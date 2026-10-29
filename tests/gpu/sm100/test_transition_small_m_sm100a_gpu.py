@@ -79,8 +79,10 @@ def test_small_m_path_runs_and_is_no_less_accurate_than_pytorch(rows, n, fp32_ma
     base = _step(pt, x, dy)
     names = _spy(monkeypatch)
     got = _step(mod, x, dy)
-    assert {"sx_ln", "sx_gate"} <= set(names), names
-    assert all(any(c.startswith(p) for c in names) for p in ("sx_expand", "sx_sq", "sx_dxn", "sx_dw")), names
+    # the backward's gate and d_xn run as one launch while every tile's cluster is resident (round sx3), as two above that
+    bwd = ("sx_gdx",) if w._sx_gdx(384, n, rows // 128, torch.cuda.current_device()) else ("sx_gate", "sx_dxn")
+    assert "sx_ln" in names and (rows > 7 * 128 or "sx_gdx" in names), names
+    assert all(any(c.startswith(p) for c in names) for p in ("sx_expand", "sx_sq", "sx_dw", *bwd)), names
     for k in ref:
         assert torch.isfinite(got[k]).all(), k
         e, b = _rel(got[k], ref[k]), _rel(base[k], ref[k])
@@ -121,6 +123,72 @@ def test_every_weight_gradient_tile_width_agrees(n, fp32_masters, monkeypatch):
     first = outs[w.SX_DW_NT[0]]
     for nt, got in outs.items():
         assert all(torch.equal(got[k], first[k]) for k in first), nt
+
+
+@pytest.mark.parametrize("fp32_masters", [True, False], ids=["fp32-masters", "bf16-params"])
+@pytest.mark.parametrize("n", [2, 4])
+@pytest.mark.parametrize("rows", [384, 896])
+def test_fused_gate_dxn_equals_the_two_launches(rows, n, fp32_masters, monkeypatch):
+    """tsx_gdx.cu (gate + d_xn + LayerNorm backward in one launch, the weight-gradient kernel reading [dA | dB] on per-tile flags)
+    runs the arithmetic of tsx_gate.cu -> tsx_dxn.cu (KS = 2): [dA | dB] and so the weight gradients are bit-identical; the
+    LayerNorm backward's row and column sums run over two 16-column halves (eight warps instead of four), so dx, dgamma and dbeta
+    differ only by fp32 summation order and dx's bf16 rounding."""
+    mod = _module(n, fp32_masters)
+    x = torch.randn(1, rows, 384, device="cuda", dtype=torch.bfloat16)
+    dy = torch.randn_like(x)
+    names = _spy(monkeypatch)
+    monkeypatch.setattr(w, "SX_GDX_FORCE", True)
+    fused = _step(mod, x, dy)
+    assert "sx_gdx" in names and "sx_gate" not in names, names
+    names.clear()
+    monkeypatch.setattr(w, "SX_GDX_FORCE", False)
+    monkeypatch.setattr(w, "_sx_ks", lambda *a: 2)
+    two = _step(mod, x, dy)
+    assert "sx_gate" in names and "sx_dxn2" in names, names
+    for k in fused:
+        if k.startswith(("expand", "squeeze")) or k == "out":
+            assert torch.equal(fused[k], two[k]), k
+        else:
+            assert _rel(fused[k], two[k]) < 2e-3, (k, _rel(fused[k], two[k]))
+
+
+@pytest.mark.parametrize("n", [2, 4])
+def test_training_step_replays_in_a_cuda_graph(n):
+    """The fused backward's flags live in a per-call buffer the kernel clears before the weight-gradient kernel may start: graph
+    replays (launches staged back to back, the buffer's old contents from the previous replay) give the eager step's gradients."""
+    mod = _module(n, True)
+    x = torch.randn(1, 768, 384, device="cuda", dtype=torch.bfloat16)
+    dy = torch.randn_like(x)
+    ref = _step(mod, x, dy)
+    m2 = copy.deepcopy(mod)
+    xx = x.clone().requires_grad_()
+    params = list(m2.parameters())
+
+    def step():
+        for p in [xx, *params]:
+            p.grad = None
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            y = m2(xx)
+        y.backward(dy)
+        return y
+
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        for _ in range(2):
+            step()
+    torch.cuda.current_stream().wait_stream(side)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        y = step()
+    grads = [xx.grad, *[p.grad for p in params]]
+    names = ["dx", *[k for k, _ in m2.named_parameters()]]
+    for _ in range(20):
+        graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(y.detach().float(), ref["out"])
+    for k, g in zip(names, grads):
+        assert torch.equal(g.float(), ref[k]), k
 
 
 @pytest.mark.parametrize("n", [2, 4])

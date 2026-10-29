@@ -1,5 +1,5 @@
 // tsx_dw.cu -- the Transition backward at SMALL M, third kernel: the weight gradients and dgamma / dbeta (-DDIM=<D> -DHID=<H>
-// -DNT=<64 | 128 | 192>), sm_100a, bf16 operands, fp32 results, a programmatic dependent launch after tsx_dxn.cu.
+// -DNT=<64 | 128 | 192>), sm_100a, bf16 operands, fp32 results, a programmatic dependent launch after tsx_dxn.cu (or tsx_gdx.cu).
 //   dWs  [D][H]   = dy^T h      over the M rows: (D / 128) x (H / NT) output tiles
 //   dWab [2H][D]  = dab^T xn    (dWa rows, then dWb rows): (2 H / 128) x (D / NT) output tiles
 // one CTA per output tile, K = M through a TMA ring; both operands are the row-major activations read MN-major (no transposed copies).
@@ -8,6 +8,9 @@
 // add the d_xn kernel's per-tile dgamma | dbeta partials in tile order (deterministic).
 // Every operand is a forward save, the backward input or the gate's output -- complete before the d_xn kernel this launch follows
 // passed its own griddepcontrol.wait -- so the products and the tile stores run while d_xn finishes; only the partial sums wait for it.
+// After tsx_gdx.cu (use_flags: the gate and d_xn in one launch) [dA | dB] is written by the launch this one runs beside: the dWab
+// CTAs read a tile's rows only after its flag turns 1 (gdx clears the flags before it lets this launch start and sets a tile's flag
+// with a gpu-scope release once the tile's cluster has stored its rows).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 #include "tsx_store.cuh"
@@ -42,7 +45,8 @@ struct Bars {
 extern "C" __global__ void __launch_bounds__(256, 1)
 transition_sx_dw(const __grid_constant__ CUtensorMap mdy, const __grid_constant__ CUtensorMap mh,
                  const __grid_constant__ CUtensorMap mdab, const __grid_constant__ CUtensorMap mxn, float* __restrict__ dws,
-                 float* __restrict__ dwab, const float* __restrict__ part, float* __restrict__ dgb, int tiles, int obf16) {
+                 float* __restrict__ dwab, const float* __restrict__ part, float* __restrict__ dgb, int tiles, int obf16,
+                 const int* __restrict__ flags, int use_flags) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -71,16 +75,27 @@ transition_sx_dw(const __grid_constant__ CUtensorMap mdy, const __grid_constant_
   const uint32_t tmem = B.tmem;
 
   if (warp == 0) {
-    if (lane == 0)
+    if (lane == 0) {
+      const bool wait_flags = !p1 && use_flags;
       for (int kb = 0; kb < nkb; ++kb) {
         const int s = kb % STG;
         if (kb >= STG) mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
         mbar_expect_tx(&B.full[s], ABT + BBT);
-        tma_load_2d(su + O_A + s * ABT, ma, &B.full[s], m0, kb * 64);
-        tma_load_2d(su + O_A + s * ABT + 8192, ma, &B.full[s], m0 + 64, kb * 64);
 #pragma unroll
         for (int jb = 0; jb < NT / 64; ++jb) tma_load_2d(su + O_B + s * BBT + jb * 8192, mb, &B.full[s], n0 + jb * 64, kb * 64);
+        if (wait_flags && !(kb & 1)) {                         // the tile's [dA | dB] rows (gdx's release) -> these TMA reads
+          int f;
+          for (;;) {
+            asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(f) : "l"(flags + (kb >> 1)) : "memory");
+            if (f) break;
+            __nanosleep(128);                                  // a poll every ~0.1 us: the gdx CTAs' loads share the L2
+          }
+          asm volatile("fence.proxy.async.global;" ::: "memory");
+        }
+        tma_load_2d(su + O_A + s * ABT, ma, &B.full[s], m0, kb * 64);
+        tma_load_2d(su + O_A + s * ABT + 8192, ma, &B.full[s], m0 + 64, kb * 64);
       }
+    }
   } else if (warp == 1) {
     for (int kb = 0; kb < nkb; ++kb) {
       const int s = kb % STG;

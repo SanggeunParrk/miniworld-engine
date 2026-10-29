@@ -90,8 +90,9 @@ SMALL_FWD_TILES = 16
 #: D = 384 at small M (at most SMALL_FWD_TILES tiles; a single-stream [B, L, 384] activation): chains of programmatic dependent
 #: launches sized for a few row tiles on all 148 SMs (sm100/widths/tsx_*.cu, round sx). Forward: LayerNorm (one warp per row) ->
 #: expand + SwiGLU over (tile, CH-unit hidden chunk) CTAs -> squeeze + residual over (tile, column block, hidden split) clusters.
-#: Backward: gate over (tile, 64-unit chunk) CTAs -> d_xn + LayerNorm backward over one cluster per tile (6 column blocks x a K
-#: split) -> dWs, dWa | dWb (fp32, or bf16 for bf16 parameters) and dgamma / dbeta over (output tile) CTAs. Every operand is read in
+#: Backward: gate + d_xn + LayerNorm backward on one cluster per tile (12 CTAs: the gate's 64-unit chunks, then 6 column blocks x
+#: the dA Wa / dB Wb halves; round sx3) -- above the resident cluster count the gate over (tile, 64-unit chunk) CTAs and d_xn as a
+#: second launch -- and dWs, dWa | dWb (fp32, or bf16 for bf16 parameters) and dgamma / dbeta over (output tile) CTAs. Every operand is read in
 #: its own layout (MN-major where needed): no transposed or concatenated weight copies per call; with fp32 masters the training
 #: forward's casts ride in the LayerNorm launch.
 SX_CH = (32, 64)
@@ -147,6 +148,23 @@ def _sx_dw_nt(d: int, h: int, busy: int, nsm: int) -> int:
         if (d // 128) * (h // nt) + (2 * h // 128) * (d // nt) + busy <= nsm:
             return nt
     return fits[-1]
+
+
+@functools.lru_cache(maxsize=16)
+def _sx_gdx_resident(d: int, n: int, index: int) -> int:
+    """Resident clusters of the fused gate + d_xn kernel (one 2 D / 64-CTA cluster per tile; 7 on a 148-SM B200)."""
+    return int(_load(d, n).max_active_clusters(f"d{d}n{n}_sx_gdx", "transition_sx_gdx", 384, 2 * (d // 64)))
+
+
+#: the small-M backward's gate and d_xn in one launch (tsx_gdx.cu) while every tile's cluster is resident; None: automatic, False: the
+#: two launches (kept for A/B runs)
+SX_GDX_FORCE = None
+
+
+def _sx_gdx(d: int, n: int, tiles: int, index: int) -> bool:
+    if SX_GDX_FORCE is not None:
+        return SX_GDX_FORCE
+    return tiles <= _sx_gdx_resident(d, n, index)
 
 
 def _sx_ks(d: int, n: int, tiles: int, index: int) -> int:
@@ -213,6 +231,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
                 for nb, k in SX_SQ
             ),
             ("sx_gate", "widths/tsx_gate.cu", dim),
+            ("sx_gdx", "widths/tsx_gdx.cu", dim),
             *((f"sx_dxn{k}", "widths/tsx_dxn.cu", (*dim, f"-DKS={k}")) for k in (1, 2)),
             *((f"sx_dw{nt}", "widths/tsx_dw.cu", (*dim, f"-DNT={nt}")) for nt in SX_DW_NT if d % nt == 0 and h % nt == 0),
         )
@@ -821,9 +840,11 @@ def _bwd_sx_launch(
     b: torch.Tensor,
     wgrad_bf16: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """The small-M backward at D = 384 (round sx), three programmatic dependent launches: gate (tsx_gate.cu) -> d_xn + LayerNorm
-    backward + dgamma / dbeta partials (tsx_dxn.cu) -> dWs, dWa | dWb (fp32) and dgamma | dbeta (tsx_dw.cu). Returns (dx, dgamma | dbeta,
-    dWa | dWb, dWs); the caller splits the packed ones (outputs of a custom op must not alias each other)."""
+    """The small-M backward at D = 384 (round sx), programmatic dependent launches: while every tile's 12-CTA cluster is resident
+    (``_sx_gdx``, round sx3) gate + d_xn + LayerNorm backward + dgamma / dbeta partials in one launch (tsx_gdx.cu), else gate
+    (tsx_gate.cu) -> d_xn (tsx_dxn.cu); then dWs, dWa | dWb (fp32, or bf16 for bf16 parameters) and dgamma | dbeta (tsx_dw.cu, beside
+    the fused launch: its dWa | dWb read a tile's [dA | dB] once the tile's flag is set). Returns (dx, dgamma | dbeta, dWa | dWb, dWs);
+    the caller splits the packed ones (outputs of a custom op must not alias each other)."""
     if _is_fake(dy, x):
         return _bwd_sx_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hid, a, b, wgrad_bf16)
     k = _Launch(x, wa.shape[0])
@@ -831,37 +852,68 @@ def _bwd_sx_launch(
     f32 = dict(dtype=torch.float32, device=x.device)
     dx = torch.empty_like(x)
     dab = torch.empty((m, 2 * h), dtype=x.dtype, device=x.device)
-    k.run(
-        "sx_gate",
-        "transition_sx_gate",
-        tiles * (h // 64),
-        (k.tmap(dy, d, m, 64, 128), k.tmap(ws, h, d), a, b, dab),
-        block=384,
-        cluster=1,
-        pdl=True,
-    )
     part = torch.empty((tiles, 2 * d), **f32)
-    ks = _sx_ks(d, k.n, tiles, x.device.index)
-    k.run(
-        f"sx_dxn{ks}",
-        "transition_sx_dxn",
-        tiles * (d // 64) * ks,
-        (
-            k.tmap(dab, 2 * h, m, 64, 128),
-            k.tmap(wa, d, h),
-            k.tmap(wb, d, h),
-            x,
-            dy,
-            rstd,
-            c1,
-            gamma,
-            dx,
-            part,
-        ),
-        block=384,
-        cluster=(d // 64) * ks,
-        pdl=True,
-    )
+    fused = _sx_gdx(d, k.n, tiles, x.device.index)
+    flags = torch.empty((tiles,), dtype=torch.int32, device=x.device)  # cleared and set by the fused kernel
+    if fused:  # gate + d_xn + LayerNorm backward on one cluster per tile (round sx3)
+        ks = 2
+        k.run(
+            "sx_gdx",
+            "transition_sx_gdx",
+            tiles * (d // 64) * ks,
+            (
+                k.tmap(dy, d, m, 64, 128),
+                k.tmap(ws, h, d),
+                a,
+                b,
+                dab,
+                k.tmap(dab, 2 * h, m, 64, 128),
+                k.tmap(wa, d, h),
+                k.tmap(wb, d, h),
+                x,
+                dy,
+                rstd,
+                c1,
+                gamma,
+                dx,
+                part,
+                flags,
+            ),
+            block=384,
+            cluster=(d // 64) * ks,
+            pdl=True,
+        )
+    else:
+        k.run(
+            "sx_gate",
+            "transition_sx_gate",
+            tiles * (h // 64),
+            (k.tmap(dy, d, m, 64, 128), k.tmap(ws, h, d), a, b, dab),
+            block=384,
+            cluster=1,
+            pdl=True,
+        )
+        ks = _sx_ks(d, k.n, tiles, x.device.index)
+        k.run(
+            f"sx_dxn{ks}",
+            "transition_sx_dxn",
+            tiles * (d // 64) * ks,
+            (
+                k.tmap(dab, 2 * h, m, 64, 128),
+                k.tmap(wa, d, h),
+                k.tmap(wb, d, h),
+                x,
+                dy,
+                rstd,
+                c1,
+                gamma,
+                dx,
+                part,
+            ),
+            block=384,
+            cluster=(d // 64) * ks,
+            pdl=True,
+        )
     dgb = torch.empty((2 * d,), **f32)
     wd = dict(dtype=torch.bfloat16 if wgrad_bf16 else torch.float32, device=x.device)
     dwab = torch.empty((2 * h, d), **wd)  # dWa then dWb
@@ -882,6 +934,8 @@ def _bwd_sx_launch(
             dgb,
             tiles,
             int(wgrad_bf16),
+            flags,
+            int(fused),
         ),
         block=256,
         cluster=1,
