@@ -337,3 +337,14 @@ def test_captured_in_a_cuda_graph(real):
         graph.replay()
         eager = blk(s2.bfloat16(), c2.bfloat16(), z2.bfloat16(), m2, rope=rope2)
     torch.testing.assert_close(out[:, :, :real], eager[:, :, :real], rtol=0, atol=0)
+
+
+def test_fp32_kernels_do_not_spill():
+    """The TF32 attention kernels (512 threads: at most 128 registers) keep everything in registers."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local
+
+    index = torch.cuda.current_device()
+    for name in ("esm32", "esm_dq32", "esm_dkv32"):
+        k = sm100_atom_local._load_esm32(name, index)
+        assert k.lmem == 0, f"{name}: {k.lmem} B of local memory (spills)"
+        assert k.regs <= 128, f"{name}: {k.regs} registers"
