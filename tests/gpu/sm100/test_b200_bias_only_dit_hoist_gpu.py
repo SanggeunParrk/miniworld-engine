@@ -3,8 +3,9 @@ integrations/bias_only_dit_hoist.py) and the blocks' ``bias=`` paths (integratio
 
   * ``pair_bias_all`` forward and backward (d pair, every dW_b, every d gamma_b) against fp64 for 1 / 3 / 24 blocks, every head
     layout, bf16 and fp32 (TF32); the PyTorch fold the same; unused biases; the LN0 backward rows against fp64, no spills;
-  * the sm_100a one-pass hoist (``bo_hoist_sm100.cu``, bf16, up to 128 / 64 weight rows forward / backward) against fp64 alone (rows
-    far from zero mean, a constant row, padded weight rows, bitwise reruns) and under ``pair_bias_all`` on a pair per sample;
+  * the sm_100a one-pass hoist (``bo_hoist_sm100.cu``, bf16 and fp32 / TF32, any number of weight rows: chunks and row ranges per
+    launch) against fp64 alone (rows far from zero mean, a constant row, padded weight rows, bitwise reruns, no local memory) and
+    under ``pair_bias_all`` on a pair per sample;
   * a stack of blocks hoisted (fused) against the stack in fp64, every gradient within the training files' bounds (bf16: 1.1x the
     PyTorch bf16 stack's error + 1e-4; fp32: 1.5x the PyTorch TF32 stack's + 1e-3), with and without a mask, L384 / L768;
   * inference on hoisted biases against the per-pair path; checkpointing (non-reentrant) bit-identical; 20 poisoned-allocator steps
@@ -297,7 +298,7 @@ def test_sm100_one_pass_hoist_against_fp64(R, N, shift):
     bounds of ``TOL``), dW' within 3e-5 (the scaled d bias as hi + lo against the exact pair, fp32 accumulation; measured 2.5-6e-6 at
     zero mean); rows with a mean 20 standard deviations off zero (the forward's projection on raw rows and the backward's S - mean_k S
     both cancel a mean term) and a constant row (variance 0) included; bit-identical reruns; no local memory; at most 64 weight rows
-    in the backward (more: ``sm100_served(..., bwd=True)`` declines and the forward still serves up to 128)."""
+    in the one-chunk backward (more: the chunked backward, ``test_sm100_hoist_chunks_and_tf32``)."""
     _sm100_only()
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
@@ -325,19 +326,75 @@ def test_sm100_one_pass_hoist_against_fp64(R, N, shift):
     assert relative(dw, w_dw) < 3e-5, relative(dw, w_dw)
     assert float(bias[:, 5].float().abs().max()) < 1e-2  # the constant row's bias is ~0
     wide = (0.1 * torch.randn(80, 128, device="cuda", generator=g)).to(BF)
-    assert HK.sm100_served(pair, wide) and not HK.sm100_served(pair, wide, bwd=True)
+    assert HK.sm100_served(pair, wide) and HK.sm100_served(pair, wide, bwd=True)  # more rows: the chunked backward
     assert not HK.sm100_served(pair[:100], wf)  # rows: a multiple of 128
-    assert not HK.sm100_served(pair.float(), wf.float())  # bf16 only (fp32: the LayerNorm rows + TF32 cuBLAS hoist)
+    assert HK.sm100_served(pair.float(), wf.float()) and HK.sm100_served(pair.float(), wf.float(), bwd=True)  # fp32: TF32
+    assert not HK.sm100_served(pair.float(), wf)  # W' in the pair's dtype
+
+
+# (rows, weight rows, row mean, dtype): bf16 past the one-chunk kernels (forward chunks of <= 128 in one launch up to 384 rows, two
+# launches at 576; backward chunks of 64, S-only launches past 256 rows) and fp32 / TF32 (forward launches of <= 128 rows; backward
+# chunks of 32, S-only launches past 256 rows), a grid whose CTAs end a tile apart, rows 20 standard deviations off zero
+SM100_CHUNKS = [
+    (5 * 128 * 128, 80, 0.5, BF),
+    (2 * 128 * 128, 144, 0.0, BF),
+    (2 * 128 * 128, 384, -1.0, BF),
+    (149 * 128, 576, 0.0, BF),
+    (2 * 256 * 256, 288, 20.0, BF),
+    (3 * 128 * 128, 16, 0.0, F32),
+    (149 * 128, 48, 0.5, F32),
+    (3 * 128 * 128, 100, 0.0, F32),
+    (2 * 128 * 128, 384, 20.0, F32),
+    (2 * 128 * 128, 576, 0.0, F32),
+]
+
+
+@pytest.mark.parametrize(("R", "N", "shift", "dt"), SM100_CHUNKS)
+def test_sm100_hoist_chunks_and_tf32(R, N, shift, dt):
+    """``bo_hoist_sm100.cu`` over weight-row chunks (``fwd_plan`` / ``bwd_plan``) and in fp32 (kind::tf32: the forward normalises the
+    tile in shared memory first, the backward takes S = xhat^T dbias) alone: bias_all^T, d pair and dW' against fp64 (bf16: the bars
+    of ``test_sm100_one_pass_hoist_against_fp64``; fp32: the TF32 bound of ``TOL``, LN0 and dbias rounded to tf32 once each), rows far
+    from zero mean and a constant row, bit-identical reruns, no local memory in any cubin used; the gate at ``SM100_MAX_ROWS``."""
+    _sm100_only()
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    g = torch.Generator(device="cuda").manual_seed(R + N + 1)
+    pair = (torch.randn(R, 128, device="cuda", generator=g) + shift).to(dt)
+    pair[5] = 0.75
+    wf = (0.1 * torch.randn(N, 128, device="cuda", generator=g)).to(dt)
+    db = torch.randn(N, R, device="cuda", generator=g).to(dt)
+    served = N <= HK.SM100_MAX_ROWS[dt]  # the kernels take any N; the gate stops where the LayerNorm rows + cuBLAS path is faster
+    assert HK.sm100_served(pair, wf) == served and HK.sm100_served(pair, wf, bwd=True) == served
+    runs = []
+    for _ in range(3):
+        runs.append((HK.sm100_fwd(pair, wf), *HK.sm100_bwd(pair, wf, db)))
+    torch.cuda.synchronize()
+    bias, dp, dw = runs[0]
+    assert all(torch.equal(a, b) for r in runs[1:] for a, b in zip(r, runs[0], strict=True))
+    h = HK._hoist100(torch.cuda.current_device())
+    for run in h.runs.values():
+        assert run.k.lmem == 0, (run.k.regs, run.k.lmem)
+    w_bias, w_dp, w_dw = _rows_ref64(pair, wf, db)
+    assert bias.shape == (N, R) and bias.dtype is dt and dp.shape == (R, 128) and dp.dtype is dt and dw.shape == (N, 128)
+    tol = TOL[dt]
+    assert relative(bias, w_bias) < tol["bias"], relative(bias, w_bias)
+    assert relative(dp, w_dp) < tol["dpair"], relative(dp, w_dp)
+    assert relative(dw, w_dw) < (3e-5 if dt is BF else tol["dW"]), relative(dw, w_dw)
+    for n0 in range(0, N, 64):  # every chunk / launch range on its own
+        assert relative(bias[n0 : n0 + 64], w_bias[n0 : n0 + 64]) < tol["bias"], n0
+        assert relative(dw[n0 : n0 + 64], w_dw[n0 : n0 + 64]) < (3e-5 if dt is BF else tol["dW"]), n0
+    assert float(bias[:, 5].float().abs().max()) < 1e-2
 
 
 @pytest.mark.parametrize(
     ("A", "L", "nb", "n_head", "d_head"),
     [(3, 256, 1, 16, 48), (2, 384, 3, 16, 48), (4, 128, 2, 24, 32), (2, 256, 1, 12, 64), (2, 128, 5, 16, 48)],
 )
-def test_per_sample_hoist_runs_the_sm100_kernels(A, L, nb, n_head, d_head, monkeypatch):
-    """``pair_bias_all`` on a pair per sample [A, L, L, 128] (bf16) takes ``bo_hoist_sm100.cu`` -- forward, and backward up to 64
-    weight rows (5 blocks of 16 heads: the backward is the LayerNorm rows + cuBLAS) -- and meets the hoist's fp64 bars (``TOL``) for
-    every output and gradient; ``settings.bias_only_dit_hoist_sm100=False`` runs the previous path to the same bars."""
+@pytest.mark.parametrize("dtype", [BF, F32])
+def test_per_sample_hoist_runs_the_sm100_kernels(A, L, nb, n_head, d_head, dtype, monkeypatch):
+    """``pair_bias_all`` on a pair per sample [A, L, L, 128] (bf16 and fp32) takes ``bo_hoist_sm100.cu`` forward and backward at every
+    weight-row count (5 blocks of 16 heads: the chunked backward) and meets the hoist's fp64 bars (``TOL``) for every output and
+    gradient; ``settings.bias_only_dit_hoist_sm100=False`` runs the previous path to the same bars."""
     _sm100_only()
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
@@ -354,10 +411,10 @@ def test_per_sample_hoist_runs_the_sm100_kernels(A, L, nb, n_head, d_head, monke
 
     monkeypatch.setattr(HK, "sm100_fwd", fwd)
     monkeypatch.setattr(HK, "sm100_bwd", bwd)
-    attns = attentions(nb, n_head, d_head, BF)
+    attns = attentions(nb, n_head, d_head, dtype)
     g = torch.Generator(device="cuda").manual_seed(A * L + nb)
-    pair = torch.randn(A, L, L, 128, device="cuda", generator=g).to(BF)
-    dbs = [torch.randn(A, n_head, L, L, device="cuda", generator=g).to(BF) for _ in range(nb)]
+    pair = torch.randn(A, L, L, 128, device="cuda", generator=g).to(dtype)
+    dbs = [torch.randn(A, n_head, L, L, device="cuda", generator=g).to(dtype) for _ in range(nb)]
     assert HO.serves(MW, attns, pair, per_sample=True)
     w_outs, w_dp, w_dgs, w_dws = hoist_ref64(attns, pair, dbs)
     for on in (True, False):
@@ -370,8 +427,8 @@ def test_per_sample_hoist_runs_the_sm100_kernels(A, L, nb, n_head, d_head, monke
         finally:
             settings.configure(**vars(old))
         ran = {k: calls[k] - before[k] for k in calls}
-        assert ran == ({"fwd": 1, "bwd": int(nb * n_head <= HK.SM100_BWD_MAX_ROWS)} if on else {"fwd": 0, "bwd": 0}), (on, ran)
-        tol = TOL[BF]
+        assert ran == ({"fwd": 1, "bwd": 1} if on else {"fwd": 0, "bwd": 0}), (on, ran)
+        tol = TOL[dtype]
         for i, (o, w) in enumerate(zip(outs, w_outs, strict=True)):
             assert o.shape == (A, n_head, L, L), i
             assert relative(o, w) < tol["bias"], (on, i, relative(o, w))
