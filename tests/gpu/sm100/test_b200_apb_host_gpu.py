@@ -214,3 +214,33 @@ def test_batch_chunking(host, monkeypatch):
         assert torch.equal(got[i], torch.cat([t[i] for t in singles])), i
     for i in range(3, len(got)):
         assert _rel(got[i], sum(t[i] for t in singles)) < 1e-5, i
+
+
+@pytest.mark.parametrize("shape", SHAPES, ids=lambda s: f"h{s[0]}d{s[1]}")
+@pytest.mark.parametrize(("S", "L"), [(1, 384), (1, 768), (5, 768)])
+def test_backward_cores_are_bitwise_repeatable(shape, S, L):
+    """The APB backward cores (attn_dkv / attn_dqb -DBPS -DDET, dQ per key chunk, dK / dV per query chunk) give the same dQ, dK,
+    dV and dbias bits on every call: each CTA's two MMA issuers accumulate in a fixed order (-DDET). Without it the order followed the
+    warpgroups' timing and test_batched_matches_single failed about 1 run in 5."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
+    heads, d = shape
+    W = sm100.apb_width(heads, d)
+    dhp, dreal = sm100.APB_GEOMETRY[(heads, d)]
+    g = torch.Generator(device="cuda").manual_seed(S * 1000 + L + heads)
+    M = S * L
+
+    def rows():
+        t = torch.randn(M, heads, dhp, device="cuda", generator=g)
+        t[..., dreal:] = 0   # 16 x 24: the 8 pad channels of every head are zero, as the projection writes them
+        return t.reshape(M, W).bfloat16()
+
+    q, k, v, dob = rows(), rows(), rows(), rows()
+    bias = torch.randn(S * heads, L, L, device="cuda", generator=g).bfloat16()
+    O, LSE = sm100.apb_forward(q, k, v, bias, L, heads, d)
+    dd = (dob.float() * O).view(M, heads, dhp).sum(-1).view(S, L, heads).permute(0, 2, 1).reshape(S * heads, L).contiguous()
+    first = [t.clone() for t in sm100.apb_backward(q, k, v, dob, bias, LSE, dd, L, heads, d)]
+    for _ in range(6):
+        again = sm100.apb_backward(q, k, v, dob, bias, LSE, dd, L, heads, d)
+        for name, a, b in zip(("dQ", "dK", "dV", "dbias"), first, again, strict=True):
+            assert torch.equal(a, b), f"{name} differs between calls"
