@@ -773,6 +773,7 @@ kernels (`integrations/triattn_b200.py` `_options` / `_kind`):
 | `gate_bias` / `out_bias` | RoseTTAFold3 | wide | yes | yes |
 | 64-channel heads | Chai-1 (256, 4 × 64), RF3 templates (64, 4 × 64), IntelliFold-2 (512, 8 × 64) | wide + `triattn_dh64_sm100.cu` | yes | yes |
 | `untransposed_output`, `dual_output` | Chai-1 trunk / templates, confidence head | wide | yes | yes |
+| 96- / 128-channel heads | none (see below) | wide + `triattn_dh128_sm100.cu` | yes | yes |
 
 - Bias orientation: the front's bias drain (`tri_front` / `tri_wfront`, flag `BT`) writes row (b, j, k)'s bias at [b, h, k, j] (its key j for
   the mask); the backward's `tri_db_rows` reads the gradient in the same orientation. The fused backward reads dbias tile-contiguously, so
@@ -836,3 +837,55 @@ Peak memory at L 731: 5.6-15.6 GiB after, 26-99 GiB before. Accuracy (`test_vari
 with 26 keys masked, output, dx and every parameter gradient against fp32 autograd): the worst gradient sits at 0.50-0.68 of the bar
 (1.25 × the bf16 module's error + 2e-3). Determinism as on the rest of the wide path: dW_q|k|v|g|o, the gate / out biases and Wo_t are
 the same bits run to run; dx, dγ, dβ and dW_b carry the query-side kernel's fp32 reduce-add of dbias.
+
+## Heads of 96 / 128 channels (2026-10-29)
+
+No FoldForge family has them: every `DenseSpec` row (`modules/dense/spec.py`, origin/main 04ee5c0) gives its pair attentions 16, 32
+or 64 channels a head (AF3 / Boltz-2 / OpenBind / RF3 trunks 4 × 32, Protenix-v2 8 × 32, OpenDDE 12 × 32, Chai-1 / IntelliFold-2 / RF3
+templates × 64, AF3 templates 4 × 16; `pair_qkv_dim` is never set, ESMFold2 has no pair attention). They are what the module builds with
+its defaults (`d_hidden = d_pair`) at AF3's four heads for d_pair 384 (4 × 96) and 512 (4 × 128). Until now they ran the module's
+PyTorch statements on B200; they now run the wide path (`serves_wide`, inference and training, every model option: bias orientation,
+gate / out biases, Chai-1's outputs) with the head-dim-128 core `triattn_dh128_sm100.cu` (heads × 128 ≤ 512 packed channels: up to four
+heads). A 96-channel head is zero-padded to 128 in the packed weights, as 16 is padded to 32 (padded q / k / v / g channels are 0 and meet
+zero columns of Wo; scale 1/√96); the front, tail, gate backward, head backward and finish kernels are the wide path's, slot-agnostic
+(the finish kernel takes 128-channel slots; delta comes per 32-channel quarter, [B, L, 4H, L], and the core adds a head's quarters).
+
+TMEM plan (512 columns; an accumulator row of a 128-channel head takes 128):
+
+| kernel | task | TMEM | shared memory | warps / ptxas |
+|---|---|---|---|---|
+| `triattn_fwd128` | (b, h, 128 queries) × 2 pair rows, keys in 64-wide sub-tiles | S / P 4 × 64 + O 2 × 128 | Q 2 × 32 KiB (a row refilled when its last QK^T retired), K \| V 4 × 32 KiB, bias 2 × 16 KiB: 226.5 KiB | 448 (TMA, MMA, 2 softmax groups, epilogue); 128 regs, 0 spills |
+| `triattn_bwd128_kv` (dK, dV) | (b, h, 128 keys, pair row), queries in 32-wide stages, the two groups alternating | S^T \| dP^T 2 × 64 + P^T \| dS^T 2 × 32 + dV \| dK 2 × 128 | K \| V of two tasks 2 × 64 KiB, Q \| dO 3 × 16 KiB, bias^T fp32 3 × 16 KiB: 226.1 KiB | 352; 153 regs, 0 spills |
+| `triattn_bwd128_q` (dQ, dbias) | (b, h, 128 queries, pair row), keys in 64-wide sub-tiles | S \| dP 2 × 128 + dQ 128 + Q \| dO 2 × 64 (bf16, the A operands) | Q \| dO staging 64 KiB, K \| V 3 × 32 KiB, bias 2 × 16 KiB, dbias pieces 2 × 16 KiB: 226.8 KiB | 320; 120 regs, 0 spills |
+
+QK^T steps through the two 128-byte-swizzled 64-column halves (K = 128); PV and the gradient products take N = 128 as one MN-major operand
+whose halves are LBO apart. dbias leaves per (pair row, key sub-tile) by TMA fp32 reduce-add (one row a task: twice the reduce traffic of
+the head-dim-64 query side); dW_q|k|v|g|o and the biases are the same bits run to run, dx / dγ / dβ / dW_b carry the reduce-add (as on the
+rest of the wide path). Shared buffers that the softmax / gradient warps read with ordinary loads (bias tiles, the query side's lse / delta
+staging) are released only after the values fed the thread's TMEM store: an `mbarrier.arrive` right after the loads went out ahead of
+them in SASS (ptxas set no wait on the LDS scoreboards), the next TMA load overwrote rows the slowest warp (sub-partition 0, beside the
+spinning TMA thread) had not read, and dK / dV of a key quarter differed run to run (10-19 of 300 backward calls; 0 of 500 after, every
+kernel bitwise repeatable).
+
+Measured 2026-10-29, node 2 GPU 0 (a utilisation filler resident), B = 1, the last 11 keys masked, bf16-mixed (fp32 parameters, bf16
+pair, autocast bf16), one CUDA graph per call (inference: `static_weights`) or per training step (forward + backward, dropout 0.25, dx and
+every parameter gradient), median of 5 rounds of 3-50 replays, ms; before = the same harness on 6fb200f9 (the PyTorch statements):
+
+| case (d_pair, heads) | mode | L 384 before | after | × | L 731 before | after | × |
+|---|---|---|---|---|---|---|---|
+| 512, 4 × 128, starting | inference | 3.855 | 0.736 | 5.2 | 25.79 | 5.154 | 5.0 |
+| 512, 4 × 128, ending, `transposed_bias=False` | inference | 4.209 | 0.755 | 5.6 | 27.08 | 5.215 | 5.2 |
+| 384, 4 × 96, starting | inference | 3.377 | 0.642 | 5.3 | 23.28 | 4.470 | 5.2 |
+| 256, 2 × 128, ending, gate / out biases | inference | 3.503 | 0.342 | 10.2 | 21.89 | 2.391 | 9.2 |
+| 512, 4 × 128, starting | training | 9.426 | 2.735 | 3.4 | 66.13 | 15.98 | 4.1 |
+| 512, 4 × 128, ending, `transposed_bias=False` | training | 10.19 | 2.806 | 3.6 | 68.51 | 16.28 | 4.2 |
+| 384, 4 × 96, starting | training | 8.090 | 2.412 | 3.4 | 58.11 | 14.01 | 4.1 |
+| 256, 2 × 128, ending, gate / out biases | training | 8.222 | 1.276 | 6.4 | 53.45 | 7.476 | 7.2 |
+
+Peak memory at L 731: 5.0 / 10.9 GiB (inference / training, d_pair 512) after, 17.7 / 28.6 GiB before. Kernel times at L 731, d_pair 512
+4 × 128 (`torch.profiler`, eager, µs): inference `triattn_fwd128` 2231, `tri_wfront` 1059, `tri_wtail` 472, the pad of the 731 crop to 768
+and the cut of the result 1233 + 156 (torch elementwise copies of the wide path's padding; absent at L 768); training `triattn_bwd128_kv` 2775,
+`triattn_bwd128_q` 2014, `triattn_fwd128` 2234, `tri_whbwd` 1522, `tri_wfront` 1069, cuBLAS 1062, `tri_wgbwd` 892, `tri_wtail` 740, the
+pad / cut copies 2468 + 720. (The 16 × 32 core at the same width, L 768: forward 2698, key side 3616, query side 3575.)
+Tests: `tests/gpu/sm100/test_triattn_b200_variants_gpu.py` (seven 96 / 128 cases with the options, inference at three shapes, training
+with dropout 0 / 0.25 against fp32 autograd at the bf16 module's bar, CUDA-graph capture).
