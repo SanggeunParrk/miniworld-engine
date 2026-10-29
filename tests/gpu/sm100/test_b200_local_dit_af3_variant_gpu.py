@@ -305,3 +305,29 @@ def test_shared_conditioning_matches_the_materialised_one():
         a = eng(s, c0.expand(4, -1, -1, -1), z, mask)
         b = eng(s, c0.expand(4, -1, -1, -1).contiguous(), z, mask)
     assert torch.equal(a, b)
+
+
+@pytest.mark.parametrize("fused", ["1", "0"], ids=["fused", "unfused"])
+@pytest.mark.parametrize("cross", [True, False], ids=["cross", "self"])
+def test_shared_conditioning_inference_fp32(cross, fused, monkeypatch):
+    """fp32 inference with the conditioning expanded over the samples: its tables are made once ([N, ..], read at row r % N by the fused
+    pre / post kernels or the unfused AdaLN / gated-residual kernels), and the outputs equal those of the materialised conditioning (tables
+    per sample row) bit for bit."""
+    override_setting(monkeypatch, "local_dit_tf32_fused", fused)
+    torch.manual_seed(3)
+    kw = dict(cross_attention=cross, kv_norm="parallel" if cross else "chained", key_window="slide")
+    eng = LocalDiTBlock(implementation=ImplementationType.MINIWORLD, **kw)
+    with torch.no_grad():
+        for name, p in eng.named_parameters():
+            p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else torch.randn_like(p) * 0.1 + (1.0 if name.endswith("weight") else 0.0))
+    eng = eng.cuda()
+    s, c, z, mask = _inputs(4, 512, 480, seed=9)
+    c0 = c[:1]
+    rows = []
+    orig = local_dit._cond_tables32
+    monkeypatch.setattr(local_dit, "_cond_tables32", lambda cond, *x, **k: rows.append(cond.shape[0]) or orig(cond, *x, **k))
+    with torch.no_grad():
+        a = eng(s, c0.expand(4, -1, -1, -1), z, mask)
+        b = eng(s, c0.expand(4, -1, -1, -1).contiguous(), z, mask)
+    assert rows == [1, 4], rows                         # the expanded conditioning's tables on N rows, the materialised one's per sample
+    assert a.dtype == F32 and torch.equal(a, b)

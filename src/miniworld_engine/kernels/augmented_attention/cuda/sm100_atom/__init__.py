@@ -859,7 +859,7 @@ def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None, 
     s [M, 128] fp32 contiguous, s1 / b1 (and mks / mkb) fp32 [M, 128] views with a common row stride each, wp the tf32-rounded [512, 128]
     pack ([q; g; k; v] with mks, else [q; k; v; g]), bq [128] -> P [M, 512] fp32 (the blocks in rndmask tf32-rounded). ``nfull`` (default
     ``_nfull``): the 128-row tiles run whole; the others as two 128 x 256 column halves. ``parallel`` (AlphaFold 3): the K / V AdaLN
-    normalises s instead of x1."""
+    normalises s instead of x1. The tables may have mrows < M rows (a conditioning shared by the M / mrows samples): row r reads r % mrows."""
     M = s.shape[0]
     assert (
         M % 128 == 0
@@ -868,6 +868,8 @@ def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None, 
         and tuple(wp.shape) == (4 * DM, DM)
     ), (s.shape, wp.shape)
     assert s1.stride(1) == b1.stride(1) == 1 and s1.stride(0) == b1.stride(0)
+    mrows = s1.shape[0]
+    assert M % mrows == 0 and mrows % 128 == 0 and b1.shape[0] == mrows, (M, mrows)
     cross = mks is not None
     if cross:
         assert mks.stride(1) == mkb.stride(1) == 1 and mks.stride(0) == mkb.stride(0)
@@ -894,13 +896,15 @@ def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None, 
         int(M),
         float(eps),
         int(nfull),
+        int(mrows),
     )
     return p
 
 
 def post32(o, g, s, so, s2, b2, st, wo, wu, ws, eps=1e-5, nfull=None):
     """Fused gate, out projection + gated residual, AdaLN 2, SwiGLU, squeeze + gated residual (``atom_post_tf32``): o, s [M, 128] fp32
-    contiguous, g a [M, 128] view, so / s2 / b2 / st [M, 128] views with one row stride, wo / wu / ws the tf32-rounded packs -> out [M, 128].
+    contiguous, g a [M, 128] view, so / s2 / b2 / st [mrows, 128] views with one row stride (mrows = M, or fewer rows shared by the samples:
+    row r reads r % mrows), wo / wu / ws the tf32-rounded packs -> out [M, 128].
     ``nfull`` (default ``_nfull``): the 128-row tiles run whole; the others as two 64-row halves."""
     M = s.shape[0]
     assert (
@@ -909,6 +913,8 @@ def post32(o, g, s, so, s2, b2, st, wo, wu, ws, eps=1e-5, nfull=None):
     assert g.stride(1) == 1 and all(
         t.stride(1) == 1 and t.stride(0) == so.stride(0) for t in (s2, b2, st)
     )
+    mrows = so.shape[0]
+    assert M % mrows == 0 and mrows % 128 == 0 and all(t.shape[0] == mrows for t in (s2, b2, st)), (M, mrows)
     out = torch.empty(M, DM, device=s.device, dtype=F32)
     d = _dev(s)
     tiles = M // 128
@@ -933,6 +939,7 @@ def post32(o, g, s, so, s2, b2, st, wo, wu, ws, eps=1e-5, nfull=None):
         int(M),
         float(eps),
         int(nfull),
+        int(mrows),
     )
     return out
 

@@ -1263,7 +1263,7 @@ def _infer(single, cond, pair, mask, weights, parallel=False, slide=False):
 
 
 def _shared_cond(single, cond):
-    """B200, bf16: a conditioning that is one [1, 1, N, d] tensor expanded over the A > 1 samples (stride 0 on the sample axis: FoldForge's and
+    """B200: a conditioning that is one [1, 1, N, d] tensor expanded over the A > 1 samples (stride 0 on the sample axis: FoldForge's and
     the diffusion trainers' call) -> that [1, 1, N, d] view, so the tables are made once and their gradient is summed over the samples (autograd
     sums the expanded view's gradient back); anything else unchanged."""
     if (single.shape[0] > 1 and cond.shape[0] == single.shape[0] and cond.stride(0) == 0 and single.is_cuda
@@ -1287,12 +1287,12 @@ def block(module, single, cond, pair, mask=None, rope=None):
     parallel, slide = _af3_flags(module)
     if single.dtype == BF:
         cond = _shared_cond(single, cond)
-    if single.dtype == F32:  # the fp32 path (TF32 tensor cores)
+    if single.dtype == F32:  # the fp32 path (TF32 tensor cores); a conditioning shared by the samples makes its tables once ([N, ..])
         if torch.is_grad_enabled() and any(
             t.requires_grad for t in (single, cond, pair, *weights)
-        ):   # training: a conditioning shared by the samples makes its tables once and sums their gradient over the samples
+        ):   # training: ... and sums their gradient over the samples
             return _LocalBlock32.apply(parallel, slide, mask, single, _shared_cond(single, cond), pair, *weights)
-        return _infer32(single, cond, pair, mask, weights, parallel, slide)
+        return _infer32(single, _shared_cond(single, cond), pair, mask, weights, parallel, slide)
     if torch.is_grad_enabled() and any(
         t.requires_grad for t in (single, cond, pair, *weights)
     ):
