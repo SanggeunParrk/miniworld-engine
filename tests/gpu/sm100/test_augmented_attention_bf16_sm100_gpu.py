@@ -265,19 +265,19 @@ def test_pair_fused_backward_is_bitwise_repeatable(H, DH):
             assert torch.equal(x, y), f"{name} differs between runs"
 
 
-def _aa_modules(d, dc, dp, H):
+def _aa_modules(d, dc, dp, H, qk=False):
     from miniworld_engine.modules import AugmentedAttentionPairBias
     from miniworld_engine.modules.exceptions import ImplementationType as IT
 
     torch.manual_seed(3)
-    mw = AugmentedAttentionPairBias(d, dc, dp, H, implementation=IT.MINIWORLD).cuda()
+    mw = AugmentedAttentionPairBias(d, dc, dp, H, use_qk_norm=qk, implementation=IT.MINIWORLD).cuda()
     with torch.no_grad():
         for p in mw.parameters():
             p.normal_(0, p.shape[-1] ** -0.5) if p.dim() > 1 else p.normal_(0, 0.1)
         mw.ln_pair.weight.add_(1.0)
-    pt = AugmentedAttentionPairBias(d, dc, dp, H, implementation=IT.PYTORCH).cuda()
+    pt = AugmentedAttentionPairBias(d, dc, dp, H, use_qk_norm=qk, implementation=IT.PYTORCH).cuda()
     pt.load_state_dict(mw.state_dict())
-    ref = AugmentedAttentionPairBias(d, dc, dp, H, implementation=IT.PYTORCH).cuda().double()
+    ref = AugmentedAttentionPairBias(d, dc, dp, H, use_qk_norm=qk, implementation=IT.PYTORCH).cuda().double()
     ref.load_state_dict({k: v.double() for k, v in mw.state_dict().items()})
     return mw, pt, ref
 
@@ -308,37 +308,47 @@ def _aa_case(A, L, d, dc, dp, pair_dtype, seed=5):
 AA_LAYOUTS = [(768, 384, 128, 16), (768, 384, 128, 24), (768, 384, 128, 12), (1024, 384, 128, 16), (768, 768, 256, 16)]
 
 
+def _route_spy(qk):
+    """(the module attribute the call must reach, its name): the module route (``sm100.module_route``, the whole module as one node
+    since 2026-10-29, with or without QK-norm). The pair-fused core (``sm100.fused_pair``) keeps the calls with a ``compute_dtype``
+    other than the activations' precision (test_module_bf16_core_takes_the_kernels_and_keeps_the_triton_error)."""
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import module_route
+
+    return module_route, "module_update"
+
+
 @needs_blackwell
 @pytest.mark.parametrize(("d", "dc", "dp", "H"), AA_LAYOUTS)
 @pytest.mark.parametrize("pair_fp32", [False, True])
-def test_module_bf16_takes_the_pair_fused_core_and_holds_the_yardstick(d, dc, dp, H, pair_fp32):
-    """AugmentedAttentionPairBias (MINIWORLD) under bf16 autocast on B200 runs the pair-fused core (bf16 inputs; or fp32 activations,
-    whose fp32 pair takes the TF32 pair pass) and its error against an fp64 run of the module is within 1.5x the PyTorch module's in
-    the same precision (out, every input gradient, the pair-side and q / k weight gradients)."""
-    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import fused_pair
-
+@pytest.mark.parametrize("qk", [False, True])
+def test_module_bf16_takes_the_pair_fused_core_and_holds_the_yardstick(d, dc, dp, H, pair_fp32, qk):
+    """AugmentedAttentionPairBias (MINIWORLD) under bf16 autocast on B200 runs the sm_100a module route, QK-norm on or off (bf16 inputs; or fp32 activations, whose fp32 pair takes the TF32 pair pass) and its error against an
+    fp64 run of the module is within 1.5x the PyTorch module's in the same precision (out, every input gradient, the pair-side and
+    q / k weight gradients)."""
     if pair_fp32 and dp != 128:
         pytest.skip("the fp32 pair pass is d_pair 128")
-    mw, pt, ref = _aa_modules(d, dc, dp, H)
+    mw, pt, ref = _aa_modules(d, dc, dp, H, qk)
     dt = torch.float32 if pair_fp32 else torch.bfloat16
     single, cond, pair, mask, dy = _aa_case(3, 256, d, dc, dp, dt)
     taken = []
-    orig = fused_pair.attention_pair_sm100
-    fused_pair.attention_pair_sm100 = lambda *a, **k: (taken.append(1), orig(*a, **k))[1]  # ty: ignore[invalid-assignment] -- spy
+    mod, name = _route_spy(qk)
+    orig = getattr(mod, name)
+    setattr(mod, name, lambda *a, **k: (taken.append(1), orig(*a, **k))[1])
     try:
         e = _aa_run(mw, single, cond, pair, mask, dy, dt, True)
     finally:
-        fused_pair.attention_pair_sm100 = orig
+        setattr(mod, name, orig)
     r = _aa_run(ref, single, cond, pair, mask, dy, torch.float64, False)
     b = _aa_run(pt, single, cond, pair, mask, dy, dt, True)
-    assert taken, "the pair-fused sm100 core was not used"
+    assert taken, f"the sm100 {name} route was not used"
     for k in r:
         assert _rel(e[k], r[k]) <= 1.5 * _rel(b[k], r[k]) + 1e-6, (k, _rel(e[k], r[k]), _rel(b[k], r[k]))
 
 
 @needs_blackwell
-def test_module_bf16_training_step_is_bitwise_repeatable():
-    mw, _, _ = _aa_modules(768, 384, 128, 16)
+@pytest.mark.parametrize("qk", [False, True])
+def test_module_bf16_training_step_is_bitwise_repeatable(qk):
+    mw, _, _ = _aa_modules(768, 384, 128, 16, qk)
     single, cond, pair, mask, dy = _aa_case(48, 384, 768, 384, 128, torch.bfloat16)
     a = _aa_run(mw, single, cond, pair, mask, dy, torch.bfloat16, True)
     b = _aa_run(mw, single, cond, pair, mask, dy, torch.bfloat16, True)
@@ -348,12 +358,11 @@ def test_module_bf16_training_step_is_bitwise_repeatable():
 
 @needs_blackwell
 @pytest.mark.parametrize("train", [False, True])
-def test_module_pair_fused_graph_replay_and_compile(train):
-    """CUDA-graph capture replays the eager result on new inputs, and torch.compile keeps the route (two opaque ops) with the eager
-    numbers (bf16 autocast, A = 5, L 256)."""
-    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import fused_pair
-
-    mw, _, _ = _aa_modules(768, 384, 128, 16)
+@pytest.mark.parametrize("qk", [False, True])
+def test_module_pair_fused_graph_replay_and_compile(train, qk):
+    """CUDA-graph capture replays the eager result on new inputs, and torch.compile keeps the route (opaque ops) with the eager
+    numbers (bf16 autocast, A = 5, L 256; the module route, QK-norm on or off)."""
+    mw, _, _ = _aa_modules(768, 384, 128, 16, qk)
     single, cond, pair, mask, dy = _aa_case(5, 256, 768, 384, 128, torch.bfloat16)
     s, c, p = (t.to(torch.bfloat16).requires_grad_(train) for t in (single, cond, pair))
 
@@ -368,13 +377,14 @@ def test_module_pair_fused_graph_replay_and_compile(train):
         t.grad = None
     eager = step(mw).clone()
     taken = []
-    orig = fused_pair.attention_pair_sm100
-    fused_pair.attention_pair_sm100 = lambda *a, **k: (taken.append(1), orig(*a, **k))[1]  # ty: ignore[invalid-assignment] -- spy
+    mod, name = _route_spy(qk)
+    orig = getattr(mod, name)
+    setattr(mod, name, lambda *a, **k: (taken.append(1), orig(*a, **k))[1])
     try:
         comp = step(torch.compile(mw))
     finally:
-        fused_pair.attention_pair_sm100 = orig
-    assert taken, "the compiled module left the pair-fused core"
+        setattr(mod, name, orig)
+    assert taken, f"the compiled module left the {name} route"
     assert _rel(comp, eager) < 1e-2, _rel(comp, eager)
     st = torch.cuda.Stream()
     st.wait_stream(torch.cuda.current_stream())

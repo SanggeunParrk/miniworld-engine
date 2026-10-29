@@ -60,8 +60,9 @@ On B200 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton, n
   the bias transpose `attn_dkv` reads), and the CUDA row kernels of
   `kernels/conditioned_transition/cuda/token_dit_train_rows.cu`, templated on the operand dtype. The key mask folds into
   the pair bias as -inf.
-- The attention module alone (`AugmentedAttentionPairBias`, `compute_dtype=bf16`, no mask, even A) also takes the sm_100a
-  bf16 forward / backward (`settings.augmented_attention_bf16_sm100`), with the dO prep in `glue.cu` (it was Triton).
+- The attention module alone (`AugmentedAttentionPairBias`) runs the sm_100a module route (`cuda/sm100/module_route.py`, since
+  2026-10-29: packed q|k|v|g GEMM, pair pass, these cores, the `aa_rows.cu` row kernels; any A and L, shared or per-sample key
+  masks, `extra_pair_bias`, QK-norm); `settings.augmented_attention_bf16_sm100` turns the B200 cores off.
 
 "미검증" = the kernels accept the shape but no test or measurement has run there. 성능 확인: see "Hardware limit (SoL) per
 kernel" (△ = fastest measured, a kernel of the group below 70 % SoL; — = not measured). cache build ✓: nothing on these paths
