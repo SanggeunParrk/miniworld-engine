@@ -636,9 +636,12 @@ def apb_width(heads: int, d: int = 384) -> int:
 
 def _apb_defs(heads: int, qpair: bool, d: int = 384, ksplit: bool = False):
     """-D flags of an AttentionPairBias build: every core takes per-sample bias planes (BPS; the backward cores' flag, the
-    forward cores' QPAIR mode)."""
+    forward cores' QPAIR mode). The backward cores (attn_dkv, attn_dqb) are built -DDET=1: each CTA's two MMA issuers accumulate
+    dK / dV and a step's dQ in a fixed order, so with the stored dQ / dK / dV slices (DQPART, QSPLIT) summed in order every APB
+    gradient is bitwise repeatable (without it the accumulation order followed the warpgroups' timing: batched-vs-single and
+    run-to-run bits differed about 1 run in 5)."""
     dhp, dreal = APB_GEOMETRY[(heads, d)]
-    defs = (("QPAIR=1",) if qpair else ("BPS=1",)) + (f"NHEAD={heads}",)
+    defs = (("QPAIR=1",) if qpair else ("BPS=1", "DET=1")) + (f"NHEAD={heads}",)
     if dhp != 48 or dreal != 48:
         defs += (f"DHP={dhp}", f"RSQDV={dreal**-0.5!r}f")
     return defs + (("KSPLIT=1",) if ksplit else ())
