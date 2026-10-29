@@ -375,8 +375,18 @@ __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm100(
     const int qq = warp & 3, r = qq * 32 + lane;
     const bool leader = warp == 10 && lane == 0;
     int nst = 0, lt = 0;
+    // dropout: row (b, i, j) takes scale row (b, j); its 32-channel chunks are loaded a chunk ahead (the first one before the wait for
+    // the tile's GEMM), so most of their L2 latency is off the drain's path (loaded in the chunk itself: 1.18x the kernel time at L768;
+    // issuing the next chunk's loads at the top of each chunk, a register copy of the current one, was 1.4x slower than this)
+    uint4 dn[4];
+    auto drop_load = [&](int t, int ch) {
+      const uint4* sp = reinterpret_cast<const uint4*>(DROP + drop_row((long)t * BM + r, L, TRANS, false) * C + ch * 32);
+#pragma unroll
+      for (int c = 0; c < 4; ++c) dn[c] = __ldg(sp + c);
+    };
     for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
       const int b = lt & 1;
+      if (DROP != nullptr) drop_load(t, 0);
       wait(af + b, (lt >> 1) & 1);
       wait(xf, lt & 1);
       tc_fence_after();
@@ -398,16 +408,14 @@ __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm100(
           tc_fence_before(); __syncwarp(); if (lane == 0) { arrive(ae + b); arrive(xe); }
         }
         uint32_t w[16];
-        if (DROP != nullptr) {                    // row (b, i, j): scale row (b, j), channels 32 ch ..
-          const long row = (long)t * BM + r;
-          const uint4* sp = reinterpret_cast<const uint4*>(DROP + drop_row(row, L, TRANS, false) * C + ch * 32);
+        if (DROP != nullptr) {
 #pragma unroll
           for (int c = 0; c < 4; ++c) {
-            const uint4 u = __ldg(sp + c);
-            const uint32_t sw[4] = {u.x, u.y, u.z, u.w};
+            const uint32_t sw[4] = {dn[c].x, dn[c].y, dn[c].z, dn[c].w};
 #pragma unroll
             for (int e = 0; e < 4; ++e) { const float2 sv = bf2f(sw[e]); v[c * 8 + 2 * e] *= sv.x; v[c * 8 + 2 * e + 1] *= sv.y; }
           }
+          if (ch < 3) drop_load(t, ch + 1);
         }
 #pragma unroll
         for (int i = 0; i < 16; ++i) { const float2 xv = bf2f(xw[i]); w[i] = pack2(v[2 * i] + xv.x, v[2 * i + 1] + xv.y); }
@@ -511,8 +519,10 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm100(
     if (lane == 0) {
       expect_tx(wf, C * C * 2);
       for (int kh = 0; kh < 2; ++kh) load_2d(&wmap, sW + kh * C * 64, wf, kh * 64, 0);
-      int lt = 0;
-      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
+      // dy | o run one tile ahead of g: tile lt + 1's pair lands, seeds dpair and (dropout) is released to the grad warps (sr) while
+      // they work on tile lt, so they scale it in place mid-tile and its du GEMM follows tile lt's dWo GEMM without waiting for them
+      // (with dy scaled at the start of its own tile, the scale and the du GEMM ran in series with every tile: 1.5x the kernel time)
+      auto pair_in = [&](int t, int lt) {
         const int b = lt & 1;
         __nv_bfloat16* dy = sDy + b * XT;
         if (lt >= 2) {                              // buffer b held tile lt - 2: its dWo GEMM retired and its seed store read it
@@ -524,13 +534,18 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm100(
           load_rows(&dymap, dy + kh * BM * 64, af + b, kh * 64, t * BM, L, TRANS);
           load_2d(&omap, sO + b * XT + kh * BM * 64, af + b, kh * 64, t * BM);
         }
-        if (lt >= 1) wait(sd, (lt - 1) & 1);
-        expect_tx(bfb, XT * 2);
-        for (int kh = 0; kh < 2; ++kh) load_2d(&gmap, sG + kh * BM * 64, bfb, kh * 64, t * BM);
         wait(af + b, (lt >> 1) & 1);                // dy landed: it seeds dpair
         if (!GB_NOSEED) for (int kh = 0; kh < 2; ++kh) store_rows(&seedmap, dy + kh * BM * 64, kh * 64, t * BM, L, TRANS);
         bulk_commit();
         if (drop) { bulk_wait_read<0>(); arrive(sr); }   // the grad warps scale dy in place next
+      };
+      if ((int)blockIdx.x < ntiles) pair_in(blockIdx.x, 0);
+      int lt = 0;
+      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
+        if (lt >= 1) wait(sd, (lt - 1) & 1);
+        expect_tx(bfb, XT * 2);
+        for (int kh = 0; kh < 2; ++kh) load_2d(&gmap, sG + kh * BM * 64, bfb, kh * 64, t * BM);
+        if (t + (int)gridDim.x < ntiles) pair_in(t + gridDim.x, lt + 1);
       }
       bulk_wait<0>();
     }
@@ -564,28 +579,36 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm100(
     const int qq = warp & 3, r = qq * 32 + lane;   // TMEM lane = row
     const int gi = (warp - 2) >> 2;                // channel half
     const bool lead = qq == 2 && lane == 0;
+    // dropout: dy <- dy o drop in place (row r, channel half gi) after the seed store read it, a tile ahead (see the producer); the
+    // scale rows are loaded at the top of the previous tile, so their L2 latency hides behind its work
+    auto drop_load = [&](int t, uint4* sv) {
+      const uint4* sp = reinterpret_cast<const uint4*>(DROP + drop_row((long)t * BM + r, L, TRANS, false) * C + gi * 64);
+#pragma unroll
+      for (int c8 = 0; c8 < 8; ++c8) sv[c8] = __ldg(sp + c8);
+    };
+    auto drop_scale = [&](int lt, const uint4* sv) {
+      wait(sr, lt & 1);
+      __nv_bfloat16* dr = sDy + (lt & 1) * XT + gi * BM * 64 + r * 64;
+#pragma unroll
+      for (int c8 = 0; c8 < 8; ++c8) {
+        uint4* pp = reinterpret_cast<uint4*>(dr + ((c8 ^ (r & 7)) << 3));
+        const uint4 dv = *pp;
+        const uint32_t d4[4] = {dv.x, dv.y, dv.z, dv.w}, s4[4] = {sv[c8].x, sv[c8].y, sv[c8].z, sv[c8].w};
+        uint32_t o4[4];
+#pragma unroll
+        for (int e = 0; e < 4; ++e) { const float2 a = bf2f(d4[e]), m = bf2f(s4[e]); o4[e] = pack2(a.x * m.x, a.y * m.y); }
+        *pp = make_uint4(o4[0], o4[1], o4[2], o4[3]);
+      }
+      fence_proxy_async();
+      __syncwarp();
+      if (lane == 0) arrive(dys);
+    };
+    if (drop && (int)blockIdx.x < ntiles) { uint4 sv[8]; drop_load(blockIdx.x, sv); drop_scale(0, sv); }
     int lt = 0;
     for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
-      if (drop) {                                  // dy <- dy o drop in place (row r, channel half gi), after the seed store read it
-        wait(sr, lt & 1);
-        const long row = (long)t * BM + r;
-        const uint4* sp = reinterpret_cast<const uint4*>(DROP + drop_row(row, L, TRANS, false) * C + gi * 64);
-        __nv_bfloat16* dr = sDy + (lt & 1) * XT + gi * BM * 64 + r * 64;
-#pragma unroll
-        for (int c8 = 0; c8 < 8; ++c8) {
-          const uint4 sv = __ldg(sp + c8);
-          uint4* pp = reinterpret_cast<uint4*>(dr + ((c8 ^ (r & 7)) << 3));
-          const uint4 dv = *pp;
-          const uint32_t d4[4] = {dv.x, dv.y, dv.z, dv.w}, s4[4] = {sv.x, sv.y, sv.z, sv.w};
-          uint32_t o4[4];
-#pragma unroll
-          for (int e = 0; e < 4; ++e) { const float2 a = bf2f(d4[e]), m = bf2f(s4[e]); o4[e] = pack2(a.x * m.x, a.y * m.y); }
-          *pp = make_uint4(o4[0], o4[1], o4[2], o4[3]);
-        }
-        fence_proxy_async();
-        __syncwarp();
-        if (lane == 0) arrive(dys);
-      }
+      const bool nxt = drop && t + (int)gridDim.x < ntiles;
+      uint4 sv[8];
+      if (nxt) drop_load(t + gridDim.x, sv);
       wait(duf, lt & 1);
       wait(bfb, lt & 1);
       tc_fence_after();
@@ -638,6 +661,11 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm100(
         store_2d(&domap, sD + gi * BM * 64, gi * 64, t * BM);
         store_2d(&dgmap, sG + gi * BM * 64, gi * 64, t * BM);
         bulk_commit();
+      }
+      // the next tile's dy o drop while the stores drain and the next g loads: its du GEMM follows this tile's dWo GEMM (scaled at
+      // the start of its own tile, the scale and the du GEMM ran in series with every tile: 1.55x the kernel time at L768)
+      if (nxt) drop_scale(lt + 1, sv);
+      if (lead) {
         bulk_wait_read<0>();
         arrive(sd);                                // (both groups: count 2) g / do buffers free
       }
