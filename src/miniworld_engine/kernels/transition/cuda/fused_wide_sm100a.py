@@ -16,7 +16,7 @@ and shared memory does:
     768   (n = 2) as 512, the squeeze / d_xn GEMMs run as two 384-column halves (the accumulator would need 768 TMEM columns)
     384   at most 16 row tiles (a single-stream [B, L, 384] activation; round sx, ``SMALL_FWD_TILES``): LayerNorm -> expand + SwiGLU ->
           squeeze as three programmatic dependent launches sized for a few tiles on all SMs; backward gate -> d_xn + LayerNorm
-          backward (one 6-CTA cluster per tile) -> fp32 dW GEMMs
+          backward (one cluster per tile) -> weight gradients + dgamma / dbeta, three more
 
 All kernels are tcgen05 / TMA / 2-CTA-cluster kernels except the LayerNorm ones; the weight gradients are cuBLAS GEMMs with an
 fp32 output. At D >= 384 the forward keeps a and b (bf16) for the backward instead of recomputing them in fp32: ~2 x M x nD bf16
@@ -90,9 +90,10 @@ SMALL_FWD_TILES = 16
 #: D = 384 at small M (at most SMALL_FWD_TILES tiles; a single-stream [B, L, 384] activation): chains of programmatic dependent
 #: launches sized for a few row tiles on all 148 SMs (sm100/widths/tsx_*.cu, round sx). Forward: LayerNorm (one warp per row) ->
 #: expand + SwiGLU over (tile, CH-unit hidden chunk) CTAs -> squeeze + residual over (tile, column block, hidden split) clusters.
-#: Backward: gate over (tile, 64-unit chunk) CTAs -> d_xn + LayerNorm backward + dgamma / dbeta over one 6-CTA cluster per tile ->
-#: the weight gradients (cuBLAS, fp32 out). Ws and Wa / Wb are read in their own layouts (MN-major operands): no transposed or
-#: concatenated weight copies per call.
+#: Backward: gate over (tile, 64-unit chunk) CTAs -> d_xn + LayerNorm backward over one cluster per tile (6 column blocks x a K
+#: split) -> dWs, dWa | dWb (fp32, or bf16 for bf16 parameters) and dgamma / dbeta over (output tile) CTAs. Every operand is read in
+#: its own layout (MN-major where needed): no transposed or concatenated weight copies per call; with fp32 masters the training
+#: forward's casts ride in the LayerNorm launch.
 SX_CH = (32, 64)
 #: squeeze builds: (output columns per cluster, hidden split = cluster size)
 SX_SQ = ((32, 1), (64, 1), (32, 2), (64, 2))
@@ -125,16 +126,16 @@ def _sx_sq(d: int, tiles: int, h: int, nsm: int) -> tuple[int, int]:
     return 64, 1
 
 
-_SX_COUNTERS: dict = {}
+@functools.lru_cache(maxsize=16)
+def _sx_dxn_resident(d: int, n: int, index: int) -> int:
+    """Resident 12-CTA clusters of the K-split d_xn kernel (7 on a 148-SM B200: clusters must fit a GPC)."""
+    return int(_load(d, n).max_active_clusters(f"d{d}n{n}_sx_dxn2", "transition_sx_dxn", 384, 2 * (d // 64)))
 
 
-def _sx_counter(device: torch.device) -> torch.Tensor:
-    """The d_xn kernel's per-column-block arrival counters (zero between launches: the last CTA resets its own), per device and stream."""
-    key = (device.index, torch.cuda.current_stream(device).cuda_stream)
-    t = _SX_COUNTERS.get(key)
-    if t is None:
-        t = _SX_COUNTERS[key] = torch.zeros(16, dtype=torch.int32, device=device)
-    return t
+def _sx_ks(d: int, n: int, tiles: int, index: int) -> int:
+    """K split of the d_xn kernel: the two halves (dA Wa, dB Wb) on a CTA pair while every tile's cluster is resident at once, which
+    halves the per-SM TMA intake that bounds it; one CTA per column block otherwise."""
+    return 2 if tiles <= _sx_dxn_resident(d, n, index) else 1
 
 
 def _dn(x: torch.Tensor, wa: torch.Tensor) -> tuple[int, int]:
@@ -195,7 +196,8 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
                 for nb, k in SX_SQ
             ),
             ("sx_gate", "widths/tsx_gate.cu", dim),
-            ("sx_dxn", "widths/tsx_dxn.cu", dim),
+            *((f"sx_dxn{k}", "widths/tsx_dxn.cu", (*dim, f"-DKS={k}")) for k in (1, 2)),
+            *((f"sx_dw{nt}", "widths/tsx_dw.cu", (*dim, f"-DNT={nt}")) for nt in (64, 128)),
         )
         if d == 384
         else ()
@@ -323,6 +325,95 @@ _FUSED_FWD = {
 }
 
 
+def _sx_forward(k, x, gamma, beta, wa, wb, ws, eps, save, out, rstd, c1, cast=None):
+    """The round-sx forward (tsx_ln -> tsx_expand -> tsx_squeeze, programmatic dependent launches) into ``out`` (and ``rstd`` / ``c1``
+    with save). ``cast``: the fp32 masters whose bf16 copies ``wa`` / ``wb`` / ``ws`` the LayerNorm launch writes first. Returns
+    (out, xn, rstd, c1, h, a, b) as ``_fwd_launch``."""
+    d, h, m, tiles = k.d, k.h, k.m, k.tiles
+
+    def ph():
+        return x.new_empty((1, 1))
+
+    xn = torch.empty_like(x)  # the expand's A operand, kept for the backward with save
+    hid = torch.empty((m, h), dtype=x.dtype, device=x.device)
+    a, b = ((torch.empty((m, h), dtype=x.dtype, device=x.device) if save else ph()) for _ in range(2))
+    nrb = (m + 7) // 8
+    k.run(
+        "sx_ln",
+        "transition_sx_ln",
+        nrb + ((3 * h * d // 8 + 511) // 512 if cast is not None else 0),  # cast blocks: 2 x 8 elements per thread
+        (x, gamma, beta, xn, rstd, c1, m, float(eps), int(save), *(cast or (x, x, x)), wa, wb, ws, h * d if cast else 0),
+        block=256,
+        cluster=1,
+        pdl=True,
+    )
+    ch = _sx_ch(h, tiles, k.nsm)
+    k.run(
+        f"sx_expand{ch}",
+        "transition_sx_expand",
+        tiles * (h // ch),
+        (k.tmap(xn, d, m, 64, 128), k.tmap(wa, d, h, 64, ch), k.tmap(wb, d, h, 64, ch), hid, a, b, int(save)),
+        block=384,
+        cluster=1,
+        pdl=True,
+    )
+    nb, sk = _sx_sq(d, tiles, h, k.nsm)
+    k.run(
+        f"sx_sq{nb}_{sk}",
+        "transition_sx_squeeze",
+        tiles * (d // nb) * sk,
+        (k.tmap(hid, h, m, 64, 128), k.tmap(ws, h, d, 64, nb), x, out),
+        block=256,
+        cluster=sk,
+        pdl=True,
+    )
+    if not save:
+        return out, x.new_empty((1, d)), rstd, c1, ph(), ph(), ph()
+    return out, xn, rstd, c1, hid, a, b
+
+
+def _fwd_sx_cast_fake(x, gamma, beta, wa, wb, ws, eps):
+    m, d = x.shape
+    f32 = dict(dtype=torch.float32, device=x.device)
+    bf = dict(dtype=torch.bfloat16, device=x.device)
+    return (
+        torch.empty_like(x),
+        torch.empty_like(x),
+        torch.empty((m,), **f32),
+        torch.empty((m,), **f32),
+        *(x.new_empty((m, wa.shape[0])) for _ in range(3)),
+        torch.empty(wa.shape, **bf),
+        torch.empty(wb.shape, **bf),
+        torch.empty(ws.shape, **bf),
+    )
+
+
+@opaque(fake=_fwd_sx_cast_fake, name="transition_wide_fwd_sx_cast_sm100a")
+def _fwd_sx_cast_launch(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    eps: float,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor, torch.Tensor, torch.Tensor,
+]:
+    """The training forward of the round-sx path from fp32 master matrices: the LayerNorm launch also writes their bf16 copies (no
+    cast launch of its own). Returns (out, xn, rstd, c1, h, a, b, wa16, wb16, ws16)."""
+    if _is_fake(x, wa):
+        return _fwd_sx_cast_fake(x, gamma, beta, wa, wb, ws, eps)
+    k = _Launch(x, wa.shape[0])
+    f32 = dict(dtype=torch.float32, device=x.device)
+    w16 = [torch.empty(w.shape, dtype=torch.bfloat16, device=w.device) for w in (wa, wb, ws)]
+    out = torch.empty_like(x)
+    rstd, c1 = torch.empty((k.m,), **f32), torch.empty((k.m,), **f32)
+    res = _sx_forward(k, x, gamma, beta, *w16, eps, True, out, rstd, c1, cast=(wa, wb, ws))
+    return (*res, *w16)
+
+
 def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save):
     """Output structure only: (out, xn, rstd, c1, h, a, b). xn / rstd / c1 are 1-element placeholders unless ``save``; h / a / b
     are [M, nD] when ``save`` at D >= 384 (kept for the backward) and placeholders otherwise."""
@@ -399,52 +490,7 @@ def _fwd_launch(
         )
         return out, xn, rstd, c1, ph(), ph(), ph()
     if _sx(d, tiles):  # three programmatic-dependent kernels sized for a few tiles (round sx: tsx_ln, tsx_expand, tsx_squeeze)
-        xn = torch.empty_like(x)  # the expand's A operand, kept for the backward with save
-        hid = torch.empty((m, h), dtype=x.dtype, device=x.device)
-        a, b = (
-            (torch.empty((m, h), dtype=x.dtype, device=x.device) if save else ph())
-            for _ in range(2)
-        )
-        k.run(
-            "sx_ln",
-            "transition_sx_ln",
-            (m + 7) // 8,
-            (x, gamma, beta, xn, rstd, c1, m, float(eps), int(save)),
-            block=256,
-            cluster=1,
-            pdl=True,
-        )
-        ch = _sx_ch(h, tiles, k.nsm)
-        k.run(
-            f"sx_expand{ch}",
-            "transition_sx_expand",
-            tiles * (h // ch),
-            (
-                k.tmap(xn, d, m, 64, 128),
-                k.tmap(wa, d, h, 64, ch),
-                k.tmap(wb, d, h, 64, ch),
-                hid,
-                a,
-                b,
-                int(save),
-            ),
-            block=384,
-            cluster=1,
-            pdl=True,
-        )
-        nb, sk = _sx_sq(d, tiles, h, k.nsm)
-        k.run(
-            f"sx_sq{nb}_{sk}",
-            "transition_sx_squeeze",
-            tiles * (d // nb) * sk,
-            (k.tmap(hid, h, m, 64, 128), k.tmap(ws, h, d, 64, nb), x, out),
-            block=256,
-            cluster=sk,
-            pdl=True,
-        )
-        if not save:
-            return out, x.new_empty((1, d)), rstd, c1, ph(), ph(), ph()
-        return out, xn, rstd, c1, hid, a, b
+        return _sx_forward(k, x, gamma, beta, wa, wb, ws, eps, save, out, rstd, c1)
     if d == 384:  # one fused kernel (round n2, tfwd_d384.cu)
         xn = torch.empty_like(x) if save else x.new_empty((1, d))
         hid, a, b = (
@@ -729,14 +775,16 @@ def _bwd_launch(
     )  # outputs of a custom op must not alias each other
 
 
-def _bwd_sx_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hid, a, b):
-    """Output structure only: (dx, dgamma | dbeta [2 D], dWa | dWb [2 H, D], dWs [D, H]); fp32 gradients but dx."""
+def _bwd_sx_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hid, a, b, wgrad_bf16):
+    """Output structure only: (dx, dgamma | dbeta [2 D] fp32, dWa | dWb [2 H, D], dWs [D, H]); the weight gradients fp32, or bf16 with
+    ``wgrad_bf16`` (bf16 parameters)."""
     f32 = dict(dtype=torch.float32, device=x.device)
+    wd = dict(dtype=torch.bfloat16 if wgrad_bf16 else torch.float32, device=x.device)
     return (
         torch.empty_like(x),
         torch.empty((2 * x.shape[1],), **f32),
-        torch.empty((2 * wa.shape[0], wa.shape[1]), **f32),
-        torch.empty(ws.shape, **f32),
+        torch.empty((2 * wa.shape[0], wa.shape[1]), **wd),
+        torch.empty(ws.shape, **wd),
     )
 
 
@@ -754,12 +802,13 @@ def _bwd_sx_launch(
     hid: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
+    wgrad_bf16: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """The small-M backward at D = 384 (round sx): gate (tsx_gate.cu) -> d_xn + LayerNorm backward + dgamma / dbeta (tsx_dxn.cu, a
-    programmatic dependent launch) -> the weight gradients as two cuBLAS GEMMs with fp32 outputs. Returns (dx, dgamma | dbeta,
+    """The small-M backward at D = 384 (round sx), three programmatic dependent launches: gate (tsx_gate.cu) -> d_xn + LayerNorm
+    backward + dgamma / dbeta partials (tsx_dxn.cu) -> dWs, dWa | dWb (fp32) and dgamma | dbeta (tsx_dw.cu). Returns (dx, dgamma | dbeta,
     dWa | dWb, dWs); the caller splits the packed ones (outputs of a custom op must not alias each other)."""
     if _is_fake(dy, x):
-        return _bwd_sx_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hid, a, b)
+        return _bwd_sx_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hid, a, b, wgrad_bf16)
     k = _Launch(x, wa.shape[0])
     d, h, m, tiles = k.d, k.h, k.m, k.tiles
     f32 = dict(dtype=torch.float32, device=x.device)
@@ -775,11 +824,11 @@ def _bwd_sx_launch(
         pdl=True,
     )
     part = torch.empty((tiles, 2 * d), **f32)
-    dgb = torch.empty((2 * d,), **f32)
+    ks = _sx_ks(d, k.n, tiles, x.device.index)
     k.run(
-        "sx_dxn",
+        f"sx_dxn{ks}",
         "transition_sx_dxn",
-        tiles * (d // 64),
+        tiles * (d // 64) * ks,
         (
             k.tmap(dab, 2 * h, m, 64, 128),
             k.tmap(wa, d, h),
@@ -791,16 +840,36 @@ def _bwd_sx_launch(
             gamma,
             dx,
             part,
-            dgb,
-            _sx_counter(x.device),
-            tiles,
         ),
         block=384,
-        cluster=d // 64,
+        cluster=(d // 64) * ks,
         pdl=True,
     )
-    dwab = _mm_f32(dab.t(), xn)  # [2H, D]: dWa then dWb
-    dws = _mm_f32(dy.t(), hid)  # [D, H]
+    dgb = torch.empty((2 * d,), **f32)
+    wd = dict(dtype=torch.bfloat16 if wgrad_bf16 else torch.float32, device=x.device)
+    dwab = torch.empty((2 * h, d), **wd)  # dWa then dWb
+    dws = torch.empty((d, h), **wd)
+    nt = 64 if (d // 128) * (h // 64) + (2 * h // 128) * (d // 64) <= k.nsm else 128
+    k.run(
+        f"sx_dw{nt}",
+        "transition_sx_dw",
+        (d // 128) * (h // nt) + (2 * h // 128) * (d // nt),
+        (
+            k.tmap(dy, d, m, 64, 64),
+            k.tmap(hid, h, m, 64, 64),
+            k.tmap(dab, 2 * h, m, 64, 64),
+            k.tmap(xn, d, m, 64, 64),
+            dws,
+            dwab,
+            part,
+            dgb,
+            tiles,
+            int(wgrad_bf16),
+        ),
+        block=256,
+        cluster=1,
+        pdl=True,
+    )
     return dx, dgb, dwab, dws
 
 
@@ -830,10 +899,17 @@ class _WideTransitionSM100A(torch.autograd.Function):
         ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
-        wa, wb, ws = _bf16_forms(wa, wb, ws, x.dtype)
-        out, xn, rstd, c1, hid, a, b = _fwd_launch(
-            flat, gf, bf, wa, wb, ws, float(eps), True
-        )
+        if (
+            _sx(flat.shape[1], flat.shape[0] // ROWS)
+            and x.dtype is torch.bfloat16
+            and all(w.dtype is torch.float32 and w.is_contiguous() for w in (wa, wb, ws))
+        ):  # fp32 masters at small M: the LayerNorm launch writes the bf16 copies
+            out, xn, rstd, c1, hid, a, b, wa, wb, ws = _fwd_sx_cast_launch(flat, gf, bf, wa, wb, ws, float(eps))
+        else:
+            wa, wb, ws = _bf16_forms(wa, wb, ws, x.dtype)
+            out, xn, rstd, c1, hid, a, b = _fwd_launch(
+                flat, gf, bf, wa, wb, ws, float(eps), True
+            )
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa, wb, ws, hid, a, b)
         ctx.shape = shape
         return out.reshape(shape)
@@ -845,7 +921,8 @@ class _WideTransitionSM100A(torch.autograd.Function):
         d, h = flat.shape[1], wa.shape[0]
         if _sx(d, flat.shape[0] // ROWS):
             dx, dgb, dwab, dws = _bwd_sx_launch(
-                dy.reshape(-1, d).contiguous(), flat, xn, rstd, c1, gf, wa, wb, ws, hid, a, b
+                dy.reshape(-1, d).contiguous(), flat, xn, rstd, c1, gf, wa, wb, ws, hid, a, b,
+                adt is torch.bfloat16 and bwdt is torch.bfloat16 and sdt is torch.bfloat16,
             )
             return (
                 dx.reshape(ctx.shape),

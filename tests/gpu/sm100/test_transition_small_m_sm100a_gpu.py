@@ -1,9 +1,10 @@
 """The B200 Transition at D = 384 and a few row tiles (the single track [B, L, 384] of a pairformer: ``fused_wide_sm100a`` round sx,
-``sm100/widths/tsx_*.cu``): LayerNorm -> expand + SwiGLU -> squeeze forward, gate -> d_xn + LayerNorm backward + dgamma / dbeta.
+``sm100/widths/tsx_*.cu``): LayerNorm (+ the fp32-master casts) -> expand + SwiGLU -> squeeze forward, gate -> d_xn + LayerNorm
+backward -> weight gradients + dgamma / dbeta.
 Claims: the module really runs these kernels at every tile count up to the bound, for n = 2 and 4, in inference and training; output
 and every gradient (fp32 masters and bf16 parameters) are no further from the fp32 PyTorch module than the bf16 PyTorch statements
-are; every squeeze decomposition and expand chunk width agree; a repeated step is bit-identical and leaves the d_xn kernel's arrival
-counters at zero (they are reset by the kernel, a later launch depends on it)."""
+are; every squeeze decomposition and expand chunk width agree; a repeated step is bit-identical (every reduction runs in a fixed
+order); the training forward's output equals inference's."""
 
 import copy
 
@@ -78,8 +79,8 @@ def test_small_m_path_runs_and_is_no_less_accurate_than_pytorch(rows, n, fp32_ma
     base = _step(pt, x, dy)
     names = _spy(monkeypatch)
     got = _step(mod, x, dy)
-    assert {"sx_ln", "sx_gate", "sx_dxn"} <= set(names) and any(c.startswith("sx_expand") for c in names), names
-    assert any(c.startswith("sx_sq") for c in names), names
+    assert {"sx_ln", "sx_gate"} <= set(names), names
+    assert all(any(c.startswith(p) for c in names) for p in ("sx_expand", "sx_sq", "sx_dxn", "sx_dw")), names
     for k in ref:
         assert torch.isfinite(got[k]).all(), k
         e, b = _rel(got[k], ref[k]), _rel(base[k], ref[k])
@@ -103,7 +104,7 @@ def test_every_squeeze_and_expand_build_agrees(n, monkeypatch):
 
 
 @pytest.mark.parametrize("n", [2, 4])
-def test_step_is_bit_identical_and_counters_reset(n):
+def test_step_is_bit_identical(n):
     mod = _module(n, True)
     x = torch.randn(1, 768, 384, device="cuda", dtype=torch.bfloat16)
     dy = torch.randn_like(x)
@@ -111,8 +112,6 @@ def test_step_is_bit_identical_and_counters_reset(n):
     del poison
     first, second = _step(mod, x, dy), _step(mod, x, dy)
     assert all(torch.equal(first[k], second[k]) for k in first)
-    torch.cuda.synchronize()
-    assert all(int(t.abs().sum()) == 0 for t in w._SX_COUNTERS.values())
 
 
 def test_inference_output_equals_the_training_forward():
