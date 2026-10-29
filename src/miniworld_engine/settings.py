@@ -314,6 +314,10 @@ class Settings:
     #: B200 bf16 bias-only DiT past L 768 (to 3072): the attention core streams P through shared memory (``pv_stream_sm100.cu``);
     #: False keeps the old bound (longer L runs the PyTorch module). Read per call.
     bias_only_dit_stream: bool = True
+    #: B200 bf16 hoisted pair bias (``pair_bias_all``, shared or per-sample pair) on the sm_100a one-pass kernels
+    #: (``bo_hoist_sm100.cu``: the LayerNorm folded into a tcgen05 projection forward, the whole backward in one pass) for up to 128
+    #: weight rows (blocks x heads); False: the LayerNorm rows + cuBLAS hoist. Read per call.
+    bias_only_dit_hoist_sm100: bool = True
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_INF3`` (default on).
     bias_only_dit_inf3: bool = True
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA`` (default on).
