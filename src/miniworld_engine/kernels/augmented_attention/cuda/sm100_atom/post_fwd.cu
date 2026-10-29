@@ -383,6 +383,10 @@ void atom_post_fwd_2stage_packed_sm90(const __nv_bfloat16* __restrict__ a,
 #include "sm100.cuh"
 using namespace s100;
 
+#ifndef RMS
+#define RMS 0                              // ESMFold2: RMSNorm statistics (the K / V AdaLN's scale raw, identity-centred by its bias)
+#endif
+
 #ifndef DIAG
 #define DIAG 0                             // 1: no compute math (handshakes only), 2: no MMAs
 #endif
@@ -618,7 +622,7 @@ atom_post_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
 #pragma unroll
         for (int e = 0; e < 16; ++e) sum += x[e];
         sum += __shfl_xor_sync(~0u, sum, 1); sum += __shfl_xor_sync(~0u, sum, 2); sum += __shfl_xor_sync(~0u, sum, 4);
-        const float mean = sum * (1.f / 128.f);
+        const float mean = RMS ? 0.f : sum * (1.f / 128.f);                       // RMS (ESMFold2): x rsqrt(mean(x^2) + eps)
         float var = 0.f;
 #pragma unroll
         for (int e = 0; e < 16; ++e) { const float d = x[e] - mean; var += d * d; }

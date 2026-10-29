@@ -341,6 +341,8 @@ def serves(module, single, cond, pair, mask, rope=None) -> bool:
 
     if local_dit_h100.matches(module, single, cond, pair, mask, rope):
         return True
+    if _esm_variant(module):
+        return _b200_esm_servable(module, single, cond, pair, mask, rope)
     if _af3_variant(module) and not _b200_af3_servable(module, single, cond, pair):
         return False
     qualified = _serves_hopper_training(module, single, cond, pair, mask)
@@ -1254,6 +1256,8 @@ def block(module, single, cond, pair, mask=None, rope=None):
 
     if local_dit_h100.matches(module, single, cond, pair, mask, rope):
         return local_dit_h100.run_block(module, single, cond, pair, mask, rope)
+    if _esm_variant(module):
+        return _esm_block(module, single, cond, pair, mask, rope)
     weights = [
         module.get_parameter(name)
         for name in (*WEIGHTS, *(CROSS_WEIGHTS if module.cross_attention else ()))
@@ -1956,3 +1960,198 @@ class _LocalBlock32(torch.autograd.Function):
 
 def _infer32(single, cond, pair, mask, weights, parallel=False, slide=False):
     return _block_fwd32(single, cond, pair, mask, list(weights), False, parallel, slide)[0]
+
+
+# ============================================================================================================ ESMFold2's block (B200)
+# ``LocalDiTBlock(**ESMFOLD2)`` for bf16 inference on the sm_100a kernels: the row kernels' ``-DRMS=1`` builds (RMSNorm AdaLNs, tables of
+# silu(c) with the scales identity-centred by a bias of 1 and the gates raw; the K / V AdaLN of the raw atoms), the q / k RMSNorm + rotary
+# and the position-indexed pair bias of ``sm100_atom_local/lesm.cu``, and the 160-position rank-window attention of ``lattn_esm.cu``:
+#
+#     cond_fwd RMS (hoisted: mod + the K / V tables) -> pre_fwd RMS -> esm_qkrope -> esm_bias (hoisted) -> attn_esm -> post_fwd RMS
+#
+# The row kernels take the AF3 block's 27 parameter slots; ESMFold2 has no conditioning LayerNorm and no projection biases, so those slots hold
+# constants (the LN weights 1, the scale biases 1, the gate biases 0). A gradient, fp32 activations or other options keep the module path.
+ESM_OPTIONS = (True, "parallel", "slide", 192, 64, "rms_silu", True, True)
+_ESM_ONES = {
+    "attention.ada_ln_in.ln_cond.weight",
+    "attention.ada_ln_in.to_scale.bias",
+    "transition.ada_ln_in.ln_cond.weight",
+    "transition.ada_ln_in.to_scale.bias",
+    "attention.ada_ln_kv.ln_cond.weight",
+    "attention.ada_ln_kv.to_scale.bias",
+}
+_ESM_ZEROS = {"attention.to_scale.bias", "transition.to_scale.bias"}
+_ESM_CONST: dict = {}
+_ESM_READY: dict = {}
+
+
+def _esm_const(device, value: float):
+    """A persistent fp32 constant vector [128] per device (made eagerly and kept; inside a capture with none kept yet, a fresh one that is
+    not kept)."""
+    key = (device, value)
+    c = _ESM_CONST.get(key)
+    if c is None:
+        c = torch.full((DS_,), value, device=device, dtype=F32)
+        if not torch.cuda.is_current_stream_capturing():
+            _ESM_CONST[key] = c
+    return c
+
+
+def _esm_weights(module):
+    """The module's parameters in the 27 slots of ``WEIGHTS + CROSS_WEIGHTS`` (constants where ESMFold2 has none)."""
+    dev = module.attention.to_query.weight.device
+    out = []
+    for name in (*WEIGHTS, *CROSS_WEIGHTS):
+        if name in _ESM_ONES:
+            out.append(_esm_const(dev, 1.0))
+        elif name in _ESM_ZEROS:
+            out.append(_esm_const(dev, 0.0))
+        else:
+            out.append(module.get_parameter(name))
+    return out
+
+
+def _esm_ready(index: int) -> bool:
+    """Build and load the ESMFold2 kernels (and the row kernels the block shares) on ``index`` once; False after one warning on failure."""
+    ok = _ESM_READY.get(index)
+    if ok is not None:
+        return ok
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+
+    try:
+        for name in rows.KERNELS_ESM:
+            rows.atom_kernel(name, index)
+        local.load_esm(index)
+        ok = True
+    except Exception as exc:  # a toolchain or driver problem keeps the module path
+        warnings.warn(f"sm_100a ESMFold2 atom kernels unavailable, keeping the module path: {exc!r}", RuntimeWarning, stacklevel=2)
+        ok = False
+    _ESM_READY[index] = ok
+    return ok
+
+
+def _b200_esm_servable(module, single, cond, pair, mask, rope) -> bool:
+    """B200, exactly ESMFold2's option set at the atom widths, bf16 single / cond / pair (bf16 or fp32 parameters), inference (no gradient
+    recorded), B = 1, the rotary tables [1, N, 16]."""
+    from miniworld_engine.modules.adaptive_layernorm.module import RMS_EPS
+    from miniworld_engine.modules.dispatch import KernelBackend
+
+    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
+        return False
+    st = settings.current()
+    if (not st.local_dit_sm100) or st.force_portable_kernels:
+        return False
+    a, tr = module.attention, module.transition
+    if a._backend != KernelBackend.PORTABLE:
+        return False
+    options = (module.cross_attention, module.kv_norm, module.key_window, module.keys, module.window_half, module.conditioning,
+               module.rope, a.use_qk_norm)
+    if options != ESM_OPTIONS or a.norm_query.eps != RMS_EPS or a.norm_key.eps != RMS_EPS or a.ln_pair.eps != EPS:
+        return False
+    params = list(module.parameters())
+    if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *params)):
+        return False
+    if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF):  # (under autocast too: the activations are bf16 either way)
+        return False
+    if any(p.dtype not in (BF, F32) or p.device != single.device for p in params):
+        return False
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[3] != DS_ or single.shape[2] == 0:
+        return False
+    n = single.shape[2]
+    nwin = (n + QUERIES - 1) // QUERIES
+    if tuple(cond.shape) != (*single.shape[:3], DC_) or tuple(pair.shape) != (1, nwin, QUERIES, ESM_OPTIONS[3], DP_):
+        return False
+    if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != (1, n) or mask.device != single.device):
+        return False
+    if rope is None or len(rope) != 2 or any(
+        t.device != single.device or tuple(t.shape) != (1, n, DS_ // NH_ // 2) or not t.is_floating_point() for t in rope
+    ):
+        return False
+    if (a.n_head, a.to_query.weight.shape[0], a.to_bias.weight.shape[1], tr.expand_a.weight.shape[0]) != (NH_, DS_, DP_, 2 * DS_):
+        return False
+    index = single.device.index if single.device.index is not None else torch.cuda.current_device()
+    return _kernels_ready(index) and _esm_ready(index)
+
+
+def _esm_cond_pack(weights, wc):
+    """The RMS cond_fwd operands: W [1152, 128] bf16 = [Wmod; Wkv_scale; Wkv_shift; 0], b [1152] fp32 = [bmod; 0; 0; 0] (the K / V scale's
+    identity bias 1 is pre_fwd's ``bs``)."""
+
+    def build():
+        wm = _kv_pack(weights)[0]
+        dev = wm.device
+        with torch.no_grad():
+            w = torch.cat([wc[0], wm, torch.zeros(DS_, DS_, device=dev, dtype=BF)]).contiguous()
+            b = torch.cat([wc[1], torch.zeros(3 * DS_, device=dev)]).contiguous()
+        return w, b
+
+    return _capture.param_forms(("local_dit_esm",), weights, build)
+
+
+def _esm_fwd_fake(single, cond, pair, mask, weights, qkw, cos, sin):
+    return torch.empty_like(single)
+
+
+@opaque(fake=_esm_fwd_fake, name="local_dit_block_esm_fwd")
+def _esm_fwd(
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    weights: list[torch.Tensor],
+    qkw: list[torch.Tensor],
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """ESMFold2's block output [A, 1, N, 128] bf16 (inference). ``cos`` / ``sin``: the rotary tables, fp32 [n, 16] at the padded length."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+    from miniworld_engine.modules.adaptive_layernorm.module import RMS_EPS
+
+    a, _, n0, _ = single.shape
+    n = _padded_length(n0)
+    m = a * n
+    with torch.cuda.device(single.device):
+        wc, wp, wo, _ = _weights(weights[: len(WEIGHTS)])
+        wrms, brms = _esm_cond_pack(weights, wc)
+        s2 = _padded(single, n).reshape(m, DS_).contiguous()
+        wkey = tuple((w.data_ptr(), w._version) for w in weights)
+
+        def tables():
+            c2 = _padded(cond, n).reshape(m, DC_).contiguous()
+            return rows.cond_fwd(c2, wrms, brms, wc[2], wc[3], rms=True)
+
+        mod, mkv = _hoisted(_HOIST_COND, cond, ("esm", wkey, n), tables) if _hoisting() else tables()
+        keys = _keys(mask, n0, n)
+
+        def bias():
+            return local.esm_bias(_trunk(pair, n), weights[_GAMMA], weights[_WBIAS], keys, n0)
+
+        if _hoisting():
+            mk = None if mask is None else _tkey(mask)
+            bias2 = _hoisted(_HOIST_BIAS, pair, ("esm", wkey[_GAMMA], wkey[_WBIAS], n, mk), bias)
+        else:
+            bias2 = bias()
+        bs = _kv_pack(weights)[1]
+        q, k, v, sg, _, _ = rows.pre_fwd_kv(s2, mod, wp[0], wp[1], mkv, bs, eps=RMS_EPS, parallel=True, rms=True)
+        wq, wk = _capture.param_forms(("local_dit_esm_qk",), qkw, lambda: [w.detach().float().contiguous() for w in qkw])
+        qn, kn = local.esm_qkrope(q, k, wq, wk, cos, sin, RMS_EPS)
+        o = local.attn_esm_sm100(qn.view(a, n, DS_), kn.view(a, n, DS_), v.view(a, n, DS_), bias2)
+        out = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, eps=RMS_EPS, rms=True)[0]
+    return _unpadded(out.view(a, 1, n, DS_), single.shape)
+
+
+def _esm_block(module, single, cond, pair, mask, rope):
+    """ESMFold2's block on the sm_100a kernels; ``serves()`` must have accepted the call (inference)."""
+    n0 = single.shape[2]
+    n = _padded_length(n0)
+    cos, sin = (
+        (t[0].float() if n == n0 else F.pad(t[0].float(), (0, 0, 0, n - n0))).contiguous() for t in rope
+    )
+    a = module.attention
+    return _esm_fwd(single, cond, pair, mask, _esm_weights(module), [a.norm_query.weight, a.norm_key.weight], cos, sin)

@@ -293,8 +293,38 @@ module, `ef < 1.5 em + 3e-3` (bf16) / `1e-3` (fp32, em = the module path on TF32
 activations; graph capture with a mask changed between replays; parallel-norm training, every gradient; a gradient through the slid
 window is not served). Without the edge kernel the slide cases fail (checked).
 
+## ESMFold2's block: bf16 inference (2026-10-29)
+
+`LocalDiTBlock(**ESMFOLD2)` (FoldForge's ESMFold2 / ESMFold2-fast atom stack: AF3's parallel K/V norm and slid window at 192 keys with the
++/- 64 rank window, RMS / SiLU conditioning with raw gates, per-head q / k RMSNorm + rotary) ran the PyTorch statements on B200. bf16
+activations (bf16 or fp32 parameters, with or without autocast), no gradient, are now served by:
+
+| stage | kernel | what changes against the AF3 block |
+|---|---|---|
+| conditioning (hoisted) | `cond_fwd.cu -DRMS=1` (`sm100_atom.KERNELS_ESM["cond_rms"]`), grid y = 3 | every table from rn(silu(c)), no sigmoid (the scales' identity bias 1, gate biases 0); the third half writes the K / V AdaLN's [scale \| shift] (mkv) |
+| AdaLN 1, K / V AdaLN, projections | `pre_fwd.cu -DCROSS=1 -DPARALLEL=1 -DRMS=1` (`"pre_rms"`) | RMSNorm statistics; the K / V scale raw (`pre + 1`) |
+| q / k norm + rotary | `sm100_atom_local/lesm.cu` `local_esm_qkrope` | per head RMSNorm (weight [32], eps float32's) then the rotary with per-atom tables, a warp per row |
+| pair bias (hoisted per pair and mask) | `lesm.cu` `local_esm_bias` | the bias re-indexed by position: bias2 [4, nwin, 32, 160] (log2 units, -inf where a position is not a key of the query: outside the real atoms, \|i - j\| > 64, or outside the window's slid 192-key subset); the real atom count from the mask on the device |
+| attention | `sm100_atom_local/lattn_esm.cu` `local_attn_esm` (tcgen05) | `lattn_fwd.cu`'s frame with 256 key positions per 128 queries (a window sees 160: five 32-key cells, the outer two triangular, one warp takes both); S in two 256-column TMEM buffers, so O lives in columns 128..159 of its sample's buffer and the next S into that buffer is issued once O is drained; 2 TMA stages; no spills (96 registers, 544 threads) |
+| gate, Wo, AdaLN 2, SwiGLU, Ws | `post_fwd.cu -DRMS=1` (`"post_rms"`) | RMSNorm statistics (the raw gates are what the RMS tables hold) |
+
+Measured, one block, CUDA graph under `static_weights()` + `static_inputs()`, conditioning shared by the samples (an expanded view), us:
+
+| (A, N) | B200 kernels | module path (B200) | x |
+|---|---|---|---|
+| (5, 4096) | 59.2 | 2107 | 35.6 |
+| (5, 1024) | 30.5 | 678 | 22.2 |
+| (1, 4096) | 26.8 | 1335 | 49.8 |
+
+At (5, 4096): post_fwd 22.5, attention 21.7, pre_fwd 15.8, q / k norm + rotary 6.4 us. Accuracy against the fp64 module (relative Frobenius,
+real atoms): 5.2-5.3e-3, the module path's own bf16 run 4.8-5.0e-3, at all eight test shapes. Tests:
+`tests/gpu/sm100/test_b200_local_dit_esmfold2_gpu.py` (eight (A, N, real atoms) shapes incl. N not a multiple of 128, under 192 real atoms
+and FoldForge's A = 5 with a shared conditioning; fp32 parameters under autocast and bf16 parameters; `ef < 2 em + 1e-3`; bitwise
+repeatable; graph capture replayed with another mask and inputs; a gradient, fp32 activations or a missing rotary keep the module path).
+Not served yet: fp32 activations and training (module path).
+
 ## Not covered
 
-B > 1, QK-norm, ESMFold2's block (192 keys, rank window, RMS / SiLU conditioning, rotary), training through AF3's slid key window, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
+B > 1, QK-norm outside ESMFold2's block, ESMFold2's block in fp32 or with a gradient, training through AF3's slid key window, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
 values projected from a second AdaLN `attention.ada_ln_kv` of the already normalised atoms) is served, but its extra work is the K / V AdaLN
 inside `pre_fwd` / `pre_bwd` (above), the conditioning LayerNorm and its backward in `lcross.cu` and cuBLAS GEMMs for the modulation tables (one `cn Wm^T` forward, one `dmkv Wm` backward).

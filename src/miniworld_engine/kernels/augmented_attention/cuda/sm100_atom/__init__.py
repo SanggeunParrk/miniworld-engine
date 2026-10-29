@@ -111,6 +111,13 @@ KERNELS = {
     "condb": ("cond_bwd", "atom_cond_bwd_sm100", _SMEM, True),
 }
 
+#: ESMFold2's builds (``-DRMS=1``: RMSNorm AdaLNs, tables of silu(c), raw gates; inference), loaded apart from KERNELS (``load_esm``)
+KERNELS_ESM = {
+    "cond_rms": ("cond_fwd", "atom_cond_fwd_sm100", _SMEM, True, ("RMS=1",)),
+    "pre_rms": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True, ("CROSS=1", "PARALLEL=1", "RMS=1")),
+    "post_rms": ("post_fwd", "atom_post_fwd_sm100", _SMEM, True, ("RMS=1",)),
+}
+
 
 @functools.lru_cache(maxsize=8)
 def _hopper(device_index: int) -> bool:
@@ -142,7 +149,7 @@ def atom_kernel(name: str, device_index: int):
     if _hopper(device_index) and name not in _HOPPER_KERNELS:
         raise NotImplementedError(f"Atom Hopper kernel {name} is not implemented")
     stem, func, smem, pdl, *defs = (
-        _HOPPER_KERNELS if _hopper(device_index) else KERNELS
+        _HOPPER_KERNELS if _hopper(device_index) else KERNELS_ESM if name in KERNELS_ESM else KERNELS
     )[name]
     return _load_atom_kernel(stem, func, device_index, smem, pdl, *defs)
 
@@ -247,10 +254,31 @@ def post_params(blk):
 
 
 # --------------------------------------------------------------------------------------------------- launches
-def cond_fwd(c, W, b, g1, g2, eps=1e-5, *, hopper_waves=2.0):
-    """c [M, 128] bf16 -> mod [M, 768] bf16 = [s1 | bi1 | so | s2 | bi2 | st] (the gates as rn(sigmoid))."""
+def cond_fwd(c, W, b, g1, g2, eps=1e-5, *, hopper_waves=2.0, rms=False):
+    """c [M, 128] bf16 -> mod [M, 768] bf16 = [s1 | bi1 | so | s2 | bi2 | st] (the gates as rn(sigmoid)).
+    ``rms`` (ESMFold2, sm_100a): every table from rn(silu(c)), no sigmoid; W [1152, 128] = [Wmod; Wkv_scale; Wkv_shift; 0], b [1152] (the
+    scales' bias 1) -> (mod, mkv [M, 256] = the K / V AdaLN's [scale | shift])."""
     M = c.shape[0]
     out = torch.empty(M, 6 * DM, device=c.device, dtype=torch.bfloat16)
+    if rms:
+        assert tuple(W.shape) == (9 * DM, DM) and b.numel() == 9 * DM, (W.shape, b.shape)
+        mkv = torch.empty(M, 2 * DM, device=c.device, dtype=torch.bfloat16)
+        ntile = M // 32
+        d = _dev(c)
+        atom_kernel("cond_rms", d)(
+            (min(num_sms(d) // 3, ntile), 3, 1),
+            (384, 1, 1),
+            _rows(c),
+            _map(W, [DM, 9 * DM], DM * 2, [32, 128], swizzle=64),
+            _rows(out, 6 * DM),
+            _rows(mkv, 2 * DM),
+            g1,
+            g2,
+            b,
+            int(ntile),
+            float(eps),
+        )
+        return out, mkv
     if _hopper(_dev(c)):
         d = _dev(c)
         maps = (
@@ -276,6 +304,7 @@ def cond_fwd(c, W, b, g1, g2, eps=1e-5, *, hopper_waves=2.0):
     maps = (
         _rows(c),
         _map(W, [DM, 6 * DM], DM * 2, [32, 128], swizzle=64),
+        _rows(out, 6 * DM),
         _rows(out, 6 * DM),
     )
     ntile = M // 32
@@ -351,10 +380,11 @@ def pre_fwd(a, mod, W, bq, save=False, eps=1e-5, cross=False):
     return Q, K, V, G, X
 
 
-def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5, parallel=False):
+def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5, parallel=False, rms=False):
     """The cross-attention mode's ``pre_fwd``: K and V from xkv = LN(x1) sigmoid(mkv[:, :128] + bs) + mkv[:, 128:] (a second AdaLN of x1)
     instead of from x1; ``parallel`` (AlphaFold 3): of the raw atoms, xkv = LN(a) sigmoid(..) + .. -> Q, K, V, G [M, 128] bf16 and, when
-    ``save``, x1 and xkv (else X = G, XK = None)."""
+    ``save``, x1 and xkv (else X = G, XK = None). ``rms`` (ESMFold2, with ``parallel``): RMSNorm statistics, the K / V scale raw."""
+    assert not rms or parallel
     M = a.shape[0]
     Q, K, V, G = (
         torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4)
@@ -375,7 +405,7 @@ def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5, parallel=False):
     )
     ntile = M // 32
     d = _dev(a)
-    atom_kernel("prexp" if parallel else "prex", d)(
+    atom_kernel("pre_rms" if rms else "prexp" if parallel else "prex", d)(
         (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,
@@ -388,7 +418,7 @@ def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5, parallel=False):
     return Q, K, V, G, X, (XK if save else None)
 
 
-def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5, *, packed_hopper=False):
+def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5, *, packed_hopper=False, rms=False):
     """a, o, g [M, 128], mod [M, 768] -> the block output [M, 128] bf16 (+ u, a2, x2, t when ``save``)."""
     M = a.shape[0]
 
@@ -435,7 +465,7 @@ def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5, *, packed_hopper=Fa
     )
     ntile = M // 16
     d = _dev(a)
-    atom_kernel("post", d)(
+    atom_kernel("post_rms" if rms else "post", d)(
         (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,
