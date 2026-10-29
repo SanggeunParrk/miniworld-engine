@@ -142,6 +142,7 @@ void atom_post_bwd_sm90(const __nv_bfloat16* dab,const __nv_bfloat16* dy,const _
 // row stage (LayerNorm recompute and backward, gates) eight threads per row, 16 channels each; the leader thread issues the TMA stores.
 // Stage (48 KB): dab [16][512] | dy -> gated | a2 -> da | s2 -> dsc2 | so -> dos | u -> du | sg -> dg | o -> dO | dx2.
 // TMEM: Wu^T 0 (256 columns: hidden 0-255 = Wa at 0, Wb at 128), Wo^T 256; warpgroup w's accumulators at 384 + 64 w: dxa 0, dxb 16, dgated 32.
+// mrows: the rows of the conditioning tables (mod, mkv): M, or N when the samples share one conditioning (table row = r % mrows)
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -189,7 +190,7 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
                     const __grid_constant__ CUtensorMap mo, const __grid_constant__ CUtensorMap mwut, const __grid_constant__ CUtensorMap mwot,
                     const __grid_constant__ CUtensorMap mda, const __grid_constant__ CUtensorMap mdmod, const __grid_constant__ CUtensorMap mdu,
                     const __grid_constant__ CUtensorMap mgated, const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mdp,
-                    float* __restrict__ Dd, float* __restrict__ DBIAS, int N, int ntile, float eps) {
+                    float* __restrict__ Dd, float* __restrict__ DBIAS, int N, int ntile, float eps, int mrows) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -237,8 +238,8 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
         for (int kb = 0; kb < 2; ++kb) {
           tma_load_2d(st + O_DY + kb * KB, &mdy, bar, 64 * kb, r0);
           tma_load_2d(st + O_A2 + kb * KB, &ma2, bar, 64 * kb, r0);
-          tma_load_2d(st + O_S2 + kb * KB, &mmod, bar, 384 + 64 * kb, r0);  // the forward mod: s2 block 3, so block 2
-          tma_load_2d(st + O_SO + kb * KB, &mmod, bar, 256 + 64 * kb, r0);
+          tma_load_2d(st + O_S2 + kb * KB, &mmod, bar, 384 + 64 * kb, r0 % mrows);  // the forward mod: s2 block 3, so block 2
+          tma_load_2d(st + O_SO + kb * KB, &mmod, bar, 256 + 64 * kb, r0 % mrows);
           tma_load_2d(st + O_U + kb * KB, &mu, bar, 64 * kb, r0);
           tma_load_2d(st + O_SG + kb * KB, &msg, bar, 64 * kb, r0);
           tma_load_2d(st + O_O + kb * KB, &mo, bar, 64 * kb, r0);

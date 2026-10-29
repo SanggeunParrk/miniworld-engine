@@ -74,6 +74,7 @@ KERNELS = {
     "pb_fin": ("lbias", "local_bias_fin", 0),
     "cond_ln": ("lcross", "local_cond_ln", 0),
     "cln_b": ("lcross", "local_cond_ln_bwd", 0),
+    "ssum": ("lcross", "local_sample_sum", 0),
     "slide": ("lslide", "local_slide_edges", 0),
     "slide_p": ("lslide", "local_slide_bwd_prep", 0),
     "slide_b": ("lslide", "local_slide_bwd", 75520),
@@ -909,6 +910,20 @@ def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
 def _row_grid(M, d):
     """Blocks of the row kernels of ``lcross.cu``: a row per half-warp (16 rows per block), persistent at 8 blocks per SM."""
     return max(1, min(8 * num_sms(d), (M + 15) // 16))
+
+
+def sample_sum(x, A, out=None):
+    """x [A n, cols] bf16 (unit column stride, any row stride; cols a multiple of 8) -> [n, cols] bf16: the sum over the A samples of each
+    row, in the samples' order (fp32 sums; deterministic)."""
+    M, cols = x.shape
+    n = M // A
+    assert x.dtype == torch.bfloat16 and x.stride(1) == 1 and cols % 8 == 0 and n * A == M
+    out = torch.empty(n, cols, device=x.device, dtype=x.dtype) if out is None else out
+    d = _dev(x)
+    total = n * cols // 8
+    _load("ssum", d)((max(1, min(8 * num_sms(d), (total + 255) // 256)), 1, 1), (256, 1, 1), x, int(x.stride(0)), out, int(out.stride(0)),
+                     int(A), int(n), int(cols))
+    return out
 
 
 def cond_ln(c, gamma, eps=1e-5):
