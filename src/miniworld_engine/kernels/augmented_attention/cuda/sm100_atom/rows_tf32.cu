@@ -297,3 +297,106 @@ f32_colsum(const float* __restrict__ x, int ld, float* __restrict__ part, int ld
     *reinterpret_cast<float4*>(part + (size_t)blockIdx.x * ldp + 128 * cb + 4 * lane) = s;
   }
 }
+
+// ------------------------------------------------------------------------------------------------ ESMFold2 (``LocalDiTBlock(**ESMFOLD2)``)
+// Its AdaLNs are RMSNorms of the atoms with raw (1 + s) scales, its output gates raw, and every conditioning table a product of silu(c):
+//   f32_adaln_rms      x = RMS(a) * scale + shift                       (scale = the stored 1 + s)
+//   f32_adaln_bwd_rms  f32_adaln_bwd with the RMSNorm backward and raw scales: d scale = dx RMS(a), d so = da y (no sigmoid backward)
+//   f32_tail_bwd_rms   dt = dy * st, d st = dy * t                       (the raw transition gate)
+//   f32_silu           sc = silu(c); f32_silu_bwd: dc = g silu'(c) (g: the tables' gradient through their weights)
+DEVI float rms128(float (&x)[4], float eps) {
+  const float rstd = 1.f / sqrtf(wsum(x[0] * x[0] + x[1] * x[1] + x[2] * x[2] + x[3] * x[3]) * (1.f / C) + eps);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) x[i] *= rstd;
+  return rstd;
+}
+DEVI void rms_back(const float (&xn)[4], const float (&dl)[4], float rstd, float (&o)[4]) {
+  const float m2 = wsum(dl[0] * xn[0] + dl[1] * xn[1] + dl[2] * xn[2] + dl[3] * xn[3]) * (1.f / C);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) o[i] = rstd * (dl[i] - xn[i] * m2);
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+f32_adaln_rms(const float* __restrict__ a, const float* __restrict__ sc, int scld, const float* __restrict__ sh, int shld,
+              float* __restrict__ out, int M, float eps) {
+  ROW_OF_WARP
+  float x[4], s[4], b[4];
+  ld4(a + (size_t)row * C + ch, x);
+  ld4(sc + (size_t)row * scld + ch, s);
+  ld4(sh + (size_t)row * shld + ch, b);
+  rms128(x, eps);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) x[i] = fmaf(x[i], s[i], b[i]);
+  st4(out + (size_t)row * C + ch, x);
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+f32_adaln_bwd_rms(const float* __restrict__ a, const float* __restrict__ sc, int scld, const float* __restrict__ dx, const float* __restrict__ dres,
+                  float* __restrict__ da, float* __restrict__ dsc, int dscld, float* __restrict__ dsh, int dshld, const float* __restrict__ y,
+                  const float* __restrict__ so, int sold, float* __restrict__ dso, int dsold, float* __restrict__ dyo, int M, float eps) {
+  ROW_OF_WARP
+  float x[4], s[4], d[4], dl[4], o[4], p[4];
+  ld4(a + (size_t)row * C + ch, x);
+  ld4(sc + (size_t)row * scld + ch, s);
+  ld4(dx + (size_t)row * C + ch, d);
+  const float rstd = rms128(x, eps);                                     // x = RMS(a)
+#pragma unroll
+  for (int i = 0; i < 4; ++i) { dl[i] = d[i] * s[i]; p[i] = d[i] * x[i]; }
+  rms_back(x, dl, rstd, o);
+  if (dres != nullptr) {
+    float r[4];
+    ld4(dres + (size_t)row * C + ch, r);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) o[i] += r[i];
+  }
+  st4(da + (size_t)row * C + ch, o);
+  st4(dsc + (size_t)row * dscld + ch, p);
+  st4(dsh + (size_t)row * dshld + ch, d);
+  if (y != nullptr) {                                                   // a1 = a + so * y upstream (so raw)
+    float yv[4], g[4], q[4];
+    ld4(y + (size_t)row * C + ch, yv);
+    ld4(so + (size_t)row * sold + ch, g);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) { p[i] = o[i] * yv[i]; q[i] = o[i] * g[i]; }
+    st4(dso + (size_t)row * dsold + ch, p);
+    st4(dyo + (size_t)row * C + ch, q);
+  }
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+f32_tail_bwd_rms(const float* __restrict__ dy, const float* __restrict__ t, const float* __restrict__ st, int stld, float* __restrict__ dt,
+                 float* __restrict__ dst, int dstld, int M) {
+  ROW_OF_WARP
+  float d[4], tv[4], s[4], o[4], p[4];
+  ld4(dy + (size_t)row * C + ch, d);
+  ld4(t + (size_t)row * C + ch, tv);
+  ld4(st + (size_t)row * stld + ch, s);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) { o[i] = d[i] * s[i]; p[i] = d[i] * tv[i]; }
+  st4(dt + (size_t)row * C + ch, o);
+  st4(dst + (size_t)row * dstld + ch, p);
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+f32_silu(const float* __restrict__ c, float* __restrict__ out, int M) {
+  ROW_OF_WARP
+  float x[4];
+  ld4(c + (size_t)row * C + ch, x);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) x[i] = x[i] / (1.f + __expf(-x[i]));
+  st4(out + (size_t)row * C + ch, x);
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+f32_silu_bwd(const float* __restrict__ c, const float* __restrict__ g, float* __restrict__ dc, int M) {
+  ROW_OF_WARP
+  float x[4], gv[4];
+  ld4(c + (size_t)row * C + ch, x);
+  ld4(g + (size_t)row * C + ch, gv);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const float s = 1.f / (1.f + __expf(-x[i]));
+    x[i] = gv[i] * s * (1.f + x[i] * (1.f - s));
+  }
+  st4(dc + (size_t)row * C + ch, x);
+}
