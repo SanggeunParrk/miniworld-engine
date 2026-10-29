@@ -22,7 +22,22 @@ _SRC = Path(__file__).with_name("b200_sources")
 C = 128          # d_pair
 H = 4            # heads
 D = C // H       # head dim (the kernels take 32 only)
-TOK = 128        # query / key / token tile of every kernel; L must be a multiple of it
+TOK = 128        # query / key / token tile of every kernel; the kernels' length is a multiple of it
+
+
+def padded_length(length: int) -> int:
+    """The kernels' length for a caller's length: whole 128-token tiles."""
+    return -(-length // TOK) * TOK
+
+
+def ragged(length: int) -> int:
+    """The ``lr`` argument of the kernels that touch the caller's pair-shaped tensors: the caller's length when it is not a whole number
+    of tiles, else 0.  Those kernels (front, tail, gate / head backward, weight gradients) read and write the caller's unpadded
+    [B, L, L, C] tensors through 4-D tensor maps whose bounds are L: rows and columns beyond L load as zeros (the zero padding) and
+    their stores are dropped (the cut); keys beyond L are masked in the front's bias drain.  Every intermediate (q, k, v, g, bias, o,
+    lse, the gradient rows) keeps the padded length, so the attention core is unchanged and no padded copy of the pair, the output,
+    dy or dx is made."""
+    return length if length % TOK else 0
 
 
 def _flags():
@@ -46,7 +61,7 @@ def _core(rows: int = 4):
 @functools.lru_cache(maxsize=1)
 def _mod():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_mod_v9", sources=[str(_SRC / "triattn_mod_sm100.cu")],
+    return load_extension(name="triattn_b200_mod_v10", sources=[str(_SRC / "triattn_mod_sm100.cu")],
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
@@ -131,6 +146,7 @@ def fused_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, d
     bt: the ending node on AlphaFold 3's bias orientation (``transposed_bias=False``): the bias of the pair as it is (inference; the
     backward reads the bias gradient in the other orientation, so training takes the wide path)."""
     B, L, _, _ = pair.shape
+    Lp, lr = padded_length(L), ragged(L)
     x = pair.contiguous().view(-1, C)
     m = _mod()
 
@@ -143,11 +159,11 @@ def fused_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, d
     # custom op's outputs may not share storage with a cache)
     w4, wo16, prm = pack() if need else _capture.param_forms("triattn_b200_pack", (wq, wk, wv, wg, wo, lnw, lnb, wb), pack)
     lw, lb, wbf = prm[0], prm[1], prm[2:]
-    q, k, v, g, bias = m.tri_front(x, lw, lb, eps, w4, wbf, mask if mask is not None else _empty_mask(pair.device), B, L, trans, bt)
-    shp = (B, L, L, H, D)
+    q, k, v, g, bias = m.tri_front(x, lw, lb, eps, w4, wbf, mask if mask is not None else _empty_mask(pair.device), B, Lp, trans, bt, lr)
+    shp = (B, Lp, Lp, H, D)
     o, lse = _core_forward(q.view(shp), k.view(shp), v.view(shp), bias, D ** -0.5, need)
-    y = m.tri_tail(g, o.view(-1, C), x, wo16, drop if drop is not None else x.new_empty(0), L,
-                   out if out is not None else x.new_empty(0), trans)
+    y = m.tri_tail(g, o.view(-1, C), x, wo16, drop if drop is not None else x.new_empty(0), Lp,
+                   out if out is not None else x.new_empty(0), trans, lr)
     return (out if out is not None else y.view(B, L, L, C)), (prm, w4, wo16, q, k, v, g, bias, o, lse)
 
 
@@ -187,32 +203,33 @@ def fused_backward(dy, pair, eps, drop, saved, dtypes, trans=False):
     Kernels: tri_gate_bwd -> triattn_bwd (biasT, key side, query side) -> tri_head_bwd -> tri_wgrad (+ slot sum, finish)."""
     prm, w4, wo16, q, k, v, g, bias, o, lse = saved
     B, L, _, _ = pair.shape
+    Lp, lr = padded_length(L), ragged(L)
     x = pair.contiguous().view(-1, C)
     lw, lb, wbf = prm[0], prm[1], prm[2:]
-    m, e = _mod(), _core(_rows_per_task(L))
+    m, e = _mod(), _core(_rows_per_task(Lp))
     det = bool(settings.current().triattn_b200_deterministic_wgrad)
     if det:
         # dbias: the query-side kernel reduce-adds into zeros; the parameter gradients' partials go to per-CTA slots (no zeroing),
         # summed in CTA order (tri_slot_sum)
-        dbws = torch.zeros(B * H * L * L, device=x.device, dtype=torch.float32)
+        dbws = torch.zeros(B * H * Lp * Lp, device=x.device, dtype=torch.float32)
         E32 = x.new_empty(0, dtype=torch.float32)
         wdwo = wmt = E32
     else:
         # one zeroed fp32 workspace for every gradient accumulator (one memset): [dWo C*C | wgrad M 4*C*C | wgrad vectors 8*C + 4,
         # padded | dbias B*4*L*L]; each piece starts on a 128-byte boundary
-        ws = torch.zeros(_WS_DB + B * H * L * L, device=x.device, dtype=torch.float32)
+        ws = torch.zeros(_WS_DB + B * H * Lp * Lp, device=x.device, dtype=torch.float32)
         dbws, wdwo, wmt = ws[_WS_DB:], ws[_WS_DWO:_WS_MT], ws[_WS_MT:_WS_DB]
     dy = dy.contiguous().view(-1, C)
     drop = drop if drop is not None else x.new_empty(0)
-    do, dg, delta, dwo, dpair = m.tri_gate_bwd(dy, g, o.view(-1, C), wo16, B, L, wdwo, drop, det, trans)
-    shp = (B, L, L, H, D)
+    do, dg, delta, dwo, dpair = m.tri_gate_bwd(dy, g, o.view(-1, C), wo16, B, Lp, wdwo, drop, det, trans, lr)
+    shp = (B, Lp, Lp, H, D)
     E = q.new_empty(0)
     dq, dk, dv, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, D ** -0.5, dbws, E, E, E)
     dq, dk, dv = dq.view(-1, C), dk.view(-1, C), dv.view(-1, C)
-    m.tri_head_bwd(dq, dk, dv, dg, db, x, w4, wbf, lw, lb, eps, dpair, B, L, trans)
+    m.tri_head_bwd(dq, dk, dv, dg, db, x, w4, wbf, lw, lb, eps, dpair, B, Lp, trans, lr)
     dt = dtypes
     fp32 = dt[2] == torch.float32
-    dw, dgb, dwo = m.tri_wgrad(dq, dk, dv, dg, db, x, eps, B, L, w4, wbf, lw, lb, True, dwo, wmt, fp32, det, trans)
+    dw, dgb, dwo = m.tri_wgrad(dq, dk, dv, dg, db, x, eps, B, Lp, w4, wbf, lw, lb, True, dwo, wmt, fp32, det, trans, lr)
     return dpair.view(B, L, L, C), dgb, dw, dwo
 
 
@@ -270,7 +287,7 @@ WIDE_MAX_HDP = 512                    # the front's q | k | v | g blocks and the
 @functools.lru_cache(maxsize=1)
 def _wide():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_wide_v36", sources=[str(_SRC / "triattn_wide_sm100.cu")],
+    return load_extension(name="triattn_b200_wide_v37", sources=[str(_SRC / "triattn_wide_sm100.cu")],
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
@@ -379,16 +396,17 @@ def wide_forward(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5, 
     """-> (y [B, L, L, C], saved = (q, k, v, g, bias, o, lse, stats)): lse / stats empty unless `need`; every saved tensor is a fresh
     allocation (none aliases an argument).  bt / out_mode: see the section header."""
     B, L, _, C = pair.shape
+    Lp, lr = padded_length(L), ragged(L)
     wcat, wo_p, _, _, gb, ob, wo2, ob2 = packed
     S = slot(head_dim)
     HDp = n_head * S
     w = _wide()
     E32 = pair.new_empty(0, dtype=torch.float32)
     x = pair.contiguous().view(-1, C)
-    stats = torch.empty(x.shape[0], 2, device=x.device, dtype=torch.float32) if need else E32
-    q, k, v, g, bias = w.tri_wfront(x, lnw, lnb, eps, wcat, n_head, mask if mask is not None else _empty_mask(pair.device), B, L, stats, trans,
-                                    gb if gb is not None else E32, bt)
-    shp = (B, L, L, n_head, S)
+    stats = torch.empty(B * Lp * Lp, 2, device=x.device, dtype=torch.float32) if need else E32
+    q, k, v, g, bias = w.tri_wfront(x, lnw, lnb, eps, wcat, n_head, mask if mask is not None else _empty_mask(pair.device), B, Lp, stats,
+                                    trans, gb if gb is not None else E32, bt, lr)
+    shp = (B, Lp, Lp, n_head, S)
     core = _core_forward if S == D else _core64_forward if S == 64 else _core128_forward
     o, lse = core(q.view(shp), k.view(shp), v.view(shp), bias, head_dim ** -0.5, need)
     o2 = o.view(-1, HDp)
@@ -396,19 +414,30 @@ def wide_forward(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5, 
     # the first (or only) out-projection: the ending node's update goes back to the pair's layout, except Chai-1's untransposed output;
     # the dropout scale is indexed on the caller's broadcast axis: the kernel row's first position where the tail's orientation is not
     # the node's (dfirst)
-    y = w.tri_wtail(g, o2, x, wo_p, dt, L, out if out is not None else x.new_empty(0), trans and out_mode != 1,
-                    ob if ob is not None else E32, trans and out_mode == 1)
+    y = w.tri_wtail(g, o2, x, wo_p, dt, Lp, out if out is not None else x.new_empty(0), trans and out_mode != 1,
+                    ob if ob is not None else E32, trans and out_mode == 1, lr)
     if out_mode == 2:                       # the second out-projection, transposed against the first, added in place
-        y = w.tri_wtail(g, o2, y.view(-1, C), wo2, dt, L, y, not trans, ob2 if ob2 is not None else E32, True)
+        y = w.tri_wtail(g, o2, y.view(-1, C), wo2, dt, Lp, y, not trans, ob2 if ob2 is not None else E32, True, lr)
     return (out if out is not None else y.view(B, L, L, C)), (q, k, v, g, bias, o, lse, stats)
 
 
-def _mm32(a, b):
-    """a @ b on cuBLAS with fp32 output (bf16 operands, fp32 accumulation)."""
+def _mm32_once(a, b):
     try:
         return torch.mm(a, b, out_dtype=torch.float32)
     except TypeError:                                            # a torch without mm(out_dtype=)
         return torch.mm(a, b).float()
+
+
+def _mm32(a, b):
+    """a @ b on cuBLAS with fp32 output (bf16 operands, fp32 accumulation).  A reduction length K that is not a multiple of 8 (the
+    caller's B L^2 rows at a ragged length) runs as K - K % 8 on cuBLAS plus the last rows in fp32: cuBLAS 12.9 on B200 (torch's
+    default allow_bf16_reduced_precision_reduction) returned [256, K] x [K, 256] products with 0.7-1.4 % relative error at K = 16641 /
+    16643, 4.5e-6 at 16640 / 16644 (measured 2026-10-29 against fp64)."""
+    k = a.shape[1]
+    r = k % 8
+    if r == 0 or k <= r:
+        return _mm32_once(a, b)
+    return _mm32_once(a[:, :k - r], b[:k - r]).addmm_(a[:, k - r:].float(), b[k - r:].float())
 
 
 def wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, saved, dtypes, trans=False, bt=False, out_mode=0):
@@ -418,33 +447,36 @@ def wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, saved
     second out-projection (its bias's gradient is dbo: the same dy_s rows), else empty)."""
     q, k, v, g, bias, o, lse, stats = saved
     B, L, _, C = pair.shape
+    Lp, lr = padded_length(L), ragged(L)
     x = pair.contiguous().view(-1, C)
     wcat, _, wo_t, wall_t, gb, ob = packed[:6]
     S = slot(head_dim)
     HDp = n_head * S
-    R = B * L * L
+    R = B * Lp * Lp
     w = _wide()
     dy = dy.contiguous().view(-1, C)
-    # dy_s in the caller's layout (as u below); the dropout scale on the node's broadcast axis
+    # dy_s in the caller's layout and length (as u below; elementwise over the caller's rows); the dropout scale on the node's
+    # broadcast axis
     dys = w.tri_scale_rows(dy, drop, L, trans) if drop is not None and drop.numel() else dy
     Dall = x.new_empty(R, 4 * HDp + 64)                       # [dq | dk | dv | dg | db rows], written in place by their producers
     cut = lambda i, n=HDp: Dall[:, i * HDp:i * HDp + n]
     # the gate backward in the update's orientation (Chai-1's untransposed output: the starting-node layout); the dual output's
     # wo_t is [Wo^T | Wo2^T] (both orientations in one K loop, u also stored in the other: u2)
-    do, _, u, delta, u2 = w.tri_wgbwd(dys, g, o.view(-1, HDp), wo_t, cut(3), B, L, trans and out_mode != 1)
-    shp = (B, L, L, n_head, S)
+    do, _, u, delta, u2 = w.tri_wgbwd(dys, g, o.view(-1, HDp), wo_t, cut(3), B, Lp, trans and out_mode != 1, lr)
+    shp = (B, Lp, Lp, n_head, S)
     E32 = q.new_empty(0, dtype=torch.float32)
     if S == D:
-        e = _core(_rows_per_task(L))
+        e = _core(_rows_per_task(Lp))
         _, _, _, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim ** -0.5,
                                     E32, cut(0), cut(1), cut(2))
     else:                     # delta per 32-channel slice [B, L, S/32 x heads, L]: the core adds a head's slices where it reads them
         bwd = _core64().triattn_bwd64 if S == 64 else _core128().triattn_bwd128
         _, _, _, db = bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim ** -0.5, cut(0), cut(1), cut(2))
-    w.tri_db_rows(db, cut(4, 64), B, L, bt)
-    dpair, xh = w.tri_whbwd(Dall, x, dy, lnw, stats, wall_t, L, trans)
-    # parameter gradients: G = D^T [xhat | 1] (one GEMM, K = L^2), then dW / dgamma / dbeta / dWb by the d_pair 128 algebra
-    # (y = gamma o xhat + beta feeds every projection) and dWo without the padded channels, in tri_wfinish
+    w.tri_db_rows(db, cut(4, 64), B, Lp, bt)
+    dpair, xh = w.tri_whbwd(Dall, x, dy, lnw, stats, wall_t, Lp, trans, lr)
+    # parameter gradients: G = D^T [xhat | 1] (one GEMM, K = B Lp^2: the pad rows of D are zero), then dW / dgamma / dbeta / dWb by the
+    # d_pair 128 algebra (y = gamma o xhat + beta feeds every projection) and dWo without the padded channels, in tri_wfinish.
+    # dWo = dy_s^T u over the caller's B L^2 rows (dy_s and u in the caller's layout and length)
     G = _mm32(Dall.t(), xh)
     dwo = _mm32(dys.t(), u)
     dt = dtypes
@@ -455,7 +487,7 @@ def wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, saved
     if gb is not None:
         dbias[:n_head * head_dim] = G[3 * HDp:4 * HDp, C].view(n_head, S)[:, :head_dim].reshape(-1)
     if ob is not None:
-        dbias[n_head * head_dim:] = _mm32(dys.t(), xh[:, C:C + 1]).view(-1)
+        dbias[n_head * head_dim:] = _mm32(dys.t(), xh[:dys.shape[0], C:C + 1]).view(-1)     # (xh's ones column: any B L^2 of its rows)
     dwo2 = x.new_empty(0)
     if out_mode == 2:                                         # dWo2 = dy_s^T u2 (the padded channels dropped), in Wo's dtype
         dwo2 = _mm32(dys.t(), u2).view(C, n_head, S)[:, :, :head_dim].reshape(C, n_head * head_dim).to(dwo.dtype)

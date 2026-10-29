@@ -8,8 +8,10 @@ The model options FoldForge's families set (``_options``) run on the same kernel
 RoseTTAFold3's gate / out-projection biases, heads of 64 channels (Chai-1, RoseTTAFold3's templates, IntelliFold-2: the head-dim-64
 core and its backward), heads of 96 / 128 channels (AF3's four heads at d_pair 384 / 512: the head-dim-128 core and its backward, 96
 zero-padded to 128) and Chai-1's output variants (``untransposed_output`` / ``dual_output``).
-Any length L >= 16: the kernels take whole 128-token tiles, a length that is not a multiple of 128 is zero-padded (the pad keys
-masked, the pad rows and columns cut from the result). Any number of samples B (templates, structures or augments folded into the
+Any length L >= 16: the kernels take whole 128-token tiles; at a length that is not a multiple of 128 the kernels that touch the
+caller's pair-shaped tensors read and write them unpadded through tensor maps bounded by L (the rows and columns beyond L load as
+zeros and their stores are dropped, the keys beyond L are masked), and only the intermediates have the padded length: no padded
+copy of the pair, the output, dy or dx. Any number of samples B (templates, structures or augments folded into the
 batch): up to ``max_batch`` per launch, more (or more than fit in memory) in launches run one after another (``plan``).
 
 The kernel launches are ``opaque`` custom ops (``kernels._compile``): the module compiles to one graph, the weight packs and the
@@ -24,7 +26,6 @@ import weakref
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
@@ -158,7 +159,8 @@ def _opt(t: torch.Tensor) -> torch.Tensor | None:
 # ---------------------------------------------------------------- custom ops
 # args = [pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, wo2, ob2, mask, drop]; the gate / out-projection biases (gb, ob), the dual
 # output's second out-projection (wo2, ob2), mask [B, L] bool and drop [B, L, C] bf16 are empty when absent; pair is the caller's layout
-# with L a multiple of 128.  variant = _BT (the ending node's bias of the pair as it is) | out_mode << 1.
+# at any length L >= 16 (the intermediates take L rounded up to whole 128-token tiles).  variant = _BT (the ending node's bias of the
+# pair as it is) | out_mode << 1.
 def _infer_fake(kind, args, eps, n_head, head_dim, trans, variant):
     return torch.empty_like(args[0])
 
@@ -185,7 +187,8 @@ def _infer(kind, args, eps, n_head, head_dim, trans, variant, out=None):
 
 def _fwd_fake(kind, args, eps, n_head, head_dim, trans, variant):
     pair = args[0]
-    B, L, _, C = pair.shape
+    B, L0, _, C = pair.shape
+    L = _padded(L0)                                                 # the intermediates' length
     R = B * L * L
     kw: dict[str, Any] = {"device": pair.device, "dtype": torch.bfloat16}
     f32: dict[str, Any] = {"device": pair.device, "dtype": torch.float32}
@@ -332,11 +335,11 @@ def _bytes_per_token(kind: int, d_pair: int, n_head: int, padded: bool, ending: 
     """(inference working set, training saved tensors, training backward working set) in bytes per pair token of one sample, on top
     of the caller's tensors (pair and output; in training also dy and dx)."""
     c, h = d_pair, n_head
-    # a padded length: the padded copy of the pair (saved in training), and of dy, and the padded output / dx before the cut; the copies
-    # of the pair and of the output are not alive at the same peak (measured: +2c per token in inference and in each training phase).
-    # The ending node reads and writes the caller's layout directly (no copies; `ending` kept for the callers)
-    extra = 2 * c if padded else 0
-    del ending
+    # a padded length: the kernels read and write the caller's unpadded tensors (no padded copies; the intermediates below are counted
+    # at the padded length by `plan`); the ending node reads and writes the caller's layout directly (no copies). `padded` and `ending`
+    # are kept for the callers.
+    extra = 0
+    del ending, padded
     if kind == FUSED:
         # inference: q | k | v | g, o; bias (bf16 per head)
         # saved: q | k | v | g, o; bias; lse (fp32 per head)   backward: do, dg, dq, dk, dv; delta, dbias, bias^T (fp32 per head)
@@ -464,43 +467,23 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
     return out.contiguous()
 
 
-def _pad(x, mask, drop):
-    """(x, mask, drop) padded to whole 128-token tiles: zero rows and columns, the pad keys masked (mask None -> a mask then)."""
-    B, L = x.shape[:2]
-    Lp = _padded(L)
-    if Lp == L:
-        return x, mask, drop
-    x = F.pad(x, (0, 0, 0, Lp - L, 0, Lp - L))
-    keep = torch.zeros(B, Lp, dtype=torch.bool, device=x.device)
-    keep[:, :L] = True if mask is None else mask
-    if drop is not None:
-        drop = F.pad(drop, (0, 0, 0, Lp - L))
-    return x, keep, drop
-
-
 def _forward_one(kind, params, x, mask, drop, needs_grad, eps, n_head, head_dim, trans, variant) -> torch.Tensor:
     """One launch of every kernel for the samples of ``x`` (the caller's layout, ``trans`` for the ending node; any strides).  Without grad or dropout: the inference
     op (bf16 weight packs); otherwise the autograd function (the parameters go in as they are and get gradients in their dtype)."""
-    L = x.shape[1]
-    xp, m, d = _pad(x, mask, drop)
-    xp = xp.contiguous()
-    mask_t = m if m is not None else xp.new_empty(0, dtype=torch.bool)
-    drop_t = d if d is not None else xp.new_empty(0)
-    if d is None and not needs_grad:
-        out = _infer_op(kind, [xp, *params, mask_t, drop_t], eps, n_head, head_dim, trans, variant)
-    else:
-        out = _TriAttnFn.apply(kind, eps, n_head, head_dim, trans, variant, xp, *params, mask_t, drop_t)
-    if xp.shape[1] != L:
-        out = out[:, :L, :L]
-    return out
+    # any length: the kernels read the caller's unpadded tensors and mask the keys beyond L themselves (no padded copies)
+    xp = x.contiguous()
+    mask_t = mask if mask is not None else xp.new_empty(0, dtype=torch.bool)
+    drop_t = drop if drop is not None else xp.new_empty(0)
+    if drop is None and not needs_grad:
+        return _infer_op(kind, [xp, *params, mask_t, drop_t], eps, n_head, head_dim, trans, variant)
+    return _TriAttnFn.apply(kind, eps, n_head, head_dim, trans, variant, xp, *params, mask_t, drop_t)
 
 
 def _infer_chunks(kind, params, x, mask, drop, sizes, eps, n_head, head_dim, trans, variant) -> torch.Tensor:
-    """Inference in chunks of ``sizes`` samples into one output (the caller's layout): a whole-tile length writes each chunk's rows in
-    place (eager; the tail kernels take them as their output), otherwise (padding, a traced call) each chunk's result is copied in."""
-    B, L = x.shape[:2]
+    """Inference in chunks of ``sizes`` samples into one output (the caller's layout): eager calls write each chunk's rows in place (the
+    tail kernels take them as their output, at any length), a traced call copies each chunk's result in."""
     out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
-    into = drop is None and _padded(L) == L and not torch.compiler.is_compiling()
+    into = drop is None and not torch.compiler.is_compiling()
     start = 0
     for n in sizes:
         sl = slice(start, start + n)
@@ -517,9 +500,10 @@ def _infer_chunks(kind, params, x, mask, drop, sizes, eps, n_head, head_dim, tra
 
 
 def _chunk_inputs(x, mask, drop, start, n):
-    """The chunk's pair, mask and dropout scale (the caller's layout), padded to whole tiles as `_forward_one` pads."""
-    xc, m, d = _pad(x[start:start + n], mask[start:start + n] if mask.numel() else None, drop[start:start + n] if drop.numel() else None)
-    return (xc.contiguous(), m if m is not None else xc.new_empty(0, dtype=torch.bool), d if d is not None else xc.new_empty(0))
+    """The chunk's pair, mask and dropout scale (the caller's layout and length, as `_forward_one` takes them)."""
+    xc = x[start:start + n].contiguous()
+    return (xc, mask[start:start + n] if mask.numel() else xc.new_empty(0, dtype=torch.bool),
+            drop[start:start + n] if drop.numel() else xc.new_empty(0))
 
 
 class _Chunked(torch.autograd.Function):
@@ -533,14 +517,13 @@ class _Chunked(torch.autograd.Function):
     def forward(ctx, kind, eps, n_head, head_dim, trans, variant, sizes, checkpoint, x, *rest):
         *params, mask, drop = rest
         p32 = [p.float() for p in params]
-        L = x.shape[1]
         out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
         saved: list[torch.Tensor] = []
         start = 0
         for n in sizes:
             xc, m, d = _chunk_inputs(x, mask, drop, start, n)
             o, *s = _fwd_op(kind, [xc, *p32, m, d], eps, n_head, head_dim, trans, variant)
-            out[start:start + n] = o[:, :L, :L]
+            out[start:start + n] = o
             del o
             if not checkpoint:
                 saved.extend(s)
@@ -556,8 +539,6 @@ class _Chunked(torch.autograd.Function):
         params, (mask, drop), saved = rest[:12], rest[12:14], rest[14:]
         kind, eps, n_head, head_dim, trans, variant, sizes, checkpoint = ctx.cfg
         p32 = [p.float() for p in params]
-        L = x.shape[1]
-        Lp = _padded(L)
         per = len(saved) // len(sizes)
         dx = torch.empty(x.shape, dtype=x.dtype, device=x.device)
         acc = [torch.zeros(p.shape, dtype=torch.float32, device=p.device) for p in params]
@@ -569,11 +550,9 @@ class _Chunked(torch.autograd.Function):
             else:
                 s = list(saved[c * per:(c + 1) * per])
             g = dy[start:start + n]
-            if Lp != L:
-                g = F.pad(g, (0, 0, 0, Lp - L, 0, Lp - L))
             grads = _grads(kind, _bwd_op(kind, [g.contiguous(), xc, *p32, d], s, eps, n_head, head_dim, trans, variant), p32)
             del s, g
-            dx[start:start + n] = grads[0][:, :L, :L]
+            dx[start:start + n] = grads[0]
             for a, gp in zip(acc, grads[1:], strict=True):
                 if gp is not None:
                     a += gp
