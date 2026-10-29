@@ -8,6 +8,10 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Fixed
+
+- `torch.compile` through no-grad calls: the other caches of `kernels._capture` (`lookup`, `lookup_inputs`, `hoisted_table`) now return `build()` while Dynamo traces, as 2.4.0's `param_forms` does, so the forms are ops of the compiled graph (recast at every call / CUDA-graph replay, fused by inductor) and no store is touched. Dynamo raised on the cache logic: a compiled MiniWorld model failed at its first no-grad recycle (`InternalTorchDynamoError: NameError: name 'torch' is not defined` from the Transition wide path; under `fullgraph=True` every sm100a Transition width and ConditionedTransition broke on `is_current_stream_capturing`). Tests: `tests/cpu/compile/test_capture_forms_compile.py`, `tests/gpu/sm100/test_b200_compile_recycle_gpu.py` (B200 modules compiled fullgraph through a no-grad then a grad call, and a compiled recycle captured in a CUDA graph replaying updated weights).
+
 ## [2.4.1] - 2026-10-30
 
 ### Fixed
