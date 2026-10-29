@@ -293,7 +293,7 @@ length-free.
 
 bf16 activations, fp32 accumulation; weight gradients leave cuBLAS in the parameter's dtype (the engine's LayerNorm weights stay
 fp32 in a bf16 block: their gradients are written in fp32). What the forward keeps: the conditioning tables and statistics, `xa`,
-`v|g`, `P` and `P^T`, the gated attention output, `y`, `xt`, `a|b`, `h`, `z` and the row statistics -- not the attention's
+`v|g`, `P` (and `P^T` for bf16 at L <= 768 only, [T2](#t2--softmax-writing-p-and-pt-softmax_t)), the gated attention output, `y`, `xt`, `a|b`, `h`, `z` and the row statistics -- not the attention's
 pre-gate output (the backward gets it from the gated one) and not the fp32 residual `x1 = x + sigmoid(g1) y` (rebuilt with one
 FMA wherever it is needed: 4 B per element less traffic and memory).
 
@@ -302,7 +302,8 @@ FMA wherever it is needed: 4 B per element less traffic and memory).
   residual out (T4).
 - Backward: residual / SwiGLU / AdaLN backwards (T4) around the cuBLAS data and weight gradients (one GEMM per group of
   parameters that share an input); the attention: `do = da sigmoid(g)`, `dg = da a (1 - sigmoid(g))`, `D = sum da a` per row
-  and head (`gate_bwd_rows`, T4; `a = sigmoid(g) o`, so `o` is never stored); `dV = P^T do` (I1 without the gate); `dbias =
+  and head (`gate_bwd_rows`, T4; `a = sigmoid(g) o`, so `o` is never stored); `dV = P^T do` (I1 without the gate on P^T at bf16 L <= 768;
+  elsewhere P read as the MN-major operand, T2); `dbias =
   P o (sum_a do v^T - D)` (T3); `dbias` -> d pair and `dWf` (T1); last, `finalize` (T4) writes the small weight gradients.
 
 **Step changes of 2026-10-08 (the defaults; each has a per-call off switch).** Measured per node in ONE process, the previous and the
@@ -344,6 +345,17 @@ contiguous bytes per row. Issue-bound (element-wise fp32 math around small produ
 `bias_only_dit_rows.cu`. A block takes 32 query rows of one head (four per warp, the row softmax of I2), keeps them in shared
 memory (row pitch L + 2: the column gathers hit distinct banks) and writes the [L keys x 32 queries] tile of `P^T` in 64-byte row
 pieces, so the backward's `dV = P^T dO` needs no transpose kernel. 24-73 % of its floor (few rows per block at L384).
+
+**P^T only where it pays (2026-10-29).** dV = P^T dO can take P itself as the MN-major A operand of a query-streamed product
+(`pv_stream_sm100.cu -DPMN`, bf16; `pv_gate_tf32.cu -DPMN`, fp32: an item is a 128-KEY tile, a stage P[64 / 32 queries][128 keys]
+as MN atoms 8 KB / 4 KB apart, B the dO tiles as before; bit-identical to the K-major products on P^T). `softmax_t` then writes P only.
+It does so for the per-sample bias (T9) always, for fp32 always and for bf16 past 768 keys; bf16 at L <= 768 keeps P^T, where dV on
+`pv_gate_inf` holds the P^T tile in tensor memory across the sample group (and `bo_pvdpb` fuses it with dbias at L384) and wins
+(in-process A/B, A = 48, us, dV on P^T / dV from P, and softmax_t with / without P^T: 16 x 48 L384 16.8 / 17.5, 7.5 / 6.0; L768
+46.2 / 53.4, 13.4 / 9.3; fp32 L768 114.2 / 121.1, 21.5 / 12.2; 24 x 32 L768 62.9 / 69.1, 17.4 / 11.3). The gate is
+`bias_only_dit_train._pt_kept`. Whole step, shared pair (`$W/scratch/k4bo/kb/bo_step.py`, CUDA graph): fp32 A48 L384 / L768 within 0.1 ms
+(8.74 / 17.77 ms) with 0.04-0.21 GiB less held; bf16 A4 L3072 (2 blocks) 8.98 -> 8.47 ms, 1.99 -> 1.42 GiB held; A16 L1536 9.83 ->
+9.64-9.83 ms, 3.52 -> 3.24 GiB.
 
 | (Length, Dimension, dtype) | (384, 768, bf16) | (768, 768, bf16) |
 |---|---|---|
@@ -496,7 +508,7 @@ on a given bias makes P = softmax(bias) per call (`softmax_rows`) and runs the s
 once per pair for every solver step (MiniWorld's `hoist_pair_bias` hoists only under autograd). Switches, read per call:
 The hoist has no switch: implementation PYTORCH takes the PyTorch fold; the dW' row chunks are the split heuristic's.
 `ln0_bwd_rows` is one warp per row pair with shuffles only (no shared memory, barriers or atomics): bitwise repeatable.
-B200 bf16 with at most 128 (forward) / 64 (backward) weight rows runs the one-pass kernels of
+B200 bf16 with at most 192 and fp32 with at most 128 weight rows (blocks x heads; `hoist.SM100_MAX_ROWS`) runs the one-pass kernels of
 [T10](#t10--the-hoist-in-one-pass-each-way-bo_hoist_sm100cu-2026-10-29-bf16) instead.
 
 Measured (B200, 2026-10-10, hoist2; `bench_scripts/bo_hoist_bench.py`): 24 blocks of 16 x 48, A = 48, bf16, checkpointing off, one
@@ -524,7 +536,7 @@ arithmetic on its captured inputs by the parameter dtype's rounding + 1e-4. Test
 ### T8 · long token rungs in training (bf16, L > 768)
 
 The training block serves L up to 3072 in bf16: the forward core (gated) and dV = P^T dO run `pv_stream_sm100` (I4; dV as a PDL
-build behind the fused backward's tail), `softmax_t` writes P and P^T up to 3072 keys (8 / 12 chunks per lane, the 32-row tile up to
+build behind the fused backward's tail), `softmax_t` writes P (no P^T: dV reads P MN-major, T2) up to 3072 keys (8 / 12 chunks per lane, the 32-row tile up to
 192 KB of shared memory), `bo_pvdpb` declines L > 768 (pv dV is not one of its bodies there), and the rest is length-free: the pair
 bias kernels (T1), dbias (T3: CTA pairs where 256-key tiles divide L, `dpb_sm100` otherwise, e.g. L1152), the rows and the fused
 backward. Measured (eight / four / two chained blocks fwd + bwd in one CUDA graph, bf16-mixed, 16 x 48, us per block; the PyTorch
@@ -547,19 +559,24 @@ composition (the training gate refused per-sample bias; inference was Hopper-onl
 the same `_BlockPSB` function as Hopper's) and inference (`bias_only_dit.update_psb` -> `runner.step_psb`) run the shared-bias cores'
 **`-DPSB` builds**; nothing else of the block changes (conditioning tables, rows, GEMMs, the hoist with its per-sample buffers).
 
-- `softmax_t` (T2) already took a [H, A, L, L] bias with a key mask per sample: it writes P and P^T per (head, sample) plane
+- `softmax_t` (T2) already took a [H, A, L, L] bias with a key mask per sample: it writes P per (head, sample) plane
   (inference: P only). Masked keys are -3e38 before the max, so a sample whose keys are **all** masked gets uniform rows -- the
   module's `finfo.min` fill gives the same -- and never NaN (the training cores of AttentionPairBias, which fold the mask as -1e30 into
   `exp2(t log2 e - m log2 e)`, are a different kernel).
 - `pv_gate_inf.cu -DPSB` (SG = 1; `PvGateCore(psb=True)`): an item is (head, query tile, sample) and its P tile is the sample's plane,
-  TMA row (h A + a) L + m0; forward a = sigmoid(g) (P_a v_a), dV = P_a^T do_a (GATE = 0 on P^T). Every plane is read once.
+  TMA row (h A + a) L + m0; forward a = sigmoid(g) (P_a v_a). dV = P_a^T do_a runs `pv_stream_sm100.cu -DPMN -DPSB` on P itself (the
+  MN-major A operand, T2; fp32 `pv_gate_tf32.cu -DPMN -DPSB`). Every plane is read once.
 - `dpb_sm100.cu -DPSB` (`DpbKernel(psb=True)`): items over (sample, head group, query tile, key tile), the K loop the one sample,
   dbias_{h,a} = P_{h,a} o (do_a v_a^T - D_{h,a}) into [H, A, L, L] (nothing summed over the samples), and the key mask (one [L] or
   [A, L]) zeroes the masked keys -- the module's `masked_fill` does, which matters only for an all-masked sample's uniform P. No
   CTA-pair (`dpbx2`) form; the key tile from `_dpb_nj` over A x head groups.
 - fp32: `pv_gate_tf32.cu -DPSB` and `dpb32_sm100.cu -DPSB`, the same changes (the fp32 `softmax_t`).
-- The backward is the per-step launch sequence (the fused tail of T6 assumes one P); P and P^T are stored, [H, A, L, L] each (bf16:
-  2 x 906 MB at A48 L768, 16 x 48).
+- The backward is the per-step launch sequence (the fused tail of T6 assumes one P); P is stored, [H, A, L, L] (bf16: 906 MB at A48
+  L768, 16 x 48). Until 2026-10-29 P^T was stored beside it for dV; dropping it (4 blocks behind `pair_bias_all`, A48, `$W/scratch/k4bo/kb/bo_step.py`,
+  CUDA graph): bf16 L384 8.295 -> 8.210 ms, held after the forward 4.72 -> 3.88 GiB; L768 23.755 -> 23.221 ms, 14.46 -> 11.08 GiB;
+  fp32 L384 17.396 -> 17.044 ms, 9.39 -> 7.70 GiB; L768 52.586 -> 51.445 ms, 28.90 -> 22.15 GiB. Hopper's recompute form (P rebuilt
+  from the bias in the backward, a second plane less) was not taken: P is the forward core's TMEM operand, so it would take a
+  softmax inside the forward core and P rebuilt in dV and dpb -- an exponential per element in three memory-bound kernels.
 
 Measured (training, 16 x 48, A = 48, bf16 activations with fp32 master parameters under autocast, a key mask per sample, CUDA graph
 on, GPU 7 of node 2 beside the utilisation filler; before = d879e180, where the call ran the module's composition; ms):
@@ -589,7 +606,7 @@ a hoisted three-block stack, a captured step bitwise eager; inference bf16 withi
 `settings.bias_only_dit_hoist_sm100`, default on, read per call). T7's hoist on B200 bf16 as ONE kernel forward (N = blocks x heads
 <= 128) and ONE backward (N <= 64), for any R a multiple of 128: the shared pair (R = L^2) and the per-sample pair of T9 (R = A L^2,
 1.8 GB of pair at A48 L384, 7.2 GB at L768) alike; the per-sample inference bias (`pair_bias_all_infer`) takes the same forward. More
-rows, or fp32: T7's LayerNorm rows + cuBLAS. N is padded to a multiple of 16 by TMA zero fill (`-DNP`; 12 / 24 / 48 / 64 heads).
+rows and fp32: [below](#t10--the-hoist-in-one-pass-each-way-bo_hoist_sm100cu-2026-10-29-bf16) (More weight rows and fp32). N is padded to a multiple of 16 by TMA zero fill (`-DNP`; 12 / 24 / 48 / 64 heads).
 
 - **Forward.** The LayerNorm is folded into the epilogue: LN0(x) W'^T = rstd (x W'^T - mean s), s_n = sum_k W'[n, k] (of the bf16 W'
   the product reads), so the raw pair tile goes from TMA straight into the tcgen05 product (M 128 rows x N NP x K 128, both K-major)
@@ -639,16 +656,49 @@ call: its bias was already one pass (`pair_bias_k`, 42.5 vs 40.2 us at A5 L384 a
 Accuracy (`tests/gpu/sm100/test_b200_bias_only_dit_hoist_gpu.py`, 13 new): the kernels alone against fp64 at 8 (R, N) shapes --
 bias and d pair 1.66e-3 (their bf16 output rounding; bounds 6e-3 / 8e-3), dW' 2.6-5.5e-6 (bound 3e-5), rows with a mean 20 standard
 deviations off zero and a constant row included, bit-identical reruns, no local memory; `pair_bias_all` on a per-sample pair (A 2-4,
-L128-384, 1-5 blocks, 16 x 48 / 24 x 32 / 12 x 64; 5 x 16 heads = 80 rows: the forward on T10, the backward on T7) against fp64
+L128-384, 1-5 blocks, 16 x 48 / 24 x 32 / 12 x 64; 5 x 16 heads = 80 rows: since 2026-10-29 the backward on the chunked kernel below, before on T7) against fp64
 within the hoist's bars (d gamma 1e-4), the switch off the same. Tried and not kept: xhat as the weight gradient's operand (hi over
 the pair tile, lo in a 32 KB buffer per group: two stages left, backward 0.883 ms at A48 L384 with dx stored per thread, 0.740 with
 the TMA staging) -- the S - mean_k S form freed the buffers for two more stages (0.661).
 
-**P and P^T** (T9 keeps both, [H, A, L, L] bf16 each: 906 MB per block at A48 L768, 226 MB at L384). Nothing in the hoist makes them
-cheaper. Two forms would: (a) no P^T -- dV = P^T dO with P read as the MN-major A operand of a streamed product (pv_gate_inf holds
-its A in tensor memory through tcgen05.cp, which takes the K-major layout, hence P^T): -1 plane per block and a third of softmax_t's
-bytes (~50 us of its 151 at L384); (b) Hopper's recompute -- two row statistics per row, P rebuilt in dpb and dV from the bias
-(-2 planes per block, the bias read again in the backward). Neither is in this change.
+**More weight rows and fp32 (2026-10-29).** The same file now serves the fp32 (TF32) hoist and more than 128 / 64 weight rows:
+- Forward: `-DNCH` chunks of NP <= 128 rows with W' resident (four TMEM accumulators, two per epilogue group; the MMA warp walks tile
+  pairs chunk by chunk so neither group waits behind the other's drain); larger N as row ranges per launch (bf16 384, fp32 128 rows:
+  W' 96 / 64 KB beside the stages; `hoist.fwd_plan`). `-DTF32`: the group's row threads normalise the tile in place (LN0 rounded to
+  the nearest tf32), arrive on `normed[s]`, and the products are `kind::tf32` -- the LN0-rows + TF32-GEMM arithmetic with no mean
+  cancellation (the raw-row fold would put tf32's 2^-11 |x| against std).
+- Backward `bo_hoist_bwd2_sm100` (`-DBWD2`; bf16 past 64 rows, every fp32 call): weight-row chunks (bf16 64, tf32 32) streamed with
+  each tile (dbias chunk + W' chunk per D-ring slot), d LN0 accumulated over them in TMEM, S for 256 rows per launch (S-only launches
+  past that, the pair read again; `hoist.bwd_plan`). bf16 keeps S = x^T (dbias rstd as hi + lo); tf32 writes xhat over the tile, copies
+  the dbias chunk K-major (it arrives in the 32-B-atom swizzle an MN-major tf32 operand needs) and takes S = xhat^T dbias = dW', both
+  operands rounded to the nearest tf32 (left to the MMA's dropped bits, the one-sided error summed over the pair rows put a 24-block
+  fp32 stack's d gamma at 2.2e-3 against the module's 7.3e-4); dx is written over xhat and stored by TMA from the tile. The epilogue
+  waits for the D slot's previous use to be released before its parity wait on the fill: that use can be the other group's and
+  still in flight (a 200-rerun stress found 3 dW' mismatches at N 72; none in 400 after).
+- Gate (`hoist.SM100_MAX_ROWS`: bf16 192, fp32 128). The tiled kernels run a tile's chunks one after another (the backward's d' / d
+  per chunk ping-pongs with its S product; the forward stores per row) and lose to T7 past ~256 rows. Hoist op alone (CUDA graphs,
+  ms, sm100 / T7 at R = 1.77 M | 7.08 M rows):
+
+| | bf16 N128 | bf16 N256 | bf16 N384 | fp32 N128 | fp32 N256 |
+|---|---|---|---|---|---|
+| forward | 0.227 / 0.384 \| 0.858 / 1.529 | 0.415 / 0.524 \| 1.597 / 1.874 | 0.596 / 0.556 \| 2.289 / 2.216 | 0.395 / 0.589 \| 1.545 / 2.364 | 0.786 / 0.752 \| 3.149 / 3.023 |
+| backward | 0.520 / 0.981 \| 2.001 / 3.852 | 1.023 / 1.002 \| 4.102 / 4.066 | 1.761 / 1.172 \| 7.259 / 4.737 | 0.882 / 1.088 \| 3.507 / 4.289 | 1.448 / 1.438 \| 5.926 / 5.717 |
+
+  The one-chunk bf16 kernels are unchanged (R 7.08 M: N16 forward 0.325 -> 0.327, backward 0.661 -> 0.661; N64 0.527 -> 0.519,
+  1.238 -> 1.238 ms). Peak memory of the backward op drops 3-5x wherever it serves (no d LN0 [R, 128] fp32, no Y operand).
+- Whole training step (`$W/scratch/k4bo/kb/bo_step.py`, per-sample pair through `pair_bias_all`, A = 48, 16 x 48, CUDA graph, median of 9 x 10 replays;
+  before = b98cd541, after = with the P^T changes above; peak = an eager step above its inputs):
+
+| | L384: ms, peak GiB | L768: ms, peak GiB |
+|---|---|---|
+| fp32, 1 block (N 16) | 9.195 -> **6.774**, 10.68 -> **3.93** | 32.579 -> **23.036**, 42.42 -> **15.43** |
+| bf16, 5 blocks (N 80) | 11.758 -> **10.402**, 10.74 -> **6.55** | 35.131 -> **29.634**, 42.43 -> **19.31** |
+| fp32, 5 blocks (N 80) | 20.314 -> **18.088**, 14.92 -> **12.81** | 59.483 -> **51.252**, 57.72 -> **38.23** |
+
+- Registers (ptxas, sm_100a): forward 48-91, `bo_hoist_bwd2_sm100` bf16 103, tf32 119; no spills. Tests:
+  `test_sm100_hoist_chunks_and_tf32` (10 (R, N, dtype) shapes up to N 576 against fp64, bitwise reruns, no local memory, the gate),
+  the per-sample hoist test in fp32 too, and the stacks / `pair_bias_all` tests (1- and 3-block hoists on the new kernels in both
+  dtypes; 24-block ones stay on T7).
 
 ## fp32 path (TF32)
 
@@ -679,8 +729,8 @@ extension's dtype-generic `unfold` / `finalize`.
 | step | inference | training forward | training backward |
 |---|---|---|---|
 | pair bias `LN(pair) Wf^T` | `pair_bias` (f32 rows) per block | `pair_bias` + row stats | `pair_bias_bwd`: d pair, dWf partials |
-| softmax | `softmax_rows` (f32) | `softmax_t` (P and P^T, f32) | -- |
-| attention | **`pv_gate_tf32`** (gated) | **`pv_gate_tf32`** (gated) | `gate_bwd` rows, **`pv_gate_tf32`** ungated on P^T (dV), **`dpb32_sm100`** |
+| softmax | `softmax_rows` (f32) | `softmax_t` (P, f32; no P^T since 2026-10-29) | -- |
+| attention | **`pv_gate_tf32`** (gated) | **`pv_gate_tf32`** (gated) | `gate_bwd` rows, **`pv_gate_tf32 -DPMN`** (dV from P, MN-major), **`dpb32_sm100`** |
 | conditioning | `ln_rows` (fp32 in / out) + 2 cuBLAS TF32 GEMMs | `cond_ln` + 2 GEMMs | `cond_bwd`, `unfold`, `finalize` |
 | rows | `adaln_in_rows`, `resgate_*_rows` (dtype-generic), `swiglu` (f32) | `adaln_a`, `res_adaln_b`, `swiglu`, `res_c` | `res_c_bwd`, `swiglu_bwd`, `res_adaln_b_bwd`, `adaln_a_bwd` |
 | v\|g, out, expand, squeeze | cuBLAS TF32 | cuBLAS TF32 | cuBLAS TF32 (data and weight gradients) |
@@ -1342,9 +1392,11 @@ Inference:
 - Long rungs (I4, T8): the streaming core is TMA-intake bound at A = 5 (L3072: 111 us against a 53 us floor; a 2-CTA form with the
   group's v tiles split by N would halve each SM's v intake) and computes 16 / 32 unused columns per sample for 48- / 32-wide heads.
 - The fused bf16 backward loads only when a CUDA runtime call precedes it on autograd's thread (Measurements 2026-10-20).
-- Per-sample pair (T9, T10): P and P^T stored, 906 MB each per block at A48 L768; dropping P^T (dV with P as an MN-major operand)
-  or both (Hopper's recompute) are the memory levers left. The fp32 hoist is still T7's LayerNorm rows + TF32 cuBLAS, and the
-  backward kernel takes at most 64 weight rows (4 blocks of 16 heads).
+- Per-sample pair (T9, T10): P stored (906 MB per block at A48 L768); Hopper's recompute is the memory lever left. The hoist kernels
+  take any weight-row count but serve up to 192 (bf16) / 128 (fp32) rows: past that their chunks run one after another per tile and
+  T7 is faster (24 blocks of 16 heads = 384 rows). What would close it: the bf16 backward's rstd folded into the pair tile once per
+  tile (x' = rstd x as hi + lo; the dbias chunk is then S's K-major B as it arrives, no per-chunk d' pass), a deeper D ring, and the
+  forward's stores through a staged TMA tile.
 - Training: half the step is cuBLAS at the power cap; the row kernels and the SwiGLU GEMM are at their floor (✓). Below it (△):
   the pair-bias kernels (T1, issue-bound), `softmax_t` (T2), `dpb` (T3, TMA intake), `finalize` (~8 us of reduction latency)
   and, with 32-wide heads, the core's N = 32 products (24 x 32 L768 at 80 % of its floor; two samples per N = 64 product would
