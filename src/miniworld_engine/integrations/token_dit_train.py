@@ -754,9 +754,10 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, 
         qn, kn, vc = (qkvg[:, i * D : (i + 1) * D] for i in range(3))
     O = None
     if psb:
-        # one bias per sample, produced by the caller (head-major [H, A, L, L], log2 units): there is no pair LayerNorm and no
-        # bias GEMM in the block, and nothing of either is kept for the backward
-        assert h100 and not fp32 and pair.shape == (H, A, L, L), "per-sample bias: the H100 bf16 block"
+        # one bias per sample, produced by the caller (H100: head-major [H, A, L, L], log2 units; B200: sample-major [A, H, L, L],
+        # natural units, the key mask folded in): there is no pair LayerNorm and no bias GEMM in the block, and nothing of either is
+        # kept for the backward
+        assert not fp32 and pair.shape == ((H, A, L, L) if h100 else (A, H, L, L)), "per-sample bias: the bf16 block"
         ph = pair.new_empty(0, dpw, dtype=at)
         pst = pair.new_empty(0, 2, dtype=torch.float32)
         bias = pair
@@ -793,9 +794,15 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, 
         )
         if extra is not None:   # natural units; the masked key columns stay -inf
             bias.add_(extra.view(1, L, L))
-    if psb:
+    if psb and h100:
         km = T.train_keymask90(mask, qn, A, L, False)[0]
         og, LSE = sm90.forward_psb(qn, kn, vc, bias, km, A, L, qkvg, H, DH)  # sigmoid(g) o, no O
+    elif psb:
+        # B200: the AttentionPairBias cores (attn_fwd2 -DQPAIR, every sample its own bias planes), unsplit: A samples fill the SMs
+        O, LSE = sm100.apb_forward(qn, kn, vc, bias.view(A * H, L, L), L, H, D)
+        LSE = LSE.view(A, H, L)
+        og = torch.empty(M, D, device=dev, dtype=at)
+        T.gate_o(O, qkvg, og)
     elif h100:
         km = kmp = perm = None
         if native:
@@ -1204,8 +1211,15 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     T.gate_o_bwd(
         dog, og if h100 else O, qkvg, dob, dd, dqkvg, L, h100
     )  # H100: D and dg from og (dO o = dog og)
-    if psb:
+    if psb and h100:
         DQ, DK, DV, DB = _psb_attn_bwd(T, qn, kn, vc, dob, mask, bias, LSE, dd, A, L, H, DH)
+    elif psb:
+        # B200: attn_dkv / attn_dqb -DBPS (dQ per key chunk, dK / dV per query chunk: summed here in chunk order), dbias
+        # [A H, L, L] fp32 natural units, the bias's own layout
+        DQ, DK, DV, DB = sm100.apb_backward(
+            qn, kn, vc, dob, bias.view(A * H, L, L), LSE.reshape(A * H, L), dd.view(A * H, L), L, H, D
+        )
+        DQ, DK, DV = DQ.sum(0), DK.sum(0), DV.sum(0)
     elif native:
         DQ, DK, DV, DB = _native_attn_bwd90(
             T, qn, kn, vc, dob, bias, mask, LSE, dd, A, L, fp32
@@ -1288,7 +1302,11 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     Ws1, Wb1, Ws2, Wb2 = (Wraw[i * D : (i + 1) * D] for i in range(4))
     T.unfold_lnw(dWn, Ws1, Wb1, Ws2, Wb2, w1, w2, dWu, dw12)
     dpair = torch.empty(R, dpw, device=dev, dtype=pdtype)
-    if (
+    if psb:
+        # B200: the bias gradient in the bias's layout; ln_pair / to_bias belong to the bias's producer (zero here)
+        dpair = DB.to(pdtype)
+        dWf = torch.zeros(H, dpw, device=dev)
+    elif (
         fp32 and not h100
     ):  # B200 fp32: LN(pair) recomputed: dpair and the dWf partials in one pass
         pwf = torch.empty(T.pair_grid(R), H * dpw, device=dev)
@@ -1339,7 +1357,13 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     torch._foreach_copy_(
         outs, [grads[n].reshape(p.shape) for n, p in zip(names, params, strict=False)]
     )
-    return [dx.view(A, 1, L, D), dc.view(cond.shape), dpair.view(1, L, L, dpw), *outs, *_xgrad(DB, extra, H, L)]
+    return [
+        dx.view(A, 1, L, D),
+        dc.view(cond.shape),
+        dpair.view(pair.shape) if psb else dpair.view(1, L, L, dpw),
+        *outs,
+        *_xgrad(DB, extra, H, L),
+    ]
 
 
 class _Block(torch.autograd.Function):
@@ -1449,9 +1473,10 @@ PSB_COND = (128, 256, 384, 768)  # conditioning widths the row kernels build for
 
 
 def _serves_psb_core(module, single, cond, mask, compute_dtype=None) -> bool:
-    """Everything ``serves_psb`` asks except the bias tensor itself: the settings, the H100 bf16 block, one batch row, the widths
-    (cond in ``PSB_COND``, transition n = 2 or 4, pair channels of ``ln_pair`` 128 or 256, a head layout of LAYOUTS), LayerNorm eps,
-    and a key mask that is one [1, L] row or a row per sample [A, L]."""
+    """Everything ``serves_psb`` asks except the bias tensor itself: the settings, the H100 or B200 bf16 block, one batch row, the
+    widths (H100: cond in ``PSB_COND``, transition n = 2 or 4, pair channels of ``ln_pair`` 128 or 256; B200: the token widths, cond
+    384, n = 2, ``ln_pair`` 128; a head layout of LAYOUTS), LayerNorm eps, and a key mask that is one [1, L] row or a row per sample
+    [A, L]."""
     if not settings.current().token_dit_train:
         return False
     if settings.current().force_portable_kernels:
@@ -1459,18 +1484,22 @@ def _serves_psb_core(module, single, cond, mask, compute_dtype=None) -> bool:
     a = module.attention
     from miniworld_engine.modules.dispatch import KernelBackend
 
-    if a._backend != KernelBackend.PORTABLE or not single.is_cuda or not _sm90(single.device):
+    if a._backend != KernelBackend.PORTABLE or not single.is_cuda:
+        return False
+    cap = torch.cuda.get_device_capability(single.device)
+    if cap not in ((9, 0), (10, 0)):
         return False
     if single.dtype not in (BF, torch.float32) or operand_dtype(single, compute_dtype) is torch.float32:
         return False
     if single.ndim != 4 or single.shape[1] != 1 or single.shape[2] == 0:
         return False
     A, _, L, d = single.shape
-    if tuple(cond.shape[:3]) != (A, 1, L) or cond.shape[3] not in PSB_COND:
+    b200 = cap == (10, 0)
+    if tuple(cond.shape[:3]) != (A, 1, L) or cond.shape[3] not in ((DC,) if b200 else PSB_COND):
         return False
-    if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] not in (2 * d, 4 * d):
+    if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] not in ((2 * d,) if b200 else (2 * d, 4 * d)):
         return False
-    if a.ln_pair.weight.numel() not in (128, 256):
+    if a.ln_pair.weight.numel() not in ((DP,) if b200 else (128, 256)):
         return False
     if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) in ((1, L), (A, L))):
         return False
@@ -1479,6 +1508,7 @@ def _serves_psb_core(module, single, cond, mask, compute_dtype=None) -> bool:
         a.ada_ln_in.ln_cond,
         module.transition.ada_ln_in.ln_in,
         module.transition.ada_ln_in.ln_cond,
+        *((a.ln_pair,) if b200 else ()),   # B200 batched: the pair's CUDA LayerNorm runs at eps 1e-5
     )
     return all(n.eps == EPS for n in norms)
 
@@ -1499,7 +1529,9 @@ def block_psb(module, single, cond, bias, mask=None, compute_dtype=None):
     producer: its gradient comes back in the bias's layout, and the block's ``ln_pair`` / ``to_bias`` weights get none from
     here (they are the producer's). Any L: a length that is not a multiple of the kernels' 128-row tile is padded here (zero
     rows, zero bias, the padded keys masked out of every softmax) and the result sliced back, as ``block`` does. Call
-    ``serves_psb`` first."""
+    ``serves_psb`` first. B200: the bias is re-laid sample-major in natural units by differentiable ops (``_block_psb_b200``)."""
+    if not _sm90(single.device):
+        return _block_psb_b200(module, single, cond, bias.permute(1, 0, 2, 3) * (1.0 / LOG2E), mask)
     a = module.attention
     qk = bool(a.use_qk_norm)
     eq = float(a.norm_query.effective_eps(torch.float32)) if qk else 0.0
@@ -1520,6 +1552,87 @@ def block_psb(module, single, cond, bias, mask=None, compute_dtype=None):
         single, cond, bias.contiguous(), mask, qk, eq, ek, False, int(a.n_head), True, None, *params
     )
     return out[:, :, :L] if Lp != L else out
+
+
+#: B200 masked keys in the per-sample bias (natural units): far enough below any real logit that exp gives exactly 0 in fp32, small
+#: enough that attn_fwd2's one-FMA exponent ((t - m) log2 e) stays exact to well under one unit when every key of a sample is
+#: masked (at -1e30 the FMA's rounding error alone is ~1e23 and such a sample's output is NaN): that sample then attends uniformly
+#: and stays finite
+NEG = -1e4
+
+
+def _block_psb_b200(module, single, cond, bias, mask=None):
+    """The B200 per-sample-bias block: ``bias`` [A, H, L, L] in natural units (any float dtype, differentiable: its producer's ops
+    get the gradient), ``mask`` [1, L] / [A, L] or None. L is padded to the kernels' 128-row tile (zero rows, zero bias, the padded
+    keys masked); the key mask is folded into the bf16 bias (``NEG``, a zero gradient there) that the AttentionPairBias cores read,
+    sample-major (attn_fwd2 -DQPAIR, attn_dkv / attn_dqb -DBPS)."""
+    F = torch.nn.functional
+    a = module.attention
+    qk = bool(a.use_qk_norm)
+    eq = float(a.norm_query.effective_eps(torch.float32)) if qk else 0.0
+    ek = float(a.norm_key.effective_eps(torch.float32)) if qk else 0.0
+    params = [module.get_parameter(n) for n in _names_for(qk)]
+    A, _, L, _ = single.shape
+    Lp = -(-L // QM) * QM
+    if Lp != L:
+        rows = (0, 0, 0, Lp - L)
+        single, cond = F.pad(single, rows), F.pad(cond, rows)
+        bias = F.pad(bias, (0, Lp - L, 0, Lp - L))
+        if mask is None:
+            mask = torch.ones(1, L, device=single.device, dtype=torch.bool)
+        mask = F.pad(mask.to(torch.bool), (0, Lp - L), value=False)
+    if mask is not None:
+        bias = bias.masked_fill(~mask.to(torch.bool).reshape(-1, 1, 1, Lp), NEG)
+    out = _Block.apply(
+        single, cond, bias.to(BF).contiguous(), None, qk, eq, ek, False, int(a.n_head), True, None, *params
+    )
+    return out[:, :, :L] if Lp != L else out
+
+
+class _SampleBias(torch.autograd.Function):
+    """B200 batched proteins: every sample's bias from its own pair, sample-major [A, H, L, L] bf16 in natural units, as the
+    AttentionPairBias cores read it -- LN(pair) by the CUDA row kernel (``pair_ln``, its statistics kept), Wf = to_bias.weight
+    diag(ln_pair.weight) applied by one batched GEMM, the masked keys (``keep`` [A | 1, L] False) set to ``NEG`` in place (their
+    gradient is zero: P = 0 there). Backward: dLN(pair) and dWf as batched GEMMs with fp32 results, the LayerNorm backward
+    (``pair_ln_bwd``), the weights' gradients from dWf."""
+
+    @staticmethod
+    def forward(ctx, pair, ln_w, wb, keep):  # noqa: D102
+        from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
+
+        A, L, dp = pair.shape[0], pair.shape[1], pair.shape[3]
+        T = ext(D, DH)
+        R = A * L * L
+        ph = torch.empty(R, dp, device=pair.device, dtype=BF)
+        pst = torch.empty(R, 2, device=pair.device, dtype=torch.float32)
+        T.pair_ln(pair.view(R, dp), ph, pst, EPS)
+        wf = (wb.float() * ln_w.float()[None, :]).to(BF)
+        bias = torch.matmul(wf, ph.view(A, L * L, dp).transpose(1, 2)).view(A, -1, L, L)   # [A, H, L, L]
+        if keep is not None:
+            bias.masked_fill_(~keep.to(torch.bool).reshape(-1, 1, 1, L), NEG)
+        ctx.save_for_backward(pair, ph, pst, wf, ln_w, wb)
+        return bias
+
+    @staticmethod
+    def backward(ctx, g):  # noqa: D102
+        from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
+
+        pair, ph, pst, wf, ln_w, wb = ctx.saved_tensors
+        A, L, dp = pair.shape[0], pair.shape[1], pair.shape[3]
+        H, R = wf.shape[0], A * L * L
+        g3 = g.reshape(A, H, L * L).to(BF)
+        dph = torch.bmm(g3.transpose(1, 2), wf.expand(A, H, dp), out_dtype=torch.float32)   # [A, L L, dp]
+        # dWf = sum_a g_a LN(pair)_a: a [H, dp] result over A L^2 rows; as A bmm's of K = L^2 cuBLAS ran it at one tile per sample
+        # (172 us at A4 L384, measured), so the rows are cut into s chunks per sample -- A s small GEMMs, summed in order
+        sc = next(c for c in (64, 32, 16, 8, 4, 2, 1) if (L * L) % c == 0)
+        k = L * L // sc
+        gs = g3.view(A, H, sc, k).transpose(1, 2).reshape(A * sc, H, k)
+        dwf = torch.bmm(gs, ph.view(A * sc, k, dp), out_dtype=torch.float32).sum(0)     # [H, dp]
+        dpair = torch.empty_like(pair)
+        ext(D, DH).pair_ln_bwd(dph.view(R, dp), pair.view(R, dp), pst, dpair.view(R, dp))
+        d_lnw = (dwf * wb.float()).sum(0).to(ln_w.dtype)
+        d_wb = (dwf * ln_w.float()[None, :]).to(wb.dtype)
+        return dpair, d_lnw, d_wb, None
 
 
 def _batched_mask(mask, B, L):
@@ -1555,6 +1668,16 @@ def block_batched(module, single, cond, pair, mask=None, compute_dtype=None):
     a = module.attention
     B, L = single.shape[1], single.shape[2]
     dp = pair.shape[-1]
+    if not _sm90(single.device):
+        # B200: the bias straight in the cores' layout (``_SampleBias``: the pair's CUDA LayerNorm, one batched GEMM, the key mask
+        # filled in place); a length off the 128-row tile is padded / masked by ``_block_psb_b200``
+        key = _batched_mask(mask, B, L)
+        whole = L % QM == 0
+        bias = _SampleBias.apply(pair.contiguous(), a.ln_pair.weight, a.to_bias.weight, key if whole else None)
+        out = _block_psb_b200(
+            module, single.reshape(B, 1, L, -1), cond.reshape(B, 1, L, -1), bias, None if whole else key
+        )
+        return out.reshape(1, B, L, -1)
     bias = F.linear(
         F.layer_norm(pair, (dp,), a.ln_pair.weight.to(pair.dtype), None, a.ln_pair.eps), a.to_bias.weight.to(pair.dtype)
     )
