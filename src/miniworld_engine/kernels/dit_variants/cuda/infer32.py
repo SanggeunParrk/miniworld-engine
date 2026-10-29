@@ -8,6 +8,10 @@
     DiT's ``pair_bias_mma`` + edge tables (atom), per pair / mask (``_capture.lookup_inputs``).
 Per block: ``ln_mod_fwd``, cuBLAS q | k (| g) and v^T, the TF32 attention core (token: the gated inference core, g folded into its epilogue; atom: the
 window kernel + the slid edge windows), ``res_*`` rows, cuBLAS expand, ``glu_fwd``, cuBLAS squeeze. bf16 inference is ``interface.py``'s.
+
+B200 (capability 10.0): the same step on the sm_100a builds of the rows and the B200 TF32 cores (``sm100.py``): the token DiT's
+``attn_inf_tf32.cu`` (q | k | g + v^T, the bias in natural key order and log2 units; any L a multiple of 8) and the local DiT's
+``lattn_fwd_tf32`` with the slid key window inside (the natural-unit fp32 bias of ``lbias_tf32``; N padded to a multiple of 128).
 """
 
 from __future__ import annotations
@@ -43,7 +47,11 @@ def _enabled(stack, single) -> bool:
     cfg = settings.current()
     return (stack.implementation != ImplementationType.PYTORCH and single.is_cuda and single.ndim == 3 and single.dtype == torch.float32
             and not cfg.force_portable_kernels
-            and torch.cuda.get_device_capability(single.device) == (9, 0))
+            and torch.cuda.get_device_capability(single.device) in ((9, 0), (10, 0)))
+
+
+def _b200(t) -> bool:
+    return torch.cuda.get_device_capability(t.device) == (10, 0)
 
 
 def _no_grad_needed(stack, single, cond, pair) -> bool:
@@ -52,13 +60,17 @@ def _no_grad_needed(stack, single, cond, pair) -> bool:
 
 def serves(stack, single, cond, pair, mask) -> bool:
     """An fp32 token stack call without a gradient: 768 wide x 16 heads, L a multiple of 128, one conditioning row set, pair 128 / 256 wide."""
-    from miniworld_engine.kernels.augmented_attention.cuda import tf32_inference_core_supported
-
     if not _enabled(stack, single) or not _no_grad_needed(stack, single, cond, pair):
         return False
+    if _b200(single):
+        from miniworld_engine.kernels.dit_variants.cuda.sm100 import (
+            token_inference_supported as tf32_inference_core_supported,
+        )
+    else:
+        from miniworld_engine.kernels.augmented_attention.cuda import tf32_inference_core_supported
     a, length, d = single.shape
     blk = stack.blocks[0]
-    return (cond.ndim == 2 and cond.shape[0] == length and tuple(pair.shape[:2]) == (length, length) and pair.shape[-1] in (128, 256)
+    return ((d, blk.n_head) == (768, 16) and cond.ndim == 2 and cond.shape[0] == length and tuple(pair.shape[:2]) == (length, length) and pair.shape[-1] in (128, 256)
             and (mask is None or tuple(mask.shape) == (length,)) and blk.expand.weight.shape[0] == 4 * d and a > 0
             and tf32_inference_core_supported(torch.float32, length, d, blk.n_head, single.device.index or 0))
 
@@ -68,7 +80,7 @@ def atom_serves(stack, single, cond, pair, mask, uid) -> bool:
     if not _enabled(stack, single) or not _no_grad_needed(stack, single, cond, pair):
         return False
     a, n, d = single.shape
-    return (d == 128 and n % 64 == 0 and cond.ndim == 2 and tuple(cond.shape) == (n, d) and tuple(pair.shape) == (n // 32, 32, 128, 16)
+    return (d == 128 and (n % 64 == 0 or (_b200(single) and n % 32 == 0)) and cond.ndim == 2 and tuple(cond.shape) == (n, d) and tuple(pair.shape) == (n // 32, 32, 128, 16)
             and (mask is None or tuple(mask.shape) == (n,)) and (uid is None or tuple(uid.shape) == (n,))
             and stack.blocks[0].expand.weight.shape[0] == 4 * d and a > 0)
 
@@ -128,9 +140,33 @@ def _token_bias(pack, pair, mask, eps, nbh):
     return bias, pair, mask
 
 
+def _token_bias_b200(pack, pair, mask, eps, nbh):
+    """B200: [nb 16, L, L] fp32, log2 units, natural key order, masked keys -inf (the TF32 inference core's bias)."""
+    from miniworld_engine.kernels.dit_variants.cuda import train
+
+    length, c = pair.shape[0], pair.shape[-1]
+    zhat = train.pair_ln_fwd(pair.reshape(length * length, c).float().contiguous(), eps, False)
+    bias = torch.mm(pack["pair_w"], zhat.t()).view(nbh, length, length)
+    if mask is not None:
+        bias.masked_fill_(~mask.bool()[None, None, :], float("-inf"))
+    return bias, pair, mask
+
+
 def inference(stack, single, cond, pair, mask):
     """The fp32 token stack's forward, no gradient: x [A, L, D] -> [A, L, D]."""
-    from miniworld_engine.kernels.augmented_attention import cuda as attn
+    # B200: the whole step outside Dynamo (a graph break): its launches are host-built TMA bindings, nothing for the compiler to fuse, and
+    # tracing them recompiled per block
+    if _b200(single):
+        return _inference_b200(stack, single, cond, pair, mask)
+    return _inference(stack, single, cond, pair, mask)
+
+
+def _inference(stack, single, cond, pair, mask):
+    b200 = _b200(single)
+    if b200:
+        from miniworld_engine.kernels.dit_variants.cuda import sm100
+    else:
+        from miniworld_engine.kernels.augmented_attention import cuda as attn
 
     ext = _ext()
     blocks = list(stack.blocks)
@@ -146,7 +182,8 @@ def inference(stack, single, cond, pair, mask):
     t_mod = torch.addmm(pack["mod_b"], sm, pack["mod_w"].t())          # [L, nb 4 D]: per block scA | shA | scT | shT
     t_gate = torch.addmm(pack["gate_b"], s, pack["gate_w"].t())        # [L, nb 2 D]: per block gA | gT
     key = (pair.data_ptr(), pair._version, tuple(pair.shape), None if mask is None else (mask.data_ptr(), mask._version), pack["pair_w"].data_ptr())
-    bias_all = _capture.lookup_inputs(_TOKEN_BIASES, key, lambda: _token_bias(pack, pair, mask, b0.pair_norm.eps, nb * heads), limit=2)[0]
+    make = _token_bias_b200 if b200 else _token_bias
+    bias_all = _capture.lookup_inputs(_TOKEN_BIASES, (*key, b200), lambda: make(pack, pair, mask, b0.pair_norm.eps, nb * heads), limit=2)[0]
 
     f32 = torch.float32
     st = torch.empty(m, 2, device=dev, dtype=f32)
@@ -177,7 +214,10 @@ def inference(stack, single, cond, pair, mask):
             ext.qkv_prep(qkg[:, :d], qkg[:, d:2 * d], qkg[:, :d], qkg[:, :d], qkg[:, d:2 * d], None, stq, wq, bq, wk, bk, 1.0, blk.q_norm.eps, True, True)
         else:
             ext.qkv_prep(qkg[:, :d], qkg[:, d:2 * d], qkg[:, :d], qkg[:, :d], qkg[:, d:2 * d], None, None, None, None, None, None, 1.0, 1e-5, False, True)
-        attn.tf32_gated_inference(qkg, vt, bias_all, i, a, 2 * d, heads, d // heads)
+        if b200:
+            sm100.gated_inference(qkg, bias_all, i, a, heads, d // heads, vt=vt)
+        else:
+            attn.tf32_gated_inference(qkg, vt, bias_all, i, a, 2 * d, heads, d // heads)
         ya = torch.mm(qkg[:, :d], w["wo"].t())
         out = torch.empty(m, d, device=dev, dtype=f32)
         if stack.parallel:
@@ -193,6 +233,9 @@ def inference(stack, single, cond, pair, mask):
             ext.res_out_fwd(xp, y2, tab, cols(T_G_T), None, 0, out, length, False)
         x = out
     return x.view(a, length, d)
+
+
+_inference_b200 = torch.compiler.disable(_inference)
 
 
 # ---------------------------------------------------------------------------------------------------------------------- atom
@@ -231,6 +274,8 @@ def _atom_pack(stack):
 
 def atom_inference(stack, single, cond, pair, mask, uid):
     """The fp32 atom stack's forward, no gradient: x [A, N, 128] -> [A, N, 128]."""
+    if _b200(single):
+        return _atom_inference_b200(stack, single, cond, pair, mask, uid)
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
 
     ext = _ext()
@@ -310,6 +355,105 @@ def atom_inference(stack, single, cond, pair, mask, uid):
             ext.res_out_fwd(xp, y2, tab, cols(A_G_T), None, 0, out, n, False)
         x = out
     return x.view(a, n, d)
+
+
+_ATOM_BIASES_B200: dict = {}
+
+
+@torch.compiler.disable
+def _atom_inference_b200(stack, single, cond, pair, mask, uid):
+    """The fp32 atom stack on B200: ``atom_inference``'s step with the local DiT's TF32 window kernels (``sm100.atom_attn_fwd``: lattn_fwd_tf32,
+    slid window inside) and the natural-unit bias of ``lbias_tf32`` (Chai-1's same-conformer mask folded in as -inf); N padded to a multiple of 128."""
+    from miniworld_engine.kernels.dit_variants.cuda import sm100
+
+    ext = _ext()
+    blocks = list(stack.blocks)
+    b0 = blocks[0]
+    a, n0, d = single.shape
+    dev = single.device
+    f32 = torch.float32
+    n = sm100.atom_padded(n0)
+    kmask = torch.ones(n0, dtype=torch.bool, device=dev) if mask is None else mask.bool()
+    x = single.float()
+    c = cond.float()
+    z = pair.float()
+    uid_p = uid
+    if n != n0:
+        x = F.pad(x, (0, 0, 0, n - n0))
+        c = F.pad(c, (0, 0, 0, n - n0))
+        z = F.pad(z, (0, 0, 0, 0, 0, 0, 0, (n - n0) // 32))
+        kmask = F.pad(kmask, (0, n - n0), value=False)
+        uid_p = None if uid is None else F.pad(uid, (0, n - n0), value=-1)
+    c, z, kmask = c.contiguous(), z.contiguous(), kmask.contiguous()
+    keys = None if (mask is None and n == n0) else kmask
+    m = a * n
+    pack = _bf16._static_pack(_PACKS, stack, _atom_pack)
+    sig = not b0.q_adaln.identity_scale
+    cm = F.layer_norm(c, (d,), eps=1e-5) if sig else c
+    t_mod = torch.addmm(pack["mod_b"], cm, pack["mod_w"].t())          # [N, nb 6 D]: per block qsc | qsh | ksc | ksh | tsc | tsh
+    t_gate = torch.addmm(pack["gate_b"], c, pack["gate_w"].t())        # [N, nb 2 D]
+    slide = stack.key_window == "slide"
+    eps = (b0.pair_norm if stack.per_block_pair_norm else stack.pair_norm).eps
+    key = (pair.data_ptr(), pair._version, tuple(pair.shape), None if mask is None else (mask.data_ptr(), mask._version),
+           None if uid is None else (uid.data_ptr(), uid._version), id(pack), stack.key_window)
+
+    def make():
+        same = None if uid_p is None else sm100.atom_same_conformer(uid_p, kmask, n, stack.key_window)
+        return [sm100.atom_bias(z, w["gamma"], w["wb"], eps, same) for w in pack["blocks"]], pair, mask, uid
+
+    biases = _capture.lookup_inputs(_ATOM_BIASES_B200, key, make, limit=2)[0]
+
+    st = torch.empty(m, 2, device=dev, dtype=f32)
+    stq = torch.empty(m, 4, device=dev, dtype=f32) if any(b.kq_norm for b in blocks) else None
+    xq, xk = torch.empty(m, d, device=dev, dtype=f32), torch.empty(m, d, device=dev, dtype=f32)
+    xt = torch.empty_like(xq) if stack.parallel else xq
+    k, v = torch.empty(m, d, device=dev, dtype=f32), torch.empty(m, d, device=dev, dtype=f32)
+    g = torch.empty(m, d, device=dev, dtype=f32)
+    width = b0.expand.weight.shape[0] // 2
+    ab = torch.empty(m, (3 if b0.up_gate else 2) * width, device=dev, dtype=f32)
+    h = torch.empty(m, width, device=dev, dtype=f32)
+    y2 = torch.empty(m, d, device=dev, dtype=f32)
+    xp = torch.empty(m, d, device=dev, dtype=f32)
+    x = x.reshape(m, d).contiguous()
+    cols = lambda cc: cc * d  # noqa: E731
+    for i, (blk, w) in enumerate(zip(blocks, pack["blocks"], strict=True)):
+        tab = torch.cat([t_mod[:, 6 * d * i:6 * d * (i + 1)], t_gate[:, 2 * d * i:2 * d * (i + 1)]], dim=1)
+        outs, scs, shs = [xq, xk], [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SH_Q), cols(A_SH_K)]
+        if stack.parallel:
+            outs, scs, shs = outs + [xt], scs + [cols(A_SC_T)], shs + [cols(A_SH_T)]
+        ext.ln_mod_fwd(x, tab, scs, shs, outs, st, n, b0.adaln_eps, sig)
+        q = torch.addmm(w["bq"], xq, w["wq"].t())
+        torch.mm(xk, w["wk"].t(), out=k)
+        torch.mm(xk, w["wv"].t(), out=v)
+        if blk.gating:
+            torch.mm(xq, w["wg"].t(), out=g)
+        if blk.kq_norm:
+            wq, bq, wk, bk = w["qk"]
+            ext.qkv_prep(q, k, v, q, k, v, stq, wq, bq, wk, bk, 1.0, blk.q_norm.eps, True, True)
+        else:
+            ext.qkv_prep(q, k, v, q, k, v, None, None, None, None, None, 1.0, 1e-5, False, True)
+        o, _ = sm100.atom_attn_fwd(q.view(a, n, d), k.view(a, n, d), v.view(a, n, d), biases[i], keys, slide)
+        o = o.view(m, d)
+        if blk.gating:
+            og = torch.empty_like(o)
+            ext.gate_fwd(o, g, og)
+        else:
+            og = o
+        ya = torch.mm(og, w["wo"].t()) if blk.project_output else og
+        out = torch.empty(m, d, device=dev, dtype=f32)
+        if stack.parallel:
+            torch.mm(xt, w["wexp"].t(), out=ab)
+            ext.glu_fwd(ab, h, blk.up_gate)
+            torch.mm(h, w["wsq"].t(), out=y2)
+            ext.res_out_fwd(x, ya, tab, cols(A_G_A), y2, cols(A_G_T), out, n, False)
+        else:
+            ext.res_ln_fwd(x, ya, tab, cols(A_G_A), cols(A_SC_T), cols(A_SH_T), xp, xt, st, n, b0.adaln_eps, sig)
+            torch.mm(xt, w["wexp"].t(), out=ab)
+            ext.glu_fwd(ab, h, blk.up_gate)
+            torch.mm(h, w["wsq"].t(), out=y2)
+            ext.res_out_fwd(xp, y2, tab, cols(A_G_T), None, 0, out, n, False)
+        x = out
+    return x.view(a, n, d)[:, :n0]
 
 
 def _ext_edge():

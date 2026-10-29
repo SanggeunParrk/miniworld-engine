@@ -11,6 +11,11 @@ pair bias) is made by ordinary torch ops outside it, so autograd chains the grad
     block    ``_TokenBlock``: x [A L, D] and the tables / bias / weights in, x' out; d x, d tables (summed over the samples: one partial
              row per (token, split of the samples), fixed order), d bias, d weights out.
 
+B200 (capability 10.0) runs the same Functions with the row kernels built for sm_100a and the B200 attention cores (``sm100.py``): the token
+DiT's ``attn_fwd2`` / ``attn_dkv`` / ``attn_dqb`` (bf16) and their TF32 twins on an unscaled q and a natural-unit bias with the masked keys
+-inf (deterministic builds: per-chunk dQ partials, one dK / dV accumulator per MMA issuer), the fp32 O gated by ``ogate_fwd``; the local DiT's
+window kernels (the slid key window inside them) for the atom stacks (N padded to a multiple of 128). An odd sample count is padded by one zero sample (token).
+
 The residual stream is fp32 inside a sequential block (between the attention and the transition half), every reduction fp32, the saved
 activations and GEMM operands bf16 (or fp32 with TF32 GEMMs). Token DiT layout only here (D = 768, 16 heads x 48, L a multiple of 128).
 """
@@ -44,6 +49,12 @@ def _ext():
     from miniworld_engine.kernels.dit_variants import cuda
 
     return cuda.train_ext()
+
+
+def _sm100():
+    from miniworld_engine.kernels.dit_variants.cuda import sm100
+
+    return sm100
 
 
 def _mm_t(a, b):
@@ -87,10 +98,15 @@ def token_fwd(x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.
     M, D = x.shape
     L, A = length, M // length
     at = tab.dtype
+    b200 = _sm100().is_b200(x)
     w_qkvg, w_o, w_exp, w_sq = (w.to(at, copy=True) for w in (wqkvg, wo, wexp, wsq))
     spec = _fwd_specs(M, L, at, x.dtype, par, gating, kq, up)
-    buf = {n: torch.empty(spec[n][0], device=x.device, dtype=spec[n][1]) for n in _NAMES if n not in ("w_qkvg", "w_o", "w_exp", "w_sq")}
-    a, xt, qkvg, qs, kb, vb, og, ya, y2, st1, ab, h = (buf[n] for n in ("a", "xt", "qkvg", "qs", "kb", "vb", "og", "ya", "y2", "st1", "ab", "h"))
+    skip = {"w_qkvg", "w_o", "w_exp", "w_sq"}
+    if b200 and at != torch.float32:   # the sm_100a bf16 core reads q / k / v as column views of qkvg (kq-norm: LN(q), LN(k) copies only)
+        skip |= {"vb"} if kq else {"qs", "kb", "vb"}
+    buf = {n: torch.empty(spec[n][0], device=x.device, dtype=spec[n][1]) for n in _NAMES if n not in skip}
+    a, xt, qkvg, og, ya, y2, st1, ab, h = (buf[n] for n in ("a", "xt", "qkvg", "og", "ya", "y2", "st1", "ab", "h"))
+    qs, kb, vb = (buf.get(n) for n in ("qs", "kb", "vb"))
     cols = lambda c: c * D  # noqa: E731
     # AdaLN of the attention (and, parallel, of the transition: one pass over x)
     if par:
@@ -101,9 +117,28 @@ def token_fwd(x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.
     bias_vec[:D] = bq.to(at)
     torch.addmm(bias_vec, a, w_qkvg.t(), out=qkvg)
     wq, bql, wk, bkl = (qkw if kq else (None, None, None, None))
-    scale = LOG2E / math.sqrt(HEAD_DIM)
-    ext.qkv_prep(qkvg[:, :D], qkvg[:, D:2 * D], qkvg[:, 2 * D:3 * D], qs, kb, vb, buf["stqk"] if kq else None, wq, bql, wk, bkl, scale, eps_qk, kq, at == torch.float32)
-    if at == torch.float32:                       # the TF32 core: key-permuted bias / mask, v^T
+    if b200:
+        # the sm_100a cores take q unscaled (1 / sqrt 48 inside), the bias in natural units (masked keys -inf, no km) and return fp32 O:
+        # bf16 without kq-norm reads q / k / v as column views of the projection output; kq-norm writes LN(q), LN(k) (and fp32 rounds every
+        # operand to nearest TF32)
+        f32 = at == torch.float32
+        if kq or f32:
+            ext.qkv_prep(qkvg[:, :D], qkvg[:, D:2 * D], qkvg[:, 2 * D:3 * D], qs, kb, vb, buf["stqk"] if kq else None, wq, bql, wk, bkl, 1.0, eps_qk,
+                         kq, f32)
+        qs, kb, vb = (t if t is not None else qkvg[:, j * D:(j + 1) * D] for j, t in enumerate((qs, kb, vb)))
+        o32, lse = _sm100().token_attn_fwd(qs, kb, vb, bias, A, L)
+        if f32 and not gating:
+            og = o32
+        else:
+            ext.ogate_fwd(o32, qkvg[:, 3 * D:] if gating else None, og)
+        del o32
+    else:
+        scale = LOG2E / math.sqrt(HEAD_DIM)
+        ext.qkv_prep(qkvg[:, :D], qkvg[:, D:2 * D], qkvg[:, 2 * D:3 * D], qs, kb, vb, buf["stqk"] if kq else None, wq, bql, wk, bkl, scale, eps_qk, kq,
+                     at == torch.float32)
+    if b200:
+        pass
+    elif at == torch.float32:                       # the TF32 core: key-permuted bias / mask, v^T
         perm = _key_perm(L, x.device)
         bias_p = bias[..., perm].contiguous()
         km_p = None if km is None else km[:, perm].contiguous()
@@ -121,9 +156,14 @@ def token_fwd(x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.
         attn._ext("attn_fwd", attn.fwd_defs() + ("FWD_BF16=1",)).attn_fwd(qs, kb, vb, bias, km, og, lse)
     torch.mm(og, w_o.t(), out=ya)
     out = buf["out"]
+
+    def expand():   # B200 bf16 without the up-gate: the SwiGLU in the expand GEMM's epilogue, [a | b] saved on the way
+        if not (b200 and not up and at == torch.bfloat16 and _sm100().swiglu_gemm(xt, w_exp, h, ab)):
+            torch.mm(xt, w_exp.t(), out=ab)
+            ext.glu_fwd(ab, h, up)
+
     if par:
-        torch.mm(xt, w_exp.t(), out=ab)
-        ext.glu_fwd(ab, h, up)
+        expand()
         torch.mm(h, w_sq.t(), out=y2)
         ext.res_out_fwd(x, ya, tab, cols(G_A), y2, cols(G_T), out, L, False)
         xp = buf["xp"]
@@ -131,11 +171,12 @@ def token_fwd(x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.
     else:
         xp, st2 = buf["xp"], buf["st2"]
         ext.res_ln_fwd(x, ya, tab, cols(G_A), cols(SC_T), cols(SH_T), xp, xt, st2, L, eps, sig)
-        torch.mm(xt, w_exp.t(), out=ab)
-        ext.glu_fwd(ab, h, up)
+        expand()
         torch.mm(h, w_sq.t(), out=y2)
         ext.res_out_fwd(xp, y2, tab, cols(G_T), None, 0, out, L, False)
     res = dict(buf, og=og, lse=lse, xp=xp, st2=st2, w_qkvg=w_qkvg, w_o=w_o, w_exp=w_exp, w_sq=w_sq)
+    if b200:   # q / k / v as the core read them; a column view of qkvg leaves as an empty placeholder (an op output may not alias another)
+        res.update({n: t if t._base is None else t.new_empty(0) for n, t in (("qs", qs), ("kb", kb), ("vb", vb))})
     return [res[n] for n in _NAMES]
 
 
@@ -190,6 +231,7 @@ def token_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias: torc
     M, D = x.shape
     L, A = length, M // length
     at = tab.dtype
+    b200 = _sm100().is_b200(x)
     S = min(A, SPLITS)
     dev = x.device
     dout = dout.to(x.dtype).contiguous()
@@ -219,7 +261,10 @@ def token_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias: torc
     dqkvg = torch.empty(M, nq * D, device=dev, dtype=at)
     dd = torch.empty(A, HEADS, L, device=dev, dtype=torch.float32)
     ext.gate_o_bwd(dog, og, qkvg[:, 3 * D:] if gating else None, dO, dqkvg[:, 3 * D:] if gating else None, dd, L, HEAD_DIM, at == torch.float32)
-    if at == torch.float32:
+    if b200:   # dq / dk / dv for the unscaled operands, dbias in natural units (the bias's own)
+        ops = [t if t.numel() else qkvg[:, j * D:(j + 1) * D] for j, t in enumerate((s["qs"], s["kb"], s["vb"]))]
+        dq, dk, dv, db = _sm100().token_attn_bwd(*ops, dO, bias, s["lse"], dd, A, L)
+    elif at == torch.float32:
         dq, dk, dv, db = _tf32_attn_bwd(s["qs"], s["kb"], s["vb"], dO, bias, km, s["lse"], dd, A, L)
     else:
         dq, dk, dv, db = attn.backward(s["qs"], s["kb"], s["vb"], dO, bias, km, s["lse"], dd, A, L)
@@ -242,7 +287,7 @@ def token_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias: torc
     else:
         dbq = qsum.clone()
         dwq, dbql, dwk, dbkl = (torch.zeros(D, device=dev, dtype=torch.float32) for _ in range(4))
-    dbias = (db * LN2).contiguous() if db.dtype != torch.float32 else (db * LN2).contiguous()
+    dbias = db if b200 else (db * LN2).contiguous()
     return [dx, dtab, dbias, dwqkvg, dbq, dwo, dwexp, dwsq, dwq, dbql, dwk, dbkl]
 
 
@@ -311,7 +356,7 @@ class _PairLN(torch.autograd.Function):
 
 # ------------------------------------------------------------------------------------------------------------------ glue
 def serves(stack, single, cond, pair, mask) -> bool:
-    """A token stack call with a gradient on H100: bf16, D = 768 with 16 heads, L a multiple of 128, one conditioning row set shared by
+    """A token stack call with a gradient on H100 or B200: bf16 or fp32, D = 768 with 16 heads, L a multiple of 128, one conditioning row set shared by
     the samples, the CUDA training switch on."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -322,7 +367,7 @@ def serves(stack, single, cond, pair, mask) -> bool:
     cfg = settings.current()
     if cfg.force_portable_kernels:
         return False
-    if torch.cuda.get_device_capability(single.device) != (9, 0):
+    if torch.cuda.get_device_capability(single.device) not in ((9, 0), (10, 0)):
         return False
     a, length, d = single.shape
     blk = stack.blocks[0]
@@ -347,26 +392,48 @@ def _tables(blk, s):
     return torch.cat([p.to(dt) for p in parts], dim=-1).contiguous()
 
 
-def _pair_biases(stack, pair):
-    """The blocks' biases [H, L, L] in log2 units (activation dtype), one LayerNorm of the pair and one stacked GEMM; the LN bias (Chai-1)
-    only shifts a head's logits by a constant, which the softmax cancels (its gradient is exactly zero), so it is left out."""
+def _pair_biases(stack, pair, units=LOG2E):
+    """The blocks' biases [H, L, L] in log2 units (``units`` 1: natural units, B200) in the activation dtype, one LayerNorm of the pair and
+    one stacked GEMM; the LN bias (Chai-1) only shifts a head's logits by a constant, which the softmax cancels (its gradient is exactly
+    zero), so it is left out."""
     blocks = list(stack.blocks)
     length, c = pair.shape[0], pair.shape[-1]
     h = blocks[0].n_head
     eps = blocks[0].pair_norm.eps
     dt = torch.bfloat16 if pair.dtype == torch.bfloat16 or torch.is_autocast_enabled("cuda") else pair.dtype
     zhat = _PairLN.apply(pair.reshape(length * length, c).contiguous(), eps, dt == torch.bfloat16)
-    w = torch.cat([b.to_pair_bias.weight.float() * b.pair_norm.weight.float()[None, :] for b in blocks]) * LOG2E
+    w = torch.cat([b.to_pair_bias.weight.float() * b.pair_norm.weight.float()[None, :] for b in blocks]) * units
     out = torch.mm(w.to(dt), zhat.t())                          # [nb H, L L]
     return [out[h * i:h * (i + 1)].view(h, length, length) for i in range(len(blocks))]
 
 
 def stack_train(stack, single, cond, pair, mask):
-    """The token stack's forward under autograd on the H100 training kernels: x [A, L, D] -> [A, L, D]."""
+    """The token stack's forward under autograd on the H100 / B200 training kernels: x [A, L, D] -> [A, L, D]."""
+    # B200: outside Dynamo (a graph break; the block Functions' opaque ops still run in a CUDA graph): traced, the B200 stack's ops failed
+    # torch.compile's custom-op aliasing check
+    if _sm100().is_b200(single):
+        return _stack_train_b200(stack, single, cond, pair, mask)
+    return _stack_train(stack, single, cond, pair, mask)
+
+
+def _stack_train(stack, single, cond, pair, mask):
     blocks = list(stack.blocks)
     a, length, d = single.shape
-    biases = _pair_biases(stack, pair)
-    km = None if mask is None else torch.where(mask.bool(), 0.0, -1e30).to(torch.float32).expand(a, length).contiguous()
+    a0 = a
+    if _sm100().is_b200(single):
+        # the sm_100a cores: natural-unit bias with the masked keys -inf (no separate key mask); the forward pairs the samples, so an odd A
+        # gets one zero sample (its output is dropped and its every gradient is exactly zero)
+        biases = _pair_biases(stack, pair, 1.0)
+        if mask is not None:
+            off = ~mask.bool().view(1, 1, length)
+            biases = [b.masked_fill(off, float("-inf")) for b in biases]
+        km = None
+        if a % 2:
+            single = F.pad(single, (0, 0, 0, 0, 0, 1))
+            a += 1
+    else:
+        biases = _pair_biases(stack, pair)
+        km = None if mask is None else torch.where(mask.bool(), 0.0, -1e30).to(torch.float32).expand(a, length).contiguous()
     x = single.reshape(a * length, d).contiguous()
     empty = single.new_empty(0, dtype=torch.float32)
     for blk, bias in zip(blocks, biases, strict=True):
@@ -377,7 +444,10 @@ def stack_train(stack, single, cond, pair, mask):
         cfg = (stack.parallel, not blk.attn_adaln.identity_scale, blk.gating, blk.kq_norm, blk.up_gate, length, blk.adaln_eps,
                blk.q_norm.eps if blk.kq_norm else 1e-5)
         x = _TokenBlock.apply(x, tab, bias, km, wqkvg, blk.to_q.bias, blk.to_out.weight, wexp, blk.squeeze.weight, *qk, cfg)
-    return x.view(a, length, d)
+    return x.view(a, length, d)[:a0]
+
+
+_stack_train_b200 = torch.compiler.disable(_stack_train)
 
 
 # ====================================================================================================================== atom stack
@@ -443,7 +513,8 @@ def _afwd_specs(M, N, at, xdt, par, gating, proj, kq, up):
     }
 
 
-def _atom_fwd_fake(x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length, eps, eps_qk):
+def _atom_fwd_fake(x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length, eps, eps_qk,
+                   kmask=None, n_real=0):
     """The saved tensors of the atom block forward (``_ANAMES``): shapes and dtypes from ``_afwd_specs``."""
     spec = _afwd_specs(x.shape[0], length, tab.dtype, x.dtype, par, gating, proj, kq, up)
     return [x.new_empty(spec[n][0], dtype=spec[n][1]) for n in _ANAMES]
@@ -453,9 +524,11 @@ def _atom_fwd_fake(x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wex
 def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torch.Tensor, keys: torch.Tensor, ebias: torch.Tensor, wq: torch.Tensor,
              bq: torch.Tensor, wk: torch.Tensor, wv: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, wexp: torch.Tensor, wsq: torch.Tensor,
              qkw: list[torch.Tensor], par: bool, sig: bool, gating: bool, proj: bool, kq: bool, up: bool, slide: bool, length: int, eps: float,
-             eps_qk: float) -> list[torch.Tensor]:
+             eps_qk: float, kmask: torch.Tensor | None = None, n_real: int = 0) -> list[torch.Tensor]:
     """One atom block's forward: [out, saved ...] (``_ANAMES``). x [A N, 128], tab [N, 8 D], bias2 [4, nwin, 32, 128] fp32 (log2, -inf off the
-    keys); the slid edge windows (widx [5], keys [5, 128], ebias [5, 4, 32, 128] natural units) when ``slide``."""
+    keys); the slid edge windows (widx [5], keys [5, 128], ebias [5, 4, 32, 128] natural units) when ``slide``.
+    B200: bias2 in natural units (-inf only for Chai-1's other-conformer keys), the key mask ``kmask`` [N] bool (or None: every atom
+    real) read by the local DiT's sm_100a window kernels, the slid key window inside them; widx / keys / ebias / n_real unused."""
     ext = _ext()
     local = _local()
     M, D = x.shape
@@ -488,10 +561,13 @@ def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torc
         qn, kn = q, k
         if f32:       # the TF32 core's operands, rounded to nearest in place
             ext.qkv_prep(q, k, v, q, k, v, None, None, None, None, None, 1.0, eps_qk, False, True)
-    o, lse = local.attn_fwd_mma(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2) if at == torch.bfloat16 else local.attn_fwd_mma32(
-        qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2)
-    if slide:
-        _edge().edge_attn_fwd(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), keys, widx, ebias, o)
+    if _sm100().is_b200(x):
+        o, lse = _sm100().atom_attn_fwd(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2, kmask, slide)
+    else:
+        o, lse = local.attn_fwd_mma(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2) if at == torch.bfloat16 else local.attn_fwd_mma32(
+            qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2)
+        if slide:
+            _edge().edge_attn_fwd(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), keys, widx, ebias, o)
     o = o.view(M, D)
     if gating:
         og = torch.empty_like(o)
@@ -517,7 +593,7 @@ def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torc
 
 
 def _atom_bwd_fake(dout, x, tab, bias2, widx, keys, ebias, saved, wq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length,
-                   eps, eps_qk):
+                   eps, eps_qk, kmask=None, n_real=0):
     """dx, dtab, dbias2, debias, the weight gradients (fp32) and the four qk-norm vectors."""
     D = ATOM_D
     f32 = torch.float32
@@ -531,7 +607,7 @@ def _atom_bwd_fake(dout, x, tab, bias2, widx, keys, ebias, saved, wq, wk, wv, wg
 def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torch.Tensor, keys: torch.Tensor, ebias: torch.Tensor,
              saved: list[torch.Tensor], wq: torch.Tensor, wk: torch.Tensor, wv: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, wexp: torch.Tensor,
              wsq: torch.Tensor, qkw: list[torch.Tensor], par: bool, sig: bool, gating: bool, proj: bool, kq: bool, up: bool, slide: bool,
-             length: int, eps: float, eps_qk: float) -> list[torch.Tensor]:
+             length: int, eps: float, eps_qk: float, kmask: torch.Tensor | None = None, n_real: int = 0) -> list[torch.Tensor]:
     """The atom block's backward: [dx, dtab, dbias2, debias, dwq, dbq, dwk, dwv, dwg, dwo, dwexp, dwsq, dwq_ln, dbq_ln, dwk_ln, dbk_ln]."""
     ext = _ext()
     local = _local()
@@ -571,20 +647,24 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
     dd = torch.empty(A, ATOM_H, N, device=dev, dtype=f32)
     ext.gate_o_bwd(dog, og, s["g"] if gating else None, dO, dp[:, :D] if gating else None, dd, N, ATOM_DH, at == torch.float32)
     qa, ka = (s["qn"], s["kn"]) if kq else (s["q"], s["k"])
-    if slide:
+    if _sm100().is_b200(x):   # dq | dk | dv into dp's column blocks 1-3, dbias2 natural units (the slid window's edge CTAs inside)
+        dbias2 = _sm100().atom_attn_bwd(qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO, bias2, s["lse"], dd, dp, kmask, slide)
+        debias = ebias.new_empty(ebias.shape, dtype=f32)
+    elif slide:
         # the five edge windows are the edge kernels' (their dO / D rows become zeros for the main kernel, which then adds nothing for them)
         dqe = torch.empty(A, 5, ATOM_WQ, D, device=dev, dtype=f32)
         dke = torch.empty(A, 5, ATOM_WK, D, device=dev, dtype=f32)
         dve = torch.empty(A, 5, ATOM_WK, D, device=dev, dtype=f32)
         dbp = torch.empty(A, 5, ATOM_H, ATOM_WQ, ATOM_WK, device=dev, dtype=f32)
         _edge().edge_bwd_compute(qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), dd, keys, widx, ebias, dqe, dke, dve, dbp)
-    dbias2 = local.attn_bwd_mma(qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), bias2, s["lse"], dd, dp[:, D:],
-                                at == torch.float32)
-    if slide:
-        _edge().edge_bwd_apply(dp[:, D:], keys, widx, dqe, dke, dve, A, N)
-        debias = dbp.sum(0)
-    else:
-        debias = ebias.new_empty(ebias.shape, dtype=f32)
+    if not _sm100().is_b200(x):
+        dbias2 = local.attn_bwd_mma(qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), bias2, s["lse"], dd, dp[:, D:],
+                                    at == torch.float32)
+        if slide:
+            _edge().edge_bwd_apply(dp[:, D:], keys, widx, dqe, dke, dve, A, N)
+            debias = dbp.sum(0)
+        else:
+            debias = ebias.new_empty(ebias.shape, dtype=f32)
     if kq:
         nblk = (M + QKV_RPB - 1) // QKV_RPB
         qpart = torch.empty(nblk, 5 * D, device=dev, dtype=f32)
@@ -622,27 +702,28 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
 
 class _AtomBlock(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl, cfg):  # noqa: D102
-        par, sig, gating, proj, kq, up, slide, length, eps, eps_qk = cfg
+    def forward(ctx, x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl, kmask, cfg):  # noqa: D102
+        par, sig, gating, proj, kq, up, slide, length, eps, eps_qk, n_real = cfg
         qkw = [wql, bql, wkl, bkl] if kq else []
         out, *saved = atom_fwd(x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length,
-                               eps, eps_qk)
-        ctx.save_for_backward(x, tab, bias2, widx, keys, ebias, *saved, wq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl)
-        ctx.cfg, ctx.n_saved = cfg, len(saved)
+                               eps, eps_qk, kmask, n_real)
+        ctx.save_for_backward(x, tab, bias2, widx, keys, ebias, *saved, wq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl,
+                              kmask if kmask is not None else x.new_empty(0))
+        ctx.cfg, ctx.n_saved, ctx.has_kmask = cfg, len(saved), kmask is not None
         return out
 
     @staticmethod
     @once_differentiable
     def backward(ctx, dout):  # noqa: D102
-        par, sig, gating, proj, kq, up, slide, length, eps, eps_qk = ctx.cfg
+        par, sig, gating, proj, kq, up, slide, length, eps, eps_qk, n_real = ctx.cfg
         x, tab, bias2, widx, keys, ebias, *rest = ctx.saved_tensors
-        saved, (wq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl) = rest[:ctx.n_saved], rest[ctx.n_saved:]
+        saved, (wq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl, kmask) = rest[:ctx.n_saved], rest[ctx.n_saved:]
         qkw = [wql, bql, wkl, bkl] if kq else []
         res = atom_bwd(dout, x, tab, bias2, widx, keys, ebias, list(saved), wq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide,
-                       length, eps, eps_qk)
+                       length, eps, eps_qk, kmask if ctx.has_kmask else None, n_real)
         dx, dtab, dbias2, debias, dwq, dbq, dwk, dwv, dwg, dwo, dwexp, dwsq, dwql, dbql, dwkl, dbkl = res
         return (dx, dtab.to(tab.dtype), dbias2, None, None, debias if slide else None, dwq, dbq, dwk, dwv, dwg if gating else None,
-                dwo if proj else None, dwexp, dwsq, *((dwql, dbql, dwkl, dbkl) if kq else (None, None, None, None)), None)
+                dwo if proj else None, dwexp, dwsq, *((dwql, dbql, dwkl, dbkl) if kq else (None, None, None, None)), None, None)
 
 
 class _AtomPairBias(torch.autograd.Function):
@@ -663,7 +744,7 @@ class _AtomPairBias(torch.autograd.Function):
 
 
 def atom_serves(stack, single, cond, pair, mask, uid) -> bool:
-    """An atom stack call with a gradient on H100: bf16, 128 wide, N a multiple of 64, a conditioning row set shared by the samples, pair
+    """An atom stack call with a gradient on H100 or B200: bf16 or fp32, 128 wide, N a multiple of 64 (B200: of 32, padded to 128 inside), a conditioning row set shared by the samples, pair
     channels 16, the CUDA training switch on."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -674,10 +755,11 @@ def atom_serves(stack, single, cond, pair, mask, uid) -> bool:
     cfg = settings.current()
     if cfg.force_portable_kernels:
         return False
-    if torch.cuda.get_device_capability(single.device) != (9, 0):
+    if torch.cuda.get_device_capability(single.device) not in ((9, 0), (10, 0)):
         return False
     a, n, d = single.shape
-    return (single.dtype in (torch.bfloat16, torch.float32) and d == ATOM_D and n % 64 == 0 and cond.ndim == 2 and tuple(cond.shape) == (n, d)
+    step = 32 if torch.cuda.get_device_capability(single.device) == (10, 0) else 64
+    return (single.dtype in (torch.bfloat16, torch.float32) and d == ATOM_D and n % step == 0 and cond.ndim == 2 and tuple(cond.shape) == (n, d)
             and tuple(pair.shape) == (n // 32, 32, 128, 16) and (mask is None or tuple(mask.shape) == (n,))
             and (uid is None or tuple(uid.shape) == (n,)) and stack.blocks[0].expand.weight.shape[0] == 4 * d and a > 0)
 
@@ -699,6 +781,8 @@ def _atom_tables(blk, c):
 
 def atom_stack_train(stack, single, cond, pair, mask, uid):
     """The atom stack's forward under autograd on the H100 training kernels: x [A, N, 128] -> [A, N, 128]."""
+    if _sm100().is_b200(single):
+        return _atom_stack_train_b200(stack, single, cond, pair, mask, uid)
     blocks = list(stack.blocks)
     a, n, d = single.shape
     nwin = n // ATOM_WQ
@@ -740,10 +824,52 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
         tab = _atom_tables(blk, cond)
         qk = (blk.q_norm.weight, blk.q_norm.bias, blk.k_norm.weight, blk.k_norm.bias) if blk.kq_norm else (empty,) * 4
         cfg = (stack.parallel, not blk.q_adaln.identity_scale, blk.gating, blk.project_output, blk.kq_norm, blk.up_gate, slide, n, blk.adaln_eps,
-               blk.q_norm.eps if blk.kq_norm else 1e-5)
+               blk.q_norm.eps if blk.kq_norm else 1e-5, n)
         wg = blk.to_g.weight if blk.gating else empty
         wo = blk.to_out.weight if blk.project_output else empty
         wexp = torch.cat([blk.expand.weight, *((blk.up.weight,) if blk.up_gate else ())])
         x = _AtomBlock.apply(x, tab, bias2, widx if slide else empty, keys if slide else empty, ebias, blk.to_q.weight, blk.to_q.bias, blk.to_k.weight,
-                             blk.to_v.weight, wg, wo, wexp, blk.squeeze.weight, *qk, cfg)
+                             blk.to_v.weight, wg, wo, wexp, blk.squeeze.weight, *qk, None, cfg)
     return x.view(a, n, d)
+
+
+@torch.compiler.disable
+def _atom_stack_train_b200(stack, single, cond, pair, mask, uid):
+    """The atom stack under autograd on B200: the same block Function with the local DiT's sm_100a window kernels (``sm100.atom_attn_fwd`` /
+    ``atom_attn_bwd``: tcgen05 bf16 or TF32, the slid key window inside them) and the natural-unit pair bias of ``lbias``
+    (``sm100.atom_bias``, Chai-1's same-conformer mask folded in as -inf at the keys each window reads). N is padded to a multiple of 128 (zero
+    rows, the padded keys masked; the first N rows returned)."""
+    sm100 = _sm100()
+    blocks = list(stack.blocks)
+    a, n0, d = single.shape
+    dev = single.device
+    n = sm100.atom_padded(n0)
+    kmask = torch.ones(n0, dtype=torch.bool, device=dev) if mask is None else mask.bool()
+    z = pair
+    if n != n0:
+        single = F.pad(single, (0, 0, 0, n - n0))
+        cond = F.pad(cond, (0, 0, 0, n - n0))
+        z = F.pad(z, (0, 0, 0, 0, 0, 0, 0, (n - n0) // ATOM_WQ))
+        kmask = F.pad(kmask, (0, n - n0), value=False)
+        uid = None if uid is None else F.pad(uid, (0, n - n0), value=-1)
+    kmask = kmask.contiguous()
+    keys = None if (mask is None and n == n0) else kmask
+    slide = stack.key_window == "slide"
+    same = None if uid is None else sm100.atom_same_conformer(uid, kmask, n, stack.key_window)
+    z = z.contiguous()
+    x = single.reshape(a * n, d).contiguous()
+    empty = single.new_empty(0, dtype=torch.float32)
+    for i, blk in enumerate(blocks):
+        norm = blk.pair_norm if stack.per_block_pair_norm else stack.pair_norm
+        wb = blk.to_pair_bias.weight if stack.per_block_pair_norm else stack.to_pair_bias.weight[ATOM_H * i:ATOM_H * (i + 1)]
+        bias2 = sm100.atom_bias(z, norm.weight, wb, norm.eps, same)
+        tab = _atom_tables(blk, cond)
+        qk = (blk.q_norm.weight, blk.q_norm.bias, blk.k_norm.weight, blk.k_norm.bias) if blk.kq_norm else (empty,) * 4
+        cfg = (stack.parallel, not blk.q_adaln.identity_scale, blk.gating, blk.project_output, blk.kq_norm, blk.up_gate, slide, n, blk.adaln_eps,
+               blk.q_norm.eps if blk.kq_norm else 1e-5, n0)
+        wg = blk.to_g.weight if blk.gating else empty
+        wo = blk.to_out.weight if blk.project_output else empty
+        wexp = torch.cat([blk.expand.weight, *((blk.up.weight,) if blk.up_gate else ())])
+        x = _AtomBlock.apply(x, tab, bias2, empty, empty, empty, blk.to_q.weight, blk.to_q.bias, blk.to_k.weight, blk.to_v.weight, wg, wo, wexp,
+                             blk.squeeze.weight, *qk, keys, cfg)
+    return x.view(a, n, d)[:, :n0]
