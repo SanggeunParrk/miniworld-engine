@@ -693,17 +693,27 @@ class PvStreamCore:
     views with any row stride, P [nh L, L] bf16 contiguous) for L > 768, where the P tile no longer fits tensor memory: P streams
     through shared memory in 64-key chunks as the K-major A operand of ONE product per 16-key step for the whole sample group
     (B = the group's v tiles side by side, N = SG x 64). Bound launches cached per (buffers, strides, S, L). ``pdl``: the -DPDL_INF
-    build, launched with the PDL attribute (the bf16 three-kernel inference step, the training backward's programmatic dV)."""
+    build, launched with the PDL attribute (the bf16 three-kernel inference step, the training backward's programmatic dV).
+    ``pmn``: the training backward's dV = P^T dO from P itself (``-DPMN``: P read as the MN-major A operand, items over 128-key
+    tiles, no P^T anywhere; ungated, any L a multiple of 128). ``psb`` (with ``pmn``): P is [nh, S, L, L], a plane per (head, sample),
+    one sample per item (``-DPSB``)."""
 
     def __init__(
-        self, device_index: int, nh: int = H, dh: int | None = None, pdl: bool = False
+        self,
+        device_index: int,
+        nh: int = H,
+        dh: int | None = None,
+        pdl: bool = False,
+        pmn: bool = False,
+        psb: bool = False,
     ):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
+        assert pmn or not psb, "the per-sample form is the dV one (PMN)"
         self._sm100, self._tm = sm100, sm100._tm
         self.nh, self.dh = nh, dh or 768 // nh
         assert (self.nh, self.dh) in LAYOUTS, (nh, dh)
-        self.device_index, self.pdl = device_index, pdl
+        self.device_index, self.pdl, self.pmn, self.psb = device_index, pdl, pmn, psb
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs = _Runs()
 
@@ -721,6 +731,8 @@ class PvStreamCore:
                 f"NHEAD={self.nh}",
                 f"DHEAD={self.dh}",
                 *(("PDL_INF",) if self.pdl else ()),
+                *(("PMN",) if self.pmn else ()),
+                *(("PSB",) if self.psb else ()),
             ),
             smem=_stream_smem(sg),
         )
@@ -728,10 +740,11 @@ class PvStreamCore:
     def _bind(self, v, P, out, S, L, g):
         M, nh, dh, tm, es = v.shape[0], self.nh, self.dh, self._tm, v.element_size()
         gg = v if g is None else g
-        sg = pick_group_stream(S, L, self.nsm, nh, dh)
+        sg = 1 if self.psb else pick_group_stream(S, L, self.nsm, nh, dh)
         rs = v.stride(0) * es
+        planes = nh * S if self.psb else nh
         maps = _descriptors(
-            tm(P, [L, nh * L], L * 2, [64, 128]),
+            tm(P, [L, planes * L], L * 2, [64, 64] if self.pmn else [64, 128]),  # PMN: [64 queries][64 keys] boxes
             tm(v, [nh * dh, L, S], [rs, L * rs], [dh, 64, sg]),  # the group's v tiles: one 3-D box per stage
             tm(gg, [nh * dh, M], gg.stride(0) * es, [dh, 128]),
             tm(out, [nh * dh, M], out.stride(0) * es, [dh, 128]),
@@ -745,14 +758,16 @@ class PvStreamCore:
         return _Launch(k, grid, (256, 1, 1), *maps, L, S)
 
     def __call__(self, v, P, out, S, g=None):
+        """``pmn``: v is dO, P the forward's P (not P^T), g None; out = dV."""
         L = v.shape[0] // S
         assert (
             v.dtype is torch.bfloat16
             and P.dtype is torch.bfloat16
             and out.dtype is torch.bfloat16
             and P.is_contiguous()
-            and tuple(P.shape) == (self.nh * L, L)
+            and tuple(P.shape) == ((self.nh * S if self.psb else self.nh) * L, L)
             and L % 128 == 0
+            and (g is None or not self.pmn)
         ), (v.dtype, P.dtype, tuple(P.shape), L)
         key = (
             v.data_ptr(),
