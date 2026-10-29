@@ -181,9 +181,7 @@ def _inference_params(module, bf):
         return (w[0].to(bf), w[1].to(bf), w[2].to(bf), w[3].to(bf), w[4].to(bf).contiguous(), w[5].to(bf).contiguous(),
                 w[6].float().contiguous(), w[7].float().contiguous(), w[8].float().contiguous(), w[9].float().contiguous())
 
-    if torch.compiler.is_compiling():
-        # traced: the casts are graph ops (the cache's capture-id query is a graph break, and a compiled graph needs no cache)
-        return list(forms())
+    # traced (torch.compile), param_forms returns forms(): the casts are graph ops
     return list(_capture.param_forms(f"trimul_b200_{bf}", params, forms))
 
 
