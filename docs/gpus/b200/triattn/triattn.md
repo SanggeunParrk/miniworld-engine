@@ -761,3 +761,45 @@ What shaped these kernels (each change A/B'd alone; accuracy tests unchanged):
   d_pair 512 501 → 387 µs.
 - Weight gradients: dq / dk / dv / dg / db written by their producers into one buffer D, one cuBLAS GEMM for G and one finish
   kernel (was five GEMMs and a dozen torch elementwise / reduce launches): d_pair 64 / 4 × 16 L128 training step 247 → 99 µs.
+
+## Model options for FoldForge (2026-10-29)
+
+The options FoldForge's families set on `TriangleAttention` ran the module's PyTorch statements on B200; they now run on the B200
+kernels (`integrations/triattn_b200.py` `_options` / `_kind`):
+
+| option | families | path | inference | training |
+|---|---|---|---|---|
+| `transposed_bias=False` (ending node, the bias of the pair as it is) | AF3, Boltz-2, OpenBind, IntelliFold-2, RF3, Chai-1 | fused (d_pair 128) / wide | yes | wide path |
+| `gate_bias` / `out_bias` | RoseTTAFold3 | wide | yes | yes |
+| 64-channel heads | Chai-1 (256, 4 × 64), RF3 templates (64, 4 × 64), IntelliFold-2 (512, 8 × 64) | wide + `triattn_dh64_sm100.cu` | yes | no (PyTorch) |
+| `untransposed_output`, `dual_output` | Chai-1 trunk / templates, confidence head | wide | yes | no (PyTorch) |
+
+- Bias orientation: the front's bias drain (`tri_front` / `tri_wfront`, flag `BT`) writes row (b, j, k)'s bias at [b, h, k, j] (its key j for
+  the mask); the backward's `tri_db_rows` reads the gradient in the same orientation. The fused backward reads dbias tile-contiguously, so
+  training on this orientation takes the wide path.
+- Biases: the gate bias is added to g in fp32 in the front's drain (template `GBIAS`, four-warp drain: the eight-warp drain spilled at 96
+  registers), the out bias to the update in the tail's drain before the one rounding of pair + update. Their gradients: d bg from the ones
+  column of G = D^T [xhat | 1], d bo = dy_s^T 1 (cuBLAS).
+- 64-channel heads: `triattn_dh64_sm100.cu`, the head-dim-32 core's schedule on [128][64] 128B-swizzled Q / K / V (QK^T K = 64, PV N = 64),
+  two pair rows a task (TMEM 3 × 128 S/P + 2 × 64 O), three K|V stages, 226.5 KiB shared memory; 128 registers, no spills. Forward only.
+- Chai-1's outputs are tail compositions: untransposed = the tail writes the starting-node layout; dual = a second tail (`to_out_t`) adds
+  its update transposed into the first one's output in place.
+
+Inference, CUDA graph, bf16, a padded crop (L real = 347 / 731, 11 keys masked), the module's PyTorch statements before:
+
+| case (d_pair, heads) | B | L 347 B200 | PyTorch | × | L 731 B200 | PyTorch | × |
+|---|---|---|---|---|---|---|---|
+| AF3 trunk ending, `transposed_bias=False` (128, 4 × 32) | 1 | 0.267 | 1.730 | 6.5 | 1.371 | 12.94 | 9.4 |
+| same, `transposed_bias=True` (reference) | 1 | 0.259 | — | — | 1.328 | — | — |
+| AF3 template ending (64, 4 × 16) | 4 | 0.808 | 5.99 | 7.4 | 4.362 | 46.89 | 10.8 |
+| RF3 trunk ending, biases (128, 4 × 32) | 1 | 0.293 | 3.55 | 12.1 | 1.408 | 28.61 | 20.3 |
+| RF3 template ending, biases (64, 4 × 64) | 4 | 1.325 | 17.16 | 13.0 | 7.365 | 133.1 | 18.1 |
+| Chai-1 trunk starting (256, 4 × 64) | 1 | 0.466 | 2.17 | 4.7 | 2.307 | 15.44 | 6.7 |
+| Chai-1 trunk ending, untransposed | 1 | 0.470 | 4.59 | 9.8 | 2.318 | 34.57 | 14.9 |
+| Chai-1 confidence ending, dual | 1 | 0.527 | 4.75 | 9.0 | 2.523 | 35.27 | 14.0 |
+| Chai-1 template ending, untransposed (64, 4 × 32) | 4 | 0.779 | 13.65 | 17.5 | 4.327 | 111.4 | 25.8 |
+| IntelliFold-2 trunk ending (512, 8 × 64) | 1 | 1.060 | 4.47 | 4.2 | 5.287 | 31.66 | 6.0 |
+
+The `transposed_bias=False` bias stores are strided by L (32 sectors a warp store, merged in L2): +3 % on the fused d_pair-128 module at
+L 731. Training (fp32 master parameters, dropout 0.25, CUDA graph, L 768): AF3 ending `transposed_bias=False` 3.79 ms on the wide path
+(fused `True` 3.54 ms, PyTorch 36.5 ms), RF3 trunk with biases 3.93 ms (PyTorch 73.0 ms). Tests: `tests/gpu/sm100/test_triattn_b200_variants_gpu.py`.
