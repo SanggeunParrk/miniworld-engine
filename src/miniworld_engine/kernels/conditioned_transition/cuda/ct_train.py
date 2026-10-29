@@ -1,4 +1,5 @@
-"""H100 ConditionedTransition tail, training: forward and backward (``ct_rows.cu`` + cuBLAS).
+"""H100 / B200 ConditionedTransition tail, training: forward and backward (``ct_rows.cu`` + cuBLAS; the row kernels are
+architecture-neutral and built for sm_90a and sm_100a).
 
     ab = x [Wa; Wb]^T        (cuBLAS)       h = silu(a) b                 (``swiglu_fwd``)
     out = h Ws^T             (cuBLAS)       sp = cond Wsc^T + b           (cuBLAS, bias epilogue)
@@ -36,7 +37,7 @@ def ext():
         name="ct_rows_sm90",
         sources=[str(_dir / "ct_rows.cu")],
         extra_cuda_cflags=[
-            *host_flags(), "-O3", "-std=c++17", *gencodes("90a"), "--expt-relaxed-constexpr", f"-I{_dir.parent.parent / 'adaln' / 'cuda'}",
+            *host_flags(), "-O3", "-std=c++17", *gencodes("90a", "100a"), "--expt-relaxed-constexpr", f"-I{_dir.parent.parent / 'adaln' / 'cuda'}",
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
         ],
         extra_cflags=["-std=c++17"],
@@ -45,7 +46,7 @@ def ext():
 
 
 def supported(x: torch.Tensor, cond: torch.Tensor, nd: int) -> bool:
-    """sm_90, bf16, or fp32 under TF32 (``allow_tf32``); the hidden width a multiple of 8."""
+    """sm_90 or sm_100, bf16, or fp32 under TF32 (``allow_tf32``); the hidden width a multiple of 8."""
     if not (x.is_cuda and cond.is_cuda and x.dtype == cond.dtype):
         return False
     if x.dtype == torch.float32 and not torch.backends.cuda.matmul.allow_tf32:
@@ -53,7 +54,7 @@ def supported(x: torch.Tensor, cond: torch.Tensor, nd: int) -> bool:
     if x.dtype not in (torch.bfloat16, torch.float32) or nd % 8:
         return False
     idx = x.device.index if x.device.index is not None else torch.cuda.current_device()
-    return torch.cuda.get_device_capability(idx) == (9, 0)
+    return torch.cuda.get_device_capability(idx) in ((9, 0), (10, 0))
 
 
 def _squeeze_gate_save_fake(h, cond, ws, wsc, bsc, res):
@@ -154,7 +155,7 @@ _FUSED_SQUEEZE_TRAIN = False
 
 def _fused_squeeze_ok(h, cond, ws) -> bool:
     """The squeeze + gate kernel's tiling: K slabs of 64, whole 128-column output tiles."""
-    return _FUSED_SQUEEZE_TRAIN and ws.shape[0] % 128 == 0 and h.shape[1] % 64 == 0 and cond.shape[1] % 64 == 0 and h.stride(1) == 1 and cond.stride(1) == 1
+    return _FUSED_SQUEEZE_TRAIN and torch.cuda.get_device_capability(h.device) == (9, 0) and ws.shape[0] % 128 == 0 and h.shape[1] % 64 == 0 and cond.shape[1] % 64 == 0 and h.stride(1) == 1 and cond.stride(1) == 1
 
 
 def _pack_fp32_fake(wa, wb, ws, wsc):
@@ -399,7 +400,7 @@ def ct_tail_train(x, cond, wa, wb, ws, wsc, bsc, residual=None):
     any dtype (rounded to the activations' dtype per call; gradients in the weights' dtype). bf16 D = 768 / hidden 1536 on whole 128-row tiles runs the
     Transition family's wgmma expand / dh kernels, everything else the row kernels around cuBLAS."""
     x, cond = x.contiguous(), cond.contiguous()
-    if _USE_WIDE and x.shape[0] % 128 == 0 and wide_supported(x, wa, ws):
+    if _USE_WIDE and x.shape[0] % 128 == 0 and torch.cuda.get_device_capability(x.device) == (9, 0) and wide_supported(x, wa, ws):
         return _TailWide.apply(x, cond, wa, wb, ws, wsc, bsc, residual)
     return _Tail.apply(x, cond, wa, wb, ws, wsc, bsc, residual)
 

@@ -201,10 +201,21 @@ def _colsum_fake(parts):
     return parts.new_empty((parts.shape[1],))
 
 
+def _colsum_ext(t: torch.Tensor):
+    """The extension with the column-sum kernels for ``t``'s card: this sm_90a one on H100, the architecture-neutral row extension
+    (``adaln_rows.cu``, same kernels) on B200, where the wgmma sources do not build."""
+    idx = t.device.index if t.device.index is not None else torch.cuda.current_device()
+    if torch.cuda.get_device_capability(idx) == (9, 0):
+        return ext()
+    from . import _ext as rows_ext
+
+    return rows_ext()
+
+
 @opaque(fake=_colsum_fake, name="adaln_cuda_colsum")
 def colsum(parts: torch.Tensor) -> torch.Tensor:
     """sum over the rows of ``parts`` [P, N] fp32 in a fixed order (one launch)."""
-    return ext().colsum(parts)
+    return _colsum_ext(parts).colsum(parts)
 
 
 def train_supported(x: torch.Tensor, cond: torch.Tensor | None = None) -> bool:
@@ -223,5 +234,5 @@ def _colsum2_fake(a, b):
 @opaque(fake=_colsum2_fake, name="adaln_cuda_colsum2")
 def colsum2(a: torch.Tensor, b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """``colsum`` of two partial-sum buffers in one launch."""
-    oa, ob = ext().colsum2(a, b)
+    oa, ob = _colsum_ext(a).colsum2(a, b)
     return oa, ob
