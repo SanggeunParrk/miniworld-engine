@@ -27,9 +27,10 @@
 // CTA's tiles g, g + 2, ..., each with its own accumulator: one group drains while the other's product runs). Persistent grid over
 // the R / 128 tiles. -DNP: the padded weight rows (a multiple of 16; rows N .. NP - 1 are TMA zero fill and never stored).
 //
-// More weight rows and fp32 (2026-10-29): the forward takes -DNCH chunks of NP rows (W' resident; four TMEM accumulators, two per
-// epilogue group) and the host splits larger N into row ranges per launch; -DTF32 is its fp32 form (the tile normalised in place,
-// then kind::tf32). The backward past one chunk, and in fp32, is bo_hoist_bwd2_sm100 (-DBWD2, at the end of this file).
+// More weight rows and fp32 (2026-10-29): -DTF32 is the forward's fp32 form (the tile normalised in place, then kind::tf32), with
+// -DNCH chunks of NP rows (W' resident; four TMEM accumulators, two per epilogue group) and larger N split into row ranges per launch.
+// bf16 past 32 weight rows takes bo_hoist_fwdt_sm100 (-DFWDT: the weight rows on M, staged TMA stores); the backward past 64 bf16
+// rows, and every fp32 backward, bo_hoist_bwd3_sm100 (-DBWD3: the tile normalised once, no per-chunk work of the row threads).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -558,115 +559,56 @@ bo_hoist_bwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constant
 }
 #endif  // NP <= 64 && NCH == 1 && !TF32
 
-// ================================================================================================ backward over weight-row chunks
-// -DBWD2 (bo_hoist_bwd2_sm100): the backward for any number of weight rows (bf16 past 64, every fp32 / -DTF32 hoist), the weight rows
-// in chunks of NP (bf16 64, tf32 32) streamed with the tile instead of resident:
-//   d LN0 = sum_j dbias_j^T W'_j      (TMEM, accumulated over the chunks: one [128 rows][128] accumulator per epilogue group)
-//   S_j  += x^T d'_j                   (TMEM, columns 256 + (j - s0) NP for the launch's S chunks [s0, s1): at most 256 columns)
-// A launch walks chunks [c0, c1) of every tile; ``dx`` launches take every chunk for d LN0 (and the LayerNorm backward, d pair) and
-// the first <= 256 weight rows of S; the rest of S takes S-only launches over their chunks (``hoist.py``: a weight-row range per
-// launch, the pair read again).
-// bf16 is the one-chunk kernel's arithmetic (S against the RAW pair and d' = dbias rstd as hi + lo; the host subtracts the channel
-// mean). TF32: the group's row threads overwrite their rows with xhat (fp32) after the statistics, so S = xhat^T dbias (dW' itself, the
-// arithmetic of the LN0-rows path: LN0 against the TF32 dbias, with no cancellation of a mean term), d = the dbias chunk copied to the
-// K-major layout the S product's B operand needs (the chunk arrives MN-major for d LN0: an MN-major kind::tf32 operand sits in the
-// 128-B swizzle with 32-B atoms); dx = rstd (dy - mean(dy) - xhat mean(dy xhat)) is written over xhat and stored by TMA from there.
-// Rings: X (the pair tile, XST slots), D (a chunk: the dbias tile, and W' in dx launches; DST slots). Barriers: xfull / xempty (the
-// MMA's commit after the tile's last product + the group's 4 warps), dfull_ / dempty_ (TMA; the MMA commit + the group's 4 warps),
-// acc / acc_empty (d LN0, per group), wfull / wempty (the group's d' buffer: 4 warps / the S product's commit), done.
-#ifdef BWD2
-constexpr int X2T = TM * DP * ES, X2B = TM * 128;                 // pair tile [DP*ES/128 boxes][128 rows][128 B]: 32 / 64 KB
-constexpr int X2_NBOX = DP * ES / 128;
-constexpr int D2B = NP * 128;                     // one MN box of a chunk [NP][128 B]: dbias (rows) or W' (channels)
-constexpr int D2T = (TM * ES / 128) * D2B;        // the dbias chunk [TM*ES/128 boxes][NP][128 B]
-constexpr int W2T = X2_NBOX * D2B;                // the W' chunk [DP*ES/128 boxes][NP][128 B]
-constexpr int D2S = D2T + W2T;                    // a D slot
-#ifdef TF32
-constexpr int WD2 = (TM * 4 / 128) * D2B;         // d: the dbias chunk K-major [4 boxes][NP][128 B]: 16 KB at NP 32
-constexpr int NWD = 1;                            // one term
-constexpr int DX2 = 0;                            // dx is staged in the pair tile itself
-#else
-constexpr int WD2 = D2T;                          // d' hi / lo: [2 boxes][NP][64 rows] each (the dbias tile's layout)
-constexpr int NWD = 2;
-constexpr int DX2 = 8 * 2 * (32 * 64);            // dx staging: per warp two [32 rows][32 channels] bf16 SW64 slots
-#endif
-constexpr int XST = 2, DST = 2;
-constexpr int O2_X = 0, O2_D = O2_X + XST * X2T, O2_W = O2_D + DST * D2S, O2_DX = O2_W + 2 * NWD * WD2, O2_BAR = O2_DX + DX2;
-constexpr int B2_SMEM = 1024 + O2_BAR + 512;
-static_assert(B2_SMEM <= SMEM_MAX, "backward (chunks) shared memory");
-static_assert(X2T % 1024 == 0 && D2S % 1024 == 0 && WD2 % 1024 == 0 && D2B % 1024 == 0, "1 KB alignment of the swizzled tiles");
-constexpr int S2_COLS = 256;                      // S columns per launch
-#ifdef TF32
-static_assert(NP % 8 == 0 && NP <= 32, "tf32 chunk: at most 32 weight rows (shared memory)");
-constexpr uint32_t ID2_DLN = idesc_tf32(TM, DP, 1, 1);   // A = dbias chunk (MN-major), B = W' chunk (MN-major)
-constexpr uint32_t ID2_S = idesc_tf32(DP, NP, 1, 0);     // A = xhat^T (pair tile MN-major), B = d (K-major)
-constexpr int K2_DLN = NP / 8, K2_S = TM / 8;            // K steps (8 rows / 8 weight rows = 1 KB of an MN operand)
-#else
-static_assert(NP % 16 == 0 && NP <= 64, "bf16 chunk: at most 64 weight rows (shared memory)");
-constexpr uint32_t ID2_DLN = idesc_bf16(TM, DP, 1, 1);
-constexpr uint32_t ID2_S = idesc_bf16(DP, NP, 1, 0);
-constexpr int K2_DLN = NP / 16, K2_S = TM / 16;          // K steps (16 rows = 2 KB of an MN operand)
-#endif
-constexpr int K2_STEP = ES == 2 ? 2048 : 1024;           // bytes per K step of an MN operand: 16 bf16 / 8 tf32 rows of 128 B
 
-struct B2Bars {
-  uint64_t xfull[XST], xempty[XST], dfull_[DST], dempty_[DST], acc[2], acc_empty[2], wfull[2], wempty[2], done;
-  uint32_t tmem;
-};
+// ================================================================================================ forward, weight rows on M (bf16)
+// -DFWDT=<chunks> (bo_hoist_fwdt_sm100): the bf16 forward for more than 64 weight rows. Per tile and chunk j of 128 weight rows the
+// product is the TRANSPOSED tile bias^T_j [128 weight rows][128 pair rows] = W'_j x^T (A = the resident W' chunk, B = the raw pair
+// tile, both K-major), so the drain thread is a weight row n (TMEM lane) holding 32 consecutive pair rows per load: the bias row it
+// writes is contiguous in [N][R]. The LayerNorm stays in the epilogue, bias[n][r] = rstd_r acc[n][r] + (-mean_r rstd_r) s_n (the
+// arithmetic of bo_hoist_fwd_sm100, element for element): the group's row threads write (rstd, -mean rstd) of their rows to shared
+// memory, the drain reads them as broadcasts, and each warp stages its [32 weight rows][64 pair rows] bf16 in a 128-B-swizzled slot
+// (two per warp) for a TMA store: whole 128-B lines per weight row (bo_hoist_fwd_sm100 stores a 2-row strip of 64-B pieces per warp
+// instruction; 64-B pieces through staging were still 1.8x slower at R = 7.1 M rows, where the bias leaves L2 for DRAM).
+// s_n (the row sums of the bf16 W', summed in the order bo_hoist_fwd_sm100 sums them) lives in registers: one per chunk per thread.
+// Warps as above; MMA order as bo_hoist_fwd_sm100 (tile pairs, chunk-major within a pair); four TMEM accumulators of 128 columns.
+// Shared memory is used to the last KB (W' FWDT x 32 KB): the dynamic base must be 1024-aligned (it is with no static shared
+// memory; trapped otherwise).
+#ifdef FWDT
+constexpr int T_NCH = FWDT;
+static_assert(T_NCH >= 1 && T_NCH <= 3, "chunks of 128 weight rows per launch");
+constexpr int T_XT = TM * DP * 2, T_XB = TM * 128;          // pair tile [2 boxes][128 rows][128 B] SW128
+constexpr int T_WT = 128 * DP * 2, T_WB = 128 * 128;        // W' chunk [2 boxes][128 weight rows][128 B] SW128
+constexpr int T_STG = 32 * 64 * 2;                          // a staging slot: [32 weight rows][64 pair rows] bf16, SW128 (4 KB)
+constexpr int T_O_W = 0, T_O_SN = T_O_W + T_NCH * T_WT;     // W' | stats [2 groups][rstd, -mean rstd][128] | staging [8 warps][2]
+constexpr int T_O_STG = T_O_SN + 2 * 2 * 128 * 4, T_O_ST = T_O_STG + 8 * 2 * T_STG;
+constexpr int T_FIT = (SMEM_MAX - T_O_ST - 512) / T_XT;
+constexpr int T_NST = T_FIT > 6 ? 6 : T_FIT;
+constexpr int T_O_BAR = T_O_ST + T_NST * T_XT, T_SMEM = T_O_BAR + 512;
+static_assert(T_NST >= 2 && T_SMEM <= SMEM_MAX && T_O_ST % 1024 == 0, "forward (weight rows on M) shared memory");
+constexpr uint32_t T_IDESC = idesc_bf16(128, TM);           // M = 128 weight rows, N = 128 pair rows
 
-#ifdef TF32
-// byte offset of fp32 (r, k) -- k = 4 c .. 4 c + 3 as one 16-byte chunk c (0..31) -- in an MN tile of 32-element atoms [box][rows][128 B]
-// in the 128-B swizzle with 32-B atomicity: 32-B granule j of 128-B row r sits at granule j ^ (r & 3)
-DEVI uint32_t x32off(uint32_t r, uint32_t c) { return (c >> 3) * X2B + r * 128u + ((((c & 7u) >> 1) ^ (r & 3u)) << 5) + (c & 1u) * 16u; }
-// (weight row n, pair row r) in the dbias chunk [4 boxes of 32 rows][NP][128 B], 32-B atoms
-DEVI uint32_t db32off(uint32_t n, uint32_t r) { return (r >> 5) * D2B + n * 128u + ((((r & 31u) >> 3) ^ (n & 3u)) << 5) + (r & 7u) * 4u; }
-// (n, r) in d [4 boxes of 32 rows][NP][128 B], K-major SW128
-DEVI uint32_t dk32off(uint32_t n, uint32_t r) { return (r >> 5) * D2B + n * 128u + ((((r & 31u) >> 2) ^ (n & 7u))) * 16u + (r & 3u) * 4u; }
-DEVI float lds32f(uint32_t a) { float v; asm volatile("ld.shared.f32 %0, [%1];" : "=f"(v) : "r"(a) : "memory"); return v; }
-DEVI void sts32f(uint32_t a, float v) { asm volatile("st.shared.f32 [%0], %1;" :: "r"(a), "f"(v) : "memory"); }
-#endif
+struct TBars { uint64_t full[T_NST], empty[T_NST], acc[4], acc_empty[4], w; uint32_t tmem; };
 
-DEVI void umma2(uint32_t d, uint64_t a, uint64_t b, uint32_t id, uint32_t acc) {
-#ifdef TF32
-  umma_ss_tf32(d, a, b, id, acc);
-#else
-  umma_ss(d, a, b, id, acc);
-#endif
-}
-DEVI uint64_t desc_mn2(uint32_t saddr, uint32_t lbo) {
-#ifdef TF32
-  return desc_mn32b(saddr, lbo);
-#else
-  return desc_mn128(saddr, lbo);
-#endif
-}
-
-// mx: pair rows (bf16: box (64, 128) SW128; tf32: box (32, 128) 128-B swizzle with 32-B atoms); mdb: dbias_all [N][R], box (bf16 64 /
-// tf32 32 rows, NP) (rows past N zero-filled); mw: W' [N][128], box (64 / 32 channels, NP); mdx: d pair [R][128] (bf16: box (32, 32)
-// SW64 from the staging slots; tf32: box (32, 32) 32-B-atom swizzle from the pair tile); part: S partials [grid][(s1 - s0) NP][128]
-// fp32. Chunks [c0, c1) of NP weight rows; S for chunks [s0, s1) (within [c0, c1)); dx != 0: d LN0 over the chunks and d pair.
+// mx: pair rows [R][128], box (64, 128) SW128; mw: W' [N][128] (this launch's rows), box (64, 128) SW128 (rows past N zero-filled);
+// mo: bias_all^T [N][R] bf16, box (32 pair rows, 32 weight rows) SW64 (rows past N clipped); wf: W' (s_n); R a multiple of 128
 extern "C" __global__ void __launch_bounds__(THREADS, 1)
-bo_hoist_bwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mdb, const __grid_constant__ CUtensorMap mw,
-                    const __grid_constant__ CUtensorMap mdx, float* __restrict__ part, int R, int c0, int c1, int s0, int s1, int dx,
-                    int eps_bits) {
+bo_hoist_fwdt_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mw, const __grid_constant__ CUtensorMap mo,
+                    const void* __restrict__ wfv, int R, int N, int eps_bits) {
   extern __shared__ __align__(1024) uint8_t smraw[];
-  uint8_t* sm = smraw + ((1024u - (smem_u32(smraw) & 1023u)) & 1023u);
+  if (smem_u32(smraw) & 1023u) __trap();                     // the layout uses the whole 227 KB: no room to realign
+  uint8_t* sm = smraw;
   const uint32_t su = smem_u32(sm);
-  B2Bars& B = *reinterpret_cast<B2Bars*>(sm + O2_BAR);
+  TBars& B = *reinterpret_cast<TBars*>(sm + T_O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int T = R / TM, G = gridDim.x, my = (T > (int)blockIdx.x) ? (T - (int)blockIdx.x + G - 1) / G : 0;
-  const int nc = c1 - c0, ns = s1 - s0;
   const float eps = __int_as_float(eps_bits);
 
   if (tid == 0) {
-    for (int s = 0; s < XST; ++s) { mbar_init(&B.xfull[s], 1); mbar_init(&B.xempty[s], 5); }
-    for (int s = 0; s < DST; ++s) { mbar_init(&B.dfull_[s], 1); mbar_init(&B.dempty_[s], 5); }
-    for (int g = 0; g < 2; ++g) {
-      mbar_init(&B.acc[g], 1); mbar_init(&B.acc_empty[g], 4); mbar_init(&B.wfull[g], 4); mbar_init(&B.wempty[g], 1);
-    }
-    mbar_init(&B.done, 1);
+    for (int s = 0; s < T_NST; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 5); }   // empty: the MMA + the 4 warps
+    for (int a = 0; a < 4; ++a) { mbar_init(&B.acc[a], 1); mbar_init(&B.acc_empty[a], 4); }
+    mbar_init(&B.w, 1);
     fence_barrier_init();
-    prefetch_map(&mx); prefetch_map(&mdb); prefetch_map(&mw); prefetch_map(&mdx);
+    prefetch_map(&mx); prefetch_map(&mw); prefetch_map(&mo);
   }
   if (warp == 1) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
   tc_fence_before();
@@ -676,67 +618,333 @@ bo_hoist_bwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
 
   if (warp == 0) {
     if (lane == 0) {
-      int q = 0;                                             // running D-ring index
+      mbar_expect_tx(&B.w, T_NCH * T_WT);
+      for (int j = 0; j < T_NCH; ++j)
+        for (int b = 0; b < 2; ++b) tma_load_2d(su + T_O_W + j * T_WT + b * T_WB, &mw, &B.w, b * 64, j * 128);
       for (int i = 0; i < my; ++i) {
-        const int xs = i % XST, r0 = ((int)blockIdx.x + i * G) * TM;
-        if (i >= XST) mbar_wait(&B.xempty[xs], ((i / XST) - 1) & 1);
-        const uint32_t xt = su + O2_X + xs * X2T;
-        mbar_expect_tx(&B.xfull[xs], X2T);
-        for (int b = 0; b < X2_NBOX; ++b) tma_load_2d(xt + b * X2B, &mx, &B.xfull[xs], b * (128 / ES), r0);
-        for (int j = c0; j < c1; ++j, ++q) {
-          const int ds = q % DST;
-          if (q >= DST) mbar_wait(&B.dempty_[ds], ((q / DST) - 1) & 1);
-          const uint32_t dt = su + O2_D + ds * D2S;
-          mbar_expect_tx(&B.dfull_[ds], D2T + (dx ? W2T : 0));
-          for (int b = 0; b < TM * ES / 128; ++b) tma_load_2d(dt + b * D2B, &mdb, &B.dfull_[ds], r0 + b * (128 / ES), j * NP);
+        const int s = i % T_NST, r0 = ((int)blockIdx.x + i * G) * TM;
+        if (i >= T_NST) mbar_wait(&B.empty[s], ((i / T_NST) - 1) & 1);
+        const uint32_t st = su + T_O_ST + s * T_XT;
+        mbar_expect_tx(&B.full[s], T_XT);
+        tma_load_2d(st, &mx, &B.full[s], 0, r0);
+        tma_load_2d(st + T_XB, &mx, &B.full[s], 64, r0);
+      }
+    }
+  } else if (warp == 1) {
+    mbar_wait(&B.w, 0);
+    for (int p = 0; p < my; p += 2)
+      for (int j = 0; j < T_NCH; ++j)
+        for (int t = p; t < p + 2 && t < my; ++t) {
+          const int s = t % T_NST, g = t & 1, u = (t >> 1) * T_NCH + j, a = 2 * g + (u & 1);
+          if (j == 0) mbar_wait(&B.full[s], (t / T_NST) & 1);
+          if (u >= 2) mbar_wait(&B.acc_empty[a], ((u >> 1) - 1) & 1);
+          tc_fence_after();
+          const uint32_t st = su + T_O_ST + s * T_XT, wj = su + T_O_W + j * T_WT;
+          if (elect_one()) {
+#pragma unroll
+            for (int ks = 0; ks < 8; ++ks) {                 // K step: 32 bytes within a 128-byte row (16 channels)
+              const uint32_t bx = (uint32_t)(ks >> 2), ko = (uint32_t)(ks & 3) * 2;
+              umma_ss(tmem + a * 128, desc_k128(wj + bx * T_WB) + ko, desc_k128(st + bx * T_XB) + ko, T_IDESC, ks ? 1u : 0u);
+            }
+            tc_commit(&B.acc[a]);
+            if (j == T_NCH - 1) tc_commit(&B.empty[s]);
+          }
+          __syncwarp();
+        }
+  } else {
+    const int g = (warp - 2) >> 2, we = warp - 2;
+    const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane;
+    float* rsg = reinterpret_cast<float*>(sm + T_O_SN) + g * 256;   // [rstd | -mean rstd] of the group's current tile
+    const uint32_t rs_a = su + T_O_SN + (uint32_t)g * 1024, stg = su + T_O_STG + (uint32_t)we * 2 * T_STG;
+    // s_n for this thread's weight row of each chunk, summed as bo_hoist_fwd_sm100 sums it (0 past N)
+    float snr[T_NCH];
+    {
+      const uint4* wf = reinterpret_cast<const uint4*>(wfv);
+#pragma unroll
+      for (int j = 0; j < T_NCH; ++j) {
+        const int n = j * 128 + (int)r;
+        float s = 0.f;
+        if (n < N) {
+          uint4 q[16];
+#pragma unroll
+          for (int e = 0; e < 16; ++e) q[e] = __ldg(wf + (long)n * 16 + e);
+#pragma unroll
+          for (int e = 0; e < 16; ++e) {
+            const uint32_t w4[4] = {q[e].x, q[e].y, q[e].z, q[e].w};
+#pragma unroll
+            for (int h = 0; h < 4; ++h) { s += bf16lo(w4[h]); s += bf16hi(w4[h]); }
+          }
+        }
+        snr[j] = s;
+      }
+    }
+    int nst = 0;                                             // TMA stores issued by this warp
+    for (int i = g; i < my; i += 2) {
+      const int s = i % T_NST, r0 = ((int)blockIdx.x + i * G) * TM;
+      mbar_wait(&B.full[s], (i / T_NST) & 1);
+      const uint32_t xt = su + T_O_ST + s * T_XT, rr = opaque(r);
+      const float k0 = row_shift(xt, rr);
+      f2 s1 = mk2(0.f, 0.f), s2 = s1, s3 = s1, s4 = s1;
+#pragma unroll
+      for (int q = 0; q < 16; q += 2) {
+        acc_stats(lds128v(xt + xoff(rr, q)), dup2(-k0), s1, s2);
+        acc_stats(lds128v(xt + xoff(rr, q + 1)), dup2(-k0), s3, s4);
+      }
+      float mean, rstd, m1;
+      finish_stats(add2(s1, s3), add2(s2, s4), k0, eps, mean, rstd, m1);
+      __syncwarp();
+      if (lane == 0) mbar_arrive(&B.empty[s]);
+      named_bar_sync(1 + g, 128);                            // the group's previous tile is drained: its statistics are free
+      rsg[rr] = rstd;
+      rsg[128 + rr] = -mean * rstd;
+      named_bar_sync(1 + g, 128);                            // every row's statistics written
+      for (int j = 0; j < T_NCH; ++j) {
+        const int u = (i >> 1) * T_NCH + j, a = 2 * g + (u & 1);
+        mbar_wait(&B.acc[a], (u >> 1) & 1);
+        tc_fence_after();
+        const f2 sn = dup2(snr[j]);
+#pragma unroll 1
+        for (int c = 0; c < 4 && j * 128 + (int)lb < N; ++c) {   // 32 pair rows per load (a warp of padding rows skips)
+          uint32_t v[32];
+          tmem_ld32(tmem + (lb << 16) + a * 128 + c * 32, v);
+          tmem_wait_ld();
+          uint32_t o[16];
+#pragma unroll
+          for (int p = 0; p < 8; ++p) {                      // rows c * 32 + 4 p .. + 3: (rstd, -mean rstd) as broadcasts
+            const uint4 rs4 = lds128(rs_a + (uint32_t)(c * 32 + 4 * p) * 4), nm4 = lds128(rs_a + 512 + (uint32_t)(c * 32 + 4 * p) * 4);
+            o[2 * p] = pk(fma2(mk2u(v[4 * p], v[4 * p + 1]), mk2u(rs4.x, rs4.y), mul2(mk2u(nm4.x, nm4.y), sn)));
+            o[2 * p + 1] = pk(fma2(mk2u(v[4 * p + 2], v[4 * p + 3]), mk2u(rs4.z, rs4.w), mul2(mk2u(nm4.z, nm4.w), sn)));
+          }
+          // stage the 32 rows into their half of the slot; every second load the slot ([32 weight rows][64 pair rows], 128 B per
+          // weight row: whole lines -- 64-B row pieces halved the DRAM write rate at large R) leaves by one TMA store
+          const uint32_t sb = stg + (uint32_t)(nst & 1) * T_STG;
+          if ((c & 1) == 0 && nst >= 2) {
+            if (lane == 0) asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory");   // the slot's previous store has read it
+            __syncwarp();
+          }
+#pragma unroll
+          for (int q = 0; q < 4; ++q) sts128(sb + sw128(lane, (c & 1) * 4 + q), make_uint4(o[4 * q], o[4 * q + 1], o[4 * q + 2], o[4 * q + 3]));
+          if (c & 1) {
+            fence_proxy_async();
+            __syncwarp();
+            if (lane == 0) { tma_store_2d(&mo, sb, r0 + (c - 1) * 32, j * 128 + (int)lb); tma_store_commit(); }
+            ++nst;
+          }
+        }
+        tc_fence_before();
+        __syncwarp();
+        if (lane == 0) mbar_arrive(&B.acc_empty[a]);
+      }
+    }
+    if (lane == 0) tma_store_wait0();
+  }
+  tc_fence_before();
+  __syncthreads();
+  if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, 512); }
+}
+#endif  // FWDT
+
+// ================================================================================================ backward, normalised tile
+// -DBWD3 (bo_hoist_bwd3_sm100; bf16, and -DTF32 for fp32): the backward for any number of weight rows. The row threads turn their tile
+// into xhat = ((x - k) - (mean - k)) rstd once per tile -- bf16: two bf16 terms, hi over the raw row in place and lo into the slot's
+// second tile (hi + lo = xhat to ~2^-17); tf32: in place, rounded to the nearest tf32 (cvt.rna) -- so every product of the tile reads
+// operands as TMA left them:
+//   d LN0 = sum_j dbias_j^T W'_j          (A = the dbias chunk MN-major, B = the W' chunk MN-major; TMEM rows x channels)
+//   S_j  += xhat^T dbias_j^T               (A = the tile MN-major, B = the dbias chunk K-major)
+// S = dbias xhat is dW' itself (no channel mean to subtract): bf16 the d bias against xhat to ~2^-17, tf32 both operands rounded to
+// the nearest tf32 (the arithmetic of the LN0-rows path), fp32 accumulation. Then the LayerNorm backward from d LN0: mean(dy),
+// mean(dy xhat), dx = rstd (dy - mean(dy) - xhat mean(dy xhat)), written over the tile and stored by TMA from there. The row threads
+// have no work per weight-row chunk: the weight rows cost tensor-core work and the dbias / W' streams only.
+// Chunks: bf16 dbias 128 weight rows ([2 boxes of 64 pair rows][128][128 B] SW128: S's K-major B and d LN0's MN-major A at once), W'
+// 64 rows; tf32 32 rows each, the dbias chunk loaded twice (K-major SW128 for S, MN-major with 32-B atoms for d LN0: an MN-major
+// kind::tf32 operand must sit in that layout, a K-major one cannot).
+// Rings: the tile slot of group g (slot g, loaded by the group itself once its previous tile's dx is stored), the dbias ring and the
+// W' ring (the MMA warp's order of use). TMEM: d LN0 accumulators -- one per group while S takes <= 256 columns, else one shared
+// (the MMA runs the next tile's first S products while the drain empties it) -- and S [128 channels][weight rows].
+// A launch walks the dbias chunks [jb, je) of every tile: ``dx`` launches all of them (d LN0, d pair) with S for [s0, s1) (<= 384
+// weight rows); S-only launches (dx = 0) [s0, s1) (<= 512 weight rows), the pair read again (``hoist.bwd3_plan``).
+#ifdef BWD3
+#ifdef TF32
+constexpr int X3B = TM * 128, X3T = 4 * X3B;              // the tile [4 boxes of 32 channels][128 rows][128 B], 32-B atoms (raw -> xhat -> dx)
+constexpr int NTERM = 1;                                  // xhat in one term
+constexpr int DC = 32, WC = 32;                           // weight rows per dbias / W' chunk
+constexpr int DKB = DC * 128;                             // a box of the dbias chunk [32 weight rows][32 pair rows]: 4 KB
+constexpr int D3K = 4 * DKB, D3T = 2 * D3K;               // the dbias chunk K-major SW128 | MN-major 32-B atoms
+constexpr int W3B = WC * 128, W3T = 4 * W3B;              // W' chunk [4 boxes of 32 channels][32 weight rows][128 B], 32-B atoms
+constexpr int KS_X = 16, KST_X = 1024;                    // S: K steps of 8 pair rows (1 KB of the MN tile)
+constexpr int KS_W = WC / 8, KST_W = 1024;                // d LN0: K steps of 8 weight rows per W' chunk
+constexpr uint32_t ID3_DLN = idesc_tf32(TM, DP, 1, 1);
+DEVI uint64_t dmn3(uint32_t a, uint32_t lbo) { return desc_mn32b(a, lbo); }
+DEVI void mma3(uint32_t d, uint64_t a, uint64_t b, uint32_t id, uint32_t acc) { umma_ss_tf32(d, a, b, id, acc); }
+DEVI uint32_t idesc3_s(int n) { return idesc_tf32(DP, n, 1, 0); }
+// byte offset of fp32 (r, 4 c .. 4 c + 3) -- chunk c (0..31) -- in the tile: 32-B granule j of 128-B row r at granule j ^ (r & 3)
+DEVI uint32_t x3off(uint32_t r, uint32_t c) { return (c >> 3) * X3B + r * 128u + ((((c & 7u) >> 1) ^ (r & 3u)) << 5) + (c & 1u) * 16u; }
+#else
+constexpr int X3B = TM * 128, X3T = 2 * X3B;              // the tile [2 boxes of 64 channels][128 rows][128 B] SW128 (raw -> hi -> dx)
+constexpr int NTERM = 2;                                  // xhat as hi | lo
+constexpr int DC = 128, WC = 64;
+constexpr int DKB = DC * 128;                             // a box of the dbias chunk [128 weight rows][64 pair rows]: 16 KB
+constexpr int D3K = 2 * DKB, D3T = D3K;                   // one copy serves both products
+constexpr int W3B = WC * 128, W3T = 2 * W3B;              // W' chunk [2 boxes of 64 channels][64 weight rows][128 B] SW128
+constexpr int KS_X = 8, KST_X = 2048;                     // S: K steps of 16 pair rows
+constexpr int KS_W = WC / 16, KST_W = 2048;               // d LN0: K steps of 16 weight rows
+constexpr uint32_t ID3_DLN = idesc_bf16(TM, DP, 1, 1);
+DEVI uint64_t dmn3(uint32_t a, uint32_t lbo) { return desc_mn128(a, lbo); }
+DEVI void mma3(uint32_t d, uint64_t a, uint64_t b, uint32_t id, uint32_t acc) { umma_ss(d, a, b, id, acc); }
+DEVI uint32_t idesc3_s(int n) { return idesc_bf16(DP, n, 1, 0); }
+#endif
+constexpr int X3S = NTERM * X3T;                          // a slot
+constexpr int D3ST = 2, W3ST = 2;
+constexpr int O3_X = 0, O3_D = O3_X + 2 * X3S, O3_W = O3_D + D3ST * D3T, O3_BAR = O3_W + W3ST * W3T;
+constexpr int B3_SMEM = 1024 + O3_BAR + 512;
+static_assert(B3_SMEM <= SMEM_MAX, "backward (normalised tile) shared memory");
+static_assert(DC % WC == 0 && X3T % 1024 == 0 && D3K % 1024 == 0 && W3T % 1024 == 0, "chunks; 1 KB alignment");
+
+struct B3Bars {
+  uint64_t xfull[2], xready[2], xmma[2], dfull[D3ST], dempty[D3ST], wfull[W3ST], wempty[W3ST], acc[2], acc_empty[2], done;
+  uint32_t tmem;
+};
+
+// mx: pair rows [R][128] (bf16: box (64, 128) SW128; tf32: box (32, 128) 32-B atoms); mdb: dbias_all [N][R], box (bf16 64 / tf32 32
+// pair rows, DC weight rows) SW128 (rows past N zero-filled); mdbm (tf32): the same box, 32-B atoms; mw: W' [N][128], box (64 / 32
+// channels, WC rows) (bf16 SW128, tf32 32-B atoms; zero-filled past N); mdx: d pair [R][128] (bf16 box (64, 32) SW128, tf32 (32, 32)
+// 32-B atoms); part: S partials [grid][(s1 - s0) DC][128] fp32 (weight row, channel). dx != 0: d LN0 over every chunk and d pair.
+extern "C" __global__ void __launch_bounds__(THREADS, 1)
+bo_hoist_bwd3_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mdb, const __grid_constant__ CUtensorMap mdbm,
+                    const __grid_constant__ CUtensorMap mw, const __grid_constant__ CUtensorMap mdx, float* __restrict__ part, int R, int N,
+                    int s0, int s1, int dx, int eps_bits) {
+  extern __shared__ __align__(1024) uint8_t smraw[];
+  uint8_t* sm = smraw + ((1024u - (smem_u32(smraw) & 1023u)) & 1023u);
+  const uint32_t su = smem_u32(sm);
+  B3Bars& B = *reinterpret_cast<B3Bars*>(sm + O3_BAR);
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int T = R / TM, G = gridDim.x, my = (T > (int)blockIdx.x) ? (T - (int)blockIdx.x + G - 1) / G : 0;
+  const float eps = __int_as_float(eps_bits);
+  const int nd = (N + DC - 1) / DC, nw = (N + WC - 1) / WC;
+  const int jb = dx ? 0 : s0, nj = (dx ? nd : s1) - jb, la = nj < D3ST ? nj : D3ST;
+  const int ns = s1 - s0, na = dx ? (ns * DC <= 256 ? 2 : 1) : 0, scol = na * DP;
+
+  if (tid == 0) {
+    for (int g = 0; g < 2; ++g) {
+      mbar_init(&B.xfull[g], 1); mbar_init(&B.xready[g], 4); mbar_init(&B.xmma[g], 1);
+      mbar_init(&B.acc[g], 1); mbar_init(&B.acc_empty[g], 4);
+    }
+    for (int s = 0; s < D3ST; ++s) { mbar_init(&B.dfull[s], 1); mbar_init(&B.dempty[s], 1); }
+    for (int s = 0; s < W3ST; ++s) { mbar_init(&B.wfull[s], 1); mbar_init(&B.wempty[s], 1); }
+    mbar_init(&B.done, 1);
+    fence_barrier_init();
+    prefetch_map(&mx); prefetch_map(&mdb); prefetch_map(&mw); prefetch_map(&mdx);
+#ifdef TF32
+    prefetch_map(&mdbm);
+#endif
+  }
+  if (warp == 1) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
+  tc_fence_before();
+  __syncthreads();
+  tc_fence_after();
+  const uint32_t tmem = B.tmem;
+
+  if (warp == 0) {
+    if (lane == 0) {                                         // the dbias and W' rings, in the MMA warp's order of use
+      int qd = 0, qw = 0;
+      for (int i = 0; i < my; ++i) {
+        const int r0 = ((int)blockIdx.x + i * G) * TM;
+        auto load_d = [&](int J) {
+          const int ds = qd % D3ST;
+          if (qd >= D3ST) mbar_wait(&B.dempty[ds], ((qd / D3ST) - 1) & 1);
+          const uint32_t dt = su + O3_D + ds * D3T;
+          mbar_expect_tx(&B.dfull[ds], D3T);
+          for (int b = 0; b < TM * ES / 128; ++b) {
+            tma_load_2d(dt + b * DKB, &mdb, &B.dfull[ds], r0 + b * (128 / ES), J * DC);
+#ifdef TF32
+            tma_load_2d(dt + D3K + b * DKB, &mdbm, &B.dfull[ds], r0 + b * (128 / ES), J * DC);
+#endif
+          }
+          ++qd;
+        };
+        for (int t = 0; t < la; ++t) load_d(jb + t);
+        for (int t = 0; t < nj; ++t) {
+          const int J = jb + t;
+          if (t >= la) load_d(J);
           if (dx)
-            for (int b = 0; b < X2_NBOX; ++b) tma_load_2d(dt + D2T + b * D2B, &mw, &B.dfull_[ds], b * (128 / ES), j * NP);
+            for (int w = J * (DC / WC); w < (J + 1) * (DC / WC) && w < nw; ++w, ++qw) {
+              const int ws = qw % W3ST;
+              if (qw >= W3ST) mbar_wait(&B.wempty[ws], ((qw / W3ST) - 1) & 1);
+              const uint32_t wt = su + O3_W + ws * W3T;
+              mbar_expect_tx(&B.wfull[ws], W3T);
+              for (int b = 0; b < DP * ES / 128; ++b) tma_load_2d(wt + b * W3B, &mw, &B.wfull[ws], b * (128 / ES), w * WC);
+            }
         }
       }
     }
   } else if (warp == 1) {
-    int q = 0;
+    int qd = 0, qw = 0;
     for (int i = 0; i < my; ++i) {
-      const int g = i & 1, k = i >> 1, xs = i % XST;
-      const uint32_t xt = su + O2_X + xs * X2T;
-      mbar_wait(&B.xfull[xs], (i / XST) & 1);
-      if (dx && k >= 1) mbar_wait(&B.acc_empty[g], (k - 1) & 1);
-      for (int j = c0; j < c1; ++j, ++q) {
-        const int ds = q % DST;
-        mbar_wait(&B.dfull_[ds], (q / DST) & 1);
+      const int g = i & 1, a = na == 2 ? g : 0;               // a: the TMEM accumulator; the barriers acc / acc_empty are per group
+      const uint32_t xs = su + O3_X + (uint32_t)g * X3S;
+      mbar_wait(&B.xready[g], (i >> 1) & 1);                 // the group's tile is xhat
+      auto sprod = [&](int J, uint32_t dt) {
+        if (J < s0 || J >= s1) return;
+        const int nJ = min(DC, ((N - J * DC) + 15) & ~15);
+        const uint32_t id = idesc3_s(nJ), col = tmem + scol + (uint32_t)(J - s0) * DC;
+        if (elect_one()) {
+#pragma unroll
+          for (int h = 0; h < NTERM; ++h)
+#pragma unroll
+            for (int ks = 0; ks < KS_X; ++ks)                // K step: 32 bytes of a pair row
+              mma3(col, dmn3(xs + h * X3T + ks * KST_X, X3B), desc_k128(dt + (ks >> 2) * DKB) + (uint64_t)((ks & 3) * 2), id,
+                   (i | h | ks) ? 1u : 0u);
+        }
+        __syncwarp();
+      };
+      tc_fence_after();
+      for (int t = 0; t < la; ++t) {                         // the first chunks' S products: before d LN0 waits for its accumulator
+        const int ds = (qd + t) % D3ST;
+        mbar_wait(&B.dfull[ds], ((qd + t) / D3ST) & 1);
         tc_fence_after();
-        const uint32_t dt = su + O2_D + ds * D2S;
-        if (dx) {
-          if (elect_one()) {
-#pragma unroll
-            for (int ks = 0; ks < K2_DLN; ++ks)
-              umma2(tmem + g * DP, desc_mn2(dt + ks * K2_STEP, D2B), desc_mn2(dt + D2T + ks * K2_STEP, D2B), ID2_DLN, (j > c0 || ks) ? 1u : 0u);
-          }
-          __syncwarp();
-        }
-        if (j >= s0 && j < s1) {
-          const int v = k * ns + (j - s0);                   // the group's running S chunk
-          mbar_wait(&B.wfull[g], v & 1);
+        sprod(jb + t, su + O3_D + ds * D3T);
+      }
+      // the accumulator's previous tile drained: the group's own previous tile (two accumulators) or the other group's (one; a
+      // barrier pair per group, never one barrier whose alternate phases two groups wait for: a waiter a phase early would pass)
+      if (dx && na == 2 && i >= 2) mbar_wait(&B.acc_empty[g], ((i >> 1) - 1) & 1);
+      if (dx && na == 1 && i >= 1) mbar_wait(&B.acc_empty[g ^ 1], ((i - 1) >> 1) & 1);
+      tc_fence_after();
+      bool first = true;
+      for (int t = 0; t < nj; ++t) {
+        const int J = jb + t, ds = (qd + t) % D3ST;
+        const uint32_t dt = su + O3_D + ds * D3T;
+        if (t >= la) {
+          mbar_wait(&B.dfull[ds], ((qd + t) / D3ST) & 1);
           tc_fence_after();
-          if (elect_one()) {
-#pragma unroll
-            for (int h = 0; h < NWD; ++h) {
-              const uint32_t dp = su + O2_W + (uint32_t)(g * NWD + h) * WD2;
-#pragma unroll
-              for (int ks = 0; ks < K2_S; ++ks)              // K step: 16 (8) rows; d' / d K-major (32 bytes within a 128-byte row)
-                umma2(tmem + 2 * DP + (j - s0) * NP, desc_mn2(xt + ks * K2_STEP, X2B), desc_k128(dp + (ks >> 2) * D2B) + (uint64_t)((ks & 3) * 2),
-                      ID2_S, (i | h | ks) ? 1u : 0u);
-            }
-            tc_commit(&B.wempty[g]);
-          }
-          __syncwarp();
+          sprod(J, dt);
         }
-        if (elect_one()) tc_commit(&B.dempty_[ds]);
+        if (dx)
+          for (int w = J * (DC / WC); w < (J + 1) * (DC / WC) && w < nw; ++w, ++qw) {
+            const int ws = qw % W3ST;
+            mbar_wait(&B.wfull[ws], (qw / W3ST) & 1);
+            tc_fence_after();
+#ifdef TF32
+            const uint32_t da = dt + D3K;                    // the MN-major copy
+#else
+            const uint32_t da = dt + (uint32_t)(w & 1) * (WC * 128);   // this W' chunk's 64 weight rows of the dbias chunk
+#endif
+            const uint32_t wt = su + O3_W + ws * W3T;
+            if (elect_one()) {
+#pragma unroll
+              for (int ks = 0; ks < KS_W; ++ks)              // K step: 16 (bf16) / 8 (tf32) weight rows
+                mma3(tmem + a * DP, dmn3(da + ks * KST_W, DKB), dmn3(wt + ks * KST_W, W3B), ID3_DLN, (first && ks == 0) ? 0u : 1u);
+              tc_commit(&B.wempty[ws]);
+            }
+            __syncwarp();
+            first = false;
+          }
+        if (elect_one()) tc_commit(&B.dempty[ds]);
         __syncwarp();
       }
+      qd += nj;
       if (elect_one()) {
         if (dx) tc_commit(&B.acc[g]);
-        tc_commit(&B.xempty[xs]);
+        tc_commit(&B.xmma[g]);
       }
       __syncwarp();
     }
@@ -745,197 +953,170 @@ bo_hoist_bwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
   } else {
     const int g = (warp - 2) >> 2;
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane;
-    const uint32_t wd = su + O2_W + (uint32_t)(g * NWD) * WD2;
-#ifndef TF32
-    const uint32_t dxs = su + O2_DX + (uint32_t)(warp - 2) * 2 * (32 * 64);
-    int nst = 0;                                             // staged dx stores issued by this warp
-#endif
+    const uint32_t xs = su + O3_X + (uint32_t)g * X3S;
+    const bool leader = warp == 2 + 4 * g && lane == 0;     // issues the group's tile loads
+    auto load_x = [&](int i) {
+      const int r0 = ((int)blockIdx.x + i * G) * TM;
+      mbar_expect_tx(&B.xfull[g], X3T);
+      for (int b = 0; b < DP * ES / 128; ++b) tma_load_2d(xs + b * X3B, &mx, &B.xfull[g], b * (128 / ES), r0);
+    };
+    if (leader && g < my) load_x(g);
     for (int i = g; i < my; i += 2) {
-      const int k = i >> 1, xs = i % XST, r0 = ((int)blockIdx.x + i * G) * TM;
-      const uint32_t xt = su + O2_X + xs * X2T, rr = opaque(r);
-      mbar_wait(&B.xfull[xs], (i / XST) & 1);
-      // ---- the row statistics (shifted one-pass sums: the forward's arithmetic)
+      const int k = i >> 1, r0 = ((int)blockIdx.x + i * G) * TM;
+      const uint32_t rr = opaque(r);
+      mbar_wait(&B.xfull[g], k & 1);
+      // ---- the row statistics (shifted one-pass sums: the forward's arithmetic), then xhat
+      float mean, rstd, m1, k0;
 #ifdef TF32
-      const float k0 = __uint_as_float(lds128v(xt + x32off(rr, 0)).x);
-      const f2 nk = dup2(-k0);
-      f2 q1 = mk2(0.f, 0.f), q2 = q1, q3 = q1, q4 = q1;
+      {
+        k0 = __uint_as_float(lds128v(xs + x3off(rr, 0)).x);
+        const f2 nk = dup2(-k0);
+        f2 q1 = mk2(0.f, 0.f), q2 = q1, q3 = q1, q4 = q1;
 #pragma unroll 4
-      for (int c = 0; c < 32; ++c) {
-        const uint4 u = lds128v(xt + x32off(rr, c));
-        const f2 t0 = add2(mk2u(u.x, u.y), nk), t1 = add2(mk2u(u.z, u.w), nk);
-        q1 = add2(q1, t0); q2 = fma2(t0, t0, q2); q3 = add2(q3, t1); q4 = fma2(t1, t1, q4);
-      }
-      float mean, rstd, m1;
-      finish_stats(add2(q1, q3), add2(q2, q4), k0, eps, mean, rstd, m1);
-      const f2 rs = dup2(rstd), nmr = dup2(-mean * rstd);
-#pragma unroll 4
-      for (int c = 0; c < 32; ++c) {                          // the row becomes xhat rounded to the nearest tf32 (cvt.rna): S's operand
-        const uint32_t ad = xt + x32off(rr, c);              // and the dx pass's input (the MMA would otherwise drop the low bits:
-        const uint4 u = lds128v(ad);                          // a one-sided error that S's sum over every pair row accumulates)
-        const f2 y0 = fma2(mk2u(u.x, u.y), rs, nmr), y1 = fma2(mk2u(u.z, u.w), rs, nmr);
-        sts128(ad, make_uint4(tf32_rna(lo2(y0)), tf32_rna(hi2(y0)), tf32_rna(lo2(y1)), tf32_rna(hi2(y1))));
-      }
-#else
-      const float k0 = row_shift(xt, rr);
-      const f2 nk = dup2(-k0);
-      f2 q1 = mk2(0.f, 0.f), q2 = q1, q3 = q1, q4 = q1;
-#pragma unroll
-      for (int q = 0; q < 16; q += 2) {
-        acc_stats(lds128v(xt + xoff(rr, q)), nk, q1, q2);
-        acc_stats(lds128v(xt + xoff(rr, q + 1)), nk, q3, q4);
-      }
-      float mean, rstd, m1;
-      finish_stats(add2(q1, q3), add2(q2, q4), k0, eps, mean, rstd, m1);
-      const f2 rs = dup2(rstd), nmr = dup2(-mean * rstd);
-#endif
-      // ---- the chunks: d' (bf16: dbias rstd as hi + lo) / d (tf32: the dbias copy) for the S product; release the D slot
-      for (int j = c0; j < c1; ++j) {
-        const int q = i * nc + (j - c0), ds = q % DST;
-        // The slot's previous use (q - DST) may be the other group's chunk: wait for its release before the parity wait on dfull_,
-        // which would otherwise pass on that use's phase while its fill is still in flight (a whole ring ahead of the fills)
-        if (q >= DST) mbar_wait(&B.dempty_[ds], ((q / DST) - 1) & 1);
-        mbar_wait(&B.dfull_[ds], (q / DST) & 1);
-        if (j >= s0 && j < s1) {
-          const int v = k * ns + (j - s0);
-          if (v >= 1) mbar_wait(&B.wempty[g], (v - 1) & 1);  // the group's previous S product has read d
-          const uint32_t db = su + O2_D + ds * D2S;
-#ifdef TF32
-#pragma unroll 8
-          for (int n = 0; n < NP; ++n)                        // rounded to the nearest tf32, as xhat
-            sts32f(wd + dk32off((uint32_t)n, rr), __uint_as_float(tf32_rna(lds32f(db + db32off((uint32_t)n, rr)))));
-#else
-#pragma unroll 8
-          for (int n = 0; n < NP; ++n) {
-            const uint32_t o = doff((uint32_t)n, rr);
-            const float d = __uint_as_float(lds16(db + o) << 16) * rstd;
-            const uint32_t hb = pack_bf16(d, 0.f) & 0xffffu;
-            sts16(wd + o, hb);
-            sts16(wd + WD2 + o, pack_bf16(d - __uint_as_float(hb << 16), 0.f) & 0xffffu);
-          }
-#endif
-          fence_proxy_async();
-          __syncwarp();
-          if (lane == 0) mbar_arrive(&B.wfull[g]);
+        for (int c = 0; c < 32; ++c) {
+          const uint4 u = lds128v(xs + x3off(rr, c));
+          const f2 t0 = add2(mk2u(u.x, u.y), nk), t1 = add2(mk2u(u.z, u.w), nk);
+          q1 = add2(q1, t0); q2 = fma2(t0, t0, q2); q3 = add2(q3, t1); q4 = fma2(t1, t1, q4);
         }
-        __syncwarp();
-        if (lane == 0) mbar_arrive(&B.dempty_[ds]);
+        finish_stats(add2(q1, q3), add2(q2, q4), k0, eps, mean, rstd, m1);
+        const f2 rs = dup2(rstd), nm1r = dup2(-m1 * rstd);
+#pragma unroll 4
+        for (int c = 0; c < 32; ++c) {                        // xhat rounded to the nearest tf32, in place
+          const uint32_t ad = xs + x3off(rr, c);
+          const uint4 u = lds128v(ad);
+          const f2 y0 = fma2(add2(mk2u(u.x, u.y), nk), rs, nm1r), y1 = fma2(add2(mk2u(u.z, u.w), nk), rs, nm1r);
+          sts128(ad, make_uint4(tf32_rna(lo2(y0)), tf32_rna(hi2(y0)), tf32_rna(lo2(y1)), tf32_rna(hi2(y1))));
+        }
       }
-      if (dx) {
-        // ---- the LayerNorm backward from d LN0 (TMEM, every chunk summed)
-        mbar_wait(&B.acc[g], k & 1);
-        tc_fence_after();
-        const uint32_t ta = tmem + (lb << 16) + g * DP;
-        f2 sd = mk2(0.f, 0.f), sdx = sd, ud = sd, udx = sd;
-#pragma unroll
-        for (int c = 0; c < 4; ++c) {                         // pass 1: sum(dy), sum(dy t) (t = xhat for tf32, x - k for bf16)
-          uint32_t vv[32];
-          tmem_ld32(ta + c * 32, vv);
-          uint4 xq[8];
-#ifdef TF32
-#pragma unroll
-          for (int e = 0; e < 8; ++e) xq[e] = lds128v(xt + x32off(rr, c * 8 + e));
-          tmem_wait_ld();
-#pragma unroll
-          for (int e = 0; e < 8; ++e) {
-            const f2 t0 = mk2u(xq[e].x, xq[e].y), t1 = mk2u(xq[e].z, xq[e].w);
-            const f2 d0 = mk2u(vv[4 * e], vv[4 * e + 1]), d1 = mk2u(vv[4 * e + 2], vv[4 * e + 3]);
-            sd = add2(sd, d0); sdx = fma2(d0, t0, sdx); ud = add2(ud, d1); udx = fma2(d1, t1, udx);
-          }
 #else
+      {
+        k0 = row_shift(xs, rr);
+        const f2 nk = dup2(-k0);
+        f2 q1 = mk2(0.f, 0.f), q2 = q1, q3 = q1, q4 = q1;
 #pragma unroll
-          for (int e = 0; e < 4; ++e) xq[e] = lds128v(xt + xoff(rr, c * 4 + e));
-          tmem_wait_ld();
+        for (int q = 0; q < 16; q += 2) {
+          acc_stats(lds128v(xs + xoff(rr, q)), nk, q1, q2);
+          acc_stats(lds128v(xs + xoff(rr, q + 1)), nk, q3, q4);
+        }
+        finish_stats(add2(q1, q3), add2(q2, q4), k0, eps, mean, rstd, m1);
+        const f2 rs = dup2(rstd), nm1r = dup2(-m1 * rstd), mone = dup2(-1.f);
+#pragma unroll 4
+        for (int q = 0; q < 16; ++q) {                        // xhat as hi (in place) + lo
+          const uint32_t ad = xs + xoff(rr, q);
+          const uint4 u = lds128v(ad);
+          const uint32_t w4[4] = {u.x, u.y, u.z, u.w};
+          uint32_t hi[4], lo[4];
 #pragma unroll
           for (int e = 0; e < 4; ++e) {
-            const uint32_t xw[4] = {xq[e].x, xq[e].y, xq[e].z, xq[e].w};
-#pragma unroll
-            for (int kk = 0; kk < 4; kk += 2) {
-              const f2 t = add2(unpk(xw[kk]), nk), d = mk2u(vv[8 * e + 2 * kk], vv[8 * e + 2 * kk + 1]);
-              const f2 t2 = add2(unpk(xw[kk + 1]), nk), d2 = mk2u(vv[8 * e + 2 * kk + 2], vv[8 * e + 2 * kk + 3]);
-              sd = add2(sd, d); sdx = fma2(d, t, sdx); ud = add2(ud, d2); udx = fma2(d2, t2, udx);
-            }
+            const f2 xh = fma2(add2(unpk(w4[e]), nk), rs, nm1r);    // (x - k) rstd - (mean - k) rstd
+            hi[e] = pk(xh);
+            lo[e] = pk(fma2(unpk(hi[e]), mone, xh));
           }
+          sts128(ad, make_uint4(hi[0], hi[1], hi[2], hi[3]));
+          sts128(xs + X3T + xoff(rr, q), make_uint4(lo[0], lo[1], lo[2], lo[3]));
+        }
+      }
 #endif
+      fence_proxy_async();
+      __syncwarp();
+      if (lane == 0) mbar_arrive(&B.xready[g]);
+      if (dx) {
+        const int a = na == 2 ? g : 0;
+        mbar_wait(&B.acc[g], k & 1);                         // d LN0 summed over every chunk; every product of this tile done
+        tc_fence_after();
+        const uint32_t ta = tmem + (lb << 16) + a * DP;
+        const f2 rs = dup2(rstd);
+        f2 sd = mk2(0.f, 0.f), sdx = sd, ud = sd, udx = sd;
+        // xhat of 32 channels (8 f2 pairs per 16-byte chunk group): tf32 the tile, bf16 hi + lo
+#pragma unroll
+        for (int c = 0; c < 4; ++c) {                        // pass 1: sum(dy), sum(dy xhat)
+          uint32_t v[32];
+          tmem_ld32(ta + c * 32, v);
+          uint4 hq[8];
+#ifdef TF32
+#pragma unroll
+          for (int e = 0; e < 8; ++e) hq[e] = lds128v(xs + x3off(rr, c * 8 + e));
+#else
+#pragma unroll
+          for (int e = 0; e < 4; ++e) { hq[e] = lds128v(xs + xoff(rr, c * 4 + e)); hq[4 + e] = lds128v(xs + X3T + xoff(rr, c * 4 + e)); }
+#endif
+          tmem_wait_ld();
+#pragma unroll
+          for (int p = 0; p < 16; p += 2) {
+            f2 x0, x1;
+#ifdef TF32
+            x0 = mk2u(hq[p >> 1].x, hq[p >> 1].y);            // channels 2 p, 2 p + 1 (p even: the chunk's first half)
+            x1 = mk2u(hq[p >> 1].z, hq[p >> 1].w);
+#else
+            const uint32_t h0 = (&hq[p >> 2].x)[p & 3], l0 = (&hq[4 + (p >> 2)].x)[p & 3];
+            const uint32_t h1 = (&hq[(p + 1) >> 2].x)[(p + 1) & 3], l1 = (&hq[4 + ((p + 1) >> 2)].x)[(p + 1) & 3];
+            x0 = add2(unpk(h0), unpk(l0));
+            x1 = add2(unpk(h1), unpk(l1));
+#endif
+            const f2 d0 = mk2u(v[2 * p], v[2 * p + 1]), d1 = mk2u(v[2 * p + 2], v[2 * p + 3]);
+            sd = add2(sd, d0); sdx = fma2(d0, x0, sdx); ud = add2(ud, d1); udx = fma2(d1, x1, udx);
+          }
         }
         sd = add2(sd, ud); sdx = add2(sdx, udx);
-        const float mdy = (lo2(sd) + hi2(sd)) * (1.f / DP);
+        const f2 nmdy = dup2(-(lo2(sd) + hi2(sd)) * (1.f / DP)), nmdyx = dup2(-(lo2(sdx) + hi2(sdx)) * (1.f / DP));
+#pragma unroll
+        for (int c = 0; c < 4; ++c) {                        // pass 2: dx = rstd (dy - mean(dy) - xhat mean(dy xhat)), over the tile
+          uint32_t v[32];
+          tmem_ld32(ta + c * 32, v);
+          uint4 hq[8];
 #ifdef TF32
-        const float mdyx = (lo2(sdx) + hi2(sdx)) * (1.f / DP);                 // mean(dy xhat)
+#pragma unroll
+          for (int e = 0; e < 8; ++e) hq[e] = lds128v(xs + x3off(rr, c * 8 + e));
 #else
-        const float mdyx = rstd * fmaf(-m1, mdy, (lo2(sdx) + hi2(sdx)) * (1.f / DP));   // rstd (mean(dy (x - k)) - (mean - k) mean(dy))
+#pragma unroll
+          for (int e = 0; e < 4; ++e) { hq[e] = lds128v(xs + xoff(rr, c * 4 + e)); hq[4 + e] = lds128v(xs + X3T + xoff(rr, c * 4 + e)); }
 #endif
-        const f2 nmdy = dup2(-mdy), nmdyx = dup2(-mdyx);
-        // pass 2: dx = rstd (dy - mean(dy) - xhat mean(dy xhat))
-#pragma unroll
-        for (int c = 0; c < 4; ++c) {
-          uint32_t vv[32];
-          tmem_ld32(ta + c * 32, vv);
-#ifdef TF32
-          uint4 xq[8];
-#pragma unroll
-          for (int e = 0; e < 8; ++e) xq[e] = lds128v(xt + x32off(rr, c * 8 + e));
           tmem_wait_ld();
+#ifdef TF32
 #pragma unroll
-          for (int e = 0; e < 8; ++e) {                     // written over xhat (every MMA reading this tile has completed: acc)
-            const f2 o0 = mul2(fma2(mk2u(xq[e].x, xq[e].y), nmdyx, add2(mk2u(vv[4 * e], vv[4 * e + 1]), nmdy)), rs);
-            const f2 o1 = mul2(fma2(mk2u(xq[e].z, xq[e].w), nmdyx, add2(mk2u(vv[4 * e + 2], vv[4 * e + 3]), nmdy)), rs);
-            sts128(xt + x32off(rr, c * 8 + e), make_uint4(__float_as_uint(lo2(o0)), __float_as_uint(hi2(o0)), __float_as_uint(lo2(o1)), __float_as_uint(hi2(o1))));
+          for (int e = 0; e < 8; ++e) {
+            const f2 o0 = mul2(fma2(mk2u(hq[e].x, hq[e].y), nmdyx, add2(mk2u(v[4 * e], v[4 * e + 1]), nmdy)), rs);
+            const f2 o1 = mul2(fma2(mk2u(hq[e].z, hq[e].w), nmdyx, add2(mk2u(v[4 * e + 2], v[4 * e + 3]), nmdy)), rs);
+            sts128(xs + x3off(rr, c * 8 + e), make_uint4(__float_as_uint(lo2(o0)), __float_as_uint(hi2(o0)), __float_as_uint(lo2(o1)), __float_as_uint(hi2(o1))));
           }
 #else
-          uint4 xq[4];
-#pragma unroll
-          for (int e = 0; e < 4; ++e) xq[e] = lds128v(xt + xoff(rr, c * 4 + e));
-          tmem_wait_ld();
-          uint4 od[4];
 #pragma unroll
           for (int e = 0; e < 4; ++e) {
-            const uint32_t xw[4] = {xq[e].x, xq[e].y, xq[e].z, xq[e].w};
+            const uint32_t hw[4] = {hq[e].x, hq[e].y, hq[e].z, hq[e].w}, lw[4] = {hq[4 + e].x, hq[4 + e].y, hq[4 + e].z, hq[4 + e].w};
             uint32_t o[4];
 #pragma unroll
             for (int kk = 0; kk < 4; ++kk) {
-              const f2 xh = fma2(unpk(xw[kk]), rs, nmr);
-              const f2 d = mk2u(vv[8 * e + 2 * kk], vv[8 * e + 2 * kk + 1]);
+              const f2 xh = add2(unpk(hw[kk]), unpk(lw[kk])), d = mk2u(v[8 * e + 2 * kk], v[8 * e + 2 * kk + 1]);
               o[kk] = pk(mul2(fma2(xh, nmdyx, add2(d, nmdy)), rs));
             }
-            od[e] = make_uint4(o[0], o[1], o[2], o[3]);
+            sts128(xs + xoff(rr, c * 4 + e), make_uint4(o[0], o[1], o[2], o[3]));
           }
-          const uint32_t sb = dxs + (uint32_t)(nst & 1) * (32 * 64);
-          if (nst >= 2) {
-            if (lane == 0) asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory");   // the slot's previous store has read it
-            __syncwarp();
-          }
-#pragma unroll
-          for (int e = 0; e < 4; ++e) sts128(sb + sw64(lane, e), od[e]);
-          fence_proxy_async();
-          __syncwarp();
-          if (lane == 0) { tma_store_2d(&mdx, sb, c * 32, r0 + (int)lb); tma_store_commit(); }
-          ++nst;
 #endif
         }
         tc_fence_before();
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.acc_empty[g]);
-#ifdef TF32
-        fence_proxy_async();                                  // dx in the pair tile -> the TMA stores of this warp's 32 rows
+        fence_proxy_async();                                 // dx in the tile -> this warp's TMA stores of its 32 rows
         __syncwarp();
         if (lane == 0) {
-          for (int b = 0; b < 4; ++b) tma_store_2d(&mdx, xt + b * X2B + lb * 128, b * 32, r0 + (int)lb);
+          for (int b = 0; b < DP * ES / 128; ++b) tma_store_2d(&mdx, xs + b * X3B + lb * 128, b * (128 / ES), r0 + (int)lb);
           tma_store_commit();
-          tma_store_wait_read0();                             // the X slot is free once the stores have read it
+          tma_store_wait_read0();                            // the slot is free once the stores have read it
         }
-#endif
+      } else {
+        mbar_wait(&B.xmma[g], k & 1);                        // the tile's S products done
       }
-      __syncwarp();
-      if (lane == 0) mbar_arrive(&B.xempty[xs]);
+      named_bar_sync(1 + g, 128);                            // the group's 4 warps are done with the slot
+      if (leader && i + 2 < my) load_x(i + 2);
     }
     if (lane == 0) tma_store_wait0();
     if (g == 0) {                                            // this CTA's S partial: TMEM lane = channel, column = weight row
       mbar_wait(&B.done, 0);
       tc_fence_after();
-      float* pp = part + (long)blockIdx.x * ns * NP * DP + r;
-      for (int c = 0; c < ns * NP / 16; ++c) {
+      float* pp = part + (long)blockIdx.x * ns * DC * DP + r;
+      for (int c = 0; c < ns * DC / 16; ++c) {
         uint32_t v[16];
-        tmem_ld16(tmem + (lb << 16) + 2 * DP + c * 16, v);
+        tmem_ld16(tmem + (lb << 16) + scol + c * 16, v);
         tmem_wait_ld();
 #pragma unroll
         for (int kk = 0; kk < 16; ++kk) pp[(c * 16 + kk) * DP] = my > 0 ? __uint_as_float(v[kk]) : 0.f;
@@ -946,4 +1127,4 @@ bo_hoist_bwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
   __syncthreads();
   if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
-#endif  // BWD2
+#endif  // BWD3

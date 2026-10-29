@@ -7,10 +7,11 @@
              split [hi | lo], 2 C columns; fp32: LN0 itself)
 
 The one-pass kernels (``bo_hoist_pass.cu``) take both widths; the multi-block bf16 backward (``bo_hoist_bwd.cu``) 128 only.
-B200 bf16 and fp32 (``sm100_fwd`` / ``sm100_bwd``, ``bo_hoist_sm100.cu``, pair width 128): the whole hoist in one pass over the pair each way per range
-of weight rows -- the projection on tcgen05 (bf16: from the raw pair rows with the LayerNorm in the epilogue; fp32: kind::tf32 on the
-tile normalised in shared memory), and d LN0, the LN0 backward and dW' in one kernel (bf16 up to 64 weight rows; more rows and fp32 over
-weight-row chunks, ``bwd_plan``). The cubins are built on first use into ``settings.engine_jit_root``.
+B200 bf16 and fp32 (``sm100_fwd`` / ``sm100_bwd``, ``bo_hoist_sm100.cu``, pair width 128): the whole hoist in one pass over the pair each way (more
+past 384 weight rows) -- the projection on tcgen05 (bf16: from the raw pair rows with the LayerNorm in the epilogue, past 32 weight rows
+with the weight rows on M and staged TMA stores; fp32: kind::tf32 on the tile normalised in shared memory), and d LN0, the LN0 backward
+and dW' in one kernel (bf16 up to 64 weight rows with rstd folded into the weight gradient's d bias; more rows and fp32 on the tile
+normalised once, ``bwd3_plan``). The cubins are built on first use into ``settings.engine_jit_root``.
 
 Built on first use (``load_extension``), never at import.
 """
@@ -174,23 +175,48 @@ def hoist_bwd_fused(pair2d: torch.Tensor, wf: torch.Tensor, dball: torch.Tensor,
     return dpair, part.sum(0)[:N]
 
 
-#: Weight rows (blocks x heads) per launch of the sm_100a one-pass hoist forward (``bo_hoist_sm100.cu``, W' resident in shared memory
-#: beside the pair stages): bf16 384 (96 KB, four 32 KB stages), fp32 128 (64 KB, two 64 KB stages); more rows run as several
-#: launches over row ranges (each reads the pair once). One launch takes NCH chunks of NP <= 128 rows (four TMEM accumulators of NP).
-SM100_FWD_LAUNCH_ROWS = {torch.bfloat16: 384, torch.float32: 128}
-#: Most weight rows of the one-chunk bf16 backward (W' resident; its shared memory); more rows, and fp32, take the chunked backward
-#: (``-DBWD2``: chunks of ``SM100_BWD_CHUNK`` rows streamed with each tile, S for at most 256 rows per launch)
+#: Weight rows per launch of the fp32 (TF32) forward ``bo_hoist_fwd_sm100 -DTF32`` (W' resident, 64 KB beside two 64 KB stages); more
+#: rows run as launches over row ranges (each reads the pair again) in NCH chunks of NP <= 128 rows (four TMEM accumulators of NP)
+SM100_FWD_LAUNCH_ROWS = 128
+#: The bf16 forward takes ``bo_hoist_fwdt_sm100`` (weight rows on M) past this many weight rows, ``bo_hoist_fwd_sm100`` up to it:
+#: measured at R = 7.08 M rows (ms, fwd_sm100 / fwdt): N32 0.351 / 0.387, N48 0.440 / 0.411, N64 0.518 / 0.423
+SM100_FWDT_MIN_ROWS = 32
+#: Weight rows per launch of ``bo_hoist_fwdt_sm100`` (W' resident: three chunks of 128, 96 KB); more rows: launches of 384, the rest last
+SM100_FWDT_LAUNCH_ROWS = 384
+#: Most weight rows of the one-pass bf16 backward ``bo_hoist_bwd_sm100`` (W' resident); more rows, and every fp32 call, take
+#: ``bo_hoist_bwd3_sm100`` (measured at R = 7.08 M: N64 1.24 vs 1.30 ms, N48 0.95 vs 1.32, N16 0.66 vs 1.30)
 SM100_BWD_MAX_ROWS = 64
-SM100_BWD_CHUNK = {torch.bfloat16: 64, torch.float32: 32}
-_BWD2_SMEM = 1024 + 229376 + 512
-#: Most weight rows the sm_100a hoist SERVES (``sm100_served``; the kernels themselves take any N). Past this the LayerNorm rows +
-#: cuBLAS path (T7) is faster: the tiled kernels run their weight-row chunks one after another per tile (the backward's d' / d per
-#: chunk, the forward's per-row stores). Measured (B200, hoist op alone, CUDA graphs, ms, sm100 / T7 at R = 1.77 M | 7.08 M rows):
-#: bf16 N128 fwd 0.227 / 0.384 | 0.858 / 1.529, bwd 0.520 / 0.981 | 2.001 / 3.852; N256 fwd 0.415 / 0.524 | 1.597 / 1.874, bwd 1.023 /
-#: 1.002 | 4.102 / 4.066; N384 bwd 1.761 / 1.172 | 7.259 / 4.737. fp32 N128 fwd 0.395 / 0.589 | 1.545 / 2.364, bwd 0.882 / 1.088 |
-#: 3.507 / 4.289; N256 bwd 1.448 / 1.438 | 5.926 / 5.717.
-SM100_MAX_ROWS = {torch.bfloat16: 192, torch.float32: 128}
+#: Most weight rows of the FORWARD the sm_100a hoist serves per dtype (``sm100_served``; none: any). fp32 past 128 rows reads the
+#: pair once per 128-row launch and loses to the LayerNorm rows + cuBLAS path (T7): N384 at R = 0.15 / 0.59 / 7.08 M rows 119 / 414 /
+#: 4983 us against 79 / 299 / 3665 (launches of 192 rows: 104 / 351 / --). The backward is served at every N.
+SM100_FWD_MAX_ROWS = {torch.float32: 128}
 _SMEM_MAX = 232448
+_BWD3_SMEM = 1024 + 229376 + 512
+
+
+def fwdt_plan(N: int) -> list[tuple[int, int]]:
+    """Weight-row ranges [n0, n1) of ``bo_hoist_fwdt_sm100``'s launches: ``SM100_FWDT_LAUNCH_ROWS`` each, the rest last."""
+    return [(n0, min(N, n0 + SM100_FWDT_LAUNCH_ROWS)) for n0 in range(0, N, SM100_FWDT_LAUNCH_ROWS)]
+
+
+def _fwdt_smem(nch: int) -> int:
+    """Dynamic shared memory of ``bo_hoist_fwdt_sm100`` (mirrors its constants; no realignment slack: the base is 1 KB aligned)."""
+    o_st = nch * 32768 + 2 * 2 * 128 * 4 + 8 * 2 * 4096
+    nst = min(6, (_SMEM_MAX - o_st - 512) // 32768)
+    return o_st + nst * 32768 + 512
+
+
+#: (dbias, W') weight rows per chunk of ``bo_hoist_bwd3_sm100``
+BWD3_CHUNKS = {torch.bfloat16: (128, 64), torch.float32: (32, 32)}
+
+
+def bwd3_plan(N: int, dtype: torch.dtype) -> list[tuple[int, int, bool]]:
+    """``bo_hoist_bwd3_sm100``'s launches, (s0, s1, dx) in dbias chunks: the first takes d LN0 over every chunk, d pair, and S for the
+    first 384 weight rows (tensor memory: S beside one d LN0 accumulator; two when S takes <= 256 columns); S-only launches take 512
+    weight rows more each (the pair read again)."""
+    dc = BWD3_CHUNKS[dtype][0]
+    nd, c1, c2 = -(-N // dc), 384 // dc, 512 // dc
+    return [(0, min(nd, c1), True)] + [(s, min(nd, s + c2), False) for s in range(c1, nd, c2)]
 
 
 def _np16(n: int) -> int:
@@ -198,12 +224,11 @@ def _np16(n: int) -> int:
 
 
 def fwd_plan(N: int, dtype: torch.dtype) -> tuple[int, int, int]:
-    """(rows per launch, NCH, NP) of the forward for N weight rows: up to ``SM100_FWD_LAUNCH_ROWS`` rows per launch in NCH chunks of NP
-    (a multiple of 16, at most 128) -- N <= 128 is one launch of one chunk (NP = N rounded up to 16)."""
+    """(rows per launch, NCH, NP) of ``bo_hoist_fwd_sm100`` for N weight rows (bf16 N <= ``SM100_FWDT_MIN_ROWS``, fp32): N <= 128 is one
+    launch of one chunk (NP = N rounded up to 16); fp32 past that launches of up to ``SM100_FWD_LAUNCH_ROWS`` rows in NCH chunks of NP."""
     if N <= 128:
         return N, 1, _np16(N)
-    cap = SM100_FWD_LAUNCH_ROWS[dtype]
-    nl = -(-N // cap)
+    nl = -(-N // SM100_FWD_LAUNCH_ROWS)
     per = -(-N // nl)
     nch = -(-per // 128)
     return per, nch, _np16(-(-per // nch))
@@ -226,16 +251,14 @@ def _sm100_smem(np_: int, bwd: bool, nch: int = 1, tf32: bool = False) -> int:
 
 
 def sm100_served(pair2d: torch.Tensor, wf: torch.Tensor, bwd: bool = False) -> bool:
-    """The sm_100a one-pass hoist serves pair rows [R, 128] (R a positive multiple of 128) with weight rows W' [N, 128] of the pair's
-    dtype, on sm_100 (``settings.bias_only_dit_hoist_sm100``), bf16 or fp32 (TF32), up to ``SM100_MAX_ROWS`` weight rows (where the
-    kernels beat the LayerNorm rows + cuBLAS path; ``sm100_fwd`` / ``sm100_bwd`` take any N): the forward over row ranges per launch
-    (``fwd_plan``), the backward (``bwd``) in one launch up to ``SM100_BWD_MAX_ROWS`` bf16 rows, else over weight-row chunks
-    (``bwd_plan``)."""
+    """The sm_100a hoist serves pair rows [R, 128] (R a positive multiple of 128) with weight rows W' [N, 128] of the pair's dtype, on
+    sm_100 (``settings.bias_only_dit_hoist_sm100``), bf16 or fp32 (TF32): the backward (``bwd``) at every N, the forward up to
+    ``SM100_FWD_MAX_ROWS`` (where it beats the LayerNorm rows + cuBLAS path; ``sm100_fwd`` itself takes any N)."""
     from miniworld_engine import settings
 
     dt = pair2d.dtype
-    if dt in SM100_MAX_ROWS and wf.shape[0] > SM100_MAX_ROWS[dt]:
-        return False  # the LayerNorm rows + cuBLAS path is faster there (see SM100_MAX_ROWS)
+    if not bwd and wf.shape[0] > SM100_FWD_MAX_ROWS.get(dt, wf.shape[0]):
+        return False  # the LayerNorm rows + cuBLAS path is faster there (see SM100_FWD_MAX_ROWS)
     if dt is torch.float32 and settings.current().bias_only_dit_pair_exact:
         return False  # the exact (three-product split fp32) pair bias was asked for: the kernels that have it
     return (
@@ -300,12 +323,33 @@ class _Hoist100:
             tm(wf, [128, N], 256, [64, np_]),  # rows N .. NP - 1: TMA zero fill
         )
 
+    def fwdt(self, pair2d, wf, out, eps):
+        """bf16, N > 64: ``bo_hoist_fwdt_sm100`` (weight rows on M, staged TMA stores), one launch per ``fwdt_plan`` range."""
+        from . import PTR, _descriptors, _Launch, sm100_kernel
+
+        R = pair2d.shape[0]
+        for n0, n1 in fwdt_plan(wf.shape[0]):
+            w, o = wf[n0:n1], out[n0:n1]
+            n, nch = n1 - n0, -(-(n1 - n0) // 128)
+            key = ("ft", pair2d.data_ptr(), w.data_ptr(), o.data_ptr(), R, n, eps)
+
+            def make(w=w, o=o, n=n, nch=nch):
+                tm = self._tm
+                k = sm100_kernel("bo_hoist_sm100", "bo_hoist_fwdt_sm100", self.device_index, src_dir=str(_dir), defs=(f"FWDT={nch}",),
+                                 smem=_fwdt_smem(nch))
+                maps = (tm(pair2d, [128, R], 256, [64, 128]), tm(w, [128, n], 256, [64, 128]), tm(o, [R, n], R * 2, [64, 32]))
+                return _Launch(k, (self.grid(R), 1, 1), (320, 1, 1), *_descriptors(*maps), PTR, R, n, _eps_bits(eps))
+
+            self.runs.bind(key, make)(w)
+
     def fwd(self, pair2d, wf, out, eps):
         """out [N, R] = W' LN0(pair)^T: one launch per range of ``fwd_plan`` rows (wf / out row slices: contiguous)."""
         from . import PTR, _descriptors, _Launch
 
         R, N = pair2d.shape[0], wf.shape[0]
         tf32 = pair2d.dtype is torch.float32
+        if not tf32 and N > SM100_FWDT_MIN_ROWS:
+            return self.fwdt(pair2d, wf, out, eps)
         per, nch, np_ = fwd_plan(N, pair2d.dtype)
         for n0 in range(0, N, per):
             w, o = wf[n0 : n0 + per], out[n0 : n0 + per]
@@ -320,44 +364,34 @@ class _Hoist100:
 
             self.runs.bind(key, make)(o, w)
 
-    def bwd2(self, pair2d, wf, dball, dpair, parts, eps):
-        """The chunked backward (``-DBWD2``): one launch per ``bwd_plan`` entry, its S partials into ``parts[k]``."""
+    def bwd3(self, pair2d, wf, dball, dpair, parts, eps):
+        """N > 64 bf16 and every fp32 call: ``bo_hoist_bwd3_sm100`` (the tile normalised once), one launch per ``bwd3_plan`` entry,
+        its S partials into ``parts[k]``."""
         from . import PTR, _descriptors, _Launch, sm100_kernel
 
         R, N = pair2d.shape[0], wf.shape[0]
         f32 = pair2d.dtype is torch.float32
-        npc = SM100_BWD_CHUNK[pair2d.dtype]
-        plan = bwd_plan(N, pair2d.dtype)
-        for (c0, c1, s0, s1, dx), part in zip(plan, parts, strict=True):
-            key = ("b2", pair2d.data_ptr(), wf.data_ptr(), dball.data_ptr(), dpair.data_ptr(), part.data_ptr(), R, N, eps, c0, s0)
+        dc, wc = BWD3_CHUNKS[pair2d.dtype]
+        for (s0, s1, dx), part in zip(bwd3_plan(N, pair2d.dtype), parts, strict=True):
+            key = ("b3", pair2d.data_ptr(), wf.data_ptr(), dball.data_ptr(), dpair.data_ptr(), part.data_ptr(), R, N, eps, s0)
 
-            def make(c0=c0, c1=c1, s0=s0, s1=s1, dx=dx, part=part):
+            def make(s0=s0, s1=s1, dx=dx, part=part):
                 tm = self._tm
                 if f32:
                     a32 = dict(swizzle="128a32", dtype="f32")
                     maps = (
                         tm(pair2d, [128, R], 512, [32, 128], **a32),
-                        tm(dball, [R, N], R * 4, [32, npc], **a32),  # rows past N: TMA zero fill
-                        tm(wf, [128, N], 512, [32, npc], **a32),
-                        tm(dpair, [128, R], 512, [32, 32], **a32),  # dx stored from the pair tile
+                        tm(dball, [R, N], R * 4, [32, dc], dtype="f32"),  # S's K-major copy (rows past N: TMA zero fill)
+                        tm(dball, [R, N], R * 4, [32, dc], **a32),  # d LN0's MN-major copy
+                        tm(wf, [128, N], 512, [32, wc], **a32),
+                        tm(dpair, [128, R], 512, [32, 32], **a32),  # dx stored from the tile
                     )
                 else:
-                    maps = (
-                        tm(pair2d, [128, R], 256, [64, 128]),
-                        tm(dball, [R, N], R * 2, [64, npc]),
-                        tm(wf, [128, N], 256, [64, npc]),
-                        tm(dpair, [128, R], 256, [32, 32], swizzle=64),
-                    )
-                k = sm100_kernel(
-                    "bo_hoist_sm100",
-                    "bo_hoist_bwd2_sm100",
-                    self.device_index,
-                    src_dir=str(_dir),
-                    defs=(f"NP={npc}", "BWD2", *(("TF32",) if f32 else ())),
-                    smem=_BWD2_SMEM,
-                )
-                return _Launch(k, (part.shape[0], 1, 1), (320, 1, 1), *_descriptors(*maps), PTR, R, c0, c1, s0, s1, int(dx),
-                               _eps_bits(eps))
+                    mdb = tm(dball, [R, N], R * 2, [64, dc])  # rows past N: TMA zero fill
+                    maps = (tm(pair2d, [128, R], 256, [64, 128]), mdb, mdb, tm(wf, [128, N], 256, [64, wc]), tm(dpair, [128, R], 256, [64, 32]))
+                k = sm100_kernel("bo_hoist_sm100", "bo_hoist_bwd3_sm100", self.device_index, src_dir=str(_dir),
+                                 defs=("BWD3", *(("TF32",) if f32 else ())), smem=_BWD3_SMEM)
+                return _Launch(k, (part.shape[0], 1, 1), (320, 1, 1), *_descriptors(*maps), PTR, R, N, s0, s1, int(dx), _eps_bits(eps))
 
             self.runs.bind(key, make)(part)
 
@@ -399,34 +433,22 @@ def sm100_fwd(pair2d: torch.Tensor, wf: torch.Tensor, eps: float = 1e-5) -> torc
     return out
 
 
-def bwd_plan(N: int, dtype: torch.dtype) -> list[tuple[int, int, int, int, bool]]:
-    """The chunked backward's launches for N weight rows: (c0, c1, s0, s1, dx) over chunks of ``SM100_BWD_CHUNK`` rows -- the first
-    takes every chunk for d LN0 and d pair and S for the first 256 rows, the others S for 256 rows more each (the pair read again)."""
-    npc = SM100_BWD_CHUNK[dtype]
-    nch, sc = -(-N // npc), 256 // npc
-    plan = [(0, nch, 0, min(nch, sc), True)]
-    plan += [(s, min(nch, s + sc), s, min(nch, s + sc), False) for s in range(sc, nch, sc)]
-    return plan
-
-
 def sm100_bwd(pair2d: torch.Tensor, wf: torch.Tensor, dball: torch.Tensor, eps: float = 1e-5):
-    """(d pair [R, 128] bf16, dW' [N, 128] fp32) from dbias_all [N, R] bf16 in one pass over the pair: d LN0 = dbias_all^T W' on tcgen05,
-    the LayerNorm backward, and S = (dbias_all diag(rstd)) pair (the scaled d bias as two bf16 terms against the raw pair rows, fp32
-    accumulation); dW' = S - its mean over the channels (every LN0 row sums to zero). The per-CTA fp32 partials of S are summed here in a
-    fixed order. Call ``sm100_served(..., bwd=True)`` first."""
+    """(d pair [R, 128], dW' [N, 128] fp32) from dbias_all [N, R] in the pair's dtype, in one pass over the pair (more past 384 weight
+    rows: ``bwd3_plan``): d LN0 = dbias_all^T W' on tcgen05, the LayerNorm backward and the weight gradient. bf16 up to
+    ``SM100_BWD_MAX_ROWS`` rows (``bo_hoist_bwd_sm100``): S = (dbias_all diag(rstd)) pair, dW' = S - its mean over the channels (every
+    LN0 row sums to zero); past that, and fp32 (``bo_hoist_bwd3_sm100``): dW' = dbias_all xhat on the tile normalised once (bf16 hi + lo,
+    tf32). The per-CTA fp32 partials are summed here in a fixed order. Call ``sm100_served(..., bwd=True)`` first."""
     R, N = pair2d.shape[0], wf.shape[0]
     h = _hoist100(_index(pair2d))
     dball = dball.contiguous()
     dpair = torch.empty_like(pair2d)
-    if pair2d.dtype is torch.float32 or N > SM100_BWD_MAX_ROWS:  # the chunked backward (-DBWD2)
-        npc = SM100_BWD_CHUNK[pair2d.dtype]
-        parts = [torch.empty(h.grid(R), (s1 - s0) * npc, 128, device=pair2d.device, dtype=torch.float32)
-                 for (_, _, s0, s1, _) in bwd_plan(N, pair2d.dtype)]
-        h.bwd2(pair2d, wf, dball, dpair, parts, float(eps))
-        S = torch.cat([p.sum(0) for p in parts])[:N]
-        if pair2d.dtype is torch.float32:
-            return dpair, S  # S = dbias xhat: dW' itself
-        return dpair, S - S.mean(1, keepdim=True)
+    if pair2d.dtype is torch.float32 or N > SM100_BWD_MAX_ROWS:  # the tile normalised once (-DBWD3)
+        dc = BWD3_CHUNKS[pair2d.dtype][0]
+        parts = [torch.empty(h.grid(R), (s1 - s0) * dc, 128, device=pair2d.device, dtype=torch.float32)
+                 for (s0, s1, _) in bwd3_plan(N, pair2d.dtype)]
+        h.bwd3(pair2d, wf, dball, dpair, parts, float(eps))
+        return dpair, torch.cat([p.sum(0) for p in parts])[:N]  # S = dbias xhat: dW' itself
     part = torch.empty(h.grid(R), _np16(N), 128, device=pair2d.device, dtype=torch.float32)
     h.bwd(pair2d, wf, dball, dpair, part, float(eps))
     S = part.sum(0)[:N]
@@ -443,4 +465,4 @@ def kernel_attrs() -> list[tuple[str, int, int]]:
     return [tuple(a) for a in ext().func_attrs()]
 
 
-__all__ = ["PAIR_WIDTHS", "PASS_FWD_MAX_ROWS", "FUSED_MAX_ROWS", "SM100_BWD_MAX_ROWS", "SM100_FWD_LAUNCH_ROWS", "SM100_MAX_ROWS", "SM100_BWD_CHUNK", "bwd_plan", "fwd_plan", "sm100_bwd", "sm100_fwd", "sm100_served", "pass_bwd", "pass_bwd_served", "pass_ext", "pass_fwd", "pass_fwd_served", "bwd_ext", "ext", "fused_bwd_served", "hoist_bwd_fused", "kernel_attrs", "ln0_bwd_rows", "ln0_rows", "operand_cols"]
+__all__ = ["PAIR_WIDTHS", "PASS_FWD_MAX_ROWS", "FUSED_MAX_ROWS", "SM100_BWD_MAX_ROWS", "SM100_FWD_LAUNCH_ROWS", "SM100_FWD_MAX_ROWS", "SM100_FWDT_LAUNCH_ROWS", "SM100_FWDT_MIN_ROWS", "BWD3_CHUNKS", "bwd3_plan", "fwd_plan", "fwdt_plan", "sm100_bwd", "sm100_fwd", "sm100_served", "pass_bwd", "pass_bwd_served", "pass_ext", "pass_fwd", "pass_fwd_served", "bwd_ext", "ext", "fused_bwd_served", "hoist_bwd_fused", "kernel_attrs", "ln0_bwd_rows", "ln0_rows", "operand_cols"]
