@@ -3,6 +3,8 @@ integrations/bias_only_dit_hoist.py) and the blocks' ``bias=`` paths (integratio
 
   * ``pair_bias_all`` forward and backward (d pair, every dW_b, every d gamma_b) against fp64 for 1 / 3 / 24 blocks, every head
     layout, bf16 and fp32 (TF32); the PyTorch fold the same; unused biases; the LN0 backward rows against fp64, no spills;
+  * the sm_100a one-pass hoist (``bo_hoist_sm100.cu``, bf16, up to 128 / 64 weight rows forward / backward) against fp64 alone (rows
+    far from zero mean, a constant row, padded weight rows, bitwise reruns) and under ``pair_bias_all`` on a pair per sample;
   * a stack of blocks hoisted (fused) against the stack in fp64, every gradient within the training files' bounds (bf16: 1.1x the
     PyTorch bf16 stack's error + 1e-4; fp32: 1.5x the PyTorch TF32 stack's + 1e-3), with and without a mask, L384 / L768;
   * inference on hoisted biases against the per-pair path; checkpointing (non-reentrant) bit-identical; 20 poisoned-allocator steps
@@ -258,6 +260,125 @@ def test_ln0_backward_rows_against_fp64(R, xdt, odt):
     ln = y.double() if K == 128 else y[:, :128].double() + y[:, 128:].double()
     assert relative(ln, ln64) < 3e-5, relative(ln, ln64)
     assert all(torch.equal(a, dx) and torch.equal(b, y) for a, b in outs[1:])
+
+
+# ------------------------------------------------------------------------------------------------ the sm_100a one-pass hoist
+def _sm100_only():
+    if torch.cuda.get_device_capability() != (10, 0):
+        pytest.skip("the sm_100a one-pass hoist (bo_hoist_sm100.cu) is B200-only")
+
+
+def _rows_ref64(pair2d, wf, dball, eps=1e-5):
+    """bias_all^T = W' LN0(x)^T, d x and dW' = dbias_all LN0 in fp64 from the same bf16 inputs."""
+    x = pair2d.double().requires_grad_(True)
+    ln = Fn.layer_norm(x, (128,), eps=eps)
+    bias = wf.double() @ ln.t()
+    torch.autograd.backward(bias, dball.double())
+    return bias.detach(), x.grad, dball.double() @ ln.detach()
+
+
+# (rows, weight rows, row mean): per-sample shapes (A L^2 rows), 12 / 24 / 48 weight rows (padded to 16 / 32 / 48), the backward's
+# largest (64), a grid whose CTAs end a tile apart (149 tiles), and rows whose mean is 20 standard deviations from zero
+SM100_ROWS = [
+    (128, 16, 0.0),
+    (3 * 256 * 256, 16, 0.0),
+    (2 * 384 * 384, 48, 0.5),
+    (4 * 128 * 128, 12, 0.0),
+    (5 * 128 * 128, 24, -1.0),
+    (3 * 128 * 128, 64, 0.0),
+    (149 * 128, 16, 0.0),
+    (2 * 256 * 256, 16, 20.0),
+]
+
+
+@pytest.mark.parametrize(("R", "N", "shift"), SM100_ROWS)
+def test_sm100_one_pass_hoist_against_fp64(R, N, shift):
+    """``bo_hoist_sm100.cu`` alone: bias_all^T, d pair and dW' against fp64 -- bias and d pair within their bf16 output rounding (the
+    bounds of ``TOL``), dW' within 3e-5 (the scaled d bias as hi + lo against the exact pair, fp32 accumulation; measured 2.5-6e-6 at
+    zero mean); rows with a mean 20 standard deviations off zero (the forward's projection on raw rows and the backward's S - mean_k S
+    both cancel a mean term) and a constant row (variance 0) included; bit-identical reruns; no local memory; at most 64 weight rows
+    in the backward (more: ``sm100_served(..., bwd=True)`` declines and the forward still serves up to 128)."""
+    _sm100_only()
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    g = torch.Generator(device="cuda").manual_seed(R + N)
+    pair = (torch.randn(R, 128, device="cuda", generator=g) + shift).to(BF)
+    pair[5] = 0.75  # a constant row: LN0 = 0, rstd = 1 / sqrt(eps)
+    wf = (0.1 * torch.randn(N, 128, device="cuda", generator=g)).to(BF)
+    db = torch.randn(N, R, device="cuda", generator=g).to(BF)
+    assert HK.sm100_served(pair, wf) and HK.sm100_served(pair, wf, bwd=True)
+    np_ = (N + 15) // 16 * 16
+    h = HK._hoist100(torch.cuda.current_device())
+    for bwd in (False, True):
+        k = h._kernel(np_, bwd)
+        assert k.lmem == 0, (np_, bwd, k.regs, k.lmem)
+    runs = []
+    for _ in range(3):
+        runs.append((HK.sm100_fwd(pair, wf), *HK.sm100_bwd(pair, wf, db)))
+    torch.cuda.synchronize()
+    bias, dp, dw = runs[0]
+    assert all(torch.equal(a, b) for r in runs[1:] for a, b in zip(r, runs[0], strict=True))
+    w_bias, w_dp, w_dw = _rows_ref64(pair, wf, db)
+    assert bias.shape == (N, R) and dp.shape == (R, 128) and dw.shape == (N, 128) and dw.dtype is F32
+    assert relative(bias, w_bias) < TOL[BF]["bias"], relative(bias, w_bias)
+    assert relative(dp, w_dp) < TOL[BF]["dpair"], relative(dp, w_dp)
+    assert relative(dw, w_dw) < 3e-5, relative(dw, w_dw)
+    assert float(bias[:, 5].float().abs().max()) < 1e-2  # the constant row's bias is ~0
+    wide = (0.1 * torch.randn(80, 128, device="cuda", generator=g)).to(BF)
+    assert HK.sm100_served(pair, wide) and not HK.sm100_served(pair, wide, bwd=True)
+    assert not HK.sm100_served(pair[:100], wf)  # rows: a multiple of 128
+    assert not HK.sm100_served(pair.float(), wf.float())  # bf16 only (fp32: the LayerNorm rows + TF32 cuBLAS hoist)
+
+
+@pytest.mark.parametrize(
+    ("A", "L", "nb", "n_head", "d_head"),
+    [(3, 256, 1, 16, 48), (2, 384, 3, 16, 48), (4, 128, 2, 24, 32), (2, 256, 1, 12, 64), (2, 128, 5, 16, 48)],
+)
+def test_per_sample_hoist_runs_the_sm100_kernels(A, L, nb, n_head, d_head, monkeypatch):
+    """``pair_bias_all`` on a pair per sample [A, L, L, 128] (bf16) takes ``bo_hoist_sm100.cu`` -- forward, and backward up to 64
+    weight rows (5 blocks of 16 heads: the backward is the LayerNorm rows + cuBLAS) -- and meets the hoist's fp64 bars (``TOL``) for
+    every output and gradient; ``settings.bias_only_dit_hoist_sm100=False`` runs the previous path to the same bars."""
+    _sm100_only()
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    calls = {"fwd": 0, "bwd": 0}
+    f0, b0 = HK.sm100_fwd, HK.sm100_bwd
+
+    def fwd(*a, **k):
+        calls["fwd"] += 1
+        return f0(*a, **k)
+
+    def bwd(*a, **k):
+        calls["bwd"] += 1
+        return b0(*a, **k)
+
+    monkeypatch.setattr(HK, "sm100_fwd", fwd)
+    monkeypatch.setattr(HK, "sm100_bwd", bwd)
+    attns = attentions(nb, n_head, d_head, BF)
+    g = torch.Generator(device="cuda").manual_seed(A * L + nb)
+    pair = torch.randn(A, L, L, 128, device="cuda", generator=g).to(BF)
+    dbs = [torch.randn(A, n_head, L, L, device="cuda", generator=g).to(BF) for _ in range(nb)]
+    assert HO.serves(MW, attns, pair, per_sample=True)
+    w_outs, w_dp, w_dgs, w_dws = hoist_ref64(attns, pair, dbs)
+    for on in (True, False):
+        old = settings.configure(bias_only_dit_hoist_sm100=on)
+        try:
+            before = dict(calls)
+            with fused_only():
+                outs, dp, dgs, dws = hoist_run(attns, pair, dbs)
+            torch.cuda.synchronize()
+        finally:
+            settings.configure(**vars(old))
+        ran = {k: calls[k] - before[k] for k in calls}
+        assert ran == ({"fwd": 1, "bwd": int(nb * n_head <= HK.SM100_BWD_MAX_ROWS)} if on else {"fwd": 0, "bwd": 0}), (on, ran)
+        tol = TOL[BF]
+        for i, (o, w) in enumerate(zip(outs, w_outs, strict=True)):
+            assert o.shape == (A, n_head, L, L), i
+            assert relative(o, w) < tol["bias"], (on, i, relative(o, w))
+        assert relative(dp, w_dp) < tol["dpair"], (on, relative(dp, w_dp))
+        for i in range(nb):
+            assert relative(dgs[i], w_dgs[i]) < tol["dg"], (on, i, relative(dgs[i], w_dgs[i]))
+            assert relative(dws[i], w_dws[i]) < tol["dW"], (on, i, relative(dws[i], w_dws[i]))
 
 
 # ------------------------------------------------------------------------------------------------ stacks of blocks
