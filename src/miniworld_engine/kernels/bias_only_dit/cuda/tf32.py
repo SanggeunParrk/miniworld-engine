@@ -137,11 +137,14 @@ class PvGateCoreTF32:
     [nh L, L] fp32 attention weights (or their per-head transpose; contiguous), v / g / out [S L, nh dh] fp32 views with any
     16-byte aligned row stride. Bound launches (their TMA descriptors carry the pointers) are cached per (buffers, strides, S, L).
     ``pdl``: the three-kernel inference step's build (``-DPDL_INF``: programmatic dependent launch, the gated output rounded to TF32
-    for the tail's MMA), launched with the PDL attribute; default off (the training step and the default inference step)."""
+    for the tail's MMA), launched with the PDL attribute; default off (the training step and the default inference step).
+    ``psb``: a pair bias of its own per sample -- P [nh, S, L, L] (``-DPSB``, one sample per work item); no PDL."""
 
     def __init__(
-        self, device_index: int, nh: int = 16, dh: int | None = None, pdl: bool = False
+        self, device_index: int, nh: int = 16, dh: int | None = None, pdl: bool = False, psb: bool = False
     ):
+        assert not (psb and pdl), "the per-sample build has no PDL form"
+        self.psb = psb
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
         self._sm100, self._tm = sm100, sm100._tm
@@ -183,6 +186,7 @@ class PvGateCoreTF32:
                 f"NHEAD={self.nh}",
                 f"DHEAD={self.dh}",
                 *batch,
+                *(("PSB",) if self.psb else ()),
             ),
             smem=_pv_smem(self.dh, sg),
         )
@@ -204,23 +208,24 @@ class PvGateCoreTF32:
     def _bind(self, v, P, out, S, L, g):
         M, nh, dh = v.shape[0], self.nh, self.dh
         tm = self._tm
-        mp = tm(P, [L, nh * L], L * 4, [32, 128], dtype="f32")
+        mp = tm(P, [L, (nh * S if self.psb else nh) * L], L * 4, [32, 128], dtype="f32")
         mv = tm(v, [nh * dh, M], _f32_rows(v), [32, 32], swizzle="128a32", dtype="f32")
         ga, gb = self._halves(out if g is None else g, M)
         oa, ob = self._halves(out, M)
         maps = _descriptors(mp, mv, ga, gb, oa, ob)
-        sg = pick_group_tf32(S, L, self.nsm, nh, dh)
+        sg = 1 if self.psb else pick_group_tf32(S, L, self.nsm, nh, dh)  # per sample: an item is one sample (its own P)
         k = self.kernel(sg, g is not None)
         grid = (min(self.nsm, nh * (L // 128) * -(-S // sg)), 1, 1)
         return (_LaunchPDL if self.pdl else _Launch)(k, grid, (256, 1, 1), *maps, L, S)
 
     def __call__(self, v, P, out, S, g=None):
-        """v [S L, nh dh] view, P [nh L, L] contiguous, out [S L, nh dh] view, g [S L, nh dh] view or None; all fp32."""
+        """v [S L, nh dh] view, P [nh L, L] contiguous ([nh S L, L] with ``psb``), out [S L, nh dh] view, g [S L, nh dh] view or None;
+        all fp32."""
         L = v.shape[0] // S
         assert (
             P.dtype is torch.float32
             and P.is_contiguous()
-            and tuple(P.shape) == (self.nh * L, L)
+            and tuple(P.shape) == ((self.nh * S if self.psb else self.nh) * L, L)
             and L % 128 == 0
         )
         key = (
@@ -379,11 +384,14 @@ _DPBX2_FAILED: set = set()
 class Dpb32:
     """``dpb32_sm100.cu`` (the fp32 port of dpb_sm100.cu): dbias [nh L, L] = P o (sum_a do v^T - D) per head, D[h, i] =
     sum_a dd[a, h, i]; do / v [A L, nh dh] fp32 views (16-byte aligned rows), P [nh L, L] fp32 contiguous, dd [A, nh, L] fp32,
-    dbias [nh L, L] fp32. Bound launches (their TMA descriptors) cached per buffer set."""
+    dbias [nh L, L] fp32. Bound launches (their TMA descriptors) cached per buffer set.
+    ``psb``: a pair bias of its own per sample -- P, dbias [nh, A, L, L], dbias_{h,a} = P_{h,a} o (do_a v_a^T - D_{h,a}), 0 on the keys
+    ``mask`` (bool [L] or [A, L]) drops (``-DPSB``; no CTA-pair form)."""
 
-    def __init__(self, device_index: int, nh: int = 16, dh: int | None = None):
+    def __init__(self, device_index: int, nh: int = 16, dh: int | None = None, psb: bool = False):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
+        self.psb = psb
         self._sm100, self._tm, self.device_index = sm100, sm100._tm, device_index
         self.nh, self.dh = nh, dh or 768 // nh
         assert (self.nh, self.dh) in LAYOUTS, (nh, dh)
@@ -398,7 +406,7 @@ class Dpb32:
             "bo_dpb32_sm100",
             self.device_index,
             src_dir=str(_dir),
-            defs=(f"NJ={DPB32_NJ}", f"NHEAD={self.nh}", f"DHEAD={self.dh}"),
+            defs=(f"NJ={DPB32_NJ}", f"NHEAD={self.nh}", f"DHEAD={self.dh}", *(("PSB",) if self.psb else ())),
             smem=DPB32_SMEM,
         )
 
@@ -414,7 +422,7 @@ class Dpb32:
             smem=DPBX2_TF32_SMEM,
         )
 
-    def _bind(self, do, v, P, out, A, L):
+    def _bind(self, do, v, P, out, A, L, kmode=0):
         nh, dh, tm, M = self.nh, self.dh, self._tm, do.shape[0]
         DA, f = nh * dh, dict(dtype="f32", swizzle=128)
         box = lambda t, w, rows: tm(t, [DA, M], _f32_rows(t), [w, rows], **f)  # noqa: E731
@@ -445,18 +453,22 @@ class Dpb32:
         mdo2, mv2 = (
             (box(do, 16, 128), box(v, 16, DPB32_NJ)) if dh == 48 else (mdo, mv)
         )  # 48-wide heads: 32 + 16 channels
+        planes = nh * A if self.psb else nh
         maps = _descriptors(
             mdo,
             mdo2,
             mv,
             mv2,
-            tm(P, [L, nh * L], L * 4, [32, 128], **f),
-            tm(out, [L, nh * L], L * 4, [32, 32], **f),
+            tm(P, [L, planes * L], L * 4, [32, 128], **f),
+            tm(out, [L, planes * L], L * 4, [32, 32], **f),
         )
-        grid = (min(self.nsm, nh // self.hp * (L // 128) * (L // DPB32_NJ)), 1, 1)
+        groups = (A if self.psb else 1) * (nh // self.hp)
+        grid = (min(self.nsm, groups * (L // 128) * (L // DPB32_NJ)), 1, 1)
+        if self.psb:  # + the key mask (a pointer per call) and its mode (0 none, 1 one for all samples, 2 per sample)
+            return _Launch(self.kernel(), grid, (256, 1, 1), *maps, PTR, L, A, PTR, kmode)
         return _Launch(self.kernel(), grid, (256, 1, 1), *maps, PTR, L, A)
 
-    def __call__(self, do, v, P, dd, out, A):
+    def __call__(self, do, v, P, dd, out, A, mask=None):
         L = do.shape[0] // A
         assert (
             all(t.dtype is torch.float32 for t in (do, v, P, dd, out))
@@ -464,8 +476,15 @@ class Dpb32:
             and P.is_contiguous()
         )
         assert (
-            out.is_contiguous() and tuple(P.shape) == (self.nh * L, L) and L % 128 == 0
+            out.is_contiguous() and tuple(P.shape) == ((self.nh * A if self.psb else self.nh) * L, L) and L % 128 == 0
         )
+        if self.psb:
+            kmode = 0 if mask is None else (1 if mask.numel() == L else 2)
+            assert mask is None or (mask.dtype is torch.bool and mask.is_contiguous() and mask.numel() in (L, A * L)), "bool mask [L] / [A, L]"
+            key = ("psb", do.data_ptr(), do.stride(0), v.data_ptr(), v.stride(0), P.data_ptr(), out.data_ptr(), A, L, kmode)
+            self.last = "single"
+            self.runs.bind(key, lambda: self._bind(do, v, P, out, A, L, kmode))(dd, dd if mask is None else mask)
+            return out
         pair = (
             dpb32_pair(L, self.nh)
             and (self.device_index, self.nh, self.dh) not in _DPBX2_FAILED

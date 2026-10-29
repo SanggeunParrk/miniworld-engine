@@ -507,7 +507,9 @@ class PvGateCore:
     the 12-launch step). ``p_early`` (with ``pdl``; the runner's three-kernel inference step only): the ``-DP_EARLY`` build, which
     loads P before griddepcontrol.wait -- only for a P no kernel of the PDL chain writes (the runner's hoisted P, made once per
     sample() before the step); never for the training backward's P^T (softmax_t right before it in the same stream).
-    settings.bias_only_dit_inf3_p_early=0 (read per call) takes the plain PDL build."""
+    settings.bias_only_dit_inf3_p_early=0 (read per call) takes the plain PDL build.
+    ``psb``: a pair bias of its own per sample -- P is [nh, S, L, L] (a plane per (head, sample), contiguous; the ``-DPSB`` build, one
+    sample per work item), L up to ``B200_TMEM_MAX_L``; no PDL."""
 
     def __init__(
         self,
@@ -517,10 +519,13 @@ class PvGateCore:
         dh: int | None = None,
         pdl: bool = False,
         p_early: bool = False,
+        psb: bool = False,
     ):
         assert pdl or not p_early, (
             "P_EARLY moves P before the PDL wait: a PDL build only"
         )
+        assert not (psb and pdl), "the per-sample build has no PDL form"
+        self.psb = psb
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
         self._sm100 = sm100
@@ -574,7 +579,7 @@ class PvGateCore:
             "bo_pv_gate_inf_sm100",
             self.device_index,
             src_dir=str(_dir),
-            defs=(f"SG={sg}", f"GATE={int(gate)}", *vdef, *self.defs),
+            defs=(f"SG={sg}", f"GATE={int(gate)}", *vdef, *self.defs, *(("PSB",) if self.psb else ())),
             smem=_pv_smem(vb),
         )
 
@@ -582,8 +587,9 @@ class PvGateCore:
         M = v.shape[0]
         tm, es = self._tm, v.element_size()
         nh, dh = self.nh, self.dh
+        planes = nh * S if self.psb else nh  # per sample: [nh, S, L, L]
         maps = _descriptors(
-            tm(P, [L, nh * L], L * 2, [64, 128]),
+            tm(P, [L, planes * L], L * 2, [64, 128]),
             tm(v, [nh * dh, M], v.stride(0) * es, [dh, vb]),
             tm(
                 v if g is None else g,
@@ -593,7 +599,7 @@ class PvGateCore:
             ),
             tm(out, [nh * dh, M], out.stride(0) * es, [dh, 128]),
         )
-        sg = pick_group(S, L, self.nsm, nh, dh)
+        sg = 1 if self.psb else pick_group(S, L, self.nsm, nh, dh)  # per sample: an item is one sample (its own P tile)
         k = self.kernel(sg, g is not None, vb, early)
         grid = (min(self.nsm, nh * (L // 128) * -(-S // sg)), 1, 1)
         if self.pdl:
@@ -611,8 +617,11 @@ class PvGateCore:
         return self._stream
 
     def __call__(self, v, P, out, S, g=None):
-        """v [S L, 768] view, P [nh L, L] contiguous, out [S L, 768] view, g [S L, 768] view or None; all bf16. L > 768 (the P tile
-        no longer fits tensor memory) runs ``pv_stream_sm100.cu`` (``PvStreamCore``)."""
+        """v [S L, 768] view, P [nh L, L] contiguous ([nh S L, L] with ``psb``), out [S L, 768] view, g [S L, 768] view or None; all
+        bf16. L > 768 (the P tile no longer fits tensor memory) runs ``pv_stream_sm100.cu`` (``PvStreamCore``; not with ``psb``)."""
+        if self.psb:
+            assert not h100_enabled(self.device_index) and v.shape[0] // S <= B200_TMEM_MAX_L, "per-sample P: B200, L <= 768"
+            assert P.shape[0] == self.nh * v.shape[0] and P.is_contiguous(), "per-sample P: [nh S L, L] contiguous"
         if (
             not h100_enabled(self.device_index)
             and v.shape[0] // S > B200_TMEM_MAX_L
@@ -847,40 +856,47 @@ def dpb_pair_on(L: int, nh: int = H, hp: int = 1, nsm: int = 148) -> bool:
 class DpbKernel:
     """``dpb_sm100.cu``: dbias [nh L, L] = P o (sum_a do v^T - D) per head, D[h, i] = sum_a dd[a, h, i]; do / v [A L, 768]
     bf16 views, P [nh L, L] bf16, dd [A, nh, L] fp32 (nh x width: one of LAYOUTS). Where ``dpb_pair_on(L)``: ``dpbx2_sm100.cu``
-    (the same result on CTA pairs; a failed build warns once and keeps dpb_sm100.cu; ``last`` says which ran)."""
+    (the same result on CTA pairs; a failed build warns once and keeps dpb_sm100.cu; ``last`` says which ran).
+    ``psb``: a pair bias of its own per sample -- P and dbias [nh, A, L, L], dbias_{h,a} = P_{h,a} o (do_a v_a^T - D_{h,a}), nothing
+    summed over the samples, 0 on the keys ``mask`` (bool [L] or [A, L]) drops (the ``-DPSB`` build of dpb_sm100.cu; no CTA-pair
+    form)."""
 
-    def __init__(self, device_index: int, nh: int = H, dh: int | None = None):
+    def __init__(self, device_index: int, nh: int = H, dh: int | None = None, psb: bool = False):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
         self._sm100, self._tm, self.device_index = sm100, sm100._tm, device_index
+        self.psb = psb
         self.nh, self.dh = nh, dh or 768 // nh
         self.nsm = num_sms(device_index)
         self.runs = _Runs()
         self._pair_k = None
 
-    def _bind(self, do, v, P, dd, out, A, L):
+    def _bind(self, do, v, P, dd, out, A, L, kmode=0):
         nh, dh = self.nh, self.dh
         hp = (
             2 if dh == 32 else 1
         )  # heads per work item (dpb_sm100.cu HP): two 32-wide heads per 128-byte row
-        nj = _dpb_nj(L, self.nsm, nh // hp, hp)
+        groups = (A if self.psb else 1) * (nh // hp)  # per sample: items over (sample, head group)
+        nj = _dpb_nj(L, self.nsm, groups, hp)
         k = sm100_kernel(
             "dpb_sm100",
             "bo_dpb_sm100",
             self.device_index,
             src_dir=str(_dir),
-            defs=(f"NJ={nj}", *_head_defs(nh, dh)),
+            defs=(f"NJ={nj}", *_head_defs(nh, dh), *(("PSB",) if self.psb else ())),
             smem=_dpb_smem(nj),
         )
         tm, M = self._tm, do.shape[0]
+        planes = nh * A if self.psb else nh
         maps = _descriptors(
             tm(do, [nh * dh, M], do.stride(0) * 2, [hp * dh, 128]),
             tm(v, [nh * dh, M], v.stride(0) * 2, [hp * dh, nj // 2]),
-            tm(P, [L, nh * L], L * 2, [32, 128], swizzle=64),
-            tm(out, [L, nh * L], L * 2, [32, 32], swizzle=64),
+            tm(P, [L, planes * L], L * 2, [32, 128], swizzle=64),
+            tm(out, [L, planes * L], L * 2, [32, 32], swizzle=64),
         )
-        grid = (min(self.nsm, nh // hp * (L // 128) * (L // nj)), 1, 1)
-
+        grid = (min(self.nsm, groups * (L // 128) * (L // nj)), 1, 1)
+        if self.psb:  # + the key mask (a pointer per call) and its mode (0 none, 1 one for all samples, 2 per sample)
+            return _Launch(k, grid, (256, 1, 1), *maps, PTR, L, A, PTR, kmode)
         return _Launch(k, grid, (256, 1, 1), *maps, PTR, L, A)
 
     def pair_kernel(self):
@@ -919,7 +935,7 @@ class DpbKernel:
             k, (min(self.nsm & ~1, 2 * items), 1, 1), (256, 1, 1), *maps, PTR, L, A
         )
 
-    def __call__(self, do, v, P, dd, out, A):
+    def __call__(self, do, v, P, dd, out, A, mask=None):
         if h100_enabled(self.device_index):
             if _H100_DPB2 and self.dh in (32, 48, 64) and do.shape[0] // A >= 384:  # L256: 64 CTAs, the 64 x 64 kernel wins
                 h100_ext().dpb2(do, v, P, dd.sum(0).contiguous(), out, A, self.nh, self.dh, self.nsm)
@@ -928,8 +944,16 @@ class DpbKernel:
             return out
         L = do.shape[0] // A
         hp = 2 if self.dh == 32 else 1
+        if self.psb:
+            assert L <= B200_TMEM_MAX_L and P.shape[0] == self.nh * A * L and out.shape[0] == P.shape[0], "per-sample P / dbias [nh A L, L]"
+            kmode = 0 if mask is None else (1 if mask.numel() == L else 2)
+            assert mask is None or (mask.dtype is torch.bool and mask.is_contiguous() and mask.numel() in (L, A * L)), "bool mask [L] / [A, L]"
+            key = ("psb", do.data_ptr(), do.stride(0), v.data_ptr(), v.stride(0), P.data_ptr(), out.data_ptr(), A, L, kmode)
+            self.runs.bind(key, lambda: self._bind(do, v, P, dd, out, A, L, kmode))(dd, dd if mask is None else mask)
+            return out
         pair = (
-            dpb_pair_on(L, self.nh, hp, self.nsm)
+            not self.psb
+            and dpb_pair_on(L, self.nh, hp, self.nsm)
             and (self.device_index, self.nh, self.dh) not in _DPBX2_FAILED
         )
         if pair and self._pair_k is None:

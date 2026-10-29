@@ -21,6 +21,8 @@
 // the key tile arrives as one [NJ][32] box.
 // Warps: 0 K-loop TMA producer, 1 MMA (whole warp waits, elect_one() issues), 2 TMEM allocator, 3 P producer, 4-7 epilogue (one
 // query row per thread: 32 accumulator registers + 32 P values per piece; at most 128 registers).
+// -DPSB (a pair bias of its own per sample; dpb_sm100.cu's -DPSB): P, dbias [H, A, L, L], dbias_{h,a} = P_{h,a} o (do_a v_a^T -
+// D_{h,a}) with the masked keys (km, kmode 1 [L] / 2 [A, L]) zeroed; an item is (sample, head group, query tile, key tile).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -35,6 +37,11 @@ using namespace s100;
 #define DHEAD 48
 #endif
 constexpr int QM = 128, DH = DHEAD, NH = NHEAD, NJ2 = NJ / 2, NQ = NJ / 32;
+#ifdef PSB
+constexpr bool PSB_P = true;
+#else
+constexpr bool PSB_P = false;
+#endif
 // heads per work item (as dpb_sm100.cu: two 32-wide heads per item), each its own accumulator
 constexpr int HP = DH == 32 ? 2 : 1;
 constexpr int NA = (DH + 31) / 32;                           // 32-channel boxes of a head row (the last one DH - 32 (NA - 1) wide)
@@ -63,19 +70,31 @@ extern "C" __global__ void __launch_bounds__(256, 2)
 bo_dpb32_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mdo2,
                const __grid_constant__ CUtensorMap mv, const __grid_constant__ CUtensorMap mv2,
                const __grid_constant__ CUtensorMap mp, const __grid_constant__ CUtensorMap mdb,
-               const float* __restrict__ dd, int L, int A) {
+               const float* __restrict__ dd, int L, int A
+#ifdef PSB
+               , const bool* __restrict__ km, int kmode
+#endif
+               ) {
+#ifndef PSB
+  const bool* km = nullptr; const int kmode = 0;
+#endif
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int mt = L / QM, nj = L / NJ, items = (NH / HP) * mt * nj;
+  const int nsi = PSB_P ? A : 1, nk = PSB_P ? 1 : A;            // PSB: items over the samples, the K loop one sample
+  const int mt = L / QM, nj = L / NJ, items = nsi * (NH / HP) * mt * nj;
   const int my = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
-  auto item_of = [&](int li, int& h, int& i0, int& j0) {
+  auto item_of = [&](int li, int& h, int& i0, int& j0, int& a0) {
     const int wi = (int)blockIdx.x + li * (int)gridDim.x;
     j0 = (wi % nj) * NJ;
     const int r = wi / nj;
-    i0 = (r % mt) * QM; h = (r / mt) * HP;                       // the item's first head
+    i0 = (r % mt) * QM;
+    const int r2 = r / mt;
+    h = (r2 % (NH / HP)) * HP;                                   // the item's first head
+    a0 = r2 / (NH / HP);                                         // PSB: the item's sample (else 0)
   };
+  auto plane = [&](int hd, int a0) { return (PSB_P ? hd * A + a0 : hd) * L; };
 
   if (tid == 0) {
     for (int s = 0; s < NST; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
@@ -95,9 +114,9 @@ bo_dpb32_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ 
     if (lane == 0) {
       int g = 0;
       for (int li = 0; li < my; ++li) {
-        int h, i0, j0; item_of(li, h, i0, j0);
-        for (int a = 0; a < A; ++a, ++g) {
-          const int s = g % NST;
+        int h, i0, j0, a0; item_of(li, h, i0, j0, a0);
+        for (int k = 0; k < nk; ++k, ++g) {
+          const int s = g % NST, a = a0 + k;
           if (g >= NST) mbar_wait(&B.empty[s], ((g / NST) - 1) & 1);
           const uint32_t st = su + O_ST + s * STB;
           mbar_expect_tx(&B.full[s], TX);
@@ -119,7 +138,7 @@ bo_dpb32_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ 
     for (int li = 0; li < my; ++li) {
       if (li >= 1) mbar_wait(&B.acc_empty, (li - 1) & 1);
       tc_fence_after();
-      for (int a = 0; a < A; ++a, ++g) {
+      for (int a = 0; a < nk; ++a, ++g) {
         const int s = g % NST;
         mbar_wait(&B.full[s], (g / NST) & 1);
         tc_fence_after();
@@ -138,7 +157,7 @@ bo_dpb32_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ 
               }
             }
           tc_commit(&B.empty[s]);
-          if (a == A - 1) tc_commit(&B.acc);
+          if (a == nk - 1) tc_commit(&B.acc);
         }
         __syncwarp();
       }
@@ -147,13 +166,13 @@ bo_dpb32_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ 
     if (lane == 0) {
       int e = 0;
       for (int li = 0; li < my; ++li) {
-        int h, i0, j0; item_of(li, h, i0, j0);
+        int h, i0, j0, a0; item_of(li, h, i0, j0, a0);
         for (int hh = 0; hh < HP; ++hh)
           for (int q = 0; q < NQ; ++q, ++e) {
             const int slot = e & 1;
             if (e >= 2) mbar_wait(&B.pempty[slot], ((e >> 1) - 1) & 1);
             mbar_expect_tx(&B.pfull[slot], PC);
-            tma_load_2d(su + O_P + slot * PC, &mp, &B.pfull[slot], j0 + q * 32, (h + hh) * L + i0);
+            tma_load_2d(su + O_P + slot * PC, &mp, &B.pfull[slot], j0 + q * 32, plane(h + hh, a0) + i0);
           }
       }
     }
@@ -162,12 +181,12 @@ bo_dpb32_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ 
     const uint32_t stg = su + O_S + (uint32_t)(warp & 3) * NSW * SWB;
     int e = 0, t = 0;
     for (int li = 0; li < my; ++li) {
-      int h, i0, j0; item_of(li, h, i0, j0);
-      float Drs[HP];                                                // D[i] = sum over the samples of the per-sample row sums,
+      int h, i0, j0, a0; item_of(li, h, i0, j0, a0);
+      float Drs[HP];                                                // D[i] = sum over the item's samples of the per-sample row sums,
 #pragma unroll                                                      // read while the item's products run
       for (int hh = 0; hh < HP; ++hh) {
         Drs[hh] = 0.f;
-        for (int a = 0; a < A; ++a) Drs[hh] += __ldg(dd + ((long)a * NH + h + hh) * L + i0 + r);
+        for (int a = a0; a < a0 + nk; ++a) Drs[hh] += __ldg(dd + ((long)a * NH + h + hh) * L + i0 + r);
       }
       mbar_wait(&B.acc, li & 1);
       tc_fence_after();
@@ -187,18 +206,28 @@ bo_dpb32_sm100(const __grid_constant__ CUtensorMap mdo, const __grid_constant__ 
           if (lane == 0) mbar_arrive(&B.pempty[slot]);
           tmem_wait_ld();
           const uint32_t sb = stg + (uint32_t)(t % NSW) * SWB;
+          uint32_t mk[8];                                           // PSB: the piece's 32 keys, one byte each (1 kept, 0 masked)
+          if (PSB_P && kmode) {
+            const bool* mrow = km + (kmode == 2 ? (long)a0 * L : 0L) + j0 + q * 32;
+            const uint4 m0 = __ldg(reinterpret_cast<const uint4*>(mrow)), m1 = __ldg(reinterpret_cast<const uint4*>(mrow + 16));
+            mk[0] = m0.x; mk[1] = m0.y; mk[2] = m0.z; mk[3] = m0.w; mk[4] = m1.x; mk[5] = m1.y; mk[6] = m1.z; mk[7] = m1.w;
+          }
 #pragma unroll
           for (int c = 0; c < 8; ++c) {
-            const uint4 o = make_uint4(__float_as_uint(__uint_as_float(p4[c].x) * (__uint_as_float(v[4 * c + 0]) - Dr)),
-                                       __float_as_uint(__uint_as_float(p4[c].y) * (__uint_as_float(v[4 * c + 1]) - Dr)),
-                                       __float_as_uint(__uint_as_float(p4[c].z) * (__uint_as_float(v[4 * c + 2]) - Dr)),
-                                       __float_as_uint(__uint_as_float(p4[c].w) * (__uint_as_float(v[4 * c + 3]) - Dr)));
-            sts128(sb + sw128(lane, c), o);
+            float o0 = __uint_as_float(p4[c].x) * (__uint_as_float(v[4 * c + 0]) - Dr);
+            float o1 = __uint_as_float(p4[c].y) * (__uint_as_float(v[4 * c + 1]) - Dr);
+            float o2 = __uint_as_float(p4[c].z) * (__uint_as_float(v[4 * c + 2]) - Dr);
+            float o3 = __uint_as_float(p4[c].w) * (__uint_as_float(v[4 * c + 3]) - Dr);
+            if (PSB_P && kmode) {                                   // keys 4c .. 4c + 3 of the piece: the bytes of word c
+              o0 = (mk[c] & 0xffu) ? o0 : 0.f; o1 = (mk[c] & 0xff00u) ? o1 : 0.f;
+              o2 = (mk[c] & 0xff0000u) ? o2 : 0.f; o3 = (mk[c] & 0xff000000u) ? o3 : 0.f;
+            }
+            sts128(sb + sw128(lane, c), make_uint4(__float_as_uint(o0), __float_as_uint(o1), __float_as_uint(o2), __float_as_uint(o3)));
           }
           fence_proxy_async();
           __syncwarp();
           if (lane == 0) {
-            tma_store_2d(&mdb, sb, j0 + q * 32, (h + hh) * L + i0 + (int)lb);
+            tma_store_2d(&mdb, sb, j0 + q * 32, plane(h + hh, a0) + i0 + (int)lb);
             tma_store_commit();
             asm volatile("cp.async.bulk.wait_group.read %0;" :: "n"(NSW - 1) : "memory");
           }
