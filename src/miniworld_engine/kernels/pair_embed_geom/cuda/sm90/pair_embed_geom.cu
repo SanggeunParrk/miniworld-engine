@@ -457,6 +457,7 @@ __device__ __forceinline__ int scatter_rows(const uint4 c, int (&rows)[11], uint
   return n;
 }
 
+#ifndef PE_SM100   // sm_100a has no wgmma: the B200 build (cuda/sm100) includes this file with PE_SM100 and brings its own table-gradient kernel
 // ---- tensor-core kernel (wgmma) ----------------------------------------------------------------------------------------------------
 // As version 3 (the one-hot operand A scattered into shared memory, B = the gradient tile), but the products are issued as warpgroup MMAs: one wgmma.m64n64k16 per
 // (64 rows, 16 pairs) with both operands read from shared memory through descriptors (A: K-major, B: N-major, both 128-byte swizzled: exactly the layouts the scatter
@@ -577,6 +578,8 @@ pg_bwd_mma4(const __nv_bfloat16* g, const uint4* codes, long long P, float* tpar
   }
 }
 
+
+#endif  // PE_SM100
 
 // ---- LayerNorm backward with the pair recomputed from the codes ---------------------------------------------------------------------------
 // hat = LN(bf16(T[rows])): the pair itself is never stored; dx = rstd * (dh - mean(dh) - hat * mean(dh * hat)) per pair, written as bf16 (zeros for padding).
@@ -741,6 +744,7 @@ void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+#ifndef PE_SM100
 // mode 0: geometry table [317][256]; mode 1: decoder table [157][256]. impl 1: tensor cores (pg_bwd_mma2), impl 2: the first tensor-core kernel, impl 0: shared-memory read-modify-write.
 // dtbl bf16 [NTAB][256], tpart fp32 scratch [NBLK][NTAB][256].
 void backward(torch::Tensor g, torch::Tensor codes, torch::Tensor tpart, torch::Tensor dtbl, int64_t mode, int64_t impl) {
@@ -778,6 +782,8 @@ void backward(torch::Tensor g, torch::Tensor codes, torch::Tensor tpart, torch::
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+#endif  // PE_SM100
+
 void ln_backward(torch::Tensor tbl, torch::Tensor codes, torch::Tensor dh, torch::Tensor dx, int64_t mode, double eps) {
   const at::cuda::CUDAGuard guard(tbl.device());
   long long P = (long long)dh.size(0) * dh.size(1) * dh.size(2);
@@ -799,9 +805,11 @@ void ln_backward(torch::Tensor tbl, torch::Tensor codes, torch::Tensor dh, torch
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+#ifndef PE_SM100
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &forward);
   m.def("forward_ca", &forward_ca);
   m.def("backward", &backward);
   m.def("ln_backward", &ln_backward);
 }
+#endif  // PE_SM100
