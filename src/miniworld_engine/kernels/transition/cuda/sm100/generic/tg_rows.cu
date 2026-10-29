@@ -1,8 +1,10 @@
 // tg_rows.cu -- the row passes of the generic sm_100a Transition (around the tcgen05 GEMMs of tg_gemm.cu), -DF32=1 for fp32 activations:
 //
 //   tg_ln_fwd_*   xn = LN(x) gamma + beta (bf16, or fp32 rounded to the TF32 grid: the expand GEMM's operand), and the row's mean / rstd
-//   tg_ln_bwd_*   dx = dy + LN backward of d_xn (fp32) through gamma; per-block partial sums of d_xn xhat (dgamma) and d_xn (dbeta)
+//   tg_ln_bwd_*   dx = dy + LN backward of d_xn (fp32) through gamma; per-block partial sums of d_xn xhat (dgamma) and d_xn (dbeta);
+//                 tg_ln_bwds_* the same over the sum of a split-K GEMM's partial slabs, added in slab order
 //   tg_colsum     column sums of [P, N] fp32 partials in a fixed order (dgamma | dbeta; the ConditionedTransition's gate bias)
+//   tg_splitsum   out = res + the sum of a split-K GEMM's fp32 partial slabs in slab order (the squeeze + residual at small M)
 //   tg_prep       the weights in the activation dtype (fp32: on the TF32 grid), and for the backward Ws^T and [Wa; Wb]^T
 //
 // A row is TPR consecutive lanes (8 / 16 / 32: a warp holds 32 / TPR rows, so a narrow row does not leave lanes idle), a lane loading
@@ -137,10 +139,10 @@ __device__ __forceinline__ void ln_fwd(const T* __restrict__ X, const float* __r
 }
 
 // dx = dy + rstd (g - mean(g) - xhat mean(g xhat)), g = d_xn gamma; PART[block] = [sum d_xn xhat | sum d_xn] over the block's rows
-template <int VEC, int TPR, int NV>
+template <int VEC, int TPR, int NV, bool SPLIT>
 __device__ __forceinline__ void ln_bwd(const float* __restrict__ DXN, const T* __restrict__ X, const T* __restrict__ DY,
                                        const float* __restrict__ MEAN, const float* __restrict__ RSTD, const float* __restrict__ G,
-                                       T* __restrict__ DX, float* __restrict__ PART, int M, int D, float* red) {
+                                       T* __restrict__ DX, float* __restrict__ PART, int M, int D, int NS, long SST, float* red) {
   constexpr int RPW = 32 / TPR;
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, l = lane % TPR, sub = lane / TPR;
   const int nwb = blockDim.x >> 5, nw = gridDim.x * nwb;
@@ -154,29 +156,79 @@ __device__ __forceinline__ void ln_bwd(const float* __restrict__ DXN, const T* _
     const float mean = ok ? MEAN[row] : 0.f, rstd = ok ? RSTD[row] : 0.f;
     float gx[NV], xh[NV];
     float s1 = 0.f, s2 = 0.f;
+    if constexpr (SPLIT) {
+      // the row's d_xn: slab 0, then the split-K slabs added in slab order with SB slabs' whole row in flight at a time (a single track:
+      // one row per warp, so the slab loads are the latency that counts); x
+      float dd[NV], xv[NV];
+      auto ldrow = [&](const float* P, float* v) {
 #pragma unroll
-    for (int i = 0; i < NV / VEC; ++i) {
-      const int c = VEC * (TPR * i + l);
-      float d[VEC], xv[VEC];
+        for (int i = 0; i < NV / VEC; ++i) {
+          const float* q = P + ro + VEC * (TPR * i + l);
 #pragma unroll
-      for (int e = 0; e < VEC; e += 4) {
-        if (e + 4 <= VEC) { const float4 t = *reinterpret_cast<const float4*>(DXN + ro + c + e); d[e] = t.x; d[e + 1] = t.y; d[e + 2] = t.z; d[e + 3] = t.w; }
+          for (int e = 0; e < VEC; e += 2) {
+            if constexpr (VEC % 4 == 0) {
+              if (e % 4 == 0) { const float4 t = *reinterpret_cast<const float4*>(q + e); v[VEC * i + e] = t.x; v[VEC * i + e + 1] = t.y; v[VEC * i + e + 2] = t.z; v[VEC * i + e + 3] = t.w; }
+            } else {
+              const float2 t = *reinterpret_cast<const float2*>(q + e); v[VEC * i + e] = t.x; v[VEC * i + e + 1] = t.y;
+            }
+          }
+        }
+      };
+      ldrow(DXN, dd);
+#pragma unroll
+      for (int i = 0; i < NV / VEC; ++i) ldvx<VEC>(X + ro + VEC * (TPR * i + l), xv + VEC * i);
+      constexpr int SB = NV <= 16 ? 4 : 2;
+      for (int s0 = 1; s0 < NS; s0 += SB) {
+        float t[SB][NV];
+#pragma unroll
+        for (int u = 0; u < SB; ++u) ldrow(DXN + (s0 + u < NS ? s0 + u : 0) * SST, t[u]);
+#pragma unroll
+        for (int u = 0; u < SB; ++u)
+          if (s0 + u < NS) {
+#pragma unroll
+            for (int k = 0; k < NV; ++k) dd[k] += t[u][k];
+          }
       }
-      if constexpr (VEC < 4) {
 #pragma unroll
-        for (int e = 0; e < VEC; e += 2) { const float2 t = *reinterpret_cast<const float2*>(DXN + ro + c + e); d[e] = t.x; d[e + 1] = t.y; }
+      for (int i = 0; i < NV / VEC; ++i) {
+        const int c = VEC * (TPR * i + l);
+#pragma unroll
+        for (int e = 0; e < VEC; ++e) {
+          const int k = VEC * i + e;
+          const float d = ok ? dd[k] : 0.f;
+          xh[k] = (xv[k] - mean) * rstd;
+          gx[k] = d * __ldg(G + c + e);
+          s1 += gx[k];
+          s2 += gx[k] * xh[k];
+          dg[k] += d * xh[k];
+          db[k] += d;
+        }
       }
-      ldvx<VEC>(X + ro + c, xv);
+    } else {
 #pragma unroll
-      for (int e = 0; e < VEC; ++e) {
-        if (!ok) d[e] = 0.f;
-        const int k = VEC * i + e;
-        xh[k] = (xv[e] - mean) * rstd;
-        gx[k] = d[e] * __ldg(G + c + e);
-        s1 += gx[k];
-        s2 += gx[k] * xh[k];
-        dg[k] += d[e] * xh[k];
-        db[k] += d[e];
+      for (int i = 0; i < NV / VEC; ++i) {
+        const int c = VEC * (TPR * i + l);
+        float d[VEC], xv[VEC];
+#pragma unroll
+        for (int e = 0; e < VEC; e += 4) {
+          if (e + 4 <= VEC) { const float4 t = *reinterpret_cast<const float4*>(DXN + ro + c + e); d[e] = t.x; d[e + 1] = t.y; d[e + 2] = t.z; d[e + 3] = t.w; }
+        }
+        if constexpr (VEC < 4) {
+#pragma unroll
+          for (int e = 0; e < VEC; e += 2) { const float2 t = *reinterpret_cast<const float2*>(DXN + ro + c + e); d[e] = t.x; d[e + 1] = t.y; }
+        }
+        ldvx<VEC>(X + ro + c, xv);
+#pragma unroll
+        for (int e = 0; e < VEC; ++e) {
+          if (!ok) d[e] = 0.f;
+          const int k = VEC * i + e;
+          xh[k] = (xv[e] - mean) * rstd;
+          gx[k] = d[e] * __ldg(G + c + e);
+          s1 += gx[k];
+          s2 += gx[k] * xh[k];
+          dg[k] += d[e] * xh[k];
+          db[k] += d[e];
+        }
       }
     }
     const float m1 = gsum<TPR>(s1) / (float)D, m2 = gsum<TPR>(s2) / (float)D;
@@ -191,24 +243,26 @@ __device__ __forceinline__ void ln_bwd(const float* __restrict__ DXN, const T* _
       stv<VEC>(DX + ro + c, o);
     }
   }
-  // the block's partials: the RPW row slots of a warp, then the warps, added in order
-  for (int c = threadIdx.x; c < 2 * D; c += blockDim.x) red[c] = 0.f;
-  for (int w = 0; w < nwb; ++w)
-    for (int q = 0; q < RPW; ++q) {
+  // the block's partials: per 128 / 256-column chunk (a warp row group's i-th vectors), every (warp, row slot) writes its column sums to
+  // its own shared-memory row, then each column adds the rows in (warp, slot) order -- the order a slot-by-slot accumulation would take,
+  // without its 8-32 serial read-modify-write rounds
+  constexpr int CW = VEC * TPR;                              // columns of one chunk
+  const int slot = warp * RPW + sub, nslot = nwb * RPW;
+#pragma unroll 1
+  for (int pass = 0; pass < 2; ++pass)
+#pragma unroll
+    for (int i = 0; i < NV / VEC; ++i) {
       __syncthreads();
-      if (warp == w && sub == q) {
 #pragma unroll
-        for (int i = 0; i < NV / VEC; ++i)
-#pragma unroll
-          for (int e = 0; e < VEC; ++e) {
-            const int c = VEC * (TPR * i + l) + e;
-            red[c] += dg[VEC * i + e];
-            red[D + c] += db[VEC * i + e];
-          }
+      for (int e = 0; e < VEC; ++e) red[slot * CW + VEC * l + e] = pass ? db[VEC * i + e] : dg[VEC * i + e];
+      __syncthreads();
+      for (int c = threadIdx.x; c < CW; c += blockDim.x) {
+        float s = 0.f;
+#pragma unroll 8
+        for (int q = 0; q < nslot; ++q) s += red[q * CW + c];
+        PART[(long)blockIdx.x * 2 * D + pass * D + CW * i + c] = s;
       }
     }
-  __syncthreads();
-  for (int c = threadIdx.x; c < 2 * D; c += blockDim.x) PART[(long)blockIdx.x * 2 * D + c] = red[c];
 }
 
 // the instantiations the host picks from: tg_ln_{fwd,bwd}_v<VEC>t<TPR>n<NV> (NV = D / TPR, at most 32)
@@ -218,9 +272,16 @@ __device__ __forceinline__ void ln_bwd(const float* __restrict__ DXN, const T* _
     ln_fwd<VEC, TPR, NV>(X, G, Bt, XN, MEAN, RSTD, M, D, eps, save);                                                                     \
   }                                                                                                                                       \
   extern "C" __global__ void __launch_bounds__(256) tg_ln_bwd_v##VEC##t##TPR##n##NV(                                                     \
-      const float* DXN, const T* X, const T* DY, const float* MEAN, const float* RSTD, const float* G, T* DX, float* PART, int M, int D) { \
-    __shared__ float red[2 * 1024];                                                                                                       \
-    ln_bwd<VEC, TPR, NV>(DXN, X, DY, MEAN, RSTD, G, DX, PART, M, D, red);                                                                \
+      const float* DXN, const T* X, const T* DY, const float* MEAN, const float* RSTD, const float* G, T* DX, float* PART, int M, int D,  \
+      int NS, int SST) {                                                                                                                  \
+    __shared__ float red[2048];   /* (8 warps x RPW slots) x VEC TPR columns */                                                          \
+    ln_bwd<VEC, TPR, NV, false>(DXN, X, DY, MEAN, RSTD, G, DX, PART, M, D, 1, 0, red);                                                   \
+  }                                                                                                                                       \
+  extern "C" __global__ void __launch_bounds__(256) tg_ln_bwds_v##VEC##t##TPR##n##NV(                                                    \
+      const float* DXN, const T* X, const T* DY, const float* MEAN, const float* RSTD, const float* G, T* DX, float* PART, int M, int D,  \
+      int NS, int SST) {                                                                                                                  \
+    __shared__ float red[2048];                                                                                                           \
+    ln_bwd<VEC, TPR, NV, true>(DXN, X, DY, MEAN, RSTD, G, DX, PART, M, D, NS, (long)SST, red);                                           \
   }
 #if F32
 // fp32: 16-B vectors (VEC 4); D = 64 TPR 16, D = 128 TPR 32 n4, and every multiple of 128 up to 1024 at TPR 32 (n = D / 32); D = 64 (2k+1)
@@ -245,42 +306,105 @@ extern "C" __global__ void __launch_bounds__(256) tg_round_tf32(const float4* __
   }
 }
 
+// 32 columns per block, the rows dealt round robin over the 8 warps (row r to warp r % 8, each warp adding its rows in order), then the
+// 8 warp sums added in warp order: a fixed order, and R / 8 loads in flight per thread instead of R in sequence
 extern "C" __global__ void __launch_bounds__(256) tg_colsum(const float* __restrict__ P, float* __restrict__ OUT, int R, int N) {
-  const int c = blockIdx.x * blockDim.x + threadIdx.x;
-  if (c >= N) return;
+  __shared__ float red[8][33];
+  const int w = threadIdx.x >> 5, l = threadIdx.x & 31, c = blockIdx.x * 32 + l;
   float s = 0.f;
-  for (int r = 0; r < R; ++r) s += P[(long)r * N + c];
-  OUT[c] = s;
+  if (c < N) {
+#pragma unroll 4
+    for (int r = w; r < R; r += 8) s += P[(long)r * N + c];
+  }
+  red[w][l] = s;
+  __syncthreads();
+  if (w == 0 && c < N) {
+    float t = red[0][l];
+#pragma unroll
+    for (int q = 1; q < 8; ++q) t += red[q][l];
+    OUT[c] = t;
+  }
+}
+
+// out [M, N] (T) = res + sum over the NS fp32 slabs P[s] (slab stride SST elements, row stride N), the slabs added in order first; 4 columns
+// per thread (N a multiple of 4)
+extern "C" __global__ void __launch_bounds__(256) tg_splitsum(const float* __restrict__ P, const T* __restrict__ RES, T* __restrict__ OUT, int M,
+                                                             int N, int NS, int SST) {
+  const long n4 = (long)M * N / 4;
+  for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (long)gridDim.x * blockDim.x) {
+    float4 a = reinterpret_cast<const float4*>(P)[i];
+    for (int sl = 1; sl < NS; ++sl) {
+      const float4 t = reinterpret_cast<const float4*>(P + (long)sl * SST)[i];
+      a.x += t.x; a.y += t.y; a.z += t.z; a.w += t.w;
+    }
+    float r[4], o[4];
+    ldv<4>(RES + 4 * i, r);
+    o[0] = r[0] + a.x; o[1] = r[1] + a.y; o[2] = r[2] + a.z; o[3] = r[3] + a.w;
+    stv<4>(OUT + 4 * i, o);
+  }
 }
 
 // Wa, Wb [H, D] and Ws [D, H] (fp32 when src_f32, else bf16) -> wa, wb, ws in T (fp32: TF32 grid); with `bwd` also Ws^T [H, D] and
-// [Wa; Wb]^T [D, 2H]. One thread per (Wa element, Ws element) pair: H D threads.
+// [Wa; Wb]^T [D, 2H]. Without `bwd` a grid-stride loop over the elements; with it one block per 32 x 32 tile (H, D multiples of 32): the
+// first (H / 32)(D / 32) blocks take a tile of Wa and Wb, the rest a tile of Ws, and the transposes go through shared memory, so every
+// global access is a coalesced 32-element row run (the per-element scattered transposes took 14 us at [1536, 384]; now 4).
+__device__ __forceinline__ float ldw(const void* W, long e, int src_f32) {
+  return src_f32 ? reinterpret_cast<const float*>(W)[e] : __bfloat162float(reinterpret_cast<const __nv_bfloat16*>(W)[e]);
+}
+__device__ __forceinline__ T cvw(float v) {
+#if F32
+  return tf32r(v);
+#else
+  return __float2bfloat16_rn(v);
+#endif
+}
 extern "C" __global__ void __launch_bounds__(256) tg_prep(const void* __restrict__ WA, const void* __restrict__ WB, const void* __restrict__ WS,
                                                          T* __restrict__ OA, T* __restrict__ OB, T* __restrict__ OS, T* __restrict__ OST,
                                                          T* __restrict__ OABT, int H, int D, int src_f32, int bwd) {
-  const long n = (long)H * D;
-  for (long e = (long)blockIdx.x * blockDim.x + threadIdx.x; e < n; e += (long)gridDim.x * blockDim.x) {
-    float a, b, s;
-    if (src_f32) {
-      a = reinterpret_cast<const float*>(WA)[e]; b = reinterpret_cast<const float*>(WB)[e]; s = reinterpret_cast<const float*>(WS)[e];
-    } else {
-      a = __bfloat162float(reinterpret_cast<const __nv_bfloat16*>(WA)[e]);
-      b = __bfloat162float(reinterpret_cast<const __nv_bfloat16*>(WB)[e]);
-      s = __bfloat162float(reinterpret_cast<const __nv_bfloat16*>(WS)[e]);
+  if (!bwd) {                                                // no transposes: a grid-stride loop over the elements
+    const long n = (long)H * D;
+    for (long e = (long)blockIdx.x * blockDim.x + threadIdx.x; e < n; e += (long)gridDim.x * blockDim.x) {
+      OA[e] = cvw(ldw(WA, e, src_f32)); OB[e] = cvw(ldw(WB, e, src_f32)); OS[e] = cvw(ldw(WS, e, src_f32));
     }
-#if F32
-    a = tf32r(a); b = tf32r(b); s = tf32r(s);
-    const T ta = a, tb = b, ts = s;
-#else
-    const T ta = __float2bfloat16_rn(a), tb = __float2bfloat16_rn(b), ts = __float2bfloat16_rn(s);
-#endif
-    OA[e] = ta; OB[e] = tb; OS[e] = ts;
-    if (bwd) {
-      const long i = e / D, j = e % D;                       // Wa[i][j] -> [Wa; Wb]^T[j][i], [j][H + i]
-      OABT[j * 2 * H + i] = ta;
-      OABT[j * 2 * H + H + i] = tb;
-      const long si = e / H, sj = e % H;                     // Ws[si][sj] -> Ws^T[sj][si]
-      OST[sj * D + si] = ts;
+    return;
+  }
+  __shared__ T ta[32][33], tb[32][33];
+  const int l = threadIdx.x & 31, w = threadIdx.x >> 5;      // 8 warps, 4 rows of the tile each
+  const int nab = (H / 32) * (D / 32);
+  if ((int)blockIdx.x < nab) {                               // Wa, Wb tile: rows i0.. of H, columns j0.. of D
+    const int i0 = (blockIdx.x / (D / 32)) * 32, j0 = (blockIdx.x % (D / 32)) * 32;
+#pragma unroll
+    for (int q = 0; q < 4; ++q) {
+      const int r = w + 8 * q;
+      const long e = (long)(i0 + r) * D + j0 + l;
+      const T a = cvw(ldw(WA, e, src_f32)), b = cvw(ldw(WB, e, src_f32));
+      OA[e] = a; OB[e] = b;
+      ta[r][l] = a; tb[r][l] = b;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int q = 0; q < 4; ++q) {                            // [Wa; Wb]^T [D, 2H]: row j0 + r, columns i0.. and H + i0..
+      const int r = w + 8 * q;
+      const long o = (long)(j0 + r) * 2 * H + i0 + l;
+      OABT[o] = ta[l][r];
+      OABT[o + H] = tb[l][r];
+    }
+  } else {                                                   // Ws tile: rows s0.. of D, columns t0.. of H
+    const int b = blockIdx.x - nab;
+    const int s0 = (b / (H / 32)) * 32, t0 = (b % (H / 32)) * 32;
+#pragma unroll
+    for (int q = 0; q < 4; ++q) {
+      const int r = w + 8 * q;
+      const long e = (long)(s0 + r) * H + t0 + l;
+      const T v = cvw(ldw(WS, e, src_f32));
+      OS[e] = v;
+      ta[r][l] = v;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int q = 0; q < 4; ++q) {                            // Ws^T [H, D]: row t0 + r, columns s0..
+      const int r = w + 8 * q;
+      OST[(long)(t0 + r) * D + s0 + l] = ta[l][r];
     }
   }
 }
