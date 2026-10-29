@@ -8,9 +8,9 @@ Figures: one box per kernel, left to right, HBM reads (blue, left) and writes (r
 Dispatch: `integrations/pwa_train.py` (the H100 integration; compute capability (10, 0) selects the sm_100a extension);
 kernels: `integrations/csrc/sm100/pwa_sm100.cu` (tcgen05 / TMEM / TMA), one extension.
 
-Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, a token key mask (or none), any N (length) and S (MSA depth)
-(both padded to 128, pad tokens masked as keys): training up to N 1024, inference up to N 2048; the wide widths (next section) in
-inference only. The MSA residual and the module's row-broadcast dropout
+Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, a token key mask (or none), any N (length) up to 2048 and any S
+(MSA depth) (both padded to 128, pad tokens masked as keys), inference and training, at MiniWorld's width and the wide widths of the next
+sections. The MSA residual and the module's row-broadcast dropout
 (`drop_msa`, training) are applied in the gate / out-projection pass. Every other call runs the portable portable path.
 
 Design notes:
@@ -28,19 +28,22 @@ Design notes:
 FoldForge's predictors run the module at other widths (DenseSpec `msa_channel` / `pair_channel` / `msa_value_dim`, 8 heads). B200
 serves them in inference (`integrations/pwa_wide.py`, `refusal` in `pwa_train.py`), and every width up to N 2048:
 
-| width (d_msa / d_pair / 8 x d_hidden) | families | kernels |
-|---|---|---|
-| 64 / 128 / 8 x 32 | MiniWorld, Boltz-2, RoseTTAFold3 | `pwa_sm100.cu` (training too, N <= 1024) |
-| 64 / 128 / 8 x 8 | AF3, OpenFold3, Protenix-v1 | `pair_fwd<128>` + `pwa_wide_sm100.cu` (64, 8) |
-| 128 / 256 / 8 x 8 | Protenix-v2 | `pair_fwd<256>` + (128, 8) |
-| 128 / 384 / 8 x 8 | OpenDDE | `pair_fwd<384>` + (128, 8) |
-| 128 / 256 / 8 x 16 | ESMFold2 | `pair_fwd<256>` + (128, 16) |
-| 64 / 256 / 8 x 32 | Chai-1 (not served on H100) | `pair_fwd<256>` + (64, 32) |
+| width (d_msa / d_pair / 8 x d_hidden) | families | kernels (inference) | training |
+|---|---|---|---|
+| 64 / 128 / 8 x 32 | MiniWorld, Boltz-2, RoseTTAFold3 | `pwa_sm100.cu` | `pwa_sm100.cu` |
+| 64 / 128 / 8 x 8 | AF3, OpenFold3, Protenix-v1 | `pair_fwd<128>` + `pwa_wide_sm100.cu` (64, 8) | + `glue_w` / `dvb_w` (64, 8), `pair_bwd` |
+| 128 / 256 / 8 x 8 | Protenix-v2 | `pair_fwd<256>` + (128, 8) | + (128, 8), `pair_bwd_w<256>` |
+| 128 / 384 / 8 x 8 | OpenDDE | `pair_fwd<384>` + (128, 8) | + (128, 8), `pair_bwd_w<384>` |
+| 128 / 256 / 8 x 16 | ESMFold2 | `pair_fwd<256>` + (128, 16) | + (128, 16), `pair_bwd_w<256>` |
+| 64 / 256 / 8 x 32 | Chai-1 (not served on H100) | `pair_fwd<256>` + (64, 32) | `pwa_sm100.cu`'s MSA side + `pair_bwd_w<256>` |
 
 - `pair_fwd` is built per (d_pair, NMAX): z arrives in units of two 64-channel blocks (one for d_pair 384), so a wider pair is more
   units per tile; NMAX 2048 holds a row of 2048 logits and its softmax reads the row three times from shared memory. The d_pair 128,
   NMAX 1024 build gives the previous kernel's bits at the previous speed (L384 / 768 / 1024: 14.5 / 38.4 / 54.9 us vs 14.5 / 38.6 /
-  55.0). Not on B200: IntelliFold-v2 (256 / 512 / 8 x 32), training at these widths, training at N > 1024.
+  55.0). Not on B200: IntelliFold-v2's MSA side (d_msa 256, 8 x 32: its pair side, d_pair 512, has `pair_fwd<512>` / `pair_bwd_w<512>`).
+- `pair_fwd`'s z ring: the two statistics groups take alternate tiles, so each waits its own full barrier per slot (a shared one let a
+  group pass on a slot whose previous load, the other group's, had not landed: d_pair 384 gave different logits run to run, 512 at
+  N > 1024 faulted; fixed 2026-10-29, d_pair 128 / 256 bitwise unchanged).
 - `pwa_wide_sm100.cu` (`ln_vg_w`, `gate_out_w`) is `ln_vg` / `pwa_gate_out` per (d_msa, d_hidden): the msa tile is d_msa / 64
   swizzled blocks, the [rows][C] value / o tiles take the swizzle of a C * 2-byte row, the LayerNorm is a thread a row in three passes.
 - Accuracy: the update against an fp32 copy of the module is within 1.01-1.04x of the module's own bf16 statements' error at every
@@ -62,6 +65,49 @@ process's matmul filler on the card. "PyTorch" is the module's statements (what 
 | MiniWorld 64 / 128 / 8 x 32 | (1024, 1024) | 2.782 | 0.695 | 4.00x |
 | MiniWorld | (1536, 1024) | 4.602 | 1.328 | 3.47x |
 | MiniWorld | (2048, 1024) | 6.681 | 2.068 | 3.23x |
+
+## Beyond MiniWorld's shape: training (2026-10-29)
+
+B200 trains every width of the table above (Chai-1 on the MiniWorld kernels) and every width at N up to 2048 (`pwa_wide._train_b200`,
+`pwa_train.refusal`). Forward as inference with y and o kept (`ln_vg_w` with y, `gate_out_w` with the row-dropout keep-mask); backward:
+
+| step | kernel | work |
+|---|---|---|
+| B1 | `glue_w` (`pwa_wide_sm100.cu`) | dout' = dres keep / (1 - p) in place; G = y Wg^T, DU = dout' Wo (tcgen05, TMEM); a thread a row: do = DU g (over o, head-major), dgp = DU o g (1 - g) (over y), go = g o (over dout'); all out by TMA |
+| B2 | cuBLAS | dv = w^T . do, dw = do . v^T (bmm); dWo = dout'^T go (fp32 out) |
+| B3 | `dvb_w` | dy = [dgp \| dv] [Wg; Wv] (tcgen05; dv's [128 s][C] head blocks are the K-major A as the contraction left them), dm = LN_bwd(dy) + dres, dgamma / dbeta; dv also stored in natural layout next to dgp |
+| B4 | cuBLAS | [dWg; dWv] = [dgp \| dv]^T y (fp32 out) |
+| B5 | `pair_sdot` + `pair_bwd` (`pair_bwd_w<256 / 384 / 512>`) | dz, dWb, dgamma_z |
+
+- `glue_w` / `dvb_w` are built where 8 d_hidden <= d_msa (the o / y / dres tiles of a 128-row tile hold the outputs in place); two
+  stages where they fit (64, 8 both; 128, 8 `dvb_w`), one otherwise. dgamma / dbeta are fp32 column sums (a warp reduce-scatter per 32
+  channels, fixed order): `dv_bwd`'s tensor-core sum rounds every dy . xhat to bf16 first, which left dgamma as noisy as the module's
+  own bf16 error.
+- `pair_bwd_w` keeps the z tile in shared memory and runs the LayerNorm in three passes over it, 32 channels at a time; dz is written over
+  z and leaves block by block; the dWb / dgamma_z GEMM reads raw z (M = dbr^T z - dbr^T mean with dbr = bf16(db rstd)), so no normalised
+  copy is written; at d_pair 512 dzn = db . Wb (K = 16) is issued once per pass and chunk (TMEM holds M beside half a row).
+- Accuracy (`tests/gpu/sm100/test_pwa_b200_training_gpu.py`): output, d_msa, d_pair and every parameter gradient against an fp32 copy
+  within 1.15x of the module's own bf16 statements' error, ln_msa.weight within 1.25x (its sum over rows cancels heavily: our error
+  stays 7-9e-3 at (203, 129) while the module's moves 6.3-10.8e-3 with the seed); ragged, N 1100-2048, row dropout, fp32 master
+  parameters under autocast; bitwise-repeatable gradients, CUDA-graph replay.
+
+Training step (forward + backward of one module call), CUDA graph, bf16-mixed (fp32 parameters under autocast), p_drop 0.15, random
+key mask (90 % kept), ms; GPU 2 of node 2. "PyTorch" is the module's statements (what B200 ran for these calls before).
+
+| width | (N, S) | PyTorch | CUDA | speed-up |
+|---|---|---|---|---|
+| AF3 64 / 128 / 8 x 8 | (384, 1024) | 1.199 | 0.534 | 2.25x |
+| AF3 | (768, 1024) | 2.514 | 1.062 | 2.37x |
+| Protenix-v2 128 / 256 / 8 x 8 | (384, 1024) | 1.689 | 0.794 | 2.13x |
+| Protenix-v2 | (768, 512) | 2.207 | 1.083 | 2.04x |
+| OpenDDE 128 / 384 / 8 x 8 | (384, 1024) | 1.821 | 0.850 | 2.14x |
+| OpenDDE | (768, 512) | 2.729 | 1.290 | 2.12x |
+| ESMFold2 128 / 256 / 8 x 16 | (384, 1024) | 2.169 | 1.024 | 2.12x |
+| ESMFold2 | (768, 512) | 2.702 | 1.332 | 2.03x |
+| Chai-1 64 / 256 / 8 x 32 | (384, 1024) | 2.707 | 0.841 | 3.22x |
+| Chai-1 | (768, 1024) | 5.749 | 1.894 | 3.04x |
+| MiniWorld 64 / 128 / 8 x 32 | (1536, 512) | 7.084 | 2.743 | 2.58x |
+| MiniWorld | (2048, 512) | 10.623 | 4.406 | 2.41x |
 
 ## MSAPairWeightedAveraging (`MSAPairWeightedAveraging`)
 
