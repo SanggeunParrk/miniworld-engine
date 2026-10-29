@@ -618,6 +618,12 @@ APB_GEOMETRY = {
     (16, 384): (32, 24),
     (24, 384): (16, 16),
     (16, 512): (32, 32),
+    # the token DiT's head layouts (TDIT_HEADS at d 768 / 1024): its per-sample-bias training block (``token_dit_train``, B200
+    # psb) runs these BPS / QPAIR builds with every sample's own bias planes
+    (16, 768): (48, 48),
+    (24, 768): (32, 32),
+    (12, 768): (64, 64),
+    (16, 1024): (64, 64),
 }
 
 
