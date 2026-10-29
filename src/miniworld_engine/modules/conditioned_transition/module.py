@@ -148,21 +148,24 @@ class ConditionedTransition(nn.Module):
         return self._update(x, cond, residual=False)
 
     def _cuda_update(self, x_in: torch.Tensor, cond: torch.Tensor, *, residual: bool):
-        """The H100 sm_90a kernels for a call that records no backward: the AdaLN (``kernels/adaln/cuda``: LN(cond) with the statistics of x, then
+        """The H100 sm_90a kernels (B200: ``kernels/adaln/cuda``'s row kernels and ``ct_sm100``'s tcgen05 tail) for a call that records no backward: the AdaLN (``kernels/adaln/cuda``: LN(cond) with the statistics of x, then
         one GEMM with the gate and the LayerNorm in its epilogue) and the tail (``kernels/conditioned_transition/cuda/ct_inference``: the expand
         GEMM with the SwiGLU in its epilogue, then the squeeze GEMM with the gate and the residual in its epilogue). ``None`` when they do not
         serve the call (another dtype, a width they do not tile, strict fp32): the caller runs the reference."""
         from miniworld_engine.kernels.adaln import cuda as adaln_cuda
-        from miniworld_engine.kernels.conditioned_transition.cuda import ct_inference
+        from miniworld_engine.kernels.conditioned_transition.cuda import ct_inference, ct_sm100
 
         device_type = x_in.device.type
         compute_dtype = (torch.get_autocast_dtype(device_type)
                          if torch.is_autocast_enabled(device_type) else self.expand_a.weight.dtype)
         d = x_in.shape[-1]
+        nd = self.expand_a.weight.shape[0]
         x2 = x_in.reshape(-1, d).to(compute_dtype)
         cond2 = cond.reshape(-1, cond.shape[-1]).to(compute_dtype)
-        if not (adaln_cuda.available(x2, cond2) and adaln_cuda.wgmma_supported(x2, cond2)
-                and ct_inference.supported(x2, cond2, self.expand_a.weight.shape[0], d)):
+        # B200: the AdaLN's row kernels around cuBLAS, then the tail's two tcgen05 GEMMs (``ct_sm100``)
+        b200 = ct_sm100.supported(x2, cond2, nd, d)
+        if not (adaln_cuda.available(x2, cond2) and (b200 or (adaln_cuda.wgmma_supported(x2, cond2)
+                                                              and ct_inference.supported(x2, cond2, nd, d)))):
             return None
         ada = self.ada_ln_in
         with torch.autocast(device_type=device_type, enabled=False):
@@ -170,14 +173,14 @@ class ConditionedTransition(nn.Module):
                 x2, cond2, ada.ln_cond.weight, ada.to_scale.weight, ada.to_scale.bias, ada.to_bias.weight,
                 ada.ln_in.eps, ada.ln_cond.eps, rna=compute_dtype == torch.float32)
             fold = residual and x_in.dtype == compute_dtype
-            y = ct_inference.ct_inference(
+            y = (ct_sm100.ct_inference_sm100 if b200 else ct_inference.ct_inference)(
                 xn, cond2, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.to_scale.weight, self.to_scale.bias,
                 x2 if fold else None)
         y = y.reshape(*x_in.shape[:-1], self.d_hidden)
         return y if fold or not residual else x_in + y
 
     def _cuda_train_update(self, x_in: torch.Tensor, cond: torch.Tensor, *, residual: bool):
-        """Training on H100: the AdaLN module (its own hand-CUDA route), then the tail's hand-CUDA forward / backward
+        """Training on H100 and B200: the AdaLN module (its own hand-CUDA route), then the tail's hand-CUDA forward / backward
         (``kernels/conditioned_transition/cuda/ct_train``: row kernels between cuBLAS GEMMs). ``None`` when they do not serve the call."""
         from miniworld_engine.kernels.conditioned_transition.cuda import ct_train
 
