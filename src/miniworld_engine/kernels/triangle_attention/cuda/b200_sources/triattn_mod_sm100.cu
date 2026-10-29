@@ -2,7 +2,8 @@
 // gate + out-projection, gate backward + delta, projection dgrad + LN backward), developed on tcgen05 / TMEM / TMA.
 //
 // front:  y = LN(x) (never stored); q | k | v | g = y . W^T  (four 128 x 128 projections, bf16, the [rows][H*32] projection layout
-//         the attention kernels read); bias[b, h, j, k] = y . Wb[h]  (head-major for the attention, masked keys = -inf)
+//         the attention kernels read); bias[b, h, j, k] = y . Wb[h]  (head-major for the attention, masked keys = -inf); with BT
+//         (AlphaFold 3's ending node: the bias of the pair as it is) row (b, j, k) writes bias[b, h, k, j] instead (its key j)
 #include <torch/extension.h>
 #include <cstring>
 #include "sm100.cuh"
@@ -58,7 +59,8 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm100(
     const float* __restrict__ LNW, const float* __restrict__ LNB, const float* __restrict__ WB,   // [128], [128], [4][128]
     const bool* __restrict__ MASK,                        // [B][L] key mask or nullptr
     __nv_bfloat16* __restrict__ BIAS,                     // [B][4][L][L]
-    const int TRANS) {                                    // 1: x / y / dy / dx in the ending node's layout (see load_rows)
+    const int TRANS,                                      // 1: x / y / dy / dx in the ending node's layout (see load_rows)
+    const int BT) {                                       // 1: row (b, j, k) -> bias[b, h, k, j] (see the header)
   using namespace fr;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -182,10 +184,11 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm100(
         const int kx = (int)(row % L);
         const long bj = row / L;
         const int j = (int)(bj % L), b = (int)(bj / L);
-        const bool keep = MASK == nullptr || MASK[(long)b * L + kx];
+        const int qi = BT ? kx : j, ki = BT ? j : kx;
+        const bool keep = MASK == nullptr || MASK[(long)b * L + ki];
 #pragma unroll
         for (int h = 0; h < NH; ++h)
-          BIAS[(((long)b * NH + h) * L + j) * L + kx] = keep ? __float2bfloat16_rn(bacc[h]) : __float2bfloat16_rn(-3.3895313892515355e38f);
+          BIAS[(((long)b * NH + h) * L + qi) * L + ki] = keep ? __float2bfloat16_rn(bacc[h]) : __float2bfloat16_rn(-3.3895313892515355e38f);
       }
       fence_proxy_async();
       __syncwarp();
@@ -1536,7 +1539,7 @@ torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch:
 // x [R, 128] bf16 (R = B * L * L rows (b, j, k)); w4 = [Wq; Wk; Wv; Wg] [512, 128] bf16; wb [4, 128]; mask [B, L] bool or empty
 // -> (q, k, v, g [R, 128] bf16, bias [B, 4, L, L] bf16 with masked keys at -inf)
 std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor w4, torch::Tensor wb,
-                                     torch::Tensor mask, int64_t B, int64_t L, bool trans) {
+                                     torch::Tensor mask, int64_t B, int64_t L, bool trans, bool bt) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.size(-1) == C, "x: [R, 128] bf16");
   const long R = x.numel() / C;
   TORCH_CHECK(R == B * L * L && L % fr::BM == 0, "rows = B * L * L, L % 128 == 0");
@@ -1559,7 +1562,7 @@ std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::
   const int ntiles = (int)(R / fr::BM);
   tri_front_sm100<<<std::min(ntiles, num_sms(x.device().index())), fr::THREADS, fr::SMEM, at::cuda::getCurrentCUDAStream()>>>(
       (int)R, (int)L, ntiles, (float)eps, xm, wm, qm, km, vm, gm, lw.data_ptr<float>(), lb.data_ptr<float>(), wbf.data_ptr<float>(), mp,
-      reinterpret_cast<__nv_bfloat16*>(bias.data_ptr<at::BFloat16>()), trans ? 1 : 0);
+      reinterpret_cast<__nv_bfloat16*>(bias.data_ptr<at::BFloat16>()), trans ? 1 : 0, bt ? 1 : 0);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {q, k, v, g, bias};
 }
@@ -1579,5 +1582,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("tri_pack_params", &tri_pack_params, "one-launch parameter pack: (w4 bf16 [512,128], wo bf16 [128,128], lnw|lnb|Wb fp32 [6,128])");
   m.def("tri_front", &tri_front, "sm100 TriangleAttention front: LN + q|k|v|g projections + head-major (masked) bias",
         py::arg("x"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("w4"), py::arg("wb"), py::arg("mask"), py::arg("B"), py::arg("L"),
-        py::arg("trans") = false);
+        py::arg("trans") = false, py::arg("bt") = false);
 }
