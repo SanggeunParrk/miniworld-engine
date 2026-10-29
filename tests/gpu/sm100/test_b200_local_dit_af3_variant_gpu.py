@@ -141,14 +141,19 @@ def _train(m, ins, dtype, w, mask):
     return res
 
 
-@pytest.mark.parametrize(("a", "n", "real"), [(3, 300, 300), (2, 384, 330), (4, 130, 120), (2, 1024, 1024)])
+TRAIN_CASES = [(3, 300, 300), (2, 384, 330), (4, 130, 120), (2, 1024, 1024), (2, 512, 400), (1, 256, 100), (3, 640, 193)]
+
+
+@pytest.mark.parametrize(("kv_norm", "key_window"), OPTIONS)
+@pytest.mark.parametrize(("a", "n", "real"), TRAIN_CASES)
 @pytest.mark.parametrize("dtype", [BF, F32], ids=["bf16", "fp32"])
-def test_parallel_kv_norm_training_matches_the_module_path(a, n, real, dtype, monkeypatch):
-    ref, eng = _blocks("parallel", "pad", seed=7)
+def test_training_matches_the_module_path(kv_norm, key_window, a, n, real, dtype, monkeypatch):
+    ref, eng = _blocks(kv_norm, key_window, seed=7)
     eng = eng.to(dtype)
     s, c, z, mask = _inputs(a, n, real, seed=8)
     ins = (s, c, z)
     w = torch.randn(a, 1, n, 128, device="cuda", dtype=torch.float64)
+    w[:, :, real:] = 0  # the loss reads the real atoms (a padding query's output differs between the window rules)
     truth = _train(ref, ins, torch.float64, w, mask)
     calls = []
     for cls in (local_dit._LocalBlock, local_dit._LocalBlock32):
@@ -165,16 +170,25 @@ def test_parallel_kv_norm_training_matches_the_module_path(a, n, real, dtype, mo
         torch.backends.cuda.matmul.allow_tf32 = tf32
     assert set(fused) == set(truth)
     for k in truth:
-        ef, em = _rel(fused[k], truth[k]), _rel(module[k], truth[k])
+        f, t, m = fused[k], truth[k], module[k]
+        if k == "out":
+            f, t, m = f[:, :, :real], t[:, :, :real], m[:, :, :real]
+        ef, em = _rel(f, t), _rel(m, t)
         assert torch.isfinite(fused[k]).all(), k
         assert ef < 1.5 * em + (3e-3 if dtype == BF else 1e-3), f"{k}: sm_100a {ef:.2e} vs module path {em:.2e}"
 
 
-def test_a_gradient_through_the_slid_window_keeps_the_module_path():
-    _, eng = _blocks("parallel", "slide")
-    eng = eng.to(BF)
-    s, c, z, mask = _inputs(2, 256, 200)
-    ins = (s.bfloat16(), c.bfloat16(), z.bfloat16())
-    with torch.no_grad():
-        assert local_dit.serves(eng, *ins, mask)
-    assert not local_dit.serves(eng, *ins, mask)  # the parameters record a gradient
+@pytest.mark.parametrize("dtype", [BF, F32], ids=["bf16", "fp32"])
+def test_slid_window_training_is_deterministic(dtype):
+    """The slid windows' gradients are summed in a fixed order: what flows from dQ / dK / dV / dbias is bitwise repeatable (the block's
+    LayerNorm-weight and bias-column gradients use atomics already without the slide, so they are not compared)."""
+    _, eng = _blocks("parallel", "slide", seed=9)
+    eng = eng.to(dtype)
+    s, c, z, mask = _inputs(4, 512, 450, seed=10)
+    w = torch.randn(4, 1, 512, 128, device="cuda", dtype=torch.float64)
+    first = _train(eng, (s, c, z), dtype, w, mask)
+    for _ in range(2):
+        again = _train(eng, (s, c, z), dtype, w, mask)
+        for k in ("out", "dsingle", "dpair", "attention.to_query.weight", "attention.to_key.weight", "attention.to_value.weight",
+                  "attention.to_bias.weight", "attention.ln_pair.weight"):
+            assert torch.equal(first[k], again[k]), k
