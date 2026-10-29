@@ -13,6 +13,9 @@
 // -DBPS=1 (AttentionPairBias): every sample has its own bias and dbias planes ([A, NHEAD, L, L]); a work item is then (sample,
 // head, 128-query tile, 128-key chunk) and walks that one sample (A = 1 is the single-sample layout, unchanged).
 // TMEM: S[w] at w * 128, dP[w] at w * 128 + 64, dS[w] at 256 + w * 32 (bf16), dQ[b] at 320 + b * 48 (NDQ buffers, round robin).
+// -DDET=1 (deterministic dQ within a CTA): the two issuers' dQ MMAs of a step run in a fixed order -- issuer 1's after issuer 0's
+// of the same step have completed, issuer 0's after issuer 1's of the previous step -- so a step's dQ partial is bitwise the same
+// run to run (with -DDQPART the whole dQ is).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -46,6 +49,9 @@ using namespace s100;
 #endif
 #ifndef BPS
 #define BPS 0                            // 1: per-sample bias / dbias, one sample per work item
+#endif
+#ifndef DET
+#define DET 0                            // 1: a step's two dQ MMAs in a fixed order (bitwise repeatable with DQPART)
 #endif
 #ifndef DQPART
 #define DQPART 0                         // 1: each key chunk's dQ partial is STORED to its own slice DQ[chunk][a L + row] (deterministic;
@@ -218,6 +224,10 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
         else __nanosleep(20);
       }
       if (g >= NDQ) mbar_wait(&B.dq_free[b], ((g / NDQ) - 1) & 1);         // step g - NDQ's dQ has been read out (and zeroed)
+      if (DET) {                                                           // issuer 0 (g) after issuer 1 (g - 1), issuer 1 (g) after issuer 0 (g)
+        if (w == 1) mbar_wait(&B.ds_free[0], g & 1);
+        else if (g >= 1) mbar_wait(&B.ds_free[1], (g - 1) & 1);
+      }
       tc_fence_after();
       const uint64_t dk = desc_mn128(su + O_K + (g % STK) * T128 + w * BN * 128, 8192);
       if (elect_one()) {

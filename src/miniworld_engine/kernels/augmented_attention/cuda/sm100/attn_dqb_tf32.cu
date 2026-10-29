@@ -19,6 +19,10 @@
 // 128-B swizzle and NBX 16-column ones in the 64-B swizzle (48 = 32 + 16, 32 = 32, 64 = 32 + 32); the MN-major K NV 32-column
 // atoms. smem: 16 x 48 208 KB (STA 2, STK 2), 24 x 32 144 KB (2, 2), 12 x 64 / 16 x 64 224 KB (STA 2, STK 1: a second K slot
 // does not fit; the next step's K then loads behind this step's dQ MMAs).
+// -DDET=1 (deterministic dQ within a CTA): the two issuers' dQ MMAs of a step run in a fixed order -- issuer 1's after issuer 0's
+// of the same step have completed, issuer 0's after issuer 1's of the previous step -- so a step's dQ partial is bitwise the same
+// run to run (with -DDQPART the whole dQ is).
+// -DDQPART=1: dQ partials stored per key chunk (see the define), with NS = 1.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -42,6 +46,12 @@ static_assert(DHP == 64 || DHP == 48 || DHP == 32, "TF32 head width 64, 48 or 32
 #ifndef STK
 #define STK (DHP == 64 ? 1 : 2)          // K ring (28 KB slots at 48): released after the step's dQ MMAs
 #endif
+#ifndef DET
+#define DET 0                            // 1: a step's two dQ MMAs in a fixed order (bitwise repeatable with DQPART)
+#endif
+#ifndef DQPART
+#define DQPART 0                         // 1: each 64-key chunk's dQ partial is STORED to its own slice DQ[chunk][a L + row] (rows ldq floats
+#endif                                   // apart; the caller adds the L / 64 slices in order) instead of reduce-added into one zeroed dQ
 #ifndef ROT
 #define ROT 1                            // start each key chunk's sample walk at a different sample (spreads the dQ reductions)
 #endif
@@ -214,6 +224,10 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         else __nanosleep(20);
       }
       if (g >= NDQ) mbar_wait(&B.dq_free[b], ((g / NDQ) - 1) & 1);         // step g - NDQ's dQ has been read out (and zeroed)
+      if (DET) {                                                           // issuer 0 (g) after issuer 1 (g - 1), issuer 1 (g) after issuer 0 (g)
+        if (w == 1) mbar_wait(&B.ds_free[0], g & 1);
+        else if (g >= 1) mbar_wait(&B.ds_free[1], (g - 1) & 1);
+      }
       tc_fence_after();
       // K_w as MN-major B: keys as rows (8 keys = 1 KB per K step), two 32-column atoms 8 KB apart
       const uint64_t dk = desc_mn32b(su + O_K + (g % STK) * SK + K_M + w * BN * 128, KC * 128);
@@ -257,8 +271,12 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
 #pragma unroll
       for (int k = 0; k < 8; ++k) {
         if (k * 4 >= nc) break;
-        red4(drow + 4 * k, __uint_as_float(v[4 * k]) * RSQD, __uint_as_float(v[4 * k + 1]) * RSQD, __uint_as_float(v[4 * k + 2]) * RSQD,
-             __uint_as_float(v[4 * k + 3]) * RSQD);
+        if (DQPART)
+          *reinterpret_cast<float4*>(drow + 4 * k) = make_float4(__uint_as_float(v[4 * k]) * RSQD, __uint_as_float(v[4 * k + 1]) * RSQD,
+                                                                 __uint_as_float(v[4 * k + 2]) * RSQD, __uint_as_float(v[4 * k + 3]) * RSQD);
+        else
+          red4(drow + 4 * k, __uint_as_float(v[4 * k]) * RSQD, __uint_as_float(v[4 * k + 1]) * RSQD, __uint_as_float(v[4 * k + 2]) * RSQD,
+               __uint_as_float(v[4 * k + 3]) * RSQD);
       }
     };
     float db[BN];
@@ -335,7 +353,7 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
           for (int k = 0; k < BN / 4; ++k) red4(brow + 4 * k, db[4 * k], db[4 * k + 1], db[4 * k + 2], db[4 * k + 3]);
         }
       }
-      e2r = e1r; e2h = e1h; e1r = a * L + m0; e1h = head;
+      e2r = e1r; e2h = e1h; e1r = (DQPART ? c * A * L : 0) + a * L + m0; e1h = head;
       advance(li, i, c, m0, head, a);
     }
     if (ng >= 2) epi(ng - 2, e2r, e2h);
