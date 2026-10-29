@@ -4,7 +4,8 @@ Kernel-level status of the Transition (`modules.Transition`, `y = x + W_s(silu(W
 module-level summary is in [b200.md](../b200.md). The hand-CUDA paths cover **bf16, n = 4 at D = 64 / 128 / 256 / 384 / 512 and
 n = 2 at D = 64 / 128 / 256 / 384 / 512 / 768**, for any activation whose rows (every dimension but the last) are a whole number of
 128-row tiles: the pair stream [B, L, L, D] (every registry length: L² is a multiple of 128 for L = 128 … 768), the MSA stream
-[B, N, L, D] and a single stream [B, L, D]. Other (D, n) and fp32 keep the Triton residual path. Columns are (Length, Dimension)
+[B, N, L, D] and a single stream [B, L, D]. Other (D, n), ragged row counts and fp32 run the generic tcgen05 kernels
+([Generic path](#generic-path-any-width-row-count-and-fp32)). Columns are (Length, Dimension)
 because the CUDA paths are bf16 only; the tables below are for the pair stream, the other streams run the same kernels on their
 rows (the single stream at D = 384 below 17 tiles excepted, see [Small M](#small-m-d384-at-most-16-tiles)).
 
@@ -482,6 +483,47 @@ per-tile path (L2048 n = 4: inference 28.7 vs 49.2 µs, training 94.2 vs 151.8 �
 [1, 768, 384] n = 2 in 11.8 / 33.1 µs.
 
 No kernel on these paths is autotuned, so nothing needs a cache (✓).
+
+## Generic path (any width, row count and fp32)
+
+`kernels/transition/cuda/fused_generic_sm100a.py` serves every call the tuned builds above do not take: any D that is a multiple of 64
+up to 1024, any hidden width that is a multiple of 128, **any row count** (TMA zero-fills the tail of the last 128-row tile and clips
+it on the store: no padding copy) and **fp32 activations on the TF32 tensor cores** (`tcgen05.mma.kind::tf32`, only where torch allows
+TF32; strict fp32 keeps the PyTorch reference). The module routes fp32 and the widths without a build here; `ops.transition` (the
+entry FoldForge's pairformer uses) pads a ragged row count for the tuned builds where one exists (measured faster: pair
+[1, 300, 300, 128] n4 50 against 85 µs) and sends the rest here.
+
+Kernels (`sm100/generic/`):
+
+* `tg_gemm.cu`: one persistent, warp-specialised tcgen05 GEMM (320 threads: a TMA producer warp, an MMA warp, eight epilogue warps,
+  two per TMEM lane quarter), accumulators double-buffered in tensor memory, operands K-major on both sides through a 128-B-swizzled
+  ring, epilogue staged through swizzled shared memory and TMA-stored. Built per epilogue: SWIGLU (two accumulators, h = silu(a) b),
+  RESID (+ x), PLAIN (fp32 d_xn), GATE (three accumulators over two operand phases: dh = dy Ws and a, b recomputed from x_n, writing
+  h and [dA | dB]) and CTGATE (the ConditionedTransition's squeeze and gate projection, see `kernels/conditioned_transition/cuda/ct_sm100.py`);
+  output tiles 128 / 64 / 32 columns, the widest that gives every SM a tile.
+* `tg_rows.cu`: LayerNorm forward / backward (16-B vectors, 8-32 lanes per row), the TF32 rounding of dy, the fixed-order column sums,
+  the weight preparation (activation dtype, TF32 grid, Ws^T and [Wa; Wb]^T in one launch).
+
+Forward: LN -> SWIGLU -> RESID (cuBLAS `addmm` below half a wave of output tiles: a single track). Backward: GATE -> cuBLAS dWs, [dWa; dWb]
+(fp32 out) -> PLAIN d_xn (cuBLAS below half a wave) -> LN backward with the residual -> column sums. The forward saves only x_n and the
+statistics. Accuracy (tests): within 1.5x the error of the same-dtype PyTorch statements against fp64, output and every gradient.
+
+Measured 2026-10-29, CUDA graph replay, µs (before = the PyTorch statements B200 ran for these calls):
+
+| call | before | after | speed-up |
+|---|---|---|---|
+| `ops.transition` bf16 inference [1, 300, 300, 128] n4 (padded tuned build) | 251.4 | 49.5 | 5.08x |
+| `ops.transition` bf16 inference [1, 300, 300, 256] n4 / n2 (padded tuned) | 448.6 / 305.4 | 153.8 / 102.5 | 2.92x / 2.98x |
+| `ops.transition` bf16 inference [1, 300, 300, 384] / [1, 300, 300, 512] n4 (padded tuned) | 697.2 / 1001.5 | 304.9 / 559.7 | 2.29x / 1.79x |
+| `ops.transition` bf16 inference [1, 300, 384] n4 / n2 (padded tuned) | 22.1 / 20.3 | 21.5 / 18.3 | 1.03x / 1.11x |
+| module fp32 [1, 384, 384, 128] n4 inference / training | 729.3 / 2195.5 | 215.2 / 926.1 | 3.39x / 2.37x |
+| module fp32 [1, 384, 384, 256] n4 inference / training | 1392.1 / 4338.6 | 576.2 / 2465.0 | 2.42x / 1.76x |
+| module fp32 [48, 384, 384] n2 inference / training | 167.4 / 652.3 | 85.1 / 419.3 | 1.97x / 1.56x |
+| module fp32 [1, 768, 384] n4 inference / training | 31.6 / 99.6 | 24.8 / 106.3 | 1.27x / 0.94x |
+
+Generic GEMMs alone (bf16, 90 000 rows): D128 n4 SWIGLU 43 µs (548 TFLOP/s), RESID 27 µs (441); D256 n4 SWIGLU 108 µs (876), RESID
+70 µs (672). Left: the single-track training step (a few row tiles: the K-serial GATE / GEMM tiles, launch count), the LN kernels at
+D >= 256 (~50 µs for 90 000 x 256 bf16, latency-bound), and a fused one-kernel forward for widths without a tuned build.
 
 ## How the kernels work
 
