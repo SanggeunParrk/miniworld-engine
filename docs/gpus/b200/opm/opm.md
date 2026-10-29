@@ -20,7 +20,8 @@ nothing of the module falls to the PyTorch statements on B200 any more (`kernels
 
 ## FoldForge widths, RoseTTAFold3, Chai-1 (`opm_wide_sm100.cu`, 2026-10-29)
 
-One extension (`opm_train._ext_wide`), the stages of `opm_sm100.cu`; MiniWorld's (64, 128) without biases keeps `opm_sm100.cu`.
+One extension (`opm_train._ext_wide`), the stages of `opm_sm100.cu`; MiniWorld's (64, 128) without biases keeps `opm_sm100.cu`, except the
+dgrad: since the fourth pass every c_z, 128 included, runs `opm_wdgrad_sm100` (the single-CTA `opm_dgrad_sm100` is deleted).
 
 - **d_msa 64 / 128 / 256 x d_pair 128 / 256 / 384 / 512, projection biases** (Protenix-v2 / ESMFold2 (128, 256), OpenDDE (128, 384),
   IntelliFold-v2 (256, 512), RoseTTAFold3 (64, 128) + biases), `integrations/opm_train.py`, either order:
@@ -39,10 +40,13 @@ One extension (`opm_train._ext_wide`), the stages of `opm_sm100.cu`; MiniWorld's
     one staging block per 64 columns, each stored by its own TMA box, its residual loaded one item ahead as soon as the block's store
     has left it. (Ablations at c_z 256, L768: drain compiled out 247 of 401 us; the per-element bias `__ldg` 90 us, the residual load at
     the start of each drain 64 us; the CTA pair alone 424 -> 401 us.) The interchain mask zeroes a pair's update (`asym`).
-  - dgrad `opm_wdgrad_sm100<CZ>` on CTA pairs: per 128-column chunk of dO one M 256 x N 128 product per K = 128 stage, each CTA landing
-    half of the chunk's Wo columns; each CTA keeps its tile's dz in a ring of 128-z units (the A operand); dbias per unit by one
-    M 256 x N 16 product (the ones in the leader's half of B). A forwarding warp tells the leader's MMA that its CTA's unit landed.
-    The interchain mask: inv 0 for the pair (dO, dz / n), its dz rows zeroed before the dbias product.
+  - dgrad `opm_wdgrad_sm100<CZ>` (c_z 128 / 256 / 384 / 512) on CTA pairs: per 256-column chunk of dO (8 c) one M 256 x N 256 product
+    per K = 128 stage, each CTA landing half of the chunk's Wo columns (128 n), into one of two 256-column TMEM accumulators (all of
+    TMEM); each CTA keeps its tile's dz in a ring of 128-z units (the A operand). dz / n and dO leave through one staging ring of
+    32 KiB TMA boxes (a dz / n unit in the unit's own layout, half a chunk of dO). dbias = sum dz is not a tensor-core product (no TMEM
+    columns are left): the drain warps reduce the dz rows they read for dz / n over the warp (a fixed fp32 butterfly), keep the sums
+    over the CTA's tiles in registers and add the four warps in a fixed order. A forwarding warp tells the leader's MMA that its CTA's
+    unit landed. The interchain mask: inv 0 for the pair (dO, dz / n), its dz row left out of dbias by a 0 factor.
   - dWo `opm_wdwo_sm100<CZ>`: every 128-wide c_z slice of a column part accumulates in one CTA's TMEM (2 x 256 / 3 x 128 / 4 x 128
     columns), so O is read once; split-K partials summed in split order.
   - prologue backward at d_msa 128 `opm_wprologue_bwd_sm100<WT, 1>`: one group of eight compute warps (two threads a row, 64 channels
@@ -71,8 +75,9 @@ One extension (`opm_train._ext_wide`), the stages of `opm_sm100.cu`; MiniWorld's
   - backward: dy = dz W', dW' = dz^T y, dbias (cuBLAS); `opm_chai_lnbwd_sm100` (CUDA cores, shared-memory staged, memory-bound) into the
     grouped layout; dA^T / dB^T by two batched GEMMs; `opm_chai_prologue_bwd_sm100` (the d_msa 64 prologue backward with 64 + 64 channels:
     dA^T tiles are the dy GEMM's MN-major A and the dW GEMM's K-major B).
-- ptxas (nvcc 13.1): no spills in any of these kernels (the MiniWorld-width `opm_prologue_bwd_sm100` of `opm_sm100.cu` spills 44 bytes,
-  as before this pass).
+- ptxas (nvcc 13.1): no spills in any of these kernels, nor in `opm_sm100.cu` (the MiniWorld-width `opm_prologue_bwd_sm100` spilled 44
+  bytes until the fourth pass: the compiler kept the 24 swizzled shared addresses of a thread live across the tile loop; the row's
+  swizzle phase is now formed per tile through an opaque move).
 - Tests: `tests/gpu/sm100/test_opm_wide_b200_gpu.py` (IntelliFold-v2, the interchain mask, batches), `test_opm_chai_b200_gpu.py`
   (fp64 statements, bf16 / fp32 master, masks, ragged shapes, interchain, batch, determinism, CUDA graph), `test_opm_variants_b200_gpu.py`.
 
@@ -115,6 +120,41 @@ stores together 22 %; a deeper Wo ring did not help): what is left there is the 
 the dO staging ring by TMA instead) and the coupling of the drain to the MMA. Chai-1: the product-norm backward 0.391 (HBM: dy, y in,
 dO out), the epilogue 0.387, prologue backward 0.109; past that only cuBLAS. Beyond these kernels the GEMMs over the materialised
 grouped product dominate every width (the fused inference kernel below shows the fused mainloop does not yet beat cuBLAS').
+
+Fourth pass (2026-10-29, GPU 4 of node 2; commits 743b1b0b, 4aa944d6, cb20bbfe):
+
+- The dgrad. Ablations of the CTA-pair kernel (c_z 384 / 512, L768) showed its MMAs bound it: with every load and store compiled out
+  it still took 510 / 650 us (~0.95 PF), and the same loop at N 256 with twice the FLOPs 621 / 801 us (~1.5 PF) -- at M 256 x N 128 a
+  CTA reads A (4 KiB) and its 2 KiB half of B from shared memory per MMA, 96 bytes a clock. (Compiled out alone, starting from the
+  TMA dz / n step below: the dO stores 634 -> 573 / 810 -> 741 us, the Wo loads -> 602 / 756, the dz loads -> 618 / 778.) Hence the
+  N 256 chunk above, with dbias moved off the tensor core; dz / n went through the staging ring by TMA first. A 128-byte-row dO box
+  (two j of 32 e, 128B swizzle) instead of the 64-byte one did not help (+0-1 %); ring depths at c_z 128 neither. Kernel alone
+  (L768 S1024, CUDA graph of 10 calls after 4 s, us, third pass -> dz / n by TMA -> N 256): c_z 256 506 -> 459 -> 398, c_z 384 722 ->
+  634 -> 545 (three units, two staging boxes; 562 with four / one), c_z 512 890 -> 810 -> 679; MiniWorld's c_z 128 (the single-CTA
+  kernel -> this one) L384 86 -> 77, L768 327 -> 292. dO and dz / n are bitwise unchanged; dbias changes by fp32 summation order only.
+- The prologue backward at MiniWorld's width: no spill (above); L768 58.0 / 58.8 -> 56.4 / 56.0 us, L384 unchanged (~31 us).
+- Training step, own CUDA-graph harness (the module call `opm_train.outer_product_mean` with the pair residual, fp32 master parameters
+  under bf16 autocast, forward + backward captured in one graph, timed 3 x 1 s after the filler process yielded the GPU; two
+  interleaved runs per tree, ms, third pass -> fourth): (64, 128) L384 0.917 / 0.919 -> 0.914 / 0.916, L768 3.338 / 3.341 -> 3.299 /
+  3.307; (128, 256) L384 1.079 / 1.075 -> 1.049 / 1.050, L768 3.777 / 3.766 -> 3.695 / 3.653; (128, 384) L384 1.202 / 1.204 ->
+  1.152 / 1.151, L768 4.339 / 4.343 -> 4.180 / 4.121; (256, 512) L384 1.454 / 1.436 -> 1.408 / 1.387, L768 4.998 / 5.006 -> 4.754 /
+  4.770. The dgrad inside that step (profiler, L768, us): c_z 128 310 / 318 -> 278 / 276, 256 509 / 498 -> 349 / 343, 384 755 / 722
+  -> 501 / 472, 512 881 / 902 -> 580 / 594.
+- The same through `bench.py ... mode=training cudagraph=manual +n_msa=1024` (median of three interleaved runs, ms, third -> fourth;
+  this harness moved by up to +-10 % run to run today, the GPU shared with the filler): (64, 128) L384 0.981 -> 0.904, L768 3.555 ->
+  3.242; (128, 256) 1.093 -> 1.080, 4.107 -> 3.815; (128, 384) 1.234 -> 1.208, 4.696 -> 4.247; (256, 512) 1.531 -> 1.476, 5.507 ->
+  5.159.
+- The three cuBLAS GEMMs. Alone in a CUDA graph at steady state under the 1000 W cap (L768 S1024, us): O = A2 BT^T 921 (1.34 PF),
+  dA = BT^T dO^T 937 (1.32 PF), dB = A2^T dO 929 (1.33 PF); L384 233 / 240 / 238 (1.29-1.33 PF): the power-capped ceiling. Inside the
+  training step the same calls take 742-780 us at L768 (~1.6 PF), as the memory-bound kernels between them let the power budget
+  recover. No reshaping helped: dA as (dO BT)^T 929 us, dA and dB on two streams (to fill the 5.2 waves of 256 x 256 tiles over 74 CTA
+  pairs) 1873 us for both, a two-way split-K of dA with fp32 partials 1005 us. Fusing them into the hand kernels does not pay either:
+  dA reduces dO over j and dB over i, so a kernel fed by the dgrad's dO tiles would need cross-CTA partial sums of [S, N 32]
+  (nondeterministic atomics, or one partial per j tile: 24 x 100 MB at L768); a flash-style pair of kernels that each own an i (j)
+  block and recompute dO from dz and Wo saves the 1.2 GB dO round trip but adds 2 x 2 N^2 c_z 1024 FLOPs (2 x 155 GF at c_z 128,
+  2 x 618 GF at 512) and runs a hand mainloop, which in the fused inference kernel measured ~13 % behind cuBLAS per unit of energy at
+  this K: at the cap that loses more than the dgrad it replaces. The O GEMM cannot drop its output (dWo reads O; `opm_train_save_o=0`
+  recomputes it), and dWo is a hand kernel already.
 
 #### Fused inference kernel (`opm_fused_sm100`, `opm_fused_infer`)
 
