@@ -13,6 +13,7 @@ from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
+    needs_backward,
     resolve_augmented_attention,
 )
 from miniworld_engine.modules.exceptions import (
@@ -118,6 +119,69 @@ class AugmentedAttentionPairBias(nn.Module):
         """
         state_dict.pop(f"{prefix}ln_pair.bias", None)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def _route_sm100(self, single, cond, pair, mask, compute_dtype, extra_pair_bias, residual: bool):
+        """B200: the whole module as ONE autograd node per call (``cuda.sm100.module_route``: the AdaLN's CUDA route, then the packed
+        q|k|v|g GEMM, the pair pass, the tcgen05 core with the gates and the residual in row kernels; every gradient add, sigmoid and
+        cast of the PyTorch statements folded into them), or None when it does not serve the call. Precision: bf16 under bf16 autocast
+        or for bf16 activations, fp32 (TF32) for fp32 activations without autocast; ``compute_dtype`` only where it names that same
+        precision. Key masks shared by the samples or one per sample, ``extra_pair_bias``, QK-norm, any A and L."""
+        if (
+            self._backend != KernelBackend.PORTABLE
+            or not single.is_cuda
+            or not _bf16_sm90_enabled()
+            or single.shape[1] != 1
+            or self.to_query.bias is None
+            or any(m.bias is not None for m in (self.to_key, self.to_value, self.to_gate, self.to_out))
+        ):
+            return None
+        from miniworld_engine.kernels.augmented_attention.cuda.sm100 import _index, _is_blackwell
+
+        if not _is_blackwell(_index(single)):
+            return None
+        if torch.is_autocast_enabled("cuda"):
+            dt = torch.get_autocast_dtype("cuda")
+            if dt is not torch.bfloat16 or compute_dtype not in (None, dt):
+                return None
+        else:
+            dt = single.dtype
+            if dt not in (torch.bfloat16, torch.float32) or compute_dtype not in (None, dt) or (dt is torch.float32 and compute_dtype is not None):
+                return None
+        key_mask = None
+        if mask is not None:
+            if mask.ndim == 3 and (mask.shape[0] == 1 or mask.stride(0) == 0):
+                key_mask = mask[0, 0]   # one row shared by the samples (an [B, L] mask expanded over A): folded into the bias
+            elif mask.ndim == 2:
+                key_mask = mask[0]
+            else:
+                key_mask = mask[:, 0]   # [A, L]: a key mask per sample, the cores' (-DKMASK)
+        from miniworld_engine.kernels.augmented_attention.cuda.sm100 import module_route as mr
+
+        heads = self.n_head
+        grad = needs_backward(self, single, cond, pair) or (
+            extra_pair_bias is not None and extra_pair_bias.requires_grad and torch.is_grad_enabled()
+        )
+        if not mr.available(single, pair, self.ln_pair.weight, self.to_bias.weight, key_mask, extra_pair_bias, dt, heads, grad):
+            return None
+        ada = self.ada_ln_in
+        res = single
+        got = ada._cuda_forward(single, cond, streams=True) if (grad and residual and single.dtype == dt and cond.dtype == dt) else None
+        if got is not None:   # the residual and the gate projection's cond as outputs of the AdaLN node: their gradients join its backward
+            x, res, cond = got
+        else:
+            x = ada(single, cond)
+        x = x if x.dtype is dt else x.to(dt)
+        cond = cond if cond.dtype is dt else cond.to(dt)
+        params = (self.to_query.weight, self.to_query.bias, self.to_key.weight, self.to_value.weight, self.to_gate.weight,
+                  self.to_out.weight, self.to_scale.weight, self.to_scale.bias, self.ln_pair.weight, self.to_bias.weight)
+        qke = ()
+        if self.use_qk_norm:
+            params = (*params, self.norm_query.weight, self.norm_key.weight)
+            qke = (float(self.norm_query.effective_eps(dt)), float(self.norm_key.effective_eps(dt)))
+        out_dtype = res.dtype if residual else dt
+        with torch.autocast("cuda", enabled=False):
+            return mr.module_update(x, cond, res if residual else None, pair, key_mask, extra_pair_bias, params, self.ln_pair.eps, heads,
+                                    out_dtype, qke)
 
     def _fused_pair_core_sm100(self, query, pair, mask, compute_dtype, extra_pair_bias):
         """The B200 pair-fused core that serves this call (``cuda.sm100.fused_pair``: the pair LayerNorm + head projection in one
@@ -340,6 +404,9 @@ class AugmentedAttentionPairBias(nn.Module):
         (the residual is this module's own input), so a block just calls ``single = module(...)``.
         A caller that composes the update some other way (a magnitude-preserving sum, a released
         checkpoint's own residual) takes :meth:`delta`."""
+        out = self._route_sm100(single, cond, pair, mask, compute_dtype, extra_pair_bias, residual=True)
+        if out is not None:   # B200: the residual add rides in the output gate's row pass
+            return out
         return single + self.delta(single, cond, pair, mask, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)
 
     @typecheck
@@ -371,6 +438,9 @@ class AugmentedAttentionPairBias(nn.Module):
         whatever the module carries either way. Only the core is cast, and the result comes back
         in the input dtype, so this changes precision and not the module's interface.
         """
+        out = self._route_sm100(single, cond, pair, mask, compute_dtype, extra_pair_bias, residual=False)
+        if out is not None:
+            return out
         in_dtype = single.dtype
         single = self.ada_ln_in(single, cond)
         whole = self._proj_core_gate(single, pair, mask, compute_dtype, extra_pair_bias)
