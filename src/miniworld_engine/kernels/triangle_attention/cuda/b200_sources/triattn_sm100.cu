@@ -805,6 +805,7 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
 #endif
           tmem_wait_ld();
           if (c == 1) {                             // both chunks loaded: the group's S^T buffer takes its next stage
+            fence_proxy_async();                    // the bias^T tile's reads, before its release: an arrive alone does not wait for outstanding LDS
             tc_fence_before();
             __syncwarp();
             if (lane == 0) { arrive(A(se + gi)); arrive(A(be + bs)); }
@@ -837,7 +838,10 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
             }
           }
 #endif
-          if (c == 0 && js >= 1) wait(A(ge + gi), (js - 1) & 1);   // this group's previous gradient GEMMs read the P^T | dS^T buffer
+          if (c == 0 && js >= 1) {                  // this group's previous gradient GEMMs read the P^T | dS^T buffer
+            wait(A(ge + gi), (js - 1) & 1);
+            tc_fence_after();
+          }
 #if TA_NOST
           if (pk[3] == 0x12345u && dk[7] == 0x777u) {
 #endif
@@ -1069,6 +1073,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
         }
 #pragma unroll
         for (int r = 0; r < QR; ++r) { lse[r] = sLD[r * 2 * BM + row]; dl[r] = sLD[r * 2 * BM + BM + row]; }
+        fence_proxy_async();                        // the staging's reads (Q / dO, lse / delta), before its release: an arrive alone does not wait for outstanding LDS
         __syncwarp();
         if (lane == 0) arrive(A(ae));
         tmem_wait_st();
@@ -1095,6 +1100,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
 #pragma unroll
           for (int i = 0; i < 32; ++i) dacc[i] = 0.f;
         }
+        fence_proxy_async();                        // the bias tile's reads, before its release: an arrive alone does not wait for outstanding LDS
         __syncwarp();
         if (lane == 0) arrive(A(be + bs));
 #pragma unroll

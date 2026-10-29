@@ -861,11 +861,9 @@ TMEM plan (512 columns; an accumulator row of a 128-channel head takes 128):
 QK^T steps through the two 128-byte-swizzled 64-column halves (K = 128); PV and the gradient products take N = 128 as one MN-major operand
 whose halves are LBO apart. dbias leaves per (pair row, key sub-tile) by TMA fp32 reduce-add (one row a task: twice the reduce traffic of
 the head-dim-64 query side); dW_q|k|v|g|o and the biases are the same bits run to run, dx / dγ / dβ / dW_b carry the reduce-add (as on the
-rest of the wide path). Shared buffers that the softmax / gradient warps read with ordinary loads (bias tiles, the query side's lse / delta
-staging) are released only after the values fed the thread's TMEM store: an `mbarrier.arrive` right after the loads went out ahead of
-them in SASS (ptxas set no wait on the LDS scoreboards), the next TMA load overwrote rows the slowest warp (sub-partition 0, beside the
-spinning TMA thread) had not read, and dK / dV of a key quarter differed run to run (10-19 of 300 backward calls; 0 of 500 after, every
-kernel bitwise repeatable).
+rest of the wide path). Shared buffers that the softmax / gradient warps read with ordinary loads (bias tiles, the query side's Q / dO / lse / delta staging)
+are released through `fence.proxy.async.shared::cta` before the releasing `mbarrier.arrive` (see
+[Releasing shared buffers read by threads](#releasing-shared-buffers-read-by-threads-2026-10-29)).
 
 Measured 2026-10-29, node 2 GPU 0 (a utilisation filler resident), B = 1, the last 11 keys masked, bf16-mixed (fp32 parameters, bf16
 pair, autocast bf16), one CUDA graph per call (inference: `static_weights`) or per training step (forward + backward, dropout 0.25, dx and
@@ -889,3 +887,25 @@ and the cut of the result 1233 + 156 (torch elementwise copies of the wide path'
 pad / cut copies 2468 + 720. (The 16 × 32 core at the same width, L 768: forward 2698, key side 3616, query side 3575.)
 Tests: `tests/gpu/sm100/test_triattn_b200_variants_gpu.py` (seven 96 / 128 cases with the options, inference at three shapes, training
 with dropout 0 / 0.25 against fp32 autograd at the bf16 module's bar, CUDA-graph capture).
+
+## Releasing shared buffers read by threads (2026-10-29)
+
+A warp that reads a TMA-filled shared buffer with ordinary loads and then arrives on the buffer's "empty" barrier must order those
+generic-proxy reads before the next TMA (async-proxy) write: `fence.proxy.async.shared::cta` ahead of the arrive (SASS: `MEMBAR.ALL.CTA` +
+`FENCE.VIEW.ASYNC.S`). Without it ptxas issued the `SYNCS.ARRIVE` with LDS still outstanding (no scoreboard wait: the loaded registers
+were consumed only after it), the producer's next load overwrote the tile, and the slowest warp (TMEM sub-partition 0, beside the spinning
+TMA thread) read the new tile's rows. Seen on the head-dim-128 key side: dK / dV of one 32-key quarter differed in 10-19 of 300 calls
+(0 of 300 with the fence; a consumer-driven late release also fixed it but cost 5-16 % on the kernels below).
+The same pattern (release right after the loads, before their use) was in:
+
+| kernel | buffer | used by |
+|---|---|---|
+| `triattn_bwd_kv_sm100` (`triattn_sm100.cu`), `triattn_bwd64_kv`, `triattn_bwd128_kv` | bias^T stage (`be`) | key side, every d_pair / head dim |
+| `triattn_bwd_q_sm100`, `triattn_bwd64_q`, `triattn_bwd128_q` | Q / dO / lse / delta staging (`ae`), bias tile (`be`) | query side |
+| `tri_tail_sm100` (`triattn_mod_sm100.cu`) | residual x tile (`xe`) | the fused d_pair 128 path, inference and training |
+
+All now take the fence (and the key sides a `tcgen05.fence::after_thread_sync` after the gradient-GEMM wait before their TMEM stores).
+The forward cores consume their bias tiles before releasing them (the released values have fed the P stores), the wide kernels release
+their rings after in-place rewrites and `cp.async.bulk.wait_group.read`, and `tri_wgrad`'s `he` / `de` releases follow the loads'
+consumers in the same thread; those were left as they are. 500 reruns of each core (head dim 32 / 64 / 128: forward o / lse, dQ, dK,
+dV) and 100-300 of the fused module (y; dW_q|k|v|g|o with `triattn_b200_deterministic_wgrad`) are bitwise equal.
