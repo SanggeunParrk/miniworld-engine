@@ -119,9 +119,46 @@ class AugmentedAttentionPairBias(nn.Module):
         state_dict.pop(f"{prefix}ln_pair.bias", None)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
+    def _fused_pair_core_sm100(self, query, pair, mask, compute_dtype, extra_pair_bias):
+        """The B200 pair-fused core that serves this call (``cuda.sm100.fused_pair``: the pair LayerNorm + head projection in one
+        pass over the pair, the tcgen05 attention core in bf16 or TF32, deterministic backward), as an entry function, or None.
+        The core's precision is ``compute_dtype`` or the query's (bf16 under autocast); fp32 only without autocast and without
+        ``compute_dtype``, as on H100."""
+        if (
+            extra_pair_bias is not None
+            or self._backend != KernelBackend.PORTABLE
+            or not _bf16_sm90_enabled()
+            or not query.is_cuda
+            or (mask is not None and mask.ndim != 2)
+        ):
+            return None
+        dt = compute_dtype or query.dtype
+        if dt is torch.float32 and (compute_dtype is not None or torch.is_autocast_enabled("cuda")):
+            return None
+        if dt not in (torch.bfloat16, torch.float32):
+            return None
+        from miniworld_engine.kernels.augmented_attention.cuda.sm100 import (
+            fused_pair as mod,
+        )
+
+        m1 = None if mask is None else mask[0]
+        if not mod.available(query, pair, self.ln_pair.weight, self.to_bias.weight, m1, dt):
+            return None
+        eps = self.ln_pair.eps
+
+        def run(q, k, v, z, lnw, wb, m):
+            q, k, v = (t if t.dtype is dt else t.to(dt) for t in (q, k, v))
+            return mod.attention_pair_sm100(q, k, v, z, lnw, wb, m, eps)
+
+        return run
+
     def _fused_pair_core(self, query, pair, mask, compute_dtype, extra_pair_bias):
         """The H100 pair-fused core that serves this call (``cuda.fused_pair`` for bf16, ``cuda.fused_pair_tf32`` for fp32: the pair
-        LayerNorm + head projection + attention in hand-written CUDA), as an entry function, or None."""
+        LayerNorm + head projection + attention in hand-written CUDA), as an entry function, or None. On B200,
+        :meth:`_fused_pair_core_sm100`."""
+        sm100 = self._fused_pair_core_sm100(query, pair, mask, compute_dtype, extra_pair_bias)
+        if sm100 is not None:
+            return sm100
         if (
             extra_pair_bias is not None
             or self._backend != KernelBackend.PORTABLE
