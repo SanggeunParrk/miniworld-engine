@@ -290,7 +290,20 @@ kernels that one `[1, 1, N, 128]` view (`_shared_cond`), and:
   and the gated-residual GEMMs (`gemm_tf32.cu`, `gemm_rg_tf32.cu`: the gate's row / TMA coordinate modulo the table rows) read row r % N, and
   the table-gradient kernels `f32_tail_bwd(_rms)` / `f32_adaln_bwd(_rms)` take a warp per table row that runs through the samples' rows
   in order, summing dscale / dshift / dgate in registers (fp32, fixed order) and writing them once; the conditioning's LayerNorm / SiLU
-  backward, its products and weight gradients run on N rows. fp32 inference keeps per-sample tables (they are hoisted per call).
+  backward, its products and weight gradients run on N rows.
+- fp32 inference (AF3 / Protenix block, round 4): the same `[1, 1, N, 128]` view; the tables are made on N rows and the fused inference
+  kernels `atom_pre_tf32` / `atom_post_tf32` (`fused_tf32.cu`, a new `mrows` argument) read table row r % N (each 128-row unit's table
+  rows are contiguous: row - (m0 - m0 % N)); the unfused path's AdaLN / gated-residual kernels already did. Per call (plain graph, the
+  tables remade in every replay) and under `static_weights()` + `static_inputs()` (tables hoisted), one cross block, parallel / slide, us:
+
+  | (A, N) | plain: per-sample | plain: shared | static: per-sample | static: shared |
+  |---|---|---|---|---|
+  | (5, 4096) | 165.5 | 123.1 | 112.3 | 96.1 |
+  | (5, 2048) | 102.2 | 77.9 | 63.8 | 57.3 |
+  | (5, 1024) | 75.3 | 64.9 | 46.9 | 46.8 |
+  | (1, 4096) | 71.6 | 73.7 | 43.0 | 43.0 |
+
+  (A = 1 has nothing to share; the static rows gain from 5x smaller tables in L2.)
 
 Measured, one block, forward + backward as one CUDA graph, bf16-mixed, the conditioning one expanded leaf; "per-sample" is the previous path
 (the same harness with `_shared_cond` off), ms:
@@ -332,7 +345,7 @@ attention backward above), ms:
 
 Tests: `tests/gpu/sm100/test_b200_local_dit_af3_variant_gpu.py` (`-k shared`: cross / self mode x chained / pad and parallel / slide x
 three (A, N, real) shapes up to A = 16, every gradient of the expanded leaf against the fp64 module, `ef < 1.5 em + 3e-3`, the table sum
-ran; `test_shared_conditioning_training_fp32`: the same cases on the fp32 path, `ef < 1.5 em + 1e-3` against the module path with TF32 on; the expanded and the materialised conditioning give bit-identical inference outputs); ESMFold2's training tests run the shared path
+ran; `test_shared_conditioning_training_fp32`: the same cases on the fp32 path, `ef < 1.5 em + 1e-3` against the module path with TF32 on; the expanded and the materialised conditioning give bit-identical inference outputs, bf16 and -- `test_shared_conditioning_inference_fp32`, cross / self, fused / unfused, the tables made on N rows -- fp32); ESMFold2's training tests run the shared path
 (their shared cases).
 
 ## AlphaFold 3's options: parallel K/V norm, slid key window (2026-10-29)
@@ -345,49 +358,57 @@ atoms, which come first). Both ran the PyTorch statements on B200 before; now:
 | option | inference | training | how |
 |---|---|---|---|
 | `kv_norm="parallel"` | bf16, fp32 | bf16, fp32 | `pre_fwd.cu` / `pre_bwd.cu` `-DPARALLEL=1` (`sm100_atom.KERNELS["prexp"]`, `["prebxp"]`): xkv = LN(s) sigmoid(pre + bs) + shift from the statistics AdaLN 1 already has; in the backward the K / V AdaLN's LN backward reads the staged `s` (x1 is not loaded) and goes into d single. fp32: `atom_pre_tf32` with `cross = 2`, the unfused path `adaln32(s, ..)` / `adaln_bwd32(s, ..)` |
-| `key_window="slide"` | bf16, fp32 | bf16, fp32 | the clipped-window attention kernel, then `sm100_atom_local/lslide.cu` `local_slide_edges(_f32)` recomputes the windows the slide moves -- 0, 1 and the last three real ones, picked on the device from the key mask's population count (no host read: CUDA-graph capturable, a replay with another mask is right), a window listed twice or not moved skipped -- over their slid keys (same per-window bias tensor: the trunked pair is laid out from the window's first key either way) and overwrites their rows of O (and of the LSE in training). Backward: `local_slide_bwd_prep` copies those windows' dO / D rows out and zeroes them (the clipped-window kernels then see dS = 0 there), `local_slide_bwd` (a CTA per moved window, head, sample) recomputes P, dP, dS over the slid keys, writes dQ and fp32 dK / dV / dbias partials, `local_slide_bwd_fin` sums the partials in a fixed order into dk / dv and the moved windows' dbias (deterministic) |
+| `key_window="slide"` | bf16, fp32 | bf16, fp32 | inside the attention kernels (round 4, below): the windows the slide moves run as edge CTAs of the same `lattn_fwd` / `lattn_dq` / `lattn_dkv` launches (and their `_tf32` twins; `sm100_atom_local/slide.cuh`), the real atom count taken from the key mask's population count on the device (no host read: CUDA-graph capturable, a replay with another mask is right); `lslide.cu` `local_slide_add(_f32)` adds the edge CTAs' dK / dV of the slid keys into dk / dv |
 
-The edge kernel is a CTA per (listed window, head, sample), 2 warps: S = Q K^T and O = P V on tensor cores (`mma.sync`: bf16, or tf32
-with the operands rounded to nearest on the fp32 path), the softmax on the S fragments. It costs a constant ~10 us per call (latency of
-its serial phases in one CTA: the mask count, the staging loads, the two products; the work is 5 x 32 queries); measured inference of one
-cross block, CUDA graph under `static_weights()` + `static_inputs()`, us (before the 2026-10-29 round-3 rewrite; the rewrite left these
-within 1 us):
+**Slid window inside the attention kernels (round 4).** The slide moves windows 0 and 1 (keys [0, 128)) and the real windows that end past
+n_real, 32 w + 80 > n_real (at most the last three; keys [max(n_real - 128, 0), n_real)); every other window keeps its clipped keys, and the
+moved windows of each of those two groups share their 128 keys. So each attention launch gets 2 groups x 4 heads x SPE extra "edge" CTAs
+at the end of its grid, running the kernel's own per-CTA program over one group: query-centric kernels (forward, dQ) take 128 query rows
+from the group's first window and their key range from the group's slid start, with every window at band offset 0 (slot j = key column j:
+the same per-window bias rows); the key-centric dK / dV kernel takes the group's 128 slid keys as its key rows and the group's windows as
+its query cells. The clipped-window CTAs skip the moved windows (forward / dQ: their rows are not stored; dK / dV: their cells are masked
+to -inf and their dbias windows not written); the edge CTAs store only theirs -- O / LSE, dQ, the moved windows' dbias (directly, or
+two exact adds into the zeroed dbias), and their dK / dV of the slid keys as a key-contiguous fp32 partial (the clipped-window CTAs own
+those keys' rows) that `local_slide_add` adds into dk / dv afterwards (a shared-memory transpose; both groups in a fixed order:
+deterministic). Every CTA takes n_real as the mask's population count (one 16-B load per thread); the add kernel reads it from the dK /
+dV kernel. SPE (`_edge_split`) is chosen so the edge CTAs run on the SMs the last wave of clipped-window CTAs leaves free, at about half a
+main CTA's samples (the dK / dV kernel at most 2: its dbias adds stay exact), else as a short tail. Two things measured on the way: with
+the edge CTAs first in the grid at one split, the dK / dV kernel went 108 -> 168 us at (48, 4096) -- its edge CTAs' partial stores were
+row-major, 32 lines per warp store; key-contiguous they are hidden -- and the add kernel's first version (a thread per 16-B vector)
+took 24 us, 11 us now.
 
-| (A, N) | bf16 chained / pad | bf16 parallel / pad | bf16 parallel / slide | fp32 chained / pad | fp32 parallel / pad | fp32 parallel / slide |
-|---|---|---|---|---|---|---|
-| (5, 4096) | 48.2 | 48.0 | 57.8 | 115.4 | 112.9 | 123.0 |
-| (5, 1024) | 27.3 | 27.1 | 36.1 | 44.0 | 41.6 | 51.8 |
-| (1, 4096) | 24.2 | 23.8 | 32.7 | 42.5 | 40.0 | 50.4 |
+What replaced what: the edge kernel `local_slide_edges` (`mma.sync`, ~10 us of serial latency per call), `local_slide_bwd_prep`,
+`local_slide_bwd` (`mma.sync` from shared memory, ~5 us per window) and `local_slide_bwd_fin` -- four kernels per training block, one per
+inference call -- by edge CTAs and one add kernel in the backward. Eager profile at (48, 4096) bf16, with / without the slide: forward
+76.2 / 75.7, dQ 81.0 / 80.1, dK / dV 108.5 / 107.9, add 10.9 us. All kernels here spill nothing (`lattn_dkv` spilled 8 B before; its
+per-thread dbias / partial offsets now sit in shared memory, as `lattn_dkv_tf32`'s, which sits at the 96-register cap of 17 warps).
 
-Training step (one cross block, forward + backward, CUDA graph, conditioning shared by the samples), ms; "before" is the CUDA-core
-backward described below:
+Measured, one cross block (`kv_norm="parallel"`), the conditioning one expanded leaf, CUDA graphs replayed in turn (the GPU is shared with
+a filler job: training cells move by about +-10 us between runs), us; slide minus pad before (round 3, the separate kernels) and now:
 
-| (A, N) | parallel / pad | parallel / slide, before | parallel / slide, now |
-|---|---|---|---|
-| bf16 (48, 4096) | 1.249 | 1.497 (+0.248) | 1.363 (+0.091) |
-| fp32 (48, 4096) | 3.987 | 4.225 (+0.238) | 4.092 (+0.108) |
-| bf16 (5, 1024) | 0.252 | 0.301 (+0.049) | 0.290 (+0.038) |
+| block | (A, N) | pad | slide, before | slide, now |
+|---|---|---|---|---|
+| training bf16 (bf16-mixed) | (48, 4096) | 1176-1205 | +122 | +11 |
+| training bf16 | (48, 8192) | 2163-2168 | +104 | +17 |
+| training fp32 | (48, 4096) | 2612-2629 | +104 | +18 |
+| training fp32 | (48, 8192) | 4915-4947 | +110 | +26 |
+| inference bf16, static | (5, 4096) | 49.2-51.2 | +11.0 | -1.9 |
+| inference bf16, static | (5, 2048) | 37.5-38.7 | +9.7 | +0.2 |
+| inference bf16, static | (5, 1024) | 32.2-32.7 | +8.2 | +0.8 |
+| inference bf16, static | (1, 4096) | 26.6-26.9 | +10.2 | +1.7 |
+| inference bf16, static | (1, 1024) | 24.6 | +8.2 | +0.0 |
+| inference fp32, static | (5, 4096) | 111.7-111.9 | +14.7 | +0.4 |
+| inference fp32, static | (5, 1024) | 43.2-44.9 | +12.0 | +1.4 |
+| inference fp32, static | (1, 4096) | 43.0 | +10.4 | +0.0 |
 
-**Slid-window backward (round 3).** The first version was a CTA per (moved window, head, sample) on CUDA cores (512 threads, the five
-32 x 128 products as shared-memory dot products: bound by shared-memory loads, 114 us at (48, 4096)), whose dK / dV went to fp32 partials
-[5][A][128][4][64] summed with the dbias partials by a fixed-order kernel (53 us), plus the CUDA-core forward edges (47 us). Now
-(`lslide.cu`): `local_slide_bwd` is a CTA (4 warps) per (key group, head, sample): the moved windows of a group share their slid keys
-(group 0: windows 0, 1 at keys [0, 128); group 1: the last three at [max(n_real - 128, 0), ..)), so the CTA sums their dK / dV in its MMA
-accumulators and adds them into dk / dv itself through shared memory and 16-B read-modify-writes -- one writer per key (when the groups'
-keys overlap, n_real < 256, group 0's CTA does both in order). The products are `mma.sync` tiles (S, dP; dQ = dS K; dK += dS^T Q, dV +=
-P^T dO); operands, the window's bias, P and dS are staged in shared memory (every load of a thread issued before any is stored). dS is
-the window's dbias partial; `local_slide_bwd_fin` only sums those over the samples. At (48, 4096) (eager profile): backward 114 + 53 ->
-49 + 5 us, forward edges 47 -> 28 us, prep 11 us. Measured inside the backward CTA (global timer marks): legacy `mma.sync` on B200 is slow
-and the operand fragments come from shared memory one 4-B load per element, so the S / dP phase (32 tensor-core instructions and ~130
-fragment loads per warp) still takes ~5 us per window; tcgen05 (M = 128 keys for S^T, dP^T, dK, dV; dQ from two windows) is the next step.
-The backward kernel has 128 threads and up to 168 registers (no spills); the edge kernel 64 threads, <= 128.
+(fp32 inference here with per-sample tables, before the shared-table change above; inference cells move by about +-2 us between runs.)
 
 Tests: `tests/gpu/sm100/test_b200_local_dit_af3_variant_gpu.py` (the three option pairs x eight
 (A, N, real atoms) cases incl. FoldForge's A = 5, N 1024, under 128 real atoms and windows listed twice; bf16 and fp32 against the fp64
 module, `ef < 1.5 em + 3e-3` (bf16) / `1e-3` (fp32, em = the module path on TF32), on the real atoms; fp32 parameters with bf16
 activations; graph capture with a mask changed between replays; training for the three option pairs x seven shapes, bf16 and fp32, every
-gradient, the loss on the real atoms; the slid-window gradients bitwise repeatable). Without the edge kernels the slide cases fail (checked,
-inference and training).
+gradient, the loss on the real atoms; the slid-window gradients bitwise repeatable). Without the dK / dV add the slide training cases fail
+(34 of them, checked).
 
 ## ESMFold2's block: bf16 inference (2026-10-29)
 
