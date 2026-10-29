@@ -16,6 +16,8 @@
 // -DDET=1 (deterministic dK / dV): the two issuers' accumulating MMAs run in block order -- the issuer of block G waits until the
 // other issuer's dV / dK MMAs of block G - 1 have completed (its ds_free commit) -- so dK / dV are bitwise the same run to run
 // (without it the accumulation order of the two warpgroups' blocks follows their timing).
+// -DOBF=1 (the AugmentedAttention module route): dK / dV leave as bf16 through mka / mva (bf16 maps, box [DH, 128], 128-B swizzle:
+// the k / v columns of the q|k|v|g gradient), rounded to nearest from the fp32 accumulators; mkb / mvb, DK / DV unused.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -43,6 +45,9 @@ using namespace s100;
 #endif
 #ifndef DET
 #define DET 0                            // 1: dK / dV accumulated in block order (bitwise repeatable)
+#endif
+#ifndef OBF
+#define OBF 0
 #endif
 #ifndef DHP
 #define DHP 48                           // head width in memory and in the MMAs: 48 (token DiT 16 x 48), 64, 32, 16; 16 x 24: 32 (the
@@ -355,7 +360,23 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
           return make_uint4(__float_as_uint(__uint_as_float(src[0]) * sc), __float_as_uint(__uint_as_float(src[1]) * sc),
                             __float_as_uint(__uint_as_float(src[2]) * sc), __float_as_uint(__uint_as_float(src[3]) * sc));
         };
-        if (TST && DH == 64) {                                             // 64 columns: two 32-column halves through xa, in turn
+        if (OBF) {                                                         // bf16: the row's DH channels as one [128][DH] box
+          const uint32_t xa = su + O_X + w * (XA + XB);
+          if (r == 0) tma_store_wait_read0();                              // the previous item's store has left the staging buffer
+          named_bar_sync(1 + w, 128);
+#pragma unroll
+          for (int q = 0; q < DH / 8; ++q) {
+            const uint4 a = sv(8 * q), b = sv(8 * q + 4);
+            sts128(xa + sw128(r, q), make_uint4(pack_bf16(__uint_as_float(a.x), __uint_as_float(a.y)), pack_bf16(__uint_as_float(a.z), __uint_as_float(a.w)),
+                                                pack_bf16(__uint_as_float(b.x), __uint_as_float(b.y)), pack_bf16(__uint_as_float(b.z), __uint_as_float(b.w))));
+          }
+          fence_proxy_async();
+          named_bar_sync(1 + w, 128);
+          if (r == 0) {
+            tma_store_2d(w == 0 ? &mka : &mva, xa, head * DH, orw);
+            tma_store_commit();
+          }
+        } else if (TST && DH == 64) {                                      // 64 columns: two 32-column halves through xa, in turn
           const uint32_t xa = su + O_X + w * (XA + XB);
 #pragma unroll
           for (int hf = 0; hf < 2; ++hf) {

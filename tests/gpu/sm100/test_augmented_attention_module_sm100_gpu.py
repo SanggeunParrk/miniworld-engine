@@ -2,8 +2,8 @@
 AdaLN as one node -- packed q|k|v|g GEMM, the pair pass, the tcgen05 cores, the gates / residual / gradient adds in the ``aa_rows.cu``
 row kernels -- against an fp64 run of the module, with the PyTorch module in the same precision as the yardstick (1.5x its error, as
 the pair-fused core's tests). Covers what the per-call core routes did not serve: ``extra_pair_bias``, L not a multiple of 128 (and
-not of 16), key masks per sample (the cores built -DKMASK=1), odd A in inference (attn_inf, no pad sample), bitwise repeatable
-gradients, CUDA-graph replay and torch.compile.
+not of 16), key masks per sample (the cores built -DKMASK=1), odd A in inference (attn_inf / attn_inf_tf32, no pad sample), bitwise
+repeatable gradients, CUDA-graph replay and torch.compile.
 """
 import pytest
 import torch

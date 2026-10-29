@@ -18,6 +18,8 @@
 // Head layouts (-DNHEAD -DDHP -DRSQDV, as the bf16 cores; none = 16 x 48): a DH-wide fp32 row is NA 32-column boxes in the
 // 128-B swizzle and NBX 16-column ones in the 64-B swizzle (48 = 32 + 16, 32 = 32, 64 = 32 + 32), v NV 32-column MN atoms.
 // smem: 16 x 48 213 KB (3 stages), 24 x 32 161 KB (3), 12 x 64 / 16 x 64 193 KB (2 stages: three do not fit).
+// -DGATE=1 (the AugmentedAttention module route): the epilogue writes og = sigmoid(g) O (fp32) through moa / mob (maps over og)
+// instead of O -- g read per row from GP (row stride ldg floats: the gate columns of the q|k|v|g GEMM output).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -36,6 +38,9 @@ using namespace s100;
 #endif                                   // a masked key's logit is the masked bias's -1e30 (natural units), its P exactly 0 in the backward
 #ifndef NHEAD
 #define NHEAD 16
+#endif
+#ifndef GATE
+#define GATE 0
 #endif
 #ifndef RSQDV
 #define RSQDV 0.14433756729740643f       // 1 / sqrt(head dim): 1 / sqrt 48; 1 / sqrt 32 = 0.17677669529663687f; 1 / sqrt 64 = 0.125f
@@ -79,6 +84,9 @@ augattn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
                        float* __restrict__ LSE, int L, int A
 #if KMASK
                        , const uint32_t* __restrict__ KMB
+#endif
+#if GATE
+                       , const float* __restrict__ GP, int ldg
 #endif
                        ) {
   extern __shared__ __align__(1024) uint8_t sm[];
@@ -284,6 +292,14 @@ augattn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
       if (n == nb - 1) {
         // ---- epilogue of the item: O = acc / l (fp32), LSE = m + log2 l
         int a0, m0, head; item_of(li, a0, m0, head);
+#if GATE
+        float4 gv[DH / 4];                                                 // this row's gate (issued before the last PV completes)
+        {
+          const float4* gp = reinterpret_cast<const float4*>(GP + ((size_t)min(a0 + w, A - 1) * L + m0 + r) * ldg + head * DH);
+#pragma unroll
+          for (int q = 0; q < DH / 4; ++q) gv[q] = __ldg(gp + q);
+        }
+#endif
         mbar_wait(&B.p_free[w][G & 1], (G >> 1) & 1);
         tc_fence_after();
         const float inv = 1.f / l_i;
@@ -296,8 +312,15 @@ augattn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         if (lane == 0) mbar_arrive(&B.o_free[w]);
         const bool live = a0 + w < A;
         auto put = [&](int q) {
+#if GATE
+          return make_uint4(__float_as_uint(__uint_as_float(ov[4 * q]) * inv * sigmoid_kit(gv[q].x)),
+                            __float_as_uint(__uint_as_float(ov[4 * q + 1]) * inv * sigmoid_kit(gv[q].y)),
+                            __float_as_uint(__uint_as_float(ov[4 * q + 2]) * inv * sigmoid_kit(gv[q].z)),
+                            __float_as_uint(__uint_as_float(ov[4 * q + 3]) * inv * sigmoid_kit(gv[q].w)));
+#else
           return make_uint4(__float_as_uint(__uint_as_float(ov[4 * q]) * inv), __float_as_uint(__uint_as_float(ov[4 * q + 1]) * inv),
                             __float_as_uint(__uint_as_float(ov[4 * q + 2]) * inv), __float_as_uint(__uint_as_float(ov[4 * q + 3]) * inv));
+#endif
         };
         if (r == 0) tma_store_wait_read0();                                // the previous item's last store has left the buffer
         named_bar_sync(1 + w, 128);

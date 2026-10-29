@@ -2,11 +2,11 @@
 // cuBLAS GEMMs and the tcgen05 attention cores that the module ran as PyTorch statements (sigmoid gates, products, residual adds,
 // casts, the gradient branches' adds), one pass each. T: the compute dtype (bf16 or fp32 = TF32 path); S: the residual stream's.
 //
-//   aam_gate_o        og = sigmoid(g) * O                                           (g: the gate columns of the q|k|v|g GEMM output)
-//   aam_gate_bwd      dO = dog sigmoid(g) (bf16, or fp32 on the TF32 grid), D = rowsum_head(dO O), dg = dog O s (1 - s) written into
-//                     the gate columns of the q|k|v|g gradient
+//   aam_gate_bwd      dO = dog sigmoid(g) (bf16, or fp32 on the TF32 grid), D = rowsum_head(dog og) (= rowsum(dO O)), dg = dog og
+//                     (1 - s) written into the gate columns of the q|k|v|g gradient (og = sigmoid(g) O: the core's gated output,
+//                     written by its -DGATE epilogue; O itself is never stored)
 //   aam_finish        dq = the core's key-chunk dQ partials summed in chunk order, written into the q columns of the q|k|v|g gradient
-//                     (bf16: dk / dv converted into their columns too), and per-block column sums of dq (the query bias gradient)
+//                     (the cores write dk / dv into theirs), and per-block column sums of dq (the query bias gradient)
 //   aam_res_gate      out = res + sigmoid(sp) * y      (the output gate and the residual; y may carry padded rows, see ``Lp``)
 //   aam_res_gate_bwd  dy2 = dout sigmoid(sp) (zero on padded rows), dsp = dout y s (1 - s), per-block column sums of dsp
 //   aam_bias_fix      the core's bias [S, H, Lp, Lp] from the pair pass's [H, L, L]: + extra [L, L], the per-sample key mask (S > 1),
@@ -14,6 +14,8 @@
 //   aam_dbias_fix     its backward: dbias [H, L, L] = the planes summed over S in order, d extra [L, L] = the heads summed in order
 //   aam_round_qkv     q | k | v columns of the q|k|v|g GEMM output rounded to the TF32 grid in place (to nearest, as cuBLAS takes fp32
 //                     operands; the tensor core alone would truncate)
+//   aam_vt_f32        fp32 inference: v^T [W, S, Lv] (attn_inf_tf32's K-major PV operand) from the v columns, on the TF32 grid; q / k
+//                     rounded in place too (unless QK-norm's pass already did)
 //
 // Every column sum is a fixed-order per-block partial (grid a function of the shape alone) summed in block order by the last block
 // (``colsum_tail``): the gradients are bitwise repeatable. Rows / columns: W (= D) a multiple of 8 (eight columns per thread), every row
@@ -132,34 +134,11 @@ __device__ __forceinline__ void colsum_tail(float* acc8, float* __restrict__ par
   if (tx == 0 && ty == 0) *counter = 0u;
 }
 
-// ------------------------------------------------------------------------------------------------ og = sigmoid(g) O
-// n8 groups of 8 of the [M, W] rows; g has row stride ldg (a column view of the q|k|v|g output)
-template <typename T>
-__device__ __forceinline__ void gate_o(const float* __restrict__ O, const T* __restrict__ g, int ldg, T* __restrict__ og, int n8, int W) {
-  const int w8 = W >> 3;
-  for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < n8; i += (long)gridDim.x * blockDim.x) {
-    const long r = i / w8;
-    const int c = (int)(i - r * w8) << 3;
-    float o[8], gv[8];
-    ld8<float>(O + r * W + c, o);
-    ld8<T>(g + r * ldg + c, gv);
-#pragma unroll
-    for (int k = 0; k < 8; ++k) o[k] *= sigm(gv[k]);
-    st8<T>(og + r * W + c, o);
-  }
-}
-extern "C" __global__ void __launch_bounds__(256) aam_gate_o_bf16(const float* O, const bf16* g, int ldg, bf16* og, int n8, int W) {
-  gate_o<bf16>(O, g, ldg, og, n8, W);
-}
-extern "C" __global__ void __launch_bounds__(256) aam_gate_o_f32(const float* O, const float* g, int ldg, float* og, int n8, int W) {
-  gate_o<float>(O, g, ldg, og, n8, W);
-}
-
 // ------------------------------------------------------------------------------------------------ the gate's backward + the core's dO prep
 // row blocks over M rows of W = H DH; rows are Lp per sample (dd [rows / Lp, H, Lp]). dO = dog s (bf16, or fp32 on the TF32 grid),
-// D = rowsum_head(dO O), dg = dog O s (1 - s) into the gate columns of the q|k|v|g gradient (row stride lddg)
+// D = rowsum_head(dog og), dg = dog og (1 - s) into the gate columns of the q|k|v|g gradient (row stride lddg)
 template <typename T, bool R32>
-__device__ __forceinline__ void gate_bwd(const T* __restrict__ dog, const float* __restrict__ O, const T* __restrict__ g, int ldg,
+__device__ __forceinline__ void gate_bwd(const T* __restrict__ dog, const T* __restrict__ og, const T* __restrict__ g, int ldg,
                                          void* __restrict__ dob, float* __restrict__ dd, T* __restrict__ dg, int lddg, int M, int Lp, int H,
                                          int DH) {
   __shared__ float red[RB][128 + 1];
@@ -170,14 +149,14 @@ __device__ __forceinline__ void gate_bwd(const T* __restrict__ dog, const float*
     if (r < M) {
       float x[8], o[8], gv[8], d[8], e[8];
       ld8<T>(dog + (long)r * W + c, x);
-      ld8<float>(O + (long)r * W + c, o);
+      ld8<T>(og + (long)r * W + c, o);
       ld8<T>(g + (long)r * ldg + c, gv);
 #pragma unroll
       for (int k = 0; k < 8; ++k) {
         const float sg = sigm(gv[k]);
         d[k] = x[k] * sg;
-        e[k] = x[k] * o[k] * sg * (1.f - sg);
-        s += d[k] * o[k];
+        e[k] = x[k] * o[k] * (1.f - sg);
+        s += x[k] * o[k];
         if (R32) d[k] = tf32r(d[k]);
       }
       st8<T>(dg + (long)r * lddg + c, e);
@@ -194,21 +173,21 @@ __device__ __forceinline__ void gate_bwd(const T* __restrict__ dog, const float*
     __syncthreads();
   }
 }
-extern "C" __global__ void __launch_bounds__(1024) aam_gate_bwd_bf16(const bf16* dog, const float* O, const bf16* g, int ldg, bf16* dob, float* dd,
+extern "C" __global__ void __launch_bounds__(1024) aam_gate_bwd_bf16(const bf16* dog, const bf16* og, const bf16* g, int ldg, bf16* dob, float* dd,
                                                                      bf16* dg, int lddg, int M, int Lp, int H, int DH) {
-  gate_bwd<bf16, false>(dog, O, g, ldg, dob, dd, dg, lddg, M, Lp, H, DH);
+  gate_bwd<bf16, false>(dog, og, g, ldg, dob, dd, dg, lddg, M, Lp, H, DH);
 }
-extern "C" __global__ void __launch_bounds__(1024) aam_gate_bwd_f32(const float* dog, const float* O, const float* g, int ldg, float* dob, float* dd,
+extern "C" __global__ void __launch_bounds__(1024) aam_gate_bwd_f32(const float* dog, const float* og, const float* g, int ldg, float* dob, float* dd,
                                                                     float* dg, int lddg, int M, int Lp, int H, int DH) {
-  gate_bwd<float, true>(dog, O, g, ldg, dob, dd, dg, lddg, M, Lp, H, DH);
+  gate_bwd<float, true>(dog, og, g, ldg, dob, dd, dg, lddg, M, Lp, H, DH);
 }
 
 // ------------------------------------------------------------------------------------------------ dq (+ dk, dv) into the q|k|v|g gradient
-// row blocks over M rows of W: dq = the np partials summed in order (stride pstride), written at dst (row stride ld); bf16: dk / dv
-// converted into the next two column blocks; dbq = the column sums of dq (fp32, before rounding)
+// row blocks over M rows of W: dq = the np partials summed in order (stride pstride), written at dst (row stride ld); dbq = the
+// column sums of dq (fp32, before rounding)
 template <typename T>
-__device__ __forceinline__ void finish(const float* __restrict__ DQ, int np, int pstride, const float* __restrict__ DK, const float* __restrict__ DV,
-                                       T* __restrict__ dst, int ld, int M, int W, float* __restrict__ part, float* __restrict__ sum,
+__device__ __forceinline__ void finish(const float* __restrict__ DQ, int np, int pstride, T* __restrict__ dst, int ld, int M, int W,
+                                       float* __restrict__ part, float* __restrict__ sum,
                                        unsigned* __restrict__ counter) {
   const int c = 8 * threadIdx.x;
   float acc[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
@@ -225,24 +204,17 @@ __device__ __forceinline__ void finish(const float* __restrict__ DQ, int np, int
     }
 #pragma unroll
     for (int k = 0; k < 8; ++k) acc[k] += a[k];
-    T* d = dst + (long)r * ld + c;
-    st8<T>(d, a);
-    if (DK) {
-      ld8<float>(DK + o, a);
-      st8<T>(d + W, a);
-      ld8<float>(DV + o, a);
-      st8<T>(d + 2 * W, a);
-    }
+    st8<T>(dst + (long)r * ld + c, a);
   }
   colsum_tail(acc, part, sum, counter, W);
 }
-extern "C" __global__ void __launch_bounds__(1024) aam_finish_bf16(const float* DQ, int np, int pstride, const float* DK, const float* DV, bf16* dst,
-                                                                   int ld, int M, int W, float* part, float* sum, unsigned* counter) {
-  finish<bf16>(DQ, np, pstride, DK, DV, dst, ld, M, W, part, sum, counter);
+extern "C" __global__ void __launch_bounds__(1024) aam_finish_bf16(const float* DQ, int np, int pstride, bf16* dst, int ld, int M, int W, float* part,
+                                                                   float* sum, unsigned* counter) {
+  finish<bf16>(DQ, np, pstride, dst, ld, M, W, part, sum, counter);
 }
 extern "C" __global__ void __launch_bounds__(1024) aam_finish_f32(const float* DQ, int np, int pstride, float* dst, int ld, int M, int W, float* part,
                                                                   float* sum, unsigned* counter) {
-  finish<float>(DQ, np, pstride, nullptr, nullptr, dst, ld, M, W, part, sum, counter);
+  finish<float>(DQ, np, pstride, dst, ld, M, W, part, sum, counter);
 }
 
 // ------------------------------------------------------------------------------------------------ out = res + sigmoid(sp) y
@@ -388,6 +360,33 @@ extern "C" __global__ void __launch_bounds__(256) aam_round_qkv(float* qkvg, int
     float* p = qkvg + r * ld + ((int)(i - r * w4) << 2);
     float4 v = *reinterpret_cast<float4*>(p);
     *reinterpret_cast<float4*>(p) = make_float4(tf32r(v.x), tf32r(v.y), tf32r(v.z), tf32r(v.w));
+  }
+}
+
+// ------------------------------------------------------------------------------------------------ v^T for the fp32 inference core
+// Block (32, 8) per 32 rows x 32 columns of v (the columns 2 W .. 3 W of q|k|v|g, row stride ld): vt[c, a, l] = tf32(v[a L + l, c])
+// (row pitch Lv >= L: 16-byte rows; keys past L are never read), and with rqk q / k of the same rows and columns rounded in place.
+extern "C" __global__ void __launch_bounds__(256) aam_vt_f32(float* __restrict__ qkvg, int ld, float* __restrict__ vt, int M, int L, int Lv, int W,
+                                                             int rqk) {
+  __shared__ float tile[32][33];
+  const int c0 = blockIdx.x * 32, r0 = blockIdx.y * 32, tx = threadIdx.x, ty = threadIdx.y, S = M / L;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const int r = r0 + ty + 8 * i;
+    if (r < M) {
+      float* row = qkvg + (long)r * ld + c0 + tx;
+      tile[ty + 8 * i][tx] = tf32r(row[2 * W]);
+      if (rqk) { row[0] = tf32r(row[0]); row[W] = tf32r(row[W]); }
+    }
+  }
+  __syncthreads();
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const int c = c0 + ty + 8 * i, m = r0 + tx;
+    if (m < M) {
+      const int a = m / L, l = m - a * L;
+      vt[((long)c * S + a) * Lv + l] = tile[tx][ty + 8 * i];
+    }
   }
 }
 
