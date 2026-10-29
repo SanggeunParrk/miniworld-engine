@@ -44,6 +44,9 @@ using namespace s100;
 #ifndef ROTK
 #define ROTK 1                           // sample offset per key chunk (0: A / chunks, spread evenly); small keeps the working set in L2
 #endif
+#ifndef KMASK
+#define KMASK 0                          // -DKMASK=1: a key mask per sample, KMB [A, L / 32] bits (bit j of word n: key 32 n + j attends);
+#endif                                   // a masked key's logit is the masked bias's -1e30 (natural units), its P exactly 0 in the backward
 #ifndef NHEAD
 #define NHEAD 16                         // heads (AttentionPairBias: 8, rows NHEAD * 48 wide)
 #endif
@@ -119,7 +122,11 @@ extern "C" __global__ void __launch_bounds__(384, 1)
 augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
                   const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap mqa,
                   const __grid_constant__ CUtensorMap mqb, const float* __restrict__ LSE,
-                  const float* __restrict__ DD, float* __restrict__ DQ, float* __restrict__ DB, int L, int A) {
+                  const float* __restrict__ DD, float* __restrict__ DQ, float* __restrict__ DB, int L, int A
+#if KMASK
+                  , const uint32_t* __restrict__ KMB
+#endif
+                  ) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -344,6 +351,10 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
       tc_fence_after();
       const f2 NL = mk2(-lse, -lse), ND = mk2(-dd, -dd);
       const uint32_t sb = su + O_B + (bs * 2 + w) * T128;
+#if KMASK
+      const uint2 kw = __ldg(reinterpret_cast<const uint2*>(KMB + (size_t)a * (L / 32) + ((c * KC + w * BN) >> 5)));   // 64 keys of sample a
+      const uint64_t km = ((uint64_t)kw.y << 32) | kw.x;
+#endif
       // quarters of 16 keys, software-pipelined: the next quarter's TMEM loads are in flight while this one is computed
       uint32_t pk[32];
       uint32_t sa[16], da[16], sq[16], dq[16];
@@ -369,7 +380,12 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
           for (int e = 0; e < 4; ++e) {
             const int j = h * 4 + e, jj = qq * 8 + j;
             const f2 x = fma2(mk2u(sv[2 * j], sv[2 * j + 1]), CQL, fma2(mk2(bf16lo(bb[e]), bf16hi(bb[e])), L2E, NL));
+#if KMASK
+            const f2 p0 = (((jj) % PMOD) < PCNT) ? ex2_poly2(x) : mk2(ex2f(lo2(x)), ex2f(hi2(x)));
+            const f2 p = mk2(((km >> (2 * jj)) & 1u) ? lo2(p0) : 0.f, ((km >> (2 * jj + 1)) & 1u) ? hi2(p0) : 0.f);
+#else
             const f2 p = (((jj) % PMOD) < PCNT) ? ex2_poly2(x) : mk2(ex2f(lo2(x)), ex2f(hi2(x)));
+#endif
             const f2 ds = mul2(p, add2(mk2u(dv[2 * j], dv[2 * j + 1]), ND));
             db[jj] = add2(db[jj], ds);
             pk[jj] = pack_bf16(lo2(ds), hi2(ds));

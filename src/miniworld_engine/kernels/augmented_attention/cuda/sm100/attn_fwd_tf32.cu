@@ -31,6 +31,9 @@ using namespace s100;
 #ifndef DHP
 #define DHP 48                           // head width: 48 (16 x 48), 32 (24 x 32), 64 (12 x 64; 16 x 64 at d 1024)
 #endif
+#ifndef KMASK
+#define KMASK 0                          // -DKMASK=1: a key mask per sample, KMB [A, L / 32] bits (bit j of word n: key 32 n + j attends);
+#endif                                   // a masked key's logit is the masked bias's -1e30 (natural units), its P exactly 0 in the backward
 #ifndef NHEAD
 #define NHEAD 16
 #endif
@@ -73,7 +76,11 @@ augattn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
                        const __grid_constant__ CUtensorMap mka, const __grid_constant__ CUtensorMap mkb,
                        const __grid_constant__ CUtensorMap mv, const __grid_constant__ CUtensorMap mb,
                        const __grid_constant__ CUtensorMap moa, const __grid_constant__ CUtensorMap mob,
-                       float* __restrict__ LSE, int L, int A) {
+                       float* __restrict__ LSE, int L, int A
+#if KMASK
+                       , const uint32_t* __restrict__ KMB
+#endif
+                       ) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -191,10 +198,16 @@ augattn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
     if (PP && w == 1) named_bar_arrive(3, 256);
     const uint32_t xs = su + O_X + w * QA;
     float m_i = -INFINITY, l_i = 0.f;                                      // exp2 units
+#if KMASK
+    const uint32_t* kmrow = KMB;                                           // this warpgroup's sample's mask words
+#endif
     for (int G = 0, li = 0, n = 0; G < nblk; ++G, ++n) {
       if (n == nb) { n = 0; ++li; }
       const int s = G % ST;
       if (n == 0) { m_i = -INFINITY; l_i = 0.f; }
+#if KMASK
+      if (n == 0) { int a0, m0, head; item_of(li, a0, m0, head); kmrow = KMB + (size_t)min(a0 + w, A - 1) * (L / 32); }
+#endif
       mbar_wait(&B.kv_full[s], (G / ST) & 1);                              // the bias tile of this block
       mbar_wait(&B.s_full[w][G & 1], (G >> 1) & 1);
       tc_fence_after();
@@ -213,6 +226,15 @@ augattn_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
           t[4 * q + 3] = fmaf(__uint_as_float(v[4 * q + 3]), RSQD * LOG2E, __uint_as_float(bw.w) * LOG2E);
         }
       }
+#if KMASK
+      {
+        const uint32_t km = __ldg(kmrow + n);                              // BN = 32 keys: one word
+        if (km != 0xffffffffu)
+#pragma unroll
+          for (int j = 0; j < BN; ++j)
+            if (!((km >> j) & 1u)) t[j] = -1e30f * LOG2E;
+      }
+#endif
       if (G >= 1) { tc_fence_before(); }
       float mxp[4] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY};
 #pragma unroll

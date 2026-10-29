@@ -54,6 +54,10 @@ constexpr int BN = 64, DH = DHP, QM = 128, DM = 768;
 #ifndef QPAIR
 #define QPAIR 0
 #endif
+#ifndef KMASK
+#define KMASK 0                          // -DKMASK=1: a key mask per sample, KMB [A, KW] bits (bit j of word n: key 32 n + j attends; KW
+#endif                                   // a multiple of 2 covering the 64-key blocks), a masked key's logit -1e30 (finite: a fully masked
+                                         // row softmaxes to uniform, as the masked bias)
 #ifndef NHEAD
 #define NHEAD 16
 #endif
@@ -116,6 +120,9 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
                   int L, int A
 #if KSPLIT
                   , const __grid_constant__ CUtensorMap mpa, const __grid_constant__ CUtensorMap mpb, float* __restrict__ LSEP, int NS
+#endif
+#if KMASK
+                  , const uint32_t* __restrict__ KMB, int KW
 #endif
                   ) {
 #if !KSPLIT
@@ -228,12 +235,19 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
     const uint32_t xg = su + O_X + w * XG;
     float m_i = -INFINITY, l_i = 0.f;
     int kb0 = 0;                                                           // the item's first key block (its chunk)
+#if KMASK
+    static_assert(!QPAIR, "the per-sample key mask is built for the sample pairs");
+    const uint32_t* kmrow = KMB;                                           // this warpgroup's sample's mask words
+#endif
     for (int G = 0, li = 0, n = 0; G < nblk; ++G, ++n) {
       if (n == nb) { n = 0; ++li; }
       const int s = G % ST;
       if (n == 0) {
         m_i = -INFINITY; l_i = 0.f;
         int a0, m0, head, sp; item_of(li, a0, m0, head, sp);
+#if KMASK
+        kmrow = KMB + (size_t)smp_of(a0, w) * KW;
+#endif
         kb0 = sp * nb;
         if (!KSPLIT && r == 0) {                                           // this item's g tile into the (drained) staging buffer
           tma_store_wait_read0();
@@ -266,6 +280,16 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
 #pragma unroll
         for (int j = 0; j < BN / 2; ++j) if (2 * j >= kv) t[j] = mk2(-INFINITY, -INFINITY);
       }
+#if KMASK
+      {
+        const uint2 kw = __ldg(reinterpret_cast<const uint2*>(kmrow) + kb0 + n);   // BN = 64 keys: two words; t[k] holds keys 2 k, 2 k + 1
+        const uint64_t km = ((uint64_t)kw.y << 32) | kw.x;
+        if (~km)
+#pragma unroll
+          for (int k = 0; k < BN / 2; ++k)
+            t[k] = mk2(((km >> (2 * k)) & 1u) ? lo2(t[k]) : fminf(lo2(t[k]), -1e30f), ((km >> (2 * k + 1)) & 1u) ? hi2(t[k]) : fminf(hi2(t[k]), -1e30f));
+      }
+#endif
       float mxp[4] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY};         // four independent chains
 #pragma unroll
       for (int j = 0; j < BN / 2; ++j) mxp[j & 3] = max3f(mxp[j & 3], lo2(t[j]), hi2(t[j]));
