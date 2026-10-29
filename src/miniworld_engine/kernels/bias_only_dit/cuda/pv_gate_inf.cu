@@ -831,6 +831,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){m.def("pv",&bo90::pv);m.def("grouped_pv"
 // of its PDL chain, and the runner launches the step's first front WITHOUT the programmatic attribute whenever its core takes this
 // build, so the whole chain starts after P's writer is complete (runner.py ``_ops3b`` / ``_step3b``). The training backward's P^T
 // (softmax_t right before, in the same stream) must never take it.
+// -DPSB (with SG=1; the training forward / dV and the inference step of a pair bias of its OWN per sample): P is [H, S, L, L] (a
+// plane per (head, sample), head-major) and an item's P tile is its sample's: the TMA row of the tile is (h S + a) L + m0. Nothing
+// else changes (an item is one sample, so each P tile serves one sample's v; the P bytes are the minimum, every plane read once).
 // L <= 768 (P plus two accumulators within 512 TMEM columns). Heads x width by -DNHEAD / -DDHEAD (16 x 48, 24 x 32, 12 x 64): a v or g
 // row of the head is DH x 2 bytes inside a 128-byte swizzle row.
 // SPDX-License-Identifier: Apache-2.0
@@ -856,6 +859,12 @@ using namespace s100;
 #define DHEAD 48
 #endif
 constexpr int BN = VB, DH = DHEAD, QM = 128, NH = NHEAD, NQC = DH / 8;   // NQC: 16-byte chunks of a head row
+#ifdef PSB
+static_assert(SG == 1, "PSB: one sample per work item (each sample its own P tile)");
+constexpr bool PSB_P = true;
+#else
+constexpr bool PSB_P = false;
+#endif
 static_assert(DH % 16 == 0 && DH <= 64, "head width: a multiple of 16 within one 128-byte swizzle row");
 // ring slot: a v tile [VB j][48 d -> 128 B] or PCS P chunks [128 i][64 j], all SW128. Larger boxes take the SM's TMA intake from
 // ~45 B/clk (12 KB) to ~60-70 (24-32 KB): with 128 keys per v tile the training shapes (A = 48) were intake-bound.
@@ -967,9 +976,10 @@ DEVI void pv_gate_body(const CUtensorMap& mp, const CUtensorMap& mv, const CUten
       };
       for (int li = 0; li < my; ++li) {
         int a0, ns, m0, h; item_of(li, a0, ns, m0, h);
+        const int prow = (PSB_P ? h * S + a0 : h) * L + m0;       // the tile's first row of P ([H L, L], or [H S L, L] per sample)
         for (int c = 0; c < nc; c += PCS) {                      // the P tile, 64 PCS keys per slot
           const int s = slot(PCS * QM * 64 * 2);
-          for (int e = 0; e < PCS; ++e) tma_load_2d(su + O_ST + s * SLOT + e * 16384, &mp, &B.full[s], (c + e) * 64, h * L + m0);
+          for (int e = 0; e < PCS; ++e) tma_load_2d(su + O_ST + s * SLOT + e * 16384, &mp, &B.full[s], (c + e) * 64, prow);
           TR(EV_PI, g - 1, 256);
         }
 #if defined(PDL_INF) && defined(P_EARLY)
