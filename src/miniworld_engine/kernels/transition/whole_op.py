@@ -38,7 +38,8 @@ def transition(
     Dispatch is the one ``modules.Transition`` uses: the hand-CUDA sm_90 kernels
     (``kernels.transition.cuda.transition_sm90a``: ``fused_sm90a`` at d=128, ``fused_wide_sm90a`` at d=64/256/384/512/768,
     ``fused_generic_sm90a`` for every other width, ragged rows and fp32 on TF32) and the sm_100 kernels (``fused_sm100a`` at
-    d=128, ``fused_wide_sm100a`` at d=64/256/384/512; n=4, bf16) where they apply. A call none of them serves runs the PyTorch
+    d=128, ``fused_wide_sm100a`` at d=64/256/384/512/768, n=4 / n=2, bf16, whole 128-row tiles; ``fused_generic_sm100a`` for every other
+    width, ragged rows and fp32 on TF32) where they apply. A call none of them serves runs the PyTorch
     reference on H100 / B200 (no Triton fallback there, ``modules.dispatch.restricted_card``) and the shape-general Triton
     residual path on every other card. LayerNorm is folded into the kernel on every kernel path, never a separate native
     ``F.layer_norm``.
@@ -58,16 +59,26 @@ def transition(
             return out
 
     if (not settings.current().force_portable_kernels):
-        from miniworld_engine.kernels.transition.cuda import fused_sm100a
+        from miniworld_engine.kernels.transition.cuda import fused_sm100a, fused_wide_sm100a
 
-        if fused_sm100a.available(x, expand_a_weight, squeeze_weight):
-            return fused_sm100a.transition_fused_sm100a(
-                x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
+        # the tuned B200 builds take whole 128-row tiles: another row count (a pair or single track at a ragged L, FoldForge's
+        # pairformer) is padded with zero rows and cut back, as modules.Transition does -- measured faster than the generic kernels
+        # wherever a tuned build exists (pair [1, 300, 300, 128] n4: 50 against 85 us)
+        d = x.shape[-1] if x.ndim else 0
+        rows = x.numel() // d if d else 0
+        xs = x
+        if (rows and rows % fused_sm100a.ROWS and x.dtype is torch.bfloat16 and x.is_cuda
+                and fused_sm100a._is_b200(x.device.index if x.device.index is not None else torch.cuda.current_device())):
+            xs = torch.nn.functional.pad(x.reshape(rows, d), (0, 0, 0, -rows % fused_sm100a.ROWS))
+        for kern, entry in ((fused_sm100a, fused_sm100a.transition_fused_sm100a), (fused_wide_sm100a, fused_wide_sm100a.transition_wide_sm100a)):
+            if kern.available(xs, expand_a_weight, squeeze_weight):
+                out = entry(xs, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
+                return out if xs is x else out[:rows].reshape(x.shape)
 
-        from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a
+        from miniworld_engine.kernels.transition.cuda import fused_generic_sm100a
 
-        if fused_wide_sm100a.available(x, expand_a_weight, squeeze_weight):
-            return fused_wide_sm100a.transition_wide_sm100a(
+        if fused_generic_sm100a.available(x, expand_a_weight, squeeze_weight):   # any other width, row count, fp32 on TF32
+            return fused_generic_sm100a.transition_generic_sm100a(
                 x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
 
     from miniworld_engine.modules.dispatch import restricted_card
