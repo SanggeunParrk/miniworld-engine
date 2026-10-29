@@ -385,11 +385,14 @@ def pre_fwd(a, mod, W, bq, save=False, eps=1e-5, cross=False):
         int(ntile),
         float(eps),
         int(save),
+        int(mod.shape[0]),
     )
     return Q, K, V, G, X
 
 
 def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5, parallel=False, rms=False):
+    # (every sm_100a row kernel reads the conditioning tables mod / mkv at row r % rows(mod): per-row tables [M, ..], or [N, ..] shared
+    # by the samples)
     """The cross-attention mode's ``pre_fwd``: K and V from xkv = LN(x1) sigmoid(mkv[:, :128] + bs) + mkv[:, 128:] (a second AdaLN of x1)
     instead of from x1; ``parallel`` (AlphaFold 3): of the raw atoms, xkv = LN(a) sigmoid(..) + .. -> Q, K, V, G [M, 128] bf16 and, when
     ``save``, x1 and xkv (else X = G, XK = None). ``rms`` (ESMFold2, with ``parallel``): RMSNorm statistics, the K / V scale raw."""
@@ -423,6 +426,7 @@ def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5, parallel=False, rms
         int(ntile),
         float(eps),
         int(save),
+        int(mod.shape[0]),
     )
     return Q, K, V, G, X, (XK if save else None)
 
@@ -481,6 +485,7 @@ def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5, *, packed_hopper=Fa
         int(ntile),
         float(eps),
         int(save),
+        int(mod.shape[0]),
     )
     return (out, *sv)
 
@@ -529,7 +534,7 @@ def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts, rms=False):
     ntile = M // 16
     d = _dev(dy)
     atom_kernel("trg_rms" if rms else "trg", d)(
-        (min(num_sms(d), ntile), 1, 1), (384, 1, 1), *maps, dbts, int(ntile)
+        (min(num_sms(d), ntile), 1, 1), (384, 1, 1), *maps, dbts, int(ntile), int(mod.shape[0])
     )
     return DT, HH, DAB
 
@@ -600,6 +605,7 @@ def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1
         int(N),
         int(ntile),
         float(eps),
+        int(mod.shape[0]),
     )
     return DA, DU, GATED, DO
 
@@ -648,6 +654,7 @@ def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5):
         DBQ,
         int(ntile),
         float(eps),
+        int(mod.shape[0]),
     )
     return DS
 
@@ -687,6 +694,7 @@ def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5,
         bs.float().contiguous(),
         int(ntile),
         float(eps),
+        int(mod.shape[0]),
     )
     return DS, dmkv
 

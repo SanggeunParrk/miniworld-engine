@@ -327,3 +327,26 @@ extern "C" __global__ void local_kv_pack_sm90(const void* gamma,const void* ws,c
  if(i<128){bs[i]=val(bias,i,2);gg[i]=val(gamma,i,0);}
 }
 #endif
+
+// local_sample_sum: out[i, c] = sum over the samples a = 0 .. A - 1, in that order, of x[a n + i, c] (bf16 [A n, cols], rows ldx apart; fp32
+// sums, bf16 out, rows ldo apart): the gradient of a conditioning table the samples share (the row kernels write it per sample row). A thread
+// per (row, 8 columns); deterministic.
+extern "C" __global__ void __launch_bounds__(256)
+local_sample_sum(const __nv_bfloat16* __restrict__ x, int ldx, __nv_bfloat16* __restrict__ out, int ldo, int A, int n, int cols) {
+  const int groups = cols / 8;
+  const long long total = (long long)n * groups;
+  for (long long e = (long long)blockIdx.x * blockDim.x + threadIdx.x; e < total; e += (long long)gridDim.x * blockDim.x) {
+    const int i = (int)(e / groups), g = (int)(e - (long long)i * groups);
+    float acc[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    const __nv_bfloat16* p = x + (size_t)i * ldx + 8 * g;
+#pragma unroll 4
+    for (int a = 0; a < A; ++a) {
+      const uint4 u = *reinterpret_cast<const uint4*>(p + (size_t)a * n * ldx);
+      const uint32_t w[4] = {u.x, u.y, u.z, u.w};
+#pragma unroll
+      for (int k = 0; k < 4; ++k) { acc[2 * k] += __uint_as_float(w[k] << 16); acc[2 * k + 1] += __uint_as_float(w[k] & 0xffff0000u); }
+    }
+    *reinterpret_cast<uint4*>(out + (size_t)i * ldo + 8 * g) =
+        make_uint4(pack_bf16(acc[0], acc[1]), pack_bf16(acc[2], acc[3]), pack_bf16(acc[4], acc[5]), pack_bf16(acc[6], acc[7]));
+  }
+}

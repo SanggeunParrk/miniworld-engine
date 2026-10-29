@@ -132,6 +132,7 @@ extern "C" __global__ void atom_grad_pack_sm90(const float* p0,const float* p1,c
 // -DPARALLEL=1 (AlphaFold 3, xkv = LN(a) sigmoid(pre + bs) + shift): the K / V AdaLN's backward reads the staged a (x1 is not loaded) and its
 // LN backward is added to d single instead of dx1.
 // TMEM: W^T 0 (256 columns, projection p at 64 p); warpgroup w's accumulators at 256 + 64 w + 16 p.
+// mrows: the rows of the conditioning tables (mod, mkv): M, or N when the samples share one conditioning (table row = r % mrows)
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -185,7 +186,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
                    const __grid_constant__ CUtensorMap mda, const __grid_constant__ CUtensorMap mwt, const __grid_constant__ CUtensorMap mds,
                    const __grid_constant__ CUtensorMap mdmod, const __grid_constant__ CUtensorMap mx1, const __grid_constant__ CUtensorMap mmkv,
                    const __grid_constant__ CUtensorMap mdmkv, float* __restrict__ DBIAS, float* __restrict__ DBQ, float* __restrict__ DBS,
-                   const float* __restrict__ BS, int ntile, float eps) {
+                   const float* __restrict__ BS, int ntile, float eps, int mrows) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -228,12 +229,12 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
         if (CROSS)
           for (int kb = 0; kb < 2; ++kb) {
             if (!PARALLEL) tma_load_2d(st + O_X1 + kb * KB, &mx1, bar, 64 * kb, r0);
-            tma_load_2d(st + O_MP + kb * KB, &mmkv, bar, 64 * kb, r0);        // the pre-sigmoid scale: mkv's columns 0 .. 127
+            tma_load_2d(st + O_MP + kb * KB, &mmkv, bar, 64 * kb, r0 % mrows);        // the pre-sigmoid scale: mkv's columns 0 .. 127
           }
         for (int kb = 0; kb < 8; ++kb) tma_load_2d(st + O_DP + kb * KB, &mdp, bar, 64 * kb, r0);
         for (int kb = 0; kb < 2; ++kb) {
           tma_load_2d(st + O_A + kb * KB, &ma, bar, 64 * kb, r0);
-          tma_load_2d(st + O_S1 + kb * KB, &mmod, bar, 64 * kb, r0);        // s1: the forward mod's block 0
+          tma_load_2d(st + O_S1 + kb * KB, &mmod, bar, 64 * kb, r0 % mrows);        // s1: the forward mod's block 0
           tma_load_2d(st + O_DA + kb * KB, &mda, bar, 64 * kb, r0);
         }
       }
