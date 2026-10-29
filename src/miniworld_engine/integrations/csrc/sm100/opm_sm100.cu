@@ -581,19 +581,25 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
         {
           const int h = grp;                     // this warp's 64 of the pair's 128 z
           __nv_bfloat16* rp = dz + h * NP * 64 + p * 64;
+          uint4 row[8];
+#pragma unroll
+          for (int c8 = 0; c8 < 8; ++c8) row[c8] = *reinterpret_cast<const uint4*>(rp + ((c8 ^ (p & 7)) << 3));
+          if (ASYM != nullptr) {
+            // the chunk GEMMs may read this row before or after the zeros land: its dO row is multiplied by inv = 0 either way.  The
+            // proxy fence (a full CTA memory barrier) comes before this thread's global stores below, which it would otherwise wait for
+            if (!same)
+#pragma unroll
+              for (int c8 = 0; c8 < 8; ++c8) *reinterpret_cast<uint4*>(rp + c8 * 8) = make_uint4(0u, 0u, 0u, 0u);
+            fence_proxy_async();
+          }
 #pragma unroll
           for (int c8 = 0; c8 < 8; ++c8) {
-            uint4 u = *reinterpret_cast<const uint4*>(rp + ((c8 ^ (p & 7)) << 3));
+            uint4 u = row[c8];
             const float2 x0 = mul2(bf2f(u.x), inv2), x1 = mul2(bf2f(u.y), inv2), x2 = mul2(bf2f(u.z), inv2), x3 = mul2(bf2f(u.w), inv2);
             u.x = pack2(x0.x, x0.y); u.y = pack2(x1.x, x1.y); u.z = pack2(x2.x, x2.y); u.w = pack2(x3.x, x3.y);
             dst[h * 8 + c8] = u;
           }
-          // the chunk GEMMs may read this row before or after the zeros land: its dO row is multiplied by inv = 0 either way
-          if (!same)
-#pragma unroll
-            for (int c8 = 0; c8 < 8; ++c8) *reinterpret_cast<uint4*>(rp + c8 * 8) = make_uint4(0u, 0u, 0u, 0u);
         }
-        fence_proxy_async();
         __syncwarp();
         if (lane == 0) { arrive(dze + d); arrive(dzm + d); }
       }

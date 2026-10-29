@@ -559,45 +559,53 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(192, 1) opm_wepilogu
 }
 
 // ---------------------------------------------------------------------------------------------
-// DGRAD at c_z = CZ: dO[(i,c),(j,e)] = (sum_z dz[i,j,z] Wo[z,(c,e)]) / n[i,j] in the grouped layout, dz/n, dbias = sum dz.
-// opm_dgrad_sm100's roles and drain; K = c_z no longer fits one stage, so a pair tile's dz stays in a ring of 128-z units (each the
-// [2 halves][128 pairs][64 z] tile of the c_z 128 kernel) for the tile's eight 128-column chunks, and Wo streams as [64 z x 128 n]
-// sub-chunks.  A unit is released by the commit after the tile's last chunk read it and by the eight drain warps (dz/n); the ring
-// holds one unit more than a tile, so the next tile's first unit lands under the current tile's last chunk.
+// DGRAD at c_z = CZ on CTA PAIRS: dO[(i,c),(j,e)] = (sum_z dz[i,j,z] Wo[z,(c,e)]) / n[i,j] in the grouped layout, dz/n, dbias = sum dz.
+// A cluster of two CTAs takes two neighbouring 128-pair tiles; per 128-column chunk of dO one cta_group::2 product M 256 (both CTAs'
+// pairs) x N 128 (each CTA lands HALF of the chunk's Wo columns, 64 n) x K = c_z, in K = 128 stages (8 MMAs a wait).  Each CTA keeps
+// its tile's dz in a ring of 128-z units ([2 halves][128 pairs][64 z], the A operand) for the tile's eight chunks; its own TMEM holds
+// its pairs' rows of the accumulators.  Against the single-CTA kernel: half the Wo bytes per CTA and tile, and half the shared-memory
+// operand traffic per FLOP (an M 128 x N 128 product reads 128 bytes a clock, all of the SM's shared-memory bandwidth, and the drain's
+// staging competed with it), twice the work per MMA instruction and per wait.  dbias += dz^T 1 over each unit by one M 256 x N 16
+// product (each CTA's rows its own pairs' sums; the ones live in the leader's half of B).  A unit is released after the tile's last
+// chunk read it (multicast commit) and the CTA's eight drain warps took dz/n; the leader's MMA learns that both CTAs' units landed from
+// a forwarding warp in each CTA.
 template <int CZ>
 struct WDg {
   static constexpr int BI = 4, BJ = 32, NP = BI * BJ;
   static constexpr int NC = 128, NCK = NCH / NC;
-  static constexpr int NZB = CZ / 128, NZS = CZ / 64;
+  static constexpr int NZB = CZ / 128;               // units = K stages per chunk
   static constexpr int UNIT = NP * 128;              // elements
-  static constexpr int NB = CZ <= 384 ? NZB + 1 : NZB;   // c_z 512: four 32 KiB units fill the ring (the next tile's first unit
-                                                       // lands once the last chunk has read it, under the chunk's other units)
-  static constexpr int WOS = 128 * 64;               // [2 n blocks][64 z][64 n]
+  static constexpr int NB = CZ <= 384 ? NZB + 1 : NZB;
+  static constexpr int WOS = 128 * 64;               // this CTA's half of a stage of Wo: [128 z][64 n]
   static constexpr int NWO = 3;
   static constexpr int OUT = NP * NC;
   static constexpr int NOUT = CZ >= 384 ? 1 : 2;
   static constexpr int NACC = 3;
-  static constexpr int ONES = 16 * NP;
-  static constexpr int THREADS = 352;
+  static constexpr int ONES = 8 * NP;                // this CTA's 8 of the 16 B rows: [2 k blocks][8][64]
+  static constexpr int THREADS = 384;                // 0: Wo, 1: MMA (leader), 2-9: drain, 10: dz units, 11: unit-landed forwarder
   static constexpr int SMEM = 1024 + (NB * UNIT + NWO * WOS + NOUT * OUT + ONES) * 2 + 512;
-  static constexpr uint32_t IDESC = idesc_bf16(128, NC, 0, 1);
-  static constexpr uint32_t IDESC_BO = idesc_bf16(128, 16, 1, 0);
+  static constexpr uint32_t IDESC = idesc_bf16(256, NC, 0, 1);
+  static constexpr uint32_t IDESC_BO = idesc_bf16(256, 16, 1, 0);
   static constexpr int BO_COL = NACC * NC;
   static_assert(SMEM <= 232448, "one CTA per SM");
   static_assert(BO_COL + NZB * 16 <= 512, "TMEM columns");
 };
 
+__device__ __forceinline__ void arrive_leader_release(uint64_t* bar) {   // release, cluster scope: this thread's prior shared stores first
+  asm volatile("mbarrier.arrive.release.cluster.shared::cluster.b64 _, [%0];\n" :: "r"(cl_map(sa(bar), 0)) : "memory");
+}
+
 template <int CZ>
-__global__ void __launch_bounds__(352, 1) opm_wdgrad_sm100(
-    int NI, int NJ, int ntiles,
+__global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_sm100(
+    int NI, int NJ, int npairs,                   // npairs: tile pairs (a cluster's item)
     const __grid_constant__ CUtensorMap dzmap,    // dz as (64 z, NJ j, CZ / 64, NI i), box (64, BJ, 1, BI), 128B swizzle
-    const __grid_constant__ CUtensorMap womap,    // Wo [CZ][NCH] as (NCH n, CZ z), box (64 n, 64 z), 128B swizzle
+    const __grid_constant__ CUtensorMap womap,    // Wo [CZ][NCH] as (NCH n, CZ z), box (64 n, 128 z), 128B swizzle
     const __grid_constant__ CUtensorMap domap,    // dO as (32 e, NJ j, 32 c, NI i), box (32, BJ, 4, BI), 64B swizzle
     __nv_bfloat16* __restrict__ DZP,              // dz/n [NI][NJ][CZ]
-    const float* __restrict__ NORM, float* __restrict__ DBO,   // the mask counts [NI][NJ] (clamped >= 1); the dbias partials
+    const float* __restrict__ NORM, float* __restrict__ DBO,   // the mask counts [NI][NJ] (clamped >= 1); the dbias partials [grid][CZ]
     const int* __restrict__ ASYM) {               // chain ids [N] (the interchain mask), or nullptr
   using C = WDg<CZ>;
-  constexpr int BJ = C::BJ, BI = C::BI, NP = C::NP, NC = C::NC, NCK = C::NCK, NZB = C::NZB, NZS = C::NZS, UNIT = C::UNIT, NB = C::NB;
+  constexpr int BJ = C::BJ, BI = C::BI, NP = C::NP, NC = C::NC, NCK = C::NCK, NZB = C::NZB, UNIT = C::UNIT, NB = C::NB;
   constexpr int WOS = C::WOS, NWO = C::NWO, OUT = C::OUT, NOUT = C::NOUT, NACC = C::NACC, BO_COL = C::BO_COL;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -606,42 +614,50 @@ __global__ void __launch_bounds__(352, 1) opm_wdgrad_sm100(
   __nv_bfloat16* sOUT = sWO + NWO * WOS;
   __nv_bfloat16* sONE = sOUT + NOUT * OUT;
   uint64_t* bars = reinterpret_cast<uint64_t*>(sONE + C::ONES);
-  uint64_t* dzf = bars;              // [NB] unit landed
-  uint64_t* dze = dzf + NB;          // [NB] count 9: the tile's last chunk read it (commit) and the 8 drain warps took dz/n
-  uint64_t* wof = dze + NB;          // [NWO]
-  uint64_t* woe = wof + NWO;         // [NWO]
-  uint64_t* accf = woe + NWO;        // [NACC]
-  uint64_t* acce = accf + NACC;      // [NACC] count 8
-  uint64_t* bod = acce + NACC;       // [1]
-  uint64_t* dzm = bod + 1;           // [NB] count 8: the drain warps took dz/n off the unit and zeroed its interchain rows
-  uint32_t* tslot = reinterpret_cast<uint32_t*>(dzm + NB);
+  uint64_t* dzf = bars;              // [NB] this CTA's unit landed
+  uint64_t* dze = dzf + NB;          // [NB] count 9: the tile's last chunk read it (multicast commit) and the 8 drain warps took dz/n
+  uint64_t* dzf2 = dze + NB;         // [NB] (leader) count 2: both CTAs' units landed (the forwarders)
+  uint64_t* dzm = dzf2 + NB;         // [NB] (leader) count 16: both CTAs' drains zeroed the unit's interchain rows
+  uint64_t* wof = dzm + NB;          // [NWO] (leader) both halves of the Wo stage landed
+  uint64_t* woe = wof + NWO;         // [NWO] (multicast commit)
+  uint64_t* accf = woe + NWO;        // [NACC] (multicast commit)
+  uint64_t* acce = accf + NACC;      // [NACC] (leader) count 16: both CTAs' drains took the accumulator
+  uint64_t* bod = acce + NACC;       // [1] (multicast commit) the last dbias GEMM retired
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(bod + 1);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int rank = (int)cl_rank();
+  const bool lead_cta = rank == 0;
+  const int cl = blockIdx.x >> 1, ncl = gridDim.x >> 1;
   if (tid == 0) {
-    for (int k = 0; k < NB; ++k) { bar_init(dzf + k, 1); bar_init(dze + k, 9); bar_init(dzm + k, 8); }
+    for (int k = 0; k < NB; ++k) { bar_init(dzf + k, 1); bar_init(dze + k, 9); bar_init(dzf2 + k, 2); bar_init(dzm + k, 16); }
     for (int k = 0; k < NWO; ++k) { bar_init(wof + k, 1); bar_init(woe + k, 1); }
-    for (int k = 0; k < NACC; ++k) { bar_init(accf + k, 1); bar_init(acce + k, 8); }
+    for (int k = 0; k < NACC; ++k) { bar_init(accf + k, 1); bar_init(acce + k, 16); }
     bar_init(bod, 1);
     bar_init_fence();
   }
+  // the ones of the dbias GEMM: B[n][k] = 1 for n == 0 (the leader's first row), zero elsewhere (rows 1-7 here, 8-15 in the peer)
   for (int v = tid; v < C::ONES / 8; v += C::THREADS) {
-    const int row = (v / 8) % 16;
+    const int row = (v / 8) % 8;
     uint4 o = make_uint4(0u, 0u, 0u, 0u);
-    if (row == 0) o = make_uint4(0x3f803f80u, 0x3f803f80u, 0x3f803f80u, 0x3f803f80u);
+    if (lead_cta && row == 0) o = make_uint4(0x3f803f80u, 0x3f803f80u, 0x3f803f80u, 0x3f803f80u);
     reinterpret_cast<uint4*>(sONE)[v] = o;
   }
-  if (warp == 1) tmem_alloc(tslot, 512);
+  if (warp == 1) tmem_alloc2(tslot, 512);
   fence_proxy_async();
   tc_fence_before();
   __syncthreads();
+  cl_sync();
   tc_fence_after();
   const uint32_t tmem = *tslot;
   const int njb = NJ / BJ;
+  auto tile_of = [&](int tp, int& i0, int& j0) { const int pt = 2 * tp + rank; i0 = (pt / njb) * BI; j0 = (pt % njb) * BJ; };
 
   if (warp == 10) {
-    if (lane == 0) {                             // the dz units
+    if (lane == 0) {                             // this CTA's dz units
       int u = 0;
-      for (int t = blockIdx.x; t < ntiles; t += gridDim.x) {
-        const int i0 = (t / njb) * BI, j0 = (t % njb) * BJ;
+      for (int tp = cl; tp < npairs; tp += ncl) {
+        int i0, j0;
+        tile_of(tp, i0, j0);
         for (int zu = 0; zu < NZB; ++zu, ++u) {
           const int d = u % NB;
           if (u >= NB) wait(dze + d, ((u / NB) - 1) & 1);
@@ -650,57 +666,66 @@ __global__ void __launch_bounds__(352, 1) opm_wdgrad_sm100(
         }
       }
     }
+  } else if (warp == 11) {
+    if (lane == 0) {                             // forward "this CTA's unit landed" to the leader's MMA
+      int u = 0;
+      for (int tp = cl; tp < npairs; tp += ncl)
+        for (int zu = 0; zu < NZB; ++zu, ++u) {
+          const int d = u % NB;
+          wait(dzf + d, (u / NB) & 1);
+          arrive_leader_release(dzf2 + d);
+        }
+    }
   } else if (warp == 0) {
-    if (lane == 0) {                             // the Wo sub-chunks (L2-resident)
+    if (lane == 0) {                             // this CTA's half of each Wo stage (L2-resident), counted on the leader's barrier
       int g = 0;
-      for (int t = blockIdx.x; t < ntiles; t += gridDim.x)
+      for (int tp = cl; tp < npairs; tp += ncl)
         for (int k = 0; k < NCK; ++k)
-          for (int zs = 0; zs < NZS; ++zs, ++g) {
+          for (int zs = 0; zs < NZB; ++zs, ++g) {
             const int w = g % NWO;
             if (g >= NWO) wait(woe + w, ((g / NWO) - 1) & 1);
-            expect_tx(wof + w, WOS * 2);
-            for (int b = 0; b < 2; ++b) load_2d(&womap, sWO + w * WOS + b * 64 * 64, wof + w, k * NC + b * 64, zs * 64);
+            if (lead_cta) expect_tx(wof + w, 2 * WOS * 2);
+            load_2d_2sm(&womap, sWO + w * WOS, wof + w, k * NC + rank * 64, zs * 128);
           }
     }
   } else if (warp == 1) {
-    if (lane == 0) {
+    if (lead_cta && lane == 0) {
       int lt = 0, g = 0, gw = 0;
-      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
+      for (int tp = cl; tp < npairs; tp += ncl, ++lt) {
         const int u0 = lt * NZB;
         for (int k = 0; k < NCK; ++k, ++g) {
           const int a = g % NACC;
           if (g >= NACC) wait(acce + a, ((g / NACC) - 1) & 1);
           tc_fence_after();
-          for (int zs = 0; zs < NZS; ++zs, ++gw) {
-            const int w = gw % NWO, d = (u0 + (zs >> 1)) % NB;
-            if (k == 0 && !(zs & 1)) {           // a unit's first use: wait for it
-              wait(dzf + d, ((u0 + (zs >> 1)) / NB) & 1);
+          for (int zs = 0; zs < NZB; ++zs, ++gw) {
+            const int w = gw % NWO, d = (u0 + zs) % NB;
+            const __nv_bfloat16* du = sDZ + d * UNIT;
+            if (k == 0) {                        // the unit's first use: both CTAs' units landed
+              wait(dzf2 + d, ((u0 + zs) / NB) & 1);
               tc_fence_after();
             }
-            if (k == NCK - 1 && !(zs & 1)) {     // its last: dbias += dz^T . 1 over it (raw dz; interchain rows zeroed by the drain, which
-              const int zu = zs >> 1;            // took this tile's dz/n long before: this GEMM waits for nothing in practice)
-              wait(dzm + d, ((u0 + zu) / NB) & 1);
+            if (k == NCK - 1) {                  // its last: dbias += dz^T . 1 over it (raw dz; interchain rows zeroed by the drains, which
+              wait(dzm + d, ((u0 + zs) / NB) & 1);   // took this tile's dz/n long before: no wait in practice)
               tc_fence_after();
-              const __nv_bfloat16* du = sDZ + d * UNIT;
 #pragma unroll
               for (int kk = 0; kk < NP / 16; ++kk)
-                mma_ss(tmem + BO_COL + zu * 16, desc_mn128(du + kk * 16 * 64, NP * 64 * 2),
-                       desc_k128(sONE + (kk >> 2) * 16 * 64 + (kk & 3) * 16), C::IDESC_BO, (lt | kk) ? 1u : 0u);
+                mma2_ss(tmem + BO_COL + zs * 16, desc_mn128(du + kk * 16 * 64, NP * 64 * 2),
+                        desc_k128(sONE + (kk >> 2) * 8 * 64 + (kk & 3) * 16), C::IDESC_BO, (lt | kk) ? 1u : 0u);
             }
             wait(wof + w, (gw / NWO) & 1);
             tc_fence_after();
-            const __nv_bfloat16* dz = sDZ + d * UNIT + (zs & 1) * NP * 64;
             const __nv_bfloat16* wo = sWO + w * WOS;
 #pragma unroll
-            for (int kk = 0; kk < 4; ++kk)
-              mma_ss(tmem + a * NC, desc_k128(dz + kk * 16), desc_mn128(wo + kk * 16 * 64, 64 * 64 * 2), C::IDESC, (zs | kk) ? 1u : 0u);
-            mma_commit(woe + w);
-            if (k == NCK - 1 && (zs & 1)) mma_commit(dze + d);   // the tile's last chunk has read this unit
+            for (int kk = 0; kk < 8; ++kk)
+              mma2_ss(tmem + a * NC, desc_k128(du + (kk >> 2) * NP * 64 + (kk & 3) * 16), desc_mn128(wo + kk * 16 * 64, 128 * 64 * 2), C::IDESC,
+                      (zs | kk) ? 1u : 0u);
+            commit2(woe + w);
+            if (k == NCK - 1) commit2(dze + d);  // the tile's last chunk has read this unit (in both CTAs)
           }
-          mma_commit(accf + a);
+          commit2(accf + a);
         }
       }
-      mma_commit(bod);
+      commit2(bod);
     }
   } else {
     const int q = warp & 3, grp = (warp - 2) >> 2;
@@ -708,12 +733,14 @@ __global__ void __launch_bounds__(352, 1) opm_wdgrad_sm100(
     const bool leader = (warp == 2 && lane == 0);
     int lt = 0, g = 0;
     // this thread's pair count, loaded one tile ahead (off the drain's critical path)
-    auto count_of = [&](int t) { return __ldg(NORM + (size_t)((t / njb) * BI + il) * NJ + (t % njb) * BJ + jl); };
-    float nrm_next = blockIdx.x < ntiles ? count_of(blockIdx.x) : 1.f;
-    for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
-      const int i0 = (t / njb) * BI, j0 = (t % njb) * BJ, u0 = lt * NZB;
+    auto count_of = [&](int tp) { int i0_, j0_; tile_of(tp, i0_, j0_); return __ldg(NORM + (size_t)(i0_ + il) * NJ + j0_ + jl); };
+    float nrm_next = cl < npairs ? count_of(cl) : 1.f;
+    for (int tp = cl; tp < npairs; tp += ncl, ++lt) {
+      int i0, j0;
+      tile_of(tp, i0, j0);
+      const int u0 = lt * NZB;
       const float nrm = nrm_next;
-      if (t + (int)gridDim.x < ntiles) nrm_next = count_of(t + gridDim.x);
+      if (tp + ncl < npairs) nrm_next = count_of(tp + ncl);
       // the interchain mask: a pair of two chains passes no gradient (inv 0 for dO and dz/n; its dz rows zeroed for dbias)
       const bool same = ASYM == nullptr || __ldg(ASYM + i0 + il) == __ldg(ASYM + j0 + jl);
       const float inv = same ? 1.0f / nrm : 0.f;
@@ -723,20 +750,26 @@ __global__ void __launch_bounds__(352, 1) opm_wdgrad_sm100(
         const int d = (u0 + zu) % NB;
         wait(dzf + d, ((u0 + zu) / NB) & 1);
         __nv_bfloat16* rp = sDZ + d * UNIT + grp * NP * 64 + p * 64;
+        uint4 row[8];
+#pragma unroll
+        for (int c8 = 0; c8 < 8; ++c8) row[c8] = *reinterpret_cast<const uint4*>(rp + ((c8 ^ (p & 7)) << 3));
+        if (ASYM != nullptr) {
+          // the chunk GEMMs may read this row before or after the zeros land: its dO row is multiplied by inv = 0 either way.  The
+          // proxy fence (a full CTA memory barrier) comes before this thread's global stores below, which it would otherwise wait for
+          if (!same)
+#pragma unroll
+            for (int c8 = 0; c8 < 8; ++c8) *reinterpret_cast<uint4*>(rp + c8 * 8) = make_uint4(0u, 0u, 0u, 0u);
+          fence_proxy_async();
+        }
 #pragma unroll
         for (int c8 = 0; c8 < 8; ++c8) {
-          uint4 u = *reinterpret_cast<const uint4*>(rp + ((c8 ^ (p & 7)) << 3));
+          uint4 u = row[c8];
           const float2 x0 = mul2(bf2f(u.x), inv2), x1 = mul2(bf2f(u.y), inv2), x2 = mul2(bf2f(u.z), inv2), x3 = mul2(bf2f(u.w), inv2);
           u.x = pack2(x0.x, x0.y); u.y = pack2(x1.x, x1.y); u.z = pack2(x2.x, x2.y); u.w = pack2(x3.x, x3.y);
           dst[zu * 16 + grp * 8 + c8] = u;
         }
-        // the chunk GEMMs may read this row before or after the zeros land: its dO row is multiplied by inv = 0 either way
-        if (!same)
-#pragma unroll
-          for (int c8 = 0; c8 < 8; ++c8) *reinterpret_cast<uint4*>(rp + c8 * 8) = make_uint4(0u, 0u, 0u, 0u);
-        fence_proxy_async();
         __syncwarp();
-        if (lane == 0) { arrive(dze + d); arrive(dzm + d); }
+        if (lane == 0) { arrive(dze + d); arrive_leader_release(dzm + d); }
       }
       for (int k = 0; k < NCK; ++k, ++g) {
         const int a = g % NACC, ob = g % NOUT;
@@ -747,12 +780,12 @@ __global__ void __launch_bounds__(352, 1) opm_wdgrad_sm100(
         __nv_bfloat16* box = sOUT + ob * OUT;
 #pragma unroll
         for (int cc = 0; cc < 2; ++cc) {
-          const int cl = grp * 2 + cc;
+          const int cl4 = grp * 2 + cc;
           float v[32];
-          tmem_ld32(tmem_at(tmem + a * NC, q * 32, cl * 32), v);
+          tmem_ld32(tmem_at(tmem + a * NC, q * 32, cl4 * 32), v);
           tmem_wait_ld();
-          if (cc == 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(acce + a); }
-          const int row = (il * 4 + cl) * BJ + jl;
+          if (cc == 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive_leader(acce + a); }
+          const int row = (il * 4 + cl4) * BJ + jl;
           __nv_bfloat16* rp = box + row * 32;
 #pragma unroll
           for (int c8 = 0; c8 < 4; ++c8) {
@@ -768,7 +801,7 @@ __global__ void __launch_bounds__(352, 1) opm_wdgrad_sm100(
         if (leader) { store_4d(&domap, box, 0, j0, k * 4, i0); bulk_commit(); }
       }
     }
-    // this CTA's dbias partial: TMEM lane = z of a unit, column BO_COL + 16 unit
+    // this CTA's dbias partial: TMEM lane = z of a unit, column BO_COL + 16 unit (its own pairs' sums)
     wait(bod, 0);
     tc_fence_after();
 #pragma unroll 1
@@ -782,7 +815,8 @@ __global__ void __launch_bounds__(352, 1) opm_wdgrad_sm100(
   }
   tc_fence_before();
   __syncthreads();
-  if (warp == 1) tmem_dealloc(tmem, 512);
+  cl_sync();
+  if (warp == 1) { tc_fence_after(); tmem_dealloc2(tmem, 512); }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2097,23 +2131,32 @@ template <int CZ>
 static std::vector<torch::Tensor> dgrad_launch(torch::Tensor& dz, torch::Tensor& norm, torch::Tensor& wo, int64_t ni, int64_t nj, int64_t grad_bf16,
                                                const int* asym) {
   using C = WDg<CZ>;
-  TORCH_CHECK(ni % C::BI == 0 && nj % C::BJ == 0, "the kernel tiles ", C::BI, " x ", C::BJ, " tokens");
+  TORCH_CHECK(ni % C::BI == 0 && nj % (2 * C::BJ) == 0, "the kernel tiles ", C::BI, " x ", 2 * C::BJ, " tokens per CTA pair");
   auto dO = torch::empty({ni * CH, nj * CH}, dz.options());
   auto dzp = torch::empty({ni, nj, (long)CZ}, dz.options());
-  const int ntiles = (int)((ni / C::BI) * (nj / C::BJ));
-  const int grid = std::min(ntiles, num_sms(dz.device().index()));
-  auto dbo_part = torch::empty({grid, (long)CZ}, dz.options().dtype(torch::kFloat32));
+  const int npairs = (int)((ni / C::BI) * (nj / C::BJ) / 2);
+  static bool attr = false;
+  static int max_clusters = 0;
+  if (!attr) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(opm_wdgrad_sm100<CZ>, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM));
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3(2 * (num_sms(dz.device().index()) / 2));
+    cfg.blockDim = dim3(C::THREADS);
+    cfg.dynamicSmemBytes = C::SMEM;
+    C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&max_clusters, (void*)opm_wdgrad_sm100<CZ>, &cfg));
+    TORCH_CHECK(max_clusters > 0, "opm_wdgrad_sm100: no CTA pair fits an SM pair");
+    attr = true;
+  }
+  const int clusters = std::min(npairs, max_clusters);
+  auto dbo_part = torch::empty({2 * clusters, (long)CZ}, dz.options().dtype(torch::kFloat32));
   const uint64_t M = (uint64_t)nj * CH;
   CUtensorMap dzm = make_map<4>(dz.data_ptr(), {64, (uint64_t)nj, (uint64_t)(CZ / 64), (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ},
                                 {64, (uint32_t)C::BJ, 1, (uint32_t)C::BI}, CU_TENSOR_MAP_SWIZZLE_128B, "dz");
-  CUtensorMap wom = make_map<2>(wo.data_ptr(), {(uint64_t)NCH, (uint64_t)CZ}, {(uint64_t)NCH}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "Wo");
+  CUtensorMap wom = make_map<2>(wo.data_ptr(), {(uint64_t)NCH, (uint64_t)CZ}, {(uint64_t)NCH}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "Wo");
   CUtensorMap dom = make_map<4>(dO.data_ptr(), {32, (uint64_t)nj, 32, (uint64_t)ni}, {32, M, 32 * M}, {32, (uint32_t)C::BJ, 4, (uint32_t)C::BI},
                                 CU_TENSOR_MAP_SWIZZLE_64B, "dO");
-  static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_wdgrad_sm100<CZ>, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM)); attr = true; }
-  opm_wdgrad_sm100<CZ><<<grid, C::THREADS, C::SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, ntiles, dzm, wom, dom,
-      reinterpret_cast<__nv_bfloat16*>(dzp.data_ptr<at::BFloat16>()),
-      norm.data_ptr<float>(), dbo_part.data_ptr<float>(), asym);
+  opm_wdgrad_sm100<CZ><<<2 * clusters, C::THREADS, C::SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, npairs, dzm, wom, dom,
+      reinterpret_cast<__nv_bfloat16*>(dzp.data_ptr<at::BFloat16>()), norm.data_ptr<float>(), dbo_part.data_ptr<float>(), asym);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dO, dzp, colsum(dbo_part, grad_bf16 ? torch::kBFloat16 : torch::kFloat32)};
 }
