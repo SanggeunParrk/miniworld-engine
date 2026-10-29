@@ -238,3 +238,7 @@ def test_refusals():
     assert "2048" in pt.refusal(big, z, 128, 256, 8, 16)
     mw = torch.empty(1, 128, 2048, 64, device=DEV, dtype=BF)
     assert pt.refusal(mw, z, 64, 128, 8, 32) is None                                    # MiniWorld width, training at N 2048
+    x256 = torch.empty(1, 128, 256, 256, device=DEV, dtype=BF)
+    assert "backward" in pt.refusal(x256, z, 256, 512, 8, 32)                           # IntelliFold-v2: inference only
+    with torch.no_grad():
+        assert pt.refusal(x256, z, 256, 512, 8, 32) is None

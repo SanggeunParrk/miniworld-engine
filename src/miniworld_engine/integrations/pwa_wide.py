@@ -41,8 +41,14 @@ NMAX_B200 = 2048  # B200 inference: pair_fwd holds a row of up to 2048 logits (N
 _EXT: dict[str, Any] = {}
 
 
+INTELLIFOLD2 = (256, 512, H, 32)  # B200 inference only: d_msa 256's weights stream through a ring (pwa_wide_sm100.cu, WS)
+
+
 def supported(d_msa: int, d_pair: int, n_head: int, d_hidden: int, cap: tuple[int, int] | None = None) -> bool:
-    """The widths this path serves; on B200 (``cap`` (10, 0)) also 8 x 32 value channels at d_msa 64 (Chai-1: d_msa 64, d_pair 256)."""
+    """The widths this path serves; on B200 (``cap`` (10, 0)) also 8 x 32 value channels at d_msa 64 (Chai-1: d_msa 64, d_pair 256) and
+    IntelliFold-v2's 256 / 512 / 8 x 32 (inference)."""
+    if cap == (10, 0) and (d_msa, d_pair, n_head, d_hidden) == INTELLIFOLD2:
+        return True
     if n_head != H or d_msa not in DMSA or d_pair not in DPAIR:
         return False
     return d_hidden in DHID or (cap == (10, 0) and d_msa == 64 and d_hidden == 32)
