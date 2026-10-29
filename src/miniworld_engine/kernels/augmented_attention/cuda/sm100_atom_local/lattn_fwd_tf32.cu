@@ -23,6 +23,8 @@
 // Threads: 17 warps (544; <= 120 registers): 16 softmax warps, one query row per thread; warp 16 issues the TMA loads (lane 0) and the
 // MMAs (whole warp, elect_one). O leaves through per-warp 2 KB stagings (32 rows x 16 fp32, 64-B swizzle) and TMA stores (band
 // quarters 0, 1); band quarter 2 writes the LSE.
+// Slid key window (SPE > 0, slide.cuh): the last 8 SPE CTAs are edge CTAs (the moved windows over their slid keys); the others skip
+// the moved windows' O / LSE.
 // SPDX-License-Identifier: Apache-2.0
 #include "../sm100/sm100.cuh"
 #include "slide.cuh"
@@ -55,9 +57,9 @@ local_attn_fwd_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_const
   uint32_t* tptr = reinterpret_cast<uint32_t*>(sm + O_BAR + 128);
   float* red = reinterpret_cast<float*>(sm + O_R);                   // [kind 2][parity 2][warp 16][lane 32]: row max / row sum partials
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int nedge = 2 * NH * SPE;                                    // the slid window's edge CTAs come first (slide.cuh; SPE = 0: none)
-  const bool edge = (int)blockIdx.x < nedge;
-  const int sp = edge ? SPE : SP, bx = (int)blockIdx.x - (edge ? 0 : nedge);
+  const int nmain = (int)gridDim.x - 2 * NH * SPE;                  // the slid window's edge CTAs come last (slide.cuh; SPE = 0: none)
+  const bool edge = (int)blockIdx.x >= nmain;
+  const int sp = edge ? SPE : SP, bx = (int)blockIdx.x - (edge ? nmain : 0);
   const int pair = bx / sp, part = bx - pair * sp;
   const int jc = pair >> 2, h = pair & 3;                            // (an edge CTA: jc = its group)
   const int a_lo = (int)((long)A * part / sp), a_hi = (int)((long)A * (part + 1) / sp);

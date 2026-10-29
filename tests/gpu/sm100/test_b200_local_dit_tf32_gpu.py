@@ -495,8 +495,8 @@ def test_the_tf32_kernels_do_not_spill():
     for name, k in kernels.items():
         assert k.lmem == 0, f"{name}: {k.lmem} B of local memory (spills)"
         cap = (
-            168 if name in ("fused.post", "local.slide_b32") else 128
-        )  # atom_post_tf32: 384 threads, one CTA per SM (smem) -> 65536 / 384 = 170 per thread; the slid-window backward: 128 threads
+            168 if name == "fused.post" else 128
+        )  # atom_post_tf32: 384 threads, one CTA per SM (smem) -> 65536 / 384 = 170 per thread
         assert k.regs <= cap, f"{name}: {k.regs} registers"
 
 

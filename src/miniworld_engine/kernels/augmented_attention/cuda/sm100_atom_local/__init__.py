@@ -9,8 +9,9 @@ The attention stage of ``modules/atom_local``'s block, forward and backward; mma
   lattn_fwd.cu   O and the row LSE.
   lattn_dq.cu    dQ (window-local).
   lattn_dkv.cu   dK, dV and dbias (key-centric: 16 keys see exactly 4 query windows = 128 queries; dbias is summed over the samples).
-  lslide.cu      AlphaFold 3's slid key window: the (at most five) windows whose slid keys differ from the clipped ones, recomputed
-                 over their slid keys after the window kernel (inference).
+  slide.cuh      AlphaFold 3's slid key window inside lattn_fwd / dq / dkv (and their tf32 twins): the windows whose slid keys differ
+                 from the clipped ones run as edge CTAs of the same launches.
+  lslide.cu      the slid keys' dK / dV partials of those edge CTAs, added into dk / dv (deterministic).
   lattn_esm.cu, lattn_esm_dq.cu, lattn_esm_dkv.cu, lesm.cu   ESMFold2's 192-key rank-window attention (forward; dQ + bias gradient;
                  dK / dV) and its q / k RMSNorm + rotary, position-indexed pair bias and conditioning SiLU (inference and training).
                  Their fp32 twins: lattn_esm_tf32.cu, lattn_esm_dq_tf32.cu, lattn_esm_dkv_tf32.cu (tcgen05 kind::tf32).
@@ -76,9 +77,7 @@ KERNELS = {
     "cln_b": ("lcross", "local_cond_ln_bwd", 0),
     "ssum": ("lcross", "local_sample_sum", 0),
     "tsum": ("lcross", "local_table_sum", 0),
-    "slide_p": ("lslide", "local_slide_bwd_prep", 0),
-    "slide_b": ("lslide", "local_slide_bwd", 92416),
-    "slide_f": ("lslide", "local_slide_bwd_fin", 0),
+    "slide_add": ("lslide", "local_slide_add", 0),
 }
 
 
@@ -255,10 +254,18 @@ def _slide_mask(km):
     return km.clone() if km is not None and km.data_ptr() % 16 else km
 
 
-def _edge_split(main_ctas, sp, d):
-    """Sample splits of the slid window's edge CTAs (2 groups x 4 heads each, ``slide.cuh``): as many as the SMs the clipped-window CTAs
-    leave free take (at most the main split), at least one."""
-    return max(1, min(sp, (num_sms(d) - main_ctas) // (2 * NH)))
+def _edge_split(main_ctas, sp, A, d, cap=None):
+    """Sample splits of the slid window's edge CTAs (2 groups x 4 heads each, ``slide.cuh``; they come after the clipped-window CTAs in the
+    grid). In sample-times: the clipped-window CTAs take tm = ceil(A / sp); edge CTAs that fit the SMs the last wave leaves free run beside
+    them (makespan max(tm, ceil(A / f))), more of them run partly as a tail (~ tm + ceil(A / s)). The better of the two, at most ``cap``
+    (the dK / dV kernel: 2, its dbias adds exactly)."""
+    hi = min(A, cap or A)
+    tm = -(-A // sp)
+    f = min(hi, (-main_ctas % num_sms(d)) // (2 * NH))
+    s = min(hi, 2 * sp)
+    if f >= 1 and max(tm, -(-A // f)) <= tm + -(-A // s):
+        return f
+    return s
 
 
 def attn_fwd(q, k, v, bias, kmask=None, slide=False):
@@ -306,7 +313,7 @@ def attn_fwd(q, k, v, bias, kmask=None, slide=False):
         return o, lse
     nq = (N + 127) // 128
     sp = max(1, min(A, num_sms(d) // (nq * NH)))
-    spe = _edge_split(nq * NH * sp, sp, d) if slide else 0
+    spe = _edge_split(nq * NH * sp, sp, A, d) if slide else 0
     if slide:
         km = _slide_mask(km)
     out = _tmap(o, (DM, N, A), (DM * 2, N * DM * 2), (16, 32, 1), 0)
@@ -634,47 +641,14 @@ def attn_esm32(q, k, v, bias2, lse=None):
     return o
 
 
-def slide_bwd_prep(do, dd, kmask, n0, A):
-    """Before the clipped-window backward of a slid-window block: the moved windows' rows of dO [A N, 128] and D [A, 4, N] are copied out and
-    zeroed in place (``lslide.cu``) -> the saved (sdo, sdd) for ``slide_bwd``."""
-    N = dd.shape[2]
-    assert do.is_contiguous() and dd.is_contiguous() and do.shape[0] == A * N
-    f32 = do.dtype == torch.float32
-    d = _dev(do)
-    sdo = torch.empty(5, A, WQ, DM, device=do.device, dtype=do.dtype)
-    sdd = torch.empty(5, A, NH, WQ, device=do.device, dtype=torch.float32)
-    km = _u8(kmask)
-    if km is not None and km.data_ptr() % 16:
-        km = km.clone()
-    (_load32("slide_p32", d) if f32 else _load("slide_p", d))((5, A, 1), (256, 1, 1), do, dd, km, sdo, sdd, int(N), int(n0), int(A))
-    return sdo, sdd
+def _slide_add(kern, spart, dkv, ldd, kcol, vcol, N, A):
+    """dK / dV of the slid keys += the edge CTAs' fp32 partials (``lslide.cu``; deterministic)."""
+    kern((A * 8, 1, 1), (256, 1, 1), spart, dkv, int(ldd), int(kcol), int(vcol), int(N), int(A))
 
 
-def slide_bwd(q, k, v, bias, kmask, n0, lse, saved, dq, dk, dv, dbias):
-    """After the clipped-window backward of a slid-window block (its dO / D rows of the moved windows zeroed by ``slide_bwd_prep``, whose
-    ``saved`` they are): the moved windows' gradients over their slid keys on tensor cores -- dQ written into ``dq``, dK / dV added into
-    ``dk`` / ``dv`` (a CTA per key group, head and sample: one writer per key), their dbias windows of ``dbias`` [4, nwin, 32, 128] written
-    (summed over the samples in order; deterministic). q, k, v, dq, dk, dv [A, N, 128] views with one row stride each (q / k / v one, the
-    gradients one); lse [A, 4, N] (the slid forward's)."""
-    A, N, _ = q.shape
-    ld, ldd = q.stride(1), dq.stride(1)
-    assert k.stride(1) == v.stride(1) == ld and dk.stride(1) == dv.stride(1) == ldd
-    f32 = q.dtype == torch.float32
-    d = _dev(q)
-    sdo, sdd = saved
-    km = _u8(kmask)
-    if km is not None and km.data_ptr() % 16:
-        km = km.clone()
-    sdb = torch.empty(5, A, NH, WQ, WK, device=q.device, dtype=torch.float32)
-    (_load32("slide_b32", d) if f32 else _load("slide_b", d))(
-        (2, NH, A), (128, 1, 1), q, k, v, int(ld), bias, km, lse, sdo, sdd, dq, dk, dv, int(ldd), sdb, int(N), int(n0), int(A)
-    )
-    total = 5 * NH * WQ * WK
-    _load("slide_f", d)((min(8 * num_sms(d), (total + 255) // 256), 1, 1), (256, 1, 1), km, sdb, dbias, int(N), int(n0), int(A))
-
-
-def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
-    """dQ, dK, dV (bf16) into dkv [A N, 512] (blocks 0 / 1 / 2) and dbias [4, nwin, 32, 128] fp32 (summed over the samples).
+def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None, slide=False):
+    """dQ, dK, dV (bf16) into dkv [A N, 512] (blocks 0 / 1 / 2) and dbias [4, nwin, 32, 128] fp32 (summed over the samples). ``slide``:
+    AlphaFold 3's slid key window (edge CTAs in both launches, ``slide.cuh``; their dK / dV partials added by ``lslide.cu``).
 
     ``dd`` is D = rowsum(dO * O) per head [A, 4, N] fp32, ``lse`` the forward's [A, 4, N] (log2 units). q, k, v, do are contiguous
     [A, N, 128]. dQ (query-centric) and dK / dV / dbias (key-centric) run on tcgen05, a CTA per (128-row chunk, head) and sample range,
@@ -793,8 +767,11 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
     sp = max(
         1, min(A, num_sms(d) // (nq * NH))
     )  # split the samples when there are few chunks
+    spe = _edge_split(nq * NH * sp, sp, A, d) if slide else 0
+    if slide:
+        km = _slide_mask(km)
     _load("dq", d)(
-        (nq * NH * sp, 1, 1),
+        ((nq * sp + 2 * spe) * NH, 1, 1),
         (544, 1, 1),
         _rows(q, 128),
         _rows(k, 224),
@@ -809,13 +786,16 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
         int(A),
         int(nwin),
         int(sp),
+        int(spe),
     )
     nk = (N + 112 + 127) // 128
     sp = (
         2 if 2 * nk * NH <= num_sms(d) and A > 1 else 1
     )  # two sample halves add into dbias exactly (0 + a + b)
+    spe = _edge_split(nk * NH * sp, sp, A, d, cap=2) if slide else 0  # (<= 2: the moved windows' dbias adds exactly too)
+    spart = torch.empty(2 * A * NH * 64 * 128 + 4, device=q.device, dtype=torch.float32) if slide else None  # (+ n_real)
     _load("dkv", d)(
-        (nk * NH * sp, 1, 1),
+        ((nk * sp + 2 * spe) * NH, 1, 1),
         (512, 1, 1),
         _rows(q, 224),
         _rows(k, 128),
@@ -828,12 +808,16 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
         km,
         dkv,
         dbias,
+        spart,
         int(ldd),
         int(N),
         int(A),
         int(nwin),
         int(sp),
+        int(spe),
     )
+    if slide:
+        _slide_add(_load("slide_add", d), spart, dkv, ldd, DM, 2 * DM, N, A)
     return dbias
 
 
@@ -1144,8 +1128,7 @@ KERNELS_TF32 = {
     "pb_f32": ("lbias_tf32", "local_bias_fwd_f32", 0),
     "pb_b32": ("lbias_tf32", "local_bias_bwd_f32", 0),
     "pb_fin32": ("lbias_tf32", "local_bias_fin_f32", 0),
-    "slide_p32": ("lslide", "local_slide_bwd_prep_f32", 0),
-    "slide_b32": ("lslide", "local_slide_bwd_f32", 92416),
+    "slide_add32": ("lslide", "local_slide_add_f32", 0),
 }
 
 
@@ -1189,7 +1172,7 @@ def attn_fwd32(q, k, v, bias, kmask=None, slide=False):
     km = _u8(kmask)
     nq = (N + 127) // 128
     sp = max(1, min(A, num_sms(d) // (nq * NH)))
-    spe = _edge_split(nq * NH * sp, sp, d) if slide else 0
+    spe = _edge_split(nq * NH * sp, sp, A, d) if slide else 0
     if slide:
         km = _slide_mask(km)
     _load32("fwd32", d)(
@@ -1211,9 +1194,9 @@ def attn_fwd32(q, k, v, bias, kmask=None, slide=False):
     return o, lse
 
 
-def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None):
+def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None, slide=False):
     """The fp32 path's backward: dQ, dK, dV (fp32) into the column blocks ``cols`` = (q, k, v) of dp [A N, C] and dbias [4, nwin, 32, 128]
-    fp32 (summed over the samples). q, k, v fp32 [A, N, 128] views, do [A, N, 128] fp32, lse / dd [A, 4, N] fp32 (log2 units / D)."""
+    fp32 (summed over the samples). ``slide``: AlphaFold 3's slid key window (as ``attn_bwd``). q, k, v fp32 [A, N, 128] views, do [A, N, 128] fp32, lse / dd [A, 4, N] fp32 (log2 units / D)."""
     A, N, _ = q.shape
     nwin = nwindows(N)
     d = _dev(q)
@@ -1226,8 +1209,11 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None):
     sp = max(
         1, min(A, num_sms(d) // (nq * NH))
     )  # split the samples when there are few chunks
+    spe = _edge_split(nq * NH * sp, sp, A, d) if slide else 0
+    if slide:
+        km = _slide_mask(km)
     _load32("dq32", d)(
-        (nq * NH * sp, 1, 1),
+        ((nq * sp + 2 * spe) * NH, 1, 1),
         (544, 1, 1),
         _rows32(q, 128),
         _rows32(k, 224),
@@ -1244,13 +1230,16 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None):
         int(A),
         int(nwin),
         int(sp),
+        int(spe),
     )
     nk = (N + 112 + 127) // 128
     sp = (
         2 if 2 * nk * NH <= num_sms(d) and A > 1 else 1
     )  # two sample halves add into dbias exactly (0 + a + b)
+    spe = _edge_split(nk * NH * sp, sp, A, d, cap=2) if slide else 0
+    spart = torch.empty(2 * A * NH * 64 * 128 + 4, device=q.device, dtype=torch.float32) if slide else None  # (+ n_real)
     _load32("dkv32", d)(
-        (nk * NH * sp, 1, 1),
+        ((nk * sp + 2 * spe) * NH, 1, 1),
         (544, 1, 1),
         _rows32(q, 224),
         _rows32(q, 224, "128a32"),
@@ -1265,6 +1254,7 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None):
         km,
         dp,
         dbias,
+        spart,
         int(ldd),
         int(kcol),
         int(vcol),
@@ -1272,7 +1262,10 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None):
         int(A),
         int(nwin),
         int(sp),
+        int(spe),
     )
+    if slide:
+        _slide_add(_load32("slide_add32", d), spart, dp, ldd, kcol, vcol, N, A)
     return dbias
 
 

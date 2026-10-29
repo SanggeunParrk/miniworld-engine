@@ -99,8 +99,11 @@ void local_attn_dq_sm90(const __grid_constant__ CUtensorMap mq,
 // and -- after the quadrant's warps have read -- writes dS as packed bf16 over S (cols 0..111, out-of-band cells zero): the TMEM A operand
 // of dQ += dS K (B = the K tile, MN-major). Warps with band quarter < 2 drain 32 x 16 of dQ each through shared memory with a TMA store.
 // Warp 16 issues the TMA loads (3 stages, refilled when a sample's MMAs commit) and the MMAs; the window's bias (log2 domain, key mask folded in) stays in shared memory.
+// Slid key window (SPE > 0, slide.cuh): the last 8 SPE CTAs are edge CTAs (the moved windows' dQ over their slid keys); the others
+// skip the moved windows' dQ.
 // SPDX-License-Identifier: Apache-2.0
 #include "../sm100/sm100.cuh"
+#include "slide.cuh"
 using namespace s100;
 
 constexpr int NH = 4, DH = 32, WQ = 32, WK = 128, KOFF = 48, QN = 128, KN = 224, NST = 3;
@@ -122,19 +125,26 @@ extern "C" __global__ void __launch_bounds__(544, 1)
 local_attn_dq(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__ CUtensorMap tm_k, const __grid_constant__ CUtensorMap tm_v,
                  const __grid_constant__ CUtensorMap tm_do, const __grid_constant__ CUtensorMap tm_l, const __grid_constant__ CUtensorMap tm_d,
                  const __grid_constant__ CUtensorMap tm_o, const float* __restrict__ gbias, const uint8_t* __restrict__ kmask,
-                 int N, int A, int nwin, int SP) {
+                 int N, int A, int nwin, int SP, int SPE) {
   extern __shared__ __align__(1024) uint8_t sm[];
+  __shared__ int sred[32];
   const uint32_t su = smem_u32(sm);
   uint64_t* bars = reinterpret_cast<uint64_t*>(sm + O_BAR);
   uint64_t *full = bars, *sready = bars + NST, *tready = bars + NST + 1, *dready = bars + NST + 2, *empty = bars + NST + 3;
   uint32_t* tptr = reinterpret_cast<uint32_t*>(sm + O_BAR + 128);
   float* sbias = reinterpret_cast<float*>(sm + O_B);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int pair = blockIdx.x / SP, part = blockIdx.x - pair * SP;
-  const int jc = pair >> 2, h = pair & 3;
-  const int q0 = 128 * jc, kb = q0 - KOFF;
-  const int a_lo = (int)((long)A * part / SP), a_hi = (int)((long)A * (part + 1) / SP);
-  const int nit = a_hi - a_lo;
+  const int nmain = (int)gridDim.x - 2 * NH * SPE;                  // the slid window's edge CTAs come last (slide.cuh; SPE = 0: none)
+  const bool edge = (int)blockIdx.x >= nmain;
+  const int sp = edge ? SPE : SP, bx = (int)blockIdx.x - (edge ? nmain : 0);
+  const int pair = bx / sp, part = bx - pair * sp;
+  const int jc = pair >> 2, h = pair & 3;                            // (an edge CTA: jc = its group)
+  const int nr = SPE > 0 ? slide_nreal(kmask, N, sred) : N;
+  int wf = 0, kbe = 0;
+  const bool live = !edge || slide_group(jc, nr, wf, kbe);
+  const int q0 = edge ? 32 * wf : 128 * jc, kb = edge ? kbe : q0 - KOFF;
+  const int a_lo = (int)((long)A * part / sp), a_hi = (int)((long)A * (part + 1) / sp);
+  const int nit = live ? a_hi - a_lo : 0;
   const bool ctl = warp == 16;                                       // TMA + MMA warp (no TMEM lanes)
 
   if (tid == 0) {
@@ -145,9 +155,11 @@ local_attn_dq(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__ 
   }
   if (warp == 0) tmem_alloc(smem_u32(tptr), 512);
   const int qd = warp & 3, qt = warp >> 2;
-  const int wq = 4 * jc + qd;                                        // this quadrant's window; lane = query qq of it
+  const int wq = (q0 >> 5) + qd;                                     // this quadrant's window; lane = query qq of it
+  const int qdb = edge ? 0 : qd;                                     // the window's first band cell (an edge CTA: its keys start the range)
+  const bool keep = SPE == 0 || (edge ? slide_mine(jc, wq, nr) : !slide_moved(wq, nr));   // this CTA writes the window's dQ
   if (!ctl) {                                                                  // lane = key offset jj (coalesced rows of the bias), loop over the queries
-    const int key = 32 * wq - KOFF + 32 * qt + lane;
+    const int key = kb + 32 * qdb + 32 * qt + lane;
     const bool kok = key >= 0 && key < N && (kmask == nullptr || kmask[key]);
     const float* src = gbias + (((size_t)h * nwin + (wq < nwin ? wq : 0)) * WQ) * WK + 32 * qt + lane;
 #pragma unroll 8
@@ -216,7 +228,7 @@ local_attn_dq(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__ 
   } else {
 
   auto drain = [&](int itd) {                                        // warps with qt < 2: 32 queries x 16 columns of dQ
-    if (qt >= 2) return;
+    if (qt >= 2 || !keep) return;
     uint32_t v[16];
     tmem_ld16(tm + ((uint32_t)(32 * qd) << 16) + C_DQ + 16 * qt, v);
     tmem_wait_ld();
@@ -241,7 +253,7 @@ local_attn_dq(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__ 
   };
 
   const uint32_t tl = tm + ((uint32_t)(32 * qd) << 16);
-  const int x0 = 32 * qd + 32 * qt;                                  // chunk-relative key column of the band quarter
+  const int x0 = 32 * qdb + 32 * qt;                                 // chunk-relative key column of the band quarter
   const float* sb = sbias + warp * 32 * BSTR + lane;
   for (int it = 0; it < nit; ++it) {
     const int s = it % NST;
@@ -268,7 +280,7 @@ local_attn_dq(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__ 
     named_bar_sync(1 + qd, 128);
     tc_fence_after();
     tmem_st16(tl + C_PS + x0 / 2, dw);
-    if (qt < 3) tmem_st16z(tl + C_PS + (qt < qd ? 16 * qt : 16 * qt + 64));
+    if (qt < 3) tmem_st16z(tl + C_PS + (qt < qdb ? 16 * qt : 16 * qt + 64));
     tmem_wait_st();
     tc_fence_before(); __syncwarp();
     if (lane == 0) mbar_arrive(tready);
