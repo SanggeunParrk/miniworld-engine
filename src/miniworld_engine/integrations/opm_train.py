@@ -45,8 +45,9 @@ CM, CH, CZ = 64, 32, 128
 # MiniWorld's run the wide composition: persistent TMA prologue at d_msa 64 / 128, cuBLAS contraction, the c_z-sliced epilogue.
 SHAPES = ((64, 128), (128, 256), (128, 384))
 # sm_100a: MiniWorld's width on csrc/sm100/opm_sm100.cu; every other (d_msa, d_pair) pair of these and RoseTTAFold3's projection biases on
-# csrc/sm100/opm_wide_sm100.cu (the same stages: d_msa 128 prologue / prologue backward, c_z cut into 128-wide slices)
-SM100_D_MSA, SM100_D_PAIR = (64, 128), (128, 256, 384)
+# csrc/sm100/opm_wide_sm100.cu (the same stages: d_msa 128 / 256 prologue / prologue backward, c_z cut into 128-wide slices); d_msa 256 /
+# d_pair 512 is IntelliFold-v2's
+SM100_D_MSA, SM100_D_PAIR = (64, 128, 256), (128, 256, 384, 512)
 _EXT: dict[str, Any] = {}
 
 
