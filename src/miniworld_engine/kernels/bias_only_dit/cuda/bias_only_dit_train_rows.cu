@@ -742,7 +742,7 @@ __device__ __forceinline__ float colsum_rg(const float* base, long stride, int n
   return ((t[0] + t[1]) + (t[2] + t[3])) + ((t[4] + t[5]) + (t[6] + t[7]));
 }
 // one finalize job (0 .. FIN_JOBS - 1) by a block of RG warps: 4 x 24 bias-sum column groups, 2 x 12 cond-LN column groups, CP dWf
-// columns; RG row groups (16 in finalize_k's 512 threads, 8 in pair_bias_bwd_fin_k's 256)
+// columns; RG row groups (32 in finalize_k's 1024 threads, 8 in pair_bias_bwd_fin_k's 256)
 // jobs: 96 bias-sum groups, 2 d_cond / 32 cond-LN column groups, CP dWf columns (CP the pair width)
 __host__ __device__ constexpr int fin_jobs(int dc, int cp = 128) { return 96 + dc / 16 + cp; }
 template <int NH, typename OT, typename NT, int RG, int U = 8>
@@ -783,11 +783,13 @@ __device__ __forceinline__ void finalize_job(int x, const float* __restrict__ PA
   }
   __syncthreads();                                                      // red free for the block's next job
 }
+// 32 row groups of 16 loads in flight per job (1024 threads): the column sums run over a few hundred to a few thousand partial rows,
+// so a job is L2-latency bound; 16 x 8 loads in flight took 7.3 / 12.9 us at A48 L384 / L768 (graph, alone)
 template <int NH, typename OT, typename NT>
-__global__ void __launch_bounds__(512) finalize_k(const float* __restrict__ PART, long prow, const Counts N, const float* __restrict__ PW,
+__global__ void __launch_bounds__(1024) finalize_k(const float* __restrict__ PART, long prow, const Counts N, const float* __restrict__ PW,
     const float* __restrict__ PWF, int nwf, const float* __restrict__ WB, const float* __restrict__ WP, OT* __restrict__ OUT,
     NT* __restrict__ NOUT, int DC, int CPW) {
-  finalize_job<NH, OT, NT, 16>(blockIdx.x, PART, prow, N, PW, PWF, nwf, WB, WP, OUT, NOUT, DC, CPW);
+  finalize_job<NH, OT, NT, 32, 16>(blockIdx.x, PART, prow, N, PW, PWF, nwf, WB, WP, OUT, NOUT, DC, CPW);
 }
 
 // pair_bias_bwd + finalize in ONE launch (settings.bias_only_dit_bwd_pbfin): the persistent pair_bias_bwd blocks (grid <= the
@@ -1071,8 +1073,8 @@ void finalize(at::Tensor part, std::vector<int64_t> n, at::Tensor pw, at::Tensor
   TDT_DISPATCH(out.scalar_type(), OT, [&] {
     TDT_DISPATCH(nout.scalar_type(), NT, [&] {
       auto k = nh == 12 ? finalize_k<12, OT, NT> : nh == 16 ? finalize_k<16, OT, NT> : finalize_k<24, OT, NT>;
-      k<<<fin_jobs(DC, (int)cp), 512, 0, S()>>>(CP<float>(part), part.size(1), c, CP<float>(pw), CP<float>(pwf), (int)nwf, CP<float>(wb),
-                                                CP<float>(wp), P<OT>(out), P<NT>(nout), DC, (int)cp);
+      k<<<fin_jobs(DC, (int)cp), 1024, 0, S()>>>(CP<float>(part), part.size(1), c, CP<float>(pw), CP<float>(pwf), (int)nwf, CP<float>(wb),
+                                                 CP<float>(wp), P<OT>(out), P<NT>(nout), DC, (int)cp);
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
