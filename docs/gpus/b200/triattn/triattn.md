@@ -972,3 +972,47 @@ Heads of 96 channels still run zero-padded to 128 (4/3 of the head-dim-128 core'
 kernels re-planned (K = 96 in QK^T as one 64-column half and one 32-column half, N = 96 in PV and in the gradient products, the TMEM column
 plan and the delta quarters), not a change that falls out of this one; not done.
 
+
+## d_pair 128 training step · dropout and the core's backward (2026-10-30)
+
+Per-kernel time of the training step at L 768 (dropout 0.25, `torch.profiler`, node 2 GPU 6 with the utilisation filler), µs, before ->
+after: `tri_gate_bwd` 259.4 -> 171.5, `tri_tail` 158.6 -> 134.5, `triattn_bwd_q` 941.8 -> 906-922; the rest unchanged (`triattn_bwd_kv`
+915, `triattn_fwd` 657-671, `tri_head_bwd` 201, `tri_wgrad` 173, `tri_front` 147). L 384: 69.8 -> 50.7, 46.9 -> 40.6, 138.1 -> 134.6.
+
+- `tri_gate_bwd` scaled dy by the dropout at the start of its own tile, after the seed store had read it: the per-thread scale loads,
+  the in-place scale and the du GEMM ran in series with every tile (1.55x the dropout-free kernel). dy | o now load a tile ahead of
+  g, and the grad warps scale the next tile's dy (scale rows loaded at the top of the previous tile) while this tile's do / dg stores
+  drain, so its du GEMM follows this tile's dWo GEMM: within 3 % of the dropout-free time.
+- `tri_tail` loads the dropout scale a 32-channel chunk ahead (the first chunk before the wait for the tile's GEMM). Issuing the next
+  chunk's loads at the top of each chunk (a register copy of the current one, 128 registers) was 1.4x slower; the remaining ~35 µs at
+  L 768 over the dropout-free tail is the L2 latency of those loads in a four-warp drain (a TMA copy of the scale tile does not fit next
+  to the g | o ring, x and the staging: 209 of 227 KiB).
+- `triattn_bwd_q`'s MMA warp now runs converged with predicated tcgen05 ops and incremental slot / phase counters (an `if (elect_one())`
+  block per MMA group took ~400 clk to issue a stage's dQ GEMMs). The same change in the forward added local-memory traffic at the
+  128-register cap and gained nothing: not kept.
+
+Module training step, CUDA graph, bf16-mixed, last 11 keys masked, two interleaved runs against 50cb977e, ms:
+
+| case | before | after | × |
+|---|---|---|---|
+| L 384 starting | 0.682 | 0.654 | 1.04 |
+| L 731 starting | 3.499 | 3.371 | 1.04 |
+| L 768 starting | 3.501 | 3.365 | 1.04 |
+| L 768 ending | 3.530 | 3.400 | 1.04 |
+
+Inference is unchanged (L 384 0.171, L 768 0.909 ms). What the profiling showed about the core's backward (where 1.8 of the 3.4 ms are;
+Nsight Compute is not available on these nodes now: `gcsudo` refuses `ncu`, so these come from probe builds and clock64 timelines):
+
+- `triattn_bwd_kv` (L 768, 915 µs, the ex2 floor ~400): removing the softmax math leaves 746 µs; removing the TMEM loads, the TMEM stores
+  or the bias^T reads alone changes nothing; all four removed 678, without the bias^T loads 650, without the Q / dO loads too 422. The
+  grad groups are busy ~1800 clk a 64-query stage, the S^T issue waits for the group's release, and the MMA skeleton alone (ss S^T /
+  dP^T with K_r / V_r read from shared memory each stage) is already ~the ex2 floor: a faster key side needs fewer shared-memory operand
+  bytes per stage (K_r / V_r as TMEM operands, for which the 512 columns have no room in this plan), not cheaper math.
+- `triattn_bwd_q` (L 768): a stage is ~650 clk of grad-warp work, and the two S buffers make the chain grad(y) -> dQ(y) GEMM -> S / dP
+  (y + 2) -> sf ~850 clk, so each buffer turns in ~1550 clk; the pass between key sub-tiles (dbias partial to shared memory, the reduce,
+  the bias copy to registers) was ~800-1500 clk and the task boundary (dQ drain, the next task's Q / dO copy into TMEM) ~5000 clk.
+  Moving the dbias reduce-adds to a dedicated warp with two slots per group, and reading the bias per stage instead of per sub-tile,
+  shortened that pass but not the kernel (941 / 907 µs): the S-buffer round trip paces it. A third S buffer needs 128 TMEM columns
+  (Q / dO A operands or two dQ rows); not done.
+- dbias stays a fp32 reduce-add (dx / dγ / dβ / dW_b run-to-run within 1e-5 relative); a deterministic dbias would need the partials of
+  every row group stored and summed in order (1.8 GB at L 768), not pursued.
