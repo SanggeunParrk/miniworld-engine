@@ -352,7 +352,7 @@ def _sx_forward(k, x, gamma, beta, wa, wb, ws, eps, save, out, rstd, c1, cast=No
         f"sx_expand{ch}",
         "transition_sx_expand",
         tiles * (h // ch),
-        (k.tmap(xn, d, m, 64, 128), k.tmap(wa, d, h, 64, ch), k.tmap(wb, d, h, 64, ch), hid, a, b, int(save)),
+        (k.tmap(xn, d, m, 64, 128), k.tmap(wa, d, h, 64, ch), k.tmap(wb, d, h, 64, ch), hid, a, b, int(save), int(cast is None)),
         block=384,
         cluster=1,
         pdl=True,
