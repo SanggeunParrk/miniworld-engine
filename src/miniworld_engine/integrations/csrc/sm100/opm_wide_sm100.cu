@@ -559,7 +559,9 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(192, 1) opm_wepilogu
 }
 
 // ---------------------------------------------------------------------------------------------
-// DGRAD at c_z = CZ on CTA PAIRS: dO[(i,c),(j,e)] = (sum_z dz[i,j,z] Wo[z,(c,e)]) / n[i,j] in the grouped layout, dz/n, dbias = sum dz.
+// DGRAD at c_z = CZ on CTA PAIRS: dO[(i,c),(j,e)] = (sum_z dz[i,j,z] Wo[z,(c,e)]) / n[i,j] in the grouped layout, dz/n, dbias = sum dz
+// (with the division after the projection, `after`, dbias = sum dz/n: the fp32 products before their bf16 rounding; it was a cuBLAS
+// GEMV over the bf16 dz/n).
 // A cluster of two CTAs takes two neighbouring 128-pair tiles; per 256-column chunk of dO one cta_group::2 product M 256 (both CTAs'
 // pairs) x N 256 (each CTA lands HALF of the chunk's Wo columns, 128 n) x K = c_z, in K = 128 stages (8 MMAs a wait), into one of two
 // 256-column TMEM accumulators (all 512 columns).  N 256: at N 128 (the previous chunk) the MMAs ran at ~0.95 PF with every load and
@@ -617,7 +619,8 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
     const __grid_constant__ CUtensorMap domap,    // dO as (32 e, NJ j, 32 c, NI i), box (32, BJ, 4, BI), 64B swizzle
     const __grid_constant__ CUtensorMap dzpmap,   // dz/n [NI][NJ][CZ], as dzmap
     const float* __restrict__ NORM, float* __restrict__ DBO,   // the mask counts [NI][NJ] (clamped >= 1); the dbias partials [grid][CZ]
-    const int* __restrict__ ASYM) {               // chain ids [N] (the interchain mask), or nullptr
+    const int* __restrict__ ASYM,                 // chain ids [N] (the interchain mask), or nullptr
+    int after) {                                  // dbias = sum dz / n (the division after the projection) instead of sum dz
   using C = WDg<CZ>;
   constexpr int BJ = C::BJ, BI = C::BI, NP = C::NP, NC = C::NC, NCK = C::NCK, NZB = C::NZB, UNIT = C::UNIT, NB = C::NB;
   constexpr int WOS = C::WOS, NWO = C::NWO, OUT = C::OUT, NOUT = C::NOUT, NACC = C::NACC;
@@ -755,7 +758,7 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
         named_sync(1, 256);
         __nv_bfloat16* sp = sOUT + (ring % NOUT) * OUT;   // the unit's layout: [2 halves][128 pairs][64 z], 128B swizzle
         float zv[64];
-        const float keep = same ? 1.f : 0.f;
+        const float keep = after ? inv : (same ? 1.f : 0.f);   // dbias: dz (0 for a pair of two chains), or dz/n
 #pragma unroll
         for (int c8 = 0; c8 < 8; ++c8) {
           uint4 u = row[c8];
@@ -2151,7 +2154,7 @@ torch::Tensor opm_wepilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor w
 
 template <int CZ>
 static std::vector<torch::Tensor> dgrad_launch(torch::Tensor& dz, torch::Tensor& norm, torch::Tensor& wo, int64_t ni, int64_t nj, int64_t grad_bf16,
-                                               const int* asym) {
+                                               const int* asym, int after) {
   using C = WDg<CZ>;
   TORCH_CHECK(ni % C::BI == 0 && nj % (2 * C::BJ) == 0, "the kernel tiles ", C::BI, " x ", 2 * C::BJ, " tokens per CTA pair");
   auto dO = torch::empty({ni * CH, nj * CH}, dz.options());
@@ -2180,24 +2183,25 @@ static std::vector<torch::Tensor> dgrad_launch(torch::Tensor& dz, torch::Tensor&
   CUtensorMap dzpm = make_map<4>(dzp.data_ptr(), {64, (uint64_t)nj, (uint64_t)(CZ / 64), (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ},
                                  {64, (uint32_t)C::BJ, 1, (uint32_t)C::BI}, CU_TENSOR_MAP_SWIZZLE_128B, "dz/n");
   opm_wdgrad_sm100<CZ><<<2 * clusters, C::THREADS, C::SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, npairs, dzm, wom, dom,
-      dzpm, norm.data_ptr<float>(), dbo_part.data_ptr<float>(), asym);
+      dzpm, norm.data_ptr<float>(), dbo_part.data_ptr<float>(), asym, after);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dO, dzp, colsum(dbo_part, grad_bf16 ? torch::kBFloat16 : torch::kFloat32)};
 }
 
 // dz [ni, nj, CZ] bf16 (CZ 128 / 256 / 384 / 512), norm fp32 [ni, nj], wo bf16 [CZ, 1024] -> [dO [ni*32, nj*32], dz/n [ni, nj, CZ], dbias [CZ]]
+// (dbias = sum dz, or sum dz/n with `after`)
 std::vector<torch::Tensor> opm_wdgrad(torch::Tensor dz, torch::Tensor norm, torch::Tensor wo, int64_t ni, int64_t nj, int64_t grad_bf16,
-                                      c10::optional<torch::Tensor> asym) {
+                                      c10::optional<torch::Tensor> asym, int64_t after) {
   TORCH_CHECK(wo.scalar_type() == torch::kBFloat16 && wo.is_contiguous() && wo.dim() == 2 && wo.size(1) == NCH, "wo: bf16 [c_z, 1024]");
   const long CZ = wo.size(0);
   TORCH_CHECK(dz.is_cuda() && dz.scalar_type() == torch::kBFloat16 && dz.is_contiguous() && dz.numel() == ni * nj * CZ, "dz: contiguous bf16 [ni, nj, c_z]");
   TORCH_CHECK(norm.scalar_type() == torch::kFloat32 && norm.is_contiguous() && norm.numel() == ni * nj, "norm: fp32 [ni, nj] mask counts");
   const int* ap = asym_ptr(asym, std::max(ni, nj));
-  if (CZ == 128) return dgrad_launch<128>(dz, norm, wo, ni, nj, grad_bf16, ap);
-  if (CZ == 256) return dgrad_launch<256>(dz, norm, wo, ni, nj, grad_bf16, ap);
-  if (CZ == 512) return dgrad_launch<512>(dz, norm, wo, ni, nj, grad_bf16, ap);
+  if (CZ == 128) return dgrad_launch<128>(dz, norm, wo, ni, nj, grad_bf16, ap, (int)after);
+  if (CZ == 256) return dgrad_launch<256>(dz, norm, wo, ni, nj, grad_bf16, ap, (int)after);
+  if (CZ == 512) return dgrad_launch<512>(dz, norm, wo, ni, nj, grad_bf16, ap, (int)after);
   TORCH_CHECK(CZ == 384, "c_z 128, 256, 384 or 512");
-  return dgrad_launch<384>(dz, norm, wo, ni, nj, grad_bf16, ap);
+  return dgrad_launch<384>(dz, norm, wo, ni, nj, grad_bf16, ap, (int)after);
 }
 
 template <int CZ>
@@ -2533,7 +2537,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_wepilogue", &opm_wepilogue, "sm100 OPM epilogue at c_z 128 / 256 / 384 / 512 on CTA pairs", py::arg("O"), py::arg("norm"), py::arg("wo"),
         py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("asym") = py::none());
   m.def("opm_wdgrad", &opm_wdgrad, "sm100 OPM dO at c_z 128 / 256 / 384 / 512", py::arg("dz"), py::arg("norm"), py::arg("wo"), py::arg("ni"),
-        py::arg("nj"), py::arg("grad_bf16") = 0, py::arg("asym") = py::none());
+        py::arg("nj"), py::arg("grad_bf16") = 0, py::arg("asym") = py::none(), py::arg("after") = 0);
   m.def("opm_wdwo", &opm_wdwo, "sm100 OPM dWo at c_z 256 / 384", py::arg("dzp"), py::arg("O"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0, py::arg("ctas") = 0);
   m.def("opm_wprologue_bwd", &opm_wprologue_bwd, "sm100 OPM prologue backward at d_msa 128 / 256");
   m.def("opm_chai_prologue", &opm_chai_prologue, "sm100 Chai-1 OPM prologue: LN + both projections + mask, group-major");
