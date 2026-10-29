@@ -27,9 +27,10 @@ def width(heads: int, d: int = 384) -> int:
     return heads * GEOMETRY[(heads, d)][1]
 
 
-def acc_n(heads: int, d: int = 384) -> int:
-    """The backward's fp32 accumulator: dlnw [d] | dlnb [d] | dbq [W] | dWf [heads, 128] | per-head dbias sums [heads]."""
-    return 2 * d + width(heads, d) + heads * DP + heads
+def acc_n(heads: int, d: int = 384, dp: int = DP) -> int:
+    """The backward's fp32 accumulator: dlnw [d] | dlnb [d] | dbq [W] | dWf [heads, dp] | per-head dbias sums [heads] (dp: d_pair,
+    128, or 256 with 16 heads: Chai-1)."""
+    return 2 * d + width(heads, d) + heads * dp + heads
 
 
 def ext(shadow: bool = False):
@@ -87,14 +88,14 @@ def _resolve_core(key: str) -> tuple[int, int]:
     return handle, int(k.smem)
 
 
-def _fake_train_fwd(single, pair, mask, params, eps_s, eps_p, ns):
+def _fake_train_fwd(single, pair, mask, params, eps_s, eps_p, ns, gate_bias=0.0):
     S, L, D = single.shape
-    H = params[9].shape[0]
+    H, dp = params[9].shape
     W, M, bf, f32 = width(H, D), S * L, torch.bfloat16, torch.float32
     e = single.new_empty
     return [e(single.shape), e((M, D), dtype=bf), e((M, 2), dtype=f32), e((M, 4 * W), dtype=bf), e((S * H, L, L), dtype=bf),
-            e((M, W), dtype=f32), e((S * H, L), dtype=f32), e((M, W), dtype=bf), e((H, DP), dtype=bf), e((4 * W, D), dtype=bf),
-            e((D, W), dtype=bf), e((H, DP), dtype=bf)]
+            e((M, W), dtype=f32), e((S * H, L), dtype=f32), e((M, W), dtype=bf), e((H, dp), dtype=bf), e((4 * W, D), dtype=bf),
+            e((D, W), dtype=bf), e((H, dp), dtype=bf)]
 
 
 def _fake_train_bwd(single, pair, mask, params, saved, dy, eps_p, nq):
@@ -130,18 +131,18 @@ def pair_bias(pair2d: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None,
 
 def pair_bias_bwd(pair2d: torch.Tensor, dbias: torch.Tensor, wf: torch.Tensor, L: int, eps: float, acc: torch.Tensor | None = None,
                   d: int = 384):
-    """(dpair [L L, 128] bf16, dWf [H, 128] fp32, per-head dbias sums [H]) of ``pair_bias`` (without the mask: masked keys
-    carry zero dbias). dWf and the sums are added into ``acc`` (``acc_n(H)`` floats, zeroed by the caller) when given; the
-    returned dWf / sums are views of it."""
-    heads = wf.shape[0]
+    """(dpair [L L, d_pair] bf16, dWf [H, d_pair] fp32, per-head dbias sums [H]) of ``pair_bias`` (without the mask: masked keys
+    carry zero dbias); d_pair 128, or 256 with 16 heads (read off ``wf``). dWf and the sums are added into ``acc`` (``acc_n(H, d,
+    d_pair)`` floats, zeroed by the caller) when given; the returned dWf / sums are views of it."""
+    heads, dp = wf.shape
     if acc is None:
-        acc = torch.zeros(acc_n(heads, d), device=pair2d.device)
+        acc = torch.zeros(acc_n(heads, d, dp), device=pair2d.device)
     dz = torch.empty_like(pair2d)
     ext().pair_bias_bwd(pair2d, dbias.contiguous(), wf, dz, acc, int(L), float(eps), int(d))
     if acc.ndim == 2:
         return dz, None, None  # Hopper block partials are reduced by finalize.
     o = 2 * d + width(heads, d)
-    return dz, acc[o:o + heads * DP].view(heads, DP), acc[o + heads * DP:]
+    return dz, acc[o:o + heads * dp].view(heads, dp), acc[o + heads * dp:]
 
 
 def pair_bias_stats(pair2d: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None, L: int, eps: float, neg: float):
