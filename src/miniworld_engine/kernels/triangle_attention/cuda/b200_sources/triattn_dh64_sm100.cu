@@ -554,6 +554,7 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd64_kv(
           }
           tmem_wait_ld();
           if (c == 1) {                             // both chunks loaded: the group's S^T buffer takes its next stage
+            fence_proxy_async();                    // the bias^T tile's reads, before its release: an arrive alone does not wait for outstanding LDS
             tc_fence_before();
             __syncwarp();
             if (lane == 0) { arrive(A(se + gi)); arrive(A(be + bs)); }
@@ -578,7 +579,10 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd64_kv(
               dk[i >> 1] = pack2(ds.x, ds.y);
             }
           }
-          if (c == 0 && js >= 1) wait(A(ge + gi), (js - 1) & 1);   // this group's previous gradient GEMMs read the P^T | dS^T buffer
+          if (c == 0 && js >= 1) {                  // this group's previous gradient GEMMs read the P^T | dS^T buffer
+            wait(A(ge + gi), (js - 1) & 1);
+            tc_fence_after();
+          }
           tmem_st8(tP + c * 16, pk); tmem_st8(tP + c * 16 + 8, pk + 8);
           tmem_st8(tP + 32 + c * 16, dk); tmem_st8(tP + 32 + c * 16 + 8, dk + 8);
         }
@@ -798,6 +802,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd64_q(
           lse[r] = sLD[r * QB_LD + row];
           dl[r] = sLD[r * QB_LD + BM + row] + sLD[r * QB_LD + 2 * BM + row];
         }
+        fence_proxy_async();                        // the staging's reads (Q / dO, lse / delta), before its release: an arrive alone does not wait for outstanding LDS
         __syncwarp();
         if (lane == 0) arrive(A(ae));
         tmem_wait_st();
@@ -824,6 +829,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd64_q(
 #pragma unroll
           for (int i = 0; i < 32; ++i) dacc[i] = 0.f;
         }
+        fence_proxy_async();                        // the bias tile's reads, before its release: an arrive alone does not wait for outstanding LDS
         __syncwarp();
         if (lane == 0) arrive(A(be + bs));
 #pragma unroll

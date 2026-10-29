@@ -39,14 +39,14 @@ def _rows_per_task(length: int) -> int:
 @functools.lru_cache(maxsize=None)
 def _core(rows: int = 4):
     ensure_cuda_home()
-    return load_extension(name=f"triattn_b200_core_r{rows}_v13", sources=[str(_SRC / "triattn_sm100.cu")],
+    return load_extension(name=f"triattn_b200_core_r{rows}_v14", sources=[str(_SRC / "triattn_sm100.cu")],
                           extra_cuda_cflags=[*_flags(), f"-DTA_R={rows}"], verbose=False)
 
 
 @functools.lru_cache(maxsize=1)
 def _mod():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_mod_v8", sources=[str(_SRC / "triattn_mod_sm100.cu")],
+    return load_extension(name="triattn_b200_mod_v9", sources=[str(_SRC / "triattn_mod_sm100.cu")],
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
@@ -277,14 +277,14 @@ def _wide():
 @functools.lru_cache(maxsize=1)
 def _core64():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_dh64_v2", sources=[str(_SRC / "triattn_dh64_sm100.cu")],
+    return load_extension(name="triattn_b200_dh64_v3", sources=[str(_SRC / "triattn_dh64_sm100.cu")],
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
 @functools.lru_cache(maxsize=1)
 def _core128():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_dh128_v1", sources=[str(_SRC / "triattn_dh128_sm100.cu")],
+    return load_extension(name="triattn_b200_dh128_v2", sources=[str(_SRC / "triattn_dh128_sm100.cu")],
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
