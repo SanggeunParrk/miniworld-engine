@@ -1,7 +1,8 @@
 // PWA (MSAPairWeightedAveraging) value side on B200 (sm_100a) at the widths the MiniWorld kernels (pwa_sm100.cu: d_msa 64, 8 x 32) do not
 // cover: d_msa PW_D in {64, 128}, 8 heads x PW_C in {8, 16, 32} value channels (AF3 / Protenix-v1 64 / 8 x 8, Protenix-v2 / OpenDDE
-// 128 / 8 x 8, ESMFold2 128 / 8 x 16, Chai-1 64 / 8 x 32 with d_pair 256), one build per (PW_D, PW_C). The pair side is pwa_sm100.cu's
-// pair_fwd (d_pair 128 / 256 / 384, N <= 2048), the contraction o = w . v is cuBLAS bmm, as on the MiniWorld width.
+// 128 / 8 x 8, ESMFold2 128 / 8 x 16, Chai-1 64 / 8 x 32 with d_pair 256), and IntelliFold-v2's 256 / 8 x 32 (inference: its projection
+// weights, 128 KiB each, stream through a shared-memory ring of k-blocks -- WS below), one build per (PW_D, PW_C). The pair side is
+// pwa_sm100.cu's pair_fwd (d_pair 128 / 256 / 384 / 512, N <= 2048), the contraction o = w . v is cuBLAS bmm, as on the MiniWorld width.
 //
 //   ln_vg_w:     y = LN(m), v = y . Wv^T head-major [H, N, S*C]          (tile = one token x 128 MSA rows)
 //   gate_out_w:  out = m + drop(bf16(sum_h (sigmoid(y Wg_h^T) * o_h) . Wo_h))   (y recomputed; tile = 128 tokens of one MSA row)
@@ -24,11 +25,13 @@ using namespace sm100;
 
 // the backward kernels (glue_w, dvb_w) are built where the value width fits under d_msa: AF3 64 / 8 x 8, Protenix-v2 / OpenDDE 128 / 8 x 8,
 // ESMFold2 128 / 8 x 16 (Chai-1's 64 / 8 x 32 is MiniWorld's MSA width: it trains on pwa_sm100.cu)
-#define PW_BWD (8 * PW_C <= PW_D)
+#define PW_BWD (8 * PW_C <= PW_D && PW_D <= 128)
 
 namespace {
 constexpr int H = 8, D = PW_D, C = PW_C, HC = H * C, KB = D / 64;
-static_assert(D == 64 || D == 128, "d_msa 64 or 128");
+static_assert(D == 64 || D == 128 || (D == 256 && C == 32), "d_msa 64 or 128, or 256 x 32 (IntelliFold-v2)");
+// d_msa 256: a projection's weights (128 KiB) do not fit next to the 64 KiB tiles: they stream through a ring of k-blocks
+constexpr bool WS = D * HC * 2 > 64 * 1024;
 static_assert(C == 8 || C == 16 || C == 32, "d_hidden 8, 16 or 32");
 
 // a [rows][C] bf16 tile (C * 2 bytes a row) as TMA lands it: the 16-byte chunk c8 of row r
@@ -54,8 +57,30 @@ __device__ __forceinline__ uint32_t gate_mul_bf16x2(float x0, float x1, uint32_t
   return u;
 }
 
+// gamma / beta of channels d0 .. d0 + 7: from shared memory (sLN = gamma [D] | beta [D], fp32), or -- the weight-streaming build, whose
+// shared memory is full -- from global through L1 (LT_: fp32 or bf16; the same values)
+struct LnShared {
+  const float* s;
+  __device__ __forceinline__ void get(int d0, float4& g0, float4& g1, float4& b0, float4& b1) const {
+    g0 = *reinterpret_cast<const float4*>(s + d0); g1 = *reinterpret_cast<const float4*>(s + d0 + 4);
+    b0 = *reinterpret_cast<const float4*>(s + D + d0); b1 = *reinterpret_cast<const float4*>(s + D + d0 + 4);
+  }
+};
+__device__ __forceinline__ void ln_ld8(const float* p, float4& a, float4& b) { a = __ldg(reinterpret_cast<const float4*>(p)); b = __ldg(reinterpret_cast<const float4*>(p) + 1); }
+__device__ __forceinline__ void ln_ld8(const __nv_bfloat16* p, float4& a, float4& b) {
+  const uint4 u = __ldg(reinterpret_cast<const uint4*>(p));
+  const float2 x0 = bf2f(u.x), x1 = bf2f(u.y), x2 = bf2f(u.z), x3 = bf2f(u.w);
+  a = make_float4(x0.x, x0.y, x1.x, x1.y); b = make_float4(x2.x, x2.y, x3.x, x3.y);
+}
+template <typename LT_>
+struct LnGlobal {
+  const LT_* w; const LT_* b;
+  __device__ __forceinline__ void get(int d0, float4& g0, float4& g1, float4& b0, float4& b1) const { ln_ld8(w + d0, g0, g1); ln_ld8(b + d0, b0, b1); }
+};
+
 // y = LN(x) of row r of a [KB][128][64] 128B-swizzled bf16 tile, in place: one thread, three passes (mean, centred variance, write)
-__device__ __forceinline__ void ln_row(__nv_bfloat16* tile, int r, const float* sLN, float eps) {
+template <typename GB>
+__device__ __forceinline__ void ln_row(__nv_bfloat16* tile, int r, const GB& gb, float eps) {
   float2 s2 = make_float2(0.f, 0.f);
 #pragma unroll 1
   for (int kb = 0; kb < KB; ++kb)
@@ -84,8 +109,8 @@ __device__ __forceinline__ void ln_row(__nv_bfloat16* tile, int r, const float* 
       uint4* p = reinterpret_cast<uint4*>(tile + kb * 128 * 64 + r * 64 + ((c8 ^ (r & 7)) << 3));
       const uint4 u = *p;
       const int d0 = kb * 64 + c8 * 8;
-      const float4 g0 = *reinterpret_cast<const float4*>(sLN + d0), g1 = *reinterpret_cast<const float4*>(sLN + d0 + 4);
-      const float4 b0 = *reinterpret_cast<const float4*>(sLN + D + d0), b1 = *reinterpret_cast<const float4*>(sLN + D + d0 + 4);
+      float4 g0, g1, b0, b1;
+      gb.get(d0, g0, g1, b0, b1);
       const float2 y0 = fma2(mul2(add2(bf2f(u.x), nm), rs), make_float2(g0.x, g0.y), make_float2(b0.x, b0.y));
       const float2 y1 = fma2(mul2(add2(bf2f(u.y), nm), rs), make_float2(g0.z, g0.w), make_float2(b0.z, b0.w));
       const float2 y2 = fma2(mul2(add2(bf2f(u.z), nm), rs), make_float2(g1.x, g1.y), make_float2(b1.x, b1.y));
@@ -102,12 +127,14 @@ __device__ __forceinline__ void ln_row(__nv_bfloat16* tile, int r, const float* 
 // warps 6-9 drain it (TMEM lane = s): a thread holds its row's HC values = eight C-wide head rows, written into eight [128 s][C]
 // tiles -- the head-major v boxes -- and stored by TMA.
 namespace lvw {
-constexpr int BS = 128, NST = 3;
+constexpr int BS = 128, NST = WS ? 1 : 3, VB = WS ? 1 : 2;
 constexpr int XT = BS * D;                      // x / y tile [KB][128][64]
-constexpr int VT = H * BS * C;                  // v staging [8 heads][128 s][C]
-constexpr int WT = HC * D;                      // Wv [KB][HC][64]
+constexpr int VT = H * BS * C;                  // v staging [8 heads][128 s][C] (VB of them)
+constexpr int WT = HC * D;                      // Wv [KB][HC][64], or (WS) a ring of WRS k-blocks [HC][64]
+constexpr int WRS = 2;
+constexpr int WBUF = WS ? WRS * HC * 64 : WT;
 constexpr int THREADS = 320;
-constexpr int SMEM = 1024 + (NST * XT + 2 * VT + WT) * 2 + 2 * D * 4 + 512;
+constexpr int SMEM = 1024 + (NST * XT + VB * VT + WBUF) * 2 + 2 * D * 4 + 512;
 constexpr uint32_t IDESC = idesc_bf16(128, HC);
 constexpr int TCOLS = 2 * HC < 32 ? 32 : 2 * HC;
 static_assert(SMEM <= 232448, "one CTA per SM");
@@ -127,8 +154,8 @@ __global__ void __launch_bounds__(lvw::THREADS, 1) ln_vg_w_sm100(
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
   __nv_bfloat16* sX = reinterpret_cast<__nv_bfloat16*>(smb);
   __nv_bfloat16* sV = sX + NST * XT;
-  __nv_bfloat16* sW = sV + 2 * VT;
-  float* sLN = reinterpret_cast<float*>(sW + WT);
+  __nv_bfloat16* sW = sV + VB * VT;
+  float* sLN = reinterpret_cast<float*>(sW + WBUF);
   uint64_t* bars = reinterpret_cast<uint64_t*>(sLN + 2 * D);
   uint64_t* xfull = bars;              // [NST]
   uint64_t* yfull = xfull + NST;       // [NST] count 4 (LN warps)
@@ -136,12 +163,15 @@ __global__ void __launch_bounds__(lvw::THREADS, 1) ln_vg_w_sm100(
   uint64_t* accf = xempty + NST;       // [2]
   uint64_t* acce = accf + 2;           // [2] count 4
   uint64_t* wful = acce + 2;           // [1]
-  uint32_t* tslot = reinterpret_cast<uint32_t*>(wful + 1);
+  uint64_t* wrf = wful + 1;            // [WRS] (WS) a Wv k-block landed
+  uint64_t* wre = wrf + WRS;           // [WRS] (WS) its GEMM retired
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(wre + WRS);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
     for (int s = 0; s < NST; ++s) { bar_init(xfull + s, 1); bar_init(yfull + s, 4); bar_init(xempty + s, 2); }
     for (int b = 0; b < 2; ++b) { bar_init(accf + b, 1); bar_init(acce + b, 4); }
     bar_init(wful, 1);
+    for (int k = 0; k < WRS; ++k) { bar_init(wrf + k, 1); bar_init(wre + k, 1); }
     bar_init_fence();
   }
   if (warp == 1) tmem_alloc(tslot, TCOLS);
@@ -153,20 +183,29 @@ __global__ void __launch_bounds__(lvw::THREADS, 1) ln_vg_w_sm100(
 
   if (warp == 0) {
     if (lane == 0) {
-      expect_tx(wful, WT * 2);
-      for (int kb = 0; kb < KB; ++kb) load_2d(&wmap, sW + kb * HC * 64, wful, kb * 64, 0);
-      int g = 0;
+      if constexpr (!WS) {
+        expect_tx(wful, WT * 2);
+        for (int kb = 0; kb < KB; ++kb) load_2d(&wmap, sW + kb * HC * 64, wful, kb * 64, 0);
+      }
+      int g = 0, gk = 0;
       for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++g) {
         const int n = t / NSB, s0 = (t % NSB) * BS, st = g % NST;
         if (g >= NST) wait(xempty + st, ((g / NST) - 1) & 1);
         expect_tx(xfull + st, XT * 2);
         for (int kb = 0; kb < KB; ++kb) load_3d(&xmap, sX + st * XT + kb * BS * 64, xfull + st, kb * 64, n, s0);
+        if constexpr (WS)                        // the tile's Wv k-blocks, in the order the GEMM takes them
+          for (int kb = 0; kb < KB; ++kb, ++gk) {
+            const int sl = gk % WRS;
+            if (gk >= WRS) wait(wre + sl, ((gk / WRS) - 1) & 1);
+            expect_tx(wrf + sl, HC * 64 * 2);
+            load_2d(&wmap, sW + sl * HC * 64, wrf + sl, kb * 64, 0);
+          }
       }
     }
   } else if (warp == 1) {
     if (lane == 0) {
-      wait(wful, 0);
-      int lt = 0;
+      if constexpr (!WS) wait(wful, 0);
+      int lt = 0, gk = 0;
       for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
         const int n = t / NSB, s0 = (t % NSB) * BS, st = lt % NST, b = lt & 1;
         wait(yfull + st, (lt / NST) & 1);
@@ -180,18 +219,30 @@ __global__ void __launch_bounds__(lvw::THREADS, 1) ln_vg_w_sm100(
         tc_fence_after();
         const __nv_bfloat16* y = sX + st * XT;
 #pragma unroll
-        for (int kb = 0; kb < KB; ++kb)
+        for (int kb = 0; kb < KB; ++kb) {
+          const __nv_bfloat16* wk = sW + kb * HC * 64;
+          if constexpr (WS) {
+            const int sl = gk % WRS;
+            wait(wrf + sl, (gk / WRS) & 1);
+            tc_fence_after();
+            wk = sW + sl * HC * 64;
+          }
 #pragma unroll
           for (int ks = 0; ks < 4; ++ks)
-            mma_ss(tmem + b * HC, desc_k128(y + kb * BS * 64 + ks * 16), desc_k128(sW + kb * HC * 64 + ks * 16), IDESC, (kb | ks) ? 1u : 0u);
+            mma_ss(tmem + b * HC, desc_k128(y + kb * BS * 64 + ks * 16), desc_k128(wk + ks * 16), IDESC, (kb | ks) ? 1u : 0u);
+          if constexpr (WS) { mma_commit(wre + gk % WRS); ++gk; }
+        }
         mma_commit(accf + b);
         mma_commit(xempty + st);
-        if (want_y && lt >= 1) {
+        if (want_y && NST == 1) {                // one stage: the next tile's x waits on this release, so it cannot be deferred
+          bulk_wait_read<0>();
+          arrive(xempty + st);
+        } else if (want_y && lt >= 1) {
           bulk_wait_read<1>();
           arrive(xempty + (lt - 1) % NST);
         }
       }
-      if (want_y && lt >= 1) {                   // the last tile's y store: release its stage too (nothing waits on it, but keep the count)
+      if (want_y && NST > 1 && lt >= 1) {        // the last tile's y store: release its stage too (nothing waits on it, but keep the count)
         bulk_wait_read<0>();
         arrive(xempty + (lt - 1) % NST);
       }
@@ -203,7 +254,7 @@ __global__ void __launch_bounds__(lvw::THREADS, 1) ln_vg_w_sm100(
     for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
       const int st = lt % NST;
       wait(xfull + st, (lt / NST) & 1);
-      ln_row(sX + st * XT, r, sLN, eps);
+      ln_row(sX + st * XT, r, LnShared{sLN}, eps);
       fence_proxy_async();
       __syncwarp();
       if (lane == 0) arrive(yfull + st);
@@ -216,9 +267,9 @@ __global__ void __launch_bounds__(lvw::THREADS, 1) ln_vg_w_sm100(
       const int n = t / NSB, s0 = (t % NSB) * BS, b = lt & 1;
       wait(accf + b, (lt >> 1) & 1);
       tc_fence_after();
-      if (leader) bulk_wait_read<1>();           // the v stores of tile lt - 2 have left staging buffer b
+      if (leader) bulk_wait_read<VB - 1>();      // the v stores of tile lt - VB have left staging buffer lt % VB
       named_sync(2, 128);
-      __nv_bfloat16* vb = sV + b * VT;
+      __nv_bfloat16* vb = sV + (lt % VB) * VT;
 #pragma unroll 1
       for (int h = 0; h < H; ++h) {
         float v[C];
@@ -258,17 +309,24 @@ constexpr int BM = 128;
 constexpr int OT = BM * HC;                     // o tile [8 heads][128 rows][C]
 constexpr int YT = BM * D;                      // msa tile [KB][128][64] -> y in place (the gate GEMM's A)
 constexpr int STAGE = OT + YT;
-constexpr int NST = 2;
+constexpr int NST = WS ? 1 : 2;
 constexpr int WGT = HC * D;                     // Wg [KB][HC][64]
 constexpr int KO = HC / 64 > 0 ? HC / 64 : 1;   // k-blocks of Wo
 constexpr int WOT = D * KO * 64;                // Wo [KO k-blocks][D][64]
+// WS (d_msa 256): Wg / Wo stream through WRS slots of 32 KiB in the order the MMA warp takes them -- a gate half's Wg rows are two
+// slots ([2 k-blocks][HC / 2][64] each), an out half's Wo two ([D][64] each)
+constexpr int WRS = 3, SLOT = 128 * 128;
+constexpr int WBUF = WS ? WRS * SLOT : WGT + WOT;
 constexpr int THREADS = 576;
-constexpr int SMEM = 1024 + (NST * STAGE + WGT + WOT) * 2 + 1024;
-constexpr int COL_G = 0, COL_U = HC, COL_OUT = HC + HC / 2;    // gate [HC] fp32 | u [HC / 2] packed bf16 | out [2][D]
+constexpr int LNB_ = WS ? 0 : 2 * D * 4;          // gamma / beta in shared memory (WS: the LayerNorm reads them through L1: no room)
+constexpr int SMEM = 1024 + (NST * STAGE + WBUF) * 2 + LNB_ + 512;
+constexpr int GREG = WS ? 1 : 2, OB = WS ? 1 : 2;               // TMEM gate-half regions, out buffers
+constexpr int COL_G = 0, COL_U = GREG * (HC / 2), COL_OUT = COL_U + HC / 2;   // gate [GREG][HC / 2] fp32 | u [HC / 2] packed bf16 | out [OB][D]
 constexpr int TCOLS = 512;
 constexpr uint32_t ID_G = idesc_bf16(128, HC / 2, 0, 0);
 constexpr uint32_t ID_OUT = idesc_bf16(128, D, 0, 0);
-static_assert(COL_OUT + 2 * D <= TCOLS, "TMEM: 512 columns");
+static_assert(COL_OUT + OB * D <= TCOLS, "TMEM: 512 columns");
+static_assert(!WS || (HC / 2 * 64 * 2 == SLOT && D * 64 == SLOT), "WS slots: two Wg k-blocks of a gate half, one Wo k-block");
 static_assert(HC % 64 == 0, "Wo k-blocks");
 static_assert(SMEM <= 232448, "one CTA per SM");
 }  // namespace gow
@@ -286,10 +344,10 @@ __global__ void __launch_bounds__(gow::THREADS, 1) gate_out_w_sm100(
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
   __nv_bfloat16* sStage = reinterpret_cast<__nv_bfloat16*>(smb);
-  __nv_bfloat16* sWg = sStage + NST * STAGE;
-  __nv_bfloat16* sWo = sWg + WGT;
-  float* sLN = reinterpret_cast<float*>(sWo + WOT);
-  uint64_t* bars = reinterpret_cast<uint64_t*>(sLN + 2 * D);
+  __nv_bfloat16* sWg = sStage + NST * STAGE;   // WS: the ring
+  __nv_bfloat16* sWo = sWg + (WS ? 0 : WGT);
+  float* sLN = reinterpret_cast<float*>(sWg + WBUF);
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sLN + LNB_ / 4);
   uint64_t* full = bars;             // [NST]
   uint64_t* empty = full + NST;      // [NST] count 9: the gate GEMMs' commit (y) and the 8 drain warps (o)
   uint64_t* gf = empty + NST;        // [2]   gate half ready
@@ -300,16 +358,19 @@ __global__ void __launch_bounds__(gow::THREADS, 1) gate_out_w_sm100(
   uint64_t* oute = outf + 2;         // [2]   count 4
   uint64_t* wf = oute + 2;           // [1]
   uint64_t* yrdy = wf + 1;           // [NST] count 4: the LayerNorm wrote y over the stage's msa tile
-  uint32_t* tslot = reinterpret_cast<uint32_t*>(yrdy + NST);
+  uint64_t* wrf = yrdy + NST;        // [WRS] (WS) a weight slot landed
+  uint64_t* wre = wrf + WRS;         // [WRS] (WS) its GEMMs retired
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(wre + WRS);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
     for (int k = 0; k < NST; ++k) { bar_init(full + k, 1); bar_init(empty + k, 9); bar_init(yrdy + k, 4); }
     for (int k = 0; k < 2; ++k) { bar_init(gf + k, 1); bar_init(ge + k, 8); bar_init(uf + k, 8); bar_init(ue + k, 1);
                                   bar_init(outf + k, 1); bar_init(oute + k, 4); }
     bar_init(wf, 1);
+    for (int k = 0; k < WRS; ++k) { bar_init(wrf + k, 1); bar_init(wre + k, 1); }
     bar_init_fence();
   }
-  if (tid < D) { sLN[tid] = to_f(LNW[tid]); sLN[D + tid] = to_f(LNB[tid]); }
+  if (!WS && tid < D) { sLN[tid] = to_f(LNW[tid]); sLN[D + tid] = to_f(LNB[tid]); }
   if (warp == 1) tmem_alloc(tslot, TCOLS);
   tc_fence_before();
   __syncthreads();
@@ -320,10 +381,7 @@ __global__ void __launch_bounds__(gow::THREADS, 1) gate_out_w_sm100(
 
   if (warp == 0) {
     if (lane == 0) {
-      expect_tx(wf, (WGT + WOT) * 2);
-      for (int kb = 0; kb < KB; ++kb) load_2d(&gmap, sWg + kb * HC * 64, wf, kb * 64, 0);
-      for (int kb = 0; kb < KO; ++kb) load_2d(&wmap, sWo + kb * D * 64, wf, kb * 64, 0);
-      for (int lt = 0; lt < nt; ++lt) {
+      auto load_stage = [&](int lt) {
         const int m0 = ((int)blockIdx.x + lt * (int)gridDim.x) * BM, st = lt % NST;
         if (lt >= NST) wait(empty + st, ((lt / NST) - 1) & 1);
         __nv_bfloat16* p = stage(lt);
@@ -331,42 +389,108 @@ __global__ void __launch_bounds__(gow::THREADS, 1) gate_out_w_sm100(
         const int s = m0 / N, i0 = m0 % N;
         for (int h = 0; h < H; ++h) load_2d(&omap, p + h * BM * C, full + st, s * C, h * N + i0);
         for (int kb = 0; kb < KB; ++kb) load_2d(&ymap, p + OT + kb * BM * 64, full + st, kb * 64, m0);
+      };
+      if constexpr (!WS) {
+        expect_tx(wf, (WGT + WOT) * 2);
+        for (int kb = 0; kb < KB; ++kb) load_2d(&gmap, sWg + kb * HC * 64, wf, kb * 64, 0);
+        for (int kb = 0; kb < KO; ++kb) load_2d(&wmap, sWo + kb * D * 64, wf, kb * 64, 0);
+        for (int lt = 0; lt < nt; ++lt) load_stage(lt);
+      } else {                                   // the MMA warp's order: G(0), then G(k + 1), O(k); a tile's stage before its first gate
+        int u = 0;
+        auto unit = [&](int k, bool g) {
+          const int hf = k & 1;
+          for (int j = 0; j < 2; ++j, ++u) {
+            const int sl = u % WRS;
+            if (u >= WRS) wait(wre + sl, ((u / WRS) - 1) & 1);
+            expect_tx(wrf + sl, SLOT * 2);
+            if (g) for (int k2 = 0; k2 < 2; ++k2) load_2d(&gmap, sWg + sl * SLOT + k2 * (HC / 2) * 64, wrf + sl, (j * 2 + k2) * 64, hf * (HC / 2));
+            else load_2d(&wmap, sWg + sl * SLOT, wrf + sl, (hf * 2 + j) * 64, 0);
+          }
+        };
+        const int K = 2 * nt;
+        if (K > 0) { load_stage(0); unit(0, true); }
+        for (int k = 0; k < K; ++k) {
+          if (k + 1 < K) { if (((k + 1) & 1) == 0) load_stage((k + 1) >> 1); unit(k + 1, true); }
+          unit(k, false);
+        }
       }
     }
   } else if (warp == 1) {
-    wait(wf, 0);
+    if constexpr (!WS) wait(wf, 0);
+    int u = 0;                                   // WS: weight slot uses, in the producer's order
     auto gate = [&](int k) {                     // gate half hf of tile lt: g[:, HC/2 hf + ...] = y . Wg[HC/2 hf ...]^T
       const int lt = k >> 1, hf = k & 1, st = lt % NST;
       if (hf == 0) wait(yrdy + st, (lt / NST) & 1);
-      if (k >= 2) wait(ge + hf, ((k >> 1) - 1) & 1);
+      if (GREG == 2 && k >= 2) wait(ge + hf, ((k >> 1) - 1) & 1);
+      if (GREG == 1 && k >= 1) wait(ge + ((k - 1) & 1), ((k - 1) >> 1) & 1);   // one gate region: the previous half drained
       tc_fence_after();
+      const __nv_bfloat16* y = stage(lt) + OT;
+      const uint32_t gcol = tmem + COL_G + (GREG == 2 ? hf * (HC / 2) : 0);
+      if constexpr (!WS) {
+        if (elect_one()) {
+#pragma unroll
+          for (int kb = 0; kb < KB; ++kb)
+#pragma unroll
+            for (int ks = 0; ks < 4; ++ks)
+              mma_ss(gcol, desc_k128(y + kb * BM * 64 + ks * 16), desc_k128(sWg + kb * HC * 64 + hf * (HC / 2) * 64 + ks * 16), ID_G, (kb | ks) ? 1u : 0u);
+        }
+      } else {
+        for (int j = 0; j < 2; ++j, ++u) {
+          const int sl = u % WRS;
+          wait(wrf + sl, (u / WRS) & 1);
+          tc_fence_after();
+          if (elect_one()) {
+#pragma unroll
+            for (int k2 = 0; k2 < 2; ++k2)
+#pragma unroll
+              for (int ks = 0; ks < 4; ++ks) {
+                const int kb = j * 2 + k2;
+                mma_ss(gcol, desc_k128(y + kb * BM * 64 + ks * 16), desc_k128(sWg + sl * SLOT + k2 * (HC / 2) * 64 + ks * 16), ID_G, (kb | ks) ? 1u : 0u);
+              }
+            mma_commit(wre + sl);
+          }
+          __syncwarp();
+        }
+      }
       if (elect_one()) {
-        const __nv_bfloat16* y = stage(lt) + OT;
-#pragma unroll
-        for (int kb = 0; kb < KB; ++kb)
-#pragma unroll
-          for (int ks = 0; ks < 4; ++ks)
-            mma_ss(tmem + COL_G + hf * (HC / 2), desc_k128(y + kb * BM * 64 + ks * 16),
-                   desc_k128(sWg + kb * HC * 64 + hf * (HC / 2) * 64 + ks * 16), ID_G, (kb | ks) ? 1u : 0u);
         mma_commit(gf + hf);
         if (hf == 1) mma_commit(empty + st);
       }
       __syncwarp();
     };
     auto outg = [&](int k) {                     // out += u[:, half hf] . Wo[:, half hf]^T  (A from TMEM)
-      const int lt = k >> 1, hf = k & 1, b = lt & 1;
+      const int lt = k >> 1, hf = k & 1, ob = lt % OB;
       wait(uf + hf, (k >> 1) & 1);
-      if (hf == 0 && lt >= 2) wait(oute + b, ((lt >> 1) - 1) & 1);
+      if (hf == 0 && lt >= OB) wait(oute + ob, ((lt / OB) - 1) & 1);
       tc_fence_after();
-      if (elect_one()) {
+      if constexpr (!WS) {
+        if (elect_one()) {
 #pragma unroll
-        for (int ks = 0; ks < HC / 32; ++ks) {
-          const int kk = hf * (HC / 2) + ks * 16;
-          mma_ts(tmem + COL_OUT + b * D, tmem + COL_U + hf * (HC / 4) + ks * 8, desc_k128(sWo + (kk >> 6) * D * 64 + ((kk & 63) >> 4) * 16),
-                 ID_OUT, (hf | ks) ? 1u : 0u);
+          for (int ks = 0; ks < HC / 32; ++ks) {
+            const int kk = hf * (HC / 2) + ks * 16;
+            mma_ts(tmem + COL_OUT + ob * D, tmem + COL_U + hf * (HC / 4) + ks * 8, desc_k128(sWo + (kk >> 6) * D * 64 + ((kk & 63) >> 4) * 16),
+                   ID_OUT, (hf | ks) ? 1u : 0u);
+          }
         }
+      } else {
+        for (int j = 0; j < 2; ++j, ++u) {       // the half's two Wo k-blocks [D][64]
+          const int sl = u % WRS;
+          wait(wrf + sl, (u / WRS) & 1);
+          tc_fence_after();
+          if (elect_one()) {
+#pragma unroll
+            for (int k4 = 0; k4 < 4; ++k4) {
+              const int ks = j * 4 + k4;
+              mma_ts(tmem + COL_OUT + ob * D, tmem + COL_U + hf * (HC / 4) + ks * 8, desc_k128(sWg + sl * SLOT + k4 * 16), ID_OUT, (hf | ks) ? 1u : 0u);
+            }
+            mma_commit(wre + sl);
+          }
+          __syncwarp();
+        }
+      }
+      if (elect_one()) {
         mma_commit(ue + hf);
-        if (hf == 1) mma_commit(outf + b);
+        if (hf == 1) mma_commit(outf + ob);
       }
       __syncwarp();
     };
@@ -389,7 +513,7 @@ __global__ void __launch_bounds__(gow::THREADS, 1) gate_out_w_sm100(
       for (int hh = 0; hh < 2; ++hh) {
         const int head = hf * 4 + pp * 2 + hh;
         float g[C];
-        tmem_ldn<C>(tmem_at(tmem + COL_G, q * 32, head * C), g);
+        tmem_ldn<C>(tmem_at(tmem + COL_G + (GREG == 2 ? hf * (HC / 2) : 0), q * 32, (pp * 2 + hh) * C), g);
         tmem_wait_ld();
         const __nv_bfloat16* ob = stage(lt) + (head * BM + r) * C;
 #pragma unroll
@@ -415,7 +539,8 @@ __global__ void __launch_bounds__(gow::THREADS, 1) gate_out_w_sm100(
     for (int lt = 0; lt < nt; ++lt) {
       const int st = lt % NST;
       wait(full + st, (lt / NST) & 1);
-      ln_row(stage(lt) + OT, r, sLN, eps);
+      if constexpr (WS) ln_row(stage(lt) + OT, r, LnGlobal<LT_>{LNW, LNB}, eps);
+      else ln_row(stage(lt) + OT, r, LnShared{sLN}, eps);
       fence_proxy_async();
       __syncwarp();
       if (lane == 0) arrive(yrdy + st);
@@ -424,8 +549,8 @@ __global__ void __launch_bounds__(gow::THREADS, 1) gate_out_w_sm100(
     // ---- output: bf16(update), dropout, + residual, straight to global, 32 channels at a time ----
     const int q = warp & 3, r = q * 32 + lane;
     for (int lt = 0; lt < nt; ++lt) {
-      const int row = ((int)blockIdx.x + lt * (int)gridDim.x) * BM + r, b = lt & 1;
-      wait(outf + b, (lt >> 1) & 1);
+      const int row = ((int)blockIdx.x + lt * (int)gridDim.x) * BM + r, b = lt % OB;
+      wait(outf + b, (lt / OB) & 1);
       tc_fence_after();
       const uint4* rp = reinterpret_cast<const uint4*>(MSA + (size_t)row * D);
       uint4* op = reinterpret_cast<uint4*>(OUT + (size_t)row * D);
@@ -990,7 +1115,7 @@ torch::Tensor gate_out_w(torch::Tensor o, torch::Tensor msa, torch::Tensor lnw, 
   const long M = S * N;
   CUtensorMap om = make_map<2>(o.data_ptr(), {(uint64_t)(S * C), (uint64_t)(H * N)}, {(uint64_t)(S * C)}, {(uint32_t)C, (uint32_t)BM}, VSW, "o");
   CUtensorMap ym = make_map<2>(msa.data_ptr(), {(uint64_t)D, (uint64_t)M}, {(uint64_t)D}, {64, (uint32_t)BM}, CU_TENSOR_MAP_SWIZZLE_128B, "msa");
-  CUtensorMap gm = make_map<2>(wg.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, (uint32_t)HC}, CU_TENSOR_MAP_SWIZZLE_128B, "wg");
+  CUtensorMap gm = make_map<2>(wg.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, (uint32_t)(WS ? HC / 2 : HC)}, CU_TENSOR_MAP_SWIZZLE_128B, "wg");
   CUtensorMap wm = make_map<2>(wo.data_ptr(), {(uint64_t)HC, (uint64_t)D}, {(uint64_t)HC}, {64, (uint32_t)D}, CU_TENSOR_MAP_SWIZZLE_128B, "wo");
   const int ntiles = (int)(M / BM);
   const int grid = std::min(ntiles, num_sms(msa.device().index()));

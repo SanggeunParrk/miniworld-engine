@@ -1,8 +1,8 @@
 """MSAPairWeightedAveraging inference on B200 beyond the MiniWorld shape (integrations.pwa_train / pwa_wide, csrc/sm100):
 
 * the widths FoldForge's predictors use: AF3 / Protenix-v1 (d_msa 64, d_pair 128, 8 x 8), Protenix-v2 (128 / 256 / 8 x 8), OpenDDE
-  (128 / 384 / 8 x 8), ESMFold2 (128 / 256 / 8 x 16), Chai-1 (64 / 256 / 8 x 32): pair_fwd at d_pair 128 / 256 / 384, ln_vg_w / gate_out_w
-  of pwa_wide_sm100.cu;
+  (128 / 384 / 8 x 8), ESMFold2 (128 / 256 / 8 x 16), Chai-1 (64 / 256 / 8 x 32), IntelliFold-v2 (256 / 512 / 8 x 32): pair_fwd at
+  d_pair 128 / 256 / 384 / 512, ln_vg_w / gate_out_w of pwa_wide_sm100.cu (d_msa 256: the weights stream through a ring);
 * token counts 1024 < N <= 2048 (pair_fwd's 2048-logit build), MiniWorld's width and the wide ones.
 
 Each against an fp32 copy of the module: the update within 1.15x of the module's own bf16 PyTorch statements' error (the bar of
@@ -30,6 +30,7 @@ FOLDFORGE = {  # (d_msa, d_pair, d_hidden): DenseSpec msa_channel / pair_channel
     "opendde": (128, 384, 8),
     "esmfold2": (128, 256, 16),
     "chai1": (64, 256, 32),
+    "intellifold2": (256, 512, 32),
 }
 
 
@@ -89,7 +90,8 @@ def test_foldforge_widths(family, n, s):
     check_update(m, *inputs(d_msa, d_pair, n, s))
 
 
-@pytest.mark.parametrize(("family", "n"), [("miniworld", 1536), ("miniworld", 2048), ("af3", 1100), ("opendde", 2048), ("esmfold2", 1536)])
+@pytest.mark.parametrize(("family", "n"), [("miniworld", 1536), ("miniworld", 2048), ("af3", 1100), ("opendde", 2048), ("esmfold2", 1536),
+                                           ("intellifold2", 1100)])
 def test_long_inference(family, n):
     d_msa, d_pair, d_hidden = (64, 128, 32) if family == "miniworld" else FOLDFORGE[family]
     m = make(d_msa, d_pair, d_hidden)
@@ -102,7 +104,7 @@ def test_no_mask_and_a_fully_masked_row_free_call():
     check_update(m, x, z, None)
 
 
-@pytest.mark.parametrize("family", ["af3", "esmfold2"])
+@pytest.mark.parametrize("family", ["af3", "esmfold2", "intellifold2"])
 def test_cuda_graph_replay(family):
     d_msa, d_pair, d_hidden = FOLDFORGE[family]
     m = make(d_msa, d_pair, d_hidden)
