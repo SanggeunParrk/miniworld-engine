@@ -138,19 +138,28 @@ const Kernels& kernels() {
   return g_kernels.emplace(dev, k).first->second;
 }
 
+// pdl: a programmatic dependent launch (the kernel may start before the previous one on the stream completes; it must execute
+// griddepcontrol.wait before it reads that kernel's output or writes memory the previous kernel may still use)
 void launch(CUfunction f, unsigned grid, unsigned block, unsigned smem, unsigned cluster, cudaStream_t stream, std::vector<void*> args,
-            const char* what) {
+            const char* what, bool pdl = false) {
   CUlaunchConfig cfg{};
   cfg.gridDimX = grid; cfg.gridDimY = 1; cfg.gridDimZ = 1;
   cfg.blockDimX = block; cfg.blockDimY = 1; cfg.blockDimZ = 1;
   cfg.sharedMemBytes = smem;
   cfg.hStream = reinterpret_cast<CUstream>(stream);
-  CUlaunchAttribute attr[1];
+  CUlaunchAttribute attr[2];
+  unsigned na = 0;
   if (cluster > 1) {
-    attr[0].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
-    attr[0].value.clusterDim.x = cluster; attr[0].value.clusterDim.y = 1; attr[0].value.clusterDim.z = 1;
-    cfg.attrs = attr; cfg.numAttrs = 1;
+    attr[na].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
+    attr[na].value.clusterDim.x = cluster; attr[na].value.clusterDim.y = 1; attr[na].value.clusterDim.z = 1;
+    ++na;
   }
+  if (pdl) {
+    attr[na].id = CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
+    attr[na].value.programmaticStreamSerializationAllowed = 1;
+    ++na;
+  }
+  if (na) { cfg.attrs = attr; cfg.numAttrs = na; }
   check(drv().launch(&cfg, f, args.data(), nullptr), what);
 }
 
@@ -401,7 +410,8 @@ TMap tmap(const torch::Tensor& t, int64_t inner, int64_t outer, int64_t box_inne
 }
 
 // Launch `kernel` of cubin `name` on the current stream with the cubin's dynamic shared memory. `args` in the kernel's parameter order.
-void launch_kernel(const std::string& name, const std::string& kernel, int64_t grid, int64_t block, int64_t cluster, py::list args) {
+void launch_kernel(const std::string& name, const std::string& kernel, int64_t grid, int64_t block, int64_t cluster, py::list args,
+                   bool pdl) {
   make_current(-1);
   CUfunction f = nullptr;
   int smem = 0;
@@ -437,7 +447,7 @@ void launch_kernel(const std::string& name, const std::string& kernel, int64_t g
     }
   }
   launch(f, static_cast<unsigned>(grid), static_cast<unsigned>(block), static_cast<unsigned>(smem), static_cast<unsigned>(cluster),
-         at::cuda::getCurrentCUDAStream(), params, kernel.c_str());
+         at::cuda::getCurrentCUDAStream(), params, kernel.c_str(), pdl);
 }
 
 // How many `cluster`-CTA clusters of `kernel` can be resident at once on the current device (one wave).
@@ -470,7 +480,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("load_cubin", &load_cubin, "register a named cubin and load it on the current device");
   m.def("tmap", &tmap, "2-D bf16 128-B-swizzled tensor map (inner, outer, box_inner, box_outer, row_stride = -1: contiguous)",
         py::arg("t"), py::arg("inner"), py::arg("outer"), py::arg("box_inner"), py::arg("box_outer"), py::arg("row_stride") = -1);
-  m.def("launch_kernel", &launch_kernel, "launch a kernel of a loaded cubin on the current stream");
+  m.def("launch_kernel", &launch_kernel, "launch a kernel of a loaded cubin on the current stream (pdl: programmatic dependent launch)",
+        py::arg("name"), py::arg("kernel"), py::arg("grid"), py::arg("block"), py::arg("cluster"), py::arg("args"), py::arg("pdl") = false);
   m.def("load", &load, "set the forward / backward cubins (loaded lazily per device)");
   m.def("transition_fused_fwd", &transition_fused_fwd, "fused sm_100a Transition forward (LN + SwiGLU expand + squeeze + residual)");
   m.def("transition_fused_bwd", &transition_fused_bwd, "fused sm_100a Transition backward (one kernel + a partial reduction)");
