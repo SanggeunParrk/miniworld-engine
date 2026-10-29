@@ -40,7 +40,7 @@ def test_fp16_halves_cost_no_accuracy_and_never_overflow(scale, monkeypatch):
     torch.backends.cuda.matmul.allow_tf32 = True
     try:
         torch.manual_seed(7)
-        d, shape = 128, (1, 48, 48, 128)
+        d, shape = 128, (1, 72, 72, 128)   # 5184 rows: above residual._FP32_HALVES_MAX_ROWS, where the halves are fp16
         module = Transition(d, n=4, implementation=ImplementationType.MINIWORLD).cuda().float()
         with torch.no_grad():
             for name, p in module.named_parameters():

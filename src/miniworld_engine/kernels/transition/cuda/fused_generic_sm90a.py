@@ -27,10 +27,12 @@ from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _dir = Path(__file__).parent / "generic_sm90a"
-_REVISION = "v30"
+_REVISION = "v31"
 MAX_D = 1024
 # `ext.prep` job masks: bit 0 Ws^T, 1-2 the two halves of [Wa;Wb]^T, 3-5 copies of Wa / Wb / Ws (TF32-rounded for fp32 activations)
 _PREP_BWD, _PREP_BWD_ROUNDED, _PREP_ROUNDED_COPIES = 0b000111, 0b011111, 0b111000
+#: fp32 training: the forward makes every copy once (the rounded Wa / Wb / Ws it reads, and Ws^T, [Wa;Wb]^T for the backward)
+_PREP_STEP_ROUNDED = 0b111111
 
 
 @functools.lru_cache(maxsize=1)
@@ -186,16 +188,44 @@ def _h16_scales(x, gamma, beta, wa, wb, ws):
     return tuple(_ext().h16_scales(gamma.float().contiguous(), beta.float().contiguous(), wa, wb, ws))
 
 
-def _fwd_h16(ext, x, xn, gamma, beta, wa, wb, ws):
-    """swiglu -> squeeze with h in fp16 (same mantissa as TF32, half the bytes of the traffic that bounds both GEMMs)."""
-    inv_sh, s, ws16 = _h16_scales(x, gamma, beta, wa, wb, ws)
+def _fwd_h16(ext, x, xn, gamma, beta, wa, wb, ws, cache=False):
+    """swiglu -> squeeze with h in fp16 (same mantissa as TF32, half the bytes of the traffic that bounds both GEMMs). ``cache``
+    (inference): the scales are made once per parameter version, like the TF32-rounded weights they are taken from."""
+    if cache:
+        from miniworld_engine.kernels import _capture
+
+        inv_sh, s, ws16 = _capture.param_forms("transition_h16_scales", (gamma, beta, wa, wb, ws),
+                                               lambda: _h16_scales(x, gamma, beta, wa, wb, ws), capture_reads_eager=True)
+    else:
+        inv_sh, s, ws16 = _h16_scales(x, gamma, beta, wa, wb, ws)
     h = ext.swiglu_h16(xn, wa, wb, inv_sh)
     return h, ext.squeeze_res_h16(h, ws16, x, s)
 
 
+#: fp32 training calls of at most D rows (and never more than this; d >= _F32_CUBLAS_MIN_D) run as cuBLAS GEMMs (TF32) around the LayerNorm / SwiGLU kernels: a 128-row
+#: tile per CTA leaves most SMs idle there (the token-stream conditioning transitions, 128 - 768 rows), and cuBLAS's split-K / small tiles
+#: fill them (measured, H100: d 768, 128 rows: the hand SwiGLU GEMM 21 us against two cuBLAS GEMMs of 6 us, training step 109 -> 81 us;
+#: d 384 at 768 rows the hand kernels stay ahead, 77 against 84 us).
+_F32_CUBLAS_MAX_ROWS = 2048
+#: ... and only from this width on: at d 384 the hand kernels (one weight prep per step) stay ahead of it at every row count.
+_F32_CUBLAS_MIN_D = 512
+#: fp32 inference rows up to which the squeeze is a cuBLAS addmm (residual as its C): one 128-row tile of the hand GEMM per CTA leaves the card
+#: mostly idle there (d 768, 128 rows: 11 us against cuBLAS split-K).
+_F32_SQUEEZE_CUBLAS_ROWS = 512
+
+
+def _f32_cublas(x: torch.Tensor, save: bool = True) -> bool:
+    """fp32 training ``x [M, D]`` at few enough rows for the cuBLAS plan. Inference keeps the hand kernels: with the TF32-rounded weight
+    copies made once per parameter version it is ahead of the cuBLAS plan at every row count (ladder, H100, d 768: the cuBLAS plan at
+    inference measured 1.16-1.20x the portable rung). So at these shapes the no-grad forward is not bit-equal to the training forward
+    (two TF32 GEMM plans, both within the TF32 bound)."""
+    return save and x.dtype is torch.float32 and x.shape[1] >= _F32_CUBLAS_MIN_D and x.shape[0] <= min(x.shape[1], _F32_CUBLAS_MAX_ROWS)
+
+
 def _saves_ab(x: torch.Tensor, save: bool) -> bool:
-    """Training bf16 forwards keep a | b for the backward (no recompute GEMM there); TF32 keeps the recompute (a, b in fp32 would double the bytes)."""
-    return save and x.dtype is torch.bfloat16
+    """Training bf16 forwards keep a | b for the backward (no recompute GEMM there); so does the small-row fp32 cuBLAS plan. The TF32 hand
+    kernels keep the recompute (a, b in fp32 would double the bytes)."""
+    return save and (x.dtype is torch.bfloat16 or _f32_cublas(x, save))
 
 
 def _cublas_plan(rows: int, d: int, hid: int) -> tuple[bool, bool, bool]:
@@ -224,7 +254,7 @@ def _side_stream(device: torch.device) -> torch.cuda.Stream:
 
 # Rows up to which the weight gradients overlap the dxn -> ln_bwd chain profitably (measured, n = 4, training step):
 # 1.25 - 1.28x at D64 / 128 for 768 - 3072 rows, 1.03 - 1.13x at D256 / 384, nothing at 12 288 rows and 1-3 % LOSS at 49 152+ (the SMs are full)
-_DW_ASIDE_ROWS = {64: 12288, 128: 3072, 256: 3072, 384: 3072, 512: 768}
+_DW_ASIDE_ROWS = {64: 12288, 128: 3072, 256: 3072, 384: 3072, 512: 768, 768: 3072}   # 768: the fp32 cuBLAS plan of the token stream
 
 
 def _dw_aside_enabled(rows: int | None = None, d: int | None = None) -> bool:
@@ -274,7 +304,7 @@ def _mm(a: torch.Tensor, b: torch.Tensor, fp32_out: bool) -> torch.Tensor:
     return torch.mm(a, b, out_dtype=torch.float32) if fp32_out else torch.mm(a, b)
 
 
-def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, pre_rounded):
+def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, pre_rounded, wcat=None):
     """Shapes of the generic forward's outputs (y, the saved tensors); no kernel runs."""
     rows = x.shape[0] if save else 1
     f32 = dict(dtype=torch.float32, device=x.device)
@@ -309,6 +339,7 @@ def _fwd_launch(
     eps: float,
     save: bool,
     pre_rounded: bool,
+    wcat: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
@@ -316,17 +347,31 @@ def _fwd_launch(
     [M, 2 HID] = [a | b] and ``h`` [M, HID] (from the fp32 accumulators) when the bf16 training forward keeps them for the backward,
     else 1-element placeholders."""
     if _is_fake(x, wa):
-        return _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, pre_rounded)
+        return _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, pre_rounded, wcat)
     ext = _ext()
+    if _f32_cublas(x, save):
+        # few fp32 rows (training): cuBLAS (TF32, as torch allows it) for a | b as one GEMM over the stacked [Wa; Wb] (``wcat``, the step's
+        # one copy, which the backward's dxn GEMM reads too) and the squeeze with the residual as its C operand; the LayerNorm and the
+        # SwiGLU are the hand kernels
+        xn, rstd, c1 = ext.ln_fwd(x, gamma, beta, float(eps), bool(save))
+        ab = torch.mm(xn, (wcat if wcat is not None else torch.cat([wa, wb], 0)).t())
+        h = ext.swiglu_f32(ab)
+        out = torch.addmm(x, h, ws.t())
+        return out, xn, rstd, c1, ab, h
     if (
         x.dtype is torch.float32 and not pre_rounded
-    ):  # the MMA would truncate raw fp32 weights: hand it TF32-rounded copies
-        _, _, wa, wb, ws = ext.prep(wa, wb, ws, _PREP_ROUNDED_COPIES, True)
+    ):  # the MMA would truncate raw fp32 weights: hand it TF32-rounded copies (inference: once per parameter version, see _weights)
+        got = None
+        if not save:
+            from ._weights import tf32_rounded_triple
+
+            got = tf32_rounded_triple(wa, wb, ws, lambda a, b, s: tuple(ext.prep(a, b, s, _PREP_ROUNDED_COPIES, True)[2:]))
+        wa, wb, ws = got if got is not None else ext.prep(wa, wb, ws, _PREP_ROUNDED_COPIES, True)[2:]
     # LayerNorm as its own kernel, not inside the expand GEMM: the in-GEMM normalization measured 5-25 % slower at 768 .. 12 288 rows
     # (it sits on each CTA's critical path; the separate kernel runs on every SM and overlaps its successor through PDL)
     xn, rstd, c1 = ext.ln_fwd(x, gamma, beta, float(eps), bool(save))
     if x.dtype is torch.float32 and x.shape[0] >= _H16_MIN_ROWS:
-        h16, out = _fwd_h16(ext, x, xn, gamma, beta, wa, wb, ws)
+        h16, out = _fwd_h16(ext, x, xn, gamma, beta, wa, wb, ws, cache=not save)
         return out, xn, rstd, c1, x.new_empty((1, 1)), x.new_empty((1, 1))
     if _saves_ab(x, save):
         h, ab = ext.swiglu_save(xn, wa, wb)
@@ -335,14 +380,29 @@ def _fwd_launch(
     if (
         x.dtype is torch.bfloat16
         and _cublas_plan(x.shape[0], x.shape[1], wa.shape[0])[0]
-    ):
+    ) or (x.dtype is torch.float32 and x.shape[0] <= _F32_SQUEEZE_CUBLAS_ROWS):
         out = torch.addmm(x, h, ws.t())  # y = h Ws^T + x, residual as beta * C
     else:
         out = ext.squeeze_res(h, ws, x)
     return out, xn, rstd, c1, ab, (h if ab.numel() > 1 else x.new_empty((1, 1)))
 
 
-def _bwd_launch_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws, dw_fp32=False):
+def _prep_step_fake(wa, wb, ws):
+    """Shapes of ``_prep_step``'s outputs: Ws^T [HID, D], [Wa;Wb]^T [D, 2 HID], and the rounded Wa, Wb [HID, D], Ws [D, HID]."""
+    hid, d = wa.shape
+    return (ws.new_empty((hid, d)), ws.new_empty((d, 2 * hid)), wa.new_empty((hid, d)), wb.new_empty((hid, d)), ws.new_empty((d, hid)))
+
+
+@opaque(fake=_prep_step_fake, name="transition_generic_prep_step_sm90a")
+def _prep_step(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """fp32 training: every TF32-rounded weight copy of the step in one launch -- the forward reads the rounded Wa / Wb / Ws, the backward
+    Ws^T, [Wa;Wb]^T and the rounded Wa / Wb -- instead of a prep in the forward and another in the backward."""
+    if _is_fake(wa):
+        return _prep_step_fake(wa, wb, ws)
+    return tuple(_ext().prep(wa, wb, ws, _PREP_STEP_ROUNDED, True))
+
+
+def _bwd_launch_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws, dw_fp32=False, wst=None, wabt=None):
     """Shapes of the generic backward's outputs (dx, dgamma, dbeta, dW_ab, dW_s); no kernel runs."""
     return (
         torch.empty_like(x),
@@ -368,18 +428,21 @@ def _bwd_launch(
     wb: torch.Tensor,
     ws: torch.Tensor,
     dw_fp32: bool = False,
+    wst: torch.Tensor | None = None,
+    wabt: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Returns (dx, dgamma, dbeta, dWab, dWs): ``dx`` already carries the residual branch, dWab = [dWa; dWb] [2 HID, D], the weight
-    gradients come out of cuBLAS (fp32 accumulation, one rounding to the weight dtype) in the weight dtype."""
+    gradients come out of cuBLAS (fp32 accumulation, one rounding to the weight dtype) in the weight dtype. ``wst`` / ``wabt``: the
+    forward's prep (fp32: Ws^T, [Wa;Wb]^T, with ``wa`` / ``wb`` its rounded copies); without them the backward makes them."""
     if _is_fake(dy, x):
-        return _bwd_launch_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws, dw_fp32)
+        return _bwd_launch_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws, dw_fp32, wst, wabt)
     ext = _ext()
     tf32 = x.dtype is torch.float32
     if (
         ab.numel() > 1
-    ):  # bf16 training: a | b saved by the forward; the weights are read as stored (MN-major wgmma operand)
+    ):  # bf16 training, or the small-row fp32 cuBLAS plan: a | b saved by the forward; bf16 reads the weights as stored (MN-major wgmma operand)
         _, gate_cublas, _ = _cublas_plan(x.shape[0], x.shape[1], wa.shape[0])
-        if gate_cublas:
+        if gate_cublas or tf32:
             dab = ext.swiglu_bwd(
                 torch.mm(dy, ws), ab
             )  # dh by cuBLAS, SwiGLU backward in one elementwise pass
@@ -392,11 +455,14 @@ def _bwd_launch(
             dwab = _mm(dab.t(), xn, dw_fp32)  # [2 HID, D]: dWa then dWb (dab holds dA | dB)
             grads.append((dwab, dws))
         del h
-        dxn = torch.mm(dab, wcat) if wcat.numel() > 1 else ext.dxn_gemm_t(dab, wa, wb)
+        dxn = torch.mm(dab, wcat) if wcat.numel() > 1 else ext.dxn_gemm_t(dab, wa, wb)   # fp32 plan: wcat always
     else:
-        wst, wabt, wa_r, wb_r, _ = ext.prep(
-            wa, wb, ws, _PREP_BWD_ROUNDED if tf32 else _PREP_BWD, tf32
-        )  # Ws^T, [Wa;Wb]^T (+ rounded Wa, Wb)
+        if wst is not None and wabt is not None:   # the forward's prep: wa / wb are its rounded copies
+            wa_r, wb_r = wa, wb
+        else:
+            wst, wabt, wa_r, wb_r, _ = ext.prep(
+                wa, wb, ws, _PREP_BWD_ROUNDED if tf32 else _PREP_BWD, tf32
+            )  # Ws^T, [Wa;Wb]^T (+ rounded Wa, Wb)
         h, dab = ext.gate(xn, dy, wa_r if tf32 else wa, wb_r if tf32 else wb, wst)
         dws = torch.mm(dy.t(), h)
         dwab = torch.mm(dab.t(), xn)
@@ -422,22 +488,34 @@ class _GenericTransitionSM90A(torch.autograd.Function):
         ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         masters = (wa, wb, ws)   # saved too: an in-place update of a parameter before backward must raise, as for any autograd op
         wa, wb, ws = _kernel_weights(x, wa, wb, ws)
+        if flat.dtype is torch.float32 and not _f32_cublas(flat):
+            # one prep for the step: the forward reads the rounded copies, the backward Ws^T / [Wa;Wb]^T and the rounded Wa / Wb
+            wst, wabt, wa, wb, ws = _prep_step(wa, wb, ws)
+            ctx.prepped = True
+        else:
+            wst = wabt = None
+            ctx.prepped = False
+        f32_cublas = _f32_cublas(flat)
+        wcat = torch.cat([wa, wb], 0) if f32_cublas else None   # the step's one stacked copy: a | b in the forward, dxn in the backward
         out, xn, rstd, c1, ab, h = _fwd_launch(
-            flat, gf, bf, wa, wb, ws, float(eps), True, False
+            flat, gf, bf, wa, wb, ws, float(eps), True, ctx.prepped, wcat
         )
-        wcat = (
-            torch.cat([wa, wb], 0)
-            if ab.numel() > 1
-            and _cublas_plan(flat.shape[0], flat.shape[1], wa.shape[0])[2]
-            else flat.new_empty((1, 1))
-        )
-        ctx.save_for_backward(flat, xn, rstd, c1, ab, h, wcat, gf, wa, wb, ws, *masters)
+        if not f32_cublas:
+            wcat = (
+                torch.cat([wa, wb], 0)
+                if ab.numel() > 1
+                and flat.dtype is torch.bfloat16
+                and _cublas_plan(flat.shape[0], flat.shape[1], wa.shape[0])[2]
+                else flat.new_empty((1, 1))
+            )
+        ctx.save_for_backward(flat, xn, rstd, c1, ab, h, wcat, gf, wa, wb, ws, *((wst, wabt) if ctx.prepped else ()), *masters)
         ctx.shape = shape
         return out.reshape(shape)
 
     @staticmethod
     def backward(ctx, dy):
-        flat, xn, rstd, c1, ab, h, wcat, gf, wa, wb, ws, *_ = ctx.saved_tensors
+        flat, xn, rstd, c1, ab, h, wcat, gf, wa, wb, ws, *rest = ctx.saved_tensors
+        prepped = tuple(rest[:2]) if ctx.prepped else ()
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
         dx, dgam, dbeta, dwab, dws = _bwd_launch(
             dy.reshape(-1, dy.shape[-1]).contiguous(),
@@ -453,6 +531,7 @@ class _GenericTransitionSM90A(torch.autograd.Function):
             wb,
             ws,
             adt is torch.float32 and flat.dtype is torch.bfloat16,
+            *prepped,
         )
         hid = wa.shape[0]
         return (
@@ -474,15 +553,7 @@ def transition_generic_sm90a(x, gamma, beta, wa, wb, ws, eps):
         and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
     ):
         shape = x.shape
-        kw = _kernel_weights(x, wa, wb, ws)
-        pre = False
-        if x.dtype is torch.float32 and all(w is o for w, o in zip(kw, (wa, wb, ws))):
-            # fp32: the TF32-rounded weight copies are made once per parameter version (weak-referenced, see _weights), not on every call
-            from ._weights import tf32_rounded_triple
-
-            got = tf32_rounded_triple(wa, wb, ws, lambda a, b, s: tuple(_ext().prep(a, b, s, _PREP_ROUNDED_COPIES, True)[2:]))
-            if got is not None:
-                kw, pre = list(got), True
+        kw = _kernel_weights(x, wa, wb, ws)   # fp32: the launch rounds them once per parameter version (_weights.tf32_rounded_triple)
         out, *_ = _fwd_launch(
             x.reshape(-1, shape[-1]).contiguous(),
             gamma.float().contiguous(),
@@ -490,7 +561,7 @@ def transition_generic_sm90a(x, gamma, beta, wa, wb, ws, eps):
             *kw,
             float(eps),
             False,
-            pre,
+            False,
         )
         return out.reshape(shape)
     return _GenericTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)

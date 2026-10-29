@@ -84,8 +84,15 @@ def _check_against_float64(fn, m, d, n, dtype, tol, deterministic_ln_grads=True)
             assert _rel(a.grad, b.grad) < 1e-5
         else:
             assert torch.equal(a.grad, b.grad)
+    from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a as gen
+
     with torch.no_grad():
-        assert torch.equal(fn(x, gamma, beta, wa, wb, ws, 1e-5), y)
+        y_inf = fn(x, gamma, beta, wa, wb, ws, 1e-5)
+    if gen._f32_cublas(x.reshape(-1, d)):
+        # few fp32 rows: training takes the cuBLAS plan, inference the hand kernels (each the faster there); both within the TF32 bound
+        assert _rel(y_inf, y_ref) < tol and _rel(y_inf, y) < tol
+    else:
+        assert torch.equal(y_inf, y)
 
 
 # -------------------------------------------------------------------------------------------------------------------- the gate

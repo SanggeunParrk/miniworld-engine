@@ -443,18 +443,38 @@ torch::Tensor dxn_gemm(torch::Tensor dab, torch::Tensor wabt) {
   return out;
 }
 
-// bf16 SwiGLU backward from a cuBLAS dh [M, HID] and the saved ab [M, 2 HID]: returns dab [M, 2 HID] (dA | dB).
+// SwiGLU backward from a cuBLAS dh [M, HID] and the saved ab [M, 2 HID] (bf16, or fp32 for the small-row cuBLAS plan): returns dab
+// [M, 2 HID] (dA | dB).
 torch::Tensor swiglu_bwd(torch::Tensor dh, torch::Tensor ab) {
   const int64_t M = dh.size(0), HID = dh.size(1);
   check_act(dh, HID, "dh"); check_act(ab, 2 * HID, "ab");
-  expect(is_bf16(dh) && is_bf16(ab) && ab.size(0) == M && HID % 8 == 0, "shapes / dtype");
+  expect(dh.scalar_type() == ab.scalar_type() && ab.size(0) == M && HID % 8 == 0, "shapes / dtype");
   auto dab = torch::empty({M, 2 * HID}, dh.options());
   if (M == 0) return dab;
-  const long long nvec = (long long)M * (HID / 8);
-  const int grid = (int)std::min<long long>((nvec + 255) / 256, 8LL * sm_count());
-  swiglu_bwd_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(cp<__nv_bfloat16>(dh), cp<__nv_bfloat16>(ab), mp<__nv_bfloat16>(dab), nvec,
-                                                                     (int)HID);
+  if (is_bf16(dh)) {
+    const long long nvec = (long long)M * (HID / 8);
+    const int grid = (int)std::min<long long>((nvec + 255) / 256, 8LL * sm_count());
+    swiglu_bwd_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(cp<__nv_bfloat16>(dh), cp<__nv_bfloat16>(ab), mp<__nv_bfloat16>(dab),
+                                                                       nvec, (int)HID);
+  } else {
+    const long long nvec = (long long)M * (HID / 4);
+    const int grid = (int)std::min<long long>((nvec + 255) / 256, 8LL * sm_count());
+    swiglu_bwd_f32_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(cp<float>(dh), cp<float>(ab), mp<float>(dab), nvec, (int)HID);
+  }
   return dab;
+}
+
+// fp32 h = silu(a) b from ab = [a | b] [M, 2 HID] (the small-row cuBLAS plan's expand halves): h [M, HID].
+torch::Tensor swiglu_f32(torch::Tensor ab) {
+  const int64_t M = ab.size(0), HID = ab.size(1) / 2;
+  check_act(ab, 2 * HID, "ab");
+  expect(!is_bf16(ab) && HID % 4 == 0, "fp32 ab [M, 2 HID]");
+  auto h = torch::empty({M, HID}, ab.options());
+  if (M == 0) return h;
+  const long long nvec = (long long)M * (HID / 4);
+  const int grid = (int)std::min<long long>((nvec + 255) / 256, 8LL * sm_count());
+  swiglu_f32_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(cp<float>(ab), mp<float>(h), nvec, (int)HID);
+  return h;
 }
 
 // bf16 dxn = dab [Wa; Wb] with the weights read as stored (MN-major operand); dab [M, 2 HID], wa / wb [HID, D].
@@ -550,6 +570,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gate_ab", &gate_ab);
   m.def("dxn_gemm_t", &dxn_gemm_t);
   m.def("swiglu_bwd", &swiglu_bwd);
+  m.def("swiglu_f32", &swiglu_f32);
   m.def("ln_bwd", &ln_bwd);
   m.def("prep", &prep);
   m.def("h16_scales", &h16_scales);

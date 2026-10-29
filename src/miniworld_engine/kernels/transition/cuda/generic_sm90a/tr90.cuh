@@ -653,6 +653,47 @@ swiglu_bwd_kernel(const __nv_bfloat16* __restrict__ dh, const __nv_bfloat16* __r
   }
 }
 
+// fp32 (the small-row cuBLAS plan): h = silu(a) b from ab = [a | b] [M][2 HID]; 4 hidden units (16 B) per thread.
+__global__ void __launch_bounds__(256)
+swiglu_f32_kernel(const float* __restrict__ ab, float* __restrict__ h, long long nvec, int HID) {
+  const int per_row = HID / 4;
+  for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < nvec; i += (long long)gridDim.x * blockDim.x) {
+    const long long row = i / per_row;
+    const int c = (int)(i - row * per_row) * 4;
+    const float4 a = *reinterpret_cast<const float4*>(ab + row * 2 * HID + c);
+    const float4 b = *reinterpret_cast<const float4*>(ab + row * 2 * HID + HID + c);
+    float4 o;
+    o.x = a.x / (1.f + __expf(-a.x)) * b.x;
+    o.y = a.y / (1.f + __expf(-a.y)) * b.y;
+    o.z = a.z / (1.f + __expf(-a.z)) * b.z;
+    o.w = a.w / (1.f + __expf(-a.w)) * b.w;
+    *reinterpret_cast<float4*>(h + row * HID + c) = o;
+  }
+}
+
+// fp32 SwiGLU backward from a cuBLAS dh [M][HID] and ab = [a | b]: dab [M][2 HID] = [dA | dB]; 4 hidden units per thread.
+__global__ void __launch_bounds__(256)
+swiglu_bwd_f32_kernel(const float* __restrict__ dh, const float* __restrict__ ab, float* __restrict__ dab, long long nvec, int HID) {
+  const int per_row = HID / 4;
+  for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < nvec; i += (long long)gridDim.x * blockDim.x) {
+    const long long row = i / per_row;
+    const int c = (int)(i - row * per_row) * 4;
+    const float4 d = *reinterpret_cast<const float4*>(dh + row * HID + c);
+    const float4 a = *reinterpret_cast<const float4*>(ab + row * 2 * HID + c);
+    const float4 b = *reinterpret_cast<const float4*>(ab + row * 2 * HID + HID + c);
+    const float dd[4] = {d.x, d.y, d.z, d.w}, aa[4] = {a.x, a.y, a.z, a.w}, bb[4] = {b.x, b.y, b.z, b.w};
+    float da[4], db[4];
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+      const float sg = 1.f / (1.f + __expf(-aa[e]));
+      da[e] = dd[e] * bb[e] * sg * (1.f + aa[e] * (1.f - sg));
+      db[e] = dd[e] * aa[e] * sg;
+    }
+    *reinterpret_cast<float4*>(dab + row * 2 * HID + c) = make_float4(da[0], da[1], da[2], da[3]);
+    *reinterpret_cast<float4*>(dab + row * 2 * HID + HID + c) = make_float4(db[0], db[1], db[2], db[3]);
+  }
+}
+
 // Sum the per-CTA dgamma / dbeta partials [G][D] x 2 in a fixed order: out_g, out_b [D].
 __global__ void __launch_bounds__(1024)
 reduce_cols_kernel(const float* __restrict__ pdg, const float* __restrict__ pdb, float* __restrict__ out_g, float* __restrict__ out_b, int G, int D) {

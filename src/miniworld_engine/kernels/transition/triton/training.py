@@ -144,6 +144,10 @@ def squeeze_swiglu_bwd_saved(dy: torch.Tensor, ws: torch.Tensor, a: torch.Tensor
     TF32 mantissa, stored divided by that fp32 device scalar)."""
     return _launch_bwd(dy, dy, dy, ws, shape_key, a, b, scale)[1]
 
+#: Rows up to which dx is two GEMMs over the dAB halves instead of one over a stacked [Wa; Wb] (the stacking copy is most of the cost there).
+_DX_SPLIT_MAX_ROWS = 4096
+
+
 def swiglu_squeeze_backward_saved(xn, wa, wb, ws, dy, shape_key, saved=None, half_scale=None):
     """``(dx, dWa, dWb, dWs)`` of ``squeeze(SwiGLU(xn @ Wa^T, xn @ Wb^T))``.
 
@@ -160,5 +164,8 @@ def swiglu_squeeze_backward_saved(xn, wa, wb, ws, dy, shape_key, saved=None, hal
         dab = squeeze_swiglu_bwd_saved(dy, ws, a, b, shape_key, half_scale)
     dws = torch.matmul(dy.T, h)                               # (K, ND)
     dwab = torch.matmul(dab.T, xn)                            # [dWa; dWb]  (2*ND, K)
-    dx = torch.matmul(dab, torch.cat((wa, wb), dim=0))        # (M, K)
+    if dy.shape[0] <= _DX_SPLIT_MAX_ROWS:      # few rows: dA Wa + dB Wb, two GEMMs over the halves of dAB, no stacked copy of the weights
+        dx = torch.addmm(torch.matmul(dab[:, :nd], wa), dab[:, nd:], wb)
+    else:
+        dx = torch.matmul(dab, torch.cat((wa, wb), dim=0))    # (M, K)
     return dx, dwab[:nd], dwab[nd:], dws

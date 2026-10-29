@@ -29,6 +29,22 @@ opt-out switch: only `force_portable_kernels` sends Transition to Triton. `trans
 backward's weight-role replicas.
 Every launch is an opaque op with a fake, so all of it traces under `torch.compile(fullgraph=True)` and captures in a CUDA graph.
 
+### fp32 at few rows (the token-stream conditioning transitions, 2026-10-29)
+
+At 128 - 768 rows (the n = 2 conditioning transitions of the token stream, `[1, L, d]`) one 128-row tile per CTA leaves most SMs idle, so
+`fused_generic_sm90a` changes plan by shape (no switch):
+
+| call | plan |
+|---|---|
+| fp32 training, rows <= d, d >= 512 (`_f32_cublas`) | hand `ln_fwd` -> cuBLAS TF32 a \| b over one stacked [Wa; Wb] per step -> `swiglu_f32` -> cuBLAS addmm (residual as C); backward cuBLAS dh -> `swiglu_bwd` (fp32) -> dW GEMMs on the side stream -> cuBLAS dxn over the same [Wa; Wb] -> hand `ln_bwd` |
+| fp32 training, otherwise | the hand kernels; the step's TF32 weight copies (rounded Wa / Wb / Ws, Ws^T, [Wa; Wb]^T) in ONE `prep` launch in the forward, reused by the backward |
+| fp32 inference | the hand kernels on TF32 weight copies made once per parameter version inside the launch (a compiled call and a capture reuse them); the squeeze as a cuBLAS addmm at <= 512 rows; the fp16 path's scales (>= 16 384 rows) cached the same way |
+
+Ladder (H100, CUDA graph, `trc_fp32_single_D768`, ms, CUDA / portable / PyTorch compiled): training L128 0.075 / 0.085 / 0.087, L384 0.109 /
+0.133 / 0.138, L768 0.165 / 0.178 / 0.190; before: CUDA 0.119 / 0.139 / 0.195 and portable 0.115 / 0.152 / 0.199 (portable > PyTorch on every row).
+The portable rung at these shapes: the squeeze splits K (`_split_k_residual_kernel` sums the splits in order), the saved halves stay fp32 below 4096
+rows, dx is two GEMMs over the dAB halves, and the H100 autotune caches carry the fp32 token-stream keys.
+
 ## Tuned kernels at n = 2 (D = 64 / 128 / 256)
 
 The kernels of the n = 4 builds (D = 128: `transition_fused_{fwd,bwd}_sm90a_kernel.cu`; D = 64 / 256: `wide/kernels/`), compiled for hidden 2 D

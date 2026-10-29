@@ -215,7 +215,12 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
 _FORMS: dict = {}
 
 
-def param_forms(tag, params, build, *, inputs_scope: bool = False):
+#: Forms a capture read from the eager scope (``capture_reads_eager``): held for the life of the process, so a newer version of the
+#: parameters replacing the entry never frees memory a captured graph still reads.
+_HELD_BY_CAPTURES: list = []
+
+
+def param_forms(tag, params, build, *, inputs_scope: bool = False, capture_reads_eager: bool = False):
     """``build()`` -- the kernel-dtype forms of some parameters (casts, contiguous copies, transposes, folds) -- cached while the very same
     parameter tensors are alive and unmodified, scoped to the capture like every weight pack (``lookup``): an eager call and a captured
     step under ``static_weights()`` share the entry, so a replay re-runs none of the cast kernels; a capture without it records them once
@@ -231,12 +236,19 @@ def param_forms(tag, params, build, *, inputs_scope: bool = False):
     after it. Inference tensors carry no version counter: not cached.
 
     ``inputs_scope``: ``static_inputs()`` (whose contract covers the weights too) also shares the eager entry with a capture, as
-    ``static_weights()`` does for every call. ``tag`` names the form (any hashable)."""
+    ``static_weights()`` does for every call. ``capture_reads_eager``: a capture is served the eager entry its warm-up made, without
+    ``static_weights()`` -- for the inference-only forms (grad off), the contract ``kernels._tf32.tf32_cached`` has for the portable kernels;
+    such an entry is then held for good. ``tag`` names the form (any hashable)."""
     params = tuple(params)
     try:
         key = (tag, tuple((p.data_ptr(), p._version, p.dtype, tuple(p.shape)) for p in params))
     except RuntimeError:
         return build()
+    if capture_reads_eager and _graph_capture_id() is not None:
+        eager = _FORMS.get((None, key))
+        if eager is not None and all(r() is p for r, p in zip(eager[0], params, strict=True)):
+            _HELD_BY_CAPTURES.append(eager[1])   # the graph reads it from now on: never freed under it
+            return eager[1]
     sk = (None, key) if inputs_scope and _STATIC_INPUTS[0] else scoped(key)
     if sk is None:
         return build()
