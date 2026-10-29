@@ -490,7 +490,17 @@ def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5, *, packed_hopper=Fa
     return (out, *sv)
 
 
-def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts, rms=False):
+def _tsum(part, which, mod, M):
+    """The table-sum arguments of a backward row kernel (``tsum.cuh``): with tables shared by the samples (mod has fewer rows than M) the
+    kernel sums their gradient over the samples into ``part`` (a ``sm100_atom_local.TableSums``) instead of storing it per sample row."""
+    if mod.shape[0] == M:
+        return (None, 0)
+    if part is None:
+        raise ValueError("shared tables (fewer rows than the activations) need the table-sum partials (sm100_atom_local.TableSums)")
+    return (getattr(part, which), int(part.J))
+
+
+def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts, rms=False, part=None):
     """dy, t, mod (st), x2 -> DT [M, 128], HH [M, 256], DAB [M, 512]; dts into dmod[:, 640:768]; d bts += the column sums. ``rms`` (ESMFold2):
     the gate st is raw (no sigmoid backward). dmod may be a column view of a wider tensor (rows dmod.stride(0) apart)."""
     M = dy.shape[0]
@@ -534,12 +544,12 @@ def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts, rms=False):
     ntile = M // 16
     d = _dev(dy)
     atom_kernel("trg_rms" if rms else "trg", d)(
-        (min(num_sms(d), ntile), 1, 1), (384, 1, 1), *maps, dbts, int(ntile), int(mod.shape[0])
+        (min(num_sms(d), ntile), 1, 1), (384, 1, 1), *maps, dbts, int(ntile), int(mod.shape[0]), *_tsum(part, "tr", mod, M)
     )
     return DT, HH, DAB
 
 
-def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1e-5, rms=False):
+def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1e-5, rms=False, part=None):
     """-> DA, DU, GATED, DO [M, 128]; dmod blocks 2-4, dP block 3 (dg), D [A, 4, N]; d bsc2 / d bos into DBIAS. ``rms`` (ESMFold2): AdaLN 2 an
     RMSNorm with a raw scale, the output gate raw."""
     M = dy.shape[0]
@@ -606,11 +616,12 @@ def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1
         int(ntile),
         float(eps),
         int(mod.shape[0]),
+        *_tsum(part, "post", mod, M),
     )
     return DA, DU, GATED, DO
 
 
-def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5):
+def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5, part=None):
     """dP [M, 512], a, mod (s1), DA -> d single [M, 128]; dmod blocks 0-1; d bsc1 into DBIAS[0:128], d bq into DBQ."""
     M = a.shape[0]
     DS = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
@@ -655,11 +666,12 @@ def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5):
         int(ntile),
         float(eps),
         int(mod.shape[0]),
+        *_tsum(part, "pre", mod, M),
     )
     return DS
 
 
-def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5, parallel=False, rms=False, dmkv=None):
+def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5, parallel=False, rms=False, dmkv=None, part=None):
     """The cross-attention mode's ``pre_bwd``: dP = [dq | dk | dv | dg] with WT the real [Wq; Wk; Wv; Wg]^T; k and v come from xkv = LN(x1)
     sigmoid(mkv[:, :128] + bs) + mkv[:, 128:], whose backward (dxkv = dk Wk + dv Wv, in the kernel) is added to dx1 before AdaLN 1's.
     -> d single [M, 128] and dmkv [M, 256] = [d pre-sigmoid scale | dxkv]; d bs (fp32 [128]) is added into DBS. ``parallel`` (AlphaFold 3,
@@ -695,6 +707,7 @@ def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5,
         int(ntile),
         float(eps),
         int(mod.shape[0]),
+        *_tsum(part, "pre", mod, M),
     )
     return DS, dmkv
 
@@ -1033,6 +1046,7 @@ def gemm32(
             int(M),
             int(k),
             int(out2 is not None),
+            int(gate.shape[0]),
         )
         return out
     atom_kernel32("gemm", d)(
@@ -1060,6 +1074,7 @@ def gemm32(
         int(gate.stride(0)) if gate is not None else 0,
         int(rndmask),
         int(a_grp),
+        int(gate.shape[0]) if gate is not None else int(M),
     )
     return out
 
@@ -1115,7 +1130,8 @@ def ln32(c, g1, g2, g3=None, eps=1e-5, out=None):
 
 
 def adaln32(a, scale, shift, eps=1e-5, rms=False):
-    """LN(a) * scale + shift: a [M, 128] fp32, scale / shift fp32 [M, 128] views (the stored sigmoid scale). ``rms`` (ESMFold2): RMS(a)."""
+    """LN(a) * scale + shift: a [M, 128] fp32, scale / shift fp32 [M or mrows, 128] views (the stored sigmoid scale; mrows < M: tables
+    shared by the M / mrows samples, row r reads table row r % mrows). ``rms`` (ESMFold2): RMS(a)."""
     out = _new(a)
     atom_kernel32("adaln_rms" if rms else "adaln", _dev(a))(
         _rowgrid(a.shape[0]),
@@ -1128,6 +1144,7 @@ def adaln32(a, scale, shift, eps=1e-5, rms=False):
         out,
         int(a.shape[0]),
         float(eps),
+        int(scale.shape[0]),
     )
     return out
 
@@ -1156,10 +1173,11 @@ def gate32(g, o):
 
 
 def tail_bwd32(dy, t, st, dst, rms=False):
-    """-> dt = dy * st; dst (a view, written) = dy * t * st (1 - st) (``rms``, ESMFold2's raw gate: dy * t)."""
+    """-> dt = dy * st; dst (a view, written) = dy * t * st (1 - st) (``rms``, ESMFold2's raw gate: dy * t). st / dst with fewer rows than dy
+    (tables shared by the samples): dst summed over the samples (fixed order)."""
     dt = _new(dy)
     atom_kernel32("tail_b_rms" if rms else "tail_b", _dev(dy))(
-        _rowgrid(dy.shape[0]),
+        _rowgrid(st.shape[0]),
         (256, 1, 1),
         dy,
         t,
@@ -1169,6 +1187,7 @@ def tail_bwd32(dy, t, st, dst, rms=False):
         dst,
         int(dst.stride(0)),
         int(dy.shape[0]),
+        int(st.shape[0]),
     )
     return dt
 
@@ -1186,12 +1205,13 @@ def adaln_bwd32(
     a, scale, dx, dres, dscale, dshift, y=None, so=None, dso=None, eps=1e-5, rms=False
 ):
     """AdaLN backward: -> da = dres + LN backward of dx * scale; dscale (view) = dx LN(a) scale (1 - scale), dshift (view) = dx. With y:
-    also d so (view) = da y so (1 - so) and the returned dyo = da so (the attention output gate upstream of a1 = a + so y)."""
+    also d so (view) = da y so (1 - so) and the returned dyo = da so (the attention output gate upstream of a1 = a + so y). scale (and so,
+    dscale, dshift, dso) with fewer rows than a: tables shared by the samples, their gradients summed over the samples (fixed order)."""
     M = a.shape[0]
     da = _new(a)
     dyo = _new(a) if y is not None else None
     atom_kernel32("adaln_b_rms" if rms else "adaln_b", _dev(a))(
-        _rowgrid(M),
+        _rowgrid(scale.shape[0]),
         (256, 1, 1),
         a,
         scale,
@@ -1211,6 +1231,7 @@ def adaln_bwd32(
         dyo,
         int(M),
         float(eps),
+        int(scale.shape[0]),
     )
     return da, dyo
 

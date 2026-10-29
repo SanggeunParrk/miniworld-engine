@@ -75,6 +75,7 @@ KERNELS = {
     "cond_ln": ("lcross", "local_cond_ln", 0),
     "cln_b": ("lcross", "local_cond_ln_bwd", 0),
     "ssum": ("lcross", "local_sample_sum", 0),
+    "tsum": ("lcross", "local_table_sum", 0),
     "slide": ("lslide", "local_slide_edges", 54912),
     "slide_p": ("lslide", "local_slide_bwd_prep", 0),
     "slide_b": ("lslide", "local_slide_bwd", 92416),
@@ -927,6 +928,36 @@ def sample_sum(x, A, out=None):
     _load("ssum", d)((max(1, min(8 * num_sms(d), (total + 255) // 256)), 1, 1), (256, 1, 1), x, int(x.stride(0)), out, int(out.stride(0)),
                      int(A), int(n), int(cols))
     return out
+
+
+class TableSums:
+    """The shared conditioning's table gradient summed over the samples inside the backward row kernels (``sm100_atom/tsum.cuh``): one
+    fp32 partial buffer per kernel (``tr`` [n / 16, J, 16, 128], ``post`` [.., 384], ``pre`` [.., 256, or 512 with the K / V modulation]),
+    then :meth:`finish` adds the partials of each table tile in slot order into the bf16 gradient [n, 1024] = [dmod | dmkv]."""
+
+    def __init__(self, A, n, cross, device):
+        ntile = A * n // 16
+        d = _dev_index(device)
+        self.A, self.n, self.ntile = A, n, ntile
+        self.U = 2 * min(num_sms(d), ntile)                         # the row kernels' grid: min(SMs, tiles) CTAs, two warpgroups each
+        self.J = self.U // (n // 16) + 2                            # slots per table tile (an upper bound)
+        mk = lambda c: torch.empty(n // 16, self.J, 16, c, device=device, dtype=torch.float32)
+        self.tr, self.post, self.pre = mk(128), mk(384), mk(512 if cross else 256)
+        self.cross = cross
+
+    def finish(self, out=None):
+        n = self.n
+        out = torch.empty(n, 1024, device=self.tr.device, dtype=torch.bfloat16) if out is None else out   # (no K / V: 768.. unwritten)
+        d = _dev(self.tr)
+        total = n * self.pre.shape[-1] // 8
+        _load("tsum", d)((max(1, min(4 * num_sms(d), (total + 255) // 256)), 3, 1), (256, 1, 1),
+                         self.tr, 128, 128, 640, 640, self.post, 384, 384, 256, 256, self.pre, self.pre.shape[-1], 256, 0, 768,
+                         out, int(out.stride(0)), int(n), int(self.A), int(self.U), int(self.ntile), int(self.J))
+        return out
+
+
+def _dev_index(device):
+    return device.index if device.index is not None else torch.cuda.current_device()
 
 
 def cond_ln(c, gamma, eps=1e-5):

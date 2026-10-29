@@ -72,7 +72,7 @@ extern "C" __global__ void __launch_bounds__(512, 1)
 atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap mo,
                const __grid_constant__ CUtensorMap mo2, const float* __restrict__ bias, const float* __restrict__ res,
                const float* __restrict__ gate, int M, int N, int K, int NT, int a_col0, int b_row0, int b_col0, int ocol0, int sigmask,
-               int mode, int save2, int res_ld, int gate_ld, int rndmask, int a_grp) {
+               int mode, int save2, int res_ld, int gate_ld, int rndmask, int a_grp, int gate_rows) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -213,7 +213,7 @@ atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ C
           } else {
             if (save2) put_chunk(&mo2, sbase, nst, lane, n0 + 32 * c, r0, v);
             const float4* rp = reinterpret_cast<const float4*>(res + (size_t)row * res_ld + n0 + 32 * c);
-            const float4* gp = reinterpret_cast<const float4*>(gate + (size_t)row * gate_ld + n0 + 32 * c);
+            const float4* gp = reinterpret_cast<const float4*>(gate + (size_t)(row % gate_rows) * gate_ld + n0 + 32 * c);   // (shared tables: row % rows)
 #pragma unroll
             for (int q = 0; q < 8; ++q) {
               const float4 rr = __ldg(rp + q), gg = __ldg(gp + q);
