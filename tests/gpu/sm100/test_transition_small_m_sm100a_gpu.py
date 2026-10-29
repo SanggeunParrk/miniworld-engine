@@ -103,6 +103,26 @@ def test_every_squeeze_and_expand_build_agrees(n, monkeypatch):
         assert _rel(o, ref) < 2e-3, key  # fp32 sums in another order, one bf16 rounding of the output
 
 
+@pytest.mark.parametrize("fp32_masters", [True, False], ids=["fp32-masters", "bf16-params"])
+@pytest.mark.parametrize("n", [2, 4])
+def test_every_weight_gradient_tile_width_agrees(n, fp32_masters, monkeypatch):
+    """The weight-gradient kernel's output tile width (``SX_DW_NT``, picked to fit beside the d_xn clusters) changes only the tiling of
+    the outputs, not any element's sum: every width gives the same gradients, bit for bit."""
+    mod = _module(n, fp32_masters)
+    x = torch.randn(1, 768, 384, device="cuda", dtype=torch.bfloat16)
+    dy = torch.randn_like(x)
+    names = _spy(monkeypatch)
+    outs = {}
+    for nt in w.SX_DW_NT:
+        monkeypatch.setattr(w, "SX_DW_NT_FORCE", nt)
+        names.clear()
+        outs[nt] = _step(mod, x, dy)
+        assert f"sx_dw{nt}" in names, names
+    first = outs[w.SX_DW_NT[0]]
+    for nt, got in outs.items():
+        assert all(torch.equal(got[k], first[k]) for k in first), nt
+
+
 @pytest.mark.parametrize("n", [2, 4])
 def test_step_is_bit_identical(n):
     mod = _module(n, True)
