@@ -69,8 +69,13 @@ struct PairIdx {
   int s, i, j;
   DEV void init(int row0, int L) { s = row0 / (L * L); i = (row0 / L) % L; j = row0 % L; }
   DEV void advance(int rows, int L) { j += rows; while (j >= L) { j -= L; if (++i == L) { i = 0; ++s; } } }
-  DEV float mask(const uint8_t* tm, int tok, int L) const {   // tok: offset in the tile
-    return tm == nullptr ? 1.f : ((__ldg(tm + s * L + i) && __ldg(tm + s * L + j + tok)) ? 1.f : 0.f);
+  // the two tokens' masks of this thread (tile offsets tok, tok + 8): both loads issued together, no short-circuit
+  DEV void mask2(const uint8_t* tm, int tok, int L, float& m0, float& m1) const {
+    if (tm == nullptr) { m0 = m1 = 1.f; return; }
+    const uint8_t* row = tm + s * L;
+    const uint32_t ri = __ldg(row + i), a0 = __ldg(row + j + tok), a1 = __ldg(row + j + tok + 8);
+    m0 = (ri & a0) ? 1.f : 0.f;
+    m1 = (ri & a1) ? 1.f : 0.f;
   }
 };
 
@@ -214,7 +219,7 @@ __global__ void __launch_bounds__(512, 1)
       const int i = u / NCH, pb = u % NPB, db = u & 1;
       if (u % NCH == 0) {
         if (i > 0) pix.advance(G * TOK, a.L);
-        mA = pix.mask(a.tmask, tok0 + tr, a.L); mB = pix.mask(a.tmask, tok0 + tr + 8, a.L);
+        pix.mask2(a.tmask, tok0 + tr, a.L, mA, mB);
       }
       PW(0, mbar_wait(&B.pre_full[pb], (u / NPB) & 1));
       PW(1, mbar_wait(&B.da_full[db], (u >> 1) & 1));
