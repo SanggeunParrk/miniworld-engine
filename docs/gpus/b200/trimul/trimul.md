@@ -312,8 +312,15 @@ the LN CTAs make one pass with no per-tile token reductions. Front CTAs keep tri
 layout. Front CTAs 96 -> 80 (D128 bidirectional) / 112 -> 84 (one direction). Partials stay deterministic.
 In the graph (nsys, D128 bidirectional B1): L768 430.5 -> 311.0 us, L384 122.7 -> 103.6 us; module (one graph per
 process, alternating, ms): fwd + bwd L384 0.555 -> 0.527, L768 2.012 -> 1.875; MiniWorld block L384 0.973 -> 0.947,
-L768 3.762 -> 3.619. The front epilogue (~5k clk/tile) and the dy refill after dWg^T are what is left in it. `b1s` (D64)
-has the same imbalance (front-bound; its LN CTAs wait ~72 % of the time) and is not yet redone.
+L768 3.762 -> 3.619. The front epilogue (~5k clk/tile) and the dy refill after dWg^T are what is left in it. The ring
+hand-over (generic stores read by bulk copies on another SM) has a writer-side fence.proxy.async before the release chain
+(55e51f66; cost not measurable) and a 500-replay bitwise stress test.
+
+**`b1s` on the same design (2026-10-30, bffcb18d).** At C = 64 every operand fits double buffered (front sets tri | xn | dy,
+Q / G, LN dPr / tri / dnr); the M = 64 products run as M = 128 MMAs with a padding block nothing reads; sample-major 4-D maps
+kept; front CTAs 80 / 96 -> 90 / 90. D64 B4 L768 bidirectional (the template stack): b1s in the graph 972.2 -> 787.6 us;
+fwd + bwd 3.557 -> 3.332 ms, MiniWorld block 6.930 -> 6.803 ms (medians of 3 alternating processes). Its front and LN CTAs
+now each wait ~50 % on the ring hand-over rather than on compute.
 
 ### D64 (2026-10-02, the first batched width, B <= 8)
 
