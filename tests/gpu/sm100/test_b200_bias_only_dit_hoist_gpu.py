@@ -335,7 +335,8 @@ def test_sm100_one_pass_hoist_against_fp64(R, N, shift):
 # (rows, weight rows, row mean, dtype): bf16 past the one-chunk kernels (forward: weight rows on M, one launch up to 384 rows, 384 + 192
 # at 576; backward: the normalised-tile kernel, dbias chunks of 128 -- two d LN0 accumulators up to 256 rows, one past that, an S-only
 # launch past 384) and fp32 / TF32 (forward: one launch up to 64 rows, past that CTA pairs -- an odd tile count, whose last tile pairs
-# with zero rows, a partial last chunk, 576 = 320 + 256 in two launches; backward chunks of 32, an S-only launch past 384), a grid whose
+# with zero rows, a partial last chunk, 576 = 320 + 256 in two launches; backward chunks of 32, an S-only launch past 384, and up to 16
+# rows chunks of 16 with W' resident and three tile slots, -DSMALLN: 3, 12, 16 rows, a tile count not a multiple of 3), a grid whose
 # CTAs end a tile apart, rows 20 standard deviations off zero, five tiles with a partial last chunk
 SM100_CHUNKS = [
     (5 * 128 * 128, 80, 0.5, BF),
@@ -352,6 +353,8 @@ SM100_CHUNKS = [
     (149 * 128, 200, 0.0, F32),
     (5 * 128, 136, -1.0, F32),
     (3 * 128, 72, 0.0, F32),
+    (149 * 128, 12, 0.5, F32),
+    (5 * 128, 16, 20.0, F32),
 ]
 
 
