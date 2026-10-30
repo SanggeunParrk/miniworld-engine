@@ -8,6 +8,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-10-30
+
 ### Fixed
 
 - H100 TriangleAttention inference at large L ran out of memory inside a model. The B-sample plan sized a launch against the whole device. FoldBench's 2432-token targets then asked for one 22.6 GiB q | k | v | g block (Protenix's 4 templates, d_pair 64) next to 34 GiB of the model.
