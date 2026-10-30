@@ -1016,3 +1016,60 @@ Nsight Compute is not available on these nodes now: `gcsudo` refuses `ncu`, so t
   (Q / dO A operands or two dQ rows); not done.
 - dbias stays a fp32 reduce-add (dx / dγ / dβ / dW_b run-to-run within 1e-5 relative); a deterministic dbias would need the partials of
   every row group stored and summed in order (1.8 GB at L 768), not pursued.
+
+## d_pair 128 core backward · what bounds it, and the TMEM re-layout that was not built (2026-10-30)
+
+The question: re-plan TMEM so that `triattn_bwd_kv` can read K_r / V_r as TMEM operands and `triattn_bwd_q` can turn a third S buffer
+(the two limits named in the section above). Before building it, each limit was lifted in a timing-only probe build of
+`triattn_sm100.cu` (results wrong, timing representative) and the kernels were timed alone (`torch.profiler`, mean of 10-20 calls, B 1,
+L 768, random q / k / v / bias / dO, node 2 GPU 6 with the utilisation filler; base 36c0d4ad: `bwd_kv` 915, `bwd_q` 922 µs, run to run
+±0.5 %):
+
+| probe (what it removes or adds) | `bwd_kv` µs | `bwd_q` µs |
+|---|---|---|
+| base | 915 | 922 |
+| S^T / dP^T read A from TMEM (the K / V-as-TMEM-operand limit lifted; A aliased on the dK / dV columns) | 899.5 | |
+| a third S buffer (aliased on the dQ columns) | | 935 |
+| no dbias reduce-adds | | 891 |
+| no ex2 (`x * 0.75`) / half of the ex2 on the FMA polynomial (`TB_POLY`) | 886 / 981 | 840 / 1014 |
+| packs as a truncating PRMT instead of F2FP / lse, delta from registers / no bias^T loads / no TMEM loads | 915 / 920 / 908 / 915 | 928 / - / - / - |
+| no -lse, -delta terms in the math (x = S scl + b, dS = P dP) / with S^T from TMEM too | 860 / 843 | 907 |
+| S^T(y + 2) only after the gradient GEMMs of y retired (what P^T written in place over S^T costs) / with both rows above | 1000 / 858 | |
+| Q / dO ring 6 -> 7 slots / the dK / dV drain skipped | 921 / 894 | |
+
+So neither limit binds the kernel as it runs: K / V from TMEM is worth 1.7 % of `bwd_kv`, and a third S buffer makes `bwd_q` slower. What
+binds both is the grad warps' arithmetic, two warps per SM sub-partition (one per group). Measured per warp instruction on one SMSP
+(microbenchmark, nvcc 13.1): MUFU.EX2 8 clk (16 / clk / SM), FFMA2 / FMUL2 2 clk, F2FP ~2 clk on the same FMA pipe, MUFU and FMA pipes
+overlapping fully; `ex2.approx.f16x2` / `.bf16x2` issue as two MUFU ops (16 clk: no packed exponential). A pair of scores costs the key
+side 16 clk of MUFU and 13 clk of FMA pipe (3 FFMA2 + FMUL2 + 2 F2FP), the query side 16 and 12: two pipes each ~80 % of the other's
+load, so neither the ex2 nor the FMA work alone moves the kernel and only removing both does (`NOMATH`: 746 µs). The SM clock under the
+power cap is ~1.53 GHz here (clock64 against wall time), so each backward kernel's ex2 floor at L 768 is ~500 µs, not 400.
+
+clock64 timelines (one CTA, L 768):
+- `bwd_kv`: a group spends ~1550-1900 clk of math per 64-query stage (two TMEM loads ~120-165 clk each, the rest arithmetic), so a stage
+  costs ~935-1125 clk against the MUFU's 512; at each task boundary (24 stages) both groups drain dK / dV at once and the next task's first
+  S^T waits for its Q / dO, ~1800 clk of the task's ~27 000.
+- `bwd_q`: a 64-key sub-tile is ~4250 clk: four stages of ~700, the dbias pass ~720 (two group barriers, the 16 KiB partial, the proxy
+  fence, the reduce) and the next bias row ~390; at each task boundary (48 stages) the dQ drain and the Q / dO copy take ~3400 clk, and
+  the next task's staging (68 KiB of cold Q / dO, issued at stage 5 after the copy's release) queues ahead of the K / V tiles and holds an
+  S issue ~2200 clk.
+
+The re-layout that would move the arithmetic (not built): in `bwd_kv`, fold -lse / (scale log2 e) and -delta into the MMA as a 16-wide
+K slice (ones x T^T, T = the row terms as three bf16 terms each, exact to ~2^-24), so a pair costs one FFMA2 and one FMUL2. TMEM for it:
+P^T | dS^T in place over S^T | dP^T (frees 128 columns), K_r / V_r of both rows (64) and the two ones slices (16) in TMEM, one MMA issuer
+(so S^T(y + 2) follows the gradient GEMMs of y in pipe order and the K / V tcgen05.cp sits between tasks): 0-255 S^T | dP^T of the two
+groups, 256-319 K / V, 320-335 the ones slices, 384-511 dK / dV. The probes bound it at ~858 µs (-6 %). It was tried with the ones
+slices in shared memory instead (TMEM unchanged, T written per Q / dO slot by a twelfth warp, Q / dO ring 5 slots for the shared
+memory): 970 µs, of which the in-kernel T chain cost ~68 µs (the S^T issue waits for the slot's lse / delta to land and be converted)
+and the two shared-memory K-slice MMAs ~21 µs; with T off the critical path (a racy timing build) 902. A fold that pays needs T
+delivered like Q / dO (a [B, N, H, S, 8] bf16 tensor, 38 MB at L 768, from the delta kernel, or a deeper lse / delta ring ahead of the
+Q / dO ring) as well as the TMEM operands; not done in this round.
+
+Also tried on `bwd_q` and not kept: the next task's staging spread one pair row at a time over the task (no change: 924 against 923.7
+µs, alternating processes); dbias reduce-adds per warp (32 rows each, no group barrier): +3-4 % (four times the TMA operations); the next
+bias row read during the pass under the partial's fence, and dQ stored per warp: `bwd_q` already sits at the 168-register cap (320
+threads allocate as 384) and the 16 extra live registers spilled 44-56 B, +1-3 %. A deterministic dbias was not attempted: the
+reduce-adds cost 3.4 % of `bwd_q`, and ordered partials are 1.8 GB at L 768.
+
+Module training step unchanged (CUDA graph, bf16-mixed, starting node, last 11 keys masked, dropout 0.25, two runs): L 384 0.653,
+L 731 3.370, L 768 3.366 ms.
