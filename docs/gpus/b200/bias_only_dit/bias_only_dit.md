@@ -512,7 +512,7 @@ once per pair for every solver step (MiniWorld's `hoist_pair_bias` hoists only u
 The hoist has no switch: implementation PYTORCH takes the PyTorch fold; the dW' row chunks are the split heuristic's.
 `ln0_bwd_rows` is one warp per row pair with shuffles only (no shared memory, barriers or atomics): bitwise repeatable.
 B200 runs the one-pass kernels of [T10](#t10--the-hoist-in-one-pass-each-way-bo_hoist_sm100cu-2026-10-29-bf16) instead at every
-weight-row count (blocks x heads; MiniWorld's 24 x 16 = 384), except the fp32 forward past 128 rows (`hoist.SM100_FWD_MAX_ROWS`).
+weight-row count (blocks x heads; MiniWorld's 24 x 16 = 384), bf16 and fp32 (the fp32 forward past 128 rows since 2026-10-30, T10).
 
 Measured (B200, 2026-10-10, hoist2; `bench_scripts/bo_hoist_bench.py`): 24 blocks of 16 x 48, A = 48, bf16, checkpointing off, one
 training step (forward + backward) per CUDA graph, hoist off / on replayed in alternation, median of 9:
@@ -688,10 +688,27 @@ rows; MiniWorld's hoisted stack is 24 blocks x 16 heads = 384 rows (bf16-mixed; 
   S-only launches past 384 rows (the pair read again). dx = rstd (dy - mean(dy) - xhat mean(dy xhat)) from xhat = hi + lo, written
   over the tile and TMA-stored. Replaces `bo_hoist_bwd2_sm100` (deleted). bf16 up to 64 rows keeps bo_hoist_bwd_sm100 (R 7.08 M:
   N64 1.24 vs 1.30 ms, N16 0.66 vs 1.30).
-- Gate (`hoist.sm100_served`): the backward at every N; the forward at every bf16 N and fp32 up to 128 rows
-  (`hoist.SM100_FWD_MAX_ROWS`): the fp32 forward reads the pair again per 128-row launch (W' 64 KB per 128 rows beside 64 KB stages)
-  and loses to T7 past that (N384, R 0.15 / 0.59 / 7.08 M: 119 / 414 / 4983 us against 79 / 299 / 3665; launches of 192 rows 104 /
-  351 / --).
+- Forward, fp32 past 64 rows (2026-10-30): `bo_hoist_fwdx_sm100` (`-DFWDX -DTF32`), CTA pairs. The fp32 W' (512 B per weight
+  row) does not fit beside 64 KB fp32 tiles in one CTA: bo_hoist_fwd_sm100 -DTF32 read the pair again per 128-row launch and lost to
+  T7 past 128 rows (N384, R 0.15 / 0.59 / 7.08 M: 119 / 414 / 4983 us against 79 / 299 / 3665), which therefore ran it. A cluster of
+  two CTAs keeps W' RESIDENT, split between them: products M 256 (the two CTAs' tiles) x N 64 (a chunk of 64 weight rows) x K 8 on
+  `cta_group::2` with B split by N, so each CTA holds 32 rows of every chunk (16 KB) -- 384 rows in 96 KB. The tile is the A operand
+  in TENSOR memory: four normaliser warps (thread = pair row = TMEM lane) take the statistics with bo_hoist_fwd_sm100's arithmetic,
+  write LN0 rounded to the nearest tf32 (`cvt.rna`, as the LN0 rows + TF32 GEMM path rounds its operand) into A[i & 1] by
+  `tcgen05.st` and reload the shared-memory slot at once (one 64 KB slot). Two drain groups take alternate chunks from four 64-column
+  accumulators and stage [32 weight rows][128 pair rows] (16 KB, two per group) for TMA stores of 512-B rows. 448 threads, 88
+  registers, no spills; launches of up to 384 rows (576 = 320 + 256, the pair read twice); an odd last tile pairs with zero rows
+  that are not stored. Bias against fp64 as before (5.1e-4 relative to T7, its TF32 rounding).
+  How it got there (N384, R 7.08 M, us; T7 3690): W' streamed through a 3-slot ring from L2 with the tile in smem 3733, the tile in
+  TMEM 3292 -- a `%globaltimer` trace showed each SM's TMA intake at ~30 GB/s shared by the tiles and W' (a 32 KB chunk 2-4 us from
+  issue to arrival); W' resident on CTA pairs, stores per thread (`st.global` of one 128-B line per warp instruction) 4547, of which
+  1190 without the stores; the drains' acc_empty arrivals as `mbarrier.arrive.relaxed.cluster` instead of the default release
+  (a release arrive waits for the thread's earlier global stores to be performed) 3602; the staged TMA stores of 512-B rows 2520
+  (the floor, pair + bias bytes at 6.31 TB/s: 2300). Not kept: W' chunk order rotated per CTA (3538: the CTAs write different
+  weight rows at once), both drain groups on every chunk (3881).
+- Gate (`hoist.sm100_served`): forward and backward at every N, bf16 and fp32 (`hoist.SM100_FWD_MAX_ROWS` is gone). fp32 up to 64
+  rows keeps bo_hoist_fwd_sm100 -DTF32 (one launch; us at R 0.15 / 0.59 / 7.08 M, fwd_sm100 / fwdx: N64 31.4 / 34.3, 102 / 110,
+  1103 / 1200; N96 35.9 / 36.4, 121 / 117, 1340 / 1274; N128 40.8 / 38.0, 139 / 124, 1545 / 1357).
 
 Hoist op alone (B200 GPU 7 of node 2 beside the utilisation filler; CUDA graphs of 5 calls, T7 / the previous sm100 kernels / now,
 median of 9 in one process, us; R = 147 k / 590 k: the shared pair at L384 / L768, 7.08 M: a pair per sample at A48 L384):
@@ -705,6 +722,16 @@ median of 9 in one process, us; R = 147 k / 590 k: the shared pair at L384 / L76
 | bf16 N128 forward / backward | -- | -- | 1549 / 878 / **673**, 3893 / 2045 / **1421** |
 | fp32 N384 backward | 157.1 / 248.1 / **133.5** | 567.6 / 881.4 / **473.6** | 7095 / 10707 / **5513** |
 | fp32 N16 backward | -- | -- | 3343 / 2120 / **1887** |
+
+fp32 forward past 64 rows (2026-10-30, `bo_hoist_fwdx_sm100`; same harness, T7 / the previous sm100 kernel (row-range launches of
+128) / **now**, us):
+
+| | R 147 k | R 590 k | R 7.08 M |
+|---|---|---|---|
+| fp32 N192 forward | 59.0 / 71.0 / **40.8** | 222.5 / 241.0 / **138.8** | 2662 / 2784 / **1567** |
+| fp32 N256 forward | 65.9 / 81.0 / **44.7** | 248.9 / 276.6 / **155.7** | 3047 / 3284 / **1776** |
+| fp32 N384 forward | 80.0 / 121.0 / **59.2** | 301.2 / 415.0 / **219.8** | 3714 / 5015 / **2524** |
+| fp32 N576 forward | 102.8 / 197.7 / **94.4** | 391.4 / 673.7 / **335.8** | 5007 / 8303 / **3848** |
 
 The one place the new kernels lose: bf16 N576 forward at R 147 k (two launches, +3.5 us; the backward gains 16 us there).
 Floors (HBM bytes at 6.31 TB/s) for bf16 N384: forward 24 / 96 / 1150 us, backward 30 / 120 / 1430 us.
@@ -1379,6 +1406,11 @@ torch.profiler, kernel time per step (3 eager steps), A = 48, 16 x 48, B200 GPU 
 - a pair per sample, one block behind the hoist: bf16 L384 / L768 2.38 / 7.22 ms, the hoist 0.98 / 3.86 ms of it (backward 646 /
   2566 us, forward 330 / 1289: 94-95 % / 98-100 % of the bytes floor); fp32 L384 4.98 ms, the hoist backward (`bo_hoist_bwd3` TF32,
   N 16) 1.88 ms against a 1.22 ms floor -- the largest kernel below its floor left in these steps (Limits).
+- the fp32 forward on CTA pairs (2026-10-30; `bo_step.py`, `pair_bias_all` + nb blocks fwd + bwd in one CUDA graph, median of 9 x
+  10 replays, 36c0d4ad / now, two runs each, ms): fp32 shared pair 24 blocks (N384) L384 51.30, 51.18 / **50.74, 50.85**; L768 99.41,
+  99.67 / **98.97, 99.42**; fp32 pair per sample 5 blocks (N80) L384 17.70, 17.74 / **17.61, 17.65**; unchanged paths (noise): fp32
+  per sample 2 blocks (N32) L768 28.58 / 28.63, bf16 shared 24 blocks L384 27.22, 27.29 / 27.28, 27.18, L768 52.39, 52.17 / 52.18,
+  52.35, bf16 per sample 5 blocks L384 9.69, 9.77 / 9.76, 9.62, 2 blocks L768 14.46 / 14.44.
 
 ## What was tried and not kept
 
@@ -1422,8 +1454,8 @@ Inference:
   group's v tiles split by N would halve each SM's v intake) and computes 16 / 32 unused columns per sample for 48- / 32-wide heads.
 - The fused bf16 backward loads only when a CUDA runtime call precedes it on autograd's thread (Measurements 2026-10-20).
 - Per-sample pair (T9, T10): P stored (906 MB per block at A48 L768); Hopper's recompute is the memory lever left. The hoist serves
-  every weight-row count; what remains below the bytes floor: the fp32 forward past 128 rows (T7 runs it: W' and the 64 KB fp32
-  stages do not fit beside each other, so each 128-row launch reads the pair again), the fp32 backward at small N (bo_hoist_bwd3
+  every weight-row count; what remains below the bytes floor: the fp32 forward past 384 rows (two launches: the pair read twice),
+  the fp32 backward at small N (bo_hoist_bwd3
   TF32 N16 at R 7.08 M 1.89 ms against a 1.22 ms floor: one 64 KB tile slot per group, nothing left for a third), and bf16 N576's
   forward at R 147 k (two launches).
 - Training: half the step is cuBLAS at the power cap; the row kernels and the SwiGLU GEMM are at their floor (✓). Below it (△):
