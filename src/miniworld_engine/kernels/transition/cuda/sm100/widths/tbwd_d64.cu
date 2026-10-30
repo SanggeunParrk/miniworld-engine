@@ -174,13 +174,15 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
     for (int i = 0; i < n_local; ++i) {
       mbar_wait(&B.dhab_full, i & 1);
       tc_fence_after();
-      if (i >= 1) mbar_wait(&B.g_empty, (i - 1) & 1);
       uint32_t dh[32], av[32], bv[32];
       tmem_ld32(trow + T_DH + half * 32, dh);
       tmem_ld32(trow + T_AB + half * 32, av);
       tmem_ld32(trow + T_AB + 64 + half * 32, bv);
       tmem_wait_ld();
       tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.gate_read);
+      // only the shared-memory writes wait for the previous tile's weight-gradient products: the TMEM loads above (and with them
+      // gate_read, hence the next tile's dh / [a|b] products) no longer queue behind them (L768 B4: training step -20 us)
+      if (i >= 1) mbar_wait(&B.g_empty, (i - 1) & 1);
 #pragma unroll
       for (int qq = 0; qq < 4; ++qq) {                     // 8 hidden units -> one 16-byte chunk of h, dA and dB each
         uint32_t hp[4], dap[4], dbp[4];
@@ -474,6 +476,7 @@ transition_bwd_d64_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_c
                          const float* __restrict__ gamma, float* __restrict__ partab, float* __restrict__ parts, float* __restrict__ dgbw,
                          int tiles, int ndw) {
   const Par p{&mdy, &mxn, &mx, &mws, &mwa, &mwb, &mdx, rstd, c1, gamma, partab, parts, dgbw, tiles, ndw};
+  pdl_launch();                                                // the partial-sum reduction may be scheduled (it waits for this grid)
   extern __shared__ __align__(1024) uint8_t sm[];
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   if (warp < 4) setmaxnreg_dec<REG_LOW>();
@@ -481,29 +484,59 @@ transition_bwd_d64_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_c
   else input_role(p, sm, blockIdx.x - ndw, gridDim.x - ndw, warp, lane);
 }
 
-// partab [NDW][128][64] (rows 0..63 dWa_s, 64..127 dWb_s), parts [NDW][64 d][64 hs] -> bf16 dWa, dWb [256][64], dWs [64][256];
-// dgbw [NDX * 4][128] -> dgamma, dbeta (fp32). Fixed summation order: a replay is bit-identical.
-extern "C" __global__ void transition_bwd_d64_reduce(const float* __restrict__ partab, const float* __restrict__ parts, const float* __restrict__ dgbw,
-                                                     float* __restrict__ dwa, float* __restrict__ dwb, float* __restrict__ dws,
-                                                     float* __restrict__ dgam, float* __restrict__ dbeta, int ndw, int nrows_dg) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x, R = ndw / NSL;
-  if (idx < 2 * H_ * D_) {                                  // dWa / dWb element: (which, slice, hs, d)
-    const int which = idx / (H_ * D_), rem = idx % (H_ * D_), slice = rem / (HS * D_), hs = (rem / D_) % HS, d = rem % D_;
+// partab [NDW][128][64] (rows 0..63 dWa_s, 64..127 dWb_s), parts [NDW][64 d][64 hs] -> fp32 dWa, dWb [H][64], dWs [64][H] (unrounded:
+// the parameters may be an fp32 master); dgbw [nrows_dg][128] -> dgamma, dbeta (fp32).
+// 256-thread blocks. Blocks 0 .. RED_WBLK-1: four consecutive weight-gradient elements per thread (16-byte loads and stores), the
+// replicas summed in replica order (the order of the one-thread-per-output version: bit-identical weight gradients). The next
+// RED_GBLK blocks: dgamma / dbeta, 16 columns per block, the rows split over 16 lane groups (group k sums rows k, k + 16, ... in
+// order, then the 16 group sums are added in group order) instead of one thread walking all ndx * 4 rows. Every sum has a fixed
+// order, so a replay is bit-identical. Launched as a programmatic dependent of the backward (griddepcontrol.wait first).
+constexpr int RED_WBLK = 3 * H_ * D_ / 1024, RED_GBLK = 2 * D_ / 16;
+static_assert(3 * H_ * D_ % 1024 == 0 && HS % 4 == 0, "whole weight-gradient blocks, four outputs inside one row");
+extern "C" __global__ void __launch_bounds__(256, 1) transition_bwd_d64_reduce(
+    const float* __restrict__ partab, const float* __restrict__ parts, const float* __restrict__ dgbw, float* __restrict__ dwa,
+    float* __restrict__ dwb, float* __restrict__ dws, float* __restrict__ dgam, float* __restrict__ dbeta, int ndw, int nrows_dg) {
+  pdl_wait();
+  const int blk = blockIdx.x, t = threadIdx.x, R = ndw / NSL;
+  if (blk < RED_WBLK) {
+    const int e = (blk * 256 + t) * 4;                         // first of four consecutive outputs
+    const float* src;
+    size_t stride;
+    float* dst;
+    if (e < 2 * H_ * D_) {                                     // dWa / dWb element (which, slice, hs, d .. d + 3)
+      const int which = e / (H_ * D_), rem = e % (H_ * D_), slice = rem / (HS * D_), hs = (rem / D_) % HS, d = rem % D_;
+      src = partab + ((size_t)slice * 128 + which * 64 + hs) * D_ + d;
+      stride = (size_t)NSL * 128 * D_;
+      dst = (which == 0 ? dwa : dwb) + rem;
+    } else {                                                   // dWs element (d, slice, hs .. hs + 3)
+      const int rem = e - 2 * H_ * D_, d = rem / H_, hh = rem % H_, slice = hh / HS, hs = hh % HS;
+      src = parts + ((size_t)slice * D_ + d) * HS + hs;
+      stride = (size_t)NSL * D_ * HS;
+      dst = dws + rem;
+    }
+    float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
+    for (int rr = 0; rr < R; ++rr) {
+      const float4 u = __ldg(reinterpret_cast<const float4*>(src + rr * stride));
+      v.x += u.x; v.y += u.y; v.z += u.z; v.w += u.w;
+    }
+    *reinterpret_cast<float4*>(dst) = v;
+  } else if (blk < RED_WBLK + RED_GBLK) {
+    __shared__ float part[16][17];
+    const int c16 = t & 15, grp = t >> 4, c = (blk - RED_WBLK) * 16 + c16;
     float v = 0.f;
-    for (int rr = 0; rr < R; ++rr) v += partab[((size_t)(rr * NSL + slice) * 128 + which * 64 + hs) * D_ + d];
-    (which == 0 ? dwa : dwb)[(slice * HS + hs) * D_ + d] = v;
-  } else if (idx < 3 * H_ * D_) {                           // dWs element (d, slice, hs)
-    const int rem = idx - 2 * H_ * D_, d = rem / H_, hh = rem % H_, slice = hh / HS, hs = hh % HS;
-    float v = 0.f;
-    for (int rr = 0; rr < R; ++rr) v += parts[((size_t)(rr * NSL + slice) * D_ + d) * HS + hs];
-    dws[d * H_ + hh] = v;
-  } else if (idx < 3 * H_ * D_ + 2 * D_) {
-    const int c = idx - 3 * H_ * D_;
-    float v = 0.f;
-    for (int rr = 0; rr < nrows_dg; ++rr) v += dgbw[(size_t)rr * (2 * D_) + c];
-    (c < D_ ? dgam : dbeta)[c % D_] = v;
+#pragma unroll 4
+    for (int rr = grp; rr < nrows_dg; rr += 16) v += __ldg(dgbw + (size_t)rr * (2 * D_) + c);
+    part[grp][c16] = v;
+    __syncthreads();
+    if (grp == 0) {
+      float sum = 0.f;
+#pragma unroll
+      for (int k = 0; k < 16; ++k) sum += part[k][c16];
+      (c < D_ ? dgam : dbeta)[c % D_] = sum;
+    }
   }
 }
+extern "C" __device__ int transition_bwd_d64_reduce_blocks = RED_WBLK + RED_GBLK;
 
 // ================================================================================== wiring surface
 // Built into a cubin by the newest nvcc that knows sm_100a and launched through the driver API from `transition_sm100.cu`;
