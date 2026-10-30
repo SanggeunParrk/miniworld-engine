@@ -91,11 +91,11 @@ def _front_ctas(length: int, width: int, direction: int, planes: int | None = No
 
 
 def _b7_source_groups(length: int, nch: int) -> int:
-    """b7g source groups of nch source CTAs each (the rest of the SMs consume): 18 x 4 one direction; 11 / 12 x 8
-    bidirectional (L <= 384 / above), measured on L128-L768."""
+    """b7g source groups of nch source CTAs each (the rest of the SMs consume, in pairs): 18 x 4 one direction; 12 x 8
+    bidirectional, measured on L128-L768 (2026-10-30, after the hand-over / consumer-pair changes)."""
     if nch == 4:
         return 18
-    return 11 if length <= 384 else 12
+    return 12
 
 
 def _pack_w1(wl, wlg, wr, wrg):
