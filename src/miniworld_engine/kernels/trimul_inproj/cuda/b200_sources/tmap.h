@@ -32,8 +32,17 @@ inline CUtensorMap make(void* base, CUtensorMapDataType dt, std::vector<uint64_t
                         CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_L2_256B) {
   CUtensorMap m;
   std::vector<uint32_t> es(dims.size(), 1);
-  CUresult r = encoder()(&m, dt, (cuuint32_t)dims.size(), base, dims.data(), strides_bytes.data(), box.data(), es.data(),
-                         CU_TENSOR_MAP_INTERLEAVE_NONE, swz, l2, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  auto encode = [&] {
+    return encoder()(&m, dt, (cuuint32_t)dims.size(), base, dims.data(), strides_bytes.data(), box.data(), es.data(),
+                     CU_TENSOR_MAP_INTERLEAVE_NONE, swz, l2, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  };
+  CUresult r = encode();
+  if (r == CUDA_ERROR_INVALID_CONTEXT) {
+    // a thread with no current context (autograd's device thread, when the backward's first CUDA call is a launcher that encodes
+    // its maps before any runtime call): bind the device's primary context and retry
+    cudaFree(nullptr);
+    r = encode();
+  }
   TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled failed: ", (int)r);
   return m;
 }

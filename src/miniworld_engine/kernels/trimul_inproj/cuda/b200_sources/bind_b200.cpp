@@ -1,7 +1,8 @@
 // Python bindings of the B200 TriMul kernels built as ONE extension (two extensions compiling the same sources interpose each
 // other's host symbols -- a launch helper's static "attribute set" flag then belongs to the other library's kernel):
 //   inference (b200_infer): k1w (front), k3g (fused output, D <= 128), k3w (fused output, LayerNorms folded, D >= 256), wide_aux
-//   training (b200_train): D64 / D128 -- k3g with saves, b1s / b1g (output-side backward), b7m / b7g (input side), lnpart_sum;
+//   training (b200_train): D64 / D128 -- trimul_forms (weight forms), k3g with saves, b1s / b1g (output-side backward), b7m / b7g
+//                           (input side), grad_reduce (deterministic parameter gradients);
 //                           D >= 256 -- k3w with saves, k1wb (front backward), wide_bwd
 #include <torch/extension.h>
 void k1w_stats(torch::Tensor x, torch::Tensor mean, torch::Tensor rstd, double eps);
@@ -34,20 +35,22 @@ void wide_lnin_bwd(torch::Tensor dxn, torch::Tensor x, torch::Tensor dy, torch::
                    torch::Tensor dx, torch::Tensor dgb);
 void wide_ln_apply(torch::Tensor x, torch::Tensor mean, torch::Tensor rstd, torch::Tensor g, torch::Tensor b, torch::Tensor xn);
 void lnpart_sum(torch::Tensor a, torch::Tensor b, torch::Tensor out);
+void trimul_forms(torch::Tensor wl, torch::Tensor wlg, torch::Tensor wr, torch::Tensor wrg, torch::Tensor wg, torch::Tensor wp,
+                  torch::Tensor out);
+void grad_reduce(torch::Tensor pf, int64_t nf, torch::Tensor lo, int64_t nl, torch::Tensor pw, int64_t ns, torch::Tensor li, int64_t nc,
+                 torch::Tensor out);
 void b1s_backward(torch::Tensor dy, torch::Tensor xn, torch::Tensor tri, torch::Tensor ds, torch::Tensor mean_o, torch::Tensor rs_o,
                   torch::Tensor wg, torch::Tensor wp, torch::Tensor go, torch::Tensor bo, torch::Tensor dg, torch::Tensor dtri,
-                  torch::Tensor dwg, torch::Tensor dwp, torch::Tensor lnpart, torch::Tensor ring, torch::Tensor flags,
-                  int64_t L, int64_t nf);
-void b7m_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Tensor dpl, torch::Tensor dgout, torch::Tensor mask,
-                  torch::Tensor w1, torch::Tensor wg, torch::Tensor gi, torch::Tensor dx, torch::Tensor dw1, torch::Tensor lnpart,
-                  double eps);
+                  torch::Tensor part, torch::Tensor lnpart, torch::Tensor ring, torch::Tensor flags, int64_t L, int64_t nf);
+void b7m_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Tensor dpl, torch::Tensor dgout,
+                  c10::optional<torch::Tensor> tmask, torch::Tensor w1, torch::Tensor wg, torch::Tensor gi, torch::Tensor dx,
+                  torch::Tensor dw1, torch::Tensor lnpart, double eps, int64_t L);
 void b1g_backward(torch::Tensor dy, torch::Tensor xn, torch::Tensor tri, torch::Tensor ds, torch::Tensor mean_o, torch::Tensor rs_o,
                   torch::Tensor wg, torch::Tensor wp, torch::Tensor go, torch::Tensor bo, torch::Tensor dg, torch::Tensor dtri,
-                  torch::Tensor dwg, torch::Tensor dwp, torch::Tensor lnpart, torch::Tensor ring, torch::Tensor flags,
-                  int64_t L, int64_t nf);
-void b7g_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Tensor dpl, torch::Tensor dgout, torch::Tensor mask,
-                  torch::Tensor w1, torch::Tensor wg, torch::Tensor gi, torch::Tensor dx, torch::Tensor dw1, torch::Tensor lnpart,
-                  torch::Tensor ring, torch::Tensor flags, double eps, int64_t sg);
+                  torch::Tensor part, torch::Tensor lnpart, torch::Tensor ring, torch::Tensor flags, int64_t L, int64_t nf);
+void b7g_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Tensor dpl, torch::Tensor dgout,
+                  c10::optional<torch::Tensor> tmask, torch::Tensor w1, torch::Tensor wg, torch::Tensor gi, torch::Tensor dx,
+                  torch::Tensor dw1, torch::Tensor lnpart, torch::Tensor ring, torch::Tensor flags, double eps, int64_t sg, int64_t L);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("k1w_stats", &k1w_stats);
@@ -65,6 +68,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("wide_lnin_bwd", &wide_lnin_bwd);
   m.def("wide_ln_apply", &wide_ln_apply);
   m.def("lnpart_sum", &lnpart_sum);
+  m.def("trimul_forms", &trimul_forms);
+  m.def("grad_reduce", &grad_reduce);
   m.def("b1s_backward", &b1s_backward);
   m.def("b7m_backward", &b7m_backward);
   m.def("b1g_backward", &b1g_backward);

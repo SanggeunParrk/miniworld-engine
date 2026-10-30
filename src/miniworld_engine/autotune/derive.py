@@ -377,6 +377,7 @@ def install_native_recorders() -> None:
         b200_train.backward = b200_contract(b200_train._backward_fake)
         b200_train.forward_small = b200_contract(b200_train._forward_small_fake)
         b200_train.backward_small = b200_contract(b200_train._backward_small_fake)
+        b200_train.forms_op = b200_contract(b200_train._forms_fake)
 
     if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9:
         # Packaged composites need explicit fake contracts; tunable ones also record selectors.
