@@ -88,7 +88,9 @@ DEV uint4 lds128(uint32_t a) {
   asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];" : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "r"(a) : "memory");
   return v;
 }
-DEV float2 lds64g(uint32_t ad) { float2 v; asm volatile("ld.shared.v2.f32 {%0,%1}, [%2];" : "=f"(v.x), "=f"(v.y) : "r"(ad) : "memory"); return v; }
+DEV float4 lds128f(uint32_t ad) {
+  float4 v; asm volatile("ld.shared.v4.f32 {%0,%1,%2,%3}, [%4];" : "=f"(v.x), "=f"(v.y), "=f"(v.z), "=f"(v.w) : "r"(ad) : "memory"); return v;
+}
 DEV void red_add(float* p, float v) { asm volatile("red.global.add.f32 [%0], %1;" ::"l"(p), "f"(v) : "memory"); }
 DEV void red_add4(float* p, float a, float b, float c, float d) {
   asm volatile("red.global.add.v4.f32 [%0], {%1, %2, %3, %4};" ::"l"(p), "f"(a), "f"(b), "f"(c), "f"(d) : "memory");
@@ -96,30 +98,8 @@ DEV void red_add4(float* p, float a, float b, float c, float d) {
 DEV uint32_t ld_acquire(const uint32_t* p) { uint32_t v; asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(v) : "l"(p) : "memory"); return v; }
 DEV void st_relaxed(uint32_t* p, uint32_t v) { asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" ::"l"(p), "r"(v) : "memory"); }
 DEV void st_release(uint32_t* p, uint32_t v) { asm volatile("st.release.gpu.global.u32 [%0], %1;" ::"l"(p), "r"(v) : "memory"); }
-#ifndef B7_RELAXED_FLAG
-#define B7_RELAXED_FLAG 0
-#endif
-// Publishing a ring tile: its TMA-store writes have completed (cp.async.bulk.wait_group, performed at L2) and are ordered before
-// generic accesses by fence.proxy.async; B7_RELAXED_FLAG=1 then writes the flag with a relaxed store (st.release.gpu costs ~2k clk).
-#ifndef B7_RELAXED_RET
-#define B7_RELAXED_RET 1
-#endif
-// Returning a ring slot (consumer): its TMA reads landed in shared memory before the MMAs that read them ran, so a relaxed store
-// suffices (B7_RELAXED_RET=1).
-DEV void flag_return(uint32_t* p) {
-#if B7_RELAXED_RET
-  asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" ::"l"(p), "r"(0u) : "memory");
-#else
-  asm volatile("st.release.gpu.global.u32 [%0], %1;" ::"l"(p), "r"(0u) : "memory");
-#endif
-}
-DEV void flag_publish(uint32_t* p, uint32_t v) {
-#if B7_RELAXED_FLAG
-  asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" ::"l"(p), "r"(v) : "memory");
-#else
-  asm volatile("st.release.gpu.global.u32 [%0], %1;" ::"l"(p), "r"(v) : "memory");
-#endif
-}
+// Returning a ring slot (consumer): its TMA reads have landed in shared memory (st_full observed), so a relaxed store suffices.
+DEV void flag_return(uint32_t* p) { asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" ::"l"(p), "r"(0u) : "memory"); }
 DEV void fence_proxy_async_global() { asm volatile("fence.proxy.async.global;" ::: "memory"); }
 DEV void fence_acq_rel_gpu() { asm volatile("fence.acq_rel.gpu;" ::: "memory"); }
 // a relaxed flag store after fence_acq_rel_gpu: together a release pattern (PTX memory model), so one fence serves several flags
@@ -296,7 +276,7 @@ __global__ void __launch_bounds__(384, 1)
         // One release fence publishes two tiles: every second store, once the two previous stores' writes are complete,
         // fence.acq_rel.gpu then relaxed flag stores (each a release pattern with the fence); a fence costs ~2k clk.
         const int b = warp == 3 ? 0 : 1;
-        int pend_slot[2] = {-1, -1}, pend_j[2] = {0, 0}, np = 0;   // stored, not yet published (oldest first)
+        int ps0 = 0, pj0 = 0, ps1 = 0, pj1 = 0, np = 0;         // stored, not yet published (oldest first)
         for (int j = b, i = 0; j < n_local; j += 2, ++i) {
           const int slot = (g * RD + j % RD) * NCH + c;
           PW(1, spin_until(a.flags + slot, 0u)); TLS(1);            // consumer of tile j - RD has taken the slot
@@ -310,18 +290,20 @@ __global__ void __launch_bounds__(384, 1)
             PW(5, bulk_wait<1>());
             fence_proxy_async_global();
             PW(4, fence_acq_rel_gpu());
-            flag_store(a.flags + pend_slot[0], (uint32_t)(pend_j[0] + 1));   // generation tag: group-local tile index + 1
-            flag_store(a.flags + pend_slot[1], (uint32_t)(pend_j[1] + 1));
+            flag_store(a.flags + ps0, (uint32_t)(pj0 + 1));   // generation tag: group-local tile index + 1
+            flag_store(a.flags + ps1, (uint32_t)(pj1 + 1));
             np = 0;
           }
-          pend_slot[np] = slot; pend_j[np] = j; ++np;
+          if (np == 0) { ps0 = slot; pj0 = j; } else { ps1 = slot; pj1 = j; }
+          ++np;
           TLS(3);
         }
         if (np > 0) {
           bulk_wait<0>();
           fence_proxy_async_global();
           fence_acq_rel_gpu();
-          for (int u = 0; u < np; ++u) flag_store(a.flags + pend_slot[u], (uint32_t)(pend_j[u] + 1));
+          flag_store(a.flags + ps0, (uint32_t)(pj0 + 1));
+          if (np == 2) flag_store(a.flags + ps1, (uint32_t)(pj1 + 1));
         }
       }
     } else if (warp >= 4) {
@@ -422,8 +404,8 @@ __global__ void __launch_bounds__(384, 1)
         fence_async_smem();
         if (warp == 4) TLS(12);
         named_bar_sync(1, 256);
+        if (tid == 128) mbar_arrive(&B.dgp_ready[b]);
         if (warp == 4) TLS(6);
-        if (tid == 128) { mbar_arrive(&B.dgp_ready[b]); PROG(3, j); }
         if (j + 1 < n_local) {                               // next tile's mask (after the proxy fence, which would wait on it)
           pix.advance(a.L);
           pix.mask2(a.tmask, tok0 + tr, a.L, mk0, mk1);
@@ -577,7 +559,8 @@ __global__ void __launch_bounds__(384, 1)
       }
     } else if (warp >= 4) {
       // LN backward + residual: row r = 32 (warp % 4) + lane, column half hc = 64 columns; the two halves of a row exchange
-      // their partial sums through shared memory. x / dy come from the smem tiles; dx overwrites x in place.
+      // their partial sums through shared memory. The x half row is read from shared memory once per tile into registers (packed
+      // bf16) and serves the statistics, the c1 / c2 pass and the output pass; dy comes from its smem tile; dx overwrites x in place.
       const int q = warp & 3, hc = (warp - 4) >> 2, r = q * 32 + lane, et = tid - 128;   // et 0..255
       float* xch = reinterpret_cast<float*>(sm + O_GI + 512);           // [2 halves][128 rows] exchange
       float* xch2 = reinterpret_cast<float*>(sm + O_GI + 1536);
@@ -588,7 +571,7 @@ __global__ void __launch_bounds__(384, 1)
       uint32_t xrow = xrow0;
       auto xa = [&](int ch) { return xrow + sw128(r, ch); };            // 16-byte chunk ch (8 columns) of this half row
       auto ya = [&](int ch) { return yrow + sw128(r, ch); };
-      const uint32_t gbase = su + O_GI + 64 * hc * 4;
+      const uint32_t gbase = su + O_GI + 64 * hc * 4;                   // gi of this half: 16 float4
       for (int jj = 0; jj < n_local; ++jj) {
         const int t = k + a.NC * jj, row0 = t * TOK, acc = jj & 1, xb = jj & 1;
         xrow = xrow0 + xb * XT;
@@ -597,36 +580,37 @@ __global__ void __launch_bounds__(384, 1)
 #ifdef PROF
         long long tz = clock64();
 #endif
-        // ---- input-LN statistics (two-pass, fp32)
-        float2 sa = make_float2(0.f, 0.f), sb = make_float2(0.f, 0.f);
+        // ---- input-LN statistics: one pass per half row about its first element (pivot), halves merged exactly (Chan)
+        uint32_t xs[32];
 #pragma unroll
         for (int ch = 0; ch < 8; ++ch) {
           const uint4 v = lds128(xa(ch));
-          sa = __fadd2_rn(sa, __fadd2_rn(up(v.x), up(v.y))); sb = __fadd2_rn(sb, __fadd2_rn(up(v.z), up(v.w)));
+          xs[4 * ch] = v.x; xs[4 * ch + 1] = v.y; xs[4 * ch + 2] = v.z; xs[4 * ch + 3] = v.w;
         }
         {
-          const float2 s2 = __fadd2_rn(sa, sb);
-          xch[hc * 128 + r] = __fadd_rn(s2.x, s2.y);
-        }
-        named_bar_sync(2, 256);
-        const float mean = __fmul_rn(__fadd_rn(xch[r], xch[128 + r]), 1.f / C);
-        const float2 nmean = make_float2(-mean, -mean);
-        sa = sb = make_float2(0.f, 0.f);
+          const float pv = __uint_as_float(xs[0] << 16);
+          const float2 np2 = make_float2(-pv, -pv);
+          float2 s1a = make_float2(0.f, 0.f), s1b = s1a, s2a = s1a, s2b = s1a;
 #pragma unroll
-        for (int ch = 0; ch < 8; ++ch) {
-          const uint4 v = lds128(xa(ch));
-          float2 d = __fadd2_rn(up(v.x), nmean); sa = __ffma2_rn(d, d, sa);
-          d = __fadd2_rn(up(v.y), nmean); sb = __ffma2_rn(d, d, sb);
-          d = __fadd2_rn(up(v.z), nmean); sa = __ffma2_rn(d, d, sa);
-          d = __fadd2_rn(up(v.w), nmean); sb = __ffma2_rn(d, d, sb);
-        }
-        {
-          const float2 s2 = __fadd2_rn(sa, sb);
-          xch2[hc * 128 + r] = __fadd_rn(s2.x, s2.y);
+          for (int w = 0; w < 32; w += 2) {
+            const float2 d0 = __fadd2_rn(up(xs[w]), np2), d1 = __fadd2_rn(up(xs[w + 1]), np2);
+            s1a = __fadd2_rn(s1a, d0); s2a = __ffma2_rn(d0, d0, s2a);
+            s1b = __fadd2_rn(s1b, d1); s2b = __ffma2_rn(d1, d1, s2b);
+          }
+          const float2 s1 = __fadd2_rn(s1a, s1b), s2 = __fadd2_rn(s2a, s2b);
+          const float S1 = __fadd_rn(s1.x, s1.y), S2 = __fadd_rn(s2.x, s2.y);
+          xch[hc * 128 + r] = __fmaf_rn(S1, 1.f / 64, pv);                       // half mean
+          xch2[hc * 128 + r] = __fmaf_rn(-S1, __fmul_rn(S1, 1.f / 64), S2);      // half sum of squared deviations
         }
         named_bar_sync(2, 256);
-        const float rstd = rsqrt_ftz(__fadd_rn(__fmul_rn(__fadd_rn(xch2[r], xch2[128 + r]), 1.f / C), a.eps));
-        const float2 rs2 = make_float2(rstd, rstd);
+        float mean, rstd;
+        {
+          const float m0 = xch[r], m1 = xch[128 + r], dm = __fsub_rn(m0, m1);
+          mean = __fmul_rn(__fadd_rn(m0, m1), 0.5f);
+          const float m2 = __fmaf_rn(__fmul_rn(32.f, dm), dm, __fadd_rn(xch2[r], xch2[128 + r]));
+          rstd = rsqrt_ftz(__fadd_rn(__fmul_rn(m2, 1.f / C), a.eps));
+        }
+        const float2 nmean = make_float2(-mean, -mean), rs2 = make_float2(rstd, rstd);
         if (et == 0 && jj >= 1) {                           // the previous tile's dx has left its x buffer: x of tile jj + 1 may land
           PW(5, bulk_wait_read<0>());
           mbar_arrive(&B.cx_free[xb ^ 1]);
@@ -642,9 +626,8 @@ __global__ void __launch_bounds__(384, 1)
 #ifdef PROF
         tz = clock64();
 #endif
-        // ---- c1 = sum dxn gi xhat, c2 = sum dxn gi (dxn = bf16 of the fp32 accumulator, kept packed for the output pass)
+        // ---- c1 = sum dxn gi xhat, c2 = sum dxn gi (dxn = bf16 of the fp32 accumulator; the output pass reads it again)
         const uint32_t trow = tmem + T_ACC + acc * 128 + ((uint32_t)(q * 32) << 16) + 64 * hc;
-        uint32_t dpk[32];
         float c1, c2;
         {
           float2 c1a[2] = {make_float2(0.f, 0.f), make_float2(0.f, 0.f)}, c2a[2] = {make_float2(0.f, 0.f), make_float2(0.f, 0.f)};
@@ -653,19 +636,17 @@ __global__ void __launch_bounds__(384, 1)
             uint32_t dv[32];
             tmem_ld32(trow + 32 * h32, dv);
             tmem_wait_ld();
-            if (h32 == 1) { tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.acc_empty[acc]); }
 #pragma unroll
             for (int c4 = 0; c4 < 4; ++c4) {
               const int ch = 4 * h32 + c4;
-              const uint4 xv = lds128(xa(ch));
-              const uint32_t xs[4] = {xv.x, xv.y, xv.z, xv.w};
+              const float4 g0 = lds128f(gbase + 32 * ch), g1 = lds128f(gbase + 32 * ch + 16);
+              const float2 gw[4] = {make_float2(g0.x, g0.y), make_float2(g0.z, g0.w), make_float2(g1.x, g1.y), make_float2(g1.z, g1.w)};
 #pragma unroll
               for (int e = 0; e < 4; ++e) {
                 const int w = 4 * ch + e;
-                dpk[w] = pack_bf16(__uint_as_float(dv[8 * c4 + 2 * e]), __uint_as_float(dv[8 * c4 + 2 * e + 1]));
-                const float2 d = up(dpk[w]);
-                const float2 xh = __fmul2_rn(__fadd2_rn(up(xs[e]), nmean), rs2);
-                const float2 dg = __fmul2_rn(d, lds64g(gbase + 8 * w));
+                const float2 d = up(pack_bf16(__uint_as_float(dv[8 * c4 + 2 * e]), __uint_as_float(dv[8 * c4 + 2 * e + 1])));
+                const float2 xh = __fmul2_rn(__fadd2_rn(up(xs[w]), nmean), rs2);
+                const float2 dg = __fmul2_rn(d, gw[e]);
                 c1a[e & 1] = __ffma2_rn(dg, xh, c1a[e & 1]);
                 c2a[e & 1] = __fadd2_rn(c2a[e & 1], dg);
               }
@@ -675,7 +656,7 @@ __global__ void __launch_bounds__(384, 1)
           c1 = __fadd_rn(c1s.x, c1s.y); c2 = __fadd_rn(c2s.x, c2s.y);
         }
         if (warp == 4 || warp == 11) TLC(warp == 4 ? 6 : 7);
-        named_bar_sync(2, 256);
+        named_bar_sync(2, 256);                             // everyone has read this tile's statistics exchange
         xch[hc * 128 + r] = c1;
         xch2[hc * 128 + r] = c2;
         named_bar_sync(2, 256);
@@ -690,19 +671,25 @@ __global__ void __launch_bounds__(384, 1)
 #pragma unroll
         for (int hq = 0; hq < 4; ++hq) {                   // 16 columns (two chunks) at a time
           float2 pg[8], pb[8];
+          uint32_t dv[16];
+          tmem_ld16(trow + 16 * hq, dv);
+          tmem_wait_ld();
+          if (hq == 3) { tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.acc_empty[acc]); }
 #pragma unroll
           for (int h2 = 0; h2 < 2; ++h2) {
             const int ch = 2 * hq + h2;
-            const uint4 xv = lds128(xa(ch)), yv = lds128(ya(ch));
-            const uint32_t xs[4] = {xv.x, xv.y, xv.z, xv.w}, ys[4] = {yv.x, yv.y, yv.z, yv.w};
+            const uint4 yv = lds128(ya(ch));
+            const float4 g0 = lds128f(gbase + 32 * ch), g1 = lds128f(gbase + 32 * ch + 16);
+            const float2 gw[4] = {make_float2(g0.x, g0.y), make_float2(g0.z, g0.w), make_float2(g1.x, g1.y), make_float2(g1.z, g1.w)};
+            const uint32_t ys[4] = {yv.x, yv.y, yv.z, yv.w};
             uint32_t o[4];
 #pragma unroll
             for (int e = 0; e < 4; ++e) {
               const int w = 4 * ch + e;
-              const float2 d = up(dpk[w]);
-              const float2 xh = __fmul2_rn(__fadd2_rn(up(xs[e]), nmean), rs2);
+              const float2 d = up(pack_bf16(__uint_as_float(dv[8 * h2 + 2 * e]), __uint_as_float(dv[8 * h2 + 2 * e + 1])));
+              const float2 xh = __fmul2_rn(__fadd2_rn(up(xs[w]), nmean), rs2);
               const float2 u = __fadd2_rn(__fmul2_rn(xh, c1b), c2b);
-              const float2 v = __fadd2_rn(__fmul2_rn(d, lds64g(gbase + 8 * w)), make_float2(-u.x, -u.y));
+              const float2 v = __fadd2_rn(__fmul2_rn(d, gw[e]), make_float2(-u.x, -u.y));
               const uint32_t lw = pack_bf16(__fmul_rn(rstd, v.x), __fmul_rn(rstd, v.y));
               const float2 tt = __fadd2_rn(up(lw), up(ys[e]));
               o[e] = pack_bf16(tt.x, tt.y);
