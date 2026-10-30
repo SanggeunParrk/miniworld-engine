@@ -112,7 +112,8 @@ statement on its first and last sample, and run twice (the first run's outputs p
 | 512 | training | 60 | 60 | 60 | 60 | 2.9e-4 | y 3.2e-3, dx 4.7e-3 | 36 (6) | 155.0 |
 
 The D256-512 training cells were re-run after the last `k1wb` change (81 cells at B 2 / 16 / 48, all bitwise). "Run to run" is y and
-dx; the weight gradients differ run to run by <= 3.1e-7 relative, as for one sample (atomic flushes). Peak includes the harness's own
+dx; the weight gradients differed run to run by <= 3.1e-7 relative, as for one sample (atomic flushes; since 2026-10-30 the D64 / D128
+weight gradients are bit-identical run to run, see "D64 / D128 glue and k3g" below; D256+ still flush atomically). Peak includes the harness's own
 allocations (it holds a clone of x). The weight-gradient column is fp32 summation order, larger where one fp32 accumulator sums more
 tokens: the D64 / D128 input-side backward (`b7m` / `b7g`) keeps dW1 in TMEM over all its tiles, so one launch of D128 L768 B48
 (before the launch cap) put ~20 k tiles into one accumulator and its front-weight gradients were 2.3e-3 off the per-sample sum
@@ -262,6 +263,39 @@ One call against B calls: 1.19-3.43x (inference) / 1.29-5.08x (training) at L128
 58-116 GB) are 0.77-0.79x of the B calls, which hold one sample's activations at a time (a model that runs B calls and then one
 backward holds all of them, beyond 192 GB at these sizes). Against cuEquivariance 1.7-4.2x, against the PyTorch statements 3.8-17.1x.
 Without a CUDA graph (B = 4, bidirectional, D64 / 128 / 256, L128 / 384; host-bound): one call 1.07-3.62x faster than four calls.
+
+### D64 / D128 glue and k3g (2026-10-30)
+
+For MiniWorld's training step (D128 bidirectional pairformer, L768, fp32 masters, row dropout, CUDA graph, R = 4: three no-grad
+recycles in train mode and one training forward + backward per block):
+- **Weight forms, one cached launch.** `trimul_forms` (`wide_aux.cu`) writes every bf16 form the D64 / D128 kernels read -- the front
+  matrices row-major (the D128 bidirectional module stores them column-major), the packed W1 of `b7m` / `b7g`, `k3g`'s permuted Wp, Wg,
+  Wp -- from the parameters (fp32 master or bf16) in one launch, cached by `kernels._capture.param_forms` (`b200_train.kernel_forms`;
+  inference uses the same entry). In a captured step it runs once per block: the recycles and the training forward share it. It
+  replaced 6 casts + 4 transposing copies + `k1w_prep` per call and `_pack_w1`'s cat / stack.
+- **Deterministic parameter gradients, no copies.** `b1s` / `b1g` / `b7m` / `b7g` write per-CTA partials (plain stores, no
+  `red.add`); `grad_reduce` sums them in a fixed order into one fp32 buffer in parameter order whose views are the gradients:
+  bit-identical run to run and between a graph replay and eager. Replaces `lnpart_sum`, the zero fill and 10 copy kernels; the ring
+  flags come zeroed from the training forward's `k3g`; `b7m` / `b7g` form the pair mask from the token mask in-kernel. Training step
+  (D128 bidirectional): 31 -> 12 kernels besides autograd's gradient accumulation.
+- **`k3g`**: `SAVE = 2`, the training epilogue (dropout scale, y bitwise as the training forward's) without the saves, for the no-grad
+  forward with a dropout scale (it ran the saving epilogue into throwaway buffers); LN_out statistics in one pivot-shifted pass;
+  sigmoid as 0.5 tanh(g / 2) + 0.5 (one MUFU op; the epilogue warps were the slowest role); no spills (the D128 instantiations spilled
+  ~100 B before). Alone, L768, one process (us): inference 179 -> 161, saving 225 -> 195, no-grad dropout 225 -> 175.
+
+Module, D128 bidirectional, B = 1, bf16 pair, fp32 masters, token mask, row dropout 0.25, CUDA graph; base 29fd703a against these
+changes (4d32e387), median of three alternating processes x three rounds, node 2 GPU 0 next to the idle filler (ms):
+
+| L | inference | no-grad + dropout | fwd + bwd | MiniWorld block (3 recycles + fwd + bwd) |
+|---|---|---|---|---|
+| 384 | 0.173 -> 0.151 | 0.209 -> 0.176 | 0.675 -> 0.626 | 1.183 -> 1.047 |
+| 768 | 0.530 -> 0.499 | 0.609 -> 0.533 | 2.229 -> 2.159 | 4.069 -> 3.859 |
+
+At L768 the block is 5.2 % faster: ~3.4 ms per R = 4 micro-batch over the 16 pairformer blocks. `b7g` varies 611-634 us between
+identical runs at L768 (the known placement sensitivity), which is most of the fwd + bwd spread. Left: `b1g` (428 us at L768; its
+LN-backward CTAs are ~95 % busy while the front CTAs serialise on single-buffered tiles) and `b7g` (source and consumer CTAs each
+stall 30-40 % on the other, clock64 role probe) -- both need a different CTA split, not tuning. The cuBLAS triangle `bmm`
+(81 us per product at L768, ~1.4 PF/s) is at the power-capped GEMM rate.
 
 ### D64 (2026-10-02, the first batched width, B <= 8)
 
