@@ -631,6 +631,9 @@ widths without a tuned build.
 - **D128 B1** (`sm100/tr_bwd_sm100.cu`): 8 × `DW_REPL` weight-role CTAs keep one hidden slice's `W_s / W_a / W_b` resident, recompute
   `dh / a / b`, run the gate, and accumulate `dW_a | dW_b | dW_s` in tensor memory; the other CTAs stream the weight chunks
   (multicast over the pair), form `d_xn`, and run the LayerNorm backward and the residual. **B2** sums the partials in a fixed order.
+  The input role's tensor memory: one `[a|b]` buffer (128 columns, handed back as soon as the gate has loaded it), two `dh` buffers
+  (64 each; the gate writes `[dA | dB]` back over `dh` as bf16, where the `d_xn` product reads its A operand) and two `d_xn` buffers
+  (128 each), so the LayerNorm backward of tile i reads `d_xn` from tensor memory in both passes while tile i + 1 accumulates.
 - **D64** (`sm100/widths/tfwd_d64.cu`, `tbwd_d64.cu`): D128's design with all weights resident in shared memory (48 KB per CTA in
   the forward, 96 KB in the backward's input role); the backward's weight role is 4 hidden slices × 20 replicas.
 - **D256 F1** (`widths/tfwd_d256.cu`): one fused kernel; the output accumulator takes 256 tensor-memory columns and the two `[a|b]`
@@ -796,3 +799,39 @@ range of the later rounds.) Measured and not kept: `tanh.approx.f16x2` (one MUFU
 FMA split (a quarter of the units through an FMA-pipe `2^x` polynomial and Newton reciprocal) spills and is slower (0.365 ms). The D64
 forward is 0.296 ms against 0.261 ms with no sigmoid at all; D128 [1, 768, 768] 0.182 against 0.175.
 
+### Spill-free D128 backward input role and forward LayerNorm (2026-10-30)
+
+The D128 kernels spilled 88 B (forward) / 320 B (backward) per thread: the forward LayerNorm kept 32 partial sums of its reduction
+tree next to the 64-word row, and the backward's LayerNorm-backward epilogue copied a whole row of `d_xn` into registers to free the
+single `d_xn` buffer at once. Now the forward evaluates the same tree depth first (`tree32`, one partial sum per level live) and the
+backward's input role double-buffers `d_xn` in tensor memory (map in [How the kernels work](#how-the-kernels-work)): warp 1 issues
+`[a|b]_j` (after the gate has loaded chunk j - 1's) with its own commit, then `dh_j`; the gate loads `a, b`, hands the buffer back,
+then waits for `dh_j`. Arithmetic, rounding points and summation orders are unchanged: output, saved statistics and every gradient
+are bit-identical to before (1 / 4 / 15 / 64 / 1152 / 3072 / 4608 tiles, n = 4 and 2). ptxas: 12 / 20 B of spill stores left, all
+setup scalars of the 56-register producer warps.
+
+Module call (fp32 masters, bf16 autocast) in one CUDA graph per process, base 36c0d4ad and this change in alternating processes,
+node 2 GPU 4. Sustained: 4 s of replays per process, NVML energy, two processes each, µs per replay (mJ per replay); burst: min over
+3 processes of the min of 3 × 50-replay medians, ms:
+
+| shape (n = 4) | no-grad fwd sustained | training sustained | no-grad fwd burst | training burst |
+|---|---|---|---|---|
+| [1, 384, 384, 128] | 57.6-58.2 -> **57.6** | 303.8-303.9 (300-306) -> **303.3-303.5** (299) | 0.0561 -> 0.0561 | 0.2770 -> 0.2779 |
+| [1, 768, 768, 128] | 217.8-217.9 -> **216.1** | 1173.5-1174.0 (1155-1183) -> **1145.7-1146.7** (1134-1152) | 0.1815 -> **0.1806** | 1.0355 -> **1.0048** |
+| MSA [1, 1024, 384, 128] | 148.0-148.1 -> **146.5-146.6** | 775.7-776.5 (765-766) -> **768.0-768.7** (763) | 0.1252 -> **0.1242** | 0.6810 -> **0.6756** |
+
+`DW_REPL` = 9 stays fastest with the new input role (L768 training 1286 / 1149 / 1176 µs at 8 / 9 / 10). Measured and not kept:
+`dh_j` issued before `[a|b]_j` (it then waits for the previous chunk's `d_xn` product to complete and the tensor pipe drains every
+chunk: L768 training 1172 -> 1190 µs); the forward LayerNorm re-reading the row from shared memory in each pass (no spills either,
+~0.8 % slower).
+
+What bounds them now (all cells run at the 1000 W cap, ~985 W measured): the L768 forward costs ~0.92 pJ per tensor-core FLOP of
+its design (213 mJ for 0.23 TFLOP), against ~0.76 for dense cuBLAS at the cap. The backward does 1.44 M FLOP per row, of which 0.39 M
+(27 %) is the weight role recomputing `dh` and `[a|b]` (and running its own gate) beside the input role; that recompute, not the
+epilogues, is the remaining lever (dropping the epilogue's dγ / dβ column sums entirely changes nothing measurable). A single-role
+backward that forms `d_xn` from slice partials would need the 8 slices of a tile in one cluster, and only 15 clusters of 8
+(120 CTAs) are resident on this card (33 of 4, 74 of 2). The forward's tile-quantization tail (4608 tiles = 31 × 148 + 20 at L768,
+1152 = 7 × 148 + 116 at L384) costs less than its 2.8 % share of tiles: the last partial round runs at a higher clock, so 20 extra
+tiles at L768 cost 3.1 µs where a pro-rata share is 0.9 µs (~1 % of the forward), and L384's last 116 tiles 5.9 µs against 5.8
+(no-grad forward of [1, T, 128, 128] for T = 4440 / 4588 / 4608 / 4736 and 1036 / 1152 / 1184 tiles); spreading the last round's
+hidden chunks over idle pairs (stream-K style, partial sums through global memory) could recover at most that and is not done.
