@@ -5,9 +5,9 @@ D64 / D128 (``forward_small`` / ``backward_small``; L a multiple of 128): forwar
 cuBLAS contractions) and k3g's saving epilogue (x_n, LN_out statistics); backward = two fused kernels around the contraction
 gradients:
   b1s / b1g   output side: gate / projection gradients, LN_out backward -> dG, dt; dWg, dWp, dg_o, db_o (front CTAs hand dP
-              to LN-backward CTAs through an L2 ring). b1s: D64 (H = 64 / 128); b1g: D128 (H = 256 bidirectional / 128), LN_out's
-              affine folded into the projection (no LayerNorm-forward pass; dWp / dg_o / db_o from A = dPr^T t on the tensor
-              cores; one LayerNorm-backward pass with the per-token sums from the front epilogue: see b1g.cu).
+              to LN-backward CTAs through an L2 ring). b1s: D64 (H = 64 / 128); b1g: D128 (H = 256 bidirectional / 128). Both fold
+              LN_out's affine into the projection (no LayerNorm-forward pass; dWp / dg_o / db_o from A = dPr^T t on the tensor
+              cores; one LayerNorm-backward pass with the per-token sums from the front epilogue: see b1g.cu, b1s.cu).
   cuBLAS      contraction gradients -> plane gradient da [P, L, L]
   b7m         D64 input side, one CTA per 128-token tile: pre-activations recomputed, gate gradients,
               dxn = [dpre | dG] [W1 ; Wg] (packed W1 resident in shared memory, dW1 in TMEM), LN_in backward + residual -> dx;
@@ -81,12 +81,12 @@ def supports(width: int, length: int, direction: int, hidden: int | None = None)
 
 
 def _front_ctas(length: int, width: int, direction: int, planes: int | None = None) -> int:
-    """b1s / b1g front CTAs: the largest multiple of L/128 <= 80 (D64, 4 D planes) / 96 (D64, 2 D planes) / 80 (D128, 4 D
-    planes) / 84 (D128, 2 D planes), measured on L128-L768 (b1g: kernel alone, B200 2026-10-30) -- per plane count, so a
-    one-direction hidden-2 D block takes the bidirectional value (the kernels' per-token work is the same)."""
+    """b1s / b1g front CTAs: the largest multiple of L/128 <= 90 (D64, either plane count) / 80 (D128, 4 D planes) / 84 (D128,
+    2 D planes), measured on L128-L768 (kernel alone, B200 2026-10-30; b1s at B4) -- per plane count, so a one-direction
+    hidden-2 D block takes the bidirectional value (the kernels' per-token work is the same)."""
     rows = length // TOK
     planes = (4 if direction == 0 else 2) * width if planes is None else planes
-    cap = {(64, True): 80, (64, False): 96, (128, True): 80, (128, False): 84}[width, planes == 4 * width]
+    cap = {(64, True): 90, (64, False): 90, (128, True): 80, (128, False): 84}[width, planes == 4 * width]
     return (cap // rows) * rows
 
 
@@ -498,9 +498,9 @@ def _backward_small_body(leaves, mask, ds, direction, saved, dy, dx):
         dy2 = dy.contiguous().view(m, d)
         dg = torch.empty_like(x2)
         dt = torch.empty_like(t)
-        ring = x.new_empty((nf * B1_RSF * (TOK + (4 if d == 128 else 0)), d))   # b1g: + a 1 KB (S1 | S2) block per slot
-        rows_o = max(nf, nsm - nf) if d == 128 else nf
-        part_o = x.new_empty((rows_o, d * (d + h)), dtype=f32)       # (dWg | dWp) rows: b1s front CTAs'; b1g front CTA r's dWg | LN CTA r's dWp
+        ring = x.new_empty((nf * B1_RSF * (TOK + 1024 // (2 * d)), d))   # per slot: a dPr tile, then a 1 KB (S1 | S2) block
+        rows_o = max(nf, nsm - nf)
+        part_o = x.new_empty((rows_o, d * (d + h)), dtype=f32)       # row r: front CTA r's dWg | LN CTA r's dWp
         lnp_o = x.new_empty((nsm - nf, 2 * h), dtype=f32)            # LN CTAs' (dg_o | db_o) rows
         (E.b1g_backward if d == 128 else E.b1s_backward)(dy2, xn, t, ds, mo, ro, wg, wp, go, bo, dg, dt, part_o, lnp_o, ring,
                                                          flags[:nf * B1_RSF], n, nf)

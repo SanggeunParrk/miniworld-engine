@@ -1,4 +1,4 @@
-"""B200 TriMul D128 backward (b1g): the front CTAs hand dP and the per-token LayerNorm sums to the LN CTAs through a global ring
+"""B200 TriMul D64 / D128 backward (b1s / b1g): the front CTAs hand dP and the per-token LayerNorm sums to the LN CTAs through a global ring
 (generic stores -> fence.proxy.async -> flag release / acquire -> bulk copy), each front CTA reusing its 4 slots: many CUDA-graph
 replays must give bitwise identical gradients (a hand-over race shows as a changed bit)."""
 
@@ -18,18 +18,19 @@ pytestmark = [
 ]
 
 
-# L256: ~6 tiles per front CTA (the 4-slot ring wraps within a launch); L768: ~59 tiles (it wraps ~15 times)
-@pytest.mark.parametrize(("length", "kind"), [(256, "bidir"), (256, "out"), (768, "bidir")])
-def test_ring_replays_bitwise(length, kind):
+# D128 L256: ~6 tiles per front CTA (the 4-slot ring wraps within a launch); L768: ~59 tiles (it wraps ~15 times);
+# D64 B4 (the template stack's batch, sample-major planes): L256 ~23 tiles per front CTA, L768 B1 ~51
+@pytest.mark.parametrize(("width", "length", "kind", "batch"), [(128, 256, "bidir", 1), (128, 256, "out", 1), (128, 768, "bidir", 1),
+                                                                (64, 256, "bidir", 4), (64, 768, "out", 1)])
+def test_ring_replays_bitwise(width, length, kind, batch):
     torch.manual_seed(357)
-    width = 128
     impl = ImplementationType.MINIWORLD
     m = (BidirectionalTriangleMultiplication(width, implementation=impl) if kind == "bidir"
          else TriangleMultiplication(width, d_hidden=width, outgoing=True, implementation=impl))
     m = randomize(m.cuda()).train().to(torch.bfloat16)
     m.p_drop = 0.0
-    x = torch.randn(1, length, length, width, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    mask = torch.ones(1, length, device="cuda", dtype=torch.bool)
+    x = torch.randn(batch, length, length, width, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    mask = torch.ones(batch, length, device="cuda", dtype=torch.bool)
     mask[:, length - length // 8:] = False
     dy = torch.randn_like(x)
     assert trimul_b200.serves_train(m, x, bidirectional=kind == "bidir")
