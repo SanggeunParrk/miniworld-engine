@@ -8,6 +8,24 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Fixed
+
+- H100 TriangleAttention inference at large L ran out of memory inside a model. The B-sample plan sized a launch against the whole device. FoldBench's 2432-token targets then asked for one 22.6 GiB q | k | v | g block (Protenix's 4 templates, d_pair 64) next to 34 GiB of the model.
+  - An inference launch's own tensors now take at most `INFERENCE_WORKSET_FRACTION` (0.25) of the device's total memory (`integrations/triattn_h100_sm90.py`).
+  - More samples than that run in sample chunks; one sample that alone exceeds it runs in blocks of pair rows on the width-generic kernels (`_generic_rows`).
+  - At L2432 on an H100: 4 templates 40.2 -> 20.1 GiB peak at the same time; d256 / 8 heads (one sample) 25.7 -> 11.4 GiB, 0.96x the time (starting node), 1.06x (ending node).
+- A `CUTLASS_PATH` to another CUTLASS release than the bundle's (4.2.0) no longer recompiles the shipped CUTLASS extensions on the first call: a bundle miss is retried with the pinned stand-in (`_nvcc._pinned_cutlass`). FoldForge's runs with CUTLASS 4.8.0 had built `triattn_h100_front3_sm90_v1` for 108 s.
+
+### Added
+
+- `architecture.checkpoints.dead_modules.mark_dead_modules(model)` flags residual modules whose every parameter is below 1e-30. A flagged TriangleAttention, TriangleMultiplication, Transition, AttentionPairBias, OuterProductMean (with `residual`) or MSAPairWeightedAveraging returns its residual input at inference: the same bits as the full forward.
+  - Protenix v2 has 41 such instances, among them the confidence head's triangle attentions; the Protenix-v2 kit skips them.
+  - The flag has no effect in training or under grad.
+
+### Changed
+
+- H100 SWA atom block, bf16 activations: the adaLN modulation backward runs its two GEMMs in TF32 on the tensor cores (they ran fp32 on the CUDA cores). InputFeatureEmbedder esmfold2 / linear training step, 4096 atoms: 0.830 -> 0.743 ms of kernels.
+
 ## [2.4.0] - 2026-10-29
 
 ### Fixed
