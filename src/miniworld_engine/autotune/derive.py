@@ -507,7 +507,7 @@ def install_native_recorders() -> None:
         b200_train.backward = b200_contract(b200_train._backward_fake)
         b200_train.forward_small = b200_contract(b200_train._forward_small_fake)
         b200_train.backward_small = b200_contract(b200_train._backward_small_fake)
-        b200_train.forms_op = b200_contract(b200_train._forms_fake)
+        b200_train.forms_op = b200_contract(b200_train._forms_op_fake)
 
     # Every hand-CUDA launch is an opaque op with a fake (``kernels/_compile.opaque``). With ``compile_wrap=disable`` its body would
     # run: on a Hopper / Blackwell card the extension loads and launches on FakeTensors (a null pointer: "data is not allocated yet",

@@ -113,16 +113,17 @@ def _unpack_w1(d, p):
     return v[:h], g[:h], v[h:], g[h:]          # dWl, dWlg, dWr, dWrg
 
 
-def _forms_fake(params):
+def _forms_op_fake(params):
+    """The one bf16 buffer of forms_op: 8 R D + 2 D R + D D elements (see wide_aux.cu forms_kernel)."""
     r, d = params[0].shape
     return params[0].new_empty((8 * r * d + 2 * d * r + d * d,), dtype=torch.bfloat16)
 
 
-@opaque(fake=_forms_fake, name="trimul_b200_forms")
+@opaque(fake=_forms_op_fake, name="trimul_b200_forms")
 def forms_op(params: list[torch.Tensor]) -> torch.Tensor:
     """wl, wlg, wr, wrg [R, D], wg [D, D], wp [D, R] (fp32 or bf16, any strides) -> one bf16 buffer of the kernels' weight forms
     (``wide_aux.cu`` ``forms_kernel``)."""
-    out = _forms_fake(params)
+    out = _forms_op_fake(params)
     with torch.cuda.device(out.device):
         _ext().trimul_forms(*params[:6], out)
     return out
