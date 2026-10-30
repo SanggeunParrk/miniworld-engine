@@ -11,6 +11,15 @@
 #include "sm100.cuh"
 using namespace s100;
 
+// Sum of the 32 leaves f(0) .. f(31) in the order of the sm_90a reduction tree `for k = 16 .. 1: p[l] += p[l + k] (l < k)`, which
+// pairs leaves whose indices differ in the highest bit first: the sum over indices B + S m (m < N) is the sum of its even-m half
+// plus its odd-m half. Evaluated depth first, so at most one partial sum per level is live.
+template <int B, int S, int N, class F> DEVI float tree_sum(F& f) {
+  if constexpr (N == 1) return f(B);
+  else return tree_sum<B, 2 * S, N / 2>(f) + tree_sum<B + S, 2 * S, N / 2>(f);
+}
+template <class F> DEVI float tree32(F f) { return tree_sum<0, 1, 32>(f); }
+
 #ifndef HID
 #define HID 512                                                // hidden units (n x D); n = 4 by default
 #endif
@@ -249,28 +258,19 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
           const uint4 t = lds128(xb + cb * 16384 + sw128(r, q));
           v[cb * 32 + q * 4 + 0] = t.x; v[cb * 32 + q * 4 + 1] = t.y; v[cb * 32 + q * 4 + 2] = t.z; v[cb * 32 + q * 4 + 3] = t.w;
         }
-      float p[32];                                             // the sm_90a reduction tree (see tfwd.cu)
-#pragma unroll
-      for (int l = 0; l < 32; ++l) p[l] = (bf16lo(v[2 * l]) + bf16hi(v[2 * l])) + (bf16lo(v[2 * l + 1]) + bf16hi(v[2 * l + 1]));
-#pragma unroll
-      for (int k = 16; k; k >>= 1)
-#pragma unroll
-        for (int l = 0; l < k; ++l) p[l] = p[l] + p[l + k];
-      const float mean = p[0] * (1.f / D_);
-#pragma unroll
-      for (int l = 0; l < 32; ++l) {
+      // the sm_90a reduction trees over leaves l = columns 4l .. 4l + 3, evaluated depth first (tree32: no array of 32 partial
+      // sums next to the row, which spilled 88 B), same order and so bit-identical
+      const float mean = tree32([&](int l) {
+        return (bf16lo(v[2 * l]) + bf16hi(v[2 * l])) + (bf16lo(v[2 * l + 1]) + bf16hi(v[2 * l + 1]));
+      }) * (1.f / D_);
+      const float rs = rsqrtf(tree32([&](int l) {
         float acc = 0.f, d;
         d = bf16lo(v[2 * l]) - mean; acc += d * d;
         d = bf16hi(v[2 * l]) - mean; acc += d * d;
         d = bf16lo(v[2 * l + 1]) - mean; acc += d * d;
         d = bf16hi(v[2 * l + 1]) - mean; acc += d * d;
-        p[l] = acc;
-      }
-#pragma unroll
-      for (int k = 16; k; k >>= 1)
-#pragma unroll
-        for (int l = 0; l < k; ++l) p[l] = p[l] + p[l + k];
-      const float rs = rsqrtf(p[0] * (1.f / D_) + eps);
+        return acc;
+      }) * (1.f / D_) + eps);
 #pragma unroll
       for (int cb = 0; cb < 2; ++cb)
 #pragma unroll
