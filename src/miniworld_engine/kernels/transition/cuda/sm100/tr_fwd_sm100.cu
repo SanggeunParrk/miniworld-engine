@@ -354,6 +354,20 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
   if (warp == 2) { tc_fence_after(); tmem_dealloc2(tmem, 512); }
 }
 
+// fp32 master weights -> the bf16 operands of the kernels, the three tensors in one launch (round to nearest even, as torch's cast):
+// thread t converts elements 8t .. 8t + 7 of the concatenation [wa | wb | ws] (each n elements, n a multiple of 8).
+extern "C" __global__ void __launch_bounds__(256, 1) transition_cast3(const float* __restrict__ wa, const float* __restrict__ wb,
+                                                                     const float* __restrict__ ws, __nv_bfloat16* __restrict__ oa,
+                                                                     __nv_bfloat16* __restrict__ ob, __nv_bfloat16* __restrict__ os, int n) {
+  const int e = (blockIdx.x * 256 + threadIdx.x) * 8;
+  if (e >= 3 * n) return;
+  const int w = e / n, k = e - w * n;
+  const float* src = (w == 0 ? wa : w == 1 ? wb : ws) + k;
+  __nv_bfloat16* dst = (w == 0 ? oa : w == 1 ? ob : os) + k;
+  const float4 u = __ldg(reinterpret_cast<const float4*>(src)), v = __ldg(reinterpret_cast<const float4*>(src) + 1);
+  *reinterpret_cast<uint4*>(dst) = make_uint4(pack_bf16(u.x, u.y), pack_bf16(u.z, u.w), pack_bf16(v.x, v.y), pack_bf16(v.z, v.w));
+}
+
 // ================================================================================== wiring surface
 // Built into a cubin by the newest nvcc that knows sm_100a and launched through the driver API from `transition_sm100.cu`;
 // the dynamic shared-memory size the launch must request is exported here so the host never restates it.
