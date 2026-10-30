@@ -105,7 +105,9 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
   return r;
 }
 #ifndef TA_POLY
-#define TA_POLY 0         // pairs i (of 16 per row) whose exponentials run as hex2_poly: TA_POLY of every 16 (1, 2, 4 or 8), the rest on the MUFU
+#define TA_POLY 8         // pairs i (of 16 per row) whose exponentials run as hex2_poly: TA_POLY of every 16 (1, 2, 4, 8 or 16), the rest on the
+                          // MUFU.  8 (every other pair; sustained, power-capped, c256 / 8 heads): L512 level, 768 / 1024 -0.5 %, 1536 -2.7 %,
+                          // 2048 -3.3 %, accuracy level; 2 / 4: level or +1.5 %; 16 (all): +12 %
 #endif
 __device__ __forceinline__ uint32_t hexp(uint32_t a, int i) {
   if (TA_POLY > 0 && i % (16 / (TA_POLY > 0 ? TA_POLY : 1)) == (16 / (TA_POLY > 0 ? TA_POLY : 1)) - 1) return hex2_poly(a);

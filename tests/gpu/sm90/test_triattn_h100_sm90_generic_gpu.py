@@ -328,3 +328,33 @@ def test_compiled_module_captures_in_a_cuda_graph(cfg):
         g.replay()
         torch.cuda.synchronize()
     assert relative(y, eager) < 1e-3
+
+
+@pytest.mark.parametrize("starting", [True, False], ids=["starting", "ending"])
+def test_c256_front_kernel(starting, monkeypatch):
+    """d_pair 256 x 8 heads beyond L 256: the one-kernel front (front_c256) against the fp32 reference, against the unfused fp16 front
+    (LN + bias kernel, cuBLAS projection) within a few fp16 ulps, and bitwise run to run."""
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90_generic as gen
+
+    cfg = (256, 256, 8)
+    ours, ref16, ref32 = trio(cfg, starting)
+    x = torch.randn(1, 384, 384, 256, device="cuda", dtype=torch.bfloat16)
+    mask = torch.rand(1, 384, device="cuda") > 0.2
+    monkeypatch.setattr(gen, "FRONT_C256", True)
+    check_inference(ours, ref16, ref32, x, mask)
+    with torch.no_grad():
+        a, b = ours.eval()(x, mask), ours(x, mask)
+        monkeypatch.setattr(gen, "FRONT_C256", False)
+        c = ours(x, mask)
+    assert torch.equal(a, b)
+    assert relative((a.float() - x.float()), (c.float() - x.float())) < 2e-2
+    # captured in a CUDA graph from a fresh module (its weight packs are built inside the capture): the eager result
+    monkeypatch.setattr(gen, "FRONT_C256", True)
+    fresh = make(cfg, ImplementationType.MINIWORLD, starting).eval()
+    fresh.load_state_dict(ours.state_dict())
+    graph = torch.cuda.CUDAGraph()
+    with torch.no_grad(), torch.cuda.graph(graph):
+        out = fresh(x, mask)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(out, a)

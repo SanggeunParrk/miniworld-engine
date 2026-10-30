@@ -271,7 +271,9 @@ __device__ __forceinline__ uint32_t h2(float a, float b) {            // fp16 pa
 __device__ __forceinline__ uint32_t cta_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(r)); return r; }
 __device__ __forceinline__ void cluster_sync() { asm volatile("barrier.cluster.arrive.release;\nbarrier.cluster.wait.acquire;\n" ::: "memory"); }
 __device__ __forceinline__ void arrive_rank(uint32_t bar, uint32_t rank) {      // arrive on the barrier at this offset in CTA `rank`
-  asm volatile("{\n.reg .b32 ra;\nmapa.shared::cluster.u32 ra, %0, %1;\nmbarrier.arrive.release.cluster.shared::cluster.b64 _, [ra];\n}\n"
+  // (default .release.cta semantics: the stage was read by the wgmma, retired before; .release.cluster put a MEMBAR behind every
+  // chunk's stores -- 35 % of the stall samples)
+  asm volatile("{\n.reg .b32 ra;\nmapa.shared::cluster.u32 ra, %0, %1;\nmbarrier.arrive.shared::cluster.b64 _, [ra];\n}\n"
                :: "r"(bar), "r"(rank) : "memory");
 }
 __device__ __forceinline__ void load_2d_mc(const void* map, uint32_t dst, uint32_t bar, int c0, int c1, uint16_t mask) {
@@ -280,8 +282,10 @@ __device__ __forceinline__ void load_2d_mc(const void* map, uint32_t dst, uint32
 }
 }  // namespace fc
 
-template <int NCH>     // 64-column chunks of q | k | v | g (unrolled: no wgmma may be in flight across a branch or a back edge)
-__global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fc::THREADS, 1) front_c256_sm90(
+// NCH: 64-column chunks of q | k | v | g (unrolled: no wgmma may be in flight across a branch or a back edge); MC: launched as clusters
+// of two CTAs that share every weight chunk (multicast), else each CTA loads its own
+template <int NCH, bool MC>
+__global__ void __launch_bounds__(fc::THREADS, 1) front_c256_sm90(
     int L, int ntiles, float eps, float inv_scale, int tr, int H,
     const __grid_constant__ CUtensorMap xmap,             // x [R][256] bf16, box (64, 128), 128B swizzle (tr: the 4-D transposed pair map)
     const __grid_constant__ CUtensorMap wmap,             // W [nch 64][256] fp16 (rows permuted per chunk), box (64, 64), 128B swizzle
@@ -302,16 +306,16 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fc::THREADS, 1) fron
   auto wf = [&](int s) { return bar0 + 24 + 8 * s; };
   auto we = [&](int s) { return bar0 + 24 + 8 * (NW + s); };                // count 16: every consumer warp of both CTAs
   const int tid = threadIdx.x, wg = tid >> 7, lane = tid & 31;
-  const uint32_t rank = cta_rank(), peer = rank ^ 1u;
+  const uint32_t rank = MC ? cta_rank() : 0u, peer = rank ^ 1u;
   for (int c = tid; c < 2 * C; c += THREADS) gb[c] = c < C ? LNW[c] : LNB[c - C];
   if (tid == 0) {
     uint64_t* bars = reinterpret_cast<uint64_t*>(smb + (bar0 - sX));
     sm90::bar_init(bars, 1); sm90::bar_init(bars + 1, 8); sm90::bar_init(bars + 2, 1);
-    for (int s = 0; s < NW; ++s) { sm90::bar_init(bars + 3 + s, 1); sm90::bar_init(bars + 3 + NW + s, 16); }
+    for (int s = 0; s < NW; ++s) { sm90::bar_init(bars + 3 + s, 1); sm90::bar_init(bars + 3 + NW + s, MC ? 16 : 8); }
     sm90::bar_init_fence();
   }
   __syncthreads();
-  cluster_sync();                                         // the peer's barriers exist before a multicast or a remote arrive reaches them
+  if (MC) cluster_sync();                                 // the peer's barriers exist before a multicast or a remote arrive reaches them
 
   if (wg == 0) {
     sm90::reg_dealloc<40>();
@@ -334,8 +338,12 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fc::THREADS, 1) fron
           }
           sm90::wait(we(ws), wph ^ 1);                     // the stage is free in both CTAs
           sm90::expect_tx(wf(ws), WT * 2);
-          for (int kb = 2 * (int)rank; kb < 2 * (int)rank + 2; ++kb)
-            load_2d_mc(&wmap, sW + ws * WT * 2 + kb * NC * 128, wf(ws), kb * 64, c * NC, (uint16_t)3);
+          if (MC) {
+            for (int kb = 2 * (int)rank; kb < 2 * (int)rank + 2; ++kb)
+              load_2d_mc(&wmap, sW + ws * WT * 2 + kb * NC * 128, wf(ws), kb * 64, c * NC, (uint16_t)3);
+          } else {
+            for (int kb = 0; kb < 4; ++kb) sm90::load_2d(&wmap, sW + ws * WT * 2 + kb * NC * 128, wf(ws), kb * 64, c * NC);
+          }
           if (++ws == NW) { ws = 0; wph ^= 1; }
         }
       }
@@ -402,7 +410,10 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fc::THREADS, 1) fron
       auto finish = [&](float (&acc)[32], int s, int c) {
         sm90::fence_regs(acc);
         __syncwarp();
-        if (lane == 0) { arrive_rank(we(s), rank); arrive_rank(we(s), peer); }
+        if (lane == 0) {
+          if (MC) { arrive_rank(we(s), rank); arrive_rank(we(s), peer); }
+          else sm90::arrive(we(s));
+        }
 #pragma unroll
         for (int r = 0; r < 2; ++r) {
 #pragma unroll
@@ -457,7 +468,7 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fc::THREADS, 1) fron
       sm90::named_sync(1, 256);                                 // the staging is read before the next tile writes it
     }
   }
-  cluster_sync();                                         // no CTA leaves while its peer may still multicast into it or arrive on it
+  if (MC) cluster_sync();                                 // no CTA leaves while its peer may still multicast into it or arrive on it
 }
 
 // sbias[b, h, i, j] = T(qkvb[(b, i, j), bias_col + h] / scale), -inf where mask[b, j] is false (T = bf16, or fp16 for the fp16 inference core:
@@ -728,7 +739,7 @@ std::vector<torch::Tensor> g_ln_bias_fwd(torch::Tensor x, torch::Tensor w, torch
 // x [M, 256] bf16 (the pair's physical rows), w16 [4 HD, 256] fp16 (rows permuted within each 64-row chunk, see front_c256_sm90),
 // wb16 [8, 256] fp16 (heads >= H zero) -> (q | k | v | g fp16 [M, 4 HD], sbias fp16 [B, H, L, L] = bias / scale, masked keys -inf)
 std::vector<torch::Tensor> g_front_c256(torch::Tensor x, torch::Tensor w, torch::Tensor b, torch::Tensor w16, torch::Tensor wb16, torch::Tensor mask,
-                                        double eps, int64_t B, int64_t L, int64_t H, bool trans, double scale) {
+                                        double eps, int64_t B, int64_t L, int64_t H, bool trans, double scale, bool mc) {
   using namespace sm90;
   TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous() && x.scalar_type() == torch::kBFloat16 && x.size(1) == fc::C, "x [M, 256] bf16");
   const long M = x.size(0);
@@ -751,12 +762,21 @@ std::vector<torch::Tensor> g_front_c256(torch::Tensor x, torch::Tensor w, torch:
                                CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
   CUtensorMap wbm = make_map<2>(wb16.data_ptr(), {C, 8}, {C}, {64, 8}, CU_TENSOR_MAP_SWIZZLE_128B, "wb16", CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(front_c256_sm90<16>, cudaFuncAttributeMaxDynamicSharedMemorySize, fc::SMEM)); attr = true; }
+  if (!attr) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(front_c256_sm90<16, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, fc::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(front_c256_sm90<16, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, fc::SMEM));
+    attr = true;
+  }
   const int ntiles = (int)(M / fc::BM);
   const int grid = std::min(ntiles, num_sms(x.device().index())) & ~1;     // clusters of two CTAs; ntiles is even (L % 128 == 0)
-  front_c256_sm90<16><<<grid, fc::THREADS, fc::SMEM, stream()>>>((int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)H, xm, wm, wbm,
-                                                            w.data_ptr<float>(), b.data_ptr<float>(), mp, reinterpret_cast<__half*>(out.data_ptr()),
-                                                            reinterpret_cast<__half*>(sbias.data_ptr()));
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3(grid); cfg.blockDim = dim3(fc::THREADS); cfg.dynamicSmemBytes = fc::SMEM; cfg.stream = stream();
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeClusterDimension; at[0].val.clusterDim.x = 2; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+  cfg.attrs = at; cfg.numAttrs = mc ? 1 : 0;
+  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, mc ? front_c256_sm90<16, true> : front_c256_sm90<16, false>, (int)L, ntiles, (float)eps, (float)(1.0 / scale),
+                                    (int)trans, (int)H, xm, wm, wbm, (const float*)w.data_ptr<float>(), (const float*)b.data_ptr<float>(), mp,
+                                    reinterpret_cast<__half*>(out.data_ptr()), reinterpret_cast<__half*>(sbias.data_ptr())));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {out, sbias};
 }
@@ -908,7 +928,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_bias_fwd", &g_ln_bias_fwd, py::arg("x"), py::arg("w"), py::arg("b"), py::arg("wb"), py::arg("mask"), py::arg("eps"), py::arg("B"),
         py::arg("L"), py::arg("H"), py::arg("trans"), py::arg("scale"));
   m.def("front_c256", &g_front_c256, py::arg("x"), py::arg("w"), py::arg("b"), py::arg("w16"), py::arg("wb16"), py::arg("mask"), py::arg("eps"),
-        py::arg("B"), py::arg("L"), py::arg("H"), py::arg("trans"), py::arg("scale"));
+        py::arg("B"), py::arg("L"), py::arg("H"), py::arg("trans"), py::arg("scale"), py::arg("mc") = true);
   m.def("front_bias", &g_front_bias);
   m.def("gate_u", &g_gate_u);
   m.def("residual", &g_residual);

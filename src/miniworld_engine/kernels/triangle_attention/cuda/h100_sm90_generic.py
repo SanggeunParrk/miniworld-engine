@@ -282,18 +282,18 @@ def _half(wcat):
 
 #: fp16 inference beyond L 256 at d_pair 256 with 8 heads x 32: ``front_c256`` (LayerNorm + q | k | v | g + head-major bias
 #: in one kernel; replaces ln_bias_fwd and the projection GEMM)
-FRONT_C256 = False  # measured slower than ln_bias_fwd + the cuBLAS GEMM so far (work in progress)
-# front_c256's weight rows within each 64-row chunk: accumulator column a = 8 i + 2 t + e of a lane (t = lane % 4) is output column
-# 32 (i // 4) + 8 t + 2 (i % 4) + e, so a lane's 16 columns of a row are two runs of 8 (16-byte stores)
-_PERM64 = [32 * ((a // 8) >> 2) + 8 * ((a % 8) // 2) + 2 * ((a // 8) & 3) + (a % 2) for a in range(64)]
+FRONT_C256 = True
 
 
 def _front_w16(wcat, hd):
     """front_c256's weights: q | k | v | g rows [4 HD, C] fp16 permuted within each 64-row chunk, cached on the packed tensor."""
     w = getattr(wcat, "_triattn_front_w16", None)
     if w is None:
-        perm = torch.tensor(_PERM64, device=wcat.device)
-        w = _half(wcat)[: 4 * hd].view(-1, 64, wcat.shape[1])[:, perm].reshape(4 * hd, wcat.shape[1]).contiguous()
+        # within each 64-row chunk, accumulator column a = 8 i + 2 t + e of a lane (t = lane % 4, i = 4 s + j) is output column
+        # 32 s + 8 t + 2 j + e: a lane's 16 columns of a row are two runs of 8 (16-byte stores).  Output rows (s, t, j, e) -> (s, j, t, e):
+        # views only (no host-to-device copy: the pack may be rebuilt inside a CUDA-graph capture)
+        c = wcat.shape[1]
+        w = _half(wcat)[: 4 * hd].view(-1, 2, 4, 4, 2, c).permute(0, 1, 3, 2, 4, 5).reshape(4 * hd, c).contiguous()
         wcat._triattn_front_w16 = w
     return w
 
@@ -429,7 +429,7 @@ def _forward(
         y = mean = rstd = None
         qkvg, sbias = g.front_c256(
             x, lnw.float().contiguous(), lnb.float().contiguous(), _front_w16(wcat, HD), _half(wcat)[4 * HD : 4 * HD + 8], front_mask, eps,
-            B, L, H, trans, scale,
+            B, L, H, trans, scale, False,  # (two-CTA multicast of the weight chunks: measured level, 2026-10-30)
         )
     elif lnbias:
         mean = rstd = None
