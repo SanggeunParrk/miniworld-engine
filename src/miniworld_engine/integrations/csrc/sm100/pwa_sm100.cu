@@ -510,14 +510,15 @@ __global__ void __launch_bounds__(go::THREADS, 1) pwa_gate_out_sm100(
 }
 
 // ---------------------------------------------------------------------------------------------
-// PWA backward glue, second form: the dgp consumers move in, so dgp never reaches global memory.  Tile = one token n x 128 MSA
-// rows s (as dv_bwd), the heads in pairs (j = 0..3: heads 2j, 2j + 1):
+// PWA backward glue, second form: the dgp consumers move in, so dgp never reaches global memory.  Tile = two tokens x 64 MSA
+// rows (row r = (s0 + r / 2, n0 + r % 2): y / dres / dyg rows are 256-byte runs, o / do head blocks two 4 KiB runs; 1.3-2 % faster
+// than one token x 128 rows, four tokens x 32 rows was 9-10 % slower), the heads in pairs (j = 0..3: heads 2j, 2j + 1):
 //   G = y . Wg_pair^T, DU = dout' . Wo_pair (dout' = dres . keep / (1 - p), one keep row per token)   tensor core, N = 64
 //   a thread a row and a head: g = sigmoid(G), do = DU g, dgp = DU o g (1 - g), go = g o          o / do straight from registers
 //   dyg[s,:]       += dgp_pair . Wg_pair                     (tensor core, TMEM over the tile's pairs; two buffers)
 //   dWo_pair       += dout'^T go_pair,  dWg_pair^T += y^T dgp_pair   (M = 64, N = 64, TMEM over the CTA's tiles)
 // and dyg -- the gate branch's share of dy = dgp Wg + dv Wv -- leaves once per tile, bf16 natural [S][N][64] (dv_bwd adds dv Wv).
-// o / do are head-major [H, N, S*C], so a head's block of the tile is 128 consecutive rows: a warp reads / writes 2 KiB runs.
+// o / do are head-major [H, N, S*C], so a head's block of the tile is two runs of 64 consecutive rows.
 // Wg / 2 and Wo^T stay resident: the gate GEMM on Wg / 2 gives G / 2, the tanh argument of sigmoid(G) = (1 + tanh(G / 2)) / 2, and dgp is
 // kept doubled (exact) for the GEMMs that read it, so dyg comes out as dgp . Wg and the slab holds 2 dWg (halved in glue2_finish).
 // (The previous (128 i, 2 s) tiles streamed Wg_h / Wo_h^T per head: the next head's gate GEMMs waited
@@ -534,7 +535,8 @@ constexpr int STAGE = 2 * RT;                              // y | dres
 constexpr int NST = 3;
 constexpr int WT = HC * D;                                 // Wg / 2, Wo^T [256][64] (32 KiB each)
 constexpr int THREADS = 320;
-constexpr int MKB = 256;                                // a keep row [64] bf16 per stage (the dropout only)
+constexpr int TT = 2, TS = BS / TT;                        // a tile: TT tokens x TS MSA rows, row r = (s0 + r / TT, n0 + r % TT)
+constexpr int MKB = 128 * TT;                              // the tile's keep rows [TT][64] bf16 per stage (the dropout only)
 constexpr int SMEM = 1024 + (NST * STAGE + 2 * WT + 2 * 2 * RT) * 2 + NST * MKB + 512;
 constexpr int COL_G = 0, COL_DU = 64, COL_WO = 128, COL_WG = 256, COL_YG = 384;
 constexpr int PW = 2 * HC;                                 // a CTA's slab row: dWo [d][256] | dWg^T [d][256]
@@ -548,18 +550,18 @@ static_assert(SMEM <= 232448, "one CTA per SM");
 
 __global__ void __launch_bounds__(gl2::THREADS, 1) pwa_glue2_sm100(
     int N, int S, int ntiles,
-    const __grid_constant__ CUtensorMap ymap,     // y [S][N][64] as (64, N, S), box (64, 1, 128), 128B swizzle
+    const __grid_constant__ CUtensorMap ymap,     // y [S][N][64] as (64, N, S), box (64, TT, TS), 128B swizzle
     const __grid_constant__ CUtensorMap rmap,     // dres, same
     const __grid_constant__ CUtensorMap gmap,     // Wg / 2 [HC][64] (pwa_wprep), box (64, 256), 128B swizzle
     const __grid_constant__ CUtensorMap wotmap,   // Wo^T [HC][64], same
-    const __grid_constant__ CUtensorMap kmap,     // keep [N][64] bf16, box (64, 1) (the dropout only)
+    const __grid_constant__ CUtensorMap kmap,     // keep [N][64] bf16, box (64, TT) (the dropout only)
     const __nv_bfloat16* __restrict__ O,          // o head-major [H][N][S*C]
     __nv_bfloat16* __restrict__ DO,               // do, as o
     __nv_bfloat16* __restrict__ DYG,              // dyg [S][N][64]
     int drop, float dscale,
     float* __restrict__ DWO) {                    // [grid][64][512]: dWo | 2 dWg^T
   using namespace gl2;
-  const int NSB = S / BS;
+  const int NSB = S / TS;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
   __nv_bfloat16* sStage = reinterpret_cast<__nv_bfloat16*>(smb);   // [NST][y | dres]
@@ -593,7 +595,7 @@ __global__ void __launch_bounds__(gl2::THREADS, 1) pwa_glue2_sm100(
   tc_fence_after();
   const uint32_t tmem = *tslot;
   const int nt = (int)blockIdx.x < ntiles ? (ntiles - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
-  auto tile_of = [&](int lt) { const int t = (int)blockIdx.x + lt * (int)gridDim.x; return make_int2(t / NSB, (t % NSB) * BS); };   // (n, s0)
+  auto tile_of = [&](int lt) { const int t = (int)blockIdx.x + lt * (int)gridDim.x; return make_int2((t / NSB) * TT, (t % NSB) * TS); };   // (n0, s0)
   auto stage = [&](int lt) { return sStage + (lt % NST) * STAGE; };
 
   if (warp == 0) {
@@ -606,10 +608,10 @@ __global__ void __launch_bounds__(gl2::THREADS, 1) pwa_glue2_sm100(
         const int n = ns.x, s0 = ns.y;
         const int st = lt % NST;
         if (lt >= NST) wait(sempty + st, ((lt / NST) - 1) & 1);
-        expect_tx(full + st, STAGE * 2 + (drop ? D * 2 : 0));
+        expect_tx(full + st, STAGE * 2 + (drop ? D * 2 * TT : 0));
         load_3d(&ymap, stage(lt), full + st, 0, n, s0);
         load_3d(&rmap, stage(lt) + RT, full + st, 0, n, s0);
-        if (drop) load_2d(&kmap, sMK + st * MKB, full + st, 0, n);   // the token's keep row lands with the tile
+        if (drop) load_2d(&kmap, sMK + st * MKB, full + st, 0, n);   // the tile's keep rows land with it
       }
     }
   } else if (warp == 1) {
@@ -669,12 +671,12 @@ __global__ void __launch_bounds__(gl2::THREADS, 1) pwa_glue2_sm100(
     }
     tc_fence_before();
     named_sync(1, 256);
-    // dout' = dres . keep / (1 - p) in place: row r, channel half pp (the tile's keep row is one row of the token, landed with it)
+    // dout' = dres . keep / (1 - p) in place: row r, channel half pp (keep row r % TT of the tile's, landed with it)
     auto prep = [&](int lt) {
       const int st = lt % NST;
       wait(full + st, (lt / NST) & 1);
       if (drop) {
-        const uint4* km = reinterpret_cast<const uint4*>(sMK + st * MKB) + pp * 4;
+        const uint4* km = reinterpret_cast<const uint4*>(sMK + st * MKB + (r % TT) * D * 2) + pp * 4;
         __nv_bfloat16* row = stage(lt) + RT + r * 64;
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
@@ -695,7 +697,7 @@ __global__ void __launch_bounds__(gl2::THREADS, 1) pwa_glue2_sm100(
       __syncwarp();
       if (lane == 0) arrive(rdy + st);
     };
-    // a tile's dyg: TMEM -> bf16 -> global (row s0 + r, the 32 channels of half pp: 64 contiguous bytes)
+    // a tile's dyg: TMEM -> bf16 -> global (row r, the 32 channels of half pp: 64 contiguous bytes)
     auto dyg_out = [&](int lt) {
       const int2 ns = tile_of(lt);
       const int n = ns.x, s0 = ns.y;
@@ -711,16 +713,16 @@ __global__ void __launch_bounds__(gl2::THREADS, 1) pwa_glue2_sm100(
       uint32_t w[16];
 #pragma unroll
       for (int k = 0; k < 16; ++k) w[k] = pack2(yv[2 * k], yv[2 * k + 1]);
-      __nv_bfloat16* dst = DYG + ((size_t)(s0 + r) * N + n) * D + pp * 32;
+      __nv_bfloat16* dst = DYG + ((size_t)(s0 + r / TT) * N + n + r % TT) * D + pp * 32;
       st256(dst, w);
       st256(dst + 16, w + 8);
     };
-    // this thread's 32 o values of pair j's head, row s0 + r (64 contiguous bytes; a warp reads 2 KiB)
+    // this thread's 32 o values of pair j's head, row r (64 contiguous bytes)
     auto load_o = [&](int lt, int j, uint32_t* og) {
       if (lt >= nt) return;
       const int2 ns = tile_of(lt);
       const int n = ns.x, s0 = ns.y;
-      const __nv_bfloat16* op = O + ((size_t)((2 * j + pp) * N + n) * S + s0 + r) * C;
+      const __nv_bfloat16* op = O + ((size_t)((2 * j + pp) * N + n + r % TT) * S + s0 + r / TT) * C;
       ld256(op, og);
       ld256(op + 16, og + 8);
     };
@@ -773,7 +775,7 @@ __global__ void __launch_bounds__(gl2::THREADS, 1) pwa_glue2_sm100(
         fence_proxy_async();
         __syncwarp();
         if (lane == 0) arrive(gof + b);
-        __nv_bfloat16* dst = DO + ((size_t)(h * N + n) * S + s0 + r) * C;
+        __nv_bfloat16* dst = DO + ((size_t)(h * N + n + r % TT) * S + s0 + r / TT) * C;
         st256(dst, wdo);
         st256(dst + 16, wdo + 8);
 #pragma unroll
@@ -2171,13 +2173,16 @@ std::vector<torch::Tensor> pwa_glue2(torch::Tensor o, torch::Tensor y, torch::Te
   const int ntiles = (int)(N * (S / BS));
   const int grid = std::min(ntiles, num_sms(y.device().index()));
   auto part = torch::empty({grid, (long)D, (long)PW}, y.options().dtype(torch::kFloat32));
-  auto nat = [&](void* p, const char* w) { return make_map<3>(p, {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)N * D}, {64, 1, BS}, CU_TENSOR_MAP_SWIZZLE_128B, w); };
+  TORCH_CHECK(N % TT == 0, "N must be a multiple of ", TT);
+  auto nat = [&](void* p, const char* w) {
+    return make_map<3>(p, {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)N * D}, {64, (uint32_t)TT, (uint32_t)TS}, CU_TENSOR_MAP_SWIZZLE_128B, w);
+  };
   CUtensorMap rm = nat(dres.data_ptr(), "dres"), ym = nat(y.data_ptr(), "y");
   CUtensorMap gm = make_map<2>(wgw.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, HC}, CU_TENSOR_MAP_SWIZZLE_128B, "wg");
   CUtensorMap wtm = make_map<2>(wot.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, HC}, CU_TENSOR_MAP_SWIZZLE_128B, "wot");
   const bool drop = dmask.has_value() && dmask->numel();
   if (drop) TORCH_CHECK(dmask->scalar_type() == torch::kBFloat16 && dmask->is_contiguous() && dmask->numel() == N * D, "dmask: [N, 64] bf16");
-  CUtensorMap km = make_map<2>(drop ? dmask->data_ptr() : y.data_ptr(), {(uint64_t)D, (uint64_t)N}, {(uint64_t)D}, {64, 1}, CU_TENSOR_MAP_SWIZZLE_NONE, "keep");
+  CUtensorMap km = make_map<2>(drop ? dmask->data_ptr() : y.data_ptr(), {(uint64_t)D, (uint64_t)N}, {(uint64_t)D}, {64, (uint32_t)TT}, CU_TENSOR_MAP_SWIZZLE_NONE, "keep");
   auto st = at::cuda::getCurrentCUDAStream();
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_glue2_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
