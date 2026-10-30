@@ -97,14 +97,14 @@ DEV void tmem_st16x256_x4(uint32_t taddr, const uint32_t (&r)[16]) {
                   "r"(r[9]), "r"(r[10]), "r"(r[11]), "r"(r[12]), "r"(r[13]), "r"(r[14]), "r"(r[15]) : "memory");
 }
 
-template <int C, int H, int SAVE>
+template <int C, int H, int SAVE, int SMJ>
 __global__ void __launch_bounds__(512, 1)
     k3g_kernel(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mtri, const __grid_constant__ CUtensorMap mwp,
               const __grid_constant__ CUtensorMap mwg, const __grid_constant__ CUtensorMap my, const __grid_constant__ CUtensorMap mxn,
               const float* __restrict__ g_in, const float* __restrict__ b_in, const float* __restrict__ g_out,
               const float* __restrict__ b_out, const __nv_bfloat16* __restrict__ ds, const __nv_bfloat16* __restrict__ xglob,
               float* __restrict__ mean_out,
-              float* __restrict__ rs_out, int L, int tiles, float eps, float4* __restrict__ zero_buf, int zero_n4) {
+              float* __restrict__ rs_out, int L, int tiles, float eps, float4* __restrict__ zero_buf, int zero_n4, int n2) {
   extern __shared__ __align__(1024) uint8_t sm[];      // no static shared memory: the dynamic window starts 1024-aligned
   using GG = Geo<C, H>;
   constexpr int XT = GG::XT, TT = GG::TT, WPB = GG::WPB, WG = GG::WG;
@@ -286,7 +286,13 @@ __global__ void __launch_bounds__(512, 1)
         const int k = 2 * i + h, slot = k % NTH;
         if (k >= NTH) PW(1, mbar_wait(&B.th_empty[slot], ((k / NTH) - 1) & 1));
         mbar_expect_tx(&B.th_full[slot], TT / 2);
-        tma_load_2d(sm + O_T + slot * (TT / 2), &mtri, &B.th_full[slot], row0 + 64 * h, 0, EVICT_FIRST);
+        if constexpr (SMJ != 0) {          // sample-major t (n2 tokens per sample): the 4-D map of tmap::make_chmajor
+          int tq, ts;
+          tok_split(row0 + 64 * h, n2, tq, ts);
+          tma_load_4d(sm + O_T + slot * (TT / 2), &mtri, &B.th_full[slot], tq, 0, ts, 0, EVICT_FIRST);
+        } else {
+          tma_load_2d(sm + O_T + slot * (TT / 2), &mtri, &B.th_full[slot], row0 + 64 * h, 0, EVICT_FIRST);
+        }
       }
     }
   }
@@ -500,11 +506,14 @@ void k3g_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wp_perm, torc
                  c10::optional<torch::Tensor> ds, c10::optional<torch::Tensor> xn_out, c10::optional<torch::Tensor> mean_out,
                  c10::optional<torch::Tensor> rs_out, int64_t grid, c10::optional<torch::Tensor> zero_buf) {
   using namespace k3g;
-  const int64_t M = x.size(0), C = x.size(1), H = tri.size(0);
+  const int64_t M = x.size(0), C = x.size(1), H = tmap::chmajor_channels(tri);   // tri [H, ..] or sample-major [H / 64, B, 64, L, L]
   TORCH_CHECK(tri.numel() == H * M && M % TOK == 0 && M % (L * L) == 0 && (!save || L % TOK == 0));   // M = B L L, tokens b-major
   auto bf = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   auto mx = tmap::make(x.data_ptr(), bf, {(uint64_t)C, (uint64_t)M}, {(uint64_t)C * 2}, {64, TOK}, CU_TENSOR_MAP_SWIZZLE_128B);
-  auto mt = tmap::make(tri.data_ptr(), bf, {(uint64_t)M, (uint64_t)H}, {(uint64_t)M * 2}, {64, (uint32_t)H}, CU_TENSOR_MAP_SWIZZLE_128B);
+  const int n2 = tri.dim() == 5 ? (int)(L * L) : 0;   // 0: the [H, M] map as before
+  TORCH_CHECK(!n2 || (C == 64 && save), "k3g_forward: sample-major t is the D64 training forward only");
+  auto mt = n2 ? tmap::make_chmajor(tri, n2, 64, (uint32_t)H, CU_TENSOR_MAP_SWIZZLE_128B)
+               : tmap::make(tri.data_ptr(), bf, {(uint64_t)M, (uint64_t)H}, {(uint64_t)M * 2}, {64, (uint32_t)H}, CU_TENSOR_MAP_SWIZZLE_128B);
   auto mwp = tmap::make(wp_perm.data_ptr(), bf, {(uint64_t)H, (uint64_t)C}, {(uint64_t)H * 2}, {64, (uint32_t)C}, CU_TENSOR_MAP_SWIZZLE_128B);
   auto mwg = tmap::make(wg.data_ptr(), bf, {(uint64_t)C, (uint64_t)C}, {(uint64_t)C * 2}, {64, (uint32_t)C}, CU_TENSOR_MAP_SWIZZLE_128B);
   auto my = tmap::make(y.data_ptr(), bf, {(uint64_t)C, (uint64_t)M}, {(uint64_t)C * 2}, {64, TOK}, CU_TENSOR_MAP_SWIZZLE_128B);
@@ -534,11 +543,12 @@ void k3g_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wp_perm, torc
   auto launch = [&](auto kern, int smem) {
     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
     kern<<<g, 512, smem, st>>>(mx, mt, mwp, mwg, my, mxn, g_in.data_ptr<float>(), b_in.data_ptr<float>(), g_out.data_ptr<float>(),
-                               b_out.data_ptr<float>(), dsp, xp, mo, ro, (int)L, tiles, (float)eps, zp, zn4);
+                               b_out.data_ptr<float>(), dsp, xp, mo, ro, (int)L, tiles, (float)eps, zp, zn4, n2);
   };
 #define K3G_CASE(CC, HH) \
   if (C == CC && H == HH) { \
-    if (save) launch(k3g_kernel<CC, HH, 1>, Geo<CC, HH>::SMEM); else launch(k3g_kernel<CC, HH, 0>, Geo<CC, HH>::SMEM); \
+    if (n2) launch(k3g_kernel<CC, HH, 1, CC == 64>, Geo<CC, HH>::SMEM); \
+    else if (save) launch(k3g_kernel<CC, HH, 1, 0>, Geo<CC, HH>::SMEM); else launch(k3g_kernel<CC, HH, 0, 0>, Geo<CC, HH>::SMEM); \
     C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
   K3G_CASE(64, 64) K3G_CASE(64, 128) K3G_CASE(128, 128) K3G_CASE(128, 256)
 #undef K3G_CASE
