@@ -209,10 +209,12 @@ def _native_h100_extension(which="qkvg"):
     return ext
 
 
-def _native_mm(a, b):
+def _native_mm(a, b, tf32=None):
     # Private cuBLAS state preserves the incumbent GEMM choice. The captured
     # graph owns its scratch tensor independently of other graphs' lifetimes.
-    return _native_h100_extension().native_owned_mm(a, b, torch.backends.cuda.matmul.allow_tf32)
+    # tf32: None follows torch's matmul flag.
+    tf32 = torch.backends.cuda.matmul.allow_tf32 if tf32 is None else tf32
+    return _native_h100_extension().native_owned_mm(a, b, tf32)
 
 
 def _native_contract(q, mod, cs, sn, seqused, weights, B, half_window, training):
@@ -408,8 +410,12 @@ def _native_h100_mod_bwd_fake(dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor
 def native_h100_mod_bwd(dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor, w32: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """(dc, dweight) of :func:`native_h100_mod_fwd`; dc and dweight are cast back to c's and w's dtype."""
     ext = _native_h100_extension()
+    # A bf16 block's forward multiplies bf16 operands on the tensor cores (native_h100_mod_fwd); its backward takes them in TF32, at
+    # least that precision (w32 and a hold bf16 values exactly, dy keeps 10 mantissa bits). In fp32 these two GEMMs ran on the CUDA
+    # cores (cutlass simt sgemm): 0.14 of the 0.83 ms of InputFeatureEmbedder's esmfold2 / linear training step (4096 atoms, 3 blocks).
+    tf32 = True if c.dtype == torch.bfloat16 else None
     with torch.autocast("cuda", enabled=False):
-        da, dw = _native_mm(dy, w32), _native_mm(dy.t(), a)
+        da, dw = _native_mm(dy, w32, tf32), _native_mm(dy.t(), a, tf32)
     dc, dweight = torch.empty_like(c), torch.empty_like(w)
     ext.native_rows([c, da], [dc], 14, 1, 1, c.shape[0], c.dtype == torch.bfloat16, FP32_EPS)
     ext.native_copy([dw], [dweight], 0)
