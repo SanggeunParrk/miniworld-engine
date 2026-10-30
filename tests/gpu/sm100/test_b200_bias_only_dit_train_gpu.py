@@ -241,6 +241,9 @@ def test_graph_capture_compile_and_steady_memory(monkeypatch, n_head, d_head, fu
     for g, e in zip(replayed, eager, strict=True):
         assert relative(g, e) < 2e-3
     # torch.compile keeps the two opaque ops (forward / backward) and gives the same step
+    # a fresh dynamo cache: earlier tests of the process compile BiasOnlyDiTBlock.forward for other layouts / dtypes /
+    # modes, and past torch._dynamo.config.recompile_limit (8) dynamo stops compiling it (fullgraph: 'found no compiled frames')
+    torch._dynamo.reset()
     compiled = torch.compile(fast, options={"triton.cudagraphs": False})
     for g, e in zip(run(compiled), eager, strict=True):
         assert relative(g, e) < 2e-3

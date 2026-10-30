@@ -341,6 +341,9 @@ def test_long_training_graph_capture_and_compile():
     replayed = [t.grad for t in (xs, cs, ps)] + [q.grad for q in fast.parameters()]
     for g, e in zip(replayed, eager, strict=True):
         assert relative(g, e) < 2e-3
+    # a fresh dynamo cache: earlier tests of the process compile BiasOnlyDiTBlock.forward for other layouts / dtypes /
+    # modes, and past torch._dynamo.config.recompile_limit (8) dynamo stops compiling it (fullgraph: 'found no compiled frames')
+    torch._dynamo.reset()
     compiled = torch.compile(fast, options={"triton.cudagraphs": False})
     for g, e in zip(run(compiled), eager, strict=True):
         assert relative(g, e) < 2e-3
