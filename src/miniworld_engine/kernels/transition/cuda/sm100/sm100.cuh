@@ -333,6 +333,22 @@ DEVI f2 sigmoid2(f2 a) {
   const f2 t = mk2(tanhf_approx(lo2(h)), tanhf_approx(hi2(h)));
   return fma2(t, mk2(0.5f, 0.5f), mk2(0.5f, 0.5f));
 }
+// the SwiGLU sigmoid of the D = 64 / 128 Transition kernels (tr_fwd / tr_bwd / tfwd_d64 / tbwd_d64): the forward and both backward roles
+// evaluate this one function, so the backward's s (and the h it recomputes for dW_s) are the forward's.
+//   TR_SIG 1 (default): 0.5 tanh.approx(a / 2) + 0.5, one MUFU op per unit. The forward is MUFU-bound on the sigmoid; this form takes
+//            the D64 [4, 768, 768] forward 0.376 -> 0.296 ms and the D128 [1, 768, 768] one 0.212 -> 0.182 ms, and every Transition
+//            accuracy bar holds with the same margins (forward and gradients vs fp64 at 0.56-0.81x the bf16 PyTorch statements' error).
+//   TR_SIG 0: the kit form rcp.approx(1 + ex2.approx(-a log2 e)), two MUFU ops per unit (bit-identical to the engine before; A/B runs)
+#ifndef TR_SIG
+#define TR_SIG 1
+#endif
+DEVI f2 sigmoid_tr(f2 a) {
+#if TR_SIG == 0
+  return mk2(sigmoid_kit(lo2(a)), sigmoid_kit(hi2(a)));
+#else
+  return sigmoid2(a);
+#endif
+}
 }  // namespace s100
 
 // ------------------------------------------------------------------ L2 cache-policy hints for TMA

@@ -6,7 +6,7 @@
 //     32 crank + 31: 4 x 4 KB), loaded once per launch -- no weight ring
 //   * expand   [a|b]_j = xn [Wa_j; Wb_j]^T   M 256, N 128, K 64 (one 128-B-swizzled K-block)
 //   * squeeze  acc    += h_j Ws_j^T          M 256, N  64 (32 per CTA), K 64, A = h_j from tensor memory
-// Rounding points as tfwd2.cu: xn bf16, a / b fp32, h = bf16(silu(a) b) (kit sigmoid), acc fp32, out = bf16(x + acc).
+// Rounding points as tfwd2.cu: xn bf16, a / b fp32, h = bf16((a s) b) (s = sigmoid_tr, sm100.cuh), acc fp32, out = bf16(x + acc).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -33,10 +33,7 @@ static_assert(HID != 256 || SMEM_BYTES == 148480, "bench_w.py SMEM[64]");
 static_assert(O_X % 1024 == 0 && O_XN % 1024 == 0 && O_WS % 1024 == 0, "128-B swizzled operands need 1 KB alignment");
 constexpr int KS = 4;                                          // K = 64 in K16 steps (expand: D; squeeze: the chunk's 64 hidden units)
 constexpr uint32_t T_AB = 0, T_H = 256, T_OUT = 384;
-// sigmoid of the SwiGLU: the kit form (ex2 + rcp on MUFU) by default; SIG_NR takes the reciprocal on the FMA pipe (Newton, error below
-// rcp.approx's), SIG_POLY the exponential (degree-6 polynomial, error below ex2.approx's), SIG_TANH 0.5 tanh(a / 2) + 0.5 (one MUFU op;
-// relaxed: tanh.approx relative error ~2^-11)
-#define SIGF(a) sigmoid_kit(a)
+// sigmoid of the SwiGLU: sigmoid_tr (sm100.cuh, TR_SIG), the function the backward's gate evaluates too
 constexpr uint32_t IDESC_EX = idesc_bf16(256, 128), IDESC_SQ = idesc_bf16(256, 64);
 
 struct Bars {
@@ -180,7 +177,8 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
           for (int k = 0; k < 8; ++k) {
             const float a0 = __uint_as_float(a[q & 1][2 * k]), a1 = __uint_as_float(a[q & 1][2 * k + 1]);
             const float b0 = __uint_as_float(b[q & 1][2 * k]), b1 = __uint_as_float(b[q & 1][2 * k + 1]);
-            hp[q * 8 + k] = pack_bf16(a0 * SIGF(a0) * b0, a1 * SIGF(a1) * b1);
+            const f2 A = mk2(a0, a1), H = mul2(mul2(A, sigmoid_tr(A)), mk2(b0, b1));   // (a s) b, as the backward's gate_pair16
+            hp[q * 8 + k] = pack_bf16(lo2(H), hi2(H));
           }
           if (q < 3) tmem_wait_ld();
         }

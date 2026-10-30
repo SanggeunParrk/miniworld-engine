@@ -204,7 +204,8 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
           for (int k = 0; k < 8; ++k) {
             const float a0 = __uint_as_float(a[q & 1][2 * k]), a1 = __uint_as_float(a[q & 1][2 * k + 1]);
             const float b0 = __uint_as_float(b[q & 1][2 * k]), b1 = __uint_as_float(b[q & 1][2 * k + 1]);
-            hp[q * 8 + k] = pack_bf16(a0 * sigmoid_kit(a0) * b0, a1 * sigmoid_kit(a1) * b1);
+            const f2 A = mk2(a0, a1), H = mul2(mul2(A, sigmoid_tr(A)), mk2(b0, b1));   // (a s) b, as the backward's gate_pair16
+            hp[q * 8 + k] = pack_bf16(lo2(H), hi2(H));
           }
           if (q < 3) tmem_wait_ld();
         }
