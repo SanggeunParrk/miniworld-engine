@@ -309,6 +309,9 @@ def _backward_body(leaves, mask, ds, direction, saved, dy, dx):
     return [dx, *(g.to(torch.float32, copy=True) for g in grads)]
 
 
+# The D64 / D128 ops carry an _sm suffix since the D64 saved set became sample-major (5-D planes / t): inductor's FX graph cache
+# keys a graph on its code and input metadata, not on a custom op's fake output, so a graph compiled when these ops returned 4-D
+# planes would be reused under the old names (and fail its size asserts). New names give new keys.
 def _forward_small_fake(leaves, mask, ds, direction):
     """y and the saved set: planes, t, x_n, LN_out mean / rstd."""
     return [torch.empty_like(leaves[0]), *_forward_small_into_fake(leaves, mask, ds, direction, leaves[0])]
@@ -328,14 +331,14 @@ def _forward_small_into_fake(leaves, mask, ds, direction, y):
             x.new_empty((m,), dtype=f32), x.new_empty((m,), dtype=f32))
 
 
-@opaque(fake=_forward_small_fake, name="trimul_b200_train_small_fwd")
+@opaque(fake=_forward_small_fake, name="trimul_b200_train_small_fwd_sm")
 def forward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int) -> list[torch.Tensor]:
     """D64 / D128 training forward; arguments as ``forward`` except ds, which is required ([B * L, D] bf16, ones without dropout).
     One direction, the hidden width (wl's rows) may be 2 D (``b200_infer.hidden_ok``)."""
     return list(_forward_small_body(leaves, mask, ds, direction, None))
 
 
-@opaque(fake=_forward_small_into_fake, name="trimul_b200_train_small_fwd_into", mutates_args=("y",))
+@opaque(fake=_forward_small_into_fake, name="trimul_b200_train_small_fwd_into_sm", mutates_args=("y",))
 def forward_small_into(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int,
                        y: torch.Tensor) -> _SAVED5:
     """``forward_small`` writing y into the caller's ``y``; returns the saved set."""
@@ -378,7 +381,7 @@ def _backward_small_into_fake(leaves, mask, ds, direction, saved, dy, dx):
     return _grads_fake(leaves)
 
 
-@opaque(fake=_backward_small_fake, name="trimul_b200_train_small_bwd")
+@opaque(fake=_backward_small_fake, name="trimul_b200_train_small_bwd_sm")
 def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int,
                    saved: list[torch.Tensor], dy: torch.Tensor) -> list[torch.Tensor]:
     """b1s / b1g -> contraction gradients -> b7m / b7g. Weight gradients accumulate atomically in one fp32 buffer (one memset),
@@ -387,7 +390,7 @@ def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
     return _backward_small_body(leaves, mask, ds, direction, saved, dy, None)
 
 
-@opaque(fake=_backward_small_into_fake, name="trimul_b200_train_small_bwd_into", mutates_args=("dx",))
+@opaque(fake=_backward_small_into_fake, name="trimul_b200_train_small_bwd_into_sm", mutates_args=("dx",))
 def backward_small_into(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int,
                         saved: list[torch.Tensor], dy: torch.Tensor, dx: torch.Tensor) -> _GRADS10:
     """``backward_small`` writing dx into the caller's ``dx``; returns the parameter gradients."""
