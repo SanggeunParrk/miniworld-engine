@@ -219,3 +219,62 @@ def test_replay_is_bit_identical():
 
     first, second = once(), once()
     assert all(torch.equal(a, b) for a, b in zip(first, second, strict=True))
+
+
+@needs_b200
+def test_weight_cast_matches_torch_bit_for_bit():
+    """The one-launch fp32 -> bf16 cast of the three weights rounds exactly like ``Tensor.to(torch.bfloat16)``, special values
+    included (ties to even, subnormals, signed zeros, inf, NaN)."""
+    from miniworld_engine.kernels.transition.cuda import fused_sm100a
+
+    torch.manual_seed(5)
+    wa, wb = (torch.randn(512, 128, device="cuda") * 3 for _ in range(2))
+    ws = torch.randn(128, 512, device="cuda") * 1e-3
+    special = torch.tensor(
+        [0.0, -0.0, float("inf"), -float("inf"), 1e-40, -1e-41, 3e38, 1.0 + 2**-8, 1.0 + 3 * 2**-8, 1.0 + 2**-9],
+        device="cuda",
+    )
+    wa.view(-1)[: special.numel()] = special
+    wb.view(-1)[-special.numel():] = special
+    got = fused_sm100a._cast_launch(wa, wb, ws)
+    for g, w in zip(got, (wa, wb, ws), strict=True):
+        want = w.to(torch.bfloat16)
+        assert g.dtype is torch.bfloat16 and g.shape == w.shape
+        assert torch.equal(g.view(torch.int16), want.view(torch.int16))
+    nan = wa.clone()
+    nan.view(-1)[7] = float("nan")
+    assert torch.isnan(fused_sm100a._cast_launch(nan, wb, ws)[0].view(-1)[7])
+
+
+@needs_b200
+def test_fp32_master_weights_equal_the_bf16_cast_run():
+    """fp32 master parameters (the bf16-mixed training case) take the one-launch cast: the forward and dx are bit-identical to a
+    run on the same weights cast to bf16 by torch, and the fp32 weight gradients round to the bf16 run's gradients."""
+    from miniworld_engine.kernels.transition.cuda import fused_sm100a
+
+    torch.manual_seed(3)
+    d, h, m = 128, 512, 128 * 20
+    x = torch.randn(m, d, device="cuda", dtype=torch.bfloat16)
+    dy = torch.randn(m, d, device="cuda", dtype=torch.bfloat16)
+    gamma = torch.rand(d, device="cuda") + 0.5
+    beta = torch.randn(d, device="cuda") * 0.1
+    w32 = [
+        torch.randn(h, d, device="cuda") * d**-0.5,
+        torch.randn(h, d, device="cuda") * d**-0.5,
+        torch.randn(d, h, device="cuda") * h**-0.5,
+    ]
+
+    def run(ws_):
+        xx = x.clone().requires_grad_()
+        params = [w.clone().requires_grad_() for w in ws_]
+        y = fused_sm100a.transition_fused_sm100a(xx, gamma, beta, *params, 1e-5)
+        y.backward(dy)
+        return y.detach(), xx.grad, [p.grad for p in params]
+
+    y32, dx32, g32 = run(w32)
+    y16, dx16, g16 = run([w.to(torch.bfloat16) for w in w32])
+    assert torch.equal(y32, y16)
+    assert torch.equal(dx32, dx16)
+    for a, b in zip(g32, g16, strict=True):
+        assert a.dtype is torch.float32 and b.dtype is torch.bfloat16
+        assert torch.equal(a.to(torch.bfloat16), b)

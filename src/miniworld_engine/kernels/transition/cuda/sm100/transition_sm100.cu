@@ -88,8 +88,8 @@ void check(CUresult r, const std::string& what) {
 
 // ---------------------------------------------------------------------------------------------------------------- kernels
 struct Kernels {
-  CUfunction fwd = nullptr, bwd = nullptr, reduce = nullptr;
-  int fwd_smem = 0, bwd_smem = 0;
+  CUfunction fwd = nullptr, bwd = nullptr, reduce = nullptr, cast = nullptr;
+  int fwd_smem = 0, bwd_smem = 0, reduce_blocks = 0;
 };
 
 std::string g_fwd_cubin, g_bwd_cubin;
@@ -131,8 +131,10 @@ const Kernels& kernels() {
   check(drv().function(&k.fwd, mf, "transition_fwd2_sm100"), "cuModuleGetFunction(transition_fwd2_sm100)");
   check(drv().function(&k.bwd, mb, "transition_bwd_sm100"), "cuModuleGetFunction(transition_bwd_sm100)");
   check(drv().function(&k.reduce, mb, "transition_bwd_reduce"), "cuModuleGetFunction(transition_bwd_reduce)");
+  check(drv().function(&k.cast, mf, "transition_cast3"), "cuModuleGetFunction(transition_cast3)");
   k.fwd_smem = read_int(mf, "transition_sm100_fwd_smem_bytes");
   k.bwd_smem = read_int(mb, "transition_sm100_bwd_smem_bytes");
+  k.reduce_blocks = read_int(mb, "transition_bwd_reduce_blocks");
   check(drv().attribute(k.fwd, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, k.fwd_smem), "forward smem opt-in");
   check(drv().attribute(k.bwd, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, k.bwd_smem), "backward smem opt-in");
   return g_kernels.emplace(dev, k).first->second;
@@ -250,6 +252,24 @@ std::vector<torch::Tensor> transition_fused_fwd(torch::Tensor x, torch::Tensor g
   return {out, xn, rstd, c1};
 }
 
+// fp32 wa / wb [512,128], ws [128,512] (the fp32 master parameters) -> their bf16 copies, one launch.
+std::vector<torch::Tensor> transition_cast_weights(torch::Tensor wa, torch::Tensor wb, torch::Tensor ws) {
+  for (const auto* w : {&wa, &wb, &ws})
+    expect(w->is_cuda() && w->is_contiguous() && w->scalar_type() == torch::kFloat32 && w->numel() == H * D,
+           "cast: weights must be contiguous cuda fp32 with 512 x 128 elements");
+  expect(wa.size(0) == H && wb.sizes() == wa.sizes() && ws.size(0) == D, "cast: wa / wb must be [512, 128], ws [128, 512]");
+  const Kernels& k = kernels();
+  auto oa = torch::empty(wa.sizes(), wa.options().dtype(torch::kBFloat16));
+  auto ob = torch::empty(wb.sizes(), wb.options().dtype(torch::kBFloat16));
+  auto os = torch::empty(ws.sizes(), ws.options().dtype(torch::kBFloat16));
+  const float *pa = wa.data_ptr<float>(), *pb = wb.data_ptr<float>(), *ps = ws.data_ptr<float>();
+  void *qa = oa.data_ptr(), *qb = ob.data_ptr(), *qs = os.data_ptr();
+  int n = static_cast<int>(H * D);
+  launch(k.cast, static_cast<unsigned>((3 * n / 8 + 255) / 256), 256, 0, 1, at::cuda::getCurrentCUDAStream(),
+         {(void*)&pa, (void*)&pb, (void*)&ps, (void*)&qa, (void*)&qb, (void*)&qs, (void*)&n}, "weight cast launch");
+  return {oa, ob, os};
+}
+
 // dy [M,128] bf16 (gradient of the module output) plus what the forward saved; `repl` = hidden-slice replicas of the weight role
 // (8 * repl CTAs). Returns (dx, dgamma, dbeta, dWa, dWb, dWs); dx already carries the residual branch, dgamma / dbeta are fp32 and the
 // weight gradients bf16 (fp32 sums rounded once).
@@ -300,11 +320,12 @@ std::vector<torch::Tensor> transition_fused_bwd(torch::Tensor dy, torch::Tensor 
          {(void*)&mdy, (void*)&mxn, (void*)&mx, (void*)&mws, (void*)&mwa, (void*)&mwb, (void*)&mdx, (void*)&rs, (void*)&c, (void*)&g,
           (void*)&xg, (void*)&pab, (void*)&ps, (void*)&pg, (void*)&tiles, (void*)&ndw},
          "backward launch");
-  const int nred = static_cast<int>(3 * H * D + 256);
-  launch(k.reduce, (nred + 255) / 256, 256, 0, 1, stream,
+  // a programmatic dependent of the backward: its blocks are scheduled as the backward's CTAs leave and wait (griddepcontrol.wait)
+  // for the whole backward
+  launch(k.reduce, static_cast<unsigned>(k.reduce_blocks), 256, 0, 1, stream,
          {(void*)&pab, (void*)&ps, (void*)&pg, (void*)&pwa, (void*)&pwb, (void*)&pws, (void*)&pdg, (void*)&pdb, (void*)&ndw,
           (void*)&nrows_dg},
-         "reduction launch");
+         "reduction launch", /*pdl=*/true);
   return {dx, dgam, dbeta, dwa, dwb, dws};
 }
 
@@ -484,5 +505,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("name"), py::arg("kernel"), py::arg("grid"), py::arg("block"), py::arg("cluster"), py::arg("args"), py::arg("pdl") = false);
   m.def("load", &load, "set the forward / backward cubins (loaded lazily per device)");
   m.def("transition_fused_fwd", &transition_fused_fwd, "fused sm_100a Transition forward (LN + SwiGLU expand + squeeze + residual)");
+  m.def("transition_cast_weights", &transition_cast_weights, "fp32 wa / wb / ws -> bf16 copies in one launch");
   m.def("transition_fused_bwd", &transition_fused_bwd, "fused sm_100a Transition backward (one kernel + a partial reduction)");
 }
