@@ -8,6 +8,11 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Changed
+
+- H100 single-direction TriangleMultiplication inference at d_pair 384 beyond L1024 runs the B200-style port (L % 128 == 0) instead of the packaged K1 / K3: 15-17 % faster than both the old path and Anthropic's `trimul_native` at L1536-2560 (`integrations/trimul_h100._legacy_native_faster`; record `docs/records/trimul_h100_bigl_20261030.md`).
+- The packaged K1 / K3 inference path keeps its launch plans and tensor maps per weight set across calls (`h100_inference._Kernels.plans`): host time per eager call 0.52 -> 0.31 ms (GPU time unchanged).
+
 ## [2.4.1] - 2026-10-30
 
 ### Fixed

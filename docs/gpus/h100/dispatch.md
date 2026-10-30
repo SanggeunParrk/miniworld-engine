@@ -181,8 +181,10 @@ tile (1, 64, 4, 4, 1). A 2-CTA multicast variant and an N-split two-warpgroup va
 use the CUDA aux kernels (`pack_into`, `fold_into`, `normalize_into`) whenever they run eagerly; the Triton versions only serve compiled
 regions. A kernel-name scan of D256/384/512 at L384/768 (36 cells) finds no Triton kernel.
 
-Inference selection (`_legacy_native_faster`): single direction D256 takes the tmn K1/K3 tiles at every L except 384; bidirectional
-keeps the preserved K1/K3 at (D384, L768) and (D512, L384).
+Inference selection (`_legacy_native_faster`): single direction D256 takes the tmn K1/K3 tiles at every L except 384; single
+direction D384 takes the B200-style port at every L it serves (multiples of 128; 17 % faster than tmn at L1536-2560, record
+`trimul_h100_bigl_20261030.md`), tmn otherwise; bidirectional keeps the preserved K1/K3 at (D384, L768) and (D512, L384).
+The tmn K1/K3 launch plans and tensor maps are cached per weight set across calls (`h100_inference._Kernels.plans`).
 
 ## Wide bidirectional training (D256/384/512)
 

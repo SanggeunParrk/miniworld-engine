@@ -214,8 +214,10 @@ def _legacy_native_faster(module, pair, inference):
     n, d = pair.shape[1], pair.shape[-1]
     if inference:
         if hasattr(module, "outgoing") and n > 1024:
-            # single direction D256 / D384 beyond L1024: the packaged tmn K1 / K3 (any L) served these before the port did
-            return d in (256, 384)
+            # single direction beyond L1024: D256 keeps the packaged tmn K1 / K3 (tmn and the port within 1 % of each other at
+            # L1024-2560); D384 takes the port, 17 % faster than tmn at L1536-2560 (2026-10-30,
+            # docs/records/trimul_h100_bigl_20261030.md). L % 128 != 0 still runs tmn (the port takes multiples of 128).
+            return d == 256
         if hasattr(module, "outgoing"):
             # single direction D256: the tmn K1 / K3 tiles beat the B200-style port by 0.7-2.5 % at every length but 384
             return d == 256 and n != 384

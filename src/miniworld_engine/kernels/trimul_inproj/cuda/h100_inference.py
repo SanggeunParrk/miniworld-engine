@@ -1,6 +1,8 @@
 """Native K1/K3 inference, packaged with its measured tile table and CUDA sources."""
 
 import json
+from collections import OrderedDict
+
 import torch
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 from miniworld_engine.kernels._compile import opaque
@@ -8,10 +10,30 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_infer_kernel as K
 
 
+#: Weight sets whose K1 / K3 launch plans and tensor maps are kept (one per TriMul layer of a model; least recently used dropped).
+PLAN_SETS = 256
+
+
 class _Kernels(K.Kernels):
     def __init__(self, native_residual=False):
         super().__init__()
         self.native_residual = native_residual
+        self._plans = OrderedDict()
+
+    def plans(self, w):
+        """The launch-plan cache of one weight set (K1 / K3 argument packs, tensor maps by address), kept across calls. A fresh
+        dict per call re-encoded every descriptor and argument pack on the host (~0.2 ms of the ~0.5 ms a call took, 2026-10-30);
+        pointers that move between calls (z, planes, output) are re-patched by K1 / K3 themselves, so only the host work is saved."""
+        key = tuple(t.data_ptr() for t in w.get("wq", ())) + tuple(
+            w[k].data_ptr() for k in ("w1", "ln_in_w", "ln_in_b", "ln_out_w", "ln_out_b", "wo", "wg") if k in w)
+        cache = self._plans.get(key)
+        if cache is None:
+            cache = self._plans[key] = {}
+            if len(self._plans) > PLAN_SETS:
+                self._plans.popitem(last=False)
+        else:
+            self._plans.move_to_end(key)
+        return cache
 
     def has_unit(self, cz, ch):
         return ("sm_90a", cz, ch, "b") in K.TILE_TABLE
@@ -160,7 +182,7 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
         ab = x.new_empty((2 * ch, rows, npad))
         tri = x.new_empty((ch, rows, npad))
         out = torch.empty_like(z) if dest is None else dest.view(z.shape)   # dest: a caller-owned buffer like x (chunked batches)
-        cache = {}
+        cache = kk.plans(w)
         kk.k1(
             z,
             mask if mask is None or mask.ndim == 1 else mask.reshape(n, n).float(),
