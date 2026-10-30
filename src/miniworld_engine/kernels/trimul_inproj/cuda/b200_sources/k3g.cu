@@ -6,6 +6,8 @@
 //   p   = xo Wp^T  [128],  g = xn Wg^T [128]   (fp32 accumulators)
 //   inference:  y = bf16(x + bf16(sigmoid(g) p))
 //   training:   y = bf16(fma(bf16(p) sigmoid(bf16(g)), ds[j], x));  saves xn [M,128] bf16 and LN_out mean / rstd [M] fp32
+//   SAVE = 2:   the training epilogue (dropout scale ds) without the saves -- a no-grad forward with dropout (MiniWorld's
+//               no-grad recycles in train mode): y bitwise equal to the training forward's, no xn / statistics stores, no x reload
 //
 // Mapping (128-token tiles, persistent CTA, 512 threads):
 //   warp 0 TMA (x tiles, tri tile, Wp K-block ring, Wg once)   warp 1 MMA   warp 2 TMEM alloc
@@ -21,7 +23,7 @@
 using namespace sm100;
 
 #ifndef K3_SIG
-#define K3_SIG 0
+#define K3_SIG 2   // epilogue sigmoid: 0 ex2 + rcp (two MUFU ops), 1 ex2 + Newton reciprocal, 2 tanh.approx (one MUFU op)
 #endif
 namespace k3g {
 
@@ -34,6 +36,20 @@ constexpr int NWP = K3_NWP;
 // half loads while this tile's second half is still being normalised
 #ifndef K3_NTH
 #define K3_NTH 2
+#endif
+#ifndef K3_LN1
+#define K3_LN1 1   // LN_out statistics in one pivot-shifted pass (0: two passes, mean then centred squares)
+#endif
+#define K3_STR(x) #x
+#define K3_UNROLL(n) _Pragma(K3_STR(unroll n))
+#ifndef K3_LNU
+#define K3_LNU 4   // LN_in row passes: a full unroll spilled ~100 B at C = 128
+#endif
+#ifndef K3_LNU4
+#define K3_LNU4 8
+#endif
+#ifndef K3_EPW
+#define K3_EPW 16
 #endif
 #ifndef K3_GSMEM
 #define K3_GSMEM 1
@@ -85,6 +101,10 @@ DEV float4 lds128f(uint32_t a) {
 DEV void ldsm_x4_trans(uint32_t addr, uint32_t& a, uint32_t& b, uint32_t& c, uint32_t& d) {
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];" : "=r"(a), "=r"(b), "=r"(c), "=r"(d) : "r"(addr));
 }
+DEV void tmem_ld8(uint32_t taddr, uint32_t (&r)[8]) {
+  asm volatile("tcgen05.ld.sync.aligned.32x32b.x8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
+               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]), "=r"(r[4]), "=r"(r[5]), "=r"(r[6]), "=r"(r[7]) : "r"(taddr));
+}
 DEV void tmem_st8(uint32_t taddr, const uint32_t (&r)[8]) {
   asm volatile("tcgen05.st.sync.aligned.32x32b.x8.b32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};"
                :: "r"(taddr), "r"(r[0]), "r"(r[1]), "r"(r[2]), "r"(r[3]), "r"(r[4]), "r"(r[5]), "r"(r[6]), "r"(r[7]) : "memory");
@@ -129,7 +149,7 @@ __global__ void __launch_bounds__(512, 1)
     mbar_init(&B.xn_ready, 1); mbar_init(&B.xo_ready, 1); mbar_init(&B.a_free, 1); mbar_init(&B.acc_full, 1); mbar_init(&B.acc_empty, 4);
     fence_mbar_init();
     prefetch_tmap(&mx); prefetch_tmap(&mtri); prefetch_tmap(&mwp); prefetch_tmap(&mwg); prefetch_tmap(&my);
-    if (SAVE) prefetch_tmap(&mxn);
+    if (SAVE == 1) prefetch_tmap(&mxn);
   }
   if (tid == 0 && (smem_u32(sm) & 1023u)) asm volatile("trap;");
   // training: clear the next backward's atomically accumulated gradient buffer (saves a separate memset launch)
@@ -211,13 +231,43 @@ __global__ void __launch_bounds__(512, 1)
           const int mm = lane >> 3, ch = 16 * j + 8 * (mm & 1) + (lane & 7), qc = tc + (mm >> 1);
           ldsm_x4_trans(base + sw128(ch, qc), w[0], w[1], w[2], w[3]);
         };
+        float mean[2], rsd[2];
+#if K3_LN1
+        {
+          // one pass over the tri tile: sums of x - k and (x - k)^2 with a per-token pivot k (its channel 0, held by lane t4 == 0),
+          // so the variance m2 / H - (m1 / H)^2 does not cancel (|m1 / H| is the distance of the mean from a sample, not the mean)
+          uint32_t w0[4]; ldj(0, w0);
+          const float kA = __shfl_sync(0xffffffffu, up(w0[0]).x, lane & ~3), kB = __shfl_sync(0xffffffffu, up(w0[2]).x, lane & ~3);
+          const float2 nkA = make_float2(-kA, -kA), nkB = make_float2(-kB, -kB);
+          float2 sA = make_float2(0.f, 0.f), sA2 = sA, sB = sA, sB2 = sA, qA = sA, qA2 = sA, qB = sA, qB2 = sA;
+#pragma unroll 4
+          for (int j = 0; j < H / 16; ++j) {
+            uint32_t w[4]; ldj(j, w);
+            float2 d;
+            d = __fadd2_rn(up(w[0]), nkA); sA = __fadd2_rn(sA, d); qA = __ffma2_rn(d, d, qA);
+            d = __fadd2_rn(up(w[1]), nkA); sA2 = __fadd2_rn(sA2, d); qA2 = __ffma2_rn(d, d, qA2);
+            d = __fadd2_rn(up(w[2]), nkB); sB = __fadd2_rn(sB, d); qB = __ffma2_rn(d, d, qB);
+            d = __fadd2_rn(up(w[3]), nkB); sB2 = __fadd2_rn(sB2, d); qB2 = __ffma2_rn(d, d, qB2);
+          }
+          float tA = __fadd_rn(__fadd_rn(sA.x, sA.y), __fadd_rn(sA2.x, sA2.y)), tB = __fadd_rn(__fadd_rn(sB.x, sB.y), __fadd_rn(sB2.x, sB2.y));
+          float uA = __fadd_rn(__fadd_rn(qA.x, qA.y), __fadd_rn(qA2.x, qA2.y)), uB = __fadd_rn(__fadd_rn(qB.x, qB.y), __fadd_rn(qB2.x, qB2.y));
+#pragma unroll
+          for (int o = 1; o <= 2; o <<= 1) {
+            tA = __fadd_rn(tA, __shfl_xor_sync(0xffffffffu, tA, o)); tB = __fadd_rn(tB, __shfl_xor_sync(0xffffffffu, tB, o));
+            uA = __fadd_rn(uA, __shfl_xor_sync(0xffffffffu, uA, o)); uB = __fadd_rn(uB, __shfl_xor_sync(0xffffffffu, uB, o));
+          }
+          const float mA = __fmul_rn(tA, 1.f / H), mB = __fmul_rn(tB, 1.f / H);
+          mean[0] = __fadd_rn(kA, mA); mean[1] = __fadd_rn(kB, mB);
+          const float vA = fmaxf(__fmaf_rn(-mA, mA, __fmul_rn(uA, 1.f / H)), 0.f), vB = fmaxf(__fmaf_rn(-mB, mB, __fmul_rn(uB, 1.f / H)), 0.f);
+          rsd[0] = rsqrt_ftz(__fadd_rn(vA, eps)); rsd[1] = rsqrt_ftz(__fadd_rn(vB, eps));
+        }
+#else
         float2 sA = make_float2(0.f, 0.f), sA2 = sA, sB = sA, sB2 = sA;
 #pragma unroll 4
         for (int j = 0; j < H / 16; ++j) {
           uint32_t w[4]; ldj(j, w);
           sA = __fadd2_rn(sA, up(w[0])); sA2 = __fadd2_rn(sA2, up(w[1])); sB = __fadd2_rn(sB, up(w[2])); sB2 = __fadd2_rn(sB2, up(w[3]));
         }
-        float mean[2], rsd[2];
         {
           float tA = __fadd_rn(__fadd_rn(sA.x, sA.y), __fadd_rn(sA2.x, sA2.y)), tB = __fadd_rn(__fadd_rn(sB.x, sB.y), __fadd_rn(sB2.x, sB2.y));
           tA = __fadd_rn(tA, __shfl_xor_sync(0xffffffffu, tA, 1)); tA = __fadd_rn(tA, __shfl_xor_sync(0xffffffffu, tA, 2));
@@ -241,7 +291,8 @@ __global__ void __launch_bounds__(512, 1)
           qB = __fadd_rn(qB, __shfl_xor_sync(0xffffffffu, qB, 1)); qB = __fadd_rn(qB, __shfl_xor_sync(0xffffffffu, qB, 2));
           rsd[0] = rsqrt_ftz(__fadd_rn(__fmul_rn(qA, 1.f / H), eps)); rsd[1] = rsqrt_ftz(__fadd_rn(__fmul_rn(qB, 1.f / H), eps));
         }
-        if (SAVE && t4 == 0) {
+#endif
+        if (SAVE == 1 && t4 == 0) {
 #pragma unroll
           for (int tb = 0; tb < 2; ++tb) {
             const int tok = row0 + tok0 + tr + 8 * tb;
@@ -305,7 +356,7 @@ __global__ void __launch_bounds__(512, 1)
       for (int kb = 0; kb < C / 64; ++kb) tma_load_2d(sm + O_X + b * XT + kb * KBB, &mx, &B.x_full[b], kb * 64, row0, EVICT_FIRST);
     }
   }
-  if (SAVE && warp == 3 && lane == 16) {
+  if (SAVE == 1 && warp == 3 && lane == 16) {
     // training: once the xn save has left the x tile, reload x (L2) into it for the epilogue's residual
     for (int i = 0; i < n_local; ++i) {
       const int b = i & 1, row0 = tile_row0(i);
@@ -325,7 +376,7 @@ __global__ void __launch_bounds__(512, 1)
       const uint32_t xr = su + O_X + b * XT;
       auto ldx = [&](int q) { return lds128(xr + (q >> 3) * KBB + sw128(r, q & 7)); };
       float2 a0 = make_float2(0.f, 0.f), a1 = a0, a2 = a0, a3 = a0;
-#pragma unroll
+      K3_UNROLL(K3_LNU)
       for (int q = 0; q < C / 8; ++q) {
         const uint4 t = ldx(q);
         a0 = __fadd2_rn(a0, up(t.x)); a1 = __fadd2_rn(a1, up(t.y)); a2 = __fadd2_rn(a2, up(t.z)); a3 = __fadd2_rn(a3, up(t.w));
@@ -334,7 +385,7 @@ __global__ void __launch_bounds__(512, 1)
       const float mean = __fmul_rn(__fadd_rn(a0.x, a0.y), 1.f / C);
       const float2 nm = make_float2(-mean, -mean);
       a0 = a1 = a2 = a3 = make_float2(0.f, 0.f);
-#pragma unroll
+      K3_UNROLL(K3_LNU)
       for (int q = 0; q < C / 8; ++q) {
         const uint4 t = ldx(q);
         float2 d;
@@ -348,7 +399,7 @@ __global__ void __launch_bounds__(512, 1)
       const float2 rr = make_float2(rs, rs);
       if (i >= 1) PW(1, mbar_wait(&B.a_free, (i - 1) & 1));   // tile i-1's products have read the xn / xo TMEM buffers
       tc_fence_after();
-#pragma unroll
+      K3_UNROLL(K3_LNU4)
       for (int q4 = 0; q4 < C / 16; ++q4) {
         uint32_t o[8];
 #pragma unroll
@@ -370,17 +421,17 @@ __global__ void __launch_bounds__(512, 1)
           o[4 * qq + 1] = aff2(t.y, ga.z, ga.w, ba.z, ba.w);
           o[4 * qq + 2] = aff2(t.z, gb4.x, gb4.y, bb.x, bb.y);
           o[4 * qq + 3] = aff2(t.w, gb4.z, gb4.w, bb.z, bb.w);
-          if (SAVE) sts128(xr + (q >> 3) * KBB + sw128(r, q & 7), o[4 * qq], o[4 * qq + 1], o[4 * qq + 2], o[4 * qq + 3]);
+          if (SAVE == 1) sts128(xr + (q >> 3) * KBB + sw128(r, q & 7), o[4 * qq], o[4 * qq + 1], o[4 * qq + 2], o[4 * qq + 3]);
         }
         tmem_st8(trow + T_XN + q4 * 8, o);
       }
       tmem_wait_st();
       tc_fence_before();
-      if (SAVE) fence_async_smem();
+      if (SAVE == 1) fence_async_smem();
       named_bar_sync(1, 128);
       if (r == 0) {
         mbar_arrive(&B.xn_ready);
-        if (SAVE) {
+        if (SAVE == 1) {
           for (int kb = 0; kb < C / 64; ++kb) tma_store_2d(&mxn, sm + O_X + b * XT + kb * KBB, kb * 64, row0);
           bulk_commit();
           bulk_wait_read<0>();
@@ -418,19 +469,26 @@ __global__ void __launch_bounds__(512, 1)
       // training: the residual x has been reloaded into the x tile after the xn save; ds comes from TMEM
       PW(0, mbar_wait(&B.acc_full, i & 1));
       tc_fence_after();
-      if (SAVE) PW(1, mbar_wait(&B.xr_full[b], (i >> 1) & 1));     // x reloaded into this x tile
+      if (SAVE == 1) PW(1, mbar_wait(&B.xr_full[b], (i >> 1) & 1));     // x reloaded into this x tile
       const uint32_t xr = su + O_X + b * XT;
 #pragma unroll
-      for (int cq = 0; cq < C / 32; ++cq) {           // 32 output channels per step
-        uint32_t pv[32], gv[32], dsw[16];
+      constexpr int EW = K3_EPW;                      // output channels per step (16: no spills at C = 128)
+      for (int cq = 0; cq < C / EW; ++cq) {
+        uint32_t pv[EW], gv[EW], dsw[EW / 2];
+#if K3_EPW == 32
         tmem_ld32(trow + T_P + cq * 32, pv);
         tmem_ld32(trow + T_G + cq * 32, gv);
         if (SAVE) tmem_ld16(trow + T_DS + cq * 16, dsw);
+#else
+        tmem_ld16(trow + T_P + cq * 16, pv);
+        tmem_ld16(trow + T_G + cq * 16, gv);
+        if (SAVE) tmem_ld8(trow + T_DS + cq * 8, dsw);
+#endif
         tmem_wait_ld();
-        if (cq == C / 32 - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.acc_empty); }
+        if (cq == C / EW - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.acc_empty); }
 #pragma unroll
-        for (int q2 = 0; q2 < 4; ++q2) {              // 8 channels = one 16-byte chunk of the row
-          const int q = cq * 4 + q2;
+        for (int q2 = 0; q2 < EW / 8; ++q2) {         // 8 channels = one 16-byte chunk of the row
+          const int q = cq * (EW / 8) + q2;
           const uint32_t a = xr + (q >> 3) * KBB + sw128(r, q & 7);
           const uint4 xv = lds128(a);
           uint32_t o[4];
@@ -447,6 +505,12 @@ __global__ void __launch_bounds__(512, 1)
             const float2 t = __fmul2_rn(gg, make_float2(-1.4426950408889634f, -1.4426950408889634f));
             const float2 dnm = __fadd2_rn(make_float2(ex2_ftz(t.x), ex2_ftz(t.y)), make_float2(1.f, 1.f));
             const float2 sg = make_float2(rcp_ftz(dnm.x), rcp_ftz(dnm.y));
+#elif K3_SIG == 2   // sigmoid(g) = 0.5 tanh(g / 2) + 0.5: one MUFU op per element
+            const float2 h = __fmul2_rn(gg, make_float2(0.5f, 0.5f));
+            float2 th;
+            asm("tanh.approx.f32 %0, %1;" : "=f"(th.x) : "f"(h.x));
+            asm("tanh.approx.f32 %0, %1;" : "=f"(th.y) : "f"(h.y));
+            const float2 sg = __ffma2_rn(th, make_float2(0.5f, 0.5f), make_float2(0.5f, 0.5f));
 #else   // kit ex2, reciprocal by 3 Newton steps on the FMA pipe (one MUFU op per element)
             float2 t = __fmul2_rn(gg, make_float2(-1.4426950408889634f, -1.4426950408889634f));
             t.x = fminf(t.x, 126.f); t.y = fminf(t.y, 126.f);
@@ -500,7 +564,8 @@ int num_sms() {
 }  // namespace k3g
 
 // x [M, C] bf16, tri [H, M] bf16, wp_perm [C, H] (columns in the TMEM K order, written by k1w_prep as wpp), wg [C, C], y [M, C];
-// training (save = 1): ds [L, C] bf16, xn_out [M, C], mean_out / rs_out [M] fp32 (then L % 128 == 0).
+// training (save = 1): ds [L, C] bf16, xn_out [M, C], mean_out / rs_out [M] fp32 (then L % 128 == 0); save = 2: the training
+// epilogue with ds and no saves (a no-grad forward with dropout).
 void k3g_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wp_perm, torch::Tensor wg, torch::Tensor g_in, torch::Tensor b_in,
                  torch::Tensor g_out, torch::Tensor b_out, torch::Tensor y, int64_t L, double eps, int64_t save,
                  c10::optional<torch::Tensor> ds, c10::optional<torch::Tensor> xn_out, c10::optional<torch::Tensor> mean_out,
@@ -511,7 +576,7 @@ void k3g_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wp_perm, torc
   auto bf = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   auto mx = tmap::make(x.data_ptr(), bf, {(uint64_t)C, (uint64_t)M}, {(uint64_t)C * 2}, {64, TOK}, CU_TENSOR_MAP_SWIZZLE_128B);
   const int n2 = tri.dim() == 5 ? (int)(L * L) : 0;   // 0: the [H, M] map as before
-  TORCH_CHECK(!n2 || (C == 64 && save), "k3g_forward: sample-major t is the D64 training forward only");
+  TORCH_CHECK(!n2 || (C == 64 && save == 1), "k3g_forward: sample-major t is the D64 training forward only");
   auto mt = n2 ? tmap::make_chmajor(tri, n2, 64, (uint32_t)H, CU_TENSOR_MAP_SWIZZLE_128B)
                : tmap::make(tri.data_ptr(), bf, {(uint64_t)M, (uint64_t)H}, {(uint64_t)M * 2}, {64, (uint32_t)H}, CU_TENSOR_MAP_SWIZZLE_128B);
   auto mwp = tmap::make(wp_perm.data_ptr(), bf, {(uint64_t)H, (uint64_t)C}, {(uint64_t)H * 2}, {64, (uint32_t)C}, CU_TENSOR_MAP_SWIZZLE_128B);
@@ -520,11 +585,15 @@ void k3g_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wp_perm, torc
   CUtensorMap mxn = my;
   const __nv_bfloat16* dsp = nullptr;
   float *mo = nullptr, *ro = nullptr;
+  TORCH_CHECK(save >= 0 && save <= 2);
   if (save) {
-    TORCH_CHECK(ds.has_value() && xn_out.has_value() && mean_out.has_value() && rs_out.has_value());
-    mxn = tmap::make(xn_out->data_ptr(), bf, {(uint64_t)C, (uint64_t)M}, {(uint64_t)C * 2}, {64, TOK}, CU_TENSOR_MAP_SWIZZLE_128B);
+    TORCH_CHECK(ds.has_value());
     TORCH_CHECK(ds->numel() == (M / (L * L)) * L * C, "k3g_forward: ds must be [B, L, C]");
     dsp = reinterpret_cast<const __nv_bfloat16*>(ds->data_ptr());
+  }
+  if (save == 1) {
+    TORCH_CHECK(xn_out.has_value() && mean_out.has_value() && rs_out.has_value());
+    mxn = tmap::make(xn_out->data_ptr(), bf, {(uint64_t)C, (uint64_t)M}, {(uint64_t)C * 2}, {64, TOK}, CU_TENSOR_MAP_SWIZZLE_128B);
     mo = mean_out->data_ptr<float>();
     ro = rs_out->data_ptr<float>();
   }
@@ -548,7 +617,9 @@ void k3g_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wp_perm, torc
 #define K3G_CASE(CC, HH) \
   if (C == CC && H == HH) { \
     if (n2) launch(k3g_kernel<CC, HH, 1, CC == 64>, Geo<CC, HH>::SMEM); \
-    else if (save) launch(k3g_kernel<CC, HH, 1, 0>, Geo<CC, HH>::SMEM); else launch(k3g_kernel<CC, HH, 0, 0>, Geo<CC, HH>::SMEM); \
+    else if (save == 1) launch(k3g_kernel<CC, HH, 1, 0>, Geo<CC, HH>::SMEM); \
+    else if (save == 2) launch(k3g_kernel<CC, HH, 2, 0>, Geo<CC, HH>::SMEM); \
+    else launch(k3g_kernel<CC, HH, 0, 0>, Geo<CC, HH>::SMEM); \
     C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
   K3G_CASE(64, 64) K3G_CASE(64, 128) K3G_CASE(128, 128) K3G_CASE(128, 256)
 #undef K3G_CASE

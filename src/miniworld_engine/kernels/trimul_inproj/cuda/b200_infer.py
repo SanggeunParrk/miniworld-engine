@@ -154,10 +154,8 @@ def _inference_body(leaves, mask, ds, direction, y):
             del planes
             if ds is None:
                 E.k3g_forward(x2, t, wpp, wg, gi, bi, go, bo, y.view(m, d), n, EPS, 0, None, None, None, None, 0)
-            else:   # the inference K3 has no dropout: the saving epilogue into throwaway buffers
-                mo = x.new_empty((m,), dtype=torch.float32)
-                E.k3g_forward(x2, t, wpp, wg, gi, bi, go, bo, y.view(m, d), n, EPS, 1, ds, torch.empty_like(x2), mo,
-                              torch.empty_like(mo), 0)
+            else:   # dropout: the training epilogue without the saves (save = 2: y as the training forward's)
+                E.k3g_forward(x2, t, wpp, wg, gi, bi, go, bo, y.view(m, d), n, EPS, 2, ds, None, None, None, 0)
             return y
         mean = x.new_empty((m,), dtype=torch.float32)
         rstd = torch.empty_like(mean)
