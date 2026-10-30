@@ -291,6 +291,11 @@ changes (4d32e387), median of three alternating processes x three rounds, node 2
 | 384 | 0.173 -> 0.151 | 0.209 -> 0.176 | 0.675 -> 0.626 | 1.183 -> 1.047 |
 | 768 | 0.530 -> 0.499 | 0.609 -> 0.533 | 2.229 -> 2.159 | 4.069 -> 3.859 |
 
+On the 2.4.0 port with the D64 sample-major layout (c2534d2c against these changes plus the b7m index fix, same harness, ms):
+D128 L768 block 4.099 -> 3.881, recycle 0.636 -> 0.574, fwd + bwd 2.196 -> 2.160; D64 bidirectional B4 L768 (the template stack)
+block 7.349 -> 7.062, recycle 1.227 -> 1.126, inference 1.089 -> 1.072, fwd + bwd 3.785 -> 3.829 (+1.2 % in graph replay, although
+the eager per-kernel sum is 30-70 us lower: k3g 439 -> 403, 40 -> 15 kernels; b1s / b7m within their run-to-run spread).
+
 At L768 the block is 5.2 % faster: ~3.4 ms per R = 4 micro-batch over the 16 pairformer blocks. `b7g` varies 611-634 us between
 identical runs at L768 (the known placement sensitivity), which is most of the fwd + bwd spread. Left: `b1g` (428 us at L768; its
 LN-backward CTAs are ~95 % busy while the front CTAs serialise on single-buffered tiles) and `b7g` (source and consumer CTAs each
