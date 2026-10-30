@@ -3,7 +3,7 @@
 // sm_100a kernel plus a partial-sum reduction.  SPDX-License-Identifier: Apache-2.0
 //
 // Contract and schedule are the sm_90a kernel's (experiments/transition_fused/src/transition_bwd.cu):
-//   dh = bf16(dy Ws)      a = xn Wa^T, b = xn Wb^T (fp32)      sig = rcp(1 + ex2(-a log2 e))      silu = a sig
+//   dh = bf16(dy Ws)      a = xn Wa^T, b = xn Wb^T (fp32)      sig = sigmoid_tr(a) (sm100.cuh: 0.5 tanh(a / 2) + 0.5)      silu = a sig
 //   h  = bf16(silu b)     dA = bf16((dh b)(sig + silu(1 - sig)))      dB = bf16(dh silu)
 //   dWs = dy^T h, dWa = dA^T xn, dWb = dB^T xn (fp32 sums, rounded once)      d_xn = bf16(dA Wa + dB Wb)
 //   LayerNorm backward from the saved statistics: xhat = (x - mean) rstd, w = gamma d_xn,
@@ -67,11 +67,11 @@ struct BarsX {
 __device__ constexpr int kRowBlk[8] = {0, 1, 4, 5, 2, 3, 6, 7};
 DEVI float gate_da(float g, float b, float s, float l) { return (g * b) * (s + l * (1.f - s)); }
 // the same gate arithmetic on pairs of units in fp32x2 (FMUL2 / FFMA2 round like FMUL / FFMA; s + l (1 - s) contracted as ptxas
-// does in the scalar form): h = l b, dA = (g b) fma(l, 1 - s, s), dB = g l, with l = a s and the kit sigmoid per unit
+// does in the scalar form): h = l b, dA = (g b) fma(l, 1 - s, s), dB = g l, with l = a s and s = sigmoid_tr (sm100.cuh; the forward's s)
 DEVI void gate_pair16(uint32_t dh0, uint32_t dh1, uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1, uint32_t& hp, uint32_t& dap, uint32_t& dbp) {
   const uint32_t gp = pack_bf16(__uint_as_float(dh0), __uint_as_float(dh1));
   const f2 G = mk2(bf16lo(gp), bf16hi(gp)), A = mk2u(a0, a1), Bv = mk2u(b0, b1);
-  const f2 S = mk2(sigmoid_kit(__uint_as_float(a0)), sigmoid_kit(__uint_as_float(a1)));
+  const f2 S = sigmoid_tr(A);
   const f2 L = mul2(A, S);
   const f2 H = mul2(L, Bv), DB = mul2(G, L);
   const f2 U = fma2(L, fma2(S, mk2(-1.f, -1.f), mk2(1.f, 1.f)), S);

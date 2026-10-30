@@ -2,7 +2,7 @@
 // — the Transition backward at D = 64, H = 4D = 256, bf16, as ONE fused sm_100a kernel plus a partial-sum reduction: the
 // two-role design of tbwd.cu (same contract and rounding points) with what D = 64 changes. SPDX-License-Identifier: Apache-2.0
 //
-//   dh = bf16(dy Ws)      a = xn Wa^T, b = xn Wb^T (fp32)      sig = rcp(1 + ex2(-a log2 e))      silu = a sig
+//   dh = bf16(dy Ws)      a = xn Wa^T, b = xn Wb^T (fp32)      sig = sigmoid_tr(a) (sm100.cuh: 0.5 tanh(a / 2) + 0.5)      silu = a sig
 //   h  = bf16(silu b)     dA = bf16((dh b)(sig + silu(1 - sig)))      dB = bf16(dh silu)
 //   dWs = dy^T h, dWa = dA^T xn, dWb = dB^T xn (fp32 sums, rounded once)      d_xn = bf16(dA Wa + dB Wb)
 //   dx = bf16(bf16((w - xhat ca - cb) rstd) + dy), w = gamma d_xn;  dgamma += d_xn xhat, dbeta += d_xn
@@ -59,11 +59,11 @@ struct BarsX {
 
 // the 16-row block of the packed [Wa_j; Wb_j] tile matching A-operand block ks of the half-by-half [dA | dB] layout
 __device__ constexpr int kRowBlk[8] = {0, 1, 4, 5, 2, 3, 6, 7};
-// tbwd.cu's fp32x2 gate: h = l b, dA = (g b) fma(l, 1 - s, s), dB = g l, with l = a s and the kit sigmoid per unit
+// tbwd.cu's fp32x2 gate: h = l b, dA = (g b) fma(l, 1 - s, s), dB = g l, with l = a s and s = sigmoid_tr (sm100.cuh; the forward's s)
 DEVI void gate_pair16(uint32_t dh0, uint32_t dh1, uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1, uint32_t& hp, uint32_t& dap, uint32_t& dbp) {
   const uint32_t gp = pack_bf16(__uint_as_float(dh0), __uint_as_float(dh1));
   const f2 G = mk2(bf16lo(gp), bf16hi(gp)), A = mk2u(a0, a1), Bv = mk2u(b0, b1);
-  const f2 S = mk2(sigmoid_kit(__uint_as_float(a0)), sigmoid_kit(__uint_as_float(a1)));
+  const f2 S = sigmoid_tr(A);
   const f2 L = mul2(A, S);
   const f2 H = mul2(L, Bv), DB = mul2(G, L);
   const f2 U = fma2(L, fma2(S, mk2(-1.f, -1.f), mk2(1.f, 1.f)), S);
