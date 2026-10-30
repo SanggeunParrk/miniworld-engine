@@ -322,6 +322,45 @@ kept; front CTAs 80 / 96 -> 90 / 90. D64 B4 L768 bidirectional (the template sta
 fwd + bwd 3.557 -> 3.332 ms, MiniWorld block 6.930 -> 6.803 ms (medians of 3 alternating processes). Its front and LN CTAs
 now each wait ~50 % on the ring hand-over rather than on compute.
 
+### b7g hand-over and consumer pairs (2026-10-30)
+
+The 30-40 % mutual stalls of `b7g`'s source and consumer CTAs (above) came from the hand-over protocol, not the split. Clock64
+role probes and ablation builds at L768 (D128 bidirectional; sources alone with consumers that only drain the ring: ~540 us,
+consumers alone fed instantly: ~600 us) showed: the consumer loader polled a tile's eight chunk flags one after another (one
+`ld.acquire.gpu` round trip, ~1.4k clk, each), the MMA warp blocked on each chunk's MMA completion before returning its ring slot,
+the x / dy tile was refilled only after the dx store had been read (~2.9k clk per tile exposed), and each source publisher paid a
+`st.release.gpu` (~2k clk) per tile. Faster dg / dp math (one-MUFU tanh sigmoid, -17 % per source tile) or a deeper ring (24 / 32
+slots) did not move the kernel. The kernel is close to shared-memory bound on both sides: a 128 x 128 x 16 UMMA with both operands
+in shared memory reads 128 B/clk (64 clk back to back), and per 128-token tile the consumer moves ~1.5 MB through shared memory
+(MMA operands, TMA fills, epilogue), each source ~256 KB per chunk.
+
+- consumer: eight watcher lanes poll a tile's chunk flags together (up to two tiles ahead) and hand them to the loader through
+  mbarriers; a ring slot is returned when its K-blocks have landed (no waits in the MMA issue loop); x double buffered, dy refilled
+  right after the output pass (4 stages instead of 5); the epilogue reads x once into registers (one-pass statistics per half row,
+  merged exactly), gi as float4, dxn read from TMEM twice instead of held in registers
+- consumers in CTA pairs (clusters of two, cooperative `cudaLaunchKernelEx`): each CTA loads its own dgp K-block and one
+  64-column half of the W1 / Wg K-block multicast to both (24 instead of 32 KB per stage per SM); both MMAs release a stage
+  (`tcgen05.commit` multicast). cta_group::1 products: the sources share the function
+- sources: one `fence.acq_rel.gpu` and relaxed flag stores (a release pattern) publish two tiles
+- 12 source groups at every L (was 11 at L <= 384)
+
+dx changes by one bf16 ulp in 132 of 75.5 M elements at L768 (statistics rounding); dW1 partials are bitwise as before.
+
+`b7g` alone (us, one process, 7 x 10 launches; a56f4f22 -> 485232e6):
+
+| L | 128 | 256 | 384 | 512 | 640 | 768 |
+|---|---|---|---|---|---|---|
+| b7g | 34.6 -> 35.2 | 88.7 -> 79.7 | 175 -> 152 | 266 -> 258 | 423 -> 397 | 612 -> 565 |
+
+Module, D128 bidirectional, B = 1, bf16 pair, fp32 masters, token mask, row dropout 0.25, CUDA graph, one graph per process,
+three alternating processes x three rounds, node 2 GPU 0 (ms, median): MiniWorld block (3 no-grad recycles + fwd + bwd) L384
+0.976 -> 0.962, L768 3.823 -> 3.751; fwd + bwd L384 0.558 -> 0.535, L768 2.113 -> 2.069. D64 bidirectional B4 L768 (`b7m`, not
+changed: one CTA per tile, no hand-over) block 7.053 -> 7.055, fwd + bwd 3.696 -> 3.686.
+
+Left: at 12 groups the sources' dg / dp warps are ~92 % busy and the consumers' MMA stages wait ~40 % on their fills; both sides
+sit near their shared-memory budget, so a further step needs fewer bytes per tile (a cta_group::2 dxn would halve the consumers'
+B traffic but cannot share a function with the sources' cta_group::1 products).
+
 ### D64 (2026-10-02, the first batched width, B <= 8)
 
 The D64 native path took B samples in one call first: `k3g` / `b1s` take a per-sample token mask and a per-sample row-dropout scale (a
