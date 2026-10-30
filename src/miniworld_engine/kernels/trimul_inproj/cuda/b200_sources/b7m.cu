@@ -62,10 +62,24 @@ DEV void red_add4(float* p, float a, float b, float c, float d) {
   asm volatile("red.global.add.v4.f32 [%0], {%1, %2, %3, %4};" ::"l"(p), "f"(a), "f"(b), "f"(c), "f"(d) : "memory");
 }
 
+// Pair mask from the [B L] token mask: pair (i, j) of sample s (token (s L + i) L + j, b-major) is kept when tokens s L + i and
+// s L + j are. A 128-token tile lies in one row i (L % 128 == 0); (s, i, j0) of a CTA's tile is advanced incrementally (no integer
+// division on the elementwise warps' path: three divisions per token cost b7g ~15 %).
+struct PairIdx {
+  int s, i, j;
+  DEV void init(int row0, int L) { s = row0 / (L * L); i = (row0 / L) % L; j = row0 % L; }
+  DEV void advance(int rows, int L) { j += rows; while (j >= L) { j -= L; if (++i == L) { i = 0; ++s; } } }
+  DEV float mask(const uint8_t* tm, int tok, int L) const {   // tok: offset in the tile
+    return tm == nullptr ? 1.f : ((__ldg(tm + s * L + i) && __ldg(tm + s * L + j + tok)) ? 1.f : 0.f);
+  }
+};
+
 struct Args {
-  const float *mask, *gi;
-  float *dw1, *lnpart;      // lnpart [grid][dgi 64 | dbi 64]: this CTA's row (summed on the host: deterministic)
-  int tiles, n2;              // n2 > 0: dpl sample-major, tokens per sample (4-D map, tmap::make_chmajor); 0: [P, M]
+  const uint8_t* tmask;     // [B L] token mask or null
+  const float* gi;
+  float *dw1, *lnpart;      // dw1 [grid][128 NCH][64]: this CTA's dW1 partial; lnpart [grid][dgi 64 | dbi 64]: this CTA's row
+                            // (both summed in a fixed order by grad_reduce: deterministic)
+  int tiles, n2, L;         // n2 > 0: dpl sample-major, tokens per sample (4-D map, tmap::make_chmajor); 0: [P, M]
   float eps;
 };
 
@@ -194,11 +208,13 @@ __global__ void __launch_bounds__(512, 1)
     const int q = warp & 3, hh = (warp - 4) >> 2, tr = lane >> 2;
     const int tok0 = q * 32 + hh * 16;
     float mA = 0.f, mB = 0.f;
+    PairIdx pix;
+    pix.init(cta * TOK, a.L);
     for (int u = 0; u < n_chunks; ++u) {
       const int i = u / NCH, pb = u % NPB, db = u & 1;
       if (u % NCH == 0) {
-        const int r0 = (cta + G * i) * TOK + tok0 + tr;
-        mA = __ldg(a.mask + r0); mB = __ldg(a.mask + r0 + 8);
+        if (i > 0) pix.advance(G * TOK, a.L);
+        mA = pix.mask(a.tmask, tok0 + tr, a.L); mB = pix.mask(a.tmask, tok0 + tr + 8, a.L);
       }
       PW(0, mbar_wait(&B.pre_full[pb], (u / NPB) & 1));
       PW(1, mbar_wait(&B.da_full[db], (u >> 1) & 1));
@@ -272,10 +288,11 @@ __global__ void __launch_bounds__(512, 1)
         uint32_t v[32];
         tmem_ld32(tmem + T_DW + ((uint32_t)(q * 32) << 16) + c * 64 + part * 32, v);
         tmem_wait_ld();
-        float* dst = a.dw1 + (size_t)(128 * c + row) * C + part * 32;
+        float* dst = a.dw1 + ((size_t)cta * (128 * NCH) + 128 * c + row) * C + part * 32;   // this CTA's partial (no atomics)
 #pragma unroll
         for (int k = 0; k < 32; k += 4)
-          red_add4(dst + k, __uint_as_float(v[k]), __uint_as_float(v[k + 1]), __uint_as_float(v[k + 2]), __uint_as_float(v[k + 3]));
+          *reinterpret_cast<float4*>(dst + k) = make_float4(__uint_as_float(v[k]), __uint_as_float(v[k + 1]), __uint_as_float(v[k + 2]),
+                                                             __uint_as_float(v[k + 3]));
       }
     }
   } else if (warp >= 12) {
@@ -429,12 +446,12 @@ __global__ void __launch_bounds__(512, 1)
 
 }  // namespace b7m
 
-// x / xn / dy / dgout / dx [M, 64]; dpl [64 NCH, M] plane gradient; mask [M] fp32 pair mask; w1 [128 NCH, 64] packed
-// (chunk c = 64 gate rows then 64 projection rows); wg [64, 64]; gi [64] fp32; dw1 [128 NCH, 64] fp32 accumulated;
-// lnpart [>= min(tiles, SMs), 128] fp32: per-CTA (dg_i | db_i) rows, written (sum them for dg_i / db_i).
-void b7m_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Tensor dpl, torch::Tensor dgout, torch::Tensor mask,
-                  torch::Tensor w1, torch::Tensor wg, torch::Tensor gi, torch::Tensor dx, torch::Tensor dw1, torch::Tensor lnpart,
-                  double eps) {
+// x / xn / dy / dgout / dx [M, 64]; dpl [64 NCH, M] plane gradient; tmask [B L] bool token mask or None; w1 [128 NCH, 64] packed
+// (chunk c = 64 gate rows then 64 projection rows); wg [64, 64]; gi [64] fp32; dw1 [min(tiles, SMs), 128 NCH, 64] fp32 per-CTA
+// partials, written; lnpart [>= min(tiles, SMs), 128] fp32: per-CTA (dg_i | db_i) rows, written (grad_reduce sums both).
+void b7m_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Tensor dpl, torch::Tensor dgout,
+                  c10::optional<torch::Tensor> tmask, torch::Tensor w1, torch::Tensor wg, torch::Tensor gi, torch::Tensor dx,
+                  torch::Tensor dw1, torch::Tensor lnpart, double eps, int64_t L) {
   using namespace b7m;
   const int64_t M = x.size(0);
   const int P = (int)tmap::chmajor_channels(dpl), NCH = P / 64;   // dpl [P, M] or sample-major [P / 64, B, 64, L, L]
@@ -454,10 +471,12 @@ void b7m_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Te
   auto mda = n2 ? tmap::make_chmajor(dpl, n2, 64, 64, CU_TENSOR_MAP_SWIZZLE_128B)
                 : tmap::make(dpl.data_ptr(), bf, {(uint64_t)M, (uint64_t)P}, {(uint64_t)M * 2}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B);
   Args a;
-  a.mask = mask.data_ptr<float>(); a.gi = gi.data_ptr<float>();
-  TORCH_CHECK(lnpart.numel() >= (int64_t)grid * 2 * C);
+  TORCH_CHECK(M % (L * L) == 0 && (!tmask.has_value() || (tmask->numel() == M / L && tmask->element_size() == 1 && tmask->is_contiguous())));
+  a.tmask = tmask.has_value() ? reinterpret_cast<const uint8_t*>(tmask->data_ptr()) : nullptr;
+  a.gi = gi.data_ptr<float>();
+  TORCH_CHECK(lnpart.numel() >= (int64_t)grid * 2 * C && dw1.numel() >= (int64_t)grid * 128 * NCH * C);
   a.dw1 = dw1.data_ptr<float>(); a.lnpart = lnpart.data_ptr<float>();
-  a.tiles = tiles; a.n2 = (int)n2; a.eps = (float)eps;
+  a.tiles = tiles; a.n2 = (int)n2; a.L = (int)L; a.eps = (float)eps;
   auto st = at::cuda::getCurrentCUDAStream();
   auto run = [&](auto kern, int smem, bool& attr) {
     if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem)); attr = true; }

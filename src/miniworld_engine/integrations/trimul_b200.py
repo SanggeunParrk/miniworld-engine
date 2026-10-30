@@ -175,6 +175,11 @@ def _inference_params(module, bf):
     params = (module.to_left.weight, module.to_left_gate.weight, module.to_right.weight, module.to_right_gate.weight,
               module.to_gate.weight, module.to_out.weight, module.ln_pair.weight, module.ln_pair.bias, module.ln_out.weight,
               module.ln_out.bias)
+    if bf == torch.bfloat16 and module.ln_pair.weight.shape[0] <= 128:
+        # D64 / D128: the same cached forms as training (one trimul_forms launch per block, shared with the training forward of a step)
+        from miniworld_engine.kernels.trimul_inproj.cuda.b200_train import kernel_forms
+
+        return kernel_forms(params)
 
     def forms():
         w = params

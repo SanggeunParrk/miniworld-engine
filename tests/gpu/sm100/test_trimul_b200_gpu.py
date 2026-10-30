@@ -121,7 +121,7 @@ def test_cuda_graph_capture(grad):
     g.replay()
     torch.cuda.synchronize()
     for a, b in zip(out, eager, strict=True):
-        assert relative(a, b) < 1e-3   # weight gradients accumulate with atomics: order-dependent
+        assert torch.equal(a, b)       # the D128 weight gradients are fixed-order sums (no atomics): replay == eager bitwise
 
 
 def _wide_module(kind, width, impl):
@@ -422,3 +422,50 @@ def test_hidden_other_ratios_not_served():
     with torch.no_grad():
         assert not trimul_b200.serves_inference(odd, x64, bidirectional=False)
         assert not trimul_b200.serves_inference(wide, x256, bidirectional=False)
+
+
+# ---- D64 / D128: cached weight forms, deterministic parameter gradients (per-CTA partials + grad_reduce) ----
+@pytest.mark.parametrize(("width", "kind"), [(64, "bidir"), (64, "out"), (128, "bidir"), (128, "in")])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_kernel_forms_match_statements(width, kind, dtype):
+    """``kernel_forms`` (one trimul_forms launch) gives exactly the bf16 casts / packs the kernels read: the front matrices row-major,
+    the packed W1 (``_pack_w1``), k3g's permuted Wp, Wg, Wp -- from fp32 masters or bf16 parameters, the D128 bidirectional module's
+    column-major front matrices included."""
+    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train
+
+    torch.manual_seed(359)
+    m = randomize(_wide_module(kind, width, ImplementationType.MINIWORLD).cuda()).to(dtype)
+    params = [m.to_left.weight, m.to_left_gate.weight, m.to_right.weight, m.to_right_gate.weight, m.to_gate.weight, m.to_out.weight,
+              m.ln_pair.weight, m.ln_pair.bias, m.ln_out.weight, m.ln_out.bias]
+    f = b200_train.kernel_forms(params)
+    bf = [p.detach().to(torch.bfloat16).contiguous() for p in params[:6]]
+    for got, want in zip(f[:6], bf, strict=True):
+        assert got.is_contiguous() and torch.equal(got, want)
+    for got, want in zip(f[6:10], params[6:], strict=True):
+        assert got.dtype == torch.float32 and torch.equal(got, want.float())
+    assert torch.equal(f[10], b200_train._pack_w1(*bf[:4]))
+    col = torch.arange(bf[5].shape[1], device="cuda")
+    perm = 16 * (col >> 4) + 8 * ((col >> 1) & 1) + 2 * ((col >> 2) & 3) + (col & 1)
+    assert torch.equal(f[11], bf[5][:, perm])
+    assert b200_train.kernel_forms(params)[10].data_ptr() == f[10].data_ptr()      # cached while the parameters are unchanged
+    with torch.no_grad():
+        params[0].add_(1.0)
+    assert b200_train.kernel_forms(params)[10].data_ptr() != f[10].data_ptr()      # a version bump rebuilds
+
+
+@pytest.mark.parametrize(("width", "kind"), [(64, "bidir"), (64, "out"), (128, "bidir"), (128, "out")])
+def test_training_parameter_gradients_deterministic(width, kind):
+    """Every gradient (x and all ten parameters, fp32 masters) is bit-identical run to run: the kernels write per-CTA partials and
+    grad_reduce sums them in a fixed order (no atomics)."""
+    torch.manual_seed(361)
+    m = randomize(_wide_module(kind, width, ImplementationType.MINIWORLD).cuda()).train()
+    m.p_drop = 0.25
+    x = torch.randn(1, 384, 384, width, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    mask = torch.rand(1, 384, device="cuda") > 0.2
+    dy = torch.randn_like(x)
+    runs = []
+    for _ in range(2):
+        torch.manual_seed(7)
+        runs.append([g.clone() for g in torch.autograd.grad(m(x, mask), [x, *m.parameters()], dy)])
+    for a, b in zip(*runs, strict=True):
+        assert torch.equal(a, b)

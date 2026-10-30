@@ -93,7 +93,8 @@ DEV uint32_t frag_addr(uint32_t tbase, int tok0, int jj, int lane) {
 struct Args {
   const __nv_bfloat16* ds;
   const float *mean_o, *rs_o, *go, *bo;
-  float *dwg, *dwp, *lnpart;   // lnpart [LN CTAs][dgo H | dbo H]: one row per LN-backward CTA (summed on the host)
+  float *part, *lnpart;     // part [front CTAs][64][64 + H]: per front CTA, row o = (dWg[o] | dWp[o]); lnpart [LN CTAs][dgo H | dbo H]:
+                            // one row per LN-backward CTA (both summed in a fixed order by grad_reduce: deterministic)
   uint32_t* flags;
   int L, tiles, NF, RSF;
   int n2;      // > 0: tri / dtri sample-major (4-D maps, tmap::make_chmajor), 0: [H, M]
@@ -353,20 +354,22 @@ __global__ void __launch_bounds__(512, 1)
         uint32_t v[32];
         tmem_ld32(ta + T_DX + part * 32, v);
         tmem_wait_ld();
-        float* dst = a.dwg + (size_t)(o - 64) * C + part * 32;
+        float* dst = a.part + ((size_t)cta * C + (o - 64)) * (C + H) + part * 32;   // this CTA's partial (no atomics)
 #pragma unroll
         for (int k = 0; k < 32; k += 4)
-          red_add4(dst + k, __uint_as_float(v[k]), __uint_as_float(v[k + 1]), __uint_as_float(v[k + 2]), __uint_as_float(v[k + 3]));
+          *reinterpret_cast<float4*>(dst + k) = make_float4(__uint_as_float(v[k]), __uint_as_float(v[k + 1]), __uint_as_float(v[k + 2]),
+                                                             __uint_as_float(v[k + 3]));
       } else {
         for (int n = 0; n < H / 64; ++n) {
           const int cb = 2 * ((n + cta) % (H / 64)) + part;
           uint32_t v[32];
           tmem_ld32(ta + T_DT + cb * 32, v);
           tmem_wait_ld();
-          float* dst = a.dwp + (size_t)o * H + cb * 32;
+          float* dst = a.part + ((size_t)cta * C + o) * (C + H) + C + cb * 32;
 #pragma unroll
           for (int k = 0; k < 32; k += 4)
-            red_add4(dst + k, __uint_as_float(v[k]), __uint_as_float(v[k + 1]), __uint_as_float(v[k + 2]), __uint_as_float(v[k + 3]));
+            *reinterpret_cast<float4*>(dst + k) = make_float4(__uint_as_float(v[k]), __uint_as_float(v[k + 1]), __uint_as_float(v[k + 2]),
+                                                               __uint_as_float(v[k + 3]));
         }
       }
     }
@@ -566,12 +569,11 @@ __global__ void __launch_bounds__(512, 1)
 }  // namespace b1s
 
 // dy / xn / dg [M, 64]; tri / dtri [H, M] channel-major; ds [L, 64] bf16; mean_o / rs_o [M]; wg [64, 64], wp [64, H] bf16;
-// go / bo [H] fp32; dwg [64, 64], dwp [64, H] fp32 accumulated; lnpart [>= SMs - nf, 2H] fp32: per-LN-CTA (dg_o | db_o)
-// rows, written (sum them); ring [nf RSF 128, 64] bf16; flags [nf RSF] zero.
+// go / bo [H] fp32; part [nf, 64, 64 + H] fp32 per-front-CTA (dWg | dWp) partials, written; lnpart [>= SMs - nf, 2H] fp32:
+// per-LN-CTA (dg_o | db_o) rows, written (grad_reduce sums both); ring [nf RSF 128, 64] bf16; flags [nf RSF] zero.
 void b1s_backward(torch::Tensor dy, torch::Tensor xn, torch::Tensor tri, torch::Tensor ds, torch::Tensor mean_o, torch::Tensor rs_o,
                   torch::Tensor wg, torch::Tensor wp, torch::Tensor go, torch::Tensor bo, torch::Tensor dg, torch::Tensor dtri,
-                  torch::Tensor dwg, torch::Tensor dwp, torch::Tensor lnpart, torch::Tensor ring, torch::Tensor flags,
-                  int64_t L, int64_t nf) {
+                  torch::Tensor part, torch::Tensor lnpart, torch::Tensor ring, torch::Tensor flags, int64_t L, int64_t nf) {
   using namespace b1s;
   const int64_t M = dy.size(0);
   const int H = (int)tmap::chmajor_channels(tri);   // tri / dtri [H, ..] or sample-major [H / 64, B, 64, L, L], the same layout
@@ -600,7 +602,8 @@ void b1s_backward(torch::Tensor dy, torch::Tensor xn, torch::Tensor tri, torch::
   a.ds = reinterpret_cast<const __nv_bfloat16*>(ds.data_ptr());
   a.mean_o = mean_o.data_ptr<float>(); a.rs_o = rs_o.data_ptr<float>(); a.go = go.data_ptr<float>(); a.bo = bo.data_ptr<float>();
   TORCH_CHECK(lnpart.numel() >= (int64_t)(nsm - nf) * 2 * H);
-  a.dwg = dwg.data_ptr<float>(); a.dwp = dwp.data_ptr<float>(); a.lnpart = lnpart.data_ptr<float>();
+  TORCH_CHECK(part.numel() >= nf * C * (C + H) && part.scalar_type() == torch::kFloat32);
+  a.part = part.data_ptr<float>(); a.lnpart = lnpart.data_ptr<float>();
   a.flags = reinterpret_cast<uint32_t*>(flags.data_ptr<int32_t>());
   a.L = (int)L; a.tiles = (int)(M / TOK); a.NF = (int)nf; a.RSF = RSF; a.n2 = n2;
   void* params[] = {(void*)&mxn, (void*)&mtri, (void*)&mwp, (void*)&mwg, (void*)&mdg, (void*)&mdtri, (void*)&mdy, (void*)&mring, (void*)&a};

@@ -109,7 +109,8 @@ def _inference_fake(leaves, mask, ds, direction):
 
 @opaque(fake=_inference_fake, name="trimul_b200_inference")
 def inference(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor | None, direction: int) -> torch.Tensor:
-    """leaves = x, wl, wlg, wr, wrg, wg, wp (bf16, [out, in]; the front four may be strided), gi, bi, go, bo (fp32);
+    """leaves = x, wl, wlg, wr, wrg, wg, wp (bf16, [out, in]; the front four may be strided), gi, bi, go, bo (fp32) -- at D64 / D128
+    optionally followed by w1, wpp (``b200_train.kernel_forms``: the front four row-major and k3g's permuted Wp made once, no prep launch);
     mask [B * L] bool token mask or None (k1w forms the pair mask); ds [B * L, D] bf16 row-dropout scale or None;
     direction 0 = bidirectional, 1 = outgoing, 2 = incoming. x is [B, L, L, D], the samples b-major (one launch per stage for the
     B samples). The hidden width is wl's row count (``hidden_ok``)."""
@@ -131,7 +132,7 @@ def inference_into(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
 
 def _inference_body(leaves, mask, ds, direction, y):
     """-> y; y None: allocated here (after the planes, as the one-launch path always did)."""
-    x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
+    x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves[:11]
     bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
     m = bsz * n * n
     E = _ext()
@@ -143,8 +144,11 @@ def _inference_body(leaves, mask, ds, direction, y):
         if y is None:
             y = torch.empty_like(x)
         if d <= 128:
-            wpp = x.new_empty((d, p // 2))     # k3g's output projection, columns in its TMEM K order
-            front = _front(E, wl, wlg, wr, wrg, wp, wpp)
+            if len(leaves) > 11:               # kernel_forms: row-major front matrices and wpp made once
+                wpp, front = leaves[12], (wl, wlg, wr, wrg)
+            else:
+                wpp = x.new_empty((d, p // 2))     # k3g's output projection, columns in its TMEM K order
+                front = _front(E, wl, wlg, wr, wrg, wp, wpp)
             E.k1w_forward(x2, *front, mask, None, None, gi, bi, planes, 0, EPS)
             t = _contract(planes, contracted(d, hid, direction), direction)
             del planes
