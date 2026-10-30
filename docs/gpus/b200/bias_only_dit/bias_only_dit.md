@@ -688,6 +688,12 @@ rows; MiniWorld's hoisted stack is 24 blocks x 16 heads = 384 rows (bf16-mixed; 
   S-only launches past 384 rows (the pair read again). dx = rstd (dy - mean(dy) - xhat mean(dy xhat)) from xhat = hi + lo, written
   over the tile and TMA-stored. Replaces `bo_hoist_bwd2_sm100` (deleted). bf16 up to 64 rows keeps bo_hoist_bwd_sm100 (R 7.08 M:
   N64 1.24 vs 1.30 ms, N16 0.66 vs 1.30).
+- Backward, fp32 up to 16 rows (2026-10-30, `-DBWD3 -DTF32 -DSMALLN`, `hoist.BWD3_SMALL_ROWS`): each group's one 64 KB tile slot
+  serialised load -> statistics -> products -> dx -> store per group (N16 R 7.08 M 1.89 ms against a 1.22 ms floor). With chunks of
+  16 weight rows (no zero-filled half of a 32-row chunk), W' resident (loaded once, 8 KB) and one dbias stage, a THIRD 64 KB tile
+  slot fits: tile i in slot i % 3, loaded by whichever group freed it (barriers per slot; the groups still take alternate tiles).
+  Same arithmetic (bit-identical d pair and dW' to the 32-row chunks), 118 registers, no spills. us, T7 / 32-row chunks / now: R 147 k
+  N16 89.2 / 56.6 / **52.6**; R 590 k 305.5 / 178.9 / **158.9**; R 7.08 M 3346 / 1885 / **1653** (N12 the same).
 - Forward, fp32 past 64 rows (2026-10-30): `bo_hoist_fwdx_sm100` (`-DFWDX -DTF32`), CTA pairs. The fp32 W' (512 B per weight
   row) does not fit beside 64 KB fp32 tiles in one CTA: bo_hoist_fwd_sm100 -DTF32 read the pair again per 128-row launch and lost to
   T7 past 128 rows (N384, R 0.15 / 0.59 / 7.08 M: 119 / 414 / 4983 us against 79 / 299 / 3665), which therefore ran it. A cluster of
@@ -721,7 +727,7 @@ median of 9 in one process, us; R = 147 k / 590 k: the shared pair at L384 / L76
 | bf16 N576 backward | 135.7 / 280.0 / **119.5** | 454.6 / 960.8 / **351.2** | -- |
 | bf16 N128 forward / backward | -- | -- | 1549 / 878 / **673**, 3893 / 2045 / **1421** |
 | fp32 N384 backward | 157.1 / 248.1 / **133.5** | 567.6 / 881.4 / **473.6** | 7095 / 10707 / **5513** |
-| fp32 N16 backward | -- | -- | 3343 / 2120 / **1887** |
+| fp32 N16 backward | -- | -- | 3343 / 2120 / 1887, **1653** (SMALLN, below) |
 
 fp32 forward past 64 rows (2026-10-30, `bo_hoist_fwdx_sm100`; same harness, T7 / the previous sm100 kernel (row-range launches of
 128) / **now**, us):
@@ -1405,7 +1411,9 @@ torch.profiler, kernel time per step (3 eager steps), A = 48, 16 x 48, B200 GPU 
   T4, 0.16 / 0.18 after), `softmax_t` 0.25 / 0.49; the hoist itself 0.09 / 0.35 ms. fp32 L384: 50.20 ms, TF32 GEMMs ~27 ms of it.
 - a pair per sample, one block behind the hoist: bf16 L384 / L768 2.38 / 7.22 ms, the hoist 0.98 / 3.86 ms of it (backward 646 /
   2566 us, forward 330 / 1289: 94-95 % / 98-100 % of the bytes floor); fp32 L384 4.98 ms, the hoist backward (`bo_hoist_bwd3` TF32,
-  N 16) 1.88 ms against a 1.22 ms floor -- the largest kernel below its floor left in these steps (Limits).
+  N 16) 1.88 ms against a 1.22 ms floor -- the largest kernel below its floor left in these steps (Limits); 1.65 ms with the
+  three-slot SMALLN build (2026-10-30; `bo_step.py psb fp32 48 L 16 48 1`, one CUDA graph, bc1f0116 / now, two runs, ms: L384 6.580,
+  6.580 / **6.363, 6.376**; L768 22.247, 22.205 / **21.435, 21.422**).
 - the fp32 forward on CTA pairs (2026-10-30; `bo_step.py`, `pair_bias_all` + nb blocks fwd + bwd in one CUDA graph, median of 9 x
   10 replays, 36c0d4ad / now, two runs each, ms): fp32 shared pair 24 blocks (N384) L384 51.30, 51.18 / **50.74, 50.85**; L768 99.41,
   99.67 / **98.97, 99.42**; fp32 pair per sample 5 blocks (N80) L384 17.70, 17.74 / **17.61, 17.65**; unchanged paths (noise): fp32
@@ -1456,8 +1464,8 @@ Inference:
 - Per-sample pair (T9, T10): P stored (906 MB per block at A48 L768); Hopper's recompute is the memory lever left. The hoist serves
   every weight-row count; what remains below the bytes floor: the fp32 forward past 384 rows (two launches: the pair read twice),
   the fp32 backward at small N (bo_hoist_bwd3
-  TF32 N16 at R 7.08 M 1.89 ms against a 1.22 ms floor: one 64 KB tile slot per group, nothing left for a third), and bf16 N576's
-  forward at R 147 k (two launches).
+  TF32 N16 at R 7.08 M 1.65 ms against a 1.22 ms floor since the three-slot SMALLN build; 17-32 rows keep two slots), and bf16 N576's
+  forward at R 147 k (two launches: 62.1 vs T7's 58.6 us).
 - Training: half the step is cuBLAS at the power cap; the row kernels and the SwiGLU GEMM are at their floor (✓). Below it (△):
   the pair-bias kernels (T1, issue-bound), `softmax_t` (T2), `dpb` (T3, TMA intake), `finalize` (L2-latency bound: 3.9 / 4.4 us alone at A48 L384 / L768 since 2026-10-30)
   and, with 32-wide heads, the core's N = 32 products (24 x 32 L768 at 80 % of its floor; two samples per N = 64 product would

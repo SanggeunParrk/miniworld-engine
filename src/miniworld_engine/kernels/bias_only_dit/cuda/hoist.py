@@ -219,13 +219,21 @@ def _fwdt_smem(nch: int) -> int:
 
 #: (dbias, W') weight rows per chunk of ``bo_hoist_bwd3_sm100``
 BWD3_CHUNKS = {torch.bfloat16: (128, 64), torch.float32: (32, 32)}
+#: fp32 calls of at most this many weight rows build ``bo_hoist_bwd3_sm100 -DSMALLN``: chunks of 16 rows, W' resident, one dbias stage
+#: and THREE tile slots (the 64 KB fp32 tile slot per group was what bound it at N16)
+BWD3_SMALL_ROWS = 16
+
+
+def bwd3_chunks(N: int, dtype: torch.dtype) -> tuple[int, int]:
+    """(dbias, W') weight rows per chunk of ``bo_hoist_bwd3_sm100`` for N weight rows."""
+    return (16, 16) if dtype is torch.float32 and N <= BWD3_SMALL_ROWS else BWD3_CHUNKS[dtype]
 
 
 def bwd3_plan(N: int, dtype: torch.dtype) -> list[tuple[int, int, bool]]:
     """``bo_hoist_bwd3_sm100``'s launches, (s0, s1, dx) in dbias chunks: the first takes d LN0 over every chunk, d pair, and S for the
     first 384 weight rows (tensor memory: S beside one d LN0 accumulator; two when S takes <= 256 columns); S-only launches take 512
     weight rows more each (the pair read again)."""
-    dc = BWD3_CHUNKS[dtype][0]
+    dc = bwd3_chunks(N, dtype)[0]
     nd, c1, c2 = -(-N // dc), 384 // dc, 512 // dc
     return [(0, min(nd, c1), True)] + [(s, min(nd, s + c2), False) for s in range(c1, nd, c2)]
 
@@ -390,9 +398,10 @@ class _Hoist100:
 
         R, N = pair2d.shape[0], wf.shape[0]
         f32 = pair2d.dtype is torch.float32
-        dc, wc = BWD3_CHUNKS[pair2d.dtype]
+        dc, wc = bwd3_chunks(N, pair2d.dtype)
+        small = f32 and dc == 16
         for (s0, s1, dx), part in zip(bwd3_plan(N, pair2d.dtype), parts, strict=True):
-            key = ("b3", pair2d.data_ptr(), wf.data_ptr(), dball.data_ptr(), dpair.data_ptr(), part.data_ptr(), R, N, eps, s0)
+            key = ("b3", pair2d.data_ptr(), wf.data_ptr(), dball.data_ptr(), dpair.data_ptr(), part.data_ptr(), R, N, eps, s0, small)
 
             def make(s0=s0, s1=s1, dx=dx, part=part):
                 tm = self._tm
@@ -409,7 +418,7 @@ class _Hoist100:
                     mdb = tm(dball, [R, N], R * 2, [64, dc])  # rows past N: TMA zero fill
                     maps = (tm(pair2d, [128, R], 256, [64, 128]), mdb, mdb, tm(wf, [128, N], 256, [64, wc]), tm(dpair, [128, R], 256, [64, 32]))
                 k = sm100_kernel("bo_hoist_sm100", "bo_hoist_bwd3_sm100", self.device_index, src_dir=str(_dir),
-                                 defs=("BWD3", *(("TF32",) if f32 else ())), smem=_BWD3_SMEM)
+                                 defs=("BWD3", *(("TF32",) if f32 else ()), *(("SMALLN",) if small else ())), smem=_BWD3_SMEM)
                 return _Launch(k, (part.shape[0], 1, 1), (320, 1, 1), *_descriptors(*maps), PTR, R, N, s0, s1, int(dx), _eps_bits(eps))
 
             self.runs.bind(key, make)(part)
@@ -464,7 +473,7 @@ def sm100_bwd(pair2d: torch.Tensor, wf: torch.Tensor, dball: torch.Tensor, eps: 
     dball = dball.contiguous()
     dpair = torch.empty_like(pair2d)
     if pair2d.dtype is torch.float32 or N > SM100_BWD_MAX_ROWS:  # the tile normalised once (-DBWD3)
-        dc = BWD3_CHUNKS[pair2d.dtype][0]
+        dc = bwd3_chunks(N, pair2d.dtype)[0]
         parts = [torch.empty(h.grid(R), (s1 - s0) * dc, 128, device=pair2d.device, dtype=torch.float32)
                  for (s0, s1, _) in bwd3_plan(N, pair2d.dtype)]
         h.bwd3(pair2d, wf, dball, dpair, parts, float(eps))
@@ -485,4 +494,4 @@ def kernel_attrs() -> list[tuple[str, int, int]]:
     return [tuple(a) for a in ext().func_attrs()]
 
 
-__all__ = ["PAIR_WIDTHS", "PASS_FWD_MAX_ROWS", "FUSED_MAX_ROWS", "SM100_BWD_MAX_ROWS", "SM100_FWDX_MIN_ROWS", "FWDX_LAUNCH_ROWS", "fwdx_plan", "SM100_FWDT_LAUNCH_ROWS", "SM100_FWDT_MIN_ROWS", "BWD3_CHUNKS", "bwd3_plan", "fwdt_plan", "sm100_bwd", "sm100_fwd", "sm100_served", "pass_bwd", "pass_bwd_served", "pass_ext", "pass_fwd", "pass_fwd_served", "bwd_ext", "ext", "fused_bwd_served", "hoist_bwd_fused", "kernel_attrs", "ln0_bwd_rows", "ln0_rows", "operand_cols"]
+__all__ = ["PAIR_WIDTHS", "PASS_FWD_MAX_ROWS", "FUSED_MAX_ROWS", "SM100_BWD_MAX_ROWS", "SM100_FWDX_MIN_ROWS", "FWDX_LAUNCH_ROWS", "fwdx_plan", "SM100_FWDT_LAUNCH_ROWS", "SM100_FWDT_MIN_ROWS", "BWD3_CHUNKS", "BWD3_SMALL_ROWS", "bwd3_chunks", "bwd3_plan", "fwdt_plan", "sm100_bwd", "sm100_fwd", "sm100_served", "pass_bwd", "pass_bwd_served", "pass_ext", "pass_fwd", "pass_fwd_served", "bwd_ext", "ext", "fused_bwd_served", "hoist_bwd_fused", "kernel_attrs", "ln0_bwd_rows", "ln0_rows", "operand_cols"]

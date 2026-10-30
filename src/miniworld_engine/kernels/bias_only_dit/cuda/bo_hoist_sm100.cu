@@ -957,7 +957,12 @@ bo_hoist_fwdx_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
 #ifdef TF32
 constexpr int X3B = TM * 128, X3T = 4 * X3B;              // the tile [4 boxes of 32 channels][128 rows][128 B], 32-B atoms (raw -> xhat -> dx)
 constexpr int NTERM = 1;                                  // xhat in one term
+#ifdef SMALLN
+// -DSMALLN (N <= 16): chunks of 16 weight rows (no zero-filled half), W' resident, one dbias stage, THREE tile slots
+constexpr int DC = 16, WC = 16;
+#else
 constexpr int DC = 32, WC = 32;                           // weight rows per dbias / W' chunk
+#endif
 constexpr int DKB = DC * 128;                             // a box of the dbias chunk [32 weight rows][32 pair rows]: 4 KB
 constexpr int D3K = 4 * DKB, D3T = 2 * D3K;               // the dbias chunk K-major SW128 | MN-major 32-B atoms
 constexpr int W3B = WC * 128, W3T = 4 * W3B;              // W' chunk [4 boxes of 32 channels][32 weight rows][128 B], 32-B atoms
@@ -984,14 +989,21 @@ DEVI void mma3(uint32_t d, uint64_t a, uint64_t b, uint32_t id, uint32_t acc) { 
 DEVI uint32_t idesc3_s(int n) { return idesc_bf16(DP, n, 1, 0); }
 #endif
 constexpr int X3S = NTERM * X3T;                          // a slot
-constexpr int D3ST = 2, W3ST = 2;
-constexpr int O3_X = 0, O3_D = O3_X + 2 * X3S, O3_W = O3_D + D3ST * D3T, O3_BAR = O3_W + W3ST * W3T;
+#ifdef SMALLN
+static_assert(NTERM == 1, "SMALLN: tf32");
+constexpr int D3ST = 1, W3ST = 1, NSLOT = 3;              // W' (one chunk) loaded once
+constexpr bool WRES = true;
+#else
+constexpr int D3ST = 2, W3ST = 2, NSLOT = 2;              // tile slot i % NSLOT: the group's own with two
+constexpr bool WRES = false;
+#endif
+constexpr int O3_X = 0, O3_D = O3_X + NSLOT * X3S, O3_W = O3_D + D3ST * D3T, O3_BAR = O3_W + W3ST * W3T;
 constexpr int B3_SMEM = 1024 + O3_BAR + 512;
 static_assert(B3_SMEM <= SMEM_MAX, "backward (normalised tile) shared memory");
 static_assert(DC % WC == 0 && X3T % 1024 == 0 && D3K % 1024 == 0 && W3T % 1024 == 0, "chunks; 1 KB alignment");
 
 struct B3Bars {
-  uint64_t xfull[2], xready[2], xmma[2], dfull[D3ST], dempty[D3ST], wfull[W3ST], wempty[W3ST], acc[2], acc_empty[2], done;
+  uint64_t xfull[NSLOT], xready[2], xmma[2], dfull[D3ST], dempty[D3ST], wfull[W3ST], wempty[W3ST], acc[2], acc_empty[2], done;
   uint32_t tmem;
 };
 
@@ -1016,9 +1028,10 @@ bo_hoist_bwd3_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
 
   if (tid == 0) {
     for (int g = 0; g < 2; ++g) {
-      mbar_init(&B.xfull[g], 1); mbar_init(&B.xready[g], 4); mbar_init(&B.xmma[g], 1);
+      mbar_init(&B.xready[g], 4); mbar_init(&B.xmma[g], 1);
       mbar_init(&B.acc[g], 1); mbar_init(&B.acc_empty[g], 4);
     }
+    for (int s = 0; s < NSLOT; ++s) mbar_init(&B.xfull[s], 1);
     for (int s = 0; s < D3ST; ++s) { mbar_init(&B.dfull[s], 1); mbar_init(&B.dempty[s], 1); }
     for (int s = 0; s < W3ST; ++s) { mbar_init(&B.wfull[s], 1); mbar_init(&B.wempty[s], 1); }
     mbar_init(&B.done, 1);
@@ -1037,6 +1050,10 @@ bo_hoist_bwd3_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
   if (warp == 0) {
     if (lane == 0) {                                         // the dbias and W' rings, in the MMA warp's order of use
       int qd = 0, qw = 0;
+      if (WRES && dx && my > 0) {                            // W' (one chunk) resident: loaded once
+        mbar_expect_tx(&B.wfull[0], W3T);
+        for (int b = 0; b < DP * ES / 128; ++b) tma_load_2d(su + O3_W + b * W3B, &mw, &B.wfull[0], b * (128 / ES), 0);
+      }
       for (int i = 0; i < my; ++i) {
         const int r0 = ((int)blockIdx.x + i * G) * TM;
         auto load_d = [&](int J) {
@@ -1056,7 +1073,7 @@ bo_hoist_bwd3_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
         for (int t = 0; t < nj; ++t) {
           const int J = jb + t;
           if (t >= la) load_d(J);
-          if (dx)
+          if (dx && !WRES)
             for (int w = J * (DC / WC); w < (J + 1) * (DC / WC) && w < nw; ++w, ++qw) {
               const int ws = qw % W3ST;
               if (qw >= W3ST) mbar_wait(&B.wempty[ws], ((qw / W3ST) - 1) & 1);
@@ -1071,7 +1088,7 @@ bo_hoist_bwd3_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
     int qd = 0, qw = 0;
     for (int i = 0; i < my; ++i) {
       const int g = i & 1, a = na == 2 ? g : 0;               // a: the TMEM accumulator; the barriers acc / acc_empty are per group
-      const uint32_t xs = su + O3_X + (uint32_t)g * X3S;
+      const uint32_t xs = su + O3_X + (uint32_t)(i % NSLOT) * X3S;
       mbar_wait(&B.xready[g], (i >> 1) & 1);                 // the group's tile is xhat
       auto sprod = [&](int J, uint32_t dt) {
         if (J < s0 || J >= s1) return;
@@ -1110,8 +1127,8 @@ bo_hoist_bwd3_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
         }
         if (dx)
           for (int w = J * (DC / WC); w < (J + 1) * (DC / WC) && w < nw; ++w, ++qw) {
-            const int ws = qw % W3ST;
-            mbar_wait(&B.wfull[ws], (qw / W3ST) & 1);
+            const int ws = WRES ? 0 : qw % W3ST;
+            mbar_wait(&B.wfull[ws], WRES ? 0 : (qw / W3ST) & 1);   // resident: phase 0, completed once
             tc_fence_after();
 #ifdef TF32
             const uint32_t da = dt + D3K;                    // the MN-major copy
@@ -1123,7 +1140,7 @@ bo_hoist_bwd3_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
 #pragma unroll
               for (int ks = 0; ks < KS_W; ++ks)              // K step: 16 (bf16) / 8 (tf32) weight rows
                 mma3(tmem + a * DP, dmn3(da + ks * KST_W, DKB), dmn3(wt + ks * KST_W, W3B), ID3_DLN, (first && ks == 0) ? 0u : 1u);
-              tc_commit(&B.wempty[ws]);
+              if (!WRES) tc_commit(&B.wempty[ws]);
             }
             __syncwarp();
             first = false;
@@ -1143,18 +1160,19 @@ bo_hoist_bwd3_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
   } else {
     const int g = (warp - 2) >> 2;
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane;
-    const uint32_t xs = su + O3_X + (uint32_t)g * X3S;
-    const bool leader = warp == 2 + 4 * g && lane == 0;     // issues the group's tile loads
-    auto load_x = [&](int i) {
-      const int r0 = ((int)blockIdx.x + i * G) * TM;
-      mbar_expect_tx(&B.xfull[g], X3T);
-      for (int b = 0; b < DP * ES / 128; ++b) tma_load_2d(xs + b * X3B, &mx, &B.xfull[g], b * (128 / ES), r0);
+    const bool leader = warp == 2 + 4 * g && lane == 0;     // issues tile loads: its group's first, then into each slot it frees
+    auto load_x = [&](int i) {                               // tile i into slot i % NSLOT
+      const int r0 = ((int)blockIdx.x + i * G) * TM, sl = i % NSLOT;
+      const uint32_t xd = su + O3_X + (uint32_t)sl * X3S;
+      mbar_expect_tx(&B.xfull[sl], X3T);
+      for (int b = 0; b < DP * ES / 128; ++b) tma_load_2d(xd + b * X3B, &mx, &B.xfull[sl], b * (128 / ES), r0);
     };
-    if (leader && g < my) load_x(g);
+    if (leader)
+      for (int i = g; i < NSLOT && i < my; i += 2) load_x(i);
     for (int i = g; i < my; i += 2) {
       const int k = i >> 1, r0 = ((int)blockIdx.x + i * G) * TM;
-      const uint32_t rr = opaque(r);
-      mbar_wait(&B.xfull[g], k & 1);
+      const uint32_t rr = opaque(r), xs = su + O3_X + (uint32_t)(i % NSLOT) * X3S;
+      mbar_wait(&B.xfull[i % NSLOT], (i / NSLOT) & 1);
       // ---- the row statistics (shifted one-pass sums: the forward's arithmetic), then xhat
       float mean, rstd, m1, k0;
 #ifdef TF32
@@ -1297,7 +1315,7 @@ bo_hoist_bwd3_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
         mbar_wait(&B.xmma[g], k & 1);                        // the tile's S products done
       }
       named_bar_sync(1 + g, 128);                            // the group's 4 warps are done with the slot
-      if (leader && i + 2 < my) load_x(i + 2);
+      if (leader && i + NSLOT < my) load_x(i + NSLOT);
     }
     if (lane == 0) tma_store_wait0();
     if (g == 0) {                                            // this CTA's S partial: TMEM lane = channel, column = weight row
