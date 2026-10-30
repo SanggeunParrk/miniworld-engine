@@ -663,6 +663,10 @@ widths without a tuned build.
   LayerNorm backward cross the cluster through distributed shared memory under split arrive / wait barriers; dgamma / dbeta are
   per-tile partials summed in tile order by B3, whose output tiles are sized so its CTAs run beside B2's clusters (round sx2). The LayerNorm runs once per row in F1 instead of in each of the 12-48 CTAs that share
   a tile (it is instruction bound: ~4k cycles per 128 × 384 tile).
+- **SwiGLU sigmoid, D64 / D128** (`sm100.cuh` `sigmoid_tr`): `s = 0.5 tanh.approx(a / 2) + 0.5`, one MUFU op per hidden unit
+  instead of the kit's two (`ex2.approx`, `rcp.approx`); F1 and both B1 roles evaluate the same function on the same fp32 `a`, so the
+  backward's `s` and the `h` it recomputes for `dW_s` are the forward's. The other widths keep the kit form. See
+  [SwiGLU sigmoid](#swiglu-sigmoid-d64--d128-2026-10-30).
 - Numerics are the sm_90a contract (same rounding points; `x_n`, `h`, `dA`, `dB`, `d_xn` in bf16, fp32 accumulation; at D ≥ 384 `a, b`
   saved in bf16); vs the fp32 module every (D, n) is at least as close as the portable path
   (`tests/gpu/sm100/test_transition_fused_sm100a_gpu.py`, `tests/gpu/sm100/test_transition_fused_wide_sm100a_gpu.py`: 1 / 3 / 15 / 1152
@@ -762,3 +766,33 @@ and training 1.5-1.6x slower than both; superseded on 2026-10-29 by the PDL chai
 [1, 768, 384] n = 2 inference 10.4-12.3, training 39.2 µs). Every other shape above is faster than both.
 The diffusion conditioning's training batch [48, L, 384] n = 2 went from 220.7 / 328.9 µs (L384 / L768, three-kernel forward and
 backward chain) to 174.2 / 296.8 µs with the fused D384 kernels.
+
+### SwiGLU sigmoid, D64 / D128 (2026-10-30)
+
+The D64 / D128 forwards were bound by the SwiGLU sigmoid on the MUFU pipe (the D64 [4, 768, 768] forward with the sigmoid replaced by
+a constant: 0.375 -> 0.261 ms). `sigmoid_tr` (`sm100.cuh`, `TR_SIG`, default 1) now evaluates it as `0.5 tanh.approx(a / 2) + 0.5`
+in F1 and in both roles of B1 (`-DTR_SIG=0` builds the previous `rcp(1 + ex2(-a log2 e))`, bit-identical to before, for A/B runs).
+Adopted because every accuracy bar holds unchanged and with the same margins: against an fp64 module, output and every gradient at
+0.56-0.81x the bf16 PyTorch statements' error (before: identical to 3 digits; bar 1.5x) on the test shapes (1 / 15 / 64 / 1152 / 3072
+tiles, MSA, n = 2 and 4), and at 0.51-0.91x with 4x / 10x weights (saturated gates, where `0.5 + 0.5 t` cancels; also identical to
+the previous form, `test_tanh_sigmoid_holds_the_fp64_bar_at_large_preactivations`); agreement with the bf16 statements unchanged
+(worst 0.80 of its bar). Against the previous kernels 0.3-0.8 % of the outputs change, by at most 4 bf16 ulps at the output's RMS
+scale; gradients differ by 1-6e-4 relative (L2). Replays stay bit-identical; ptxas: registers and the existing spills unchanged
+(D128 forward / backward 88 / 320 B spill stores before and after, D64 none).
+
+Module call (fp32 master parameters, bf16 autocast) in one CUDA graph per process, base a56f4f22 and this change in alternating
+processes, min over 3 processes of the min of 3 × 50-replay medians, node 2 GPU 4, ms:
+
+| shape (n = 4) | no-grad forward before | after | training step before | after |
+|---|---|---|---|---|
+| [1, 384, 384, 128] | 0.0658 | **0.0558** | 0.3004 | **0.2767** |
+| [1, 768, 768, 128] | 0.2124 | **0.1815** | 1.0559 (1.164-1.203) | 1.0408 (1.126-1.137) |
+| [4, 768, 768, 64] | 0.3742 | **0.2952** | 1.7513 | **1.6295** |
+| MSA [1, 1024, 384, 128] | 0.1467 | **0.1255** | 0.7135 | **0.6813** |
+
+(The [1, 768, 768, 128] training step drops from its first 50-replay round to the later ones under the power cap; in parentheses the
+range of the later rounds.) Measured and not kept: `tanh.approx.f16x2` (one MUFU op per two units) is slower than the f32 form
+(D64 forward 0.310 vs 0.296 ms; the f16 conversions cost more than the MUFU saved) and 2-3x further from the previous outputs; a MUFU /
+FMA split (a quarter of the units through an FMA-pipe `2^x` polynomial and Newton reciprocal) spills and is slower (0.365 ms). The D64
+forward is 0.296 ms against 0.261 ms with no sigmoid at all; D128 [1, 768, 768] 0.182 against 0.175.
+

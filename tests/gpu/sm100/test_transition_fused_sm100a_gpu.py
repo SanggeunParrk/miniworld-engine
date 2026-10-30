@@ -278,3 +278,38 @@ def test_fp32_master_weights_equal_the_bf16_cast_run():
     for a, b in zip(g32, g16, strict=True):
         assert a.dtype is torch.float32 and b.dtype is torch.bfloat16
         assert torch.equal(a.to(torch.bfloat16), b)
+
+
+@needs_b200
+@pytest.mark.parametrize("scale", [4.0, 10.0])
+@pytest.mark.parametrize(
+    "case", [((1, 384, 384, 128), 4), ((1, 1024, 384, 128), 4), ((4, 128, 128, 64), 4)], ids=lambda c: f"{c[0]}-n{c[1]}"
+)
+def test_tanh_sigmoid_holds_the_fp64_bar_at_large_preactivations(case, scale, monkeypatch):
+    """The D = 64 / 128 kernels evaluate the SwiGLU sigmoid as 0.5 tanh.approx(a / 2) + 0.5 (sm100.cuh ``sigmoid_tr``; forward and
+    backward the same function). Its absolute error is largest where the gate saturates (|a| of several units: 0.5 + 0.5 t cancels for
+    a << 0), so weights scaled by 4x / 10x push most pre-activations there; output and every gradient must still be no further from the
+    fp64 module than 1.5x the bf16 PyTorch statements are. Measured 2026-10-30: 0.51-0.91x, equal to the exp2 / rcp sigmoid's to 3 digits."""
+    shape, n = case
+    torch.manual_seed(72)
+    from miniworld_engine.modules import Transition
+
+    module = Transition(shape[-1], n=n, implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
+    with torch.no_grad():
+        for param in module.parameters():
+            if param.ndim == 2:
+                param.normal_(std=scale * param.shape[1] ** -0.5)
+    x = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    dy = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    mod64 = copy.deepcopy(module).double()
+    override_setting(monkeypatch, "transition_fused_sm100a", "0")
+    xx = x.double().requires_grad_()
+    y = mod64(xx)
+    y.backward(dy.double())
+    reference = {"out": y.detach(), "dx": xx.grad, **{k: p.grad for k, p in mod64.named_parameters()}}
+    fused = _run(module, x, dy, fused=True, monkeypatch=monkeypatch)
+    torch_ = _run(module, x, dy, fused=False, monkeypatch=monkeypatch)
+    for name, want in reference.items():
+        got = float((fused[name].double() - want).norm() / want.norm())
+        base = float((torch_[name].double() - want).norm() / want.norm())
+        assert got <= 1.5 * base, f"{name}: fused {got:.3e} vs bf16 statements {base:.3e}"
