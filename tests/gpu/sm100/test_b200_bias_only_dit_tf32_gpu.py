@@ -574,17 +574,22 @@ def test_swiglu_gemms_match_fp64(M):
 
 
 def test_fp32_row_kernels_fit_128_registers():
-    """Every kernel of the fp32 row extension (defaults and opt-in builds): at most 128 registers, no local memory (spills). The
-    three-warp res_adaln_b_bwd is built for two 192-thread blocks per SM: up to 168 registers."""
+    """Every kernel of the fp32 row extension that B200 runs (defaults and opt-in builds): at most 128 registers, no local memory
+    (spills). The three-warp res_adaln_b_bwd is built for two 192-thread blocks per SM: up to 168 registers.
+
+    The 256-wide pair instantiations (``<..., 256>``, engine 2.4.0's Protenix-v2 pair) are Hopper-only: every B200 gate admits pair 128
+    only (bias_only_dit.serves / serves_psb, bias_only_dit_train.serves, bias_only_dit_hoist.serves), so B200 never launches them.
+    Built for sm_100a, pair_bias_tc_k<NH, TERMS, 256> sits at the 128-register cap with 176-200 B of local memory; they are held only
+    to the launch-bounds cap here."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
 
     cap = {"res_adaln_b_bwd_k": 168}
-    bad = [
-        (name, regs, lmem)
-        for name, regs, lmem in T.rows32().func_attrs()
-        if regs > cap.get(name, 128) or lmem
-    ]
+    attrs = T.rows32().func_attrs()
+    b200 = [(name, regs, lmem) for name, regs, lmem in attrs if not name.endswith(", 256>")]
+    assert len(b200) < len(attrs)  # the 256-wide entries are still listed (the filter matches their names)
+    bad = [(name, regs, lmem) for name, regs, lmem in b200 if regs > cap.get(name, 128) or lmem]
     assert not bad, bad
+    assert all(regs <= 128 for name, regs, _ in attrs if name.endswith(", 256>"))
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
