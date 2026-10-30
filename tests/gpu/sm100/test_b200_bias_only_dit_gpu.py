@@ -91,6 +91,9 @@ def test_caches_follow_live_weights_and_pair(monkeypatch, inf3_env):
     with torch.no_grad():
         got = fast(x, c, p)
         assert relative(got, ref_bf(x, c, p)) < 0.01
+        # a fresh dynamo cache: earlier tests of the process compile BiasOnlyDiTBlock.forward for other layouts / dtypes /
+        # modes, and past torch._dynamo.config.recompile_limit (8) dynamo stops compiling it (fullgraph: 'found no compiled frames')
+        torch._dynamo.reset()
         compiled = torch.compile(
             fast, fullgraph=True, options={"triton.cudagraphs": False}
         )

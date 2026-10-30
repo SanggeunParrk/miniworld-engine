@@ -155,6 +155,9 @@ def test_inference_graph_compile_and_caches(monkeypatch, inf3_env):
             assert not rows, names
         else:  # no front / tail kernel
             assert not any(k in n for n in names for k in INF3_NAMES[::2]), names
+        # a fresh dynamo cache: earlier tests of the process compile BiasOnlyDiTBlock.forward for other layouts / dtypes /
+        # modes, and past torch._dynamo.config.recompile_limit (8) dynamo stops compiling it (fullgraph: 'found no compiled frames')
+        torch._dynamo.reset()
         compiled = torch.compile(
             fast, fullgraph=True, options={"triton.cudagraphs": False}
         )
@@ -351,6 +354,9 @@ def test_training_kernels_ran_graph_capture_compile_and_steady_memory(n_head, d_
     for g, e in zip(replayed, eager, strict=True):
         assert relative(g, e) < 1e-4
     # torch.compile keeps the two opaque ops (forward / backward) and gives the same step
+    # a fresh dynamo cache: earlier tests of the process compile BiasOnlyDiTBlock.forward for other layouts / dtypes /
+    # modes, and past torch._dynamo.config.recompile_limit (8) dynamo stops compiling it (fullgraph: 'found no compiled frames')
+    torch._dynamo.reset()
     compiled = torch.compile(fast, options={"triton.cudagraphs": False})
     for g, e in zip(run(compiled), eager, strict=True):
         assert relative(g, e) < 1e-4
