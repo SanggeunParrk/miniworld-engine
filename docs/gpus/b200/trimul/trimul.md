@@ -346,6 +346,15 @@ in shared memory reads 128 B/clk (64 clk back to back), and per 128-token tile t
 
 dx changes by one bf16 ulp in 132 of 75.5 M elements at L768 (statistics rounding); dW1 partials are bitwise as before.
 
+Memory ordering of the ring (made explicit after review): dgp is written to shared memory by generic stores, then
+fence.proxy.async.shared::cta before the publisher's TMA store; the publisher waits for the store's writes, fences the proxy
+(fence.proxy.async.global) and releases the flags (fence.acq_rel.gpu + relaxed stores); the consumer acquires them (ld.acquire.gpu,
+then mbarrier release / acquire to its loader) and fences the proxy before its TMA loads. Slot return: once a half tile's K-blocks
+have landed, a returner lane fences the proxy and releases the zeroed flags; the source acquires the slot and fences the proxy
+before its TMA store into it. Cost: b7g L768 565 -> 571 us, L384 153 -> 156 us (slot returns per half tile instead of per
+chunk). `tests/gpu/sm100/test_trimul_b200_b7g_handover_gpu.py`: 500 graph replays bitwise at L768 and L256 (ring slots recycle every
+few tiles), and odd tile counts (consumers one CTA per tile; the module never produces them, L being a multiple of 128).
+
 `b7g` alone (us, one process, 7 x 10 launches; a56f4f22 -> 485232e6):
 
 | L | 128 | 256 | 384 | 512 | 640 | 768 |

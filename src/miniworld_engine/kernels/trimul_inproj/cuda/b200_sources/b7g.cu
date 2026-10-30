@@ -11,7 +11,9 @@
 //     both release a stage, tcgen05.commit multicast),
 //     dxn = bf16( sum_c dgp_c W1_c + dGout Wg )  (fp32 accumulate over K = 1024 + 128, one rounding, as on H100),
 //     LN_in backward + residual -> dx (TMA store), dgi / dbi (reduce-scatter over each warp's rows, register-accumulated);
-//     a flag is reset to 0 as soon as its tile's K-blocks have landed in shared memory, which frees the ring slot. A published
+//     a flag is reset to 0 once its K-blocks have landed in shared memory (a returner lane, per half tile: fence.proxy.async +
+//     release pattern; the source acquires the slot and fences the proxy before its TMA store). Odd tile counts (not reached
+//     with L % 128 == 0) run one CTA per tile without the pairing. A published
 //     flag carries the group-local tile index + 1, so a consumer never takes an older tile still waiting in the same slot;
 //     sources publish two tiles per release fence.
 // Flags are 0 again when the kernel ends, so launches and CUDA-graph replays need no reset.
@@ -60,7 +62,8 @@ struct Bars {
   // source
   uint64_t w_full, x_full[NX], x_free[NX], da_full[2], da_free[2], pre_full[2], pre_free[2], dgp_ready[2], dgp_free[2];
   // consumer
-  uint64_t st_full[NST], st_empty[NST], acc_full[2], acc_empty[2], cx_full[2], cx_free[2], dy_full, dy_free, fready[2][8], fdone[2];
+  uint64_t st_full[NST], st_empty[NST], acc_full[2], acc_empty[2], cx_full[2], cx_free[2], dy_full, dy_free, fready[2][8], fdone[2],
+      landed[2][2], retdone[2];
   uint32_t tmem;
 };
 static_assert(sizeof(Bars) <= 512, "barrier block");
@@ -102,7 +105,8 @@ DEV void red_add4(float* p, float a, float b, float c, float d) {
 DEV uint32_t ld_acquire(const uint32_t* p) { uint32_t v; asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(v) : "l"(p) : "memory"); return v; }
 DEV void st_relaxed(uint32_t* p, uint32_t v) { asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" ::"l"(p), "r"(v) : "memory"); }
 DEV void st_release(uint32_t* p, uint32_t v) { asm volatile("st.release.gpu.global.u32 [%0], %1;" ::"l"(p), "r"(v) : "memory"); }
-// Returning a ring slot (consumer): its TMA reads have landed in shared memory (st_full observed), so a relaxed store suffices.
+// Returning a ring slot (consumer): after fence.proxy.async.global + fence.acq_rel.gpu (the slot's TMA reads have landed), a
+// relaxed store completes the release pattern; the source acquires it and fences the proxy before its TMA store.
 DEV void flag_return(uint32_t* p) { asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" ::"l"(p), "r"(0u) : "memory"); }
 DEV void fence_proxy_async_global() { asm volatile("fence.proxy.async.global;" ::: "memory"); }
 // multicast to both CTAs of the pair: same smem offset / mbarrier offset in each CTA of ctaMask
@@ -171,6 +175,7 @@ struct Args {
                             // order by grad_reduce; lnpart [consumers][dgi 128 | dbi 128]: one row per consumer CTA
   uint32_t* flags;          // [SG][RD][NCH]
   int tiles, L, SG, NC;
+  int pair;                 // consumers in CTA pairs sharing the W1 / Wg stream (even tile count); 0: one CTA per tile, own stream
   float eps;
 };
 
@@ -205,12 +210,13 @@ __global__ void __launch_bounds__(384, 1)
       mbar_init(&B.acc_full[b], 1); mbar_init(&B.acc_empty[b], 8);
     }
     for (int b = 0; b < NX; ++b) { mbar_init(&B.x_full[b], 1); mbar_init(&B.x_free[b], 1); }
-    for (int b = 0; b < NST; ++b) { mbar_init(&B.st_full[b], 1); mbar_init(&B.st_empty[b], 2); }   // consumer pairs: both CTAs' MMAs release a stage
+    for (int b = 0; b < NST; ++b) { mbar_init(&B.st_full[b], 1); mbar_init(&B.st_empty[b], a.pair ? 2 : 1); }   // consumer pairs: both CTAs' MMAs release a stage
     for (int b = 0; b < 2; ++b) { mbar_init(&B.cx_full[b], 1); mbar_init(&B.cx_free[b], 1); }
     mbar_init(&B.dy_full, 1); mbar_init(&B.dy_free, 1);
     for (int b = 0; b < 2; ++b) {
       mbar_init(&B.fdone[b], 1);
       for (int c = 0; c < 8; ++c) mbar_init(&B.fready[b][c], 1);
+      mbar_init(&B.landed[b][0], 1); mbar_init(&B.landed[b][1], 1); mbar_init(&B.retdone[b], 1);
     }
     fence_mbar_init();
   }
@@ -296,7 +302,8 @@ __global__ void __launch_bounds__(384, 1)
         int ps0 = 0, pj0 = 0, ps1 = 0, pj1 = 0, np = 0;         // stored, not yet published (oldest first)
         for (int j = b, i = 0; j < n_local; j += 2, ++i) {
           const int slot = (g * RD + j % RD) * NCH + c;
-          PW(1, spin_until(a.flags + slot, 0u)); TLS(1);            // consumer of tile j - RD has taken the slot
+          PW(1, spin_until(a.flags + slot, 0u)); TLS(1);            // consumer of tile j - RD has taken the slot (acquire)
+          fence_proxy_async_global();                               // ... ordered before this thread's async-proxy writes to it
           PW(0, mbar_wait(&B.dgp_ready[b], (j >> 1) & 1)); TLS(0);
           PW(3, tma_store_2d(&mring, sm + S_DGP + b * XT, 0, slot * TOK));
           PW(3, tma_store_2d(&mring, sm + S_DGP + b * XT + XT / 2, 64, slot * TOK));
@@ -440,6 +447,10 @@ __global__ void __launch_bounds__(384, 1)
         uint32_t v[32];
         tmem_ld32(tmem + T_DW + ((uint32_t)(q * 32) << 16) + cb * 32, v);
         tmem_wait_ld();
+        if (n_local == 0) {                                   // a group without tiles (tiles < SG): its TMEM was never written
+#pragma unroll
+          for (int e = 0; e < 32; ++e) v[e] = 0u;
+        }
         float* dst = a.dw1 + ((size_t)g * (128 * NCH) + 128 * c + row) * C + cb * 32;   // this group's partial (no atomics)
 #pragma unroll
         for (int k = 0; k < 32; k += 4)
@@ -452,9 +463,11 @@ __global__ void __launch_bounds__(384, 1)
     const int k = blockIdx.x - NS;
     // consumer pairs (clusters of two): pair pk takes tile pairs u = pk + NP jj, its CTA r = k & 1 tile 2 u + r; the pair streams
     // the W1 / Wg K-blocks once, each CTA loading one 64-column half multicast to both
-    const int NP = a.NC >> 1, pk = k >> 1, rk = k & 1, tp = a.tiles >> 1;
-    const int n_local = tp > pk ? (tp - pk + NP - 1) / NP : 0;
-    auto tile_of = [&](int jj) { return 2 * (pk + NP * jj) + rk; };
+    // (odd tile count: a.pair = 0, CTA k takes tiles k + NC jj and streams the whole K-blocks itself)
+    const bool pair = a.pair != 0;
+    const int NP = a.NC >> 1, pk = k >> 1, rk = pair ? (k & 1) : 0, tp = a.tiles >> 1;
+    const int n_local = pair ? (tp > pk ? (tp - pk + NP - 1) / NP : 0) : (a.tiles > k ? (a.tiles - k + a.NC - 1) / a.NC : 0);
+    auto tile_of = [&](int jj) { return pair ? 2 * (pk + NP * jj) + rk : k + a.NC * jj; };
 #ifdef MBAR_DEBUG
     if (tid == 0 && k < 3) printf("CONSUMER blk %d k %d n_local %d NC %d SG %d\n", blockIdx.x, k, n_local, a.NC, a.SG);
 #endif
@@ -470,7 +483,12 @@ __global__ void __launch_bounds__(384, 1)
             mbar_expect_tx(&B.st_full[st], STB);
             const uint32_t d = C_ST + st * STB;
             tma_load_2d(sm + d, &mgo, &B.st_full[st], 64 * kh, row0, EVICT_FIRST);
-            tma_load_3d_mc(sm + d + STB / 2 + rk * (STB / 4), &mwg, &B.st_full[st], 0, 64 * kh, rk, 3, EVICT_LAST);
+            if (pair) {
+              tma_load_3d_mc(sm + d + STB / 2 + rk * (STB / 4), &mwg, &B.st_full[st], 0, 64 * kh, rk, 3, EVICT_LAST);
+            } else {
+              tma_load_3d(sm + d + STB / 2, &mwg, &B.st_full[st], 0, 64 * kh, 0, EVICT_LAST);
+              tma_load_3d(sm + d + STB / 2 + STB / 4, &mwg, &B.st_full[st], 0, 64 * kh, 1, EVICT_LAST);
+            }
           }
           const int fb = jj & 1;
           for (int c = 0; c < NCH; ++c) {
@@ -496,7 +514,12 @@ __global__ void __launch_bounds__(384, 1)
               PW(5, tma_load_2d(sm + d, &mring, &B.st_full[st], 64 * kh, slot * TOK, EVICT_FIRST));
 #endif
 #ifndef B7_NOW1
-              PW(6, tma_load_3d_mc(sm + d + STB / 2 + rk * (STB / 4), &mw1k, &B.st_full[st], 0, 128 * c + 64 * kh, rk, 3, EVICT_LAST));
+              if (pair) {
+                PW(6, tma_load_3d_mc(sm + d + STB / 2 + rk * (STB / 4), &mw1k, &B.st_full[st], 0, 128 * c + 64 * kh, rk, 3, EVICT_LAST));
+              } else {
+                tma_load_3d(sm + d + STB / 2, &mw1k, &B.st_full[st], 0, 128 * c + 64 * kh, 0, EVICT_LAST);
+                tma_load_3d(sm + d + STB / 2 + STB / 4, &mw1k, &B.st_full[st], 0, 128 * c + 64 * kh, 1, EVICT_LAST);
+              }
 #endif
 #endif
             }
@@ -520,7 +543,7 @@ __global__ void __launch_bounds__(384, 1)
         uint32_t ph = 0;
         for (int jj = 0; jj < n_local; ++jj) {
           const int t = tile_of(jj), g = t % a.SG, s = (t / a.SG) % RD, acc = jj & 1;
-          const int fbase = (g * RD + s) * NCH;
+          const int fb = jj & 1;
           PW(1, mbar_wait(&B.acc_empty[acc], ((jj >> 1) & 1) ^ 1));
           tc_fence_after();
           const uint32_t d = tmem + T_ACC + acc * 128;
@@ -528,16 +551,22 @@ __global__ void __launch_bounds__(384, 1)
           for (int s2 = 0; s2 < 2 + 2 * NCH; ++s2) {         // 2 (dGout, Wg) stages, then NCH chunks x 2 K-blocks of (dgp_c, W1_c)
             PW(0, mbar_wait(&B.st_full[st], ph));
             tc_fence_after();
-            // a chunk's second K-block has landed: its ring slot's global reads are done, return the slot (relaxed store; nothing
-            // here waits for the MMAs)
-            if (s2 >= 3 && (s2 & 1) && ldr) flag_return(a.flags + fbase + ((s2 - 2) >> 1));
+            // the first / second half of the chunks has landed (their ring slots' global reads are done): hand them to the slot
+            // returner (warp 3 lane 16), which fences and releases; nothing here waits for the MMAs
+            if (s2 == NCH + 1) {
+              if (jj >= 2) mbar_wait(&B.retdone[fb], ((jj >> 1) - 1) & 1);
+              if (ldr) mbar_arrive(&B.landed[fb][0]);
+            } else if (s2 == 2 * NCH + 1) {
+              if (ldr) mbar_arrive(&B.landed[fb][1]);
+            }
             const uint64_t da = dA0 + (uint64_t)st * SD, db = dB0 + (uint64_t)st * SD;
             if (ldr) {
               umma_ss(d, da, db, ID_DX, s2 != 0);
               umma_ss(d, da + 2, db + 128, ID_DX, 1);
               umma_ss(d, da + 4, db + 256, ID_DX, 1);
               umma_ss(d, da + 6, db + 384, ID_DX, 1);
-              umma_commit_mc(&B.st_empty[st], 3);            // the stage is free in both CTAs once both MMAs have read it
+              if (pair) umma_commit_mc(&B.st_empty[st], 3);  // the stage is free in both CTAs once both MMAs have read it
+              else umma_commit(&B.st_empty[st]);
             }
             if (B7_WARPMMA) __syncwarp();
             if (++st == NST) { st = 0; ph ^= 1; }
@@ -576,6 +605,19 @@ __global__ void __launch_bounds__(384, 1)
           if (jj >= 2) mbar_wait(&B.fdone[fb], ((jj >> 1) - 1) & 1);
           PW(0, spin_until(a.flags + (g * RD + s) * NCH + c, (uint32_t)(t / a.SG + 1)));
           mbar_arrive(&B.fready[fb][c]);
+        }
+      } else if (lane == 16) {
+        // ring-slot returner: once a half of a tile's chunks has landed in shared memory (the MMA warp's st_full), order those
+        // async-proxy reads before the flag writes (fence.proxy.async, then a release pattern) and reset the flags to 0
+        for (int jj = 0; jj < n_local; ++jj) {
+          const int t = tile_of(jj), g = t % a.SG, s = (t / a.SG) % RD, fb = jj & 1;
+          for (int h = 0; h < 2; ++h) {
+            mbar_wait(&B.landed[fb][h], (jj >> 1) & 1);
+            fence_proxy_async_global();
+            fence_acq_rel_gpu();
+            for (int c = h * (NCH / 2); c < (h + 1) * (NCH / 2); ++c) flag_return(a.flags + (g * RD + s) * NCH + c);
+          }
+          mbar_arrive(&B.retdone[fb]);
         }
       }
     } else if (warp >= 4) {
@@ -793,7 +835,7 @@ void b7g_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Te
   using namespace b7g;
   const int64_t M = x.size(0);
   const int P = (int)dpl.size(0), NCH = P / 64;
-  TORCH_CHECK(M % (2 * TOK) == 0 && x.size(1) == C && dpl.numel() == (int64_t)P * M && (NCH == 4 || NCH == 8) && w1.size(0) == 128 * NCH);
+  TORCH_CHECK(M % TOK == 0 && x.size(1) == C && dpl.numel() == (int64_t)P * M && (NCH == 4 || NCH == 8) && w1.size(0) == 128 * NCH);
   int nsm = 0, dev = 0;
   cudaGetDevice(&dev);
   cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
@@ -820,6 +862,7 @@ void b7g_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Te
   a.dw1 = dw1.data_ptr<float>(); a.lnpart = lnpart.data_ptr<float>();
   a.flags = reinterpret_cast<uint32_t*>(flags.data_ptr<int32_t>());
   a.tiles = (int)(M / TOK); a.L = (int)L; a.SG = SG; a.NC = NC; a.eps = (float)eps;
+  a.pair = (a.tiles % 2 == 0) ? 1 : 0;                       // L % 128 == 0 always gives an even count; kept for any M
   void* params[] = {(void*)&mxn, (void*)&mda, (void*)&mw1, (void*)&mring, (void*)&mgo, (void*)&mwg, (void*)&mdx, (void*)&mw1k,
                     (void*)&mx, (void*)&mdy, (void*)&a};
   auto launch = [&](const void* fn, bool& attr) {
