@@ -28,6 +28,12 @@
 // RS = NF RSF dPr tiles of 32 KB, each in the SWIZZLE_NONE K-major operand layout [16 column chunks][128 tok][8 o] (a front warp
 // stores a chunk of its 32 tokens as 512 contiguous bytes; the LN CTA bulk-copies the tile and feeds it to its MMAs as is), then
 // RS (S1 [128] | S2 [128]) fp32 blocks of 1 KB.
+// Ring hand-over (generic-proxy global stores -> async-proxy bulk copies on another SM), in order:
+//   epilogue threads: st.global dPr / S -> fence.proxy.async.global (each writer, orders its generic stores before later
+//   async-proxy accesses) -> bar.sync (all 384 epilogue threads) -> mbarrier arrive dp_ready (release.cta) -> store warp:
+//   arrive published -> flag warp: st.release.gpu flag = generation;  LN producer: ld.acquire.gpu flag -> fence.proxy.async.global
+//   -> cp.async.bulk of the slot. The flag release is cumulative over the writers' stores through the CTA barrier / mbarrier
+//   chain. (dG and dTri go out by TMA stores; tile operands come in by TMA loads.)
 #include "sm100.cuh"
 #include "tmap.h"
 
@@ -486,6 +492,9 @@ __global__ void __launch_bounds__(512, 1)
           float* sg = a.sring + (size_t)slot * 2 * TOK;
           sg[r] = sb[r] + p1; sg[TOK + r] = sb[TOK + r] + p2;
         }
+#ifndef B1G_NO_PROXY_FENCE
+        fence_proxy_async_global();                                     // this thread's dPr / S stores before the async-proxy reads
+#endif
         named_bar_sync(1, 384);
         if (tid == 128) { mbar_arrive(&F.q_empty[b]); mbar_arrive(&F.dp_ready); }
       }
