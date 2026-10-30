@@ -32,8 +32,11 @@ ones and the GPU is that arch; anything else is ignored with one line and the JI
 (directories holding a `manifest.json`) adds bundles from elsewhere.
 
 CUTLASS / CuTe headers are needed only to *build* the TriangleAttention kernels that include them: the call sites take
-the include directory from `_nvcc.cutlass_include()` (a stand-in when `CUTLASS_PATH` is unset), the key is the same
-either way (`cutlass@4.2.0`), and only a build without headers raises `_nvcc.CutlassMissing`.
+the include directory from `_nvcc.cutlass_include()` (a stand-in when `CUTLASS_PATH` is unset), and only a build without
+headers raises `_nvcc.CutlassMissing`. The key labels the headers by release (`cutlass@<version.h>`; the stand-in is the
+pinned `cutlass@4.2.0` the bundle is built with). A `CUTLASS_PATH` to another release gives another key, so a bundle
+miss is retried with that include directory replaced by the stand-in (`_nvcc._pinned_cutlass`): the shipped binary is
+used, and only a kernel the bundle lacks is built against the other release.
 
 ## The content key: the code graph
 

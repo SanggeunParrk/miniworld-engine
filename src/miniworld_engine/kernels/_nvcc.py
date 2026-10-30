@@ -892,6 +892,25 @@ def _ext_key(name: str, kwargs: dict, sources: list[str] | None, inline: bool) -
     return material, cg.key_of(material), graph
 
 
+def _pinned_cutlass(kwargs: dict) -> dict | None:
+    """``kwargs`` with every CUTLASS include directory of another release than ``_codegraph.CUTLASS_PINNED`` replaced by
+    ``CUTLASS_STANDIN`` (keyed as the pinned release), or None when there is none: the key a prebuilt bundle holds the artifact
+    under.  A CUTLASS_PATH to another checkout (4.8.0 in FoldForge's runs, 2026-10-30) otherwise re-keyed every CUTLASS
+    extension and compiled the shipped ones again on the first call."""
+    from miniworld_engine.kernels import _codegraph as cg
+
+    incs = [str(p) for p in kwargs.get("extra_include_paths") or []]
+    ctx = cg.context()
+    pinned = f"cutlass@{cg.CUTLASS_PINNED}"
+    swapped = []
+    for p in incs:
+        label, _ = cg.classify_dir(p, ctx)
+        swapped.append(str(CUTLASS_STANDIN) if label.startswith("cutlass@") and label != pinned else p)
+    if swapped == incs:
+        return None
+    return {**kwargs, "extra_include_paths": swapped}
+
+
 def _import_ext(so: Path, module: str, python_module: bool) -> Any:
     from torch.utils.cpp_extension import _import_module_from_library
 
@@ -916,6 +935,19 @@ def _load(kind_label: str, name: str, kwargs: dict, sources: list[str] | None = 
               "kwargs": {k: v for k, v in kwargs.items() if k != "verbose"}}
     python_module = bool(kwargs.get("is_python_module", True))
     hit = prebuilt.find("ext", name, key)
+    pinned = _pinned_cutlass(kwargs) if hit is None else None
+    if pinned is not None:
+        # CUTLASS_PATH names another CUTLASS release than the bundle was built with: the headers only matter to a build, so the
+        # shipped binary of the pinned release is the artifact (the local build key stays this checkout's, for a build below)
+        p_material, p_key, _ = _ext_key(name, pinned, sources, inline)
+        p_hit = prebuilt.find("ext", name, p_key)
+        if p_hit is not None:
+            module = p_hit.entry.get("module", name)
+            ext = _import_ext(p_hit.path, module, python_module)
+            _resolved("ext", name, p_key, p_hit.path, "prebuilt", p_material, module=module, python_module=python_module,
+                      recipe=recipe)
+            _LOADED[key] = _LOADED[p_key] = ext
+            return ext
     if hit is not None:
         module = hit.entry.get("module", name)
         ext = _import_ext(hit.path, module, python_module)

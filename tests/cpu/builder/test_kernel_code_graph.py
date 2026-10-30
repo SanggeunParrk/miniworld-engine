@@ -145,6 +145,36 @@ def test_a_cutlass_directory_is_keyed_by_its_version_present_or_not(tmp_path: Pa
     assert cg.classify_dir("/not/here/cutlass/include", ctx) == (f"cutlass@{cg.CUTLASS_PINNED}", True)
 
 
+def test_another_release_on_the_include_path_finds_the_pinned_key(tmp_path: Path) -> None:
+    """CUTLASS_PATH to another release (4.8.0 in FoldForge's runs, 2026-10-30) keys an extension differently from the bundle,
+    which is built with the pinned release; the bundle lookup retries with the stand-in, which keys like that release."""
+    def checkout(version: str) -> Path:
+        inc = tmp_path / f"headers-{version}" / "include"
+        (inc / "cutlass").mkdir(parents=True)
+        (inc / "cute").mkdir()
+        major, minor, patch = version.split(".")
+        (inc / "cutlass" / "version.h").write_text(
+            f"#define CUTLASS_MAJOR {major}\n#define CUTLASS_MINOR {minor}\n#define CUTLASS_PATCH {patch}\n")
+        (inc / "cute" / "tensor.hpp").write_text("// cute\n")
+        return inc
+
+    src = tmp_path / "src" / "k.cu"
+    src.parent.mkdir()
+    src.write_text("#include <cute/tensor.hpp>\n__global__ void k() {}\n")
+
+    def key(kwargs: dict) -> str:
+        return _nvcc._ext_key("ext_k", kwargs, [str(src)], False)[1]
+
+    pinned_release, other = checkout(cg.CUTLASS_PINNED), checkout("4.8.0")
+    at = {"extra_include_paths": [str(src.parent), str(pinned_release)]}
+    assert _nvcc._pinned_cutlass(at) is None
+    elsewhere = {"extra_include_paths": [str(src.parent), str(other)]}
+    assert key(elsewhere) != key(at)
+    retry = _nvcc._pinned_cutlass(elsewhere)
+    assert retry["extra_include_paths"] == [str(src.parent), str(_nvcc.CUTLASS_STANDIN)]
+    assert key(retry) == key(at)
+
+
 def test_generated_headers_are_read_from_the_overlay_and_not_written(tmp_path: Path) -> None:
     gen = tmp_path / "jit" / "trimul_h100" / "headers_abc"
     cg.publish(gen / "g.cuh", "int generated;\n")
