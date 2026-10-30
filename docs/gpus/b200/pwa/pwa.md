@@ -197,6 +197,62 @@ elementwise pass (~800-1000 cycles a pair; `tanh.approx.f16x2` issues two MUFU o
 tile's stage (~850 cycles a tile) as what is left; moving the keep-mask prep to the producer warp measured 20 % slower and was not
 kept, nor was an o prefetch two pairs ahead (4 % slower). `dvb_w` and `pair_bwd_w` are as above.
 
+### Second pass on `pwa_glue2` and the step's kernel count (2026-10-30, later)
+
+`pwa_glue2` alone is 127 us of CUDA time at (384, 1024) (+ 5 us of `glue2_finish`); plain streaming kernels moving the same bytes (o -> do,
+y + dres -> dyg) take 99.5 us, so the kernel runs at ~80 % of what this traffic reaches at best. Ablations (one build each, kernel alone,
+correctness off, (384, 1024), base 138.4 us with the finish):
+
+| removed from the kernel | us |
+|---|---|
+| nothing | 138.4 |
+| dWo / dWg GEMMs (16 x M64 N64 K16 a pair), or the dyg GEMMs | 136.2 / 136.7 |
+| tanh (MUFU) | 136.4 |
+| keep-mask prep | 136.1 |
+| o loads | 125.8 |
+| do stores | 125.8 |
+| o loads and do stores | 117.7 |
+| all of the above | 95.3 |
+
+No single resource dominates: every removal but the o / do traffic is worth ~2 us, and with o / do gone the rest is the per-pair chain
+(G | DU GEMMs -> TMEM load -> elementwise -> go / dgp to shared). Tried and not kept (same harness, alternating builds):
+
+- elementwise pass with ~15 % fewer instructions (tn = tanh(-G/2): g = 1/2 - tn/2, 2 dgp = x + x tn as one FMA): 0 %; packed-bf16
+  arithmetic would remove a similar share and also loses accuracy; `tanh.approx.bf16x2` measured 16-52 cycles a warp instruction
+  (f32 `tanh.approx` 8), so the elementwise pass is not where the time goes and more drain warps were not built;
+- issuing the dWo / dWg / dyg GEMMs of pair p - 2 after the G | DU GEMMs of pair p (the drain waits on G | DU only): +1-3 %;
+- o into L2 two / four / eight pairs ahead (`cp.async.bulk.prefetch.L2`): 0 / 0 / +11 %; L2 evict-first hints on o / do: 0 %;
+- o by TMA straight into the go slot of its buffer (no register stream): +1 % (timed before its box layout was right; not pursued);
+- do staged in shared memory and stored by TMA (64B-swizzled boxes or two 8 KiB bulk copies, a store warp): +25 / +37 %;
+- two y / dres stages instead of three: 0 % (kept at three); four tokens x 32 rows a tile: +9-10 %.
+
+Kept: two tokens x 64 rows a tile (1.3-2 % faster, below) and six fewer launches in the step: the forward's three weight casts become
+one (`pwa_wcast`), the dropout keep is `rand > bf16(p)` inside `pwa_gate_out` / `pwa_glue2` (the same draw, bitwise the same keep; no
+compare / cast launches), `glue2_finish` + `dv_finish` become `bwd_finish` (after `dv_bwd`), and the pair side's `colsum` +
+`pair_param_finish(_w)` become `pair_param_finish2` (every d_pair). nsys, one CUDA-graph step at (384, 1024): 30 -> 24 kernels.
+
+Kernel alone (`pwa_glue2` + its finish, CUDA events, median of 30, GPU 2 of node 2, dropout on), us:
+
+| (N, S) | one token x 128 rows | two tokens x 64 rows |
+|---|---|---|
+| (384, 1024) | 138.3 | 136.5 |
+| (768, 1024) | 250.9 | 246.8 |
+| (1536, 512) | 251.0 | 247.5 |
+| (2048, 512) | 326.8 | 320.3 |
+
+Training step (as above, alternating base / new processes, GPU 2 of node 2), ms ("before" = 36c0d4ad):
+
+| width | (N, S) | before | after |
+|---|---|---|---|
+| MiniWorld 64 / 128 / 8 x 32 | (384, 1024) | 0.695 | 0.686 |
+| MiniWorld | (768, 1024) | 1.549 | 1.538 |
+| Chai-1 64 / 256 / 8 x 32 | (384, 1024) | 0.744 | 0.737 |
+| Protenix-v2 128 / 256 / 8 x 8 | (384, 1024) | 0.716 | 0.716 |
+| AF3 64 / 128 / 8 x 8 | (384, 1024) | 0.485 | 0.485 |
+
+Steps of more than ~2 ms ((1536, 512), (2048, 512)) were not re-measured: a stray context on the card time-sliced long replays
+(5.26 ms at (1536, 512) for either build).
+
 ## MSAPairWeightedAveraging (`MSAPairWeightedAveraging`)
 
 ### Inference
