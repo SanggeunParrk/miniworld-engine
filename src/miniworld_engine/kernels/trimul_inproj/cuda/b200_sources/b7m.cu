@@ -66,9 +66,13 @@ DEV void red_add4(float* p, float a, float b, float c, float d) {
 // s L + j are. A 128-token tile lies in one row i (L % 128 == 0); (s, i, j0) of a CTA's tile is advanced incrementally (no integer
 // division on the elementwise warps' path: three divisions per token cost b7g ~15 %).
 struct PairIdx {
-  int s, i, j;
-  DEV void init(int row0, int L) { s = row0 / (L * L); i = (row0 / L) % L; j = row0 % L; }
-  DEV void advance(int rows, int L) { j += rows; while (j >= L) { j -= L; if (++i == L) { i = 0; ++s; } } }
+  int s, i, j, dq, dr;      // dq, dr: the CTA's tile step (step rows = dq L + dr), split once
+  DEV void init(int row0, int step, int L) { s = row0 / (L * L); i = (row0 / L) % L; j = row0 % L; dq = step / L; dr = step % L; }
+  DEV void advance(int L) {   // no loop over L-sized steps (b7m steps 148 x 128 tokens: ~25 per tile at L768)
+    j += dr; i += dq;
+    if (j >= L) { j -= L; ++i; }
+    while (i >= L) { i -= L; ++s; }
+  }
   // the two tokens' masks of this thread (tile offsets tok, tok + 8): both loads issued together, no short-circuit
   DEV void mask2(const uint8_t* tm, int tok, int L, float& m0, float& m1) const {
     if (tm == nullptr) { m0 = m1 = 1.f; return; }
@@ -214,11 +218,11 @@ __global__ void __launch_bounds__(512, 1)
     const int tok0 = q * 32 + hh * 16;
     float mA = 0.f, mB = 0.f;
     PairIdx pix;
-    pix.init(cta * TOK, a.L);
+    pix.init(cta * TOK, G * TOK, a.L);
     for (int u = 0; u < n_chunks; ++u) {
       const int i = u / NCH, pb = u % NPB, db = u & 1;
       if (u % NCH == 0) {
-        if (i > 0) pix.advance(G * TOK, a.L);
+        if (i > 0) pix.advance(a.L);
         pix.mask2(a.tmask, tok0 + tr, a.L, mA, mB);
       }
       PW(0, mbar_wait(&B.pre_full[pb], (u / NPB) & 1));
