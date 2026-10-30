@@ -5,11 +5,15 @@
 //   source CTAs  (8 per source group; CTA (g, c) owns packed-W1 chunk c = plane channels 64c .. 64c+63, rows 128c .. 128c+127)
 //     for every tile of its group: pre = xn W1_c^T, dg/dp (fragment layout) -> dgp tile [128 tok][128] bf16,
 //     dW_c += dgp^T xn (TMEM, persistent), dgp -> ring slot (TMA store) + flag = 1.
-//   consumer CTAs: for each of its tiles: wait the 8 flags, stream (dgp_c, W1_c) pairs through a 2-stage ring,
+//   consumer CTAs (pairs, clusters of two): for each of its tiles: NCH watcher lanes poll the tile's chunk
+//     flags together and hand them to the loader through mbarriers; stream (dgp_c, W1_c) K-blocks through a 4-stage ring (each
+//     CTA of the pair loads its own dgp K-block and one 64-column half of the W1 / Wg K-block, multicast to both: the pair's MMAs
+//     both release a stage, tcgen05.commit multicast),
 //     dxn = bf16( sum_c dgp_c W1_c + dGout Wg )  (fp32 accumulate over K = 1024 + 128, one rounding, as on H100),
 //     LN_in backward + residual -> dx (TMA store), dgi / dbi (reduce-scatter over each warp's rows, register-accumulated);
-//     a flag is reset to 0 once its tile has landed in shared memory, which also frees the ring slot. A published flag carries
-//     the group-local tile index + 1, so a consumer never takes an older tile still waiting in the same slot.
+//     a flag is reset to 0 as soon as its tile's K-blocks have landed in shared memory, which frees the ring slot. A published
+//     flag carries the group-local tile index + 1, so a consumer never takes an older tile still waiting in the same slot;
+//     sources publish two tiles per release fence.
 // Flags are 0 again when the kernel ends, so launches and CUDA-graph replays need no reset.
 #include "sm100.cuh"
 #include "tmap.h"
@@ -101,6 +105,17 @@ DEV void st_release(uint32_t* p, uint32_t v) { asm volatile("st.release.gpu.glob
 // Returning a ring slot (consumer): its TMA reads have landed in shared memory (st_full observed), so a relaxed store suffices.
 DEV void flag_return(uint32_t* p) { asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" ::"l"(p), "r"(0u) : "memory"); }
 DEV void fence_proxy_async_global() { asm volatile("fence.proxy.async.global;" ::: "memory"); }
+// multicast to both CTAs of the pair: same smem offset / mbarrier offset in each CTA of ctaMask
+DEV void tma_load_3d_mc(void* dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2, uint16_t mask, uint64_t hint) {
+  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster.L2::cache_hint"
+               " [%0], [%1, {%3, %4, %5}], [%2], %6, %7;"
+               ::"r"(smem_u32(dst)), "l"(reinterpret_cast<uint64_t>(m)), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2), "h"(mask), "l"(hint)
+               : "memory");
+}
+DEV void umma_commit_mc(uint64_t* bar, uint16_t mask) {
+  asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64 [%0], %1;"
+               ::"r"(smem_u32(bar)), "h"(mask) : "memory");
+}
 DEV void fence_acq_rel_gpu() { asm volatile("fence.acq_rel.gpu;" ::: "memory"); }
 // a relaxed flag store after fence_acq_rel_gpu: together a release pattern (PTX memory model), so one fence serves several flags
 DEV void flag_store(uint32_t* p, uint32_t v) { asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" ::"l"(p), "r"(v) : "memory"); }
@@ -190,7 +205,7 @@ __global__ void __launch_bounds__(384, 1)
       mbar_init(&B.acc_full[b], 1); mbar_init(&B.acc_empty[b], 8);
     }
     for (int b = 0; b < NX; ++b) { mbar_init(&B.x_full[b], 1); mbar_init(&B.x_free[b], 1); }
-    for (int b = 0; b < NST; ++b) { mbar_init(&B.st_full[b], 1); mbar_init(&B.st_empty[b], 1); }
+    for (int b = 0; b < NST; ++b) { mbar_init(&B.st_full[b], 1); mbar_init(&B.st_empty[b], 2); }   // consumer pairs: both CTAs' MMAs release a stage
     for (int b = 0; b < 2; ++b) { mbar_init(&B.cx_full[b], 1); mbar_init(&B.cx_free[b], 1); }
     mbar_init(&B.dy_full, 1); mbar_init(&B.dy_free, 1);
     for (int b = 0; b < 2; ++b) {
@@ -204,6 +219,8 @@ __global__ void __launch_bounds__(384, 1)
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+  cluster_arrive();                                          // the pair's barriers are initialised before any multicast lands
+  cluster_wait();
   const uint32_t tmem = B.tmem;
   PROF_BEGIN
 
@@ -433,7 +450,11 @@ __global__ void __launch_bounds__(384, 1)
   } else {
     // ================================================================== CONSUMER
     const int k = blockIdx.x - NS;
-    const int n_local = a.tiles > k ? (a.tiles - k + a.NC - 1) / a.NC : 0;   // tiles t = k + NC jj
+    // consumer pairs (clusters of two): pair pk takes tile pairs u = pk + NP jj, its CTA r = k & 1 tile 2 u + r; the pair streams
+    // the W1 / Wg K-blocks once, each CTA loading one 64-column half multicast to both
+    const int NP = a.NC >> 1, pk = k >> 1, rk = k & 1, tp = a.tiles >> 1;
+    const int n_local = tp > pk ? (tp - pk + NP - 1) / NP : 0;
+    auto tile_of = [&](int jj) { return 2 * (pk + NP * jj) + rk; };
 #ifdef MBAR_DEBUG
     if (tid == 0 && k < 3) printf("CONSUMER blk %d k %d n_local %d NC %d SG %d\n", blockIdx.x, k, n_local, a.NC, a.SG);
 #endif
@@ -441,7 +462,7 @@ __global__ void __launch_bounds__(384, 1)
       if (lane == 0) {
         int q = 0;
         for (int jj = 0; jj < n_local; ++jj) {
-          const int t = k + a.NC * jj, row0 = t * TOK, g = t % a.SG, s = (t / a.SG) % RD;
+          const int t = tile_of(jj), row0 = t * TOK, g = t % a.SG, s = (t / a.SG) % RD;
           TLD(0);
           for (int kh = 0; kh < 2; ++kh, ++q) {              // dGout K-block kh with Wg rows 64 kh ..: needs no flag
             const int st = q % NST;
@@ -449,7 +470,7 @@ __global__ void __launch_bounds__(384, 1)
             mbar_expect_tx(&B.st_full[st], STB);
             const uint32_t d = C_ST + st * STB;
             tma_load_2d(sm + d, &mgo, &B.st_full[st], 64 * kh, row0, EVICT_FIRST);
-            tma_load_3d(sm + d + STB / 2, &mwg, &B.st_full[st], 0, 64 * kh, 0, EVICT_LAST);
+            tma_load_3d_mc(sm + d + STB / 2 + rk * (STB / 4), &mwg, &B.st_full[st], 0, 64 * kh, rk, 3, EVICT_LAST);
           }
           const int fb = jj & 1;
           for (int c = 0; c < NCH; ++c) {
@@ -475,7 +496,7 @@ __global__ void __launch_bounds__(384, 1)
               PW(5, tma_load_2d(sm + d, &mring, &B.st_full[st], 64 * kh, slot * TOK, EVICT_FIRST));
 #endif
 #ifndef B7_NOW1
-              PW(6, tma_load_3d(sm + d + STB / 2, &mw1k, &B.st_full[st], 0, 128 * c + 64 * kh, 0, EVICT_LAST));
+              PW(6, tma_load_3d_mc(sm + d + STB / 2 + rk * (STB / 4), &mw1k, &B.st_full[st], 0, 128 * c + 64 * kh, rk, 3, EVICT_LAST));
 #endif
 #endif
             }
@@ -498,7 +519,7 @@ __global__ void __launch_bounds__(384, 1)
         int st = 0;
         uint32_t ph = 0;
         for (int jj = 0; jj < n_local; ++jj) {
-          const int t = k + a.NC * jj, g = t % a.SG, s = (t / a.SG) % RD, acc = jj & 1;
+          const int t = tile_of(jj), g = t % a.SG, s = (t / a.SG) % RD, acc = jj & 1;
           const int fbase = (g * RD + s) * NCH;
           PW(1, mbar_wait(&B.acc_empty[acc], ((jj >> 1) & 1) ^ 1));
           tc_fence_after();
@@ -516,7 +537,7 @@ __global__ void __launch_bounds__(384, 1)
               umma_ss(d, da + 2, db + 128, ID_DX, 1);
               umma_ss(d, da + 4, db + 256, ID_DX, 1);
               umma_ss(d, da + 6, db + 384, ID_DX, 1);
-              umma_commit(&B.st_empty[st]);
+              umma_commit_mc(&B.st_empty[st], 3);            // the stage is free in both CTAs once both MMAs have read it
             }
             if (B7_WARPMMA) __syncwarp();
             if (++st == NST) { st = 0; ph ^= 1; }
@@ -533,7 +554,7 @@ __global__ void __launch_bounds__(384, 1)
         // refilled once the dx of the tile two back has left it; dy tiles (the output pass's residual), refilled as soon as the
         // previous output pass has read its tile
         for (int jj = 0; jj < n_local; ++jj) {
-          const int row0 = (k + a.NC * jj) * TOK, b = jj & 1;
+          const int row0 = tile_of(jj) * TOK, b = jj & 1;
           if (jj >= 2) PW(0, mbar_wait(&B.cx_free[b], ((jj >> 1) - 1) & 1));
           mbar_expect_tx(&B.cx_full[b], XT);
           tma_load_2d(sm + C_X + b * XT, &mx, &B.cx_full[b], 0, row0, EVICT_FIRST);
@@ -551,7 +572,7 @@ __global__ void __launch_bounds__(384, 1)
         // to the loader, which then orders its TMA reads behind them with fence.proxy.async)
         const int c = lane;
         for (int jj = 0; jj < n_local; ++jj) {
-          const int t = k + a.NC * jj, g = t % a.SG, s = (t / a.SG) % RD, fb = jj & 1;
+          const int t = tile_of(jj), g = t % a.SG, s = (t / a.SG) % RD, fb = jj & 1;
           if (jj >= 2) mbar_wait(&B.fdone[fb], ((jj >> 1) - 1) & 1);
           PW(0, spin_until(a.flags + (g * RD + s) * NCH + c, (uint32_t)(t / a.SG + 1)));
           mbar_arrive(&B.fready[fb][c]);
@@ -573,7 +594,7 @@ __global__ void __launch_bounds__(384, 1)
       auto ya = [&](int ch) { return yrow + sw128(r, ch); };
       const uint32_t gbase = su + O_GI + 64 * hc * 4;                   // gi of this half: 16 float4
       for (int jj = 0; jj < n_local; ++jj) {
-        const int t = k + a.NC * jj, row0 = t * TOK, acc = jj & 1, xb = jj & 1;
+        const int t = tile_of(jj), row0 = t * TOK, acc = jj & 1, xb = jj & 1;
         xrow = xrow0 + xb * XT;
         if (warp == 4) { TLC(0); TLD(13); }
         PW(1, mbar_wait(&B.cx_full[xb], (jj >> 1) & 1));
@@ -756,6 +777,8 @@ __global__ void __launch_bounds__(384, 1)
   if (lane == 0 && warp < 8) PROF_END(warp == 3 ? 2 : (warp >= 4 ? 3 : warp));
   tc_fence_before();
   __syncthreads();
+  cluster_arrive();                                          // no CTA leaves while its pair may still multicast into it
+  cluster_wait();
   if (warp == 2) tmem_dealloc(tmem, 512);
 }
 
@@ -770,20 +793,21 @@ void b7g_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Te
   using namespace b7g;
   const int64_t M = x.size(0);
   const int P = (int)dpl.size(0), NCH = P / 64;
-  TORCH_CHECK(M % TOK == 0 && x.size(1) == C && dpl.numel() == (int64_t)P * M && (NCH == 4 || NCH == 8) && w1.size(0) == 128 * NCH);
+  TORCH_CHECK(M % (2 * TOK) == 0 && x.size(1) == C && dpl.numel() == (int64_t)P * M && (NCH == 4 || NCH == 8) && w1.size(0) == 128 * NCH);
   int nsm = 0, dev = 0;
   cudaGetDevice(&dev);
   cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
   const int SG = (int)sg, NC = nsm - NCH * SG;
-  TORCH_CHECK(NC >= 1 && ring.size(0) >= (int64_t)SG * RD * NCH * TOK && flags.numel() >= SG * RD * NCH);
+  TORCH_CHECK(NC >= 2 && NC % 2 == 0 && ring.size(0) >= (int64_t)SG * RD * NCH * TOK && flags.numel() >= SG * RD * NCH);
   auto bf = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   auto tok_map = [&](const torch::Tensor& t, int64_t rows) {
     return tmap::make(t.data_ptr(), bf, {(uint64_t)C, (uint64_t)rows}, {(uint64_t)C * 2}, {64, TOK}, CU_TENSOR_MAP_SWIZZLE_128B);
   };
   auto mxn = tok_map(xn, M), mgo = tok_map(dgout, M), mdx = tok_map(dx, M), mring = tok_map(ring, ring.size(0));
   auto mw1 = tok_map(w1, w1.size(0)), mx = tok_map(x, M), mdy = tok_map(dy, M);
-  auto mwg = tmap::make(wg.data_ptr(), bf, {64, 128, 2}, {(uint64_t)C * 2, 128}, {64, 64, 2}, CU_TENSOR_MAP_SWIZZLE_128B);
-  auto mw1k = tmap::make(w1.data_ptr(), bf, {64, (uint64_t)w1.size(0), 2}, {(uint64_t)C * 2, 128}, {64, 64, 2}, CU_TENSOR_MAP_SWIZZLE_128B);
+  // W1 / Wg K-blocks as two 64-column halves (z), one per CTA of a consumer pair
+  auto mwg = tmap::make(wg.data_ptr(), bf, {64, 128, 2}, {(uint64_t)C * 2, 128}, {64, 64, 1}, CU_TENSOR_MAP_SWIZZLE_128B);
+  auto mw1k = tmap::make(w1.data_ptr(), bf, {64, (uint64_t)w1.size(0), 2}, {(uint64_t)C * 2, 128}, {64, 64, 1}, CU_TENSOR_MAP_SWIZZLE_128B);
   auto mda = tmap::make(dpl.data_ptr(), bf, {(uint64_t)M, (uint64_t)P}, {(uint64_t)M * 2}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B);
   Args a;
   a.x = reinterpret_cast<const __nv_bfloat16*>(x.data_ptr());
@@ -800,7 +824,13 @@ void b7g_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Te
                     (void*)&mx, (void*)&mdy, (void*)&a};
   auto launch = [&](const void* fn, bool& attr) {
     if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-    C10_CUDA_CHECK(cudaLaunchCooperativeKernel(fn, dim3(nsm), dim3(384), params, SMEM, at::cuda::getCurrentCUDAStream()));
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3(nsm); cfg.blockDim = dim3(384); cfg.dynamicSmemBytes = SMEM; cfg.stream = at::cuda::getCurrentCUDAStream();
+    cudaLaunchAttribute at[2];
+    at[0].id = cudaLaunchAttributeCooperative; at[0].val.cooperative = 1;   // every CTA resident: the ring flags spin across CTAs
+    at[1].id = cudaLaunchAttributeClusterDimension; at[1].val.clusterDim.x = 2; at[1].val.clusterDim.y = 1; at[1].val.clusterDim.z = 1;
+    cfg.attrs = at; cfg.numAttrs = 2;
+    C10_CUDA_CHECK(cudaLaunchKernelExC(&cfg, fn, params));
   };
   static bool attr4 = false, attr8 = false;
   if (NCH == 4) launch((const void*)b7g_kernel<4>, attr4);
