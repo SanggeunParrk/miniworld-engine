@@ -302,6 +302,19 @@ LN-backward CTAs are ~95 % busy while the front CTAs serialise on single-buffere
 stall 30-40 % on the other, clock64 role probe) -- both need a different CTA split, not tuning. The cuBLAS triangle `bmm`
 (81 us per product at L768, ~1.4 PF/s) is at the power-capped GEMM rate.
 
+**`b1g` redesigned (2026-10-30, a0a27f04).** LN_out's affine is folded into the projection (Wp' = bf16(Wp g_o), u = rowsum Wp',
+c = Wp b_o: P = rs (t Wp'^T - mean u) + c on the raw contraction output), so no normalised tile is formed; dWp / dg_o / db_o
+come from A = sum dPr^T t on the LN CTAs' tensor cores and v = sum dPr mean, s = sum dPr / rs (dPr = bf16(dP rs)); the
+LayerNorm backward's per-token sums are formed by the front epilogue (S1 = sum_o dPr (Q - mean u), S2 = sum_o dPr u), so
+the LN CTAs make one pass with no per-tile token reductions. Front CTAs keep tri's channel halves and xn in three rotating
+32 KB slots (the next tile's operands load during this tile's epilogue), Q double-buffered in TMEM, Wg resident, dWg^T per
+64-output block (the next dy refills block by block), dPr stored coalesced into the ring in the SWIZZLE_NONE K-major
+layout. Front CTAs 96 -> 80 (D128 bidirectional) / 112 -> 84 (one direction). Partials stay deterministic.
+In the graph (nsys, D128 bidirectional B1): L768 430.5 -> 311.0 us, L384 122.7 -> 103.6 us; module (one graph per
+process, alternating, ms): fwd + bwd L384 0.555 -> 0.527, L768 2.012 -> 1.875; MiniWorld block L384 0.973 -> 0.947,
+L768 3.762 -> 3.619. The front epilogue (~5k clk/tile) and the dy refill after dWg^T are what is left in it. `b1s` (D64)
+has the same imbalance (front-bound; its LN CTAs wait ~72 % of the time) and is not yet redone.
+
 ### D64 (2026-10-02, the first batched width, B <= 8)
 
 The D64 native path took B samples in one call first: `k3g` / `b1s` take a per-sample token mask and a per-sample row-dropout scale (a
