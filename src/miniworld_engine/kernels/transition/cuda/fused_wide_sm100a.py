@@ -670,7 +670,18 @@ def _bwd_launch(
                 k.nsm,
                 (*maps, rstd, c1, gamma, partab, parts, dgbw, tiles, ndw),
             )
-            reduce = "transition_bwd_d64_reduce"
+            # a programmatic dependent of the backward (it waits for the whole grid): 16-byte weight-gradient blocks, then dgamma /
+            # dbeta 16 columns per block over 16 row groups (fixed order; tbwd_d64.cu)
+            k.run(
+                "bwd",
+                "transition_bwd_d64_reduce",
+                3 * h * d // 1024 + 2 * d // 16,
+                (partab, parts, dgbw, dwa, dwb, dws, dgam, dbeta, ndw, ndx * 4),
+                256,
+                1,
+                pdl=True,
+            )
+            return dx, dgam, dbeta, dwa, dwb, dws
         else:
             k.run(
                 "bwd",

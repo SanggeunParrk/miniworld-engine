@@ -20,12 +20,16 @@ constexpr int WAB_CH = 8192, WS_CH = 4096;                     // this CTA's hal
 constexpr int O_WAB = 0, O_WS = NCH * WAB_CH;
 constexpr int TILE = ROWS * D_ * 2;                            // 16 KB: one K-block of 128 rows
 constexpr int O_X = O_WS + NCH * WS_CH;
-constexpr int O_XN = O_X + 2 * TILE;
+// x stages: a stage lives from its load through the tile's LayerNorm, its four chunks and the epilogue (which writes y over it), so with
+// two stages the load of tile i + 2 was issued only after tile i's epilogue and its latency was exposed before LN(i + 2); four stages
+// keep it ahead (L768 B4, 18432 tiles: 0.413 -> 0.375 ms)
+constexpr int NXS = 4;
+constexpr int O_XN = O_X + NXS * TILE;
 constexpr int O_GB = O_XN + 2 * TILE;
 constexpr int O_BAR = O_GB + 512;
 constexpr int SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
-static_assert(HID != 256 || SMEM_BYTES == 115712, "bench_w.py SMEM[64]");
+static_assert(HID != 256 || SMEM_BYTES == 148480, "bench_w.py SMEM[64]");
 static_assert(O_X % 1024 == 0 && O_XN % 1024 == 0 && O_WS % 1024 == 0, "128-B swizzled operands need 1 KB alignment");
 constexpr int KS = 4;                                          // K = 64 in K16 steps (expand: D; squeeze: the chunk's 64 hidden units)
 constexpr uint32_t T_AB = 0, T_H = 256, T_OUT = 384;
@@ -41,7 +45,7 @@ struct Bars {
   // both CTAs (leader's multicast commits)
   uint64_t xn_empty[2], ex_done[2], sq_done[2], out_full;
   // local
-  uint64_t x_full[2], x_empty[2];
+  uint64_t x_full[NXS], x_empty[NXS];
   uint32_t tmem;
 };
 
@@ -68,8 +72,8 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
     for (int s = 0; s < 2; ++s) {
       mbar_init(&B.xn_full[s], 2); mbar_init(&B.ab_empty[s], 8); mbar_init(&B.h_full[s], 8);
       mbar_init(&B.xn_empty[s], 1); mbar_init(&B.ex_done[s], 1); mbar_init(&B.sq_done[s], 1);
-      mbar_init(&B.x_full[s], 1); mbar_init(&B.x_empty[s], 1);
     }
+    for (int s = 0; s < NXS; ++s) { mbar_init(&B.x_full[s], 1); mbar_init(&B.x_empty[s], 1); }
     mbar_init(&B.out_empty, 8); mbar_init(&B.out_full, 1);
     fence_barrier_init();
     if (n_local > 0) {                                         // tile 0's x now, not after the cluster sync (its barrier is local)
@@ -92,8 +96,8 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
     // ------------------------------------------------------------------------------------------ x producer (own tiles)
     if (lane == 0) {
       for (int i = 1; i < n_local; ++i) {                     // tile 0 was issued at setup
-        const int b = i & 1, row = tile_of(i) * ROWS;
-        if (i >= 2) mbar_wait(&B.x_empty[b], ((i >> 1) - 1) & 1);
+        const int b = i & (NXS - 1), row = tile_of(i) * ROWS;
+        if (i >= NXS) mbar_wait(&B.x_empty[b], ((i / NXS) - 1) & 1);
         mbar_expect_tx(&B.x_full[b], TILE);
         const uint32_t dst = su + O_X + b * TILE;
 #pragma unroll
@@ -205,13 +209,13 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
     // gamma / beta by the LayerNorm warps themselves, under tile 0's x load (ln's first named barrier publishes them)
     if (t2 < 64) { reinterpret_cast<float*>(sm + O_GB)[t2] = gamma[t2]; reinterpret_cast<float*>(sm + O_GB)[64 + t2] = beta[t2]; }
     auto ln = [&](int i) {
-      const int b = i & 1, grow = tile_of(i) * ROWS + (int)r;
+      const int b = i & 1, xs = i & (NXS - 1), grow = tile_of(i) * ROWS + (int)r;
       const bool real = i < n_valid;
-      mbar_wait(&B.x_full[b], (i >> 1) & 1);
+      mbar_wait(&B.x_full[xs], (i / NXS) & 1);
       if (i >= 2) mbar_wait(&B.xn_empty[b], ((i >> 1) - 1) & 1);
       if (t2 == 0) tma_store_wait_read0();
       named_bar_sync(1, 128);
-      const uint32_t xb = su + O_X + b * TILE, xnb = su + O_XN + b * TILE;
+      const uint32_t xb = su + O_X + xs * TILE, xnb = su + O_XN + b * TILE;
       uint32_t v[32];
 #pragma unroll
       for (int q = 0; q < 8; ++q) {
@@ -266,7 +270,7 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
       }
     };
     auto epi = [&](int i) {
-      const int b = i & 1;
+      const int b = i & (NXS - 1);
       mbar_wait(&B.out_full, i & 1);
       tc_fence_after();
       const uint32_t xb = su + O_X + b * TILE;
