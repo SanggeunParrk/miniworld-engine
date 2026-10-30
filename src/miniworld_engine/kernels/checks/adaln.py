@@ -125,7 +125,7 @@ def adaln_bwd_pre_dx():
     dy, x = _rand(_M, _D), _rand(_M, _D)
     gate = torch.sigmoid(_rand(_M, _D).float()).to(dy.dtype)
     mean_x, rstd_x = _true_stats(x)
-    d_stack, dx = _bwd_x(dy, x, mean_x, rstd_x, gate, shape_key=_SHAPE_KEY)
+    d_stack, dx, _ = _bwd_x(dy, x, mean_x, rstd_x, gate, shape_key=_SHAPE_KEY)   # dsb: only filled with fold_dsb
     xr = x.float().detach().requires_grad_(True)
     s = torch.logit(gate.float()).detach().requires_grad_(True)
     (torch.sigmoid(s) * F.layer_norm(xr, (_D,), eps=_EPS)).backward(dy.float())
