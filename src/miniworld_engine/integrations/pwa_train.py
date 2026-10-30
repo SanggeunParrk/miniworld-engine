@@ -547,6 +547,12 @@ def _h100_float(*weights):
     return tuple(w.float().contiguous() for w in weights)
 
 
+def _keep_thr(p_drop: float) -> float:
+    """keep = rand > p with rand a bf16 tensor compares in bf16 (PyTorch does not promote for a Python scalar): the threshold the
+    sm_100a kernels compare the drawn bf16 rand against, so their keep is exactly (rand > p)."""
+    return float(torch.tensor(p_drop, dtype=torch.bfloat16).float())
+
+
 class _PwaMath(torch.autograd.Function):
     """out = msa + PWA(msa, pair, key mask). Weights in their own dtype (fp32 or bf16); gradients returned in it."""
 
@@ -559,9 +565,14 @@ class _PwaMath(torch.autograd.Function):
         z = pair[0].contiguous()
         N = m.shape[1]
         bf = torch.bfloat16
-        wv16, wg16, wo16 = _cast_h100_matrices(wv.detach(), wg.detach(), wo.detach())
         sm100 = torch.cuda.get_device_capability(m.device) == (10, 0)
         k = _k100() if sm100 else _k()
+        if sm100 and any(w.dtype != bf for w in (wv, wg, wo)):  # the three bf16 copies in one launch
+            wv16, wg16, wo16 = k["pwa"].pwa_wcast(
+                wv.detach().contiguous(), wg.detach().contiguous(), wo.detach().contiguous()
+            )
+        else:
+            wv16, wg16, wo16 = _cast_h100_matrices(wv.detach(), wg.detach(), wo.detach())
         if not sm100 and native_aux_enabled() and pm.numel() <= N:
             ctx.key_mask = pm
             pm = k["pair3"].mask(m, None if pm.numel() == 0 else pm, N)
@@ -598,6 +609,8 @@ class _PwaMath(torch.autograd.Function):
                 )
 
                 dmask = extension("pack").drop_keep(m, N, D, float(p_drop))
+            elif sm100:  # the draw itself: the kernels take keep = rand > p (_keep_thr), no compare / cast launches
+                dmask = torch.rand(N, D, device=m.device, dtype=bf)
             else:
                 dmask = (torch.rand(N, D, device=m.device, dtype=bf) > p_drop).to(bf)
             dscale = 1.0 / (1.0 - p_drop)
@@ -617,6 +630,7 @@ class _PwaMath(torch.autograd.Function):
                 wo16,
                 dmask,
                 dscale,
+                _keep_thr(p_drop) if p_drop > 0 else 0.5,
             )  # split: contraction, then gate / out (y recomputed; ln_vg's y kept for the backward)
         else:
             if (
@@ -651,6 +665,7 @@ class _PwaMath(torch.autograd.Function):
         )
         ctx.eps = (eps_m, eps_z)
         ctx.dscale = dscale
+        ctx.p_drop = p_drop
         return out[None]
 
     @staticmethod
@@ -671,8 +686,9 @@ class _PwaMath(torch.autograd.Function):
             # pwa_wprep reads the (fp32 or bf16) parameters itself: Wo^T, [Wg; Wv]^T, Wg / 2 in bf16, one launch
             wot, wgvT, wgh = k.pwa_wprep(wg.detach().contiguous(), wv.detach().contiguous(), wo.detach().contiguous())
             # glue2: dgp never leaves the chip -- its consumers (dWg = dgp^T y, dyg = dgp Wg) run inside; dv_bwd adds dv Wv to dyg
-            d_o, dyg, dWo, dWg = k.pwa_glue2(
-                o, y, dres0, wgh, wot, dmask, ctx.dscale, int(wo.dtype == bf)
+            # and sums glue2's dWo | dWg slab with its own in its one finish launch; dmask is the drawn rand (keep = rand > p)
+            d_o, dyg, gpart = k.pwa_glue2(
+                o, y, dres0, wgh, wot, dmask, ctx.dscale, _keep_thr(ctx.p_drop) if dmask is not None else 0.5
             )
             dv = torch.bmm(
                 w16.transpose(1, 2), d_o
@@ -680,7 +696,7 @@ class _PwaMath(torch.autograd.Function):
             dw = torch.bmm(
                 d_o, v.transpose(1, 2)
             )  # [H][N][N] bf16 (PyTorch's dw is bf16 too), K = S*C
-            dm, dWv, dlw, dlb = k.dv_bwd(
+            dm, dWv, dlw, dlb, dWo, dWg = k.dv_bwd(
                 dv,
                 dyg,
                 y,
@@ -691,6 +707,8 @@ class _PwaMath(torch.autograd.Function):
                 eps_m,
                 int(wv.dtype == bf),
                 int(lnm_w.dtype == bf),
+                gpart,
+                int(wo.dtype == bf),
             )
             dz, dWb, dzw = k.pair_bwd(
                 z,
@@ -1034,6 +1052,7 @@ def pair_weighted_averaging(
 class _SavedContext:
     eps: tuple[float, float]
     dscale: float
+    p_drop: float
     key_mask: torch.Tensor
 
     def save_for_backward(self, *tensors):
@@ -1103,6 +1122,7 @@ def _backward_math(args, kept, dy, eps_m, eps_z, p_drop):
     ctx = _SavedContext()
     ctx.eps = (eps_m, eps_z)
     ctx.dscale = 1 / (1 - p_drop) if p_drop else 1.0
+    ctx.p_drop = p_drop
     ctx.key_mask = args[2]
     ctx.saved_tensors = (
         args[0][0],
