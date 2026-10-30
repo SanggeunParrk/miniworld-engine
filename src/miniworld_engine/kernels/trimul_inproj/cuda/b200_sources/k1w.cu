@@ -86,11 +86,11 @@ DEV void stmatrix_x4_trans(uint32_t addr, uint32_t a, uint32_t b, uint32_t c, ui
                : "memory");
 }
 
-template <int D, int P>
+template <int D, int P, int SMJ>
 __global__ void __launch_bounds__(NTHREADS, 1)
     k1w_kernel(const __grid_constant__ CUtensorMap mx, const __grid_constant__ WMaps mw, const __grid_constant__ CUtensorMap mplane,
                const uint8_t* __restrict__ tokmask, int L, float* __restrict__ mean, float* __restrict__ rstd,
-               const float* __restrict__ gamma, const float* __restrict__ beta, int tiles, float eps, int stats_out) {
+               const float* __restrict__ gamma, const float* __restrict__ beta, int tiles, float eps, int stats_out, int n2) {
   using G_ = Cfg<D>;
   constexpr int KB = G_::KB, XC = G_::XC, NXN = G_::NXN, NACC = G_::NACC, NWS = G_::NWS, NXS = G_::NXS;
   constexpr int NCH = P / 64;
@@ -326,7 +326,13 @@ __global__ void __launch_bounds__(NTHREADS, 1)
         fence_async_smem();
         __syncwarp();
         if (lane == 0) {
-          tma_store_2d(&mplane, sm + G_::O_OUT + (warp - 8) * OSTW, row0 + q * 32, c * 64);
+          if constexpr (SMJ != 0) {        // sample-major planes (n2 tokens per sample): the 4-D map of tmap::make_chmajor
+            int tq, ts;
+            tok_split(row0 + q * 32, n2, tq, ts);
+            tma_store_4d(&mplane, sm + G_::O_OUT + (warp - 8) * OSTW, tq, 0, ts, c);
+          } else {
+            tma_store_2d(&mplane, sm + G_::O_OUT + (warp - 8) * OSTW, row0 + q * 32, c * 64);
+          }
           bulk_commit();
         }
       }
@@ -387,10 +393,19 @@ int num_sms() {
 
 template <int D, int P>
 void launch(const CUtensorMap& mx, const WMaps& mw, const CUtensorMap& mp, const uint8_t* mask, int L, float* mean, float* rs,
-            const float* g, const float* b, int tiles, int grid, cudaStream_t st, float eps, int stats_out) {
+            const float* g, const float* b, int tiles, int grid, cudaStream_t st, float eps, int stats_out, int n2) {
   static bool attr = false;
-  if (!attr) { cudaFuncSetAttribute(k1w_kernel<D, P>, cudaFuncAttributeMaxDynamicSharedMemorySize, Cfg<D>::SMEM); attr = true; }
-  k1w_kernel<D, P><<<grid, NTHREADS, Cfg<D>::SMEM, st>>>(mx, mw, mp, mask, L, mean, rs, g, b, tiles, eps, stats_out);
+  if constexpr (D == 64) {   // sample-major planes: D64 training only (a compile-time variant: the [P, M] kernel is unchanged)
+    static bool attr_s = false;
+    if (n2 > 0) {
+      if (!attr_s) { cudaFuncSetAttribute(k1w_kernel<D, P, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, Cfg<D>::SMEM); attr_s = true; }
+      k1w_kernel<D, P, 1><<<grid, NTHREADS, Cfg<D>::SMEM, st>>>(mx, mw, mp, mask, L, mean, rs, g, b, tiles, eps, stats_out, n2);
+      return;
+    }
+  }
+  TORCH_CHECK(n2 == 0, "k1w: sample-major planes are D64 only");
+  if (!attr) { cudaFuncSetAttribute(k1w_kernel<D, P, 0>, cudaFuncAttributeMaxDynamicSharedMemorySize, Cfg<D>::SMEM); attr = true; }
+  k1w_kernel<D, P, 0><<<grid, NTHREADS, Cfg<D>::SMEM, st>>>(mx, mw, mp, mask, L, mean, rs, g, b, tiles, eps, stats_out, 0);
 }
 
 template <int D>
@@ -426,9 +441,11 @@ void k1w_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Te
                  c10::optional<torch::Tensor> rstd, torch::Tensor gamma, torch::Tensor beta, torch::Tensor planes, int64_t grid,
                  double eps) {
   using namespace k1w;
-  const int64_t M = x.size(0), D = x.size(1), P = planes.size(0);
-  TORCH_CHECK(M % TOK == 0 && planes.numel() == P * M && x.is_contiguous() && planes.is_contiguous() && (planes.dim() == 3 || planes.dim() == 4));
-  // planes [P, L, L] (one sample) or [P, B, L, L]; the tokens of x are b-major, M = B L L
+  const int64_t M = x.size(0), D = x.size(1), P = tmap::chmajor_channels(planes);
+  TORCH_CHECK(M % TOK == 0 && planes.numel() == P * M && x.is_contiguous() && planes.is_contiguous() &&
+              (planes.dim() == 3 || planes.dim() == 4 || planes.dim() == 5));
+  // planes [P, L, L] (one sample), [P, B, L, L] or sample-major [P / 64, B, 64, L, L] (tmap::make_chmajor); the tokens of x are
+  // b-major, M = B L L
   const int L = (int)planes.size(planes.dim() - 1);
   const int64_t nb = M / ((int64_t)L * L);
   TORCH_CHECK(nb * L * L == M && planes.size(planes.dim() - 2) == L);
@@ -444,7 +461,9 @@ void k1w_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Te
     mw.m[k] = tmap::make(w.data_ptr(), bf, {(uint64_t)D, (uint64_t)(P / 2)}, {(uint64_t)w.stride(0) * 2}, {64, 64},
                          CU_TENSOR_MAP_SWIZZLE_128B);
   }
-  auto mp = tmap::make(planes.data_ptr(), bf, {(uint64_t)M, (uint64_t)P}, {(uint64_t)M * 2}, {32u, 64}, CU_TENSOR_MAP_SWIZZLE_64B);
+  const int n2 = planes.dim() == 5 ? L * L : 0;   // 0: the [P, M] map as before
+  auto mp = n2 ? tmap::make_chmajor(planes, n2, 32u, 64, CU_TENSOR_MAP_SWIZZLE_64B)
+               : tmap::make(planes.data_ptr(), bf, {(uint64_t)M, (uint64_t)P}, {(uint64_t)M * 2}, {32u, 64}, CU_TENSOR_MAP_SWIZZLE_64B);
   const int tiles = (int)(M / TOK);
   int g = grid > 0 ? (int)grid : num_sms();
   g = std::min(g, tiles);
@@ -456,7 +475,7 @@ void k1w_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Te
   float* rs = rstd.has_value() ? rstd->data_ptr<float>() : nullptr;
   const int so = (D <= 128 && mu != nullptr) ? 1 : 0;
 #define K1W_CASE(DD, PP) \
-  if (D == DD && P == PP) { launch<DD, PP>(mx, mw, mp, mk, L, mu, rs, ga, be, tiles, g, st, (float)eps, so); C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
+  if (D == DD && P == PP) { launch<DD, PP>(mx, mw, mp, mk, L, mu, rs, ga, be, tiles, g, st, (float)eps, so, n2); C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
   K1W_CASE(64, 256) K1W_CASE(64, 128) K1W_CASE(128, 512) K1W_CASE(128, 256) K1W_CASE(256, 1024) K1W_CASE(256, 512)
   K1W_CASE(384, 1536) K1W_CASE(384, 768) K1W_CASE(512, 2048) K1W_CASE(512, 1024)
 #undef K1W_CASE
