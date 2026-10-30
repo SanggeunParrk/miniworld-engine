@@ -46,11 +46,12 @@ def make(
     p_drop=0.0,
     dtype=torch.bfloat16,
     seed=0,
+    **kwargs,
 ):
     c, hd, h = cfg
     torch.manual_seed(seed)
     m = TriangleAttention(
-        c, h, d_hidden=hd, starting=starting, p_drop=p_drop, implementation=impl
+        c, h, d_hidden=hd, starting=starting, p_drop=p_drop, implementation=impl, **kwargs
     )
     with torch.no_grad():
         for name, p in m.named_parameters():
@@ -377,6 +378,81 @@ def test_forced_chunks_match_one_launch(monkeypatch, name, mode, length):
         assert relative(chunked[1], one[1]) < 5e-3
         for a, b in zip(chunked[2], one[2], strict=True):
             assert relative(a, b) < 5e-3
+
+
+#: (name, starting, AF3's ending-node bias orientation, RoseTTAFold3's gate / out-projection biases)
+ROW_BLOCK_CASES = [
+    ("C64-H4x16", True, False, False),
+    ("C64-H4x16", False, False, False),
+    ("C64-H4x16", False, True, False),
+    ("C128", True, False, False),
+    ("C128", False, False, True),
+    ("C256", True, False, False),
+    ("C256", False, True, False),
+]
+
+
+@pytest.mark.parametrize("length", [384, 304], ids=["L384", "L304-padded"])
+@pytest.mark.parametrize(
+    "case",
+    ROW_BLOCK_CASES,
+    ids=[f"{n}-{'start' if s else 'end'}{'-af3bias' if f else ''}{'-biases' if b else ''}" for n, s, f, b in ROW_BLOCK_CASES],
+)
+def test_inference_in_row_blocks(monkeypatch, case, length):
+    """A sample whose inference working set exceeds the cap (``INFERENCE_WORKSET_FRACTION``, lowered here so that a 384-token sample
+    takes 3 blocks) runs one sample at a time in blocks of pair rows on the width-generic kernels: against one launch of the call's own
+    path (the fused one for C128).  Same kernels per row, other cuBLAS algorithms for fewer rows: within the bf16 rounding."""
+    name, starting, af3_bias, biases = case
+    cfg = CONFIGS[name]
+    C, B = cfg[0], 3
+    m = make(cfg, starting=starting, transposed_bias=not af3_bias, gate_bias=biases, out_bias=biases).eval()
+    x, mask, _ = inputs(B, length, C, grad=False)
+    with torch.no_grad():
+        one = m(x, mask)
+        pair = torch.empty(1, 384, 384, C, device="cuda", dtype=torch.bfloat16)
+        kind = tri.kind_of(m, pair)
+        assert kind is not None
+        per_sample = tri._bytes_per_token(tri.GENERIC, C, cfg[2], False)[0] * 384 * 384
+        total = torch.cuda.get_device_properties(0).total_memory
+        monkeypatch.setattr(tri, "INFERENCE_WORKSET_FRACTION", per_sample / 2.5 / total)
+        assert tri._rows_blocks(kind, pair, cfg[2]) == 3
+        assert tri.plan(kind, B, length, C, cfg[2], False, total)[0] == 1
+        calls = []
+        real = tri._generic_rows
+
+        def spy(*args):
+            calls.append(args[-1])
+            return real(*args)
+
+        monkeypatch.setattr(tri, "_generic_rows", spy)
+        blocks = m(x, mask)
+    assert calls == [3] * B  # one launch per sample (the plan's chunk), each in 3 blocks
+    err = relative(blocks, one)
+    print(f"\n{case} L{length}: relative {err:.2e}")
+    assert err < 2e-3
+
+
+def test_foldbench_template_call_is_split():
+    """The call that ran out of memory inside FoldBench (2026-10-30): Protenix's 4 templates at 2432 tokens on the d_pair-64 stack
+    (one 22.6 GiB q | k | v | g block next to 34 GiB of the model).  Now samples one at a time, each within the inference cap."""
+    total = torch.cuda.get_device_properties(0).total_memory
+    chunk, _ = tri.plan(tri.GENERIC, 4, 2432, 64, 4, False, total)
+    assert chunk < 4
+    work = tri._bytes_per_token(tri.GENERIC, 64, 4, False)[0] * 2432 * 2432
+    assert chunk * work <= tri.INFERENCE_WORKSET_FRACTION * total
+    m = make(CONFIGS["C64-H4x16"]).eval()
+    x, mask, _ = inputs(4, 2432, 64, grad=False)
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    with torch.no_grad():
+        y = m(x, mask)
+    peak = torch.cuda.max_memory_allocated() - base
+    print(f"\nFoldBench template call: chunk {chunk}, peak above the inputs {peak / 2**30:.1f} GiB")
+    assert peak <= tri.INFERENCE_WORKSET_FRACTION * total + 2 * x.numel() * x.element_size()
+    with torch.no_grad():
+        assert relative(y[1:2], m(x[1:2], mask[1:2])) < 1e-3
 
 
 #: (name, training, L, B): calls that ran out of memory in one launch on an H100 80GB before chunking (2026-10-19)

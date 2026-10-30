@@ -9,6 +9,7 @@ run eagerly inside the ops (also under a CUDA-graph capture), and the autograd f
 
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
 import torch
@@ -119,6 +120,12 @@ def _infer(kind, args, eps, n_head, head_dim, trans, out=None, flip=False):
     mask = args[9]
     gate_bias, out_bias = (t if t.numel() else None for t in args[11:13]) if len(args) > 11 else (None, None)
     mask = mask if mask.numel() else None
+    blocks = _rows_blocks(kind, pair, n_head)
+    if blocks > 1:
+        wcat, wo_p = _packed(GENERIC, tuple(weights))
+        return _generic_rows(
+            pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, out, flip, gate_bias, out_bias, blocks
+        )
     if kind == FUSED:
         from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import inference
 
@@ -134,6 +141,94 @@ def _infer(kind, args, eps, n_head, head_dim, trans, out=None, flip=False):
     return gen.inference(
         pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, out, flip, gate_bias, out_bias
     )
+
+
+def _rows_blocks(kind: int, pair: torch.Tensor, n_head: int) -> int:
+    """Blocks of pair rows one sample's inference runs in: 1 while a sample's working set on the call's path fits the inference cap
+    (``INFERENCE_WORKSET_FRACTION``), else the fewest equal blocks whose width-generic working set fits it.  A pure function of the
+    shapes and the device's total memory."""
+    L, C = pair.shape[1], pair.shape[3]
+    index = pair.device.index if pair.device.index is not None else torch.cuda.current_device()
+    cap = INFERENCE_WORKSET_FRACTION * _total_memory(index)
+    if _bytes_per_token(kind, C, n_head, False)[0] * L * L <= cap:
+        return 1
+    return min(L, -(-_bytes_per_token(GENERIC, C, n_head, False)[0] * L * L // int(cap)))
+
+
+def _generic_rows(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, out, flip, gate_bias, out_bias, blocks):
+    """Inference of one sample at a time in ``blocks`` blocks of its pair rows, on the width-generic kernels (``_rows_blocks``).
+
+    Rows of triangle attention are independent but share the bias, so the bias comes first: LayerNorm and the bias projection block by
+    block of the pair's rows into one [L^2, Hp] tensor, then the scaled / masked head-major bias of the whole sample.  Then per block: LayerNorm again,
+    q | k | v | g, the core on the block's rows against every key (it takes N rows != S keys), the gate and the out-projection with the
+    residual, written into the block's rows of the output.  The ending node's rows are the pair's columns: its blocks are copied into
+    row order and their results copied back (only in this path).  The kernels and the arithmetic per row are the one-launch path's; the
+    GEMMs of fewer rows may pick other cuBLAS algorithms."""
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as core_mod
+    from miniworld_engine.kernels.triangle_attention.cuda import (
+        h100_sm90_generic as gen,
+    )
+
+    B, L, _, C = pair.shape
+    H, D = n_head, gen.D
+    HD = H * D
+    g = gen._glue()
+    h16 = core_mod.INFERENCE_FP16  # as the one-launch path at L > 256: fp16 projections, bias and core
+    ww = wcat.half() if h16 else wcat
+    w4, wb = ww[: 4 * HD], ww[4 * HD :]
+    lw, lb = lnw.float().contiguous(), lnb.float().contiguous()
+    scale = head_dim**-0.5
+    pair = pair.contiguous()
+    out = torch.empty_like(pair) if out is None else out
+    bo = None if out_bias is None else out_bias.to(torch.bfloat16).contiguous()
+    gb = None
+    if gate_bias is not None:
+        hd = gate_bias.numel() // H
+        gb = F.pad(gate_bias.view(H, hd), (0, D - hd))
+    core = core_mod._core_h16().triattn_fwd_h16 if h16 else core_mod._core().triattn_fwd
+    lt = gen._lt()
+    bounds = [L * i // blocks for i in range(blocks + 1)]
+    blocks_of = list(itertools.pairwise(bounds))
+    for b in range(B):
+        rows = pair[b].transpose(0, 1) if trans else pair[b]  # the sample's logical rows [i, j, C]
+
+        def block(i0, i1, rows=rows):
+            return rows[i0:i1].contiguous().view(-1, C)  # a copy only for the ending node
+
+        # the bias of every token, block by block over the pair's own rows (no copies), then into the logical order (ending node:
+        # the small [L, L, Hp] transposed)
+        bias = torch.empty(L * L, wb.shape[0], device=pair.device, dtype=ww.dtype)
+        for i0, i1 in blocks_of:
+            y = g.ln_fwd(pair[b, i0:i1].reshape(-1, C), lw, lb, eps, L, False, h16)[0]
+            torch.matmul(y, wb.t(), out=bias[i0 * L : i1 * L])
+        if trans:
+            bias = bias.view(L, L, -1).transpose(0, 1).reshape(L * L, -1)
+        m = None if mask is None else mask[b : b + 1]
+        front_mask = m if m is not None and not flip else pair.new_empty(0, dtype=torch.bool)
+        sbias = g.front_bias(bias, front_mask, 1, L, H, 0, scale)
+        del bias
+        if flip:
+            sbias = core_mod.flip_bias(sbias, m)
+        for i0, i1 in blocks_of:
+            R = i1 - i0
+            x = block(i0, i1)
+            y = g.ln_fwd(x, lw, lb, eps, L, False, h16)[0]
+            qkvg = torch.matmul(y, w4.t())  # [R L, 4 HD]
+            del y
+            ld = qkvg.shape[1]
+            q, k, v, gt = (
+                qkvg.view(-1).as_strided((1, R, L, H, D), (R * L * ld, L * ld, ld, D, 1), i * HD) for i in range(4)
+            )
+            if gb is not None:
+                gt.add_(gb.to(gt.dtype))
+            u = core(q, k, v, sbias, scale, False, gt, False)[3]
+            del qkvg, q, k, v, gt
+            if trans:
+                res = lt.lt_mm(u.view(R * L, HD), wo_p, x, L, False, None, bo)
+                out[b, :, i0:i1] = res.view(R, L, C).transpose(0, 1)
+            else:
+                lt.lt_mm(u.view(R * L, HD), wo_p, x, L, False, out[b, i0:i1], bo)
+    return out
 
 
 def _fwd_fake(kind, args, eps, n_head, head_dim, trans):
@@ -356,6 +451,13 @@ def kind_of(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> int
 CHUNK_MEMORY_FRACTION = 0.85
 #: cuBLAS / cublasLt workspaces, the query-side dbias slabs of one-sample launches (<= 132 x 128 x L x 4 bytes), the allocator's rounding
 _SLACK = 1 << 30
+#: Inference working-set cap: an inference launch's own tensors (on top of the caller's pair and output) take at most this share of
+#: the device's total memory.  The budget above treats the call as the device's only tenant, but an inference call runs inside a
+#: model that holds its activations, caches and the allocator's free blocks: FoldBench's 2432-token targets (Protenix's 4 templates on
+#: the d_pair-64 stack, one 22.6 GiB q | k | v | g block) ran out of memory with 34 GiB in use and 44 GiB reserved but fragmented
+#: (2026-10-30).  More samples than the cap takes run in sample chunks (``plan``); one sample that alone exceeds it runs in blocks of
+#: pair rows (``_rows_blocks``, ``_generic_rows``).  Like the budget, a function of the device's total memory only.
+INFERENCE_WORKSET_FRACTION = 0.25
 
 
 def _bytes_per_token(
@@ -405,11 +507,12 @@ def plan(
         return max(1, min(limit, int(free // (per_sample * tokens))))
 
     if not training:
-        # the caller's pair and the output (the chunks write into it)
+        # the caller's pair and the output (the chunks write into it); the launch's own tensors within the inference cap
         resident = 4 * c
-        if batch * (resident + work_inf) * tokens <= budget:
+        cap = INFERENCE_WORKSET_FRACTION * total_memory
+        if batch * (resident + work_inf) * tokens <= budget and batch * work_inf * tokens <= cap:
             return min(batch, limit), False
-        return fit(budget - batch * resident * tokens, work_inf), False
+        return fit(min(budget - batch * resident * tokens, cap), work_inf), False
     # training: the caller's pair, output, dy and dx (the chunks' results are copied into the output and dx)
     resident = 8 * c
     if batch * (resident + held + work_bwd) * tokens <= budget:

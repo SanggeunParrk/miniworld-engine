@@ -46,10 +46,23 @@ def test_small_calls_run_in_one_launch():
             assert tri.plan(kind, 1, 768, c, h, training, H100)[0] == 1
             assert tri.plan(kind, 48, 128, c, h, training, H100) == (48, False)
             assert tri.plan(kind, 4, 384, c, h, training, H100) == (4, False)
-    assert tri.plan(*FUSED[:1], 48, 768, 128, 4, False, H100) == (
-        48,
-        False,
-    )  # fits: 1.8 kB per token
+    # 48 samples at 768 fit the device (1.8 kB per token) but not the inference cap: launches of at most a quarter of it
+    chunk, checkpoint = tri.plan(*FUSED[:1], 48, 768, 128, 4, False, H100)
+    assert 16 <= chunk < 48
+    assert not checkpoint
+
+
+def test_inference_working_set_is_capped():
+    """An inference launch's own tensors take at most INFERENCE_WORKSET_FRACTION of the device (the model around the call holds the
+    rest), including FoldBench's 4 templates at 2432 tokens that ran out of memory in one launch (2026-10-30)."""
+    cap = tri.INFERENCE_WORKSET_FRACTION * H100
+    for kind, c, h in (FUSED, WIDE, TEMPLATE):
+        for length in (384, 768, 1536, 2432):
+            work = tri._bytes_per_token(kind, c, h, False)[0] * length * length
+            for batch in (1, 2, 4, 16):
+                chunk = tri.plan(kind, batch, length, c, h, False, H100)[0]
+                assert chunk == 1 or chunk * work <= cap
+    assert tri.plan(tri.GENERIC, 4, 2432, 64, 4, False, H100)[0] < 4
 
 
 def test_more_samples_than_one_launch_takes():
