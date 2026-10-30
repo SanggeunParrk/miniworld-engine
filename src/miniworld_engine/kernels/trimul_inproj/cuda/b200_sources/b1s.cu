@@ -96,9 +96,10 @@ struct Args {
   float *dwg, *dwp, *lnpart;   // lnpart [LN CTAs][dgo H | dbo H]: one row per LN-backward CTA (summed on the host)
   uint32_t* flags;
   int L, tiles, NF, RSF;
+  int n2;      // > 0: tri / dtri sample-major (4-D maps, tmap::make_chmajor), 0: [H, M]
 };
 
-template <int H>
+template <int H, int SMJ>
 __global__ void __launch_bounds__(512, 1)
     b1s_kernel(const __grid_constant__ CUtensorMap mxn, const __grid_constant__ CUtensorMap mtri, const __grid_constant__ CUtensorMap mwp,
                const __grid_constant__ CUtensorMap mwg, const __grid_constant__ CUtensorMap mdg, const __grid_constant__ CUtensorMap mdtri,
@@ -158,8 +159,15 @@ __global__ void __launch_bounds__(512, 1)
           mbar_expect_tx(&B.in_full[b], 2 * XT + WGT + TT);
           tma_load_2d(s, &mxn, &B.in_full[b], 0, row0, EVICT_FIRST);
           tma_load_2d(s + 2 * XT, &mwg, &B.in_full[b], 0, 0, EVICT_LAST);
-          tma_load_2d(s + 3 * XT, &mtri, &B.in_full[b], row0, 0, EVICT_NORMAL);
-          tma_load_2d(s + 3 * XT + TT / 2, &mtri, &B.in_full[b], row0 + 64, 0, EVICT_NORMAL);
+          if constexpr (SMJ != 0) {
+            int tq, ts;
+            tok_split(row0, a.n2, tq, ts);                       // a tile never crosses a sample (L % 128 == 0)
+            tma_load_4d(s + 3 * XT, &mtri, &B.in_full[b], tq, 0, ts, 0, EVICT_NORMAL);
+            tma_load_4d(s + 3 * XT + TT / 2, &mtri, &B.in_full[b], tq + 64, 0, ts, 0, EVICT_NORMAL);
+          } else {
+            tma_load_2d(s + 3 * XT, &mtri, &B.in_full[b], row0, 0, EVICT_NORMAL);
+            tma_load_2d(s + 3 * XT + TT / 2, &mtri, &B.in_full[b], row0 + 64, 0, EVICT_NORMAL);
+          }
           tma_load_2d(s + XT, &mdy, &B.in_full[b], 0, row0, EVICT_FIRST);
         }
       }
@@ -377,8 +385,15 @@ __global__ void __launch_bounds__(512, 1)
           const int t = l + NL * j, b = j & 1, row0 = t * TOK, fi = t / NF, slot = (t % NF) * a.RSF + fi % a.RSF;
           if (j >= 2) PW(0, mbar_wait(&B.tl_free[b], ((j >> 1) - 1) & 1));
           mbar_expect_tx(&B.tl_full[b], TT);
-          tma_load_2d(sm + O_T2 + b * TT, &mtri, &B.tl_full[b], row0, 0, EVICT_FIRST);
-          tma_load_2d(sm + O_T2 + b * TT + TT / 2, &mtri, &B.tl_full[b], row0 + 64, 0, EVICT_FIRST);
+          if constexpr (SMJ != 0) {
+            int tq, ts;
+            tok_split(row0, a.n2, tq, ts);
+            tma_load_4d(sm + O_T2 + b * TT, &mtri, &B.tl_full[b], tq, 0, ts, 0, EVICT_FIRST);
+            tma_load_4d(sm + O_T2 + b * TT + TT / 2, &mtri, &B.tl_full[b], tq + 64, 0, ts, 0, EVICT_FIRST);
+          } else {
+            tma_load_2d(sm + O_T2 + b * TT, &mtri, &B.tl_full[b], row0, 0, EVICT_FIRST);
+            tma_load_2d(sm + O_T2 + b * TT + TT / 2, &mtri, &B.tl_full[b], row0 + 64, 0, EVICT_FIRST);
+          }
           PW(1, spin_until(a.flags + slot, (uint32_t)(fi / a.RSF + 1)));
           fence_proxy_async_global();
           if (j >= 1) {
@@ -416,8 +431,15 @@ __global__ void __launch_bounds__(512, 1)
         for (int j = 0; j < n_local; ++j) {
           const int t = l + NL * j, b = j & 1, row0 = t * TOK;
           PW(0, mbar_wait(&B.dtri_ready[b], (j >> 1) & 1));
-          tma_store_2d(&mdtri, sm + O_T2 + b * TT, row0, 0);
-          tma_store_2d(&mdtri, sm + O_T2 + b * TT + TT / 2, row0 + 64, 0);
+          if constexpr (SMJ != 0) {
+            int tq, ts;
+            tok_split(row0, a.n2, tq, ts);
+            tma_store_4d(&mdtri, sm + O_T2 + b * TT, tq, 0, ts, 0);
+            tma_store_4d(&mdtri, sm + O_T2 + b * TT + TT / 2, tq + 64, 0, ts, 0);
+          } else {
+            tma_store_2d(&mdtri, sm + O_T2 + b * TT, row0, 0);
+            tma_store_2d(&mdtri, sm + O_T2 + b * TT + TT / 2, row0 + 64, 0);
+          }
           bulk_commit();
           PW(1, bulk_wait_read<0>());
           mbar_arrive(&B.tl_free[b]);
@@ -552,7 +574,7 @@ void b1s_backward(torch::Tensor dy, torch::Tensor xn, torch::Tensor tri, torch::
                   int64_t L, int64_t nf) {
   using namespace b1s;
   const int64_t M = dy.size(0);
-  const int H = (int)tri.size(0);
+  const int H = (int)tmap::chmajor_channels(tri);   // tri / dtri [H, ..] or sample-major [H / 64, B, 64, L, L], the same layout
   TORCH_CHECK(dy.size(1) == C && M % (L * L) == 0 && L % TOK == 0 && tri.numel() == H * M && (H == 64 || H == 128));   // M = B L L, tokens b-major
   TORCH_CHECK(ds.numel() == (M / (L * L)) * L * C, "b1s_backward: ds must be [B, L, 64]");
   int nsm = 0, dev = 0;
@@ -564,8 +586,11 @@ void b1s_backward(torch::Tensor dy, torch::Tensor xn, torch::Tensor tri, torch::
   auto tok_map = [&](const torch::Tensor& t, int64_t rows) {
     return tmap::make(t.data_ptr(), bf, {(uint64_t)C, (uint64_t)rows}, {(uint64_t)C * 2}, {64, TOK}, CU_TENSOR_MAP_SWIZZLE_128B);
   };
+  TORCH_CHECK(dtri.dim() == tri.dim() && dtri.numel() == tri.numel(), "b1s_backward: dtri has tri's layout");
+  const int n2 = tri.dim() == 5 ? (int)(L * L) : 0;
   auto ch_map = [&](const torch::Tensor& t) {
-    return tmap::make(t.data_ptr(), bf, {(uint64_t)M, (uint64_t)H}, {(uint64_t)M * 2}, {64, (uint32_t)H}, CU_TENSOR_MAP_SWIZZLE_128B);
+    return n2 ? tmap::make_chmajor(t, n2, 64, (uint32_t)H, CU_TENSOR_MAP_SWIZZLE_128B)
+              : tmap::make(t.data_ptr(), bf, {(uint64_t)M, (uint64_t)H}, {(uint64_t)M * 2}, {64, (uint32_t)H}, CU_TENSOR_MAP_SWIZZLE_128B);
   };
   auto mxn = tok_map(xn, M), mdg = tok_map(dg, M), mdy = tok_map(dy, M), mring = tok_map(ring, ring.size(0));
   auto mtri = ch_map(tri), mdtri = ch_map(dtri);
@@ -577,15 +602,15 @@ void b1s_backward(torch::Tensor dy, torch::Tensor xn, torch::Tensor tri, torch::
   TORCH_CHECK(lnpart.numel() >= (int64_t)(nsm - nf) * 2 * H);
   a.dwg = dwg.data_ptr<float>(); a.dwp = dwp.data_ptr<float>(); a.lnpart = lnpart.data_ptr<float>();
   a.flags = reinterpret_cast<uint32_t*>(flags.data_ptr<int32_t>());
-  a.L = (int)L; a.tiles = (int)(M / TOK); a.NF = (int)nf; a.RSF = RSF;
+  a.L = (int)L; a.tiles = (int)(M / TOK); a.NF = (int)nf; a.RSF = RSF; a.n2 = n2;
   void* params[] = {(void*)&mxn, (void*)&mtri, (void*)&mwp, (void*)&mwg, (void*)&mdg, (void*)&mdtri, (void*)&mdy, (void*)&mring, (void*)&a};
   auto launch = [&](const void* fn, int smem, bool& attr) {
     if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, smem)); attr = true; }
     C10_CUDA_CHECK(cudaLaunchCooperativeKernel(fn, dim3(nsm), dim3(512), params, smem, at::cuda::getCurrentCUDAStream()));
   };
-  static bool attr64 = false, attr128 = false;
-  if (H == 64) launch((const void*)b1s_kernel<64>, Geo<64>::SMEM, attr64);
-  else launch((const void*)b1s_kernel<128>, Geo<128>::SMEM, attr128);
+  static bool attr64 = false, attr128 = false, attr64s = false, attr128s = false;
+  if (H == 64) launch(n2 ? (const void*)b1s_kernel<64, 1> : (const void*)b1s_kernel<64, 0>, Geo<64>::SMEM, n2 ? attr64s : attr64);
+  else launch(n2 ? (const void*)b1s_kernel<128, 1> : (const void*)b1s_kernel<128, 0>, Geo<128>::SMEM, n2 ? attr128s : attr128);
 }
 
 torch::Tensor b1s_prof() {

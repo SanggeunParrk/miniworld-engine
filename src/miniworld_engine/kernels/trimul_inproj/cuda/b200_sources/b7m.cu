@@ -65,11 +65,11 @@ DEV void red_add4(float* p, float a, float b, float c, float d) {
 struct Args {
   const float *mask, *gi;
   float *dw1, *lnpart;      // lnpart [grid][dgi 64 | dbi 64]: this CTA's row (summed on the host: deterministic)
-  int tiles;
+  int tiles, n2;              // n2 > 0: dpl sample-major, tokens per sample (4-D map, tmap::make_chmajor); 0: [P, M]
   float eps;
 };
 
-template <int NCH>
+template <int NCH, int SMJ>
 __global__ void __launch_bounds__(512, 1)
     b7m_kernel(const __grid_constant__ CUtensorMap mxn, const __grid_constant__ CUtensorMap mda, const __grid_constant__ CUtensorMap mw1,
                const __grid_constant__ CUtensorMap mgo, const __grid_constant__ CUtensorMap mwg, const __grid_constant__ CUtensorMap mdx,
@@ -118,8 +118,15 @@ __global__ void __launch_bounds__(512, 1)
           const int u = i * NCH + c, db = u & 1;
           if (u >= 2) PW(1, mbar_wait(&B.da_free[db], ((u >> 1) - 1) & 1));
           mbar_expect_tx(&B.da_full[db], DAT);
-          tma_load_2d(sm + G_::S_DA + db * DAT, &mda, &B.da_full[db], row0, 64 * c, EVICT_FIRST);
-          tma_load_2d(sm + G_::S_DA + db * DAT + DAT / 2, &mda, &B.da_full[db], row0 + 64, 64 * c, EVICT_FIRST);
+          if constexpr (SMJ != 0) {
+            int tq, ts;
+            tok_split(row0, a.n2, tq, ts);
+            tma_load_4d(sm + G_::S_DA + db * DAT, &mda, &B.da_full[db], tq, 0, ts, c, EVICT_FIRST);
+            tma_load_4d(sm + G_::S_DA + db * DAT + DAT / 2, &mda, &B.da_full[db], tq + 64, 0, ts, c, EVICT_FIRST);
+          } else {
+            tma_load_2d(sm + G_::S_DA + db * DAT, &mda, &B.da_full[db], row0, 64 * c, EVICT_FIRST);
+            tma_load_2d(sm + G_::S_DA + db * DAT + DAT / 2, &mda, &B.da_full[db], row0 + 64, 64 * c, EVICT_FIRST);
+          }
         }
         if (i >= 1) PW(2, mbar_wait(&B.go_free, (i - 1) & 1));
         mbar_expect_tx(&B.go_full, XT);
@@ -430,7 +437,8 @@ void b7m_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Te
                   double eps) {
   using namespace b7m;
   const int64_t M = x.size(0);
-  const int P = (int)dpl.size(0), NCH = P / 64;
+  const int P = (int)tmap::chmajor_channels(dpl), NCH = P / 64;   // dpl [P, M] or sample-major [P / 64, B, 64, L, L]
+  const int64_t n2 = dpl.dim() == 5 ? dpl.size(3) * dpl.size(4) : 0;
   TORCH_CHECK(M % TOK == 0 && x.size(1) == C && dpl.numel() == (int64_t)P * M && (NCH == 2 || NCH == 4) && w1.size(0) == 128 * NCH);
   int nsm = 0, dev = 0;
   cudaGetDevice(&dev);
@@ -443,20 +451,23 @@ void b7m_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Te
   auto mxn = tok_map(xn, M), mgo = tok_map(dgout, M), mdx = tok_map(dx, M), mx = tok_map(x, M), mdy = tok_map(dy, M);
   auto mw1 = tok_map(w1, w1.size(0));
   auto mwg = tmap::make(wg.data_ptr(), bf, {(uint64_t)C, (uint64_t)C}, {(uint64_t)C * 2}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B);
-  auto mda = tmap::make(dpl.data_ptr(), bf, {(uint64_t)M, (uint64_t)P}, {(uint64_t)M * 2}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B);
+  auto mda = n2 ? tmap::make_chmajor(dpl, n2, 64, 64, CU_TENSOR_MAP_SWIZZLE_128B)
+                : tmap::make(dpl.data_ptr(), bf, {(uint64_t)M, (uint64_t)P}, {(uint64_t)M * 2}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B);
   Args a;
   a.mask = mask.data_ptr<float>(); a.gi = gi.data_ptr<float>();
   TORCH_CHECK(lnpart.numel() >= (int64_t)grid * 2 * C);
   a.dw1 = dw1.data_ptr<float>(); a.lnpart = lnpart.data_ptr<float>();
-  a.tiles = tiles; a.eps = (float)eps;
+  a.tiles = tiles; a.n2 = (int)n2; a.eps = (float)eps;
   auto st = at::cuda::getCurrentCUDAStream();
-  static bool attr2 = false, attr4 = false;
+  auto run = [&](auto kern, int smem, bool& attr) {
+    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem)); attr = true; }
+    kern<<<grid, 512, smem, st>>>(mxn, mda, mw1, mgo, mwg, mdx, mx, mdy, a);
+  };
+  static bool attr[4] = {false, false, false, false};
   if (NCH == 2) {
-    if (!attr2) { C10_CUDA_CHECK(cudaFuncSetAttribute(b7m_kernel<2>, cudaFuncAttributeMaxDynamicSharedMemorySize, Geo<2>::SMEM)); attr2 = true; }
-    b7m_kernel<2><<<grid, 512, Geo<2>::SMEM, st>>>(mxn, mda, mw1, mgo, mwg, mdx, mx, mdy, a);
+    if (n2) run(b7m_kernel<2, 1>, Geo<2>::SMEM, attr[1]); else run(b7m_kernel<2, 0>, Geo<2>::SMEM, attr[0]);
   } else {
-    if (!attr4) { C10_CUDA_CHECK(cudaFuncSetAttribute(b7m_kernel<4>, cudaFuncAttributeMaxDynamicSharedMemorySize, Geo<4>::SMEM)); attr4 = true; }
-    b7m_kernel<4><<<grid, 512, Geo<4>::SMEM, st>>>(mxn, mda, mw1, mgo, mwg, mdx, mx, mdy, a);
+    if (n2) run(b7m_kernel<4, 1>, Geo<4>::SMEM, attr[3]); else run(b7m_kernel<4, 0>, Geo<4>::SMEM, attr[2]);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

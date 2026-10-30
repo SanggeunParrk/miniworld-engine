@@ -93,6 +93,21 @@ DEV void tma_store_3d(const CUtensorMap* m, const void* src, int c0, int c1, int
                "r"(smem_u32(src)), "r"(c0), "r"(c1), "r"(c2)
                : "memory");
 }
+// 4-D boxes of a channel-major activation map (tmap::make_chmajor): coordinates (token in sample, 0, sample, 64-channel chunk)
+DEV void tma_load_4d(void* dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2, int c3, uint64_t hint) {
+  asm volatile(
+      "cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1, {%3, %4, %5, %6}], [%2], %7;" ::"r"(
+          smem_u32(dst)),
+      "l"(reinterpret_cast<uint64_t>(m)), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "l"(hint)
+      : "memory");
+}
+DEV void tma_store_4d(const CUtensorMap* m, const void* src, int c0, int c1, int c2, int c3) {
+  asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.bulk_group [%0, {%2, %3, %4, %5}], [%1];" ::"l"(reinterpret_cast<uint64_t>(m)),
+               "r"(smem_u32(src)), "r"(c0), "r"(c1), "r"(c2), "r"(c3)
+               : "memory");
+}
+// token -> (token in sample, sample) for the 4-D maps above
+DEV void tok_split(int tok, int n2, int& q, int& s) { s = tok / n2; q = tok - s * n2; }
 DEV void tma_store_2d(const CUtensorMap* m, const void* src, int c0, int c1) {
   asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, {%2, %3}], [%1];" ::"l"(reinterpret_cast<uint64_t>(m)),
                "r"(smem_u32(src)), "r"(c0), "r"(c1)

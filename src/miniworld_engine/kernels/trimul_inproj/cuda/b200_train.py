@@ -131,6 +131,52 @@ def _contract_bwd(planes, dt, d, direction):
     return dpl.view(planes.shape)
 
 
+def _sample_major(width: int, hidden: int, direction: int) -> bool:
+    """D64 training keeps its channel-major activations (planes, t, dt, the plane gradient) sample-major: ``[P / 64, B, 64, L, L]``,
+    each 64-channel chunk (one contraction operand) holding the B samples' planes one after another, instead of ``[P, B, L, L]``.
+    k1w's plane stores then step one sample's L^2 tokens between channels whatever B is; with the channel stride B L^2, k1w ran at
+    half its one-sample rate at B4 L768 (580 vs 4 x 72 us). The contractions fold (sample, channel) of a chunk into cuBLAS's batch
+    exactly as before (the same per-sample products), and k3g / b1s / b7m read the same tiles through 4-D maps
+    (``tmap::make_chmajor``). Every chunk must be one operand: the contracted width is 64."""
+    return width == 64 and contracted(width, hidden, direction) == 64
+
+
+def _contract_sm(planes, direction):
+    """``_contract`` for sample-major planes [P / 64, B, 64, n, n] -> t [H / 64, B, 64, n, n] (chunk g of planes is operand g). As in
+    ``_contract`` the ``out=`` buffers are slices of one 3-D tensor and the 5-D result is a view of it."""
+    n, k = planes.shape[-1], planes.shape[1] * 64
+    f = lambda a: a.view(-1, n, n)
+    g = 2 if direction == 0 else 1
+    t = planes.new_empty((g * k, n, n))
+    if direction == 0:
+        torch.bmm(f(planes[0]), f(planes[2]).transpose(1, 2), out=t[:k])
+        torch.bmm(f(planes[1]).transpose(1, 2), f(planes[3]), out=t[k:])
+    elif direction == 1:
+        torch.bmm(f(planes[0]), f(planes[1]).transpose(1, 2), out=t)
+    else:
+        torch.bmm(f(planes[0]).transpose(1, 2), f(planes[1]), out=t)
+    return t.view(g, *planes.shape[1:])
+
+
+def _contract_bwd_sm(planes, dt, direction):
+    """``_contract_bwd`` for sample-major planes / dt; returns the plane gradient in the planes' layout."""
+    n, k = planes.shape[-1], planes.shape[1] * 64
+    f = lambda a: a.view(-1, n, n)
+    dpl = planes.new_empty((planes.shape[0] * k, n, n))
+    if direction == 0:
+        torch.bmm(f(dt[0]), f(planes[2]), out=dpl[:k])
+        torch.bmm(f(planes[3]), f(dt[1]).transpose(1, 2), out=dpl[k:2 * k])
+        torch.bmm(f(dt[0]).transpose(1, 2), f(planes[0]), out=dpl[2 * k:3 * k])
+        torch.bmm(f(planes[1]), f(dt[1]), out=dpl[3 * k:])
+    elif direction == 1:
+        torch.bmm(f(dt[0]), f(planes[1]), out=dpl[:k])
+        torch.bmm(f(dt[0]).transpose(1, 2), f(planes[0]), out=dpl[k:])
+    else:
+        torch.bmm(f(planes[1]), f(dt[0]).transpose(1, 2), out=dpl[:k])
+        torch.bmm(f(planes[0]), f(dt[0]), out=dpl[k:])
+    return dpl.view(planes.shape)
+
+
 def _forward_fake(leaves, mask, ds, direction):
     """y and the saved set: planes, t, mean / rstd (LN_in), mean / rstd (LN_out), k3w vectors, p, g."""
     return [torch.empty_like(leaves[0]), *_forward_into_fake(leaves, mask, ds, direction, leaves[0])]
@@ -274,7 +320,11 @@ def _forward_small_into_fake(leaves, mask, ds, direction, y):
     bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
     m, p = bsz * n * n, planes_of(d, leaves[1].shape[0], direction)
     f32 = torch.float32
-    return (x.new_empty((p, bsz, n, n)), x.new_empty((p // 2, bsz, n, n)), x.new_empty((m, d)),
+    if _sample_major(d, leaves[1].shape[0], direction):
+        pl, tt = x.new_empty((p // 64, bsz, 64, n, n)), x.new_empty((p // 128, bsz, 64, n, n))
+    else:
+        pl, tt = x.new_empty((p, bsz, n, n)), x.new_empty((p // 2, bsz, n, n))
+    return (pl, tt, x.new_empty((m, d)),
             x.new_empty((m,), dtype=f32), x.new_empty((m,), dtype=f32))
 
 
@@ -304,10 +354,11 @@ def _forward_small_body(leaves, mask, ds, direction, y):
         x2 = x.reshape(m, d)
         hid = wl.shape[0]
         p = planes_of(d, hid, direction)
-        planes = x.new_empty((p, bsz, n, n))
+        sm = _sample_major(d, hid, direction)
+        planes = x.new_empty((p // 64, bsz, 64, n, n) if sm else (p, bsz, n, n))
         wpp = x.new_empty((d, p // 2))     # k3g's output projection, columns in its TMEM K order
         E.k1w_forward(x2, *_front(E, wl, wlg, wr, wrg, wp, wpp), mask, None, None, gi, bi, planes, 0, EPS)
-        t = _contract(planes, contracted(d, hid, direction), direction)
+        t = _contract_sm(planes, direction) if sm else _contract(planes, contracted(d, hid, direction), direction)
         if y is None:
             y = torch.empty_like(x)
         xn = torch.empty_like(x2)
@@ -349,7 +400,8 @@ def _backward_small_body(leaves, mask, ds, direction, saved, dy, dx):
     planes, t, xn, mo, ro = saved
     bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
     m = bsz * n * n
-    p = planes.shape[0]
+    sm = planes.dim() == 5                  # sample-major (``_sample_major``)
+    p = planes.shape[0] * (64 if sm else 1)
     h = p // 2
     nf = _front_ctas(n, d, direction, p)
     nch = p // 64
@@ -376,7 +428,8 @@ def _backward_small_body(leaves, mask, ds, direction, saved, dy, dx):
         (E.b1g_backward if d == 128 else E.b1s_backward)(dy2, xn, t, ds, mo, ro, wg, wp, go, bo, dg, dt, dwg, dwp, lnp_o, ring, flags,
                                                          n, nf)
         del ring
-        dpl = _contract_bwd(planes, dt, contracted(d, wl.shape[0], direction), direction)
+        dpl = (_contract_bwd_sm(planes, dt, direction) if sm
+               else _contract_bwd(planes, dt, contracted(d, wl.shape[0], direction), direction))
         del dt
         if mask is None:
             pair_mask = x.new_ones((m,), dtype=torch.float32)
@@ -391,7 +444,7 @@ def _backward_small_body(leaves, mask, ds, direction, saved, dy, dx):
             E.b7g_backward(x2, xn, dy2, dpl.view(p, m), dg, pair_mask, w1, wg, gi, dx.view(m, d), dw1, lnp_i, ring7, flags7, EPS,
                            sg)
         else:
-            E.b7m_backward(x2, xn, dy2, dpl.view(p, m), dg, pair_mask, w1, wg, gi, dx.view(m, d), dw1, lnp_i, EPS)
+            E.b7m_backward(x2, xn, dy2, dpl if sm else dpl.view(p, m), dg, pair_mask, w1, wg, gi, dx.view(m, d), dw1, lnp_i, EPS)
         dwl, dwlg, dwr, dwrg = _unpack_w1(dw1, p)
         lns = x.new_empty((2 * h + 2 * d,), dtype=torch.float32)
         E.lnpart_sum(lnp_o, lnp_i, lns)

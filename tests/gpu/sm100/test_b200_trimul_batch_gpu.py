@@ -432,3 +432,35 @@ def test_chunked_training_graph_replay(case, checkpoint, monkeypatch):
     assert torch.equal(got_g[0], want_g[0])
     assert max(relative(a, b) for a, b in zip(got_g[1:], want_g[1:], strict=True)) < 2e-3
     _graph_train_step(m, x.requires_grad_(), mask, ds, dy)
+
+
+@pytest.mark.parametrize("case", [(384, 4, 0), (384, 4, 1), (384, 4, 2), (768, 2, 0), (128, 16, 0)],
+                         ids=["L384-B4-dir0", "L384-B4-dir1", "L384-B4-dir2", "L768-B2-dir0", "L128-B16-dir0"])
+def test_d64_sample_major_layout_matches_plane_major(case, monkeypatch):
+    """D64 training keeps planes / t / dt / the plane gradient sample-major ([P / 64, B, 64, L, L], ``b200_train._sample_major``):
+    k1w, k3g, b1s and b7m address them through 4-D maps. Same products and per-token reductions as the [P, B, L, L] layout, so y, dx
+    and the LayerNorm gradients are bitwise equal to it and the weight gradients within the atomic flush order; the saved planes
+    are 5-D."""
+    L, B, direction = case
+    m = make(64, direction)
+    x, mask, ds, dy = inputs(B, L, 64)
+    saved = []
+    fwd = b200_train.forward_small
+
+    def spy(*a, **k):
+        out = fwd(*a, **k)
+        saved.append(out[1].dim())
+        return out
+
+    monkeypatch.setattr(b200_train, "forward_small", spy)
+    y_sm, g_sm = train(m, x, mask, ds, dy)
+    monkeypatch.setattr(b200_train, "_sample_major", lambda *a: False)
+    y_pm, g_pm = train(m, x, mask, ds, dy)
+    assert saved == [5, 4]
+    assert torch.equal(y_sm, y_pm) and torch.equal(g_sm[0], g_pm[0])
+    names = [n for n, _ in m.named_parameters()]
+    for n, a, b in zip(names, g_sm[1:], g_pm[1:], strict=True):
+        if n.startswith("ln_"):
+            assert torch.equal(a, b), n
+        else:
+            assert relative(a, b) < 1e-5, (n, relative(a, b))
