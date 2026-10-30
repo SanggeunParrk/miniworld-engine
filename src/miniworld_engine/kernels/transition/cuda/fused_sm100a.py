@@ -285,6 +285,29 @@ def _fwd_launch(
     return tuple(_ext().transition_fused_fwd(x, gamma, beta, wa, wb, ws, eps, save))
 
 
+def _cast_launch_fake(wa, wb, ws):
+    return tuple(torch.empty(w.shape, dtype=torch.bfloat16, device=w.device) for w in (wa, wb, ws))
+
+
+@opaque(fake=_cast_launch_fake, name="transition_cast_weights_sm100a")
+def _cast_launch(
+    wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """bf16 copies of the fp32 (master) wa / wb / ws in one launch instead of three casts."""
+    if _is_fake(wa, wb, ws):
+        return _cast_launch_fake(wa, wb, ws)
+    return tuple(_ext().transition_cast_weights(wa, wb, ws))
+
+
+def _bf16_weights(x, wa, wb, ws):
+    """The kernels' bf16 weight operands: one cast launch for fp32 masters, else ``.to`` (a no-op for bf16 parameters)."""
+    if x.dtype is torch.bfloat16 and all(
+        w.dtype is torch.float32 and w.is_contiguous() for w in (wa, wb, ws)
+    ):
+        return _cast_launch(wa, wb, ws)
+    return tuple(w.to(x.dtype).contiguous() for w in (wa, wb, ws))
+
+
 def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws):
     """Output structure only: the six gradients, each shaped like what it is a gradient of (dgamma / dbeta and the weight
     gradients fp32)."""
@@ -333,7 +356,7 @@ class _FusedTransitionSM100A(torch.autograd.Function):
         ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
-        wa, wb, ws = (w.to(x.dtype).contiguous() for w in (wa, wb, ws))
+        wa, wb, ws = _bf16_weights(x, wa, wb, ws)
         out, xn, rstd, c1 = _fwd_launch(flat, gf, bf, wa, wb, ws, float(eps), True)
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa, wb, ws)
         ctx.shape = shape
