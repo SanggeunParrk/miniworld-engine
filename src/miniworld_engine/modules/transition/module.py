@@ -65,6 +65,9 @@ class Transition(nn.Module):
 
     """
 
+    #: A numerically dead instance of a checkpoint (``architecture.checkpoints.dead_modules``): inference returns the residual input.
+    dead: bool = False
+
     def __init__(
         self,
         d_hidden: int = 128,
@@ -111,6 +114,8 @@ class Transition(nn.Module):
 
         The same op with the weights as arguments (residual included) is ``ops.transition``.
         """
+        if self.dead and not (self.training or torch.is_grad_enabled()):
+            return x
         if self._requires_h100_cuda(x):
             if not _fused_sm90a_enabled():
                 return self._torch_forward(x) + x   # the native CUDA kernels are switched off: PyTorch, never Triton

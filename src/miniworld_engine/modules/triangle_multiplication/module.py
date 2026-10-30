@@ -55,6 +55,9 @@ class TriangleMultiplication(nn.Module):
 
     """
 
+    #: A numerically dead instance of a checkpoint (``architecture.checkpoints.dead_modules``): inference returns the residual input.
+    dead: bool = False
+
     def __init__(
         self,
         d_pair: int = 128,
@@ -144,6 +147,8 @@ class TriangleMultiplication(nn.Module):
         ``self.training`` (standard nn.Module semantics); inference is identity.
         >>> The raw op without the residual is ``ops.triangle_multiplicative_update``,
         not a flag on this module."""
+        if self.dead and not (self.training or torch.is_grad_enabled()):
+            return pair
         dropout_p = self.p_drop if dropout_p is None else dropout_p
         with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
             backend = _dispatch.guard_dtype(

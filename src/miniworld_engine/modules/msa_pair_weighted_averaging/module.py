@@ -30,6 +30,9 @@ class MSAPairWeightedAveraging(nn.Module):
 
     """
 
+    #: A numerically dead instance of a checkpoint (``architecture.checkpoints.dead_modules``): inference returns the residual input.
+    dead: bool = False
+
     def __init__(
         self,
         d_msa: int,
@@ -88,6 +91,8 @@ class MSAPairWeightedAveraging(nn.Module):
         """Forward pass. ALWAYS returns the residual output msa + drop_msa(pwa(msa, pair)) — the
         residual is UNCONDITIONAL (domain standard, explicit add) and drop_msa is optional (p_drop,
         training only). The residual is unconditional and has no flag."""
+        if self.dead and not (self.training or torch.is_grad_enabled()):
+            return msa
         # The packaged H100 forward/backward is automatic for supported module inputs;
         # its output already carries the residual and training dropout.
         # Inference takes the same forward kernels (no o kept, no dropout) -- faster than the upstream cell and payload-free.

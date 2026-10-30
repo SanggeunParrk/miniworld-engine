@@ -78,6 +78,9 @@ class OuterProductMean(nn.Module):
 
     """
 
+    #: A numerically dead instance of a checkpoint (``architecture.checkpoints.dead_modules``): inference returns the residual input.
+    dead: bool = False
+
     def __init__(
         self,
         d_msa: int,
@@ -159,6 +162,8 @@ class OuterProductMean(nn.Module):
         explicitly by the block (``pair = opm(msa, ..., residual=pair)``) rather than being the
         module's own input; the add is unconditional when ``residual`` is provided (no dropout on
         the OPM branch). ``residual=None`` returns the raw OPM output (standalone / benchmarking)."""
+        if self.dead and residual is not None and not (self.training or torch.is_grad_enabled()):
+            return residual
         if self.groups > 1 or self.to_left.bias is not None:  # RoseTTAFold3 / Chai-1 (see the constructor)
             from miniworld_engine.kernels.outer_product_mean import composed
 

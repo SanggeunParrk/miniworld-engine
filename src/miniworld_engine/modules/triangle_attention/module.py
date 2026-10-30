@@ -73,6 +73,9 @@ class TriangleAttention(nn.Module):
 
     """
 
+    #: A numerically dead instance of a checkpoint (``architecture.checkpoints.dead_modules``): inference returns the residual input.
+    dead: bool = False
+
     def __init__(
         self,
         d_pair: int = 128,
@@ -377,6 +380,8 @@ class TriangleAttention(nn.Module):
         >>> The raw op without the residual is ``_attention()`` / ``ops.triangle_attention``,
         not a flag on this module."""
         variant_output = self.untransposed_output or self.dual_output
+        if self.dead and not (variant_output or self.training or torch.is_grad_enabled()):
+            return pair
         if variant_output or self.to_gate.bias is not None or self.to_out.bias is not None:
             # RoseTTAFold3's biases, Chai-1's output variants: the H100 kernels for inference, else the torch statements
             from miniworld_engine.integrations import triattn_h100_sm90

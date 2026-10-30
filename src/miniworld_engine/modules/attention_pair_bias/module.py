@@ -36,6 +36,9 @@ class AttentionPairBias(nn.Module):
 
     """
 
+    #: A numerically dead instance of a checkpoint (``architecture.checkpoints.dead_modules``): inference returns the residual input.
+    dead: bool = False
+
     def __init__(
         self,
         d_single: int = 384,
@@ -91,6 +94,8 @@ class AttentionPairBias(nn.Module):
         """Forward pass. ALWAYS applies the residual: single + attention_pair_bias(single, pair).
         The residual is UNCONDITIONAL (domain standard) and applied EXPLICITLY here (team-gm layer,
         not kernel-fused). The residual is unconditional and has no flag."""
+        if self.dead and not (self.training or torch.is_grad_enabled()):
+            return single
         # Hand-CUDA B200 (integrations.attention_pair_bias_b200 states its contract; the residual is folded there).
         if _b200.serves_inference(self, single, pair, mask):
             return _b200.update_inference(self, single, pair, mask)
