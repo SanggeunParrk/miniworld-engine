@@ -27,11 +27,12 @@ Per training step that replaces, per block, the pair LayerNorm + projection (``p
 the accumulation of a [L, L, 128] pair gradient, by one pass of each for all blocks. Hopper: the forward is ONE kernel (``bo_hoist_pass.cu`` hoist_fwd, N <= 64: LN0 and the projection on the tensor cores, the normalised pair never
 written), the backward of one block of 16 heads is ONE kernel (hoist_bwd1: d LN0, the LN0 backward and dW' in a single pass over the pair, bf16 and
 fp32/TF32); more blocks keep the bf16 ``bo_hoist_bwd.cu`` kernel (N <= 192), fp32 the two cuBLAS GEMMs (TF32) around the LN0 rows.
-B200, bf16 and fp32 (``settings.bias_only_dit_hoist_sm100``, R a multiple of 128, any weight-row count except the fp32 forward past
-``hoist.SM100_FWD_MAX_ROWS`` = 128 rows, where the path below is faster; ``kernels/bias_only_dit/cuda/bo_hoist_sm100.cu``): the bf16
+B200, bf16 and fp32 (``settings.bias_only_dit_hoist_sm100``, R a multiple of 128, any weight-row count;
+``kernels/bias_only_dit/cuda/bo_hoist_sm100.cu``): the bf16
 forward is one pass over the pair per 384 weight rows, the projection of the raw pair rows on tcgen05 with the LayerNorm applied in the
 epilogue as rstd (x W'^T - mean s) (past 32 rows with the weight rows on M and staged TMA stores); fp32 normalises the tile in shared
-memory and projects it on kind::tf32 (launches of 128 rows). The backward is one pass up to 384 weight rows: bf16 N <= 64 d LN0 on
+memory and projects it on kind::tf32 (up to 64 rows; past that on CTA pairs that keep W' resident between them, the tile in tensor
+memory, one pass over the pair per 384 rows). The backward is one pass up to 384 weight rows: bf16 N <= 64 d LN0 on
 tcgen05, the LN0 backward and dW' = S - mean_k S with S = (dbias diag(rstd)) x in tensor memory; more rows, and fp32, on the tile
 normalised once per tile (bf16 xhat as hi + lo, tf32 rounded): d LN0 over chunks of the streamed dbias / W' rows and dW' = dbias xhat
 in tensor memory, no per-chunk work of the row threads; S-only launches past 384 rows. The LayerNorm rows + cuBLAS above remain the path off B200 and with the switch off.

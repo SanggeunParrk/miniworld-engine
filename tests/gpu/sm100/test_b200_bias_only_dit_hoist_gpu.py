@@ -334,7 +334,8 @@ def test_sm100_one_pass_hoist_against_fp64(R, N, shift):
 
 # (rows, weight rows, row mean, dtype): bf16 past the one-chunk kernels (forward: weight rows on M, one launch up to 384 rows, 384 + 192
 # at 576; backward: the normalised-tile kernel, dbias chunks of 128 -- two d LN0 accumulators up to 256 rows, one past that, an S-only
-# launch past 384) and fp32 / TF32 (forward launches of <= 128 rows; backward chunks of 32, an S-only launch past 384), a grid whose
+# launch past 384) and fp32 / TF32 (forward: one launch up to 64 rows, past that CTA pairs -- an odd tile count, whose last tile pairs
+# with zero rows, a partial last chunk, 576 = 320 + 256 in two launches; backward chunks of 32, an S-only launch past 384), a grid whose
 # CTAs end a tile apart, rows 20 standard deviations off zero, five tiles with a partial last chunk
 SM100_CHUNKS = [
     (5 * 128 * 128, 80, 0.5, BF),
@@ -348,6 +349,9 @@ SM100_CHUNKS = [
     (3 * 128 * 128, 100, 0.0, F32),
     (2 * 128 * 128, 384, 20.0, F32),
     (2 * 128 * 128, 576, 0.0, F32),
+    (149 * 128, 200, 0.0, F32),
+    (5 * 128, 136, -1.0, F32),
+    (3 * 128, 72, 0.0, F32),
 ]
 
 
@@ -356,7 +360,7 @@ def test_sm100_hoist_chunks_and_tf32(R, N, shift, dt):
     """``bo_hoist_sm100.cu`` over weight-row chunks (``fwdt_plan`` / ``fwd_plan`` / ``bwd3_plan``) and in fp32 (kind::tf32: the forward normalises the
     tile in shared memory first, the backward takes S = xhat^T dbias) alone: bias_all^T, d pair and dW' against fp64 (bf16: the bars
     of ``test_sm100_one_pass_hoist_against_fp64``; fp32: the TF32 bound of ``TOL``, LN0 and dbias rounded to tf32 once each), rows far
-    from zero mean and a constant row, bit-identical reruns, no local memory in any cubin used; the gate at ``SM100_FWD_MAX_ROWS``."""
+    from zero mean and a constant row, bit-identical reruns, no local memory in any cubin used; served forward and backward at every N."""
     _sm100_only()
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
@@ -365,9 +369,8 @@ def test_sm100_hoist_chunks_and_tf32(R, N, shift, dt):
     pair[5] = 0.75
     wf = (0.1 * torch.randn(N, 128, device="cuda", generator=g)).to(dt)
     db = torch.randn(N, R, device="cuda", generator=g).to(dt)
-    # the kernels take any N; the forward's gate stops where the LayerNorm rows + cuBLAS path is faster (fp32 past 128 rows), the
-    # backward is served at every N
-    assert HK.sm100_served(pair, wf) == (N <= HK.SM100_FWD_MAX_ROWS.get(dt, N)) and HK.sm100_served(pair, wf, bwd=True)
+    # served at every N both ways (the fp32 forward past 128 rows was T7's until the CTA-pair kernel, 2026-10-30)
+    assert HK.sm100_served(pair, wf) and HK.sm100_served(pair, wf, bwd=True)
     runs = []
     for _ in range(3):
         runs.append((HK.sm100_fwd(pair, wf), *HK.sm100_bwd(pair, wf, db)))

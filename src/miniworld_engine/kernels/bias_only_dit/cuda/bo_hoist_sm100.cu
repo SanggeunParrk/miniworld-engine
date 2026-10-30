@@ -27,10 +27,10 @@
 // CTA's tiles g, g + 2, ..., each with its own accumulator: one group drains while the other's product runs). Persistent grid over
 // the R / 128 tiles. -DNP: the padded weight rows (a multiple of 16; rows N .. NP - 1 are TMA zero fill and never stored).
 //
-// More weight rows and fp32 (2026-10-29): -DTF32 is the forward's fp32 form (the tile normalised in place, then kind::tf32), with
-// -DNCH chunks of NP rows (W' resident; four TMEM accumulators, two per epilogue group) and larger N split into row ranges per launch.
-// bf16 past 32 weight rows takes bo_hoist_fwdt_sm100 (-DFWDT: the weight rows on M, staged TMA stores); the backward past 64 bf16
-// rows, and every fp32 backward, bo_hoist_bwd3_sm100 (-DBWD3: the tile normalised once, no per-chunk work of the row threads).
+// More weight rows and fp32 (2026-10-29): -DTF32 is the forward's fp32 form up to 64 weight rows (the tile normalised in place, then
+// kind::tf32); fp32 past 64 rows takes bo_hoist_fwdx_sm100 (-DFWDX: CTA pairs, W' resident split between them, staged TMA stores);
+// bf16 past 32 weight rows bo_hoist_fwdt_sm100 (-DFWDT: the weight rows on M, staged TMA stores); the backward past 64 bf16 rows, and
+// every fp32 backward, bo_hoist_bwd3_sm100 (-DBWD3: the tile normalised once, no per-chunk work of the row threads).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -48,10 +48,8 @@ constexpr int DBT = NP * TM * 2;                  // dbias tile [2 boxes][NP][64
 constexpr int DBB = NP * 64 * 2;
 constexpr int THREADS = 320;
 constexpr int SMEM_MAX = 232448;
-// forward: NCH chunks of NP weight rows (N <= NCH NP per launch; the host splits larger N over launches), W' resident
-#ifndef NCH
-#define NCH 1
-#endif
+// forward: one chunk of NP weight rows per launch, W' resident (NCH: the loops below are written per chunk)
+constexpr int NCH = 1;
 #ifdef TF32
 constexpr int ES = 4;                             // fp32 pair / W' / bias
 #else
@@ -71,14 +69,13 @@ constexpr int F_FIT = (SMEM_MAX - 1024 - F_O_ST - F_SN - 512) / F_XT;
 constexpr int F_NST = F_FIT > 8 ? 8 : F_FIT;
 constexpr int F_O_S = F_O_ST + F_NST * F_XT, F_O_BAR = F_O_S + F_SN, F_SMEM = 1024 + F_O_BAR + 512;
 static_assert(F_NST >= 2 && F_SMEM <= SMEM_MAX, "forward shared memory");
-static_assert(NCH >= 1 && NCH * NP <= 1024, "weight-row chunks");
 #ifdef TF32
 constexpr uint32_t F_IDESC = idesc_tf32(TM, NP);
 #else
 constexpr uint32_t F_IDESC = idesc_bf16(TM, NP);
 #endif
 constexpr uint32_t F_TCOLS = 4 * NP <= 32 ? 32 : 4 * NP <= 64 ? 64 : 4 * NP <= 128 ? 128 : 4 * NP <= 256 ? 256 : 512;
-#if NP <= 64 && NCH == 1 && !defined(TF32)  // ------------------------------------------- backward (bf16, NP <= 64)
+#if NP <= 64 && !defined(TF32)  // ------------------------------------------- backward (bf16, NP <= 64)
 constexpr int B_STAGE = XT + DBT;
 constexpr int DXS = 32 * 64, B_DX = 8 * 2 * DXS;          // dx staging: per warp two [32 rows][32 channels] bf16 SW64 slots
 constexpr int B_O_W = 0, B_O_DS = B_O_W + ((WT + 1023) / 1024) * 1024;   // W' | d' [2 groups][hi, lo][NP][128 rows] | dx staging
@@ -345,7 +342,7 @@ bo_hoist_fwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constant
 
 // ================================================================================================ backward
 // (built for bf16, NP <= 64 only: the d' buffers and two stages need the shared memory)
-#if NP <= 64 && NCH == 1 && !defined(TF32)
+#if NP <= 64 && !defined(TF32)
 struct BBars { uint64_t full[B_NST], empty[B_NST], acc[2], acc_empty[2], dfull[2], dempty[2], w, done; uint32_t tmem; };
 
 // byte offset of element (n, r) in a [2 boxes][NP][64 rows] bf16 SW128 tile (the dbias tile and the d' tiles)
@@ -557,7 +554,7 @@ bo_hoist_bwd_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constant
   __syncthreads();
   if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
-#endif  // NP <= 64 && NCH == 1 && !TF32
+#endif  // NP <= 64 && !TF32
 
 
 // ================================================================================================ forward, weight rows on M (bf16)
@@ -743,6 +740,199 @@ bo_hoist_fwdt_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constan
   if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
 #endif  // FWDT
+
+// ================================================================================================ forward, fp32, CTA pairs
+// -DFWDX -DTF32 (bo_hoist_fwdx_sm100): the fp32 (TF32) forward for more than 128 weight rows in ONE pass over the pair. The fp32 W'
+// (512 B per weight row) does not fit beside the 64 KB fp32 tiles of one CTA (bo_hoist_fwd_sm100 -DTF32 -DNCH read the pair again per
+// 128-row launch), and streaming it from L2 costs each SM's TMA intake more than the pair itself (measured: 30 GB/s per SM shared by
+// the tiles and W', 3.3 ms at N384 R 7.08 M). Here a cluster of two CTAs keeps W' RESIDENT, split between them: products of M 256
+// (the two CTAs' tiles) x N 64 (a chunk of 64 weight rows) on cta_group::2, whose B operand is split by N -- each CTA holds 32 rows of
+// every chunk (16 KB fp32), so 384 rows take 96 KB per CTA beside two tile slots, 640 rows 160 KB beside one.
+// The tile is the A operand in TENSOR memory: the normaliser warps (a thread = a pair row = a TMEM lane) compute the row statistics
+// (shifted one-pass sums: bo_hoist_fwd_sm100's arithmetic), write LN0 rounded to the nearest tf32 (cvt.rna, as the LayerNorm rows +
+// TF32 GEMM path rounds its operand) into A[i & 1] by tcgen05.st, and load the next tile into the shared-memory slot they have read.
+// Pair rows on M: the drain thread is a pair row, each warp store one 128-B line of bias_all^T [N][R] (32 consecutive pair rows of
+// one weight row); TMEM columns 0-31 of an accumulator are the leader's W' rows of the chunk, 32-63 the peer's.
+// Items: the cluster's tile pairs k = cluster + i clusters (tiles 2 k and 2 k + 1, one per CTA; an odd last tile pairs with zero
+// rows that are not stored). Warps (448 threads): 0 TMA (W', once), 1 MMA (the leader) and TMEM, 2-5 the normaliser, 6-9 / 10-13 two
+// drain groups (chunk u = i nch + j of the CTA's sequence goes to group u & 1; four 64-column accumulators, a = u & 3).
+// Barriers: xfull[s] (TMA, each CTA), w (TMA, each CTA) / wpeer (leader: the peer's W' landed), aready[b] (leader, 8 = 4 warps x 2
+// CTAs, release / acquire at cluster scope) / aempty[b] (multicast commit), acc[a] (multicast commit) / acc_empty[a] (leader, 8).
+#ifdef FWDX
+static_assert(ES == 4, "FWDX is the fp32 (TF32) forward: build with -DTF32");
+constexpr int XST = 1;                                      // tile slots (the normaliser reads a tile into TMEM at once)
+constexpr int X_THREADS = 448;
+constexpr int X_WC = 64, X_WH = 32;                         // weight rows per chunk (the products' N) / per CTA
+constexpr int X_XB = TM * 128, X_XT = 4 * X_XB;             // tile [4 boxes of 32 channels][128 rows][128 B] SW128: 64 KB
+constexpr int X_WB = X_WH * 128, X_WT = 4 * X_WB;           // this CTA's half of a W' chunk [4 boxes][32 rows][128 B] SW128: 16 KB
+constexpr int X_ST = 32 * TM * 4;                           // a staging slot [32 weight rows][128 pair rows] fp32: 16 KB, two per group
+constexpr int X_O_BAR = 0, X_O_X = 1024, X_O_S = X_O_X + XST * X_XT, X_O_W = X_O_S + 4 * X_ST;
+constexpr int X_MAXCH = (SMEM_MAX - 1024 - X_O_W) / X_WT;   // W' chunks that fit
+static_assert(X_MAXCH >= 1, "forward (CTA pairs) shared memory");
+constexpr uint32_t X_COL_ACC = 2 * DP;                      // TMEM: A[2] | accumulators [4][64]
+constexpr uint32_t X_IDESC = idesc_tf32(2 * TM, X_WC);
+
+struct XBars { uint64_t xfull[XST], w, wpeer, aready[2], aempty[2], acc[4], acc_empty[4]; uint32_t tmem; };
+static_assert(sizeof(XBars) <= 1024, "barriers");
+
+DEVI void umma_ts2_tf32(uint32_t d, uint32_t a_tmem, uint64_t b, uint32_t idesc, uint32_t acc) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::2.kind::tf32 [%0], [%1], %2, %3, p; }"
+               :: "r"(d), "r"(a_tmem), "l"(b), "r"(idesc), "r"(acc) : "memory");
+}
+
+// mx: pair rows [R][128] fp32, box (32, 128) SW128; mw: W' [N][128] fp32 (this launch's rows), box (32, 32) SW128 (rows past N zero-
+// filled); out: bias_all^T [N][R] fp32 (this launch's rows); R a multiple of 128, N <= 64 X_MAXCH; grid: clusters of 2
+extern "C" __global__ void __launch_bounds__(X_THREADS, 1)
+bo_hoist_fwdx_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mw, const __grid_constant__ CUtensorMap mo,
+                    int R, int N, int eps_bits) {
+  extern __shared__ __align__(1024) uint8_t smraw[];
+  uint8_t* sm = smraw + ((1024u - (smem_u32(smraw) & 1023u)) & 1023u);
+  const uint32_t su = smem_u32(sm);
+  XBars& B = *reinterpret_cast<XBars*>(sm + X_O_BAR);
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int crank = (int)cluster_rank();
+  const bool leader = crank == 0;
+  const int T = R / TM, TP = (T + 1) / 2, cl = (int)blockIdx.x >> 1, ncl = (int)gridDim.x >> 1;
+  const int my = (TP > cl) ? (TP - cl + ncl - 1) / ncl : 0;
+  const int nch = (N + X_WC - 1) / X_WC;
+  const float eps = __int_as_float(eps_bits);
+  if (nch > X_MAXCH) __trap();
+
+  if (tid == 0) {
+    for (int s = 0; s < XST; ++s) mbar_init(&B.xfull[s], 1);
+    mbar_init(&B.w, 1); mbar_init(&B.wpeer, 1);
+    for (int b = 0; b < 2; ++b) { mbar_init(&B.aready[b], 8); mbar_init(&B.aempty[b], 1); }
+    for (int a = 0; a < 4; ++a) { mbar_init(&B.acc[a], 1); mbar_init(&B.acc_empty[a], 8); }
+    fence_barrier_init();
+    prefetch_map(&mx); prefetch_map(&mw); prefetch_map(&mo);
+  }
+  if (warp == 1) { tmem_alloc2(smem_u32(&B.tmem), 512); tmem_relinquish2(); }
+  tc_fence_before();
+  __syncthreads();
+  cluster_sync();
+  tc_fence_after();
+  const uint32_t tmem = B.tmem;
+
+  if (warp == 0) {
+    if (lane == 0) {                                         // this CTA's half of every W' chunk, once
+      mbar_expect_tx(&B.w, nch * X_WT);
+      for (int j = 0; j < nch; ++j)
+        for (int b = 0; b < 4; ++b) tma_load_2d(su + X_O_W + j * X_WT + b * X_WB, &mw, &B.w, b * 32, j * X_WC + crank * X_WH);
+      if (!leader) { mbar_wait(&B.w, 0); mbar_arrive_remote(&B.wpeer, 0); }
+    }
+  } else if (warp == 1) {
+    if (leader) {
+      mbar_wait(&B.w, 0);
+      mbar_wait_cl(&B.wpeer, 0);
+      int u = 0;
+      for (int i = 0; i < my; ++i) {
+        const int b = i & 1;
+        mbar_wait_cl(&B.aready[b], (i >> 1) & 1);           // both CTAs' tiles i in A[b]
+        for (int j = 0; j < nch; ++j, ++u) {
+          const int a = u & 3;
+          if (u >= 4) mbar_wait_cl(&B.acc_empty[a], ((u >> 2) - 1) & 1);
+          tc_fence_after();
+          const uint32_t wj = su + X_O_W + j * X_WT;
+          if (elect_one()) {
+#pragma unroll
+            for (int ks = 0; ks < 16; ++ks) {                // K step: 8 channels (8 TMEM columns of A; 32 bytes of a W' row)
+              const uint32_t bx = (uint32_t)(ks >> 2), ko = (uint32_t)(ks & 3) * 2;
+              umma_ts2_tf32(tmem + X_COL_ACC + a * X_WC, tmem + b * DP + ks * 8, desc_k128(wj + bx * X_WB) + ko, X_IDESC, ks ? 1u : 0u);
+            }
+            tc_commit2_mc(&B.acc[a], 3);
+            if (j == nch - 1) tc_commit2_mc(&B.aempty[b], 3);
+          }
+          __syncwarp();
+        }
+      }
+    }
+  } else if (warp < 6) {                                     // the normaliser: tile i from slot i % XST into A[i & 1]
+    const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane;
+    auto load_x = [&](int i) {
+      const int s = i % XST, r0 = (2 * (cl + i * ncl) + crank) * TM;   // past R (an odd last tile's partner): zero fill
+      mbar_expect_tx(&B.xfull[s], X_XT);
+      for (int b = 0; b < 4; ++b) tma_load_2d(su + X_O_X + s * X_XT + b * X_XB, &mx, &B.xfull[s], b * 32, r0);
+    };
+    if (warp == 2 && lane == 0)
+      for (int i = 0; i < XST && i < my; ++i) load_x(i);
+    for (int i = 0; i < my; ++i) {
+      const int s = i % XST, b = i & 1;
+      const uint32_t xs = su + X_O_X + s * X_XT, rr = opaque(r);
+      mbar_wait(&B.xfull[s], (i / XST) & 1);
+      const float k0 = __uint_as_float(lds128v(xs + xoff(rr, 0)).x);
+      f2 s1 = mk2(0.f, 0.f), s2 = s1, s3 = s1, s4 = s1;
+      const f2 nk = dup2(-k0);
+#pragma unroll 4
+      for (int q = 0; q < 32; ++q) {
+        const uint4 u = lds128v(xs + xoff(rr, q));
+        const f2 t0 = add2(mk2u(u.x, u.y), nk), t1 = add2(mk2u(u.z, u.w), nk);
+        s1 = add2(s1, t0); s2 = fma2(t0, t0, s2); s3 = add2(s3, t1); s4 = fma2(t1, t1, s4);
+      }
+      float mean, rstd, m1;
+      finish_stats(add2(s1, s3), add2(s2, s4), k0, eps, mean, rstd, m1);
+      const f2 rs = dup2(rstd), nmr = dup2(-mean * rstd);
+      if (i >= 2) mbar_wait(&B.aempty[b], ((i >> 1) - 1) & 1);   // A[b]'s previous tile multiplied
+      tc_fence_after();
+      const uint32_t ta = tmem + (lb << 16) + (uint32_t)b * DP;
+#pragma unroll 1
+      for (int c = 0; c < 8; ++c) {                          // 16 channels per TMEM store
+        uint32_t o[16];
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+          const uint4 u = lds128v(xs + xoff(rr, c * 4 + e));
+          const f2 y0 = fma2(mk2u(u.x, u.y), rs, nmr), y1 = fma2(mk2u(u.z, u.w), rs, nmr);
+          o[4 * e] = tf32_rna(lo2(y0)); o[4 * e + 1] = tf32_rna(hi2(y0)); o[4 * e + 2] = tf32_rna(lo2(y1)); o[4 * e + 3] = tf32_rna(hi2(y1));
+        }
+        tmem_st16(ta + c * 16, o);
+      }
+      tmem_wait_st();
+      tc_fence_before();
+      __syncwarp();
+      if (lane == 0) mbar_arrive_remote_relaxed(&B.aready[b], 0);
+      named_bar_sync(1, 128);                                // the slot read by the normaliser's 4 warps: the next tile into it
+      if (warp == 2 && lane == 0 && i + XST < my) load_x(i + XST);
+    }
+  } else {                                                   // drain group g: the CTA's chunks u = g mod 2
+    const int g = (warp - 6) >> 2;
+    const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane;
+    const bool gl = warp == 6 + 4 * g && lane == 0;          // the group's TMA store issuer
+    const uint32_t stg = su + X_O_S + (uint32_t)g * 2 * X_ST;
+    int u = 0, nst = 0;
+    for (int i = 0; i < my; ++i) {
+      const int r0 = (2 * (cl + i * ncl) + crank) * TM;
+      for (int j = 0; j < nch; ++j, ++u) {
+        if ((u & 1) != g) continue;
+        const int a = u & 3;
+        mbar_wait(&B.acc[a], (u >> 2) & 1);
+        tc_fence_after();
+        uint32_t v[64];
+        tmem_ld32(tmem + (lb << 16) + X_COL_ACC + a * X_WC, *reinterpret_cast<uint32_t(*)[32]>(v));
+        tmem_ld32(tmem + (lb << 16) + X_COL_ACC + a * X_WC + 32, *reinterpret_cast<uint32_t(*)[32]>(v + 32));
+        tmem_wait_ld();
+        tc_fence_before();
+        __syncwarp();
+        if (lane == 0) mbar_arrive_remote_relaxed(&B.acc_empty[a], 0);
+#pragma unroll
+        for (int h = 0; h < 2; ++h, ++nst) {                 // weight rows j 64 + 32 h ..: [32 weight rows][128 pair rows] by TMA
+          const uint32_t sb = stg + (uint32_t)(nst & 1) * X_ST;
+          if (gl && nst >= 2) asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory");   // the slot's previous store read it
+          named_bar_sync(2 + g, 128);
+#pragma unroll
+          for (int k = 0; k < 32; ++k) sts32(sb + (uint32_t)k * 512u + r * 4u, v[32 * h + k]);
+          fence_proxy_async();
+          named_bar_sync(2 + g, 128);
+          if (gl) { tma_store_2d(&mo, sb, r0, j * X_WC + 32 * h); tma_store_commit(); }
+        }
+      }
+    }
+    if (gl) tma_store_wait0();
+  }
+  tc_fence_before();
+  __syncthreads();
+  cluster_sync();
+  if (warp == 1) { tc_fence_after(); tmem_dealloc2(tmem, 512); }
+}
+#endif  // FWDX
 
 // ================================================================================================ backward, normalised tile
 // -DBWD3 (bo_hoist_bwd3_sm100; bf16, and -DTF32 for fp32): the backward for any number of weight rows. The row threads turn their tile
