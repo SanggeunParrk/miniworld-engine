@@ -4,6 +4,7 @@
 //
 //   forward   ln_fwd         x -> y = LN(x) (bf16) + mean / rstd (fp32)
 //             front_bias     the bias GEMM's [M, Hp] output -> head-major sbias [B, H, L, L] = bf16(bias / scale), masked keys -inf
+//             ln_bias_fwd    (fp16 inference, C <= 256, H <= 8) ln_fwd + the bias projection + front_bias in one pass: y fp16 and sbias
 //             (core)         triattn_fwd with `gate`: u = sigmoid(g) o O in its epilogue (O itself only when the backward needs it)
 //             residual       out = x + drop o t        (t = u Wo^T from cuBLAS; drop = [B, L, C] broadcast over the rows i)
 //   backward  gate_bwd_in    ddrop = dy o drop
@@ -20,6 +21,7 @@
 #include <c10/cuda/CUDAException.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include "sm90.cuh"
 #include <cstdint>
 #include <tuple>
 #include <type_traits>
@@ -118,6 +120,344 @@ __global__ void __launch_bounds__(256) ln_fwd_k(const bf16* __restrict__ x, cons
     }
     if (sub == 0 && ok) { mean_o[row] = mean; rstd_o[row] = rstd; }
   }
+}
+
+// fp16-core inference front, LayerNorm and bias in one pass: y = LN(x) * w + b as fp16 (the q | k | v | g GEMM's input, the values ln_fwd_k
+// writes) and the head-major scaled bias sbias[b, h, i, j] = fp16(sum_c y16[c] Wb[h, c] / scale) (finite values clamped to the fp16 range,
+// -inf where mask[b, j] is false) from the same registers: the bias GEMM re-read all of y for 8 output columns, and front_bias was a third
+// launch.  A block = the 128 logical rows (b, i, j0 .. j0 + 127): they arrive in shared memory by bulk copies (one 64 KiB copy; the ending
+// node's strided rows one copy each), each warp normalises 16 of them (one row per warp, 8 channels per lane, C <= 256), keeps its [8 heads]
+// [8 channels] slice of Wb in registers and reduce-scatters the 8 dot products over the warp (9 shuffles: lane l ends with head l / 4); the
+// block's [8 heads][128 keys] bias tile leaves through shared memory in 16-byte stores.
+constexpr int LNB_ROWS = 128;
+__global__ void __launch_bounds__(256, 2) ln_bias_fwd_k(const bf16* __restrict__ x, const float* __restrict__ w, const float* __restrict__ bs,
+                                                        const bf16* __restrict__ wb, const bool* __restrict__ mask, __half* __restrict__ y,
+                                                        __half* __restrict__ sbias, int C, float eps, int L, int tr, int H, float inv_scale) {
+  extern __shared__ __align__(128) unsigned char lnb_sm[];
+  bf16* xs = reinterpret_cast<bf16*>(lnb_sm);                                        // [128 rows][C]
+  __half* sb = reinterpret_cast<__half*>(lnb_sm + LNB_ROWS * C * 2);                 // [8 heads][128 keys]
+  uint64_t* bar = reinterpret_cast<uint64_t*>(lnb_sm + LNB_ROWS * C * 2 + 8 * LNB_ROWS * 2);
+  const uint32_t sbar = (uint32_t)__cvta_generic_to_shared(bar), sxs = (uint32_t)__cvta_generic_to_shared(xs);
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+  const long row0 = (long)blockIdx.x * LNB_ROWS, LL = (long)L * L;
+  const long b = row0 / LL, rem = row0 - b * LL, i = rem / L, j0 = rem - i * L;
+  if (tid == 0) {
+    asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "r"(sbar) : "memory");
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  __syncthreads();
+  if (warp == 0) {
+    const uint32_t rb = (uint32_t)C * 2;
+    if (lane == 0) asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(sbar), "r"(LNB_ROWS * rb) : "memory");
+    __syncwarp();
+    if (!tr) {
+      if (lane == 0)
+        asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+                     :: "r"(sxs), "l"(x + row0 * C), "r"(LNB_ROWS * rb), "r"(sbar) : "memory");
+    } else {
+      for (int r = lane; r < LNB_ROWS; r += 32)
+        asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+                     :: "r"(sxs + r * rb), "l"(x + phys_row(row0 + r, L, tr) * C), "r"(rb), "r"(sbar) : "memory");
+    }
+  }
+  const bool act = lane < (C >> 3);
+  float wr[8][8], ww[8], bb[8];
+#pragma unroll
+  for (int h = 0; h < 8; ++h) {
+    if (act) unpack8(*reinterpret_cast<const uint4*>(wb + (long)h * C + lane * 8), wr[h]);
+    else {
+#pragma unroll
+      for (int e = 0; e < 8; ++e) wr[h][e] = 0.f;
+    }
+  }
+#pragma unroll
+  for (int e = 0; e < 8; ++e) { ww[e] = act ? w[lane * 8 + e] : 0.f; bb[e] = act ? bs[lane * 8 + e] : 0.f; }
+  asm volatile("{\n.reg .pred p;\nLNB_WAIT:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], 0;\n@!p bra LNB_WAIT;\n}\n" :: "r"(sbar) : "memory");
+#pragma unroll 2
+  for (int k = 0; k < LNB_ROWS / 8; ++k) {
+    const int r = warp + 8 * k;
+    const long row = row0 + r;
+    float v[8];
+    float s = 0.f;
+    if (act) {
+      unpack8(*reinterpret_cast<const uint4*>(xs + r * C + lane * 8), v);
+#pragma unroll
+      for (int e = 0; e < 8; ++e) s += v[e];
+    }
+    const float mean = warp_sum(s) / C;
+    float q = 0.f;
+    if (act) {
+#pragma unroll
+      for (int e = 0; e < 8; ++e) { const float d = v[e] - mean; q = fmaf(d, d, q); }
+    }
+    const float rstd = rsqrtf(warp_sum(q) / C + eps);
+    float part[8];
+#pragma unroll
+    for (int h = 0; h < 8; ++h) part[h] = 0.f;
+    if (act) {
+      float o[8];
+#pragma unroll
+      for (int e = 0; e < 8; ++e) o[e] = fmaf((v[e] - mean) * rstd, ww[e], bb[e]);
+      const uint4 yv = pack8h(o);
+      *reinterpret_cast<uint4*>(y + row * C + lane * 8) = yv;
+      const uint32_t yw[4] = {yv.x, yv.y, yv.z, yv.w};
+#pragma unroll
+      for (int kk = 0; kk < 4; ++kk) {      // the bias GEMM's input: y as rounded to fp16
+        const float2 f = __half22float2(*reinterpret_cast<const __half2*>(&yw[kk]));
+#pragma unroll
+        for (int h = 0; h < 8; ++h) part[h] = fmaf(f.y, wr[h][2 * kk + 1], fmaf(f.x, wr[h][2 * kk], part[h]));
+      }
+    }
+    // reduce-scatter: halves of the heads over lane bit 4, then bit 3, then bit 2; bits 1 and 0 sum the last one
+    const bool b4 = lane & 16, b3 = lane & 8, b2 = lane & 4;
+    float a4[4], a2[2];
+#pragma unroll
+    for (int kk = 0; kk < 4; ++kk) a4[kk] = (b4 ? part[kk + 4] : part[kk]) + __shfl_xor_sync(0xffffffffu, b4 ? part[kk] : part[kk + 4], 16);
+#pragma unroll
+    for (int kk = 0; kk < 2; ++kk) a2[kk] = (b3 ? a4[kk + 2] : a4[kk]) + __shfl_xor_sync(0xffffffffu, b3 ? a4[kk] : a4[kk + 2], 8);
+    float a1 = (b2 ? a2[1] : a2[0]) + __shfl_xor_sync(0xffffffffu, b2 ? a2[0] : a2[1], 4);
+    a1 += __shfl_xor_sync(0xffffffffu, a1, 2);
+    a1 += __shfl_xor_sync(0xffffffffu, a1, 1);
+    if ((lane & 3) == 0) {
+      const bool keep = mask == nullptr || mask[b * L + j0 + r];
+      sb[(lane >> 2) * LNB_ROWS + r] = __float2half_rn(keep ? fmaxf(fminf(a1 * inv_scale, 6.0e4f), -6.0e4f) : -INFINITY);
+    }
+  }
+  __syncthreads();
+  if (tid < 8 * LNB_ROWS / 8) {      // 16 bytes = 8 keys per thread
+    const int h = tid / (LNB_ROWS / 8), seg = tid % (LNB_ROWS / 8);
+    if (h < H)
+      *reinterpret_cast<uint4*>(sbias + ((b * H + h) * L + i) * L + j0 + seg * 8) = *reinterpret_cast<const uint4*>(sb + h * LNB_ROWS + seg * 8);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// fp16-core inference front at d_pair 256 (q | k | v | g of 4 HD = 64 nch columns, at most 8 heads): y = LN(x) (fp16, never stored),
+// [q | k | v | g] = y W^T (fp16 out, the [M, 4 HD] layout of the projection GEMM it replaces) and the head-major scaled bias of the fp16
+// core, in one kernel -- it replaces ln_fwd / ln_bias_fwd, the projection GEMM (which re-read y) and front_bias.
+// Tile = 128 rows (one (b, i), 128 consecutive j).  384 threads: warpgroup 0 = TMA producer, warpgroups 1 / 2 = rows 0-63 / 64-127.
+// A consumer warp ldmatrix-loads its 16 rows of x straight into the wgmma A-fragment layout (16 k16 blocks), releases the x stage and
+// normalises in registers (a row's 256 channels sit on the 4 lanes of a quad: the statistics are two quad sums; y = fp16 of the fp32
+// LayerNorm, the value ln_fwd_k writes).  The fp16 weights [4 HD][256] do not fit beside it (512 KiB), so they stream through a ring
+// of 64-column chunks (32 KiB) shared by both consumer warpgroups and by the two CTAs of a cluster (each CTA's producer loads half of
+// every chunk, multicast to both: the L2 serves each chunk once per 256 rows); every chunk is 16 m64n64k16 RS wgmma per warpgroup,
+// double-buffered so chunk c + 1 runs on the tensor core while chunk c is stored.  The weight rows are permuted within each chunk so
+// that a lane's 16 accumulator columns of a row are 2 x 8 consecutive output columns: every lane stores 16 contiguous bytes, a warp
+// store covers 8 rows x 64 bytes (whole sectors), no staging.  The bias (8 resident Wb rows, one m64n8 chain) leaves through shared
+// memory as [8 heads][128 keys] in 16-byte stores.  The kernel is HBM-bound: it writes four times what it reads.
+namespace fc {
+constexpr int C = 256, BM = 128, NC = 64, NW = 4;
+constexpr int XT = BM * C;                                // x tile [4 k blocks][128 rows][64], 128B swizzle (64 KiB)
+constexpr int WT = NC * C;                                // weight chunk [4 k blocks][64 rows][64] fp16 (32 KiB)
+constexpr int WBT = 8 * C;                                // Wb [4 k blocks][8 rows][64] fp16 (4 KiB)
+constexpr int THREADS = 384;
+constexpr int SMEM = 1024 + (XT + NW * WT + WBT) * 2 + 2 * C * 4 + 8 * BM * 2 + 256;
+static_assert(SMEM <= 232448, "smem");
+__device__ __forceinline__ void mma_n64(float (&d)[32], const uint32_t (&a)[4], uint64_t b, uint32_t scale_d) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, %37, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 " SM90_L32 ", {%32, %33, %34, %35}, %36, p, 1, 1, 0;\n}\n"
+               : SM90_D32(0) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b), "r"(scale_d));
+}
+__device__ __forceinline__ void mma_n8(float (&d)[4], const uint32_t (&a)[4], uint64_t b, uint32_t scale_d) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, %9, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n8k16.f32.f16.f16 {%0, %1, %2, %3}, {%4, %5, %6, %7}, %8, p, 1, 1, 0;\n}\n"
+               : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b), "r"(scale_d));
+}
+__device__ __forceinline__ uint32_t h2(float a, float b) {            // fp16 pair, a -> low half
+  uint32_t r;
+  asm("cvt.rn.f16x2.f32 %0, %1, %2;" : "=r"(r) : "f"(b), "f"(a));
+  return r;
+}
+__device__ __forceinline__ uint32_t cta_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(r)); return r; }
+__device__ __forceinline__ void cluster_sync() { asm volatile("barrier.cluster.arrive.release;\nbarrier.cluster.wait.acquire;\n" ::: "memory"); }
+__device__ __forceinline__ void arrive_rank(uint32_t bar, uint32_t rank) {      // arrive on the barrier at this offset in CTA `rank`
+  asm volatile("{\n.reg .b32 ra;\nmapa.shared::cluster.u32 ra, %0, %1;\nmbarrier.arrive.release.cluster.shared::cluster.b64 _, [ra];\n}\n"
+               :: "r"(bar), "r"(rank) : "memory");
+}
+__device__ __forceinline__ void load_2d_mc(const void* map, uint32_t dst, uint32_t bar, int c0, int c1, uint16_t mask) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;\n"
+               :: "r"(dst), "l"(map), "r"(bar), "r"(c0), "r"(c1), "h"(mask) : "memory");
+}
+}  // namespace fc
+
+template <int NCH>     // 64-column chunks of q | k | v | g (unrolled: no wgmma may be in flight across a branch or a back edge)
+__global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fc::THREADS, 1) front_c256_sm90(
+    int L, int ntiles, float eps, float inv_scale, int tr, int H,
+    const __grid_constant__ CUtensorMap xmap,             // x [R][256] bf16, box (64, 128), 128B swizzle (tr: the 4-D transposed pair map)
+    const __grid_constant__ CUtensorMap wmap,             // W [nch 64][256] fp16 (rows permuted per chunk), box (64, 64), 128B swizzle
+    const __grid_constant__ CUtensorMap wbmap,            // Wb [8][256] fp16 (rows >= H zero), box (64, 8), 128B swizzle
+    const float* __restrict__ LNW, const float* __restrict__ LNB,
+    const bool* __restrict__ MASK,                        // [B][L] key mask or nullptr
+    __half* __restrict__ OUT,                             // [R][nch 64] fp16: q | k | v | g
+    __half* __restrict__ SBIAS) {                         // [B][H][L][L] fp16
+  using namespace fc;
+  using sm90::sa;
+  constexpr int nch = NCH;
+  extern __shared__ __align__(1024) unsigned char raw[];
+  unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
+  const uint32_t sX = sa(smb), sW = sX + XT * 2, sWb = sW + NW * WT * 2, sGB = sWb + WBT * 2, sSB = sGB + 2 * C * 4, bar0 = sSB + 8 * BM * 2;
+  float* gb = reinterpret_cast<float*>(smb + (sGB - sX));                    // gamma [256] | beta [256]
+  __half* sbt = reinterpret_cast<__half*>(smb + (sSB - sX));                 // the tile's bias [8 heads][128 keys]
+  const uint32_t xf = bar0, xe = bar0 + 8, wbf = bar0 + 16;                 // xe: count 8 (every consumer warp holds its fragments)
+  auto wf = [&](int s) { return bar0 + 24 + 8 * s; };
+  auto we = [&](int s) { return bar0 + 24 + 8 * (NW + s); };                // count 16: every consumer warp of both CTAs
+  const int tid = threadIdx.x, wg = tid >> 7, lane = tid & 31;
+  const uint32_t rank = cta_rank(), peer = rank ^ 1u;
+  for (int c = tid; c < 2 * C; c += THREADS) gb[c] = c < C ? LNW[c] : LNB[c - C];
+  if (tid == 0) {
+    uint64_t* bars = reinterpret_cast<uint64_t*>(smb + (bar0 - sX));
+    sm90::bar_init(bars, 1); sm90::bar_init(bars + 1, 8); sm90::bar_init(bars + 2, 1);
+    for (int s = 0; s < NW; ++s) { sm90::bar_init(bars + 3 + s, 1); sm90::bar_init(bars + 3 + NW + s, 16); }
+    sm90::bar_init_fence();
+  }
+  __syncthreads();
+  cluster_sync();                                         // the peer's barriers exist before a multicast or a remote arrive reaches them
+
+  if (wg == 0) {
+    sm90::reg_dealloc<40>();
+    if (tid == 0) {
+      sm90::prefetch_map(&xmap); sm90::prefetch_map(&wmap); sm90::prefetch_map(&wbmap);
+      sm90::expect_tx(wbf, WBT * 2);
+      for (int kb = 0; kb < 4; ++kb) sm90::load_2d(&wbmap, sWb + kb * 8 * 128, wbf, kb * 64, 0);
+      int ws = 0, wph = 0, xph = 0;
+      const int t0 = blockIdx.x;
+      if (t0 < ntiles) {
+        sm90::expect_tx(xf, XT * 2);
+        for (int kb = 0; kb < 4; ++kb) sm90::load_pair(&xmap, sX + kb * BM * 128, xf, kb * 64, t0 * BM, L, tr);
+      }
+      for (int t = t0; t < ntiles; t += gridDim.x) {
+        for (int c = 0; c < nch; ++c) {
+          if (c == (nch > 2 ? 2 : nch - 1) && t + (int)gridDim.x < ntiles) {     // the next tile's x, once the consumers hold this one's fragments
+            sm90::wait(xe, xph); xph ^= 1;
+            sm90::expect_tx(xf, XT * 2);
+            for (int kb = 0; kb < 4; ++kb) sm90::load_pair(&xmap, sX + kb * BM * 128, xf, kb * 64, (t + gridDim.x) * BM, L, tr);
+          }
+          sm90::wait(we(ws), wph ^ 1);                     // the stage is free in both CTAs
+          sm90::expect_tx(wf(ws), WT * 2);
+          for (int kb = 2 * (int)rank; kb < 2 * (int)rank + 2; ++kb)
+            load_2d_mc(&wmap, sW + ws * WT * 2 + kb * NC * 128, wf(ws), kb * 64, c * NC, (uint16_t)3);
+          if (++ws == NW) { ws = 0; wph ^= 1; }
+        }
+      }
+    }
+  } else {
+    sm90::reg_alloc<232>();
+    const int w = wg - 1, T = tid - 128, wi = (tid & 127) >> 5, g8 = lane >> 2, t4 = lane & 3;
+    const int lrow = 64 * w + 16 * wi + (lane & 7) + 8 * ((lane >> 3) & 1), lcol8 = lane >> 4;
+    sm90::wait(wbf, 0);
+    int ws = 0, wph = 0, xph = 0;
+    for (int t = blockIdx.x; t < ntiles; t += gridDim.x) {
+      sm90::wait(xf, xph); xph ^= 1;
+      auto chunk = [&](int c16) { return sX + (c16 >> 3) * BM * 128 + lrow * 128 + (((c16 & 7) ^ (lrow & 7)) << 4); };
+      uint32_t ya[16][4];
+#pragma unroll
+      for (int kb = 0; kb < 16; ++kb) sm90::ldsm_x4(chunk(2 * kb + lcol8), ya[kb]);
+#pragma unroll
+      for (int kb = 0; kb < 16; ++kb) sm90::fence_regs(ya[kb]);
+      sm90::fence_proxy_async();
+      __syncwarp();
+      if (lane == 0) sm90::arrive(xe);
+      // LayerNorm of rows g (words 0, 2 of each block) and g + 8 (words 1, 3), fp32
+      float s0 = 0.f, s1 = 0.f;
+#pragma unroll
+      for (int kb = 0; kb < 16; ++kb) {
+        const float2 a = sm90::bf2f(ya[kb][0]), b = sm90::bf2f(ya[kb][2]), c = sm90::bf2f(ya[kb][1]), d = sm90::bf2f(ya[kb][3]);
+        s0 += (a.x + a.y) + (b.x + b.y); s1 += (c.x + c.y) + (d.x + d.y);
+      }
+      const float mu0 = sm90::quad_sum(s0) * (1.f / C), mu1 = sm90::quad_sum(s1) * (1.f / C);
+      float v0 = 0.f, v1 = 0.f;
+#pragma unroll
+      for (int kb = 0; kb < 16; ++kb) {
+        const float2 a = sm90::bf2f(ya[kb][0]), b = sm90::bf2f(ya[kb][2]), c = sm90::bf2f(ya[kb][1]), d = sm90::bf2f(ya[kb][3]);
+        v0 += (a.x - mu0) * (a.x - mu0) + (a.y - mu0) * (a.y - mu0) + (b.x - mu0) * (b.x - mu0) + (b.y - mu0) * (b.y - mu0);
+        v1 += (c.x - mu1) * (c.x - mu1) + (c.y - mu1) * (c.y - mu1) + (d.x - mu1) * (d.x - mu1) + (d.y - mu1) * (d.y - mu1);
+      }
+      const float r0 = rsqrtf(sm90::quad_sum(v0) * (1.f / C) + eps), r1 = rsqrtf(sm90::quad_sum(v1) * (1.f / C) + eps);
+#pragma unroll
+      for (int kb = 0; kb < 16; ++kb) {
+#pragma unroll
+        for (int hf = 0; hf < 2; ++hf) {                      // channels 16 kb + 8 hf + 2 t4 + {0, 1}
+          const int k = 16 * kb + 8 * hf + 2 * t4;
+          const float2 gm = *reinterpret_cast<const float2*>(gb + k), bt = *reinterpret_cast<const float2*>(gb + C + k);
+          const float2 a = sm90::bf2f(ya[kb][2 * hf]), c = sm90::bf2f(ya[kb][2 * hf + 1]);
+          ya[kb][2 * hf] = h2(fmaf((a.x - mu0) * r0, gm.x, bt.x), fmaf((a.y - mu0) * r0, gm.y, bt.y));
+          ya[kb][2 * hf + 1] = h2(fmaf((c.x - mu1) * r1, gm.x, bt.x), fmaf((c.y - mu1) * r1, gm.y, bt.y));
+        }
+      }
+      const long row = (long)t * BM + 64 * w + 16 * wi + g8;      // this lane's first row; its second is row + 8
+      const int ldo = nch * NC;
+      float acc0[32], acc1[32];
+      auto take = [&](float (&acc)[32]) -> int {               // the next ring stage: wait for its chunk, issue its GEMM
+        const int s = ws;
+        sm90::wait(wf(s), wph);
+        sm90::wg_fence();
+#pragma unroll
+        for (int kb = 0; kb < 16; ++kb)
+          mma_n64(acc, ya[kb], sm90::desc_k128(sW + s * WT * 2 + (kb >> 2) * NC * 128 + (kb & 3) * 32), kb ? 1u : 0u);
+        sm90::wg_commit();
+        if (++ws == NW) { ws = 0; wph ^= 1; }
+        return s;
+      };
+      // chunk c retired: release its stage in both CTAs, store it (a lane's two runs of 8 columns of rows g, g + 8)
+      auto finish = [&](float (&acc)[32], int s, int c) {
+        sm90::fence_regs(acc);
+        __syncwarp();
+        if (lane == 0) { arrive_rank(we(s), rank); arrive_rank(we(s), peer); }
+#pragma unroll
+        for (int r = 0; r < 2; ++r) {
+#pragma unroll
+          for (int hf = 0; hf < 2; ++hf) {
+            uint4 v;
+            v.x = h2(acc[4 * (4 * r + 0) + 2 * hf], acc[4 * (4 * r + 0) + 2 * hf + 1]);
+            v.y = h2(acc[4 * (4 * r + 1) + 2 * hf], acc[4 * (4 * r + 1) + 2 * hf + 1]);
+            v.z = h2(acc[4 * (4 * r + 2) + 2 * hf], acc[4 * (4 * r + 2) + 2 * hf + 1]);
+            v.w = h2(acc[4 * (4 * r + 3) + 2 * hf], acc[4 * (4 * r + 3) + 2 * hf + 1]);
+            *reinterpret_cast<uint4*>(OUT + (row + 8 * hf) * ldo + c * NC + 32 * r + 8 * t4) = v;
+          }
+        }
+      };
+      // chunks in pairs (nch is even), so each accumulator set is a fixed register range: chunk c + 1 runs while chunk c is stored
+      int stg0 = take(acc0);
+#pragma unroll
+      for (int c = 0; c < nch; c += 2) {
+        const int stg1 = take(acc1);
+        sm90::wg_wait<1>();
+        finish(acc0, stg0, c);
+        if (c + 2 < nch) {
+          stg0 = take(acc0);
+          sm90::wg_wait<1>();
+        } else {
+          sm90::wg_wait<0>();
+        }
+        finish(acc1, stg1, c + 1);
+      }
+      // the bias: one m64n8 chain over the resident Wb; lanes hold heads 2 t4, 2 t4 + 1 of rows g, g + 8
+      float bacc[4];
+      sm90::wg_fence();
+#pragma unroll
+      for (int kb = 0; kb < 16; ++kb) mma_n8(bacc, ya[kb], sm90::desc_k128(sWb + (kb >> 2) * 8 * 128 + (kb & 3) * 32), kb ? 1u : 0u);
+      sm90::wg_commit();
+      sm90::wg_wait<0>();
+      sm90::fence_regs(bacc);
+      const long bi = (long)t * BM / L, b = bi / L, i = bi - b * L;
+      const int j0 = (int)((long)t * BM - bi * L);
+#pragma unroll
+      for (int hf = 0; hf < 2; ++hf) {
+        const int r = 64 * w + 16 * wi + g8 + 8 * hf;           // row in the tile = key j0 + r
+        const bool keep = MASK == nullptr || MASK[b * L + j0 + r];
+#pragma unroll
+        for (int e = 0; e < 2; ++e)
+          sbt[(2 * t4 + e) * BM + r] = __float2half_rn(keep ? fmaxf(fminf(bacc[2 * hf + e] * inv_scale, 6.0e4f), -6.0e4f) : -INFINITY);
+      }
+      sm90::named_sync(1, 256);
+      if (T < 8 * BM / 8) {                                     // 16 bytes = 8 keys per thread
+        const int h = T / (BM / 8), seg = T % (BM / 8);
+        if (h < H) *reinterpret_cast<uint4*>(SBIAS + ((b * H + h) * L + i) * L + j0 + seg * 8) = *reinterpret_cast<const uint4*>(sbt + h * BM + seg * 8);
+      }
+      sm90::named_sync(1, 256);                                 // the staging is read before the next tile writes it
+    }
+  }
+  cluster_sync();                                         // no CTA leaves while its peer may still multicast into it or arrive on it
 }
 
 // sbias[b, h, i, j] = T(qkvb[(b, i, j), bias_col + h] / scale), -inf where mask[b, j] is false (T = bf16, or fp16 for the fp16 inference core:
@@ -361,6 +701,66 @@ std::vector<torch::Tensor> g_ln_fwd(torch::Tensor x, torch::Tensor w, torch::Ten
   return {y, mean, rstd};
 }
 
+// x [M, C] bf16 (C <= 256), wb [8, C] bf16 (heads >= H zero) -> (y fp16 [M, C], sbias fp16 [B, H, L, L] = bias / scale, masked keys -inf)
+std::vector<torch::Tensor> g_ln_bias_fwd(torch::Tensor x, torch::Tensor w, torch::Tensor b, torch::Tensor wb, torch::Tensor mask, double eps,
+                                         int64_t B, int64_t L, int64_t H, bool trans, double scale) {
+  TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous() && x.scalar_type() == torch::kBFloat16, "x [M, C] bf16 contiguous");
+  const long M = x.size(0);
+  const int C = (int)x.size(1);
+  TORCH_CHECK(C % 8 == 0 && C <= 256 && M == B * L * L && H >= 1 && H <= 8 && L % LNB_ROWS == 0, "C % 8 == 0, C <= 256, M = B L L, H <= 8, L % 128 == 0");
+  TORCH_CHECK(wb.is_cuda() && wb.is_contiguous() && wb.scalar_type() == torch::kBFloat16 && wb.size(0) == 8 && wb.size(1) == C, "wb [8, C] bf16");
+  TORCH_CHECK(w.is_contiguous() && b.is_contiguous() && w.scalar_type() == torch::kFloat32 && b.scalar_type() == torch::kFloat32, "w, b fp32");
+  auto y = torch::empty_like(x, x.options().dtype(torch::kHalf));
+  auto sbias = torch::empty({B, H, L, L}, x.options().dtype(torch::kHalf));
+  torch::Tensor mk;
+  const bool* mp = nullptr;
+  if (mask.numel() > 0) { mk = mask.to(torch::kBool).contiguous(); TORCH_CHECK(mk.numel() == B * L, "mask [B, L]"); mp = mk.data_ptr<bool>(); }
+  const int smem = LNB_ROWS * C * 2 + 8 * LNB_ROWS * 2 + 16;
+  static bool attr = false;
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(ln_bias_fwd_k, cudaFuncAttributeMaxDynamicSharedMemorySize, LNB_ROWS * 256 * 2 + 8 * LNB_ROWS * 2 + 16)); attr = true; }
+  ln_bias_fwd_k<<<(unsigned)(M / LNB_ROWS), 256, smem, stream()>>>(cbp(x), w.data_ptr<float>(), b.data_ptr<float>(), cbp(wb), mp,
+                                                                   reinterpret_cast<__half*>(y.data_ptr()), reinterpret_cast<__half*>(sbias.data_ptr()),
+                                                                   C, (float)eps, (int)L, (int)trans, (int)H, (float)(1.0 / scale));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {y, sbias};
+}
+
+// x [M, 256] bf16 (the pair's physical rows), w16 [4 HD, 256] fp16 (rows permuted within each 64-row chunk, see front_c256_sm90),
+// wb16 [8, 256] fp16 (heads >= H zero) -> (q | k | v | g fp16 [M, 4 HD], sbias fp16 [B, H, L, L] = bias / scale, masked keys -inf)
+std::vector<torch::Tensor> g_front_c256(torch::Tensor x, torch::Tensor w, torch::Tensor b, torch::Tensor w16, torch::Tensor wb16, torch::Tensor mask,
+                                        double eps, int64_t B, int64_t L, int64_t H, bool trans, double scale) {
+  using namespace sm90;
+  TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous() && x.scalar_type() == torch::kBFloat16 && x.size(1) == fc::C, "x [M, 256] bf16");
+  const long M = x.size(0);
+  TORCH_CHECK(M == B * L * L && L % fc::BM == 0 && H >= 1 && H <= 8, "M = B L L, L % 128 == 0, H <= 8");
+  TORCH_CHECK(w16.is_contiguous() && w16.scalar_type() == torch::kHalf && w16.size(1) == fc::C && w16.size(0) % fc::NC == 0, "w16 [64 n, 256] fp16");
+  TORCH_CHECK(w16.size(0) == 16 * fc::NC, "4 HD = 1024 (8 heads x 32)");
+  TORCH_CHECK(wb16.is_contiguous() && wb16.scalar_type() == torch::kHalf && wb16.size(0) == 8 && wb16.size(1) == fc::C, "wb16 [8, 256] fp16");
+  TORCH_CHECK(w.is_contiguous() && b.is_contiguous() && w.scalar_type() == torch::kFloat32 && b.scalar_type() == torch::kFloat32, "w, b fp32");
+  const int nch = (int)(w16.size(0) / fc::NC);
+  auto out = torch::empty({M, (long)nch * fc::NC}, x.options().dtype(torch::kHalf));
+  auto sbias = torch::empty({B, H, L, L}, x.options().dtype(torch::kHalf));
+  torch::Tensor mk;
+  const bool* mp = nullptr;
+  if (mask.numel() > 0) { mk = mask.to(torch::kBool).contiguous(); TORCH_CHECK(mk.numel() == B * L, "mask [B, L]"); mp = mk.data_ptr<bool>(); }
+  const uint64_t C = fc::C;
+  CUtensorMap xm = trans ? make_map<4>(x.data_ptr(), {C, (uint64_t)L, (uint64_t)L, (uint64_t)B}, {(uint64_t)L * C, C, (uint64_t)L * L * C},
+                                       {64, 128, 1, 1}, CU_TENSOR_MAP_SWIZZLE_128B, "x")
+                         : make_map<2>(x.data_ptr(), {C, (uint64_t)M}, {C}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "x");
+  CUtensorMap wm = make_map<2>(w16.data_ptr(), {C, (uint64_t)w16.size(0)}, {C}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "w16",
+                               CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
+  CUtensorMap wbm = make_map<2>(wb16.data_ptr(), {C, 8}, {C}, {64, 8}, CU_TENSOR_MAP_SWIZZLE_128B, "wb16", CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
+  static bool attr = false;
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(front_c256_sm90<16>, cudaFuncAttributeMaxDynamicSharedMemorySize, fc::SMEM)); attr = true; }
+  const int ntiles = (int)(M / fc::BM);
+  const int grid = std::min(ntiles, num_sms(x.device().index())) & ~1;     // clusters of two CTAs; ntiles is even (L % 128 == 0)
+  front_c256_sm90<16><<<grid, fc::THREADS, fc::SMEM, stream()>>>((int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)H, xm, wm, wbm,
+                                                            w.data_ptr<float>(), b.data_ptr<float>(), mp, reinterpret_cast<__half*>(out.data_ptr()),
+                                                            reinterpret_cast<__half*>(sbias.data_ptr()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {out, sbias};
+}
+
 // qkvb [M, ld] bf16 -> sbias [B, H, L, L] bf16; mask [B, L] bool or empty; L % 128 == 0
 torch::Tensor g_front_bias(torch::Tensor qkvb, torch::Tensor mask, int64_t B, int64_t L, int64_t H, int64_t bias_col, double scale) {
   TORCH_CHECK(L % 128 == 0, "L % 128 == 0");
@@ -505,6 +905,10 @@ std::vector<torch::Tensor> g_pack(torch::Tensor wq, torch::Tensor wk, torch::Ten
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_fwd", &g_ln_fwd, py::arg("x"), py::arg("w"), py::arg("b"), py::arg("eps"), py::arg("L"), py::arg("trans"), py::arg("h16") = false);
+  m.def("ln_bias_fwd", &g_ln_bias_fwd, py::arg("x"), py::arg("w"), py::arg("b"), py::arg("wb"), py::arg("mask"), py::arg("eps"), py::arg("B"),
+        py::arg("L"), py::arg("H"), py::arg("trans"), py::arg("scale"));
+  m.def("front_c256", &g_front_c256, py::arg("x"), py::arg("w"), py::arg("b"), py::arg("w16"), py::arg("wb16"), py::arg("mask"), py::arg("eps"),
+        py::arg("B"), py::arg("L"), py::arg("H"), py::arg("trans"), py::arg("scale"));
   m.def("front_bias", &g_front_bias);
   m.def("gate_u", &g_gate_u);
   m.def("residual", &g_residual);

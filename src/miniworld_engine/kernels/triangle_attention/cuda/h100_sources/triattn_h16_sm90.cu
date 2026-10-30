@@ -33,6 +33,12 @@ using namespace sm90;
 #ifndef TA_ORDER1_MINS
 #define TA_ORDER1_MINS 2048   // from this S on the CTAs running together work on one head (its bias stays L2-resident across the row groups)
 #endif
+#ifndef TA_BIAS_L2
+#define TA_BIAS_L2 (20 << 20) // below TA_ORDER1_MINS: the CTAs running together work on the largest group of heads whose bias (hg S^2 fp16) fits
+#endif                        // this many bytes (all H heads up to 4 x 1536^2: 8 heads at L 1536 thrashed the L2 -- 32 GB of DRAM reads per call)
+#ifndef TA_HG
+#define TA_HG 0               // experiments: a fixed head group (a divisor of H) instead
+#endif
 #ifndef TA_TAU
 #define TA_TAU 8.f        // exact form: a tile raises a row's offset only when its maximum exceeds it by more than this many log2 units
 #endif
@@ -82,6 +88,29 @@ __device__ __forceinline__ void mma_h16_n40(float (&d)[20], const uint32_t (&a)[
 __device__ __forceinline__ uint32_t hmax2(uint32_t a, uint32_t b) { uint32_t r; asm("max.f16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 __device__ __forceinline__ uint32_t hfma2(uint32_t a, uint32_t b, uint32_t c) { uint32_t r; asm("fma.rn.f16x2 %0, %1, %2, %3;" : "=r"(r) : "r"(a), "r"(b), "r"(c)); return r; }
 __device__ __forceinline__ uint32_t hex2(uint32_t a) { uint32_t r; asm("ex2.approx.f16x2 %0, %1;" : "=r"(r) : "r"(a)); return r; }
+// 2^x on f16x2 pairs without the MUFU (FMA / ALU pipes): x clamped at -15 (results below 2^-14.5 flush to 0), j = round(x) by the 1551 shift,
+// f = x - j in [-0.5, 0.5], 2^f by a degree-3 polynomial (Chebyshev-economised Taylor, ~1.2e-4 relative before the fp16 roundings), times 2^j
+// whose fp16 exponent field is the low bits of the shifted sum (15 + j for j >= -14, 0 for j = -15).
+__device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
+  uint32_t t, jf, f, p, s, r;
+  asm("max.f16x2 %0, %1, %2;" : "=r"(x) : "r"(x), "r"(0xCB80CB80u));                 // -15
+  asm("add.rn.f16x2 %0, %1, %2;" : "=r"(t) : "r"(x), "r"(0x660F660Fu));              // + 1551: rounds x to an integer
+  asm("add.rn.f16x2 %0, %1, %2;" : "=r"(jf) : "r"(t), "r"(0xE60FE60Fu));             // - 1551 (exact)
+  asm("sub.rn.f16x2 %0, %1, %2;" : "=r"(f) : "r"(x), "r"(jf));
+  asm("fma.rn.f16x2 %0, %1, %2, %3;" : "=r"(p) : "r"(0x2B1B2B1Bu), "r"(f), "r"(0x33C433C4u));   // c3 f + c2
+  asm("fma.rn.f16x2 %0, %1, %2, %3;" : "=r"(p) : "r"(p), "r"(f), "r"(0x398C398Cu));            // .. f + c1
+  asm("fma.rn.f16x2 %0, %1, %2, %3;" : "=r"(p) : "r"(p), "r"(f), "r"(0x3C003C00u));            // .. f + c0
+  s = (t << 10) & 0x7C007C00u;
+  asm("mul.rn.f16x2 %0, %1, %2;" : "=r"(r) : "r"(p), "r"(s));
+  return r;
+}
+#ifndef TA_POLY
+#define TA_POLY 0         // pairs i (of 16 per row) whose exponentials run as hex2_poly: TA_POLY of every 16 (1, 2, 4 or 8), the rest on the MUFU
+#endif
+__device__ __forceinline__ uint32_t hexp(uint32_t a, int i) {
+  if (TA_POLY > 0 && i % (16 / (TA_POLY > 0 ? TA_POLY : 1)) == (16 / (TA_POLY > 0 ? TA_POLY : 1)) - 1) return hex2_poly(a);
+  return hex2(a);
+}
 __device__ __forceinline__ float hlo(uint32_t a) { return __half2float(__ushort_as_half((unsigned short)(a & 0xffffu))); }
 __device__ __forceinline__ float hhi(uint32_t a) { return __half2float(__ushort_as_half((unsigned short)(a >> 16))); }
 __device__ __forceinline__ uint32_t hdup(float x) { const unsigned short h = __half_as_ushort(__float2half_rn(x)); return (uint32_t)h | ((uint32_t)h << 16); }
@@ -89,10 +118,12 @@ __device__ __forceinline__ float hround(float x) { return __half2float(__float2h
 }  // namespace
 
 // SPEC: the speculative offset (fix list written to FIX); else the exact form, which with FIX set runs the tasks of that list (static schedule).
-// ORD1: task order query tile, row group, head (the CTAs running together share one head's bias), else query tile, head, row group.
+// ORD1: task order query tile, head in its group of hg, row group, head group (the CTAs running together share the bias of hg heads; hg = 1:
+// one head), else query tile, head, row group.
 template <bool SPEC, bool ORD1>
 __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     int N, int H, int S, int ntasks, float scl,          // scl = scale * log2(e)
+    int hg,                                              // ORD1: heads per group (a divisor of H)
     const __grid_constant__ CUtensorMap qmap,            // q [B*N*S][H*32] fp16 (rows may sit at a wider stride), box (32, 128), 64B swizzle
     const __grid_constant__ CUtensorMap kmap,
     const __grid_constant__ CUtensorMap vmap,
@@ -137,7 +168,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   __syncthreads();
   auto decode = [&](int t, int& b, int& h, int& qt, int& g) {
     qt = t % QTILES; int r = t / QTILES;
-    if (ORD1) { g = r % NG; r /= NG; h = r % H; b = r / H; }
+    if (ORD1) { const int hl = r % hg; r /= hg; g = r % NG; r /= NG; h = (r % (H / hg)) * hg + hl; b = r / (H / hg); }
     else        { h = r % H; r /= H; g = r % NG; b = r / NG; }
   };
   auto row0 = [&](int b, int n) -> int { n = min(n, N - 1); return (b * N + n) * S; };   // first (b, n) row; a padding row reads row N - 1
@@ -273,7 +304,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     }
     const uint32_t nm0 = hdup(m[r][0] > -INFINITY ? -m[r][0] : 0.f), nm1 = hdup(m[r][1] > -INFINITY ? -m[r][1] : 0.f);
 #pragma unroll
-    for (int i = 0; i < 16; ++i) { sc[r][2 * i] = hex2(hfma2(sc[r][2 * i], scl2, nm0)); sc[r][2 * i + 1] = hex2(hfma2(sc[r][2 * i + 1], scl2, nm1)); }
+    for (int i = 0; i < 16; ++i) { sc[r][2 * i] = hexp(hfma2(sc[r][2 * i], scl2, nm0), i); sc[r][2 * i + 1] = hexp(hfma2(sc[r][2 * i + 1], scl2, nm1), i); }
   };
   // after the PV of a tile of row rr retired: its row-sum increment is at least its largest probability; past 2^TA_TS the offset rises by the
   // power of two that brings it back to about 1 (o and l scaled exactly); a non-finite one (an fp16 probability overflowed) cannot be repaired
@@ -477,14 +508,19 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
   auto fix = torch::empty({list ? 1 + ntasks : 0}, q.options().dtype(torch::kInt32));
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   if (list) C10_CUDA_CHECK(cudaMemsetAsync(fix.data_ptr<int>(), 0, sizeof(int), stream));
+  // head groups: one head from TA_ORDER1_MINS on, else the most heads whose bias fits TA_BIAS_L2 (all of them: ORD0)
+  int hg = (int)H;
+  if (TA_HG > 0 && H % TA_HG == 0) hg = TA_HG;
+  else if (S >= TA_ORDER1_MINS) hg = 1;
+  else while (hg > 1 && (H % hg != 0 || (double)hg * S * S * 2 > (double)(TA_BIAS_L2))) --hg;
+  const bool ord1 = hg < H;
   auto launch = [&](auto kernel, int* sch, int* fx) {
     kernel<<<grid, THREADS, SMEM, stream>>>(
-      (int)N, (int)H, (int)S, (int)ntasks, (float)(scale * 1.4426950408889634), qm, km, vm, bm,
+      (int)N, (int)H, (int)S, (int)ntasks, (float)(scale * 1.4426950408889634), hg, qm, km, vm, bm,
       store_out ? reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()) : nullptr, want_lse ? lse.data_ptr<float>() : nullptr, flags.data_ptr<int>(),
       has_gate ? reinterpret_cast<const __nv_bfloat16*>(gate->data_ptr()) : nullptr, (int)(has_gate && gate->scalar_type() == torch::kHalf),
       has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L, sch, fx);
   };
-  const bool ord1 = S >= TA_ORDER1_MINS;
   if (spec) {
     launch(ord1 ? triattn_h16_sm90<true, true> : triattn_h16_sm90<true, false>, dyn ? sched.data_ptr<int>() : nullptr, list ? fix.data_ptr<int>() : nullptr);
     if (list) {

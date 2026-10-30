@@ -174,7 +174,7 @@ def _generic_rows(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans
     HD = H * D
     g = gen._glue()
     h16 = core_mod.INFERENCE_FP16  # as the one-launch path at L > 256: fp16 projections, bias and core
-    ww = wcat.half() if h16 else wcat
+    ww = gen._half(wcat) if h16 else wcat
     w4, wb = ww[: 4 * HD], ww[4 * HD :]
     lw, lb = lnw.float().contiguous(), lnb.float().contiguous()
     scale = head_dim**-0.5
