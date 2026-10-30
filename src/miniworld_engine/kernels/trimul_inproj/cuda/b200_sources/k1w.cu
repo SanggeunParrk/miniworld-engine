@@ -207,7 +207,7 @@ __global__ void __launch_bounds__(NTHREADS, 1)
         auto ldx = [&](int q) { const int kb = q >> 3; int sl = s + kb; if (sl >= NXS) sl -= NXS;
                                 return lds128(su + G_::O_X + sl * KBB + sw128(r, q & 7)); };
         float2 a0 = make_float2(0.f, 0.f), a1 = a0, a2 = a0, a3 = a0;
-#pragma unroll
+#pragma unroll (D <= 64 ? D / 8 : 4)   // a full unroll spilled 72 B at D128
         for (int q = 0; q < D / 8; ++q) {
           const uint4 t = ldx(q);
           a0 = __fadd2_rn(a0, up(t.x)); a1 = __fadd2_rn(a1, up(t.y)); a2 = __fadd2_rn(a2, up(t.z)); a3 = __fadd2_rn(a3, up(t.w));
@@ -216,7 +216,7 @@ __global__ void __launch_bounds__(NTHREADS, 1)
         mu = __fmul_rn(__fadd_rn(a0.x, a0.y), 1.f / D);
         const float2 nm0 = make_float2(-mu, -mu);
         a0 = a1 = a2 = a3 = make_float2(0.f, 0.f);
-#pragma unroll
+#pragma unroll (D <= 64 ? D / 8 : 4)
         for (int q = 0; q < D / 8; ++q) {
           const uint4 t = ldx(q);
           float2 d;
