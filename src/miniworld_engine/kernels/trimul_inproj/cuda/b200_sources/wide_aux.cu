@@ -1,7 +1,8 @@
 // wide_aux.cu -- small pieces around the B200 wide TriMul kernels (k1w front, k3w output):
 //   ln_stats   per-token mean / rstd over the H channels of the channel-major contraction output t [H, M] (k3w's LN_out fold)
 //   fold_prep  k3w's folded weight operands bf16(Wp g_o), bf16(Wg g_i) and their row sums / bias projections
-//   lnpart_sum the D64 / D128 backward's per-CTA LayerNorm-gradient rows summed in a fixed order
+//   trimul_forms  the D64 / D128 kernels' bf16 weight forms in one launch (cached by the caller while the parameters are unchanged)
+//   grad_reduce   the D64 / D128 backward's per-CTA parameter-gradient partials summed in a fixed order, in parameter order
 #include <cuda_bf16.h>
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -139,6 +140,93 @@ __global__ void __launch_bounds__(256) lnpart_sum_kernel(const float* __restrict
   }
 }
 
+
+// -------------------------------------------------------------------------------------------------------------- trimul_forms
+// Every bf16 weight form the D64 / D128 kernels read, from the parameters as they are stored (fp32 master or bf16, any strides: the D128
+// bidirectional module keeps the four front matrices column-major), one element per thread, into one buffer:
+//   [wl | wlg | wr | wrg] row-major [R, D] each (k1w), w1 [4R, D] packed (b7m / b7g: chunk c = 64 gate rows, then 64 value rows, of
+//   the P = 2R planes [left | right]), wpp [D, R] (k3g: columns in its TMEM K order), wg [D, D], wp [D, R] (b1s / b1g).
+// R = P / 2 = the contraction width h. Rounding: round to nearest even, as torch's cast.
+struct FormSrc { const void* p[6]; long long s0[6], s1[6]; int f32[6]; };   // wl, wlg, wr, wrg, wg, wp
+__device__ __forceinline__ __nv_bfloat16 form_ld(const FormSrc& s, int k, int r, int c) {
+  const long long o = (long long)r * s.s0[k] + (long long)c * s.s1[k];
+  return s.f32[k] ? __float2bfloat16_rn(reinterpret_cast<const float*>(s.p[k])[o]) : reinterpret_cast<const __nv_bfloat16*>(s.p[k])[o];
+}
+__global__ void __launch_bounds__(256) forms_kernel(FormSrc s, int R, int D, __nv_bfloat16* __restrict__ out, int total) {
+  const int e = blockIdx.x * 256 + threadIdx.x;
+  if (e >= total) return;
+  const int RD = R * D;
+  __nv_bfloat16 v;
+  if (e < 4 * RD) {
+    v = form_ld(s, e / RD, (e % RD) / D, e % D);
+  } else if (e < 8 * RD) {
+    const int f = e - 4 * RD, pr = f / D, c = f % D, rr = pr & 127, idx = 64 * (pr >> 7) + (rr & 63);
+    const int k = (rr < 64 ? 1 : 0) + (idx < R ? 0 : 2);      // gate rows: wlg / wrg; value rows: wl / wr
+    v = form_ld(s, k, idx < R ? idx : idx - R, c);
+  } else if (e < 8 * RD + D * R) {
+    const int f = e - 8 * RD, n = f / R, col = f % R;
+    const int b = col >> 4, q = (col >> 2) & 3, rr = (col >> 1) & 1, u = col & 1;
+    v = form_ld(s, 5, n, 16 * b + 8 * rr + 2 * q + u);
+  } else if (e < 8 * RD + D * R + D * D) {
+    const int f = e - 8 * RD - D * R;
+    v = form_ld(s, 4, f / D, f % D);
+  } else {
+    const int f = e - 8 * RD - D * R - D * D;
+    v = form_ld(s, 5, f / R, f % R);
+  }
+  out[e] = v;
+}
+
+// -------------------------------------------------------------------------------------------------------------- grad_reduce
+// The D64 / D128 backward's parameter gradients from its per-CTA partials, each output element summed over the partials in index
+// order (bit-identical run to run), written in the parameters' order [dwl | dwlg | dwr | dwrg | dwg | dwp | dgi | dbi | dgo | dbo]:
+//   pf [nf][D][D + R]  b1s / b1g front CTAs: row o = (dWg[o] | dWp[o])        lo [nl][2R]  b1s / b1g LN CTAs: (dgo | dbo)
+//   pw [ns][4R][D]     b7m CTAs / b7g source groups: packed dW1               li [nc][2D]  b7m / b7g LN rows: (dgi | dbi)
+__global__ void __launch_bounds__(256) grad_reduce_kernel(const float* __restrict__ pf, int nf, const float* __restrict__ lo, int nl,
+                                                           const float* __restrict__ pw, int ns, const float* __restrict__ li, int nc,
+                                                           int R, int D, float* __restrict__ out, int total) {
+  // block = 128 consecutive outputs, 4 per lane (float4; every region size is a multiple of 128); warp w sums partials w, w + 8, ...,
+  // the 8 warp sums are added in warp order: a fixed order, and at most ceil(n / 8) dependent loads per thread
+  __shared__ float4 part[8][32];
+  const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
+  const int e = blockIdx.x * 128 + 4 * lane;
+  const int RD = R * D;
+  const float* p;
+  long long st;
+  int n;
+  if (e < 4 * RD) {
+    const int k = e / RD, r = (e % RD) / D, c = e % D, idx = (k >> 1) * R + r;   // k: wl, wlg, wr, wrg
+    p = pw + (long long)(128 * (idx >> 6) + ((k & 1) ? 0 : 64) + (idx & 63)) * D + c;
+    st = 4LL * RD; n = ns;
+  } else if (e < 4 * RD + D * D) {
+    const int f = e - 4 * RD;
+    p = pf + (long long)(f / D) * (D + R) + f % D; st = (long long)D * (D + R); n = nf;
+  } else if (e < 4 * RD + D * D + D * R) {
+    const int f = e - 4 * RD - D * D;
+    p = pf + (long long)(f / R) * (D + R) + D + f % R; st = (long long)D * (D + R); n = nf;
+  } else if (e < 4 * RD + D * D + D * R + 2 * D) {
+    p = li + (e - 4 * RD - D * D - D * R); st = 2 * D; n = nc;
+  } else {
+    p = lo + (e - 4 * RD - D * D - D * R - 2 * D); st = 2 * R; n = nl;
+  }
+  float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
+  if (e < total) {
+#pragma unroll 4
+    for (int i = w; i < n; i += 8) {
+      const float4 v = __ldg(reinterpret_cast<const float4*>(p + i * st));
+      acc.x += v.x; acc.y += v.y; acc.z += v.z; acc.w += v.w;
+    }
+  }
+  part[w][lane] = acc;
+  __syncthreads();
+  if (w == 0 && e < total) {
+    float4 t = make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll
+    for (int k = 0; k < 8; ++k) { const float4 v = part[k][lane]; t.x += v.x; t.y += v.y; t.z += v.z; t.w += v.w; }
+    *reinterpret_cast<float4*>(out + e) = t;
+  }
+}
+
 }  // namespace wide
 
 // mean / rstd [M] over the H channels of channel-major t [H, M]
@@ -179,5 +267,41 @@ void lnpart_sum(torch::Tensor a, torch::Tensor b, torch::Tensor out) {
   const int wa = (int)a.size(1), wb = (int)b.size(1);
   lnpart_sum_kernel<<<(wa + wb + 31) / 32, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       a.data_ptr<float>(), wa, b.data_ptr<float>(), wb, (int)a.size(0), out.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// wl, wlg, wr, wrg [R, D], wg [D, D], wp [D, R]: fp32 or bf16, any strides -> out bf16 [8 R D + 2 D R + D D] (see forms_kernel)
+void trimul_forms(torch::Tensor wl, torch::Tensor wlg, torch::Tensor wr, torch::Tensor wrg, torch::Tensor wg, torch::Tensor wp,
+                  torch::Tensor out) {
+  using namespace wide;
+  const int R = (int)wl.size(0), D = (int)wl.size(1);
+  const torch::Tensor* ts[6] = {&wl, &wlg, &wr, &wrg, &wg, &wp};
+  FormSrc s;
+  for (int k = 0; k < 6; ++k) {
+    const torch::Tensor& t = *ts[k];
+    TORCH_CHECK(t.dim() == 2 && t.is_cuda() && (t.scalar_type() == torch::kFloat32 || t.scalar_type() == torch::kBFloat16));
+    TORCH_CHECK(k < 4 ? (t.size(0) == R && t.size(1) == D) : (t.size(0) == D && t.size(1) == (k == 4 ? D : R)), "trimul_forms: shapes");
+    s.p[k] = t.data_ptr(); s.s0[k] = t.stride(0); s.s1[k] = t.stride(1); s.f32[k] = t.scalar_type() == torch::kFloat32;
+  }
+  const int total = 8 * R * D + 2 * D * R + D * D;
+  TORCH_CHECK(R % 64 == 0 && out.is_contiguous() && out.scalar_type() == torch::kBFloat16 && out.numel() == total);
+  forms_kernel<<<(total + 255) / 256, 256, 0, at::cuda::getCurrentCUDAStream()>>>(s, R, D,
+                                                                                   reinterpret_cast<__nv_bfloat16*>(out.data_ptr()), total);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// pf [>= nf, D (D + R)], lo [>= nl, 2R], pw [>= ns, 4 R D], li [>= nc, 2D] fp32 partials -> out [4 R D + D D + D R + 2D + 2R] fp32
+void grad_reduce(torch::Tensor pf, int64_t nf, torch::Tensor lo, int64_t nl, torch::Tensor pw, int64_t ns, torch::Tensor li, int64_t nc,
+                 torch::Tensor out) {
+  using namespace wide;
+  const int D = (int)(li.size(-1) / 2), R = (int)(lo.size(-1) / 2);
+  for (const torch::Tensor* t : {&pf, &lo, &pw, &li, &out}) TORCH_CHECK(t->is_contiguous() && t->scalar_type() == torch::kFloat32);
+  TORCH_CHECK(pf.numel() >= nf * D * (D + R) && lo.numel() >= nl * 2 * R && pw.numel() >= ns * 4LL * R * D && li.numel() >= nc * 2 * D);
+  const int total = 4 * R * D + D * D + D * R + 2 * D + 2 * R;
+  TORCH_CHECK(out.numel() == total, "grad_reduce: out size");
+  TORCH_CHECK(R % 64 == 0 && D % 64 == 0 && total % 128 == 0);
+  grad_reduce_kernel<<<total / 128, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      pf.data_ptr<float>(), (int)nf, lo.data_ptr<float>(), (int)nl, pw.data_ptr<float>(), (int)ns, li.data_ptr<float>(), (int)nc, R, D,
+      out.data_ptr<float>(), total);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

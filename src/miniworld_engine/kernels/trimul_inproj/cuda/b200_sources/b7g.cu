@@ -142,11 +142,25 @@ DEV void spin_until(const uint32_t* p, uint32_t v) {
 #endif
 }
 
+// Pair mask from the [B L] token mask: pair (i, j) of sample s (token (s L + i) L + j, b-major) is kept when tokens s L + i and
+// s L + j are. A 128-token tile lies in one row i (L % 128 == 0); (s, i, j0) of a CTA's tile is advanced incrementally (no integer
+// division on the elementwise warps' path: three divisions per token cost b7g ~15 %).
+struct PairIdx {
+  int s, i, j;
+  DEV void init(int row0, int L) { s = row0 / (L * L); i = (row0 / L) % L; j = row0 % L; }
+  DEV void advance(int rows, int L) { j += rows; while (j >= L) { j -= L; if (++i == L) { i = 0; ++s; } } }
+  DEV float mask(const uint8_t* tm, int tok, int L) const {   // tok: offset in the tile
+    return tm == nullptr ? 1.f : ((__ldg(tm + s * L + i) && __ldg(tm + s * L + j + tok)) ? 1.f : 0.f);
+  }
+};
+
 struct Args {
   const __nv_bfloat16 *x, *dy;
-  const float *mask, *gi;
+  const uint8_t* tmask;     // [B L] token mask (pair (i, j) of sample s kept when tokens s L + i and s L + j are), or null
+  const float* gi;
   __nv_bfloat16* dx;
-  float *dw1, *lnpart;      // lnpart [consumers][dgi 128 | dbi 128]: one row per consumer CTA (summed on the host)
+  float *dw1, *lnpart;      // dw1 [SG][128 NCH][128]: one dW1 partial per source group (rows 128 c + r of chunk c), summed in a fixed
+                            // order by grad_reduce; lnpart [consumers][dgi 128 | dbi 128]: one row per consumer CTA
   uint32_t* flags;          // [SG][RD][NCH]
   int tiles, L, SG, NC;
   float eps;
@@ -293,7 +307,9 @@ __global__ void __launch_bounds__(384, 1)
       const int q = warp & 3, hh = (warp - 4) >> 2, t4 = lane & 3, tr = lane >> 2;
       const int tok0 = q * 32 + hh * 16;
       float mk0 = 0.f, mk1 = 0.f;
-      if (n_local > 0) { mk0 = __ldg(a.mask + g * TOK + tok0 + tr); mk1 = __ldg(a.mask + g * TOK + tok0 + tr + 8); }
+      PairIdx pix;
+      pix.init(g * TOK, a.L);
+      if (n_local > 0) { mk0 = pix.mask(a.tmask, tok0 + tr, a.L); mk1 = pix.mask(a.tmask, tok0 + tr + 8, a.L); }
       for (int j = 0; j < n_local; ++j) {
         const int b = j & 1;
         const float mA = mk0, mB = mk1;
@@ -387,8 +403,8 @@ __global__ void __launch_bounds__(384, 1)
         if (warp == 4) TLS(6);
         if (tid == 128) { mbar_arrive(&B.dgp_ready[b]); PROG(3, j); }
         if (j + 1 < n_local) {                               // next tile's mask (after the proxy fence, which would wait on it)
-          const int r1 = (g + a.SG * (j + 1)) * TOK + tok0 + tr;
-          mk0 = __ldg(a.mask + r1); mk1 = __ldg(a.mask + r1 + 8);
+          pix.advance(a.SG * TOK, a.L);
+          mk0 = pix.mask(a.tmask, tok0 + tr, a.L); mk1 = pix.mask(a.tmask, tok0 + tr + 8, a.L);
         }
       }
     }
@@ -403,10 +419,11 @@ __global__ void __launch_bounds__(384, 1)
         uint32_t v[32];
         tmem_ld32(tmem + T_DW + ((uint32_t)(q * 32) << 16) + cb * 32, v);
         tmem_wait_ld();
-        float* dst = a.dw1 + (size_t)(128 * c + row) * C + cb * 32;
+        float* dst = a.dw1 + ((size_t)g * (128 * NCH) + 128 * c + row) * C + cb * 32;   // this group's partial (no atomics)
 #pragma unroll
         for (int k = 0; k < 32; k += 4)
-          red_add4(dst + k, __uint_as_float(v[k]), __uint_as_float(v[k + 1]), __uint_as_float(v[k + 2]), __uint_as_float(v[k + 3]));
+          *reinterpret_cast<float4*>(dst + k) = make_float4(__uint_as_float(v[k]), __uint_as_float(v[k + 1]), __uint_as_float(v[k + 2]),
+                                                             __uint_as_float(v[k + 3]));
       }
     }
   } else {
@@ -718,12 +735,12 @@ __global__ void __launch_bounds__(384, 1)
 
 }  // namespace b7g
 
-// x / xn / dy / dgout / dx [M, 128]; dpl [64 NCH, M] plane gradient; mask [M] fp32 pair mask; w1 [128 NCH, 128] packed;
-// wg [128, 128]; gi [128] fp32; dw1 [128 NCH, 128] fp32 accumulated; lnpart [>= SMs - NCH SG, 256] fp32: per-consumer
-// (dg_i | db_i) rows, written (sum them); ring [SG RD NCH 128, 128]; flags zero.
-void b7g_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Tensor dpl, torch::Tensor dgout, torch::Tensor mask,
-                  torch::Tensor w1, torch::Tensor wg, torch::Tensor gi, torch::Tensor dx, torch::Tensor dw1, torch::Tensor lnpart,
-                  torch::Tensor ring, torch::Tensor flags, double eps, int64_t sg) {
+// x / xn / dy / dgout / dx [M, 128]; dpl [64 NCH, M] plane gradient; tmask [B L] bool token mask or None; w1 [128 NCH, 128] packed;
+// wg [128, 128]; gi [128] fp32; dw1 [SG, 128 NCH, 128] fp32 per-group partials, written; lnpart [>= SMs - NCH SG, 256] fp32:
+// per-consumer (dg_i | db_i) rows, written (grad_reduce sums both in a fixed order); ring [SG RD NCH 128, 128]; flags zero.
+void b7g_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Tensor dpl, torch::Tensor dgout,
+                  c10::optional<torch::Tensor> tmask, torch::Tensor w1, torch::Tensor wg, torch::Tensor gi, torch::Tensor dx,
+                  torch::Tensor dw1, torch::Tensor lnpart, torch::Tensor ring, torch::Tensor flags, double eps, int64_t sg, int64_t L) {
   using namespace b7g;
   const int64_t M = x.size(0);
   const int P = (int)dpl.size(0), NCH = P / 64;
@@ -745,12 +762,14 @@ void b7g_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Te
   Args a;
   a.x = reinterpret_cast<const __nv_bfloat16*>(x.data_ptr());
   a.dy = reinterpret_cast<const __nv_bfloat16*>(dy.data_ptr());
-  a.mask = mask.data_ptr<float>(); a.gi = gi.data_ptr<float>();
+  TORCH_CHECK(M % (L * L) == 0 && (!tmask.has_value() || (tmask->numel() == M / L && tmask->element_size() == 1 && tmask->is_contiguous())));
+  a.tmask = tmask.has_value() ? reinterpret_cast<const uint8_t*>(tmask->data_ptr()) : nullptr;
+  a.gi = gi.data_ptr<float>();
   a.dx = reinterpret_cast<__nv_bfloat16*>(dx.data_ptr());
-  TORCH_CHECK(lnpart.numel() >= (int64_t)NC * 2 * C);
+  TORCH_CHECK(lnpart.numel() >= (int64_t)NC * 2 * C && dw1.numel() >= (int64_t)SG * 128 * NCH * C);
   a.dw1 = dw1.data_ptr<float>(); a.lnpart = lnpart.data_ptr<float>();
   a.flags = reinterpret_cast<uint32_t*>(flags.data_ptr<int32_t>());
-  a.tiles = (int)(M / TOK); a.L = 0; a.SG = SG; a.NC = NC; a.eps = (float)eps;
+  a.tiles = (int)(M / TOK); a.L = (int)L; a.SG = SG; a.NC = NC; a.eps = (float)eps;
   void* params[] = {(void*)&mxn, (void*)&mda, (void*)&mw1, (void*)&mring, (void*)&mgo, (void*)&mwg, (void*)&mdx, (void*)&mw1k,
                     (void*)&mx, (void*)&mdy, (void*)&a};
   auto launch = [&](const void* fn, bool& attr) {
