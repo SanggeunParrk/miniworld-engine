@@ -312,7 +312,18 @@ def _pwa_bwd_layernorm_gemm_softmax_kernel(Z, W, DW, MASK, LNW, WB, DZ, DWB, DGZ
         zy = (zh * gz[None, :]).to(tl.bfloat16)
         dlb = dl.to(tl.bfloat16)
         dwb += tl.dot(tl.trans(dlb), zy)
-        dzy = tl.dot(dlb, wb.to(tl.bfloat16))                                               # [BJ, DZP]
+        if DZP <= 256:
+            dzy = tl.dot(dlb, wb.to(tl.bfloat16))                                           # [BJ, DZP]
+        else:
+            # A pair row wider than 256 (DZP 512: d_pair 384 / 512): sm_100's lowering of this K = 16, N = 512 dot from registers faults
+            # with "misaligned address" at BJ 64 / 4-8 warps (Triton 3.7; N <= 256, or BJ <= 32, is fine). The product has K = NH heads:
+            # an outer-product sum over the heads instead, on the same bf16 operands (fp32 FMAs; only the summation order differs).
+            dzy = tl.zeros((BJ, DZP), tl.float32)
+            for h in tl.static_range(NH):
+                sel = (hh == h)[None, :]
+                dl_h = tl.sum(tl.where(sel, dlb.to(tl.float32), 0.0), axis=1)                # [BJ]
+                wb_h = tl.sum(tl.where((hh == h)[:, None], wb.to(tl.bfloat16).to(tl.float32), 0.0), axis=0)   # [DZP]
+                dzy += dl_h[:, None] * wb_h[None, :]
         dgs += tl.sum(dzy * zh, axis=0)
         dxh = dzy * gz[None, :]
         m1 = tl.sum(dxh, axis=1) / DZC

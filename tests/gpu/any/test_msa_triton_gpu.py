@@ -78,7 +78,7 @@ def _twin(module):
 
 @pytest.mark.parametrize("mask_kind", ["none", "ragged", "empty_rows"])
 @pytest.mark.parametrize("normalize_before_proj", [True, False])
-@pytest.mark.parametrize("d_pair", [128, 384])
+@pytest.mark.parametrize("d_pair", [128, 384, 64, 16])   # 16: the 16-wide output tiles
 def test_outer_product_mean(mask_kind, normalize_before_proj, d_pair):
     torch.manual_seed(0)
     b, s, n = 2, 200, 136
@@ -119,10 +119,11 @@ def test_outer_product_mean_variants(monkeypatch, mask_kind, variant):
 
 
 @pytest.mark.parametrize("mask_kind", ["none", "ragged", "all_masked"])
-@pytest.mark.parametrize("d_pair", [128, 125])
+@pytest.mark.parametrize("d_pair", [128, 125, 64, 384])
 @pytest.mark.parametrize(("n_head", "d_hidden"), [(8, 32), (8, 8), (4, 8), (4, 12)])
 def test_pair_weighted_averaging(mask_kind, d_pair, n_head, d_hidden):
-    """d_hidden 8 is AF3's msa_value_dim (OpenFold3, Protenix, OpenDDE): the head is a 16-column tile with 8 columns masked."""
+    """d_hidden 8 is AF3's msa_value_dim (OpenFold3, Protenix, OpenDDE): the head is a 16-column tile with 8 columns masked. d_pair 384
+    (OpenDDE) pads the pair row to 512 (its backward once faulted with a misaligned address on sm_100), 64 is MiniWorld's B200 trunk."""
     if (n_head, d_hidden) != (8, 32) and d_pair != 128:
         pytest.skip("the narrow heads are crossed with the masks, not with the ragged pair width")
     torch.manual_seed(0)
