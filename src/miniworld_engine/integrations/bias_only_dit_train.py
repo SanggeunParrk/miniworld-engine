@@ -35,7 +35,7 @@ weight gradients and the unfold, ``pair_bias_bwd_fin`` for pair_bias_bwd + final
 read per call, or a failed build: the per-step launches.
 
 ``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD), B200, bf16 or fp32 inputs, the
-token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128, or 256 on H100 / transition n = 2), B == 1, L a multiple of 128 up to 768 (bf16 on
+token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 or 256 / transition n = 2), B == 1, L a multiple of 128 up to 768 (bf16 on
 B200: up to 3072, the forward core and dV on ``pv_stream_sm100.cu`` past 768, ``softmax_t`` to 3072 keys, the rest length-free), a per-sample
 conditioning [A, 1, L, 384], a key mask [1, L] or none, LayerNorm eps 1e-5. settings.bias_only_dit_train=0 turns it off.
 
@@ -73,7 +73,8 @@ D, DP = 768, 128
 #: its weights; Hopper serves both, the sm_100 fused tails only 384; another width keeps the module's PyTorch composition
 KERNEL_D_CONDS = (384, 768)
 #: the pair widths the pair-bias kernels take (a template parameter of pair_bias / pair_bias_bwd / pair_bias_tc / pair_bias_bwd_tc and
-#: of finalize's ln_pair / to_bias jobs): read off to_bias.weight; Hopper serves both, sm_100 128 (DP)
+#: of finalize's ln_pair / to_bias jobs): read off to_bias.weight; Hopper and sm_100 serve both (sm_100 at 256: the per-step
+#: pair_bias_bwd + finalize, the one-launch pair_bias_bwd_fin is built for 128)
 KERNEL_D_PAIRS = (128, 256)
 #: (n_head, head width) served: 768 attention channels as 16 x 48, 24 x 32, 12 x 64, 1024 as 16 x 64 (read off the weights:
 #: to_bias.weight rows = heads, to_value.weight rows = channels)
@@ -177,7 +178,7 @@ def serves(module, single, cond, pair, mask=None, bias=None, per_sample=False) -
     if d_cond not in KERNEL_D_CONDS or (d_cond != 384 and not h100_enabled(single.device)) or tuple(cond.shape) != (*single.shape[:3], d_cond):
         return False
     d_pair = module.attention.to_bias.weight.shape[1]
-    if d_pair not in KERNEL_D_PAIRS or (d_pair != DP and not h100_enabled(single.device)):
+    if d_pair not in KERNEL_D_PAIRS:
         return False
     if bias is None and tuple(pair.shape) != (1, L, L, d_pair):
         return False
@@ -1273,6 +1274,7 @@ def _bwd_fused_step(
     L768), where the per-step path takes 23; 9 with bo_bwd_mid on. ``dbias_out`` (a hoisted bias's gradient [H, L L]): dbias is
     written there and the pair's backward is left to the hoist -- finalize alone (one launch) instead of pair_bias_bwd_fin."""
     DC = cond.shape[-1]
+    dp = W["Wb"].shape[1]  # the pair width (128, or 256: Protenix-v2's diffusion pair)
     (chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z) = saved[:16]
     pst = saved[16] if dbias_out is None else None
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
@@ -1287,10 +1289,10 @@ def _bwd_fused_step(
         4, max(BT.partial_rows(M), 4 * (M // 128)), D, device=dev
     )  # bg2 bs2 bg1 (4 rows per tile) | bs1
     flat = torch.empty(
-        _flat(H, DC), device=dev, dtype=pdt["attention.ada_ln_in.to_scale.weight"]
+        _flat(H, DC, dp), device=dev, dtype=pdt["attention.ada_ln_in.to_scale.weight"]
     )
     norms = torch.empty(
-        _NORMS(DC), device=dev, dtype=pdt["attention.ada_ln_in.ln_cond.weight"]
+        _NORMS(DC, dp), device=dev, dtype=pdt["attention.ada_ln_in.ln_cond.weight"]
     )
     dG, dGg, dz, dab = e(M, 4 * D), e(M, 2 * D), e(M, D), e(M, 4 * D)
     dx1, dy, do, dvg, dd = (
@@ -1464,9 +1466,9 @@ def _bwd_fused_step(
             flat,
             norms,
         ]
-    dpair = torch.empty(R, DP, device=dev, dtype=pair.dtype)
-    pwf = torch.empty(BT.partial_rows(M), H, DP, device=dev)
-    if BWF.pbfin_on():  # one launch: grid barrier, then finalize's jobs
+    dpair = torch.empty(R, dp, device=dev, dtype=pair.dtype)
+    pwf = torch.empty(BT.partial_rows(M), H, dp, device=dev)
+    if BWF.pbfin_on() and dp == DP:  # one launch: grid barrier, then finalize's jobs (pair_bias_bwd_fin_k: 128 wide)
         BT.pair_bias_bwd_fin_cuda(
             dbias,
             p2,
@@ -1491,7 +1493,7 @@ def _bwd_fused_step(
     return [
         dx.view(A, 1, L, D),
         dc.view(A, 1, L, DC),
-        dpair.view(1, L, L, DP),
+        dpair.view(1, L, L, dp),
         dWvg,
         dWab,
         dWgg,

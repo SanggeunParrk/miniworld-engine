@@ -23,7 +23,7 @@ bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute
 
 ``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation MINIWORLD), H100 or B200, a
 bf16 or fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32), the token widths (cond 384 / pair
-128, or 256 on H100: Protenix-v2's diffusion pair, the same kernels built at that width / transition n = 2) at a head layout
+128, or 256: Protenix-v2's diffusion pair, the same kernels built at that width / transition n = 2) at a head layout
 of LAYOUTS (B200: 16 x 48, 24 x 32, 12 x 64 at d 768, 16 x 64 at d 1024; H100: 16 x 48
 only; bf16 and fp32 alike), B == 1, a key mask of [B, L] or none (``DiTBlock`` hands an [A, B, L] mask shared by the samples
 over as its [B, L] row), LayerNorm eps 1e-5. Anything else keeps the module path. settings.token_dit_train=0 turns it off.
@@ -131,9 +131,10 @@ def serves(module, single, cond, pair, mask, compute_dtype=None, extra=None) -> 
     ):
         return False
     d = single.shape[-1]
-    # the pair: 128 channels, or 256 (Protenix-v2's diffusion pair) on H100 -- the pair kernels are built per width (``ext(dp=)``)
+    # the pair: 128 channels, or 256 (Protenix-v2's diffusion pair) on H100 and B200 -- the pair kernels are built per width
+    # (``ext(dp=)``: pair_ln / pair_bias / their backwards are templates on the width)
     dp = pair.shape[-1] if pair.ndim == 4 else 0
-    if dp != a.ln_pair.weight.numel() or not (dp == DP or (dp == 256 and cap == (9, 0))):
+    if dp != a.ln_pair.weight.numel() or dp not in (DP, 256):
         return False
     if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (
         1,

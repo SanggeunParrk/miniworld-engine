@@ -261,9 +261,13 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         return False
     # the pair enters once per sample, through the bias hoist: 128 everywhere; 256 (Protenix-v2's diffusion pair) on H100, where
     # the hoist normalises it with the CUDA LayerNorm rows (``conditioned_transition.cuda._pair_bias_wide``; fp32 takes
-    # ``_native_fp32_inference`` above)
+    # ``_native_fp32_inference`` above), and on B200 bf16 and fp32 (``conditioned_transition.cuda.pair_bias_all``: the same
+    # LayerNorm row template at 256 channels + one cuBLAS GEMM; the step after the hoist is the 128-wide pair's)
+    cap0 = torch.cuda.get_device_capability(single.device)
     if pair.shape[-1] != 128 and not (
-        pair.shape[-1] == 256 and single.dtype is torch.bfloat16 and torch.cuda.get_device_capability(single.device) == (9, 0)
+        pair.shape[-1] == 256
+        and a.ln_pair.weight.shape[0] == 256
+        and ((single.dtype is torch.bfloat16 and cap0 == (9, 0)) or cap0 == (10, 0))
     ):
         return False
     # One conditioning shared by the samples (a sampling step: L table rows) or one per sample (S L rows); the runner

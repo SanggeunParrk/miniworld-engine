@@ -41,10 +41,11 @@ bf16 (pair bf16; the weights in any dtype, folded in fp32 and rounded to bf16 as
 accumulation, the bias in bf16, d LN0 and dW' in fp32, d pair in the pair's dtype. fp32 (pair and weights fp32, no autocast): the
 same structure, the GEMMs on TF32 tensor cores (``tf32_gemms``), every tensor fp32.
 
-``serves()`` is the gate (B200 or H100, an engine implementation, pair [1, L, L, C] bf16 or fp32, C = 128 or 256 on H100, 128 on B200);
+``serves()`` is the gate (B200 or H100, an engine implementation, pair [1, L, L, C] bf16 or fp32, C = 128 or 256);
 anything else takes the PyTorch fold of ``modules.bias_only_dit.hoist``. At C = 256 (the widths written 128 above) every kernel is the same
 template at the other width, except the multi-block bf16 backward (``bo_hoist_bwd.cu``, 128 only): more than one block of 16 heads takes the
-two GEMMs around ``ln0_bwd_rows`` there.
+two GEMMs around ``ln0_bwd_rows`` there. B200 at C = 256: the sm_100a hoist is 128 wide, so the forward is the LayerNorm rows + one cuBLAS
+GEMM (inference of one block: the one-pass ``pair_bias`` row kernel), the backward the two cuBLAS GEMMs around ``ln0_bwd_rows``.
 """
 
 from __future__ import annotations
@@ -57,7 +58,7 @@ from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
 DP = 128
-#: the pair widths of the fused hoist: 128 everywhere, 256 on H100 (the sm_90 kernels are templates on the width)
+#: the pair widths of the fused hoist: 128 and 256 (the sm_90 kernels and the row kernels are templates on the width)
 DPS = (128, 256)
 BF = torch.bfloat16
 F32 = torch.float32
@@ -68,7 +69,7 @@ SINK_ATTR = "_bias_only_dit_hoist_sink"
 def serves(implementation, attns, pair, per_sample=False) -> bool:
     """The fused hoist serves ``pair`` and the attention modules ``attns`` (eps / head count / no offset checked by the caller).
     ``per_sample``: ``pair`` is [A, L, L, C] with A > 1 (a pair of its own per sample, the samples in the batch axis) instead of
-    [1, L, L, C]; C = 128, or 256 on H100."""
+    [1, L, L, C]; C = 128 or 256."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
     if implementation != ImplementationType.MINIWORLD:
@@ -83,7 +84,6 @@ def serves(implementation, attns, pair, per_sample=False) -> bool:
         or (pair.shape[0] < 2 if per_sample else pair.shape[0] != 1)
         or pair.shape[1] != pair.shape[2]
         or dp not in DPS
-        or (dp != DP and torch.cuda.get_device_capability(pair.device) != (9, 0))
         or pair.shape[1] == 0
     ):
         return False

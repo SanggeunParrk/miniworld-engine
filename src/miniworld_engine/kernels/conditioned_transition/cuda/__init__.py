@@ -426,7 +426,8 @@ _FUSED_PAIR_BIAS_F32 = True
 
 def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None, perm=False):
     """Every block's pair bias, head-major: out [NB, L, L] = (LN(z) @ wt)^T with wt [C, NB] (the LayerNorm weights and
-    any log2 e scale already folded in), -inf on the columns of masked keys (``mask`` [L] bool). z2d [L L, 128].
+    any log2 e scale already folded in), -inf on the columns of masked keys (``mask`` [L] bool). z2d [L L, C], C = 128 or 256 (the
+    256-wide pair of Protenix-v2's diffusion transformer: the same LayerNorm row template, ``layernorm128_rows``).
     A CUDA LayerNorm and one cuBLAS GEMM (a fused one-pass LayerNorm + projection kernel, one thread per pair row, measured
     slower -- 450 against 266 us for a whole L = 768 block call -- and was dropped). ``perm``: the key columns in
     ``key_perm`` order (the TF32 core's; the LayerNorm writes the pair rows there, so it costs nothing)."""
@@ -453,7 +454,7 @@ def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None, perm=False):
     if m is not None and perm:
         m = m[key_perm(L, m.device)]
     m = None if m is None else m.contiguous()
-    zh = torch.empty(z2d.shape[0], 128, device=z2d.device, dtype=wt.dtype)
+    zh = torch.empty(z2d.shape[0], z2d.shape[1], device=z2d.device, dtype=wt.dtype)
     _ext().layernorm128_rows(z2d, zh, float(eps), bool(perm))
     torch.mm(wt.t(), zh.t(), out=out.view(nb, -1))
     if m is not None:
