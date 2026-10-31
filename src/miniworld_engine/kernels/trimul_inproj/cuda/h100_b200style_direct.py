@@ -42,17 +42,21 @@ def _kernel(d, h, cfg):
 
 def front(x, weights, token_mask, gi, bi, ab, xs):
     """x [B, n, n, d]; B > 1: the samples stacked along K1's slow token axis (K1Params.rows = B n, planes [2 h, B n, n]), the token
-    mask [B n] read per sample."""
+    mask [B n] read per sample. One sample may take planes padded past n (ab [2 h, np, np], np = ab.shape[-1] >= n, a multiple of 16):
+    K1 writes zeros into the pad rows and columns, as the packaged K1 does."""
     rows, n, d, h = x.shape[0] * x.shape[1], x.shape[1], x.shape[-1], ab.shape[0] // 2
+    np_ = ab.shape[-1]
+    if np_ != n and rows != n:
+        raise ValueError("padded planes take one sample")
     cfg = K._config(d)
     a, b, _, _, mb = cfg[:5]
     kernel, smem = _kernel(d, h, cfg)
-    tj = n // b
-    tiles = (rows // a) * tj
+    tj = -(-np_ // b)
+    tiles = (-(-(rows if rows != n else np_) // a)) * tj
     fields = [
         I._map(x, [64, b, a], [d, n, rows], [d * 2, n * d * 2]),
         T._launch_module().TensorMap(b"\0" * 128),
-        I._map(ab, [64, 1, 32], [n, rows, 2 * h], [n * 2, rows * n * 2]),
+        I._map(ab, [64, 1, 32], [np_, rows if rows != n else np_, 2 * h], [np_ * 2, (rows if rows != n else np_) * np_ * 2]),
         token_mask,
         gi,
         bi,
@@ -60,10 +64,10 @@ def front(x, weights, token_mask, gi, bi, ab, xs):
         xs,
         None,
         n,
-        n,
+        np_,
         tj,
         tiles,
-        1,
+        int(np_ % 8 == 0),
         n,
         1,
         1e-5,

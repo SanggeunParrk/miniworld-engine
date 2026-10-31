@@ -21,6 +21,12 @@ using bf = __nv_bfloat16;
 #ifndef GFOLD
 #define GFOLD 0
 #endif
+// ROWPAD (one sample, inference, any L): tokens run in 64-token chunks of one pair row, CJ = ceil(L / 64) chunks per row; a CTA takes
+// chunks 2 tile and 2 tile + 1 (one per consumer warpgroup). tri is read from the K1 planes padded to Np (3-D map [Np j][Np i][H]),
+// x / y through 3-D maps [D][L j][L i] whose out-of-range tokens TMA zero-fills on load and drops on store.
+#ifndef ROWPAD
+#define ROWPAD 0
+#endif
 // Hopper implementation of the B200 folded K3 algorithm. The saved tensors
 // are projection/gate values and LN statistics, never normalized H rows.
 constexpr int D = WIDTH, H = HIDDEN, BN = BLOCKN, NS = STAGES, MT = 128;
@@ -35,6 +41,9 @@ struct Params {
   CUtensorMap tri, xa, wp, wg, xm, ym;
   const float* uv; const float* xs; int M; int tiles;
   const bf* ds; bf* pv; bf* gv; float* mu; float* rs; int L;
+#if ROWPAD
+  int Np, CJ;
+#endif
 };
 
 TMN_DEVI uint32_t lds32(uint32_t a) { uint32_t v; asm volatile("ld.shared.b32 %0,[%1];" : "=r"(v) : "r"(a)); return v; }
@@ -79,6 +88,10 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
       uint32_t it = 0;
       for (int tile = blockIdx.x; tile < p.tiles; tile += gridDim.x) {
         const int tok0 = tile * MT;
+#if ROWPAD
+        const int c0 = 2 * tile, c1 = c0 + 1;
+        const int i0 = c0 / p.CJ, j0 = (c0 % p.CJ) * 64, i1 = c1 / p.CJ, j1 = (c1 % p.CJ) * 64;
+#endif
         for (int cb = 0; cb < NCB; ++cb) {
           for (int kc = 0; kc < KG + KP; ++kc, ++it) {
             const int s = it % NS; const uint32_t u = it / NS;
@@ -87,12 +100,22 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
             uint8_t* a = ring + s * STAGE;
             if (kc < KG) {
               tma_load_2d(a + ABYTES, &p.wg, full + s, kc * 64, cb * BN);
+#if ROWPAD
+              tma_load_3d(a, &p.xa, full + s, kc * 64, j0, i0);
+              tma_load_3d(a + 8192, &p.xa, full + s, kc * 64, j1, i1);
+#else
               tma_load_2d(a, &p.xa, full + s, kc * 64, tok0);
+#endif
             } else {
               const int k = kc - KG;
               tma_load_2d(a + ABYTES, &p.wp, full + s, k * 64, cb * BN);
+#if ROWPAD
+              tma_load_3d(a, &p.tri, full + s, j0, i0, k * 64);
+              tma_load_3d(a + 8192, &p.tri, full + s, j1, i1, k * 64);
+#else
               tma_load_2d(a, &p.tri, full + s, tok0, k * 64);
               tma_load_2d(a + 8192, &p.tri, full + s, tok0 + 64, k * 64);
+#endif
             }
           }
         }
@@ -115,11 +138,21 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
 
   for (int tile = blockIdx.x; tile < p.tiles; tile += gridDim.x) {
     const int tok0 = tile * MT + 64 * w;
+#if ROWPAD
+    const int ci = (2 * tile + w) / p.CJ, cj = ((2 * tile + w) % p.CJ) * 64;   // this warpgroup's chunk: pair row ci, tokens cj .. cj + 63
+#endif
     // batched samples (M = B L L, tokens b-major): these 64 tokens lie in sample s = tok0 / L^2, whose dropout scale is rows s L .. s L + L - 1
     const bf* const dsb = p.ds + (size_t)(tok0 / (p.L * p.L)) * p.L * D;
     float s1a = 0.f, s2a = 0.f, s1b = 0.f, s2b = 0.f, ka = 0.f, kb = 0.f;
     float2 xsA = make_float2(0.f, 1.f), xsB = xsA;
+#if ROWPAD
+    if constexpr (GFOLD) {
+      if (ci < p.L && cj + rowA < p.L) xsA = ldg64f(p.xs + 2 * ((size_t)ci * p.L + cj + rowA));
+      if (ci < p.L && cj + rowB < p.L) xsB = ldg64f(p.xs + 2 * ((size_t)ci * p.L + cj + rowB));
+    }
+#else
     if constexpr (GFOLD) { xsA = ldg64f(p.xs + 2 * (size_t)(tok0 + rowA)); xsB = ldg64f(p.xs + 2 * (size_t)(tok0 + rowB)); }
+#endif
     for (int cb = 0; cb < NCB; ++cb) {
       // ---- gate: G = xa . Wg^T (K = D)
       for (int kc = 0; kc < KG; ++kc, ++it) {
@@ -151,7 +184,11 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
         tma_store_wait_read<0>();
         mbar_arrive_expect_tx(xfull + w, XBYTES);
 #pragma unroll
+#if ROWPAD
+        for (int j = 0; j < BN / 64; ++j) tma_load_3d(xbuf + w * XBYTES + j * 8192, &p.xm, xfull + w, cb * BN + 64 * j, cj, ci);
+#else
         for (int j = 0; j < BN / 64; ++j) tma_load_2d(xbuf + w * XBYTES + j * 8192, &p.xm, xfull + w, cb * BN + 64 * j, tok0);
+#endif
       }
       // ---- projection: raw tri (MN-major) . Wpf^T (K = H); output-LN statistics on the tile's first column block
       for (int kc = 0; kc < KP; ++kc, ++it) {
@@ -226,7 +263,11 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
       named_bar_sync(1 + w, 128);
       if (elect) {
 #pragma unroll
+#if ROWPAD
+        for (int j = 0; j < BN / 64; ++j) tma_store_3d(&p.ym, xbuf + w * XBYTES + j * 8192, cb * BN + 64 * j, cj, ci);
+#else
         for (int j = 0; j < BN / 64; ++j) tma_store_2d(&p.ym, xbuf + w * XBYTES + j * 8192, cb * BN + 64 * j, tok0);
+#endif
         tma_store_commit();
       }
     }

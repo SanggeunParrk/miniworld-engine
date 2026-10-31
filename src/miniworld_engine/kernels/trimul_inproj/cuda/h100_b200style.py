@@ -283,8 +283,58 @@ def _forward_fake(leaves, mask, ds, direction):
     return [torch.empty_like(leaves[0]), *_saved(leaves[0], direction)]
 
 
+def rowpad_serves(x, direction):
+    """One sample, one direction, D256 / D384, inference at an L the token-flat path does not take (L % 128 != 0)."""
+    return (x.ndim == 4 and x.shape[0] == 1 and direction in (1, 2) and x.shape[-1] in (256, 384) and x.shape[1] == x.shape[2]
+            and x.shape[1] >= 16 and x.shape[1] % 128 != 0)
+
+
+def _run_rowpad(leaves, mask, direction, out=None):
+    """One sample at any L: K1 writes planes padded to the next multiple of 16 (zero pad rows / columns, as the packaged K1),
+    the contraction runs on the padded planes, K3 walks 64-token chunks of one pair row (k3.cu ROWPAD) and reads / writes x / y
+    through 3-D maps that clip the ragged row end. Same arithmetic per token as the token-flat path (pad terms are exact zeros)."""
+    x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
+    n, d, h = x.shape[1], x.shape[-1], wp.shape[1]
+    npad = -(-n // 16) * 16
+    with T.native_context(x.device):
+        ab = x.new_empty((2 * h, npad, npad))
+        xs = x.new_empty((n * n, 2), dtype=torch.float32)
+        vec = x.new_empty((4, d), dtype=torch.float32)
+        weights = [w if w.dtype == torch.bfloat16 and w.is_contiguous() else w.to(torch.bfloat16).contiguous()
+                   for w in (wl, wlg, wr, wrg)]
+        token = (torch.ones(n, device=x.device, dtype=torch.bool) if mask is None or mask.numel() == 0
+                 else mask.reshape(n).to(torch.bool).contiguous())
+        from .h100_b200style_direct import front
+
+        front(x, weights, token, gi, bi, ab, xs)
+        tri = _contract(ab, d, direction)
+        wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
+        _aux().fold(wp, go, bo, wg, gi, bi, wpf, wgf, vec)
+        y = T.take_output(x) if out is None else out
+        cfg = _output_config(d)
+        from .h100_b200style_static import output_kernel
+
+        kernel, smem = output_kernel(d, h, cfg, rowpad=True)
+        bn, _ = cfg
+        cj = -(-n // 64)
+        tiles = -(-(n * cj) // 2)
+        fields = [
+            I._map(tri, [64, 1, 64], [npad, npad, h], [npad * 2, npad * npad * 2]),
+            I._map(x, [64, 64, 1], [d, n, n], [d * 2, n * d * 2]),
+            I._map(wpf, [64, bn], [h, d], [h * 2]),
+            I._map(wgf, [64, bn], [d, d], [d * 2]),
+            I._map(x, [64, 64, 1], [d, n, n], [d * 2, n * d * 2]),
+            I._map(y, [64, 64, 1], [d, n, n], [d * 2, n * d * 2]),
+            vec, xs, n * n, tiles, None, None, None, None, None, n, npad, cj,
+        ]
+        kernel.launch((min(tiles, num_sms(x.device.index)), 1, 1), (384, 1, 1), [T._launch_module().Struct(fields)], smem)
+        return [y]
+
+
 def _run_forward(leaves, mask, ds, direction, save, out=None):
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
+    if not save and ds is None and rowpad_serves(x, direction):
+        return _run_rowpad(leaves, mask, direction, out)
     # Batched samples (x [B, n, n, d], B > 1): tokens b-major (M = B n n). K1 stacks the samples along its slow token axis, the
     # contraction batches over channels x B, K3 is token-flat and reads the dropout-scale row s n + j of its sample.
     bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
@@ -573,13 +623,14 @@ def trimul(leaves, mask, ds, direction=0, out=None):
         or bsz < 1
         or x.shape[1] != x.shape[2]
         or x.shape[-1] not in WIDTHS
-        or x.shape[1] % 128 or x.shape[1] < 128
+        or ((x.shape[1] % 128 or x.shape[1] < 128)
+            and not (not torch.is_grad_enabled() and ds is None and mask.numel() in (0, x.shape[1]) and rowpad_serves(x, direction)))
         or not x.is_contiguous()
         or direction not in (0, 1, 2)
         or torch.cuda.get_device_capability(x.device) != (9, 0)
     ):
         raise ValueError(
-            "B200-style Hopper TriMul requires BF16, D256/384/512, L a multiple of 128"
+            "B200-style Hopper TriMul requires BF16, D256/384/512, L a multiple of 128 (any L for one-sample, one-direction D256 / D384 inference)"
         )
     h = x.shape[-1] * (2 if direction == 0 else 1)
     if leaves[1].shape != (h, x.shape[-1]) or leaves[6].shape != (x.shape[-1], h):

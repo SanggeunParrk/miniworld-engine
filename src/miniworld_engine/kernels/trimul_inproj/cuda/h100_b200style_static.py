@@ -6,7 +6,8 @@ from . import h100_wide_inference as BI
 
 
 @T.device_cache
-def output_kernel(d, h, cfg):
+def output_kernel(d, h, cfg, rowpad=False):
+    """rowpad: the any-L one-sample form (k3.cu ROWPAD: 64-token chunks of one pair row, padded planes)."""
     bn, stages = cfg
     source = K.R / ("k3reorder.cu" if d == 512 else "k3.cu")
     body = source.read_text()
@@ -37,6 +38,7 @@ def output_kernel(d, h, cfg):
         "-DTMN_SIGMOID_TANH=1",
         "-DMW_MINB=1",
         "-DMW_K1_STREAM=1",
+        *(["-DROWPAD=1"] if rowpad else []),
     ]
     kernel = T.load_unit(
         str(T.compile_text(body, flags)), "b200style_k3_static"

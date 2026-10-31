@@ -234,11 +234,16 @@ def _b200style_serves(module, pair, inference=False, padded=False):
     if padded and (not inference or pair.ndim != 4 or pair.shape[0] == 1 or pair.shape[1] % TRAINING_GRANULE == 0):
         return False
     length = -(-pair.shape[1] // TRAINING_GRANULE) * TRAINING_GRANULE if padded else pair.shape[1]
+    # one-sample, one-direction D384 inference at L % 128 != 0: the port's any-L form (K1 planes padded to 16, k3.cu ROWPAD),
+    # 0.81-0.84x Anthropic's time at L200-1500 where the packaged K1 / K3 ran 0.99-1.01x (2026-10-30, record
+    # trimul_h100_vs_anthropic_15pct_20261030.md). D256 keeps the packaged K1 / K3 there (the two within 1 %).
+    rowpad = (inference and not padded and pair.ndim == 4 and pair.shape[0] == 1 and hasattr(module, "outgoing")
+              and pair.shape[-1] == 384 and 16 <= pair.shape[1] <= MAX_TRAINING_LENGTH and pair.shape[1] % TRAINING_GRANULE != 0)
     if (not pair.is_cuda or pair.dtype != torch.bfloat16 or pair.ndim != 4
             or not 1 <= pair.shape[0] <= max_batch(pair.shape[-1]) or pair.shape[0] * length * length >= 2 ** 31
             or pair.shape[1] != pair.shape[2]
             or pair.shape[-1] not in (256, 384, 512)
-            or not _training_length(length)
+            or not (_training_length(length) or rowpad)
             or not pair.is_contiguous() or module.d_hidden != pair.shape[-1]
             or module.ln_pair.eps != 1e-5 or module.ln_out.eps != 1e-5
             or torch.cuda.get_device_capability(pair.device) != (9, 0)):
