@@ -24,6 +24,7 @@ import torch.nn.functional as F
 from miniworld_engine.integrations import bias_only_dit_hoist as _fused
 from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits as _pair_bias_logits
 from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import supported as _pair_bias_supported
+from miniworld_engine.modules.dispatch import portable_blocked
 from miniworld_engine.modules.exceptions import ImplementationType
 
 
@@ -75,7 +76,9 @@ def pair_bias_all(blocks, pair: torch.Tensor, *, implementation: ImplementationT
         if not torch.is_grad_enabled():  # inference: one pass over the pair per block (LayerNorm on chip), no autograd node
             return _fused.pair_bias_all_infer(attns, pair)
         return _fused.pair_bias_all_psb(attns, pair)
-    if impl == ImplementationType.MINIWORLD and pair.ndim == 4 and _pair_bias_supported(pair, len(attns) * H):
+    if (impl == ImplementationType.MINIWORLD and pair.ndim == 4 and _pair_bias_supported(pair, len(attns) * H)
+            # the one-pass kernels have no registry row (autotune.records.UNREGISTERED_OPS): off H100 / B200 the PyTorch fold below
+            and not (pair.is_cuda and portable_blocked("bias_only_pair_bias", pair.device, pair, attns[0].to_bias.weight))):
         return _portable(attns, pair, eps)
     return _reference(attns, pair, eps)
 

@@ -53,13 +53,31 @@ _TOKEN_ATTENTION = (
 )
 #: The block-local window attention (32 queries x 128 / 192 keys per window): the atom DiT block's core.
 _WINDOW_ATTENTION = ("augmented_attention/augmented_attention_*_window_triton",)
-#: The inference pair-bias producer of the portable DiT paths: LayerNorm of the pair and its projection to the heads in one pass.
-_PAIR_BIAS = ("layernorm_linear/layernorm_linear_fwd_triton",)
+#: The inference pair-bias producer of the portable DiT paths: LayerNorm of the pair and its projection to the heads in one pass (an fp32
+#: pair takes the LayerNorm forward of the layernorm family and a cuBLAS projection instead, ``layernorm_linear/triton/fused.py``).
+_PAIR_BIAS = ("layernorm_linear/layernorm_linear_fwd_triton", "layernorm/layernorm_fwd_saveact_triton")
+#: The strided (feature-major) LayerNorm forward / backward the AdaLN family and the TriMul training front save and recompute with
+#: (``layernorm_linear/triton/te_style.py``): family ``layernorm_linear``, so ``adaln/*`` and ``trimul_inproj/*`` do not match them.
+_LN_STRIDED = ("layernorm_linear/layernorm_fwd_saveact_strided_triton", "layernorm_linear/layernorm_bwd_atomic_strided_triton")
+#: The flat sigmoid-gate multiply and its backward (``gated_projection/triton/main.py`` ``_sigmul_*``), launched by the ConditionedTransition
+#: training path, the SWA atom attention's gate and the bias-only DiT core.
+_SIGMUL = ("gated_projection/gated_projection_gate_flat_triton", "gated_projection/gated_projection_bwd_gate_flat_triton")
 
+#: Every entry below is checked against what the op's portable path LAUNCHES: ``kernels/registry/registry_kernel.units.json`` (``dev derive``
+#: runs each ``registry_module.csv`` row and records every Triton launch, per dtype and eval / train) is the evidence for the module ops,
+#: docs/records/triton_gate_audit_20261031.md for the rest. A kernel launched by a sub-module that has a gate of its own (a LayerNorm module
+#: inside AugmentedAttention) is listed under the parent too: the parent's portable route depends on it.
 OP_KERNELS: dict[str, tuple[str, ...]] = {
     # the residual path also launches the input LayerNorm's forward (layernorm family) and its backward with the residual gradient (trimul_inproj family)
     "transition": ("transition/*", "layernorm/layernorm_fwd_saveact_triton", "trimul_inproj/trimul_input_ln_residual_bwd_triton"),
-    "triangle_multiplication": ("trimul_inproj/*",),
+    # the input LayerNorm (layernorm family; its backward the persistent split kernel) and the training front's strided / m-major LayerNorm
+    "triangle_multiplication": (
+        "trimul_inproj/*",
+        "layernorm/layernorm_fwd_saveact_triton",
+        "layernorm/layernorm_bwd_split_triton",
+        *_LN_STRIDED,
+        "layernorm_linear/layernorm_bwd_split_mmajor_triton",
+    ),
     "triangle_attention": (
         "triangle_attention/*",
         "layernorm_linear/*",
@@ -67,9 +85,20 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
         "gated_projection/gated_projection_*",
         "bias_only_attention/*",
     ),
-    "adaptive_layernorm": ("adaln/*",),
-    "conditioned_transition": ("conditioned_transition/*", "adaln/*"),
-    "augmented_attention": (*_TOKEN_ATTENTION, "adaln/*"),
+    "adaptive_layernorm": ("adaln/*", *_LN_STRIDED),
+    "conditioned_transition": ("conditioned_transition/*", "adaln/*", *_LN_STRIDED, *_SIGMUL),
+    # the token attention core, its AdaLN, the pair LayerNorm (layernorm family), and the pair-bias LayerNorm + projection: the fp32-statistics
+    # kernel with its backward in a training call (modules/augmented_attention), the one-pass forward in AttentionPairBias inference
+    "augmented_attention": (
+        *_TOKEN_ATTENTION,
+        "adaln/*",
+        *_LN_STRIDED,
+        "layernorm/layernorm_fwd_saveact_triton",
+        "layernorm/layernorm_bwd_atomic_triton",
+        "layernorm_linear/layernorm_linear_fwd_fp32_triton",
+        "layernorm_linear/layernorm_linear_bwd_fp32_triton",
+        "layernorm_linear/layernorm_linear_fwd_triton",
+    ),
     "outer_product_mean": ("outer_product_mean/*",),
     "msa_pair_weighted_averaging": ("pair_weighted_averaging/*",),
     "rmsnorm": ("rmsnorm/*",),
@@ -84,18 +113,51 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
     "layernorm": ("layernorm/*",),
     # the smooth lDDT of the diffusion loss (kernels/smooth_lddt): prep + forward, and the backward in a training call
     "smooth_lddt": ("smooth_lddt/*",),
-    # the ops.* facade entry points that launch a single Triton unit (kernels/*/whole_op.py)
+    # the ops.* facade entry points that launch a single Triton unit (kernels/*/whole_op.py, kernels/_ops_routed.py)
     "gated_linear": ("gated_projection/gated_projection_*", "bias_only_attention/*"),
     "augmented_attention_pair_bias": _TOKEN_ATTENTION,
-    "swiglu_ffn": ("transition/transition_expand_swiglu_triton",),
-    "swa_atom_attention": ("rope/*", "rmsnorm/*", "gated_projection/swa_gate_out_fwd_triton"),
+    # the bare SwiGLU (ops.swiglu_ffn, ops.conditioned_transition's tail, the ESMFold2 atom block's FFN) and its backward
+    "swiglu_ffn": ("transition/transition_expand_swiglu_triton", "transition/transition_bwd_squeeze_swiglu_triton"),
+    # ops.rms_norm_modulation (the adaLN-Zero RMSNorm + modulation of the ESMFold2 atom block and SWADiTBlock's per-op path)
+    "rms_norm_modulation": ("rmsnorm_adamod/*",),
+    # ops.layer_norm_linear: Linear(LayerNorm(x)) with fp32 statistics (kernels/layernorm_linear/triton/pair_bias.py)
+    "layer_norm_linear": ("layernorm_linear/layernorm_linear_fwd_fp32_triton", "layernorm_linear/layernorm_linear_bwd_fp32_triton"),
+    "swa_atom_attention": ("rope/*", "rmsnorm/*", "gated_projection/swa_gate_out_fwd_triton", *_SIGMUL),
     "swa_dit": ("swa_dit/*", "rmsnorm/*"),
+    # the bias-only DiT's training core (kernels/bias_only_attention/triton/core_t.py): cuBLAS GEMMs around the flat sigmoid gate
+    "bias_only_core": _SIGMUL,
     # The attention cores of the portable DiT paths (the rest of those blocks is torch ops and the ops above, each with its own rule):
     # the AF3 / Protenix / OpenFold3 / ESMFold2 atom block (LocalDiTBlock), and the Boltz-2 / RoseTTAFold3 / Chai-1 token and atom stacks.
     "local_dit": (*_WINDOW_ATTENTION, *_PAIR_BIAS),
     "dit_variant": (*_TOKEN_ATTENTION, *_PAIR_BIAS),
     "dit_variant_atom": (*_WINDOW_ATTENTION, *_PAIR_BIAS),
+    # ProteinMPNN (modules/mpnn): its kernels are chosen by backend options, not by `implementation`. `auto` asks the record for the two
+    # sub-ops it can put on Triton (the message reduction; the edge MLP, on sm_86 only); an explicit Triton backend is the caller's choice
+    # and is not gated (kernels/mpnn_message/interface.py, kernels/mpnn_edge_mlp/interface.py). Listed per family so `missing` reports all six.
+    "mpnn_message": ("mpnn_message/*",),
+    "mpnn_edge_mlp": ("mpnn_edge_mlp/*",),
+    "mpnn_edge_dropout": ("mpnn_edge_dropout/*",),
+    "mpnn_edge_tail": ("mpnn_edge_tail/*",),
+    "mpnn_node_message": ("mpnn_node_message/*",),
+    "mpnn_relative_position": ("mpnn_relative_position/*",),
 }
+
+#: Ops whose portable kernels have NO registry row (no driver, no check, so ``run_all`` cannot record them on any card): off H100 / B200
+#: they always take their PyTorch statements, with one ``UnrecordedCardWarning`` naming the kernels. Registering the kernels
+#: (registry.csv + driver + check, then ``run_all``) moves an op from here into ``OP_KERNELS``.
+UNREGISTERED_OPS: dict[str, tuple[str, ...]] = {
+    # ops.gated_residual: x + gate * branch with eager product rounding (SWADiTBlock's per-op path)
+    "gated_residual": ("kernels/gated_projection/triton/residual.py:_forward", "kernels/gated_projection/triton/residual.py:_backward"),
+    # the bias-only DiT's one-pass pair LayerNorm + bias projection (BiasOnlyAttention training, pair_bias_all's portable leg)
+    "bias_only_pair_bias": (
+        "kernels/bias_only_attention/triton/pair_bias.py:_ln_bias_fwd_kernel",
+        "kernels/bias_only_attention/triton/pair_bias.py:_ln_bias_bwd_kernel",
+    ),
+}
+
+#: Kernels whose name carries a training word but which every INFERENCE forward of their ops launches too (``registry_kernel.units.json``:
+#: the LayerNorm forward that saves its statistics runs in each ``eval`` unit of Transition, TriMul, TriangleAttention, AugmentedAttention).
+_INFERENCE_TOO = frozenset({"layernorm_fwd_saveact_triton"})
 
 #: The words of a kernel name that make it a training kernel: it saves activations for the backward (`saveact`), is the backward
 #: (`bwd`, `dw`) or the fused training epilogue (`train`). Every other kernel of an op runs in the forward of an inference call too.
@@ -106,6 +168,8 @@ _manifest_dir: Path | None = None
 
 def kernel_mode(kernel: str) -> str:
     """``"training"`` if ``kernel`` only runs where a backward is recorded, else ``"inference"`` (its forward serves both)."""
+    if kernel in _INFERENCE_TOO:
+        return "inference"
     return "training" if _TRAINING_WORDS & set(kernel.split("_")) else "inference"
 
 
@@ -178,7 +242,10 @@ def triton_kernels(op: str, dtype: str = "bf16", mode: str = "training") -> tupl
 
 def missing(op: str, name: str, capability: tuple[int, int], dtype: str = "bf16", mode: str = "training") -> tuple[str, ...]:
     """The kernels ``op`` launches in ``mode`` with no ``ok`` row for this exact card at ``dtype`` (empty means recorded). An op the
-    table does not know has no kernels to vouch for: its only entry is a note naming the op."""
+    table does not know has no kernels to vouch for: its only entry is a note naming the op. An op of ``UNREGISTERED_OPS`` names the
+    kernels no card can hold a row for."""
+    if op in UNREGISTERED_OPS:
+        return tuple(f"<unregistered: {k}>" for k in UNREGISTERED_OPS[op])
     kernels = triton_kernels(op, dtype, mode)
     if not kernels:
         return (f"<no portable kernel of {op!r} declares {dtype}>",)

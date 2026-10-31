@@ -84,6 +84,16 @@ def _should_use_triton(supported: bool, backend: MessageBackend) -> bool:
     return supported and backend != "pytorch"
 
 
+def _auto_unrecorded(preactivation: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor) -> bool:
+    """``auto`` on a card other than H100 / B200 puts the reduction on Triton only where the engine holds a record of the
+    ``mpnn_message`` kernels for that card (``autotune.records``; inference: the forward kernels, training: all four); otherwise one
+    ``UnrecordedCardWarning`` and the PyTorch statements. H100 / B200 keep what ``auto`` always did there; an explicit Triton backend is
+    the caller's choice and is not asked."""
+    from miniworld_engine.modules.dispatch import portable_blocked
+
+    return portable_blocked("mpnn_message", preactivation.device, preactivation, weight, bias, dtype="bf16")
+
+
 def message_hidden_reduce(
     preactivation: torch.Tensor,
     weight: torch.Tensor,
@@ -114,7 +124,7 @@ def message_hidden_reduce(
     # forward for both policies; the memory policy discards and later
     # recomputes its projected activation. The compatibility name ``triton``
     # denotes the compute policy.
-    if _should_use_triton(supported, backend):
+    if _should_use_triton(supported, backend) and not (backend == "auto" and _auto_unrecorded(preactivation, weight, bias)):
         if not torch.is_grad_enabled():
             from miniworld_engine.kernels.mpnn_message.triton.inference import (
                 _int32_offsets_supported,

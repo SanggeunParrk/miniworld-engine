@@ -8,6 +8,21 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Off H100 / B200, every Triton kernel a public entry point launches is now behind the record gate (`docs/dispatch.md`; audit:
+  `docs/records/triton_gate_audit_20261031.md`). H100 and B200 run what they ran.
+  - Gated now (a card without the record warns once and runs the PyTorch statements): `ops.rms_norm_modulation`, `ops.layer_norm_linear`,
+    `ops.conditioned_transition`, `ops.triangle_multiplicative_update` and its bidirectional form, `ops.gated_residual`, the QK norm of
+    `ops.triangle_attention`, the ESMFold2 `SWAAtomTransformer` (fused block and per-block RMSNorm-modulation / SwiGLU), the bias-only DiT
+    training core and pair bias, ProteinMPNN's `auto` message reduction / edge MLP, and a Transition call the A100 fused kernels turn down.
+  - `autotune.records.OP_KERNELS` counts what each op launches (checked against the derived units): the LayerNorm kernels of TriMul, AdaLN,
+    ConditionedTransition and AugmentedAttention, the SwiGLU backward, the SWA gate kernels; new ops `rms_norm_modulation`,
+    `layer_norm_linear`, `bias_only_core` and the six MPNN families. `UNREGISTERED_OPS` names the kernels with no registry row (never recorded).
+  - The facades, LayerNorm / RMSNorm and the fp32 calls of AdaLN, ConditionedTransition and AugmentedAttention ask the record at the call's
+    precision and mode.
+- `tm1` / `tm2` (4 Triton rows) are `developed=no`: nothing outside their drivers and checks launches them.
+
 ## [2.4.1] - 2026-10-30
 
 ### Fixed

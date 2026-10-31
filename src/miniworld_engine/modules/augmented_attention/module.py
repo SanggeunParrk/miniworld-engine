@@ -254,6 +254,7 @@ class AugmentedAttentionPairBias(nn.Module):
             query, key, value, bias = (t.to(compute_dtype) for t in (query, key, value, bias))
 
         backend = _dispatch.call_backend(self, self._backend, query, key, value, bias)   # card recorded for inference only: PyTorch for training
+        backend = _dispatch.fp32_gate("augmented_attention", backend, self, query, key, value, bias)   # an fp32 core: the card's fp32 rows
         if (
             backend == KernelBackend.PORTABLE
             and self.implementation == ImplementationType.MINIWORLD

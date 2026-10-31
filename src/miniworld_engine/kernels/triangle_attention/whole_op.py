@@ -79,6 +79,14 @@ def triangle_attention(
 
         # a card the engine holds no record for: the PyTorch statements for the attention core and the QK norm (one UnrecordedCardWarning)
         blocked = pair.is_cuda and portable_blocked("triangle_attention", pair.device, pair, to_value_weight, to_out_weight)
+        from miniworld_engine import settings
+        from miniworld_engine.modules import dispatch
+
+        if (not blocked and query.is_cuda and query.dtype != torch.bfloat16 and not dispatch.restricted_card(query.device)
+                and not settings.current().force_portable_kernels):
+            # the triangle-attention core is bf16 only (its registry rows and its record): off H100 / B200 another dtype is a refusal
+            dispatch.warn_refused("triangle_attention", query.device, f"the portable triangle-attention core is bf16 only, got {query.dtype}")
+            blocked = True
         if use_qk_norm:
             # No `d_head` here any more: the kernel normalizes over the LAST axis and reads its
             # width from the tensor, where F.rms_norm wanted it restated as `normalized_shape`.
@@ -87,7 +95,8 @@ def triangle_attention(
             # rather than held. `eps` is this function's own, so nothing about it changes.
             from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
 
-            if blocked:
+            # the QK norm launches the rmsnorm family: its own record (a card may hold the attention kernels and not the RMSNorm ones)
+            if blocked or (pair.is_cuda and portable_blocked("rmsnorm", pair.device, query, norm_query_weight, norm_key_weight)):
                 query = F.rms_norm(query, (query.shape[-1],), norm_query_weight, eps)
                 key = F.rms_norm(key, (key.shape[-1],), norm_key_weight, eps)
             else:

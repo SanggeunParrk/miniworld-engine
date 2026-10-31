@@ -14,6 +14,7 @@ from torch.nn.parameter import Parameter
 from miniworld_engine import kernels
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
+    portable_blocked,
     resolve_layernorm,
     resolve_rmsnorm,
     restricted_card,
@@ -185,6 +186,10 @@ class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
             if len(self.normalized_shape) == 1 and supported(input):
                 return layernorm_cuda(input, self.weight, self.bias, self.eps)
             return super().forward(input.float()).to(input.dtype)
+        if backend == KernelBackend.CUDA and input.is_cuda and portable_blocked("layernorm", input.device, input, self.weight):
+            # the build-time resolve asked the bf16 forward kernels; a training call (the backward kernels) or an fp32 call asks again (one
+            # UnrecordedCardWarning, the PyTorch statements)
+            return super().forward(input.float()).to(input.dtype)
         if backend == KernelBackend.CUDA:
             # miniworld = our auto-routing LayerNorm: forward fused triton (HBM-bound,
             # at the bandwidth wall) + backward auto-dispatched per shape
@@ -232,6 +237,9 @@ class RMSNorm(nn.RMSNorm):
             return out.to(x.dtype) if self._returns_input_dtype else out
         if self._backend != KernelBackend.PORTABLE:
             raise InvalidImplementationError(self.implementation)
+        if portable_blocked("rmsnorm", x.device, x, self.weight):
+            # the build-time resolve asked the bf16 forward kernels; a training call (the backward) or an fp32 call asks again
+            return super().forward(x).to(x.dtype)
         eps = self.effective_eps(x.dtype)
         return kernels.triton_rmsnorm(x, self.weight, eps)
 

@@ -36,6 +36,7 @@ from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
     call_backend,
+    fp32_gate,
     needs_backward,
     resolve_conditioned_transition,
     train_gate,
@@ -222,6 +223,7 @@ class ConditionedTransition(nn.Module):
             backend = KernelBackend.PYTORCH   # a call the sm_90a kernels do not serve (or a training call): the reference
         if backend == KernelBackend.PORTABLE and not x.is_cuda:
             backend = KernelBackend.PYTORCH   # a CPU tensor (a module built on a CPU host keeps the Triton label): the reference
+        backend = fp32_gate("conditioned_transition", backend, self, x, cond)   # an fp32 call: the card's fp32 rows
         if backend == KernelBackend.PYTORCH:
             y = self._reference(x, cond)
             return x_in + y if residual else y

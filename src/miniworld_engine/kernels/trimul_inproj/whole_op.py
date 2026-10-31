@@ -106,6 +106,10 @@ def triangle_multiplicative_update(
     w_left, w_right = p_in_weight[:d_hidden], p_in_weight[d_hidden:]
     w_left_gate, w_right_gate = g_in_weight[:d_hidden], g_in_weight[d_hidden:]
 
+    if _off_record(x, p_in_weight, g_in_weight, p_out_weight, g_out_weight):
+        # a card the engine holds no record for: the PyTorch statements (one UnrecordedCardWarning)
+        return _trimul_pytorch(x, mask, norm_in_weight, norm_in_bias, w_left, w_left_gate, w_right, w_right_gate,
+                               norm_out_weight, norm_out_bias, p_out_weight, g_out_weight, eps, direction)
     # Grads flow to every weight arg because the unpacked weights above are differentiable
     # slice+transpose VIEWS of the packed inputs.
     return trimul_triton(
@@ -162,6 +166,10 @@ def bidirectional_triangle_multiplicative_update(
 
     # Grads flow to every weight arg (differentiable .t() views) and x (autograd-transparent LN_in).
     d_hidden = to_left_weight.shape[0] // 2  # to_left: (2*d_hidden, d_pair)
+    if _off_record(x, to_left_weight, to_gate_weight, to_out_weight):
+        # a card the engine holds no record for: the PyTorch statements (one UnrecordedCardWarning)
+        return _trimul_pytorch(x, mask, norm_in_weight, norm_in_bias, to_left_weight, to_left_gate_weight, to_right_weight,
+                               to_right_gate_weight, norm_out_weight, norm_out_bias, to_out_weight, to_gate_weight, eps, "bidirectional")
     return bidirectional_trimul_triton(
         x,
         to_left_weight,
@@ -179,3 +187,46 @@ def bidirectional_triangle_multiplicative_update(
         d_hidden,
         mask=mask,
     )
+
+
+def _off_record(x: torch.Tensor, *weights: torch.Tensor) -> bool:
+    """Must this facade call run the PyTorch statements rather than the portable kernels? On a card other than H100 / B200: when the
+    kernels refuse the dtype (they are bf16 only, as their registry rows and their record: one ``KernelRefusedWarning``) or the card holds
+    no record of them (``modules.dispatch.portable_blocked``: one ``UnrecordedCardWarning``). H100 / B200 and the A/B switch keep the
+    kernels, as before."""
+    from miniworld_engine import settings
+    from miniworld_engine.modules import dispatch
+
+    if not x.is_cuda or dispatch.restricted_card(x.device) or settings.current().force_portable_kernels:
+        return False
+    if x.dtype != torch.bfloat16:
+        dispatch.warn_refused("triangle_multiplication", x.device, f"the portable TriMul kernels are bf16 only, got {x.dtype}")
+        return True
+    return dispatch.portable_blocked("triangle_multiplication", x.device, x, *weights)
+
+
+def _trimul_pytorch(x, mask, ln_in_w, ln_in_b, WL, WLg, WR, WRg, ln_out_w, ln_out_b, Wout, Wg, eps, direction):
+    """The PyTorch statements of both facades (``x + update(x)``), for a card the engine holds no record for. Same algebra as
+    ``modules.triangle_multiplication`` (the mask is a (B, L) residue mask or a (B, L, L) pair mask applied to the contraction inputs; the
+    output gate stays unmasked; ``"bidirectional"`` contracts the first half of the hidden channels outgoing, the second incoming). The
+    weights are cast to the activation's dtype, as the PyTorch legs of the modules run them."""
+    import torch.nn.functional as F
+
+    dt = x.dtype
+    x_n = F.layer_norm(x, (x.shape[-1],), None if ln_in_w is None else ln_in_w.to(dt), None if ln_in_b is None else ln_in_b.to(dt), eps)
+    left = torch.sigmoid(F.linear(x_n, WLg.to(dt))) * F.linear(x_n, WL.to(dt))
+    right = torch.sigmoid(F.linear(x_n, WRg.to(dt))) * F.linear(x_n, WR.to(dt))
+    if mask is not None:
+        m = (mask.unsqueeze(-1) & mask.unsqueeze(-2)) if mask.dim() == 2 else mask.bool()
+        left = left * m[..., None].to(dt)
+        right = right * m[..., None].to(dt)
+    if direction == "outgoing":
+        out = torch.einsum("bikd,bjkd->bijd", left, right)
+    elif direction == "incoming":
+        out = torch.einsum("bkid,bkjd->bijd", left, right)
+    else:
+        h = left.shape[-1] // 2
+        out = torch.cat([torch.einsum("bikd,bjkd->bijd", left[..., :h], right[..., :h]),
+                         torch.einsum("bkid,bkjd->bijd", left[..., h:], right[..., h:])], dim=-1)
+    out = F.layer_norm(out, (out.shape[-1],), ln_out_w.to(dt), ln_out_b.to(dt), eps)
+    return x + torch.sigmoid(F.linear(x_n, Wg.to(dt))) * F.linear(out, Wout.to(dt))

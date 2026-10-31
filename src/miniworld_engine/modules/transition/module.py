@@ -88,6 +88,8 @@ class Transition(nn.Module):
         # Resolution lives in modules.dispatch; forward routes on self._backend.
         self.implementation = ImplementationType(implementation)
         native_cuda = self._native_cuda_serves()
+        # resolved with no record (the sm_80 fused kernels serve d=128, n=4); a call they turn down per call still needs one (_residual_forward)
+        self._native_cuda_route = native_cuda and self.implementation == ImplementationType.MINIWORLD
         self._backend = resolve_transition(self.implementation, native_cuda=native_cuda)
         # a card recorded for the forward kernels but not the backward ones: training calls take the PyTorch reference
         self._train_gate = _dispatch.train_gate("transition", self.implementation, self._backend, native_cuda=native_cuda)
@@ -278,6 +280,10 @@ class Transition(nn.Module):
 
         if self._requires_h100_cuda(x):
             return self._torch_forward(x) + x   # B200 / H100 without a CUDA build for this call: no Triton fallback
+        if getattr(self, "_native_cuda_route", False) and x.is_cuda and _dispatch.portable_blocked("transition", x.device, x, wa, wb, ws):
+            # built on the strength of the A100 fused kernels, which turned this call down (ragged rows, a dtype, a build): the portable
+            # kernels need the card's record like any other call (one UnrecordedCardWarning, the PyTorch reference)
+            return self._torch_forward(x) + x
 
         from miniworld_engine.kernels.transition.triton.residual import (
             transition_residual,

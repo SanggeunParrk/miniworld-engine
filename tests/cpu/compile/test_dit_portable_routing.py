@@ -28,7 +28,8 @@ ATOM_OPS = ("local_dit", "dit_variant_atom")
 def test_the_atom_ops_hold_the_window_kernels_and_the_token_ops_the_token_ones():
     window = {"augmented_attention_fwd_window_triton", "augmented_attention_bwd_window_triton",
               "augmented_attention_bwd_reduce_window_triton"}
-    bias = {"layernorm_linear_fwd_triton"}        # the pair-bias producer of an inference call
+    # the pair-bias producer of an inference call (an fp32 pair: the LayerNorm forward of the layernorm family and a cuBLAS projection)
+    bias = {"layernorm_linear_fwd_triton", "layernorm_fwd_saveact_triton"}
     for op in ATOM_OPS:
         assert set(records.triton_kernels(op, "bf16", "training")) == window | bias
         assert set(records.triton_kernels(op, "bf16", "inference")) == {"augmented_attention_fwd_window_triton"} | bias

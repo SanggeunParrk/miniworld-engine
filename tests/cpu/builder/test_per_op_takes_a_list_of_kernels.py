@@ -37,7 +37,7 @@ def _args(shards, case, *extra):
         ["build", case, "--per-op", "--shards", str(shards), *extra])
 
 
-TWO = "transition_fwd_b2b_triton,trimul_gemm_gate_triton"
+TWO = "transition_fwd_b2b_triton,trimul_gemm_gate_mmajor_triton"
 
 
 def test_one_name_still_means_one_kernel(spy, tmp_path) -> None:

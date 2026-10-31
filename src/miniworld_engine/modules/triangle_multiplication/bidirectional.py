@@ -163,6 +163,8 @@ class BidirectionalTriangleMultiplication(nn.Module):
                 return _anthropic.update_bidirectional(self, pair, mask)
 
         backend = _dispatch.call_backend(self, self._backend, pair)   # a card recorded for inference only: PyTorch for a training call
+        # the portable kernels are bf16 only (their record is bf16): another dtype runs the PyTorch statements, as TriangleMultiplication does
+        backend = _dispatch.guard_dtype(backend, pair.dtype, op="BidirectionalTriangleMultiplication")
         if backend == KernelBackend.CUEQUIVARIANCE:
             return _r(self._forward_cuequivariance(pair, mask))
         if backend == KernelBackend.PORTABLE and not no_triton and self.d_hidden != pair.shape[-1] and pair.is_cuda:

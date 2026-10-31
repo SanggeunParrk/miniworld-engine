@@ -10,6 +10,7 @@ from miniworld_engine.kernels import _capture, adaln_inference, adaln_train
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
     call_backend,
+    fp32_gate,
     needs_backward,
     resolve_adaptive_layernorm,
     train_gate,
@@ -94,6 +95,7 @@ class AdaptiveLayerNorm(nn.Module):
         backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
         if backend in (KernelBackend.PORTABLE, KernelBackend.CUDA) and not x.is_cuda:
             backend = KernelBackend.PYTORCH   # a CPU tensor (a module built on a CPU host keeps the kernel label): the reference
+        backend = fp32_gate("adaptive_layernorm", backend, self, x, cond)   # an fp32 call: the card's fp32 rows
         if backend == KernelBackend.CUDA:
             out = self._cuda_forward(x, cond)
             if out is not None:

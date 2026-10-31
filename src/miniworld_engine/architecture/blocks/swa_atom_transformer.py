@@ -31,11 +31,20 @@ from miniworld_engine.architecture.layers.ops import mp_sum, mp_swish_gate
 from miniworld_engine.architecture.primitives import Linear, MPLinear
 from miniworld_engine.architecture.typing import typecheck
 from miniworld_engine.modules import RMSNorm
-from miniworld_engine.modules.dispatch import fallback_autocast, restricted_card
+from miniworld_engine.modules.dispatch import (
+    fallback_autocast,
+    portable_blocked,
+    restricted_card,
+)
 from miniworld_engine.modules.swa_atom_attention.module import (
     SWA3DRoPEAttention,
     build_3d_rope,
 )
+
+
+def _record_dtype(dtype: torch.dtype) -> str:
+    """The precision the record is asked at for a kernel call in ``dtype`` (``modules.dispatch.record_dtype``)."""
+    return "fp32" if dtype == torch.float32 else "bf16"
 
 
 class SwiGLUFFN(nn.Module):
@@ -59,26 +68,33 @@ class SwiGLUFFN(nn.Module):
         self.w_down = dense(hidden, d_model, bias=False, init="normal")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if (
+        engine = (
             self.implementation == ImplementationType.MINIWORLD_ENGINE
             and x.is_cuda
             and not self.magnitude_preserving
             and not self._pointwise
             and not restricted_card(x.device)  # H100 / B200 have no Triton fallback: the PyTorch statements below run
-        ):
+        )
+        blocked = False
+        if engine:
             # Cast through autograd, retaining the original FP32 master weights.
             dtype = (
                 torch.get_autocast_dtype("cuda")
                 if torch.is_autocast_enabled("cuda")
                 else x.dtype
             )
+            # a card the engine holds no record for (autotune.records, op "swiglu_ffn"): the PyTorch statements below, one warning
+            blocked = portable_blocked(
+                "swiglu_ffn", x.device, x, self.w_up.weight, self.w_down.weight, dtype=_record_dtype(dtype)
+            )
+        if engine and not blocked:
             wa, wb = self.w_up.weight.to(dtype).chunk(2, dim=0)
             with torch.autocast("cuda", enabled=False):
                 return kernels.triton_swiglu_ffn(
                     x.to(dtype), wa, wb, self.w_down.weight.to(dtype)
                 )
-        # H100 / B200 land here (no Triton fallback): fp32 master weights under a bf16 activation run under bf16 autocast
-        with fallback_autocast(x, self, x.is_cuda and restricted_card(x.device)):
+        # H100 / B200 land here (no Triton fallback), and an unrecorded card: fp32 master weights under a bf16 activation run under bf16 autocast
+        with fallback_autocast(x, self, x.is_cuda and (blocked or restricted_card(x.device))):
             x1, x2 = self.w_up(x).chunk(2, dim=-1)
             x = mp_swish_gate(x1, x2) if self.magnitude_preserving else F.silu(x1) * x2
             return self.w_down(x)
@@ -151,13 +167,23 @@ class SWAAtomBlock(nn.Module):
         c: Float[torch.Tensor, "N S d_cond"],
         attention_params: tuple,
     ) -> Float[torch.Tensor, "N S d_atom"]:
-        if (
+        engine = (
             self.implementation == ImplementationType.MINIWORLD_ENGINE
             and q.is_cuda
             and not self.mp_full
             and not self._pointwise
             and not restricted_card(q.device)  # H100 / B200 have no Triton fallback: the PyTorch statements below run
-        ):
+        )
+        blocked = False
+        if engine:
+            # the fused RMSNorm + adaLN modulation (op "rms_norm_modulation") needs the card's record; without it the PyTorch statements
+            # below run (one warning). The attention and the FFN gate themselves.
+            dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else q.dtype
+            blocked = portable_blocked(
+                "rms_norm_modulation", q.device, q, c, self.adaln_modulation[1].weight, dtype=_record_dtype(dtype)
+            )
+            engine = not blocked
+        if engine:
             # Keep the six-chunk checkpoint layout and the adaLN-Zero algorithm.
             # The engine SWADiTBlock implements different conditioning, so it
             # cannot replace this block without changing the trained model.
@@ -186,7 +212,7 @@ class SWAAtomBlock(nn.Module):
                 )
             ffn = gate_f * self.ffn(ffn_in)
             return mp_sum(q, ffn, self.residual_t) if self.mp_residual else q + ffn
-        with fallback_autocast(q, self, q.is_cuda and restricted_card(q.device)):
+        with fallback_autocast(q, self, q.is_cuda and (blocked or restricted_card(q.device))):
             shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = self.adaln_modulation(
                 c
             ).chunk(6, dim=-1)
@@ -348,7 +374,7 @@ class SWAAtomTransformer(nn.Module):
         # weights in that dtype or fp32 (an fp32 master over bf16 activations: the
         # engine casts them for its kernels outside autograd); the global cast makes
         # the fp32 caller's operands bf16.
-        return (
+        served = (
             q.dtype in (torch.bfloat16, torch.float32)
             and c.dtype == q.dtype
             and cfg.d_atom == 128
@@ -375,6 +401,15 @@ class SWAAtomTransformer(nn.Module):
                     b.ffn.w_down.weight,
                 )
             )
+        )
+        if not served:
+            return False
+        # Off H100 / B200 the block runs the portable swa_dit kernels: the card needs a record for them (autotune.records, op "swa_dit",
+        # at the precision the block runs); without one the per-block statements run (each part gated by its own op), with one warning.
+        # H100 / B200 are not asked (portable_blocked is False there): they keep their native stages.
+        return not portable_blocked(
+            "swa_dit", q.device, q, c, *(p for b in self.blocks for p in (b.attn.Wqkv.weight, b.ffn.w_up.weight)),
+            dtype="bf16" if cast else _record_dtype(q.dtype),
         )
 
     def _forward_fused(self, q, c, attention_params, c_base):

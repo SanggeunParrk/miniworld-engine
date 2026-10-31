@@ -139,6 +139,13 @@ def edge_mlp_update(
             "that fit in signed 32-bit indexing"
         )
     selected = _select_backend(preactivation, backend, supported=supported)
+    if backend == "auto" and selected != "pytorch":
+        from miniworld_engine.modules.dispatch import portable_blocked
+
+        # `auto` puts the edge MLP on Triton (sm_86 only) where the engine holds a record of the `mpnn_edge_mlp` kernels for this exact
+        # card (autotune.records); otherwise one UnrecordedCardWarning and the PyTorch statements. An explicit backend is not asked.
+        if portable_blocked("mpnn_edge_mlp", preactivation.device, preactivation, hidden_weight, output_weight, dtype="bf16"):
+            selected = "pytorch"
     if selected == "triton_memory":
         from miniworld_engine.kernels.mpnn_edge_mlp.triton import triton_edge_mlp_update
 

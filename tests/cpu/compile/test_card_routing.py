@@ -252,7 +252,7 @@ def test_per_call_resolvers_ask_for_the_mode(monkeypatch, manifests):
 
 # ---- the ops.* entry points obey the same rule ------------------------------------------------------------------------
 def test_ops_entry_points_are_blocked_on_an_unrecorded_card_only(monkeypatch, manifests):
-    x = torch.randn(2, 8)
+    x = torch.randn(2, 8).bfloat16()   # the rows are asked at the call's precision (dispatch.record_dtype): the manifest below is bf16
     dev = fake_card(monkeypatch, "Brand New GPU", (8, 9))
     with pytest.warns(UnrecordedCardWarning, match="transition"):
         assert dispatch.portable_blocked("transition", dev, x)

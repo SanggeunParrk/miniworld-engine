@@ -20,11 +20,13 @@ its reference and writes `autotune/manifests/<card name> (smXX).csv` (the `#prov
 **recorded on a card for a call** when every portable kernel *that call launches* has an `ok` row in that card's manifest at the dtype in use:
 
 * the kernels of an op are the `developed == yes` portable rows of the registry selected by `autotune.records.OP_KERNELS`
-  (family and kernel-name patterns per op; the undeveloped A/B alternatives are not held against an op);
+  (family and kernel-name patterns per op; the undeveloped A/B alternatives are not held against an op). Each entry is checked against
+  what the op's portable path launches -- the units `dev derive` records per `registry_module.csv` row, dtype and eval / train
+  (`kernels/registry/registry_kernel.units.json`; `tests/cpu/compile/test_triton_gate_audit.py`);
 * **the call's mode decides which of them**: an *inference* call (no backward recorded: `torch.no_grad`, `eval()` with detached inputs and
   no parameter gradient) launches the forward kernels only; a *training* call launches those and the backward ones. A kernel is a
-  training kernel when its name carries a `bwd`, `saveact`, `train` or `dw` word (`records.kernel_mode`); the rest run in an inference
-  forward too. A missing backward kernel therefore blocks training calls only: TriMul on an Ampere card runs the portable kernels for inference and
+  training kernel when its name carries a `bwd`, `saveact`, `train` or `dw` word (`records.kernel_mode`; one exception, the LayerNorm
+  forward `layernorm_fwd_saveact_triton`, which every inference forward launches too); the rest run in an inference forward too. A missing backward kernel therefore blocks training calls only: TriMul on an Ampere card runs the portable kernels for inference and
   the PyTorch reference (one warning) for a call that needs a backward;
 * `failed` and `untested` rows, a kernel with no row, and a row at another precision are not evidence;
 * the card is identified by its **exact name and capability**: `NVIDIA RTX A6000 (sm86)`. An A40 or an L40S (same sm_86 / sm_89
@@ -52,30 +54,39 @@ Generated from the manifests in the tree (`records.missing(op, card, mode=)`, `b
 
 | op | A100 80GB PCIe (sm80) | RTX A5000 (sm86) | RTX A6000 (sm86) | H100 / B200 | any other card |
 |---|---|---|---|---|---|
-| Transition | CUDA at d=128, n=4; else warns (1 of 5 inference, 2 of 9 training) | warns (1 / 2 of 9) | warns (1 / 2 of 9) | CUDA, else PyTorch | warns, PyTorch |
-| TriangleMultiplication (+ bidirectional) | portable inference; training warns (3 of 8) | portable inference; training warns (3 of 8) | portable inference; training warns (3 of 8) | CUDA, else PyTorch | warns, PyTorch |
+| Transition | CUDA at d=128, n=4 (a call those kernels turn down asks the record); else warns (1 of 6 inference, 3 of 10 training) | warns (1 / 3 of 10) | warns (1 / 3 of 10) | CUDA, else PyTorch | warns, PyTorch |
+| TriangleMultiplication (+ bidirectional, `ops.triangle_multiplicative_update` and its bidirectional form) | portable inference; training warns (3 of 13) | portable inference; training warns (3 of 13) | portable inference; training warns (3 of 13) | CUDA, else PyTorch | warns, PyTorch |
 | TriangleAttention (+ bidirectional, bias-only) | portable | portable | portable | CUDA, else PyTorch | warns, PyTorch |
-| AdaptiveLayerNorm | warns (2 of 8) | warns (2 of 8) | warns (2 of 8) | CUDA on H100, PyTorch on B200 | warns, PyTorch |
-| ConditionedTransition | warns (2 inference, 3 training of 17) | warns (2 / 3 of 17) | warns (2 / 4 of 17) | CUDA on H100, PyTorch on B200 | warns, PyTorch |
-| AugmentedAttention / AttentionPairBias | warns (2 of 11) | warns (2 of 11) | warns (2 of 11) | CUDA, else PyTorch | warns, PyTorch |
-| OuterProductMean | warns (2 inference, 5 training of 5) | same | same | CUDA, else PyTorch | warns, PyTorch |
+| AdaptiveLayerNorm | warns (2 of 5 inference, 2 of 10 training) | same | same | CUDA on H100, PyTorch on B200 | warns, PyTorch |
+| ConditionedTransition | warns (2 of 10 inference, 3 of 21 training) | warns (2 / 3 of 21) | warns (2 / 4 of 21) | CUDA on H100, PyTorch on B200 | warns, PyTorch |
+| AugmentedAttention / AttentionPairBias | warns (2 of 9 inference, 2 of 18 training) | same | same | CUDA, else PyTorch | warns, PyTorch |
+| OuterProductMean | warns (3 of 3 inference, 8 of 8 training) | same | same | CUDA, else PyTorch | warns, PyTorch |
 | MSAPairWeightedAveraging | warns (3 inference, 7 training of 7) | same | same | CUDA, else PyTorch | warns, PyTorch |
 | RMSNorm | portable | warns (1 inference, 2 training of 2) | same | CUDA | warns, PyTorch |
-| LayerNorm | portable forward, CUDA / portable backward | same | same | CUDA (general kernel) | warns, PyTorch |
-| SWA atom attention (QK norm + RoPE, gate) | warns (3 / 4 of 6) | warns (4 / 6 of 6) | warns (4 / 6 of 6) | CUDA, else PyTorch | warns, PyTorch |
-| SWADiTBlock | warns (3 / 9 of 11) | warns (4 / 11 of 11) | warns (4 / 11 of 11) | CUDA, else PyTorch | warns, PyTorch |
+| LayerNorm | portable (forward and backward; asked per call: training and fp32 calls too) | same | same | CUDA (general kernel) | warns, PyTorch |
+| SWA atom attention (QK norm + RoPE, gate) | warns (3 of 5 / 4 of 8) | warns (4 of 5 / 6 of 8) | warns (4 of 5 / 6 of 8) | CUDA, else PyTorch | warns, PyTorch |
+| SWADiTBlock (and ESMFold2's `SWAAtomTransformer` fused block) | warns (3 / 9 of 11) | warns (4 / 11 of 11) | warns (4 / 11 of 11) | CUDA, else PyTorch | warns, PyTorch |
+| RMSNorm + adaLN modulation (`ops.rms_norm_modulation`; the ESMFold2 atom block, SWADiTBlock's per-op path) | portable | warns (1 of 1 / 2 of 2) | same | Triton through the facade, PyTorch in the blocks | warns, PyTorch |
+| `ops.layer_norm_linear` (fp32-statistics LayerNorm + projection) | portable | portable | portable | Triton (facade) | warns, PyTorch |
+| `ops.swiglu_ffn`, `ops.conditioned_transition` (the SwiGLU tail), the ESMFold2 atom FFN | portable inference; training warns (1 of 2) | same | same | Triton (facade), PyTorch in the blocks | warns, PyTorch |
+| `ops.gated_residual`, the bias-only DiT pair-bias kernel | warns (no registry row: never recorded) | same | same | Triton | warns, PyTorch |
+| ProteinMPNN `auto` (message reduction; edge MLP on sm_86) | warns (message: 2 of 2 inference, 4 of 4 training) | portable | warns (message 2 of 2 / 4 of 4, edge MLP 2 of 2) | Triton message reduction (as before) | warns, PyTorch |
 | La-Proteina pair builders (`pair_embed_geom`, `pair_embed_ca`, `pair_embed_adaln`) | warns (2 inference, 5 training of 5 for the encoder / decoder pair; 1 / 4 of 4 for the initial pair) | same | same | CUDA on H100, PyTorch on B200 | warns, PyTorch |
 | Token-pair initialisation (`token_pair_init`) | warns (1 inference, 4 training of 4) | same | same | CUDA | warns, PyTorch |
 | smooth lDDT (`kernels.smooth_lddt`, the diffusion loss; called directly, not a module) | warns (no record) | warns | warns | CUDA | warns, PyTorch |
 | Diffusion sampler glue (`kernels.sampler_ops`: `augment_noise`, `align_euler`, `pool_atoms`; called directly, not a module) | warns (no record) | warns | warns | CUDA | warns, PyTorch |
-| LocalDiTBlock window attention (AF3 / Protenix / OpenFold3 / OpenDDE / ESMFold2 atom blocks) | warns (1 inference, 3 training of 4) | same | same | CUDA (bf16 / fp32 inference), else PyTorch | warns, PyTorch |
+| LocalDiTBlock window attention (AF3 / Protenix / OpenFold3 / OpenDDE / ESMFold2 atom blocks) | warns (1 of 3 inference, 3 of 5 training) | same | same | CUDA (bf16 / fp32 inference), else PyTorch | warns, PyTorch |
 | DiTVariantStack (Boltz-2 / RoseTTAFold3 / Chai-1 token stacks) | portable | portable | portable | CUDA (bf16 inference), else PyTorch | warns, PyTorch |
-| AtomDiTVariantStack (their atom stacks) | warns (1 inference, 3 training of 4) | same | same | CUDA (bf16 inference), else PyTorch | warns, PyTorch |
+| AtomDiTVariantStack (their atom stacks) | warns (1 of 3 inference, 3 of 5 training) | same | same | CUDA (bf16 inference), else PyTorch | warns, PyTorch |
 
 **Parts that route through other ops.** `BiasOnlyDiTBlock` builds its AdaptiveLayerNorm, ConditionedTransition and pair LayerNorm with the
 block's implementation, so it has no row of its own: on a card it takes the portable kernels of those three rows when each is recorded
-(the attention core is the batched einsum on every card) and warns per unrecorded part otherwise; H100 / B200 run the CUDA block
-paths and the PyTorch leg of the parts. `DiTBlock(extra_pair_bias=)` rides the attention's bias, so it follows the `AugmentedAttention` row.
+and warns per unrecorded part otherwise. Its attention core is the batched einsum, except in a training call: there the portable
+family's feature-major core (`kernels.bias_only_attention.triton.core_t`, op `bias_only_core`: the flat sigmoid-gate kernels) and the one-pass
+pair LayerNorm + bias projection (`triton.pair_bias`, also `pair_bias_all`'s portable leg) run where the card holds their record -- the
+pair-bias kernels have no registry row (`records.UNREGISTERED_OPS`), so that part is always the PyTorch statements off H100 / B200. H100 / B200
+run the CUDA block paths and the PyTorch leg of the parts (a training call the CUDA block declines still reaches those two portable kernels
+there, as before). `DiTBlock(extra_pair_bias=)` rides the attention's bias, so it follows the `AugmentedAttention` row.
 **Transition fp32** (TF32 tensor cores) takes the portable residual path only where torch allows TF32 (`set_float32_matmul_precision` not
 `"highest"` / `allow_tf32`, the switch the H100 generic kernels follow; full-precision fp32 keeps the PyTorch statements), and a card needs
 **fp32** `ok` rows for what the call launches (`records.missing("transition", ..., "fp32", mode)`; the Ampere manifests hold none yet, so
@@ -116,12 +127,25 @@ inputs, so the three paths give the same result for the same draws. `serves(...)
 
 ## The `ops.*` entry points
 
-The weights-as-args facade follows the same rule where a bare portable unit sat behind it: `ops.transition`, `ops.gated_linear`,
-`ops.augmented_attention_pair_bias`, `ops.swiglu_ffn`, `ops.layer_norm` and the attention core of `ops.triangle_attention` call
-`dispatch.portable_blocked(op, device, *tensors)` first (CUDA path, recorded portable, else the PyTorch statements and the same warning). H100
-and B200 keep what they did. **Not routed** (they call their portable kernels directly, as before): `ops.triangle_multiplicative_update`,
-`ops.bidirectional_triangle_multiplicative_update`, `ops.conditioned_transition`, `ops.layer_norm_linear`, `ops.rms_norm_modulation`,
-`ops.gated_residual`, and the QK-norm of `ops.triangle_attention`'s fallback; so are the raw `kernels.*` functions.
+Every weights-as-args facade follows the same rule: `ops.transition`, `ops.gated_linear`, `ops.augmented_attention_pair_bias`,
+`ops.swiglu_ffn`, `ops.layer_norm`, `ops.triangle_attention` (its attention core, and its QK norm under the `rmsnorm` record),
+`ops.triangle_multiplicative_update` / `ops.bidirectional_triangle_multiplicative_update` (op `triangle_multiplication`),
+`ops.conditioned_transition` (its SwiGLU tail: op `swiglu_ffn`), `ops.layer_norm_linear`, `ops.rms_norm_modulation` and `ops.gated_residual`
+call `dispatch.portable_blocked(op, device, *tensors)` first (CUDA path, recorded portable, else the PyTorch statements and the same warning),
+asking the rows at the call's precision (`dispatch.record_dtype`: fp32 for an fp32 activation, bf16 otherwise) and mode (training when a
+tensor needs a gradient). The TriMul and triangle-attention cores are bf16 only: another dtype is a `KernelRefusedWarning` and the PyTorch
+statements. `ops.gated_residual`'s kernels have no registry row, so it is never recorded and runs its PyTorch statement off H100 / B200. H100
+and B200 keep what they did (the facades run their kernels there, as before). The raw `kernels.*` functions are not routed: they are the
+kernels, not an entry point.
+
+## ProteinMPNN
+
+`modules.mpnn` chooses its kernels by backend options, not by `implementation`. Their default `auto` puts the hidden-message reduction on
+Triton wherever the call fits the kernel, and the edge MLP on sm_86 only; off H100 / B200 that choice now asks the card's record (ops
+`mpnn_message`, `mpnn_edge_mlp`; the six MPNN families are all in `OP_KERNELS`): a card without it gets one `UnrecordedCardWarning` and the
+PyTorch statements, the same numbers as `backend="pytorch"`. An explicit Triton backend (`triton`, `triton_compute`, `triton_memory`,
+`bitpack`, the edge-tail / node-message / relative-position switches) is the caller's request and is not gated, as an explicit
+`implementation` is not. H100 / B200 are unchanged.
 
 ## The Anthropic payload
 
@@ -157,11 +181,16 @@ replacement when the name is one that 2.3.12 removed (see the CHANGELOG).
 * The route is resolved when the module is built, from the current device (or the `device` the resolver is given). A module built on a
   CPU host and moved to a card keeps the portable kernel family label; its portable leg is then not gated. Under `torch.compile` an uncached card
   reads as "no card" (the driver query cannot be traced): build or run the module eagerly once before compiling.
-* The native-CUDA test at build time is per op and shape-agnostic except for Transition (A100: d = 128, n = 4). Ragged rows or a dtype the
-  fused sm_80 kernel does not take still reach the portable kernels of that card.
-* The architecture blocks that call kernels directly (`architecture.blocks.swa_atom_transformer`, the standalone `LayerNorm` of
-  `architecture.primitives`) obey the H100 / B200 rule (`restricted_card`) but are not gated by records.
-* dtype: the module-level resolve checks bf16, the dtype the fused kernels run (`guard_dtype` sends the rest to PyTorch). Transition fp32
-  is the exception: it asks for fp32 rows per call (`dispatch.dtype_gate`).
-* LayerNorm is gated by the forward kernels only (all four `layernorm` kernels are `ok` on every recorded card); its backward choice
-  ((CUDA vs portable)) stays kernel-internal.
+* The native-CUDA test at build time is per op and shape-agnostic except for Transition (A100: d = 128, n = 4). A call the fused sm_80 kernel
+  turns down (ragged rows, a dtype) asks the card's record before it reaches the portable kernels.
+* The architecture blocks that call kernels directly obey the same rule: ESMFold2's `SWAAtomTransformer` asks `swa_dit` before its fused block
+  and `rms_norm_modulation` / `swiglu_ffn` in each block; the standalone `LayerNorm` of `architecture.primitives` goes through `ops.layer_norm`.
+* dtype: the module-level resolve checks bf16, the dtype the fused kernels run (`guard_dtype` sends the rest to PyTorch). An fp32 call asks
+  for fp32 rows per call in Transition (`dispatch.dtype_gate`), AdaptiveLayerNorm, ConditionedTransition, AugmentedAttention
+  (`dispatch.fp32_gate`), LayerNorm, RMSNorm and every `ops.*` facade. `LocalDiTBlock`, the DiT variant stacks and the SWA atom attention still
+  ask bf16 rows for an fp32 call (`portable_leg_allowed` takes no dtype).
+* LayerNorm and RMSNorm resolve the forward kernels when built and ask again per call (`portable_blocked`): a training call needs the
+  backward rows, an fp32 call the fp32 rows. The LayerNorm backward choice (CUDA vs portable) stays kernel-internal.
+* A handful of small Triton helpers run inside a gated op's path with no registry row of their own (`kernels/_cast.py`, the fp32 grid
+  rounding of `kernels/_tf32.py`, Transition's split-K reduction, the MPNN no-grad message kernel and bias-gradient zeroing): they are
+  covered by their op's gate, not by a manifest row. See `docs/records/triton_gate_audit_20261031.md`.

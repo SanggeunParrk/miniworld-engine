@@ -36,7 +36,13 @@ def conditioned_transition(
     weight/bias.
     """
     from miniworld_engine.kernels.transition.triton.main import triton_transition
+    from miniworld_engine.modules.dispatch import portable_blocked
 
-    out = triton_transition(x, expand_a_weight, expand_b_weight, squeeze_weight, n)
+    if x.is_cuda and portable_blocked("swiglu_ffn", x.device, x, expand_a_weight, expand_b_weight, squeeze_weight):
+        # a card the engine holds no record for (the tail launches the SwiGLU kernels of ops.swiglu_ffn): the PyTorch statements
+        wa, wb, ws = (w.to(x.dtype) for w in (expand_a_weight, expand_b_weight, squeeze_weight))
+        out = F.linear(F.silu(F.linear(x, wa)) * F.linear(x, wb), ws)
+    else:
+        out = triton_transition(x, expand_a_weight, expand_b_weight, squeeze_weight, n)
     scale = F.linear(cond, to_scale_weight, to_scale_bias)
     return torch.sigmoid(scale) * out

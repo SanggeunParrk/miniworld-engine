@@ -533,6 +533,19 @@ def dtype_gate(op: str, device: torch.device | None, dtype: str, *, training: bo
     return _card_gate(op, device, False, "training" if training else "inference", dtype)
 
 
+def fp32_gate(op: str, backend: KernelBackend, module: torch.nn.Module, x: torch.Tensor, *tensors: torch.Tensor) -> KernelBackend:
+    """``backend`` for a call whose portable kernels run in fp32 (``x`` fp32 outside autocast): the module-level resolve vouched for bf16
+    only, so a ``PORTABLE`` call asks the card's record at fp32 (:func:`dtype_gate`, inference or training as the call is). Anything else --
+    another backend, a bf16 / autocast call, a CPU tensor -- is returned unchanged. H100 / B200 are never refused here (the rule passes them
+    through; their modules take their CUDA or PyTorch leg)."""
+    if backend is not KernelBackend.PORTABLE or not x.is_cuda:
+        return backend
+    compute = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else x.dtype
+    if compute != torch.float32:
+        return backend
+    return dtype_gate(op, x.device, "fp32", training=needs_backward(module, x, *tensors))
+
+
 class TrainGate:
     """What a module built on a card recorded for INFERENCE but not for TRAINING remembers: its training calls take the PyTorch
     reference (:func:`call_backend`), with one warning. Plain attributes, so a compiled forward reads it as constants."""
@@ -584,11 +597,18 @@ def call_backend(module: torch.nn.Module, backend: KernelBackend, *tensors: torc
     return KernelBackend.PYTORCH
 
 
-def portable_blocked(op: str, device: torch.device | None, *tensors: torch.Tensor, dtype: str = "bf16") -> bool:
-    """For the weights-as-args ``ops.*`` entry points: must this call NOT run ``op``'s portable kernels? True on a CUDA card other than
-    H100 / B200 that has no ``ok`` rows for what the call launches (inference; training when a tensor needs a gradient; ``dtype`` is the precision the rows are asked at), unless the
-    A/B switch is on: the caller then runs the PyTorch statements, with the same warning as the modules. False everywhere else
-    (H100 / B200 keep their own rule, no card keeps the kernel)."""
+def record_dtype(tensor: torch.Tensor | None) -> str:
+    """The precision a call's manifest rows are asked at: ``"fp32"`` for an fp32 activation, ``"bf16"`` otherwise (the kernels declare
+    bf16 and fp32 only; an fp16 call is asked at bf16, as the module-level resolve always has been)."""
+    return "fp32" if tensor is not None and tensor.dtype == torch.float32 else "bf16"
+
+
+def portable_blocked(op: str, device: torch.device | None, *tensors: torch.Tensor, dtype: str | None = None) -> bool:
+    """For the weights-as-args ``ops.*`` entry points (and the call sites that launch a portable kernel outside a module's resolve): must
+    this call NOT run ``op``'s portable kernels? True on a CUDA card other than H100 / B200 that has no ``ok`` rows for what the call
+    launches (inference; training when a tensor needs a gradient; ``dtype`` is the precision the rows are asked at, by default the first
+    tensor's, :func:`record_dtype`), unless the A/B switch is on: the caller then runs the PyTorch statements, with the same warning as
+    the modules. False everywhere else (H100 / B200 keep their own rule, no card keeps the kernel)."""
     from miniworld_engine import settings
 
     if settings.current().force_portable_kernels:
@@ -598,6 +618,8 @@ def portable_blocked(op: str, device: torch.device | None, *tensors: torch.Tenso
         return False
     training = torch.is_grad_enabled() and any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
     mode = "training" if training else "inference"
+    if dtype is None:
+        dtype = record_dtype(next((t for t in tensors if isinstance(t, torch.Tensor)), None))
     return route_for_card(op, card[0], card[1], dtype=dtype, mode=mode) is KernelBackend.PYTORCH
 
 
