@@ -182,6 +182,76 @@ def _hoist_bwd(
     return [dpair, dwf]
 
 
+def _onepass(pair2d: torch.Tensor, wf: torch.Tensor) -> bool:
+    """B200 at a pair the sm_100a hoist does not take (256 wide) for ONE block of 12, 16 or 24 heads: the per-block training block's
+    one-pass pair kernels (``pair_bias``, bf16 mma; fp32 ``pair_bias_tc`` / ``pair_bias_bwd_tc`` on TF32) -- the pair read once, no
+    LN0 written -- instead of the LayerNorm rows + cuBLAS; fp32 also backward (``pair_bias_bwd_tc``: no [R, C] fp32 d LN0, no
+    ``ln0_bwd_rows`` between two GEMMs). bf16 keeps ``_hoist_bwd`` (see ``_Hoist.forward``)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    return (
+        pair2d.is_cuda
+        and torch.cuda.get_device_capability(pair2d.device) == (10, 0)
+        and pair2d.dtype in (BF, F32)
+        and wf.dtype is pair2d.dtype
+        and pair2d.shape[-1] in DPS
+        and wf.shape[-1] == pair2d.shape[-1]
+        and wf.shape[0] in (12, 16, 24)
+        and pair2d.shape[0] % 128 == 0
+        and pair2d.is_contiguous()
+        and not HK.sm100_served(pair2d, wf, bwd=True)
+    )
+
+
+def _terms() -> int:
+    return 3 if settings.current().bias_only_dit_pair_exact else 1
+
+
+def _fwd1_fake(pair2d, wf, eps):
+    return [pair2d.new_empty((wf.shape[0], pair2d.shape[0])), pair2d.new_empty((pair2d.shape[0], 2), dtype=F32)]
+
+
+@opaque(fake=_fwd1_fake, name="bias_only_dit_hoist_fwd1")
+def _hoist_fwd1(pair2d: torch.Tensor, wf: torch.Tensor, eps: float) -> list[torch.Tensor]:
+    """[bias_all^T [N, R] in the pair's dtype, the row statistics [R, 2] fp32] in one pass over the pair (``_onepass``)."""
+    bias = torch.empty(wf.shape[0], pair2d.shape[0], device=pair2d.device, dtype=pair2d.dtype)
+    pst = torch.empty(pair2d.shape[0], 2, device=pair2d.device, dtype=F32)
+    if pair2d.dtype is F32:
+        from miniworld_engine.kernels.bias_only_dit.cuda import tf32
+
+        tf32.rows32().pair_bias_tc_cuda(pair2d, wf.contiguous(), bias, pst, eps, _terms())
+    else:
+        from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+
+        ext().pair_bias_cuda(pair2d, wf.contiguous(), bias, pst, eps)
+    return [bias, pst]
+
+
+def _bwd1_fake(pair2d, wf, dball, pst):
+    return [torch.empty_like(pair2d), wf.new_empty(wf.shape, dtype=F32)]
+
+
+@opaque(fake=_bwd1_fake, name="bias_only_dit_hoist_bwd1")
+def _hoist_bwd1(pair2d: torch.Tensor, wf: torch.Tensor, dball: torch.Tensor, pst: torch.Tensor) -> list[torch.Tensor]:
+    """[d pair, dW' [N, C] fp32] in one pass over the pair from the forward's row statistics (``_onepass``); the per-CTA dW' partials
+    summed here in a fixed order."""
+    n, c = wf.shape
+    dpair = torch.empty_like(pair2d)
+    if pair2d.dtype is F32:
+        from miniworld_engine.kernels.bias_only_dit.cuda import tf32
+
+        K = tf32.rows32()
+        part = torch.empty(K.partial_rows(0), n, c, device=pair2d.device, dtype=F32)
+        g = K.pair_bias_bwd_tc_cuda(dball.contiguous(), pair2d, pst, wf.contiguous(), dpair, part, _terms())
+    else:
+        from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+
+        K = ext()
+        part = torch.empty(K.partial_rows(0), n, c, device=pair2d.device, dtype=F32)
+        g = K.pair_bias_bwd_cuda(dball.contiguous(), pair2d, pst, wf.contiguous(), dpair, part)
+    return [dpair, part[:g].sum(0)]
+
+
 class _Sink:
     """The one [N, R] buffer the hoisted blocks' backwards write their bias gradients into, a [H, R] slice each (``slot``), so the
     hoist's backward GEMMs read them where they were written (``take``). Made by the first block backward that asks; handed to the
@@ -251,8 +321,16 @@ class _Hoist(torch.autograd.Function):
         ctx.set_materialize_grads(
             False
         )  # an unused block's bias: None, not a zero tensor
-        ball = _hoist_fwd(pair.reshape(A * L * L, dp), wf, eps)
-        ctx.save_for_backward(pair, wf, gam, wts)
+        p2 = pair.reshape(A * L * L, dp)
+        if _onepass(p2, wf):
+            ball, pst = _hoist_fwd1(p2, wf, eps)
+            if pair.dtype is not F32:
+                # bf16: the one-pass backward takes dW' against LN0 rounded to bf16 (d gamma 2e-3 against fp64 where the hoist holds
+                # 1e-4, test_b200_bias_only_dit_hoist_gpu): the backward stays on the [hi | lo] split of ``_hoist_bwd``
+                pst = pair.new_empty(0, dtype=F32)
+        else:
+            ball, pst = _hoist_fwd(p2, wf, eps), pair.new_empty(0, dtype=F32)
+        ctx.save_for_backward(pair, wf, gam, wts, pst)
         ctx.meta = (eps, nb, H, sink, [p.dtype for p in params])
         if sink.psb:  # per-sample: block b's slice is the head-major [H, A, L, L]
             return tuple(ball[i * H : (i + 1) * H].view(H, A, L, L) for i in range(nb))
@@ -260,12 +338,15 @@ class _Hoist(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grads):
-        pair, wf, gam, wts = ctx.saved_tensors
+        pair, wf, gam, wts, pst = ctx.saved_tensors
         eps, nb, H, sink, pdts = ctx.meta
         L, dp = pair.shape[1], pair.shape[-1]
         R = (pair.shape[0] if sink.psb else 1) * L * L
         dball = sink.take(grads)
-        dpair, dwf = _hoist_bwd(pair.reshape(R, dp), wf, dball, eps, _split(R))
+        if pst.numel():
+            dpair, dwf = _hoist_bwd1(pair.reshape(R, dp), wf, dball, pst)
+        else:
+            dpair, dwf = _hoist_bwd(pair.reshape(R, dp), wf, dball, eps, _split(R))
         del dball
         dwf = dwf.view(nb, H, dp)
         dW = dwf * gam[:, None, :]  # dW_b = dW'_b diag(g_b)
