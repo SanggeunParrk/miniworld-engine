@@ -267,7 +267,8 @@ def _wall(wcat, hd):
     return w
 
 
-#: fp16 inference beyond L 256, d_pair <= 256, <= 8 heads: ``ln_bias_fwd`` (LayerNorm + bias projection + head-major bias in one kernel)
+#: fp16 inference beyond L 256, d_pair 256 (other head layouts than front_c256), <= 8 heads: ``ln_bias_fwd`` (LayerNorm + bias projection
+#: + head-major bias in one kernel; 0.95-0.97x the module; at d_pair 64 / 128 it measured 1.00-1.13x slower, 2026-10-30)
 LN_BIAS = True
 
 
@@ -400,11 +401,11 @@ def _forward(
     )
     # inference on the fp16 core (h100_sm90.INFERENCE_FP16): q / k / v and the bias in fp16, from the fused front or (L > 256) fp16 GEMMs
     h16 = (not need) and _core_mod.INFERENCE_FP16 and (fused or L > 256)
-    # fp16 inference beyond L 256 at d_pair <= 256 and <= 8 heads: LayerNorm, the bias projection and the head-major bias in one kernel
+    # fp16 inference beyond L 256 at d_pair 256 (<= 8 heads): LayerNorm, the bias projection and the head-major bias in one kernel
     # (the bias GEMM re-read all of y for its 8 columns)
     # d_pair 256: LayerNorm, q | k | v | g and the bias in one kernel (the y round trip and the projection GEMM gone)
     front256 = (not fused) and h16 and L > 256 and C == 256 and HD == 256 and FRONT_C256
-    lnbias = (not fused) and (not front256) and h16 and L > 256 and C <= 256 and H <= 8 and LN_BIAS
+    lnbias = (not fused) and (not front256) and h16 and L > 256 and C == 256 and H <= 8 and LN_BIAS
     if fused:  # LN + projection + head-major scaled bias: one kernel
         y = mean = rstd = None
         proj, sbias, _ = _front().front(
