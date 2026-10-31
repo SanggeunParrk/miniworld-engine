@@ -137,3 +137,10 @@ fp32 accumulators per SM, then a 2048-token x D exchange per SM (1 MB at D256) a
 - D128 / D64 port route below L768 / L1000: 1-5 % slower than the packaged K1/K3 (the fold launch and the K1 statistics weigh more).
 - D256 at L % 128 != 0 on the port any-L form: within 1 % of the packaged path (L200 0.93-1.00, L500 0.97, L1000 0.96,
   L1500 0.95), kept on the packaged path.
+
+## 6. Step 3: no-mask inference on the port takes the direct K1
+
+Without a mask the token-flat port packed the four projection weights and built and read a bf16 [L, L] pair mask (`_front_rs`).
+Now an inference call without a mask runs the direct K1 on an all-true token mask (same products). No mask, ours / Anthropic
+(out / in): D384 L128 1.062 / 1.071 -> 0.842 / 0.837, L256 0.872 / 0.867 -> 0.818 / 0.818, L384 0.857 / 0.850 -> 0.827 / 0.828,
+L2048 -> 0.841 / 0.831; D256 L384 1.002 / 1.012 -> 0.969 / 0.969, L128 0.929 -> 0.921. Outputs equal to Anthropic's.

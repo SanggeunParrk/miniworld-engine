@@ -378,6 +378,11 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
         # Emit the D512 normalized input here; backward reuses it directly.
         saved_xn = x.new_empty((m, d)) if save and d == 512 else None
         weights = (wl, wlg, wr, wrg)
+        if not save and mask.numel() == 0 and d in (256, 384):
+            # no mask at inference: the direct K1 on an all-true token mask (L bytes) instead of packing the weights and building and
+            # reading a bf16 [L, L] pair mask (same products: every mask factor is 1). No-mask calls vs Anthropic: D384 L128 1.07 -> 0.84x,
+            # D256 L384 1.01 -> 0.97x (2026-10-31)
+            mask = torch.ones(rows, device=x.device, dtype=torch.bool)
         if (
             d in (256, 384)
             and mask.dtype == torch.bool
