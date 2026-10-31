@@ -224,6 +224,14 @@ GROUPS: list[Group] = [
     ops("samp_aug", "sampler augment_noise", "sampler_augment", (4096, 12288, 24576), "B5", "n_augment=5", weight=3, dtype_label="fp32", modes=("inference",)),
     ops("samp_align", "sampler align_euler", "sampler_align", (4096, 12288, 24576), "B5", "n_augment=5", weight=3, dtype_label="fp32", modes=("inference",)),
     ops("samp_pool", "sampler pool_atoms", "sampler_pool", (4096, 12288, 24576), "B5 c768", "n_augment=5", weight=2, dtype_label="bf16", modes=("inference",)),
+    # ---- MiniWorld B200 training shapes not covered above (pair D64 at L384 / L768; docs/gpus/b200/triton_ladder.md) ---------------
+    G("mw_tm_out_D64", "TriMul outgoing", "triangle_multiplication", (768,), "D64", "d_pair=64", weight=3),
+    G("mw_tm_in_D64", "TriMul incoming", "triangle_multiplication", (384, 768), "D64", "d_pair=64", "trimul_direction=incoming", weight=3),
+    G("mw_tmb_D64", "TriMul bidirectional", "triangle_multiplication_bidirectional", (768,), "D64", "d_pair=64", weight=3),
+    G("mw_ta_D64", "TriAttn", "triangle_attention", (768,), "D64 2x32", "d_pair=64", "+tri_n_head=2", weight=3),
+    G("mw_tr_D64", "Transition", "transition", (384, 768), "D64", "d_pair=64", weight=3),
+    G("mw_opm_p64", "OuterProductMean", "outer_product", (384, 768), "S1024 msa64 pair64", "d_pair=64", weight=3),
+    G("mw_pwa_p64", "MSAPairWeightedAveraging", "msa_pair_weighted_averaging", (384, 768), "S1024 8x32 pair64", "d_pair=64", weight=3),
 ]
 BY_ID = {g.id: g for g in GROUPS}
 PARAM_VARIANT = "@bf16p"
