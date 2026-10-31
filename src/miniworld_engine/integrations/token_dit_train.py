@@ -23,7 +23,7 @@ bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute
 
 ``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation MINIWORLD), H100 or B200, a
 bf16 or fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32), the token widths (cond 384 / pair
-128, or 256: Protenix-v2's diffusion pair, the same kernels built at that width / transition n = 2) at a head layout
+128, or 256 on H100: Protenix-v2's diffusion pair, the same kernels built at that width / transition n = 2) at a head layout
 of LAYOUTS (B200: 16 x 48, 24 x 32, 12 x 64 at d 768, 16 x 64 at d 1024; H100: 16 x 48
 only; bf16 and fp32 alike), B == 1, a key mask of [B, L] or none (``DiTBlock`` hands an [A, B, L] mask shared by the samples
 over as its [B, L] row), LayerNorm eps 1e-5. Anything else keeps the module path. settings.token_dit_train=0 turns it off.
@@ -650,11 +650,17 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, psb=False, n=2, dp=DP):
     ]
 
 
+#: B200 bf16: the one-pass pair bias (``_pair_fused``); False keeps the CUDA pair LayerNorm rows + the cuBLAS bias GEMM and their backward
+#: (LN(pair) kept as a bf16 [L^2, d_pair] activation, two GEMMs and a [L^2, d_pair] fp32 d LN(pair) round trip backward)
+B200_PAIR_FUSED = True
+
+
 def _pair_fused(h100, fp32, psb, dp) -> bool:
-    """The H100 bf16 block builds its bias with the one-pass pair kernel (LN(pair) Wf^T on TF32 tensor cores, the extra term added in the same
+    """The bf16 block builds its bias with the one-pass pair kernel (LN(pair) Wf^T on TF32 tensor cores, the extra term added in the same
     pass, no LN(pair) written) and differentiates it with its one-pass backward (dpair and the dWf partials): it keeps no LN(pair) either.
-    Both pair widths it serves (128; 256, Protenix-v2's diffusion pair): the kernels are built per width."""
-    return h100 and not fp32 and not psb and dp in (128, 256)
+    Both pair widths it serves (128; 256, Protenix-v2's diffusion pair): the kernels are built per width. H100: log2 units, the key mask
+    left to the core; B200 (``B200_PAIR_FUSED``): natural units with the key mask folded in as -inf (the B200 fp32 block's kernel, bf16 out)."""
+    return (h100 or B200_PAIR_FUSED) and not fp32 and not psb and dp in (128, 256)
 
 
 def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, psb=False, extra=None):
@@ -770,10 +776,11 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, 
     elif _pair_fused(h100, fp32, psb, dpw):
         ph = pair.new_empty(0, dpw, dtype=at)
         bias = torch.empty(H, L, L, device=dev, dtype=at)
-        T.pair_bias(
-            p2, (W["Wf"].float() * LOG2E).contiguous(), None, bias, pst, L, EPS,
-            None if extra is None else extra.reshape(-1).float().contiguous(), LOG2E,
-        )   # log2 units, rounded once to bf16
+        ex = None if extra is None else extra.reshape(-1).float().contiguous()
+        if h100:
+            T.pair_bias(p2, (W["Wf"].float() * LOG2E).contiguous(), None, bias, pst, L, EPS, ex, LOG2E)   # log2 units, rounded once to bf16
+        else:   # B200: natural units, the key mask as -inf (the sm_100a bf16 core reads it from the bias), rounded once to bf16
+            T.pair_bias(p2, W["Wf"], None if mask is None else mask.reshape(L).to(torch.bool).contiguous(), bias, pst, L, EPS, ex, 1.0)
     elif h100 or not fp32:
         ph = torch.empty(R, dpw, device=dev, dtype=at)
         T.pair_ln(p2, ph, pst, EPS)
@@ -832,7 +839,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, 
                 qn, kn, vc, bias, km if native else _key_mask(mask, A, L), A, L, qkvg, H, DH
             )  # sigmoid(g) o, no O
     else:
-        if not fp32 and mask is not None:
+        if not fp32 and mask is not None and not _pair_fused(h100, fp32, psb, dpw):   # the one-pass pair bias folded the mask in
             bias.masked_fill_(~mask.reshape(1, 1, L), float("-inf"))
         O, LSE = (
             sm100.forward_tf32(qn, kn, vc, bias, A, L, H, DH)
