@@ -182,6 +182,11 @@ def transition_residual(x, gamma, beta, wa, wb, ws, eps):
     if row_fused.serves(x, wa, ws, save):
         # B200 at d = 64 / 128: one row-fused launch each way (rows.py), the hidden activation never reaches HBM in the forward
         return row_fused.transition_rows(x, gamma, beta, wa, wb, ws, eps)
+    from miniworld_engine.kernels.transition.triton import wide
+
+    if wide.serves(x, wa, ws, save):
+        # B200 inference at d = 256 / 384 / 512: the two GEMMs of this path on TMA descriptors (wide.py)
+        return wide.transition_wide(x, gamma, beta, wa, wb, ws, eps)
     # Returning the identity from the SAME LN Function lets its two gradients meet
     # inside LN backward. No activation copy, separate dx add, or duplicate dgamma/dbeta.
     xn, residual = input_ln_residual(x, gamma, beta, eps)

@@ -449,8 +449,10 @@ def test_a_launch_site_does_not_pin_what_the_tuner_owns() -> None:
     # `_rows_fwd_kernel` / `_rows_bwd_kernel` (kernels/transition/triton/rows.py) are the B200-only row-fused portable Transition at
     # d = 64 / 128: their operands are host TMA descriptors whose block shapes ARE the tile, fixed before the launch, so the tuner cannot
     # vary them; the per-(dtype, d) tiles were swept on the B200 (rows._FWD / rows._BWD) and `serves` keeps every other card off them.
+    # `_expand_kernel` / `_squeeze_kernel` (kernels/transition/triton/wide.py) are the same kind: B200-only TMA-descriptor GEMMs of the wide
+    # inference forward, tiles swept on the B200 (wide._EXP / wide._SQ).
     NOT_TUNED = {"_zero_bias_grad_kernel", "_pack", "_fold", "_cast_kernel",
-                 "_lnl_fwd_t_persistent", "_rows_fwd_kernel", "_rows_bwd_kernel"}
+                 "_lnl_fwd_t_persistent", "_rows_fwd_kernel", "_rows_bwd_kernel", "_expand_kernel", "_squeeze_kernel"}
     pinned: dict[str, str] = {}
     for path in sorted(SRC.rglob("*.py")):
         try:
