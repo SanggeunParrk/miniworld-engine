@@ -31,6 +31,7 @@ FOLDFORGE = {  # (d_msa, d_pair, d_hidden): DenseSpec msa_channel / pair_channel
     "esmfold2": (128, 256, 16),
     "chai1": (64, 256, 32),
     "intellifold2": (256, 512, 32),
+    "mw_pair64": (64, 64, 32),  # MiniWorld's B200 trunk: the MiniWorld kernels with pair_fwd at d_pair 64
 }
 
 
@@ -91,7 +92,7 @@ def test_foldforge_widths(family, n, s):
 
 
 @pytest.mark.parametrize(("family", "n"), [("miniworld", 1536), ("miniworld", 2048), ("af3", 1100), ("opendde", 2048), ("esmfold2", 1536),
-                                           ("intellifold2", 1100)])
+                                           ("intellifold2", 1100), ("mw_pair64", 2048)])
 def test_long_inference(family, n):
     d_msa, d_pair, d_hidden = (64, 128, 32) if family == "miniworld" else FOLDFORGE[family]
     m = make(d_msa, d_pair, d_hidden)
@@ -104,7 +105,7 @@ def test_no_mask_and_a_fully_masked_row_free_call():
     check_update(m, x, z, None)
 
 
-@pytest.mark.parametrize("family", ["af3", "esmfold2", "intellifold2"])
+@pytest.mark.parametrize("family", ["af3", "esmfold2", "intellifold2", "mw_pair64"])
 def test_cuda_graph_replay(family):
     d_msa, d_pair, d_hidden = FOLDFORGE[family]
     m = make(d_msa, d_pair, d_hidden)

@@ -17,7 +17,8 @@ dy never rounds to bf16).
 On sm_100a (B200) the same boundaries run `csrc/sm100/pwa_sm100.cu`: forward pair_fwd (LN_z folded into proj_z), ln_vg,
 cuBLAS bmm (o = w . v), pwa_gate_out; backward pwa_glue2 (do, dyg = dgp . Wg, dWo, dWg -- dgp stays on chip), cuBLAS bmm
 (dv = w^T . do, dw = do . v^T), dv_bwd, pair_bwd. B200 takes N up to 2048 (pair_fwd's 2048-logit build), inference and training;
-pair_fwd / pair_bwd take d_pair 128 / 256 / 384 / 512, so Chai-1's 64 / 256 / 8 x 32 trains here too; the other wide widths run `pwa_wide`.
+pair_fwd / pair_bwd take d_pair 64 / 128 / 256 / 384 / 512, so Chai-1's 64 / 256 / 8 x 32 trains here too and MiniWorld's 64-wide pair (B200 trunk)
+runs here in inference and training; the other wide widths run `pwa_wide`.
 
 Automatic in auto mode; settings.pwa_train=0 disables this path. It serves a grad-enabled call of a module built with
 implementation="miniworld" or "anthropic" when the shapes fit (d_msa=64, d_pair=128, 8 heads x 32, batch 1,
@@ -41,6 +42,7 @@ from miniworld_engine.kernels import _cast_cuda
 
 H, C, D, DZ = 8, 32, 64, 128
 HC = H * C
+MW_PAIR64 = (D, 64, H, C)  # (d_msa, d_pair, n_head, d_hidden) of MiniWorld's B200 trunk: the MiniWorld kernels on B200 (pair_fwd / pair_bwd at d_pair 64)
 _EXT: dict[str, Any] = {}
 _NATIVE_TRAINING_SCOPE: ContextVar[bool] = ContextVar(
     "pwa_native_training", default=False
@@ -124,7 +126,8 @@ def refusal(
         if not _enabled():
             return "settings.pwa_train / pwa_infer disables the native path"
         cap = torch.cuda.get_device_capability(msa.device) if msa.is_cuda else None
-        wide = (d_msa, d_pair, n_head, d_hidden) != (D, DZ, H, C)
+        # B200: MiniWorld's own kernels also at its 64-wide pair (pair_fwd / pair_bwd at d_pair 64), inference and training
+        wide = (d_msa, d_pair, n_head, d_hidden) != (D, DZ, H, C) and not (cap == (10, 0) and (d_msa, d_pair, n_head, d_hidden) == MW_PAIR64)
         if wide and not _wide.supported(d_msa, d_pair, n_head, d_hidden, cap):
             return (
                 f"the kernels serve (d_msa={D}, d_pair={DZ}, n_head={H}, d_hidden={C}) and, wide, d_msa in {_wide.DMSA}, "
@@ -1181,8 +1184,18 @@ def _inference_op(args: list[torch.Tensor], eps_m: float, eps_z: float) -> torch
     return _inference_math(module, msa, pair, None if mask.numel() == 0 else mask)
 
 
+def _pair64_b200(module, device) -> bool:
+    """MiniWorld's B200 trunk width (d_pair 64): the MiniWorld kernels of `csrc/sm100/pwa_sm100.cu`, not the wide path."""
+    return (
+        module.to_value.weight.shape[1],
+        module.to_bias.weight.shape[1],
+        module.n_head,
+        module.to_value.weight.shape[0] // module.n_head,
+    ) == MW_PAIR64 and device.type == "cuda" and torch.cuda.get_device_capability(device) == (10, 0)
+
+
 def pair_weighted_averaging_inference(module, msa, pair, mask):
-    if _is_wide(module):
+    if _is_wide(module) and not _pair64_b200(module, msa.device):
         return _wide.pair_weighted_averaging_inference(module, msa, pair, mask)
     msa, pair, mask, s0, n0 = _pad_b200(msa, pair, mask)
     if (s0, n0) != tuple(msa.shape[1:3]):

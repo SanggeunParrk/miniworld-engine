@@ -25,6 +25,29 @@ Design notes:
   tail adds dv · W_v; dgamma / dbeta and the pair side's parameter gradients come from tensor-core sums (per-head
   M = dbᵀ x̂, 1ᵀ [dy x̂ | dy]) instead of per-tile warp reduce-scatters.
 
+## MiniWorld's B200 trunk width: d_pair 64 (2026-10-31)
+
+MiniWorld trains its B200 trunk with a 64-wide pair (d_msa 64, 8 x 32). The MSA side is MiniWorld's own kernels; only the pair side
+depends on d_pair. `pair_fwd` is built at d_pair 64 (one 64-channel unit a tile, ten-unit z ring) and `pair_bwd_sm100` is templated on
+d_pair 64 / 128: at 64 the two channel halves of a row share the one 64-channel block (chunks 0-3 / 4-7 of its 128-byte row, 32 channels
+a thread), dzn = db . Wb runs at N = 64 and the dWb^T GEMM keeps M = 128 d with its second 64-d atom the first again (LBO 0, lanes 64-127
+a copy never read). Before this the B200 `miniworld` routing ran the PyTorch statements (the width was "wide" and not served). ptxas:
+pair_bwd_sm100<64> 134 registers (128: 168), no spill.
+
+Ladder (group `mw_pwa_p64`, S1024 8x32, bf16-mixed, CUDA graph, us; GPU 5 of node 2):
+
+| mode | L | CUDA before (PyTorch statements) | CUDA now | Triton | compiled PyTorch |
+|---|---|---|---|---|---|
+| inference | 384 | 483.4 | 216.8 | 343.9 | 475.0 |
+| inference | 768 | 1058.6 | 493.4 | 733.2 | 1043.5 |
+| training | 384 | 1372.9 | 656.4 | 1379.4 | 1351.8 |
+| training | 768 | 2918.5 | 1500.2 | 2845.6 | 2871.4 |
+
+Accuracy: `pair_bwd` at d_pair 64 vs float64 autograd is closer than the d_pair 128 kernel (dgamma_z 5.5e-3 vs 8.8e-3, dz 6.7e-3 vs
+8.7e-3 at N 1536). At the module level, ln_pair.weight at N 1536 is 1.11-1.38x the module's own bf16 statements' error over three seeds
+(their error happens to be lower at this width; 0.87-0.97x at d_pair 128), so `test_pwa_b200_training_gpu.py` holds that one gradient at
+d_pair 64 to 1.5x and checks the kernel itself against fp64 at N 1536.
+
 ## Beyond MiniWorld's shape: inference (2026-10-29)
 
 FoldForge's predictors run the module at other widths (DenseSpec `msa_channel` / `pair_channel` / `msa_value_dim`, 8 heads). B200

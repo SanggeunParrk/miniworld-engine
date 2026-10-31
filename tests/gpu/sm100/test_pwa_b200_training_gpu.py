@@ -34,6 +34,7 @@ FOLDFORGE = {  # (d_msa, d_pair, d_hidden): DenseSpec msa_channel / pair_channel
     "chai1": (64, 256, 32),
     "miniworld": (64, 128, 32),
     "intellifold2": (256, 512, 32),
+    "mw_pair64": (64, 64, 32),  # MiniWorld's B200 trunk: the MiniWorld kernels with pair_fwd / pair_bwd at d_pair 64
 }
 PARAMS = ("ln_msa.weight", "ln_msa.bias", "to_value.weight", "to_gate.weight", "ln_pair.weight", "to_bias.weight", "to_out.weight")
 P_DROP = 0.15
@@ -120,32 +121,37 @@ def check(family, n, s, masked=True, p_drop=0.0, master=False):
         # ln_msa.weight: a sum over the rows of dy xhat with heavy cancellation; the kernels' error is steady (7-9e-3 at (203, 129)) while
         # the module's own bf16 error moves with the seed (6.3-10.8e-3, three seeds), so the ratio spans 0.75-1.18 (dv_bwd and dvb_w alike)
         bar = 1.25 if name == "ln_msa.weight" else 1.15
+        # ln_pair.weight at d_pair 64 (MiniWorld's B200 trunk): sum_h Wb o M over 64 channels, the same cancellation. At N 1536 the module's
+        # own bf16 statements land closer to fp32 than at d_pair 128 (three seeds: ratio 1.11 / 1.19 / 1.38 vs 0.87-0.97 at d_pair 128) while
+        # pair_bwd itself is closer to fp64 than the d_pair 128 kernel (dgamma 5.5e-3 vs 8.8e-3 at N 1536; test_pair_bwd_wide_against_fp64)
+        if name == "ln_pair.weight" and d_pair == 64:
+            bar = 1.5
         assert rel(a, t) <= bar * rel(b, t), (family, name, rel(a, t), rel(b, t))
 
 
-@pytest.mark.parametrize("family", ["af3", "protenix2", "opendde", "esmfold2", "chai1", "intellifold2"])
+@pytest.mark.parametrize("family", ["af3", "protenix2", "opendde", "esmfold2", "chai1", "intellifold2", "mw_pair64"])
 @pytest.mark.parametrize(("n", "s"), [(203, 129), (384, 256)])
 def test_foldforge_widths(family, n, s):
     check(family, n, s)
 
 
 @pytest.mark.parametrize(("family", "n"), [("miniworld", 1536), ("miniworld", 2048), ("af3", 1100), ("opendde", 2048), ("esmfold2", 1536),
-                                           ("chai1", 1100), ("intellifold2", 1100), ("intellifold2", 2048)])
+                                           ("chai1", 1100), ("intellifold2", 1100), ("intellifold2", 2048), ("mw_pair64", 1536)])
 def test_long_training(family, n):
     check(family, n, 128)
 
 
-@pytest.mark.parametrize("family", ["af3", "esmfold2", "chai1", "miniworld", "intellifold2"])
+@pytest.mark.parametrize("family", ["af3", "esmfold2", "chai1", "miniworld", "intellifold2", "mw_pair64"])
 def test_row_dropout(family):
     check(family, 384, 256, p_drop=P_DROP)
 
 
-@pytest.mark.parametrize("family", ["af3", "opendde", "intellifold2"])
+@pytest.mark.parametrize("family", ["af3", "opendde", "intellifold2", "mw_pair64"])
 def test_fp32_master_under_autocast(family):
     check(family, 300, 200, masked=False, p_drop=P_DROP if family != "af3" else 0.0, master=True)
 
 
-@pytest.mark.parametrize("family", ["protenix2", "esmfold2", "chai1", "intellifold2"])
+@pytest.mark.parametrize("family", ["protenix2", "esmfold2", "chai1", "intellifold2", "mw_pair64"])
 def test_repeatable_gradients(family):
     d_msa, d_pair, d_hidden = FOLDFORGE[family]
     m = make(d_msa, d_pair, d_hidden)
@@ -155,7 +161,7 @@ def test_repeatable_gradients(family):
         assert torch.equal(u, v), name
 
 
-@pytest.mark.parametrize("family", ["af3", "esmfold2", "intellifold2"])
+@pytest.mark.parametrize("family", ["af3", "esmfold2", "intellifold2", "mw_pair64"])
 def test_cuda_graph_training_step(family):
     d_msa, d_pair, d_hidden = FOLDFORGE[family]
     m = make(d_msa, d_pair, d_hidden)
@@ -192,7 +198,7 @@ def test_cuda_graph_training_step(family):
         assert torch.equal(g, e)
 
 
-@pytest.mark.parametrize(("d_pair", "n"), [(384, 768), (384, 1152), (512, 640), (512, 2048)])
+@pytest.mark.parametrize(("d_pair", "n"), [(64, 768), (64, 1152), (384, 768), (384, 1152), (512, 640), (512, 2048)])
 def test_pair_fwd_is_repeatable(d_pair, n):
     """pair_fwd's z ring: each statistics group waits its own phases (a shared barrier let a group pass on a slot whose previous load,
     the other group's, had not landed: d_pair 384 gave different logits run to run, 512 at N > 1024 faulted)"""
@@ -205,9 +211,10 @@ def test_pair_fwd_is_repeatable(d_pair, n):
     assert all(torch.equal(w[0], v) for v in w[1:])
 
 
-@pytest.mark.parametrize(("d_pair", "n"), [(256, 384), (384, 384), (512, 256)])
+@pytest.mark.parametrize(("d_pair", "n"), [(64, 384), (64, 256), (64, 1536), (256, 384), (384, 384), (512, 256)])
 def test_pair_bwd_wide_against_fp64(d_pair, n):
-    """pair_bwd at the wide pair widths vs float64 autograd of LN -> proj_z -> mask -> softmax, as close as the d_pair 128 kernel"""
+    """pair_bwd at the other pair widths (d_pair 64: pair_bwd_sm100's two 32-channel halves of one block; 256 / 384 / 512: pair_bwd_w_sm100)
+    vs float64 autograd of LN -> proj_z -> mask -> softmax, as close as the d_pair 128 kernel"""
     k = pt._k100()["pwa"]
 
     def errors(dz_):
@@ -235,6 +242,7 @@ def test_refusals():
     assert pt.refusal(x, z, 128, 256, 8, 16) is None                                    # grad enabled: ESMFold2 trains
     assert pt.refusal(x, z, 128, 256, 8, 8, dropout=True) is None
     assert pt.refusal(x[..., :64], z, 64, 256, 8, 32) is None                           # Chai-1: the MiniWorld MSA kernels
+    assert pt.refusal(x[..., :64], z[..., :64], 64, 64, 8, 32) is None                  # MiniWorld's B200 trunk (d_pair 64)
     assert pt.refusal(x, z, 128, 256, 8, 32) is not None                                # d_msa 128 x 32: not built
     big = torch.empty(1, 1, 2049, 128, device=DEV, dtype=BF)
     assert "2048" in pt.refusal(big, z, 128, 256, 8, 16)
