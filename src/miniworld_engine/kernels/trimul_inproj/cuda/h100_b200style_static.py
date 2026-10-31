@@ -6,8 +6,9 @@ from . import h100_wide_inference as BI
 
 
 @T.device_cache
-def output_kernel(d, h, cfg, rowpad=False):
-    """rowpad: the any-L one-sample form (k3.cu ROWPAD: 64-token chunks of one pair row, padded planes)."""
+def output_kernel(d, h, cfg, rowpad=False, xbuf=1):
+    """rowpad: the any-L one-sample form (k3.cu ROWPAD: 64-token chunks of one pair row, padded planes); xbuf: residual / output
+    tiles per warpgroup (k3.cu XBUF)."""
     bn, stages = cfg
     source = K.R / ("k3reorder.cu" if d == 512 else "k3.cu")
     body = source.read_text()
@@ -39,10 +40,13 @@ def output_kernel(d, h, cfg, rowpad=False):
         "-DMW_MINB=1",
         "-DMW_K1_STREAM=1",
         *(["-DROWPAD=1"] if rowpad else []),
+        *([f"-DXBUF={xbuf}"] if xbuf != 1 else []),
     ]
     kernel = T.load_unit(
         str(T.compile_text(body, flags)), "b200style_k3_static"
     ).kernel(name)
-    smem = BI._k3_smem(d, bn, stages)
+    smem = BI._k3_smem(d, bn, stages) + (xbuf - 1) * (2 * 64 * bn * 2 + 16)
+    if smem > 232448:
+        raise ValueError("K3 resources")
     kernel.set_max_dynamic_smem(smem)
     return kernel, smem

@@ -21,12 +21,19 @@ using bf = __nv_bfloat16;
 #ifndef GFOLD
 #define GFOLD 0
 #endif
-// ROWPAD (one sample, inference, any L): tokens run in 64-token chunks of one pair row, CJ = ceil(L / 64) chunks per row; a CTA takes
+// ROWPAD (inference, any L for one sample, L % 16 == 0 for B samples stacked b-major): tokens run in 64-token chunks of one pair row,
+// CJ = ceil(L / 64) chunks per row, Params.M = the pair rows (B L); a CTA takes
 // chunks 2 tile and 2 tile + 1 (one per consumer warpgroup). tri is read from the K1 planes padded to Np (3-D map [Np j][Np i][H]),
 // x / y through 3-D maps [D][L j][L i] whose out-of-range tokens TMA zero-fills on load and drops on store.
 #ifndef ROWPAD
 #define ROWPAD 0
 #endif
+// XBUF: residual / output tiles per warpgroup. 2 = the next column block / tile loads x into the other buffer while the previous y is
+// still leaving by TMA store (1: wait for that store's read before reloading the same buffer).
+#ifndef XBUF
+#define XBUF 1
+#endif
+constexpr int XB = XBUF;
 // Hopper implementation of the B200 folded K3 algorithm. The saved tensors
 // are projection/gate values and LN statistics, never normalized H rows.
 constexpr int D = WIDTH, H = HIDDEN, BN = BLOCKN, NS = STAGES, MT = 128;
@@ -60,8 +67,8 @@ TMN_DEVI void tma_store_2d(const CUtensorMap* map, const void* src, int c0, int 
 extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_constant__ const Params p) {
   extern __shared__ __align__(1024) uint8_t sm[];
   uint8_t* ring = sm;
-  uint8_t* xbuf = sm + NS * STAGE;                               // [2 wg][BN/64 chunks][64 tok][128 B]
-  float* su = reinterpret_cast<float*>(xbuf + 2 * XBYTES);       // [4][D]
+  uint8_t* xbuf = sm + NS * STAGE;                               // [2 wg][XB][BN/64 chunks][64 tok][128 B]
+  float* su = reinterpret_cast<float*>(xbuf + 2 * XB * XBYTES);  // [4][D]
   const float* sv = su + D; const float* sug = su + 2 * D; const float* svg = su + 3 * D;
   float* red = su + 4 * D;                                       // [2 wg][4 grp][64 tok][2]  partial sums
   float* sk = red + 2 * 4 * 64 * 2;                              // [2 wg][64 tok] shift
@@ -69,13 +76,13 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
   float* srs = smu + 2 * 64;                                     // [2 wg][64 tok] rs
   uint64_t* full = reinterpret_cast<uint64_t*>(srs + 2 * 64);
   uint64_t* empty = full + NS;
-  uint64_t* xfull = empty + NS;                                  // [2 wg]
+  uint64_t* xfull = empty + NS;                                  // [2 wg][XB]
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int wg = __shfl_sync(0xffffffffu, tid >> 7, 0);
   for (int i = tid; i < (GFOLD ? 4 : 2) * D; i += 384) su[i] = p.uv[i];
   if (tid == 0) {
     for (int s = 0; s < NS; ++s) { mbar_init(full + s, 1); mbar_init(empty + s, 8); }
-    mbar_init(xfull, 1); mbar_init(xfull + 1, 1);
+    for (int b = 0; b < 2 * XB; ++b) mbar_init(xfull + b, 1);
     fence_barrier_init();
     tma_prefetch_desc(&p.tri); tma_prefetch_desc(&p.xa); tma_prefetch_desc(&p.wp); tma_prefetch_desc(&p.wg);
     tma_prefetch_desc(&p.xm); tma_prefetch_desc(&p.ym);
@@ -130,8 +137,8 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
   const int rowA = 16 * wiw + (lane >> 2), rowB = rowA + 8;       // WG-relative accumulator rows
   const int q2 = 2 * (lane & 3);
   const bool elect = wiw == 0 && lane == 0;
-  const uint32_t ring_u = smem_u32(ring), xb_u = smem_u32(xbuf) + w * XBYTES;
-  uint32_t it = 0, xph = 0;
+  const uint32_t ring_u = smem_u32(ring), xb_w = smem_u32(xbuf) + w * XB * XBYTES;
+  uint32_t it = 0, xph = 0, xe = 0;                               // xph: phase bit per buffer; xe: this warpgroup's epilogue count
   float acc[NACC];
   uint32_t gp[NACC / 2];
   auto release = [&](uint32_t i) { fence_proxy_async(); __syncwarp(); if (lane == 0) mbar_arrive(empty + (i % NS)); };
@@ -147,8 +154,8 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
     float2 xsA = make_float2(0.f, 1.f), xsB = xsA;
 #if ROWPAD
     if constexpr (GFOLD) {
-      if (ci < p.L && cj + rowA < p.L) xsA = ldg64f(p.xs + 2 * ((size_t)ci * p.L + cj + rowA));
-      if (ci < p.L && cj + rowB < p.L) xsB = ldg64f(p.xs + 2 * ((size_t)ci * p.L + cj + rowB));
+      if (ci < p.M && cj + rowA < p.L) xsA = ldg64f(p.xs + 2 * ((size_t)ci * p.L + cj + rowA));   // ROWPAD: M = pair rows (B L, b-major)
+      if (ci < p.M && cj + rowB < p.L) xsB = ldg64f(p.xs + 2 * ((size_t)ci * p.L + cj + rowB));
     }
 #else
     if constexpr (GFOLD) { xsA = ldg64f(p.xs + 2 * (size_t)(tok0 + rowA)); xsB = ldg64f(p.xs + 2 * (size_t)(tok0 + rowB)); }
@@ -179,15 +186,19 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
 #pragma unroll
         for (int g = 0; g < NACC / 4; ++g) { gp[2 * g] = pack_bf16(acc[4 * g], acc[4 * g + 1]); gp[2 * g + 1] = pack_bf16(acc[4 * g + 2], acc[4 * g + 3]); }
       }
-      // the residual tile: this warpgroup's previous y store has left shared memory -> load x [64 tok][BN] over it
+      // the residual tile: the y store that last used this buffer has left shared memory -> load x [64 tok][BN] over it
+      const int xbi = XB > 1 ? (int)(xe % XB) : 0;
+      uint8_t* const xcur = xbuf + (w * XB + xbi) * XBYTES;
+      uint64_t* const xbar = xfull + w * XB + xbi;
+      const uint32_t xb_u = xb_w + xbi * XBYTES;
       if (elect) {
-        tma_store_wait_read<0>();
-        mbar_arrive_expect_tx(xfull + w, XBYTES);
+        tma_store_wait_read<XB - 1>();
+        mbar_arrive_expect_tx(xbar, XBYTES);
 #pragma unroll
 #if ROWPAD
-        for (int j = 0; j < BN / 64; ++j) tma_load_3d(xbuf + w * XBYTES + j * 8192, &p.xm, xfull + w, cb * BN + 64 * j, cj, ci);
+        for (int j = 0; j < BN / 64; ++j) tma_load_3d(xcur + j * 8192, &p.xm, xbar, cb * BN + 64 * j, cj, ci);
 #else
-        for (int j = 0; j < BN / 64; ++j) tma_load_2d(xbuf + w * XBYTES + j * 8192, &p.xm, xfull + w, cb * BN + 64 * j, tok0);
+        for (int j = 0; j < BN / 64; ++j) tma_load_2d(xcur + j * 8192, &p.xm, xbar, cb * BN + 64 * j, tok0);
 #endif
       }
       // ---- projection: raw tri (MN-major) . Wpf^T (K = H); output-LN statistics on the tile's first column block
@@ -230,7 +241,7 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
       }
       // ---- epilogue: y = x + bf16(P) * sigmoid(bf16(G)), in place over the x tile, then one TMA store per 64 columns
       const float rsA = srs[w * 64 + rowA], nmA = smu[w * 64 + rowA], rsB = srs[w * 64 + rowB], nmB = smu[w * 64 + rowB];
-      mbar_wait(xfull + w, xph); xph ^= 1;
+      mbar_wait(xbar, (xph >> xbi) & 1); xph ^= 1u << xbi;
 #pragma unroll
       for (int g = 0; g < NACC / 4; ++g) {
         const int cc = 8 * g + q2, c = cb * BN + cc;
@@ -264,12 +275,13 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
       if (elect) {
 #pragma unroll
 #if ROWPAD
-        for (int j = 0; j < BN / 64; ++j) tma_store_3d(&p.ym, xbuf + w * XBYTES + j * 8192, cb * BN + 64 * j, cj, ci);
+        for (int j = 0; j < BN / 64; ++j) tma_store_3d(&p.ym, xcur + j * 8192, cb * BN + 64 * j, cj, ci);
 #else
-        for (int j = 0; j < BN / 64; ++j) tma_store_2d(&p.ym, xbuf + w * XBYTES + j * 8192, cb * BN + 64 * j, tok0);
+        for (int j = 0; j < BN / 64; ++j) tma_store_2d(&p.ym, xcur + j * 8192, cb * BN + 64 * j, tok0);
 #endif
         tma_store_commit();
       }
+      ++xe;
     }
   }
   if (elect) tma_store_wait_all();

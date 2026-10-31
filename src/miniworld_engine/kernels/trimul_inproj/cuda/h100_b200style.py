@@ -89,11 +89,21 @@ def _headers(backward=False):
 def _config(d, backward=False):
     if d == 256 and not backward:
         return (2, 64, 4, 4, 1, 0)
+    if d == 128 and not backward:
+        return (6, 32, 8, 2, 1)   # the packaged D128 K1 tile (192-token CTA, three consumer warpgroups), inference only
     return {256: (2, 64, 4, 4, 1), 384: (2, 64, 2, 6, 1), 512: (2, 64, 4, 2, 1)}[d]
 
 
 def _output_config(d):
+    if d == 128:
+        return (128, K3_STAGES_128)
     return (192, 4) if d == 384 else (256, 3)
+
+
+#: K3 ring depth at D128 (BN = 128: one column block, [128 tok + 128 n] x 64 k per stage)
+K3_STAGES_128 = 4
+#: residual / output tiles per K3 warpgroup at D128 (k3.cu XBUF; the D256 / D384 tiles leave no shared memory for a second one)
+K3_XBUF_128 = 2
 
 
 @T.device_cache
@@ -284,48 +294,55 @@ def _forward_fake(leaves, mask, ds, direction):
 
 
 def rowpad_serves(x, direction):
-    """One sample, one direction, D256 / D384, inference at an L the token-flat path does not take (L % 128 != 0)."""
-    return (x.ndim == 4 and x.shape[0] == 1 and direction in (1, 2) and x.shape[-1] in (256, 384) and x.shape[1] == x.shape[2]
-            and x.shape[1] >= 16 and x.shape[1] % 128 != 0)
+    """One direction, inference: D256 / D384 at an L the token-flat path does not take (L % 128 != 0), D128 at every L (the
+    token-flat port has no D128 build). One sample at any L >= 16; B samples (stacked b-major, as K1 takes them) at L % 16 == 0."""
+    return (x.ndim == 4 and direction in (1, 2) and x.shape[1] == x.shape[2] and x.shape[1] >= 16
+            and (x.shape[0] == 1 or (x.shape[1] % 16 == 0 and x.shape[-1] == 128))
+            and (x.shape[-1] == 128 or (x.shape[-1] in (256, 384) and x.shape[1] % 128 != 0)))
 
 
 def _run_rowpad(leaves, mask, direction, out=None):
-    """One sample at any L: K1 writes planes padded to the next multiple of 16 (zero pad rows / columns, as the packaged K1),
-    the contraction runs on the padded planes, K3 walks 64-token chunks of one pair row (k3.cu ROWPAD) and reads / writes x / y
-    through 3-D maps that clip the ragged row end. Same arithmetic per token as the token-flat path (pad terms are exact zeros)."""
+    """Any L: K1 writes planes padded to the next multiple of 16 (zero pad rows / columns, as the packaged K1; B samples need no pad
+    and stack b-major), the contraction runs on the planes, K3 walks 64-token chunks of one pair row (k3.cu ROWPAD) and reads /
+    writes x / y through 3-D maps that clip the ragged row end. Same arithmetic per token as the token-flat path (pad terms are
+    exact zeros)."""
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
-    n, d, h = x.shape[1], x.shape[-1], wp.shape[1]
+    bsz, n, d, h = x.shape[0], x.shape[1], x.shape[-1], wp.shape[1]
+    rows = bsz * n
     npad = -(-n // 16) * 16
+    if bsz > 1 and npad != n:
+        raise ValueError("B samples need L % 16 == 0")
     with T.native_context(x.device):
-        ab = x.new_empty((2 * h, npad, npad))
-        xs = x.new_empty((n * n, 2), dtype=torch.float32)
+        ab = x.new_empty((2 * h, rows if bsz > 1 else npad, npad))
+        xs = x.new_empty((rows * n, 2), dtype=torch.float32)
         vec = x.new_empty((4, d), dtype=torch.float32)
         weights = [w if w.dtype == torch.bfloat16 and w.is_contiguous() else w.to(torch.bfloat16).contiguous()
                    for w in (wl, wlg, wr, wrg)]
-        token = (torch.ones(n, device=x.device, dtype=torch.bool) if mask is None or mask.numel() == 0
-                 else mask.reshape(n).to(torch.bool).contiguous())
+        token = (torch.ones(rows, device=x.device, dtype=torch.bool) if mask is None or mask.numel() == 0
+                 else mask.reshape(rows).to(torch.bool).contiguous())
         from .h100_b200style_direct import front
 
         front(x, weights, token, gi, bi, ab, xs)
-        tri = _contract(ab, d, direction)
+        tri = _contract(ab, d, direction)            # [h, (B,) np, np]
+        prow = rows if bsz > 1 else npad             # pair rows of the planes / tri
         wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
         _aux().fold(wp, go, bo, wg, gi, bi, wpf, wgf, vec)
         y = T.take_output(x) if out is None else out
         cfg = _output_config(d)
         from .h100_b200style_static import output_kernel
 
-        kernel, smem = output_kernel(d, h, cfg, rowpad=True)
+        kernel, smem = output_kernel(d, h, cfg, rowpad=True, xbuf=K3_XBUF_128 if d == 128 else 1)
         bn, _ = cfg
         cj = -(-n // 64)
-        tiles = -(-(n * cj) // 2)
+        tiles = -(-(rows * cj) // 2)
         fields = [
-            I._map(tri, [64, 1, 64], [npad, npad, h], [npad * 2, npad * npad * 2]),
-            I._map(x, [64, 64, 1], [d, n, n], [d * 2, n * d * 2]),
+            I._map(tri, [64, 1, 64], [npad, prow, h], [npad * 2, prow * npad * 2]),
+            I._map(x, [64, 64, 1], [d, n, rows], [d * 2, n * d * 2]),
             I._map(wpf, [64, bn], [h, d], [h * 2]),
             I._map(wgf, [64, bn], [d, d], [d * 2]),
-            I._map(x, [64, 64, 1], [d, n, n], [d * 2, n * d * 2]),
-            I._map(y, [64, 64, 1], [d, n, n], [d * 2, n * d * 2]),
-            vec, xs, n * n, tiles, None, None, None, None, None, n, npad, cj,
+            I._map(x, [64, 64, 1], [d, n, rows], [d * 2, n * d * 2]),
+            I._map(y, [64, 64, 1], [d, n, rows], [d * 2, n * d * 2]),
+            vec, xs, rows, tiles, None, None, None, None, None, n, npad, cj,
         ]
         kernel.launch((min(tiles, num_sms(x.device.index)), 1, 1), (384, 1, 1), [T._launch_module().Struct(fields)], smem)
         return [y]
@@ -617,14 +634,15 @@ def trimul(leaves, mask, ds, direction=0, out=None):
     launches (tokens b-major; mask a token mask [B n] / pair mask [B n n] or empty, ds [B n, d])."""
     x = leaves[0]
     bsz = x.shape[0] if x.ndim == 4 else 0
+    rowpad = (x.ndim == 4 and not torch.is_grad_enabled() and ds is None and mask.numel() in (0, x.shape[0] * x.shape[1])
+              and rowpad_serves(x, direction))
     if (
         x.dtype != torch.bfloat16
         or x.ndim != 4
         or bsz < 1
         or x.shape[1] != x.shape[2]
-        or x.shape[-1] not in WIDTHS
-        or ((x.shape[1] % 128 or x.shape[1] < 128)
-            and not (not torch.is_grad_enabled() and ds is None and mask.numel() in (0, x.shape[1]) and rowpad_serves(x, direction)))
+        or (x.shape[-1] not in WIDTHS and not rowpad)
+        or ((x.shape[1] % 128 or x.shape[1] < 128) and not rowpad)
         or not x.is_contiguous()
         or direction not in (0, 1, 2)
         or torch.cuda.get_device_capability(x.device) != (9, 0)

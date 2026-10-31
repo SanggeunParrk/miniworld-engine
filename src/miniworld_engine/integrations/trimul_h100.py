@@ -708,7 +708,25 @@ def _update_inference_one(module, pair, mask, *, bidirectional, out=None):
     return y
 
 
+#: One-direction D128 inference from this length on takes the port's any-L form (K1 + LN statistics, folded K3 with two residual /
+#: output tiles per warpgroup): 0.5-1 % faster than the packaged K1 / K3 at L768-1536, 4-7 % at L2048 (2026-10-31, record
+#: trimul_h100_vs_anthropic_15pct_20261030.md); the packaged path stays faster below.
+ROWPAD_D128_FROM = 768
+
+
+def _rowpad_d128(module, pair, mask, bidirectional):
+    return (pair.ndim == 4 and (mask is None or (mask.numel() == pair.shape[0] * pair.shape[1] and mask.dtype == torch.bool))
+            and not bidirectional and (pair.shape[0] == 1 or pair.shape[1] % 16 == 0) and pair.shape[-1] == 128 and module.d_hidden == 128
+            and pair.shape[1] == pair.shape[2] and ROWPAD_D128_FROM <= pair.shape[1] <= MAX_TRAINING_LENGTH
+            and pair.dtype == torch.bfloat16 and pair.is_contiguous() and module.ln_pair.eps == 1e-5 and module.ln_out.eps == 1e-5
+            and all(p.dtype == torch.float32 and p.is_contiguous() for p in (module.ln_pair.weight, module.ln_pair.bias,
+                                                                             module.ln_out.weight, module.ln_out.bias)))
+
+
 def _update_inference_body(module, pair, mask, bidirectional, out):
+    if _rowpad_d128(module, pair, mask, bidirectional):
+        return _b200style_update(module, pair, mask, None, False, out=out) if out is not None else _b200style_update(
+            module, pair, mask, None, False)
     if _b200style_serves(module, pair, inference=True):
         if out is None:   # (the one-launch call keeps the five-argument form tests patch)
             return _b200style_update(module, pair, mask, None, bidirectional)

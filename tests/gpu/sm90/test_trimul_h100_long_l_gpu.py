@@ -132,8 +132,8 @@ def reference(m, direction, x, mask, ds, chunk=256):
     return y
 
 
-def counting(monkeypatch, module, name):
-    calls = []
+def counting(monkeypatch, module, name, calls=None):
+    calls = [] if calls is None else calls
     fn = getattr(module, name)
 
     def wrapped(*a, **k):
@@ -146,8 +146,8 @@ def counting(monkeypatch, module, name):
 
 def native_entry(monkeypatch, D, direction, training):
     """The CUDA entry point a served call must reach (not the PyTorch statements)."""
-    if not training:
-        return counting(monkeypatch, h100_inference, "inference")
+    if not training:   # D128 one direction from ROWPAD_D128_FROM on: the port's any-L form (h100_b200style.trimul)
+        return counting(monkeypatch, h100_b200style, "trimul", counting(monkeypatch, h100_inference, "inference"))
     if D == 64:
         return (counting(monkeypatch, h100_d64_b200gate, "bidirectional_trimul") if direction == 0 else
                 counting(monkeypatch, h100_uni_d64_b200gate, "single_trimul"))
@@ -442,6 +442,30 @@ def test_d384_rowpad_inference(case, monkeypatch):
         assert trimul_h100._b200style_serves(m, x, inference=True)
         got = m(x, mask)
         assert calls, "the any-L port form was not reached"
+        assert torch.equal(got, m(x, mask))
+        err = relative(got, reference(m, direction, x, mask, None))
+    assert err < 1e-2, err
+
+
+D128_ROWPAD = [(direction, L, masked) for direction in (1, 2) for L in (768, 1000) for masked in (True, False)]
+
+
+@pytest.mark.parametrize("case", D128_ROWPAD, ids=[f"dir{d}-L{L}-{'mask' if m else 'nomask'}" for d, L, m in D128_ROWPAD])
+def test_d128_rowpad_inference(case, monkeypatch):
+    """One-sample D128 inference from ROWPAD_D128_FROM on takes the port's any-L form: two residual / output tiles per K3
+    warpgroup are bitwise one tile (k3.cu XBUF), the result is deterministic and within the bf16 band of the FP32 statement."""
+    direction, L, masked = case
+    m = make(128, direction).eval()
+    x, mask, _ = inputs(1, L, 128)
+    mask = mask if masked else None
+    calls = []
+    run = h100_b200style._run_rowpad
+    monkeypatch.setattr(h100_b200style, "_run_rowpad", lambda *a, **k: calls.append(1) or run(*a, **k))
+    with torch.no_grad():
+        got = m(x, mask)
+        assert calls, "the any-L port form was not reached"
+        assert torch.equal(got, m(x, mask))
+        monkeypatch.setattr(h100_b200style, "K3_XBUF_128", 1)
         assert torch.equal(got, m(x, mask))
         err = relative(got, reference(m, direction, x, mask, None))
     assert err < 1e-2, err
