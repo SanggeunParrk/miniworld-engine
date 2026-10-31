@@ -42,31 +42,39 @@ def _inputs(dtype=BF16, c=_C):
     return msa, pair, mask, weights, keep
 
 
-def _forward() -> None:
+#: Both sides of the boolean key flags: a key mask or none (HAS_MASK), dropout or none (HAS_KEEP, eval / p_drop = 0).
+_SIDES = (True, False)
+
+
+def _forward(masks=(True,)) -> None:
     from miniworld_engine.kernels.pair_weighted_averaging.interface import (
         triton_pair_weighted_averaging,
     )
 
     for c in _VALUE_DIMS:
-        msa, pair, mask, weights, _keep = _inputs(c=c)
-        with torch.no_grad():
-            triton_pair_weighted_averaging(msa, pair, mask, *weights)
+        for use_mask in masks:
+            msa, pair, mask, weights, _keep = _inputs(c=c)
+            with torch.no_grad():
+                triton_pair_weighted_averaging(msa, pair, mask if use_mask else None, *weights)
 
 
-def _backward() -> None:
+def _backward(masks=(True,), keeps=(True,)) -> None:
     from miniworld_engine.kernels.pair_weighted_averaging.interface import (
         triton_pair_weighted_averaging,
     )
 
     for c in _VALUE_DIMS:
-        msa, pair, mask, weights, keep = _inputs(c=c)
-        leaves = [t.requires_grad_() for t in (msa, pair, *weights)]
-        out = triton_pair_weighted_averaging(leaves[0], leaves[1], mask, *leaves[2:], keep=keep, p_drop=_P_DROP)
-        out.backward(torch.randn_like(out))
+        for use_mask in masks:
+            for use_keep in keeps:
+                msa, pair, mask, weights, keep = _inputs(c=c)
+                leaves = [t.requires_grad_() for t in (msa, pair, *weights)]
+                drop = {"keep": keep, "p_drop": _P_DROP} if use_keep else {}
+                out = triton_pair_weighted_averaging(leaves[0], leaves[1], mask if use_mask else None, *leaves[2:], **drop)
+                out.backward(torch.randn_like(out))
 
 
 def pair_weighted_averaging_layernorm_gemm_softmax_triton() -> None:
-    _forward()
+    _forward(masks=_SIDES)
 
 
 def pair_weighted_averaging_layernorm_gemm_triton() -> None:
@@ -78,7 +86,7 @@ def pair_weighted_averaging_gate_gemm_triton() -> None:
 
 
 def pair_weighted_averaging_bwd_gate_gemm_triton() -> None:
-    _backward()
+    _backward(keeps=_SIDES)
 
 
 def pair_weighted_averaging_bwd_layernorm_gemm_dw_triton() -> None:
@@ -90,4 +98,4 @@ def pair_weighted_averaging_bwd_layernorm_gemm_dx_dlnw_triton() -> None:
 
 
 def pair_weighted_averaging_bwd_layernorm_gemm_softmax_triton() -> None:
-    _backward()
+    _backward(masks=_SIDES)

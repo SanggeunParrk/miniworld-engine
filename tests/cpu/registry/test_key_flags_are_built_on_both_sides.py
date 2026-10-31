@@ -90,11 +90,6 @@ ONE_SIDED: dict[tuple[str, str], str] = {
         "the per-op driver builds HAS_DSB=0 only: =1 folds the column sums of dscale into dx through a DSB atomic buffer that "
         "the checker driver does not allocate (not driven yet; the =1 path is launched by the training backward with the same "
         "tile config, only its autotune key is missing)",
-    ("gated_projection_bwd_gate_dropres_triton", "FROM_PREACT"):
-        "drivers/trimul_inproj.py gates the =1 probe on `_sm100()`. The preact form is passed only "
-        "by the checker since the sm100 CuTeDSL merged-training paths that launched it were removed "
-        "in v2.2.0; below sm100 it is a program nothing can launch. This entry retires itself "
-        "when a B200 cache lands",
 
 }
 
