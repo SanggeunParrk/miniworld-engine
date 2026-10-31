@@ -12,7 +12,7 @@
 //   warp 1       MMA issuer and TMEM owner: per row tile two accumulators (cn Wb^T, cn Ws^T), double-buffered in tensor memory
 //   warps 2-5    one thread per row: LN(cond) * wc IN PLACE in the A buffer (bf16, or fp32 on the TF32 grid) from shared memory (16-B
 //                chunks, conflict-free under the swizzle; bf16 keeps the row in registers between the statistics and the write) and x's
-//                (rstd, mean rstd) -- one statistics pass each, sum and sum of squares in fp32
+//                (rstd, mean rstd) -- two-pass statistics (mean, then squared deviations from it), fp32, safe for a large mean
 //   warps 6-9    the epilogue: warp w reads TMEM lanes 32 (w % 4) .., one row per thread; y = sigmoid(acc1 + bs) (x rstd - mean rstd) + acc0,
 //                stored straight to global memory (64 / 128 contiguous bytes per thread)
 //
@@ -227,39 +227,54 @@ adaln_fused_sm100(const __grid_constant__ CUtensorMap mB0, const __grid_constant
       const uint32_t ph = (tc >> 1) & 1;
       const int ab = NA == 2 ? buf : 0;
       mbar_wait(&B.sempty[buf], ph ^ 1);                // the epilogue of tile tc - 2 has read these statistics
-      // x's statistics: one pass over the row (sum and sum of squares, fp32), from the staging (bf16) or global memory (fp32: issued
-      // before the wait for cond, so these loads overlap its TMA)
-      float s = 0.f, q2 = 0.f;
+      // x's statistics, two passes (the mean, then the sum of squared deviations from it, fp32): from the staging (bf16) or global memory
+      // (fp32: the first pass issued before the wait for cond, so its loads overlap that TMA; the second re-reads the row, an L1 hit)
+      const long xrow = (long)(t / NT) * 128 + r;
+      const float* xr = reinterpret_cast<const float*>(X) + xrow * DX;
+      const uint32_t xbase = su + O_X + (NXS == 2 ? buf : 0) * X_BYTES;
+      float s = 0.f;
       if (NXS == 0) {
-        const long row = (long)(t / NT) * 128 + r;
-        const float* xr = reinterpret_cast<const float*>(X) + row * DX;
 #pragma unroll
         for (int c = 0; c < DX / 4; ++c) {
-          const float4 v = row < M ? __ldg(reinterpret_cast<const float4*>(xr) + c) : make_float4(0.f, 0.f, 0.f, 0.f);
+          const float4 v = xrow < M ? __ldg(reinterpret_cast<const float4*>(xr) + c) : make_float4(0.f, 0.f, 0.f, 0.f);
           s += (v.x + v.y) + (v.z + v.w);
-          q2 += (v.x * v.x + v.y * v.y) + (v.z * v.z + v.w * v.w);
         }
       }
       mbar_wait(&B.rawfull[ab], NA == 2 ? ph : (uint32_t)(tc & 1));   // raw cond (and bf16 x) rows of this tile landed
       if (NXS == 2) {
-        const uint32_t xbase = su + O_X + buf * X_BYTES;
 #pragma unroll
         for (int c = 0; c < DX * ESZ / 16; ++c) {
           float v[16 / ESZ];
           rd16(xbase + (c / 8) * KB_A + sw128(r, c % 8), v);
 #pragma unroll
-          for (int e = 0; e < 16 / ESZ; ++e) { s += v[e]; q2 += v[e] * v[e]; }
+          for (int e = 0; e < 16 / ESZ; ++e) s += v[e];
         }
       }
       const float mx = s * (1.f / DX);
-      const float rx = rsqrtf(fmaxf(q2 * (1.f / DX) - mx * mx, 0.f) + eps_x);
+      float q2 = 0.f;
+      if (NXS == 0) {
+#pragma unroll
+        for (int c = 0; c < DX / 4; ++c) {
+          const float4 v = xrow < M ? __ldg(reinterpret_cast<const float4*>(xr) + c) : make_float4(mx, mx, mx, mx);
+          q2 += ((v.x - mx) * (v.x - mx) + (v.y - mx) * (v.y - mx)) + ((v.z - mx) * (v.z - mx) + (v.w - mx) * (v.w - mx));
+        }
+      } else {
+#pragma unroll
+        for (int c = 0; c < DX * ESZ / 16; ++c) {
+          float v[16 / ESZ];
+          rd16(xbase + (c / 8) * KB_A + sw128(r, c % 8), v);
+#pragma unroll
+          for (int e = 0; e < 16 / ESZ; ++e) q2 += (v[e] - mx) * (v[e] - mx);
+        }
+      }
+      const float rx = rsqrtf(q2 * (1.f / DX) + eps_x);
       ST[buf * 128 + r] = make_float2(rx, mx * rx);
-      // LN(cond) * wc in place: the row's chunks read once (bf16: kept in registers; fp32: read again for the write pass)
+      // LN(cond) * wc in place, two-pass statistics: bf16 keeps the row in registers (read once), fp32 re-reads it from shared memory
       const uint32_t abase = su + O_A + ab * A_BYTES;
       constexpr int NCH = KC * ESZ / 16;
       constexpr bool KEEP = !F32;
       uint4 raw[KEEP ? NCH : 1];
-      s = 0.f; q2 = 0.f;
+      s = 0.f;
 #pragma unroll
       for (int c = 0; c < NCH; ++c) {
         const uint4 u = lds128(abase + (c / 8) * KB_A + sw128(r, c % 8));
@@ -267,10 +282,18 @@ adaln_fused_sm100(const __grid_constant__ CUtensorMap mB0, const __grid_constant
         float v[16 / ESZ];
         unpack16(u, v);
 #pragma unroll
-        for (int e = 0; e < 16 / ESZ; ++e) { s += v[e]; q2 += v[e] * v[e]; }
+        for (int e = 0; e < 16 / ESZ; ++e) s += v[e];
       }
       const float mc = s * (1.f / KC);
-      const float rc = rsqrtf(fmaxf(q2 * (1.f / KC) - mc * mc, 0.f) + eps_c);
+      q2 = 0.f;
+#pragma unroll
+      for (int c = 0; c < NCH; ++c) {
+        float v[16 / ESZ];
+        unpack16(KEEP ? raw[KEEP ? c : 0] : lds128(abase + (c / 8) * KB_A + sw128(r, c % 8)), v);
+#pragma unroll
+        for (int e = 0; e < 16 / ESZ; ++e) q2 += (v[e] - mc) * (v[e] - mc);
+      }
+      const float rc = rsqrtf(q2 * (1.f / KC) + eps_c);
 #pragma unroll
       for (int c = 0; c < NCH; ++c) {
         const uint32_t a = abase + (c / 8) * KB_A + sw128(r, c % 8);

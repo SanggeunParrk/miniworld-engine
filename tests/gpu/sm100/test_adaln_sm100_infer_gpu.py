@@ -71,3 +71,33 @@ def test_matches_the_reference_at_every_tile_width(dtype, shape, bn, fused):
         bits = yr.view(torch.int32) & 0x1FFF
         assert int(bits.abs().max()) == 0, "rna output off the TF32 grid"
         assert _err(yr, ref) <= 1.5 * _err(pt, ref) + 2e-4
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
+@pytest.mark.parametrize("shape", [(5000, 128, 128), (3000, 768, 384)], ids=["atom", "token"])
+@pytest.mark.parametrize("fused", [None, False], ids=["route", "two_launch"])
+def test_a_large_mean_keeps_the_statistics(dtype, shape, fused):
+    """x and cond with mean 1e3 and standard deviation 1: a one-pass E[v^2] - E[v]^2 variance in fp32 loses ~6 % of it (1e6 * 6e-8); the
+    two-pass statistics keep the result within 1.5x the error of the same-dtype PyTorch statements."""
+    from miniworld_engine.kernels.adaln.cuda import sm100
+
+    m, d, dc = shape
+    if fused is False and dc not in sm100.FUSED_KC:
+        pytest.skip("the two-launch route is the only one at this width")
+    g = torch.Generator(device="cuda").manual_seed(3)
+    x = (1e3 + torch.randn(m, d, device="cuda", generator=g)).to(dtype)
+    c = (1e3 + torch.randn(m, dc, device="cuda", generator=g)).to(dtype)
+    wc = 1 + 0.3 * torch.randn(dc, device="cuda", generator=g)
+    ws = 0.05 * torch.randn(d, dc, device="cuda", generator=g)
+    bs = 0.5 * torch.randn(d, device="cuda", generator=g)
+    wb = 0.05 * torch.randn(d, dc, device="cuda", generator=g)
+    sm100.FUSED = fused
+    try:
+        with torch.no_grad():
+            y = sm100.adaln_inference(x, c, wc, ws, bs, wb, 1e-5, 1e-5)
+    finally:
+        sm100.FUSED = None
+    ref = _ref(x.double(), c.double(), wc.double(), ws.double(), bs.double(), wb.double())
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=dtype is torch.bfloat16):
+        pt = _ref(x, c, wc, ws, bs, wb).to(dtype)   # the same-dtype PyTorch statements (bf16: autocast, LayerNorm in fp32, bf16 GEMMs)
+    assert _err(y, ref) <= 1.5 * _err(pt, ref) + 1e-4, (_err(y, ref), _err(pt, ref))
