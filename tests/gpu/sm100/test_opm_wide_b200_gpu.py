@@ -1,5 +1,6 @@
 """B200 OuterProductMean at the FoldForge widths on the sm_100a kernels (``csrc/sm100/opm_wide_sm100.cu`` through ``integrations.opm_train``):
-d_msa 64 / 128 / 256 x d_pair 128 / 256 / 384 / 512 (Protenix-v2 / ESMFold2 (128, 256), OpenDDE (128, 384), IntelliFold-v2 (256, 512)), either
+d_msa 64 / 128 / 256 x d_pair 128 / 256 / 384 / 512 (Protenix-v2 / ESMFold2 (128, 256), OpenDDE (128, 384), IntelliFold-v2 (256, 512)) and
+MiniWorld's B200 trunk width d_pair 64 (opm_sm100.cu's epilogue at N = 64, the dgrad / dWo in one 64-wide slice), either
 normalisation order, RoseTTAFold3's
 projection biases, inference AND training.
 
@@ -42,6 +43,9 @@ WIDTHS = {
     "w128_128": (128, 128, {}),
     "intellifold2": (256, 512, {}),                  # IntelliFold-v2: d_msa 256 (a CTA pair per prologue-backward tile), c_z 512
     "w256_after_bias": (256, 128, {"projection_bias": True, "normalize_before_proj": False}),
+    "mw_pair64": (64, 64, {}),                       # MiniWorld's B200 trunk: opm_sm100.cu at N = 64, the dgrad / dWo in one 64-wide slice
+    "mw_pair64_after": (64, 64, {"normalize_before_proj": False}),
+    "w128_64_bias": (128, 64, {"projection_bias": True}),
 }
 
 
@@ -133,7 +137,7 @@ def test_training_matches_fp64_statements(name, s, n, master, served):
         assert e <= max(2.0 * r, 1e-2), f"{name} d{nm}: engine {e:.2e} vs bf16 statements {r:.2e}"
 
 
-@pytest.mark.parametrize("name", ["rf3_before", "opendde_after", "rf3_wide", "intellifold2"])
+@pytest.mark.parametrize("name", ["rf3_before", "opendde_after", "rf3_wide", "intellifold2", "mw_pair64"])
 def test_training_is_deterministic_and_graph_safe(name, served):
     d_msa, d_pair, options = WIDTHS[name]
     m = build(d_msa, d_pair, options, torch.bfloat16)
@@ -195,7 +199,8 @@ def test_the_inference_op_applies_the_projection_biases_itself(d_msa, d_pair, af
 # the interchain mask (``mask_interchain`` with chain ids) and a batch of MSA stacks: B200 serves both on the sm_100a kernels (the epilogue
 # zeroes the update of a pair of two chains, the dgrad its gradient; the batch runs one stack at a time)
 CHAIN_WIDTHS = {"miniworld": (64, 128, {}), "rf3_after": (64, 128, {"projection_bias": True, "normalize_before_proj": False}),
-                "protenix2": (128, 256, {}), "opendde_after": (128, 384, {"normalize_before_proj": False}), "intellifold2": (256, 512, {})}
+                "protenix2": (128, 256, {}), "opendde_after": (128, 384, {"normalize_before_proj": False}), "intellifold2": (256, 512, {}),
+                "mw_pair64": (64, 64, {})}
 
 
 def chained(b, n, *, seed=4):

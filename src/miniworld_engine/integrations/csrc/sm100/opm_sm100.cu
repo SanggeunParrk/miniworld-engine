@@ -4,7 +4,7 @@
 //
 //   opm_epilogue:  z[i,j,:] = (O[(i,c),(j,e)] reshaped to [(i,j),(c,e)]) . Wo^T / n[i,j] + bias (+ residual)
 //
-// The epilogue is a GEMM with M = 128 (i,j) pairs per tile, N = c_z = 128, K = c_hidden^2 = 1024.
+// The epilogue is a GEMM with M = 128 (i,j) pairs per tile, N = c_z (128, or 64: MiniWorld's B200 trunk), K = c_hidden^2 = 1024.
 // The [i,j,c,e] -> [(i,j),(c,e)] permute is NOT done by threads: a 4-D TMA box over O with the dims
 // ordered (e, j, i, c) lands a k-chunk of two c values as two [(i,j) rows][32 e] tiles -- each exactly
 // the canonical 64-byte-swizzled K-major operand -- because TMA does not require monotonic strides.
@@ -22,30 +22,41 @@ using namespace sm100;
 namespace {
 constexpr int CH = 32, CZ = 128, NCH = CH * CH;
 
-namespace ep {
-constexpr int BI = 4, BJ = 32, NP = BI * BJ;            // 128 pairs per tile
-constexpr int KC = 64;                                  // k per stage = 2 c values
-constexpr int NK = NCH / KC;                            // 16 stages per tile
-constexpr int NST = 5;
-constexpr int ATILE = NP * KC, BTILE = CZ * KC;         // elements
-constexpr int STAGE = ATILE + BTILE;
-constexpr int OBLK = NP * 64;                           // staging: two blocks [BI][BJ][64], one per 64 output columns
-constexpr int OUTT = 2 * OBLK;
-constexpr int THREADS = 192;
-constexpr int SMEM = 1024 + (NST * STAGE + OUTT) * 2 + CZ * 4 + 256;   // + the bias (fp32)
-constexpr uint32_t IDESC = idesc_bf16(128, CZ);
-}  // namespace ep
+// Built per c_z: 128 (MiniWorld's pair width on the other GPUs, RoseTTAFold3) and 64 (MiniWorld's B200 trunk: N = 64, one 64-column output
+// block a tile; the smaller Wo chunk leaves room for a deeper O ring).
+template <int CZ_>
+struct EP {
+  static constexpr int CZ = CZ_;
+  static constexpr int BI = 4, BJ = 32, NP = BI * BJ;            // 128 pairs per tile
+  static constexpr int KC = 64;                                  // k per stage = 2 c values
+  static constexpr int NK = NCH / KC;                            // 16 stages per tile
+  static constexpr int NST = CZ == 64 ? 8 : 5;
+  static constexpr int ATILE = NP * KC, BTILE = CZ * KC;         // elements
+  static constexpr int STAGE = ATILE + BTILE;
+  static constexpr int NOB = CZ / 64;                            // output blocks of 64 columns
+  static constexpr int OBLK = NP * 64;                           // staging: one block [BI][BJ][64] per 64 output columns
+  static constexpr int OUTT = NOB * OBLK;
+  static constexpr int THREADS = 192;
+  static constexpr int SMEM = 1024 + (NST * STAGE + OUTT) * 2 + CZ * 4 + 256;   // + the bias (fp32)
+  static constexpr uint32_t IDESC = idesc_bf16(128, CZ);
+  static constexpr int TMEM_COLS = 2 * CZ;                       // two accumulators
+  static_assert((CZ == 64 || CZ == 128) && SMEM <= 232448, "c_z 64 / 128, one CTA per SM");
+};
 
-__global__ void __launch_bounds__(ep::THREADS, 1) opm_epilogue_sm100(
+template <int CZ_>
+__global__ void __launch_bounds__(192, 1) opm_epilogue_sm100(
     int NI, int NJ, int ntiles,
     const __grid_constant__ CUtensorMap amap,     // O as (e 32, j NJ, i NI, c 32), box (32, BJ, BI, 2), 64B swizzle
-    const __grid_constant__ CUtensorMap bmap,     // Wo [CZ][NCH], box (64, 128)
-    const __grid_constant__ CUtensorMap zmap,     // z as (64 z, NJ j, 2 halves, NI i), box (64, BJ, 1, BI): one 64-column block
+    const __grid_constant__ CUtensorMap bmap,     // Wo [CZ][NCH], box (64, CZ)
+    const __grid_constant__ CUtensorMap zmap,     // z as (64 z, NJ j, CZ / 64 blocks, NI i), box (64, BJ, 1, BI): one 64-column block
     const __grid_constant__ CUtensorMap rmap,     // the residual, same layout
     const float* __restrict__ NORM,               // [NI][NJ] mask counts (clamped >= 1)
     const void* __restrict__ BIAS, int bias_bf16, int has_res, int after,
     const int* __restrict__ ASYM) {               // chain ids [N] (the interchain mask: a pair of two chains gets no update), or nullptr
-  using namespace ep;
+  using P = EP<CZ_>;
+  constexpr int CZ = P::CZ, BI = P::BI, BJ = P::BJ, NP = P::NP, KC = P::KC, NK = P::NK, NST = P::NST, ATILE = P::ATILE, STAGE = P::STAGE;
+  constexpr int NOB = P::NOB, OBLK = P::OBLK, OUTT = P::OUTT;
+  constexpr uint32_t IDESC = P::IDESC;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
   __nv_bfloat16* sStage = reinterpret_cast<__nv_bfloat16*>(smb);
@@ -56,19 +67,20 @@ __global__ void __launch_bounds__(ep::THREADS, 1) opm_epilogue_sm100(
   uint64_t* empty = full + NST;     // [NST]
   uint64_t* accf = empty + NST;     // [2]
   uint64_t* acce = accf + 2;        // [2]
-  uint64_t* resf = acce + 2;        // [2] a staging block's residual landed
-  uint32_t* tslot = reinterpret_cast<uint32_t*>(resf + 2);
+  uint64_t* resf = acce + 2;        // [NOB] a staging block's residual landed
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(resf + NOB);
 
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
     for (int s = 0; s < NST; ++s) { bar_init(full + s, 1); bar_init(empty + s, 1); }
-    for (int b = 0; b < 2; ++b) { bar_init(accf + b, 1); bar_init(acce + b, 4); bar_init(resf + b, 1); }
+    for (int b = 0; b < 2; ++b) { bar_init(accf + b, 1); bar_init(acce + b, 4); }
+    for (int h = 0; h < NOB; ++h) bar_init(resf + h, 1);
     bar_init_fence();
     prefetch_map(&amap); prefetch_map(&bmap); prefetch_map(&zmap); if (has_res) prefetch_map(&rmap);
   }
   // the bias in shared memory (per-element __ldg of it in the drain sat on the critical path)
   if (tid < CZ) sBias[tid] = bias_bf16 ? __bfloat162float(reinterpret_cast<const __nv_bfloat16*>(BIAS)[tid]) : reinterpret_cast<const float*>(BIAS)[tid];
-  if (warp == 1) tmem_alloc(tslot, 256);
+  if (warp == 1) tmem_alloc(tslot, P::TMEM_COLS);
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
@@ -125,7 +137,7 @@ __global__ void __launch_bounds__(ep::THREADS, 1) opm_epilogue_sm100(
       expect_tx(resf + h, OBLK * 2);
       load_4d(&rmap, sOut + h * OBLK, resf + h, 0, (t % njb) * BJ, h, (t / njb) * BI);
     };
-    if (leader && has_res && (int)blockIdx.x < ntiles) { res_load(blockIdx.x, 0); res_load(blockIdx.x, 1); }
+    if (leader && has_res && (int)blockIdx.x < ntiles) for (int h = 0; h < NOB; ++h) res_load(blockIdx.x, h);
     float nrm_next = blockIdx.x < ntiles ? count_of(blockIdx.x) : 1.f;
     int lt = 0;
     for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
@@ -139,12 +151,12 @@ __global__ void __launch_bounds__(ep::THREADS, 1) opm_epilogue_sm100(
       tc_fence_after();
       const uint32_t tb = tmem_at(tmem + b * CZ, q * 32, 0);
 #pragma unroll 1
-      for (int h = 0; h < 2; ++h) {
+      for (int h = 0; h < NOB; ++h) {
         float v[64];
         tmem_ld32(tb + h * 64, v);
         tmem_ld32(tb + h * 64 + 32, v + 32);
         tmem_wait_ld();
-        if (h == 1) { tc_fence_before(); if (lane == 0) arrive(acce + b); }   // accumulator drained
+        if (h == NOB - 1) { tc_fence_before(); if (lane == 0) arrive(acce + b); }   // accumulator drained
         if (has_res) wait(resf + h, lt & 1);
         __nv_bfloat16* row = sOut + h * OBLK + (il * BJ + jl) * 64;
         const float* bh = sBias + h * 64;
@@ -185,7 +197,7 @@ __global__ void __launch_bounds__(ep::THREADS, 1) opm_epilogue_sm100(
   }
   tc_fence_before();
   __syncthreads();
-  if (warp == 1) tmem_dealloc(tmem, 256);
+  if (warp == 1) tmem_dealloc(tmem, P::TMEM_COLS);
 }
 
 
@@ -1212,34 +1224,49 @@ static const int* asym_ptr(const c10::optional<torch::Tensor>& asym, int64_t n) 
   return asym->data_ptr<int>();
 }
 
-torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor wo, torch::Tensor bias,
-                           int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual, int64_t after, c10::optional<torch::Tensor> asym) {
-  using namespace ep;
-  TORCH_CHECK(O.is_cuda() && O.scalar_type() == torch::kBFloat16 && O.is_contiguous(), "O: contiguous cuda bf16");
-  TORCH_CHECK(O.size(0) == ni * CH && O.size(1) == nj * CH, "O: [ni*32, nj*32]");
-  const torch::Tensor counts = as_counts(norm, ni, nj);
-  TORCH_CHECK(wo.scalar_type() == torch::kBFloat16 && wo.is_contiguous() && wo.numel() == CZ * NCH, "wo: bf16 [128, 1024]");
-  TORCH_CHECK((bias.scalar_type() == torch::kFloat32 || bias.scalar_type() == torch::kBFloat16) && bias.is_contiguous() && bias.numel() == CZ,
-              "bias: fp32 or bf16 [128]");
+template <int CZ>
+static torch::Tensor opm_epilogue_launch(const torch::Tensor& O, const torch::Tensor& counts, const torch::Tensor& wo, const torch::Tensor& bias,
+                                         int64_t ni, int64_t nj, const c10::optional<torch::Tensor>& residual, int64_t after,
+                                         const c10::optional<torch::Tensor>& asym) {
+  using P = EP<CZ>;
+  constexpr int BI = P::BI, BJ = P::BJ;
   TORCH_CHECK(ni % BI == 0 && nj % BJ == 0, "the epilogue tiles ", BI, " x ", BJ, " tokens");
   const bool has_res = residual.has_value() && residual->numel() > 0;
   auto out = torch::empty({1, ni, nj, (long)CZ}, O.options());
   if (has_res)
-    TORCH_CHECK(residual->scalar_type() == torch::kBFloat16 && residual->is_contiguous() && residual->numel() == ni * nj * CZ, "residual: bf16 [1, ni, nj, 128]");
+    TORCH_CHECK(residual->scalar_type() == torch::kBFloat16 && residual->is_contiguous() && residual->numel() == ni * nj * CZ, "residual: bf16 [1, ni, nj, c_z]");
   const uint64_t M = (uint64_t)nj * CH;
   CUtensorMap am = make_map<4>(O.data_ptr(), {32, (uint64_t)nj, (uint64_t)ni, 32}, {32, 32 * M, M}, {32, BJ, BI, 2}, CU_TENSOR_MAP_SWIZZLE_64B, "O");
   CUtensorMap bm = make_map<2>(wo.data_ptr(), {(uint64_t)NCH, (uint64_t)CZ}, {(uint64_t)NCH}, {64, CZ}, CU_TENSOR_MAP_SWIZZLE_128B, "Wo");
-  CUtensorMap zm = make_map<4>(out.data_ptr(), {64, (uint64_t)nj, 2, (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ}, {64, BJ, 1, BI}, CU_TENSOR_MAP_SWIZZLE_128B, "z");
-  CUtensorMap rm = has_res ? make_map<4>(residual->data_ptr(), {64, (uint64_t)nj, 2, (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ}, {64, BJ, 1, BI}, CU_TENSOR_MAP_SWIZZLE_128B, "res") : zm;
+  CUtensorMap zm = make_map<4>(out.data_ptr(), {64, (uint64_t)nj, (uint64_t)(CZ / 64), (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ},
+                               {64, BJ, 1, BI}, CU_TENSOR_MAP_SWIZZLE_128B, "z");
+  CUtensorMap rm = has_res ? make_map<4>(residual->data_ptr(), {64, (uint64_t)nj, (uint64_t)(CZ / 64), (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ},
+                                         {64, BJ, 1, BI}, CU_TENSOR_MAP_SWIZZLE_128B, "res") : zm;
   const int ntiles = (int)((ni / BI) * (nj / BJ));
   const int grid = std::min(ntiles, num_sms(O.device().index()));
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_epilogue_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-  opm_epilogue_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>(
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_epilogue_sm100<CZ>, cudaFuncAttributeMaxDynamicSharedMemorySize, P::SMEM)); attr = true; }
+  opm_epilogue_sm100<CZ><<<grid, P::THREADS, P::SMEM, at::cuda::getCurrentCUDAStream()>>>(
       (int)ni, (int)nj, ntiles, am, bm, zm, rm, counts.data_ptr<float>(),
       bias.data_ptr(), bias.scalar_type() == torch::kBFloat16 ? 1 : 0, has_res ? 1 : 0, (int)after, asym_ptr(asym, std::max(ni, nj)));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
+}
+
+// O [ni*32, nj*32] bf16, norm (fp32 counts [ni, nj] or the int32 bit rows), wo bf16 [c_z, 1024] (c_z 128, or 64: MiniWorld's B200 trunk),
+// bias fp32 | bf16 [c_z] -> z [1, ni, nj, c_z] (+ residual)
+torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor wo, torch::Tensor bias,
+                           int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual, int64_t after, c10::optional<torch::Tensor> asym) {
+  TORCH_CHECK(O.is_cuda() && O.scalar_type() == torch::kBFloat16 && O.is_contiguous(), "O: contiguous cuda bf16");
+  TORCH_CHECK(O.size(0) == ni * CH && O.size(1) == nj * CH, "O: [ni*32, nj*32]");
+  const torch::Tensor counts = as_counts(norm, ni, nj);
+  const long cz = wo.size(0);
+  TORCH_CHECK(cz == 64 || cz == 128, "c_z 64 or 128 (opm_wepilogue: the wider ones)");
+  TORCH_CHECK(wo.scalar_type() == torch::kBFloat16 && wo.is_contiguous() && wo.dim() == 2 && wo.size(1) == NCH, "wo: bf16 [c_z, 1024]");
+  TORCH_CHECK((bias.scalar_type() == torch::kFloat32 || bias.scalar_type() == torch::kBFloat16) && bias.is_contiguous() && bias.numel() == cz,
+              "bias: fp32 or bf16 [c_z]");
+  return cz == 64 ? opm_epilogue_launch<64>(O, counts, wo, bias, ni, nj, residual, after, asym)
+                  : opm_epilogue_launch<128>(O, counts, wo, bias, ni, nj, residual, after, asym);
 }
 
 std::vector<torch::Tensor> opm_prologue(torch::Tensor m, torch::Tensor mask, torch::Tensor lnw, torch::Tensor lnb, double eps,

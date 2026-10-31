@@ -47,8 +47,9 @@ CM, CH, CZ = 64, 32, 128
 SHAPES = ((64, 128), (128, 256), (128, 384))
 # sm_100a: MiniWorld's width on csrc/sm100/opm_sm100.cu; every other (d_msa, d_pair) pair of these and RoseTTAFold3's projection biases on
 # csrc/sm100/opm_wide_sm100.cu (the same stages: d_msa 128 / 256 prologue / prologue backward, c_z cut into 128-wide slices); d_msa 256 /
-# d_pair 512 is IntelliFold-v2's
-SM100_D_MSA, SM100_D_PAIR = (64, 128, 256), (128, 256, 384, 512)
+# d_pair 512 is IntelliFold-v2's; d_pair 64 is MiniWorld's B200 trunk (opm_sm100.cu's epilogue at N = 64, the c_z-sliced dgrad / dWo in one
+# 64-wide slice)
+SM100_D_MSA, SM100_D_PAIR = (64, 128, 256), (64, 128, 256, 384, 512)
 _EXT: dict[str, Any] = {}
 
 
@@ -568,7 +569,7 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
         mk = mk != 0
     cm, cz = m.shape[2], wo.shape[0]
     (wa16, wb16, wo16, bo16, *pb16), w16 = _bf16_params(ext, [wa, wb, wo, bo, *((pbias,) if pbias is not None else ())])
-    if (cm, cz) != (CM, CZ) or pbias is not None:
+    if cm != CM or cz not in (64, CZ) or pbias is not None:
         wext = _ext_wide(msa.device)
         # the biases in bf16, as the module's bf16 Linear adds them (its fp32 accumulation, one rounding of the sum)
         pb = pb16[0].float() if pbias is not None else m.new_empty((0,), dtype=torch.float32)
@@ -580,7 +581,7 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
             return z, m, mk, bits, a2, bt, stats, None, w16
         o = torch.matmul(a2, bt.t())
         norm = ext.opm_norm(bits)   # the mask counts [N, N] (one small kernel; the epilogue and the dgrad read them, one tile ahead)
-        if cz == CZ:
+        if cz in (64, CZ):   # opm_sm100.cu's epilogue at N = c_z (MiniWorld's 64 / 128)
             z = ext.opm_epilogue(o, norm, wo16, bo16, n, n, residual, int(after), asym)
         else:
             z = wext.opm_wepilogue(o, norm, wo16, bo16, n, n, residual, int(after), asym)
@@ -588,7 +589,7 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
     a2, bt, _, stats, bits = ext.opm_prologue(m, mk, lnw.detach().contiguous(), lnb.detach().contiguous(), float(eps), wa16, wb16,
                                               save_stats, False)
     n = m.shape[1]
-    if not save_stats and asym is None and _fused_sm100_enabled(m.shape[0], n):
+    if not save_stats and cz == CZ and asym is None and _fused_sm100_enabled(m.shape[0], n):
         # inference: the products stay on chip (k-permuted weight as H100's fused kernel; the bias rounded to bf16 as below)
         z = ext.opm_fused_infer(a2, bt, bits, _fused_weight(wo), bo16, residual, int(after))
         return z, m, mk, bits, a2, bt, stats, None, w16

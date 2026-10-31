@@ -577,10 +577,12 @@ template <int CZ>
 struct WDg {
   static constexpr int BI = 4, BJ = 32, NP = BI * BJ;
   static constexpr int NC = 256, NCK = NCH / NC;     // 4 chunks of 8 c
-  static constexpr int NZB = CZ / 128;               // units = K stages per chunk
-  static constexpr int UNIT = NP * 128;              // elements
+  static constexpr int ZU = CZ < 128 ? CZ : 128;     // z a unit (K stage): 128, or c_z 64 (MiniWorld's B200 trunk) in one unit
+  static constexpr int ZH = ZU / 64;                 // 64-z halves a unit: the drain groups that take a unit's dz/n
+  static constexpr int NZB = CZ / ZU;                // units = K stages per chunk
+  static constexpr int UNIT = NP * ZU;               // elements
   static constexpr int NB = CZ <= 256 ? NZB + 1 : NZB;
-  static constexpr int WOS = 128 * 128;              // this CTA's half of a stage of Wo: [2 n blocks][128 z][64 n]
+  static constexpr int WOS = 128 * ZU;               // this CTA's half of a stage of Wo: [2 n blocks][ZU z][64 n]
   static constexpr int NWO = 2;
   static constexpr int OUT = NP * 128;               // a staging box: half a chunk of dO [4 i][4 c][32 j][32 e] or a dz/n unit
   static constexpr int NOUT = CZ >= 512 ? 1 : 2;
@@ -591,6 +593,7 @@ struct WDg {
   static_assert(SMEM <= 232448, "one CTA per SM");
   static_assert(NACC * NC <= 512, "TMEM columns");
   static_assert(NZB * 2 * 4 * 64 * 4 <= OUT * 2, "the dbias partials fit a staging box");
+  static_assert(CZ % ZU == 0 && (ZH == 1 || ZH == 2), "c_z 64 or a multiple of 128");
 };
 
 __device__ __forceinline__ void arrive_leader_release(uint64_t* bar) {   // release, cluster scope: this thread's prior shared stores first
@@ -622,7 +625,7 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
     const int* __restrict__ ASYM,                 // chain ids [N] (the interchain mask), or nullptr
     int after) {                                  // dbias = sum dz / n (the division after the projection) instead of sum dz
   using C = WDg<CZ>;
-  constexpr int BJ = C::BJ, BI = C::BI, NP = C::NP, NC = C::NC, NCK = C::NCK, NZB = C::NZB, UNIT = C::UNIT, NB = C::NB;
+  constexpr int BJ = C::BJ, BI = C::BI, NP = C::NP, NC = C::NC, NCK = C::NCK, NZB = C::NZB, UNIT = C::UNIT, NB = C::NB, ZU = C::ZU, ZH = C::ZH;
   constexpr int WOS = C::WOS, NWO = C::NWO, OUT = C::OUT, NOUT = C::NOUT, NACC = C::NACC;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -631,7 +634,7 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
   __nv_bfloat16* sOUT = sWO + NWO * WOS;
   uint64_t* bars = reinterpret_cast<uint64_t*>(sOUT + NOUT * OUT);
   uint64_t* dzf = bars;              // [NB] this CTA's unit landed
-  uint64_t* dze = dzf + NB;          // [NB] count 9: the tile's last chunk read it (multicast commit) and the 8 drain warps took dz/n
+  uint64_t* dze = dzf + NB;          // [NB] count 1 + 4 ZH: the tile's last chunk read it (multicast commit) and the drain warps took dz/n
   uint64_t* dzf2 = dze + NB;         // [NB] (leader) count 2: both CTAs' units landed (the forwarders)
   uint64_t* wof = dzf2 + NB;         // [NWO] (leader) both halves of the Wo stage landed
   uint64_t* woe = wof + NWO;         // [NWO] (multicast commit)
@@ -643,7 +646,7 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
   const bool lead_cta = rank == 0;
   const int cl = blockIdx.x >> 1, ncl = gridDim.x >> 1;
   if (tid == 0) {
-    for (int k = 0; k < NB; ++k) { bar_init(dzf + k, 1); bar_init(dze + k, 9); bar_init(dzf2 + k, 2); }
+    for (int k = 0; k < NB; ++k) { bar_init(dzf + k, 1); bar_init(dze + k, 1 + 4 * ZH); bar_init(dzf2 + k, 2); }
     for (int k = 0; k < NWO; ++k) { bar_init(wof + k, 1); bar_init(woe + k, 1); }
     for (int k = 0; k < NACC; ++k) { bar_init(accf + k, 1); bar_init(acce + k, 16); }
     bar_init_fence();
@@ -667,7 +670,7 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
           const int d = u % NB;
           if (u >= NB) wait(dze + d, ((u / NB) - 1) & 1);
           expect_tx(dzf + d, UNIT * 2);
-          for (int h = 0; h < 2; ++h) load_4d(&dzmap, sDZ + d * UNIT + h * NP * 64, dzf + d, 0, j0, zu * 2 + h, i0);
+          for (int h = 0; h < ZH; ++h) load_4d(&dzmap, sDZ + d * UNIT + h * NP * 64, dzf + d, 0, j0, zu * ZH + h, i0);
         }
       }
     }
@@ -691,7 +694,7 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
             if (g >= NWO) wait(woe + w, ((g / NWO) - 1) & 1);
             if (lead_cta) expect_tx(wof + w, 2 * WOS * 2);
             for (int b = 0; b < 2; ++b)
-              load_2d_2sm(&womap, sWO + w * WOS + b * 128 * 64, wof + w, k * NC + rank * (NC / 2) + b * 64, zs * 128);
+              load_2d_2sm(&womap, sWO + w * WOS + b * ZU * 64, wof + w, k * NC + rank * (NC / 2) + b * 64, zs * ZU);
           }
     }
   } else if (warp == 1) {
@@ -714,8 +717,8 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
             tc_fence_after();
             const __nv_bfloat16* wo = sWO + w * WOS;
 #pragma unroll
-            for (int kk = 0; kk < 8; ++kk)
-              mma2_ss(tmem + a * NC, desc_k128(du + (kk >> 2) * NP * 64 + (kk & 3) * 16), desc_mn128(wo + kk * 16 * 64, 128 * 64 * 2), C::IDESC,
+            for (int kk = 0; kk < ZU / 16; ++kk)
+              mma2_ss(tmem + a * NC, desc_k128(du + (kk >> 2) * NP * 64 + (kk & 3) * 16), desc_mn128(wo + kk * 16 * 64, ZU * 64 * 2), C::IDESC,
                       (zs | kk) ? 1u : 0u);
             commit2(woe + w);
             if (k == NCK - 1) commit2(dze + d);  // the tile's last chunk has read this unit (in both CTAs)
@@ -728,6 +731,7 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
     const int q = warp & 3, grp = (warp - 2) >> 2;
     const int p = q * 32 + lane, il = p / BJ, jl = p % BJ;
     const bool leader = (warp == 2 && lane == 0);
+    const bool act = grp < ZH;                // this group takes a 64-z half of each unit (c_z 64: group 0 only)
     int lt = 0, g = 0, ring = 0;              // ring: uses of the staging ring (dz/n units, then dO half-chunks, per tile)
     float2 dbs[NZB];                          // this warp's dbias sums over the CTA's tiles: z = unit zu, half grp, 2 lane, 2 lane + 1
 #pragma unroll
@@ -752,39 +756,45 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
         const int roff = grp * NP * 64 + p * 64;
         const __nv_bfloat16* rp = sDZ + d * UNIT + roff;
         uint4 row[8];
+        if (act) {
 #pragma unroll
-        for (int c8 = 0; c8 < 8; ++c8) row[c8] = *reinterpret_cast<const uint4*>(rp + ((c8 ^ (p & 7)) << 3));
+          for (int c8 = 0; c8 < 8; ++c8) row[c8] = *reinterpret_cast<const uint4*>(rp + ((c8 ^ (p & 7)) << 3));
+        }
         if (leader) bulk_wait_read<NOUT - 1>();  // the ring slot's previous store has read it
         named_sync(1, 256);
-        __nv_bfloat16* sp = sOUT + (ring % NOUT) * OUT;   // the unit's layout: [2 halves][128 pairs][64 z], 128B swizzle
+        __nv_bfloat16* sp = sOUT + (ring % NOUT) * OUT;   // the unit's layout: [ZH halves][128 pairs][64 z], 128B swizzle
         float zv[64];
         const float keep = after ? inv : (same ? 1.f : 0.f);   // dbias: dz (0 for a pair of two chains), or dz/n
+        if (act) {
 #pragma unroll
-        for (int c8 = 0; c8 < 8; ++c8) {
-          uint4 u = row[c8];
-          const uint32_t uw[4] = {u.x, u.y, u.z, u.w};
-          uint32_t ow[4];
+          for (int c8 = 0; c8 < 8; ++c8) {
+            uint4 u = row[c8];
+            const uint32_t uw[4] = {u.x, u.y, u.z, u.w};
+            uint32_t ow[4];
 #pragma unroll
-          for (int k = 0; k < 4; ++k) {
-            const float2 x = bf2f(uw[k]);
-            zv[c8 * 8 + 2 * k] = x.x * keep;
-            zv[c8 * 8 + 2 * k + 1] = x.y * keep;
-            const float2 y = mul2(x, inv2);
-            ow[k] = pack2(y.x, y.y);
+            for (int k = 0; k < 4; ++k) {
+              const float2 x = bf2f(uw[k]);
+              zv[c8 * 8 + 2 * k] = x.x * keep;
+              zv[c8 * 8 + 2 * k + 1] = x.y * keep;
+              const float2 y = mul2(x, inv2);
+              ow[k] = pack2(y.x, y.y);
+            }
+            *reinterpret_cast<uint4*>(sp + roff + ((c8 ^ (p & 7)) << 3)) = make_uint4(ow[0], ow[1], ow[2], ow[3]);
           }
-          *reinterpret_cast<uint4*>(sp + roff + ((c8 ^ (p & 7)) << 3)) = make_uint4(ow[0], ow[1], ow[2], ow[3]);
+          __syncwarp();
+          if (lane == 0) arrive(dze + d);
         }
-        __syncwarp();
-        if (lane == 0) arrive(dze + d);
         fence_proxy_async();
         named_sync(1, 256);
         if (leader) {
-          for (int h = 0; h < 2; ++h) store_4d(&dzpmap, sp + h * NP * 64, 0, j0, zu * 2 + h, i0);
+          for (int h = 0; h < ZH; ++h) store_4d(&dzpmap, sp + h * NP * 64, 0, j0, zu * ZH + h, i0);
           bulk_commit();
         }
-        const float2 cs = warp_colsum64(zv, lane);
-        dbs[zu].x += cs.x;
-        dbs[zu].y += cs.y;
+        if (act) {
+          const float2 cs = warp_colsum64(zv, lane);
+          dbs[zu].x += cs.x;
+          dbs[zu].y += cs.y;
+        }
       }
       for (int k = 0; k < NCK; ++k, ++g) {
         const int a = g % NACC;
@@ -824,16 +834,18 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
     if (leader) bulk_wait_read<0>();
     named_sync(1, 256);
     float* red = reinterpret_cast<float*>(sOUT);                     // [NZB][2 halves][4 warps][64 z]
+    if (act) {
 #pragma unroll
-    for (int zu = 0; zu < NZB; ++zu)
-      *reinterpret_cast<float2*>(red + ((zu * 2 + grp) * 4 + q) * 64 + 2 * lane) = dbs[zu];
+      for (int zu = 0; zu < NZB; ++zu)
+        *reinterpret_cast<float2*>(red + ((zu * 2 + grp) * 4 + q) * 64 + 2 * lane) = dbs[zu];
+    }
     named_sync(1, 256);
-    if (q == 0) {
+    if (q == 0 && act) {
 #pragma unroll 1
       for (int zu = 0; zu < NZB; ++zu) {
         const float* r = red + (zu * 2 + grp) * 4 * 64;
         for (int z = lane; z < 64; z += 32)
-          DBO[(size_t)blockIdx.x * CZ + zu * 128 + grp * 64 + z] = ((r[z] + r[64 + z]) + r[128 + z]) + r[192 + z];
+          DBO[(size_t)blockIdx.x * CZ + zu * ZU + grp * 64 + z] = ((r[z] + r[64 + z]) + r[128 + z]) + r[192 + z];
       }
     }
     if (leader) bulk_wait<0>();
@@ -851,7 +863,10 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
 template <int CZ>
 struct WDw {
   static constexpr int BI = 2, BJ = 32, NP = BI * BJ;
-  static constexpr int NZB = CZ / 128;
+  static constexpr int NZB = CZ >= 128 ? CZ / 128 : 1;
+  static constexpr int ZL = CZ < 128 ? CZ : 128;     // z rows a 128-lane slice holds: c_z 64 (MiniWorld's B200 trunk) keeps M = 128, its A
+                                                     // operand's second 64-z atom the first again (LBO 0), lanes 64-127 a copy never stored
+  static constexpr uint32_t A_LBO = CZ >= 128 ? NP * 64 * 2 : 0;
   static constexpr int NPART = NZB <= 2 ? 4 : 8;
   static constexpr int NHALF = NCH / NPART;          // 256 / 128 columns
   static constexpr int NCB = NHALF / 32;
@@ -872,7 +887,7 @@ __global__ void __launch_bounds__(192, 1) opm_wdwo_sm100(
     int NI, int NJ, int ntiles, int nsplit,
     const __grid_constant__ CUtensorMap amap,     // dz/n as (64 z, NJ j, NI i, CZ / 64), box (64, BJ, BI, CZ / 64), 128B swizzle
     const __grid_constant__ CUtensorMap bmap,     // O    as (32 e, NJ j, NI i, 32 c), box (32, BJ, BI, NCB), 64B swizzle
-    const __grid_constant__ CUtensorMap pmap) {   // the partials [nsplit * CZ][NCH] fp32, box (32, 128), 128B swizzle
+    const __grid_constant__ CUtensorMap pmap) {   // the partials [nsplit * CZ][NCH] fp32, box (32, ZL), 128B swizzle
   using C = WDw<CZ>;
   constexpr int BI = C::BI, BJ = C::BJ, NP = C::NP, NZB = C::NZB, NHALF = C::NHALF, NCB = C::NCB, AT = C::AT, STAGE = C::STAGE;
   constexpr int NST = C::NST, MN = C::MN;
@@ -924,7 +939,7 @@ __global__ void __launch_bounds__(192, 1) opm_wdwo_sm100(
           for (int zb = 0; zb < NZB; ++zb)
 #pragma unroll
             for (int h = 0; h < NHALF / MN; ++h)
-              mma_ss(tmem + zb * NHALF + h * MN, desc_mn128(a + zb * 2 * NP * 64 + ks * 16 * 64, NP * 64 * 2),
+              mma_ss(tmem + zb * NHALF + h * MN, desc_mn128(a + zb * 2 * NP * 64 + ks * 16 * 64, C::A_LBO),
                      sdesc(sa(b + h * (MN / 32) * NP * 32 + ks * 16 * 32), NP * 32 * 2, 512, 4), C::IDESC, (g | ks) ? 1u : 0u);
         mma_commit(empty + s);
       }
@@ -954,7 +969,7 @@ __global__ void __launch_bounds__(192, 1) opm_wdwo_sm100(
           fence_proxy_async();
           named_sync(1, 128);
           if (leader) {
-            for (int bb = 0; bb < 4; ++bb) store_2d(&pmap, stg + bb * 128 * 32, part * NHALF + c0 - 96 + bb * 32, split * CZ + zb * 128);
+            for (int bb = 0; bb < 4; ++bb) store_2d(&pmap, stg + bb * 128 * 32, part * NHALF + c0 - 96 + bb * 32, split * CZ + zb * C::ZL);
             bulk_commit();
           }
         }
@@ -2177,7 +2192,7 @@ static std::vector<torch::Tensor> dgrad_launch(torch::Tensor& dz, torch::Tensor&
   const uint64_t M = (uint64_t)nj * CH;
   CUtensorMap dzm = make_map<4>(dz.data_ptr(), {64, (uint64_t)nj, (uint64_t)(CZ / 64), (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ},
                                 {64, (uint32_t)C::BJ, 1, (uint32_t)C::BI}, CU_TENSOR_MAP_SWIZZLE_128B, "dz");
-  CUtensorMap wom = make_map<2>(wo.data_ptr(), {(uint64_t)NCH, (uint64_t)CZ}, {(uint64_t)NCH}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "Wo");
+  CUtensorMap wom = make_map<2>(wo.data_ptr(), {(uint64_t)NCH, (uint64_t)CZ}, {(uint64_t)NCH}, {64, (uint32_t)C::ZU}, CU_TENSOR_MAP_SWIZZLE_128B, "Wo");
   CUtensorMap dom = make_map<4>(dO.data_ptr(), {32, (uint64_t)nj, 32, (uint64_t)ni}, {32, M, 32 * M}, {32, (uint32_t)C::BJ, 4, (uint32_t)C::BI},
                                 CU_TENSOR_MAP_SWIZZLE_64B, "dO");
   CUtensorMap dzpm = make_map<4>(dzp.data_ptr(), {64, (uint64_t)nj, (uint64_t)(CZ / 64), (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ},
@@ -2188,7 +2203,7 @@ static std::vector<torch::Tensor> dgrad_launch(torch::Tensor& dz, torch::Tensor&
   return {dO, dzp, colsum(dbo_part, grad_bf16 ? torch::kBFloat16 : torch::kFloat32)};
 }
 
-// dz [ni, nj, CZ] bf16 (CZ 128 / 256 / 384 / 512), norm fp32 [ni, nj], wo bf16 [CZ, 1024] -> [dO [ni*32, nj*32], dz/n [ni, nj, CZ], dbias [CZ]]
+// dz [ni, nj, CZ] bf16 (CZ 64 / 128 / 256 / 384 / 512), norm fp32 [ni, nj], wo bf16 [CZ, 1024] -> [dO [ni*32, nj*32], dz/n [ni, nj, CZ], dbias [CZ]]
 // (dbias = sum dz, or sum dz/n with `after`)
 std::vector<torch::Tensor> opm_wdgrad(torch::Tensor dz, torch::Tensor norm, torch::Tensor wo, int64_t ni, int64_t nj, int64_t grad_bf16,
                                       c10::optional<torch::Tensor> asym, int64_t after) {
@@ -2197,10 +2212,11 @@ std::vector<torch::Tensor> opm_wdgrad(torch::Tensor dz, torch::Tensor norm, torc
   TORCH_CHECK(dz.is_cuda() && dz.scalar_type() == torch::kBFloat16 && dz.is_contiguous() && dz.numel() == ni * nj * CZ, "dz: contiguous bf16 [ni, nj, c_z]");
   TORCH_CHECK(norm.scalar_type() == torch::kFloat32 && norm.is_contiguous() && norm.numel() == ni * nj, "norm: fp32 [ni, nj] mask counts");
   const int* ap = asym_ptr(asym, std::max(ni, nj));
+  if (CZ == 64) return dgrad_launch<64>(dz, norm, wo, ni, nj, grad_bf16, ap, (int)after);
   if (CZ == 128) return dgrad_launch<128>(dz, norm, wo, ni, nj, grad_bf16, ap, (int)after);
   if (CZ == 256) return dgrad_launch<256>(dz, norm, wo, ni, nj, grad_bf16, ap, (int)after);
   if (CZ == 512) return dgrad_launch<512>(dz, norm, wo, ni, nj, grad_bf16, ap, (int)after);
-  TORCH_CHECK(CZ == 384, "c_z 128, 256, 384 or 512");
+  TORCH_CHECK(CZ == 384, "c_z 64, 128, 256, 384 or 512");
   return dgrad_launch<384>(dz, norm, wo, ni, nj, grad_bf16, ap, (int)after);
 }
 
@@ -2217,7 +2233,7 @@ static torch::Tensor dwo_launch(torch::Tensor& dzp, torch::Tensor& O, int64_t ni
                                {64, (uint32_t)C::BJ, (uint32_t)C::BI, (uint32_t)(CZ / 64)}, CU_TENSOR_MAP_SWIZZLE_128B, "dzp");
   CUtensorMap bm = make_map<4>(O.data_ptr(), {32, (uint64_t)nj, (uint64_t)ni, 32}, {32, 32 * M, M}, {32, (uint32_t)C::BJ, (uint32_t)C::BI, (uint32_t)C::NCB},
                                CU_TENSOR_MAP_SWIZZLE_64B, "O");
-  CUtensorMap pm = make_map<2>(part.data_ptr(), {(uint64_t)NCH, (uint64_t)nsplit * CZ}, {(uint64_t)NCH}, {32, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "part",
+  CUtensorMap pm = make_map<2>(part.data_ptr(), {(uint64_t)NCH, (uint64_t)nsplit * CZ}, {(uint64_t)NCH}, {32, (uint32_t)C::ZL}, CU_TENSOR_MAP_SWIZZLE_128B, "part",
                                CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_wdwo_sm100<CZ>, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM)); attr = true; }
@@ -2232,9 +2248,10 @@ torch::Tensor opm_wdwo(torch::Tensor dzp, torch::Tensor O, int64_t ni, int64_t n
   TORCH_CHECK(dzp.is_contiguous() && dzp.scalar_type() == torch::kBFloat16 && dzp.dim() == 3, "dzp: bf16 [ni, nj, c_z]");
   TORCH_CHECK(O.is_contiguous() && O.scalar_type() == torch::kBFloat16 && O.size(0) == ni * CH && O.size(1) == nj * CH, "O: bf16 [ni*32, nj*32]");
   const long CZ = dzp.size(2);
+  if (CZ == 64) return dwo_launch<64>(dzp, O, ni, nj, grad_bf16, ctas);   // MiniWorld's B200 trunk (c_z 128 is opm_sm100.cu's opm_dwo)
   if (CZ == 256) return dwo_launch<256>(dzp, O, ni, nj, grad_bf16, ctas);
   if (CZ == 512) return dwo_launch<512>(dzp, O, ni, nj, grad_bf16, ctas);
-  TORCH_CHECK(CZ == 384, "c_z 256, 384 or 512");
+  TORCH_CHECK(CZ == 384, "c_z 64, 256, 384 or 512");
   return dwo_launch<384>(dzp, O, ni, nj, grad_bf16, ctas);
 }
 

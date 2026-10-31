@@ -18,6 +18,29 @@ IntelliFold-v2's (d_msa 256, d_pair 512), the interchain mask (`mask_interchain`
 of two chains, the dgrad its gradient) and a batch of MSA stacks (one stack at a time), training and inference, every width and Chai-1;
 nothing of the module falls to the PyTorch statements on B200 any more (`kernels/outer_product_mean/composed.py` serves only H100).
 
+## MiniWorld's B200 trunk width: d_pair 64 (2026-10-31)
+
+MiniWorld trains its B200 trunk with a 64-wide pair. Before this the B200 `miniworld` routing ran the PyTorch statements for it
+(`SM100_D_PAIR` had no 64), slower than the portable Triton kernels. Now the same stages as d_pair 128: `opm_prologue` (d_msa 64),
+cuBLAS for the grouped outer product, `opm_epilogue` built at N = 64 (one 64-column output block a tile; the smaller Wo chunk frees
+shared memory for an 8-deep O ring), and in training the CTA-pair dgrad of `opm_wide_sm100.cu` with one 64-wide K unit a chunk (one
+drain group takes the unit's dz / n) and its c_z-sliced dWo with the one 64-z slice kept at M = 128 (the A operand's second 64-z atom is
+the first again, LBO 0: TMEM lanes 64-127 hold a copy that is never stored). Other d_msa (128 / 256) and RoseTTAFold3's biases at
+d_pair 64 take the wide prologue and the same epilogue. ptxas: epilogue<64> 109 registers, no spill; wdgrad<64> 168 registers, 8 bytes
+of spill; wdwo<64> 85 registers.
+
+Ladder (`benchmarks/runners/ladder.py`, group `mw_opm_p64`, S1024, bf16-mixed, CUDA graph, us; GPU 5 of node 2):
+
+| mode | L | CUDA before (PyTorch statements) | CUDA now | Triton | compiled PyTorch |
+|---|---|---|---|---|---|
+| inference | 384 | 673.8 | 303.1 | 329.8 | 440.5 |
+| inference | 768 | 2509.8 | 1129.6 | 1224.5 | 1618.0 |
+| training | 384 | 1305.5 | 944.0 | 1160.2 | 1290.9 |
+| training | 768 | 4561.6 | 3501.0 | 4193.2 | 4538.1 |
+
+Tests: `tests/gpu/sm100/test_opm_wide_b200_gpu.py` (`mw_pair64`, `mw_pair64_after`, `w128_64_bias`: inference / training against the
+fp64 statements, interchain + batch, deterministic + CUDA graph).
+
 ## FoldForge widths, RoseTTAFold3, Chai-1 (`opm_wide_sm100.cu`, 2026-10-29)
 
 One extension (`opm_train._ext_wide`), the stages of `opm_sm100.cu`; MiniWorld's (64, 128) without biases keeps `opm_sm100.cu`, except the
