@@ -1,0 +1,985 @@
+{
+  "build_rev": 1,
+  "config_space": [
+    "((('BJ', 16),), 2, 1)",
+    "((('BJ', 16),), 4, 1)",
+    "((('BJ', 16),), 4, 2)",
+    "((('BJ', 16),), 8, 1)",
+    "((('BJ', 32),), 4, 1)",
+    "((('BJ', 32),), 8, 1)",
+    "((('BJ', 4),), 4, 1)",
+    "((('BJ', 64),), 4, 1)",
+    "((('BJ', 8),), 2, 1)",
+    "((('BJ', 8),), 4, 1)"
+  ],
+  "config_space_hash": "571b8e80f45c",
+  "driver_id_scheme": 2,
+  "driver_identity": "2420463adae3",
+  "entries": {
+    "bfloat16+float32|P=512,shape_key=17592320295393": [
+      {
+        "kwargs": {
+          "BJ": 8
+        },
+        "ms": 0.03276799991726875,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 8
+        },
+        "ms": 0.034591998904943466,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.03478400036692619,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.03481600061058998,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.03481600061058998,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|P=512,shape_key=26388413317601": [
+      {
+        "kwargs": {
+          "BJ": 8
+        },
+        "ms": 0.06387200206518173,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 8
+        },
+        "ms": 0.06543999910354614,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.0655359998345375,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 32
+        },
+        "ms": 0.06572800129652023,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.06758400052785873,
+        "num_stages": 1,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|P=512,shape_key=35184506339809": [
+      {
+        "kwargs": {
+          "BJ": 8
+        },
+        "ms": 0.10841599851846695,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BJ": 8
+        },
+        "ms": 0.1085439994931221,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 32
+        },
+        "ms": 0.1085439994931221,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.10864000022411346,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.11059200018644333,
+        "num_stages": 1,
+        "num_warps": 2
+      }
+    ],
+    "bfloat16+float32|P=512,shape_key=43980599362017": [
+      {
+        "kwargs": {
+          "BJ": 32
+        },
+        "ms": 0.16383999586105347,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 8
+        },
+        "ms": 0.1658879965543747,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.16595199704170227,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BJ": 8
+        },
+        "ms": 0.16793599724769592,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.16793599724769592,
+        "num_stages": 1,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|P=512,shape_key=52776692384225": [
+      {
+        "kwargs": {
+          "BJ": 32
+        },
+        "ms": 0.22937600314617157,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.23545600473880768,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BJ": 8
+        },
+        "ms": 0.23552000522613525,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.23556800186634064,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 8
+        },
+        "ms": 0.2377920001745224,
+        "num_stages": 1,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|P=512,shape_key=8796227273185": [
+      {
+        "kwargs": {
+          "BJ": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.014431999996304512,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 4
+        },
+        "ms": 0.014495999552309513,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 16
+        },
+        "ms": 0.016383999958634377,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 8
+        },
+        "ms": 0.016383999958634377,
+        "num_stages": 1,
+        "num_warps": 2
+      }
+    ]
+  },
+  "entry_grids": {
+    "bfloat16+float32|P=512,shape_key=17592320295393": [
+      "571b8e80f45c"
+    ],
+    "bfloat16+float32|P=512,shape_key=26388413317601": [
+      "571b8e80f45c"
+    ],
+    "bfloat16+float32|P=512,shape_key=35184506339809": [
+      "571b8e80f45c"
+    ],
+    "bfloat16+float32|P=512,shape_key=43980599362017": [
+      "571b8e80f45c"
+    ],
+    "bfloat16+float32|P=512,shape_key=52776692384225": [
+      "571b8e80f45c"
+    ],
+    "bfloat16+float32|P=512,shape_key=8796227273185": [
+      "571b8e80f45c"
+    ]
+  },
+  "env_identity": "7efec5ac14d2",
+  "gpu": "NVIDIA B200 (sm100)",
+  "grids": {
+    "571b8e80f45c": [
+      "((('BJ', 16),), 2, 1)",
+      "((('BJ', 16),), 4, 1)",
+      "((('BJ', 16),), 4, 2)",
+      "((('BJ', 16),), 8, 1)",
+      "((('BJ', 32),), 4, 1)",
+      "((('BJ', 32),), 8, 1)",
+      "((('BJ', 4),), 4, 1)",
+      "((('BJ', 64),), 4, 1)",
+      "((('BJ', 8),), 2, 1)",
+      "((('BJ', 8),), 4, 1)"
+    ]
+  },
+  "key_scheme": 3,
+  "measurements": {
+    "bfloat16+float32|P=512,shape_key=17592320295393": {
+      "043ea08ca31f5c8c1787": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 8
+            },
+            "ms": 0.03276799991726875,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 8
+            },
+            "ms": 0.034591998904943466,
+            "num_stages": 1,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.03478400036692619,
+            "num_stages": 1,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.03481600061058998,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.03481600061058998,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 16),), 2, 1)",
+          "((('BJ', 16),), 4, 1)",
+          "((('BJ', 16),), 4, 2)",
+          "((('BJ', 16),), 8, 1)",
+          "((('BJ', 32),), 4, 1)",
+          "((('BJ', 32),), 8, 1)",
+          "((('BJ', 4),), 4, 1)",
+          "((('BJ', 64),), 4, 1)",
+          "((('BJ', 8),), 2, 1)",
+          "((('BJ', 8),), 4, 1)"
+        ],
+        "workload": {
+          "arguments": {
+            "BET": {
+              "dtype": "torch.float32",
+              "shape": [
+                512
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "GAM": {
+              "dtype": "torch.float32",
+              "shape": [
+                512
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "K": 8,
+            "L": 256,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8,
+                2048,
+                2048
+              ],
+              "stride": [
+                4194304,
+                2048,
+                1
+              ]
+            },
+            "P": 512,
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                65536,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "eps": 0.1,
+            "shape_key": 17592320295393
+          },
+          "implementation": "b40d0ee6970c732f677b9cc88ec140010e46d79892f0267805c26f1233ace36e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|P=512,shape_key=26388413317601": {
+      "53f9ad22aecf20034a6b": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 8
+            },
+            "ms": 0.06387200206518173,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 8
+            },
+            "ms": 0.06543999910354614,
+            "num_stages": 1,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.0655359998345375,
+            "num_stages": 1,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 32
+            },
+            "ms": 0.06572800129652023,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.06758400052785873,
+            "num_stages": 1,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 16),), 2, 1)",
+          "((('BJ', 16),), 4, 1)",
+          "((('BJ', 16),), 4, 2)",
+          "((('BJ', 16),), 8, 1)",
+          "((('BJ', 32),), 4, 1)",
+          "((('BJ', 32),), 8, 1)",
+          "((('BJ', 4),), 4, 1)",
+          "((('BJ', 64),), 4, 1)",
+          "((('BJ', 8),), 2, 1)",
+          "((('BJ', 8),), 4, 1)"
+        ],
+        "workload": {
+          "arguments": {
+            "BET": {
+              "dtype": "torch.float32",
+              "shape": [
+                512
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "GAM": {
+              "dtype": "torch.float32",
+              "shape": [
+                512
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "K": 8,
+            "L": 384,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8,
+                3072,
+                3072
+              ],
+              "stride": [
+                9437184,
+                3072,
+                1
+              ]
+            },
+            "P": 512,
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "eps": 0.1,
+            "shape_key": 26388413317601
+          },
+          "implementation": "b40d0ee6970c732f677b9cc88ec140010e46d79892f0267805c26f1233ace36e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|P=512,shape_key=35184506339809": {
+      "777befa23f072bc45aea": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 8
+            },
+            "ms": 0.10841599851846695,
+            "num_stages": 1,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BJ": 8
+            },
+            "ms": 0.1085439994931221,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 32
+            },
+            "ms": 0.1085439994931221,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.10864000022411346,
+            "num_stages": 1,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.11059200018644333,
+            "num_stages": 1,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BJ', 16),), 2, 1)",
+          "((('BJ', 16),), 4, 1)",
+          "((('BJ', 16),), 4, 2)",
+          "((('BJ', 16),), 8, 1)",
+          "((('BJ', 32),), 4, 1)",
+          "((('BJ', 32),), 8, 1)",
+          "((('BJ', 4),), 4, 1)",
+          "((('BJ', 64),), 4, 1)",
+          "((('BJ', 8),), 2, 1)",
+          "((('BJ', 8),), 4, 1)"
+        ],
+        "workload": {
+          "arguments": {
+            "BET": {
+              "dtype": "torch.float32",
+              "shape": [
+                512
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "GAM": {
+              "dtype": "torch.float32",
+              "shape": [
+                512
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "K": 8,
+            "L": 512,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8,
+                4096,
+                4096
+              ],
+              "stride": [
+                16777216,
+                4096,
+                1
+              ]
+            },
+            "P": 512,
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                262144,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "eps": 0.1,
+            "shape_key": 35184506339809
+          },
+          "implementation": "b40d0ee6970c732f677b9cc88ec140010e46d79892f0267805c26f1233ace36e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|P=512,shape_key=43980599362017": {
+      "ad61bc3b73c42201a60d": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 32
+            },
+            "ms": 0.16383999586105347,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 8
+            },
+            "ms": 0.1658879965543747,
+            "num_stages": 1,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.16595199704170227,
+            "num_stages": 1,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BJ": 8
+            },
+            "ms": 0.16793599724769592,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.16793599724769592,
+            "num_stages": 1,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('BJ', 16),), 2, 1)",
+          "((('BJ', 16),), 4, 1)",
+          "((('BJ', 16),), 4, 2)",
+          "((('BJ', 16),), 8, 1)",
+          "((('BJ', 32),), 4, 1)",
+          "((('BJ', 32),), 8, 1)",
+          "((('BJ', 4),), 4, 1)",
+          "((('BJ', 64),), 4, 1)",
+          "((('BJ', 8),), 2, 1)",
+          "((('BJ', 8),), 4, 1)"
+        ],
+        "workload": {
+          "arguments": {
+            "BET": {
+              "dtype": "torch.float32",
+              "shape": [
+                512
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "GAM": {
+              "dtype": "torch.float32",
+              "shape": [
+                512
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "K": 8,
+            "L": 640,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8,
+                5120,
+                5120
+              ],
+              "stride": [
+                26214400,
+                5120,
+                1
+              ]
+            },
+            "P": 512,
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                409600,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "eps": 0.1,
+            "shape_key": 43980599362017
+          },
+          "implementation": "b40d0ee6970c732f677b9cc88ec140010e46d79892f0267805c26f1233ace36e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|P=512,shape_key=52776692384225": {
+      "22dc263f714e998ecbc0": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 32
+            },
+            "ms": 0.22937600314617157,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.23545600473880768,
+            "num_stages": 1,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BJ": 8
+            },
+            "ms": 0.23552000522613525,
+            "num_stages": 1,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.23556800186634064,
+            "num_stages": 1,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 8
+            },
+            "ms": 0.2377920001745224,
+            "num_stages": 1,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 16),), 2, 1)",
+          "((('BJ', 16),), 4, 1)",
+          "((('BJ', 16),), 4, 2)",
+          "((('BJ', 16),), 8, 1)",
+          "((('BJ', 32),), 4, 1)",
+          "((('BJ', 32),), 8, 1)",
+          "((('BJ', 4),), 4, 1)",
+          "((('BJ', 64),), 4, 1)",
+          "((('BJ', 8),), 2, 1)",
+          "((('BJ', 8),), 4, 1)"
+        ],
+        "workload": {
+          "arguments": {
+            "BET": {
+              "dtype": "torch.float32",
+              "shape": [
+                512
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "GAM": {
+              "dtype": "torch.float32",
+              "shape": [
+                512
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "K": 8,
+            "L": 768,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8,
+                6144,
+                6144
+              ],
+              "stride": [
+                37748736,
+                6144,
+                1
+              ]
+            },
+            "P": 512,
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "eps": 0.1,
+            "shape_key": 52776692384225
+          },
+          "implementation": "b40d0ee6970c732f677b9cc88ec140010e46d79892f0267805c26f1233ace36e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|P=512,shape_key=8796227273185": {
+      "1c2ea821bf26ea338485": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.014431999996304512,
+            "num_stages": 1,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 4
+            },
+            "ms": 0.014495999552309513,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 16
+            },
+            "ms": 0.016383999958634377,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 8
+            },
+            "ms": 0.016383999958634377,
+            "num_stages": 1,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BJ', 16),), 2, 1)",
+          "((('BJ', 16),), 4, 1)",
+          "((('BJ', 16),), 4, 2)",
+          "((('BJ', 16),), 8, 1)",
+          "((('BJ', 32),), 4, 1)",
+          "((('BJ', 32),), 8, 1)",
+          "((('BJ', 4),), 4, 1)",
+          "((('BJ', 64),), 4, 1)",
+          "((('BJ', 8),), 2, 1)",
+          "((('BJ', 8),), 4, 1)"
+        ],
+        "workload": {
+          "arguments": {
+            "BET": {
+              "dtype": "torch.float32",
+              "shape": [
+                512
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "GAM": {
+              "dtype": "torch.float32",
+              "shape": [
+                512
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "K": 8,
+            "L": 128,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8,
+                1024,
+                1024
+              ],
+              "stride": [
+                1048576,
+                1024,
+                1
+              ]
+            },
+            "P": 512,
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16384,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "eps": 0.1,
+            "shape_key": 8796227273185
+          },
+          "implementation": "b40d0ee6970c732f677b9cc88ec140010e46d79892f0267805c26f1233ace36e",
+          "scheme": 1
+        }
+      }
+    }
+  },
+  "op": "outer_product_mean_epilogue_ln_triton",
+  "op_identity": "76841f5588d1",
+  "provenance": {
+    "built_utc": "2026-10-30T10:00:56+00:00",
+    "torch": "2.13.0+cu129",
+    "triton": "3.7.1"
+  },
+  "schema": 1
+}

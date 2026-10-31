@@ -1,0 +1,1093 @@
+{
+  "build_rev": 1,
+  "config_space": [
+    "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 256), ('TILES', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('TILES', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 1)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 1, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 16, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 32, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 5)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 6)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 8)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 4, 3)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 8, 3)"
+  ],
+  "config_space_hash": "491f9b98724f",
+  "driver_id_scheme": 2,
+  "driver_identity": "089c7119fad5",
+  "entries": {
+    "bfloat16|DROPOUT=1,shape_key=147456": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "TILES": 1
+        },
+        "ms": 0.159743994474411,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 4
+        },
+        "ms": 0.16383999586105347,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 2
+        },
+        "ms": 0.16582399606704712,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "TILES": 4
+        },
+        "ms": 0.17004799842834473,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 2
+        },
+        "ms": 0.17209599912166595,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|DROPOUT=1,shape_key=16384": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "TILES": 1
+        },
+        "ms": 0.04918399825692177,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 2
+        },
+        "ms": 0.055296000093221664,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "TILES": 2
+        },
+        "ms": 0.05734400078654289,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 2
+        },
+        "ms": 0.05734400078654289,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 2
+        },
+        "ms": 0.05939200147986412,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|DROPOUT=1,shape_key=262144": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 4
+        },
+        "ms": 0.2969599962234497,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "TILES": 1
+        },
+        "ms": 0.29900801181793213,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 2
+        },
+        "ms": 0.30108800530433655,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64,
+          "TILES": 4
+        },
+        "ms": 0.3134079873561859,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 4
+        },
+        "ms": 0.3184640109539032,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|DROPOUT=1,shape_key=65536": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "TILES": 1
+        },
+        "ms": 0.08806400001049042,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 2
+        },
+        "ms": 0.0902400016784668,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 2
+        },
+        "ms": 0.09424000233411789,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 4
+        },
+        "ms": 0.09625600278377533,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "TILES": 2
+        },
+        "ms": 0.10035199671983719,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ]
+  },
+  "entry_grids": {
+    "bfloat16|DROPOUT=1,shape_key=147456": [
+      "491f9b98724f"
+    ],
+    "bfloat16|DROPOUT=1,shape_key=16384": [
+      "491f9b98724f"
+    ],
+    "bfloat16|DROPOUT=1,shape_key=262144": [
+      "491f9b98724f"
+    ],
+    "bfloat16|DROPOUT=1,shape_key=65536": [
+      "491f9b98724f"
+    ]
+  },
+  "env_identity": "7efec5ac14d2",
+  "gpu": "NVIDIA B200 (sm100)",
+  "grids": {
+    "491f9b98724f": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 4, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 8, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 256), ('TILES', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('TILES', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 1)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 4, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 8, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 1, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 16, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 2, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 32, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 1)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 4)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 5)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 6)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 8)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 8, 3)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 4, 2)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 4, 3)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 8, 2)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 4, 3)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 8, 3)"
+    ]
+  },
+  "key_scheme": 3,
+  "measurements": {
+    "bfloat16|DROPOUT=1,shape_key=147456": {
+      "c5a198276a2f1de6b04d": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "TILES": 1
+            },
+            "ms": 0.159743994474411,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 4
+            },
+            "ms": 0.16383999586105347,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 2
+            },
+            "ms": 0.16582399606704712,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 128,
+              "BLOCK_M1": 64,
+              "TILES": 4
+            },
+            "ms": 0.17004799842834473,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 2
+            },
+            "ms": 0.17209599912166595,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 8, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 256), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 8, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 1, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 16, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 32, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 5)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 6)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 8)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 8, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 4, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 8, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 4, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "DROPOUT": true,
+            "WIDTH": 128,
+            "dropout_scale": 1.1111111111111112,
+            "edge_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                48,
+                128
+              ],
+              "stride": [
+                25165824,
+                6144,
+                128,
+                1
+              ]
+            },
+            "eps": 1e-05,
+            "hidden_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                48,
+                128
+              ],
+              "stride": [
+                25165824,
+                6144,
+                128,
+                1
+              ]
+            },
+            "keep_probability": 0.9,
+            "norm_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "norm_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                48,
+                128
+              ],
+              "stride": [
+                25165824,
+                6144,
+                128,
+                1
+              ]
+            },
+            "output_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "output_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "rows": 196608,
+            "seed_ptr": {
+              "dtype": "torch.int64",
+              "shape": [
+                1
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "shape_key": 147456
+          },
+          "implementation": "4c8a44c7b74c91871d13c67a24795bd298b7f50c6813681f4fa0b566dbe1d112",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|DROPOUT=1,shape_key=16384": {
+      "6e78b1904b3e445c2564": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "TILES": 1
+            },
+            "ms": 0.04918399825692177,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 2
+            },
+            "ms": 0.055296000093221664,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "TILES": 2
+            },
+            "ms": 0.05734400078654289,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 2
+            },
+            "ms": 0.05734400078654289,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 2
+            },
+            "ms": 0.05939200147986412,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 8, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 256), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 8, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 1, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 16, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 32, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 5)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 6)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 8)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 8, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 4, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 8, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 4, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "DROPOUT": true,
+            "WIDTH": 128,
+            "dropout_scale": 1.1111111111111112,
+            "edge_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                48,
+                128
+              ],
+              "stride": [
+                6291456,
+                6144,
+                128,
+                1
+              ]
+            },
+            "eps": 1e-05,
+            "hidden_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                48,
+                128
+              ],
+              "stride": [
+                6291456,
+                6144,
+                128,
+                1
+              ]
+            },
+            "keep_probability": 0.9,
+            "norm_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "norm_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                48,
+                128
+              ],
+              "stride": [
+                6291456,
+                6144,
+                128,
+                1
+              ]
+            },
+            "output_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "output_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "rows": 49152,
+            "seed_ptr": {
+              "dtype": "torch.int64",
+              "shape": [
+                1
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "shape_key": 16384
+          },
+          "implementation": "4c8a44c7b74c91871d13c67a24795bd298b7f50c6813681f4fa0b566dbe1d112",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|DROPOUT=1,shape_key=262144": {
+      "a29d6d918429fa78e961": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 4
+            },
+            "ms": 0.2969599962234497,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "TILES": 1
+            },
+            "ms": 0.29900801181793213,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 2
+            },
+            "ms": 0.30108800530433655,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 128,
+              "BLOCK_M1": 64,
+              "TILES": 4
+            },
+            "ms": 0.3134079873561859,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 4
+            },
+            "ms": 0.3184640109539032,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 8, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 256), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 8, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 1, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 16, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 32, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 5)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 6)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 8)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 8, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 4, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 8, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 4, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "DROPOUT": true,
+            "WIDTH": 128,
+            "dropout_scale": 1.1111111111111112,
+            "edge_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                48,
+                128
+              ],
+              "stride": [
+                50331648,
+                6144,
+                128,
+                1
+              ]
+            },
+            "eps": 1e-05,
+            "hidden_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                48,
+                128
+              ],
+              "stride": [
+                50331648,
+                6144,
+                128,
+                1
+              ]
+            },
+            "keep_probability": 0.9,
+            "norm_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "norm_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                48,
+                128
+              ],
+              "stride": [
+                50331648,
+                6144,
+                128,
+                1
+              ]
+            },
+            "output_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "output_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "rows": 393216,
+            "seed_ptr": {
+              "dtype": "torch.int64",
+              "shape": [
+                1
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "shape_key": 262144
+          },
+          "implementation": "4c8a44c7b74c91871d13c67a24795bd298b7f50c6813681f4fa0b566dbe1d112",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|DROPOUT=1,shape_key=65536": {
+      "10aaf6b2380b074622f4": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "TILES": 1
+            },
+            "ms": 0.08806400001049042,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 2
+            },
+            "ms": 0.0902400016784668,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 2
+            },
+            "ms": 0.09424000233411789,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 4
+            },
+            "ms": 0.09625600278377533,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "TILES": 2
+            },
+            "ms": 0.10035199671983719,
+            "num_stages": 3,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 128), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('TILES', 4)), 8, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 256), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 8, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 1, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 16, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 32, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 5)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 6)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 4, 8)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('TILES', 4)), 8, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 4, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 8, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 4, 3)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('TILES', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "DROPOUT": true,
+            "WIDTH": 128,
+            "dropout_scale": 1.1111111111111112,
+            "edge_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                48,
+                128
+              ],
+              "stride": [
+                12582912,
+                6144,
+                128,
+                1
+              ]
+            },
+            "eps": 1e-05,
+            "hidden_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                48,
+                128
+              ],
+              "stride": [
+                12582912,
+                6144,
+                128,
+                1
+              ]
+            },
+            "keep_probability": 0.9,
+            "norm_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "norm_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                48,
+                128
+              ],
+              "stride": [
+                12582912,
+                6144,
+                128,
+                1
+              ]
+            },
+            "output_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "output_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "rows": 98304,
+            "seed_ptr": {
+              "dtype": "torch.int64",
+              "shape": [
+                1
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "shape_key": 65536
+          },
+          "implementation": "4c8a44c7b74c91871d13c67a24795bd298b7f50c6813681f4fa0b566dbe1d112",
+          "scheme": 1
+        }
+      }
+    }
+  },
+  "op": "mpnn_edge_tail_fwd_gemm_layernorm_recompute_triton",
+  "op_identity": "f971f1b8c025",
+  "provenance": {
+    "built_utc": "2026-10-30T10:00:50+00:00",
+    "torch": "2.13.0+cu129",
+    "triton": "3.7.1"
+  },
+  "schema": 1
+}

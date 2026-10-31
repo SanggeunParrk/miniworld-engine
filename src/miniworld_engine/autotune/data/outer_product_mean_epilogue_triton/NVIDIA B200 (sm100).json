@@ -1,0 +1,5677 @@
+{
+  "build_rev": 1,
+  "config_space": [
+    "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+    "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+    "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+    "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+    "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+    "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+    "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+    "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+    "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+    "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+    "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+    "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+    "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+    "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 256), ('TI', 4)), 4, 2)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+    "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+  ],
+  "config_space_hash": "8dc7e92824e3",
+  "driver_id_scheme": 2,
+  "driver_identity": "808b62192cc6",
+  "entries": {
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=17592723181310": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.046911999583244324,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 2
+        },
+        "ms": 0.04710400104522705,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.04713600128889084,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.04755200073122978,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 16,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.051263999193906784,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=17592723443454": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.053247999399900436,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.06143999844789505,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.0634239986538887,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.06963200122117996,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.07782399654388428,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=17592723967742": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.09414400160312653,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.11264000087976456,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.11459200084209442,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.12495999783277512,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.1311040073633194,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=17592724492030": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.13523200154304504,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.16383999586105347,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.16793599724769592,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.1884160041809082,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.1985280066728592,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=26388816203518": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 2
+        },
+        "ms": 0.08195199817419052,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.08195199817419052,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.08204799890518188,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.08399999886751175,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 16,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.09212800115346909,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=26388816465662": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.09625600278377533,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.11059200018644333,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.1189119964838028,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.1250240057706833,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.14950400590896606,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=26388816989950": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.17824000120162964,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.20694400370121002,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.22944000363349915,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.23772799968719482,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.2845120131969452,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=26388817514238": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.26425600051879883,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.31142398715019226,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.34409600496292114,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.359391987323761,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.4177919924259186,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=35184909225726": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 2
+        },
+        "ms": 0.13315199315547943,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.13315199315547943,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.1372160017490387,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.14220799505710602,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 16,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.14550399780273438,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=35184909487870": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.15769599378108978,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.1844799965620041,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.21107199788093567,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.21916800737380981,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.24988800287246704,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=35184910012158": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.30291199684143066,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.36032000184059143,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.39932799339294434,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.40966400504112244,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.4843200147151947,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=35184910536446": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.44859200716018677,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.5386239886283875,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.6144000291824341,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.6144319772720337,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.7210559844970703,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=43981002247934": [
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.19871999323368073,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 2
+        },
+        "ms": 0.1995840072631836,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.20483200252056122,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.20892800390720367,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 16,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.21507200598716736,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=43981002510078": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.2396160066127777,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.27856001257896423,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.32153600454330444,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.32972800731658936,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.38307198882102966,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=43981003034366": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.4628480076789856,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.5427680015563965,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.6165600121021271,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.6287360191345215,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.7474880218505859,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=43981003558654": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.6963520050048828,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.8212800025939941,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.9472000002861023,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.9472320079803467,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 1.1152480244636536,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=52777095270142": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 2
+        },
+        "ms": 0.28044798970222473,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.2805759906768799,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.28060799837112427,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.2887679934501648,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 16,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.2990399897098541,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=52777095532286": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.34092798829078674,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.39948800206184387,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.4536319971084595,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.4587840139865875,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 2
+        },
+        "ms": 0.5446720123291016,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=52777096056574": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.6593599915504456,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.781440019607544,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.8868160247802734,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.897136002779007,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 2
+        },
+        "ms": 1.0649759769439697,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=52777096580862": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.9993279874324799,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 1.173535943031311,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 1.340287983417511,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 1.3444960117340088,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 1.5964159965515137,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=8796630159102": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 1
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 16,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 2
+        },
+        "ms": 0.02252800017595291,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.02252800017595291,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.02252800017595291,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=8796630421246": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.02454400062561035,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 2
+        },
+        "ms": 0.02457600086927414,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.02457600086927414,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.02470399998128414,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.026623999699950218,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=8796630945534": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.026623999699950218,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.03276799991726875,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.03683200106024742,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.03686400130391121,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.036896001547575,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=8796631469822": [
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 128,
+          "TI": 4
+        },
+        "ms": 0.04505600035190582,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 2
+        },
+        "ms": 0.05318399891257286,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 32,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.05321599915623665,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 2,
+          "BN": 64,
+          "TI": 4
+        },
+        "ms": 0.05321599915623665,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BJ": 64,
+          "BKD": 4,
+          "BN": 64,
+          "TI": 1
+        },
+        "ms": 0.05523199960589409,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ]
+  },
+  "entry_grids": {
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=17592723181310": [
+      "529f4a143607"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=17592723443454": [
+      "d3ca044cda49"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=17592723967742": [
+      "8dc7e92824e3"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=17592724492030": [
+      "d3ca044cda49"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=26388816203518": [
+      "529f4a143607"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=26388816465662": [
+      "d3ca044cda49"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=26388816989950": [
+      "8dc7e92824e3"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=26388817514238": [
+      "d3ca044cda49"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=35184909225726": [
+      "529f4a143607"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=35184909487870": [
+      "d3ca044cda49"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=35184910012158": [
+      "8dc7e92824e3"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=35184910536446": [
+      "d3ca044cda49"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=43981002247934": [
+      "529f4a143607"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=43981002510078": [
+      "d3ca044cda49"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=43981003034366": [
+      "8dc7e92824e3"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=43981003558654": [
+      "d3ca044cda49"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=52777095270142": [
+      "529f4a143607"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=52777095532286": [
+      "d3ca044cda49"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=52777096056574": [
+      "8dc7e92824e3"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=52777096580862": [
+      "d3ca044cda49"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=8796630159102": [
+      "529f4a143607"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=8796630421246": [
+      "d3ca044cda49"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=8796630945534": [
+      "8dc7e92824e3"
+    ],
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=8796631469822": [
+      "d3ca044cda49"
+    ]
+  },
+  "env_identity": "7efec5ac14d2",
+  "gpu": "NVIDIA B200 (sm100)",
+  "grids": {
+    "529f4a143607": [
+      "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+      "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+      "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+    ],
+    "8dc7e92824e3": [
+      "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+      "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+      "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 256), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+    ],
+    "d3ca044cda49": [
+      "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+      "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+      "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+      "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+      "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+    ]
+  },
+  "key_scheme": 3,
+  "measurements": {
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=17592723181310": {
+      "d974d350f44ad8f3c998": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.046911999583244324,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 2
+            },
+            "ms": 0.04710400104522705,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.04713600128889084,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.04755200073122978,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 16,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.051263999193906784,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                64
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 64,
+            "HAS_RES": true,
+            "L": 256,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                8192
+              ],
+              "stride": [
+                8192,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                256,
+                64
+              ],
+              "stride": [
+                16384,
+                64,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                65536,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "shape_key": 17592723181310
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=17592723443454": {
+      "1e0b321af0f58eae29ba": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.053247999399900436,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.06143999844789505,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.0634239986538887,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.06963200122117996,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.07782399654388428,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 128,
+            "HAS_RES": true,
+            "L": 256,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                8192
+              ],
+              "stride": [
+                8192,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                256,
+                128
+              ],
+              "stride": [
+                32768,
+                128,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                65536,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "shape_key": 17592723443454
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=17592723967742": {
+      "2fba13fa36591237dc1e": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.09414400160312653,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.11264000087976456,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.11459200084209442,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.12495999783277512,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.1311040073633194,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 256), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                256
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 256,
+            "HAS_RES": true,
+            "L": 256,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                8192
+              ],
+              "stride": [
+                8192,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                256,
+                256
+              ],
+              "stride": [
+                65536,
+                256,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                65536,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 17592723967742
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=17592724492030": {
+      "441d9bd7ae2439a60eab": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.13523200154304504,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.16383999586105347,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.16793599724769592,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.1884160041809082,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.1985280066728592,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                384
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 384,
+            "HAS_RES": true,
+            "L": 256,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                8192
+              ],
+              "stride": [
+                8192,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                256,
+                384
+              ],
+              "stride": [
+                98304,
+                384,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                65536,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "shape_key": 17592724492030
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=26388816203518": {
+      "4c2ffc5064ecb53346d0": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 2
+            },
+            "ms": 0.08195199817419052,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.08195199817419052,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.08204799890518188,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.08399999886751175,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 16,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.09212800115346909,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                64
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 64,
+            "HAS_RES": true,
+            "L": 384,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                12288,
+                12288
+              ],
+              "stride": [
+                12288,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                384,
+                384,
+                64
+              ],
+              "stride": [
+                24576,
+                64,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "shape_key": 26388816203518
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=26388816465662": {
+      "4edefb2451653c0f6254": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.09625600278377533,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.11059200018644333,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.1189119964838028,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.1250240057706833,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.14950400590896606,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 128,
+            "HAS_RES": true,
+            "L": 384,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                12288,
+                12288
+              ],
+              "stride": [
+                12288,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                384,
+                384,
+                128
+              ],
+              "stride": [
+                49152,
+                128,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "shape_key": 26388816465662
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=26388816989950": {
+      "58faec1ec73bb813d500": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.17824000120162964,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.20694400370121002,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.22944000363349915,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.23772799968719482,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.2845120131969452,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 256), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                256
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 256,
+            "HAS_RES": true,
+            "L": 384,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                12288,
+                12288
+              ],
+              "stride": [
+                12288,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                384,
+                384,
+                256
+              ],
+              "stride": [
+                98304,
+                256,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 26388816989950
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=26388817514238": {
+      "de700a35bdee086420db": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.26425600051879883,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.31142398715019226,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.34409600496292114,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.359391987323761,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.4177919924259186,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                384
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 384,
+            "HAS_RES": true,
+            "L": 384,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                12288,
+                12288
+              ],
+              "stride": [
+                12288,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                384,
+                384,
+                384
+              ],
+              "stride": [
+                147456,
+                384,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "shape_key": 26388817514238
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=35184909225726": {
+      "c86af93adb527cf9cc03": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 2
+            },
+            "ms": 0.13315199315547943,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.13315199315547943,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.1372160017490387,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.14220799505710602,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 16,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.14550399780273438,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                64
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 64,
+            "HAS_RES": true,
+            "L": 512,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                512,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16384,
+                16384
+              ],
+              "stride": [
+                16384,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                512,
+                512,
+                64
+              ],
+              "stride": [
+                32768,
+                64,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                262144,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "shape_key": 35184909225726
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=35184909487870": {
+      "a3da0df2419a7150fc9f": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.15769599378108978,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.1844799965620041,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.21107199788093567,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.21916800737380981,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.24988800287246704,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 128,
+            "HAS_RES": true,
+            "L": 512,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                512,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16384,
+                16384
+              ],
+              "stride": [
+                16384,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                512,
+                512,
+                128
+              ],
+              "stride": [
+                65536,
+                128,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                262144,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "shape_key": 35184909487870
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=35184910012158": {
+      "dac73567a58127fae7a8": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.30291199684143066,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.36032000184059143,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.39932799339294434,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.40966400504112244,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.4843200147151947,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 256), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                256
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 256,
+            "HAS_RES": true,
+            "L": 512,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                512,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16384,
+                16384
+              ],
+              "stride": [
+                16384,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                512,
+                512,
+                256
+              ],
+              "stride": [
+                131072,
+                256,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                262144,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 35184910012158
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=35184910536446": {
+      "6d190d827d81d5695db3": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.44859200716018677,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.5386239886283875,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.6144000291824341,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.6144319772720337,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.7210559844970703,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                384
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 384,
+            "HAS_RES": true,
+            "L": 512,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                512,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16384,
+                16384
+              ],
+              "stride": [
+                16384,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                512,
+                512,
+                384
+              ],
+              "stride": [
+                196608,
+                384,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                262144,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "shape_key": 35184910536446
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=43981002247934": {
+      "abb5ab07745c74152bb6": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.19871999323368073,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 2
+            },
+            "ms": 0.1995840072631836,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.20483200252056122,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.20892800390720367,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 16,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.21507200598716736,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                64
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 64,
+            "HAS_RES": true,
+            "L": 640,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                640,
+                640
+              ],
+              "stride": [
+                640,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                20480,
+                20480
+              ],
+              "stride": [
+                20480,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                640,
+                640,
+                64
+              ],
+              "stride": [
+                40960,
+                64,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                409600,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "shape_key": 43981002247934
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=43981002510078": {
+      "673aec77bfd06120fb48": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.2396160066127777,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.27856001257896423,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.32153600454330444,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.32972800731658936,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.38307198882102966,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 128,
+            "HAS_RES": true,
+            "L": 640,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                640,
+                640
+              ],
+              "stride": [
+                640,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                20480,
+                20480
+              ],
+              "stride": [
+                20480,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                640,
+                640,
+                128
+              ],
+              "stride": [
+                81920,
+                128,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                409600,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "shape_key": 43981002510078
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=43981003034366": {
+      "8ddd832b3f989c41d4cd": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.4628480076789856,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.5427680015563965,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.6165600121021271,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.6287360191345215,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.7474880218505859,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 256), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                256
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 256,
+            "HAS_RES": true,
+            "L": 640,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                640,
+                640
+              ],
+              "stride": [
+                640,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                20480,
+                20480
+              ],
+              "stride": [
+                20480,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                640,
+                640,
+                256
+              ],
+              "stride": [
+                163840,
+                256,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                409600,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 43981003034366
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=43981003558654": {
+      "9df5ff6ba1afb148b804": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.6963520050048828,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.8212800025939941,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.9472000002861023,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.9472320079803467,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 1.1152480244636536,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                384
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 384,
+            "HAS_RES": true,
+            "L": 640,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                640,
+                640
+              ],
+              "stride": [
+                640,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                20480,
+                20480
+              ],
+              "stride": [
+                20480,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                640,
+                640,
+                384
+              ],
+              "stride": [
+                245760,
+                384,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                409600,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "shape_key": 43981003558654
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=52777095270142": {
+      "7cb961e1bce2d0a2052c": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 2
+            },
+            "ms": 0.28044798970222473,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.2805759906768799,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.28060799837112427,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.2887679934501648,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 16,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.2990399897098541,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                64
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 64,
+            "HAS_RES": true,
+            "L": 768,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                768,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                24576,
+                24576
+              ],
+              "stride": [
+                24576,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                768,
+                768,
+                64
+              ],
+              "stride": [
+                49152,
+                64,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "shape_key": 52777095270142
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=52777095532286": {
+      "aaf01394dab1ead59cd0": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.34092798829078674,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.39948800206184387,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.4536319971084595,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.4587840139865875,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 2
+            },
+            "ms": 0.5446720123291016,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 128,
+            "HAS_RES": true,
+            "L": 768,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                768,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                24576,
+                24576
+              ],
+              "stride": [
+                24576,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                768,
+                768,
+                128
+              ],
+              "stride": [
+                98304,
+                128,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "shape_key": 52777095532286
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=52777096056574": {
+      "95068edea9d9f33c8e3e": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.6593599915504456,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.781440019607544,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.8868160247802734,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.897136002779007,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 2
+            },
+            "ms": 1.0649759769439697,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 256), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                256
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 256,
+            "HAS_RES": true,
+            "L": 768,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                768,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                24576,
+                24576
+              ],
+              "stride": [
+                24576,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                768,
+                768,
+                256
+              ],
+              "stride": [
+                196608,
+                256,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 52777096056574
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=52777096580862": {
+      "afb163f51fadc6fed13a": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.9993279874324799,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 1.173535943031311,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 1.340287983417511,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 1.3444960117340088,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 1.5964159965515137,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                384
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 384,
+            "HAS_RES": true,
+            "L": 768,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                768,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                24576,
+                24576
+              ],
+              "stride": [
+                24576,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                768,
+                768,
+                384
+              ],
+              "stride": [
+                294912,
+                384,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "shape_key": 52777096580862
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=8796630159102": {
+      "707f181cd40402c88f35": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 1
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 16,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 2
+            },
+            "ms": 0.02252800017595291,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.02252800017595291,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.02252800017595291,
+            "num_stages": 3,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                64
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 64,
+            "HAS_RES": true,
+            "L": 128,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                4096,
+                4096
+              ],
+              "stride": [
+                4096,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128,
+                64
+              ],
+              "stride": [
+                8192,
+                64,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16384,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "shape_key": 8796630159102
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=8796630421246": {
+      "c9ce3ddfff595d24534d": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.02454400062561035,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 2
+            },
+            "ms": 0.02457600086927414,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.02457600086927414,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.02470399998128414,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.026623999699950218,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 128,
+            "HAS_RES": true,
+            "L": 128,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                4096,
+                4096
+              ],
+              "stride": [
+                4096,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128,
+                128
+              ],
+              "stride": [
+                16384,
+                128,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16384,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "shape_key": 8796630421246
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=8796630945534": {
+      "4269090dd06aec2ef433": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.026623999699950218,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.03276799991726875,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.03683200106024742,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.03686400130391121,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.036896001547575,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 256), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                256
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 256,
+            "HAS_RES": true,
+            "L": 128,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                4096,
+                4096
+              ],
+              "stride": [
+                4096,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128,
+                256
+              ],
+              "stride": [
+                32768,
+                256,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16384,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 8796630945534
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|HAS_RES=1,NORM_FIRST=1,shape_key=8796631469822": {
+      "dc7c2e929d9503476638": {
+        "entries": [
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 128,
+              "TI": 4
+            },
+            "ms": 0.04505600035190582,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 2
+            },
+            "ms": 0.05318399891257286,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 32,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.05321599915623665,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 2,
+              "BN": 64,
+              "TI": 4
+            },
+            "ms": 0.05321599915623665,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BJ": 64,
+              "BKD": 4,
+              "BN": 64,
+              "TI": 1
+            },
+            "ms": 0.05523199960589409,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 128), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 16), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 32), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 1), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 2), ('BN', 64), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 128), ('TI', 4)), 8, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 32), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 1)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 2)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 1, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 2, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 1)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 3)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 4)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 5)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 4, 6)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 2)",
+          "((('BJ', 64), ('BKD', 4), ('BN', 64), ('TI', 4)), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BIAS": {
+              "dtype": "torch.float32",
+              "shape": [
+                384
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "CH": 32,
+            "CZ": 384,
+            "HAS_RES": true,
+            "L": 128,
+            "NORM": {
+              "dtype": "torch.float32",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "NORM_FIRST": true,
+            "O": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                4096,
+                4096
+              ],
+              "stride": [
+                4096,
+                1
+              ]
+            },
+            "OUT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128,
+                384
+              ],
+              "stride": [
+                49152,
+                384,
+                1
+              ]
+            },
+            "RES": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "WOT": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1024,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "shape_key": 8796631469822
+          },
+          "implementation": "faf22ad86b18b77e8c9ff11749dbb9d836507767ed91871609c1fc6453718756",
+          "scheme": 1
+        }
+      }
+    }
+  },
+  "op": "outer_product_mean_epilogue_triton",
+  "op_identity": "3802d2957985",
+  "provenance": {
+    "built_utc": "2026-10-30T10:00:56+00:00",
+    "torch": "2.13.0+cu129",
+    "triton": "3.7.1"
+  },
+  "schema": 1
+}
