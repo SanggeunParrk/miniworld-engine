@@ -66,6 +66,10 @@ NARROW = re.compile(r"\.to\(\s*torch\.bfloat16\s*\)|\.bfloat16\(\)")
 #: that file learned to read their width from a tensor. A key that a reformat invalidates is a key
 #: that gets bulk-updated without anyone rereading the judgement.
 NOT_A_NORMALISATION = {
+    ("bias_only_attention/triton/core_t.py",
+     "w_cat, w_out = torch.cat([wv, wg], 0).to(torch.bfloat16), wo.to(torch.bfloat16)"):
+        "The bias-only core's fp32 master WEIGHTS rounded to the bf16 GEMM operands (a non-contiguous fallback of cast_pack); the "
+        "family entered this scan with its pair LayerNorm (pair_bias.py), and this file normalises nothing.",
     ("pair_weighted_averaging/triton/main.py",
      "empty if keep is None else keep[bi].to(torch.bfloat16).contiguous(),"):
         "The row-broadcast dropout keep-mask (0 / 1, exact in bf16) as the kernel's operand, not a normalized activation.",

@@ -94,3 +94,23 @@ def swa_gate_out_fwd_triton():
         gate, out, weight = _swa_gate_inputs()
         reference = (torch.sigmoid(gate.float()) * out.float()).to(gate.dtype) @ weight.T
         return {"output": (swa_gate_out_inference(gate, out, weight), reference)}
+
+
+def gated_projection_fwd_residual_triton():
+    """_forward: ``x + gate * branch`` with the product rounded to the activation dtype first -- the eager statement, so the
+    reference is the same statement in the same dtype and the difference is exactly zero."""
+    from miniworld_engine.kernels.gated_projection.triton.residual import gated_residual
+
+    x, gate, branch = _x(), _x(), _x()
+    return gated_residual(x, gate, branch), x + gate * branch
+
+
+def gated_projection_bwd_residual_triton():
+    """_backward: ``dgate = dy * branch``, ``dbranch = dy * gate`` (fp32 products, rounded once); ``dy`` random, as the flat gate's
+    check argues."""
+    from miniworld_engine.kernels.gated_projection.triton.residual import gated_residual
+
+    x, gate, branch = _x().requires_grad_(), _x().requires_grad_(), _x().requires_grad_()
+    dy = _x()
+    gated_residual(x, gate, branch).backward(dy)
+    return {"dgate": (gate.grad, _f(dy) * _f(branch)), "dbranch": (branch.grad, _f(dy) * _f(gate)), "dx": (x.grad, dy)}

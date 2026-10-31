@@ -85,9 +85,9 @@ def layer_norm_linear(x: torch.Tensor, ln_weight: torch.Tensor, proj_weight: tor
 
 
 def gated_residual(x: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor) -> torch.Tensor:
-    """``x + gate * branch`` -- see ``kernels.gated_projection.triton.residual.gated_residual``. Its two Triton kernels have no registry
-    row (``autotune.records.UNREGISTERED_OPS``), so no card holds a record for them: off H100 / B200 the call is the same PyTorch statement
-    (the kernel rounds the product to the activation dtype before the add, as eager does), with one warning."""
+    """``x + gate * branch`` -- see ``kernels.gated_projection.triton.residual.gated_residual`` (op ``gated_residual``:
+    ``gated_projection_fwd_residual_triton`` and its backward). On a card without their record: the same PyTorch statement (the kernel
+    rounds the product to the activation dtype before the add, as eager does), with one warning."""
     from miniworld_engine.modules.dispatch import portable_blocked
 
     if x.is_cuda and portable_blocked("gated_residual", x.device, x, gate, branch):

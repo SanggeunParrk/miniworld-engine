@@ -13,6 +13,7 @@ from miniworld_engine.kernels.drivers import (
     BF16,
     TensorKw,
     _grad,
+    aligned_only,
     dev,
     driver_heads,
     driver_width,
@@ -106,3 +107,39 @@ def gated_projection_bwd_dx_triton() -> None:
     g2 = torch.randn(L * L, DH, **kw)
     r2 = torch.randn(L * L, DH, **kw)
     _dgrad_epilogue(do2, wo, g2, r2, shape_key=_pair_key())
+
+
+# ── bias_only_attention/triton/pair_bias.py: the one-pass pair LayerNorm + bias projection ────────
+
+#: The pair-bias kernels' channel count: the swept width rounded down to a power of two -- the row block holds a whole pair row
+#: (`pair_bias.supported`: C a power of two, 16 .. 512), so a ragged or non-power-of-two width is not one this kernel ever sees.
+_PB_C = aligned_only("bias_only_attention.pair_bias_c", 1 << (driver_width(128).bit_length() - 1),
+                     "the row block holds a whole pair row: C is a power of two")
+
+
+def _pair_bias_inputs(grad: bool = False) -> tuple[torch.Tensor, ...]:
+    """pair [1, L, L, C] (the channel count the kernel serves: a power of two), the LayerNorm weight [C] and the bias projection
+    [H, C] -- BiasOnlyAttention's ``ln_pair`` / ``to_bias``."""
+    pair = torch.randn(1, L, L, _PB_C, device=dev(), dtype=BF16, requires_grad=grad)
+    gamma = (1.0 + 0.1 * torch.randn(_PB_C, device=dev())).requires_grad_(grad)
+    weight = (torch.randn(H, _PB_C, device=dev()) * _PB_C**-0.5).requires_grad_(grad)
+    return pair, gamma, weight
+
+
+def bias_only_attention_layernorm_gemm_triton() -> None:
+    """_ln_bias_fwd_kernel, via pair_bias_logits."""
+    from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import (
+        pair_bias_logits,
+    )
+
+    pair_bias_logits(*_pair_bias_inputs(), 1e-5)
+
+
+def bias_only_attention_bwd_layernorm_gemm_triton() -> None:
+    """_ln_bias_bwd_kernel, via PairBiasFn.backward."""
+    from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import (
+        pair_bias_logits,
+    )
+
+    out = pair_bias_logits(*_pair_bias_inputs(grad=True), 1e-5)
+    out.backward(torch.randn_like(out))

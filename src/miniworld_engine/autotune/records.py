@@ -62,6 +62,13 @@ _LN_STRIDED = ("layernorm_linear/layernorm_fwd_saveact_strided_triton", "layerno
 #: The flat sigmoid-gate multiply and its backward (``gated_projection/triton/main.py`` ``_sigmul_*``), launched by the ConditionedTransition
 #: training path, the SWA atom attention's gate and the bias-only DiT core.
 _SIGMUL = ("gated_projection/gated_projection_gate_flat_triton", "gated_projection/gated_projection_bwd_gate_flat_triton")
+#: The pair / token gate GEMMs of the gated_projection family (``gated_projection/triton/main.py``) and the flat ones. Spelled out rather
+#: than ``gated_projection/gated_projection_*``: the family also holds the SWA gate and the residual gate of ``ops.gated_residual``,
+#: which the ops that count these never launch.
+_GATED_PROJECTION = ("gated_projection/gated_projection_gate_triton", "gated_projection/gated_projection_bwd_gate_triton", *_SIGMUL)
+#: The token / pair gate GEMMs that live in the bias_only_attention family (``gated_projection_gate_gemm_triton``, ``_bwd_dx_triton``),
+#: spelled out so the family's own pair-bias kernels are not held against TriangleAttention / ops.gated_linear.
+_GATE_GEMM = ("bias_only_attention/gated_projection_*",)
 
 #: Every entry below is checked against what the op's portable path LAUNCHES: ``kernels/registry/registry_kernel.units.json`` (``dev derive``
 #: runs each ``registry_module.csv`` row and records every Triton launch, per dtype and eval / train) is the evidence for the module ops,
@@ -82,8 +89,8 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
         "triangle_attention/*",
         "layernorm_linear/*",
         "layernorm/*",
-        "gated_projection/gated_projection_*",
-        "bias_only_attention/*",
+        *_GATED_PROJECTION,
+        *_GATE_GEMM,
     ),
     "adaptive_layernorm": ("adaln/*", *_LN_STRIDED),
     "conditioned_transition": ("conditioned_transition/*", "adaln/*", *_LN_STRIDED, *_SIGMUL),
@@ -114,7 +121,9 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
     # the smooth lDDT of the diffusion loss (kernels/smooth_lddt): prep + forward, and the backward in a training call
     "smooth_lddt": ("smooth_lddt/*",),
     # the ops.* facade entry points that launch a single Triton unit (kernels/*/whole_op.py, kernels/_ops_routed.py)
-    "gated_linear": ("gated_projection/gated_projection_*", "bias_only_attention/*"),
+    "gated_linear": (*_GATED_PROJECTION, *_GATE_GEMM),
+    # ops.gated_residual: x + gate * branch (gated_projection/triton/residual.py), the SWADiTBlock per-op residual
+    "gated_residual": ("gated_projection/gated_projection_fwd_residual_triton", "gated_projection/gated_projection_bwd_residual_triton"),
     "augmented_attention_pair_bias": _TOKEN_ATTENTION,
     # the bare SwiGLU (ops.swiglu_ffn, ops.conditioned_transition's tail, the ESMFold2 atom block's FFN) and its backward
     "swiglu_ffn": ("transition/transition_expand_swiglu_triton", "transition/transition_bwd_squeeze_swiglu_triton"),
@@ -126,6 +135,12 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
     "swa_dit": ("swa_dit/*", "rmsnorm/*"),
     # the bias-only DiT's training core (kernels/bias_only_attention/triton/core_t.py): cuBLAS GEMMs around the flat sigmoid gate
     "bias_only_core": _SIGMUL,
+    # the bias-only DiT's one-pass pair LayerNorm + bias projection (bias_only_attention/triton/pair_bias.py): BiasOnlyAttention training and
+    # pair_bias_all's portable leg (inference too)
+    "bias_only_pair_bias": (
+        "bias_only_attention/bias_only_attention_layernorm_gemm_triton",
+        "bias_only_attention/bias_only_attention_bwd_layernorm_gemm_triton",
+    ),
     # The attention cores of the portable DiT paths (the rest of those blocks is torch ops and the ops above, each with its own rule):
     # the AF3 / Protenix / OpenFold3 / ESMFold2 atom block (LocalDiTBlock), and the Boltz-2 / RoseTTAFold3 / Chai-1 token and atom stacks.
     "local_dit": (*_WINDOW_ATTENTION, *_PAIR_BIAS),
@@ -145,19 +160,23 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
 #: Ops whose portable kernels have NO registry row (no driver, no check, so ``run_all`` cannot record them on any card): off H100 / B200
 #: they always take their PyTorch statements, with one ``UnrecordedCardWarning`` naming the kernels. Registering the kernels
 #: (registry.csv + driver + check, then ``run_all``) moves an op from here into ``OP_KERNELS``.
-UNREGISTERED_OPS: dict[str, tuple[str, ...]] = {
-    # ops.gated_residual: x + gate * branch with eager product rounding (SWADiTBlock's per-op path)
-    "gated_residual": ("kernels/gated_projection/triton/residual.py:_forward", "kernels/gated_projection/triton/residual.py:_backward"),
-    # the bias-only DiT's one-pass pair LayerNorm + bias projection (BiasOnlyAttention training, pair_bias_all's portable leg)
-    "bias_only_pair_bias": (
-        "kernels/bias_only_attention/triton/pair_bias.py:_ln_bias_fwd_kernel",
-        "kernels/bias_only_attention/triton/pair_bias.py:_ln_bias_bwd_kernel",
-    ),
-}
+UNREGISTERED_OPS: dict[str, tuple[str, ...]] = {}
+#: (``gated_residual`` and ``bias_only_pair_bias`` were here until their kernels got registry rows, 2026-10-31.)
+
+#: Kernels that run at ONE precision whatever the call's: their registry row declares that precision (the kernel's own buffers) and a call
+#: at another precision launches them all the same. ``augmented_attention_bwd_reduce_triton`` sums the fp32 dq partials of the split
+#: backward: a bf16 training call launches it on fp32 tensors (``registry_kernel.units.json``: every bf16 ``train`` unit of
+#: augmented_attention / projected_attention records it at float32). Such a kernel counts for every call of its ops and is asked at
+#: its own precision (:func:`row_dtype`).
+_RUNS_AT: dict[str, str] = {"augmented_attention_bwd_reduce_triton": "fp32"}
 
 #: Kernels whose name carries a training word but which every INFERENCE forward of their ops launches too (``registry_kernel.units.json``:
 #: the LayerNorm forward that saves its statistics runs in each ``eval`` unit of Transition, TriMul, TriangleAttention, AugmentedAttention).
 _INFERENCE_TOO = frozenset({"layernorm_fwd_saveact_triton"})
+#: Kernels that run ONLY where no backward is recorded: an op's training call never launches them. The MPNN message reduction takes its
+#: no-save full fusion only with autograd off (`kernels/mpnn_message/interface.py`); a call that records a backward runs the projection and
+#: the reduce kernels instead.
+_INFERENCE_ONLY = frozenset({"mpnn_message_fwd_gemm_gelu_reduce_triton"})
 
 #: The words of a kernel name that make it a training kernel: it saves activations for the backward (`saveact`), is the backward
 #: (`bwd`, `dw`) or the fused training epilogue (`train`). Every other kernel of an op runs in the forward of an inference call too.
@@ -231,9 +250,11 @@ def triton_kernels(op: str, dtype: str = "bf16", mode: str = "training") -> tupl
         if row["backend"] != "triton" or row["developed"] != "yes":
             continue
         declared = {d.strip() for d in (row.get("dtypes") or "bf16").split("|") if d.strip()}
-        if dtype not in declared:
+        if dtype not in declared and row["kernel"] not in _RUNS_AT:
             continue
         if mode == "inference" and kernel_mode(row["kernel"]) == "training":
+            continue
+        if mode == "training" and row["kernel"] in _INFERENCE_ONLY:
             continue
         if any(fnmatch.fnmatchcase(f"{row['family']}/{row['kernel']}", p) for p in patterns):
             out.append(row["kernel"])
@@ -250,7 +271,12 @@ def missing(op: str, name: str, capability: tuple[int, int], dtype: str = "bf16"
     if not kernels:
         return (f"<no portable kernel of {op!r} declares {dtype}>",)
     rows = _load(card_key(name, capability))
-    return tuple(k for k in kernels if rows.get((k, dtype)) != "ok")
+    return tuple(k for k in kernels if rows.get((k, row_dtype(k, dtype))) != "ok")
+
+
+def row_dtype(kernel: str, dtype: str) -> str:
+    """The precision ``kernel``'s manifest row is asked at for a call at ``dtype``: the call's, or the kernel's own (``_RUNS_AT``)."""
+    return _RUNS_AT.get(kernel, dtype)
 
 
 def recorded(op: str, name: str, capability: tuple[int, int], dtype: str = "bf16", mode: str = "training") -> bool:

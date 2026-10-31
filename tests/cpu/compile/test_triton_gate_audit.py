@@ -108,13 +108,14 @@ def test_the_layernorm_forward_that_saves_its_statistics_counts_for_inference():
 
 
 def test_every_registered_family_is_counted_by_some_op():
-    counted = {k for op in records.OP_KERNELS for k in records.triton_kernels(op, "bf16")}
-    counted |= {k for op in records.OP_KERNELS for k in records.triton_kernels(op, "fp32")}
+    counted = {k for op in records.OP_KERNELS for d in ("bf16", "fp32") for m in ("inference", "training")
+               for k in records.triton_kernels(op, d, m)}
     built = {r["kernel"] for r in records._registry() if r["backend"] == "triton" and r["developed"] == "yes"}
     assert not built - counted, sorted(built - counted)
 
 
-def test_an_unregistered_op_is_never_recorded(manifests):
+def test_an_unregistered_op_is_never_recorded(manifests, monkeypatch):
+    monkeypatch.setitem(records.UNREGISTERED_OPS, "some_op", ("kernels/x.py:_k",))    # the mechanism; the table is empty today
     for op, kernels in records.UNREGISTERED_OPS.items():
         assert op not in records.OP_KERNELS
         assert records.missing(op, LONG, (8, 6)) == tuple(f"<unregistered: {k}>" for k in kernels)
@@ -164,7 +165,7 @@ def test_ops_layer_norm_linear_and_gated_residual_run_the_statements_on_an_unrec
         out = ops.layer_norm_linear(x, lnw, pw, 1e-5)
     torch.testing.assert_close(out, F.linear(F.layer_norm(x, (16,), lnw, None, 1e-5), pw))
     g, b = torch.randn_like(x), torch.randn_like(x)
-    with pytest.warns(UnrecordedCardWarning, match="unregistered"):
+    with pytest.warns(UnrecordedCardWarning, match="gated_residual"):
         out = ops.gated_residual(x, g, b)
     torch.testing.assert_close(out, x + g * b)
 
@@ -265,3 +266,69 @@ def test_a_bf16_trimul_facade_call_asks_the_record(unrecorded):
         out = ops.triangle_multiplicative_update(x, "outgoing", None, **w)
     assert out.shape == x.shape
     assert out.dtype == torch.bfloat16
+
+
+def test_every_kernel_with_a_row_and_a_former_unregistered_op_is_counted():
+    """gated_residual and the bias-only pair bias have registry rows now (2026-10-31): their ops count them."""
+    assert set(records.triton_kernels("gated_residual")) == {
+        "gated_projection_fwd_residual_triton", "gated_projection_bwd_residual_triton"}
+    assert set(records.triton_kernels("bias_only_pair_bias")) == {
+        "bias_only_attention_layernorm_gemm_triton", "bias_only_attention_bwd_layernorm_gemm_triton"}
+    assert set(records.triton_kernels("bias_only_pair_bias", "bf16", "inference")) == {"bias_only_attention_layernorm_gemm_triton"}
+    assert "mpnn_message_fwd_gemm_gelu_reduce_triton" in records.triton_kernels("mpnn_message", "bf16", "inference")
+    # the family-wide patterns of TriangleAttention / ops.gated_linear do not pick up the new rows
+    for op in ("triangle_attention", "gated_linear"):
+        assert not {"gated_projection_fwd_residual_triton", "bias_only_attention_layernorm_gemm_triton"} & set(records.triton_kernels(op))
+    assert "augmented_attention_bwd_atomic_triton" in records.triton_kernels("augmented_attention_pair_bias")   # memory_efficient
+
+
+def test_the_split_backward_reduce_is_asked_at_its_own_precision(monkeypatch, manifests):
+    """augmented_attention_bwd_reduce_triton sums fp32 partials whatever the call's precision: a bf16 training call counts it, and asks
+    its fp32 row."""
+    assert "augmented_attention_bwd_reduce_triton" in records.triton_kernels("augmented_attention_pair_bias", "bf16", "training")
+    assert "augmented_attention_bwd_reduce_triton" not in records.triton_kernels("augmented_attention_pair_bias", "bf16", "inference")
+    assert records.row_dtype("augmented_attention_bwd_reduce_triton", "bf16") == "fp32"
+    assert records.row_dtype("augmented_attention_fwd_triton", "bf16") == "bf16"
+    fake_card(monkeypatch, LONG, (8, 6))
+    write_manifest(manifests, LONG, (8, 6), ["augmented_attention_pair_bias"])            # writes that kernel's row at fp32
+    assert records.recorded("augmented_attention_pair_bias", LONG, (8, 6), "bf16", "training")
+    path = manifests / f"{records.card_key(LONG, (8, 6))}.csv"
+    text = path.read_text().replace("augmented_attention_bwd_reduce_triton,triton,x,x.py,ok,,fp32",
+                                    "augmented_attention_bwd_reduce_triton,triton,x,x.py,ok,,bf16")
+    path.write_text(text)
+    records._load.cache_clear()
+    assert records.missing("augmented_attention_pair_bias", LONG, (8, 6), "bf16", "training") == ("augmented_attention_bwd_reduce_triton",)
+
+
+def test_the_early_prunes_keep_the_launch_the_kernels_had_before_they_were_tuned():
+    """Outside a build, the default config sets prune to the fixed launches of before: the pair-bias backward's warps by channel count,
+    the MPNN no-grad fusion's policy by group count (and never a row tile that cannot hold its groups)."""
+    import triton
+
+    from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import _bwd_prune
+    from miniworld_engine.kernels.mpnn_message.triton.inference import _prune
+
+    warps = [triton.Config({}, num_warps=4, num_stages=2), triton.Config({}, num_warps=8, num_stages=2)]
+    assert [c.num_warps for c in _bwd_prune(warps, {}, C=128)] == [4]
+    assert [c.num_warps for c in _bwd_prune(warps, {}, C=256)] == [8]
+    policy = [triton.Config({"GROUPS_PER_CTA": 1, "BLOCK_M": 64, "BLOCK_K": 16, "COALESCED_WEIGHT_LOAD": 1}, num_warps=2),
+              triton.Config({"GROUPS_PER_CTA": 2, "BLOCK_M": 128, "BLOCK_K": 32, "COALESCED_WEIGHT_LOAD": 0}, num_warps=4),
+              triton.Config({"GROUPS_PER_CTA": 2, "BLOCK_M": 64, "BLOCK_K": 32, "COALESCED_WEIGHT_LOAD": 0}, num_warps=4)]
+    assert [c.kwargs["GROUPS_PER_CTA"] for c in _prune(policy, {"groups": 100})] == [1]
+    assert [(c.kwargs["GROUPS_PER_CTA"], c.kwargs["BLOCK_M"]) for c in _prune(policy, {"groups": 4096})] == [(2, 128)]
+    settings.configure(run_autotune=True)
+    try:
+        assert len(_prune(policy, {"groups": 100})) == 2          # a build searches every valid config
+        assert len(_bwd_prune(warps, {}, C=128)) == 2
+    finally:
+        settings.configure(run_autotune=False)
+
+
+def test_the_mpnn_no_grad_fusion_counts_for_inference_only():
+    """`mpnn_message_fwd_gemm_gelu_reduce_triton` runs only with autograd off: an inference call needs its row, a training call never
+    launches it (so an A5000, which holds the four training-path rows and not this one, stays portable for training)."""
+    infer = set(records.triton_kernels("mpnn_message", "bf16", "inference"))
+    train = set(records.triton_kernels("mpnn_message", "bf16", "training"))
+    assert "mpnn_message_fwd_gemm_gelu_reduce_triton" in infer
+    assert "mpnn_message_fwd_gemm_gelu_reduce_triton" not in train
+    assert records.recorded("mpnn_message", "NVIDIA RTX A5000", (8, 6), mode="training")

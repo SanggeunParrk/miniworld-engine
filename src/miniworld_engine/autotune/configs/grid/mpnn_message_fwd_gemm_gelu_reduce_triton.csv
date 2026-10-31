@@ -1,0 +1,7 @@
+axis,values
+GROUPS_PER_CTA,1 2
+BLOCK_M,64 128
+BLOCK_K,16 32 64
+COALESCED_WEIGHT_LOAD,0 1
+num_warps,2 4 8
+num_stages,2 3 4

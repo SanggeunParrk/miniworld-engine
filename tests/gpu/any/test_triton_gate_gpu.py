@@ -13,6 +13,7 @@ import warnings
 
 import pytest
 import torch
+import torch.nn.functional as F
 from fake_card import write_manifest
 
 from miniworld_engine import settings
@@ -147,19 +148,97 @@ def test_layer_norm_linear(card, launches, grad):
     _blocked_then_recorded(card, launches, ["layer_norm_linear"], fn, ["layernorm_linear"], match="layer_norm_linear")
 
 
-def test_gated_residual_is_never_recorded(card, launches):
+@pytest.mark.parametrize("grad", [False, True], ids=["inference", "training"])
+def test_gated_residual(card, launches, grad):
+    """Registered now: an unrecorded card warns and runs the statement, a recorded one runs the kernels -- bit for bit the eager result
+    (the product is rounded to the activation dtype before the add; the forward launches without FMA)."""
     from miniworld_engine import ops
 
-    x, g, b = (torch.randn(4, 256, 128, device="cuda", dtype=torch.bfloat16) for _ in range(3))
-    card(["swa_dit", "rms_norm_modulation"])
-    with pytest.warns(UnrecordedCardWarning, match="unregistered"):
-        ref = ops.gated_residual(x, g, b)
-    assert _of(launches, "gated_projection.triton.residual") == 0
-    settings.configure(force_portable_kernels=True)
-    out = ops.gated_residual(x, g, b)
+    torch.manual_seed(0)
+    x, g, b = (torch.randn(4, 256, 128, device="cuda", dtype=torch.bfloat16, requires_grad=grad) for _ in range(3))
+    dy = torch.randn(4, 256, 128, device="cuda", dtype=torch.bfloat16)
+
+    def fn():
+        with torch.set_grad_enabled(grad):
+            out = ops.gated_residual(x, g, b)
+            if not grad:
+                return out
+            out.backward(dy)
+            res = (out.detach(), x.grad.clone(), g.grad.clone(), b.grad.clone())
+            x.grad = g.grad = b.grad = None
+            return res
+
+    ref, out = _blocked_then_recorded(card, launches, ["gated_residual"], fn, ["gated_projection.triton.residual"], match="gated_residual")
+    for o, r in zip(out if grad else (out,), ref if grad else (ref,), strict=True):
+        torch.testing.assert_close(o, r, rtol=0, atol=0)
+
+
+def test_bias_only_pair_bias_is_recorded_like_any_op(card, launches):
+    """The pair-bias kernels have registry rows now: with the record they run off H100 / B200 (training), without it the statements."""
+    from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import (
+        pair_bias_logits,
+    )
+
+    torch.manual_seed(0)
+    pair = torch.randn(1, 96, 96, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    gamma = (1 + 0.1 * torch.randn(128, device="cuda")).requires_grad_()
+    weight = (torch.randn(16, 128, device="cuda") * 128**-0.5).requires_grad_()
+    card(["bias_only_pair_bias"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnrecordedCardWarning)
+        assert not dispatch.portable_blocked("bias_only_pair_bias", pair.device, pair, gamma, weight)
+        out = pair_bias_logits(pair, gamma, weight, 1e-5)
+        out.float().square().sum().backward()
     torch.cuda.synchronize()
-    assert _of(launches, "gated_projection.triton.residual") > 0
-    torch.testing.assert_close(out, ref)
+    assert _of(launches, "bias_only_attention.triton.pair_bias") >= 2, dict(launches)
+    z = F.layer_norm(pair.detach().float(), (128,), gamma.detach().float(), None, 1e-5)
+    ref = F.linear(z, weight.detach().float()).permute(0, 3, 1, 2)
+    assert _rel(out, ref) < 2e-2
+
+
+def test_the_split_backward_reduce_runs_on_fp32_partials_in_a_bf16_training_call(card, launches, monkeypatch):
+    """`augmented_attention_bwd_reduce_triton` is declared fp32 and a bf16 training call launches it: on fp32 tensors (the routing asks
+    its fp32 row, records._RUNS_AT)."""
+    import triton.runtime.jit as jit
+
+    from miniworld_engine import ops
+
+    seen = []
+    original = jit.JITFunction.run
+
+    def run(self, *args, **kwargs):
+        if getattr(self.fn, "__name__", "") == "_dq_reduce":
+            seen.append({a.dtype for a in args if isinstance(a, torch.Tensor)})
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(jit.JITFunction, "run", run)
+    settings.configure(force_portable_kernels=True)
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(2, 1, 4, 256, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True) for _ in range(3))
+    bias = torch.randn(1, 4, 256, 256, device="cuda", dtype=torch.bfloat16)
+    ops.augmented_attention_pair_bias(q, k, v, bias).float().sum().backward()
+    torch.cuda.synchronize()
+    assert seen, "the split backward's reduce did not launch"
+    assert all(dt == {torch.float32} for dt in seen), seen
+
+
+def test_memory_efficient_backward_asks_its_record(card, launches):
+    """`kernel_type="memory_efficient"` launches augmented_attention_bwd_atomic_triton (developed now): counted by the gate."""
+    from miniworld_engine import ops
+
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(2, 1, 4, 256, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True) for _ in range(3))
+    bias = torch.randn(1, 4, 256, 256, device="cuda", dtype=torch.bfloat16)
+
+    def fn():
+        out = ops.augmented_attention_pair_bias(q, k, v, bias, kernel_type="memory_efficient")
+        out.float().sum().backward()
+        res = (out.detach(), q.grad.clone())
+        q.grad = k.grad = v.grad = None
+        return res
+
+    _blocked_then_recorded(card, launches, ["augmented_attention_pair_bias"], fn, ["augmented_attention.triton.memory_efficient"],
+                           match="augmented_attention_pair_bias")
 
 
 def _trimul_weights(d, bidirectional=False):

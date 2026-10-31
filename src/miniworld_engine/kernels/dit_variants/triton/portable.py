@@ -39,7 +39,10 @@ def _leg_allowed(stack, single, op: str) -> bool:
 
     if stack.implementation != ImplementationType.MINIWORLD:
         return False
-    return dispatch.portable_leg_allowed(single.device, op, training=dispatch.needs_backward(stack, single))
+    # the precision the attention core and the pair-bias kernels run at: the activations' (fp32 asks the card's fp32 rows)
+    return dispatch.portable_leg_allowed(
+        single.device, op, training=dispatch.needs_backward(stack, single), dtype=dispatch.record_dtype(single)
+    )
 
 
 def serves(stack, single, cond, pair, mask) -> bool:

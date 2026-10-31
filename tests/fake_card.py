@@ -33,10 +33,12 @@ def write_manifest(directory: Path, name: str, capability: tuple[int, int], ops,
             ["#provenance", "0.0.0", "0" * 12, "clean", "2026-10-24", "test", ""]]
     seen = set()
     for op in ops:
-        for kernel in records.triton_kernels(op, dtype, "training" if training else "inference"):
+        # a training record covers what both modes launch (an inference-only kernel is not in the training set)
+        modes = ("inference", "training") if training else ("inference",)
+        for kernel in (k for m in modes for k in records.triton_kernels(op, dtype, m)):
             if kernel not in seen and kernel not in skip:
                 seen.add(kernel)
-                rows.append([kernel, "triton", "x", "x.py", status, "", dtype])
+                rows.append([kernel, "triton", "x", "x.py", status, "", records.row_dtype(kernel, dtype)])
     with path.open("w", newline="") as handle:
         csv.writer(handle).writerows(rows)
     return path

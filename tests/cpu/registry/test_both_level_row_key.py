@@ -163,7 +163,12 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
             continue
         # This specialized projection is called only by the SWA atom module;
         # the older shared sigmoid kernels still serve all three streams.
-        want = ({"atom"} if r["kernel"] == "swa_gate_out_fwd_triton"
+        # ops.gated_residual (gated_projection/triton/residual.py): the SWADiTBlock per-op residual, atom stream only. The bias-only DiT's
+        # pair LayerNorm + bias projection (bias_only_attention/triton/pair_bias.py) reads the pair stream and nothing else.
+        want = ({"atom"} if r["kernel"] in ("swa_gate_out_fwd_triton", "gated_projection_fwd_residual_triton",
+                                              "gated_projection_bwd_residual_triton")
+                else {"pair"} if r["kernel"] in ("bias_only_attention_layernorm_gemm_triton",
+                                                 "bias_only_attention_bwd_layernorm_gemm_triton")
                 else {"pair", "atom", "msa"} if r["kernel"] == "transition_fwd_b2b_triton"
                 else expect.get(r["family"]))
         got = {x for x in (r.get("sides") or "").split("|") if x}

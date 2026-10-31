@@ -300,10 +300,13 @@ def portable_forced(impl: ImplementationType | str = ImplementationType.MINIWORL
     return settings.current().force_portable_kernels and _coerce(impl) == ImplementationType.MINIWORLD
 
 
-def portable_leg_allowed(device: torch.device | None = None, op: str | None = None, *, training: bool = False) -> bool:
+def portable_leg_allowed(
+    device: torch.device | None = None, op: str | None = None, *, training: bool = False, dtype: str = "bf16"
+) -> bool:
     """May a module run its portable leg on ``device``? False on H100 / B200 (see :func:`restricted_card`): the module takes its
     PyTorch leg. With ``op``, also False on a card without a record for what the call launches (:func:`route_for_card`, forward
-    kernels only unless ``training``: one warning per op, card and mode). ``force_portable_kernels`` allows it everywhere."""
+    kernels only unless ``training``, the rows at ``dtype`` -- the precision the kernels run at, :func:`record_dtype` of the activation:
+    one warning per op, card and mode). ``force_portable_kernels`` allows it everywhere."""
     if restricted_card(device):
         return False
     if op is None:
@@ -312,7 +315,7 @@ def portable_leg_allowed(device: torch.device | None = None, op: str | None = No
 
     if settings.current().force_portable_kernels:
         return True
-    return _card_gate(op, device, False, "training" if training else "inference") is not KernelBackend.PYTORCH
+    return _card_gate(op, device, False, "training" if training else "inference", dtype) is not KernelBackend.PYTORCH
 
 
 def _torch_on_hopper_blackwell(default: KernelBackend) -> Callable[[torch.device | None], KernelBackend]:

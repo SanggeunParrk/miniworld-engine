@@ -77,7 +77,7 @@ def pair_bias_all(blocks, pair: torch.Tensor, *, implementation: ImplementationT
             return _fused.pair_bias_all_infer(attns, pair)
         return _fused.pair_bias_all_psb(attns, pair)
     if (impl == ImplementationType.MINIWORLD and pair.ndim == 4 and _pair_bias_supported(pair, len(attns) * H)
-            # the one-pass kernels have no registry row (autotune.records.UNREGISTERED_OPS): off H100 / B200 the PyTorch fold below
+            # the one-pass kernels (op bias_only_pair_bias) need the card's record: without it, off H100 / B200, the PyTorch fold below
             and not (pair.is_cuda and portable_blocked("bias_only_pair_bias", pair.device, pair, attns[0].to_bias.weight))):
         return _portable(attns, pair, eps)
     return _reference(attns, pair, eps)

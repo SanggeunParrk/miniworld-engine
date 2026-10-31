@@ -359,9 +359,15 @@ def transition_squeeze_residual_triton():
     w = rows2d(K_SMALL, N_EXPAND * K_SMALL)
     r = rows2d(ROWS, K_SMALL)
     out = squeeze_residual(h, w, r, SHAPE_KEY)
+    # Few rows and a long K: the launcher splits K (`residual._split_k`: 24 output tiles at 128 x 768 leave the SMs of every card
+    # from an A100 up idle, so it cuts K 8 ways) and `_split_k_residual_kernel` sums the fp32 partials in order and adds the
+    # residual. That reduction has no registry row of its own; this case is its evidence, under this kernel's row.
+    hs, ws, rs = rows2d(128, 3072), rows2d(768, 3072), rows2d(128, 768)
+    out_split = squeeze_residual(hs, ws, rs, SHAPE_KEY)
     _exact_reference()
     expected = ((h.float() @ w.float().T).to(h.dtype).float() + r.float()).to(r.dtype)
-    return out, expected
+    expected_split = ((hs.float() @ ws.float().T).to(hs.dtype).float() + rs.float()).to(rs.dtype)
+    return {"out": (out, expected), "out_split_k": (out_split, expected_split)}
 
 
 # ── native Hopper (sm90) CUDA kernels ────────────────────────────────────────────────────────

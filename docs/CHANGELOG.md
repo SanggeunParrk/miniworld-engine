@@ -10,6 +10,16 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Fixed
 
+- The record gate asks an fp32 call for fp32 rows in `LocalDiTBlock`, the DiT variant stacks, `SWADiTBlock` and the SWA atom attention too
+  (`dispatch.portable_leg_allowed(..., dtype=)`). H100 / B200 unchanged. Record: `docs/records/triton_gate_rows_20261031.md`.
+- Registry rows (driver, check, H100-calibrated band, config ladders) for the Triton kernels that had none: `gated_projection_fwd_residual_triton`
+  / `_bwd_residual_triton` (`ops.gated_residual`), `bias_only_attention_layernorm_gemm_triton` / `_bwd_layernorm_gemm_triton` (the bias-only
+  DiT pair bias), `mpnn_message_fwd_gemm_gelu_reduce_triton` (MPNN's no-grad message fusion). Their default config set is the launch they had,
+  so an untuned card runs what it ran. `records.UNREGISTERED_OPS` is empty.
+- `augmented_attention_bwd_reduce_triton` (fp32 partials) is counted for bf16 training calls and asked at fp32 (`records._RUNS_AT`): A100 /
+  A5000 training of the token attention and the DiT variant stacks now warn until those cards hold its fp32 row.
+- `augmented_attention_bwd_atomic_triton` (`kernel_type="memory_efficient"`) is `developed=yes` and counted by the gate.
+- `transition_squeeze_residual_triton`'s check drives a split-K shape, so `_split_k_residual_kernel` is checked under that row.
 - Off H100 / B200, every Triton kernel a public entry point launches is now behind the record gate (`docs/dispatch.md`; audit:
   `docs/records/triton_gate_audit_20261031.md`). H100 and B200 run what they ran.
   - Gated now (a card without the record warns once and runs the PyTorch statements): `ops.rms_norm_modulation`, `ops.layer_norm_linear`,

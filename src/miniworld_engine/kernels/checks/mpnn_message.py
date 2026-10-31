@@ -66,3 +66,10 @@ def mpnn_message_bwd_dx_triton():
 def mpnn_message_bwd_reduce_dbias_triton():
     """_gelu_reduce_db_bwd_kernel: the reduction's backward and the bias gradient with it."""
     return _gradients()
+
+
+def mpnn_message_fwd_gemm_gelu_reduce_triton():
+    """_message_inference_kernel: projection, GELU and the masked neighbour reduction in one pass, autograd off (the only way
+    production reaches it), against the fp32 reference."""
+    with torch.no_grad():
+        return _pair()

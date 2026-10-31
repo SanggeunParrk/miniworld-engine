@@ -90,7 +90,7 @@ class BiasOnlyAttention(nn.Module):
             and self.ln_pair.weight is not None and getattr(self.ln_pair, "bias", None) is None and self.to_bias.bias is None
             and (pair.requires_grad or self.ln_pair.weight.requires_grad or self.to_bias.weight.requires_grad)
             and _pair_bias_supported(pair, self.n_head)
-            # its two Triton kernels have no registry row (autotune.records.UNREGISTERED_OPS): off H100 / B200 the PyTorch statements
+            # its two Triton kernels (op bias_only_pair_bias) need the card's record: without it, off H100 / B200, the PyTorch statements
             and not portable_blocked("bias_only_pair_bias", pair.device, pair, self.ln_pair.weight, self.to_bias.weight))
 
     def _feature_major_psb(self, single) -> bool:

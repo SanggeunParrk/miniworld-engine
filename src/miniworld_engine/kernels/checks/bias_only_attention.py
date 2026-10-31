@@ -17,6 +17,7 @@ from miniworld_engine.kernels.checks import (
     _fwd_saved,
     _grads,
     _lse2,
+    _no_tf32,
     _rowsum,
 )
 from miniworld_engine.kernels.drivers import BF16, TensorKw, dev
@@ -111,3 +112,40 @@ def gated_projection_bwd_dx_triton() -> dict[str, Pair]:
         "d_gate": (dg, da * r * s * (1.0 - s)),
         "gated": (a, s * r),
     }
+
+
+def _pair_bias_ref(pair, gamma, weight, eps=1e-5) -> torch.Tensor:
+    """``to_bias(ln_pair(pair))`` head-major, the unfused statements in fp32 (no offset in the LayerNorm, none in the projection)."""
+    z = torch.nn.functional.layer_norm(pair.float(), (pair.shape[-1],), gamma.float(), None, eps)
+    return torch.nn.functional.linear(z, weight.float()).permute(0, 3, 1, 2)
+
+
+def bias_only_attention_layernorm_gemm_triton() -> Pair:
+    """_ln_bias_fwd_kernel: the head-major logits against LayerNorm + projection in fp32."""
+    from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import (
+        pair_bias_logits,
+    )
+    from miniworld_engine.kernels.drivers.bias_only_attention import _pair_bias_inputs
+
+    pair, gamma, weight = _pair_bias_inputs()
+    with _no_tf32():
+        ref = _pair_bias_ref(pair, gamma, weight)
+    return pair_bias_logits(pair, gamma, weight, 1e-5), ref
+
+
+def bias_only_attention_bwd_layernorm_gemm_triton() -> dict[str, Pair]:
+    """_ln_bias_bwd_kernel: d pair, d gamma, d W against autograd over the fp32 reference, with a random upstream gradient."""
+    from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import (
+        pair_bias_logits,
+    )
+    from miniworld_engine.kernels.drivers.bias_only_attention import _pair_bias_inputs
+
+    pair, gamma, weight = _pair_bias_inputs(grad=True)
+    out = pair_bias_logits(pair, gamma, weight, 1e-5)
+    dl = torch.randn_like(out)
+    out.backward(dl)
+    got = (pair.grad, gamma.grad, weight.grad)
+    ins = [t.detach().clone().requires_grad_() for t in (pair, gamma, weight)]
+    with _no_tf32():
+        _pair_bias_ref(*ins).backward(dl.float())
+    return {name: (g, r.grad) for name, g, r in zip(("dpair", "dgamma", "dweight"), got, ins, strict=True)}

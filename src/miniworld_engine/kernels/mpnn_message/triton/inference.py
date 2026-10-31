@@ -3,12 +3,19 @@
 Unlike the training implementation, this path does not materialize the
 ``[..., 48, 128]`` projected activation needed by backward.  It is therefore
 selected only while autograd is disabled.
+
+Registered as ``mpnn_message_fwd_gemm_gelu_reduce_triton``. Its two launch policies (one residue per CTA up to 2048 residue groups, two
+above: the A5000 winners) are the default config set, and the early prune picks the one the group count asks for outside a build, so a
+card with no tuned cache runs exactly what it ran; the grid set is what a build searches. Every config must hold its groups' rows in
+one tile (``BLOCK_M >= GROUPS_PER_CTA * 48``): the prune drops the rest always, a build included.
 """
 
 from __future__ import annotations
 
 import torch
 
+from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.autotune.shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
@@ -25,6 +32,25 @@ def _gelu(x):
     return 0.5 * x * (1.0 + tl.erf(x * 0.7071067811865476))
 
 
+def _policy_groups(groups: int) -> int:
+    """Residue groups per CTA of the fixed policy: 1 up to ``_SMALL_GROUP_LIMIT`` groups, 2 above."""
+    return 1 if groups <= _SMALL_GROUP_LIMIT else 2
+
+
+def _prune(configs, nargs, **meta):
+    """Configs whose row tile holds their groups (always); outside a build, the policy's groups per CTA for this group count."""
+    from miniworld_engine import settings
+
+    valid = [c for c in configs if c.kwargs["BLOCK_M"] >= c.kwargs["GROUPS_PER_CTA"] * _NEIGHBORS]
+    if settings.current().run_autotune:
+        return valid
+    groups = int(nargs["groups"] if "groups" in nargs else meta["groups"])
+    keep = [c for c in valid if c.kwargs["GROUPS_PER_CTA"] == _policy_groups(groups)]
+    return keep or valid
+
+
+@triton.autotune(configs=configs_for("mpnn_message_fwd_gemm_gelu_reduce_triton"), key=["shape_key"],
+                 prune_configs_by={"early_config_prune": _prune})
 @triton.jit
 def _message_inference_kernel(
     preactivation_ptr,
@@ -34,6 +60,7 @@ def _message_inference_kernel(
     reduced_ptr,
     groups,
     neighbor_scale,
+    shape_key,
     HIDDEN: tl.constexpr,
     NEIGHBORS: tl.constexpr,
     GROUPS_PER_CTA: tl.constexpr,
@@ -127,21 +154,10 @@ def _inference_op(
         dtype=torch.float32,
     )
 
-    if groups <= _SMALL_GROUP_LIMIT:
-        # A5000 B=1,L=2048 winner: one residue per CTA, coalesced W load.
-        groups_per_cta = 1
-        block_m, block_k = 64, 16
-        warps, stages = 2, 3
-        coalesced_weight_load = True
-    else:
-        # A5000 B=4,L=2048 winner.  Two residues share one CTA, halving the
-        # output grid and amortizing weight traffic.
-        groups_per_cta = 2
-        block_m, block_k = 128, 32
-        warps, stages = 4, 3
-        coalesced_weight_load = False
-
-    grid = lambda meta: (triton.cdiv(groups, groups_per_cta),)  # noqa: E731
+    # The launch policies (default config set, mpnn_message_fwd_gemm_gelu_reduce_triton.csv): up to 2048 groups the A5000 B=1, L=2048
+    # winner (one residue per CTA, coalesced W load: BLOCK_M 64, BLOCK_K 16, 2 warps); above, the B=4 one (two residues share a CTA,
+    # halving the output grid and amortizing weight traffic: BLOCK_M 128, BLOCK_K 32, 4 warps); both 3 stages.
+    grid = lambda meta: (triton.cdiv(groups, meta["GROUPS_PER_CTA"]),)  # noqa: E731
     _message_inference_kernel[grid](
         preactivation,
         weight,
@@ -150,15 +166,10 @@ def _inference_op(
         reduced,
         groups,
         neighbor_scale,
+        shape_key=both_key(groups * _NEIGHBORS, G=_policy_groups(groups)),
         HIDDEN=_HIDDEN,
         NEIGHBORS=_NEIGHBORS,
-        GROUPS_PER_CTA=groups_per_cta,
-        BLOCK_M=block_m,
         BLOCK_N=_HIDDEN,
-        BLOCK_K=block_k,
-        COALESCED_WEIGHT_LOAD=coalesced_weight_load,
-        num_warps=warps,
-        num_stages=stages,
     )
     return reduced.reshape(*preactivation.shape[:-2], _HIDDEN)
 

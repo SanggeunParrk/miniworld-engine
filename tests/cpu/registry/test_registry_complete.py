@@ -96,6 +96,10 @@ def test_level_is_consistent_within_a_family() -> None:
     specialized = {
         "qk_norm_rope_fwd_triton": ("rope", "both"),
         "qk_norm_rope_bwd_triton": ("rope", "both"),
+        # the bias-only DiT's pair LayerNorm + projection runs bf16 and fp32 (an fp32 DiT trains through it), which a token-level row
+        # cannot declare; it keys on its row count like every level=both kernel
+        "bias_only_attention_layernorm_gemm_triton": ("bias_only_attention", "both"),
+        "bias_only_attention_bwd_layernorm_gemm_triton": ("bias_only_attention", "both"),
     }
     # Q/K fusion uses the shared row-count key convention; standalone 3D RoPE
     # retains atom indexing. Family membership does not force identical key layouts.
@@ -428,11 +432,9 @@ def test_a_launch_site_does_not_pin_what_the_tuner_owns() -> None:
     #: kernel -> why it launches with a pinned config. The mpnn families arrived from a branch that
     #: predates the autotune machinery; porting them is in progress and this is the checklist.
     #: `_zero_bias_grad_kernel` fills a buffer with zeros in one program.
-    #: `_message_inference_kernel` is the pre-existing forward-only 48x128 fusion,
-    #: with two measured A5000 configurations selected by group count. It is not
-    #: registered/cache-built. Its old wrap_triton(kernel)[grid] launch escaped this
-    #: direct-launch scan; switching to an opaque boundary exposes the existing gap.
-    #: Keep it explicit until it has a driver, checker and autotune ladder.
+    #: `_message_inference_kernel` (mpnn_message_fwd_gemm_gelu_reduce_triton) and the bias-only pair-bias pair
+    #: (`_ln_bias_fwd_kernel` / `_ln_bias_bwd_kernel`) were ported 2026-10-31: registry rows, drivers, checkers, ladders;
+    #: their former fixed launches are the default config set (docs/records/triton_gate_audit_20261031.md).
     # H100's live weight pack is an untuned copy/reorder helper (BLOCK=1024,
     # four warps), not a registered GEMM or an autotuned launch.
     # `_fold` (kernels/trimul_inproj/cuda/h100_wide_inference.py) is the same kind: one program per
@@ -441,8 +443,7 @@ def test_a_launch_site_does_not_pin_what_the_tuner_owns() -> None:
     # `_cast_kernel` (kernels/_cast.py) is a one-pass dtype copy of a few weights; `_ln_bias_fwd_kernel` / `_ln_bias_bwd_kernel`
     # (kernels/bias_only_attention/triton/pair_bias.py) are memory-bound row passes whose single axis (rows per program) was swept once on an H100
     # (docs/records/portable_bodit_ct_training_20261026.md); none has a registry row, ladder or driver.
-    NOT_TUNED = {"_zero_bias_grad_kernel", "_message_inference_kernel", "_pack", "_fold",
-                 "_cast_kernel", "_ln_bias_fwd_kernel", "_ln_bias_bwd_kernel"}
+    NOT_TUNED = {"_zero_bias_grad_kernel", "_pack", "_fold", "_cast_kernel"}
     pinned: dict[str, str] = {}
     for path in sorted(SRC.rglob("*.py")):
         try:

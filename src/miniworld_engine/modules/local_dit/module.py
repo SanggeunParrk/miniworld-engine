@@ -196,7 +196,8 @@ class LocalDiTBlock(DiTBlock):
 
         if self.attention.implementation != ImplementationType.MINIWORLD or not x.is_cuda:
             return False
-        if not dispatch.portable_leg_allowed(x.device, "local_dit", training=dispatch.needs_backward(self, x)):
+        # the window core runs in the activation's dtype: an fp32 call asks the card's fp32 rows
+        if not dispatch.portable_leg_allowed(x.device, "local_dit", training=dispatch.needs_backward(self, x), dtype=dispatch.record_dtype(x)):
             return False
         why = (
             f"head width {head_dim} > 64" if head_dim > 64

@@ -86,3 +86,21 @@ def swa_gate_out_fwd_triton() -> None:
     )
     with torch.no_grad():
         swa_gate_out_inference(*_swa_gate_inputs())
+
+
+# ── gated_projection/triton/residual.py: x + gate * branch (ops.gated_residual) ─────────────────
+
+def gated_projection_fwd_residual_triton() -> None:
+    """_forward, via the kernel module's own gated_residual (not the ``ops`` facade, which a card without a record would send to
+    PyTorch)."""
+    from miniworld_engine.kernels.gated_projection.triton.residual import gated_residual
+
+    gated_residual(_x(), _x(), _x())
+
+
+def gated_projection_bwd_residual_triton() -> None:
+    """_backward, via _GatedResidual.backward."""
+    from miniworld_engine.kernels.gated_projection.triton.residual import gated_residual
+
+    x, gate, branch = _x().requires_grad_(), _x().requires_grad_(), _x().requires_grad_()
+    gated_residual(x, gate, branch).backward(_x())

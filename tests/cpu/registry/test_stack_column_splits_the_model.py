@@ -45,6 +45,11 @@ def test_a_family_does_not_straddle_the_two_halves() -> None:
             # SWA-only output projection shares its GEMM family with trunk gates.
             assert (r["family"], r["stack"]) == ("gated_projection", "diffusion")
             continue
+        if r["kernel"] in ("bias_only_attention_layernorm_gemm_triton", "bias_only_attention_bwd_layernorm_gemm_triton"):
+            # the bias-only DiT's pair-bias LayerNorm + projection lives with the family's trunk gate GEMMs (one package);
+            # the bias-only DiT block that launches it is a diffusion block
+            assert (r["family"], r["stack"]) == ("bias_only_attention", "diffusion")
+            continue
         by_family[r["family"]].add(r["stack"])
     split = {f: sorted(v) for f, v in by_family.items() if len(v) > 1}
     assert not split, (

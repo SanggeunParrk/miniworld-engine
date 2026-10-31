@@ -54,3 +54,9 @@ def mpnn_message_bwd_dx_triton() -> None:
 
 def mpnn_message_bwd_reduce_dbias_triton() -> None:
     _message(backward=True)
+
+
+def mpnn_message_fwd_gemm_gelu_reduce_triton() -> None:
+    """_message_inference_kernel: the same call with autograd off, which is when production takes the no-save full fusion."""
+    with torch.no_grad():
+        _message(backward=False)
