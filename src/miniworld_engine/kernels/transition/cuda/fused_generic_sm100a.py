@@ -49,6 +49,15 @@ _BNS = {"swiglu": (128, 64), "resid": (128, 64), "plain": (128, 64, 32), "gate":
 _BNS_F32 = {"swiglu": (128, 64, 32), "resid": (128, 64, 32), "plain": (128, 64, 32), "gate": (64, 32), "ctgate": (128, 64, 32),
             "swiglu_ab": (128, 64, 32), "gate_ab": (128, 64, 32)}
 _MODE = {"swiglu": 0, "resid": 1, "plain": 2, "gate": 3, "ctgate": 4, "swiglu_ab": 5, "gate_ab": 6}
+#: The CTA-pair builds (-DCTA2: cta_group::2, M = 256 products, each CTA bringing half of the B tile) and their output tile widths, taken
+#: by ``_K.gemm`` where the pair tiles fill the card at least twice: half the B-operand intake per output of the 1-CTA 128-row tiles, whose
+#: TMA intake bound the D768 training GEMMs (the SWIGLU_AB producer alone streamed its operands in 795 of its 1543 us). Kernels alone,
+#: bf16 [147 456 rows] d768 n4, us (1-CTA -> pair): SWIGLU_AB 1543 -> 1262-1290, RESID 626 -> 438 (cuBLAS addmm 503). Measured slower
+#: as pairs and kept on single CTAs: SWIGLU 1018 -> 1042, GATE_AB 1058 -> 1110 (epilogue-bound).
+_BNS2 = {"swiglu_ab": 128, "resid": 256}
+_BNS2_F32 = {"swiglu_ab": 128, "resid": 256}
+#: A/B switch for the pair builds
+CTA2 = True
 
 
 def _tf32_allowed() -> bool:
@@ -65,6 +74,8 @@ def _load(f32: bool):
     for name, mode in _MODE.items():
         for bn in (_BNS_F32 if f32 else _BNS)[name]:
             specs.append((f"{name}{bn}", "generic/tg_gemm.cu", (f"-DMODE={mode}", f"-DF32={int(f32)}", f"-DBN={bn}")))
+    for name, bn in (_BNS2_F32 if f32 else _BNS2).items():
+        specs.append((f"{name}{bn}x2", "generic/tg_gemm.cu", (f"-DMODE={_MODE[name]}", f"-DF32={int(f32)}", f"-DBN={bn}", "-DCTA2=1")))
     if f32:
         specs += [(f"fused{d}", "generic/tg_fused_f32.cu", (f"-DD={d}", f"-DBN={FUSED_F32_BN}")) for d in FUSED_F32_WIDTHS]
     for name, path in build_cubins(f"generic_{tag}", tuple(specs)).items():
@@ -239,15 +250,30 @@ class _K:
         output tile width (None: ``_pick_bn``); ``ks`` > 1: split K, slice s storing its fp32 partial at rows s ``mstride`` + m of o0."""
         if bn is None:
             bn = _pick_bn((_BNS_F32 if self.f32 else _BNS)[name], m, n, self.nsm)
+        bn2 = (_BNS2_F32 if self.f32 else _BNS2).get(name)
+        pair = CTA2 and ks == 1 and bn2 is not None and n % bn2 == 0 and -(-m // 256) * (n // bn2) >= self.nsm
+        if pair:
+            bn = bn2
+        bb = bn // 2 if pair else bn                      # B rows each CTA brings
         ocg = 32 if (self.f32 or name == "plain") else 64
         t = self.ext.tmap
         ma0 = t(a0, k0, m, self.bke, 128)
         ma1 = t(a1, k1, m, self.bke, 128) if a1 is not None else ma0
-        mb0 = t(b0, b0.shape[1], b0.shape[0], self.bke, bn)
-        mb1 = t(b1, b1.shape[1], b1.shape[0], self.bke, bn) if b1 is not None else mb0
-        mb2 = t(b2, b2.shape[1], b2.shape[0], self.bke, bn) if b2 is not None else mb0
+        mb0 = t(b0, b0.shape[1], b0.shape[0], self.bke, bb)
+        mb1 = t(b1, b1.shape[1], b1.shape[0], self.bke, bb) if b1 is not None else mb0
+        mb2 = t(b2, b2.shape[1], b2.shape[0], self.bke, bb) if b2 is not None else mb0
+        if name == "gate_ab":   # the epilogue TMA-loads the saved [a | b] (res) in its staging groups: OCG x 32 boxes
+            mb1 = t(res, res.shape[1], res.shape[0], ocg, 32)
         mo0 = t(o0, o0.shape[1], o0.shape[0], ocg, 32)
         mo1 = t(o1, o1.shape[1], o1.shape[0], ocg, 32) if o1 is not None else mo0
+        if pair:
+            tiles = -(-m // 256) * (n // bn)
+            self.ext.launch_kernel(
+                f"generic_{self.tag}_{name}{bn}x2", "tg_gemm_sm100", 2 * max(1, min(self.nsm // 2, tiles)), 320, 2,
+                [ma0, ma1, mb0, mb1, mb2, mo0, mo1, res if res is not None else o0, bias if bias is not None else o0,
+                 m, n, k0, k1, ldres, hoff, ks, mstride],
+            )
+            return
         tiles = -(-m // 128) * -(-n // bn) * ks
         self.ext.launch_kernel(
             f"generic_{self.tag}_{name}{bn}", "tg_gemm_sm100", max(1, min(self.nsm, tiles)), 320, 1,
