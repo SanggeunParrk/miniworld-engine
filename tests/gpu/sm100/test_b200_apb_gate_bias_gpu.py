@@ -33,6 +33,8 @@ CASES = [
     (16, 384, 128, 1.0),
     (8, 384, 128, 1.0),
     (12, 384, 128, 0.5),
+    (8, 384, 256, 0.0),  # 8 x 48 at a 256-wide pair: the 16-head backward schedule built at 8 heads
+    (8, 384, 256, 1.0),
 ]
 
 

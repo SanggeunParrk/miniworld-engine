@@ -263,12 +263,14 @@ constexpr int BOX_B = 128 * 64 * 2;
 template <int DPW = DP> constexpr int bt_pair() { return 128 * DPW * 2; }
 // 8 heads: two blocks per SM (128 registers), BWD_STAGES deep; 16 / 24 heads (64 / 96 dWf accumulators; 128 at d_pair 256): one
 // block per SM, 3 stages (d_pair 256: 3 x 72 KB, the shared memory's limit)
-template <int NH> constexpr int bwd_bps() { return NH == 8 ? 2 : 1; }   // (12 heads run as 16)
-template <int NH> constexpr int bwd_stages() { return NH == 8 ? BWD_STAGES : 3; }
+// 8 heads at d_pair 256 (the 8 x 48 block at a 256-wide pair) run as the 16-head schedule: one block, three stages (68 KB tiles), S2
+// from a first dx^ pass (the projection path YP holds the 128-wide B fragments only)
+template <int NH, int DPW = DP> constexpr int bwd_bps() { return NH == 8 && DPW == DP ? 2 : 1; }   // (12 heads run as 16)
+template <int NH, int DPW = DP> constexpr int bwd_stages() { return NH == 8 && DPW == DP ? BWD_STAGES : 3; }
 template <int NH, int DPW = DP> constexpr int bwd_tile() { return bt_pair<DPW>() + NH * 128 * 4; }   // pair, then dbias
 // + the tile's row statistics (rstd, mean of its 128 rows) when the dWf runs column-wise (d_pair 256, below)
 template <int NH, int DPW = DP> constexpr int bwd_smem() {
-  constexpr int red = 8 * (NH * DPW + NH) * 4, ring = bwd_stages<NH>() * bwd_tile<NH, DPW>();   // the end reduce reuses the ring
+  constexpr int red = 8 * (NH * DPW + NH) * 4, ring = bwd_stages<NH, DPW>() * bwd_tile<NH, DPW>();   // the end reduce reuses the ring
   return (ring > red ? ring : red) + 1024 + 64 + (DPW / 32) * 32 * 4 * (nhp<NH>() / 8) * 4 + (DPW > DP ? 2 * 128 * 4 : 0);
 }
 __device__ __forceinline__ uint32_t swz(int r, int c) {                     // byte offset of (row, column) in a swizzled pair tile
@@ -301,12 +303,11 @@ __device__ __forceinline__ void ldsm_x4_trans(uint32_t (&r)[4], uint32_t addr) {
 // accumulators) over every row group of the tile, its B = rstd dbias built from shared memory, the mean term over all the tile's rows
 // (so a warp's dWf columns are the block's: no sum over warps). Fixed order: deterministic.
 template <int NH, int DPW, bool BAT>
-__global__ void __launch_bounds__(256, bwd_bps<NH>()) pair_bias_bwd_k(const __grid_constant__ CUtensorMap tmz, const __grid_constant__ CUtensorMap tmd,
+__global__ void __launch_bounds__(256, bwd_bps<NH, DPW>()) pair_bias_bwd_k(const __grid_constant__ CUtensorMap tmz, const __grid_constant__ CUtensorMap tmd,
     const bf* __restrict__ W, bf* __restrict__ DZ, float* __restrict__ AWF, float* __restrict__ AHS, int L, float eps, int acc_stride, int S) {
-  constexpr int NT8 = nhp<NH>() / 8, BW = NT8, BT = bwd_tile<NH, DPW>(), NSB = bwd_stages<NH>();   // BW: dx^ B words per tile (one per group)
+  constexpr int NT8 = nhp<NH>() / 8, BW = NT8, BT = bwd_tile<NH, DPW>(), NSB = bwd_stages<NH, DPW>();   // BW: dx^ B words per tile (one per group)
   constexpr int BTP = bt_pair<DPW>(), NU = DPW / 32, NMT = DPW / 16;
-  constexpr bool YP = NH == 8;                                              // S2 from the projection y (8) or a first dx^ pass (16)
-  static_assert(!YP || DPW == DP, "8 heads: d_pair 128 only");
+  constexpr bool YP = NH == 8 && DPW == DP;                                 // S2 from the projection y (8 x 128) or a first dx^ pass
   constexpr bool CW = DPW > DP;                                             // column-wise dWf (d_pair 256)
   static_assert(!CW || DPW == 8 * 32, "column-wise dWf: 8 warps x 32 columns");
   constexpr int NACC = CW ? 2 : NMT;                                        // dWf tiles a warp holds
@@ -1043,7 +1044,7 @@ void pair_bias_bwd_t(const at::Tensor& z, const at::Tensor& dbias, const at::Ten
   }
   const long ntiles = ns * L * ((L + 127) / 128);
   float* awf = P<float>(acc) + 2 * G.d + width(G);
-  (ns > 1 ? pair_bias_bwd_k<NH, DPW, true> : pair_bias_bwd_k<NH, DPW, false>)<<<(unsigned)std::min<long>((long)bwd_bps<NH>() * nsm_of(z), ntiles),
+  (ns > 1 ? pair_bias_bwd_k<NH, DPW, true> : pair_bias_bwd_k<NH, DPW, false>)<<<(unsigned)std::min<long>((long)bwd_bps<NH, DPW>() * nsm_of(z), ntiles),
       256, bwd_smem<NH, DPW>(), S()>>>(mz, md, CP<bf>(w), P<bf>(dz), awf, awf + NH * DPW, (int)L, (float)eps,
                                        acc.dim() == 2 ? (int)acc.size(1) : 0, (int)ns);
 }
@@ -1051,7 +1052,7 @@ void pair_bias_bwd_t(const at::Tensor& z, const at::Tensor& dbias, const at::Ten
 void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, at::Tensor acc, int64_t L, double eps, int64_t d) {
   chk(z, at::kBFloat16, "pair"); chk(dbias, at::kFloat, "dbias"); chk(w, at::kBFloat16, "wf"); chk(dz, at::kBFloat16, "dpair");
   const int64_t nh = w.size(0), dp = w.size(1);
-  TORCH_CHECK(dp == DP || (dp == 2 * DP && nh == 16), "pair_bias_bwd: d_pair 128, or 256 with 16 heads");
+  TORCH_CHECK(dp == DP || (dp == 2 * DP && (nh == 8 || nh == 16)), "pair_bias_bwd: d_pair 128, or 256 with 8 or 16 heads");
   Geo G = geo(nh, d);
   G.dp = (int)dp;
   chk_acc(acc, G);
@@ -1059,7 +1060,7 @@ void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, 
   TORCH_CHECK(L % 16 == 0 && ns >= 1 && z.numel() == ns * L * L * dp && dbias.numel() == ns * nh * L * L && dz.numel() == z.numel(),
               "pair_bias_bwd shapes: pair [S, L, L, d_pair], dbias [S, H, L, L]");
   const at::cuda::CUDAGuard gd(z.device());
-  if (dp == 2 * DP) pair_bias_bwd_t<16, 2 * DP>(z, dbias, w, dz, acc, L, eps, G);
+  if (dp == 2 * DP) { if (nh == 16) pair_bias_bwd_t<16, 2 * DP>(z, dbias, w, dz, acc, L, eps, G); else pair_bias_bwd_t<8, 2 * DP>(z, dbias, w, dz, acc, L, eps, G); }
   else if (nh == 8) pair_bias_bwd_t<8>(z, dbias, w, dz, acc, L, eps, G);
   else if (nh == 12) pair_bias_bwd_t<12>(z, dbias, w, dz, acc, L, eps, G);
   else if (nh == 16) pair_bias_bwd_t<16>(z, dbias, w, dz, acc, L, eps, G);
@@ -1068,8 +1069,8 @@ void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, 
 }
 
 // Blocks of pair_bias_bwd's grid at L (the partial rows it writes): the Hopper accumulator's row count for its columns.
-int64_t pair_bwd_blocks(at::Tensor like, int64_t nh, int64_t L, int64_t ns) {
-  const int bps = nh == 8 ? 2 : 1;
+int64_t pair_bwd_blocks(at::Tensor like, int64_t nh, int64_t L, int64_t ns, int64_t dp) {
+  const int bps = nh == 8 && dp == DP ? 2 : 1;                             // bwd_bps<NH, DPW>()
   return std::min<int64_t>((int64_t)bps * nsm_of(like), ns * L * ((L + 127) / 128));
 }
 
@@ -1594,7 +1595,7 @@ std::vector<at::Tensor> train_bwd(const at::Tensor& single, const at::Tensor& pa
   const at::Tensor &xa = saved[0], &st = saved[1], &qkvg = saved[2], &bias = saved[3], &O = saved[4], &LSE = saved[5], &og = saved[6],
                    &wf = saved[7], &wpack = saved[8], &wop = saved[9], &wbo = saved[10];
   const at::Tensor x = single.view({M, D}), dy2 = dy.contiguous().view({M, D});
-  const int64_t ra = std::min<int64_t>(blocks(M), 2L * nsm_of(x)), rb = pair_bwd_blocks(x, H, L, NB);
+  const int64_t ra = std::min<int64_t>(blocks(M), 2L * nsm_of(x)), rb = pair_bwd_blocks(x, H, L, NB, dp);
   at::Tensor acc = at::empty({std::max(ra, rb), (int64_t)acc_n(G.d, G.nh, (int)W, G.dp)}, opts(x, at::kFloat));
   const at::Tensor dog = at::mm(dy2, wop);                                   // [M, W]: zero in the pads
   const at::Tensor dwo = at::mm(dy2.t(), og, at::kFloat);
@@ -2441,7 +2442,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("exact_bias_add", &apb_exact::bias_add);
   m.def("exact_db_transpose", &apb_exact::db_transpose);
   m.def("zero_acc", &zero_acc);
-  m.def("pair_bwd_blocks", &pair_bwd_blocks, py::arg("like"), py::arg("nh"), py::arg("L"), py::arg("ns") = 1);
+  m.def("pair_bwd_blocks", &pair_bwd_blocks, py::arg("like"), py::arg("nh"), py::arg("L"), py::arg("ns") = 1, py::arg("dp") = 128);
   m.def("pair_bias_fwd", &pair_bias_fwd);
   m.def("pair_bias_fwd_stats", &pair_bias_fwd_stats);
   m.def("pair_bias_bwd", &pair_bias_bwd);

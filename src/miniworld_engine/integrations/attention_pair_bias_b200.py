@@ -118,7 +118,9 @@ def _eligible(
     native = capability in ((9, 0), (10, 0))
     trains = capability == (10, 0) or not torch.is_grad_enabled()
     if dp == WIDE_DP:
-        if not (native and H == WIDE_HEADS and trains):
+        # 16 heads (Chai-1; H100 inference, B200 both); 8 heads (8 x 48 at a 256-wide pair) on B200: pair_bias_fwd's 256-wide ring for 8
+        # heads, pair_bias_bwd's 16-head schedule (one block, three stages, S2 from a dx^ pass) built at 8
+        if not (native and trains and (H == WIDE_HEADS or (H == 8 and capability == (10, 0)))):
             return False
     elif dp != DP or (module.gate_bias and (not native or not trains)):
         return False
@@ -514,7 +516,7 @@ def backward(
         rows_a = (M + rows.RW - 1) // rows.RW
         if _cap(x.device) != (9, 0):
             rows_a = min(rows_a, 2 * _nsm(x.device))
-        rows_b = E.pair_bwd_blocks(x, H, L, NB)
+        rows_b = E.pair_bwd_blocks(x, H, L, NB, dp)
         acc = torch.empty(max(rows_a, rows_b), rows.acc_n(H, D, dp), device=x.device)
         dog = dy2 @ wo  # [L, W]: zero in the pads (Wo's pad columns are zero)
         dwo = torch.mm(
