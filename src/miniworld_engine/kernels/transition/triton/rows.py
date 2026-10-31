@@ -14,8 +14,8 @@ torch.compile'd PyTorch at these widths. Here a program owns a 128-row tile and 
   and per-program dgamma / dbeta partials summed in program order (no atomics: a replay is bit-identical).
 
 Operands move by TMA (host tensor descriptors: the row tail of the last tile is zero-filled on the way in and clipped on the way out).
-The forward also takes fp32 activations (TF32 products, operands rounded to nearest: weights once in the launcher, xn and h in the
-kernel, the contract of ``kernels/_tf32.py``), but ``serves`` does not route them yet (see ``_FWD``).
+The forward also takes fp32 activations for inference (TF32 products, operands rounded to nearest: weights once in the launcher, xn and
+h in the kernel, the contract of ``kernels/_tf32.py``) at hidden = 4 d (``FP32_EXPANSION``).
 
 The tile shapes are fixed per (dtype, d): measured on the B200 (CUDA-graph replay, [589 824, d] rows, n = 4) over BLOCK_M 64 / 128,
 BLOCK_N 32 / 64 / 128, 4 / 8 warps, 1-3 stages; there is no autotune key for these kernels, and other cards keep the split path
@@ -32,11 +32,17 @@ from miniworld_engine.kernels._fastmath import sigmoid_fast
 from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many
 
 #: (dtype, d) -> (BLOCK_M, BLOCK_N, num_warps, num_stages), measured on the B200 (fwd alone, d = 128, L768 pair: 328 us; d = 64: 128 us).
-#: bf16 only: the fp32 (TF32) forward measured 1.7-1.9x faster than torch.compile (d128 n4 L768 833 vs 1439 us, n2 L384 130 vs 241 us) but
-#: then also beat the generic hand-CUDA fp32 kernels (n2 L384 147 us, n4 L384 217 us), so it waits for a fused fp32 CUDA forward.
-_FWD = {(torch.bfloat16, 64): (128, 64, 4, 2), (torch.bfloat16, 128): (128, 32, 4, 2)}
+#: The fp32 (TF32) forward (inference only, see FP32_EXPANSION) is 1.7-1.9x faster than torch.compile (d128 n4 L768 833 vs 1439 us).
+_FWD = {(torch.bfloat16, 64): (128, 64, 4, 2), (torch.bfloat16, 128): (128, 32, 4, 2),
+        (torch.float32, 64): (64, 32, 4, 2), (torch.float32, 128): (64, 32, 4, 2)}
 #: the backward (bf16 only; d = 128 L768: 1.34 ms, d = 64: 0.47 ms; BLOCK_M 64 at d = 128 ties at L768 and loses at L128, 131 vs 116 us)
 _BWD = {(torch.bfloat16, 64): (128, 32, 4, 2), (torch.bfloat16, 128): (128, 64, 8, 2)}
+
+
+#: fp32 (TF32) inference takes the row-fused forward at this expansion only (hidden = 4 d): there the hand-CUDA forward
+#: (cuda/sm100/generic/tg_fused_f32.cu) is faster than it (d128 L384 197 vs 218 us, L768 732 vs 833); at hidden = 2 d it is not yet
+#: (L128 27.0 vs 19.5, L384 130 vs 130), and the split path keeps the call
+FP32_EXPANSION = 4
 
 
 def _desc(t: torch.Tensor, block):
@@ -46,7 +52,8 @@ def _desc(t: torch.Tensor, block):
 
 
 def serves(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor, training: bool) -> bool:
-    """sm_100 (B200), d = 64 or 128, a hidden width that is a multiple of 64, bf16 activations and weights."""
+    """sm_100 (B200), d = 64 or 128, a hidden width that is a multiple of 64, bf16 activations and weights; fp32 (TF32) for inference at
+    hidden = 4 d."""
     if x.device.type != "cuda" or x.numel() == 0 or x.ndim < 2:
         return False
     if torch.cuda.get_device_capability(x.device)[0] != 10:
@@ -59,6 +66,8 @@ def serves(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor, training: bool) 
     if tuple(wa.shape) != (nd, d) or tuple(ws.shape) != (d, nd) or nd % 64:
         return False
     if wa.dtype != x.dtype or ws.dtype != x.dtype:
+        return False
+    if x.dtype is torch.float32 and nd != FP32_EXPANSION * d:
         return False
     if x.dtype is torch.float32:   # TF32 only where torch allows it (the split path keeps IEEE fp32 otherwise)
         from miniworld_engine.kernels._dot_precision import dot_precision

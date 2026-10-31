@@ -85,6 +85,48 @@ def test_rows_portable_matches_reference(d, n, shape, train, monkeypatch):
         settings.reset()
 
 
+def test_rows_fp32_inference_matches_fp64():
+    """fp32 (TF32) inference at hidden = 4 d: the row-fused forward against fp64, no worse than the split path."""
+    import miniworld_engine.kernels.transition.triton.rows as rows
+
+    old = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True
+    settings.reset()
+    settings.configure(force_portable_kernels=True)
+    try:
+        for d, shape in ((128, (1, 37, 40)), (64, (1, 50, 50))):
+            torch.manual_seed(0)
+            m = Transition(d, n=4, implementation=ImplementationType.MINIWORLD).cuda().float().eval()
+            with torch.no_grad():
+                m.squeeze.weight.normal_(std=(d * 4) ** -0.5)
+                m.ln_in.weight.uniform_(0.5, 1.5)
+                m.ln_in.bias.uniform_(-0.2, 0.2)
+            ref = Transition(d, n=4, implementation=ImplementationType.PYTORCH).cuda().double()
+            ref.load_state_dict(m.state_dict())
+            x = torch.randn(*shape, d, device="cuda")
+            with torch.no_grad():
+                yr = ref._torch_forward(x.double())
+                calls = []
+                real = rows.transition_rows
+                rows.transition_rows = lambda *a, **k: calls.append(1) or real(*a, **k)
+                try:
+                    yrow = m(x).double() - x.double()
+                finally:
+                    rows.transition_rows = real
+                assert calls, "fp32 inference did not take the row-fused forward"
+                orig = rows.serves
+                rows.serves = lambda *a, **k: False
+                try:
+                    ysplit = m(x).double() - x.double()
+                finally:
+                    rows.serves = orig
+            e_rows, e_split = ((yrow - yr).norm() / yr.norm()).item(), ((ysplit - yr).norm() / yr.norm()).item()
+            assert e_rows <= 1.1 * e_split + 1e-6 and e_rows < 1e-3, (d, e_rows, e_split)
+    finally:
+        settings.reset()
+        torch.backends.cuda.matmul.allow_tf32 = old
+
+
 def test_rows_serves_gate():
     from miniworld_engine.kernels.transition.triton.rows import serves
 
@@ -92,6 +134,13 @@ def test_rows_serves_gate():
     wa = torch.randn(512, 128, device="cuda", dtype=torch.bfloat16)
     ws = torch.randn(128, 512, device="cuda", dtype=torch.bfloat16)
     assert serves(x, wa, ws, True) and serves(x, wa, ws, False)
-    assert not serves(x.float(), wa.float(), ws.float(), False)            # fp32 keeps the split path (see rows._FWD)
+    old = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        assert serves(x.float(), wa.float(), ws.float(), False)            # fp32 (TF32) inference at hidden = 4 d
+        assert not serves(x.float(), wa.float(), ws.float(), True)         # fp32 training keeps the split path
+        assert not serves(x.float(), wa[:256].float(), ws[:, :256].float(), False)   # hidden = 2 d: the split path (rows.FP32_EXPANSION)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = old
     assert not serves(torch.randn(4, 256, device="cuda", dtype=torch.bfloat16), wa.new_empty(1024, 256), ws.new_empty(256, 1024), True)
     assert not serves(x, wa[:480], ws[:, :480], True)                       # hidden width not a multiple of 64
