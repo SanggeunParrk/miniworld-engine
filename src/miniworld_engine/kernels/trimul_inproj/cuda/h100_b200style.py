@@ -326,8 +326,7 @@ def _run_rowpad(leaves, mask, direction, out=None):
         ab = x.new_empty((2 * h, rows if bsz > 1 else npad, npad))
         xs = x.new_empty((rows * n, 2), dtype=torch.float32)
         vec = x.new_empty((4, d), dtype=torch.float32)
-        weights = [w if w.dtype == torch.bfloat16 and w.is_contiguous() else w.to(torch.bfloat16).contiguous()
-                   for w in (wl, wlg, wr, wrg)]
+        weights = [w.contiguous() for w in (wl, wlg, wr, wrg)]   # bf16 already (trimul casts the matrices: cast_training_weights)
         token = (torch.ones(rows, device=x.device, dtype=torch.bool) if mask is None or mask.numel() == 0
                  else mask.reshape(rows).to(torch.bool).contiguous())
         from .h100_b200style_direct import front
