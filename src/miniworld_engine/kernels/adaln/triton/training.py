@@ -685,6 +685,12 @@ def _cublas_class(device) -> bool:
     return device is not None and device.type == "cuda" and torch.cuda.get_device_capability(device)[0] >= 9
 
 
+#: B200 (sm_100) fp32 (TF32) training forward: None (``_pick_fwd``, as on every sm90+ card) or "cublas" (the cuBLAS [scale | bias] GEMM + the
+#: epilogue pass instead of the Triton TF32 GEMM + gate kernel). Measured (B200, module training step in a CUDA graph, A = 48, us): d768 c384
+#: L128 / 768 167.6 / 721.9 -> 141.2 / 597.9; d128 c128 L1024 / 8192 161.7 / 931.6 -> 151.4 / 884.5.
+B200_F32_FWD = "cublas"
+
+
 def _pick_fwd(nx: int, device=None) -> str:
     """Measured-best forward by width: token (nx > _ATOM_D_MAX) -> fused; atom -> fused on sm90+ (the GEMM+gate kernel beats the cuBLAS sb GEMM
     plus epilogue there: 4096 atoms fp32 0.99 -> 0.84 of PyTorch together with the dgrad change), cublas on the older cards."""
@@ -700,11 +706,11 @@ class AdaLNTrainFn(torch.autograd.Function):
     def forward(ctx, x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
                 eps_x, eps_cond, with_stream=False, with_cond=False):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
-        from miniworld_engine.integrations.h100_master import is_h100
+        from miniworld_engine.modules.adaptive_layernorm.module import master_card
         raw_weights = (scale_weight, scale_bias, bias_weight)
         ctx.dtypes = (x.dtype, cond.dtype, cond_ln_weight.dtype,
                       scale_weight.dtype, scale_bias.dtype, bias_weight.dtype)
-        ctx.master = x.dtype == torch.bfloat16 and scale_weight.dtype == torch.float32 and is_h100(x.device)
+        ctx.master = x.dtype == torch.bfloat16 and scale_weight.dtype == torch.float32 and master_card(x.device)
         saved_wcat = None
         if ctx.master:
             # the three fp32 master weights as bf16 in ONE launch; the scale / bias projections land as the halves of their concatenation
@@ -740,6 +746,9 @@ class AdaLNTrainFn(torch.autograd.Function):
         )
         if mode == "fused" and not tf32_ok:
             mode = "cublas"
+        if (_FWD_MODE == "auto" and B200_F32_FWD is not None and x.dtype == torch.float32 and x.is_cuda
+                and torch.cuda.get_device_capability(x.device) == (10, 0)):
+            mode = B200_F32_FWD
         if mode == "fused":
             # LN(cond) (with its saved mean / rstd) and the statistics of x: one launch; the weights are read in place as (NC, NX) views
             cond_aff, rstd_x, c1, mean_c, rstd_c = _cond_affine_stats_saved(cond2d, cond_ln_weight, eps_cond, x2d, eps_x, shape_key=ak)

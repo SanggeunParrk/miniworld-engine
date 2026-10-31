@@ -622,13 +622,46 @@ def adaln_inference_fused(
 _FUSED_D_MAX = 256
 
 
+#: B200 (sm_100) fp32 / TF32 routes, by width class ("gemm_gate" | "materialize" | "fused"; None: the dispatch below as on every card; "auto":
+#: by rows, see ``_b200_f32_route``).
+B200_F32_ROUTE: dict = {"token": "materialize", "atom": "auto"}
+#: rows from which the atom width takes the materialize route on a B200 (fp32)
+B200_F32_ATOM_MATERIALIZE_ROWS = 16384
+
+
+def _b200_f32_route(x) -> str | None:
+    """The route an fp32 (TF32) call takes on a B200, or None for the generic dispatch. Measured (B200, CUDA-graph replay of the module, A = 5,
+    us): token d768 c384 L128 / 384 / 768: gemm_gate 26.4 / 30.5 / 51.0, materialize (cuBLAS TF32 GEMM between the two Triton row passes)
+    24.4 / 32.6 / 39.0; c768: 38.8 / 42.9 / 75.6 against 28.6 / 38.8 / 49.1 -- the Triton TF32 GEMM + gate kernel runs at a fraction of the
+    tensor cores on this card. Atom d128 L1024 / 4096 / 8192 (5120 .. 40960 rows): fused 18.3 / 38.8 / 57.2, materialize 20.4 / 32.6 / 46.6."""
+    if x.dtype is not torch.float32 or not x.is_cuda or not torch.backends.cuda.matmul.allow_tf32:
+        return None
+    if torch.cuda.get_device_capability(x.device) != (10, 0):
+        return None
+    route = B200_F32_ROUTE["atom" if x.shape[-1] <= _FUSED_D_MAX else "token"]
+    if route == "auto":
+        route = "materialize" if x.numel() // x.shape[-1] >= B200_F32_ATOM_MATERIALIZE_ROWS else "fused"
+    return route
+
+
 def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
                     eps_x, eps_cond, **kw):
     """Dispatch: small d (≤256) → single fused kernel; wide d → LN(cond) + one fused GEMM+gate
     kernel (``adaln_inference_gemm_gate``) for 16-bit and TF32 fp32, else materialize + cuBLAS.
     ``kw`` (weight_cat/bias_cat) is forwarded to the materialize path so a caller with fixed
     weights can concatenate once."""
-    if x.shape[-1] <= _FUSED_D_MAX:
+    route = _b200_f32_route(x)
+    if route == "materialize":
+        from miniworld_engine.kernels import _capture
+
+        weight_cat, bias_cat = _capture.param_forms(
+            "adaln_materialize_cat", (scale_weight, scale_bias, bias_weight),
+            lambda: (torch.cat([scale_weight, bias_weight], dim=0), torch.cat([scale_bias, scale_bias.new_zeros(scale_bias.shape[0])], dim=0)))
+        return adaln_inference_materialize(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight, eps_x, eps_cond,
+                                           weight_cat=weight_cat, bias_cat=bias_cat)
+    if route == "gemm_gate":
+        return adaln_inference_gemm_gate(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight, eps_x, eps_cond)
+    if route == "fused" or x.shape[-1] <= _FUSED_D_MAX:
         return adaln_inference_fused(x, cond, cond_ln_weight, scale_weight, scale_bias,
                                      bias_weight, eps_x, eps_cond)
     # Wide d: LN(cond) once, then ONE kernel for the projections and the gate.

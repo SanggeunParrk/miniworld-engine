@@ -6,6 +6,12 @@ from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations.h100_master import is_h100
+
+
+def master_card(device: torch.device) -> bool:
+    """H100 or B200: the portable training path takes the fp32 master weights as they are (one cast launch inside, fp32 weight gradients from
+    the GEMMs) instead of a differentiable cast per weight -- on B200 those casts and their backward were ~10 launches per call."""
+    return is_h100(device) or (device.type == "cuda" and torch.cuda.get_device_capability(device) == (10, 0))
 from miniworld_engine.kernels import _capture, adaln_inference, adaln_train
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -130,7 +136,7 @@ class AdaptiveLayerNorm(nn.Module):
             device_type = x.device.type
             compute_dtype = (torch.get_autocast_dtype(device_type)
                              if torch.is_autocast_enabled(device_type) else x.dtype)
-            master = fn is adaln_train and compute_dtype == torch.bfloat16 and is_h100(x.device)
+            master = fn is adaln_train and compute_dtype == torch.bfloat16 and master_card(x.device)
             params = (self.to_scale.weight, self.to_scale.bias, self.to_bias.weight)
             if master:
                 w_scale, b_scale, w_bias = params

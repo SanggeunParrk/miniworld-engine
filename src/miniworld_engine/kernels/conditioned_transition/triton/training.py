@@ -543,6 +543,18 @@ def set_forward_mode(name: str):
     _FWD_MODE = name
 
 
+#: B200 (sm_100) fp32 (TF32) overrides: the training forward (None: ``_pick_fwd``; "cublas": the cuBLAS GEMMs + the row passes) and the
+#: backward's dh + SwiGLU backward (None: as below; "cublas": the cuBLAS dh GEMM + the flat SwiGLU-backward pass at every width). The Triton
+#: TF32 GEMMs of the fused b2b forward / dh kernel lose to cuBLAS on this card. Measured (B200, module training step in a CUDA graph, A = 48,
+#: atom d128 c128, us): L1024 / 8192 647.1 / 3899.4 -> forward 532.6 / 3077.3 -> both 514.0 / 2982.3.
+B200_F32_FWD = "cublas"
+B200_F32_DH = "cublas"
+
+
+def _b200_f32(x) -> bool:
+    return x.dtype == torch.float32 and x.is_cuda and torch.cuda.get_device_capability(x.device) == (10, 0)
+
+
 def _pick_fwd(d_hidden: int, M: int) -> str:
     """Measured-best forward backend per regime (CUDA-graph fwd+bwd)."""
     if d_hidden <= _ATOM_D_MAX:
@@ -565,9 +577,9 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
-        from miniworld_engine.integrations.h100_master import is_h100
+        from miniworld_engine.modules.adaptive_layernorm.module import master_card
         raw_weights = (wa, wb, ws, wsc, bsc)
-        ctx.master = x.dtype == torch.bfloat16 and wa.dtype == torch.float32 and is_h100(x.device)
+        ctx.master = x.dtype == torch.bfloat16 and wa.dtype == torch.float32 and master_card(x.device)
         wcat = None
         if ctx.master:
             # the casts of the five fp32 master weights in ONE launch, the expand weights straight into the halves of their concatenation
@@ -598,6 +610,8 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         ctx.length = L
         ctx.has_residual = residual is not None
         mode = _pick_fwd(x.shape[1], x.shape[0]) if _FWD_MODE == "auto" else _FWD_MODE
+        if _FWD_MODE == "auto" and B200_F32_FWD is not None and _b200_f32(x):
+            mode = B200_F32_FWD
         if x.dtype == torch.bfloat16 and mode == "fused" and x.shape[1] > _ATOM_D_MAX:
             # The reroute used to cover ALL of bf16 on the strength of an untested spill
             # concern: "nothing has benchmarked this kernel at bf16 ... lifting this needs a
@@ -726,7 +740,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         # cuBLAS dh (115 us) plus the flat pass (185 us, at its HBM roofline), so the split stays there too. With the K-major B tile and the pre-rounded dout the
         # kernel is 373 us (M = 18432, d = 768, CUDA events, L2 flushed) against 316 us for the split (nt dh GEMM 131 us + the flat pass 185 us): still the split.
         # At the atom width (M = 196608, d = 128) the same kernel is 315 us against 484 us for the split, and there it is used.
-        wide_fp32 = dout.dtype == torch.float32 and x.shape[1] > _ATOM_D_MAX
+        wide_fp32 = dout.dtype == torch.float32 and (x.shape[1] > _ATOM_D_MAX or (B200_F32_DH == "cublas" and _b200_f32(dout)))
         if not wide_fp32:
             dab = _dh_swiglu_bwd(dout, ws, a, b, shape_key=shape_key)
             del dout, dy
