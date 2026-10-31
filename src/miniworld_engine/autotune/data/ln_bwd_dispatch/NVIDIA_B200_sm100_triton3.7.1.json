@@ -12,5 +12,13 @@
       "persistent": 0.18168
     },
     "path": "atomic"
+  },
+  "256|131072": {
+    "ms": {
+      "atomic": 0.097282,
+      "cuda": 0.085247,
+      "persistent": 0.158369
+    },
+    "path": "cuda"
   }
 }
