@@ -207,9 +207,9 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
             _H100_BMM.bmm(fold(left[:h]), fold(right[:h]).transpose(-1, -2), out=fold(tri[:h]))
             _H100_BMM.bmm(fold(left[h:]).transpose(-1, -2), fold(right[h:]), out=fold(tri[h:]))
         elif direction == 1:
-            _H100_BMM.bmm(fold(left), fold(right).transpose(-1, -2), out=fold(tri))
+            _H100_BMM.contract(fold(left), fold(right).transpose(-1, -2), out=fold(tri))
         else:
-            _H100_BMM.bmm(fold(left).transpose(-1, -2), fold(right), out=fold(tri))
+            _H100_BMM.contract(fold(left).transpose(-1, -2), fold(right), out=fold(tri))
         kk.k3(
             tri,
             z,

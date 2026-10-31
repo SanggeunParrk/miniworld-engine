@@ -213,14 +213,12 @@ _LEGACY_BIDIR_INFERENCE_CELLS = ((384, 768), (512, 384))
 def _legacy_native_faster(module, pair, inference):
     n, d = pair.shape[1], pair.shape[-1]
     if inference:
-        if hasattr(module, "outgoing") and n > 1024:
-            # single direction beyond L1024: D256 keeps the packaged tmn K1 / K3 (tmn and the port within 1 % of each other at
-            # L1024-2560); D384 takes the port, 17 % faster than tmn at L1536-2560 (2026-10-30,
-            # docs/records/trimul_h100_bigl_20261030.md). L % 128 != 0 still runs tmn (the port takes multiples of 128).
-            return d == 256
         if hasattr(module, "outgoing"):
-            # single direction D256: the tmn K1 / K3 tiles beat the B200-style port by 0.7-2.5 % at every length but 384
-            return d == 256 and n != 384
+            # single direction D256 / D384: the port at every L (L % 128 != 0 through its any-L form): D384 17 % faster than the packaged
+            # K1 / K3 at L1536-2560 (record trimul_h100_bigl_20261030.md); D256 2-5 % faster at L256-2048 once its contraction takes the
+            # measured cuBLASLt configurations (record trimul_h100_d256_20261031.md); below L256 D256 keeps the packaged K1 / K3 (the
+            # port's extra fold launch: L128 0.89 / 1.01x Anthropic with / without a mask vs 0.83 / 0.92x)
+            return d == 256 and n < 256
         return (d, n) in _LEGACY_BIDIR_INFERENCE_CELLS
     return n in (384, 768) and d in _LEGACY_TRAINING_WIDTHS
 
@@ -234,11 +232,11 @@ def _b200style_serves(module, pair, inference=False, padded=False):
     if padded and (not inference or pair.ndim != 4 or pair.shape[0] == 1 or pair.shape[1] % TRAINING_GRANULE == 0):
         return False
     length = -(-pair.shape[1] // TRAINING_GRANULE) * TRAINING_GRANULE if padded else pair.shape[1]
-    # one-sample, one-direction D384 inference at L % 128 != 0: the port's any-L form (K1 planes padded to 16, k3.cu ROWPAD),
+    # one-sample, one-direction D256 / D384 inference at L % 128 != 0: the port's any-L form (K1 planes padded to 16, k3.cu ROWPAD),
     # 0.81-0.84x Anthropic's time at L200-1500 where the packaged K1 / K3 ran 0.99-1.01x (2026-10-30, record
-    # trimul_h100_vs_anthropic_15pct_20261030.md). D256 keeps the packaged K1 / K3 there (the two within 1 %).
+    # trimul_h100_vs_anthropic_15pct_20261030.md); D256 likewise since its port path runs ahead (record trimul_h100_d256_20261031.md).
     rowpad = (inference and not padded and pair.ndim == 4 and pair.shape[0] == 1 and hasattr(module, "outgoing")
-              and pair.shape[-1] == 384 and 16 <= pair.shape[1] <= MAX_TRAINING_LENGTH and pair.shape[1] % TRAINING_GRANULE != 0)
+              and pair.shape[-1] in (256, 384) and 16 <= pair.shape[1] <= MAX_TRAINING_LENGTH and pair.shape[1] % TRAINING_GRANULE != 0)
     if (not pair.is_cuda or pair.dtype != torch.bfloat16 or pair.ndim != 4
             or not 1 <= pair.shape[0] <= max_batch(pair.shape[-1]) or pair.shape[0] * length * length >= 2 ** 31
             or pair.shape[1] != pair.shape[2]

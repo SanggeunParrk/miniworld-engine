@@ -278,9 +278,23 @@ def _output_kernel(d, h, cfg, save=False):
 
 
 def _contract(ab, d, direction):
-    from .b200_infer import _contract as contract
+    """B200's contraction (``b200_infer._contract``) for both directions; one direction through ``_h100_bmm.contract`` (the measured
+    cuBLASLt configuration where one is listed)."""
+    from .b200_infer import _contract as contract, _fold
 
-    return contract(ab, d, direction)
+    if direction == 0:
+        return contract(ab, d, direction)
+    from ._h100_bmm import contract as lt_contract
+
+    n = ab.shape[-1]
+    samples = ab.numel() // (ab.shape[0] * n * n)
+    t = ab.new_empty((d * samples, n, n))
+    left, right = _fold(ab[:d]), _fold(ab[d:2 * d])
+    if direction == 1:
+        lt_contract(left, right.transpose(1, 2), t)
+    else:
+        lt_contract(left.transpose(1, 2), right, t)
+    return t.view(d, *ab.shape[1:])
 
 
 def _saved(x, direction):
