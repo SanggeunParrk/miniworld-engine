@@ -8,9 +8,10 @@ fixed order (block partials summed in order), so the op is bitwise repeatable.
 
 Contract (``supported``): sm_90 or sm_100, bf16 x / cond, widths in ``WIDTHS`` (a multiple of 64), x.shape[:-1] == cond.shape[:-1].
 
-B200 (sm_100a): ``adaln_rows.cu`` is architecture-neutral and is built for both cards; the sm_90a wgmma kernels (``infer.py``) are not, so
-B200 runs the row kernels around the cuBLAS GEMMs for inference and training alike (``ln_cond_fwd`` -> GEMM -> ``adaln_fwd``; backward
-``adaln_bwd`` -> GEMMs -> ``ln_cond_bwd``), the fixed-order column sums from this extension too.
+B200 (sm_100a): ``adaln_rows.cu`` is architecture-neutral and is built for both cards; the sm_90a wgmma kernels (``infer.py``) are not.
+B200 inference runs ``sm100`` (``ln_cond_xstats`` -> one tcgen05 GEMM with the gate and LN(x) in its epilogue, two launches); B200 training
+runs the row kernels around the cuBLAS GEMMs (``ln_cond_fwd`` -> GEMM -> ``adaln_fwd``; backward ``adaln_bwd`` -> GEMMs -> ``ln_cond_bwd``),
+the fixed-order column sums from this extension too.
 """
 
 from __future__ import annotations
@@ -284,6 +285,7 @@ def adaln(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x: float = 1e-5
 
     The ONE entry of the H100 AdaLN; the route is chosen here by mode, dtype and shape:
 
+    * no backward recorded, B200: ``sm100`` (the row pass ``ln_cond_xstats``, then one tcgen05 GEMM with the gate and LN(x) in its epilogue);
     * no backward recorded: the sm_90a wgmma kernels of ``infer.py`` (``ln_rows`` + one GEMM with the gate and the LayerNorm of x in its epilogue, the
       second launch under PDL). ``rna``: round an fp32 result to the TF32 grid (its consumer is a TF32 GEMM);
     * a backward recorded: the same wgmma forward for bf16 (saving what the backward reads), the row kernels + cuBLAS of ``adaln_rows.cu`` for fp32
@@ -295,6 +297,12 @@ def adaln(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x: float = 1e-5
     from . import infer
 
     grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, cond, ln_cond_weight, w_scale, b_scale, w_bias))
+    if not grad:
+        from . import sm100 as b200
+
+        if b200.supported(x, cond):   # B200 inference: the row pass + one tcgen05 GEMM with the gate and LN(x) in its epilogue
+            y = b200.adaln_inference(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond, rna=rna)
+            return (y, x, cond) if streams else y
     wgmma = infer.supported(x, cond, x.shape[-1], cond.shape[-1])
     if wgmma and not grad:
         y = infer.adaln_inference(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond, rna=rna)

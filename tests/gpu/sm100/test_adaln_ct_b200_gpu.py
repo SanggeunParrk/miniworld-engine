@@ -1,4 +1,5 @@
-"""B200: the hand-CUDA AdaptiveLayerNorm and ConditionedTransition behind the standalone modules (FoldForge imports both): the AdaLN row
+"""B200: the hand-CUDA AdaptiveLayerNorm and ConditionedTransition behind the standalone modules (FoldForge imports both): the AdaLN
+inference as one row pass and one tcgen05 GEMM with the gate in its epilogue (``kernels/adaln/cuda/sm100``), its training as the row
 kernels around cuBLAS (``kernels/adaln/cuda/adaln_rows.cu``, built for sm_100a too), the inference tail on two tcgen05 GEMMs
 (``kernels/conditioned_transition/cuda/ct_sm100``) and the training tail's row kernels around cuBLAS (``ct_train``).
 
@@ -125,7 +126,13 @@ def test_inference_launches_the_cuda_kernels_and_matches_the_reference(op, bf16,
         assert _err(y, yr) <= 1.5 * _err(yp, yr) + 1e-6, (_err(y, yr), _err(yp, yr))
         again = run() if mode != "graph" else (g.replay(), out.clone())[1]
         assert torch.equal(again, y)
-    assert _has(names, "ln_cond_fwd", "adaln_fwd_k"), names
+    # inference (kernels/adaln/cuda/sm100): at the atom width (cond 128) one tcgen05 kernel (LN(cond) built in shared memory, the gate and LN(x)
+    # in its epilogue); elsewhere the row pass (LN(cond) and x's statistics) and the tcgen05 GEMM with the gate and LN(x) in its epilogue
+    # (fp32 at the atom width: the row kernels around cuBLAS, as before -- measured faster there)
+    if dc == 128 and not bf16:
+        assert _has(names, "ln_cond_fwd", "adaln_fwd_k"), names
+    else:
+        assert _has(names, "adaln_fused_sm100") if dc == 128 else _has(names, "ln_cond_xstats", "adaln_gemm_sm100"), names
     if op == "ct":
         assert _has(names, "tg_gemm_sm100"), names
     assert not any(_is_triton(k) for k in names), names

@@ -129,6 +129,63 @@ __global__ void __launch_bounds__(32 * WPB) ln_cond_fwd_t_k(const float* __restr
   tpose::flush(Ts, CNT, ldd, 0, N, (int)m0, rows, wp, WPB, lane);
 }
 
+// The row pass of the B200 inference route (sm100/adaln_gemm_sm100.cu, the GEMM with the gate and LN(x) in its epilogue): cn = LN(cond) * wc in the
+// activation dtype (fp32 with ``rna``: on the TF32 grid, the A operand of a TF32 MMA that truncates) and x's (rstd, mean rstd), so the GEMM's
+// epilogue normalises x as x rstd - mean rstd without reading the row twice. Widths are runtime (any multiple of 128 up to 1024; every chunk of
+// four is a compile-time register slot, predicated), the statistics fp32 and centred, as ln_cond_fwd_k / adaln_fwd_k. Ends with the
+// programmatic-launch trigger: the GEMM (a dependent launch) starts its prologue under this kernel's tail.
+template <typename T>
+__device__ __forceinline__ void ld_row_rt(const T* __restrict__ p, int n, int lane, float (&v)[32]) {
+#pragma unroll
+  for (int k = 0; k < 8; ++k) {
+    if (128 * k < n) {
+      const float4 t = ld4(p + 4 * (lane + 32 * k));
+      v[4 * k] = t.x; v[4 * k + 1] = t.y; v[4 * k + 2] = t.z; v[4 * k + 3] = t.w;
+    } else {
+      v[4 * k] = v[4 * k + 1] = v[4 * k + 2] = v[4 * k + 3] = 0.f;
+    }
+  }
+}
+__device__ __forceinline__ void stats_rt(const float (&v)[32], int n, float eps, float& mean, float& rstd) {
+  float s = 0.f;
+#pragma unroll
+  for (int i = 0; i < 32; ++i) s += v[i];   // the slots past the row are zero
+  mean = wsum(s) / (float)n;
+  float q = 0.f;
+#pragma unroll
+  for (int i = 0; i < 32; ++i)
+    if (128 * (i / 4) < n) q += (v[i] - mean) * (v[i] - mean);
+  rstd = rsqrtf(wsum(q) / (float)n + eps);
+}
+template <typename T>
+__global__ void __launch_bounds__(32 * WPB) ln_cond_xstats_k(const T* __restrict__ C, const float* __restrict__ W, const T* __restrict__ X,
+                                                             T* __restrict__ CN, float2* __restrict__ STX, int NC, int NX, long R, float eps_c,
+                                                             float eps_x, bool rna) {
+  const int lane = threadIdx.x & 31;
+  const long row = (long)blockIdx.x * WPB + (threadIdx.x >> 5);
+  if (row < R) {
+    float v[32], mean, rstd;
+    ld_row_rt(C + row * NC, NC, lane, v);
+    stats_rt(v, NC, eps_c, mean, rstd);
+#pragma unroll
+    for (int k = 0; k < 8; ++k) {
+      if (128 * k < NC) {
+        const float4 w = *reinterpret_cast<const float4*>(W + 4 * (lane + 32 * k));
+        float4 o = make_float4((v[4 * k] - mean) * rstd * w.x, (v[4 * k + 1] - mean) * rstd * w.y, (v[4 * k + 2] - mean) * rstd * w.z,
+                               (v[4 * k + 3] - mean) * rstd * w.w);
+        if (rna) { o.x = tf32_rn(o.x); o.y = tf32_rn(o.y); o.z = tf32_rn(o.z); o.w = tf32_rn(o.w); }
+        st4(CN + row * NC + 4 * (lane + 32 * k), o);
+      }
+    }
+    ld_row_rt(X + row * NX, NX, lane, v);
+    stats_rt(v, NX, eps_x, mean, rstd);
+    if (lane == 0) STX[row] = make_float2(rstd, mean * rstd);
+  }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
+}
+
 template <int N, typename T>
 __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X, const T* __restrict__ SB, T* __restrict__ Y,
                                                         float2* __restrict__ ST, long R, float eps, bool rna) {
@@ -435,6 +492,27 @@ std::vector<at::Tensor> ln_cond_fwd_t(at::Tensor cond, at::Tensor w, double eps)
   return {cn, st, cnt};
 }
 
+// (cn, x statistics [R, 2] = (rstd, mean rstd)) for the B200 inference GEMM (see ln_cond_xstats_k); cond / x of one dtype, widths multiples of 128 up to 1024
+std::vector<at::Tensor> ln_cond_xstats(at::Tensor cond, at::Tensor w, at::Tensor x, double eps_c, double eps_x, bool rna) {
+  chk_act(cond, "cond");
+  chk_act(x, "x");
+  chk(w, at::kFloat, "wc");
+  TORCH_CHECK(x.scalar_type() == cond.scalar_type(), "ln_cond_xstats: cond and x of one dtype");
+  const long NC = w.numel(), R = cond.numel() / NC, NX = x.numel() / R;
+  TORCH_CHECK(NC % 128 == 0 && NC <= 1024 && NX % 128 == 0 && NX <= 1024 && NX * R == x.numel(), "ln_cond_xstats: widths multiples of 128 up to 1024");
+  const at::cuda::CUDAGuard gd(cond.device());
+  auto cn = at::empty_like(cond);
+  auto st = at::empty({R, 2}, cond.options().dtype(at::kFloat));
+  if (cond.scalar_type() == at::kBFloat16)
+    ln_cond_xstats_k<bf><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<bf>(cond), w.data_ptr<float>(), P<bf>(x), PM<bf>(cn), reinterpret_cast<float2*>(st.data_ptr()),
+                                                             (int)NC, (int)NX, R, (float)eps_c, (float)eps_x, false);
+  else
+    ln_cond_xstats_k<float><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<float>(cond), w.data_ptr<float>(), P<float>(x), PM<float>(cn),
+                                                                reinterpret_cast<float2*>(st.data_ptr()), (int)NC, (int)NX, R, (float)eps_c, (float)eps_x, rna);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {cn, st};
+}
+
 std::vector<at::Tensor> adaln_fwd(at::Tensor x, at::Tensor sb, double eps, bool rna) {
   chk_act(x, "x");
   TORCH_CHECK(sb.scalar_type() == x.scalar_type() && sb.is_contiguous(), "sb dtype");
@@ -650,6 +728,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("colsum2", &colsum2);
   m.def("ln_cond_fwd", &ln_cond_fwd);
   m.def("ln_cond_fwd_t", &ln_cond_fwd_t);
+  m.def("ln_cond_xstats", &ln_cond_xstats);
   m.def("adaln_fwd", &adaln_fwd, py::arg("x"), py::arg("sb"), py::arg("eps"), py::arg("rna") = false);
   m.def("adaln_bwd", &adaln_bwd, py::arg("dy"), py::arg("x"), py::arg("sb"), py::arg("st"), py::arg("add") = py::none(), py::arg("rna") = false);
   m.def("adaln_bwd_t", &adaln_bwd_t, py::arg("dy"), py::arg("x"), py::arg("sb"), py::arg("st"), py::arg("add") = py::none(), py::arg("gmul") = 2);
