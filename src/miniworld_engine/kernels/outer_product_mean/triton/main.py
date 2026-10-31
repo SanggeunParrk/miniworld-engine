@@ -15,8 +15,8 @@ Every tile, warp count, stage count and persistent program count is an autotune 
 the constants in the kernels are the model dimensions (constexpr). Offsets that scale with L^2 CH^2 or S L are 64-bit.
 ``normalize_before_proj=True`` (AF3 order) divides before the projection; False (ESMFold2) divides after it, bias included.
 
-d_msa and d_hidden must be powers of two >= 16 (``tl.arange`` over the whole row); d_pair only has to be a multiple of 32,
-because it is tiled, never spanned (the smallest output tile of the ladder is 32). ``refusal`` says which.
+d_msa and d_hidden must be powers of two >= 16 (``tl.arange`` over the whole row); d_pair only has to be a multiple of 16,
+because it is tiled, never spanned (the smallest output tile of the ladder is 16: a 16-wide pair has its own tiles). ``refusal`` says which.
 
 Two variants ride the same kernels (``kernels.outer_product_mean.reference`` is their oracle):
 
@@ -369,8 +369,8 @@ def refusal(msa: torch.Tensor, d_hidden: int, d_pair: int, *, interchain: bool, 
         d_msa = msa.shape[-1]
         if not (_pow2_16(d_msa) and _pow2_16(d_hidden)):
             return f"d_msa and d_hidden must be powers of two >= 16 (spanned by one tile), got {d_msa}, {d_hidden}"
-        if d_pair % 32:
-            return f"d_pair must be a multiple of 32 (the smallest output tile), got {d_pair}"
+        if d_pair % 16:
+            return f"d_pair must be a multiple of 16 (the smallest output tile), got {d_pair}"
         if groups > 1:
             if d_hidden % groups:
                 return f"d_hidden ({d_hidden}) must be divisible by groups ({groups})"
@@ -570,42 +570,75 @@ def _bwd_grouped(dz: torch.Tensor, msa: torch.Tensor, mask: torch.Tensor, a: tor
     return [dm, dg, dbeta, dwl, dwr, dwo, dgam, dbet, dbo, dbl, dbr]
 
 
+def _stack(t: torch.Tensor, bi: int) -> torch.Tensor:
+    """Stack ``bi`` of a batched optional input (an empty tensor stays empty)."""
+    return t[bi] if t.numel() else t
+
+
+def _sum_grads(per_stack: list[list[torch.Tensor]]) -> list[torch.Tensor]:
+    """The parameter gradients of a batch: the stacks' fp32 gradients summed in fp32 (one rounding to the parameter dtype later, not one
+    per stack: with bf16 parameters a per-stack bf16 gradient summed by autograd rounded every partial sum, which a 16-wide bias showed)."""
+    return [torch.stack(g, 0).sum(0) if len(g) > 1 else g[0] for g in zip(*per_stack, strict=True)]
+
+
 class _OuterProductMeanTriton(torch.autograd.Function):
-    """One MSA stack (no batch axis). ``mask`` / ``residual`` / ``bl`` / ``br`` are empty tensors when absent."""
+    """A batch of MSA stacks, one stack at a time through the kernels. ``mask`` / ``residual`` / ``bl`` / ``br`` are empty tensors when
+    absent."""
 
     @staticmethod
     def forward(ctx, msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, residual, eps, norm_first):
-        out, a, b, o, norm = _fwd(msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, residual, eps, norm_first)
-        ctx.save_for_backward(msa, mask, a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo, bo)
+        outs, kept = [], []
+        for bi in range(msa.shape[0]):
+            out, a, b, o, norm = _fwd(msa[bi], _stack(mask, bi), lnw, lnb, wl, wr, bl, br, wo, bo, _stack(residual, bi), eps, norm_first)
+            outs.append(out)
+            kept += [a, b, o, norm]
+        ctx.save_for_backward(msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, *kept)
         ctx.eps, ctx.norm_first, ctx.has_res = eps, norm_first, residual.numel() > 0
-        return out
+        return torch.stack(outs, 0)
 
     @staticmethod
     def backward(ctx, dz):
-        msa, mask, a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo, bo = ctx.saved_tensors
-        dm, dg, dbeta, dwl, dwr, dwo, dbo, dbl, dbr = _bwd(dz.contiguous(), msa, mask, a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo,
-                                                           ctx.eps, ctx.norm_first)
-        return (dm, None, dg.to(lnw.dtype), dbeta.to(lnb.dtype), dwl.to(wl.dtype), dwr.to(wr.dtype),
+        msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, *kept = ctx.saved_tensors
+        dms, grads = [], []
+        for bi in range(msa.shape[0]):
+            a, b, o, norm = kept[4 * bi:4 * bi + 4]
+            dm, *g = _bwd(dz[bi].contiguous(), msa[bi], _stack(mask, bi), a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo, ctx.eps,
+                          ctx.norm_first)
+            dms.append(dm)
+            grads.append(g)
+        dg, dbeta, dwl, dwr, dwo, dbo, dbl, dbr = _sum_grads(grads)
+        return (torch.stack(dms, 0), None, dg.to(lnw.dtype), dbeta.to(lnb.dtype), dwl.to(wl.dtype), dwr.to(wr.dtype),
                 dbl.to(bl.dtype) if bl.numel() else None, dbr.to(br.dtype) if br.numel() else None, dwo.to(wo.dtype),
                 dbo.to(bo.dtype), dz if ctx.has_res else None, None, None)
 
 
 class _OuterProductMeanGroupedTriton(torch.autograd.Function):
-    """One MSA stack of the grouped (Chai-1) variant: ``groups`` outer products, LayerNorm'd products, no pair-count division."""
+    """A batch of MSA stacks of the grouped (Chai-1) variant: ``groups`` outer products, LayerNorm'd products, no pair-count division."""
 
     @staticmethod
     def forward(ctx, msa, mask, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo, residual, eps, eps_prod, groups):
-        out, a, b, o, y = _fwd_grouped(msa, mask, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo, residual, eps, eps_prod, groups)
-        ctx.save_for_backward(msa, mask, a, b, o, y, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo)
+        outs, kept = [], []
+        for bi in range(msa.shape[0]):
+            out, a, b, o, y = _fwd_grouped(msa[bi], _stack(mask, bi), lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo, _stack(residual, bi), eps,
+                                           eps_prod, groups)
+            outs.append(out)
+            kept += [a, b, o, y]
+        ctx.save_for_backward(msa, mask, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo, *kept)
         ctx.meta, ctx.has_res = (eps, eps_prod, groups), residual.numel() > 0
-        return out
+        return torch.stack(outs, 0)
 
     @staticmethod
     def backward(ctx, dz):
-        msa, mask, a, b, o, y, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo = ctx.saved_tensors
-        dm, dg, dbeta, dwl, dwr, dwo, dgam, dbet, dbo, dbl, dbr = _bwd_grouped(dz.contiguous(), msa, mask, a, b, o, y, lnw, lnb, wl, wr, bl,
-                                                                               br, gam, bet, wo, *ctx.meta)
-        return (dm, None, dg.to(lnw.dtype), dbeta.to(lnb.dtype), dwl.to(wl.dtype), dwr.to(wr.dtype),
+        msa, mask, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo, *kept = ctx.saved_tensors
+        dms, grads = [], []
+        for bi in range(msa.shape[0]):
+            a, b, o, y = kept[4 * bi:4 * bi + 4]
+            dm, *g = _bwd_grouped(dz[bi].contiguous(), msa[bi], _stack(mask, bi), a, b, o, y, lnw, lnb, wl, wr, bl, br, gam, bet, wo,
+                                  *ctx.meta)
+            dms.append(dm)
+            grads.append(g)
+        dg, dbeta, dwl, dwr, dwo, dgam, dbet, dbo, dbl, dbr = _sum_grads(grads)
+        return (torch.stack(dms, 0), None, dg.to(lnw.dtype), dbeta.to(lnb.dtype), dwl.to(wl.dtype), dwr.to(wr.dtype),
                 dbl.to(bl.dtype) if bl.numel() else None, dbr.to(br.dtype) if br.numel() else None, dgam.to(gam.dtype),
                 dbet.to(bet.dtype), dwo.to(wo.dtype), dbo.to(bo.dtype), dz if ctx.has_res else None, None, None, None)
 
@@ -622,20 +655,16 @@ def triton_outer_product_mean(msa: torch.Tensor, mask: torch.Tensor | None, ln_w
     channels split into ``groups`` halves with one outer product each, their ``groups * (CH / groups)^2`` products LayerNorm'd
     (``product_norm_*``, eps ``product_norm_eps``), projected, and NOT divided by the pair counts (``normalize_before_proj`` is moot).
 
-    Stacks run one at a time: the mask counts and the grouped outer product are per stack. Check :func:`refusal` first."""
+    Stacks run one at a time (one autograd node for the batch, the parameter gradients summed over the stacks in fp32): the mask counts and
+    the grouped outer product are per stack. Check :func:`refusal` first."""
     def empty():                                           # one tensor per absent input: Dynamo refuses an autograd.Function
         return msa.new_empty((0,))                         # applied to the same tensor twice
 
     bl, br = (empty(), empty()) if b_left is None else (b_left, b_right)
-    outs = []
-    for bi in range(msa.shape[0]):
-        m = empty() if mask is None else mask[bi]
-        r = empty() if residual is None else residual[bi]
-        if groups > 1:
-            outs.append(_OuterProductMeanGroupedTriton.apply(msa[bi], m, ln_weight, ln_bias, w_left, w_right, bl, br, product_norm_weight,
-                                                             product_norm_bias, w_out, b_out, r, float(eps), float(product_norm_eps),
-                                                             int(groups)))
-        else:
-            outs.append(_OuterProductMeanTriton.apply(msa[bi], m, ln_weight, ln_bias, w_left, w_right, bl, br, w_out, b_out, r,
-                                                      float(eps), bool(normalize_before_proj)))
-    return outs[0].unsqueeze(0) if len(outs) == 1 else torch.stack(outs, 0)
+    m = empty() if mask is None else mask
+    r = empty() if residual is None else residual
+    if groups > 1:
+        return _OuterProductMeanGroupedTriton.apply(msa, m, ln_weight, ln_bias, w_left, w_right, bl, br, product_norm_weight, product_norm_bias,
+                                                    w_out, b_out, r, float(eps), float(product_norm_eps), int(groups))
+    return _OuterProductMeanTriton.apply(msa, m, ln_weight, ln_bias, w_left, w_right, bl, br, w_out, b_out, r, float(eps),
+                                         bool(normalize_before_proj))

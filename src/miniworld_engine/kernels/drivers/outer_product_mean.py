@@ -26,7 +26,7 @@ _S = ragged(1024)
 _CM = aligned_only("outer_product_mean.d_msa", 64, "one tl.arange tile spans the MSA channels: a power of two")
 _CH = aligned_only("outer_product_mean.d_hidden", 32, "one tl.arange tile spans the hidden channels: a power of two")
 _GROUPS, _CH_GROUPED = 8, 64
-_CZ = aligned_only("outer_product_mean.d_pair", driver_width(128), "tiled by the output ladder, whose smallest rung is 32")
+_CZ = aligned_only("outer_product_mean.d_pair", driver_width(128), "tiled by the output ladder, whose smallest rung is 16")
 
 
 def _inputs(dtype=BF16, variant="base"):
