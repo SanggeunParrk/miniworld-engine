@@ -5991,10 +5991,12 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
         from miniworld_engine.integrations import local_dit as fused
 
         with torch.set_grad_enabled(is_train):
-            if esm:
+            if esm and torch.cuda.get_device_capability(single.device) == (9, 0):
                 from miniworld_engine.integrations import local_dit_h100 as _h100
 
                 served = bool(_h100.matches(model.layers[0], single, cond, pair, mask, fwd_kw["rope"]))
+            elif esm:  # B200: ESMFold2's block is ``integrations.local_dit``'s too (``_esm_block``: rotary q / k, 192 keys)
+                served = fused.serves(model.layers[0], single, cond, pair, mask, fwd_kw["rope"])
             else:
                 served = fused.serves(model.layers[0], single, cond, pair, mask)
         if served:
