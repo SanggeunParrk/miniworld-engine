@@ -38,6 +38,11 @@ def test_transition_residual_all_gradients(shape, n, monkeypatch):
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
     settings.configure(force_portable_kernels=True)
+    # This is the SPLIT residual path's rounding contract (bf16 d_xn, as the unfused statements round it). On the B200 the portable path
+    # takes the row-fused kernels at d = 64 / 128 instead, which keep d_xn in fp32 (gradient error vs fp64 at or below this path's; at
+    # (1, 128, 128) 4.1e-3 / 4.4e-3 from it, n 2 / 4): they are checked against fp64 in tests/gpu/sm100/test_transition_rows_portable_gpu.py.
+    from miniworld_engine.kernels.transition.triton import rows
+    monkeypatch.setattr(rows, "serves", lambda *a, **k: False)
     torch.manual_seed(72)
     module = Transition(shape[-1], n=n, implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
     with torch.no_grad():

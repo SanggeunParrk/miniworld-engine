@@ -175,11 +175,16 @@ _FP32_HALVES_MAX_ROWS = 4096
 
 
 def transition_residual(x, gamma, beta, wa, wb, ws, eps):
+    # grad mode and an operand that wants one, decided here: ``ctx.needs_input_grad`` is true for parameters under no_grad too
+    save = torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
+    from miniworld_engine.kernels.transition.triton import rows as row_fused
+
+    if row_fused.serves(x, wa, ws, save):
+        # B200 at d = 64 / 128: one row-fused launch each way (rows.py), the hidden activation never reaches HBM in the forward
+        return row_fused.transition_rows(x, gamma, beta, wa, wb, ws, eps)
     # Returning the identity from the SAME LN Function lets its two gradients meet
     # inside LN backward. No activation copy, separate dx add, or duplicate dgamma/dbeta.
     xn, residual = input_ln_residual(x, gamma, beta, eps)
-    # grad mode and an operand that wants one, decided here: ``ctx.needs_input_grad`` is true for parameters under no_grad too
-    save = torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
     # fp32: the saved halves are fp16 below a scale only where their traffic matters; at few rows they stay fp32 and the scale's
     # reductions over the weights (more than the halves themselves cost there) are not made
     rows = xn.numel() // xn.shape[-1]

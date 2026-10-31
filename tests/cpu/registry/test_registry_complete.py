@@ -446,8 +446,11 @@ def test_a_launch_site_does_not_pin_what_the_tuner_owns() -> None:
     # `_lnl_fwd_t_persistent` (kernels/layernorm_linear/triton/fused.py) is the B200-only head-major pair-bias producer of the APB portable
     # path (N <= 16 heads, K 128 / 256): one config swept on a B200 (rows x warps x stages x programs per SM); no registry row or driver
     # (the APB pair-bias calls are not a registry shape of layernorm_linear_fwd_triton, whose grid is pinned by the 2026-09-16 record).
+    # `_rows_fwd_kernel` / `_rows_bwd_kernel` (kernels/transition/triton/rows.py) are the B200-only row-fused portable Transition at
+    # d = 64 / 128: their operands are host TMA descriptors whose block shapes ARE the tile, fixed before the launch, so the tuner cannot
+    # vary them; the per-(dtype, d) tiles were swept on the B200 (rows._FWD / rows._BWD) and `serves` keeps every other card off them.
     NOT_TUNED = {"_zero_bias_grad_kernel", "_pack", "_fold", "_cast_kernel",
-                 "_lnl_fwd_t_persistent"}
+                 "_lnl_fwd_t_persistent", "_rows_fwd_kernel", "_rows_bwd_kernel"}
     pinned: dict[str, str] = {}
     for path in sorted(SRC.rglob("*.py")):
         try:
