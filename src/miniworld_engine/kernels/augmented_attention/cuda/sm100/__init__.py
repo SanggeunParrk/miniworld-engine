@@ -188,13 +188,15 @@ def _rs(t: torch.Tensor) -> int:
 
 #: token DiT head layouts the bf16 kernels take: (heads, head dim) -> d = heads x head dim (16 x 48 is the default build)
 TDIT_HEADS = ((16, 48), (24, 32), (12, 64), (16, 64))
+#: the dense atom layout (AugmentedAttention at d_single 128: 4 heads x 32, d_pair 16): built for ``module_route`` only
+ATOM_HEADS = ((4, 32),)
 
 
 def _tdit_defs(heads: int = H, dh: int = D):
-    """-D flags for a token DiT head layout (none for the default 16 x 48)."""
+    """-D flags for a token DiT head layout (none for the default 16 x 48), or the atom layout (``ATOM_HEADS``)."""
     if (heads, dh) == (H, D):
         return ()
-    assert (heads, dh) in TDIT_HEADS, (heads, dh)
+    assert (heads, dh) in TDIT_HEADS + ATOM_HEADS, (heads, dh)
     return (f"NHEAD={heads}", f"DHP={dh}", f"RSQDV={dh**-0.5!r}f")
 
 

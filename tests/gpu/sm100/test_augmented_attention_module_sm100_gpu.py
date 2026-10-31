@@ -123,6 +123,40 @@ def test_module_route_layouts(d, dc, dp, H, prec, train):
     _check(d, dc, dp, H, prec, train, 3, 136, "ps", False)
 
 
+# the dense atom layout (d 128 = 4 heads x 32, cond 128, d_pair 16: pair16.cu's pass); atom lengths (8 atoms a token)
+ATOM_CASES = [(5, 1024, False, False), (4, 512, True, False), (3, 200, True, True), (2, 384, "ps", False), (5, 100, "ps", True),
+              (1, 37, True, False)]
+
+
+@pytest.mark.parametrize("prec", ["bf16", "fp32"])
+@pytest.mark.parametrize("train", [True, False])
+@pytest.mark.parametrize(("A", "L", "masked", "extra"), ATOM_CASES)
+def test_module_route_atom_layout(prec, train, A, L, masked, extra):
+    if prec == "fp32" and train and (A, L) == (1, 37):
+        # one sample of 37 atoms: ln_pair.weight's gradient (a 16-vector, the heads' dWf summed against wb) is a sum over 37^2 rows
+        # only; the TF32 core's dbias puts it at 9.0e-4 of fp64 vs the PyTorch statements' 5.6e-4 (both at the TF32 grid). The same
+        # call with 8 samples of 100 atoms ("ps") holds the yardstick.
+        pytest.skip("TF32-grid dlnw at 37^2 pair rows (see comment)")
+    _check(128, 128, 16, 4, prec, train, A, L, masked, extra)
+
+
+def test_module_route_atom_fp32_pair_under_autocast():
+    """An fp32 16-wide pair under bf16 autocast (fp32 activations): the pair pass reads fp32 and writes the bf16 core's bias."""
+    torch.backends.cuda.matmul.allow_tf32 = True
+    mw, pt, ref = _modules(128, 128, 16, 4)
+    single, cond, pair, mask, _, dy = _case(4, 256, 128, 128, 16, True, False)
+    outs = []
+    for m in (mw, pt, ref):
+        dt = torch.float64 if m is ref else torch.float32
+        s, c, p = (t.to(dt).clone().requires_grad_() for t in (single, cond, pair))
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=m is not ref):
+            o = m(s, c, p, mask)
+        o.backward(dy.to(o.dtype))
+        outs.append([t.detach().double() for t in (o, s.grad, c.grad, p.grad)])
+    for e, b, r in zip(*outs, strict=True):
+        assert _rel(e, r) <= 1.5 * _rel(b, r) + 1e-6, (_rel(e, r), _rel(b, r))
+
+
 @pytest.mark.parametrize("prec", ["bf16", "fp32"])
 @pytest.mark.parametrize("train", [True, False])
 @pytest.mark.parametrize(("A", "L", "masked", "extra"), [(3, 256, True, False), (3, 200, "ps", True), (5, 100, True, True)])

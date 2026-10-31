@@ -24,12 +24,18 @@ autocast copies were ~2/3 of a training step. Here (``aa_rows.cu`` for every row
                      to [d, A, L padded to 4] on the TF32 grid, q / k rounded in place) | mm Wo (reading the q columns) | addmm Wsc |
                      ``aam_res_gate``
 
+The dense atom layout (d 128 = 4 heads x 32, d_pair 16; ``ATOM_HEADS``): the same route, the cores built for 4 x 32, and the pair pass
+of ``pair16.cu`` (``aap16_fwd`` / ``aap16_bwd``: a 16-wide pair row is LayerNorm-ed and projected on CUDA cores, bf16 or fp32 pair, the bias
+in the core's dtype; dpair and the fixed-order dwf block partials in one more read of the pair). Before it the B200 ran this module's
+PyTorch statements (the [A, H, L, L] scores materialized: 48 GiB at A 48, 8192 atoms, fp32).
+
 QK-norm (per-head RMSNorm of q and k): ``aam_qknorm`` after the GEMM (training: normalized copies, the rstd kept; inference: in place)
 and ``aam_qknorm_bwd`` after the core's backward (in place in the q|k|v|g gradient). A key mask per sample: the cores built -DKMASK=1
 (the mask as bits, ``aam_pack_kmask``; masked keys' P exactly 0 in the backward; attn_inf_tf32 included).
 
 Every gradient is bitwise repeatable (fixed-order sums, the deterministic core backward). Contract (``supported``): sm_100, q / k / v
-heads at a token DiT layout (``TDIT_HEADS``), B == 1, QK-norm on or off, d_pair 128 (bf16 pair: also 256 at 16 heads), a key mask [L]
+heads at a token DiT layout (``TDIT_HEADS``) with d_pair 128 (bf16 pair: also 256 at 16 heads), or 4 x 32 with d_pair 16 (``ATOM_HEADS``;
+bf16 or fp32 pair), B == 1, QK-norm on or off, a key mask [L]
 shared by the samples, [A, L] one per sample, or none, any A, any L (the training cores run L padded to a multiple of 128 and A to an even count, the pair passes L
 padded to a multiple of 16: zero rows, masked keys, sliced off), an extra [L, L] logit term (any float dtype, differentiable).
 Precision: bf16 under bf16 autocast or for bf16 activations; fp32 (TF32 tensor cores) for fp32 activations without autocast when TF32
@@ -45,7 +51,7 @@ import torch.nn.functional as F
 from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
-from . import TDIT_HEADS, _grid, _index, _is_blackwell, _rs, _sm100_kernel, _tdit_defs, _tm
+from . import ATOM_HEADS, TDIT_HEADS, _grid, _index, _is_blackwell, _rs, _sm100_kernel, _tdit_defs, _tm
 from .fused_pair import NEG, _core_defs, _finish_grid, _pair_bias, _tf32_on, _wf
 
 BF = torch.bfloat16
@@ -57,6 +63,15 @@ PM = 16    # the pair passes' row groups
 
 def _k(name: str, dev: int):
     return _sm100_kernel("aa_rows", name, dev, smem=0)
+
+
+def _k16(name: str, dev: int):
+    return _sm100_kernel("pair16", name, dev, smem=0)
+
+
+def _atom(heads: int, dh: int, dp: int) -> bool:
+    """The dense atom layout: 4 heads x 32 over a 16-wide pair (``pair16.cu``'s pass)."""
+    return (heads, dh) in ATOM_HEADS and dp == 16
 
 
 def _ceil(x: int, m: int) -> int:
@@ -73,15 +88,16 @@ def supported(x, pair, lnw, wb, mask, extra, dtype, heads: int) -> bool:
     if x.dim() != 4 or not x.is_cuda or not pair.is_cuda or x.shape[1] != 1:
         return False
     A, _, L, d = x.shape
-    if A < 1 or L < 1 or d % heads or (heads, d // heads) not in TDIT_HEADS:
-        return False
     dp = pair.shape[-1]
+    atom = d % heads == 0 and _atom(heads, d // heads, dp)
+    if A < 1 or L < 1 or d % heads or ((heads, d // heads) not in TDIT_HEADS and not atom):
+        return False
     if pair.dim() != 4 or tuple(pair.shape) != (1, L, L, dp) or tuple(wb.shape) != (heads, dp) or tuple(lnw.shape) != (dp,):
         return False
     if dtype is BF:
-        ok = (pair.dtype is BF and (dp == 128 or (dp == 256 and heads == 16))) or (pair.dtype is F32 and dp == 128)
+        ok = (atom and pair.dtype in (BF, F32)) or (pair.dtype is BF and (dp == 128 or (dp == 256 and heads == 16))) or (pair.dtype is F32 and dp == 128)
     elif dtype is F32:
-        ok = pair.dtype is F32 and dp == 128 and _tf32_on()
+        ok = pair.dtype is F32 and (dp == 128 or atom) and _tf32_on()
     else:
         ok = False
     if not ok:
@@ -93,7 +109,7 @@ def supported(x, pair, lnw, wb, mask, extra, dtype, heads: int) -> bool:
     return _is_blackwell(_index(x))
 
 
-def _build(dev: int, H: int, DH: int, dtype: torch.dtype, pair_dtype: torch.dtype, train: bool, kmask: bool = False) -> None:
+def _build(dev: int, H: int, DH: int, dtype: torch.dtype, pair_dtype: torch.dtype, train: bool, kmask: bool = False, dp: int = 128) -> None:
     """Load every kernel a call will launch (a build or load failure raises: B200 has no silent fallback). ``kmask``: the cores built
     for a per-sample key mask (-DKMASK=1)."""
     kd = ("KMASK=1",) if kmask else ()
@@ -114,7 +130,12 @@ def _build(dev: int, H: int, DH: int, dtype: torch.dtype, pair_dtype: torch.dtyp
         _sm100_kernel("attn_fwd_tf32", "augattn_fwd_tf32_sm100", dev, defs=(*td, "GATE=1"))
         _sm100_kernel("attn_dkv_tf32", "augattn_dkv_tf32_sm100", dev, defs=cd)
         _sm100_kernel("attn_dqb_tf32", "augattn_dqb_tf32_sm100", dev, defs=(*cd, "DQPART=1"))
-    if pair_dtype is BF:
+    if _atom(H, DH, dp):
+        p, o = ("b" if pair_dtype is BF else "f"), ("b" if dtype is BF else "f")
+        _k16(f"aap16_fwd_{p}{o}", dev)
+        if train:
+            _k16(f"aap16_bwd_{p}", dev)
+    elif pair_dtype is BF:
         from ..apb import ext
 
         ext()
@@ -138,7 +159,7 @@ def available(x, pair, lnw, wb, mask, extra, dtype, heads: int, train: bool) -> 
     if isinstance(x, FakeTensor) or isinstance(pair, FakeTensor):
         return False
     try:
-        _build(_index(x), heads, x.shape[-1] // heads, dtype, pair.dtype, train, mask is not None and mask.dim() == 2)
+        _build(_index(x), heads, x.shape[-1] // heads, dtype, pair.dtype, train, mask is not None and mask.dim() == 2, pair.shape[-1])
     except Exception as exc:
         raise RuntimeError(f"sm100 AugmentedAttention module route kernels failed to build or load on B200: {exc!r}") from exc
     return True
@@ -282,13 +303,45 @@ def _bias(pair, lnw, wb, mask, extra, eps, bf: bool, train: bool, L: int, Lb: in
         lnw = lnw * LOG2E
     # the pair pass folds a key mask only at its own length, and its fp32 training form takes none (folded into the fix then)
     m = mask if (mask is not None and Lb == L and not (pair.dtype is F32 and train)) else None
-    bias, pst = _pair_bias(pz, lnw, wb, m, eps, bf, train)
+    if pair.shape[-1] == 16:
+        bias, pst = _pair16_fwd(pz, lnw, wb, m, eps, bf), pz.new_empty((0, 2), dtype=F32)
+    else:
+        bias, pst = _pair_bias(pz, lnw, wb, m, eps, bf, train)
     if not fix:
         return bias, pst, False
     pm = None if mask is None or m is not None else mask.reshape(L).contiguous()
     out = bias if Lp == Lb else torch.empty(H, Lp, Lp, device=bias.device, dtype=bias.dtype)
     _bias_fix(bias, extra, pm, out, 1, H, L, Lb, Lp, LOG2E if log2 else 1.0)
     return out, pst, True
+
+
+def _pair16_fwd(pz, lnw, wb, m, eps, bf: bool):
+    """The atom layout's pair pass (``aap16_fwd``): bias [H, Lb, Lb] in the core's dtype from the 16-wide pair [1, Lb, Lb, 16] (``lnw``
+    already in the bias's units), keys with ``m`` false at NEG."""
+    dev = _index(pz)
+    Lb, H = pz.shape[1], wb.shape[0]
+    wf = _wf(wb, lnw, F32)
+    p2 = pz.reshape(Lb * Lb, 16)
+    if not p2.is_contiguous():
+        p2 = p2.contiguous()
+    bias = torch.empty(H, Lb, Lb, device=pz.device, dtype=BF if bf else F32)
+    J = 8 if pz.dtype is BF else 4
+    grid = min(-(-Lb * Lb // (J * 256)), 8 * _nsm(dev))
+    tag = ("b" if pz.dtype is BF else "f") + ("b" if bf else "f")
+    _k16(f"aap16_fwd_{tag}", dev)((grid, 1, 1), (256, 1, 1), p2, wf, m, bias, int(Lb), float(eps), float(NEG))
+    return bias
+
+
+def _pair16_bwd(DB, p2, lnw, wb, eps, Lb):
+    """(dpair [Lb Lb, 16] in the pair's dtype, dwf [H, 16] fp32) of :func:`_pair16_fwd` (natural units) from dbias [H, Lb, Lb] fp32."""
+    dev = _index(p2)
+    H = wb.shape[0]
+    dz = torch.empty_like(p2)
+    grid = min(-(-Lb * Lb // (4 * 256)), 2 * _nsm(dev))   # a function of the shape and the GPU: the partial rows' order is fixed
+    part = torch.empty(grid, H * 16, device=p2.device, dtype=F32)
+    _k16("aap16_bwd_b" if p2.dtype is BF else "aap16_bwd_f", dev)((grid, 1, 1), (256, 1, 1), DB, p2, _wf(wb, lnw, F32), dz, part, int(Lb),
+                                                                  float(eps))
+    return dz, part.sum(0).view(H, 16)
 
 
 # --------------------------------------------------------------------------------------------------- the cores (per-sample key mask)
@@ -404,7 +457,7 @@ def _fwd_fake(x, cond, res, pair, mask, extra, params, eps, heads, out_dtype, qk
     Ap, Lp, Lb = _dims(A, L)
     Mp, M = Ap * Lp, A * L
     e = x.new_empty
-    st = (Lb * Lb, 2) if pair.dtype is F32 else (0, 2)
+    st = (Lb * Lb, 2) if (pair.dtype is F32 and pair.shape[-1] != 16) else (0, 2)
     padded = (Ap, Lp) != (A, L)
     return [
         e((A, 1, L, D), dtype=out_dtype),
@@ -625,7 +678,9 @@ def _bwd(
         dp = pair.shape[-1]
         pz = pair if Lb == L else F.pad(pair, (0, 0, 0, Lb - L, 0, Lb - L))
         p2 = pz.reshape(Lb * Lb, dp)
-        if pair.dtype is BF:
+        if dp == 16:
+            dz, dwf = _pair16_bwd(DB, p2 if p2.is_contiguous() else p2.contiguous(), lnw, wb, eps, Lb)
+        elif pair.dtype is BF:
             from ..apb import acc_n, ext, pair_bias_bwd, width
 
             acc = torch.empty(ext().pair_bwd_blocks(pz, H, Lb, 1), acc_n(H, 384, dp), device=x.device, dtype=F32)
