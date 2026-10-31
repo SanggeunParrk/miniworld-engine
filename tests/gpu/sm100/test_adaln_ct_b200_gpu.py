@@ -128,7 +128,8 @@ def test_inference_launches_the_cuda_kernels_and_matches_the_reference(op, bf16,
         assert torch.equal(again, y)
     # inference (kernels/adaln/cuda/sm100): bf16 at the atom width (cond 128) one tcgen05 kernel (LN(cond) built in shared memory, the gate and
     # LN(x) in its epilogue), elsewhere the row pass + the tcgen05 GEMM with the gate in its epilogue; fp32 the row kernels around one cuBLAS
-    # TF32 GEMM (the weights packed once). The tail: bf16 the two tcgen05 GEMMs, fp32 cuBLAS between the CUDA SwiGLU / gate row kernels.
+    # TF32 GEMM (the weights packed once). The tail at the token width (bf16 up to 4096 rows) cuBLAS between the CUDA SwiGLU / gate row kernels,
+    # else the two tcgen05 GEMMs.
     if not bf16:
         assert _has(names, "ln_cond_fwd", "adaln_fwd_k"), names
     elif dc == 128:
@@ -136,7 +137,13 @@ def test_inference_launches_the_cuda_kernels_and_matches_the_reference(op, bf16,
     else:
         assert _has(names, "ln_cond_xstats", "adaln_gemm_sm100"), names
     if op == "ct":
-        assert _has(names, "tg_gemm_sm100") if bf16 else _has(names, "swiglu_fwd", "sigmul_fwd"), names
+        from miniworld_engine.kernels.conditioned_transition.cuda import ct_sm100
+
+        rows_ = 1
+        for r_ in rows:
+            rows_ *= r_
+        cublas_tail = d > 128 and (not bf16 or rows_ <= ct_sm100.BF16_CUBLAS_MAX_ROWS)
+        assert _has(names, "swiglu_fwd", "sigmul_fwd") if cublas_tail else _has(names, "tg_gemm_sm100"), names
     assert not any(_is_triton(k) for k in names), names
 
 

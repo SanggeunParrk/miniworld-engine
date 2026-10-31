@@ -74,12 +74,17 @@ def _tail(xn: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: torch.Tens
 #: L128 / 384 / 768 the tcgen05 tail's CT 61.2 / 90.0 / 114.5 against the Triton family's cuBLAS route 51.0 / 73.5 / 106.3 -- the TF32
 #: tcgen05 GEMMs of the generic Transition kernel are below cuBLAS at these thin K.
 F32_ROUTE = "cublas"
+#: the widths each dtype takes the cuBLAS tail at: d_hidden above ``CUBLAS_MIN_D[dtype]`` (fp32: the token width only -- at the atom width
+#: d128 the tcgen05 tail is the faster, ladder L4096 / 8192 59.4 / 84.0 against 69.5 / 108.4 us); bf16 also only up to ``BF16_CUBLAS_MAX_ROWS``
+#: rows (module inference in a CUDA graph, A = 5, d768, us, tcgen05 / cuBLAS tail: L384 73.6 / 65.3, L768 91.8 / 88.0, L1024 100.0 / 104.3)
+CUBLAS_MIN_D = {"fp32": 128, "bf16": 128}
+BF16_CUBLAS_MAX_ROWS = 4096
 
 
-def _f32_weights(wa, wb, ws, wsc, bsc):
-    """[Wa; Wb], Ws, Wsc, bsc as contiguous fp32 (cuBLAS rounds TF32 operands itself)."""
-    f = lambda w: w.float().contiguous()  # noqa: E731
-    return torch.cat([wa, wb]).float().contiguous(), f(ws), f(wsc), f(bsc)
+def _f32_weights(wa, wb, ws, wsc, bsc, dt=torch.float32):
+    """[Wa; Wb], Ws, Wsc in ``dt`` and bsc (contiguous; fp32: cuBLAS rounds TF32 operands itself; bf16: the bias in bf16 too, as addmm takes it)."""
+    f = lambda w: w.to(dt).contiguous()  # noqa: E731
+    return torch.cat([wa, wb]).to(dt).contiguous(), f(ws), f(wsc), f(bsc)
 
 
 def _tail_cublas_fake(xn, cond, wab, ws, wsc, bsc, res):
@@ -90,7 +95,7 @@ def _tail_cublas_fake(xn, cond, wab, ws, wsc, bsc, res):
 @opaque(fake=_tail_cublas_fake, name="conditioned_transition_tail_f32_cublas_sm100a")
 def _tail_cublas(xn: torch.Tensor, cond: torch.Tensor, wab: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
                  res: torch.Tensor | None) -> torch.Tensor:
-    """fp32: ab = xn [Wa; Wb]^T, h = silu(a) b (swiglu_fwd), sp = cond Wsc^T + bsc, y = res + sigmoid(sp) * (h Ws^T) (sigmul_fwd)."""
+    """ab = xn [Wa; Wb]^T, h = silu(a) b (swiglu_fwd), sp = cond Wsc^T + bsc, y = res + sigmoid(sp) * (h Ws^T) (sigmul_fwd)."""
     from miniworld_engine.kernels._tf32 import tf32_matmul
 
     from .ct_train import ext as rows_ext
@@ -108,8 +113,9 @@ def ct_inference_sm100(xn, cond, wa, wb, ws, wsc, bsc, residual=None):
     """``residual + sigmoid(cond Wsc^T + bsc) * (silu(xn Wa^T) * (xn Wb^T)) Ws^T`` without a backward: ``xn`` [M, D], ``cond`` [M, DC] of
     one dtype, ``residual`` [M, D] in that dtype or None (then the update alone); the weights in any dtype."""
     f32 = xn.dtype is torch.float32
-    if f32 and F32_ROUTE == "cublas":
-        ww = _capture.param_forms("ct_sm100a_f32_cublas", (wa, wb, ws, wsc, bsc), lambda: _f32_weights(wa, wb, ws, wsc, bsc))
+    floor = CUBLAS_MIN_D["fp32" if f32 else "bf16"]
+    if (F32_ROUTE == "cublas" or not f32) and floor is not None and xn.shape[1] > floor and (f32 or xn.shape[0] <= BF16_CUBLAS_MAX_ROWS):
+        ww = _capture.param_forms(f"ct_sm100a_cublas_{xn.dtype}", (wa, wb, ws, wsc, bsc), lambda: _f32_weights(wa, wb, ws, wsc, bsc, xn.dtype))
         return _tail_cublas(xn.contiguous(), cond.contiguous(), *ww, residual.contiguous() if residual is not None else None)
     ww = _capture.param_forms(f"ct_sm100a_{xn.dtype}", (wa, wb, ws, wsc, bsc), lambda: _weights(wa, wb, ws, wsc, bsc, f32))
     res = residual.contiguous() if residual is not None else None

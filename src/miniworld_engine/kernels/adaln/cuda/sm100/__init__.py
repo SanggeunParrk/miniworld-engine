@@ -172,12 +172,12 @@ def _infer_fake(x2, c2, wc, wb, ws, bs, eps_x, eps_c, rna):
     return torch.empty_like(x2)
 
 
-def _f32_cublas_fake(x2, c2, wc, wcat, bcat, eps_x, eps_c, rna):
+def _f32_cublas_op_fake(x2, c2, wc, wcat, bcat, eps_x, eps_c, rna):
     """Output structure of ``_f32_cublas_op``: y [M, D] like x2."""
     return torch.empty_like(x2)
 
 
-@opaque(fake=_f32_cublas_fake, name="adaln_sm100a_f32_cublas")
+@opaque(fake=_f32_cublas_op_fake, name="adaln_sm100a_f32_cublas")
 def _f32_cublas_op(x2: torch.Tensor, c2: torch.Tensor, wc: torch.Tensor, wcat: torch.Tensor, bcat: torch.Tensor, eps_x: float, eps_c: float,
                    rna: bool) -> torch.Tensor:
     """``_f32_cublas`` as one opaque op."""
