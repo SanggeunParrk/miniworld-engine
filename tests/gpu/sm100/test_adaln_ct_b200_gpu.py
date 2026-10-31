@@ -126,15 +126,17 @@ def test_inference_launches_the_cuda_kernels_and_matches_the_reference(op, bf16,
         assert _err(y, yr) <= 1.5 * _err(yp, yr) + 1e-6, (_err(y, yr), _err(yp, yr))
         again = run() if mode != "graph" else (g.replay(), out.clone())[1]
         assert torch.equal(again, y)
-    # inference (kernels/adaln/cuda/sm100): at the atom width (cond 128) one tcgen05 kernel (LN(cond) built in shared memory, the gate and LN(x)
-    # in its epilogue); elsewhere the row pass (LN(cond) and x's statistics) and the tcgen05 GEMM with the gate and LN(x) in its epilogue
-    # (fp32 at the atom width: the row kernels around cuBLAS, as before -- measured faster there)
-    if dc == 128 and not bf16:
+    # inference (kernels/adaln/cuda/sm100): bf16 at the atom width (cond 128) one tcgen05 kernel (LN(cond) built in shared memory, the gate and
+    # LN(x) in its epilogue), elsewhere the row pass + the tcgen05 GEMM with the gate in its epilogue; fp32 the row kernels around one cuBLAS
+    # TF32 GEMM (the weights packed once). The tail: bf16 the two tcgen05 GEMMs, fp32 cuBLAS between the CUDA SwiGLU / gate row kernels.
+    if not bf16:
         assert _has(names, "ln_cond_fwd", "adaln_fwd_k"), names
+    elif dc == 128:
+        assert _has(names, "adaln_fused_sm100"), names
     else:
-        assert _has(names, "adaln_fused_sm100") if dc == 128 else _has(names, "ln_cond_xstats", "adaln_gemm_sm100"), names
+        assert _has(names, "ln_cond_xstats", "adaln_gemm_sm100"), names
     if op == "ct":
-        assert _has(names, "tg_gemm_sm100"), names
+        assert _has(names, "tg_gemm_sm100") if bf16 else _has(names, "swiglu_fwd", "sigmul_fwd"), names
     assert not any(_is_triton(k) for k in names), names
 
 

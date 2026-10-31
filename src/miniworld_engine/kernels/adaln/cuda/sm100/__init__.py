@@ -45,10 +45,6 @@ def supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
     if x.dtype is torch.float32 and not _tf32_allowed():
         return False
     d, dc = x.shape[-1], cond.shape[-1]
-    if x.dtype is torch.float32 and dc in FUSED_KC:
-        # fp32 at the atom width stays on the row kernels + cuBLAS: measured (ladder, A = 5, d128 c128, L4096 / 8192) 30.6 / 40.9 us there
-        # against 34.7 / 47.0 for the one-kernel route (its resident fp32 weight tile leaves room for one A buffer and no x staging)
-        return False
     if d % 128 or dc % 128 or d > 1024 or dc > 1024 or x.numel() == 0 or x.shape[:-1] != cond.shape[:-1]:
         return False
     idx = x.device.index if x.device.index is not None else torch.cuda.current_device()
@@ -73,7 +69,7 @@ def _load_fused(f32: bool, bn: int, kc: int, dx: int):
     from miniworld_engine.kernels.transition.cuda import fused_sm100a
 
     tag = f"{'f32' if f32 else 'bf16'}_bn{bn}_k{kc}_d{dx}"
-    inc = Path(fused_sm100a.__file__).parent / "sm100"
+    inc = _dir   # this directory's frozen copy of the sm_100a primitives (sm100.cuh)
     path = _nvcc.cubin(f"adaln_sm100a/fused_{tag}", ["-std=c++17", "-O3", "-arch=sm_100a", "-cubin", f"-I{inc}", f"-DF32={int(f32)}",
                                                      f"-DBN={bn}", f"-DKC={kc}", f"-DDX={dx}"], source=_dir / "adaln_fused_sm100.cu",
                        toolchain="sm100")
@@ -102,19 +98,25 @@ def _fused(x2, c2, wc, wb, ws, bs, eps_x, eps_c, rna, nsm):
     return y
 
 
-@functools.lru_cache(maxsize=8)
-def _load(f32: bool, bn: int):
-    """The sm_100a host binding with this (dtype, tile width) cubin registered (loaded on the current device: a rejected cubin fails here)."""
+#: staging buffers per epilogue warp of the GEMM (2: double-buffered stores; 1: a deeper operand ring), by dtype. fp32: 1 (measured,
+#: CUDA-graph replay per call: [1920 / 3840, 768] c384 17.9 / 25.1 -> 17.3 / 24.2 us)
+STAGING = {False: 2, True: 1}
+
+
+@functools.lru_cache(maxsize=16)
+def _load(f32: bool, bn: int, stg: int = 2):
+    """The sm_100a host binding with this (dtype, tile width, cluster) cubin registered (loaded on the current device: a rejected cubin fails
+    here). Returns (binding, registered name)."""
     from miniworld_engine.kernels import _nvcc
     from miniworld_engine.kernels.transition.cuda import fused_sm100a
 
-    tag = f"{'f32' if f32 else 'bf16'}_bn{bn}"
-    inc = Path(fused_sm100a.__file__).parent / "sm100"
+    tag = f"{'f32' if f32 else 'bf16'}_bn{bn}_s{stg}"
+    inc = _dir   # this directory's frozen copy of the sm_100a primitives (sm100.cuh)
     path = _nvcc.cubin(f"adaln_sm100a/gemm_{tag}", ["-std=c++17", "-O3", "-arch=sm_100a", "-cubin", f"-I{inc}", f"-DF32={int(f32)}",
-                                                    f"-DBN={bn}"], source=_dir / "adaln_gemm_sm100.cu", toolchain="sm100")
+                                                    f"-DBN={bn}", f"-DSTGP={stg}"], source=_dir / "adaln_gemm_sm100.cu", toolchain="sm100")
     ext = fused_sm100a._ext()
     ext.load_cubin(f"adaln_sm100a_{tag}", str(path))
-    return ext
+    return ext, f"adaln_sm100a_{tag}"
 
 
 def _pick_bn(m: int, n: int, f32: bool, nsm: int) -> int:
@@ -141,9 +143,45 @@ def _weights(ws, bs, wb, f32: bool):
     return wb_, ws_, b
 
 
+#: fp32 route: "cublas" (ln_cond_fwd -> cuBLAS TF32 -> adaln_fwd, the weights packed once per parameter version, every width) or "tcgen05"
+#: (adaln_gemm_sm100 with the gate in its epilogue; at cond 128 the one-kernel route). Measured (B200, CUDA-graph replay per call, us,
+#: tcgen05 / cublas / the Triton materialize route): [640, 768] c384 11.9 / 11.2 / 13.7, [1920, 768] c384 17.1 / 16.3 / 19.0, [3840, 768]
+#: c384 24.1 / 23.1 / 23.6, c768 17.0 / 12.8 / 15.8, 22.4 / 19.6 / 22.3, 33.7 / 30.9 / 30.7: the TF32 tcgen05 GEMM at this thin K is
+#: below cuBLAS's, more than the epilogue fusion gives back. The atom width (cond 128): the one-kernel route at [5120 / 40960, 128] 12.1 /
+#: 39.4 against 12.4 / 46.0 for the rows around a GEMM; the row kernels around cuBLAS measured 30.6 / 40.9 in the ladder (L4096 / 8192).
+F32_ROUTE = "cublas"
+
+
+def _f32_cublas(x2, c2, wc, wcat, bcat, eps_x, eps_c, rna):
+    """The fp32 row kernels around one cuBLAS TF32 GEMM: cn = LN(cond) wc, [scale | bias] = cn [Ws; Wb]^T + [bs | 0], y = adaln_fwd (x's
+    statistics in the same pass)."""
+    from miniworld_engine.kernels._tf32 import tf32_matmul
+
+    from .. import _ext as _rows_ext
+
+    e = _rows_ext()
+    cn, _ = e.ln_cond_fwd(c2, wc, float(eps_c))
+    with tf32_matmul():
+        sb = torch.addmm(bcat, cn, wcat.t())
+    y, _ = e.adaln_fwd(x2, sb, float(eps_x), bool(rna))
+    return y
+
+
 def _infer_fake(x2, c2, wc, wb, ws, bs, eps_x, eps_c, rna):
     """Output structure of ``_infer``: y [M, D] like x2."""
     return torch.empty_like(x2)
+
+
+def _f32_cublas_fake(x2, c2, wc, wcat, bcat, eps_x, eps_c, rna):
+    """Output structure of ``_f32_cublas_op``: y [M, D] like x2."""
+    return torch.empty_like(x2)
+
+
+@opaque(fake=_f32_cublas_fake, name="adaln_sm100a_f32_cublas")
+def _f32_cublas_op(x2: torch.Tensor, c2: torch.Tensor, wc: torch.Tensor, wcat: torch.Tensor, bcat: torch.Tensor, eps_x: float, eps_c: float,
+                   rna: bool) -> torch.Tensor:
+    """``_f32_cublas`` as one opaque op."""
+    return _f32_cublas(x2, c2, wc, wcat, bcat, eps_x, eps_c, rna)
 
 
 @opaque(fake=_infer_fake, name="adaln_sm100a_infer")
@@ -162,13 +200,13 @@ def _infer(x2: torch.Tensor, c2: torch.Tensor, wc: torch.Tensor, wb: torch.Tenso
     cn, st = _rows_ext().ln_cond_xstats(c2, wc.contiguous(), x2, float(eps_c), float(eps_x), f32)
     nsm = num_sms(x2.device)
     bn = BN_FORCE or _pick_bn(m, d, f32, nsm)
-    ext = _load(f32, bn)
+    ext, name = _load(f32, bn, STAGING[f32])
     bke, ocg = (32, 32) if f32 else (64, 64)
     y = torch.empty_like(x2)
     t = ext.tmap
     tiles = -(-m // 128) * -(-d // bn)
     ext.launch_kernel(
-        f"adaln_sm100a_{'f32' if f32 else 'bf16'}_bn{bn}", "adaln_gemm_sm100", max(1, min(nsm, tiles)), 320, 1,
+        name, "adaln_gemm_sm100", max(1, min(nsm, tiles)), 320, 1,
         [t(cn, dc, m, bke, 128), t(wb, dc, d, bke, bn), t(ws, dc, d, bke, bn), t(y, d, m, ocg, 32), x2, st, bs, m, d, dc, d,
          int(bool(rna) and f32)],
         pdl=True,
@@ -183,8 +221,16 @@ def adaln_inference(x, cond, wc, ws, bs, wb, eps_x: float, eps_c: float, *, rna:
 
     f32 = x.dtype is torch.float32
     params = (ws, wb) if bs is None else (ws, bs, wb)
-    wb_, ws_, bs_ = _capture.param_forms(f"adaln_sm100a_{x.dtype}", params, lambda: _weights(ws, bs, wb, f32))
     d, dc = x.shape[-1], cond.shape[-1]
+    if f32 and F32_ROUTE == "cublas":
+        wcat, bcat = _capture.param_forms(
+            "adaln_sm100a_f32_cublas", params,
+            lambda: (torch.cat([ws, wb]).float().contiguous(),
+                     torch.cat([bs.float() if bs is not None else ws.new_zeros(d, dtype=torch.float32), ws.new_zeros(d, dtype=torch.float32)])))
+        y = _f32_cublas_op(x.reshape(-1, d).contiguous(), cond.reshape(-1, dc).contiguous(), wc.contiguous(), wcat, bcat, float(eps_x),
+                           float(eps_c), bool(rna))
+        return y.view(x.shape)
+    wb_, ws_, bs_ = _capture.param_forms(f"adaln_sm100a_{x.dtype}", params, lambda: _weights(ws, bs, wb, f32))
     y = _infer(x.reshape(-1, d).contiguous(), cond.reshape(-1, dc).contiguous(), wc, wb_, ws_, bs_, float(eps_x), float(eps_c), bool(rna))
     return y.view(x.shape)
 

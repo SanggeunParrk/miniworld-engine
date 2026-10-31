@@ -1,5 +1,5 @@
 """B200: the AdaLN inference route ``kernels/adaln/cuda/sm100`` -- the row pass ``ln_cond_xstats`` + the tcgen05 GEMM ``adaln_gemm_sm100`` with the
-gate and LN(x) in its epilogue, and at the atom width the one-kernel ``adaln_fused_sm100`` (both routes tested there) -- at every output-tile width, bf16 and fp32 (TF32), against an fp64 reference: within 1.5x the
+gate and LN(x) in its epilogue (both staging depths), and at the atom width the one-kernel ``adaln_fused_sm100`` (both routes tested there) -- at every output-tile width, bf16 and fp32 (TF32), against an fp64 reference: within 1.5x the
 error of the same-dtype PyTorch statements, bitwise repeatable, and the fp32 ``rna`` output on the TF32 grid. Row counts off the 128-row tile and
 large enough for a second wave of the persistent grid."""
 from __future__ import annotations
@@ -37,7 +37,8 @@ def _err(a, ref):
 @pytest.mark.parametrize("shape", SHAPES, ids=[f"m{m}-d{d}-c{c}" for m, d, c in SHAPES])
 @pytest.mark.parametrize("bn", [128, 64, 32])
 @pytest.mark.parametrize("fused", [None, False], ids=["route", "two_launch"])
-def test_matches_the_reference_at_every_tile_width(dtype, shape, bn, fused):
+@pytest.mark.parametrize("stg", [2, 1], ids=["stage2", "stage1"])
+def test_matches_the_reference_at_every_tile_width(dtype, shape, bn, fused, stg):
     from miniworld_engine.kernels.adaln.cuda import sm100
 
     if bn == 32 and dtype is torch.bfloat16:
@@ -52,7 +53,11 @@ def test_matches_the_reference_at_every_tile_width(dtype, shape, bn, fused):
     wb = 0.05 * torch.randn(d, dc, device="cuda", generator=g)
     if fused is False and shape[2] not in sm100.FUSED_KC:
         pytest.skip("the two-launch route is the only one at this width")
-    sm100.BN_FORCE, sm100.FUSED = bn, fused
+    if stg == 1 and (fused is None and shape[2] in sm100.FUSED_KC and dtype is torch.bfloat16):
+        pytest.skip("the one-kernel route has no staging option")
+    saved = dict(sm100.STAGING)
+    # fp32 calls take the cuBLAS route in production; the tcgen05 kernels are pinned here so that every width of them stays tested
+    sm100.BN_FORCE, sm100.FUSED, sm100.STAGING, sm100.F32_ROUTE = bn, fused, {False: stg, True: stg}, "tcgen05"
     try:
         assert sm100.supported(x, c) or (dtype is torch.float32 and dc in sm100.FUSED_KC)   # fp32 atoms: the module keeps the row kernels
         with torch.no_grad():
@@ -60,7 +65,7 @@ def test_matches_the_reference_at_every_tile_width(dtype, shape, bn, fused):
             again = sm100.adaln_inference(x, c, wc, ws, bs, wb, 1e-5, 1e-5)
             yr = sm100.adaln_inference(x, c, wc, ws, bs, wb, 1e-5, 1e-5, rna=True)
     finally:
-        sm100.BN_FORCE, sm100.FUSED = None, None
+        sm100.BN_FORCE, sm100.FUSED, sm100.STAGING, sm100.F32_ROUTE = None, None, saved, "cublas"
     assert y.dtype == dtype and y.shape == x.shape
     assert torch.equal(y, again)
     ref = _ref(x.double(), c.double(), wc.double(), ws.double(), bs.double(), wb.double())
@@ -76,7 +81,8 @@ def test_matches_the_reference_at_every_tile_width(dtype, shape, bn, fused):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
 @pytest.mark.parametrize("shape", [(5000, 128, 128), (3000, 768, 384)], ids=["atom", "token"])
 @pytest.mark.parametrize("fused", [None, False], ids=["route", "two_launch"])
-def test_a_large_mean_keeps_the_statistics(dtype, shape, fused):
+@pytest.mark.parametrize("f32_route", ["cublas", "tcgen05"])
+def test_a_large_mean_keeps_the_statistics(dtype, shape, fused, f32_route):
     """x and cond with mean 1e3 and standard deviation 1: a one-pass E[v^2] - E[v]^2 variance in fp32 loses ~6 % of it (1e6 * 6e-8); the
     two-pass statistics keep the result within 1.5x the error of the same-dtype PyTorch statements."""
     from miniworld_engine.kernels.adaln.cuda import sm100
@@ -91,12 +97,14 @@ def test_a_large_mean_keeps_the_statistics(dtype, shape, fused):
     ws = 0.05 * torch.randn(d, dc, device="cuda", generator=g)
     bs = 0.5 * torch.randn(d, device="cuda", generator=g)
     wb = 0.05 * torch.randn(d, dc, device="cuda", generator=g)
-    sm100.FUSED = fused
+    if dtype is torch.bfloat16 and f32_route != "cublas":
+        pytest.skip("fp32 only")
+    sm100.FUSED, sm100.F32_ROUTE = fused, f32_route
     try:
         with torch.no_grad():
             y = sm100.adaln_inference(x, c, wc, ws, bs, wb, 1e-5, 1e-5)
     finally:
-        sm100.FUSED = None
+        sm100.FUSED, sm100.F32_ROUTE = None, "cublas"
     ref = _ref(x.double(), c.double(), wc.double(), ws.double(), bs.double(), wb.double())
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=dtype is torch.bfloat16):
         pt = _ref(x, c, wc, ws, bs, wb).to(dtype)   # the same-dtype PyTorch statements (bf16: autocast, LayerNorm in fp32, bf16 GEMMs)

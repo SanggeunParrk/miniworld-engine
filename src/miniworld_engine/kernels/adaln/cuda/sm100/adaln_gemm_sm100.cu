@@ -33,7 +33,10 @@ constexpr int ESZ = F32 ? 4 : 2;                     // activation / operand ele
 constexpr int BKE = 128 / ESZ;                       // elements per 128-byte K-block row
 constexpr int OCG = F32 ? 32 : 64;                   // output columns per 128-byte staging row
 constexpr int UPG = OCG / 32;                        // 32-column TMEM loads per output group
-constexpr int STG_PAR = 2;                           // double-buffered staging
+#ifndef STGP
+#define STGP 2
+#endif
+constexpr int STG_PAR = STGP;                        // staging buffers per warp (2: double-buffered stores; 1: room for a deeper operand ring)
 constexpr int A_BYTES = 128 * 128, B_BYTES = BN * 128, STAGE = A_BYTES + NACC * B_BYTES;
 constexpr int SLAB = 32 * 128;                       // one warp's staging slab: 32 rows x 128 B
 constexpr int NEPI = 8;                              // epilogue warps: two per TMEM lane quarter, splitting the columns
@@ -199,8 +202,8 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
       for (int g = (UPG == 1 ? half : 0); g < BN / OCG; g += (UPG == 1 ? 2 : 1), ++grp) {
         const int c0 = n0 + g * OCG;                         // first output column of the group
         if (c0 >= N) break;
-        const int par = grp & 1;
-        if (storer && lane == 0) tma_store_wait_read1();
+        const int par = STG_PAR == 2 ? (grp & 1) : 0;
+        if (storer && lane == 0) { if (STG_PAR == 2) tma_store_wait_read1(); else tma_store_wait_read0(); }
         if (UPG == 2) named_bar_sync(1 + q4, 64); else __syncwarp();
         {
           const int u = UPG == 1 ? 0 : half;
