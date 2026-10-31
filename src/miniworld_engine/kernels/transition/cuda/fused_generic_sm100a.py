@@ -179,12 +179,27 @@ def _plan(name: str, m: int, n: int, ks: tuple[int, ...], f32: bool, nsm: int, s
     return best[1], best[2]
 
 
-def _ab(m: int, hid: int, nsm: int) -> bool:
+def _ab(m: int, hid: int, nsm: int, d: int = 0, f32: bool = True) -> bool:
     """Whether a training call keeps a, b from the forward (SWIGLU_AB -> GATE_AB) instead of recomputing them in the backward's GATE: at
     a few row tiles (the gate's 64-column output tiles under one wave), where the GATE grid is bound by its per-CTA operand intake and the
     recompute doubles it, while the stores are small. Measured (module training step, CUDA graph): fp32 [1, 154, 768] n2 104.0 -> 96.6 us,
-    bf16 [1, 500, 1024] n2 114.8 -> 109.0, [1, 300, 768] n4 110.7 -> 107.3; [1, 768, 384] n4 fp32 even (88.4 / 89.1)."""
-    return AB_FORCE if AB_FORCE is not None else -(-m // 128) * -(-hid // 64) < nsm
+    bf16 [1, 500, 1024] n2 114.8 -> 109.0, [1, 300, 768] n4 110.7 -> 107.3; [1, 768, 384] n4 fp32 even (88.4 / 89.1).
+    And for bf16 at d >= 768 at any row count: the recompute is 2 M d hid more tensor-core work (a third of the step at n = 4) against
+    one write and one read of [a | b]. Measured, bf16 [1, 384, 384, 768] n4 (with the cuBLAS d_xn of ``_dxn_cublas``): 8189 -> 6378 us
+    (min of 50 replays; the recompute alone 8189 -> 6772)."""
+    if AB_FORCE is not None:
+        return AB_FORCE
+    return -(-m // 128) * -(-hid // 64) < nsm or (not f32 and d >= _AB_WIDE)
+
+
+#: bf16 widths from which training keeps a, b (``_ab``) and takes d_xn from cuBLAS (``_dxn_cublas``) at every row count
+_AB_WIDE = 768
+
+
+def _dxn_cublas(d: int, f32: bool) -> bool:
+    """The backward's d_xn = [dA | dB] [Wa; Wb] (K = 2 hid) by cuBLAS at bf16 d >= 768: the PLAIN tile ran it at ~0.85 PF where cuBLAS'
+    2-CTA tiles run ~1.5 (bf16 [1, 384, 384, 768] n4, kept a, b: 6772 -> 6378 us)."""
+    return not f32 and d >= _AB_WIDE
 
 
 #: A/B override of ``_ab`` (None: automatic)
@@ -260,7 +275,8 @@ def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save):
     m, d = x.shape
     f32 = dict(dtype=torch.float32, device=x.device)
     rows = m if save else 1
-    ab = x.new_empty((m, 2 * wa.shape[0])) if save and _ab(m, wa.shape[0], num_sms(x.device)) else x.new_empty((1, 1))
+    ab = (x.new_empty((m, 2 * wa.shape[0])) if save and _ab(m, wa.shape[0], num_sms(x.device), d, x.dtype is torch.float32)
+          else x.new_empty((1, 1)))
     return torch.empty_like(x), torch.empty_like(x), torch.empty((rows,), **f32), torch.empty((rows,), **f32), ab
 
 
@@ -280,7 +296,7 @@ def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: to
     sfx, rpw = _ln_variant(d, k.f32)
     k.rows(f"tg_ln_fwd_{sfx}", max(1, min(-(-m // (8 * rpw)), k.nsm * 8)), (x, gamma, beta, xn, mean, rstd, m, d, float(eps), int(save)))
     h = torch.empty((m, hid), dtype=x.dtype, device=x.device)
-    if save and _ab(m, hid, k.nsm):   # a few row tiles: keep a, b for the backward's GATE_AB
+    if save and _ab(m, hid, k.nsm, d, k.f32):   # a few row tiles, or a wide bf16 d: keep a, b for the backward's GATE_AB
         ab = torch.empty((m, 2 * hid), dtype=x.dtype, device=x.device)
         k.gemm("swiglu_ab", m, hid, xn, wa, h, b1=wb, o1=ab, k0=d, hoff=hid,
                bn=_plan("swiglu_ab", m, hid, (d,), k.f32, k.nsm, False)[0])
@@ -358,7 +374,7 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, mean: torch
     dwab = _mm_f32(dab.t(), xn)         # [2H, D]: dWa then dWb
     del h
     bn, ks = _plan("plain", m, d, (2 * hid,), k.f32, k.nsm, True)
-    if DXN_ROUTE == "cublas":
+    if DXN_ROUTE == "cublas" or (DXN_ROUTE is None and ks == 1 and _dxn_cublas(d, k.f32)):   # (a few row tiles keep the split-K PLAIN)
         dxn, ks, mp = _mm_f32(dab, wabt.t()), 1, 0
     else:
         if DXN_ROUTE == "nosplit":
