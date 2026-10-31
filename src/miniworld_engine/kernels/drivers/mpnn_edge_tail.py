@@ -116,11 +116,11 @@ def mpnn_edge_tail_fwd_gemm_recompute_triton() -> None:
 
 
 def mpnn_edge_tail_fwd_gemm_layernorm_recompute_triton() -> None:
-    _edge_tail("triton", backward=False)
+    _edge_tail("triton", backward=False, dropouts=_BOTH_DROPOUTS)
 
 
 def mpnn_edge_tail_bwd_recompute_triton() -> None:
-    _edge_tail("triton", backward=True)
+    _edge_tail("triton", backward=True, dropouts=_BOTH_DROPOUTS)
 
 
 def mpnn_edge_tail_bwd_dx_recompute_triton() -> None:

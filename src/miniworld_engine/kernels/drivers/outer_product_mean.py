@@ -52,36 +52,49 @@ def _inputs(dtype=BF16, variant="base"):
 VARIANTS = ("base", "pbias", "grouped")
 
 
-def _forward(variants=("base",)) -> None:
+#: Both sides of the boolean key flags: masked / unmasked rows (HAS_MASK), with / without the pair residual (HAS_RES), and the pair-count
+#: division before / after the output projection (NORM_FIRST: ``normalize_before_proj``, RoseTTAFold3's divide-after form). Each side is
+#: its own constexpr specialisation and its own cache bucket, so a driver that calls one side leaves the other untuned.
+_MASK_SIDES = (True, False)
+_EPILOGUE_SIDES = ((True, True), (False, True), (True, False))   # (residual, normalize_before_proj)
+
+
+def _forward(variants=("base",), masks=(True,), epilogues=((True, True),)) -> None:
     from miniworld_engine.kernels.outer_product_mean.interface import (
         triton_outer_product_mean,
     )
 
     for variant in variants:
-        msa, mask, weights, residual, options = _inputs(variant=variant)
-        with torch.no_grad():
-            triton_outer_product_mean(msa, mask, *weights, residual=residual, **options)
+        for use_mask in masks:
+            for use_res, norm_first in epilogues:
+                msa, mask, weights, residual, options = _inputs(variant=variant)
+                if variant != "grouped":
+                    options = {**options, "normalize_before_proj": norm_first}
+                with torch.no_grad():
+                    triton_outer_product_mean(msa, mask if use_mask else None, *weights, residual=residual if use_res else None,
+                                              **options)
 
 
-def _backward(variants=("base",)) -> None:
+def _backward(variants=("base",), masks=(True,)) -> None:
     from miniworld_engine.kernels.outer_product_mean.interface import (
         triton_outer_product_mean,
     )
 
     for variant in variants:
-        msa, mask, weights, residual, options = _inputs(variant=variant)
-        leaves = [t.requires_grad_() for t in (msa, *weights, residual)]
-        options = {k: v.requires_grad_() if isinstance(v, torch.Tensor) else v for k, v in options.items()}
-        out = triton_outer_product_mean(leaves[0], mask, *leaves[1:7], residual=leaves[7], **options)
-        out.backward(torch.randn_like(out))
+        for use_mask in masks:
+            msa, mask, weights, residual, options = _inputs(variant=variant)
+            leaves = [t.requires_grad_() for t in (msa, *weights, residual)]
+            options = {k: v.requires_grad_() if isinstance(v, torch.Tensor) else v for k, v in options.items()}
+            out = triton_outer_product_mean(leaves[0], mask if use_mask else None, *leaves[1:7], residual=leaves[7], **options)
+            out.backward(torch.randn_like(out))
 
 
 def outer_product_mean_layernorm_gemm_triton() -> None:
-    _forward(VARIANTS)
+    _forward(VARIANTS, masks=_MASK_SIDES)
 
 
 def outer_product_mean_epilogue_triton() -> None:
-    _forward()
+    _forward(epilogues=_EPILOGUE_SIDES)
 
 
 def outer_product_mean_bwd_epilogue_dx_triton() -> None:
@@ -93,7 +106,7 @@ def outer_product_mean_bwd_epilogue_dw_triton() -> None:
 
 
 def outer_product_mean_bwd_layernorm_gemm_triton() -> None:
-    _backward(VARIANTS)
+    _backward(VARIANTS, masks=_MASK_SIDES)
 
 
 def outer_product_mean_epilogue_ln_triton() -> None:

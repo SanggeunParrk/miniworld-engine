@@ -96,6 +96,10 @@ def test_a_bucket_key_names_a_dtype(path: Path):
         dtype, bucket = key.split("|", 1)
         assert dtype
         assert bucket
+        # `cache.dtype_of_args` keys on the FLOATING operands and spells a kernel with none of them `any` -- the bool-mask
+        # packer `mpnn_edge_dropout_fwd_packed_triton` (bool in, uint8 out), whose first cache is the B200 one.
+        if dtype == "any":
+            continue
         for one in dtype.split("+"):
             assert one in {"bfloat16", "float32", "float16", "int32", "int64", "int8",
                            "uint8", "float64", "bool"}, f"{key!r}: unknown dtype {one!r}"
