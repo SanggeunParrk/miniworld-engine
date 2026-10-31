@@ -14,7 +14,7 @@ __global__ void __launch_bounds__(cta_threads<TPR>()) ln_bwd_kernel(
   constexpr int CTA = cta_threads<TPR>();
   constexpr int RPC = CTA / TPR;
   constexpr int E = CHUNKS * VEC;
-  static_assert(RPT == 1 || TPR <= 32, "rows in flight only on the shuffle-reduced (sub-)warp rows");
+  static_assert(RPT == 1, "built at one row a thread");
   extern __shared__ float part_smem[];  // RPC * TPR * E floats when RPC > 1 and the affine gradients are wanted
   __shared__ float red[TPR > 32 ? RPC * (TPR / 32) : 1];
   const int r_in = threadIdx.x / TPR, lane = threadIdx.x % TPR;
@@ -24,65 +24,67 @@ __global__ void __launch_bounds__(cta_threads<TPR>()) ln_bwd_kernel(
   load_affine<TPR, CHUNKS, VEC>(w, wbf, 1.f, lane, N, wr);
 #pragma unroll
   for (int e = 0; e < E; ++e) aw[e] = ab[e] = 0.f;
-  for (int64_t base = int64_t(blockIdx.x) * (RPC * RPT); base < M; base += int64_t(gridDim.x) * (RPC * RPT)) {
-    Pack<T, VEC> xr[RPT][CHUNKS], dr[RPT][CHUNKS];
-    float mu[RPT], rs[RPT];
+  struct Rows {
+    Pack<T, VEC> xr[CHUNKS], dr[CHUNKS];
+    float mu, rs;
+  };
+  auto load_row = [&](Rows& t, int64_t row) {
+    const bool valid = row < M;
+    const int64_t off = (valid ? row : 0) * int64_t(N);
+    t.mu = valid && !RMS ? mean[row] : 0.f;
+    t.rs = valid ? rstd[row] : 0.f;
 #pragma unroll
-    for (int k = 0; k < RPT; ++k) {
-      const int64_t row = base + k * RPC + r_in;
-      const bool valid = row < M;
-      const int64_t off = (valid ? row : 0) * int64_t(N);
-      mu[k] = valid && !RMS ? mean[row] : 0.f;
-      rs[k] = valid ? rstd[row] : 0.f;
+    for (int c = 0; c < CHUNKS; ++c) {
+      const int col = (c * TPR + lane) * VEC;
+      const bool in = valid && col < N;
+      t.xr[c] = in ? load_pack<T, VEC>(x + off + col) : zero_pack<T, VEC>();
+      t.dr[c] = in ? load_pack<T, VEC>(dy + off + col) : zero_pack<T, VEC>();
+    }
+  };
+  auto process = [&](const Rows& t, int64_t row) {
+    float s1 = 0.f, s2 = 0.f;
+    float xh[E], g[E];
+#pragma unroll
+    for (int c = 0; c < CHUNKS; ++c) {
+#pragma unroll
+      for (int i = 0; i < VEC; ++i) {
+        const int e = c * VEC + i;
+        const float dv = to_f<T>(t.dr[c].v[i]);
+        xh[e] = (to_f<T>(t.xr[c].v[i]) - t.mu) * t.rs;
+        g[e] = dv * wr[e];
+        s1 += g[e];
+        s2 += g[e] * xh[e];
+        if (wgrad) {
+          aw[e] += dv * xh[e];
+          if constexpr (!RMS) ab[e] += dv;
+        }
+      }
+    }
+    if constexpr (RMS) s1 = 0.f;
+    else s1 = row_sum<TPR>(s1, red, r_in, lane) * inv_n;
+    s2 = row_sum<TPR>(s2, red, r_in, lane) * inv_n;
+    if (row < M) {
+      const int64_t off = row * int64_t(N);
 #pragma unroll
       for (int c = 0; c < CHUNKS; ++c) {
         const int col = (c * TPR + lane) * VEC;
-        const bool in = valid && col < N;
-        xr[k][c] = in ? load_pack<T, VEC>(x + off + col) : zero_pack<T, VEC>();
-        dr[k][c] = in ? load_pack<T, VEC>(dy + off + col) : zero_pack<T, VEC>();
-      }
-    }
+        if (col < N) {
+          float o[VEC];
 #pragma unroll
-    for (int k = 0; k < RPT; ++k) {
-      const int64_t row = base + k * RPC + r_in;
-      float s1 = 0.f, s2 = 0.f;
-      float xh[E], g[E];
-#pragma unroll
-      for (int c = 0; c < CHUNKS; ++c) {
-#pragma unroll
-        for (int i = 0; i < VEC; ++i) {
-          const int e = c * VEC + i;
-          const float dv = to_f<T>(dr[k][c].v[i]);
-          xh[e] = (to_f<T>(xr[k][c].v[i]) - mu[k]) * rs[k];
-          g[e] = dv * wr[e];
-          s1 += g[e];
-          s2 += g[e] * xh[e];
-          if (wgrad) {
-            aw[e] += dv * xh[e];
-            if constexpr (!RMS) ab[e] += dv;
+          for (int i = 0; i < VEC; ++i) {
+            const int e = c * VEC + i;
+            o[i] = t.rs * (g[e] - s1 - xh[e] * s2);
           }
-        }
-      }
-      if constexpr (RMS) s1 = 0.f;
-      else s1 = row_sum<TPR>(s1, red, r_in, lane) * inv_n;
-      s2 = row_sum<TPR>(s2, red, r_in, lane) * inv_n;
-      if (row < M) {
-        const int64_t off = row * int64_t(N);
-#pragma unroll
-        for (int c = 0; c < CHUNKS; ++c) {
-          const int col = (c * TPR + lane) * VEC;
-          if (col < N) {
-            float o[VEC];
-#pragma unroll
-            for (int i = 0; i < VEC; ++i) {
-              const int e = c * VEC + i;
-              o[i] = rs[k] * (g[e] - s1 - xh[e] * s2);
-            }
-            store_vec<T, VEC>(dx + off + col, o);
-          }
+          store_vec<T, VEC>(dx + off + col, o);
         }
       }
     }
+  };
+  const int64_t stride = int64_t(gridDim.x) * RPC;
+  for (int64_t base = int64_t(blockIdx.x) * RPC; base < M; base += stride) {
+    Rows t;
+    load_row(t, base + r_in);
+    process(t, base + r_in);
   }
   if (!wgrad) return;
   // the CTA's rows-in-flight hold partials of the same columns: sum them in shared memory, then one partial row per CTA
@@ -121,22 +123,26 @@ __global__ void __launch_bounds__(cta_threads<TPR>()) ln_bwd_kernel(
   }
 }
 
-// out[col] = sum over the P partial rows, 32 columns x 8 row slices per CTA, fixed order.
-__global__ void __launch_bounds__(256) ln_col_reduce(const float* __restrict__ part, int P, int N, void* __restrict__ out, int obf) {
+// out[col] = sum over the P partial rows, 32 columns x 8 row slices per CTA, fixed order. blockIdx.y picks the gradient: 0 dw (part,
+// out), 1 db (part + pstride N, out2) -- one launch for both.
+__global__ void __launch_bounds__(256) ln_col_reduce(const float* __restrict__ part, int P, int pstride, int N, void* __restrict__ out,
+                                                     void* __restrict__ out2, int obf) {
   __shared__ float sm[8][33];
+  const float* src = part + (blockIdx.y ? int64_t(pstride) * N : 0);
+  void* dst = blockIdx.y ? out2 : out;
   const int tx = threadIdx.x & 31, sl = threadIdx.x >> 5;
   const int col = blockIdx.x * 32 + tx;
   float s = 0.f;
   if (col < N)
-    for (int p = sl; p < P; p += 8) s += part[int64_t(p) * N + col];
+    for (int p = sl; p < P; p += 8) s += src[int64_t(p) * N + col];
   sm[sl][tx] = s;
   __syncthreads();
   if (sl == 0 && col < N) {
     float t = 0.f;
 #pragma unroll
     for (int i = 0; i < 8; ++i) t += sm[i][tx];
-    if (obf) reinterpret_cast<__nv_bfloat16*>(out)[col] = __float2bfloat16(t);
-    else reinterpret_cast<float*>(out)[col] = t;
+    if (obf) reinterpret_cast<__nv_bfloat16*>(dst)[col] = __float2bfloat16(t);
+    else reinterpret_cast<float*>(dst)[col] = t;
   }
 }
 
@@ -154,7 +160,7 @@ int launch_bwd(const T* dy, const T* x, const void* w, int wbf, const float* mea
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ[wgrad], kern, CTA, smem);
     if (occ[wgrad] < 1) occ[wgrad] = 1;
   }
-  const int64_t groups = (M + RPC * RPT - 1) / (RPC * RPT);
+  const int64_t groups = (M + RPC - 1) / RPC;
   int64_t cap = int64_t(num_sms()) * occ[wgrad];
   if (cap > grid_cap) cap = grid_cap;
   int grid = int(groups < cap ? groups : cap);
@@ -242,10 +248,14 @@ std::vector<torch::Tensor> ln_bwd(torch::Tensor dy, torch::Tensor x, torch::Tens
   TORCH_CHECK(grid > 0, "general LayerNorm backward: no build for tpr=", tpr, " chunks=", chunks, " vec=", vec, " rpt=", rpt);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   if (wgrad) {
-    const int blocks = (N + 31) / 32;
-    mwln::ln_col_reduce<<<blocks, 256, 0, s>>>(dwp, grid, N, dw.data_ptr(), int(gbf16));
-    if (!rms) mwln::ln_col_reduce<<<blocks, 256, 0, s>>>(dbp, grid, N, db.data_ptr(), int(gbf16));
+    mwln::ln_col_reduce<<<dim3((N + 31) / 32, rms ? 1 : 2), 256, 0, s>>>(dwp, grid, int(grid_cap), N, dw.data_ptr(),
+                                                                          rms ? nullptr : db.data_ptr(), int(gbf16));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return {dx, dw, db};
+}
+
+// the bulk backward's column pass: dw (and db, laid out P rows after it) in one launch
+void ln_col_reduce_launch(const float* part, int P, int N, void* out, void* out2, int obf, cudaStream_t s) {
+  mwln::ln_col_reduce<<<dim3((N + 31) / 32, out2 ? 2 : 1), 256, 0, s>>>(part, P, P, N, out, out2, obf);
 }

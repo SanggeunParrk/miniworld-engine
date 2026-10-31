@@ -123,8 +123,7 @@ __device__ __forceinline__ Pack<T, VEC> zero_pack() {
 }  // namespace mwln
 
 // Instantiation lists, shared by the launchers. Scalar path: TPR 32..1024 x CHUNKS {1, 2, 4, 8}. Vector path: also CHUNKS 3 (a 768 /
-// 1536 / 3072-wide bf16 row at a warp or two per row without idle lanes). RPT (rows per thread in flight) is a template parameter of
-// the kernels, built at 1 only: measured on B200 over N 64-3072, two or four rows in flight lost to one row with a resident-wave grid
-// (``general.config_sm100``) everywhere but by <= 7% on a few fp32 cases.
+// 1536 / 3072-wide bf16 row at a warp or two per row without idle lanes). RPT (rows a thread holds) is a template parameter, built at 1:
+// two rows a thread, batched or software-pipelined, measured slower on B200 than the one-wave grid at one row.
 #define MWLN_FOR_CHUNKS(M, ...) M(1, __VA_ARGS__) M(2, __VA_ARGS__) M(4, __VA_ARGS__) M(8, __VA_ARGS__)
 #define MWLN_FOR_CHUNKS_V(M, ...) MWLN_FOR_CHUNKS(M, __VA_ARGS__) M(3, __VA_ARGS__)

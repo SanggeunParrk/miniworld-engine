@@ -7,6 +7,9 @@ Layout (``ln_common.cuh``): TPR threads per row, each holding CHUNKS vectors of 
 from the width: the fewest idle lanes, at most 32 values per thread, and TPR as close to 128 as that allows (measured on H100: 128
 threads x 2-4 vectors beat 256-1024 threads x 1 vector by 10-40% at widths 2048-8192; 8 vectors per thread spill).
 
+B200 (sm_100) backward of rows >= 1 KB (a bf16 768-wide RMSNorm): ``ln_bulk.cu`` -- tiles of rows brought in by TMA bulk copies two
+stages ahead, dx written in place and bulk-stored (:func:`bwd_bulk_sm100`).
+
 B200 (sm_100) launches its own layout (:func:`launch_config`): a (sub-)warp per row (TPR <= 32, shuffle reductions only, CHUNKS
 up to 4 incl. 3: a 768-wide bf16 row is a warp of 3 vectors a lane) on a one-wave grid. The H100 layout (128 threads x one 16-byte
 vector a row, shared-memory row reductions, a 4-wave grid) left a bf16 [48 L, 768] RMSNorm at ~2 TB/s.
@@ -89,6 +92,29 @@ def config_sm100(n: int, elem_bytes: int, rows: int) -> tuple[int, int, int, int
     return (*sw, 1, 1)
 
 
+def bwd_bulk_sm100(n: int, elem_bytes: int) -> tuple[int, int, int] | None:
+    """(rows a tile, stages, CTAs a SM) of the bulk-copy backward (``ln_bulk.cu``) for rows of >= 1 KB with a sub-warp layout, else
+    None. Measured at bf16 [18432 / 49152, 768] (RMSNorm): 32.0 -> 29.4 us / 79.3 -> 69.5 us forward + backward against the register
+    backward; on shorter rows (128 / 256 wide) it lost or tied."""
+    sw = _sub_warp(n, elem_bytes)
+    rowb = n * elem_bytes
+    if sw is None or rowb < 1024:
+        return None
+    rpc = 256 // sw[0]
+    return max(rpc, (32768 // rowb) // rpc * rpc), 2, 2
+
+
+def bwd_launch(x: torch.Tensor):
+    """The bulk backward's (tpr, chunks, rows a tile, stages, CTAs a SM) for ``x`` [M, N] on B200, or None (the register backward)."""
+    if not (x.is_cuda and _cc(x.device.index if x.device.index is not None else torch.cuda.current_device()) == (10, 0)):
+        return None
+    cfg = bwd_bulk_sm100(x.shape[1], x.element_size())
+    if cfg is None or x.data_ptr() % 16:
+        return None
+    sw = _sub_warp(x.shape[1], x.element_size())
+    return (sw[0], sw[1], *cfg)
+
+
 def launch_config(n: int, elem_bytes: int, rows: int, device: torch.device) -> tuple[int, int, int, int, int]:
     """(tpr, chunks, vec, rpt, waves) for this card: :func:`config_sm100` on B200, :func:`config` (rpt 1) elsewhere."""
     if device.type == "cuda" and _cc(device.index if device.index is not None else torch.cuda.current_device()) == (10, 0):
@@ -113,7 +139,7 @@ def _ext():
     ensure_cuda_home()
     return load_extension(
         name="layernorm_general_cuda_v4",
-        sources=[str(_dir / "bind.cpp"), str(_dir / "ln_fwd.cu"), str(_dir / "ln_bwd.cu")],
+        sources=[str(_dir / "bind.cpp"), str(_dir / "ln_fwd.cu"), str(_dir / "ln_bwd.cu"), str(_dir / "ln_bulk.cu")],
         extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "--expt-relaxed-constexpr", *gencodes("80", "90", "100")],
         extra_cflags=["-O3", "-std=c++17"],
         verbose=False,
@@ -174,6 +200,9 @@ def _bwd(dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, b: torch.Tensor, me
          wgrad: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """LayerNorm backward from the saved mean / rstd. (dx, dw, db); the affine gradients only when wgrad (``b`` only names their
     dtype)."""
+    bulk = bwd_launch(x) if dy.data_ptr() % 16 == 0 else None
+    if bulk is not None:
+        return tuple(_ext().bwd_bulk(dy, x, w, mean, rstd, bool(wgrad), False, *bulk, _grad_bf16(w, b)))
     tpr, ch, vec, rpt, _ = launch_config(x.shape[1], x.element_size(), x.shape[0], x.device)
     dx, dw, db = _ext().bwd(dy, x, w, mean, rstd, bool(wgrad), False, tpr, ch, vec, rpt, 0, _grad_bf16(w, b))
     return dx, dw, db
@@ -217,4 +246,4 @@ def layernorm_cuda(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Ten
     return _LayerNorm.apply(x2, weight, bias, float(eps)).reshape(shape)
 
 
-__all__ = ["config", "config_sm100", "launch_config", "layernorm_cuda", "supported"]
+__all__ = ["bwd_bulk_sm100", "config", "config_sm100", "launch_config", "layernorm_cuda", "supported"]

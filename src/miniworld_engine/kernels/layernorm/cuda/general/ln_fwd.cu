@@ -1,6 +1,5 @@
 // General LayerNorm / RMSNorm forward: y = (x - mean) * rstd * w + b per row (RMS: mean = 0, no bias), fp32 statistics, y in x's
-// dtype; mean / rstd saved on request. Each thread keeps RPT rows in flight (their loads issued before any reduction), the rows
-// held as the packs they were loaded as.
+// dtype; mean / rstd saved on request. A row is held as the packs it was loaded as.
 #include "ln_common.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
@@ -14,72 +13,72 @@ __global__ void __launch_bounds__(cta_threads<TPR>()) ln_fwd_kernel(
   constexpr int CTA = cta_threads<TPR>();
   constexpr int RPC = CTA / TPR;
   constexpr int E = CHUNKS * VEC;
-  static_assert(RPT == 1 || TPR <= 32, "rows in flight only on the shuffle-reduced (sub-)warp rows");
+  static_assert(RPT == 1, "built at one row a thread");
   __shared__ float red[TPR > 32 ? RPC * (TPR / 32) : 1];
   const int r_in = threadIdx.x / TPR, lane = threadIdx.x % TPR;
   const float inv_n = 1.f / float(N);
   float wr[E], br[E];
   load_affine<TPR, CHUNKS, VEC>(w, wbf, 1.f, lane, N, wr);
   if constexpr (!RMS) load_affine<TPR, CHUNKS, VEC>(b, bbf, 0.f, lane, N, br);
-  for (int64_t base = int64_t(blockIdx.x) * (RPC * RPT); base < M; base += int64_t(gridDim.x) * (RPC * RPT)) {
-    Pack<T, VEC> raw[RPT][CHUNKS];
+  // one row of this thread, from its packs: statistics, the normalized row, the stats (lane 0)
+  auto process = [&](const Pack<T, VEC>* raw, int64_t row) {
+    float mean = 0.f;
+    if constexpr (!RMS) {
+      float s = 0.f;
 #pragma unroll
-    for (int k = 0; k < RPT; ++k) {
-      const int64_t row = base + k * RPC + r_in;
-      const bool valid = row < M;
-      const T* xr = x + (valid ? row : 0) * int64_t(N);
+      for (int c = 0; c < CHUNKS; ++c)
 #pragma unroll
-      for (int c = 0; c < CHUNKS; ++c) {
-        const int col = (c * TPR + lane) * VEC;
-        raw[k][c] = (valid && col < N) ? load_pack<T, VEC>(xr + col) : zero_pack<T, VEC>();
+        for (int i = 0; i < VEC; ++i) s += to_f<T>(raw[c].v[i]);
+      mean = row_sum<TPR>(s, red, r_in, lane) * inv_n;
+    }
+    float q = 0.f;
+#pragma unroll
+    for (int c = 0; c < CHUNKS; ++c) {
+      const int col = (c * TPR + lane) * VEC;
+      if (col < N) {
+#pragma unroll
+        for (int i = 0; i < VEC; ++i) {
+          const float d = to_f<T>(raw[c].v[i]) - mean;
+          q += d * d;
+        }
       }
     }
-#pragma unroll
-    for (int k = 0; k < RPT; ++k) {
-      const int64_t row = base + k * RPC + r_in;
-      float mean = 0.f;
-      if constexpr (!RMS) {
-        float s = 0.f;
-#pragma unroll
-        for (int c = 0; c < CHUNKS; ++c)
-#pragma unroll
-          for (int i = 0; i < VEC; ++i) s += to_f<T>(raw[k][c].v[i]);
-        mean = row_sum<TPR>(s, red, r_in, lane) * inv_n;
-      }
-      float q = 0.f;
+    const float rstd = rsqrtf(row_sum<TPR>(q, red, r_in, lane) * inv_n + eps);
+    if (row < M) {
+      T* yr = y + row * int64_t(N);
 #pragma unroll
       for (int c = 0; c < CHUNKS; ++c) {
         const int col = (c * TPR + lane) * VEC;
         if (col < N) {
+          float o[VEC];
 #pragma unroll
           for (int i = 0; i < VEC; ++i) {
-            const float d = to_f<T>(raw[k][c].v[i]) - mean;
-            q += d * d;
+            const float xn = (to_f<T>(raw[c].v[i]) - mean) * rstd;
+            o[i] = RMS ? xn * wr[c * VEC + i] : xn * wr[c * VEC + i] + br[c * VEC + i];
           }
+          store_vec<T, VEC>(yr + col, o);
         }
       }
-      const float rstd = rsqrtf(row_sum<TPR>(q, red, r_in, lane) * inv_n + eps);
-      if (row < M) {
-        T* yr = y + row * int64_t(N);
-#pragma unroll
-        for (int c = 0; c < CHUNKS; ++c) {
-          const int col = (c * TPR + lane) * VEC;
-          if (col < N) {
-            float o[VEC];
-#pragma unroll
-            for (int i = 0; i < VEC; ++i) {
-              const float xn = (to_f<T>(raw[k][c].v[i]) - mean) * rstd;
-              o[i] = RMS ? xn * wr[c * VEC + i] : xn * wr[c * VEC + i] + br[c * VEC + i];
-            }
-            store_vec<T, VEC>(yr + col, o);
-          }
-        }
-        if (lane == 0) {
-          if (mean_out) mean_out[row] = mean;
-          if (rstd_out) rstd_out[row] = rstd;
-        }
+      if (lane == 0) {
+        if (mean_out) mean_out[row] = mean;
+        if (rstd_out) rstd_out[row] = rstd;
       }
     }
+  };
+  auto load_row = [&](Pack<T, VEC>* raw, int64_t row) {
+    const bool valid = row < M;
+    const T* xr = x + (valid ? row : 0) * int64_t(N);
+#pragma unroll
+    for (int c = 0; c < CHUNKS; ++c) {
+      const int col = (c * TPR + lane) * VEC;
+      raw[c] = (valid && col < N) ? load_pack<T, VEC>(xr + col) : zero_pack<T, VEC>();
+    }
+  };
+  const int64_t stride = int64_t(gridDim.x) * RPC;
+  for (int64_t base = int64_t(blockIdx.x) * RPC; base < M; base += stride) {
+    Pack<T, VEC> raw[CHUNKS];
+    load_row(raw, base + r_in);
+    process(raw, base + r_in);
   }
 }
 
@@ -89,8 +88,18 @@ void launch_fwd(const T* x, const void* w, const void* b, int wbf, int bbf, T* y
   constexpr int CTA = cta_threads<TPR>();
   constexpr int RPC = CTA / TPR;
   const int sms = num_sms();
-  const int64_t groups = (M + RPC * RPT - 1) / (RPC * RPT);
-  const int64_t cap = int64_t(sms) * (2048 / CTA) * (waves > 0 ? waves : 4);  // full residency, a few waves of grid-stride
+  const int64_t groups = (M + RPC - 1) / RPC;
+  int64_t cap;
+  if (waves > 0) {   // `waves` resident waves: the CTAs the SMs actually hold (registers), not the 2048-thread bound
+    static int occ = 0;
+    if (!occ) {
+      cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, ln_fwd_kernel<T, TPR, CHUNKS, VEC, RMS, RPT>, CTA, 0);
+      if (occ < 1) occ = 1;
+    }
+    cap = int64_t(sms) * occ * waves;
+  } else {
+    cap = int64_t(sms) * (2048 / CTA) * 4;  // full residency, a few waves of grid-stride (the H100 launch)
+  }
   const int grid = int(groups < cap ? groups : cap);
   ln_fwd_kernel<T, TPR, CHUNKS, VEC, RMS, RPT>
       <<<grid > 0 ? grid : 1, CTA, 0, stream>>>(x, w, b, wbf, bbf, y, mean, rstd, M, N, eps);

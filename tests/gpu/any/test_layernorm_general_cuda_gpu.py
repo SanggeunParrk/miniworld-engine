@@ -71,7 +71,7 @@ def test_leading_dims_bf16_activation_fp32_affine_and_no_grad():
     assert rel(y, ref) < 1e-2
 
 
-@pytest.mark.parametrize("n", [64, 128, 1000])
+@pytest.mark.parametrize("n", [64, 128, 768, 1000])   # 768: B200's bulk-copy backward (rows >= 1 KB)
 def test_replays_are_bit_identical(n):
     x, w, b, dy = _case(20000, n, torch.bfloat16, "wb", seed=3)
     outs = []
