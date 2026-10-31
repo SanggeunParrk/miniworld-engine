@@ -23,8 +23,10 @@ def bwd_rows(L: int) -> int:
 
 
 def fwd_rows(L: int) -> int:
-    """Rows of z per CTA in the forward: 2 from L 512 (the 72 KB table load is amortised), else 1 (measured L128-L768)."""
-    return 2 if L >= 512 else 1
+    """Rows of z per forward tile (one register copy of right[j] serves them): 2, 1 where the tile's packed words would not fit the
+    shared memory. Measured (CUDA graph, B200): rows 1 / 2 / 4 x 2 / 4 / 8 positions in flight x 4 / 8 CTAs a SM at B16 L128-384, B48
+    L128-256, B5 L768, B1 L2048: 2 rows, 4 positions, 8 CTAs is the best or within 3% of it everywhere."""
+    return 2 if 2 * L * 4 <= 200 * 1024 else 1
 
 
 def check_packable(r_max: int, s_max: int) -> None:
@@ -41,7 +43,7 @@ def n_rel(r_max: int, s_max: int) -> int:
 
 
 @functools.lru_cache(maxsize=None)
-def cubin(ri: int = 2) -> str:
+def cubin(ri: int = 2, rf: int = 2) -> str:
     """Path of the cubin, built on first use; rebuilt only when the source, a flag or the toolchain changes."""
     from miniworld_engine.kernels import _nvcc
 
@@ -52,8 +54,9 @@ def cubin(ri: int = 2) -> str:
         "-cubin",
         "-lineinfo",
         f"-DTPI_RI={ri}",
+        f"-DTPI_RF={rf}",
     )
-    return str(_nvcc.cubin(f"token_pair_init_sm100/token_pair_init_ri{ri}", flags, source=_dir / "token_pair_init.cu",
+    return str(_nvcc.cubin(f"token_pair_init_sm100/token_pair_init_ri{ri}_rf{rf}", flags, source=_dir / "token_pair_init.cu",
                            toolchain="sm100"))
 
 
@@ -62,10 +65,10 @@ def _kernels(index: int, nbin: int, L: int):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     with torch.cuda.device(index):
-        ri = bwd_rows(L)
-        fwd = driver.Kernel(cubin(ri), "tpi_fwd", nbin * P * 4 + L * 4)
+        ri, rf = bwd_rows(L), fwd_rows(L)
+        fwd = driver.Kernel(cubin(ri, rf), "tpi_fwd", rf * L * 4)
         bwd = driver.Kernel(
-            cubin(ri), "tpi_bwd", nbin * P * 4 + NWARP * ri * P * 4 + ri * L * 4
+            cubin(ri, rf), "tpi_bwd", nbin * P * 4 + NWARP * ri * P * 4 + ri * L * 4
         )
     return fwd, bwd
 
@@ -81,11 +84,12 @@ def forward(left, right, tbl, ids, bond, r_max: int, s_max: int) -> torch.Tensor
     nbin = n_rel(r_max, s_max) + 2
     fwd, _ = _kernels(_dev(left), nbin, L)
     out = torch.empty(B, L, L, P, device=left.device, dtype=torch.float32)
-    rows = fwd_rows(L)
-    tiles = (L + rows - 1) // rows
+    tiles = B * -(-L // fwd_rows(L))
+    from miniworld_engine.kernels._device import num_sms
+
     with torch.cuda.device(left.device):
         fwd(
-            (B * tiles, 1, 1),
+            (min(tiles, 8 * num_sms(_dev(left))), 1, 1),
             (32 * NWARP, 1, 1),
             left,
             right,
@@ -97,7 +101,6 @@ def forward(left, right, tbl, ids, bond, r_max: int, s_max: int) -> torch.Tensor
             int(L),
             int(r_max),
             int(s_max),
-            rows,
         )
     return out
 

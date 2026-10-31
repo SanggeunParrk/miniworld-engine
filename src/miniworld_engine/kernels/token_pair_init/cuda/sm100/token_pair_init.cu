@@ -8,7 +8,7 @@
 // chain and residue only), c3 the clipped chain-symmetry offset (6 classes). The reference builds the 139-wide one-hot per
 // pair and runs a Linear over it; a one-hot times a matrix is a row gather, so this kernel never materialises it.
 //
-//   forward   one pass writing z (the only large tensor)
+//   forward   one pass writing z (the only large tensor): per row the table part is recomputed only where the bins change along j
 //   backward  one pass over dz: dleft (row sums), dright (column sums, global vector atomics), and the class-bin
 //             gradients dW[bin][:] -- run-length accumulated in registers, added per CTA in shared memory, then to global once.
 //
@@ -77,43 +77,65 @@ __device__ __forceinline__ void pack_rows(uint32_t* pk, const int* ids, const ui
 #endif
 constexpr int UNR = TPI_UNR;                      // positions in flight per warp in the forward
 
+#ifndef TPI_RF
+#define TPI_RF 2
+#endif
+constexpr int RF = TPI_RF;                       // rows of z per tile in the forward
+
+// Forward: a CTA takes tiles of RF rows i of one batch element (grid-stride over the B * ceil(L / RF) tiles). Each warp walks a
+// contiguous run of positions j and serves the tile's RF rows from one register copy of right[j]; per row it keeps t = left[i] +
+// the table rows of the pair's bins, recomputed only when the packed word changes along j (the clipped offsets are constant away
+// from the diagonal, the chain / entity / bond bins nearly so: a warp-uniform branch). A position of a row costs one add and one
+// streaming store; the table is read through L1 (__ldg) on a change only, and only the packed words live in shared memory.
 extern "C" __global__ void __launch_bounds__(256)
 tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const float* __restrict__ tbl, const int* __restrict__ ids,
-        const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax, int rows_per_cta) {
-    extern __shared__ __align__(16) float sm[];
-    const int nrel = 2 * (2 * rmax + 2) + (2 * smax + 2) + 1, nbin = nrel + 2;
-    uint32_t* pk = (uint32_t*)(sm + nbin * P);       // [L]
-    for (int idx = threadIdx.x; idx < nbin * (P / 4); idx += blockDim.x) ((float4*)sm)[idx] = ((const float4*)tbl)[idx];
+        const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax) {
+    extern __shared__ __align__(16) uint32_t pk[];   // [RF][L]
+    const int nrel = 2 * (2 * rmax + 2) + (2 * smax + 2) + 1;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, BL = B * L;
-    const int tiles = (L + rows_per_cta - 1) / rows_per_cta;
-    const int b = blockIdx.x / tiles, i0 = (blockIdx.x % tiles) * rows_per_cta;
-    const float4* T = (const float4*)sm;
-    for (int i = i0; i < min(i0 + rows_per_cta, L); i++) {
-        __syncthreads();                             // tables loaded (first row) / previous row's pk consumed
-        pack_rows(pk, ids, bond, BL, L, b, i, 1, rmax, smax);
+    const int tiles = (L + RF - 1) / RF;
+    const float4* T = (const float4*)tbl;
+    const int span = (L + NWARP - 1) / NWARP;
+    const int jb = min(L, warp * span), je = min(L, jb + span);
+    for (int tile = blockIdx.x; tile < B * tiles; tile += gridDim.x) {
+        const int b = tile / tiles, i0 = (tile % tiles) * RF, nrows = min(RF, L - i0);
+        __syncthreads();                             // the previous tile's words consumed
+        pack_rows(pk, ids, bond, BL, L, b, i0, nrows, rmax, smax);
         __syncthreads();
-        const int ri = b * L + i;
-        const float4 lf = ((const float4*)(left + (size_t)ri * P))[lane];
-        float4* orow = (float4*)(out + (size_t)ri * L * P);
-        for (int j0 = warp * UNR; j0 < L; j0 += NWARP * UNR) {
-            float4 o[UNR];
+        float4 lf[RF], t[RF];
+        uint32_t last[RF];
+#pragma unroll
+        for (int r = 0; r < RF; r++) {
+            lf[r] = r < nrows ? __ldg((const float4*)(left + (size_t)(b * L + i0 + r) * P) + lane) : make_float4(0.f, 0.f, 0.f, 0.f);
+            t[r] = lf[r];
+            last[r] = 0xffffffffu;                   // no packed word is all ones (bit 26 up is zero)
+        }
+        for (int j0 = jb; j0 < je; j0 += UNR) {
+            float4 rv[UNR];
 #pragma unroll
             for (int u = 0; u < UNR; u++) {
-                const int j = min(j0 + u, L - 1);
-                o[u] = lf + ((const float4*)(right + (size_t)(b * L + j) * P))[lane];
+                const int j = min(j0 + u, je - 1);
+                rv[u] = __ldg((const float4*)(right + (size_t)(b * L + j) * P) + lane);
             }
 #pragma unroll
             for (int u = 0; u < UNR; u++) {
-                const uint32_t w = pk[min(j0 + u, L - 1)];
-                o[u] += T[(w & 255) * 32 + lane];
-                o[u] += T[((w >> 8) & 255) * 32 + lane];
-                o[u] += T[((w >> 16) & 255) * 32 + lane];
-                if ((w >> 24) & 1) o[u] += T[(nrel - 1) * 32 + lane];
-                o[u] += T[(nrel + ((w >> 25) & 1)) * 32 + lane];
-            }
+                const int j = j0 + u;
+                if (j >= je) break;
 #pragma unroll
-            for (int u = 0; u < UNR; u++)
-                if (j0 + u < L) __stcs(orow + (size_t)(j0 + u) * 32 + lane, o[u]);
+                for (int r = 0; r < RF; r++) {
+                    if (r >= nrows) break;
+                    const uint32_t w = pk[r * L + j];
+                    if (w != last[r]) {
+                        last[r] = w;
+                        float4 v = lf[r] + __ldg(T + (w & 255) * 32 + lane);
+                        v += __ldg(T + ((w >> 8) & 255) * 32 + lane);
+                        v += __ldg(T + ((w >> 16) & 255) * 32 + lane);
+                        if ((w >> 24) & 1) v += __ldg(T + (nrel - 1) * 32 + lane);
+                        t[r] = v + __ldg(T + (nrel + ((w >> 25) & 1)) * 32 + lane);
+                    }
+                    __stcs((float4*)(out + ((size_t)(b * L + i0 + r) * L + j) * P) + lane, t[r] + rv[u]);
+                }
+            }
         }
     }
 }
