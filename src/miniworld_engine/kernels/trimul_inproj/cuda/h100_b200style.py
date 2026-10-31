@@ -86,22 +86,31 @@ def _headers(backward=False):
     return dest
 
 
-def _config(d, backward=False):
+def _config(d, backward=False, n=None):
     if d == 256 and not backward:
         return (2, 64, 4, 4, 1, 0)
     if d == 128 and not backward:
         return (6, 32, 8, 2, 1)   # the packaged D128 K1 tile (192-token CTA, three consumer warpgroups), inference only
+    if d == 64 and not backward:   # inference only: 192-token CTAs (6, 32) up to L1536, (3, 64) beyond (as the packaged D64 K1)
+        return K1_TILE_64 if n is None or n <= 1536 else K1_TILE_64_LONG
     return {256: (2, 64, 4, 4, 1), 384: (2, 64, 2, 6, 1), 512: (2, 64, 4, 2, 1)}[d]
 
 
 def _output_config(d):
     if d == 128:
         return (128, K3_STAGES_128)
+    if d == 64:
+        return (64, K3_STAGES_64)
     return (192, 4) if d == 384 else (256, 3)
 
 
 #: K3 ring depth at D128 (BN = 128: one column block, [128 tok + 128 n] x 64 k per stage)
 K3_STAGES_128 = 4
+#: The D64 K1 tile (BI, BJ, NSLOT, SKCH, MINB)
+K1_TILE_64 = (6, 32, 4, 1, 1)
+K1_TILE_64_LONG = (3, 64, 4, 1, 1)
+#: K3 ring depth at D64 (BN = 64)
+K3_STAGES_64 = 4
 #: residual / output tiles per K3 warpgroup at D128 (k3.cu XBUF; the D256 / D384 tiles leave no shared memory for a second one)
 K3_XBUF_128 = 2
 
@@ -297,8 +306,8 @@ def rowpad_serves(x, direction):
     """One direction, inference: D256 / D384 at an L the token-flat path does not take (L % 128 != 0), D128 at every L (the
     token-flat port has no D128 build). One sample at any L >= 16; B samples (stacked b-major, as K1 takes them) at L % 16 == 0."""
     return (x.ndim == 4 and direction in (1, 2) and x.shape[1] == x.shape[2] and x.shape[1] >= 16
-            and (x.shape[0] == 1 or (x.shape[1] % 16 == 0 and x.shape[-1] == 128))
-            and (x.shape[-1] == 128 or (x.shape[-1] in (256, 384) and x.shape[1] % 128 != 0)))
+            and (x.shape[0] == 1 or (x.shape[1] % 16 == 0 and x.shape[-1] in (64, 128)))
+            and (x.shape[-1] in (64, 128) or (x.shape[-1] in (256, 384) and x.shape[1] % 128 != 0)))
 
 
 def _run_rowpad(leaves, mask, direction, out=None):
@@ -331,7 +340,7 @@ def _run_rowpad(leaves, mask, direction, out=None):
         cfg = _output_config(d)
         from .h100_b200style_static import output_kernel
 
-        kernel, smem = output_kernel(d, h, cfg, rowpad=True, xbuf=K3_XBUF_128 if d == 128 else 1)
+        kernel, smem = output_kernel(d, h, cfg, rowpad=True, xbuf=K3_XBUF_128 if d <= 128 else 1)
         bn, _ = cfg
         cj = -(-n // 64)
         tiles = -(-(rows * cj) // 2)

@@ -447,16 +447,17 @@ def test_d384_rowpad_inference(case, monkeypatch):
     assert err < 1e-2, err
 
 
-D128_ROWPAD = [(direction, L, masked) for direction in (1, 2) for L in (768, 1000) for masked in (True, False)]
+SMALL_ROWPAD = [(D, direction, L, masked) for D, Ls in ((128, (768, 1000)), (64, (1000, 1040, 1600))) for direction in (1, 2)
+                for L in Ls for masked in (True, False)]
 
 
-@pytest.mark.parametrize("case", D128_ROWPAD, ids=[f"dir{d}-L{L}-{'mask' if m else 'nomask'}" for d, L, m in D128_ROWPAD])
-def test_d128_rowpad_inference(case, monkeypatch):
-    """One-sample D128 inference from ROWPAD_D128_FROM on takes the port's any-L form: two residual / output tiles per K3
+@pytest.mark.parametrize("case", SMALL_ROWPAD, ids=[f"D{D}-dir{d}-L{L}-{'mask' if m else 'nomask'}" for D, d, L, m in SMALL_ROWPAD])
+def test_small_width_rowpad_inference(case, monkeypatch):
+    """One-sample D64 / D128 inference from ROWPAD_FROM on takes the port's any-L form: two residual / output tiles per K3
     warpgroup are bitwise one tile (k3.cu XBUF), the result is deterministic and within the bf16 band of the FP32 statement."""
-    direction, L, masked = case
-    m = make(128, direction).eval()
-    x, mask, _ = inputs(1, L, 128)
+    D, direction, L, masked = case
+    m = make(D, direction).eval()
+    x, mask, _ = inputs(1, L, D)
     mask = mask if masked else None
     calls = []
     run = h100_b200style._run_rowpad

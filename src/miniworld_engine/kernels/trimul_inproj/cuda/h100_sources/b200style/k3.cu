@@ -41,7 +41,7 @@ constexpr int NCB = D / BN, KG = D / 64, KP = H / 64;
 constexpr int ABYTES = MT * 128, WBYTES = BN * 128, STAGE = ABYTES + WBYTES;
 constexpr int XBYTES = 64 * BN * 2;                              // per warpgroup x / y tile
 constexpr int NACC = BN / 2;
-static_assert(D % BN == 0 && (BN == 128 || BN == 192 || BN == 256), "column block");
+static_assert(D % BN == 0 && (BN == 64 || BN == 128 || BN == 192 || BN == 256), "column block");
 // xa: gate A operand (x with GFOLD, else xn), box [64 k][128 tok]; wp, wg: [BN n][64 k] weight chunks; xm, ym: [64][64]
 // uv: fp32 [4][D] = up, vp, ug, vg; xs: fp32 [M][2] = (mean, rstd) of LN_in (GFOLD)
 struct Params {
@@ -55,7 +55,8 @@ struct Params {
 
 TMN_DEVI uint32_t lds32(uint32_t a) { uint32_t v; asm volatile("ld.shared.b32 %0,[%1];" : "=r"(v) : "r"(a)); return v; }
 template <int TA> TMN_DEVI void mma_n(float (&d)[NACC], uint64_t a, uint64_t b, int acc) {
-  if constexpr (BN == 128) mw_mma128<TA>(d, a, b, acc);
+  if constexpr (BN == 64) mw_mma64<TA>(d, a, b, acc);
+  else if constexpr (BN == 128) mw_mma128<TA>(d, a, b, acc);
   else if constexpr (BN == 192) mw_mma192<TA>(d, a, b, acc);
   else mw_mma256<TA>(d, a, b, acc);
 }

@@ -48,7 +48,7 @@ def front(x, weights, token_mask, gi, bi, ab, xs):
     np_ = ab.shape[-1]
     if np_ != n and rows != n:
         raise ValueError("padded planes take one sample")
-    cfg = K._config(d)
+    cfg = K._config(d, n=n)
     a, b, _, _, mb = cfg[:5]
     kernel, smem = _kernel(d, h, cfg)
     tj = -(-np_ // b)
