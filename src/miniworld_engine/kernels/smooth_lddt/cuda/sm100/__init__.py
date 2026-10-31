@@ -16,7 +16,7 @@ from miniworld_engine.kernels._device import num_sms
 
 _dir = Path(__file__).parent
 BLK = 128   # atoms per tile / threads per CTA (slddt_*: one thread per atom row)
-FBLK = 512  # threads per CTA of the whole-structure kernels (slddt_*_full) on B200; H100 picks 128 / 256 / 512 (:func:`_fblk`)
+FBLK = 512  # the largest CTA (threads) of the whole-structure kernels (slddt_*_full); :func:`_fblk` / :func:`_fwd_variant` size it to the grid
 FULL_SMEM = 110 * 1024   # whole-structure kernels need N * 32 B of shared memory; two CTAs per SM (N <= 3520 atoms) beat the tile kernels
 FORCE_TILE = False  # tests set it to compare the tile kernel with the whole-structure one
 
@@ -28,18 +28,18 @@ def _full(n: int) -> bool:
 FORCE_FWD = ""   # tests / probes: a fixed forward variant "<threads>s<threads per row>" of FWD_VARIANTS (the whole-structure kernel)
 FORCE_FB = 0     # ... and a fixed backward CTA size (128 / 256 / 512)
 FWD_VARIANTS = ("128s1", "256s1", "512s1", "256s2", "512s2", "512s4")
-FBLK_FILL = 2   # H100 backward: the largest CTA (512 / 256 / 128 threads) whose grid keeps FBLK_FILL CTAs per SM (else the smallest)
+FBLK_FILL = 2   # backward: the largest CTA (512 / 256 / 128 threads) whose grid keeps FBLK_FILL CTAs per SM (else the smallest)
 
 
 
 
 def _fblk(x: torch.Tensor, n_augment_batch: int, n: int) -> int:
-    """Threads per CTA of the whole-structure kernels. B200 keeps 512. On H100 a launch of A * B * N / 512 CTAs can be smaller than the SM count (A48 x N1024:
-    96 CTAs on 132 SMs, the other SMs idle, 16 warps on the rest): take the largest CTA whose grid has at least ``FBLK_FILL`` CTAs per SM (else the smallest)."""
+    """Threads per CTA of the whole-structure backward. A launch of A * B * N / 512 CTAs can be smaller than the SM count (A48 x N1024: 96 CTAs
+    on 132 H100 / 148 B200 SMs, the other SMs idle, 16 warps on the rest): take the largest CTA whose grid has at least ``FBLK_FILL`` CTAs per SM
+    (else the smallest). B200 (eager, 2026-10-31, A48: N512 393 -> 335 us, N1024 369 -> 355, N2048 1102 -> 999; A5 N1024 363 -> 341; A16
+    N4096 1374 either way) -- it used to keep 512 there."""
     if FORCE_FB:
         return FORCE_FB
-    if _arch(_dev(x)) != "sm_90a":
-        return FBLK
     sms = num_sms(_dev(x))
     for fb in (512, 256, 128):
         if n_augment_batch * -(-n // fb) >= FBLK_FILL * sms:
@@ -48,11 +48,11 @@ def _fblk(x: torch.Tensor, n_augment_batch: int, n: int) -> int:
 
 
 def _fwd_variant(x: torch.Tensor, n_augment_batch: int, n: int) -> str:
-    """Forward whole-structure variant "<threads>s<threads per row>": B200 keeps 512s1; H100 deals each row to S = 2 threads (a launch has only A * B * N rows: A48 x N1024 is 11 warps per SM) and sizes the CTA to the grid."""
+    """Forward whole-structure variant "<threads>s<threads per row>": each row dealt to S = 2 threads (a launch has only A * B * N rows: A48 x
+    N1024 is 11 warps per SM) and the CTA sized to the grid. B200 kept 512s1 (one thread per row, 96 CTAs at A48 x N1024 on 148 SMs); with the
+    rule (eager calls, 2026-10-31): A48 N512 127 -> 110 us, N1024 300 -> 164, N2048 521 -> 409; A5 N1024 194 -> 121; A16 N4096 637 either way."""
     if FORCE_FWD:
         return FORCE_FWD
-    if _arch(_dev(x)) != "sm_90a":
-        return "512s1"
     sms = num_sms(_dev(x))
     for v, rows in (("512s2", 256), ("256s2", 128)):   # the largest CTA whose grid still has 1.5 CTAs per SM (measured A16 / A48, N512 - N2048)
         if n_augment_batch * -(-n // rows) >= 1.5 * sms:
