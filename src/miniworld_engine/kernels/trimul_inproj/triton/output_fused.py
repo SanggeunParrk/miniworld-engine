@@ -152,3 +152,31 @@ def output_f567_train(
         shape_key=token_key(seq_len, KP=kp, KG=kg, N=n),
     )
     return y, proj, gate
+
+
+
+#: Inference back half (LN_out + output projection + gate + residual): the fused ``back._back_kernel`` serves an LN_out width K up to
+#: this; wider K runs ``split_back_infer``. ``_back_kernel`` has no persistent tile over K: past one K tile it re-reads and re-normalises
+#: the [BLOCK_M1, K] tri rows for every BLOCK_N slice of the output and runs both GEMMs at BLOCK_M1 = 64 (its register ceiling).
+#: B200 (2026-10-31, CUDA graph, bf16, one direction D512 L384): fused 1690 us per module call, F567 split 1376 us, this split
+#: (cuBLAS projection) 1173 us; compiled PyTorch 1406-1425 us. Bidirectional D256 (K = 512) L384 917 -> 775 us, D512 (K = 1024) 2734 -> 2041 us.
+FUSED_BACK_MAX_K = 256
+
+
+def split_back_infer(tri_km: torch.Tensor, x_n: torch.Tensor, wp: torch.Tensor, wgt: torch.Tensor, ln_w: torch.Tensor,
+                     ln_b: torch.Tensor, eps: float, residual: torch.Tensor, seq_len: int) -> torch.Tensor:
+    """y = residual + sigmoid(x_n Wg) (LN_out(tri) Wp^T) for a wide LN_out: ``_ln_materialize`` (one pass over the channel-major
+    tri [K, M] -> the normalised rows, token-major bf16), the projection as a plain cuBLAS GEMM, and ``gate_elem_train`` (the gate
+    logits by cuBLAS, sigmoid / product / residual in one Triton pass; the identity drop scale). F567 (both GEMMs as Triton tiles,
+    the training forward's output stage) ran its two K = 512 products at ~0.35 PFLOP/s on the B200 whatever its tile (swept
+    BM 64-128 x BN 64-256 x BK 32-128 x warps x stages: 412-500 us against 155 GFLOP). tri_km [K, M]; x_n [M, KG]; wp (N, K)
+    (nn.Linear form); wgt (KG, N); residual [M, N]. Returns y [M, N]."""
+    from miniworld_engine.autotune.shape_key import both_key
+    from miniworld_engine.kernels.layernorm_linear.triton.te_style import _ln_materialize
+    from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_train, ones_dropscale
+
+    m = tri_km.shape[1]
+    norm, _, _ = _ln_materialize(tri_km.t(), ln_w, ln_b, eps, shape_key=both_key(m))
+    proj = torch.mm(norm, wp.t())
+    y, _ = gate_elem_train(x_n, proj, wgt, residual, ones_dropscale(seq_len, wp.shape[0], x_n), seq_len)
+    return y

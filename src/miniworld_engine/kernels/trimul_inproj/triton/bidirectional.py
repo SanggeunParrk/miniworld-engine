@@ -22,6 +22,7 @@ from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _ln_materialize,
 )
 from miniworld_engine.kernels.trimul_inproj.triton.output_fused import output_f567_train
+from miniworld_engine.kernels.trimul_inproj.triton import output_fused
 from miniworld_engine.autotune.shape_key import both_key, pack, token_key
 from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
@@ -322,6 +323,10 @@ def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h,
         y, _ = gate_elem_train(x_n.reshape(M, D), proj, Wgt, residual,
                                ones_dropscale(L, D, x_n), seq_len=L)
         return y.view(B, L, L, D)
+    if H > output_fused.FUSED_BACK_MAX_K:
+        # wide LN_out (2 h > 256: D256 / D512 bidirectional): the split back half (see output_fused.FUSED_BACK_MAX_K)
+        return output_fused.split_back_infer(tri.reshape(H, M), x_n.reshape(M, D), Wp, Wgt, ln_out_w, ln_out_b, eps,
+                                             residual.reshape(M, D), L).view(B, L, L, D)
     # ONE pass: LN_out(H) + proj GEMM (H -> D) + gate GEMM (D -> D) + residual. This used to be
     # `_te_forward` (LN+GEMM) followed by a separate gate pass (since removed), because
     # `trimul_back_triton` gated over the same axis it normalised and so refused H != D. It takes

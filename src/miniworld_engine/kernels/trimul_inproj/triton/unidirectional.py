@@ -23,6 +23,7 @@ from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import (
     input_ln_residual,
 )
 from miniworld_engine.kernels.trimul_inproj.triton.output_fused import output_f567_train
+from miniworld_engine.kernels.trimul_inproj.triton import output_fused
 from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
 from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
@@ -159,6 +160,11 @@ def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outg
     lf = left.reshape(H, L, L)
     rf = right.reshape(H, L, L)
     tri = _contract(lf, rf, outgoing)                           # (H, L, L)
+    if x_n.dtype == torch.bfloat16 and H > output_fused.FUSED_BACK_MAX_K:
+        # wide LN_out (D512 one direction): the split back half (see output_fused.FUSED_BACK_MAX_K)
+        M = B * L * L
+        return output_fused.split_back_infer(tri.reshape(H, M), x_n.reshape(M, D), Wp, Wgt, ln_out_w, ln_out_b, eps,
+                                             residual.reshape(M, D), L).view(B, L, L, D)
     # Fused back-half: LN_out + proj-gemm + gate-gemm + mul in ONE kernel (``trimul_back_triton``),
     # which replaces the 2-kernel ``_te_forward`` (LN_out+proj) + ``gate_elem_triton`` (gate+mul) split:
     # one fewer launch and one fewer HBM round-trip of the [L,L,D] proj tensor. All triton, so it
