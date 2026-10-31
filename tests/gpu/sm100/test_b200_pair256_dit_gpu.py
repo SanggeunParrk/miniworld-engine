@@ -165,9 +165,9 @@ def test_token_dit_inference(monkeypatch, dtype, d_pair, A, L, masked):
 @pytest.mark.parametrize("d_pair", WIDTHS)
 @pytest.mark.parametrize(("A", "L", "masked"), [(4, 256, True), (3, 200, False)])
 def test_token_dit_training(monkeypatch, dtype, d_pair, A, L, masked):
-    """``token_dit_train._Block`` (B200: ``pair_ln`` + cuBLAS in bf16, the one-pass ``pair_bias`` in fp32, their backwards at the build's
-    pair width) serves the call; every gradient no worse than the engine's own module path against the fp32 PyTorch block (IEEE): the
-    yardstick of ``tests/gpu/sm90/test_token_dit_pair256_gpu.py``."""
+    """``token_dit_train._Block`` serves the call (bf16: the APB pair kernels; fp32: the one-pass ``pair_bias``) -- except bf16 at pair 256,
+    which B200 trains on the module composition (faster there); every gradient no worse than the engine's own module path against the
+    fp32 PyTorch block (IEEE): the yardstick of ``tests/gpu/sm90/test_token_dit_pair256_gpu.py``."""
     from settings_helpers import override_setting
 
     torch.manual_seed(7)
@@ -195,7 +195,8 @@ def test_token_dit_training(monkeypatch, dtype, d_pair, A, L, masked):
     truth = run(ref, False)
     spy = _Spy(monkeypatch, TDT._Block, "apply")
     got = run(eng, dtype is F32)
-    assert spy.n == 1, f"the {dtype} pair-{d_pair} training call did not take the fused block"
+    composed = dtype is BF and d_pair == 256   # B200 bf16 pair 256 trains on the module composition (token_dit_train.serves)
+    assert spy.n == (0 if composed else 1), f"the {dtype} pair-{d_pair} training call took the wrong route ({spy.n} fused calls)"
     override_setting(monkeypatch, "token_dit_train", "0")
     module = run(eng, dtype is F32)
     assert set(got) == set(truth), sorted(set(truth) ^ set(got))

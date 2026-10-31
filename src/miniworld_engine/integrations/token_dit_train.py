@@ -23,7 +23,7 @@ bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute
 
 ``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation MINIWORLD), H100 or B200, a
 bf16 or fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32), the token widths (cond 384 / pair
-128, or 256 on H100: Protenix-v2's diffusion pair, the same kernels built at that width / transition n = 2) at a head layout
+128, or 256: Protenix-v2's diffusion pair, the same kernels built at that width / transition n = 2) at a head layout
 of LAYOUTS (B200: 16 x 48, 24 x 32, 12 x 64 at d 768, 16 x 64 at d 1024; H100: 16 x 48
 only; bf16 and fp32 alike), B == 1, a key mask of [B, L] or none (``DiTBlock`` hands an [A, B, L] mask shared by the samples
 over as its [B, L] row), LayerNorm eps 1e-5. Anything else keeps the module path. settings.token_dit_train=0 turns it off.
@@ -135,6 +135,11 @@ def serves(module, single, cond, pair, mask, compute_dtype=None, extra=None) -> 
     # (``ext(dp=)``: pair_ln / pair_bias / their backwards are templates on the width)
     dp = pair.shape[-1] if pair.ndim == 4 else 0
     if dp != a.ln_pair.weight.numel() or dp not in (DP, 256):
+        return False
+    if dp == 256 and cap == (10, 0) and operand_dtype(single, compute_dtype) is BF:
+        # B200 bf16 at pair 256 stays on the module composition (AugmentedAttentionPairBias + ConditionedTransition, CUDA): this block
+        # measured 1.73 / 3.80 ms against its 1.68 / 3.75 (ladder dit_p256_bf16 training, A48 L384 / L768, same GPU and window) with the
+        # pair bias on the same APB kernels -- the rest of the block is the difference. fp32 keeps this block (4.66 -> 2.92 ms).
         return False
     if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (
         1,
@@ -655,6 +660,20 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, psb=False, n=2, dp=DP):
 B200_PAIR_FUSED = True
 
 
+def _apb_pair(h100, fp32, psb, p2, H, dp) -> bool:
+    """B200 bf16 (``_pair_fused``): the AttentionPairBias block's TMA pair kernels (``augmented_attention/cuda/apb``: ``pair_bias_fwd``
+    with the key mask as -inf, ``pair_bias_bwd`` with LN(pair) recomputed and dWf accumulated on chip) where they are built -- 12 / 16 /
+    24 heads at 128 channels, 16 at 256 -- instead of ``token_dit_train_rows.cu``'s ``pair_bias`` / ``pair_bias_bwd``: A48 L384 pair 256
+    53 + 75 -> 22 + 54 us, the gap by which the fused block lost to the module composition (which runs these)."""
+    return (
+        not h100
+        and _pair_fused(h100, fp32, psb, dp)
+        and p2.dtype is BF
+        and p2.is_contiguous()
+        and (H in (12, 16, 24) if dp == 128 else H == 16)
+    )
+
+
 def _pair_fused(h100, fp32, psb, dp) -> bool:
     """The bf16 block builds its bias with the one-pass pair kernel (LN(pair) Wf^T on TF32 tensor cores, the extra term added in the same
     pass, no LN(pair) written) and differentiates it with its one-pass backward (dpair and the dWf partials): it keeps no LN(pair) either.
@@ -779,6 +798,13 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, 
         ex = None if extra is None else extra.reshape(-1).float().contiguous()
         if h100:
             T.pair_bias(p2, (W["Wf"].float() * LOG2E).contiguous(), None, bias, pst, L, EPS, ex, LOG2E)   # log2 units, rounded once to bf16
+        elif _apb_pair(h100, fp32, psb, p2, H, dpw):   # B200: the APB TMA pair kernel, natural units, masked keys -inf
+            from miniworld_engine.kernels.augmented_attention.cuda import apb as _apb
+
+            m = None if mask is None else mask.reshape(L).to(torch.bool).contiguous()
+            bias = _apb.pair_bias(p2, W["Wf_at"], m, L, EPS, float("-inf")).view(H, L, L)
+            if extra is not None:   # natural units; the masked key columns stay -inf
+                bias.add_(extra.view(1, L, L))
         else:   # B200: natural units, the key mask as -inf (the sm_100a bf16 core reads it from the bias), rounded once to bf16
             T.pair_bias(p2, W["Wf"], None if mask is None else mask.reshape(L).to(torch.bool).contiguous(), bias, pst, L, EPS, ex, 1.0)
     elif h100 or not fp32:
@@ -1320,6 +1346,14 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         pwf = torch.empty(T.pair_grid(R), H * dpw, device=dev)
         T.pair_bias_bwd(DB.view(H, R), p2, pst, Wf, dpair, pwf)
         dWf = pwf.sum(0).view(H, dpw)
+    elif _apb_pair(h100, fp32, psb, p2, H, dpw):   # LN(pair) recomputed, dpair and dWf in one pass (the forward's kernel family)
+        from miniworld_engine.kernels.augmented_attention.cuda import apb as _apb
+
+        # one dWf partial row per block, summed here in block order (atomics into one row were not bitwise repeatable)
+        acc = torch.empty(_apb.ext().pair_bwd_blocks(p2, H, L, 1, dpw), _apb.acc_n(H, 384, dpw), device=dev)
+        dpair, _, _ = _apb.pair_bias_bwd(p2, DB.reshape(H, R).float(), W["Wf_at"], L, EPS, acc)
+        o = 2 * 384 + _apb.width(H, 384)
+        dWf = acc[:, o : o + H * dpw].sum(0).view(H, dpw)
     elif _pair_fused(h100, fp32, psb, dpw):
         part = torch.empty(T.pair_grid(R), H * dpw, device=dev)
         T.pair_bias_bwd(DB.reshape(H, R).contiguous(), p2, pst, Wf, dpair, part)
