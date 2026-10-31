@@ -184,9 +184,9 @@ def _hoist_bwd(
 
 def _onepass(pair2d: torch.Tensor, wf: torch.Tensor) -> bool:
     """B200 at a pair the sm_100a hoist does not take (256 wide) for ONE block of 12, 16 or 24 heads: the per-block training block's
-    one-pass pair kernels (``pair_bias``, bf16 mma; fp32 ``pair_bias_tc`` / ``pair_bias_bwd_tc`` on TF32) -- the pair read once, no
-    LN0 written -- instead of the LayerNorm rows + cuBLAS; fp32 also backward (``pair_bias_bwd_tc``: no [R, C] fp32 d LN0, no
-    ``ln0_bwd_rows`` between two GEMMs). bf16 keeps ``_hoist_bwd`` (see ``_Hoist.forward``)."""
+    one-pass pair kernels (``pair_bias`` / ``pair_bias_bwd``, bf16 mma, the backward's dW' against the [hi | lo] split of LN0 as
+    ``_hoist_bwd`` takes it; fp32 ``pair_bias_tc`` / ``pair_bias_bwd_tc`` on TF32) -- the pair read once each way, no LN0 and no
+    [R, C] fp32 d LN0 written -- instead of the LayerNorm rows + cuBLAS forward and two GEMMs around ``ln0_bwd_rows`` backward."""
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
     return (
@@ -248,7 +248,8 @@ def _hoist_bwd1(pair2d: torch.Tensor, wf: torch.Tensor, dball: torch.Tensor, pst
 
         K = ext()
         part = torch.empty(K.partial_rows(0), n, c, device=pair2d.device, dtype=F32)
-        g = K.pair_bias_bwd_cuda(dball.contiguous(), pair2d, pst, wf.contiguous(), dpair, part)
+        # lo: dW' against the [hi | lo] split of LN0 (the hoist's d gamma bar, 1e-4 against fp64; the bf16 term alone gives 2e-3)
+        g = K.pair_bias_bwd_cuda(dball.contiguous(), pair2d, pst, wf.contiguous(), dpair, part, True)
     return [dpair, part[:g].sum(0)]
 
 
@@ -324,10 +325,6 @@ class _Hoist(torch.autograd.Function):
         p2 = pair.reshape(A * L * L, dp)
         if _onepass(p2, wf):
             ball, pst = _hoist_fwd1(p2, wf, eps)
-            if pair.dtype is not F32:
-                # bf16: the one-pass backward takes dW' against LN0 rounded to bf16 (d gamma 2e-3 against fp64 where the hoist holds
-                # 1e-4, test_b200_bias_only_dit_hoist_gpu): the backward stays on the [hi | lo] split of ``_hoist_bwd``
-                pst = pair.new_empty(0, dtype=F32)
         else:
             ball, pst = _hoist_fwd(p2, wf, eps), pair.new_empty(0, dtype=F32)
         ctx.save_for_backward(pair, wf, gam, wts, pst)

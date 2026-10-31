@@ -485,7 +485,11 @@ template <int NH, int CP = 128> struct PB {
   static constexpr int SMEM = 2 * ZS + 2 * DS + BW + XS;
 };
 
-template <int NH, int CP = 128>
+// LO (the hoist's backward, integrations/bias_only_dit_hoist.py): dWf against LN(pair) to ~2^-17, as the two-term split
+// [bf16(LN) | bf16(LN - bf16(LN))] of ``ln0_bwd_rows`` gives the hoist's GEMM: after the bf16 term's dWf pass the lanes rebuild LN
+// from the raw pair chunks they still hold (u), write the remainder into the same item buffer and run the dWf pass again into the
+// same accumulators. The block's training backward (LO = false) keeps the one bf16 term.
+template <int NH, int CP = 128, bool LO = false>
 __device__ __forceinline__ void pair_bias_bwd_body(const bf* __restrict__ DB, const bf* __restrict__ Z,
     const float2* __restrict__ PST, const bf* __restrict__ WF, bf* __restrict__ DZ, float* __restrict__ DWF, long R) {
   using C = PB<NH, CP>;
@@ -635,6 +639,7 @@ __device__ __forceinline__ void pair_bias_bwd_body(const bf* __restrict__ DB, co
     }
     __syncthreads();                                   // LN of the item's rows
     // dWf^T[16 (NG w + c) + m, head 8 t + n] over the item's rows: A = LN^T [16 columns x 16 rows], B = dbias^T [16 rows x 8 heads]
+    auto dwf_pass = [&]() {
 #pragma unroll
     for (int c = 0; c < NG; ++c)
 #pragma unroll
@@ -657,7 +662,26 @@ __device__ __forceinline__ void pair_bias_bwd_body(const bf* __restrict__ DB, co
           mma16816(dacc[c][NT - 1], c0, c1, c2, c3, b0, b1);
         }
       }
-    __syncthreads();                                   // before this buffer is refilled
+    };
+    dwf_pass();
+    __syncthreads();                                   // before this buffer is refilled (LO: before the remainder replaces LN)
+    if constexpr (LO) {
+#pragma unroll
+      for (int m = 0; m < 4; ++m) {
+        float v0[8], v1[8];
+        unpack8(u[0][m], v0); unpack8(u[1][m], v1);
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          v0[e] = (v0[e] - st0.x) * st0.y; v0[e] -= __bfloat162float(__float2bfloat16_rn(v0[e]));
+          v1[e] = (v1[e] - st1.x) * st1.y; v1[e] -= __bfloat162float(__float2bfloat16_rn(v1[e]));
+        }
+        *reinterpret_cast<uint4*>(smem + zs_off(b, wr + g, c16 + q + 4 * m)) = pack8(v0);
+        *reinterpret_cast<uint4*>(smem + zs_off(b, wr + g + 8, c16 + q + 4 * m)) = pack8(v1);
+      }
+      __syncthreads();
+      dwf_pass();
+      __syncthreads();
+    }
   }
   // dacc[c][t]: d0, d1 = column 16 (NG w + c) + g, heads 8 t + 2 q + {0, 1}; d2, d3 = column 16 (NG w + c) + g + 8
 #pragma unroll
@@ -673,10 +697,10 @@ __device__ __forceinline__ void pair_bias_bwd_body(const bf* __restrict__ DB, co
         }
       }
 }
-template <int NH, int CP = 128>
+template <int NH, int CP = 128, bool LO = false>
 __global__ void __launch_bounds__(WPB * 32, 2) pair_bias_bwd_k(const bf* __restrict__ DB, const bf* __restrict__ Z,
     const float2* __restrict__ PST, const bf* __restrict__ WF, bf* __restrict__ DZ, float* __restrict__ DWF, long R) {
-  pair_bias_bwd_body<NH, CP>(DB, Z, PST, WF, DZ, DWF, R);
+  pair_bias_bwd_body<NH, CP, LO>(DB, Z, PST, WF, DZ, DWF, R);
 }
 
 // -------------------------------------------------------------------------------------------- small weight gradients
@@ -1153,16 +1177,16 @@ void pair_bias(at::Tensor z, at::Tensor wf, at::Tensor bias, at::Tensor pst, dou
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-template <int PWD>                                             // PWD: the pair width
+template <int PWD, bool LO = false>                            // PWD: the pair width; LO: dWf against the [hi | lo] split of LN(pair)
 unsigned pair_bias_bwd_launch(const at::Tensor& db, const at::Tensor& z, const at::Tensor& pst, const at::Tensor& wf, const at::Tensor& dz,
                               const at::Tensor& dwf, int64_t nh, int64_t R) {
   static bool attr = [] {
-    return cudaFuncSetAttribute(pair_bias_bwd_k<12, PWD>, cudaFuncAttributeMaxDynamicSharedMemorySize, PB<12, PWD>::SMEM) == cudaSuccess
-        && cudaFuncSetAttribute(pair_bias_bwd_k<16, PWD>, cudaFuncAttributeMaxDynamicSharedMemorySize, PB<16, PWD>::SMEM) == cudaSuccess
-        && cudaFuncSetAttribute(pair_bias_bwd_k<24, PWD>, cudaFuncAttributeMaxDynamicSharedMemorySize, PB<24, PWD>::SMEM) == cudaSuccess;
+    return cudaFuncSetAttribute(pair_bias_bwd_k<12, PWD, LO>, cudaFuncAttributeMaxDynamicSharedMemorySize, PB<12, PWD>::SMEM) == cudaSuccess
+        && cudaFuncSetAttribute(pair_bias_bwd_k<16, PWD, LO>, cudaFuncAttributeMaxDynamicSharedMemorySize, PB<16, PWD>::SMEM) == cudaSuccess
+        && cudaFuncSetAttribute(pair_bias_bwd_k<24, PWD, LO>, cudaFuncAttributeMaxDynamicSharedMemorySize, PB<24, PWD>::SMEM) == cudaSuccess;
   }();
   TORCH_CHECK(attr, "pair_bias_bwd: shared memory attribute");
-  auto k = nh == 12 ? pair_bias_bwd_k<12, PWD> : nh == 16 ? pair_bias_bwd_k<16, PWD> : pair_bias_bwd_k<24, PWD>;
+  auto k = nh == 12 ? pair_bias_bwd_k<12, PWD, LO> : nh == 16 ? pair_bias_bwd_k<16, PWD, LO> : pair_bias_bwd_k<24, PWD, LO>;
   const int smem = nh == 12 ? PB<12, PWD>::SMEM : nh == 16 ? PB<16, PWD>::SMEM : PB<24, PWD>::SMEM;
   const unsigned g = grid(k, R / PB<16, PWD>::RI, 1, smem);
   TORCH_CHECK(dwf.numel() >= (int64_t)g * nh * PWD, "pair_bias_bwd: dWf partials [partial_rows, nh, pair width]");
@@ -1170,14 +1194,17 @@ unsigned pair_bias_bwd_launch(const at::Tensor& db, const at::Tensor& z, const a
   return g;
 }
 
-int64_t pair_bias_bwd(at::Tensor db, at::Tensor z, at::Tensor pst, at::Tensor wf, at::Tensor dz, at::Tensor dwf) {
+int64_t pair_bias_bwd(at::Tensor db, at::Tensor z, at::Tensor pst, at::Tensor wf, at::Tensor dz, at::Tensor dwf, bool lo = false) {
   const int64_t R = z.size(0), nh = wf.size(0), cp = z.size(1);
   bf16c(z, "pair"); bf16c(wf, "Wf"); f32c(dwf, "dWf partials");
   TORCH_CHECK(z.is_contiguous() && (cp == 128 || cp == 256) && R % 128 == 0 && wf.is_contiguous() && (nh == 12 || nh == 16 || nh == 24)
               && wf.size(1) == cp, "pair_bias_bwd: pair [R, 128 or 256] (R a multiple of 128), Wf [12, 16 or 24, pair width] bf16");
   TORCH_CHECK(db.scalar_type() == at::kBFloat16 && db.is_contiguous() && db.numel() == nh * R, "pair_bias_bwd: dbias [nh, R]");
   TORCH_CHECK(dz.is_contiguous() && dz.scalar_type() == at::kBFloat16 && pst.is_contiguous(), "pair_bias_bwd: d pair bf16");
-  const unsigned g = cp == 128 ? pair_bias_bwd_launch<128>(db, z, pst, wf, dz, dwf, nh, R) : pair_bias_bwd_launch<256>(db, z, pst, wf, dz, dwf, nh, R);
+  const unsigned g = lo ? (cp == 128 ? pair_bias_bwd_launch<128, true>(db, z, pst, wf, dz, dwf, nh, R)
+                                     : pair_bias_bwd_launch<256, true>(db, z, pst, wf, dz, dwf, nh, R))
+                       : (cp == 128 ? pair_bias_bwd_launch<128>(db, z, pst, wf, dz, dwf, nh, R)
+                                     : pair_bias_bwd_launch<256>(db, z, pst, wf, dz, dwf, nh, R));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return g;
 }
@@ -1320,7 +1347,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("adaln_a_bwd_cuda", &adaln_a_bwd);
   m.def("cond_bwd_cuda", &cond_bwd);
   m.def("partial_rows", &partial_rows);
-  m.def("pair_bias_bwd_cuda", &pair_bias_bwd);
+  m.def("pair_bias_bwd_cuda", &pair_bias_bwd, pybind11::arg("db"), pybind11::arg("z"), pybind11::arg("pst"), pybind11::arg("wf"),
+        pybind11::arg("dz"), pybind11::arg("dwf"), pybind11::arg("lo") = false);
   m.def("finalize_cuda", &finalize);
   m.def("pair_bias_bwd_fin_cuda", &pair_bias_bwd_fin);
   m.def("pack16_cuda", &pack16);
