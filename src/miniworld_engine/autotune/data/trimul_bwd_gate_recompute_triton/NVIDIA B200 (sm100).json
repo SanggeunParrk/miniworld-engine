@@ -1,0 +1,2943 @@
+{
+  "build_rev": 1,
+  "config_space": [
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256), ('GROUP_M', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32), ('GROUP_M', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 1)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 4)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+    "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)"
+  ],
+  "config_space_hash": "7f5f7d96435b",
+  "driver_id_scheme": 2,
+  "driver_identity": "ccdf5ea3fe65",
+  "entries": {
+    "bfloat16|shape_key=12884968218": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "GROUP_M": 4
+        },
+        "ms": 0.06963200122117996,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.12892800569534302,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.14131200313568115,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.14131200313568115,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.14131200313568115,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=12885164826": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "GROUP_M": 4
+        },
+        "ms": 0.16179199516773224,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.17606399953365326,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.17609600722789764,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.17612800002098083,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.17612800002098083,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=12885426970": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "GROUP_M": 4
+        },
+        "ms": 0.3850240111351013,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.3994559943675995,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.39955198764801025,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.4118399918079376,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.4127039909362793,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=12885951258": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.9390880167484283,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.9410880208015442,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "GROUP_M": 4
+        },
+        "ms": 1.0456000566482544,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 1.0485440492630005,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 1.0506240129470825,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=12886475546": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 1.7064639925956726,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 1.7131839990615845,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 1.831936001777649,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 1.8422399759292603,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 1
+        },
+        "ms": 1.8632000088691711,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=6442517274": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "GROUP_M": 4
+        },
+        "ms": 0.02457600086927414,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.03686400130391121,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.043007999658584595,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.043007999658584595,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.043007999658584595,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=6442713882": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "GROUP_M": 4
+        },
+        "ms": 0.04729599878191948,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.05119999870657921,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.053247999399900436,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.053247999399900436,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.053247999399900436,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=6442976026": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "GROUP_M": 4
+        },
+        "ms": 0.10451199859380722,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.1085439994931221,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.1085439994931221,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.11148799955844879,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.1125440001487732,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=6443500314": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.23968000710010529,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.24160000681877136,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.2683199942111969,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.2683520019054413,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32,
+          "GROUP_M": 4
+        },
+        "ms": 0.2693119943141937,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=6444024602": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.42800000309944153,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.43011200428009033,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.4742719978094101,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.4833280146121979,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 1
+        },
+        "ms": 0.48528000712394714,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ]
+  },
+  "entry_grids": {
+    "bfloat16|shape_key=12884968218": [
+      "7f5f7d96435b"
+    ],
+    "bfloat16|shape_key=12885164826": [
+      "7f5f7d96435b"
+    ],
+    "bfloat16|shape_key=12885426970": [
+      "7f5f7d96435b"
+    ],
+    "bfloat16|shape_key=12885951258": [
+      "7f5f7d96435b"
+    ],
+    "bfloat16|shape_key=12886475546": [
+      "7f5f7d96435b"
+    ],
+    "bfloat16|shape_key=6442517274": [
+      "7f5f7d96435b"
+    ],
+    "bfloat16|shape_key=6442713882": [
+      "7f5f7d96435b"
+    ],
+    "bfloat16|shape_key=6442976026": [
+      "7f5f7d96435b"
+    ],
+    "bfloat16|shape_key=6443500314": [
+      "7f5f7d96435b"
+    ],
+    "bfloat16|shape_key=6444024602": [
+      "7f5f7d96435b"
+    ]
+  },
+  "env_identity": "7efec5ac14d2",
+  "gpu": "NVIDIA B200 (sm100)",
+  "grids": {
+    "7f5f7d96435b": [
+      "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+      "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256), ('GROUP_M', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32), ('GROUP_M', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 1)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 4)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)"
+    ]
+  },
+  "key_scheme": 3,
+  "measurements": {
+    "bfloat16|shape_key=12884968218": {
+      "95752a321bc3c1f88e2e": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 32,
+              "GROUP_M": 4
+            },
+            "ms": 0.06963200122117996,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 32,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.12892800569534302,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.14131200313568115,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 16,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.14131200313568115,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.14131200313568115,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 4)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "M": 589824,
+            "N": 16,
+            "WL_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "WLg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "WR_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "WRg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "dLA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "dLB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "dRA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "dRB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "grad_left_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "grad_right_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "shape_key": 12884968218,
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            }
+          },
+          "implementation": "f8ca3bfe5bcd82c3fd88b5f1109166d8fd5221d2caf04c14e10853d4d63e38b8",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=12885164826": {
+      "ce1c1034642d76111641": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 32,
+              "GROUP_M": 4
+            },
+            "ms": 0.16179199516773224,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.17606399953365326,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.17609600722789764,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.17612800002098083,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.17612800002098083,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 4)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "M": 589824,
+            "N": 64,
+            "WL_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                64,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "WLg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                64,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "WR_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                64,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "WRg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                64,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "dLA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "dLB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "dRA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "dRB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "grad_left_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "grad_right_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "shape_key": 12885164826,
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            }
+          },
+          "implementation": "f8ca3bfe5bcd82c3fd88b5f1109166d8fd5221d2caf04c14e10853d4d63e38b8",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=12885426970": {
+      "45e1ec0cf8d0775646ab": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 32,
+              "GROUP_M": 4
+            },
+            "ms": 0.3850240111351013,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.3994559943675995,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.39955198764801025,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.4118399918079376,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.4127039909362793,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 4)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "M": 589824,
+            "N": 128,
+            "WL_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "WLg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "WR_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "WRg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "dLA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "dLB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "dRA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "dRB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "grad_left_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "grad_right_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "shape_key": 12885426970,
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "f8ca3bfe5bcd82c3fd88b5f1109166d8fd5221d2caf04c14e10853d4d63e38b8",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=12885951258": {
+      "ef5c0d7cde89fad78acc": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.9390880167484283,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.9410880208015442,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 32,
+              "GROUP_M": 4
+            },
+            "ms": 1.0456000566482544,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 1.0485440492630005,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 1.0506240129470825,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 4)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "M": 589824,
+            "N": 256,
+            "WL_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "WLg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "WR_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "WRg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "dLA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "dLB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "dRA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "dRB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "grad_left_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "grad_right_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 12885951258,
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            }
+          },
+          "implementation": "f8ca3bfe5bcd82c3fd88b5f1109166d8fd5221d2caf04c14e10853d4d63e38b8",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=12886475546": {
+      "7270a6c90909ae42d766": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 1.7064639925956726,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 1.7131839990615845,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 1.831936001777649,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 1.8422399759292603,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 1
+            },
+            "ms": 1.8632000088691711,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 4)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "M": 589824,
+            "N": 384,
+            "WL_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "WLg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "WR_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "WRg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "dLA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "dLB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "dRA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "dRB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "grad_left_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "grad_right_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "shape_key": 12886475546,
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                589824,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            }
+          },
+          "implementation": "f8ca3bfe5bcd82c3fd88b5f1109166d8fd5221d2caf04c14e10853d4d63e38b8",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=6442517274": {
+      "1dfa39a8392bf9b5721e": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 32,
+              "GROUP_M": 4
+            },
+            "ms": 0.02457600086927414,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 32,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.03686400130391121,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.043007999658584595,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 16,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.043007999658584595,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.043007999658584595,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 4)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "M": 147456,
+            "N": 16,
+            "WL_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "WLg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "WR_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "WRg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                16,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "dLA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "dLB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "dRA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "dRB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "grad_left_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "grad_right_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            },
+            "shape_key": 6442517274,
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                16
+              ],
+              "stride": [
+                16,
+                1
+              ]
+            }
+          },
+          "implementation": "f8ca3bfe5bcd82c3fd88b5f1109166d8fd5221d2caf04c14e10853d4d63e38b8",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=6442713882": {
+      "993ded23abcc56960e76": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 32,
+              "GROUP_M": 4
+            },
+            "ms": 0.04729599878191948,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 32,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.05119999870657921,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.053247999399900436,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.053247999399900436,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 64,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.053247999399900436,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 4)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "M": 147456,
+            "N": 64,
+            "WL_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                64,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "WLg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                64,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "WR_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                64,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "WRg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                64,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "dLA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "dLB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "dRA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "dRB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "grad_left_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "grad_right_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "shape_key": 6442713882,
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            }
+          },
+          "implementation": "f8ca3bfe5bcd82c3fd88b5f1109166d8fd5221d2caf04c14e10853d4d63e38b8",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=6442976026": {
+      "30e033dbdac2ec840946": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 32,
+              "GROUP_M": 4
+            },
+            "ms": 0.10451199859380722,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.1085439994931221,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.1085439994931221,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.11148799955844879,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.1125440001487732,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 4)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "M": 147456,
+            "N": 128,
+            "WL_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "WLg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "WR_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "WRg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "dLA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "dLB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "dRA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "dRB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "grad_left_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "grad_right_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "shape_key": 6442976026,
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "f8ca3bfe5bcd82c3fd88b5f1109166d8fd5221d2caf04c14e10853d4d63e38b8",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=6443500314": {
+      "61a5a61470e92171ab56": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.23968000710010529,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.24160000681877136,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.2683199942111969,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.2683520019054413,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 32,
+              "GROUP_M": 4
+            },
+            "ms": 0.2693119943141937,
+            "num_stages": 2,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 4)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "M": 147456,
+            "N": 256,
+            "WL_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "WLg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "WR_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "WRg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "dLA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "dLB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "dRA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "dRB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "grad_left_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "grad_right_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 6443500314,
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            }
+          },
+          "implementation": "f8ca3bfe5bcd82c3fd88b5f1109166d8fd5221d2caf04c14e10853d4d63e38b8",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=6444024602": {
+      "c45cc3897ab560dd4d7b": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.42800000309944153,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 1
+            },
+            "ms": 0.43011200428009033,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.4742719978094101,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.4833280146121979,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 1
+            },
+            "ms": 0.48528000712394714,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 32), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 256), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 32), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 2, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 1)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 4)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 64), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "M": 147456,
+            "N": 384,
+            "WL_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "WLg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "WR_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "WRg_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                384,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "dLA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "dLB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "dRA_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "dRB_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "grad_left_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "grad_right_out_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            },
+            "shape_key": 6444024602,
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                147456,
+                384
+              ],
+              "stride": [
+                384,
+                1
+              ]
+            }
+          },
+          "implementation": "f8ca3bfe5bcd82c3fd88b5f1109166d8fd5221d2caf04c14e10853d4d63e38b8",
+          "scheme": 1
+        }
+      }
+    }
+  },
+  "op": "trimul_bwd_gate_recompute_triton",
+  "op_identity": "7ef63833edd3",
+  "provenance": {
+    "built_utc": "2026-10-30T10:03:06+00:00",
+    "torch": "2.13.0+cu129",
+    "triton": "3.7.1"
+  },
+  "schema": 1
+}

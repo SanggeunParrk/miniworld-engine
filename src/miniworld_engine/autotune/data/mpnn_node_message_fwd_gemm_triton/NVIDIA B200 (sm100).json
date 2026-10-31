@@ -1,0 +1,2213 @@
+{
+  "build_rev": 1,
+  "config_space": [
+    "((('GROUPS', 1),), 4, 2)",
+    "((('GROUPS', 16),), 1, 2)",
+    "((('GROUPS', 16),), 16, 2)",
+    "((('GROUPS', 16),), 2, 2)",
+    "((('GROUPS', 16),), 32, 2)",
+    "((('GROUPS', 16),), 4, 1)",
+    "((('GROUPS', 16),), 4, 2)",
+    "((('GROUPS', 16),), 4, 3)",
+    "((('GROUPS', 16),), 4, 4)",
+    "((('GROUPS', 16),), 4, 5)",
+    "((('GROUPS', 16),), 4, 6)",
+    "((('GROUPS', 16),), 4, 8)",
+    "((('GROUPS', 16),), 8, 2)",
+    "((('GROUPS', 16),), 8, 3)",
+    "((('GROUPS', 2),), 4, 2)",
+    "((('GROUPS', 4),), 4, 2)",
+    "((('GROUPS', 8),), 4, 2)",
+    "((('GROUPS', 8),), 4, 3)",
+    "((('GROUPS', 8),), 8, 2)",
+    "((('GROUPS', 8),), 8, 3)"
+  ],
+  "config_space_hash": "9b3f4062b67c",
+  "driver_id_scheme": 2,
+  "driver_identity": "1f29ae6dcb02",
+  "entries": {
+    "bfloat16+float32|SAVE_PREACT=0,shape_key=137439153303": [
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.3113279938697815,
+        "num_stages": 2,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.3829759955406189,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "GROUPS": 1
+        },
+        "ms": 0.41574400663375854,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.4402880072593689,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.4782080054283142,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|SAVE_PREACT=0,shape_key=17180069015": [
+      {
+        "kwargs": {
+          "GROUPS": 1
+        },
+        "ms": 0.0655359998345375,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.06963200122117996,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.07577600330114365,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.10239999741315842,
+        "num_stages": 2,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.12697599828243256,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|SAVE_PREACT=0,shape_key=34359938199": [
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.10239999741315842,
+        "num_stages": 2,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "GROUPS": 1
+        },
+        "ms": 0.11468800157308578,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.12902399897575378,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.131071999669075,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.14336000382900238,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|SAVE_PREACT=0,shape_key=68719676567": [
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.16396799683570862,
+        "num_stages": 2,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.21094399690628052,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "GROUPS": 1
+        },
+        "ms": 0.21507200598716736,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.24988800287246704,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.2539519965648651,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|SAVE_PREACT=1,shape_key=137439153303": [
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.416703999042511,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.43004798889160156,
+        "num_stages": 2,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "GROUPS": 1
+        },
+        "ms": 0.4362240135669708,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.4760960042476654,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.5058879852294922,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|SAVE_PREACT=1,shape_key=17180069015": [
+      {
+        "kwargs": {
+          "GROUPS": 1
+        },
+        "ms": 0.06758400052785873,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.07379200309515,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.0798719972372055,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.11059200018644333,
+        "num_stages": 2,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.13318400084972382,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|SAVE_PREACT=1,shape_key=34359938199": [
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.11264000087976456,
+        "num_stages": 2,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "GROUPS": 1
+        },
+        "ms": 0.11881600320339203,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.13939200341701508,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.14134399592876434,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.14977599680423737,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|SAVE_PREACT=1,shape_key=68719676567": [
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.2171200066804886,
+        "num_stages": 2,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.22038400173187256,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "GROUPS": 1
+        },
+        "ms": 0.2252800017595291,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "GROUPS": 16
+        },
+        "ms": 0.2703680098056793,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 8
+        },
+        "ms": 0.2744640111923218,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ]
+  },
+  "entry_grids": {
+    "bfloat16+float32|SAVE_PREACT=0,shape_key=137439153303": [
+      "9b3f4062b67c"
+    ],
+    "bfloat16+float32|SAVE_PREACT=0,shape_key=17180069015": [
+      "9b3f4062b67c"
+    ],
+    "bfloat16+float32|SAVE_PREACT=0,shape_key=34359938199": [
+      "9b3f4062b67c"
+    ],
+    "bfloat16+float32|SAVE_PREACT=0,shape_key=68719676567": [
+      "9b3f4062b67c"
+    ],
+    "bfloat16+float32|SAVE_PREACT=1,shape_key=137439153303": [
+      "9b3f4062b67c"
+    ],
+    "bfloat16+float32|SAVE_PREACT=1,shape_key=17180069015": [
+      "9b3f4062b67c"
+    ],
+    "bfloat16+float32|SAVE_PREACT=1,shape_key=34359938199": [
+      "9b3f4062b67c"
+    ],
+    "bfloat16+float32|SAVE_PREACT=1,shape_key=68719676567": [
+      "9b3f4062b67c"
+    ]
+  },
+  "env_identity": "7efec5ac14d2",
+  "gpu": "NVIDIA B200 (sm100)",
+  "grids": {
+    "9b3f4062b67c": [
+      "((('GROUPS', 1),), 4, 2)",
+      "((('GROUPS', 16),), 1, 2)",
+      "((('GROUPS', 16),), 16, 2)",
+      "((('GROUPS', 16),), 2, 2)",
+      "((('GROUPS', 16),), 32, 2)",
+      "((('GROUPS', 16),), 4, 1)",
+      "((('GROUPS', 16),), 4, 2)",
+      "((('GROUPS', 16),), 4, 3)",
+      "((('GROUPS', 16),), 4, 4)",
+      "((('GROUPS', 16),), 4, 5)",
+      "((('GROUPS', 16),), 4, 6)",
+      "((('GROUPS', 16),), 4, 8)",
+      "((('GROUPS', 16),), 8, 2)",
+      "((('GROUPS', 16),), 8, 3)",
+      "((('GROUPS', 2),), 4, 2)",
+      "((('GROUPS', 4),), 4, 2)",
+      "((('GROUPS', 8),), 4, 2)",
+      "((('GROUPS', 8),), 4, 3)",
+      "((('GROUPS', 8),), 8, 2)",
+      "((('GROUPS', 8),), 8, 3)"
+    ]
+  },
+  "key_scheme": 3,
+  "measurements": {
+    "bfloat16+float32|SAVE_PREACT=0,shape_key=137439153303": {
+      "3cb5d26bdac7fd6e62f7": {
+        "entries": [
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.3113279938697815,
+            "num_stages": 2,
+            "num_warps": 16
+          },
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.3829759955406189,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "GROUPS": 1
+            },
+            "ms": 0.41574400663375854,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.4402880072593689,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.4782080054283142,
+            "num_stages": 2,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('GROUPS', 1),), 4, 2)",
+          "((('GROUPS', 16),), 1, 2)",
+          "((('GROUPS', 16),), 16, 2)",
+          "((('GROUPS', 16),), 2, 2)",
+          "((('GROUPS', 16),), 32, 2)",
+          "((('GROUPS', 16),), 4, 1)",
+          "((('GROUPS', 16),), 4, 2)",
+          "((('GROUPS', 16),), 4, 3)",
+          "((('GROUPS', 16),), 4, 4)",
+          "((('GROUPS', 16),), 4, 5)",
+          "((('GROUPS', 16),), 4, 6)",
+          "((('GROUPS', 16),), 4, 8)",
+          "((('GROUPS', 16),), 8, 2)",
+          "((('GROUPS', 16),), 8, 3)",
+          "((('GROUPS', 2),), 4, 2)",
+          "((('GROUPS', 4),), 4, 2)",
+          "((('GROUPS', 8),), 4, 2)",
+          "((('GROUPS', 8),), 4, 3)",
+          "((('GROUPS', 8),), 8, 2)",
+          "((('GROUPS', 8),), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BLOCK_M1": 64,
+            "EDGE_WEIGHT_STRIDE": 128,
+            "NEIGHBORS": 48,
+            "SAVE_PREACT": false,
+            "WIDTH": 128,
+            "edge_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                48,
+                128
+              ],
+              "stride": [
+                50331648,
+                6144,
+                128,
+                1
+              ]
+            },
+            "edge_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "groups_total": 8192,
+            "hidden_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "hidden_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                48,
+                128
+              ],
+              "stride": [
+                50331648,
+                6144,
+                128,
+                1
+              ]
+            },
+            "hidden_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "index_ptr": {
+              "dtype": "torch.int64",
+              "shape": [
+                1,
+                8192,
+                48
+              ],
+              "stride": [
+                393216,
+                48,
+                1
+              ]
+            },
+            "mask_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                48
+              ],
+              "stride": [
+                393216,
+                48,
+                1
+              ]
+            },
+            "neighbor_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                128
+              ],
+              "stride": [
+                1048576,
+                128,
+                1
+              ]
+            },
+            "neighbor_scale": 48,
+            "preactivation_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                48,
+                128
+              ],
+              "stride": [
+                50331648,
+                6144,
+                128,
+                1
+              ]
+            },
+            "query_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                128
+              ],
+              "stride": [
+                1048576,
+                128,
+                1
+              ]
+            },
+            "reduced_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                8192,
+                128
+              ],
+              "stride": [
+                1048576,
+                128,
+                1
+              ]
+            },
+            "shape_key": 137439153303
+          },
+          "implementation": "c86164690df2bd98fe021883a597040fa5c819b7021318f6f32055cb9ff7dc16",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|SAVE_PREACT=0,shape_key=17180069015": {
+      "8a04c233f7b0549da84b": {
+        "entries": [
+          {
+            "kwargs": {
+              "GROUPS": 1
+            },
+            "ms": 0.0655359998345375,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.06963200122117996,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.07577600330114365,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.10239999741315842,
+            "num_stages": 2,
+            "num_warps": 16
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.12697599828243256,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('GROUPS', 1),), 4, 2)",
+          "((('GROUPS', 16),), 1, 2)",
+          "((('GROUPS', 16),), 16, 2)",
+          "((('GROUPS', 16),), 2, 2)",
+          "((('GROUPS', 16),), 32, 2)",
+          "((('GROUPS', 16),), 4, 1)",
+          "((('GROUPS', 16),), 4, 2)",
+          "((('GROUPS', 16),), 4, 3)",
+          "((('GROUPS', 16),), 4, 4)",
+          "((('GROUPS', 16),), 4, 5)",
+          "((('GROUPS', 16),), 4, 6)",
+          "((('GROUPS', 16),), 4, 8)",
+          "((('GROUPS', 16),), 8, 2)",
+          "((('GROUPS', 16),), 8, 3)",
+          "((('GROUPS', 2),), 4, 2)",
+          "((('GROUPS', 4),), 4, 2)",
+          "((('GROUPS', 8),), 4, 2)",
+          "((('GROUPS', 8),), 4, 3)",
+          "((('GROUPS', 8),), 8, 2)",
+          "((('GROUPS', 8),), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BLOCK_M1": 64,
+            "EDGE_WEIGHT_STRIDE": 128,
+            "NEIGHBORS": 48,
+            "SAVE_PREACT": false,
+            "WIDTH": 128,
+            "edge_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                48,
+                128
+              ],
+              "stride": [
+                6291456,
+                6144,
+                128,
+                1
+              ]
+            },
+            "edge_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "groups_total": 1024,
+            "hidden_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "hidden_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                48,
+                128
+              ],
+              "stride": [
+                6291456,
+                6144,
+                128,
+                1
+              ]
+            },
+            "hidden_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "index_ptr": {
+              "dtype": "torch.int64",
+              "shape": [
+                1,
+                1024,
+                48
+              ],
+              "stride": [
+                49152,
+                48,
+                1
+              ]
+            },
+            "mask_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                48
+              ],
+              "stride": [
+                49152,
+                48,
+                1
+              ]
+            },
+            "neighbor_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                128
+              ],
+              "stride": [
+                131072,
+                128,
+                1
+              ]
+            },
+            "neighbor_scale": 48,
+            "preactivation_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                48,
+                128
+              ],
+              "stride": [
+                6291456,
+                6144,
+                128,
+                1
+              ]
+            },
+            "query_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                128
+              ],
+              "stride": [
+                131072,
+                128,
+                1
+              ]
+            },
+            "reduced_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                1024,
+                128
+              ],
+              "stride": [
+                131072,
+                128,
+                1
+              ]
+            },
+            "shape_key": 17180069015
+          },
+          "implementation": "c86164690df2bd98fe021883a597040fa5c819b7021318f6f32055cb9ff7dc16",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|SAVE_PREACT=0,shape_key=34359938199": {
+      "b31ce77abf49187bb8b1": {
+        "entries": [
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.10239999741315842,
+            "num_stages": 2,
+            "num_warps": 16
+          },
+          {
+            "kwargs": {
+              "GROUPS": 1
+            },
+            "ms": 0.11468800157308578,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.12902399897575378,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.131071999669075,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.14336000382900238,
+            "num_stages": 2,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('GROUPS', 1),), 4, 2)",
+          "((('GROUPS', 16),), 1, 2)",
+          "((('GROUPS', 16),), 16, 2)",
+          "((('GROUPS', 16),), 2, 2)",
+          "((('GROUPS', 16),), 32, 2)",
+          "((('GROUPS', 16),), 4, 1)",
+          "((('GROUPS', 16),), 4, 2)",
+          "((('GROUPS', 16),), 4, 3)",
+          "((('GROUPS', 16),), 4, 4)",
+          "((('GROUPS', 16),), 4, 5)",
+          "((('GROUPS', 16),), 4, 6)",
+          "((('GROUPS', 16),), 4, 8)",
+          "((('GROUPS', 16),), 8, 2)",
+          "((('GROUPS', 16),), 8, 3)",
+          "((('GROUPS', 2),), 4, 2)",
+          "((('GROUPS', 4),), 4, 2)",
+          "((('GROUPS', 8),), 4, 2)",
+          "((('GROUPS', 8),), 4, 3)",
+          "((('GROUPS', 8),), 8, 2)",
+          "((('GROUPS', 8),), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BLOCK_M1": 64,
+            "EDGE_WEIGHT_STRIDE": 128,
+            "NEIGHBORS": 48,
+            "SAVE_PREACT": false,
+            "WIDTH": 128,
+            "edge_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                48,
+                128
+              ],
+              "stride": [
+                12582912,
+                6144,
+                128,
+                1
+              ]
+            },
+            "edge_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "groups_total": 2048,
+            "hidden_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "hidden_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                48,
+                128
+              ],
+              "stride": [
+                12582912,
+                6144,
+                128,
+                1
+              ]
+            },
+            "hidden_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "index_ptr": {
+              "dtype": "torch.int64",
+              "shape": [
+                1,
+                2048,
+                48
+              ],
+              "stride": [
+                98304,
+                48,
+                1
+              ]
+            },
+            "mask_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                48
+              ],
+              "stride": [
+                98304,
+                48,
+                1
+              ]
+            },
+            "neighbor_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                128
+              ],
+              "stride": [
+                262144,
+                128,
+                1
+              ]
+            },
+            "neighbor_scale": 48,
+            "preactivation_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                48,
+                128
+              ],
+              "stride": [
+                12582912,
+                6144,
+                128,
+                1
+              ]
+            },
+            "query_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                128
+              ],
+              "stride": [
+                262144,
+                128,
+                1
+              ]
+            },
+            "reduced_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                2048,
+                128
+              ],
+              "stride": [
+                262144,
+                128,
+                1
+              ]
+            },
+            "shape_key": 34359938199
+          },
+          "implementation": "c86164690df2bd98fe021883a597040fa5c819b7021318f6f32055cb9ff7dc16",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|SAVE_PREACT=0,shape_key=68719676567": {
+      "7e97d62c0839702812ab": {
+        "entries": [
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.16396799683570862,
+            "num_stages": 2,
+            "num_warps": 16
+          },
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.21094399690628052,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "GROUPS": 1
+            },
+            "ms": 0.21507200598716736,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.24988800287246704,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.2539519965648651,
+            "num_stages": 3,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('GROUPS', 1),), 4, 2)",
+          "((('GROUPS', 16),), 1, 2)",
+          "((('GROUPS', 16),), 16, 2)",
+          "((('GROUPS', 16),), 2, 2)",
+          "((('GROUPS', 16),), 32, 2)",
+          "((('GROUPS', 16),), 4, 1)",
+          "((('GROUPS', 16),), 4, 2)",
+          "((('GROUPS', 16),), 4, 3)",
+          "((('GROUPS', 16),), 4, 4)",
+          "((('GROUPS', 16),), 4, 5)",
+          "((('GROUPS', 16),), 4, 6)",
+          "((('GROUPS', 16),), 4, 8)",
+          "((('GROUPS', 16),), 8, 2)",
+          "((('GROUPS', 16),), 8, 3)",
+          "((('GROUPS', 2),), 4, 2)",
+          "((('GROUPS', 4),), 4, 2)",
+          "((('GROUPS', 8),), 4, 2)",
+          "((('GROUPS', 8),), 4, 3)",
+          "((('GROUPS', 8),), 8, 2)",
+          "((('GROUPS', 8),), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BLOCK_M1": 64,
+            "EDGE_WEIGHT_STRIDE": 128,
+            "NEIGHBORS": 48,
+            "SAVE_PREACT": false,
+            "WIDTH": 128,
+            "edge_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                48,
+                128
+              ],
+              "stride": [
+                25165824,
+                6144,
+                128,
+                1
+              ]
+            },
+            "edge_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "groups_total": 4096,
+            "hidden_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "hidden_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                48,
+                128
+              ],
+              "stride": [
+                25165824,
+                6144,
+                128,
+                1
+              ]
+            },
+            "hidden_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "index_ptr": {
+              "dtype": "torch.int64",
+              "shape": [
+                1,
+                4096,
+                48
+              ],
+              "stride": [
+                196608,
+                48,
+                1
+              ]
+            },
+            "mask_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                48
+              ],
+              "stride": [
+                196608,
+                48,
+                1
+              ]
+            },
+            "neighbor_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                128
+              ],
+              "stride": [
+                524288,
+                128,
+                1
+              ]
+            },
+            "neighbor_scale": 48,
+            "preactivation_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                48,
+                128
+              ],
+              "stride": [
+                25165824,
+                6144,
+                128,
+                1
+              ]
+            },
+            "query_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                128
+              ],
+              "stride": [
+                524288,
+                128,
+                1
+              ]
+            },
+            "reduced_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                4096,
+                128
+              ],
+              "stride": [
+                524288,
+                128,
+                1
+              ]
+            },
+            "shape_key": 68719676567
+          },
+          "implementation": "c86164690df2bd98fe021883a597040fa5c819b7021318f6f32055cb9ff7dc16",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|SAVE_PREACT=1,shape_key=137439153303": {
+      "c83e477d062b51e4728a": {
+        "entries": [
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.416703999042511,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.43004798889160156,
+            "num_stages": 2,
+            "num_warps": 16
+          },
+          {
+            "kwargs": {
+              "GROUPS": 1
+            },
+            "ms": 0.4362240135669708,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.4760960042476654,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.5058879852294922,
+            "num_stages": 2,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('GROUPS', 1),), 4, 2)",
+          "((('GROUPS', 16),), 1, 2)",
+          "((('GROUPS', 16),), 16, 2)",
+          "((('GROUPS', 16),), 2, 2)",
+          "((('GROUPS', 16),), 32, 2)",
+          "((('GROUPS', 16),), 4, 1)",
+          "((('GROUPS', 16),), 4, 2)",
+          "((('GROUPS', 16),), 4, 3)",
+          "((('GROUPS', 16),), 4, 4)",
+          "((('GROUPS', 16),), 4, 5)",
+          "((('GROUPS', 16),), 4, 6)",
+          "((('GROUPS', 16),), 4, 8)",
+          "((('GROUPS', 16),), 8, 2)",
+          "((('GROUPS', 16),), 8, 3)",
+          "((('GROUPS', 2),), 4, 2)",
+          "((('GROUPS', 4),), 4, 2)",
+          "((('GROUPS', 8),), 4, 2)",
+          "((('GROUPS', 8),), 4, 3)",
+          "((('GROUPS', 8),), 8, 2)",
+          "((('GROUPS', 8),), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BLOCK_M1": 64,
+            "EDGE_WEIGHT_STRIDE": 128,
+            "NEIGHBORS": 48,
+            "SAVE_PREACT": true,
+            "WIDTH": 128,
+            "edge_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                48,
+                128
+              ],
+              "stride": [
+                50331648,
+                6144,
+                128,
+                1
+              ]
+            },
+            "edge_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "groups_total": 8192,
+            "hidden_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "hidden_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                48,
+                128
+              ],
+              "stride": [
+                50331648,
+                6144,
+                128,
+                1
+              ]
+            },
+            "hidden_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "index_ptr": {
+              "dtype": "torch.int64",
+              "shape": [
+                1,
+                8192,
+                48
+              ],
+              "stride": [
+                393216,
+                48,
+                1
+              ]
+            },
+            "mask_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                48
+              ],
+              "stride": [
+                393216,
+                48,
+                1
+              ]
+            },
+            "neighbor_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                128
+              ],
+              "stride": [
+                1048576,
+                128,
+                1
+              ]
+            },
+            "neighbor_scale": 48,
+            "preactivation_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                48,
+                128
+              ],
+              "stride": [
+                50331648,
+                6144,
+                128,
+                1
+              ]
+            },
+            "query_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8192,
+                128
+              ],
+              "stride": [
+                1048576,
+                128,
+                1
+              ]
+            },
+            "reduced_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                8192,
+                128
+              ],
+              "stride": [
+                1048576,
+                128,
+                1
+              ]
+            },
+            "shape_key": 137439153303
+          },
+          "implementation": "c86164690df2bd98fe021883a597040fa5c819b7021318f6f32055cb9ff7dc16",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|SAVE_PREACT=1,shape_key=17180069015": {
+      "2a18634b09e82e895150": {
+        "entries": [
+          {
+            "kwargs": {
+              "GROUPS": 1
+            },
+            "ms": 0.06758400052785873,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.07379200309515,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.0798719972372055,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.11059200018644333,
+            "num_stages": 2,
+            "num_warps": 16
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.13318400084972382,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('GROUPS', 1),), 4, 2)",
+          "((('GROUPS', 16),), 1, 2)",
+          "((('GROUPS', 16),), 16, 2)",
+          "((('GROUPS', 16),), 2, 2)",
+          "((('GROUPS', 16),), 32, 2)",
+          "((('GROUPS', 16),), 4, 1)",
+          "((('GROUPS', 16),), 4, 2)",
+          "((('GROUPS', 16),), 4, 3)",
+          "((('GROUPS', 16),), 4, 4)",
+          "((('GROUPS', 16),), 4, 5)",
+          "((('GROUPS', 16),), 4, 6)",
+          "((('GROUPS', 16),), 4, 8)",
+          "((('GROUPS', 16),), 8, 2)",
+          "((('GROUPS', 16),), 8, 3)",
+          "((('GROUPS', 2),), 4, 2)",
+          "((('GROUPS', 4),), 4, 2)",
+          "((('GROUPS', 8),), 4, 2)",
+          "((('GROUPS', 8),), 4, 3)",
+          "((('GROUPS', 8),), 8, 2)",
+          "((('GROUPS', 8),), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BLOCK_M1": 64,
+            "EDGE_WEIGHT_STRIDE": 128,
+            "NEIGHBORS": 48,
+            "SAVE_PREACT": true,
+            "WIDTH": 128,
+            "edge_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                48,
+                128
+              ],
+              "stride": [
+                6291456,
+                6144,
+                128,
+                1
+              ]
+            },
+            "edge_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "groups_total": 1024,
+            "hidden_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "hidden_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                48,
+                128
+              ],
+              "stride": [
+                6291456,
+                6144,
+                128,
+                1
+              ]
+            },
+            "hidden_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "index_ptr": {
+              "dtype": "torch.int64",
+              "shape": [
+                1,
+                1024,
+                48
+              ],
+              "stride": [
+                49152,
+                48,
+                1
+              ]
+            },
+            "mask_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                48
+              ],
+              "stride": [
+                49152,
+                48,
+                1
+              ]
+            },
+            "neighbor_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                128
+              ],
+              "stride": [
+                131072,
+                128,
+                1
+              ]
+            },
+            "neighbor_scale": 48,
+            "preactivation_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                48,
+                128
+              ],
+              "stride": [
+                6291456,
+                6144,
+                128,
+                1
+              ]
+            },
+            "query_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1024,
+                128
+              ],
+              "stride": [
+                131072,
+                128,
+                1
+              ]
+            },
+            "reduced_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                1024,
+                128
+              ],
+              "stride": [
+                131072,
+                128,
+                1
+              ]
+            },
+            "shape_key": 17180069015
+          },
+          "implementation": "c86164690df2bd98fe021883a597040fa5c819b7021318f6f32055cb9ff7dc16",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|SAVE_PREACT=1,shape_key=34359938199": {
+      "17ff93a686a949987248": {
+        "entries": [
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.11264000087976456,
+            "num_stages": 2,
+            "num_warps": 16
+          },
+          {
+            "kwargs": {
+              "GROUPS": 1
+            },
+            "ms": 0.11881600320339203,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.13939200341701508,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.14134399592876434,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.14977599680423737,
+            "num_stages": 2,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('GROUPS', 1),), 4, 2)",
+          "((('GROUPS', 16),), 1, 2)",
+          "((('GROUPS', 16),), 16, 2)",
+          "((('GROUPS', 16),), 2, 2)",
+          "((('GROUPS', 16),), 32, 2)",
+          "((('GROUPS', 16),), 4, 1)",
+          "((('GROUPS', 16),), 4, 2)",
+          "((('GROUPS', 16),), 4, 3)",
+          "((('GROUPS', 16),), 4, 4)",
+          "((('GROUPS', 16),), 4, 5)",
+          "((('GROUPS', 16),), 4, 6)",
+          "((('GROUPS', 16),), 4, 8)",
+          "((('GROUPS', 16),), 8, 2)",
+          "((('GROUPS', 16),), 8, 3)",
+          "((('GROUPS', 2),), 4, 2)",
+          "((('GROUPS', 4),), 4, 2)",
+          "((('GROUPS', 8),), 4, 2)",
+          "((('GROUPS', 8),), 4, 3)",
+          "((('GROUPS', 8),), 8, 2)",
+          "((('GROUPS', 8),), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BLOCK_M1": 64,
+            "EDGE_WEIGHT_STRIDE": 128,
+            "NEIGHBORS": 48,
+            "SAVE_PREACT": true,
+            "WIDTH": 128,
+            "edge_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                48,
+                128
+              ],
+              "stride": [
+                12582912,
+                6144,
+                128,
+                1
+              ]
+            },
+            "edge_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "groups_total": 2048,
+            "hidden_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "hidden_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                48,
+                128
+              ],
+              "stride": [
+                12582912,
+                6144,
+                128,
+                1
+              ]
+            },
+            "hidden_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "index_ptr": {
+              "dtype": "torch.int64",
+              "shape": [
+                1,
+                2048,
+                48
+              ],
+              "stride": [
+                98304,
+                48,
+                1
+              ]
+            },
+            "mask_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                48
+              ],
+              "stride": [
+                98304,
+                48,
+                1
+              ]
+            },
+            "neighbor_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                128
+              ],
+              "stride": [
+                262144,
+                128,
+                1
+              ]
+            },
+            "neighbor_scale": 48,
+            "preactivation_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                48,
+                128
+              ],
+              "stride": [
+                12582912,
+                6144,
+                128,
+                1
+              ]
+            },
+            "query_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                128
+              ],
+              "stride": [
+                262144,
+                128,
+                1
+              ]
+            },
+            "reduced_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                2048,
+                128
+              ],
+              "stride": [
+                262144,
+                128,
+                1
+              ]
+            },
+            "shape_key": 34359938199
+          },
+          "implementation": "c86164690df2bd98fe021883a597040fa5c819b7021318f6f32055cb9ff7dc16",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|SAVE_PREACT=1,shape_key=68719676567": {
+      "9a8eacb1b61fe697e531": {
+        "entries": [
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.2171200066804886,
+            "num_stages": 2,
+            "num_warps": 16
+          },
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.22038400173187256,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "GROUPS": 1
+            },
+            "ms": 0.2252800017595291,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "GROUPS": 16
+            },
+            "ms": 0.2703680098056793,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "GROUPS": 8
+            },
+            "ms": 0.2744640111923218,
+            "num_stages": 3,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('GROUPS', 1),), 4, 2)",
+          "((('GROUPS', 16),), 1, 2)",
+          "((('GROUPS', 16),), 16, 2)",
+          "((('GROUPS', 16),), 2, 2)",
+          "((('GROUPS', 16),), 32, 2)",
+          "((('GROUPS', 16),), 4, 1)",
+          "((('GROUPS', 16),), 4, 2)",
+          "((('GROUPS', 16),), 4, 3)",
+          "((('GROUPS', 16),), 4, 4)",
+          "((('GROUPS', 16),), 4, 5)",
+          "((('GROUPS', 16),), 4, 6)",
+          "((('GROUPS', 16),), 4, 8)",
+          "((('GROUPS', 16),), 8, 2)",
+          "((('GROUPS', 16),), 8, 3)",
+          "((('GROUPS', 2),), 4, 2)",
+          "((('GROUPS', 4),), 4, 2)",
+          "((('GROUPS', 8),), 4, 2)",
+          "((('GROUPS', 8),), 4, 3)",
+          "((('GROUPS', 8),), 8, 2)",
+          "((('GROUPS', 8),), 8, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "BLOCK_M1": 64,
+            "EDGE_WEIGHT_STRIDE": 128,
+            "NEIGHBORS": 48,
+            "SAVE_PREACT": true,
+            "WIDTH": 128,
+            "edge_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                48,
+                128
+              ],
+              "stride": [
+                25165824,
+                6144,
+                128,
+                1
+              ]
+            },
+            "edge_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "groups_total": 4096,
+            "hidden_bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128
+              ],
+              "stride": [
+                1
+              ]
+            },
+            "hidden_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                48,
+                128
+              ],
+              "stride": [
+                25165824,
+                6144,
+                128,
+                1
+              ]
+            },
+            "hidden_weight_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                128,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "index_ptr": {
+              "dtype": "torch.int64",
+              "shape": [
+                1,
+                4096,
+                48
+              ],
+              "stride": [
+                196608,
+                48,
+                1
+              ]
+            },
+            "mask_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                48
+              ],
+              "stride": [
+                196608,
+                48,
+                1
+              ]
+            },
+            "neighbor_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                128
+              ],
+              "stride": [
+                524288,
+                128,
+                1
+              ]
+            },
+            "neighbor_scale": 48,
+            "preactivation_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                48,
+                128
+              ],
+              "stride": [
+                25165824,
+                6144,
+                128,
+                1
+              ]
+            },
+            "query_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4096,
+                128
+              ],
+              "stride": [
+                524288,
+                128,
+                1
+              ]
+            },
+            "reduced_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                4096,
+                128
+              ],
+              "stride": [
+                524288,
+                128,
+                1
+              ]
+            },
+            "shape_key": 68719676567
+          },
+          "implementation": "c86164690df2bd98fe021883a597040fa5c819b7021318f6f32055cb9ff7dc16",
+          "scheme": 1
+        }
+      }
+    }
+  },
+  "op": "mpnn_node_message_fwd_gemm_triton",
+  "op_identity": "7563dfc5defb",
+  "provenance": {
+    "built_utc": "2026-10-30T10:00:53+00:00",
+    "torch": "2.13.0+cu129",
+    "triton": "3.7.1"
+  },
+  "schema": 1
+}

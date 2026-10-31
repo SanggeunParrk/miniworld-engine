@@ -1,0 +1,6637 @@
+{
+  "build_rev": 2,
+  "config_space": [
+    "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+    "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+  ],
+  "config_space_hash": "abc04ac3cf76",
+  "driver_id_scheme": 2,
+  "driver_identity": "43af72ce08ff",
+  "entries": {
+    "bfloat16|shape_key=140739636889766": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.012415999546647072,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014240000396966934,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=17594334578854": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.012384000234305859,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.014208000153303146,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=17605077239974": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.09011200070381165,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.09020800143480301,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.0942080020904541,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.09619200229644775,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.09827200323343277,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|shape_key=26390427601062": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.012480000033974648,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.012703999876976013,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=26401170262182": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.09216000139713287,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.09219200164079666,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.09516800194978714,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.0963200032711029,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.10022400319576263,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|shape_key=281477125245094": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.012415999546647072,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=35186520623270": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.01235199999064207,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.014240000396966934,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=35197263284390": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.09200000017881393,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.09216000139713287,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.09430400282144547,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.09625600278377533,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.09839999675750732,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|shape_key=43982613645478": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014303999952971935,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=43993356306598": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.09206400066614151,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.09216000139713287,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.09433600306510925,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.09625600278377533,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.09839999675750732,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|shape_key=52778706667686": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.012319999746978283,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.014303999952971935,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=52789449328806": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.09212800115346909,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.09219200164079666,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.09436800330877304,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.09628800302743912,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.09913600236177444,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|shape_key=562952101955750": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|shape_key=70370892712102": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.012415999546647072,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|shape_key=8798241556646": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.014303999952971935,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|shape_key=8808984217766": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.09216000139713287,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.09216000139713287,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.09609600156545639,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.09628800302743912,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.1003199964761734,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "float32|shape_key=140739636889766": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020320000126957893,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.02252800017595291,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=17594334578854": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020287999883294106,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.022463999688625336,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=17605077239974": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.2027519941329956,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.20479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.2396160066127777,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.2642880082130432,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.26627200841903687,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=26390427601062": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020416000857949257,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.02252800017595291,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=26401170262182": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.20479999482631683,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.20479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.2396479994058609,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.26633599400520325,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.2682560086250305,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=281477125245094": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020447999238967896,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.022463999688625336,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=35186520623270": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.018464000895619392,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020447999238967896,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.022447999566793442,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=35197263284390": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.20278400182724,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.20479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.2396160066127777,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.26627200841903687,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.26627200841903687,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=43982613645478": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.02252800017595291,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=43993356306598": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.20479999482631683,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.20479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.23971199989318848,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.26627200841903687,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.26819199323654175,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=52778706667686": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.02038400061428547,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.022495999932289124,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=52789449328806": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.20479999482631683,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.20479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.2396160066127777,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.2682560086250305,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.2682560086250305,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=562952101955750": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.018464000895619392,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020447999238967896,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.022495999932289124,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=70370892712102": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.02027199976146221,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.02252800017595291,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=8798241556646": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.018464000895619392,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.020447999238967896,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.022495999932289124,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=8808984217766": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.20479999482631683,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 128,
+          "GROUP_M": 8
+        },
+        "ms": 0.20479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128,
+          "GROUP_M": 4
+        },
+        "ms": 0.23971199989318848,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 4
+        },
+        "ms": 0.2519359886646271,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 8
+        },
+        "ms": 0.2662079930305481,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ]
+  },
+  "entry_grids": {
+    "bfloat16|shape_key=140739636889766": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=17594334578854": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=17605077239974": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=26390427601062": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=26401170262182": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=281477125245094": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=35186520623270": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=35197263284390": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=43982613645478": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=43993356306598": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=52778706667686": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=52789449328806": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=562952101955750": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=70370892712102": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=8798241556646": [
+      "abc04ac3cf76"
+    ],
+    "bfloat16|shape_key=8808984217766": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=140739636889766": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=17594334578854": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=17605077239974": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=26390427601062": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=26401170262182": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=281477125245094": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=35186520623270": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=35197263284390": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=43982613645478": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=43993356306598": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=52778706667686": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=52789449328806": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=562952101955750": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=70370892712102": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=8798241556646": [
+      "abc04ac3cf76"
+    ],
+    "float32|shape_key=8808984217766": [
+      "abc04ac3cf76"
+    ]
+  },
+  "env_identity": "7efec5ac14d2",
+  "gpu": "NVIDIA B200 (sm100)",
+  "grids": {
+    "abc04ac3cf76": [
+      "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+      "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+    ]
+  },
+  "key_scheme": 3,
+  "measurements": {
+    "bfloat16|shape_key=140739636889766": {
+      "36dcbf7ffa257bc81a10": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.01228800043463707,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.012415999546647072,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014240000396966934,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 140739636889766,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=17594334578854": {
+      "cca0e13bb52d67d46f97": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.012384000234305859,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.014208000153303146,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 17594334578854,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=17605077239974": {
+      "aad9c0899dd53aa9b0f1": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.09011200070381165,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.09020800143480301,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.0942080020904541,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.09619200229644775,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.09827200323343277,
+            "num_stages": 4,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 768,
+            "M": 8192,
+            "ND": 1536,
+            "ND2": 3072,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                3072
+              ],
+              "stride": [
+                3072,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                1536
+              ],
+              "stride": [
+                1536,
+                1
+              ]
+            },
+            "shape_key": 17605077239974,
+            "stride_abm": 3072,
+            "stride_abn": 1,
+            "stride_hm": 1536,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 768,
+            "stride_xk": 1,
+            "stride_xm": 768,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=26390427601062": {
+      "d3244a679696d79e2321": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.012480000033974648,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.012703999876976013,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 26390427601062,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=26401170262182": {
+      "63b743010c738411ee4f": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.09216000139713287,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.09219200164079666,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.09516800194978714,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.0963200032711029,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.10022400319576263,
+            "num_stages": 4,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 768,
+            "M": 8192,
+            "ND": 1536,
+            "ND2": 3072,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                3072
+              ],
+              "stride": [
+                3072,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                1536
+              ],
+              "stride": [
+                1536,
+                1
+              ]
+            },
+            "shape_key": 26401170262182,
+            "stride_abm": 3072,
+            "stride_abn": 1,
+            "stride_hm": 1536,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 768,
+            "stride_xk": 1,
+            "stride_xm": 768,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=281477125245094": {
+      "5e250848ba2a524e585b": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.01228800043463707,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.012415999546647072,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 281477125245094,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=35186520623270": {
+      "02e8bb21f01c628ff2cd": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.01235199999064207,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.014240000396966934,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 35186520623270,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=35197263284390": {
+      "95c854fabd82255b9179": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.09200000017881393,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.09216000139713287,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.09430400282144547,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.09625600278377533,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.09839999675750732,
+            "num_stages": 4,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 768,
+            "M": 8192,
+            "ND": 1536,
+            "ND2": 3072,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                3072
+              ],
+              "stride": [
+                3072,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                1536
+              ],
+              "stride": [
+                1536,
+                1
+              ]
+            },
+            "shape_key": 35197263284390,
+            "stride_abm": 3072,
+            "stride_abn": 1,
+            "stride_hm": 1536,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 768,
+            "stride_xk": 1,
+            "stride_xm": 768,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=43982613645478": {
+      "413e43ade0ccd267e0f3": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.01228800043463707,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.013311999849975109,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014303999952971935,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 43982613645478,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=43993356306598": {
+      "bc7fc92a9abc3da7d1bb": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.09206400066614151,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.09216000139713287,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.09433600306510925,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.09625600278377533,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.09839999675750732,
+            "num_stages": 4,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 768,
+            "M": 8192,
+            "ND": 1536,
+            "ND2": 3072,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                3072
+              ],
+              "stride": [
+                3072,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                1536
+              ],
+              "stride": [
+                1536,
+                1
+              ]
+            },
+            "shape_key": 43993356306598,
+            "stride_abm": 3072,
+            "stride_abn": 1,
+            "stride_hm": 1536,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 768,
+            "stride_xk": 1,
+            "stride_xm": 768,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=52778706667686": {
+      "9c44a39c797edcde6e8e": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.012319999746978283,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.014303999952971935,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 52778706667686,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=52789449328806": {
+      "5dbefe331611ecff229c": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.09212800115346909,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.09219200164079666,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.09436800330877304,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.09628800302743912,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.09913600236177444,
+            "num_stages": 4,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 768,
+            "M": 8192,
+            "ND": 1536,
+            "ND2": 3072,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                3072
+              ],
+              "stride": [
+                3072,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                1536
+              ],
+              "stride": [
+                1536,
+                1
+              ]
+            },
+            "shape_key": 52789449328806,
+            "stride_abm": 3072,
+            "stride_abn": 1,
+            "stride_hm": 1536,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 768,
+            "stride_xk": 1,
+            "stride_xm": 768,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=562952101955750": {
+      "4151692cdfb3d4aa4b49": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.01228800043463707,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 562952101955750,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=70370892712102": {
+      "28df5a6d581d08c21941": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.01228800043463707,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.012415999546647072,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 70370892712102,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=8798241556646": {
+      "3883ef4246280ff0bc74": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.01228800043463707,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.014303999952971935,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.014336000196635723,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 8798241556646,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|shape_key=8808984217766": {
+      "3cdd72076bd49f94b3d6": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.09216000139713287,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.09216000139713287,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.09609600156545639,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.09628800302743912,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.1003199964761734,
+            "num_stages": 4,
+            "num_warps": 8
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 768,
+            "M": 8192,
+            "ND": 1536,
+            "ND2": 3072,
+            "PRE": false,
+            "ab_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                3072
+              ],
+              "stride": [
+                3072,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                1536
+              ],
+              "stride": [
+                1536,
+                1
+              ]
+            },
+            "shape_key": 8808984217766,
+            "stride_abm": 3072,
+            "stride_abn": 1,
+            "stride_hm": 1536,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 768,
+            "stride_xk": 1,
+            "stride_xm": 768,
+            "wa_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                8192,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=140739636889766": {
+      "f2113ed86deacc1eb9d1": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020320000126957893,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.02252800017595291,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 140739636889766,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=17594334578854": {
+      "0fe4cf20ca5c11d12d64": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020287999883294106,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.022463999688625336,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 17594334578854,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=17605077239974": {
+      "031afeaccaa862b29637": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.2027519941329956,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.20479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.2396160066127777,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.2642880082130432,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.26627200841903687,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 768,
+            "M": 8192,
+            "ND": 1536,
+            "ND2": 3072,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                3072
+              ],
+              "stride": [
+                3072,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                1536
+              ],
+              "stride": [
+                1536,
+                1
+              ]
+            },
+            "shape_key": 17605077239974,
+            "stride_abm": 3072,
+            "stride_abn": 1,
+            "stride_hm": 1536,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 768,
+            "stride_xk": 1,
+            "stride_xm": 768,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=26390427601062": {
+      "1751cdd13c91e2c88006": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020416000857949257,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.02252800017595291,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 26390427601062,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=26401170262182": {
+      "fb2b0d9d8cd5ecaeb0f5": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.20479999482631683,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.20479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.2396479994058609,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.26633599400520325,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.2682560086250305,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 768,
+            "M": 8192,
+            "ND": 1536,
+            "ND2": 3072,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                3072
+              ],
+              "stride": [
+                3072,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                1536
+              ],
+              "stride": [
+                1536,
+                1
+              ]
+            },
+            "shape_key": 26401170262182,
+            "stride_abm": 3072,
+            "stride_abn": 1,
+            "stride_hm": 1536,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 768,
+            "stride_xk": 1,
+            "stride_xm": 768,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=281477125245094": {
+      "5b708d0c5f52c855571b": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020447999238967896,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.022463999688625336,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 281477125245094,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=35186520623270": {
+      "a7746cd923eeaa56bc3e": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.018464000895619392,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020447999238967896,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.022447999566793442,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 35186520623270,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=35197263284390": {
+      "f10d6304b01fd35697d5": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.20278400182724,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.20479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.2396160066127777,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.26627200841903687,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.26627200841903687,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 768,
+            "M": 8192,
+            "ND": 1536,
+            "ND2": 3072,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                3072
+              ],
+              "stride": [
+                3072,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                1536
+              ],
+              "stride": [
+                1536,
+                1
+              ]
+            },
+            "shape_key": 35197263284390,
+            "stride_abm": 3072,
+            "stride_abn": 1,
+            "stride_hm": 1536,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 768,
+            "stride_xk": 1,
+            "stride_xm": 768,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=43982613645478": {
+      "5e114d4fef606ff0f66a": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.02252800017595291,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 43982613645478,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=43993356306598": {
+      "9bae2d00ba460a8ca044": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.20479999482631683,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.20479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.23971199989318848,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.26627200841903687,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.26819199323654175,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 768,
+            "M": 8192,
+            "ND": 1536,
+            "ND2": 3072,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                3072
+              ],
+              "stride": [
+                3072,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                1536
+              ],
+              "stride": [
+                1536,
+                1
+              ]
+            },
+            "shape_key": 43993356306598,
+            "stride_abm": 3072,
+            "stride_abn": 1,
+            "stride_hm": 1536,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 768,
+            "stride_xk": 1,
+            "stride_xm": 768,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=52778706667686": {
+      "386b0a7f10b96bd8347e": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.02038400061428547,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.022495999932289124,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 52778706667686,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=52789449328806": {
+      "88b4769779bd7cadd53f": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.20479999482631683,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.20479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.2396160066127777,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.2682560086250305,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.2682560086250305,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 768,
+            "M": 8192,
+            "ND": 1536,
+            "ND2": 3072,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                3072
+              ],
+              "stride": [
+                3072,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                1536
+              ],
+              "stride": [
+                1536,
+                1
+              ]
+            },
+            "shape_key": 52789449328806,
+            "stride_abm": 3072,
+            "stride_abn": 1,
+            "stride_hm": 1536,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 768,
+            "stride_xk": 1,
+            "stride_xm": 768,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=562952101955750": {
+      "2b3801673764ae6513ce": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.018464000895619392,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020447999238967896,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.022495999932289124,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 562952101955750,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=70370892712102": {
+      "224bc0322a30660cd84c": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.02027199976146221,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.02252800017595291,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 70370892712102,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=8798241556646": {
+      "93ebe7a17afd68b930ae": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.018464000895619392,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.020447999238967896,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.020479999482631683,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.022495999932289124,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 128,
+            "M": 8192,
+            "ND": 256,
+            "ND2": 512,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                512
+              ],
+              "stride": [
+                512,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                256
+              ],
+              "stride": [
+                256,
+                1
+              ]
+            },
+            "shape_key": 8798241556646,
+            "stride_abm": 512,
+            "stride_abn": 1,
+            "stride_hm": 256,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 128,
+            "stride_xk": 1,
+            "stride_xm": 128,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                256,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                128
+              ],
+              "stride": [
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    },
+    "float32|shape_key=8808984217766": {
+      "e673f8e4be200ae4376f": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.20479999482631683,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 128,
+              "GROUP_M": 8
+            },
+            "ms": 0.20479999482631683,
+            "num_stages": 4,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 64,
+              "BLOCK_N": 128,
+              "GROUP_M": 4
+            },
+            "ms": 0.23971199989318848,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 4
+            },
+            "ms": 0.2519359886646271,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K": 32,
+              "BLOCK_M1": 128,
+              "BLOCK_N": 64,
+              "GROUP_M": 8
+            },
+            "ms": 0.2662079930305481,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_K', 16), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 1)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 128), ('GROUP_M', 8)), 8, 4)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 128), ('BLOCK_N', 64), ('GROUP_M', 8)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 128), ('GROUP_M', 4)), 4, 3)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 2)",
+          "((('BLOCK_K', 32), ('BLOCK_M1', 64), ('BLOCK_N', 64), ('GROUP_M', 4)), 4, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "K": 768,
+            "M": 8192,
+            "ND": 1536,
+            "ND2": 3072,
+            "PRE": true,
+            "ab_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                3072
+              ],
+              "stride": [
+                3072,
+                1
+              ]
+            },
+            "h_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                1536
+              ],
+              "stride": [
+                1536,
+                1
+              ]
+            },
+            "shape_key": 8808984217766,
+            "stride_abm": 3072,
+            "stride_abn": 1,
+            "stride_hm": 1536,
+            "stride_hn": 1,
+            "stride_wk": 1,
+            "stride_wn": 768,
+            "stride_xk": 1,
+            "stride_xm": 768,
+            "wa_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "wb_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1536,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            },
+            "x_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                8192,
+                768
+              ],
+              "stride": [
+                768,
+                1
+              ]
+            }
+          },
+          "implementation": "c53e657e6587ae5865f0267a2bb6ac2f8287b7ec8e84d2fc9557b7750df40d2e",
+          "scheme": 1
+        }
+      }
+    }
+  },
+  "op": "cond_transition_expand_swiglu_saveact_triton",
+  "op_identity": "556992007eb0",
+  "provenance": {
+    "built_utc": "2026-10-30T09:58:03+00:00",
+    "torch": "2.13.0+cu129",
+    "triton": "3.7.1"
+  },
+  "schema": 1
+}
