@@ -4,6 +4,7 @@
 //   training (b200_train): D64 / D128 -- trimul_forms (weight forms), k3g with saves, b1s / b1g (output-side backward), b7m / b7g
 //                           (input side), grad_reduce (deterministic parameter gradients);
 //                           D >= 256 -- k3w with saves, k1wb (front backward), wide_bwd
+//                           D64 bidirectional hidden 128 -- k3g with saves, wide_bwd (hid_*, lnout), k1wb
 #include <torch/extension.h>
 void k1w_stats(torch::Tensor x, torch::Tensor mean, torch::Tensor rstd, double eps);
 void k1w_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Tensor wr, torch::Tensor wrg,
@@ -33,6 +34,11 @@ void wide_lnout_bwd(torch::Tensor dout, torch::Tensor t, torch::Tensor mu_o, tor
                     torch::Tensor go, torch::Tensor dt, torch::Tensor dgb);
 void wide_lnin_bwd(torch::Tensor dxn, torch::Tensor x, torch::Tensor dy, torch::Tensor mu_i, torch::Tensor rs_i, torch::Tensor gi,
                    torch::Tensor dx, torch::Tensor dgb);
+void hid_gate_bwd(torch::Tensor dy, torch::Tensor q, torch::Tensor g, c10::optional<torch::Tensor> ds, torch::Tensor vec,
+                  torch::Tensor mu_o, torch::Tensor rs_o, torch::Tensor dpr, torch::Tensor dg_out, torch::Tensor S1, torch::Tensor S2,
+                  torch::Tensor r01, int64_t L);
+void hid_lnin_bwd(torch::Tensor dxn, torch::Tensor x, torch::Tensor dy, torch::Tensor gi, torch::Tensor dx, torch::Tensor dgb,
+                  double eps);
 void wide_ln_apply(torch::Tensor x, torch::Tensor mean, torch::Tensor rstd, torch::Tensor g, torch::Tensor b, torch::Tensor xn);
 void lnpart_sum(torch::Tensor a, torch::Tensor b, torch::Tensor out);
 void trimul_forms(torch::Tensor wl, torch::Tensor wlg, torch::Tensor wr, torch::Tensor wrg, torch::Tensor wg, torch::Tensor wp,
@@ -67,6 +73,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("wide_lnout_bwd", &wide_lnout_bwd);
   m.def("wide_lnin_bwd", &wide_lnin_bwd);
   m.def("wide_ln_apply", &wide_ln_apply);
+  m.def("hid_gate_bwd", &hid_gate_bwd);
+  m.def("hid_lnin_bwd", &hid_lnin_bwd);
   m.def("lnpart_sum", &lnpart_sum);
   m.def("trimul_forms", &trimul_forms);
   m.def("grad_reduce", &grad_reduce);

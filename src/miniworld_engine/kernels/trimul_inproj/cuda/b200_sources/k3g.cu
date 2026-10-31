@@ -55,7 +55,8 @@ constexpr int NWP = K3_NWP;
 #define K3_GSMEM 1
 #endif
 constexpr int NTH = K3_NTH;
-// C = d_pair (64 / 128), H = packed hidden (C: one direction, 2C: bidirectional), H <= 256
+// C = d_pair (64 / 128), H = packed hidden (C: one direction, 2C: bidirectional or one direction at hidden 2C, 4C: bidirectional
+// at hidden 2C, D64 only), H <= 256
 template <int C, int H>
 struct Geo {
   static constexpr int XT = TOK * C * 2;        // x tile [128 tok][C ch], C / 64 K-blocks of 16 KB (SW128)
@@ -621,7 +622,7 @@ void k3g_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wp_perm, torc
     else if (save == 2) launch(k3g_kernel<CC, HH, 2, 0>, Geo<CC, HH>::SMEM); \
     else launch(k3g_kernel<CC, HH, 0, 0>, Geo<CC, HH>::SMEM); \
     C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
-  K3G_CASE(64, 64) K3G_CASE(64, 128) K3G_CASE(128, 128) K3G_CASE(128, 256)
+  K3G_CASE(64, 64) K3G_CASE(64, 128) K3G_CASE(64, 256) K3G_CASE(128, 128) K3G_CASE(128, 256)
 #undef K3G_CASE
   TORCH_CHECK(false, "k3g_forward: unsupported (C, H) = (", C, ", ", H, ")");
 }

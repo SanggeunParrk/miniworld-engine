@@ -1,4 +1,5 @@
-// k1wb.cu -- backward of the B200 wide TriMul front (D = 256 / 384 / 512): recomputes k1w's pre-activations
+// k1wb.cu -- backward of the B200 wide TriMul front (D = 256 / 384 / 512; and D64 at P = 512, the bidirectional hidden-128 block,
+// whose output-side backward does not fit b1s): recomputes k1w's pre-activations
 //   g_c = xn Wg_c^T, p_c = xn Wp_c^T (same transform, same TMEM products, masked token rows zero)
 // and turns the plane gradient da [P, L*L] (channel-major, from the contraction backward) into the pre-activation gradients
 //   dg_c = da_c p_c sigmoid(g_c) (1 - sigmoid(g_c)),   dp_c = da_c sigmoid(g_c)          (0 for a masked pair)
@@ -417,7 +418,7 @@ void k1wb_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::T
     k1wb_kernel<DD, PP><<<g, NTHREADS, Cfg<DD>::SMEM, st>>>(mx, mw, mda, mdp, mk, L, mean.data_ptr<float>(), rstd.data_ptr<float>(), \
         gamma.data_ptr<float>(), beta.data_ptr<float>(), tiles, 1e-5f, 0); \
     C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
-  K1WB_CASE(256, 1024) K1WB_CASE(256, 512) K1WB_CASE(384, 1536) K1WB_CASE(384, 768) K1WB_CASE(512, 2048) K1WB_CASE(512, 1024)
+  K1WB_CASE(64, 512) K1WB_CASE(256, 1024) K1WB_CASE(256, 512) K1WB_CASE(384, 1536) K1WB_CASE(384, 768) K1WB_CASE(512, 2048) K1WB_CASE(512, 1024)
 #undef K1WB_CASE
   TORCH_CHECK(false, "k1wb_forward: unsupported (D, P) = (", D, ", ", P, ")");
 }

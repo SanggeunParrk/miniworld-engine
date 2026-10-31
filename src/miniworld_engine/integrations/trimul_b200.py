@@ -1,6 +1,6 @@
 """Automatic dispatch to the B200 (sm_100a) TriMul: inference (``b200_infer``) and training (``b200_train``), D64-D512,
 both modules; the hidden width equals the pair width, or is twice it in one direction at D64 / D128 (``b200_infer.hidden_ok``:
-AF3 / Protenix template blocks, pair 64, hidden 128).
+AF3 / Protenix template blocks, pair 64, hidden 128) or bidirectionally at D64 (8 D planes).
 
 Batched samples at every width: x [B, L, L, D] runs as one launch per stage (tokens b-major, M = B L L; the token mask and the
 row-dropout scale are read per sample, the contraction batches over channels x B), up to ``max_batch(D)`` samples per launch.
@@ -48,6 +48,11 @@ _WORKING_SET_PER_CHANNEL = {
     (True, True, True): 36.2, (True, True, False): 53.3,
     (True, False, True): 21.7, (True, False, False): 33.3,
 }
+#: The D64 bidirectional hidden-128 block (8 D planes, ``b200_train._eight_planes``): (training) -> the same two coefficients. Estimated
+#: from its buffers (inference: x, y, 8 D planes, 4 D of t; training: k1wb's moment -- the saved planes, t, x_n, the plane gradient and
+#: [dpre | dg] next to x, dy, dx), +15 %.
+_WORKING_SET_EIGHT = {False: 34.0, True: 98.0}
+_HELD_EIGHT = 30.0
 #: Training: bytes per pair token per channel one launch holds from its forward to its backward (saved tensors and y; x / dy
 #: excluded), (4 D planes, D <= 128). Measured with the coefficients above (B200, L128 B16 / L384 B4 / L768 B2-4, max).
 _HELD_PER_CHANNEL = {(True, True): 16.2, (True, False): 17.2, (False, True): 9.3, (False, False): 11.2}
@@ -80,7 +85,8 @@ def _plan(module, pair: torch.Tensor, inference: bool, bidirectional: bool) -> t
     n, d = pair.shape[1], pair.shape[-1]
     tokens = d * n * n                                 # bytes per sample = coefficient x tokens
     four = _four_planes(module, bidirectional)
-    peak = _WORKING_SET_PER_CHANNEL[(not inference, four, d <= 128)] * 1.05
+    eight = bidirectional and module.d_hidden == 2 * d
+    peak = (_WORKING_SET_EIGHT[not inference] if eight else _WORKING_SET_PER_CHANNEL[(not inference, four, d <= 128)]) * 1.05
     index = pair.device.index if pair.device.index is not None else 0
     budget = CHUNK_MEMORY_FRACTION * (_total_memory(index) if pair.is_cuda else 0)
     limit = max(1, min(max_batch(d), (2 ** 31 - 1) // (n * n)))
@@ -94,7 +100,7 @@ def _plan(module, pair: torch.Tensor, inference: bool, bidirectional: bool) -> t
         free = budget - bsz * 4.0 * tokens
         return max(1, min(limit, int(free // (peak * tokens)))), False
     caller = bsz * _CALLER_PER_CHANNEL * tokens
-    saved = (_HELD_PER_CHANNEL[(four, d <= 128)] * 1.05 - 2.0) * tokens               # y is the caller's
+    saved = ((_HELD_EIGHT if eight else _HELD_PER_CHANNEL[(four, d <= 128)]) * 1.05 - 2.0) * tokens               # y is the caller's
     work = (peak - _CALLER_PER_CHANNEL) * tokens - saved                              # one chunk's backward workspace
     free = budget - caller - bsz * saved
     if free >= work:                                   # every chunk's saved state fits next to one chunk's backward workspace

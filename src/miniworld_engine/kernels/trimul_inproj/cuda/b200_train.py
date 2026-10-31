@@ -15,6 +15,10 @@ gradients:
   b7g         D128 input side, over P / 64 plane chunks (8 bidirectional, 4 one direction) per source group (the packed
               W1, 128 / 256 KB, does not fit next to b7m's buffers)
 
+D64 bidirectional at hidden 128 (8 D = 512 planes, an LN_out over 256 channels): the D64 / D128 forward (k1w, cuBLAS, k3g's saves);
+the backward is the wide path's decomposition below on k3g's saved set (``_backward_hid_body``: q / g by cuBLAS, ``hid_gate_bwd``, lnout_bwd,
+k1wb, ``hid_lnin_bwd``), since b1s / b7m do not fit 8 D planes.
+
 D256 / 384 / 512:
 
 Forward = the inference path (``b200_infer``: k1w, cuBLAS contractions, k3w) with k3w also storing p (output projection) and g
@@ -182,7 +186,7 @@ def _flag_words(n, d, direction, p):
     return nf * B1_RSF + (_b7_source_groups(n, nch) * B7_RD * nch if d == 128 else 0)
 
 
-from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import _contract, _fold, contracted, hidden_ok, planes_of
+from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import _contract, _fold, contracted, hidden_of, hidden_ok, planes_of
 
 
 def _contract_bwd(planes, dt, d, direction):
@@ -400,9 +404,10 @@ def _forward_small_into_fake(leaves, mask, ds, direction, y):
     """The saved set of ``forward_small`` (y is written into ``y``): planes, t, x_n, LN_out mean / rstd, the backward's zeroed flags."""
     x = leaves[0]
     bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
-    m, p = bsz * n * n, planes_of(d, leaves[1].shape[0], direction)
+    hid = hidden_of(leaves[1].shape[0], direction)
+    m, p = bsz * n * n, planes_of(d, hid, direction)
     f32 = torch.float32
-    if _sample_major(d, leaves[1].shape[0], direction):
+    if _sample_major(d, hid, direction):
         pl, tt = x.new_empty((p // 64, bsz, 64, n, n)), x.new_empty((p // 128, bsz, 64, n, n))
     else:
         pl, tt = x.new_empty((p, bsz, n, n)), x.new_empty((p // 2, bsz, n, n))
@@ -433,7 +438,7 @@ def _forward_small_body(leaves, mask, ds, direction, y):
     E = _ext()
     with torch.cuda.device(x.device):
         x2 = x.reshape(m, d)
-        hid = wl.shape[0]
+        hid = hidden_of(wl.shape[0], direction)
         p = planes_of(d, hid, direction)
         sm = _sample_major(d, hid, direction)
         planes = x.new_empty((p // 64, bsz, 64, n, n) if sm else (p, bsz, n, n))
@@ -476,8 +481,71 @@ def backward_small_into(leaves: list[torch.Tensor], mask: torch.Tensor | None, d
     return _backward_small_body(leaves, mask, ds, direction, saved, dy, dx)[1]
 
 
+def _eight_planes(width: int, rows: int, direction: int) -> bool:
+    """The D64 bidirectional hidden-128 block (``b200_infer.hidden_ok``): 8 D = 512 planes, an LN_out over 256 channels. Its forward is
+    ``forward_small``'s (k1w, cuBLAS, k3g); its backward is ``_backward_hid_body`` (b1s's double-buffered front and LN tiles do not fit
+    at H = 256, b7m's packed W1 and dW1 do not fit at P = 512)."""
+    return direction == 0 and rows == 4 * width
+
+
+def _backward_hid_body(leaves, mask, ds, direction, saved, dy, dx):
+    """``_backward_small_body`` for the 8-plane D64 block: the wide path's decomposition (cuBLAS for the GEMMs, hand CUDA between them).
+      fold_prep      Wp' = bf16(Wp g_o), sp = rowsum(Wp'), ep = Wp b_o
+      cuBLAS         q = t^T Wp'^T, g = xn Wg^T (fp32; k3g saved neither p nor g)
+      hid_gate_bwd   p = rs_o (q - mu_o sp) + ep; dp, dg (into [dpre | dg]), dpr = dp rs_o; S1, S2; r0, r1
+      cuBLAS         dor^T = Wp^T dpr^T;  lnout_bwd -> dt, dg_o, db_o;  dWp = g_o (dpr^T t^T - r1) + b_o r0
+      cuBLAS         contraction gradients -> plane gradient da
+      k1wb           da -> dpre (pre-activations recomputed from x)
+      cuBLAS         [dW1 ; dWg] = [dpre | dg]^T xn,  dxn = [dpre | dg] [W1 ; Wg]
+      hid_lnin_bwd   dx = dy + LN_in backward of dxn; dg_i, db_i
+    -> [dx, the ten parameter gradients as one fp32 buffer in parameter order]."""
+    x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, w1, _wpp = leaves
+    planes, t, xn, mo, ro, _zb = saved
+    bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
+    m = bsz * n * n
+    p = planes.shape[0]
+    h = p // 2                                                     # LN_out channels
+    f32 = torch.float32
+    E = _ext()
+    with torch.cuda.device(x.device):
+        x2 = x.reshape(m, d)
+        dy2 = dy.contiguous().view(m, d)
+        t2 = t.view(h, m)
+        wpq = torch.empty_like(wp)
+        wgq = torch.empty_like(wg)
+        vec = x.new_empty((4, d), dtype=f32)
+        E.wide_fold_prep(wp, go, bo, wg, gi, bi, wpq, wgq, vec)
+        q = torch.mm(t2.t(), wpq.t(), out_dtype=f32)
+        g = torch.mm(xn, wg.t(), out_dtype=f32)
+        dpr = torch.empty_like(x2)                                  # dp rs_o
+        dcat = x.new_empty((m, 2 * p + d))                          # [dpre | dg]
+        s1 = x.new_empty((m,), dtype=f32)
+        s2 = torch.empty_like(s1)
+        acc = x.new_empty((4 * d + 2 * h,), dtype=f32)              # r0, r1, dg_i, db_i, dg_o, db_o
+        r0, r1 = acc[:d], acc[d:2 * d]
+        E.hid_gate_bwd(dy2, q, g, ds, vec, mo, ro, dpr, dcat[:, 2 * p:], s1, s2, acc[:2 * d], n)
+        del q, g
+        dt = torch.empty_like(t)
+        E.wide_lnout_bwd(torch.mm(wp.t(), dpr.t()), t2, mo, ro, s1, s2, go, dt.view(h, m), acc[4 * d:])
+        dwp = go[None, :] * (torch.mm(dpr.t(), t2.t(), out_dtype=f32) - r1[:, None]) + r0[:, None] * bo[None, :]
+        dpl = _contract_bwd(planes, dt, p // 4, direction)
+        del dt
+        E.k1wb_forward(x2, wl, wlg, wr, wrg, mask, mo, ro, gi, bi, dpl, dcat, 0)   # D <= 128: k1wb forms its own LN_in statistics
+        del dpl
+        dw = torch.mm(dcat.t(), xn, out_dtype=f32)                  # [2P + D, D] = [packed dW1 ; dWg]
+        dxn = torch.mm(dcat, torch.cat((w1, wg)))
+        del dcat
+        if dx is None:
+            dx = torch.empty_like(x)
+        E.hid_lnin_bwd(dxn, x2, dy2, gi, dx.view(m, d), acc[2 * d:4 * d], EPS)
+        grads = torch.cat([v.reshape(-1) for v in (*_unpack_w1(dw[:2 * p], p), dw[2 * p:], dwp, acc[2 * d:])])
+    return [dx, grads]
+
+
 def _backward_small_body(leaves, mask, ds, direction, saved, dy, dx):
     """-> [dx, parameter-gradient buffer]; dx None: allocated here."""
+    if _eight_planes(leaves[0].shape[-1], leaves[1].shape[0], direction):
+        return _backward_hid_body(leaves, mask, ds, direction, saved, dy, dx)
     x, wl, wlg, wr, wrg, wg, wp, gi, _bi, go, bo, w1, _wpp = leaves
     planes, t, xn, mo, ro, zb = saved
     bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
@@ -506,7 +574,7 @@ def _backward_small_body(leaves, mask, ds, direction, saved, dy, dx):
                                                          flags[:nf * B1_RSF], n, nf)
         del ring
         dpl = (_contract_bwd_sm(planes, dt, direction) if sm
-               else _contract_bwd(planes, dt, contracted(d, wl.shape[0], direction), direction))
+               else _contract_bwd(planes, dt, contracted(d, hidden_of(wl.shape[0], direction), direction), direction))
         del dt
         if dx is None:
             dx = torch.empty_like(x)

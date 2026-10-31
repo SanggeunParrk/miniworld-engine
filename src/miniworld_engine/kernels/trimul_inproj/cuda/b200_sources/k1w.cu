@@ -4,7 +4,8 @@
 //   plane[c]  = bf16(sigmoid(g_c) * p_c)              g_c = xn Wg_c^T, p_c = xn Wp_c^T on fp32 accumulators; ONE bf16 rounding
 //   Pair (i, j) is masked unless tokens i and j both are kept (the pair mask is formed here from the [L] token mask); a masked
 //   pair's xn row is zero, so its plane values are exactly 0.
-// planes [P, L*L]: P = 4D (bidirectional: left out | left in | right out | right in) or 2D (one direction: left | right).
+// planes [P, L*L]: P = 4H (bidirectional: left out | left in | right out | right in) or 2H (one direction: left | right), H the
+// hidden width (D, or 2D: one direction at D64 / D128, bidirectional at D64 -- P = 512, the D128 bidirectional plane count).
 //
 // Mapping. Tokens on M (128-token tiles, persistent CTAs). Unlike k1.cu the x tile does not stay in shared memory (at D512 it is
 // 128 KB): x streams through a ring of 64-channel K-blocks, the transform warps normalise each K-block with precomputed statistics
@@ -476,7 +477,7 @@ void k1w_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Te
   const int so = (D <= 128 && mu != nullptr) ? 1 : 0;
 #define K1W_CASE(DD, PP) \
   if (D == DD && P == PP) { launch<DD, PP>(mx, mw, mp, mk, L, mu, rs, ga, be, tiles, g, st, (float)eps, so, n2); C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
-  K1W_CASE(64, 256) K1W_CASE(64, 128) K1W_CASE(128, 512) K1W_CASE(128, 256) K1W_CASE(256, 1024) K1W_CASE(256, 512)
+  K1W_CASE(64, 512) K1W_CASE(64, 256) K1W_CASE(64, 128) K1W_CASE(128, 512) K1W_CASE(128, 256) K1W_CASE(256, 1024) K1W_CASE(256, 512)
   K1W_CASE(384, 1536) K1W_CASE(384, 768) K1W_CASE(512, 2048) K1W_CASE(512, 1024)
 #undef K1W_CASE
   TORCH_CHECK(false, "k1w_forward: unsupported (D, P) = (", D, ", ", P, ")");

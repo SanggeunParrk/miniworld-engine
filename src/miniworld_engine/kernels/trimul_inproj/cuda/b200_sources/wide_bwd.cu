@@ -185,8 +185,11 @@ __global__ void __launch_bounds__(256) colsum_kernel(const float* __restrict__ p
   __shared__ float red[8][32];
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, c = blockIdx.x * 32 + lane;
   float a = 0.f;
-  if (c < C)
+  if (c < C) {
+    // the loads are independent, the adds keep their order (bit-identical to the rolled loop): 8 loads in flight per warp
+#pragma unroll 8
     for (int r = warp; r < R; r += 8) a += part[(size_t)r * C + c];
+  }
   red[warp][lane] = a;
   __syncthreads();
   if (warp == 0 && c < C) {
@@ -303,6 +306,156 @@ __global__ void __launch_bounds__(256) ln_apply_kernel(const __nv_bfloat16* __re
   }
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------- D64, 8 D planes
+// The D64 bidirectional hidden-128 block (b200_train._backward_hid_body): its forward is k3g's (no p / g saved), so the output-side
+// backward gets q = t^T Wp'^T and g = xn Wg^T from cuBLAS (fp32) and forms p by k3w's fold, p = rs_o (q - mu_o sp) + ep.
+//   gate_bwd_fold  as gate_bwd, with p from (q, mu_o, rs_o, sp, ep) and fp32 q / g:  p - ep = rs_o (q - mu_o sp)
+//   lnin_bwd64     lnin_bwd at D = 64 with the LayerNorm statistics recomputed from x (a row is 8 lanes x 8 channels: 4 rows per
+//                  warp instruction instead of lnin_bwd's row per warp with 24 idle lanes); dg_i / db_i per-block partials summed by
+//                  colsum_kernel in a fixed order
+template <int D>
+__global__ void __launch_bounds__(256) gate_bwd_fold_kernel(const __nv_bfloat16* __restrict__ dy, const float* __restrict__ q,
+                                                             const float* __restrict__ g, const __nv_bfloat16* __restrict__ ds,
+                                                             const float* __restrict__ vec, const float* __restrict__ mu_o,
+                                                             const float* __restrict__ rs_o, __nv_bfloat16* __restrict__ dpr_out,
+                                                             __nv_bfloat16* __restrict__ dg_out, int ldg, float* __restrict__ S1,
+                                                             float* __restrict__ S2, float* __restrict__ part, int M, int L) {
+  constexpr int G8 = D / 8;
+  const size_t T = (size_t)gridDim.x * blockDim.x, n = (size_t)M * G8;
+  const size_t e0 = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  const int qq = (int)(e0 % G8), c8 = qq * 8;
+  float sp[8], ep[8], c0[8], c1[8];
+#pragma unroll
+  for (int j = 0; j < 8; ++j) { sp[j] = vec[c8 + j]; ep[j] = vec[D + c8 + j]; c0[j] = 0.f; c1[j] = 0.f; }
+  for (size_t base = 0; base < n; base += T) {            // uniform trip count per warp (shuffles need every lane)
+    const size_t e = base + e0;
+    const bool ok = e < n;
+    const int row = ok ? (int)(e / G8) : -1;
+    float s1 = 0.f, s2 = 0.f;
+    if (ok) {
+      float fy[8], fq[8], fg[8], fd[8];
+      unpack8(reinterpret_cast<const uint4*>(dy)[e], fy);
+      {
+        const float4 a = reinterpret_cast<const float4*>(q)[2 * e], b = reinterpret_cast<const float4*>(q)[2 * e + 1];
+        const float4 u = reinterpret_cast<const float4*>(g)[2 * e], v = reinterpret_cast<const float4*>(g)[2 * e + 1];
+        fq[0] = a.x; fq[1] = a.y; fq[2] = a.z; fq[3] = a.w; fq[4] = b.x; fq[5] = b.y; fq[6] = b.z; fq[7] = b.w;
+        fg[0] = u.x; fg[1] = u.y; fg[2] = u.z; fg[3] = u.w; fg[4] = v.x; fg[5] = v.y; fg[6] = v.z; fg[7] = v.w;
+      }
+      if (ds) {
+        const int dr = M > L * L ? row % L + row / (L * L) * L : row % L;
+        unpack8(*reinterpret_cast<const uint4*>(ds + (size_t)dr * D + c8), fd);
+      } else {
+#pragma unroll
+        for (int j = 0; j < 8; ++j) fd[j] = 1.f;
+      }
+      const float ro = rs_o[row], mo = mu_o[row], rm = ro * mo;
+      float odpr[8], odg[8];
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        const float pc = ro * fmaf(-mo, sp[j], fq[j]);   // p - ep
+        const float sg = sigmoidf_fast(fg[j]);
+        const float dpv = fy[j] * fd[j] * sg;
+        odpr[j] = dpv * ro;
+        odg[j] = dpv * (pc + ep[j]) * (1.f - sg);
+        s1 = fmaf(dpv, sp[j], s1);
+        s2 = fmaf(dpv, pc, s2);
+        c0[j] += dpv;
+        c1[j] = fmaf(dpv, rm, c1[j]);
+      }
+      reinterpret_cast<uint4*>(dpr_out)[e] = pack8(odpr);
+      *reinterpret_cast<uint4*>(dg_out + (size_t)row * ldg + c8) = pack8(odg);
+    }
+    seg_sum_atomic(s1, row, S1);                         // a row is G8 lanes of one warp: one add per row onto zero (exact)
+    seg_sum_atomic(s2, row, S2);
+  }
+  // r0 / r1: this block's row of partials, summed over its threads in a fixed order (colsum_kernel adds the rows): deterministic
+  __shared__ float cs[2][256 / G8][D];
+  const int slot = threadIdx.x / G8;                      // threads of one slot own the D channels (q = threadIdx.x % G8)
+#pragma unroll
+  for (int j = 0; j < 8; ++j) { cs[0][slot][c8 + j] = c0[j]; cs[1][slot][c8 + j] = c1[j]; }
+  __syncthreads();
+  for (int k = threadIdx.x; k < 2 * D; k += blockDim.x) {
+    const int w = k / D, c = k % D;
+    float a = 0.f;
+    for (int r = 0; r < 256 / G8; ++r) a += cs[w][r][c];
+    part[(size_t)blockIdx.x * 2 * D + k] = a;
+  }
+}
+
+__device__ __forceinline__ float rsqrt_ftz_(float x) { float y; asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x)); return y; }
+__device__ __forceinline__ float sum8(float v) {         // over the 8 lanes of a row (lane groups of 8)
+  v += __shfl_xor_sync(0xffffffffu, v, 1); v += __shfl_xor_sync(0xffffffffu, v, 2); v += __shfl_xor_sync(0xffffffffu, v, 4);
+  return v;
+}
+constexpr int L64_RR = 2;                                  // rows per thread per step (loads in flight)
+__global__ void __launch_bounds__(256) lnin_bwd64_kernel(const __nv_bfloat16* __restrict__ dxn, const __nv_bfloat16* __restrict__ x,
+                                                          const __nv_bfloat16* __restrict__ dy, const float* __restrict__ gi,
+                                                          __nv_bfloat16* __restrict__ dx, float* __restrict__ part, int M, float eps) {
+  constexpr int D = 64;
+  __shared__ float cs[2][32][D];
+  const int lane = threadIdx.x & 31, sub = lane & 7, rw = threadIdx.x >> 3;   // rw: this thread's row slot in the block (0..31)
+  const int c8 = sub * 8;
+  float gg[8], c0[8], c1[8];
+#pragma unroll
+  for (int j = 0; j < 8; ++j) { gg[j] = gi[c8 + j]; c0[j] = 0.f; c1[j] = 0.f; }
+  for (int row0 = blockIdx.x * 32 * L64_RR; row0 < M; row0 += gridDim.x * 32 * L64_RR) {   // fixed grid: fixed partial order
+    uint4 vd[L64_RR], vx[L64_RR], vy[L64_RR];
+#pragma unroll
+    for (int r = 0; r < L64_RR; ++r) {
+      const int row = row0 + r * 32 + rw;
+      if (row < M) {
+        const size_t e = (size_t)row * 8 + sub;
+        vd[r] = reinterpret_cast<const uint4*>(dxn)[e];
+        vx[r] = reinterpret_cast<const uint4*>(x)[e];
+        vy[r] = reinterpret_cast<const uint4*>(dy)[e];
+      }
+    }
+#pragma unroll
+    for (int r = 0; r < L64_RR; ++r) {
+      const int row = row0 + r * 32 + rw;
+      const bool ok = row < M;                             // every lane runs the shuffles; rows past M contribute nothing
+      float fd[8], fx[8], fy[8];
+      unpack8(ok ? vd[r] : make_uint4(0, 0, 0, 0), fd); unpack8(ok ? vx[r] : make_uint4(0, 0, 0, 0), fx);
+      float s = 0.f;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) s += fx[j];
+      const float mu = sum8(s) * (1.f / D);
+      float v = 0.f;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) { const float d = fx[j] - mu; v = fmaf(d, d, v); }
+      const float rs = rsqrt_ftz_(sum8(v) * (1.f / D) + eps);
+      float a = 0.f, b = 0.f, xh[8];
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        xh[j] = (fx[j] - mu) * rs;
+        const float gd = gg[j] * fd[j];
+        a += gd; b = fmaf(gd, xh[j], b);
+        c0[j] = fmaf(fd[j], xh[j], c0[j]);
+        c1[j] += fd[j];
+      }
+      a = sum8(a) * (1.f / D); b = sum8(b) * (1.f / D);
+      if (ok) {
+        unpack8(vy[r], fy);
+        float o[8];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) o[j] = fy[j] + rs * (gg[j] * fd[j] - a - xh[j] * b);
+        reinterpret_cast<uint4*>(dx)[(size_t)row * 8 + sub] = pack8(o);
+      }
+    }
+  }
+#pragma unroll
+  for (int j = 0; j < 8; ++j) { cs[0][rw][c8 + j] = c0[j]; cs[1][rw][c8 + j] = c1[j]; }
+  __syncthreads();
+  if (threadIdx.x < 2 * D) {
+    const int k = threadIdx.x >> 6, c = threadIdx.x & 63;
+    float acc = 0.f;
+#pragma unroll 8
+    for (int w = 0; w < 32; ++w) acc += cs[k][w][c];
+    part[(size_t)blockIdx.x * 2 * D + k * D + c] = acc;     // (dg_i | db_i) row of this block; colsum_kernel adds the rows in order
+  }
+}
+
 }  // namespace wbwd
 
 #define WB_WIDTHS(X) X(256) X(384) X(512)
@@ -374,4 +527,41 @@ void wide_ln_apply(torch::Tensor x, torch::Tensor mean, torch::Tensor rstd, torc
   WB_WIDTHS(LA)
 #undef LA
   TORCH_CHECK(false, "wide_ln_apply: unsupported D ", D);
+}
+
+// D64 bidirectional hidden 128: dy [M, 64]; q = t^T Wp'^T, g = xn Wg^T [M, 64] fp32; ds [B L, 64] or none; vec [4, 64] (fold_prep's
+// sp, ep, ...); mu_o / rs_o [M] -> dpr [M, 64]; dg -> dg_out[:, :64] (row stride ldg); S1 / S2 [M]; r01 [128] = (r0 ; r1).
+void hid_gate_bwd(torch::Tensor dy, torch::Tensor q, torch::Tensor g, c10::optional<torch::Tensor> ds, torch::Tensor vec,
+                  torch::Tensor mu_o, torch::Tensor rs_o, torch::Tensor dpr, torch::Tensor dg_out, torch::Tensor S1, torch::Tensor S2,
+                  torch::Tensor r01, int64_t L) {
+  using namespace wbwd;
+  const int M = (int)dy.size(0), D = (int)dy.size(1);
+  TORCH_CHECK(D == 64 && dg_out.stride(1) == 1 && dg_out.stride(0) % 8 == 0 && q.is_contiguous() && g.is_contiguous() &&
+              q.scalar_type() == torch::kFloat32 && g.scalar_type() == torch::kFloat32 && q.size(0) == M && g.size(0) == M);
+  auto st = at::cuda::getCurrentCUDAStream();
+  const __nv_bfloat16* dsp = ds.has_value() ? CBF(*ds) : nullptr;
+  S1.zero_(); S2.zero_();
+  constexpr int NB = 148 * 4;                           // x 256 threads, a multiple of G8 = 8
+  auto part = torch::empty({(int64_t)NB * 2 * D}, S1.options());
+  gate_bwd_fold_kernel<64><<<NB, 256, 0, st>>>(CBF(dy), q.data_ptr<float>(), g.data_ptr<float>(), dsp, vec.data_ptr<float>(),
+      mu_o.data_ptr<float>(), rs_o.data_ptr<float>(), BF(dpr), BF(dg_out), (int)dg_out.stride(0), S1.data_ptr<float>(),
+      S2.data_ptr<float>(), part.data_ptr<float>(), M, (int)L);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  colsum_kernel<<<(2 * D + 31) / 32, 256, 0, st>>>(part.data_ptr<float>(), r01.data_ptr<float>(), NB, 2 * D);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// D64: dxn, x, dy [M, 64] -> dx [M, 64]; dgb [128] = (dg_i ; db_i); the LayerNorm statistics are recomputed from x
+void hid_lnin_bwd(torch::Tensor dxn, torch::Tensor x, torch::Tensor dy, torch::Tensor gi, torch::Tensor dx, torch::Tensor dgb,
+                  double eps) {
+  using namespace wbwd;
+  const int M = (int)x.size(0), D = (int)x.size(1);
+  TORCH_CHECK(D == 64 && dxn.is_contiguous() && x.is_contiguous() && dy.is_contiguous() && dx.is_contiguous());
+  auto st = at::cuda::getCurrentCUDAStream();
+  const int nb = std::min((M + 32 * L64_RR - 1) / (32 * L64_RR), 148 * 4);
+  auto part = torch::empty({(int64_t)nb * 2 * D}, gi.options());
+  lnin_bwd64_kernel<<<nb, 256, 0, st>>>(CBF(dxn), CBF(x), CBF(dy), gi.data_ptr<float>(), BF(dx), part.data_ptr<float>(), M, (float)eps);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  colsum_kernel<<<(2 * D + 31) / 32, 256, 0, st>>>(part.data_ptr<float>(), dgb.data_ptr<float>(), nb, 2 * D);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

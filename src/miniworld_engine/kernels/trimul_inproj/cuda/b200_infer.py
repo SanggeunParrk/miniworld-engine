@@ -48,21 +48,33 @@ def supports(width: int, length: int, dropout: bool = False, hidden: int | None 
 
 
 def hidden_ok(width: int, hidden: int, direction: int) -> bool:
-    """hidden == width, or hidden == 2 width in one direction at D64 / D128 (Protenix's template TriMul: pair 64, hidden 128).
-    The latter has, per token, exactly the bidirectional kernels' shapes -- 4 D planes out of k1w, an LN_out over 2 D channels
-    into k3g, the same b1s / b1g / b7m / b7g backward -- only the cuBLAS contraction between them pairs the planes differently
-    (all 2 D channels in one direction instead of D per direction), so the D64 / D128 kernels serve it unchanged."""
-    return hidden == width or (direction != 0 and width <= 128 and hidden == 2 * width)
+    """hidden == width; or hidden == 2 width in one direction at D64 / D128 (Protenix's template TriMul: pair 64, hidden 128); or
+    hidden == 2 width bidirectional at D64 (pair 64, hidden 128 per direction).
+    One direction at hidden 2 D has, per token, exactly the bidirectional kernels' shapes -- 4 D planes out of k1w, an LN_out over 2 D
+    channels into k3g, the same b1s / b1g / b7m / b7g backward -- only the cuBLAS contraction between them pairs the planes differently
+    (all 2 D channels in one direction instead of D per direction), so the D64 / D128 kernels serve it unchanged. Bidirectional at
+    hidden 2 D (D64 only) is k1w at 8 D = 512 planes and k3g at an LN_out over 256 channels (the D128 bidirectional block's plane and
+    LN_out widths at a 64-wide pair); its training backward is ``b200_train._backward_hid_body`` (k3g's H <= 256 bounds D128 at hidden 256)."""
+    if hidden == width:
+        return True
+    if hidden != 2 * width:
+        return False
+    return width <= 128 if direction != 0 else width == 64
+
+
+def hidden_of(rows: int, direction: int) -> int:
+    """The module's ``d_hidden`` from the row count of its left projection (2 d_hidden bidirectional: [outgoing | incoming])."""
+    return rows // 2 if direction == 0 else rows
 
 
 def planes_of(width: int, hidden: int, direction: int) -> int:
-    """k1w's channel-major plane count: [a_out | a_in | b_out | b_in] (D each) bidirectional, [a | b] (hidden each) otherwise."""
-    return 4 * width if direction == 0 else 2 * hidden
+    """k1w's channel-major plane count: [a_out | a_in | b_out | b_in] (hidden each) bidirectional, [a | b] (hidden each) otherwise."""
+    return 4 * hidden if direction == 0 else 2 * hidden
 
 
 def contracted(width: int, hidden: int, direction: int) -> int:
-    """Channels per contraction product: D per direction bidirectional, the hidden width in one direction."""
-    return width if direction == 0 else hidden
+    """Channels per contraction product: the hidden width (per direction bidirectional)."""
+    return hidden
 
 
 def _front(E, wl, wlg, wr, wrg, wp=None, wpp=None):
@@ -113,7 +125,7 @@ def inference(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.T
     optionally followed by w1, wpp (``b200_train.kernel_forms``: the front four row-major and k3g's permuted Wp made once, no prep launch);
     mask [B * L] bool token mask or None (k1w forms the pair mask); ds [B * L, D] bf16 row-dropout scale or None;
     direction 0 = bidirectional, 1 = outgoing, 2 = incoming. x is [B, L, L, D], the samples b-major (one launch per stage for the
-    B samples). The hidden width is wl's row count (``hidden_ok``)."""
+    B samples). The hidden width follows from wl's row count (``hidden_of``, ``hidden_ok``)."""
     return _inference_body(leaves, mask, ds, direction, None)
 
 
@@ -138,7 +150,7 @@ def _inference_body(leaves, mask, ds, direction, y):
     E = _ext()
     with torch.cuda.device(x.device):
         x2 = x.reshape(m, d)
-        hid = wl.shape[0]
+        hid = hidden_of(wl.shape[0], direction)
         p = planes_of(d, hid, direction)
         planes = x.new_empty((p, bsz, n, n))
         if y is None:
