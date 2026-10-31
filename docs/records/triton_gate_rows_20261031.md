@@ -64,6 +64,16 @@ H100 / B200: unchanged routing (the rule passes them through). On H100 the five 
 
 ## run_all on H100
 
-`python -m miniworld_engine.autotune.run_all --only <families>` MERGES into the card's manifest (`devices.record`: rows of kernels the
-run did not touch are kept, the run's rows win, the other precision's rows are carried through); it rewrites the `#provenance` row to the
-run's commit. See the hand-off for whether it was run on this branch and what changed in `autotune/manifests/NVIDIA H100 80GB HBM3 (sm90).csv`.
+`run_all` records through `devices.record`, which MERGES but also rewrites the `#provenance` row to the running commit. So it was run
+(commit ddb66667, 2026-10-31, `--only gated_projection,bias_only_attention,mpnn_message,transition,augmented_attention`, bf16 and fp32)
+into a scratch copy of the manifests (`devices._DEVICES` pointed at a scratch directory), and only the nine rows of the new kernels were
+copied into `autotune/manifests/NVIDIA H100 80GB HBM3 (sm90).csv` by hand: bf16 for all five, fp32 for the four that declare it. Each
+carries `[run_all at ddb66667 2026-10-31 merged by hand; the provenance row is the 2.4.1 run]` in its detail; the `#provenance` row is
+untouched (2.4.1, a6ac9fda), and so is every other row.
+
+All 42 bf16 and 21 fp32 kernels of those families passed on H100, among them (not merged: their committed 2.4.1 rows stand)
+`transition_squeeze_residual_triton` with its new split-K case (bf16 out 1.07e-03, split 1.91e-03; fp32 2.68e-04 / 2.72e-04),
+`augmented_attention_bwd_atomic_triton` (bf16 4.70e-03, fp32 9.63e-04) and `augmented_attention_bwd_reduce_triton` at fp32 (0).
+
+Still to record: the Ampere cards (A100, A5000, A6000) for the new rows and the fp32 row of `augmented_attention_bwd_reduce_triton`
+(A100, A5000), on those cards, with the same partial procedure.
