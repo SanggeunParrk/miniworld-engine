@@ -225,16 +225,20 @@
   },
   "entry_grids": {
     "bfloat16+float32|shape_key=1099511827607": [
-      "60dbdc153c45"
+      "60dbdc153c45",
+      "c76c11b25b7b"
     ],
     "bfloat16+float32|shape_key=2473901362327": [
-      "60dbdc153c45"
+      "60dbdc153c45",
+      "c76c11b25b7b"
     ],
     "bfloat16+float32|shape_key=274878106775": [
-      "60dbdc153c45"
+      "60dbdc153c45",
+      "c76c11b25b7b"
     ],
     "bfloat16+float32|shape_key=4398046710935": [
-      "60dbdc153c45"
+      "60dbdc153c45",
+      "c76c11b25b7b"
     ]
   },
   "env_identity": "7efec5ac14d2",
@@ -269,6 +273,13 @@
       "((('BLOCK_M1', 64), ('TILES', 4)), 4, 8)",
       "((('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
       "((('BLOCK_M1', 64), ('TILES', 4)), 8, 3)"
+    ],
+    "c76c11b25b7b": [
+      "((('BLOCK_M1', 16), ('TILES', 4)), 4, 2)",
+      "((('BLOCK_M1', 32), ('TILES', 4)), 4, 2)",
+      "((('BLOCK_M1', 64), ('TILES', 1)), 4, 2)",
+      "((('BLOCK_M1', 64), ('TILES', 4)), 16, 2)",
+      "((('BLOCK_M1', 64), ('TILES', 4)), 32, 2)"
     ]
   },
   "key_scheme": 3,

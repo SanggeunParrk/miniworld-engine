@@ -224,21 +224,32 @@
   },
   "entry_grids": {
     "bfloat16|shape_key=1099511827607": [
+      "3afb78baa129",
       "6f9aa4ee6dae"
     ],
     "bfloat16|shape_key=2473901362327": [
-      "6f9aa4ee6dae"
+      "6f9aa4ee6dae",
+      "d559c0ecd8e5"
     ],
     "bfloat16|shape_key=274878106775": [
-      "6f9aa4ee6dae"
+      "6f9aa4ee6dae",
+      "d7f1f1d0f7cf"
     ],
     "bfloat16|shape_key=4398046710935": [
-      "6f9aa4ee6dae"
+      "6f9aa4ee6dae",
+      "d559c0ecd8e5"
     ]
   },
   "env_identity": "7efec5ac14d2",
   "gpu": "NVIDIA B200 (sm100)",
   "grids": {
+    "3afb78baa129": [
+      "((('BLOCK_M1', 128), ('TILES', 2)), 8, 3)",
+      "((('BLOCK_M1', 32), ('TILES', 4)), 4, 2)",
+      "((('BLOCK_M1', 64), ('TILES', 1)), 4, 2)",
+      "((('BLOCK_M1', 64), ('TILES', 4)), 4, 1)",
+      "((('BLOCK_M1', 64), ('TILES', 4)), 8, 3)"
+    ],
     "6f9aa4ee6dae": [
       "((('BLOCK_M1', 128), ('TILES', 2)), 4, 2)",
       "((('BLOCK_M1', 128), ('TILES', 2)), 4, 3)",
@@ -267,6 +278,20 @@
       "((('BLOCK_M1', 64), ('TILES', 4)), 4, 8)",
       "((('BLOCK_M1', 64), ('TILES', 4)), 8, 2)",
       "((('BLOCK_M1', 64), ('TILES', 4)), 8, 3)"
+    ],
+    "d559c0ecd8e5": [
+      "((('BLOCK_M1', 128), ('TILES', 2)), 8, 3)",
+      "((('BLOCK_M1', 128), ('TILES', 4)), 8, 3)",
+      "((('BLOCK_M1', 32), ('TILES', 4)), 4, 2)",
+      "((('BLOCK_M1', 64), ('TILES', 1)), 4, 2)",
+      "((('BLOCK_M1', 64), ('TILES', 4)), 4, 1)"
+    ],
+    "d7f1f1d0f7cf": [
+      "((('BLOCK_M1', 128), ('TILES', 4)), 8, 3)",
+      "((('BLOCK_M1', 32), ('TILES', 4)), 4, 2)",
+      "((('BLOCK_M1', 64), ('TILES', 1)), 4, 2)",
+      "((('BLOCK_M1', 64), ('TILES', 2)), 8, 3)",
+      "((('BLOCK_M1', 64), ('TILES', 4)), 4, 1)"
     ]
   },
   "key_scheme": 3,

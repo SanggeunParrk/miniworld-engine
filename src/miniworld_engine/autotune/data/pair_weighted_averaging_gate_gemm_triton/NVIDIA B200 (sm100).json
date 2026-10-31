@@ -18,7 +18,7 @@
   ],
   "config_space_hash": "45db3e278a7f",
   "driver_id_scheme": 2,
-  "driver_identity": "db19d59471c8",
+  "driver_identity": "a75ddb17d919",
   "entries": {
     "bfloat16+float32|CP=16,HAS_KEEP=0,shape_key=108086941886480547": [
       {
@@ -695,57 +695,94 @@
   },
   "entry_grids": {
     "bfloat16+float32|CP=16,HAS_KEEP=0,shape_key=108086941886480547": [
+      "0cd8ae450516",
       "45db3e278a7f"
     ],
     "bfloat16+float32|CP=16,HAS_KEEP=0,shape_key=144115738905444515": [
+      "31fb90427bb4",
       "45db3e278a7f"
     ],
     "bfloat16+float32|CP=16,HAS_KEEP=0,shape_key=180144535924408483": [
-      "45db3e278a7f"
+      "45db3e278a7f",
+      "d945b5da3fd6"
     ],
     "bfloat16+float32|CP=16,HAS_KEEP=0,shape_key=216173332943372451": [
+      "0cd8ae450516",
       "45db3e278a7f"
     ],
     "bfloat16+float32|CP=16,HAS_KEEP=0,shape_key=36029347848552611": [
+      "3f7ee131c8e2",
       "45db3e278a7f"
     ],
     "bfloat16+float32|CP=16,HAS_KEEP=0,shape_key=72058144867516579": [
-      "45db3e278a7f"
+      "45db3e278a7f",
+      "6391fe6cd8f3"
     ],
     "bfloat16+float32|CP=16,HAS_KEEP=1,shape_key=108086941886480547": [
+      "3f7ee131c8e2",
       "45db3e278a7f"
     ],
     "bfloat16+float32|CP=16,HAS_KEEP=1,shape_key=216173332943372451": [
+      "3f7ee131c8e2",
       "45db3e278a7f"
     ],
     "bfloat16+float32|CP=32,HAS_KEEP=0,shape_key=108088591153922211": [
-      "45db3e278a7f"
+      "45db3e278a7f",
+      "d945b5da3fd6"
     ],
     "bfloat16+float32|CP=32,HAS_KEEP=0,shape_key=144117388172886179": [
-      "45db3e278a7f"
+      "45db3e278a7f",
+      "8bfb101552ed"
     ],
     "bfloat16+float32|CP=32,HAS_KEEP=0,shape_key=180146185191850147": [
-      "45db3e278a7f"
+      "45db3e278a7f",
+      "8bfb101552ed"
     ],
     "bfloat16+float32|CP=32,HAS_KEEP=0,shape_key=216174982210814115": [
-      "45db3e278a7f"
+      "45db3e278a7f",
+      "8bfb101552ed"
     ],
     "bfloat16+float32|CP=32,HAS_KEEP=0,shape_key=36030997115994275": [
-      "45db3e278a7f"
+      "45db3e278a7f",
+      "8bfb101552ed"
     ],
     "bfloat16+float32|CP=32,HAS_KEEP=0,shape_key=72059794134958243": [
-      "45db3e278a7f"
+      "45db3e278a7f",
+      "8bfb101552ed"
     ],
     "bfloat16+float32|CP=32,HAS_KEEP=1,shape_key=108088591153922211": [
-      "45db3e278a7f"
+      "45db3e278a7f",
+      "8bfb101552ed"
     ],
     "bfloat16+float32|CP=32,HAS_KEEP=1,shape_key=216174982210814115": [
-      "45db3e278a7f"
+      "45db3e278a7f",
+      "8bfb101552ed"
     ]
   },
   "env_identity": "7efec5ac14d2",
   "gpu": "NVIDIA B200 (sm100)",
   "grids": {
+    "0cd8ae450516": [
+      "((('BS', 128),), 4, 2)",
+      "((('BS', 64),), 2, 2)",
+      "((('BS', 64),), 4, 3)",
+      "((('BS', 64),), 4, 4)",
+      "((('BS', 64),), 8, 3)"
+    ],
+    "31fb90427bb4": [
+      "((('BS', 64),), 1, 2)",
+      "((('BS', 64),), 2, 2)",
+      "((('BS', 64),), 4, 3)",
+      "((('BS', 64),), 4, 4)",
+      "((('BS', 64),), 8, 3)"
+    ],
+    "3f7ee131c8e2": [
+      "((('BS', 128),), 8, 3)",
+      "((('BS', 64),), 2, 2)",
+      "((('BS', 64),), 4, 3)",
+      "((('BS', 64),), 4, 4)",
+      "((('BS', 64),), 8, 3)"
+    ],
     "45db3e278a7f": [
       "((('BS', 128),), 4, 2)",
       "((('BS', 128),), 4, 3)",
@@ -760,6 +797,27 @@
       "((('BS', 64),), 4, 3)",
       "((('BS', 64),), 4, 4)",
       "((('BS', 64),), 8, 2)",
+      "((('BS', 64),), 8, 3)"
+    ],
+    "6391fe6cd8f3": [
+      "((('BS', 128),), 4, 2)",
+      "((('BS', 128),), 4, 3)",
+      "((('BS', 128),), 8, 3)",
+      "((('BS', 64),), 2, 2)",
+      "((('BS', 64),), 8, 3)"
+    ],
+    "8bfb101552ed": [
+      "((('BS', 128),), 8, 3)",
+      "((('BS', 64),), 4, 3)",
+      "((('BS', 64),), 4, 4)",
+      "((('BS', 64),), 8, 2)",
+      "((('BS', 64),), 8, 3)"
+    ],
+    "d945b5da3fd6": [
+      "((('BS', 128),), 4, 2)",
+      "((('BS', 128),), 8, 3)",
+      "((('BS', 64),), 4, 3)",
+      "((('BS', 64),), 4, 4)",
       "((('BS', 64),), 8, 3)"
     ]
   },
