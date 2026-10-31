@@ -194,6 +194,8 @@ def _sampler(op, impl, B, n, dev):
 
 
 def _norm(op, impl, B, n, train, conf, dev, dtype):
+    """x in the activation dtype; the affine parameters fp32 -- the bf16-mixed contract (fp32 master parameters; the engine's LayerNorm
+    module pins its affine to fp32 in every precision) -- so every rung meets the parameter layout a model hands it."""
     g = torch.Generator(device=dev).manual_seed(0)
     if op == "layernorm":
         from miniworld_engine.kernels.layernorm.interface import layernorm_kernel
@@ -201,11 +203,11 @@ def _norm(op, impl, B, n, train, conf, dev, dtype):
 
         D = conf.d_pair
         x = torch.randn(1, n, n, D, device=dev, dtype=dtype, generator=g).requires_grad_(train)
-        w = torch.randn(D, device=dev, dtype=dtype, generator=g).requires_grad_(train)
-        b = torch.randn(D, device=dev, dtype=dtype, generator=g).requires_grad_(train)
+        w = torch.randn(D, device=dev, dtype=torch.float32, generator=g).requires_grad_(train)
+        b = torch.randn(D, device=dev, dtype=torch.float32, generator=g).requires_grad_(train)
         if impl == "pytorch":
-            def fwd(x, w, b):
-                return F.layer_norm(x, (D,), w, b, 1e-5)
+            def fwd(x, w, b):   # as modules.primitives.LayerNorm's PyTorch backend: fp32 statistics against the fp32 affine
+                return F.layer_norm(x.float(), (D,), w, b, 1e-5).to(x.dtype)
             path = "torch.nn.functional.layer_norm"
         elif impl == "portable":
             def fwd(x, w, b):
@@ -230,10 +232,10 @@ def _norm(op, impl, B, n, train, conf, dev, dtype):
 
     D = conf.d_single_token
     x = torch.randn(B, n, D, device=dev, dtype=dtype, generator=g).requires_grad_(train)
-    w = torch.randn(D, device=dev, dtype=dtype, generator=g).requires_grad_(train)
+    w = torch.randn(D, device=dev, dtype=torch.float32, generator=g).requires_grad_(train)
     if impl == "pytorch":
-        def fwd(x, w):
-            return F.rms_norm(x, (D,), w, 1e-5)
+        def fwd(x, w):   # fp32 statistics against the fp32 weight, the input dtype out (the engine RMSNorm's contract)
+            return F.rms_norm(x.float(), (D,), w, 1e-5).to(x.dtype)
         path = "torch.nn.functional.rms_norm"
     elif impl == "portable":
         def fwd(x, w):
@@ -281,7 +283,7 @@ def run(bench, conf, seq_len, implementation):
         in_dt = "bfloat16" if op == "sampler_pool" else "float32"
     else:
         fwd, args, wrt, dout, path = _norm(op, impl, B, n, is_train, conf, dev, dtype)
-        in_dt = par_dt = str(dtype).replace("torch.", "")
+        in_dt, par_dt = str(dtype).replace("torch.", ""), "float32"
 
     row_conf = conf
     if key == "pytorch" and conf.compile:
