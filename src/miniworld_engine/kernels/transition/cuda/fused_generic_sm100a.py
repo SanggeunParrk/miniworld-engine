@@ -65,6 +65,8 @@ def _load(f32: bool):
     for name, mode in _MODE.items():
         for bn in (_BNS_F32 if f32 else _BNS)[name]:
             specs.append((f"{name}{bn}", "generic/tg_gemm.cu", (f"-DMODE={mode}", f"-DF32={int(f32)}", f"-DBN={bn}")))
+    if f32:
+        specs += [(f"fused{d}", "generic/tg_fused_f32.cu", (f"-DD={d}", f"-DBN={FUSED_F32_BN}")) for d in FUSED_F32_WIDTHS]
     for name, path in build_cubins(f"generic_{tag}", tuple(specs)).items():
         ext.load_cubin(f"generic_{tag}_{name}", path)
     return ext
@@ -202,6 +204,18 @@ def _dxn_cublas(d: int, f32: bool) -> bool:
     return not f32 and d >= _AB_WIDE
 
 
+#: fp32 inference widths whose forward after the LayerNorm is the one fused kernel ``tg_fused_f32`` (expand + SwiGLU + squeeze + residual,
+#: h kept on chip) instead of the SWIGLU and RESID GEMMs; FUSED_F32 = False runs the GEMM chain (A/B)
+FUSED_F32_WIDTHS = (64, 128)
+FUSED_F32 = True
+#: hidden units per chunk of the fused kernel (32: three weight stages fit beside the xn tile at d = 128)
+FUSED_F32_BN = 32
+
+
+def _fused_f32(d: int, hid: int, f32: bool, save: bool) -> bool:
+    return FUSED_F32 and f32 and not save and d in FUSED_F32_WIDTHS and hid % FUSED_F32_BN == 0
+
+
 #: A/B override of ``_ab`` (None: automatic)
 AB_FORCE = None
 
@@ -294,6 +308,16 @@ def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: to
     mean = torch.empty((m if save else 1,), **f32)
     rstd = torch.empty_like(mean)
     sfx, rpw = _ln_variant(d, k.f32)
+    if _fused_f32(d, hid, k.f32, save):
+        # one launch: LayerNorm, expand, SwiGLU, squeeze and residual (sm100/generic/tg_fused_f32.cu); xn and h never reach HBM, and ``xn``
+        # stays an unwritten placeholder (inference saves nothing)
+        out = torch.empty_like(x)
+        t = k.ext.tmap
+        k.ext.launch_kernel(
+            f"generic_f32_fused{d}", "tg_fused_f32_sm100", max(1, min(k.nsm, -(-m // 128))), 448, 1,
+            [t(wa, d, hid, 32, FUSED_F32_BN), t(wb, d, hid, 32, FUSED_F32_BN), t(ws, hid, d, 32, d), t(out, d, m, 32, 32), x, gamma, beta,
+             float(eps), m, hid])
+        return out, xn, mean, rstd, x.new_empty((1, 1))
     k.rows(f"tg_ln_fwd_{sfx}", max(1, min(-(-m // (8 * rpw)), k.nsm * 8)), (x, gamma, beta, xn, mean, rstd, m, d, float(eps), int(save)))
     h = torch.empty((m, hid), dtype=x.dtype, device=x.device)
     if save and _ab(m, hid, k.nsm, d, k.f32):   # a few row tiles, or a wide bf16 d: keep a, b for the backward's GATE_AB
