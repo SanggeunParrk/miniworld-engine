@@ -627,6 +627,8 @@ _FUSED_D_MAX = 256
 B200_F32_ROUTE: dict = {"token": "materialize", "atom": "auto"}
 #: rows from which the atom width takes the materialize route on a B200 (fp32)
 B200_F32_ATOM_MATERIALIZE_ROWS = 16384
+#: the bf16 token width on a B200: None (the dispatch below) or a route as above
+B200_BF16_TOKEN_ROUTE = None
 
 
 def _b200_f32_route(x) -> str | None:
@@ -634,9 +636,11 @@ def _b200_f32_route(x) -> str | None:
     us): token d768 c384 L128 / 384 / 768: gemm_gate 26.4 / 30.5 / 51.0, materialize (cuBLAS TF32 GEMM between the two Triton row passes)
     24.4 / 32.6 / 39.0; c768: 38.8 / 42.9 / 75.6 against 28.6 / 38.8 / 49.1 -- the Triton TF32 GEMM + gate kernel runs at a fraction of the
     tensor cores on this card. Atom d128 L1024 / 4096 / 8192 (5120 .. 40960 rows): fused 18.3 / 38.8 / 57.2, materialize 20.4 / 32.6 / 46.6."""
-    if x.dtype is not torch.float32 or not x.is_cuda or not torch.backends.cuda.matmul.allow_tf32:
+    if not x.is_cuda or torch.cuda.get_device_capability(x.device) != (10, 0):
         return None
-    if torch.cuda.get_device_capability(x.device) != (10, 0):
+    if x.dtype is torch.bfloat16 and x.shape[-1] > _FUSED_D_MAX:
+        return B200_BF16_TOKEN_ROUTE
+    if x.dtype is not torch.float32 or not torch.backends.cuda.matmul.allow_tf32:
         return None
     route = B200_F32_ROUTE["atom" if x.shape[-1] <= _FUSED_D_MAX else "token"]
     if route == "auto":

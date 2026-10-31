@@ -22,6 +22,9 @@ ATOM_D_MAX = 128  # d_hidden <= this -> fused b2b; else composed
 #: Measured (B200, module inference in a CUDA graph, A = 5, d128 c128, us): L1024 / 8192 51.1 / 215.0 -> 42.8 / 128.8 (the b2b kernel's TF32
 #: dots run far below this card's tensor cores).
 B200_F32_ATOM_ROUTE = "cublas"
+#: B200 bf16 at the token width: None (the composed Triton expand+SwiGLU / squeeze+gate kernels) or "cublas" (cuBLAS GEMMs + row passes).
+#: Measured (B200, module inference in a CUDA graph, A = 5, d768 c384, us, L768 / 1024): 104.4 / 122.8 -> 87.9 / 108.4.
+B200_BF16_TOKEN_ROUTE = "cublas"
 
 
 def cond_transition_inference_dispatch(x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
@@ -46,7 +49,8 @@ def cond_transition_inference_dispatch(x, cond, wa, wb, ws, wsc, bsc, length=Non
 
         y = cond_transition_inference(x, cond, wa, wb, ws, wsc, bsc, length)
         return y if residual is None else residual + y
-    if x.dtype is torch.float32:
+    if x.dtype is torch.float32 or (B200_BF16_TOKEN_ROUTE == "cublas" and x.dtype is torch.bfloat16 and x.is_cuda
+                                    and torch.cuda.get_device_capability(x.device) == (10, 0)):
         from .composed import cond_transition_inference_cublas
 
         return cond_transition_inference_cublas(x, cond, wa, wb, ws, wsc, bsc, length, residual)

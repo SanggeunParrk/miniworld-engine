@@ -549,10 +549,20 @@ def set_forward_mode(name: str):
 #: atom d128 c128, us): L1024 / 8192 647.1 / 3899.4 -> forward 532.6 / 3077.3 -> both 514.0 / 2982.3.
 B200_F32_FWD = "cublas"
 B200_F32_DH = "cublas"
+#: the same two overrides for bf16 (None: as on every card). Measured (B200, module training step in a CUDA graph, A = 48, d768 c384, us,
+#: L384 / 768): 747.4 / 1431.4 -> dh on cuBLAS 700.2 / 1341.3 -> and the forward 694.2 / 1328.0 (the fused Triton dh + SwiGLU-backward
+#: kernel and the expand + SwiGLU forward kernel lose to cuBLAS + the row passes on this card; their B200 tile search already covers
+#: 128-wide tiles, 8 warps and up to 5 stages).
+B200_BF16_FWD = "cublas"
+B200_BF16_DH = "cublas"
 
 
 def _b200_f32(x) -> bool:
     return x.dtype == torch.float32 and x.is_cuda and torch.cuda.get_device_capability(x.device) == (10, 0)
+
+
+def _b200_bf16(x) -> bool:
+    return x.dtype == torch.bfloat16 and x.is_cuda and torch.cuda.get_device_capability(x.device) == (10, 0)
 
 
 def _pick_fwd(d_hidden: int, M: int) -> str:
@@ -612,6 +622,8 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         mode = _pick_fwd(x.shape[1], x.shape[0]) if _FWD_MODE == "auto" else _FWD_MODE
         if _FWD_MODE == "auto" and B200_F32_FWD is not None and _b200_f32(x):
             mode = B200_F32_FWD
+        if _FWD_MODE == "auto" and B200_BF16_FWD is not None and _b200_bf16(x):
+            mode = B200_BF16_FWD
         if x.dtype == torch.bfloat16 and mode == "fused" and x.shape[1] > _ATOM_D_MAX:
             # The reroute used to cover ALL of bf16 on the strength of an untested spill
             # concern: "nothing has benchmarked this kernel at bf16 ... lifting this needs a
@@ -740,7 +752,8 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         # cuBLAS dh (115 us) plus the flat pass (185 us, at its HBM roofline), so the split stays there too. With the K-major B tile and the pre-rounded dout the
         # kernel is 373 us (M = 18432, d = 768, CUDA events, L2 flushed) against 316 us for the split (nt dh GEMM 131 us + the flat pass 185 us): still the split.
         # At the atom width (M = 196608, d = 128) the same kernel is 315 us against 484 us for the split, and there it is used.
-        wide_fp32 = dout.dtype == torch.float32 and (x.shape[1] > _ATOM_D_MAX or (B200_F32_DH == "cublas" and _b200_f32(dout)))
+        wide_fp32 = (dout.dtype == torch.float32 and (x.shape[1] > _ATOM_D_MAX or (B200_F32_DH == "cublas" and _b200_f32(dout)))) or (
+            B200_BF16_DH == "cublas" and _b200_bf16(dout))
         if not wide_fp32:
             dab = _dh_swiglu_bwd(dout, ws, a, b, shape_key=shape_key)
             del dout, dy
