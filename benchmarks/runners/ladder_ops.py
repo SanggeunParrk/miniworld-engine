@@ -212,9 +212,18 @@ def _norm(op, impl, B, n, train, conf, dev, dtype):
                 return triton_layernorm(x, w, b, 1e-5)
             path = "kernels.layernorm.triton.main.triton_layernorm"
         else:
-            def fwd(x, w, b):
-                return layernorm_kernel(x, w, b, 1e-5)
-            path = "kernels.layernorm.interface.layernorm_kernel"
+            from miniworld_engine.kernels.layernorm.cuda.general import layernorm_cuda, supported
+            from miniworld_engine.modules.dispatch import restricted_card
+
+            if restricted_card(x.device) and supported(x):
+                # what the engine's LayerNorm modules run on H100 / B200 (modules.primitives.LayerNorm, MINIWORLD): the general CUDA kernel
+                def fwd(x, w, b):
+                    return layernorm_cuda(x, w, b, 1e-5)
+                path = "kernels.layernorm.cuda.general.layernorm_cuda"
+            else:
+                def fwd(x, w, b):
+                    return layernorm_kernel(x, w, b, 1e-5)
+                path = "kernels.layernorm.interface.layernorm_kernel"
         return fwd, (x, w, b), (x, w, b), torch.randn_like(x), path
     from miniworld_engine.kernels.rmsnorm.cuda import rmsnorm_cuda
     from miniworld_engine.kernels.rmsnorm.triton.main import triton_rmsnorm

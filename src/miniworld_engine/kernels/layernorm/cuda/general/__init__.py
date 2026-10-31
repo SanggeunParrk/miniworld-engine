@@ -6,6 +6,12 @@ and captures in a CUDA graph. The same extension serves RMSNorm (`kernels/rmsnor
 Layout (``ln_common.cuh``): TPR threads per row, each holding CHUNKS vectors of VEC elements in registers; :func:`config` picks them
 from the width: the fewest idle lanes, at most 32 values per thread, and TPR as close to 128 as that allows (measured on H100: 128
 threads x 2-4 vectors beat 256-1024 threads x 1 vector by 10-40% at widths 2048-8192; 8 vectors per thread spill).
+
+B200 (sm_100) launches its own layout (:func:`launch_config`): a (sub-)warp per row (TPR <= 32, shuffle reductions only, CHUNKS
+up to 4 incl. 3: a 768-wide bf16 row is a warp of 3 vectors a lane) on a one-wave grid. The H100 layout (128 threads x one 16-byte
+vector a row, shared-memory row reductions, a 4-wave grid) left a bf16 [48 L, 768] RMSNorm at ~2 TB/s.
+The affine parameters are read as they are, fp32 or bf16 (no cast launch), and a bf16 parameter's gradient leaves the column pass
+in bf16.
 """
 
 from __future__ import annotations
@@ -54,13 +60,59 @@ def config(n: int, elem_bytes: int) -> tuple[int, int, int]:
     return best[1]
 
 
+def _sub_warp(n: int, elem_bytes: int, tprs=(4, 8, 16, 32), chunks=(1, 2, 3, 4)) -> tuple[int, int, int] | None:
+    """(tpr, chunks, vec) of the vector path with TPR <= 32 and no idle lane-vector, or None."""
+    vmax = 16 // elem_bytes
+    if n % vmax:
+        return None
+    nvec = n // vmax
+    best = None
+    for tpr in tprs:
+        for ch in chunks:
+            if tpr * ch == nvec:
+                key = (abs(ch - 2), -tpr)   # two vectors per thread first, then the wider row group
+                if best is None or key < best[0]:
+                    best = (key, (tpr, ch, vmax))
+    return None if best is None else best[1]
+
+
+@functools.lru_cache(maxsize=4096)
+def config_sm100(n: int, elem_bytes: int, rows: int) -> tuple[int, int, int, int, int]:
+    """(tpr, chunks, vec, rpt, waves) on B200 for ``rows`` rows of ``n`` elements: a (sub-)warp per row without idle lanes (two vectors a
+    thread where the width allows) and a one-wave grid (each CTA walks its rows); the H100 layout where no such sub-warp layout exists.
+    Measured (CUDA graph, B200) over N 64-3072 x bf16 / fp32 x 4K-590K rows against the H100 layout: e.g. bf16 [49152, 768] RMSNorm
+    forward 45.6 -> 26.6 us, backward 65.4 -> 53.8 us; bf16 [589824, 128] LayerNorm 63.6 -> 56.3 / 106.6 -> 103.1 us."""
+    sw = _sub_warp(n, elem_bytes)
+    if sw is None:
+        tpr, ch, vec = config(n, elem_bytes)
+        return tpr, ch, vec, 1, 0
+    return (*sw, 1, 1)
+
+
+def launch_config(n: int, elem_bytes: int, rows: int, device: torch.device) -> tuple[int, int, int, int, int]:
+    """(tpr, chunks, vec, rpt, waves) for this card: :func:`config_sm100` on B200, :func:`config` (rpt 1) elsewhere."""
+    if device.type == "cuda" and _cc(device.index if device.index is not None else torch.cuda.current_device()) == (10, 0):
+        return config_sm100(n, elem_bytes, _bucket(rows))
+    tpr, ch, vec = config(n, elem_bytes)
+    return tpr, ch, vec, 1, 0
+
+
+@functools.lru_cache(maxsize=16)
+def _cc(index: int) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(index)
+
+
+def _bucket(rows: int) -> int:
+    return 1 << max(0, rows.bit_length() - 1)
+
+
 @functools.lru_cache(maxsize=None)
 def _ext():
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
     return load_extension(
-        name="layernorm_general_cuda_v3",
+        name="layernorm_general_cuda_v4",
         sources=[str(_dir / "bind.cpp"), str(_dir / "ln_fwd.cu"), str(_dir / "ln_bwd.cu")],
         extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "--expt-relaxed-constexpr", *gencodes("80", "90", "100")],
         extra_cflags=["-O3", "-std=c++17"],
@@ -80,9 +132,19 @@ def supported(x: torch.Tensor) -> bool:
 
 
 def _affine(t: torch.Tensor | None, x: torch.Tensor) -> torch.Tensor:
+    """The parameter as the kernels read it: fp32 or bf16 as it is (no cast launch), any other dtype cast to fp32."""
     if t is None:
         return x.new_empty((0,), dtype=torch.float32)
-    return t.detach().to(device=x.device, dtype=torch.float32).contiguous()
+    t = t.detach()
+    if t.dtype not in (torch.float32, torch.bfloat16) or t.device != x.device:
+        t = t.to(device=x.device, dtype=torch.float32)
+    return t.contiguous()
+
+
+def _grad_bf16(*ts: torch.Tensor) -> bool:
+    """The column pass writes the affine gradients in bf16 when every given parameter is bf16 (else fp32)."""
+    ts = [t for t in ts if t.numel()]
+    return bool(ts) and all(t.dtype is torch.bfloat16 for t in ts)
 
 
 def _fwd_fake(x, w, b, eps, save):
@@ -94,25 +156,26 @@ def _fwd_fake(x, w, b, eps, save):
 
 @opaque(fake=_fwd_fake, name="layernorm_general_fwd")
 def _fwd(x: torch.Tensor, w: torch.Tensor, b: torch.Tensor, eps: float, save: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """LayerNorm forward of contiguous x [M, N]; w / b fp32 [N] or empty. (y, mean, rstd)."""
-    tpr, ch, vec = config(x.shape[1], x.element_size())
-    y, mean, rstd = _ext().fwd(x, w, b, float(eps), bool(save), False, tpr, ch, vec)
+    """LayerNorm forward of contiguous x [M, N]; w / b fp32 or bf16 [N] or empty. (y, mean, rstd)."""
+    tpr, ch, vec, rpt, waves = launch_config(x.shape[1], x.element_size(), x.shape[0], x.device)
+    y, mean, rstd = _ext().fwd(x, w, b, float(eps), bool(save), False, tpr, ch, vec, rpt, waves)
     return y, mean, rstd
 
 
-def _bwd_fake(dy, x, w, mean, rstd, wgrad):
-    """dx like x; dw / db fp32 [N] when wgrad, else empty."""
-    f32 = dict(dtype=torch.float32, device=x.device)
+def _bwd_fake(dy, x, w, b, mean, rstd, wgrad):
+    """dx like x; dw / db [N] (bf16 when w and b are, else fp32) when wgrad, else empty."""
+    gdt = torch.bfloat16 if _grad_bf16(w, b) else torch.float32
     n = x.shape[1] if wgrad else 0
-    return torch.empty_like(x), torch.empty((n,), **f32), torch.empty((n,), **f32)
+    return torch.empty_like(x), torch.empty((n,), dtype=gdt, device=x.device), torch.empty((n,), dtype=gdt, device=x.device)
 
 
 @opaque(fake=_bwd_fake, name="layernorm_general_bwd")
-def _bwd(dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor,
+def _bwd(dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, b: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor,
          wgrad: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """LayerNorm backward from the saved mean / rstd. (dx, dw, db); the affine gradients only when wgrad."""
-    tpr, ch, vec = config(x.shape[1], x.element_size())
-    dx, dw, db = _ext().bwd(dy, x, w, mean, rstd, bool(wgrad), False, tpr, ch, vec, 0)
+    """LayerNorm backward from the saved mean / rstd. (dx, dw, db); the affine gradients only when wgrad (``b`` only names their
+    dtype)."""
+    tpr, ch, vec, rpt, _ = launch_config(x.shape[1], x.element_size(), x.shape[0], x.device)
+    dx, dw, db = _ext().bwd(dy, x, w, mean, rstd, bool(wgrad), False, tpr, ch, vec, rpt, 0, _grad_bf16(w, b))
     return dx, dw, db
 
 
@@ -121,17 +184,17 @@ class _LayerNorm(torch.autograd.Function):
     def forward(ctx, x2, weight, bias, eps):
         w, b = _affine(weight, x2), _affine(bias, x2)
         y, mean, rstd = _fwd(x2, w, b, eps, True)
-        ctx.save_for_backward(x2, w, mean, rstd)
+        ctx.save_for_backward(x2, w, b, mean, rstd)
         ctx.has = (weight is not None, bias is not None)
         ctx.dtypes = (None if weight is None else weight.dtype, None if bias is None else bias.dtype)
         return y
 
     @staticmethod
     def backward(ctx, dy):
-        x2, w, mean, rstd = ctx.saved_tensors
+        x2, w, b, mean, rstd = ctx.saved_tensors
         has_w, has_b = ctx.has
         wgrad = (has_w and ctx.needs_input_grad[1]) or (has_b and ctx.needs_input_grad[2])
-        dx, dw, db = _bwd(dy.contiguous(), x2, w, mean, rstd, bool(wgrad))
+        dx, dw, db = _bwd(dy.contiguous(), x2, w, b, mean, rstd, bool(wgrad))
         gw = dw.to(ctx.dtypes[0]) if has_w and ctx.needs_input_grad[1] else None
         gb = db.to(ctx.dtypes[1]) if has_b and ctx.needs_input_grad[2] else None
         return dx, gw, gb, None
@@ -154,4 +217,4 @@ def layernorm_cuda(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Ten
     return _LayerNorm.apply(x2, weight, bias, float(eps)).reshape(shape)
 
 
-__all__ = ["config", "layernorm_cuda", "supported"]
+__all__ = ["config", "config_sm100", "launch_config", "layernorm_cuda", "supported"]

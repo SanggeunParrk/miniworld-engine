@@ -1,104 +1,117 @@
 // General LayerNorm / RMSNorm forward: y = (x - mean) * rstd * w + b per row (RMS: mean = 0, no bias), fp32 statistics, y in x's
-// dtype; mean / rstd saved on request.
+// dtype; mean / rstd saved on request. Each thread keeps RPT rows in flight (their loads issued before any reduction), the rows
+// held as the packs they were loaded as.
 #include "ln_common.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 
 namespace mwln {
 
-template <typename T, int TPR, int CHUNKS, int VEC, bool RMS>
+template <typename T, int TPR, int CHUNKS, int VEC, bool RMS, int RPT>
 __global__ void __launch_bounds__(cta_threads<TPR>()) ln_fwd_kernel(
-    const T* __restrict__ x, const float* __restrict__ w, const float* __restrict__ b, T* __restrict__ y,
+    const T* __restrict__ x, const void* __restrict__ w, const void* __restrict__ b, int wbf, int bbf, T* __restrict__ y,
     float* __restrict__ mean_out, float* __restrict__ rstd_out, int64_t M, int N, float eps) {
   constexpr int CTA = cta_threads<TPR>();
   constexpr int RPC = CTA / TPR;
   constexpr int E = CHUNKS * VEC;
+  static_assert(RPT == 1 || TPR <= 32, "rows in flight only on the shuffle-reduced (sub-)warp rows");
   __shared__ float red[TPR > 32 ? RPC * (TPR / 32) : 1];
   const int r_in = threadIdx.x / TPR, lane = threadIdx.x % TPR;
   const float inv_n = 1.f / float(N);
   float wr[E], br[E];
-  load_affine<TPR, CHUNKS, VEC>(w, 1.f, lane, N, wr);
-  load_affine<TPR, CHUNKS, VEC>(b, 0.f, lane, N, br);
-  for (int64_t base = int64_t(blockIdx.x) * RPC; base < M; base += int64_t(gridDim.x) * RPC) {
-    const int64_t row = base + r_in;
-    const bool valid = row < M;
-    const T* xr = x + (valid ? row : 0) * int64_t(N);
-    float v[E];
-    float s = 0.f;
+  load_affine<TPR, CHUNKS, VEC>(w, wbf, 1.f, lane, N, wr);
+  if constexpr (!RMS) load_affine<TPR, CHUNKS, VEC>(b, bbf, 0.f, lane, N, br);
+  for (int64_t base = int64_t(blockIdx.x) * (RPC * RPT); base < M; base += int64_t(gridDim.x) * (RPC * RPT)) {
+    Pack<T, VEC> raw[RPT][CHUNKS];
 #pragma unroll
-    for (int c = 0; c < CHUNKS; ++c) {
-      const int col = (c * TPR + lane) * VEC;
-      if (valid && col < N) {
-        load_vec<T, VEC>(xr + col, v + c * VEC);
-      } else {
+    for (int k = 0; k < RPT; ++k) {
+      const int64_t row = base + k * RPC + r_in;
+      const bool valid = row < M;
+      const T* xr = x + (valid ? row : 0) * int64_t(N);
 #pragma unroll
-        for (int i = 0; i < VEC; ++i) v[c * VEC + i] = 0.f;
-      }
-#pragma unroll
-      for (int i = 0; i < VEC; ++i) s += v[c * VEC + i];
-    }
-    float mean = 0.f;
-    if constexpr (!RMS) mean = row_sum<TPR>(s, red, r_in, lane) * inv_n;
-    float q = 0.f;
-#pragma unroll
-    for (int c = 0; c < CHUNKS; ++c) {
-      const int col = (c * TPR + lane) * VEC;
-      if (col < N) {
-#pragma unroll
-        for (int i = 0; i < VEC; ++i) {
-          const float d = v[c * VEC + i] - mean;
-          q += d * d;
-        }
+      for (int c = 0; c < CHUNKS; ++c) {
+        const int col = (c * TPR + lane) * VEC;
+        raw[k][c] = (valid && col < N) ? load_pack<T, VEC>(xr + col) : zero_pack<T, VEC>();
       }
     }
-    const float rstd = rsqrtf(row_sum<TPR>(q, red, r_in, lane) * inv_n + eps);
-    if (valid) {
-      T* yr = y + row * int64_t(N);
+#pragma unroll
+    for (int k = 0; k < RPT; ++k) {
+      const int64_t row = base + k * RPC + r_in;
+      float mean = 0.f;
+      if constexpr (!RMS) {
+        float s = 0.f;
+#pragma unroll
+        for (int c = 0; c < CHUNKS; ++c)
+#pragma unroll
+          for (int i = 0; i < VEC; ++i) s += to_f<T>(raw[k][c].v[i]);
+        mean = row_sum<TPR>(s, red, r_in, lane) * inv_n;
+      }
+      float q = 0.f;
 #pragma unroll
       for (int c = 0; c < CHUNKS; ++c) {
         const int col = (c * TPR + lane) * VEC;
         if (col < N) {
-          float o[VEC];
 #pragma unroll
           for (int i = 0; i < VEC; ++i) {
-            o[i] = (v[c * VEC + i] - mean) * rstd * wr[c * VEC + i] + br[c * VEC + i];
+            const float d = to_f<T>(raw[k][c].v[i]) - mean;
+            q += d * d;
           }
-          store_vec<T, VEC>(yr + col, o);
         }
       }
-      if (lane == 0) {
-        if (mean_out) mean_out[row] = mean;
-        if (rstd_out) rstd_out[row] = rstd;
+      const float rstd = rsqrtf(row_sum<TPR>(q, red, r_in, lane) * inv_n + eps);
+      if (row < M) {
+        T* yr = y + row * int64_t(N);
+#pragma unroll
+        for (int c = 0; c < CHUNKS; ++c) {
+          const int col = (c * TPR + lane) * VEC;
+          if (col < N) {
+            float o[VEC];
+#pragma unroll
+            for (int i = 0; i < VEC; ++i) {
+              const float xn = (to_f<T>(raw[k][c].v[i]) - mean) * rstd;
+              o[i] = RMS ? xn * wr[c * VEC + i] : xn * wr[c * VEC + i] + br[c * VEC + i];
+            }
+            store_vec<T, VEC>(yr + col, o);
+          }
+        }
+        if (lane == 0) {
+          if (mean_out) mean_out[row] = mean;
+          if (rstd_out) rstd_out[row] = rstd;
+        }
       }
     }
   }
 }
 
-template <typename T, int TPR, int CHUNKS, int VEC, bool RMS>
-void launch_fwd(const T* x, const float* w, const float* b, T* y, float* mean, float* rstd, int64_t M, int N, float eps,
-                cudaStream_t stream) {
+template <typename T, int TPR, int CHUNKS, int VEC, bool RMS, int RPT>
+void launch_fwd(const T* x, const void* w, const void* b, int wbf, int bbf, T* y, float* mean, float* rstd, int64_t M, int N,
+                float eps, int waves, cudaStream_t stream) {
   constexpr int CTA = cta_threads<TPR>();
   constexpr int RPC = CTA / TPR;
   const int sms = num_sms();
-  const int64_t groups = (M + RPC - 1) / RPC;
-  const int64_t cap = int64_t(sms) * (2048 / CTA) * 4;  // full residency, a few waves of grid-stride
+  const int64_t groups = (M + RPC * RPT - 1) / (RPC * RPT);
+  const int64_t cap = int64_t(sms) * (2048 / CTA) * (waves > 0 ? waves : 4);  // full residency, a few waves of grid-stride
   const int grid = int(groups < cap ? groups : cap);
-  ln_fwd_kernel<T, TPR, CHUNKS, VEC, RMS><<<grid > 0 ? grid : 1, CTA, 0, stream>>>(x, w, b, y, mean, rstd, M, N, eps);
+  ln_fwd_kernel<T, TPR, CHUNKS, VEC, RMS, RPT>
+      <<<grid > 0 ? grid : 1, CTA, 0, stream>>>(x, w, b, wbf, bbf, y, mean, rstd, M, N, eps);
 }
 
 template <typename T, int VEC, bool RMS>
-bool dispatch_fwd(int tpr, int chunks, const T* x, const float* w, const float* b, T* y, float* mean, float* rstd, int64_t M,
-                  int N, float eps, cudaStream_t s) {
-#define MWLN_CASE(CH, TPR_)                                                              \
-  if (tpr == TPR_ && chunks == CH) {                                                     \
-    launch_fwd<T, TPR_, CH, VEC, RMS>(x, w, b, y, mean, rstd, M, N, eps, s);                  \
-    return true;                                                                         \
+bool dispatch_fwd(int tpr, int chunks, int rpt, const T* x, const void* w, const void* b, int wbf, int bbf, T* y, float* mean,
+                  float* rstd, int64_t M, int N, float eps, int waves, cudaStream_t s) {
+#define MWLN_CASE(CH, TPR_)                                                                     \
+  if (tpr == TPR_ && chunks == CH && rpt == 1) {                                                \
+    launch_fwd<T, TPR_, CH, VEC, RMS, 1>(x, w, b, wbf, bbf, y, mean, rstd, M, N, eps, waves, s); \
+    return true;                                                                                \
   }
 #define MWLN_TPR(TPR_) MWLN_FOR_CHUNKS(MWLN_CASE, TPR_)
+#define MWLN_TPR_V(TPR_) MWLN_FOR_CHUNKS_V(MWLN_CASE, TPR_)
   if constexpr (VEC > 1) {
-    MWLN_TPR(4) MWLN_TPR(8) MWLN_TPR(16)
+    MWLN_TPR_V(4) MWLN_TPR_V(8) MWLN_TPR_V(16) MWLN_TPR_V(32) MWLN_TPR_V(64) MWLN_TPR_V(128) MWLN_TPR_V(256) MWLN_TPR_V(512) MWLN_TPR_V(1024)
+  } else {
+    MWLN_TPR(32) MWLN_TPR(64) MWLN_TPR(128) MWLN_TPR(256) MWLN_TPR(512) MWLN_TPR(1024)
   }
-  MWLN_TPR(32) MWLN_TPR(64) MWLN_TPR(128) MWLN_TPR(256) MWLN_TPR(512) MWLN_TPR(1024)
+#undef MWLN_TPR_V
 #undef MWLN_TPR
 #undef MWLN_CASE
   return false;
@@ -106,10 +119,11 @@ bool dispatch_fwd(int tpr, int chunks, const T* x, const float* w, const float* 
 
 }  // namespace mwln
 
-// x [M, N] contiguous (bf16 / fp16 / fp32); w, b fp32 [N] or empty. Returns (y, mean, rstd); rstd is [M] fp32 when `save`, mean too
-// unless `rms` (RMSNorm: no mean, and b must be empty), else they are empty.
+// x [M, N] contiguous (bf16 / fp16 / fp32); w, b fp32 or bf16 [N] (16-byte aligned) or empty. Returns (y, mean, rstd); rstd is [M]
+// fp32 when `save`, mean too unless `rms` (RMSNorm: no mean, and b must be empty), else they are empty. `rpt`: rows per thread in
+// flight (TPR <= 32 only); `waves`: the grid cap in resident waves (0: 4).
 std::vector<torch::Tensor> ln_fwd(torch::Tensor x, torch::Tensor w, torch::Tensor b, double eps, bool save, bool rms, int64_t tpr,
-                                  int64_t chunks, int64_t vec) {
+                                  int64_t chunks, int64_t vec, int64_t rpt, int64_t waves) {
   TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous(), "x must be contiguous CUDA [M, N]");
   TORCH_CHECK(!rms || b.numel() == 0, "RMSNorm has no bias");
   const int64_t M = x.size(0);
@@ -119,17 +133,21 @@ std::vector<torch::Tensor> ln_fwd(torch::Tensor x, torch::Tensor w, torch::Tenso
   auto mean = save && !rms ? torch::empty({M}, f32) : torch::empty({0}, f32);
   auto rstd = save ? torch::empty({M}, f32) : torch::empty({0}, f32);
   if (M == 0) return {y, mean, rstd};
-  if (w.numel() && reinterpret_cast<uintptr_t>(w.data_ptr()) % 16) w = w.clone();
-  if (b.numel() && reinterpret_cast<uintptr_t>(b.data_ptr()) % 16) b = b.clone();
-  const float* wp = w.numel() ? w.data_ptr<float>() : nullptr;
-  const float* bp = b.numel() ? b.data_ptr<float>() : nullptr;
+  for (auto* t : {&w, &b}) {
+    if (!t->numel()) continue;
+    TORCH_CHECK(t->scalar_type() == torch::kFloat32 || t->scalar_type() == torch::kBFloat16, "affine parameters fp32 or bf16");
+    if (reinterpret_cast<uintptr_t>(t->data_ptr()) % 16 || !t->is_contiguous()) *t = t->contiguous().clone();
+  }
+  const void* wp = w.numel() ? w.data_ptr() : nullptr;
+  const void* bp = b.numel() ? b.data_ptr() : nullptr;
+  const int wbf = w.numel() && w.scalar_type() == torch::kBFloat16, bbf = b.numel() && b.scalar_type() == torch::kBFloat16;
   float* mp = mean.numel() ? mean.data_ptr<float>() : nullptr;
   float* rp = save ? rstd.data_ptr<float>() : nullptr;
   auto s = at::cuda::getCurrentCUDAStream();
   bool ok = false;
-#define MWLN_GO(CT, V) \
-  (rms ? mwln::dispatch_fwd<CT, V, true>(int(tpr), int(chunks), xp, wp, bp, yp, mp, rp, M, N, float(eps), s)  \
-       : mwln::dispatch_fwd<CT, V, false>(int(tpr), int(chunks), xp, wp, bp, yp, mp, rp, M, N, float(eps), s))
+#define MWLN_GO(CT, V)                                                                                                            \
+  (rms ? mwln::dispatch_fwd<CT, V, true>(int(tpr), int(chunks), int(rpt), xp, wp, bp, wbf, bbf, yp, mp, rp, M, N, float(eps), int(waves), s) \
+       : mwln::dispatch_fwd<CT, V, false>(int(tpr), int(chunks), int(rpt), xp, wp, bp, wbf, bbf, yp, mp, rp, M, N, float(eps), int(waves), s))
 #define MWLN_DT(TORCH_T, CT, VMAX)                                     \
   if (x.scalar_type() == TORCH_T) {                                     \
     auto xp = reinterpret_cast<const CT*>(x.data_ptr());                \
@@ -141,7 +159,7 @@ std::vector<torch::Tensor> ln_fwd(torch::Tensor x, torch::Tensor w, torch::Tenso
   MWLN_DT(torch::kFloat32, float, 4)
 #undef MWLN_DT
 #undef MWLN_GO
-  TORCH_CHECK(ok, "general LayerNorm forward: no build for tpr=", tpr, " chunks=", chunks, " vec=", vec);
+  TORCH_CHECK(ok, "general LayerNorm forward: no build for tpr=", tpr, " chunks=", chunks, " vec=", vec, " rpt=", rpt);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {y, mean, rstd};
 }

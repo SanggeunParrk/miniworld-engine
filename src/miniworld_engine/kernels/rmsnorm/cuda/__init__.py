@@ -1,5 +1,5 @@
 """General RMSNorm on CUDA: ``x / sqrt(mean(x^2) + eps) * weight`` over the last dimension at any width (1 .. 65 536 bf16 / fp16,
-32 768 fp32), any row count, bf16 / fp16 / fp32 activations, fp32 statistics, optional weight (cast to fp32), forward and backward
+32 768 fp32), any row count, bf16 / fp16 / fp32 activations, fp32 statistics, optional weight (fp32 / bf16 read as is), forward and backward
 (dx, and dw without atomics: a replay is bit-identical). It is the general LayerNorm kernel (``kernels/layernorm/cuda/general``) built
 with the mean and the bias dropped, so it shares that extension, its launch configuration and its measurements.
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels.layernorm.cuda.general import _affine, _ext, config, supported
+from miniworld_engine.kernels.layernorm.cuda.general import _affine, _ext, _grad_bf16, launch_config, supported
 
 
 def _fwd_fake(x, w, eps, save):
@@ -19,23 +19,24 @@ def _fwd_fake(x, w, eps, save):
 
 @opaque(fake=_fwd_fake, name="rmsnorm_general_fwd")
 def _fwd(x: torch.Tensor, w: torch.Tensor, eps: float, save: bool) -> tuple[torch.Tensor, torch.Tensor]:
-    """RMSNorm forward of contiguous x [M, N]; w fp32 [N] or empty. (y, rstd)."""
-    tpr, ch, vec = config(x.shape[1], x.element_size())
-    y, _, rstd = _ext().fwd(x, w, x.new_empty((0,), dtype=torch.float32), float(eps), bool(save), True, tpr, ch, vec)
+    """RMSNorm forward of contiguous x [M, N]; w fp32 or bf16 [N] or empty. (y, rstd)."""
+    tpr, ch, vec, rpt, waves = launch_config(x.shape[1], x.element_size(), x.shape[0], x.device)
+    y, _, rstd = _ext().fwd(x, w, x.new_empty((0,), dtype=torch.float32), float(eps), bool(save), True, tpr, ch, vec, rpt, waves)
     return y, rstd
 
 
 def _bwd_fake(dy, x, w, rstd, wgrad):
-    """dx like x; dw fp32 [N] when wgrad, else empty."""
-    return torch.empty_like(x), torch.empty((x.shape[1] if wgrad else 0,), dtype=torch.float32, device=x.device)
+    """dx like x; dw [N] (bf16 for a bf16 w, else fp32) when wgrad, else empty."""
+    gdt = torch.bfloat16 if _grad_bf16(w) else torch.float32
+    return torch.empty_like(x), torch.empty((x.shape[1] if wgrad else 0,), dtype=gdt, device=x.device)
 
 
 @opaque(fake=_bwd_fake, name="rmsnorm_general_bwd")
 def _bwd(dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, rstd: torch.Tensor, wgrad: bool) -> tuple[torch.Tensor, torch.Tensor]:
     """RMSNorm backward from the saved rstd. (dx, dw); dw only when wgrad."""
-    tpr, ch, vec = config(x.shape[1], x.element_size())
+    tpr, ch, vec, rpt, _ = launch_config(x.shape[1], x.element_size(), x.shape[0], x.device)
     empty = x.new_empty((0,), dtype=torch.float32)
-    dx, dw, _ = _ext().bwd(dy, x, w, empty, rstd, bool(wgrad), True, tpr, ch, vec, 0)
+    dx, dw, _ = _ext().bwd(dy, x, w, empty, rstd, bool(wgrad), True, tpr, ch, vec, rpt, 0, _grad_bf16(w))
     return dx, dw
 
 

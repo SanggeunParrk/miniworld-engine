@@ -75,15 +75,18 @@ __device__ __forceinline__ void store_vec(T* p, const float* in) {
   }
 }
 
-// A thread's affine values for its columns (fixed across the rows it visits): 1 / 0 where `p` is null or past N. VEC fp32 values are
-// read as 16-byte vectors (the host passes 16-byte-aligned weights).
+// A thread's affine values for its columns (fixed across the rows it visits): `fill` where `p` is null or past N. `bf` says the
+// parameter is bf16 (else fp32): fp32 values are read as 16-byte vectors, bf16 ones as VEC-wide packs (the host passes aligned rows).
 template <int TPR, int CHUNKS, int VEC>
-__device__ __forceinline__ void load_affine(const float* __restrict__ p, float fill, int lane, int N, float* out) {
+__device__ __forceinline__ void load_affine(const void* __restrict__ pv, int bf, float fill, int lane, int N, float* out) {
 #pragma unroll
   for (int c = 0; c < CHUNKS; ++c) {
     const int col = (c * TPR + lane) * VEC;
-    if (p && col < N) {
-      if constexpr (VEC % 4 == 0) {
+    if (pv && col < N) {
+      if (bf) {
+        load_vec<__nv_bfloat16, VEC>(reinterpret_cast<const __nv_bfloat16*>(pv) + col, out + c * VEC);
+      } else if constexpr (VEC % 4 == 0) {
+        const float* p = reinterpret_cast<const float*>(pv);
 #pragma unroll
         for (int i = 0; i < VEC; i += 4) {
           const float4 t = *reinterpret_cast<const float4*>(p + col + i);
@@ -93,6 +96,7 @@ __device__ __forceinline__ void load_affine(const float* __restrict__ p, float f
           out[c * VEC + i + 3] = t.w;
         }
       } else {
+        const float* p = reinterpret_cast<const float*>(pv);
 #pragma unroll
         for (int i = 0; i < VEC; ++i) out[c * VEC + i] = p[col + i];
       }
@@ -103,7 +107,24 @@ __device__ __forceinline__ void load_affine(const float* __restrict__ p, float f
   }
 }
 
+// A row's VEC-wide pack as loaded (kept raw in registers: half the registers of its fp32 values for bf16 / fp16), and its values.
+template <typename T, int VEC>
+__device__ __forceinline__ Pack<T, VEC> load_pack(const T* p) {
+  return *reinterpret_cast<const Pack<T, VEC>*>(p);
+}
+template <typename T, int VEC>
+__device__ __forceinline__ Pack<T, VEC> zero_pack() {
+  Pack<T, VEC> z;
+#pragma unroll
+  for (int i = 0; i < VEC; ++i) z.v[i] = from_f<T>(0.f);
+  return z;
+}
+
 }  // namespace mwln
 
-// Instantiation lists, shared by the launchers. Vector path: TPR 4..1024 x CHUNKS {1, 2, 4, 8}; scalar path: TPR 32..1024.
+// Instantiation lists, shared by the launchers. Scalar path: TPR 32..1024 x CHUNKS {1, 2, 4, 8}. Vector path: also CHUNKS 3 (a 768 /
+// 1536 / 3072-wide bf16 row at a warp or two per row without idle lanes). RPT (rows per thread in flight) is a template parameter of
+// the kernels, built at 1 only: measured on B200 over N 64-3072, two or four rows in flight lost to one row with a resident-wave grid
+// (``general.config_sm100``) everywhere but by <= 7% on a few fp32 cases.
 #define MWLN_FOR_CHUNKS(M, ...) M(1, __VA_ARGS__) M(2, __VA_ARGS__) M(4, __VA_ARGS__) M(8, __VA_ARGS__)
+#define MWLN_FOR_CHUNKS_V(M, ...) MWLN_FOR_CHUNKS(M, __VA_ARGS__) M(3, __VA_ARGS__)
