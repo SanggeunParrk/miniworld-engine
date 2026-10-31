@@ -225,6 +225,20 @@ def _key_mask(mask, A, L, perm=None):
 _PACKS: dict = {}
 
 
+def _b200_rpb(single, fp32) -> int:
+    """Rows per block of the B200 row kernels (``ext(rpb=)``): 8, or fewer (down to 2) where A L rows give under one block per SM at 8 -- the
+    D-wide row kernels at A = 2 (L256: 64 blocks of 8 rows on 148 SMs) ran 8-18 us a launch, latency-bound. fp32 deals its rows over
+    one resident wave whatever rpb is (``row_grid``), so it keeps 8. The forward and the backward call this with the same input."""
+    if fp32:
+        return 8
+    m = single.shape[0] * single.shape[2]
+    sms = num_sms(single.device)
+    for r in (8, 4):
+        if -(-m // r) >= sms:
+            return r
+    return 2   # rpb 1 doubled the per-column partial rows the host sums (two reductions 13 -> 25 us at A2 L256)
+
+
 def _native_rpb():
     return 2
 
@@ -725,7 +739,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, 
     T = ext(
         D,
         DH,
-        rpb=_native_rpb() if _native90(single.device) else 8,
+        rpb=_native_rpb() if _native90(single.device) else _b200_rpb(single, fp32),
         empty_uniform=_empty_uniform90(single.device, single.shape[0], single.shape[2]),
         dc=cond.shape[-1],
         n=nexp,
@@ -1140,7 +1154,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     T = ext(
         D,
         DH,
-        rpb=_native_rpb() if _native90(single.device) else 8,
+        rpb=_native_rpb() if _native90(single.device) else _b200_rpb(single, fp32),
         empty_uniform=_empty_uniform90(single.device, single.shape[0], single.shape[2]),
         dc=cond.shape[-1],
         n=nexp,
@@ -1396,9 +1410,9 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     # custom-op outputs may not alias each other: the gradients above are views of a few shared buffers, so each leaves as
     # its own tensor in the parameter's dtype -- one multi-tensor copy kernel for all of them (23 copies were ~45 us)
     outs = [torch.empty(p.shape, device=dev, dtype=p.dtype) for p in params]
-    torch._foreach_copy_(
-        outs, [grads[n].reshape(p.shape) for n, p in zip(names, params, strict=False)]
-    )
+    srcs = [grads[n].reshape(p.shape) for n, p in zip(names, params, strict=False)]
+    if not _pack_grads(srcs, outs):
+        torch._foreach_copy_(outs, srcs)
     return [
         dx.view(A, 1, L, D),
         dc.view(cond.shape),
@@ -1406,6 +1420,22 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         *outs,
         *_xgrad(DB, extra, H, L),
     ]
+
+
+def _pack_grads(srcs, outs) -> bool:
+    """The gradients' copies into their own tensors as ONE launch of the bias-only training rows' ``pack16`` (a 4096-element program per
+    chunk: a memory-bound pass) where it applies -- B200, at most 48 contiguous, 16-byte aligned bf16 / fp32 segments of a multiple of 4
+    elements. torch._foreach_copy_ runs the same copy on a few CTAs: 22 us of a 0.5 ms A2 L512 training step (B200)."""
+    if not srcs or len(srcs) > 48 or torch.cuda.get_device_capability(srcs[0].device) != (10, 0):
+        return False
+    for t in (*srcs, *outs):
+        if not (t.is_contiguous() and t.dtype in (BF, torch.float32) and t.numel() % 4 == 0 and t.data_ptr() % 16 == 0):
+            return False
+    from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as _bo_ext
+
+    none = srcs[0].new_empty(0)
+    _bo_ext().pack16_cuda(list(srcs), list(outs), [none] * len(srcs), [0] * len(srcs))
+    return True
 
 
 class _Block(torch.autograd.Function):
