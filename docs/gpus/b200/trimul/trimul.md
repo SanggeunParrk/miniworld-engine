@@ -14,7 +14,7 @@ the hidden width (planes P = 4D, contraction output H = 2D), its two contraction
 the planes each; one direction has P = 2D, H = D.
 
 Served when `implementation=miniworld`, bf16 contiguous `[B, L, L, D]` input (any B: see "Batched samples"), `d_hidden = D` (or, one direction at D64 / D128,
-`d_hidden = 2D`: see below), LayerNorm eps 1e-5, compute capability (10, 0), and:
+`d_hidden = 2D`, and bidirectional at D64, `d_hidden = 128`: see below), LayerNorm eps 1e-5, compute capability (10, 0), and:
 - inference: L a multiple of 16 (with a dropout scale at D <= 128: a multiple of 128);
 - training: D64 / D128 either direction: L a multiple of 128 (L <= 10240); D256 / D384 / D512: L a multiple of 16.
 Every other shape runs the portable path.
@@ -425,6 +425,36 @@ training, CUDA-graph timing (30 replays after warm-up), ms; cuEquivariance 0.12 
 | 128 | 256 | 1 | 384 | 0.132 / 0.407 / 1.652 | 3.08 | 0.559 / 2.025 / 5.224 | 3.62 |
 | 128 | 256 | 1 | 512 | 0.222 / 0.696 / 3.061 | 3.14 | 0.896 / 3.504 / 9.441 | 3.91 |
 | 128 | 256 | 1 | 768 | 0.513 / 1.555 / 7.922 | 3.03 | 1.912 / 7.607 / 26.747 | 3.98 |
+
+## Bidirectional at hidden twice the width (D64, hidden 128)
+
+`BidirectionalTriangleMultiplication(64, d_hidden=128)` ran the PyTorch statements on the B200 until 2026-10-31 (the Triton ladder,
+`docs/gpus/b200/triton_ladder.md`: `miniworld` 604 us against Triton 232 us in inference, no CUDA path in training). Per token it is
+the D128 bidirectional block's plane and LN_out widths at a 64-wide pair: k1w writes 8D = 512 planes (`k1w<64, 512>`), the two
+contractions take 128 channels each, k3g normalises 256 channels and projects back to 64 (`k3g<64, 256>`). Inference and the training
+forward are those kernels (`b200_infer.hidden_ok`, `planes_of` / `contracted` now count the hidden width per direction).
+The training backward cannot use b1s / b7m (b1s's double-buffered front tiles do not fit shared memory at H = 256 and its LN CTAs'
+dnr buffers do not fit TMEM; b7m's packed W1 [1024, 64] and its dW1 accumulator would fill shared memory and all of TMEM), so it is
+the wide path's decomposition on k3g's saved set (`b200_train._backward_hid_body`): fold_prep; q = t^T Wp'^T and g = x_n Wg^T by
+cuBLAS (k3g saves neither p nor g); `hid_gate_bwd` (p by the fold, dp / dg / dpr, S1 / S2, r0 / r1); dor^T by cuBLAS; `lnout_bwd`;
+dWp by cuBLAS; the contraction gradients; `k1wb<64, 512>` (pre-activation gradients, LN_in recomputed); [dW1 ; dWg] and dxn by cuBLAS;
+`hid_lnin_bwd` (D64 rows on 8 lanes, the statistics recomputed). Every parameter gradient is a fixed-order sum (per-block partials +
+`colsum`): bit-identical run to run. Batched samples, the row-dropout scale, chunking (`trimul_b200._plan`, its own working-set
+coefficients) and CUDA graphs work as for the other shapes. Tests: `tests/gpu/sm100/test_trimul_b200_gpu.py -k bidir_hidden` (every
+gradient against an fp32 PyTorch reference at B1 L128 / L384, B2 L256 and with a row-dropout draw; no-grad dropout = training forward;
+determinism; graph capture). ptxas: k1w<64, 512> 118, k1wb<64, 512> 122, k3g<64, 256> 99 / 84 registers, no spills.
+
+Measured 2026-10-31, B200 node 2, the ladder harness (`benchmarks/runners/ladder.py`, CUDA graph, bf16-mixed with fp32 master
+parameters), L384, us:
+
+| mode | `miniworld` before (PyTorch statements) | `miniworld` now (CUDA) | Triton (portable) | compiled PyTorch | CUDA / Triton |
+|---|---|---|---|---|---|
+| inference | 604 | 117 | 231 | 665 | 0.50 |
+| training (fwd + bwd) | 1873 | 681 | 779 | 1916 | 0.87 |
+
+Where the time goes (training, L384, torch.profiler, eager launches): k1wb 116, the contraction GEMMs ~120, the [dW1 ; dWg] and dxn
+GEMMs over [dpre | dg] (302 MB) 65 + 58, lnout_bwd 62, k3g 38, k1w 37, hid_gate_bwd 35. The remaining lever is an input-side kernel
+that never writes [dpre | dg] (b7g's structure at C = 64, P = 512), and p / g saves from k3g (drops the two cuBLAS recomputes).
 
 ## Bidirectional (`BidirectionalTriangleMultiplication`)
 
