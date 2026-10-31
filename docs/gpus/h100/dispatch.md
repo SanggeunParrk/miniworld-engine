@@ -182,8 +182,11 @@ use the CUDA aux kernels (`pack_into`, `fold_into`, `normalize_into`) whenever t
 regions. A kernel-name scan of D256/384/512 at L384/768 (36 cells) finds no Triton kernel.
 
 Inference selection (`_legacy_native_faster`): single direction D256 takes the tmn K1/K3 tiles at every L except 384; single
-direction D384 takes the B200-style port at every L it serves (multiples of 128; 17 % faster than tmn at L1536-2560, record
-`trimul_h100_bigl_20261030.md`), tmn otherwise; bidirectional keeps the preserved K1/K3 at (D384, L768) and (D512, L384).
+direction D384 takes the B200-style port at every L (multiples of 128 token-flat, 17 % faster than tmn at L1536-2560, record
+`trimul_h100_bigl_20261030.md`; any other L through its any-L form, k3.cu ROWPAD: K1 planes padded to 16, K3 in 64-token chunks of
+one pair row); single direction D64 / D128 take the any-L form from `ROWPAD_FROM` = {64: 1000, 128: 768} on (BN 64 / 128 K3 with
+two residual / output tiles per warpgroup, B samples stacked b-major; record `trimul_h100_vs_anthropic_15pct_20261030.md`), the
+tmn K1/K3 below; bidirectional keeps the preserved K1/K3 at (D384, L768) and (D512, L384).
 The tmn K1/K3 launch plans and tensor maps are cached per weight set across calls (`h100_inference._Kernels.plans`).
 
 ## Wide bidirectional training (D256/384/512)

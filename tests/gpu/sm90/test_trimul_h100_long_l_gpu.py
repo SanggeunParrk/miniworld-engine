@@ -466,7 +466,7 @@ def test_small_width_rowpad_inference(case, monkeypatch):
         got = m(x, mask)
         assert calls, "the any-L port form was not reached"
         assert torch.equal(got, m(x, mask))
-        monkeypatch.setattr(h100_b200style, "K3_XBUF_128", 1)
+        monkeypatch.setattr(h100_b200style, "K3_XBUF", {})
         assert torch.equal(got, m(x, mask))
         err = relative(got, reference(m, direction, x, mask, None))
     assert err < 1e-2, err

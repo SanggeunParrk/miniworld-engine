@@ -111,8 +111,9 @@ K1_TILE_64 = (6, 32, 4, 1, 1)
 K1_TILE_64_LONG = (3, 64, 4, 1, 1)
 #: K3 ring depth at D64 (BN = 64)
 K3_STAGES_64 = 4
-#: residual / output tiles per K3 warpgroup at D128 (k3.cu XBUF; the D256 / D384 tiles leave no shared memory for a second one)
-K3_XBUF_128 = 2
+#: residual / output tiles per K3 warpgroup (k3.cu XBUF) by width; the D256 / D384 tiles (BN 256 / 192) leave no shared memory for a
+#: second one
+K3_XBUF = {64: 2, 128: 2}
 
 
 @T.device_cache
@@ -340,7 +341,7 @@ def _run_rowpad(leaves, mask, direction, out=None):
         cfg = _output_config(d)
         from .h100_b200style_static import output_kernel
 
-        kernel, smem = output_kernel(d, h, cfg, rowpad=True, xbuf=K3_XBUF_128 if d <= 128 else 1)
+        kernel, smem = output_kernel(d, h, cfg, rowpad=True, xbuf=K3_XBUF.get(d, 1))
         bn, _ = cfg
         cj = -(-n // 64)
         tiles = -(-(rows * cj) // 2)
