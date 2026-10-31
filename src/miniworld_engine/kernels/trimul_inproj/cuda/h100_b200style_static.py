@@ -6,10 +6,9 @@ from . import h100_wide_inference as BI
 
 
 @T.device_cache
-def output_kernel(d, h, cfg, rowpad=False, xbuf=1, extra=(), split=None):
+def output_kernel(d, h, cfg, rowpad=False, xbuf=1, extra=()):
     """rowpad: the any-L one-sample form (k3.cu ROWPAD: 64-token chunks of one pair row, padded planes); xbuf: residual / output
-    tiles per warpgroup (k3.cu XBUF); split: (A stages, weight stages) of the split operand rings (k3.cu NSA / NSB), None = one ring of
-    cfg[1] stages."""
+    tiles per warpgroup (k3.cu XBUF)."""
     bn, stages = cfg
     source = K.R / ("k3reorder.cu" if d == 512 else "k3.cu")
     body = source.read_text()
@@ -43,14 +42,11 @@ def output_kernel(d, h, cfg, rowpad=False, xbuf=1, extra=(), split=None):
         *(["-DROWPAD=1"] if rowpad else []),
         *([f"-DXBUF={xbuf}"] if xbuf != 1 else []),
         *extra,   # measurement builds only (e.g. -DK3_DIAG=1)
-        *([f"-DNSA={split[0]}", f"-DNSB={split[1]}"] if split else []),
     ]
     kernel = T.load_unit(
         str(T.compile_text(body, flags)), "b200style_k3_static"
     ).kernel(name)
     smem = BI._k3_smem(d, bn, stages) + (xbuf - 1) * (2 * 64 * bn * 2 + 16)
-    if split:   # the one ring's stages give way to NSA A chunks (128 tok x 64 k) and NSB weight chunks (BN x 64 k)
-        smem += split[0] * 128 * 128 + split[1] * bn * 128 + 16 * (split[0] + split[1]) - stages * (128 * 128 + bn * 128 + 16)
     if smem > 232448:
         raise ValueError("K3 resources")
     kernel.set_max_dynamic_smem(smem)

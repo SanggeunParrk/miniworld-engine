@@ -7,7 +7,8 @@ from . import _h100_runtime as T
 
 
 @T.device_cache
-def _kernel(d, h, cfg):
+def _kernel(d, h, cfg, lnm=1, extra=()):
+    """lnm / extra: measurement builds only (lnm 0 = no input LayerNorm, extra e.g. -DTMN_K1_DIAG=2)."""
     a, b, slots, sk, mb = cfg[:5]
     schedule = cfg[5] if len(cfg) > 5 else 1
     name = "mw_b200style_k1_direct"
@@ -16,7 +17,7 @@ def _kernel(d, h, cfg):
         f"using C=tmn::K1Cfg<{d},{h},false,{a},{b},{slots},{sk},{schedule}>;\n"
         'extern "C" __global__ __launch_bounds__(C::NTHR,C::MINB) '
         f"void {name}(__grid_constant__ const tmn::K1ParamsQ p){{"
-        "tmn::sm90::k1_body<C,true,1,true,false,1,tmn::K1ParamsQ>(p);}\n"
+        f"tmn::sm90::k1_body<C,true,{lnm},true,false,1,tmn::K1ParamsQ>(p);}}\n"
     )
     flags = [
         "-std=c++17",
@@ -31,6 +32,7 @@ def _kernel(d, h, cfg):
         "-DTMN_SIGMOID_TANH=1",
         "-DTMN_WSKIP=1",
         "-DTMN_K1_BULK_STORE=1",
+        *extra,
     ]
     smem = I._k1_smem(d, (*cfg[:5], 2))
     kernel = T.load_unit(
@@ -40,7 +42,7 @@ def _kernel(d, h, cfg):
     return kernel, smem
 
 
-def front(x, weights, token_mask, gi, bi, ab, xs):
+def front(x, weights, token_mask, gi, bi, ab, xs, diag=()):
     """x [B, n, n, d]; B > 1: the samples stacked along K1's slow token axis (K1Params.rows = B n, planes [2 h, B n, n]), the token
     mask [B n] read per sample. One sample may take planes padded past n (ab [2 h, np, np], np = ab.shape[-1] >= n, a multiple of 16):
     K1 writes zeros into the pad rows and columns, as the packaged K1 does."""
@@ -50,7 +52,7 @@ def front(x, weights, token_mask, gi, bi, ab, xs):
         raise ValueError("padded planes take one sample")
     cfg = K._config(d, n=n)
     a, b, _, _, mb = cfg[:5]
-    kernel, smem = _kernel(d, h, cfg)
+    kernel, smem = _kernel(d, h, cfg, *diag)
     tj = -(-np_ // b)
     tiles = (-(-(rows if rows != n else np_) // a)) * tj
     fields = [
