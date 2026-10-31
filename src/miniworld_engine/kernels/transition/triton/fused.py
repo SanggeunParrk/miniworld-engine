@@ -620,8 +620,8 @@ def transition_b2b(
 
 
 # ---------------------------------------------------------------------------
-# K-TILED back-to-back (bounded smem -> runs at ANY d; scales with K).  [UNVERIFIED:
-# written while GPU was unavailable; must be cos-checked + benched on H100 before use.]
+# K-TILED back-to-back (bounded smem -> runs at ANY d; scales with K).  Checked by run_all on H100
+# (2.4.1, rel 2.0e-03); plain pointer loads, no Hopper-only feature (registry arch sm80; the A100 rows predate this code).
 #
 # The full-K-row b2b above loads BLOCK_K = next_pow2(K), so its weight tiles are [K, BLOCK_N]
 # and overflow smem at d>=256. This variant tiles K (inner k-loop): weight tiles are
@@ -758,7 +758,7 @@ def transition_b2b_ktiled(
 ) -> torch.Tensor:
     """K-tiled fully-fused LN + SwiGLU expand + squeeze -> out (M, D), h off HBM, any d.
 
-    UNVERIFIED until cos-checked + benched on H100. Bounded smem (weight tiles
+    Checked by run_all on H100; registry arch sm80 (the A100 rows predate this code). Bounded smem (weight tiles
     [BLOCK_K, BLOCK_N]) -> no OOM at d>=256, unlike ``transition_b2b``.
     """
     M, K = x2.shape

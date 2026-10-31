@@ -155,8 +155,8 @@ from the code.
 <!-- BEGIN GENERATED: hardware-support -->
 | arch | GPUs | kernels | backends |
 |---|---|---|---|
-| **sm80+** | A100, A5000, A6000, RTX 4090 | 161 | triton 155, cuda 6 |
-| **sm90+** | H100 | 34 | cuda 30, triton 4 |
+| **sm80+** | A100, A5000, A6000, RTX 4090 | 165 | triton 159, cuda 6 |
+| **sm90+** | H100 | 30 | cuda 30 |
 <!-- END GENERATED: hardware-support -->
 
 **The minimum supported architecture is sm80.** The generated table above states each
