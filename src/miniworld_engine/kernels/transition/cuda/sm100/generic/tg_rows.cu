@@ -83,6 +83,23 @@ template <int VEC> __device__ __forceinline__ void ldvx(const T* p, float* v) { 
 #endif
   ldv<VEC>(p, v);
 }
+// the lane's NV columns of an fp32 vector (gamma, beta), loaded once per kernel with 8 / 16-B loads: a per-element __ldg inside the row
+// loop is one scalar L1 request per element per lane (32 sectors per warp instruction for 1 sector of data), which bound the row passes
+// at ~2 TB/s (bf16 [147 456, 768]: fwd 233 us against a 74 us copy)
+template <int VEC, int TPR, int NV> __device__ __forceinline__ void ldcols(const float* __restrict__ P, int l, float* v) {
+#pragma unroll
+  for (int i = 0; i < NV / VEC; ++i) {
+    const float* q = P + VEC * (TPR * i + l);
+#pragma unroll
+    for (int e = 0; e < VEC; e += 2) {
+      if constexpr (VEC % 4 == 0) {
+        if (e % 4 == 0) { const float4 t = __ldg(reinterpret_cast<const float4*>(q + e)); v[VEC * i + e] = t.x; v[VEC * i + e + 1] = t.y; v[VEC * i + e + 2] = t.z; v[VEC * i + e + 3] = t.w; }
+      } else {
+        const float2 t = __ldg(reinterpret_cast<const float2*>(q + e)); v[VEC * i + e] = t.x; v[VEC * i + e + 1] = t.y;
+      }
+    }
+  }
+}
 template <int TPR> __device__ __forceinline__ float gsum(float v) {
 #pragma unroll
   for (int o = TPR / 2; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
@@ -104,6 +121,9 @@ __device__ __forceinline__ void ln_fwd(const T* __restrict__ X, const float* __r
 #pragma unroll
     for (int i = 0; i < NV / VEC; ++i) ldvx<VEC>(x + VEC * (TPR * i + l), v + VEC * i);
   };
+  float gc[NV], bc[NV];
+  ldcols<VEC, TPR, NV>(G, l, gc);
+  ldcols<VEC, TPR, NV>(Bt, l, bc);
   if (base < M) load(base, nx);
   for (; base < M; base += nw * RPW) {
     const int row = base + sub;
@@ -128,7 +148,7 @@ __device__ __forceinline__ void ln_fwd(const T* __restrict__ X, const float* __r
       float o[VEC];
 #pragma unroll
       for (int e = 0; e < VEC; ++e) {
-        o[e] = (v[VEC * i + e] - mean) * rstd * __ldg(G + c + e) + __ldg(Bt + c + e);
+        o[e] = (v[VEC * i + e] - mean) * rstd * gc[VEC * i + e] + bc[VEC * i + e];
 #if F32
         o[e] = tf32r(o[e]);
 #endif
@@ -147,15 +167,23 @@ __device__ __forceinline__ void ln_bwd(const float* __restrict__ DXN, const T* _
   constexpr int RPW = 32 / TPR;
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, l = lane % TPR, sub = lane / TPR;
   const int nwb = blockDim.x >> 5, nw = gridDim.x * nwb;
-  float dg[NV], db[NV];
+  float dg[NV], db[NV], gc[NV];
 #pragma unroll
   for (int i = 0; i < NV; ++i) { dg[i] = 0.f; db[i] = 0.f; }
+  ldcols<VEC, TPR, NV>(G, l, gc);
   for (int base = (blockIdx.x * nwb + warp) * RPW; base < M; base += nw * RPW) {
     const int row = base + sub;
     const bool ok = row < M;
     const long ro = (long)(ok ? row : 0) * D;
     const float mean = ok ? MEAN[row] : 0.f, rstd = ok ? RSTD[row] : 0.f;
-    float gx[NV], xh[NV];
+    float gx[NV], xh[NV], ry[NV];
+    // a warp-wide row (TPR 32): dy (the residual branch) is issued with the row's other loads, not after its reductions -- one memory
+    // round trip per row (bf16 [147 456, 768] 384 -> 210 us). Rows of 8 / 16 lanes already keep 2-4 rows in flight per warp and lose by it.
+    constexpr bool PREF = TPR == 32;
+    if constexpr (PREF) {
+#pragma unroll
+      for (int i = 0; i < NV / VEC; ++i) ldvx<VEC>(DY + ro + VEC * (TPR * i + l), ry + VEC * i);
+    }
     float s1 = 0.f, s2 = 0.f;
     if constexpr (SPLIT) {
       // the row's d_xn: slab 0, then the split-K slabs added in slab order with SB slabs' whole row in flight at a time (a single track:
@@ -198,7 +226,7 @@ __device__ __forceinline__ void ln_bwd(const float* __restrict__ DXN, const T* _
           const int k = VEC * i + e;
           const float d = ok ? dd[k] : 0.f;
           xh[k] = (xv[k] - mean) * rstd;
-          gx[k] = d * __ldg(G + c + e);
+          gx[k] = d * gc[k];
           s1 += gx[k];
           s2 += gx[k] * xh[k];
           dg[k] += d * xh[k];
@@ -224,7 +252,7 @@ __device__ __forceinline__ void ln_bwd(const float* __restrict__ DXN, const T* _
           if (!ok) d[e] = 0.f;
           const int k = VEC * i + e;
           xh[k] = (xv[e] - mean) * rstd;
-          gx[k] = d[e] * __ldg(G + c + e);
+          gx[k] = d[e] * gc[k];
           s1 += gx[k];
           s2 += gx[k] * xh[k];
           dg[k] += d[e] * xh[k];
@@ -237,10 +265,10 @@ __device__ __forceinline__ void ln_bwd(const float* __restrict__ DXN, const T* _
 #pragma unroll
     for (int i = 0; i < NV / VEC; ++i) {
       const int c = VEC * (TPR * i + l);
-      float r[VEC], o[VEC];
-      ldvx<VEC>(DY + ro + c, r);
+      float o[VEC];
+      if constexpr (!PREF) ldvx<VEC>(DY + ro + c, ry + VEC * i);
 #pragma unroll
-      for (int e = 0; e < VEC; ++e) { const int k = VEC * i + e; o[e] = r[e] + rstd * (gx[k] - m1 - xh[k] * m2); }
+      for (int e = 0; e < VEC; ++e) { const int k = VEC * i + e; o[e] = ry[k] + rstd * (gx[k] - m1 - xh[k] * m2); }
       stv<VEC>(DX + ro + c, o);
     }
   }
