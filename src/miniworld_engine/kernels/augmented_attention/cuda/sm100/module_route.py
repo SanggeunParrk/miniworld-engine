@@ -35,7 +35,7 @@ and ``aam_qknorm_bwd`` after the core's backward (in place in the q|k|v|g gradie
 
 Every gradient is bitwise repeatable (fixed-order sums, the deterministic core backward). Contract (``supported``): sm_100, q / k / v
 heads at a token DiT layout (``TDIT_HEADS``) with d_pair 128 (bf16 pair: also 256 at 16 heads), or 4 x 32 with d_pair 16 (``ATOM_HEADS``;
-bf16 or fp32 pair), B == 1, QK-norm on or off, a key mask [L]
+bf16 or fp32 pair); fp32 path: also an fp32 d_pair 256 at 16 heads (``pair256.cu``), B == 1, QK-norm on or off, a key mask [L]
 shared by the samples, [A, L] one per sample, or none, any A, any L (the training cores run L padded to a multiple of 128 and A to an even count, the pair passes L
 padded to a multiple of 16: zero rows, masked keys, sliced off), an extra [L, L] logit term (any float dtype, differentiable).
 Precision: bf16 under bf16 autocast or for bf16 activations; fp32 (TF32 tensor cores) for fp32 activations without autocast when TF32
@@ -69,6 +69,15 @@ def _k16(name: str, dev: int):
     return _sm100_kernel("pair16", name, dev, smem=0)
 
 
+def _k256(name: str, dev: int):
+    return _sm100_kernel("pair256", name, dev, smem=0)
+
+
+def _wide32(pair_dtype, heads: int, dp: int) -> bool:
+    """An fp32 256-wide pair at 16 heads (ESMFold2's token layout): ``pair256.cu``'s pass on the fp32 path."""
+    return pair_dtype is F32 and dp == 256 and heads == 16
+
+
 def _atom(heads: int, dh: int, dp: int) -> bool:
     """The dense atom layout: 4 heads x 32 over a 16-wide pair (``pair16.cu``'s pass)."""
     return (heads, dh) in ATOM_HEADS and dp == 16
@@ -97,7 +106,7 @@ def supported(x, pair, lnw, wb, mask, extra, dtype, heads: int) -> bool:
     if dtype is BF:
         ok = (atom and pair.dtype in (BF, F32)) or (pair.dtype is BF and (dp == 128 or (dp == 256 and heads == 16))) or (pair.dtype is F32 and dp == 128)
     elif dtype is F32:
-        ok = pair.dtype is F32 and (dp == 128 or atom) and _tf32_on()
+        ok = pair.dtype is F32 and (dp == 128 or atom or _wide32(pair.dtype, heads, dp)) and _tf32_on()
     else:
         ok = False
     if not ok:
@@ -130,7 +139,11 @@ def _build(dev: int, H: int, DH: int, dtype: torch.dtype, pair_dtype: torch.dtyp
         _sm100_kernel("attn_fwd_tf32", "augattn_fwd_tf32_sm100", dev, defs=(*td, "GATE=1"))
         _sm100_kernel("attn_dkv_tf32", "augattn_dkv_tf32_sm100", dev, defs=cd)
         _sm100_kernel("attn_dqb_tf32", "augattn_dqb_tf32_sm100", dev, defs=(*cd, "DQPART=1"))
-    if _atom(H, DH, dp):
+    if dtype is F32 and _wide32(pair_dtype, H, dp):
+        _k256("aap256_fwd", dev)
+        if train:
+            _k256("aap256_bwd", dev)
+    elif _atom(H, DH, dp):
         p, o = ("b" if pair_dtype is BF else "f"), ("b" if dtype is BF else "f")
         _k16(f"aap16_fwd_{p}{o}", dev)
         if train:
@@ -305,6 +318,8 @@ def _bias(pair, lnw, wb, mask, extra, eps, bf: bool, train: bool, L: int, Lb: in
     m = mask if (mask is not None and Lb == L and not (pair.dtype is F32 and train)) else None
     if pair.shape[-1] == 16:
         bias, pst = _pair16_fwd(pz, lnw, wb, m, eps, bf), pz.new_empty((0, 2), dtype=F32)
+    elif not bf and _wide32(pair.dtype, H, pair.shape[-1]):
+        bias, pst = _pair256_fwd(pz, lnw, wb, m, eps), pz.new_empty((0, 2), dtype=F32)
     else:
         bias, pst = _pair_bias(pz, lnw, wb, m, eps, bf, train)
     if not fix:
@@ -342,6 +357,31 @@ def _pair16_bwd(DB, p2, lnw, wb, eps, Lb):
     _k16("aap16_bwd_b" if p2.dtype is BF else "aap16_bwd_f", dev)((grid, 1, 1), (256, 1, 1), DB, p2, _wf(wb, lnw, F32), dz, part, int(Lb),
                                                                   float(eps))
     return dz, part.sum(0).view(H, 16)
+
+
+def _pair256_fwd(pz, lnw, wb, m, eps):
+    """``pair256.cu``'s pass: bias [16, Lb, Lb] fp32 from the fp32 pair [1, Lb, Lb, 256] (``lnw`` in the bias's units), keys with ``m``
+    false at NEG."""
+    dev = _index(pz)
+    Lb, H = pz.shape[1], wb.shape[0]
+    p2 = pz.reshape(Lb * Lb, 256)
+    if not p2.is_contiguous():
+        p2 = p2.contiguous()
+    bias = torch.empty(H, Lb, Lb, device=pz.device, dtype=F32)
+    grid = min(-(-Lb * Lb // (16 * 8)), 4 * _nsm(dev))
+    _k256("aap256_fwd", dev)((grid, 1, 1), (256, 1, 1), p2, _wf(wb, lnw, F32), m, bias, int(Lb), float(eps), float(NEG))
+    return bias
+
+
+def _pair256_bwd(DB, p2, lnw, wb, eps, Lb):
+    """(dpair [Lb Lb, 256] fp32, dwf [16, 256] fp32) of :func:`_pair256_fwd` (natural units) from dbias [16, Lb, Lb] fp32."""
+    dev = _index(p2)
+    H = wb.shape[0]
+    dz = torch.empty_like(p2)
+    grid = min(-(-Lb * Lb // (16 * 8)), _nsm(dev))   # one CTA a SM: the partial rows' count and order follow the shape and the GPU
+    part = torch.empty(grid, H * 256, device=p2.device, dtype=F32)
+    _k256("aap256_bwd", dev)((grid, 1, 1), (256, 1, 1), DB, p2, _wf(wb, lnw, F32), dz, part, int(Lb), float(eps))
+    return dz, part.sum(0).view(H, 256)
 
 
 # --------------------------------------------------------------------------------------------------- the cores (per-sample key mask)
@@ -457,7 +497,7 @@ def _fwd_fake(x, cond, res, pair, mask, extra, params, eps, heads, out_dtype, qk
     Ap, Lp, Lb = _dims(A, L)
     Mp, M = Ap * Lp, A * L
     e = x.new_empty
-    st = (Lb * Lb, 2) if (pair.dtype is F32 and pair.shape[-1] != 16) else (0, 2)
+    st = (Lb * Lb, 2) if (pair.dtype is F32 and pair.shape[-1] == 128) else (0, 2)
     padded = (Ap, Lp) != (A, L)
     return [
         e((A, 1, L, D), dtype=out_dtype),
@@ -680,6 +720,8 @@ def _bwd(
         p2 = pz.reshape(Lb * Lb, dp)
         if dp == 16:
             dz, dwf = _pair16_bwd(DB, p2 if p2.is_contiguous() else p2.contiguous(), lnw, wb, eps, Lb)
+        elif not bf and _wide32(pair.dtype, H, dp):
+            dz, dwf = _pair256_bwd(DB, p2 if p2.is_contiguous() else p2.contiguous(), lnw, wb, eps, Lb)
         elif pair.dtype is BF:
             from ..apb import acc_n, ext, pair_bias_bwd, width
 

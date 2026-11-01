@@ -117,8 +117,7 @@ def test_module_route_holds_the_yardstick(prec, train, A, L, masked, extra):
 @pytest.mark.parametrize("prec", ["bf16", "fp32"])
 @pytest.mark.parametrize("train", [True, False])
 def test_module_route_layouts(d, dc, dp, H, prec, train):
-    if prec == "fp32" and dp != 128:
-        pytest.skip("the fp32 pair pass is d_pair 128")
+    # fp32: d_pair 128 (bias_only_dit rows32) and, at 16 heads, d_pair 256 (pair256.cu, ESMFold2's token layout)
     _check(d, dc, dp, H, prec, train, 3, 200, True, True)
     _check(d, dc, dp, H, prec, train, 3, 136, "ps", False)
 
