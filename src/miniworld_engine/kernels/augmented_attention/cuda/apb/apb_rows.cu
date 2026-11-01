@@ -152,9 +152,11 @@ __device__ __forceinline__ void wf_frags(const bf* W, uint32_t (&b)[NT8][DPW / 1
 // Batched: S samples, pair [S, L, L, DPW], mask [S, L], bias [S, NH, L, L]; a tile's query row i runs over the S L rows. BAT = false
 // (one sample) compiles the single-sample indexing (the batched one cost 6 % at L1536).
 // ST (optional): the (mean, rstd) of every pair row, for a backward that does not recompute them
+// EX (optional, one sample): an [L, L] logit term (bf16, or fp32 with exf32) added to every head's bias before its one bf16 rounding
+// (the token DiT's extra_pair_bias); masked keys stay ``neg``
 template <int NH, int DPW, bool BAT>
 __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z, const bf* __restrict__ W, const bool* __restrict__ MASK,
-    bf* __restrict__ OUT, float2* __restrict__ ST, int L, float eps, float neg, int S) {
+    bf* __restrict__ OUT, float2* __restrict__ ST, int L, float eps, float neg, int S, const void* __restrict__ EX = nullptr, int exf32 = 0) {
   constexpr int NT8 = nhp<NH>() / 8, NHP = nhp<NH>(), NSF = fwd_stages<DPW>(), FT = fwd_tile<DPW>(), UU = DPW / 32;
   extern __shared__ __align__(128) uint8_t smem[];
   float (*out_s)[NHP][128 + 4] = reinterpret_cast<float (*)[NHP][128 + 4]>(smem + NSF * FT);
@@ -231,6 +233,11 @@ __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z,
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
         float a = os[h][ch * 8 + 2 * e], bb = os[h][ch * 8 + 2 * e + 1];
+        if (!BAT && EX != nullptr) {
+          const long xo = (long)il * L + j + 2 * e;
+          if (exf32) { a += static_cast<const float*>(EX)[xo]; bb += static_cast<const float*>(EX)[xo + 1]; }
+          else { a += __bfloat162float(static_cast<const bf*>(EX)[xo]); bb += __bfloat162float(static_cast<const bf*>(EX)[xo + 1]); }
+        }
         if (MASK) {
           if constexpr (BAT) { const long mj = (long)sb * L + j + 2 * e; if (!MASK[mj]) a = neg; if (!MASK[mj + 1]) bb = neg; }
           else { if (!MASK[j + 2 * e]) a = neg; if (!MASK[j + 2 * e + 1]) bb = neg; }
@@ -304,7 +311,8 @@ __device__ __forceinline__ void ldsm_x4_trans(uint32_t (&r)[4], uint32_t addr) {
 // (so a warp's dWf columns are the block's: no sum over warps). Fixed order: deterministic.
 template <int NH, int DPW, bool BAT>
 __global__ void __launch_bounds__(256, bwd_bps<NH, DPW>()) pair_bias_bwd_k(const __grid_constant__ CUtensorMap tmz, const __grid_constant__ CUtensorMap tmd,
-    const bf* __restrict__ W, bf* __restrict__ DZ, float* __restrict__ AWF, float* __restrict__ AHS, int L, float eps, int acc_stride, int S) {
+    const bf* __restrict__ W, bf* __restrict__ DZ, float* __restrict__ AWF, float* __restrict__ AHS, int L, float eps, int acc_stride, int S,
+    void* __restrict__ DEX = nullptr, int dexf32 = 0) {   // DEX (one sample): [L, L] d extra = sum over the heads of dbias (bf16, or fp32)
   constexpr int NT8 = nhp<NH>() / 8, BW = NT8, BT = bwd_tile<NH, DPW>(), NSB = bwd_stages<NH, DPW>();   // BW: dx^ B words per tile (one per group)
   constexpr int BTP = bt_pair<DPW>(), NU = DPW / 32, NMT = DPW / 16;
   constexpr bool YP = NH == 8 && DPW == DP;                                 // S2 from the projection y (8 x 128) or a first dx^ pass
@@ -403,6 +411,17 @@ __global__ void __launch_bounds__(256, bwd_bps<NH, DPW>()) pair_bias_bwd_k(const
           d1[nt][j] = live ? dbs[(2 * q + j + 8 * nt) * 128 + rb + g + 8] : 0.f;
         }
         s1a += d0[nt][0] * sw0[nt] + d0[nt][1] * sw1[nt]; s1b += d1[nt][0] * sw0[nt] + d1[nt][1] * sw1[nt];
+      }
+      if (!BAT && DEX != nullptr) {                                         // rows g, g + 8: the quad's lanes hold every head
+        float e0 = 0.f, e1 = 0.f;
+#pragma unroll
+        for (int nt = 0; nt < NT8; ++nt) { e0 += d0[nt][0] + d0[nt][1]; e1 += d1[nt][0] + d1[nt][1]; }
+        e0 = quad_sum(e0); e1 = quad_sum(e1);
+        if (q == 0) {
+          const long xo = (long)i * L + j0 + rb + g;
+          if (dexf32) { static_cast<float*>(DEX)[xo] = e0; static_cast<float*>(DEX)[xo + 8] = e1; }
+          else { static_cast<bf*>(DEX)[xo] = __float2bfloat16(e0); static_cast<bf*>(DEX)[xo + 8] = __float2bfloat16(e1); }
+        }
       }
       uint32_t ad0[NT8], ad1[NT8];                                          // A of dx^ per 8-head group: rows g, g + 8
 #pragma unroll
@@ -941,7 +960,7 @@ int nsm_of(const at::Tensor& t) {
 
 template <int NH, int DPW>
 void pair_bias_fwd_t(const at::Tensor& z, const at::Tensor& w, const c10::optional<at::Tensor>& mask, at::Tensor& out, float2* st, int64_t L, double eps,
-                     double neg) {
+                     double neg, const void* ex = nullptr, int exf32 = 0) {
   static bool attr = false;
   if (!attr) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_fwd_k<NH, DPW, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, fwd_smem<NH, DPW>()));
@@ -952,11 +971,12 @@ void pair_bias_fwd_t(const at::Tensor& z, const at::Tensor& w, const c10::option
   const long ntiles = ns * L * ((L + 127) / 128);
   const long per_sm = DPW > 128 ? 1 : 2;  // the 256-wide ring fills the SM's shared memory
   (ns > 1 ? pair_bias_fwd_k<NH, DPW, true> : pair_bias_fwd_k<NH, DPW, false>)<<<(unsigned)std::min<long>(per_sm * nsm_of(z), ntiles), FNT,
-      fwd_smem<NH, DPW>(), S()>>>(CP<bf>(z), CP<bf>(w), mask ? CP<bool>(*mask) : nullptr, P<bf>(out), st, (int)L, (float)eps, (float)neg, (int)ns);
+      fwd_smem<NH, DPW>(), S()>>>(CP<bf>(z), CP<bf>(w), mask ? CP<bool>(*mask) : nullptr, P<bf>(out), st, (int)L, (float)eps, (float)neg, (int)ns,
+                                  ex, exf32);
 }
 // d_pair 128 (8 / 12 / 16 / 24 heads) or 256 (8 heads); ``stats`` (optional [L L, 2] fp32) receives every row's (mean, rstd)
 void pair_bias_fwd_impl(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, c10::optional<at::Tensor> stats, int64_t L, double eps,
-                        double neg) {
+                        double neg, c10::optional<at::Tensor> extra = c10::nullopt) {
   chk(z, at::kBFloat16, "pair"); chk(w, at::kBFloat16, "wf"); chk(out, at::kBFloat16, "bias");
   const int64_t nh = w.size(0), dp = w.size(1);
   TORCH_CHECK(dp == DP || (dp == 2 * DP && (nh == 8 || nh == 16)), "pair_bias: d_pair 128, or 256 with 8 or 16 heads");
@@ -967,12 +987,19 @@ void pair_bias_fwd_impl(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> ma
   if (mask) { chk(*mask, at::kBool, "mask"); TORCH_CHECK(mask->numel() == ns * L, "mask [S, L]"); }
   float2* st = nullptr;
   if (stats) { chk(*stats, at::kFloat, "stats"); TORCH_CHECK(stats->numel() == 2 * ns * L * L, "stats [S L L, 2]"); st = reinterpret_cast<float2*>(stats->data_ptr()); }
+  const void* ex = nullptr;
+  int xf = 0;
+  if (extra) {
+    TORCH_CHECK(ns == 1 && extra->is_contiguous() && extra->numel() == L * L && (extra->scalar_type() == at::kBFloat16 || extra->scalar_type() == at::kFloat),
+                "pair_bias extra: one sample, a contiguous [L, L] bf16 / fp32 term");
+    ex = extra->data_ptr(); xf = extra->scalar_type() == at::kFloat ? 1 : 0;
+  }
   const at::cuda::CUDAGuard gd(z.device());
-  if (dp == 2 * DP) { if (nh == 16) pair_bias_fwd_t<16, 2 * DP>(z, w, mask, out, st, L, eps, neg); else pair_bias_fwd_t<8, 2 * DP>(z, w, mask, out, st, L, eps, neg); }
-  else if (nh == 8) pair_bias_fwd_t<8, DP>(z, w, mask, out, st, L, eps, neg);
-  else if (nh == 12) pair_bias_fwd_t<12, DP>(z, w, mask, out, st, L, eps, neg);
-  else if (nh == 16) pair_bias_fwd_t<16, DP>(z, w, mask, out, st, L, eps, neg);
-  else pair_bias_fwd_t<24, DP>(z, w, mask, out, st, L, eps, neg);
+  if (dp == 2 * DP) { if (nh == 16) pair_bias_fwd_t<16, 2 * DP>(z, w, mask, out, st, L, eps, neg, ex, xf); else pair_bias_fwd_t<8, 2 * DP>(z, w, mask, out, st, L, eps, neg, ex, xf); }
+  else if (nh == 8) pair_bias_fwd_t<8, DP>(z, w, mask, out, st, L, eps, neg, ex, xf);
+  else if (nh == 12) pair_bias_fwd_t<12, DP>(z, w, mask, out, st, L, eps, neg, ex, xf);
+  else if (nh == 16) pair_bias_fwd_t<16, DP>(z, w, mask, out, st, L, eps, neg, ex, xf);
+  else pair_bias_fwd_t<24, DP>(z, w, mask, out, st, L, eps, neg, ex, xf);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 void pair_bias_fwd(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, int64_t L, double eps, double neg) {
@@ -980,6 +1007,10 @@ void pair_bias_fwd(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, a
 }
 void pair_bias_fwd_stats(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, at::Tensor stats, int64_t L, double eps, double neg) {
   pair_bias_fwd_impl(z, w, mask, out, stats, L, eps, neg);
+}
+// with an [L, L] logit term added to every head (one sample)
+void pair_bias_fwd_x(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor extra, at::Tensor out, int64_t L, double eps, double neg) {
+  pair_bias_fwd_impl(z, w, mask, out, c10::nullopt, L, eps, neg, extra);
 }
 
 CUtensorMap tensor_map(void* ptr, CUtensorMapDataType dt, int rank, const cuuint64_t* dims, const cuuint64_t* strides,
@@ -1028,7 +1059,7 @@ CUtensorMap cached_map(const void* p, CUtensorMapDataType dt, int rank, const cu
 
 template <int NH, int DPW = DP>
 void pair_bias_bwd_t(const at::Tensor& z, const at::Tensor& dbias, const at::Tensor& w, at::Tensor& dz, at::Tensor& acc, int64_t L, double eps,
-                     const Geo& G) {
+                     const Geo& G, void* dex = nullptr, int dexf32 = 0) {
   const int64_t ns = z.numel() / (L * L * DPW);                             // samples
   const cuuint64_t zd[2] = {(cuuint64_t)DPW, (cuuint64_t)(ns * L * L)}, zs[1] = {DPW * 2};
   const cuuint32_t zb[2] = {64, 128};
@@ -1046,10 +1077,11 @@ void pair_bias_bwd_t(const at::Tensor& z, const at::Tensor& dbias, const at::Ten
   float* awf = P<float>(acc) + 2 * G.d + width(G);
   (ns > 1 ? pair_bias_bwd_k<NH, DPW, true> : pair_bias_bwd_k<NH, DPW, false>)<<<(unsigned)std::min<long>((long)bwd_bps<NH, DPW>() * nsm_of(z), ntiles),
       256, bwd_smem<NH, DPW>(), S()>>>(mz, md, CP<bf>(w), P<bf>(dz), awf, awf + NH * DPW, (int)L, (float)eps,
-                                       acc.dim() == 2 ? (int)acc.size(1) : 0, (int)ns);
+                                       acc.dim() == 2 ? (int)acc.size(1) : 0, (int)ns, dex, dexf32);
 }
 // d_pair 128 (8 / 12 / 16 / 24 heads) or 256 (16 heads: Chai-1), read off wf [NH, d_pair]
-void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, at::Tensor acc, int64_t L, double eps, int64_t d) {
+void pair_bias_bwd_impl(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, at::Tensor acc, int64_t L, double eps, int64_t d,
+                        c10::optional<at::Tensor> dex_t) {
   chk(z, at::kBFloat16, "pair"); chk(dbias, at::kFloat, "dbias"); chk(w, at::kBFloat16, "wf"); chk(dz, at::kBFloat16, "dpair");
   const int64_t nh = w.size(0), dp = w.size(1);
   TORCH_CHECK(dp == DP || (dp == 2 * DP && (nh == 8 || nh == 16)), "pair_bias_bwd: d_pair 128, or 256 with 8 or 16 heads");
@@ -1059,13 +1091,27 @@ void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, 
   const int64_t ns = z.numel() / (L * L * dp);
   TORCH_CHECK(L % 16 == 0 && ns >= 1 && z.numel() == ns * L * L * dp && dbias.numel() == ns * nh * L * L && dz.numel() == z.numel(),
               "pair_bias_bwd shapes: pair [S, L, L, d_pair], dbias [S, H, L, L]");
+  void* dex = nullptr;
+  int xf = 0;
+  if (dex_t) {
+    TORCH_CHECK(ns == 1 && dex_t->is_contiguous() && dex_t->numel() == L * L && (dex_t->scalar_type() == at::kBFloat16 || dex_t->scalar_type() == at::kFloat),
+                "pair_bias_bwd dextra: one sample, a contiguous [L, L] bf16 / fp32 tensor");
+    dex = dex_t->data_ptr(); xf = dex_t->scalar_type() == at::kFloat ? 1 : 0;
+  }
   const at::cuda::CUDAGuard gd(z.device());
-  if (dp == 2 * DP) { if (nh == 16) pair_bias_bwd_t<16, 2 * DP>(z, dbias, w, dz, acc, L, eps, G); else pair_bias_bwd_t<8, 2 * DP>(z, dbias, w, dz, acc, L, eps, G); }
-  else if (nh == 8) pair_bias_bwd_t<8>(z, dbias, w, dz, acc, L, eps, G);
-  else if (nh == 12) pair_bias_bwd_t<12>(z, dbias, w, dz, acc, L, eps, G);
-  else if (nh == 16) pair_bias_bwd_t<16>(z, dbias, w, dz, acc, L, eps, G);
-  else pair_bias_bwd_t<24>(z, dbias, w, dz, acc, L, eps, G);
+  if (dp == 2 * DP) { if (nh == 16) pair_bias_bwd_t<16, 2 * DP>(z, dbias, w, dz, acc, L, eps, G, dex, xf); else pair_bias_bwd_t<8, 2 * DP>(z, dbias, w, dz, acc, L, eps, G, dex, xf); }
+  else if (nh == 8) pair_bias_bwd_t<8>(z, dbias, w, dz, acc, L, eps, G, dex, xf);
+  else if (nh == 12) pair_bias_bwd_t<12>(z, dbias, w, dz, acc, L, eps, G, dex, xf);
+  else if (nh == 16) pair_bias_bwd_t<16>(z, dbias, w, dz, acc, L, eps, G, dex, xf);
+  else pair_bias_bwd_t<24>(z, dbias, w, dz, acc, L, eps, G, dex, xf);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, at::Tensor acc, int64_t L, double eps, int64_t d) {
+  pair_bias_bwd_impl(z, dbias, w, dz, acc, L, eps, d, c10::nullopt);
+}
+// also d extra [L, L] = dbias summed over the heads (one sample)
+void pair_bias_bwd_x(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, at::Tensor acc, at::Tensor dex, int64_t L, double eps, int64_t d) {
+  pair_bias_bwd_impl(z, dbias, w, dz, acc, L, eps, d, dex);
 }
 
 // Blocks of pair_bias_bwd's grid at L (the partial rows it writes): the Hopper accumulator's row count for its columns.
@@ -2446,6 +2492,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pair_bias_fwd", &pair_bias_fwd);
   m.def("pair_bias_fwd_stats", &pair_bias_fwd_stats);
   m.def("pair_bias_bwd", &pair_bias_bwd);
+  m.def("pair_bias_fwd_x", &pair_bias_fwd_x);
+  m.def("pair_bias_bwd_x", &pair_bias_bwd_x);
   m.def("ln_rows", &ln_rows);
   m.def("gate_rows", &gate_rows);
   m.def("gate_bwd", &gate_bwd);

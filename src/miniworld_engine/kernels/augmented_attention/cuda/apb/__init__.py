@@ -121,16 +121,21 @@ def host_ops() -> bool:
     return True
 
 
-def pair_bias(pair2d: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None, L: int, eps: float, neg: float) -> torch.Tensor:
+def pair_bias(pair2d: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None, L: int, eps: float, neg: float,
+              extra: torch.Tensor | None = None) -> torch.Tensor:
     """bias [S H, L, L] bf16 = wf . LN(pair) (no LN affine: fold its weight into ``wf`` [H, 128] bf16, H = 8, 12, 16 or 24), ``neg``
-    on the keys where ``mask`` [S L] is False. pair2d [S L L, 128] bf16 contiguous (S samples), L a multiple of 16."""
+    on the keys where ``mask`` [S L] is False. pair2d [S L L, 128] bf16 contiguous (S samples), L a multiple of 16. ``extra`` (one
+    sample): a contiguous [L, L] bf16 / fp32 logit term added to every head before the bias's one bf16 rounding."""
     out = torch.empty(pair2d.shape[0] // L * wf.shape[0] // L, L, L, device=pair2d.device, dtype=torch.bfloat16)
-    ext().pair_bias_fwd(pair2d, wf, mask, out, int(L), float(eps), float(neg))
+    if extra is None:
+        ext().pair_bias_fwd(pair2d, wf, mask, out, int(L), float(eps), float(neg))
+    else:
+        ext().pair_bias_fwd_x(pair2d, wf, mask, extra, out, int(L), float(eps), float(neg))
     return out
 
 
 def pair_bias_bwd(pair2d: torch.Tensor, dbias: torch.Tensor, wf: torch.Tensor, L: int, eps: float, acc: torch.Tensor | None = None,
-                  d: int = 384):
+                  d: int = 384, dextra: torch.Tensor | None = None):
     """(dpair [L L, d_pair] bf16, dWf [H, d_pair] fp32, per-head dbias sums [H]) of ``pair_bias`` (without the mask: masked keys
     carry zero dbias); d_pair 128, or 256 with 16 heads (read off ``wf``). dWf and the sums are added into ``acc`` (``acc_n(H, d,
     d_pair)`` floats, zeroed by the caller) when given; the returned dWf / sums are views of it."""
@@ -138,7 +143,10 @@ def pair_bias_bwd(pair2d: torch.Tensor, dbias: torch.Tensor, wf: torch.Tensor, L
     if acc is None:
         acc = torch.zeros(acc_n(heads, d, dp), device=pair2d.device)
     dz = torch.empty_like(pair2d)
-    ext().pair_bias_bwd(pair2d, dbias.contiguous(), wf, dz, acc, int(L), float(eps), int(d))
+    if dextra is None:
+        ext().pair_bias_bwd(pair2d, dbias.contiguous(), wf, dz, acc, int(L), float(eps), int(d))
+    else:   # ``extra``'s gradient [L, L] (bf16 / fp32, one sample): dbias summed over the heads, written by the same pass
+        ext().pair_bias_bwd_x(pair2d, dbias.contiguous(), wf, dz, acc, dextra, int(L), float(eps), int(d))
     if acc.ndim == 2:
         return dz, None, None  # Hopper block partials are reduced by finalize.
     o = 2 * d + width(heads, d)

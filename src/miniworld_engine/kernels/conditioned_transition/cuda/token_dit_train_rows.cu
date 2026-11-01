@@ -86,6 +86,28 @@ __global__ void __launch_bounds__(256) sample_sum_k(const AT* __restrict__ S, lo
   V4<AT>::store(O + l * (long)W4 * 4 + c, acc);
 }
 
+// O[c] = sum over the R rows of S[r, c] (fp32, a fixed order: bitwise repeatable): the per-block partial rows of the row kernels and the
+// pair kernels, summed. A block of 1024 threads takes CSC columns (CSC / 4 float4 lanes x 1024 / (CSC / 4) row lanes) and reduces its
+// row lanes in shared memory. at::sum over dim 0 took 12 us for [256, 5376] (A2 L256) and 17 us for [2304, 5376] (A48 L384).
+constexpr int CSC = 32, CSX = CSC / 4, CSY = 1024 / CSX;
+__global__ void __launch_bounds__(1024) colsum_k(const float* __restrict__ S, long ss, int R, int W, float* __restrict__ O) {
+  __shared__ float4 red[CSY][CSX];
+  const int tx = threadIdx.x % CSX, ty = threadIdx.x / CSX, c = blockIdx.x * CSC + tx * 4;
+  float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
+  if (c < W) {
+#pragma unroll 4
+    for (int r = ty; r < R; r += CSY) acc = add4(acc, V4<float>::load(S + (long)r * ss + c));
+  }
+  red[ty][tx] = acc;
+  __syncthreads();
+#pragma unroll
+  for (int k = CSY / 2; k > 0; k >>= 1) {
+    if (ty < k) red[ty][tx] = add4(red[ty][tx], red[ty + k][tx]);
+    __syncthreads();
+  }
+  if (ty == 0 && c < W) V4<float>::store(O + c, red[0][tx]);
+}
+
 // ------------------------------------------------------------------------------------------------------------- forward
 template <typename CT, typename AT>
 __global__ void __launch_bounds__(NTC) cond_prep_k(const CT* __restrict__ C, AT* __restrict__ CHAT, AT* __restrict__ CBF,
@@ -407,16 +429,19 @@ __global__ void __launch_bounds__(NTC) cond_bwd_k(const AT* __restrict__ DCHAT, 
   }
 }
 
-// The cond-LN weights are folded into the conditioning GEMM (Wn = W diag(w), four [768, 384] blocks). A block takes 16 rows of one
-// 768-row group: dW[i] = dWn[i] w, and dw += dWn[i] W[i] summed over the group's rows (w1 for groups 0, 1; w2 for 2, 3).
+// The cond-LN weights are folded into the conditioning GEMM (Wn = W diag(w), four [768, 384] blocks). A block takes ULR rows of one
+// 768-row group: dW[i] = dWn[i] w, and dw += dWn[i] W[i] summed over the group's rows (w1 for groups 0, 1; w2 for 2, 3). The rows'
+// loads are issued together (unrolled): 192 blocks of 16 rows one after another ran latency-bound, 12 us at every size.
+constexpr int ULR = 8;
 __global__ void __launch_bounds__(NTC) unfold_lnw_k(const float* __restrict__ DWN, const float* __restrict__ WS1,
     const float* __restrict__ WB1, const float* __restrict__ WS2, const float* __restrict__ WB2, const float* __restrict__ W1,
     const float* __restrict__ W2, float* __restrict__ DW, float* __restrict__ DW12) {
-  const int col = threadIdx.x * 4, i0 = blockIdx.x * 16, grp = i0 / D;
+  const int col = threadIdx.x * 4, i0 = blockIdx.x * ULR, grp = i0 / D;
   const float* Wg = grp == 0 ? WS1 : grp == 1 ? WB1 : grp == 2 ? WS2 : WB2;
   const float4 lw = V4<float>::load((grp < 2 ? W1 : W2) + col);
   float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
-  for (int i = i0; i < i0 + 16; ++i) {
+#pragma unroll
+  for (int i = i0; i < i0 + ULR; ++i) {
     const float4 d = V4<float>::load(DWN + (long)i * DC + col);
     V4<float>::store(DW + (long)i * DC + col, mul4(d, lw));
     acc = add4(acc, mul4(d, V4<float>::load(Wg + (long)(i % D) * DC + col)));
@@ -1000,11 +1025,23 @@ void sample_sum(at::Tensor src, at::Tensor dst) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// [R, W] fp32 rows (unit column stride, any row stride; 16-byte aligned) -> their column sums [W]
+at::Tensor colsum(at::Tensor src) {
+  TORCH_CHECK(src.dim() == 2 && src.scalar_type() == at::kFloat && src.stride(1) == 1 && src.size(1) % 4 == 0 && src.stride(0) % 4 == 0 &&
+              reinterpret_cast<uintptr_t>(src.data_ptr()) % 16 == 0, "colsum: fp32 [R, W] rows, W and the row stride multiples of 4");
+  const at::cuda::CUDAGuard g(src.device());
+  const int64_t R = src.size(0), W = src.size(1);
+  auto out = at::empty({W}, src.options());
+  colsum_k<<<(unsigned)((W + CSC - 1) / CSC), 1024, 0, S()>>>(CP<float>(src), src.stride(0), (int)R, (int)W, P<float>(out));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
 void unfold_lnw(at::Tensor dwn, at::Tensor ws1, at::Tensor wb1, at::Tensor ws2, at::Tensor wb2, at::Tensor w1, at::Tensor w2,
                 at::Tensor dw, at::Tensor dw12) {
   TORCH_CHECK(dwn.size(0) == 4 * D && dwn.size(1) == DC, "unfold_lnw: dWn [4 D, DC]");
   const at::cuda::CUDAGuard g(dwn.device());
-  unfold_lnw_k<<<4 * D / 16, NTC, 0, S()>>>(CP<float>(dwn), CP<float>(ws1), CP<float>(wb1), CP<float>(ws2), CP<float>(wb2), CP<float>(w1),
+  unfold_lnw_k<<<4 * D / ULR, NTC, 0, S()>>>(CP<float>(dwn), CP<float>(ws1), CP<float>(wb1), CP<float>(ws2), CP<float>(wb2), CP<float>(w1),
                                             CP<float>(w2), P<float>(dw), P<float>(dw12));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -1399,5 +1436,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cond_bwd", &cond_bwd);
   m.def("unfold_lnw", &unfold_lnw);
   m.def("sample_sum", &sample_sum);
+  m.def("colsum", &colsum);
   m.def("pair_ln_bwd", &pair_ln_bwd);
 }

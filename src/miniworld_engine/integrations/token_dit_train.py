@@ -835,16 +835,15 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, 
     elif _pair_fused(h100, fp32, psb, dpw):
         ph = pair.new_empty(0, dpw, dtype=at)
         bias = torch.empty(H, L, L, device=dev, dtype=at)
-        ex = None if extra is None else extra.reshape(-1).float().contiguous()
+        ex = None if (extra is None or _apb_pair(h100, fp32, psb, p2, H, dpw)) else extra.reshape(-1).float().contiguous()
         if h100:
             T.pair_bias(p2, (W["Wf"].float() * LOG2E).contiguous(), None, bias, pst, L, EPS, ex, LOG2E)   # log2 units, rounded once to bf16
         elif _apb_pair(h100, fp32, psb, p2, H, dpw):   # B200: the APB TMA pair kernel, natural units, masked keys -inf
             from miniworld_engine.kernels.augmented_attention.cuda import apb as _apb
 
             m = None if mask is None else mask.reshape(L).to(torch.bool).contiguous()
-            bias = _apb.pair_bias(p2, W["Wf_at"], m, L, EPS, float("-inf")).view(H, L, L)
-            if extra is not None:   # natural units; the masked key columns stay -inf
-                bias.add_(extra.view(1, L, L))
+            # the extra term added in the same pass, before the one bf16 rounding (natural units; the masked key columns stay -inf)
+            bias = _apb.pair_bias(p2, W["Wf_at"], m, L, EPS, float("-inf"), extra=extra).view(H, L, L)
         else:   # B200: natural units, the key mask as -inf (the sm_100a bf16 core reads it from the bias), rounded once to bf16
             T.pair_bias(p2, W["Wf"], None if mask is None else mask.reshape(L).to(torch.bool).contiguous(), bias, pst, L, EPS, ex, 1.0)
     elif h100 or not fp32:
@@ -1338,7 +1337,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dx = torch.empty(M, D, device=dev, dtype=sdt)
     T.adaln_a_bwd(dxa, x, xst, G, bs1, dx1, dx, dG, part[3])
     if not native:
-        sums = allp.sum(0) if qk else allp[:, : 5 * D].sum(0)
+        sums = T.colsum(allp if qk else allp[:, : 5 * D])   # one deterministic pass (at::sum over dim 0 ran 12 us at A2 L256)
         pb = sums[: 5 * D].view(5, D)
         dwqk = (
             sums[5 * D :].view(2, H, DH).sum(1).reshape(-1)
@@ -1388,6 +1387,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     Ws1, Wb1, Ws2, Wb2 = (Wraw[i * D : (i + 1) * D] for i in range(4))
     T.unfold_lnw(dWn, Ws1, Wb1, Ws2, Wb2, w1, w2, dWu, dw12)
     dpair = torch.empty(R, dpw, device=dev, dtype=pdtype)
+    dex = None   # d extra, when the pair pass writes it (else ``_xgrad`` from dbias)
     if psb:
         # B200: the bias gradient in the bias's layout; ln_pair / to_bias belong to the bias's producer (zero here)
         dpair = DB.to(pdtype)
@@ -1403,9 +1403,11 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
 
         # one dWf partial row per block, summed here in block order (atomics into one row were not bitwise repeatable)
         acc = torch.empty(_apb.ext().pair_bwd_blocks(p2, H, L, 1, dpw), _apb.acc_n(H, 384, dpw), device=dev)
-        dpair, _, _ = _apb.pair_bias_bwd(p2, DB.reshape(H, R).float(), W["Wf_at"], L, EPS, acc)
+        # d extra (dbias summed over the heads) written by the same pass
+        dex = None if extra is None else torch.empty(L, L, device=dev, dtype=extra.dtype)
+        dpair, _, _ = _apb.pair_bias_bwd(p2, DB.reshape(H, R).float(), W["Wf_at"], L, EPS, acc, dextra=dex)
         o = 2 * 384 + _apb.width(H, 384)
-        dWf = acc[:, o : o + H * dpw].sum(0).view(H, dpw)
+        dWf = T.colsum(acc[:, o : o + H * dpw]).view(H, dpw)
     elif _pair_fused(h100, fp32, psb, dpw):
         part = torch.empty(T.pair_grid(R), H * dpw, device=dev)
         T.pair_bias_bwd(DB.reshape(H, R).contiguous(), p2, pst, Wf, dpair, part)
@@ -1456,7 +1458,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         dc.view(cond.shape),
         dpair.view(pair.shape) if psb else dpair.view(1, L, L, dpw),
         *outs,
-        *_xgrad(DB, extra, H, L),
+        *([dex] if dex is not None else _xgrad(DB, extra, H, L)),
     ]
 
 
