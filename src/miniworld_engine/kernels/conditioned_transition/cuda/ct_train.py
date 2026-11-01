@@ -192,6 +192,49 @@ _XT = os.environ.get("CT_XT", "1") != "0"   # read once at import (the routing r
 GATE7_BN: int | None = 256
 
 
+#: the forward's expand on B200 bf16: h and [a | b] from one tcgen05 GEMM with the SwiGLU in its epilogue (``tg_gemm.cu`` MODE 5, CTA-pair
+#: build, 128-column tiles of each of a and b) instead of cuBLAS ab + ``swiglu_fwd`` (which reads ab back). Kernels alone, bf16 d768 hid1536,
+#: M 18432 / 36864 / 49152: 91.8 / 178.9 / 251.1 us -> 85.2 / 163.2 / 214.3. h is silu(a) b of the fp32 products (the saved a, b are rounded
+#: to bf16 as before). False: the cuBLAS route (A/B).
+SWIGLU_AB = True
+
+
+def _swab_ok(x: torch.Tensor, wab: torch.Tensor) -> bool:
+    nd = wab.shape[0] // 2
+    return (SWIGLU_AB and x.dtype is torch.bfloat16 and wab.dtype is torch.bfloat16 and torch.cuda.get_device_capability(x.device) == (10, 0)
+            and nd % 128 == 0 and x.shape[1] % 64 == 0 and wab.is_contiguous() and x.is_contiguous())
+
+
+def _swiglu_ab_fake(x, wab):
+    """(h [M, ND], ab [M, 2 ND])."""
+    nd = wab.shape[0] // 2
+    return x.new_empty((x.shape[0], nd)), x.new_empty((x.shape[0], 2 * nd))
+
+
+@opaque(fake=_swiglu_ab_fake, name="conditioned_transition_cuda_swiglu_ab_sm100a")
+def swiglu_ab(x: torch.Tensor, wab: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """h = silu(a) b and ab = [a | b] = x [Wa; Wb]^T (bf16, ``wab`` the concatenation [2 ND, D])."""
+    from .ct_tg import gemm
+
+    m, d = x.shape
+    nd = wab.shape[0] // 2
+    h = x.new_empty((m, nd))
+    ab = x.new_empty((m, 2 * nd))
+    gemm("swiglu_ab", 128, True, m, nd, x, wab[:nd], h, b1=wab[nd:], o1=ab, k0=d, hoff=nd)
+    return h, ab
+
+
+def _transpose_bf16_fake(t):
+    """t^T [C, R]."""
+    return t.new_empty((t.shape[1], t.shape[0]))
+
+
+@opaque(fake=_transpose_bf16_fake, name="conditioned_transition_cuda_transpose_bf16")
+def transpose_bf16(t: torch.Tensor) -> torch.Tensor:
+    """t^T (bf16, contiguous): one tiled pass (``ct_rows.cu``)."""
+    return ext().transpose_bf16(t.contiguous())
+
+
 def _gate7_ok(dout: torch.Tensor, ab: torch.Tensor) -> bool:
     if GATE7_BN is None or dout.dtype is not torch.bfloat16 or ab.dtype is not torch.bfloat16:
         return False
@@ -263,8 +306,11 @@ class _Tail(torch.autograd.Function):
             wab = torch.cat([wa, wb]).to(dt)
             wsb, wscb, bscb = ws.to(dt), wsc.to(dt), bsc.to(dt)
             wabT = wsT = wscT = None
-        ab = torch.mm(x, wab.t())
-        h = swiglu_fwd(ab)
+        if _swab_ok(x, wab):   # B200 bf16: the expand and the SwiGLU in one tcgen05 GEMM
+            h, ab = swiglu_ab(x, wab)
+        else:
+            ab = torch.mm(x, wab.t())
+            h = swiglu_fwd(ab)
         if dt is torch.bfloat16 and _fused_squeeze_ok(h, cond, wsb):   # one wgmma kernel for both GEMMs and the gate (+ residual)
             y, out, sp = squeeze_gate_save(h, cond, wsb, wscb, bsc.float().contiguous(), res)
         else:
@@ -298,7 +344,7 @@ class _Tail(torch.autograd.Function):
         t = (lambda w: w) if x.dtype is not f32 else None   # TF32: the K-major copies packed by the forward (18432 rows: dh -21, dx -72, dcond -23 us)
         k = (lambda i, w: tw[i].t()) if x.dtype is f32 else (lambda i, w: w)
         if _gate7_ok(dout, ab):   # B200 bf16: dh and the SwiGLU backward in one tcgen05 GEMM
-            dab = gate_ab(dout, wsb.t().contiguous(), ab)
+            dab = gate_ab(dout, transpose_bf16(wsb), ab)
         else:
             dh = torch.mm(dout, k(1, wsb))
             dab = swiglu_bwd(dh, ab)

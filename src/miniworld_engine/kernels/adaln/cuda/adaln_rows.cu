@@ -207,6 +207,81 @@ __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X,
   if (lane == 0) ST[row] = make_float2(mean, rstd);
 }
 
+// adaln_fwd_k for bf16 at widths that are a multiple of 256: each lane holds its 16-B chunks of x, scale and bias still packed (8 bf16 per
+// 4 registers) and a warp takes RPW rows at once, so a block keeps ~2x the bytes of adaln_fwd_k in flight (that kernel holds the rows as
+// fp32: its register footprint, not the memory system, bounded it at ~3.3 TB/s). Same arithmetic (modulate, two-pass fp32 statistics);
+// the statistics' summation order differs from adaln_fwd_k's.
+constexpr int AF_RPW = 2;
+__device__ __forceinline__ void unpk8(const uint4 u, float (&v)[8]) {
+  const uint32_t w[4] = {u.x, u.y, u.z, u.w};
+#pragma unroll
+  for (int j = 0; j < 4; ++j) { v[2 * j] = __uint_as_float(w[j] << 16); v[2 * j + 1] = __uint_as_float(w[j] & 0xffff0000u); }
+}
+__device__ __forceinline__ uint4 pk8(const float (&v)[8]) {
+  uint32_t w[4];
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    const bf2 t = __floats2bfloat162_rn(v[2 * j], v[2 * j + 1]);
+    w[j] = *reinterpret_cast<const uint32_t*>(&t);
+  }
+  return make_uint4(w[0], w[1], w[2], w[3]);
+}
+template <int N>
+__global__ void __launch_bounds__(32 * WPB) adaln_fwd_pk_k(const bf* __restrict__ X, const bf* __restrict__ SB, bf* __restrict__ Y,
+                                                           float2* __restrict__ ST, long R, float eps) {
+  constexpr int V = N / 256;                         // 16-B chunks of a row per lane
+  const int lane = threadIdx.x & 31;
+  const long row0 = ((long)blockIdx.x * WPB + (threadIdx.x >> 5)) * AF_RPW;
+  uint4 xr[AF_RPW][V], sr[AF_RPW][V], br[AF_RPW][V];
+#pragma unroll
+  for (int q = 0; q < AF_RPW; ++q) {
+    const long row = row0 + q;
+    if (row < R) {
+#pragma unroll
+      for (int v = 0; v < V; ++v) {
+        const int c = 8 * (lane + 32 * v);
+        xr[q][v] = *reinterpret_cast<const uint4*>(X + row * N + c);
+        sr[q][v] = *reinterpret_cast<const uint4*>(SB + row * 2 * N + c);
+        br[q][v] = *reinterpret_cast<const uint4*>(SB + row * 2 * N + N + c);
+      }
+    }
+  }
+#pragma unroll
+  for (int q = 0; q < AF_RPW; ++q) {
+    const long row = row0 + q;
+    if (row >= R) break;
+    float s = 0.f;
+#pragma unroll
+    for (int v = 0; v < V; ++v) {
+      float t[8];
+      unpk8(xr[q][v], t);
+#pragma unroll
+      for (int e = 0; e < 8; ++e) s += t[e];
+    }
+    const float mean = wsum(s) * (1.f / N);
+    float q2 = 0.f;
+#pragma unroll
+    for (int v = 0; v < V; ++v) {
+      float t[8];
+      unpk8(xr[q][v], t);
+#pragma unroll
+      for (int e = 0; e < 8; ++e) q2 += (t[e] - mean) * (t[e] - mean);
+    }
+    const float rstd = rsqrtf(wsum(q2) * (1.f / N) + eps);
+#pragma unroll
+    for (int v = 0; v < V; ++v) {
+      float t[8], g[8], b[8];
+      unpk8(xr[q][v], t);
+      unpk8(sr[q][v], g);
+      unpk8(br[q][v], b);
+#pragma unroll
+      for (int e = 0; e < 8; ++e) t[e] = rowmath::modulate(t[e], mean, rstd, sigm(g[e]), b[e]);
+      *reinterpret_cast<uint4*>(Y + row * N + 8 * (lane + 32 * v)) = pk8(t);
+    }
+    if (lane == 0) ST[row] = make_float2(mean, rstd);
+  }
+}
+
 template <int N, typename T>
 __global__ void __launch_bounds__(32 * WPB, 2) adaln_bwd_k(const T* __restrict__ DY, const T* __restrict__ X, const T* __restrict__ SB,
                                                         const float2* __restrict__ ST, T* __restrict__ DSB, T* __restrict__ DX,
@@ -521,8 +596,17 @@ std::vector<at::Tensor> adaln_fwd(at::Tensor x, at::Tensor sb, double eps, bool 
   const at::cuda::CUDAGuard gd(x.device());
   auto y = at::empty_like(x);
   auto st = at::empty({R, 2}, x.options().dtype(at::kFloat));
-  ACT_SWITCH(N, x, adaln_fwd_k<NN, T><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<T>(x), P<T>(sb), PM<T>(y), reinterpret_cast<float2*>(st.data_ptr()), R,
-                                                                          (float)eps, rna && x.scalar_type() == at::kFloat));
+  if (x.scalar_type() == at::kBFloat16 && (N == 256 || N == 512 || N == 768 || N == 1024)) {   // bf16: the packed kernel (adaln_fwd_pk_k)
+    const unsigned grid = (unsigned)((R + WPB * AF_RPW - 1) / (WPB * AF_RPW));
+    float2* stp = reinterpret_cast<float2*>(st.data_ptr());
+    if (N == 256) adaln_fwd_pk_k<256><<<grid, 32 * WPB, 0, S()>>>(P<bf>(x), P<bf>(sb), PM<bf>(y), stp, R, (float)eps);
+    else if (N == 512) adaln_fwd_pk_k<512><<<grid, 32 * WPB, 0, S()>>>(P<bf>(x), P<bf>(sb), PM<bf>(y), stp, R, (float)eps);
+    else if (N == 768) adaln_fwd_pk_k<768><<<grid, 32 * WPB, 0, S()>>>(P<bf>(x), P<bf>(sb), PM<bf>(y), stp, R, (float)eps);
+    else adaln_fwd_pk_k<1024><<<grid, 32 * WPB, 0, S()>>>(P<bf>(x), P<bf>(sb), PM<bf>(y), stp, R, (float)eps);
+  } else {
+    ACT_SWITCH(N, x, adaln_fwd_k<NN, T><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<T>(x), P<T>(sb), PM<T>(y), reinterpret_cast<float2*>(st.data_ptr()), R,
+                                                                            (float)eps, rna && x.scalar_type() == at::kFloat));
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {y, st};
 }

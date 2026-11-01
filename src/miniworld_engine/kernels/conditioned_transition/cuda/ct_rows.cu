@@ -342,7 +342,9 @@ std::vector<at::Tensor> sigmul_bwd(at::Tensor dy, at::Tensor out, at::Tensor sp,
   auto dout = at::empty_like(dy), dsc = at::empty_like(dy);
   const long chunks = dy.numel() / V;
   const int ndc = (int)(dy.size(-1) / V);
-  const int threads = ndc * std::max(1, 128 / ndc);
+  // bf16: ~512 threads a block (the grid is capped at a few blocks per SM, and one chunk per thread in flight left the pass latency-bound:
+  // 32 -> ~24 us at [18432, 768]); fp32 keeps 128
+  const int threads = ndc * std::max(1, (f ? 128 : 512) / ndc);
   TORCH_CHECK(threads <= 1024, "width");
   const unsigned grid = (unsigned)grid_blocks;
   auto part = at::empty({(long)grid, dy.size(-1)}, dy.options().dtype(at::kFloat));
@@ -407,6 +409,33 @@ std::vector<at::Tensor> sigmul_bwd_x(at::Tensor dy, at::Tensor out, at::Tensor s
   return {dout, dsc, part, doutT};
 }
 
+// ---- t^T of a bf16 matrix [R, C] (32 x 32 tiles through shared memory): Ws^T for the B200 bf16 backward's fused dh GEMM (ct_tg gate7), whose
+// B operand is K-major
+__global__ void __launch_bounds__(256) transpose_bf16_k(const bf* __restrict__ src, bf* __restrict__ dst, int R, int C) {
+  __shared__ bf tile[32][34];
+  const int c0 = blockIdx.x * 32, r0 = blockIdx.y * 32, tx = threadIdx.x & 31, ty = threadIdx.x >> 5;
+#pragma unroll
+  for (int k = 0; k < 32; k += 8) {
+    const int r = r0 + ty + k, c = c0 + tx;
+    if (r < R && c < C) tile[ty + k][tx] = src[(long)r * C + c];
+  }
+  __syncthreads();
+#pragma unroll
+  for (int k = 0; k < 32; k += 8) {
+    const int c = c0 + ty + k, r = r0 + tx;
+    if (r < R && c < C) dst[(long)c * R + r] = tile[tx][ty + k];
+  }
+}
+at::Tensor transpose_bf16(at::Tensor t) {
+  TORCH_CHECK(t.is_cuda() && t.scalar_type() == at::kBFloat16 && t.dim() == 2 && t.is_contiguous(), "transpose_bf16: bf16 [R, C] contiguous");
+  const int R = (int)t.size(0), C = (int)t.size(1);
+  const at::cuda::CUDAGuard g(t.device());
+  auto o = at::empty({C, R}, t.options());
+  transpose_bf16_k<<<dim3((unsigned)((C + 31) / 32), (unsigned)((R + 31) / 32)), 256, 0, S()>>>(P<bf>(t), PM<bf>(o), R, C);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return o;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swiglu_fwd", &swiglu_fwd);
   m.def("swiglu_bwd", &swiglu_bwd);
@@ -415,4 +444,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swiglu_bwd_t", &swiglu_bwd_t);
   m.def("sigmul_bwd_t", &sigmul_bwd_t);
   m.def("sigmul_bwd_x", &sigmul_bwd_x);
+  m.def("transpose_bf16", &transpose_bf16);
 }
