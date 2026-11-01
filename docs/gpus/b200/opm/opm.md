@@ -41,6 +41,36 @@ Ladder (`benchmarks/runners/ladder.py`, group `mw_opm_p64`, S1024, bf16-mixed, C
 Tests: `tests/gpu/sm100/test_opm_wide_b200_gpu.py` (`mw_pair64`, `mw_pair64_after`, `w128_64_bias`: inference / training against the
 fp64 statements, interchain + batch, deterministic + CUDA graph).
 
+### d_pair 64 inference: the fused kernel, double-buffered (2026-11-01)
+
+Inference at d_pair 64 and S <= 2048 (padded) now runs `opm_fused_infer` (`opm_fused_sm100<64, true>`: the grouped outer product and the
+1024 -> 64 projection in one kernel, the 1.2 GB product never in HBM, no count kernel) instead of cuBLAS + `opm_epilogue<64>` +
+`opm_norm` (`opm_train._FUSED_SM100_MAX_S`). Three kernels a call instead of five: the cast (which now also writes Wo in the fused
+kernel's k order, `opm_cast_bf16(..., perm)`: the two permute kernels of `_fused_weight` are gone from the fp32-master step), the
+prologue, the fused kernel. What made it win at c_z 64 where c_z 128 tied (below): half the projection, and the DB variant -- the two
+passes in flight own disjoint TMEM halves (columns [256 (p & 1), + 256)), so a pass never waits for the drain of the previous one (the
+0.5-1 us bubble per 7-8 us pass of the three-slot rotation). There is no column left for a persistent z accumulator: each pass's
+projection lands in the first 64 columns of its own, already drained half, and the four epilogue warps sum the four passes' partials in
+fp32 registers (fp32 throughout, as before; the update matches the unfused path to bf16 rounding, max |diff| 4e-3 on a unit residual).
+
+Kernel pair vs fused (B200 GPU 6, CUDA graph, triton do_bench median, us; cuBLAS + epilogue -> fused): S1024 L128 55 / 56, L256 145 / 135,
+L384 299 / 266, L512 523 / 463, L768 1092 / 1039; S2048 L128 84 / 82, L256 241 / 241, L384 506 / 505, L512 888 / 806, L768 1937 / 1934;
+S4096 L256 448 / 478, L384 980 / 977, L512 1687 / 1697, L768 3693 / 3774 (the fused mainloop's long-K gap: not served). The DB variant
+against the three-slot one at S1024: L384 269 -> 266, L768 1067 -> 1039. Per kernel (profiler, L768 S1024): fused 1003, prologue 45,
+cast 3 (was cuBLAS 829 + epilogue 240 + prologue 49 + counts 11 + cast 3).
+
+Ladder (`mw_opm_p64`, S1024, bf16-mixed, CUDA graph, us; GPU 6 of node 2, same session; training untouched):
+
+| mode | L | CUDA before | CUDA now | Triton | CUDA / Triton before -> now |
+|---|---|---|---|---|---|
+| inference | 384 | 295.0 | 256.0 | 317.4 / 325.6 | 0.929 -> 0.786 |
+| inference | 768 | 1077.1 | 1017.7 | 1189.9 / 1157.1 | 0.905 -> 0.879 |
+| training | 384 | 927.4 | 925.3 | 1140.5 / 1149.7 | 0.813 -> 0.805 |
+| training | 768 | 3415.0 | 3431.2 | 4107.1 / 4133.0 | 0.831 -> 0.830 |
+
+Tests: `tests/gpu/sm100/test_opm_fused_b200_gpu.py` at c_z 64 and 128 (fp64 statements, against the unfused composition, deterministic +
+CUDA graph); the fused call is counted by `opm_train.STATS["fused_sm100"]`.
+
 ## FoldForge widths, RoseTTAFold3, Chai-1 (`opm_wide_sm100.cu`, 2026-10-29)
 
 One extension (`opm_train._ext_wide`), the stages of `opm_sm100.cu`; MiniWorld's (64, 128) without biases keeps `opm_sm100.cu`, except the

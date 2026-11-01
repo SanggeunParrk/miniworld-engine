@@ -34,9 +34,9 @@ OPTIONS = {
 }
 
 
-def build(options, dtype=torch.bfloat16):
+def build(options, dtype=torch.bfloat16, cz=128):
     torch.manual_seed(0)
-    m = OuterProductMean(64, 128, 32, implementation=ImplementationType.MINIWORLD, **options).cuda().eval()
+    m = OuterProductMean(64, cz, 32, implementation=ImplementationType.MINIWORLD, **options).cuda().eval()
     with torch.no_grad():
         for pname, p in m.named_parameters():
             p.copy_(1 + 0.1 * torch.randn_like(p) if "norm" in pname and pname.endswith("weight") else
@@ -55,28 +55,41 @@ def inputs(s, n, *, seed=1):
     return msa, mask
 
 
+class _FusedCalls:
+    """The fused kernel's call count since construction (`opm_train.STATS["fused_sm100"]`)."""
+
+    def __init__(self):
+        self.start = opm_train.STATS["fused_sm100"]
+
+    def __bool__(self):
+        return opm_train.STATS["fused_sm100"] > self.start
+
+    def clear(self):
+        self.start = opm_train.STATS["fused_sm100"]
+
+
 @pytest.fixture
 def fused_everywhere(monkeypatch):
-    """Route every (N, S) cell to the fused kernel and count its calls (`_fused_weight` runs only on that path)."""
-    calls = []
-    real = opm_train._fused_weight
-    monkeypatch.setattr(opm_train, "_fused_weight", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
-    monkeypatch.setattr(opm_train, "_fused_sm100_enabled", lambda s, n: True)
-    return calls
+    """Route every (N, S) cell to the fused kernel and count its calls."""
+    monkeypatch.setattr(opm_train, "_fused_sm100_enabled", lambda *a: True)
+    return _FusedCalls()
 
 
 def rel(a, b):
     return ((a.double() - b).norm() / b.norm().clamp_min(1e-30)).item()
 
 
+@pytest.mark.parametrize("cz", [128, 64])
 @pytest.mark.parametrize("name", list(OPTIONS))
 @pytest.mark.parametrize(("s", "n"), [(256, 64), (200, 100), (1024, 128), (512, 320)])
 @pytest.mark.parametrize("residual", [False, True])
-def test_fused_matches_fp64_statements(name, s, n, residual, fused_everywhere):
-    m = build(OPTIONS[name], torch.float32)
+def test_fused_matches_fp64_statements(name, s, n, residual, cz, fused_everywhere):
+    if cz != 128 and OPTIONS[name].get("projection_bias"):
+        pytest.skip("RoseTTAFold3's biases at d_pair 64 run opm_wide_sm100.cu (no fused kernel)")
+    m = build(OPTIONS[name], torch.float32, cz)
     msa, mask = inputs(s, n)
     g = torch.Generator(device="cuda").manual_seed(2)
-    pair = torch.randn(1, n, n, 128, device="cuda", generator=g)
+    pair = torch.randn(1, n, n, cz, device="cuda", generator=g)
     gold, ref16, eng = copy.deepcopy(m).double(), copy.deepcopy(m).bfloat16(), copy.deepcopy(m).bfloat16()
     with torch.no_grad():
         want = gold._variant_reference(msa.double(), mask, None, pair.double() if residual else None)
@@ -87,22 +100,21 @@ def test_fused_matches_fp64_statements(name, s, n, residual, fused_everywhere):
     assert rel(got, want) <= 1.5 * rel(base, want), f"engine {rel(got, want):.2e} vs bf16 statements {rel(base, want):.2e}"
 
 
+@pytest.mark.parametrize("cz", [128, 64])
 @pytest.mark.parametrize("after", [False, True])
 @pytest.mark.parametrize(("s", "n"), [(512, 128), (1024, 256)])
-def test_fused_matches_the_unfused_composition(after, s, n, monkeypatch):
+def test_fused_matches_the_unfused_composition(after, s, n, cz, monkeypatch):
     """Same bf16 products: only the order of the fp32 sums of the projection differs."""
-    m = build({"normalize_before_proj": not after})
+    m = build({"normalize_before_proj": not after}, cz=cz)
     msa, mask = inputs(s, n)
-    pair = torch.randn(1, n, n, 128, device="cuda", dtype=torch.bfloat16)
-    calls = []
-    real = opm_train._fused_weight
-    monkeypatch.setattr(opm_train, "_fused_weight", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    pair = torch.randn(1, n, n, cz, device="cuda", dtype=torch.bfloat16)
+    calls = _FusedCalls()
     with torch.no_grad():
-        monkeypatch.setattr(opm_train, "_fused_sm100_enabled", lambda s_, n_: True)
+        monkeypatch.setattr(opm_train, "_fused_sm100_enabled", lambda *a: True)
         fused = m(msa.bfloat16(), mask, residual=pair)
         assert calls
         calls.clear()
-        monkeypatch.setattr(opm_train, "_fused_sm100_enabled", lambda s_, n_: False)
+        monkeypatch.setattr(opm_train, "_fused_sm100_enabled", lambda *a: False)
         unfused = m(msa.bfloat16(), mask, residual=pair)
         assert not calls
     d = (fused.float() - unfused.float()).abs()
@@ -110,8 +122,9 @@ def test_fused_matches_the_unfused_composition(after, s, n, monkeypatch):
     assert rel(fused, unfused.double()) < 5e-3
 
 
-def test_fused_is_deterministic_and_graph_safe(fused_everywhere):
-    m = build({})
+@pytest.mark.parametrize("cz", [128, 64])
+def test_fused_is_deterministic_and_graph_safe(cz, fused_everywhere):
+    m = build({}, cz=cz)
     msa, mask = inputs(512, 192)
     msa = msa.bfloat16()
     with torch.no_grad():

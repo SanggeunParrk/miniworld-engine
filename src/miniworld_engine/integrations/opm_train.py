@@ -144,6 +144,7 @@ def refusal(
 STATS: dict[str, Any] = {
     "served": 0,
     "refused": {},
+    "fused_sm100": 0,   # B200 inference calls the fused outer product + projection kernel served
 }  # how often the path ran / why it did not (for a real-model check)
 
 
@@ -187,12 +188,13 @@ def _fused_enabled(s: int, n: int, *, training: bool, cm: int = CM, cz: int = CZ
 
 
 def _fused_weight(wo):
-    """Wo [128, 1024] bf16 with k = (c, e) permuted to (c // 8, e // 8, c % 8, e % 8): the layout `opm_fused_infer` keeps its products in."""
+    """Wo [c_z, 1024] bf16 with k = (c, e) permuted to (c // 8, e // 8, c % 8, e % 8): the layout `opm_fused_infer` keeps its products in."""
     from miniworld_engine.kernels import _capture
 
+    cz = wo.shape[0]
     return _capture.param_forms(
         "opm_fused_w", [wo],
-        lambda: wo.detach().to(torch.bfloat16).reshape(128, 4, 8, 4, 8).permute(0, 1, 3, 2, 4).reshape(128, 1024).contiguous())
+        lambda: wo.detach().to(torch.bfloat16).reshape(cz, 4, 8, 4, 8).permute(0, 1, 3, 2, 4).reshape(cz, 1024).contiguous())
 
 
 def _owned_blas_for(s: int, n: int, *, training: bool) -> bool:
@@ -463,10 +465,13 @@ def fused_prologue(
     return A2, BT, stats
 
 
-def _fused_sm100_enabled(s: int, n: int) -> bool:
+def _fused_sm100_enabled(s: int, n: int, cz: int = CZ) -> bool:
     """B200 inference: the outer product + projection as ONE kernel (`opm_fused_infer`, csrc/sm100/opm_sm100.cu) at the cells where it
-    measured faster than cuBLAS + the epilogue kernel (`_FUSED_SM100_CELLS`; docs/gpus/b200/opm/opm.md)."""
-    return (n, s) in _FUSED_SM100_CELLS and not settings.current().force_portable_kernels
+    measured faster than cuBLAS + the epilogue kernel (`_FUSED_SM100_CELLS` at c_z 128, `_FUSED_SM100_MAX_S` per c_z;
+    docs/gpus/b200/opm/opm.md)."""
+    if settings.current().force_portable_kernels:
+        return False
+    return (cz == CZ and (n, s) in _FUSED_SM100_CELLS) or s <= _FUSED_SM100_MAX_S.get(cz, 0)
 
 
 # (N, S) after the wrapper's padding (N % 64, S % 256) where the fused kernel is served: none, as measured 2026-10-29 (B200, CUDA graph).
@@ -476,6 +481,13 @@ def _fused_sm100_enabled(s: int, n: int) -> bool:
 # L384 293 -> 288, L512 513 -> 505, L640 800 -> 788, L768 1144 -> 1141; S2048 +4-8 %; S4096 +9-10 %.  A cell goes here once it wins
 # on the harness (docs/gpus/b200/opm/opm.md: what is left is the fused mainloop's energy per product).
 _FUSED_SM100_CELLS: frozenset[tuple[int, int]] = frozenset()
+# {c_z: the deepest (padded) MSA where the fused kernel serves every N}.  c_z 64 (MiniWorld's B200 trunk) runs the double-buffered
+# variant (`opm_fused_sm100<64, true>`: the two passes in flight own disjoint TMEM halves, no pass-to-pass bubble) and has no epilogue
+# kernel re-reading the 1.2 GB product to beat -- measured 2026-11-01 (B200 GPU 6, CUDA graph, triton do_bench median, us, cuBLAS +
+# epilogue -> fused): S1024 L128 55 / 56, L256 145 / 135, L384 299 / 266, L512 523 / 463, L768 1092 / 1039; S2048 L128 84 / 82, L256
+# 241 / 241, L384 506 / 505, L512 888 / 806, L768 1937 / 1934; S4096 L256 448 / 478, L384 980 / 977, L512 1687 / 1697, L768 3693 /
+# 3774 (the fused mainloop's long-K gap, below) -> served up to S2048.
+_FUSED_SM100_MAX_S: dict[int, int] = {64: 2048}
 
 
 def _ext_wide(device=None):
@@ -534,14 +546,15 @@ class _sm_carveout:
         return False
 
 
-def _bf16_params(ext, ps):
+def _bf16_params(ext, ps, perm: int = -1):
     """bf16 forms of the parameters `ps` (Wa, Wb, Wo, the bias[, the projection biases]): with fp32 master parameters ONE launch writes
     them all into one flat buffer (`opm_cast_bf16`, segments at 64-element boundaries) -- a cast kernel each, in the forward and again in
     the backward, were seven launches of the training step.  Returns the views and the buffer (None when every parameter is bf16 already,
-    as with bf16 parameters: no kernel)."""
+    as with bf16 parameters: no kernel).  `perm` >= 0: that parameter (Wo) comes back in the fused inference kernel's k order
+    (`_fused_weight`'s), written so by the same launch."""
     if all(p.dtype == torch.bfloat16 for p in ps):
-        return [p.detach().contiguous() for p in ps], None
-    flat = ext.opm_cast_bf16([p.detach().contiguous() for p in ps])
+        return [_fused_weight(p) if k == perm else p.detach().contiguous() for k, p in enumerate(ps)], None
+    flat = ext.opm_cast_bf16([p.detach().contiguous() for p in ps], perm)
     return _bf16_views(flat, ps), flat
 
 
@@ -560,15 +573,22 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
     and its bias (ESMFold2's order, and AF3's as released).  `pbias` (RoseTTAFold3's left | right projection biases, [64]):
     the prologue adds them to the projections, masked like them; widths other than MiniWorld's and the biases run
     `opm_wide_sm100.cu` (the epilogue cuts c_z into 128-wide slices).  `asym` (int32 [N] chain ids, the interchain mask): the epilogue
-    zeroes the update of a pair of two chains (the residual passes through).  The last value returned is the flat bf16 buffer of the
-    parameters' bf16 forms (`_bf16_params`; None with bf16 parameters), which the training backward reuses."""
+    zeroes the update of a pair of two chains (the residual passes through).  Inference where `_fused_sm100_enabled` (MiniWorld's B200
+    c_z 64 up to S2048): the outer product and the projection in one kernel (`opm_fused_infer`), no product in HBM, no count kernel.
+    The last value returned is the flat bf16 buffer of the parameters' bf16 forms (`_bf16_params`; None with bf16 parameters), which
+    the training backward reuses."""
     bf = torch.bfloat16
     m = msa[0].contiguous()
     mk = mask[0].contiguous()
     if mk.dtype != torch.bool:
         mk = mk != 0
     cm, cz = m.shape[2], wo.shape[0]
-    (wa16, wb16, wo16, bo16, *pb16), w16 = _bf16_params(ext, [wa, wb, wo, bo, *((pbias,) if pbias is not None else ())])
+    n = m.shape[1]
+    # B200 inference at MiniWorld's d_msa: the fused outer product + projection, its Wo k-permuted by the cast launch
+    fused = (not save_stats and cm == CM and cz in (64, CZ) and pbias is None and asym is None
+             and _fused_sm100_enabled(m.shape[0], n, cz))
+    (wa16, wb16, wo16, bo16, *pb16), w16 = _bf16_params(ext, [wa, wb, wo, bo, *((pbias,) if pbias is not None else ())],
+                                                        perm=2 if fused else -1)
     if cm != CM or cz not in (64, CZ) or pbias is not None:
         wext = _ext_wide(msa.device)
         # the biases in bf16, as the module's bf16 Linear adds them (its fp32 accumulation, one rounding of the sum)
@@ -577,6 +597,7 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
             m, mk, lnw.detach().contiguous(), lnb.detach().contiguous(), float(eps), wa16, wb16, pb, bool(save_stats))
         n = m.shape[1]
         if not save_stats and cz == CZ and asym is None and _fused_sm100_enabled(m.shape[0], n):
+            STATS["fused_sm100"] += 1
             z = ext.opm_fused_infer(a2, bt, bits, _fused_weight(wo), bo16, residual, int(after))
             return z, m, mk, bits, a2, bt, stats, None, w16
         o = torch.matmul(a2, bt.t())
@@ -588,10 +609,10 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
         return z, m, mk, norm, a2, bt, stats, o, w16
     a2, bt, _, stats, bits = ext.opm_prologue(m, mk, lnw.detach().contiguous(), lnb.detach().contiguous(), float(eps), wa16, wb16,
                                               save_stats, False)
-    n = m.shape[1]
-    if not save_stats and cz == CZ and asym is None and _fused_sm100_enabled(m.shape[0], n):
+    if fused:
         # inference: the products stay on chip (k-permuted weight as H100's fused kernel; the bias rounded to bf16 as below)
-        z = ext.opm_fused_infer(a2, bt, bits, _fused_weight(wo), bo16, residual, int(after))
+        STATS["fused_sm100"] += 1
+        z = ext.opm_fused_infer(a2, bt, bits, wo16, bo16, residual, int(after))
         return z, m, mk, bits, a2, bt, stats, None, w16
     o = torch.matmul(a2, bt.t())  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
     norm = ext.opm_norm(bits)     # the mask counts [N, N], read by the epilogue and the dgrad
