@@ -31,7 +31,14 @@ WIDTHS = (128, 256, 384, 512, 768, 1024)
 FEATURE_MAJOR_WIDTHS = (256, 384, 512, 768)   # fp32 backward row pass writing the gradient feature-major (``adaln_bwd_t``)
 _XT = os.environ.get("ADALN_XT", "1") != "0"   # fp32 token-width weight gradient with LN(cond)^T as the K-major operand
 _XT_MAX_ROWS = 24576
-_FM = os.environ.get("ADALN_FM", "auto")   # "1": always, "0": never, "auto": a cond of 768 columns or more
+_FM = os.environ.get("ADALN_FM", "auto")   # "1": always, "0": never, "auto": a cond of 768 columns or more, on H100 (``_fm_auto``)
+
+
+def _fm_auto(x2, c2) -> bool:
+    """The feature-major fp32 backward where "auto" takes it: a cond of 768 columns, on H100. On B200 the row-major backward measured faster at
+    every cond-768 training row (CUDA graph, us, L128 / L384 / L768 at 48 x L rows: 157 / 366 / 694 against 168 / 385 / 719 feature-major): the
+    transposing row pass costs more than the K-major weight-gradient GEMM saves there."""
+    return c2.shape[1] >= 768 and _sm90(x2)
 
 
 @functools.lru_cache(maxsize=None)
@@ -144,17 +151,14 @@ def _fwd_fake(x2, c2, wc, ws, bs, wb, eps_x, eps_c, rna=False):
 
 
 def _fm(x2, c2) -> bool:
-    """The fp32 feature-major backward (``adaln_bwd_t``) for this call. "auto": a cond of 768 columns or more, except on B200 (sm_100), where the
-    transposing row pass costs more than the K-major weight-gradient GEMMs give back (ConditionedTransition training step d768 c768, CUDA graph,
-    us: 6144 rows 520 -> 508, 36864 rows 2654 -> 2637 without it)."""
+    """The fp32 feature-major backward (``adaln_bwd_t``) for this call. "auto": ``_fm_auto`` (a cond of 768 columns, on H100). Not on B200
+    (sm_100), where the transposing row pass costs more than the K-major weight-gradient GEMMs give back (ConditionedTransition training step
+    d768 c768, CUDA graph, us: 6144 rows 520 -> 508, 36864 rows 2654 -> 2637 without it; the AdaLN alone: ``_fm_auto``)."""
     if x2.dtype is not torch.float32 or x2.shape[-1] not in FEATURE_MAJOR_WIDTHS:
         return False
     if _FM == "1":
         return True
-    if _FM != "auto" or c2.shape[1] < 768:
-        return False
-    idx = x2.device.index if x2.device.index is not None else torch.cuda.current_device()
-    return torch.cuda.get_device_capability(idx) != (10, 0)
+    return _FM == "auto" and _fm_auto(x2, c2)
 
 
 def _cnt_ok(x2, c2) -> bool:
