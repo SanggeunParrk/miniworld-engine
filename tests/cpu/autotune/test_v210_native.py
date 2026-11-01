@@ -109,8 +109,9 @@ def test_precompile_workers_key_their_builds_for_the_measuring_arch(monkeypatch,
 
 def test_the_compile_plumbing_is_not_part_of_the_measured_identity():
     """Where candidates are precompiled does not change what is measured: editing native_compile.py keeps the caches."""
-    import inspect
-    assert "native_compile.py" not in inspect.getsource(native.source_identity).split('"""')[-1]
+    from miniworld_engine.autotune import identity
+    for op in native.BUILD_OPS:
+        assert "autotune/native_compile.py" not in identity.native_files(op)
 
 
 def test_every_trimul_candidate_is_instantiated_in_the_unit():

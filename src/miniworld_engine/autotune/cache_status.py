@@ -60,9 +60,10 @@ def _registry_symbols() -> dict[str, tuple[str, str]]:
 def _current_op_identity(op: str) -> str | None:
     """The live source/key fingerprint for ``op``, or None if it has no registry autotuner (a
     dispatch-only cache) or cannot be imported on this machine."""
-    from miniworld_engine.autotune.native import BUILD_OPS, source_identity
+    from miniworld_engine.autotune.native import BUILD_OPS
+    from miniworld_engine.autotune.native import op_identity as native_op_identity
     if op in BUILD_OPS:
-        return source_identity()
+        return native_op_identity(op)
     sym = _registry_symbols().get(op)
     if sym is None:
         return None

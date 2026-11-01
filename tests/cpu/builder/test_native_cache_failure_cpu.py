@@ -14,7 +14,7 @@ GRID = [{"tile_m": 64}, {"tile_m": 128}]
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "_ACTIVE", replace(settings.current(), run_autotune=False))
-    monkeypatch.setattr(native, "source_identity", lambda: "source")
+    monkeypatch.setattr(native, "op_identity", lambda op: "source")
     monkeypatch.setattr(cache, "gpu_key", lambda *_: "test-sm90")
     monkeypatch.setattr(cache, "env_identity", lambda: "env")
     monkeypatch.setattr(cache, "build_rev", lambda _: 1)
@@ -78,7 +78,7 @@ def test_failed_measurement_remains_retryable_and_never_published(monkeypatch, t
     from miniworld_engine.autotune import native_compile
     monkeypatch.setattr(settings, "_ACTIVE", replace(settings.current(), run_autotune=True,
                                                      bench_clear_mb=0, bench_rep_ms=0))
-    monkeypatch.setattr(native, "source_identity", lambda: "source")
+    monkeypatch.setattr(native, "op_identity", lambda op: "source")
     monkeypatch.setattr(native, "gpu_key", lambda *_: "test-sm90")
     monkeypatch.setattr(capture, "gpu_key", lambda *_: "test-sm90")
     monkeypatch.setattr(native_compile, "precompile", lambda *_: {})

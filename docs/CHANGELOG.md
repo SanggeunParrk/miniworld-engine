@@ -8,6 +8,36 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- `dev code-graph --diff BASE` / `--repo`: the whole repository as one graph (every file a node; import, lazy import, include, reference,
+  cache and identity edges) and what a change reaches and owes: tests, docs, caches, the CUDA artifacts that rebuild, restamp / derive,
+  the stale evidence now; `--check` exits 2 on stale evidence. `build/repo_graph.py`.
+- `dev code-graph --affected FILE` covers Triton kernels, native ops and the derivation, not only nvcc artifacts: `triton:<kernel>` (file +
+  JIT helpers + driver; reports the committed cache's verdict), `native:<op>` (restamp owed for that op), `autotune:derivation` (how many
+  units re-run). `build/code_graph_extra.py`, `docs/kernels/prebuilt-kernels.md`.
+- `dev code-graph --diff BASE --new-only` (only the staleness the diff causes) and `--tests [cpu|gpu|all]` (the reached test files, one path
+  per line, for pytest).
+- `dev restamp-native [--op OP] [--dry-run|--check]`: rewrite the stored identity of the native caches whose op graph moved, without measuring.
+- `autotune/identity.py`: one rule for what must be redone, the digest of the part of the code graph an artifact depends on
+  (`docs/records/graph_identities_20261101.md`).
+
+### Changed
+
+- **Native caches are judged per op.** `native.op_identity(op)` (registry row, the closure of the op's files inside `kernels/`, the safety
+  set) replaces `native.source_identity()` (one hash of every `kernels/**` file) in `cache_status.scan`, `derive.coverage`,
+  `native.choose_config` and the cache JSON's `op_identity`; an edit to an unrelated kernel no longer forces a restamp of all `*_cuda`
+  caches. `source_identity()` stays as a scratch-directory salt only. The seven committed `*_cuda` caches were restamped once (no
+  re-measure).
+- **`dev derive` is incremental and `registry_kernel.units.json` is schema 2.** Every unit records the files it depends on (files whose
+  code ran, found with `sys.monitoring` on every thread, the modules its imports named, the data files it opened, the files of every kernel
+  it launched, the safety set), with a digest each. `dev derive` re-records only the units whose files changed and rebuilds
+  `registry_kernel.csv` from per-unit keys and launch counts; `plan.load()` is valid iff no stored unit has a changed file (no global
+  `plan.source_identity`). Plans live at `autotune/plans/<arch>/registry_kernel.*` and `<plan cache>/<arch>/registry_kernel.csv`, no
+  longer one directory per source hash; the build's resume generation is per unit (`builder._unit_scope`). `dev derive` needs Python >= 3.12
+  (a derivation recorded without `sys.monitoring` would miss the autograd backward threads) and writes the evidence only after a clean run
+  (`<evidence>.new`, `.failed.json` on error): a failed run no longer overwrites the committed evidence.
+
 ### Fixed
 
 - H100 autotune caches for the five Triton kernels registered on 2026-10-31 (grid build, merged): no more "no tuned autotune cache"

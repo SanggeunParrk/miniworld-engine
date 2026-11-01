@@ -1329,6 +1329,39 @@ def cmd_code_graph(args: argparse.Namespace) -> int:
     return code_graph(args)
 
 
+def cmd_restamp_native(args: argparse.Namespace) -> int:
+    """Rewrite the stored identity of the native caches to the current per-op identity (``native.op_identity``) -- no measurement.
+
+    A native cache is valid iff the digest of its op's part of the code graph still equals the one it stores. When the graph moved
+    for a reason that cannot change a timing (a refactor the maintainer has judged neutral) this declares the measurements still
+    valid; when it moved for a reason that can, retune instead. Only caches whose stored identity differs are rewritten, and only
+    the identity string changes. ``--dry-run`` lists them; ``--check`` exits 1 when any differs."""
+    import json
+
+    from miniworld_engine.autotune import cache_status, native
+
+    todo = []
+    for op in sorted(native.BUILD_OPS):
+        if args.op and op not in args.op:
+            continue
+        new = native.op_identity(op)
+        for path in sorted((cache_status._DATA / op).glob("*.json")):
+            text = path.read_text()
+            old = json.loads(text).get("op_identity")
+            if old == new:
+                continue
+            if not old:
+                print(f"{op} [{path.stem}]: no stored identity, retune it", file=sys.stderr)
+                return 2
+            todo.append((op, path, text, old, new))
+    for op, path, text, old, new in todo:
+        print(f"{op:44} {path.stem:32} {old[:12]} -> {new[:12]}" + ("  (dry run)" if args.dry_run or args.check else ""))
+        if not (args.dry_run or args.check):
+            path.write_text(text.replace(old, new))
+    print(f"{len(todo)} native cache(s) {'differ' if args.dry_run or args.check else 'restamped'}; the rest already match their op's graph")
+    return 1 if args.check and todo else 0
+
+
 def cmd_derive(args: argparse.Namespace) -> int:
     """Derive `registry_kernel.csv` from `registry_module.csv` by running the modules on fake
     tensors -- no kernel compiled, no memory allocated, every branch decided by Python.
@@ -1337,15 +1370,33 @@ def cmd_derive(args: argparse.Namespace) -> int:
     WHICH axis a kernel buckets on and then guessed the VALUES, and every guess that drifted from
     what the modules launch was a bucket production reaches with no cache entry. Here the values
     are not guessed: the modules are run, and what they launch is what gets written.
+
+    Incremental: every unit records the files it depends on (``autotune/identity.py``). A unit of the prior evidence whose files
+    all still have their stored digest is taken as it is; only the others run. ``--no-reuse`` runs everything.
     """
+    import json
+
+    from miniworld_engine._atomic import write_json
     from miniworld_engine.autotune import derive, plan
 
-    source = plan.source_identity()
     out = Path(args.out) if args.out else derive.REGISTRY_KERNEL
-    evidence = Path(args.per_unit) if getattr(args, "per_unit", "") else out.with_suffix(".units.json")
+    evidence = out.with_suffix(".units.json")
+    if getattr(args, "per_unit", ""):
+        evidence = Path(args.per_unit)
+    arch = args.arch or derive.sm_tag()
     rows = derive.module_rows()
-    work = derive.units(rows, arch=args.arch or derive.sm_tag())
-    print(f"{len(rows)} module rows -> {len(work)} invocations to record", flush=True)
+    work = derive.units(rows, arch=arch)
+    reuse: dict = {}
+    prior = Path(args.prior) if getattr(args, "prior", "") else evidence
+    if not getattr(args, "no_reuse", False) and prior.is_file():
+        try:
+            reuse = plan.reusable_units(json.loads(prior.read_text()), arch)
+        except (OSError, ValueError):
+            reuse = {}
+    labels = {u.label for u in work}
+    reuse = {k: v for k, v in reuse.items() if k in labels}
+    print(f"{len(rows)} module rows -> {len(work)} invocations: {len(reuse)} reused (every recorded file unchanged), "
+          f"{len(work) - len(reuse)} to record", flush=True)
 
     def progress(i, total, unit, launches, error):
         if error:
@@ -1353,24 +1404,30 @@ def cmd_derive(args: argparse.Namespace) -> int:
         elif i % 25 == 0 or i == total:
             print(f"  [{i}/{total}] {unit.label}: {len(launches)} launches", flush=True)
 
-    entries, skipped = derive.derive_all(
-        rows, on_unit=progress, arch=args.arch or None,
-        per_unit=evidence, workers=getattr(args, "workers", 1))
-    arch = args.arch or derive.sm_tag()
-    out = Path(args.out) if args.out else derive.REGISTRY_KERNEL
+    staging = evidence.with_name(evidence.name + ".new")
+    try:
+        entries, skipped = derive.derive_all(
+            rows, on_unit=progress, arch=args.arch or None,
+            per_unit=staging, workers=getattr(args, "workers", 1), reuse=reuse)
+    except ValueError as exc:                           # a source edited while the units ran
+        print(f"derivation refused: {exc}; existing registry preserved: {out}", file=sys.stderr)
+        return 1
     if skipped:
-        from miniworld_engine._atomic import write_json
         report = out.with_suffix(".errors.json")
         write_json(report, [{"unit": u.label, "reason": why} for u, why in skipped])
         print(f"derivation FAILED: {len(skipped)} invocations; details: {report}",
               file=sys.stderr)
         print(f"Existing registry preserved: {out}", file=sys.stderr)
-        return 1
-    if source != plan.source_identity():
-        print("Dispatch sources changed during derivation; existing registry preserved.", file=sys.stderr)
+        if staging.exists():
+            staging.replace(evidence.with_name(evidence.stem + ".failed.json"))
         return 1
     written = derive.write_kernel_registry(entries, arch, out)
-    plan.stamp(evidence, out, source)
+    try:
+        plan.stamp(staging, out)
+    except ValueError as exc:
+        print(f"{exc}; existing registry preserved: {out}", file=sys.stderr)
+        return 1
+    staging.replace(evidence)
     kernels = {op for op, _, _ in entries if not op.startswith("<")}
     unresolved = sorted({op for op, _, b in entries
                          if op.startswith("<") or str(b).startswith("<")})
@@ -1380,10 +1437,6 @@ def cmd_derive(args: argparse.Namespace) -> int:
         print(f"  {len(unresolved)} launches with no cache entry to build:")
         for name in unresolved[:20]:
             print(f"    {name}")
-    if skipped:
-        print(f"  {len(skipped)} invocations the modules refused (shape not supported):")
-        for unit, why in skipped[:20]:
-            print(f"    {unit.label}: {why}")
     return 0
 
 
@@ -2018,9 +2071,20 @@ def build_parser() -> argparse.ArgumentParser:
                           "axis of the sweep earns its units")
     der.add_argument("--out", default="",
                      help="write here instead of the in-repo registry_kernel.csv")
+    der.add_argument("--prior", default="",
+                     help="reuse the units of this units.json whose recorded files are unchanged (default: the evidence next to --out)")
+    der.add_argument("--no-reuse", action="store_true", help="record every unit, whatever the prior evidence says")
     der.set_defaults(func=cmd_derive)
     der.add_argument("--workers", type=int, default=1,
                      help="isolated derivation processes sharing the allocated GPU")
+
+    rsn = dev.add_parser("restamp-native",
+                         help="rewrite the stored identity of native caches whose op graph moved to the current one, without "
+                              "re-measuring (judge first: see docs/kernels/prebuilt-kernels.md)")
+    rsn.add_argument("--op", action="append", default=[], help="only this native op (repeatable)")
+    rsn.add_argument("--dry-run", action="store_true", help="list the caches that would be rewritten")
+    rsn.add_argument("--check", action="store_true", help="exit 1 when any cache differs (writes nothing)")
+    rsn.set_defaults(func=cmd_restamp_native)
 
     bnd = dev.add_parser("bundle-kernels",
                          help="compile every CUDA artifact a production run requests on this arch and package them "
@@ -2068,6 +2132,19 @@ def build_parser() -> argparse.ArgumentParser:
     cgr.add_argument("-I", "--include", action="append", default=[], help="include directory for a file target")
     cgr.add_argument("--manifest", action="append", default=[],
                      help="also consult this bundle manifest.json or records .jsonl")
+    cgr.add_argument("--diff", default="", metavar="BASE",
+                     help="the whole-repo graph: what every file that differs from BASE (a git revision, plus untracked files) reaches, "
+                          "and what the change owes (restamp, derive, retune, tests, docs)")
+    cgr.add_argument("--repo", action="store_true", help="the whole-repo graph: node and edge counts, files with no edge")
+    cgr.add_argument("--check", action="store_true",
+                     help="with --diff: exit 2 when the committed evidence is stale (a stale tuned cache the change reaches, a native identity or "
+                          "derivation that no longer matches the sources)")
+    cgr.add_argument("-v", "--verbose", action="store_true", help="with --diff: every reached node and the chain that reaches it")
+    cgr.add_argument("--new-only", action="store_true",
+                     help="with --diff --check: report only the staleness this diff causes (native ops whose graph holds a changed file, "
+                          "derivation units that recorded one), not staleness that was already there")
+    cgr.add_argument("--tests", nargs="?", const="all", choices=["all", "cpu", "gpu"], default="",
+                     help="with --diff: print the reached test files, one repo path per line (pass them to pytest)")
     cgr.set_defaults(func=cmd_code_graph)
 
     aud = dev.add_parser("audit",

@@ -7,13 +7,12 @@ from pathlib import Path
 import pytest
 from settings_helpers import override_setting
 
-from miniworld_engine.autotune import derive, plan
+from miniworld_engine.autotune import derive, identity, plan
 
 
 def setup_plan(monkeypatch, tmp_path):
     override_setting(monkeypatch, "plan_cache_dir", str(tmp_path / "user-cache"))
     monkeypatch.setattr(plan, "ROOT", tmp_path / "package")
-    monkeypatch.setattr(plan, "source_identity", lambda: "revision1")
     monkeypatch.setattr(derive, "REGISTRY_KERNEL", tmp_path / "shipped.csv")
 
 
@@ -21,9 +20,9 @@ def publish(path, arch="sm86"):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("kernel,arch\nexample," + arch + "\n")
     path.with_suffix(".units.json").write_text(
-        json.dumps({"arch": arch, "complete": True, "errors": [], "units": {}})
+        json.dumps({"schema": 2, "arch": arch, "complete": True, "errors": [], "units": {}})
     )
-    plan.stamp(path.with_suffix(".units.json"), path, plan.source_identity())
+    plan.stamp(path.with_suffix(".units.json"), path)
 
 
 @pytest.mark.parametrize("state", ["missing", "stale", "foreign"])
@@ -47,6 +46,8 @@ def test_refresh_is_isolated_and_verified(monkeypatch, tmp_path, state):
     assert derive.registry_path("sm86") == got
     assert plan.ensure("sm86") == got
     assert len(calls) == 1
+    if state != "missing":                                    # the refresh starts from the evidence on disk: only stale units re-run
+        assert calls[0][calls[0].index("--prior") + 1] == str(derive.REGISTRY_KERNEL.with_suffix(".units.json"))
 
 
 def test_failed_refresh_does_not_publish(monkeypatch, tmp_path):
@@ -62,12 +63,13 @@ def test_failed_refresh_does_not_publish(monkeypatch, tmp_path):
     assert derive.REGISTRY_KERNEL.read_bytes() == before
 
 
-def test_architectures_and_revisions_do_not_overwrite_each_other(monkeypatch, tmp_path):
+def test_architectures_do_not_overwrite_each_other_and_an_edit_does_not_move_the_path(monkeypatch, tmp_path):
+    """A plan is valid by the digests of the files it recorded, so its location no longer changes with every source edit."""
     setup_plan(monkeypatch, tmp_path)
     first = plan.generated_registry("sm86")
     assert first != plan.generated_registry("sm90")
-    monkeypatch.setattr(plan, "source_identity", lambda: "revision2")
-    assert first != plan.generated_registry("sm86")
+    identity.refresh()
+    assert plan.generated_registry("sm86") == first
 
 
 def test_build_stops_before_module_or_driver_work_if_plan_fails(monkeypatch):
@@ -94,7 +96,6 @@ def test_build_stops_before_module_or_driver_work_if_plan_fails(monkeypatch):
 @pytest.mark.parametrize("location", ["override", "xdg", "home", "relative_xdg"])
 def test_generated_plans_use_user_writable_storage(monkeypatch, tmp_path, location):
     monkeypatch.setattr(plan, "ROOT", tmp_path / "read-only-site-packages")
-    monkeypatch.setattr(plan, "source_identity", lambda: "revision1")
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     override_setting(monkeypatch, "plan_cache_dir", None)
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
@@ -108,7 +109,7 @@ def test_generated_plans_use_user_writable_storage(monkeypatch, tmp_path, locati
     elif location == "relative_xdg":
         monkeypatch.setenv("XDG_CACHE_HOME", "relative-path-is-invalid")
     assert plan.generated_registry("sm_86") == (
-        expected / "sm86" / "revision1" / "registry_kernel.csv"
+        expected / "sm86" / "registry_kernel.csv"
     )
 
 
@@ -129,7 +130,9 @@ def test_packaged_verified_plan_needs_no_writable_install(monkeypatch, tmp_path)
     assert derive.registry_path("sm86") == packaged
 
 
-def test_source_and_wheel_dispatch_identity_agree(monkeypatch, tmp_path):
+def test_source_and_wheel_agree_on_what_a_plan_depends_on(monkeypatch, tmp_path, request):
+    """A wheel ships fewer files (no ``notes``); the digests of the files a unit recorded are the same in both layouts, and an
+    edit to a shipped file moves the wheel's verdict as it moves the source tree's."""
     import shutil
 
     source = tmp_path / "source"
@@ -140,10 +143,6 @@ def test_source_and_wheel_dispatch_identity_agree(monkeypatch, tmp_path):
         "modules/example.py",
         "kernels/example/triton/main.py",
         "autotune/builder.py",
-        "autotune/checkpoint_cases.py",
-        "autotune/derive.py",
-        "autotune/module_registry.py",
-        "autotune/shape_key.py",
         "autotune/policy.py",
         "build/gpu_to_kernels/sm86.csv",
     )
@@ -156,11 +155,21 @@ def test_source_and_wheel_dispatch_identity_agree(monkeypatch, tmp_path):
     notes.write_text("local experimental implementation")
     wheel = tmp_path / "wheel"
     shutil.copytree(source, wheel, ignore=shutil.ignore_patterns("notes"))
-    monkeypatch.setattr(plan, "ROOT", source)
-    expected = plan.source_identity()
+    request.addfinalizer(identity.refresh)
+
+    def doc(root):
+        monkeypatch.setattr(identity, "PKG", root)
+        identity.refresh()
+        return {"schema": 2, "units": {"u": []}, **plan.pack_files({"u": ["modules/example.py", *identity.safety_files()]})}
+
+    evidence = doc(source)
+    assert plan.stale_units(evidence) == {}
     notes.write_text("an unrelated historical edit")
-    assert plan.source_identity() == expected
-    monkeypatch.setattr(plan, "ROOT", wheel)
-    assert plan.source_identity() == expected
+    identity.refresh()
+    assert plan.stale_units(evidence) == {}
+    monkeypatch.setattr(identity, "PKG", wheel)
+    identity.refresh()
+    assert plan.stale_units(evidence) == {}
     (wheel / "modules" / "example.py").write_text("changed runtime dispatch")
-    assert plan.source_identity() != expected
+    identity.refresh()
+    assert plan.stale_units(evidence) == {"u": ["modules/example.py"]}

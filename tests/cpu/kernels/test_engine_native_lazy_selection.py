@@ -41,7 +41,7 @@ def resolver(monkeypatch):
     monkeypatch.setattr(cache, "build_rev", lambda *_: 1)
     monkeypatch.setattr(cache, "_load", lambda *_: state["data"])
     monkeypatch.setattr(cache, "_warn_once", lambda *args, **kwargs: None)
-    monkeypatch.setattr(native, "source_identity", lambda: "implementation")
+    monkeypatch.setattr(native, "op_identity", lambda op: "implementation")
     space = [{"tile_m": m, "tile_n": n} for m in (64, 128, 192) for n in (64, 128, 256)]
 
     def publish(config, *, identity="implementation"):

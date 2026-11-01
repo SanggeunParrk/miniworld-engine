@@ -868,9 +868,22 @@ def file_label(path: Path) -> str:
 
 
 def code_graph(args) -> int:
+    from miniworld_engine.build import code_graph_extra as extra
+    from miniworld_engine.build import repo_graph
     from miniworld_engine.kernels import _codegraph as cg
 
-    known = known_artifacts(args.manifest)
+    if args.diff:
+        if args.tests:
+            print("\n".join(repo_graph.diff_tests(args.diff, args.tests)))
+            return 0
+        text, owed = repo_graph.report(args.diff, verbose=args.verbose, manifests=args.manifest, new_only=args.new_only)
+        print(text)
+        return 2 if args.check and owed else 0
+    if args.repo:
+        print(repo_graph.summary())
+        return 0
+
+    known = known_artifacts(args.manifest) + list(extra.artifacts())
     if args.affected:
         path = Path(args.affected)
         label = file_label(path)
@@ -878,8 +891,9 @@ def code_graph(args) -> int:
         hits = []
         for a in known:
             nodes = {n[0]: n[1] for n in (a.get("material") or {}).get("nodes") or []}
-            if label in nodes:
+            if label in nodes and (a.get("material") or {}).get("kind") is None:
                 hits.append((a, "rebuilds" if nodes[label] != digest else "unchanged (same normalized content)"))
+        hits += extra.affected(path)       # Triton kernels, the native identity, the derivation: what the edit does to their evidence
         print(f"{label}: reached by {len(hits)} of {len(known)} known artifacts")
         for a, state in sorted(hits, key=lambda h: h[0]["name"]):
             print(f"  {a['name']:60s} {a['key'][:16]}  {state}")
@@ -909,9 +923,12 @@ def code_graph(args) -> int:
             now = ""
             if label.startswith("pkg:"):
                 p = cg.PKG_ROOT / label[4:]
-                cur = cg.parse_file(str(p)).digest if p.is_file() else None
+                kind = m.get("kind")
+                cur = (extra.node_digest(p, kind) if kind else cg.parse_file(str(p)).digest) if p.is_file() else None
                 now = "" if cur == digest else ("  CHANGED" if cur else "  MISSING")
             print(f"  {label:70s} {digest[:16]}{now}")
+        if m.get("kind"):
+            continue            # a Triton kernel / identity: the graph is its files, nothing is compiled from them here
         for spelling in m.get("external", []):
             print(f"  ext:{spelling}")
         print(f"  flags: {json.dumps(m.get('flags'))}")

@@ -374,7 +374,7 @@ def test_code_graph_affected_lists_the_artifacts_a_file_reaches(tmp_path: Path, 
     }}))
     assert main(["dev", "code-graph", "--affected", str(header), "--manifest", str(manifest)]) == 0
     out = capsys.readouterr().out
-    assert "reached by 2 of 3" in out
+    assert "reached by 2 of " in out
     assert "augattn_sm100/old" in out
     assert "other/unrelated" not in out
     assert out.count("rebuilds") == 1
@@ -460,3 +460,53 @@ def test_stale_keys_are_the_artifacts_this_checkout_cannot_key() -> None:
     assert set(stale) == {"changed", "gone"}
     assert "(missing)" in stale["gone"][0]
     assert set(kb.drop_stale(entries)) == {"fresh", "bare", "nomaterial"}
+
+
+# ------------------------------------------------------------------------------------- Triton kernels and the two identities
+def test_the_graph_holds_every_triton_kernel_with_its_jit_helpers_and_driver() -> None:
+    """``dev code-graph --affected FILE`` reaches a Triton kernel through its file, the JIT helpers it imports and its driver."""
+    import csv
+
+    from miniworld_engine.build import code_graph_extra as extra
+
+    named = {a["name"]: a for a in extra.artifacts()}
+    with extra.REGISTRY.open(encoding="utf-8") as handle:
+        triton = [r["kernel"] for r in csv.DictReader(handle) if r["backend"] == "triton"]
+    assert triton
+    assert all(f"triton:{k}" in named for k in triton)
+    nodes = {n[0] for n in named["triton:adaln_gemm_gate_triton"]["material"]["nodes"]}
+    assert {"pkg:kernels/adaln/triton/inference.py", "pkg:kernels/_tiles.py", "pkg:kernels/_tf32.py",
+            "pkg:kernels/drivers/adaln.py"} <= nodes                 # kernel file, JIT helpers (followed through imports), driver
+
+
+def test_a_python_digest_ignores_comments_and_formatting_but_not_code(tmp_path: Path) -> None:
+    from miniworld_engine.build import code_graph_extra as extra
+
+    a, b, c = tmp_path / "a.py", tmp_path / "b.py", tmp_path / "c.py"
+    a.write_text("x = [1, 2]\n\n\ndef f(p):\n    return p + 1\n")
+    b.write_text("# note\nx = [1,\n     2]   # trailing\ndef f(p):\n    return (p+1)\n")
+    c.write_text("x = [1, 2]\n\n\ndef f(p):\n    return p + 2\n")
+    assert extra.py_digest(a) == extra.py_digest(b) != extra.py_digest(c)
+
+
+def test_a_native_op_artifact_lists_exactly_its_graph_and_is_keyed_by_its_identity() -> None:
+    """The node list of ``native:<op>`` is the file set ``native.op_identity`` hashes; a drift would hide a restamp."""
+    from miniworld_engine.autotune import identity, native
+    from miniworld_engine.build import code_graph_extra as extra
+
+    named = {a["name"]: a for a in extra.artifacts()}
+    for op in native.BUILD_OPS:
+        art = named[f"native:{op}"]
+        assert {n[0] for n in art["material"]["nodes"]} == {f"pkg:{p}" for p in identity.native_files(op)}
+        assert art["key"] == native.op_identity(op)[:32]
+
+
+def test_the_derivation_artifact_lists_the_files_the_committed_units_recorded() -> None:
+    import json
+
+    from miniworld_engine.autotune import plan
+    from miniworld_engine.build import code_graph_extra as extra
+
+    art = next(a for a in extra.artifacts() if a["name"] == "autotune:derivation")
+    recorded = json.loads(plan.EVIDENCE.read_text()).get("file_index", [])
+    assert {n[0] for n in art["material"]["nodes"]} == {f"pkg:{p}" for p in recorded if (extra.PKG / p).is_file()}

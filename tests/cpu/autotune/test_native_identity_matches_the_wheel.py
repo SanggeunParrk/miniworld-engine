@@ -22,3 +22,27 @@ def test_every_directory_the_wheel_excludes_is_left_out_of_the_identity() -> Non
     source = Path(native.__file__).read_text()
     for name in kernel_dirs:
         assert f'"{name}"' in source.split("def source_identity", 1)[1].split("def ", 1)[0], name
+
+
+def test_a_native_ops_graph_holds_only_files_the_wheel_ships_and_is_per_op() -> None:
+    """``native.op_identity`` hashes the same files in a wheel as in the checkout: no `notes`, no generator `gen`; and an unrelated
+    kernel family is not part of an op's graph (the point of replacing the one global hash)."""
+    from miniworld_engine.autotune import identity
+
+    for op in native.BUILD_OPS:
+        files = identity.native_files(op)
+        assert files
+        assert not [f for f in files if {"notes", "gen", "plans"} & set(f.split("/"))], op
+        assert not [f for f in files if f.startswith("autotune/data/")], op
+        assert "kernels/triangle_attention/triton/main.py" not in files, op
+    assert len({native.op_identity(op) for op in native.BUILD_OPS}) == len(native.BUILD_OPS)
+
+
+def test_the_global_source_identity_is_only_a_salt() -> None:
+    """Nothing is judged stale by ``source_identity()``: the cache scan, the coverage check and the chooser use ``op_identity``."""
+    import inspect
+
+    from miniworld_engine.autotune import cache_status, derive
+
+    for fn in (cache_status._current_op_identity, derive.coverage, native.choose_config):
+        assert "source_identity" not in inspect.getsource(fn).replace("native_source_identity", ""), fn.__name__

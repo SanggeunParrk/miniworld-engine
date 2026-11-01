@@ -85,6 +85,62 @@ the third which artifacts a change to that file rebuilds. Known artifacts are th
 key material next to the artifact), the installed bundles' and any `--manifest` (a `manifest.json` or a records
 `.jsonl`).
 
+`--affected` also covers what nvcc does not compile (`build/code_graph_extra.py`; no GPU, no kernel import). One artifact per
+registry Triton kernel (`triton:<kernel>`): its registry file, the JIT-helper files it imports (followed only into files that
+contain `triton.jit`) and its registry driver; the state printed is the committed cache's (`autotune.cache_status`: `cache STALE now: kernel
+source/key changed (op_identity)` per GPU, or `tuned cache current`). One artifact per native op (`native:<op>`, keyed by
+`native.op_identity(op)`): the files of that op's graph (below). One `autotune:derivation` artifact: the union of the files the committed
+derivation's units recorded. Run it as its own job and read it before a test submit, as for the CUDA artifacts.
+
+### One rule for what must be redone: the digest of the part of the graph an artifact depends on
+
+An artifact stores the digest of its part of the code graph and is stale **iff** that digest differs from the current one; nothing
+else is judged stale and nothing that did not change is redone (`autotune/identity.py`; before it the native caches were judged by
+one hash of every `kernels/**` file and the derivation by one hash of `modules/`, `kernels/`, `integrations/`, so any edit forced a
+restamp of all seven `*_cuda` caches and a full `dev derive`).
+
+* **Triton kernel**: `cache.op_identity` / `implementation_identity` (kernel body, `key=[...]`, JIT helpers): unchanged, already per op.
+* **Native op** (`autotune/data/<op>_cuda/<gpu>.json`, field `op_identity`): the digest of the op's registry row, the closure of its
+  files and the safety set. The closure: the registry file and driver of the row, every python file that names the kernel file, then
+  python imports (function-level ones too), `#include` edges and the paths / `miniworld_engine.x.y` names a source spells out --
+  followed only inside `kernels/`. A `.py` is hashed by bytes, a `.cu` / `.cuh` after `kernels/_codegraph` normalization (comments,
+  whitespace). `cache_status.scan()`, `derive.coverage` and `native.choose_config` compare this per-op value;
+  `native.source_identity()` survives only as a scratch-directory salt in `native_compile`.
+  `miniworld-engine dev restamp-native [--op OP] [--dry-run|--check]` rewrites the stored identity of the caches whose graph moved,
+  without measuring: judge first that the edit cannot move a timing, otherwise retune.
+* **Derivation unit** (`registry_kernel.units.json`, schema 2): per unit, the keys it launched, their launch counts, and the files it
+  depends on, each with a digest: the files whose code ran while the unit was recorded (`sys.monitoring`, every thread, Python >= 3.12),
+  the modules its import statements named, the data files it opened, what a module-level import of those can come from, the registry
+  file / JIT helpers / driver of every kernel it launched, and the safety set. The file table is stored once (`file_index`,
+  `file_tokens`), each unit holds indices into it (`unit_files`). A file's token is its bytes and its syntax tree: bytes equal is
+  unchanged on any Python, the tree equal (a comment or formatting edit) counts only under the same Python.
+  `dev derive` reuses every unit of the prior evidence (`--prior`, default the file next to `--out`) whose files all match and
+  records only the others; `registry_kernel.csv` is rebuilt from per-unit keys, counts and fields, identically to a full run
+  (`--no-reuse` records everything). `plan.load()` is valid iff complete, error free, the registry identity and arch match and no stored
+  unit has a changed file: no GPU, no hash of the whole tree. A plan has no per-source directory any more
+  (`autotune/plans/<arch>/registry_kernel.csv`, the user cache `plans/<arch>/registry_kernel.csv`), and the resume generation of a
+  build (`builder._unit_scope`) moves with the files of the unit's own op or module, not with every edit.
+* **Safety set** (in every identity): `settings.py`, `modules/dispatch.py`, `autotune/{cache,shape_key,policy,builder,derive,
+  checkpoint_cases,module_registry,native,fused_config,hopper_cuda_config,native_history}.py`; for a derivation unit also
+  `kernels/registry/registry.csv`, `registry_module.csv` and `build/gpu_to_kernels/*.csv` (a native op takes only its own registry row:
+  the CSVs select which units get built, never what a measured candidate is). A safety file that exists now but is not in a unit's
+  record makes the unit stale.
+
+`dev code-graph --diff BASE` and `--repo` draw the whole repository (`build/repo_graph.py`): every tracked and untracked file is a node, and
+the edges are read from the files -- Python imports (module-level `import`, function-level `lazy`), `#include`, repo paths and
+`miniworld_engine.x.y` names written in a source, doc, YAML or registry file, each `autotune/data/<op>/<gpu>.json` on its kernel file, JIT
+helpers, driver, config grid and `registry.csv` row, each native cache on its op's identity node (`identity:native:<op>`, edges to the
+op's closure) and the derived files on `identity:derivation` (edges to the union of the units' recorded files). `--diff BASE` takes the files
+that differ from BASE (plus untracked), drops the ones whose normalized content is unchanged (comments and whitespace), and walks the edges
+backwards: the tests (CPU / GPU), docs, benchmarks, caches and CUDA sources it reaches, with the lazy-import-only reach counted apart, and
+what it owes: which native ops to restamp (and how many stay), which derivation units re-run. The walk ends at an identity. A registry row
+is a node of its own (an edit to one row reaches that kernel's caches only). With `--manifest` it names the CUDA artifacts a changed `.cu` /
+`.cuh` rebuilds, and it reads the committed evidence now: `STALE now: <op> [<gpu>]`, native ops whose cache no longer matches their graph,
+`N of M` derivation units stale. `--check` exits 2 when that evidence is stale, for a job or an agent to gate on (staleness that
+main already carries counts); `--new-only` keeps only what the diff causes (native ops whose graph holds a changed file, units that
+recorded one). `--tests [cpu|gpu|all]` prints the reached test files one repo path per line (through lazy imports too): `pytest $(dev
+code-graph --diff main --tests cpu)`. `-v` prints the chain that reaches every node and the stale units.
+
 ## Building the prebuilt kernels
 
 ```bash

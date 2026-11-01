@@ -35,6 +35,7 @@ yields different kernels on sm_86 and sm_90. That is a property of the code, not
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import csv
 import dataclasses
@@ -194,6 +195,7 @@ def install_recorder(sink: list) -> None:
     from miniworld_engine.autotune.configs import op_of
 
     def tuned_run(self, *args, **kwargs):
+        _note_kernel(self)
         nargs = dict(zip(_arg_names(self), args, strict=False))
         nargs.update(kwargs)
         op = op_of(getattr(self, "configs", None) or [])
@@ -218,6 +220,7 @@ def install_recorder(sink: list) -> None:
         return
 
     def plain_run(self, *args, **kwargs):
+        _note_kernel(self)
         # No autotuner => no config grid => nothing for the cache to hold. Recorded so the report
         # can say the launch happened, never written to registry_kernel.csv.
         sink.append((f"<unautotuned:{self.fn.__name__}>", "", ""))
@@ -257,6 +260,123 @@ def _pin(option: tuple[str, str] | None):
         yield 0.0
     finally:
         settings.configure(**{field: before})
+
+
+# --------------------------------------------------------------------------- #
+# what a unit depends on: the files that ran, the modules it imported, the data it opened
+# --------------------------------------------------------------------------- #
+_PKG = Path(__file__).resolve().parents[1]
+_STATE: dict = {"active": None, "installed": False}
+
+
+class UnitTrace:
+    """Evidence of one recorded unit. ``code``: files whose code ran (``sys.monitoring``, every thread -- the autograd engine's
+    backward threads included, which ``sys.setprofile`` cannot see); ``modules``: dotted names its import statements named (executed
+    lazy imports, ``importlib.import_module`` string dispatch); ``opened``: package files it opened (CSV / JSON data)."""
+
+    def __init__(self) -> None:
+        self.code: set[str] = set()
+        self.modules: set[str] = set()
+        self.opened: set[str] = set()
+
+    def package_files(self) -> tuple[set[str], set[str]]:
+        prefix = str(_PKG) + os.sep
+
+        def rel(names):
+            out = set()
+            for name in names:
+                path = os.path.abspath(name)
+                if path.startswith(prefix) and not path.endswith((".pyc", ".pyo")):
+                    out.add(Path(path).relative_to(_PKG).as_posix())
+            return out
+        return rel(self.code), rel(self.opened)
+
+
+def _install_trace() -> None:
+    import builtins
+    import importlib
+    import importlib.util
+    import sys
+
+    if _STATE["installed"]:
+        return
+    if sys.version_info < (3, 12):
+        raise RuntimeError("dev derive records which files each unit runs with sys.monitoring (Python >= 3.12): the older "
+                           "sys.setprofile cannot see the autograd backward threads, so the evidence would under-approximate")
+    mon = sys.monitoring
+    tool = 3
+    mon.use_tool_id(tool, "miniworld-derive")
+
+    def on_start(code, offset):
+        trace = _STATE["active"]
+        if trace is not None:
+            trace.code.add(code.co_filename)
+        return mon.DISABLE                                   # one event per code object per unit (restart_events re-arms them)
+
+    for event in (mon.events.PY_START, mon.events.PY_RESUME):
+        mon.register_callback(tool, event, on_start)
+    mon.set_events(tool, mon.events.PY_START | mon.events.PY_RESUME)
+
+    def audit(event, args):
+        trace = _STATE["active"]
+        if trace is not None and event == "open" and args and isinstance(args[0], (str, bytes, os.PathLike)):
+            trace.opened.add(os.fsdecode(args[0]))
+
+    sys.addaudithook(audit)
+
+    real_import = builtins.__import__
+
+    def traced_import(name, globals=None, locals=None, fromlist=(), level=0):
+        trace = _STATE["active"]
+        if trace is not None:
+            if level and globals:
+                package = globals.get("__package__") or globals.get("__name__", "").rpartition(".")[0]
+                parts = package.split(".")
+                base = ".".join(parts[: len(parts) - (level - 1)]) if level > 1 else package
+                name_abs = f"{base}.{name}" if name else base
+            else:
+                name_abs = name
+            trace.modules.add(name_abs)
+            trace.modules.update(f"{name_abs}.{item}" for item in (fromlist or ()) if isinstance(item, str))
+        return real_import(name, globals, locals, fromlist, level)
+
+    builtins.__import__ = traced_import
+    real_import_module = importlib.import_module
+
+    def traced_import_module(name, package=None):
+        trace = _STATE["active"]
+        if trace is not None:
+            trace.modules.add(importlib.util.resolve_name(name, package) if name.startswith(".") else name)
+        return real_import_module(name, package)
+
+    importlib.import_module = traced_import_module
+    _STATE["installed"] = True
+
+
+@contextlib.contextmanager
+def trace_unit():
+    """Collect a :class:`UnitTrace` for everything that runs inside the block."""
+    import sys
+
+    _install_trace()
+    sys.monitoring.restart_events()
+    trace = UnitTrace()
+    _STATE["active"] = trace
+    try:
+        yield trace
+    finally:
+        _STATE["active"] = None
+
+
+def _note_kernel(obj) -> None:
+    """A Triton launch the recorder swallows never runs the kernel's Python: name its file as executed."""
+    trace = _STATE["active"]
+    if trace is None:
+        return
+    for attr in (obj, getattr(obj, "fn", None), getattr(obj, "base_fn", None)):
+        code = getattr(getattr(attr, "__code__", None), "co_filename", None)
+        if code:
+            trace.code.add(code)
 
 
 def record(unit: DeriveUnit, cases: dict) -> tuple[list, str | None]:
@@ -538,44 +658,75 @@ def target_arch(sm: str) -> None:
 KERNEL_HEADER = ("kernel", "arch", "dtype", "bucket", "modules", "streams", "lengths", "units", "shapes")
 
 
-def derive_all(rows: list[ModuleRow] | None = None, *, on_unit=None,
-               arch: str | None = None, per_unit: Path | None = None,
-               workers: int = 1) -> tuple[dict, list]:
-    """Run every unit and collect ``(kernel, dtype, bucket) -> evidence``.
+def _unit_record(launches: list, files: list[str]) -> dict:
+    """What is kept of one unit: its keys (sorted, as ``units.json`` has always held them), how many launches made each, its files."""
+    counts = collections.Counter(f"{op}|{dt}|{b}" for op, dt, b in launches)
+    keys = sorted(counts)
+    return {"keys": keys, "counts": [counts[k] for k in keys], "files": files}
 
-    Returns ``(entries, errors)``. Any failed declared invocation prevents publication of a
-    complete registry. GPU support exclusions belong in the shared unit enumeration.
-    """
+
+def _launches_of(record_: dict) -> list:
+    out = []
+    for key, n in zip(record_["keys"], record_["counts"], strict=True):
+        op, dtype, bucket = key.split("|", 2)
+        out.extend([(op, dtype, bucket)] * n)
+    return out
+
+
+def _accumulate(entries: dict, unit: DeriveUnit, launches: list) -> None:
+    for op, dtype, bucket in launches:
+        ev = entries.setdefault((op, dtype, bucket), {
+            "modules": set(), "streams": set(), "lengths": set(), "units": 0})
+        ev["modules"].add(unit.module)
+        ev["streams"].add(unit.stream)
+        ev["lengths"].add(unit.length)
+        ev.setdefault("shapes", {}).setdefault(unit.stream, set()).add(unit.length)
+        ev["units"] += 1
+
+
+def _collect(rows, on_unit, arch, reuse) -> tuple[dict, list, dict]:
+    """Run (or take from ``reuse``) every unit of ``rows``: ``(entries, errors, records)``. ``reuse`` maps a unit label to the
+    record of a prior derivation whose files still match (``plan.reusable_units``); those units are not run."""
+    from miniworld_engine.autotune import identity
     from miniworld_engine.autotune.builder import cases
 
-    if workers > 1:
-        return _parallel_derive(rows, arch, per_unit, workers)
-    require_environment()
-    if arch:
-        target_arch(arch)
-    # The derivation asks which kernels the modules launch, not whether this card is allowed to launch them: route as if the
-    # card were recorded (a patched arch above carries a real card's name, which no manifest knows).
-    from miniworld_engine.modules import dispatch
-
-    dispatch.assume_every_card_recorded()
-    install_no_calibration()
-    install_module_apply()
-    install_native_recorders()
     rows = module_rows() if rows is None else rows
-    case_by_name = {c.name: c for c in cases()}
+    work = units(rows, arch=arch or sm_tag())
+    todo = [u for u in work if u.label not in reuse]
+    case_by_name: dict = {}
+    before = identity.snapshot() if todo else {}
+    if todo:
+        require_environment()
+        if arch:
+            target_arch(arch)
+        # The derivation asks which kernels the modules launch, not whether this card is allowed to launch them: route as if the
+        # card were recorded (a patched arch above carries a real card's name, which no manifest knows).
+        from miniworld_engine.modules import dispatch
 
+        dispatch.assume_every_card_recorded()
+        install_no_calibration()
+        install_module_apply()
+        install_native_recorders()
+        case_by_name = {c.name: c for c in cases()}
     entries: dict = {}
     skipped: list = []
-    #: unit label -> the keys it produced. Written only when asked: it answers "which axis of the
-    #: sweep earns its units", which is not a question a build needs but is exactly the question
-    #: to ask when 6,526 units produce 833 buckets.
-    per_unit_keys: dict = {}
-    work = units(rows, arch=arch or sm_tag())
+    records: dict = {}
     for i, unit in enumerate(work, 1):
-        if unit.module not in case_by_name:
-            skipped.append((unit, f"no case builds {unit.module!r}"))
-            continue
-        launches, error = record(unit, case_by_name)
+        prior = reuse.get(unit.label)
+        if prior is not None:
+            launches, error, files = _launches_of(prior), None, list(prior["files"])
+        else:
+            if unit.module not in case_by_name:
+                skipped.append((unit, f"no case builds {unit.module!r}"))
+                continue
+            with trace_unit() as seen:
+                launches, error = record(unit, case_by_name)
+            code, opened = seen.package_files()
+            files = identity.unit_files(code, seen.modules, opened, [op for op, _, _ in launches if not op.startswith("<")])
+            tokens = identity.tokens(files)
+            moved = identity.changed_since(before, files)
+            if moved:
+                raise ValueError(f"sources changed while {unit.label!r} was derived ({moved[0]}); repeat the derivation")
         unresolved = [x for x in launches if x[0].startswith("<untracked:")
                       or str(x[2]).startswith("<")]
         if unresolved and not error:
@@ -585,61 +736,88 @@ def derive_all(rows: list[ModuleRow] | None = None, *, on_unit=None,
             if on_unit is not None:
                 on_unit(i, len(work), unit, launches, error)
             continue
-        for op, dtype, bucket in launches:
-            ev = entries.setdefault((op, dtype, bucket), {
-                "modules": set(), "streams": set(), "lengths": set(), "units": 0})
-            ev["modules"].add(unit.module)
-            ev["streams"].add(unit.stream)
-            ev["lengths"].add(unit.length)
-            ev.setdefault("shapes", {}).setdefault(unit.stream, set()).add(unit.length)
-            ev["units"] += 1
-        if per_unit is not None:
-            per_unit_keys[unit.label] = sorted({f"{op}|{dt}|{b}" for op, dt, b in launches})
+        _accumulate(entries, unit, launches)
+        records[unit.label] = prior if prior is not None else {**_unit_record(launches, files), "tokens": tokens}
         if on_unit is not None:
             on_unit(i, len(work), unit, launches, error)
-    if per_unit is not None:
+    return entries, skipped, records
 
+
+def evidence_document(arch: str, records: dict, skipped: list) -> dict:
+    """The ``units.json`` body (schema 2): keys per unit, launch counts, and the file table with one digest per file."""
+    from miniworld_engine.autotune import identity, plan
+
+    records = dict(sorted(records.items()))                 # a parallel run files its units in completion order: publish them in label order
+    for label, r in records.items():
+        moved = sorted(p for p, token in r.get("tokens", {}).items() if identity.file_token(p) != token)
+        if moved:
+            raise ValueError(f"sources changed while {label!r} was derived ({moved[0]}); repeat the derivation")
+    return {"schema": plan.SCHEMA, "arch": normalise_arch(arch), "complete": not skipped,
+            "units": {label: r["keys"] for label, r in records.items()},
+            "launch_counts": {label: r["counts"] for label, r in records.items()},
+            **plan.pack_files({label: r["files"] for label, r in records.items()}),
+            "errors": [{"unit": u.label, "reason": e} for u, e in skipped]}
+
+
+def derive_all(rows: list[ModuleRow] | None = None, *, on_unit=None,
+               arch: str | None = None, per_unit: Path | None = None,
+               workers: int = 1, reuse: dict | None = None) -> tuple[dict, list]:
+    """Run every unit and collect ``(kernel, dtype, bucket) -> evidence``.
+
+    Returns ``(entries, errors)``. Any failed declared invocation prevents publication of a
+    complete registry. GPU support exclusions belong in the shared unit enumeration.
+
+    ``reuse`` (``plan.reusable_units`` of a prior derivation): the units whose recorded files all still match are taken from it,
+    not run. The entries come out the same either way: they are rebuilt from each unit's keys, launch counts and fields.
+    """
+    reuse = reuse or {}
+    if workers > 1:
+        return _parallel_derive(rows, arch, per_unit, workers, reuse)
+    entries, skipped, records = _collect(rows, on_unit, arch, reuse)
+    if per_unit is not None:
         from miniworld_engine._atomic import write_json
-        write_json(per_unit, {"schema": 1, "arch": normalise_arch(arch or sm_tag()),
-                             "complete": not skipped, "units": per_unit_keys,
-                             "errors": [{"unit": u.label, "reason": e} for u, e in skipped]})
+        write_json(per_unit, evidence_document(arch or sm_tag(), records, skipped))
     return entries, skipped
 
 
 def _derive_chunk(args):
     torch.set_num_threads(1)
-    rows, arch, path = args
-    entries, errors = derive_all(rows, arch=arch, per_unit=path)
-    return entries, errors, path
+    rows, arch, reuse = args
+    return _collect(rows, None, arch, reuse)
 
 
-def _parallel_derive(rows, arch, per_unit, workers):
+def _parallel_derive(rows, arch, per_unit, workers, reuse):
     """Separate processes isolate monkeypatches and share only the CUDA context requirement."""
-    import json
     import multiprocessing
-    import tempfile
 
     from miniworld_engine._atomic import write_json
 
-    require_environment()
     rows = module_rows() if rows is None else rows
-    # Balance by invocation count, not CSV row count.
-    chunks = [[] for _ in range(min(workers, len(rows)))]
-    sizes = [0] * len(chunks)
-    for row in sorted(rows, key=lambda r: len(units([r])), reverse=True):
-        i = min(range(len(chunks)), key=lambda n: sizes[n])
-        chunks[i].append(row)
-        sizes[i] += len(units([row]))
-    entries, errors, evidence = {}, [], {}
-    with tempfile.TemporaryDirectory(prefix="miniworld-derive-") as td:
-        tasks = [(chunk, arch, Path(td) / f"{i}.json") for i, chunk in enumerate(chunks)]
+    arch_tag = arch or sm_tag()
+    by_row = {id(r): units([r], arch=arch_tag) for r in rows}
+    todo = {id(r): [u for u in by_row[id(r)] if u.label not in reuse] for r in rows}
+    if not any(todo.values()):
+        entries, errors, records = _collect(rows, None, arch, reuse)       # nothing to run: no worker, no CUDA context
+    else:
+        require_environment()
+        # Balance by invocation still to run, not CSV row count.
+        chunks = [[] for _ in range(min(workers, len([r for r in rows if todo[id(r)]]) or 1))]
+        sizes = [0] * len(chunks)
+        for row in sorted((r for r in rows if todo[id(r)] or by_row[id(r)]), key=lambda r: len(todo[id(r)]), reverse=True):
+            i = min(range(len(chunks)), key=lambda n: sizes[n])
+            chunks[i].append(row)
+            sizes[i] += len(todo[id(row)])
+        entries, errors, records = {}, [], {}
+        tasks = []
+        for chunk in chunks:
+            labels = {u.label for r in chunk for u in by_row[id(r)]}
+            tasks.append((chunk, arch, {k: v for k, v in reuse.items() if k in labels}))
         with multiprocessing.get_context("spawn").Pool(len(chunks)) as pool:
-            for found, failed, path in pool.imap_unordered(_derive_chunk, tasks):
+            for found, failed, recorded in pool.imap_unordered(_derive_chunk, tasks):
                 errors.extend(failed)
-                recorded = json.loads(path.read_text())["units"]
-                if set(recorded) & set(evidence):
+                if set(recorded) & set(records):
                     raise ValueError("duplicate derivation unit identities")
-                evidence.update(recorded)
+                records.update(recorded)
                 for key, ev in found.items():
                     if key not in entries:
                         entries[key] = ev
@@ -650,11 +828,9 @@ def _parallel_derive(rows, arch, per_unit, workers):
                     target["units"] += ev["units"]
                     for stream, lengths in ev.get("shapes", {}).items():
                         target.setdefault("shapes", {}).setdefault(stream, set()).update(lengths)
-                print(f"derive: {len(evidence)} invocations recorded, {len(errors)} errors", flush=True)
+                print(f"derive: {len(records)} invocations recorded, {len(errors)} errors", flush=True)
     if per_unit is not None:
-        write_json(per_unit, {"schema": 1, "arch": normalise_arch(arch or sm_tag()),
-                             "complete": not errors, "units": evidence,
-                             "errors": [{"unit": u.label, "reason": e} for u, e in errors]})
+        write_json(per_unit, evidence_document(arch_tag, records, errors))
     return entries, errors
 
 
@@ -787,7 +963,7 @@ def coverage(arch: str, gpu_key_name: str, data_dir: Path | None = None) -> dict
         try:
             from miniworld_engine.autotune import native
             if op_dir.name in native.BUILD_OPS:
-                reason = cache.measurement_mismatch(op_dir.name, data, native.source_identity())
+                reason = cache.measurement_mismatch(op_dir.name, data, native.op_identity(op_dir.name))
                 if reason:
                     invalid[op_dir.name] = reason
                     continue

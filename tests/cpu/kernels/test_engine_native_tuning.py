@@ -216,7 +216,7 @@ def test_runtime_uses_explicit_last_native_profile(tuner, monkeypatch):
         dtype="bfloat16",
         bucket="physical shape A",
         candidates=[cache.as_cfg_dict({"kwargs": {"tile": i}}) for i in (1, 2)],
-        op_id=native.source_identity(),
+        op_id=native.op_identity(OP),
     )
     assert selected is not None
     assert selected["kwargs"] == {"tile": 2}

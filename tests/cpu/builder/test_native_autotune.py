@@ -13,7 +13,7 @@ def isolate(monkeypatch):
     from miniworld_engine.autotune import native_compile
     monkeypatch.setattr(native_compile, "precompile", lambda *args: {})
     monkeypatch.setattr(settings, "_ACTIVE", replace(settings.current(), run_autotune=True))
-    monkeypatch.setattr(native, "source_identity", lambda: "source-v1")
+    monkeypatch.setattr(native, "op_identity", lambda op: "source-v1")
     monkeypatch.setattr(native, "gpu_key", lambda _: "test-sm90")
     monkeypatch.setattr(torch.cuda, "synchronize", lambda _: None)
     monkeypatch.setattr(capture, "_bench_lock_acquire", lambda: None)
@@ -224,7 +224,7 @@ def test_runtime_reader_serves_a_cache_measured_under_another_toolchain(monkeypa
     monkeypatch.setattr(cache, "env_identity", lambda: "cu130")
     monkeypatch.setattr(cache, "_load", lambda *_: data)
     monkeypatch.setattr(cache, "_scheme_stale", lambda *_: False)
-    monkeypatch.setattr(native, "source_identity", lambda: "source-v1")
+    monkeypatch.setattr(native, "op_identity", lambda op: "source-v1")
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         assert native.choose_config("x", configs, dtype="bf16", bucket="shape") == configs[1]
@@ -247,7 +247,7 @@ def test_runtime_reader_serves_the_nearest_measured_workload_of_the_same_form(mo
     monkeypatch.setattr(cache, "env_identity", lambda: "env")
     monkeypatch.setattr(cache, "_load", lambda *_: data)
     monkeypatch.setattr(cache, "_scheme_stale", lambda *_: False)
-    monkeypatch.setattr(native, "source_identity", lambda: "source-v1")
+    monkeypatch.setattr(native, "op_identity", lambda op: "source-v1")
     pick = lambda bucket: native.choose_config("x", configs, dtype="bf16", bucket=bucket)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -284,7 +284,7 @@ def test_native_measurements_survive_publication_and_runtime_lookup(op, tmp_path
     # This publication fixture uses an artificial key/grid; workload decoding is tested separately.
     monkeypatch.setattr(native, "pending_candidates", lambda *args, **kwargs: [])
     assert cache_status.scan()[0].verdict == "OK"
-    monkeypatch.setattr(native, "source_identity", lambda: "source-v2")
+    monkeypatch.setattr(native, "op_identity", lambda op: "source-v2")
     assert cache_status.scan()[0].verdict == "STALE"
 
 
@@ -331,11 +331,10 @@ def test_cuda_layernorm_driver_uses_requested_width(monkeypatch):
 
 
 def test_native_policy_changes_invalidate_resume_generation(monkeypatch):
-    from miniworld_engine.autotune import builder, plan, shard
-    monkeypatch.setattr(plan, "source_identity", lambda: "same-python-dispatch")
+    from miniworld_engine.autotune import builder, shard
     monkeypatch.setattr(shard, "provenance", lambda: {"gpu": "H100", "env_identity": "env"})
     before = builder._generation_for_work(None)
-    monkeypatch.setattr(native, "source_identity", lambda: "new-cuda-or-config")
+    monkeypatch.setattr(native, "policy_identity", lambda: "new-cuda-or-config")
     assert builder._generation_for_work(None) != before
 
 

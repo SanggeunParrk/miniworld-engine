@@ -1469,23 +1469,21 @@ def _shard_reusable(path: Path) -> bool:
 
 
 def _generation_for_work(config_dir: Path | None) -> str:
-    """Keep stale shards and claims out of this GPU/source/grid generation."""
+    """Keep stale shards and claims out of this GPU/settings/grid generation.
+
+    What a unit's shard depends on in the SOURCES is added per unit (``_unit_scope``): an edit to one kernel moves the generation of
+    the units that run it, not of every shard."""
     import hashlib
 
-    from miniworld_engine.autotune import plan
+    from miniworld_engine.autotune import identity
     from miniworld_engine.autotune.native import (
         policy_identity as native_policy_identity,
-    )
-    from miniworld_engine.autotune.native import (
-        source_identity as native_source_identity,
     )
     from miniworld_engine.autotune.shard import provenance
 
     digest = hashlib.sha256()
-    digest.update(plan.source_identity().encode())
-    # CuTe policies and hand-CUDA .cu bodies are outside the derivation hash.
-    # Their edits must invalidate completed native unit shards as well.
-    digest.update(native_source_identity().encode())
+    # dispatch inputs / cache layer / the builder itself: the safety set every unit depends on
+    digest.update(repr(identity.tokens(identity.safety_files())).encode())
     digest.update(native_policy_identity().encode())
     from miniworld_engine import settings
     digest.update(repr((settings.current().bench_clear_mb,
@@ -1496,6 +1494,23 @@ def _generation_for_work(config_dir: Path | None) -> str:
             digest.update(path.name.encode())
             digest.update(path.read_bytes())
     return digest.hexdigest()[:16]
+
+
+def _unit_scope(unit, by_name: dict, evidence: dict | None) -> str:
+    """The part of the sources a unit's shard depends on: a driver unit's op closure, a module unit's recorded files (the
+    verified derivation says which), else the whole tree (the old, coarse generation)."""
+    from miniworld_engine.autotune import identity, plan
+
+    files = None
+    op = getattr(unit, "op", "")
+    if op:
+        files = identity.op_files(op) or None
+    elif evidence is not None and getattr(unit, "case", "") in by_name:
+        try:
+            files = plan.unit_file_sets(evidence).get(plan.label(unit, by_name[unit.case]))
+        except (KeyError, AttributeError, TypeError):
+            files = None
+    return identity.files_digest(files) if files else identity.tree_digest()
 
 
 def _cache_ok_ops() -> set[str]:
@@ -1950,6 +1965,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
             print(f"    {stem}", flush=True)
     work = units(selected) if case_build else list(selected)
     sm = device_sm()
+    evidence = None
     if case_build and fill_gaps and sm:
         from miniworld_engine.autotune import derive, plan
         try:
@@ -1972,14 +1988,16 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
                      for op in sorted({op for op, _key in report["missing"]})
                      if op not in BUILD_OPS]
             generation = hashlib.sha256(
-                repr((evidence["source_identity"], sorted(missing), grids)).encode()).hexdigest()[:12]
+                repr((plan.evidence_identity(evidence), sorted(missing), grids)).encode()).hexdigest()[:12]
             work = [dataclasses.replace(u, generation=generation) for u in work]
             print(f"verified cache plan: {len(work)} of {before} module units cover "
                   f"{len(missing)} missing keys", flush=True)
     if work:
         generation = _generation_for_work(config_dir)
+        by_name = {c.name: c for c in selected if hasattr(c, "name")}
         work = [dataclasses.replace(u, generation=(
-            f"{u.generation}-{generation}" if u.generation else generation)) for u in work]
+            f"{u.generation}-{generation}-{_unit_scope(u, by_name, evidence)}" if u.generation
+            else f"{generation}-{_unit_scope(u, by_name, evidence)}")) for u in work]
     if resume:
         work = [u for u in work if not _shard_reusable(shard_dir / f"{u.stem}.json")]
     # A unit the shipped cache already answers is not work. Tested per ITEM with `isinstance`, not

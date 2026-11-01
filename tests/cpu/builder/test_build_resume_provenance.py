@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from miniworld_engine.autotune import builder, plan, shard
+from miniworld_engine.autotune import builder, shard
 
 
 @pytest.fixture
@@ -30,7 +30,9 @@ def test_only_matching_shard_can_skip_work(tmp_path, environment, stamp):
 
 
 def test_generation_changes_with_source_grid_and_gpu(tmp_path, environment, monkeypatch):
-    monkeypatch.setattr(plan, "source_identity", lambda: "source1")
+    from miniworld_engine.autotune import identity
+    safety = {"settings.py": "source1"}
+    monkeypatch.setattr(identity, "tokens", lambda files: {f: safety.get(f, "t") for f in files})
     grid = tmp_path / "op.csv"
     grid.write_text("block\n32\n")
     first = builder._generation_for_work(tmp_path)
@@ -38,12 +40,26 @@ def test_generation_changes_with_source_grid_and_gpu(tmp_path, environment, monk
     grid.write_text("block\n64\n")
     assert builder._generation_for_work(tmp_path) != first
     grid.write_text("block\n32\n")
-    monkeypatch.setattr(plan, "source_identity", lambda: "source2")
+    safety["settings.py"] = "source2"                    # a file every unit depends on moved
     assert builder._generation_for_work(tmp_path) != first
-    monkeypatch.setattr(plan, "source_identity", lambda: "source1")
+    safety["settings.py"] = "source1"
     monkeypatch.setattr(shard, "provenance", lambda: {
         "gpu": "another-gpu", "env_identity": "current-compiler"})
     assert builder._generation_for_work(tmp_path) != first
+
+
+def test_a_units_generation_moves_only_with_the_files_it_depends_on(monkeypatch):
+    """An edit to one kernel moves the generation of the units that run it, not of every shard."""
+    from miniworld_engine.autotune import identity
+    digests = {"kernels/a.py": "a1", "kernels/b.py": "b1"}
+    monkeypatch.setattr(identity, "tokens", lambda files: {f: digests[f] for f in files})
+    monkeypatch.setattr(identity, "op_files", lambda op: {"op_a": ["kernels/a.py"], "op_b": ["kernels/b.py"]}[op])
+    a, b = builder.OpUnit("op_a", 128), builder.OpUnit("op_b", 128)
+    before = (builder._unit_scope(a, {}, None), builder._unit_scope(b, {}, None))
+    digests["kernels/a.py"] = "a2"
+    after = (builder._unit_scope(a, {}, None), builder._unit_scope(b, {}, None))
+    assert after[0] != before[0]
+    assert after[1] == before[1]
 
 
 def test_driver_claims_are_separated_by_generation():

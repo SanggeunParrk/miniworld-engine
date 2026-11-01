@@ -60,12 +60,11 @@ def build_ops_for_arch(arch):
 
 @lru_cache(None)
 def source_identity() -> str:
-    """Conservative native implementation identity, independent of the search grid.
+    """A global SALT, never a verdict: one hash of every ``kernels/**`` source, as the wheel ships them.
 
-    Changing candidate policy preserves measurements of unchanged kernels. Kernel,
-    launcher, conversion/validation and benchmark changes still invalidate them.
-    ``native_compile.py`` is not part of it: it only decides where and how candidates are
-    compiled ahead of the measurement, and a compiled extension is keyed by its own sources.
+    Nothing is judged stale by it any more (``op_identity`` decides that, per op). ``native_compile`` keys a scratch directory
+    with it so two source states never share one. ``native_compile.py`` is not part of it: it only decides where and how
+    candidates are compiled ahead of the measurement, and a compiled extension is keyed by its own sources.
     """
     root = Path(__file__).resolve().parents[1]
     digest = hashlib.sha256()
@@ -89,6 +88,23 @@ def source_identity() -> str:
             digest.update(str(path.relative_to(root)).encode())
             digest.update(path.read_bytes())
     return digest.hexdigest()
+
+
+def op_identity(op: str) -> str:
+    """The identity a native cache of ``op`` is stored under and judged by: the digest of the op's graph closure.
+
+    Registry row -> its kernel file and driver -> python imports (lazy too), ``#include`` edges, named paths, plus the safety set
+    (``autotune/identity.py``). An edit outside that closure leaves it, and the cache, alone."""
+    from miniworld_engine.autotune import identity
+
+    return identity.native_identity(op)
+
+
+def ops_identity(ops=None) -> str:
+    """One digest over the identities of ``ops`` (default: every native op): moves exactly when one of their graphs moves."""
+    from miniworld_engine.autotune import identity
+
+    return identity.native_aggregate(BUILD_OPS if ops is None else ops)
 
 
 def policy_identity():
@@ -207,7 +223,7 @@ def choose_config(op, candidates, *, dtype, bucket, device_index=None, run=None,
         raise ValueError(f"{op}: no configuration supports this workload")
     if torch.compiler.is_compiling():
         return dict(candidates[0])
-    identity = source_identity()
+    identity = op_identity(op)
     if not settings.current().run_autotune or run is None:
         best = select_config(op, dtype=dtype, bucket=bucket, candidates=_CacheConfigView(candidates),
                              device_index=device_index, op_id=identity)

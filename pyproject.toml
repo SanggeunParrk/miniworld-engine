@@ -96,7 +96,7 @@ miniworld_engine = ["py.typed", "**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", 
 # from a parent package's tree. tests/cpu/layout/test_notes_stay_out_of_the_wheel.py checks the result.
 
 [tool.setuptools.exclude-package-data]
-miniworld_engine = ["autotune/plans/*/*/*",  # generated revision history; rebuilt in user cache
+miniworld_engine = ["autotune/plans/*/*",  # one verified plan per arch (valid by the digests of the files it recorded); rebuilt in user cache
                     "kernels/*/notes/*", "kernels/*/notes/*/*", "kernels/*/notes/*/*/*",
                     # Both `default` and opt-in `grid` ship. A/B accuracy/blk*/
                     # warp*/mixed* exist to compare tilings during a sweep and a consumer

@@ -147,22 +147,52 @@ def test_cuda_pin_cannot_bypass_dtype_compatibility(monkeypatch):
     assert ln._resolve_bwd_path(2, 128, x, x, w, x, x) != "cuda"
 
 
-def test_plan_rejects_changed_sources_or_registry(tmp_path, monkeypatch):
-    from miniworld_engine.autotune import plan
+def test_plan_rejects_changed_sources_or_registry(tmp_path, monkeypatch, request):
+    """A derivation is valid iff every file it recorded still has its digest; a file outside its record never matters."""
+    from miniworld_engine.autotune import identity, plan
+    pkg = tmp_path / "pkg"
+    (pkg / "kernels").mkdir(parents=True)
+    for name, text in (("settings.py", "A = 1\n"), ("kernels/k.py", "x = 1\n"), ("kernels/other.py", "y = 1\n")):
+        (pkg / name).write_text(text)
+    monkeypatch.setattr(identity, "PKG", pkg)
+    request.addfinalizer(identity.refresh)
+    identity.refresh()
     registry = tmp_path / "registry.csv"
     registry.write_text("complete registry")
     evidence = tmp_path / "units.json"
-    evidence.write_text(json.dumps({"complete": True, "arch": "sm86", "units": {}, "errors": []}))
-    monkeypatch.setattr(plan, "source_identity", lambda: "source1")
-    plan.stamp(evidence, registry, "source1")
+    evidence.write_text(json.dumps({
+        "schema": 2, "complete": True, "arch": "sm86", "units": {"u": ["k|f|b"]}, "errors": [],
+        **plan.pack_files({"u": ["kernels/k.py", "settings.py"]})}))
+    plan.stamp(evidence, registry)
     assert plan.load("sm_86", registry, evidence)["complete"]
-    monkeypatch.setattr(plan, "source_identity", lambda: "source2")
+
+    (pkg / "kernels/other.py").write_text("y = 2\n")                  # outside the unit's record: nothing moves
+    identity.refresh()
+    assert plan.load("sm86", registry, evidence)["complete"]
+    (pkg / "kernels/k.py").write_text("x = 1  # a comment\n")          # a comment: the syntax tree is the same
+    identity.refresh()
+    assert plan.load("sm86", registry, evidence)["complete"]
+    (pkg / "kernels/k.py").write_text("x = 2\n")                       # code
+    identity.refresh()
     with pytest.raises(ValueError, match="stale"):
         plan.load("sm86", registry, evidence)
-    monkeypatch.setattr(plan, "source_identity", lambda: "source1")
+    assert plan.stale_units(json.loads(evidence.read_text())) == {"u": ["kernels/k.py"]}
+    (pkg / "kernels/k.py").write_text("x = 1\n")
+    identity.refresh()
     registry.write_text("partial replacement")
     with pytest.raises(ValueError, match="stale"):
         plan.load("sm86", registry, evidence)
+
+
+def test_a_schema_one_derivation_has_no_file_evidence_and_is_stale(tmp_path):
+    from miniworld_engine.autotune import plan
+    registry = tmp_path / "registry.csv"
+    registry.write_text("rows")
+    evidence = tmp_path / "units.json"
+    evidence.write_text(json.dumps({"schema": 1, "complete": True, "arch": "sm86", "units": {"u": []}, "errors": []}))
+    with pytest.raises(ValueError, match="schema-2"):
+        plan.stamp(evidence, registry)
+    assert plan.stale_units(json.loads(evidence.read_text())) == {"u": ["<schema 1: no file evidence>"]}
 
 
 def test_plan_keeps_every_missing_key_and_rejects_unreachable(monkeypatch):

@@ -1,4 +1,9 @@
-"""Choose module invocations that cover the missing kernel keys of a verified derivation."""
+"""Choose module invocations that cover the missing kernel keys of a verified derivation.
+
+A derivation (``registry_kernel.units.json``, schema 2) stores, per unit, the keys it produced AND the files it depends on, with a
+digest of each (``autotune.identity``). It is valid iff every stored file still has its stored digest: nothing global, so an edit to
+one kernel makes the units that ran it stale and no others, and ``dev derive`` re-runs exactly those.
+"""
 
 from __future__ import annotations
 
@@ -10,49 +15,90 @@ from miniworld_engine._atomic import write_json
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "kernels" / "registry" / "registry_kernel.units.json"
+SCHEMA = 2
 
 
-def source_identity() -> str:
-    """Hash dispatch inputs; tuning results and page edits do not invalidate a derivation."""
-    files = [
-        ROOT / "settings.py",
-        ROOT / "kernels" / "registry" / "registry_module.csv",
-        ROOT / "kernels" / "registry" / "registry.csv",
-    ]
-    for directory in (ROOT / "modules", ROOT / "kernels", ROOT / "integrations"):
-        files.extend(
-            path
-            for path in directory.rglob("*.py")
-            if "notes" not in path.relative_to(directory).parts
-        )
-    files.extend((ROOT / "build" / "gpu_to_kernels").glob("*.csv"))
-    files.extend(
-        ROOT / "autotune" / name
-        for name in (
-            "builder.py",
-            "checkpoint_cases.py",
-            "derive.py",
-            "module_registry.py",
-            "shape_key.py",
-        )
-    )
-    from miniworld_engine.autotune import policy
+# ------------------------------------------------------------------------------------------------- per-unit file evidence
+def pack_files(unit_files: dict[str, list[str]]) -> dict:
+    """``{label: [relpath]}`` -> the compact stored form: one sorted file table with a digest each, one index list per unit."""
+    from miniworld_engine.autotune import identity
 
-    files.append(ROOT / "autotune" / "policy.py")
-    h = hashlib.sha256(repr(policy.identity()).encode())
-    for path in sorted(set(files)):
-        h.update(str(path.relative_to(ROOT)).encode())
-        h.update(path.read_bytes())
+    table = sorted({p for files in unit_files.values() for p in files})
+    where = {p: i for i, p in enumerate(table)}
+    return {
+        "norm_scheme": identity.norm_scheme(),
+        "file_index": table,
+        "file_tokens": [identity.file_token(p) for p in table],
+        "unit_files": {label: sorted(where[p] for p in set(files)) for label, files in unit_files.items()},
+    }
+
+
+def unit_file_sets(data: dict) -> dict[str, list[str]]:
+    table = data.get("file_index", [])
+    return {label: [table[i] for i in ids] for label, ids in data.get("unit_files", {}).items()}
+
+
+def stale_units(data: dict, labels=None) -> dict[str, list[str]]:
+    """``{label: files that no longer match}`` for every unit of ``data`` (or only ``labels``) whose evidence is out of date.
+
+    A unit is stale when a file it depends on changed or vanished, when a file of the safety set it does not list exists now (a new
+    ``gpu_to_kernels`` CSV), or when it carries no file evidence at all (a schema-1 derivation)."""
+    from miniworld_engine.autotune import identity
+
+    table, tokens = data.get("file_index", []), data.get("file_tokens", [])
+    scheme = data.get("norm_scheme", "")
+    fresh = {p: identity.token_matches(p, t, scheme) for p, t in zip(table, tokens, strict=False)}
+    safety = identity.safety_files()
+    out: dict[str, list[str]] = {}
+    for label, ids in data.get("unit_files", {}).items() if data.get("schema") == SCHEMA else ():
+        if labels is not None and label not in labels:
+            continue
+        files = {table[i] for i in ids}
+        bad = sorted(p for p in files if not fresh.get(p))
+        bad += sorted(p for p in safety if p not in files)
+        if bad:
+            out[label] = bad
+    if data.get("schema") != SCHEMA:
+        every = set(data.get("units", {})) if labels is None else set(labels)
+        out.update({label: ["<schema 1: no file evidence>"] for label in every})
+    for label in (data.get("units", {}) if labels is None else labels):
+        if label not in data.get("unit_files", {}) and label not in out:
+            out[label] = ["<no recorded files>"]
+    return out
+
+
+def reusable_units(data: dict, arch: str) -> dict[str, dict]:
+    """The units of a prior derivation whose evidence is still current: ``{label: {"keys", "counts", "files"}}``."""
+    from miniworld_engine.autotune.derive import normalise_arch
+
+    if not isinstance(data, dict) or data.get("schema") != SCHEMA or normalise_arch(data.get("arch", "")) != normalise_arch(arch):
+        return {}
+    stale = stale_units(data)
+    files = unit_file_sets(data)
+    counts = data.get("launch_counts", {})
+    return {label: {"keys": keys, "counts": counts.get(label) or [1] * len(keys), "files": files[label]}
+            for label, keys in data.get("units", {}).items() if label not in stale and label in files}
+
+
+def evidence_identity(data: dict) -> str:
+    """Digest of what a derivation says (its keys per unit and the registry it produced), not of the sources: it moves when the
+    derived work moves. Keys a shard directory instead of the old per-edit source hash."""
+    h = hashlib.sha256(json.dumps(data.get("units", {}), sort_keys=True).encode())
+    h.update(str(data.get("registry_identity", "")).encode())
     return h.hexdigest()
 
 
-def stamp(path: Path, registry: Path, source: str) -> None:
+def stamp(path: Path, registry: Path, source: str | None = None) -> None:
+    """Publish the evidence next to ``registry``: it must be complete, error free, and every recorded file must still have the
+    digest it was recorded with (a source edited while the derivation ran is refused). ``source`` is accepted for old callers."""
     data = json.loads(path.read_text())
     if not data.get("complete") or data.get("errors"):
         raise ValueError("cannot publish an incomplete derivation")
-    if source != source_identity():
-        raise ValueError("dispatch sources changed during derivation; repeat it")
-    data["source_identity"] = source
+    if data.get("schema") != SCHEMA:
+        raise ValueError("a derivation needs schema-2 file evidence")
+    changed = stale_units(data)
+    if changed:
+        raise ValueError(f"sources changed during derivation ({len(changed)} units); repeat it")
     data["registry_identity"] = hashlib.sha256(registry.read_bytes()).hexdigest()
     write_json(path, data)
 
@@ -68,10 +114,10 @@ def load(arch: str, registry: Path | None = None, path: Path | None = None) -> d
     if (
         not data.get("complete")
         or data.get("errors")
-        or data.get("source_identity") != source_identity()
-        or data.get("registry_identity")
-        != hashlib.sha256(registry.read_bytes()).hexdigest()
+        or data.get("schema") != SCHEMA
+        or data.get("registry_identity") != hashlib.sha256(registry.read_bytes()).hexdigest()
         or normalise_arch(data.get("arch", "")) != normalise_arch(arch)
+        or stale_units(data)
     ):
         raise ValueError("kernel derivation is incomplete or stale; run dev derive")
     return data
@@ -84,6 +130,15 @@ def is_verified(arch: str, registry: Path) -> bool:
     except (OSError, ValueError):
         return False
     return True
+
+
+def status(path: Path | None = None) -> dict:
+    """What the committed derivation says NOW (cheap, no GPU): ``{"units": n, "stale": {label: files}, "schema": s}``."""
+    try:
+        data = json.loads((path or EVIDENCE).read_text())
+    except (OSError, ValueError):
+        return {"units": 0, "stale": {}, "schema": 0, "missing": True}
+    return {"units": len(data.get("units", {})), "stale": stale_units(data), "schema": data.get("schema", 1)}
 
 
 def label(unit, case) -> str:
@@ -138,11 +193,11 @@ def _plan_suffix(arch: str) -> Path:
     tag = normalise_arch(arch)
     if not tag.startswith("sm") or not tag[2:].isdigit():
         raise ValueError(f"invalid GPU architecture: {arch!r}")
-    return Path(tag) / source_identity() / "registry_kernel.csv"
+    return Path(tag) / "registry_kernel.csv"
 
 
 def generated_registry(arch: str) -> Path:
-    """Writable plans are isolated from the installed package and keyed by source revision.
+    """Writable plans are isolated from the installed package. A plan is valid by the digests of the files it depends on, so one path per arch.
 
     settings.plan_cache_dir overrides only derived dispatch plans, not tuned kernel
     choices. Otherwise use the standard XDG cache location, including in wheel installs.
@@ -223,6 +278,11 @@ def ensure(arch: str, *, workers: int = 1) -> Path:
                 "--workers",
                 str(max(1, workers)),
             ]
+            # incremental: the units of the newest evidence on disk whose files still match are not run again
+            for candidate in registry_candidates(arch):
+                if candidate.with_suffix(".units.json").is_file():
+                    command += ["--prior", str(candidate.with_suffix(".units.json"))]
+                    break
             result = subprocess.run(command, env=env, check=False)
             if result.returncode:
                 error_report = temporary.with_suffix(".errors.json")
