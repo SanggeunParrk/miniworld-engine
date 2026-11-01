@@ -136,9 +136,12 @@ def serves(module, single, cond, pair, mask, compute_dtype=None, extra=None) -> 
     dp = pair.shape[-1] if pair.ndim == 4 else 0
     if dp != a.ln_pair.weight.numel() or dp not in (DP, 256):
         return False
-    # B200 bf16 at pair 256 takes this block too: with a conditioning shared by the samples computed once (``_shared_cond``) it measured
-    # 1.60 ms against the module composition's 1.76 (A48 L384, fwd + bwd, CUDA-graph replay, same GPU); before that it lost to the
-    # composition by 1-3 % (1.73 / 3.80 against 1.68 / 3.75 ms at L384 / L768) and B200 had routed it there.
+    if dp == 256 and cap == (10, 0) and operand_dtype(single, compute_dtype) is BF and not _shared_cond(single, cond, False):
+        # B200 bf16 at pair 256: this block when the samples share their conditioning (``_shared_cond``: computed once), 1.61 / 3.56 ms
+        # against the module composition's 1.75 / 3.91 (A48 L384 / L768, fwd + bwd, CUDA-graph replay, same GPU); a conditioning of
+        # its own per sample stays on the composition (AugmentedAttentionPairBias + ConditionedTransition, CUDA), where this block
+        # measured 1.77 / 3.91 ms against its 1.71 / 3.85.
+        return False
     if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (
         1,
         single.shape[2],
@@ -605,9 +608,9 @@ def _swiglu_gemm(xt, wab):
 
 
 #: samples from which a conditioning shared by the samples (``_shared_cond``) is computed once: its GEMMs (6 D outputs per row
-#: forward, four GEMMs backward) and their [rows, 6 D] tables then run L rows instead of A L. At A = 2 the tables are small and the
-#: GEMMs latency-bound; the sample sum would be one more launch.
-SC_MIN_SAMPLES = 4
+#: forward, four GEMMs backward) and their [rows, 6 D] tables then run L rows instead of A L. Already A = 2 gains (no cond copies
+#: forward and backward against one sample-sum launch): 297.9 -> 293.8 us at L256, 410.6 -> 405.0 at L512 (+[L, L] bias, fwd + bwd).
+SC_MIN_SAMPLES = 2
 
 
 def _shared_cond(single, cond, fp32) -> bool:

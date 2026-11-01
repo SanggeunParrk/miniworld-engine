@@ -165,9 +165,10 @@ def test_token_dit_inference(monkeypatch, dtype, d_pair, A, L, masked):
 @pytest.mark.parametrize("d_pair", WIDTHS)
 @pytest.mark.parametrize(("A", "L", "masked"), [(4, 256, True), (3, 200, False)])
 def test_token_dit_training(monkeypatch, dtype, d_pair, A, L, masked):
-    """``token_dit_train._Block`` serves the call (bf16: the APB pair kernels; fp32: the one-pass ``pair_bias``) at both pair widths;
-    every gradient no worse than the engine's own module path against the fp32 PyTorch block (IEEE): the yardstick of
-    ``tests/gpu/sm90/test_token_dit_pair256_gpu.py``."""
+    """``token_dit_train._Block`` serves the call (bf16: the APB pair kernels; fp32: the one-pass ``pair_bias``) -- except bf16 at pair 256
+    with a conditioning per sample (as here), which B200 trains on the module composition (faster there; a shared conditioning takes
+    the fused block: ``test_token_dit_training_shared_cond``); every gradient no worse than the engine's own module path against the
+    fp32 PyTorch block (IEEE): the yardstick of ``tests/gpu/sm90/test_token_dit_pair256_gpu.py``."""
     from settings_helpers import override_setting
 
     torch.manual_seed(7)
@@ -195,7 +196,8 @@ def test_token_dit_training(monkeypatch, dtype, d_pair, A, L, masked):
     truth = run(ref, False)
     spy = _Spy(monkeypatch, TDT._Block, "apply")
     got = run(eng, dtype is F32)
-    assert spy.n == 1, f"the {dtype} pair-{d_pair} training call took the wrong route ({spy.n} fused calls)"
+    composed = dtype is BF and d_pair == 256   # B200 bf16 pair 256, a conditioning per sample: the module composition (serves)
+    assert spy.n == (0 if composed else 1), f"the {dtype} pair-{d_pair} training call took the wrong route ({spy.n} fused calls)"
     override_setting(monkeypatch, "token_dit_train", "0")
     module = run(eng, dtype is F32)
     assert set(got) == set(truth), sorted(set(truth) ^ set(got))
@@ -210,9 +212,10 @@ def test_token_dit_training(monkeypatch, dtype, d_pair, A, L, masked):
 def test_token_dit_training_shared_cond(monkeypatch, d_pair, A, L, masked, extra):
     """bf16 training with ONE conditioning shared by the samples (expanded over them with stride 0, as a sampling step or a shared-cond
     training step hands it): the fused block computes the conditioning once (``token_dit_train._shared_cond``: [L, 6 D] tables read at row
-    r % L, their row gradients summed over the samples before the conditioning GEMMs). Every output and gradient matches the same call with
-    the conditioning materialized per sample (the per-row path) and is no worse than it against the fp32 PyTorch block (IEEE); the shared
-    conditioning's gradient is the per-sample gradients' sum."""
+    r % L, their row gradients summed over the samples before the conditioning GEMMs) -- at pair 256 too, where a conditioning per sample
+    trains on the module composition. Every output and gradient is no worse than the same call with the conditioning materialized per
+    sample (the fused per-row path; pair 256: the composition) against the fp32 PyTorch block (IEEE); the shared conditioning's gradient
+    is the per-sample gradients' sum."""
     torch.manual_seed(7)
     ref = _randomize(DiTBlock(d_pair=d_pair, implementation=IT.PYTORCH).cuda())
     eng = DiTBlock(d_pair=d_pair, implementation=IT.MINIWORLD).cuda()
