@@ -248,3 +248,106 @@ tpi_bwd(const float* __restrict__ g, const int* __restrict__ ids, const uint8_t*
         if (v.x != 0.f || v.y != 0.f || v.z != 0.f || v.w != 0.f) atomicAdd((float4*)dtbl + idx, v);
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Forward only in ONE launch (no gradient: the inference call): what the forward-only call ran as the prep kernel (ids -> int32, the transposed table) and
+// tpi_fwd. One CTA per SM stages the table T[r][:] = [Wrel^T ; Wbond^T] (fp32, exact copies) in shared memory, its 16-byte chunks XOR-swizzled by the row so
+// that the transposing store and the row reads are free of bank conflicts; the ids are read as they are (int32 or int64, ``wide`` bit k for id tensor k).
+// Work items are (b, row pair, 16 positions): lane = (row r, position) packs its pair's word, then the warp walks the 16 positions, one register copy of
+// right[j] serving both rows; the items are split EVENLY over the warps of the grid (contiguous ranges). The sum is tpi_fwd's, operation for operation
+// (left + the class rows + entity + bond, then + right): bitwise the same z.
+#ifndef TPI_W_WARPS
+#define TPI_W_WARPS 32
+#endif
+constexpr int WW = TPI_W_WARPS;
+constexpr int JB = 16;                               // positions per work item (x 2 rows = 32 pairs, one per lane)
+
+__device__ __forceinline__ int ld_id(const void* p, int wide, long k) {
+    return wide ? (int)reinterpret_cast<const long long*>(p)[k] : reinterpret_cast<const int*>(p)[k];
+}
+
+extern "C" __global__ void __launch_bounds__(WW * 32, 1)
+tpi_fwd_w(const float* __restrict__ left, const float* __restrict__ right, const float* __restrict__ w_rel, const float* __restrict__ w_bond,
+          const void* __restrict__ id_asym, const void* __restrict__ id_res, const void* __restrict__ id_tok, const void* __restrict__ id_ent,
+          const void* __restrict__ id_sym, int wide, const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax) {
+    extern __shared__ __align__(16) float4 Ts[];     // [nbin][32] float4
+    const int nrel = 2 * (2 * rmax + 2) + (2 * smax + 2) + 1, nbin = nrel + 2;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    {
+        const int rblk = (nbin + 31) >> 5;
+        for (int task = warp; task < rblk * 4; task += WW) {
+            const int r = (task % rblk) * 32 + lane, cb = (task / rblk) * 32;     // lane: table row r, channels cb .. cb + 31
+            if (r < nbin) {
+                float v[32];
+#pragma unroll
+                for (int k = 0; k < 32; k++) v[k] = r < nrel ? __ldg(w_rel + (size_t)(cb + k) * nrel + r) : __ldg(w_bond + (size_t)(cb + k) * 2 + (r - nrel));
+#pragma unroll
+                for (int q = 0; q < 8; q++) Ts[r * 32 + (((cb >> 2) + q) ^ (r & 31))] = make_float4(v[4 * q], v[4 * q + 1], v[4 * q + 2], v[4 * q + 3]);
+            }
+        }
+    }
+    __syncthreads();
+    const int BL = B * L, NI = (L + 1) >> 1, NJ = (L + JB - 1) / JB;
+    const long long I = (long long)B * NI * NJ, G = (long long)gridDim.x * WW, g = (long long)blockIdx.x * WW + warp;
+    const long long it0 = g * I / G, it1 = (g + 1) * I / G;
+    const float4* rv4 = reinterpret_cast<const float4*>(right);
+    auto word = [&](long long it) -> uint32_t {      // lane's pair of item it: row 2 ip + (lane >> 4), position jb JB + (lane & 15)
+        uint32_t wd = 0xffffffffu;
+        if (it < it1) {
+            const int jb = (int)(it % NJ);
+            const long long rest = it / NJ;
+            const int ip = (int)(rest % NI), b = (int)(rest / NI);
+            const int i = 2 * ip + (lane >> 4), j = jb * JB + (lane & 15);
+            if (i < L && j < L) {
+                const int ri = b * L + i, rj = b * L + j;
+                const Row a{ld_id(id_asym, wide & 1, ri), ld_id(id_res, (wide >> 1) & 1, ri), ld_id(id_tok, (wide >> 2) & 1, ri),
+                            ld_id(id_ent, (wide >> 3) & 1, ri), ld_id(id_sym, (wide >> 4) & 1, ri)};
+                const Row c{ld_id(id_asym, wide & 1, rj), ld_id(id_res, (wide >> 1) & 1, rj), ld_id(id_tok, (wide >> 2) & 1, rj),
+                            ld_id(id_ent, (wide >> 3) & 1, rj), ld_id(id_sym, (wide >> 4) & 1, rj)};
+                wd = pack_pair(a, c, bond[(size_t)ri * L + j], rmax, smax);
+            }
+        }
+        return wd;
+    };
+    uint32_t cur = word(it0);
+    for (long long it = it0; it < it1; ++it) {
+        const uint32_t nxt = word(it + 1);
+        const int jb = (int)(it % NJ);
+        const long long rest = it / NJ;
+        const int ip = (int)(rest % NI), b = (int)(rest / NI);
+        const int i0 = 2 * ip, nrows = min(2, L - i0), j0 = jb * JB, nj = min(JB, L - j0);
+        float4 lf[2], t[2];
+        uint32_t last[2];
+#pragma unroll
+        for (int r = 0; r < 2; r++) {
+            lf[r] = r < nrows ? __ldg(reinterpret_cast<const float4*>(left + (size_t)(b * L + i0 + r) * P) + lane) : make_float4(0.f, 0.f, 0.f, 0.f);
+            t[r] = lf[r];
+            last[r] = 0xffffffffu;                   // no packed word is all ones
+        }
+        for (int u0 = 0; u0 < nj; u0 += 4) {
+            float4 rv[4];
+#pragma unroll
+            for (int u = 0; u < 4; u++) rv[u] = __ldg(rv4 + (size_t)(b * L + j0 + min(u0 + u, nj - 1)) * 32 + lane);
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                if (u0 + u >= nj) break;
+#pragma unroll
+                for (int r = 0; r < 2; r++) {
+                    if (r >= nrows) break;
+                    const uint32_t w = __shfl_sync(0xffffffffu, cur, r * 16 + u0 + u);
+                    if (w != last[r]) {
+                        last[r] = w;
+                        float4 v = lf[r] + Ts[(w & 255) * 32 + (lane ^ ((w & 255) & 31))];
+                        v += Ts[((w >> 8) & 255) * 32 + (lane ^ (((w >> 8) & 255) & 31))];
+                        v += Ts[((w >> 16) & 255) * 32 + (lane ^ (((w >> 16) & 255) & 31))];
+                        if ((w >> 24) & 1) v += Ts[(nrel - 1) * 32 + (lane ^ ((nrel - 1) & 31))];
+                        const int rb = nrel + ((w >> 25) & 1);
+                        t[r] = v + Ts[rb * 32 + (lane ^ (rb & 31))];
+                    }
+                    __stcs(reinterpret_cast<float4*>(out + ((size_t)(b * L + i0 + r) * L + j0 + u0 + u) * P) + lane, t[r] + rv[u]);
+                }
+            }
+        }
+        cur = nxt;
+    }
+}

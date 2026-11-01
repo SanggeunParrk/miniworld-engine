@@ -73,6 +73,31 @@ def _kernels(index: int, nbin: int, L: int):
     return fwd, bwd
 
 
+@functools.lru_cache(maxsize=16)
+def _kernel_w(index: int, nbin: int):
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+
+    with torch.cuda.device(index):
+        return driver.Kernel(cubin(), "tpi_fwd_w", nbin * P * 4)
+
+
+def forward_w(left, right, w_rel, w_bond, ids, bond, r_max: int, s_max: int) -> torch.Tensor:
+    """Forward only, ONE launch: z [B, L, L, 128] fp32 from left / right [B, L, 128] fp32, the weights w_rel [128, n_rel] / w_bond [128, 2] fp32 as they
+    are (the table is staged in the kernel), the five id tensors [B * L] int32 or int64 (asym, residue, token, entity, sym) and bond [B*L*L] uint8.
+    Bitwise the z of :func:`forward` over the prep kernel's ids and table."""
+    B, L, _ = left.shape
+    check_packable(r_max, s_max)
+    nbin = n_rel(r_max, s_max) + 2
+    from miniworld_engine.kernels._device import num_sms
+
+    k = _kernel_w(_dev(left), nbin)
+    out = torch.empty(B, L, L, P, device=left.device, dtype=torch.float32)
+    wide = sum(1 << q for q, t in enumerate(ids) if t.dtype == torch.int64)
+    with torch.cuda.device(left.device):
+        k((num_sms(_dev(left)), 1, 1), (32 * 32, 1, 1), left, right, w_rel, w_bond, *ids, int(wide), bond, out, int(B), int(L), int(r_max), int(s_max))
+    return out
+
+
 def _dev(t: torch.Tensor) -> int:
     return t.device.index if t.device.index is not None else torch.cuda.current_device()
 

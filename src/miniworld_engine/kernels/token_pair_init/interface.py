@@ -121,6 +121,29 @@ def _can_prep(ids, w_rel, w_bond) -> bool:
             and all(t.dtype in (torch.int32, torch.int64) and t.is_contiguous() for t in ids))
 
 
+def _token_pair_init_fwd_w_fake(left, right, w_rel, w_bond, asym, residue, token, entity, sym, bond, r_max, s_max):
+    B, L, P = left.shape
+    return torch.empty((B, L, L, P), dtype=torch.float32, device=left.device)
+
+
+@opaque(fake=_token_pair_init_fwd_w_fake, name="token_pair_init_fwd_w")
+def token_pair_init_fwd_w(left: torch.Tensor, right: torch.Tensor, w_rel: torch.Tensor, w_bond: torch.Tensor, asym: torch.Tensor, residue: torch.Tensor,
+                          token: torch.Tensor, entity: torch.Tensor, sym: torch.Tensor, bond: torch.Tensor, r_max: int, s_max: int) -> torch.Tensor:
+    """z [B, L, L, 128] fp32 in one B200 launch from the weights and the raw ids (bitwise the prep + forward pair)."""
+    from miniworld_engine.kernels.token_pair_init.cuda import sm100
+
+    return sm100.forward_w(left, right, w_rel, w_bond, [asym, residue, token, entity, sym], bond, r_max, s_max)
+
+
+def _one_kernel(left, right, w_rel, w_bond, ids) -> bool:
+    """The forward-only call on B200 runs one kernel: nothing differentiates, fp32 contiguous streams and weights, int32 / int64 contiguous ids."""
+    if torch.is_grad_enabled() and any(t.requires_grad for t in (left, right, w_rel, w_bond)):
+        return False
+    return (torch.cuda.get_device_capability(left.device) == (10, 0)
+            and all(t.dtype == torch.float32 and t.is_contiguous() for t in (left, right, w_rel, w_bond))
+            and all(t.dtype in (torch.int32, torch.int64) and t.is_contiguous() for t in ids))
+
+
 class TokenPairInitFunction(torch.autograd.Function):
     """The kernels read fp32: bf16 ``left`` / ``right`` (autocast) and a bf16 table are cast here, outside autograd, and the
     gradients go back in each input's dtype (an fp32 table -- fp32 master weights -- gets its fp32 gradient unrounded)."""
@@ -156,6 +179,9 @@ def token_pair_init(left: torch.Tensor, right: torch.Tensor, w_rel: torch.Tensor
         return token_pair_init_reference(left.to(f), right.to(f), w_rel.to(f), w_bond.to(f), asym_id, residue_idx, token_idx, entity_id, sym_id, bond != 0,
                                          r_max, s_max)
     id5 = [t.reshape(-1) for t in (asym_id, residue_idx, token_idx, entity_id, sym_id)]
+    if where == CUDA and _one_kernel(left, right, w_rel, w_bond, id5):
+        bond8 = bond.contiguous().view(torch.uint8).reshape(-1) if bond.dtype is torch.bool else (bond != 0).to(torch.uint8).reshape(-1)
+        return token_pair_init_fwd_w(left, right, w_rel, w_bond, *id5, bond8, r_max, s_max)
     fast = _can_prep(id5, w_rel, w_bond)
     if fast:
         ids, tbl = token_pair_init_prep(*id5, w_rel, w_bond)
