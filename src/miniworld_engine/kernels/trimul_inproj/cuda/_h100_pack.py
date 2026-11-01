@@ -177,7 +177,7 @@ def pack_into_triton(dst: torch.Tensor, wl: torch.Tensor, wlg: torch.Tensor, wr:
 def _pack_blocks(dst: torch.Tensor, wl: torch.Tensor, wlg: torch.Tensor, wr: torch.Tensor, wrg: torch.Tensor) -> None:
     """The pack as PyTorch copies (bit-exact, no arithmetic): ``dst`` [4R, D] is R / 16 groups of 64 rows, each 32 gate rows then the 32
     matching value rows; the first R / 32 groups read the left leaves (gate ``wlg``, value ``wl``), the rest the right ones. H100 / B200 launch no
-    Triton, so the compiled-region pack is this and not ``_pack_triton_launch``."""
+    Triton, so the compiled-region pack is this and not ``tests/gpu/sm90/_triton_records.pack_triton_launch``."""
     r, d = wl.shape
 
     def blocks(w):
@@ -188,13 +188,6 @@ def _pack_blocks(dst: torch.Tensor, wl: torch.Tensor, wlg: torch.Tensor, wr: tor
     dst.view(2 * (r // 32), 2, 32, d).copy_(torch.cat((left, right), 0))
 
 
-def _pack_triton_launch(dst: torch.Tensor, wl: torch.Tensor, wlg: torch.Tensor, wr: torch.Tensor, wrg: torch.Tensor) -> None:
-    """The former Triton launch of ``pack_into_triton`` (``_pack``): not reached on H100 / B200, kept."""
-    r, d = wl.shape
-    _pack[(triton.cdiv(4 * r * d, 1024),)](
-        dst, wl, wlg, wr, wrg, r, d,
-        *wl.stride(), *wlg.stride(), *wr.stride(), *wrg.stride(),
-        BLOCK=1024, num_warps=4)
 
 
 @T.device_cache
