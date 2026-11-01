@@ -54,7 +54,11 @@ constexpr int A_BYTES = NKB * KB_A, B_BYTES = NKB * KB_B, X_BYTES = NKX * KB_A;
 // from global memory for the statistics and the epilogue re-reads them (an L2 hit)
 constexpr int NA = F32 ? 1 : 2;
 constexpr int NXS = F32 ? 0 : 2;
-constexpr int O_B = 0, O_A = NACC * B_BYTES, O_X = O_A + NA * A_BYTES, O_ST = O_X + NXS * X_BYTES, O_BAR = O_ST + 2 * 128 * 8;
+// fp32 (no x staging): one 32-row x 128-B slab per epilogue warp, through which x is read and y written as whole 128-B row segments
+// (the thread-per-row global accesses were one cache line per lane and instruction: 6.8 us of an epilogue per tile at [20480, 128])
+constexpr int SLAB = 32 * 128, NSLAB = NXS == 0 ? 4 : 0;
+constexpr int O_B = 0, O_A = NACC * B_BYTES, O_X = O_A + NA * A_BYTES, O_SL = O_X + NXS * X_BYTES, O_ST = O_SL + NSLAB * SLAB,
+              O_WC = O_ST + 2 * 128 * 8, O_BS = O_WC + KC * 4, O_BAR = O_BS + BN * 4;
 constexpr int SMEM_BYTES = O_BAR + 256;
 constexpr int TCOLS = NACC * BN;
 static_assert(KC % 128 == 0 && DX % 128 == 0 && KC <= 256 && DX <= 256, "widths");
@@ -143,6 +147,8 @@ adaln_fused_sm100(const __grid_constant__ CUtensorMap mB0, const __grid_constant
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   float2* ST = reinterpret_cast<float2*>(sm + O_ST);   // [2][128] (rstd, mean rstd) of x's rows
+  float* WCs = reinterpret_cast<float*>(sm + O_WC);    // [KC] the LayerNorm weight of cond
+  float* BSs = reinterpret_cast<float*>(sm + O_BS);    // [BN] the gate bias of this CTA's columns
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   constexpr int NT = DX / BN;
   const int MT = (M + 127) / 128, tiles = MT * NT;
@@ -221,6 +227,10 @@ adaln_fused_sm100(const __grid_constant__ CUtensorMap mB0, const __grid_constant
   } else if (warp < 6) {
     // ------------------------------------------------------------------------------------------------ A producers (warps 2-5)
     const uint32_t r = (uint32_t)((warp - 2) * 32 + lane);   // this thread's row of the tile
+    // wc into shared memory (read by every row below): issued here, under the first tile's TMA, instead of as global loads inside the
+    // normalisation (a DRAM round trip on a cold cache, on the path to the MMA); the four producer warps meet at named barrier 1
+    for (int i = (int)r; i < KC; i += 128) WCs[i] = __ldg(WC + i);
+    named_bar_sync(1, 128);
     int tc = 0;
     for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++tc) {
       const int buf = tc & 1;
@@ -299,10 +309,10 @@ adaln_fused_sm100(const __grid_constant__ CUtensorMap mB0, const __grid_constant
         const uint32_t a = abase + (c / 8) * KB_A + sw128(r, c % 8);
         float v[16 / ESZ];
         unpack16(KEEP ? raw[KEEP ? c : 0] : lds128(a), v);
-        const float4* wp = reinterpret_cast<const float4*>(WC + c * (16 / ESZ));
+        const float4* wp = reinterpret_cast<const float4*>(WCs + c * (16 / ESZ));
 #pragma unroll
         for (int e4 = 0; e4 < 16 / ESZ / 4; ++e4) {
-          const float4 w = __ldg(wp + e4);
+          const float4 w = wp[e4];
           v[4 * e4] = (v[4 * e4] - mc) * rc * w.x;
           v[4 * e4 + 1] = (v[4 * e4 + 1] - mc) * rc * w.y;
           v[4 * e4 + 2] = (v[4 * e4 + 2] - mc) * rc * w.z;
@@ -318,15 +328,76 @@ adaln_fused_sm100(const __grid_constant__ CUtensorMap mB0, const __grid_constant
     // ------------------------------------------------------------------------------------------------ epilogue (warps 6-9)
     const int q4 = warp & 3;
     const int rl = q4 * 32 + lane;
+    // the gate bias of this CTA's columns into shared memory (it was a global load per element in the loop below): the four epilogue
+    // warps meet at named barrier 2, long before the first accumulator is ready
+    for (int i = (warp - 6) * 32 + lane; i < BN; i += 128) BSs[i] = __ldg(BS + n0 + i);
+    named_bar_sync(2, 128);
     int tc = 0;
     for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++tc) {
       const int buf = tc & 1;
       const uint32_t ph = (tc >> 1) & 1;
+#if F32
+      // x read and y written through this warp's slab as whole 128-B row segments: the 32 x 32 block (rows m0 .. m0 + 31, columns
+      // n0 + 32 c ..) is eight 16-B loads a lane, lane l of load i taking row 4 i + l / 8, chunk l % 8 (each instruction four full row
+      // segments); in the slab (128-B swizzle) every lane then reads and rewrites its own row, and the block leaves the same way.
+      // The thread-per-row global accesses this replaces were one cache line per lane and instruction (6.8 us of epilogue a tile at [20480, 128]).
+      const long m0 = (long)(t / NT) * 128 + q4 * 32;
+      const uint32_t slab = su + O_SL + (uint32_t)(warp - 6) * SLAB;
+      uint4 xq[8];
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {                     // the first block, in flight under the accumulator wait
+        const long rr = m0 + 4 * i + (lane >> 3);
+        xq[i] = rr < M ? ldg128(reinterpret_cast<const float*>(X) + rr * DX + n0 + 4 * (lane & 7)) : make_uint4(0, 0, 0, 0);
+      }
+      mbar_wait(&B.accf[buf], ph);
+      tc_fence_after();
+      const float2 st = ST[buf * 128 + rl];
+      const uint32_t tb = tmem + ((uint32_t)(q4 * 32) << 16) + buf * TCOLS;
+#pragma unroll 1
+      for (int c = 0; c < BN / 32; ++c) {
+#pragma unroll
+        for (int i = 0; i < 8; ++i) sts128(slab + sw128((uint32_t)(4 * i + (lane >> 3)), (uint32_t)(lane & 7)), xq[i]);
+        if (c + 1 < BN / 32) {                          // the next block's x in flight under this block's math
+#pragma unroll
+          for (int i = 0; i < 8; ++i) {
+            const long rr = m0 + 4 * i + (lane >> 3);
+            xq[i] = rr < M ? ldg128(reinterpret_cast<const float*>(X) + rr * DX + n0 + (c + 1) * 32 + 4 * (lane & 7)) : make_uint4(0, 0, 0, 0);
+          }
+        }
+        uint32_t acc[NACC][32];
+        tmem_ld32(tb + c * 32, acc[0]);
+        tmem_ld32(tb + BN + c * 32, acc[1]);
+        __syncwarp();
+        float o[32];
+#pragma unroll
+        for (int q = 0; q < 8; ++q) {
+          const uint4 v = lds128(slab + sw128((uint32_t)lane, (uint32_t)q));
+          o[4 * q] = __uint_as_float(v.x); o[4 * q + 1] = __uint_as_float(v.y); o[4 * q + 2] = __uint_as_float(v.z); o[4 * q + 3] = __uint_as_float(v.w);
+        }
+        tmem_wait_ld();
+#pragma unroll
+        for (int e = 0; e < 32; ++e) {
+          const float sp = __uint_as_float(acc[1][e]) + BSs[c * 32 + e];
+          const float y = sigmoid_kit(sp) * (o[e] * st.x - st.y) + __uint_as_float(acc[0][e]);
+          o[e] = rna ? tf32r(y) : y;
+        }
+#pragma unroll
+        for (int q = 0; q < 8; ++q)
+          sts128(slab + sw128((uint32_t)lane, (uint32_t)q), make_uint4(__float_as_uint(o[4 * q]), __float_as_uint(o[4 * q + 1]),
+                                                                      __float_as_uint(o[4 * q + 2]), __float_as_uint(o[4 * q + 3])));
+        __syncwarp();
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+          const int rr = 4 * i + (lane >> 3);
+          const uint4 v = lds128(slab + sw128((uint32_t)rr, (uint32_t)(lane & 7)));
+          if (m0 + rr < M) stg128(reinterpret_cast<float*>(Y) + (m0 + rr) * DX + n0 + c * 32 + 4 * (lane & 7), v);
+        }
+        __syncwarp();                                   // the slab is rewritten by the next block
+      }
+#else
       const long row = (long)(t / NT) * 128 + rl;
       const bool ok = row < M;
-      const uint32_t xbase = su + O_X + (NXS == 2 ? buf : 0) * X_BYTES;   // (NXS == 2) this tile's x rows, staged by the TMA warp
-      float xn[32];
-      if (NXS == 0) load32(X, row * DX + n0, ok, xn);  // x of the first chunk, issued before the accumulators are waited on
+      const uint32_t xbase = su + O_X + buf * X_BYTES;  // this tile's x rows, staged by the TMA warp
       mbar_wait(&B.accf[buf], ph);
       tc_fence_after();
       const float2 st = ST[buf * 128 + rl];
@@ -334,19 +405,13 @@ adaln_fused_sm100(const __grid_constant__ CUtensorMap mB0, const __grid_constant
 #pragma unroll 1
       for (int c = 0; c < BN / 32; ++c) {
         float o[32];
-        if (NXS == 2) {
 #pragma unroll
-          for (int g = 0; g < 32 * ESZ / 16; ++g) {     // the 32 columns n0 + 32 c .. as 16-B chunks of the swizzled staging
-            const int k = n0 + c * 32 + g * (16 / ESZ);
-            float v[16 / ESZ];
-            rd16(xbase + (k / BKE) * KB_A + sw128((uint32_t)rl, (uint32_t)((k % BKE) * ESZ / 16)), v);
+        for (int g = 0; g < 32 * ESZ / 16; ++g) {       // the 32 columns n0 + 32 c .. as 16-B chunks of the swizzled staging
+          const int k = n0 + c * 32 + g * (16 / ESZ);
+          float v[16 / ESZ];
+          rd16(xbase + (k / BKE) * KB_A + sw128((uint32_t)rl, (uint32_t)((k % BKE) * ESZ / 16)), v);
 #pragma unroll
-            for (int e = 0; e < 16 / ESZ; ++e) o[g * (16 / ESZ) + e] = v[e];
-          }
-        } else {
-#pragma unroll
-          for (int e = 0; e < 32; ++e) o[e] = xn[e];
-          if (c + 1 < BN / 32) load32(X, row * DX + n0 + (c + 1) * 32, ok, xn);   // the next chunk's x in flight under this chunk's math
+          for (int e = 0; e < 16 / ESZ; ++e) o[g * (16 / ESZ) + e] = v[e];
         }
         uint32_t acc[NACC][32];
         tmem_ld32(tb + c * 32, acc[0]);
@@ -354,12 +419,12 @@ adaln_fused_sm100(const __grid_constant__ CUtensorMap mB0, const __grid_constant
         tmem_wait_ld();
 #pragma unroll
         for (int e = 0; e < 32; ++e) {
-          const float sp = __uint_as_float(acc[1][e]) + __ldg(BS + n0 + c * 32 + e);
-          const float y = sigmoid_kit(sp) * (o[e] * st.x - st.y) + __uint_as_float(acc[0][e]);
-          o[e] = (F32 && rna) ? tf32r(y) : y;
+          const float sp = __uint_as_float(acc[1][e]) + BSs[c * 32 + e];
+          o[e] = sigmoid_kit(sp) * (o[e] * st.x - st.y) + __uint_as_float(acc[0][e]);
         }
         if (ok) store32(Y, row * DX + n0 + c * 32, o);
       }
+#endif
       tc_fence_before();
       __syncwarp();
       if (lane == 0) { mbar_arrive(&B.acce[buf]); mbar_arrive(&B.sempty[buf]); }
