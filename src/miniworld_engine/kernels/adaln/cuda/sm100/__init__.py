@@ -28,8 +28,10 @@ _dir = Path(__file__).parent
 #: the sm_100a primitives (mbarrier, TMA, tcgen05) shared with the Transition kernels: kernels/transition/cuda/sm100/sm100.cuh
 _inc = _dir.parent.parent.parent / "transition" / "cuda" / "sm100"
 #: Output-tile widths per dtype, widest first (two accumulators double-buffered: 2 x 2 x BN <= 512 tensor-memory columns; a bf16 output is
-#: staged in 64-column groups)
-_BNS = {False: (128, 64), True: (128, 64, 32)}
+#: staged in 64-column groups). fp32 192: one accumulator buffer (2 x 192 columns), for a single-wave grid -- [3840, 768] is 120 tiles of
+#: 192 against 180 of 128; bf16 32: stored by the epilogue threads themselves (``DIRECT``), for a few hundred rows -- [640, 768] is 120
+#: tiles of 32 against 60 of 64
+_BNS = {False: (128, 64, 32), True: (192, 128, 64, 32)}
 #: A/B and test override of the output-tile width (None: ``_pick_bn``)
 BN_FORCE: int | None = None
 
@@ -130,6 +132,8 @@ def _pick_bn(m: int, n: int, f32: bool, nsm: int) -> int:
     K-block, so a narrower tile only pays where it fills more of the first wave."""
     best = None
     for bn in _BNS[f32]:
+        if n % bn:
+            continue
         tiles = -(-m // 128) * -(-n // bn)
         cost = -(-tiles // nsm) * (128 + 2 * bn)
         if best is None or cost < best[0]:
@@ -155,7 +159,21 @@ def _weights(ws, bs, wb, f32: bool):
 #: c384 24.1 / 23.1 / 23.6, c768 17.0 / 12.8 / 15.8, 22.4 / 19.6 / 22.3, 33.7 / 30.9 / 30.7: the TF32 tcgen05 GEMM at this thin K is
 #: below cuBLAS's, more than the epilogue fusion gives back. The atom width (cond 128): the one-kernel route at [5120 / 40960, 128] 12.1 /
 #: 39.4 against 12.4 / 46.0 for the rows around a GEMM; the row kernels around cuBLAS measured 30.6 / 40.9 in the ladder (L4096 / 8192).
-F32_ROUTE = "cublas"
+#: "auto" (default): tcgen05 at the token widths, cuBLAS at the atom width. Re-measured on the ladder's timer (triton do_bench: L2 flushed
+#: before every call, CUDA graph, us, tcgen05 / cublas / Triton) once the tcgen05 GEMM took a 192-column single-wave tile (the 128-column
+#: grid of [3840, 768] was 180 tiles on 148 SMs, two 590-KB operand intakes on a quarter of them) and the row pass its early launch:
+#: [3840, 768] c384 30.2 / 32.6 / 32.6, c768 38.8 / 40.8 / 40.8; [1920, 768] c384 22.4 / - / 28.5, c768 28.6 / - / 32.6. The atom width
+#: stays on cuBLAS: the one-kernel fp32 kernel (two A buffers at 64 columns or one at 128) measured 28.5 / 38.8 at [20480 / 40960, 128]
+#: against 28.6 / 40.8, the two launches 38.8 / 63.4. An ``rna`` call (the ConditionedTransition's AdaLN, whose result feeds its TF32
+#: tail) keeps cuBLAS: that block was measured and tuned around it.
+F32_ROUTE = "auto"
+
+
+def _f32_tcgen05(m: int, dc: int, rna: bool) -> bool:
+    """``F32_ROUTE == "auto"``: whether an fp32 call takes the two tcgen05 launches. Not at the atom width, not for an ``rna`` call, and at a
+    768-wide cond only past ``EARLY_PDL_ROWS`` rows: each 128-row tile then reads 128 x 768 fp32 of cn (384 KB) through the ring, and
+    at [640 / 1920, 768] cuBLAS measured 18.4 / 28.0 against 24.4 / 28.6 us (cond 384 at 640 rows: 16.2 against 18.2)."""
+    return dc not in FUSED_KC and not rna and (dc < 768 or m > EARLY_PDL_ROWS)
 
 
 def _f32_cublas(x2, c2, wc, wcat, bcat, eps_x, eps_c, rna):
@@ -213,8 +231,8 @@ def _infer(x2: torch.Tensor, c2: torch.Tensor, wc: torch.Tensor, wb: torch.Tenso
     tiles = -(-m // 128) * -(-d // bn)
     ext.launch_kernel(
         name, "adaln_gemm_sm100", max(1, min(nsm, tiles)), 320, 1,
-        [t(cn, dc, m, bke, 128), t(wb, dc, d, bke, bn), t(ws, dc, d, bke, bn), t(y, d, m, ocg, 32), x2, st, bs, m, d, dc, d,
-         int(bool(rna) and f32)],
+        [t(cn, dc, m, bke, 128), t(wb, dc, d, bke, bn), t(ws, dc, d, bke, bn), t(y, d, m, ocg if f32 or bn >= 64 else 32, 32), x2, st, bs, m, d,
+         dc, d, int(bool(rna) and f32), y],
         pdl=True,
     )
     return y
@@ -228,7 +246,7 @@ def adaln_inference(x, cond, wc, ws, bs, wb, eps_x: float, eps_c: float, *, rna:
     f32 = x.dtype is torch.float32
     params = (ws, wb) if bs is None else (ws, bs, wb)
     d, dc = x.shape[-1], cond.shape[-1]
-    if f32 and F32_ROUTE == "cublas":
+    if f32 and (F32_ROUTE == "cublas" or (F32_ROUTE == "auto" and not _f32_tcgen05(x.numel() // max(d, 1), dc, rna))):
         wcat, bcat = _capture.param_forms(
             "adaln_sm100a_f32_cublas", params,
             lambda: (torch.cat([ws, wb]).float().contiguous(),

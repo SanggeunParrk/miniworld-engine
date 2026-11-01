@@ -127,21 +127,25 @@ def test_inference_launches_the_cuda_kernels_and_matches_the_reference(op, bf16,
         again = run() if mode != "graph" else (g.replay(), out.clone())[1]
         assert torch.equal(again, y)
     # inference (kernels/adaln/cuda/sm100): bf16 at the atom width (cond 128) one tcgen05 kernel (LN(cond) built in shared memory, the gate and
-    # LN(x) in its epilogue), elsewhere the row pass + the tcgen05 GEMM with the gate in its epilogue; fp32 the row kernels around one cuBLAS
-    # TF32 GEMM (the weights packed once). The tail at the token width (bf16 up to 4096 rows) cuBLAS between the CUDA SwiGLU / gate row kernels,
-    # else the two tcgen05 GEMMs. The ConditionedTransition's bf16 call on the cuBLAS tail takes its AdaLN and gate projection as one head
-    # (ct_sm100.head_inference: the row-statistics pass, then ct_head_sm100 / ct_head_split_sm100).
+    # LN(x) in its epilogue), elsewhere the row pass + the tcgen05 GEMM with the gate in its epilogue; fp32 the same two launches at the token
+    # widths of the AdaLN module (``sm100._f32_tcgen05``), and the row kernels around one cuBLAS TF32 GEMM (the weights packed once) at the
+    # atom width and at cond 768 up to a few thousand rows. The tail at the token width (bf16 up to 4096 rows) cuBLAS between the CUDA SwiGLU /
+    # gate row kernels, else the two tcgen05 GEMMs. The ConditionedTransition's bf16 call on the cuBLAS tail takes its AdaLN and gate projection
+    # as one head (ct_sm100.head_inference: the row-statistics pass, then ct_head_sm100 / ct_head_split_sm100).
+    from miniworld_engine.kernels.adaln.cuda import sm100 as adaln_sm100
+    from miniworld_engine.kernels.conditioned_transition.cuda import ct_sm100
+
     rows_ = 1
     for r_ in rows:
         rows_ *= r_
-    from miniworld_engine.kernels.conditioned_transition.cuda import ct_sm100
-
     ct_head = op == "ct" and bf16 and d > 128 and rows_ <= ct_sm100.BF16_CUBLAS_MAX_ROWS and ct_sm100.HEAD_FUSED
     # The fp32 ConditionedTransition at the token widths: the whole module as one op with the AdaLN and the gate projection one GEMM on the centred
     # conditioning (ct_sm100.ct_inference_full_f32: cond_center, adaln_fold_fwd, sigmul_fwd_ld).
     fold = op == "ct" and not bf16 and d > 128
     if fold:
         assert _has(names, "adaln_fold_fwd", "swiglu_fwd", "sigmul_fwd_ld"), names
+    elif not bf16 and op == "adaln" and adaln_sm100._f32_tcgen05(rows_, dc, False):
+        assert _has(names, "ln_cond_xstats", "adaln_gemm_sm100"), names
     elif not bf16:
         assert _has(names, "ln_cond_fwd", "adaln_fwd_k"), names
     elif ct_head:

@@ -31,7 +31,9 @@ using namespace s100;
 constexpr int NACC = 2;                              // acc 0 = cn Wb^T (the shift), acc 1 = cn Ws^T (the gate's pre-activation)
 constexpr int ESZ = F32 ? 4 : 2;                     // activation / operand element bytes
 constexpr int BKE = 128 / ESZ;                       // elements per 128-byte K-block row
-constexpr int OCG = F32 ? 32 : 64;                   // output columns per 128-byte staging row
+// bf16 at BN = 32 (DIRECT): the tile is narrower than a 128-B staging row of bf16; the epilogue thread stores its row's 32 outputs (64 B) itself
+#define DIRECT (!F32 && BN == 32)
+constexpr int OCG = F32 || DIRECT ? 32 : 64;         // output columns per 128-byte staging row (DIRECT: per group)
 constexpr int UPG = OCG / 32;                        // 32-column TMEM loads per output group
 #ifndef STGP
 #define STGP 2
@@ -49,8 +51,11 @@ constexpr int O_ST = 0, O_STG = NST * STAGE, O_BSM = O_STG + STG_BYTES, O_BAR = 
 constexpr int SMEM_BYTES = O_BAR + 1024;
 constexpr int TCOLS = NACC * BN;                     // TMEM columns of one accumulator buffer
 static_assert(NST >= 2, "ring depth");
-static_assert(2 * TCOLS <= 512, "two accumulator buffers must fit tensor memory");
-static_assert(BN % 32 == 0 && BN % OCG == 0 && BN >= 32 && BN <= 128, "tile width");
+// accumulator buffers in tensor memory: two (the epilogue of tile i under the main loop of tile i + 1) where they fit; a tile wider than 128
+// columns (2 x BN > 256 columns) has one -- it is picked where the grid is a single wave, one tile a CTA, so nothing would overlap anyway
+constexpr int NBUF = 2 * TCOLS <= 512 ? 2 : 1;
+static_assert(NBUF * TCOLS <= 512, "the accumulators must fit tensor memory");
+static_assert(BN % 32 == 0 && BN % OCG == 0 && BN >= 32 && BN <= 256, "tile width");
 static_assert(STAGE % 1024 == 0 && SLAB % 1024 == 0, "128-B swizzle atoms");
 
 #if F32
@@ -111,11 +116,11 @@ DEVI void load32(const void* src, long off, bool ok, float (&v)[32]) {
 }
 
 // maps: A cn [M][K] (box BKE x 128), B0 Wb [N][K], B1 Ws [N][K] (box BKE x BN), O y [M][N] (box OCG x 32).
-// X [M][ldx] the activation, ST [M] (rstd, mean rstd) of its rows, BS [N] the gate bias (fp32).
+// X [M][ldx] the activation, ST [M] (rstd, mean rstd) of its rows, BS [N] the gate bias (fp32), Yd y itself (stored directly at DIRECT).
 extern "C" __global__ void __launch_bounds__(64 + 32 * NEPI, 1)
 adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUtensorMap mB0, const __grid_constant__ CUtensorMap mB1,
                  const __grid_constant__ CUtensorMap mO, const void* __restrict__ X, const float2* __restrict__ ST,
-                 const float* __restrict__ BS, int M, int N, int K, int ldx, int rna) {
+                 const float* __restrict__ BS, int M, int N, int K, int ldx, int rna, void* __restrict__ Yd) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -175,8 +180,8 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
       int it = 0, tc = 0;
       const int nk = K / BKE;
       for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++tc) {
-        const int buf = tc & 1;
-        mbar_wait(&B.acce[buf], ((tc >> 1) & 1) ^ 1);
+        const int buf = tc % NBUF;
+        mbar_wait(&B.acce[buf], ((tc / NBUF) & 1) ^ 1);
         tc_fence_after();
         const uint32_t dbase = tmem + buf * TCOLS;
         for (int k = 0; k < nk; ++k, ++it) {
@@ -208,7 +213,7 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
     const bool storer = UPG == 1 || half == 0;
     int tc = 0, grp = 0;
     for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++tc) {
-      const int buf = tc & 1;
+      const int buf = tc % NBUF;
       const int m0 = (t / NT) * 128, n0 = (t % NT) * BN;
       const int row = m0 + q4 * 32 + lane;
       const bool rok = row < M;
@@ -225,7 +230,7 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
         const int g0 = UPG == 1 ? half : 0;
         if (g0 < BN / OCG && n0 + g0 * OCG < N) load32(X, (long)row * ldx + n0 + g0 * OCG + (UPG == 1 ? 0 : half) * 32, rok, xpre);
       }
-      mbar_wait(&B.accf[buf], (tc >> 1) & 1);
+      mbar_wait(&B.accf[buf], (tc / NBUF) & 1);
       tc_fence_after();
       const uint32_t tb = tmem + ((uint32_t)(q4 * 32) << 16) + buf * TCOLS;
 #pragma unroll
@@ -234,7 +239,7 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
         const int c0 = n0 + g * OCG;                         // first output column of the group
         if (g >= BN / OCG || c0 >= N) break;
         const int par = STG_PAR == 2 ? (grp & 1) : 0;
-        if (storer && lane == 0) { if (STG_PAR == 2) tma_store_wait_read1(); else tma_store_wait_read0(); }
+        if (!DIRECT && storer && lane == 0) { if (STG_PAR == 2) tma_store_wait_read1(); else tma_store_wait_read0(); }
         if (UPG == 2) named_bar_sync(1 + q4, 64); else __syncwarp();
         {
           const int u = UPG == 1 ? 0 : half;
@@ -256,11 +261,21 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
             const float y = sigm(sp) * (o[e] * st.x - st.y) + __uint_as_float(acc[0][e]);
             o[e] = (F32 && rna) ? tf32r(y) : y;
           }
+#if DIRECT
+          if (rok) {
+            __nv_bfloat16* yp = reinterpret_cast<__nv_bfloat16*>(Yd) + (long)row * N + n0 + col;
+#pragma unroll
+            for (int q = 0; q < 4; ++q)
+              stg128(yp + 8 * q, make_uint4(pack_bf16(o[8 * q], o[8 * q + 1]), pack_bf16(o[8 * q + 2], o[8 * q + 3]), pack_bf16(o[8 * q + 4], o[8 * q + 5]),
+                                            pack_bf16(o[8 * q + 6], o[8 * q + 7])));
+          }
+#else
           stage32(stg + (uint32_t)par * SLAB, r, u, o);
+#endif
         }
         fence_proxy_async();
         if (UPG == 2) named_bar_sync(1 + q4, 64); else __syncwarp();
-        if (storer && lane == 0) {
+        if (!DIRECT && storer && lane == 0) {
           tma_store_2d(&mO, stg + (uint32_t)par * SLAB, c0, m0 + q4 * 32);
           tma_store_commit();
         }
@@ -269,7 +284,7 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.acce[buf]);
     }
-    if (storer && lane == 0) tma_store_wait0();
+    if (!DIRECT && storer && lane == 0) tma_store_wait0();
   }
   tc_fence_before();
   __syncthreads();
