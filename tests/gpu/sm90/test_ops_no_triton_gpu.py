@@ -179,7 +179,9 @@ class TestFacades:
         shapes = [(d,), (d,), (d, d), (heads, d), (d, d), (d, d), (d, d), (d, d)]
         ws = [randn(*s, dtype=dtype, scale=0.05 if len(s) == 2 else 0.1, seed=i) + (1 if n == "ln_w" else 0)
               for i, (n, s) in enumerate(zip(names, shapes, strict=True))]
-        norm = [randn(d // heads, dtype=dtype, scale=0.1, seed=11) + 1, randn(d // heads, dtype=dtype, scale=0.1, seed=12) + 1] if qk_norm else []
+        # small QK-norm weights: with weights ~1 the logits have a standard deviation ~5 and the softmax is a near argmax, so a bf16 rounding
+        # difference between two correct implementations flips rows (an ill-conditioned test, not a different function)
+        norm = [0.25 * (randn(d // heads, dtype=dtype, scale=0.1, seed=11) + 1), 0.25 * (randn(d // heads, dtype=dtype, scale=0.1, seed=12) + 1)] if qk_norm else []
         mask = torch.rand(1, length, device="cuda") > 0.1
 
         def call(pair, ln_w, ln_b, wv, wb, wg, wo, wq, wk, *nq):
@@ -188,7 +190,18 @@ class TestFacades:
                 to_out_weight=wo, to_query_weight=wq, to_key_weight=wk,
                 norm_query_weight=nq[0] if nq else None, norm_key_weight=nq[1] if nq else None)
 
-        check(f"ops.triangle_attention qk_norm={qk_norm}", dtype, call, [pair, *ws, *norm], grad)
+        # fp32: the previous path was already the PyTorch statements (the portable triangle-attention core is bf16 only)
+        check(f"ops.triangle_attention qk_norm={qk_norm}", dtype, call, [pair, *ws, *norm], grad, expect_old_launch=dtype is torch.bfloat16)
+        if dtype is torch.bfloat16 and not grad:
+            # an independent yardstick: the same call on the same (bf16-rounded) values in fp32, PyTorch statements
+            inputs = [pair, *ws, *norm]
+            with ab(False):
+                got, _ = evaluate(call, inputs, False)
+                truth, _ = evaluate(call, [t.float() for t in inputs], False)
+            with ab(True):
+                previous, _ = evaluate(call, inputs, False)
+            REPORT.append(f"ops.triangle_attention qk_norm={qk_norm} vs fp32 statements: new={rel(got[0], truth[0]):.2e} previous(Triton)={rel(previous[0], truth[0]):.2e}")
+            assert rel(got[0], truth[0]) <= 2 * TOL[dtype]
 
     @pytest.mark.parametrize("direction", ["outgoing", "incoming"])
     def test_trimul(self, dtype, grad, direction):
