@@ -26,9 +26,8 @@ from miniworld_engine.architecture._engine_impl import (
     torch_pointwise,
 )
 from miniworld_engine.architecture.blocks._engine_impl import to_engine_impl
-from miniworld_engine.architecture.exceptions import ImplementationType
-from miniworld_engine.architecture.layers.ops import mp_sum, mp_swish_gate
-from miniworld_engine.architecture.primitives import Linear, MPLinear
+from miniworld_engine.architecture.exceptions import ImplementationType, legacy_options_removed
+from miniworld_engine.architecture.primitives import Linear
 from miniworld_engine.architecture.typing import typecheck
 from miniworld_engine.modules import RMSNorm
 from miniworld_engine.modules.dispatch import (
@@ -59,19 +58,17 @@ class SwiGLUFFN(nn.Module):
         implementation: ImplementationType = ImplementationType.MINIWORLD_ENGINE,
     ) -> None:
         super().__init__()
+        legacy_options_removed("SwiGLUFFN", magnitude_preserving=magnitude_preserving)
         hidden = ((expansion_ratio * (d_model // 3) * 2) + 255) // 256 * 256
-        self.magnitude_preserving = magnitude_preserving
         self.implementation = implementation
         self._pointwise = torch_pointwise()
-        dense = MPLinear if magnitude_preserving else Linear
-        self.w_up = dense(d_model, 2 * hidden, bias=False, init="normal")
-        self.w_down = dense(hidden, d_model, bias=False, init="normal")
+        self.w_up = Linear(d_model, 2 * hidden, bias=False, init="normal")
+        self.w_down = Linear(hidden, d_model, bias=False, init="normal")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         engine = (
             self.implementation == ImplementationType.MINIWORLD_ENGINE
             and x.is_cuda
-            and not self.magnitude_preserving
             and not self._pointwise
             and not restricted_card(x.device)  # H100 / B200 have no Triton fallback: the PyTorch statements below run
         )
@@ -96,7 +93,7 @@ class SwiGLUFFN(nn.Module):
         # H100 / B200 land here (no Triton fallback), and an unrecorded card: fp32 master weights under a bf16 activation run under bf16 autocast
         with fallback_autocast(x, self, x.is_cuda and (blocked or restricted_card(x.device))):
             x1, x2 = self.w_up(x).chunk(2, dim=-1)
-            x = mp_swish_gate(x1, x2) if self.magnitude_preserving else F.silu(x1) * x2
+            x = F.silu(x1) * x2
             return self.w_down(x)
 
 
@@ -118,11 +115,14 @@ class SWAAtomBlock(nn.Module):
         implementation: ImplementationType = ImplementationType.MINIWORLD_ENGINE,
     ) -> None:
         super().__init__()
-        magnitude_preserving = magnitude_preserving or mp_full
-        self.mp_residual = mp_residual or mp_full
+        legacy_options_removed(
+            "SWAAtomBlock",
+            magnitude_preserving=magnitude_preserving,
+            mp_full=mp_full,
+            mp_residual=mp_residual,
+        )
         self.residual_t = residual_t
         self.implementation = implementation
-        self.mp_full = mp_full
         self._pointwise = torch_pointwise()
         self.attn_norm = RMSNorm(
             d_atom,
@@ -134,21 +134,15 @@ class SWAAtomBlock(nn.Module):
             elementwise_affine=False,
             implementation=to_engine_impl_pointwise(implementation),
         )
-        # Plain ESMFold2 uses adaLN-Zero. Under full MP, this modulation is an
-        # active MP projection; residual magnitude is controlled by mp_sum.
-        mod_cls = MPLinear if mp_full else Linear
+        # ESMFold2 adaLN-Zero
         self.adaln_modulation = nn.Sequential(
             nn.SiLU(),
-            mod_cls(
-                d_cond, 6 * d_atom, bias=False, init="normal" if mp_full else "zero"
-            ),
+            Linear(d_cond, 6 * d_atom, bias=False, init="zero"),
         )
         self.attn = SWA3DRoPEAttention(
             d_atom,
             n_head,
             half_window=half_window,
-            magnitude_preserving=magnitude_preserving,
-            mp_full=mp_full,
             implementation=to_engine_impl(implementation),
         )
         # the engine attention keeps its flash core; its q/k-norm + RoPE and
@@ -157,7 +151,6 @@ class SWAAtomBlock(nn.Module):
         self.ffn = SwiGLUFFN(
             d_atom,
             expansion_ratio,
-            magnitude_preserving=magnitude_preserving,
             implementation=implementation,
         )
 
@@ -170,7 +163,6 @@ class SWAAtomBlock(nn.Module):
         engine = (
             self.implementation == ImplementationType.MINIWORLD_ENGINE
             and q.is_cuda
-            and not self.mp_full
             and not self._pointwise
             and not restricted_card(q.device)  # H100 / B200 have no Triton fallback: the PyTorch statements below run
         )
@@ -200,7 +192,7 @@ class SWAAtomBlock(nn.Module):
                     q.to(dtype), activated, weights[1], weights[0], weights[2], eps=eps
                 )
             attn = gate_a * self.attn(attn_in, attention_params)
-            q = mp_sum(q, attn, self.residual_t) if self.mp_residual else q + attn
+            q = q + attn
             with torch.autocast("cuda", enabled=False):
                 ffn_in, gate_f = kernels.triton_rmsnorm_adamod(
                     q.to(dtype),
@@ -211,17 +203,17 @@ class SWAAtomBlock(nn.Module):
                     eps=self.ffn_norm.effective_eps(q.dtype),
                 )
             ffn = gate_f * self.ffn(ffn_in)
-            return mp_sum(q, ffn, self.residual_t) if self.mp_residual else q + ffn
+            return q + ffn
         with fallback_autocast(q, self, q.is_cuda and (blocked or restricted_card(q.device))):
             shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = self.adaln_modulation(
                 c
             ).chunk(6, dim=-1)
             attn_in = self.attn_norm(q) * (1 + scale_a) + shift_a
             attn = gate_a * self.attn(attn_in, attention_params)
-            q = mp_sum(q, attn, self.residual_t) if self.mp_residual else q + attn
+            q = q + attn
             ffn_in = self.ffn_norm(q) * (1 + scale_f) + shift_f
             ffn = gate_f * self.ffn(ffn_in)
-            q = mp_sum(q, ffn, self.residual_t) if self.mp_residual else q + ffn
+            q = q + ffn
             return q
 
 

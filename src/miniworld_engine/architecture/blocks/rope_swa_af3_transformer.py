@@ -23,9 +23,9 @@ from jaxtyping import Float, Int
 
 from miniworld_engine.architecture.blocks._engine_impl import to_engine_impl
 from miniworld_engine.architecture.blocks.swa_atom_transformer import SWAAtomTransformer
-from miniworld_engine.architecture.exceptions import ImplementationType
-from miniworld_engine.architecture.layers.ops import mp_sum, sigmoid_gate
-from miniworld_engine.architecture.primitives import Linear, MPLinear
+from miniworld_engine.architecture.exceptions import ImplementationType, legacy_options_removed
+from miniworld_engine.architecture.layers.ops import sigmoid_gate
+from miniworld_engine.architecture.primitives import Linear
 from miniworld_engine.architecture.typing import typecheck
 from miniworld_engine.modules import AdaptiveLayerNorm, ConditionedTransition, RMSNorm
 from miniworld_engine.modules.swa_atom_attention import (
@@ -69,17 +69,16 @@ class RoPESWAAttentionAF3(nn.Module):
         self.scale = self.head_dim**-0.5
         self.half_window = half_window
         self.use_qk_norm = use_qk_norm
-        magnitude_preserving = magnitude_preserving or mp_full
-        self.magnitude_preserving = magnitude_preserving
-        self.mp_full = mp_full
+        legacy_options_removed(
+            "RoPESWAAttentionAF3",
+            magnitude_preserving=magnitude_preserving,
+            use_rotation=use_rotation,
+            mp_full=mp_full,
+        )
         self.implementation = implementation
-        if use_rotation or mp_full:
-            raise ValueError(
-                "The installed engine does not support legacy rotation/MP AdaLN"
-            )
 
-        # AF3 block pieces, with DiT-MP/EDM2 init when mp_full is enabled.
-        dense = MPLinear if magnitude_preserving else Linear
+        # AF3 block pieces
+        dense = Linear
         self.ada_ln_in = AdaptiveLayerNorm(
             d_single, d_cond, implementation=to_engine_impl(implementation)
         )
@@ -97,24 +96,9 @@ class RoPESWAAttentionAF3(nn.Module):
             self.norm_key = RMSNorm(
                 self.head_dim, implementation=to_engine_impl(implementation)
             )
-        gate_cls = MPLinear if mp_full else Linear
-        out_cls = MPLinear if mp_full else Linear
-        self.to_gate = gate_cls(
-            d_single,
-            self.head_dim * n_head,
-            bias=False,
-            init="normal" if mp_full else "gating",
-        )
-        self.to_out = out_cls(
-            self.head_dim * n_head,
-            d_single,
-            bias=False,
-            init="normal" if mp_full else "zero",
-        )
-        scale_cls = MPLinear if mp_full else Linear
-        self.to_scale = scale_cls(
-            d_cond, d_single, bias=True, init="normal" if mp_full else "default"
-        )
+        self.to_gate = Linear(d_single, self.head_dim * n_head, bias=False, init="gating")
+        self.to_out = Linear(self.head_dim * n_head, d_single, bias=False, init="zero")
+        self.to_scale = Linear(d_cond, d_single, bias=True, init="default")
         self.to_scale.bias.data.fill_(-2.0)
 
     def forward(
@@ -222,11 +206,13 @@ class RoPESWAAF3Block(nn.Module):
         implementation: ImplementationType = ImplementationType.MINIWORLD_ENGINE,
     ) -> None:
         super().__init__()
-        self.mp_residual = mp_residual or mp_full
-        if magnitude_preserving:
-            raise ValueError(
-                "The installed engine does not support legacy MP ConditionedTransition"
-            )
+        legacy_options_removed(
+            "RoPESWAAF3Block",
+            magnitude_preserving=magnitude_preserving,
+            use_rotation=use_rotation,
+            mp_full=mp_full,
+            mp_residual=mp_residual,
+        )
         self.residual_t = residual_t
         self.attention = RoPESWAAttentionAF3(
             d_atom,
@@ -252,13 +238,8 @@ class RoPESWAAF3Block(nn.Module):
         attention_params: tuple,
     ) -> Float[torch.Tensor, "N S d_atom"]:
         attn = self.attention(q, c, attention_params)
-        q = mp_sum(q, attn, self.residual_t) if self.mp_residual else q + attn
-        # the engine transition returns q + f(q); mp_sum mixes the update itself
-        return (
-            mp_sum(q, self.transition.delta(q, c), self.residual_t)
-            if self.mp_residual
-            else self.transition(q, c)
-        )
+        q = q + attn
+        return self.transition(q, c)
 
 
 class RoPESWAAF3Transformer(nn.Module):

@@ -9,10 +9,11 @@ from jaxtyping import Bool, Float
 from miniworld_engine.architecture.exceptions import (
     ImplementationType,
     InvalidImplementationError,
+    legacy_options_removed,
 )
 from miniworld_engine.architecture.layers.adaln import AdaptiveLayerNorm
 from miniworld_engine.architecture.layers.ops import sigmoid_gate
-from miniworld_engine.architecture.primitives import Linear, MPLinear
+from miniworld_engine.architecture.primitives import Linear
 from miniworld_engine.architecture.typing import typecheck
 
 
@@ -57,71 +58,40 @@ class AugmentedAttentionPairBias(nn.Module):
         ),
     ) -> None:
         super().__init__()
+        legacy_options_removed(
+            "AugmentedAttentionPairBias",
+            magnitude_preserving=magnitude_preserving,
+            use_rotation=use_rotation,
+            mp_full=mp_full,
+        )
         self.n_head = n_head
         self.use_qk_norm = use_qk_norm
         self.use_bias_norm = use_bias_norm
-        # mp_full extends MP to every linear in the block (incl. zero/gating-init
-        # to_out, to_gate, and AdaLN scale/angle); it implies magnitude_preserving.
-        magnitude_preserving = magnitude_preserving or mp_full
-        self.magnitude_preserving = magnitude_preserving
-        self.mp_full = mp_full
         self.implementation = implementation
         self.kernel_type = kernel_type
 
         if d_hidden is None:
             d_hidden = d_single // n_head
 
-        # EDM2 magnitude preservation: q/k/v projections use forced weight
-        # normalization. They emit tensors consumed by the attention kernel
-        # (not raw weights), so this composes with the miniworld_engine attention core.
-        dense = MPLinear if magnitude_preserving else Linear
-        self.ada_ln_in = AdaptiveLayerNorm(
-            d_single, d_cond, use_rotation=use_rotation, mp_full=mp_full
-        )
-        self.to_query = dense(d_single, d_hidden * n_head, bias=True)
-        self.to_key = dense(d_single, d_hidden * n_head, bias=False)
-        self.to_value = dense(d_single, d_hidden * n_head, bias=False)
+        self.ada_ln_in = AdaptiveLayerNorm(d_single, d_cond)
+        self.to_query = Linear(d_single, d_hidden * n_head, bias=True)
+        self.to_key = Linear(d_single, d_hidden * n_head, bias=False)
+        self.to_value = Linear(d_single, d_hidden * n_head, bias=False)
 
         if use_qk_norm:
             self.norm_query = nn.RMSNorm(d_hidden)
             self.norm_key = nn.RMSNorm(d_hidden)
 
         self.ln_pair = nn.LayerNorm(d_pair, bias=False)
-        # The pair->logit-bias projection is one of the top ||w||-growth sites
-        # (its weight is scale-invariant under norm_bias, so its norm drifts
-        # freely). Under MP it gets forced weight normalization too; otherwise
-        # it stays the original zero-init Linear.
-        self.to_bias = (
-            MPLinear(d_pair, n_head, bias=False, init="normal")
-            if magnitude_preserving
-            else Linear(d_pair, n_head, bias=False, init="zero")
-        )
+        self.to_bias = Linear(d_pair, n_head, bias=False, init="zero")
         # RMSNorm (affine) over the n_head axis of the pair bias, to bound the
         # additive attention-logit bias (otherwise to_bias / ln_pair.gamma grow
         # unbounded -> attention-logit-growth divergence). Mirrors qk-norm.
         if use_bias_norm:
             self.norm_bias = nn.RMSNorm(n_head)
-        # Under mp_full, the gate and output projections are MP too (lose their
-        # gating/zero init; magnitude stays controlled via MP + mp_sum residual).
-        gate_cls = MPLinear if mp_full else Linear
-        out_cls = MPLinear if mp_full else Linear
-        self.to_gate = gate_cls(
-            d_single,
-            d_hidden * n_head,
-            bias=False,
-            init="normal" if mp_full else "gating",
-        )
-        self.to_out = out_cls(
-            d_hidden * n_head,
-            d_single,
-            bias=False,
-            init="normal" if mp_full else "zero",
-        )
-
-        scale_cls = MPLinear if mp_full else Linear
-        self.to_scale = scale_cls(
-            d_cond, d_single, bias=True, init="normal" if mp_full else "default"
-        )
+        self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
+        self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
+        self.to_scale = Linear(d_cond, d_single, bias=True, init="default")
         self.to_scale.bias.data.fill_(-2.0)
 
     # Inference-time chunking constant. The non-chunked path computes

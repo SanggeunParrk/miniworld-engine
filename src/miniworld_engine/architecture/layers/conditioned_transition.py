@@ -5,14 +5,14 @@ from jaxtyping import Float
 from miniworld_engine.architecture.exceptions import (
     ImplementationType,
     InvalidImplementationError,
+    legacy_options_removed,
 )
 from miniworld_engine.architecture.layers.adaln import AdaptiveLayerNorm
 from miniworld_engine.architecture.layers.ops import (
-    mp_swish_gate,
     sigmoid_gate,
     swish_gate,
 )
-from miniworld_engine.architecture.primitives import Linear, MPLinear
+from miniworld_engine.architecture.primitives import Linear
 from miniworld_engine.architecture.typing import typecheck
 
 
@@ -30,6 +30,7 @@ class ConditionedTransition(nn.Module):
     implementation : ImplementationType
         Implementation to use.
 
+    The legacy ``magnitude_preserving`` / ``use_rotation`` / ``mp_full`` options were removed (they must be false).
     """
 
     def __init__(
@@ -44,32 +45,23 @@ class ConditionedTransition(nn.Module):
         implementation: ImplementationType = ImplementationType.MINIWORLD_ENGINE,
     ) -> None:
         super().__init__()
+        legacy_options_removed(
+            "ConditionedTransition",
+            magnitude_preserving=magnitude_preserving,
+            use_rotation=use_rotation,
+            mp_full=mp_full,
+        )
 
         self.n = n
-        magnitude_preserving = magnitude_preserving or mp_full
-        self.magnitude_preserving = magnitude_preserving
-        self.mp_full = mp_full
-        # The miniworld_engine transition kernel consumes raw expand/squeeze weights, which
-        # bypasses MPLinear's on-use normalization. So MP forces the PyTorch path.
-        self.implementation = (
-            ImplementationType.PYTORCH if magnitude_preserving else implementation
-        )
+        self.implementation = implementation
 
-        dense = MPLinear if magnitude_preserving else Linear
-        self.ada_ln_in = AdaptiveLayerNorm(
-            d_hidden=d_hidden, d_cond=d_cond, use_rotation=use_rotation, mp_full=mp_full
-        )
-        self.expand_a = dense(d_hidden, d_hidden * n, bias=False, init="relu")
-        self.expand_b = dense(d_hidden, d_hidden * n, bias=False, init="relu")
-        # Under mp_full the output projection + conditioning gate are MP too
-        # (lose zero-init); the bias=-2 on to_scale keeps the gate weak at init.
-        if mp_full:
-            self.squeeze = MPLinear(d_hidden * n, d_hidden, bias=False, init="normal")
-            self.to_scale = MPLinear(d_cond, d_hidden, bias=True, init="normal")
-        else:
-            self.squeeze = Linear(d_hidden * n, d_hidden, bias=False, init="zero")
-            self.to_scale = Linear(d_cond, d_hidden, bias=True, init="zero")
+        self.ada_ln_in = AdaptiveLayerNorm(d_hidden=d_hidden, d_cond=d_cond)
+        self.expand_a = Linear(d_hidden, d_hidden * n, bias=False, init="relu")
+        self.expand_b = Linear(d_hidden, d_hidden * n, bias=False, init="relu")
+        self.squeeze = Linear(d_hidden * n, d_hidden, bias=False, init="zero")
+        self.to_scale = Linear(d_cond, d_hidden, bias=True, init="zero")
         self.to_scale.bias.data.fill_(-2.0)
+
 
     @typecheck
     def forward(
@@ -100,8 +92,7 @@ class ConditionedTransition(nn.Module):
         if self.implementation == ImplementationType.PYTORCH:
             a = self.expand_a(x)
             b = self.expand_b(x)
-            # MP-SwiGLU (÷0.596) keeps unit variance when expand layers are MP.
-            x = mp_swish_gate(a, b) if self.magnitude_preserving else swish_gate(a, b)
+            x = swish_gate(a, b)
             out = self.squeeze(x)
             return sigmoid_gate(self.to_scale(cond), out)
 
