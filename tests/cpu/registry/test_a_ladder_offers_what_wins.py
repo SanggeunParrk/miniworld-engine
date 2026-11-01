@@ -85,6 +85,10 @@ MEASURED_AXES = {
     # rebuild justify removing its rung from this card-independent grid.
     # Keep the existing space until the A100 measurements can be refreshed.
     ("augmented_attention_bwd_reduce_triton", "num_warps"): [1, 2, 4],
+    # 2026-11-01: the H100 re-measure (job 41366) made these two kernels "fully measured" on the only card whose cache is current;
+    # the Ampere caches (A100 / A5000 / A6000) are stale and not refreshed, so H100-only winners cannot narrow the card-independent grid.
+    ("augmented_attention_bwd_reduce_triton", "num_stages"): [1, 2, 3, 4, 5],
+    ("gated_projection_gate_gemm_triton", "num_warps"): [1, 2, 4],
 }
 
 

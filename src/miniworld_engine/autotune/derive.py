@@ -460,6 +460,16 @@ def install_no_calibration() -> None:
                 setattr(mod, name, lambda *a, **k: None)
 
 
+#: Module prefixes whose opaque hand-CUDA launches return their fakes during a derivation (see `install_native_recorders`).
+_FAKED_NATIVE_FAMILIES = tuple(
+    f"miniworld_engine.kernels.{family}"
+    for family in (
+        "layernorm.cuda.general", "layernorm.cuda.pipe", "rmsnorm.cuda", "adaln.cuda", "conditioned_transition.cuda",
+        "dit_variants.cuda", "augmented_attention.cuda", "trimul_inproj.cuda.", "triangle_attention.cuda.h100_triattn",
+    )
+) + ("miniworld_engine.integrations.",)
+
+
 def install_native_recorders() -> None:
     """Record native selectors and model outputs without compiling or launching CUDA.
 
@@ -498,6 +508,24 @@ def install_native_recorders() -> None:
         b200_train.forward_small = b200_contract(b200_train._forward_small_fake)
         b200_train.backward_small = b200_contract(b200_train._backward_small_fake)
 
+    # Every hand-CUDA launch is an opaque op with a fake (``kernels/_compile.opaque``). With ``compile_wrap=disable`` its body would
+    # run: on a Hopper / Blackwell card the extension loads and launches on FakeTensors (a null pointer: "data is not allocated yet",
+    # then a sticky illegal-address error that fails every later unit), and on another card it builds for nothing. The fake is the
+    # contract this derivation needs (shapes and dtypes; the Triton launches the module makes around it are still recorded).
+    # Only the families listed in ``_FAKED_NATIVE_FAMILIES``: an op whose body records a native selector (``native.choose_config``) or launches
+    # a tuned Triton kernel of its own must run, and the sm90 composites below keep their explicit contracts.
+    from miniworld_engine.kernels import _compile
+
+    def native_fake(fn, args, kwargs) -> bool:
+        from torch._subclasses.fake_tensor import is_fake
+
+        module = getattr(fn, "__module__", "") or ""
+        if not module.startswith(_FAKED_NATIVE_FAMILIES):
+            return False
+        flat = [t for a in (*args, *kwargs.values()) for t in (a if isinstance(a, (list, tuple)) else (a,))]
+        return any(is_fake(t) for t in flat if torch.is_tensor(t))
+
+    _compile.FAKE_WHEN = native_fake
     if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9:
         # Packaged composites need explicit fake contracts; tunable ones also record selectors.
         # Keep their module dispatch and saved-tensor/autograd contracts during
@@ -536,6 +564,49 @@ def install_native_recorders() -> None:
             for entry, fake in functions:
                 selector = getattr(module, "_select_config", None) if module_name.endswith("h100_inference") else None
                 setattr(module, entry, native_contract(getattr(module, fake), selector))
+
+        # The fused / generic weight packs launch an extension on the parameters; their torch-statement forms give the same shapes.
+        from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90, h100_sm90_generic
+
+        h100_sm90._pack_params = h100_sm90._pack_params_torch  # ty: ignore[invalid-assignment]
+        h100_sm90_generic.pack_weights = h100_sm90_generic.pack_weights_torch  # ty: ignore[invalid-assignment]
+
+        # Hand-CUDA wrappers that are plain functions (no opaque op, so no fake of their own): the shapes and dtypes their callers read.
+        from miniworld_engine.kernels.outer_product_mean import cuda as opm_cuda
+        from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
+
+        bf, f32 = torch.bfloat16, torch.float32
+
+        def fake_first(fn):
+            def run(first, *args, **kwargs):
+                require_fake(first)
+                return fn(first, *args, **kwargs)
+            return run
+
+        opm_cuda.gather = fake_first(  # ty: ignore[invalid-assignment]
+            lambda prod, groups, k, *a, **kw: prod.new_empty(
+                (prod.shape[0] // groups * (prod.shape[1] // k) ** 2, groups * k * k)))
+        opm_cuda.split_groups = fake_first(  # ty: ignore[invalid-assignment]
+            lambda x, b, s, n, groups, k: x.new_empty((b * groups, s, n * k)))
+        opm_cuda.bias_finish = fake_first(lambda out, *a, **kw: None)  # ty: ignore[invalid-assignment]
+        opm_cuda.chai_proj = fake_first(  # ty: ignore[invalid-assignment]
+            lambda x, mask, gamma, beta, w, eps=1e-5, save=False: (
+                x.new_empty((8, x.shape[0], 8), dtype=bf), x.new_empty((8, x.shape[0], 8), dtype=bf),
+                x.new_empty((x.shape[0], 2) if save else (0,), dtype=f32)))
+        opm_cuda.chai_epilogue = fake_first(  # ty: ignore[invalid-assignment]
+            lambda o, wfold, bias, residual=None, save=False, eps=0.1: (
+                o.new_empty((1, o.shape[1] // 8, o.shape[1] // 8, wfold.shape[0]), dtype=bf),
+                o.new_empty(((o.shape[1] // 8) ** 2, 512) if save else (0,), dtype=bf),
+                o.new_empty(((o.shape[1] // 8) ** 2, 2) if save else (0,), dtype=f32)))
+        opm_cuda.chai_bwd = fake_first(  # ty: ignore[invalid-assignment]
+            lambda dy, y, stats, n: dy.new_empty((8, n * 8, n * 8), dtype=bf))
+        opm_cuda.chai_projbwd = fake_first(  # ty: ignore[invalid-assignment]
+            lambda x, mask, da, db, gamma, beta, stats, wlr: (
+                x.new_empty((x.shape[0], 128), dtype=bf), x.new_empty((x.shape[0], 64), dtype=bf),
+                x.new_empty((x.shape[0], 64), dtype=bf), x.new_empty((x.shape[0] // 64, 128), dtype=f32)))
+        # The dual-head TriangleAttention forward (extension front, attention and projections): the module's pair out.
+        h100_dh.forward = lambda module, pair, mask=None: (  # ty: ignore[invalid-assignment]
+            require_fake(pair), torch.empty_like(pair))[1]
 
         # TriangleAttention leaf extension calls without a fake of their own. Shapes and dtypes
         # mirror bias_fusion.cu / dq.cu: BF16 [1,L,L,128] buffers viewed

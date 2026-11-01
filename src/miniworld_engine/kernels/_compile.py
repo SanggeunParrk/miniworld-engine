@@ -114,6 +114,7 @@ save intermediates, and keeps the eager path byte-identical to what shipped.
 from __future__ import annotations
 
 import contextlib
+import functools
 
 import torch
 
@@ -125,6 +126,10 @@ from miniworld_engine import settings
 #: the same launcher is a no-op in intent, so hand back the op that is already there rather than
 #: making import order decide whether the library loads at all.
 _REGISTERED: dict[str, object] = {}
+
+#: Set by `autotune.derive` only: `(fn, args, kwargs) -> bool`, true when the opaque launch `fn` is to return its fake instead of running
+#: (compile_wrap="disable" only: the custom-op mode already dispatches to the fake under FakeTensorMode).
+FAKE_WHEN = None
 
 
 def _op_name(fn, name: str | None) -> str:
@@ -156,7 +161,19 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()):
 
     def decorate(fn):
         if settings.current().compile_wrap == "disable":
-            return torch.compiler.disable(fn)
+            disabled = torch.compiler.disable(fn)
+            if fake is None:
+                return disabled
+
+            @functools.wraps(fn)
+            def call(*args, **kwargs):
+                # `autotune.derive` runs the modules on FakeTensors and asks which kernels they launch: a native launch has no
+                # business running there, so it hands over a predicate and gets the op's fake (same shapes, no launch, no build).
+                if FAKE_WHEN is not None and FAKE_WHEN(fn, args, kwargs):
+                    return fake(*args, **kwargs)
+                return disabled(*args, **kwargs)
+
+            return call
         if fake is None:
             raise ValueError(
                 f"compile_wrap='custom_op' needs a fake implementation for "
