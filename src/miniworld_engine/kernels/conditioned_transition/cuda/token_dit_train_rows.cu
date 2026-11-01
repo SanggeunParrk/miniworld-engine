@@ -68,6 +68,24 @@ __device__ __forceinline__ void part_store(float* part, long stride, float4 v) {
   V4<float>::store(part + (long)blockIdx.x * stride + threadIdx.x * 4, v);
 }
 
+// The conditioning row of row r: a conditioning shared by the samples (gp > 0: the rows are sample-major, a L + l) is computed once,
+// [gp = L, width], and every sample reads row r % gp; gp = 0: one conditioning row per row
+__device__ __forceinline__ long grow(long r, int gp) { return gp ? r % gp : r; }
+
+// O[l] = sum over the A samples of S[a P + l] (fp32 sums, one rounding): the backward's conditioning gradients of a shared
+// conditioning, [A P, W] -> [P, W], before the conditioning GEMMs (which then run P rows instead of A P)
+template <typename AT>
+__global__ void __launch_bounds__(256) sample_sum_k(const AT* __restrict__ S, long ss, AT* __restrict__ O, int P, int W4, int A) {
+  const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= (long)P * W4) return;
+  const long l = i / W4;
+  const int c = (int)(i % W4) * 4;
+  float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll 8
+  for (int a = 0; a < A; ++a) acc = add4(acc, V4<AT>::load(S + ((long)a * P + l) * ss + c));
+  V4<AT>::store(O + l * (long)W4 * 4 + c, acc);
+}
+
 // ------------------------------------------------------------------------------------------------------------- forward
 template <typename CT, typename AT>
 __global__ void __launch_bounds__(NTC) cond_prep_k(const CT* __restrict__ C, AT* __restrict__ CHAT, AT* __restrict__ CBF,
@@ -89,17 +107,18 @@ __global__ void __launch_bounds__(NTC) cond_prep_k(const CT* __restrict__ C, AT*
 // receives the fp32 residual (the backward and res_adaln_b read it)
 template <typename XT, typename AT>
 __global__ void __launch_bounds__(NT) adaln_a_k(const XT* __restrict__ X, float* __restrict__ XO, const AT* __restrict__ G, long sg,
-    const float* __restrict__ BS, AT* __restrict__ XA, float2* __restrict__ XST, int M, int rpb, float eps) {
+    const float* __restrict__ BS, AT* __restrict__ XA, float2* __restrict__ XST, int M, int rpb, float eps, int gp) {
   __shared__ float red[NT / 32];
   const int col = threadIdx.x * 4;
   const float4 bs = V4<float>::load(BS + col);
   for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
+    const long rg = grow(r, gp);
     const float4 x = V4<XT>::load(X + r * D + col);
     if (XO) V4<float>::store(XO + r * D + col, x);
     const float mean = block_sum<NT>(sum4(x), red) / D;
     const float4 d = make_float4(x.x - mean, x.y - mean, x.z - mean, x.w - mean);
     const float rstd = rsqrtf(block_sum<NT>(sum4(mul4(d, d)), red) / D + eps);
-    const float4 s = sig4(add4(V4<AT>::load(G + r * sg + col), bs)), sh = V4<AT>::load(G + r * sg + D + col);
+    const float4 s = sig4(add4(V4<AT>::load(G + rg * sg + col), bs)), sh = V4<AT>::load(G + rg * sg + D + col);
     V4<AT>::store(XA + r * D + col, make_float4(s.x * d.x * rstd + sh.x, s.y * d.y * rstd + sh.y, s.z * d.z * rstd + sh.z,
                                                 s.w * d.w * rstd + sh.w));
     if (threadIdx.x == 0) XST[r] = make_float2(mean, rstd);
@@ -154,18 +173,20 @@ __global__ void __launch_bounds__(NT) gate_o_k(const float* __restrict__ O, cons
 template <typename AT>
 __global__ void __launch_bounds__(NT) res_adaln_b_k(const float* __restrict__ X, const AT* __restrict__ Y,
     const AT* __restrict__ GG, long sgg, const float* __restrict__ BG1, const AT* __restrict__ G, long sg,
-    const float* __restrict__ BS2, float* __restrict__ X1, AT* __restrict__ XT, float2* __restrict__ X1ST, int M, int rpb, float eps) {
+    const float* __restrict__ BS2, float* __restrict__ X1, AT* __restrict__ XT, float2* __restrict__ X1ST, int M, int rpb, float eps,
+    int gp) {
   __shared__ float red[NT / 32];
   const int col = threadIdx.x * 4;
   const float4 bg = V4<float>::load(BG1 + col), bs = V4<float>::load(BS2 + col);
   for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
+    const long rg = grow(r, gp);
     const float4 x1 = add4(V4<float>::load(X + r * D + col),
-                           mul4(sig4(add4(V4<AT>::load(GG + r * sgg + col), bg)), V4<AT>::load(Y + r * D + col)));
+                           mul4(sig4(add4(V4<AT>::load(GG + rg * sgg + col), bg)), V4<AT>::load(Y + r * D + col)));
     V4<float>::store(X1 + r * D + col, x1);
     const float mean = block_sum<NT>(sum4(x1), red) / D;
     const float4 d = make_float4(x1.x - mean, x1.y - mean, x1.z - mean, x1.w - mean);
     const float rstd = rsqrtf(block_sum<NT>(sum4(mul4(d, d)), red) / D + eps);
-    const float4 s = sig4(add4(V4<AT>::load(G + r * sg + 2 * D + col), bs)), sh = V4<AT>::load(G + r * sg + 3 * D + col);
+    const float4 s = sig4(add4(V4<AT>::load(G + rg * sg + 2 * D + col), bs)), sh = V4<AT>::load(G + rg * sg + 3 * D + col);
     V4<AT>::store(XT + r * D + col, make_float4(s.x * d.x * rstd + sh.x, s.y * d.y * rstd + sh.y, s.z * d.z * rstd + sh.z,
                                                 s.w * d.w * rstd + sh.w));
     if (threadIdx.x == 0) X1ST[r] = make_float2(mean, rstd);
@@ -174,12 +195,12 @@ __global__ void __launch_bounds__(NT) res_adaln_b_k(const float* __restrict__ X,
 
 template <typename OT, typename AT>
 __global__ void __launch_bounds__(NT) res_c_k(const float* __restrict__ X1, const AT* __restrict__ Z, const AT* __restrict__ GG,
-    long sgg, const float* __restrict__ BG2, OT* __restrict__ OUT, int M, int rpb) {
+    long sgg, const float* __restrict__ BG2, OT* __restrict__ OUT, int M, int rpb, int gp) {
   const int col = threadIdx.x * 4;
   const float4 bg = V4<float>::load(BG2 + col);
   for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
     V4<OT>::store(OUT + r * D + col, add4(V4<float>::load(X1 + r * D + col),
-        mul4(sig4(add4(V4<AT>::load(GG + r * sgg + D + col), bg)), V4<AT>::load(Z + r * D + col))));
+        mul4(sig4(add4(V4<AT>::load(GG + grow(r, gp) * sgg + D + col), bg)), V4<AT>::load(Z + r * D + col))));
   }
 }
 
@@ -216,13 +237,14 @@ __global__ void __launch_bounds__(256) pair_ln_k(const ZT* __restrict__ Z, long 
 // ------------------------------------------------------------------------------------------------------------ backward
 template <typename OT, typename AT>
 __global__ void __launch_bounds__(NT) res_c_bwd_k(const OT* __restrict__ DOUT, const AT* __restrict__ Z, const AT* __restrict__ GG,
-    long sgg, const float* __restrict__ BG2, AT* __restrict__ DZ, AT* __restrict__ DGG, long sdg, float* __restrict__ PG2, long sp, int M, int rpb) {
+    long sgg, const float* __restrict__ BG2, AT* __restrict__ DZ, AT* __restrict__ DGG, long sdg, float* __restrict__ PG2, long sp, int M, int rpb,
+    int gp) {
   const int col = threadIdx.x * 4;
   const float4 bg = V4<float>::load(BG2 + col);
   float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
   for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
     const float4 dout = V4<OT>::load(DOUT + r * D + col), z = V4<AT>::load(Z + r * D + col);
-    const float4 s = sig4(add4(V4<AT>::load(GG + r * sgg + D + col), bg));
+    const float4 s = sig4(add4(V4<AT>::load(GG + grow(r, gp) * sgg + D + col), bg));
     V4<AT>::store(DZ + r * D + col, mul4(dout, s));
     const float4 dg = rnd<AT>(dsig4(mul4(dout, z), s));
     V4<AT>::store(DGG + r * sdg + D + col, dg);
@@ -252,16 +274,17 @@ __global__ void __launch_bounds__(NT) res_adaln_b_bwd_k(const OT* __restrict__ D
     const float* __restrict__ X1, const float2* __restrict__ X1ST, const AT* __restrict__ G, long sg, const float* __restrict__ BS2,
     const AT* __restrict__ GG, long sgg, const float* __restrict__ BG1, const AT* __restrict__ Y, float* __restrict__ DX1,
     AT* __restrict__ DY, AT* DG, long sdg, AT* __restrict__ DGG, long sdgg, float* __restrict__ PS2,
-    float* __restrict__ PG1, long sp, int M, int rpb) {
+    float* __restrict__ PG1, long sp, int M, int rpb, int gp) {
   __shared__ float red[NT / 32];
   const int col = threadIdx.x * 4;
   const float4 bs = V4<float>::load(BS2 + col), bg = V4<float>::load(BG1 + col);
   float4 acc_s = make_float4(0.f, 0.f, 0.f, 0.f), acc_g = acc_s;
   for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
+    const long rg = grow(r, gp);
     const float4 dxt = V4<AT>::load(DXT + r * sxt + col), x1 = V4<float>::load(X1 + r * D + col);
     const float2 st = X1ST[r];
     const float4 xh = make_float4((x1.x - st.x) * st.y, (x1.y - st.x) * st.y, (x1.z - st.x) * st.y, (x1.w - st.x) * st.y);
-    const float4 s2 = sig4(add4(V4<AT>::load(G + r * sg + 2 * D + col), bs));
+    const float4 s2 = sig4(add4(V4<AT>::load(G + rg * sg + 2 * D + col), bs));
     if (!dxt_in_dg) V4<AT>::store(DG + r * sdg + 3 * D + col, dxt);     // dxt_in_dg: the dxt GEMM wrote it there
     const float4 ds2 = rnd<AT>(dsig4(mul4(dxt, xh), s2));
     V4<AT>::store(DG + r * sdg + 2 * D + col, ds2);
@@ -272,7 +295,7 @@ __global__ void __launch_bounds__(NT) res_adaln_b_bwd_k(const OT* __restrict__ D
     const float4 dx1 = make_float4(dout.x + st.y * (dxh.x - m1 - xh.x * m2), dout.y + st.y * (dxh.y - m1 - xh.y * m2),
                                    dout.z + st.y * (dxh.z - m1 - xh.z * m2), dout.w + st.y * (dxh.w - m1 - xh.w * m2));
     V4<float>::store(DX1 + r * D + col, dx1);
-    const float4 g1 = sig4(add4(V4<AT>::load(GG + r * sgg + col), bg));
+    const float4 g1 = sig4(add4(V4<AT>::load(GG + rg * sgg + col), bg));
     V4<AT>::store(DY + r * D + col, mul4(dx1, g1));
     const float4 dg1 = rnd<AT>(dsig4(mul4(dx1, V4<AT>::load(Y + r * D + col)), g1));
     V4<AT>::store(DGG + r * sdgg + col, dg1);
@@ -342,7 +365,7 @@ __global__ void __launch_bounds__(NT) qknorm_bwd_k(const float* DQ, const float*
 template <typename OT, typename AT>
 __global__ void __launch_bounds__(NT) adaln_a_bwd_k(const AT* DXA, long sxa, int dxa_in_dg, const float* __restrict__ X,
     const float2* __restrict__ XST, const AT* __restrict__ G, long sg, const float* __restrict__ BS1, const float* __restrict__ DX1,
-    OT* __restrict__ DX, AT* DG, long sdg, float* __restrict__ PS1, long sp, int M, int rpb) {
+    OT* __restrict__ DX, AT* DG, long sdg, float* __restrict__ PS1, long sp, int M, int rpb, int gp) {
   __shared__ float red[NT / 32];
   const int col = threadIdx.x * 4;
   const float4 bs = V4<float>::load(BS1 + col);
@@ -351,7 +374,7 @@ __global__ void __launch_bounds__(NT) adaln_a_bwd_k(const AT* DXA, long sxa, int
     const float4 dxa = V4<AT>::load(DXA + r * sxa + col), x = V4<float>::load(X + r * D + col);
     const float2 st = XST[r];
     const float4 xh = make_float4((x.x - st.x) * st.y, (x.y - st.x) * st.y, (x.z - st.x) * st.y, (x.w - st.x) * st.y);
-    const float4 s = sig4(add4(V4<AT>::load(G + r * sg + col), bs));
+    const float4 s = sig4(add4(V4<AT>::load(G + grow(r, gp) * sg + col), bs));
     if (!dxa_in_dg) V4<AT>::store(DG + r * sdg + D + col, dxa);         // dxa_in_dg: the dxa GEMM wrote it there
     const float4 ds1 = rnd<AT>(dsig4(mul4(dxa, xh), s));
     V4<AT>::store(DG + r * sdg + col, ds1);
@@ -367,10 +390,13 @@ __global__ void __launch_bounds__(NT) adaln_a_bwd_k(const AT* DXA, long sxa, int
 
 template <typename CT, typename OT, typename AT>
 __global__ void __launch_bounds__(NTC) cond_bwd_k(const AT* __restrict__ DCHAT, const AT* __restrict__ DCG, const CT* __restrict__ C,
-    const float2* __restrict__ CST, OT* __restrict__ DCO, int M, int rpb, int Crows = 0) {   // Crows: C is a [Crows, DC] block repeated (sm_90 native)
+    const float2* __restrict__ CST, OT* __restrict__ DCO, int M, int rpb, int Crows = 0, int P = 0) {   // Crows: C is a [Crows, DC] block repeated (sm_90 native)
+  // P > 0: a conditioning shared by the samples -- DCHAT / DCG / C / CST hold its P rows (their gradients summed over the samples);
+  // DCO rows [0, P) receive the gradient, rows [P, M) (the other samples of the stride-0 expanded input) zeros
   __shared__ float red[NTC / 32];
   const int col = threadIdx.x * 4;
   for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
+    if (P && r >= P) { V4<OT>::store(DCO + r * DC + col, make_float4(0.f, 0.f, 0.f, 0.f)); continue; }
     const float4 dch = V4<AT>::load(DCHAT + r * DC + col), c = V4<CT>::load(C + (Crows ? r % Crows : r) * DC + col);
     const float2 st = CST[r];
     const float4 ch = make_float4((c.x - st.x) * st.y, (c.y - st.x) * st.y, (c.z - st.x) * st.y, (c.w - st.x) * st.y);
@@ -632,6 +658,14 @@ void actc(const at::Tensor& t, const at::Tensor& ref, const char* n) {
 void f32c(const at::Tensor& t, const char* n) { TORCH_CHECK(t.scalar_type() == at::kFloat && t.is_contiguous(), n, ": contiguous fp32"); }
 
 int nsm() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCount; }
+
+// The conditioning row period of an M-row call (the kernels' gp): 0 when G has M rows, else its row count -- a conditioning shared by
+// the samples, computed once ([L, width]) and read at row r % L
+int gperiod(const at::Tensor& G, int64_t M) {
+  if (G.size(0) == M) return 0;
+  TORCH_CHECK(G.size(0) > 0 && M % G.size(0) == 0, "conditioning rows: M, or L of a conditioning shared by the M / L samples");
+  return (int)G.size(0);
+}
 // resident blocks per SM of a kernel at `threads` threads (cached per kernel)
 // `smem`: the kernel's dynamic shared memory (the pair-bias kernels); above the 48 KB default it is opted in here, once, before any launch
 template <typename K> int occupancy(K* kern, int threads, size_t smem = 0) {
@@ -700,7 +734,7 @@ void adaln_a(at::Tensor x, at::Tensor G, at::Tensor bs, at::Tensor xa, at::Tenso
     TDT_DISPATCH(x.scalar_type(), XT, [&] {
       const RowGrid rg = row_grid<AT>(adaln_a_k<XT, AT>, NT, M);
       adaln_a_k<XT, AT><<<rg.grid, NT, 0, S()>>>(CP<XT>(x), xop, CP<AT>(G), G.stride(0), CP<float>(bs), P<AT>(xa), P<float2>(xst),
-                                                 (int)M, rg.rpb, (float)eps);
+                                                 (int)M, rg.rpb, (float)eps, gperiod(G, M));
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -737,11 +771,13 @@ void res_adaln_b(at::Tensor x, at::Tensor y, at::Tensor Gg, at::Tensor bg1, at::
                  at::Tensor xt, at::Tensor x1st, double eps) {
   const int64_t M = x.size(0);
   f32c(x, "x"); actc(Gg, y, "Gg"); actc(G, y, "G"); actc(xt, y, "xt");
+  TORCH_CHECK(Gg.size(0) == G.size(0), "res_adaln_b: G / Gg rows");
   const at::cuda::CUDAGuard g(x.device());
   TDT_DISPATCH(y.scalar_type(), AT, [&] {
     const RowGrid rg = row_grid<AT>(res_adaln_b_k<AT>, NT, M);
     res_adaln_b_k<AT><<<rg.grid, NT, 0, S()>>>(CP<float>(x), CP<AT>(y), CP<AT>(Gg), Gg.stride(0), CP<float>(bg1), CP<AT>(G), G.stride(0),
-                                               CP<float>(bs2), P<float>(x1), P<AT>(xt), P<float2>(x1st), (int)M, rg.rpb, (float)eps);
+                                               CP<float>(bs2), P<float>(x1), P<AT>(xt), P<float2>(x1st), (int)M, rg.rpb, (float)eps,
+                                               gperiod(G, M));
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -754,7 +790,7 @@ void res_c(at::Tensor x1, at::Tensor z, at::Tensor Gg, at::Tensor bg2, at::Tenso
     TDT_DISPATCH(out.scalar_type(), OT, [&] {
       const RowGrid rg = row_grid<AT>(res_c_k<OT, AT>, NT, M);
       res_c_k<OT, AT><<<rg.grid, NT, 0, S()>>>(CP<float>(x1), CP<AT>(z), CP<AT>(Gg), Gg.stride(0), CP<float>(bg2), P<OT>(out), (int)M,
-                                               rg.rpb);
+                                               rg.rpb, gperiod(Gg, M));
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -829,7 +865,7 @@ void res_c_bwd(at::Tensor dout, at::Tensor z, at::Tensor Gg, at::Tensor bg2, at:
     TDT_DISPATCH(dout.scalar_type(), OT, [&] {
       const RowGrid rg = row_grid<AT>(res_c_bwd_k<OT, AT>, NT, M, pg2.size(0));
       res_c_bwd_k<OT, AT><<<rg.grid, NT, 0, S()>>>(CP<OT>(dout), CP<AT>(z), CP<AT>(Gg), Gg.stride(0), CP<float>(bg2), P<AT>(dz), P<AT>(dGg),
-                                                   dGg.stride(0), P<float>(pg2), pg2.stride(0), (int)M, rg.rpb);
+                                                   dGg.stride(0), P<float>(pg2), pg2.stride(0), (int)M, rg.rpb, gperiod(Gg, M));
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -857,7 +893,7 @@ void res_adaln_b_bwd(at::Tensor dout, at::Tensor dxt, at::Tensor x1, at::Tensor 
                      at::Tensor pg1) {
   const int64_t M = x1.size(0);
   actc(G, dxt, "G"); actc(Gg, dxt, "Gg"); actc(y, dxt, "y"); actc(dy, dxt, "dy"); actc(dG, dxt, "dG"); actc(dGg, dxt, "dGg");
-  TORCH_CHECK(ps2.size(0) == pg1.size(0), "res_adaln_b_bwd: partial rows");
+  TORCH_CHECK(ps2.size(0) == pg1.size(0) && Gg.size(0) == G.size(0), "res_adaln_b_bwd: partial rows, G / Gg rows");
   const int in_dg = col_view_of(dxt, dG, 3 * D) ? 1 : 0;
   const at::cuda::CUDAGuard g(x1.device());
   TDT_DISPATCH(dxt.scalar_type(), AT, [&] {
@@ -865,7 +901,7 @@ void res_adaln_b_bwd(at::Tensor dout, at::Tensor dxt, at::Tensor x1, at::Tensor 
       const RowGrid rg = row_grid<AT>(res_adaln_b_bwd_k<OT, AT>, NT, M, ps2.size(0));
       res_adaln_b_bwd_k<OT, AT><<<rg.grid, NT, 0, S()>>>(CP<OT>(dout), CP<AT>(dxt), dxt.stride(0), in_dg, CP<float>(x1), CP<float2>(x1st),
           CP<AT>(G), G.stride(0), CP<float>(bs2), CP<AT>(Gg), Gg.stride(0), CP<float>(bg1), CP<AT>(y), P<float>(dx1), P<AT>(dy), P<AT>(dG),
-          dG.stride(0), P<AT>(dGg), dGg.stride(0), P<float>(ps2), P<float>(pg1), ps2.stride(0), (int)M, rg.rpb);
+          dG.stride(0), P<AT>(dGg), dGg.stride(0), P<float>(ps2), P<float>(pg1), ps2.stride(0), (int)M, rg.rpb, gperiod(G, M));
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -924,23 +960,42 @@ void adaln_a_bwd(at::Tensor dxa, at::Tensor x, at::Tensor xst, at::Tensor G, at:
       const RowGrid rg = row_grid<AT>(adaln_a_bwd_k<OT, AT>, NT, M, ps1.size(0));
       adaln_a_bwd_k<OT, AT><<<rg.grid, NT, 0, S()>>>(CP<AT>(dxa), dxa.stride(0), in_dg, CP<float>(x), CP<float2>(xst), CP<AT>(G), G.stride(0),
                                                      CP<float>(bs1), CP<float>(dx1), P<OT>(dx), P<AT>(dG), dG.stride(0), P<float>(ps1),
-                                                     ps1.stride(0), (int)M, rg.rpb);
+                                                     ps1.stride(0), (int)M, rg.rpb, gperiod(G, M));
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// dc [M, DC]: M = dchat's rows, or (a conditioning shared by the samples: dchat / dcg / c / cst hold its P rows) a multiple of them, the
+// rows past P zero
 void cond_bwd(at::Tensor dchat, at::Tensor dcg, at::Tensor c, at::Tensor cst, at::Tensor dc) {
-  const int64_t M = dchat.size(0);
+  const int64_t M = dc.numel() / DC, Pr = dchat.size(0);
+  TORCH_CHECK(dc.is_contiguous() && M % Pr == 0 && dcg.size(0) == Pr && cst.size(0) == Pr, "cond_bwd: rows");
   actc(dcg, dchat, "dcg");
   const at::cuda::CUDAGuard g(c.device());
   TDT_DISPATCH(dchat.scalar_type(), AT, [&] {
     TDT_DISPATCH(c.scalar_type(), CT, [&] {
       TDT_DISPATCH(dc.scalar_type(), OT, [&] {
         const RowGrid rg = row_grid<AT>(cond_bwd_k<CT, OT, AT>, NTC, M);
-        cond_bwd_k<CT, OT, AT><<<rg.grid, NTC, 0, S()>>>(CP<AT>(dchat), CP<AT>(dcg), CP<CT>(c), CP<float2>(cst), P<OT>(dc), (int)M, rg.rpb);
+        cond_bwd_k<CT, OT, AT><<<rg.grid, NTC, 0, S()>>>(CP<AT>(dchat), CP<AT>(dcg), CP<CT>(c), CP<float2>(cst), P<OT>(dc), (int)M, rg.rpb, 0,
+                                                         M == Pr ? 0 : (int)Pr);
       });
     });
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// dst [P, W] = src [A P, W] summed over the A samples (sample-major rows; src may be a row-strided view)
+void sample_sum(at::Tensor src, at::Tensor dst) {
+  const int64_t rows = dst.size(0), W = dst.size(1);
+  TORCH_CHECK(dst.is_contiguous() && src.stride(1) == 1 && src.size(1) == W && W % 4 == 0 && src.size(0) % rows == 0,
+              "sample_sum: [A P, W] -> [P, W]");
+  actc(src, dst, "src");
+  const at::cuda::CUDAGuard g(src.device());
+  const int64_t n = rows * (W / 4);
+  TDT_DISPATCH(dst.scalar_type(), AT, [&] {
+    sample_sum_k<AT><<<(unsigned)((n + 255) / 256), 256, 0, S()>>>(CP<AT>(src), src.stride(0), P<AT>(dst), (int)rows, (int)(W / 4),
+                                                                   (int)(src.size(0) / rows));
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -1343,5 +1398,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("adaln_a_bwd", &adaln_a_bwd);
   m.def("cond_bwd", &cond_bwd);
   m.def("unfold_lnw", &unfold_lnw);
+  m.def("sample_sum", &sample_sum);
   m.def("pair_ln_bwd", &pair_ln_bwd);
 }

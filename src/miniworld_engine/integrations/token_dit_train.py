@@ -606,6 +606,28 @@ def _swiglu_gemm(xt, wab):
     return _GSW[idx]
 
 
+#: samples from which a conditioning shared by the samples (``_shared_cond``) is computed once: its GEMMs (6 D outputs per row
+#: forward, four GEMMs backward) and their [rows, 6 D] tables then run L rows instead of A L. At A = 2 the tables are small and the
+#: GEMMs latency-bound; the sample sum would be one more launch.
+SC_MIN_SAMPLES = 4
+
+
+def _shared_cond(single, cond, fp32) -> bool:
+    """The B200 bf16 block takes ``cond`` as ONE conditioning shared by the samples when the caller handed it so: expanded over the
+    samples with stride 0 (a sampling step, or a training step whose samples share their conditioning). Its LayerNorm, its two
+    GEMMs and the [L, 6 D] tables are computed once and every sample's rows read row r % L; the backward sums the tables' row
+    gradients over the samples (``sample_sum``) before the conditioning GEMMs. Not the H100 path (``cond_prep90`` reads the
+    expansion itself) nor fp32."""
+    A = single.shape[0]
+    return (
+        not fp32
+        and not _sm90(single.device)
+        and A >= SC_MIN_SAMPLES
+        and cond.shape[0] == A
+        and cond.stride(0) == 0
+    )
+
+
 def _names_for(qk):
     return ["attention." + n for n in ATT + (QKN if qk else ())] + [
         "transition." + n for n in TRN
@@ -624,23 +646,24 @@ def _nd(params, qk, D):
     return P["transition.expand_a.weight"].shape[0] // D, P["attention.ln_pair.weight"].shape[0]
 
 
-def _saved_like(single, cond, pair, fp32, qk=True, H=H, psb=False, n=2, dp=DP):
+def _saved_like(single, cond, pair, fp32, qk=True, H=H, psb=False, n=2, dp=DP, sc=False):
     """Shapes / dtypes of the forward's saved activations (the fake implementation and the contract of _fwd). The fp32 path
     saves no copy of cond (_own_cond), no copy of v (QK-norm: the core reads it from qkvg) and no LN(pair) (pair_bias_bwd
     recomputes it): those slots are empty [0, n] tensors. H100: q / k / v are always copies (the q pass scales q; the TF32 core's
     v^T is built from v) and no O slot (the cores write og), and fp32 keeps LN(pair) (the dWf / dpair GEMMs read it)."""
     A, _, L, D = single.shape
     M, R, e = A * L, L * L, single.new_empty
+    Mc = L if sc else M   # the conditioning's rows: a conditioning shared by the samples is computed once (``_shared_cond``)
     f32, at = torch.float32, (torch.float32 if fp32 else BF)
     h100 = _sm90(single.device)
     copies = qk or h100
     return [
         e((M, D), dtype=f32),
-        e((M, cond.shape[-1]), dtype=at),
-        e((0 if _own_cond(cond, fp32) else M, cond.shape[-1]), dtype=at),
-        e((M, 2), dtype=f32),
-        e((M, 4 * D), dtype=at),
-        e((M, 2 * D), dtype=at),
+        e((Mc, cond.shape[-1]), dtype=at),
+        e((0 if _own_cond(cond, fp32) else Mc, cond.shape[-1]), dtype=at),
+        e((Mc, 2), dtype=f32),
+        e((Mc, 4 * D), dtype=at),
+        e((Mc, 2 * D), dtype=at),
         e((M, 2), dtype=f32),
         e((M, D), dtype=at),
         e((M, 4 * D), dtype=at),
@@ -696,11 +719,11 @@ def _pair_fused(h100, fp32, psb, dp) -> bool:
     return (h100 or B200_PAIR_FUSED) and not fp32 and not psb and dp in (128, 256)
 
 
-def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, psb=False, extra=None):
+def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, psb=False, extra=None, sc=False):
     n, dp = _nd(params, qk, single.shape[-1])
     return [
         torch.empty_like(single),
-        *_saved_like(single, cond, pair, fp32, qk, heads, psb, n, dp),
+        *_saved_like(single, cond, pair, fp32, qk, heads, psb, n, dp, sc),
     ]
 
 
@@ -718,15 +741,17 @@ def _fwd(
     heads: int,
     psb: bool = False,
     extra: torch.Tensor | None = None,
+    sc: bool = False,
 ) -> list[torch.Tensor]:
     """The block's forward: [out, *saved activations] (every output freshly allocated); ``fp32``: fp32 GEMM operands (on TF32
     tensor cores, whatever the caller's allow_tf32) and the TF32 attention kernels, else bf16. Autocast off: the precision is
-    ``fp32``'s, and an enclosing bf16 autocast would otherwise turn the fp32 path's GEMM outputs bf16."""
+    ``fp32``'s, and an enclosing bf16 autocast would otherwise turn the fp32 path's GEMM outputs bf16. ``sc``: ``cond`` is one
+    conditioning shared by the samples (``_shared_cond``), computed once."""
     with _tf32(fp32), torch.autocast("cuda", enabled=False):
-        return _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, psb, extra)
+        return _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, psb, extra, sc)
 
 
-def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, extra=None):
+def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, extra=None, sc=False):
     mm, _mm32, addmm = _owned_gemms90(single)
     from miniworld_engine.kernels.augmented_attention import cuda as sm90
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
@@ -755,21 +780,22 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, 
         qk or h100
     )  # q / k / v copies: QK-norm, or the sm_90a cores' pre-scaled q (see _saved_like)
     x = torch.empty(M, D, device=dev)  # the fp32 residual, written by adaln_a
+    Mc = L if sc else M  # sc: the conditioning's L rows, read by every sample at row r % L (the row kernels' period)
     c2 = (
-        None if native else cond.reshape(M, cond.shape[-1]).contiguous()
+        None if native else (cond[0].reshape(L, cond.shape[-1]) if sc else cond.reshape(M, cond.shape[-1])).contiguous()
     )  # native: cond_prep90 reads cond as given
     own_c = _own_cond(cond, fp32)
-    chat = torch.empty(M, cond.shape[-1], device=dev, dtype=at)
+    chat = torch.empty(Mc, cond.shape[-1], device=dev, dtype=at)
     cbf = None if own_c else torch.empty_like(chat)
-    cst = torch.empty(M, 2, device=dev)
+    cst = torch.empty(Mc, 2, device=dev)
     if native:
         T.cond_prep90(cond, chat, cbf, cst, EPS)
     else:
         T.cond_prep(c2, chat, cbf, cst, EPS)
     W = _pack(P, qk, dev, at)
     Wn, Wg = W["Wn"], W["Wg"]
-    G = mm(chat, Wn.t())  # [M, 4D] s1 | sh1 | s2 | sh2
-    Gg = mm(c2 if own_c else cbf, Wg.t())  # [M, 2D] gate1 | gate2
+    G = mm(chat, Wn.t())  # [Mc, 4D] s1 | sh1 | s2 | sh2
+    Gg = mm(c2 if own_c else cbf, Wg.t())  # [Mc, 2D] gate1 | gate2
     bs1, bs2, bg1, bg2 = W["bs1"], W["bs2"], W["bg1"], W["bg2"]
     xa = torch.empty(M, D, device=dev, dtype=at)
     xst = torch.empty(M, 2, device=dev)
@@ -1090,7 +1116,7 @@ def _native_final90(
     return [result[n] for n in names]
 
 
-def _bwd_fake(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads, psb=False, extra=None):
+def _bwd_fake(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads, psb=False, extra=None, sc=False):
     return [
         torch.empty_like(single),
         torch.empty_like(cond),
@@ -1116,12 +1142,14 @@ def _bwd(
     heads: int,
     psb: bool = False,
     extra: torch.Tensor | None = None,
+    sc: bool = False,
 ) -> list[torch.Tensor]:
     """The block's backward: [d single, d cond, d pair, *d params] in the inputs' dtypes (autocast off, as ``_fwd``); with
-    ``psb`` the third is d bias [H, A, L, L]."""
+    ``psb`` the third is d bias [H, A, L, L]; with ``sc`` d cond is the shared conditioning's gradient in sample 0's rows, zeros in
+    the others (the caller's stride-0 expansion sums them)."""
     with _tf32(fp32), torch.autocast("cuda", enabled=False):
         return _bwd_body(
-            single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads, psb, extra
+            single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads, psb, extra, sc
         )
 
 
@@ -1142,7 +1170,7 @@ def _psb_attn_bwd(T, qs, k, v, dob, mask, bias, lse, dd, A, L, H, DH):
     return sm90.backward_psb(qs, k, v, dob, bias, km, lse, dd, A, L, H, DH)
 
 
-def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H, psb=False, extra=None):
+def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H, psb=False, extra=None, sc=False):
     mm, mm32, _addmm = _owned_gemms90(single)
     from miniworld_engine.kernels.augmented_attention import cuda as sm90
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
@@ -1222,7 +1250,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     sdt, cdt, pdtype = single.dtype, cond.dtype, pair.dtype
     native = _native90(dev)
     c2, p2 = (
-        (None if native else cond.reshape(M, cond.shape[-1]).contiguous()),
+        (None if native else (cond[0].reshape(L, cond.shape[-1]) if sc else cond.reshape(M, cond.shape[-1])).contiguous()),
         None if psb else pair.reshape(R, dpw),
     )  # native: cond_bwd90 reads cond as given
     if psb:
@@ -1232,8 +1260,12 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     allp = torch.empty(T.part_rows(M, fp32), 7 * D, device=dev)
     part = [allp[:, i * D : (i + 1) * D] for i in range(5)]
     pwqk = allp[:, 5 * D :]
-    dG = torch.empty(M, 4 * D, device=dev, dtype=at)
-    dGg = torch.empty(M, 2 * D, device=dev, dtype=at)
+    if sc:   # one [M, 6D] buffer, so that one pass sums both over the samples (``sample_sum``)
+        dGall = torch.empty(M, 6 * D, device=dev, dtype=at)
+        dG, dGg = dGall[:, : 4 * D], dGall[:, 4 * D :]
+    else:
+        dG = torch.empty(M, 4 * D, device=dev, dtype=at)
+        dGg = torch.empty(M, 2 * D, device=dev, dtype=at)
     dz = torch.empty(M, D, device=dev, dtype=at)
     T.res_c_bwd(dout, z, Gg, bg2, dz, dGg, part[0])
     dh = mm(dz, Wsq)  # [M, n D]
@@ -1313,6 +1345,12 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
             if qk
             else torch.zeros(2 * DH, device=dev)
         )
+    if sc:
+        # a conditioning shared by the samples: its row gradients summed over them ([M, 6D] -> [L, 6D], fp32 sums) before the
+        # conditioning GEMMs, which then run L rows, not A L
+        dGs = torch.empty(L, 6 * D, device=dev, dtype=at)
+        T.sample_sum(dGall, dGs)
+        dG, dGg = dGs[:, : 4 * D], dGs[:, 4 * D :]
     dchat = mm(dG, Wn)
     dWn = mm32(dG.t(), chat)
     dcg = mm(dGg, Wg)
@@ -1440,17 +1478,17 @@ def _pack_grads(srcs, outs) -> bool:
 
 class _Block(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, single, cond, pair, mask, qk, eq, ek, fp32, heads, psb, extra, *params):
+    def forward(ctx, single, cond, pair, mask, qk, eq, ek, fp32, heads, psb, extra, sc, *params):
         out, *saved = _fwd(
-            single, cond, pair, mask, list(params), qk, eq, ek, fp32, heads, psb, extra
+            single, cond, pair, mask, list(params), qk, eq, ek, fp32, heads, psb, extra, sc
         )
         ctx.save_for_backward(single, cond, pair, *params, *saved, extra)
-        ctx.meta = (mask, qk, eq, ek, fp32, len(params), heads, psb, extra is not None and ctx.needs_input_grad[10])
+        ctx.meta = (mask, qk, eq, ek, fp32, len(params), heads, psb, extra is not None and ctx.needs_input_grad[10], sc)
         return out
 
     @staticmethod
     def backward(ctx, dout):
-        mask, qk, eq, ek, fp32, npar, heads, psb, xgrad = ctx.meta
+        mask, qk, eq, ek, fp32, npar, heads, psb, xgrad, sc = ctx.meta
         vals = ctx.saved_tensors
         single, cond, pair = vals[:3]
         params, saved, extra = list(vals[3 : 3 + npar]), list(vals[3 + npar : -1]), vals[-1]
@@ -1470,6 +1508,7 @@ class _Block(torch.autograd.Function):
             heads,
             psb,
             xg,
+            sc,
         )
         if _native90(single.device) and not psb:
             _activate_native_caller(force=True)
@@ -1485,14 +1524,16 @@ class _Block(torch.autograd.Function):
             None,
             None,
             pg.pop() if xgrad else None,
-            *(g if ctx.needs_input_grad[11 + i] else None for i, g in enumerate(pg)),
+            None,
+            *(g if ctx.needs_input_grad[12 + i] else None for i, g in enumerate(pg)),
         )
 
 
-def _pad(single, cond, pair, mask, Ap, Lp):
+def _pad(single, cond, pair, mask, Ap, Lp, sc=False):
     """The inputs padded to Ap samples of Lp rows (``block``): zero single / cond rows and samples, zero pair rows and columns,
     the padded keys masked out of every softmax. The padded queries and samples are computed and dropped, so their output
-    gradient is zero and they add nothing to any gradient; the masked keys get P = 0, so they add nothing either."""
+    gradient is zero and they add nothing to any gradient; the masked keys get P = 0, so they add nothing either. ``sc``: a
+    conditioning shared by the samples stays one (its rows padded, then expanded over the Ap samples again)."""
     F = torch.nn.functional
     A, _, L, _ = single.shape
     rows = (0, 0, 0, Lp - L, 0, 0, 0, Ap - A)
@@ -1500,7 +1541,7 @@ def _pad(single, cond, pair, mask, Ap, Lp):
         mask = torch.ones(1, L, device=single.device, dtype=torch.bool)
     return (
         F.pad(single, rows),
-        F.pad(cond, rows),
+        F.pad(cond[:1], rows[:4]).expand(Ap, -1, -1, -1) if sc else F.pad(cond, rows),
         F.pad(pair, (0, 0, 0, Lp - L, 0, Lp - L)),
         F.pad(mask.to(torch.bool), (0, Lp - L), value=False),
     )
@@ -1520,19 +1561,20 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None, extra=None)
     Ap = A if _sm90(single.device) else A + A % 2
     Lp = -(-L // QM) * QM
     padded = (Ap, Lp) != (A, L)
+    sc = _shared_cond(single, cond, fp32)
     caller = (
         single,
         cond,
         pair,
     )  # the caller's tensors: the native hooks attach to their autograd edges, not the pads'
     if padded:
-        single, cond, pair, mask = _pad(single, cond, pair, mask, Ap, Lp)
+        single, cond, pair, mask = _pad(single, cond, pair, mask, Ap, Lp, sc)
         if extra is not None:
             extra = torch.nn.functional.pad(extra, (0, Lp - L, 0, Lp - L))
     params = [module.get_parameter(n) for n in _names_for(qk)]
     out = _Block.apply(
         single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head), False,
-        None if extra is None else extra.contiguous(), *params
+        None if extra is None else extra.contiguous(), sc, *params
     )
     if _native90(caller[0].device):
         # The result's edges now strongly own leaf AccumulateGrad nodes.
@@ -1621,7 +1663,7 @@ def block_psb(module, single, cond, bias, mask=None, compute_dtype=None):
         bias = F.pad(bias, (0, Lp - L, 0, Lp - L))
         mask = F.pad(mask.to(torch.bool), (0, Lp - L), value=False)
     out = _Block.apply(
-        single, cond, bias.contiguous(), mask, qk, eq, ek, False, int(a.n_head), True, None, *params
+        single, cond, bias.contiguous(), mask, qk, eq, ek, False, int(a.n_head), True, None, False, *params
     )
     return out[:, :, :L] if Lp != L else out
 
@@ -1656,7 +1698,7 @@ def _block_psb_b200(module, single, cond, bias, mask=None):
     if mask is not None:
         bias = bias.masked_fill(~mask.to(torch.bool).reshape(-1, 1, 1, Lp), NEG)
     out = _Block.apply(
-        single, cond, bias.to(BF).contiguous(), None, qk, eq, ek, False, int(a.n_head), True, None, *params
+        single, cond, bias.to(BF).contiguous(), None, qk, eq, ek, False, int(a.n_head), True, None, False, *params
     )
     return out[:, :, :L] if Lp != L else out
 
