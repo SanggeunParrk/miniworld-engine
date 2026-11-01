@@ -24,6 +24,15 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Changed
 
+- **H100 / B200 launch no Triton through the `ops.*` facades, the bias-only DiT training fallbacks or the AugmentedAttention CUDA-path helpers**
+  (`portable_blocked` is False on cc 9 / 10, so these call sites kept their Triton kernels outside the record gate). The facades ask
+  `restricted_card` first: the CUDA kernel where one serves the call (`ops.layer_norm`: the general CUDA LayerNorm; `ops.augmented_attention_pair_bias`:
+  the sm_90 bf16 core), the PyTorch statements otherwise (`swiglu_ffn`, `rms_norm_modulation`, `layer_norm_linear`, `gated_residual`, `gated_linear`,
+  `conditioned_transition`, `triangle_attention`, both TriMul updates; TriMul stays bf16-only on CUDA). `BiasOnlyDiTBlock`'s `core_t` / pair-bias
+  fallbacks and `pair_bias_all`'s Triton fold are off there; the sm_90 AugmentedAttention `_scale_bf16_kernel` / `_prep_do_kernel` / `_wf_kernel` and
+  the compiled-region TriMul weight pack are PyTorch ops (the Triton versions are kept as `_*_triton`). `portable_on_hopper_blackwell` keeps the
+  Triton kernels for A/B. Tests: `tests/cpu/compile/test_h100_ops_no_triton.py`, `tests/gpu/sm90/test_ops_no_triton_gpu.py`;
+  `docs/records/h100_ops_gate_20261101.md`, `docs/gpus/h100/dispatch.md`.
 - **Native caches are judged per op.** `native.op_identity(op)` (registry row, the closure of the op's files inside `kernels/`, the safety
   set) replaces `native.source_identity()` (one hash of every `kernels/**` file) in `cache_status.scan`, `derive.coverage`,
   `native.choose_config` and the cache JSON's `op_identity`; an edit to an unrelated kernel no longer forces a restamp of all `*_cuda`

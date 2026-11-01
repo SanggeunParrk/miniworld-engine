@@ -28,10 +28,11 @@ def gated_linear(
         or gate.shape != value.shape
     ):
         return F.linear(torch.sigmoid(gate) * value, weight, bias)
-    from miniworld_engine.modules.dispatch import portable_blocked
+    from miniworld_engine.modules.dispatch import portable_blocked, restricted_card
 
-    if portable_blocked("gated_linear", value.device, gate, value, weight):
-        return F.linear(torch.sigmoid(gate) * value, weight, bias)   # no record of the kernels on this card
+    if restricted_card(value.device) or portable_blocked("gated_linear", value.device, gate, value, weight):
+        # H100 / B200 launch no Triton (no CUDA kernel serves this op): the PyTorch statements; also a card with no record of the kernels
+        return F.linear(torch.sigmoid(gate) * value, weight, bias)
     shape = value.shape
     # Released AF3 exposes an unbatched [L,D] token stream. Restore its semantic
     # batch before the existing primitives compute their pre-flatten shape key.

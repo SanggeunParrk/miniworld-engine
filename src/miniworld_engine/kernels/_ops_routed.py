@@ -3,7 +3,9 @@
 ``ops.swiglu_ffn``, ``ops.layer_norm``, ``ops.rms_norm_modulation``, ``ops.layer_norm_linear`` and ``ops.gated_residual`` called a Triton
 function directly, so on a card the engine holds no record for they would have stayed on Triton while ``modules.*`` warned and ran
 PyTorch. Here the call is routed first (``modules.dispatch.portable_blocked``, at the call's precision and mode): CUDA / recorded Triton as
-before, the PyTorch statements otherwise. H100 and B200 are not touched (``portable_blocked`` is False there: they keep what they ran).
+before, the PyTorch statements otherwise. H100 and B200 launch NO Triton here (``modules.dispatch.restricted_card``, the same rule as the modules): the CUDA kernel where one exists
+for the call (``layer_norm``: the general CUDA LayerNorm), the PyTorch statements otherwise. ``portable_on_hopper_blackwell`` /
+``force_portable_kernels`` (A/B work) keep the Triton kernels there.
 """
 
 from __future__ import annotations
@@ -12,11 +14,18 @@ import torch
 import torch.nn.functional as F
 
 
+def _no_triton(x: torch.Tensor) -> bool:
+    """H100 / B200 (and no A/B switch): this facade must not launch a Triton kernel."""
+    from miniworld_engine.modules.dispatch import restricted_card
+
+    return x.is_cuda and restricted_card(x.device)
+
+
 def swiglu_ffn(x: torch.Tensor, expand_a_weight: torch.Tensor, expand_b_weight: torch.Tensor, squeeze_weight: torch.Tensor) -> torch.Tensor:
     """``W_down( SiLU(Wa @ x) * (Wb @ x) )`` -- see ``kernels.transition.triton.fused.triton_swiglu_ffn``."""
     from miniworld_engine.modules.dispatch import portable_blocked
 
-    if x.is_cuda and portable_blocked("swiglu_ffn", x.device, x, expand_a_weight, expand_b_weight, squeeze_weight):
+    if _no_triton(x) or (x.is_cuda and portable_blocked("swiglu_ffn", x.device, x, expand_a_weight, expand_b_weight, squeeze_weight)):
         return F.linear(F.silu(F.linear(x, expand_a_weight)) * F.linear(x, expand_b_weight), squeeze_weight)
     from miniworld_engine.kernels.transition.triton.fused import triton_swiglu_ffn
 
@@ -27,6 +36,13 @@ def layer_norm(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tensor 
     """LayerNorm (autograd) with an optional per-row scale folded in -- see ``kernels.layernorm.triton.main.triton_layernorm``."""
     from miniworld_engine.modules.dispatch import portable_blocked
 
+    if _no_triton(x):
+        # H100 / B200: the general CUDA LayerNorm (any width the kernels take, bf16 / fp16 / fp32, forward and backward); the row scale is
+        # applied after it (one more rounding than the Triton kernel's in-kernel scale), a call it does not take runs the PyTorch statements
+        from miniworld_engine.kernels.layernorm.cuda.general import layernorm_cuda, supported
+
+        out = layernorm_cuda(x, weight, bias, eps) if supported(x) else F.layer_norm(x, (x.shape[-1],), weight, bias, eps)
+        return out if row_scale is None else out * row_scale.reshape(*x.shape[:-1], 1).to(out.dtype)
     if x.is_cuda and portable_blocked("layernorm", x.device, x, *(t for t in (weight, bias) if t is not None)):
         out = F.layer_norm(x, (x.shape[-1],), weight, bias, eps)
         return out if row_scale is None else out * row_scale.reshape(*x.shape[:-1], 1).to(out.dtype)
@@ -57,7 +73,7 @@ def rms_norm_modulation(
     (``kernels.rmsnorm.reference.rmsnorm_adamod_reference``, fp32 statistics and projections, the outputs in ``q``'s dtype)."""
     from miniworld_engine.modules.dispatch import portable_blocked
 
-    if q.is_cuda and portable_blocked(
+    if _no_triton(q) or q.is_cuda and portable_blocked(
         "rms_norm_modulation", q.device, q, c, w_scale, w_shift, w_gate, *(t for t in (weight,) if t is not None)
     ):
         from miniworld_engine.kernels.rmsnorm.reference import rmsnorm_adamod_reference
@@ -74,7 +90,7 @@ def layer_norm_linear(x: torch.Tensor, ln_weight: torch.Tensor, proj_weight: tor
     with the weights in the activation's dtype (the statements the modules' PyTorch legs run), the result in ``x``'s dtype."""
     from miniworld_engine.modules.dispatch import portable_blocked
 
-    if x.is_cuda and portable_blocked("layer_norm_linear", x.device, x, ln_weight, proj_weight):
+    if _no_triton(x) or (x.is_cuda and portable_blocked("layer_norm_linear", x.device, x, ln_weight, proj_weight)):
         normed = F.layer_norm(x, (x.shape[-1],), ln_weight.to(x.dtype), None, eps)
         return F.linear(normed, proj_weight.to(x.dtype))
     from miniworld_engine.kernels.layernorm_linear.triton.pair_bias import (
@@ -90,7 +106,7 @@ def gated_residual(x: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor) ->
     rounds the product to the activation dtype before the add, as eager does), with one warning."""
     from miniworld_engine.modules.dispatch import portable_blocked
 
-    if x.is_cuda and portable_blocked("gated_residual", x.device, x, gate, branch):
+    if _no_triton(x) or (x.is_cuda and portable_blocked("gated_residual", x.device, x, gate, branch)):
         if x.shape != gate.shape or x.shape != branch.shape:
             raise ValueError("gated_residual requires identical shapes")
         return x + gate * branch

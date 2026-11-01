@@ -40,9 +40,23 @@ def augmented_attention_pair_bias(
     from miniworld_engine.kernels.augmented_attention.interface import (
         triton_augmented_attention_pair_bias as _fn,
     )
-    from miniworld_engine.modules.dispatch import portable_blocked
+    from miniworld_engine.modules.dispatch import portable_blocked, restricted_card
 
     in_dtype = query.dtype
+    if query.is_cuda and restricted_card(query.device):
+        # H100 / B200 launch no Triton. bf16, B == 1, 16 x 48 or 4 x 32 heads, L a multiple of 128: the hand-CUDA sm_90 core (the one
+        # modules.AugmentedAttention takes); every other call: the PyTorch reference (fp32 accumulation, the caller's dtype back).
+        q_, k_, v_, b_ = query.transpose(2, 3), key.transpose(2, 3), value.transpose(2, 3), bias.permute(0, 2, 3, 1)
+        if in_dtype is torch.bfloat16:
+            from miniworld_engine.kernels.augmented_attention import cuda as cuda_sm90
+
+            if cuda_sm90.available(q_, b_):
+                return cuda_sm90.augmented_attention_bf16_sm90(q_, k_, v_, b_, mask).transpose(2, 3).to(in_dtype)
+        from miniworld_engine.kernels.augmented_attention.reference import (
+            augmented_attention_pair_bias_pytorch,
+        )
+
+        return augmented_attention_pair_bias_pytorch(q_, k_, v_, b_, mask).transpose(2, 3).to(in_dtype)
     if query.is_cuda and portable_blocked("augmented_attention_pair_bias", query.device, query, key, value, bias):
         # a card the engine holds no record for: the PyTorch reference (one UnrecordedCardWarning)
         from miniworld_engine.kernels.augmented_attention.reference import (

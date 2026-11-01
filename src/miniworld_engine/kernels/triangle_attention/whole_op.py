@@ -78,9 +78,14 @@ def triangle_attention(
         from miniworld_engine.modules.dispatch import portable_blocked
 
         # a card the engine holds no record for: the PyTorch statements for the attention core and the QK norm (one UnrecordedCardWarning)
-        blocked = pair.is_cuda and portable_blocked("triangle_attention", pair.device, pair, to_value_weight, to_out_weight)
         from miniworld_engine import settings
         from miniworld_engine.modules import dispatch
+
+        # H100 / B200 launch no Triton (the CUDA TriangleAttention kernels are bound to the module, not to weights-as-args): the PyTorch core
+        blocked = pair.is_cuda and (
+            dispatch.restricted_card(pair.device)
+            or portable_blocked("triangle_attention", pair.device, pair, to_value_weight, to_out_weight)
+        )
 
         if (not blocked and query.is_cuda and query.dtype != torch.bfloat16 and not dispatch.restricted_card(query.device)
                 and not settings.current().force_portable_kernels):

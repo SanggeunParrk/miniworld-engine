@@ -374,13 +374,19 @@ def _bf16_rows(t, w):
     return t if t.is_contiguous() else t.contiguous()
 
 
+def _scale_bf16(x, scale):
+    """``(x * scale)`` rounded to bf16, the arithmetic of ``_scale_bf16_kernel`` as PyTorch ops (fp32 multiply, one rounding to bf16): H100 / B200 launch
+    no Triton (docs/gpus/h100/dispatch.md), and these helpers sit on the CUDA path of every call. bf16 / fp32 inputs multiply in fp32 directly
+    (PyTorch's scalar multiply computes in fp32 for a bf16 tensor); anything else is widened first."""
+    if x.dtype not in (torch.bfloat16, torch.float32):
+        x = x.float()
+    return (x * scale).to(torch.bfloat16)
+
+
 def _prep_qkv(q, k, v, scale):
     """q scaled into the core's log2 units (one pass) and the bf16 rows of q, k, v: k and v are used as they are when already contiguous bf16."""
     w = q.shape[-2] * q.shape[-1]
-    qc = q.contiguous()
-    n = qc.numel()
-    qs = torch.empty(n, device=q.device, dtype=torch.bfloat16)
-    _scale_bf16_kernel[(triton.cdiv(n, 4096),)](qc, qs, n, scale, BLOCK=4096)
+    qs = _scale_bf16(q.contiguous(), scale).reshape(-1)
     return qs.view(-1, w), _bf16_rows(k, w), _bf16_rows(v, w)
 
 
@@ -411,7 +417,16 @@ def _prep_do_kernel(
 
 
 def _prep_do(do, o, A, L, nh=H, dh=D, write_dob=True):
-    """dO -> bf16 and D = rowsum(dO * O) as [A, H, L] fp32. ``write_dob=False``: D only (dO is already the bf16 rows the core reads; it is returned as is)."""
+    """dO -> bf16 and D = rowsum(dO * O) as [A, H, L] fp32. ``write_dob=False``: D only (dO is already the bf16 rows the core reads; it is returned as is).
+    PyTorch ops (fp32 products, fp32 row sums): H100 / B200 launch no Triton; ``_prep_do_triton`` is the former one-pass kernel launch, kept."""
+    do = do.reshape(A * L, nh * dh).contiguous()
+    dob = do.to(torch.bfloat16) if write_dob else do
+    prod = do.float().view(A, L, nh, dh) * o.reshape(A, L, nh, dh).float()
+    return dob, prod.sum(-1).permute(0, 2, 1).contiguous()
+
+
+def _prep_do_triton(do, o, A, L, nh=H, dh=D, write_dob=True):
+    """The Triton launch of ``_prep_do`` (``_prep_do_kernel``): not reached on H100 / B200, kept as the record of what the helper was."""
     do = do.reshape(A * L, nh * dh).contiguous()
     dob = torch.empty(A * L, nh * dh, device=do.device, dtype=torch.bfloat16) if write_dob else do
     dd = torch.empty(A, nh, L, device=do.device, dtype=torch.float32)
@@ -434,6 +449,11 @@ def _scale_bf16_kernel(b, out, n, scale, BLOCK: tl.constexpr):
 
 def _bias_prep(bias_hll):
     """[H, L, L] bias -> bf16 bias * log2 e (log2 units, as the kernels seed it)."""
+    return _scale_bf16(bias_hll.contiguous(), LOG2E)
+
+
+def _bias_prep_triton(bias_hll):
+    """The Triton launch of ``_bias_prep`` (``_scale_bf16_kernel``): not reached on H100 / B200, kept."""
     bias_hll = bias_hll.contiguous()
     out = torch.empty(bias_hll.shape, device=bias_hll.device, dtype=torch.bfloat16)
     n = bias_hll.numel()

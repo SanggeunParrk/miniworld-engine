@@ -43,7 +43,7 @@ from miniworld_engine.integrations import bias_only_dit as _fused
 from miniworld_engine.integrations import bias_only_dit_train as _train
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.conditioned_transition import ConditionedTransition
-from miniworld_engine.modules.dispatch import portable_blocked
+from miniworld_engine.modules.dispatch import portable_blocked, restricted_card
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear
@@ -90,6 +90,8 @@ class BiasOnlyAttention(nn.Module):
             and self.ln_pair.weight is not None and getattr(self.ln_pair, "bias", None) is None and self.to_bias.bias is None
             and (pair.requires_grad or self.ln_pair.weight.requires_grad or self.to_bias.weight.requires_grad)
             and _pair_bias_supported(pair, self.n_head)
+            # H100 / B200 run no Triton kernel: the PyTorch statements below (the CUDA blocks take what they serve before this)
+            and not restricted_card(pair.device)
             # its two Triton kernels (op bias_only_pair_bias) need the card's record: without it, off H100 / B200, the PyTorch statements
             and not portable_blocked("bias_only_pair_bias", pair.device, pair, self.ln_pair.weight, self.to_bias.weight))
 
@@ -101,7 +103,8 @@ class BiasOnlyAttention(nn.Module):
             and single.dtype in (torch.bfloat16, torch.float32)
             and torch.is_grad_enabled()
             and (single.requires_grad or any(p.requires_grad for p in self.parameters()))
-            # the core's sigmoid-gate kernels need the card's record (op "bias_only_core"); H100 / B200 are not asked
+            # the core's sigmoid-gate kernels need the card's record (op "bias_only_core"); H100 / B200 launch no Triton: PyTorch statements
+            and not restricted_card(single.device)
             and not portable_blocked("bias_only_core", single.device, single, self.to_value.weight, self.to_out.weight))
 
     def _feature_major(self, single) -> bool:
@@ -113,7 +116,8 @@ class BiasOnlyAttention(nn.Module):
             and single.dtype in (torch.bfloat16, torch.float32)
             and torch.is_grad_enabled()
             and (single.requires_grad or any(p.requires_grad for p in self.parameters()))
-            # the core's sigmoid-gate kernels need the card's record (op "bias_only_core"); H100 / B200 are not asked
+            # the core's sigmoid-gate kernels need the card's record (op "bias_only_core"); H100 / B200 launch no Triton: PyTorch statements
+            and not restricted_card(single.device)
             and not portable_blocked("bias_only_core", single.device, single, self.to_value.weight, self.to_out.weight))
 
     def _attention_weights(self, pair, mask, bias, dtype):

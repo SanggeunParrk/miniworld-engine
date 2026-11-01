@@ -53,6 +53,18 @@ with a correct result. `modules.dispatch.restricted_card(device)` is the single 
   outside its buckets. `tests/gpu/sm90/test_architecture_no_triton_gpu.py` records every Triton launch through the atom transformer
   (windowed, AF3 and global attention), the Pairformer and the diffusion transformer: none, bf16 and fp32, inference and training. A
   MiniWorld phase-1a training run with `train.forbid_triton` on ran 67 steps on H100 without a Triton launch (2026-10-18).
+* The functional `ops.*` facades follow the same rule (`kernels/_ops_routed.py`, the `whole_op.py` files; `portable_blocked` is False on cc 9 / 10,
+  so they ask `restricted_card` first): `ops.layer_norm` -> the general CUDA LayerNorm (the row scale after it), `ops.augmented_attention_pair_bias`
+  -> the hand-CUDA sm_90 core for bf16 (16 x 48 / 4 x 32 heads, B = 1, L a multiple of 128; the one `modules.AugmentedAttention` takes), else the
+  PyTorch reference (fp32 accumulation); `ops.swiglu_ffn`, `ops.rms_norm_modulation`, `ops.layer_norm_linear`, `ops.gated_residual`,
+  `ops.gated_linear`, `ops.conditioned_transition`, `ops.triangle_attention` (core + QK norm) and both TriMul updates -> the PyTorch statements
+  (the hand-CUDA TriangleAttention / TriMul kernels are bound to the modules, not to weights-as-args; TriMul stays bf16-only and is never run
+  in fp32 here). `ops.transition` already did this. A/B (`portable_on_hopper_blackwell`) keeps the Triton kernels.
+* The training fallbacks of `BiasOnlyDiTBlock` (`_feature_major`, `_feature_major_psb`: the Triton `core_t`; `_fused_pair_bias` and the
+  `pair_bias_all` fold: the Triton pair-bias kernels) are off on these cards: a shape the CUDA block (`integrations/bias_only_dit_train.py`)
+  cannot take runs the PyTorch statements. The three Triton helpers of the sm_90 AugmentedAttention cores (`_scale_bf16_kernel`, `_prep_do_kernel`,
+  `_wf_kernel`) are PyTorch ops now (kept as `_*_triton`, bit-identical for the scales, fp32 sums for D), and so is the compiled-region TriMul
+  weight pack (`_h100_pack.pack_into_triton` body, bit-exact copies). Record: [h100_ops_gate_20261101.md](../../records/h100_ops_gate_20261101.md).
 * The engine `SWADiTBlock` (`modules/swa_dit`) does the same: its leg for a contract the fused block refuses, and its `SwiGLUFFN`, run
   the PyTorch statements on these cards rather than the Triton RMS-adaLN / gated-residual / SwiGLU ops.
 * SWA atom DiT in fp32 under matmul precision "highest" (torch's default): the native H100 stages serve it (exact-fp32 cuBLAS

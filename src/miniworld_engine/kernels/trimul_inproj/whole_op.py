@@ -190,15 +190,19 @@ def bidirectional_triangle_multiplicative_update(
 
 
 def _off_record(x: torch.Tensor, *weights: torch.Tensor) -> bool:
-    """Must this facade call run the PyTorch statements rather than the portable kernels? On a card other than H100 / B200: when the
+    """Must this facade call run the PyTorch statements rather than the portable kernels? H100 / B200: always (no Triton there). Any other card: when the
     kernels refuse the dtype (they are bf16 only, as their registry rows and their record: one ``KernelRefusedWarning``) or the card holds
-    no record of them (``modules.dispatch.portable_blocked``: one ``UnrecordedCardWarning``). H100 / B200 and the A/B switch keep the
-    kernels, as before."""
+    no record of them (``modules.dispatch.portable_blocked``: one ``UnrecordedCardWarning``). The A/B switch keeps the
+    kernels."""
     from miniworld_engine import settings
     from miniworld_engine.modules import dispatch
 
-    if not x.is_cuda or dispatch.restricted_card(x.device) or settings.current().force_portable_kernels:
+    if not x.is_cuda or settings.current().force_portable_kernels:
         return False
+    if dispatch.restricted_card(x.device):
+        # H100 / B200 launch no Triton. The hand-CUDA TriMul (bf16 only) is bound to the module (`modules.TriangleMultiplication`), not to
+        # weights-as-args: this facade runs the PyTorch statements there, in the caller's dtype (never a CUDA path wrong for the dtype).
+        return True
     if x.dtype != torch.bfloat16:
         dispatch.warn_refused("triangle_multiplication", x.device, f"the portable TriMul kernels are bf16 only, got {x.dtype}")
         return True

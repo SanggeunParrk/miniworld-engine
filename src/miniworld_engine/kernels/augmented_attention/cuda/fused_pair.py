@@ -84,7 +84,14 @@ def _wf_kernel(wb, lnw, out_l2, out_nat, n, scale, BLOCK: tl.constexpr, NAT: tl.
 
 
 def _wf(wb: torch.Tensor, lnw: torch.Tensor, need_nat: bool):
-    """d_pair 128: (wf in log2 units, wf natural) bf16 [H, 128] = wb * lnw (* log2 e); the natural copy only when asked."""
+    """d_pair 128: (wf in log2 units, wf natural) bf16 [H, 128] = wb * lnw (* log2 e); the natural copy only when asked. PyTorch ops (fp32
+    product, one rounding to bf16): H100 / B200 launch no Triton; ``_wf_triton`` is the former kernel launch, kept."""
+    w = wb.float() * lnw.float()[None, :]
+    return (w * LOG2E).to(torch.bfloat16), (w.to(torch.bfloat16) if need_nat else None)
+
+
+def _wf_triton(wb: torch.Tensor, lnw: torch.Tensor, need_nat: bool):
+    """The Triton launch of ``_wf`` (``_wf_kernel``): not reached on H100 / B200, kept."""
     wb, lnw = wb.contiguous(), lnw.contiguous()
     n = wb.numel()
     l2 = torch.empty(wb.shape, device=wb.device, dtype=torch.bfloat16)
@@ -94,7 +101,12 @@ def _wf(wb: torch.Tensor, lnw: torch.Tensor, need_nat: bool):
 
 
 def _wf32(wb: torch.Tensor, lnw: torch.Tensor):
-    """d_pair 16: wf = wb * lnw, fp32 [H, 16] (the kernel applies log2 e itself)."""
+    """d_pair 16: wf = wb * lnw, fp32 [H, 16] (the kernel applies log2 e itself). PyTorch ops; ``_wf32_triton`` is the former launch, kept."""
+    return (wb.float() * lnw.float()[None, :]).contiguous()
+
+
+def _wf32_triton(wb: torch.Tensor, lnw: torch.Tensor):
+    """The Triton launch of ``_wf32`` (``_wf_kernel``): not reached on H100 / B200, kept."""
     wb, lnw = wb.contiguous(), lnw.contiguous()
     n = wb.numel()
     out = torch.empty(wb.shape, device=wb.device, dtype=torch.float32)
