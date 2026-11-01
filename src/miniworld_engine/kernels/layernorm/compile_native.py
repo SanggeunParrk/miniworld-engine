@@ -11,6 +11,7 @@ from miniworld_engine.autotune.shape_key import both_key, pack, rows_of
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.layernorm import dispatch as dispatch_cache
 from miniworld_engine.kernels.layernorm.triton.main import (
+    _persistent_programs,
     layer_norm_bwd_dx_fused,
     layer_norm_fwd_fused,
 )
@@ -159,7 +160,13 @@ def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: 
     dx_2d = torch.empty_like(dy_2d)
     dw = torch.zeros(n, dtype=torch.float32, device=x.device)
     db = torch.zeros(n, dtype=torch.float32, device=x.device)
-    grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
+    # The kernel is persistent (each program walks row tiles pid, pid + nprog, ... and flushes dw / db once): launch it on the same
+    # capped grid as triton.main._ln_bwd, the other call site of this kernel and key. An uncapped grid (one program per row tile)
+    # ranked the tiles differently -- a small BLOCK_M1 paid one atomic flush per 16 rows -- so the configs the build kept for a key
+    # were not the ones that win at the persistent launch (B200, x[1, 768, 768, 128] bf16: the kept BLOCK_M1 64 / 4 warps ran 138.7 us
+    # there, BLOCK_M1 16 / 1 warp 77.7 us).
+    programs = _persistent_programs(x.device)
+    grid = lambda meta: [min(triton.cdiv(m, meta["BLOCK_M1"]), programs)]
     layer_norm_bwd_dx_fused[grid](
         dx_2d,
         dy_2d,
