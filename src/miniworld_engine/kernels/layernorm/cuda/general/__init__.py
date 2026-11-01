@@ -7,8 +7,9 @@ Layout (``ln_common.cuh``): TPR threads per row, each holding CHUNKS vectors of 
 from the width: the fewest idle lanes, at most 32 values per thread, and TPR as close to 128 as that allows (measured on H100: 128
 threads x 2-4 vectors beat 256-1024 threads x 1 vector by 10-40% at widths 2048-8192; 8 vectors per thread spill).
 
-B200 (sm_100) backward of rows >= 1 KB (a bf16 768-wide RMSNorm): ``ln_bulk.cu`` -- tiles of rows brought in by TMA bulk copies two
-stages ahead, dx written in place and bulk-stored (:func:`bwd_bulk_sm100`).
+B200 (sm_100), bf16 / fp32 rows a (sub-)warp holds without idle lanes: ``ln_rows.cu`` (:func:`rows_launch`) -- small CTAs on a
+resident grid, 16-byte vectors, shuffle reductions only, streaming loads / stores in the forward; per-CTA dw / db partials in a
+fixed order. Measured against the Triton kernels and a plain copy of the same bytes (the HBM floor) in the commit that added it.
 
 B200 (sm_100) launches its own layout (:func:`launch_config`): a (sub-)warp per row (TPR <= 32, shuffle reductions only, CHUNKS
 up to 4 incl. 3: a 768-wide bf16 row is a warp of 3 vectors a lane) on a one-wave grid. The H100 layout (128 threads x one 16-byte
@@ -92,27 +93,33 @@ def config_sm100(n: int, elem_bytes: int, rows: int) -> tuple[int, int, int, int
     return (*sw, 1, 1)
 
 
-def bwd_bulk_sm100(n: int, elem_bytes: int) -> tuple[int, int, int] | None:
-    """(rows a tile, stages, CTAs a SM) of the bulk-copy backward (``ln_bulk.cu``) for rows of >= 1 KB with a sub-warp layout, else
-    None. Measured at bf16 [18432 / 49152, 768] (RMSNorm): 32.0 -> 29.4 us / 79.3 -> 69.5 us forward + backward against the register
-    backward; on shorter rows (128 / 256 wide) it lost or tied."""
-    sw = _sub_warp(n, elem_bytes)
-    rowb = n * elem_bytes
-    if sw is None or rowb < 1024:
+def rows_config(n: int, elem_bytes: int, backward: bool) -> tuple[int, int, int, int, int] | None:
+    """(tpr, chunks, rows a thread, warps a CTA, CTAs a SM) of ``ln_rows.cu`` for rows of ``n`` elements, or None (no sub-warp layout
+    without idle lanes). Measured on B200 (CUDA graphs) at [147456 / 589824, 128] bf16 / fp32, [147456, 256] bf16, [18432 / 49152, 768]
+    bf16: the backward wants the most vectors a thread (up to 4) and two rows a thread on 4 two-warp CTAs a SM where a row group is
+    under a warp, one row on 8 where it is a whole warp; the forward two vectors a thread (fp32: four), one row, 16 two-warp CTAs a SM."""
+    vec = 16 // elem_bytes
+    if n % vec:
         return None
-    rpc = 256 // sw[0]
-    return max(rpc, (32768 // rowb) // rpc * rpc), 2, 2
+    nvec = n // vec
+    lays = [(t, c) for t in (4, 8, 16, 32) for c in (1, 2, 3, 4) if t * c == nvec and (c != 3 or t == 32)]
+    if not lays:
+        return None
+    if backward:
+        tpr, ch = max(lays, key=lambda tc: (tc[1], -tc[0]))
+        return (tpr, ch, 2, 2, 4) if tpr < 32 else (tpr, ch, 1, 2, 8)
+    want = 4 if elem_bytes == 4 else 2
+    tpr, ch = min(lays, key=lambda tc: (abs(tc[1] - want), -tc[0]))
+    return tpr, ch, 1, 2, 16
 
 
-def bwd_launch(x: torch.Tensor):
-    """The bulk backward's (tpr, chunks, rows a tile, stages, CTAs a SM) for ``x`` [M, N] on B200, or None (the register backward)."""
-    if not (x.is_cuda and _cc(x.device.index if x.device.index is not None else torch.cuda.current_device()) == (10, 0)):
+def rows_launch(x: torch.Tensor, backward: bool):
+    """:func:`rows_config` for ``x`` [M, N] on B200 (bf16 / fp32, 16-byte aligned rows), or None (the general kernels)."""
+    if not (x.is_cuda and x.dtype in (torch.bfloat16, torch.float32) and x.data_ptr() % 16 == 0):
         return None
-    cfg = bwd_bulk_sm100(x.shape[1], x.element_size())
-    if cfg is None or x.data_ptr() % 16:
+    if _cc(x.device.index if x.device.index is not None else torch.cuda.current_device()) != (10, 0):
         return None
-    sw = _sub_warp(x.shape[1], x.element_size())
-    return (sw[0], sw[1], *cfg)
+    return rows_config(x.shape[1], x.element_size(), backward)
 
 
 def launch_config(n: int, elem_bytes: int, rows: int, device: torch.device) -> tuple[int, int, int, int, int]:
@@ -138,8 +145,8 @@ def _ext():
 
     ensure_cuda_home()
     return load_extension(
-        name="layernorm_general_cuda_v4",
-        sources=[str(_dir / "bind.cpp"), str(_dir / "ln_fwd.cu"), str(_dir / "ln_bwd.cu"), str(_dir / "ln_bulk.cu")],
+        name="layernorm_general_cuda_v5",
+        sources=[str(_dir / "bind.cpp"), str(_dir / "ln_fwd.cu"), str(_dir / "ln_bwd.cu"), str(_dir / "ln_rows.cu")],
         extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "--expt-relaxed-constexpr", *gencodes("80", "90", "100")],
         extra_cflags=["-O3", "-std=c++17"],
         verbose=False,
@@ -183,6 +190,9 @@ def _fwd_fake(x, w, b, eps, save):
 @opaque(fake=_fwd_fake, name="layernorm_general_fwd")
 def _fwd(x: torch.Tensor, w: torch.Tensor, b: torch.Tensor, eps: float, save: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """LayerNorm forward of contiguous x [M, N]; w / b fp32 or bf16 [N] or empty. (y, mean, rstd)."""
+    rl = rows_launch(x, False)
+    if rl is not None:
+        return tuple(_ext().rows_fwd(x, w, b, float(eps), bool(save), False, *rl))
     tpr, ch, vec, rpt, waves = launch_config(x.shape[1], x.element_size(), x.shape[0], x.device)
     y, mean, rstd = _ext().fwd(x, w, b, float(eps), bool(save), False, tpr, ch, vec, rpt, waves)
     return y, mean, rstd
@@ -200,9 +210,9 @@ def _bwd(dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, b: torch.Tensor, me
          wgrad: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """LayerNorm backward from the saved mean / rstd. (dx, dw, db); the affine gradients only when wgrad (``b`` only names their
     dtype)."""
-    bulk = bwd_launch(x) if dy.data_ptr() % 16 == 0 else None
-    if bulk is not None:
-        return tuple(_ext().bwd_bulk(dy, x, w, mean, rstd, bool(wgrad), False, *bulk, _grad_bf16(w, b)))
+    rl = rows_launch(x, True) if dy.data_ptr() % 16 == 0 else None
+    if rl is not None:
+        return tuple(_ext().rows_bwd(dy, x, w, mean, rstd, bool(wgrad), False, *rl, _grad_bf16(w, b)))
     tpr, ch, vec, rpt, _ = launch_config(x.shape[1], x.element_size(), x.shape[0], x.device)
     dx, dw, db = _ext().bwd(dy, x, w, mean, rstd, bool(wgrad), False, tpr, ch, vec, rpt, 0, _grad_bf16(w, b))
     return dx, dw, db
@@ -246,4 +256,4 @@ def layernorm_cuda(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Ten
     return _LayerNorm.apply(x2, weight, bias, float(eps)).reshape(shape)
 
 
-__all__ = ["bwd_bulk_sm100", "config", "config_sm100", "launch_config", "layernorm_cuda", "supported"]
+__all__ = ["config", "config_sm100", "launch_config", "layernorm_cuda", "rows_config", "rows_launch", "supported"]

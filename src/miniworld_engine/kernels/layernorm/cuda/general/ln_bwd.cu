@@ -123,24 +123,32 @@ __global__ void __launch_bounds__(cta_threads<TPR>()) ln_bwd_kernel(
   }
 }
 
-// out[col] = sum over the P partial rows, 32 columns x 8 row slices per CTA, fixed order. blockIdx.y picks the gradient: 0 dw (part,
-// out), 1 db (part + pstride N, out2) -- one launch for both.
-__global__ void __launch_bounds__(256) ln_col_reduce(const float* __restrict__ part, int P, int pstride, int N, void* __restrict__ out,
-                                                     void* __restrict__ out2, int obf) {
-  __shared__ float sm[8][33];
+// out[col] = sum over the P partial rows, fixed order: 32 columns x 32 row slices per CTA (1024 threads, four loads in flight a
+// thread), the slices summed in order. blockIdx.y picks the gradient: 0 dw (part, out), 1 db (part + pstride N, out2) -- one launch
+// for both. (Eight slices and one load at a time made this pass ~20 us at 1184 partial rows: latency-bound, longer than the kernel.)
+__global__ void __launch_bounds__(1024) ln_col_reduce(const float* __restrict__ part, int P, int pstride, int N, void* __restrict__ out,
+                                                      void* __restrict__ out2, int obf) {
+  __shared__ float sm[32][33];
   const float* src = part + (blockIdx.y ? int64_t(pstride) * N : 0);
   void* dst = blockIdx.y ? out2 : out;
   const int tx = threadIdx.x & 31, sl = threadIdx.x >> 5;
   const int col = blockIdx.x * 32 + tx;
   float s = 0.f;
-  if (col < N)
-    for (int p = sl; p < P; p += 8) s += src[int64_t(p) * N + col];
+  if (col < N) {
+    int p = sl;
+    for (; p + 96 < P; p += 128) {
+      const float a = src[int64_t(p) * N + col], b = src[int64_t(p + 32) * N + col];
+      const float c = src[int64_t(p + 64) * N + col], d = src[int64_t(p + 96) * N + col];
+      s += a; s += b; s += c; s += d;
+    }
+    for (; p < P; p += 32) s += src[int64_t(p) * N + col];
+  }
   sm[sl][tx] = s;
   __syncthreads();
   if (sl == 0 && col < N) {
     float t = 0.f;
 #pragma unroll
-    for (int i = 0; i < 8; ++i) t += sm[i][tx];
+    for (int i = 0; i < 32; ++i) t += sm[i][tx];
     if (obf) reinterpret_cast<__nv_bfloat16*>(dst)[col] = __float2bfloat16(t);
     else reinterpret_cast<float*>(dst)[col] = t;
   }
@@ -248,14 +256,14 @@ std::vector<torch::Tensor> ln_bwd(torch::Tensor dy, torch::Tensor x, torch::Tens
   TORCH_CHECK(grid > 0, "general LayerNorm backward: no build for tpr=", tpr, " chunks=", chunks, " vec=", vec, " rpt=", rpt);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   if (wgrad) {
-    mwln::ln_col_reduce<<<dim3((N + 31) / 32, rms ? 1 : 2), 256, 0, s>>>(dwp, grid, int(grid_cap), N, dw.data_ptr(),
+    mwln::ln_col_reduce<<<dim3((N + 31) / 32, rms ? 1 : 2), 1024, 0, s>>>(dwp, grid, int(grid_cap), N, dw.data_ptr(),
                                                                           rms ? nullptr : db.data_ptr(), int(gbf16));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return {dx, dw, db};
 }
 
-// the bulk backward's column pass: dw (and db, laid out P rows after it) in one launch
+// the rows backward's column pass (ln_rows.cu): dw (and db, laid out P rows after it) in one launch
 void ln_col_reduce_launch(const float* part, int P, int N, void* out, void* out2, int obf, cudaStream_t s) {
-  mwln::ln_col_reduce<<<dim3((N + 31) / 32, out2 ? 2 : 1), 256, 0, s>>>(part, P, P, N, out, out2, obf);
+  mwln::ln_col_reduce<<<dim3((N + 31) / 32, out2 ? 2 : 1), 1024, 0, s>>>(part, P, P, N, out, out2, obf);
 }

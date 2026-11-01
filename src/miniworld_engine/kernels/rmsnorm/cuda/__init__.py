@@ -9,7 +9,7 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels.layernorm.cuda.general import _affine, _ext, _grad_bf16, bwd_launch, launch_config, supported
+from miniworld_engine.kernels.layernorm.cuda.general import _affine, _ext, _grad_bf16, launch_config, rows_launch, supported
 
 
 def _fwd_fake(x, w, eps, save):
@@ -20,6 +20,10 @@ def _fwd_fake(x, w, eps, save):
 @opaque(fake=_fwd_fake, name="rmsnorm_general_fwd")
 def _fwd(x: torch.Tensor, w: torch.Tensor, eps: float, save: bool) -> tuple[torch.Tensor, torch.Tensor]:
     """RMSNorm forward of contiguous x [M, N]; w fp32 or bf16 [N] or empty. (y, rstd)."""
+    rl = rows_launch(x, False)
+    if rl is not None:
+        y, _, rstd = _ext().rows_fwd(x, w, x.new_empty((0,), dtype=torch.float32), float(eps), bool(save), True, *rl)
+        return y, rstd
     tpr, ch, vec, rpt, waves = launch_config(x.shape[1], x.element_size(), x.shape[0], x.device)
     y, _, rstd = _ext().fwd(x, w, x.new_empty((0,), dtype=torch.float32), float(eps), bool(save), True, tpr, ch, vec, rpt, waves)
     return y, rstd
@@ -35,9 +39,9 @@ def _bwd_fake(dy, x, w, rstd, wgrad):
 def _bwd(dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, rstd: torch.Tensor, wgrad: bool) -> tuple[torch.Tensor, torch.Tensor]:
     """RMSNorm backward from the saved rstd. (dx, dw); dw only when wgrad."""
     empty = x.new_empty((0,), dtype=torch.float32)
-    bulk = bwd_launch(x) if dy.data_ptr() % 16 == 0 else None
-    if bulk is not None:
-        dx, dw, _ = _ext().bwd_bulk(dy, x, w, empty, rstd, bool(wgrad), True, *bulk, _grad_bf16(w))
+    rl = rows_launch(x, True) if dy.data_ptr() % 16 == 0 else None
+    if rl is not None:
+        dx, dw, _ = _ext().rows_bwd(dy, x, w, empty, rstd, bool(wgrad), True, *rl, _grad_bf16(w))
         return dx, dw
     tpr, ch, vec, rpt, _ = launch_config(x.shape[1], x.element_size(), x.shape[0], x.device)
     dx, dw, _ = _ext().bwd(dy, x, w, empty, rstd, bool(wgrad), True, tpr, ch, vec, rpt, 0, _grad_bf16(w))
