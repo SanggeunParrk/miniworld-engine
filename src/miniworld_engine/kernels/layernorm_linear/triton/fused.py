@@ -288,6 +288,54 @@ def _lnl_triton_launch(x, ln_weight, ln_bias, weight, bias, eps, *, save_stats):
     return y.reshape(*x.shape[:-1], N), mean, rstd
 
 
+@triton.jit
+def _lnl_fwd_t_persistent(x_ptr, w_ptr, g_ptr, b_ptr, y_ptr, M, N, eps, K: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr,
+                          NPROG: tl.constexpr, STAGES: tl.constexpr):
+    """``(LayerNorm(x) @ W^T)^T`` [N, M] for a whole-row K and a few outputs (N <= BN): persistent programs walk the row blocks in a
+    software-pipelined loop (the next tile's loads in flight while this one is normalised and projected), W held once per program. The
+    same arithmetic as ``_lnl_fwd_kernel``'s covering schedule (fp32 statistics, LN rounded to the input dtype, fp32 accumulation)."""
+    pid = tl.program_id(0)
+    k = tl.arange(0, K)
+    cols = tl.arange(0, BN)
+    cm = cols < N
+    w = tl.load(w_ptr + cols[None, :] * K + k[:, None], mask=cm[None, :], other=0.0)   # [K, BN]
+    g = tl.load(g_ptr + k).to(tl.float32)
+    bb = tl.load(b_ptr + k).to(tl.float32)
+    for blk in tl.range(pid, tl.cdiv(M, BM), NPROG, num_stages=STAGES):
+        rows = blk.to(tl.int64) * BM + tl.arange(0, BM)
+        rm = rows < M
+        x = tl.load(x_ptr + rows[:, None] * K + k[None, :], mask=rm[:, None], other=0.0).to(tl.float32)
+        mean = tl.sum(x, axis=1) / K
+        xc = x - mean[:, None]
+        rstd = tl.rsqrt(tl.sum(xc * xc, axis=1) / K + eps)
+        xn = (xc * rstd[:, None] * g[None, :] + bb[None, :]).to(x_ptr.dtype.element_ty)
+        acc = tl.dot(xn, w, out_dtype=tl.float32, input_precision="ieee")
+        tl.store(y_ptr + cols[None, :] * M + rows[:, None], acc.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
+
+
+#: B200 (sm_100) launch of ``_lnl_fwd_t_persistent`` (rows per block, warps, pipeline stages, programs per SM), swept on GPU 6 at the
+#: AttentionPairBias pair-bias shapes (N = 8 / 16 heads, K = 128 / 256, L384 / L768: 2026-11-01, GPU shared, +-5 %): 15-18 % under the
+#: tuned ``_lnl_fwd_kernel`` (K 256 N 8 L768 129 -> 106 us, L384 41 -> 35; K 128 N 8 L768 68 -> 59); the autotuned covering configs of
+#: the grid cap at the same 2.3 TB/s (the whole-tile load is not pipelined). Other cards keep the autotuned kernel.
+_T_PERSISTENT_B200 = (32, 4, 3, 4)
+
+
+def _fwd_t_persistent(x2, ln_weight, ln_bias, w, eps):
+    M, K = x2.shape
+    N = w.shape[0]
+    if not (x2.is_cuda and torch.cuda.get_device_capability(x2.device) == (10, 0) and K in (128, 256) and N <= 16
+            and x2.dtype == torch.bfloat16 and M > 0):
+        return None
+    from miniworld_engine.kernels._device import num_sms
+
+    bm, nw, st, per = _T_PERSISTENT_B200
+    nprog = max(1, min(triton.cdiv(M, bm), num_sms(x2.device) * per))
+    y = torch.empty(N, M, device=x2.device, dtype=x2.dtype)
+    _lnl_fwd_t_persistent[(nprog,)](x2, w, ln_weight.contiguous(), ln_bias.contiguous(), y, M, N, eps, K=K, BM=bm, BN=16, NPROG=nprog,
+                                     STAGES=st, num_warps=nw)
+    return y
+
+
 def _layernorm_linear_triton_fwd_t_fake(x, ln_weight, ln_bias, weight, eps=1e-5):
     """(N, rows): ``weight``'s row count by ``x``'s rows."""
     return x.new_empty((weight.shape[0], x.numel() // x.shape[-1]))
@@ -315,6 +363,9 @@ def layernorm_linear_triton_fwd_t(
         return layernorm_linear_triton_fwd(x2, ln_weight, ln_bias, weight, None, eps).t().contiguous()
     x2 = x2.contiguous()
     w = weight.to(x.dtype).contiguous()
+    y = _fwd_t_persistent(x2, ln_weight, ln_bias, w, eps)
+    if y is not None:
+        return y
     y = torch.empty(N, M, device=x.device, dtype=x.dtype)
     dummy = torch.empty(0, device=x.device, dtype=torch.float32)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731  (1-D: N looped in-kernel)

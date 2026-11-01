@@ -443,7 +443,11 @@ def test_a_launch_site_does_not_pin_what_the_tuner_owns() -> None:
     # `_cast_kernel` (kernels/_cast.py) is a one-pass dtype copy of a few weights; `_ln_bias_fwd_kernel` / `_ln_bias_bwd_kernel`
     # (kernels/bias_only_attention/triton/pair_bias.py) are memory-bound row passes whose single axis (rows per program) was swept once on an H100
     # (docs/records/portable_bodit_ct_training_20261026.md); none has a registry row, ladder or driver.
-    NOT_TUNED = {"_zero_bias_grad_kernel", "_pack", "_fold", "_cast_kernel"}
+    # `_lnl_fwd_t_persistent` (kernels/layernorm_linear/triton/fused.py) is the B200-only head-major pair-bias producer of the APB portable
+    # path (N <= 16 heads, K 128 / 256): one config swept on a B200 (rows x warps x stages x programs per SM); no registry row or driver
+    # (the APB pair-bias calls are not a registry shape of layernorm_linear_fwd_triton, whose grid is pinned by the 2026-09-16 record).
+    NOT_TUNED = {"_zero_bias_grad_kernel", "_pack", "_fold", "_cast_kernel",
+                 "_lnl_fwd_t_persistent"}
     pinned: dict[str, str] = {}
     for path in sorted(SRC.rglob("*.py")):
         try:
