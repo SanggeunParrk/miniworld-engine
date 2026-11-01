@@ -1381,7 +1381,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         ]
     T.cond_bwd(dchat, dcg, c2, cst, dc)
     dWu = torch.empty_like(dWn)
-    dw12 = torch.zeros(2, cond.shape[-1], device=dev)
+    dw12 = torch.empty(2, cond.shape[-1], device=dev)   # written whole by unfold_lnw
     Ws1, Wb1, Ws2, Wb2 = (Wraw[i * D : (i + 1) * D] for i in range(4))
     T.unfold_lnw(dWn, Ws1, Wb1, Ws2, Wb2, w1, w2, dWu, dw12)
     dpair = torch.empty(R, dpw, device=dev, dtype=pdtype)
@@ -1418,6 +1418,10 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         dph = mm32(dbv.t(), Wf.to(at))  # [R, dp]
         T.pair_ln_bwd(dph, p2, pst, dpair)
     dWs1, dWb1, dWs2, dWb2 = dWu.split(D)
+    if psb:
+        dlnp, dWbias = (dWf * Wb).sum(0), dWf * wp
+    else:   # one launch
+        dlnp, dWbias = T.pair_wgrad(dWf.contiguous(), Wb.contiguous(), wp.contiguous())
     grads = {
         "attention.ada_ln_in.ln_cond.weight": dw12[0],
         "attention.ada_ln_in.to_scale.weight": dWs1,
@@ -1433,8 +1437,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         "attention.norm_query.weight": dwqk[:DH],
         "attention.norm_key.weight": dwqk[DH:],
         "attention.to_out.weight": dWo,
-        "attention.ln_pair.weight": (dWf * Wb).sum(0),
-        "attention.to_bias.weight": dWf * wp,
+        "attention.ln_pair.weight": dlnp,
+        "attention.to_bias.weight": dWbias,
         "transition.ada_ln_in.ln_cond.weight": dw12[1],
         "transition.ada_ln_in.to_scale.weight": dWs2,
         "transition.ada_ln_in.to_scale.bias": pb[1],

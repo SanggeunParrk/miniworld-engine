@@ -108,6 +108,19 @@ __global__ void __launch_bounds__(1024) colsum_k(const float* __restrict__ S, lo
   if (ty == 0 && c < W) V4<float>::store(O + c, red[0][tx]);
 }
 
+__global__ void pair_wgrad_k(const float* __restrict__ DWF, const float* __restrict__ WB, const float* __restrict__ WP, float* __restrict__ DLNW,
+                             float* __restrict__ DWB, int H, int dp) {
+  const int c = threadIdx.x;
+  const float wp = WP[c];
+  float acc = 0.f;
+  for (int h = 0; h < H; ++h) {
+    const float d = DWF[h * dp + c];
+    acc = fmaf(d, WB[h * dp + c], acc);
+    DWB[h * dp + c] = d * wp;
+  }
+  DLNW[c] = acc;
+}
+
 // ------------------------------------------------------------------------------------------------------------- forward
 template <typename CT, typename AT>
 __global__ void __launch_bounds__(NTC) cond_prep_k(const CT* __restrict__ C, AT* __restrict__ CHAT, AT* __restrict__ CBF,
@@ -430,12 +443,13 @@ __global__ void __launch_bounds__(NTC) cond_bwd_k(const AT* __restrict__ DCHAT, 
 }
 
 // The cond-LN weights are folded into the conditioning GEMM (Wn = W diag(w), four [768, 384] blocks). A block takes ULR rows of one
-// 768-row group: dW[i] = dWn[i] w, and dw += dWn[i] W[i] summed over the group's rows (w1 for groups 0, 1; w2 for 2, 3). The rows'
-// loads are issued together (unrolled): 192 blocks of 16 rows one after another ran latency-bound, 12 us at every size.
+// 768-row group: dW[i] = dWn[i] w, and dw += dWn[i] W[i] summed over the group's rows (w1 for groups 0, 1; w2 for 2, 3). A block's dw
+// leaves as one partial row, PART [blocks / 2, 2 DC] (column half = w1 / w2), which colsum_k then sums: the atomics of every block onto
+// the same 2 DC addresses serialised in L2 (12-14 us at any size, A2 L256 included).
 constexpr int ULR = 8;
 __global__ void __launch_bounds__(NTC) unfold_lnw_k(const float* __restrict__ DWN, const float* __restrict__ WS1,
     const float* __restrict__ WB1, const float* __restrict__ WS2, const float* __restrict__ WB2, const float* __restrict__ W1,
-    const float* __restrict__ W2, float* __restrict__ DW, float* __restrict__ DW12) {
+    const float* __restrict__ W2, float* __restrict__ DW, float* __restrict__ PART) {
   const int col = threadIdx.x * 4, i0 = blockIdx.x * ULR, grp = i0 / D;
   const float* Wg = grp == 0 ? WS1 : grp == 1 ? WB1 : grp == 2 ? WS2 : WB2;
   const float4 lw = V4<float>::load((grp < 2 ? W1 : W2) + col);
@@ -446,8 +460,7 @@ __global__ void __launch_bounds__(NTC) unfold_lnw_k(const float* __restrict__ DW
     V4<float>::store(DW + (long)i * DC + col, mul4(d, lw));
     acc = add4(acc, mul4(d, V4<float>::load(Wg + (long)(i % D) * DC + col)));
   }
-  atomicAdd(DW12 + (grp / 2) * DC + col, acc.x); atomicAdd(DW12 + (grp / 2) * DC + col + 1, acc.y);
-  atomicAdd(DW12 + (grp / 2) * DC + col + 2, acc.z); atomicAdd(DW12 + (grp / 2) * DC + col + 3, acc.w);
+  V4<float>::store(PART + (long)(blockIdx.x % (gridDim.x / 2)) * 2 * DC + (grp / 2) * DC + col, acc);   // blocks [0, nb/2): groups 0, 1
 }
 
 template <typename ZT>
@@ -1038,12 +1051,31 @@ at::Tensor colsum(at::Tensor src) {
 }
 
 void unfold_lnw(at::Tensor dwn, at::Tensor ws1, at::Tensor wb1, at::Tensor ws2, at::Tensor wb2, at::Tensor w1, at::Tensor w2,
-                at::Tensor dw, at::Tensor dw12) {
+                at::Tensor dw, at::Tensor dw12) {   // dw12 [2, DC]: written (not accumulated)
   TORCH_CHECK(dwn.size(0) == 4 * D && dwn.size(1) == DC, "unfold_lnw: dWn [4 D, DC]");
+  TORCH_CHECK(dw12.is_contiguous() && dw12.numel() == 2 * DC && dw12.scalar_type() == at::kFloat, "unfold_lnw: dw12 [2, DC] fp32");
   const at::cuda::CUDAGuard g(dwn.device());
-  unfold_lnw_k<<<4 * D / ULR, NTC, 0, S()>>>(CP<float>(dwn), CP<float>(ws1), CP<float>(wb1), CP<float>(ws2), CP<float>(wb2), CP<float>(w1),
-                                            CP<float>(w2), P<float>(dw), P<float>(dw12));
+  constexpr int nb = 4 * D / ULR;
+  auto part = at::empty({nb / 2, 2 * DC}, dwn.options());
+  unfold_lnw_k<<<nb, NTC, 0, S()>>>(CP<float>(dwn), CP<float>(ws1), CP<float>(wb1), CP<float>(ws2), CP<float>(wb2), CP<float>(w1),
+                                    CP<float>(w2), P<float>(dw), P<float>(part));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  colsum_k<<<(unsigned)((2 * DC + CSC - 1) / CSC), 1024, 0, S()>>>(CP<float>(part), 2 * DC, nb / 2, 2 * DC, P<float>(dw12));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// The pair projection's weight gradients from dWf [H, DPW] (Wf = Wb diag(wp)): d ln_pair.weight = sum_h dWf Wb, d to_bias.weight = dWf wp
+// (one launch: three elementwise / reduce kernels were 9 us at A2 L256)
+std::vector<at::Tensor> pair_wgrad(at::Tensor dwf, at::Tensor wb, at::Tensor wp) {
+  const int64_t H = dwf.size(0), dp = dwf.size(1);
+  TORCH_CHECK(dwf.is_contiguous() && wb.is_contiguous() && wp.is_contiguous() && wb.sizes() == dwf.sizes() && wp.numel() == dp &&
+              dwf.scalar_type() == at::kFloat && wb.scalar_type() == at::kFloat && wp.scalar_type() == at::kFloat && dp <= 1024,
+              "pair_wgrad: fp32 dWf / Wb [H, d_pair], wp [d_pair]");
+  const at::cuda::CUDAGuard g(dwf.device());
+  auto dlnw = at::empty({dp}, dwf.options()), dwb = at::empty_like(dwf);
+  pair_wgrad_k<<<1, (unsigned)dp, 0, S()>>>(CP<float>(dwf), CP<float>(wb), CP<float>(wp), P<float>(dlnw), P<float>(dwb), (int)H, (int)dp);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {dlnw, dwb};
 }
 
 void pair_ln_bwd(at::Tensor dxh, at::Tensor z, at::Tensor pst, at::Tensor dz) {
@@ -1437,5 +1469,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("unfold_lnw", &unfold_lnw);
   m.def("sample_sum", &sample_sum);
   m.def("colsum", &colsum);
+  m.def("pair_wgrad", &pair_wgrad);
   m.def("pair_ln_bwd", &pair_ln_bwd);
 }
