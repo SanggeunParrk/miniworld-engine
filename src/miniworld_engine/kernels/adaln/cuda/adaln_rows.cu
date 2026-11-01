@@ -172,23 +172,25 @@ __device__ __forceinline__ void stats_rt(const float (&v)[32], int n, float eps,
     if (128 * (i / 4) < n) q += (v[i] - mean) * (v[i] - mean);
   rstd = rsqrtf(wsum(q) / (float)n + eps);
 }
-template <typename T>
+// EARLY (a few thousand rows at most, one wave of blocks): the dependent GEMM may launch at the start -- its prologue, tensor-memory allocation
+// and the weight loads of its first ring stages (which do not read this kernel's output) then run under this pass; its griddepcontrol.wait
+// still waits for this whole grid to complete and flush -- and the cond and x rows are loaded together (one memory round trip, not two).
+// Past that the pass is many waves of blocks and throughput-bound: the joint loads' 64 live row registers cost occupancy (bf16 d768 c384
+// at 3840 / 5120 rows: 4.8 / 6.3 -> 6.1 / 8.0 us), and the early GEMM CTAs cost the pass more than they saved (ladder 22.3 -> 24.4 us at
+// 3840): the original order, the trigger at the end of each block.
+template <typename T, bool EARLY>
 __global__ void __launch_bounds__(32 * WPB) ln_cond_xstats_k(const T* __restrict__ C, const float* __restrict__ W, const T* __restrict__ X,
                                                              T* __restrict__ CN, float2* __restrict__ STX, int NC, int NX, long R, float eps_c,
-                                                             float eps_x, bool rna, bool early) {
-  // early: the dependent GEMM may launch now -- its prologue, tensor-memory allocation and the weight loads of its first ring stages (which
-  // do not read this kernel's output) then run under this pass; its griddepcontrol.wait still waits for this whole grid to complete and
-  // flush. Only while the GEMM's CTAs and this pass fit the SMs together (a few thousand rows): at 3840 rows (bf16 d768) the early GEMM
-  // CTAs cost the pass more than they saved (ladder 22.3 -> 24.4 us); there the trigger stays at the end of each block.
+                                                             float eps_x, bool rna) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-  if (early) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  if (EARLY) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 #endif
   const int lane = threadIdx.x & 31;
   const long row = (long)blockIdx.x * WPB + (threadIdx.x >> 5);
   if (row < R) {
     float v[32], xv[32], mean, rstd;
     ld_row_rt(C + row * NC, NC, lane, v);
-    ld_row_rt(X + row * NX, NX, lane, xv);   // both rows in flight together: one memory round trip, not two
+    if constexpr (EARLY) ld_row_rt(X + row * NX, NX, lane, xv);
     stats_rt(v, NC, eps_c, mean, rstd);
 #pragma unroll
     for (int k = 0; k < 8; ++k) {
@@ -200,11 +202,16 @@ __global__ void __launch_bounds__(32 * WPB) ln_cond_xstats_k(const T* __restrict
         st4(CN + row * NC + 4 * (lane + 32 * k), o);
       }
     }
-    stats_rt(xv, NX, eps_x, mean, rstd);
+    if constexpr (EARLY) {
+      stats_rt(xv, NX, eps_x, mean, rstd);
+    } else {
+      ld_row_rt(X + row * NX, NX, lane, v);
+      stats_rt(v, NX, eps_x, mean, rstd);
+    }
     if (lane == 0) STX[row] = make_float2(rstd, mean * rstd);
   }
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-  if (!early) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  if (!EARLY) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 #endif
 }
 
@@ -600,12 +607,15 @@ std::vector<at::Tensor> ln_cond_xstats(at::Tensor cond, at::Tensor w, at::Tensor
   const at::cuda::CUDAGuard gd(cond.device());
   auto cn = at::empty_like(cond);
   auto st = at::empty({R, 2}, cond.options().dtype(at::kFloat));
-  if (cond.scalar_type() == at::kBFloat16)
-    ln_cond_xstats_k<bf><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<bf>(cond), w.data_ptr<float>(), P<bf>(x), PM<bf>(cn), reinterpret_cast<float2*>(st.data_ptr()),
-                                                             (int)NC, (int)NX, R, (float)eps_c, (float)eps_x, false, early_pdl);
-  else
-    ln_cond_xstats_k<float><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<float>(cond), w.data_ptr<float>(), P<float>(x), PM<float>(cn),
-                                                                reinterpret_cast<float2*>(st.data_ptr()), (int)NC, (int)NX, R, (float)eps_c, (float)eps_x, rna, early_pdl);
+#define XS(TT, RNA, E)                                                                                                                   \
+  ln_cond_xstats_k<TT, E><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<TT>(cond), w.data_ptr<float>(), P<TT>(x), PM<TT>(cn),                        \
+                                                              reinterpret_cast<float2*>(st.data_ptr()), (int)NC, (int)NX, R, (float)eps_c, (float)eps_x, RNA)
+  if (cond.scalar_type() == at::kBFloat16) {
+    if (early_pdl) XS(bf, false, true); else XS(bf, false, false);
+  } else {
+    if (early_pdl) XS(float, rna, true); else XS(float, rna, false);
+  }
+#undef XS
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {cn, st};
 }
