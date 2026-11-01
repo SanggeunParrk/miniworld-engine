@@ -341,7 +341,8 @@ def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: to
         t = k.ext.tmap
         k.ext.launch_kernel(
             f"generic_f32_fused{d}", "tg_fused_f32_sm100", max(1, min(k.nsm, -(-m // 128))), 448, 1,
-            [t(wa, d, hid, 32, FUSED_F32_BN), t(wb, d, hid, 32, FUSED_F32_BN), t(ws, hid, d, 32, d), t(out, d, m, 32, 32), x, gamma, beta,
+            [t(x, d, m, 32, 128), t(wa, d, hid, 32, FUSED_F32_BN), t(wb, d, hid, 32, FUSED_F32_BN), t(ws, hid, d, 32, d), t(out, d, m, 32, 32), x,
+             gamma, beta,
              float(eps), m, hid])
         return out, xn, mean, rstd, x.new_empty((1, 1))
     k.rows(f"tg_ln_fwd_{sfx}", max(1, min(-(-m // (8 * rpw)), k.nsm * 8)), (x, gamma, beta, xn, mean, rstd, m, d, float(eps), int(save)))

@@ -30,7 +30,9 @@ constexpr int WST = KBD * WKB;                   // a ring stage: [Wa_c ; Wb_c] 
 constexpr int WS_BYTES = D * 128;                // the squeeze chunk Ws[:, c] as [D][BN = 32]: one K-block
 constexpr int H_BYTES = 128 * 128;               // h_c [128][32] fp32: one K-block
 constexpr int O_W = 0, O_WS = O_W + NSW * WST, O_H = O_WS + NSS * WS_BYTES;
-constexpr int O_BAR = O_H + NH * H_BYTES;
+constexpr int O_XS = O_H + NH * H_BYTES;          // the x tile [128][D] fp32, TMA-loaded (128-B swizzled) for the LayerNorm warps
+constexpr int XS_BYTES = KBD * 128 * 128;
+constexpr int O_BAR = O_XS + XS_BYTES;
 constexpr int SMEM_BYTES = O_BAR + 1024;
 static_assert(SMEM_BYTES <= 232448, "shared memory");
 static_assert(D == 64 || D == 128, "width");
@@ -55,14 +57,14 @@ DEVI float tf32r(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r)
 
 struct Bars {
   uint64_t yfull, yempty;
-  uint64_t xfull[2], xempty[2];
+  uint64_t xfull[2], xempty[2], xsfull;
   uint64_t wfull[NSW], wempty[NSW], sfull[NSS], sempty[NSS];
   uint64_t abfull[2], abempty[2], hfull[NH], hempty[NH];
   uint32_t tmem;
 };
 
 extern "C" __global__ void __launch_bounds__(64 + 32 * (NEPI + NLN), 1)
-tg_fused_f32_sm100(const __grid_constant__ CUtensorMap mWa, const __grid_constant__ CUtensorMap mWb, const __grid_constant__ CUtensorMap mWs,
+tg_fused_f32_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant__ CUtensorMap mWa, const __grid_constant__ CUtensorMap mWb, const __grid_constant__ CUtensorMap mWs,
                    const __grid_constant__ CUtensorMap mY, const float* __restrict__ X, const float* __restrict__ G, const float* __restrict__ Bt,
                    float eps, int M, int HID) {
   extern __shared__ __align__(1024) uint8_t sm[];
@@ -72,14 +74,14 @@ tg_fused_f32_sm100(const __grid_constant__ CUtensorMap mWa, const __grid_constan
   const int tiles = (M + 127) / 128, NC = HID / BN;
 
   if (threadIdx.x == 0) {
-    mbar_init(&B.yfull, 1); mbar_init(&B.yempty, NEPI);
+    mbar_init(&B.yfull, 1); mbar_init(&B.yempty, NEPI); mbar_init(&B.xsfull, 1);
     for (int s = 0; s < 2; ++s) { mbar_init(&B.xfull[s], NLN); mbar_init(&B.xempty[s], 1); }
     for (int s = 0; s < NSW; ++s) { mbar_init(&B.wfull[s], 1); mbar_init(&B.wempty[s], 1); }
     for (int s = 0; s < NSS; ++s) { mbar_init(&B.sfull[s], 1); mbar_init(&B.sempty[s], 1); }
     for (int s = 0; s < 2; ++s) { mbar_init(&B.abfull[s], 1); mbar_init(&B.abempty[s], NEPI); }
     for (int s = 0; s < NH; ++s) { mbar_init(&B.hfull[s], NEPI); mbar_init(&B.hempty[s], 1); }
     fence_barrier_init();
-    prefetch_map(&mWa); prefetch_map(&mWb); prefetch_map(&mWs); prefetch_map(&mY);
+    prefetch_map(&mX); prefetch_map(&mWa); prefetch_map(&mWb); prefetch_map(&mWs); prefetch_map(&mY);
   }
   if (warp == 1) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
   tc_fence_before();
@@ -153,34 +155,45 @@ tg_fused_f32_sm100(const __grid_constant__ CUtensorMap mWa, const __grid_constan
     }
   } else if (warp >= 2 + NEPI) {
     // ------------------------------------------------------------------------------------------------ LayerNorm (warps 10-13)
+    // the tile's x arrives by TMA into XS (one bulk load per 32-column K-block, issued for the next tile as soon as this one has been
+    // read, so its latency hides behind the wait for the next xn slot); each thread normalises its row (its TMEM lane) from shared memory
+    // -- per-thread row loads from global memory had put the LayerNorm on the critical path of a few-tile / n = 2 call
     const uint32_t lrow = (uint32_t)((warp & 3) * 32) << 16;
-    const int rr = (warp & 3) * 32 + lane;
+    const uint32_t rr = (uint32_t)((warp & 3) * 32 + lane);
+    const bool issuer = warp == 2 + NEPI && lane == 0;
+    const uint32_t xs = su + O_XS;
+    if (issuer && (int)blockIdx.x < tiles) {
+      mbar_expect_tx(&B.xsfull, XS_BYTES);
+      for (int k = 0; k < KBD; ++k) tma_load_2d(xs + k * 16384, &mX, &B.xsfull, k * 32, blockIdx.x * 128);
+    }
     int tc = 0;
     for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++tc) {
       const int xb = tc & 1;
-      mbar_wait(&B.xempty[xb], ((tc >> 1) & 1) ^ 1);
-      tc_fence_after();
-      const long row = (long)t * 128 + rr;
-      const bool ok = row < M;
-      const float4* xr = reinterpret_cast<const float4*>(X + (ok ? row : 0) * D);
+      mbar_wait(&B.xsfull, tc & 1);
+      auto ld4 = [&](int i) {                         // columns 4 i .. 4 i + 3 of the row
+        const uint4 w = lds128(xs + (uint32_t)(i >> 3) * 16384u + sw128(rr, (uint32_t)(i & 7)));
+        return make_float4(__uint_as_float(w.x), __uint_as_float(w.y), __uint_as_float(w.z), __uint_as_float(w.w));
+      };
       float s = 0.f;
 #pragma unroll 8
-      for (int i = 0; i < D / 4; ++i) { const float4 v = __ldg(xr + i); s += (v.x + v.y) + (v.z + v.w); }
+      for (int i = 0; i < D / 4; ++i) { const float4 v = ld4(i); s += (v.x + v.y) + (v.z + v.w); }
       const float mean = s / (float)D;
       float q = 0.f;
 #pragma unroll 8
       for (int i = 0; i < D / 4; ++i) {
-        const float4 v = __ldg(xr + i);
+        const float4 v = ld4(i);
         const float a = v.x - mean, b = v.y - mean, c = v.z - mean, e = v.w - mean;
         q += (a * a + b * b) + (c * c + e * e);
       }
       const float rstd = rsqrtf(q / (float)D + eps);
+      mbar_wait(&B.xempty[xb], ((tc >> 1) & 1) ^ 1);
+      tc_fence_after();
 #pragma unroll
       for (int u = 0; u < D / 16; ++u) {
         uint32_t o[16];
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
-          const float4 v = __ldg(xr + 4 * u + j);
+          const float4 v = ld4(4 * u + j);
           const float4 gg = __ldg(reinterpret_cast<const float4*>(G) + 4 * u + j), bb = __ldg(reinterpret_cast<const float4*>(Bt) + 4 * u + j);
           o[4 * j] = __float_as_uint(tf32r((v.x - mean) * rstd * gg.x + bb.x));
           o[4 * j + 1] = __float_as_uint(tf32r((v.y - mean) * rstd * gg.y + bb.y));
@@ -188,6 +201,13 @@ tg_fused_f32_sm100(const __grid_constant__ CUtensorMap mWa, const __grid_constan
           o[4 * j + 3] = __float_as_uint(tf32r((v.w - mean) * rstd * gg.w + bb.w));
         }
         tmem_st16(tmem + lrow + T_X + xb * 128 + 16 * u, o);
+      }
+      // XS has been read by all four warps: the next tile's x may land
+      named_bar_sync(2, 32 * NLN);
+      if (issuer && t + (int)gridDim.x < tiles) {
+        fence_proxy_async();
+        mbar_expect_tx(&B.xsfull, XS_BYTES);
+        for (int k = 0; k < KBD; ++k) tma_load_2d(xs + k * 16384, &mX, &B.xsfull, k * 32, (t + gridDim.x) * 128);
       }
       tmem_wait_st();
       tc_fence_before();
