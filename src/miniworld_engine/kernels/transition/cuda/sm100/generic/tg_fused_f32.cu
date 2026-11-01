@@ -188,8 +188,8 @@ tg_fused_f32_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
       const float rstd = rsqrtf(q / (float)D + eps);
       mbar_wait(&B.xempty[xb], ((tc >> 1) & 1) ^ 1);
       tc_fence_after();
-#pragma unroll
-      for (int u = 0; u < D / 16; ++u) {
+#pragma unroll 2
+      for (int u = 0; u < D / 16; ++u) {                 // unrolled only twice: fully unrolled, the gamma / beta loads were hoisted and spilled
         uint32_t o[16];
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
@@ -258,23 +258,24 @@ tg_fused_f32_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
 #pragma unroll
       for (int u = 0; u < D / 64; ++u) {
         const int col = half * (D / 2) + u * 32;
-        uint32_t acc[32];
-        tmem_ld32(tmem + lrow + T_Y + col, acc);
-        float xv[32];
+        if (u > 0) { if (lane == 0) tma_store_wait_read0(); __syncwarp(); }
         const float* xp = X + row * D + col;
 #pragma unroll
-        for (int q = 0; q < 8; ++q) {
-          const uint4 w = ok ? ldg128(xp + 4 * q) : make_uint4(0, 0, 0, 0);
-          xv[4 * q] = __uint_as_float(w.x); xv[4 * q + 1] = __uint_as_float(w.y); xv[4 * q + 2] = __uint_as_float(w.z); xv[4 * q + 3] = __uint_as_float(w.w);
-        }
-        tmem_wait_ld();
-        if (u > 0) { if (lane == 0) tma_store_wait_read0(); __syncwarp(); }
+        for (int hh = 0; hh < 2; ++hh) {                   // 16 columns at a time: fewer live registers (no spills at 448 threads)
+          uint32_t acc[16];
+          tmem_ld16(tmem + lrow + T_Y + col + 16 * hh, acc);
+          uint4 w[4];
 #pragma unroll
-        for (int q = 0; q < 8; ++q)
-          sts128(slab + sw128((uint32_t)lane, q), make_uint4(__float_as_uint(__uint_as_float(acc[4 * q]) + xv[4 * q]),
-                                                             __float_as_uint(__uint_as_float(acc[4 * q + 1]) + xv[4 * q + 1]),
-                                                             __float_as_uint(__uint_as_float(acc[4 * q + 2]) + xv[4 * q + 2]),
-                                                             __float_as_uint(__uint_as_float(acc[4 * q + 3]) + xv[4 * q + 3])));
+          for (int q = 0; q < 4; ++q) w[q] = ok ? ldg128(xp + 16 * hh + 4 * q) : make_uint4(0, 0, 0, 0);
+          tmem_wait_ld();
+#pragma unroll
+          for (int q = 0; q < 4; ++q)
+            sts128(slab + sw128((uint32_t)lane, 4 * hh + q),
+                   make_uint4(__float_as_uint(__uint_as_float(acc[4 * q]) + __uint_as_float(w[q].x)),
+                              __float_as_uint(__uint_as_float(acc[4 * q + 1]) + __uint_as_float(w[q].y)),
+                              __float_as_uint(__uint_as_float(acc[4 * q + 2]) + __uint_as_float(w[q].z)),
+                              __float_as_uint(__uint_as_float(acc[4 * q + 3]) + __uint_as_float(w[q].w))));
+        }
         fence_proxy_async();
         __syncwarp();
         if (lane == 0) { tma_store_2d(&mY, slab, col, t * 128 + q4 * 32); tma_store_commit(); }
