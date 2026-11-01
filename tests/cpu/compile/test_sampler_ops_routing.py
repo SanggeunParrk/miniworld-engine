@@ -43,14 +43,14 @@ def test_the_kernels_of_the_op_by_dtype():
 
 
 @pytest.mark.parametrize("dtype", ["fp32", "bf16"])
-def test_h100_runs_cuda_and_b200_the_reference_without_a_warning(monkeypatch, dtype):
-    dev = fake_card(monkeypatch, "NVIDIA H100 80GB HBM3", (9, 0))
-    assert interface._where(dev, dtype) == R.CUDA
-    dev = fake_card(monkeypatch, "NVIDIA B200", (10, 0))
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        assert interface._where(dev, dtype) == R.REFERENCE
-    assert R.restricted_reason(dev, CAPS) is not None and not interface._card_ok(dev)
+def test_h100_and_b200_run_cuda_without_a_warning(monkeypatch, dtype):
+    # B200 has the sm_100a build of the glue (6c9242e13): both cards take the hand CUDA kernels, with no record and no warning
+    for name, cap in (("NVIDIA H100 80GB HBM3", (9, 0)), ("NVIDIA B200", (10, 0))):
+        dev = fake_card(monkeypatch, name, cap)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert interface._where(dev, dtype) == R.CUDA
+        assert R.restricted_reason(dev, CAPS) is None and interface._card_ok(dev)
 
 
 @pytest.mark.parametrize("dtype", ["fp32", "bf16"])
@@ -60,7 +60,7 @@ def test_the_ab_switch_puts_every_card_on_the_portable_kernels(monkeypatch, dtyp
         with portable_switch():
             assert interface._where(dev, dtype) == R.PORTABLE
             assert interface._card_ok(dev)
-        assert R.cuda_served(dev, CAPS) == (cap == (9, 0))
+        assert R.cuda_served(dev, CAPS) == (cap in ((9, 0), (10, 0)))
 
 
 @pytest.mark.parametrize("dtype", ["fp32", "bf16"])
