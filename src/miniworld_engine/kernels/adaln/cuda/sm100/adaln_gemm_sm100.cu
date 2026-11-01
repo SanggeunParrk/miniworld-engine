@@ -42,9 +42,10 @@ constexpr int SLAB = 32 * 128;                       // one warp's staging slab:
 constexpr int NEPI = 8;                              // epilogue warps: two per TMEM lane quarter, splitting the columns
 constexpr int STG_BYTES = NEPI * STG_PAR * SLAB;
 constexpr int BUDGET = 232448 - 1024;                // dynamic shared memory minus the barriers' kilobyte
-constexpr int NST_FIT = (BUDGET - STG_BYTES) / STAGE;
+constexpr int BSM_BYTES = 2 * BN * 4;                // the gate bias of the current and the previous tile's columns (fp32)
+constexpr int NST_FIT = (BUDGET - STG_BYTES - BSM_BYTES) / STAGE;
 constexpr int NST = NST_FIT > 8 ? 8 : NST_FIT;
-constexpr int O_ST = 0, O_STG = NST * STAGE, O_BAR = O_STG + STG_BYTES;
+constexpr int O_ST = 0, O_STG = NST * STAGE, O_BSM = O_STG + STG_BYTES, O_BAR = O_BSM + BSM_BYTES;
 constexpr int SMEM_BYTES = O_BAR + 1024;
 constexpr int TCOLS = NACC * BN;                     // TMEM columns of one accumulator buffer
 static_assert(NST >= 2, "ring depth");
@@ -212,17 +213,13 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
       const int row = m0 + q4 * 32 + lane;
       const bool rok = row < M;
       const float2 st = rok ? ST[row] : make_float2(0.f, 0.f);   // (rstd, mean rstd): x_hat = x rstd - mean rstd
-      // the gate bias of this warp's columns of the tile (at most two 32-column units), loaded before the accumulator wait: in the
-      // group loop it was a dependent global load (a DRAM round trip on a cold cache) between the MMA and the first store
+      // the gate bias of the tile's columns into shared memory (double-buffered by tile parity), loaded before the accumulator wait by the
+      // eight epilogue warps, which meet at named barrier 5: in the group loop it was a dependent global load per element (a DRAM round
+      // trip on a cold cache) between the MMA and the first store. (Registers instead spilled at two tiles a CTA: bf16 c384 L1024 24 -> 28 us.)
       constexpr int NGW = UPG == 1 ? (BN / OCG + 1) / 2 : BN / OCG;   // groups this warp handles
-      float bsr[NGW][32];
-#pragma unroll
-      for (int j = 0; j < NGW; ++j) {
-        const int g = UPG == 1 ? half + 2 * j : j;
-        const int cb = n0 + g * OCG + (UPG == 1 ? 0 : half) * 32;
-#pragma unroll
-        for (int e = 0; e < 32; ++e) bsr[j][e] = (g < BN / OCG && cb + e < N) ? __ldg(BS + cb + e) : 0.f;
-      }
+      float* bsm = reinterpret_cast<float*>(sm + O_BSM) + (tc & 1) * BN;
+      for (int i = ew * 32 + lane; i < BN; i += 32 * NEPI) bsm[i] = n0 + i < N ? __ldg(BS + n0 + i) : 0.f;
+      named_bar_sync(5, 32 * NEPI);
       float xpre[32];                                        // x of the first group, also in flight under the accumulator wait
       {
         const int g0 = UPG == 1 ? half : 0;
@@ -232,7 +229,7 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
       tc_fence_after();
       const uint32_t tb = tmem + ((uint32_t)(q4 * 32) << 16) + buf * TCOLS;
 #pragma unroll
-      for (int jg = 0; jg < NGW; ++jg, ++grp) {              // this warp's groups (UPG == 1: g % 2 == half), jg indexes bsr
+      for (int jg = 0; jg < NGW; ++jg, ++grp) {              // this warp's groups (UPG == 1: g % 2 == half)
         const int g = UPG == 1 ? half + 2 * jg : jg;
         const int c0 = n0 + g * OCG;                         // first output column of the group
         if (g >= BN / OCG || c0 >= N) break;
@@ -255,7 +252,7 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
           tmem_wait_ld();
 #pragma unroll
           for (int e = 0; e < 32; ++e) {
-            const float sp = __uint_as_float(acc[1][e]) + bsr[jg][e];
+            const float sp = __uint_as_float(acc[1][e]) + bsm[col + e];
             const float y = sigm(sp) * (o[e] * st.x - st.y) + __uint_as_float(acc[0][e]);
             o[e] = (F32 && rna) ? tf32r(y) : y;
           }
