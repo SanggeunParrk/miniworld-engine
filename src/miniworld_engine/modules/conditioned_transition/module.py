@@ -175,7 +175,9 @@ class ConditionedTransition(nn.Module):
             with torch.autocast(device_type=device_type, enabled=False):
                 y = ct_sm100.ct_inference_full_f32(x2, cond2, ada, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight,
                                                    self.to_scale.weight, self.to_scale.bias, x2 if fold else None)
-        elif b200 and ct_sm100.head_supported(x2, cond2, nd, d):   # B200 bf16, few rows: the AdaLN and the gate projection in one kernel
+            y = y.reshape(*x_in.shape[:-1], self.d_hidden)
+            return y if fold or not residual else x_in + y
+        if b200 and ct_sm100.head_supported(x2, cond2, nd, d):   # B200 bf16, few rows: the AdaLN and the gate projection in one kernel
             fold = residual and x_in.dtype == compute_dtype
             with torch.autocast(device_type=device_type, enabled=False):
                 y = ct_sm100.head_inference(
