@@ -301,6 +301,16 @@ def pack_weights(wq, wk, wv, wg, wb, wo):
         wcat = wall[: 4 * n_head * D + _hp(n_head)]
         wcat._triattn_wall = wall
         return wcat, wo_p
+    return pack_weights_torch(*ws)
+
+
+def pack_weights_torch(wq, wk, wv, wg, wb, wo):
+    """``pack_weights`` by torch statements only (no extension launch): the fallback for other dtypes, and the form a derivation on
+    FakeTensors records."""
+    n_head = wb.shape[0]
+    hd = wq.shape[0] // n_head
+    C = wq.shape[1]
+    bf = torch.bfloat16
 
     def pad_rows(w):
         w = w.to(bf)

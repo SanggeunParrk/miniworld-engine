@@ -173,6 +173,11 @@ def _pack_params(wq, wk, wv, wg, wb, wo):
         and all(t.is_contiguous() for t in (wq, wk, wv, wg, wb, wo))
     ):
         return _mod().tri_pack(wq, wk, wv, wg, wb, wo)
+    return _pack_params_torch(wq, wk, wv, wg, wb, wo)
+
+
+def _pack_params_torch(wq, wk, wv, wg, wb, wo):
+    """``_pack_params`` by torch statements only (no extension launch): the fallback, and the form a derivation on FakeTensors records."""
     w4, wb16 = pack_front(wq, wk, wv, wg, wb)
     return w4, wb16, wo.to(torch.bfloat16).contiguous()
 

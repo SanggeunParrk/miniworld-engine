@@ -45,7 +45,7 @@
           "BLOCK_K_NH": 32,
           "BLOCK_M1": 64
         },
-        "ms": 0.04492799937725067,
+        "ms": 0.04479999840259552,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -55,7 +55,7 @@
           "BLOCK_K_NH": 64,
           "BLOCK_M1": 64
         },
-        "ms": 0.045184001326560974,
+        "ms": 0.045024000108242035,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -65,7 +65,7 @@
           "BLOCK_K_NH": 32,
           "BLOCK_M1": 64
         },
-        "ms": 0.0459199994802475,
+        "ms": 0.04601600021123886,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -75,7 +75,7 @@
           "BLOCK_K_NH": 32,
           "BLOCK_M1": 64
         },
-        "ms": 0.05183999985456467,
+        "ms": 0.05137600004673004,
         "num_stages": 2,
         "num_warps": 2
       },
@@ -85,7 +85,7 @@
           "BLOCK_K_NH": 64,
           "BLOCK_M1": 128
         },
-        "ms": 0.05984000116586685,
+        "ms": 0.058400001376867294,
         "num_stages": 3,
         "num_warps": 4
       }
@@ -97,7 +97,7 @@
           "BLOCK_K_NH": 32,
           "BLOCK_M1": 64
         },
-        "ms": 0.11148799955844879,
+        "ms": 0.11113599687814713,
         "num_stages": 2,
         "num_warps": 2
       },
@@ -107,19 +107,9 @@
           "BLOCK_K_NH": 16,
           "BLOCK_M1": 128
         },
-        "ms": 0.13235199451446533,
+        "ms": 0.1324159950017929,
         "num_stages": 2,
         "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_D": 32,
-          "BLOCK_K_NH": 64,
-          "BLOCK_M1": 128
-        },
-        "ms": 0.13417600095272064,
-        "num_stages": 2,
-        "num_warps": 4
       },
       {
         "kwargs": {
@@ -127,7 +117,7 @@
           "BLOCK_K_NH": 32,
           "BLOCK_M1": 128
         },
-        "ms": 0.13449600338935852,
+        "ms": 0.1340160071849823,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -137,7 +127,17 @@
           "BLOCK_K_NH": 64,
           "BLOCK_M1": 128
         },
-        "ms": 0.13449600338935852,
+        "ms": 0.13436800241470337,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_D": 32,
+          "BLOCK_K_NH": 64,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.13443200290203094,
         "num_stages": 3,
         "num_warps": 4
       }
@@ -149,7 +149,7 @@
           "BLOCK_K_NH": 32,
           "BLOCK_M1": 64
         },
-        "ms": 0.3227519989013672,
+        "ms": 0.3214080035686493,
         "num_stages": 2,
         "num_warps": 2
       },
@@ -159,28 +159,8 @@
           "BLOCK_K_NH": 64,
           "BLOCK_M1": 128
         },
-        "ms": 0.4068160057067871,
+        "ms": 0.4055039882659912,
         "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_D": 32,
-          "BLOCK_K_NH": 32,
-          "BLOCK_M1": 128
-        },
-        "ms": 0.4068959951400757,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_D": 32,
-          "BLOCK_K_NH": 32,
-          "BLOCK_M1": 128
-        },
-        "ms": 0.4071199893951416,
-        "num_stages": 3,
         "num_warps": 4
       },
       {
@@ -189,7 +169,27 @@
           "BLOCK_K_NH": 64,
           "BLOCK_M1": 128
         },
-        "ms": 0.40809598565101624,
+        "ms": 0.40560001134872437,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_D": 32,
+          "BLOCK_K_NH": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.4060640037059784,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_D": 32,
+          "BLOCK_K_NH": 32,
+          "BLOCK_M1": 128
+        },
+        "ms": 0.40639999508857727,
         "num_stages": 3,
         "num_warps": 4
       }
@@ -201,7 +201,7 @@
           "BLOCK_K_NH": 32,
           "BLOCK_M1": 64
         },
-        "ms": 0.6398240029811859,
+        "ms": 0.6458560228347778,
         "num_stages": 2,
         "num_warps": 2
       },
@@ -211,7 +211,7 @@
           "BLOCK_K_NH": 64,
           "BLOCK_M1": 128
         },
-        "ms": 0.843455970287323,
+        "ms": 0.8511359989643097,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -221,8 +221,8 @@
           "BLOCK_K_NH": 32,
           "BLOCK_M1": 128
         },
-        "ms": 0.8437439799308777,
-        "num_stages": 3,
+        "ms": 0.8512960076332092,
+        "num_stages": 2,
         "num_warps": 4
       },
       {
@@ -231,7 +231,7 @@
           "BLOCK_K_NH": 64,
           "BLOCK_M1": 128
         },
-        "ms": 0.8437759876251221,
+        "ms": 0.8513280153274536,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -241,8 +241,8 @@
           "BLOCK_K_NH": 32,
           "BLOCK_M1": 128
         },
-        "ms": 0.844543993473053,
-        "num_stages": 2,
+        "ms": 0.8525440096855164,
+        "num_stages": 3,
         "num_warps": 4
       }
     ],
@@ -1293,18 +1293,8 @@
           "BLOCK_K_NH": 32,
           "BLOCK_M1": 64
         },
-        "ms": 0.4710719883441925,
+        "ms": 0.4663520008325577,
         "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_D": 128,
-          "BLOCK_K_NH": 16,
-          "BLOCK_M1": 64
-        },
-        "ms": 0.5128960013389587,
-        "num_stages": 2,
         "num_warps": 4
       },
       {
@@ -1313,7 +1303,17 @@
           "BLOCK_K_NH": 32,
           "BLOCK_M1": 64
         },
-        "ms": 0.5147200226783752,
+        "ms": 0.5130559802055359,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_D": 128,
+          "BLOCK_K_NH": 16,
+          "BLOCK_M1": 64
+        },
+        "ms": 0.5168960094451904,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -1323,7 +1323,7 @@
           "BLOCK_K_NH": 16,
           "BLOCK_M1": 32
         },
-        "ms": 0.5293759703636169,
+        "ms": 0.5247679948806763,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -1333,7 +1333,7 @@
           "BLOCK_K_NH": 16,
           "BLOCK_M1": 32
         },
-        "ms": 0.54448002576828,
+        "ms": 0.5410080254077911,
         "num_stages": 2,
         "num_warps": 4
       }
@@ -3162,7 +3162,7 @@
   "key_scheme": 3,
   "measurements": {
     "bfloat16+float32|TC=0,shape_key=10133100235334847": {
-      "68d24e0271d5594c302b": {
+      "951a7a5ba802b3c028f2": {
         "entries": [
           {
             "kwargs": {
@@ -3170,7 +3170,7 @@
               "BLOCK_K_NH": 32,
               "BLOCK_M1": 64
             },
-            "ms": 0.04492799937725067,
+            "ms": 0.04479999840259552,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -3180,7 +3180,7 @@
               "BLOCK_K_NH": 64,
               "BLOCK_M1": 64
             },
-            "ms": 0.045184001326560974,
+            "ms": 0.045024000108242035,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -3190,7 +3190,7 @@
               "BLOCK_K_NH": 32,
               "BLOCK_M1": 64
             },
-            "ms": 0.0459199994802475,
+            "ms": 0.04601600021123886,
             "num_stages": 3,
             "num_warps": 4
           },
@@ -3200,7 +3200,7 @@
               "BLOCK_K_NH": 32,
               "BLOCK_M1": 64
             },
-            "ms": 0.05183999985456467,
+            "ms": 0.05137600004673004,
             "num_stages": 2,
             "num_warps": 2
           },
@@ -3210,7 +3210,7 @@
               "BLOCK_K_NH": 64,
               "BLOCK_M1": 128
             },
-            "ms": 0.05984000116586685,
+            "ms": 0.058400001376867294,
             "num_stages": 3,
             "num_warps": 4
           }
@@ -3350,13 +3350,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=10133101309084863": {
-      "85cfeb4fe20673da98b9": {
+      "2b27161e04d0c4228f09": {
         "entries": [
           {
             "kwargs": {
@@ -3364,7 +3364,7 @@
               "BLOCK_K_NH": 32,
               "BLOCK_M1": 64
             },
-            "ms": 0.11148799955844879,
+            "ms": 0.11113599687814713,
             "num_stages": 2,
             "num_warps": 2
           },
@@ -3374,19 +3374,9 @@
               "BLOCK_K_NH": 16,
               "BLOCK_M1": 128
             },
-            "ms": 0.13235199451446533,
+            "ms": 0.1324159950017929,
             "num_stages": 2,
             "num_warps": 8
-          },
-          {
-            "kwargs": {
-              "BLOCK_K_D": 32,
-              "BLOCK_K_NH": 64,
-              "BLOCK_M1": 128
-            },
-            "ms": 0.13417600095272064,
-            "num_stages": 2,
-            "num_warps": 4
           },
           {
             "kwargs": {
@@ -3394,7 +3384,7 @@
               "BLOCK_K_NH": 32,
               "BLOCK_M1": 128
             },
-            "ms": 0.13449600338935852,
+            "ms": 0.1340160071849823,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -3404,7 +3394,17 @@
               "BLOCK_K_NH": 64,
               "BLOCK_M1": 128
             },
-            "ms": 0.13449600338935852,
+            "ms": 0.13436800241470337,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K_D": 32,
+              "BLOCK_K_NH": 64,
+              "BLOCK_M1": 128
+            },
+            "ms": 0.13443200290203094,
             "num_stages": 3,
             "num_warps": 4
           }
@@ -3544,13 +3544,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=10133103456584895": {
-      "fa876fb29caa44248e77": {
+      "635b1c18e6100daa811a": {
         "entries": [
           {
             "kwargs": {
@@ -3558,7 +3558,7 @@
               "BLOCK_K_NH": 32,
               "BLOCK_M1": 64
             },
-            "ms": 0.3227519989013672,
+            "ms": 0.3214080035686493,
             "num_stages": 2,
             "num_warps": 2
           },
@@ -3568,28 +3568,8 @@
               "BLOCK_K_NH": 64,
               "BLOCK_M1": 128
             },
-            "ms": 0.4068160057067871,
+            "ms": 0.4055039882659912,
             "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BLOCK_K_D": 32,
-              "BLOCK_K_NH": 32,
-              "BLOCK_M1": 128
-            },
-            "ms": 0.4068959951400757,
-            "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BLOCK_K_D": 32,
-              "BLOCK_K_NH": 32,
-              "BLOCK_M1": 128
-            },
-            "ms": 0.4071199893951416,
-            "num_stages": 3,
             "num_warps": 4
           },
           {
@@ -3598,7 +3578,27 @@
               "BLOCK_K_NH": 64,
               "BLOCK_M1": 128
             },
-            "ms": 0.40809598565101624,
+            "ms": 0.40560001134872437,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K_D": 32,
+              "BLOCK_K_NH": 32,
+              "BLOCK_M1": 128
+            },
+            "ms": 0.4060640037059784,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K_D": 32,
+              "BLOCK_K_NH": 32,
+              "BLOCK_M1": 128
+            },
+            "ms": 0.40639999508857727,
             "num_stages": 3,
             "num_warps": 4
           }
@@ -3738,13 +3738,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=10133105604084927": {
-      "2af9c064c8937714608a": {
+      "d05968405ed31df622da": {
         "entries": [
           {
             "kwargs": {
@@ -3752,7 +3752,7 @@
               "BLOCK_K_NH": 32,
               "BLOCK_M1": 64
             },
-            "ms": 0.6398240029811859,
+            "ms": 0.6458560228347778,
             "num_stages": 2,
             "num_warps": 2
           },
@@ -3762,7 +3762,7 @@
               "BLOCK_K_NH": 64,
               "BLOCK_M1": 128
             },
-            "ms": 0.843455970287323,
+            "ms": 0.8511359989643097,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -3772,8 +3772,8 @@
               "BLOCK_K_NH": 32,
               "BLOCK_M1": 128
             },
-            "ms": 0.8437439799308777,
-            "num_stages": 3,
+            "ms": 0.8512960076332092,
+            "num_stages": 2,
             "num_warps": 4
           },
           {
@@ -3782,7 +3782,7 @@
               "BLOCK_K_NH": 64,
               "BLOCK_M1": 128
             },
-            "ms": 0.8437759876251221,
+            "ms": 0.8513280153274536,
             "num_stages": 3,
             "num_warps": 4
           },
@@ -3792,8 +3792,8 @@
               "BLOCK_K_NH": 32,
               "BLOCK_M1": 128
             },
-            "ms": 0.844543993473053,
-            "num_stages": 2,
+            "ms": 0.8525440096855164,
+            "num_stages": 3,
             "num_warps": 4
           }
         ],
@@ -3932,13 +3932,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=140738562106559": {
-      "343d4bf4986d193c5342": {
+      "284c397d0732a138e3ea": {
         "entries": [
           {
             "kwargs": {
@@ -4126,13 +4126,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=140739635856575": {
-      "8c5eb65d62820d7f4427": {
+      "c78efbbb9a8108f23c3a": {
         "entries": [
           {
             "kwargs": {
@@ -4320,13 +4320,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=26389352817855": {
-      "b0100ead45e30cc27bcb": {
+      "11b6331219d5b3a9a7ee": {
         "entries": [
           {
             "kwargs": {
@@ -4514,13 +4514,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=26390426567871": {
-      "9b1036c8339876b8b051": {
+      "3ddcd808e36f8ead1f70": {
         "entries": [
           {
             "kwargs": {
@@ -4708,13 +4708,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=26392574067903": {
-      "bf0cea3fe141379a9460": {
+      "c55357bd4db6222d7aa4": {
         "entries": [
           {
             "kwargs": {
@@ -4902,13 +4902,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=26394721567935": {
-      "f6d576228b2df3e85fe2": {
+      "a41495a6297887d1af92": {
         "entries": [
           {
             "kwargs": {
@@ -5096,13 +5096,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=281476050461887": {
-      "487b4338644929715664": {
+      "a5ec134e51a2bdc87d4b": {
         "entries": [
           {
             "kwargs": {
@@ -5290,13 +5290,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=281477124211903": {
-      "d3f8aceb53728443dbdc": {
+      "cd7bdaa7d2f183bc22ee": {
         "entries": [
           {
             "kwargs": {
@@ -5484,13 +5484,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=40532397720085695": {
-      "82f488b842ae0908c60c": {
+      "ab30811363673307c199": {
         "entries": [
           {
             "kwargs": {
@@ -5678,13 +5678,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=40532398793835711": {
-      "7057e5f20e8fc02c991e": {
+      "79d936f74fbb55b8e9c0": {
         "entries": [
           {
             "kwargs": {
@@ -5872,13 +5872,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=40532400941335743": {
-      "2c563223b12d41f383ea": {
+      "979796ada3364a6415d7": {
         "entries": [
           {
             "kwargs": {
@@ -6066,13 +6066,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=40532403088835775": {
-      "790b86a4ea832eb9888b": {
+      "77447572f1a2df4e7668": {
         "entries": [
           {
             "kwargs": {
@@ -6260,13 +6260,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=52777631884479": {
-      "85abe79e36d9a5114b7f": {
+      "a2a81a969cd72c62c2ac": {
         "entries": [
           {
             "kwargs": {
@@ -6454,13 +6454,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=52778705634495": {
-      "0b31011a211f7c259412": {
+      "cea83416153dd7f50f98": {
         "entries": [
           {
             "kwargs": {
@@ -6648,13 +6648,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=52780853134527": {
-      "769b3790f89dcc8e0b31": {
+      "c1d238387b48eb0735f6": {
         "entries": [
           {
             "kwargs": {
@@ -6842,13 +6842,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=52783000634559": {
-      "c62ba5e6182d5e7c6e1a": {
+      "136860c1f0dc15fae487": {
         "entries": [
           {
             "kwargs": {
@@ -7036,13 +7036,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=562951027172543": {
-      "1b4e4c6d4a5aa42d8e12": {
+      "f20c9b17c184260b1c9f": {
         "entries": [
           {
             "kwargs": {
@@ -7230,13 +7230,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=562952100922559": {
-      "184c830fe267ec554502": {
+      "867bb0def3ebbefb6653": {
         "entries": [
           {
             "kwargs": {
@@ -7424,13 +7424,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=70369817928895": {
-      "68e40114ac2d8f8ae95f": {
+      "8b755a7909e22bcdee6a": {
         "entries": [
           {
             "kwargs": {
@@ -7618,13 +7618,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=0,shape_key=70370891678911": {
-      "2839f0ace6c8e623758f": {
+      "bf7f13d09c7d5a785de7": {
         "entries": [
           {
             "kwargs": {
@@ -7812,13 +7812,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=1,shape_key=10133112046585023": {
-      "9a8004bdc15a1d3ec794": {
+      "fa4ea0e23c031c4ead43": {
         "entries": [
           {
             "kwargs": {
@@ -7826,18 +7826,8 @@
               "BLOCK_K_NH": 32,
               "BLOCK_M1": 64
             },
-            "ms": 0.4710719883441925,
+            "ms": 0.4663520008325577,
             "num_stages": 3,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BLOCK_K_D": 128,
-              "BLOCK_K_NH": 16,
-              "BLOCK_M1": 64
-            },
-            "ms": 0.5128960013389587,
-            "num_stages": 2,
             "num_warps": 4
           },
           {
@@ -7846,7 +7836,17 @@
               "BLOCK_K_NH": 32,
               "BLOCK_M1": 64
             },
-            "ms": 0.5147200226783752,
+            "ms": 0.5130559802055359,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_K_D": 128,
+              "BLOCK_K_NH": 16,
+              "BLOCK_M1": 64
+            },
+            "ms": 0.5168960094451904,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -7856,7 +7856,7 @@
               "BLOCK_K_NH": 16,
               "BLOCK_M1": 32
             },
-            "ms": 0.5293759703636169,
+            "ms": 0.5247679948806763,
             "num_stages": 3,
             "num_warps": 4
           },
@@ -7866,7 +7866,7 @@
               "BLOCK_K_NH": 16,
               "BLOCK_M1": 32
             },
-            "ms": 0.54448002576828,
+            "ms": 0.5410080254077911,
             "num_stages": 2,
             "num_warps": 4
           }
@@ -8006,13 +8006,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=1,shape_key=26401164068031": {
-      "d5bfb761b1fdce59e7d2": {
+      "526957dc873b66440eba": {
         "entries": [
           {
             "kwargs": {
@@ -8200,13 +8200,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=1,shape_key=40532409531335871": {
-      "9641420439d8d94887e4": {
+      "562047ef2b0ebe767478": {
         "entries": [
           {
             "kwargs": {
@@ -8394,13 +8394,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|TC=1,shape_key=52789443134655": {
-      "57ee032e75253e0264d1": {
+      "d07518d51d167bd871bd": {
         "entries": [
           {
             "kwargs": {
@@ -8588,13 +8588,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=10133100235334847": {
-      "2cea2f511f4cc6f0d5be": {
+      "b6057f7242a615bfc0a1": {
         "entries": [
           {
             "kwargs": {
@@ -8782,13 +8782,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=10133101309084863": {
-      "db4215ca06aa1fe812f2": {
+      "384c7cf3a82f87be3a9c": {
         "entries": [
           {
             "kwargs": {
@@ -8976,13 +8976,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=10133103456584895": {
-      "b58cfa4cbb3c1ec1710d": {
+      "4ca86389dcfe5d22f480": {
         "entries": [
           {
             "kwargs": {
@@ -9170,13 +9170,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=10133105604084927": {
-      "debc56d34f28462a3452": {
+      "6e60451c0961c00c87f9": {
         "entries": [
           {
             "kwargs": {
@@ -9364,13 +9364,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=10133112046585023": {
-      "11e3897aed7defbcc0e9": {
+      "f621a8add6721cb9f292": {
         "entries": [
           {
             "kwargs": {
@@ -9558,13 +9558,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=140738562106559": {
-      "a8fea6b6382878cc4859": {
+      "04f7df19ead4d8558867": {
         "entries": [
           {
             "kwargs": {
@@ -9752,13 +9752,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=140739635856575": {
-      "377543256dcaa8bab26e": {
+      "30e4f69f1d0a47c1228d": {
         "entries": [
           {
             "kwargs": {
@@ -9946,13 +9946,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=26389352817855": {
-      "edd9a328f000915335f1": {
+      "902fbfba64af507b8a06": {
         "entries": [
           {
             "kwargs": {
@@ -10140,13 +10140,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=26390426567871": {
-      "9d976a4be85efd7a8809": {
+      "6872a7c1934f9bbaeb7e": {
         "entries": [
           {
             "kwargs": {
@@ -10334,13 +10334,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=26392574067903": {
-      "1e16b496569df5b8105b": {
+      "c5512bf2c108311c11ce": {
         "entries": [
           {
             "kwargs": {
@@ -10528,13 +10528,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=26394721567935": {
-      "0ecd0856a0d1ad3edb0b": {
+      "837ec9042f77c1f85c25": {
         "entries": [
           {
             "kwargs": {
@@ -10722,13 +10722,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=26401164068031": {
-      "5ca3b4c52ac361065de4": {
+      "2db97c1c2f9927340852": {
         "entries": [
           {
             "kwargs": {
@@ -10916,13 +10916,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=281476050461887": {
-      "33a2ea6a57436fe50561": {
+      "0c26ff9ddc1b17563ace": {
         "entries": [
           {
             "kwargs": {
@@ -11110,13 +11110,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=281477124211903": {
-      "4aee6a408cd690807181": {
+      "5d88d7000b1dd3a8e407": {
         "entries": [
           {
             "kwargs": {
@@ -11304,13 +11304,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=40532397720085695": {
-      "15aed213e2ca9287f0b5": {
+      "031392f8117dd8e33976": {
         "entries": [
           {
             "kwargs": {
@@ -11498,13 +11498,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=40532398793835711": {
-      "d2207117395a7b89ceb5": {
+      "3e540b5e32d0368cf59f": {
         "entries": [
           {
             "kwargs": {
@@ -11692,13 +11692,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=40532400941335743": {
-      "049e79562a798c7d38ac": {
+      "d392ee25ba7477a33ff3": {
         "entries": [
           {
             "kwargs": {
@@ -11886,13 +11886,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=40532403088835775": {
-      "9f3539f5fcaf2824b3e1": {
+      "8a5d0e553a6beca9fd17": {
         "entries": [
           {
             "kwargs": {
@@ -12080,13 +12080,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=40532409531335871": {
-      "b248d20de38facc7fe9a": {
+      "46e1eeeba976e53bb525": {
         "entries": [
           {
             "kwargs": {
@@ -12274,13 +12274,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=52777631884479": {
-      "5369af018fd94ebc6fe1": {
+      "876c7ba0874a09e44afb": {
         "entries": [
           {
             "kwargs": {
@@ -12468,13 +12468,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=52778705634495": {
-      "33243e2bbbfecb6e83a8": {
+      "eb315718130ae6920e2a": {
         "entries": [
           {
             "kwargs": {
@@ -12662,13 +12662,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=52780853134527": {
-      "e51e58d24bb8379d82e6": {
+      "acc829b81b7646f13047": {
         "entries": [
           {
             "kwargs": {
@@ -12856,13 +12856,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=52783000634559": {
-      "8b3d53ab748509a0f11a": {
+      "f35059ebe61b40bae6bd": {
         "entries": [
           {
             "kwargs": {
@@ -13050,13 +13050,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=52789443134655": {
-      "ce1a6e9129da87872426": {
+      "99a068f82823feeee5cc": {
         "entries": [
           {
             "kwargs": {
@@ -13244,13 +13244,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=562951027172543": {
-      "24332e2625ad91af47e5": {
+      "9d55562c47d762c2087a": {
         "entries": [
           {
             "kwargs": {
@@ -13438,13 +13438,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=562952100922559": {
-      "fe7b61c5dc39e65c7520": {
+      "767d1e091ef53240eb23": {
         "entries": [
           {
             "kwargs": {
@@ -13632,13 +13632,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=70369817928895": {
-      "4f1e2f97531962ffffe3": {
+      "d452cf7d7524c15fe9d1": {
         "entries": [
           {
             "kwargs": {
@@ -13826,13 +13826,13 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }
     },
     "float32|TC=0,shape_key=70370891678911": {
-      "30836b2502b84ee2343d": {
+      "5b2611d3e59a1c22612c": {
         "entries": [
           {
             "kwargs": {
@@ -14020,7 +14020,7 @@
               ]
             }
           },
-          "implementation": "0544f449fc40143b32d04169332a86448bf16c5000129b4d13c186ff1674d4bd",
+          "implementation": "26d3a78644645a3d935a1b461c700db171765edf83ceaa8dfe41645cd62b77e9",
           "scheme": 1
         }
       }

@@ -617,8 +617,8 @@ def native_training_dropout(module, pair, probability):
     one = _one_chunk(module, pair, False)
     if not (_b200style_serves(module, one) or _selected_wide_training(module, one) or _selected_d64_training(module, one) or (one.shape[-1] == 64 and _native_training_enabled())) or not _serves_one(module, one):
         return None
-    from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import extension
-    return extension("pack").drop_scale(pair, probability).reshape(
+    from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import _drop_scale
+    return _drop_scale(pair, probability).reshape(
         pair.shape[0], 1, pair.shape[1], pair.shape[-1])
 
 
