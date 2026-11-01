@@ -69,8 +69,13 @@ def _k16(name: str, dev: int):
     return _sm100_kernel("pair16", name, dev, smem=0)
 
 
-def _k256(name: str, dev: int):
-    return _sm100_kernel("pair256", name, dev, smem=0)
+#: pair256.cu's forward: 6 warps a CTA, each two 16-row tiles (padded rows of 260 floats) + the TF32 weights [256][24]
+_P256_FW = 6
+_P256_FWD_SMEM = (256 * 24 + _P256_FW * 2 * 16 * 260) * 4
+
+
+def _k256(name: str, dev: int, smem: int = 0):
+    return _sm100_kernel("pair256", name, dev, smem=smem)
 
 
 def _wide32(pair_dtype, heads: int, dp: int) -> bool:
@@ -140,7 +145,7 @@ def _build(dev: int, H: int, DH: int, dtype: torch.dtype, pair_dtype: torch.dtyp
         _sm100_kernel("attn_dkv_tf32", "augattn_dkv_tf32_sm100", dev, defs=cd)
         _sm100_kernel("attn_dqb_tf32", "augattn_dqb_tf32_sm100", dev, defs=(*cd, "DQPART=1"))
     if dtype is F32 and _wide32(pair_dtype, H, dp):
-        _k256("aap256_fwd", dev)
+        _k256("aap256_fwd", dev, _P256_FWD_SMEM)
         if train:
             _k256("aap256_bwd", dev)
     elif _atom(H, DH, dp):
@@ -368,8 +373,9 @@ def _pair256_fwd(pz, lnw, wb, m, eps):
     if not p2.is_contiguous():
         p2 = p2.contiguous()
     bias = torch.empty(H, Lb, Lb, device=pz.device, dtype=F32)
-    grid = min(-(-Lb * Lb // (16 * 8)), 4 * _nsm(dev))
-    _k256("aap256_fwd", dev)((grid, 1, 1), (256, 1, 1), p2, _wf(wb, lnw, F32), m, bias, int(Lb), float(eps), float(NEG))
+    grid = min(-(-Lb * Lb // (16 * _P256_FW)), _nsm(dev))
+    _k256("aap256_fwd", dev, _P256_FWD_SMEM)((grid, 1, 1), (32 * _P256_FW, 1, 1), p2, _wf(wb, lnw, F32), m, bias, int(Lb), float(eps),
+                                              float(NEG))
     return bias
 
 
