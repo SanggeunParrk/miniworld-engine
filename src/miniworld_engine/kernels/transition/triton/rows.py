@@ -39,10 +39,12 @@ _FWD = {(torch.bfloat16, 64): (128, 64, 4, 2), (torch.bfloat16, 128): (128, 32, 
 _BWD = {(torch.bfloat16, 64): (128, 32, 4, 2), (torch.bfloat16, 128): (128, 64, 8, 2)}
 
 
-#: fp32 (TF32) inference takes the row-fused forward at this expansion only (hidden = 4 d): there the hand-CUDA forward
-#: (cuda/sm100/generic/tg_fused_f32.cu) is faster than it (d128 L384 197 vs 218 us, L768 732 vs 833); at hidden = 2 d it is not yet
-#: (L128 27.0 vs 19.5, L384 130 vs 130), and the split path keeps the call
+#: fp32 (TF32) inference takes the row-fused forward at this expansion (hidden = 4 d): there the hand-CUDA forward
+#: (cuda/sm100/generic/tg_fused_f32.cu) is faster than it (d128 L384 182 vs 218 us, L768 686 vs 833; L128 31.6 vs 30.2 is the exception)
 FP32_EXPANSION = 4
+#: ... and at hidden = 2 d from this many rows on: there the hand-CUDA forward (tg_fused_f32, LayerNorm from a TMA-loaded tile) is the
+#: faster one (d128 n2, us, CUDA / this kernel: L384 113 / 130, L768 411 / 483; L256 60.2 / 61.8 and L128 23.1 / 19.3 not yet)
+FP32_N2_MIN_ROWS = 100_000
 
 
 def _desc(t: torch.Tensor, block):
@@ -67,7 +69,7 @@ def serves(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor, training: bool) 
         return False
     if wa.dtype != x.dtype or ws.dtype != x.dtype:
         return False
-    if x.dtype is torch.float32 and nd != FP32_EXPANSION * d:
+    if x.dtype is torch.float32 and nd != FP32_EXPANSION * d and x.numel() // d < FP32_N2_MIN_ROWS:
         return False
     if x.dtype is torch.float32:   # TF32 only where torch allows it (the split path keeps IEEE fp32 otherwise)
         from miniworld_engine.kernels._dot_precision import dot_precision

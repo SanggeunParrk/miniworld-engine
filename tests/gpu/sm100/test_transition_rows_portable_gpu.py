@@ -128,6 +128,7 @@ def test_rows_fp32_inference_matches_fp64():
 
 
 def test_rows_serves_gate():
+    import miniworld_engine.kernels.transition.triton.rows as rows
     from miniworld_engine.kernels.transition.triton.rows import serves
 
     x = torch.randn(4, 128, device="cuda", dtype=torch.bfloat16)
@@ -139,7 +140,9 @@ def test_rows_serves_gate():
     try:
         assert serves(x.float(), wa.float(), ws.float(), False)            # fp32 (TF32) inference at hidden = 4 d
         assert not serves(x.float(), wa.float(), ws.float(), True)         # fp32 training keeps the split path
-        assert not serves(x.float(), wa[:256].float(), ws[:, :256].float(), False)   # hidden = 2 d: the split path (rows.FP32_EXPANSION)
+        assert not serves(x.float(), wa[:256].float(), ws[:, :256].float(), False)   # hidden = 2 d, few rows: the split path
+        big = torch.empty(rows.FP32_N2_MIN_ROWS, 128, device="cuda")
+        assert serves(big, wa[:256].float(), ws[:, :256].float(), False)   # hidden = 2 d from FP32_N2_MIN_ROWS rows
     finally:
         torch.backends.cuda.matmul.allow_tf32 = old
     assert not serves(torch.randn(4, 256, device="cuda", dtype=torch.bfloat16), wa.new_empty(1024, 256), ws.new_empty(256, 1024), True)
