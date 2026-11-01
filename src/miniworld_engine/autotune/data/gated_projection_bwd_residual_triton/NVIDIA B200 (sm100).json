@@ -1,157 +1,121 @@
 {
   "build_rev": 1,
   "config_space": [
-    "((('BLOCK', 1024),), 1, 1)",
-    "((('BLOCK', 1024),), 1, 2)",
-    "((('BLOCK', 1024),), 1, 3)",
-    "((('BLOCK', 1024),), 2, 1)",
-    "((('BLOCK', 1024),), 2, 2)",
-    "((('BLOCK', 1024),), 2, 3)",
-    "((('BLOCK', 1024),), 4, 1)",
     "((('BLOCK', 1024),), 4, 2)",
     "((('BLOCK', 1024),), 4, 3)",
-    "((('BLOCK', 1024),), 8, 1)",
     "((('BLOCK', 1024),), 8, 2)",
     "((('BLOCK', 1024),), 8, 3)",
-    "((('BLOCK', 128),), 1, 1)",
-    "((('BLOCK', 128),), 1, 2)",
-    "((('BLOCK', 128),), 1, 3)",
-    "((('BLOCK', 128),), 2, 1)",
-    "((('BLOCK', 128),), 2, 2)",
-    "((('BLOCK', 128),), 2, 3)",
-    "((('BLOCK', 128),), 4, 1)",
-    "((('BLOCK', 128),), 4, 2)",
-    "((('BLOCK', 128),), 4, 3)",
-    "((('BLOCK', 128),), 8, 1)",
-    "((('BLOCK', 128),), 8, 2)",
-    "((('BLOCK', 128),), 8, 3)",
-    "((('BLOCK', 2048),), 1, 1)",
-    "((('BLOCK', 2048),), 1, 2)",
-    "((('BLOCK', 2048),), 1, 3)",
-    "((('BLOCK', 2048),), 2, 1)",
-    "((('BLOCK', 2048),), 2, 2)",
-    "((('BLOCK', 2048),), 2, 3)",
-    "((('BLOCK', 2048),), 4, 1)",
     "((('BLOCK', 2048),), 4, 2)",
     "((('BLOCK', 2048),), 4, 3)",
-    "((('BLOCK', 2048),), 8, 1)",
     "((('BLOCK', 2048),), 8, 2)",
     "((('BLOCK', 2048),), 8, 3)",
-    "((('BLOCK', 256),), 1, 1)",
-    "((('BLOCK', 256),), 1, 2)",
-    "((('BLOCK', 256),), 1, 3)",
-    "((('BLOCK', 256),), 2, 1)",
-    "((('BLOCK', 256),), 2, 2)",
-    "((('BLOCK', 256),), 2, 3)",
-    "((('BLOCK', 256),), 4, 1)",
     "((('BLOCK', 256),), 4, 2)",
     "((('BLOCK', 256),), 4, 3)",
-    "((('BLOCK', 256),), 8, 1)",
     "((('BLOCK', 256),), 8, 2)",
     "((('BLOCK', 256),), 8, 3)",
-    "((('BLOCK', 4096),), 1, 1)",
-    "((('BLOCK', 4096),), 1, 2)",
-    "((('BLOCK', 4096),), 1, 3)",
-    "((('BLOCK', 4096),), 2, 1)",
-    "((('BLOCK', 4096),), 2, 2)",
-    "((('BLOCK', 4096),), 2, 3)",
-    "((('BLOCK', 4096),), 4, 1)",
     "((('BLOCK', 4096),), 4, 2)",
     "((('BLOCK', 4096),), 4, 3)",
-    "((('BLOCK', 4096),), 8, 1)",
     "((('BLOCK', 4096),), 8, 2)",
     "((('BLOCK', 4096),), 8, 3)",
-    "((('BLOCK', 512),), 1, 1)",
-    "((('BLOCK', 512),), 1, 2)",
-    "((('BLOCK', 512),), 1, 3)",
-    "((('BLOCK', 512),), 2, 1)",
-    "((('BLOCK', 512),), 2, 2)",
-    "((('BLOCK', 512),), 2, 3)",
-    "((('BLOCK', 512),), 4, 1)",
     "((('BLOCK', 512),), 4, 2)",
     "((('BLOCK', 512),), 4, 3)",
-    "((('BLOCK', 512),), 8, 1)",
     "((('BLOCK', 512),), 8, 2)",
     "((('BLOCK', 512),), 8, 3)"
   ],
-  "config_space_hash": "fb0ad5f62870",
+  "config_space_hash": "82c5892086a6",
   "driver_id_scheme": 2,
   "driver_identity": "7323b25d9822",
   "entries": {
     "bfloat16|shape_key=1024": [
       {
         "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 1,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 3,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 1024
+          "BLOCK": 256
         },
         "ms": 0.006175999995321035,
         "num_stages": 3,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006271999794989824,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006304000038653612,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006335999816656113,
-        "num_stages": 3,
-        "num_warps": 1
+        "num_warps": 4
       },
       {
         "kwargs": {
           "BLOCK": 256
         },
-        "ms": 0.006335999816656113,
-        "num_stages": 1,
-        "num_warps": 1
+        "ms": 0.006175999995321035,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 256
+        },
+        "ms": 0.006175999995321035,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK": 256
+        },
+        "ms": 0.006175999995321035,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK": 512
+        },
+        "ms": 0.006175999995321035,
+        "num_stages": 2,
+        "num_warps": 4
       }
     ],
     "bfloat16|shape_key=2048": [
       {
         "kwargs": {
+          "BLOCK": 1024
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 1024
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK": 2048
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 2048
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK": 4096
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
           "BLOCK": 256
         },
         "ms": 0.006144000217318535,
         "num_stages": 3,
-        "num_warps": 1
+        "num_warps": 4
       },
       {
         "kwargs": {
@@ -159,7 +123,15 @@
         },
         "ms": 0.006144000217318535,
         "num_stages": 2,
-        "num_warps": 2
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 256
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 2,
+        "num_warps": 8
       },
       {
         "kwargs": {
@@ -167,144 +139,80 @@
         },
         "ms": 0.006144000217318535,
         "num_stages": 3,
-        "num_warps": 2
+        "num_warps": 8
       },
       {
         "kwargs": {
           "BLOCK": 512
         },
         "ms": 0.006144000217318535,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 512
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 1,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006144000217318535,
         "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 1,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 256
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 1,
         "num_warps": 4
       }
     ],
     "bfloat16|shape_key=4096": [
       {
         "kwargs": {
-          "BLOCK": 256
+          "BLOCK": 1024
         },
-        "ms": 0.006175999995321035,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 256
-        },
-        "ms": 0.006175999995321035,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 512
-        },
-        "ms": 0.006175999995321035,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 512
-        },
-        "ms": 0.006175999995321035,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 512
-        },
-        "ms": 0.006175999995321035,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 2048
-        },
-        "ms": 0.008031999692320824,
-        "num_stages": 1,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 2048
-        },
-        "ms": 0.008063999935984612,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 2048
-        },
-        "ms": 0.0080960001796484,
+        "ms": 0.006144000217318535,
         "num_stages": 2,
         "num_warps": 4
       },
       {
         "kwargs": {
-          "BLOCK": 4096
+          "BLOCK": 1024
         },
-        "ms": 0.0080960001796484,
-        "num_stages": 1,
+        "ms": 0.006144000217318535,
+        "num_stages": 3,
         "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 2048
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 2048
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 2048
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 2,
+        "num_warps": 8
       },
       {
         "kwargs": {
           "BLOCK": 4096
         },
-        "ms": 0.0080960001796484,
+        "ms": 0.006335999816656113,
         "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK": 4096
+        },
+        "ms": 0.006335999816656113,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK": 4096
+        },
+        "ms": 0.00800000037997961,
+        "num_stages": 3,
         "num_warps": 4
       }
     ],
@@ -313,6 +221,14 @@
         "kwargs": {
           "BLOCK": 2048
         },
+        "ms": 0.0080960001796484,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 2048
+        },
         "ms": 0.008128000423312187,
         "num_stages": 2,
         "num_warps": 4
@@ -323,55 +239,23 @@
         },
         "ms": 0.008128000423312187,
         "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK": 4096
+        },
+        "ms": 0.008128000423312187,
+        "num_stages": 3,
         "num_warps": 4
       },
       {
         "kwargs": {
           "BLOCK": 4096
         },
-        "ms": 0.0081599997356534,
+        "ms": 0.008128000423312187,
         "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 1024
-        },
-        "ms": 0.0081599997356534,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 1024
-        },
-        "ms": 0.0081599997356534,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 1024
-        },
-        "ms": 0.0081599997356534,
-        "num_stages": 1,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 256
-        },
-        "ms": 0.008191999979317188,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 256
-        },
-        "ms": 0.008191999979317188,
-        "num_stages": 2,
-        "num_warps": 1
+        "num_warps": 8
       },
       {
         "kwargs": {
@@ -379,94 +263,118 @@
         },
         "ms": 0.008191999979317188,
         "num_stages": 3,
-        "num_warps": 1
+        "num_warps": 4
       },
       {
         "kwargs": {
           "BLOCK": 256
         },
         "ms": 0.008191999979317188,
-        "num_stages": 1,
-        "num_warps": 2
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 512
+        },
+        "ms": 0.008191999979317188,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 512
+        },
+        "ms": 0.008191999979317188,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 512
+        },
+        "ms": 0.008191999979317188,
+        "num_stages": 2,
+        "num_warps": 8
       }
     ],
     "float32|shape_key=1024": [
       {
         "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
+          "BLOCK": 256
         },
         "ms": 0.006144000217318535,
         "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 1,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006175999995321035,
-        "num_stages": 3,
-        "num_warps": 2
+        "num_warps": 4
       },
       {
         "kwargs": {
           "BLOCK": 256
         },
-        "ms": 0.006175999995321035,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 256
-        },
-        "ms": 0.006175999995321035,
+        "ms": 0.006144000217318535,
         "num_stages": 2,
-        "num_warps": 1
+        "num_warps": 4
       },
       {
         "kwargs": {
           "BLOCK": 256
         },
-        "ms": 0.006175999995321035,
+        "ms": 0.006144000217318535,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK": 256
+        },
+        "ms": 0.006144000217318535,
         "num_stages": 3,
-        "num_warps": 1
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK": 512
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 2,
+        "num_warps": 4
       }
     ],
     "float32|shape_key=2048": [
       {
         "kwargs": {
+          "BLOCK": 256
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 256
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 256
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK": 256
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
           "BLOCK": 512
         },
         "ms": 0.006144000217318535,
@@ -475,271 +383,192 @@
       },
       {
         "kwargs": {
-          "BLOCK": 512
-        },
-        "ms": 0.006144000217318535,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
           "BLOCK": 1024
         },
-        "ms": 0.006144000217318535,
-        "num_stages": 1,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006175999995321035,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.006175999995321035,
-        "num_stages": 3,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 512
-        },
-        "ms": 0.0080960001796484,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 1024
-        },
-        "ms": 0.0080960001796484,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK": 2048
-        },
-        "ms": 0.0080960001796484,
-        "num_stages": 1,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK": 512
-        },
-        "ms": 0.008128000423312187,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 512
-        },
-        "ms": 0.008128000423312187,
+        "ms": 0.0081599997356534,
         "num_stages": 2,
-        "num_warps": 1
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 1024
+        },
+        "ms": 0.0081599997356534,
+        "num_stages": 3,
+        "num_warps": 4
       }
     ],
     "float32|shape_key=4096": [
       {
         "kwargs": {
-          "BLOCK": 512
+          "BLOCK": 2048
         },
         "ms": 0.0081599997356534,
         "num_stages": 2,
-        "num_warps": 1
+        "num_warps": 8
       },
       {
         "kwargs": {
-          "BLOCK": 512
-        },
-        "ms": 0.0081599997356534,
-        "num_stages": 1,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 512
-        },
-        "ms": 0.0081599997356534,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 512
+          "BLOCK": 2048
         },
         "ms": 0.0081599997356534,
         "num_stages": 3,
-        "num_warps": 2
+        "num_warps": 8
       },
       {
         "kwargs": {
-          "BLOCK": 1024
+          "BLOCK": 256
         },
-        "ms": 0.0081599997356534,
-        "num_stages": 1,
+        "ms": 0.008191999979317188,
+        "num_stages": 3,
         "num_warps": 4
       },
       {
         "kwargs": {
           "BLOCK": 256
         },
-        "ms": 0.0081599997356534,
+        "ms": 0.008191999979317188,
         "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 256
-        },
-        "ms": 0.0081599997356534,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 256
-        },
-        "ms": 0.0081599997356534,
-        "num_stages": 3,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 256
-        },
-        "ms": 0.0081599997356534,
-        "num_stages": 1,
         "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK": 256
+        },
+        "ms": 0.008191999979317188,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK": 256
+        },
+        "ms": 0.008191999979317188,
+        "num_stages": 3,
+        "num_warps": 8
       },
       {
         "kwargs": {
           "BLOCK": 512
         },
-        "ms": 0.0081599997356534,
-        "num_stages": 1,
-        "num_warps": 1
+        "ms": 0.008191999979317188,
+        "num_stages": 2,
+        "num_warps": 4
       }
     ],
     "float32|shape_key=8192": [
       {
         "kwargs": {
-          "BLOCK": 1024
+          "BLOCK": 256
         },
-        "ms": 0.0081599997356534,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 1024
-        },
-        "ms": 0.0081599997356534,
+        "ms": 0.008191999979317188,
         "num_stages": 3,
-        "num_warps": 2
+        "num_warps": 4
       },
       {
         "kwargs": {
-          "BLOCK": 2048
+          "BLOCK": 256
         },
-        "ms": 0.0081599997356534,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 2048
-        },
-        "ms": 0.0081599997356534,
+        "ms": 0.008191999979317188,
         "num_stages": 2,
-        "num_warps": 1
+        "num_warps": 4
       },
       {
         "kwargs": {
-          "BLOCK": 2048
+          "BLOCK": 256
         },
-        "ms": 0.0081599997356534,
+        "ms": 0.008191999979317188,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK": 256
+        },
+        "ms": 0.008191999979317188,
         "num_stages": 3,
-        "num_warps": 1
+        "num_warps": 8
       },
       {
         "kwargs": {
-          "BLOCK": 4096
+          "BLOCK": 512
         },
-        "ms": 0.010208000428974628,
+        "ms": 0.008191999979317188,
         "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.010239999741315842,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.010239999741315842,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.010239999741315842,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK": 128
-        },
-        "ms": 0.010239999741315842,
-        "num_stages": 1,
-        "num_warps": 2
+        "num_warps": 4
       }
     ]
   },
   "entry_grids": {
     "bfloat16|shape_key=1024": [
+      "18b7c3536206",
+      "82c5892086a6",
       "fb0ad5f62870"
     ],
     "bfloat16|shape_key=2048": [
+      "18b7c3536206",
+      "82c5892086a6",
       "fb0ad5f62870"
     ],
     "bfloat16|shape_key=4096": [
+      "18b7c3536206",
+      "82c5892086a6",
       "fb0ad5f62870"
     ],
     "bfloat16|shape_key=8192": [
+      "18b7c3536206",
+      "82c5892086a6",
       "fb0ad5f62870"
     ],
     "float32|shape_key=1024": [
+      "18b7c3536206",
+      "82c5892086a6",
       "fb0ad5f62870"
     ],
     "float32|shape_key=2048": [
+      "18b7c3536206",
+      "82c5892086a6",
       "fb0ad5f62870"
     ],
     "float32|shape_key=4096": [
+      "18b7c3536206",
+      "82c5892086a6",
       "fb0ad5f62870"
     ],
     "float32|shape_key=8192": [
+      "18b7c3536206",
+      "82c5892086a6",
       "fb0ad5f62870"
     ]
   },
   "env_identity": "7efec5ac14d2",
   "gpu": "NVIDIA B200 (sm100)",
   "grids": {
+    "18b7c3536206": [
+      "((('BLOCK', 256),), 4, 3)"
+    ],
+    "82c5892086a6": [
+      "((('BLOCK', 1024),), 4, 2)",
+      "((('BLOCK', 1024),), 4, 3)",
+      "((('BLOCK', 1024),), 8, 2)",
+      "((('BLOCK', 1024),), 8, 3)",
+      "((('BLOCK', 2048),), 4, 2)",
+      "((('BLOCK', 2048),), 4, 3)",
+      "((('BLOCK', 2048),), 8, 2)",
+      "((('BLOCK', 2048),), 8, 3)",
+      "((('BLOCK', 256),), 4, 2)",
+      "((('BLOCK', 256),), 4, 3)",
+      "((('BLOCK', 256),), 8, 2)",
+      "((('BLOCK', 256),), 8, 3)",
+      "((('BLOCK', 4096),), 4, 2)",
+      "((('BLOCK', 4096),), 4, 3)",
+      "((('BLOCK', 4096),), 8, 2)",
+      "((('BLOCK', 4096),), 8, 3)",
+      "((('BLOCK', 512),), 4, 2)",
+      "((('BLOCK', 512),), 4, 3)",
+      "((('BLOCK', 512),), 8, 2)",
+      "((('BLOCK', 512),), 8, 3)"
+    ],
     "fb0ad5f62870": [
       "((('BLOCK', 1024),), 1, 1)",
       "((('BLOCK', 1024),), 1, 2)",
@@ -822,43 +651,43 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 1024
+              "BLOCK": 256
             },
             "ms": 0.006175999995321035,
             "num_stages": 3,
-            "num_warps": 2
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006271999794989824,
-            "num_stages": 2,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006304000038653612,
-            "num_stages": 1,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006335999816656113,
-            "num_stages": 3,
-            "num_warps": 1
+            "num_warps": 4
           },
           {
             "kwargs": {
               "BLOCK": 256
             },
-            "ms": 0.006335999816656113,
-            "num_stages": 1,
-            "num_warps": 1
+            "ms": 0.006175999995321035,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.006175999995321035,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.006175999995321035,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 512
+            },
+            "ms": 0.006175999995321035,
+            "num_stages": 2,
+            "num_warps": 4
           }
         ],
         "searched": [
@@ -1013,43 +842,43 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006144000217318535,
-            "num_stages": 1,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
+              "BLOCK": 256
             },
             "ms": 0.006144000217318535,
             "num_stages": 3,
-            "num_warps": 1
+            "num_warps": 4
           },
           {
             "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006144000217318535,
-            "num_stages": 1,
-            "num_warps": 2
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
+              "BLOCK": 256
             },
             "ms": 0.006144000217318535,
             "num_stages": 2,
-            "num_warps": 2
+            "num_warps": 4
           },
           {
             "kwargs": {
-              "BLOCK": 128
+              "BLOCK": 256
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
             },
             "ms": 0.006144000217318535,
             "num_stages": 3,
-            "num_warps": 2
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 512
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 2,
+            "num_warps": 4
           }
         ],
         "searched": [
@@ -1206,43 +1035,43 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 256
+              "BLOCK": 1024
             },
             "ms": 0.006144000217318535,
             "num_stages": 3,
-            "num_warps": 1
+            "num_warps": 4
           },
           {
             "kwargs": {
-              "BLOCK": 256
+              "BLOCK": 1024
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 2048
             },
             "ms": 0.006144000217318535,
             "num_stages": 2,
-            "num_warps": 2
+            "num_warps": 4
           },
           {
             "kwargs": {
-              "BLOCK": 256
+              "BLOCK": 2048
             },
             "ms": 0.006144000217318535,
-            "num_stages": 3,
-            "num_warps": 2
+            "num_stages": 2,
+            "num_warps": 8
           },
           {
             "kwargs": {
-              "BLOCK": 512
+              "BLOCK": 4096
             },
             "ms": 0.006144000217318535,
-            "num_stages": 3,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 512
-            },
-            "ms": 0.006144000217318535,
-            "num_stages": 1,
-            "num_warps": 2
+            "num_stages": 2,
+            "num_warps": 8
           }
         ],
         "searched": [
@@ -1397,42 +1226,42 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006144000217318535,
-            "num_stages": 2,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
+              "BLOCK": 256
             },
             "ms": 0.006144000217318535,
             "num_stages": 3,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006144000217318535,
-            "num_stages": 1,
-            "num_warps": 2
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006144000217318535,
-            "num_stages": 2,
-            "num_warps": 2
+            "num_warps": 4
           },
           {
             "kwargs": {
               "BLOCK": 256
             },
             "ms": 0.006144000217318535,
-            "num_stages": 1,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 512
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 2,
             "num_warps": 4
           }
         ],
@@ -1590,43 +1419,43 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 256
+              "BLOCK": 1024
             },
-            "ms": 0.006175999995321035,
-            "num_stages": 1,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 256
-            },
-            "ms": 0.006175999995321035,
-            "num_stages": 3,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 512
-            },
-            "ms": 0.006175999995321035,
-            "num_stages": 1,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 512
-            },
-            "ms": 0.006175999995321035,
+            "ms": 0.006144000217318535,
             "num_stages": 2,
-            "num_warps": 1
+            "num_warps": 4
           },
           {
             "kwargs": {
-              "BLOCK": 512
+              "BLOCK": 1024
             },
-            "ms": 0.006175999995321035,
+            "ms": 0.006144000217318535,
             "num_stages": 3,
-            "num_warps": 1
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 2048
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 2048
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 2048
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 2,
+            "num_warps": 8
           }
         ],
         "searched": [
@@ -1781,42 +1610,42 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 2048
+              "BLOCK": 4096
             },
-            "ms": 0.008031999692320824,
-            "num_stages": 1,
-            "num_warps": 2
+            "ms": 0.006335999816656113,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 4096
+            },
+            "ms": 0.006335999816656113,
+            "num_stages": 3,
+            "num_warps": 8
           },
           {
             "kwargs": {
               "BLOCK": 2048
             },
-            "ms": 0.008063999935984612,
+            "ms": 0.00800000037997961,
             "num_stages": 2,
-            "num_warps": 2
+            "num_warps": 4
           },
           {
             "kwargs": {
               "BLOCK": 2048
             },
-            "ms": 0.0080960001796484,
-            "num_stages": 2,
+            "ms": 0.00800000037997961,
+            "num_stages": 3,
             "num_warps": 4
           },
           {
             "kwargs": {
               "BLOCK": 4096
             },
-            "ms": 0.0080960001796484,
-            "num_stages": 1,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BLOCK": 4096
-            },
-            "ms": 0.0080960001796484,
-            "num_stages": 2,
+            "ms": 0.00800000037997961,
+            "num_stages": 3,
             "num_warps": 4
           }
         ],
@@ -1974,43 +1803,43 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 4096
-            },
-            "ms": 0.0081599997356534,
-            "num_stages": 2,
-            "num_warps": 2
-          },
-          {
-            "kwargs": {
-              "BLOCK": 256
-            },
-            "ms": 0.008191999979317188,
-            "num_stages": 1,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 256
-            },
-            "ms": 0.008191999979317188,
-            "num_stages": 2,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
               "BLOCK": 256
             },
             "ms": 0.008191999979317188,
             "num_stages": 3,
-            "num_warps": 1
+            "num_warps": 4
           },
           {
             "kwargs": {
               "BLOCK": 256
             },
             "ms": 0.008191999979317188,
-            "num_stages": 1,
-            "num_warps": 2
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 512
+            },
+            "ms": 0.008191999979317188,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 512
+            },
+            "ms": 0.008191999979317188,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 512
+            },
+            "ms": 0.008191999979317188,
+            "num_stages": 2,
+            "num_warps": 8
           }
         ],
         "searched": [
@@ -2167,6 +1996,14 @@
             "kwargs": {
               "BLOCK": 2048
             },
+            "ms": 0.0080960001796484,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 2048
+            },
             "ms": 0.008128000423312187,
             "num_stages": 2,
             "num_warps": 4
@@ -2177,31 +2014,23 @@
             },
             "ms": 0.008128000423312187,
             "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 4096
+            },
+            "ms": 0.008128000423312187,
+            "num_stages": 3,
             "num_warps": 4
           },
           {
             "kwargs": {
-              "BLOCK": 1024
+              "BLOCK": 4096
             },
-            "ms": 0.0081599997356534,
+            "ms": 0.008128000423312187,
             "num_stages": 2,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 1024
-            },
-            "ms": 0.0081599997356534,
-            "num_stages": 3,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 1024
-            },
-            "ms": 0.0081599997356534,
-            "num_stages": 1,
-            "num_warps": 2
+            "num_warps": 8
           }
         ],
         "searched": [
@@ -2358,43 +2187,43 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006144000217318535,
-            "num_stages": 1,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006144000217318535,
-            "num_stages": 2,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
+              "BLOCK": 256
             },
             "ms": 0.006144000217318535,
             "num_stages": 3,
-            "num_warps": 1
+            "num_warps": 4
           },
           {
             "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006144000217318535,
-            "num_stages": 1,
-            "num_warps": 2
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
+              "BLOCK": 256
             },
             "ms": 0.006144000217318535,
             "num_stages": 2,
-            "num_warps": 2
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 3,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 512
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 2,
+            "num_warps": 4
           }
         ],
         "searched": [
@@ -2549,27 +2378,11 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006144000217318535,
-            "num_stages": 1,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.006175999995321035,
-            "num_stages": 3,
-            "num_warps": 2
-          },
-          {
-            "kwargs": {
               "BLOCK": 256
             },
             "ms": 0.006175999995321035,
-            "num_stages": 1,
-            "num_warps": 1
+            "num_stages": 3,
+            "num_warps": 4
           },
           {
             "kwargs": {
@@ -2577,7 +2390,15 @@
             },
             "ms": 0.006175999995321035,
             "num_stages": 2,
-            "num_warps": 1
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.006175999995321035,
+            "num_stages": 2,
+            "num_warps": 8
           },
           {
             "kwargs": {
@@ -2585,7 +2406,15 @@
             },
             "ms": 0.006175999995321035,
             "num_stages": 3,
-            "num_warps": 1
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 512
+            },
+            "ms": 0.006175999995321035,
+            "num_stages": 2,
+            "num_warps": 4
           }
         ],
         "searched": [
@@ -2742,7 +2571,15 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 512
+              "BLOCK": 256
+            },
+            "ms": 0.006144000217318535,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
             },
             "ms": 0.006144000217318535,
             "num_stages": 2,
@@ -2750,35 +2587,27 @@
           },
           {
             "kwargs": {
-              "BLOCK": 512
+              "BLOCK": 256
             },
             "ms": 0.006144000217318535,
-            "num_stages": 3,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BLOCK": 1024
-            },
-            "ms": 0.006144000217318535,
-            "num_stages": 1,
+            "num_stages": 2,
             "num_warps": 8
           },
           {
             "kwargs": {
-              "BLOCK": 128
+              "BLOCK": 256
             },
-            "ms": 0.006175999995321035,
-            "num_stages": 1,
-            "num_warps": 1
+            "ms": 0.006144000217318535,
+            "num_stages": 3,
+            "num_warps": 8
           },
           {
             "kwargs": {
-              "BLOCK": 128
+              "BLOCK": 512
             },
-            "ms": 0.006175999995321035,
-            "num_stages": 3,
-            "num_warps": 2
+            "ms": 0.006144000217318535,
+            "num_stages": 2,
+            "num_warps": 4
           }
         ],
         "searched": [
@@ -2933,43 +2762,43 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 512
+              "BLOCK": 1024
             },
-            "ms": 0.0080960001796484,
-            "num_stages": 3,
-            "num_warps": 1
+            "ms": 0.0081599997356534,
+            "num_stages": 2,
+            "num_warps": 4
           },
           {
             "kwargs": {
               "BLOCK": 1024
             },
-            "ms": 0.0080960001796484,
+            "ms": 0.0081599997356534,
             "num_stages": 3,
             "num_warps": 4
           },
           {
             "kwargs": {
-              "BLOCK": 2048
+              "BLOCK": 256
             },
-            "ms": 0.0080960001796484,
-            "num_stages": 1,
-            "num_warps": 8
+            "ms": 0.008191999979317188,
+            "num_stages": 3,
+            "num_warps": 4
           },
           {
             "kwargs": {
-              "BLOCK": 512
+              "BLOCK": 256
             },
-            "ms": 0.008128000423312187,
-            "num_stages": 1,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 512
-            },
-            "ms": 0.008128000423312187,
+            "ms": 0.008191999979317188,
             "num_stages": 2,
-            "num_warps": 1
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.008191999979317188,
+            "num_stages": 2,
+            "num_warps": 8
           }
         ],
         "searched": [
@@ -3126,43 +2955,43 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 512
+              "BLOCK": 2048
             },
             "ms": 0.0081599997356534,
             "num_stages": 2,
-            "num_warps": 1
+            "num_warps": 8
           },
           {
             "kwargs": {
-              "BLOCK": 512
-            },
-            "ms": 0.0081599997356534,
-            "num_stages": 1,
-            "num_warps": 2
-          },
-          {
-            "kwargs": {
-              "BLOCK": 512
-            },
-            "ms": 0.0081599997356534,
-            "num_stages": 2,
-            "num_warps": 2
-          },
-          {
-            "kwargs": {
-              "BLOCK": 512
+              "BLOCK": 2048
             },
             "ms": 0.0081599997356534,
             "num_stages": 3,
-            "num_warps": 2
+            "num_warps": 8
           },
           {
             "kwargs": {
-              "BLOCK": 1024
+              "BLOCK": 256
             },
-            "ms": 0.0081599997356534,
-            "num_stages": 1,
+            "ms": 0.008191999979317188,
+            "num_stages": 3,
             "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.008191999979317188,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.008191999979317188,
+            "num_stages": 2,
+            "num_warps": 8
           }
         ],
         "searched": [
@@ -3319,41 +3148,41 @@
             "kwargs": {
               "BLOCK": 256
             },
-            "ms": 0.0081599997356534,
-            "num_stages": 2,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 256
-            },
-            "ms": 0.0081599997356534,
-            "num_stages": 2,
-            "num_warps": 2
-          },
-          {
-            "kwargs": {
-              "BLOCK": 256
-            },
-            "ms": 0.0081599997356534,
+            "ms": 0.008191999979317188,
             "num_stages": 3,
-            "num_warps": 2
+            "num_warps": 4
           },
           {
             "kwargs": {
               "BLOCK": 256
             },
-            "ms": 0.0081599997356534,
-            "num_stages": 1,
+            "ms": 0.008191999979317188,
+            "num_stages": 2,
             "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.008191999979317188,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.008191999979317188,
+            "num_stages": 3,
+            "num_warps": 8
           },
           {
             "kwargs": {
               "BLOCK": 512
             },
-            "ms": 0.0081599997356534,
-            "num_stages": 1,
-            "num_warps": 1
+            "ms": 0.008191999979317188,
+            "num_stages": 2,
+            "num_warps": 4
           }
         ],
         "searched": [
@@ -3510,43 +3339,43 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 1024
+              "BLOCK": 256
             },
-            "ms": 0.0081599997356534,
-            "num_stages": 2,
-            "num_warps": 2
-          },
-          {
-            "kwargs": {
-              "BLOCK": 1024
-            },
-            "ms": 0.0081599997356534,
+            "ms": 0.008191999979317188,
             "num_stages": 3,
-            "num_warps": 2
+            "num_warps": 4
           },
           {
             "kwargs": {
-              "BLOCK": 2048
+              "BLOCK": 256
             },
-            "ms": 0.0081599997356534,
-            "num_stages": 1,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 2048
-            },
-            "ms": 0.0081599997356534,
+            "ms": 0.008191999979317188,
             "num_stages": 2,
-            "num_warps": 1
+            "num_warps": 4
           },
           {
             "kwargs": {
-              "BLOCK": 2048
+              "BLOCK": 256
             },
-            "ms": 0.0081599997356534,
+            "ms": 0.008191999979317188,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.008191999979317188,
             "num_stages": 3,
-            "num_warps": 1
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 512
+            },
+            "ms": 0.008191999979317188,
+            "num_stages": 2,
+            "num_warps": 4
           }
         ],
         "searched": [
@@ -3701,43 +3530,43 @@
         "entries": [
           {
             "kwargs": {
-              "BLOCK": 4096
+              "BLOCK": 256
             },
             "ms": 0.010208000428974628,
-            "num_stages": 2,
-            "num_warps": 2
+            "num_stages": 3,
+            "num_warps": 8
           },
           {
             "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.010239999741315842,
-            "num_stages": 1,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
-            },
-            "ms": 0.010239999741315842,
-            "num_stages": 2,
-            "num_warps": 1
-          },
-          {
-            "kwargs": {
-              "BLOCK": 128
+              "BLOCK": 256
             },
             "ms": 0.010239999741315842,
             "num_stages": 3,
-            "num_warps": 1
+            "num_warps": 4
           },
           {
             "kwargs": {
-              "BLOCK": 128
+              "BLOCK": 256
             },
             "ms": 0.010239999741315842,
-            "num_stages": 1,
-            "num_warps": 2
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK": 256
+            },
+            "ms": 0.010239999741315842,
+            "num_stages": 2,
+            "num_warps": 8
+          },
+          {
+            "kwargs": {
+              "BLOCK": 512
+            },
+            "ms": 0.010239999741315842,
+            "num_stages": 2,
+            "num_warps": 4
           }
         ],
         "searched": [

@@ -46,7 +46,7 @@
         "kwargs": {
           "BLOCK_ELEMENTS": 512
         },
-        "ms": 0.012256000190973282,
+        "ms": 0.01228800043463707,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -54,7 +54,7 @@
         "kwargs": {
           "BLOCK_ELEMENTS": 512
         },
-        "ms": 0.012256000190973282,
+        "ms": 0.01228800043463707,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -123,7 +123,7 @@
             "kwargs": {
               "BLOCK_ELEMENTS": 512
             },
-            "ms": 0.012256000190973282,
+            "ms": 0.01228800043463707,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -131,7 +131,7 @@
             "kwargs": {
               "BLOCK_ELEMENTS": 512
             },
-            "ms": 0.012256000190973282,
+            "ms": 0.01228800043463707,
             "num_stages": 3,
             "num_warps": 4
           },
@@ -220,7 +220,7 @@
             "kwargs": {
               "BLOCK_ELEMENTS": 1024
             },
-            "ms": 0.03891199827194214,
+            "ms": 0.03888000175356865,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -333,7 +333,7 @@
             "kwargs": {
               "BLOCK_ELEMENTS": 1024
             },
-            "ms": 0.014303999952971935,
+            "ms": 0.014336000196635723,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -341,7 +341,7 @@
             "kwargs": {
               "BLOCK_ELEMENTS": 2048
             },
-            "ms": 0.014336000196635723,
+            "ms": 0.014368000440299511,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -349,7 +349,7 @@
             "kwargs": {
               "BLOCK_ELEMENTS": 512
             },
-            "ms": 0.018400000408291817,
+            "ms": 0.01849599927663803,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -357,7 +357,7 @@
             "kwargs": {
               "BLOCK_ELEMENTS": 512
             },
-            "ms": 0.018400000408291817,
+            "ms": 0.01852799952030182,
             "num_stages": 3,
             "num_warps": 4
           },
@@ -365,7 +365,7 @@
             "kwargs": {
               "BLOCK_ELEMENTS": 512
             },
-            "ms": 0.02457600086927414,
+            "ms": 0.02470399998128414,
             "num_stages": 2,
             "num_warps": 8
           }
@@ -446,7 +446,7 @@
             "kwargs": {
               "BLOCK_ELEMENTS": 1024
             },
-            "ms": 0.02252800017595291,
+            "ms": 0.022495999932289124,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -462,7 +462,7 @@
             "kwargs": {
               "BLOCK_ELEMENTS": 512
             },
-            "ms": 0.03276799991726875,
+            "ms": 0.032607998698949814,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -470,7 +470,7 @@
             "kwargs": {
               "BLOCK_ELEMENTS": 512
             },
-            "ms": 0.03276799991726875,
+            "ms": 0.032607998698949814,
             "num_stages": 3,
             "num_warps": 4
           },
