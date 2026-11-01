@@ -509,6 +509,15 @@ def install_native_recorders() -> None:
         b200_train.backward_small = b200_contract(b200_train._backward_small_fake)
         b200_train.forms_op = b200_contract(b200_train._forms_op_fake)
 
+        # B200 Chai-1 OPM (kernels.outer_product_mean.chai, groups 8): its opaque forward / backward launch opm_wide_sm100 on the arguments
+        # (no fake inside: "data is not allocated yet"); the fakes are the contract, and the ops launch no tuned Triton kernel of their own.
+        from miniworld_engine.kernels.outer_product_mean import chai as opm_chai
+
+        opm_chai._fwd_op = lambda args, eps, eps_prod, train: (  # ty: ignore[invalid-assignment]
+            require_fake(args[0]), opm_chai._fwd_op_fake(args, eps, eps_prod, train))[1]
+        opm_chai._bwd_op = lambda args, kept, dz, eps, eps_prod: (  # ty: ignore[invalid-assignment]
+            require_fake(dz), opm_chai._bwd_op_fake(args, kept, dz, eps, eps_prod))[1]
+
     # Every hand-CUDA launch is an opaque op with a fake (``kernels/_compile.opaque``). With ``compile_wrap=disable`` its body would
     # run: on a Hopper / Blackwell card the extension loads and launches on FakeTensors (a null pointer: "data is not allocated yet",
     # then a sticky illegal-address error that fails every later unit), and on another card it builds for nothing. The fake is the
