@@ -239,9 +239,9 @@ __global__ void __launch_bounds__(256, 2) ln_bias_fwd_k(const bf16* __restrict__
 // A consumer warp ldmatrix-loads its 16 rows of x straight into the wgmma A-fragment layout (16 k16 blocks), releases the x stage and
 // normalises in registers (a row's 256 channels sit on the 4 lanes of a quad: the statistics are two quad sums; y = fp16 of the fp32
 // LayerNorm, the value ln_fwd_k writes).  The fp16 weights [4 HD][256] do not fit beside it (512 KiB), so they stream through a ring
-// of 64-column chunks (32 KiB) shared by both consumer warpgroups and by the two CTAs of a cluster (each CTA's producer loads half of
-// every chunk, multicast to both: the L2 serves each chunk once per 256 rows); every chunk is 16 m64n64k16 RS wgmma per warpgroup,
-// double-buffered so chunk c + 1 runs on the tensor core while chunk c is stored.  The weight rows are permuted within each chunk so
+// of 64-column chunks (32 KiB) shared by both consumer warpgroups (optionally by the two CTAs of a cluster, each CTA's producer
+// loading half of every chunk, multicast to both: measured level); every chunk is 16 m64n64k16 RS wgmma per warpgroup, retired
+// before it is stored (the other warpgroup fills the tensor core).  The weight rows are permuted within each chunk so
 // that a lane's 16 accumulator columns of a row are 2 x 8 consecutive output columns: every lane stores 16 contiguous bytes, a warp
 // store covers 8 rows x 64 bytes (whole sectors), no staging.  The bias (8 resident Wb rows, one m64n8 chain) leaves through shared
 // memory as [8 heads][128 keys] in 16-byte stores.  The kernel is HBM-bound: it writes four times what it reads.
@@ -394,7 +394,7 @@ __global__ void __launch_bounds__(fc::THREADS, 1) front_c256_sm90(
       }
       const long row = (long)t * BM + 64 * w + 16 * wi + g8;      // this lane's first row; its second is row + 8
       const int ldo = nch * NC;
-      float acc0[32], acc1[32];
+      float acc0[32];
       auto take = [&](float (&acc)[32]) -> int {               // the next ring stage: wait for its chunk, issue its GEMM
         const int s = ws;
         sm90::wait(wf(s), wph);
@@ -427,20 +427,13 @@ __global__ void __launch_bounds__(fc::THREADS, 1) front_c256_sm90(
           }
         }
       };
-      // chunks in pairs (nch is even), so each accumulator set is a fixed register range: chunk c + 1 runs while chunk c is stored
-      int stg0 = take(acc0);
+      // one accumulator set: each chunk retires before it is stored (the other warpgroup keeps the tensor core busy).  Two sets, chunk
+      // c + 1 issued while chunk c is stored, spilled 104 bytes per thread at the 168-register cap of 384 threads: 2.90 vs 2.49 ms at L1536
 #pragma unroll
-      for (int c = 0; c < nch; c += 2) {
-        const int stg1 = take(acc1);
-        sm90::wg_wait<1>();
-        finish(acc0, stg0, c);
-        if (c + 2 < nch) {
-          stg0 = take(acc0);
-          sm90::wg_wait<1>();
-        } else {
-          sm90::wg_wait<0>();
-        }
-        finish(acc1, stg1, c + 1);
+      for (int c = 0; c < nch; ++c) {
+        const int stg = take(acc0);
+        sm90::wg_wait<0>();
+        finish(acc0, stg, c);
       }
       // the bias: one m64n8 chain over the resident Wb; lanes hold heads 2 t4, 2 t4 + 1 of rows g, g + 8
       float bacc[4];

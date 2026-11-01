@@ -37,10 +37,12 @@ TOK = _core_mod.TOK
 
 
 @functools.lru_cache(maxsize=None)
-def _glue():
+def _glue(defs: tuple[str, ...] = ()):
+    """The width-generic glue kernels; `defs` = extra -D knobs (experiments), part of the build name."""
     ensure_cuda_home()
+    tag = "".join(f"_{d.replace("=", "").lower()}" for d in defs)
     return load_extension(
-        name="triattn_h100_generic_v5",
+        name=f"triattn_h100_generic{tag}_v5",
         sources=[str(_SRC / "triattn_generic_sm90.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -49,6 +51,7 @@ def _glue():
             *gencodes("90a"),
             "--use_fast_math",
             "-DNDEBUG",
+            *(f"-D{d}" for d in defs),
         ],
         verbose=True,
     )
