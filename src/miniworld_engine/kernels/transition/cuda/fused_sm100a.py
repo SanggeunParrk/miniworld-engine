@@ -202,12 +202,11 @@ def _ext():
 
 @functools.lru_cache(maxsize=8)
 def _is_b200(index: int) -> bool:
-    props = torch.cuda.get_device_properties(index)
-    # the backward's role split needs whole 2-CTA clusters on both sides of 8 * DW_REPL
-    return (props.major, props.minor) == (
-        10,
-        0,
-    ) and props.multi_processor_count % 2 == 0
+    # The arch through `torch.cuda.get_device_capability`, as every other dispatch site reads it (and the one `dev derive --arch` patches:
+    # read from the properties, a derivation for sm86 / sm90 on a B200 took this path and recorded no Transition Triton launch).
+    # The backward's role split needs whole 2-CTA clusters on both sides of 8 * DW_REPL.
+    return (torch.cuda.get_device_capability(index) == (10, 0)
+            and torch.cuda.get_device_properties(index).multi_processor_count % 2 == 0)
 
 
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
