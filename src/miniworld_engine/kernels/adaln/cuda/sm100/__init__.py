@@ -25,6 +25,8 @@ import torch
 from miniworld_engine.kernels._compile import opaque
 
 _dir = Path(__file__).parent
+#: the sm_100a primitives (mbarrier, TMA, tcgen05) shared with the Transition kernels: kernels/transition/cuda/sm100/sm100.cuh
+_inc = _dir.parent.parent.parent / "transition" / "cuda" / "sm100"
 #: Output-tile widths per dtype, widest first (two accumulators double-buffered: 2 x 2 x BN <= 512 tensor-memory columns; a bf16 output is
 #: staged in 64-column groups)
 _BNS = {False: (128, 64), True: (128, 64, 32)}
@@ -69,7 +71,7 @@ def _load_fused(f32: bool, bn: int, kc: int, dx: int):
     from miniworld_engine.kernels.transition.cuda import fused_sm100a
 
     tag = f"{'f32' if f32 else 'bf16'}_bn{bn}_k{kc}_d{dx}"
-    inc = _dir   # this directory's frozen copy of the sm_100a primitives (sm100.cuh)
+    inc = _inc
     path = _nvcc.cubin(f"adaln_sm100a/fused_{tag}", ["-std=c++17", "-O3", "-arch=sm_100a", "-cubin", f"-I{inc}", f"-DF32={int(f32)}",
                                                      f"-DBN={bn}", f"-DKC={kc}", f"-DDX={dx}"], source=_dir / "adaln_fused_sm100.cu",
                        toolchain="sm100")
@@ -111,7 +113,7 @@ def _load(f32: bool, bn: int, stg: int = 2):
     from miniworld_engine.kernels.transition.cuda import fused_sm100a
 
     tag = f"{'f32' if f32 else 'bf16'}_bn{bn}_s{stg}"
-    inc = _dir   # this directory's frozen copy of the sm_100a primitives (sm100.cuh)
+    inc = _inc
     path = _nvcc.cubin(f"adaln_sm100a/gemm_{tag}", ["-std=c++17", "-O3", "-arch=sm_100a", "-cubin", f"-I{inc}", f"-DF32={int(f32)}",
                                                     f"-DBN={bn}", f"-DSTGP={stg}"], source=_dir / "adaln_gemm_sm100.cu", toolchain="sm100")
     ext = fused_sm100a._ext()
