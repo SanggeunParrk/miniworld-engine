@@ -191,7 +191,8 @@ replacement when the name is one that 2.3.12 removed (see the CHANGELOG).
   (`dispatch.fp32_gate`), LayerNorm, RMSNorm, every `ops.*` facade, and -- through `portable_leg_allowed(..., dtype=)` -- `LocalDiTBlock`,
   the DiT variant stacks, SWADiTBlock and the SWA atom attention.
 * A kernel that runs at one precision whatever the call's is asked at that precision (`records._RUNS_AT`): the split attention backward's
-  `augmented_attention_bwd_reduce_triton` sums fp32 partials in a bf16 training call, so that call needs the card's fp32 row for it. A
+  `augmented_attention_bwd_reduce_triton` sums fp32 partials in a bf16 training call, so that call needs the card's fp32 row for it. The
+  SWA DiT window-attention kernels (`swa_dit_softmax_*`) run on bf16 operands inside the fp32 block, so an fp32 call needs their bf16 rows. A
   kernel that runs only without a recorded backward (`records._INFERENCE_ONLY`: the MPNN no-save message fusion) counts for inference calls
   only.
 * LayerNorm and RMSNorm resolve the forward kernels when built and ask again per call (`portable_blocked`): a training call needs the

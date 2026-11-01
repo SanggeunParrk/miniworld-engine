@@ -168,7 +168,15 @@ UNREGISTERED_OPS: dict[str, tuple[str, ...]] = {}
 #: backward: a bf16 training call launches it on fp32 tensors (``registry_kernel.units.json``: every bf16 ``train`` unit of
 #: augmented_attention / projected_attention records it at float32). Such a kernel counts for every call of its ops and is asked at
 #: its own precision (:func:`row_dtype`).
-_RUNS_AT: dict[str, str] = {"augmented_attention_bwd_reduce_triton": "fp32"}
+_RUNS_AT: dict[str, str] = {
+    "augmented_attention_bwd_reduce_triton": "fp32",
+    # The SWA DiT window attention (kernels/swa_dit/triton): the fp32 block runs its projections and FFN in fp32 (`*_fp32_triton`) around
+    # the SAME window-attention kernels on bf16 operands (`swa_dit/dispatch.py`; an H100 launch spy of the fp32 drivers, forward and
+    # backward, saw bfloat16 operands with fp32 statistics, 2026-11-01): an fp32 call launches them at their bf16 contract.
+    "swa_dit_softmax_fwd_triton": "bf16",
+    "swa_dit_softmax_bwd_dq_triton": "bf16",
+    "swa_dit_softmax_bwd_dkdv_triton": "bf16",
+}
 
 #: Kernels whose name carries a training word but which every INFERENCE forward of their ops launches too (``registry_kernel.units.json``:
 #: the LayerNorm forward that saves its statistics runs in each ``eval`` unit of Transition, TriMul, TriangleAttention, AugmentedAttention).

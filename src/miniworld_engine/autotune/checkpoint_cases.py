@@ -12,6 +12,8 @@ from torch import nn
 NAMES = (
     "layernorm_linear_atom_output",
     "rms_norm_modulation",
+    # ops.gated_residual: x + gate * branch, SWADiTBlock's per-op adaLN-Zero residual (atom stream, augmented rows)
+    "gated_residual",
     "triangle_attention_checkpoint",
     "gated_linear",
     "swiglu_ffn",
@@ -59,6 +61,8 @@ class Leaf(nn.Module):
             return y + gate
         if self.kind == "gated_linear":
             return ops.gated_linear(*args, self.weight)
+        if self.kind == "gated_residual":
+            return ops.gated_residual(*args)
         if self.kind == "swiglu_ffn":
             return ops.swiglu_ffn(*args, self.wa, self.wb, self.ws)
         if self.kind in ("layernorm_linear_native", "layernorm_linear_atom_output"):
@@ -105,6 +109,8 @@ def _inputs(kind, b, length, dims, dt, stream):
             ),
         )
     x = _activation(b, length, width, dt, stream)
+    if kind == "gated_residual":
+        return (x, torch.randn_like(x), torch.randn_like(x))
     return (x, torch.randn_like(x)) if kind == "gated_linear" else (x,)
 
 

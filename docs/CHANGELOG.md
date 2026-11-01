@@ -10,6 +10,12 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Fixed
 
+- H100 autotune caches for the five Triton kernels registered on 2026-10-31 (grid build, merged): no more "no tuned autotune cache"
+  warning for the covered shapes; up to 26% faster (pair-bias backward) and 19% (MPNN no-grad fusion), never slower beyond noise
+  (`docs/records/h100_triton_caches_20261101.md`). The pre-registration launch rules apply to the default config set only, so measured
+  winners take effect.
+- The SWA DiT window-attention kernels run on bf16 operands inside the fp32 block (launch spy): an fp32 `swa_dit` call counts them at bf16
+  (`records._RUNS_AT`).
 - The record gate asks an fp32 call for fp32 rows in `LocalDiTBlock`, the DiT variant stacks, `SWADiTBlock` and the SWA atom attention too
   (`dispatch.portable_leg_allowed(..., dtype=)`). H100 / B200 unchanged. Record: `docs/records/triton_gate_rows_20261031.md`.
 - Registry rows (driver, check, H100-calibrated band, config ladders) for the Triton kernels that had none: `gated_projection_fwd_residual_triton`

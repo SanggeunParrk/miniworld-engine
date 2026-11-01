@@ -115,14 +115,17 @@ def gated_projection_bwd_dx_triton() -> None:
 #: (`pair_bias.supported`: C a power of two, 16 .. 512), so a ragged or non-power-of-two width is not one this kernel ever sees.
 _PB_C = aligned_only("bias_only_attention.pair_bias_c", 1 << (driver_width(128).bit_length() - 1),
                      "the row block holds a whole pair row: C is a power of two")
+#: The outputs: BiasOnlyDiTBlock's heads (16 at the default widths, the call the model makes; the key folds N, so the driver has to
+#: launch the count production launches for its cache entry to be the one production reads).
+_PB_N = 16
 
 
 def _pair_bias_inputs(grad: bool = False) -> tuple[torch.Tensor, ...]:
     """pair [1, L, L, C] (the channel count the kernel serves: a power of two), the LayerNorm weight [C] and the bias projection
-    [H, C] -- BiasOnlyAttention's ``ln_pair`` / ``to_bias``."""
+    [16, C] -- BiasOnlyAttention's ``ln_pair`` / ``to_bias``."""
     pair = torch.randn(1, L, L, _PB_C, device=dev(), dtype=BF16, requires_grad=grad)
     gamma = (1.0 + 0.1 * torch.randn(_PB_C, device=dev())).requires_grad_(grad)
-    weight = (torch.randn(H, _PB_C, device=dev()) * _PB_C**-0.5).requires_grad_(grad)
+    weight = (torch.randn(_PB_N, _PB_C, device=dev()) * _PB_C**-0.5).requires_grad_(grad)
     return pair, gamma, weight
 
 

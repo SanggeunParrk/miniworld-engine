@@ -47,15 +47,24 @@ def _bwd_warps(c: int) -> int:
 
 
 def _bwd_prune(configs, nargs, **meta):
-    """Outside a build, the warps ``_bwd_warps`` picks for this channel count (the launch these kernels had before they were tuned);
-    a build (``settings.run_autotune``) searches every config."""
+    """Over the DEFAULT config set and outside a build, the warps ``_bwd_warps`` picks for this channel count (the launch these kernels
+    had before they were tuned). A build (``settings.run_autotune``) searches every config, and a tuned cache's measured winners -- the
+    cache reader hands them through this prune again, as new Config objects -- are left as they are."""
     from miniworld_engine import settings
 
-    if settings.current().run_autotune:
+    if settings.current().run_autotune or not _from(configs, _BWD_DEFAULTS):
         return configs
     want = _bwd_warps(int(nargs["C"] if "C" in nargs else meta["C"]))   # C reaches the prune as a launch keyword
     keep = [c for c in configs if c.num_warps == want]
     return keep or configs
+
+
+def _from(configs, live) -> bool:
+    """Are these configs (by identity) the live default list ``configs_for`` handed the autotuner, rather than measured winners?"""
+    return all(any(c is d for d in live) for c in configs)
+
+
+_BWD_DEFAULTS = configs_for("bias_only_attention_bwd_layernorm_gemm_triton")
 
 
 @triton.autotune(configs=configs_for("bias_only_attention_layernorm_gemm_triton"), key=["shape_key"])

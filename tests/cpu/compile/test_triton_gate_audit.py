@@ -41,6 +41,7 @@ MODULE_OPS = {
     "pairformer_block": ("transition", "triangle_multiplication", "triangle_attention"),
     "projected_attention": ("augmented_attention_pair_bias",),
     "rms_norm_modulation": ("rms_norm_modulation",),
+    "gated_residual": ("gated_residual",),
     "swa_atom_attention": ("swa_atom_attention",),
     "swiglu_ffn": ("swiglu_ffn",),
     "transition": ("transition",),
@@ -301,25 +302,28 @@ def test_the_split_backward_reduce_is_asked_at_its_own_precision(monkeypatch, ma
 
 
 def test_the_early_prunes_keep_the_launch_the_kernels_had_before_they_were_tuned():
-    """Outside a build, the default config sets prune to the fixed launches of before: the pair-bias backward's warps by channel count,
-    the MPNN no-grad fusion's policy by group count (and never a row tile that cannot hold its groups)."""
+    """Over the DEFAULT config sets and outside a build, the prunes pick the fixed launches of before: the pair-bias backward's warps by
+    channel count, the MPNN no-grad fusion's policy by group count. Measured winners (new Config objects from a tuned cache) and a build
+    pass through untouched -- except that an MPNN row tile that cannot hold its groups is never kept."""
     import triton
 
-    from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import _bwd_prune
-    from miniworld_engine.kernels.mpnn_message.triton.inference import _prune
+    from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import _BWD_DEFAULTS, _bwd_prune
+    from miniworld_engine.kernels.mpnn_message.triton.inference import _DEFAULTS, _prune
 
-    warps = [triton.Config({}, num_warps=4, num_stages=2), triton.Config({}, num_warps=8, num_stages=2)]
-    assert [c.num_warps for c in _bwd_prune(warps, {}, C=128)] == [4]
-    assert [c.num_warps for c in _bwd_prune(warps, {}, C=256)] == [8]
-    policy = [triton.Config({"GROUPS_PER_CTA": 1, "BLOCK_M": 64, "BLOCK_K": 16, "COALESCED_WEIGHT_LOAD": 1}, num_warps=2),
-              triton.Config({"GROUPS_PER_CTA": 2, "BLOCK_M": 128, "BLOCK_K": 32, "COALESCED_WEIGHT_LOAD": 0}, num_warps=4),
-              triton.Config({"GROUPS_PER_CTA": 2, "BLOCK_M": 64, "BLOCK_K": 32, "COALESCED_WEIGHT_LOAD": 0}, num_warps=4)]
-    assert [c.kwargs["GROUPS_PER_CTA"] for c in _prune(policy, {"groups": 100})] == [1]
-    assert [(c.kwargs["GROUPS_PER_CTA"], c.kwargs["BLOCK_M"]) for c in _prune(policy, {"groups": 4096})] == [(2, 128)]
+    assert [c.num_warps for c in _BWD_DEFAULTS] == [4, 8]
+    assert [c.num_warps for c in _bwd_prune(list(_BWD_DEFAULTS), {}, C=128)] == [4]
+    assert [c.num_warps for c in _bwd_prune(list(_BWD_DEFAULTS), {}, C=256)] == [8]
+    winners = [triton.Config({"BR": 32}, num_warps=4, num_stages=3), triton.Config({"BR": 64}, num_warps=8, num_stages=2)]
+    assert _bwd_prune(winners, {}, C=128) == winners                      # a tuned cache's winners are not re-pruned
+    assert [c.kwargs["GROUPS_PER_CTA"] for c in _prune(list(_DEFAULTS), {"groups": 100})] == [1]
+    assert [c.kwargs["GROUPS_PER_CTA"] for c in _prune(list(_DEFAULTS), {"groups": 4096})] == [2]
+    measured = [triton.Config({"GROUPS_PER_CTA": 2, "BLOCK_M": 128, "BLOCK_K": 32, "COALESCED_WEIGHT_LOAD": 1}, num_warps=4),
+                triton.Config({"GROUPS_PER_CTA": 2, "BLOCK_M": 64, "BLOCK_K": 32, "COALESCED_WEIGHT_LOAD": 0}, num_warps=4)]
+    assert _prune(measured, {"groups": 100}) == measured[:1]              # the policy does not apply; the invalid tile is still dropped
     settings.configure(run_autotune=True)
     try:
-        assert len(_prune(policy, {"groups": 100})) == 2          # a build searches every valid config
-        assert len(_bwd_prune(warps, {}, C=128)) == 2
+        assert len(_prune(list(_DEFAULTS), {"groups": 100})) == 2          # a build searches every valid config
+        assert len(_bwd_prune(list(_BWD_DEFAULTS), {}, C=128)) == 2
     finally:
         settings.configure(run_autotune=False)
 
@@ -332,3 +336,12 @@ def test_the_mpnn_no_grad_fusion_counts_for_inference_only():
     assert "mpnn_message_fwd_gemm_gelu_reduce_triton" in infer
     assert "mpnn_message_fwd_gemm_gelu_reduce_triton" not in train
     assert records.recorded("mpnn_message", "NVIDIA RTX A5000", (8, 6), mode="training")
+
+
+def test_the_swa_window_attention_counts_for_fp32_calls_at_bf16():
+    """The fp32 SWA DiT block runs the window-attention kernels on bf16 operands: an fp32 call counts them and asks their bf16 rows."""
+    for k in ("swa_dit_softmax_fwd_triton", "swa_dit_softmax_bwd_dq_triton", "swa_dit_softmax_bwd_dkdv_triton"):
+        assert k in records.triton_kernels("swa_dit", "fp32", "training"), k
+        assert records.row_dtype(k, "fp32") == "bf16"
+    assert "swa_dit_softmax_fwd_triton" in records.triton_kernels("swa_dit", "fp32", "inference")
+    assert "swa_dit_softmax_bwd_dq_triton" not in records.triton_kernels("swa_dit", "fp32", "inference")

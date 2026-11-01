@@ -37,12 +37,16 @@ def _policy_groups(groups: int) -> int:
     return 1 if groups <= _SMALL_GROUP_LIMIT else 2
 
 
+_DEFAULTS = configs_for("mpnn_message_fwd_gemm_gelu_reduce_triton")
+
+
 def _prune(configs, nargs, **meta):
-    """Configs whose row tile holds their groups (always); outside a build, the policy's groups per CTA for this group count."""
+    """Configs whose row tile holds their groups (always); over the DEFAULT config set and outside a build, the policy's groups per CTA
+    for this group count. A tuned cache's measured winners (handed through this prune again as new Config objects) are left as they are."""
     from miniworld_engine import settings
 
     valid = [c for c in configs if c.kwargs["BLOCK_M"] >= c.kwargs["GROUPS_PER_CTA"] * _NEIGHBORS]
-    if settings.current().run_autotune:
+    if settings.current().run_autotune or not all(any(c is d for d in _DEFAULTS) for c in configs):
         return valid
     groups = int(nargs["groups"] if "groups" in nargs else meta["groups"])
     keep = [c for c in valid if c.kwargs["GROUPS_PER_CTA"] == _policy_groups(groups)]
