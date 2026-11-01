@@ -132,20 +132,36 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
   __syncthreads();
   tc_fence_after();
   const uint32_t tmem = B.tmem;
+  const int nk = K / BKE;
+  // the weight tiles of the first ring stages do not depend on the row pass: issued before waiting for it (the row pass triggers this
+  // launch at its start, so they and the prologue above run under it)
+  const int npre = (int)blockIdx.x < tiles ? (nk < NST ? nk : NST) : 0;
+  if (warp == 0 && lane == 0) {
+    const int n0 = ((int)blockIdx.x % NT) * BN;
+    for (int k = 0; k < npre; ++k) {
+      mbar_expect_tx(&B.full[k], A_BYTES + NACC * B_BYTES);
+      const uint32_t base = su + O_ST + k * STAGE;
+      tma_load_2d(base + A_BYTES, &mB0, &B.full[k], k * BKE, n0);
+      tma_load_2d(base + A_BYTES + B_BYTES, &mB1, &B.full[k], k * BKE, n0);
+    }
+  }
   pdl_wait();   // cn and the statistics come from the row pass this launch depends on
 
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------------ producer
     if (lane == 0) {
       int it = 0;
-      const int nk = K / BKE;
       for (int t = blockIdx.x; t < tiles; t += gridDim.x) {
         const int m0 = (t / NT) * 128, n0 = (t % NT) * BN;
         for (int k = 0; k < nk; ++k, ++it) {
           const int s = it % NST;
+          const uint32_t base = su + O_ST + s * STAGE;
+          if (it < npre) {   // this stage's weight tiles are in flight already (above)
+            tma_load_2d(base, &mA, &B.full[s], k * BKE, m0);
+            continue;
+          }
           mbar_wait(&B.empty[s], ((it / NST) & 1) ^ 1);
           mbar_expect_tx(&B.full[s], A_BYTES + NACC * B_BYTES);
-          const uint32_t base = su + O_ST + s * STAGE;
           tma_load_2d(base, &mA, &B.full[s], k * BKE, m0);
           tma_load_2d(base + A_BYTES, &mB0, &B.full[s], k * BKE, n0);
           tma_load_2d(base + A_BYTES + B_BYTES, &mB1, &B.full[s], k * BKE, n0);
@@ -196,12 +212,30 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
       const int row = m0 + q4 * 32 + lane;
       const bool rok = row < M;
       const float2 st = rok ? ST[row] : make_float2(0.f, 0.f);   // (rstd, mean rstd): x_hat = x rstd - mean rstd
+      // the gate bias of this warp's columns of the tile (at most two 32-column units), loaded before the accumulator wait: in the
+      // group loop it was a dependent global load (a DRAM round trip on a cold cache) between the MMA and the first store
+      constexpr int NGW = UPG == 1 ? (BN / OCG + 1) / 2 : BN / OCG;   // groups this warp handles
+      float bsr[NGW][32];
+#pragma unroll
+      for (int j = 0; j < NGW; ++j) {
+        const int g = UPG == 1 ? half + 2 * j : j;
+        const int cb = n0 + g * OCG + (UPG == 1 ? 0 : half) * 32;
+#pragma unroll
+        for (int e = 0; e < 32; ++e) bsr[j][e] = (g < BN / OCG && cb + e < N) ? __ldg(BS + cb + e) : 0.f;
+      }
+      float xpre[32];                                        // x of the first group, also in flight under the accumulator wait
+      {
+        const int g0 = UPG == 1 ? half : 0;
+        if (g0 < BN / OCG && n0 + g0 * OCG < N) load32(X, (long)row * ldx + n0 + g0 * OCG + (UPG == 1 ? 0 : half) * 32, rok, xpre);
+      }
       mbar_wait(&B.accf[buf], (tc >> 1) & 1);
       tc_fence_after();
       const uint32_t tb = tmem + ((uint32_t)(q4 * 32) << 16) + buf * TCOLS;
-      for (int g = (UPG == 1 ? half : 0); g < BN / OCG; g += (UPG == 1 ? 2 : 1), ++grp) {
+#pragma unroll
+      for (int jg = 0; jg < NGW; ++jg, ++grp) {              // this warp's groups (UPG == 1: g % 2 == half), jg indexes bsr
+        const int g = UPG == 1 ? half + 2 * jg : jg;
         const int c0 = n0 + g * OCG;                         // first output column of the group
-        if (c0 >= N) break;
+        if (g >= BN / OCG || c0 >= N) break;
         const int par = STG_PAR == 2 ? (grp & 1) : 0;
         if (storer && lane == 0) { if (STG_PAR == 2) tma_store_wait_read1(); else tma_store_wait_read0(); }
         if (UPG == 2) named_bar_sync(1 + q4, 64); else __syncwarp();
@@ -209,14 +243,19 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
           const int u = UPG == 1 ? 0 : half;
           const int col = g * OCG + u * 32;                  // column within the tile
           float o[32];
-          load32(X, (long)row * ldx + n0 + col, rok, o);     // x, issued before the tensor-memory loads
+          if (jg == 0) {
+#pragma unroll
+            for (int e = 0; e < 32; ++e) o[e] = xpre[e];
+          } else {
+            load32(X, (long)row * ldx + n0 + col, rok, o);   // x, issued before the tensor-memory loads
+          }
           uint32_t acc[NACC][32];
 #pragma unroll
           for (int j = 0; j < NACC; ++j) tmem_ld32(tb + j * BN + col, acc[j]);
           tmem_wait_ld();
 #pragma unroll
           for (int e = 0; e < 32; ++e) {
-            const float sp = __uint_as_float(acc[1][e]) + __ldg(BS + n0 + col + e);
+            const float sp = __uint_as_float(acc[1][e]) + bsr[jg][e];
             const float y = sigm(sp) * (o[e] * st.x - st.y) + __uint_as_float(acc[0][e]);
             o[e] = (F32 && rna) ? tf32r(y) : y;
           }

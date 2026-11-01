@@ -100,6 +100,10 @@ def _fused(x2, c2, wc, wb, ws, bs, eps_x, eps_c, rna, nsm):
     return y
 
 
+#: Row counts up to which the row pass lets the GEMM launch at its start (``ln_cond_xstats_k``'s ``early``): the GEMM's prologue and its
+#: first weight tiles then run under the pass. Measured (ladder, bf16 d768): c384 1920 rows 18.2 -> 16.4 us; 3840 rows 22.3 -> 24.4 us with it
+EARLY_PDL_ROWS = 2560
+
 #: staging buffers per epilogue warp of the GEMM (2: double-buffered stores; 1: a deeper operand ring), by dtype. fp32: 1 (measured,
 #: CUDA-graph replay per call: [1920 / 3840, 768] c384 17.9 / 25.1 -> 17.3 / 24.2 us)
 STAGING = {False: 2, True: 1}
@@ -199,7 +203,7 @@ def _infer(x2: torch.Tensor, c2: torch.Tensor, wc: torch.Tensor, wb: torch.Tenso
     dc = c2.shape[1]
     if _fused_ok(d, dc):
         return _fused(x2, c2, wc.contiguous(), wb, ws, bs, eps_x, eps_c, rna, num_sms(x2.device))
-    cn, st = _rows_ext().ln_cond_xstats(c2, wc.contiguous(), x2, float(eps_c), float(eps_x), f32)
+    cn, st = _rows_ext().ln_cond_xstats(c2, wc.contiguous(), x2, float(eps_c), float(eps_x), f32, m <= EARLY_PDL_ROWS)
     nsm = num_sms(x2.device)
     bn = BN_FORCE or _pick_bn(m, d, f32, nsm)
     ext, name = _load(f32, bn, STAGING[f32])

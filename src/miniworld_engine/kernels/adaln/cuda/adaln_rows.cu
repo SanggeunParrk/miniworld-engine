@@ -160,12 +160,20 @@ __device__ __forceinline__ void stats_rt(const float (&v)[32], int n, float eps,
 template <typename T>
 __global__ void __launch_bounds__(32 * WPB) ln_cond_xstats_k(const T* __restrict__ C, const float* __restrict__ W, const T* __restrict__ X,
                                                              T* __restrict__ CN, float2* __restrict__ STX, int NC, int NX, long R, float eps_c,
-                                                             float eps_x, bool rna) {
+                                                             float eps_x, bool rna, bool early) {
+  // early: the dependent GEMM may launch now -- its prologue, tensor-memory allocation and the weight loads of its first ring stages (which
+  // do not read this kernel's output) then run under this pass; its griddepcontrol.wait still waits for this whole grid to complete and
+  // flush. Only while the GEMM's CTAs and this pass fit the SMs together (a few thousand rows): at 3840 rows (bf16 d768) the early GEMM
+  // CTAs cost the pass more than they saved (ladder 22.3 -> 24.4 us); there the trigger stays at the end of each block.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  if (early) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
   const int lane = threadIdx.x & 31;
   const long row = (long)blockIdx.x * WPB + (threadIdx.x >> 5);
   if (row < R) {
-    float v[32], mean, rstd;
+    float v[32], xv[32], mean, rstd;
     ld_row_rt(C + row * NC, NC, lane, v);
+    ld_row_rt(X + row * NX, NX, lane, xv);   // both rows in flight together: one memory round trip, not two
     stats_rt(v, NC, eps_c, mean, rstd);
 #pragma unroll
     for (int k = 0; k < 8; ++k) {
@@ -177,12 +185,11 @@ __global__ void __launch_bounds__(32 * WPB) ln_cond_xstats_k(const T* __restrict
         st4(CN + row * NC + 4 * (lane + 32 * k), o);
       }
     }
-    ld_row_rt(X + row * NX, NX, lane, v);
-    stats_rt(v, NX, eps_x, mean, rstd);
+    stats_rt(xv, NX, eps_x, mean, rstd);
     if (lane == 0) STX[row] = make_float2(rstd, mean * rstd);
   }
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  if (!early) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 #endif
 }
 
@@ -568,7 +575,7 @@ std::vector<at::Tensor> ln_cond_fwd_t(at::Tensor cond, at::Tensor w, double eps)
 }
 
 // (cn, x statistics [R, 2] = (rstd, mean rstd)) for the B200 inference GEMM (see ln_cond_xstats_k); cond / x of one dtype, widths multiples of 128 up to 1024
-std::vector<at::Tensor> ln_cond_xstats(at::Tensor cond, at::Tensor w, at::Tensor x, double eps_c, double eps_x, bool rna) {
+std::vector<at::Tensor> ln_cond_xstats(at::Tensor cond, at::Tensor w, at::Tensor x, double eps_c, double eps_x, bool rna, bool early_pdl) {
   chk_act(cond, "cond");
   chk_act(x, "x");
   chk(w, at::kFloat, "wc");
@@ -580,10 +587,10 @@ std::vector<at::Tensor> ln_cond_xstats(at::Tensor cond, at::Tensor w, at::Tensor
   auto st = at::empty({R, 2}, cond.options().dtype(at::kFloat));
   if (cond.scalar_type() == at::kBFloat16)
     ln_cond_xstats_k<bf><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<bf>(cond), w.data_ptr<float>(), P<bf>(x), PM<bf>(cn), reinterpret_cast<float2*>(st.data_ptr()),
-                                                             (int)NC, (int)NX, R, (float)eps_c, (float)eps_x, false);
+                                                             (int)NC, (int)NX, R, (float)eps_c, (float)eps_x, false, early_pdl);
   else
     ln_cond_xstats_k<float><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<float>(cond), w.data_ptr<float>(), P<float>(x), PM<float>(cn),
-                                                                reinterpret_cast<float2*>(st.data_ptr()), (int)NC, (int)NX, R, (float)eps_c, (float)eps_x, rna);
+                                                                reinterpret_cast<float2*>(st.data_ptr()), (int)NC, (int)NX, R, (float)eps_c, (float)eps_x, rna, early_pdl);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {cn, st};
 }
@@ -861,7 +868,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("colsum2", &colsum2);
   m.def("ln_cond_fwd", &ln_cond_fwd);
   m.def("ln_cond_fwd_t", &ln_cond_fwd_t);
-  m.def("ln_cond_xstats", &ln_cond_xstats);
+  m.def("ln_cond_xstats", &ln_cond_xstats, py::arg("cond"), py::arg("w"), py::arg("x"), py::arg("eps_c"), py::arg("eps_x"), py::arg("rna"),
+        py::arg("early_pdl") = false);
   m.def("adaln_fwd", &adaln_fwd, py::arg("x"), py::arg("sb"), py::arg("eps"), py::arg("rna") = false);
   m.def("adaln_bwd", &adaln_bwd, py::arg("dy"), py::arg("x"), py::arg("sb"), py::arg("st"), py::arg("add") = py::none(), py::arg("rna") = false);
   m.def("adaln_bwd_t", &adaln_bwd_t, py::arg("dy"), py::arg("x"), py::arg("sb"), py::arg("st"), py::arg("add") = py::none(), py::arg("gmul") = 2);
