@@ -168,6 +168,15 @@ class ConditionedTransition(nn.Module):
                                                               and ct_inference.supported(x2, cond2, nd, d)))):
             return None
         ada = self.ada_ln_in
+        if b200 and ct_sm100.head_supported(x2, cond2, nd, d):   # B200 bf16, few rows: the AdaLN and the gate projection in one kernel
+            fold = residual and x_in.dtype == compute_dtype
+            with torch.autocast(device_type=device_type, enabled=False):
+                y = ct_sm100.head_inference(
+                    x2, cond2, ada.ln_cond.weight, ada.to_scale.weight, ada.to_scale.bias, ada.to_bias.weight, ada.ln_in.eps, ada.ln_cond.eps,
+                    self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.to_scale.weight, self.to_scale.bias,
+                    x2 if fold else None)
+            y = y.reshape(*x_in.shape[:-1], self.d_hidden)
+            return y if fold or not residual else x_in + y
         with torch.autocast(device_type=device_type, enabled=False):
             xn = adaln_cuda.adaln(
                 x2, cond2, ada.ln_cond.weight, ada.to_scale.weight, ada.to_scale.bias, ada.to_bias.weight,

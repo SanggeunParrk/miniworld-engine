@@ -50,6 +50,9 @@ __device__ __forceinline__ float sigm(float x) { return 1.f / (1.f + __expf(-x))
 template <bool F32>
 __global__ void swiglu_fwd_k(const typename Vec<F32>::T* __restrict__ ab, typename Vec<F32>::T* __restrict__ h, long chunks, int ndc) {
   constexpr int V = Vec<F32>::N;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.wait;" ::: "memory");   // launched as a programmatic dependent (bf16): the producer's results are visible after this
+#endif
   for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < chunks; i += (long)gridDim.x * blockDim.x) {
     const long m = i / ndc, j = i % ndc;                     // row, chunk of the row
     float a[V], b[V], o[V];
@@ -84,6 +87,9 @@ template <bool F32, bool RES>
 __global__ void sigmul_fwd_k(const typename Vec<F32>::T* __restrict__ out, const typename Vec<F32>::T* __restrict__ sp,
                              const typename Vec<F32>::T* __restrict__ res, typename Vec<F32>::T* __restrict__ y, long chunks) {
   constexpr int V = Vec<F32>::N;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.wait;" ::: "memory");   // launched as a programmatic dependent (bf16): the producer's results are visible after this
+#endif
   for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < chunks; i += (long)gridDim.x * blockDim.x) {
     float o[V], s[V], r[V], v[V];
     Vec<F32>::ld(out + i * V, o);
@@ -280,6 +286,23 @@ __global__ void __launch_bounds__(32 * TW) sigmul_bwd_x_k(const float* __restric
 
 cudaStream_t S() { return at::cuda::getCurrentCUDAStream(); }
 unsigned grid_of(long chunks) { return (unsigned)std::min<long>((chunks + 255) / 256, 132L * 16); }
+// a launch with programmatic stream serialization (PDL): the grid may be scheduled before the previous kernel on the stream has finished
+// (its own griddepcontrol.wait holds it until that kernel's results are visible), so the launch latency overlaps that kernel's tail. Used
+// for the bf16 row passes that follow a cuBLAS GEMM.
+template <typename... KArgs, typename... Args>
+void launch_pdl(void (*kernel)(KArgs...), unsigned grid, unsigned block, Args... args) {
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3(grid);
+  cfg.blockDim = dim3(block);
+  cfg.dynamicSmemBytes = 0;
+  cfg.stream = at::cuda::getCurrentCUDAStream();
+  cudaLaunchAttribute attr[1];
+  attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attr[0].val.programmaticStreamSerializationAllowed = 1;
+  cfg.attrs = attr;
+  cfg.numAttrs = 1;
+  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, kernel, static_cast<KArgs>(args)...));
+}
 bool is_f32(const at::Tensor& t) {
   TORCH_CHECK(t.is_cuda() && t.is_contiguous() && (t.scalar_type() == at::kBFloat16 || t.scalar_type() == at::kFloat), "contiguous bf16 / fp32 CUDA tensor");
   return t.scalar_type() == at::kFloat;
@@ -297,7 +320,7 @@ at::Tensor swiglu_fwd(at::Tensor ab) {
   auto h = at::empty({M, nd}, ab.options());
   const long chunks = M * nd / V;
   if (f) swiglu_fwd_k<true><<<grid_of(chunks), 256, 0, S()>>>(P<float>(ab), PM<float>(h), chunks, (int)(nd / V));
-  else swiglu_fwd_k<false><<<grid_of(chunks), 256, 0, S()>>>(P<bf>(ab), PM<bf>(h), chunks, (int)(nd / V));
+  else launch_pdl(swiglu_fwd_k<false>, grid_of(chunks), 256, P<bf>(ab), PM<bf>(h), chunks, (int)(nd / V));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return h;
 }
@@ -327,7 +350,8 @@ at::Tensor sigmul_fwd(at::Tensor out, at::Tensor sp, c10::optional<at::Tensor> r
   const bool r = res.has_value();
 #define SF(F, T, R) sigmul_fwd_k<F, R><<<grid_of(chunks), 256, 0, S()>>>(P<T>(out), P<T>(sp), r ? P<T>(*res) : nullptr, PM<T>(y), chunks)
   if (f) { if (r) SF(true, float, true); else SF(true, float, false); }
-  else { if (r) SF(false, bf, true); else SF(false, bf, false); }
+  else if (r) launch_pdl(sigmul_fwd_k<false, true>, grid_of(chunks), 256, P<bf>(out), P<bf>(sp), P<bf>(*res), PM<bf>(y), chunks);
+  else launch_pdl(sigmul_fwd_k<false, false>, grid_of(chunks), 256, P<bf>(out), P<bf>(sp), (const bf*)nullptr, PM<bf>(y), chunks);
 #undef SF
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return y;
@@ -436,6 +460,67 @@ at::Tensor transpose_bf16(at::Tensor t) {
   return o;
 }
 
+// ---- the row statistics of the B200 bf16 inference head (ct_head_sm100.cu): ST[r] = (rstd_x, mean_x rstd_x, rstd_c, mean_c rstd_c) of x [R, NX] and
+// cond [R, NC] (two passes over each row held in registers, fp32), one warp per row. It lets its dependent launch at once
+// (griddepcontrol.launch_dependents first): the head kernel runs as its programmatic dependent and waits for these only in its epilogue.
+__device__ __forceinline__ void row_stats(const bf* __restrict__ p, int N, int lane, float eps, float& rstd, float& mean) {
+  float v[4][8];
+  float s = 0.f;
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    const int c = lane + 32 * j;
+    if (8 * c < N) {
+      const uint4 q = *reinterpret_cast<const uint4*>(p + 8 * c);
+      const uint32_t w[4] = {q.x, q.y, q.z, q.w};
+#pragma unroll
+      for (int e = 0; e < 4; ++e) { v[j][2 * e] = __uint_as_float(w[e] << 16); v[j][2 * e + 1] = __uint_as_float(w[e] & 0xffff0000u); }
+#pragma unroll
+      for (int e = 0; e < 8; ++e) s += v[j][e];
+    }
+  }
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+  mean = s * (1.f / N);
+  float q2 = 0.f;
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    if (8 * (lane + 32 * j) < N) {
+#pragma unroll
+      for (int e = 0; e < 8; ++e) q2 += (v[j][e] - mean) * (v[j][e] - mean);
+    }
+  }
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) q2 += __shfl_xor_sync(0xffffffffu, q2, o);
+  rstd = rsqrtf(q2 * (1.f / N) + eps);
+}
+__global__ void __launch_bounds__(256) head_stats_k(const bf* __restrict__ X, const bf* __restrict__ C, float4* __restrict__ ST, long R, int NX, int NC,
+                                                    float eps_x, float eps_c) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
+  const int lane = threadIdx.x & 31;
+  const long row = (long)blockIdx.x * 8 + (threadIdx.x >> 5);
+  if (row >= R) return;
+  float rx, mx, rc, mc;
+  row_stats(X + row * NX, NX, lane, eps_x, rx, mx);
+  row_stats(C + row * NC, NC, lane, eps_c, rc, mc);
+  if (lane == 0) ST[row] = make_float4(rx, mx * rx, rc, mc * rc);
+}
+at::Tensor head_stats(at::Tensor x, at::Tensor cond, double eps_x, double eps_c) {
+  TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && cond.scalar_type() == at::kBFloat16 && x.dim() == 2 && cond.dim() == 2 &&
+              x.is_contiguous() && cond.is_contiguous() && x.size(0) == cond.size(0), "head_stats: bf16 [R, NX], [R, NC] contiguous");
+  const long R = x.size(0);
+  const int NX = (int)x.size(1), NC = (int)cond.size(1);
+  TORCH_CHECK(NX % 8 == 0 && NX <= 1024 && NC % 8 == 0 && NC <= 1024, "head_stats: widths multiples of 8 up to 1024");
+  const at::cuda::CUDAGuard g(x.device());
+  auto st = at::empty({R, 4}, x.options().dtype(at::kFloat));
+  if (R > 0)
+    head_stats_k<<<(unsigned)((R + 7) / 8), 256, 0, S()>>>(P<bf>(x), P<bf>(cond), reinterpret_cast<float4*>(st.data_ptr()), R, NX, NC, (float)eps_x,
+                                                           (float)eps_c);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return st;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swiglu_fwd", &swiglu_fwd);
   m.def("swiglu_bwd", &swiglu_bwd);
@@ -445,4 +530,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("sigmul_bwd_t", &sigmul_bwd_t);
   m.def("sigmul_bwd_x", &sigmul_bwd_x);
   m.def("transpose_bf16", &transpose_bf16);
+  m.def("head_stats", &head_stats);
 }

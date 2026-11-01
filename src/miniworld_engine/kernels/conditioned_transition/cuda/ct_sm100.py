@@ -12,6 +12,9 @@ TF32 ones (where torch allows TF32); any row count. The weights are cast (fp32: 
 
 from __future__ import annotations
 
+import functools
+from pathlib import Path
+
 import torch
 
 from miniworld_engine.kernels import _capture
@@ -109,6 +112,144 @@ def _tail_cublas(xn: torch.Tensor, cond: torch.Tensor, wab: torch.Tensor, ws: to
     return e.sigmul_fwd(out, sp, res)
 
 
+#: bf16 inference on the cuBLAS tail (d_hidden above ``CUBLAS_MIN_D``, rows up to ``BF16_CUBLAS_MAX_ROWS``): the module's AdaLN and the tail's
+#: gate projection sp = cond Wsc^T + bsc as ONE tcgen05 GEMM over the raw cond rows (``ct_head_sm100.cu``: LN(cond) folded into the AdaLN
+#: weights, three accumulators on one A operand) after ``head_stats`` (the row statistics, its programmatic primary), replacing
+#: ln_cond_xstats -> adaln_gemm_sm100 and the cuBLAS addmm; then cuBLAS expand -> swiglu_fwd -> cuBLAS squeeze -> sigmul_fwd.
+#: False: the AdaLN entry and ``ct_inference_sm100`` (A/B).
+HEAD_FUSED = True
+#: the head kernel's output tile widths, chosen per call by ``_head_bn`` (BN 128: three accumulators single-buffered; 64: double-buffered)
+_HEAD_BNS = (128, 64)
+
+
+def head_supported(x2: torch.Tensor, cond2: torch.Tensor, nd: int, d: int) -> bool:
+    """The calls ``head_inference`` serves: bf16 rows on the cuBLAS tail, widths the head kernel and its row pass tile."""
+    floor = CUBLAS_MIN_D["bf16"]
+    dc = cond2.shape[-1]
+    return (HEAD_FUSED and x2.dtype is torch.bfloat16 and cond2.dtype is torch.bfloat16 and floor is not None and d > floor
+            and x2.shape[0] <= BF16_CUBLAS_MAX_ROWS and d % 128 == 0 and d <= 1024 and dc % 64 == 0 and dc <= 1024)
+
+
+@functools.lru_cache(maxsize=4)
+def _head_cubin(bn: int):
+    from miniworld_engine.kernels import _nvcc
+    from miniworld_engine.kernels.transition.cuda import fused_sm100a
+
+    here = Path(__file__).parent
+    inc = here.parent.parent / "transition" / "cuda" / "sm100"
+    tag = f"bn{bn}"
+    path = _nvcc.cubin(f"ct_sm100a/head_{tag}", ["-std=c++17", "-O3", "-arch=sm_100a", "-cubin", f"-I{inc}", f"-DBN={bn}"],
+                       source=here / "ct_head_sm100.cu", toolchain="sm100")
+    ext = fused_sm100a._ext()
+    ext.load_cubin(f"ct_sm100a_head_{tag}", str(path))
+    return ext, f"ct_sm100a_head_{tag}"
+
+
+#: the split build (``ct_head_split_sm100.cu``: xn and sp tiles on different CTAs, each streaming 128 + 256 rows a K-block) where its grid
+#: fits one wave; None turns it off (A/B)
+HEAD_SPLIT = True
+
+
+@functools.lru_cache(maxsize=1)
+def _head_split_cubin():
+    from miniworld_engine.kernels import _nvcc
+    from miniworld_engine.kernels.transition.cuda import fused_sm100a
+
+    here = Path(__file__).parent
+    inc = here.parent.parent / "transition" / "cuda" / "sm100"
+    path = _nvcc.cubin("ct_sm100a/head_split", ["-std=c++17", "-O3", "-arch=sm_100a", "-cubin", f"-I{inc}"],
+                       source=here / "ct_head_split_sm100.cu", toolchain="sm100")
+    ext = fused_sm100a._ext()
+    ext.load_cubin("ct_sm100a_head_split", str(path))
+    return ext, "ct_sm100a_head_split"
+
+
+def _head_bn(m: int, n: int, nsm: int) -> int:
+    """The tile width with the least (waves x per-tile operand intake: 128 cond rows and 3 BN weight rows per K-block). Measured (module
+    inference, kernel alone, [3840, 768] c384): BN 64 16.8 us, BN 128 19.6."""
+    best = None
+    for bn in _HEAD_BNS:
+        tiles = -(-m // 128) * (n // bn)
+        cost = -(-tiles // nsm) * (128 + 3 * bn)
+        if best is None or cost < best[0]:
+            best = (cost, bn)
+    return best[1]
+
+
+def _head_fake(x2, c2, wbw, wsw, wg, bs, bg, ub, us, eps_x, eps_c):
+    """(xn, sp) [M, D] like x2."""
+    return torch.empty_like(x2), torch.empty_like(x2)
+
+
+@opaque(fake=_head_fake, name="conditioned_transition_b200_bf16_head")
+def _head(x2: torch.Tensor, c2: torch.Tensor, wbw: torch.Tensor, wsw: torch.Tensor, wg: torch.Tensor, bs: torch.Tensor, bg: torch.Tensor,
+          ub: torch.Tensor, us: torch.Tensor, eps_x: float, eps_c: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """xn (the AdaLN of x2 by c2) and sp = c2 Wg^T + bg: x2 [M, D], c2 [M, DC] bf16 contiguous, the folded weights from ``_head_weights``."""
+    from miniworld_engine.kernels._device import num_sms
+
+    from .ct_train import ext as rows_ext
+
+    m, d = x2.shape
+    dc = c2.shape[1]
+    nsm = num_sms(x2.device)
+    st = rows_ext().head_stats(x2, c2, float(eps_x), float(eps_c))
+    xn, sp = torch.empty_like(x2), torch.empty_like(x2)
+    mt = -(-m // 128)
+    if HEAD_SPLIT and d % 256 == 0 and mt * (d // 128 + d // 256) <= nsm:   # one wave of balanced xn / sp tiles
+        ext, name = _head_split_cubin()
+        t = ext.tmap
+        ext.launch_kernel(name, "ct_head_split_sm100", mt * (d // 128 + d // 256), 320, 1,
+                          [t(c2, dc, m, 64, 128), t(wbw, dc, d, 64, 128), t(wsw, dc, d, 64, 128), t(wg, dc, d, 64, 256), t(xn, d, m, 64, 32),
+                           t(sp, d, m, 64, 32), x2, st, bs, bg, ub, us, m, d, dc], pdl=True)
+        return xn, sp
+    bn = _head_bn(m, d, nsm)
+    ext, name = _head_cubin(bn)
+    t = ext.tmap
+    tiles = mt * (d // bn)
+    ext.launch_kernel(name, "ct_head_sm100", max(1, min(nsm, tiles)), 320, 1,
+                      [t(c2, dc, m, 64, 128), t(wbw, dc, d, 64, bn), t(wsw, dc, d, 64, bn), t(wg, dc, d, 64, bn), t(xn, d, m, 64, 32),
+                       t(sp, d, m, 64, 32), x2, st, bs, bg, ub, us, m, d, dc], pdl=True)
+    return xn, sp
+
+
+def _head_weights(wc, ada_ws, ada_bs, ada_wb, wsc, bsc):
+    """(Wb wc, Ws wc, Wg) bf16 [D, DC] and (bs, bg, ub, us) fp32 [D]: the AdaLN weights with the cond LayerNorm weight folded in, their row sums
+    taken over the rounded values, and the gate biases rounded to bf16 first (as the unfused bf16 paths add them)."""
+    bf = torch.bfloat16
+    wcf = wc.float()
+    wbw = (ada_wb.float() * wcf).to(bf).contiguous()
+    wsw = (ada_ws.float() * wcf).to(bf).contiguous()
+    d = wbw.shape[0]
+    bs = ada_bs.to(bf).float().contiguous() if ada_bs is not None else torch.zeros(d, dtype=torch.float32, device=wbw.device)
+    return (wbw, wsw, wsc.to(bf).contiguous(), bs, bsc.to(bf).float().contiguous(), wbw.float().sum(1).contiguous(),
+            wsw.float().sum(1).contiguous())
+
+
+def _tail_sp_fake(xn, wab, ws, sp, res):
+    """y [M, D] like xn."""
+    return torch.empty((xn.shape[0], ws.shape[0]), dtype=xn.dtype, device=xn.device)
+
+
+@opaque(fake=_tail_sp_fake, name="conditioned_transition_tail_bf16_cublas_sp_sm100a")
+def _tail_cublas_sp(xn: torch.Tensor, wab: torch.Tensor, ws: torch.Tensor, sp: torch.Tensor, res: torch.Tensor | None) -> torch.Tensor:
+    """``_tail_cublas`` with the gate pre-activation sp handed in: ab = xn [Wa; Wb]^T, h = silu(a) b, y = res + sigmoid(sp) (h Ws^T)."""
+    from .ct_train import ext as rows_ext
+
+    e = rows_ext()
+    h = e.swiglu_fwd(torch.mm(xn, wab.t()))
+    return e.sigmul_fwd(torch.mm(h, ws.t()), sp, res)
+
+
+def head_inference(x2, cond2, ln_cond_w, ada_ws, ada_bs, ada_wb, eps_x, eps_c, wa, wb, ws, wsc, bsc, residual=None):
+    """The module's no-backward call (AdaLN + tail) for ``head_supported`` rows: x2 [M, D], cond2 [M, DC] bf16, the weights in any dtype
+    (prepared once per parameter version), ``residual`` [M, D] bf16 or None. Returns y [M, D]."""
+    hp = (ln_cond_w, ada_ws, ada_wb, wsc, bsc) + ((ada_bs,) if ada_bs is not None else ())
+    hw = _capture.param_forms("ct_sm100a_head_bf16", hp, lambda: _head_weights(ln_cond_w, ada_ws, ada_bs, ada_wb, wsc, bsc))
+    wab, wsq, _, _ = _capture.param_forms(f"ct_sm100a_cublas_{x2.dtype}", (wa, wb, ws, wsc, bsc), lambda: _f32_weights(wa, wb, ws, wsc, bsc, x2.dtype))
+    xn, sp = _head(x2.contiguous(), cond2.contiguous(), *hw, float(eps_x), float(eps_c))
+    return _tail_cublas_sp(xn, wab, wsq, sp, residual.contiguous() if residual is not None else None)
+
+
 def ct_inference_sm100(xn, cond, wa, wb, ws, wsc, bsc, residual=None):
     """``residual + sigmoid(cond Wsc^T + bsc) * (silu(xn Wa^T) * (xn Wb^T)) Ws^T`` without a backward: ``xn`` [M, D], ``cond`` [M, DC] of
     one dtype, ``residual`` [M, D] in that dtype or None (then the update alone); the weights in any dtype."""
@@ -122,4 +263,4 @@ def ct_inference_sm100(xn, cond, wa, wb, ws, wsc, bsc, residual=None):
     return _tail(xn.contiguous(), cond.contiguous(), *ww, res)
 
 
-__all__ = ["ct_inference_sm100", "supported"]
+__all__ = ["ct_inference_sm100", "head_inference", "head_supported", "supported"]
