@@ -193,11 +193,16 @@ def _opm_bwd_epilogue_dw_kernel(DZN, O, DWO, L, CH2, shape_key,
 @triton.autotune(configs=configs_for("outer_product_mean_bwd_layernorm_gemm_triton"), key=["shape_key", "HAS_MASK", "HAS_PBIAS", "K"],
                  reset_to_zero=["DWL", "DWR", "DG", "DBETA", "DBL", "DBR"])
 @triton.jit
-def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, DWR, DG, DBETA, DBL, DBR, T_, eps, shape_key,
+def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, Y, DWL, DWR, DG, DBETA, DBL, DBR, T_, eps, shape_key,
                                    CM: tl.constexpr, CH: tl.constexpr, K: tl.constexpr, HAS_MASK: tl.constexpr,
                                    HAS_PBIAS: tl.constexpr, BT: tl.constexpr, PPS: tl.constexpr):
-    # persistent (PPS programs per SM): the program walks token blocks pid, pid + nprog, ..., keeping dW_left / dW_right / dgamma /
-    # dbeta in registers, and adds them once at the end
+    # persistent (PPS programs per SM): the program walks token blocks pid, pid + nprog, ..., keeping dgamma / dbeta (and the projection
+    # biases' gradients) in registers, and adds them once at the end. The projections' weight gradients are NOT formed here: the kernel
+    # leaves mask . y, y = LN(x) (the projections' input, bf16 as the forward rounds it), and the host takes dW = [dA | dB]^T (mask . y) on
+    # cuBLAS (the mask of a row zeroes da there, so it may sit on either operand) -- two
+    # transposed M = CH dots and their [CH, CM] fp32 accumulators per program made this kernel 4x slower than its memory traffic.
+    # The grouped layout (Chai-1, K < CH: dA / dB group-major) keeps dW in the kernel (DWL / DWR): there the host GEMMs were G times as many
+    # and slower than the in-kernel sums
     pid = tl.program_id(0)
     nprog = tl.num_programs(0)
     cols = tl.arange(0, CM)
@@ -206,10 +211,10 @@ def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, D
     bta = tl.load(LNB + cols)
     wl = tl.load(WL + ch[:, None] * CM + cols[None, :])                                   # [CH, CM]
     wr = tl.load(WR + ch[:, None] * CM + cols[None, :])
-    dwl = tl.zeros((CH, CM), dtype=tl.float32)
-    dwr = tl.zeros((CH, CM), dtype=tl.float32)
     dgs = tl.zeros((CM,), dtype=tl.float32)
     dbs = tl.zeros((CM,), dtype=tl.float32)
+    dwl = tl.zeros((CH, CM), dtype=tl.float32)
+    dwr = tl.zeros((CH, CM), dtype=tl.float32)
     dbl = tl.zeros((CH,), dtype=tl.float32)
     dbr = tl.zeros((CH,), dtype=tl.float32)
     src_ch = ((ch // K).to(tl.int64) * T_)[None, :] * K + (ch % K)[None, :]               # group-major [G, T, K] columns
@@ -222,18 +227,23 @@ def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, D
         xc = x - mu[:, None]
         rs = tl.rsqrt(tl.sum(xc * xc, axis=1) / CM + eps)
         xh = xc * rs[:, None]
-        y = (xh * g[None, :] + bta[None, :]).to(tl.bfloat16)
+        y = xh * g[None, :] + bta[None, :]
         da = tl.load(DA + rows[:, None] * K + src_ch, mask=rm[:, None], other=0.0)
         db = tl.load(DB + rows[:, None] * K + src_ch, mask=rm[:, None], other=0.0)
         if HAS_MASK:
             mk = tl.load(MASK + rows, mask=rm, other=0) != 0
             da = tl.where(mk[:, None], da, 0.0).to(tl.bfloat16)
             db = tl.where(mk[:, None], db, 0.0).to(tl.bfloat16)
+            y = tl.where(mk[:, None], y, 0.0)                                                # mask . y: the dW GEMM's operand
+        if K == CH:
+            tl.store(Y + rows[:, None] * CM + cols[None, :], y.to(tl.bfloat16), mask=rm[:, None])
+        else:
+            yb = y.to(tl.bfloat16)
+            dwl += tl.dot(tl.trans(da), yb)
+            dwr += tl.dot(tl.trans(db), yb)
         if HAS_PBIAS:
             dbl += tl.sum(da.to(tl.float32), axis=0)
             dbr += tl.sum(db.to(tl.float32), axis=0)
-        dwl += tl.dot(tl.trans(da), y)
-        dwr += tl.dot(tl.trans(db), y)
         dy = tl.dot(da, wl) + tl.dot(db, wr)                                                 # [BT, CM] fp32
         dgs += tl.sum(dy * xh, axis=0)
         dbs += tl.sum(dy, axis=0)
@@ -242,8 +252,9 @@ def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, D
         m2 = tl.sum(dxh * xh, axis=1) / CM
         dx = rs[:, None] * (dxh - m1[:, None] - xh * m2[:, None])
         tl.store(DM + rows[:, None] * CM + cols[None, :], dx.to(tl.bfloat16), mask=rm[:, None])
-    tl.atomic_add(DWL + ch[:, None] * CM + cols[None, :], dwl)
-    tl.atomic_add(DWR + ch[:, None] * CM + cols[None, :], dwr)
+    if K != CH:
+        tl.atomic_add(DWL + ch[:, None] * CM + cols[None, :], dwl)
+        tl.atomic_add(DWR + ch[:, None] * CM + cols[None, :], dwr)
     tl.atomic_add(DG + cols, dgs)
     tl.atomic_add(DBETA + cols, dbs)
     if HAS_PBIAS:
@@ -467,22 +478,33 @@ def _bwd(dz: torch.Tensor, msa: torch.Tensor, mask: torch.Tensor, a: torch.Tenso
 
 
 def _ln_gemm_bwd(x, m8, lnw, lnb, wl, wr, dA, dB, eps, S, L, CM, CH, K, has_mask, has_pbias):
-    """The shared tail of both backwards: mask, dy = [dA | dB] W, dW_left / dW_right (and the biases' gradients), LayerNorm backward.
-    dA / dB are [G, S L, K] (K = CH: [S L, CH]). Returns [dmsa [S L, CM], dgamma, dbeta, dW_left, dW_right, db_left, db_right]."""
+    """The shared tail of both backwards: mask, dy = [dA | dB] W, LayerNorm backward (one kernel, which also leaves mask . y, y = LN(x)),
+    then dW_left / dW_right = dA^T (mask . y) / dB^T (mask . y) on cuBLAS (fp32 out); the grouped layout keeps dW in the kernel.
+    dA / dB are [G, S L, K] (K = CH: [S L, CH]).
+    Returns [dmsa [S L, CM], dgamma, dbeta, dW_left, dW_right, db_left, db_right]."""
     bf = torch.bfloat16
     T_ = S * L
+    G = CH // K
     dm = torch.empty_like(x)
-    red = x.new_zeros((2 * CH * CM + 2 * CM + 2 * CH,), dtype=torch.float32)
-    dwl, dwr = red[:CH * CM].view(CH, CM), red[CH * CM:2 * CH * CM].view(CH, CM)
-    dg, dbeta = red[2 * CH * CM:2 * CH * CM + CM], red[2 * CH * CM + CM:2 * CH * CM + 2 * CM]
-    dbl, dbr = red[2 * CH * CM + 2 * CM:2 * CH * CM + 2 * CM + CH], red[2 * CH * CM + 2 * CM + CH:]
+    y = torch.empty_like(x) if G == 1 else x                                              # (unused by the grouped layout)
+    red = x.new_zeros((2 * CM + 2 * CH + (2 * CH * CM if G > 1 else 0),), dtype=torch.float32)
+    dg, dbeta = red[:CM], red[CM:2 * CM]
+    dbl, dbr = red[2 * CM:2 * CM + CH], red[2 * CM + CH:2 * CM + 2 * CH]
+    dwl_k = red[2 * CM + 2 * CH:2 * CM + 2 * CH + CH * CM].view(CH, CM) if G > 1 else red
+    dwr_k = red[2 * CM + 2 * CH + CH * CM:].view(CH, CM) if G > 1 else red
     nsm = num_sms(x.device)
     _opm_bwd_layernorm_gemm_kernel[lambda meta: (min(triton.cdiv(T_, meta["BT"]), meta["PPS"] * nsm),)](
         x, m8, lnw.float().contiguous(), lnb.float().contiguous(), wl.to(bf).contiguous(), wr.to(bf).contiguous(),
-        dA, dB, dm, dwl, dwr, dg, dbeta, dbl, dbr, T_, eps,
-        shape_key=token_key(length_of((S, L, CM)), CM=CM, CH=CH, **({} if K == CH else {"G": CH // K})), CM=CM, CH=CH, K=K,
+        dA, dB, dm, y, dwl_k, dwr_k, dg, dbeta, dbl, dbr, T_, eps,
+        shape_key=token_key(length_of((S, L, CM)), CM=CM, CH=CH, **({} if K == CH else {"G": G})), CM=CM, CH=CH, K=K,
         HAS_MASK=has_mask, HAS_PBIAS=has_pbias)
-    return dm.view(S, L, CM), dg.clone(), dbeta.clone(), dwl.clone(), dwr.clone(), dbl.clone(), dbr.clone()
+    # dW = d^T y over the T rows: one [CH, CM] GEMM (G batched K-wide slices for the grouped layout), fp32-accumulated and fp32 out
+    if G == 1:
+        dwl = torch.mm(dA.view(T_, CH).t(), y, out_dtype=torch.float32)
+        dwr = torch.mm(dB.view(T_, CH).t(), y, out_dtype=torch.float32)
+    else:   # the grouped layout: dW summed in the kernel (host GEMMs per group measured 477 -> 727 us on Chai-1 training L256)
+        dwl, dwr = dwl_k.clone(), dwr_k.clone()
+    return dm.view(S, L, CM), dg.clone(), dbeta.clone(), dwl, dwr, dbl.clone(), dbr.clone()
 
 
 # ---------------------------------------------------------------------------------------------------- grouped launches
@@ -559,7 +581,7 @@ def _bwd_grouped(dz: torch.Tensor, msa: torch.Tensor, mask: torch.Tensor, a: tor
         dy, o, gam.float().contiguous(), dO, dgam, dbet, L, eps_prod,
         shape_key=token_key(length_of(msa.shape), K=K, G=groups), K=K, P=P)
     del dy
-    dbo = dzc.sum(0, dtype=torch.float32)
+    dbo = torch.mm(dzc.new_ones((1, L * L)), dzc, out_dtype=torch.float32).reshape(-1)   # fp32-accumulated GEMV (as `_bwd`), not an axis-0 sum
     dA = torch.bmm(b.view(groups, S, L * K), dO.transpose(1, 2))                            # [G, S, (i, k)]
     dB = torch.bmm(a.view(groups, S, L * K), dO)                                            # [G, S, (j, l)]
     del dO

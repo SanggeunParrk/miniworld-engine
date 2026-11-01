@@ -8,7 +8,6 @@
     "((('BT', 128), ('PPS', 8)), 4, 2)",
     "((('BT', 128), ('PPS', 8)), 4, 3)",
     "((('BT', 128), ('PPS', 8)), 8, 2)",
-    "((('BT', 128), ('PPS', 8)), 8, 3)",
     "((('BT', 16), ('PPS', 16)), 4, 2)",
     "((('BT', 32), ('PPS', 16)), 4, 2)",
     "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -27,26 +26,35 @@
     "((('BT', 64), ('PPS', 8)), 8, 2)",
     "((('BT', 64), ('PPS', 8)), 8, 3)"
   ],
-  "config_space_hash": "52d1c3e0a236",
+  "config_space_hash": "2a3a2dfd14a8",
   "driver_id_scheme": 2,
-  "driver_identity": "761b50b2e512",
+  "driver_identity": "e4e5d25a349e",
   "entries": {
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=0,K=32,shape_key=26388816202553": [
       {
         "kwargs": {
           "BT": 64,
-          "PPS": 2
+          "PPS": 16
         },
-        "ms": 0.16076800227165222,
+        "ms": 0.09107200056314468,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BT": 32,
+          "PPS": 16
+        },
+        "ms": 0.09113600105047226,
         "num_stages": 2,
         "num_warps": 4
       },
       {
         "kwargs": {
-          "BT": 64,
-          "PPS": 4
+          "BT": 16,
+          "PPS": 16
         },
-        "ms": 0.1669439971446991,
+        "ms": 0.11372800171375275,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -55,26 +63,17 @@
           "BT": 64,
           "PPS": 16
         },
-        "ms": 0.17100800573825836,
+        "ms": 0.13635200262069702,
         "num_stages": 2,
-        "num_warps": 2
+        "num_warps": 1
       },
       {
         "kwargs": {
           "BT": 64,
-          "PPS": 8
+          "PPS": 2
         },
-        "ms": 0.18131199479103088,
+        "ms": 0.14643199741840363,
         "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 8
-        },
-        "ms": 0.18329599499702454,
-        "num_stages": 3,
         "num_warps": 4
       }
     ],
@@ -84,44 +83,44 @@
           "BT": 64,
           "PPS": 16
         },
-        "ms": 0.2600640058517456,
+        "ms": 0.14441600441932678,
         "num_stages": 2,
         "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BT": 32,
+          "PPS": 16
+        },
+        "ms": 0.14854399859905243,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BT": 16,
+          "PPS": 16
+        },
+        "ms": 0.19766399264335632,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BT": 64,
+          "PPS": 16
+        },
+        "ms": 0.24491199851036072,
+        "num_stages": 1,
+        "num_warps": 4
       },
       {
         "kwargs": {
           "BT": 64,
           "PPS": 2
         },
-        "ms": 0.29283198714256287,
+        "ms": 0.2528960108757019,
         "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 4
-        },
-        "ms": 0.30003198981285095,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 8
-        },
-        "ms": 0.31542399525642395,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 8
-        },
-        "ms": 0.3235839903354645,
-        "num_stages": 3,
         "num_warps": 4
       }
     ],
@@ -131,7 +130,7 @@
           "BT": 64,
           "PPS": 2
         },
-        "ms": 0.18943999707698822,
+        "ms": 0.1913760006427765,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -140,7 +139,7 @@
           "BT": 64,
           "PPS": 4
         },
-        "ms": 0.20582400262355804,
+        "ms": 0.2069920003414154,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -149,7 +148,7 @@
           "BT": 16,
           "PPS": 16
         },
-        "ms": 0.213919997215271,
+        "ms": 0.21216000616550446,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -158,7 +157,7 @@
           "BT": 32,
           "PPS": 16
         },
-        "ms": 0.21929599344730377,
+        "ms": 0.2181439995765686,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -167,27 +166,27 @@
           "BT": 64,
           "PPS": 8
         },
-        "ms": 0.236735999584198,
-        "num_stages": 2,
-        "num_warps": 4
+        "ms": 0.2385919988155365,
+        "num_stages": 3,
+        "num_warps": 8
       }
     ],
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=0,K=8,shape_key=216177181234072643": [
       {
         "kwargs": {
-          "BT": 32,
+          "BT": 16,
           "PPS": 16
         },
-        "ms": 0.3307519853115082,
+        "ms": 0.3266240060329437,
         "num_stages": 2,
         "num_warps": 4
       },
       {
         "kwargs": {
-          "BT": 16,
+          "BT": 32,
           "PPS": 16
         },
-        "ms": 0.3378880023956299,
+        "ms": 0.3266879916191101,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -196,7 +195,7 @@
           "BT": 64,
           "PPS": 2
         },
-        "ms": 0.3400000035762787,
+        "ms": 0.3409920036792755,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -205,7 +204,7 @@
           "BT": 64,
           "PPS": 4
         },
-        "ms": 0.3532800078392029,
+        "ms": 0.3513279855251312,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -214,7 +213,7 @@
           "BT": 64,
           "PPS": 8
         },
-        "ms": 0.371616005897522,
+        "ms": 0.37167999148368835,
         "num_stages": 2,
         "num_warps": 8
       }
@@ -225,44 +224,44 @@
           "BT": 64,
           "PPS": 16
         },
-        "ms": 0.187391996383667,
+        "ms": 0.1157120019197464,
         "num_stages": 2,
         "num_warps": 2
       },
       {
         "kwargs": {
           "BT": 64,
-          "PPS": 2
+          "PPS": 16
         },
-        "ms": 0.21612800657749176,
+        "ms": 0.1382399946451187,
         "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 4
-        },
-        "ms": 0.2242880016565323,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 8
-        },
-        "ms": 0.24060800671577454,
-        "num_stages": 2,
-        "num_warps": 4
+        "num_warps": 1
       },
       {
         "kwargs": {
           "BT": 32,
           "PPS": 16
         },
-        "ms": 0.2510719895362854,
+        "ms": 0.1607999950647354,
         "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BT": 16,
+          "PPS": 16
+        },
+        "ms": 0.165072001516819,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BT": 64,
+          "PPS": 16
+        },
+        "ms": 0.18828800320625305,
+        "num_stages": 1,
         "num_warps": 4
       }
     ],
@@ -272,92 +271,92 @@
           "BT": 64,
           "PPS": 16
         },
-        "ms": 0.2793920040130615,
+        "ms": 0.18326400220394135,
         "num_stages": 2,
         "num_warps": 2
       },
       {
         "kwargs": {
           "BT": 64,
-          "PPS": 2
+          "PPS": 16
         },
-        "ms": 0.4055359959602356,
+        "ms": 0.26524800062179565,
         "num_stages": 2,
-        "num_warps": 4
+        "num_warps": 1
       },
       {
         "kwargs": {
           "BT": 32,
           "PPS": 16
         },
-        "ms": 0.40755200386047363,
+        "ms": 0.28166401386260986,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BT": 16,
+          "PPS": 16
+        },
+        "ms": 0.29289600253105164,
         "num_stages": 2,
         "num_warps": 4
       },
       {
         "kwargs": {
           "BT": 64,
-          "PPS": 4
+          "PPS": 16
         },
-        "ms": 0.40857601165771484,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 8
-        },
-        "ms": 0.4238719940185547,
-        "num_stages": 2,
+        "ms": 0.31651198863983154,
+        "num_stages": 1,
         "num_warps": 4
       }
     ],
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=0,K=32,shape_key=26388816202553": [
       {
         "kwargs": {
+          "BT": 32,
+          "PPS": 16
+        },
+        "ms": 0.11779200285673141,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
           "BT": 64,
           "PPS": 16
         },
-        "ms": 0.1884640008211136,
+        "ms": 0.11971200257539749,
         "num_stages": 2,
         "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BT": 16,
+          "PPS": 16
+        },
+        "ms": 0.1239359974861145,
+        "num_stages": 2,
+        "num_warps": 4
       },
       {
         "kwargs": {
           "BT": 64,
           "PPS": 2
         },
-        "ms": 0.20367999374866486,
+        "ms": 0.15056000649929047,
         "num_stages": 2,
         "num_warps": 4
       },
       {
         "kwargs": {
           "BT": 64,
-          "PPS": 4
-        },
-        "ms": 0.21395200490951538,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 8
-        },
-        "ms": 0.22838400304317474,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 32,
           "PPS": 16
         },
-        "ms": 0.2354080006480217,
+        "ms": 0.1544640064239502,
         "num_stages": 2,
-        "num_warps": 4
+        "num_warps": 1
       }
     ],
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=0,K=32,shape_key=52777095269177": [
@@ -366,16 +365,34 @@
           "BT": 64,
           "PPS": 16
         },
-        "ms": 0.29398399591445923,
+        "ms": 0.19766399264335632,
         "num_stages": 2,
         "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BT": 32,
+          "PPS": 16
+        },
+        "ms": 0.20377600193023682,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BT": 16,
+          "PPS": 16
+        },
+        "ms": 0.22015999257564545,
+        "num_stages": 2,
+        "num_warps": 4
       },
       {
         "kwargs": {
           "BT": 64,
           "PPS": 2
         },
-        "ms": 0.38304001092910767,
+        "ms": 0.27535998821258545,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -384,25 +401,7 @@
           "BT": 64,
           "PPS": 4
         },
-        "ms": 0.38604798913002014,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 32,
-          "PPS": 16
-        },
-        "ms": 0.3861759901046753,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 8
-        },
-        "ms": 0.4023999869823456,
+        "ms": 0.2754879891872406,
         "num_stages": 2,
         "num_warps": 4
       }
@@ -413,7 +412,7 @@
           "BT": 64,
           "PPS": 2
         },
-        "ms": 0.23468799889087677,
+        "ms": 0.22838400304317474,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -422,7 +421,7 @@
           "BT": 64,
           "PPS": 4
         },
-        "ms": 0.25519999861717224,
+        "ms": 0.2489279955625534,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -431,18 +430,18 @@
           "BT": 16,
           "PPS": 16
         },
-        "ms": 0.27136000990867615,
+        "ms": 0.2630079984664917,
         "num_stages": 2,
         "num_warps": 4
       },
       {
         "kwargs": {
-          "BT": 32,
-          "PPS": 16
+          "BT": 64,
+          "PPS": 8
         },
-        "ms": 0.2754560112953186,
+        "ms": 0.2796800136566162,
         "num_stages": 2,
-        "num_warps": 4
+        "num_warps": 8
       },
       {
         "kwargs": {
@@ -460,25 +459,7 @@
           "BT": 64,
           "PPS": 2
         },
-        "ms": 0.42800000309944153,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 16
-        },
-        "ms": 0.4327999949455261,
-        "num_stages": 1,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 32,
-          "PPS": 16
-        },
-        "ms": 0.4349760115146637,
+        "ms": 0.4116159975528717,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -487,7 +468,7 @@
           "BT": 16,
           "PPS": 16
         },
-        "ms": 0.44227200746536255,
+        "ms": 0.43116798996925354,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -496,9 +477,27 @@
           "BT": 64,
           "PPS": 4
         },
-        "ms": 0.4440000057220459,
+        "ms": 0.4311999976634979,
         "num_stages": 2,
         "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BT": 64,
+          "PPS": 16
+        },
+        "ms": 0.43724799156188965,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BT": 64,
+          "PPS": 8
+        },
+        "ms": 0.4577600061893463,
+        "num_stages": 2,
+        "num_warps": 8
       }
     ],
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=1,K=32,shape_key=26388816202553": [
@@ -507,43 +506,43 @@
           "BT": 64,
           "PPS": 16
         },
-        "ms": 0.20790399610996246,
+        "ms": 0.12387199699878693,
         "num_stages": 2,
         "num_warps": 2
       },
       {
         "kwargs": {
           "BT": 64,
-          "PPS": 2
+          "PPS": 16
         },
-        "ms": 0.246799997985363,
+        "ms": 0.15670399367809296,
         "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 4
-        },
-        "ms": 0.2568640112876892,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 8
-        },
-        "ms": 0.2734079957008362,
-        "num_stages": 2,
-        "num_warps": 4
+        "num_warps": 1
       },
       {
         "kwargs": {
           "BT": 32,
           "PPS": 16
         },
-        "ms": 0.28966400027275085,
+        "ms": 0.1607999950647354,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BT": 16,
+          "PPS": 16
+        },
+        "ms": 0.16896000504493713,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BT": 64,
+          "PPS": 2
+        },
+        "ms": 0.18115200102329254,
         "num_stages": 2,
         "num_warps": 4
       }
@@ -554,43 +553,43 @@
           "BT": 64,
           "PPS": 16
         },
-        "ms": 0.32767999172210693,
+        "ms": 0.20579199492931366,
         "num_stages": 2,
         "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 2
-        },
-        "ms": 0.45977601408958435,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BT": 64,
-          "PPS": 4
-        },
-        "ms": 0.46592000126838684,
-        "num_stages": 2,
-        "num_warps": 4
       },
       {
         "kwargs": {
           "BT": 32,
           "PPS": 16
         },
-        "ms": 0.4864319860935211,
+        "ms": 0.2847039997577667,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BT": 16,
+          "PPS": 16
+        },
+        "ms": 0.29785600304603577,
         "num_stages": 2,
         "num_warps": 4
       },
       {
         "kwargs": {
           "BT": 64,
-          "PPS": 8
+          "PPS": 16
         },
-        "ms": 0.4864639937877655,
+        "ms": 0.3022080063819885,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BT": 64,
+          "PPS": 2
+        },
+        "ms": 0.3338879942893982,
         "num_stages": 2,
         "num_warps": 4
       }
@@ -598,59 +597,46 @@
   },
   "entry_grids": {
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=0,K=32,shape_key=26388816202553": [
-      "52d1c3e0a236"
+      "2a3a2dfd14a8"
     ],
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=0,K=32,shape_key=52777095269177": [
-      "52d1c3e0a236"
+      "2a3a2dfd14a8"
     ],
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=0,K=8,shape_key=108090790177180739": [
-      "52d1c3e0a236"
+      "2a3a2dfd14a8"
     ],
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=0,K=8,shape_key=216177181234072643": [
-      "52d1c3e0a236"
+      "2a3a2dfd14a8"
     ],
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=1,K=32,shape_key=26388816202553": [
-      "52d1c3e0a236"
+      "2a3a2dfd14a8"
     ],
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=1,K=32,shape_key=52777095269177": [
-      "52d1c3e0a236"
+      "2a3a2dfd14a8"
     ],
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=0,K=32,shape_key=26388816202553": [
-      "52d1c3e0a236",
-      "fd93104025bd"
+      "2a3a2dfd14a8"
     ],
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=0,K=32,shape_key=52777095269177": [
-      "52d1c3e0a236",
-      "fd93104025bd"
+      "2a3a2dfd14a8"
     ],
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=0,K=8,shape_key=108090790177180739": [
-      "0bb5b99a88c4",
-      "52d1c3e0a236"
+      "2a3a2dfd14a8"
     ],
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=0,K=8,shape_key=216177181234072643": [
-      "52d1c3e0a236",
-      "b3ebeedf8fec"
+      "2a3a2dfd14a8"
     ],
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=1,K=32,shape_key=26388816202553": [
-      "52d1c3e0a236",
-      "fd93104025bd"
+      "2a3a2dfd14a8"
     ],
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=1,K=32,shape_key=52777095269177": [
-      "52d1c3e0a236",
-      "fd93104025bd"
+      "2a3a2dfd14a8"
     ]
   },
   "env_identity": "7efec5ac14d2",
   "gpu": "NVIDIA B200 (sm100)",
   "grids": {
-    "0bb5b99a88c4": [
-      "((('BT', 16), ('PPS', 16)), 4, 2)",
-      "((('BT', 32), ('PPS', 16)), 4, 2)",
-      "((('BT', 64), ('PPS', 2)), 4, 2)",
-      "((('BT', 64), ('PPS', 4)), 4, 2)",
-      "((('BT', 64), ('PPS', 8)), 8, 3)"
-    ],
-    "52d1c3e0a236": [
+    "2a3a2dfd14a8": [
       "((('BT', 128), ('PPS', 16)), 4, 2)",
       "((('BT', 128), ('PPS', 16)), 4, 3)",
       "((('BT', 128), ('PPS', 16)), 8, 2)",
@@ -658,7 +644,6 @@
       "((('BT', 128), ('PPS', 8)), 4, 2)",
       "((('BT', 128), ('PPS', 8)), 4, 3)",
       "((('BT', 128), ('PPS', 8)), 8, 2)",
-      "((('BT', 128), ('PPS', 8)), 8, 3)",
       "((('BT', 16), ('PPS', 16)), 4, 2)",
       "((('BT', 32), ('PPS', 16)), 4, 2)",
       "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -676,42 +661,37 @@
       "((('BT', 64), ('PPS', 8)), 4, 3)",
       "((('BT', 64), ('PPS', 8)), 8, 2)",
       "((('BT', 64), ('PPS', 8)), 8, 3)"
-    ],
-    "b3ebeedf8fec": [
-      "((('BT', 16), ('PPS', 16)), 4, 2)",
-      "((('BT', 32), ('PPS', 16)), 4, 2)",
-      "((('BT', 64), ('PPS', 16)), 4, 1)",
-      "((('BT', 64), ('PPS', 2)), 4, 2)",
-      "((('BT', 64), ('PPS', 4)), 4, 2)"
-    ],
-    "fd93104025bd": [
-      "((('BT', 32), ('PPS', 16)), 4, 2)",
-      "((('BT', 64), ('PPS', 16)), 2, 2)",
-      "((('BT', 64), ('PPS', 2)), 4, 2)",
-      "((('BT', 64), ('PPS', 4)), 4, 2)",
-      "((('BT', 64), ('PPS', 8)), 4, 2)"
     ]
   },
   "key_scheme": 3,
   "measurements": {
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=0,K=32,shape_key=26388816202553": {
-      "0bcd9ccd4882540eaad9": {
+      "8980967d9d6bf1f485f3": {
         "entries": [
           {
             "kwargs": {
               "BT": 64,
-              "PPS": 2
+              "PPS": 16
             },
-            "ms": 0.16076800227165222,
+            "ms": 0.09107200056314468,
+            "num_stages": 2,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BT": 32,
+              "PPS": 16
+            },
+            "ms": 0.09113600105047226,
             "num_stages": 2,
             "num_warps": 4
           },
           {
             "kwargs": {
-              "BT": 64,
-              "PPS": 4
+              "BT": 16,
+              "PPS": 16
             },
-            "ms": 0.1669439971446991,
+            "ms": 0.11372800171375275,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -720,26 +700,17 @@
               "BT": 64,
               "PPS": 16
             },
-            "ms": 0.17100800573825836,
+            "ms": 0.13635200262069702,
             "num_stages": 2,
-            "num_warps": 2
+            "num_warps": 1
           },
           {
             "kwargs": {
               "BT": 64,
-              "PPS": 8
+              "PPS": 2
             },
-            "ms": 0.18131199479103088,
+            "ms": 0.14643199741840363,
             "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 8
-            },
-            "ms": 0.18329599499702454,
-            "num_stages": 3,
             "num_warps": 4
           }
         ],
@@ -751,7 +722,6 @@
           "((('BT', 128), ('PPS', 8)), 4, 2)",
           "((('BT', 128), ('PPS', 8)), 4, 3)",
           "((('BT', 128), ('PPS', 8)), 8, 2)",
-          "((('BT', 128), ('PPS', 8)), 8, 3)",
           "((('BT', 16), ('PPS', 16)), 4, 2)",
           "((('BT', 32), ('PPS', 16)), 4, 2)",
           "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -846,22 +816,18 @@
             "DWL": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
             "DWR": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
@@ -931,60 +897,71 @@
                 1
               ]
             },
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                393216,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
             "eps": 1e-05,
             "shape_key": 26388816202553
           },
-          "implementation": "abf7efc1344504feba39afe6b38c4f4afc1ca9c255fa784be6e0f61bb66a1050",
+          "implementation": "b2d1bc545e07e242659da8d0ea5dc60763946a8d5e9b18ce33c7a342d558c6b8",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=0,K=32,shape_key=52777095269177": {
-      "7047b37d28439971ecff": {
+      "525d52421ece7f107138": {
         "entries": [
           {
             "kwargs": {
               "BT": 64,
               "PPS": 16
             },
-            "ms": 0.2600640058517456,
+            "ms": 0.14441600441932678,
             "num_stages": 2,
             "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BT": 32,
+              "PPS": 16
+            },
+            "ms": 0.14854399859905243,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BT": 16,
+              "PPS": 16
+            },
+            "ms": 0.19766399264335632,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BT": 64,
+              "PPS": 16
+            },
+            "ms": 0.24491199851036072,
+            "num_stages": 1,
+            "num_warps": 4
           },
           {
             "kwargs": {
               "BT": 64,
               "PPS": 2
             },
-            "ms": 0.29283198714256287,
+            "ms": 0.2528960108757019,
             "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 4
-            },
-            "ms": 0.30003198981285095,
-            "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 8
-            },
-            "ms": 0.31542399525642395,
-            "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 8
-            },
-            "ms": 0.3235839903354645,
-            "num_stages": 3,
             "num_warps": 4
           }
         ],
@@ -996,7 +973,6 @@
           "((('BT', 128), ('PPS', 8)), 4, 2)",
           "((('BT', 128), ('PPS', 8)), 4, 3)",
           "((('BT', 128), ('PPS', 8)), 8, 2)",
-          "((('BT', 128), ('PPS', 8)), 8, 3)",
           "((('BT', 16), ('PPS', 16)), 4, 2)",
           "((('BT', 32), ('PPS', 16)), 4, 2)",
           "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -1091,22 +1067,18 @@
             "DWL": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
             "DWR": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
@@ -1176,23 +1148,34 @@
                 1
               ]
             },
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                786432,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
             "eps": 1e-05,
             "shape_key": 52777095269177
           },
-          "implementation": "abf7efc1344504feba39afe6b38c4f4afc1ca9c255fa784be6e0f61bb66a1050",
+          "implementation": "b2d1bc545e07e242659da8d0ea5dc60763946a8d5e9b18ce33c7a342d558c6b8",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=0,K=8,shape_key=108090790177180739": {
-      "498844a738b1eb087b9f": {
+      "ecceef4419130eec217c": {
         "entries": [
           {
             "kwargs": {
               "BT": 64,
               "PPS": 2
             },
-            "ms": 0.18943999707698822,
+            "ms": 0.1913760006427765,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -1201,7 +1184,7 @@
               "BT": 64,
               "PPS": 4
             },
-            "ms": 0.20582400262355804,
+            "ms": 0.2069920003414154,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -1210,7 +1193,7 @@
               "BT": 16,
               "PPS": 16
             },
-            "ms": 0.213919997215271,
+            "ms": 0.21216000616550446,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -1219,7 +1202,7 @@
               "BT": 32,
               "PPS": 16
             },
-            "ms": 0.21929599344730377,
+            "ms": 0.2181439995765686,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -1228,9 +1211,9 @@
               "BT": 64,
               "PPS": 8
             },
-            "ms": 0.236735999584198,
-            "num_stages": 2,
-            "num_warps": 4
+            "ms": 0.2385919988155365,
+            "num_stages": 3,
+            "num_warps": 8
           }
         ],
         "searched": [
@@ -1241,7 +1224,6 @@
           "((('BT', 128), ('PPS', 8)), 4, 2)",
           "((('BT', 128), ('PPS', 8)), 4, 3)",
           "((('BT', 128), ('PPS', 8)), 8, 2)",
-          "((('BT', 128), ('PPS', 8)), 8, 3)",
           "((('BT', 16), ('PPS', 16)), 4, 2)",
           "((('BT', 32), ('PPS', 16)), 4, 2)",
           "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -1425,32 +1407,43 @@
                 1
               ]
             },
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                393216,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
             "eps": 1e-05,
             "shape_key": 108090790177180739
           },
-          "implementation": "abf7efc1344504feba39afe6b38c4f4afc1ca9c255fa784be6e0f61bb66a1050",
+          "implementation": "b2d1bc545e07e242659da8d0ea5dc60763946a8d5e9b18ce33c7a342d558c6b8",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=0,K=8,shape_key=216177181234072643": {
-      "7770c30591d9cd531993": {
+      "87491e469b37e8f07d11": {
         "entries": [
-          {
-            "kwargs": {
-              "BT": 32,
-              "PPS": 16
-            },
-            "ms": 0.3307519853115082,
-            "num_stages": 2,
-            "num_warps": 4
-          },
           {
             "kwargs": {
               "BT": 16,
               "PPS": 16
             },
-            "ms": 0.3378880023956299,
+            "ms": 0.3266240060329437,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BT": 32,
+              "PPS": 16
+            },
+            "ms": 0.3266879916191101,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -1459,7 +1452,7 @@
               "BT": 64,
               "PPS": 2
             },
-            "ms": 0.3400000035762787,
+            "ms": 0.3409920036792755,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -1468,7 +1461,7 @@
               "BT": 64,
               "PPS": 4
             },
-            "ms": 0.3532800078392029,
+            "ms": 0.3513279855251312,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -1477,7 +1470,7 @@
               "BT": 64,
               "PPS": 8
             },
-            "ms": 0.371616005897522,
+            "ms": 0.37167999148368835,
             "num_stages": 2,
             "num_warps": 8
           }
@@ -1490,7 +1483,6 @@
           "((('BT', 128), ('PPS', 8)), 4, 2)",
           "((('BT', 128), ('PPS', 8)), 4, 3)",
           "((('BT', 128), ('PPS', 8)), 8, 2)",
-          "((('BT', 128), ('PPS', 8)), 8, 3)",
           "((('BT', 16), ('PPS', 16)), 4, 2)",
           "((('BT', 32), ('PPS', 16)), 4, 2)",
           "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -1674,60 +1666,71 @@
                 1
               ]
             },
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                786432,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
             "eps": 1e-05,
             "shape_key": 216177181234072643
           },
-          "implementation": "abf7efc1344504feba39afe6b38c4f4afc1ca9c255fa784be6e0f61bb66a1050",
+          "implementation": "b2d1bc545e07e242659da8d0ea5dc60763946a8d5e9b18ce33c7a342d558c6b8",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=1,K=32,shape_key=26388816202553": {
-      "d5bc2729cd7538093167": {
+      "5e2eab6ef1ba528790d2": {
         "entries": [
           {
             "kwargs": {
               "BT": 64,
               "PPS": 16
             },
-            "ms": 0.187391996383667,
+            "ms": 0.1157120019197464,
             "num_stages": 2,
             "num_warps": 2
           },
           {
             "kwargs": {
               "BT": 64,
-              "PPS": 2
+              "PPS": 16
             },
-            "ms": 0.21612800657749176,
+            "ms": 0.1382399946451187,
             "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 4
-            },
-            "ms": 0.2242880016565323,
-            "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 8
-            },
-            "ms": 0.24060800671577454,
-            "num_stages": 2,
-            "num_warps": 4
+            "num_warps": 1
           },
           {
             "kwargs": {
               "BT": 32,
               "PPS": 16
             },
-            "ms": 0.2510719895362854,
+            "ms": 0.1607999950647354,
             "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BT": 16,
+              "PPS": 16
+            },
+            "ms": 0.165072001516819,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BT": 64,
+              "PPS": 16
+            },
+            "ms": 0.18828800320625305,
+            "num_stages": 1,
             "num_warps": 4
           }
         ],
@@ -1739,7 +1742,6 @@
           "((('BT', 128), ('PPS', 8)), 4, 2)",
           "((('BT', 128), ('PPS', 8)), 4, 3)",
           "((('BT', 128), ('PPS', 8)), 8, 2)",
-          "((('BT', 128), ('PPS', 8)), 8, 3)",
           "((('BT', 16), ('PPS', 16)), 4, 2)",
           "((('BT', 32), ('PPS', 16)), 4, 2)",
           "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -1834,22 +1836,18 @@
             "DWL": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
             "DWR": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
@@ -1919,60 +1917,71 @@
                 1
               ]
             },
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                393216,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
             "eps": 1e-05,
             "shape_key": 26388816202553
           },
-          "implementation": "abf7efc1344504feba39afe6b38c4f4afc1ca9c255fa784be6e0f61bb66a1050",
+          "implementation": "b2d1bc545e07e242659da8d0ea5dc60763946a8d5e9b18ce33c7a342d558c6b8",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|HAS_MASK=0,HAS_PBIAS=1,K=32,shape_key=52777095269177": {
-      "6d3a99f8226c94e4ac4b": {
+      "beeed5fd3c92a3eb1226": {
         "entries": [
           {
             "kwargs": {
               "BT": 64,
               "PPS": 16
             },
-            "ms": 0.2793920040130615,
+            "ms": 0.18326400220394135,
             "num_stages": 2,
             "num_warps": 2
           },
           {
             "kwargs": {
               "BT": 64,
-              "PPS": 2
+              "PPS": 16
             },
-            "ms": 0.4055359959602356,
+            "ms": 0.26524800062179565,
             "num_stages": 2,
-            "num_warps": 4
+            "num_warps": 1
           },
           {
             "kwargs": {
               "BT": 32,
               "PPS": 16
             },
-            "ms": 0.40755200386047363,
+            "ms": 0.28166401386260986,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BT": 16,
+              "PPS": 16
+            },
+            "ms": 0.29289600253105164,
             "num_stages": 2,
             "num_warps": 4
           },
           {
             "kwargs": {
               "BT": 64,
-              "PPS": 4
+              "PPS": 16
             },
-            "ms": 0.40857601165771484,
-            "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 8
-            },
-            "ms": 0.4238719940185547,
-            "num_stages": 2,
+            "ms": 0.31651198863983154,
+            "num_stages": 1,
             "num_warps": 4
           }
         ],
@@ -1984,7 +1993,6 @@
           "((('BT', 128), ('PPS', 8)), 4, 2)",
           "((('BT', 128), ('PPS', 8)), 4, 3)",
           "((('BT', 128), ('PPS', 8)), 8, 2)",
-          "((('BT', 128), ('PPS', 8)), 8, 3)",
           "((('BT', 16), ('PPS', 16)), 4, 2)",
           "((('BT', 32), ('PPS', 16)), 4, 2)",
           "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -2079,22 +2087,18 @@
             "DWL": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
             "DWR": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
@@ -2164,61 +2168,72 @@
                 1
               ]
             },
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                786432,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
             "eps": 1e-05,
             "shape_key": 52777095269177
           },
-          "implementation": "abf7efc1344504feba39afe6b38c4f4afc1ca9c255fa784be6e0f61bb66a1050",
+          "implementation": "b2d1bc545e07e242659da8d0ea5dc60763946a8d5e9b18ce33c7a342d558c6b8",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=0,K=32,shape_key=26388816202553": {
-      "f5c49a2c356cf844f39a": {
+      "25f540606bd03536b2cb": {
         "entries": [
+          {
+            "kwargs": {
+              "BT": 32,
+              "PPS": 16
+            },
+            "ms": 0.11779200285673141,
+            "num_stages": 2,
+            "num_warps": 4
+          },
           {
             "kwargs": {
               "BT": 64,
               "PPS": 16
             },
-            "ms": 0.1884640008211136,
+            "ms": 0.11971200257539749,
             "num_stages": 2,
             "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BT": 16,
+              "PPS": 16
+            },
+            "ms": 0.1239359974861145,
+            "num_stages": 2,
+            "num_warps": 4
           },
           {
             "kwargs": {
               "BT": 64,
               "PPS": 2
             },
-            "ms": 0.20367999374866486,
+            "ms": 0.15056000649929047,
             "num_stages": 2,
             "num_warps": 4
           },
           {
             "kwargs": {
               "BT": 64,
-              "PPS": 4
-            },
-            "ms": 0.21395200490951538,
-            "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 8
-            },
-            "ms": 0.22838400304317474,
-            "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 32,
               "PPS": 16
             },
-            "ms": 0.2354080006480217,
+            "ms": 0.1544640064239502,
             "num_stages": 2,
-            "num_warps": 4
+            "num_warps": 1
           }
         ],
         "searched": [
@@ -2229,7 +2244,6 @@
           "((('BT', 128), ('PPS', 8)), 4, 2)",
           "((('BT', 128), ('PPS', 8)), 4, 3)",
           "((('BT', 128), ('PPS', 8)), 8, 2)",
-          "((('BT', 128), ('PPS', 8)), 8, 3)",
           "((('BT', 16), ('PPS', 16)), 4, 2)",
           "((('BT', 32), ('PPS', 16)), 4, 2)",
           "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -2324,22 +2338,18 @@
             "DWL": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
             "DWR": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
@@ -2407,32 +2417,61 @@
                 1
               ]
             },
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                393216,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
             "eps": 1e-05,
             "shape_key": 26388816202553
           },
-          "implementation": "abf7efc1344504feba39afe6b38c4f4afc1ca9c255fa784be6e0f61bb66a1050",
+          "implementation": "b2d1bc545e07e242659da8d0ea5dc60763946a8d5e9b18ce33c7a342d558c6b8",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=0,K=32,shape_key=52777095269177": {
-      "8e051f7d9e45949aba21": {
+      "c96d05f8f99a16b7186a": {
         "entries": [
           {
             "kwargs": {
               "BT": 64,
               "PPS": 16
             },
-            "ms": 0.29398399591445923,
+            "ms": 0.19766399264335632,
             "num_stages": 2,
             "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BT": 32,
+              "PPS": 16
+            },
+            "ms": 0.20377600193023682,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BT": 16,
+              "PPS": 16
+            },
+            "ms": 0.22015999257564545,
+            "num_stages": 2,
+            "num_warps": 4
           },
           {
             "kwargs": {
               "BT": 64,
               "PPS": 2
             },
-            "ms": 0.38304001092910767,
+            "ms": 0.27535998821258545,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -2441,25 +2480,7 @@
               "BT": 64,
               "PPS": 4
             },
-            "ms": 0.38604798913002014,
-            "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 32,
-              "PPS": 16
-            },
-            "ms": 0.3861759901046753,
-            "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 8
-            },
-            "ms": 0.4023999869823456,
+            "ms": 0.2754879891872406,
             "num_stages": 2,
             "num_warps": 4
           }
@@ -2472,7 +2493,6 @@
           "((('BT', 128), ('PPS', 8)), 4, 2)",
           "((('BT', 128), ('PPS', 8)), 4, 3)",
           "((('BT', 128), ('PPS', 8)), 8, 2)",
-          "((('BT', 128), ('PPS', 8)), 8, 3)",
           "((('BT', 16), ('PPS', 16)), 4, 2)",
           "((('BT', 32), ('PPS', 16)), 4, 2)",
           "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -2567,22 +2587,18 @@
             "DWL": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
             "DWR": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
@@ -2650,23 +2666,34 @@
                 1
               ]
             },
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                786432,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
             "eps": 1e-05,
             "shape_key": 52777095269177
           },
-          "implementation": "abf7efc1344504feba39afe6b38c4f4afc1ca9c255fa784be6e0f61bb66a1050",
+          "implementation": "b2d1bc545e07e242659da8d0ea5dc60763946a8d5e9b18ce33c7a342d558c6b8",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=0,K=8,shape_key=108090790177180739": {
-      "167ee746ee2b66a318f8": {
+      "61c0d0b78ba68301e384": {
         "entries": [
           {
             "kwargs": {
               "BT": 64,
               "PPS": 2
             },
-            "ms": 0.23468799889087677,
+            "ms": 0.22838400304317474,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -2675,7 +2702,7 @@
               "BT": 64,
               "PPS": 4
             },
-            "ms": 0.25519999861717224,
+            "ms": 0.2489279955625534,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -2684,18 +2711,18 @@
               "BT": 16,
               "PPS": 16
             },
-            "ms": 0.27136000990867615,
+            "ms": 0.2630079984664917,
             "num_stages": 2,
             "num_warps": 4
           },
           {
             "kwargs": {
-              "BT": 32,
-              "PPS": 16
+              "BT": 64,
+              "PPS": 8
             },
-            "ms": 0.2754560112953186,
+            "ms": 0.2796800136566162,
             "num_stages": 2,
-            "num_warps": 4
+            "num_warps": 8
           },
           {
             "kwargs": {
@@ -2715,7 +2742,6 @@
           "((('BT', 128), ('PPS', 8)), 4, 2)",
           "((('BT', 128), ('PPS', 8)), 4, 3)",
           "((('BT', 128), ('PPS', 8)), 8, 2)",
-          "((('BT', 128), ('PPS', 8)), 8, 3)",
           "((('BT', 16), ('PPS', 16)), 4, 2)",
           "((('BT', 32), ('PPS', 16)), 4, 2)",
           "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -2890,6 +2916,17 @@
               "dtype": "torch.bfloat16",
               "shape": [
                 64,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                393216,
                 64
               ],
               "stride": [
@@ -2900,38 +2937,20 @@
             "eps": 1e-05,
             "shape_key": 108090790177180739
           },
-          "implementation": "abf7efc1344504feba39afe6b38c4f4afc1ca9c255fa784be6e0f61bb66a1050",
+          "implementation": "b2d1bc545e07e242659da8d0ea5dc60763946a8d5e9b18ce33c7a342d558c6b8",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=0,K=8,shape_key=216177181234072643": {
-      "897141277fc49e4ae5cb": {
+      "13e877080485e30685ca": {
         "entries": [
           {
             "kwargs": {
               "BT": 64,
               "PPS": 2
             },
-            "ms": 0.42800000309944153,
-            "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 16
-            },
-            "ms": 0.4327999949455261,
-            "num_stages": 1,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 32,
-              "PPS": 16
-            },
-            "ms": 0.4349760115146637,
+            "ms": 0.4116159975528717,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -2940,7 +2959,7 @@
               "BT": 16,
               "PPS": 16
             },
-            "ms": 0.44227200746536255,
+            "ms": 0.43116798996925354,
             "num_stages": 2,
             "num_warps": 4
           },
@@ -2949,9 +2968,27 @@
               "BT": 64,
               "PPS": 4
             },
-            "ms": 0.4440000057220459,
+            "ms": 0.4311999976634979,
             "num_stages": 2,
             "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BT": 64,
+              "PPS": 16
+            },
+            "ms": 0.43724799156188965,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BT": 64,
+              "PPS": 8
+            },
+            "ms": 0.4577600061893463,
+            "num_stages": 2,
+            "num_warps": 8
           }
         ],
         "searched": [
@@ -2962,7 +2999,6 @@
           "((('BT', 128), ('PPS', 8)), 4, 2)",
           "((('BT', 128), ('PPS', 8)), 4, 3)",
           "((('BT', 128), ('PPS', 8)), 8, 2)",
-          "((('BT', 128), ('PPS', 8)), 8, 3)",
           "((('BT', 16), ('PPS', 16)), 4, 2)",
           "((('BT', 32), ('PPS', 16)), 4, 2)",
           "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -3144,59 +3180,70 @@
                 1
               ]
             },
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                786432,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
             "eps": 1e-05,
             "shape_key": 216177181234072643
           },
-          "implementation": "abf7efc1344504feba39afe6b38c4f4afc1ca9c255fa784be6e0f61bb66a1050",
+          "implementation": "b2d1bc545e07e242659da8d0ea5dc60763946a8d5e9b18ce33c7a342d558c6b8",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=1,K=32,shape_key=26388816202553": {
-      "d597b736994e03b5bd04": {
+      "9de9ae4be913d2d0a4ce": {
         "entries": [
           {
             "kwargs": {
               "BT": 64,
               "PPS": 16
             },
-            "ms": 0.20790399610996246,
+            "ms": 0.12387199699878693,
             "num_stages": 2,
             "num_warps": 2
           },
           {
             "kwargs": {
               "BT": 64,
-              "PPS": 2
+              "PPS": 16
             },
-            "ms": 0.246799997985363,
+            "ms": 0.15670399367809296,
             "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 4
-            },
-            "ms": 0.2568640112876892,
-            "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 8
-            },
-            "ms": 0.2734079957008362,
-            "num_stages": 2,
-            "num_warps": 4
+            "num_warps": 1
           },
           {
             "kwargs": {
               "BT": 32,
               "PPS": 16
             },
-            "ms": 0.28966400027275085,
+            "ms": 0.1607999950647354,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BT": 16,
+              "PPS": 16
+            },
+            "ms": 0.16896000504493713,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BT": 64,
+              "PPS": 2
+            },
+            "ms": 0.18115200102329254,
             "num_stages": 2,
             "num_warps": 4
           }
@@ -3209,7 +3256,6 @@
           "((('BT', 128), ('PPS', 8)), 4, 2)",
           "((('BT', 128), ('PPS', 8)), 4, 3)",
           "((('BT', 128), ('PPS', 8)), 8, 2)",
-          "((('BT', 128), ('PPS', 8)), 8, 3)",
           "((('BT', 16), ('PPS', 16)), 4, 2)",
           "((('BT', 32), ('PPS', 16)), 4, 2)",
           "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -3304,22 +3350,18 @@
             "DWL": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
             "DWR": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
@@ -3387,59 +3429,70 @@
                 1
               ]
             },
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                393216,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
             "eps": 1e-05,
             "shape_key": 26388816202553
           },
-          "implementation": "abf7efc1344504feba39afe6b38c4f4afc1ca9c255fa784be6e0f61bb66a1050",
+          "implementation": "b2d1bc545e07e242659da8d0ea5dc60763946a8d5e9b18ce33c7a342d558c6b8",
           "scheme": 1
         }
       }
     },
     "bfloat16+float32|HAS_MASK=1,HAS_PBIAS=1,K=32,shape_key=52777095269177": {
-      "5db71fbf65656a03784e": {
+      "5898cce3ce6913589e8a": {
         "entries": [
           {
             "kwargs": {
               "BT": 64,
               "PPS": 16
             },
-            "ms": 0.32767999172210693,
+            "ms": 0.20579199492931366,
             "num_stages": 2,
             "num_warps": 2
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 2
-            },
-            "ms": 0.45977601408958435,
-            "num_stages": 2,
-            "num_warps": 4
-          },
-          {
-            "kwargs": {
-              "BT": 64,
-              "PPS": 4
-            },
-            "ms": 0.46592000126838684,
-            "num_stages": 2,
-            "num_warps": 4
           },
           {
             "kwargs": {
               "BT": 32,
               "PPS": 16
             },
-            "ms": 0.4864319860935211,
+            "ms": 0.2847039997577667,
+            "num_stages": 2,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BT": 16,
+              "PPS": 16
+            },
+            "ms": 0.29785600304603577,
             "num_stages": 2,
             "num_warps": 4
           },
           {
             "kwargs": {
               "BT": 64,
-              "PPS": 8
+              "PPS": 16
             },
-            "ms": 0.4864639937877655,
+            "ms": 0.3022080063819885,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BT": 64,
+              "PPS": 2
+            },
+            "ms": 0.3338879942893982,
             "num_stages": 2,
             "num_warps": 4
           }
@@ -3452,7 +3505,6 @@
           "((('BT', 128), ('PPS', 8)), 4, 2)",
           "((('BT', 128), ('PPS', 8)), 4, 3)",
           "((('BT', 128), ('PPS', 8)), 8, 2)",
-          "((('BT', 128), ('PPS', 8)), 8, 3)",
           "((('BT', 16), ('PPS', 16)), 4, 2)",
           "((('BT', 32), ('PPS', 16)), 4, 2)",
           "((('BT', 64), ('PPS', 1)), 4, 2)",
@@ -3547,22 +3599,18 @@
             "DWL": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
             "DWR": {
               "dtype": "torch.float32",
               "shape": [
-                32,
-                64
+                192
               ],
               "stride": [
-                64,
                 1
               ]
             },
@@ -3630,19 +3678,30 @@
                 1
               ]
             },
+            "Y": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                786432,
+                64
+              ],
+              "stride": [
+                64,
+                1
+              ]
+            },
             "eps": 1e-05,
             "shape_key": 52777095269177
           },
-          "implementation": "abf7efc1344504feba39afe6b38c4f4afc1ca9c255fa784be6e0f61bb66a1050",
+          "implementation": "b2d1bc545e07e242659da8d0ea5dc60763946a8d5e9b18ce33c7a342d558c6b8",
           "scheme": 1
         }
       }
     }
   },
   "op": "outer_product_mean_bwd_layernorm_gemm_triton",
-  "op_identity": "ed9833674f6b",
+  "op_identity": "bf9c7ec2be7a",
   "provenance": {
-    "built_utc": "2026-10-30T10:00:56+00:00",
+    "built_utc": "2026-11-01T03:17:15+00:00",
     "torch": "2.13.0+cu129",
     "triton": "3.7.1"
   },
