@@ -186,6 +186,36 @@ def pack_fp32(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, wsc: torch.T
 
 _XT = os.environ.get("CT_XT", "1") != "0"   # read once at import (the routing runs inside traces)
 
+# ---- B200 bf16 backward: dh = dout Ws and the SwiGLU backward in ONE tcgen05 GEMM (``tg_gemm.cu`` MODE 7, GATE_AB without h: the epilogue
+# TMA-loads the forward's saved [a | b] tile and writes [dA | dB]; dh never reaches HBM). Replaces cuBLAS dh + ``swiglu_bwd`` (a write and a
+# read of dh [M, ND]). GATE7_BN: the output tile width (128 or 256 columns of the hidden width); None turns the route off (A/B).
+GATE7_BN: int | None = 256
+
+
+def _gate7_ok(dout: torch.Tensor, ab: torch.Tensor) -> bool:
+    if GATE7_BN is None or dout.dtype is not torch.bfloat16 or ab.dtype is not torch.bfloat16:
+        return False
+    nd = ab.shape[1] // 2
+    return (torch.cuda.get_device_capability(dout.device) == (10, 0) and dout.shape[1] % 64 == 0 and nd % GATE7_BN == 0
+            and ab.is_contiguous() and dout.shape[0] == ab.shape[0])
+
+
+def _gate_ab_fake(dout, wsT, ab):
+    """[dA | dB] like ab."""
+    return torch.empty_like(ab)
+
+
+@opaque(fake=_gate_ab_fake, name="conditioned_transition_cuda_gate_ab_sm100a")
+def gate_ab(dout: torch.Tensor, wsT: torch.Tensor, ab: torch.Tensor) -> torch.Tensor:
+    """[dA | dB] of dh = dout Ws (``wsT`` = Ws^T [ND, D], bf16) and the saved ab = [a | b] [M, 2 ND]: da = dh b silu'(a), db = dh silu(a)."""
+    from .ct_tg import gemm
+
+    m, d = dout.shape
+    nd = wsT.shape[0]
+    dab = torch.empty_like(ab)
+    gemm("gate7", GATE7_BN, False, m, nd, dout, wsT, dab, k0=d, o1=dab, res=ab, hoff=nd)
+    return dab
+
 
 def _sigmul_bwd_x_fake(dy, out, sp):
     """(dout, dscale, the block partials of the column sums of dscale, dout^T padded to 32 rows)."""
@@ -267,8 +297,11 @@ class _Tail(torch.autograd.Function):
             dws = torch.mm(dout.t(), h, out_dtype=f32) if o(ws) else torch.mm(dout.t(), h)
         t = (lambda w: w) if x.dtype is not f32 else None   # TF32: the K-major copies packed by the forward (18432 rows: dh -21, dx -72, dcond -23 us)
         k = (lambda i, w: tw[i].t()) if x.dtype is f32 else (lambda i, w: w)
-        dh = torch.mm(dout, k(1, wsb))
-        dab = swiglu_bwd(dh, ab)
+        if _gate7_ok(dout, ab):   # B200 bf16: dh and the SwiGLU backward in one tcgen05 GEMM
+            dab = gate_ab(dout, wsb.t().contiguous(), ab)
+        else:
+            dh = torch.mm(dout, k(1, wsb))
+            dab = swiglu_bwd(dh, ab)
         if xt:
             dwab = torch.mm(dab.t(), transpose_f32(x).t())
         else:

@@ -679,27 +679,40 @@ void pack_f32(std::vector<at::Tensor> srcs, std::vector<at::Tensor> dsts, std::v
 }
 
 // ======================================================================================================================== column sums of block partials
-// out[n] = sum_p parts[p, n] in a fixed order (32 columns x 8 row slices a block, the slices summed in order). The sm_90a extension
-// (adaln_sm90.cu) has the same kernels; these are the ones B200 (sm_100a) runs, where that extension does not build.
-__global__ void __launch_bounds__(256) colsum_rows_k(const float* __restrict__ pa, float* __restrict__ oa, int Pa, int Na,
-                                                     const float* __restrict__ pb, float* __restrict__ ob, int Pb, int Nb) {
-  __shared__ float red[8][33];
-  const int ba = (Na + 31) / 32;
+// out[n] = sum_p parts[p, n] in a fixed order: 16 columns x 64 row slices a block (1024 threads); slice s sums rows s, s + 64, ... into four
+// interleaved accumulators added in a fixed order, then the block adds its 64 slices by a fixed tree. The sm_90a extension (adaln_sm90.cu)
+// has its own kernels; these are the ones B200 (sm_100a) runs, where that extension does not build. (The earlier 32 columns x 8 slices
+// walked ~130 dependent rows a thread on 24 blocks: 38 us for the [1056, 768] partials of a CT training step, now a few.)
+constexpr int CS_COLS = 16, CS_SL = 64;
+__global__ void __launch_bounds__(CS_COLS * CS_SL) colsum_rows_k(const float* __restrict__ pa, float* __restrict__ oa, int Pa, int Na,
+                                                                const float* __restrict__ pb, float* __restrict__ ob, int Pb, int Nb) {
+  __shared__ float red[CS_SL][CS_COLS + 1];
+  const int ba = (Na + CS_COLS - 1) / CS_COLS;
   const bool second = (int)blockIdx.x >= ba;
   const float* parts = second ? pb : pa;
   float* out = second ? ob : oa;
   const int P = second ? Pb : Pa, N = second ? Nb : Na;
-  const int c = ((int)blockIdx.x - (second ? ba : 0)) * 32 + (threadIdx.x & 31), s = threadIdx.x >> 5;
-  float v = 0.f;
-  if (c < N) for (int p = s; p < P; p += 8) v += parts[(int64_t)p * N + c];
-  red[s][threadIdx.x & 31] = v;
-  __syncthreads();
-  if (s == 0 && c < N) {
-    float t = 0.f;
-#pragma unroll
-    for (int q = 0; q < 8; ++q) t += red[q][threadIdx.x & 31];
-    out[c] = t;
+  const int lc = threadIdx.x % CS_COLS, s = threadIdx.x / CS_COLS;
+  const int c = ((int)blockIdx.x - (second ? ba : 0)) * CS_COLS + lc;
+  float v0 = 0.f, v1 = 0.f, v2 = 0.f, v3 = 0.f;
+  if (c < N) {
+    int p = s;
+    for (; p + 3 * CS_SL < P; p += 4 * CS_SL) {
+      v0 += __ldg(parts + (int64_t)p * N + c);
+      v1 += __ldg(parts + (int64_t)(p + CS_SL) * N + c);
+      v2 += __ldg(parts + (int64_t)(p + 2 * CS_SL) * N + c);
+      v3 += __ldg(parts + (int64_t)(p + 3 * CS_SL) * N + c);
+    }
+    for (; p < P; p += CS_SL) v0 += __ldg(parts + (int64_t)p * N + c);
   }
+  red[s][lc] = (v0 + v1) + (v2 + v3);
+  __syncthreads();
+#pragma unroll
+  for (int h = CS_SL / 2; h > 0; h >>= 1) {
+    if (s < h) red[s][lc] += red[s + h][lc];
+    __syncthreads();
+  }
+  if (s == 0 && c < N) out[c] = red[0][lc];
 }
 std::vector<at::Tensor> colsum2(at::Tensor a, at::Tensor b) {
   chk(a, at::kFloat, "parts a");
@@ -707,7 +720,7 @@ std::vector<at::Tensor> colsum2(at::Tensor a, at::Tensor b) {
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2, "parts [P, N] fp32");
   const at::cuda::CUDAGuard gd(a.device());
   auto oa = at::empty({a.size(1)}, a.options()), ob = at::empty({b.size(1)}, b.options());
-  colsum_rows_k<<<(unsigned)((a.size(1) + 31) / 32 + (b.size(1) + 31) / 32), 256, 0, S()>>>(
+  colsum_rows_k<<<(unsigned)((a.size(1) + CS_COLS - 1) / CS_COLS + (b.size(1) + CS_COLS - 1) / CS_COLS), CS_COLS * CS_SL, 0, S()>>>(
       P<float>(a), PM<float>(oa), (int)a.size(0), (int)a.size(1), P<float>(b), PM<float>(ob), (int)b.size(0), (int)b.size(1));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {oa, ob};
@@ -717,7 +730,7 @@ at::Tensor colsum(at::Tensor parts) {
   TORCH_CHECK(parts.dim() == 2, "parts [P, N] fp32");
   const at::cuda::CUDAGuard gd(parts.device());
   auto out = at::empty({parts.size(1)}, parts.options());
-  colsum_rows_k<<<(unsigned)((parts.size(1) + 31) / 32), 256, 0, S()>>>(P<float>(parts), PM<float>(out), (int)parts.size(0),
+  colsum_rows_k<<<(unsigned)((parts.size(1) + CS_COLS - 1) / CS_COLS), CS_COLS * CS_SL, 0, S()>>>(P<float>(parts), PM<float>(out), (int)parts.size(0),
                                                                           (int)parts.size(1), nullptr, nullptr, 0, 0);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;

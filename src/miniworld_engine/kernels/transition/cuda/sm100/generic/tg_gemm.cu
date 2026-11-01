@@ -10,6 +10,7 @@
 //   MODE 6  GATE_AB  dh = dy Ws, a, b read from the forward's [a | b] (res, row stride ldres, b at column hoff) -> h, [dA | dB]
 //                    (the backward at a few row tiles: one operand phase instead of GATE's two, whose recompute of a, b doubles the
 //                    per-CTA operand intake that bounds a sub-wave grid)
+//   MODE 7  GATE_AB without h: MODE 6 storing only [dA | dB] (the ConditionedTransition training backward, which keeps h from its forward)
 //
 // -DF32=1: fp32 activations on the TF32 tensor cores (kind::tf32; the operands are expected on the TF32 grid, the outputs that feed a
 // later TF32 GEMM are rounded to it), else bf16 (kind::f16). Any M (TMA zero-fills the tail rows of the last 128-row tile and clips
@@ -46,7 +47,7 @@ constexpr int NCTA = CTA2 ? 2 : 1;
 constexpr int BNL = BN / NCTA;                       // B rows (output columns) each CTA of a pair brings
 
 constexpr bool SWG = MODE == 0 || MODE == 5;                             // the SwiGLU forward epilogues
-constexpr bool GAT = MODE == 3 || MODE == 6;                             // the gate (SwiGLU backward) epilogues: h, dA, dB
+constexpr bool GAT = MODE == 3 || MODE == 6 || MODE == 7;                             // the gate (SwiGLU backward) epilogues: h, dA, dB
 constexpr int NACC = SWG ? 2 : MODE == 3 ? 3 : MODE == 4 ? 2 : 1;        // accumulators per tile
 constexpr int NPH = (MODE == 3 || MODE == 4) ? 2 : 1;                     // operand phases (A, K) per tile
 constexpr int NBS = (SWG || MODE == 3) ? 2 : 1;                           // B tiles per ring stage (the widest phase)
@@ -58,7 +59,9 @@ constexpr int BKE = 128 / ESZ;                       // elements per 128-byte K-
 constexpr bool OUT_F32 = F32 || MODE == 2;           // PLAIN writes fp32 whatever the operands
 constexpr int OCG = OUT_F32 ? 32 : 64;               // output columns per 128-byte staging row
 constexpr int UPG = OCG / 32;                        // 32-column TMEM loads per output group
-constexpr int NOUT = (GAT || MODE == 5) ? 3 : 1;     // staged outputs per group (GATE: h, dA, dB; SWIGLU_AB: h, a, b)
+constexpr int NOUT = MODE == 7 ? 2 : (GAT || MODE == 5) ? 3 : 1;   // staged outputs per group (GATE: h, dA, dB; SWIGLU_AB: h, a, b; MODE 7: dA, dB)
+constexpr bool LDAB = MODE == 6 || MODE == 7;            // the epilogue TMA-loads the saved a, b into its dA / dB slabs
+constexpr int SL_A = MODE == 7 ? 0 : 1, SL_B = SL_A + 1;   // staging slots of dA (a) and dB (b)
 // staging slabs: bf16 outputs (UPG 2) are staged by one warp per lane quarter (4 owners), fp32 ones by every epilogue warp (8); so the
 // three-output bf16 epilogues (SWIGLU_AB, GATE, GATE_AB) fit double-buffered staging too
 constexpr int NOWN = UPG == 1 ? 8 : 4;                 // (8 = NEPI, defined below)
@@ -122,7 +125,7 @@ DEVI void tma_store_wait_read1() { asm volatile("cp.async.bulk.wait_group.read 1
 
 struct Bars {
   uint64_t full[NST], empty[NST], accf[2], acce[2];
-  uint64_t ldab[MODE == 6 ? NOWN : 1][2];            // GATE_AB: the saved a, b of a group TMA-loaded into its dA / dB staging slabs
+  uint64_t ldab[LDAB ? NOWN : 1][2];            // GATE_AB: the saved a, b of a group TMA-loaded into its dA / dB staging slabs
   uint32_t tmem;
 };
 
@@ -200,7 +203,7 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
   if (threadIdx.x == 0) {
     for (int s = 0; s < NST; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
     for (int s = 0; s < 2; ++s) { mbar_init(&B.accf[s], 1); mbar_init(&B.acce[s], NEPI * NCTA); }
-#if MODE == 6
+#if MODE == 6 || MODE == 7
     for (int o = 0; o < NOWN; ++o) { mbar_init(&B.ldab[o][0], 1); mbar_init(&B.ldab[o][1], 1); }
 #endif
     fence_barrier_init();
@@ -289,7 +292,7 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
     const uint32_t stg = su + O_STG + (uint32_t)(owner * NOUT * STG_PAR) * SLAB;
     const bool storer = UPG == 1 || half == 0;
     int tc = 0, grp = 0;
-#if MODE == 6
+#if MODE == 6 || MODE == 7
     // GATE_AB with double-buffered staging (bf16): the a, b TMA loads run one staging group ahead of the group being computed (into the
     // other parity's dA / dB slabs, once that parity's previous stores have been read out), so their latency leaves the group's chain
     constexpr bool PREF = STG_PAR == 2;
@@ -299,8 +302,8 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
       const int rq = ksq * MSTR + (ttq / NT) * 128 * NCTA + (int)rank * 128 + q4 * 32;
       uint64_t* bq = &B.ldab[owner][pq];
       mbar_expect_tx(bq, 2 * SLAB);
-      tma_load_2d(stg + (uint32_t)(1 * STG_PAR + pq) * SLAB, &mB1, bq, cq, rq);
-      tma_load_2d(stg + (uint32_t)(2 * STG_PAR + pq) * SLAB, &mB1, bq, hoff + cq, rq);
+      tma_load_2d(stg + (uint32_t)(SL_A * STG_PAR + pq) * SLAB, &mB1, bq, cq, rq);
+      tma_load_2d(stg + (uint32_t)(SL_B * STG_PAR + pq) * SLAB, &mB1, bq, hoff + cq, rq);
     };
     if (PREF && storer && lane == 0 && (int)(blockIdx.x / NCTA) < tiles) ab_issue((int)(blockIdx.x / NCTA), 0, 0);
 #endif
@@ -316,7 +319,7 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
         const int c0 = n0 + g * OCG;                         // first output column of the group
         if (c0 >= N) break;
         const int par = STG_PAR == 2 ? (grp & 1) : 0;
-#if MODE == 6
+#if MODE == 6 || MODE == 7
         if (PREF) {
           if (storer && lane == 0) {
             tma_store_wait_read0();                          // the other parity's slabs are free: prefetch the next group's a, b into them
@@ -328,15 +331,15 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
 #else
         if (storer && lane == 0) { if (STG_PAR == 2) tma_store_wait_read1(); else tma_store_wait_read0(); }
 #endif
-#if MODE == 6
+#if MODE == 6 || MODE == 7
         // the group's a, b (the forward's [a | b], map mB1, box OCG x 32) into the dA / dB slabs, which their previous stores have left
         // (wait_read above): bulk loads in the layout stage32 writes, instead of 32 rows of per-thread loads per warp instruction
         uint64_t* lb = &B.ldab[owner][par];
         if (!PREF && storer && lane == 0) {
           const int rl = ks * MSTR + m0 + q4 * 32;
           mbar_expect_tx(lb, 2 * SLAB);
-          tma_load_2d(stg + (uint32_t)(1 * STG_PAR + par) * SLAB, &mB1, lb, c0, rl);
-          tma_load_2d(stg + (uint32_t)(2 * STG_PAR + par) * SLAB, &mB1, lb, hoff + c0, rl);
+          tma_load_2d(stg + (uint32_t)(SL_A * STG_PAR + par) * SLAB, &mB1, lb, c0, rl);
+          tma_load_2d(stg + (uint32_t)(SL_B * STG_PAR + par) * SLAB, &mB1, lb, hoff + c0, rl);
         }
 #endif
         if (UPG == 2) named_bar_sync(1 + q4, 64); else __syncwarp();
@@ -379,11 +382,11 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
             o1[e] = F32 ? tf32r(da) : da;                    // dA, dB: the d_xn GEMM's A operand
             o2[e] = F32 ? tf32r(db) : db;
           }
-#elif MODE == 6
+#elif MODE == 6 || MODE == 7
           float o1[32], o2[32], av[32], bv[32];
           mbar_wait(lb, (grp >> (STG_PAR == 2 ? 1 : 0)) & 1);
-          stage_ld32(stg + (uint32_t)(1 * STG_PAR + par) * SLAB, r, u, av);
-          stage_ld32(stg + (uint32_t)(2 * STG_PAR + par) * SLAB, r, u, bv);
+          stage_ld32(stg + (uint32_t)(SL_A * STG_PAR + par) * SLAB, r, u, av);
+          stage_ld32(stg + (uint32_t)(SL_B * STG_PAR + par) * SLAB, r, u, bv);
 #pragma unroll
           for (int e = 0; e < 32; ++e) {
             const float dh = __uint_as_float(acc[0][e]), a = av[e], b = bv[e];
@@ -405,20 +408,24 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
             o0[e] += sigm(sp) * __uint_as_float(acc[0][e]);
           }
 #endif
+#if MODE != 7
           stage32(stg + (uint32_t)(0 * STG_PAR + par) * SLAB, r, u, o0);
-#if MODE == 3 || MODE == 5 || MODE == 6
-          stage32(stg + (uint32_t)(1 * STG_PAR + par) * SLAB, r, u, o1);
-          stage32(stg + (uint32_t)(2 * STG_PAR + par) * SLAB, r, u, o2);
+#endif
+#if MODE == 3 || MODE == 5 || MODE == 6 || MODE == 7
+          stage32(stg + (uint32_t)(SL_A * STG_PAR + par) * SLAB, r, u, o1);
+          stage32(stg + (uint32_t)(SL_B * STG_PAR + par) * SLAB, r, u, o2);
 #endif
         }
         fence_proxy_async();
         if (UPG == 2) named_bar_sync(1 + q4, 64); else __syncwarp();
         if (storer && lane == 0) {
           const int r0 = ks * MSTR + m0 + q4 * 32;
+#if MODE != 7
           tma_store_2d(&mO0, stg + (uint32_t)(0 * STG_PAR + par) * SLAB, c0, r0);
-#if MODE == 3 || MODE == 5 || MODE == 6
-          tma_store_2d(&mO1, stg + (uint32_t)(1 * STG_PAR + par) * SLAB, c0, r0);
-          tma_store_2d(&mO1, stg + (uint32_t)(2 * STG_PAR + par) * SLAB, hoff + c0, r0);
+#endif
+#if MODE == 3 || MODE == 5 || MODE == 6 || MODE == 7
+          tma_store_2d(&mO1, stg + (uint32_t)(SL_A * STG_PAR + par) * SLAB, c0, r0);
+          tma_store_2d(&mO1, stg + (uint32_t)(SL_B * STG_PAR + par) * SLAB, hoff + c0, r0);
 #endif
           tma_store_commit();
         }
