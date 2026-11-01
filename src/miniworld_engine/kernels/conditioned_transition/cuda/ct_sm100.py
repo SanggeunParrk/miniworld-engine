@@ -225,12 +225,12 @@ def _head_weights(wc, ada_ws, ada_bs, ada_wb, wsc, bsc):
             wsw.float().sum(1).contiguous())
 
 
-def _tail_sp_fake(xn, wab, ws, sp, res):
+def _tail_cublas_sp_fake(xn, wab, ws, sp, res):
     """y [M, D] like xn."""
     return torch.empty((xn.shape[0], ws.shape[0]), dtype=xn.dtype, device=xn.device)
 
 
-@opaque(fake=_tail_sp_fake, name="conditioned_transition_tail_bf16_cublas_sp_sm100a")
+@opaque(fake=_tail_cublas_sp_fake, name="conditioned_transition_tail_bf16_cublas_sp_sm100a")
 def _tail_cublas_sp(xn: torch.Tensor, wab: torch.Tensor, ws: torch.Tensor, sp: torch.Tensor, res: torch.Tensor | None) -> torch.Tensor:
     """``_tail_cublas`` with the gate pre-activation sp handed in: ab = xn [Wa; Wb]^T, h = silu(a) b, y = res + sigmoid(sp) (h Ws^T)."""
     from .ct_train import ext as rows_ext
