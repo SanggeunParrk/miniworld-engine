@@ -70,25 +70,40 @@ __device__ __forceinline__ void stats(const float (&v)[N / 32], float eps, float
   rstd = rsqrtf(wsum(q) * (1.f / N) + eps);
 }
 
+// Rows a warp of ln_cond_fwd_k handles at a narrow width: a 128-wide row is one 16-B (fp32) / 8-B (bf16) load a lane, so one row a warp kept a
+// single load in flight and the 8-row blocks lived about one DRAM round trip each. RU rows' loads are issued before any of their arithmetic
+// (B200, CUDA graph, fp32 [20480, 128]: 5.5 -> 4.0 us; [196608, 128] training 33.7 -> 27.9 us). The same change made adaln_fwd_k and the
+// persistent backward passes slower (fp32 [40960, 128] adaln_fwd 12.0 -> 14.3 us): they keep one row a warp.
+template <int N> constexpr int RU = N <= 128 ? 4 : (N <= 256 ? 2 : 1);
+template <int N> unsigned rows_grid_n(long R) { return (unsigned)((R + WPB * RU<N> - 1) / (WPB * RU<N>)); }
+
 template <int N, typename T>
 __global__ void __launch_bounds__(32 * WPB) ln_cond_fwd_k(const T* __restrict__ C, const float* __restrict__ W, T* __restrict__ CN,
                                                           float2* __restrict__ ST, long R, float eps) {
+  constexpr int U = RU<N>;
   const int lane = threadIdx.x & 31;
-  const long row = (long)blockIdx.x * WPB + (threadIdx.x >> 5);
-  if (row >= R) return;
-  float v[N / 32], mean, rstd;
-  ld_row<N>(C + row * N, lane, v);
-  stats<N>(v, eps, mean, rstd);
+  const long row0 = (long)blockIdx.x * WPB * U + (threadIdx.x >> 5);   // rows row0 + WPB u
+  float v[U][N / 32];
 #pragma unroll
-  for (int k = 0; k < N / 128; ++k) {
-    const float4 w = *reinterpret_cast<const float4*>(W + 4 * (lane + 32 * k));
-    v[4 * k] = (v[4 * k] - mean) * rstd * w.x;
-    v[4 * k + 1] = (v[4 * k + 1] - mean) * rstd * w.y;
-    v[4 * k + 2] = (v[4 * k + 2] - mean) * rstd * w.z;
-    v[4 * k + 3] = (v[4 * k + 3] - mean) * rstd * w.w;
+  for (int u = 0; u < U; ++u)
+    if (row0 + WPB * u < R) ld_row<N>(C + (row0 + WPB * u) * N, lane, v[u]);
+#pragma unroll
+  for (int u = 0; u < U; ++u) {
+    const long row = row0 + WPB * u;
+    if (row >= R) break;
+    float mean, rstd;
+    stats<N>(v[u], eps, mean, rstd);
+#pragma unroll
+    for (int k = 0; k < N / 128; ++k) {
+      const float4 w = *reinterpret_cast<const float4*>(W + 4 * (lane + 32 * k));
+      v[u][4 * k] = (v[u][4 * k] - mean) * rstd * w.x;
+      v[u][4 * k + 1] = (v[u][4 * k + 1] - mean) * rstd * w.y;
+      v[u][4 * k + 2] = (v[u][4 * k + 2] - mean) * rstd * w.z;
+      v[u][4 * k + 3] = (v[u][4 * k + 3] - mean) * rstd * w.w;
+    }
+    st_row<N>(CN + row * N, lane, v[u]);
+    if (lane == 0) ST[row] = make_float2(mean, rstd);
   }
-  st_row<N>(CN + row * N, lane, v);
-  if (lane == 0) ST[row] = make_float2(mean, rstd);
 }
 
 // ln_cond_fwd with the K-major copy of its output: CNT [N, ldd] (row f: feature f of LN(cond) * wc, one column per activation row), written through shared-memory tiles of
@@ -542,7 +557,7 @@ std::vector<at::Tensor> ln_cond_fwd(at::Tensor cond, at::Tensor w, double eps) {
   const at::cuda::CUDAGuard gd(cond.device());
   auto cn = at::empty_like(cond);
   auto st = at::empty({R, 2}, cond.options().dtype(at::kFloat));
-  ACT_SWITCH(N, cond, ln_cond_fwd_k<NN, T><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<T>(cond), w.data_ptr<float>(), PM<T>(cn),
+  ACT_SWITCH(N, cond, ln_cond_fwd_k<NN, T><<<rows_grid_n<NN>(R), 32 * WPB, 0, S()>>>(P<T>(cond), w.data_ptr<float>(), PM<T>(cn),
                                                                                reinterpret_cast<float2*>(st.data_ptr()), R, (float)eps));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {cn, st};
