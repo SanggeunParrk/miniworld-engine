@@ -165,9 +165,9 @@ def test_token_dit_inference(monkeypatch, dtype, d_pair, A, L, masked):
 @pytest.mark.parametrize("d_pair", WIDTHS)
 @pytest.mark.parametrize(("A", "L", "masked"), [(4, 256, True), (3, 200, False)])
 def test_token_dit_training(monkeypatch, dtype, d_pair, A, L, masked):
-    """``token_dit_train._Block`` serves the call (bf16: the APB pair kernels; fp32: the one-pass ``pair_bias``) -- except bf16 at pair 256,
-    which B200 trains on the module composition (faster there); every gradient no worse than the engine's own module path against the
-    fp32 PyTorch block (IEEE): the yardstick of ``tests/gpu/sm90/test_token_dit_pair256_gpu.py``."""
+    """``token_dit_train._Block`` serves the call (bf16: the APB pair kernels; fp32: the one-pass ``pair_bias``) at both pair widths;
+    every gradient no worse than the engine's own module path against the fp32 PyTorch block (IEEE): the yardstick of
+    ``tests/gpu/sm90/test_token_dit_pair256_gpu.py``."""
     from settings_helpers import override_setting
 
     torch.manual_seed(7)
@@ -195,8 +195,7 @@ def test_token_dit_training(monkeypatch, dtype, d_pair, A, L, masked):
     truth = run(ref, False)
     spy = _Spy(monkeypatch, TDT._Block, "apply")
     got = run(eng, dtype is F32)
-    composed = dtype is BF and d_pair == 256   # B200 bf16 pair 256 trains on the module composition (token_dit_train.serves)
-    assert spy.n == (0 if composed else 1), f"the {dtype} pair-{d_pair} training call took the wrong route ({spy.n} fused calls)"
+    assert spy.n == 1, f"the {dtype} pair-{d_pair} training call took the wrong route ({spy.n} fused calls)"
     override_setting(monkeypatch, "token_dit_train", "0")
     module = run(eng, dtype is F32)
     assert set(got) == set(truth), sorted(set(truth) ^ set(got))
@@ -204,6 +203,52 @@ def test_token_dit_training(monkeypatch, dtype, d_pair, A, L, masked):
         ef, em = _rel(got[k], truth[k]), _rel(module[k], truth[k])
         assert torch.isfinite(got[k]).all(), k
         assert ef < 1.5 * em + 3e-3, f"{k}: fused {ef:.2e} vs module path {em:.2e}"
+
+
+@pytest.mark.parametrize("d_pair", WIDTHS)
+@pytest.mark.parametrize(("A", "L", "masked", "extra"), [(4, 256, True, False), (6, 200, False, True), (48, 128, True, False)])
+def test_token_dit_training_shared_cond(monkeypatch, d_pair, A, L, masked, extra):
+    """bf16 training with ONE conditioning shared by the samples (expanded over them with stride 0, as a sampling step or a shared-cond
+    training step hands it): the fused block computes the conditioning once (``token_dit_train._shared_cond``: [L, 6 D] tables read at row
+    r % L, their row gradients summed over the samples before the conditioning GEMMs). Every output and gradient matches the same call with
+    the conditioning materialized per sample (the per-row path) and is no worse than it against the fp32 PyTorch block (IEEE); the shared
+    conditioning's gradient is the per-sample gradients' sum."""
+    torch.manual_seed(7)
+    ref = _randomize(DiTBlock(d_pair=d_pair, implementation=IT.PYTORCH).cuda())
+    eng = DiTBlock(d_pair=d_pair, implementation=IT.MINIWORLD).cuda()
+    eng.load_state_dict(ref.state_dict())
+    single, cond, pair, mask, w = _inputs(A, L, d_pair, False, masked, seed=8)
+    c0 = cond[:1].clone()
+    ex = (0.5 * torch.randn(L, L, device="cuda")) if extra else None
+    shared_calls = []
+    real = TDT._shared_cond
+    monkeypatch.setattr(TDT, "_shared_cond", lambda *a: shared_calls.append(real(*a)) or shared_calls[-1])
+
+    def run(m, shared, dtype):
+        ins = [t.detach().clone().to(dtype).requires_grad_() for t in (single, c0, pair)]
+        xin = None if ex is None else ex.detach().clone().to(dtype).requires_grad_()
+        c = ins[1].expand(A, -1, -1, -1) if shared else ins[1].expand(A, -1, -1, -1).contiguous()
+        with torch.autocast("cuda", dtype=BF, enabled=dtype is BF):
+            out = m(ins[0], c, ins[2], mask, **({} if xin is None else {"extra_pair_bias": xin}))
+        (out.float() * w).sum().backward()
+        res = {"out": out.detach().float(), "dsingle": ins[0].grad.float(), "dcond": ins[1].grad.float(), "dpair": ins[2].grad.float()}
+        if xin is not None:
+            res["dextra"] = xin.grad.float()
+        res.update({n: p.grad.float() for n, p in m.named_parameters() if p.grad is not None})
+        m.zero_grad(set_to_none=True)
+        return res
+
+    truth = run(ref, False, F32)
+    spy = _Spy(monkeypatch, TDT._Block, "apply")
+    got = run(eng, True, BF)
+    assert spy.n == 1 and shared_calls[-1] is True, "the shared-conditioning fused block did not serve the call"
+    per_row = run(eng, False, BF)
+    assert shared_calls[-1] is False
+    assert set(got) == set(truth) == set(per_row), sorted(set(truth) ^ set(got))
+    for k in truth:
+        ef, em = _rel(got[k], truth[k]), _rel(per_row[k], truth[k])
+        assert torch.isfinite(got[k]).all(), k
+        assert ef < 1.5 * em + 3e-3, f"{k}: shared conditioning {ef:.2e} vs per-row conditioning {em:.2e}"
 
 
 # ================================================================================================ bias-only DiT (BiasOnlyDiTBlock)
