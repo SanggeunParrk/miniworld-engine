@@ -289,6 +289,21 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
     const uint32_t stg = su + O_STG + (uint32_t)(owner * NOUT * STG_PAR) * SLAB;
     const bool storer = UPG == 1 || half == 0;
     int tc = 0, grp = 0;
+#if MODE == 6
+    // GATE_AB with double-buffered staging (bf16): the a, b TMA loads run one staging group ahead of the group being computed (into the
+    // other parity's dA / dB slabs, once that parity's previous stores have been read out), so their latency leaves the group's chain
+    constexpr bool PREF = STG_PAR == 2;
+    auto ab_issue = [&](int tq, int gq, int pq) {
+      const int ksq = tq / MNT, ttq = tq % MNT;
+      const int cq = (ttq % NT) * BN + gq * OCG;
+      const int rq = ksq * MSTR + (ttq / NT) * 128 * NCTA + (int)rank * 128 + q4 * 32;
+      uint64_t* bq = &B.ldab[owner][pq];
+      mbar_expect_tx(bq, 2 * SLAB);
+      tma_load_2d(stg + (uint32_t)(1 * STG_PAR + pq) * SLAB, &mB1, bq, cq, rq);
+      tma_load_2d(stg + (uint32_t)(2 * STG_PAR + pq) * SLAB, &mB1, bq, hoff + cq, rq);
+    };
+    if (PREF && storer && lane == 0 && (int)(blockIdx.x / NCTA) < tiles) ab_issue((int)(blockIdx.x / NCTA), 0, 0);
+#endif
     for (int t = blockIdx.x / NCTA; t < tiles; t += gridDim.x / NCTA, ++tc) {
       const int buf = tc & 1;
       const int ks = t / MNT, tt = t % MNT;
@@ -301,12 +316,23 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
         const int c0 = n0 + g * OCG;                         // first output column of the group
         if (c0 >= N) break;
         const int par = STG_PAR == 2 ? (grp & 1) : 0;
+#if MODE == 6
+        if (PREF) {
+          if (storer && lane == 0) {
+            tma_store_wait_read0();                          // the other parity's slabs are free: prefetch the next group's a, b into them
+            int tn = t, gn = g + 1;
+            if (gn >= BN / OCG || n0 + gn * OCG >= N) { tn = t + (int)(gridDim.x / NCTA); gn = 0; }
+            if (tn < tiles) ab_issue(tn, gn, par ^ 1);
+          }
+        } else if (storer && lane == 0) { tma_store_wait_read0(); }
+#else
         if (storer && lane == 0) { if (STG_PAR == 2) tma_store_wait_read1(); else tma_store_wait_read0(); }
+#endif
 #if MODE == 6
         // the group's a, b (the forward's [a | b], map mB1, box OCG x 32) into the dA / dB slabs, which their previous stores have left
         // (wait_read above): bulk loads in the layout stage32 writes, instead of 32 rows of per-thread loads per warp instruction
         uint64_t* lb = &B.ldab[owner][par];
-        if (storer && lane == 0) {
+        if (!PREF && storer && lane == 0) {
           const int rl = ks * MSTR + m0 + q4 * 32;
           mbar_expect_tx(lb, 2 * SLAB);
           tma_load_2d(stg + (uint32_t)(1 * STG_PAR + par) * SLAB, &mB1, lb, c0, rl);
