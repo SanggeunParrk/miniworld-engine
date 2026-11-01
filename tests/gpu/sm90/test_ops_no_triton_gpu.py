@@ -21,6 +21,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from portable_helpers import randomize_half_std as randomize
+import _triton_records as rec
 
 from miniworld_engine import ops, settings
 
@@ -348,25 +349,25 @@ def test_the_cuda_path_prep_helpers_equal_their_triton_originals():
         cu._scale_bf16_kernel[((qd.numel() + 4095) // 4096,)](qd, out, qd.numel(), 0.123, BLOCK=4096)
         assert torch.equal(cu._scale_bf16(qd, 0.123).reshape(-1), out), "scale: not bit-identical to the Triton helper"
     bias = randn(nh, length, length, dtype=torch.bfloat16)
-    assert torch.equal(cu._bias_prep(bias), cu._bias_prep_triton(bias))
+    assert torch.equal(cu._bias_prep(bias), rec.bias_prep_triton(bias))
     do, o = randn(a * length, nh * dh), randn(a * length, nh * dh, seed=5)
     for o_dtype in (torch.float32, torch.bfloat16):
         dob, dd = cu._prep_do(do, o.to(o_dtype), a, length, nh, dh)
-        dob_t, dd_t = cu._prep_do_triton(do, o.to(o_dtype), a, length, nh, dh)
+        dob_t, dd_t = rec.prep_do_triton(do, o.to(o_dtype), a, length, nh, dh)
         assert torch.equal(dob, dob_t)
         assert rel(dd, dd_t) < 1e-6, rel(dd, dd_t)                      # fp32 row sums in a different order
         dob_b, dd_b = cu._prep_do(do.bfloat16(), o.to(o_dtype), a, length, nh, dh, write_dob=False)
-        dob_bt, dd_bt = cu._prep_do_triton(do.bfloat16(), o.to(o_dtype), a, length, nh, dh, write_dob=False)
+        dob_bt, dd_bt = rec.prep_do_triton(do.bfloat16(), o.to(o_dtype), a, length, nh, dh, write_dob=False)
         assert rel(dd_b, dd_bt) < 1e-6
     for dp in (128, 16):
         wb, lnw = randn(nh, dp, dtype=torch.bfloat16), randn(dp, dtype=torch.bfloat16)
         for need_nat in (True, False):
             if dp == 128:
                 l2, nat = fp._wf(wb, lnw, need_nat)
-                l2_t, nat_t = fp._wf_triton(wb, lnw, need_nat)
+                l2_t, nat_t = rec.wf_triton(wb, lnw, need_nat)
                 assert torch.equal(l2, l2_t) and (nat is None) == (nat_t is None) and (nat is None or torch.equal(nat, nat_t))
         wb32, lnw32 = wb.float(), lnw.float()
-        assert torch.equal(fp._wf32(wb32, lnw32), fp._wf32_triton(wb32, lnw32))
+        assert torch.equal(fp._wf32(wb32, lnw32), rec.wf32_triton(wb32, lnw32))
 
 
 @pytest.mark.parametrize("rows", [64, 128, 256])
@@ -377,6 +378,6 @@ def test_the_trimul_weight_pack_equals_the_triton_launch(rows):
     leaves = [randn(rows, d, dtype=torch.bfloat16, seed=s) for s in (1, 2, 3, 4)]
     new, old = (torch.zeros(4 * rows, d, device="cuda", dtype=torch.bfloat16) for _ in range(2))
     pack._pack_blocks(new, *leaves)
-    pack._pack_triton_launch(old, *leaves)
+    rec.pack_triton_launch(old, *leaves)
     torch.cuda.synchronize()
     assert torch.equal(new, old)

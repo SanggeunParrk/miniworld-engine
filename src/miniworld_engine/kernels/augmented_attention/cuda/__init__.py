@@ -421,22 +421,13 @@ def _prep_do_kernel(
 
 def _prep_do(do, o, A, L, nh=H, dh=D, write_dob=True):
     """dO -> bf16 and D = rowsum(dO * O) as [A, H, L] fp32. ``write_dob=False``: D only (dO is already the bf16 rows the core reads; it is returned as is).
-    PyTorch ops (fp32 products, fp32 row sums): H100 / B200 launch no Triton; ``_prep_do_triton`` is the former one-pass kernel launch, kept."""
+    PyTorch ops (fp32 products, fp32 row sums): H100 / B200 launch no Triton; ``tests/gpu/sm90/_triton_records.prep_do_triton`` is the former one-pass kernel launch, kept."""
     do = do.reshape(A * L, nh * dh).contiguous()
     dob = do.to(torch.bfloat16) if write_dob else do
     prod = do.float().view(A, L, nh, dh) * o.reshape(A, L, nh, dh).float()
     return dob, prod.sum(-1).permute(0, 2, 1).contiguous()
 
 
-def _prep_do_triton(do, o, A, L, nh=H, dh=D, write_dob=True):
-    """The Triton launch of ``_prep_do`` (``_prep_do_kernel``): not reached on H100 / B200, kept as the record of what the helper was."""
-    do = do.reshape(A * L, nh * dh).contiguous()
-    dob = torch.empty(A * L, nh * dh, device=do.device, dtype=torch.bfloat16) if write_dob else do
-    dd = torch.empty(A, nh, L, device=do.device, dtype=torch.float32)
-    _prep_do_kernel[((A * L) // 8,)](
-        do, o.reshape(A * L, nh * dh), dob, dd, L, NH=nh, DH=dh, DP=64, ROWS=8, WRITE_DOB=write_dob
-    )
-    return dob, dd
 
 
 @triton.jit
@@ -455,13 +446,6 @@ def _bias_prep(bias_hll):
     return _scale_bf16(bias_hll.contiguous(), LOG2E)
 
 
-def _bias_prep_triton(bias_hll):
-    """The Triton launch of ``_bias_prep`` (``_scale_bf16_kernel``): not reached on H100 / B200, kept."""
-    bias_hll = bias_hll.contiguous()
-    out = torch.empty(bias_hll.shape, device=bias_hll.device, dtype=torch.bfloat16)
-    n = bias_hll.numel()
-    _scale_bf16_kernel[(triton.cdiv(n, 4096),)](bias_hll, out, n, LOG2E, BLOCK=4096)
-    return out
 
 
 # --------------------------------------------------------------------------------------------------- forward op
