@@ -106,6 +106,13 @@ def triangle_multiplicative_update(
     w_left, w_right = p_in_weight[:d_hidden], p_in_weight[d_hidden:]
     w_left_gate, w_right_gate = g_in_weight[:d_hidden], g_in_weight[d_hidden:]
 
+    cuda = _h100_cuda(x)
+    if cuda:
+        # H100: the hand-CUDA TriMul the module runs (bf16; a call it does not serve falls through to the statements below)
+        out = cuda(x, mask, False, outgoing, d_hidden, eps, norm_in_weight, norm_in_bias, w_left, w_left_gate, w_right, w_right_gate,
+                   norm_out_weight, norm_out_bias, p_out_weight, g_out_weight)
+        if out is not None:
+            return out
     if _off_record(x, p_in_weight, g_in_weight, p_out_weight, g_out_weight):
         # a card the engine holds no record for: the PyTorch statements (one UnrecordedCardWarning)
         return _trimul_pytorch(x, mask, norm_in_weight, norm_in_bias, w_left, w_left_gate, w_right, w_right_gate,
@@ -166,6 +173,12 @@ def bidirectional_triangle_multiplicative_update(
 
     # Grads flow to every weight arg (differentiable .t() views) and x (autograd-transparent LN_in).
     d_hidden = to_left_weight.shape[0] // 2  # to_left: (2*d_hidden, d_pair)
+    cuda = _h100_cuda(x)
+    if cuda:
+        out = cuda(x, mask, True, None, d_hidden, eps, norm_in_weight, norm_in_bias, to_left_weight, to_left_gate_weight, to_right_weight,
+                   to_right_gate_weight, norm_out_weight, norm_out_bias, to_out_weight, to_gate_weight)
+        if out is not None:
+            return out
     if _off_record(x, to_left_weight, to_gate_weight, to_out_weight):
         # a card the engine holds no record for: the PyTorch statements (one UnrecordedCardWarning)
         return _trimul_pytorch(x, mask, norm_in_weight, norm_in_bias, to_left_weight, to_left_gate_weight, to_right_weight,
@@ -187,6 +200,18 @@ def bidirectional_triangle_multiplicative_update(
         d_hidden,
         mask=mask,
     )
+
+
+def _h100_cuda(x: torch.Tensor):
+    """``kernels._h100_ops.trimul`` when this call may take the hand-CUDA TriMul (an H100 run with no Triton: ``restricted_card``), else None."""
+    from miniworld_engine import settings
+    from miniworld_engine.modules import dispatch
+
+    if x.device.type != "cuda" or settings.current().force_portable_kernels or not dispatch.restricted_card(x.device):
+        return None
+    from miniworld_engine.kernels import _h100_ops
+
+    return _h100_ops.trimul
 
 
 def _off_record(x: torch.Tensor, *weights: torch.Tensor) -> bool:

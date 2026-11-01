@@ -380,7 +380,10 @@ def _scale_bf16(x, scale):
     (PyTorch's scalar multiply computes in fp32 for a bf16 tensor); anything else is widened first."""
     if x.dtype not in (torch.bfloat16, torch.float32):
         x = x.float()
-    return (x * scale).to(torch.bfloat16)
+    if x.dtype is torch.bfloat16:
+        return x * scale
+    out = torch.empty(x.shape, device=x.device, dtype=torch.bfloat16)
+    return torch.mul(x, scale, out=out)    # fp32: one kernel (the product is rounded to bf16 on the store, no fp32 temporary)
 
 
 def _prep_qkv(q, k, v, scale):

@@ -54,12 +54,16 @@ with a correct result. `modules.dispatch.restricted_card(device)` is the single 
   (windowed, AF3 and global attention), the Pairformer and the diffusion transformer: none, bf16 and fp32, inference and training. A
   MiniWorld phase-1a training run with `train.forbid_triton` on ran 67 steps on H100 without a Triton launch (2026-10-18).
 * The functional `ops.*` facades follow the same rule (`kernels/_ops_routed.py`, the `whole_op.py` files; `portable_blocked` is False on cc 9 / 10,
-  so they ask `restricted_card` first): `ops.layer_norm` -> the general CUDA LayerNorm (the row scale after it), `ops.augmented_attention_pair_bias`
-  -> the hand-CUDA sm_90 core for bf16 (16 x 48 / 4 x 32 heads, B = 1, L a multiple of 128; the one `modules.AugmentedAttention` takes), else the
-  PyTorch reference (fp32 accumulation); `ops.swiglu_ffn`, `ops.rms_norm_modulation`, `ops.layer_norm_linear`, `ops.gated_residual`,
-  `ops.gated_linear`, `ops.conditioned_transition`, `ops.triangle_attention` (core + QK norm) and both TriMul updates -> the PyTorch statements
-  (the hand-CUDA TriangleAttention / TriMul kernels are bound to the modules, not to weights-as-args; TriMul stays bf16-only and is never run
-  in fp32 here). `ops.transition` already did this. A/B (`portable_on_hopper_blackwell`) keeps the Triton kernels.
+  so they ask `restricted_card` first) and take the hand-CUDA kernel that serves the call through thin wrappers (`kernels/_h100_ops.py`; each answers None
+  where no kernel serves, and the facade then runs the PyTorch form): `ops.layer_norm` -> the general CUDA LayerNorm (the row scale after it);
+  `ops.triangle_attention` bf16 -> the sm_90 core of the module path (L padded to 128, QK norm on the general CUDA RMSNorm), every other call -> the
+  PyTorch core chunked over the rows (no OOM at L = 1024, bit-reproducible); both TriMul updates bf16 -> the module's hand-CUDA TriMul
+  (`integrations.trimul_h100`; fp32 stays PyTorch statements: TriMul is bf16-only); `ops.conditioned_transition` / `ops.swiglu_ffn` -> the conditioned-transition tail kernels
+  (`ct_inference`, `ct_tail_train`, the CUDA SwiGLU row kernels); `ops.layer_norm_linear` (d_pair 128 -> 16) -> the pair-bias kernels (`apb`, the token DiT's `pair_bias`);
+  `ops.gated_linear` -> the CUDA gate row kernels + GEMM; `ops.gated_residual` -> `addcmul`; `ops.rms_norm_modulation` -> four launches in the activation's dtype;
+  `ops.augmented_attention_pair_bias` -> the hand-CUDA sm_90 core for bf16 (16 x 48 / 4 x 32 heads, B = 1, L a multiple of 128; the one `modules.AugmentedAttention`
+  takes), else SDPA with the pair bias (cuDNN without a gradient at bf16). `ops.transition` already did this. A/B (`portable_on_hopper_blackwell`) keeps the Triton kernels.
+  Measured against the Triton path: [h100_ops_gate_perf_20261101.md](../../records/h100_ops_gate_perf_20261101.md) (the remaining slower rows and why).
 * The training fallbacks of `BiasOnlyDiTBlock` (`_feature_major`, `_feature_major_psb`: the Triton `core_t`; `_fused_pair_bias` and the
   `pair_bias_all` fold: the Triton pair-bias kernels) are off on these cards: a shape the CUDA block (`integrations/bias_only_dit_train.py`)
   cannot take runs the PyTorch statements. The three Triton helpers of the sm_90 AugmentedAttention cores (`_scale_bf16_kernel`, `_prep_do_kernel`,

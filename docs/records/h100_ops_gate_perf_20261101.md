@@ -1,412 +1,472 @@
-# H100 ops gate: performance of the new routing against the previous Triton path (2026-11-01)
+# H100 ops gate: performance of the routing against the previous Triton path (2026-11-01)
 
-Branch `fix/h100-ops-gate` (8eea3f6d7). Follow-up to [h100_ops_gate_20261101.md](h100_ops_gate_20261101.md), whose **Performance** section said "not measured".
+Branch `fix/h100-ops-gate`. Follow-up to [h100_ops_gate_20261101.md](h100_ops_gate_20261101.md), whose **Performance** section said "not measured".
+
+Two measurements of the same harness. **Before** (job 41372, branch at 8eea3f6d7) routed the `ops.*` facades that lost their Triton kernel to PyTorch
+statements: 208 of 342 rows were more than 5% slower than the Triton path, 86 of them more than 2x (layer_norm_linear up to 10.5x, triangle attention
+bf16 up to 12.4x, TriMul up to 10.8x), and `ops.triangle_attention` at L = 1024 ran out of memory (the PyTorch core builds 16 GiB of scores). **After**
+(this file's tables; jobs 41387 and 41393) the facades are wired to the hand-CUDA kernels that already serve the same ops
+(`kernels/_h100_ops.py`, thin wrappers; no new kernel, no Triton): 107 rows are still more than 5% slower, 6 more than 2x, none out of memory.
+
+## What serves each facade now (H100)
+
+| facade | before (41372) | now |
+|---|---|---|
+| `ops.triangle_attention` bf16, 32-channel heads | PyTorch core (OOM at L1024) | the sm_90 core of the module path (`h100_sm90`: forward, delta, key-side and query-side backward) as an autograd function of the projected q / k / v / bias (`_TriangleCore`; L padded to 128 with masked keys); QK norm on the general CUDA RMSNorm (`rmsnorm_cuda`) |
+| `ops.triangle_attention` fp32 / other heads | PyTorch core | PyTorch core chunked over the rows (score budget 4 GiB per chunk, checkpointed in training, a function of the shapes only): L1024 runs, bit-reproducibly |
+| `ops.triangle_multiplicative_update`, `ops.bidirectional_...` bf16 | PyTorch statements | the module's hand-CUDA TriMul (`integrations.trimul_h100`: K1 / K3 inference, B1..B7 training, chunked batches) through a module-shaped view of the weights; fp32 stays the statements (TriMul is bf16 only) |
+| `ops.layer_norm_linear` d_pair 128 -> 16 | `F.layer_norm` + `F.linear` | no gradient, bf16: `apb.pair_bias` (LayerNorm + projection, weight folded); otherwise the token DiT's `pair_bias` / `pair_bias_bwd` row kernels (one pass each way, TF32 projection) |
+| `ops.rms_norm_modulation` | fp32 statements (a dozen launches) | activation-dtype statements: one RMSNorm, one GEMM over [Ws; Wsh; Wg] with the 1 of `1 + scale` in the bias epilogue, one `addcmul` |
+| `ops.conditioned_transition` bf16 | PyTorch statements | `ct_inference` / `ct_tail_train` (the module's tail: expand + SwiGLU GEMM, squeeze + gate GEMM) |
+| `ops.swiglu_ffn` | PyTorch statements | bf16 inference: `ct_inference` with a gate of exactly one (`cond = x`, `Wsc = 0`, bias 30); training and fp32: cuBLAS + the CUDA SwiGLU row kernels (`_SwiGLUFFN`) |
+| `ops.gated_linear` bf16 | PyTorch statements | the CUDA sigmoid-gate row kernels around one GEMM (`_GatedLinear`) |
+| `ops.gated_residual` | `x + gate * branch` | one `addcmul` (two products backward) |
+| `ops.augmented_attention_pair_bias`, calls the sm_90 core does not take | PyTorch reference (einsum, L^2 fp32 scores) | `F.scaled_dot_product_attention` with the additive pair bias (cuDNN attention without a gradient at bf16, memory-efficient kernel otherwise) |
+| `BiasOnlyAttention._attention_weights` (shared pair, shapes the CUDA block does not take) | `ln_pair` + `to_bias` statements | `ops.layer_norm_linear`'s CUDA path |
 
 ## Method
 
-* One H100 80GB HBM3 per case (node01, 8 GPUs, one Slurm job as a work queue: job **41372**, 171 cases, 20 min), torch 2.13 / cu129, same checkout for both sides.
+* One H100 80GB HBM3 per case (node01; before: 8 GPUs, one Slurm job as a work queue, job **41372**; after: 4 GPUs, job **41387** for the full harness and **41393** for the
+  `augmented_attention_pair_bias` groups after the padded-core experiment was removed), torch 2.13 / cu129, same checkout for both sides.
 * **new** = default settings (H100: no Triton through `ops.*` / the fallbacks). **old** = `settings.portable_on_hopper_blackwell=True` (the Triton path the branch replaced), same inputs,
   modules rebuilt per side (the module routing is resolved at build).
 * CUDA-graph timing, warm (3 eager warm-ups, 10 replay warm-ups, median of 5 batches of replays, each side run twice, the better kept). Never eager.
-* `infer` = `no_grad` forward; `fwd+bwd` = forward with autograd plus `autograd.grad` over every floating input (and the module parameters). Backward alone = fwd+bwd minus a graph-timed grad-mode forward;
-  it is in the raw data, not tabled (`bwd` ratios follow the fwd+bwd ones).
+* `infer` = `no_grad` forward; `fwd+bwd` = forward with autograd plus `autograd.grad` over every floating input (and the module parameters).
 * Shapes: pair ops on `(1, L, L, 128)`, token ops on `(4, L, D)` with D = 768 (cond 384), atom-style `D = 128`; trimul / triangle attention D128 (4 heads); augmented-attention op on `(2, 1, H, L, D)`;
-  `BiasOnlyDiTBlock(16 x 48)` with 3 samples (shared pair / pair per sample), bf16 = autocast over fp32 masters, fp32 = plain; `AugmentedAttentionPairBias(768, 384, 128, 16)` with 2 samples. L = 128 / 256 / 512 / 1024 (plus L100 / L200
-  for the shapes the CUDA core refuses: the paths the branch changed). Weights random, the same on both sides.
+  `BiasOnlyDiTBlock(16 x 48)` with 3 samples (shared pair / pair per sample), bf16 = autocast over fp32 masters, fp32 = plain; `AugmentedAttentionPairBias(768, 384, 128, 16)` with 2 samples. L = 128 / 256 / 512 / 1024 (plus L100 / L200).
+  Weights random, the same on both sides.
 * `new/old` > 1 means the new path is slower. Latencies below ~0.02 ms are within graph-timing noise (about +-10%).
-* Harness and logs outside the checkout: `~/miniworld-engine-scratch/h100-ops-gate-logs/perf/` (`bench_gate.py`, `run.sh`, `agg.py`, `out_41372/`).
-* `dev code-graph --diff main` ran first as its own job (**41370**, same result as the record of 2026-11-01: no CUDA source changed, nothing rebuilt).
+* The first attempt of some cases raised `During CUDA graph capture, autograd node AccumulateGrad has a stale reference to the default stream` (8 cases, both sides: new TriMul facade, old Triton fp32 swiglu); the
+  second attempt of each ran and is the one kept (best of two), so every row below is a successful capture. Not diagnosed (a harness warm-up quirk or the TriMul caller hooks); the modules' own capture tests pass.
+* Harness and logs outside the checkout: `~/miniworld-engine-scratch/h100-ops-gate-logs/perf/` (`bench_gate.py`, `agg_final.py`, `out_41372`, `out_41387`, `out_aug_41393`, `out_final`).
+* `dev code-graph --diff main` ran first as its own job before each test / measurement submission (**41376**, **41384**, **41392**): no CUDA source changed, nothing rebuilt; it reaches 192 CPU / 195 GPU test files, of which the ones named in
+  the record of the gate (and `test_ops_cuda_wiring_gpu.py`) ran. `dev restamp-native --op trimul_fwd_sm90_cuda` (owed because `_h100_pack.py` moved) ran in job 41377.
 
 ## Result in one picture
 
-new / old latency of fwd+bwd per op and L (blue < 1, new faster; red > 1, new slower; fp32 cases with no old Triton path read 1.00).
+new / old latency of fwd+bwd per op and L, before (left) and after (right) (blue < 1, new faster; red > 1, new slower).
 
 ![new / old](figures/h100_ops_gate_perf_20261101.png)
 
-## Slower than the previous Triton path by more than 5% (list, not fixed)
+## Still slower than the previous Triton path by more than 5%
 
-Ratio ranges over L = 128 ... 1024 (fwd+bwd; infer in brackets where it differs); every row is in the full table below.
+Ratios over L = 128 ... 1024 (L100 / L200 where listed), before in the sixth column. Rows within 1.05 are not listed.
 
-| op / path | shapes | new/old fwd+bwd | new/old infer |
-|---|---|---|---|
-| `ops.layer_norm` | token D768 fp32 | 1.06 - 1.32 | within noise |
-| `ops.swiglu_ffn` | pair D128 h512 bf16 | 1.46 - 1.64 | 1.96 - 2.28 |
-| `ops.swiglu_ffn` | pair D128 h512 fp32 | 1.09 - 1.17 | not slower |
-| `ops.swiglu_ffn` | token D768 h1536 bf16 | 1.06 - 1.16 | 1.13 - 1.23 |
-| `ops.conditioned_transition` | token D768 bf16 | 1.07 - 1.10 | 1.10 - 1.20 |
-| `ops.conditioned_transition` | atom D128 bf16 | 1.20 - 1.24 | 1.29 - 1.36 |
-| `ops.conditioned_transition` | atom D128 fp32 | 1.00 - 1.09 | not slower |
-| `ops.rms_norm_modulation` | D768 c384 bf16 | 2.0 - 4.6 | 1.9 - 6.7 |
-| `ops.rms_norm_modulation` | D128 c128 bf16 | 5.1 - 6.0 | 6.9 - 8.6 |
-| `ops.rms_norm_modulation` | D128 c128 fp32 | 1.0 - 1.22 | not slower |
-| `ops.layer_norm_linear` | pair D128 -> 16, bf16 | 4.5 - 8.5 | 5.6 - 10.5 |
-| `ops.layer_norm_linear` | same, fp32 | 1.9 - 3.2 | 1.9 - 2.3 |
-| `ops.gated_residual` | pair D128 and token D768, bf16 / fp32 | 1.0 - 1.65 (pair 1.32 - 1.37 from L256) | 1.25 - 1.68 |
-| `ops.gated_linear` | pair D128 / token D768, bf16 | 1.22 - 1.60 | 1.33 - 2.23 |
-| `ops.triangle_attention` (QK norm or not) | bf16, L128 / 256 / 512 | 3.7 - 9.2 | 4.8 - 12.4 |
-| `ops.triangle_attention` | bf16 and fp32, **L1024: out of memory on the new path** (PyTorch core materialises the L^3 x heads scores; 16 GiB per tensor); the old Triton core ran 28 ms (QK norm, bf16) | - | - |
-| `ops.triangle_multiplicative_update` (outgoing / incoming) | bf16 | 3.6 - 10.8 | 3.1 - 8.9 |
-| `ops.bidirectional_triangle_multiplicative_update` | bf16 | 3.3 - 7.1 | 3.0 - 8.9 |
-| `ops.augmented_attention_pair_bias`, supported, 16x48 | bf16, L128 / 256 | 1.52 / 1.13 (L512 / 1024: 0.88 / 0.77, new faster) | 1.07 - 1.35 up to L512 |
-| `ops.augmented_attention_pair_bias`, supported, 4x32 | bf16, L128 / 256 / 512 | 1.62 / 1.56 / 1.32 (L1024: 1.00) | 1.24 - 1.41 |
-| `ops.augmented_attention_pair_bias`, unsupported | fp32 16x48 | 2.5 - 4.2 | |
-| `ops.augmented_attention_pair_bias`, unsupported | bf16 8x64 / bf16 16x48 L200 | 3.7 - 7.0 / 3.95 | |
-| `BiasOnlyDiTBlock` | L1024, shared pair, bf16 / fp32 | 1.32 / 1.39 | |
-| `BiasOnlyDiTBlock` | L100 (the CUDA block cannot take it), fp32, both layouts | 1.14 / 1.08 | |
-| `BiasOnlyDiTBlock` | L1024, pair per sample, fp32 | 1.07 | |
-| `AugmentedAttentionPairBias` module (helper replacement) | fp32, L100 ... 1024 | 1.12 - 1.29 (grows with L) | |
-| `AugmentedAttentionPairBias` module | bf16 L100 | 1.26 | |
+| op / path | shapes | dtype | mode | new/old now | new/old before | rows > 1.05 |
+|---|---|---|---|---|---|---|
+| layer_norm | pair D128 | bf16 | infer | 1.00 - 1.12 | 1.00 - 1.09 | 1 of 4 (L 256) |
+| layer_norm | token D768 | bf16 | infer | 0.93 - 1.09 | 0.91 - 1.11 | 1 of 4 (L 512) |
+| layer_norm | token D768 | fp32 | fwd+bwd | 0.97 - 1.32 | 1.06 - 1.32 | 3 of 4 (L 256, 512, 1024) |
+| swiglu_ffn | pair D128 h512 | bf16 | infer | 1.28 - 1.39 | 1.96 - 2.28 | 4 of 4 (L 128, 256, 512, 1024) |
+| swiglu_ffn | pair D128 h512 | bf16 | fwd+bwd | 1.05 - 1.21 | 1.46 - 1.64 | 4 of 4 (L 128, 256, 512, 1024) |
+| swiglu_ffn | token D768 h1536 | bf16 | infer | 1.24 - 1.30 | 1.13 - 1.23 | 4 of 4 (L 128, 256, 512, 1024) |
+| conditioned_transition | atom D128 c128 n2 | fp32 | fwd+bwd | 1.00 - 1.08 | 1.00 - 1.09 | 2 of 4 (L 512, 1024) |
+| rms_norm_modulation | D128 c128 | bf16 | infer | 1.51 - 2.00 | 6.91 - 8.63 | 4 of 4 (L 128, 256, 512, 1024) |
+| rms_norm_modulation | D128 c128 | bf16 | fwd+bwd | 1.67 - 1.95 | 5.11 - 5.97 | 4 of 4 (L 128, 256, 512, 1024) |
+| layer_norm_linear | pair D128 ->16 | bf16 | infer | 0.94 - 1.77 | 5.64 - 10.49 | 2 of 4 (L 128, 256) |
+| layer_norm_linear | pair D128 ->16 | bf16 | fwd+bwd | 1.11 - 1.70 | 4.48 - 8.54 | 4 of 4 (L 128, 256, 512, 1024) |
+| gated_residual | pair D128 | bf16 | fwd+bwd | 0.83 - 1.15 | 1.03 - 1.34 | 3 of 4 (L 256, 512, 1024) |
+| gated_residual | pair D128 | fp32 | fwd+bwd | 1.03 - 1.13 | 1.10 - 1.37 | 3 of 4 (L 256, 512, 1024) |
+| gated_residual | token D768 | bf16 | fwd+bwd | 0.83 - 1.26 | 1.01 - 1.56 | 1 of 4 (L 128) |
+| gated_residual | token D768 | fp32 | fwd+bwd | 0.93 - 1.38 | 1.15 - 1.65 | 3 of 4 (L 128, 256, 1024) |
+| gated_linear | pair D128 | bf16 | infer | 1.14 - 1.64 | 1.54 - 2.23 | 4 of 4 (L 128, 256, 512, 1024) |
+| gated_linear | pair D128 | bf16 | fwd+bwd | 1.09 - 1.19 | 1.31 - 1.60 | 4 of 4 (L 128, 256, 512, 1024) |
+| gated_linear | token D768 | bf16 | infer | 1.03 - 1.07 | 1.33 - 1.35 | 2 of 4 (L 128, 512) |
+| gated_linear | token D768 | bf16 | fwd+bwd | 1.07 - 1.17 | 1.22 - 1.28 | 4 of 4 (L 128, 256, 512, 1024) |
+| triangle_attention | D128 H4 | bf16 | infer | 0.73 - 1.07 | 5.03 - 12.38 | 1 of 4 (L 128) |
+| augmented_attention_pair_bias [supported] | bf16 16x48 B1 | bf16 | infer | 0.83 - 1.34 | 0.84 - 1.35 | 3 of 4 (L 128, 256, 512) |
+| augmented_attention_pair_bias [supported] | bf16 16x48 B1 | bf16 | fwd+bwd | 0.78 - 1.48 | 0.77 - 1.52 | 2 of 4 (L 128, 256) |
+| augmented_attention_pair_bias [supported] | bf16 4x32 B1 | bf16 | infer | 1.19 - 1.40 | 1.24 - 1.41 | 4 of 4 (L 128, 256, 512, 1024) |
+| augmented_attention_pair_bias [supported] | bf16 4x32 B1 | bf16 | fwd+bwd | 0.96 - 1.58 | 1.00 - 1.62 | 3 of 4 (L 128, 256, 512) |
+| augmented_attention_pair_bias [unsupported] | fp32 16x48 | fp32 | infer | 1.55 - 3.60 | 3.09 - 7.55 | 4 of 4 (L 128, 256, 512, 1024) |
+| augmented_attention_pair_bias [unsupported] | fp32 16x48 | fp32 | fwd+bwd | 1.80 - 2.24 | 2.47 - 4.21 | 4 of 4 (L 128, 256, 512, 1024) |
+| augmented_attention_pair_bias [unsupported] | bf16 8x64 | bf16 | infer | 0.99 - 2.07 | 3.94 - 18.31 | 3 of 4 (L 256, 512, 1024) |
+| augmented_attention_pair_bias [unsupported] | bf16 8x64 | bf16 | fwd+bwd | 1.39 - 1.66 | 3.74 - 7.00 | 4 of 4 (L 128, 256, 512, 1024) |
+| augmented_attention_pair_bias [unsupported] | bf16 16x48 L200 | bf16 | infer | 1.09 | 5.03 | 1 of 1 (L 200) |
+| augmented_attention_pair_bias [unsupported] | bf16 16x48 L200 | bf16 | fwd+bwd | 1.18 | 3.95 | 1 of 1 (L 200) |
+| BiasOnlyDiTBlock | shared pair | bf16 | fwd+bwd | 0.96 - 1.16 | 0.97 - 1.32 | 1 of 5 (L 1024) |
+| BiasOnlyDiTBlock | shared pair | fp32 | infer | 1.00 - 1.42 | 1.00 - 1.45 | 1 of 5 (L 100) |
+| BiasOnlyDiTBlock | shared pair | fp32 | fwd+bwd | 1.00 - 1.13 | 1.00 - 1.39 | 2 of 5 (L 100, 1024) |
+| BiasOnlyDiTBlock | pair per sample | fp32 | infer | 0.99 - 1.41 | 1.00 - 1.40 | 2 of 5 (L 100, 1024) |
+| BiasOnlyDiTBlock | pair per sample | fp32 | fwd+bwd | 0.99 - 1.08 | 1.00 - 1.08 | 2 of 5 (L 100, 1024) |
+| AugmentedAttentionPairBias module | A2 D768 | bf16 | infer | 0.91 - 1.27 | 0.86 - 1.26 | 1 of 5 (L 100) |
+| AugmentedAttentionPairBias module | A2 D768 | bf16 | fwd+bwd | 0.99 - 1.24 | 0.99 - 1.26 | 1 of 5 (L 100) |
+| AugmentedAttentionPairBias module | A2 D768 | fp32 | infer | 1.24 - 1.39 | 1.26 - 1.40 | 5 of 5 (L 100, 128, 256, 512, 1024) |
+| AugmentedAttentionPairBias module | A2 D768 | fp32 | fwd+bwd | 1.11 - 1.30 | 1.12 - 1.29 | 5 of 5 (L 100, 128, 256, 512, 1024) |
+Fully within 1.05 now (every L, both modes): `ops.triangle_multiplicative_update` outgoing / incoming and `ops.bidirectional_triangle_multiplicative_update` (3.1 - 10.8x before), `ops.triangle_attention` bf16 with and without QK norm except
+the bf16 L128 inference row at 1.07 (3.7 - 12.4x before; L1024: 0.73 / 0.68, the sm_90 core is faster than the Triton core), `ops.swiglu_ffn` and `ops.conditioned_transition` fp32 (0.6 - 1.0), `ops.conditioned_transition` bf16 token / atom
+(1.07 - 1.36 before), `ops.layer_norm` bf16, `ops.rms_norm_modulation` D768 bf16 and fp32 (2.0 - 6.7x before) and fp32 D128, `ops.layer_norm_linear` bf16 inference from L512 (0.94 at L1024),
+`BiasOnlyDiTBlock` L128 ... 512 (1.00, the same CUDA block), `AugmentedAttentionPairBias` module bf16 L128 ... 1024.
 
-Faster or equal on the new path: `ops.layer_norm` (pair D128 and token D768 bf16: 0.71 - 1.01), `ops.rms_norm_modulation` D768 fp32 (0.17 - 0.37: the old Triton fp32 unit was slow), `ops.swiglu_ffn` token D768 fp32 (0.89 - 0.93),
-`ops.conditioned_transition` token D768 fp32 (0.91 - 0.94), `ops.augmented_attention_pair_bias` supported 16x48 at L512 / 1024 (0.88 / 0.77), `BiasOnlyDiTBlock` L128 ... 512 (1.00, same CUDA block),
-`BiasOnlyDiTBlock` L100 bf16 (0.91 - 0.97), `AugmentedAttentionPairBias` module bf16 L128 ... 1024 (0.99 - 1.00). `ops.triangle_attention` fp32 reads 1.00 (both sides were already the PyTorch statements).
+### Why the rest is slower (measured causes; nothing here is a regression of a CUDA path, each row is a call whose old path was one fused Triton kernel)
 
-Reading: the bare `ops.*` facades that were a fused Triton pass and are now several PyTorch kernels are the large losses (layer_norm_linear, rms_norm_modulation bf16, triangle attention and TriMul facades at 3 - 12x, no CUDA kernel is bound to them);
-the modules are unchanged where the CUDA block takes the shape (ratio 1.00). Not measured: B200 (no node), the `integrations/*` Triton paths the record lists as not reached.
+* **`ops.swiglu_ffn` bf16** (pair 1.05 - 1.39, token inference 1.24 - 1.30; was 1.06 - 2.28): no CUDA kernel serves the bare SwiGLU FFN with the hidden activation on chip. The fused CUDA Transition (`transition_b2b`) carries the LayerNorm and the residual and
+  cannot be neutralised; the nearest kernel is `ct_inference`, whose expand + SwiGLU GEMM writes the hidden activation to HBM once (the Triton unit kept it in registers). Under 2x, so no new kernel.
+* **`ops.rms_norm_modulation` D128 c128 bf16** (1.5 - 2.0, 10 - 14 us against 7 us; was 5 - 8.6): four launches (RMSNorm, weight concatenation, GEMM, `addcmul`) against one Triton kernel that does the 128 x 128 projection in-register. The RMS-adaLN CUDA kernels of
+  the SWA block are bound to that block (fixed widths, silu on the conditioning). A one-launch row kernel would close it; it was not written (the largest row is 2.0x, only at L1024 inference).
+* **`ops.layer_norm_linear` bf16** (inference L128 / L256 1.77 / 1.21, training 1.11 - 1.70; was 4.5 - 10.5): the CUDA kernels are persistent one-pass kernels with a TF32 projection and saved statistics (from the source, not profiled); at L128 the call is 8 us against 5 us, and the inference rows from L512 are at or under 1.0 (the `apb` kernel), so the remaining rows are small-L latency and the training backward.
+* **`ops.gated_residual` / `ops.gated_linear`** (1.0 - 1.4 / 1.03 - 1.64; was 1.0 - 1.65 / 1.2 - 2.2): the Triton units were one elementwise (or gate + GEMM) pass; the CUDA row kernels of the conditioned transition and `addcmul` are one pass each but the gated
+  linear still writes and re-reads the gated activation before the GEMM, and the backward of `addcmul` is two products (the Triton backward was one kernel).
+* **`ops.augmented_attention_pair_bias`**: supported shapes (bf16 16 x 48 / 4 x 32, L % 128 == 0, B = 1) run the sm_90 core: faster than Triton from L512 (16 x 48), 1.2 - 1.6x slower at small L (the head-major to token-major copies of q, k, v and the scale pass,
+  against Triton kernels that read the head-major layout directly; unchanged since the first measurement). Calls the core does not take: fp32 (1.55 - 3.6) has no CUDA core at the default matmul precision (the `attn_tf32` cores serve fp32 only
+  under TF32, by the engine's rule that fp32 keeps full-fp32 math otherwise; the Triton fp32 kernel ran TF32 dots, so the comparison is not like for like) and SDPA's memory-efficient kernel is the fastest exact-fp32 form measured
+  (job 41381: the math backend is 1.4 - 1.5x slower again at fp32); bf16 8 x 64 (0.99 - 2.07) has no CUDA core for 64-channel heads (cuDNN attention, inference; the memory-efficient kernel with a gradient: bias gradients are not supported by cuDNN); bf16 16 x 48 at L200 (1.09 / 1.18)
+  is SDPA (a padded sm_90 core was measured and was slower, 2.6x, and removed).
+* **`BiasOnlyDiTBlock`** L1024 shared pair (bf16 1.16, fp32 1.11; was 1.32 / 1.39): the pair LayerNorm + bias projection is now the CUDA pair-bias kernel; the rest of the gap is in the block's training fallback (PyTorch einsums where the Triton `core_t` ran; not isolated).
+  fp32 L100 inference 1.4 (0.28 against 0.20 ms) is the fp32 statements leg of the block. Pair per sample fp32: 1.07 - 1.41, same legs.
+* **`AugmentedAttentionPairBias` module** fp32 (1.11 - 1.39) and bf16 L100 (1.24 - 1.27): module paths, not facades; with the A/B switch the module runs the portable Triton family, without it the module's own CUDA / PyTorch legs. Not diagnosed further here.
+* **`ops.layer_norm`** token D768 fp32 fwd+bwd (L256 / L512 / L1024: 1.11 / 1.11 / 1.32, 0.015 - 0.04 ms): the fp32 LayerNorm backward of the general CUDA kernel against the Triton one on a small tensor (not diagnosed).
+* **`ops.conditioned_transition` atom fp32 fwd+bwd** L512 / L1024 (1.08 / 1.06): fp32 at the default matmul precision runs the exact statements (the CUDA tail needs TF32).
+
+## Out of memory
+
+`ops.triangle_attention` at L = 1024 (4 heads, bf16 and fp32, with and without QK norm; the PyTorch core built 16 GiB of fp32 scores per tensor): bf16 runs the sm_90 core (4.7 ms inference, 18.4 ms fwd+bwd, 0.73x the Triton core);
+fp32 runs the chunked PyTorch core (92 ms inference, 370 ms fwd+bwd; the previous Triton path was the same PyTorch statements for fp32 and ran out of memory too, so the "old" column is the chunked core as well: 1.00).
+Both are bit-reproducible (`tests/gpu/sm90/test_ops_cuda_wiring_gpu.py::test_triangle_attention_at_l1024_does_not_run_out_of_memory`, job 41377 / 41387 / 41393).
 
 ## Full table (infer and fwd+bwd, every case)
 
-| op | variant | L | dtype | mode | new ms | old (Triton) ms | new/old | note |
-|---|---|---|---|---|---|---|---|---|
-| ops.layer_norm | pair D128 | 128 | bf16 | infer | 0.004 | 0.004 | 1.00 | |
-| ops.layer_norm | pair D128 | 128 | bf16 | fwd+bwd | 0.012 | 0.014 | 0.87 | |
-| ops.layer_norm | pair D128 | 128 | fp32 | infer | 0.006 | 0.006 | 1.01 | |
-| ops.layer_norm | pair D128 | 128 | fp32 | fwd+bwd | 0.016 | 0.018 | 0.87 | |
-| ops.layer_norm | pair D128 | 256 | bf16 | infer | 0.010 | 0.009 | 1.09 | |
-| ops.layer_norm | pair D128 | 256 | bf16 | fwd+bwd | 0.037 | 0.042 | 0.87 | |
-| ops.layer_norm | pair D128 | 256 | fp32 | infer | 0.024 | 0.025 | 0.95 | |
-| ops.layer_norm | pair D128 | 256 | fp32 | fwd+bwd | 0.065 | 0.068 | 0.96 | |
-| ops.layer_norm | pair D128 | 512 | bf16 | infer | 0.049 | 0.049 | 1.00 | |
-| ops.layer_norm | pair D128 | 512 | bf16 | fwd+bwd | 0.124 | 0.126 | 0.98 | |
-| ops.layer_norm | pair D128 | 512 | fp32 | infer | 0.091 | 0.092 | 0.99 | |
-| ops.layer_norm | pair D128 | 512 | fp32 | fwd+bwd | 0.233 | 0.235 | 0.99 | |
-| ops.layer_norm | pair D128 | 1024 | bf16 | infer | 0.182 | 0.182 | 1.00 | |
-| ops.layer_norm | pair D128 | 1024 | bf16 | fwd+bwd | 0.462 | 0.459 | 1.01 | |
-| ops.layer_norm | pair D128 | 1024 | fp32 | infer | 0.356 | 0.359 | 0.99 | |
-| ops.layer_norm | pair D128 | 1024 | fp32 | fwd+bwd | 0.908 | 0.900 | 1.01 | |
-| ops.layer_norm | token D768 | 128 | bf16 | infer | 0.003 | 0.004 | 0.91 | |
-| ops.layer_norm | token D768 | 128 | bf16 | fwd+bwd | 0.010 | 0.012 | 0.79 | |
-| ops.layer_norm | token D768 | 128 | fp32 | infer | 0.003 | 0.005 | 0.65 | |
-| ops.layer_norm | token D768 | 128 | fp32 | fwd+bwd | 0.013 | 0.012 | 1.06 | |
-| ops.layer_norm | token D768 | 256 | bf16 | infer | 0.004 | 0.004 | 0.91 | |
-| ops.layer_norm | token D768 | 256 | bf16 | fwd+bwd | 0.011 | 0.015 | 0.75 | |
-| ops.layer_norm | token D768 | 256 | fp32 | infer | 0.004 | 0.005 | 0.71 | |
-| ops.layer_norm | token D768 | 256 | fp32 | fwd+bwd | 0.015 | 0.014 | 1.10 | |
-| ops.layer_norm | token D768 | 512 | bf16 | infer | 0.005 | 0.004 | 1.11 | |
-| ops.layer_norm | token D768 | 512 | bf16 | fwd+bwd | 0.013 | 0.018 | 0.75 | |
-| ops.layer_norm | token D768 | 512 | fp32 | infer | 0.005 | 0.006 | 0.82 | |
-| ops.layer_norm | token D768 | 512 | fp32 | fwd+bwd | 0.019 | 0.018 | 1.09 | |
-| ops.layer_norm | token D768 | 1024 | bf16 | infer | 0.006 | 0.006 | 0.98 | |
-| ops.layer_norm | token D768 | 1024 | bf16 | fwd+bwd | 0.016 | 0.022 | 0.71 | |
-| ops.layer_norm | token D768 | 1024 | fp32 | infer | 0.008 | 0.008 | 0.96 | |
-| ops.layer_norm | token D768 | 1024 | fp32 | fwd+bwd | 0.041 | 0.031 | 1.32 | |
-| ops.swiglu_ffn | pair D128 h512 | 128 | bf16 | infer | 0.052 | 0.026 | 1.96 | |
-| ops.swiglu_ffn | pair D128 h512 | 128 | bf16 | fwd+bwd | 0.169 | 0.116 | 1.46 | |
-| ops.swiglu_ffn | pair D128 h512 | 128 | fp32 | infer | 0.225 | 0.242 | 0.93 | |
-| ops.swiglu_ffn | pair D128 h512 | 128 | fp32 | fwd+bwd | 0.653 | 0.599 | 1.09 | |
-| ops.swiglu_ffn | pair D128 h512 | 256 | bf16 | infer | 0.217 | 0.099 | 2.21 | |
-| ops.swiglu_ffn | pair D128 h512 | 256 | bf16 | fwd+bwd | 0.651 | 0.398 | 1.64 | |
-| ops.swiglu_ffn | pair D128 h512 | 256 | fp32 | infer | 0.850 | 0.835 | 1.02 | |
-| ops.swiglu_ffn | pair D128 h512 | 256 | fp32 | fwd+bwd | 2.420 | 2.116 | 1.14 | |
-| ops.swiglu_ffn | pair D128 h512 | 512 | bf16 | infer | 0.807 | 0.361 | 2.24 | |
-| ops.swiglu_ffn | pair D128 h512 | 512 | bf16 | fwd+bwd | 2.375 | 1.458 | 1.63 | |
-| ops.swiglu_ffn | pair D128 h512 | 512 | fp32 | infer | 3.273 | 3.219 | 1.02 | |
-| ops.swiglu_ffn | pair D128 h512 | 512 | fp32 | fwd+bwd | 9.313 | 8.096 | 1.15 | |
-| ops.swiglu_ffn | pair D128 h512 | 1024 | bf16 | infer | 3.193 | 1.398 | 2.28 | |
-| ops.swiglu_ffn | pair D128 h512 | 1024 | bf16 | fwd+bwd | 9.330 | 5.726 | 1.63 | |
-| ops.swiglu_ffn | pair D128 h512 | 1024 | fp32 | infer | 12.818 | 12.668 | 1.01 | |
-| ops.swiglu_ffn | pair D128 h512 | 1024 | fp32 | fwd+bwd | 37.775 | 32.237 | 1.17 | |
-| ops.swiglu_ffn | token D768 h1536 | 128 | bf16 | infer | 0.020 | 0.018 | 1.13 | |
-| ops.swiglu_ffn | token D768 h1536 | 128 | bf16 | fwd+bwd | 0.061 | 0.053 | 1.16 | |
-| ops.swiglu_ffn | token D768 h1536 | 128 | fp32 | infer | 0.119 | 0.191 | 0.62 | |
-| ops.swiglu_ffn | token D768 h1536 | 128 | fp32 | fwd+bwd | 0.377 | 0.426 | 0.89 | |
-| ops.swiglu_ffn | token D768 h1536 | 256 | bf16 | infer | 0.026 | 0.022 | 1.18 | |
-| ops.swiglu_ffn | token D768 h1536 | 256 | bf16 | fwd+bwd | 0.080 | 0.070 | 1.14 | |
-| ops.swiglu_ffn | token D768 h1536 | 256 | fp32 | infer | 0.204 | 0.287 | 0.71 | |
-| ops.swiglu_ffn | token D768 h1536 | 256 | fp32 | fwd+bwd | 0.625 | 0.704 | 0.89 | |
-| ops.swiglu_ffn | token D768 h1536 | 512 | bf16 | infer | 0.039 | 0.032 | 1.23 | |
-| ops.swiglu_ffn | token D768 h1536 | 512 | bf16 | fwd+bwd | 0.120 | 0.112 | 1.07 | |
-| ops.swiglu_ffn | token D768 h1536 | 512 | fp32 | infer | 0.397 | 0.552 | 0.72 | |
-| ops.swiglu_ffn | token D768 h1536 | 512 | fp32 | fwd+bwd | 1.165 | 1.291 | 0.90 | |
-| ops.swiglu_ffn | token D768 h1536 | 1024 | bf16 | infer | 0.069 | 0.058 | 1.18 | |
-| ops.swiglu_ffn | token D768 h1536 | 1024 | bf16 | fwd+bwd | 0.215 | 0.203 | 1.06 | |
-| ops.swiglu_ffn | token D768 h1536 | 1024 | fp32 | infer | 0.732 | 0.941 | 0.78 | |
-| ops.swiglu_ffn | token D768 h1536 | 1024 | fp32 | fwd+bwd | 2.158 | 2.319 | 0.93 | |
-| ops.conditioned_transition | token D768 c384 n2 | 128 | bf16 | infer | 0.028 | 0.025 | 1.10 | |
-| ops.conditioned_transition | token D768 c384 n2 | 128 | bf16 | fwd+bwd | 0.093 | 0.086 | 1.08 | |
-| ops.conditioned_transition | token D768 c384 n2 | 128 | fp32 | infer | 0.142 | 0.211 | 0.67 | |
-| ops.conditioned_transition | token D768 c384 n2 | 128 | fp32 | fwd+bwd | 0.448 | 0.493 | 0.91 | |
-| ops.conditioned_transition | token D768 c384 n2 | 256 | bf16 | infer | 0.035 | 0.031 | 1.14 | |
-| ops.conditioned_transition | token D768 c384 n2 | 256 | bf16 | fwd+bwd | 0.121 | 0.110 | 1.10 | |
-| ops.conditioned_transition | token D768 c384 n2 | 256 | fp32 | infer | 0.236 | 0.320 | 0.74 | |
-| ops.conditioned_transition | token D768 c384 n2 | 256 | fp32 | fwd+bwd | 0.726 | 0.800 | 0.91 | |
-| ops.conditioned_transition | token D768 c384 n2 | 512 | bf16 | infer | 0.052 | 0.043 | 1.20 | |
-| ops.conditioned_transition | token D768 c384 n2 | 512 | bf16 | fwd+bwd | 0.170 | 0.159 | 1.07 | |
-| ops.conditioned_transition | token D768 c384 n2 | 512 | fp32 | infer | 0.440 | 0.597 | 0.74 | |
-| ops.conditioned_transition | token D768 c384 n2 | 512 | fp32 | fwd+bwd | 1.317 | 1.448 | 0.91 | |
-| ops.conditioned_transition | token D768 c384 n2 | 1024 | bf16 | infer | 0.085 | 0.075 | 1.13 | |
-| ops.conditioned_transition | token D768 c384 n2 | 1024 | bf16 | fwd+bwd | 0.278 | 0.260 | 1.07 | |
-| ops.conditioned_transition | token D768 c384 n2 | 1024 | fp32 | infer | 0.818 | 1.033 | 0.79 | |
-| ops.conditioned_transition | token D768 c384 n2 | 1024 | fp32 | fwd+bwd | 2.405 | 2.565 | 0.94 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 128 | bf16 | infer | 0.019 | 0.014 | 1.29 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 128 | bf16 | fwd+bwd | 0.060 | 0.050 | 1.20 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 128 | fp32 | infer | 0.029 | 0.038 | 0.77 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 128 | fp32 | fwd+bwd | 0.101 | 0.100 | 1.00 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 256 | bf16 | infer | 0.020 | 0.015 | 1.31 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 256 | bf16 | fwd+bwd | 0.066 | 0.053 | 1.23 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 256 | fp32 | infer | 0.033 | 0.040 | 0.83 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 256 | fp32 | fwd+bwd | 0.109 | 0.108 | 1.02 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 512 | bf16 | infer | 0.021 | 0.016 | 1.30 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 512 | bf16 | fwd+bwd | 0.076 | 0.061 | 1.24 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 512 | fp32 | infer | 0.039 | 0.041 | 0.93 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 512 | fp32 | fwd+bwd | 0.135 | 0.124 | 1.09 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 1024 | bf16 | infer | 0.023 | 0.017 | 1.36 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 1024 | bf16 | fwd+bwd | 0.088 | 0.073 | 1.20 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 1024 | fp32 | infer | 0.052 | 0.056 | 0.93 | |
-| ops.conditioned_transition | atom D128 c128 n2 | 1024 | fp32 | fwd+bwd | 0.191 | 0.179 | 1.06 | |
-| ops.rms_norm_modulation | D768 c384 | 128 | bf16 | infer | 0.085 | 0.046 | 1.85 | |
-| ops.rms_norm_modulation | D768 c384 | 128 | bf16 | fwd+bwd | 0.239 | 0.118 | 2.02 | |
-| ops.rms_norm_modulation | D768 c384 | 128 | fp32 | infer | 0.062 | 0.529 | 0.12 | |
-| ops.rms_norm_modulation | D768 c384 | 128 | fp32 | fwd+bwd | 0.191 | 1.108 | 0.17 | |
-| ops.rms_norm_modulation | D768 c384 | 256 | bf16 | infer | 0.126 | 0.046 | 2.71 | |
-| ops.rms_norm_modulation | D768 c384 | 256 | bf16 | fwd+bwd | 0.326 | 0.124 | 2.63 | |
-| ops.rms_norm_modulation | D768 c384 | 256 | fp32 | infer | 0.092 | 0.529 | 0.17 | |
-| ops.rms_norm_modulation | D768 c384 | 256 | fp32 | fwd+bwd | 0.273 | 1.163 | 0.23 | |
-| ops.rms_norm_modulation | D768 c384 | 512 | bf16 | infer | 0.190 | 0.046 | 4.10 | |
-| ops.rms_norm_modulation | D768 c384 | 512 | bf16 | fwd+bwd | 0.540 | 0.145 | 3.71 | |
-| ops.rms_norm_modulation | D768 c384 | 512 | fp32 | infer | 0.153 | 0.526 | 0.29 | |
-| ops.rms_norm_modulation | D768 c384 | 512 | fp32 | fwd+bwd | 0.478 | 1.289 | 0.37 | |
-| ops.rms_norm_modulation | D768 c384 | 1024 | bf16 | infer | 0.312 | 0.047 | 6.65 | |
-| ops.rms_norm_modulation | D768 c384 | 1024 | bf16 | fwd+bwd | 0.827 | 0.180 | 4.60 | |
-| ops.rms_norm_modulation | D768 c384 | 1024 | fp32 | infer | 0.261 | 0.996 | 0.26 | |
-| ops.rms_norm_modulation | D768 c384 | 1024 | fp32 | fwd+bwd | 0.747 | 2.042 | 0.37 | |
-| ops.rms_norm_modulation | D128 c128 | 128 | bf16 | infer | 0.049 | 0.007 | 6.91 | |
-| ops.rms_norm_modulation | D128 c128 | 128 | bf16 | fwd+bwd | 0.122 | 0.024 | 5.11 | |
-| ops.rms_norm_modulation | D128 c128 | 128 | fp32 | infer | 0.027 | 0.032 | 0.85 | |
-| ops.rms_norm_modulation | D128 c128 | 128 | fp32 | fwd+bwd | 0.085 | 0.072 | 1.17 | |
-| ops.rms_norm_modulation | D128 c128 | 256 | bf16 | infer | 0.050 | 0.007 | 7.27 | |
-| ops.rms_norm_modulation | D128 c128 | 256 | bf16 | fwd+bwd | 0.126 | 0.024 | 5.21 | |
-| ops.rms_norm_modulation | D128 c128 | 256 | fp32 | infer | 0.028 | 0.032 | 0.87 | |
-| ops.rms_norm_modulation | D128 c128 | 256 | fp32 | fwd+bwd | 0.088 | 0.076 | 1.17 | |
-| ops.rms_norm_modulation | D128 c128 | 512 | bf16 | infer | 0.054 | 0.007 | 7.70 | |
-| ops.rms_norm_modulation | D128 c128 | 512 | bf16 | fwd+bwd | 0.136 | 0.027 | 5.14 | |
-| ops.rms_norm_modulation | D128 c128 | 512 | fp32 | infer | 0.033 | 0.032 | 1.03 | |
-| ops.rms_norm_modulation | D128 c128 | 512 | fp32 | fwd+bwd | 0.100 | 0.082 | 1.22 | |
-| ops.rms_norm_modulation | D128 c128 | 1024 | bf16 | infer | 0.062 | 0.007 | 8.63 | |
-| ops.rms_norm_modulation | D128 c128 | 1024 | bf16 | fwd+bwd | 0.170 | 0.028 | 5.97 | |
-| ops.rms_norm_modulation | D128 c128 | 1024 | fp32 | infer | 0.038 | 0.058 | 0.65 | |
-| ops.rms_norm_modulation | D128 c128 | 1024 | fp32 | fwd+bwd | 0.120 | 0.120 | 1.00 | |
-| ops.layer_norm_linear | pair D128 ->16 | 128 | bf16 | infer | 0.025 | 0.004 | 5.64 | |
-| ops.layer_norm_linear | pair D128 ->16 | 128 | bf16 | fwd+bwd | 0.102 | 0.019 | 5.28 | |
-| ops.layer_norm_linear | pair D128 ->16 | 128 | fp32 | infer | 0.033 | 0.017 | 1.94 | |
-| ops.layer_norm_linear | pair D128 ->16 | 128 | fp32 | fwd+bwd | 0.115 | 0.042 | 2.76 | |
-| ops.layer_norm_linear | pair D128 ->16 | 256 | bf16 | infer | 0.079 | 0.009 | 8.69 | |
-| ops.layer_norm_linear | pair D128 ->16 | 256 | bf16 | fwd+bwd | 0.417 | 0.049 | 8.54 | |
-| ops.layer_norm_linear | pair D128 ->16 | 256 | fp32 | infer | 0.123 | 0.064 | 1.91 | |
-| ops.layer_norm_linear | pair D128 ->16 | 256 | fp32 | fwd+bwd | 0.502 | 0.157 | 3.20 | |
-| ops.layer_norm_linear | pair D128 ->16 | 512 | bf16 | infer | 0.313 | 0.033 | 9.40 | |
-| ops.layer_norm_linear | pair D128 ->16 | 512 | bf16 | fwd+bwd | 0.707 | 0.158 | 4.48 | |
-| ops.layer_norm_linear | pair D128 ->16 | 512 | fp32 | infer | 0.469 | 0.215 | 2.18 | |
-| ops.layer_norm_linear | pair D128 ->16 | 512 | fp32 | fwd+bwd | 0.998 | 0.519 | 1.92 | |
-| ops.layer_norm_linear | pair D128 ->16 | 1024 | bf16 | infer | 1.215 | 0.116 | 10.49 | |
-| ops.layer_norm_linear | pair D128 ->16 | 1024 | bf16 | fwd+bwd | 2.670 | 0.586 | 4.56 | |
-| ops.layer_norm_linear | pair D128 ->16 | 1024 | fp32 | infer | 1.821 | 0.802 | 2.27 | |
-| ops.layer_norm_linear | pair D128 ->16 | 1024 | fp32 | fwd+bwd | 3.794 | 1.967 | 1.93 | |
-| ops.gated_residual | pair D128 | 128 | bf16 | infer | 0.007 | 0.007 | 0.97 | |
-| ops.gated_residual | pair D128 | 128 | bf16 | fwd+bwd | 0.014 | 0.013 | 1.03 | |
-| ops.gated_residual | pair D128 | 128 | fp32 | infer | 0.014 | 0.008 | 1.68 | |
-| ops.gated_residual | pair D128 | 128 | fp32 | fwd+bwd | 0.030 | 0.027 | 1.10 | |
-| ops.gated_residual | pair D128 | 256 | bf16 | infer | 0.034 | 0.025 | 1.39 | |
-| ops.gated_residual | pair D128 | 256 | bf16 | fwd+bwd | 0.071 | 0.054 | 1.32 | |
-| ops.gated_residual | pair D128 | 256 | fp32 | infer | 0.071 | 0.046 | 1.55 | |
-| ops.gated_residual | pair D128 | 256 | fp32 | fwd+bwd | 0.140 | 0.103 | 1.37 | |
-| ops.gated_residual | pair D128 | 512 | bf16 | infer | 0.135 | 0.089 | 1.51 | |
-| ops.gated_residual | pair D128 | 512 | bf16 | fwd+bwd | 0.270 | 0.201 | 1.34 | |
-| ops.gated_residual | pair D128 | 512 | fp32 | infer | 0.265 | 0.173 | 1.54 | |
-| ops.gated_residual | pair D128 | 512 | fp32 | fwd+bwd | 0.530 | 0.393 | 1.35 | |
-| ops.gated_residual | pair D128 | 1024 | bf16 | infer | 0.522 | 0.348 | 1.50 | |
-| ops.gated_residual | pair D128 | 1024 | bf16 | fwd+bwd | 1.044 | 0.785 | 1.33 | |
-| ops.gated_residual | pair D128 | 1024 | fp32 | infer | 1.043 | 0.682 | 1.53 | |
-| ops.gated_residual | pair D128 | 1024 | fp32 | fwd+bwd | 2.085 | 1.555 | 1.34 | |
-| ops.gated_residual | token D768 | 128 | bf16 | infer | 0.004 | 0.003 | 1.34 | |
-| ops.gated_residual | token D768 | 128 | bf16 | fwd+bwd | 0.008 | 0.005 | 1.56 | |
-| ops.gated_residual | token D768 | 128 | fp32 | infer | 0.005 | 0.003 | 1.50 | |
-| ops.gated_residual | token D768 | 128 | fp32 | fwd+bwd | 0.009 | 0.005 | 1.65 | |
-| ops.gated_residual | token D768 | 256 | bf16 | infer | 0.005 | 0.004 | 1.25 | |
-| ops.gated_residual | token D768 | 256 | bf16 | fwd+bwd | 0.009 | 0.007 | 1.30 | |
-| ops.gated_residual | token D768 | 256 | fp32 | infer | 0.005 | 0.004 | 1.38 | |
-| ops.gated_residual | token D768 | 256 | fp32 | fwd+bwd | 0.010 | 0.007 | 1.44 | |
-| ops.gated_residual | token D768 | 512 | bf16 | infer | 0.006 | 0.006 | 1.01 | |
-| ops.gated_residual | token D768 | 512 | bf16 | fwd+bwd | 0.011 | 0.010 | 1.01 | |
-| ops.gated_residual | token D768 | 512 | fp32 | infer | 0.008 | 0.006 | 1.43 | |
-| ops.gated_residual | token D768 | 512 | fp32 | fwd+bwd | 0.019 | 0.017 | 1.15 | |
-| ops.gated_residual | token D768 | 1024 | bf16 | infer | 0.010 | 0.010 | 1.05 | |
-| ops.gated_residual | token D768 | 1024 | bf16 | fwd+bwd | 0.023 | 0.019 | 1.22 | |
-| ops.gated_residual | token D768 | 1024 | fp32 | infer | 0.026 | 0.019 | 1.38 | |
-| ops.gated_residual | token D768 | 1024 | fp32 | fwd+bwd | 0.054 | 0.042 | 1.27 | |
-| ops.gated_linear | pair D128 | 128 | bf16 | infer | 0.011 | 0.007 | 1.54 | |
-| ops.gated_linear | pair D128 | 128 | bf16 | fwd+bwd | 0.036 | 0.027 | 1.31 | |
-| ops.gated_linear | pair D128 | 256 | bf16 | infer | 0.038 | 0.024 | 1.54 | |
-| ops.gated_linear | pair D128 | 256 | bf16 | fwd+bwd | 0.118 | 0.089 | 1.32 | |
-| ops.gated_linear | pair D128 | 512 | bf16 | infer | 0.167 | 0.077 | 2.17 | |
-| ops.gated_linear | pair D128 | 512 | bf16 | fwd+bwd | 0.476 | 0.297 | 1.60 | |
-| ops.gated_linear | pair D128 | 1024 | bf16 | infer | 0.632 | 0.283 | 2.23 | |
-| ops.gated_linear | pair D128 | 1024 | bf16 | fwd+bwd | 1.790 | 1.122 | 1.60 | |
-| ops.gated_linear | token D768 | 128 | bf16 | infer | 0.009 | 0.007 | 1.34 | |
-| ops.gated_linear | token D768 | 128 | bf16 | fwd+bwd | 0.023 | 0.018 | 1.28 | |
-| ops.gated_linear | token D768 | 256 | bf16 | infer | 0.010 | 0.007 | 1.35 | |
-| ops.gated_linear | token D768 | 256 | bf16 | fwd+bwd | 0.026 | 0.021 | 1.22 | |
-| ops.gated_linear | token D768 | 512 | bf16 | infer | 0.012 | 0.009 | 1.33 | |
-| ops.gated_linear | token D768 | 512 | bf16 | fwd+bwd | 0.034 | 0.028 | 1.22 | |
-| ops.gated_linear | token D768 | 1024 | bf16 | infer | 0.019 | 0.014 | 1.35 | |
-| ops.gated_linear | token D768 | 1024 | bf16 | fwd+bwd | 0.060 | 0.047 | 1.28 | |
-| ops.triangle_attention | D128 H4 | 128 | bf16 | infer | 0.382 | 0.076 | 5.03 | |
-| ops.triangle_attention | D128 H4 | 128 | bf16 | fwd+bwd | 1.109 | 0.302 | 3.67 | |
-| ops.triangle_attention | D128 H4 | 128 | fp32 | infer | 0.398 | 0.398 | 1.00 | |
-| ops.triangle_attention | D128 H4 | 128 | fp32 | fwd+bwd | 1.239 | 1.239 | 1.00 | |
-| ops.triangle_attention | D128 H4 | 256 | bf16 | infer | 2.157 | 0.252 | 8.55 | |
-| ops.triangle_attention | D128 H4 | 256 | bf16 | fwd+bwd | 6.324 | 1.142 | 5.54 | |
-| ops.triangle_attention | D128 H4 | 256 | fp32 | infer | 2.054 | 2.054 | 1.00 | |
-| ops.triangle_attention | D128 H4 | 256 | fp32 | fwd+bwd | 6.449 | 6.454 | 1.00 | |
-| ops.triangle_attention | D128 H4 | 512 | bf16 | infer | 14.870 | 1.201 | 12.38 | |
-| ops.triangle_attention | D128 H4 | 512 | bf16 | fwd+bwd | 41.682 | 4.511 | 9.24 | |
-| ops.triangle_attention | D128 H4 | 512 | fp32 | infer | 12.990 | 12.986 | 1.00 | |
-| ops.triangle_attention | D128 H4 | 512 | fp32 | fwd+bwd | 39.062 | 39.050 | 1.00 | |
-| ops.triangle_attention | D128 H4 | 1024 | bf16 | infer | - | - | - | {'new': 'OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.91 GiB is free. Including non-PyTorch memory, this process h'} |
-| ops.triangle_attention | D128 H4 | 1024 | bf16 | fwd+bwd | - | - | - | {'new': 'OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.91 GiB is free. Including non-PyTorch memory, this process h'} |
-| ops.triangle_attention | D128 H4 | 1024 | fp32 | infer | - | - | - | {'new': 'OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.18 GiB of which 164.94 MiB is free. Including non-PyTorch memory, this process', 'old': 'OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.18 GiB of which 196.94 MiB is free. Including non-PyTorch memory, this process'} |
-| ops.triangle_attention | D128 H4 | 1024 | fp32 | fwd+bwd | - | - | - | {'new': 'OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.18 GiB of which 164.94 MiB is free. Including non-PyTorch memory, this process', 'old': 'OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.18 GiB of which 196.94 MiB is free. Including non-PyTorch memory, this process'} |
-| ops.triangle_attention | D128 H4 +QKnorm | 128 | bf16 | infer | 0.456 | 0.096 | 4.75 | |
-| ops.triangle_attention | D128 H4 +QKnorm | 128 | bf16 | fwd+bwd | 1.591 | 0.365 | 4.36 | |
-| ops.triangle_attention | D128 H4 +QKnorm | 128 | fp32 | infer | 0.485 | 0.485 | 1.00 | |
-| ops.triangle_attention | D128 H4 +QKnorm | 128 | fp32 | fwd+bwd | 1.737 | 1.737 | 1.00 | |
-| ops.triangle_attention | D128 H4 +QKnorm | 256 | bf16 | infer | 2.439 | 0.311 | 7.84 | |
-| ops.triangle_attention | D128 H4 +QKnorm | 256 | bf16 | fwd+bwd | 7.053 | 1.321 | 5.34 | |
-| ops.triangle_attention | D128 H4 +QKnorm | 256 | fp32 | infer | 2.417 | 2.416 | 1.00 | |
-| ops.triangle_attention | D128 H4 +QKnorm | 256 | fp32 | fwd+bwd | 7.339 | 7.340 | 1.00 | |
-| ops.triangle_attention | D128 H4 +QKnorm | 512 | bf16 | infer | 15.822 | 1.455 | 10.87 | |
-| ops.triangle_attention | D128 H4 +QKnorm | 512 | bf16 | fwd+bwd | 44.306 | 5.195 | 8.53 | |
-| ops.triangle_attention | D128 H4 +QKnorm | 512 | fp32 | infer | 14.279 | 14.276 | 1.00 | |
-| ops.triangle_attention | D128 H4 +QKnorm | 512 | fp32 | fwd+bwd | 42.428 | 42.435 | 1.00 | |
-| ops.triangle_attention | D128 H4 +QKnorm | 1024 | bf16 | infer | - | - | - | {'new': 'OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.11 GiB is free. Including non-PyTorch memory, this process h'} |
-| ops.triangle_attention | D128 H4 +QKnorm | 1024 | bf16 | fwd+bwd | - | - | - | {'new': 'OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.18 GiB of which 1.11 GiB is free. Including non-PyTorch memory, this process h'} |
-| ops.triangle_attention | D128 H4 +QKnorm | 1024 | fp32 | infer | - | - | - | {'new': 'OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.18 GiB of which 15.98 GiB is free. Including non-PyTorch memory, this process ', 'old': 'OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.18 GiB of which 15.98 GiB is free. Including non-PyTorch memory, this process '} |
-| ops.triangle_attention | D128 H4 +QKnorm | 1024 | fp32 | fwd+bwd | - | - | - | {'new': 'OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.18 GiB of which 15.98 GiB is free. Including non-PyTorch memory, this process ', 'old': 'OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.18 GiB of which 15.98 GiB is free. Including non-PyTorch memory, this process '} |
-| ops.triangle_multiplicative_update | outgoing D128 | 128 | bf16 | infer | 0.171 | 0.055 | 3.12 | |
-| ops.triangle_multiplicative_update | outgoing D128 | 128 | bf16 | fwd+bwd | 0.694 | 0.194 | 3.58 | |
-| ops.triangle_multiplicative_update | outgoing D128 | 256 | bf16 | infer | 0.575 | 0.138 | 4.17 | |
-| ops.triangle_multiplicative_update | outgoing D128 | 256 | bf16 | fwd+bwd | 2.481 | 0.523 | 4.75 | |
-| ops.triangle_multiplicative_update | outgoing D128 | 512 | bf16 | infer | 2.499 | 0.455 | 5.49 | |
-| ops.triangle_multiplicative_update | outgoing D128 | 512 | bf16 | fwd+bwd | 9.407 | 1.739 | 5.41 | |
-| ops.triangle_multiplicative_update | outgoing D128 | 1024 | bf16 | infer | 15.997 | 1.803 | 8.87 | |
-| ops.triangle_multiplicative_update | outgoing D128 | 1024 | bf16 | fwd+bwd | 73.757 | 6.829 | 10.80 | |
-| ops.triangle_multiplicative_update | incoming D128 | 128 | bf16 | infer | 0.174 | 0.054 | 3.24 | |
-| ops.triangle_multiplicative_update | incoming D128 | 128 | bf16 | fwd+bwd | 0.697 | 0.193 | 3.60 | |
-| ops.triangle_multiplicative_update | incoming D128 | 256 | bf16 | infer | 0.575 | 0.138 | 4.17 | |
-| ops.triangle_multiplicative_update | incoming D128 | 256 | bf16 | fwd+bwd | 2.478 | 0.522 | 4.74 | |
-| ops.triangle_multiplicative_update | incoming D128 | 512 | bf16 | infer | 2.493 | 0.456 | 5.47 | |
-| ops.triangle_multiplicative_update | incoming D128 | 512 | bf16 | fwd+bwd | 9.394 | 1.732 | 5.42 | |
-| ops.triangle_multiplicative_update | incoming D128 | 1024 | bf16 | infer | 15.944 | 1.803 | 8.84 | |
-| ops.triangle_multiplicative_update | incoming D128 | 1024 | bf16 | fwd+bwd | 73.925 | 6.872 | 10.76 | |
-| ops.bidirectional_triangle_multiplicative_update | D128 | 128 | bf16 | infer | 0.251 | 0.083 | 3.03 | |
-| ops.bidirectional_triangle_multiplicative_update | D128 | 128 | bf16 | fwd+bwd | 0.849 | 0.254 | 3.34 | |
-| ops.bidirectional_triangle_multiplicative_update | D128 | 256 | bf16 | infer | 0.918 | 0.220 | 4.17 | |
-| ops.bidirectional_triangle_multiplicative_update | D128 | 256 | bf16 | fwd+bwd | 3.185 | 0.798 | 3.99 | |
-| ops.bidirectional_triangle_multiplicative_update | D128 | 512 | bf16 | infer | 4.004 | 0.754 | 5.31 | |
-| ops.bidirectional_triangle_multiplicative_update | D128 | 512 | bf16 | fwd+bwd | 11.968 | 2.819 | 4.24 | |
-| ops.bidirectional_triangle_multiplicative_update | D128 | 1024 | bf16 | infer | 27.806 | 3.114 | 8.93 | |
-| ops.bidirectional_triangle_multiplicative_update | D128 | 1024 | bf16 | fwd+bwd | 85.494 | 12.018 | 7.11 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 128 | bf16 | infer | 0.018 | 0.014 | 1.35 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 128 | bf16 | fwd+bwd | 0.051 | 0.033 | 1.52 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 256 | bf16 | infer | 0.021 | 0.017 | 1.29 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 256 | bf16 | fwd+bwd | 0.066 | 0.059 | 1.13 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 512 | bf16 | infer | 0.029 | 0.027 | 1.07 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 512 | bf16 | fwd+bwd | 0.117 | 0.133 | 0.88 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 1024 | bf16 | infer | 0.061 | 0.072 | 0.84 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 1024 | bf16 | fwd+bwd | 0.353 | 0.456 | 0.77 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 128 | bf16 | infer | 0.017 | 0.012 | 1.41 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 128 | bf16 | fwd+bwd | 0.045 | 0.028 | 1.62 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 256 | bf16 | infer | 0.019 | 0.014 | 1.39 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 256 | bf16 | fwd+bwd | 0.055 | 0.035 | 1.56 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 512 | bf16 | infer | 0.024 | 0.018 | 1.31 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 512 | bf16 | fwd+bwd | 0.075 | 0.057 | 1.32 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 1024 | bf16 | infer | 0.034 | 0.027 | 1.24 | |
-| ops.augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 1024 | bf16 | fwd+bwd | 0.133 | 0.133 | 1.00 | |
-| ops.augmented_attention_pair_bias [unsupported] | fp32 16x48 | 128 | fp32 | infer | 0.040 | 0.013 | 3.09 | |
-| ops.augmented_attention_pair_bias [unsupported] | fp32 16x48 | 128 | fp32 | fwd+bwd | 0.100 | 0.041 | 2.47 | |
-| ops.augmented_attention_pair_bias [unsupported] | fp32 16x48 | 256 | fp32 | infer | 0.083 | 0.021 | 3.97 | |
-| ops.augmented_attention_pair_bias [unsupported] | fp32 16x48 | 256 | fp32 | fwd+bwd | 0.216 | 0.079 | 2.75 | |
-| ops.augmented_attention_pair_bias [unsupported] | fp32 16x48 | 512 | fp32 | infer | 0.291 | 0.048 | 6.08 | |
-| ops.augmented_attention_pair_bias [unsupported] | fp32 16x48 | 512 | fp32 | fwd+bwd | 0.766 | 0.192 | 3.98 | |
-| ops.augmented_attention_pair_bias [unsupported] | fp32 16x48 | 1024 | fp32 | infer | 1.119 | 0.148 | 7.55 | |
-| ops.augmented_attention_pair_bias [unsupported] | fp32 16x48 | 1024 | fp32 | fwd+bwd | 2.824 | 0.671 | 4.21 | |
-| ops.augmented_attention_pair_bias [unsupported] | bf16 8x64 | 128 | bf16 | infer | 0.051 | 0.013 | 3.94 | |
-| ops.augmented_attention_pair_bias [unsupported] | bf16 8x64 | 128 | bf16 | fwd+bwd | 0.116 | 0.031 | 3.74 | |
-| ops.augmented_attention_pair_bias [unsupported] | bf16 8x64 | 256 | bf16 | infer | 0.074 | 0.015 | 4.78 | |
-| ops.augmented_attention_pair_bias [unsupported] | bf16 8x64 | 256 | bf16 | fwd+bwd | 0.193 | 0.043 | 4.48 | |
-| ops.augmented_attention_pair_bias [unsupported] | bf16 8x64 | 512 | bf16 | infer | 0.183 | 0.021 | 8.68 | |
-| ops.augmented_attention_pair_bias [unsupported] | bf16 8x64 | 512 | bf16 | fwd+bwd | 0.466 | 0.090 | 5.17 | |
-| ops.augmented_attention_pair_bias [unsupported] | bf16 8x64 | 1024 | bf16 | infer | 0.733 | 0.040 | 18.31 | |
-| ops.augmented_attention_pair_bias [unsupported] | bf16 8x64 | 1024 | bf16 | fwd+bwd | 1.778 | 0.254 | 7.00 | |
-| ops.augmented_attention_pair_bias [unsupported] | bf16 16x48 L200 | 200 | bf16 | infer | 0.086 | 0.017 | 5.03 | |
-| ops.augmented_attention_pair_bias [unsupported] | bf16 16x48 L200 | 200 | bf16 | fwd+bwd | 0.213 | 0.054 | 3.95 | |
-| BiasOnlyDiTBlock | shared pair | 100 | bf16 | infer | 0.107 | 0.136 | 0.78 | |
-| BiasOnlyDiTBlock | shared pair | 100 | bf16 | fwd+bwd | 0.341 | 0.350 | 0.97 | |
-| BiasOnlyDiTBlock | shared pair | 100 | fp32 | infer | 0.284 | 0.196 | 1.45 | |
-| BiasOnlyDiTBlock | shared pair | 100 | fp32 | fwd+bwd | 0.799 | 0.701 | 1.14 | |
-| BiasOnlyDiTBlock | shared pair | 128 | bf16 | infer | 0.144 | 0.144 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 128 | bf16 | fwd+bwd | 0.241 | 0.241 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 128 | fp32 | infer | 0.169 | 0.169 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 128 | fp32 | fwd+bwd | 0.440 | 0.440 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 256 | bf16 | infer | 0.174 | 0.174 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 256 | bf16 | fwd+bwd | 0.293 | 0.292 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 256 | fp32 | infer | 0.235 | 0.235 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 256 | fp32 | fwd+bwd | 0.587 | 0.587 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 512 | bf16 | infer | 0.265 | 0.265 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 512 | bf16 | fwd+bwd | 0.442 | 0.441 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 512 | fp32 | infer | 0.402 | 0.402 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 512 | fp32 | fwd+bwd | 0.956 | 0.960 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 1024 | bf16 | infer | 0.564 | 0.563 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 1024 | bf16 | fwd+bwd | 2.006 | 1.523 | 1.32 | |
-| BiasOnlyDiTBlock | shared pair | 1024 | fp32 | infer | 0.965 | 0.963 | 1.00 | |
-| BiasOnlyDiTBlock | shared pair | 1024 | fp32 | fwd+bwd | 6.725 | 4.844 | 1.39 | |
-| BiasOnlyDiTBlock | pair per sample | 100 | bf16 | infer | 0.114 | 0.143 | 0.80 | |
-| BiasOnlyDiTBlock | pair per sample | 100 | bf16 | fwd+bwd | 0.353 | 0.388 | 0.91 | |
-| BiasOnlyDiTBlock | pair per sample | 100 | fp32 | infer | 0.296 | 0.211 | 1.40 | |
-| BiasOnlyDiTBlock | pair per sample | 100 | fp32 | fwd+bwd | 0.809 | 0.752 | 1.08 | |
-| BiasOnlyDiTBlock | pair per sample | 128 | bf16 | infer | 0.152 | 0.152 | 1.00 | |
-| BiasOnlyDiTBlock | pair per sample | 128 | bf16 | fwd+bwd | 0.256 | 0.257 | 1.00 | |
-| BiasOnlyDiTBlock | pair per sample | 128 | fp32 | infer | 0.161 | 0.161 | 1.00 | |
-| BiasOnlyDiTBlock | pair per sample | 128 | fp32 | fwd+bwd | 0.456 | 0.455 | 1.00 | |
-| BiasOnlyDiTBlock | pair per sample | 256 | bf16 | infer | 0.189 | 0.189 | 1.00 | |
-| BiasOnlyDiTBlock | pair per sample | 256 | bf16 | fwd+bwd | 0.346 | 0.346 | 1.00 | |
-| BiasOnlyDiTBlock | pair per sample | 256 | fp32 | infer | 0.230 | 0.230 | 1.00 | |
-| BiasOnlyDiTBlock | pair per sample | 256 | fp32 | fwd+bwd | 0.675 | 0.664 | 1.02 | |
-| BiasOnlyDiTBlock | pair per sample | 512 | bf16 | infer | 0.297 | 0.298 | 1.00 | |
-| BiasOnlyDiTBlock | pair per sample | 512 | bf16 | fwd+bwd | 0.646 | 0.647 | 1.00 | |
-| BiasOnlyDiTBlock | pair per sample | 512 | fp32 | infer | 0.432 | 0.431 | 1.00 | |
-| BiasOnlyDiTBlock | pair per sample | 512 | fp32 | fwd+bwd | 1.344 | 1.343 | 1.00 | |
-| BiasOnlyDiTBlock | pair per sample | 1024 | bf16 | infer | 1.896 | 1.942 | 0.98 | |
-| BiasOnlyDiTBlock | pair per sample | 1024 | bf16 | fwd+bwd | 3.401 | 3.377 | 1.01 | |
-| BiasOnlyDiTBlock | pair per sample | 1024 | fp32 | infer | 4.786 | 4.101 | 1.17 | |
-| BiasOnlyDiTBlock | pair per sample | 1024 | fp32 | fwd+bwd | 7.673 | 7.163 | 1.07 | |
-| AugmentedAttentionPairBias module | A2 D768 | 100 | bf16 | infer | 0.101 | 0.080 | 1.26 | |
-| AugmentedAttentionPairBias module | A2 D768 | 100 | bf16 | fwd+bwd | 0.313 | 0.248 | 1.26 | |
-| AugmentedAttentionPairBias module | A2 D768 | 100 | fp32 | infer | 0.196 | 0.156 | 1.26 | |
-| AugmentedAttentionPairBias module | A2 D768 | 100 | fp32 | fwd+bwd | 0.508 | 0.454 | 1.12 | |
-| AugmentedAttentionPairBias module | A2 D768 | 128 | bf16 | infer | 0.070 | 0.081 | 0.86 | |
-| AugmentedAttentionPairBias module | A2 D768 | 128 | bf16 | fwd+bwd | 0.276 | 0.277 | 1.00 | |
-| AugmentedAttentionPairBias module | A2 D768 | 128 | fp32 | infer | 0.204 | 0.161 | 1.27 | |
-| AugmentedAttentionPairBias module | A2 D768 | 128 | fp32 | fwd+bwd | 0.548 | 0.482 | 1.14 | |
-| AugmentedAttentionPairBias module | A2 D768 | 256 | bf16 | infer | 0.091 | 0.097 | 0.94 | |
-| AugmentedAttentionPairBias module | A2 D768 | 256 | bf16 | fwd+bwd | 0.329 | 0.332 | 0.99 | |
-| AugmentedAttentionPairBias module | A2 D768 | 256 | fp32 | infer | 0.310 | 0.242 | 1.28 | |
-| AugmentedAttentionPairBias module | A2 D768 | 256 | fp32 | fwd+bwd | 0.871 | 0.739 | 1.18 | |
-| AugmentedAttentionPairBias module | A2 D768 | 512 | bf16 | infer | 0.124 | 0.131 | 0.95 | |
-| AugmentedAttentionPairBias module | A2 D768 | 512 | bf16 | fwd+bwd | 0.468 | 0.474 | 0.99 | |
-| AugmentedAttentionPairBias module | A2 D768 | 512 | fp32 | infer | 0.695 | 0.503 | 1.38 | |
-| AugmentedAttentionPairBias module | A2 D768 | 512 | fp32 | fwd+bwd | 1.874 | 1.492 | 1.26 | |
-| AugmentedAttentionPairBias module | A2 D768 | 1024 | bf16 | infer | 0.231 | 0.238 | 0.97 | |
-| AugmentedAttentionPairBias module | A2 D768 | 1024 | bf16 | fwd+bwd | 1.019 | 1.029 | 0.99 | |
-| AugmentedAttentionPairBias module | A2 D768 | 1024 | fp32 | infer | 2.217 | 1.587 | 1.40 | |
-| AugmentedAttentionPairBias module | A2 D768 | 1024 | fp32 | fwd+bwd | 5.336 | 4.120 | 1.29 | |
+| op | variant | L | dtype | mode | new ms | old (Triton) ms | new/old | before (job 41372) | note |
+|---|---|---|---|---|---|---|---|---|---|
+| layer_norm | pair D128 | 128 | bf16 | infer | 0.004 | 0.004 | 1.00 | 1.00 | |
+| layer_norm | pair D128 | 128 | bf16 | fwd+bwd | 0.012 | 0.015 | 0.83 | 0.87 | |
+| layer_norm | pair D128 | 128 | fp32 | infer | 0.006 | 0.006 | 1.01 | 1.01 | |
+| layer_norm | pair D128 | 128 | fp32 | fwd+bwd | 0.015 | 0.019 | 0.78 | 0.87 | |
+| layer_norm | pair D128 | 256 | bf16 | infer | 0.010 | 0.009 | 1.12 | 1.09 | |
+| layer_norm | pair D128 | 256 | bf16 | fwd+bwd | 0.037 | 0.042 | 0.88 | 0.87 | |
+| layer_norm | pair D128 | 256 | fp32 | infer | 0.024 | 0.025 | 0.95 | 0.95 | |
+| layer_norm | pair D128 | 256 | fp32 | fwd+bwd | 0.065 | 0.069 | 0.94 | 0.96 | |
+| layer_norm | pair D128 | 512 | bf16 | infer | 0.049 | 0.049 | 1.01 | 1.00 | |
+| layer_norm | pair D128 | 512 | bf16 | fwd+bwd | 0.124 | 0.126 | 0.98 | 0.98 | |
+| layer_norm | pair D128 | 512 | fp32 | infer | 0.092 | 0.092 | 0.99 | 0.99 | |
+| layer_norm | pair D128 | 512 | fp32 | fwd+bwd | 0.233 | 0.234 | 1.00 | 0.99 | |
+| layer_norm | pair D128 | 1024 | bf16 | infer | 0.183 | 0.182 | 1.01 | 1.00 | |
+| layer_norm | pair D128 | 1024 | bf16 | fwd+bwd | 0.461 | 0.462 | 1.00 | 1.01 | |
+| layer_norm | pair D128 | 1024 | fp32 | infer | 0.356 | 0.359 | 0.99 | 0.99 | |
+| layer_norm | pair D128 | 1024 | fp32 | fwd+bwd | 0.910 | 0.906 | 1.00 | 1.01 | |
+| layer_norm | token D768 | 128 | bf16 | infer | 0.003 | 0.004 | 0.95 | 0.91 | |
+| layer_norm | token D768 | 128 | bf16 | fwd+bwd | 0.010 | 0.012 | 0.80 | 0.79 | |
+| layer_norm | token D768 | 128 | fp32 | infer | 0.003 | 0.005 | 0.64 | 0.65 | |
+| layer_norm | token D768 | 128 | fp32 | fwd+bwd | 0.013 | 0.013 | 0.97 | 1.06 | |
+| layer_norm | token D768 | 256 | bf16 | infer | 0.004 | 0.004 | 0.93 | 0.91 | |
+| layer_norm | token D768 | 256 | bf16 | fwd+bwd | 0.011 | 0.014 | 0.77 | 0.75 | |
+| layer_norm | token D768 | 256 | fp32 | infer | 0.004 | 0.005 | 0.72 | 0.71 | |
+| layer_norm | token D768 | 256 | fp32 | fwd+bwd | 0.015 | 0.013 | 1.11 | 1.10 | |
+| layer_norm | token D768 | 512 | bf16 | infer | 0.005 | 0.004 | 1.09 | 1.11 | |
+| layer_norm | token D768 | 512 | bf16 | fwd+bwd | 0.013 | 0.018 | 0.74 | 0.75 | |
+| layer_norm | token D768 | 512 | fp32 | infer | 0.005 | 0.006 | 0.83 | 0.82 | |
+| layer_norm | token D768 | 512 | fp32 | fwd+bwd | 0.019 | 0.017 | 1.11 | 1.09 | |
+| layer_norm | token D768 | 1024 | bf16 | infer | 0.005 | 0.006 | 0.96 | 0.98 | |
+| layer_norm | token D768 | 1024 | bf16 | fwd+bwd | 0.016 | 0.022 | 0.70 | 0.71 | |
+| layer_norm | token D768 | 1024 | fp32 | infer | 0.008 | 0.008 | 0.98 | 0.96 | |
+| layer_norm | token D768 | 1024 | fp32 | fwd+bwd | 0.041 | 0.031 | 1.32 | 1.32 | |
+| swiglu_ffn | pair D128 h512 | 128 | bf16 | infer | 0.034 | 0.026 | 1.28 | 1.96 | |
+| swiglu_ffn | pair D128 h512 | 128 | bf16 | fwd+bwd | 0.122 | 0.116 | 1.05 | 1.46 | |
+| swiglu_ffn | pair D128 h512 | 128 | fp32 | infer | 0.222 | 0.244 | 0.91 | 0.93 | |
+| swiglu_ffn | pair D128 h512 | 128 | fp32 | fwd+bwd | 0.586 | 0.604 | 0.97 | 1.09 | |
+| swiglu_ffn | pair D128 h512 | 256 | bf16 | infer | 0.127 | 0.098 | 1.29 | 2.21 | |
+| swiglu_ffn | pair D128 h512 | 256 | bf16 | fwd+bwd | 0.480 | 0.400 | 1.20 | 1.64 | |
+| swiglu_ffn | pair D128 h512 | 256 | fp32 | infer | 0.819 | 0.836 | 0.98 | 1.02 | |
+| swiglu_ffn | pair D128 h512 | 256 | fp32 | fwd+bwd | 2.138 | 2.101 | 1.02 | 1.14 | |
+| swiglu_ffn | pair D128 h512 | 512 | bf16 | infer | 0.501 | 0.361 | 1.39 | 2.24 | |
+| swiglu_ffn | pair D128 h512 | 512 | bf16 | fwd+bwd | 1.776 | 1.464 | 1.21 | 1.63 | |
+| swiglu_ffn | pair D128 h512 | 512 | fp32 | infer | 2.905 | 3.220 | 0.90 | 1.02 | |
+| swiglu_ffn | pair D128 h512 | 512 | fp32 | fwd+bwd | 8.072 | 8.099 | 1.00 | 1.15 | |
+| swiglu_ffn | pair D128 h512 | 1024 | bf16 | infer | 1.976 | 1.437 | 1.38 | 2.28 | |
+| swiglu_ffn | pair D128 h512 | 1024 | bf16 | fwd+bwd | 6.951 | 5.850 | 1.19 | 1.63 | |
+| swiglu_ffn | pair D128 h512 | 1024 | fp32 | infer | 11.425 | 12.686 | 0.90 | 1.01 | |
+| swiglu_ffn | pair D128 h512 | 1024 | fp32 | fwd+bwd | 32.533 | 32.824 | 0.99 | 1.17 | |
+| swiglu_ffn | token D768 h1536 | 128 | bf16 | infer | 0.023 | 0.018 | 1.27 | 1.13 | |
+| swiglu_ffn | token D768 h1536 | 128 | bf16 | fwd+bwd | 0.047 | 0.052 | 0.91 | 1.16 | |
+| swiglu_ffn | token D768 h1536 | 128 | fp32 | infer | 0.115 | 0.190 | 0.61 | 0.62 | |
+| swiglu_ffn | token D768 h1536 | 128 | fp32 | fwd+bwd | 0.328 | 0.423 | 0.77 | 0.89 | |
+| swiglu_ffn | token D768 h1536 | 256 | bf16 | infer | 0.028 | 0.022 | 1.30 | 1.18 | |
+| swiglu_ffn | token D768 h1536 | 256 | bf16 | fwd+bwd | 0.068 | 0.069 | 0.99 | 1.14 | |
+| swiglu_ffn | token D768 h1536 | 256 | fp32 | infer | 0.204 | 0.286 | 0.71 | 0.71 | |
+| swiglu_ffn | token D768 h1536 | 256 | fp32 | fwd+bwd | 0.597 | 0.699 | 0.85 | 0.89 | |
+| swiglu_ffn | token D768 h1536 | 512 | bf16 | infer | 0.040 | 0.033 | 1.24 | 1.23 | |
+| swiglu_ffn | token D768 h1536 | 512 | bf16 | fwd+bwd | 0.104 | 0.114 | 0.92 | 1.07 | |
+| swiglu_ffn | token D768 h1536 | 512 | fp32 | infer | 0.368 | 0.548 | 0.67 | 0.72 | |
+| swiglu_ffn | token D768 h1536 | 512 | fp32 | fwd+bwd | 1.077 | 1.290 | 0.83 | 0.90 | |
+| swiglu_ffn | token D768 h1536 | 1024 | bf16 | infer | 0.073 | 0.057 | 1.28 | 1.18 | |
+| swiglu_ffn | token D768 h1536 | 1024 | bf16 | fwd+bwd | 0.185 | 0.202 | 0.92 | 1.06 | |
+| swiglu_ffn | token D768 h1536 | 1024 | fp32 | infer | 0.651 | 0.940 | 0.69 | 0.78 | |
+| swiglu_ffn | token D768 h1536 | 1024 | fp32 | fwd+bwd | 1.961 | 2.304 | 0.85 | 0.93 | |
+| conditioned_transition | token D768 c384 n2 | 128 | bf16 | infer | 0.021 | 0.026 | 0.81 | 1.10 | |
+| conditioned_transition | token D768 c384 n2 | 128 | bf16 | fwd+bwd | 0.075 | 0.086 | 0.86 | 1.08 | |
+| conditioned_transition | token D768 c384 n2 | 128 | fp32 | infer | 0.142 | 0.213 | 0.67 | 0.67 | |
+| conditioned_transition | token D768 c384 n2 | 128 | fp32 | fwd+bwd | 0.447 | 0.496 | 0.90 | 0.91 | |
+| conditioned_transition | token D768 c384 n2 | 256 | bf16 | infer | 0.027 | 0.031 | 0.88 | 1.14 | |
+| conditioned_transition | token D768 c384 n2 | 256 | bf16 | fwd+bwd | 0.100 | 0.109 | 0.91 | 1.10 | |
+| conditioned_transition | token D768 c384 n2 | 256 | fp32 | infer | 0.235 | 0.317 | 0.74 | 0.74 | |
+| conditioned_transition | token D768 c384 n2 | 256 | fp32 | fwd+bwd | 0.722 | 0.790 | 0.91 | 0.91 | |
+| conditioned_transition | token D768 c384 n2 | 512 | bf16 | infer | 0.038 | 0.045 | 0.85 | 1.20 | |
+| conditioned_transition | token D768 c384 n2 | 512 | bf16 | fwd+bwd | 0.144 | 0.161 | 0.89 | 1.07 | |
+| conditioned_transition | token D768 c384 n2 | 512 | fp32 | infer | 0.440 | 0.594 | 0.74 | 0.74 | |
+| conditioned_transition | token D768 c384 n2 | 512 | fp32 | fwd+bwd | 1.310 | 1.439 | 0.91 | 0.91 | |
+| conditioned_transition | token D768 c384 n2 | 1024 | bf16 | infer | 0.069 | 0.076 | 0.92 | 1.13 | |
+| conditioned_transition | token D768 c384 n2 | 1024 | bf16 | fwd+bwd | 0.235 | 0.263 | 0.89 | 1.07 | |
+| conditioned_transition | token D768 c384 n2 | 1024 | fp32 | infer | 0.817 | 1.031 | 0.79 | 0.79 | |
+| conditioned_transition | token D768 c384 n2 | 1024 | fp32 | fwd+bwd | 2.405 | 2.564 | 0.94 | 0.94 | |
+| conditioned_transition | atom D128 c128 n2 | 128 | bf16 | infer | 0.010 | 0.014 | 0.69 | 1.29 | |
+| conditioned_transition | atom D128 c128 n2 | 128 | bf16 | fwd+bwd | 0.039 | 0.050 | 0.79 | 1.20 | |
+| conditioned_transition | atom D128 c128 n2 | 128 | fp32 | infer | 0.029 | 0.039 | 0.75 | 0.77 | |
+| conditioned_transition | atom D128 c128 n2 | 128 | fp32 | fwd+bwd | 0.100 | 0.100 | 1.00 | 1.00 | |
+| conditioned_transition | atom D128 c128 n2 | 256 | bf16 | infer | 0.010 | 0.015 | 0.66 | 1.31 | |
+| conditioned_transition | atom D128 c128 n2 | 256 | bf16 | fwd+bwd | 0.043 | 0.054 | 0.80 | 1.23 | |
+| conditioned_transition | atom D128 c128 n2 | 256 | fp32 | infer | 0.033 | 0.040 | 0.83 | 0.83 | |
+| conditioned_transition | atom D128 c128 n2 | 256 | fp32 | fwd+bwd | 0.109 | 0.107 | 1.02 | 1.02 | |
+| conditioned_transition | atom D128 c128 n2 | 512 | bf16 | infer | 0.010 | 0.016 | 0.65 | 1.30 | |
+| conditioned_transition | atom D128 c128 n2 | 512 | bf16 | fwd+bwd | 0.051 | 0.061 | 0.83 | 1.24 | |
+| conditioned_transition | atom D128 c128 n2 | 512 | fp32 | infer | 0.038 | 0.041 | 0.92 | 0.93 | |
+| conditioned_transition | atom D128 c128 n2 | 512 | fp32 | fwd+bwd | 0.134 | 0.124 | 1.08 | 1.09 | |
+| conditioned_transition | atom D128 c128 n2 | 1024 | bf16 | infer | 0.011 | 0.017 | 0.63 | 1.36 | |
+| conditioned_transition | atom D128 c128 n2 | 1024 | bf16 | fwd+bwd | 0.059 | 0.073 | 0.81 | 1.20 | |
+| conditioned_transition | atom D128 c128 n2 | 1024 | fp32 | infer | 0.052 | 0.056 | 0.92 | 0.93 | |
+| conditioned_transition | atom D128 c128 n2 | 1024 | fp32 | fwd+bwd | 0.191 | 0.180 | 1.06 | 1.06 | |
+| rms_norm_modulation | D768 c384 | 128 | bf16 | infer | 0.013 | 0.046 | 0.29 | 1.85 | |
+| rms_norm_modulation | D768 c384 | 128 | bf16 | fwd+bwd | 0.051 | 0.120 | 0.43 | 2.02 | |
+| rms_norm_modulation | D768 c384 | 128 | fp32 | infer | 0.043 | 0.525 | 0.08 | 0.12 | |
+| rms_norm_modulation | D768 c384 | 128 | fp32 | fwd+bwd | 0.139 | 1.099 | 0.13 | 0.17 | |
+| rms_norm_modulation | D768 c384 | 256 | bf16 | infer | 0.016 | 0.046 | 0.34 | 2.71 | |
+| rms_norm_modulation | D768 c384 | 256 | bf16 | fwd+bwd | 0.070 | 0.123 | 0.57 | 2.63 | |
+| rms_norm_modulation | D768 c384 | 256 | fp32 | infer | 0.066 | 0.525 | 0.13 | 0.17 | |
+| rms_norm_modulation | D768 c384 | 256 | fp32 | fwd+bwd | 0.232 | 1.161 | 0.20 | 0.23 | |
+| rms_norm_modulation | D768 c384 | 512 | bf16 | infer | 0.022 | 0.046 | 0.47 | 4.10 | |
+| rms_norm_modulation | D768 c384 | 512 | bf16 | fwd+bwd | 0.103 | 0.145 | 0.71 | 3.71 | |
+| rms_norm_modulation | D768 c384 | 512 | fp32 | infer | 0.118 | 0.532 | 0.22 | 0.29 | |
+| rms_norm_modulation | D768 c384 | 512 | fp32 | fwd+bwd | 0.402 | 1.296 | 0.31 | 0.37 | |
+| rms_norm_modulation | D768 c384 | 1024 | bf16 | infer | 0.038 | 0.047 | 0.82 | 6.65 | |
+| rms_norm_modulation | D768 c384 | 1024 | bf16 | fwd+bwd | 0.178 | 0.185 | 0.96 | 4.60 | |
+| rms_norm_modulation | D768 c384 | 1024 | fp32 | infer | 0.235 | 1.004 | 0.23 | 0.26 | |
+| rms_norm_modulation | D768 c384 | 1024 | fp32 | fwd+bwd | 0.786 | 2.058 | 0.38 | 0.37 | |
+| rms_norm_modulation | D128 c128 | 128 | bf16 | infer | 0.010 | 0.007 | 1.51 | 6.91 | |
+| rms_norm_modulation | D128 c128 | 128 | bf16 | fwd+bwd | 0.039 | 0.023 | 1.67 | 5.11 | |
+| rms_norm_modulation | D128 c128 | 128 | fp32 | infer | 0.013 | 0.032 | 0.39 | 0.85 | |
+| rms_norm_modulation | D128 c128 | 128 | fp32 | fwd+bwd | 0.049 | 0.072 | 0.68 | 1.17 | |
+| rms_norm_modulation | D128 c128 | 256 | bf16 | infer | 0.011 | 0.007 | 1.60 | 7.27 | |
+| rms_norm_modulation | D128 c128 | 256 | bf16 | fwd+bwd | 0.041 | 0.024 | 1.72 | 5.21 | |
+| rms_norm_modulation | D128 c128 | 256 | fp32 | infer | 0.014 | 0.032 | 0.45 | 0.87 | |
+| rms_norm_modulation | D128 c128 | 256 | fp32 | fwd+bwd | 0.055 | 0.076 | 0.72 | 1.17 | |
+| rms_norm_modulation | D128 c128 | 512 | bf16 | infer | 0.012 | 0.007 | 1.81 | 7.70 | |
+| rms_norm_modulation | D128 c128 | 512 | bf16 | fwd+bwd | 0.047 | 0.026 | 1.79 | 5.14 | |
+| rms_norm_modulation | D128 c128 | 512 | fp32 | infer | 0.019 | 0.032 | 0.58 | 1.03 | |
+| rms_norm_modulation | D128 c128 | 512 | fp32 | fwd+bwd | 0.069 | 0.082 | 0.84 | 1.22 | |
+| rms_norm_modulation | D128 c128 | 1024 | bf16 | infer | 0.014 | 0.007 | 2.00 | 8.63 | |
+| rms_norm_modulation | D128 c128 | 1024 | bf16 | fwd+bwd | 0.055 | 0.028 | 1.95 | 5.97 | |
+| rms_norm_modulation | D128 c128 | 1024 | fp32 | infer | 0.025 | 0.058 | 0.43 | 0.65 | |
+| rms_norm_modulation | D128 c128 | 1024 | fp32 | fwd+bwd | 0.106 | 0.121 | 0.88 | 1.00 | |
+| layer_norm_linear | pair D128 ->16 | 128 | bf16 | infer | 0.008 | 0.005 | 1.77 | 5.64 | |
+| layer_norm_linear | pair D128 ->16 | 128 | bf16 | fwd+bwd | 0.032 | 0.019 | 1.70 | 5.28 | |
+| layer_norm_linear | pair D128 ->16 | 128 | fp32 | infer | 0.008 | 0.017 | 0.49 | 1.94 | |
+| layer_norm_linear | pair D128 ->16 | 128 | fp32 | fwd+bwd | 0.035 | 0.041 | 0.85 | 2.76 | |
+| layer_norm_linear | pair D128 ->16 | 256 | bf16 | infer | 0.011 | 0.009 | 1.21 | 8.69 | |
+| layer_norm_linear | pair D128 ->16 | 256 | bf16 | fwd+bwd | 0.065 | 0.049 | 1.33 | 8.54 | |
+| layer_norm_linear | pair D128 ->16 | 256 | fp32 | infer | 0.019 | 0.065 | 0.29 | 1.91 | |
+| layer_norm_linear | pair D128 ->16 | 256 | fp32 | fwd+bwd | 0.080 | 0.158 | 0.51 | 3.20 | |
+| layer_norm_linear | pair D128 ->16 | 512 | bf16 | infer | 0.034 | 0.033 | 1.02 | 9.40 | |
+| layer_norm_linear | pair D128 ->16 | 512 | bf16 | fwd+bwd | 0.181 | 0.160 | 1.14 | 4.48 | |
+| layer_norm_linear | pair D128 ->16 | 512 | fp32 | infer | 0.066 | 0.215 | 0.31 | 2.18 | |
+| layer_norm_linear | pair D128 ->16 | 512 | fp32 | fwd+bwd | 0.211 | 0.518 | 0.41 | 1.92 | |
+| layer_norm_linear | pair D128 ->16 | 1024 | bf16 | infer | 0.109 | 0.116 | 0.94 | 10.49 | |
+| layer_norm_linear | pair D128 ->16 | 1024 | bf16 | fwd+bwd | 0.645 | 0.583 | 1.11 | 4.56 | |
+| layer_norm_linear | pair D128 ->16 | 1024 | fp32 | infer | 0.240 | 0.801 | 0.30 | 2.27 | |
+| layer_norm_linear | pair D128 ->16 | 1024 | fp32 | fwd+bwd | 0.751 | 1.953 | 0.38 | 1.93 | |
+| gated_residual | pair D128 | 128 | bf16 | infer | 0.004 | 0.007 | 0.57 | 0.97 | |
+| gated_residual | pair D128 | 128 | bf16 | fwd+bwd | 0.011 | 0.013 | 0.83 | 1.03 | |
+| gated_residual | pair D128 | 128 | fp32 | infer | 0.007 | 0.008 | 0.99 | 1.68 | |
+| gated_residual | pair D128 | 128 | fp32 | fwd+bwd | 0.028 | 0.027 | 1.03 | 1.10 | |
+| gated_residual | pair D128 | 256 | bf16 | infer | 0.024 | 0.025 | 0.99 | 1.39 | |
+| gated_residual | pair D128 | 256 | bf16 | fwd+bwd | 0.062 | 0.054 | 1.15 | 1.32 | |
+| gated_residual | pair D128 | 256 | fp32 | infer | 0.046 | 0.046 | 1.00 | 1.55 | |
+| gated_residual | pair D128 | 256 | fp32 | fwd+bwd | 0.116 | 0.103 | 1.13 | 1.37 | |
+| gated_residual | pair D128 | 512 | bf16 | infer | 0.088 | 0.089 | 0.99 | 1.51 | |
+| gated_residual | pair D128 | 512 | bf16 | fwd+bwd | 0.223 | 0.200 | 1.11 | 1.34 | |
+| gated_residual | pair D128 | 512 | fp32 | infer | 0.173 | 0.173 | 1.00 | 1.54 | |
+| gated_residual | pair D128 | 512 | fp32 | fwd+bwd | 0.438 | 0.393 | 1.11 | 1.35 | |
+| gated_residual | pair D128 | 1024 | bf16 | infer | 0.343 | 0.348 | 0.99 | 1.50 | |
+| gated_residual | pair D128 | 1024 | bf16 | fwd+bwd | 0.865 | 0.785 | 1.10 | 1.33 | |
+| gated_residual | pair D128 | 1024 | fp32 | infer | 0.683 | 0.682 | 1.00 | 1.53 | |
+| gated_residual | pair D128 | 1024 | fp32 | fwd+bwd | 1.725 | 1.556 | 1.11 | 1.34 | |
+| gated_residual | token D768 | 128 | bf16 | infer | 0.003 | 0.003 | 0.84 | 1.34 | |
+| gated_residual | token D768 | 128 | bf16 | fwd+bwd | 0.006 | 0.005 | 1.26 | 1.56 | |
+| gated_residual | token D768 | 128 | fp32 | infer | 0.003 | 0.003 | 1.00 | 1.50 | |
+| gated_residual | token D768 | 128 | fp32 | fwd+bwd | 0.007 | 0.005 | 1.38 | 1.65 | |
+| gated_residual | token D768 | 256 | bf16 | infer | 0.003 | 0.004 | 0.76 | 1.25 | |
+| gated_residual | token D768 | 256 | bf16 | fwd+bwd | 0.007 | 0.007 | 1.01 | 1.30 | |
+| gated_residual | token D768 | 256 | fp32 | infer | 0.004 | 0.004 | 0.89 | 1.38 | |
+| gated_residual | token D768 | 256 | fp32 | fwd+bwd | 0.009 | 0.007 | 1.21 | 1.44 | |
+| gated_residual | token D768 | 512 | bf16 | infer | 0.004 | 0.006 | 0.63 | 1.01 | |
+| gated_residual | token D768 | 512 | bf16 | fwd+bwd | 0.009 | 0.011 | 0.83 | 1.01 | |
+| gated_residual | token D768 | 512 | fp32 | infer | 0.006 | 0.006 | 0.94 | 1.43 | |
+| gated_residual | token D768 | 512 | fp32 | fwd+bwd | 0.015 | 0.017 | 0.93 | 1.15 | |
+| gated_residual | token D768 | 1024 | bf16 | infer | 0.005 | 0.010 | 0.51 | 1.05 | |
+| gated_residual | token D768 | 1024 | bf16 | fwd+bwd | 0.020 | 0.019 | 1.04 | 1.22 | |
+| gated_residual | token D768 | 1024 | fp32 | infer | 0.018 | 0.018 | 1.00 | 1.38 | |
+| gated_residual | token D768 | 1024 | fp32 | fwd+bwd | 0.047 | 0.042 | 1.11 | 1.27 | |
+| gated_linear | pair D128 | 128 | bf16 | infer | 0.009 | 0.008 | 1.14 | 1.54 | |
+| gated_linear | pair D128 | 128 | bf16 | fwd+bwd | 0.030 | 0.027 | 1.10 | 1.31 | |
+| gated_linear | pair D128 | 256 | bf16 | infer | 0.032 | 0.025 | 1.29 | 1.54 | |
+| gated_linear | pair D128 | 256 | bf16 | fwd+bwd | 0.097 | 0.089 | 1.09 | 1.32 | |
+| gated_linear | pair D128 | 512 | bf16 | infer | 0.122 | 0.077 | 1.58 | 2.17 | |
+| gated_linear | pair D128 | 512 | bf16 | fwd+bwd | 0.347 | 0.298 | 1.16 | 1.60 | |
+| gated_linear | pair D128 | 1024 | bf16 | infer | 0.470 | 0.287 | 1.64 | 2.23 | |
+| gated_linear | pair D128 | 1024 | bf16 | fwd+bwd | 1.302 | 1.090 | 1.19 | 1.60 | |
+| gated_linear | token D768 | 128 | bf16 | infer | 0.007 | 0.007 | 1.05 | 1.34 | |
+| gated_linear | token D768 | 128 | bf16 | fwd+bwd | 0.019 | 0.018 | 1.07 | 1.28 | |
+| gated_linear | token D768 | 256 | bf16 | infer | 0.008 | 0.008 | 1.04 | 1.35 | |
+| gated_linear | token D768 | 256 | bf16 | fwd+bwd | 0.022 | 0.020 | 1.08 | 1.22 | |
+| gated_linear | token D768 | 512 | bf16 | infer | 0.010 | 0.010 | 1.07 | 1.33 | |
+| gated_linear | token D768 | 512 | bf16 | fwd+bwd | 0.031 | 0.027 | 1.13 | 1.22 | |
+| gated_linear | token D768 | 1024 | bf16 | infer | 0.014 | 0.014 | 1.03 | 1.35 | |
+| gated_linear | token D768 | 1024 | bf16 | fwd+bwd | 0.056 | 0.048 | 1.17 | 1.28 | |
+| triangle_attention | D128 H4 | 128 | bf16 | infer | 0.081 | 0.076 | 1.07 | 5.03 | |
+| triangle_attention | D128 H4 | 128 | bf16 | fwd+bwd | 0.302 | 0.303 | 1.00 | 3.67 | |
+| triangle_attention | D128 H4 | 128 | fp32 | infer | 0.397 | 0.397 | 1.00 | 1.00 | |
+| triangle_attention | D128 H4 | 128 | fp32 | fwd+bwd | 1.239 | 1.239 | 1.00 | 1.00 | |
+| triangle_attention | D128 H4 | 256 | bf16 | infer | 0.236 | 0.251 | 0.94 | 8.55 | |
+| triangle_attention | D128 H4 | 256 | bf16 | fwd+bwd | 1.018 | 1.145 | 0.89 | 5.54 | |
+| triangle_attention | D128 H4 | 256 | fp32 | infer | 2.051 | 2.052 | 1.00 | 1.00 | |
+| triangle_attention | D128 H4 | 256 | fp32 | fwd+bwd | 6.444 | 6.445 | 1.00 | 1.00 | |
+| triangle_attention | D128 H4 | 512 | bf16 | infer | 1.016 | 1.197 | 0.85 | 12.38 | |
+| triangle_attention | D128 H4 | 512 | bf16 | fwd+bwd | 3.592 | 4.497 | 0.80 | 9.24 | |
+| triangle_attention | D128 H4 | 512 | fp32 | infer | 12.983 | 12.982 | 1.00 | 1.00 | |
+| triangle_attention | D128 H4 | 512 | fp32 | fwd+bwd | 39.049 | 39.046 | 1.00 | 1.00 | |
+| triangle_attention | D128 H4 | 1024 | bf16 | infer | 4.683 | 6.372 | 0.73 | - | |
+| triangle_attention | D128 H4 | 1024 | bf16 | fwd+bwd | 18.359 | 25.316 | 0.73 | - | |
+| triangle_attention | D128 H4 | 1024 | fp32 | infer | 91.943 | 91.945 | 1.00 | - | |
+| triangle_attention | D128 H4 | 1024 | fp32 | fwd+bwd | 370.258 | 370.376 | 1.00 | - | |
+| triangle_attention | D128 H4 +QKnorm | 128 | bf16 | infer | 0.092 | 0.094 | 0.98 | 4.75 | |
+| triangle_attention | D128 H4 +QKnorm | 128 | bf16 | fwd+bwd | 0.336 | 0.366 | 0.92 | 4.36 | |
+| triangle_attention | D128 H4 +QKnorm | 128 | fp32 | infer | 0.406 | 0.491 | 0.83 | 1.00 | |
+| triangle_attention | D128 H4 +QKnorm | 128 | fp32 | fwd+bwd | 1.276 | 1.727 | 0.74 | 1.00 | |
+| triangle_attention | D128 H4 +QKnorm | 256 | bf16 | infer | 0.269 | 0.313 | 0.86 | 7.84 | |
+| triangle_attention | D128 H4 +QKnorm | 256 | bf16 | fwd+bwd | 1.102 | 1.319 | 0.84 | 5.34 | |
+| triangle_attention | D128 H4 +QKnorm | 256 | fp32 | infer | 2.097 | 2.453 | 0.85 | 1.00 | |
+| triangle_attention | D128 H4 +QKnorm | 256 | fp32 | fwd+bwd | 6.589 | 7.330 | 0.90 | 1.00 | |
+| triangle_attention | D128 H4 +QKnorm | 512 | bf16 | infer | 1.114 | 1.446 | 0.77 | 10.87 | |
+| triangle_attention | D128 H4 +QKnorm | 512 | bf16 | fwd+bwd | 3.824 | 5.173 | 0.74 | 8.53 | |
+| triangle_attention | D128 H4 +QKnorm | 512 | fp32 | infer | 13.173 | 14.548 | 0.91 | 1.00 | |
+| triangle_attention | D128 H4 +QKnorm | 512 | fp32 | fwd+bwd | 39.532 | 42.415 | 0.93 | 1.00 | |
+| triangle_attention | D128 H4 +QKnorm | 1024 | bf16 | infer | 5.057 | 7.404 | 0.68 | - | |
+| triangle_attention | D128 H4 +QKnorm | 1024 | bf16 | fwd+bwd | 19.295 | 28.151 | 0.69 | - | |
+| triangle_attention | D128 H4 +QKnorm | 1024 | fp32 | infer | 92.432 | 98.123 | 0.94 | - | |
+| triangle_attention | D128 H4 +QKnorm | 1024 | fp32 | fwd+bwd | 371.810 | 383.260 | 0.97 | - | |
+| triangle_multiplicative_update | outgoing D128 | 128 | bf16 | infer | 0.024 | 0.054 | 0.43 | 3.12 | |
+| triangle_multiplicative_update | outgoing D128 | 128 | bf16 | fwd+bwd | 0.160 | 0.193 | 0.83 | 3.58 | |
+| triangle_multiplicative_update | outgoing D128 | 256 | bf16 | infer | 0.069 | 0.137 | 0.51 | 4.17 | |
+| triangle_multiplicative_update | outgoing D128 | 256 | bf16 | fwd+bwd | 0.391 | 0.523 | 0.75 | 4.75 | |
+| triangle_multiplicative_update | outgoing D128 | 512 | bf16 | infer | 0.251 | 0.455 | 0.55 | 5.49 | |
+| triangle_multiplicative_update | outgoing D128 | 512 | bf16 | fwd+bwd | 1.260 | 1.733 | 0.73 | 5.41 | |
+| triangle_multiplicative_update | outgoing D128 | 1024 | bf16 | infer | 1.107 | 1.831 | 0.60 | 8.87 | |
+| triangle_multiplicative_update | outgoing D128 | 1024 | bf16 | fwd+bwd | 5.106 | 6.874 | 0.74 | 10.80 | |
+| triangle_multiplicative_update | incoming D128 | 128 | bf16 | infer | 0.023 | 0.054 | 0.42 | 3.24 | |
+| triangle_multiplicative_update | incoming D128 | 128 | bf16 | fwd+bwd | 0.160 | 0.192 | 0.83 | 3.60 | |
+| triangle_multiplicative_update | incoming D128 | 256 | bf16 | infer | 0.069 | 0.138 | 0.50 | 4.17 | |
+| triangle_multiplicative_update | incoming D128 | 256 | bf16 | fwd+bwd | 0.391 | 0.524 | 0.75 | 4.74 | |
+| triangle_multiplicative_update | incoming D128 | 512 | bf16 | infer | 0.253 | 0.457 | 0.55 | 5.47 | |
+| triangle_multiplicative_update | incoming D128 | 512 | bf16 | fwd+bwd | 1.268 | 1.734 | 0.73 | 5.42 | |
+| triangle_multiplicative_update | incoming D128 | 1024 | bf16 | infer | 1.108 | 1.826 | 0.61 | 8.84 | |
+| triangle_multiplicative_update | incoming D128 | 1024 | bf16 | fwd+bwd | 5.119 | 6.854 | 0.75 | 10.76 | |
+| bidirectional_triangle_multiplicative_update | D128 | 128 | bf16 | infer | 0.037 | 0.082 | 0.45 | 3.03 | |
+| bidirectional_triangle_multiplicative_update | D128 | 128 | bf16 | fwd+bwd | 0.190 | 0.253 | 0.75 | 3.34 | |
+| bidirectional_triangle_multiplicative_update | D128 | 256 | bf16 | infer | 0.118 | 0.221 | 0.53 | 4.17 | |
+| bidirectional_triangle_multiplicative_update | D128 | 256 | bf16 | fwd+bwd | 0.480 | 0.798 | 0.60 | 3.99 | |
+| bidirectional_triangle_multiplicative_update | D128 | 512 | bf16 | infer | 0.430 | 0.753 | 0.57 | 5.31 | |
+| bidirectional_triangle_multiplicative_update | D128 | 512 | bf16 | fwd+bwd | 1.709 | 2.800 | 0.61 | 4.24 | |
+| bidirectional_triangle_multiplicative_update | D128 | 1024 | bf16 | infer | 1.906 | 3.170 | 0.60 | 8.93 | |
+| bidirectional_triangle_multiplicative_update | D128 | 1024 | bf16 | fwd+bwd | 7.708 | 12.011 | 0.64 | 7.11 | |
+| augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 128 | bf16 | infer | 0.018 | 0.014 | 1.34 | 1.35 | |
+| augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 128 | bf16 | fwd+bwd | 0.050 | 0.034 | 1.48 | 1.52 | |
+| augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 256 | bf16 | infer | 0.021 | 0.020 | 1.07 | 1.29 | |
+| augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 256 | bf16 | fwd+bwd | 0.066 | 0.063 | 1.05 | 1.13 | |
+| augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 512 | bf16 | infer | 0.029 | 0.027 | 1.08 | 1.07 | |
+| augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 512 | bf16 | fwd+bwd | 0.118 | 0.133 | 0.89 | 0.88 | |
+| augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 1024 | bf16 | infer | 0.060 | 0.073 | 0.83 | 0.84 | |
+| augmented_attention_pair_bias [supported] | bf16 16x48 B1 | 1024 | bf16 | fwd+bwd | 0.353 | 0.454 | 0.78 | 0.77 | |
+| augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 128 | bf16 | infer | 0.017 | 0.012 | 1.40 | 1.41 | |
+| augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 128 | bf16 | fwd+bwd | 0.045 | 0.028 | 1.58 | 1.62 | |
+| augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 256 | bf16 | infer | 0.019 | 0.014 | 1.38 | 1.39 | |
+| augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 256 | bf16 | fwd+bwd | 0.055 | 0.036 | 1.55 | 1.56 | |
+| augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 512 | bf16 | infer | 0.024 | 0.019 | 1.29 | 1.31 | |
+| augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 512 | bf16 | fwd+bwd | 0.075 | 0.056 | 1.33 | 1.32 | |
+| augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 1024 | bf16 | infer | 0.034 | 0.028 | 1.19 | 1.24 | |
+| augmented_attention_pair_bias [supported] | bf16 4x32 B1 | 1024 | bf16 | fwd+bwd | 0.133 | 0.138 | 0.96 | 1.00 | |
+| augmented_attention_pair_bias [unsupported] | fp32 16x48 | 128 | fp32 | infer | 0.023 | 0.015 | 1.55 | 3.09 | |
+| augmented_attention_pair_bias [unsupported] | fp32 16x48 | 128 | fp32 | fwd+bwd | 0.074 | 0.041 | 1.80 | 2.47 | |
+| augmented_attention_pair_bias [unsupported] | fp32 16x48 | 256 | fp32 | infer | 0.043 | 0.021 | 2.04 | 3.97 | |
+| augmented_attention_pair_bias [unsupported] | fp32 16x48 | 256 | fp32 | fwd+bwd | 0.151 | 0.078 | 1.93 | 2.75 | |
+| augmented_attention_pair_bias [unsupported] | fp32 16x48 | 512 | fp32 | infer | 0.132 | 0.047 | 2.82 | 6.08 | |
+| augmented_attention_pair_bias [unsupported] | fp32 16x48 | 512 | fp32 | fwd+bwd | 0.390 | 0.191 | 2.04 | 3.98 | |
+| augmented_attention_pair_bias [unsupported] | fp32 16x48 | 1024 | fp32 | infer | 0.534 | 0.148 | 3.60 | 7.55 | |
+| augmented_attention_pair_bias [unsupported] | fp32 16x48 | 1024 | fp32 | fwd+bwd | 1.502 | 0.671 | 2.24 | 4.21 | |
+| augmented_attention_pair_bias [unsupported] | bf16 8x64 | 128 | bf16 | infer | 0.013 | 0.013 | 0.99 | 3.94 | |
+| augmented_attention_pair_bias [unsupported] | bf16 8x64 | 128 | bf16 | fwd+bwd | 0.043 | 0.031 | 1.39 | 3.74 | |
+| augmented_attention_pair_bias [unsupported] | bf16 8x64 | 256 | bf16 | infer | 0.017 | 0.015 | 1.14 | 4.78 | |
+| augmented_attention_pair_bias [unsupported] | bf16 8x64 | 256 | bf16 | fwd+bwd | 0.070 | 0.042 | 1.66 | 4.48 | |
+| augmented_attention_pair_bias [unsupported] | bf16 8x64 | 512 | bf16 | infer | 0.030 | 0.021 | 1.44 | 8.68 | |
+| augmented_attention_pair_bias [unsupported] | bf16 8x64 | 512 | bf16 | fwd+bwd | 0.142 | 0.088 | 1.61 | 5.17 | |
+| augmented_attention_pair_bias [unsupported] | bf16 8x64 | 1024 | bf16 | infer | 0.080 | 0.039 | 2.07 | 18.31 | |
+| augmented_attention_pair_bias [unsupported] | bf16 8x64 | 1024 | bf16 | fwd+bwd | 0.383 | 0.254 | 1.51 | 7.00 | |
+| augmented_attention_pair_bias [unsupported] | bf16 16x48 L200 | 200 | bf16 | infer | 0.019 | 0.017 | 1.09 | 5.03 | |
+| augmented_attention_pair_bias [unsupported] | bf16 16x48 L200 | 200 | bf16 | fwd+bwd | 0.075 | 0.064 | 1.18 | 3.95 | |
+| BiasOnlyDiTBlock | shared pair | 100 | bf16 | infer | 0.106 | 0.149 | 0.71 | 0.78 | |
+| BiasOnlyDiTBlock | shared pair | 100 | bf16 | fwd+bwd | 0.342 | 0.357 | 0.96 | 0.97 | |
+| BiasOnlyDiTBlock | shared pair | 100 | fp32 | infer | 0.277 | 0.196 | 1.42 | 1.45 | |
+| BiasOnlyDiTBlock | shared pair | 100 | fp32 | fwd+bwd | 0.788 | 0.696 | 1.13 | 1.14 | |
+| BiasOnlyDiTBlock | shared pair | 128 | bf16 | infer | 0.143 | 0.143 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 128 | bf16 | fwd+bwd | 0.241 | 0.241 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 128 | fp32 | infer | 0.167 | 0.167 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 128 | fp32 | fwd+bwd | 0.440 | 0.440 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 256 | bf16 | infer | 0.173 | 0.173 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 256 | bf16 | fwd+bwd | 0.293 | 0.293 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 256 | fp32 | infer | 0.235 | 0.236 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 256 | fp32 | fwd+bwd | 0.588 | 0.588 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 512 | bf16 | infer | 0.264 | 0.263 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 512 | bf16 | fwd+bwd | 0.445 | 0.443 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 512 | fp32 | infer | 0.403 | 0.402 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 512 | fp32 | fwd+bwd | 0.965 | 0.960 | 1.01 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 1024 | bf16 | infer | 0.563 | 0.564 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 1024 | bf16 | fwd+bwd | 1.772 | 1.523 | 1.16 | 1.32 | |
+| BiasOnlyDiTBlock | shared pair | 1024 | fp32 | infer | 0.959 | 0.963 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | shared pair | 1024 | fp32 | fwd+bwd | 5.378 | 4.825 | 1.11 | 1.39 | |
+| BiasOnlyDiTBlock | pair per sample | 100 | bf16 | infer | 0.114 | 0.156 | 0.73 | 0.80 | |
+| BiasOnlyDiTBlock | pair per sample | 100 | bf16 | fwd+bwd | 0.353 | 0.394 | 0.90 | 0.91 | |
+| BiasOnlyDiTBlock | pair per sample | 100 | fp32 | infer | 0.298 | 0.212 | 1.41 | 1.40 | |
+| BiasOnlyDiTBlock | pair per sample | 100 | fp32 | fwd+bwd | 0.810 | 0.753 | 1.08 | 1.08 | |
+| BiasOnlyDiTBlock | pair per sample | 128 | bf16 | infer | 0.152 | 0.152 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | pair per sample | 128 | bf16 | fwd+bwd | 0.257 | 0.256 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | pair per sample | 128 | fp32 | infer | 0.159 | 0.160 | 0.99 | 1.00 | |
+| BiasOnlyDiTBlock | pair per sample | 128 | fp32 | fwd+bwd | 0.453 | 0.452 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | pair per sample | 256 | bf16 | infer | 0.188 | 0.188 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | pair per sample | 256 | bf16 | fwd+bwd | 0.346 | 0.347 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | pair per sample | 256 | fp32 | infer | 0.230 | 0.230 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | pair per sample | 256 | fp32 | fwd+bwd | 0.667 | 0.675 | 0.99 | 1.02 | |
+| BiasOnlyDiTBlock | pair per sample | 512 | bf16 | infer | 0.296 | 0.296 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | pair per sample | 512 | bf16 | fwd+bwd | 0.648 | 0.647 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | pair per sample | 512 | fp32 | infer | 0.434 | 0.430 | 1.01 | 1.00 | |
+| BiasOnlyDiTBlock | pair per sample | 512 | fp32 | fwd+bwd | 1.345 | 1.345 | 1.00 | 1.00 | |
+| BiasOnlyDiTBlock | pair per sample | 1024 | bf16 | infer | 1.897 | 1.935 | 0.98 | 0.98 | |
+| BiasOnlyDiTBlock | pair per sample | 1024 | bf16 | fwd+bwd | 3.417 | 3.386 | 1.01 | 1.01 | |
+| BiasOnlyDiTBlock | pair per sample | 1024 | fp32 | infer | 4.766 | 4.104 | 1.16 | 1.17 | |
+| BiasOnlyDiTBlock | pair per sample | 1024 | fp32 | fwd+bwd | 7.657 | 7.147 | 1.07 | 1.07 | |
+| AugmentedAttentionPairBias module | A2 D768 | 100 | bf16 | infer | 0.100 | 0.079 | 1.27 | 1.26 | |
+| AugmentedAttentionPairBias module | A2 D768 | 100 | bf16 | fwd+bwd | 0.313 | 0.252 | 1.24 | 1.26 | |
+| AugmentedAttentionPairBias module | A2 D768 | 100 | fp32 | infer | 0.197 | 0.158 | 1.25 | 1.26 | |
+| AugmentedAttentionPairBias module | A2 D768 | 100 | fp32 | fwd+bwd | 0.510 | 0.460 | 1.11 | 1.12 | |
+| AugmentedAttentionPairBias module | A2 D768 | 128 | bf16 | infer | 0.069 | 0.076 | 0.91 | 0.86 | |
+| AugmentedAttentionPairBias module | A2 D768 | 128 | bf16 | fwd+bwd | 0.274 | 0.276 | 0.99 | 1.00 | |
+| AugmentedAttentionPairBias module | A2 D768 | 128 | fp32 | infer | 0.206 | 0.166 | 1.24 | 1.27 | |
+| AugmentedAttentionPairBias module | A2 D768 | 128 | fp32 | fwd+bwd | 0.551 | 0.480 | 1.15 | 1.14 | |
+| AugmentedAttentionPairBias module | A2 D768 | 256 | bf16 | infer | 0.091 | 0.098 | 0.92 | 0.94 | |
+| AugmentedAttentionPairBias module | A2 D768 | 256 | bf16 | fwd+bwd | 0.329 | 0.332 | 0.99 | 0.99 | |
+| AugmentedAttentionPairBias module | A2 D768 | 256 | fp32 | infer | 0.309 | 0.242 | 1.28 | 1.28 | |
+| AugmentedAttentionPairBias module | A2 D768 | 256 | fp32 | fwd+bwd | 0.871 | 0.739 | 1.18 | 1.18 | |
+| AugmentedAttentionPairBias module | A2 D768 | 512 | bf16 | infer | 0.125 | 0.134 | 0.94 | 0.95 | |
+| AugmentedAttentionPairBias module | A2 D768 | 512 | bf16 | fwd+bwd | 0.469 | 0.476 | 0.99 | 0.99 | |
+| AugmentedAttentionPairBias module | A2 D768 | 512 | fp32 | infer | 0.695 | 0.503 | 1.38 | 1.38 | |
+| AugmentedAttentionPairBias module | A2 D768 | 512 | fp32 | fwd+bwd | 1.873 | 1.490 | 1.26 | 1.26 | |
+| AugmentedAttentionPairBias module | A2 D768 | 1024 | bf16 | infer | 0.231 | 0.237 | 0.97 | 0.97 | |
+| AugmentedAttentionPairBias module | A2 D768 | 1024 | bf16 | fwd+bwd | 1.021 | 1.028 | 0.99 | 0.99 | |
+| AugmentedAttentionPairBias module | A2 D768 | 1024 | fp32 | infer | 2.210 | 1.585 | 1.39 | 1.40 | |
+| AugmentedAttentionPairBias module | A2 D768 | 1024 | fp32 | fwd+bwd | 5.346 | 4.115 | 1.30 | 1.29 | |

@@ -30,8 +30,15 @@ def gated_linear(
         return F.linear(torch.sigmoid(gate) * value, weight, bias)
     from miniworld_engine.modules.dispatch import portable_blocked, restricted_card
 
+    if restricted_card(value.device):
+        # H100: the CUDA sigmoid-gate row kernels of the conditioned-transition tail around one GEMM (no Triton on H100 / B200)
+        from miniworld_engine.kernels import _h100_ops
+
+        out = _h100_ops.gated_linear(gate, value, weight, bias)
+        if out is not None:
+            return out
     if restricted_card(value.device) or portable_blocked("gated_linear", value.device, gate, value, weight):
-        # H100 / B200 launch no Triton (no CUDA kernel serves this op): the PyTorch statements; also a card with no record of the kernels
+        # no CUDA kernel serves this call (or B200): the PyTorch statements; also a card with no record of the kernels
         return F.linear(torch.sigmoid(gate) * value, weight, bias)
     shape = value.shape
     # Released AF3 exposes an unbatched [L,D] token stream. Restore its semantic

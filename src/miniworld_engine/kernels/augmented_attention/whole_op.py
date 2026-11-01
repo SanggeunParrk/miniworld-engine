@@ -52,6 +52,11 @@ def augmented_attention_pair_bias(
 
             if cuda_sm90.available(q_, b_):
                 return cuda_sm90.augmented_attention_bf16_sm90(q_, k_, v_, b_, mask).transpose(2, 3).to(in_dtype)
+        if query.device.type == "cuda" and not torch.compiler.is_compiling() and query.dim() == 5:
+            # any other dtype / head layout / length: the memory-efficient SDPA kernel with the pair bias (fp32 accumulation, no L^2 scores)
+            from miniworld_engine.kernels import _h100_ops
+
+            return _h100_ops.augmented_attention_sdpa(query, key, value, bias, mask).to(in_dtype)
         from miniworld_engine.kernels.augmented_attention.reference import (
             augmented_attention_pair_bias_pytorch,
         )

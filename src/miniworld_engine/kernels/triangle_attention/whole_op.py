@@ -102,17 +102,28 @@ def triangle_attention(
 
             # the QK norm launches the rmsnorm family: its own record (a card may hold the attention kernels and not the RMSNorm ones)
             if blocked or (pair.is_cuda and portable_blocked("rmsnorm", pair.device, query, norm_query_weight, norm_key_weight)):
-                query = F.rms_norm(query, (query.shape[-1],), norm_query_weight, eps)
-                key = F.rms_norm(key, (key.shape[-1],), norm_key_weight, eps)
+                # on the token-major layout the projections' GEMMs leave (contiguous): the result is the layout the CUDA core reads
+                def _norm(t, w):
+                    from miniworld_engine.kernels import _h100_ops
+
+                    tm = t.permute(0, 2, 3, 1, 4)
+                    done = _h100_ops.rms_norm_rows(tm, w, eps) if dispatch.restricted_card(pair.device) else None   # H100: the CUDA RMSNorm
+                    return (done if done is not None else F.rms_norm(tm, (tm.shape[-1],), w, eps)).permute(0, 3, 1, 2, 4)
+
+                query = _norm(query, norm_query_weight)
+                key = _norm(key, norm_key_weight)
             else:
                 query = triton_rmsnorm(query, norm_query_weight, eps)
                 key = triton_rmsnorm(key, norm_key_weight, eps)
         if blocked:
-            from miniworld_engine.kernels.triangle_attention.reference import (
-                triangle_attention_pair_bias_pytorch,
-            )
+            from miniworld_engine.kernels import _h100_ops
 
-            out = triangle_attention_pair_bias_pytorch(query, key, value, bias)
+            # H100: the sm_90 CUDA core where it serves the call (bf16, 32-channel heads); every other call (and every other card without a
+            # record): the PyTorch core, chunked over the rows so the L^3 scores never exceed a fixed budget (no OOM at L = 1024)
+            if dispatch.restricted_card(pair.device):
+                out = _h100_ops.triangle_core(query, key, value, bias)
+            else:
+                out = _h100_ops.triangle_core_pytorch(query, key, value, bias)
         else:
             out = triton_triangle_attention_pair_bias(query, key, value, bias)
     else:

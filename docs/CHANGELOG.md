@@ -26,13 +26,16 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 - **H100 / B200 launch no Triton through the `ops.*` facades, the bias-only DiT training fallbacks or the AugmentedAttention CUDA-path helpers**
   (`portable_blocked` is False on cc 9 / 10, so these call sites kept their Triton kernels outside the record gate). The facades ask
-  `restricted_card` first: the CUDA kernel where one serves the call (`ops.layer_norm`: the general CUDA LayerNorm; `ops.augmented_attention_pair_bias`:
-  the sm_90 bf16 core), the PyTorch statements otherwise (`swiglu_ffn`, `rms_norm_modulation`, `layer_norm_linear`, `gated_residual`, `gated_linear`,
-  `conditioned_transition`, `triangle_attention`, both TriMul updates; TriMul stays bf16-only on CUDA). `BiasOnlyDiTBlock`'s `core_t` / pair-bias
-  fallbacks and `pair_bias_all`'s Triton fold are off there; the sm_90 AugmentedAttention `_scale_bf16_kernel` / `_prep_do_kernel` / `_wf_kernel` and
-  the compiled-region TriMul weight pack are PyTorch ops (the Triton versions are kept as `_*_triton`). `portable_on_hopper_blackwell` keeps the
-  Triton kernels for A/B. Tests: `tests/cpu/compile/test_h100_ops_no_triton.py`, `tests/gpu/sm90/test_ops_no_triton_gpu.py`;
-  `docs/records/h100_ops_gate_20261101.md`, `docs/gpus/h100/dispatch.md`.
+  `restricted_card` first and take the hand-CUDA kernel that already serves the op through thin wrappers (`kernels/_h100_ops.py`): the sm_90 core for
+  `ops.triangle_attention` bf16 (QK norm on the general CUDA RMSNorm), the module's hand-CUDA TriMul for both TriMul updates (bf16 only), the
+  conditioned-transition tail kernels for `ops.conditioned_transition` / `ops.swiglu_ffn`, the pair-bias kernels for `ops.layer_norm_linear`, the CUDA gate row kernels
+  for `ops.gated_linear`, the general CUDA LayerNorm for `ops.layer_norm`, the sm_90 core (else SDPA with the pair bias) for `ops.augmented_attention_pair_bias`. A call no
+  kernel serves runs the PyTorch form; `ops.triangle_attention`'s PyTorch core is chunked over the rows so L = 1024 no longer runs out of memory (it built 16 GiB of
+  scores). `BiasOnlyDiTBlock`'s `core_t` / pair-bias fallbacks and `pair_bias_all`'s Triton fold are off there; the sm_90 AugmentedAttention `_scale_bf16_kernel` /
+  `_prep_do_kernel` / `_wf_kernel` and the compiled-region TriMul weight pack are PyTorch ops (the Triton versions are kept as `_*_triton`).
+  `portable_on_hopper_blackwell` keeps the Triton kernels for A/B. Against the Triton path: 208 of 342 measured rows were > 5% slower with plain PyTorch statements, 107 are now
+  (`docs/records/h100_ops_gate_perf_20261101.md`). Tests: `tests/cpu/compile/test_h100_ops_no_triton.py`, `tests/gpu/sm90/test_ops_no_triton_gpu.py`,
+  `tests/gpu/sm90/test_ops_cuda_wiring_gpu.py`; `docs/records/h100_ops_gate_20261101.md`, `docs/gpus/h100/dispatch.md`.
 - **Native caches are judged per op.** `native.op_identity(op)` (registry row, the closure of the op's files inside `kernels/`, the safety
   set) replaces `native.source_identity()` (one hash of every `kernels/**` file) in `cache_status.scan`, `derive.coverage`,
   `native.choose_config` and the cache JSON's `op_identity`; an edit to an unrelated kernel no longer forces a restamp of all `*_cuda`

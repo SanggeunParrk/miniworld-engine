@@ -38,6 +38,14 @@ def conditioned_transition(
     from miniworld_engine.kernels.transition.triton.main import triton_transition
     from miniworld_engine.modules.dispatch import portable_blocked, restricted_card
 
+    if x.is_cuda and restricted_card(x.device):
+        # H100: the hand-CUDA conditioned-transition tail the module runs (expand + SwiGLU, squeeze + gate), where it serves the call
+        from miniworld_engine.kernels import _h100_ops
+
+        out = _h100_ops.conditioned_transition(
+            x, cond, expand_a_weight, expand_b_weight, squeeze_weight, to_scale_weight, to_scale_bias)
+        if out is not None:
+            return out
     if x.is_cuda and (restricted_card(x.device) or portable_blocked("swiglu_ffn", x.device, x, expand_a_weight, expand_b_weight, squeeze_weight)):
         # H100 / B200 (no Triton, no CUDA kernel for the bare SwiGLU tail), or a card the engine holds no record for (the tail launches the
         # SwiGLU kernels of ops.swiglu_ffn): the PyTorch statements

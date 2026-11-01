@@ -368,3 +368,131 @@ def test_the_trimul_weight_pack_matches_the_triton_layout(h100, rows):
         leaf = (wrg if gate else wr) if right else (wlg if gate else wl)
         expected[row] = leaf[r]
     torch.testing.assert_close(dst, expected, rtol=0, atol=0)
+
+
+# ------------------------------------------------------------------------------------------------------------------------------------
+# kernels/_h100_ops.py: the CUDA wiring of the facades (docs/records/h100_ops_gate_perf_20261101.md)
+# ------------------------------------------------------------------------------------------------------------------------------------
+def test_h100_ops_module_imports_and_names_no_triton():
+    """The wiring module launches no Triton and imports none: no ``triton`` import, no ``.triton.`` module path, no ``@triton.jit`` in its code."""
+    import ast
+    import pathlib
+
+    from miniworld_engine.kernels import _h100_ops
+
+    source = pathlib.Path(_h100_ops.__file__).read_text()
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert all("triton" not in a.name for a in node.names), ast.dump(node)
+        if isinstance(node, ast.ImportFrom):
+            assert "triton" not in (node.module or "") and all("triton" not in a.name for a in node.names), ast.dump(node)
+    assert "@triton" not in source and "JITFunction" not in source
+
+
+def test_the_cuda_wrappers_decline_a_cpu_tensor_and_a_compile_trace(h100):
+    """``on_h100`` is the precondition of every wrapper: CPU tensors (this host) never reach an extension, so each wrapper answers None / False."""
+    from miniworld_engine.kernels import _h100_ops as ops_
+
+    x = torch.randn(1, 8, 8, 128).bfloat16()
+    assert not ops_.on_h100(x)
+    assert ops_.layer_norm_linear(x, torch.ones(128), torch.randn(16, 128), 1e-5) is None
+    assert not ops_.layer_norm_linear_serves(x, torch.ones(128), torch.randn(16, 128))
+    assert ops_.swiglu_ffn(x, torch.randn(256, 128), torch.randn(256, 128), torch.randn(128, 256)) is None
+    assert ops_.trimul(x, None, False, True, 128, 1e-5, *(torch.ones(128) for _ in range(2)), *(torch.randn(128, 128) for _ in range(4)),
+                       *(torch.ones(128) for _ in range(2)), torch.randn(128, 128), torch.randn(128, 128)) is None
+    assert ops_.gated_linear(x, x, torch.randn(8, 128).bfloat16(), None) is None
+
+
+def test_the_ops_facades_ask_the_cuda_wrappers_first_on_h100(h100, monkeypatch):
+    """A facade on a restricted card offers the call to its CUDA wrapper before it runs the statements: the wrapper's answer is the result."""
+    from miniworld_engine import ops
+    from miniworld_engine.kernels import _h100_ops as ops_
+
+    marker = torch.full((1,), 7.0)
+    seen = []
+    for name in ("swiglu_ffn", "layer_norm_linear", "gated_linear", "conditioned_transition"):
+        monkeypatch.setattr(ops_, name, lambda *a, _n=name, **k: (seen.append(_n), marker)[1])
+    x = torch.randn(2, 4, 4, 16)
+    assert ops.swiglu_ffn(x, torch.randn(32, 16), torch.randn(32, 16), torch.randn(16, 32)) is marker
+    assert ops.layer_norm_linear(x, torch.randn(16), torch.randn(4, 16), 1e-5) is marker
+    xb = x.bfloat16()
+    assert ops.gated_linear(xb, xb, torch.randn(8, 16).bfloat16(), None) is marker
+    out = ops.conditioned_transition(x, torch.randn(2, 4, 4, 8), expand_a_weight=torch.randn(32, 16), expand_b_weight=torch.randn(32, 16),
+                                     squeeze_weight=torch.randn(16, 32), to_scale_weight=torch.randn(16, 8), to_scale_bias=torch.randn(16), n=2)
+    assert out is marker
+    assert seen == ["swiglu_ffn", "layer_norm_linear", "gated_linear", "conditioned_transition"]
+
+
+def test_the_triangle_facade_takes_the_cuda_core_function_on_h100(h100, monkeypatch):
+    from miniworld_engine import ops
+    from miniworld_engine.kernels import _h100_ops as ops_
+
+    calls = []
+    real = ops_.triangle_core_pytorch
+
+    def core(q, k, v, bias):
+        calls.append(tuple(q.shape))
+        return real(q, k, v, bias)
+
+    monkeypatch.setattr(ops_, "triangle_core", core)
+    torch.manual_seed(0)
+    d, heads, length = 16, 2, 6
+    out = ops.triangle_attention(
+        torch.randn(1, length, length, d), None, n_head=heads, ln_pair_weight=torch.ones(d), ln_pair_bias=torch.zeros(d),
+        to_value_weight=torch.randn(d, d) * 0.2, to_bias_weight=torch.randn(heads, d) * 0.2, to_gate_weight=torch.randn(d, d) * 0.2,
+        to_out_weight=torch.randn(d, d) * 0.2, to_query_weight=torch.randn(d, d) * 0.2, to_key_weight=torch.randn(d, d) * 0.2)
+    assert calls == [(1, heads, length, length, d // heads)] and out.shape == (1, length, length, d)
+
+
+@pytest.mark.parametrize("grad", [False, True])
+def test_the_pytorch_triangle_core_is_chunked_within_its_score_budget(monkeypatch, grad):
+    """The fallback core never builds more than ``_SCORE_BUDGET`` bytes of scores per chunk (16 GiB at L = 1024 was the OOM), gives the one-shot result,
+    and in training checkpoints the chunks (same gradients)."""
+    from miniworld_engine.kernels import _h100_ops as ops_
+    from miniworld_engine.kernels.triangle_attention.reference import (
+        triangle_attention_pair_bias_pytorch as core,
+    )
+
+    torch.manual_seed(0)
+    b, h, length, dh = 1, 2, 24, 8
+    q, k, v = (torch.randn(b, h, length, length, dh, requires_grad=grad) for _ in range(3))
+    bias = torch.randn(b, h, length, length, requires_grad=grad)
+    one = core(q, k, v, bias)
+    rows_seen = []
+    real_core = core
+
+    monkeypatch.setattr(ops_, "_SCORE_BUDGET", b * h * length * length * 4 * 5)           # 5 rows per chunk
+    import miniworld_engine.kernels.triangle_attention.reference as ref
+
+    def spy(qc, kc, vc, bc):
+        rows_seen.append(qc.shape[2])
+        assert qc.shape[2] * b * h * length * length * 4 <= b * h * length * length * 4 * 5
+        return real_core(qc, kc, vc, bc)
+
+    monkeypatch.setattr(ref, "triangle_attention_pair_bias_pytorch", spy)
+    chunked = ops_.triangle_core_pytorch(q, k, v, bias)
+    assert rows_seen[0] == 5 and sum(rows_seen[: len(rows_seen)]) >= length
+    torch.testing.assert_close(chunked, one, rtol=1e-5, atol=1e-6)
+    if grad:
+        g = torch.randn_like(one)
+        grads_one = torch.autograd.grad(one, [q, k, v, bias], g)
+        grads_chunked = torch.autograd.grad(chunked, [q, k, v, bias], g)
+        for a, c in zip(grads_one, grads_chunked, strict=True):
+            torch.testing.assert_close(c, a, rtol=1e-4, atol=1e-5)
+
+
+def test_rms_norm_modulation_statements_match_the_reference_in_bf16(h100):
+    """The activation-dtype form (one RMSNorm, one GEMM, two elementwise kernels) stays within bf16 rounding of the fp32 reference; the gate is the GEMM's slice."""
+    from miniworld_engine import ops
+    from miniworld_engine.kernels.rmsnorm.reference import rmsnorm_adamod_reference
+
+    torch.manual_seed(0)
+    q, c = torch.randn(3, 8, 32).bfloat16(), torch.randn(3, 8, 16).bfloat16()
+    w = [(torch.randn(32, 16) * 0.1).bfloat16() for _ in range(3)]
+    weight = torch.randn(32).bfloat16()
+    y, g = ops.rms_norm_modulation(q, c, *w, weight, 1e-5)
+    ry, rg = rmsnorm_adamod_reference(q, c, *w, weight, 1e-5)
+    assert y.dtype is torch.bfloat16 and g.dtype is torch.bfloat16
+    torch.testing.assert_close(y.float(), ry.float(), rtol=3e-2, atol=3e-2)
+    torch.testing.assert_close(g.float(), rg.float(), rtol=3e-2, atol=3e-2)

@@ -25,6 +25,13 @@ def swiglu_ffn(x: torch.Tensor, expand_a_weight: torch.Tensor, expand_b_weight: 
     """``W_down( SiLU(Wa @ x) * (Wb @ x) )`` -- see ``kernels.transition.triton.fused.triton_swiglu_ffn``."""
     from miniworld_engine.modules.dispatch import portable_blocked
 
+    if _no_triton(x):
+        # H100: the CUDA kernels of the conditioned-transition tail (fused expand + SwiGLU GEMM, SwiGLU row kernels) where they serve the call
+        from miniworld_engine.kernels import _h100_ops
+
+        out = _h100_ops.swiglu_ffn(x, expand_a_weight, expand_b_weight, squeeze_weight)
+        if out is not None:
+            return out
     if _no_triton(x) or (x.is_cuda and portable_blocked("swiglu_ffn", x.device, x, expand_a_weight, expand_b_weight, squeeze_weight)):
         return F.linear(F.silu(F.linear(x, expand_a_weight)) * F.linear(x, expand_b_weight), squeeze_weight)
     from miniworld_engine.kernels.transition.triton.fused import triton_swiglu_ffn
@@ -73,7 +80,12 @@ def rms_norm_modulation(
     (``kernels.rmsnorm.reference.rmsnorm_adamod_reference``, fp32 statistics and projections, the outputs in ``q``'s dtype)."""
     from miniworld_engine.modules.dispatch import portable_blocked
 
-    if _no_triton(q) or q.is_cuda and portable_blocked(
+    if _no_triton(q):
+        # H100 / B200: the activation-dtype statements with the fewest launches (one RMSNorm, one GEMM, two elementwise kernels)
+        from miniworld_engine.kernels import _h100_ops
+
+        return _h100_ops.rms_norm_modulation(q, c, w_scale, w_shift, w_gate, weight, eps)
+    if q.is_cuda and portable_blocked(
         "rms_norm_modulation", q.device, q, c, w_scale, w_shift, w_gate, *(t for t in (weight,) if t is not None)
     ):
         from miniworld_engine.kernels.rmsnorm.reference import rmsnorm_adamod_reference
@@ -90,6 +102,13 @@ def layer_norm_linear(x: torch.Tensor, ln_weight: torch.Tensor, proj_weight: tor
     with the weights in the activation's dtype (the statements the modules' PyTorch legs run), the result in ``x``'s dtype."""
     from miniworld_engine.modules.dispatch import portable_blocked
 
+    if _no_triton(x):
+        # H100, d_pair 128 -> 16 heads: the token DiT's CUDA pair-bias kernels (LayerNorm + projection in one pass each way)
+        from miniworld_engine.kernels import _h100_ops
+
+        out = _h100_ops.layer_norm_linear(x, ln_weight, proj_weight, eps)
+        if out is not None:
+            return out
     if _no_triton(x) or (x.is_cuda and portable_blocked("layer_norm_linear", x.device, x, ln_weight, proj_weight)):
         normed = F.layer_norm(x, (x.shape[-1],), ln_weight.to(x.dtype), None, eps)
         return F.linear(normed, proj_weight.to(x.dtype))
@@ -109,6 +128,10 @@ def gated_residual(x: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor) ->
     if _no_triton(x) or (x.is_cuda and portable_blocked("gated_residual", x.device, x, gate, branch)):
         if x.shape != gate.shape or x.shape != branch.shape:
             raise ValueError("gated_residual requires identical shapes")
+        if _no_triton(x) and x.dtype == gate.dtype == branch.dtype:
+            from miniworld_engine.kernels import _h100_ops
+
+            return _h100_ops.gated_residual(x, gate, branch)   # one fused elementwise kernel
         return x + gate * branch
     from miniworld_engine.kernels.gated_projection.triton.residual import (
         gated_residual as _gated_residual,
