@@ -57,6 +57,40 @@ def test_opm_variant(name, b, s, n):
 
 
 @pytest.mark.parametrize("name", ["rf3_after", "rf3_before"])
+@pytest.mark.parametrize(("s", "n"), [(1, 128), (2, 128), (4, 256), (64, 128)])
+def test_rf3_shallow_msa_biases_counted_once(name, s, n, monkeypatch):
+    """RoseTTAFold3's biases on an MSA that is not a multiple of 256 deep (``composed.biased_on_fused``: the fused path plus the bias terms):
+    the projection biases enter once, not in the fused path's prologue and again as bias terms (fp64 statements, bf16 error held to the bf16 statements')."""
+    options = dict(VARIANTS[name])
+    torch.manual_seed(0)
+    m = OuterProductMean(64, options.pop("d_pair"), options.pop("d_hidden"), implementation=ImplementationType.MINIWORLD, **options)
+    m = m.cuda().eval()
+    with torch.no_grad():
+        for pname, p in m.named_parameters():
+            p.copy_(1 + 0.1 * torch.randn_like(p) if "norm" in pname and pname.endswith("weight") else
+                    torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else 0.3 * torch.randn_like(p))
+    g = torch.Generator(device="cuda").manual_seed(1)
+    msa = torch.randn(1, s, n, 64, device="cuda", generator=g)
+    mask = torch.rand(1, s, n, device="cuda", generator=g) > 0.2
+    gold = copy.deepcopy(m).double()
+    ref16 = copy.deepcopy(m).to(torch.bfloat16)
+    eng = m.to(torch.bfloat16)
+    calls = []
+    run = composed.biased_on_fused
+    monkeypatch.setattr(composed, "biased_on_fused", lambda *a, **k: (calls.append(1), run(*a, **k))[1])
+    with torch.no_grad():
+        want = gold._variant_reference(msa.double(), mask, None, None)
+        base = ref16._variant_reference(msa.bfloat16(), mask, None, None)
+        got = eng(msa.bfloat16(), mask)
+    assert calls, "biased_on_fused did not serve the call"
+
+    def rel(x):
+        return ((x.double() - want).norm() / want.norm()).item()
+
+    assert rel(got) <= max(1.5 * rel(base), 1e-2), f"{name}: engine {rel(got):.2e} vs bf16 statements {rel(base):.2e}"
+
+
+@pytest.mark.parametrize("name", ["rf3_after", "rf3_before"])
 @pytest.mark.parametrize(("s", "n", "residual"), [(512, 128, True), (1024, 256, False), (256, 192, True)])
 def test_rf3_training_matches_fp64_statements(name, s, n, residual, monkeypatch):
     """RoseTTAFold3's biased projections in a grad-enabled call run the wide fused composition (the projection biases in the prologue,

@@ -85,7 +85,7 @@ def biased_on_fused(module, msa, mask, token_asym_id=None, residual=None):
     K = module.group_width
     bf = torch.bfloat16
     keep = (mask if mask is not None else torch.ones(B, S, N, dtype=torch.bool, device=msa.device)).to(bf)
-    out = opm_train.outer_product_mean(module, msa, keep.bool(), residual=None).contiguous()
+    out = opm_train.outer_product_mean(module, msa, keep.bool(), residual=None, with_bias=False).contiguous()   # the bias terms are added below, not in the prologue
     m = module.ln_msa(msa) * keep[..., None]                                             # L0 = mask (W_L m) = W_L (mask m)
     l0 = torch.matmul(m, module.to_left.weight.to(bf).t())                               # [B, S, N, K]
     r0 = torch.matmul(m, module.to_right.weight.to(bf).t())

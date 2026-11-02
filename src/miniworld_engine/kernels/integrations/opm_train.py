@@ -941,9 +941,12 @@ class _OpmMath(torch.autograd.Function):
 
 
 def outer_product_mean(
-    module, msa: torch.Tensor, mask: torch.Tensor, residual: torch.Tensor | None = None
+    module, msa: torch.Tensor, mask: torch.Tensor, residual: torch.Tensor | None = None, *, with_bias: bool = True
 ) -> torch.Tensor:
     """OPM with optional pair residual fused into the CUDA epilogue; no OPM dropout in the model.
+
+    ``with_bias=False`` ignores the module's projection biases (``to_left.bias`` / ``to_right.bias``): the caller adds their terms itself
+    (``composed.biased_on_fused``); with the biases passed here as well they would be counted twice.
 
     A length that is not a multiple of 64 or an MSA depth that is not a multiple of 256 is padded with rows that carry mask 0
     (they add nothing to any count or product and the prologue zeroes their projections), and the pair output is cut back; the
@@ -965,7 +968,7 @@ def outer_product_mean(
     )
     r = residual.contiguous() if fuse else msa.new_empty((0,))
     # RoseTTAFold3: the left | right projection biases as one fp32 vector (an empty tensor: no biases)
-    pbias = (torch.cat([module.to_left.bias, module.to_right.bias]) if module.to_left.bias is not None
+    pbias = (torch.cat([module.to_left.bias, module.to_right.bias]) if with_bias and module.to_left.bias is not None
              else msa.new_empty((0,), dtype=torch.float32))
     tensors = [
         msa.contiguous(),
