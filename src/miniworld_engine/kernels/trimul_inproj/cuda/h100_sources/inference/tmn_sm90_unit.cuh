@@ -200,6 +200,8 @@ TMN_K3_SET_BF16(64, 128, 3, 64, 8, 1)           // both: 166 KB
 // epilogue finishes blocks in PAIRS (128-byte row segments).  K3Cfg's static_assert says so.
 #elif TMN_CZ == 384 && TMN_CH == 384
 TMN_K1_SET_BF16(384, 384, 2, 64, 6, 2)          // 96 KB z tile + 6 x 16 KB ring (two 3-slot blocks in flight)
+TMN_K1_SET_BF16(384, 384, 1, 128, 6, 2)         // tuning alternatives (the table's k1_variants)
+TMN_K1_SET_BF16(384, 384, 2, 64, 4, 3)
 TMN_K3W_SET_BF16(384, 384, 1, 64, 4, 1)         // wide K3, split-N: X 48 KB + z 48 KB + one (24 + 24) KB slot pair per block in flight + staging = 214 KB
                                                 // (no fp32-resident-z form at c_z 384: the fp32 z tile does not fit next to the operands; served by name upstream)
 #elif TMN_CZ == 128 && TMN_CH == 384

@@ -35,6 +35,13 @@ _FWD_BR = 64
 _BWD_BR = 64
 
 
+def _bwd_warps(c: int) -> int:
+    """Warps of the backward program: 4, or 8 from 256 channels on -- its [64, C] row block, d xhat and the [16, C] dW' accumulator spill
+    at 4 warps there (H100, R = 4 x 512^2, 16 outputs, 2026-10-29: C 256 bf16 1611 -> 582 us, fp32 2588 -> 1040 us; C 128 stays at 4: 249
+    against 395 us)."""
+    return 8 if c >= 256 else 4
+
+
 @triton.jit
 def _ln_bias_fwd_kernel(X, W, OUT, MEAN, RSTD, R, eps, C: tl.constexpr, N: tl.constexpr, NP: tl.constexpr, BR: tl.constexpr):
     pid = tl.program_id(0).to(tl.int64)
@@ -121,7 +128,7 @@ def _bwd(x: torch.Tensor, w: torch.Tensor, dl: torch.Tensor, mean: torch.Tensor,
     dx = torch.empty_like(x)
     dw = torch.zeros((n, c), device=x.device, dtype=torch.float32)
     nprog = max(1, min(num_sms(x.device.index or 0) * 2, triton.cdiv(r, _BWD_BR)))
-    _ln_bias_bwd_kernel[(nprog,)](x, w, dl, mean, rstd, dx, dw, r, C=c, N=n, NP=_np(n), BR=_BWD_BR, NPROG=nprog, num_warps=4, num_stages=2)
+    _ln_bias_bwd_kernel[(nprog,)](x, w, dl, mean, rstd, dx, dw, r, C=c, N=n, NP=_np(n), BR=_BWD_BR, NPROG=nprog, num_warps=_bwd_warps(c), num_stages=2)
     return dx, dw
 
 

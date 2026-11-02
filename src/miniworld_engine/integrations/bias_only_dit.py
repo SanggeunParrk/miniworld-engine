@@ -16,7 +16,7 @@ settings.bias_only_dit_inf3=0 (read per call) keeps the 12-launch cuBLAS + rows 
 bf16 step, which is also what a failed build falls back to.
 
 ``serves()`` is the whole gate: no autograd, the engine's kernels (implementation MINIWORLD), B200 or H100, bf16 or fp32, the
-token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128 (up to 768; 3072 on H100: ``core_supported``), a key mask [1, L] or
+token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128, or 256 on H100 / transition n = 2), B == 1, L a multiple of 128 (up to 768; 3072 on H100: ``core_supported``), a key mask [1, L] or
 none, LayerNorm eps 1e-5. The conditioning may be one per sample or one shared by the samples (sample axis 1 or stride 0).
 settings.bias_only_dit=0 turns it off. Anything else keeps the module's PyTorch composition.
 
@@ -37,6 +37,9 @@ from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 
 D, DC, DP = 768, 384, 128
+#: the pair widths of the pair-bias hoist (``FusedBiasOnlyDiT.hoist``: the LayerNorm rows template, the fp32 one-pass ``pair_bias`` template): 128,
+#: and 256 on H100
+DPS = (128, 256)
 LAYOUTS = (
     (16, 48),
     (24, 32),
@@ -109,7 +112,10 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         or cond.shape[0] not in (1, A)
     ):
         return False
-    if bias is None and tuple(pair.shape) != (1, L, L, DP):
+    dp = module.attention.ln_pair.weight.shape[0]
+    if dp not in DPS or (dp != DP and torch.cuda.get_device_capability(single.device) != (9, 0)):
+        return False
+    if bias is None and tuple(pair.shape) != (1, L, L, dp):
         return False
     if bias is not None and (
         tuple(bias.shape) != (1, module.attention.n_head, L, L)
@@ -268,7 +274,7 @@ def chunk_samples(n_samples: int, n_head: int, length: int, itemsize: int) -> in
 
 
 def serves_psb(module, single, cond, pair, mask=None, bias=None) -> bool:
-    """Inference with a pair (``pair`` [B, L, L, 128]) or a hoisted bias (``bias`` [B, H, L, L]) of its own per sample: ``single`` /
+    """Inference with a pair (``pair`` [B, L, L, 128 or 256]) or a hoisted bias (``bias`` [B, H, L, L]) of its own per sample: ``single`` /
     ``cond`` [1, B, L, d], B > 1, no autograd, H100, bf16 or fp32 (TF32), L a multiple of 128 up to 768 (fp32 beyond 512 takes
     the cuBLAS core), a key mask [1, L] / [B, L] or none."""
     from miniworld_engine.modules.exceptions import ImplementationType
@@ -293,7 +299,9 @@ def serves_psb(module, single, cond, pair, mask=None, bias=None) -> bool:
         return False
     at = module.attention
     H = at.n_head
-    if bias is None and tuple(pair.shape) != (B, L, L, DP):
+    if at.ln_pair.weight.shape[0] not in DPS:
+        return False
+    if bias is None and tuple(pair.shape) != (B, L, L, at.ln_pair.weight.shape[0]):
         return False
     if bias is not None and (tuple(bias.shape) != (B, H, L, L) or bias.device != single.device):
         return False

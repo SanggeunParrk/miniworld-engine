@@ -100,8 +100,11 @@ def pack_weights(w_scale: torch.Tensor, b_scale: torch.Tensor, w_bias: torch.Ten
 
 
 def packed(w_scale, b_scale, w_bias, dtype):
-    """``pack_weights`` cached while the parameters are unmodified (``_capture.param_forms``)."""
-    return _capture.param_forms(f"adaln_cuda_{dtype}", (w_scale, b_scale, w_bias), lambda: pack_weights(w_scale, b_scale, w_bias, dtype))
+    """``pack_weights`` cached while the parameters are unmodified (``_capture.param_forms``). Called inside the opaque op, so a compiled
+    caller runs it at run time and reuses it (traced, it was recomputed at every call); a capture reads the eager entry its warm-up made
+    (inference forms, grad off)."""
+    return _capture.param_forms(f"adaln_cuda_{dtype}", (w_scale, b_scale, w_bias), lambda: pack_weights(w_scale, b_scale, w_bias, dtype),
+                                capture_reads_eager=True)
 
 
 # read once at import: the routing functions run inside torch.compile traces, which must not look at the environment
@@ -114,15 +117,17 @@ def atom_fused(nx: int, nc: int) -> bool:
     return nx == 128 and nc == 128 and _ATOM
 
 
-def _infer_fake(x, cond, lnw, wc, bs, eps_x, eps_cond, ht, rna):
+def _infer_fake(x, cond, lnw, w_scale, b_scale, w_bias, eps_x, eps_cond, ht, rna):
     """y: x's shape and dtype."""
     return torch.empty_like(x)
 
 
 @opaque(fake=_infer_fake, name="adaln_cuda_inference")
-def _infer(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, wc: torch.Tensor, bs: torch.Tensor, eps_x: float, eps_cond: float, ht: int,
-           rna: bool) -> torch.Tensor:
-    """x [M, NX], cond [M, NC] contiguous; ``wc`` / ``bs`` from :func:`pack_weights`."""
+def _infer(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, w_scale: torch.Tensor, b_scale: torch.Tensor, w_bias: torch.Tensor,
+           eps_x: float, eps_cond: float, ht: int, rna: bool) -> torch.Tensor:
+    """x [M, NX], cond [M, NC] contiguous; the projections as parameters, packed here (:func:`packed`), at run time even under
+    ``torch.compile``."""
+    wc, bs = packed(w_scale, b_scale, w_bias, x.dtype)
     e = ext()
     m, nx = x.shape
     y = torch.empty_like(x)
@@ -145,8 +150,7 @@ def adaln_inference(x, cond, lnw, w_scale, b_scale, w_bias, eps_x, eps_cond, *, 
     x2 = x.reshape(-1, nx).contiguous()
     c2 = cond.reshape(-1, nc).contiguous()
     ht = ht or pick_ht_adaln(x2.shape[0], nx, num_sms(x.device), x.dtype is torch.float32)
-    wc, bs = packed(w_scale, b_scale, w_bias, x.dtype)
-    y = _infer(x2, c2, lnw.float().contiguous(), wc, bs, float(eps_x), float(eps_cond), ht, rna)
+    y = _infer(x2, c2, lnw.float().contiguous(), w_scale, b_scale, w_bias, float(eps_x), float(eps_cond), ht, rna)
     return y.reshape(shape)
 
 

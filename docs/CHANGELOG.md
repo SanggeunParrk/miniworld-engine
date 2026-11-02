@@ -8,7 +8,27 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-10-29
+
 ### Fixed
+
+- H100 native autotune (`autotune/native.py`, `native_compile.py`, `cache.py`, `fused_config.py`):
+  - Candidates are timed in the warm CUDA-graph regime (`do_bench_cudagraph`, the measurement records `"regime": "cuda_graph_warm"`).
+    Cold-L2 timing had picked a TriMul L384 config slower in the warm model forward.
+  - The precompile workers see no device, so the arch in an extension's key is pinned to the parent's. They no longer key `arch: cpu`
+    and recompile every candidate serially.
+  - `native_compile.py` is no longer part of the cache's source identity.
+  - The runtime serves a cache measured under another environment or toolchain, and invalidates only on an op-identity change. A key
+    with no entry takes the nearest measured workload of the same tensor form.
+  - The bf16 / fp16 validator compares within the dtype's rounding (a 1-ULP `bwd_residual` difference no longer rejects a candidate).
+- TriMul H100 D384 inference: two `TMN_K1_SET_BF16(384, 384, ...)` configs, so the K1 stage has a kernel at D384 (was `no_kernel`).
+- `torch.compile` over the H100 token DiT / AdaLN / ConditionedTransition inference: `_capture.param_forms` builds directly under
+  Dynamo (a `NameError` inside the traced cache lookup). AdaLN and ConditionedTransition pack their weights inside the opaque op
+  (`capture_reads_eager=True`), so a compiled call no longer re-packs every step.
+- `_capture` caches: eviction counts only the entries not pinned by `static_inputs()` / `static_weights()`, and a pinned entry whose
+  inputs died is unpinned. A long CUDA-graph sampler no longer evicts its own pinned packs.
+- H100 token DiT inference pair-bias cache: keyed on the pair's storage (`StorageWeakRef`), not on the tensor object. A captured sampler
+  replay hands the pair in as a fresh alias each step, and from the second trajectory on the hoisted bias was rebuilt every replay.
 
 - H100 fp32 (TF32) Transition at the token-stream conditioning widths (n = 2, d 384 / 768, 128 - 768 rows; ladder groups `trc_fp32_single_*`, `trc_fp32_pair_D128`): every row is now CUDA < portable < PyTorch. Hand CUDA (`kernels/transition/cuda/fused_generic_sm90a.py`): fp32 training at most d rows and d >= 512 runs cuBLAS TF32 GEMMs over one stacked [Wa; Wb] per step around the hand LayerNorm and two new fp32 SwiGLU kernels (`swiglu_f32`, `swiglu_bwd` fp32), the weight gradients overlapped on the side stream (d768 L128 training 0.119 -> 0.075 ms); fp32 training otherwise makes the step's TF32 weight copies in one prep launch (was one in the forward and one in the backward); fp32 inference rounds the weights once per parameter version inside the launch, so compiled calls and captures reuse it too (`_capture.param_forms(capture_reads_eager=)`), caches the fp16 path's scales the same way, and runs the squeeze as a cuBLAS addmm at up to 512 rows. Portable (Triton): the squeeze splits K at few rows (`_split_k_residual_kernel`), fp32 training keeps the saved expand halves in fp32 at up to 4096 rows (no per-call scale reductions), dx is two GEMMs over the dAB halves at up to 4096 rows (no stacked weight copy), and the H100 autotune caches hold the fp32 token-stream keys of the five kernels the path launches (the Transition Triton kernels had no H100 cache).
 
@@ -24,6 +44,20 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 - H100 ladder: `token_pair_init` inference (TMA table + R rows per CTA), `pool_atoms` (16-byte loads), `smooth_lddt` forward / backward launch geometry and `pair_embed_ca` glue now beat the portable kernels in every measured row; the portable `pair_embed_adaln` backward no longer aliases its outputs (training ladder rows measure). See `docs/records/pair_ops_ladder_20261026.md`.
 
 ### Added
+
+- H100 token DiT and bias-only DiT at a 256-wide pair (Protenix-v2's diffusion pair, `d_pair` 256), inference and training, bf16 and
+  fp32 / TF32. Before, any pair width but 128 ran the composed path (cuBLAS projections + PyTorch statements).
+  - `token_dit_rows.cu` / `token_dit_train_rows.cu` take the pair width from the weights. The bias hoist and the training pair kernels
+    run 128 or 256 (`PAIR_WIDTHS_H100`).
+  - The bias-only family's hoist, f32 and training row kernels do the same.
+  - Pair-256 CUDA time equals pair 128 (ladder groups `dit_p256_*`, `bodit_p256_*`, `bodit_psb_p256*`).
+  - New registry row: `augmented_attention`, `d_single=768;d_cond=384;d_pair=256;n_head=16` (Protenix-v2 diffusion token DiT).
+  - Tests: `tests/gpu/sm90/test_token_dit_pair256_gpu.py`, `tests/gpu/sm90/test_bias_only_dit_pair256_gpu.py`.
+  - The kernel bundle's coverage runs the pair-256 diffusion and bias-only cases.
+- H100 `sampler_ops` CUDA calls are opaque ops, so a compiled sampler no longer breaks its graph at them.
+- The 5I28 benchmark (`benchmarks/5i28.md`): the model-level speed protocol against the Anthropic kits. Its inputs are the real MSA
+  and 4 distinct real templates on both sides, and its time is the warm forward. Every model, n = 1 - 16:
+  `docs/records/5i28_benchmark_all_models_20261029.md`.
 
 - H100 token / atom DiT inference with several trunk_seeds in one call (trunk_seed x diffusion_seed batching, e.g. 5 x 5): the
   sm_90a attention core takes `nbg` distinct hoisted biases (one per trunk_seed, each its own pair; sample s reads bias s % nbg;

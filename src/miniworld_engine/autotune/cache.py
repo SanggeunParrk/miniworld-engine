@@ -614,6 +614,53 @@ def runtime_candidates(data, entry_key, implementation=None):
     return list(candidates.values())
 
 
+_NEAREST: dict = {}
+
+
+def _native_form(bucket: str):
+    """A native ``tensor_key`` as (form, log extents): the form is what a measurement must share to stand in for another
+    workload -- tensor count, each tensor's rank, last extent and dtype, and ``extra`` -- and the sizes are what may
+    differ (batch, length, rows). None for a key that is not a native tensor key."""
+    try:
+        parts, extra = ast.literal_eval(bucket)
+    except (ValueError, SyntaxError, TypeError):
+        return None
+    form, sizes = [], []
+    for part in parts:
+        if part is None:
+            form.append(None)
+            continue
+        shape, _, dt = part
+        form.append((len(shape), shape[-1] if shape else None, dt))
+        sizes.extend(math.log(max(1, n)) for n in shape)
+    return (tuple(form), repr(extra)), sizes
+
+
+def _nearest_native_key(data: dict, dtype: str, bucket: str) -> str | None:
+    """The measured entry key closest to an unmeasured native workload of the same form: a protein of 137 tokens, or
+    four templates stacked in one call, is served by the measured 128-token / single-sample winner rather than by
+    the declared default. Closest = least summed |log ratio| over every extent, so a batch-only difference keeps the
+    length. Memoised per loaded cache."""
+    memo = _NEAREST.get((id(data), dtype, bucket))
+    if memo is not None and memo[0] is data:
+        return memo[1]
+    want = _native_form(bucket)
+    best, best_d = None, math.inf
+    if want is not None:
+        prefix = f"{dtype}|"
+        for key in set(data.get("entries", {})) | set(data.get("measurements", {})):
+            if not key.startswith(prefix):
+                continue
+            have = _native_form(key[len(prefix):])
+            if have is None or have[0] != want[0]:
+                continue
+            d = sum(abs(a - b) for a, b in zip(have[1], want[1]))
+            if d < best_d:
+                best, best_d = key, d
+    _NEAREST[(id(data), dtype, bucket)] = (data, best)
+    return best
+
+
 def measurement_mismatch(op: str, data: dict, op_id: str | None = None) -> str:
     """Validity shared by planning and runtime; a grid edit preserves old measurements."""
     if _stored_rev(data) != build_rev(op):
@@ -1453,9 +1500,11 @@ def select_config(
         _warn_once(op, gk, dtype, "tuned autotune cache is STALE (build revision changed)",
                    fallback="the declared native default")
         return None
-    if op_id and (data.get("op_identity") != op_id
-                  or data.get("env_identity") != env_identity()):
-        _warn_once(op, gk, dtype, "native cache source/environment changed",
+    # A native cache measured under another toolchain (the cu129 wheel's cache read by the cu130 wheel, another triton
+    # or ptxas) is still served: every candidate is a validated kernel of this source, and the declared default the
+    # alternative falls back to was itself chosen on some other toolchain. Changed SOURCE is the one invalidation.
+    if op_id and data.get("op_identity") != op_id:
+        _warn_once(op, gk, dtype, "native cache source changed",
                    fallback="the declared native default")
         return None
     if not op_id and candidates is not None and not grid_compatible(data, candidates):
@@ -1467,6 +1516,9 @@ def select_config(
         return None
     try:
         entry = runtime_candidates(data, f"{dtype}|{bucket}")
+        if op_id and (not isinstance(entry, list) or not entry):
+            nearest = _nearest_native_key(data, dtype, bucket)
+            entry = runtime_candidates(data, nearest) if nearest else None
     except (AttributeError, KeyError, TypeError, ValueError):
         entry = None  # partial/corrupt entry or measurement maps are a cache miss
     if not isinstance(entry, list) or not entry:

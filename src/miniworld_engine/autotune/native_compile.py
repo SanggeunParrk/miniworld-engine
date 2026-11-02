@@ -93,9 +93,13 @@ def _run_one(task, directory, timeout, env):
 
 def run_tasks(tasks, *, jobs, directory, timeout=300):
     """Run distinct tasks with bounded CPU concurrency and per-candidate diagnostics."""
+    from miniworld_engine.kernels._codegraph import target_arch
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES="",
+    # The workers see no device, so the arch in an extension's key is pinned to this process's.
+    # Unpinned it was "cpu": every candidate was built under a key the measuring process never
+    # looks up, and compiled a second time, serially, inside the unit.
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="", MINIWORLD_ENGINE_TARGET_ARCH=target_arch(),
                OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MAX_JOBS="1")
     unique = {task_id(task): task for task in tasks}
     try:

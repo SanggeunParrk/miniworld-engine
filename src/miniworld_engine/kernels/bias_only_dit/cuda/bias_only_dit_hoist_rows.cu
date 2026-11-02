@@ -39,60 +39,83 @@ namespace {
 using namespace tdr;
 using bf = __nv_bfloat16;
 
-constexpr int CW = 128;         // the pair width: a float4 per lane
 constexpr int WPB = 8;          // warps per block
 constexpr int RPW = 2;          // rows per warp
 
-// Y's row: y itself (fp32, 128 columns) or [bf16(y) | bf16(y - bf16(y))] (bf16, 256 columns)
-template <typename YT> struct YOp;
-template <> struct YOp<float> {
+// Y's row: y itself (fp32, CW columns) or [bf16(y) | bf16(y - bf16(y))] (bf16, 2 CW columns); CW the pair width (128 or 256: CW / 128
+// float4 per lane, chunk c at columns 128 c + 4 lane)
+template <typename YT, int CW> struct YOp;
+template <int CW> struct YOp<float, CW> {
   static constexpr int COLS = CW;
-  static __device__ __forceinline__ void store(float* row, int lane, float4 y) { V4<float>::store(row + lane * 4, y); }
+  static __device__ __forceinline__ void store(float* row, int col, float4 y) { V4<float>::store(row + col, y); }
 };
-template <> struct YOp<bf> {
+template <int CW> struct YOp<bf, CW> {
   static constexpr int COLS = 2 * CW;
   static __device__ __forceinline__ float rnd(float v) { return __bfloat162float(__float2bfloat16_rn(v)); }
-  static __device__ __forceinline__ void store(bf* row, int lane, float4 y) {
+  static __device__ __forceinline__ void store(bf* row, int col, float4 y) {
     const float4 hi = make_float4(rnd(y.x), rnd(y.y), rnd(y.z), rnd(y.w));     // exact in bf16: the store below keeps it
-    V4<bf>::store(row + lane * 4, hi);
-    V4<bf>::store(row + CW + lane * 4, make_float4(y.x - hi.x, y.y - hi.y, y.z - hi.z, y.w - hi.w));   // y - hi exact in fp32
+    V4<bf>::store(row + col, hi);
+    V4<bf>::store(row + CW + col, make_float4(y.x - hi.x, y.y - hi.y, y.z - hi.z, y.w - hi.w));   // y - hi exact in fp32
   }
 };
 
-template <typename XT, typename OT, typename YT>
+template <int CW, typename XT, typename OT, typename YT>
 __global__ void __launch_bounds__(WPB * 32) ln0_bwd_rows_kernel(const XT* __restrict__ X, const float* __restrict__ DY,
     OT* __restrict__ DX, YT* __restrict__ Y, long R, float eps) {
+  static_assert(CW == 128 || CW == 256, "pair width 128 or 256");
+  constexpr int K = CW / 128;
   const long row0 = ((long)blockIdx.x * WPB + threadIdx.x / 32) * RPW;
   const int lane = threadIdx.x % 32;
-  float4 x[RPW], d[RPW];
+  float4 x[RPW][K], d[RPW][K];
 #pragma unroll
   for (int k = 0; k < RPW; ++k) {
     const long r = row0 + k;
-    if (r < R) {
-      x[k] = V4<XT>::load(X + r * CW + lane * 4);
-      d[k] = V4<float>::load(DY + r * CW + lane * 4);
-    } else {
-      x[k] = make_float4(0.f, 0.f, 0.f, 0.f);
-      d[k] = make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll
+    for (int c = 0; c < K; ++c) {
+      if (r < R) {
+        x[k][c] = V4<XT>::load(X + r * CW + c * 128 + lane * 4);
+        d[k][c] = V4<float>::load(DY + r * CW + c * 128 + lane * 4);
+      } else {
+        x[k][c] = make_float4(0.f, 0.f, 0.f, 0.f);
+        d[k][c] = make_float4(0.f, 0.f, 0.f, 0.f);
+      }
     }
   }
 #pragma unroll
   for (int k = 0; k < RPW; ++k) {
-    // the forward's statistics (layernorm_rows_kernel<128>), then y
-    float4 y = x[k];
-    const float mean = warp_sum(y.x + y.y + y.z + y.w) / 128.f;
-    y.x -= mean; y.y -= mean; y.z -= mean; y.w -= mean;
-    const float rstd = rsqrtf(warp_sum(y.x * y.x + y.y * y.y + y.z * y.z + y.w * y.w) / 128.f + eps);
-    y.x *= rstd; y.y *= rstd; y.z *= rstd; y.w *= rstd;
-    const float4 g = d[k];
-    const float m1 = warp_sum(g.x + g.y + g.z + g.w) / 128.f;                        // mean(dy)
-    const float m2 = warp_sum(g.x * y.x + g.y * y.y + g.z * y.z + g.w * y.w) / 128.f;  // mean(dy y)
-    const float4 o = make_float4(rstd * (g.x - m1 - y.x * m2), rstd * (g.y - m1 - y.y * m2), rstd * (g.z - m1 - y.z * m2),
-                                 rstd * (g.w - m1 - y.w * m2));
+    // the forward's statistics (layernorm_rows_kernel<CW>: the same sums in the same order), then y
+    float4 y[K];
+    float s = 0.f;
+#pragma unroll
+    for (int c = 0; c < K; ++c) { y[c] = x[k][c]; s += y[c].x + y[c].y + y[c].z + y[c].w; }
+    const float mean = warp_sum(s) / (float)CW;
+    float q = 0.f;
+#pragma unroll
+    for (int c = 0; c < K; ++c) {
+      y[c].x -= mean; y[c].y -= mean; y[c].z -= mean; y[c].w -= mean;
+      q += y[c].x * y[c].x + y[c].y * y[c].y + y[c].z * y[c].z + y[c].w * y[c].w;
+    }
+    const float rstd = rsqrtf(warp_sum(q) / (float)CW + eps);
+    float s1 = 0.f, s2 = 0.f;
+#pragma unroll
+    for (int c = 0; c < K; ++c) {
+      y[c].x *= rstd; y[c].y *= rstd; y[c].z *= rstd; y[c].w *= rstd;
+      const float4 g = d[k][c];
+      s1 += g.x + g.y + g.z + g.w;
+      s2 += g.x * y[c].x + g.y * y[c].y + g.z * y[c].z + g.w * y[c].w;
+    }
+    const float m1 = warp_sum(s1) / (float)CW;                                       // mean(dy)
+    const float m2 = warp_sum(s2) / (float)CW;                                       // mean(dy y)
     const long r = row0 + k;
-    if (r < R) {
-      V4<OT>::store(DX + r * CW + lane * 4, o);
-      YOp<YT>::store(Y + r * YOp<YT>::COLS, lane, y);
+#pragma unroll
+    for (int c = 0; c < K; ++c) {
+      const float4 g = d[k][c];
+      const float4 o = make_float4(rstd * (g.x - m1 - y[c].x * m2), rstd * (g.y - m1 - y[c].y * m2), rstd * (g.z - m1 - y[c].z * m2),
+                                   rstd * (g.w - m1 - y[c].w * m2));
+      if (r < R) {
+        V4<OT>::store(DX + r * CW + c * 128 + lane * 4, o);
+        YOp<YT, CW>::store(Y + r * YOp<YT, CW>::COLS, c * 128 + lane * 4, y[c]);
+      }
     }
   }
 }
@@ -111,10 +134,11 @@ void rows(const at::Tensor& t, const char* name, int64_t R, int64_t cols) {
   TORCH_CHECK(reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0, name, ": 16-byte aligned");
 }
 
-// dx = LN0 backward of dy at x (no affine) and Y = the dW' GEMM operand of y = LN0(x): x, dx bf16 or fp32 [R, 128], dy fp32 [R, 128],
-// y bf16 [R, 256] (hi | lo) or fp32 [R, 128]; all contiguous
+// dx = LN0 backward of dy at x (no affine) and Y = the dW' GEMM operand of y = LN0(x): x, dx bf16 or fp32 [R, C], dy fp32 [R, C],
+// y bf16 [R, 2 C] (hi | lo) or fp32 [R, C]; all contiguous; C the pair width, 128 or 256
 void ln0_bwd_rows(at::Tensor x, at::Tensor dy, at::Tensor dx, at::Tensor y, double eps) {
-  const int64_t R = x.size(0);
+  const int64_t R = x.size(0), CW = x.dim() == 2 ? x.size(1) : 0;
+  TORCH_CHECK(CW == 128 || CW == 256, "ln0_bwd_rows: rows of 128 or 256 channels");
   rows(x, "x", R, CW); rows(dy, "dy", R, CW); rows(dx, "dx", R, CW);
   rows(y, "y", R, y.scalar_type() == at::kBFloat16 ? 2 * CW : CW);
   TORCH_CHECK(dy.scalar_type() == at::kFloat, "ln0_bwd_rows: dy fp32");
@@ -125,7 +149,8 @@ void ln0_bwd_rows(at::Tensor x, at::Tensor dy, at::Tensor dx, at::Tensor y, doub
   HR_DISPATCH(x.scalar_type(), XT, [&] {
     HR_DISPATCH(dx.scalar_type(), OT, [&] {
       HR_DISPATCH(y.scalar_type(), YT, [&] {
-        ln0_bwd_rows_kernel<XT, OT, YT><<<(unsigned)((R + per - 1) / per), WPB * 32, 0, at::cuda::getCurrentCUDAStream()>>>(
+        auto k = CW == 128 ? ln0_bwd_rows_kernel<128, XT, OT, YT> : ln0_bwd_rows_kernel<256, XT, OT, YT>;
+        k<<<(unsigned)((R + per - 1) / per), WPB * 32, 0, at::cuda::getCurrentCUDAStream()>>>(
             reinterpret_cast<const XT*>(x.data_ptr()), reinterpret_cast<const float*>(dy.data_ptr()),
             reinterpret_cast<OT*>(dx.data_ptr()), reinterpret_cast<YT*>(y.data_ptr()), (long)R, (float)eps);
       });
@@ -142,9 +167,11 @@ std::vector<std::tuple<std::string, int64_t, int64_t>> func_attrs() {
     TORCH_CHECK(cudaFuncGetAttributes(&a, f) == cudaSuccess, "cudaFuncGetAttributes ", n);
     out.emplace_back(n, (int64_t)a.numRegs, (int64_t)a.localSizeBytes);
   };
-#define FA(XT, OT, YT) add("ln0_bwd_rows_kernel<" #XT ", " #OT ", " #YT ">", (const void*)ln0_bwd_rows_kernel<XT, OT, YT>)
-  FA(bf, bf, bf); FA(bf, float, bf); FA(float, bf, bf); FA(float, float, bf);
-  FA(bf, bf, float); FA(bf, float, float); FA(float, bf, float); FA(float, float, float);
+#define FA(CW, XT, OT, YT) add("ln0_bwd_rows_kernel<" #CW ", " #XT ", " #OT ", " #YT ">", (const void*)ln0_bwd_rows_kernel<CW, XT, OT, YT>)
+  FA(128, bf, bf, bf); FA(128, bf, float, bf); FA(128, float, bf, bf); FA(128, float, float, bf);
+  FA(128, bf, bf, float); FA(128, bf, float, float); FA(128, float, bf, float); FA(128, float, float, float);
+  FA(256, bf, bf, bf); FA(256, bf, float, bf); FA(256, float, bf, bf); FA(256, float, float, bf);
+  FA(256, bf, bf, float); FA(256, bf, float, float); FA(256, float, bf, float); FA(256, float, float, float);
 #undef FA
   return out;
 }

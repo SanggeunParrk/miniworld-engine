@@ -69,7 +69,7 @@ def _tf32():
 
 
 def _rows():
-    """The token DiT's CUDA row kernels: the pair LayerNorm (C = 128) of the hoist."""
+    """The token DiT's CUDA row kernels: the pair LayerNorm (C = 128 or 256) of the hoist."""
     from miniworld_engine.kernels.conditioned_transition import cuda as rows
 
     return rows
@@ -177,7 +177,10 @@ class FusedBiasOnlyDiT:
             R32.softmax_rows_cuda(P.view(-1, L), P.view(-1, L), m)
             return P
         zh = torch.empty(L * L, self.dp, device=pair.device, dtype=self.dtype)
-        _rows()._ext().layernorm128_rows(z2d, zh, EPS, False)
+        if self.dp == 128:
+            _rows()._ext().layernorm128_rows(z2d, zh, EPS, False)
+        else:  # the same row kernel template at 256 channels (layernorm_rows_kernel<256>)
+            _rows()._ext().layernorm_rows_cuda(z2d, zh, EPS)
         P = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
         torch.mm(self.pw, zh.t(), out=P.view(self.nb * self.h, L * L))
         C.softmax_rows(P.view(-1, L), P.view(-1, L), m)

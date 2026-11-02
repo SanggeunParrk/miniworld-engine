@@ -32,8 +32,10 @@ bf16 (pair bf16; the weights in any dtype, folded in fp32 and rounded to bf16 as
 accumulation, the bias in bf16, d LN0 and dW' in fp32, d pair in the pair's dtype. fp32 (pair and weights fp32, no autocast): the
 same structure, the GEMMs on TF32 tensor cores (``tf32_gemms``), every tensor fp32.
 
-``serves()`` is the gate (B200 or H100, an engine implementation, pair [1, L, L, 128] bf16 or fp32); anything else takes the PyTorch fold of
-``modules.bias_only_dit.hoist``.
+``serves()`` is the gate (B200 or H100, an engine implementation, pair [1, L, L, C] bf16 or fp32, C = 128 or 256 on H100, 128 on B200);
+anything else takes the PyTorch fold of ``modules.bias_only_dit.hoist``. At C = 256 (the widths written 128 above) every kernel is the same
+template at the other width, except the multi-block bf16 backward (``bo_hoist_bwd.cu``, 128 only): more than one block of 16 heads takes the
+two GEMMs around ``ln0_bwd_rows`` there.
 """
 
 from __future__ import annotations
@@ -46,6 +48,8 @@ from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
 DP = 128
+#: the pair widths of the fused hoist: 128 everywhere, 256 on H100 (the sm_90 kernels are templates on the width)
+DPS = (128, 256)
 BF = torch.bfloat16
 F32 = torch.float32
 #: the attribute of each hoisted bias that names its slot of the shared gradient buffer: (``_Sink``, block index)
@@ -54,8 +58,8 @@ SINK_ATTR = "_bias_only_dit_hoist_sink"
 
 def serves(implementation, attns, pair, per_sample=False) -> bool:
     """The fused hoist serves ``pair`` and the attention modules ``attns`` (eps / head count / no offset checked by the caller).
-    ``per_sample``: ``pair`` is [A, L, L, 128] with A > 1 (a pair of its own per sample, the samples in the batch axis) instead of
-    [1, L, L, 128]."""
+    ``per_sample``: ``pair`` is [A, L, L, C] with A > 1 (a pair of its own per sample, the samples in the batch axis) instead of
+    [1, L, L, C]; C = 128, or 256 on H100."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
     if implementation != ImplementationType.MINIWORLD:
@@ -64,17 +68,19 @@ def serves(implementation, attns, pair, per_sample=False) -> bool:
         return False
     if not pair.is_cuda or torch.cuda.get_device_capability(pair.device) not in ((10, 0), (9, 0)):
         return False
+    dp = pair.shape[-1]
     if (
         pair.ndim != 4
         or (pair.shape[0] < 2 if per_sample else pair.shape[0] != 1)
         or pair.shape[1] != pair.shape[2]
-        or pair.shape[-1] != DP
+        or dp not in DPS
+        or (dp != DP and torch.cuda.get_device_capability(pair.device) != (9, 0))
         or pair.shape[1] == 0
     ):
         return False
     ws = [p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)]
     if any(
-        p is None or not p.is_cuda or p.device != pair.device or p.shape[-1] != DP
+        p is None or not p.is_cuda or p.device != pair.device or p.shape[-1] != dp
         for p in ws
     ):
         return False
@@ -138,11 +144,12 @@ def _hoist_bwd(
     if HK.fused_bwd_served(pair2d, wf):
         dpair, dwf = HK.hoist_bwd_fused(pair2d, wf, dball, eps)  # one pass over the pair (bo_hoist_bwd.cu)
         return [dpair, dwf]
-    K = HK.operand_cols(pair2d.dtype)
+    dp = pair2d.shape[-1]
+    K = HK.operand_cols(pair2d.dtype, dp)
     with _gemms(pair2d.dtype):
         dln = (
             torch.mm(dball.t(), wf) if f32 else torch.mm(dball.t(), wf, out_dtype=F32)
-        )  # [R, 128] fp32
+        )  # [R, dp] fp32
         dpair = torch.empty_like(pair2d)
         y = torch.empty(R, K, device=pair2d.device, dtype=pair2d.dtype)
         HK.ln0_bwd_rows(pair2d, dln, dpair, y, eps)
@@ -158,7 +165,7 @@ def _hoist_bwd(
             )  # [N, K] fp32
         else:
             p = torch.mm(dball, y) if f32 else torch.mm(dball, y, out_dtype=F32)
-        dwf = p if K == DP else p[:, :DP] + p[:, DP:]  # hi + lo
+        dwf = p if K == dp else p[:, :dp] + p[:, dp:]  # hi + lo
     return [dpair, dwf]
 
 
@@ -313,7 +320,7 @@ def pair_bias_all_infer(attns, pair) -> tuple[torch.Tensor, ...]:
     ONE buffer), from one pass over the pair for a single block (``_hoist_fwd_infer``). Call ``serves(..., per_sample=True)`` first."""
     nb, H, A, L = len(attns), attns[0].to_bias.weight.shape[0], pair.shape[0], pair.shape[1]
     _, _, wf = _fold([p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)], pair.dtype)
-    ball = _hoist_fwd_infer(pair.contiguous().view(A * L * L, DP), wf, float(attns[0].ln_pair.eps))
+    ball = _hoist_fwd_infer(pair.contiguous().view(A * L * L, pair.shape[-1]), wf, float(attns[0].ln_pair.eps))
     return tuple(ball[i * H : (i + 1) * H].view(H, A, L, L).permute(1, 0, 2, 3) for i in range(nb))
 
 

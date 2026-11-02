@@ -1,5 +1,7 @@
 # Benchmarking
 
+Model-level speed (FoldForge on this engine against the Anthropic kits) is [the 5I28 benchmark](5i28.md).
+
 ## Directory Boundary
 
 `benchmarks/` has three meanings:

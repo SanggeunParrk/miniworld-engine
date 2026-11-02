@@ -4,7 +4,7 @@
 //   resgate_adaln_rows  x += sigmoid(gl[tok]) * y  (fp32, in place); then optionally out = LN(x) * sigmoid(ms) + mb
 //   gate_rows           out = o * sigmoid(g)
 //   swiglu_rows         out = silu(a) * b,  ab = [a | b]
-//   layernorm128_rows   out = LN(z), C = 128, no affine (the pair rows of the hoisted pair bias; cuBLAS projects them)
+//   layernorm128_rows   out = LN(z), C = 128 or 256, no affine (the pair rows of the hoisted pair bias; cuBLAS projects them)
 //   qknorm_rows         q, k (columns 0-767, 768-1535 of a row) <- RMSNorm per 48-wide head * weight, in place (QK-norm)
 //   adaln_in_rows       x = xin (the step's input, any dtype, into the fp32 residual) and out = AdaLN(x), one pass
 //   resgate_out_rows    out = x + sigmoid(gl[tok]) * y in the output dtype (the block's last residual, no fp32 write-back)
@@ -377,12 +377,15 @@ void swiglu_rows(at::Tensor ab, at::Tensor out) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// the pair rows of the hoisted bias, 128 (the name's) or 256 columns (Protenix-v2's diffusion pair); ``perm``: rows written in the
+// TF32 core's key order
 void layernorm128_rows(at::Tensor z, at::Tensor out, double eps, bool perm) {
-  const int64_t R = z.size(0);
-  TORCH_CHECK(z.size(1) == 128 && out.is_contiguous() && out.size(1) == 128 && out.size(0) == R, "layernorm128_rows");
-  check_rows(z, "z", 128);
+  const int64_t R = z.size(0), C = z.size(1);
+  TORCH_CHECK((C == 128 || C == 256) && out.is_contiguous() && out.size(1) == C && out.size(0) == R, "layernorm128_rows: [R, 128 | 256]");
+  check_rows(z, "z", C);
   const at::cuda::CUDAGuard g(z.device());
-  launch_layernorm_rows<128>(z, out, eps, perm);
+  if (C == 128) launch_layernorm_rows<128>(z, out, eps, perm);
+  else launch_layernorm_rows<256>(z, out, eps, perm);
 }
 
 // d: the model width (q = columns 0 .. d - 1, k = d .. 2d - 1); the head dim is the weights' length (d / heads)
@@ -432,7 +435,14 @@ struct TokenPack {
   const void* src[25]; bool fp32[25];
   void* dst[13]; int size[13]; int blocks[13];
   int D, DC, H, HH; float qs; bool qk; bool out_fp32;
+  int DP;   // pair width: the to_bias / ln_pair columns (128; Protenix-v2's diffusion pair, 256)
 };
+// the pair width of a token DiT leaf list: ln_pair.weight (leaf 12) has DP entries, to_bias.weight (leaf 13) is [heads, DP]
+static int pair_width(const std::vector<at::Tensor>& weights) {
+  const int DP=weights[12].numel();
+  TORCH_CHECK((DP==128 || DP==256) && weights[13].numel()%DP==0,"token DiT pair width: 128 or 256");
+  return DP;
+}
 __device__ float pack_read(const TokenPack& p,int j,int i) {
   return p.fp32[j] ? static_cast<const float*>(p.src[j])[i]
                   : __bfloat162float(static_cast<const __nv_bfloat16*>(p.src[j])[i]);
@@ -456,7 +466,7 @@ __global__ void token_pack_kernel(TokenPack p) {
     } else if(out==1) {int s=i/D;if(s==0 || s==2)v=pack_read(p,s==0?8:16,i%D);}
     else if(out==2) {v=pack_read(p,i/(D*DC)==0?10:18,i%(D*DC));}
     else if(out==3) {v=pack_read(p,i/D==0?11:19,i%D);}
-    else if(out==4) {v=pack_read(p,13,i)*pack_read(p,12,i%128)*1.4426950408889634f;}
+    else if(out==4) {v=pack_read(p,13,i)*pack_read(p,12,i%p.DP)*1.4426950408889634f;}
     else if(out==5) {
       const int s=i/(D*D);const int wi=s==0?0:s==1?2:s==2?3:4;
       v=pack_read(p,wi,i%(D*D));if(s==0 && !p.qk)v*=p.qs;
@@ -478,16 +488,17 @@ std::vector<at::Tensor> token_pack(std::vector<at::Tensor> weights,int64_t heads
   TORCH_CHECK(weights.size()==(qk?25:23),"token DiT leaf count");
   const at::cuda::CUDAGuard guard(weights[0].device());
   const int D=weights[0].size(1),DC=weights[6].numel(),HH=weights[20].size(0);
+  const int DP=pair_width(weights);
   TORCH_CHECK(((D==768 && (heads==12 || heads==16 || heads==24)) || (D==1024 && heads==16)) && DC==384 && HH%128==0,
               "Hopper token pack requires 768 x (12, 16, 24 heads) or 1024 x 16 heads, cond 384, hidden multiple of 128");
-  TokenPack p{};p.D=D;p.DC=DC;p.H=heads;p.HH=HH;p.qs=qs;p.qk=qk;
+  TokenPack p{};p.D=D;p.DC=DC;p.H=heads;p.HH=HH;p.qs=qs;p.qk=qk;p.DP=DP;
   for(int j=0;j<(int)weights.size();++j) {
     const auto& t=weights[j];
     TORCH_CHECK(t.device()==weights[0].device() && t.is_contiguous()
       && (t.scalar_type()==at::kFloat || t.scalar_type()==at::kBFloat16),"token pack leaf dtype/device/layout");
     p.src[j]=t.data_ptr();p.fp32[j]=t.scalar_type()==at::kFloat;
   }
-  std::vector<std::vector<int64_t>> shapes={{4*D,DC},{4*D},{2*D,DC},{2*D},{heads,128},{4*D,D},{4*D},{D,D},{0},{D,HH},{qk?D/heads:0},{qk?D/heads:0},{2*HH,D}};
+  std::vector<std::vector<int64_t>> shapes={{4*D,DC},{4*D},{2*D,DC},{2*D},{heads,DP},{4*D,D},{4*D},{D,D},{0},{D,HH},{qk?D/heads:0},{qk?D/heads:0},{2*HH,D}};
   std::vector<at::Tensor> outputs;int blocks=0;
   for(int j=0;j<13;++j) {
     if((j==7 && !p.fp32[5]) || (j==9 && !p.fp32[22])) {
@@ -532,7 +543,7 @@ __global__ void token_pack_vector_kernel(TokenPack p) {
     if(s==0||s==2)v=pack_read4(p,s==0?8:16,i%D);
   } else if(out==2)v=pack_read4(p,i/(D*DC)==0?10:18,i%(D*DC));
   else if(out==3)v=pack_read4(p,i/D==0?11:19,i%D);
-  else if(out==4)v=pack_scale4(pack_mul4(pack_read4(p,13,i),pack_read4(p,12,i%128)),1.4426950408889634f);
+  else if(out==4)v=pack_scale4(pack_mul4(pack_read4(p,13,i),pack_read4(p,12,i%p.DP)),1.4426950408889634f);
   else if(out==5) {
     const int s=i/(D*D),w=s==0?0:s==1?2:s==2?(p.out_fp32?4:3):(p.out_fp32?3:4);
     v=pack_read4(p,w,i%(D*D));if(s==0&&!p.qk)v=pack_scale4(v,p.qs);
@@ -554,16 +565,17 @@ std::vector<at::Tensor> token_pack_vector(std::vector<at::Tensor> weights,int64_
   TORCH_CHECK(weights.size()==(qk?25:23),"token DiT leaf count");
   const at::cuda::CUDAGuard guard(weights[0].device());
   const int D=weights[0].size(1),DC=weights[6].numel(),HH=weights[20].size(0);
+  const int DP=pair_width(weights);
   TORCH_CHECK(((D==768 && (heads==12 || heads==16 || heads==24)) || (D==1024 && heads==16)) && DC==384 && HH%128==0,
               "Hopper token pack requires 768 x (12, 16, 24 heads) or 1024 x 16 heads, cond 384, hidden multiple of 128");
-  TokenPack p{};p.D=D;p.DC=DC;p.H=heads;p.HH=HH;p.qs=qs;p.qk=qk;p.out_fp32=out_fp32;
+  TokenPack p{};p.D=D;p.DC=DC;p.H=heads;p.HH=HH;p.qs=qs;p.qk=qk;p.out_fp32=out_fp32;p.DP=DP;
   for(int j=0;j<(int)weights.size();++j) {
     const auto& t=weights[j];
     TORCH_CHECK(t.device()==weights[0].device() && t.is_contiguous()
       && (t.scalar_type()==at::kFloat || t.scalar_type()==at::kBFloat16),"token pack leaf dtype/device/layout");
     p.src[j]=t.data_ptr();p.fp32[j]=t.scalar_type()==at::kFloat;
   }
-  std::vector<std::vector<int64_t>> shapes={{4*D,DC},{4*D},{2*D,DC},{2*D},{heads,128},{4*D,D},{4*D},{D,D},{out_fp32?2*HH:0,D},{D,HH},{qk?D/heads:0},{qk?D/heads:0},{out_fp32?0:2*HH,D}};
+  std::vector<std::vector<int64_t>> shapes={{4*D,DC},{4*D},{2*D,DC},{2*D},{heads,DP},{4*D,D},{4*D},{D,D},{out_fp32?2*HH:0,D},{D,HH},{qk?D/heads:0},{qk?D/heads:0},{out_fp32?0:2*HH,D}};
   std::vector<at::Tensor> outputs;int blocks=0;
   for(int j=0;j<13;++j) {
     if((j==7 && p.fp32[5]==out_fp32) || (j==9 && p.fp32[22]==out_fp32)) {
@@ -587,7 +599,8 @@ std::vector<at::Tensor> token_alloc90(std::vector<at::Tensor> weights,int64_t he
  const at::cuda::CUDAGuard guard(weights[0].device());
  const int D=weights[0].size(1),DC=384,HH=weights[20].size(0);
  TORCH_CHECK(D==768||(D==1024&&heads==16),"native inference pack width");
- std::vector<std::vector<int64_t>> shapes={{4*D,DC},{4*D},{2*D,DC},{2*D},{heads,128},{4*D,D},{4*D},{D,D},
+ const int DP=pair_width(weights);
+ std::vector<std::vector<int64_t>> shapes={{4*D,DC},{4*D},{2*D,DC},{2*D},{heads,DP},{4*D,D},{4*D},{D,D},
   {fp32?2*HH:0,D},{D,HH},{qk?D/heads:0},{qk?D/heads:0},{fp32?0:2*HH,D}};
  std::vector<at::Tensor> out;
  for(int o=0;o<13;++o){
@@ -600,7 +613,7 @@ std::vector<at::Tensor> token_alloc90(std::vector<at::Tensor> weights,int64_t he
 void token_stage90(std::vector<at::Tensor> weights,std::vector<at::Tensor> out,int64_t heads,bool qk,double qs,bool fp32,int begin,int end) {
  TORCH_CHECK(out.size()==13&&weights.size()==(qk?25:23)&&0<=begin&&begin<end&&end<=13,"native inference pack stage");
  const at::cuda::CUDAGuard guard(weights[0].device());
- TokenPack p{};p.D=weights[0].size(1);p.DC=384;p.H=heads;p.HH=weights[20].size(0);p.qs=qs;p.qk=qk;p.out_fp32=fp32;
+ TokenPack p{};p.D=weights[0].size(1);p.DC=384;p.H=heads;p.HH=weights[20].size(0);p.qs=qs;p.qk=qk;p.out_fp32=fp32;p.DP=pair_width(weights);
  TORCH_CHECK(p.D==768||(p.D==1024&&heads==16),"native inference pack width");
  for(int j=0;j<(int)weights.size();++j){
   TORCH_CHECK(weights[j].device()==weights[0].device()&&weights[j].is_contiguous()

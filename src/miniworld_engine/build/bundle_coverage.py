@@ -101,20 +101,21 @@ def cases() -> list[dict]:
                     for b in ((1, BATCHED) if length in (384, 768) else (1,)):
                         out.append({"kind": "pairformer", "L": length, "train": train, "dtype": prec, "bidir": bidir,  # noqa: PERF401
                                     "batch": b, "heavy": length >= HEAVY_TOKENS})
+                # d_pair 256: Protenix-v2's diffusion pair (the 256-wide bias hoist and training pair kernels).
                 for opts in ({}, {"hoist_pair_bias": True}, {"hoist_pair_bias": True, "attention_core_dtype": "bf16_sm90"},
-                             {"use_qk_norm": True}):
+                             {"use_qk_norm": True}, {"d_pair": 256}):
                     for b in ((1, BATCHED) if length in (384, 768) else (1,)):
                         out.append({"kind": "diffusion", "L": length, "train": train, "dtype": prec, "options": opts,  # noqa: PERF401
                                     "samples": 48 if train else 5, "batch": b, "heavy": length >= HEAVY_TOKENS})
                 # The bias-only token DiT: one pair shared by the samples, or a pair of its own per sample (training
-                # block_psb); masked or not; trained stacks also from one hoisted pair_bias_all.
-                for d_cond in (384, 768):
+                # block_psb); masked or not; trained stacks also from one hoisted pair_bias_all; pair 128 and 256 wide.
+                for d_cond, d_pair in ((384, 128), (768, 128), (384, 256), (768, 256)):
                     for pair in ("shared", "per_sample"):
                         if pair == "per_sample" and length > TRAIN_TOKENS[-1]:
                             continue
                         for masked, hoist in ((False, False), (True, False), *(((True, True),) if train else ())):
                             out.append({"kind": "bias_only_dit", "L": length, "train": train, "dtype": prec,  # noqa: PERF401
-                                        "d_cond": d_cond, "pair": pair, "masked": masked, "hoist": hoist,
+                                        "d_cond": d_cond, "d_pair": d_pair, "pair": pair, "masked": masked, "hoist": hoist,
                                         "samples": 48 if train else 5,
                                         "heavy": length >= HEAVY_TOKENS or (pair == "per_sample" and length >= 640)})
             atoms = (1024, 2048, 3072, 4096, 6144) if train else ATOM_RUNGS
@@ -246,7 +247,7 @@ def _run_block(c: dict) -> None:
         model = DiffusionTransformer(DiffusionTransformer.Config(n_block=1, implementation=impl, **c["options"]))
         a, n, b = c["samples"], c["L"], c.get("batch", 1)
         args = (torch.randn(a, b, n, 768, device="cuda", dtype=dt), torch.randn(a, b, n, 384, device="cuda", dtype=dt),
-                torch.randn(b, n, n, 128, device="cuda", dtype=dt))
+                torch.randn(b, n, n, c["options"].get("d_pair", 128), device="cuda", dtype=dt))
     elif c["kind"] == "swa_atom":
         from miniworld_engine.architecture.blocks.swa_atom_transformer import (
             SWAAtomTransformer,
@@ -300,7 +301,7 @@ def _run_block(c: dict) -> None:
         )
         from miniworld_engine.modules.exceptions import ImplementationType as MI
 
-        blocks = [BiasOnlyDiTBlock(d_cond=c["d_cond"], implementation=MI.MINIWORLD).cuda().to(pdt)
+        blocks = [BiasOnlyDiTBlock(d_cond=c["d_cond"], d_pair=c.get("d_pair", 128), implementation=MI.MINIWORLD).cuda().to(pdt)
                   for _ in range(2 if c["hoist"] else 1)]
         for b in blocks:
             _randomize(b)
@@ -309,7 +310,7 @@ def _run_block(c: dict) -> None:
         lead, nb = ((1, a), a) if per else ((a, 1), 1)  # per sample: [1, A, L, d] reading pair [A, L, L, 128]
         x = torch.randn(*lead, n, 768, device="cuda", dtype=dt)
         cond = torch.randn(*lead, n, c["d_cond"], device="cuda", dtype=dt)
-        pair = torch.randn(nb, n, n, 128, device="cuda", dtype=dt)
+        pair = torch.randn(nb, n, n, c.get("d_pair", 128), device="cuda", dtype=dt)
         mask = torch.rand(nb, n, device="cuda") > 0.15 if c["masked"] else None
         if c["train"]:
             x, cond, pair = (t.requires_grad_(True) for t in (x, cond, pair))

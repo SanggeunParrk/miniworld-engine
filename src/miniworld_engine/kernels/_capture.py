@@ -157,8 +157,11 @@ def _pin_if_static_capture(store: dict, sk) -> set:
 
 
 def _evict(store: dict, pinned: set, limit: int, keep) -> None:
-    """Drop the oldest entries that no static capture reads until fewer than ``limit`` are left (or only pinned ones)."""
-    for k in [k for k in store if k not in pinned and k != keep][: max(0, len(store) - limit + 1)]:
+    """Drop the oldest entries that no static capture reads until fewer than ``limit`` of those are left. The pinned entries do not
+    count: they are what live graphs read, and while they filled the limit every new entry was evicted as it was made -- a
+    sampler that captures each trajectory then recorded the table's rebuild into every replay from its second trajectory on."""
+    free = [k for k in store if k not in pinned and k != keep]
+    for k in free[: max(0, len(free) + 1 - limit)]:
         del store[k]
 
 
@@ -204,6 +207,7 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
     if alive is not None:
         for k in [k for k, e in store.items() if not alive(e)]:
             del store[k]
+            pinned.discard(k)   # its tensor is gone, so is every graph that read the entry
     if sk not in store:
         _evict(store, pinned, limit, sk)
     out = store[sk] = build()
@@ -239,6 +243,10 @@ def param_forms(tag, params, build, *, inputs_scope: bool = False, capture_reads
     ``static_weights()`` does for every call. ``capture_reads_eager``: a capture is served the eager entry its warm-up made, without
     ``static_weights()`` -- for the inference-only forms (grad off), the contract ``kernels._tf32.tf32_cached`` has for the portable kernels;
     such an entry is then held for good. ``tag`` names the form (any hashable)."""
+    if torch.compiler.is_compiling():
+        # A cache keyed on tensor identity cannot be traced (Dynamo died on the weak references: FoldForge's compiled Protenix-v2
+        # sampler, AdaLN inference). Traced, the forms are computed in the graph; the opaque ops call this at run time and cache.
+        return build()
     params = tuple(params)
     try:
         key = (tag, tuple((p.data_ptr(), p._version, p.dtype, tuple(p.shape)) for p in params))
