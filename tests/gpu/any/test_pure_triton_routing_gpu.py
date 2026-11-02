@@ -47,7 +47,12 @@ def test_masked_layernorm_backward_is_chosen_by_ops_layer_norm(monkeypatch, forc
     y.sum().backward()
     ref = torch.nn.functional.layer_norm(x.detach().float(), (x.shape[-1],), w.float(), b.float(), 1e-5) * rs.float()[None, :, None]
     assert (y.float() - ref).abs().max() < 0.1
-    assert bool(calls) is (not forced)
+    from miniworld_engine.modules.dispatch import restricted_card
+
+    # H100 / B200 launch no Triton: the call runs the general CUDA LayerNorm (forward and backward) and multiplies the row scale after it, so the
+    # masked-backward kernel below is only chosen on the cards that keep the portable path
+    if not restricted_card(x.device):
+        assert bool(calls) is (not forced)
 
 
 def test_triton_layernorm_file_is_pure_even_when_not_forced(monkeypatch):
