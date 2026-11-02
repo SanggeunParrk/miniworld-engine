@@ -1312,7 +1312,7 @@
         "workload": {
           "bench_clear_mb": 0,
           "bench_rep_ms": 0,
-          "implementation": "9ff47724a7d8d767a1c8e8431c59bcf96cf13626c349431edf0fc5881afe6b5a",
+          "implementation": "c7c2462dc2075bd47cac2857f8d1c372e51cc5771e62b0f47d3f3454b87d4a18",
           "kind": "native",
           "regime": "cuda_graph_warm",
           "scheme": 1
@@ -1936,7 +1936,7 @@
         "workload": {
           "bench_clear_mb": 0,
           "bench_rep_ms": 0,
-          "implementation": "9ff47724a7d8d767a1c8e8431c59bcf96cf13626c349431edf0fc5881afe6b5a",
+          "implementation": "c7c2462dc2075bd47cac2857f8d1c372e51cc5771e62b0f47d3f3454b87d4a18",
           "kind": "native",
           "regime": "cuda_graph_warm",
           "scheme": 1
@@ -2586,7 +2586,7 @@
         "workload": {
           "bench_clear_mb": 0,
           "bench_rep_ms": 0,
-          "implementation": "9ff47724a7d8d767a1c8e8431c59bcf96cf13626c349431edf0fc5881afe6b5a",
+          "implementation": "c7c2462dc2075bd47cac2857f8d1c372e51cc5771e62b0f47d3f3454b87d4a18",
           "kind": "native",
           "regime": "cuda_graph_warm",
           "scheme": 1
@@ -3210,7 +3210,7 @@
         "workload": {
           "bench_clear_mb": 0,
           "bench_rep_ms": 0,
-          "implementation": "9ff47724a7d8d767a1c8e8431c59bcf96cf13626c349431edf0fc5881afe6b5a",
+          "implementation": "c7c2462dc2075bd47cac2857f8d1c372e51cc5771e62b0f47d3f3454b87d4a18",
           "kind": "native",
           "regime": "cuda_graph_warm",
           "scheme": 1
@@ -3860,7 +3860,7 @@
         "workload": {
           "bench_clear_mb": 0,
           "bench_rep_ms": 0,
-          "implementation": "9ff47724a7d8d767a1c8e8431c59bcf96cf13626c349431edf0fc5881afe6b5a",
+          "implementation": "c7c2462dc2075bd47cac2857f8d1c372e51cc5771e62b0f47d3f3454b87d4a18",
           "kind": "native",
           "regime": "cuda_graph_warm",
           "scheme": 1
@@ -4484,7 +4484,7 @@
         "workload": {
           "bench_clear_mb": 0,
           "bench_rep_ms": 0,
-          "implementation": "9ff47724a7d8d767a1c8e8431c59bcf96cf13626c349431edf0fc5881afe6b5a",
+          "implementation": "c7c2462dc2075bd47cac2857f8d1c372e51cc5771e62b0f47d3f3454b87d4a18",
           "kind": "native",
           "regime": "cuda_graph_warm",
           "scheme": 1
@@ -5134,7 +5134,7 @@
         "workload": {
           "bench_clear_mb": 0,
           "bench_rep_ms": 0,
-          "implementation": "9ff47724a7d8d767a1c8e8431c59bcf96cf13626c349431edf0fc5881afe6b5a",
+          "implementation": "c7c2462dc2075bd47cac2857f8d1c372e51cc5771e62b0f47d3f3454b87d4a18",
           "kind": "native",
           "regime": "cuda_graph_warm",
           "scheme": 1
@@ -5758,7 +5758,7 @@
         "workload": {
           "bench_clear_mb": 0,
           "bench_rep_ms": 0,
-          "implementation": "9ff47724a7d8d767a1c8e8431c59bcf96cf13626c349431edf0fc5881afe6b5a",
+          "implementation": "c7c2462dc2075bd47cac2857f8d1c372e51cc5771e62b0f47d3f3454b87d4a18",
           "kind": "native",
           "regime": "cuda_graph_warm",
           "scheme": 1
@@ -5777,7 +5777,7 @@
     "bfloat16|([((768, 256), (256, 1), 'torch.bfloat16'), ((768,), (1,), 'torch.float32'), ((768,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((768, 1024), (1024, 1), 'torch.bfloat16')], (False,))": "b363ecfb26dbcffc2185"
   },
   "op": "transition_bwd_gate_sm90_cuda",
-  "op_identity": "9ff47724a7d8d767a1c8e8431c59bcf96cf13626c349431edf0fc5881afe6b5a",
+  "op_identity": "c7c2462dc2075bd47cac2857f8d1c372e51cc5771e62b0f47d3f3454b87d4a18",
   "provenance": {
     "built_utc": "2026-10-29T10:38:29+00:00",
     "torch": "2.13.0+cu129",

@@ -66,6 +66,10 @@ NARROW = re.compile(r"\.to\(\s*torch\.bfloat16\s*\)|\.bfloat16\(\)")
 #: that file learned to read their width from a tensor. A key that a reformat invalidates is a key
 #: that gets bulk-updated without anyone rereading the judgement.
 NOT_A_NORMALISATION = {
+    ("layernorm_linear/cuda/pair_bias.py",
+     "wf = (proj_weight.float() * ln_weight.float()[None, :]).to(torch.bfloat16).contiguous()"):
+        "The projection WEIGHT with the LayerNorm weight folded in (fp32 product), rounded to the bf16 GEMM operand of the no-gradient pair-bias kernel; "
+        "the activation is normalised in fp32 inside the kernel.",
     ("bias_only_attention/triton/core_t.py",
      "w_cat, w_out = torch.cat([wv, wg], 0).to(torch.bfloat16), wo.to(torch.bfloat16)"):
         "The bias-only core's fp32 master WEIGHTS rounded to the bf16 GEMM operands (a non-contiguous fallback of cast_pack); the "
