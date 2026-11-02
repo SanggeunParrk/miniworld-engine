@@ -165,7 +165,28 @@ def _cnt_ok(x2, c2) -> bool:
     """fp32 token-width step whose weight gradient takes LN(cond)^T as the K-major operand (``ln_cond_fwd_t``)."""
     fm = _fm(x2, c2)   # that route has its own feature-major gradients
     # M <= 24576: at M = 36864 cuBLAS picks a slower "tt" kernel for the K-major copy (dW 222 against 197 us) and the transposed row pass is 28 us dearer (measured: 1050 against 1008 us)
-    return _XT and x2.dtype is torch.float32 and c2.shape[1] in (256, 384, 512) and not fm and x2.shape[0] % 4 == 0 and x2.shape[0] <= _XT_MAX_ROWS
+    # B200: the split-K weight gradient (``_splitk``) takes cn row-major; the K-major copy is H100's
+    return (_XT and x2.dtype is torch.float32 and c2.shape[1] in (256, 384, 512) and not fm and x2.shape[0] % 4 == 0 and x2.shape[0] <= _XT_MAX_ROWS
+            and _sm90(x2))
+
+
+#: B200 fp32 token-width weight gradient [dWs; dWb] = dsb^T cn as SPLITK row blocks (one batched TF32 GEMM) summed in a fixed order: the
+#: output is 2 d x dc against a K of all the rows, and cuBLAS's single GEMM ran it on a few dozen tiles. Triton do_bench, CUDA graph, us,
+#: single GEMM (best layout) / split 4: d768 c384 18432 rows 69.4 / 51.2, 6144 rows 30.5 / 28.5; c768 6144 rows 42.8 / 36.7 (and the old
+#: route's transposing copy of the result, 8 us there, is gone); the atom width (49152 x 256 x 128) 30.5 / 36.7 keeps the single GEMM.
+SPLITK = 4
+
+
+def _splitk(x2, d, m) -> bool:
+    return SPLITK > 1 and d > 128 and m % SPLITK == 0 and not _sm90(x2)
+
+
+def _wgrad_splitk(dsb, cn, out=None):
+    """[dWs; dWb] = dsb^T cn [2 d, dc] as SPLITK row blocks of one batched TF32 GEMM summed in a fixed order (deterministic); into ``out`` if given
+    (the B200 side stream of a few row tiles, ``SIDE_MAX_ROWS``)."""
+    m, n2, dc = dsb.shape[0], dsb.shape[1], cn.shape[1]
+    part = torch.bmm(dsb.view(SPLITK, m // SPLITK, n2).transpose(1, 2), cn.view(SPLITK, m // SPLITK, dc))
+    return part.sum(0) if out is None else torch.sum(part, 0, out=out)
 
 
 @opaque(fake=_fwd_fake, name="adaln_h100_fwd")
@@ -255,13 +276,17 @@ def _bwd(
             dwcat = torch.empty((wcat.shape[0], cn.shape[1]), dtype=torch.float32, device=x2.device)
             side.wait_stream(cur)
             with torch.cuda.stream(side):
-                if cnT is not None and cnT.numel() > 0:
+                if _splitk(x2, d, dsb.shape[0]):
+                    _wgrad_splitk(dsb, cn, out=dwcat)
+                elif cnT is not None and cnT.numel() > 0:
                     torch.mm(dsb.t(), cnT[:, :cn.shape[0]].t(), out=dwcat)
                 else:
                     torch.mm(dsb.t(), cn, out=dwcat)
         dcn = torch.mm(dsb, wcatT.t())
         if side is not None:
             pass   # dwcat: on the side stream above
+        elif _splitk(x2, d, dsb.shape[0]):
+            dwcat = _wgrad_splitk(dsb, cn)
         elif cnT is not None and cnT.numel() > 0:   # the smaller operand K-major (written by ln_cond_fwd_t): the GEMM comes out [2 d, dc], no transposing copy after it
             dwcat = torch.mm(dsb.t(), cnT[:, :cn.shape[0]].t())
         else:
