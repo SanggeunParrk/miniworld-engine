@@ -122,6 +122,7 @@ def _can_prep(ids, w_rel, w_bond) -> bool:
 
 
 def _token_pair_init_fwd_w_fake(left, right, w_rel, w_bond, asym, residue, token, entity, sym, bond, r_max, s_max):
+    """z [B, L, L, P] fp32 (the prep + forward pair in one launch; P comes from ``left``)."""
     B, L, P = left.shape
     return torch.empty((B, L, L, P), dtype=torch.float32, device=left.device)
 
