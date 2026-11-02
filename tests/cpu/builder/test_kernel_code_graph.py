@@ -374,7 +374,11 @@ def test_code_graph_affected_lists_the_artifacts_a_file_reaches(tmp_path: Path, 
     }}))
     assert main(["dev", "code-graph", "--affected", str(header), "--manifest", str(manifest)]) == 0
     out = capsys.readouterr().out
-    assert "reached by 2 of " in out
+    import re
+
+    reached = re.search(r"reached by (\d+) of ", out)
+    assert reached and int(reached.group(1)) >= 2   # the two manifest artifacts, plus every native op whose graph holds the header (the per-card wiring now sits in kernels/)
+    assert "augattn_sm100/attn_fwd2" in out
     assert "augattn_sm100/old" in out
     assert "other/unrelated" not in out
     assert out.count("rebuilds") == 1
