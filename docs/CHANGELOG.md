@@ -8,6 +8,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.4.3] - 2026-11-03
+
 ### Added
 
 - `TriangleMultiplication(divide_by_length=True)` (and `TriangleMultiplicationReference`): RoseTTAFold3's contraction divided by the real sequence length before `ln_out`; every kernel path refuses it and the PyTorch statements run.
@@ -16,6 +18,20 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 - `miniworld_engine.modules.released` and `from_released(state_dict, ...)` on `TriangleMultiplication`, `TriangleAttention`, `Transition`, `OuterProductMean`, `MSAPairWeightedAveraging`, `AttentionPairBias`, `PairformerBlock`, `DiTVariantStack`, `AtomDiTVariantStack`: build the engine module from the released checkpoints' layout (interleaved TriMul projection, fused `transition1`, `output_w`).
 - `PairformerConfig(d_single, n_head_single, single_gate_bias, pair_transition_n, single_transition_n, parallel, divide_by_length)`: the single track and the `parallel` schedule; `PairformerBlock.forward(pair, mask, single)` / `Pairformer.forward` return `(pair, single)` with a single track. Defaults are the old pair-track block.
 - `dit_variant.serving(stack, *inputs)` / `stack.serving(...)`: `"cuda"`, `"portable"` or `"pytorch"`; a PYTORCH variant stack is served (inference and training), not refused. `docs/kernels/released-checkpoints.md`.
+
+### Changed
+
+- **SWA modules on H100 bf16: `SwiGLUFFN` runs the hand-CUDA `kernels.swiglu_ffn`** instead of the composed statements.
+- **`swiglu_ffn` dispatch: bf16 hidden > 512 takes cuBLAS + the row kernel** (`_CT_MAX_HIDDEN_BF16 = 512`): the token D768 bf16 shape was slower than PyTorch.
+- MPNN Triton backward kernels (7) carry per-kernel `rtol` bands in `registry.csv`, taken from the measured bf16-autograd error against an fp64 truth;
+  the encoder w1 checkpoint parity test is a relative-norm check, not bitwise (compiled).
+- `dev code-graph` judges the derivation of the derived card (sm90: `DERIVED_ARCH`, `--gpu`), not another card's plan (it had reported "1156 of 1156 units stale").
+
+### Fixed
+
+- Tests: GPU tests call only registry-declared shapes (undeclared APB d_pair 256 / head-count cases removed); the stale-cache gate covers H100 native caches only
+  (sm90 `_triton` caches exempt, guarded by a test); one-sided key flags (Transition `HALF`, two MPNN `DROPOUT`) are listed with their reason;
+  the notes-in-wheel test ignores `__pycache__`; `tests/conftest.py` defaults `MATHDX_HOME`.
 
 ## [2.4.2] - 2026-11-02
 
