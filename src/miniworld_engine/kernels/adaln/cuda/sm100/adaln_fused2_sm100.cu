@@ -15,7 +15,9 @@
 //   warps 2-5    one thread a row: LN(cond) * wc in place in A (fp32 on the TF32 grid, four partial sums a statistic), then a remote
 //                arrive on the leader's A barrier
 //   warps 6-9    one thread a row: x's statistics from the staged x (two-pass), y = sigmoid(acc1 + bs) (x rstd - mean rstd) + acc0 written
-//                over x in the staging (``rna``: on the TF32 grid), then one TMA store of the tile; the staging is free for the next x
+//                over x in the staging (``rna``: on the TF32 grid), each 32-column block TMA-stored as soon as it is written; the next tile's
+//                x block lands in its place as soon as that store has read it (the staging is single-buffered, so whole-tile handoffs
+//                serialised the store, the next x load and its statistics: ~7 us of chain for a pair's second tile)
 //
 // The leader's MMA commits arrive on both CTAs' barriers (multicast); the completions of both CTAs' producers / epilogues are counted on
 // the leader's. Accumulators double-buffered in tensor memory (2 x 2 x 128 columns): the epilogue of tile i overlaps the MMA of tile i + 1.
@@ -43,12 +45,13 @@ DEVI void umma2(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) {
   asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::2.kind::tf32 [%0], %1, %2, %3, p; }"
                :: "r"(d), "l"(a), "l"(b), "r"(IDESC2), "r"(acc) : "memory");
 }
+DEVI void tma_store_wait_read1() { asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory"); }
 DEVI float tf32r(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return __uint_as_float(r); }
 
 struct Bars {
   uint64_t bfull, afull, acce[2];                    // leader: weight bytes of both CTAs; 4 producer / 4 epilogue warps of each CTA
   uint64_t aempty, accf[2];                          // both: the leader's multicast commits
-  uint64_t rawfull, xfull, xempty;                   // local
+  uint64_t rawfull, xfull[4], xempty[4];             // local; x by 32-column block
   uint32_t tmem;
 };
 
@@ -72,7 +75,8 @@ adaln_fused2_sm100(const __grid_constant__ CUtensorMap mB0, const __grid_constan
   if (threadIdx.x == 0) {
     mbar_init(&B.bfull, 1); mbar_init(&B.afull, 8); mbar_init(&B.aempty, 1);
     for (int s = 0; s < 2; ++s) { mbar_init(&B.acce[s], 8); mbar_init(&B.accf[s], 1); }
-    mbar_init(&B.rawfull, 1); mbar_init(&B.xfull, 1); mbar_init(&B.xempty, 1);
+    mbar_init(&B.rawfull, 1);
+    for (int kb = 0; kb < 4; ++kb) { mbar_init(&B.xfull[kb], 1); mbar_init(&B.xempty[kb], 1); }
     fence_barrier_init();
     prefetch_map(&mB0); prefetch_map(&mB1); prefetch_map(&mC); prefetch_map(&mX); prefetch_map(&mY);
   }
@@ -103,10 +107,12 @@ adaln_fused2_sm100(const __grid_constant__ CUtensorMap mB0, const __grid_constan
             tma_load_2d_2sm(su + O_B + BH_BYTES + kb * KB_BH, &mB1, &B.bfull, kb * BKE, crank * (BN / 2));
           }
         }
-        if (tc > 0) mbar_wait(&B.xempty, (tc - 1) & 1);   // the epilogue of the last tile has stored y out of the staging
-        mbar_expect_tx(&B.xfull, X_BYTES);
 #pragma unroll
-        for (int kb = 0; kb < DX / BKE; ++kb) tma_load_2d(su + O_X + kb * KB_A, &mX, &B.xfull, kb * BKE, m0);
+        for (int kb = 0; kb < DX / BKE; ++kb) {
+          if (tc > 0) mbar_wait(&B.xempty[kb], (tc - 1) & 1);   // the last tile's y block kb has been stored out of the staging
+          mbar_expect_tx(&B.xfull[kb], KB_A);
+          tma_load_2d(su + O_X + kb * KB_A, &mX, &B.xfull[kb], kb * BKE, m0);
+        }
       }
     }
   } else if (warp == 1) {
@@ -177,7 +183,8 @@ adaln_fused2_sm100(const __grid_constant__ CUtensorMap mB0, const __grid_constan
     for (int t = pair; t < ptiles; t += npairs, ++tc) {
       const int buf = tc & 1;
       const int m0 = t * 256 + crank * 128;
-      mbar_wait(&B.xfull, tc & 1);
+#pragma unroll
+      for (int kb = 0; kb < DX / BKE; ++kb) mbar_wait(&B.xfull[kb], tc & 1);
       // x's statistics, two passes over the staged row, four partial sums
       float ps[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll
@@ -218,18 +225,19 @@ adaln_fused2_sm100(const __grid_constant__ CUtensorMap mB0, const __grid_constan
           }
           sts128(a, make_uint4(__float_as_uint(o[0]), __float_as_uint(o[1]), __float_as_uint(o[2]), __float_as_uint(o[3])));
         }
-      }
-      tc_fence_before();
-      __syncwarp();
-      if (lane == 0) mbar_arrive_remote_relaxed(&B.acce[buf], 0);
-      fence_proxy_async();                               // y in the staging -> the TMA store (async proxy)
-      named_bar_sync(2, 128);
-      if (warp == 6 && lane == 0) {
-#pragma unroll
-        for (int kb = 0; kb < DX / BKE; ++kb) tma_store_2d(&mY, su + O_X + kb * KB_A, kb * BKE, m0);
-        tma_store_commit();
-        tma_store_wait_read0();
-        mbar_arrive(&B.xempty);
+        if (c == BN / 32 - 1) {
+          tc_fence_before();
+          __syncwarp();
+          if (lane == 0) mbar_arrive_remote_relaxed(&B.acce[buf], 0);   // the accumulators are read: the pair's next MMA may write them
+        }
+        fence_proxy_async();                             // y block c in the staging -> its TMA store (async proxy)
+        named_bar_sync(2, 128);
+        if (warp == 6 && lane == 0) {
+          tma_store_2d(&mY, su + O_X + c * KB_A, c * BKE, m0);
+          tma_store_commit();
+          if (c > 0) { tma_store_wait_read1(); mbar_arrive(&B.xempty[c - 1]); }   // block c - 1 is read out: the next x may land there
+          if (c == BN / 32 - 1) { tma_store_wait_read0(); mbar_arrive(&B.xempty[c]); }
+        }
       }
     }
     if (warp == 6 && lane == 0) tma_store_wait0();

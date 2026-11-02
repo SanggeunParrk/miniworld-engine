@@ -86,9 +86,9 @@ def _load_fused(f32: bool, bn: int, kc: int, dx: int):
 #: False / True: never / always (A/B, tests)
 FUSED2: bool | None = None
 #: Where the pair kernel beats the row kernels around cuBLAS (triton do_bench, CUDA graph, us, pair kernel / cuBLAS route / Triton): [40960,
-#: 128] 34.6 / 38.7 / 40.7. At [20480, 128] it ties (26.4 / 26.4 / 26.4): 80 pair tiles on 74 pairs, six of them run a second tile, and each
-#: tile moves 192 KB through one SM (x, cond in, y out) with the x staging single-buffered; at [5120, 128] 18.2 against 16.2.
-FUSED2_MIN_ROWS = 32768
+#: 128] 32.5 / 38.7 / 40.7, [20480, 128] 24.4 / 26.4 / 26.4 (80 pair tiles on 74 pairs: six of them run a second tile); at [5120, 128] it
+#: loses (18.2 against 16.2: one tile a pair, nothing for the pipeline to hide).
+FUSED2_MIN_ROWS = 16384
 
 
 @functools.lru_cache(maxsize=2)
