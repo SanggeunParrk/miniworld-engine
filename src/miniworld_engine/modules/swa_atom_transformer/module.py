@@ -111,7 +111,20 @@ class SwiGLUFFN(nn.Module):
                 return kernels.triton_swiglu_ffn(
                     x.to(dtype), wa, wb, self.w_down.weight.to(dtype)
                 )
-        # H100 / B200 land here (no Triton fallback), and an unrecorded card: fp32 master weights under a bf16 activation run under bf16 autocast
+        if (
+            self.implementation == ImplementationType.MINIWORLD
+            and x.is_cuda
+            and not self._pointwise
+            and restricted_card(x.device)
+        ):
+            # H100: the hand-CUDA ``kernels.swiglu_ffn`` (fused expand + SwiGLU GEMM at inference, the SwiGLU row kernels in training) at the
+            # declared precision, bf16 (registry_module.csv, swiglu_ffn rows); it runs the PyTorch statements itself for a call it does not serve.
+            dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else x.dtype
+            if dtype == torch.bfloat16:
+                wa, wb = self.w_up.weight.to(dtype).chunk(2, dim=0)
+                with torch.autocast("cuda", enabled=False):
+                    return kernels.swiglu_ffn(x.to(dtype), wa, wb, self.w_down.weight.to(dtype))
+        # B200, fp32 on H100 and an unrecorded card: fp32 master weights under a bf16 activation run under bf16 autocast
         with fallback_autocast(x, self, x.is_cuda and (blocked or restricted_card(x.device))):
             x1, x2 = self.w_up(x).chunk(2, dim=-1)
             x = F.silu(x1) * x2

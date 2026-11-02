@@ -450,6 +450,18 @@ def cuda_rebuilds(result: dict, manifests: list[str]) -> list[tuple[str, str]]:
     return sorted(set(out))
 
 
+#: The card the engine is derived and released for. The derivation check judges THIS card's plan (``autotune/plans/<arch>/``) unless
+#: ``--gpu`` names another: a plan is valid per card (``dev derive --arch X`` re-records only X), so reading a different card's plan
+#: right after deriving this one reports that other plan's stale units as if the derive had not run -- all of them when a file every
+#: unit lists (the safety set: ``settings.py``, ``modules/dispatch.py``, the registry CSVs ...) changed ("1156 of 1156 stale").
+DERIVED_ARCH = "sm90"
+
+
+def derivation_plans() -> dict[str, Path]:
+    """``{arch: units.json}`` of every committed per-card plan."""
+    return {p.parent.name: p for p in sorted((PKG / "autotune" / "plans").glob("*/registry_kernel.units.json"))}
+
+
 def live_evidence(result: dict, new_only: bool = False, gpu: str = "") -> dict:
     """What the committed evidence says NOW, against the working tree (CPU only): the stale tuned caches among the ones reached, the
     native ops whose cache no longer matches their graph, and the derivation units whose recorded files moved.
@@ -466,9 +478,12 @@ def live_evidence(result: dict, new_only: bool = False, gpu: str = "") -> dict:
     reached_ops = {PurePosixPath(n).parent.name for n in result["reached"] if g.nodes[n] == "cache"}
     touched = {p.removeprefix(f"{SRC}/") for p in [*result["changed"], *result["cosmetic"]] if p.startswith(f"{SRC}/")}
     native_stale = sorted({r.op for r in rows if r.stale and r.reason.startswith("native implementation changed")})
-    plan_file = PKG / "autotune" / "plans" / gpu / "registry_kernel.units.json" if gpu else None
-    status = plan.status(plan_file) if plan_file is not None and plan_file.is_file() else plan.status()
+    plans = derivation_plans()
+    arch = gpu or DERIVED_ARCH
+    status = plan.status(plans[arch]) if arch in plans else plan.status()
     units_stale = status["stale"]
+    # the other cards' plans: counted for the report, never judged (a derive on one card does not refresh them)
+    other = {a: len(plan.status(p)["stale"]) for a, p in plans.items() if a != arch}
     if new_only:
         rows_changed = set(result.get("rows") or [])
         seeds = {*result["changed"], *(f"registry-row:{k}" for k in rows_changed)}
@@ -477,7 +492,8 @@ def live_evidence(result: dict, new_only: bool = False, gpu: str = "") -> dict:
         units_stale = {k: v for k, v in units_stale.items() if set(v) & touched}
         reached_ops &= direct                              # a cache whose own files (kernel, helpers, driver, grid, row) hold a changed file
     return {"stale": [r for r in rows if r.stale and r.op in reached_ops], "native_stale": native_stale,
-            "units_stale": units_stale, "units_total": status["units"], "schema": status["schema"], "new_only": new_only}
+            "units_stale": units_stale, "units_total": status["units"], "schema": status["schema"], "new_only": new_only,
+            "units_arch": arch if arch in plans else "", "units_other": other}
 
 
 def _chain(parent: dict[str, str], node: str) -> str:
@@ -501,7 +517,8 @@ def actions(result: dict) -> list[str]:
                     + ", ".join(sorted(native_moved)[:8]) + " -- moved by "
                     + ", ".join(sorted({PurePosixPath(p).name for fs in native_moved.values() for p in fs})[:4]))
     if moved.get(DERIVATION):
-        todo.append(f"dev derive --arch sm86: re-runs only the units whose recorded files changed, reuses the rest; then viz.sweep_page "
+        todo.append(f"dev derive --arch {DERIVED_ARCH} --out src/miniworld_engine/autotune/plans/{DERIVED_ARCH}/registry_kernel.csv: re-runs only the units "
+                    f"whose recorded files changed, reuses the rest; then viz.sweep_page "
                     f"-- moved by {len(moved[DERIVATION])} file(s): " + ", ".join(moved[DERIVATION][:4]) + (" ..." if len(moved[DERIVATION]) > 4 else ""))
     if result.get("rows"):
         todo.append(f"registry rows changed ({len(result['rows'])}): " + ", ".join(result["rows"][:8]) + (" ..." if len(result["rows"]) > 8 else "")
@@ -572,7 +589,11 @@ def report(base: str, verbose: bool = False, manifests: list[str] = (), new_only
     lines.append("owed:")
     lines.extend(f"  - {a}" for a in actions(result) or ["nothing"])
     ev = result["evidence"]
-    lines.append(f"evidence{' (new-only: what this diff causes)' if new_only else ''}{f' [{gpu} only]' if gpu else ''}: derivation {len(ev['units_stale'])} of {ev['units_total']} units stale, "
+    arch_tag = " [" + ev["units_arch"] + "]" if ev.get("units_arch") else ""
+    others = ", ".join(a + " " + str(n) for a, n in sorted(ev.get("units_other", {}).items()))
+    not_judged = f" (not judged: {others} stale)" if others else ""
+    lines.append(f"evidence{' (new-only: what this diff causes)' if new_only else ''}{f' [{gpu} only]' if gpu else ''}: derivation{arch_tag} "
+                 f"{len(ev['units_stale'])} of {ev['units_total']} units stale{not_judged}, "
                  f"native {len(ev['native_stale'])} op(s) stale, tuned {len(ev['stale'])} reached cache(s) stale")
     owed = pending(result)
     lines.append(f"check: {len(owed)} pending" + ("" if not owed else " -- " + "; ".join(owed[:4]) + (" ..." if len(owed) > 4 else "")))

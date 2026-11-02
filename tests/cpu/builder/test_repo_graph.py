@@ -107,7 +107,7 @@ def test_new_only_keeps_what_the_diff_causes_and_drops_what_was_already_stale(mo
             self.op = op
 
     monkeypatch.setattr(cache_status, "scan", lambda: [Row("layernorm_fwd_cuda"), Row("trimul_fwd_sm90_cuda")])
-    monkeypatch.setattr(plan, "status", lambda: {"units": 3, "schema": 2, "stale": {"a": ["kernels/x.py"], "b": ["kernels/y.py"]}})
+    monkeypatch.setattr(plan, "status", lambda path=None: {"units": 3, "schema": 2, "stale": {"a": ["kernels/x.py"], "b": ["kernels/y.py"]}})
     touched = next(p for p in identity.native_files("layernorm_fwd_cuda") if p.startswith("kernels/layernorm/"))
     result = {"graph": graph, "changed": [f"src/miniworld_engine/{touched}"], "cosmetic": [], "reached": {}, "rows": []}
     everything = rg.live_evidence(result)
@@ -127,3 +127,29 @@ def test_tests_lists_reached_test_files_one_path_each(graph: rg.Graph) -> None:
     assert cpu
     assert all(p.startswith("tests/") and p.endswith(".py") and "gpu" not in p.split("/")[:3] for p in cpu)
     assert set(rg.tests(result, "all")) == set(cpu) | set(rg.tests(result, "gpu"))
+
+
+def test_the_derivation_is_judged_on_the_card_that_was_derived_not_on_another_cards_plan(monkeypatch, graph: rg.Graph, tmp_path) -> None:
+    """``dev derive --arch sm90`` re-records the sm90 plan only. The check used to read the default (sm86) plan whatever was derived, so a
+    change to a file every unit lists (the safety set) read as "1156 of 1156 stale" right after a successful derive. Now the plan of
+    ``DERIVED_ARCH`` (or ``--gpu``) is judged, and the other cards' plans are only counted in the report."""
+    from miniworld_engine.autotune import cache_status, plan
+
+    plans = {"sm86": tmp_path / "sm86.json", "sm90": tmp_path / "sm90.json"}
+    states = {plans["sm86"]: {"units": 4, "schema": 2, "stale": {f"u{i}": ["settings.py"] for i in range(4)}},
+              plans["sm90"]: {"units": 4, "schema": 2, "stale": {}}}
+    monkeypatch.setattr(rg, "derivation_plans", lambda: plans)
+    monkeypatch.setattr(plan, "status", lambda path=None: states[path] if path else states[plans["sm86"]])
+    monkeypatch.setattr(cache_status, "scan", lambda: [])
+    result = {"graph": graph, "changed": ["src/miniworld_engine/settings.py"], "cosmetic": [], "reached": {}, "rows": []}
+
+    after_sm90_derive = rg.live_evidence(result, new_only=True)
+    assert rg.DERIVED_ARCH == "sm90"
+    assert after_sm90_derive["units_arch"] == "sm90" and after_sm90_derive["units_stale"] == {}
+    assert after_sm90_derive["units_other"] == {"sm86": 4}
+    assert rg.pending({"evidence": after_sm90_derive}) == []
+
+    sm86 = rg.live_evidence(result, new_only=True, gpu="sm86")
+    assert sm86["units_arch"] == "sm86" and len(sm86["units_stale"]) == 4
+    assert sm86["units_other"] == {"sm90": 0}
+    assert any("4 of 4 units stale" in o for o in rg.pending({"evidence": sm86}))

@@ -22,6 +22,23 @@ sys.path.insert(0, str(Path(__file__).parent))
 import pytest
 
 
+def _default_mathdx_home() -> None:
+    """The three CUDA transition extensions include cuBLASDx (kernels/_nvcc.py ``mathdx_home``). When no variable names a mathdx root
+    (``MINIWORLD_MATHDX_HOME`` / ``MATHDX_HOME`` / ``NVIDIA_MATHDX_HOME``),
+    point ``MATHDX_HOME`` at the unpacked wheel the cluster keeps in ``~/mathdx_dl`` -- the same role
+    ``CUTLASS_PATH`` plays for the CUTLASS kernels: a test run needs no export. Only a root that really holds the headers is used."""
+    import os
+
+    if any(os.environ.get(v) for v in ("MINIWORLD_MATHDX_HOME", "MATHDX_HOME", "NVIDIA_MATHDX_HOME")):
+        return
+    root = Path.home() / "mathdx_dl" / "extracted" / "nvidia" / "mathdx"
+    if (root / "include" / "cublasdx.hpp").is_file():
+        os.environ["MATHDX_HOME"] = str(root)
+
+
+_default_mathdx_home()
+
+
 def pytest_collection_modifyitems(config, items) -> None:
     import torch
 

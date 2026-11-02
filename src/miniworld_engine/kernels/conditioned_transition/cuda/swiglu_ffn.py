@@ -50,6 +50,9 @@ class _SwiGLUFFN(torch.autograd.Function):
 
 _GATE_ONE: dict = {}
 
+#: Widest hidden (rows of ``wa``) at which bf16 inference takes the fused ``ct_inference`` kernel; wider ones take cuBLAS + the SwiGLU row kernel.
+_CT_MAX_HIDDEN_BF16 = 512
+
 
 def _gate_of_one(x: torch.Tensor):
     """(Wsc, bias) of a gate that is exactly one for any cond: zero weights and bias 30 (sigmoid(30) rounds to 1.0f). Cached per (device, dtype,
@@ -77,7 +80,11 @@ def swiglu_ffn(x, wa, wb, ws):
     from miniworld_engine.kernels.conditioned_transition.cuda import ct_inference as ct
 
     d = shape[-1]
-    if _tf32_or_bf16(x) and ct.supported(x2, x2, wa.shape[0], d):
+    # bf16 with a hidden width above 512: the fused expand + SwiGLU GEMM writes a hidden activation that is no longer small next to the GEMM, and
+    # cuBLAS + the SwiGLU row kernel is as fast or faster (CUDA graph, H100, hidden 768 / 1536, 128 - 65536 rows: 0.8 - 1.0x of ct_inference's time;
+    # the fused kernel was 1.04 - 1.37x SLOWER than the PyTorch statements at hidden 1536). At hidden <= 512 the fused kernel stays (1.2 - 1.8x faster).
+    wide_bf16 = x.dtype is torch.bfloat16 and wa.shape[0] > _CT_MAX_HIDDEN_BF16
+    if not wide_bf16 and _tf32_or_bf16(x) and ct.supported(x2, x2, wa.shape[0], d):
         wsc, bsc = _gate_of_one(x2)
         return ct.ct_inference(x2, x2, wa, wb, ws, wsc, bsc).reshape(*shape[:-1], ws.shape[0])
     return _SwiGLUFFN.apply(x2, wa, wb, ws).reshape(*shape[:-1], ws.shape[0])

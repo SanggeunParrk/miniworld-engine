@@ -43,6 +43,16 @@ class SwiGLUFFN(nn.Module):
             from miniworld_engine.kernels.transition.interface import swiglu_ffn as _op_swiglu_ffn
             wa, wb = self.w_up.weight.chunk(2, dim=0)
             return _op_swiglu_ffn(x, wa, wb, self.w_down.weight)
+        if self.implementation != ImplementationType.PYTORCH and x.is_cuda and x.dtype == torch.bfloat16:
+            from miniworld_engine.modules.dispatch import restricted_card
+
+            if restricted_card(x.device):
+                # H100: the hand-CUDA ``swiglu_ffn`` (kernels/conditioned_transition/cuda/swiglu_ffn.py) at the declared precision, bf16
+                # (registry_module.csv, swiglu_ffn rows); it runs the PyTorch statements itself for a call it does not serve.
+                from miniworld_engine.kernels.transition.interface import swiglu_ffn as _op_swiglu_ffn
+
+                wa, wb = self.w_up.weight.to(x.dtype).chunk(2, dim=0)
+                return _op_swiglu_ffn(x, wa, wb, self.w_down.weight.to(x.dtype))
         x1, x2 = self.w_up(x).chunk(2, dim=-1)
         return self.w_down(F.silu(x1) * x2)
 
