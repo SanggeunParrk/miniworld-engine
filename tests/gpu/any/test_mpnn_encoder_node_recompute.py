@@ -340,7 +340,14 @@ def test_encoder_node_w1_checkpoint_fullgraph_parity() -> None:
     expected_output, expected_gradients = run(baseline_fn)
     actual_output, actual_gradients = run(candidate_fn)
 
-    torch.testing.assert_close(actual_output, expected_output, atol=0, rtol=0)
+    # Not bitwise: eager the two paths are bit-identical at every layer, but inductor fuses the two
+    # compiled graphs differently, so bf16 outputs differ by ~1 ulp on ~12% of elements (measured
+    # 2026-11-02 H100: rel-norm 1.2e-3 between them, while each is 5.1e-3 from an fp64 reference and
+    # each is run-to-run deterministic). The bound is half the error either path already has.
+    output_error = torch.linalg.vector_norm(
+        actual_output.float() - expected_output.float()
+    ) / torch.linalg.vector_norm(expected_output.float()).clamp_min(1e-12)
+    assert output_error < 2.5e-3
     assert actual_gradients.keys() == expected_gradients.keys()
     expected_flat = torch.cat(
         [gradient.float().flatten() for gradient in expected_gradients.values()]
