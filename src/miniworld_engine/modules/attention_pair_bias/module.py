@@ -104,16 +104,23 @@ class AttentionPairBias(nn.Module):
         single: Float[torch.Tensor, "B L d_single"],
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
+        extra_pair_bias: Float[torch.Tensor, "B H L L"] | None = None,
     ) -> Float[torch.Tensor, "B L d_single"]:
         """Forward pass. ALWAYS applies the residual: single + attention_pair_bias(single, pair).
         The residual is UNCONDITIONAL (domain standard) and applied EXPLICITLY here (team-gm layer,
-        not kernel-fused). The residual is unconditional and has no flag."""
+        not kernel-fused). The residual is unconditional and has no flag.
+
+        ``extra_pair_bias`` [B, n_head, L, L] (head-major, the layout of the attention logits; a head axis of 1 is shared by every head,
+        so a refiner's [L, L] term is ``extra[None, None]``) is added to the pair-bias logits (after ``to_bias``, before the key mask and
+        the softmax; the structural-token refiner's extra bias); gradient flows to it.
+        The native CUDA paths (B200 / H100 APB) and the fused-pair kernel compute the bias from ``pair`` inside the kernel and cannot
+        take it, so a call with it skips them: it runs the attention on the summed bias (PyTorch SDPA, or the portable Triton kernel)."""
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return single
         # Hand-CUDA B200 (integrations.attention_pair_bias_b200 states its contract; the residual is folded there).
-        if _b200.serves_inference(self, single, pair, mask):
+        if extra_pair_bias is None and _b200.serves_inference(self, single, pair, mask):
             return _b200.update_inference(self, single, pair, mask)
-        if _b200.serves_train(self, single, pair, mask):
+        if extra_pair_bias is None and _b200.serves_train(self, single, pair, mask):
             return _b200.update_train(self, single, pair, mask)
         # H100 / B200 have no Triton fallback: a MINIWORLD call the native CUDA path does not serve runs the PyTorch attention.
         no_triton = (
@@ -162,7 +169,8 @@ class AttentionPairBias(nn.Module):
 
         fused_out = None
         if (
-            not self.use_qk_norm
+            extra_pair_bias is None
+            and not self.use_qk_norm
             and self._backend == KernelBackend.PORTABLE
             and query.dtype == torch.bfloat16
             and pair.dtype == torch.bfloat16
@@ -218,6 +226,8 @@ class AttentionPairBias(nn.Module):
             bias = layernorm_linear_triton_fwd_t(
                 pair, ln_w, torch.zeros_like(ln_w), self.to_bias.weight, self.ln_pair.eps
             ).view(self.n_head, B_, L_, L_).permute(1, 0, 2, 3)
+            if extra_pair_bias is not None:
+                bias = bias + extra_pair_bias.to(bias.dtype)
         else:
             pair = self.ln_pair(pair)
             bias = (
@@ -226,6 +236,8 @@ class AttentionPairBias(nn.Module):
                 else self.to_bias(pair)
             )
             bias = rearrange(bias, "B L L2 H -> B H L L2")
+            if extra_pair_bias is not None:  # before the key mask: a masked key stays at the minimum
+                bias = bias + extra_pair_bias.to(bias.dtype)
             if mask is not None and backend != KernelBackend.PORTABLE:  # the portable kernel takes the key mask itself
                 bias = bias.masked_fill(
                     ~mask[:, None, None, :], torch.finfo(bias.dtype).min
