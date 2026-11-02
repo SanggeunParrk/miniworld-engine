@@ -12,7 +12,7 @@ from miniworld_engine.kernels._tf32 import tf32_dot
 from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.autotune.shape_key import pack, token_key
 
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain

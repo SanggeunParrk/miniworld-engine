@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 from jaxtyping import Bool, Float
 
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.primitives import Dropout
 from miniworld_engine.modules.transition import Transition

@@ -42,7 +42,7 @@ from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_ord
 
 from jaxtyping import Float
 
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.autotune.shape_key import both_key, pack, length_of, rows_of
 from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 

@@ -27,7 +27,7 @@ import matplotlib as mpl
 mpl.use("Agg")
 import matplotlib.pyplot as plt
 
-from miniworld_engine.viz import (
+from miniworld_engine.utils.viz import (
     apply_theme,
     canonical,
     label_for,
@@ -159,7 +159,7 @@ def _bars(ax, rows: list[Row], axis: str, speedup: bool) -> None:
 
 
 def _color(impl: str) -> str:
-    from miniworld_engine.viz import color_for
+    from miniworld_engine.utils.viz import color_for
 
     return color_for(impl)
 

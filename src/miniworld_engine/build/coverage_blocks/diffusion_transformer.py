@@ -10,7 +10,7 @@ from torch.utils.checkpoint import checkpoint, checkpoint_sequential
 
 from miniworld_engine.build.coverage_blocks.pair_bias_hoist import pair_bias_all
 from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.modules import AugmentedAttentionPairBias
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.functional import sigmoid_gate

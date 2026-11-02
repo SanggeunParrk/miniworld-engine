@@ -10,7 +10,7 @@ import triton.language as tl
 from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.autotune.shape_key import pack, token_key
 
 

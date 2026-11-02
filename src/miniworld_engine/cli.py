@@ -1247,7 +1247,7 @@ def cmd_buckets(args: argparse.Namespace) -> int:
 
 def cmd_import_anthropic(args: argparse.Namespace) -> int:
     """`dev import-anthropic`: see ``tools/import_anthropic.py``."""
-    from miniworld_engine.tools import import_anthropic
+    from miniworld_engine.utils.tools import import_anthropic
     import_anthropic.main([args.source, args.destination])
     return 0
 
@@ -1263,14 +1263,14 @@ def cmd_build_anthropic_sm100a(args: argparse.Namespace) -> int:
 
 def cmd_make_default_configs(args: argparse.Namespace) -> int:
     """`dev make-default-configs`: see ``tools/make_default_configs.py``."""
-    from miniworld_engine.tools import make_default_configs
+    from miniworld_engine.utils.tools import make_default_configs
     make_default_configs.generate()
     return 0
 
 
 def cmd_audit_thresholds(args: argparse.Namespace) -> int:
     """`dev audit-thresholds`: see ``tools/audit_thresholds.py``."""
-    from miniworld_engine.tools import audit_thresholds
+    from miniworld_engine.utils.tools import audit_thresholds
     return audit_thresholds.main()
 
 
@@ -1376,7 +1376,7 @@ def cmd_derive(args: argparse.Namespace) -> int:
     """
     import json
 
-    from miniworld_engine._atomic import write_json
+    from miniworld_engine.utils.atomic import write_json
     from miniworld_engine.autotune import derive, plan
 
     out = Path(args.out) if args.out else derive.REGISTRY_KERNEL

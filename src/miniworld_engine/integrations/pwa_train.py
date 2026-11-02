@@ -521,7 +521,7 @@ def _cast_h100_matrices(*weights):
     if torch.cuda.get_device_capability(weights[0].device) == (9, 0) and any(
         w.dtype != torch.bfloat16 for w in weights
     ):
-        from miniworld_engine.integrations.h100_master import pack
+        from miniworld_engine.utils.h100_master import pack
 
         return tuple(pack(weights))
     return tuple(w.to(torch.bfloat16).contiguous() for w in weights)

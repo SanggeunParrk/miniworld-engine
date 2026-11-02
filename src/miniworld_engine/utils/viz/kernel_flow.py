@@ -1,6 +1,6 @@
 """Kernel-flow figures for docs/gpus/<gpu>/<module>/<module>.md: one box per kernel, left to right, HBM underneath.
 
-    python -m miniworld_engine.viz.kernel_flow docs/gpus/h100/trimul/figures/trimul_bidir.json
+    python -m miniworld_engine.utils.viz.kernel_flow docs/gpus/h100/trimul/figures/trimul_bidir.json
 
 A spec is JSON: ``{"figures": {"<name>": {"title": ..., "panels": [...]}}}``; each figure is
 written next to the spec as ``<spec stem>_<name>.svg``. Panels stack top to bottom (training:

@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 from jaxtyping import Float
 
-from miniworld_engine._typecheck import typecheck
-from miniworld_engine.integrations.h100_master import is_h100
+from miniworld_engine.utils.typecheck import typecheck
+from miniworld_engine.utils.h100_master import is_h100
 from miniworld_engine.kernels import _capture, adaln_inference, adaln_train
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -104,7 +104,7 @@ class AdaptiveLayerNorm(nn.Module):
         if backend == KernelBackend.PYTORCH:
             # H100 / B200 resolve MINIWORLD to this leg (no Triton fallback there); fp32 master weights under a bf16 activation keep
             # their unrounded fp32 gradients (``h100_master.master_linear``), as the Triton path's own casts did.
-            from miniworld_engine.integrations.h100_master import master_linear
+            from miniworld_engine.utils.h100_master import master_linear
             from miniworld_engine.modules import dispatch as _dispatch
 
             engine_leg = self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(x.device)
@@ -182,7 +182,7 @@ class AdaptiveRMSNorm(nn.Module):
         self.to_bias = Linear(d_cond, d_hidden, bias=False, init="zero", dtype=dtype)
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        from miniworld_engine.integrations.h100_master import master_linear
+        from miniworld_engine.utils.h100_master import master_linear
 
         wide = torch.float64 if x.dtype == torch.float64 else torch.float32
         xw = x.to(wide)

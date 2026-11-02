@@ -42,7 +42,7 @@ from typing import Any
 
 import torch
 
-from miniworld_engine._atomic import write_json
+from miniworld_engine.utils.atomic import write_json
 
 SCHEMA = 1
 

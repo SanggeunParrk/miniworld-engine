@@ -11,7 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from miniworld_engine._atomic import write_json
+from miniworld_engine.utils.atomic import write_json
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "kernels" / "registry" / "registry_kernel.units.json"

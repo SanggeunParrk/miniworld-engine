@@ -3,7 +3,7 @@
 Kernel-level status of `TriangleAttention` (`use_self_attention=True`) on B200; the module-level summary belongs in
 [b200.md](../b200.md). bf16 only; columns are (Length, Dimension). B200 = CUDA where a hand-written sm_100a path
 exists; a shape without one is 미구현 (it runs the portable path). Figures: one box per kernel, left to right, HBM reads
-(blue, left) and writes (red, right); generated from `figures/triattn.json` by `python -m miniworld_engine.viz.kernel_flow`,
+(blue, left) and writes (red, right); generated from `figures/triattn.json` by `python -m miniworld_engine.utils.viz.kernel_flow`,
 then converted to PNG with `cairosvg` (scale 2, white background).
 
 Dispatch: `integrations/triattn_b200.py`, called first in `TriangleAttention.forward`. Kernels:

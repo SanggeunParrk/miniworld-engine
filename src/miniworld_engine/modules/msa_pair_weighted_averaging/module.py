@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from jaxtyping import Bool, Float
 
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.integrations import anthropic_msa as _anthropic
 from miniworld_engine.integrations import pwa_train as _pwa_train
 from miniworld_engine.modules import dispatch as _dispatch

@@ -6,7 +6,7 @@ from torch.utils.checkpoint import checkpoint, checkpoint_sequential
 from typing_extensions import Self
 
 from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.modules import (
     AttentionPairBias,
     BidirectionalTriangleMultiplication,

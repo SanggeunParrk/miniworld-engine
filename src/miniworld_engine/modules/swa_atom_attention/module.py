@@ -40,7 +40,7 @@ import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
 
 from miniworld_engine import settings
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.modules.exceptions import (
     ImplementationType,

@@ -4,7 +4,7 @@ from typing import Any
 import pytest
 import torch
 
-from miniworld_engine.integrations.optimizer import align_optimizer_state_layout_
+from miniworld_engine.utils.optimizer import align_optimizer_state_layout_
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_multiplication.bidirectional import (
     BidirectionalTriangleMultiplication,

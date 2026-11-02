@@ -18,7 +18,7 @@ from miniworld_engine.kernels._tiles import tile_grid, tile_order
 
 from jaxtyping import Float
 
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.autotune.shape_key import both_key, length_of, pack, rows_of
 
 def get_seq_group(length) -> int:

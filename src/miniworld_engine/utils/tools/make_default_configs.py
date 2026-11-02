@@ -7,7 +7,7 @@ import csv
 import itertools
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1] / "autotune" / "configs"
+ROOT = Path(__file__).resolve().parents[2] / "autotune" / "configs"
 
 
 def preference(axis):

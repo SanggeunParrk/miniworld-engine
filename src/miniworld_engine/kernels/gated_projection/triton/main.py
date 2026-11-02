@@ -14,7 +14,7 @@ from einops import rearrange
 from jaxtyping import Float
 
 from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 
 AUTOTUNE = settings.current().autotunes("tri_attention")
 # BOTH tile axes are searched. BLOCK_N used to be pinned at the launch site to

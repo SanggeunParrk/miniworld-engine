@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from miniworld_engine.autotune import builder, checkpoint_cases, module_registry
-from miniworld_engine.viz import sweep_page
+from miniworld_engine.utils.viz import sweep_page
 
 ROOT = Path(__file__).resolve().parents[3]
 CENSUS = json.loads((ROOT / "tests/cpu/data/checkpoint-shapes-20260915.json").read_text())["groups"]

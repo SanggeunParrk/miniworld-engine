@@ -8,7 +8,7 @@ from einops import rearrange, repeat
 from jaxtyping import Bool, Float
 
 from miniworld_engine import kernels
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.dispatch import (

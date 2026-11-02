@@ -171,7 +171,7 @@ bulk shared::cluster copies, summed in rank order.
 - Accuracy against the fp64 block (A8 S1024, standalone development build): ours output 2.58e-3, dq 2.78e-3, dc 4.60-4.62e-3, worst
   weight gradient 7.4-7.6e-3; the portable path 2.58e-3 / 2.78e-3 / 4.91e-3 / 7.4-7.6e-3 (bf16 rounding points of the same algorithm).
   The harness inference rows carry the output error against an fp32 IEEE block in their CSV.
-- Charts: under each table, a length sweep at D128 (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/swa_atom_dit/swa_atom_dit.md`).
+- Charts: under each table, a length sweep at D128 (`python -m miniworld_engine.utils.viz.measure_bars docs/gpus/b200/swa_atom_dit/swa_atom_dit.md`).
 
 ### Inference A5
 

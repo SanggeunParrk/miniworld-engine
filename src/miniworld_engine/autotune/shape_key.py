@@ -135,7 +135,7 @@ assert not (set(DIT_ATOM_LENGTHS) & set(DIT_TOKEN_LENGTHS)), (
 #:    On the composed path (d_hidden=768/d_cond=384, what `bench_module conditioned_transition`
 #:    runs) the best of ALL seven buckets beats the rung the ladder picks by only 1.02x-1.08x.
 #:    Adding 640+896 to this ladder costs +9.8 GPU-hours on a 110-hour sweep (+8.9%, by
-#:    `python -m miniworld_engine.viz.sweep_page`) to chase at most 8% at two lengths the model
+#:    `python -m miniworld_engine.utils.viz.sweep_page`) to chase at most 8% at two lengths the model
 #:    never runs -- they are bench sweep points. So the rungs stay as they are. Floor, not ceiling,
 #:    is also the safe direction: 896 runs a config tuned for 768 rows' worth of tiles, never one
 #:    tuned for more work than is there.

@@ -4,7 +4,7 @@
 import torch
 from jaxtyping import Float
 
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 
 
 @typecheck

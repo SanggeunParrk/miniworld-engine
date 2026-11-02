@@ -22,7 +22,7 @@ import triton.language as tl
 
 from jaxtyping import Float
 
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.kernels._compile import opaque
 
 # tl.dot needs every dim >= 16; below this the backward uses the scalar loop.

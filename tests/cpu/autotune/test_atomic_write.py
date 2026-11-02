@@ -14,7 +14,7 @@ import json
 import multiprocessing as mp
 from pathlib import Path
 
-from miniworld_engine._atomic import write_json
+from miniworld_engine.utils.atomic import write_json
 
 
 def _writer(args) -> None:

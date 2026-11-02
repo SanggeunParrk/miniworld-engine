@@ -29,9 +29,9 @@ from jaxtyping import Float
 
 from miniworld_engine import kernels
 from miniworld_engine.kernels import _capture
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.autotune.shape_key import length_of
-from miniworld_engine.integrations.h100_master import is_h100
+from miniworld_engine.utils.h100_master import is_h100
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -112,7 +112,7 @@ class ConditionedTransition(nn.Module):
         x: Float[torch.Tensor, "*"],
         cond: Float[torch.Tensor, "*"],
     ) -> Float[torch.Tensor, "*"]:
-        from miniworld_engine.integrations.h100_master import master_linear
+        from miniworld_engine.utils.h100_master import master_linear
 
         a = master_linear(self.expand_a, x)
         b = master_linear(self.expand_b, x)

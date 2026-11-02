@@ -199,7 +199,7 @@ Let `A=benchmarks/kernels/gemm_epilogue/artifacts`.
 All figures share one palette/theme so the benchmark
 figures read as **one coherent set** (this matters for the paper: a reviewer
 sees the same backend in the same colour in every plot). Defined once in
-`src/miniworld_engine/viz/style.py` and imported by:
+`src/miniworld_engine/utils/viz/style.py` and imported by:
 
 - `benchmarks/runners/plot_csv.py` (grouped bar plots from benchmark CSVs).
 
@@ -224,7 +224,7 @@ Rules baked into the module:
 
 - **Generated results go in the target's `artifacts/`**; durable explanations
   go in `docs/`.
-- **Use the shared style** (`miniworld_engine.viz`) for every figure — never
+- **Use the shared style** (`miniworld_engine.utils.viz`) for every figure — never
   ad-hoc colours.
 - **Both inference and training** when the op is used in training.
 - **CUDA Graph timing regime:** `cudagraph=auto` selects `manual` for inference.

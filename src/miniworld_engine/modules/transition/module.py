@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float
 
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import KernelBackend, resolve_transition
 from miniworld_engine.modules.exceptions import ImplementationType

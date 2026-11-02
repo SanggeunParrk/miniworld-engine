@@ -700,7 +700,7 @@ class AdaLNTrainFn(torch.autograd.Function):
     def forward(ctx, x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
                 eps_x, eps_cond, with_stream=False, with_cond=False):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
-        from miniworld_engine.integrations.h100_master import is_h100
+        from miniworld_engine.utils.h100_master import is_h100
         raw_weights = (scale_weight, scale_bias, bias_weight)
         ctx.dtypes = (x.dtype, cond.dtype, cond_ln_weight.dtype,
                       scale_weight.dtype, scale_bias.dtype, bias_weight.dtype)
@@ -714,7 +714,7 @@ class AdaLNTrainFn(torch.autograd.Function):
                 saved_wcat, scale_bias = cast_pack([scale_weight, bias_weight, scale_bias], 2)
                 scale_weight, bias_weight = saved_wcat[:scale_weight.shape[0]], saved_wcat[scale_weight.shape[0]:]
             else:
-                from miniworld_engine.integrations.h100_master import pack as pack_master
+                from miniworld_engine.utils.h100_master import pack as pack_master
 
                 scale_weight, scale_bias, bias_weight = pack_master(raw_weights)
         orig_x_shape = x.shape

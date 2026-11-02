@@ -4,7 +4,7 @@ Kernel-level status of `MSAPairWeightedAveraging` on B200; the module-level summ
 module's shape is fixed (d_msa 64, d_pair 128, 8 heads x 32), so the columns are (Length, MSA depth). B200 = CUDA where a
 hand-written sm_100a kernel runs a step; the two contractions and the weight gradient are cuBLAS `bmm` (figures only).
 Figures: one box per kernel, left to right, HBM reads (blue, left) and writes (red, right); generated from
-`figures/pwa.json` by `python -m miniworld_engine.viz.kernel_flow`, then converted to PNG (`cairosvg -s 2 -b white`).
+`figures/pwa.json` by `python -m miniworld_engine.utils.viz.kernel_flow`, then converted to PNG (`cairosvg -s 2 -b white`).
 Dispatch: `integrations/pwa_train.py` (the H100 integration; compute capability (10, 0) selects the sm_100a extension);
 kernels: `integrations/csrc/sm100/pwa_sm100.cu` (tcgen05 / TMEM / TMA), one extension.
 
@@ -132,7 +132,7 @@ Design notes:
   gradient, and the inference update, within 1.15x of the module's own bf16 statements' error against an fp32 copy.
 - Re-verification (2026-10-10, engine v2.2.0 plus unreleased changes, the setup above with the kernels built by nvcc 13.1, driver 580.95.05, one GPU with no other process on it): every cell of the inference table and the CUDA-graph training table (66 cells) was re-measured through the harness command above, one run per width and mode; a cell that moved by more than 8 % against the table was repeated (once, twice if still beyond 8 %) and the median of the runs is reported. Median change 0.5 % (0.6 % for ours), 90th percentile 1.6 %; no cell moved by more than 8 %. The no-CUDA-graph training tables are host-bound (their cells move by 20-60 % between runs with the load on the host) and keep their 2026-09-30 values. **2026-10-11:** every CUDA-graph cell of these tables was re-measured with fp32 master parameters (`precision=bf16-mixed`, the harness default since that date: fp32 parameters over bf16 activations under `torch.autocast`; one run per cell, `parameter_dtype` = float32 in the CSV, the engine environment's python called directly); the cells above are those values. The no-CUDA-graph training tables are host-bound and keep their earlier values (bf16 parameters).
 - Charts: under each table, a length sweep at S1024 and an MSA-depth sweep at L384
-  (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/pwa/pwa.md --length-d 1024`).
+  (`python -m miniworld_engine.utils.viz.measure_bars docs/gpus/b200/pwa/pwa.md --length-d 1024`).
 
 ### PWA · Inference (CUDA graph)
 

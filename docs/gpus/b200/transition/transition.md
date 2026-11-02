@@ -27,7 +27,7 @@ the same kernel sources (not shipped), with the experiment switches resolved to 
 equals that build's cubin.
 
 Figures: one box per kernel, left to right, HBM reads (blue, left) and writes (red, right); generated from
-`figures/transition_pair.json` by `python -m miniworld_engine.viz.kernel_flow`. (`rsvg-convert` was not available where the figures were
+`figures/transition_pair.json` by `python -m miniworld_engine.utils.viz.kernel_flow`. (`rsvg-convert` was not available where the figures were
 generated, so the pages embed the SVG until the PNGs are rendered.) The dW GEMMs of the D ≥ 256 backward are cuBLAS (fp32 output) and
 appear in the figures only. The n = 2 builds run the kernels of the same width's figure (D768 as D512).
 

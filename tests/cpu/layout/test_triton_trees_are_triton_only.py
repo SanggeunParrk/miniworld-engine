@@ -30,9 +30,9 @@ SHARED_TRITON_HELPERS = ("_tma.py", "_compile.py", "_tiles.py", "_dot_precision.
 
 #: EXPLICIT exceptions to the import rules: (path under kernels/, imported module) -> why it is not a hand-CUDA call.
 ALLOW_IMPORTS = {
-    ("adaln/triton/training.py", "miniworld_engine.integrations.h100_master"):
+    ("adaln/triton/training.py", "miniworld_engine.utils.h100_master"):
         "H100 master-weight pack: one multi-tensor PyTorch bf16 copy (torch._foreach_copy_), no CUDA kernel; card-specific branch, reported in docs/records/pure_triton_trees_20261027.md",
-    ("conditioned_transition/triton/training.py", "miniworld_engine.integrations.h100_master"):
+    ("conditioned_transition/triton/training.py", "miniworld_engine.utils.h100_master"):
         "same H100 master-weight pack (a PyTorch cast), no CUDA kernel",
 }
 

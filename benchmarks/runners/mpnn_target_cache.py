@@ -27,7 +27,7 @@ from benchmarks.runners.mpnn_training import logits_for, make_inputs, param_audi
 from triton.runtime.autotuner import Autotuner
 
 from miniworld_engine import settings
-from miniworld_engine._atomic import write_json
+from miniworld_engine.utils.atomic import write_json
 from miniworld_engine.autotune import cache, capture
 from miniworld_engine.autotune.configs import op_of
 

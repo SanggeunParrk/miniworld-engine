@@ -14,7 +14,7 @@ import json
 import pathlib
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[1] / "kernels"
+ROOT = pathlib.Path(__file__).resolve().parents[2] / "kernels"
 SKIP = {0, 1, 2, -1, 100, 1000}
 
 class Finder(ast.NodeVisitor):

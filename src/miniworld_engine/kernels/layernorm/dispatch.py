@@ -33,7 +33,7 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine._atomic import write_json
+from miniworld_engine.utils.atomic import write_json
 from miniworld_engine.kernels._compile import device_constant
 
 _SUBDIR = "ln_bwd_dispatch"

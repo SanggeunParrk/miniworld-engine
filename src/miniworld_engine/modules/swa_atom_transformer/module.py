@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from torch.utils.checkpoint import checkpoint_sequential
 
 from miniworld_engine import kernels, settings
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.modules import RMSNorm
 from miniworld_engine.modules.dispatch import (
     fallback_autocast,

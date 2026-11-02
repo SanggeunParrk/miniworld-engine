@@ -14,8 +14,8 @@ from einops import rearrange
 from jaxtyping import Bool, Float
 
 from miniworld_engine import kernels, settings
-from miniworld_engine._typecheck import typecheck
-from miniworld_engine.integrations import h100_master as _master
+from miniworld_engine.utils.typecheck import typecheck
+from miniworld_engine.utils import h100_master as _master
 from miniworld_engine.integrations import triattn_b200 as _b200
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels.bias_only_attention import dispatch as _bo_dispatch

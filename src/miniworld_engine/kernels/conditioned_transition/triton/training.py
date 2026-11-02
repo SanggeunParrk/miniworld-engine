@@ -565,7 +565,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
-        from miniworld_engine.integrations.h100_master import is_h100
+        from miniworld_engine.utils.h100_master import is_h100
         raw_weights = (wa, wb, ws, wsc, bsc)
         ctx.master = x.dtype == torch.bfloat16 and wa.dtype == torch.float32 and is_h100(x.device)
         wcat = None
@@ -578,7 +578,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
                 wcat, ws, wsc, bsc = cast_pack([wa, wb, ws, wsc, bsc], 2)
                 wa, wb = wcat[:nd0], wcat[nd0:]
             else:
-                from miniworld_engine.integrations.h100_master import pack as pack_master
+                from miniworld_engine.utils.h100_master import pack as pack_master
 
                 wcat = None
                 wa, wb, ws, wsc, bsc = pack_master(raw_weights)

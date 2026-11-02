@@ -1,6 +1,6 @@
 """Bar charts for the Measurements section of docs/gpus/<gpu>/<module>/<module>.md.
 
-    python -m miniworld_engine.viz.measure_bars docs/gpus/b200/trimul/trimul.md [--length-d 128] [--dim-l 384] [--length-prefix L]
+    python -m miniworld_engine.utils.viz.measure_bars docs/gpus/b200/trimul/trimul.md [--length-d 128] [--dim-l 384] [--length-prefix L]
 
 Every table under a ``## Measurements...`` section whose first column is ``(Length, <axis>)`` or ``(Length, <axis>, dtype)`` --
 ``Dimension``, or e.g. ``MSA depth`` for the MSA modules (a table with two rows at one length is skipped: split it by dtype) -- gets two charts, drawn from the table itself so they cannot disagree with it: a length sweep at one
@@ -18,7 +18,7 @@ import argparse
 import re
 from pathlib import Path
 
-from miniworld_engine.viz import style
+from miniworld_engine.utils.viz import style
 
 #: the second axis of a table's first column -> (tick prefix, chart / file name)
 AXES = {"Dimension": ("D", "dimension"), "MSA depth": ("S", "msa_depth")}

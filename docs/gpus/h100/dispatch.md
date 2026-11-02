@@ -152,7 +152,7 @@ copies into the module's new strides. **Old optimizer moments need a one-time
 layout migration**, especially with fused AdamW:
 
 ```python
-from miniworld_engine.integrations.optimizer import align_optimizer_state_layout_
+from miniworld_engine.utils.optimizer import align_optimizer_state_layout_
 
 model.load_state_dict(checkpoint["model_state_dict"])
 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

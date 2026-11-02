@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.integrations.h100_master import is_h100
-from miniworld_engine.integrations.h100_master import pack as pack_master
+from miniworld_engine.utils.h100_master import is_h100
+from miniworld_engine.utils.h100_master import pack as pack_master
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.swa_dit.dispatch import (
     _h100_global,

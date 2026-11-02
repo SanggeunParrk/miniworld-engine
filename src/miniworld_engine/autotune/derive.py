@@ -846,7 +846,7 @@ def derive_all(rows: list[ModuleRow] | None = None, *, on_unit=None,
         return _parallel_derive(rows, arch, per_unit, workers, reuse)
     entries, skipped, records = _collect(rows, on_unit, arch, reuse)
     if per_unit is not None:
-        from miniworld_engine._atomic import write_json
+        from miniworld_engine.utils.atomic import write_json
         write_json(per_unit, evidence_document(arch or sm_tag(), records, skipped))
     return entries, skipped
 
@@ -861,7 +861,7 @@ def _parallel_derive(rows, arch, per_unit, workers, reuse):
     """Separate processes isolate monkeypatches and share only the CUDA context requirement."""
     import multiprocessing
 
-    from miniworld_engine._atomic import write_json
+    from miniworld_engine.utils.atomic import write_json
 
     rows = module_rows() if rows is None else rows
     arch_tag = arch or sm_tag()

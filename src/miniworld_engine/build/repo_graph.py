@@ -265,7 +265,7 @@ def _identities(g: Graph) -> None:
     for path in derived:
         g.edge(f"{SRC}/{path}", DERIVATION, "identity")
     for page in (p for p in g.nodes if p.startswith("docs/kernels/") and p.endswith("sweep-grid.html")):
-        for dep in (f"{SRC}/kernels/registry/registry_kernel.csv", f"{SRC}/viz/sweep_page.py"):
+        for dep in (f"{SRC}/kernels/registry/registry_kernel.csv", f"{SRC}/utils/viz/sweep_page.py"):
             g.edge(page, dep, "ref")
 
 

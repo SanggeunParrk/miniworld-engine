@@ -1,6 +1,6 @@
 """One page describing the whole autotune sweep: every kernel, one row.
 
-`python -m miniworld_engine.viz.sweep_page` writes `docs/kernels/autotune-sweep-grid.html`.
+`python -m miniworld_engine.utils.viz.sweep_page` writes `docs/kernels/autotune-sweep-grid.html`.
 
 It reads the repository, never a snapshot: `registry.csv` for what a kernel is, `op_units()` for
 the shapes a build drives it at, `autotune/configs/grid/` for the ladders it searches, and
@@ -21,7 +21,7 @@ import html
 import json
 from pathlib import Path
 
-PKG = Path(__file__).resolve().parents[1]
+PKG = Path(__file__).resolve().parents[2]
 REGISTRY = PKG / "kernels" / "registry" / "registry.csv"
 EXEMPT = PKG / "kernels" / "registry" / "tile_order_exempt.csv"
 GRID = PKG / "autotune" / "configs" / "grid"

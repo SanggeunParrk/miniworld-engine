@@ -24,7 +24,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.integrations import h100_master as _master
+from miniworld_engine.utils import h100_master as _master
 from miniworld_engine.integrations import local_dit as _local
 from miniworld_engine.modules.adaptive_layernorm import (
     AdaptiveLayerNorm,

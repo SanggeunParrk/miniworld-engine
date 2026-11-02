@@ -4,7 +4,7 @@ Kernel-level status of the TriMul modules on B200; the module-level summary is i
 [b200.md](../b200.md). bf16 only; columns are (Length, Dimension). B200 = CUDA where a
 hand-written sm_100a path exists; a shape without one is 미구현 (portable path). Figures: one box
 per kernel, left to right, HBM reads (blue, left) and writes (red, right); generated from
-`figures/trimul.json` by `python -m miniworld_engine.viz.kernel_flow`,
+`figures/trimul.json` by `python -m miniworld_engine.utils.viz.kernel_flow`,
 then converted to PNG (`cairosvg -s 2 -b white`; `rsvg-convert` was not installed in the environment that generated the figures).
 Dispatch: `integrations/trimul_b200.py`; kernels: `kernels/trimul_inproj/cuda/`
 (`b200_infer.py`, `b200_train.py`) and `b200_sources/` (tcgen05 / TMEM / TMA), one extension.
@@ -519,7 +519,7 @@ kernels) and both inference tables, all four implementations in one harness run 
   4.3e-3 / 5.4e-3, cuEquivariance 4.0e-3 / 5.5e-3).
 - Re-verification (2026-10-10, engine v2.2.0 plus unreleased changes, the setup above with the kernels built by nvcc 13.1, driver 580.95.05, one GPU with no other process on it): every cell of the CUDA-graph inference and training tables of both modules (360 cells) was re-measured through the harness command above, one run per width and mode; a cell that moved by more than 8 % against the table was repeated (once, twice if still beyond 8 %) and the median of the runs is reported. Median change 0.5 % (2.0 % for ours), 90th percentile 3.3 %; one cell was replaced ((640, 512) bidirectional inference, 2.608 -> 2.896 ms). The no-CUDA-graph training tables are host-bound (their cells move by 20-60 % between runs with the load on the host) and keep their 2026-09-30 values. **2026-10-11:** every CUDA-graph cell of these tables was re-measured with fp32 master parameters (`precision=bf16-mixed`, the harness default since that date: fp32 parameters over bf16 activations under `torch.autocast`; one run per cell, `parameter_dtype` = float32 in the CSV, the engine environment's python called directly); the cells above are those values. The no-CUDA-graph training tables are host-bound and keep their earlier values (bf16 parameters).
 - Charts: under each table, a length sweep at D128 and a dimension sweep at L384, drawn from the table
-  (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/trimul/trimul.md`).
+  (`python -m miniworld_engine.utils.viz.measure_bars docs/gpus/b200/trimul/trimul.md`).
 
 ### Bidirectional · Inference (CUDA graph)
 

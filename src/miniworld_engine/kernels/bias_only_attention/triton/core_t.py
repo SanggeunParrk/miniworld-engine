@@ -108,7 +108,7 @@ class BiasOnlyCoreT(torch.autograd.Function):
     """``o = to_out(sigmoid(g) * (softmax(bias) v))`` with ``[v; g] = x @ W_vg^T``, for x [M, d] with M = A * L (one pair), ``p`` [H, L, L].
 
     Weights fp32 master on an H100 under bf16 activations: cast inside (one multi-tensor copy) and the weight gradients are fp32 GEMM
-    outputs, never rounded to bf16 (the ``integrations.h100_master`` contract). Otherwise the weights are used as given.
+    outputs, never rounded to bf16 (the ``utils.h100_master`` contract). Otherwise the weights are used as given.
     """
 
     @staticmethod

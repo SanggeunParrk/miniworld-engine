@@ -12,7 +12,7 @@ from miniworld_engine.kernels._tf32 import tf32_dot
 from jaxtyping import Bool, Float
 
 from miniworld_engine.autotune.shape_key import atom_key, pack
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 
 
 # NOT called from this file any more -- every launch below keys on `atom_key(L)` (see

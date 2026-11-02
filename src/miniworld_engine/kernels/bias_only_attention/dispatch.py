@@ -32,7 +32,7 @@ import torch
 
 # Reuse the shared per-GPU key (name + compute capability + triton version) and
 # M-bucketing from the layernorm dispatch cache so all kernels key GPUs identically.
-from miniworld_engine._atomic import write_json
+from miniworld_engine.utils.atomic import write_json
 from miniworld_engine.kernels._compile import device_constant
 from miniworld_engine.kernels.layernorm.dispatch import gpu_key, mbucket
 

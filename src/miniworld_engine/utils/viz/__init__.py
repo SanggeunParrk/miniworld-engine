@@ -11,7 +11,7 @@ NVIDIA baselines in the same greens, regardless of which figure they look at.
 See ``style.py`` for the actual definitions.
 """
 
-from miniworld_engine.viz.style import (
+from miniworld_engine.utils.viz.style import (
     FORMATS,
     PALETTE,
     apply_theme,

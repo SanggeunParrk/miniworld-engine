@@ -2237,7 +2237,7 @@ def dump_shard(path: str, *, unit_complete: bool = False) -> int:
     in-repo cache). Parallel capture jobs each ``dump_shard`` to their OWN file; a single
     ``merge_shards`` writer folds them into the committed cache — so no env var and no
     concurrent writers ever touch the in-repo tree. Returns the number of ops dumped."""
-    from miniworld_engine._atomic import write_json
+    from miniworld_engine.utils.atomic import write_json
     from miniworld_engine.autotune.cache import KEY_SCHEME
 
     # `_key_scheme`, leading underscore: every other top-level key in a shard is an OP NAME, and

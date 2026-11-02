@@ -9,7 +9,7 @@ import pytest
 from miniworld_engine.autotune import builder, configs, width_evidence
 from miniworld_engine.autotune.cache import _sig, _sig_from_dict
 from miniworld_engine.autotune.module_registry import transition_driver_shapes
-from miniworld_engine.viz import sweep_page
+from miniworld_engine.utils.viz import sweep_page
 
 ROOT = Path(__file__).resolve().parents[3]
 REPORT = json.loads((ROOT / "tests/cpu/data/autotune-space-20260916.json").read_text())

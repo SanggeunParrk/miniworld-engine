@@ -8,7 +8,7 @@ import json
 import math
 from pathlib import Path
 
-from miniworld_engine._atomic import write_json
+from miniworld_engine.utils.atomic import write_json
 
 
 def _timings_identity(data: dict) -> str:

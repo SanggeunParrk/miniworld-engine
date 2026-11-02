@@ -33,7 +33,7 @@ from einops import rearrange
 from jaxtyping import Bool, Float
 
 from miniworld_engine import kernels
-from miniworld_engine._typecheck import typecheck
+from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels.bias_only_attention import dispatch as _bo_dispatch
 from miniworld_engine.modules import dispatch as _dispatch

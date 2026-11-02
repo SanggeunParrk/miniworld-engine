@@ -62,7 +62,7 @@ def compile_task(task):
 
 
 def _run_one(task, directory, timeout, env):
-    from miniworld_engine._atomic import write_json
+    from miniworld_engine.utils.atomic import write_json
     key = task_id(task)
     request = directory / f"{key}.request.json"
     log = directory / f"{key}.log"

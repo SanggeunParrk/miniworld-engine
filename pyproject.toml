@@ -233,7 +233,7 @@ ban-relative-imports = "all"
 # The multiplication sign is the page's own column label ("units x grid" reads worse and the
 # test has to match the rendered string byte for byte), so RUF001 is off for the generator and the
 # test that checks its output.
-"src/miniworld_engine/viz/sweep_page.py" = ["RUF001"]
+"src/miniworld_engine/utils/viz/sweep_page.py" = ["RUF001"]
 "tests/cpu/layout/test_the_sweep_page_matches_the_repo.py" = ["RUF001"]
 # The presentation plots label axes with the multiplication sign, the minus sign
 # (heads × head width, |i−j| ≤ 64); they are typographic characters in figure text, not identifiers.
@@ -246,7 +246,7 @@ ban-relative-imports = "all"
   "E402",   # the bench/tool scripts bootstrap sys.path before importing the package
   "PT",
 ]
-"src/miniworld_engine/tools/**/*.py" = ["PT"]
+"src/miniworld_engine/utils/tools/**/*.py" = ["PT"]
 # team-gm's kernel relaxation (math-notation names, no annotations) for the
 # connecting/reference code that lives under kernels/ (interface.py, reference.py).
 "src/miniworld_engine/kernels/**/*.py" = []
@@ -262,7 +262,7 @@ ban-relative-imports = "all"
 "src/miniworld_engine/modules/triangle_multiplication/baseline_dtv1_bidir.py" = [
   "ALL",
 ]
-"src/miniworld_engine/_typecheck.py" = []
+"src/miniworld_engine/utils/typecheck.py" = []
 
 [tool.ruff.format]
 docstring-code-format = false

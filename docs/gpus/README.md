@@ -41,7 +41,7 @@ fixed-width bf16 MSA modules, otherwise `(Length, Dimension, dtype)`); rows are 
 runs, or 미구현), **성능 확인** (maintainer only: ✓ finished, △ the fastest measured but not yet complete,
 ✗ not confirmed) and **cache build** (agent, ✓ / ✗).
 Kernel tables cover CUDA / Triton kernels; PyTorch and cuBLAS steps appear only in the figures.
-Every measurement table is followed by two bar charts drawn from it (`python -m miniworld_engine.viz.measure_bars
+Every measurement table is followed by two bar charts drawn from it (`python -m miniworld_engine.utils.viz.measure_bars
 <page>`): a length sweep at D128 and a dimension (or MSA-depth) sweep at L384 (`--length-d` / `--dim-l` for a page without them), one
 bar per implementation, latency on a log axis; rerun it whenever a table changes.
 Measurements compare PyTorch compiled / cuEquivariance / Anthropic / ours, CUDA-graph or compiled

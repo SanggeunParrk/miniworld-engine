@@ -10,7 +10,7 @@ Layout per GPU (H100 first; B200 / A100 move to it next):
       <module>.md             kernel-level tables, kernel-flow figures, measurements
       figures/
         <module>_<variant>.json          figure spec
-        <module>_<variant>_<name>.svg    generated (python -m miniworld_engine.viz.kernel_flow <spec>)
+        <module>_<variant>_<name>.svg    generated (python -m miniworld_engine.utils.viz.kernel_flow <spec>)
         <module>_<variant>_<name>.png    rsvg-convert -z 2 -b white <svg> -o <png>; pages embed the PNG
 
 Table rules (both pages):
@@ -23,7 +23,7 @@ Table rules (both pages):
 - Kernel tables only for CUDA / Triton kernels; PyTorch and cuBLAS steps appear in the figures only.
 - Measurements (module page): one table per variant and mode; columns PyTorch compiled /
   cuEquivariance / Anthropic / ours / × (ours vs the fastest other); rows = shapes and conditions.
-  Under each table, two bar charts drawn from it by `python -m miniworld_engine.viz.measure_bars <page>`:
+  Under each table, two bar charts drawn from it by `python -m miniworld_engine.utils.viz.measure_bars <page>`:
   length sweep at D128, dimension sweep at L384 (latency, log axis, one bar per implementation).
 -->
 

@@ -225,7 +225,7 @@ Training invocations add `cudagraph=manual`; fp32 invocations add `precision=32`
    opaque ops + fakes, dispatch from the module with the old path as the fallback and an environment switch (`MINIWORLD_<NAME>=0`)
    to turn it off for A/B.
 5. Add the registry rows, the layout / vocabulary tests that fail until the names agree, the benchmark yaml if a new target.
-6. Measure with the harness (section 5), tables + figures with `python -m miniworld_engine.viz.measure_bars <page>`.
+6. Measure with the harness (section 5), tables + figures with `python -m miniworld_engine.utils.viz.measure_bars <page>`.
 7. Write the page from `docs/gpus/template.md`, the completion tables, the CHANGELOG entry; `pixi run ci` and the GPU suite.
 
 ## 8. Engineering rules learned on the B200
