@@ -23,11 +23,30 @@ FUSED, GENERIC = 0, 1
 
 
 def _fused_shape(module, pair) -> bool:
-    """d_pair = d_hidden = 128, 4 heads x 32: the fused kernels (front / tail / backward on wgmma)."""
-    return (
+    """d_pair = d_hidden = 128, 4 heads x 32: the fused kernels (front / tail / backward on wgmma).  d_pair = d_hidden = 256, 8 heads
+    x 32 (``h100_sm90.WIDE``): the wide fused front, inference only (with grad or training dropout: the width-generic kernels)."""
+    if (
         module.n_head == 4
         and pair.shape[-1] == 128
         and tuple(module.to_query.weight.shape) == (128, 128)
+    ):
+        return True
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as fused
+
+    d_hidden, d_pair = module.to_query.weight.shape
+    return (
+        pair.shape[-1] == d_pair
+        and fused.wide(d_pair, d_hidden, module.n_head)
+        and not _trains(module, pair)
+    )
+
+
+def _trains(module, pair) -> bool:
+    """The call takes the autograd function (``forward``'s ``needs_grad``) or applies the module's training dropout."""
+    if module.training and module.p_drop > 0.0:
+        return True
+    return torch.is_grad_enabled() and (
+        pair.requires_grad or any(p.requires_grad for p in module.parameters())
     )
 
 
@@ -367,9 +386,11 @@ def _bytes_per_token(
     # a length padded to 128: the padded copy of the pair (saved in training) and of dy, the padded output / dx before the cut
     pad = 4 * c if padded else 0
     if kind == FUSED:
-        # inference: q | k | v | g, o, the output; sbias (bf16 per head)
+        # inference: q | k | v | g, o, the output; sbias (bf16 per head); the wide path (d_pair 256: u instead of o) also cublasLt's
+        # tuning copy of the output
         # saved: q | k | v | g, o; sbias; lse (fp32 per head)   backward: do, dg, dq, dk, dv; delta, dbias, its slab sum (fp32 per head)
-        return 12 * c + 2 * h + pad, 10 * c + 6 * h + pad // 2, 10 * c + 12 * h + pad
+        wide = 2 * c if c != 128 else 0
+        return 12 * c + 2 * h + pad + wide, 10 * c + 6 * h + pad // 2, 10 * c + 12 * h + pad
     # heads padded to 32 channels, the bias columns to 8
     hd, hp = 32 * h, (h + 7) // 8 * 8
     # inference: y, the LN statistics, q | k | v | g | bias, sbias, u = sigmoid(g) o O, the output and cublasLt's tuning copy of it
