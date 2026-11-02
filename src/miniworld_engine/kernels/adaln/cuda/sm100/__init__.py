@@ -112,16 +112,17 @@ STAGING = {False: 2, True: 1}
 
 
 @functools.lru_cache(maxsize=16)
-def _load(f32: bool, bn: int, stg: int = 2):
+def _load(f32: bool, bn: int, stg: int = 2, fold: bool = False):
     """The sm_100a host binding with this (dtype, tile width, cluster) cubin registered (loaded on the current device: a rejected cubin fails
     here). Returns (binding, registered name)."""
     from miniworld_engine.kernels import _nvcc
     from miniworld_engine.kernels.transition.cuda import fused_sm100a
 
-    tag = f"{'f32' if f32 else 'bf16'}_bn{bn}_s{stg}"
+    tag = f"{'f32' if f32 else 'bf16'}_bn{bn}_s{stg}" + ("_fold" if fold else "")
     inc = _inc
     path = _nvcc.cubin(f"adaln_sm100a/gemm_{tag}", ["-std=c++17", "-O3", "-arch=sm_100a", "-cubin", f"-I{inc}", f"-DF32={int(f32)}",
-                                                    f"-DBN={bn}", f"-DSTGP={stg}"], source=_dir / "adaln_gemm_sm100.cu", toolchain="sm100")
+                                                    f"-DBN={bn}", f"-DSTGP={stg}", f"-DFOLD={int(fold)}"], source=_dir / "adaln_gemm_sm100.cu",
+                       toolchain="sm100")
     ext = fused_sm100a._ext()
     ext.load_cubin(f"adaln_sm100a_{tag}", str(path))
     return ext, f"adaln_sm100a_{tag}"
@@ -232,7 +233,58 @@ def _infer(x2: torch.Tensor, c2: torch.Tensor, wc: torch.Tensor, wb: torch.Tenso
     ext.launch_kernel(
         name, "adaln_gemm_sm100", max(1, min(nsm, tiles)), 320, 1,
         [t(cn, dc, m, bke, 128), t(wb, dc, d, bke, bn), t(ws, dc, d, bke, bn), t(y, d, m, ocg if f32 or bn >= 64 else 32, 32), x2, st, bs, m, d,
-         dc, d, int(bool(rna) and f32), y],
+         dc, d, int(bool(rna) and f32), y, bs, bs],
+        pdl=True,
+    )
+    return y
+
+
+#: bf16 token widths: LN(cond) folded into the weights (``adaln_gemm_sm100.cu`` FOLD), the row pass only the statistics, which only the GEMM's
+#: epilogue waits for. None: ``_fold_ok`` decides; False / True: never / always (A/B, tests)
+FOLD: bool | None = None
+
+
+def _fold_ok(m: int, d: int, dc: int) -> bool:
+    return FOLD is not False and dc not in FUSED_KC
+
+
+def _fold_weights(wc, ws, bs, wb):
+    """(Wb wc, Ws wc) bf16 [D, DC], the gate bias fp32 (rounded to bf16 first), and the row sums ub / us fp32 [D] of the ROUNDED folded
+    weights (what the MMA reads: the identity cn W^T = rstd (cond (W wc)^T) - rstd mean u is then exact up to the fp32 accumulation)."""
+    bf = torch.bfloat16
+    wcf = wc.float()
+    wbw = (wb.float() * wcf).to(bf).contiguous()
+    wsw = (ws.float() * wcf).to(bf).contiguous()
+    b = bs.to(bf).float().contiguous() if bs is not None else torch.zeros(ws.shape[0], dtype=torch.float32, device=ws.device)
+    return wbw, wsw, b, wbw.float().sum(1).contiguous(), wsw.float().sum(1).contiguous()
+
+
+def _infer_fold_fake(x2, c2, wbw, wsw, bs, ub, us, eps_x, eps_c):
+    return torch.empty_like(x2)
+
+
+@opaque(fake=_infer_fold_fake, name="adaln_sm100a_infer_fold")
+def _infer_fold(x2: torch.Tensor, c2: torch.Tensor, wbw: torch.Tensor, wsw: torch.Tensor, bs: torch.Tensor, ub: torch.Tensor, us: torch.Tensor,
+                eps_x: float, eps_c: float) -> torch.Tensor:
+    """bf16 x2 [M, D], c2 [M, DC] contiguous, the folded weights of ``_fold_weights``. Returns y [M, D]: ``xc_stats``, then the FOLD GEMM as its
+    programmatic dependent (only the epilogue waits)."""
+    from miniworld_engine.kernels._device import num_sms
+
+    from .. import _ext as _rows_ext
+
+    m, d = x2.shape
+    dc = c2.shape[1]
+    st = _rows_ext().xc_stats(x2, c2, float(eps_x), float(eps_c))
+    nsm = num_sms(x2.device)
+    bn = BN_FORCE or _pick_bn(m, d, False, nsm)
+    ext, name = _load(False, bn, STAGING[False], True)
+    y = torch.empty_like(x2)
+    t = ext.tmap
+    tiles = -(-m // 128) * -(-d // bn)
+    ext.launch_kernel(
+        name, "adaln_gemm_sm100", max(1, min(nsm, tiles)), 320, 1,
+        [t(c2, dc, m, 64, 128), t(wbw, dc, d, 64, bn), t(wsw, dc, d, 64, bn), t(y, d, m, 64 if bn >= 64 else 32, 32), x2, st, bs, m, d, dc, d, 0, y,
+         ub, us],
         pdl=True,
     )
     return y
@@ -253,6 +305,10 @@ def adaln_inference(x, cond, wc, ws, bs, wb, eps_x: float, eps_c: float, *, rna:
                      torch.cat([bs.float() if bs is not None else ws.new_zeros(d, dtype=torch.float32), ws.new_zeros(d, dtype=torch.float32)])))
         y = _f32_cublas_op(x.reshape(-1, d).contiguous(), cond.reshape(-1, dc).contiguous(), wc.contiguous(), wcat, bcat, float(eps_x),
                            float(eps_c), bool(rna))
+        return y.view(x.shape)
+    if not f32 and _fold_ok(x.numel() // max(d, 1), d, dc):
+        fw = _capture.param_forms("adaln_sm100a_fold_bf16", (wc, *params), lambda: _fold_weights(wc, ws, bs, wb))
+        y = _infer_fold(x.reshape(-1, d).contiguous(), cond.reshape(-1, dc).contiguous(), *fw, float(eps_x), float(eps_c))
         return y.view(x.shape)
     wb_, ws_, bs_ = _capture.param_forms(f"adaln_sm100a_{x.dtype}", params, lambda: _weights(ws, bs, wb, f32))
     y = _infer(x.reshape(-1, d).contiguous(), cond.reshape(-1, dc).contiguous(), wc, wb_, ws_, bs_, float(eps_x), float(eps_c), bool(rna))

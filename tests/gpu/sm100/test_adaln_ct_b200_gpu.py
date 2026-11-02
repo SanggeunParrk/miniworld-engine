@@ -131,7 +131,8 @@ def test_inference_launches_the_cuda_kernels_and_matches_the_reference(op, bf16,
     # widths of the AdaLN module (``sm100._f32_tcgen05``), and the row kernels around one cuBLAS TF32 GEMM (the weights packed once) at the
     # atom width and at cond 768 up to a few thousand rows. The tail at the token width (bf16 up to 4096 rows) cuBLAS between the CUDA SwiGLU /
     # gate row kernels, else the two tcgen05 GEMMs. The ConditionedTransition's bf16 call on the cuBLAS tail takes its AdaLN and gate projection
-    # as one head (ct_sm100.head_inference: the row-statistics pass, then ct_head_sm100 / ct_head_split_sm100).
+    # as one head (ct_sm100.head_inference: the row-statistics pass, then ct_head_sm100 / ct_head_split_sm100); the AdaLN module's bf16 call at
+    # the token width folds LN(cond) into its weights the same way (``xc_stats``, then the FOLD GEMM).
     from miniworld_engine.kernels.adaln.cuda import sm100 as adaln_sm100
     from miniworld_engine.kernels.conditioned_transition.cuda import ct_sm100
 
@@ -152,6 +153,8 @@ def test_inference_launches_the_cuda_kernels_and_matches_the_reference(op, bf16,
         assert _has(names, "head_stats", "ct_head"), names
     elif dc == 128:
         assert _has(names, "adaln_fused_sm100"), names
+    elif op == "adaln":   # bf16 token width: LN(cond) folded into the GEMM's weights, the row pass only the statistics
+        assert _has(names, "xc_stats", "adaln_gemm_sm100"), names
     else:
         assert _has(names, "ln_cond_xstats", "adaln_gemm_sm100"), names
     if op == "ct":

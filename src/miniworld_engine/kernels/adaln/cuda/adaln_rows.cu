@@ -620,6 +620,39 @@ std::vector<at::Tensor> ln_cond_xstats(at::Tensor cond, at::Tensor w, at::Tensor
   return {cn, st};
 }
 
+// The row pass of the B200 bf16 inference route with LN(cond) folded into the GEMM's weights (sm100/adaln_gemm_sm100.cu FOLD): only the
+// statistics, ST [R] = (rstd_x, mean_x rstd_x, rstd_c, mean_c rstd_c), two-pass fp32 as ln_cond_xstats_k; nothing else is written. The GEMM
+// reads them in its epilogue only, so this pass lets it launch at once (its main loop runs under this pass).
+__global__ void __launch_bounds__(32 * WPB) xc_stats_k(const bf* __restrict__ X, const bf* __restrict__ C, float4* __restrict__ ST, int NX, int NC,
+                                                       long R, float eps_x, float eps_c) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
+  const int lane = threadIdx.x & 31;
+  const long row = (long)blockIdx.x * WPB + (threadIdx.x >> 5);
+  if (row >= R) return;
+  float v[32], c[32], mx, rx, mc, rc;
+  ld_row_rt(X + row * NX, NX, lane, v);
+  ld_row_rt(C + row * NC, NC, lane, c);
+  stats_rt(v, NX, eps_x, mx, rx);
+  stats_rt(c, NC, eps_c, mc, rc);
+  if (lane == 0) ST[row] = make_float4(rx, mx * rx, rc, mc * rc);
+}
+at::Tensor xc_stats(at::Tensor x, at::Tensor cond, double eps_x, double eps_c) {
+  chk(x, at::kBFloat16, "x");
+  chk(cond, at::kBFloat16, "cond");
+  TORCH_CHECK(x.dim() == 2 && cond.dim() == 2 && x.size(0) == cond.size(0), "xc_stats: [R, NX], [R, NC]");
+  const long R = x.size(0), NX = x.size(1), NC = cond.size(1);
+  TORCH_CHECK(NC % 128 == 0 && NC <= 1024 && NX % 128 == 0 && NX <= 1024, "xc_stats: widths multiples of 128 up to 1024");
+  const at::cuda::CUDAGuard gd(x.device());
+  auto st = at::empty({R, 4}, x.options().dtype(at::kFloat));
+  if (R > 0)
+    xc_stats_k<<<rows_grid(R), 32 * WPB, 0, S()>>>(P<bf>(x), P<bf>(cond), reinterpret_cast<float4*>(st.data_ptr()), (int)NX, (int)NC, R, (float)eps_x,
+                                                   (float)eps_c);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return st;
+}
+
 std::vector<at::Tensor> adaln_fwd(at::Tensor x, at::Tensor sb, double eps, bool rna) {
   chk_act(x, "x");
   TORCH_CHECK(sb.scalar_type() == x.scalar_type() && sb.is_contiguous(), "sb dtype");
@@ -893,6 +926,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("colsum2", &colsum2);
   m.def("ln_cond_fwd", &ln_cond_fwd);
   m.def("ln_cond_fwd_t", &ln_cond_fwd_t);
+  m.def("xc_stats", &xc_stats);
   m.def("ln_cond_xstats", &ln_cond_xstats, py::arg("cond"), py::arg("w"), py::arg("x"), py::arg("eps_c"), py::arg("eps_x"), py::arg("rna"),
         py::arg("early_pdl") = false);
   m.def("adaln_fwd", &adaln_fwd, py::arg("x"), py::arg("sb"), py::arg("eps"), py::arg("rna") = false);

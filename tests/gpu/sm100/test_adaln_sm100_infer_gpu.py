@@ -38,7 +38,8 @@ def _err(a, ref):
 @pytest.mark.parametrize("bn", [192, 128, 64, 32])
 @pytest.mark.parametrize("fused", [None, False], ids=["route", "two_launch"])
 @pytest.mark.parametrize("stg", [2, 1], ids=["stage2", "stage1"])
-def test_matches_the_reference_at_every_tile_width(dtype, shape, bn, fused, stg):
+@pytest.mark.parametrize("fold", [None, False], ids=["fold", "nofold"])
+def test_matches_the_reference_at_every_tile_width(dtype, shape, bn, fused, stg, fold):
     from miniworld_engine.kernels.adaln.cuda import sm100
 
     m, d, dc = shape
@@ -57,7 +58,10 @@ def test_matches_the_reference_at_every_tile_width(dtype, shape, bn, fused, stg)
         pytest.skip("the two-launch route is the only one at this width")
     if stg == 1 and (fused is None and shape[2] in sm100.FUSED_KC and dtype is torch.bfloat16):
         pytest.skip("the one-kernel route has no staging option")
+    if fold is False and (dtype is torch.float32 or dc in sm100.FUSED_KC):
+        pytest.skip("the fold is the bf16 token-width route only")
     saved, saved_route = dict(sm100.STAGING), sm100.F32_ROUTE
+    sm100.FOLD = fold
     # fp32 calls take the cuBLAS route at the atom width in production; the tcgen05 kernels are pinned here so that every width of them stays tested
     sm100.BN_FORCE, sm100.FUSED, sm100.STAGING, sm100.F32_ROUTE = bn, fused, {False: stg, True: stg}, "tcgen05"
     try:
@@ -67,7 +71,7 @@ def test_matches_the_reference_at_every_tile_width(dtype, shape, bn, fused, stg)
             again = sm100.adaln_inference(x, c, wc, ws, bs, wb, 1e-5, 1e-5)
             yr = sm100.adaln_inference(x, c, wc, ws, bs, wb, 1e-5, 1e-5, rna=True)
     finally:
-        sm100.BN_FORCE, sm100.FUSED, sm100.STAGING, sm100.F32_ROUTE = None, None, saved, saved_route
+        sm100.BN_FORCE, sm100.FUSED, sm100.STAGING, sm100.F32_ROUTE, sm100.FOLD = None, None, saved, saved_route, None
     assert y.dtype == dtype and y.shape == x.shape
     assert torch.equal(y, again)
     ref = _ref(x.double(), c.double(), wc.double(), ws.double(), bs.double(), wb.double())

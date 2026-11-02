@@ -17,6 +17,12 @@
 // rounds y to it too, for a consumer whose MMA truncates), else bf16 (kind::f16). Any M (TMA zero-fills the tail rows of the last 128-row
 // tile and clips them on the store), N a multiple of the output group (64 bf16 / 32 fp32 columns), K a multiple of 64 (bf16) / 32 (fp32).
 // Launched as a programmatic dependent of the row pass: everything up to the first read of cn overlaps that kernel's tail.
+//
+// -DFOLD=1 (bf16): LN(cond) folded into the weights, the GEMM over the RAW cond rows (the ConditionedTransition head's identity,
+// kernels/conditioned_transition/cuda/ct_head_sm100.cu): cn W^T = rstd_c (cond (W wc)^T) - rstd_c mean_c u, u[n] = sum_k (W wc)[n, k] summed
+// from the bf16-rounded W wc the MMA reads (exact up to the fp32 accumulation; cond is bf16 already, so the A operand is not rounded at
+// all). The row pass (``xc_stats``) then only produces the statistics of x and cond, which only the epilogue reads: the producer and the MMA
+// never wait for it, so the whole main loop runs under the row pass instead of after it.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -27,6 +33,10 @@ using namespace s100;
 #ifndef BN
 #define BN 128
 #endif
+#ifndef FOLD
+#define FOLD 0
+#endif
+static_assert(!(FOLD && F32), "the fold is bf16 only: a TF32 A operand would round the raw cond");
 
 constexpr int NACC = 2;                              // acc 0 = cn Wb^T (the shift), acc 1 = cn Ws^T (the gate's pre-activation)
 constexpr int ESZ = F32 ? 4 : 2;                     // activation / operand element bytes
@@ -44,7 +54,8 @@ constexpr int SLAB = 32 * 128;                       // one warp's staging slab:
 constexpr int NEPI = 8;                              // epilogue warps: two per TMEM lane quarter, splitting the columns
 constexpr int STG_BYTES = NEPI * STG_PAR * SLAB;
 constexpr int BUDGET = 232448 - 1024;                // dynamic shared memory minus the barriers' kilobyte
-constexpr int BSM_BYTES = 2 * BN * 4;                // the gate bias of the current and the previous tile's columns (fp32)
+constexpr int NVEC = FOLD ? 3 : 1;                   // per-column vectors staged a tile: the gate bias (FOLD: and u of Wb wc, Ws wc)
+constexpr int BSM_BYTES = 2 * NVEC * BN * 4;         // ... of the current and the previous tile's columns (fp32)
 constexpr int NST_FIT = (BUDGET - STG_BYTES - BSM_BYTES) / STAGE;
 constexpr int NST = NST_FIT > 8 ? 8 : NST_FIT;
 constexpr int O_ST = 0, O_STG = NST * STAGE, O_BSM = O_STG + STG_BYTES, O_BAR = O_BSM + BSM_BYTES;
@@ -115,12 +126,14 @@ DEVI void load32(const void* src, long off, bool ok, float (&v)[32]) {
 #endif
 }
 
-// maps: A cn [M][K] (box BKE x 128), B0 Wb [N][K], B1 Ws [N][K] (box BKE x BN), O y [M][N] (box OCG x 32).
-// X [M][ldx] the activation, ST [M] (rstd, mean rstd) of its rows, BS [N] the gate bias (fp32), Yd y itself (stored directly at DIRECT).
+// maps: A cn [M][K] (FOLD: cond) (box BKE x 128), B0 Wb [N][K], B1 Ws [N][K] (FOLD: both times wc) (box BKE x BN), O y [M][N] (box OCG x 32).
+// X [M][ldx] the activation, STv [M] float2 (rstd_x, mean_x rstd_x) of its rows (FOLD: float4, then (rstd_c, mean_c rstd_c)), BS [N] the
+// gate bias (fp32), Yd y itself (stored directly at DIRECT), UB / US [N] (FOLD) the row sums of the folded Wb / Ws.
 extern "C" __global__ void __launch_bounds__(64 + 32 * NEPI, 1)
 adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUtensorMap mB0, const __grid_constant__ CUtensorMap mB1,
-                 const __grid_constant__ CUtensorMap mO, const void* __restrict__ X, const float2* __restrict__ ST,
-                 const float* __restrict__ BS, int M, int N, int K, int ldx, int rna, void* __restrict__ Yd) {
+                 const __grid_constant__ CUtensorMap mO, const void* __restrict__ X, const float* __restrict__ STv,
+                 const float* __restrict__ BS, int M, int N, int K, int ldx, int rna, void* __restrict__ Yd, const float* __restrict__ UB,
+                 const float* __restrict__ US) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -141,7 +154,7 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
   const int nk = K / BKE;
   // the weight tiles of the first ring stages do not depend on the row pass: issued before waiting for it (the row pass triggers this
   // launch at its start, so they and the prologue above run under it)
-  const int npre = (int)blockIdx.x < tiles ? (nk < NST ? nk : NST) : 0;
+  const int npre = (int)blockIdx.x < tiles && !FOLD ? (nk < NST ? nk : NST) : 0;
   if (warp == 0 && lane == 0) {
     const int n0 = ((int)blockIdx.x % NT) * BN;
     for (int k = 0; k < npre; ++k) {
@@ -151,7 +164,7 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
       tma_load_2d(base + A_BYTES + B_BYTES, &mB1, &B.full[k], k * BKE, n0);
     }
   }
-  pdl_wait();   // cn and the statistics come from the row pass this launch depends on
+  if (!FOLD || warp >= 2) pdl_wait();   // cn and the statistics come from the row pass this launch depends on (FOLD: only the epilogue's)
 
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------------ producer
@@ -217,13 +230,20 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
       const int m0 = (t / NT) * 128, n0 = (t % NT) * BN;
       const int row = m0 + q4 * 32 + lane;
       const bool rok = row < M;
-      const float2 st = rok ? ST[row] : make_float2(0.f, 0.f);   // (rstd, mean rstd): x_hat = x rstd - mean rstd
+#if FOLD
+      const float4 st = rok ? reinterpret_cast<const float4*>(STv)[row] : make_float4(0.f, 0.f, 0.f, 0.f);
+#else
+      const float2 st = rok ? reinterpret_cast<const float2*>(STv)[row] : make_float2(0.f, 0.f);   // (rstd, mean rstd): x_hat = x rstd - mean rstd
+#endif
       // the gate bias of the tile's columns into shared memory (double-buffered by tile parity), loaded before the accumulator wait by the
       // eight epilogue warps, which meet at named barrier 5: in the group loop it was a dependent global load per element (a DRAM round
       // trip on a cold cache) between the MMA and the first store. (Registers instead spilled at two tiles a CTA: bf16 c384 L1024 24 -> 28 us.)
       constexpr int NGW = UPG == 1 ? (BN / OCG + 1) / 2 : BN / OCG;   // groups this warp handles
-      float* bsm = reinterpret_cast<float*>(sm + O_BSM) + (tc & 1) * BN;
-      for (int i = ew * 32 + lane; i < BN; i += 32 * NEPI) bsm[i] = n0 + i < N ? __ldg(BS + n0 + i) : 0.f;
+      float* bsm = reinterpret_cast<float*>(sm + O_BSM) + (tc & 1) * NVEC * BN;
+      for (int i = ew * 32 + lane; i < BN; i += 32 * NEPI) {
+        bsm[i] = n0 + i < N ? __ldg(BS + n0 + i) : 0.f;
+        if (FOLD) { bsm[BN + i] = n0 + i < N ? __ldg(UB + n0 + i) : 0.f; bsm[2 * BN + i] = n0 + i < N ? __ldg(US + n0 + i) : 0.f; }
+      }
       named_bar_sync(5, 32 * NEPI);
       float xpre[32];                                        // x of the first group, also in flight under the accumulator wait
       {
@@ -257,8 +277,13 @@ adaln_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__
           tmem_wait_ld();
 #pragma unroll
           for (int e = 0; e < 32; ++e) {
+#if FOLD
+            const float sp = st.z * __uint_as_float(acc[1][e]) - st.w * bsm[2 * BN + col + e] + bsm[col + e];
+            const float y = sigm(sp) * (o[e] * st.x - st.y) + (st.z * __uint_as_float(acc[0][e]) - st.w * bsm[BN + col + e]);
+#else
             const float sp = __uint_as_float(acc[1][e]) + bsm[col + e];
             const float y = sigm(sp) * (o[e] * st.x - st.y) + __uint_as_float(acc[0][e]);
+#endif
             o[e] = (F32 && rna) ? tf32r(y) : y;
           }
 #if DIRECT
