@@ -876,7 +876,7 @@ def code_graph(args) -> int:
         if args.tests:
             print("\n".join(repo_graph.diff_tests(args.diff, args.tests)))
             return 0
-        text, owed = repo_graph.report(args.diff, verbose=args.verbose, manifests=args.manifest, new_only=args.new_only)
+        text, owed = repo_graph.report(args.diff, verbose=args.verbose, manifests=args.manifest, new_only=args.new_only, gpu=args.gpu)
         print(text)
         return 2 if args.check and owed else 0
     if args.repo:

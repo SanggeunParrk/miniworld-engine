@@ -2143,6 +2143,8 @@ def build_parser() -> argparse.ArgumentParser:
     cgr.add_argument("--new-only", action="store_true",
                      help="with --diff --check: report only the staleness this diff causes (native ops whose graph holds a changed file, "
                           "derivation units that recorded one), not staleness that was already there")
+    cgr.add_argument("--gpu", default="", metavar="ARCH",
+                     help="with --diff: judge only this card's evidence (e.g. sm90): its tuned and native caches and its derivation plan; the other cards' staleness is not counted")
     cgr.add_argument("--tests", nargs="?", const="all", choices=["all", "cpu", "gpu"], default="",
                      help="with --diff: print the reached test files, one repo path per line (pass them to pytest)")
     cgr.set_defaults(func=cmd_code_graph)

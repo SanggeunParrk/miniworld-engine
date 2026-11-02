@@ -7,6 +7,9 @@ a change to B can change A. Edges come from what the files themselves say, not f
 * ``include`` -- ``#include "..."`` in ``.cu`` / ``.cuh`` / ``.inc`` / ``.h`` / ``.cpp``;
 * ``ref``     -- a repo path or a ``miniworld_engine.x.y`` dotted name written in a source, doc, YAML or registry file
   (registry rows name each kernel's file, driver and check; a doc names the code it describes);
+* ``ref`` (built paths) -- a path a python file BUILDS from segments (``ROOT / "docs" / name``, ``Path(__file__).parents[2] / "src"``,
+  ``glob`` / ``rglob`` / ``iterdir`` of a directory): :mod:`repo_paths` evaluates the expression; a known path is an edge to the file, a prefix
+  or an enumerated directory an edge to every file below it (never narrower than what the code can reach);
 * ``cache``   -- ``autotune/data/<op>/<gpu>.json`` is measured from ``<op>``'s kernel file, the JIT helpers that file imports, its
   driver, its config grid ``configs/grid/<op>.csv`` and ``registry.csv`` (``build_rev``), and every cache is keyed by ``cache.py``;
 * ``identity`` -- the artifacts that are judged by the digest of their own part of the graph (``autotune/identity.py``) are nodes of their
@@ -32,6 +35,8 @@ import hashlib
 import re
 import subprocess
 from pathlib import Path, PurePosixPath
+
+from miniworld_engine.build import repo_paths
 
 PKG = Path(__file__).resolve().parents[1]
 ROOT = PKG.parents[1]
@@ -185,6 +190,52 @@ def _native_ops() -> set[str]:
 
 
 @functools.cache
+def _module_resolver(resolve: _Resolver):
+    """``repo_paths.Analyzer``'s ``resolve_module(module, here, level)``: an import -> the repo file it names (or None)."""
+
+    def find(module: str, here: str, level: int) -> str | None:
+        if level == 0:
+            target = resolve.dotted(module) if module.startswith("miniworld_engine") else None
+            base = module.replace(".", "/")
+        else:
+            up = PurePosixPath(here).parent
+            for _ in range(level - 1):
+                up = up.parent
+            base = str(up / module.replace(".", "/")) if module else str(up)
+            target = None
+        for cand in (target, f"{base}.py", f"{base}/__init__.py"):
+            if cand and cand in resolve.paths:
+                return cand
+        return None
+
+    return find
+
+
+def _built_paths(g: Graph, path: str, use: repo_paths.PathUse, resolve: _Resolver, below: dict[str, list[str]]) -> None:
+    """The edges of the paths a python file builds: exact ones to their file, prefixes and enumerated directories to every file below."""
+    for exact in sorted(use.exact):
+        if exact in resolve.paths and exact != path:
+            g.edge(path, exact, "ref")
+    wanted = set(use.prefixes)
+    if use.enumerates or use.opaque_enumeration:
+        wanted |= {v[1] for v in use.values}
+    for prefix in sorted(wanted):
+        if not prefix:
+            continue                                   # the repository root itself: too wide to be an answer, the named parts say more
+        for dep in below.get(prefix, ()):
+            if dep != path:
+                g.edge(path, dep, "ref")
+
+
+def _files_below(paths: list[str], prefixes: set[str]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {p: [] for p in prefixes}
+    for f in paths:
+        for p in prefixes:
+            if f.startswith(p):
+                out[p].append(f)
+    return out
+
+
 def build() -> Graph:
     paths = files()
     g = Graph()
@@ -192,12 +243,21 @@ def build() -> Graph:
     g.nodes.update({f"{NATIVE_PREFIX}{op}": "identity" for op in sorted(_native_ops())})
     g.nodes[DERIVATION] = "identity"
     resolve = _Resolver(paths)
+    analyzer = repo_paths.Analyzer(set(paths), _text, _module_resolver(resolve))
+    uses = {p: analyzer.use(p) for p in paths if PurePosixPath(p).suffix == ".py"}
+    wanted = set()
+    for use in uses.values():
+        wanted |= {x for x in use.prefixes if x}
+        if use.enumerates or use.opaque_enumeration:
+            wanted |= {v[1] for v in use.values if v[1]}
+    below = _files_below(paths, wanted)
     for p in paths:
         suffix = PurePosixPath(p).suffix
         if suffix not in SCANNED and p not in SCANNED_CSV:
             continue
         text = _text(p)
         if suffix == ".py":
+            _built_paths(g, p, uses[p], resolve, below)
             for dep, lazy in _python_imports(p, text, resolve).items():
                 g.edge(p, dep, "lazy" if lazy else "import")
         if suffix in CCODE:
@@ -389,20 +449,24 @@ def cuda_rebuilds(result: dict, manifests: list[str]) -> list[tuple[str, str]]:
     return sorted(set(out))
 
 
-def live_evidence(result: dict, new_only: bool = False) -> dict:
+def live_evidence(result: dict, new_only: bool = False, gpu: str = "") -> dict:
     """What the committed evidence says NOW, against the working tree (CPU only): the stale tuned caches among the ones reached, the
     native ops whose cache no longer matches their graph, and the derivation units whose recorded files moved.
 
     ``new_only``: keep only what the diff itself causes -- the native ops whose graph holds a changed file and the units that
-    recorded one -- not staleness that was already there at ``base``."""
+    recorded one -- not staleness that was already there at ``base``.
+
+    ``gpu`` (``"sm90"``): judge only that card's evidence -- its tuned caches and native caches, and the derivation plan of that arch
+    (``autotune/plans/<gpu>/``); the other cards' staleness is not this diff's business and not counted."""
     from miniworld_engine.autotune import cache_status, identity, plan
 
     g = result["graph"]
-    rows = cache_status.scan()
+    rows = [r for r in cache_status.scan() if not gpu or f"({gpu})" in r.gpu]
     reached_ops = {PurePosixPath(n).parent.name for n in result["reached"] if g.nodes[n] == "cache"}
     touched = {p.removeprefix(f"{SRC}/") for p in [*result["changed"], *result["cosmetic"]] if p.startswith(f"{SRC}/")}
     native_stale = sorted({r.op for r in rows if r.stale and r.reason.startswith("native implementation changed")})
-    status = plan.status()
+    plan_file = PKG / "autotune" / "plans" / gpu / "registry_kernel.units.json" if gpu else None
+    status = plan.status(plan_file if plan_file is not None and plan_file.is_file() else None)
     units_stale = status["stale"]
     if new_only:
         rows_changed = set(result.get("rows") or [])
@@ -488,10 +552,10 @@ def tests(result: dict, kind: str = "all") -> list[str]:
                   and (ROOT / n).is_file())
 
 
-def report(base: str, verbose: bool = False, manifests: list[str] = (), new_only: bool = False) -> tuple[str, int]:
+def report(base: str, verbose: bool = False, manifests: list[str] = (), new_only: bool = False, gpu: str = "") -> tuple[str, int]:
     result = changes(base)
     result["rebuilds"] = cuda_rebuilds(result, list(manifests))
-    result["evidence"] = live_evidence(result, new_only=new_only)
+    result["evidence"] = live_evidence(result, new_only=new_only, gpu=gpu)
     g, reached = result["graph"], result["reached"]
     lines = [(f"{len(result['changed'])} changed, {len(result['cosmetic'])} cosmetic (comments / whitespace), {len(result['deleted'])} deleted "
               f"vs {base}; the graph: {len(g.nodes)} nodes, {sum(len(d) for d in g.deps.values())} edges {dict(g.edge_count())}")]
@@ -507,7 +571,7 @@ def report(base: str, verbose: bool = False, manifests: list[str] = (), new_only
     lines.append("owed:")
     lines.extend(f"  - {a}" for a in actions(result) or ["nothing"])
     ev = result["evidence"]
-    lines.append(f"evidence{' (new-only: what this diff causes)' if new_only else ''}: derivation {len(ev['units_stale'])} of {ev['units_total']} units stale, "
+    lines.append(f"evidence{' (new-only: what this diff causes)' if new_only else ''}{f' [{gpu} only]' if gpu else ''}: derivation {len(ev['units_stale'])} of {ev['units_total']} units stale, "
                  f"native {len(ev['native_stale'])} op(s) stale, tuned {len(ev['stale'])} reached cache(s) stale")
     owed = pending(result)
     lines.append(f"check: {len(owed)} pending" + ("" if not owed else " -- " + "; ".join(owed[:4]) + (" ..." if len(owed) > 4 else "")))
