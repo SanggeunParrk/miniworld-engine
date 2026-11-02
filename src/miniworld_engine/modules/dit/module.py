@@ -98,7 +98,9 @@ class DiTBlock(nn.Module):
         mask shared by the samples, so an [A, B, L] mask that is one -- a [B, L] mask expanded over A (stride 0), or A == 1 --
         reaches them as its [B, L] row; a mask that differs per sample keeps the module path."""
         key_mask, shared = _shared_key_mask(mask)
-        if shared and _h100.serves(self, single, cond, pair, compute_dtype, extra_pair_bias):
+        # B > 1 trunk_seeds (each its own pair) share ONE key mask: it must come expanded over B (stride 0, recognised without a device read)
+        trunk_seeds_ok = single.shape[1] == 1 or key_mask is None or key_mask.stride(0) == 0
+        if shared and trunk_seeds_ok and _h100.serves(self, single, cond, pair, compute_dtype, extra_pair_bias):
             return _h100.update(self, single, cond, pair, key_mask, extra_pair_bias)
         # the H100 fused training block takes the term (folded into its bias); the other fused blocks do not: skipped, never silently dropping it
         if shared and _train.serves(self, single, cond, pair, key_mask, compute_dtype, extra_pair_bias):

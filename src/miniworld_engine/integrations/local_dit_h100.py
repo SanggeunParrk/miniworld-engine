@@ -64,17 +64,16 @@ def matches(module, single, cond, pair, mask, rope=None) -> bool:
             return False
     else:
         return False
-    if (
-        single.ndim != 4
-        or single.shape[1] != 1
-        or single.shape[3] != DS
-        or single.shape[2] == 0
-    ):
+    if single.ndim != 4 or single.shape[3] != DS or single.shape[2] == 0:
+        return False
+    # G = single.shape[1] distinct pairs (one per trunk_seed), the samples laid out [A][G]: bf16 inference (no gradient recorded) only
+    groups = single.shape[1]
+    if groups != 1 and (dt != (BF, BF, BF) or torch.is_grad_enabled()):
         return False
     n = single.shape[2]
     nwin = (n + 31) // 32
     if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (
-        1,
+        groups,
         nwin,
         32,
         128,
@@ -87,9 +86,11 @@ def matches(module, single, cond, pair, mask, rope=None) -> bool:
         and (cond.is_contiguous() or _shared(cond))
     ):
         return False
+    # the key mask is [B, N] (the modules' contract): [1, N] for one pair; for G pairs of one input, ONE mask expanded over G (stride 0)
     if mask is not None and (
         mask.dtype != torch.bool
-        or tuple(mask.shape) != (1, n)
+        or tuple(mask.shape) != (groups, n)
+        or (groups > 1 and mask.stride(0) != 0)
         or mask.device != single.device
     ):
         return False
@@ -145,22 +146,28 @@ def _edge_tables(z, gamma, wb, n, kmask, n0):
     return idx, keys, mask, bias[None].contiguous()
 
 
-def _slid_edges(o, q, k, v, tables, a, n):
+def _slid_edges(o, q, k, v, tables, a, groups, n):
     """Overwrite the attention output ``o`` [A, N, 128] of the windows whose slid key window is not the clipped one with the attention
     over their slid key windows (torch, fp32). Those are windows 0 and 1 and the last three real windows (a window ends at
     ``32 w + 80``, so at most three end past the last real atom): five windows chosen on the device from the real atom count, so there
-    is no host read and the call can be captured. A window chosen twice is computed twice with the same result. ``tables``: ``_edge_tables``."""
-    idx, keys, mask, bias = tables
+    is no host read and the call can be captured. A window chosen twice is computed twice with the same result.
+
+    ``a`` samples laid out [a / G][G] over G pairs (G = 1: one pair): ONE set of torch ops over [a / G, G, ...]. The five windows, their key
+    positions and validity depend on the real atom count only, which the G pairs of one input share (``tables[g][:3]`` are equal); only the
+    pair bias differs, ``tables[g][3]`` stacked to [G, 5, h, 32, 128]. ``tables``: one ``_edge_tables`` per pair."""
+    idx, keys, mask, _ = tables[0]
+    bias = torch.cat([t[3] for t in tables], 0)
+    ag = a // groups
     h, d = NH, DS // NH
     nwin = n // 32
-    qs = q.view(a, nwin, 32, h, d)[:, idx].float()
-    ks = k.view(a, n, h, d)[:, keys].float()
-    vs = v.view(a, n, h, d)[:, keys].float()
-    logits = torch.einsum("awqhd,awkhd->awhqk", qs, ks) * d**-0.5 + bias
-    logits = logits.masked_fill(mask, float("-inf"))
+    qs = q.view(ag, groups, nwin, 32, h, d)[:, :, idx].float()
+    ks = k.view(ag, groups, n, h, d)[:, :, keys].float()
+    vs = v.view(ag, groups, n, h, d)[:, :, keys].float()
+    logits = torch.einsum("agwqhd,agwkhd->agwhqk", qs, ks) * d**-0.5 + bias[None]
+    logits = logits.masked_fill(mask[None], float("-inf"))
     probs = torch.nan_to_num(torch.softmax(logits, dim=-1))
-    out = torch.einsum("awhqk,awkhd->awqhd", probs, vs).reshape(a, 5, 32, DS)
-    o.view(a, nwin, 32, DS).index_copy_(1, idx, out.to(o.dtype))
+    out = torch.einsum("agwhqk,agwkhd->agwqhd", probs, vs).reshape(ag, groups, 5, 32, DS)
+    o.view(ag, groups, nwin, 32, DS).index_copy_(2, idx, out.to(o.dtype))
 
 
 # --------------------------------------------------------------------------------------------------------------------- the ops
@@ -176,9 +183,11 @@ def _shared(cond) -> bool:
 
 
 def _dims(single):
-    a, _, n0, _ = single.shape
+    """(samples, real atoms, padded atoms, rows): the samples are the A x G rows of ``single`` [A, G, N, d] (G distinct pairs, one per
+    trunk_seed; G = 1 for every training call), laid out [A][G]."""
+    a, g, n0, _ = single.shape
     n = _ld._padded_length(n0)
-    return a, n0, n, a * n
+    return a * g, n0, n, a * g * n
 
 
 _NBASE = len(_ld.WEIGHTS) + len(_ld.CROSS_WEIGHTS)
@@ -238,6 +247,9 @@ def _fwd(
 
     tf32 = single.dtype == F32
     a, _n0, n, m = _dims(single)
+    groups = single.shape[1]
+    if groups > 1 and (tf32 or save):
+        raise ValueError("G distinct pairs: bf16 inference only (the TF32 twin and the backward keep one bias)")
     attn = local.attn_fwd_mma32 if tf32 else local.attn_fwd_mma
     qkw = [w.float().contiguous() for w in weights[_NBASE:]]
     weights = weights[:_NBASE]
@@ -246,11 +258,11 @@ def _fwd(
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
         c2 = (
-            _ld._padded(cond[:1], n).reshape(n, DC)
+            _ld._padded(cond[:1], n).reshape(groups * n, DC)
             if shared
             else _ld._padded(cond, n).reshape(m, DC)
         ).contiguous()
-        nmod = n if shared else m
+        nmod = groups * n if shared else m   # shared: one conditioning per (group, atom), read modulo G N (rows are [A][G][N])
         hoist = (not save) and settings.current().local_dit_hoist
         wkey = (
             (tuple((w.data_ptr(), w._version) for w in weights), parallel_kv)
@@ -264,10 +276,12 @@ def _fwd(
         mod, mkv = (
             _ld._hoisted(_HOIST_COND, cond, (wkey, n), tables) if hoist else tables()
         )
-        z = _ld._trunk(pair, n).contiguous()
+        zs = [_ld._trunk(pair[g : g + 1], n).contiguous() for g in range(groups)]
+        z = zs[0]
 
         def pair_bias():
-            return local.pair_bias_mma(z, p["gamma"], p["wbias"], kmask, n)
+            biases = [local.pair_bias_mma(zg, p["gamma"], p["wbias"], kmask, n) for zg in zs]
+            return biases[0] if groups == 1 else torch.stack(biases).contiguous()   # [G, 4, nwin, 32, 128]
 
         if hoist:
             mk = None if kmask is None else _ld._tkey(kmask)
@@ -289,31 +303,24 @@ def _fwd(
             _qk_kernels().qknorm_fwd(qraw, kraw, qkw[0], qkw[1], _QK_EPS, _QK_EPS, q, k)
             if not save:
                 del qraw, kraw
-        o, lse = attn(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2)
+        o, lse = attn(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2, **({"groups": groups} if groups > 1 else {}))
         if slide:
             def edges():
-                return _edge_tables(z, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0)
+                return [_edge_tables(zg, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0) for zg in zs]
 
-            _slid_edges(
-                o,
-                q,
-                k,
-                v,
-                _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk), edges) if hoist else edges(),
-                a,
-                n,
-            )
+            tables = _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk), edges) if hoist else edges()
+            _slid_edges(o, q, k, v, tables, a, groups, n)
         o = o.view(m, DS)
         if not save:
             return [
                 _ld._unpadded(
-                    k90.post_fwd(s2, o, sg, mod, p, tf32, nmod=nmod).view(a, 1, n, DS),
+                    k90.post_fwd(s2, o, sg, mod, p, tf32, nmod=nmod).view(a // groups, groups, n, DS),
                     single.shape,
                 )
             ]
         out, u, a2, x2, t = k90.post_fwd(s2, o, sg, mod, p, tf32, save=True, nmod=nmod)
     return [
-        _ld._unpadded(out.view(a, 1, n, DS), single.shape),
+        _ld._unpadded(out.view(a // groups, groups, n, DS), single.shape),
         bias2,
         mod,
         mkv,
