@@ -2,7 +2,7 @@
 ``force_portable_kernels``.
 
 Default (non-forced) dispatch is what it was: the same stage is taken on the same card, now from ``_ops_routed`` / ``transition.interface`` /
-``triangle_attention.interface`` / ``integrations.token_dit``. Forced, none of them is entered (the Triton files hold no way to).
+``triangle_attention.interface`` / ``kernels.integrations.token_dit``. Forced, none of them is entered (the Triton files hold no way to).
 """
 
 import pytest

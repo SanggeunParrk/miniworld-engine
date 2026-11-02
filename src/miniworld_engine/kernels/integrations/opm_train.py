@@ -984,7 +984,7 @@ def outer_product_mean(
         save_o = settings.current().opm_train_save_o
         out = OpmTrainFn.apply(*tensors, eps, save_o, after)
         if torch.cuda.get_device_capability(msa.device) == (9, 0):
-            from miniworld_engine.integrations.token_dit_train import (
+            from miniworld_engine.kernels.integrations.token_dit_train import (
                 _native_caller_output,
             )
 

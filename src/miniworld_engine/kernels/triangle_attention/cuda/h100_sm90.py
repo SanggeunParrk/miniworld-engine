@@ -324,7 +324,7 @@ class TriAttnFused(torch.autograd.Function):
     """The whole module (residual included): pair [B, L, L, 128] -> pair + drop o TriangleAttention(pair), starting node.
     Parameters may be bf16 or fp32 (master weights); the gradients come back in their dtype.
     drop: the module's broadcast dropout scale as [B, L, 128] bf16 (index = the row's last position), or None.
-    (The module path goes through the custom ops of ``integrations.triattn_h100_sm90``, which call `train_forward` / `train_backward`.)"""
+    (The module path goes through the custom ops of ``kernels.integrations.triattn_h100_sm90``, which call `train_forward` / `train_backward`.)"""
 
     @staticmethod
     def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop):

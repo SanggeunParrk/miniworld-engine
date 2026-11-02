@@ -7,7 +7,7 @@ Needs an H100 (sm_90a); skipped elsewhere.
 import pytest
 import torch
 
-from miniworld_engine.integrations import opm_train as ot
+from miniworld_engine.kernels.integrations import opm_train as ot
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.outer_product import OuterProductMean
 

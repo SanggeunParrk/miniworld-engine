@@ -1,4 +1,4 @@
-"""sm_100a (B200) row kernels of the AF3 atom transformer block (``modules/local_dit.LocalDiTBlock``; ``integrations/local_dit``), forward
+"""sm_100a (B200) row kernels of the AF3 atom transformer block (``modules/local_dit.LocalDiTBlock``; ``kernels/integrations/local_dit``), forward
 and backward. The attention and the pair bias of that block are ``sm100_atom_local``'s.
 
     a = a + sigmoid(to_scale(s)) * to_out(sigmoid(g) * attention(q, k, v))
@@ -21,7 +21,7 @@ On sm_90a (H100) the same sources carry a second half under ``-DATOM_HOPPER=1`` 
 ``atom_kernel`` / ``load_all`` and the launchers below pick it by ``_hopper(device)``; the fp32 (TF32) path is sm_100a only.
 
 The fp32 path (fp32 activations, ``KERNELS_TF32``, loaded by ``atom_kernel32`` only when an fp32 call is served; used by the local
-atom block, ``integrations/local_dit``):
+atom block, ``kernels/integrations/local_dit``):
   gemm_tf32.cu    every projection and activation-gradient product as one tcgen05 kind::tf32 GEMM launch with the block's epilogues
                   (bias + sigmoid blocks, gated residual, SwiGLU).
   rows_tf32.cu    the row-wise stages around them (LayerNorms, AdaLN and their backward, gates, SwiGLU backward, D), fp32 CUDA cores.

@@ -70,7 +70,7 @@ def serves(module, pair, mask=None):
 
 
 def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None):
-    from miniworld_engine.integrations.token_dit_train import _native_caller_output
+    from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_output
     from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import (
         forward as native,
     )

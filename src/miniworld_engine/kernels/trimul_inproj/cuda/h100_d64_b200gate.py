@@ -3,7 +3,7 @@
 B1 stores BF16 dGout. B7 accumulates dGout @ Wg with the input projection
 gradient in FP32. Constant accumulator indices avoid local array traffic.
 The original normalization-statistics saves and forward path are retained.
-The D64 training path the integration selects (``integrations.trimul_h100``).
+The D64 training path the integration selects (``kernels.integrations.trimul_h100``).
 
 direction 1 / 2: a single-direction module whose hidden width is 128 (2 D, AF3 / Protenix's template TriMul: pair 64,
 hidden 128). Per token it has exactly this block's shapes -- K1 writes 4 D planes [a | b] (2 D each), K3 normalises a

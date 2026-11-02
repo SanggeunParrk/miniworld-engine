@@ -7,7 +7,7 @@ refusals that do not need a GPU (dtype, batch, the epilogue's fixed dims) name w
 import pytest
 import torch
 
-from miniworld_engine.integrations import anthropic_msa as msa
+from miniworld_engine.baselines import anthropic_msa as msa
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.msa_pair_weighted_averaging import (
     MSAPairWeightedAveraging,
@@ -111,7 +111,7 @@ def test_the_epilogue_refuses_the_convention_that_divides_the_bias(monkeypatch):
 
 def test_the_engines_own_h100_paths_do_not_answer_to_the_anthropic_option():
     """``implementation="anthropic"`` runs the release's path, never the engine's own OPM / pair weighted averaging first."""
-    from miniworld_engine.integrations import opm_train, pwa_train
+    from miniworld_engine.kernels.integrations import opm_train, pwa_train
 
     assert not opm_train.wanted(ImplementationType.ANTHROPIC)
     assert not pwa_train.wanted(ImplementationType.ANTHROPIC)

@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from portable_helpers import randomize_half_std as _randomize
 from settings_helpers import policy_portable_off as policy  # noqa: F401
 
-from miniworld_engine.integrations import token_dit_train
+from miniworld_engine.kernels.integrations import token_dit_train
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -99,7 +99,7 @@ def test_per_sample_bias_block_matches_the_module_path(A, L, masked, qk, d_cond)
 @pytest.mark.parametrize(("A", "L", "blocks"), [(3, 256, 4), (4, 384, 12), (2, 128, 3), (2, 200, 3)])
 def test_pair_biases_match_the_per_block_layernorm_and_projection(A, L, blocks):
     """One LayerNorm and one GEMM leave every block's bias; value and gradients against each block's own torch LN + projection."""
-    from miniworld_engine.integrations.token_dit_pair_bias import pair_biases
+    from miniworld_engine.kernels.integrations.token_dit_pair_bias import pair_biases
 
     torch.manual_seed(5)
     g = torch.Generator(device="cuda").manual_seed(6)

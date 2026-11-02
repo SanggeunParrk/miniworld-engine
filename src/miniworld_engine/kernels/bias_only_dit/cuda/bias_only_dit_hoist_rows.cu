@@ -1,4 +1,4 @@
-// Bias-only token DiT: the row kernel of the HOISTED pair bias's backward (integrations/bias_only_dit_hoist.py).
+// Bias-only token DiT: the row kernel of the HOISTED pair bias's backward (kernels/integrations/bias_only_dit_hoist.py).
 //
 // The hoist makes every block's attention logits from ONE LayerNorm of the pair rows without affine (LN0: the token DiT rows'
 // layernorm128_rows) and ONE cuBLAS GEMM against all blocks' gamma-folded weights. Its backward is two cuBLAS GEMMs

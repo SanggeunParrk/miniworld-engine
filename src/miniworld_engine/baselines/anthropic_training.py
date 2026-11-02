@@ -20,7 +20,7 @@ WEIGHT_KEYS = ("ln_in_w", "ln_in_b", "w_ag", "w_ap", "w_bg", "w_bp",
 
 
 def native_ops():
-    from miniworld_engine.integrations.anthropic import configure
+    from miniworld_engine.baselines.anthropic import configure
     configure()
     build = os.environ.get("TRIMUL_NATIVE_BUILD_DIR")
     if not build:

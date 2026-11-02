@@ -4,7 +4,7 @@ against the PyTorch module in fp32 IEEE matmuls, on non-trivial random weights."
 import pytest
 import torch
 
-from miniworld_engine.integrations import token_dit as TD
+from miniworld_engine.kernels.integrations import token_dit as TD
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 

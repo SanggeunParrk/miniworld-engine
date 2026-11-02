@@ -4,7 +4,7 @@ equal G separate one-pair calls, and hold the bf16 yardstick against the fp64 Py
 import pytest
 import torch
 
-from miniworld_engine.integrations import local_dit_h100 as h100
+from miniworld_engine.kernels.integrations import local_dit_h100 as h100
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.local_dit import LocalDiTBlock
 

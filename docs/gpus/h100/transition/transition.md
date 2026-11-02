@@ -153,7 +153,7 @@ tables (pair / single / ragged rows and fp32 against PyTorch, Triton and Transfo
 ### Against anthropic and cuequivariance (inference) and PyTorch (training)
 
 cuequivariance has no Transition kernel: `implementation="cuequivariance"` runs the PyTorch reference, so that column is `torch.compile` of the
-reference. anthropic (`integrations/anthropic.py`; rows `v2` at D128 n = 4, `pf` at D64 / 128 / 256 / 384; inference only) refuses D512, n = 4 at D64
+reference. anthropic (`baselines/anthropic.py`; rows `v2` at D128 n = 4, `pf` at D64 / 128 / 256 / 384; inference only) refuses D512, n = 4 at D64
 and n = 2 at D384 / 512; its D256 specialised row `esm_t16` needs the CUDA 13 driver stack (this cluster has 575 / CUDA 12.9: the cubin load
 crashes), so D256 is `pf`. The official harness (`bench.py target=transition level=module`, compiled + CUDA graph, `L x L` pair rows >= 16 384) measured D128
 1.18 - 1.42x anthropic on 2026-10-14 with the fused kernel that was corrected on 2026-10-15; the module-path table below is the current one.

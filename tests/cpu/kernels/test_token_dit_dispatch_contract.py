@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import token_dit
+from miniworld_engine.kernels.integrations import token_dit
 from miniworld_engine.kernels.augmented_attention.cuda import sm100
 from miniworld_engine.modules.dispatch import KernelBackend
 

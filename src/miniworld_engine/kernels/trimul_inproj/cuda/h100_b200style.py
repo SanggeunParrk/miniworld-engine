@@ -1,4 +1,4 @@
-"""Hopper port of the B200 wide TriMul fusion algorithm (selected by ``integrations.trimul_h100`` wherever it is faster).
+"""Hopper port of the B200 wide TriMul fusion algorithm (selected by ``kernels.integrations.trimul_h100`` wherever it is faster).
 
 K1 writes gated planes and LN_in statistics; folded K3 writes y, projection,
 gate and LN_out statistics. Neither normalized output rows nor front

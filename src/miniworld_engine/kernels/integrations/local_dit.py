@@ -316,7 +316,7 @@ def _esm_variant(module) -> bool:
 
 
 def serves(module, single, cond, pair, mask, rope=None) -> bool:
-    from miniworld_engine.integrations import local_dit_h100
+    from miniworld_engine.kernels.integrations import local_dit_h100
 
     if local_dit_h100.matches(module, single, cond, pair, mask, rope):
         return True
@@ -1206,7 +1206,7 @@ class _LocalBlock(torch.autograd.Function):
         saved, weights = rest[: ctx.n_saved], rest[ctx.n_saved :]
         grads = _block_bwd(dy, single, cond, pair, mask, list(weights), list(saved))
         if single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0):
-            from miniworld_engine.integrations.token_dit_train import (
+            from miniworld_engine.kernels.integrations.token_dit_train import (
                 _activate_native_caller,
             )
 
@@ -1220,7 +1220,7 @@ def _infer(single, cond, pair, mask, weights):
 
 def block(module, single, cond, pair, mask=None, rope=None):
     """The block's output stream (both residuals included), on the sm_100a kernels; ``serves()`` must have accepted the call."""
-    from miniworld_engine.integrations import local_dit_h100
+    from miniworld_engine.kernels.integrations import local_dit_h100
 
     if local_dit_h100.matches(module, single, cond, pair, mask, rope):
         return local_dit_h100.run_block(module, single, cond, pair, mask, rope)
@@ -1239,7 +1239,7 @@ def block(module, single, cond, pair, mask=None, rope=None):
     ):
         out = _LocalBlock.apply(mask, single, cond, pair, *weights)
         if single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0):
-            from miniworld_engine.integrations.token_dit_train import (
+            from miniworld_engine.kernels.integrations.token_dit_train import (
                 _native_caller_hooks,
             )
 

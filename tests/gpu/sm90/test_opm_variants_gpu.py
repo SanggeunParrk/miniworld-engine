@@ -62,7 +62,7 @@ def test_rf3_training_matches_fp64_statements(name, s, n, residual, monkeypatch)
     """RoseTTAFold3's biased projections in a grad-enabled call run the wide fused composition (the projection biases in the prologue,
     their gradients off dA / dB): outputs and every gradient (msa, residual, all parameters) against the fp64 statements, the
     engine's bf16 error held to the bf16 statements' own."""
-    from miniworld_engine.integrations import opm_train
+    from miniworld_engine.kernels.integrations import opm_train
 
     options = dict(VARIANTS[name])
     torch.manual_seed(0)

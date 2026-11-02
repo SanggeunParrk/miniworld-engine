@@ -24,7 +24,7 @@ bitwise-repeatable steps, at the four layouts) and `tests/gpu/any/test_token_dit
 On H100 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton -- in bf16 and fp32, QK-norm on or off, on
 two paths that `modules/dit` dispatches to (the same two integrations as on B200):
 
-- **Inference** (`integrations/token_dit.py` -> `kernels/conditioned_transition/triton/token_dit_runner.py`): `DiTBlock`
+- **Inference** (`kernels/integrations/token_dit.py` -> `kernels/conditioned_transition/triton/token_dit_runner.py`): `DiTBlock`
   calls with no autograd and the engine's kernel backend, shared or per-sample conditioning. Weight pack and pair bias
   use the upstream capture-scoped caches: eager entries stay outside captures; each capture records their construction
   once and each replay recomputes them from the current weights / pair. A shared conditioning needs L rows, per-sample S L.
@@ -42,7 +42,7 @@ two paths that `modules/dit` dispatches to (the same two integrations as on B200
     Its TF32 build serves the fp32 inference expand at M >= 768 rows since 2026-10-15 (the row kernel hands it a TF32-rounded
     `xa`; accuracy equals the cuBLAS path's; see "fp32 inference after the fused expand" below);
   - the other GEMMs cuBLAS (fp32: TF32 under the caller's `allow_tf32`).
-- **Training** (`integrations/token_dit_train.py`): `DiTBlock` calls under autograd, B == 1, L % 128 == 0, key mask [B, L]
+- **Training** (`kernels/integrations/token_dit_train.py`): `DiTBlock` calls under autograd, B == 1, L % 128 == 0, key mask [B, L]
   or none. One autograd Function per block whose forward and backward are each one opaque op (torch.compile keeps them
   as nodes). Row kernels `kernels/conditioned_transition/cuda/token_dit_train_rows.cu` (16 kernels, the B200 set; built
   a second time with fp32 GEMM operands, `-DTDT_OP_F32`, for the fp32 block), cuBLAS GEMMs, and the attention core:
@@ -71,7 +71,7 @@ attention bias), the attention cores above -- which share one bias across the A 
 - `token_dit_train.block_psb` / `serves_psb`: the same block as above with the bias an input. Any L (padded to the 128-row tile inside,
   the padded keys masked), any A, one batch row, cond width 384 or 768 (`TD_DC` build define), bf16 operands; no autograd needed to run.
   The block returns d bias in the bias's layout and units and none for its own `ln_pair` / `to_bias` weights (the producer's).
-- `integrations/token_dit_pair_bias.pair_biases`: the biases of every block of a stack from one pair [A, L, L, 128] in one pass -- one
+- `kernels/integrations/token_dit_pair_bias.pair_biases`: the biases of every block of a stack from one pair [A, L, L, 128] in one pass -- one
   CUDA pair LayerNorm, one GEMM against the blocks' stacked `to_bias.weight diag(ln_pair.weight) log2 e` -- as views of one
   [blocks H, A L L] buffer; the backward is two GEMMs and the LayerNorm backward. Reading the pair once instead of once per block
   is what the per-block LayerNorm + projection cost twelve times.

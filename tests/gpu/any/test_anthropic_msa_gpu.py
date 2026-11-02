@@ -9,7 +9,7 @@ import os
 import pytest
 import torch
 
-from miniworld_engine.integrations import anthropic_msa as msa
+from miniworld_engine.baselines import anthropic_msa as msa
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.msa_pair_weighted_averaging import (
     MSAPairWeightedAveraging,

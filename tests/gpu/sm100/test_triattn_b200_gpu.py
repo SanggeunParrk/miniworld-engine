@@ -9,7 +9,7 @@ import torch
 from portable_helpers import randomize, relative
 from settings_helpers import policy_b200_portable_off as policy  # noqa: F401
 
-from miniworld_engine.integrations import triattn_b200
+from miniworld_engine.kernels.integrations import triattn_b200
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_attention.module import TriangleAttention
 

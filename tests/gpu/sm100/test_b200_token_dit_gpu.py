@@ -1,4 +1,4 @@
-"""The fused token DiT inference path on B200 (integrations/token_dit.py): the same contract as on H100, with the
+"""The fused token DiT inference path on B200 (kernels/integrations/token_dit.py): the same contract as on H100, with the
 step's attention on the sm_100a gated core (kernels/augmented_attention/cuda/sm100; bf16, or TF32 for fp32)."""
 
 import pytest
@@ -7,7 +7,7 @@ from portable_helpers import randomize, relative
 from settings_helpers import override_setting
 from settings_helpers import policy_blackwell_portable_off as policy  # noqa: F401
 
-from miniworld_engine.integrations import token_dit
+from miniworld_engine.kernels.integrations import token_dit
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 

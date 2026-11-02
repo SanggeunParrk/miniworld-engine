@@ -7,7 +7,7 @@
 #
 # implementations:
 #   pytorch    the module's statements
-#   miniworld  auto: integrations/pwa_train.py (CUDA pair_fwd3 / ln_vg / pwa_fwd2 forward, fused
+#   miniworld  auto: kernels/integrations/pwa_train.py (CUDA pair_fwd3 / ln_vg / pwa_fwd2 forward, fused
 #              backward, residual + dropout in-kernel) on sm_90a bf16; see `execution_path`
 #   anthropic  PRISTINE: opt_core.ops.msa_pwa.forward_masked exactly as shipped (shipped default
 #              _CFG[32] = the fo kernel with the fused LN_m/proj prologue), STOCK LayerNorm for norm_z
@@ -15,7 +15,7 @@
 #              autocast; the engine adds the residual. INFERENCE ONLY -- training `unsupported`.
 #              Needs MINIWORLD_ANTHROPIC_ROOT (cssb: /home/psk6950/ext/uplifting-biomolecular-modeling).
 #              FPF_PWA_CFG is unset for the row.
-#   anthropic_hybrid  integrations/anthropic_msa.py: the upstream msa_pwa cell (g_fo4p) with OUR
+#   anthropic_hybrid  baselines/anthropic_msa.py: the upstream msa_pwa cell (g_fo4p) with OUR
 #              fused LayerNorm substituted for norm_z. Needs OPT_CORE_DIR=$MINIWORLD_ANTHROPIC_ROOT/
 #              common/opt_core. The harness pins settings.pwa_train=0 / settings.pwa_infer=0 for
 #              both anthropic labels and masks OPT_CORE_DIR for every non-anthropic row.

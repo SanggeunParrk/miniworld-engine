@@ -20,10 +20,10 @@ fp32 inputs and weights, no CUDA autocast; see [fp32 path](#fp32-path-tf32)) -- 
 mask [1, L] or none, LayerNorm eps 1e-5, implementation MINIWORLD. Everything else -- other cards, other widths, fp32
 under autocast or with bf16 weights -- runs the module's PyTorch composition. Each integration's `serves()` is the whole gate.
 
-- **Inference** (no autograd): `BiasOnlyDiTBlock.forward` -> `integrations/bias_only_dit.py` -> `kernels/bias_only_dit/cuda/runner.py`
+- **Inference** (no autograd): `BiasOnlyDiTBlock.forward` -> `kernels/integrations/bias_only_dit.py` -> `kernels/bias_only_dit/cuda/runner.py`
   (`FusedBiasOnlyDiT`). One conditioning per sample or one shared by the samples (sample axis 1 or stride 0). The weight pack and
   `P` are cached on the tensors' (pointer, version), CUDA-graph replays included.
-- **Training** (autograd on): `integrations/bias_only_dit_train.py`. One conditioning per sample. One autograd Function per block
+- **Training** (autograd on): `kernels/integrations/bias_only_dit_train.py`. One conditioning per sample. One autograd Function per block
   whose forward and backward are each one opaque op (`torch.compile` keeps them as nodes); CUDA-graph safe (launches take their
   row counts as arguments, no host syncs).
 
@@ -411,7 +411,7 @@ repeatability / steady-memory test at the defaults and with every fusion on.
 
 ### T7 · hoisted pair bias: `pair_bias_all` (every block's bias from one LayerNorm and one GEMM)
 
-`modules/bias_only_dit/hoist.py` (the API and the PyTorch fold), `integrations/bias_only_dit_hoist.py` (B200, bf16 and fp32),
+`modules/bias_only_dit/hoist.py` (the API and the PyTorch fold), `kernels/integrations/bias_only_dit_hoist.py` (B200, bf16 and fp32),
 `kernels/bias_only_dit/cuda/bias_only_dit_hoist_rows.cu` (`ln0_bwd_rows`). `ln_pair` has no offset, so with LN0 the LayerNorm without
 affine (statistics shared by every block) and the fold W'_b = W_b diag(gamma_b): bias_b = LN0(pair) W'_b^T. Forward: LN0 rows (the
 token DiT's `layernorm128_rows`) and ONE cuBLAS GEMM, bias_all^T = W'_all LN0^T [nb H, L^2]: block b's bias is the contiguous

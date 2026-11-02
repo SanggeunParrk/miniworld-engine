@@ -162,7 +162,7 @@ def test_module_wiring_matches_pytorch_reference(monkeypatch, D, outgoing):
     """TriangleMultiplication(D256/384) through integrations.trimul_h100.update matches its PYTORCH implementation."""
     _hopper()
     from miniworld_engine import settings
-    from miniworld_engine.integrations import trimul_h100
+    from miniworld_engine.kernels.integrations import trimul_h100
     from miniworld_engine.modules.exceptions import ImplementationType as I
     from miniworld_engine.modules.triangle_multiplication.module import (
         TriangleMultiplication,

@@ -1,12 +1,12 @@
 """The fused token DiT paths on B200 at the head layouts beside 16 x 48: 24 x 32 and 12 x 64 (d 768), 16 x 64 (d 1024), bf16,
-against the PyTorch block (inference: integrations/token_dit.py; training: integrations/token_dit_train.py)."""
+against the PyTorch block (inference: kernels/integrations/token_dit.py; training: kernels/integrations/token_dit_train.py)."""
 
 import pytest
 import torch
 from portable_helpers import randomize, relative
 from settings_helpers import policy_blackwell_portable_off as policy  # noqa: F401
 
-from miniworld_engine.integrations import token_dit
+from miniworld_engine.kernels.integrations import token_dit
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -68,7 +68,7 @@ def _train_step(mod, x, c, p, mask, dy):
 @pytest.mark.parametrize(("L", "qk"), [(128, False), (384, True), (384, False), (128, True)])
 def test_training(layout, L, qk):
     """The fused training block (bf16) against the fp32 PyTorch block, held to the bf16 PyTorch block's own error."""
-    from miniworld_engine.integrations import token_dit_train
+    from miniworld_engine.kernels.integrations import token_dit_train
 
     H, d = layout
     m, tb = _blocks(layout, qk, seed=2)

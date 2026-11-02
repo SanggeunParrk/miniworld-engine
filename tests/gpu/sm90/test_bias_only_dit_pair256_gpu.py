@@ -1,6 +1,6 @@
 """The bias-only token DiT block with a 256-wide pair (Protenix-v2's diffusion transformer: d_single 768, d_cond 384, 16 heads x 48,
 d_pair 256) on every fused H100 route the 128-wide pair has: inference and training, bf16 and fp32 (TF32), one pair for every sample
-(``integrations.bias_only_dit.update`` / ``bias_only_dit_train.block``) and a pair of its own per sample (``update_psb`` /
+(``kernels.integrations.bias_only_dit.update`` / ``bias_only_dit_train.block``) and a pair of its own per sample (``update_psb`` /
 ``block_psb`` behind the hoist ``pair_bias_all``), and a stack of blocks on hoisted biases. The pair-bias kernels are the 128-wide
 ones templated on the width (``pair_bias_k`` / ``pair_bias_bwd`` / ``pair_bias_tc`` / ``pair_bias_bwd_tc`` / finalize,
 ``bo_hoist_pass.cu``, ``ln0_bwd_rows``, the LayerNorm rows template), so each case runs at d_pair 128 and 256.
@@ -17,9 +17,9 @@ import torch
 from portable_helpers import randomize_half_std as _randomize
 from settings_helpers import policy_portable_off as policy  # noqa: F401
 
-from miniworld_engine.integrations import bias_only_dit as fused
-from miniworld_engine.integrations import bias_only_dit_hoist as hoist
-from miniworld_engine.integrations import bias_only_dit_train as train
+from miniworld_engine.kernels.integrations import bias_only_dit as fused
+from miniworld_engine.kernels.integrations import bias_only_dit_hoist as hoist
+from miniworld_engine.kernels.integrations import bias_only_dit_train as train
 from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock, pair_bias_all
 from miniworld_engine.modules.exceptions import ImplementationType as IT

@@ -1,5 +1,5 @@
 // Bias-only token DiT, the HOISTED pair bias's backward in ONE kernel (bf16, mma.sync m16n8k16): the three steps of
-// ``integrations/bias_only_dit_hoist.py _hoist_bwd`` that stream the pair -- d LN0 = dbias_all^T W'_all (a cuBLAS GEMM with fp32 output),
+// ``kernels/integrations/bias_only_dit_hoist.py _hoist_bwd`` that stream the pair -- d LN0 = dbias_all^T W'_all (a cuBLAS GEMM with fp32 output),
 // the LayerNorm backward rows (``ln0_bwd_rows``) and dW'_all = dbias_all Y (a cuBLAS GEMM over the hi / lo split of LN0) -- fused, so d LN0
 // (fp32, 4 bytes per pair element) and Y (4 bytes) never reach HBM.
 //

@@ -16,8 +16,8 @@ class ImplementationType(str, Enum):
       * ``cuequivariance`` — the vendor baseline (comparison only).
       * ``anthropic`` — kernels from Anthropic's uplifting-biomolecular-modeling release:
         the TriMul units of a payload named by ``TRIMUL_NATIVE_BUILD_DIR`` (see
-        ``integrations.anthropic_trimul``), and the MSA-module paths built on the
-        ``opt_core`` runtime named by ``OPT_CORE_DIR`` (see ``integrations.anthropic_msa``
+        ``kernels.integrations.anthropic_trimul``), and the MSA-module paths built on the
+        ``opt_core`` runtime named by ``OPT_CORE_DIR`` (see ``kernels.integrations.anthropic_msa``
         — its OuterProductMean epilogue is this repo's own CUDA kernel). Inference only,
         and it refuses rather than silently reroute; ``miniworld`` uses the same payloads
         where it can and falls back where it cannot.

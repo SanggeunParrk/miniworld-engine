@@ -174,7 +174,7 @@ def test_token_pair_init_bf16_streams_fp32_weights():
 
 
 def test_pair_weighted_averaging():
-    from miniworld_engine.integrations import pwa_train
+    from miniworld_engine.kernels.integrations import pwa_train
     from miniworld_engine.modules import MSAPairWeightedAveraging
     from miniworld_engine.modules.exceptions import ImplementationType as IT
 

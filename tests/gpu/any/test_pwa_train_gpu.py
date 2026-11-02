@@ -9,7 +9,7 @@ import torch
 from settings_helpers import override_setting
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import pwa_train as pt
+from miniworld_engine.kernels.integrations import pwa_train as pt
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.msa_pair_weighted_averaging import (
     MSAPairWeightedAveraging,

@@ -1,5 +1,5 @@
 """The hoisted pair bias of the bias-only token DiT on B200: ``pair_bias_all`` (modules/bias_only_dit/hoist.py,
-integrations/bias_only_dit_hoist.py) and the blocks' ``bias=`` paths (integrations/bias_only_dit_train.py, bias_only_dit.py).
+kernels/integrations/bias_only_dit_hoist.py) and the blocks' ``bias=`` paths (kernels/integrations/bias_only_dit_train.py, bias_only_dit.py).
 
   * ``pair_bias_all`` forward and backward (d pair, every dW_b, every d gamma_b) against fp64 for 1 / 3 / 24 blocks, every head
     layout, bf16 and fp32 (TF32); the PyTorch fold the same; unused biases; the LN0 backward rows against fp64, no spills;
@@ -26,9 +26,9 @@ from portable_helpers import relative_fp64 as relative
 from portable_helpers import tf32_matmul_flag as tf32
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import bias_only_dit as INF
-from miniworld_engine.integrations import bias_only_dit_hoist as HO
-from miniworld_engine.integrations import bias_only_dit_train as TR
+from miniworld_engine.kernels.integrations import bias_only_dit as INF
+from miniworld_engine.kernels.integrations import bias_only_dit_hoist as HO
+from miniworld_engine.kernels.integrations import bias_only_dit_train as TR
 from miniworld_engine.modules.bias_only_dit import (
     BiasOnlyAttention,
     BiasOnlyDiTBlock,

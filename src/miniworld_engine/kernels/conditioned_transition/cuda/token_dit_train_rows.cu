@@ -1,5 +1,5 @@
 // Token DiT TRAINING row kernels (CUDA): every elementwise / row step of the fused training block
-// (integrations/token_dit_train.py), forward and backward. The GEMMs between them are cuBLAS, the attention core sm_100a.
+// (kernels/integrations/token_dit_train.py), forward and backward. The GEMMs between them are cuBLAS, the attention core sm_100a.
 //
 // Layout: a block of NT = width / 4 threads walks rpb consecutive rows (bf16: RPB = 8; fp32: one resident wave of blocks, the
 // rows dealt evenly -- row_grid); a thread always owns the same 4 columns, so the per-column gradient sums (biases, qk-norm

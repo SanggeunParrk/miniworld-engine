@@ -1,7 +1,7 @@
 """H100 TriMul beyond L1024 and at ragged L: the D64 / D128 CUDA paths (and the wide B200-style port) at the lengths MiniWorld's
 inference rungs reach (1536 / 2048 / 2560) and at lengths that are not a multiple of 128.
 
-Contract (``integrations.trimul_h100``): inference any L >= 16 (one sample pads to 16 inside K1 / K3; B samples at L % 16 != 0
+Contract (``kernels.integrations.trimul_h100``): inference any L >= 16 (one sample pads to 16 inside K1 / K3; B samples at L % 16 != 0
 are padded on the host), training L a multiple of 128 up to ``MAX_TRAINING_LENGTH``. Every case runs the module as MiniWorld
 does (FP32 parameters, a bf16 pair, a token mask, row dropout in training) against the FP32 PyTorch statement of the module,
 every gradient included. The reference is computed in row chunks (checkpointed in training) so that L2560 fits next to the
@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
-from miniworld_engine.integrations import trimul_h100
+from miniworld_engine.kernels.integrations import trimul_h100
 from miniworld_engine.kernels.trimul_inproj.cuda import (
     h100_b200style,
     h100_d64_b200gate,

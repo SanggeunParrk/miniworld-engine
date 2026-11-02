@@ -74,11 +74,11 @@ def _bias_terms(module):
 
 
 def biased_on_fused(module, msa, mask, token_asym_id=None, residual=None):
-    """RoseTTAFold3's biased projections on the fused H100 OPM (``integrations.opm_train``, which reads the weights only), plus the bias terms:
+    """RoseTTAFold3's biased projections on the fused H100 OPM (``kernels.integrations.opm_train``, which reads the weights only), plus the bias terms:
     with L = mask (W_L m + b_L) = L0 + mask b_L (likewise R), the outer product O = O0 + b_L (x) Rs + Ls (x) b_R + cnt b_L (x) b_R, where
     Rs[i, j] = sum_s mask[s, i] R0[s, j], Ls[i, j] = sum_s L0[s, i] mask[s, j]; projected and divided by the clamped counts (the out bias
     and the division order are the fused path's), the terms add (Rs A^T + Ls Bm^T) / cnt + c (cnt > 0) to its output."""
-    from miniworld_engine.integrations import opm_train
+    from miniworld_engine.kernels.integrations import opm_train
     from miniworld_engine.kernels.outer_product_mean import cuda
 
     B, S, N, _ = msa.shape
@@ -117,7 +117,7 @@ def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
     """RoseTTAFold3's biased projections in the wide H100 composition: its persistent TMA prologue adds the left | right biases in
     the projection epilogue (masked like the projections), then cuBLAS for the outer product and the fused epilogue (out-projection,
     bias, count normalisation before or after it, residual)."""
-    from miniworld_engine.integrations import opm_train
+    from miniworld_engine.kernels.integrations import opm_train
 
     bf = torch.bfloat16
     m = msa[0].contiguous()

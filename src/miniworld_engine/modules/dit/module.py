@@ -15,7 +15,7 @@ ACROSS parts in the reference but cannot fuse across our opaque ops. Measured on
 
 Each part owns its residual, like every ``x = x + f(x)`` module in the engine:
 ``AugmentedAttentionPairBias`` and ``ConditionedTransition`` return ``x + f(x)``, so the block
-only chains them. The fused block paths (``integrations.token_dit`` / ``token_dit_train`` at token
+only chains them. The fused block paths (``kernels.integrations.token_dit`` / ``token_dit_train`` at token
 widths on B200) fold both residuals into their kernels.
 """
 
@@ -25,8 +25,8 @@ import torch
 import torch.nn as nn
 from jaxtyping import Bool, Float
 
-from miniworld_engine.integrations import token_dit as _h100
-from miniworld_engine.integrations import token_dit_train as _train
+from miniworld_engine.kernels.integrations import token_dit as _h100
+from miniworld_engine.kernels.integrations import token_dit_train as _train
 from miniworld_engine.modules.augmented_attention import AugmentedAttentionPairBias
 from miniworld_engine.modules.conditioned_transition import ConditionedTransition
 from miniworld_engine.modules.exceptions import ImplementationType

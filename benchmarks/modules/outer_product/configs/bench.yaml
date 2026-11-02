@@ -7,7 +7,7 @@
 #
 # implementations:
 #   pytorch    the module's statements (fp32 mask count)
-#   miniworld  auto: integrations/opm_train.py (fused prologue + cuBLAS + csrc/opm_epilogue.cu,
+#   miniworld  auto: kernels/integrations/opm_train.py (fused prologue + cuBLAS + csrc/opm_epilogue.cu,
 #              forward and backward) on sm_90a bf16; the served path is in `execution_path`
 #   anthropic  PRISTINE: opt_core.ops.msa_opm.forward_mask_norm exactly as shipped (upstream fused
 #              LN/projection/mask prologue + ONE Triton outer-product/projection kernel, shipped
@@ -16,7 +16,7 @@
 #              the engine adds the residual. INFERENCE ONLY -- training rows are `unsupported`.
 #              Needs MINIWORLD_ANTHROPIC_ROOT=<checkout containing common/opt_core>
 #              (cssb: /home/psk6950/ext/uplifting-biomolecular-modeling). FPF_OPM_CFG is unset for the row.
-#   anthropic_hybrid  integrations/anthropic_msa.py: upstream msa_opm prologue + cuBLAS + OUR
+#   anthropic_hybrid  baselines/anthropic_msa.py: upstream msa_opm prologue + cuBLAS + OUR
 #              csrc/opm_epilogue.cu. Needs OPT_CORE_DIR=$MINIWORLD_ANTHROPIC_ROOT/common/opt_core (the
 #              same tree). The harness pins settings.opm_train=0 for both anthropic labels
 #              (opm_train would otherwise serve implementation="anthropic" first) and masks

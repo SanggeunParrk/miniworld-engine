@@ -5,7 +5,7 @@ import torch
 from settings_helpers import override_setting
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import opm_train as ot
+from miniworld_engine.kernels.integrations import opm_train as ot
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.outer_product import OuterProductMean
 

@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from portable_helpers import relative
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import trimul_h100
+from miniworld_engine.kernels.integrations import trimul_h100
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
 

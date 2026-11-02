@@ -67,7 +67,7 @@ def test_fp32_pair256_takes_the_fused_route_and_holds_the_tf32_yardstick(heads, 
     permutation of ``augmented_attention/cuda/pair_rows.cu``; other heads: the LayerNorm rows in key order + cuBLAS) and the error
     against an fp64 run is no worse than 1.5x the fp32 PyTorch module's in the same TF32 regime (or the 1.5e-3 the 128-wide layouts
     are held to)."""
-    from miniworld_engine.integrations import token_dit as TD
+    from miniworld_engine.kernels.integrations import token_dit as TD
     from miniworld_engine.kernels.conditioned_transition import cuda as ct_cuda
 
     torch.manual_seed(6)
@@ -134,7 +134,7 @@ def test_pair256_training_takes_the_fused_block_and_matches_the_module_path(dtyp
     module path in the same regime, against the fp32 PyTorch block (IEEE): the yardstick of ``test_token_dit_train_gpu``."""
     from settings_helpers import override_setting
 
-    from miniworld_engine.integrations import token_dit_train
+    from miniworld_engine.kernels.integrations import token_dit_train
 
     torch.manual_seed(7)
     ref = _randomize(DiTBlock(d_pair=256, use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda())

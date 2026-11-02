@@ -1,4 +1,4 @@
-"""B200 block-local AF3 atom block (``integrations.local_dit``): LocalDiTBlock runs the sm_100a kernels for inference and training --
+"""B200 block-local AF3 atom block (``kernels.integrations.local_dit``): LocalDiTBlock runs the sm_100a kernels for inference and training --
 with or without a [B, N] key mask, at any N --, its output and every gradient no worse against an fp64 PyTorch block than the bf16
 module path's, and every call it does not serve keeps the module path."""
 
@@ -6,7 +6,7 @@ import pytest
 import torch
 from settings_helpers import override_setting
 
-from miniworld_engine.integrations import local_dit
+from miniworld_engine.kernels.integrations import local_dit
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.local_dit import LocalDiTBlock, to_windows
 

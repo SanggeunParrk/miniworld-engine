@@ -11,7 +11,7 @@ from tests.gpu.sm100.test_b200_token_dit_gpu import (
 )
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import token_dit, token_dit_train
+from miniworld_engine.kernels.integrations import token_dit, token_dit_train
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 

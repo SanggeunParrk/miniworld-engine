@@ -3,7 +3,7 @@
 B1 stores BF16 dGout. B7 accumulates dGout @ Wg with the input projection
 gradient in FP32. Constant accumulator indices avoid local array traffic.
 The original normalization-statistics saves and forward path are retained.
-The D64 training path the integration selects (``integrations.trimul_h100``).
+The D64 training path the integration selects (``kernels.integrations.trimul_h100``).
 """
 
 from __future__ import annotations

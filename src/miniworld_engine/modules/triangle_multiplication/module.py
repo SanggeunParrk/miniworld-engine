@@ -11,9 +11,9 @@ import torch.nn as nn
 from jaxtyping import Bool, Float
 
 from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.integrations import anthropic_trimul as _anthropic
-from miniworld_engine.integrations import trimul_b200 as _b200
-from miniworld_engine.integrations import trimul_h100 as _h100
+from miniworld_engine.baselines import anthropic_trimul as _anthropic
+from miniworld_engine.kernels.integrations import trimul_b200 as _b200
+from miniworld_engine.kernels.integrations import trimul_h100 as _h100
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,

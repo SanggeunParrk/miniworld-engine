@@ -6,7 +6,7 @@ Which of the two families runs is decided by the CALLER (module / interface rout
 (AST, no GPU) and fails on, in any file of a ``kernels/*/triton/`` tree or a shared Triton helper:
 
 * an import of a module with a ``cuda`` path component (``kernels.<family>.cuda...``, ``from ..cuda import``, ``from <pkg> import cuda``),
-* an import of ``miniworld_engine.integrations`` (the hand-CUDA stages),
+* an import of ``miniworld_engine.kernels.integrations`` (the hand-CUDA stages),
 * an import of the extension builders (``_nvcc``, ``prebuilt``, ``torch.utils.cpp_extension``),
 * a call of ``load_extension`` / ``load_inline`` / ``_ext(...)`` or a ``torch.ops.miniworld*`` / ``torch.ops.mwln*`` access.
 
@@ -76,7 +76,7 @@ def _violations(path: Path, source: str) -> list[tuple[str, str]]:
             parts = m.split(".")
             if parts[0] == "miniworld_engine" and "cuda" in parts[2:]:
                 found.append(("imports a cuda module", m))
-            elif m == "miniworld_engine.integrations" or m.startswith("miniworld_engine.integrations."):
+            elif m == "miniworld_engine.kernels.integrations" or m.startswith("miniworld_engine.kernels.integrations."):
                 found.append(("imports an integration", m))
             elif _BUILDERS & set(parts):
                 found.append(("imports an extension builder", m))
@@ -155,7 +155,7 @@ def test_the_detector_sees_what_it_is_meant_to_see():
         "from ..cuda import layer_norm_bwd_cuda": "imports a cuda module",
         "from miniworld_engine.kernels.transition.cuda import transition_b2b_fwd": "imports a cuda module",
         "from miniworld_engine.kernels.augmented_attention import cuda as sm90": "imports a cuda module",
-        "from miniworld_engine.integrations.token_dit import update": "imports an integration",
+        "from miniworld_engine.kernels.integrations.token_dit import update": "imports an integration",
         "from miniworld_engine.kernels._nvcc import load_extension": "imports an extension builder",
         "x = load_extension(name='a')": "builds / loads an extension",
         "y = m._ext('attn')": "builds / loads an extension",

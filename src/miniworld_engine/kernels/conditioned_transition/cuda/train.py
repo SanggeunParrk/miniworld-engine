@@ -1,7 +1,7 @@
 """CUDA row kernels of the fused token DiT TRAINING block (``token_dit_train_rows.cu``), forward and backward.
 
 Built on first use (``load_extension``), never at import. Entry points take the operands in the layouts
-``integrations/token_dit_train.py`` keeps them: residual stream fp32 [M, d], every GEMM operand in the path's dtype (bf16
+``kernels/integrations/token_dit_train.py`` keeps them: residual stream fp32 [M, d], every GEMM operand in the path's dtype (bf16
 or fp32), per-column bias / weight gradient sums as per-block partial rows that the host sums.
 """
 

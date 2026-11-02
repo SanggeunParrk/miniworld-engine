@@ -5,8 +5,8 @@ module's shape is fixed (d_msa 64, d_hidden 32, d_pair 128), so the columns are 
 hand-written sm_100a kernel runs a step; the outer-product and gradient GEMMs are cuBLAS (figures only, no kernel tables).
 Figures: one box per kernel, left to right, HBM reads (blue, left) and writes (red, right); generated from
 `figures/opm.json` by `python -m miniworld_engine.utils.viz.kernel_flow`, then converted to PNG (`cairosvg -s 2 -b white`).
-Dispatch: `integrations/opm_train.py` (the H100 integration; compute capability (10, 0) selects the sm_100a extension);
-kernels: `integrations/csrc/sm100/opm_sm100.cu` (tcgen05 / TMEM / TMA), one extension.
+Dispatch: `kernels/integrations/opm_train.py` (the H100 integration; compute capability (10, 0) selects the sm_100a extension);
+kernels: `kernels/integrations/csrc/sm100/opm_sm100.cu` (tcgen05 / TMEM / TMA), one extension.
 
 Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, `normalize_before_proj` (the AF3 order), no
 interchain masking, N (length) a multiple of 64 and S (MSA depth) a multiple of 256, inference and training alike. The pair residual is added in

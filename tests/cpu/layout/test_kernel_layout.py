@@ -25,11 +25,11 @@ The shape, and what each part is for:
                    call). Only some families expose one; it is a property of the layer, not of
                    the folder.
 
-Two directories under ``kernels/`` are NOT families: ``drivers/`` and ``checks/``, the
+Three directories under ``kernels/`` are NOT families: ``drivers/`` and ``checks/``, the
 autotune-capture harness. They hold one module per registry family -- ``drivers/<family>.py``
 and ``checks/<family>.py``, named by registry.csv's ``family`` column, which is what
 ``test_registry_complete.py::test_the_harness_is_one_module_per_family`` enforces. They are
-listed here so a third one cannot appear without a decision.
+listed here so a fourth one cannot appear without a decision. The third is ``integrations/``, the per-card wiring of the modules (decided 2026-11-02: implementation belongs here).
 """
 from __future__ import annotations
 
@@ -161,6 +161,9 @@ def test_notes_are_not_a_package() -> None:
 
 
 HARNESS_DIRS = {"drivers", "checks"}
+#: The per-card hand-CUDA wiring of the modules (it was the top-level ``integrations/`` package): implementation, so it sits with the kernels; it is one
+#: directory of shared sources (``csrc/``) and the Python that launches them, not a family, and not a harness.
+GLUE_DIRS = {"integrations"}
 #: Data, not code: the registry CSVs and their evidence files (no ``__init__.py``).
 DATA_DIRS = {"registry"}
 
@@ -171,7 +174,7 @@ def test_the_only_non_family_directories_are_the_harness() -> None:
     either a family someone forgot to finish or a place kernels will quietly accumulate."""
     stray = sorted(d.name for d in KERNELS.iterdir()
                    if d.is_dir() and d.name != "__pycache__"
-                   and d not in _families() and d.name not in HARNESS_DIRS | DATA_DIRS)
+                   and d not in _families() and d.name not in HARNESS_DIRS | DATA_DIRS | GLUE_DIRS)
     assert not stray, (f"directories under kernels/ that are neither a family nor the harness "
                        f"({', '.join(sorted(HARNESS_DIRS))}): {', '.join(stray)}")
 

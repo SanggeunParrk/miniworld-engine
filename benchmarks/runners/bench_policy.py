@@ -75,14 +75,14 @@ MODULE_REGISTRY_EXCEPTIONS: dict[str, str] = {
                "core even though the adaLN and the transition around it are bf16|fp32",
     "local_dit": "the AF3 atom transformer block (32 x 128 windows): its sm_100a kernels are bf16-only; fp32 falls to the "
                  "module's PyTorch composition",
-    "outer_product": "no registry family of its own: the fused path (integrations/opm_train.py, "
+    "outer_product": "no registry family of its own: the fused path (kernels/integrations/opm_train.py, "
                      "csrc/opm_epilogue.cu) and the Anthropic path are bf16-only; fp32 falls to "
                      "the module's statements",
-    "msa_pair_weighted_averaging": "no registry family of its own: integrations/pwa_train.py and "
+    "msa_pair_weighted_averaging": "no registry family of its own: kernels/integrations/pwa_train.py and "
                                    "the Anthropic msa_pwa cell are bf16-only",
     "attention_pair_bias": "no registry family of its own; benched at bf16 like the trunk it sits "
                            "in (cuequivariance's compiled whole-op route is a BF16 contract)",
-    "bias_only_dit": "no registry family of its own: the fused path (integrations/bias_only_dit.py, "
+    "bias_only_dit": "no registry family of its own: the fused path (kernels/integrations/bias_only_dit.py, "
                      "kernels/bias_only_dit/cuda) is bf16-only; fp32 falls to the module's PyTorch composition",
 }
 

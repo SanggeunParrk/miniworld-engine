@@ -1,7 +1,7 @@
 """Content identities read off the code graph: what an artifact depends on, and a digest of exactly that.
 
 One rule replaces the hand-made global hashes (``native.source_identity`` over every ``kernels/**`` file, ``plan.source_identity``
-over ``modules/``, ``kernels/``, ``integrations/``): an artifact stores the digest of the part of the graph it depends on, and is
+over ``modules/``, ``kernels/``, ``baselines/``, ``utils/``): an artifact stores the digest of the part of the graph it depends on, and is
 stale iff that digest differs from the current one. Nothing else is judged stale, and nothing that did not change is redone.
 
 Two artifacts use it:
@@ -695,8 +695,8 @@ def files_digest(files: Iterable[str]) -> str:
 
 @functools.lru_cache(maxsize=1)
 def tree_digest() -> str:
-    """The coarse fallback: every package source under ``kernels/``, ``modules/``, ``integrations/`` plus the safety set."""
-    top = ("kernels/", "modules/", "integrations/")
+    """The coarse fallback: every package source under ``kernels/``, ``modules/``, ``baselines/``, ``utils/`` plus the safety set."""
+    top = ("kernels/", "modules/", "baselines/", "utils/")
     return files_digest([p for p in _index()[0] if p.startswith(top) and not p.endswith(".csv")] + safety_files())
 
 

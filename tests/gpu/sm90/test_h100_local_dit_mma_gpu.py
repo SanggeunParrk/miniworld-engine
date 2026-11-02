@@ -1,4 +1,4 @@
-"""AF3 block-local atom DiT on H100 (integrations/local_dit_h100.py: warp-level tensor-core row kernels + mma.sync window attention).
+"""AF3 block-local atom DiT on H100 (kernels/integrations/local_dit_h100.py: warp-level tensor-core row kernels + mma.sync window attention).
 
 fp32 activations and parameters run the TF32 kernels, bf16 activations (fp32 master or bf16 parameters) the bf16 ones. The bar is the
 repository's (docs/kernels/gpu-kernel-development-guide.md section 6): the output and every input / parameter gradient are no worse
@@ -10,7 +10,7 @@ padded lengths and key masks, the opaque ops under a CUDA graph, and that the ke
 import pytest
 import torch
 
-from miniworld_engine.integrations import local_dit_h100 as h100
+from miniworld_engine.kernels.integrations import local_dit_h100 as h100
 from miniworld_engine.kernels import _capture
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.local_dit import LocalDiTBlock

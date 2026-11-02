@@ -1,4 +1,4 @@
-"""The fp32 (TF32) path of the bias-only token DiT on B200 (kernels/bias_only_dit/cuda/tf32.py, integrations/bias_only_dit.py and
+"""The fp32 (TF32) path of the bias-only token DiT on B200 (kernels/bias_only_dit/cuda/tf32.py, kernels/integrations/bias_only_dit.py and
 bias_only_dit_train.py with fp32 inputs): the block's output and every gradient against an fp64 reference, the kernels against
 their fp64 references, eager / torch.compile / CUDA graph, that the TF32 CUDA kernels ran (and no Triton), and what it declines.
 
@@ -25,8 +25,8 @@ from portable_helpers import tf32_matmul_flag as tf32
 from settings_helpers import override_setting
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import bias_only_dit as INF
-from miniworld_engine.integrations import bias_only_dit_train as TR
+from miniworld_engine.kernels.integrations import bias_only_dit as INF
+from miniworld_engine.kernels.integrations import bias_only_dit_train as TR
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
 from miniworld_engine.modules.bias_only_dit import module as bo_module
 from miniworld_engine.modules.exceptions import ImplementationType

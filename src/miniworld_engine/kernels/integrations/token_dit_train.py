@@ -438,7 +438,7 @@ def _pack(P, qk, dev, at):
     if hit is not None and hit[0] == key:
         return hit[1]
     if native:
-        from miniworld_engine.integrations.token_dit import QK_WEIGHTS, WEIGHTS
+        from miniworld_engine.kernels.integrations.token_dit import QK_WEIGHTS, WEIGHTS
         from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
 
         names = WEIGHTS + (QK_WEIGHTS if qk else ())
@@ -983,7 +983,7 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
 def _native_final90(
     T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab, dWsq, qk
 ):
-    from miniworld_engine.integrations.token_dit import QK_WEIGHTS, WEIGHTS
+    from miniworld_engine.kernels.integrations.token_dit import QK_WEIGHTS, WEIGHTS
 
     canonical = WEIGHTS + (QK_WEIGHTS if qk else ())
     P = dict(zip(names, params, strict=True))

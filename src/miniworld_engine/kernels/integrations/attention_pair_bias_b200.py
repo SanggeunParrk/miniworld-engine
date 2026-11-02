@@ -655,7 +655,7 @@ class _Training(torch.autograd.Function):
                 grads = _cast_cuda.cast(
                     grads, [torch.float32 if dt == torch.float32 else torch.bfloat16 for dt in ctx.param_dtypes]
                 )
-            from miniworld_engine.integrations.token_dit_train import (
+            from miniworld_engine.kernels.integrations.token_dit_train import (
                 _activate_native_caller,
             )
 
@@ -683,7 +683,7 @@ def update_train(
         *_leaves(module),
     )
     if torch.cuda.get_device_capability(single.device) == (9, 0):
-        from miniworld_engine.integrations.token_dit_train import _native_caller_hooks
+        from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_hooks
 
         # The result graph now owns its AccumulateGrad nodes. Installing on
         # fresh leaves before apply can hook a temporary weak-held node.

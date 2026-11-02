@@ -13,7 +13,7 @@ import torch
 from portable_helpers import randomize_half_std as randomize
 from settings_helpers import policy_portable_off as policy  # noqa: F401
 
-from miniworld_engine.integrations import bias_only_dit_train as bt
+from miniworld_engine.kernels.integrations import bias_only_dit_train as bt
 from miniworld_engine.kernels.bias_only_dit import cuda as C
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -399,7 +399,7 @@ def test_psb32_kernels_match_fp64_and_are_bitwise_repeatable(H, dh, A, L, mask_k
 def test_fused_hoist_backward_matches_fp64_and_the_cublas_path(n_rows, rows):
     """d pair and dW' of ``bias_only_dit_hoist._hoist_bwd``: the one-pass kernel against an fp64 oracle and against the cuBLAS + ln0_bwd_rows
     path (the fused kernels refused), bitwise repeatable."""
-    from miniworld_engine.integrations import bias_only_dit_hoist as hoist
+    from miniworld_engine.kernels.integrations import bias_only_dit_hoist as hoist
 
     g = torch.Generator(device="cuda").manual_seed(11)
     bf = torch.bfloat16
@@ -437,7 +437,7 @@ def _ln_oracle(pair):
 def test_one_pass_hoist_forward(dtype, n_rows, rows):
     """``pass_fwd``: bias^T = W' LN0(pair)^T in one pass over the pair (any R multiple of 16, up to 64 bias rows) against an fp64 oracle, against the
     LayerNorm kernel + GEMM it replaces, bitwise repeatable; the routing (``_hoist_fwd``) takes it."""
-    from miniworld_engine.integrations import bias_only_dit_hoist as hoist
+    from miniworld_engine.kernels.integrations import bias_only_dit_hoist as hoist
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
     g = torch.Generator(device="cuda").manual_seed(5)
@@ -461,7 +461,7 @@ def test_one_pass_hoist_forward(dtype, n_rows, rows):
 def test_one_pass_hoist_backward(dtype, rows):
     """``pass_bwd`` (one block of 16 heads, bf16 and fp32 / TF32): d pair and dW' against an fp64 oracle and against the cuBLAS + ln0_bwd_rows path
     (the fused kernels refused), bitwise repeatable, any R multiple of 16."""
-    from miniworld_engine.integrations import bias_only_dit_hoist as hoist
+    from miniworld_engine.kernels.integrations import bias_only_dit_hoist as hoist
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
     g = torch.Generator(device="cuda").manual_seed(13)

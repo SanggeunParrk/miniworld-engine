@@ -39,7 +39,7 @@ token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 /
 conditioning [A, 1, L, 384], a key mask [1, L] or none, LayerNorm eps 1e-5. settings.bias_only_dit_train=0 turns it off.
 
 Hoisted pair bias (``block(..., bias=b)``, b [1, H, L, L] in the step's dtype from ``pair_bias_all``,
-``integrations/bias_only_dit_hoist.py``): the block's own autograd function without the pair -- the forward skips ``pair_bias``
+``kernels/integrations/bias_only_dit_hoist.py``): the block's own autograd function without the pair -- the forward skips ``pair_bias``
 (softmax_t reads b and writes P / P^T beside it), the backward skips ``pair_bias_bwd`` (and its ``pair_bias_bwd_fin`` merge): the bias
 gradient leaves the block as its input's gradient, written straight into the block's slice of the hoist's shared buffer when b
 names one (``SINK_ATTR``), and a separate ``finalize`` launch (no dWf partials: its ln_pair / to_bias jobs see no rows) makes the
@@ -54,7 +54,7 @@ import warnings
 import torch
 
 from miniworld_engine import settings
-from miniworld_engine.integrations.bias_only_dit_hoist import SINK_ATTR
+from miniworld_engine.kernels.integrations.bias_only_dit_hoist import SINK_ATTR
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 
@@ -1478,7 +1478,7 @@ class _Block(torch.autograd.Function):
         from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
 
         if h100_enabled(single.device):
-            from miniworld_engine.integrations.token_dit_train import (
+            from miniworld_engine.kernels.integrations.token_dit_train import (
                 _activate_native_caller,
             )
 
@@ -2164,7 +2164,7 @@ def block(module, single, cond, pair, mask=None, bias=None):
         from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
 
         if h100_enabled(single.device):
-            from miniworld_engine.integrations.token_dit_train import (
+            from miniworld_engine.kernels.integrations.token_dit_train import (
                 _native_caller_hooks,
             )
 

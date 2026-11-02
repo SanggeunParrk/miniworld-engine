@@ -1,4 +1,4 @@
-"""Row kernels of the hoisted pair bias (``integrations/bias_only_dit_hoist.py``), bf16 and fp32, pair width 128 or 256.
+"""Row kernels of the hoisted pair bias (``kernels/integrations/bias_only_dit_hoist.py``), bf16 and fp32, pair width 128 or 256.
 
   forward    LN0(pair): the token DiT rows' ``layernorm128_rows`` (one warp per row, no affine; the inference hoist's kernel), its
              ``layernorm_rows`` (the same kernel template) for 256 channels

@@ -35,7 +35,7 @@ import triton
 import triton.language as tl
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import pwa_wide as _wide
+from miniworld_engine.kernels.integrations import pwa_wide as _wide
 from miniworld_engine.kernels import _cast_cuda
 
 H, C, D, DZ = 8, 32, 64, 128
@@ -980,7 +980,7 @@ def pair_weighted_averaging(
         9,
         0,
     ):
-        from miniworld_engine.integrations.token_dit_train import _native_caller_hooks
+        from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_hooks
 
         # Keep the result's autograd edges alive before hooking leaf nodes.
         _native_caller_hooks(
@@ -1091,7 +1091,7 @@ class PwaTrainFn(torch.autograd.Function):
         if native_aux_enabled(vals[0]) and torch.cuda.get_device_capability(
             dy.device
         ) == (9, 0):
-            from miniworld_engine.integrations.token_dit_train import (
+            from miniworld_engine.kernels.integrations.token_dit_train import (
                 _activate_native_caller,
             )
 

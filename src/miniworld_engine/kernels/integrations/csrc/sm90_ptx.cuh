@@ -1,4 +1,4 @@
-// The sm_90a PTX helpers the integrations/csrc wgmma + TMA kernels share (dgv_bwd, ln_vg, opm_epilogue, pwa_*): wgmma
+// The sm_90a PTX helpers the kernels/integrations/csrc wgmma + TMA kernels share (dgv_bwd, ln_vg, opm_epilogue, pwa_*): wgmma
 // fragments and groups, setmaxnreg, mbarrier, TMA bulk tensor copies and bulk groups, cluster barriers, and (`mma`) the mma.sync /
 // cp.async group helpers of pair3 / pair_wide / pwa_wide. One definition
 // each; a file brings the ones it uses into its own `wg` / `tma` namespace with `using csrc_sm90::wg::x;`. A helper whose

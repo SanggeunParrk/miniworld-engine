@@ -11,7 +11,7 @@ import pytest
 import torch
 from settings_helpers import override_setting
 
-from miniworld_engine.integrations import opm_train
+from miniworld_engine.kernels.integrations import opm_train
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.outer_product import OuterProductMean
 

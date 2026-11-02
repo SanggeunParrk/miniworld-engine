@@ -20,7 +20,7 @@ Hand-written CUDA and cuBLAS only (no Triton), bf16 and fp32 (TF32 tensor cores,
 16 x 48 heads, B == 1 (a pair of its own per sample, B > 1: [below](#per-sample-pair-bias-inference-2026-10-27)), L a multiple of 128 up to 3072 (inference: the sampler's token rungs reach 2560) or 768 (training), a key mask
 [1, L] or none. Everything else keeps the module's PyTorch composition.
 
-- **Inference** (`integrations/bias_only_dit.py` -> `kernels/bias_only_dit/cuda/runner.py`, `FusedBiasOnlyDiT`): one conditioning
+- **Inference** (`kernels/integrations/bias_only_dit.py` -> `kernels/bias_only_dit/cuda/runner.py`, `FusedBiasOnlyDiT`): one conditioning
   per sample or one shared by the samples. Per call: the conditioning tables (LN rows + two cuBLAS GEMMs; bf16 up to 384 table rows:
   LN rows + ONE sm_90a GEMM for both, `bo_gemm_sm90.cu cond_tables`), then per block `adaln_in_rows` (no fp32 copy of the input:
   the first residual pass, `resgate_adaln_rows_in`, reads the input itself) -> cuBLAS v | g -> **`pvx`** (bf16) / **`pvx32`** (fp32)
@@ -30,7 +30,7 @@ Hand-written CUDA and cuBLAS only (no Triton), bf16 and fp32 (TF32 tensor cores,
   capture-scoped cache. The private switches `runner._H100_NOCOPY` / `_H100_EXPAND_ROWS` / `_H100_COND1` (all on) keep the
   previous forms for A/B. The B200 three-kernel step was ported (`inf3_h100.py`, `bo_inf3_sm90.cu`) and is slower here: off
   (`inf3_h100._ON`), [below](#the-b200-three-kernel-step-and-fused-backward-on-h100-2026-10-19).
-- **Training** (`integrations/bias_only_dit_train.py`): one autograd Function per block, forward and backward each one opaque op.
+- **Training** (`kernels/integrations/bias_only_dit_train.py`): one autograd Function per block, forward and backward each one opaque op.
   bf16: pair bias + `softmax_t` (P and P^T), v | g GEMM, `pvx` (a = sigmoid(g) P v), out GEMM, the AdaLN / residual rows, expand
   GEMM + `swiglu_rows` (a | b saved), squeeze GEMM; backward `res_c_bwd`, dh GEMM + `swiglu_bwd`, dxt, `res_adaln_b_bwd`, dog,
   `gate_bwd_rows`, **`pvx` ungated** (dV = P^T dO), **`dpb2`** (dbias = P o (sum_a dO v^T - D)), dxa, `adaln_a_bwd`, the conditioning
@@ -165,7 +165,7 @@ The conditioning width is read off the block's weights; the training row kernels
 ## Per-sample pair bias, inference (2026-10-27)
 
 `block(single [1, B, L, d], cond [1, B, L, 384], pair [B, L, L, 128])` or `bias=` [B, H, L, L] (B > 1, no gradient): before this a per-sample pair
-ran the PyTorch reference on H100. Now served by `integrations/bias_only_dit.serves_psb` / `update_psb` (bf16, and fp32 on TF32; H100; L a
+ran the PyTorch reference on H100. Now served by `kernels/integrations/bias_only_dit.serves_psb` / `update_psb` (bf16, and fp32 on TF32; H100; L a
 multiple of 128 up to 768; key mask [1, L] or [B, L]; every head layout). Full numbers and
 the rejected list: [h100_bodit_psb_inference_20261027.md](../../../records/h100_bodit_psb_inference_20261027.md).
 
@@ -239,7 +239,7 @@ Token DiT training (`tests/gpu/any/test_token_dit_train_gpu.py`, 60 tests) cover
 
 ## Hoisted pair bias (`pair_bias_all`, 2026-10-15)
 
-`integrations/bias_only_dit_hoist.py` makes every block's pair bias from ONE LayerNorm (`LN0(pair)`, shared by the blocks) and ONE
+`kernels/integrations/bias_only_dit_hoist.py` makes every block's pair bias from ONE LayerNorm (`LN0(pair)`, shared by the blocks) and ONE
 GEMM (`W'_all = [W_b diag(g_b)]`, cuBLAS bf16 / TF32), and its backward from one dLN0 GEMM, one `ln0_bwd_rows` and one dW' GEMM
 (the blocks write their dbias into slices of one buffer). It was B200-only (`serves()` required sm_100); the gate now also admits
 sm_90. The LN0 rows are the same CUDA kernels (built for sm_90 already); the block functions already took `bias=`.

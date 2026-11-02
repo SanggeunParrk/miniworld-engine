@@ -146,7 +146,7 @@ def cases() -> list[dict]:
     # and falls back from is reached by no model shape, and would JIT-compile on a first call.
     out.append({"kind": "swa_stages", "train": False, "dtype": "bfloat16", "heavy": False})
     # The Anthropic OPM path (integrations/anthropic_msa) finishes with THIS repo's csrc/opm_epilogue.cu, built once under the name
-    # ``miniworld_opm_epilogue`` (no variant suffix: the ``_native*`` ones belong to integrations/opm_train). Needs no payload to build.
+    # ``miniworld_opm_epilogue`` (no variant suffix: the ``_native*`` ones belong to kernels/integrations/opm_train). Needs no payload to build.
     out.append({"kind": "anthropic_ext", "train": False, "dtype": "bfloat16", "heavy": False})
     # La-Proteina (kernels/pair_embed_geom, pair_embed_adaln; the token DiT block at its widths: 768 / 12 heads x 64 / pair 256 / cond 256 or 128 /
     # transition x4): the pair builders once, and the batched-pairs block (block_psb under serves_batched) inference and training at the padded
@@ -352,7 +352,7 @@ def _run_block(c: dict) -> None:
         _swa_stages()
         return
     elif c["kind"] == "anthropic_ext":
-        from miniworld_engine.integrations import anthropic_msa
+        from miniworld_engine.baselines import anthropic_msa
 
         anthropic_msa._ext()
         return

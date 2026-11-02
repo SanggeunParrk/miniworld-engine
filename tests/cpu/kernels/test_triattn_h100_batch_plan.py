@@ -1,9 +1,9 @@
-"""``integrations.triattn_h100_sm90``: samples per launch (``max_batch``) and the memory chunking of a B-sample call (``plan``), a pure
+"""``kernels.integrations.triattn_h100_sm90``: samples per launch (``max_batch``) and the memory chunking of a B-sample call (``plan``), a pure
 function of the path, the shapes, the mode and the device's total memory."""
 
 import pytest
 
-from miniworld_engine.integrations import triattn_h100_sm90 as tri
+from miniworld_engine.kernels.integrations import triattn_h100_sm90 as tri
 
 H100 = 85_018_279_936  # torch.cuda.get_device_properties(0).total_memory of an H100 80GB HBM3 (2026-10-20)
 FUSED = (tri.FUSED, 128, 4)

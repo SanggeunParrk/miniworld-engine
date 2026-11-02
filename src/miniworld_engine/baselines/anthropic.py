@@ -285,7 +285,7 @@ def module_trimul(module, pair, mask, dropout_p):
     import torch
 
     if torch.is_grad_enabled() or (module.training and dropout_p):
-        from miniworld_engine.integrations.anthropic_training import module_update
+        from miniworld_engine.baselines.anthropic_training import module_update
 
         update = module_update(module, pair, mask)
         if module.training and dropout_p:

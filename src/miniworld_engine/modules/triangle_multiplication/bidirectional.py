@@ -6,9 +6,9 @@ channels; the hidden channels split in half — first ``d_hidden`` compute the
 product (``bkid,bkjd->bijd``). The two are concatenated to ``2 * d_hidden`` and
 projected down to ``d_pair``.
 
-PYTORCH is the reference. On H100 the hand-CUDA kernels (``integrations.trimul_h100``)
+PYTORCH is the reference. On H100 the hand-CUDA kernels (``kernels.integrations.trimul_h100``)
 serve the qualified training/inference shapes, on B200 the sm_100a kernels
-(``integrations.trimul_b200``, D64-D512); everything else runs the Triton pipeline
+(``kernels.integrations.trimul_b200``, D64-D512); everything else runs the Triton pipeline
 (``kernels/trimul_inproj/triton/bidirectional.py``): one wider gated GEMM front
 (left/right each ``2*d_hidden``), two contractions, and a shared ``2*d_hidden`` back.
 """
@@ -20,9 +20,9 @@ import torch.nn as nn
 from jaxtyping import Bool, Float
 
 from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.integrations import anthropic_trimul as _anthropic
-from miniworld_engine.integrations import trimul_b200 as _b200
-from miniworld_engine.integrations import trimul_h100 as _h100
+from miniworld_engine.baselines import anthropic_trimul as _anthropic
+from miniworld_engine.kernels.integrations import trimul_b200 as _b200
+from miniworld_engine.kernels.integrations import trimul_h100 as _h100
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,

@@ -14,7 +14,7 @@ import torch
 from portable_helpers import relative
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import triattn_h100_sm90 as tri
+from miniworld_engine.kernels.integrations import triattn_h100_sm90 as tri
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_attention.module import TriangleAttention
 

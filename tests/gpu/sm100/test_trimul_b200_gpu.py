@@ -6,7 +6,7 @@ import torch
 from portable_helpers import randomize, relative
 from settings_helpers import policy_b200_portable_off as policy  # noqa: F401
 
-from miniworld_engine.integrations import trimul_b200
+from miniworld_engine.kernels.integrations import trimul_b200
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
 from miniworld_engine.modules.triangle_multiplication.bidirectional import (

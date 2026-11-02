@@ -70,7 +70,7 @@ version counters.
 
 ## Primitive providers and carried kernels
 
-`miniworld_engine.integrations.anthropic` exposes inference wrappers for
+`miniworld_engine.baselines.anthropic` exposes inference wrappers for
 triangle multiplication, triangle attention, Transition, LayerNorm, shared
 pair-bias attention, and atom attention. For providers returning `(output,
 selection)`, retain the selection in run records. `provider(name)` exposes the

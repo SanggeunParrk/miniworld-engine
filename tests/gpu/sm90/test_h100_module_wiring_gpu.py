@@ -6,7 +6,7 @@ from portable_helpers import randomize, relative
 from settings_helpers import override_setting
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import token_dit, trimul_h100
+from miniworld_engine.kernels.integrations import token_dit, trimul_h100
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication

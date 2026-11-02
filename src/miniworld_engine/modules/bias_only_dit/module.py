@@ -14,7 +14,7 @@ a GEMM per head), not the flash-attention core with an argument switched off.
 
 ``implementation=PYTORCH`` is the reference. ``MINIWORLD`` / ``PORTABLE`` (the engine's kernels) take, on H100 / B200 in bf16 (or in
 fp32 on TF32 tensor cores: an fp32 block with fp32 inputs, no autocast),
-``integrations.bias_only_dit`` without autograd and ``integrations.bias_only_dit_train`` with it (CUDA and cuBLAS only), and
+``kernels.integrations.bias_only_dit`` without autograd and ``kernels.integrations.bias_only_dit_train`` with it (CUDA and cuBLAS only), and
 the composition of the parts everywhere else. The parts (AdaptiveLayerNorm, ConditionedTransition, the pair LayerNorm) are built with
 the block's implementation, so they route per card as any module does: H100 / B200 run their PyTorch leg for a call no CUDA block path
 serves; another card runs the portable kernels of the parts (forward and backward, bf16 and fp32) when the engine holds a record for
@@ -39,8 +39,8 @@ from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels.bias_only_attention.triton.core_t import bias_only_core_t as _core_t
 from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits as _pair_bias_logits
 from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import supported as _pair_bias_supported
-from miniworld_engine.integrations import bias_only_dit as _fused
-from miniworld_engine.integrations import bias_only_dit_train as _train
+from miniworld_engine.kernels.integrations import bias_only_dit as _fused
+from miniworld_engine.kernels.integrations import bias_only_dit_train as _train
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.conditioned_transition import ConditionedTransition
 from miniworld_engine.modules.dispatch import portable_blocked, restricted_card
@@ -243,7 +243,7 @@ class BiasOnlyDiTBlock(nn.Module):
     def _psb_candidate(self, single, cond, pair, bias) -> bool:
         """A pair (or hoisted bias) of its own per sample: ``single`` [1, B, L, d] with ``pair`` [B, L, L, d_pair] or ``bias``
         [B, H, L, L], B > 1 (the samples folded into the batch axis, each attending with its own bias). Training on Hopper only
-        (``integrations.bias_only_dit_train.block_psb``)."""
+        (``kernels.integrations.bias_only_dit_train.block_psb``)."""
         if (pair is None and bias is None) or not torch.is_grad_enabled() or self.implementation is _REF:
             return False
         if not (single.ndim == 4 and single.shape[0] == 1 and single.shape[1] > 1):
@@ -263,7 +263,7 @@ class BiasOnlyDiTBlock(nn.Module):
         if tuple(bias.shape) != (B, self.attention.n_head, L, L):
             return None
         s, c = single.reshape(B, 1, L, -1), cond.reshape(B, 1, L, -1)
-        from miniworld_engine.integrations.bias_only_dit_hoist import SINK_ATTR
+        from miniworld_engine.kernels.integrations.bias_only_dit_hoist import SINK_ATTR
 
         hb = bias.permute(1, 0, 2, 3)
         hb = hb if hb.is_contiguous() else hb.contiguous()

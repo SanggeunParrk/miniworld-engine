@@ -285,7 +285,7 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
             raise ValueError("native H100 SWA modulation requires contiguous BF16/FP32 width128 and [768,128] weights")
         c = c_base.reshape(-1, c_base.shape[-1])
         if torch.is_grad_enabled() and (c.requires_grad or wmod.requires_grad):
-            from miniworld_engine.integrations.token_dit_train import (
+            from miniworld_engine.kernels.integrations.token_dit_train import (
                 _native_caller_output,
             )
             out = SWADiTModulationH100.apply(c, wmod)

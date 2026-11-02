@@ -16,7 +16,7 @@ Time-roofline SoL (8 x 48, measured 2026-09-30): inference 6-51 % (L128 -> L768)
 the pair kernels run at 69-95 %, the attention cores are latency-bound at B = 1.
 
 On B200 the module runs **hand-written CUDA and cuBLAS only** (no Triton, no quack), from `AttentionPairBias.forward`
-through `integrations/attention_pair_bias_b200.py` when the call matches its contract: implementation MINIWORLD with the
+through `kernels/integrations/attention_pair_bias_b200.py` when the call matches its contract: implementation MINIWORLD with the
 engine backend not forced to Triton, bf16 single and pair, B = 1, (heads, d_single) one of `SHAPES` = (8, 384), (12, 384),
 (16, 384), (24, 384), (16, 512), d_pair 128, no QK-norm, key mask [1, L] or none, capability 10.0. Everything else keeps
 the module path.

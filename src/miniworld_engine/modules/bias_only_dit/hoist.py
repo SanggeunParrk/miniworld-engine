@@ -11,7 +11,7 @@ stacked folded weights. Pass block b its bias (``block(single, cond, pair, mask,
 rounding (the GEMM sums the same products, gamma applied to the weight instead of the activation). Under activation checkpointing
 call it OUTSIDE the checkpointed blocks.
 
-On B200 with an engine implementation (bf16, or fp32 on TF32 tensor cores) this is ``integrations.bias_only_dit_hoist`` (one
+On B200 with an engine implementation (bf16, or fp32 on TF32 tensor cores) this is ``kernels.integrations.bias_only_dit_hoist`` (one
 LayerNorm rows pass, cuBLAS GEMMs, the blocks' bias gradients written into one buffer); elsewhere the PyTorch fold below
 (autograd differentiates it), with the same API.
 """
@@ -21,7 +21,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.integrations import bias_only_dit_hoist as _fused
+from miniworld_engine.kernels.integrations import bias_only_dit_hoist as _fused
 from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits as _pair_bias_logits
 from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import supported as _pair_bias_supported
 from miniworld_engine.modules.dispatch import portable_blocked, restricted_card

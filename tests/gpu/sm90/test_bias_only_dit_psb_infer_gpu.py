@@ -1,4 +1,4 @@
-"""The bias-only token DiT INFERENCE step on a pair bias of its own per sample (``integrations.bias_only_dit.serves_psb`` /
+"""The bias-only token DiT INFERENCE step on a pair bias of its own per sample (``kernels.integrations.bias_only_dit.serves_psb`` /
 ``update_psb``, reached through ``BiasOnlyDiTBlock(single [1, B, L, d], cond, pair [B, L, L, 128])`` or ``bias=`` from
 ``pair_bias_all`` with no gradient) against the PyTorch module fed the same per-sample pair in fp32 IEEE, bf16 and fp32 (TF32), with
 a key mask per sample, shared or none; against the same samples run one at a time (the shared-P path); the sample chunking of a
@@ -9,7 +9,7 @@ import torch
 from portable_helpers import randomize_half_std as randomize
 from settings_helpers import policy_portable_off as policy  # noqa: F401
 
-from miniworld_engine.integrations import bias_only_dit as bi
+from miniworld_engine.kernels.integrations import bias_only_dit as bi
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock, pair_bias_all
 from miniworld_engine.modules.exceptions import ImplementationType
 

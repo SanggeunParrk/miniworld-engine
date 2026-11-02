@@ -1,6 +1,6 @@
-"""``integrations.trimul_h100.MAX_BATCH`` is the samples-per-call limit that callers (MiniWorld's template embedder) ask for."""
+"""``kernels.integrations.trimul_h100.MAX_BATCH`` is the samples-per-call limit that callers (MiniWorld's template embedder) ask for."""
 
-from miniworld_engine.integrations import trimul_h100
+from miniworld_engine.kernels.integrations import trimul_h100
 
 
 def test_the_batch_limit_is_public_and_positive():

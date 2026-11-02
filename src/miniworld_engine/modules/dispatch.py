@@ -235,7 +235,7 @@ _DEFAULT_BACKEND = KernelBackend.PORTABLE  # unknown op / unknown GPU -> portabl
 _CUEQ_OPS = frozenset({"triangle_multiplication", "triangle_attention"})
 
 # The ops whose module has an ``anthropic`` branch (``KernelBackend.ANTHROPIC``): the Anthropic TriMul payload and its TriangleAttention
-# adapter (``integrations.anthropic``). Other ops reject an explicit ANTHROPIC request in ``resolve``.
+# adapter (``kernels.integrations.anthropic``). Other ops reject an explicit ANTHROPIC request in ``resolve``.
 _ANTHROPIC_OPS = frozenset({"triangle_multiplication", "triangle_attention"})
 
 
@@ -251,7 +251,7 @@ _TRIMUL_ROUTE_BACKENDS = {
 
 def _trimul_known_best(device: torch.device | None) -> KernelBackend:
     """trimul: PORTABLE family on every arch. The hand-CUDA H100 kernels are not a module-layer
-    backend: the modules try ``integrations.trimul_h100`` first and fall through to this
+    backend: the modules try ``kernels.integrations.trimul_h100`` first and fall through to this
     family for every shape it does not serve. ``settings.trimul_impl`` pins a backend for
     debug/A-B."""
     from miniworld_engine import settings

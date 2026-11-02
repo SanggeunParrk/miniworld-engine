@@ -1,4 +1,4 @@
-// Bias-only token DiT, the HOISTED pair bias (integrations/bias_only_dit_hoist.py) in ONE pass over the pair each way, sm_90a, bf16 and fp32 (TF32).
+// Bias-only token DiT, the HOISTED pair bias (kernels/integrations/bias_only_dit_hoist.py) in ONE pass over the pair each way, sm_90a, bf16 and fp32 (TF32).
 //
 //   hoist_fwd   bias^T [N, R] = W' LN0(pair)^T          LayerNorm rows (no affine) + the projection on the tensor cores; the normalised pair never
 //                                                       exists in memory (it was written by a LayerNorm kernel and read back by cuBLAS)

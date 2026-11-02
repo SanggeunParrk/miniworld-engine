@@ -128,8 +128,6 @@ def test_every_launcher_is_opaque_or_only_reached_through_one() -> None:
     """
     harness = {SRC / "kernels" / "checks", SRC / "kernels" / "drivers"}
     paths = [p for p in _python_files() if p.parent not in harness]
-    # Production module entry points may live in integrations and provide the opaque boundary.
-    paths += sorted((SRC / "integrations").glob("*.py"))
     launchers, ops, calls = _launchers_and_ops(paths)
 
     # "Covered" is TRANSITIVE: `_ln_bwd_atomic`'s only caller is `ln_bwd_mmajor`, which is not an
@@ -200,7 +198,7 @@ OP_FAMILIES = (
     "pair_embed_adaln", # La-Proteina's pair builder (kernels/pair_embed_adaln): one forward op, one backward op
     "sampler_ops",     # the diffusion sampler glue (kernels/sampler_ops): augment + re-noise, Kabsch align + Euler step, encoder pooling
     "smooth_lddt",     # AF3 Alg. 27 smooth lDDT of the diffusion loss (kernels/smooth_lddt): prep, forward and backward ops
-    "local_dit",       # the AF3 block-local atom block (integrations/local_dit): one forward op, one backward op
+    "local_dit",       # the AF3 block-local atom block (kernels/integrations/local_dit): one forward op, one backward op
     "dit_variants",    # the Boltz-2 / RoseTTAFold3 / Chai-1 DiT block variants (kernels/dit_variants/cuda/train.py): token and atom block forward / backward, pair LayerNorm
     "tm1",
     "tm2",

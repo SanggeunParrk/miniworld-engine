@@ -1,0 +1,1 @@
+"""Adapters that call external baselines (Anthropic's uplifting-biomolecular-modeling release) through the engine's entry points. Not engine kernels; the upstream code lives under ``third_party/anthropic``."""

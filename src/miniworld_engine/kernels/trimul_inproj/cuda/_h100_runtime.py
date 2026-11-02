@@ -413,7 +413,7 @@ def read_header(path):
 
 
 # ------------------------------------------------------------------------------------------------ caller-owned outputs
-# A chunked batch (``integrations.trimul_h100``) hands each chunk's launch the rows of the batch's y (forward) and dx (backward):
+# A chunked batch (``kernels.integrations.trimul_h100``) hands each chunk's launch the rows of the batch's y (forward) and dx (backward):
 # the path's final y / dx allocation takes the buffer instead of allocating, so no chunk output is copied or concatenated. Only
 # the first allocation of a matching tensor takes it (the scope is consumed), and never while Dynamo traces (the buffer is not an
 # argument of the opaque op, so a traced graph would not see the write): there the path allocates and the caller copies.

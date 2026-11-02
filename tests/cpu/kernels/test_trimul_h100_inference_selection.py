@@ -1,4 +1,4 @@
-"""``integrations.trimul_h100._legacy_native_faster`` (inference): single-direction D384 never keeps the packaged tmn K1 / K3
+"""``kernels.integrations.trimul_h100._legacy_native_faster`` (inference): single-direction D384 never keeps the packaged tmn K1 / K3
 and D256 only below L256; the B200-style port serves the rest (records trimul_h100_bigl_20261030.md, trimul_h100_d256_20261031.md)."""
 
 from types import SimpleNamespace
@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from miniworld_engine.integrations import trimul_h100
+from miniworld_engine.kernels.integrations import trimul_h100
 
 ONE_DIRECTION = SimpleNamespace(outgoing=True)
 

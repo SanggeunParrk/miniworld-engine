@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import anthropic as A
+from miniworld_engine.baselines import anthropic as A
 
 p = argparse.ArgumentParser()
 p.add_argument("--family", required=True, choices=["trimul","triattn","transition","ln","apb","atom_window","gather","template","dtk","adaln","swiglu","msa_ln","opm","ln_linear","opm_core","pwa"])

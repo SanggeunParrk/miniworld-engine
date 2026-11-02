@@ -260,7 +260,7 @@ def test_cuda_dispatch_has_no_triton():
 
 
 def test_opt_in_module_dispatch():
-    from miniworld_engine.integrations import triattn_h100
+    from miniworld_engine.kernels.integrations import triattn_h100
     from miniworld_engine.modules.dispatch import KernelBackend
 
     m = make(256).eval()

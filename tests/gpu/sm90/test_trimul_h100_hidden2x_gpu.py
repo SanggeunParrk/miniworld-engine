@@ -11,7 +11,7 @@ import torch
 from portable_helpers import relative
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import trimul_h100
+from miniworld_engine.kernels.integrations import trimul_h100
 from miniworld_engine.kernels.trimul_inproj.cuda import (
     h100_d64_b200gate,
     h100_inference,

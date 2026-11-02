@@ -6,7 +6,7 @@ hand-written sm_100a path exists; a shape without one is 미구현 (portable pat
 per kernel, left to right, HBM reads (blue, left) and writes (red, right); generated from
 `figures/trimul.json` by `python -m miniworld_engine.utils.viz.kernel_flow`,
 then converted to PNG (`cairosvg -s 2 -b white`; `rsvg-convert` was not installed in the environment that generated the figures).
-Dispatch: `integrations/trimul_b200.py`; kernels: `kernels/trimul_inproj/cuda/`
+Dispatch: `kernels/integrations/trimul_b200.py`; kernels: `kernels/trimul_inproj/cuda/`
 (`b200_infer.py`, `b200_train.py`) and `b200_sources/` (tcgen05 / TMEM / TMA), one extension.
 
 Both modules share one kernel family: the bidirectional module is the one-direction module at twice

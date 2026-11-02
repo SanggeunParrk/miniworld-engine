@@ -1,4 +1,4 @@
-"""AttentionPairBias training on H100 (integrations/attention_pair_bias_b200.py, sm_90a branch) against the fp32 PyTorch module.
+"""AttentionPairBias training on H100 (kernels/integrations/attention_pair_bias_b200.py, sm_90a branch) against the fp32 PyTorch module.
 
 The bar is the guide's (docs/kernels/gpu-kernel-development-guide.md section 6): the output and every input / parameter gradient
 of the native path are no worse than 1.3x the bf16 PyTorch module's error against the fp32 module (the Triton path sits at the
@@ -82,7 +82,7 @@ def _train(mod, single, pair, mask, dy, autocast=False):
 @pytest.mark.parametrize("L", [128, 384])
 @pytest.mark.parametrize("master", [False, True], ids=["bf16params", "fp32master"])
 def test_apb_h100_training_accuracy(shape, masked, L, master):
-    from miniworld_engine.integrations import attention_pair_bias_b200 as native
+    from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as native
 
     ref = _modules(shape)
     single, pair, mask = _inputs(L, shape[1], masked)

@@ -5,8 +5,8 @@ module's shape is fixed (d_msa 64, d_pair 128, 8 heads x 32), so the columns are
 hand-written sm_100a kernel runs a step; the two contractions and the weight gradient are cuBLAS `bmm` (figures only).
 Figures: one box per kernel, left to right, HBM reads (blue, left) and writes (red, right); generated from
 `figures/pwa.json` by `python -m miniworld_engine.utils.viz.kernel_flow`, then converted to PNG (`cairosvg -s 2 -b white`).
-Dispatch: `integrations/pwa_train.py` (the H100 integration; compute capability (10, 0) selects the sm_100a extension);
-kernels: `integrations/csrc/sm100/pwa_sm100.cu` (tcgen05 / TMEM / TMA), one extension.
+Dispatch: `kernels/integrations/pwa_train.py` (the H100 integration; compute capability (10, 0) selects the sm_100a extension);
+kernels: `kernels/integrations/csrc/sm100/pwa_sm100.cu` (tcgen05 / TMEM / TMA), one extension.
 
 Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, a token key mask (or none), N (length) a multiple of 128 up
 to 1024 and S (MSA depth) a multiple of 128, inference and training alike. The MSA residual and the module's row-broadcast dropout

@@ -2,7 +2,7 @@
 
 Kernel-level status of AttentionPairBias (Pairformer single track: LayerNorm(single) -> q / k / v / gate projections, pair bias =
 to_bias(LayerNorm(pair)), key mask, softmax, sigmoid gate, to_out, residual) on H100. Module summary: [h100.md](../h100.md).
-Contract (same code as B200, `integrations/attention_pair_bias_b200.py`): bf16 activations, B = 1, d_pair 128, no QK-norm,
+Contract (same code as B200, `kernels/integrations/attention_pair_bias_b200.py`): bf16 activations, B = 1, d_pair 128, no QK-norm,
 (heads, d_single) in 8 x 48 / 12 x 32 / 16 x 24 / 24 x 16 at 384 and 16 x 32 at 512, inference L % 16 == 0, training L % 128 == 0.
 fp32 master parameters are rounded to bf16 inside the packing pass (no cast launch); gradients are fp32, never rounded to bf16.
 

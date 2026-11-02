@@ -17,7 +17,7 @@ import math
 
 import torch
 
-from miniworld_engine.integrations.token_dit_train import BF, EPS, _mm32
+from miniworld_engine.kernels.integrations.token_dit_train import BF, EPS, _mm32
 
 LOG2E = 1.0 / math.log(2.0)
 D, DH = 768, 48

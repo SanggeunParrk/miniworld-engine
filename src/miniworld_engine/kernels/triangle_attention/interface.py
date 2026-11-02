@@ -5,7 +5,7 @@ its own backward. This module is the family's public door: importers name it rat
 ``triton/`` layout.
 
 The forward is the portable Triton one (``triton/main.py``, pure Triton kernels that never reach for CUDA); the H100 hand-CUDA
-TriangleAttention lives at the module level (``integrations/triattn_h100_sm90``).
+TriangleAttention lives at the module level (``kernels/integrations/triattn_h100_sm90``).
 """
 
 from __future__ import annotations

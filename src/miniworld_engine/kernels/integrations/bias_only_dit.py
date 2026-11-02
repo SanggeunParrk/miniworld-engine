@@ -330,7 +330,7 @@ def update_psb(module, single, cond, pair, mask, bias=None):
         return _infer_psb(s, c, hb, mask, weights).reshape(single.shape)
     H = module.attention.n_head
     k = chunk_samples(B, H, L, single.element_size())
-    from miniworld_engine.integrations import bias_only_dit_hoist as hoist
+    from miniworld_engine.kernels.integrations import bias_only_dit_hoist as hoist
 
     outs = []
     for b0 in range(0, B, k):

@@ -507,7 +507,7 @@ _FAKED_NATIVE_FAMILIES = tuple(
         "layernorm.cuda.general", "layernorm.cuda.pipe", "rmsnorm.cuda", "adaln.cuda", "conditioned_transition.cuda",
         "dit_variants.cuda", "augmented_attention.cuda", "trimul_inproj.cuda.", "triangle_attention.cuda.h100_triattn",
     )
-) + ("miniworld_engine.integrations.",)
+) + ("miniworld_engine.kernels.integrations.",)
 
 
 def install_native_recorders() -> None:
@@ -572,11 +572,11 @@ def install_native_recorders() -> None:
         # derivation, while preventing driver/C++ launches on fake data.
         import importlib
         contracts = (
-            ("integrations.opm_train", (("_forward_op", "_forward_fake"), ("_backward_op", "_backward_fake"),
+            ("kernels.integrations.opm_train", (("_forward_op", "_forward_fake"), ("_backward_op", "_backward_fake"),
                                          ("_inference_op", "_inference_fake"))),
-            ("integrations.pwa_train", (("_forward_op", "_forward_fake"), ("_backward_op", "_backward_fake"),
+            ("kernels.integrations.pwa_train", (("_forward_op", "_forward_fake"), ("_backward_op", "_backward_fake"),
                                          ("_inference_op", "_infer_fake"))),
-            ("integrations.token_dit", (("_infer", "_fake"),)),
+            ("kernels.integrations.token_dit", (("_infer", "_fake"),)),
             ("kernels.trimul_inproj.cuda.h100_training", (("forward", "_forward_fake"), ("backward", "_backward_fake"))),
             ("kernels.trimul_inproj.cuda.h100_single", (("forward", "_forward_fake"), ("backward", "_backward_fake"))),
             ("kernels.trimul_inproj.cuda.h100_inference", (("inference", "_inference_fake"),)),

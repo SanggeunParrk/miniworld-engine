@@ -164,7 +164,7 @@ def test_module_wiring_matches_pytorch_reference(monkeypatch):
     """The module through the default integrations.trimul_h100.update D64 route matches the module's own PYTORCH implementation (fp32 copy)."""
     _hopper()
     from miniworld_engine import settings
-    from miniworld_engine.integrations import trimul_h100
+    from miniworld_engine.kernels.integrations import trimul_h100
     from miniworld_engine.modules.exceptions import ImplementationType as I
     from miniworld_engine.modules.triangle_multiplication.bidirectional import (
         BidirectionalTriangleMultiplication,
@@ -236,7 +236,7 @@ def test_native_bucket_module_graph(monkeypatch, n, master):
     import json
     import os
 
-    from miniworld_engine.integrations import trimul_h100 as I
+    from miniworld_engine.kernels.integrations import trimul_h100 as I
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
     from miniworld_engine.modules.exceptions import ImplementationType
     from miniworld_engine.modules.triangle_multiplication.bidirectional import (

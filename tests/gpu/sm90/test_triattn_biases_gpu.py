@@ -6,7 +6,7 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.integrations import triattn_h100_sm90
+from miniworld_engine.kernels.integrations import triattn_h100_sm90
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_attention import TriangleAttention
 

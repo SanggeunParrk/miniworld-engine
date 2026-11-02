@@ -466,7 +466,7 @@ def _update_one(module, pair, mask, dropscale, *, bidirectional=True):
     with preserved_d64_context(_selected_d64_training(module, pair)):
         out = _update(module, pair, mask, dropscale, bidirectional=bidirectional)
     if _b200style_serves(module, pair) or _native_buckets_enabled(pair) or _selected_native_training(module, pair) or _selected_d64_training(module, pair) or (pair.shape[-1] == 64 and _native_training_enabled()):
-        from miniworld_engine.integrations.token_dit_train import _native_caller_output
+        from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_output
         out = _native_caller_output(out, pair, *module.parameters(), force=True)
     return out
 

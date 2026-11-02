@@ -10,7 +10,7 @@ import math
 import pytest
 import torch
 
-from miniworld_engine.integrations import anthropic_trimul as native
+from miniworld_engine.baselines import anthropic_trimul as native
 from miniworld_engine.modules import (
     BidirectionalTriangleMultiplication,
     TriangleMultiplication,

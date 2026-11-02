@@ -9,7 +9,7 @@ the *trunked* atom pair `[nwin, 32, 128, 16]` (shared by the A samples) -> gated
 [b200.md](../b200.md).
 
 **Where the code is.** `modules/local_dit/module.py` (the block, the PyTorch reference path, `to_windows` that makes the trunked pair
-from a dense one), `integrations/local_dit.py` (the dispatch: two opaque ops `local_dit_block_fwd` / `local_dit_block_bwd` under an
+from a dense one), `kernels/integrations/local_dit.py` (the dispatch: two opaque ops `local_dit_block_fwd` / `local_dit_block_bwd` under an
 autograd Function, served eagerly, under `torch.compile` and in CUDA graphs), and the attention and pair-bias kernels in
 `kernels/augmented_attention/cuda/sm100_atom_local/`. The row kernels (conditioning, input projections, post-attention, transition and
 their backward) are in `kernels/augmented_attention/cuda/sm100_atom/`. The block
@@ -141,7 +141,7 @@ inference call goes from 11 to 6 kernels (a graph of the whole call under `stati
 fp32 single / cond / pair with fp32 parameters (no autocast) are served on B200 by a separate set of kernels: every product on tcgen05
 `kind::tf32` (fp32 operands read at tf32 precision, fp32 accumulation), everything else fp32 -- the residual stream, LayerNorms / AdaLNs,
 gates, the softmax and P, every saved activation and every gradient. The weight gradients are the grouped `atom_dw` kernel on tf32 (fp32
-partials, fp32 gradients). No Triton, none of the bf16 kernels. Dispatch: `integrations/local_dit.py`
+partials, fp32 gradients). No Triton, none of the bf16 kernels. Dispatch: `kernels/integrations/local_dit.py`
 (`_fp32_call`, `_LocalBlock32` / `_infer32`, opaque ops `local_dit_block_fwd_tf32` / `local_dit_block_bwd_tf32`); the kernels load
 separately from the bf16 ones (a build / load failure warns once and keeps the module path for fp32 calls only);
 `settings.local_dit_tf32=0` keeps fp32 calls on the module path. A bf16 model fed fp32 activations, or a call under autocast, keeps the

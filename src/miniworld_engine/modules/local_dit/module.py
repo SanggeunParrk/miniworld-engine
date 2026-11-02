@@ -15,7 +15,7 @@ of the atoms, SiLU of the conditioning, ``(1 + s)`` scale, no biases), both outp
 q and k pass a per-head RMSNorm and a rotary with per-atom tables the caller supplies, and a window holds 192 keys of which a query
 sees those within +/- 64 of it by rank among the real atoms.
 
-The reference path below is plain PyTorch (the window gather by ``unfold``); on a B200 ``integrations/local_dit`` serves bf16 calls
+The reference path below is plain PyTorch (the window gather by ``unfold``); on a B200 ``kernels/integrations/local_dit`` serves bf16 calls
 with the sm_100a kernels of ``kernels/augmented_attention/cuda/sm100_atom_local``, and fp32 calls (fp32 parameters) with their TF32 twins.
 """
 
@@ -25,7 +25,7 @@ import torch
 import torch.nn.functional as F
 
 from miniworld_engine.utils import h100_master as _master
-from miniworld_engine.integrations import local_dit as _local
+from miniworld_engine.kernels.integrations import local_dit as _local
 from miniworld_engine.modules.adaptive_layernorm import AdaptiveLayerNorm
 from miniworld_engine.modules.adaptive_layernorm.module import RMS_EPS, AdaptiveRMSNorm
 from miniworld_engine.modules.dit import DiTBlock

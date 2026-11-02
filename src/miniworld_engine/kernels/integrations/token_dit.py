@@ -357,7 +357,7 @@ def _infer(
 
     ``extra``: an [L, L] logit bias for every head (Hopper CUDA path only; ``serves`` rejects it elsewhere)."""
     if torch.cuda.get_device_capability(single.device) == (9, 0):
-        from miniworld_engine.integrations.token_dit_train import _tf32
+        from miniworld_engine.kernels.integrations.token_dit_train import _tf32
         from miniworld_engine.kernels.conditioned_transition import cuda
 
         with _tf32(single.dtype is torch.float32):
@@ -395,7 +395,7 @@ def _infer(
     # autocast off: the step's precision is the runner's dtype (single's), and an enclosing bf16 autocast would turn the fp32
     # step's conditioning GEMMs bf16
     with torch.cuda.device(single.device), torch.autocast("cuda", enabled=False):
-        # This path is inference only (the token DiT is not recycled; training takes integrations/token_dit_train), so
+        # This path is inference only (the token DiT is not recycled; training takes kernels/integrations/token_dit_train), so
         # the weights do not change between the calls of a sampling run. Packing is tens of small kernels (~0.2 ms a
         # call, more than the block's step at L384): reuse the pack while every weight's (pointer, version) is the same
         # -- an in-place update bumps ``_version`` and misses. Scoped to the CUDA-graph capture (``kernels._capture``): a

@@ -2,7 +2,7 @@
 
 * the TF32 attention cores built per layout (``attn_fwd_tf32``, ``attn_dkv_tf32`` + ``attn_dqb_tf32``, ``attn_inf_tf32``;
   ``sm100._tdit_defs``) against fp64;
-* the fused inference step (integrations/token_dit.py) and the fused training block (integrations/token_dit_train.py) in fp32
+* the fused inference step (kernels/integrations/token_dit.py) and the fused training block (kernels/integrations/token_dit_train.py) in fp32
   against the fp32 IEEE PyTorch block, no worse than the engine's own module path in the same TF32 regime, and the path
   actually taken.
 """
@@ -194,7 +194,7 @@ class _TF32:
     ("S", "L", "qk"), [(5, 384, False), (4, 200, True), (3, 333, False)]
 )
 def test_fused_inference_fp32(layout, S, L, qk, monkeypatch):
-    from miniworld_engine.integrations import token_dit
+    from miniworld_engine.kernels.integrations import token_dit
 
     _, d = layout
     ref, eng = _pair_of_blocks(layout, qk, seed=11)
@@ -245,7 +245,7 @@ def _run(m, single, cond, pair, mask, w):
 def test_fused_training_fp32(layout, A, L, qk, monkeypatch):
     """The fused fp32 training block (TF32 kernels; L = 200 and odd A through the internal padding) against the fp32 IEEE
     block: output and every gradient within 1.5x the module path's error in the same TF32 regime."""
-    from miniworld_engine.integrations import token_dit_train
+    from miniworld_engine.kernels.integrations import token_dit_train
 
     _, d = layout
     ref, eng = _pair_of_blocks(layout, qk, seed=21)
@@ -282,7 +282,7 @@ def test_fused_training_fp32(layout, A, L, qk, monkeypatch):
 def test_fused_training_fp32_under_bf16_autocast(layout, monkeypatch):
     """bf16-mixed training runs the model under bf16 autocast: an fp32 block still takes the fp32 (TF32) kernels -- the
     precision follows the tensors -- with the same result as without autocast."""
-    from miniworld_engine.integrations import token_dit_train
+    from miniworld_engine.kernels.integrations import token_dit_train
 
     _, d = layout
     _, eng = _pair_of_blocks(layout, True, seed=31)

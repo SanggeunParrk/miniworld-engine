@@ -196,7 +196,7 @@ def test_block_training_gradients_against_the_fp32_oracle(dtype, L, nh, dh):
 @pytest.mark.parametrize(("L", "A", "shared"), [(1024, 2, True), (1536, 2, False), (2560, 1, True)])
 def test_block_inference_long_rungs(dtype, L, A, shared):
     """The sampler's long token rungs (up to 2560) run the Hopper path (``pvx`` / ``pvx32`` stream P; no 768 bound)."""
-    from miniworld_engine.integrations import bias_only_dit as fused
+    from miniworld_engine.kernels.integrations import bias_only_dit as fused
 
     block = make_block(dtype)
     torch.manual_seed(L)

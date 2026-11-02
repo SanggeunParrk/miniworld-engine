@@ -145,7 +145,7 @@ def test_changed_graph_inputs_weights_mask_dropout_dy(d, direction):
 @pytest.mark.parametrize("master", [False, True])
 def test_module_dispatch_and_all_gradients(d, bidirectional, master, monkeypatch):
     from miniworld_engine import settings
-    from miniworld_engine.integrations import trimul_h100
+    from miniworld_engine.kernels.integrations import trimul_h100
     from miniworld_engine.modules.exceptions import ImplementationType
     from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
     from miniworld_engine.modules.triangle_multiplication.bidirectional import (

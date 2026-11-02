@@ -1,5 +1,5 @@
 """AttentionPairBias with a gate bias (Chai-1's pairformer single attention, ``gate_bias=1.0``) and Chai-1's width (16 x 24 heads,
-d_pair 256) on H100, inference: the native CUDA path (integrations/attention_pair_bias_b200.py) against the fp32 PyTorch module.
+d_pair 256) on H100, inference: the native CUDA path (kernels/integrations/attention_pair_bias_b200.py) against the fp32 PyTorch module.
 
 The bar is the guide's: the output is no worse than 1.3x the bf16 PyTorch module's error against the fp32 module. Also: the call is
 served by the native path (not the composed SDPA statements), a gate bias of 0 leaves the d_pair 128 call as it was (bitwise equal
@@ -69,7 +69,7 @@ def _inputs(L, d, dp, masked, seed=1):
 @pytest.mark.parametrize("L", [128, 384])
 @pytest.mark.parametrize("master", [False, True], ids=["bf16params", "fp32master"])
 def test_apb_gate_bias_inference_accuracy(case, masked, L, master):
-    from miniworld_engine.integrations import attention_pair_bias_b200 as native
+    from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as native
 
     ref = _reference(case)
     single, pair, mask = _inputs(L, case[1], case[2], masked)

@@ -5,7 +5,7 @@ Kernel-level status of the TriMul modules on H100; the module-level summary is i
 without a CUDA path is 미구현 (it runs the PyTorch reference: no portable-kernel fallback on H100, see [dispatch.md](../dispatch.md)). Figures: one box per kernel, left to right, HBM reads (blue,
 left) and writes (red, right); generated from `figures/trimul_bidir.json` by
 `python -m miniworld_engine.utils.viz.kernel_flow`, then `rsvg-convert -z 2 -b white` to PNG.
-Dispatch: `integrations/trimul_h100.py`.
+Dispatch: `kernels/integrations/trimul_h100.py`.
 
 ## Batched samples (B <= 48 per launch, any B per call, every width)
 

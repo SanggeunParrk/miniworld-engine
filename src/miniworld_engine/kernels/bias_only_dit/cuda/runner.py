@@ -777,7 +777,7 @@ class FusedBiasOnlyDiT:
         elif L <= C.PSB32_MAX_L:
             C.psb32_fwd(bias, stats, mask, vg, a, S, H, dh)
         else:  # fp32 beyond the TF32 core's resident-v length: P per (head, sample) by the softmax rows, then one batched GEMM
-            from miniworld_engine.integrations.bias_only_dit_train import _psb_fwd_core
+            from miniworld_engine.kernels.integrations.bias_only_dit_train import _psb_fwd_core
 
             P = torch.empty(H, S, L, L, device=vg.device, dtype=torch.float32)
             _tf32().rows32().softmax_t_cuda(bias, P.view(H * S * L, L), None, mask, S)

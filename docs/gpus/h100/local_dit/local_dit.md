@@ -7,7 +7,7 @@ bias `LN(z) Wb^T` of the *trunked* atom pair `[nwin, 32, 128, 16]` -> gated out-
 residual; d_single = d_cond = 128, d_pair = 16, 4 heads x 32. Module summary: [h100.md](../h100.md); the B200 page is
 [local_dit](../../b200/local_dit/local_dit.md) (tcgen05; the kernels here are a different design for the same stage boundaries).
 
-**Contract** (`integrations/local_dit_h100.matches`): H100, cross-attention, with or without QK-norm, B = 1, any A, any N (padded to a multiple of 128
+**Contract** (`kernels/integrations/local_dit_h100.matches`): H100, cross-attention, with or without QK-norm, B = 1, any A, any N (padded to a multiple of 128
 inside, the padded atoms masked as keys), a `[1, N]` bool key mask or none, contiguous `single` / `cond` `[A, 1, N, 128]` and pair
 `[1, nwin, 32, 128, 16]`; **fp32** activations with fp32 parameters (no autocast) run the TF32 kernels, **bf16** activations (fp32 master or
 bf16 parameters, autocast allowed) the bf16 ones; inference and training. Anything else runs the module composition (on H100 its PyTorch

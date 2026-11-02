@@ -1,5 +1,5 @@
 // Device helpers of the Chai-1 OuterProductMean kernels (sm_90a): mbarrier, TMA, wgmma m64n128k16 (both operands from shared
-// memory, 128-byte swizzle).  Same conventions as integrations/csrc/opm_epilogue.cu (namespaces wg / opm_pro_tma): a K-major tile
+// memory, 128-byte swizzle).  Same conventions as kernels/integrations/csrc/opm_epilogue.cu (namespaces wg / opm_pro_tma): a K-major tile
 // is [rows][64 bf16] = 128 B per row with the 16-byte chunk index XORed by row % 8.
 #pragma once
 #include <cuda.h>

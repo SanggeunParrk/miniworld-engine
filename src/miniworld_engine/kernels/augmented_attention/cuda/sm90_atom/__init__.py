@@ -166,7 +166,7 @@ def round_tf32(x: torch.Tensor) -> torch.Tensor:
     return tf32_grid(x.contiguous())
 
 
-# weights, in ``integrations.local_dit.WEIGHTS`` + ``CROSS_WEIGHTS`` order
+# weights, in ``kernels.integrations.local_dit.WEIGHTS`` + ``CROSS_WEIGHTS`` order
 _I = {
     n: i
     for i, n in enumerate(

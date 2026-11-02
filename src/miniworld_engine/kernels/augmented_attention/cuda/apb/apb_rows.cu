@@ -1,5 +1,5 @@
 // AttentionPairBias on B200 (CUDA): the pair -> bias pass, its backward, and the row passes of the single track
-// (integrations/attention_pair_bias_b200.py). The attention core is sm_100a (kernels/augmented_attention/cuda/sm100), the
+// (kernels/integrations/attention_pair_bias_b200.py). The attention core is sm_100a (kernels/augmented_attention/cuda/sm100), the
 // projections cuBLAS.
 //
 // Heads x head dim: 8 x 48, 12 x 32, 24 x 16, 16 x 24 (d_single 384) and 16 x 32 (d_single 512). The pair kernels run the heads in mma groups of 8 (12 heads as 16:

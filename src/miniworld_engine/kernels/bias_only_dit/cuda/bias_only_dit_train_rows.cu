@@ -1,5 +1,5 @@
 // Bias-only token DiT TRAINING row kernels (CUDA): the elementwise / row steps between the GEMMs of the fused training block
-// (integrations/bias_only_dit_train.py), forward and backward. Same arithmetic as the token DiT's training rows
+// (kernels/integrations/bias_only_dit_train.py), forward and backward. Same arithmetic as the token DiT's training rows
 // (kernels/conditioned_transition/cuda/token_dit_train_rows.cu), laid out for the memory rate:
 //
 //   * the 768-wide rows take two warps (64 threads) each, the 384-wide conditioning rows one warp; a lane owns float4 chunks lane,
@@ -823,7 +823,7 @@ __global__ void __launch_bounds__(WPB * 32, 2) pair_bias_bwd_fin_k(const bf* __r
 }
 
 // ------------------------------------------------------------------------------------------------------------ weight pack
-// The bf16 training step's weight pack (integrations/bias_only_dit_train.py _pack, settings.bias_only_dit_train_pack1=1) in ONE
+// The bf16 training step's weight pack (kernels/integrations/bias_only_dit_train.py _pack, settings.bias_only_dit_train_pack1=1) in ONE
 // launch: up to 48 segments, each dst = src (o scale[i % period], broadcast over the rows: the folded LayerNorm weights) with bf16
 // or fp32 on either side and on the scale (fp32 arithmetic, RN to the destination: the torch casts / products bit for bit), or
 // dst = (src o scale[col])^T of a [rows, cols] matrix, the scale optional (32 x 32 tiles through shared memory: the K-major weights

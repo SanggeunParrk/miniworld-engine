@@ -136,7 +136,7 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
     # nothing on it autotunes, so no build case fills a cache for it (BUILDLESS).
     "bias_only_dit": ModuleTarget(()),
     # The AF3 atom DiT block with block-local (32 x 128 window) attention (modules/local_dit). Its engine path is the
-    # opaque hand-CUDA ops local_dit_block_fwd / _bwd (integrations/local_dit.py): nothing on it autotunes (BUILDLESS).
+    # opaque hand-CUDA ops local_dit_block_fwd / _bwd (kernels/integrations/local_dit.py): nothing on it autotunes (BUILDLESS).
     "local_dit": ModuleTarget(()),
     # The performance ladder's harness for the ops that have no module (pair builders, token-pair init, smooth lDDT, sampler glue, norms):
     # `bench_module ladder_ops` runs one of them (`+ladder_op=` picks it; the ladder, `miniworld-engine ladder`, runs them all).
@@ -1253,8 +1253,8 @@ def cmd_import_anthropic(args: argparse.Namespace) -> int:
 
 
 def cmd_build_anthropic_sm100a(args: argparse.Namespace) -> int:
-    """`dev build-anthropic-sm100a`: see ``integrations.anthropic_trimul.build_sm100a``."""
-    from miniworld_engine.integrations.anthropic_trimul import build_sm100a
+    """`dev build-anthropic-sm100a`: see ``kernels.integrations.anthropic_trimul.build_sm100a``."""
+    from miniworld_engine.baselines.anthropic_trimul import build_sm100a
 
     for key in build_sm100a(args.build_dir, nvcc=args.nvcc or None):
         print(f"built {key}")

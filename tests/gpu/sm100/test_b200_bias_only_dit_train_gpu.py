@@ -1,4 +1,4 @@
-"""The fused bias-only token DiT TRAINING path on B200 (integrations/bias_only_dit_train.py): the output and every gradient
+"""The fused bias-only token DiT TRAINING path on B200 (kernels/integrations/bias_only_dit_train.py): the output and every gradient
 against an fp32 PyTorch block, within the PyTorch bf16 block's own error; the attention's backward kernels against einsum;
 CUDA graph capture, torch.compile, steady memory over steps, and what it declines."""
 
@@ -10,7 +10,7 @@ from portable_helpers import relative_fp64 as relative64
 from settings_helpers import override_setting
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import bias_only_dit_train as TR
+from miniworld_engine.kernels.integrations import bias_only_dit_train as TR
 from miniworld_engine.kernels.bias_only_dit import cuda as C
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType

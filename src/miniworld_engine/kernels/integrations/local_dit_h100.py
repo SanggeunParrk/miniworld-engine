@@ -1,7 +1,7 @@
 """The AF3 atom transformer block on H100 (sm_90a): warp-level tensor-core row kernels (mma.sync, bf16 or TF32) and the mma.sync window
 attention, no tcgen05 / wgmma, cuBLAS only for the weight gradients.
 
-``matches`` is the whole gate; ``integrations.local_dit.serves`` / ``block`` ask it first. fp32 activations and parameters (no autocast)
+``matches`` is the whole gate; ``kernels.integrations.local_dit.serves`` / ``block`` ask it first. fp32 activations and parameters (no autocast)
 run the TF32 kernels; operands are rounded to nearest tf32, the residual stream, LayerNorms, softmax and every stored activation stay fp32.
 
     inference  cond90 (hoisted) -> pre90 -> window attention -> post90
@@ -15,7 +15,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import local_dit as _ld
+from miniworld_engine.kernels.integrations import local_dit as _ld
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._tf32 import tf32_matmul
 

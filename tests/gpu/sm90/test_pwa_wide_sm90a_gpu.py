@@ -7,7 +7,7 @@ Needs an H100 (sm_90a); skipped elsewhere.
 import pytest
 import torch
 
-from miniworld_engine.integrations import pwa_train as pt
+from miniworld_engine.kernels.integrations import pwa_train as pt
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.msa_pair_weighted_averaging import (
     MSAPairWeightedAveraging,

@@ -9,7 +9,7 @@ from portable_helpers import randomize_half_std as _randomize
 from settings_helpers import policy_portable_off as policy  # noqa: F401
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import token_dit_train
+from miniworld_engine.kernels.integrations import token_dit_train
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 

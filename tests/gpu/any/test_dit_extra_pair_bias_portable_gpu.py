@@ -14,7 +14,7 @@ from portable_helpers import portable_on, rel, report
 from portable_helpers import randomize_normalised as _randomize
 from portable_helpers import run_extra_pair_bias as _run
 
-from miniworld_engine.integrations import token_dit
+from miniworld_engine.kernels.integrations import token_dit
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType as I
 

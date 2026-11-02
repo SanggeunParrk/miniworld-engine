@@ -1,4 +1,4 @@
-"""B200 block-local AF3 atom block, fp32 path (``integrations.local_dit`` on the TF32 kernels): fp32 LocalDiTBlock calls run the sm_100a
+"""B200 block-local AF3 atom block, fp32 path (``kernels.integrations.local_dit`` on the TF32 kernels): fp32 LocalDiTBlock calls run the sm_100a
 kind::tf32 kernels for inference and training -- with or without a [B, N] key mask, cross mode or not, at N not a multiple of 32 / 128,
 eagerly, under torch.compile and in CUDA graphs --; the output and every gradient are no worse against an fp64 PyTorch block than the fp32
 module path in the same regime; the TF32 CUDA kernels are what ran (no Triton, none of the bf16 kernels); no kernel spills.
@@ -14,7 +14,7 @@ import pytest
 import torch
 from settings_helpers import override_setting
 
-from miniworld_engine.integrations import local_dit
+from miniworld_engine.kernels.integrations import local_dit
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.local_dit import LocalDiTBlock, to_windows
 

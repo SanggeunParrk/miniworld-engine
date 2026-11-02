@@ -1064,7 +1064,7 @@ __global__ void __launch_bounds__(256, 2) pair_bias_bwd_tc_k(const float* __rest
 }
 
 // ------------------------------------------------------------------------------------------------------------ weight pack
-// The fp32 training step's weight pack (integrations/bias_only_dit_train.py _pack32) in one launch instead of eight torch cats and
+// The fp32 training step's weight pack (kernels/integrations/bias_only_dit_train.py _pack32) in one launch instead of eight torch cats and
 // products: up to 16 segments dst = src (o scale, broadcast over the rows: the folded LayerNorm weights), float4 granular.
 // Segment blockIdx.y per grid row (the segment table stays in parameter space: __grid_constant__, a uniform index), 32-bit indices.
 // (A per-element search over the table with a 64-bit modulo ran 42 us for ~45 MB: slower than the torch ops it replaced.)

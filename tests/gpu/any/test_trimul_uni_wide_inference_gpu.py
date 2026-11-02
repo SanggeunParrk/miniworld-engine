@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import trimul_h100 as H
+from miniworld_engine.kernels.integrations import trimul_h100 as H
 from miniworld_engine.kernels.trimul_inproj.cuda import h100_uni_wide_inference as UW
 from miniworld_engine.modules.exceptions import ImplementationType as I
 from miniworld_engine.modules.triangle_multiplication.module import (

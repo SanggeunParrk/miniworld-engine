@@ -451,7 +451,7 @@ def rebase_recipe(recipe: dict, recorded_jit: str | None, jit: str | None, packa
     recipe still carries the generated TriMul header and ``compile_text`` texts of the recording: refresh the records
     with a coverage run after editing the sources they are generated from.)"""
     text = json.dumps(recipe)
-    m = re.search(r'(?:"|-I)(/[^"]*?/miniworld_engine)/(?:kernels|integrations|modules)/', text)
+    m = re.search(r'(?:"|-I)(/[^"]*?/miniworld_engine)/(?:kernels|baselines|utils|modules)/', text)
     for old, new in ((recipe.get("jit") or recorded_jit, jit), (m.group(1) if m else None, str(package))):
         if old and new and old != new:
             text = text.replace(old, new)

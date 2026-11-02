@@ -3,7 +3,7 @@
 Triton, every arch: :func:`trimul_triton` (single direction) and
 :func:`bidirectional_trimul_triton` (outgoing + incoming in one block), both weights-as-args
 autograd Functions with a forward-only inference path. The hand-CUDA H100 kernels under
-``cuda/`` are reached through ``integrations.trimul_h100``, which states their contract.
+``cuda/`` are reached through ``kernels.integrations.trimul_h100``, which states their contract.
 """
 
 from __future__ import annotations

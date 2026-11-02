@@ -4,8 +4,8 @@ Kernel-level status of `MSAPairWeightedAveraging` on H100; the module-level summ
 contract in [dispatch.md](../dispatch.md). bf16, batch 1; the columns are (Length, MSA depth). The B200 page is
 [../../b200/pwa/pwa.md](../../b200/pwa/pwa.md): the wide path below is the B200 structure written for wgmma.
 
-Dispatch: `integrations/pwa_train.py` (MiniWorld width: `csrc/pair3.cu`, `ln_vg.cu`, `pwa_fwd2/3.cu`, `pwa_gateout.cu`, `pwa_glue3.cu`,
-`dgv_bwd.cu`) and `integrations/pwa_wide.py` (every other width: `csrc/pair_wide.cu`, `csrc/pwa_wide.cu`). Served when
+Dispatch: `kernels/integrations/pwa_train.py` (MiniWorld width: `csrc/pair3.cu`, `ln_vg.cu`, `pwa_fwd2/3.cu`, `pwa_gateout.cu`, `pwa_glue3.cu`,
+`dgv_bwd.cu`) and `kernels/integrations/pwa_wide.py` (every other width: `csrc/pair_wide.cu`, `csrc/pwa_wide.cu`). Served when
 `implementation=miniworld` (or `anthropic`), bf16, batch 1, a token key mask (or none), inference and training alike; the MSA residual
 and the module's row dropout (`drop_msa`) are applied in the gate / out pass. `settings.pwa_train` / `pwa_infer` turn the paths off.
 Every other call runs the module's PyTorch statements on H100 (no portable-kernel fallback, see [dispatch.md](../dispatch.md)); other cards run the

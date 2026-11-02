@@ -220,7 +220,7 @@ Training invocations add `cudagraph=manual`; fp32 invocations add `precision=32`
 3. Build the path stage by stage with a profiled breakdown (`torch.profiler` kernel sums at the harness shapes); the
    per-kernel table of the page comes from it. Start from the largest stage; fuse neighbours that exchange an HBM
    round trip; launch-bound regions (small A, small L) are won by fewer kernels, not faster ones.
-4. Integrate through `src/miniworld_engine/integrations/<module>_<gpu>.py`: arch gate (`serves()` / `refusal()` says why it declines,
+4. Integrate through `src/miniworld_engine/kernels/integrations/<module>_<gpu>.py`: arch gate (`serves()` / `refusal()` says why it declines,
    never raises), weight-pack caches keyed on pointer and `_version`, autograd Function that casts parameters inside,
    opaque ops + fakes, dispatch from the module with the old path as the fallback and an environment switch (`MINIWORLD_<NAME>=0`)
    to turn it off for A/B.
@@ -250,7 +250,7 @@ Training invocations add `cudagraph=manual`; fp32 invocations add `precision=32`
 ## 9. Deliverables checklist
 
 - [ ] `src/miniworld_engine/kernels/<family>/<backend>/` sources, built by the newest toolchain that knows the arch
-- [ ] `src/miniworld_engine/integrations/<module>_<gpu>.py` with arch gate, caches, autograd Function, fakes
+- [ ] `src/miniworld_engine/kernels/integrations/<module>_<gpu>.py` with arch gate, caches, autograd Function, fakes
 - [ ] registry rows, driver / check entries; `tests/cpu/layout`, `tests/cpu/registry` green
 - [ ] GPU tests: numerics, ragged, A sweep, fp32-master, graph capture + replay stress, compile (no breaks)
 - [ ] harness tables (bf16-mixed; fp32 for the diffusion blocks) for inference and training, commands in the page
@@ -286,13 +286,13 @@ Where the B200 code lives (use it as the layout template):
 
 | module | kernels | integration | page |
 |---|---|---|---|
-| TriMul | `kernels/trimul`, `kernels/triangle_multiplication` | `integrations/trimul_b200.py` | `docs/gpus/b200/trimul/` |
-| TriangleAttention | `kernels/triangle_attention` | `integrations/triattn_b200.py` | `docs/gpus/b200/triattn/` |
+| TriMul | `kernels/trimul`, `kernels/triangle_multiplication` | `kernels/integrations/trimul_b200.py` | `docs/gpus/b200/trimul/` |
+| TriangleAttention | `kernels/triangle_attention` | `kernels/integrations/triattn_b200.py` | `docs/gpus/b200/triattn/` |
 | Transition | `kernels/transition/cuda` (`fused_sm100a`, `fused_wide_sm100a`) | module dispatch | `docs/gpus/b200/transition/` |
-| OPM / PWA | `integrations/csrc/sm100/` | `integrations/opm_train.py`, `pwa_train.py` | `docs/gpus/b200/opm/`, `pwa/` |
-| AttentionPairBias | `kernels/augmented_attention/cuda` | `integrations/attention_pair_bias_b200.py` | `docs/gpus/b200/attention_pair_bias/` |
-| token DiT | `kernels/conditioned_transition`, `kernels/augmented_attention/cuda` | `integrations/token_dit.py`, `token_dit_train.py` | `docs/gpus/b200/token_dit/` |
-| bias-only token DiT | `kernels/bias_only_dit/cuda` | `integrations/bias_only_dit*.py` | `docs/gpus/b200/bias_only_dit/` |
-| AF3 atom DiT | `kernels/augmented_attention/cuda/sm100_atom`, `sm100_atom_local` | `integrations/local_dit.py` | `docs/gpus/b200/local_dit/` |
+| OPM / PWA | `kernels/integrations/csrc/sm100/` | `kernels/integrations/opm_train.py`, `pwa_train.py` | `docs/gpus/b200/opm/`, `pwa/` |
+| AttentionPairBias | `kernels/augmented_attention/cuda` | `kernels/integrations/attention_pair_bias_b200.py` | `docs/gpus/b200/attention_pair_bias/` |
+| token DiT | `kernels/conditioned_transition`, `kernels/augmented_attention/cuda` | `kernels/integrations/token_dit.py`, `token_dit_train.py` | `docs/gpus/b200/token_dit/` |
+| bias-only token DiT | `kernels/bias_only_dit/cuda` | `kernels/integrations/bias_only_dit*.py` | `docs/gpus/b200/bias_only_dit/` |
+| AF3 atom DiT | `kernels/augmented_attention/cuda/sm100_atom`, `sm100_atom_local` | `kernels/integrations/local_dit.py` | `docs/gpus/b200/local_dit/` |
 | SWA atom DiT | `kernels/swa_dit/cuda/sm100` | module dispatch (`kernels/swa_dit/dispatch.py`) | `docs/gpus/b200/swa_atom_dit/` |
 | token pair init | `kernels/token_pair_init` | module | `docs/gpus/b200/token_pair_init/` |

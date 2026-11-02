@@ -1,4 +1,4 @@
-"""The fused bias-only token DiT inference path on B200 (integrations/bias_only_dit.py, kernels/bias_only_dit/cuda): against
+"""The fused bias-only token DiT inference path on B200 (kernels/integrations/bias_only_dit.py, kernels/bias_only_dit/cuda): against
 the PyTorch block in the same bf16 regime and against fp32, the attention core and the softmax against their references, and
 the caches (weight pack, hoisted attention weights) against live changes."""
 
@@ -9,7 +9,7 @@ from portable_helpers import randomize, relative
 from settings_helpers import override_setting
 from settings_helpers import policy_blackwell_portable_off as policy  # noqa: F401
 
-from miniworld_engine.integrations import bias_only_dit
+from miniworld_engine.kernels.integrations import bias_only_dit
 from miniworld_engine.kernels.bias_only_dit import cuda as C
 from miniworld_engine.kernels.bias_only_dit import reference as R
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
@@ -710,7 +710,7 @@ def test_pv_core_p_early_selection(inf3b, monkeypatch, env):
     """Spies: the inference step's core takes the P_EARLY build at every block and the step's first front (only) launches without
     the programmatic attribute -- settings.bias_only_dit_inf3_p_early=0: neither; the training cores (forward / dV, PDL or not)
     and bo_pvdpb never take it."""
-    from miniworld_engine.integrations import bias_only_dit_train as TR
+    from miniworld_engine.kernels.integrations import bias_only_dit_train as TR
     from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
 
     if env is None:

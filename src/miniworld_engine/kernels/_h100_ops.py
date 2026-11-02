@@ -130,7 +130,7 @@ def triangle_core(q, k, v, bias):
 
 # ---------------------------------------------------------------------------------------------------------------- TriMul
 def _trimul_shim(x, bidirectional, outgoing, d_hidden, eps, ln_in_w, ln_in_b, wl, wlg, wr, wrg, ln_out_w, ln_out_b, w_out, w_gate):
-    """A module-shaped view of the facade's weights (the attributes ``integrations.trimul_h100`` reads): the LayerNorm affine as fp32 (an exact
+    """A module-shaped view of the facade's weights (the attributes ``kernels.integrations.trimul_h100`` reads): the LayerNorm affine as fp32 (an exact
     cast of the usual fp32 parameters), the six projections as they are, ``outgoing`` only for the single-direction update (the integration
     tells the two modules apart by ``hasattr(module, "outgoing")``)."""
     from miniworld_engine.modules.exceptions import ImplementationType
@@ -156,7 +156,7 @@ def _trimul_shim(x, bidirectional, outgoing, d_hidden, eps, ln_in_w, ln_in_b, wl
 
 def trimul(x, mask, bidirectional, outgoing, d_hidden, eps, ln_in_w, ln_in_b, wl, wlg, wr, wrg, ln_out_w, ln_out_b, w_out, w_gate):
     """``x + update(x)`` through the hand-CUDA TriMul of ``modules.TriangleMultiplication`` / ``BidirectionalTriangleMultiplication``
-    (``integrations.trimul_h100``: K1 / K3 inference, B1..B7 training, chunked batches), bf16 only; None when the integration does not serve
+    (``kernels.integrations.trimul_h100``: K1 / K3 inference, B1..B7 training, chunked batches), bf16 only; None when the integration does not serve
     the call (the caller runs the PyTorch statements). ``mask``: None or a (B, L) bool residue mask."""
     if x.dtype is not torch.bfloat16 or x.ndim != 4 or not on_h100(x, wl, w_out):
         return None
@@ -164,7 +164,7 @@ def trimul(x, mask, bidirectional, outgoing, d_hidden, eps, ln_in_w, ln_in_b, wl
         return None
     if mask is not None and (mask.dtype is not torch.bool or mask.shape != x.shape[:2]):
         return None
-    from miniworld_engine.integrations import trimul_h100 as h100
+    from miniworld_engine.kernels.integrations import trimul_h100 as h100
 
     x = x if x.is_contiguous() else x.contiguous()
     shim = _trimul_shim(x, bidirectional, outgoing, d_hidden, eps, ln_in_w, ln_in_b, wl, wlg, wr, wrg, ln_out_w, ln_out_b, w_out, w_gate)

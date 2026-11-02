@@ -1,7 +1,7 @@
 """CUDA passes of AttentionPairBias (the Pairformer single track) on B200 (``apb_rows.cu``): the pair -> bias projection
 with its LayerNorm (mma.sync), its backward, and the row passes of the single track (LayerNorm, sigmoid gate, their
 backwards). Its attention cores are this family's sm_100a kernels (``../sm100``). Built on first use (``load_extension``),
-never at import; ``integrations/attention_pair_bias_b200.py`` drives them."""
+never at import; ``kernels/integrations/attention_pair_bias_b200.py`` drives them."""
 
 from __future__ import annotations
 

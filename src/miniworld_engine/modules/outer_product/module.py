@@ -6,8 +6,8 @@ from einops import rearrange
 from jaxtyping import Bool, Float, Int
 
 from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.integrations import anthropic_msa as _anthropic
-from miniworld_engine.integrations import opm_train as _opm_train
+from miniworld_engine.baselines import anthropic_msa as _anthropic
+from miniworld_engine.kernels.integrations import opm_train as _opm_train
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import KernelBackend, resolve
 from miniworld_engine.modules.exceptions import ImplementationType

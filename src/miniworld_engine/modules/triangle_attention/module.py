@@ -1,7 +1,7 @@
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/triangle_updates.py
 """Triangle (gated self-)attention — model-level op connecting the fused
 triangle-attention kernel (and a cuequivariance baseline). On B200 the sm_100a kernels
-(``integrations.triattn_b200``: d_pair 128 / 4 heads fused, inference and training; other widths 64-512 with 16- or
+(``kernels.integrations.triattn_b200``: d_pair 128 / 4 heads fused, inference and training; other widths 64-512 with 16- or
 32-channel heads, inference and training) serve the whole module."""
 
 import math
@@ -16,7 +16,7 @@ from jaxtyping import Bool, Float
 from miniworld_engine import kernels, settings
 from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.utils import h100_master as _master
-from miniworld_engine.integrations import triattn_b200 as _b200
+from miniworld_engine.kernels.integrations import triattn_b200 as _b200
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels.bias_only_attention import dispatch as _bo_dispatch
 from miniworld_engine.modules import dispatch as _dispatch
@@ -232,7 +232,7 @@ class TriangleAttention(nn.Module):
             )
 
         if backend == KernelBackend.ANTHROPIC:
-            from miniworld_engine.integrations.anthropic import triangle_attention
+            from miniworld_engine.baselines.anthropic import triangle_attention
 
             q, k, v = (
                 t.permute(0, 2, 1, 3, 4).contiguous() for t in (query, key, value)
@@ -384,7 +384,7 @@ class TriangleAttention(nn.Module):
             return pair
         if variant_output or self.to_gate.bias is not None or self.to_out.bias is not None:
             # RoseTTAFold3's biases, Chai-1's output variants: the H100 kernels for inference, else the torch statements
-            from miniworld_engine.integrations import triattn_h100_sm90
+            from miniworld_engine.kernels.integrations import triattn_h100_sm90
             from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
 
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
@@ -400,12 +400,12 @@ class TriangleAttention(nn.Module):
             return pair + out
         if self._backend == KernelBackend.ANTHROPIC:
             if self.anthropic_row.startswith("block:"):
-                from miniworld_engine.integrations.anthropic import (
+                from miniworld_engine.baselines.anthropic import (
                     module_triangle_attention,
                 )
 
                 return module_triangle_attention(self, pair, mask)
-            from miniworld_engine.integrations.anthropic import _inference
+            from miniworld_engine.baselines.anthropic import _inference
 
             _inference()
             if self.training and self.p_drop:
@@ -418,7 +418,7 @@ class TriangleAttention(nn.Module):
         if not self._bias_untransposed and _b200.serves_wide(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return _b200.forward_wide(self, pair, mask)
-        from miniworld_engine.integrations import triattn_h100, triattn_h100_sm90
+        from miniworld_engine.kernels.integrations import triattn_h100, triattn_h100_sm90
 
         if triattn_h100_sm90.serves(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):

@@ -633,7 +633,7 @@ def train_backward(
 class TriAttnGeneric(torch.autograd.Function):
     """pair + drop o TriangleAttention(pair) (starting node), any served (d_pair, heads); parameters bf16 or fp32 (gradients come back in
     their dtype); drop = the module's broadcast dropout scale [B, L, C] bf16 or None.
-    (The module path goes through the custom ops of ``integrations.triattn_h100_sm90``, which call `train_forward` / `train_backward`.)"""
+    (The module path goes through the custom ops of ``kernels.integrations.triattn_h100_sm90``, which call `train_forward` / `train_backward`.)"""
 
     @staticmethod
     def forward(

@@ -5,7 +5,7 @@ in [dispatch.md](../dispatch.md). bf16; d_hidden 32, the widths are listed below
 (Length, MSA depth). The B200 page of the same module is [../../b200/opm/opm.md](../../b200/opm/opm.md); the fusion algorithm is
 the same, the instructions are not (see [Against B200](#against-b200)).
 
-Dispatch: `integrations/opm_train.py` (`_h100_path`, `_forward_wide`); kernels: `integrations/csrc/opm_epilogue.cu` (one extension per
+Dispatch: `kernels/integrations/opm_train.py` (`_h100_path`, `_forward_wide`); kernels: `kernels/integrations/csrc/opm_epilogue.cu` (one extension per
 (d_msa, d_pair), built by JIT for sm_90a).
 Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, no interchain masking, inference and training alike; the pair
 residual is added in the epilogue (its gradient is `dz`). The `opm_train` setting (default on) turns the path off. Every other call runs the

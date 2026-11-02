@@ -14,7 +14,7 @@ final mul into the layernorm-linear epilogue — see
 
 Execution paths (v2.2.0):
 
-  - ``cuda/`` — the hand-written H100 kernels (``integrations.trimul_h100`` states the
+  - ``cuda/`` — the hand-written H100 kernels (``kernels.integrations.trimul_h100`` states the
     qualified training / inference contract: widths, lengths, B=1, sm_90).
   - ``triton/`` — the portable fused pipeline (``unidirectional.trimul_triton`` /
     ``bidirectional.bidirectional_trimul_triton``), autograd-capable, every arch; the

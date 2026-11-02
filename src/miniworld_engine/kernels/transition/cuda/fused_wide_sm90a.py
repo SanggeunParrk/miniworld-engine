@@ -589,6 +589,6 @@ def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
         )
         return out.reshape(shape)
     out = _WideTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)
-    from miniworld_engine.integrations.token_dit_train import _native_caller_output
+    from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_output
 
     return _native_caller_output(out, x, gamma, beta, wa, wb, ws, force=True)

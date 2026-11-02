@@ -1,4 +1,4 @@
-// qknorm_local.cu -- QK-norm of the AF3 atom block's q and k (H100 mma family, integrations/local_dit_h100.py): per head (4 heads x 32) RMSNorm
+// qknorm_local.cu -- QK-norm of the AF3 atom block's q and k (H100 mma family, kernels/integrations/local_dit_h100.py): per head (4 heads x 32) RMSNorm
 // with one shared weight per tensor, eps in the denominator as torch's rms_norm.
 //
 //   forward   qo = q * rsqrt(mean(q^2) + eps) * wq,    ko likewise              (q, k [M, 128] bf16 or fp32, weights fp32 [32])

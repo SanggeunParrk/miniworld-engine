@@ -1,4 +1,4 @@
-"""The fused token DiT TRAINING block on H100 / B200 (integrations/token_dit_train.py) against the fp32 PyTorch DiTBlock (IEEE, TF32
+"""The fused token DiT TRAINING block on H100 / B200 (kernels/integrations/token_dit_train.py) against the fp32 PyTorch DiTBlock (IEEE, TF32
 off): output and every input / parameter gradient no worse than the engine's own module path in the same regime -- bf16, or
 fp32 (the fused path's TF32 kernels) -- (the switch is off in the second run), and the path actually taken."""
 
@@ -8,7 +8,7 @@ from portable_helpers import randomize_half_std as _randomize
 from settings_helpers import override_setting
 
 from miniworld_engine import settings
-from miniworld_engine.integrations import token_dit_train
+from miniworld_engine.kernels.integrations import token_dit_train
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 

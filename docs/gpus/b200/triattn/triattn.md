@@ -6,7 +6,7 @@ exists; a shape without one is 미구현 (it runs the portable path). Figures: o
 (blue, left) and writes (red, right); generated from `figures/triattn.json` by `python -m miniworld_engine.utils.viz.kernel_flow`,
 then converted to PNG with `cairosvg` (scale 2, white background).
 
-Dispatch: `integrations/triattn_b200.py`, called first in `TriangleAttention.forward`. Kernels:
+Dispatch: `kernels/integrations/triattn_b200.py`, called first in `TriangleAttention.forward`. Kernels:
 `kernels/triangle_attention/cuda/b200_triattn.py` (build + autograd) and `b200_sources/` (tcgen05 / TMEM / TMA:
 `triattn_sm100.cu` = attention core, `triattn_mod_sm100.cu` = the d_pair 128 kernels around it, `triattn_wide_sm100.cu` = the
 other widths' kernels around it, `sm100.cuh` = shared helpers). d_pair 128 / 4 × 32 is covered for inference and training
@@ -148,7 +148,7 @@ has no model and follows the 32-channel rule):
 | 384 | 384 | 12 × 32 | OpenDDE trunk |
 | 512 | 512 | 16 × 32 | none (benchmark width) |
 
-Served by `integrations/triattn_b200.serves_wide` / `forward_wide` (called after the d_pair 128 check), for inference and for
+Served by `kernels/integrations/triattn_b200.serves_wide` / `forward_wide` (called after the d_pair 128 check), for inference and for
 training with the module's dropout, when `d_pair` is a multiple of 64 in 64 .. 512, heads have 16 or 32 channels (at most 16
 heads), and the other conditions of the d_pair 128 path hold. A 16-channel head is zero-padded to 32 in the packed weights (its
 padded q / k / v / g channels are 0 and meet zero columns of Wo; the softmax scale stays 1/√16), so every width runs the

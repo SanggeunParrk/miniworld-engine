@@ -273,7 +273,7 @@ class BenchConfig(BaseModel):
     tri_d_hidden: int | None = None
     #: TriangleAttention on B200: False sets `module._b200_cuda = False` (the Triton path, the baseline the CUDA path replaced).
     tri_b200_cuda: bool = True
-    #: TriangleAttention on H100: False sets `module._h100_cuda = False` (the b200style path of `integrations/triattn_h100.py`).
+    #: TriangleAttention on H100: False sets `module._h100_cuda = False` (the b200style path of `kernels/integrations/triattn_h100.py`).
     tri_h100_cuda: bool = True
     #: "boltz2" / "rosettafold3" / "chai1": the `dit` target (token stack, `modules.dit_variant.DiTVariantStack`) or the `local_dit` target
     #: (atom stack, `AtomDiTVariantStack`) benches that model's DiT variant instead of the AF3 block; `n_layers` blocks. Not a yaml key:
@@ -810,7 +810,7 @@ def _payload_refusal(exc: BaseException) -> str | None:
         seen.add(id(current))
         if type(current).__name__ == "PayloadUnavailable" and type(
             current
-        ).__module__.startswith("miniworld_engine.integrations.anthropic"):
+        ).__module__.startswith("miniworld_engine.baselines.anthropic"):
             return f"{type(current).__module__}.PayloadUnavailable: {current}"
         if (
             type(current).__name__ == "FPFFallback"
@@ -938,7 +938,7 @@ def _anthropic_upstream_or_unsupported():
     The module-adapter rows (TriangleAttention, Transition) need the release's `common/opt_core`
     runtime: `MINIWORLD_ANTHROPIC_ROOT` names the checkout that contains `common/opt_core`.
     """
-    from miniworld_engine.integrations import anthropic as upstream
+    from miniworld_engine.baselines import anthropic as upstream
 
     try:
         upstream.configure()
@@ -1084,7 +1084,7 @@ def bench_module_triangle_multiplication(
     )
     if anthropic and not is_inference_mode(conf.mode):
         # The module refuses grad-enabled calls itself (anthropic_trimul.refusal); say so up front
-        # instead of paying for the reference model first. integrations/anthropic_training.py is a
+        # instead of paying for the reference model first. baselines/anthropic_training.py is a
         # PyTorch-recompute correctness baseline that no module dispatches to -- not a backend.
         raise UnsupportedBenchmark(
             "anthropic TriMul is inference-only: integrations.anthropic_trimul serves forward-only "
@@ -1487,7 +1487,7 @@ def bench_module_triangle_attention(
         ImplementationType.CUEQUIVARIANCE: "cuequivariance_torch.triangle_attention",
     }.get(spec.impl, spec.impl.value)
     if spec.impl == ImplementationType.MINIWORLD:
-        from miniworld_engine.integrations import triattn_b200
+        from miniworld_engine.kernels.integrations import triattn_b200
 
         layer0 = layers[0]
         if triattn_b200.serves(layer0, pair, mask):
@@ -2341,7 +2341,7 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
     cuequivariance has no OuterProductMean kernel, and triton/cuda are not separate module
     options here (the module only swaps its LayerNorm for them), so both are `unsupported`.
     """
-    from miniworld_engine.integrations import anthropic_msa, opm_train
+    from miniworld_engine.baselines import anthropic_msa, opm_train
     from miniworld_engine.modules import OuterProductMean
 
     key = implementation.strip().lower()
@@ -2583,7 +2583,7 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
       `unsupported`. Needs OPT_CORE_DIR; pwa_train is pinned off for the row (it would otherwise
       serve implementation="anthropic" first).
     """
-    from miniworld_engine.integrations import anthropic_msa, pwa_train
+    from miniworld_engine.baselines import anthropic_msa, pwa_train
     from miniworld_engine.modules import MSAPairWeightedAveraging
 
     key = implementation.strip().lower()
@@ -4758,7 +4758,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         fwd_kw = {"extra_pair_bias": torch.randn(length, length, device=DEVICE, dtype=dtype)}
 
     def _token_dit_train_serves(block, single, cond, pair, mask) -> bool:
-        from miniworld_engine.integrations import token_dit_train
+        from miniworld_engine.kernels.integrations import token_dit_train
 
         with torch.enable_grad():
             return token_dit_train.serves(block, single, cond, pair, mask)
@@ -4768,7 +4768,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         runner), else why not, named from the conditions `serves()` checks. Nested: the CPU
         contract tests execute the bench_module_* functions in a namespace of their own."""
         from miniworld_engine import settings
-        from miniworld_engine.integrations import token_dit
+        from miniworld_engine.kernels.integrations import token_dit
 
         with torch.set_grad_enabled(is_train):  # the grad mode the timed step runs in
             if token_dit.serves(block, single, cond, pair):
@@ -5982,11 +5982,11 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
     elif spec.impl == ImplementationType.PYTORCH:
         execution_path = "module.reference.torch"
     else:
-        from miniworld_engine.integrations import local_dit as fused
+        from miniworld_engine.kernels.integrations import local_dit as fused
 
         with torch.set_grad_enabled(is_train):
             if esm:
-                from miniworld_engine.integrations import local_dit_h100 as _h100
+                from miniworld_engine.kernels.integrations import local_dit_h100 as _h100
 
                 served = bool(_h100.matches(model.layers[0], single, cond, pair, mask, fwd_kw["rope"]))
             else:
@@ -6196,7 +6196,7 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
     if spec.impl == ImplementationType.PYTORCH:
         execution_path = "module.reference.torch"
     elif per_sample:
-        from miniworld_engine.integrations import bias_only_dit as fused_infer
+        from miniworld_engine.kernels.integrations import bias_only_dit as fused_infer
 
         with torch.set_grad_enabled(is_train):
             served = (
@@ -6217,8 +6217,8 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
             else "modules.bias_only_dit.BiasOnlyDiTBlock[reference composition: the per-sample bias path declined]"
         )
     else:
-        from miniworld_engine.integrations import bias_only_dit as fused
-        from miniworld_engine.integrations import bias_only_dit_train as fused_train
+        from miniworld_engine.kernels.integrations import bias_only_dit as fused
+        from miniworld_engine.kernels.integrations import bias_only_dit_train as fused_train
 
         with torch.set_grad_enabled(is_train):
             served = (fused_train if is_train else fused).serves(

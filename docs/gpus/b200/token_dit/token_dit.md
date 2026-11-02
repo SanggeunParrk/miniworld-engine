@@ -27,11 +27,11 @@ mask -- the one the diffusion module passes -- around `DiTBlock.forward`.
 On B200 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton, no quack -- on two paths that
 `modules/dit` dispatches to:
 
-- **Inference** (`integrations/token_dit.py` -> `kernels/conditioned_transition/triton/token_dit_runner.py`, the fused
+- **Inference** (`kernels/integrations/token_dit.py` -> `kernels/conditioned_transition/triton/token_dit_runner.py`, the fused
   step runner shared with H100): serves `DiTBlock` calls with no autograd, the engine's kernel backend (implementation
   MINIWORLD), bf16 or fp32, any L >= 8, the conditioning shared by the samples (L table rows) or one per sample
   (S L rows). The core's TMA maps are 3-D per sample (tile tails load as zeros, stores clip, keys past L are masked), so it
-  takes any multiple of 8; `integrations/token_dit.py` pads other lengths to the next multiple of 8 (zero single / cond /
+  takes any multiple of 8; `kernels/integrations/token_dit.py` pads other lengths to the next multiple of 8 (zero single / cond /
   pair rows, the key mask extended with False) and returns the first L rows. QK-norm blocks (`use_qk_norm`) take the
   same step: one in-place CUDA pass (`qknorm_rows`, RMSNorm of every 48-wide q / k head, eps as the module's
   `effective_eps`) right after the projection GEMM, with the sm_scale log2 e fold moved from Wq / bq into the q norm's
@@ -48,7 +48,7 @@ On B200 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton, n
   scoped to the capture (`kernels/_capture.py`): a replay re-packs the current weights unless the caller declares
   `static_weights()` (the benchmark harness does for inference), in which case a replay reads the pack and pair bias it was
   captured with and the live single / cond.
-- **Training** (`integrations/token_dit_train.py`): serves `DiTBlock` calls under autograd, engine kernel backend
+- **Training** (`kernels/integrations/token_dit_train.py`): serves `DiTBlock` calls under autograd, engine kernel backend
   (implementation MINIWORLD), bf16 (inputs, or `compute_dtype=bf16`) or fp32 (fp32 inputs, no `compute_dtype`),
   B == 1, any A and L (padded to an even A and L % 128 == 0 inside, 2026-10-06), key mask [B, L] or none (`DiTBlock` passes
   the [B, L] row of an [A, B, L] mask expanded over the samples). One autograd Function per block whose forward and backward are
@@ -476,7 +476,7 @@ of the group below 70 % SoL; ✓ would need every kernel of the group at 70 % or
 | 16 x 64 | 1024 | ✓ | CUDA (2026-10-10) | ✓ | CUDA (2026-10-10) |
 
 d_cond 384, d_pair 128 and transition n = 2 in every layout; the transition and the projections scale with d_single.
-`integrations/token_dit.py` and `integrations/token_dit_train.py` list the layouts as `LAYOUTS` ((heads, d_single) pairs);
+`kernels/integrations/token_dit.py` and `kernels/integrations/token_dit_train.py` list the layouts as `LAYOUTS` ((heads, d_single) pairs);
 `serves()` takes a layout from the block's `n_head` and the input width. Until 2026-10-06 the fp32 path stayed 16 x 48 (the
 TF32 kernels' tiles were built around 48-wide rows: see T1'-T3'); see "fp32 head layouts" below.
 
