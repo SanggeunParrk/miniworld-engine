@@ -132,8 +132,8 @@ def reference(m, direction, x, mask, ds, chunk=256):
     return y
 
 
-def counting(monkeypatch, module, name):
-    calls = []
+def counting(monkeypatch, module, name, calls=None):
+    calls = [] if calls is None else calls
     fn = getattr(module, name)
 
     def wrapped(*a, **k):
@@ -146,8 +146,8 @@ def counting(monkeypatch, module, name):
 
 def native_entry(monkeypatch, D, direction, training):
     """The CUDA entry point a served call must reach (not the PyTorch statements)."""
-    if not training:
-        return counting(monkeypatch, h100_inference, "inference")
+    if not training:   # D128 one direction from ROWPAD_D128_FROM on: the port's any-L form (h100_b200style.trimul)
+        return counting(monkeypatch, h100_b200style, "trimul", counting(monkeypatch, h100_inference, "inference"))
     if D == 64:
         return (counting(monkeypatch, h100_d64_b200gate, "bidirectional_trimul") if direction == 0 else
                 counting(monkeypatch, h100_uni_d64_b200gate, "single_trimul"))
@@ -400,3 +400,73 @@ def test_wide_port_determinism_l512(monkeypatch):
     assert torch.equal(y, y2)
     assert max(relative(a, b) for a, b in zip(g, g2, strict=True)) < 1e-3
     print("D256 L512 bitwise-equal gradients:", [torch.equal(a, b) for a, b in zip(g, g2, strict=True)])
+
+
+# --------------------------------------------------------------------------- D256 / D384 one direction, the port's any-L form (k3.cu ROWPAD)
+def _port_leaves(m, x):
+    return [x, m.to_left.weight, m.to_left_gate.weight, m.to_right.weight, m.to_right_gate.weight, m.to_gate.weight,
+            m.to_out.weight, m.ln_pair.weight, m.ln_pair.bias, m.ln_out.weight, m.ln_out.bias]
+
+
+@pytest.mark.parametrize("D", (256, 384))
+@pytest.mark.parametrize("direction", (1, 2))
+@pytest.mark.parametrize("L", (128, 384))
+def test_rowpad_form_equals_the_token_flat_port(D, direction, L):
+    """At an L both forms take, the any-L form (64-token chunks of one pair row, planes padded to 16, 3-D x / y maps) is bitwise
+    the token-flat port: the same K1, contraction and folded K3 arithmetic per token."""
+    m = make(D, direction).eval()
+    x, mask, _ = inputs(1, L, D)
+    with torch.no_grad():
+        leaves = [x, *h100_b200style.cast_training_weights(_port_leaves(m, x)[1:7]), *_port_leaves(m, x)[7:]]
+        token = mask.reshape(L).contiguous()
+        flat = h100_b200style._run_forward(leaves, token, None, direction, False)[0]
+        rowpad = h100_b200style._run_rowpad(leaves, token, direction)[0]
+    assert torch.equal(rowpad, flat)
+
+
+ROWPAD = [(direction, L, masked) for direction in (1, 2) for L in (40, 200, 500) for masked in (True, False)]
+
+
+@pytest.mark.parametrize("case", ROWPAD, ids=[f"dir{d}-L{L}-{'mask' if m else 'nomask'}" for d, L, m in ROWPAD])
+def test_d384_rowpad_inference(case, monkeypatch):
+    """One-sample D384 inference at L % 128 != 0 takes the port's any-L form: the FP32 statement within the bf16 band, and
+    deterministic."""
+    direction, L, masked = case
+    m = make(384, direction).eval()
+    x, mask, _ = inputs(1, L, 384)
+    mask = mask if masked else None
+    calls = []
+    run = h100_b200style._run_rowpad
+    monkeypatch.setattr(h100_b200style, "_run_rowpad", lambda *a, **k: calls.append(1) or run(*a, **k))
+    with torch.no_grad():
+        assert trimul_h100._b200style_serves(m, x, inference=True)
+        got = m(x, mask)
+        assert calls, "the any-L port form was not reached"
+        assert torch.equal(got, m(x, mask))
+        err = relative(got, reference(m, direction, x, mask, None))
+    assert err < 1e-2, err
+
+
+SMALL_ROWPAD = [(D, direction, L, masked) for D, Ls in ((128, (768, 1000)), (64, (1000, 1040, 1600))) for direction in (1, 2)
+                for L in Ls for masked in (True, False)]
+
+
+@pytest.mark.parametrize("case", SMALL_ROWPAD, ids=[f"D{D}-dir{d}-L{L}-{'mask' if m else 'nomask'}" for D, d, L, m in SMALL_ROWPAD])
+def test_small_width_rowpad_inference(case, monkeypatch):
+    """One-sample D64 / D128 inference from ROWPAD_FROM on takes the port's any-L form: two residual / output tiles per K3
+    warpgroup are bitwise one tile (k3.cu XBUF), the result is deterministic and within the bf16 band of the FP32 statement."""
+    D, direction, L, masked = case
+    m = make(D, direction).eval()
+    x, mask, _ = inputs(1, L, D)
+    mask = mask if masked else None
+    calls = []
+    run = h100_b200style._run_rowpad
+    monkeypatch.setattr(h100_b200style, "_run_rowpad", lambda *a, **k: calls.append(1) or run(*a, **k))
+    with torch.no_grad():
+        got = m(x, mask)
+        assert calls, "the any-L port form was not reached"
+        assert torch.equal(got, m(x, mask))
+        monkeypatch.setattr(h100_b200style, "K3_XBUF", {})
+        assert torch.equal(got, m(x, mask))
+        err = relative(got, reference(m, direction, x, mask, None))
+    assert err < 1e-2, err

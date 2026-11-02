@@ -88,8 +88,8 @@ def reference(m, direction, x, mask, ds):
     return x.float() + (upd if ds is None else upd * ds.float())
 
 
-def counting(monkeypatch, module, name):
-    calls = []
+def counting(monkeypatch, module, name, calls=None):
+    calls = [] if calls is None else calls
     fn = getattr(module, name)
 
     def wrapped(*a, **k):
@@ -104,8 +104,8 @@ def counting(monkeypatch, module, name):
 def native_entry(monkeypatch, D, direction, training):
     if D >= 256:
         return counting(monkeypatch, h100_b200style, "trimul")
-    if not training:
-        return counting(monkeypatch, h100_inference, "inference")
+    if not training:   # D128 one direction from ROWPAD_D128_FROM on: the port's any-L form (h100_b200style.trimul)
+        return counting(monkeypatch, h100_b200style, "trimul", counting(monkeypatch, h100_inference, "inference"))
     if direction == 0:
         return counting(monkeypatch, h100_training, "bidirectional_trimul")
     return counting(monkeypatch, h100_single, "single_trimul")

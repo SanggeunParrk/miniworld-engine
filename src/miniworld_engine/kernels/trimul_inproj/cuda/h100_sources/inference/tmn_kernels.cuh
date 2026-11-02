@@ -30,6 +30,9 @@
 #ifndef TMN_WSKIP
 #define TMN_WSKIP 0             // experiment: 1 = with a resident weight ring, wait on barW_full only in the first tile (later tiles: the phase already completed)
 #endif
+#ifndef TMN_K1_DIAG
+#define TMN_K1_DIAG 0           // measurement builds only: 2 = no gate arithmetic in the K1 epilogue (planes = raw accumulators), 4 = no MMAs issued
+#endif
 #ifndef TMN_K1_WARPSTORE
 #define TMN_K1_WARPSTORE 0      // experiment: 1 = K1 lane store path stores each warp's own 16 tokens x 32 channels (no per-block warpgroup barrier)
 #endif
@@ -776,7 +779,7 @@ TMN_DEVI void k1_body(const P& p) {
       for (int i = 0; i < 32; ++i) ac[i] = 0.f;
       fence_regs(ac);
       wgmma_fence();
-      mma_chain<SKCH>(ac, fa, dlo, dhi);
+      if ((TMN_K1_DIAG & 4) == 0) mma_chain<SKCH>(ac, fa, dlo, dhi);
       wgmma_commit();
     };
     auto epilogue = [&](float (&ac)[32], int b, uint32_t wi, bool release) {   // release: free the block's ring slots here (schedule 0) or not (already freed)
@@ -794,6 +797,7 @@ TMN_DEVI void k1_body(const P& p) {
       for (int q = 0; q < 4; ++q) {
         float vA0 = math::gate(ac[4 * q + 0], ac[4 * (q + 4) + 0], mA), vA1 = math::gate(ac[4 * q + 1], ac[4 * (q + 4) + 1], mA);   // sigmoid(g) p m, fp32
         float vB0 = math::gate(ac[4 * q + 2], ac[4 * (q + 4) + 2], mB), vB1 = math::gate(ac[4 * q + 3], ac[4 * (q + 4) + 3], mB);
+        if ((TMN_K1_DIAG & 2) != 0) { vA0 = ac[4 * q]; vA1 = ac[4 * q + 1]; vB0 = ac[4 * q + 2]; vB1 = ac[4 * q + 3]; }
         if (TMN_K1_NO_VSEL == 0) {   // experiment TMN_K1_NO_VSEL: invalid rows already carry mA/mB == 0 (zero-filled OOB z rows give finite products)
           if (!vA) { vA0 = 0.f; vA1 = 0.f; }
           if (!vB) { vB0 = 0.f; vB1 = 0.f; }

@@ -84,6 +84,11 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 ### Removed
 
 - `miniworld_engine.architecture` is no longer part of the engine: the diffusion processes (EDM, decoupled x-pred), the SE(3) / align / transform helpers, `tensor_layout`, the model layers, the checkpoint adapters (`mark_dead_modules`, the attention backend adapters) and the RoPE-SWA / MSA / template blocks belong to the models that use them; they stay in git history. The SWA atom transformer that `modules.InputFeatureEmbedder` holds is now `modules.swa_atom_transformer` (on the engine enum `ImplementationType.MINIWORLD`); the Pairformer / DiffusionTransformer blocks the bundle coverage driver runs are `build/coverage_blocks` (build time only). `legacy` magnitude-preserving / rotation options are gone with the layers.
+### Changed
+
+- H100 single-direction TriangleMultiplication inference on the B200-style port's any-L form (`h100_b200style._run_rowpad`, k3.cu `ROWPAD`): D384 at L % 128 != 0 (0.81-0.84x Anthropic's `trimul_native` time, was 0.96-1.01x), D128 from L768 and D64 from L1000 (BN 128 / 64 K3 builds, `XBUF` double residual tile; 1-7 % faster than the packaged K1 / K3). Record `docs/records/trimul_h100_vs_anthropic_15pct_20261030.md`.
+- H100 single-direction TriangleMultiplication inference at d_pair 384 beyond L1024 runs the B200-style port (L % 128 == 0) instead of the packaged K1 / K3: 15-17 % faster than both the old path and Anthropic's `trimul_native` at L1536-2560 (`integrations/trimul_h100._legacy_native_faster`; record `docs/records/trimul_h100_bigl_20261030.md`).
+- The packaged K1 / K3 inference path keeps its launch plans and tensor maps per weight set across calls (`h100_inference._Kernels.plans`): host time per eager call 0.52 -> 0.31 ms (GPU time unchanged).
 
 ## [2.4.1] - 2026-10-30
 
