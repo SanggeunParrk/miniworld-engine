@@ -6,7 +6,7 @@ the conditioning predicts ``shift / scale / gate`` for both the attention and th
 FFN sub-layer; the residual branches are gated by a zero-initialised modulation
 so they start as the identity. This is intentionally *not* the AF3 conditioning
 (``sigmoid``-scale AdaLN + ``bias=-2`` output gate) used by
-:class:`~miniworld_engine.architecture.layers.AugmentedAttentionPairBias`; it mirrors ESMFold2,
+:class:`~miniworld_engine.modules.AugmentedAttentionPairBias`; it mirrors ESMFold2,
 which reverts the atom transformer to the original DiT block while keeping AF3's
 ``AttentionPairBias`` only at the token level.
 """

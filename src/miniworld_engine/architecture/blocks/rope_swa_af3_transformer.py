@@ -24,7 +24,7 @@ from jaxtyping import Float, Int
 from miniworld_engine.architecture.blocks._engine_impl import to_engine_impl
 from miniworld_engine.architecture.blocks.swa_atom_transformer import SWAAtomTransformer
 from miniworld_engine.architecture.exceptions import ImplementationType, legacy_options_removed
-from miniworld_engine.architecture.layers.ops import sigmoid_gate
+
 from miniworld_engine.architecture.primitives import Linear
 from miniworld_engine.architecture.typing import typecheck
 from miniworld_engine.modules import AdaptiveLayerNorm, ConditionedTransition, RMSNorm
@@ -149,9 +149,9 @@ class RoPESWAAttentionAF3(nn.Module):
             )
 
         out = out.reshape(n, s, -1)
-        out = sigmoid_gate(self.to_gate(x), out)
+        out = torch.sigmoid(self.to_gate(x)) * out
         out = self.to_out(out)
-        return sigmoid_gate(self.to_scale(cond), out)
+        return torch.sigmoid(self.to_scale(cond)) * out
 
     def _flash_window(self, q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s):
         return flash_window_seqused(
