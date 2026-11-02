@@ -57,4 +57,4 @@ The reference runs out of memory at B = 48, L = 512 (and for `pair_embed_adaln` 
 | `pg_fwd`, `pg_fwd_ca` | persistent CTAs, 16 / 32 warps, one warp per (b, i) row; bins as torch computes them (bucket by binary search over the limits in shared memory), up to ten bf16 table rows from shared memory summed in fp32, optional LayerNorm, 16 B stores; the 16-byte codes for the backward |
 | `pg_ln_bwd` | LayerNorm backward with the pair recomputed from the codes, `UL` pairs per warp step, loads pipelined two steps deep |
 | `pg_bwd_mma4` | table gradient: the one-hot operand scattered into a swizzled shared-memory tile (two extra warps), `wgmma.m64n64k16` with both operands from shared memory, one warpgroup per 64 table rows, fixed pair slices and tile order, fixed-order reduce: bitwise deterministic. `MINIWORLD_PAIR_EMBED_BWD_IMPL=2` selects the previous `mma.sync` kernel, `0` the shared-memory kernel |
-| `pe_bwd_tbl4` | the same for `pair_embed_adaln` (fp32 partials); `MINIWORLD_PAIR_EMBED_BWD_IMPL=0` selects the previous kernel |
+| `pe_bwd_tbl4` | the same for `pair_embed_adaln` (fp32 partials); `settings.pair_embed_bwd_impl=0` selects the previous kernel |

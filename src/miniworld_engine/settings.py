@@ -417,6 +417,26 @@ class Settings:
     #: Formerly ``MINIWORLD_SWA_H100_CUDA_ONLY``: None runs the native Hopper SWA DiT block for the shapes it is qualified for and
     #: falls back elsewhere; True forces it (an unsupported call raises); False disables it.
     swa_dit_h100_native: bool | None = None
+    # ---- kernel variant knobs (formerly bare environment variables of the kernel files, read once at import: a kernel module reads them when it is
+    # imported, so configure() before the first kernel use)
+    #: Formerly ``ADALN_XT``: the fp32 token-width AdaLN weight gradient with LN(cond)^T as the K-major operand.
+    adaln_xt: bool = True
+    #: Formerly ``ADALN_FM``: the fp32 AdaLN backward row pass writing the gradient feature-major: "1" always, "0" never, "auto" for a cond of 768 columns or more.
+    adaln_fm: str = "auto"
+    #: Formerly ``ADALN_MODE``: the AdaLN wgmma inference tile layout (measured best: 128-column tiles).
+    adaln_mode: str = "h128"
+    #: Formerly ``ADALN_ATOM``: the atom width (128 x 128) AdaLN runs the one-launch kernel; False switches it off for A/B timing.
+    adaln_atom: bool = True
+    #: Formerly ``ADALN_FP32_WG``: which fp32 AdaLN training widths take the wgmma forward ("atom" = the atom width only).
+    adaln_fp32_wg: str = "atom"
+    #: Formerly ``CT_XT``: the fp32 conditioned-transition weight gradient with the K-major operand.
+    ct_xt: bool = True
+    #: Formerly ``CT_FM``: the conditioned-transition feature-major backward (measured: no gain at 18432 rows).
+    ct_fm: bool = False
+    #: Formerly ``OPM_FUSED_DEFS``: extra nvcc -D flags of the fused OuterProductMean prologue (also part of its extension key).
+    opm_fused_defs: str = ""
+    #: Formerly ``MINIWORLD_PAIR_EMBED_BWD_IMPL``: the pair-embedding table gradient kernel (1: wgmma, 2: the first tensor-core kernel (geometry only), 0: the shared-memory read-modify-write kernel).
+    pair_embed_bwd_impl: int = 1
 
     def autotunes(self, kernel: str) -> bool:
         """Is ``kernel``'s full config grid unlocked for this run?"""
@@ -537,6 +557,15 @@ def engine_jit_root() -> Path:
 #: Environment variables that used to switch these settings and are not read any more. The value is the setting that replaced
 #: the variable ("" when the switch was removed). Setting one now changes nothing, so it is reported instead of ignored silently.
 _REMOVED_ENVIRONMENT = {
+    "ADALN_XT": "adaln_xt",
+    "ADALN_FM": "adaln_fm",
+    "ADALN_MODE": "adaln_mode",
+    "ADALN_ATOM": "adaln_atom",
+    "ADALN_FP32_WG": "adaln_fp32_wg",
+    "CT_XT": "ct_xt",
+    "CT_FM": "ct_fm",
+    "OPM_FUSED_DEFS": "opm_fused_defs",
+    "MINIWORLD_PAIR_EMBED_BWD_IMPL": "pair_embed_bwd_impl",
     "MINIWORLD_AUGATTN_BF16_SM100": "augmented_attention_bf16_sm100",
     "MINIWORLD_AUGATTN_BF16_SM90": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BIAS_ONLY_DIT": "bias_only_dit",

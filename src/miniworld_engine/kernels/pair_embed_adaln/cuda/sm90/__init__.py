@@ -5,10 +5,11 @@ bound. The backward is bitwise deterministic (no atomics: per-CTA partials summe
 from __future__ import annotations
 
 import functools
-import os
 from pathlib import Path
 
 import torch
+
+from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 C = 256
@@ -35,7 +36,7 @@ def forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim, clim, n
     return out, bins
 
 
-IMPL = int(os.environ.get("MINIWORLD_PAIR_EMBED_BWD_IMPL", "1"))   # 1: table gradient on the tensor cores (wgmma), 0: the shared-memory read-modify-write kernel (A/B)
+IMPL = settings.current().pair_embed_bwd_impl   # 1: table gradient on the tensor cores (wgmma), 0: the shared-memory read-modify-write kernel (A/B)
 
 
 def backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2, impl=None):

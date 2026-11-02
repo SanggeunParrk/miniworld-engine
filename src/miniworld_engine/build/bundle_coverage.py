@@ -399,7 +399,7 @@ def _la_proteina_pair() -> None:
         for eps in (None, 1e-5):
             pair_embed_geom_train(w, bb, flags[0], flags[1], flags[2], idx, chains, ln_eps=eps).float().sum().backward()
             pair_embed_ca(wc, ca, flags[2], ln_eps=eps).float().sum().backward()
-        for impl in (0, 1):   # the shared-memory read-modify-write backward is the A/B switch MINIWORLD_PAIR_EMBED_BWD_IMPL=0
+        for impl in (0, 1):   # the shared-memory read-modify-write backward is the A/B switch settings.pair_embed_bwd_impl=0
             pair, codes = geom.forward(w.detach().t().to(torch.bfloat16).contiguous(), bb, flags[0].to(torch.uint8), flags[1].to(torch.uint8),
                                        flags[2].to(torch.uint8), idx.to(torch.int32), chains, torch.linspace(0.1, 2, 20, device=dev),
                                        torch.linspace(-torch.pi, torch.pi, 20, device=dev), with_codes=True)

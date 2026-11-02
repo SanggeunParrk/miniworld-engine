@@ -2191,6 +2191,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if argv is None and args.func is cmd_derive and os.environ.get("MINIWORLD_COMPILE_WRAP") != "disable":
+        # The one setting a kernel module reads when it is imported, so it cannot be set from inside the command: a derivation needs "disable"
+        # (a custom op answers a fake tensor with its own fake and records nothing). Run this command again with it set, so nobody has to export it
+        # -- and no test or bench shell inherits it.
+        os.environ["MINIWORLD_COMPILE_WRAP"] = "disable"
+        os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
     return args.func(args)
 
 

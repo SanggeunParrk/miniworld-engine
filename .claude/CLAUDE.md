@@ -27,7 +27,7 @@ torch 2.13 + cu129, triton 3.7, Transformer Engine, cuequivariance 0.12, FlashAt
   `miniworld-engine dev install-flash --arch <sm>`. Use `pixi run --frozen` afterwards.
 - At runtime: `export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH`.
 - Per-GPU JIT caches: set `settings.engine_jit_root` per checkout/GPU so builds don't collide.
-- `dev derive` needs `MINIWORLD_COMPILE_WRAP=disable`.
+- `dev derive` sets `MINIWORLD_COMPILE_WRAP=disable` itself (it re-runs itself with it); never export it in a shell that also runs tests or benchmarks.
 
 ## Where things go
 

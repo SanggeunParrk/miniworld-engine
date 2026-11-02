@@ -29,7 +29,6 @@ bf16 on sm_90a, normalize_before_proj, no interchain mask. Fuses the optional pa
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -246,7 +245,7 @@ def _ext(
     if epi_half:
         key += "_half"
     if fused and not sm100 and not wide:   # the fused outer product + projection kernel (csrc/opm_epilogue.cu, MINIWORLD_OPM_FUSED)
-        key += "_fused" + os.environ.get("OPM_FUSED_DEFS", "").replace(" ", "").replace("=", "").replace("-D", "_")
+        key += "_fused" + settings.current().opm_fused_defs.replace(" ", "").replace("=", "").replace("-D", "_")
     if wide and not sm100:
         key += f"_{cm}_{cz}"
     if key in _EXT:
@@ -275,7 +274,7 @@ def _ext(
         if epi_half:
             suffix += "_half"
         if fused and not wide:
-            suffix += "_fused" + os.environ.get("OPM_FUSED_DEFS", "").replace(" ", "").replace("=", "").replace("-D", "_")
+            suffix += "_fused" + settings.current().opm_fused_defs.replace(" ", "").replace("=", "").replace("-D", "_")
         if wide:
             suffix += f"_{cm}_{cz}"
         _EXT[key] = load(
@@ -285,7 +284,7 @@ def _ext(
             + ([f"-DOPM_CM={cm}", f"-DOPM_CZ={cz}"] if wide else [])
             + (["-DMINIWORLD_OPM_EPILOGUE_TMA_OVERLAP=1"] if epi_tma else [])
             + (["-DMINIWORLD_OPM_EPILOGUE_TMA_HALF=1"] if epi_half else [])
-            + (["-DMINIWORLD_OPM_FUSED=1", *os.environ.get("OPM_FUSED_DEFS", "").split()] if fused and not wide else []),
+            + (["-DMINIWORLD_OPM_FUSED=1", *settings.current().opm_fused_defs.split()] if fused and not wide else []),
             extra_cflags=["-O3"],
         )
     return _EXT[key]

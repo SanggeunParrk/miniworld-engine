@@ -11,10 +11,11 @@ never at import. Entry point: :func:`adaln_inference`.
 from __future__ import annotations
 
 import functools
-import os
 from pathlib import Path
 
 import torch
+
+from miniworld_engine import settings
 
 from miniworld_engine.kernels._device import num_sms
 
@@ -108,12 +109,12 @@ def packed(w_scale, b_scale, w_bias, dtype):
 
 
 # read once at import: the routing functions run inside torch.compile traces, which must not look at the environment
-_ATOM = os.environ.get("ADALN_ATOM", "1") != "0"
-_FP32_WG = os.environ.get("ADALN_FP32_WG", "atom")
+_ATOM = settings.current().adaln_atom
+_FP32_WG = settings.current().adaln_fp32_wg
 
 
 def atom_fused(nx: int, nc: int) -> bool:
-    """The atom width (NX = NC = 128) runs the one-launch kernel (``ADALN_ATOM=0`` switches it off for A/B timing)."""
+    """The atom width (NX = NC = 128) runs the one-launch kernel (``settings.adaln_atom=False`` switches it off for A/B timing)."""
     return nx == 128 and nc == 128 and _ATOM
 
 
@@ -187,7 +188,7 @@ def fwd_saved(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, w_scale: t
     if atom_fused(nx, cond.shape[1]):
         e.adaln_atom(cond, lnw, x, wc, bs, y, stx, stc, sb, aff, eps_cond, eps_x, False, num_sms(x.device))
         return y, aff, stc, stx, sb, (wc if x.dtype is torch.bfloat16 else wc.new_empty(0))
-    mode = os.environ.get("ADALN_MODE", "h128")   # measured (M = 18432 / 36864 / 49152, bf16): 128-column tiles 68 / 153 / 194 us, 64-column 69 / 160 / 239, A-resident 112 / 183 / 199
+    mode = settings.current().adaln_mode   # measured (M = 18432 / 36864 / 49152, bf16): 128-column tiles 68 / 153 / 194 us, 64-column 69 / 160 / 239, A-resident 112 / 183 / 199
     ar = x.dtype == torch.bfloat16 and cond.shape[1] == 384 and nx % 64 == 0 and mode == "ar"   # A-resident row blocks (see adaln_sm90.cu)
     if mode == "h64": ht = 64
     elif mode == "h128": ht = 128
@@ -212,7 +213,7 @@ def colsum(parts: torch.Tensor) -> torch.Tensor:
 
 
 def train_supported(x: torch.Tensor, cond: torch.Tensor | None = None) -> bool:
-    """The wgmma training forward: bf16 (fp32 training is served by the row kernels + cuBLAS, except where ``ADALN_FP32_WG`` says otherwise)."""
+    """The wgmma training forward: bf16 (fp32 training is served by the row kernels + cuBLAS, except where ``settings.adaln_fp32_wg`` says otherwise)."""
     if x.dtype == torch.float32:
         mode = _FP32_WG   # the atom width has the one-launch kernel; the token widths measured slower than cuBLAS + the row kernels
         return mode == "all" or (mode == "atom" and cond is not None and atom_fused(x.shape[-1], cond.shape[-1]))

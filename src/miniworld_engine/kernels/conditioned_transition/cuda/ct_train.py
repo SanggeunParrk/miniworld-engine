@@ -12,10 +12,11 @@ come back in fp32) or fp32 on TF32 GEMMs (the process's ``allow_tf32``). Built o
 from __future__ import annotations
 
 import functools
-import os
 from pathlib import Path
 
 import torch
+
+from miniworld_engine import settings
 
 from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels import _cast_cuda
@@ -24,7 +25,7 @@ from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.adaln.cuda.infer import colsum
 
 _dir = Path(__file__).parent
-_FM = os.environ.get("CT_FM", "0") == "1"   # the feature-major backward (measured: no gain at 18432 rows, see _backward_feature_major)
+_FM = settings.current().ct_fm   # the feature-major backward (measured: no gain at 18432 rows, see _backward_feature_major)
 
 
 @functools.lru_cache(maxsize=None)
@@ -183,7 +184,7 @@ def pack_fp32(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, wsc: torch.T
     return wab, wabT, wsT, wscT
 
 
-_XT = os.environ.get("CT_XT", "1") != "0"   # read once at import (the routing runs inside traces)
+_XT = settings.current().ct_xt   # read once at import (the routing runs inside traces)
 
 
 def _sigmul_bwd_x_fake(dy, out, sp):

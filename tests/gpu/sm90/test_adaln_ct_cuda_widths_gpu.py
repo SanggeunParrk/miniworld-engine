@@ -198,6 +198,8 @@ def test_adaln_fp32_small_m_takes_32_column_tiles():
 _HANG_PROBE = r"""
 import sys, torch
 torch.backends.cuda.matmul.allow_tf32 = True
+from miniworld_engine import settings
+settings.configure(adaln_atom=False)   # the atom-width route is switched off: it would not reach the two-slab kernel
 from miniworld_engine.kernels.adaln.cuda import infer
 nx, nc, m, bf = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), sys.argv[4] == "bf16"
 dt = torch.bfloat16 if bf else torch.float32
@@ -219,10 +221,8 @@ def test_two_k_slab_wgmma_kernel_does_not_deadlock_with_many_tiles_a_cta(nx, nc,
     """Regression: with two K slabs (bf16 cond 128, fp32 cond 64) the producer of ``adaln_gemm_k`` asked for the next tile's x at slab ``KB / 2`` = 1, but the consumers release
     that staging only after consuming slab 1: a wait for a slab not yet requested, a hang as soon as a CTA had a second tile (M = 20480 rows: every bf16 d = c = 128 ladder row).
     Run in a child process with a timeout: the old code never returns. (The atom-width d = c = 128 route is switched off in the child: it would not reach this kernel.)"""
-    import os
     import subprocess
     import sys
 
-    env = dict(os.environ, ADALN_ATOM="0")
-    r = subprocess.run([sys.executable, "-c", _HANG_PROBE, str(nx), str(nc), "20480", bf], env=env, timeout=300, capture_output=True, text=True)
+    r = subprocess.run([sys.executable, "-c", _HANG_PROBE, str(nx), str(nc), "20480", bf], timeout=300, capture_output=True, text=True)
     assert r.returncode == 0, (r.stdout[-500:], r.stderr[-1500:])

@@ -4,10 +4,11 @@ launched on torch's current stream (CUDA-graph capturable). Forward only."""
 from __future__ import annotations
 
 import functools
-import os
 from pathlib import Path
 
 import torch
+
+from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 
@@ -45,7 +46,7 @@ def forward_ca(tbl, ca, mask, idx, dlim, with_codes=False, ln_eps=None):
     return (out, codes) if with_codes else out
 
 
-IMPL = int(os.environ.get("MINIWORLD_PAIR_EMBED_BWD_IMPL", "1"))   # 1: wgmma, 2: the first tensor-core kernel (mma.sync), 0: the shared-memory read-modify-write kernel (A/B)
+IMPL = settings.current().pair_embed_bwd_impl   # 1: wgmma, 2: the first tensor-core kernel (mma.sync), 0: the shared-memory read-modify-write kernel (A/B)
 
 
 def backward(g, codes, mode, impl=None):

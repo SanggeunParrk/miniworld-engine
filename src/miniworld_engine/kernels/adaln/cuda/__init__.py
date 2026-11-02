@@ -12,7 +12,6 @@ Contract (``supported``): sm_90, bf16 x / cond, widths in ``WIDTHS`` (a multiple
 from __future__ import annotations
 
 import functools
-import os
 from pathlib import Path
 
 import torch
@@ -24,9 +23,9 @@ from miniworld_engine import settings
 _dir = Path(__file__).parent
 WIDTHS = (128, 256, 384, 512, 768, 1024)
 FEATURE_MAJOR_WIDTHS = (256, 384, 512, 768)   # fp32 backward row pass writing the gradient feature-major (``adaln_bwd_t``)
-_XT = os.environ.get("ADALN_XT", "1") != "0"   # fp32 token-width weight gradient with LN(cond)^T as the K-major operand
+_XT = settings.current().adaln_xt   # fp32 token-width weight gradient with LN(cond)^T as the K-major operand
 _XT_MAX_ROWS = 24576
-_FM = os.environ.get("ADALN_FM", "auto")   # "1": always, "0": never, "auto": a cond of 768 columns or more
+_FM = settings.current().adaln_fm   # "1": always, "0": never, "auto": a cond of 768 columns or more
 
 
 @functools.lru_cache(maxsize=None)
