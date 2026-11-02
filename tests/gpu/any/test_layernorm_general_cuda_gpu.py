@@ -117,8 +117,8 @@ def test_config_covers_every_width():
 def test_engine_layernorms_take_the_general_kernel_on_h100_and_b200(monkeypatch):
     """modules.LayerNorm (MINIWORLD) and architecture.primitives.LayerNorm (MINIWORLD_ENGINE) run the general kernel on the cards with no
     Triton fallback, with the module's fp32 affine, and match their PyTorch reference in value and gradient."""
-    from miniworld_engine.architecture.exceptions import ImplementationType as ArchImpl
-    from miniworld_engine.architecture.primitives import LayerNorm as ArchLayerNorm
+    from miniworld_engine._blocks.exceptions import ImplementationType as ArchImpl
+    from miniworld_engine._blocks.primitives import LayerNorm as ArchLayerNorm
     from miniworld_engine.kernels.layernorm.cuda import general
     from miniworld_engine.modules import LayerNorm
     from miniworld_engine.modules.exceptions import ImplementationType

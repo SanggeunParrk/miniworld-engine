@@ -8,10 +8,10 @@ from pydantic import BaseModel
 from torch import nn
 from torch.utils.checkpoint import checkpoint, checkpoint_sequential
 
-from miniworld_engine.architecture.blocks._engine_impl import to_engine_impl
-from miniworld_engine.architecture.blocks.pair_bias_hoist import pair_bias_all
-from miniworld_engine.architecture.exceptions import ImplementationType
-from miniworld_engine.architecture.typing import typecheck
+from miniworld_engine._blocks.blocks._engine_impl import to_engine_impl
+from miniworld_engine._blocks.blocks.pair_bias_hoist import pair_bias_all
+from miniworld_engine._blocks.exceptions import ImplementationType
+from miniworld_engine._blocks.typing import typecheck
 from miniworld_engine.modules import AugmentedAttentionPairBias
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.functional import sigmoid_gate

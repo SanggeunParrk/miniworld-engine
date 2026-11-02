@@ -11,7 +11,7 @@ from jaxtyping import Float
 from torch import Size
 from torch.nn.parameter import Parameter
 
-from miniworld_engine.architecture.exceptions import (
+from miniworld_engine._blocks.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )

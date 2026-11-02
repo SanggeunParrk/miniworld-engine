@@ -21,14 +21,14 @@ from pydantic import BaseModel
 from torch.utils.checkpoint import checkpoint_sequential
 
 from miniworld_engine import kernels, settings
-from miniworld_engine.architecture._engine_impl import (
+from miniworld_engine._blocks._engine_impl import (
     to_engine_impl_pointwise,
     torch_pointwise,
 )
-from miniworld_engine.architecture.blocks._engine_impl import to_engine_impl
-from miniworld_engine.architecture.exceptions import ImplementationType, legacy_options_removed
-from miniworld_engine.architecture.primitives import Linear
-from miniworld_engine.architecture.typing import typecheck
+from miniworld_engine._blocks.blocks._engine_impl import to_engine_impl
+from miniworld_engine._blocks.exceptions import ImplementationType, legacy_options_removed
+from miniworld_engine._blocks.primitives import Linear
+from miniworld_engine._blocks.typing import typecheck
 from miniworld_engine.modules import RMSNorm
 from miniworld_engine.modules.dispatch import (
     fallback_autocast,

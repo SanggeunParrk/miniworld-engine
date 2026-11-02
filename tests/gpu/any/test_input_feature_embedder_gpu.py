@@ -8,7 +8,7 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.architecture.exceptions import ImplementationType
+from miniworld_engine._blocks.exceptions import ImplementationType
 from miniworld_engine.modules import InputFeatureEmbedder
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")]

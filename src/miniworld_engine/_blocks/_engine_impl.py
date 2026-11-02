@@ -3,7 +3,7 @@
 import torch
 
 from miniworld_engine import settings
-from miniworld_engine.architecture.exceptions import ImplementationType
+from miniworld_engine._blocks.exceptions import ImplementationType
 from miniworld_engine.modules.exceptions import (
     ImplementationType as EngineImplementation,
 )

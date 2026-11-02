@@ -1,9 +1,9 @@
-"""The architecture package imports on its own and keeps the names MiniWorld builds on."""
+"""The internal blocks package imports on its own (the names the coverage driver and InputFeatureEmbedder build on)."""
 
 import importlib
 import pkgutil
 
-import miniworld_engine.architecture as architecture
+import miniworld_engine._blocks as architecture
 
 
 def test_every_module_imports():
@@ -19,20 +19,18 @@ def test_every_module_imports():
 
 
 def test_public_names():
-    from miniworld_engine.architecture.blocks import (
+    from miniworld_engine._blocks.blocks import (
         DiffusionTransformer,
         Pairformer,
         SWAAtomTransformer,
     )
-    from miniworld_engine.architecture.diffusion.edm import EDMScheduler
-    from miniworld_engine.architecture.exceptions import ImplementationType
-    from miniworld_engine.architecture.typing import typecheck
+    from miniworld_engine._blocks.exceptions import ImplementationType
+    from miniworld_engine._blocks.typing import typecheck
 
     assert callable(typecheck)
     assert {
         DiffusionTransformer,
         Pairformer,
         SWAAtomTransformer,
-        EDMScheduler,
         ImplementationType,
     }

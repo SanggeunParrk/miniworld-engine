@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from miniworld_engine import settings
-from miniworld_engine.architecture.blocks.swa_atom_transformer import SWAAtomTransformer
+from miniworld_engine._blocks.blocks.swa_atom_transformer import SWAAtomTransformer
 from miniworld_engine.modules.swa_atom_attention import build_attention_params
 
 pytestmark = [
@@ -86,8 +86,8 @@ def _step(model, args, dtype, grad):
 @pytest.mark.parametrize("grad", [False, True], ids=["inference", "training"])
 @pytest.mark.parametrize("length", [100, 256])
 def test_the_pairformer_launches_no_triton(triton_launches, length, grad, dtype):
-    from miniworld_engine.architecture.blocks.pairformer import Pairformer
-    from miniworld_engine.architecture.exceptions import ImplementationType
+    from miniworld_engine._blocks.blocks.pairformer import Pairformer
+    from miniworld_engine._blocks.exceptions import ImplementationType
 
     config = Pairformer.Config(
         n_block=2, p_drop=0.0, use_bidirectional_trimul=True, implementation=ImplementationType.MINIWORLD_ENGINE
@@ -103,8 +103,8 @@ def test_the_pairformer_launches_no_triton(triton_launches, length, grad, dtype)
 @pytest.mark.parametrize("grad", [False, True], ids=["inference", "training"])
 @pytest.mark.parametrize("length", [100, 256])
 def test_the_diffusion_transformer_launches_no_triton(triton_launches, length, grad, dtype):
-    from miniworld_engine.architecture.blocks.diffusion_transformer import DiffusionTransformer
-    from miniworld_engine.architecture.exceptions import ImplementationType
+    from miniworld_engine._blocks.blocks.diffusion_transformer import DiffusionTransformer
+    from miniworld_engine._blocks.exceptions import ImplementationType
 
     config = DiffusionTransformer.Config(n_block=2, implementation=ImplementationType.MINIWORLD_ENGINE)
     model = DiffusionTransformer(config).cuda()

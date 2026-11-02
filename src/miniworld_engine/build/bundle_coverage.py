@@ -228,19 +228,19 @@ def _run_case(c: dict) -> None:
 def _run_block(c: dict) -> None:
     import torch
 
-    from miniworld_engine.architecture.exceptions import ImplementationType
+    from miniworld_engine._blocks.exceptions import ImplementationType
 
     pdt, dt, autocast = _prec(c["dtype"])
     impl = ImplementationType.MINIWORLD_ENGINE
     if c["kind"] == "pairformer":
-        from miniworld_engine.architecture.blocks.pairformer import Pairformer
+        from miniworld_engine._blocks.blocks.pairformer import Pairformer
 
         model = Pairformer(Pairformer.Config(n_block=1, p_drop=0.25 if c["train"] else 0.0,
                                              use_bidirectional_trimul=c["bidir"], implementation=impl))
         b, n = c["batch"], c["L"]
         args = (torch.randn(b, n, n, 128, device="cuda", dtype=dt), torch.randn(b, n, 384, device="cuda", dtype=dt))
     elif c["kind"] == "diffusion":
-        from miniworld_engine.architecture.blocks.diffusion_transformer import (
+        from miniworld_engine._blocks.blocks.diffusion_transformer import (
             DiffusionTransformer,
         )
 
@@ -249,7 +249,7 @@ def _run_block(c: dict) -> None:
         args = (torch.randn(a, b, n, 768, device="cuda", dtype=dt), torch.randn(a, b, n, 384, device="cuda", dtype=dt),
                 torch.randn(b, n, n, c["options"].get("d_pair", 128), device="cuda", dtype=dt))
     elif c["kind"] == "swa_atom":
-        from miniworld_engine.architecture.blocks.swa_atom_transformer import (
+        from miniworld_engine._blocks.blocks.swa_atom_transformer import (
             SWAAtomTransformer,
         )
         from miniworld_engine.modules.swa_atom_attention import build_attention_params
@@ -472,7 +472,7 @@ def _model_variants() -> None:
     """Every Boltz-2 / RoseTTAFold3 / Chai-1 variant path once, bf16 inference, small shapes."""
     import torch
 
-    from miniworld_engine.architecture.blocks.pairformer import PairformerBlock
+    from miniworld_engine._blocks.blocks.pairformer import PairformerBlock
     from miniworld_engine.modules import Transition, TriangleMultiplication
     from miniworld_engine.modules import dit_variant as dv
     from miniworld_engine.modules.exceptions import ImplementationType as MI

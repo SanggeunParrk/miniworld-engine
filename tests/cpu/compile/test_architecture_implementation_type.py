@@ -1,6 +1,6 @@
 """The architecture-level ``ImplementationType`` names the Anthropic release too, and maps to the engine's option."""
-from miniworld_engine.architecture._engine_impl import to_engine_impl
-from miniworld_engine.architecture.exceptions import ImplementationType
+from miniworld_engine._blocks._engine_impl import to_engine_impl
+from miniworld_engine._blocks.exceptions import ImplementationType
 from miniworld_engine.modules.exceptions import ImplementationType as EngineImplementation
 
 

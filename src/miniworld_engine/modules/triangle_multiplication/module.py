@@ -55,7 +55,7 @@ class TriangleMultiplication(nn.Module):
 
     """
 
-    #: A numerically dead instance of a checkpoint (``architecture.checkpoints.dead_modules``): inference returns the residual input.
+    #: A numerically dead instance of a checkpoint (``(removed with architecture/: git history) checkpoints.dead_modules``): inference returns the residual input.
     dead: bool = False
 
     def __init__(

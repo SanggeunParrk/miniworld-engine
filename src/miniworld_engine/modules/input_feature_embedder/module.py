@@ -33,7 +33,7 @@ import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
 from torch import nn
 
-from miniworld_engine.architecture.exceptions import ImplementationType
+from miniworld_engine._blocks.exceptions import ImplementationType
 
 #: Reference features per atom: position (3), mask, element, arcsinh(charge).
 N_ATOM_FEATURES = 6
@@ -100,9 +100,9 @@ class InputFeatureEmbedder(nn.Module):
     ) -> None:
         super().__init__()
         # Imported here: the architecture package imports `miniworld_engine.modules`, which imports this file.
-        from miniworld_engine.architecture.blocks._engine_impl import to_engine_impl
-        from miniworld_engine.architecture.blocks.swa_atom_transformer import SWAAtomTransformer
-        from miniworld_engine.architecture.primitives import LayerNorm, Linear
+        from miniworld_engine._blocks.blocks._engine_impl import to_engine_impl
+        from miniworld_engine._blocks.blocks.swa_atom_transformer import SWAAtomTransformer
+        from miniworld_engine._blocks.primitives import LayerNorm, Linear
         from miniworld_engine.modules.primitives import RMSNorm
 
         if features not in ("legacy", "esmfold2"):

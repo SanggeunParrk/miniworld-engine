@@ -3,7 +3,7 @@ Linears architecture code builds."""
 
 from torch import nn
 
-from miniworld_engine.architecture import primitives as arch
+from miniworld_engine._blocks import primitives as arch
 from miniworld_engine.modules import primitives as engine
 
 
