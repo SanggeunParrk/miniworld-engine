@@ -320,11 +320,14 @@ def _fold_weights(wsa, bsa, wba, wc, wsc, bsc):
 
 def full_f32_supported(x2: torch.Tensor, cond2: torch.Tensor, nd: int, d: int) -> bool:
     """The whole-module fp32 route: B200 fp32 at the widths whose tail takes cuBLAS (``CUBLAS_MIN_D``) and whose AdaLN takes the cuBLAS route, at
-    the widths the folded row pass is built for."""
+    the widths the folded row pass is built for. The AdaLN's route is the one of an ``rna`` call (the module's AdaLN output feeds the TF32 tail):
+    cuBLAS under its "cublas" and "auto" fp32 routes (``adaln.cuda.sm100._f32_tcgen05`` keeps an ``rna`` call there), not under a forced "tcgen05"."""
     from miniworld_engine.kernels.adaln.cuda import sm100 as adaln_b200
 
-    return (F32_ROUTE == "cublas" and x2.dtype is torch.float32 and d > CUBLAS_MIN_D["fp32"] and d in FOLD_WIDTHS and cond2.shape[-1] in FOLD_WIDTHS
-            and supported(x2, cond2, nd, d) and adaln_b200.F32_ROUTE == "cublas" and adaln_b200.supported(x2, cond2))
+    m, dc = x2.shape[0], cond2.shape[-1]
+    adaln_cublas = adaln_b200.F32_ROUTE == "cublas" or (adaln_b200.F32_ROUTE == "auto" and not adaln_b200._f32_tcgen05(m, dc, True))
+    return (F32_ROUTE == "cublas" and x2.dtype is torch.float32 and d > CUBLAS_MIN_D["fp32"] and d in FOLD_WIDTHS and dc in FOLD_WIDTHS
+            and supported(x2, cond2, nd, d) and adaln_cublas and adaln_b200.supported(x2, cond2))
 
 
 def ct_inference_full_f32(x2, cond2, ada, wa, wb, ws, wsc, bsc, residual=None):
