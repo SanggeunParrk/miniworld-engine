@@ -1006,6 +1006,274 @@ __global__ void __launch_bounds__(256) tri_param_finish(const float* __restrict_
   }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------------
+// wide front (inference):  d_pair CW = 256, 8 heads x 32 -- the front above at a width whose [Wq; Wk; Wv; Wg] (512 KiB) no longer fits
+// one CTA.  The CTAs come in groups of four, CTA 4 n + p holding projection p's weights (q, k, v, g: [256 out][CW] bf16, 128 KiB,
+// resident) and walking the same 64-row tiles as the other three of its group (so x is read from HBM once and from L2 three times);
+// the g CTA also holds Wb ([8][CW]) and writes the head-major bias.  Each of them normalises the rows itself (the LayerNorm is ~5 %
+// of the issue slots here; storing y would cost an HBM round trip).  384 threads: warpgroup 0 = TMA producer (the weights once, then
+// each consumer's x tiles into that consumer's own stage), warpgroups 1 / 2 = alternate 64-row tiles of the CTA.  A consumer warp
+// ldmatrix-loads its 16 rows of x into the wgmma A-fragment layout, releases the stage as soon as the fragments are in registers
+// (the producer refills it under the GEMMs), normalises in registers (statistics = quad sums) and runs two m64n128 RS chains (the
+// projection's two column halves) back to back; the first half is stored while the second computes.  The packed weight rows are
+// permuted (tri_pack_wide) so that a lane's accumulator columns are 8 consecutive output columns per 32-column group: every lane
+// stores 16 contiguous bytes straight from registers (a warp's store = 8 rows x 64 contiguous bytes, whole sectors), no staging.
+#ifndef FW_MC
+#define FW_MC 0       // 1: the four CTAs of a group form a cluster; each loads one K block of the x tile multicast to all four
+#endif
+__device__ __forceinline__ void cluster_sync_all() {
+  asm volatile("barrier.cluster.arrive.release;\nbarrier.cluster.wait.acquire;\n" ::: "memory");
+}
+__device__ __forceinline__ void arrive_rank(uint32_t bar, uint32_t rank) {    // arrive on the barrier at the same offset in CTA `rank`
+  asm volatile("{\n.reg .b32 ra;\nmapa.shared::cluster.u32 ra, %0, %1;\nmbarrier.arrive.release.cluster.shared::cluster.b64 _, [ra];\n}\n"
+               :: "r"(bar), "r"(rank) : "memory");
+}
+__device__ __forceinline__ void load_pair_mc(const void* map, uint32_t dst, uint32_t bar, int c0, int row, int L, int tr, uint16_t mask) {
+  if (!tr) {
+    asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;\n"
+                 :: "r"(dst), "l"(map), "r"(bar), "r"(c0), "r"(row), "h"(mask) : "memory");
+    return;
+  }
+  int i, j, b; pair_coord(row, L, i, j, b);
+  asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4, %5, %6}], [%2], %7;\n"
+               :: "r"(dst), "l"(map), "r"(bar), "r"(c0), "r"(j), "r"(i), "r"(b), "h"(mask) : "memory");
+}
+#ifndef FW_PF
+#define FW_PF 0       // the producer prefetches x tile k + FW_PF into L2 (0: off)
+#endif
+__device__ __forceinline__ void l2_prefetch_pair(const void* map, int c0, int row, int L, int tr) {
+  if (!tr) {
+    asm volatile("cp.async.bulk.prefetch.tensor.2d.L2.global.tile [%0, {%1, %2}];\n" :: "l"(map), "r"(c0), "r"(row) : "memory");
+    return;
+  }
+  int i, j, b; pair_coord(row, L, i, j, b);
+  asm volatile("cp.async.bulk.prefetch.tensor.4d.L2.global.tile [%0, {%1, %2, %3, %4}];\n" :: "l"(map), "r"(c0), "r"(j), "r"(i), "r"(b) : "memory");
+}
+#ifndef FW_ABL
+#define FW_ABL 0      // ablations (wrong output by design): 1 = no stores, 2 = no GEMM, 4 = no LayerNorm, 8 = no x loads
+#endif
+namespace fw {
+constexpr int BM = 64;                                    // rows per consumer tile
+constexpr int NG = 256;                                   // output columns per CTA (one projection)
+constexpr int HB = 8;                                     // bias rows (heads)
+constexpr int THREADS = 384;
+template <int CW> struct Cfg {
+  static constexpr int KB = CW / 64;                      // 64-channel K blocks (one 128B-swizzled TMA box each)
+  static constexpr int XT = BM * CW;                      // x stage [KB][64 rows][64]
+  static constexpr int WT = NG * CW;                      // W [KB][256 rows][64]
+  static constexpr int WBT = HB * CW;                     // Wb [KB][8][64]
+  static constexpr int SMEM = 1024 + (WT + WBT + 2 * XT) * 2 + 3 * CW * 4 + 256;
+  static_assert(SMEM <= 232448, "smem");
+};
+struct Outs { void* p[4]; long ldo; };                    // q, k, v, g and their row stride (elements)
+}  // namespace fw
+
+template <int CW>
+__global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
+    int L, int ntiles, float eps, float inv_scale, int tr, int h16, int nh,
+    const __grid_constant__ CUtensorMap xmap,             // x [R][CW] bf16, box (64, 64), 128B swizzle (tr: the 4-D transposed pair map)
+    const __grid_constant__ CUtensorMap wmap,             // packed W [4 * 256][CW] bf16 (tri_pack_wide's row order), box (64, 256)
+    const __grid_constant__ CUtensorMap wbmap,            // Wb8 [8][CW] bf16, box (64, 8)
+    const float* __restrict__ LNW, const float* __restrict__ LNB,
+    const bool* __restrict__ MASK,                        // [B][L] key mask or nullptr
+    const float* __restrict__ GBIAS,                      // [CW] fp32 gate bias (RoseTTAFold3) or nullptr
+    fw::Outs outs,                                        // q / k / v ([R][CW], fp16 when h16, else bf16), g ([R][CW] bf16)
+    void* __restrict__ BIAS) {                            // [B][nh][L][L] bf16, or fp16 (h16)
+  using namespace fw;
+  using Q = Cfg<CW>;
+  constexpr int KB = Q::KB, XT = Q::XT, WT = Q::WT, WBT = Q::WBT;
+  extern __shared__ __align__(1024) unsigned char raw[];
+  unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
+  const uint32_t sW = sa(smb), sWb = sW + WT * 2, sX = sWb + WBT * 2, sGB = sX + 2 * XT * 2, bar0 = sGB + 3 * CW * 4;
+  float* gb = reinterpret_cast<float*>(smb + (sGB - sW));                    // gamma [CW] | beta [CW] | gate bias [CW]
+  const uint32_t wf = bar0;
+  auto xf = [&](int s) { return bar0 + 8 + 8 * s; };
+  auto xe = [&](int s) { return bar0 + 24 + 8 * s; };                       // count 4: every warp of the consumer holds its fragments
+  const int tid = threadIdx.x, wg = tid >> 7, lane = tid & 31;
+  const int grp = blockIdx.x & 3, G = gridDim.x >> 2, idx = blockIdx.x >> 2;
+  for (int c = tid; c < 3 * CW; c += THREADS)
+    gb[c] = c < CW ? LNW[c] : c < 2 * CW ? LNB[c - CW] : (GBIAS != nullptr ? GBIAS[c - 2 * CW] : 0.f);
+  if (tid == 0) {
+    uint64_t* bars = reinterpret_cast<uint64_t*>(smb + (bar0 - sW));
+    bar_init(bars, 1);
+    for (int k = 0; k < 2; ++k) { bar_init(bars + 1 + k, 1); bar_init(bars + 3 + k, FW_MC ? 16 : 4); }
+    bar_init_fence();
+  }
+  __syncthreads();
+#if FW_MC
+  cluster_sync_all();                                      // every barrier of the cluster initialised before a remote arrive / multicast
+#endif
+
+  if (wg == 0) {
+    reg_dealloc<40>();
+    if (tid == 0) {
+      prefetch_map(&xmap); prefetch_map(&wmap); prefetch_map(&wbmap);
+      expect_tx(wf, (WT + (grp == 3 ? WBT : 0)) * 2);
+      for (int kb = 0; kb < KB; ++kb) {
+        load_2d(&wmap, sW + kb * NG * 64 * 2, wf, kb * 64, grp * NG);
+        if (grp == 3) load_2d(&wbmap, sWb + kb * HB * 64 * 2, wf, kb * 64, 0);
+      }
+      int k = 0;
+      for (int t = idx; t < ntiles; t += G, ++k) {
+#if FW_ABL & 8
+        break;
+#endif
+        const int s = k & 1;
+        wait(xe(s), ((k >> 1) & 1) ^ 1);
+        expect_tx(xf(s), XT * 2);
+#if FW_MC
+        for (int kb = grp; kb < KB; kb += 4) load_pair_mc(&xmap, sX + (s * XT + kb * BM * 64) * 2, xf(s), kb * 64, t * BM, L, tr, 0xF);
+#else
+        for (int kb = 0; kb < KB; ++kb) load_pair(&xmap, sX + (s * XT + kb * BM * 64) * 2, xf(s), kb * 64, t * BM, L, tr);
+#endif
+#if FW_PF
+        if (grp == 0 && t + FW_PF * G < ntiles)
+          for (int kb = 0; kb < KB; ++kb) l2_prefetch_pair(&xmap, kb * 64, (t + FW_PF * G) * BM, L, tr);
+#endif
+      }
+    }
+#if FW_MC
+    cluster_sync_all();                                    // no CTA leaves while another may still write into it
+#endif
+    return;
+  }
+
+  reg_alloc<232>();
+  const int w = wg - 1, T = tid - 128 * wg, wi = T >> 5, g8 = lane >> 2, t4 = lane & 3;
+  const int lrow = 16 * wi + (lane & 7) + 8 * ((lane >> 3) & 1), lcol8 = lane >> 4;
+  const bool half_out = h16 && grp < 3, has_gb = grp == 3 && GBIAS != nullptr;
+  wait(wf, 0);
+  int k = w;
+  for (int t = idx + w * G; t < ntiles; t += 2 * G, k += 2) {
+#if !(FW_ABL & 8)
+    wait(xf(w), (k >> 1) & 1);
+#endif
+    const uint32_t xs = sX + w * XT * 2;
+    // ldmatrix address of 16-byte chunk c16 (of the row's CW / 8) for this lane's row: [KB][64 rows][64] 128B swizzle
+    auto chunk = [&](int c16) { return xs + (c16 >> 3) * BM * 128 + lrow * 128 + (((c16 & 7) ^ (lrow & 7)) << 4); };
+    uint32_t xa[4 * KB][4];
+#pragma unroll
+    for (int kb = 0; kb < 4 * KB; ++kb) ldsm_x4(chunk(2 * kb + lcol8), xa[kb]);
+    // LayerNorm of rows g (words 0, 2 of each block) and g + 8 (words 1, 3), fp32
+    float s0 = 0.f, s1 = 0.f;
+#pragma unroll
+    for (int kb = 0; kb < 4 * KB; ++kb) {
+      const float2 a = bf2f(xa[kb][0]), b = bf2f(xa[kb][2]), c = bf2f(xa[kb][1]), d = bf2f(xa[kb][3]);
+      s0 += (a.x + a.y) + (b.x + b.y); s1 += (c.x + c.y) + (d.x + d.y);
+    }
+    // every fragment is in registers (the sums read them all): hand the stage back to the producer
+    fence_proxy_async();
+    __syncwarp();
+#if !(FW_ABL & 8)
+#if FW_MC
+    if (lane < 4) arrive_rank(xe(w), lane);                // the stage of all four CTAs (each is filled by all four)
+#else
+    if (lane == 0) arrive(xe(w));
+#endif
+#endif
+    const float mu0 = quad_sum(s0) * (1.f / CW), mu1 = quad_sum(s1) * (1.f / CW);
+    float v0 = 0.f, v1 = 0.f;
+#pragma unroll
+    for (int kb = 0; kb < 4 * KB; ++kb) {
+      const float2 a = bf2f(xa[kb][0]), b = bf2f(xa[kb][2]), c = bf2f(xa[kb][1]), d = bf2f(xa[kb][3]);
+      v0 += (a.x - mu0) * (a.x - mu0) + (a.y - mu0) * (a.y - mu0) + (b.x - mu0) * (b.x - mu0) + (b.y - mu0) * (b.y - mu0);
+      v1 += (c.x - mu1) * (c.x - mu1) + (c.y - mu1) * (c.y - mu1) + (d.x - mu1) * (d.x - mu1) + (d.y - mu1) * (d.y - mu1);
+    }
+    const float r0 = rsqrtf(quad_sum(v0) * (1.f / CW) + eps), r1 = rsqrtf(quad_sum(v1) * (1.f / CW) + eps);
+    uint32_t ya[4 * KB][4];
+#pragma unroll
+    for (int kb = 0; kb < 4 * KB; ++kb) {
+#pragma unroll
+      for (int hf = 0; hf < 2; ++hf) {                        // channels 16 kb + 8 hf + 2 t4 + {0, 1}
+        const int c = 16 * kb + 8 * hf + 2 * t4;
+        const float2 gm = *reinterpret_cast<const float2*>(gb + c), bt = *reinterpret_cast<const float2*>(gb + CW + c);
+        const float2 a = bf2f(xa[kb][2 * hf]), d = bf2f(xa[kb][2 * hf + 1]);
+        ya[kb][2 * hf] = pack2(fmaf((a.x - mu0) * r0, gm.x, bt.x), fmaf((a.y - mu0) * r0, gm.y, bt.y));
+        ya[kb][2 * hf + 1] = pack2(fmaf((d.x - mu1) * r1, gm.x, bt.x), fmaf((d.y - mu1) * r1, gm.y, bt.y));
+      }
+    }
+#if FW_ABL & 4
+#pragma unroll
+    for (int kb = 0; kb < 4 * KB; ++kb)
+      for (int j = 0; j < 4; ++j) ya[kb][j] = xa[kb][j] ^ __float_as_uint(r0 + r1);
+#endif
+    const long row = (long)t * BM + 16 * wi + g8;              // this lane's first row; its second is row + 8
+    float accs[2][64];
+    float accb[4];
+    // commit groups: [bias (g CTA)], half 0, half 1
+    if (grp == 3) {
+      wg_fence();
+#pragma unroll
+      for (int kb = 0; kb < 4 * KB; ++kb) mma_rs_n8(accb, ya[kb], desc_k128(sWb + (kb >> 2) * HB * 128 + (kb & 3) * 32), kb ? 1u : 0u);
+      wg_commit();
+    }
+#pragma unroll
+    for (int c = 0; c < 2; ++c) {
+      wg_fence();
+#pragma unroll
+      for (int kb = 0; kb < 4 * KB; ++kb)
+#if FW_ABL & 2
+        for (int j = 0; j < 4; ++j) accs[c][4 * kb + j] = __uint_as_float(ya[kb][j] ^ c);
+#else
+        mma_rs_n128<0>(accs[c], ya[kb], desc_k128(sW + ((kb >> 2) * NG + c * 128) * 128 + (kb & 3) * 32), kb ? 1u : 0u);
+#endif
+      wg_commit();
+    }
+#pragma unroll
+    for (int c = 0; c < 2; ++c) {
+      float (&acc)[64] = accs[c];
+      if (c == 0) wg_wait<1>(); else wg_wait<0>();
+      fence_regs(acc);
+      if (c == 0 && grp == 3) {                                // the bias: lane t4 holds heads 2 t4, 2 t4 + 1 of rows g, g + 8
+        fence_regs(accb);
+        if (2 * t4 < nh) {
+#pragma unroll
+          for (int hf = 0; hf < 2; ++hf) {
+            const long r = row + 8 * hf, bi = r / L;
+            const int j = (int)(r - bi * L);
+            const long b = bi / L, i = bi - b * L;
+            const bool keep = MASK == nullptr || MASK[b * L + j];
+#pragma unroll
+            for (int e = 0; e < 2; ++e) {
+              const int h = 2 * t4 + e;
+              const float val = keep ? accb[2 * hf + e] * inv_scale : -INFINITY;
+              const long at = ((b * nh + h) * L + i) * L + j;
+              if (h16) reinterpret_cast<__half*>(BIAS)[at] = __float2half_rn(val > -INFINITY ? fmaxf(fminf(val, 6.0e4f), -6.0e4f) : val);
+              else reinterpret_cast<__nv_bfloat16*>(BIAS)[at] = __float2bfloat16_rn(val);
+            }
+          }
+        }
+      }
+      // accumulator column 8 i + 2 t4 + e holds output column 32 (i / 4) + 8 t4 + 2 (i % 4) + e of this half (tri_pack_wide's order):
+      // the lane's words of 32-column group m are 8 consecutive columns
+      __nv_bfloat16* out = reinterpret_cast<__nv_bfloat16*>(outs.p[grp]);
+#pragma unroll
+      for (int m = 0; m < 4; ++m) {
+        const int col = c * 128 + 32 * m + 8 * t4;
+        float bia[8];
+#pragma unroll
+        for (int e = 0; e < 8; ++e) bia[e] = has_gb ? gb[2 * CW + col + e] : 0.f;
+#pragma unroll
+        for (int hf = 0; hf < 2; ++hf) {
+          uint32_t wv[4];
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            const float a = acc[16 * m + 4 * q + 2 * hf] + bia[2 * q], b = acc[16 * m + 4 * q + 2 * hf + 1] + bia[2 * q + 1];
+            wv[q] = half_out ? pack2h(a, b) : pack2(a, b);
+          }
+#if FW_ABL & 1
+          if (wv[0] == 0x7fc17fc1u && wv[1] == 0x7fc17fc1u)
+#endif
+          *reinterpret_cast<uint4*>(out + (row + 8 * hf) * outs.ldo + col) = make_uint4(wv[0], wv[1], wv[2], wv[3]);
+        }
+      }
+    }
+  }
+#if FW_MC
+  cluster_sync_all();
+#endif
+}
+
 namespace {
 auto bf16ptr(const torch::Tensor& t) { return reinterpret_cast<__nv_bfloat16*>(t.data_ptr<at::BFloat16>()); }
 auto bf16c(const torch::Tensor& t) { return reinterpret_cast<const __nv_bfloat16*>(t.data_ptr<at::BFloat16>()); }
@@ -1237,7 +1505,126 @@ std::vector<torch::Tensor> tri_pack(torch::Tensor wq, torch::Tensor wk, torch::T
   return {w4, wb16, wo16};
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------------
+// wide front (d_pair 256, 8 heads x 32), inference.
+// x [R, 256] bf16 (rows (b, i, j)); lnw / lnb fp32 [256]; wpk [1024, 256] bf16 = tri_pack_wide's [Wq; Wk; Wv; Wg] (rows permuted within
+// each 128-row half); wb8 [8, 256] bf16 (Wb, zero rows below nh); mask [B, L] bool or empty; gb fp32 [256] gate bias or none
+// -> (q, k, v [R, 256] fp16 when h16 else bf16, g [R, 256] bf16, sbias [B, nh, L, L] fp16 / bf16 = bias / scale, masked keys -inf)
+std::vector<torch::Tensor> tri_front_wide(torch::Tensor x, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor wpk,
+                                          torch::Tensor wb8, torch::Tensor mask, int64_t B, int64_t L, int64_t nh, double scale, bool trans,
+                                          bool h16, c10::optional<torch::Tensor> gbias, bool packed) {
+  constexpr int CW = 256;
+  TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.size(-1) == CW, "x: [R, 256] bf16");
+  const long R = x.numel() / CW;
+  TORCH_CHECK(R == B * L * L && L % fw::BM == 0, "rows = B * L * L, L % 64 == 0");
+  TORCH_CHECK(nh >= 1 && nh <= fw::HB, "1 <= heads <= 8");
+  TORCH_CHECK(wpk.scalar_type() == torch::kBFloat16 && wpk.is_contiguous() && wpk.size(0) == 4 * fw::NG && wpk.size(1) == CW, "wpk [1024, 256] bf16");
+  TORCH_CHECK(wb8.scalar_type() == torch::kBFloat16 && wb8.is_contiguous() && wb8.size(0) == fw::HB && wb8.size(1) == CW, "wb8 [8, 256] bf16");
+  if (gbias.has_value())
+    TORCH_CHECK(gbias->is_cuda() && gbias->scalar_type() == torch::kFloat32 && gbias->is_contiguous() && gbias->numel() == CW, "gb: fp32 [256]");
+  auto opt = x.options();
+  const auto hopt = h16 ? opt.dtype(torch::kHalf) : opt;
+  // packed: q | k | v | g as column blocks of one [R, 4 CW] buffer (row stride 4 CW)
+  torch::Tensor q, k, v, g;
+  if (packed) {
+    auto all = torch::empty({R, 4 * CW}, hopt);
+    q = all.narrow(1, 0, CW); k = all.narrow(1, CW, CW); v = all.narrow(1, 2 * CW, CW);
+    g = all.narrow(1, 3 * CW, CW);
+    if (h16) g = g.view(torch::kBFloat16);
+  } else {
+    q = torch::empty({R, CW}, hopt); k = torch::empty({R, CW}, hopt); v = torch::empty({R, CW}, hopt); g = torch::empty({R, CW}, opt);
+  }
+  auto bias = torch::empty({B, nh, L, L}, hopt);
+  auto lw = lnw.to(torch::kFloat32).contiguous(), lb = lnb.to(torch::kFloat32).contiguous();
+  const bool* mp = nullptr;
+  torch::Tensor mk;
+  if (mask.numel() > 0) { mk = mask.to(torch::kBool).contiguous(); TORCH_CHECK(mk.numel() == B * L, "mask [B, L]"); mp = mk.data_ptr<bool>(); }
+  auto m2 = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
+    return make_map<2>(t.data_ptr(), {(uint64_t)CW, rows}, {(uint64_t)CW}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
+  CUtensorMap xm = !trans ? m2(x, R, fw::BM, "x")
+                          : make_map<4>(x.data_ptr(), {(uint64_t)CW, (uint64_t)L, (uint64_t)L, (uint64_t)B},
+                                        {(uint64_t)L * CW, (uint64_t)CW, (uint64_t)L * L * CW}, {64, (uint32_t)fw::BM, 1, 1},
+                                        CU_TENSOR_MAP_SWIZZLE_128B, "x");
+  CUtensorMap wm = m2(wpk, 4 * fw::NG, fw::NG, "wpk"), wbm = m2(wb8, fw::HB, fw::HB, "wb8");
+  using Q = fw::Cfg<CW>;
+  static bool attr = false;
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_wide_sm90<CW>, cudaFuncAttributeMaxDynamicSharedMemorySize, Q::SMEM)); attr = true; }
+  const int ntiles = (int)(R / fw::BM);
+  // groups of four CTAs (q, k, v, g), at most one CTA per SM, each consumer warpgroup with a tile
+  const int groups = std::max(1, std::min(num_sms(x.device().index()) / 4, (ntiles + 1) / 2));
+  fw::Outs outs{{q.data_ptr(), k.data_ptr(), v.data_ptr(), g.data_ptr()}, (long)q.stride(0)};
+#if FW_MC
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3(4 * groups); cfg.blockDim = dim3(fw::THREADS); cfg.dynamicSmemBytes = Q::SMEM; cfg.stream = at::cuda::getCurrentCUDAStream();
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeClusterDimension; at[0].val.clusterDim.x = 4; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+  cfg.attrs = at; cfg.numAttrs = 1;
+  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, tri_front_wide_sm90<CW>,
+      (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, (int)nh, xm, wm, wbm, lw.data_ptr<float>(), lb.data_ptr<float>(),
+      mp, gbias.has_value() ? gbias->data_ptr<float>() : nullptr, outs, bias.data_ptr()));
+#else
+  tri_front_wide_sm90<CW><<<4 * groups, fw::THREADS, Q::SMEM, at::cuda::getCurrentCUDAStream()>>>(
+      (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, (int)nh, xm, wm, wbm, lw.data_ptr<float>(), lb.data_ptr<float>(),
+      mp, gbias.has_value() ? gbias->data_ptr<float>() : nullptr, outs, bias.data_ptr());
+#endif
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {q, k, v, g, bias};
+}
+
+// one launch: [Wq; Wk; Wv; Wg] [C, C] each -> wpk [4 C, C] bf16 in the wide front's row order (within each 128-row half, packed row
+// n = 8 i + 2 t + e holds output row 32 (i / 4) + 8 t + 2 (i % 4) + e), Wb [nh, C] -> wb8 [8, C] (rows >= nh zero), Wo -> wo16 [C, C] bf16
+template <typename T>
+__global__ void __launch_bounds__(256) tri_pack_wide_k(const T* __restrict__ wq, const T* __restrict__ wk, const T* __restrict__ wv,
+                                                       const T* __restrict__ wg, const T* __restrict__ wb, const T* __restrict__ wo, int Cw, int nh,
+                                                       __nv_bfloat16* __restrict__ wpk, __nv_bfloat16* __restrict__ wb8,
+                                                       __nv_bfloat16* __restrict__ wo16) {
+  const long cc = (long)Cw * Cw, n4 = 4 * cc, nb = (long)fw::HB * Cw;
+  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < n4 + nb + cc; i += (long)gridDim.x * 256) {
+    if (i < n4) {
+      const int t = (int)(i / cc);
+      const long e = i - (long)t * cc;
+      const int prow = (int)(e / Cw), c = (int)(e - (long)prow * Cw);
+      const int n = prow & 127, ii = n >> 3, tt = (n >> 1) & 3, ee = n & 1;
+      const int orow = (prow & ~127) + 32 * (ii >> 2) + 8 * tt + 2 * (ii & 3) + ee;
+      const T* src = t == 0 ? wq : t == 1 ? wk : t == 2 ? wv : wg;
+      wpk[i] = __float2bfloat16_rn(to_f32(src[(long)orow * Cw + c]));
+    } else if (i < n4 + nb) {
+      const long j = i - n4;
+      wb8[j] = __float2bfloat16_rn(j < (long)nh * Cw ? to_f32(wb[j]) : 0.f);
+    } else {
+      const long j = i - n4 - nb;
+      wo16[j] = __float2bfloat16_rn(to_f32(wo[j]));
+    }
+  }
+}
+std::vector<torch::Tensor> tri_pack_wide(torch::Tensor wq, torch::Tensor wk, torch::Tensor wv, torch::Tensor wg, torch::Tensor wb, torch::Tensor wo) {
+  const auto dt = wq.scalar_type();
+  const long Cw = wq.size(1);
+  const int nh = (int)wb.size(0);
+  TORCH_CHECK(Cw % 128 == 0 && wq.size(0) == Cw, "wq [C, C], C % 128 == 0");
+  for (const auto* t : {&wq, &wk, &wv, &wg, &wo}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == dt && t->is_contiguous() && t->numel() == Cw * Cw, "w [C, C]");
+  TORCH_CHECK(wb.scalar_type() == dt && wb.is_contiguous() && nh <= fw::HB && wb.numel() == nh * Cw, "wb [nh <= 8, C]");
+  TORCH_CHECK(dt == torch::kFloat32 || dt == torch::kBFloat16, "fp32 or bf16 parameters");
+  auto bopt = wq.options().dtype(torch::kBFloat16);
+  auto wpk = torch::empty({4 * Cw, Cw}, bopt), wb8 = torch::empty({fw::HB, Cw}, bopt), wo16 = torch::empty({Cw, Cw}, bopt);
+  const long total = 5 * Cw * Cw + fw::HB * Cw;
+  const int grid = (int)std::min<long>((total + 255) / 256, 2048);
+  auto stream = at::cuda::getCurrentCUDAStream();
+  if (dt == torch::kFloat32)
+    tri_pack_wide_k<float><<<grid, 256, 0, stream>>>(wq.data_ptr<float>(), wk.data_ptr<float>(), wv.data_ptr<float>(), wg.data_ptr<float>(),
+        wb.data_ptr<float>(), wo.data_ptr<float>(), (int)Cw, nh, bf16ptr(wpk), bf16ptr(wb8), bf16ptr(wo16));
+  else
+    tri_pack_wide_k<__nv_bfloat16><<<grid, 256, 0, stream>>>(bf16c(wq), bf16c(wk), bf16c(wv), bf16c(wg), bf16c(wb), bf16c(wo), (int)Cw, nh,
+        bf16ptr(wpk), bf16ptr(wb8), bf16ptr(wo16));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {wpk, wb8, wo16};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("tri_front_wide", &tri_front_wide, "sm90 TriangleAttention front at d_pair 256 / 8 heads x 32 (inference): LN + q|k|v|g + head-major bias / scale",
+        py::arg("x"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("wpk"), py::arg("wb8"), py::arg("mask"), py::arg("B"),
+        py::arg("L"), py::arg("nh"), py::arg("scale"), py::arg("trans") = false, py::arg("h16") = true, py::arg("gb") = py::none(), py::arg("packed") = false);
+  m.def("tri_pack_wide", &tri_pack_wide, "sm90 TriangleAttention wide weight pack: (wpk [4C, C], wb8 [8, C], wo16 [C, C]) bf16 in one launch");
   m.def("tri_wgrad", &tri_wgrad, "sm90 TriangleAttention parameter gradients: (dWq, dWk, dWv, dWg [128,128], dgamma, dbeta [128], dWb [4,128], dWo [128,128])");
   m.def("tri_pack", &tri_pack, "sm90 TriangleAttention weight pack: (w4 [512,128] bf16, wb16 [16,128] bf16, wo16 [128,128] bf16) in one launch");
   m.def("tri_head_bwd", &tri_head_bwd, "sm90 TriangleAttention head backward: projection dgrad + LN backward, dx added into dpair");

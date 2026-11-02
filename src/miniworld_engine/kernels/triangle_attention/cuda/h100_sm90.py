@@ -91,7 +91,7 @@ def _mod(defs: tuple[str, ...] = ()):
     ensure_cuda_home()
     tag = "".join(f"_{d.replace('=', '').lower()}" for d in defs)
     return load_extension(
-        name=f"triattn_h100_mod{tag}_v10",
+        name=f"triattn_h100_mod{tag}_v11",
         sources=[str(_SRC / "triattn_mod_sm90.cu")],
         extra_cuda_cflags=[*_flags(), *(f"-D{d}" for d in defs)],
         verbose=True,
@@ -116,11 +116,26 @@ def flip_bias(sbias, mask):
     return out.contiguous()
 
 
+#: d_pair -> heads (x 32) of the wide front (``tri_front_wide``, inference): the fused d_pair-128 front's design at a width whose four
+#: projections no longer fit one CTA.  Training at these widths runs the width-generic kernels (``h100_sm90_generic``).
+WIDE = {256: 8}
+#: the wide front writes q | k | v | g as column blocks of one [M, 4 C] buffer (the width-generic GEMM's layout) instead of four tensors
+WIDE_PACKED = False
+
+
+def wide(d_pair: int, d_hidden: int, n_head: int) -> bool:
+    """(d_pair, d_hidden, heads) served by the wide fused inference path."""
+    return WIDE.get(d_pair) == n_head and d_hidden == d_pair
+
+
 def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, out=None, flip=False, gate_bias=None, out_bias=None):
     """pair + TriangleAttention(pair) for the starting node, no grad: front (LN + projections + bias) -> core -> tail (gate +
     out-projection + residual).  w4, wb16 = pack_front(...); wo16 = Wo in bf16; `out`: a contiguous tensor like pair to write into.  ``flip``: the ending node (``trans``) takes its
     bias from the pair as it is (:func:`flip_bias`). ``gate_bias`` [128] / ``out_bias`` [C]: biases of the gate / out-projection
-    (RoseTTAFold3), added to the front's gate and to the result."""
+    (RoseTTAFold3), added to the front's gate and to the result.  At a ``WIDE`` width (w4, wb16, wo16 = ``_pack_params(...)``, the
+    wide pack) the call runs :func:`inference_wide`."""
+    if pair.shape[-1] != C:
+        return inference_wide(pair, lnw, lnb, w4, wb16, wo16, mask, eps, trans, out, flip, gate_bias, out_bias)
     B, L, _, _ = pair.shape
     x = pair.contiguous().view(-1, C)
     m = _mod()
@@ -152,6 +167,45 @@ def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, 
     ).view(B, L, L, C)
 
 
+@torch.autocast("cuda", enabled=False)
+def inference_wide(pair, lnw, lnb, wpk, wb8, wo16, mask=None, eps=1e-5, trans=False, out=None, flip=False, gate_bias=None, out_bias=None):
+    """``inference`` at a ``WIDE`` width (d_pair 256, 8 heads x 32): the wide front (LN + q | k | v | g + head-major bias in one kernel,
+    ``tri_front_wide``) -> the core with the gate in its epilogue (u = sigmoid(g) o O, as the width-generic path) -> x + u Wo^T [+ bo]
+    (cublasLt, the residual in its epilogue: the generic path's out-projection).  wpk, wb8, wo16 = ``_pack_params(...)``."""
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90_generic as gen
+
+    B, L, _, cw = pair.shape
+    nh = cw // D
+    M = B * L * L
+    x = pair.contiguous().view(M, cw)
+    empty = torch.empty(0, device=pair.device)
+    gb = None if gate_bias is None else gate_bias.float().contiguous()
+    q, k, v, g, sbias = _mod().tri_front_wide(
+        x,
+        lnw.float().contiguous(),
+        lnb.float().contiguous(),
+        eps,
+        wpk,
+        wb8,
+        mask if mask is not None and not flip else empty.bool(),
+        B,
+        L,
+        nh,
+        D**-0.5,
+        trans,
+        INFERENCE_FP16,
+        gb,
+        WIDE_PACKED,
+    )
+    if flip:
+        sbias = flip_bias(sbias, mask)
+    shp = (B, L, L, nh, D)
+    core = _core_h16().triattn_fwd_h16 if INFERENCE_FP16 else _core().triattn_fwd
+    _, _, _, u = core(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, g.view(shp), False)
+    bo = None if out_bias is None else out_bias.to(torch.bfloat16).contiguous()
+    return gen._lt().lt_mm(u.view(M, cw), wo16, x, L, trans, out, bo).view(B, L, L, cw)
+
+
 @functools.lru_cache(maxsize=None)
 def _bwd(defs: tuple[str, ...] = ()):
     """The core backward kernels (delta, key side, query side); `defs` = extra -D knobs (experiments)."""
@@ -166,7 +220,13 @@ def _bwd(defs: tuple[str, ...] = ()):
 
 
 def _pack_params(wq, wk, wv, wg, wb, wo):
-    """(w4, wb16, wo16) in one launch when the six parameters share a dtype (fp32 master or bf16); the torch pack otherwise."""
+    """(w4, wb16, wo16) in one launch when the six parameters share a dtype (fp32 master or bf16); the torch pack otherwise.
+    At a ``WIDE`` width: (wpk, wb8, wo16) of ``tri_pack_wide`` (one launch; parameters of mixed dtypes are cast to bf16 first)."""
+    if wq.shape[1] != C:
+        ws = (wq, wk, wv, wg, wb, wo)
+        if len({t.dtype for t in ws}) != 1 or wq.dtype not in (torch.float32, torch.bfloat16):
+            ws = tuple(t.to(torch.bfloat16) for t in ws)
+        return _mod().tri_pack_wide(*(t.contiguous() for t in ws))
     if (
         len({t.dtype for t in (wq, wk, wv, wg, wb, wo)}) == 1
         and wq.dtype in (torch.float32, torch.bfloat16)

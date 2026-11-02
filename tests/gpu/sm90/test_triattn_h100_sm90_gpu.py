@@ -235,3 +235,95 @@ def test_cuda_graph_capture(grad):
     torch.cuda.synchronize()
     for a, b in zip(out, eager, strict=True):
         assert relative(a, b) < 1e-3
+
+
+# ---------------------------------------------------------------- the wide fused front: d_pair 256, 8 heads x 32, inference
+WIDE_LENGTHS = [128, 256, 384, 768]
+
+
+def make_wide(impl, starting=True, dtype=torch.bfloat16, **kw):
+    torch.manual_seed(0)
+    m = TriangleAttention(256, 8, d_hidden=256, starting=starting, implementation=impl, **kw)
+    return randomize(m).cuda().to(dtype)
+
+
+def trio_wide(starting=True, **kw):
+    ours = make_wide(ImplementationType.MINIWORLD, starting, **kw)
+    ref16 = make_wide(ImplementationType.PYTORCH, starting, **kw)
+    ref16.load_state_dict(ours.state_dict())
+    ref32 = make_wide(ImplementationType.PYTORCH, starting, dtype=torch.float32, **kw)
+    ref32.load_state_dict({k: v.float() for k, v in ours.state_dict().items()})
+    return ours, ref16, ref32
+
+
+def check_wide(ours, ref16, ref32, x, mask):
+    with torch.no_grad():
+        assert triattn_h100.kind_of(ours.eval(), x, mask) == triattn_h100.FUSED
+        check_inference(ours, ref16, ref32, x, mask)
+        assert torch.equal(ours(x, mask), ours(x, mask))  # run to run
+
+
+@pytest.mark.parametrize("length", WIDE_LENGTHS)
+@pytest.mark.parametrize("starting", [True, False], ids=["starting", "ending"])
+@pytest.mark.parametrize("masked", [False, True], ids=["nomask", "mask"])
+def test_wide_inference(length, starting, masked):
+    ours, ref16, ref32 = trio_wide(starting)
+    batch = 2 if length <= 384 else 1
+    x = torch.randn(batch, length, length, 256, device="cuda", dtype=torch.bfloat16)
+    mask = torch.rand(batch, length, device="cuda") > 0.2 if masked else None
+    check_wide(ours, ref16, ref32, x, mask)
+
+
+@pytest.mark.parametrize("length", [208, 256])
+def test_wide_padded_and_bias_orientation(length):
+    """A padded length (the pad keys masked) and the ending node on AlphaFold 3's bias orientation."""
+    for starting, tb in ((True, True), (False, False)):
+        ours, ref16, ref32 = trio_wide(starting, transposed_bias=tb)
+        x = torch.randn(1, length, length, 256, device="cuda", dtype=torch.bfloat16)
+        mask = torch.rand(1, length, device="cuda") > 0.2
+        check_wide(ours, ref16, ref32, x, mask)
+
+
+def test_wide_gate_and_out_biases():
+    """RoseTTAFold3-style gate / out-projection biases: the gate bias in fp32 inside the front, the out bias in the projection."""
+    ours, ref16, ref32 = trio_wide(gate_bias=True, out_bias=True)
+    with torch.no_grad():
+        for m in (ours, ref16, ref32):
+            m.to_gate.bias.copy_(torch.linspace(-1, 1, 256, device="cuda").to(m.to_gate.bias.dtype))
+            m.to_out.bias.copy_(torch.linspace(0.5, -0.5, 256, device="cuda").to(m.to_out.bias.dtype))
+    x = torch.randn(1, 256, 256, 256, device="cuda", dtype=torch.bfloat16)
+    check_wide(ours, ref16, ref32, x, torch.rand(1, 256, device="cuda") > 0.2)
+
+
+def test_wide_routing():
+    """Inference takes the wide fused path; with grad or training dropout the call stays on the width-generic kernels."""
+    m = make_wide(ImplementationType.MINIWORLD)
+    x = torch.zeros(1, 128, 128, 256, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        assert triattn_h100.kind_of(m.eval(), x) == triattn_h100.FUSED
+    assert triattn_h100.kind_of(m.eval(), x) == triattn_h100.GENERIC  # parameters require grad
+    with torch.no_grad():
+        m.p_drop = 0.25
+        assert triattn_h100.kind_of(m.train(), x) == triattn_h100.GENERIC
+    other = TriangleAttention(256, 16, d_hidden=256, implementation=ImplementationType.MINIWORLD).cuda()  # 16-channel heads
+    with torch.no_grad():
+        assert triattn_h100.kind_of(other.eval(), x) == triattn_h100.GENERIC
+
+
+def test_wide_cuda_graph_capture():
+    m = make_wide(ImplementationType.MINIWORLD).eval()
+    x = torch.randn(2, 256, 256, 256, device="cuda", dtype=torch.bfloat16)
+    mask = torch.rand(2, 256, device="cuda") > 0.2
+    with torch.no_grad():
+        eager = m(x, mask).clone()
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            m(x, mask)
+        torch.cuda.current_stream().wait_stream(s)
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            out = m(x, mask)
+        g.replay()
+        torch.cuda.synchronize()
+    assert torch.equal(out, eager)
