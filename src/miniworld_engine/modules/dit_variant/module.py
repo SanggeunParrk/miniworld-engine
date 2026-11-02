@@ -110,7 +110,7 @@ class DiTVariantStack(nn.Module):
     @classmethod
     def from_released(cls, state_dict, *, n_head: int, parallel: bool, super_block_size: int = 4, prefix: str = "",
                       implementation: ImplementationType = ImplementationType.PYTORCH, dtype: torch.dtype | None = None,
-                      adaln_eps: float = 1e-5, pair_eps: float = 1e-5, **options) -> "DiTVariantStack":
+                      adaln_eps: float = 1e-5, pair_eps: float = 1e-5, **options) -> DiTVariantStack:
         """The stack from a released token ``DiffusionTransformer`` state (``self_attention.i`` / ``transition_block.i`` /
         ``pair_input_layer_norm`` / ``pair_logits_projection``; Boltz-2, RoseTTAFold3, Chai-1 layouts, see ``modules.released``). The block
         options follow from the weights; ``options`` override them."""
@@ -212,7 +212,7 @@ class AtomDiTVariantStack(nn.Module):
     @classmethod
     def from_released(cls, state_dict, *, parallel: bool, key_window: str = "slide", prefix: str = "",
                       implementation: ImplementationType = ImplementationType.PYTORCH, dtype: torch.dtype | None = None,
-                      adaln_eps: float = 1e-5, pair_eps: float = 1e-5, **options) -> "AtomDiTVariantStack":
+                      adaln_eps: float = 1e-5, pair_eps: float = 1e-5, **options) -> AtomDiTVariantStack:
         """The stack from a released ``DiffusionCrossAttTransformer`` state (``cross_attention.i`` / ``transition_block.i`` /
         ``pair_input_layer_norm`` / ``pair_logits_projection``; see ``modules.released``)."""
         from miniworld_engine.modules import released

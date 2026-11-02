@@ -1,3 +1,4 @@
+# ruff: noqa: PT018, PT011, C408
 """H100: the released-checkpoint options on the MINIWORLD implementation. An option no kernel implements is REFUSED (a ``KernelRefusedWarning``,
 then the PyTorch statements), never ignored; an option a kernel serves agrees with the PyTorch implementation.
 

@@ -1,3 +1,4 @@
+# ruff: noqa: PT018, PT011, C408
 """PYTORCH engine modules built ``from_released`` against FoldForge's dense modules, the numerical oracle of the released checkpoints.
 
 Skipped unless FoldForge is importable (``FOLDFORGE_SRC=<.../FoldForge/src>`` or ``foldforge`` installed): the engine does not depend on it.
@@ -16,20 +17,38 @@ if os.environ.get("FOLDFORGE_SRC"):
     sys.path.insert(0, os.environ["FOLDFORGE_SRC"])
 pytest.importorskip("foldforge.modules.dense.spec")
 
-from foldforge.modules.dense.attention import GridSelfAttention, MSAAttention  # noqa: E402
-from foldforge.modules.dense.pairformer import PairformerBlock as DensePairformerBlock  # noqa: E402
-from foldforge.modules.dense.primitives import OuterProductMean as DenseOPM  # noqa: E402
-from foldforge.modules.dense.primitives import Transition as DenseTransition  # noqa: E402
-from foldforge.modules.dense.spec import ALPHAFOLD3  # noqa: E402
-from foldforge.modules.dense.triangle_multiplication import TriangleMultiplication as DenseTriMul  # noqa: E402
-from foldforge.modules.engine.routing import _length_divided_triangle  # noqa: E402
+from foldforge.modules.dense.attention import (
+    GridSelfAttention,
+    MSAAttention,
+)
+from foldforge.modules.dense.pairformer import (
+    PairformerBlock as DensePairformerBlock,
+)
+from foldforge.modules.dense.primitives import (
+    OuterProductMean as DenseOPM,
+)
+from foldforge.modules.dense.primitives import (
+    Transition as DenseTransition,
+)
+from foldforge.modules.dense.spec import ALPHAFOLD3
+from foldforge.modules.dense.triangle_multiplication import (
+    TriangleMultiplication as DenseTriMul,
+)
+from foldforge.modules.engine.routing import _length_divided_triangle
 
-from miniworld_engine.modules.msa_pair_weighted_averaging import MSAPairWeightedAveraging  # noqa: E402
-from miniworld_engine.modules.outer_product import OuterProductMean  # noqa: E402
-from miniworld_engine.modules.pairformer import PairformerBlock, PairformerConfig  # noqa: E402
-from miniworld_engine.modules.transition import Transition  # noqa: E402
-from miniworld_engine.modules.triangle_attention import TriangleAttention  # noqa: E402
-from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication  # noqa: E402
+from miniworld_engine.modules.msa_pair_weighted_averaging import (
+    MSAPairWeightedAveraging,
+)
+from miniworld_engine.modules.outer_product import OuterProductMean
+from miniworld_engine.modules.pairformer import (
+    PairformerBlock,
+    PairformerConfig,
+)
+from miniworld_engine.modules.transition import Transition
+from miniworld_engine.modules.triangle_attention import TriangleAttention
+from miniworld_engine.modules.triangle_multiplication import (
+    TriangleMultiplication,
+)
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 L, C = 16, 16
@@ -139,9 +158,15 @@ def test_pairformer_block(flavour):
 
 
 # ------------------------------------------------------------------------------------------------------------------- DiT variant stacks
-from foldforge.modules.dense.diffusion_transformer import DiffusionCrossAttTransformer, DiffusionTransformer  # noqa: E402
+from foldforge.modules.dense.diffusion_transformer import (
+    DiffusionCrossAttTransformer,
+    DiffusionTransformer,
+)
 
-from miniworld_engine.modules.dit_variant import AtomDiTVariantStack, DiTVariantStack  # noqa: E402
+from miniworld_engine.modules.dit_variant import (
+    AtomDiTVariantStack,
+    DiTVariantStack,
+)
 
 TOKEN_FLAVOURS = {
     "boltz2": dict(per_block_pair_layer_norm=True, transition_up_gate=True),

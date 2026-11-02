@@ -24,9 +24,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Bool, Float
 
-from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear
+from miniworld_engine.utils.typecheck import typecheck
 
 
 def inverse_length(like: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:

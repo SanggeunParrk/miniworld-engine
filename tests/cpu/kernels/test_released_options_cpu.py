@@ -1,3 +1,4 @@
+# ruff: noqa: PT018, PT011, C408
 """The released-checkpoint options of the engine modules (CPU, no oracle needed): what each option means, that every default is
 unchanged, and that the released-layout adapters are exact tensor reshuffles.
 
@@ -18,7 +19,10 @@ from miniworld_engine.modules.pairformer import PairformerBlock, PairformerConfi
 from miniworld_engine.modules.transition import Transition
 from miniworld_engine.modules.triangle_attention import TriangleAttention
 from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
-from miniworld_engine.modules.triangle_multiplication.reference import TriangleMultiplicationReference, inverse_length
+from miniworld_engine.modules.triangle_multiplication.reference import (
+    TriangleMultiplicationReference,
+    inverse_length,
+)
 
 L, C = 12, 16
 
@@ -138,7 +142,7 @@ def test_opm_count_offset_refuses_groups():
 # ---------------------------------------------------------------------------------------------------------------- adapters
 def _released_trimul_state(c=C, h=24, seed=0):
     g = torch.Generator().manual_seed(seed)
-    r = lambda *s: torch.randn(*s, generator=g) * 0.3  # noqa: E731
+    r = lambda *s: torch.randn(*s, generator=g) * 0.3
     return {"left_norm_input.weight": r(c) + 1, "left_norm_input.bias": r(c), "projection.weight": r(2 * h, c), "gate.weight": r(2 * h, c),
             "center_norm.weight": r(h) + 1, "center_norm.bias": r(h), "output_projection.weight": r(c, h), "gating_linear.weight": r(c, c)}
 
@@ -240,7 +244,7 @@ def test_pairformer_single_track_schedules(parallel):
     _randomise(blk, seed=2, std=0.2)
     p_out, s_out = blk(pair, mask, single)
     # the schedule by hand
-    delta = lambda m, x: m(x, mask) - x  # noqa: E731
+    delta = lambda m, x: m(x, mask) - x
     if parallel:
         upd = sum(delta(m, pair) for m in (blk.tri_multi_outgoing, blk.tri_multi_incoming, blk.tri_atten_starting, blk.tri_atten_ending))
         want_pair = pair + upd + (blk.transition_pair(pair) - pair)

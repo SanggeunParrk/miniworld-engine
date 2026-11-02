@@ -27,7 +27,6 @@ import torch
 import torch.nn as nn
 from jaxtyping import Bool, Float
 
-from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.modules.attention_pair_bias import AttentionPairBias
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.primitives import Dropout
@@ -37,6 +36,7 @@ from miniworld_engine.modules.triangle_multiplication import (
     BidirectionalTriangleMultiplication,
     TriangleMultiplication,
 )
+from miniworld_engine.utils.typecheck import typecheck
 
 
 @dataclass
@@ -179,7 +179,7 @@ class PairformerBlock(nn.Module):
 
     @classmethod
     def from_released(cls, state_dict, *, config: PairformerConfig, prefix: str = "", dtype: torch.dtype | None = None,
-                      norm_eps: float = 1e-5, implementation: ImplementationType = ImplementationType.PYTORCH) -> "PairformerBlock":
+                      norm_eps: float = 1e-5, implementation: ImplementationType = ImplementationType.PYTORCH) -> PairformerBlock:
         """The block from a released ``PairformerBlock`` state (names in ``modules.released``); ``config`` carries what the weights do
         not say (head counts, ``parallel``, ``divide_by_length``, ``transposed_bias`` ...)."""
         from miniworld_engine.modules import released

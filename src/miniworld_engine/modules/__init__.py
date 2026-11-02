@@ -6,12 +6,13 @@ benchmark results, and every folder holds a ``module.py``. Three ops used to be 
 made the rule above a description of eight of eleven ops.
 
 The flat modules that remain are NOT ops -- they are the shared infrastructure the ops are built
-from, and they are exactly these four:
+from, and they are exactly these five:
 
     dispatch.py    backend selection (public ImplementationType -> internal KernelBackend)
     exceptions.py  the public implementation enum and its error
     primitives.py  layer classes the ops compose (Linear, LayerNorm, Dropout, MPLinear)
     functional.py  free functions the ops compose (sigmoid_gate, swish_gate)
+    released.py    released-checkpoint weight adapters behind every op's ``from_released``
 
 ``functional.py`` is named for torch's own split between layer classes and the free functions
 beside them. It was ``ops.py``; the whole-op namespace that sat one level above it was removed.

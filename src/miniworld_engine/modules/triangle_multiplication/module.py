@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 from jaxtyping import Bool, Float
 
-from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.baselines import anthropic_trimul as _anthropic
 from miniworld_engine.kernels.integrations import trimul_b200 as _b200
 from miniworld_engine.kernels.integrations import trimul_h100 as _h100
@@ -26,6 +25,7 @@ from miniworld_engine.modules.exceptions import (
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear
 from miniworld_engine.modules.triangle_multiplication.reference import inverse_length
+from miniworld_engine.utils.typecheck import typecheck
 
 
 @contextmanager
@@ -225,7 +225,9 @@ class TriangleMultiplication(nn.Module):
             if backend == KernelBackend.PORTABLE and self.d_hidden != pair.shape[-1] and pair.is_cuda:
                 # the portable front projects d_pair -> d_hidden from the weights (Protenix's / FoldForge's template TriMul, pair 64 /
                 # hidden 128); outside the served widths it is a refusal, not an error
-                from miniworld_engine.kernels.trimul_inproj.triton.contract import hidden_refusal
+                from miniworld_engine.kernels.trimul_inproj.triton.contract import (
+                    hidden_refusal,
+                )
 
                 why = hidden_refusal(pair.shape[-1], self.d_hidden)
                 if why is not None:

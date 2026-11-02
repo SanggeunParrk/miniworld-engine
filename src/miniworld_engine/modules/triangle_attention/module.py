@@ -14,11 +14,9 @@ from einops import rearrange
 from jaxtyping import Bool, Float
 
 from miniworld_engine import kernels, settings
-from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.utils import h100_master as _master
-from miniworld_engine.kernels.integrations import triattn_b200 as _b200
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels.bias_only_attention import dispatch as _bo_dispatch
+from miniworld_engine.kernels.integrations import triattn_b200 as _b200
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -30,6 +28,8 @@ from miniworld_engine.modules.exceptions import (
 )
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear
+from miniworld_engine.utils import h100_master as _master
+from miniworld_engine.utils.typecheck import typecheck
 
 
 @contextmanager
@@ -435,7 +435,10 @@ class TriangleAttention(nn.Module):
         if not self._bias_untransposed and _b200.serves_wide(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return _b200.forward_wide(self, pair, mask)
-        from miniworld_engine.kernels.integrations import triattn_h100, triattn_h100_sm90
+        from miniworld_engine.kernels.integrations import (
+            triattn_h100,
+            triattn_h100_sm90,
+        )
 
         if triattn_h100_sm90.serves(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):

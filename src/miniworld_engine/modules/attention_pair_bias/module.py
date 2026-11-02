@@ -5,9 +5,7 @@ from einops import rearrange
 from jaxtyping import Bool, Float
 
 from miniworld_engine import kernels
-from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as _b200
-from miniworld_engine.utils import h100_master as _h100_master
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import KernelBackend, resolve_augmented_attention
 from miniworld_engine.modules.exceptions import (
@@ -16,6 +14,8 @@ from miniworld_engine.modules.exceptions import (
 )
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear, RMSNorm
+from miniworld_engine.utils import h100_master as _h100_master
+from miniworld_engine.utils.typecheck import typecheck
 
 
 class AttentionPairBias(nn.Module):

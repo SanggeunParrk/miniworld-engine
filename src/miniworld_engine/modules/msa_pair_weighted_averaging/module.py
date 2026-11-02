@@ -4,7 +4,6 @@ import torch.nn.functional as F
 from einops import rearrange
 from jaxtyping import Bool, Float
 
-from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.baselines import anthropic_msa as _anthropic
 from miniworld_engine.kernels.integrations import pwa_train as _pwa_train
 from miniworld_engine.modules import dispatch as _dispatch
@@ -12,6 +11,7 @@ from miniworld_engine.modules.dispatch import KernelBackend, resolve
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import Dropout, LayerNorm, Linear
+from miniworld_engine.utils.typecheck import typecheck
 
 
 class MSAPairWeightedAveraging(nn.Module):
