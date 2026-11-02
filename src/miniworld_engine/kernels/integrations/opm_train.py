@@ -99,8 +99,11 @@ def refusal(
     *,
     interchain: bool,
     normalize_before_proj: bool,
+    custom_divisor: bool = False,
 ) -> str | None:
-    """None if this path can run this training call, else why it cannot. Never raises."""
+    """None if this path can run this training call, else why it cannot. Never raises.
+
+    ``custom_divisor``: the module divides by ``count + count_offset`` or by the MSA depth (``divisor_params``); only the sm_90a kernels take it."""
     try:
         if not _enabled():
             return "settings.opm_train=False disables the native path"
@@ -117,6 +120,8 @@ def refusal(
         cap = torch.cuda.get_device_capability(msa.device)
         if cap not in ((9, 0), (10, 0)):
             return "the kernels are built for sm_90a and sm_100a"
+        if cap == (10, 0) and custom_divisor:
+            return "the sm_100a kernels divide by the clamped pair count only (no count_offset / divide_by_length)"
         if cap == (10, 0) and torch.is_grad_enabled() and not _SM100_TRAIN:
             return "the sm_100a backward kernels are not built yet"
         if cap == (10, 0) and (
@@ -133,6 +138,18 @@ def refusal(
         return None
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
+
+
+def divisor_params(module, depth: int) -> tuple[float, float]:
+    """(dmin, doff) of the pair divisor ``max(count, dmin) + doff`` the kernels take (``depth`` = the MSA rows S before any padding):
+    (1, 0) the clamp of the count at 1 (default); ``count_offset`` -> (0, offset), AlphaFold 3's ``count + offset``;
+    ``divide_by_length`` -> (S, 0): a count never exceeds S, so the divisor is the constant S (RoseTTAFold3)."""
+    if getattr(module, "divide_by_length", False):
+        return float(depth), 0.0
+    offset = getattr(module, "count_offset", None)
+    if offset is not None:
+        return 0.0, float(offset)
+    return 1.0, 0.0
 
 
 STATS: dict[str, Any] = {
@@ -492,7 +509,7 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
 
 
 def _forward_wide(
-    ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residual, save_stats, after, pbias=None
+    ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residual, save_stats, after, pbias=None, dmin=1.0, doff=0.0
 ):
     """The wide composition (d_msa 64 / 128, d_pair 128 / 256 / 384, either normalisation order): the persistent TMA prologue
     (LN + both projections + mask -> A2 / BT, the statistics and the exact mask count), cuBLAS for the grouped outer product,
@@ -525,14 +542,15 @@ def _forward_wide(
         gam, bet, wa16, wb16, wo16, ob, pb = _capture.param_forms(
             "opm_wide_infer", [t for t in (lnw, lnb, wa, wb, wo, bo, pbias) if t is not None], forms)
     # inference: the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table), no separate count kernel
-    a2, bt, stats, mask16, norm = ext.opm_prologue_wide(m, mk, gam, bet, wa16, wb16, float(eps), bool(save_stats), pb, bool(save_stats))
+    dkw = {} if (dmin, doff) == (1.0, 0.0) else {"dmin": float(dmin), "doff": float(doff)}   # the pair divisor max(count, dmin) + doff
+    a2, bt, stats, mask16, norm = ext.opm_prologue_wide(m, mk, gam, bet, wa16, wb16, float(eps), bool(save_stats), pb, bool(save_stats), **dkw)
     ctx.has_bias = pbias is not None
     if fused:   # inference: the products stay in shared memory (norm is the mask bit table here)
-        z = ext.opm_fused_infer(a2, bt, norm, _fused_weight(wo), ob, residual, int(after))
+        z = ext.opm_fused_infer(a2, bt, norm, _fused_weight(wo), ob, residual, int(after), **dkw)
         o = None
     else:
         o = torch.mm(a2, bt.t())  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
-        z = ext.opm_epilogue(o, norm, wo16, ob, n, n, residual, int(after))
+        z = ext.opm_epilogue(o, norm, wo16, ob, n, n, residual, int(after), **dkw)
     ctx.save_o = bool(save_o)
     ctx.after = bool(after)
     ctx.save_for_backward(
@@ -636,6 +654,8 @@ class _OpmMath(torch.autograd.Function):
         save_stats=True,
         after=False,
         pbias=None,
+        dmin=1.0,
+        doff=0.0,
     ):
         cm, cz = msa.shape[3], wo.shape[0]
         path = _h100_path(msa.shape[1], msa.shape[2], training=save_stats)
@@ -661,6 +681,8 @@ class _OpmMath(torch.autograd.Function):
                 save_stats,
                 after,
                 pbias,
+                dmin,
+                doff,
             )
         owned = _owned_blas_for(msa.shape[1], msa.shape[2], training=save_stats)
         fused = path != "legacy" and _fused_enabled(msa.shape[1], msa.shape[2], training=save_stats) \
@@ -718,16 +740,17 @@ class _OpmMath(torch.autograd.Function):
                 else ext.opm_native_prologue
             )
             # inference: the mask count is taken by the epilogue from the mask bit rows (`norm` is then that int32 [N, S/32] table)
+            dkw = {} if (dmin, doff) == (1.0, 0.0) else {"dmin": float(dmin), "doff": float(doff)}   # the pair divisor max(count, dmin) + doff
             a2, bt, stats, mask16, norm = prologue(
-                m, mask[0], packed, float(eps), save_stats, save_stats
+                m, mask[0], packed, float(eps), save_stats, save_stats, **dkw
             )
             n = m.shape[1]
             if fused:   # inference: the products stay in shared memory (norm is the mask bit table here)
-                z = ext.opm_fused_infer(a2, bt, norm, _fused_weight(wo), packed[5], residual, 0)
+                z = ext.opm_fused_infer(a2, bt, norm, _fused_weight(wo), packed[5], residual, 0, **dkw)
                 o = None
             else:
                 o = _owned_mm(a2, bt.t(), owned)
-                z = ext.opm_epilogue(o, norm, packed[4], packed[5], n, n, residual)
+                z = ext.opm_epilogue(o, norm, packed[4], packed[5], n, n, residual, **dkw)
             ctx.save_o = bool(save_o)
             ctx.save_for_backward(
                 m,
@@ -764,8 +787,8 @@ class _OpmMath(torch.autograd.Function):
         )  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
         mf = mask16.float()
         norm = (
-            (mf.t() @ mf).clamp_(min=1).contiguous()
-        )  # the module's own fp32 mask count
+            ((mf.t() @ mf).clamp_(min=dmin) + doff).contiguous()
+        )  # the module's own fp32 pair divisor (the mask count clamped at 1 by default)
         z = ext.opm_epilogue(
             o,
             norm,
@@ -956,6 +979,7 @@ def outer_product_mean(
     cz = module.to_out.weight.shape[0]
     n0 = msa.shape[2]
     msa_in = msa
+    dmin, doff = divisor_params(module, msa.shape[1])   # before the depth is padded: divide_by_length divides by the real S
     pn, ps = -n0 % 64, -msa.shape[1] % 256
     if pn or ps:
         msa = torch.nn.functional.pad(msa, (0, 0, 0, pn, 0, ps))
@@ -984,7 +1008,7 @@ def outer_product_mean(
     ]
     if torch.is_grad_enabled():
         save_o = settings.current().opm_train_save_o
-        out = OpmTrainFn.apply(*tensors, eps, save_o, after)
+        out = OpmTrainFn.apply(*tensors, eps, save_o, after, dmin, doff)
         if torch.cuda.get_device_capability(msa.device) == (9, 0):
             from miniworld_engine.kernels.integrations.token_dit_train import (
                 _native_caller_output,
@@ -993,7 +1017,7 @@ def outer_product_mean(
             leaves = (msa_in, *module.parameters(), *((residual,) if fuse else ()))
             out = _native_caller_output(out, *leaves, force=True)
     else:
-        out = _inference_op(tensors, eps, after)
+        out = _inference_op(tensors, eps, after, dmin, doff)
     if pn:
         out = out[:, :n0, :n0]
     return out + residual if residual is not None and not fuse else out
@@ -1008,7 +1032,7 @@ class _SavedContext:
         self.saved_tensors = tensors
 
 
-def _forward_fake(args, eps, save_o, after):
+def _forward_fake(args, eps, save_o, after, dmin=1.0, doff=0.0):
     m = args[0]
     _, s, n, _ = m.shape
     CZ = args[6].shape[0]  # d_pair of this call (the module-level CZ is MiniWorld's)
@@ -1047,7 +1071,7 @@ from miniworld_engine.kernels._compile import opaque
 
 @opaque(fake=_forward_fake, name="opm_h100_fwd")
 def _forward_op(
-    args: list[torch.Tensor], eps: float, save_o: bool, after: bool
+    args: list[torch.Tensor], eps: float, save_o: bool, after: bool, dmin: float = 1.0, doff: float = 0.0
 ) -> list[torch.Tensor]:
     ctx = _SavedContext()
     out = _OpmMath.forward(
@@ -1058,6 +1082,8 @@ def _forward_op(
         residual=args[8] if args[8].numel() else None,
         after=after,
         pbias=args[9].detach() if args[9].numel() else None,
+        dmin=dmin,
+        doff=doff,
     )
     sv = ctx.saved_tensors
     kept = list(sv[1:6])
@@ -1099,10 +1125,10 @@ class OpmTrainFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, *args):
         tensors = list(args[:10])
-        ctx.eps, ctx.save_o, ctx.after = args[10:]
+        ctx.eps, ctx.save_o, ctx.after, dmin, doff = args[10:]   # (dmin, doff): the pair divisor max(count, dmin) + doff; the backward reads it off the saved table
         ctx.has_residual = bool(tensors[8].numel())
         ctx.has_bias = bool(tensors[9].numel())
-        out, *kept = _forward_op(tensors, ctx.eps, ctx.save_o, ctx.after)
+        out, *kept = _forward_op(tensors, ctx.eps, ctx.save_o, ctx.after, dmin, doff)
         ctx.save_for_backward(*tensors, *kept)
         return out
 
@@ -1121,10 +1147,12 @@ class OpmTrainFn(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            None,
         )
 
 
-def _inference_fake(args, eps, after):
+def _inference_fake(args, eps, after, dmin=1.0, doff=0.0):
     m = args[0]
     return torch.empty(
         (1, m.shape[2], m.shape[2], args[6].shape[0]),
@@ -1134,7 +1162,7 @@ def _inference_fake(args, eps, after):
 
 
 @opaque(fake=_inference_fake, name="opm_h100_infer")
-def _inference_op(args: list[torch.Tensor], eps: float, after: bool) -> torch.Tensor:
+def _inference_op(args: list[torch.Tensor], eps: float, after: bool, dmin: float = 1.0, doff: float = 0.0) -> torch.Tensor:
     # No training activations or LN statistics escape the inference boundary.
     if torch.cuda.get_device_capability(args[0].device) == (10, 0):
         return _forward_sm100(
@@ -1153,4 +1181,6 @@ def _inference_op(args: list[torch.Tensor], eps: float, after: bool) -> torch.Te
         save_stats=False,
         after=after,
         pbias=args[9] if args[9].numel() else None,
+        dmin=dmin,
+        doff=doff,
     )

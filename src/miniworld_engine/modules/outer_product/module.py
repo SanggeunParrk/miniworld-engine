@@ -68,7 +68,13 @@ class OuterProductMean(nn.Module):
     The default preserves the AF3 ordering and checkpoint behavior.
 
     ``count_offset`` (default ``None``) switches the divisor to AlphaFold 3's ``count + count_offset`` (``1e-3`` in the released
-    code); with ``normalize_before_proj=False`` that is AF3's ``(W out + b) / (count + 1e-3)``. Served by the PyTorch statements only.
+    code); with ``normalize_before_proj=False`` that is AF3's ``(W out + b) / (count + 1e-3)``.
+
+    ``divide_by_length`` (RoseTTAFold3) divides the pair output by the MSA depth S (``msa.shape[1]``, masked rows included) for every pair
+    instead of by the pair count; it excludes ``count_offset``.
+
+    Both options change only the per-pair divisor: the H100 CUDA paths (``kernels.integrations.opm_train``, ``kernels.outer_product_mean.composed``)
+    take it as a pair of kernel scalars (``divisor = max(count, dmin) + doff``), inference and training; a shape they do not serve runs the PyTorch statements.
 
     Parameters
     ----------
@@ -96,14 +102,19 @@ class OuterProductMean(nn.Module):
         groups: int = 1,
         product_norm_eps: float = 0.1,
         count_offset: float | None = None,
+        divide_by_length: bool = False,
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
         # AlphaFold 3 / Protenix divisor: ``count + count_offset`` (1e-3 in the released code) instead of ``clamp(count, 1)``. None keeps
-        # the clamp. No kernel implements it: a MINIWORLD call REFUSES it (a KernelRefusedWarning on a GPU) and runs the PyTorch statements.
-        if count_offset is not None and groups > 1:
-            raise ValueError("count_offset needs groups == 1: the grouped (Chai-1) form does not divide by the pair count")
+        # the clamp. RoseTTAFold3 ``divide_by_length``: the divisor is the MSA depth S. The H100 CUDA paths take both (see the class docstring);
+        # a call they do not serve REFUSES (a KernelRefusedWarning on a GPU) and runs the PyTorch statements.
+        if (count_offset is not None or divide_by_length) and groups > 1:
+            raise ValueError("count_offset / divide_by_length need groups == 1: the grouped (Chai-1) form does not divide by the pair count")
+        if count_offset is not None and divide_by_length:
+            raise ValueError("count_offset and divide_by_length are two different divisors: set one")
         self.count_offset = count_offset
+        self.divide_by_length = bool(divide_by_length)
 
         self.mask_interchain = mask_interchain
         self.implementation = ImplementationType(implementation)
@@ -170,7 +181,10 @@ class OuterProductMean(nn.Module):
         else:
             out = rearrange(torch.einsum("bmid,bmje->bijde", left, right), "B L1 L2 D1 D2 -> B L1 L2 (D1 D2)")
             norm = torch.einsum("bmi,bmj->bij", mask.float(), mask.float())
-            norm = (norm + self.count_offset if self.count_offset is not None else norm.clamp(min=1))[..., None]
+            if self.divide_by_length:
+                norm = torch.full_like(norm, float(S))[..., None]
+            else:
+                norm = (norm + self.count_offset if self.count_offset is not None else norm.clamp(min=1))[..., None]
             if self.normalize_before_proj:
                 pair = self.to_out((out / norm).to(left.dtype))
             else:
@@ -195,11 +209,9 @@ class OuterProductMean(nn.Module):
         the OPM branch). ``residual=None`` returns the raw OPM output (standalone / benchmarking)."""
         if self.dead and residual is not None and not (self.training or torch.is_grad_enabled()):
             return residual
-        if self.count_offset is not None:
-            # no kernel divides by ``count + offset``: refuse (never ignore the option) and run the PyTorch statements
-            if self.implementation == ImplementationType.MINIWORLD and msa.is_cuda:
-                _dispatch.warn_refused("outer_product_mean", msa.device, "count_offset: no kernel takes it")
-            return self._variant_reference(msa, mask, token_asym_id, residual)
+        # ``count_offset`` / ``divide_by_length``: only the pair divisor differs. The H100 opm_train / composed paths take it; the Anthropic
+        # payload and the portable Triton kernel do not (never ignored: they step aside), and a call no kernel serves runs the PyTorch statements.
+        custom = self.count_offset is not None or self.divide_by_length
         if self.groups > 1 or self.to_left.bias is not None:  # RoseTTAFold3 / Chai-1 (see the constructor)
             from miniworld_engine.kernels.outer_product_mean import composed
 
@@ -217,7 +229,7 @@ class OuterProductMean(nn.Module):
                 and torch.cuda.get_device_capability(msa.device) == (9, 0)
                 and _opm_train.serves(msa, *(self.to_left.weight.shape[1], self.to_left.weight.shape[0], self.to_out.weight.shape[0]),
                                       interchain=bool(self.mask_interchain and token_asym_id is not None),
-                                      normalize_before_proj=self.normalize_before_proj)
+                                      normalize_before_proj=self.normalize_before_proj, custom_divisor=custom)
             ):
                 _m = mask if mask is not None else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
                 return _opm_train.outer_product_mean(self, msa, _m, residual=residual)
@@ -228,7 +240,7 @@ class OuterProductMean(nn.Module):
                 and self.groups == 1
                 and _opm_train.wanted(self.implementation)
                 and _opm_train.serves(msa, *(self.to_left.weight.shape[1], self.to_left.weight.shape[0], self.to_out.weight.shape[0]),
-                                      interchain=False, normalize_before_proj=self.normalize_before_proj)
+                                      interchain=False, normalize_before_proj=self.normalize_before_proj, custom_divisor=custom)
                 and not torch.is_grad_enabled()
             ):
                 return composed.biased_on_fused(self, msa, mask, token_asym_id, residual)
@@ -244,7 +256,8 @@ class OuterProductMean(nn.Module):
             # outer product), routed like the standard leg below: a card with a record (dispatch.resolve), force_portable_kernels. A
             # call the kernels refuse warns once (KernelRefusedWarning) and runs the PyTorch statements.
             if (
-                self.implementation == ImplementationType.MINIWORLD
+                not custom   # the Triton kernel divides by the clamped count only
+                and self.implementation == ImplementationType.MINIWORLD
                 and resolve("outer_product_mean", self.implementation, msa.device,
                             training=_dispatch.needs_backward(self, msa)) == KernelBackend.PORTABLE
                 and _dispatch.portable_leg_allowed(msa.device)
@@ -303,6 +316,7 @@ class OuterProductMean(nn.Module):
                 *_dims,
                 interchain=bool(self.mask_interchain and token_asym_id is not None),
                 normalize_before_proj=self.normalize_before_proj,
+                custom_divisor=custom,
             ):
                 _m = (
                     mask
@@ -312,7 +326,7 @@ class OuterProductMean(nn.Module):
                 return _opm_train.outer_product_mean(self, msa, _m, residual=residual)
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused path where it
         # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
-        if _anthropic.wanted(self.implementation):
+        if not custom and _anthropic.wanted(self.implementation):
             _fused = {
                 "grad": torch.is_grad_enabled(),
                 "interchain": bool(self.mask_interchain and token_asym_id is not None),
@@ -331,6 +345,13 @@ class OuterProductMean(nn.Module):
                 )
                 _pair = _anthropic.outer_product_mean(self, msa, _m)
                 return residual + _pair if residual is not None else _pair
+        if custom:
+            # no CUDA path serves this call (shape / dtype / device outside opm_train's contract) and the portable Triton kernel and the
+            # Anthropic payload divide by the clamped count only: refuse (never ignore the option) and run the PyTorch statements
+            if self.implementation == ImplementationType.MINIWORLD and msa.is_cuda:
+                _dispatch.warn_refused("outer_product_mean", msa.device,
+                                       "count_offset / divide_by_length: this call is outside the CUDA kernels' contract (bf16, batch 1, d_msa/d_pair of opm_train.SHAPES)")
+            return self._variant_reference(msa, mask, token_asym_id, residual)
         # The portable Triton path (kernels.outer_product_mean) for every call the native paths above did not take:
         # other GPUs with a record (dispatch.resolve), other widths, force_portable_kernels. A card without a record resolves to
         # PYTORCH there (one warning); H100 / B200 take the PyTorch statements below.

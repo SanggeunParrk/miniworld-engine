@@ -2,7 +2,7 @@
 """The released-checkpoint options of the engine modules (CPU, no oracle needed): what each option means, that every default is
 unchanged, and that the released-layout adapters are exact tensor reshuffles.
 
-``divide_by_length`` (TriangleMultiplication), ``count_offset`` (OuterProductMean), ``transposed_bias`` (TriangleAttention, already there),
+``divide_by_length`` (TriangleMultiplication, OuterProductMean), ``count_offset`` (OuterProductMean), ``transposed_bias`` (TriangleAttention, already there),
 the ``from_released`` adapters (``modules/released.py``), the single-track / ``parallel`` PairformerBlock and ``serving`` of the DiT variant stacks.
 Against FoldForge's dense modules (the oracle of the released equations): ``test_released_parity.py``.
 """
@@ -137,6 +137,78 @@ def test_opm_count_offset_semantics(before):
 def test_opm_count_offset_refuses_groups():
     with pytest.raises(ValueError):
         OuterProductMean(24, C, 8, groups=2, count_offset=1e-3)
+
+
+def test_opm_divide_by_length_refuses_groups_and_count_offset():
+    with pytest.raises(ValueError):
+        OuterProductMean(24, C, 8, groups=2, divide_by_length=True)
+    with pytest.raises(ValueError):
+        OuterProductMean(24, C, 8, count_offset=1e-3, divide_by_length=True)
+    assert OuterProductMean(24, C, 8).divide_by_length is False
+
+
+@pytest.mark.parametrize("before", [True, False])
+@pytest.mark.parametrize("masked", [True, False])
+def test_opm_divide_by_length_semantics(before, masked):
+    """RoseTTAFold3: every pair is divided by the MSA depth S, not by its own count (masked rows stay in S)."""
+    msa, mask = _opm_data()
+    mask = mask if masked else None
+    opm = OuterProductMean(24, C, 8, divide_by_length=True, normalize_before_proj=before)
+    _randomise(opm)
+    out = opm(msa, mask)
+    s = msa.shape[1]
+    m = mask if mask is not None else torch.ones(msa.shape[:3], dtype=torch.bool)
+    left, right = opm.to_left(opm.ln_msa(msa)) * m[..., None], opm.to_right(opm.ln_msa(msa)) * m[..., None]
+    prod = torch.einsum("bmid,bmje->bijde", left, right).flatten(-2)
+    want = opm.to_out(prod / s) if before else opm.to_out(prod) / s
+    torch.testing.assert_close(out, want, atol=1e-4, rtol=1e-4)
+    plain = OuterProductMean(24, C, 8, normalize_before_proj=before)
+    plain.load_state_dict(opm.state_dict())
+    if masked:
+        assert not torch.allclose(out, plain(msa, mask), atol=1e-6)
+
+
+@pytest.mark.parametrize("before", [True, False])
+@pytest.mark.parametrize("option", [{"count_offset": 1e-3}, {"divide_by_length": True}, {}])
+@pytest.mark.parametrize("bias", [False, True])
+def test_opm_kernel_reference_and_divisor_params_agree_with_the_module(before, option, bias):
+    """``kernels.outer_product_mean.reference`` (the oracle of the GPU tests) and ``opm_train.divisor_params`` (the kernels' two scalars,
+    divisor = max(count, dmin) + doff) say what the module says."""
+    from miniworld_engine.kernels.integrations.opm_train import divisor_params
+    from miniworld_engine.kernels.outer_product_mean.reference import outer_product_mean_reference
+
+    msa, mask = _opm_data()
+    opm = OuterProductMean(24, C, 8, normalize_before_proj=before, projection_bias=bias, **option)
+    _randomise(opm)
+    got = opm(msa, mask)
+    ref = outer_product_mean_reference(
+        msa, mask, opm.ln_msa.weight, opm.ln_msa.bias, opm.to_left.weight, opm.to_right.weight, opm.to_out.weight, opm.to_out.bias,
+        eps=float(getattr(opm.ln_msa, "eps", 1e-5)), normalize_before_proj=before, b_left=opm.to_left.bias, b_right=opm.to_right.bias, **option)
+    torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
+    # the scalars: the module's divisor table is max(count, dmin) + doff
+    dmin, doff = divisor_params(opm, msa.shape[1])
+    count = torch.einsum("bmi,bmj->bij", mask.float(), mask.float())
+    table = count.clamp(min=dmin) + doff
+    if "divide_by_length" in option:
+        assert dmin == msa.shape[1] and doff == 0.0 and bool((table == msa.shape[1]).all())
+    elif "count_offset" in option:
+        assert (dmin, doff) == (0.0, 1e-3) and torch.equal(table, count + 1e-3)
+    else:
+        assert (dmin, doff) == (1.0, 0.0) and torch.equal(table, count.clamp(min=1))
+
+
+def test_opm_divisor_survives_a_fully_masked_token():
+    """A token no row covers has count 0: the offset divides by 1e-3 (not by 1), divide_by_length by S."""
+    msa, mask = _opm_data()
+    mask = mask.clone()
+    mask[..., 0] = False
+    opm = OuterProductMean(24, C, 8, count_offset=1e-3, normalize_before_proj=False)
+    _randomise(opm)
+    out = opm(msa, mask)
+    torch.testing.assert_close(out[:, 0, 0], opm.to_out.bias / 1e-3 * torch.ones_like(out[:, 0, 0]), atol=1e-3, rtol=1e-4)
+    by_length = OuterProductMean(24, C, 8, divide_by_length=True, normalize_before_proj=False)
+    by_length.load_state_dict(opm.state_dict())
+    torch.testing.assert_close(by_length(msa, mask)[:, 0, 0], opm.to_out.bias / msa.shape[1] * torch.ones_like(out[:, 0, 0]), atol=1e-5, rtol=1e-4)
 
 
 # ---------------------------------------------------------------------------------------------------------------- adapters
