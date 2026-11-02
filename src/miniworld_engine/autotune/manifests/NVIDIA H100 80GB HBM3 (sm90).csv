@@ -1,7 +1,7 @@
 kernel,backend,family,file,status,detail,dtype
-#provenance,2.4.1,a6ac9fdafb41,clean,2026-10-30,v2.4.0-7-ga6ac9fda,
+#provenance,2.4.2,f35260f31a37,clean,2026-11-02,v2.4.0-96-gf35260f31,
 adaln_bwd_dx_dlnw_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel DCond=2.79e-03 DLnW=2.04e-03 (band 1e-02 declared),bf16
-adaln_bwd_pre_dx_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,failed,WRONG NUMBERS: checker raised ValueError: too many values to unpack (expected 2),bf16
+adaln_bwd_pre_dx_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel D=1.51e-03 DX=3.13e-03 (band 1e-02 declared),bf16
 adaln_epilogue_saveact_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel Y=2.33e-03 Mean=2.23e-08 Rstd=1.86e-07 Gate=1.95e-03 (band 1e-02 declared),bf16
 adaln_epilogue_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/inference.py,ok,rel out=2.48e-03 (band 1e-02 declared),bf16
 adaln_fwd_gate_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel Y=2.14e-03 Gate=1.95e-03 (band 8e-03 declared),bf16
@@ -35,9 +35,9 @@ gated_projection_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kerne
 gated_projection_gate_flat_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel out=2.15e-03 (band 8e-03 declared),bf16
 gated_projection_gate_gemm_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/gate_out.py,ok,rel out=3.79e-03 (band 1e-02 declared),bf16
 gated_projection_gate_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel out=2.15e-03 (band 8e-03 declared),bf16
-layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.60e-03 dgamma=3.15e-07 dbeta=1.67e-07 (band 1e-02 declared),bf16
+layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.60e-03 dgamma=3.78e-07 dbeta=2.50e-07 (band 1e-02 declared),bf16
 layernorm_bwd_atomic_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/main.py,ok,rel dx=2.03e-03 dw=2.26e-03 db=2.41e-03 (band 1e-02 declared),bf16
-layernorm_bwd_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel dx=2.61e-03 dgamma=2.62e-07 dbeta=8.45e-08 (band 9e-03 declared),bf16
+layernorm_bwd_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel dx=2.61e-03 dgamma=2.40e-07 dbeta=8.45e-08 (band 9e-03 declared),bf16
 layernorm_bwd_reduce_cuda,cuda,layernorm,miniworld_engine/kernels/layernorm/cuda/layer_norm_cuda_kernel.cu,ok,rel dw=2.26e-03 db=2.41e-03 (band 9e-03 declared),bf16
 layernorm_bwd_split_cuda,cuda,layernorm,miniworld_engine/kernels/layernorm/cuda/layer_norm_cuda_kernel.cu,ok,rel dx=2.03e-03 dw=2.26e-03 db=2.41e-03 (band 1e-02 declared),bf16
 layernorm_bwd_split_mmajor_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/mmajor_bwd.py,ok,rel dx=2.60e-03 dgamma=3.07e-07 dbeta=1.04e-07 (band 1e-02 declared),bf16
@@ -52,7 +52,7 @@ layernorm_fwd_strided_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/
 layernorm_linear_bwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,ok,rel dx=2.30e-03 dln_weight=1.74e-03 dproj_weight=2.01e-03 (band 1e-02 declared),bf16
 layernorm_linear_fwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,ok,rel out=2.37e-03 mean=2.08e-08 rstd=1.74e-07 (band 9e-03 declared),bf16
 layernorm_linear_fwd_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/fused.py,ok,rel out=3.51e-03 (band 2e-02 declared),bf16
-layernorm_stats_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/stats.py,ok,rel rstd=8.69e-08 c1=1.63e-07 (band 6e-07 declared),bf16
+layernorm_stats_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/stats.py,ok,rel rstd=8.69e-08 c1=8.17e-08 (band 6e-07 declared),bf16
 outer_product_mean_bwd_epilogue_dw_triton,triton,outer_product_mean,miniworld_engine/kernels/outer_product_mean/triton/main.py,ok,rel dw_out=4.55e-03 (band 1e-02 declared),bf16
 outer_product_mean_bwd_epilogue_dx_triton,triton,outer_product_mean,miniworld_engine/kernels/outer_product_mean/triton/main.py,ok,rel dmsa=5.84e-03 db_out=2.05e-03 dresidual=0.00e+00 (band 1e-02 declared),bf16
 outer_product_mean_bwd_layernorm_gemm_triton,triton,outer_product_mean,miniworld_engine/kernels/outer_product_mean/triton/main.py,ok,rel dmsa=5.84e-03 dln_weight=4.26e-03 dln_bias=3.54e-03 dw_left=4.97e-03 dw_right=6.01e-03 dmsa_pbias=4.23e-03 dln_weight_pbias=7.72e-03 dln_bias_pbias=2.32e-03 dw_left_pbias=5.16e-03 dw_right_pbias=4.23e-03 db_left_pbias=1.97e-03 db_right_pbias=3.41e-03 dmsa_grouped=4.30e-03 dln_weight_grouped=4.27e-03 dln_bias_grouped=2.00e-03 dw_left_grouped=5.39e-03 dw_right_grouped=4.50e-03 (band 1e-02 declared),bf16
@@ -73,7 +73,7 @@ rmsnorm_adamod_fwd_triton,triton,rmsnorm_adamod,miniworld_engine/kernels/rmsnorm
 rmsnorm_bwd_triton,triton,rmsnorm,miniworld_engine/kernels/rmsnorm/triton/main.py,ok,rel dx_aff=2.03e-03 dweight_aff=2.73e-03 dx_plain=2.54e-03 (band 4e-03 declared),bf16
 rmsnorm_fwd_triton,triton,rmsnorm,miniworld_engine/kernels/rmsnorm/triton/main.py,ok,rel y_aff=2.37e-03 y_plain=3.80e-03 (band 4e-03 declared),bf16
 rope_fwd_triton,triton,rope,miniworld_engine/kernels/rope/triton/main.py,ok,rel y=5.14e-04 dx=7.23e-04 (band 3e-03 declared),bf16
-transition_bwd_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,failed,RuntimeError: Error building extension 'transition_cuda_ext_v2': [1/3] c++ -MMD -MF transition_cuda.o.d -DTORCH_EXTENSION_NAME=transit | c++: error: unrecognized command line option ‘-std=c++20’; did you mean ‘-std=c++2a’?,bf16
+transition_bwd_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,failed,RuntimeError: Error building extension 'transition_cuda_ext_v2': [1/2] c++ -MMD -MF transition_cuda.o.d -DTORCH_EXTENSION_NAME=transit | c++: error: unrecognized command line option ‘-std=c++20’; did you mean ‘-std=c++2a’?,bf16
 transition_bwd_swiglu_recompute_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel h=2.18e-03 dAB=2.12e-03 xn=7.02e-04 (band 1e-02 declared),bf16
 transition_bwd_squeeze_swiglu_triton,triton,transition,miniworld_engine/kernels/transition/triton/training.py,ok,rel h=2.15e-03 dA=2.49e-03 dB=2.44e-03 dA_saved=2.54e-03 dB_saved=2.46e-03 (band 1e-02 declared),bf16
 transition_cast_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,failed,ImportError: <path>,bf16
@@ -106,9 +106,9 @@ transition_fwd_b2b_sm90_cuda,cuda,transition,miniworld_engine/kernels/transition
 transition_expand_gate_sm90_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_expand_gate_kernel.cu,ok,rel out=1.94e-03 (band 8e-03 declared),bf16
 transition_bwd_gate_sm90_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_gatebwd_kernel.cu,ok,rel h=1.94e-03 dAB=2.97e-03 xn=5.27e-04 (band 1e-02 declared),bf16
 trimul_output_f567_train_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/output_fused.py,ok,rel y=4.27e-03 proj=2.95e-03 gate=2.72e-03 (band 1e-02 declared),bf16
-trimul_input_ln_residual_bwd_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py,ok,rel dx=2.29e-03 dw=3.22e-07 db=8.17e-08 (band 1e-02 declared),bf16
+trimul_input_ln_residual_bwd_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py,ok,rel dx=2.29e-03 dw=6.84e-07 db=8.17e-08 (band 1e-02 declared),bf16
 trimul_input_dual_bwd_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py,ok,rel dx=2.34e-03 (band 1e-02 declared),bf16
-transition_squeeze_residual_triton,triton,transition,miniworld_engine/kernels/transition/triton/residual.py,ok,rel out=1.07e-03 (band 1e-02 declared),bf16
+transition_squeeze_residual_triton,triton,transition,miniworld_engine/kernels/transition/triton/residual.py,ok,rel out=1.07e-03 out_split_k=1.91e-03 (band 4e-03 declared),bf16
 mpnn_edge_tail_fwd_gemm_gather_saveact_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/compute.py,ok,rel out=6.01e-03 (band 5e-02),bf16
 mpnn_edge_tail_fwd_gemm_b2b_saveact_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/compute.py,ok,rel out=6.01e-03 (band 5e-02),bf16
 mpnn_edge_tail_fwd_gemm_layernorm_saveact_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/compute.py,ok,rel out=6.01e-03 (band 5e-02),bf16
@@ -175,11 +175,11 @@ token_pair_init_dw_reduce_triton,triton,token_pair_init,miniworld_engine/kernels
 smooth_lddt_fwd_triton,triton,smooth_lddt,miniworld_engine/kernels/smooth_lddt/triton/main.py,ok,rel sums=8.80e-08 (band 3e-07 declared),bf16
 smooth_lddt_bwd_triton,triton,smooth_lddt,miniworld_engine/kernels/smooth_lddt/triton/main.py,ok,rel dx=2.72e-03 (band 1e-02 declared),bf16
 sampler_ops_pool_triton,triton,sampler_ops,miniworld_engine/kernels/sampler_ops/triton/main.py,ok,rel out=0.00e+00 (band 4e-03 declared),bf16
-gated_projection_fwd_residual_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/residual.py,ok,rel out=0.00e+00 (band 0e+00 declared) [run_all at ddb66667 2026-10-31 merged by hand; the provenance row is the 2.4.1 run],bf16
-gated_projection_bwd_residual_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/residual.py,ok,rel dgate=2.71e-03 dbranch=2.62e-03 dx=0.00e+00 (band 1e-02 declared) [run_all at ddb66667 2026-10-31 merged by hand; the provenance row is the 2.4.1 run],bf16
-bias_only_attention_layernorm_gemm_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/pair_bias.py,ok,rel out=3.50e-03 (band 1e-02 declared) [run_all at ddb66667 2026-10-31 merged by hand; the provenance row is the 2.4.1 run],bf16
-bias_only_attention_bwd_layernorm_gemm_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/pair_bias.py,ok,rel dpair=4.57e-03 dgamma=1.46e-03 dweight=1.51e-03 (band 2e-02 declared) [run_all at ddb66667 2026-10-31 merged by hand; the provenance row is the 2.4.1 run],bf16
-mpnn_message_fwd_gemm_gelu_reduce_triton,triton,mpnn_message,miniworld_engine/kernels/mpnn_message/triton/inference.py,ok,rel out=1.07e-03 (band 4e-03 declared) [run_all at ddb66667 2026-10-31 merged by hand; the provenance row is the 2.4.1 run],bf16
+gated_projection_fwd_residual_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/residual.py,ok,rel out=0.00e+00 (band 0e+00 declared),bf16
+gated_projection_bwd_residual_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/residual.py,ok,rel dgate=2.71e-03 dbranch=2.62e-03 dx=0.00e+00 (band 1e-02 declared),bf16
+bias_only_attention_layernorm_gemm_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/pair_bias.py,ok,rel out=3.28e-03 (band 1e-02 declared),bf16
+bias_only_attention_bwd_layernorm_gemm_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/pair_bias.py,ok,rel dpair=6.37e-03 dgamma=1.43e-03 dweight=1.62e-03 (band 2e-02 declared),bf16
+mpnn_message_fwd_gemm_gelu_reduce_triton,triton,mpnn_message,miniworld_engine/kernels/mpnn_message/triton/inference.py,ok,rel out=1.07e-03 (band 4e-03 declared),bf16
 gated_projection_fwd_residual_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/residual.py,ok,rel out=0.00e+00 (band 0e+00 declared) [run_all at ddb66667 2026-10-31 merged by hand; the provenance row is the 2.4.1 run],fp32
 gated_projection_bwd_residual_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/residual.py,ok,rel dgate=0.00e+00 dbranch=0.00e+00 dx=0.00e+00 (band 0e+00 declared) [run_all at ddb66667 2026-10-31 merged by hand; the provenance row is the 2.4.1 run],fp32
 bias_only_attention_layernorm_gemm_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/pair_bias.py,ok,rel out=3.03e-04 (band 1e-03 declared) [run_all at ddb66667 2026-10-31 merged by hand; the provenance row is the 2.4.1 run],fp32
