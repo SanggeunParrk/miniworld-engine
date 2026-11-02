@@ -81,6 +81,10 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
     precision and mode.
 - `tm1` / `tm2` (4 Triton rows) are `developed=no`: nothing outside their drivers and checks launches them.
 
+### Removed
+
+- `miniworld_engine.architecture` is no longer part of the engine: the diffusion processes (EDM, decoupled x-pred), the SE(3) / align / transform helpers, `tensor_layout`, the model layers, the checkpoint adapters (`mark_dead_modules`, the attention backend adapters) and the RoPE-SWA / MSA / template blocks belong to the models that use them; they stay in git history. The SWA atom transformer that `modules.InputFeatureEmbedder` holds is now `modules.swa_atom_transformer` (on the engine enum `ImplementationType.MINIWORLD`); the Pairformer / DiffusionTransformer blocks the bundle coverage driver runs are `build/coverage_blocks` (build time only). `legacy` magnitude-preserving / rotation options are gone with the layers.
+
 ## [2.4.1] - 2026-10-30
 
 ### Fixed

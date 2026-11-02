@@ -185,7 +185,7 @@ replacement when the name is one that 2.3.12 removed (see the CHANGELOG).
 * The native-CUDA test at build time is per op and shape-agnostic except for Transition (A100: d = 128, n = 4). A call the fused sm_80 kernel
   turns down (ragged rows, a dtype) asks the card's record before it reaches the portable kernels.
 * The architecture blocks that call kernels directly obey the same rule: ESMFold2's `SWAAtomTransformer` asks `swa_dit` before its fused block
-  and `rms_norm_modulation` / `swiglu_ffn` in each block; the standalone `LayerNorm` of `architecture.primitives` goes through `ops.layer_norm`.
+  and `rms_norm_modulation` / `swiglu_ffn` in each block; the standalone `LayerNorm` goes through `ops.layer_norm`.
 * dtype: the module-level resolve checks bf16, the dtype the fused kernels run (`guard_dtype` sends the rest to PyTorch). An fp32 call asks
   for fp32 rows per call in Transition (`dispatch.dtype_gate`), AdaptiveLayerNorm, ConditionedTransition, AugmentedAttention
   (`dispatch.fp32_gate`), LayerNorm, RMSNorm, every `ops.*` facade, and -- through `portable_leg_allowed(..., dtype=)` -- `LocalDiTBlock`,

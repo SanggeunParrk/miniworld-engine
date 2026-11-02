@@ -36,7 +36,7 @@ contract) is not routed to the portable kernel family -- untuned on these cards,
 benchmark -- and it is not refused either: it runs the **PyTorch reference** (`torch.compile` fuses it where the caller compiles), always
 with a correct result. `modules.dispatch.restricted_card(device)` is the single test; each module takes its PyTorch leg when it is true.
 
-* LayerNorm (`modules.LayerNorm` MINIWORLD, `architecture.primitives.LayerNorm` MINIWORLD_ENGINE) runs the general CUDA LayerNorm
+* LayerNorm (`modules.LayerNorm` MINIWORLD) runs the general CUDA LayerNorm
   (`kernels/layernorm/cuda/general`: any width up to 64K bf16 / 32K fp32, any row count, bf16 / fp16 / fp32, forward and backward,
   bit-identical replays); a multi-dimension `normalized_shape` or a CPU tensor runs the PyTorch statements.
 * RMSNorm (`modules.RMSNorm` MINIWORLD) runs the general CUDA RMSNorm (`kernels/rmsnorm/cuda`, the LayerNorm kernel without mean
@@ -48,7 +48,7 @@ with a correct result. `modules.dispatch.restricted_card(device)` is the single 
   OuterProductMean, MSAPairWeightedAveraging, Transition and the SWA RMS norm take the CUDA path where it exists and the PyTorch statements
   otherwise. The former `ValueError` refusals of those modules ("H100 ... requires the native CUDA contract") are gone.
 * The architecture blocks that call kernels directly rather than through the module dispatch obey it too: `SWAAtomBlock` / `SwiGLUFFN`
-  (`architecture/blocks/swa_atom_transformer.py`: the RMSNorm-adaLN modulation and the SwiGLU FFN) and `SWA3DRoPEAttention` (QK norm +
+  (`modules/swa_atom_transformer/module.py`: the RMSNorm-adaLN modulation and the SwiGLU FFN) and `SWA3DRoPEAttention` (QK norm +
   RoPE, gate, output projection) run their PyTorch statements; the token DiT's fp32 Hopper path declines (instead of raising) a call
   outside its buckets. `tests/gpu/sm90/test_architecture_no_triton_gpu.py` records every Triton launch through the atom transformer
   (windowed, AF3 and global attention), the Pairformer and the diffusion transformer: none, bf16 and fp32, inference and training. A

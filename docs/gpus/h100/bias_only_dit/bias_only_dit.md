@@ -259,7 +259,7 @@ Training step, nb blocks, A = 48 (eager CUDA events, one GPU; per-block pair bia
 | fp32 | 768 | 4 | 42.19 | 40.77 | 1.035 | 0.36 ms |
 
 The saving is per block and independent of A, so it grows with the stack depth (24 blocks: ~4 ms bf16 / ~8.5 ms fp32 at L768 by
-extrapolation, not measured). The token DiT has no fused hoist; its `architecture/blocks/pair_bias_hoist.py` stays the PyTorch fold.
+extrapolation, not measured). The token DiT has no fused hoist; its pair-bias hoist (`build/coverage_blocks/pair_bias_hoist.py`, coverage only) stays the PyTorch fold.
 
 ## Measurements, length sweep (2026-10-15)
 

@@ -250,7 +250,7 @@ class Settings:
     # defaults. `force_portable_kernels` turns every *_cuda stage off as well.
     #: Let `modules.swa_dit.SWADiTBlock` (implementation other than pytorch) run the fused block when
     #: `kernels.swa_dit.interface.refusal` accepts the call (bf16 or fp32, d_atom 128 / 4 heads, window 128, SwiGLU hidden 256);
-    #: off keeps the per-op path. (`architecture.blocks.swa_atom_transformer.SWAAtomTransformer` opts in by its config, `fused_triton`.)
+    #: off keeps the per-op path. (`modules.swa_atom_transformer.SWAAtomTransformer` opts in by its config, `fused_triton`.)
     swa_dit_fused: bool = True
     #: B200 only: keep the engine's portable norm kernels (`LayerNorm` / `RMSNorm` with implementation MINIWORLD) instead of
     #: PyTorch ops that `torch.compile` fuses (the default on B200: no portable kernels on that card). Other cards are unaffected.
