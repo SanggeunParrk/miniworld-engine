@@ -19,7 +19,6 @@ def test_checkpoint_dimensions_reach_build_cases():
     contains("augmented_attention", d_single=768, d_cond=768, d_pair=256, n_head=16)
     contains("transition", d_hidden=64, n=2)
     contains("swiglu_ffn", d_hidden=128, d_expanded=256)
-    contains("gated_linear", d_hidden=64, d_out=128)
     contains("layernorm_linear_native", d_norm=16, n_head=12)
     contains("rms_norm_modulation", d_hidden=128, d_cond=128)
     for width in (16, 267, 451, 831, 833, 2560):

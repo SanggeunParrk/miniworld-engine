@@ -33,7 +33,6 @@ from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triang
 
 from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
 
-from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
 
 from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
 
@@ -111,14 +110,6 @@ class TestCudaWiring:
                         lambda x, c, a, b, s, wc, bc: _op_conditioned_transition(
                             x, c, expand_a_weight=a, expand_b_weight=b, squeeze_weight=s, to_scale_weight=wc, to_scale_bias=bc, n=2),
                         [x, cond, wa, wb, ws, wsc, bsc], grad, monkeypatch, "conditioned_transition")
-
-    def test_gated_linear(self, dtype, grad, monkeypatch):
-        if dtype is not BF16:
-            pytest.skip("_op_gated_linear serves bf16 only")
-        for d, shape in ((128, (1, 128, 128)), (768, (4, 256))):
-            gate, value, w = randn(*shape, d, dtype=dtype, seed=1), randn(*shape, d, dtype=dtype, seed=2), randn(d, d, dtype=dtype, scale=0.1)
-            cases_check(f"_op_gated_linear D{d}", dtype, lambda g, v, w: _op_gated_linear(g, v, w, None), [gate, value, w], grad,
-                        monkeypatch, "gated_linear")
 
     def test_gated_residual(self, dtype, grad):
         x, g, b = (randn(1, 128, 128, 128, dtype=dtype, seed=s) for s in (1, 2, 3))

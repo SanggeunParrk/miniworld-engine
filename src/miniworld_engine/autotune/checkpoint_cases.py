@@ -15,7 +15,6 @@ NAMES = (
     # _op_gated_residual: x + gate * branch, SWADiTBlock's per-op adaLN-Zero residual (atom stream, augmented rows)
     "gated_residual",
     "triangle_attention_checkpoint",
-    "gated_linear",
     "swiglu_ffn",
     "projected_attention",
     "layernorm_native",
@@ -37,8 +36,6 @@ class Leaf(nn.Module):
         if kind == "rms_norm_modulation":
             for name in ("wscale", "wshift", "wgate"):
                 weight(name, (dims["d_hidden"], dims["d_cond"]))
-        elif kind == "gated_linear":
-            weight("weight", (dims["d_out"], dims["d_hidden"]))
         elif kind == "swiglu_ffn":
             for name in ("wa", "wb"):
                 weight(name, (dims["d_expanded"], dims["d_hidden"]))
@@ -49,7 +46,6 @@ class Leaf(nn.Module):
 
     def forward(self, *args):
         from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
-        from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
         from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
         from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
         from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
@@ -63,8 +59,6 @@ class Leaf(nn.Module):
                 eps=torch.finfo(args[0].dtype).eps,
             )
             return y + gate
-        if self.kind == "gated_linear":
-            return _op_gated_linear(*args, self.weight)
         if self.kind == "gated_residual":
             return _op_gated_residual(*args)
         if self.kind == "swiglu_ffn":
@@ -115,7 +109,7 @@ def _inputs(kind, b, length, dims, dt, stream):
     x = _activation(b, length, width, dt, stream)
     if kind == "gated_residual":
         return (x, torch.randn_like(x), torch.randn_like(x))
-    return (x, torch.randn_like(x)) if kind == "gated_linear" else (x,)
+    return (x,)
 
 
 def cases():

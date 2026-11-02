@@ -42,17 +42,6 @@ augmented_attention,token_single,128|256|384|512|640|768,d_single=768;d_cond=768
 outer_product_mean,msa_token,128|256|384|512|640|768,d_msa=128;d_pair=256;d_hidden=32,ln_bwd_path=persistent|ln_bwd_path=atomic|ln_bwd_path=cuda,miniworld,bfloat16,,eval|train,Protenix-v2/ESMFold2,1,1
 msa_pair_weighted_averaging,msa_token,128|256|384|512|640|768,d_msa=128;d_pair=256;n_head=8,p_drop=0.25|ln_bwd_path=persistent|ln_bwd_path=atomic|ln_bwd_path=cuda,miniworld,bfloat16,,eval|train,ESMFold2,1,1
 outer_product_mean,msa_token,128|256|384|512|640|768,d_msa=128;d_pair=384;d_hidden=32,ln_bwd_path=persistent|ln_bwd_path=atomic|ln_bwd_path=cuda,miniworld,bfloat16,,eval|train,OpenDDE,1,1
-gated_linear,token_pair,128|256|384|512|640|768,d_hidden=64;d_out=64,gate_backend=fused|gate_backend=split,miniworld,bfloat16,,eval|train,AF3 template,1,1
-gated_linear,token_pair,128|256|384|512|640|768,d_hidden=128;d_out=64,gate_backend=fused|gate_backend=split,miniworld,bfloat16,,eval|train,Protenix-v1 template,1,1
-gated_linear,token_pair,128|256|384|512|640|768,d_hidden=128;d_out=128,gate_backend=fused|gate_backend=split,miniworld,bfloat16,,eval|train,AF3/Protenix-v1,1,1
-gated_linear,token_pair,128|256|384|512|640|768,d_hidden=256;d_out=256,gate_backend=fused|gate_backend=split,miniworld,bfloat16,,eval|train,Protenix-v2/ESMFold2,1,1
-gated_linear,token_pair,128|256|384|512|640|768,d_hidden=384;d_out=384,gate_backend=fused|gate_backend=split,miniworld,bfloat16,,eval|train,OpenDDE,1,1
-gated_linear,msa_token,128|256|384|512|640|768,d_hidden=64;d_out=64,gate_backend=fused|gate_backend=split,miniworld,bfloat16,,eval|train,AF3/Protenix-v1 MSA,1,1
-gated_linear,msa_token,128|256|384|512|640|768,d_hidden=64;d_out=128,gate_backend=fused|gate_backend=split,miniworld,bfloat16,,eval|train,Protenix-v2/OpenDDE MSA,1,1
-gated_linear,msa_token,128|256|384|512|640|768,d_hidden=128;d_out=128,gate_backend=fused|gate_backend=split,miniworld,bfloat16,,eval|train,ESMFold2 MSA,1,1
-gated_linear,atom_single,1024|2048|3072|4096|5120|6144|7168|8192,d_hidden=128;d_out=128,gate_backend=fused|gate_backend=split,miniworld,bfloat16,,eval|train,AF3/Protenix/OpenDDE atom,5,48
-gated_linear,token_single,128|256|384|512|640|768,d_hidden=384;d_out=384,gate_backend=fused|gate_backend=split,miniworld,bfloat16,,eval|train,AF-family single,1,1
-gated_linear,token_single,128|256|384|512|640|768,d_hidden=768;d_out=768,gate_backend=fused|gate_backend=split,miniworld,bfloat16,,eval|train,AF-family/ESMFold2 token DiT,5,48
 swiglu_ffn,atom_single,1024|2048|3072|4096|5120|6144|7168|8192,d_hidden=128;d_expanded=256,,miniworld,bfloat16,,eval|train,ESMFold2 atom SwiGLUFFN,5,48
 swiglu_ffn,token_pair,128|256|384|512|640|768,d_hidden=128;d_expanded=256,,miniworld,bfloat16,,eval|train,AF3 unconditioned diffusion transition,1,1
 swiglu_ffn,token_single,128|256|384|512|640|768,d_hidden=384;d_expanded=768,,miniworld,bfloat16,,eval|train,AF3 unconditioned diffusion transition,1,1

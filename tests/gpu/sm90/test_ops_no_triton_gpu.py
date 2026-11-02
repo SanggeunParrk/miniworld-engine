@@ -31,7 +31,6 @@ from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triang
 
 from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
 
-from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
 
 from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
 
@@ -170,12 +169,6 @@ class TestFacades:
     def test_gated_residual(self, dtype, grad):
         x, g, b = (randn(4, 64, 128, dtype=dtype, seed=s) for s in (1, 2, 3))
         check("_op_gated_residual", dtype, _op_gated_residual, [x, g, b], grad)
-
-    def test_gated_linear(self, dtype, grad):
-        if dtype is not torch.bfloat16:
-            pytest.skip("_op_gated_linear serves bf16 only (every other dtype was already the PyTorch equation)")
-        gate, value, w = randn(2, 64, 128, dtype=dtype, seed=1), randn(2, 64, 128, dtype=dtype, seed=2), randn(64, 128, dtype=dtype, scale=0.1)
-        check("_op_gated_linear", dtype, lambda g, v, w: _op_gated_linear(g, v, w, None), [gate, value, w], grad)
 
     def test_conditioned_transition(self, dtype, grad):
         x, cond = randn(2, 64, 128, dtype=dtype), randn(2, 64, 64, dtype=dtype)

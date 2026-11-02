@@ -271,40 +271,6 @@ def conditioned_transition(x, cond, wa, wb, ws, wsc, bsc):
 
 
 # ---------------------------------------------------------------------------------------------------------------- gates
-class _GatedLinear(torch.autograd.Function):
-    """``Linear(sigmoid(gate) * value)``: the CUDA sigmoid-gate row kernels of the conditioned-transition tail around one GEMM."""
-
-    @staticmethod
-    def forward(ctx, gate, value, weight, bias):  # noqa: D102
-        from miniworld_engine.kernels.conditioned_transition.cuda.ct_train import sigmul_fwd
-
-        u = sigmul_fwd(value, gate, None)
-        out = F.linear(u, weight, bias)
-        ctx.save_for_backward(gate, value, weight, u)
-        ctx.has_bias = bias is not None
-        return out
-
-    @staticmethod
-    def backward(ctx, dy):  # noqa: D102
-        from miniworld_engine.kernels.conditioned_transition.cuda.ct_train import sigmul_bwd
-
-        gate, value, weight, u = ctx.saved_tensors
-        dy = dy.contiguous()
-        du = torch.mm(dy, weight)
-        dvalue, dgate, _ = sigmul_bwd(du, value, gate)
-        dw = torch.mm(dy.t(), u)
-        return dgate, dvalue, dw, (dy.sum(0) if ctx.has_bias else None)
-
-
-def gated_linear(gate, value, weight, bias):
-    """``F.linear(sigmoid(gate) * value, weight, bias)`` for bf16 rows through the CUDA gate kernels, or None."""
-    if not on_h100(gate, value, weight) or value.dtype is not torch.bfloat16 or value.shape[-1] % 8 or not value.is_contiguous() or not gate.is_contiguous():
-        return None
-    shape = value.shape
-    out = _GatedLinear.apply(gate.reshape(-1, shape[-1]), value.reshape(-1, shape[-1]), weight, bias)
-    return out.reshape(*shape[:-1], weight.shape[0])
-
-
 class _GatedResidual(torch.autograd.Function):
     """``x + gate * branch``: one ``addcmul`` kernel forward; backward the two products (autograd's ``addcmul`` backward runs four kernels)."""
 

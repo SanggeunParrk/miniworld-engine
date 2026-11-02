@@ -127,7 +127,7 @@ inputs, so the three paths give the same result for the same draws. `serves(...)
 
 ## The `ops.*` entry points
 
-Every weights-as-args facade follows the same rule: `ops.transition`, `ops.gated_linear`, `ops.augmented_attention_pair_bias`,
+Every weights-as-args facade follows the same rule: `ops.transition`, `ops.augmented_attention_pair_bias`,
 `ops.swiglu_ffn`, `ops.layer_norm`, `ops.triangle_attention` (its attention core, and its QK norm under the `rmsnorm` record),
 `ops.triangle_multiplicative_update` / `ops.bidirectional_triangle_multiplicative_update` (op `triangle_multiplication`),
 `ops.conditioned_transition` (its SwiGLU tail: op `swiglu_ffn`), `ops.layer_norm_linear`, `ops.rms_norm_modulation` and `ops.gated_residual`

@@ -966,9 +966,6 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: (512,512) -- while `cases()` declares gated_projection at (hd, d) of (128,128) and
     #: (256,128). `--replay` asked for (256,128) and (512,256) and neither was reachable.
     GATE_OUT_PAIRS = tuple(sorted({
-        (r.dims["d_hidden"], r.dims["d_out"])
-        for r in module_rows() if r.module == "gated_linear"
-    } | {
         (r.dims["d_hidden"] * (2 if r.module.endswith("_bidirectional") else 1),
          r.dims["d_pair"])
         for r in module_rows()

@@ -67,7 +67,7 @@ _SIGMUL = ("gated_projection/gated_projection_gate_flat_triton", "gated_projecti
 #: which the ops that count these never launch.
 _GATED_PROJECTION = ("gated_projection/gated_projection_gate_triton", "gated_projection/gated_projection_bwd_gate_triton", *_SIGMUL)
 #: The token / pair gate GEMMs that live in the bias_only_attention family (``gated_projection_gate_gemm_triton``, ``_bwd_dx_triton``),
-#: spelled out so the family's own pair-bias kernels are not held against TriangleAttention / ops.gated_linear.
+#: spelled out so the family's own pair-bias kernels are not held against TriangleAttention.
 _GATE_GEMM = ("bias_only_attention/gated_projection_*",)
 
 #: Every entry below is checked against what the op's portable path LAUNCHES: ``kernels/registry/registry_kernel.units.json`` (``dev derive``
@@ -121,7 +121,6 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
     # the smooth lDDT of the diffusion loss (kernels/smooth_lddt): prep + forward, and the backward in a training call
     "smooth_lddt": ("smooth_lddt/*",),
     # the ops.* facade entry points that launch a single Triton unit (kernels/*/whole_op.py, kernels/_ops_routed.py)
-    "gated_linear": (*_GATED_PROJECTION, *_GATE_GEMM),
     # ops.gated_residual: x + gate * branch (gated_projection/triton/residual.py), the SWADiTBlock per-op residual
     "gated_residual": ("gated_projection/gated_projection_fwd_residual_triton", "gated_projection/gated_projection_bwd_residual_triton"),
     "augmented_attention_pair_bias": _TOKEN_ATTENTION,

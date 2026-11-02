@@ -60,7 +60,7 @@ with a correct result. `modules.dispatch.restricted_card(device)` is the single 
   PyTorch core chunked over the rows (no OOM at L = 1024, bit-reproducible); both TriMul updates bf16 -> the module's hand-CUDA TriMul
   (`integrations.trimul_h100`; fp32 stays PyTorch statements: TriMul is bf16-only); `ops.conditioned_transition` / `ops.swiglu_ffn` -> the conditioned-transition tail kernels
   (`ct_inference`, `ct_tail_train`, the CUDA SwiGLU row kernels); `ops.layer_norm_linear` (d_pair 128 -> 16) -> the pair-bias kernels (`apb`, the token DiT's `pair_bias`);
-  `ops.gated_linear` -> the CUDA gate row kernels + GEMM; `ops.gated_residual` -> `addcmul`; `ops.rms_norm_modulation` -> four launches in the activation's dtype;
+  `ops.gated_residual` -> `addcmul`; `ops.rms_norm_modulation` -> four launches in the activation's dtype;
   `ops.augmented_attention_pair_bias` -> the hand-CUDA sm_90 core for bf16 (16 x 48 / 4 x 32 heads, B = 1, L a multiple of 128; the one `modules.AugmentedAttention`
   takes), else SDPA with the pair bias (cuDNN without a gradient at bf16). `ops.transition` already did this. A/B (`portable_on_hopper_blackwell`) keeps the Triton kernels.
   Measured against the Triton path: [h100_ops_gate_perf_20261101.md](../../records/h100_ops_gate_perf_20261101.md) (the remaining slower rows and why).

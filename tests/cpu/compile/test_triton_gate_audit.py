@@ -32,7 +32,6 @@ MODULE_OPS = {
     "augmented_attention": ("augmented_attention",),
     "attention_pair_bias": ("augmented_attention",),
     "conditioned_transition": ("conditioned_transition",),
-    "gated_linear": ("gated_linear",),
     "layernorm_linear_atom_output": ("layer_norm_linear",),
     "layernorm_linear_native": ("layer_norm_linear",),
     "layernorm_native": ("layernorm",),
@@ -146,7 +145,6 @@ def unrecorded(monkeypatch, manifests):
 def test_ops_rms_norm_modulation_runs_the_reference_on_an_unrecorded_card(unrecorded):
     from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
     from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
-    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
     from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
     from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
     from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
@@ -166,7 +164,6 @@ def test_ops_rms_norm_modulation_runs_the_reference_on_an_unrecorded_card(unreco
 def test_ops_layer_norm_linear_and_gated_residual_run_the_statements_on_an_unrecorded_card(unrecorded):
     from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
     from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
-    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
     from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
     from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
     from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
@@ -185,7 +182,6 @@ def test_ops_layer_norm_linear_and_gated_residual_run_the_statements_on_an_unrec
 def test_ops_conditioned_transition_runs_the_statements_on_an_unrecorded_card(unrecorded):
     from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
     from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
-    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
     from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
     from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
     from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
@@ -205,7 +201,6 @@ def test_ops_conditioned_transition_runs_the_statements_on_an_unrecorded_card(un
 def test_ops_triangle_multiplicative_update_runs_the_reference_on_an_unrecorded_card(unrecorded, direction, pair_mask):
     from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
     from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
-    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
     from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
     from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
     from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
@@ -232,7 +227,6 @@ def test_ops_triangle_multiplicative_update_runs_the_reference_on_an_unrecorded_
 def test_ops_bidirectional_triangle_multiplicative_update_matches_the_module_reference(monkeypatch, manifests):
     from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
     from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
-    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
     from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
     from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
     from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
@@ -286,7 +280,6 @@ def test_a_bf16_trimul_facade_call_asks_the_record(unrecorded):
     """fp32 is a refusal (above: the kernels are bf16 only); a bf16 call on a card without a record is the unrecorded warning."""
     from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
     from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
-    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
     from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
     from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
     from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
@@ -310,8 +303,8 @@ def test_every_kernel_with_a_row_and_a_former_unregistered_op_is_counted():
         "bias_only_attention_layernorm_gemm_triton", "bias_only_attention_bwd_layernorm_gemm_triton"}
     assert set(records.triton_kernels("bias_only_pair_bias", "bf16", "inference")) == {"bias_only_attention_layernorm_gemm_triton"}
     assert "mpnn_message_fwd_gemm_gelu_reduce_triton" in records.triton_kernels("mpnn_message", "bf16", "inference")
-    # the family-wide patterns of TriangleAttention / _op_gated_linear do not pick up the new rows
-    for op in ("triangle_attention", "gated_linear"):
+    # the family-wide pattern of TriangleAttention does not pick up the new rows
+    for op in ("triangle_attention",):
         assert not {"gated_projection_fwd_residual_triton", "bias_only_attention_layernorm_gemm_triton"} & set(records.triton_kernels(op))
     assert "augmented_attention_bwd_atomic_triton" in records.triton_kernels("augmented_attention_pair_bias")   # memory_efficient
 
