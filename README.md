@@ -97,11 +97,12 @@ src/miniworld_engine/
 ├── kernels/            fusion units — one folder per family
 │   ├── <family>/       reference.py · interface.py · [dispatch.py] · [whole_op.py]
 │   │                   cuda/ · triton/ backends · notes/ (dated optimization logs)
+│   ├── integrations/   hand-CUDA entry points wired into modules (trimul_h100, token_dit, …) + their csrc/
 │   ├── drivers/  checks/   autotune-capture harness: one module per registry family
 │   └── registry/       registry.csv (declared kernels) · registry_module.csv (model shapes)
 │                       · registry_kernel.csv (derived plan) · exemption / evidence lists
 ├── modules/            model ops: connect kernels, no backend folders
-├── integrations/       hand-CUDA entry points wired into modules (trimul_h100, token_dit, …)
+├── baselines/          adapters that call external baselines (Anthropic release)
 ├── autotune/           tuner, cache reader/builder · configs/{default,grid,ab/} · data/ (per-GPU caches)
 ├── build/              cache-build matrix and audits
 ├── utils/              atomic writes, typecheck, optimizer migration, h100_master, tools/ (maintenance commands behind `miniworld-engine dev …`), viz/
