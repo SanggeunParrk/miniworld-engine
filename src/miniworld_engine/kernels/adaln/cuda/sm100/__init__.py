@@ -82,6 +82,48 @@ def _load_fused(f32: bool, bn: int, kc: int, dx: int):
     return ext, f"adaln_sm100a_fused_{tag}"
 
 
+#: fp32 at the atom width (d = cond = 128): the one-launch CTA-pair kernel (``adaln_fused2_sm100.cu``). None: from ``FUSED2_MIN_ROWS`` rows;
+#: False / True: never / always (A/B, tests)
+FUSED2: bool | None = None
+#: Where the pair kernel beats the row kernels around cuBLAS (triton do_bench, CUDA graph, us, pair kernel / cuBLAS route / Triton): [40960,
+#: 128] 34.6 / 38.7 / 40.7. At [20480, 128] it ties (26.4 / 26.4 / 26.4): 80 pair tiles on 74 pairs, six of them run a second tile, and each
+#: tile moves 192 KB through one SM (x, cond in, y out) with the x staging single-buffered; at [5120, 128] 18.2 against 16.2.
+FUSED2_MIN_ROWS = 32768
+
+
+@functools.lru_cache(maxsize=2)
+def _load_fused2():
+    from miniworld_engine.kernels import _nvcc
+    from miniworld_engine.kernels.transition.cuda import fused_sm100a
+
+    path = _nvcc.cubin("adaln_sm100a/fused2_f32", ["-std=c++17", "-O3", "-arch=sm_100a", "-cubin", f"-I{_inc}"], source=_dir / "adaln_fused2_sm100.cu",
+                       toolchain="sm100")
+    ext = fused_sm100a._ext()
+    ext.load_cubin("adaln_sm100a_fused2_f32", str(path))
+    return ext, "adaln_sm100a_fused2_f32"
+
+
+def _fused2_fake(x2, c2, wc, wb, ws, bs, eps_x, eps_c, rna):
+    return torch.empty_like(x2)
+
+
+@opaque(fake=_fused2_fake, name="adaln_sm100a_fused2_f32")
+def _fused2(x2: torch.Tensor, c2: torch.Tensor, wc: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, bs: torch.Tensor, eps_x: float, eps_c: float,
+            rna: bool) -> torch.Tensor:
+    """fp32 x2 / c2 [M, 128] contiguous, wb / ws [128, 128] fp32 on the TF32 grid, bs [128] fp32: the CTA-pair kernel. Returns y [M, 128]."""
+    from miniworld_engine.kernels._device import num_sms
+
+    m = x2.shape[0]
+    ext, name = _load_fused2()
+    y = torch.empty_like(x2)
+    npairs = max(1, min(num_sms(x2.device) // 2, -(-m // 256)))
+    t = ext.tmap
+    ext.launch_kernel(name, "adaln_fused2_sm100", 2 * npairs, 320, 2,
+                      [t(wb, 128, 128, 32, 64), t(ws, 128, 128, 32, 64), t(c2, 128, m, 32, 128), t(x2, 128, m, 32, 128), t(y, 128, m, 32, 128),
+                       wc, bs, m, float(eps_c), float(eps_x), int(bool(rna))], False)
+    return y
+
+
 def _fused(x2, c2, wc, wb, ws, bs, eps_x, eps_c, rna, nsm):
     """The one-kernel route (``adaln_fused_sm100.cu``)."""
     f32 = x2.dtype is torch.float32
@@ -298,6 +340,11 @@ def adaln_inference(x, cond, wc, ws, bs, wb, eps_x: float, eps_c: float, *, rna:
     f32 = x.dtype is torch.float32
     params = (ws, wb) if bs is None else (ws, bs, wb)
     d, dc = x.shape[-1], cond.shape[-1]
+    if f32 and d == 128 and dc == 128 and _tf32_allowed() and (FUSED2 or (FUSED2 is None and x.numel() // d >= FUSED2_MIN_ROWS)):
+        wb_, ws_, bs_ = _capture.param_forms("adaln_sm100a_torch.float32", params, lambda: _weights(ws, bs, wb, True))
+        y = _fused2(x.reshape(-1, d).contiguous(), cond.reshape(-1, dc).contiguous(), wc.float().contiguous(), wb_, ws_, bs_, float(eps_x),
+                    float(eps_c), bool(rna))
+        return y.view(x.shape)
     if f32 and (F32_ROUTE == "cublas" or (F32_ROUTE == "auto" and not _f32_tcgen05(x.numel() // max(d, 1), dc, rna))):
         wcat, bcat = _capture.param_forms(
             "adaln_sm100a_f32_cublas", params,

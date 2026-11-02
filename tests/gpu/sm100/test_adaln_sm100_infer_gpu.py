@@ -116,3 +116,36 @@ def test_a_large_mean_keeps_the_statistics(dtype, shape, fused, f32_route):
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=dtype is torch.bfloat16):
         pt = _ref(x, c, wc, ws, bs, wb).to(dtype)   # the same-dtype PyTorch statements (bf16: autocast, LayerNorm in fp32, bf16 GEMMs)
     assert _err(y, ref) <= 1.5 * _err(pt, ref) + 1e-4, (_err(y, ref), _err(pt, ref))
+
+
+@pytest.mark.parametrize("m", [333, 5000, 40000])
+@pytest.mark.parametrize("mean", [0.0, 1e3], ids=["centred", "large_mean"])
+def test_the_pair_kernel_matches_the_reference(m, mean):
+    """fp32 at the atom width: the CTA-pair kernel (``adaln_fused2_sm100.cu``, cta_group::2) against an fp64 reference, within 1.5x the
+    error of the fp32 PyTorch statements, bitwise repeatable, the ``rna`` output on the TF32 grid; rows off the 256-row pair tile and
+    enough for a second tile on some pairs."""
+    from miniworld_engine.kernels.adaln.cuda import sm100
+
+    g = torch.Generator(device="cuda").manual_seed(5)
+    x = torch.randn(m, 128, device="cuda", generator=g) + mean
+    c = torch.randn(m, 128, device="cuda", generator=g) * 2 + 0.5 + mean
+    wc = 1 + 0.3 * torch.randn(128, device="cuda", generator=g)
+    ws = 0.05 * torch.randn(128, 128, device="cuda", generator=g)
+    bs = 0.5 * torch.randn(128, device="cuda", generator=g)
+    wb = 0.05 * torch.randn(128, 128, device="cuda", generator=g)
+    saved = sm100.FUSED2
+    sm100.FUSED2 = True
+    try:
+        with torch.no_grad():
+            y = sm100.adaln_inference(x, c, wc, ws, bs, wb, 1e-5, 1e-5)
+            again = sm100.adaln_inference(x, c, wc, ws, bs, wb, 1e-5, 1e-5)
+            yr = sm100.adaln_inference(x, c, wc, ws, bs, wb, 1e-5, 1e-5, rna=True)
+    finally:
+        sm100.FUSED2 = saved
+    assert torch.equal(y, again)
+    ref = _ref(x.double(), c.double(), wc.double(), ws.double(), bs.double(), wb.double())
+    with torch.no_grad():
+        pt = _ref(x, c, wc, ws, bs, wb)
+    assert _err(y, ref) <= 1.5 * _err(pt, ref) + 1e-6, (_err(y, ref), _err(pt, ref))
+    assert int((yr.view(torch.int32) & 0x1FFF).abs().max()) == 0, "rna output off the TF32 grid"
+    assert _err(yr, ref) <= 1.5 * _err(pt, ref) + 2e-4
