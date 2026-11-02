@@ -118,12 +118,12 @@ def test_a_large_mean_keeps_the_statistics(dtype, shape, fused, f32_route):
     assert _err(y, ref) <= 1.5 * _err(pt, ref) + 1e-4, (_err(y, ref), _err(pt, ref))
 
 
-@pytest.mark.parametrize("m", [333, 5000, 40000])
+@pytest.mark.parametrize("m", [333, 5000, 18945, 19000, 20480, 21312, 21313, 40000])
 @pytest.mark.parametrize("mean", [0.0, 1e3], ids=["centred", "large_mean"])
 def test_the_pair_kernel_matches_the_reference(m, mean):
     """fp32 at the atom width: the CTA-pair kernel (``adaln_fused2_sm100.cu``, cta_group::2) against an fp64 reference, within 1.5x the
     error of the fp32 PyTorch statements, bitwise repeatable, the ``rna`` output on the TF32 grid; rows off the 256-row pair tile and
-    enough for a second tile on some pairs."""
+    enough for a second tile on some pairs; 18945 .. 21312 rows (74 pairs of 256 rows, the rest as 32-row tail tiles one a pair) are the single-pass tail route, 21313 the first count past it."""
     from miniworld_engine.kernels.adaln.cuda import sm100
 
     g = torch.Generator(device="cuda").manual_seed(5)

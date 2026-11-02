@@ -118,10 +118,15 @@ def _fused2(x2: torch.Tensor, c2: torch.Tensor, wc: torch.Tensor, wb: torch.Tens
     ext, name = _load_fused2()
     y = torch.empty_like(x2)
     npairs = max(1, min(num_sms(x2.device) // 2, -(-m // 256)))
+    # a few rows past one 256-row tile a pair (20480 rows on 74 pairs: 80 tiles): the surplus rows go to the pairs as 32-row tail tiles in the
+    # same pass (``mini`` in the kernel) instead of a second tile queued behind the first (+5.9 us of a 12.5 us tile)
+    mini_base = npairs * 256
+    mini = int(m > mini_base and -(-(m - mini_base) // 32) <= npairs)
     t = ext.tmap
     ext.launch_kernel(name, "adaln_fused2_sm100", 2 * npairs, 320, 2,
                       [t(wb, 128, 128, 32, 64), t(ws, 128, 128, 32, 64), t(c2, 128, m, 32, 128), t(x2, 128, m, 32, 128), t(y, 128, m, 32, 128),
-                       wc, bs, m, float(eps_c), float(eps_x), int(bool(rna))], False)
+                       t(c2, 128, m, 32, 16), t(x2, 128, m, 32, 16), t(y, 128, m, 32, 16),
+                       wc, bs, m, float(eps_c), float(eps_x), int(bool(rna)), mini_base, mini], False)
     return y
 
 
