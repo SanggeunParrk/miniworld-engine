@@ -30,6 +30,7 @@ import csv
 import functools
 import hashlib
 import json
+import os
 import re
 import sys
 from collections.abc import Iterable
@@ -50,6 +51,15 @@ SAFETY_PY = (
     "autotune/checkpoint_cases.py", "autotune/module_registry.py", "autotune/native.py", "autotune/fused_config.py",
     "autotune/hopper_cuda_config.py", "autotune/native_history.py",
 )
+#: The measurement path of a native op: how a candidate is built, timed and judged. Outside ``kernels/``, hashed into every NATIVE
+#: identity (an edit to how a candidate is timed can change what the cache claims) but not into a derivation unit (which launches
+#: nothing and times nothing).
+MEASURE_PY = ("autotune/capture.py", "autotune/native_compile.py", "autotune/configs.py", "autotune/buckets.py")
+#: Files outside ``kernels/`` a native closure never follows into: the tools that READ identities (an edit to the rule is a
+#: ``SCHEME`` bump, not a kernel edit), the CLI, the build / viz tooling. ``modules/`` files are members when a closure file
+#: names them, but not followed (the module layer is a consumer of the kernels, not a part of them).
+TOOLING = frozenset({"cli.py", "autotune/identity.py", "autotune/plan.py", "autotune/run_all.py", "autotune/preflight.py",
+                     "autotune/cache_backfill.py", "autotune/space_backfill.py", "autotune/cache_status.py"})
 SAFETY_DATA = ("kernels/registry/registry.csv", "kernels/registry/registry_module.csv")
 SAFETY_GLOBS = ("build/gpu_to_kernels/*.csv",)
 
@@ -92,8 +102,25 @@ def _stat(relpath: str):
     return str(PKG / relpath), st.st_mtime_ns, st.st_size
 
 
+DIR = "dir:"
+
+
+def _listing(relpath: str) -> str:
+    """Digest of the NAMES in a package directory (``dir:<rel>``): what a ``listdir`` / ``glob`` / ``scandir`` saw. ``""`` when it
+    is gone. Byte-code caches are not part of it."""
+    try:
+        names = sorted(n for n in os.listdir(PKG / relpath.removeprefix(DIR)) if n != "__pycache__" and not n.endswith((".pyc", ".pyo")))
+    except OSError:
+        return ""
+    return hashlib.sha256("\n".join(names).encode()).hexdigest()
+
+
 def digests(relpath: str) -> tuple[str, str]:
-    """``(bytes digest, normalized digest)`` of a package file; ``("", "")`` when it does not exist."""
+    """``(bytes digest, normalized digest)`` of a package file; ``("", "")`` when it does not exist. A ``dir:<rel>`` entry is the
+    listing of a directory (a data directory a unit globbed: a new file in it changes the unit's inputs)."""
+    if relpath.startswith(DIR):
+        listing = _listing(relpath)
+        return listing, listing
     key = _stat(relpath)
     return ("", "") if key is None else (_raw(*key), _norm(*key))
 
@@ -112,6 +139,8 @@ def file_token(relpath: str) -> str:
 
 def token_matches(relpath: str, stored: str, stored_scheme: str) -> bool:
     """Bytes equal -> unchanged on any Python; else the normalized halves, only where both were made by the same scheme."""
+    if relpath.startswith(DIR):
+        return bool(stored) and _listing(relpath)[:20] == stored.partition(":")[0]
     key = _stat(relpath)
     if key is None or not stored:
         return False
@@ -143,7 +172,7 @@ def _index() -> tuple[frozenset[str], dict[str, tuple[str, ...]]]:
 def refresh() -> None:
     """Forget the file index and every cached closure (a test that writes files, a long-lived process after a checkout)."""
     _index.cache_clear()
-    for cached in (_deps, _imports, _launchers, _op_files, _registry_text, _raw, _norm, tree_digest, _is_jit, launch_files):
+    for cached in (_deps, _imports, _dynamic_split, outside_files, env_names, _launchers, _op_files, _registry_text, _raw, _norm, tree_digest, _is_jit, launch_files):
         cached.cache_clear()
     native_identity.cache_clear()
 
@@ -203,6 +232,116 @@ def _imports(relpath: str) -> tuple[frozenset[str], frozenset[str]]:
     return frozenset(strict), frozenset(lazy - strict)
 
 
+_IMPORT_CALLS = {"import_module", "__import__", "find_spec"}
+_REL_STRING = re.compile(r"^\.+(?:\w+(?:\.\w+)*)?$")
+
+
+def _leading_text(node: ast.AST) -> tuple[str, bool]:
+    """``(text, complete)``: the leading constant text of a string expression and whether it is the whole value."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value, True
+    if isinstance(node, ast.JoinedStr):
+        out = ""
+        for part in node.values:
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                out += part.value
+            else:
+                return out, False
+        return out, True
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add | ast.Mod):
+        return _leading_text(node.left)[0], False
+    return "", False
+
+
+def dynamic_import_specs(tree: ast.AST, *, is_package_init: bool = False) -> list[tuple[str, str]]:
+    """The imports a source performs by NAME at run time, as ``(kind, text)``; the one place that knows how dispatch is spelled.
+
+    * ``("exact", "a.b")`` / ``("exact", ".rel.name")`` -- ``import_module("a.b")``, ``__import__``, ``find_spec``;
+    * ``("prefix", "a.b.")`` -- ``import_module(f"a.b.{x}")``: any module whose dotted name starts so;
+    * ``("opaque", "")`` -- ``import_module(name)``: no text to go by, so every module under the file's own package;
+    * ``("relative", ".x.y")`` -- a string literal that is a relative module name (a lazy-export table: ``".adaln.interface"``);
+    * ``("children", "")`` -- a package ``__init__`` that defines ``__getattr__`` (PEP 562): every module of the package.
+
+    Everything it cannot read stays conservative: a wider set, never a narrower one."""
+    out: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else ""
+            if name in _IMPORT_CALLS and node.args:
+                text, complete = _leading_text(node.args[0])
+                out.append(("exact" if complete and text else "prefix" if text else "opaque", text))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value not in (".", "..") and _REL_STRING.match(node.value):
+            out.append(("relative", node.value))
+        elif is_package_init and isinstance(node, ast.FunctionDef) and node.name == "__getattr__":
+            out.append(("children", ""))
+    return out
+
+
+def _dotted_of(relpath: str) -> str:
+    parts = list(PurePosixPath(relpath).with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(["miniworld_engine", *parts])
+
+
+def _exact_module(dotted: str) -> list[str]:
+    """The package file of exactly ``dotted`` (no shortening to a parent: a string that merely looks like a module name must be one)."""
+    parts = dotted.split(".")
+    base = "/".join(parts[1:])
+    paths = _index()[0]
+    return [c for c in (f"{base}.py", f"{base}/__init__.py") if base and c in paths][:1]
+
+
+@functools.cache
+def _dynamic_split(relpath: str) -> tuple[frozenset[str], frozenset[str]]:
+    """``(precise, wide)``: the package files a source can import by a name only the running program knows. ``precise`` -- the
+    names the source spells out (an ``import_module("a.b")``, a prefix, a table of relative module names); ``wide`` -- what stands
+    in when it spells none (``import_module(name)`` of a parameter, a ``__getattr__`` package): the whole package tree / its modules."""
+    try:
+        tree = ast.parse((PKG / relpath).read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError):
+        return frozenset(), frozenset()
+    paths = _index()[0]
+    here = PurePosixPath(relpath).parent
+    package = ".".join(["miniworld_engine", *here.parts])
+    precise: set[str] = set()
+    wide: set[str] = set()
+
+    def absolute(text: str) -> str:
+        if not text.startswith("."):
+            return text
+        level = len(text) - len(text.lstrip("."))
+        base = package.split(".")
+        base = base[: len(base) - (level - 1)] if level > 1 else base
+        return ".".join([*base, *([text.lstrip(".")] if text.lstrip(".") else [])])
+
+    for kind, text in dynamic_import_specs(tree, is_package_init=relpath.endswith("__init__.py")):
+        if kind == "exact":
+            precise.update(module_files(absolute(text)))
+        elif kind == "relative":
+            precise.update(_exact_module(absolute(text)))
+        elif kind == "prefix":
+            prefix = absolute(text)
+            precise.update(p for p in paths if p.endswith(".py") and _dotted_of(p).startswith(prefix))
+        elif kind == "opaque":
+            wide.update(p for p in paths if p.endswith(".py") and (here == PurePosixPath(".") or PurePosixPath(p).is_relative_to(here)))
+        elif kind == "children":
+            wide.update(p for p in paths if p.endswith(".py") and (PurePosixPath(p).parent == here or (
+                PurePosixPath(p).name == "__init__.py" and PurePosixPath(p).parent.parent == here)))
+    if precise:
+        wide = set()               # a dispatch table that names its modules is the answer; the fallback only stands in for no names
+    for group in (precise, wide):
+        for p in list(group):
+            group.update(_package_chain(p))
+        group.discard(relpath)
+    return frozenset(precise), frozenset(wide)
+
+
+def _dynamic(relpath: str) -> frozenset[str]:
+    return _dynamic_split(relpath)[0] | _dynamic_split(relpath)[1]
+
+
 def module_files(dotted: str) -> list[str]:
     """The package files that run when ``dotted`` is imported: its module and every parent package ``__init__``."""
     hit = module_file(dotted)
@@ -258,7 +397,7 @@ def _deps(relpath: str) -> frozenset[str]:
 
     if path.suffix == ".py":
         strict, lazy = _imports(relpath)
-        found.update(strict, lazy)
+        found.update(strict, lazy, _dynamic(relpath))        # a name only the running program knows: every module it can mean
         strings = _string_constants(text)                    # names written as code, not in comments or docstrings
         for name in _DOTTED_RE.findall(strings):
             found.update(module_files(name))
@@ -384,10 +523,43 @@ def _native_token(relpath: str) -> str:
     return _norm(*key) if PurePosixPath(relpath).suffix in CCODE else _raw(*key)
 
 
+def _py_deps(relpath: str) -> frozenset[str]:
+    """What a python file names as code: its imports (function-level too), the modules its strings and dispatch tables name."""
+    strict, lazy = _imports(relpath)
+    found = set(strict) | set(lazy) | set(_dynamic(relpath))
+    try:
+        strings = _string_constants((PKG / relpath).read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        strings = ""
+    for name in _DOTTED_RE.findall(strings):
+        found.update(module_files(name))
+    found.discard(relpath)
+    return frozenset(found)
+
+
+@functools.cache
+def outside_files(op: str) -> tuple[str, ...]:
+    """The files OUTSIDE ``kernels/`` a native op uses: what its closure files import or name (the capture / compile / config
+    helpers, the integrations a kernel module reaches back into) and the measurement path (:data:`MEASURE_PY`), followed through their
+    imports. Not the tooling (:data:`TOOLING`), and not into ``modules/`` (a member when named, never followed)."""
+    base = [p for p in op_files(op) if p.endswith(".py")]
+    queue = [d for f in [*base, *MEASURE_PY] for d in _py_deps(f) if not d.startswith("kernels/")] + [m for m in MEASURE_PY if (PKG / m).is_file()]
+    seen: set[str] = set()
+    while queue:
+        node = queue.pop()
+        if node in seen or node in TOOLING or node.startswith(("build/", "viz/")):
+            continue
+        seen.add(node)
+        if node.endswith(".py") and not node.startswith("modules/"):
+            queue.extend(d for d in _py_deps(node) if d not in seen and not d.startswith("kernels/"))
+    return tuple(sorted(seen))
+
+
 def native_files(op: str) -> list[str]:
-    """Every file the native cache of ``op`` depends on: its closure and the safety set (the registry CSVs enter as the op's own row)."""
+    """Every file the native cache of ``op`` depends on: its closure, the files outside ``kernels/`` it uses and the safety set
+    (the registry CSVs enter as the op's own row)."""
     row_only = set(SAFETY_DATA) | {p for p in op_files(op) if p.startswith("build/gpu_to_kernels/")}
-    return sorted((set(op_files(op)) - row_only) | set(safety_files(data=False)))
+    return sorted((set(op_files(op)) - row_only) | set(outside_files(op)) | set(safety_files(data=False)))
 
 
 def _mathdx() -> str:
@@ -424,20 +596,96 @@ def native_aggregate(ops: Iterable[str]) -> str:
 
 
 # ------------------------------------------------------------------------------------------------------ a derivation unit
-def unit_files(executed: Iterable[str], modules: Iterable[str], data: Iterable[str], ops: Iterable[str]) -> list[str]:
+def lazy_reach(executed: Iterable[str]) -> set[str]:
+    """What code that ran can still reach without that reach having been observed: the function-level imports and the name-dispatched
+    modules of every executed python file (with what they import at module level), and the data files such a file names. A constant
+    read through a hub's lazy import in a unit that ran no function of the hub is covered here, not by luck."""
+    out: set[str] = set()
+    for relpath in set(executed):
+        if not relpath.endswith(".py"):
+            continue
+        for dep in (*_imports(relpath)[1], *_dynamic_split(relpath)[0]):       # the names a unit performed are recorded at run time
+            out |= strict_closure([dep])
+        out.update(d for d in _deps(relpath) if not d.endswith(".py"))
+    return out
+
+
+def unit_files(executed: Iterable[str], modules: Iterable[str], data: Iterable[str], ops: Iterable[str], listed: Iterable[str] = ()) -> list[str]:
     """The files one derivation unit depends on.
 
     ``executed`` -- package files whose code ran while the unit was recorded; ``modules`` -- dotted names its import statements
-    named (executed lazy imports included); ``data`` -- package files it opened. Plus what a constant imported at module level can
-    come from (:func:`strict_closure` of the first two), the files of every kernel it launched (:func:`launch_files`: row file,
-    JIT helpers, driver) and the safety set."""
+    named (executed lazy imports included); ``data`` -- package files it opened; ``listed`` -- package directories it listed
+    (``listdir`` / ``scandir`` / ``glob``), kept as ``dir:<rel>`` entries whose token is the listing. Plus what a constant imported at
+    module level can come from (:func:`strict_closure` of the first two), what the executed code can import lazily or by name
+    (:func:`lazy_reach`), the files of every kernel it launched (:func:`launch_files`: row file, JIT helpers, driver) and the safety set."""
+    executed = set(executed)
     seeds = set(executed)
     for name in modules:
         seeds.update(module_files(name))
-    files = strict_closure(seeds) | set(data) | set(safety_files())
+    files = strict_closure(seeds) | lazy_reach(seeds) | set(data) | set(safety_files())
+    files |= {f"{DIR}{PurePosixPath(d).as_posix()}" for d in listed}
     for op in set(ops):
         files.update(launch_files(op))
     return sorted(files)
+
+
+# ----------------------------------------------------------------------------------------------------------- the toolchain
+#: Distributions whose version changes what a kernel compiles to or which bucket key a launch makes.
+TOOLCHAIN_DISTS = ("torch", "triton", "transformer-engine", "cuequivariance", "cuequivariance-ops-torch-cu12", "flash-attn-4",
+                   "nvidia-cuda-runtime-cu12", "nvidia-cuda-nvcc-cu12", "nvidia-cublas-cu12", "nvidia-mathdx", "nvidia-cutlass-dsl", "cuda-python")
+#: Environment variables the engine reads that cannot change a derivation / a measurement (where it runs, not what it computes).
+ENV_OPERATIONAL = frozenset({"MINIWORLD_COMPILE_WRAP", "CUDA_VISIBLE_DEVICES", "HOME", "USER", "PATH", "PWD", "TMPDIR", "XDG_CACHE_HOME",
+                             "LD_LIBRARY_PATH", "PYTHONPATH", "CONDA_PREFIX", "CUTLASS_PATH", "TRITON_CACHE_DIR", "QUACK_CACHE_ENABLED"})
+ENV_PREFIXES = ("MINIWORLD_", "TRITON_", "TORCH_", "TORCHINDUCTOR_", "CUDA_", "NVIDIA_", "NVCC_", "CUTE_", "QUACK_", "CUEQ_", "NVTE_")
+_ENV_RE = re.compile(r"""(?:environ(?:\.get|\.setdefault|\.pop)?\s*[(\[]|getenv\s*\(|\bin\s+(?:os\.)?environ\b)[^"'\n]{0,40}["']([A-Z][A-Z0-9_]+)["']|["']([A-Z][A-Z0-9_]+)["']\s+in\s+(?:os\.)?environ""")
+
+
+@functools.cache
+def env_names() -> tuple[str, ...]:
+    """Every environment variable a package source reads by name (a literal passed to ``environ`` / ``getenv``), limited to the
+    prefixes that belong to the engine and its toolchain and minus the operational ones."""
+    names: set[str] = set()
+    for relpath in _index()[0]:
+        if relpath.endswith(".py"):
+            try:
+                text = (PKG / relpath).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            names.update(a or b for a, b in _ENV_RE.findall(text))
+    return tuple(sorted(n for n in names if n.startswith(ENV_PREFIXES) and n not in ENV_OPERATIONAL))
+
+
+def toolchain() -> dict:
+    """What a derivation / a native cache was made under and is only valid for: the Python minor, the version of every toolchain
+    distribution (``torch`` carries its CUDA build in its local version, ``+cu129``), and the value of every engine environment
+    variable that is set. A change of any of them marks the evidence stale: the graph's inputs are not only files."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    versions = {}
+    for dist in TOOLCHAIN_DISTS:
+        try:
+            versions[dist] = version(dist)
+        except PackageNotFoundError:
+            versions[dist] = "absent"
+    return {"python": f"{sys.version_info[0]}.{sys.version_info[1]}", "versions": versions,
+            "env": {n: os.environ[n] for n in env_names() if n in os.environ}}
+
+
+def toolchain_diff(stored: dict | None) -> list[str]:
+    """How ``stored`` (a recorded :func:`toolchain`) differs from now; ``[]`` when equal."""
+    now = toolchain()
+    out = []
+    if (stored or {}).get("python") != now["python"]:
+        out.append(f"python {(stored or {}).get('python')} -> {now['python']}")
+    for dist in sorted(set(now["versions"]) | set((stored or {}).get("versions", {}))):
+        was, is_ = (stored or {}).get("versions", {}).get(dist), now["versions"].get(dist)
+        if was != is_:
+            out.append(f"{dist} {was} -> {is_}")
+    for name in sorted(set(now["env"]) | set((stored or {}).get("env", {}))):
+        was, is_ = (stored or {}).get("env", {}).get(name), now["env"].get(name)
+        if was != is_:
+            out.append(f"env {name} {was!r} -> {is_!r}")
+    return out
 
 
 def files_digest(files: Iterable[str]) -> str:
