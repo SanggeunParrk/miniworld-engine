@@ -5,9 +5,8 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint, checkpoint_sequential
 from typing_extensions import Self
 
-from miniworld_engine._blocks.blocks._engine_impl import to_engine_impl
-from miniworld_engine._blocks.exceptions import ImplementationType
-from miniworld_engine._blocks.typing import typecheck
+from miniworld_engine.modules.exceptions import ImplementationType
+from miniworld_engine._typecheck import typecheck
 from miniworld_engine.modules import (
     AttentionPairBias,
     BidirectionalTriangleMultiplication,
@@ -46,20 +45,20 @@ class PairformerBlock(nn.Module):
             # here (honest dispatch — no silent reroute to miniworld_engine).
             self.tri_multi = BidirectionalTriangleMultiplication(
                 d_pair=d_pair,
-                implementation=to_engine_impl(implementation),
+                implementation=implementation,
                 p_drop=p_drop,
             )
         else:
             self.tri_multi_outgoing = TriangleMultiplication(
                 d_pair=d_pair,
                 outgoing=True,
-                implementation=to_engine_impl(implementation),
+                implementation=implementation,
                 p_drop=p_drop,
             )
             self.tri_multi_incoming = TriangleMultiplication(
                 d_pair=d_pair,
                 outgoing=False,
-                implementation=to_engine_impl(implementation),
+                implementation=implementation,
                 p_drop=p_drop,
             )
         if use_triangle_attention:
@@ -69,7 +68,7 @@ class PairformerBlock(nn.Module):
                 starting=True,
                 use_self_attention=use_self_attention,
                 use_qk_norm=use_qk_norm,
-                implementation=to_engine_impl(implementation),
+                implementation=implementation,
                 p_drop=p_drop,
             )
             self.tri_atten_ending = TriangleAttention(
@@ -78,7 +77,7 @@ class PairformerBlock(nn.Module):
                 starting=False,
                 use_self_attention=use_self_attention,
                 use_qk_norm=use_qk_norm,
-                implementation=to_engine_impl(implementation),
+                implementation=implementation,
                 p_drop=p_drop,
             )
         # residual + drop_row/drop_col are OWNED by the miniworld_engine modules now (unconditional
@@ -91,7 +90,7 @@ class PairformerBlock(nn.Module):
         # errors here (honest dispatch — no silent reroute to miniworld_engine).
         self.transition_pair = Transition(
             d_pair,
-            implementation=to_engine_impl(implementation),
+            implementation=implementation,
         )
 
         if use_single:
@@ -102,7 +101,7 @@ class PairformerBlock(nn.Module):
                 use_qk_norm=use_qk_norm,
             )
             self.transition_single = Transition(
-                d_single, implementation=to_engine_impl(implementation)
+                d_single, implementation=implementation
             )
 
     @classmethod

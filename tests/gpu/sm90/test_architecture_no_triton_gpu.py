@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from miniworld_engine import settings
-from miniworld_engine._blocks.blocks.swa_atom_transformer import SWAAtomTransformer
+from miniworld_engine.modules.swa_atom_transformer import SWAAtomTransformer
 from miniworld_engine.modules.swa_atom_attention import build_attention_params
 
 pytestmark = [
@@ -86,11 +86,11 @@ def _step(model, args, dtype, grad):
 @pytest.mark.parametrize("grad", [False, True], ids=["inference", "training"])
 @pytest.mark.parametrize("length", [100, 256])
 def test_the_pairformer_launches_no_triton(triton_launches, length, grad, dtype):
-    from miniworld_engine._blocks.blocks.pairformer import Pairformer
-    from miniworld_engine._blocks.exceptions import ImplementationType
+    from miniworld_engine.build.coverage_blocks.pairformer import Pairformer
+    from miniworld_engine.modules.exceptions import ImplementationType
 
     config = Pairformer.Config(
-        n_block=2, p_drop=0.0, use_bidirectional_trimul=True, implementation=ImplementationType.MINIWORLD_ENGINE
+        n_block=2, p_drop=0.0, use_bidirectional_trimul=True, implementation=ImplementationType.MINIWORLD
     )
     model = Pairformer(config).cuda()
     pair = torch.randn(1, length, length, 128, device="cuda", dtype=dtype, requires_grad=grad)
@@ -103,10 +103,10 @@ def test_the_pairformer_launches_no_triton(triton_launches, length, grad, dtype)
 @pytest.mark.parametrize("grad", [False, True], ids=["inference", "training"])
 @pytest.mark.parametrize("length", [100, 256])
 def test_the_diffusion_transformer_launches_no_triton(triton_launches, length, grad, dtype):
-    from miniworld_engine._blocks.blocks.diffusion_transformer import DiffusionTransformer
-    from miniworld_engine._blocks.exceptions import ImplementationType
+    from miniworld_engine.build.coverage_blocks.diffusion_transformer import DiffusionTransformer
+    from miniworld_engine.modules.exceptions import ImplementationType
 
-    config = DiffusionTransformer.Config(n_block=2, implementation=ImplementationType.MINIWORLD_ENGINE)
+    config = DiffusionTransformer.Config(n_block=2, implementation=ImplementationType.MINIWORLD)
     model = DiffusionTransformer(config).cuda()
     single = torch.randn(2, 1, length, 768, device="cuda", dtype=dtype, requires_grad=grad)
     cond = torch.randn(2, 1, length, 384, device="cuda", dtype=dtype)

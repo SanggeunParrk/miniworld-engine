@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from miniworld_engine import settings
-from miniworld_engine._blocks.blocks.swa_atom_transformer import SWAAtomTransformer
+from miniworld_engine.modules.swa_atom_transformer import SWAAtomTransformer
 from miniworld_engine.modules.swa_atom_attention import build_attention_params
 
 pytestmark = [

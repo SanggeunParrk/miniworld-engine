@@ -8,10 +8,9 @@ from pydantic import BaseModel
 from torch import nn
 from torch.utils.checkpoint import checkpoint, checkpoint_sequential
 
-from miniworld_engine._blocks.blocks._engine_impl import to_engine_impl
-from miniworld_engine._blocks.blocks.pair_bias_hoist import pair_bias_all
-from miniworld_engine._blocks.exceptions import ImplementationType
-from miniworld_engine._blocks.typing import typecheck
+from miniworld_engine.build.coverage_blocks.pair_bias_hoist import pair_bias_all
+from miniworld_engine.modules.exceptions import ImplementationType
+from miniworld_engine._typecheck import typecheck
 from miniworld_engine.modules import AugmentedAttentionPairBias
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.functional import sigmoid_gate
@@ -172,7 +171,7 @@ class DiffusionTransformerBlock(DiTBlock):
             d_pair,
             n_head,
             use_qk_norm=use_qk_norm,
-            implementation=to_engine_impl(implementation),
+            implementation=implementation,
         )
         self.register_load_state_dict_pre_hook(_load_legacy_names)
 

@@ -5,7 +5,7 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine._blocks.blocks.pairformer import (
+from miniworld_engine.build.coverage_blocks.pairformer import (
     PairformerBlock,
     _parallel_residual,
 )

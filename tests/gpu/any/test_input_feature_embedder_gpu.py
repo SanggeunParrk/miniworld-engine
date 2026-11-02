@@ -8,7 +8,7 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine._blocks.exceptions import ImplementationType
+from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules import InputFeatureEmbedder
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")]
@@ -46,12 +46,12 @@ def _model(implementation, window=128, features="legacy"):
 
 
 def test_parameter_names_match_the_miniworld_encoder():
-    names = {n.split(".")[0] for n, _ in _model(ImplementationType.MINIWORLD_ENGINE).named_parameters()}
+    names = {n.split(".")[0] for n, _ in _model(ImplementationType.MINIWORLD).named_parameters()}
     assert names == {"to_atom_single_cond", "atom_transformer", "atom_single_rep_to_token_single"}
 
 
 def test_esmfold2_layout_adds_the_condition_layernorm_and_drops_the_terminal_norm():
-    model = _model(ImplementationType.MINIWORLD_ENGINE, features="esmfold2")
+    model = _model(ImplementationType.MINIWORLD, features="esmfold2")
     names = {n.split(".")[0] for n, _ in model.named_parameters()}
     assert names == {"to_atom_single_cond", "atom_norm", "atom_transformer", "atom_single_rep_to_token_single"}
     assert model.to_atom_single_cond.weight.shape == (128, 3 + 1 + 1 + 128)
@@ -82,7 +82,7 @@ def test_esmfold2_layout_is_the_esmfold2_encoder(dtype):
     from miniworld_engine.modules.input_feature_embedder.module import atom_single_features_esmfold2
     from miniworld_engine.modules.swa_atom_attention.module import build_attention_params
 
-    model = _model(ImplementationType.MINIWORLD_ENGINE, features="esmfold2")
+    model = _model(ImplementationType.MINIWORLD, features="esmfold2")
     pos, _ref_mask, element, charge, space_uid, atom_mask, atom_to_token, n_token = _inputs()
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=dtype is torch.bfloat16):
         y = model(pos, _ref_mask, element, charge, space_uid, atom_mask, atom_to_token, n_token).float()
@@ -104,10 +104,10 @@ def test_the_linear_token_pool_is_layernorm_linear_mean_without_relu():
     -- no ReLU, so the pooled features take both signs; the default keeps the ReLU."""
     from miniworld_engine.modules.swa_atom_attention.module import build_attention_params
 
-    model = _model(ImplementationType.MINIWORLD_ENGINE, features="esmfold2+linear")
+    model = _model(ImplementationType.MINIWORLD, features="esmfold2+linear")
     assert isinstance(model.atom_out_norm, torch.nn.LayerNorm)
     assert not any(isinstance(m, torch.nn.ReLU) for m in model.modules())
-    assert any(isinstance(m, torch.nn.ReLU) for m in _model(ImplementationType.MINIWORLD_ENGINE, features="esmfold2").modules())
+    assert any(isinstance(m, torch.nn.ReLU) for m in _model(ImplementationType.MINIWORLD, features="esmfold2").modules())
     with pytest.raises(ValueError, match="token_pool"):
         InputFeatureEmbedder(128, 384, n_head=4, n_block=3, token_pool="gelu")
     pos, ref_mask, element, charge, space_uid, atom_mask, atom_to_token, n_token = _inputs()
@@ -131,7 +131,7 @@ def test_the_linear_token_pool_is_layernorm_linear_mean_without_relu():
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
 @pytest.mark.parametrize("grad", [False, True], ids=["inference", "training"])
 def test_matches_the_pytorch_implementation(dtype, grad, window, features, monkeypatch):
-    engine = _model(ImplementationType.MINIWORLD_ENGINE, WINDOWS[window], features)
+    engine = _model(ImplementationType.MINIWORLD, WINDOWS[window], features)
     fused = []
     original = type(engine.atom_transformer)._forward_fused
     monkeypatch.setattr(type(engine.atom_transformer), "_forward_fused", lambda *a: fused.append(1) or original(*a))
@@ -172,7 +172,7 @@ def test_no_triton_on_h100_or_b200(monkeypatch, grad, window, features):
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(jit.JITFunction, "run", run)
-    model = _model(ImplementationType.MINIWORLD_ENGINE, WINDOWS[window], features)
+    model = _model(ImplementationType.MINIWORLD, WINDOWS[window], features)
     with torch.set_grad_enabled(grad), torch.autocast("cuda", dtype=torch.bfloat16):
         y = model(*_inputs())
         if grad:
@@ -193,7 +193,7 @@ def test_a_default_window_cell_stays_on_cuda(grad, window, monkeypatch):
     launches = collections.Counter()
     original = jit.JITFunction.run
     monkeypatch.setattr(jit.JITFunction, "run", lambda self, *a, **k: launches.update([self.fn.__name__]) or original(self, *a, **k))
-    model = _model(ImplementationType.MINIWORLD_ENGINE, WINDOWS[window])
+    model = _model(ImplementationType.MINIWORLD, WINDOWS[window])
     with torch.set_grad_enabled(grad), torch.autocast("cuda", dtype=torch.bfloat16):
         y = model(*_inputs(n=4096, n_token=512))
         if grad:

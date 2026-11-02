@@ -115,10 +115,8 @@ def test_config_covers_every_width():
 
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] not in (9, 10), reason="H100 / B200 routing")
 def test_engine_layernorms_take_the_general_kernel_on_h100_and_b200(monkeypatch):
-    """modules.LayerNorm (MINIWORLD) and architecture.primitives.LayerNorm (MINIWORLD_ENGINE) run the general kernel on the cards with no
+    """modules.LayerNorm (MINIWORLD) runs the general kernel on the cards with no
     Triton fallback, with the module's fp32 affine, and match their PyTorch reference in value and gradient."""
-    from miniworld_engine._blocks.exceptions import ImplementationType as ArchImpl
-    from miniworld_engine._blocks.primitives import LayerNorm as ArchLayerNorm
     from miniworld_engine.kernels.layernorm.cuda import general
     from miniworld_engine.modules import LayerNorm
     from miniworld_engine.modules.exceptions import ImplementationType
@@ -126,8 +124,7 @@ def test_engine_layernorms_take_the_general_kernel_on_h100_and_b200(monkeypatch)
     calls = []
     real = general.layernorm_cuda
     monkeypatch.setattr(general, "layernorm_cuda", lambda *a, **k: calls.append(1) or real(*a, **k))
-    for make, impl, ref_impl in ((LayerNorm, ImplementationType.MINIWORLD, ImplementationType.PYTORCH),
-                                 (ArchLayerNorm, ArchImpl.MINIWORLD_ENGINE, ArchImpl.PYTORCH)):
+    for make, impl, ref_impl in ((LayerNorm, ImplementationType.MINIWORLD, ImplementationType.PYTORCH),):
         mod = make(128, implementation=impl).cuda()
         ref = make(128, implementation=ref_impl).cuda()
         with torch.no_grad():
@@ -144,4 +141,4 @@ def test_engine_layernorms_take_the_general_kernel_on_h100_and_b200(monkeypatch)
         for a, e in zip(*outs, strict=True):
             assert a.dtype == e.dtype
             assert rel(a, e) < 1e-2
-    assert len(calls) == 2
+    assert len(calls) == 1

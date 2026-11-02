@@ -338,7 +338,7 @@ def test_the_esmfold2_atom_transformer(card, launches, fused):
 
 
 def _esmfold2(card, launches, fused):
-    from miniworld_engine._blocks.blocks.swa_atom_transformer import (
+    from miniworld_engine.modules.swa_atom_transformer import (
         SWAAtomTransformer,
     )
     from miniworld_engine.modules.swa_atom_attention import build_attention_params

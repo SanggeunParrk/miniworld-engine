@@ -33,7 +33,7 @@ import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
 from torch import nn
 
-from miniworld_engine._blocks.exceptions import ImplementationType
+from miniworld_engine.modules.exceptions import ImplementationType
 
 #: Reference features per atom: position (3), mask, element, arcsinh(charge).
 N_ATOM_FEATURES = 6
@@ -96,14 +96,11 @@ class InputFeatureEmbedder(nn.Module):
         uid_rope_base_frequency: float = 10000.0,
         features: AtomFeatures = "legacy",
         token_pool: TokenPool = "relu",
-        implementation: ImplementationType = ImplementationType.MINIWORLD_ENGINE,
+        implementation: ImplementationType = ImplementationType.MINIWORLD,
     ) -> None:
         super().__init__()
-        # Imported here: the architecture package imports `miniworld_engine.modules`, which imports this file.
-        from miniworld_engine._blocks.blocks._engine_impl import to_engine_impl
-        from miniworld_engine._blocks.blocks.swa_atom_transformer import SWAAtomTransformer
-        from miniworld_engine._blocks.primitives import LayerNorm, Linear
-        from miniworld_engine.modules.primitives import RMSNorm
+        from miniworld_engine.modules.swa_atom_transformer import SWAAtomTransformer
+        from miniworld_engine.modules.primitives import LayerNorm, Linear, RMSNorm
 
         if features not in ("legacy", "esmfold2"):
             message = f"features must be 'legacy' or 'esmfold2', got {features!r}"
@@ -147,7 +144,7 @@ class InputFeatureEmbedder(nn.Module):
         elif features == "esmfold2":
             self.atom_out_norm = nn.Identity()
         else:
-            self.atom_out_norm = RMSNorm(d_atom, elementwise_affine=False, implementation=to_engine_impl(implementation))
+            self.atom_out_norm = RMSNorm(d_atom, elementwise_affine=False, implementation=implementation)
         self.atom_single_rep_to_token_single = nn.Sequential(
             Linear(d_atom, d_token, init="default", bias=False),
             *([nn.ReLU()] if token_pool == "relu" else []),

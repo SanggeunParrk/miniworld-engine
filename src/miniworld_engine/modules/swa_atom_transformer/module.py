@@ -21,24 +21,44 @@ from pydantic import BaseModel
 from torch.utils.checkpoint import checkpoint_sequential
 
 from miniworld_engine import kernels, settings
-from miniworld_engine._blocks._engine_impl import (
-    to_engine_impl_pointwise,
-    torch_pointwise,
-)
-from miniworld_engine._blocks.blocks._engine_impl import to_engine_impl
-from miniworld_engine._blocks.exceptions import ImplementationType, legacy_options_removed
-from miniworld_engine._blocks.primitives import Linear
-from miniworld_engine._blocks.typing import typecheck
+from miniworld_engine._typecheck import typecheck
 from miniworld_engine.modules import RMSNorm
 from miniworld_engine.modules.dispatch import (
     fallback_autocast,
     portable_blocked,
     restricted_card,
 )
+from miniworld_engine.modules.exceptions import ImplementationType
+from miniworld_engine.modules.primitives import Linear
 from miniworld_engine.modules.swa_atom_attention.module import (
     SWA3DRoPEAttention,
     build_3d_rope,
 )
+
+
+_B200_CAPABILITY = (10, 0)
+
+
+def torch_pointwise() -> bool:
+    """Whether pointwise and normalization modules run as PyTorch ops here (B200 policy: the pieces around the GEMMs and attention are PyTorch
+    ops that ``torch.compile`` fuses; ``settings.b200_portable_kernels`` keeps the engine Triton kernels, the A/B switch). Call it when a module
+    is BUILT: it asks the device, which a traced forward must not."""
+    if not (torch.cuda.is_available() and torch.cuda.get_device_capability() == _B200_CAPABILITY):
+        return False
+    return not getattr(settings.current(), "b200_portable_kernels", True)
+
+
+def _pointwise_impl(implementation: ImplementationType) -> ImplementationType:
+    """``implementation``, or PyTorch under :func:`torch_pointwise`."""
+    return ImplementationType.PYTORCH if torch_pointwise() else implementation
+
+
+def _legacy_options_removed(where: str, **options: bool) -> None:
+    """The legacy magnitude-preserving options were removed: accepted as false (configs that spell them out keep loading), they raise when on."""
+    on = sorted(name for name, value in options.items() if value)
+    if on:
+        msg = f"{where}: the legacy option(s) {", ".join(on)} were removed; restore them from git history if needed."
+        raise NotImplementedError(msg)
 
 
 def _record_dtype(dtype: torch.dtype) -> str:
@@ -55,10 +75,10 @@ class SwiGLUFFN(nn.Module):
         expansion_ratio: int = 2,
         *,
         magnitude_preserving: bool = False,
-        implementation: ImplementationType = ImplementationType.MINIWORLD_ENGINE,
+        implementation: ImplementationType = ImplementationType.MINIWORLD,
     ) -> None:
         super().__init__()
-        legacy_options_removed("SwiGLUFFN", magnitude_preserving=magnitude_preserving)
+        _legacy_options_removed("SwiGLUFFN", magnitude_preserving=magnitude_preserving)
         hidden = ((expansion_ratio * (d_model // 3) * 2) + 255) // 256 * 256
         self.implementation = implementation
         self._pointwise = torch_pointwise()
@@ -67,7 +87,7 @@ class SwiGLUFFN(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         engine = (
-            self.implementation == ImplementationType.MINIWORLD_ENGINE
+            self.implementation == ImplementationType.MINIWORLD
             and x.is_cuda
             and not self._pointwise
             and not restricted_card(x.device)  # H100 / B200 have no Triton fallback: the PyTorch statements below run
@@ -112,10 +132,10 @@ class SWAAtomBlock(nn.Module):
         mp_full: bool = False,
         mp_residual: bool = False,
         residual_t: float = 0.3,
-        implementation: ImplementationType = ImplementationType.MINIWORLD_ENGINE,
+        implementation: ImplementationType = ImplementationType.MINIWORLD,
     ) -> None:
         super().__init__()
-        legacy_options_removed(
+        _legacy_options_removed(
             "SWAAtomBlock",
             magnitude_preserving=magnitude_preserving,
             mp_full=mp_full,
@@ -127,12 +147,12 @@ class SWAAtomBlock(nn.Module):
         self.attn_norm = RMSNorm(
             d_atom,
             elementwise_affine=False,
-            implementation=to_engine_impl_pointwise(implementation),
+            implementation=_pointwise_impl(implementation),
         )
         self.ffn_norm = RMSNorm(
             d_atom,
             elementwise_affine=False,
-            implementation=to_engine_impl_pointwise(implementation),
+            implementation=_pointwise_impl(implementation),
         )
         # ESMFold2 adaLN-Zero
         self.adaln_modulation = nn.Sequential(
@@ -143,7 +163,7 @@ class SWAAtomBlock(nn.Module):
             d_atom,
             n_head,
             half_window=half_window,
-            implementation=to_engine_impl(implementation),
+            implementation=implementation,
         )
         # the engine attention keeps its flash core; its q/k-norm + RoPE and
         # output gate are PyTorch ops under the B200 policy
@@ -161,7 +181,7 @@ class SWAAtomBlock(nn.Module):
         attention_params: tuple,
     ) -> Float[torch.Tensor, "N S d_atom"]:
         engine = (
-            self.implementation == ImplementationType.MINIWORLD_ENGINE
+            self.implementation == ImplementationType.MINIWORLD
             and q.is_cuda
             and not self._pointwise
             and not restricted_card(q.device)  # H100 / B200 have no Triton fallback: the PyTorch statements below run
@@ -297,7 +317,7 @@ class SWAAtomTransformer(nn.Module):
                     mp_residual=config.mp_residual,
                     residual_t=config.residual_t,
                     implementation=config.implementation
-                    or ImplementationType.MINIWORLD_ENGINE,
+                    or ImplementationType.MINIWORLD,
                 )
                 for _ in range(config.n_block)
             ],
