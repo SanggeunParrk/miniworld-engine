@@ -272,7 +272,7 @@ def gate_elem_bwd(dy: torch.Tensor, x_n: torch.Tensor, proj: torch.Tensor, gate:
     d_proj = torch.empty_like(dy)
     d_glogit = torch.empty_like(dy)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
-    # gate_elem_bwd is the 2-D-only ``GateElem`` autograd path: x_n arrives already flattened
+    # gate_elem_bwd is the 2-D-only form: x_n arrives already flattened
     # to (M, K), so L has to come from ``seq_len``.
     _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit,
                                    dropscale.reshape(int(seq_len), N).contiguous(), int(seq_len), M, N=N,
@@ -280,32 +280,3 @@ def gate_elem_bwd(dy: torch.Tensor, x_n: torch.Tensor, proj: torch.Tensor, gate:
     dx_gate = d_glogit @ Wg.t()            # (M, K)  cuBLAS
     dWg = xn_flat.t() @ d_glogit           # (K, N)  cuBLAS
     return d_proj, dx_gate, dWg
-
-
-class GateElem(torch.autograd.Function):
-    """autograd.Function over 2D tensors. x_n:(M,K) proj:(M,N) Wg:(K,N) residual:(M,N) -> y:(M,N).
-    Saves gate+proj+x_n (the simple training save design). Caller reshapes to/from 4D.
-
-    NOTE: nothing in the repo calls ``GateElem.apply`` any more -- the v6 merged training
-    Function subsumed it. It is kept because it is the readable statement of the split back
-    half's autograd, and it is held to the same contract as the rest: the residual is an input,
-    not an option, and its gradient is the identity.
-    """
-
-    @staticmethod
-    def forward(ctx, x_n, proj, Wg, residual, dropscale, seq_len):
-        # TRAINING: triton gate (cuBLAS gemm + one triton sigmoid·mul pass, gate saved FREE).
-        # Training needs `gate` for the bwd, so it is saved here rather than recomputed from a
-        # preact (measured: the preact write + bwd σ recompute cost more than a fused fwd saves).
-        y, gate = gate_elem_train(x_n, proj, Wg, residual, dropscale, seq_len)
-        ctx.save_for_backward(x_n, proj, gate, Wg, dropscale)
-        ctx.seq_len = seq_len
-        return y
-
-    @staticmethod
-    def backward(ctx, dy):
-        x_n, proj, gate, Wg, dropscale = ctx.saved_tensors
-        d_proj, dx_gate, dWg = gate_elem_bwd(dy, x_n, proj, gate, Wg, dropscale, ctx.seq_len)
-        # d(y = residual + ds*proj*gate)/d(residual) = 1, so the residual's grad is dy untouched.
-        # dropscale and seq_len take no gradient.
-        return dx_gate, d_proj, dWg, dy, None, None

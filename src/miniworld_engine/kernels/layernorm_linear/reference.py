@@ -34,36 +34,6 @@ def layernorm_linear_pytorch(
     return F.linear(normed, weight, bias)
 
 
-def fold_weights(
-    weight: torch.Tensor,     # (d_out, d_in)  — nn.Linear layout
-    ln_weight: torch.Tensor,  # (d_in,)  gamma
-    ln_bias: torch.Tensor,    # (d_in,)  beta
-    bias: torch.Tensor | None,  # (d_out,)
-    *,
-    w2_dtype: torch.dtype = torch.bfloat16,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Precompute the folded GEMM operands (prologue).
-
-    The GEMM contracts over K=d_in, so it wants W with shape (K, N) = weight.T.
-    Returns ``W2 (K, N), S (N,), B2 (N,)`` matching the kernel's math:
-
-        W2[k,n] = gamma[k] * W[k,n]          (stored in the GEMM operand dtype)
-        S[n]    = sum_k W2[k,n]              (FP32, reduced from the *stored* W2!)
-        B2[n]   = sum_k beta[k] * W[k,n] + bias[n]   (FP32)
-
-    Crucial: ``S`` is the column-sum of the *rounded* ``W2`` (the values the GEMM
-    actually multiplies), not of ``gamma*W`` in FP32 — otherwise ``acc - mean*S``
-    leaves a residual common-mode term.
-    """
-    W = weight.t().contiguous()                       # (K, N)
-    W2 = (ln_weight[:, None].float() * W.float()).to(w2_dtype)   # (K, N)
-    S = W2.float().sum(dim=0)                          # (N,)  from the stored W2
-    B2 = ln_bias.float() @ W.float()                   # (N,)
-    if bias is not None:
-        B2 = B2 + bias.float()
-    return W2, S, B2
-
-
 class LayerNormLinearRef(nn.Module):
     """`nn.LayerNorm` -> `nn.Linear`, the eager module handed to `torch.compile`.
 
