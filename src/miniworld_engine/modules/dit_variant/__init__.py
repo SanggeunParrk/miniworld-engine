@@ -1,4 +1,5 @@
-"""DiT block variants of Boltz-2, RoseTTAFold3 and Chai-1 (inference)."""
+"""DiT block variants of Boltz-2, RoseTTAFold3 and Chai-1 (inference). The stacks are the modules; the per-block classes (``DiTVariantBlock``,
+``AtomDiTVariantBlock``, ``VariantAdaLN``) are parts of a stack and are imported from ``dit_variant.module`` by nothing else."""
 
 from miniworld_engine.modules.dit_variant.module import (
     BOLTZ2,
@@ -7,11 +8,8 @@ from miniworld_engine.modules.dit_variant.module import (
     CHAI1_ATOM,
     ROSETTAFOLD3,
     ROSETTAFOLD3_ATOM,
-    AtomDiTVariantBlock,
     AtomDiTVariantStack,
-    DiTVariantBlock,
     DiTVariantStack,
-    VariantAdaLN,
     serves_portable,
 )
 
@@ -22,10 +20,7 @@ __all__ = [
     "CHAI1_ATOM",
     "ROSETTAFOLD3",
     "ROSETTAFOLD3_ATOM",
-    "AtomDiTVariantBlock",
     "AtomDiTVariantStack",
-    "DiTVariantBlock",
     "DiTVariantStack",
-    "VariantAdaLN",
     "serves_portable",
 ]

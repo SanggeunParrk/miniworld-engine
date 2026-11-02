@@ -16,3 +16,11 @@ from miniworld_engine.kernels.rmsnorm.triton.main import (
 )
 
 __all__ = ["triton_rmsnorm", "triton_rmsnorm_adamod"]
+
+
+def rms_norm(x, weight=None, eps=1e-5):
+    """RMSNorm over the last axis on the kernel backend the running card takes (see ``_ops_routed.rms_norm``): the entry point for a caller that
+    needs the op alone, without building a module."""
+    from miniworld_engine.kernels._ops_routed import rms_norm as _routed
+
+    return _routed(x, weight, eps)

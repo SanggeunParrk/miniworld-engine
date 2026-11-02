@@ -138,3 +138,20 @@ def gated_residual(x: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor) ->
     )
 
     return _gated_residual(x, gate, branch)
+
+
+def rms_norm(x: torch.Tensor, weight: torch.Tensor | None = None, eps: float = 1e-5) -> torch.Tensor:
+    """RMSNorm over the last axis, routed per card like :func:`layer_norm`: H100 / B200 the general CUDA RMSNorm (the PyTorch statements for a call
+    it does not take), a card without a record the PyTorch statements, every other card the portable ``triton_rmsnorm``."""
+    from miniworld_engine.modules.dispatch import portable_blocked
+
+    if _no_triton(x):
+        from miniworld_engine.kernels import _h100_ops
+
+        out = _h100_ops.rms_norm_rows(x, weight, eps)
+        return out if out is not None else F.rms_norm(x, (x.shape[-1],), weight, eps)
+    if x.is_cuda and portable_blocked("rmsnorm", x.device, x, *(t for t in (weight,) if t is not None)):
+        return F.rms_norm(x, (x.shape[-1],), weight, eps)
+    from miniworld_engine.kernels.rmsnorm.triton.main import triton_rmsnorm
+
+    return triton_rmsnorm(x, weight, eps)
