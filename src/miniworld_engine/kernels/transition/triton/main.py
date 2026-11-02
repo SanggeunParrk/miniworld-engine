@@ -21,11 +21,6 @@ from jaxtyping import Float
 from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.autotune.shape_key import both_key, length_of, pack, rows_of
 
-def get_seq_group(length) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    from miniworld_engine.autotune.buckets import bucket_mixed
-    return bucket_mixed(length)
-
 # Cache-narrowing prunes composed OVER the smem safety prune (see autotune package). Bucket on
 # the autotune key (shape_key, ND, K); dtype from x (defaults bf16). Separate op ids for fwd/bwd
 # since their best tiles differ. Miss/stale -> warn once + full grid.

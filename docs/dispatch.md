@@ -128,9 +128,8 @@ inputs, so the three paths give the same result for the same draws. `serves(...)
 ## The `ops.*` entry points
 
 Every weights-as-args facade follows the same rule: `ops.transition`, `ops.augmented_attention_pair_bias`,
-`ops.swiglu_ffn`, `ops.layer_norm`, `ops.triangle_attention` (its attention core, and its QK norm under the `rmsnorm` record),
-`ops.triangle_multiplicative_update` / `ops.bidirectional_triangle_multiplicative_update` (op `triangle_multiplication`),
-`ops.conditioned_transition` (its SwiGLU tail: op `swiglu_ffn`), `ops.layer_norm_linear`, `ops.rms_norm_modulation` and `ops.gated_residual`
+`ops.swiglu_ffn`, `ops.layer_norm`,
+`ops.triangle_multiplicative_update` (op `triangle_multiplication`), `ops.layer_norm_linear`, `ops.rms_norm_modulation` and `ops.gated_residual`
 call `dispatch.portable_blocked(op, device, *tensors)` first (CUDA path, recorded portable, else the PyTorch statements and the same warning),
 asking the rows at the call's precision (`dispatch.record_dtype`: fp32 for an fp32 activation, bf16 otherwise) and mode (training when a
 tensor needs a gradient). The TriMul and triangle-attention cores are bf16 only: another dtype is a `KernelRefusedWarning` and the PyTorch

@@ -490,85 +490,6 @@ def sparse_neighbor_attention(
     return out * valid.unsqueeze(-1).unsqueeze(-1)
 
 
-@torch.no_grad()
-def build_local_structure_neighbor_indices(
-    x_t: Float[torch.Tensor, "N S 3"],
-    valid: Bool[torch.Tensor, "N S"],
-    *,
-    seq_neighbors: int = 128,
-    structure_neighbors: int = 128,
-    query_chunk_size: int = 128,
-) -> tuple[Int[torch.Tensor, "N S K"], Bool[torch.Tensor, "N S K"]]:
-    """Build sequence-local plus x_t-nearest neighbor indices.
-
-    The sequence-local set is the nearest ``seq_neighbors`` atoms in valid atom
-    order and includes self. The structure set takes the nearest
-    ``structure_neighbors`` atoms by current noisy coordinates after excluding
-    the sequence-local set, so the concatenated set is duplicate-free.
-
-    This avoids full [N, S, S] distance tensors; each batch row and query chunk
-    is processed independently to keep peak memory bounded.
-    """
-    n, s = valid.shape
-    device = valid.device
-    if seq_neighbors < 1:
-        raise ValueError("seq_neighbors must be >= 1 so every valid atom includes self.")
-    if structure_neighbors < 0:
-        raise ValueError("structure_neighbors must be >= 0.")
-
-    seq_k = min(seq_neighbors, s)
-    struct_k = min(structure_neighbors, s)
-    total_k = seq_k + struct_k
-    neighbor_idx = torch.zeros(n, s, total_k, dtype=torch.int32, device=device)
-    neighbor_mask = torch.zeros(n, s, total_k, dtype=torch.bool, device=device)
-
-    coords = x_t.to(torch.float32)
-    for b in range(n):
-        valid_pos = torch.nonzero(valid[b], as_tuple=False).flatten()
-        m = int(valid_pos.numel())
-        if m == 0:
-            continue
-
-        row_seq_k = min(seq_k, m)
-        ranks = torch.arange(m, device=device)
-        rank_dist = (ranks[:, None] - ranks[None, :]).abs().to(torch.float32)
-        # Stable tie-break toward lower atom index for deterministic neighbors.
-        rank_dist = rank_dist + valid_pos.view(1, m).to(torch.float32) * 1e-6
-        _, seq_rank_idx = torch.topk(rank_dist, k=row_seq_k, dim=-1, largest=False)
-        seq_atom_idx = valid_pos[seq_rank_idx]
-        neighbor_idx[b, valid_pos, :row_seq_k] = seq_atom_idx.to(torch.int32)
-        neighbor_mask[b, valid_pos, :row_seq_k] = True
-
-        if struct_k == 0:
-            continue
-
-        row_struct_k = min(struct_k, max(m - row_seq_k, 0))
-        if row_struct_k == 0:
-            continue
-
-        row_coords = coords[b, valid_pos]
-        for q_start in range(0, m, query_chunk_size):
-            q_stop = min(q_start + query_chunk_size, m)
-            q_pos = valid_pos[q_start:q_stop]
-            d2 = torch.cdist(row_coords[q_start:q_stop], row_coords, p=2).square()
-            seq_excluded = torch.zeros(q_stop - q_start, m, dtype=torch.bool, device=device)
-            seq_excluded.scatter_(1, seq_rank_idx[q_start:q_stop, :row_seq_k], True)
-            d2 = d2.masked_fill(seq_excluded, float("inf"))
-            d2 = d2 + valid_pos.view(1, m).to(torch.float32) * 1e-6
-            struct_vals, struct_rank_idx = torch.topk(
-                d2, k=row_struct_k, dim=-1, largest=False
-            )
-            offset = seq_k
-            neighbor_idx[b, q_pos, offset:offset + row_struct_k] = valid_pos[
-                struct_rank_idx
-            ].to(torch.int32)
-            neighbor_mask[b, q_pos, offset:offset + row_struct_k] = torch.isfinite(
-                struct_vals
-            )
-
-    return neighbor_idx, neighbor_mask
-
-
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1, x2 = x.chunk(2, dim=-1)
     return torch.cat((-x2, x1), dim=-1)
@@ -593,7 +514,7 @@ def apply_rotary_emb_3d(
     # cos/sin are fp32 (angle precision), which promotes a bf16 x to fp32. Do the
     # rotation math in the promoted dtype but cast back to the input dtype, so q/k
     # keep the same dtype as the (unrotated) v — otherwise SDPA rejects the mixed
-    # dtypes and flash silently upcasts. Mirrors _qk_norm's `.to(x.dtype)`.
+    # dtypes and flash silently upcasts.
     x_rot = (x_rot * cos + _rotate_half(x_rot) * sin).to(x.dtype)
     return torch.cat([x_rot, x[..., ro_dim:]], dim=-1)
 
@@ -658,36 +579,6 @@ def build_3d_rope(
         freqs = torch.cat([freqs, pad], dim=-1)
 
     return freqs.cos(), freqs.sin()
-
-
-def _qk_norm(x: torch.Tensor) -> torch.Tensor:
-    """RMSNorm over head_dim, non-affine -- ESMFold2 Algorithm 8's q/k normalization.
-
-    Through the `rmsnorm` family rather than `F.rms_norm`, which is three HBM passes and holds
-    the normalized activation for the backward; the kernel is one pass and recomputes it from
-    the saved row statistic.
-
-    ``eps`` is spelled out, and it is fp32's epsilon and not bf16's. `F.rms_norm` documents its
-    default as ``torch.finfo(x.dtype).eps``, but that is not what it does on a bf16 input: it
-    accumulates in fp32 and the epsilon follows the ACCUMULATION dtype. Measured against this
-    kernel at [4, 512, 4, 32] bf16, matching what F.rms_norm actually computes --
-
-        eps = finfo(float32).eps   rel 1.9e-05   <- rounding, i.e. the same function
-        eps = 1e-5                 rel 1.8e-04
-        eps = finfo(bfloat16).eps  rel 5.0e-03   <- 0.0078; a 0.5% change, not a rounding one
-
-    -- so passing the input dtype's epsilon, which is what the documentation reads like, would
-    have made this a numerical change wearing a scheduling change's clothes.
-
-    Eager on CPU: the kernel is CUDA-only and the module's unit tests are not.
-    """
-    from miniworld_engine.modules import dispatch as _dispatch
-
-    if not x.is_cuda or not _dispatch.portable_leg_allowed(x.device, "swa_atom_attention", dtype=_dispatch.record_dtype(x)):   # H100 / B200: no Triton fallback; other cards: only with a record
-        return F.rms_norm(x, (x.size(-1),), eps=torch.finfo(torch.float32).eps).to(x.dtype)
-    from miniworld_engine import kernels
-
-    return kernels.triton_rmsnorm(x, None, torch.finfo(torch.float32).eps).to(x.dtype)
 
 
 class SWA3DRoPEAttention(nn.Module):

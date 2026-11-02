@@ -54,9 +54,7 @@ def augmented_attention_pair_bias(
                 return cuda_sm90.augmented_attention_bf16_sm90(q_, k_, v_, b_, mask).transpose(2, 3).to(in_dtype)
         if query.device.type == "cuda" and not torch.compiler.is_compiling() and query.dim() == 5:
             # any other dtype / head layout / length: the memory-efficient SDPA kernel with the pair bias (fp32 accumulation, no L^2 scores)
-            from miniworld_engine.kernels import _h100_ops
-
-            return _h100_ops.augmented_attention_sdpa(query, key, value, bias, mask).to(in_dtype)
+            return augmented_attention_sdpa(query, key, value, bias, mask).to(in_dtype)
         from miniworld_engine.kernels.augmented_attention.reference import (
             augmented_attention_pair_bias_pytorch,
         )
@@ -79,3 +77,32 @@ def augmented_attention_pair_bias(
     b = bias.permute(0, 2, 3, 1)
     out = _fn(q, k, v, b, mask, compute_efficient=kernel_type == "compute_efficient")           # (A,B,L,H,D)
     return out.transpose(2, 3).to(in_dtype)  # -> (A,B,H,L,D)
+
+
+def augmented_attention_sdpa(query, key, value, bias, mask):
+    """Pair-biased attention for the calls the sm_90 core does not take (any dtype, head width and length): ``(A, B, H, L, D)`` q / k / v,
+    bias ``(B, H, L, L)``, key mask ``(A, B, L)``, through ``F.scaled_dot_product_attention`` (memory-efficient kernel with an additive
+    bias; fp32 accumulation, the scores are never materialised). Masked keys carry the dtype's minimum (a fully masked row averages uniformly
+    where the reference returns zeros: no row of the model's masks is fully masked)."""
+    import torch.nn.functional as F
+
+    from miniworld_engine.kernels._device import on_h100
+
+    A, B, H, L, D = query.shape
+    add = bias.unsqueeze(0).expand(A, B, H, L, L)
+    if mask is not None:
+        add = torch.where(mask[:, :, None, None, :], add, torch.finfo(add.dtype).min)
+    q, k, v = (t.reshape(A * B, H, L, D) for t in (query, key, value))
+    add = add.reshape(A * B, H, L, L).to(query.dtype)
+    grad = torch.is_grad_enabled() and any(t.requires_grad for t in (query, key, value, bias))
+    if not grad and query.dtype is torch.bfloat16 and on_h100(query):
+        # no gradient: the cuDNN attention (1.3 - 1.6x the memory-efficient kernel at bf16; it has no gradient for an additive bias), the
+        # memory-efficient kernel when cuDNN refuses the call
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+
+        try:
+            with sdpa_kernel([SDPBackend.CUDNN_ATTENTION]):
+                return F.scaled_dot_product_attention(q, k, v, attn_mask=add).reshape(A, B, H, L, D)
+        except RuntimeError:
+            pass
+    return F.scaled_dot_product_attention(q, k, v, attn_mask=add).reshape(A, B, H, L, D)

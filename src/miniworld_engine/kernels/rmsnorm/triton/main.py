@@ -21,7 +21,7 @@ What is kept, because it was measured there and the shape regime is the same kin
   * both tile axes tuned, and the row statistics kept in fp32 whatever the activation dtype.
 
 ``HAS_WEIGHT`` is new. The two callers disagree: ``modules/swa_atom_attention`` normalizes q and k
-with no learnable weight, while ``kernels/triangle_attention/whole_op.py`` passes one. A constexpr
+with no learnable weight, while the triangle-attention QK norm passes one. A constexpr
 branch serves both without a dummy ones-vector, which would otherwise cost a full N-wide load and
 multiply per row for the caller that has no weight.
 """

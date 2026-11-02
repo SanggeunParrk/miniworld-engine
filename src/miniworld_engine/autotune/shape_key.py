@@ -375,36 +375,6 @@ def shape_bucket(length: int, level: str) -> int:
     return _floor_clamp(int(length), buckets)
 
 
-def dim_bucket(d: int) -> int:
-    """Bucket a channel width.
-
-    Unlike the shape axis this does NOT clamp or floor: the declared widths are the widths kernels
-    are built for, so a value outside the set means the caller is running a width nobody tuned, and
-    silently folding it into a neighbour would hide that. Raise instead.
-    """
-    d = int(d)
-    if d not in DIM_BUCKETS:
-        raise ValueError(
-            f"dimension {d} is not one of {DIM_BUCKETS}. Widths are exact: a config tuned at a "
-            f"different width was tuned for a different register and smem footprint. Add the width "
-            f"to DIM_BUCKETS and re-tune, or dispatch this call elsewhere."
-        )
-    return d
-
-
-def pair_length(rows: int) -> int:
-    """L from a pair kernel's flattened row count M = L*L, for call sites that only have M."""
-    import math
-
-    L = math.isqrt(int(rows))
-    if int(rows) != L * L:
-        raise ValueError(
-            f"row count {rows} is not a perfect square, so it did not come from an L*L pair; pass "
-            f"L directly instead of asking this helper to recover it."
-        )
-    return L
-
-
 def token_key(length: int, **axes: int) -> int:
     """Shape key for a token/pair-level kernel (`level=token` in registry.csv).
 

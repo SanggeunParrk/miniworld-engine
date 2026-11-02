@@ -30,15 +30,13 @@ A row whose keys are all masked would be ``0/0``; the kernel floors the softmax
 denominator so such a row yields all-zero probabilities and a finite zero output,
 and this reference does the same.
 
-Provided as an ``nn.Module`` (:class:`AugmentedAttentionPairBiasReference`) so a
-kernel can be checked on both the forward output and the backward gradients, plus
-a plain functional form (:func:`augmented_attention_pair_bias_pytorch`).
+A kernel is checked on both the forward output and the backward gradients against the
+plain functional form (:func:`augmented_attention_pair_bias_pytorch`).
 """
 
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 
 # The kernel floors the running row max before subtracting it, and floors the softmax
 # denominator, so a fully masked row stays finite instead of producing 0/0 = NaN.
@@ -90,33 +88,6 @@ def augmented_attention_pair_bias_pytorch(
         value.to(acc_dtype),
     )
     return out.to(compute_dtype)
-
-
-class AugmentedAttentionPairBiasReference(nn.Module):
-    """nn.Module reference for augmented attention with pair bias.
-
-    Holds no parameters. The kernel entry point takes ``query``/``key``/``value``/
-    ``bias`` directly and owns no weights, so a backward comparison differentiates
-    with respect to those four input tensors rather than module state; the module
-    exists only to give tests the same shape of object as the weight-owning
-    references, e.g.::
-
-        ref = AugmentedAttentionPairBiasReference()
-        o = ref(q, k, v, bias, mask)                                  # reference
-        ok = triton_augmented_attention_pair_bias(q, k, v, bias, mask)  # kernel
-        o.sum().backward()                                    # -> q.grad, bias.grad
-    """
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        bias: torch.Tensor,
-        mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Forward pass; differentiable in ``query``, ``key``, ``value``, ``bias``."""
-        return augmented_attention_pair_bias_pytorch(query, key, value, bias, mask)
 
 
 def window_logits_pytorch(

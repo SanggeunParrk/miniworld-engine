@@ -11,12 +11,6 @@ import triton.language as tl
 from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
 
 
-def get_seq_group(length) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    from miniworld_engine.autotune.buckets import bucket_mixed
-    return bucket_mixed(length)
-
-
 # (The hand-CUDA warp-per-row LN backward is NOT here: it lives in kernels/layernorm/cuda/masked_bwd.py and is chosen by the caller.)
 
 # The two shipped kernels (`layer_norm_fwd_fused`, `layer_norm_bwd_dx_fused`) tile the FEATURE
@@ -431,37 +425,3 @@ def triton_layernorm(x, weight, bias, eps, row_scale=None):
     if bias is None:
         bias = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float32)
     return TritonLayerNormFunction.apply(x, weight, bias, eps, row_scale)
-
-
-def _triton_layernorm_masked_fake(x, weight, bias, eps, row_scale):
-    """Same shape and dtype as x -- row_scale is a per-row factor, it does not reshape."""
-    return torch.empty_like(x)
-
-
-@opaque(fake=_triton_layernorm_masked_fake, name="layernorm_masked_fwd")
-def triton_layernorm_masked(
-    x: torch.Tensor,
-    weight: torch.Tensor | None,
-    bias: torch.Tensor | None,
-    eps: float,
-    row_scale: torch.Tensor,
-) -> torch.Tensor:
-    """Forward-only LN with a per-row scale folded into the epilogue (free) — for the
-    AF triangle pair-mask: y = LN(x) * row_scale[row]. row_scale is [M] (or anything
-    reshapeable to [M]); broadcast over the feature dim. No autograd (bench/inference)."""
-    x_2d = x.reshape(-1, x.shape[-1]).contiguous()
-    y_2d = torch.empty_like(x_2d)
-    M, N = x_2d.shape
-    mean = torch.empty(M, dtype=torch.float32, device=x.device)
-    rstd = torch.empty(M, dtype=torch.float32, device=x.device)
-    rs = row_scale.reshape(-1).to(x_2d.dtype).contiguous()
-    # fmt: off
-    grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
-    layer_norm_fwd_fused[grid](
-        x_2d, y_2d, weight, bias, mean, rstd, rs,
-        x_2d.stride(0), x_2d.stride(1),
-        M, N, eps,
-        shape_key=both_key(rows_of(x.shape), N=N), HAS_ROWSCALE=True,
-    )
-    # fmt: on
-    return y_2d.view_as(x)

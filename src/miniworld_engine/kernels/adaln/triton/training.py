@@ -59,12 +59,6 @@ _GEMM_BF16 = False
 _ATOM_D_MAX = 128
 
 
-def set_gemm_bf16(flag: bool) -> None:
-    """Enable bf16 operands (fp32 accumulate) for the GEMMs on fp32 inputs (faster, cos≈0.9999)."""
-    global _GEMM_BF16  # noqa: PLW0603
-    _GEMM_BF16 = flag
-
-
 def _mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """a@b. fp32 inputs: bf16 operands (fp32 accum) if _GEMM_BF16 else TF32 cuBLAS."""
     if _GEMM_BF16 and a.dtype == torch.float32:
@@ -563,12 +557,6 @@ def _dgrad_condln(D: torch.Tensor, w_cat: torch.Tensor, cond: torch.Tensor,
 # True/False force the choice (for benchmarking). wgrad (dW) is ALWAYS cuBLAS (per directive).
 _DGRAD_TRITON = None
 _DGRAD_TRITON_NC_MAX = 256   # fused triton dgrad wins for NC ≤ this (memory-bound regime)
-
-
-def set_dgrad_triton(flag) -> None:
-    """Select dgrad impl: None=auto (by NC), True=force fused triton, False=force cuBLAS+_ln_bwd."""
-    global _DGRAD_TRITON  # noqa: PLW0603
-    _DGRAD_TRITON = flag
 
 
 @triton.autotune(configs=configs_for("adaln_fwd_gate_triton"), key=["shape_key"])

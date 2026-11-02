@@ -31,13 +31,7 @@ import triton.language as tl
 # 1024 == the wrapper's K ceiling, so "one tile holds the whole row" (the schedule this
 # kernel was written for) is still reachable; every smaller candidate is made correct by the
 # k-loops below rather than silently wrong.
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
 from miniworld_engine.autotune.shape_key import both_key
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
 
 
 # HAS_BIAS is keyed: it is constexpr, so the two variants already compile separately, but the

@@ -10,6 +10,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
+- `miniworld_engine.kernels` exports `swiglu_ffn`, `transition_layer` (the whole Transition layer with weights as arguments, `transition/interface.py::transition`; not named `transition`, which is the subpackage) and
+  `triangle_multiplicative_update` (cuequivariance-signature, residual form): each names a family interface, as FoldForge calls them as standalone ops.
 - `dev code-graph --diff BASE` / `--repo`: the whole repository as one graph (every file a node; import, lazy import, include, reference,
   cache and identity edges) and what a change reaches and owes: tests, docs, caches, the CUDA artifacts that rebuild, restamp / derive,
   the stale evidence now; `--check` exits 2 on stale evidence. `build/repo_graph.py`.
@@ -84,8 +86,24 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 ### Removed
 
 - `miniworld_engine.architecture` is no longer part of the engine: the diffusion processes (EDM, decoupled x-pred), the SE(3) / align / transform helpers, `tensor_layout`, the model layers, the checkpoint adapters (`mark_dead_modules`, the attention backend adapters) and the RoPE-SWA / MSA / template blocks belong to the models that use them; they stay in git history. The SWA atom transformer that `modules.InputFeatureEmbedder` holds is now `modules.swa_atom_transformer` (on the engine enum `ImplementationType.MINIWORLD`); the Pairformer / DiffusionTransformer blocks the bundle coverage driver runs are `build/coverage_blocks` (build time only). `legacy` magnitude-preserving / rotation options are gone with the layers.
-- `miniworld_engine.ops` (the whole-op namespace) is removed. `modules.swa_dit` and the autotune checkpoint cases call the kernel entry points (`kernels/_ops_routed.py`, `kernels/*/whole_op.py`) directly; a model that needs a single op connects to the kernel backend rather than building a module around it. `tools/`, `viz/`, `_atomic`, `_typecheck`, `integrations/optimizer`, `integrations/h100_master` moved under `utils/`.
+- `miniworld_engine.ops` (the whole-op namespace) is removed. `modules.swa_dit` and the autotune checkpoint cases call the kernel entry points (the family `interface.py` files, `kernels/*/whole_op.py`) directly; a model that needs a single op connects to the kernel backend rather than building a module around it. `tools/`, `viz/`, `_atomic`, `_typecheck`, `integrations/optimizer`, `integrations/h100_master` moved under `utils/`.
 - `gated_linear` (the weights-as-args gate + output projection) is removed with its CUDA wrapper, its `registry_module.csv` rows and its checkpoint case: no engine module, MiniWorld / FoldForge source calls it.
+- `kernels/_h100_ops.py` and `kernels/_ops_routed.py` (what the deleted `ops` facade left behind) are dissolved into the families they served; behaviour on every live path is unchanged:
+  `layer_norm` -> `layernorm/interface.py`; `rms_norm`, `rms_norm_modulation` -> `rmsnorm/interface.py` (their H100 statements and `rms_norm_rows` in `rmsnorm/cuda/h100.py`);
+  `swiglu_ffn` -> `transition/interface.py` (H100 CUDA wrapper `_SwiGLUFFN` in `conditioned_transition/cuda/swiglu_ffn.py`); `gated_residual` ->
+  `gated_projection/interface.py`; `layer_norm_linear` -> `layernorm_linear/interface.py` (the token DiT's CUDA pair-bias wrapper in `layernorm_linear/cuda/pair_bias.py`, which
+  `modules/bias_only_dit` imports); `augmented_attention_sdpa` and the H100 TriMul wrapper stay with their `whole_op.py`; `on_h100` / `no_triton` are in `kernels/_device.py`.
+- Whole-ops nothing called are removed: `kernels/conditioned_transition/whole_op.py`, `kernels/triangle_attention/whole_op.py` (with the H100 triangle-attention core wrapper and its chunked PyTorch core),
+  and `bidirectional_triangle_multiplicative_update` (`trimul_inproj/whole_op.py`), with the tests that only exercised them. The registry rows they reached are still reached by the modules.
+- Dead code, each name re-verified by grep over src / tests / benchmarks / docs and string uses: the `get_seq_group` shim of 16 Triton / baseline files and `trimul_inproj/triton/_autotune.py` (it held only that shim);
+  the unused `*Reference` classes of 10 family `reference.py` files (`AdaLNReference`, `AugmentedAttentionPairBiasReference`, `BiasOnlyAttentionReference`, `ConditionedTransitionReference`,
+  `GatedProjectionReference`, `TM1Reference`, `TM2Reference`, `TransitionReference`, `TrimulInProjReference`, `TriangleAttentionReference`, `TriangleAttentionPairBiasReference`; the reference functions stay);
+  `autotune.native.ops_identity`, `autotune.records.routing_table`, `augmented_attention.cuda.natural_forward` / `natural_backward`, `layernorm.triton.main.triton_layernorm_masked`,
+  `swa_dit.autograd.H100ModulationLinear`, `trimul_inproj.autograd.trimul_manual`, `triangle_attention.cuda.b200_triattn.TriAttnCore`, `modules.transition.module.nvtx_range`,
+  `integrations.token_dit.require_hopper_native`, `autotune.shape_key.pair_length` / `dim_bucket`, adaln `set_gemm_bf16` / `set_dgrad_triton`, `transition.triton.fused._SwiGLUFFNFused`,
+  `transition.cuda.cuda_transition_b2b` / `cuda_transition_expand_gate`, `swa_atom_attention.module.build_local_structure_neighbor_indices` / `_qk_norm`, `modules.dispatch.is_sm86`,
+  `autotune.devices.kernels_for` / `runnable_kernels`, `build.coverage_blocks.diffusion_transformer.upgrade_legacy_keys`, `swa_dit.cuda.loader.jit_root`,
+  `augmented_attention.cuda.sm100_atom.load_all` / `owned_wgrad_hopper`, `_nvcc.cutlass_available`, `layernorm_linear.reference.layernorm_linear_folded`, `fused_pair_tf32._gmp_bwd`.
 - Bare environment variables of kernel files became settings (read once, when the kernel module is imported; the old names warn): `ADALN_XT/FM/MODE/ATOM/FP32_WG` -> `adaln_xt/adaln_fm/adaln_mode/adaln_atom/adaln_fp32_wg`, `CT_XT/CT_FM` -> `ct_xt/ct_fm`, `OPM_FUSED_DEFS` -> `opm_fused_defs`, `MINIWORLD_PAIR_EMBED_BWD_IMPL` -> `pair_embed_bwd_impl`. `miniworld-engine dev derive` no longer needs `MINIWORLD_COMPILE_WRAP=disable` exported: it re-runs itself with it.
 - `integrations/` is `kernels/integrations/` (the per-card wiring is implementation); the Anthropic adapters are `baselines/`.
 - code graph: the paths a python file builds from segments (`ROOT / "docs" / name`, `Path(__file__).parents[2] / ...`, `glob` / `rglob` of a directory) are edges (`build/repo_paths.py`); `dev code-graph --diff BASE --gpu ARCH` judges only that card's evidence; `kernels.layer_norm` / `kernels.rms_norm` are the entry points for a caller that needs the op alone.

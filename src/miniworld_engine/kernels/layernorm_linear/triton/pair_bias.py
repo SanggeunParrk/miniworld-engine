@@ -38,13 +38,7 @@ MIN_TL_DOT_DIM = 16
 
 # shape_key is keyed: the grid is cdiv(M, BLOCK_M1) and M is the pair row count (B*L^2), so one
 # BLOCK_M1 was being reused from L=128 to L=1024+.
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
 from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
 
 
 @triton.autotune(configs=configs_for("layernorm_linear_fwd_fp32_triton"),

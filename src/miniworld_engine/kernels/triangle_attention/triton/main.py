@@ -14,13 +14,6 @@ from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.autotune.shape_key import pack, token_key
 
 
-def get_seq_group(length) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    from miniworld_engine.autotune.buckets import bucket_squared
-    return bucket_squared(length * length)
-
-
-
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
 # reduction over d, so it tiles with an accumulating loop and HEAD_DIM_PAD joins the sweep.
 

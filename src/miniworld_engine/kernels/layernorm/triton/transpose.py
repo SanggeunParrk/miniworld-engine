@@ -32,13 +32,7 @@ from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 # forced D to be a power of two and left no column mask. It is the REDUCE axis (mean/var over D),
 # so it is a CSV tile; a row at or above the extent keeps the whole-row schedule
 # is still reachable and the tuner picks it wherever the second pass is not worth the registers.
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
 from miniworld_engine.autotune.shape_key import both_key, pack
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
 
 
 @triton.autotune(configs=configs_for("layernorm_fwd_mmajor_triton"), key=['shape_key'])

@@ -17,12 +17,6 @@ from miniworld_engine.autotune.shape_key import pack, token_key
 AUTOTUNE = settings.current().autotunes("tri_attention")
 
 
-def get_seq_group(L) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    from miniworld_engine.autotune.buckets import bucket_squared
-    return bucket_squared(L * L)
-
-
 @triton.jit
 def _attn_fwd_inner(
     acc,

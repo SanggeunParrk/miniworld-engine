@@ -100,13 +100,6 @@ def op_identity(op: str) -> str:
     return identity.native_identity(op)
 
 
-def ops_identity(ops=None) -> str:
-    """One digest over the identities of ``ops`` (default: every native op): moves exactly when one of their graphs moves."""
-    from miniworld_engine.autotune import identity
-
-    return identity.native_aggregate(BUILD_OPS if ops is None else ops)
-
-
 def policy_identity():
     """Search policy invalidates completed build units, never compatible timings."""
     digest = hashlib.sha256()

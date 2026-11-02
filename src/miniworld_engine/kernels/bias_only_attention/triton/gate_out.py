@@ -38,12 +38,6 @@ from miniworld_engine.autotune.shape_key import both_key, length_of, pack, rows_
 
 
 
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
 
 
 def _key_of(shape) -> int:

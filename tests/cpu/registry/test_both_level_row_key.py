@@ -132,7 +132,7 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
     """
     expect = {"transition": {"pair", "token"},
               # rmsnorm: pair through triangle_attention's qk-norm
-              # (kernels/triangle_attention/whole_op.py) and atom through the SWA atom block's
+              # (the triangle-attention module) and atom through the SWA atom block's
               # `_qk_norm` (modules/swa_atom_attention/module.py). No token stream: the token-DiT
               # user was the adaLN modulate, now the rmsnorm_adamod family.
               "rmsnorm": {"pair", "atom"},

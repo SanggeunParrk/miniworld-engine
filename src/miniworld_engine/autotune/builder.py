@@ -822,9 +822,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #
     # These are the model's own widths, not DIM_BUCKETS. `cases()` states them -- d_pair 128,
     # d_single 384 -- and driving the two the model actually runs costs 2x, where the six declared
-    # buckets would cost 6x to tune four widths nothing asks for. `dim_bucket` still refuses
-    # anything outside DIM_BUCKETS at runtime, so an unlisted width is a loud miss, not a silent
-    # one.
+    # buckets would cost 6x to tune four widths nothing asks for.
     # The WIDTH ladder per class. `level` says which LENGTH axis a kernel is on; `width` says which
     # side's channel width it sees, and the two are independent -- a kernel can be token-level and
     # still be driven at several d_pair values. Ladders come from what the model runs: d_pair walks

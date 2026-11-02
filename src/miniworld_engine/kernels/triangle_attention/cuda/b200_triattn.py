@@ -53,27 +53,6 @@ def supports(length: int) -> bool:
     return length > 0 and length % TOK == 0
 
 
-class TriAttnCore(torch.autograd.Function):
-    """out = softmax(scale q.k + bias) v on [B, N, S, H, 32] tensors, bias [B, H, S, S]."""
-
-    @staticmethod
-    def forward(ctx, q, k, v, bias, scale):
-        out, lse, _ = _core(_rows_per_task(q.shape[2])).triattn_fwd(q, k, v, bias, scale, any(ctx.needs_input_grad))
-        ctx.save_for_backward(q, k, v, bias, out, lse)
-        ctx.scale = scale
-        return out
-
-    @staticmethod
-    def backward(ctx, dout):
-        q, k, v, bias, out, lse = ctx.saved_tensors
-        e = _core(_rows_per_task(q.shape[2]))
-        dout = dout.contiguous()
-        delta = e.triattn_delta(dout, out)
-        E = q.new_empty(0)
-        dq, dk, dv, db = e.triattn_bwd(q, k, v, bias, dout, lse, delta, ctx.scale, q.new_empty(0, dtype=torch.float32), E, E, E)
-        return dq, dk, dv, db.to(bias.dtype), None
-
-
 # One zeroed fp32 workspace for every gradient accumulator of the backward (one memset instead of four):
 # [dWo C*C | wgrad M 4*C*C | wgrad vectors 8*C + 4, padded | dbias B*4*L*L]; each piece starts on a 128-byte boundary.
 _WS_DWO, _WS_MT, _WS_VEC, _WS_DB = 0, C * C, 5 * C * C, 5 * C * C + 1056

@@ -1,4 +1,4 @@
-"""``TriangleAttention(transposed_bias=False)`` (AlphaFold 3's ending-node bias) on the H100 hand-CUDA kernels and the whole op.
+"""``TriangleAttention(transposed_bias=False)`` (AlphaFold 3's ending-node bias) on the H100 hand-CUDA kernels.
 
 The kernels serve the orientation for inference, by transposing the bias between the front and the core; a call with grad falls
 to the composed legs. Accuracy is judged against the PyTorch module of the same orientation in fp32, with the bf16 PyTorch
@@ -9,7 +9,6 @@ import pytest
 import torch
 
 from miniworld_engine.kernels.integrations import triattn_h100_sm90 as triattn_h100
-from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_attention.module import TriangleAttention
 
@@ -123,26 +122,3 @@ def test_a_call_with_grad_takes_the_composed_legs_and_keeps_the_gradients():
         assert relative(got, want) < 3e-2
 
 
-@pytest.mark.parametrize("transposed_bias", [True, False])
-def test_whole_op_matches_the_module(transposed_bias):
-    ours = make(ImplementationType.PYTORCH, 128, 4, transposed_bias, dtype=torch.float32)
-    torch.manual_seed(4)
-    pair = torch.randn(1, 64, 64, 128, device="cuda")
-    mask = key_mask(64)
-    with torch.no_grad():
-        update = triangle_attention(
-            pair,
-            mask,
-            n_head=4,
-            ln_pair_weight=ours.ln_pair.weight,
-            ln_pair_bias=ours.ln_pair.bias,
-            to_value_weight=ours.to_value.weight,
-            to_bias_weight=ours.to_bias.weight,
-            to_gate_weight=ours.to_gate.weight,
-            to_out_weight=ours.to_out.weight,
-            to_query_weight=ours.to_query.weight,
-            to_key_weight=ours.to_key.weight,
-            starting=False,
-            transposed_bias=transposed_bias,
-        )
-        torch.testing.assert_close(pair + update, ours(pair, mask), rtol=2e-3, atol=2e-3)

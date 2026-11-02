@@ -17,26 +17,12 @@ the op: every launcher -- ``modules.Transition``, ``ops.transition``, the fused 
 epilogue -- returns ``x + transition(x)``. The bare no-LayerNorm, no-residual SwiGLU FFN is a
 different op with a different reference.
 
-Provided as an ``nn.Module`` (:class:`TransitionReference`, owns every weight as a
-parameter) so a kernel can be checked on both forward output and backward gradients::
-
-    ref = TransitionReference(d_hidden=128, n=4).cuda()
-    y = ref(x)                                         # reference forward
-    yk = transition(                                   # kernel forward
-        x, ln_in_weight=ref.ln_in_weight, ln_in_bias=ref.ln_in_bias,
-        expand_a_weight=ref.expand_a_weight, expand_b_weight=ref.expand_b_weight,
-        squeeze_weight=ref.squeeze_weight, n=4,
-    )
-    y.sum().backward()                                 # -> ref.expand_a_weight.grad, x.grad
-
-A plain functional form (:func:`transition_pytorch`) is kept for callers that already
-hold the weight tensors.
+The reference is the plain functional form (:func:`transition_pytorch`): a kernel is checked against it on both the forward output and the backward gradients.
 """
 
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 
@@ -69,49 +55,3 @@ def transition_pytorch(
     h = F.silu(a) * b
     out = F.linear(h, squeeze_weight)
     return out + x
-
-
-class TransitionReference(nn.Module):
-    """nn.Module reference for the SwiGLU transition (forward + backward ground truth)."""
-
-    def __init__(
-        self,
-        d_hidden: int = 128,
-        n: int = 4,
-        *,
-        eps: float = 1e-5,
-        device: torch.device | str | None = None,
-        dtype: torch.dtype = torch.bfloat16,
-    ) -> None:
-        super().__init__()
-        self.d_hidden = d_hidden
-        self.n = n
-        self.eps = eps
-        nd = n * d_hidden
-
-        def w(out_features: int, in_features: int) -> nn.Parameter:
-            scale = in_features**-0.5
-            t = torch.randn(out_features, in_features, device=device, dtype=dtype)
-            return nn.Parameter(t * scale)
-
-        # LayerNorm affine is created in fp32 rather than the trunk dtype, mirroring the
-        # fp32-pinned norm params of ``modules.Transition``; forward casts them to the
-        # activation dtype.
-        self.ln_in_weight = nn.Parameter(torch.ones(d_hidden, device=device))
-        self.ln_in_bias = nn.Parameter(torch.zeros(d_hidden, device=device))
-        self.expand_a_weight = w(nd, d_hidden)
-        self.expand_b_weight = w(nd, d_hidden)
-        self.squeeze_weight = w(d_hidden, nd)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass; differentiable in ``x`` and every weight."""
-        return transition_pytorch(
-            x,
-            self.ln_in_weight,
-            self.ln_in_bias,
-            self.expand_a_weight,
-            self.expand_b_weight,
-            self.squeeze_weight,
-            self.n,
-            self.eps,
-        )

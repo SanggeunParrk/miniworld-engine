@@ -36,6 +36,7 @@ _CONTRACT = frozenset(
         "layernorm_kernel",
         "swa_dit_block",
         "swa_dit_hoist_modulation",
+        "swiglu_ffn",
         "triton_augmented_attention_pair_bias",
         "triton_bias_only_attention",
         "triton_layernorm",
@@ -49,6 +50,8 @@ _CONTRACT = frozenset(
         "triton_transition",
         "triton_transition_fused",
         "triton_triangle_attention_pair_bias",
+        "transition_layer",
+        "triangle_multiplicative_update",
     }
 )
 

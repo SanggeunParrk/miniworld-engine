@@ -145,14 +145,6 @@ def atom_kernel(name: str, device_index: int):
     return _load_atom_kernel(stem, func, device_index, smem, pdl, *defs)
 
 
-def load_all(device_index: int) -> None:
-    """Build and load every kernel on the device (raises on any failure)."""
-    for name in _HOPPER_KERNELS if _hopper(device_index) else KERNELS:
-        atom_kernel(name, device_index)
-
-
-
-
 def _dev(t: torch.Tensor) -> int:
     return t.device.index if t.device.index is not None else torch.cuda.current_device()
 
@@ -1403,11 +1395,6 @@ def _owned_wgrad_extension():
         extra_ldflags=["-lcublasLt"],
         verbose=False,
     )
-
-
-def owned_wgrad_hopper(gradient, activation):
-    """BF16 GEMM to FP32 with cuBLASLt scratch owned by the captured graph."""
-    return _owned_wgrad_extension().owned_wgrad(gradient, activation)
 
 
 def pack_hopper(weights, backward=False):

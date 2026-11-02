@@ -27,24 +27,19 @@ from miniworld_engine import settings
 
 from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
 
-from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
-
-from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
 
 
-from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+from miniworld_engine.kernels.gated_projection.interface import gated_residual as _op_gated_residual
 
-from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+from miniworld_engine.kernels.layernorm.interface import layer_norm as _op_layer_norm
 
-from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+from miniworld_engine.kernels.layernorm_linear.interface import layer_norm_linear as _op_layer_norm_linear
 
-from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+from miniworld_engine.kernels.rmsnorm.interface import rms_norm_modulation as _op_rms_norm_modulation
 
-from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+from miniworld_engine.kernels.transition.interface import swiglu_ffn as _op_swiglu_ffn
 
-from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
-
-from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
+from miniworld_engine.kernels.trimul_inproj.interface import triangle_multiplicative_update as _op_triangle_multiplicative_update
 
 pytestmark = [
     pytest.mark.gpu,
@@ -170,16 +165,6 @@ class TestFacades:
         x, g, b = (randn(4, 64, 128, dtype=dtype, seed=s) for s in (1, 2, 3))
         check("_op_gated_residual", dtype, _op_gated_residual, [x, g, b], grad)
 
-    def test_conditioned_transition(self, dtype, grad):
-        x, cond = randn(2, 64, 128, dtype=dtype), randn(2, 64, 64, dtype=dtype)
-        wa, wb, ws = (randn(256, 128, dtype=dtype, scale=0.1, seed=1), randn(256, 128, dtype=dtype, scale=0.1, seed=2),
-                      randn(128, 256, dtype=dtype, scale=0.1, seed=3))
-        wsc, bsc = randn(128, 64, dtype=dtype, scale=0.1), randn(128, dtype=dtype, scale=0.1)
-        check("_op_conditioned_transition", dtype,
-              lambda x, c, a, b, s, wc, bc: _op_conditioned_transition(
-                  x, c, expand_a_weight=a, expand_b_weight=b, squeeze_weight=s, to_scale_weight=wc, to_scale_bias=bc, n=2),
-              [x, cond, wa, wb, ws, wsc, bsc], grad)
-
     @pytest.mark.parametrize(("heads", "length", "dim"), [(16, 128, 48), (4, 100, 32)], ids=["cuda-core", "reference"])
     def test_augmented_attention_pair_bias(self, dtype, grad, heads, length, dim):
         q, k, v = (randn(2, 1, heads, length, dim, dtype=dtype, seed=s) for s in (1, 2, 3))
@@ -188,39 +173,6 @@ class TestFacades:
         # at (16, 128, 48) bf16 the previous path was already the hand-CUDA core only through the module; the facade ran Triton
         check(f"_op_augmented_attention_pair_bias H{heads} L{length}", dtype,
               lambda q, k, v, b: _op_augmented_attention_pair_bias(q, k, v, b, mask), [q, k, v, bias], grad)
-
-    @pytest.mark.parametrize("qk_norm", [False, True])
-    def test_triangle_attention(self, dtype, grad, qk_norm):
-        d, heads, length = 128, 4, 64
-        pair = randn(1, length, length, d, dtype=dtype)
-        names = ["ln_w", "ln_b", "wv", "wb", "wg", "wo", "wq", "wk"]
-        shapes = [(d,), (d,), (d, d), (heads, d), (d, d), (d, d), (d, d), (d, d)]
-        ws = [randn(*s, dtype=dtype, scale=0.05 if len(s) == 2 else 0.1, seed=i) + (1 if n == "ln_w" else 0)
-              for i, (n, s) in enumerate(zip(names, shapes, strict=True))]
-        # small QK-norm weights: with weights ~1 the logits have a standard deviation ~5 and the softmax is a near argmax, so a bf16 rounding
-        # difference between two correct implementations flips rows (an ill-conditioned test, not a different function)
-        norm = [0.25 * (randn(d // heads, dtype=dtype, scale=0.1, seed=11) + 1), 0.25 * (randn(d // heads, dtype=dtype, scale=0.1, seed=12) + 1)] if qk_norm else []
-        mask = torch.rand(1, length, device="cuda") > 0.1
-
-        def call(pair, ln_w, ln_b, wv, wb, wg, wo, wq, wk, *nq):
-            return _op_triangle_attention(
-                pair, mask, n_head=heads, ln_pair_weight=ln_w, ln_pair_bias=ln_b, to_value_weight=wv, to_bias_weight=wb, to_gate_weight=wg,
-                to_out_weight=wo, to_query_weight=wq, to_key_weight=wk,
-                norm_query_weight=nq[0] if nq else None, norm_key_weight=nq[1] if nq else None)
-
-        # fp32: the previous path was already the PyTorch statements (the portable triangle-attention core is bf16 only)
-        check(f"_op_triangle_attention qk_norm={qk_norm}", dtype, call, [pair, *ws, *norm], grad, expect_old_launch=dtype is torch.bfloat16,
-              compare_previous=not qk_norm)     # Triton core: wrong when q, k are contiguous (QK-normed) and v is a strided view (probe 2026-11-01)
-        if dtype is torch.bfloat16 and not grad:
-            # an independent yardstick: the same call on the same (bf16-rounded) values in fp32, PyTorch statements
-            inputs = [pair, *ws, *norm]
-            with ab(False):
-                got, _ = evaluate(call, inputs, False)
-                truth, _ = evaluate(call, [t.float() for t in inputs], False)
-            with ab(True):
-                previous, _ = evaluate(call, inputs, False)
-            REPORT.append(f"_op_triangle_attention qk_norm={qk_norm} vs fp32 statements: new={rel(got[0], truth[0]):.2e} previous(Triton)={rel(previous[0], truth[0]):.2e}")
-            assert rel(got[0], truth[0]) <= 2 * TOL[dtype]
 
     @pytest.mark.parametrize("direction", ["outgoing", "incoming"])
     def test_trimul(self, dtype, grad, direction):
@@ -237,23 +189,6 @@ class TestFacades:
 
         # fp32: the previous path was already the PyTorch statements (the Triton TriMul is bf16 only), so no Triton launch there
         check(f"_op_triangle_multiplicative_update {direction}", dtype, call, tensors, grad, expect_old_launch=dtype is torch.bfloat16)
-
-    def test_trimul_bidirectional(self, dtype, grad):
-        d, length = 128, 64
-        x = randn(1, length, length, d, dtype=dtype)
-        mask = torch.rand(1, length, device="cuda") > 0.1
-        ws = [randn(2 * d, d, dtype=dtype, scale=0.05, seed=s) for s in (1, 2, 3, 4)]
-        tensors = [x, randn(d, dtype=torch.float32, scale=0.1) + 1, randn(d, dtype=torch.float32, scale=0.1), *ws,
-                   randn(2 * d, dtype=torch.float32, scale=0.1) + 1, randn(2 * d, dtype=torch.float32, scale=0.1),
-                   randn(d, 2 * d, dtype=dtype, scale=0.05, seed=5), randn(d, d, dtype=dtype, scale=0.05, seed=6)]
-
-        def call(x, nw, nb, wl, wlg, wr, wrg, now, nob, wo, wg):
-            return _op_bidirectional_triangle_multiplicative_update(
-                x, mask, norm_in_weight=nw, norm_in_bias=nb, to_left_weight=wl, to_left_gate_weight=wlg, to_right_weight=wr,
-                to_right_gate_weight=wrg, norm_out_weight=now, norm_out_bias=nob, to_out_weight=wo, to_gate_weight=wg)
-
-        check("_op_bidirectional_triangle_multiplicative_update", dtype, call, tensors, grad, expect_old_launch=dtype is torch.bfloat16)
-
 
 def _bias_only_pair(dtype):
     from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock

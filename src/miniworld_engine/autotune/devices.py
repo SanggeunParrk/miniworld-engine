@@ -245,11 +245,6 @@ def provenance(gpu_key: str) -> dict | None:
     return None
 
 
-def runnable_kernels(gpu_key: str) -> frozenset[str]:
-    """Kernels this card was observed to run. Not "expected to" -- observed."""
-    return frozenset(r["kernel"] for r in load_manifest(gpu_key) if r["status"] == "ok")
-
-
 def untested_kernels(gpu_key: str) -> frozenset[str]:
     """Declared but never exercised here. These are the holes."""
     # `skipped` counts as tested: the card was asked and gave a definite answer. A hole is a
@@ -258,11 +253,3 @@ def untested_kernels(gpu_key: str) -> frozenset[str]:
     return frozenset(registered_kernels() - tested)
 
 
-def kernels_for(gpu_key: str, family: str) -> tuple[str, ...]:
-    """This family's kernels that ran here, once each. A kernel measured at both precisions has a
-    row per precision, and callers want the kernel list, not the measurement list."""
-    out: list[str] = []
-    for r in load_manifest(gpu_key):
-        if r["family"] == family and r["status"] == "ok" and r["kernel"] not in out:
-            out.append(r["kernel"])
-    return tuple(out)

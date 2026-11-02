@@ -76,6 +76,10 @@ _LAZY_EXPORTS = {
     "triton_layernorm": (".layernorm.interface", "triton_layernorm"),
     "layer_norm": (".layernorm.interface", "layer_norm"),
     "rms_norm": (".rmsnorm.interface", "rms_norm"),
+    "swiglu_ffn": (".transition.interface", "swiglu_ffn"),
+    # not "transition": that is the name of the subpackage `kernels.transition`, and importing it would replace the function on this module
+    "transition_layer": (".transition.interface", "transition"),
+    "triangle_multiplicative_update": (".trimul_inproj.interface", "triangle_multiplicative_update"),
     "triton_tm1": (".tm1.interface", "triton_tm1"),
     "triton_tm2": (".tm2.interface", "triton_tm2"),
     "triton_transition": (".transition.interface", "triton_transition"),
@@ -117,6 +121,7 @@ __all__ = [
     "sigmoid_gate_fused",
     "swa_dit_block",
     "swa_dit_hoist_modulation",
+    "swiglu_ffn",
     "triton_augmented_attention_pair_bias",
     "triton_bias_only_attention",
     "triton_layernorm",
@@ -129,5 +134,7 @@ __all__ = [
     "triton_tm2",
     "triton_transition",
     "triton_transition_fused",
+    "transition_layer",
+    "triangle_multiplicative_update",
     "triton_triangle_attention_pair_bias",
 ]

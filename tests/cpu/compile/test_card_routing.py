@@ -274,9 +274,9 @@ def test_ops_entry_points_are_blocked_on_an_unrecorded_card_only(monkeypatch, ma
 def test_ops_swiglu_and_layer_norm_run_the_statements_on_an_unrecorded_card(monkeypatch, manifests):
     import torch.nn.functional as F
 
-    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels.layernorm.interface import layer_norm as _op_layer_norm
 
-    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.transition.interface import swiglu_ffn as _op_swiglu_ffn
     dev = fake_card(monkeypatch, "Brand New GPU", (8, 9))
     monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))   # the tensors are CPU; the card is faked
     monkeypatch.setattr(dispatch, "_card_of", lambda device=None: ("Brand New GPU", (8, 9)))

@@ -1,7 +1,7 @@
 """Drivers for the ``rmsnorm`` family -- and the shape block ``drivers/rmsnorm_adamod.py`` shares.
 
 ``triton_rmsnorm`` normalizes per attention HEAD: ``modules/swa_atom_attention`` over
-``head_dim = d_model // n_heads`` (module.py:457) and ``kernels/triangle_attention/whole_op.py``
+``head_dim = d_model // n_heads`` (module.py:457) and the triangle-attention QK norm
 over its own ``d_head``. Its normalized axis is small, which is why the ladders in
 ``configs/grid/rmsnorm_*.csv`` floor BLOCK_K at 16 (a valid tile; no `tl.dot` on this axis so
 no higher floor is forced) and the rows at 1. The adaLN modulate

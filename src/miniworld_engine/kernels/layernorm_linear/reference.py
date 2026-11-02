@@ -64,37 +64,6 @@ def fold_weights(
     return W2, S, B2
 
 
-def layernorm_linear_folded(
-    x: torch.Tensor,          # (M, d_in)
-    ln_weight: torch.Tensor,  # (d_in,)
-    ln_bias: torch.Tensor,    # (d_in,)
-    weight: torch.Tensor,     # (d_out, d_in)
-    bias: torch.Tensor | None,  # (d_out,)
-    eps: float = 1e-5,
-    *,
-    out_dtype: torch.dtype | None = None,
-) -> torch.Tensor:
-    """Folded-form reference — a faithful CPU/GPU mirror of the fused kernel.
-
-    Validates the folded math: raw ``X @ W2`` with the
-    LayerNorm mean/rstd applied in the epilogue, instead of normalizing X first.
-    Stats use FP32 naive variance ``E[x^2] - E[x]^2`` (the kernel's formula) so
-    this also exposes the same cancellation behaviour.
-    """
-    out_dtype = out_dtype or x.dtype
-    W2, S, B2 = fold_weights(weight, ln_weight, ln_bias, bias, w2_dtype=x.dtype)
-
-    xf = x.float()
-    mean = xf.mean(dim=1)                               # (M,)
-    var = (xf * xf).mean(dim=1) - mean * mean           # naive E[x^2]-E[x]^2
-    rstd = torch.rsqrt(var + eps)                       # (M,)
-
-    # acc = X @ W2 with bf16 operands, FP32 accumulation (mirrors the tensor-core GEMM)
-    acc = (x.to(W2.dtype).float() @ W2.float())         # (M, N)
-    y = (acc - mean[:, None] * S[None, :]) * rstd[:, None] + B2[None, :]
-    return y.to(out_dtype)
-
-
 class LayerNormLinearRef(nn.Module):
     """`nn.LayerNorm` -> `nn.Linear`, the eager module handed to `torch.compile`.
 

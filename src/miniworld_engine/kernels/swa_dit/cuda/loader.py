@@ -60,11 +60,6 @@ _EXT: dict[str, Any] = {}
 ERRORS: dict[str, str] = {}
 
 
-def jit_root() -> Path:
-    """Where the extensions build: ``$settings.engine_jit_root``, else ``~/.cache/miniworld_engine_jit``."""
-    return settings.engine_jit_root()
-
-
 @functools.lru_cache(maxsize=16)
 def _capability(index: int) -> tuple[int, int]:
     return torch.cuda.get_device_capability(index)

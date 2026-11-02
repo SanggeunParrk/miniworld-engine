@@ -322,20 +322,6 @@ def _gmp_fwd(qkvg: torch.Tensor, o: torch.Tensor, c0: int) -> torch.Tensor:
     return _rows_ext().gate_mul_fwd(qkvg[:, c0 : c0 + o.shape[1]], o)
 
 
-def _gmp_bwd_fake(qkvg, o, dy, c0):
-    """Shapes of the op this fake belongs to (no kernel runs); see the op's docstring."""
-    return o.new_empty(o.shape), o.new_empty(o.shape)
-
-
-@opaque(fake=_gmp_bwd_fake, name="augmented_attention_gate_mul_packed_bwd")
-def _gmp_bwd(qkvg: torch.Tensor, o: torch.Tensor, dy: torch.Tensor, c0: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """(d gate, d o) of :func:`_gmp_fwd`."""
-    from .fused_pair import _rows_ext
-
-    dg, dd = _rows_ext().gate_mul_bwd(qkvg[:, c0 : c0 + o.shape[1]], o, dy.contiguous())
-    return dg, dd
-
-
 def _bwd_gc_fake(qkvg, o, dy, lse, bias_p, qs, kr, vr, qt, kt, pair, lnw, wb, eps):
     """Shapes of the op this fake belongs to (no kernel runs); see the op's docstring."""
     return (

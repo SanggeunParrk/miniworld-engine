@@ -19,12 +19,6 @@ from miniworld_engine.autotune.shape_key import pack, token_key
 # reduction over d, so it tiles with an accumulating loop and HEAD_DIM_PAD joins the sweep.
 
 
-def get_seq_group(length) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    from miniworld_engine.autotune.buckets import bucket_squared
-    return bucket_squared(length * length)
-
-
 @triton.jit
 def _attn_fwd_inner(
     acc,

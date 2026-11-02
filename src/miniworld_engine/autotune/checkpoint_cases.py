@@ -46,10 +46,10 @@ class Leaf(nn.Module):
 
     def forward(self, *args):
         from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
-        from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
-        from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
-        from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
-        from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+        from miniworld_engine.kernels.gated_projection.interface import gated_residual as _op_gated_residual
+        from miniworld_engine.kernels.layernorm_linear.interface import layer_norm_linear as _op_layer_norm_linear
+        from miniworld_engine.kernels.rmsnorm.interface import rms_norm_modulation as _op_rms_norm_modulation
+        from miniworld_engine.kernels.transition.interface import swiglu_ffn as _op_swiglu_ffn
         if self.kind == "rms_norm_modulation":
             y, gate = _op_rms_norm_modulation(
                 *args,

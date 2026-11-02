@@ -18,7 +18,6 @@ i.e. the caller passes ``nn.Linear.weight.T``.
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 
 
 def trimul_inproj_pytorch(
@@ -36,37 +35,3 @@ def trimul_inproj_pytorch(
     left_bdll = left.permute(0, 3, 1, 2).contiguous()  # (B, D, L, L)
     right_bdll = right.permute(0, 3, 1, 2).contiguous()  # (B, D, L, L)
     return left_bdll, right_bdll, gate
-
-
-class TrimulInProjReference(nn.Module):
-    """nn.Module reference (forward + backward ground truth).
-
-    Owns the five projection weights as ``nn.Linear`` so a kernel can be checked
-    on both forward output and backward gradients. ``forward`` takes the
-    ALREADY-NORMALIZED pair (LN_in is a separate kernel in this design).
-    """
-
-    def __init__(self, d: int = 128, *, dtype: torch.dtype | None = None) -> None:
-        super().__init__()
-
-        def lin() -> nn.Linear:
-            return nn.Linear(d, d, bias=False, dtype=dtype)
-
-        self.to_left = lin()
-        self.to_left_gate = lin()
-        self.to_right = lin()
-        self.to_right_gate = lin()
-        self.to_gate = lin()
-
-    def forward(
-        self, x_normed: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """``x_normed`` : (B, L, L, D) -> (left_bdll, right_bdll, gate_blld)."""
-        return trimul_inproj_pytorch(
-            x_normed,
-            self.to_left.weight.T,
-            self.to_left_gate.weight.T,
-            self.to_right.weight.T,
-            self.to_right_gate.weight.T,
-            self.to_gate.weight.T,
-        )

@@ -30,6 +30,8 @@ standard AF3 configuration).
 
 from __future__ import annotations
 
+import types
+
 import torch
 
 
@@ -139,79 +141,14 @@ def triangle_multiplicative_update(
     )
 
 
-def bidirectional_triangle_multiplicative_update(
-    x: torch.Tensor,                        # (B, L, L, d_pair)
-    mask: torch.Tensor | None = None,       # (B, L) residue mask
-    *,
-    norm_in_weight: torch.Tensor,           # (d_pair,)
-    norm_in_bias: torch.Tensor,             # (d_pair,)
-    to_left_weight: torch.Tensor,           # (2*d_hidden, d_pair)
-    to_left_gate_weight: torch.Tensor,      # (2*d_hidden, d_pair)
-    to_right_weight: torch.Tensor,          # (2*d_hidden, d_pair)
-    to_right_gate_weight: torch.Tensor,     # (2*d_hidden, d_pair)
-    norm_out_weight: torch.Tensor,          # (2*d_hidden,)
-    norm_out_bias: torch.Tensor,            # (2*d_hidden,)
-    to_out_weight: torch.Tensor,            # (d_pair, 2*d_hidden)
-    to_gate_weight: torch.Tensor,           # (d_pair, d_pair)
-    eps: float = 1e-5,
-) -> torch.Tensor:
-    """Bidirectional (outgoing+incoming, one fused block) triangle multiplicative
-    update — whole-op call. Returns the RESIDUAL form ``x + bidir_trimul(x)``,
-    ``(B, L, L, d_pair)``: the residual is fused into the gate store epilogue and is part of
-    what this op is, not a flag on it (see ``trimul_inproj/triton/gate_elem.py`` for the
-    measurement). cuequivariance has no bidirectional equivalent to compare against; for the
-    single-direction one, add the residual to cuequiv's output in plain torch (see
-    ``triangle_multiplicative_update`` above).
-    Autograd-transparent: grads flow to ``x`` and every weight. Backed by the TRITON bidir pipeline
-    (weights-as-args autograd Function + no-grad inference path). ``d_hidden == d_pair``
-    required. Unlike single-direction trimul there is no cuequiv equivalent, so this
-    takes the four (2·d_hidden, d_pair) projections directly.
-    """
-    from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
-        bidirectional_trimul_triton,
-    )
-
-    # Grads flow to every weight arg (differentiable .t() views) and x (autograd-transparent LN_in).
-    d_hidden = to_left_weight.shape[0] // 2  # to_left: (2*d_hidden, d_pair)
-    cuda = _h100_cuda(x)
-    if cuda:
-        out = cuda(x, mask, True, None, d_hidden, eps, norm_in_weight, norm_in_bias, to_left_weight, to_left_gate_weight, to_right_weight,
-                   to_right_gate_weight, norm_out_weight, norm_out_bias, to_out_weight, to_gate_weight)
-        if out is not None:
-            return out
-    if _off_record(x, to_left_weight, to_gate_weight, to_out_weight):
-        # a card the engine holds no record for: the PyTorch statements (one UnrecordedCardWarning)
-        return _trimul_pytorch(x, mask, norm_in_weight, norm_in_bias, to_left_weight, to_left_gate_weight, to_right_weight,
-                               to_right_gate_weight, norm_out_weight, norm_out_bias, to_out_weight, to_gate_weight, eps, "bidirectional")
-    return bidirectional_trimul_triton(
-        x,
-        to_left_weight,
-        to_left_gate_weight,
-        to_right_weight,
-        to_right_gate_weight,
-        to_gate_weight,       # Wg  (d_pair, d_pair)
-        to_out_weight,        # Wout (d_pair, 2*d_hidden)
-        norm_in_weight,
-        norm_in_bias,
-        norm_out_weight,
-        norm_out_bias,
-        eps,                  # eps_in
-        eps,                  # eps_out
-        d_hidden,
-        mask=mask,
-    )
-
-
 def _h100_cuda(x: torch.Tensor):
-    """``kernels._h100_ops.trimul`` when this call may take the hand-CUDA TriMul (an H100 run with no Triton: ``restricted_card``), else None."""
+    """``_trimul_h100`` when this call may take the hand-CUDA TriMul (an H100 run with no Triton: ``restricted_card``), else None."""
     from miniworld_engine import settings
     from miniworld_engine.modules import dispatch
 
     if x.device.type != "cuda" or settings.current().force_portable_kernels or not dispatch.restricted_card(x.device):
         return None
-    from miniworld_engine.kernels import _h100_ops
-
-    return _h100_ops.trimul
+    return _trimul_h100
 
 
 def _off_record(x: torch.Tensor, *weights: torch.Tensor) -> bool:
@@ -235,9 +172,9 @@ def _off_record(x: torch.Tensor, *weights: torch.Tensor) -> bool:
 
 
 def _trimul_pytorch(x, mask, ln_in_w, ln_in_b, WL, WLg, WR, WRg, ln_out_w, ln_out_b, Wout, Wg, eps, direction):
-    """The PyTorch statements of both facades (``x + update(x)``), for a card the engine holds no record for. Same algebra as
+    """The PyTorch statements of the facade (``x + update(x)``), for a card the engine holds no record for. Same algebra as
     ``modules.triangle_multiplication`` (the mask is a (B, L) residue mask or a (B, L, L) pair mask applied to the contraction inputs; the
-    output gate stays unmasked; ``"bidirectional"`` contracts the first half of the hidden channels outgoing, the second incoming). The
+    output gate stays unmasked). The
     weights are cast to the activation's dtype, as the PyTorch legs of the modules run them."""
     import torch.nn.functional as F
 
@@ -251,11 +188,58 @@ def _trimul_pytorch(x, mask, ln_in_w, ln_in_b, WL, WLg, WR, WRg, ln_out_w, ln_ou
         right = right * m[..., None].to(dt)
     if direction == "outgoing":
         out = torch.einsum("bikd,bjkd->bijd", left, right)
-    elif direction == "incoming":
+    else:  # "incoming"
         out = torch.einsum("bkid,bkjd->bijd", left, right)
-    else:
-        h = left.shape[-1] // 2
-        out = torch.cat([torch.einsum("bikd,bjkd->bijd", left[..., :h], right[..., :h]),
-                         torch.einsum("bkid,bkjd->bijd", left[..., h:], right[..., h:])], dim=-1)
     out = F.layer_norm(out, (out.shape[-1],), ln_out_w.to(dt), ln_out_b.to(dt), eps)
     return x + torch.sigmoid(F.linear(x_n, Wg.to(dt))) * F.linear(out, Wout.to(dt))
+
+
+def _trimul_shim(x, bidirectional, outgoing, d_hidden, eps, ln_in_w, ln_in_b, wl, wlg, wr, wrg, ln_out_w, ln_out_b, w_out, w_gate):
+    """A module-shaped view of the facade's weights (the attributes ``kernels.integrations.trimul_h100`` reads): the LayerNorm affine as fp32 (an exact
+    cast of the usual fp32 parameters), the six projections as they are, ``outgoing`` only for the single-direction update (the integration
+    tells the two modules apart by ``hasattr(module, "outgoing")``)."""
+    from miniworld_engine.modules.exceptions import ImplementationType
+
+    def lin(w):
+        return types.SimpleNamespace(weight=w, bias=None)
+
+    def norm(w, b):
+        return types.SimpleNamespace(weight=w.float(), bias=b.float(), eps=eps)
+
+    shim = types.SimpleNamespace(
+        implementation=ImplementationType.MINIWORLD, d_hidden=d_hidden,
+        ln_pair=norm(ln_in_w, ln_in_b), ln_out=norm(ln_out_w, ln_out_b),
+        to_left=lin(wl), to_left_gate=lin(wlg), to_right=lin(wr), to_right_gate=lin(wrg), to_gate=lin(w_gate), to_out=lin(w_out),
+    )
+    if not bidirectional:
+        shim.outgoing = outgoing
+    shim.parameters = lambda: [
+        wl, wlg, wr, wrg, w_gate, w_out, shim.ln_pair.weight, shim.ln_pair.bias, shim.ln_out.weight, shim.ln_out.bias
+    ]
+    return shim
+
+
+def _trimul_h100(x, mask, bidirectional, outgoing, d_hidden, eps, ln_in_w, ln_in_b, wl, wlg, wr, wrg, ln_out_w, ln_out_b, w_out, w_gate):
+    """``x + update(x)`` through the hand-CUDA TriMul of ``modules.TriangleMultiplication``
+    (``kernels.integrations.trimul_h100``: K1 / K3 inference, B1..B7 training, chunked batches), bf16 only; None when the integration does not serve
+    the call (the caller runs the PyTorch statements). ``mask``: None or a (B, L) bool residue mask."""
+    from miniworld_engine.kernels._device import on_h100
+
+    if x.dtype is not torch.bfloat16 or x.ndim != 4 or not on_h100(x, wl, w_out):
+        return None
+    if any(t is None for t in (ln_in_w, ln_in_b, ln_out_w, ln_out_b)):
+        return None
+    if mask is not None and (mask.dtype is not torch.bool or mask.shape != x.shape[:2]):
+        return None
+    from miniworld_engine.kernels.integrations import trimul_h100 as h100
+
+    x = x if x.is_contiguous() else x.contiguous()
+    shim = _trimul_shim(x, bidirectional, outgoing, d_hidden, eps, ln_in_w, ln_in_b, wl, wlg, wr, wrg, ln_out_w, ln_out_b, w_out, w_gate)
+    grad = torch.is_grad_enabled() and any(t.requires_grad for t in (x, wl, wlg, wr, wrg, w_out, w_gate, ln_in_w, ln_in_b, ln_out_w, ln_out_b))
+    if not grad:
+        if h100.serves_inference(shim, x, bidirectional=bidirectional):
+            return h100.update_inference(shim, x, mask, bidirectional=bidirectional)
+        return None
+    if (h100.serves(shim, x) if bidirectional else h100.serves_single(shim, x)):
+        return h100.update(shim, x, mask, None, bidirectional=bidirectional)
+    return None

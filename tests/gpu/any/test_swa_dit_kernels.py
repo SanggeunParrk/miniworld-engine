@@ -5,7 +5,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.kernels import _ops_routed as ops
+from miniworld_engine.kernels.gated_projection import interface as gated_interface
+from miniworld_engine.kernels.rmsnorm import interface as rmsnorm_interface
+from miniworld_engine.kernels.transition import interface as transition_interface
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.swa_atom_attention import build_attention_params
 from miniworld_engine.modules.swa_dit import SWADiTBlock
@@ -28,9 +30,9 @@ def test_all_block_ops_are_reached(monkeypatch, implementation):
         calls.append("residual")
         return x + gate * branch
 
-    monkeypatch.setattr(ops, "rms_norm_modulation", modulation)
-    monkeypatch.setattr(ops, "swiglu_ffn", ffn)
-    monkeypatch.setattr(ops, "gated_residual", residual)
+    monkeypatch.setattr(rmsnorm_interface, "rms_norm_modulation", modulation)
+    monkeypatch.setattr(transition_interface, "swiglu_ffn", ffn)
+    monkeypatch.setattr(gated_interface, "gated_residual", residual)
     model = SWADiTBlock(32, 24, 4, half_window=2, implementation=implementation)
     projection = model.adaln_modulation[1]
     assert isinstance(projection, torch.nn.Linear)

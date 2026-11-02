@@ -149,9 +149,3 @@ class TriMulManualBwd(torch.autograd.Function):
         # x, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b, ln_out_w, ln_out_b, eps
         return (dx, dWL, dWLg, dWR, dWRg, dWg, dWp,
                 dWln_in, dBln_in, dWln_out, dBln_out, None)
-
-
-def trimul_manual(x, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b,
-                  ln_out_w, ln_out_b, eps=1e-5):
-    return TriMulManualBwd.apply(x, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b,
-                                 ln_out_w, ln_out_b, eps)

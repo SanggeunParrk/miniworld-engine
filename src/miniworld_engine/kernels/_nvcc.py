@@ -337,10 +337,6 @@ def cutlass_include() -> Path:
     return inc if root and (inc / "cute" / "tensor.hpp").is_file() else CUTLASS_STANDIN
 
 
-def cutlass_available() -> bool:
-    return cutlass_include() != CUTLASS_STANDIN
-
-
 # ---------------------------------------------------------------------------------------------
 # Build progress. Every JIT build is silent (verbose=False everywhere), so a first call that spends
 # minutes in nvcc looked exactly like a hang. One line when a compile starts, one when it ends,

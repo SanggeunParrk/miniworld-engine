@@ -17,8 +17,8 @@ kernels use.
 
    This is AF3 Algorithm 14 with ``b_jk`` shared across the triangle apex ``i``.
 
-2. :func:`triangle_attention_pytorch` mirrors the whole-op
-   ``kernels/triangle_attention/whole_op.py::triangle_attention``: pair-shaped
+2. :func:`triangle_attention_pytorch` mirrors the layer
+   ``modules.TriangleAttention``: pair-shaped
    ``(B, L, L, d_pair)`` in and out, weights-as-args, with the LayerNorm, the
    q/k/v/bias/gate projections, the optional qk-RMSNorm, the sigmoid gate and the
    out-projection composed around the attention above.
@@ -35,17 +35,13 @@ softmax and the PV accumulation are done in fp32, and the probabilities are roun
 the value dtype before the PV contraction because the kernel feeds ``p.to(v.dtype)`` to
 its second ``tl.dot`` while summing the fp32 ``p`` for the denominator.
 
-:class:`TriangleAttentionPairBiasReference` is the module form of (1); it holds NO
-parameters, because the primitive kernel owns no weights — its q/k/v/bias inputs are
-already-projected activations. :class:`TriangleAttentionReference` is the module form of
-(2) and owns every projection as an ``nn.Parameter``, so a test can compare both the
-forward output and the backward gradients.
+Both are plain functions (the primitive kernel owns no weights: its q/k/v/bias inputs are
+already-projected activations), so a test can compare both the forward output and the backward gradients.
 """
 
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 
@@ -151,107 +147,3 @@ def triangle_attention_pytorch(
     if not starting:
         out = out.transpose(1, 2)
     return out
-
-
-class TriangleAttentionPairBiasReference(nn.Module):
-    """nn.Module form of the primitive attention kernel. Holds NO parameters.
-
-    The kernel entry point ``triton_triangle_attention_pair_bias`` owns no weights: it
-    consumes already-projected ``q``/``k``/``v`` and a pre-built pair ``bias``. The
-    module exists only so the primitive can be driven through the same
-    ``module(*inputs)`` interface as the weighted references; gradients flow to the
-    four input tensors.
-    """
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        bias: torch.Tensor,
-    ) -> torch.Tensor:
-        """``(B, H, L, L, D) x3`` + ``(B, H, L, L)`` -> ``(B, H, L, L, D)``."""
-        return triangle_attention_pair_bias_pytorch(q, k, v, bias)
-
-
-class TriangleAttentionReference(nn.Module):
-    """nn.Module reference for the whole-op (forward + backward ground truth).
-
-    Owns every weight the whole-op takes as an ``nn.Parameter``, named exactly like the
-    whole-op's keyword arguments, so a test can feed ``ref.<name>`` straight into the
-    kernel and compare both outputs and grads, e.g.::
-
-        ref = TriangleAttentionReference(64, 4).cuda().to(torch.bfloat16)
-        y = ref(pair, mask)
-        y_k = triangle_attention(pair, mask, n_head=4, ln_pair_weight=ref.ln_pair_weight, ...)
-    """
-
-    def __init__(
-        self,
-        d_pair: int = 128,
-        n_head: int = 4,
-        *,
-        d_hidden: int | None = None,
-        starting: bool = True,
-        use_self_attention: bool = True,
-        use_qk_norm: bool = False,
-        eps: float = 1e-5,
-        device=None,
-        dtype=None,
-    ) -> None:
-        super().__init__()
-        d_hidden = d_pair if d_hidden is None else d_hidden
-        if d_hidden % n_head != 0:
-            msg = f"d_hidden ({d_hidden}) must be divisible by n_head ({n_head})"
-            raise ValueError(msg)
-
-        self.n_head = n_head
-        self.starting = starting
-        self.use_self_attention = use_self_attention
-        self.use_qk_norm = use_qk_norm
-        self.eps = eps
-
-        def proj(out_features: int, in_features: int) -> nn.Parameter:
-            w = torch.empty(out_features, in_features, device=device, dtype=dtype)
-            nn.init.xavier_uniform_(w)
-            return nn.Parameter(w)
-
-        def ones(n: int) -> nn.Parameter:
-            return nn.Parameter(torch.ones(n, device=device, dtype=dtype))
-
-        self.ln_pair_weight = ones(d_pair)
-        self.ln_pair_bias = nn.Parameter(torch.zeros(d_pair, device=device, dtype=dtype))
-        self.to_value_weight = proj(d_hidden, d_pair)
-        self.to_bias_weight = proj(n_head, d_pair)
-        self.to_gate_weight = proj(d_hidden, d_pair)
-        self.to_out_weight = proj(d_pair, d_hidden)
-
-        self.to_query_weight = proj(d_hidden, d_pair) if use_self_attention else None
-        self.to_key_weight = proj(d_hidden, d_pair) if use_self_attention else None
-        qk_norm = use_self_attention and use_qk_norm
-        self.norm_query_weight = ones(d_hidden // n_head) if qk_norm else None
-        self.norm_key_weight = ones(d_hidden // n_head) if qk_norm else None
-
-    def forward(
-        self,
-        pair: torch.Tensor,  # (B, L, L, d_pair)
-        mask: torch.Tensor | None = None,  # (B, L) bool
-    ) -> torch.Tensor:
-        """Raw triangle-attention op (no residual, no dropout). -> ``(B, L, L, d_pair)``."""
-        return triangle_attention_pytorch(
-            pair,
-            mask,
-            n_head=self.n_head,
-            ln_pair_weight=self.ln_pair_weight,
-            ln_pair_bias=self.ln_pair_bias,
-            to_value_weight=self.to_value_weight,
-            to_bias_weight=self.to_bias_weight,
-            to_gate_weight=self.to_gate_weight,
-            to_out_weight=self.to_out_weight,
-            to_query_weight=self.to_query_weight,
-            to_key_weight=self.to_key_weight,
-            norm_query_weight=self.norm_query_weight,
-            norm_key_weight=self.norm_key_weight,
-            starting=self.starting,
-            eps=self.eps,
-        )

@@ -1,7 +1,7 @@
 """The portable family is pure Triton: no file of a ``kernels/*/triton/`` tree (nor a shared Triton helper) reaches for hand-CUDA.
 
 Which of the two families runs is decided by the CALLER (module / interface routing, ``kernels/_pair_route.py``, ``modules/dispatch.py``,
-``kernels/_ops_routed.py``), never from inside a Triton file. The ladder (hand-CUDA < portable Triton < PyTorch) measures the portable rung with
+``kernels/*/interface.py``), never from inside a Triton file. The ladder (hand-CUDA < portable Triton < PyTorch) measures the portable rung with
 ``settings.force_portable_kernels=True`` on H100, so a CUDA call hidden in a Triton file contaminates that rung. This test reads the sources
 (AST, no GPU) and fails on, in any file of a ``kernels/*/triton/`` tree or a shared Triton helper:
 

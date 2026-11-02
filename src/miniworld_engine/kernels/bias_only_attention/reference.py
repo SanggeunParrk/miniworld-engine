@@ -27,15 +27,13 @@ at the positions to drop, which the softmax then sends to zero probability. A ro
 ``bias`` that is entirely ``-inf`` is ``0/0`` in the kernel, and likewise NaN here --
 the kernel applies no denominator floor, so neither does this reference.
 
-Provided as an ``nn.Module`` (:class:`BiasOnlyAttentionReference`) so a kernel can be
-checked on both the forward output and the backward gradients, plus a plain
+A kernel is checked on both the forward output and the backward gradients against the plain
 functional form (:func:`bias_only_attention_pytorch`).
 """
 
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 
 
 def _accumulator_dtype(dtype: torch.dtype) -> torch.dtype:
@@ -66,22 +64,3 @@ def bias_only_attention_pytorch(
         value.to(acc_dtype),
     )
     return out.to(compute_dtype)
-
-
-class BiasOnlyAttentionReference(nn.Module):
-    """nn.Module reference for bias-only triangle attention.
-
-    Holds no parameters. The kernel entry point takes ``value`` and ``bias`` directly
-    and owns no weights, so a backward comparison differentiates with respect to those
-    two input tensors rather than module state; the module exists only to give tests
-    the same shape of object as the weight-owning references, e.g.::
-
-        ref = BiasOnlyAttentionReference()
-        o = ref(v, bias)                          # reference
-        ok = triton_bias_only_attention(v, bias)  # kernel
-        o.sum().backward()                        # -> v.grad, bias.grad
-    """
-
-    def forward(self, value: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
-        """Forward pass; differentiable in ``value`` and ``bias``."""
-        return bias_only_attention_pytorch(value, bias)

@@ -15,15 +15,6 @@ from miniworld_engine.autotune.shape_key import atom_key, pack
 from miniworld_engine.utils.typecheck import typecheck
 
 
-# NOT called from this file any more -- every launch below keys on `atom_key(L)` (see
-# autotune/shape_key.py: the key is L, the atom count, and this family is level=atom in
-# kernels/registry/registry.csv). Kept only because ``checks/augmented_attention.py`` still imports it.
-def get_seq_group(length) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    from miniworld_engine.autotune.buckets import bucket_linear
-    return bucket_linear(length)
-
-
 # HEAD_DIM_PAD is a launcher value, not a CSV axis. Tensor-core dot products need
 # at least 16 reduction lanes, including for small heads (e.g. D=8). Loads and
 # stores mask the padded lanes; delta reduces over the same padded dimension.

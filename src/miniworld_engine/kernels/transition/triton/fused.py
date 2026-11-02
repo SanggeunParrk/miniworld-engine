@@ -54,12 +54,6 @@ def _transition_fuse_stats_enabled() -> bool:
     return settings.current().transition_fuse_stats
 
 
-def get_seq_group(length) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    from miniworld_engine.autotune.buckets import bucket_mixed
-    return bucket_mixed(length)
-
-
 def _shape_key(shape_key: int | None, rows: int, **axes: int) -> int:
     """The autotune shape key for a launch: L bucketed against the ``both`` set.
 
@@ -316,7 +310,7 @@ def _prefer_covering_b2b(configs, nargs, **_):
 # which is already in the key and already says WHICH OP this launch is:
 #   HAS_LN=1  the Transition op, `y = x + squeeze(SwiGLU(LN(x)))`. Its residual is
 #             unconditional -- every module and the `ops.transition` facade define it that way.
-#   HAS_LN=0  the bare SwiGLU FFN (`_SwiGLUFFNFused` / `triton_swiglu_ffn`), whose whole
+#   HAS_LN=0  the bare SwiGLU FFN (`triton_swiglu_ffn`), whose whole
 #             contract is "no LayerNorm, no residual" and whose caller owns its own norm.
 # That is the same pairing the old flag always had -- (HAS_LN=0, ADD_RESIDUAL=1) was a
 # combination nothing could launch -- so folding it in removes a variable without removing a
@@ -806,34 +800,6 @@ def _swiglu_b2b(x2: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.
                           has_ln=False, shape_key=shape_key)
 
 
-class _SwiGLUFFNFused(torch.autograd.Function):
-    """``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))`` in ONE kernel -- no LayerNorm, no residual."""
-
-    @staticmethod
-    def forward(ctx, x, expand_a_weight, expand_b_weight, squeeze_weight):
-        orig_shape = x.shape
-        x2 = x.reshape(-1, orig_shape[-1])
-        if x2.stride(1) != 1:
-            x2 = x2.contiguous()
-        out = _swiglu_b2b(
-            x2, expand_a_weight.contiguous(), expand_b_weight.contiguous(),
-            squeeze_weight.contiguous(), both_key(rows_of(orig_shape)),
-        )
-        ctx.save_for_backward(x2, expand_a_weight, expand_b_weight, squeeze_weight)
-        ctx.shape, ctx.nd = orig_shape, expand_a_weight.shape[0]
-        return out.reshape(orig_shape)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        from miniworld_engine.kernels.transition.triton.main import swiglu_squeeze_backward
-
-        x2, wa, wb, ws = ctx.saved_tensors
-        grad_output = grad_output.reshape(-1, ctx.shape[-1])
-        if grad_output.stride(1) != 1:
-            grad_output = grad_output.contiguous()
-        return swiglu_squeeze_backward(x2, wa, wb, ws, grad_output, ctx.shape, ctx.nd)
-
-
 def triton_swiglu_ffn(
     x: torch.Tensor,
     expand_a_weight: torch.Tensor,
@@ -860,12 +826,12 @@ def triton_swiglu_ffn(
 
         eager PyTorch          fwd 1.69 ms  bwd 2.99  held 864 MB  peak 9622 MB
         split (this)           fwd 0.61     bwd 1.90  held  96 MB  peak 2039 MB
-        b2b (_SwiGLUFFNFused)  fwd 1.36     bwd 1.89  held  96 MB  peak 2039 MB
+        b2b (removed)          fwd 1.36     bwd 1.89  held  96 MB  peak 2039 MB
 
     b2b loses the forward 2.2x and holds exactly the same memory -- h is recomputed in the
     backward either way, so never reaching HBM saves bandwidth, not held activation. The b2b
-    path stays reachable through `_SwiGLUFFNFused` for a shape where that trade may turn
-    (a much larger ND, where the h round-trip grows and the weight re-read does not).
+    form (``_SwiGLUFFNFused``, removed; it is in git history) could pay off only for a much larger ND, where the h round-trip grows and
+    the weight re-read does not.
     """
     from miniworld_engine.kernels.transition.triton.main import triton_transition
 

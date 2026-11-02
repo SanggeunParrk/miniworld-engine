@@ -120,11 +120,11 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
     "layernorm": ("layernorm/*",),
     # the smooth lDDT of the diffusion loss (kernels/smooth_lddt): prep + forward, and the backward in a training call
     "smooth_lddt": ("smooth_lddt/*",),
-    # the ops.* facade entry points that launch a single Triton unit (kernels/*/whole_op.py, kernels/_ops_routed.py)
+    # the ops.* facade entry points that launch a single Triton unit (the family interfaces of layernorm, rmsnorm, transition, gated_projection, layernorm_linear; kernels/*/whole_op.py)
     # ops.gated_residual: x + gate * branch (gated_projection/triton/residual.py), the SWADiTBlock per-op residual
     "gated_residual": ("gated_projection/gated_projection_fwd_residual_triton", "gated_projection/gated_projection_bwd_residual_triton"),
     "augmented_attention_pair_bias": _TOKEN_ATTENTION,
-    # the bare SwiGLU (ops.swiglu_ffn, ops.conditioned_transition's tail, the ESMFold2 atom block's FFN) and its backward
+    # the bare SwiGLU (ops.swiglu_ffn, the ESMFold2 atom block's FFN) and its backward
     "swiglu_ffn": ("transition/transition_expand_swiglu_triton", "transition/transition_bwd_squeeze_swiglu_triton"),
     # ops.rms_norm_modulation (the adaLN-Zero RMSNorm + modulation of the ESMFold2 atom block and SWADiTBlock's per-op path)
     "rms_norm_modulation": ("rmsnorm_adamod/*",),
@@ -289,16 +289,3 @@ def row_dtype(kernel: str, dtype: str) -> str:
 def recorded(op: str, name: str, capability: tuple[int, int], dtype: str = "bf16", mode: str = "training") -> bool:
     """Does the engine hold evidence that the Triton kernels ``op`` launches in ``mode`` run correctly on exactly this card at ``dtype``?"""
     return not missing(op, name, capability, dtype, mode)
-
-
-def routing_table(dtype: str = "bf16", mode: str = "training") -> dict[str, dict[str, tuple[str, ...]]]:
-    """``{card: {op: missing kernels}}`` over every recorded card -- the data behind ``docs/dispatch.md``."""
-    return {
-        c: {op: missing(op, c.rsplit(" (sm", 1)[0], _capability_of(c), dtype, mode) for op in OP_KERNELS}
-        for c in recorded_cards()
-    }
-
-
-def _capability_of(card: str) -> tuple[int, int]:
-    digits = card.rsplit("(sm", 1)[1].rstrip(")")
-    return int(digits[:-1]), int(digits[-1])

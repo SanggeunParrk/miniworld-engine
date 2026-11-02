@@ -1,5 +1,4 @@
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/transition.py
-from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
@@ -38,17 +37,6 @@ def _fused_sm80_enabled() -> bool:
     from miniworld_engine import settings
 
     return (not settings.current().force_portable_kernels)
-
-
-@contextmanager
-def nvtx_range(name: str, enabled: bool):
-    if enabled:
-        torch.cuda.nvtx.range_push(name)
-    try:
-        yield
-    finally:
-        if enabled:
-            torch.cuda.nvtx.range_pop()
 
 
 class Transition(nn.Module):

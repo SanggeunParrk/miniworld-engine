@@ -112,12 +112,6 @@ def sigmoid_gate_bwd_kernel(
         tl.store(drep_ptr + offset, drep_val, mask=mask)
 
 
-def get_seq_group(length) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    from miniworld_engine.autotune.buckets import bucket_mixed
-    return bucket_mixed(length)
-
-
 def _sigmoid_gate_fake(gate, x, shape_key):
     """(M, N) like x -- the gate is applied elementwise."""
     return torch.empty_like(x)

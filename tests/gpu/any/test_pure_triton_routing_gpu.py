@@ -1,7 +1,7 @@
 """The family is chosen by the CALLER: the hand-CUDA stages that used to hide in Triton files are reached through the routing layer, and not under
 ``force_portable_kernels``.
 
-Default (non-forced) dispatch is what it was: the same stage is taken on the same card, now from ``_ops_routed`` / ``transition.interface`` /
+Default (non-forced) dispatch is what it was: the same stage is taken on the same card, now from ``layernorm.interface`` / ``transition.interface`` /
 ``triangle_attention.interface`` / ``kernels.integrations.token_dit``. Forced, none of them is entered (the Triton files hold no way to).
 """
 
@@ -35,7 +35,7 @@ def _masked_ln(width=128, rows=512):
 
 @pytest.mark.parametrize("forced", [False, True])
 def test_masked_layernorm_backward_is_chosen_by_ops_layer_norm(monkeypatch, forced):
-    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels.layernorm.interface import layer_norm as _op_layer_norm
     from miniworld_engine.kernels.layernorm import cuda as ln_cuda
 
     settings.configure(force_portable_kernels=forced)

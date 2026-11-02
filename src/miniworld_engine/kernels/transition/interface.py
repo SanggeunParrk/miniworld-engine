@@ -35,3 +35,36 @@ def triton_transition_fused(x, ln_weight, ln_bias, expand_a_weight, expand_b_wei
     from miniworld_engine.kernels.transition.cuda import train_route
 
     return train_route.triton_transition_fused(x, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight, n, eps, save_xn)
+
+
+def swiglu_ffn(x, expand_a_weight, expand_b_weight, squeeze_weight):
+    """``W_down( SiLU(Wa @ x) * (Wb @ x) )``, routed per card -- see ``kernels.transition.triton.fused.triton_swiglu_ffn``. H100 / B200 launch no
+    Triton: the CUDA kernels of the conditioned-transition tail (fused expand + SwiGLU GEMM, SwiGLU row kernels) where they serve the call
+    (``kernels/conditioned_transition/cuda/swiglu_ffn``), the PyTorch statements otherwise. A card without a record: the PyTorch statements."""
+    import torch.nn.functional as F
+
+    from miniworld_engine.kernels._device import no_triton
+    from miniworld_engine.modules.dispatch import portable_blocked
+
+    if no_triton(x):
+        # H100: the CUDA kernels of the conditioned-transition tail (fused expand + SwiGLU GEMM, SwiGLU row kernels) where they serve the call
+        from miniworld_engine.kernels.conditioned_transition.cuda import swiglu_ffn as cuda_swiglu
+
+        out = cuda_swiglu.swiglu_ffn(x, expand_a_weight, expand_b_weight, squeeze_weight)
+        if out is not None:
+            return out
+    if no_triton(x) or (x.is_cuda and portable_blocked("swiglu_ffn", x.device, x, expand_a_weight, expand_b_weight, squeeze_weight)):
+        return F.linear(F.silu(F.linear(x, expand_a_weight)) * F.linear(x, expand_b_weight), squeeze_weight)
+    from miniworld_engine.kernels.transition.triton.fused import triton_swiglu_ffn
+
+    return triton_swiglu_ffn(x, expand_a_weight, expand_b_weight, squeeze_weight)
+
+
+def transition(x, *, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, n, eps: float = 1e-5):
+    """The whole Transition layer ``x + squeeze(SwiGLU(LN(x)))`` with the weights as arguments (autograd-transparent): ``kernels.transition.whole_op.transition``."""
+    from miniworld_engine.kernels.transition.whole_op import transition as _transition
+
+    return _transition(
+        x, ln_in_weight=ln_in_weight, ln_in_bias=ln_in_bias, expand_a_weight=expand_a_weight, expand_b_weight=expand_b_weight,
+        squeeze_weight=squeeze_weight, n=n, eps=eps,
+    )

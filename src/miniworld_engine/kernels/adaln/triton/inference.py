@@ -59,12 +59,6 @@ _GEMM_BF16 = False
 
 
 
-def set_gemm_bf16(flag: bool) -> None:
-    """Enable bf16 operands (fp32 accumulate) for the GEMM on fp32 inputs (faster, cos≈0.9999)."""
-    global _GEMM_BF16  # noqa: PLW0603
-    _GEMM_BF16 = flag
-
-
 @contextlib.contextmanager
 def _fp32_matmul_ctx(dtype):
     if dtype is not torch.float32:

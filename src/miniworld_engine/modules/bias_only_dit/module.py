@@ -97,14 +97,14 @@ class BiasOnlyAttention(nn.Module):
 
     def _cuda_pair_bias(self, pair) -> bool:
         """H100 only (``restricted_card``): the pair LayerNorm + bias projection of one sample (d_pair 128, 16 heads, no offsets, a pair of
-        L x L rows) on the CUDA pair-bias kernels of the token DiT (``_h100_ops.layer_norm_linear``)."""
+        L x L rows) on the CUDA pair-bias kernels of the token DiT (``layernorm_linear.cuda.pair_bias.layer_norm_linear``)."""
         if (pair is None or not pair.is_cuda or self.ada_ln_in.implementation != ImplementationType.MINIWORLD
                 or self.ln_pair.weight is None or getattr(self.ln_pair, "bias", None) is not None or self.to_bias.bias is not None
                 or pair.ndim != 4 or pair.shape[0] != 1 or not restricted_card(pair.device)):
             return False
-        from miniworld_engine.kernels import _h100_ops
+        from miniworld_engine.kernels.layernorm_linear.cuda.pair_bias import layer_norm_linear_serves
 
-        return _h100_ops.layer_norm_linear_serves(pair, self.ln_pair.weight, self.to_bias.weight)
+        return layer_norm_linear_serves(pair, self.ln_pair.weight, self.to_bias.weight)
 
     def _feature_major_psb(self, single) -> bool:
         """The same core for a pair of its own per sample (``single`` [1, B, L, d], B > 1; ``core_t`` with ``p`` [B, H, L, L])."""
@@ -145,9 +145,9 @@ class BiasOnlyAttention(nn.Module):
                 logits = _pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
             elif bias is None and self._cuda_pair_bias(pair):
                 # H100, 16 heads, d_pair 128: LayerNorm + projection in one CUDA pass (the token DiT's pair-bias kernels), head-major, no copy
-                from miniworld_engine.kernels import _h100_ops
+                from miniworld_engine.kernels.layernorm_linear.cuda.pair_bias import layer_norm_linear
 
-                logits = _h100_ops.layer_norm_linear(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps).permute(0, 3, 1, 2)
+                logits = layer_norm_linear(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps).permute(0, 3, 1, 2)
             elif bias is None:
                 logits = self.to_bias(self.ln_pair(pair)).permute(0, 3, 1, 2)   # (B, H, L, L)
             else:

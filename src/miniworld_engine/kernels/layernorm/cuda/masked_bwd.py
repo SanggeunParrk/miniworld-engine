@@ -1,7 +1,7 @@
 """LayerNorm autograd whose BACKWARD is the hand-CUDA warp-per-row kernel (``layer_norm_bwd_cuda``).
 
 This used to live inside ``triton/main.py`` (``_ln_bwd``); a Triton file must not reach for CUDA, so the choice is made by the caller
-(:func:`use_cuda_bwd`, asked by ``kernels/_ops_routed.layer_norm``) and the CUDA backward lives here, in the CUDA family. The forward is the
+(:func:`use_cuda_bwd`, asked by ``kernels/layernorm/interface.layer_norm``) and the CUDA backward lives here, in the CUDA family. The forward is the
 Triton forward (``_ln_fwd``); only the three gradients differ.
 
 Measured B200 (M=L^2, N=128, fwd+bwd): MASKED (a ``row_scale``, the AF pair mask) CUDA beats Triton 1.17x @L512, 1.28x @L1024 -- Triton pays a

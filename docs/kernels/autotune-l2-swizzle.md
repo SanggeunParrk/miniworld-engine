@@ -36,7 +36,7 @@ matches upstream Triton, whose matmul tutorial calls it `GROUP_SIZE_M`.
 | L2 swizzle (above) | 5 | yes | no | yes | `tl.constexpr` |
 | autotune cache bucket | 43 | no | yes | **no** | plain runtime int |
 
-The bucket role exists only so the autotuner keys its cache on `get_seq_group(M)` instead of a raw
+The bucket role exists only so the autotuner keys its cache on `bucket_mixed(M)` (``autotune.buckets``) instead of a raw
 token count. It is not a tuning value and the kernel never reads it. It used to be declared
 `tl.constexpr`, which baked the bucket id into the compiled kernel and forced a separate compile per
 sequence-length bucket for byte-identical code; it is a runtime argument now, and `key=[...]` keys on

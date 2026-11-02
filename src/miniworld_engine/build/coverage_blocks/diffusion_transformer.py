@@ -1,5 +1,3 @@
-from collections.abc import Mapping
-from typing import TypeVar
 
 import torch
 from einops import rearrange, repeat
@@ -14,8 +12,6 @@ from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.modules import AugmentedAttentionPairBias
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.functional import sigmoid_gate
-
-T = TypeVar("T")
 
 
 def _sm90_attention():
@@ -116,29 +112,6 @@ def _load_legacy_names(
         state_dict[new + k.removeprefix(old)] = state_dict.pop(k)
 
 
-def upgrade_legacy_keys(model: nn.Module, state_dict: Mapping[str, T]) -> dict[str, T]:
-    """``state_dict`` with its diffusion blocks' ``attention_pair_bias.`` keys renamed.
-
-    Each ``DiffusionTransformerBlock``'s ``attention_pair_bias.`` keys become
-    ``attention.``. ``load_state_dict`` does this through the block's load pre-hook;
-    readers of a raw state dict keyed by ``named_parameters`` (the EMA shadow,
-    parameter policies) call this first. Other modules' own ``attention_pair_bias``
-    (the pairformer's) keep their keys.
-    """
-    olds = tuple(
-        f"{n}.{_LEGACY}" if n else _LEGACY
-        for n, m in model.named_modules()
-        if isinstance(m, DiffusionTransformerBlock)
-    )
-    out: dict[str, T] = {}
-    for k, v in state_dict.items():
-        old = next((o for o in olds if k.startswith(o)), None)
-        if old is not None:
-            k = old.removesuffix(_LEGACY) + "attention." + k.removeprefix(old)
-        out[k] = v
-    return out
-
-
 class DiffusionTransformerBlock(DiTBlock):
     """A single block of the Diffusion Transformer: the engine's ``DiTBlock``.
 
@@ -151,8 +124,7 @@ class DiffusionTransformerBlock(DiTBlock):
     The attention is ``self.attention`` (the engine's name); its keys are
     ``attention.`` in ``named_parameters`` and ``state_dict`` alike, and
     ``attention_pair_bias`` is the same module under its old name. Checkpoints that
-    spell the keys ``attention_pair_bias.`` still load (a load pre-hook;
-    :func:`upgrade_legacy_keys` for raw state dicts).
+    spell the keys ``attention_pair_bias.`` still load (a load pre-hook).
     """
 
     def __init__(

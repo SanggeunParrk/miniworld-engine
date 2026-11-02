@@ -17,24 +17,12 @@ Formula, per row of the flattened ``(..., d)`` inputs::
 LayerNorms are affine-free except for ``cond_ln_weight`` (the cond LayerNorm has
 no bias) and ``to_bias`` has no bias term of its own.
 
-Provided as an ``nn.Module`` (:class:`AdaLNReference`, owning the four
-parameters) so a kernel can be checked against it on both the forward output and
-the backward gradients, e.g.::
-
-    ref = AdaLNReference(d_hidden, d_cond).cuda().to(torch.bfloat16)
-    y = ref(x, cond)
-    yk = adaln_train(x, cond, ref.cond_ln_weight, ref.scale_weight,
-                     ref.scale_bias, ref.bias_weight, ref.eps_x, ref.eps_cond)
-    y.sum().backward()
-
-A plain functional form (:func:`adaln_pytorch`) is kept for callers that already
-hold the weight tensors.
+The reference is the plain functional form (:func:`adaln_pytorch`): a kernel is checked against it on both the forward output and the backward gradients.
 """
 
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 
 
 def adaln_pytorch(
@@ -72,45 +60,3 @@ def adaln_pytorch(
     gate = torch.sigmoid(scale.float()).to(out_dtype)
     y = gate.float() * x_hat + bias.float()
     return y.to(out_dtype)
-
-
-class AdaLNReference(nn.Module):
-    """nn.Module reference for adaptive LayerNorm (forward + backward ground truth)."""
-
-    def __init__(
-        self,
-        d_hidden: int,
-        d_cond: int,
-        *,
-        eps_x: float = 1e-5,
-        eps_cond: float = 1e-5,
-        device: torch.device | str | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> None:
-        super().__init__()
-        scale = d_cond**-0.5
-        # Spelled out rather than splatted from a `kw` dict: a bare dict literal infers a joined
-        # value type that matches no `torch.ones`/`torch.randn` overload.
-        self.cond_ln_weight = nn.Parameter(torch.ones(d_cond, device=device, dtype=dtype))
-        self.scale_weight = nn.Parameter(
-            torch.randn(d_hidden, d_cond, device=device, dtype=dtype) * scale
-        )
-        self.scale_bias = nn.Parameter(torch.ones(d_hidden, device=device, dtype=dtype))
-        self.bias_weight = nn.Parameter(
-            torch.randn(d_hidden, d_cond, device=device, dtype=dtype) * scale
-        )
-        self.eps_x = eps_x
-        self.eps_cond = eps_cond
-
-    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        """Forward pass; differentiable in ``x``, ``cond`` and all four parameters."""
-        return adaln_pytorch(
-            x,
-            cond,
-            self.cond_ln_weight,
-            self.scale_weight,
-            self.scale_bias,
-            self.bias_weight,
-            self.eps_x,
-            self.eps_cond,
-        )

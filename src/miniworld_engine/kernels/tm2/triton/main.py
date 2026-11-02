@@ -174,12 +174,6 @@ def fused_sigmoid_gate2_bwd_kernel(
     )
 
 
-def get_seq_group(length) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    from miniworld_engine.autotune.buckets import bucket_squared
-    return bucket_squared(length)
-
-
 def _tm2_fwd_fake(x, y, gate_weight, out_weight, shape_key):
     """`out`, shaped and typed like the flat `x`."""
     return torch.empty_like(x)

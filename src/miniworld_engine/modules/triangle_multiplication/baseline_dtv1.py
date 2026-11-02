@@ -83,7 +83,6 @@ from miniworld_engine.kernels._tiles import tile_order
 from cuequivariance_ops.triton import Layout  # optional cuequivariance backend
 
 from miniworld_engine.autotune import tensor_dtype_of
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
 from miniworld_engine.autotune.shape_key import token_key
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -206,19 +205,6 @@ def _shape_key(seq_len) -> int:
     with no L to give, not a production path.
     """
     return token_key(int(seq_len)) if seq_len is not None else token_key(0)
-
-
-def get_seq_group(rows) -> int:
-    """Bucket a raw row/element count for the autotune key (canonical autotune.buckets).
-
-    Every count in this file is either the pair row count M = b*i*j (the GEMMs) or a flat
-    element count (the elementwise backward), so all three ops share ONE bucketer.
-    bucket_mixed is used rather than bucket_squared even for the pair-only GEMMs because
-    COMBINED_EDGES is the UNION of the linear and squared edge sets -- it is a strict
-    refinement of the squared edges, never coarser, and it also covers the elementwise
-    op whose count is ~2*D*M and lands far above the squared edges.
-    """
-    return _bucket(rows)
 
 
 # AUTOTUNE KEY: ['shape_key', 'K', 'ALLOW_TF32'] -- was ['M', 'N', 'K', 'ALLOW_TF32']. Keying

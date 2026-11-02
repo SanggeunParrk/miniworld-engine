@@ -70,8 +70,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         # own that fused epilogue. See the single-dir TriangleMultiplication for the full rationale.
         # >>> There is no way to turn it off, not even by editing a local: the residual is part
         # >>> of what this module IS. For the raw op in isolation -- benchmarking, or a caller
-        # >>> that owns its own residual -- use ``ops.bidirectional_triangle_multiplicative_update``, the
-        # >>> weights-as-args facade that mirrors cuequivariance's signature.
+        # >>> that owns its own residual -- use the kernel entry point (``kernels/trimul_inproj/interface.py``).
         # ======================================================================================
         self.p_drop = p_drop
         self.d_pair = d_pair
@@ -127,8 +126,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         UNCONDITIONAL (no flag — domain standard, fused FOR SPEED). The row-broadcast DROPOUT is
         OPTIONAL: ``dropout_p`` overrides the instance ``p_drop`` per call (None -> ``self.p_drop``)
         and is active only in ``self.training``.
-        >>> The raw op without the residual is ``ops.bidirectional_triangle_multiplicative_update``,
-        not a flag on this module."""
+        >>> The raw op without the residual is not a flag on this module."""
         dropout_p = self.p_drop if dropout_p is None else dropout_p
         _pair_in = pair
         _ds = (self._make_drop_row_scale(pair, dropout_p)

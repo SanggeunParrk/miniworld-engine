@@ -16,12 +16,6 @@ from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.autotune.shape_key import length_of, token_key, pack
 
 
-def get_seq_group(length) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    from miniworld_engine.autotune.buckets import bucket_squared
-    return bucket_squared(length)
-
-
 # Real cross-product tile search (was: 2 fwd / 1 bwd pinned configs, only num_warps varied).
 # BLOCK_M1 (grid M-tile), BLOCK_N (grid N-output tile) and BLOCK_K (contraction-loop tile) are
 # all genuine tunable tiles of the `for k_start in range(0, N, BLOCK_K)` GEMM. The smem prune

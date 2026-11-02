@@ -32,13 +32,7 @@ import triton.language as tl
 # takes a handful of values; M is the row count and is effectively continuous, so keying on it
 # would mint a fresh autotune (a full-grid sweep on a cache miss) for every distinct M the model
 # runs, which is a per-shape stall, not a better config.
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
 from miniworld_engine.autotune.shape_key import both_key, rows_of, pack
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
 
 
 @triton.autotune(configs=configs_for("layernorm_stats_triton"), key=['shape_key'])

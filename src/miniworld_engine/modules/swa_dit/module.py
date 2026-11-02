@@ -38,9 +38,9 @@ class SwiGLUFFN(nn.Module):
         if self.implementation != ImplementationType.PYTORCH and not (
             x.is_cuda and not portable_leg_allowed(x.device, "swa_dit", training=needs_backward(self, x), dtype=record_dtype(x))
         ):
-            from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
-            from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
-            from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+            from miniworld_engine.kernels.gated_projection.interface import gated_residual as _op_gated_residual
+            from miniworld_engine.kernels.rmsnorm.interface import rms_norm_modulation as _op_rms_norm_modulation
+            from miniworld_engine.kernels.transition.interface import swiglu_ffn as _op_swiglu_ffn
             wa, wb = self.w_up.weight.chunk(2, dim=0)
             return _op_swiglu_ffn(x, wa, wb, self.w_down.weight)
         x1, x2 = self.w_up(x).chunk(2, dim=-1)
@@ -212,9 +212,9 @@ class SWADiTBlock(nn.Module):
                 # H100 / B200 have no Triton fallback, nor has a card without a record: the PyTorch statements below (fp32 masters under bf16 autocast)
                 with fallback_autocast(x, self):
                     return self._pytorch_forward(x, cond, attention_params).to(x.dtype)
-            from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
-            from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
-            from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+            from miniworld_engine.kernels.gated_projection.interface import gated_residual as _op_gated_residual
+            from miniworld_engine.kernels.rmsnorm.interface import rms_norm_modulation as _op_rms_norm_modulation
+            from miniworld_engine.kernels.transition.interface import swiglu_ffn as _op_swiglu_ffn
             activated = self.adaln_modulation[0](cond)
             projection = self.adaln_modulation[1]
             assert isinstance(projection, nn.Linear)
