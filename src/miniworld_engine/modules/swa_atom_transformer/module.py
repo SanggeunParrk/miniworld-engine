@@ -57,7 +57,8 @@ def _legacy_options_removed(where: str, **options: bool) -> None:
     """The legacy magnitude-preserving options were removed: accepted as false (configs that spell them out keep loading), they raise when on."""
     on = sorted(name for name, value in options.items() if value)
     if on:
-        msg = f"{where}: the legacy option(s) {", ".join(on)} were removed; restore them from git history if needed."
+        names = ", ".join(on)
+        msg = f"{where}: the legacy option(s) {names} were removed; restore them from git history if needed."
         raise NotImplementedError(msg)
 
 

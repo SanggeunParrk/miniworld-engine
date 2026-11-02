@@ -40,7 +40,7 @@ TOK = _core_mod.TOK
 def _glue(defs: tuple[str, ...] = ()):
     """The width-generic glue kernels; `defs` = extra -D knobs (experiments), part of the build name."""
     ensure_cuda_home()
-    tag = "".join(f"_{d.replace("=", "").lower()}" for d in defs)
+    tag = "".join(f"_{d.replace('=', '').lower()}" for d in defs)
     return load_extension(
         name=f"triattn_h100_generic{tag}_v5",
         sources=[str(_SRC / "triattn_generic_sm90.cu")],
