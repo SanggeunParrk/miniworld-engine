@@ -85,10 +85,11 @@ def _load_fused(f32: bool, bn: int, kc: int, dx: int):
 #: fp32 at the atom width (d = cond = 128): the one-launch CTA-pair kernel (``adaln_fused2_sm100.cu``). None: from ``FUSED2_MIN_ROWS`` rows;
 #: False / True: never / always (A/B, tests)
 FUSED2: bool | None = None
-#: Where the pair kernel beats the row kernels around cuBLAS (triton do_bench, CUDA graph, us, pair kernel / cuBLAS route / Triton): [40960,
-#: 128] 32.5 / 38.7 / 40.7, [20480, 128] 24.4 / 26.4 / 26.4 (80 pair tiles on 74 pairs: six of them run a second tile); at [5120, 128] it
-#: loses (18.2 against 16.2: one tile a pair, nothing for the pipeline to hide).
-FUSED2_MIN_ROWS = 16384
+#: Where the pair kernel beats the row kernels around cuBLAS (triton do_bench, CUDA graph, 6 us timer floor included, us, pair kernel / cuBLAS
+#: route): [10240, 128] 16.3 / 20.4, [5120, 128] 16.2 / 17.3, [2560, 128] 15.0 / 15.4, [1280, 128] 14.7 / 14.2 (the pair kernel has the TMA and
+#: tensor-memory setup of a tile whatever its rows); [40960, 128] 31.0, [20480, 128] 24.4 (80 pair tiles on 74 pairs: six of them run a second
+#: tile, +5.9 us over the 74-tile 18.5 us).
+FUSED2_MIN_ROWS = 2560
 
 
 @functools.lru_cache(maxsize=2)
