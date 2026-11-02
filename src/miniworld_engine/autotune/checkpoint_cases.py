@@ -12,7 +12,7 @@ from torch import nn
 NAMES = (
     "layernorm_linear_atom_output",
     "rms_norm_modulation",
-    # ops.gated_residual: x + gate * branch, SWADiTBlock's per-op adaLN-Zero residual (atom stream, augmented rows)
+    # _op_gated_residual: x + gate * branch, SWADiTBlock's per-op adaLN-Zero residual (atom stream, augmented rows)
     "gated_residual",
     "triangle_attention_checkpoint",
     "gated_linear",
@@ -48,10 +48,14 @@ class Leaf(nn.Module):
             weight("weight", (dims["n_head"], dims["d_norm"]))
 
     def forward(self, *args):
-        from miniworld_engine import ops
-
+        from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+        from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+        from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+        from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+        from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+        from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
         if self.kind == "rms_norm_modulation":
-            y, gate = ops.rms_norm_modulation(
+            y, gate = _op_rms_norm_modulation(
                 *args,
                 self.wscale,
                 self.wshift,
@@ -60,15 +64,15 @@ class Leaf(nn.Module):
             )
             return y + gate
         if self.kind == "gated_linear":
-            return ops.gated_linear(*args, self.weight)
+            return _op_gated_linear(*args, self.weight)
         if self.kind == "gated_residual":
-            return ops.gated_residual(*args)
+            return _op_gated_residual(*args)
         if self.kind == "swiglu_ffn":
-            return ops.swiglu_ffn(*args, self.wa, self.wb, self.ws)
+            return _op_swiglu_ffn(*args, self.wa, self.wb, self.ws)
         if self.kind in ("layernorm_linear_native", "layernorm_linear_atom_output"):
-            return ops.layer_norm_linear(*args, self.norm, self.weight)
+            return _op_layer_norm_linear(*args, self.norm, self.weight)
         if self.kind == "projected_attention":
-            return ops.augmented_attention_pair_bias(*args)
+            return _op_augmented_attention_pair_bias(*args)
         raise ValueError(self.kind)
 
 

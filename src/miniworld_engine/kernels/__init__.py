@@ -1,9 +1,8 @@
 """Flat re-export surface for the **primitive** fusion kernels.
 
-This is an INTERNAL surface: the per-GEMM / LN / gate / attention fusion units out
-of which the public whole-ops (:mod:`miniworld_engine.ops`) are built. It is also
-used by the internal benchmark/reference harness (``miniworld_engine.modules``).
-Model code should consume ``ops.*`` (whole model-layer ops), never reach in here.
+This is an INTERNAL surface: the per-GEMM / LN / gate / attention fusion units that
+``miniworld_engine.modules`` is built from. It is also used by the internal benchmark/reference harness. A model takes the layers from
+``modules``; for a single op (a LayerNorm, an RMSNorm) it may connect to the kernel entry point here.
 
 Each name resolves lazily to the canonical Triton entry point for that op, without
 knowing the per-op / per-backend folder layout. Import stays side-effect-free (no

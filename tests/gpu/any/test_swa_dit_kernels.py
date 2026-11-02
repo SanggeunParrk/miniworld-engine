@@ -5,7 +5,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine import ops
+from miniworld_engine.kernels import _ops_routed as ops
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.swa_atom_attention import build_attention_params
 from miniworld_engine.modules.swa_dit import SWADiTBlock

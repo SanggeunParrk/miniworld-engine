@@ -1,12 +1,10 @@
 """Public/contract API guarantees.
 
-``miniworld_engine.ops`` is the **consumer contract** (whole model-layer ops);
-``miniworld_engine.kernels`` is the **internal primitive** surface out of which the
-ops are built (also used by the benchmark harness). Both are pinned here so that:
+``miniworld_engine.kernels`` is the **internal primitive** surface (also used by the benchmark harness); its names are pinned here so that:
 
   1. Each name set is stable — adding/removing one is a conscious change that must
-     update the relevant frozen set (``_OPS_CONTRACT`` / ``_CONTRACT``) and CHANGELOG.
-  2. ``import miniworld_engine.ops`` / ``.kernels`` stays cheap and side-effect-free:
+     update the frozen set (``_CONTRACT``) and CHANGELOG.
+  2. ``import miniworld_engine.kernels`` stays cheap and side-effect-free:
      importing must NOT pull triton / cutlass / cuequivariance / lightning / hydra
      into ``sys.modules``. Heavy backends load lazily on first *call*, so the package
      imports on a CPU/login node without a GPU stack.
@@ -102,57 +100,6 @@ def test_import_is_side_effect_free() -> None:
     )
     subprocess.run([sys.executable, "-c", code], check=True)
 
-
-# Frozen public surface of miniworld_engine.ops — the WHOLE-OP (composite,
-# weights-as-args, autograd-transparent) contract consumed by model code. Primitives
-# live in `kernels` and are NOT re-exported here. Grows as ops are added.
-_OPS_CONTRACT = frozenset(
-    {
-        "augmented_attention_pair_bias",
-        "bidirectional_triangle_multiplicative_update",
-        "conditioned_transition",
-        "gated_linear",
-        "gated_residual",
-        "swiglu_ffn",
-        "rms_norm_modulation",
-        "layer_norm",
-        "layer_norm_linear",
-        "transition",
-        "triangle_attention",
-        "triangle_multiplicative_update",
-    }
-)
-
-
-def test_ops_surface_is_frozen() -> None:
-    from miniworld_engine import ops
-
-    surface = set(ops.__all__)
-    added = surface - _OPS_CONTRACT
-    removed = _OPS_CONTRACT - surface
-    assert (added, removed) == (set(), set()), (
-        f"ops public surface changed (added={sorted(added)}, removed={sorted(removed)}). "
-        f"Update _OPS_CONTRACT in tests/cpu/compile/test_public_api.py and CHANGELOG.md."
-    )
-
-
-def test_ops_import_is_side_effect_free() -> None:
-    """Importing the ops package must not pull any heavy backend (lazy on call)."""
-    heavy = ", ".join(repr(h) for h in _HEAVY)
-    code = (
-        "import sys\n"
-        # Interpreter startup can already hold a heavy module (a .pth hook installed by a
-        # dependency, e.g. nvidia_cutlass_dsl_packages.pth via Transformer Engine); only what
-        # THIS import adds is ours to answer for.
-        "_before = set(sys.modules)\n"
-        "import miniworld_engine.ops as o\n"
-        f"_heavy = ({heavy},)\n"
-        "leaked = sorted({m.split('.')[0] for m in set(sys.modules) - _before "
-        "for h in _heavy if h in m})\n"
-        "assert not leaked, f'ops import pulled heavy backends: {leaked}'\n"
-        "assert 'triangle_multiplicative_update' in dir(o)\n"
-    )
-    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 def _kernels_deprecated() -> list[str]:

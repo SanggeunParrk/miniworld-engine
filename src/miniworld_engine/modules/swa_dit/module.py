@@ -38,10 +38,11 @@ class SwiGLUFFN(nn.Module):
         if self.implementation != ImplementationType.PYTORCH and not (
             x.is_cuda and not portable_leg_allowed(x.device, "swa_dit", training=needs_backward(self, x), dtype=record_dtype(x))
         ):
-            from miniworld_engine import ops
-
+            from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+            from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+            from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
             wa, wb = self.w_up.weight.chunk(2, dim=0)
-            return ops.swiglu_ffn(x, wa, wb, self.w_down.weight)
+            return _op_swiglu_ffn(x, wa, wb, self.w_down.weight)
         x1, x2 = self.w_up(x).chunk(2, dim=-1)
         return self.w_down(F.silu(x1) * x2)
 
@@ -211,22 +212,23 @@ class SWADiTBlock(nn.Module):
                 # H100 / B200 have no Triton fallback, nor has a card without a record: the PyTorch statements below (fp32 masters under bf16 autocast)
                 with fallback_autocast(x, self):
                     return self._pytorch_forward(x, cond, attention_params).to(x.dtype)
-            from miniworld_engine import ops
-
+            from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+            from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+            from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
             activated = self.adaln_modulation[0](cond)
             projection = self.adaln_modulation[1]
             assert isinstance(projection, nn.Linear)
             sh_a, sc_a, g_a, sh_f, sc_f, g_f = projection.weight.chunk(6, dim=0)
             # nn.RMSNorm(eps=None) uses the opmath epsilon (fp32 for BF16).
             eps = torch.finfo(torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype).eps
-            attn_in, gate_a = ops.rms_norm_modulation(
+            attn_in, gate_a = _op_rms_norm_modulation(
                 x, activated, sc_a, sh_a, g_a, eps=eps,
             )
-            x = ops.gated_residual(x, gate_a, self.attn(attn_in, attention_params))
-            ffn_in, gate_f = ops.rms_norm_modulation(
+            x = _op_gated_residual(x, gate_a, self.attn(attn_in, attention_params))
+            ffn_in, gate_f = _op_rms_norm_modulation(
                 x, activated, sc_f, sh_f, g_f, eps=eps,
             )
-            return ops.gated_residual(x, gate_f, self.ffn(ffn_in))
+            return _op_gated_residual(x, gate_f, self.ffn(ffn_in))
         return self._pytorch_forward(x, cond, attention_params)
 
     def _pytorch_forward(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> torch.Tensor:

@@ -23,7 +23,29 @@ import torch.nn.functional as F
 from portable_helpers import randomize_half_std as randomize
 import _triton_records as rec
 
-from miniworld_engine import ops, settings
+from miniworld_engine import settings
+
+from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+
+from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+
+from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+
+from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+
+from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+
+from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+
+from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+
+from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+
+from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+
+from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+
+from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
 
 pytestmark = [
     pytest.mark.gpu,
@@ -126,42 +148,42 @@ def randn(*shape, dtype=torch.float32, scale=1.0, seed=0):
 class TestFacades:
     def test_swiglu_ffn(self, dtype, grad):
         x, wa, wb, ws = randn(2, 64, 128, dtype=dtype), randn(256, 128, dtype=dtype, scale=0.1), randn(256, 128, dtype=dtype, scale=0.1), randn(128, 256, dtype=dtype, scale=0.1)
-        check("ops.swiglu_ffn", dtype, ops.swiglu_ffn, [x, wa, wb, ws], grad)
+        check("_op_swiglu_ffn", dtype, _op_swiglu_ffn, [x, wa, wb, ws], grad)
 
     @pytest.mark.parametrize("row_scale", [False, True])
     def test_layer_norm(self, dtype, grad, row_scale):
         x, w, b = randn(4, 100, 128, dtype=dtype), randn(128, dtype=torch.float32, scale=0.1) + 1, randn(128, dtype=torch.float32, scale=0.1)
         rs = (torch.rand(4, 100, device="cuda") > 0.2).to(dtype)
         # the row scale is applied after the CUDA LayerNorm (one more rounding than the Triton kernel's in-kernel scale)
-        check(f"ops.layer_norm row_scale={row_scale}", dtype,
-              lambda x, w, b: ops.layer_norm(x, w, b, 1e-5, rs if row_scale else None), [x, w, b], grad)
+        check(f"_op_layer_norm row_scale={row_scale}", dtype,
+              lambda x, w, b: _op_layer_norm(x, w, b, 1e-5, rs if row_scale else None), [x, w, b], grad)
 
     def test_rms_norm_modulation(self, dtype, grad):
         q, c = randn(2, 64, 128, dtype=dtype), randn(2, 64, 64, dtype=dtype)
         ws = [randn(128, 64, dtype=dtype, scale=0.1, seed=s) for s in (1, 2, 3)]
-        check("ops.rms_norm_modulation", dtype, lambda q, c, a, b, g: ops.rms_norm_modulation(q, c, a, b, g, None, 1e-5), [q, c, *ws], grad)
+        check("_op_rms_norm_modulation", dtype, lambda q, c, a, b, g: _op_rms_norm_modulation(q, c, a, b, g, None, 1e-5), [q, c, *ws], grad)
 
     def test_layer_norm_linear(self, dtype, grad):
         x, lnw, pw = randn(1, 64, 64, 128, dtype=dtype), randn(128, dtype=torch.float32, scale=0.1) + 1, randn(16, 128, dtype=torch.float32, scale=0.1)
-        check("ops.layer_norm_linear", dtype, lambda x, l, p: ops.layer_norm_linear(x, l, p, 1e-5), [x, lnw, pw], grad)
+        check("_op_layer_norm_linear", dtype, lambda x, l, p: _op_layer_norm_linear(x, l, p, 1e-5), [x, lnw, pw], grad)
 
     def test_gated_residual(self, dtype, grad):
         x, g, b = (randn(4, 64, 128, dtype=dtype, seed=s) for s in (1, 2, 3))
-        check("ops.gated_residual", dtype, ops.gated_residual, [x, g, b], grad)
+        check("_op_gated_residual", dtype, _op_gated_residual, [x, g, b], grad)
 
     def test_gated_linear(self, dtype, grad):
         if dtype is not torch.bfloat16:
-            pytest.skip("ops.gated_linear serves bf16 only (every other dtype was already the PyTorch equation)")
+            pytest.skip("_op_gated_linear serves bf16 only (every other dtype was already the PyTorch equation)")
         gate, value, w = randn(2, 64, 128, dtype=dtype, seed=1), randn(2, 64, 128, dtype=dtype, seed=2), randn(64, 128, dtype=dtype, scale=0.1)
-        check("ops.gated_linear", dtype, lambda g, v, w: ops.gated_linear(g, v, w, None), [gate, value, w], grad)
+        check("_op_gated_linear", dtype, lambda g, v, w: _op_gated_linear(g, v, w, None), [gate, value, w], grad)
 
     def test_conditioned_transition(self, dtype, grad):
         x, cond = randn(2, 64, 128, dtype=dtype), randn(2, 64, 64, dtype=dtype)
         wa, wb, ws = (randn(256, 128, dtype=dtype, scale=0.1, seed=1), randn(256, 128, dtype=dtype, scale=0.1, seed=2),
                       randn(128, 256, dtype=dtype, scale=0.1, seed=3))
         wsc, bsc = randn(128, 64, dtype=dtype, scale=0.1), randn(128, dtype=dtype, scale=0.1)
-        check("ops.conditioned_transition", dtype,
-              lambda x, c, a, b, s, wc, bc: ops.conditioned_transition(
+        check("_op_conditioned_transition", dtype,
+              lambda x, c, a, b, s, wc, bc: _op_conditioned_transition(
                   x, c, expand_a_weight=a, expand_b_weight=b, squeeze_weight=s, to_scale_weight=wc, to_scale_bias=bc, n=2),
               [x, cond, wa, wb, ws, wsc, bsc], grad)
 
@@ -171,8 +193,8 @@ class TestFacades:
         bias = randn(1, heads, length, length, dtype=dtype, seed=4)
         mask = torch.rand(2, 1, length, device="cuda") > 0.1
         # at (16, 128, 48) bf16 the previous path was already the hand-CUDA core only through the module; the facade ran Triton
-        check(f"ops.augmented_attention_pair_bias H{heads} L{length}", dtype,
-              lambda q, k, v, b: ops.augmented_attention_pair_bias(q, k, v, b, mask), [q, k, v, bias], grad)
+        check(f"_op_augmented_attention_pair_bias H{heads} L{length}", dtype,
+              lambda q, k, v, b: _op_augmented_attention_pair_bias(q, k, v, b, mask), [q, k, v, bias], grad)
 
     @pytest.mark.parametrize("qk_norm", [False, True])
     def test_triangle_attention(self, dtype, grad, qk_norm):
@@ -188,13 +210,13 @@ class TestFacades:
         mask = torch.rand(1, length, device="cuda") > 0.1
 
         def call(pair, ln_w, ln_b, wv, wb, wg, wo, wq, wk, *nq):
-            return ops.triangle_attention(
+            return _op_triangle_attention(
                 pair, mask, n_head=heads, ln_pair_weight=ln_w, ln_pair_bias=ln_b, to_value_weight=wv, to_bias_weight=wb, to_gate_weight=wg,
                 to_out_weight=wo, to_query_weight=wq, to_key_weight=wk,
                 norm_query_weight=nq[0] if nq else None, norm_key_weight=nq[1] if nq else None)
 
         # fp32: the previous path was already the PyTorch statements (the portable triangle-attention core is bf16 only)
-        check(f"ops.triangle_attention qk_norm={qk_norm}", dtype, call, [pair, *ws, *norm], grad, expect_old_launch=dtype is torch.bfloat16,
+        check(f"_op_triangle_attention qk_norm={qk_norm}", dtype, call, [pair, *ws, *norm], grad, expect_old_launch=dtype is torch.bfloat16,
               compare_previous=not qk_norm)     # Triton core: wrong when q, k are contiguous (QK-normed) and v is a strided view (probe 2026-11-01)
         if dtype is torch.bfloat16 and not grad:
             # an independent yardstick: the same call on the same (bf16-rounded) values in fp32, PyTorch statements
@@ -204,7 +226,7 @@ class TestFacades:
                 truth, _ = evaluate(call, [t.float() for t in inputs], False)
             with ab(True):
                 previous, _ = evaluate(call, inputs, False)
-            REPORT.append(f"ops.triangle_attention qk_norm={qk_norm} vs fp32 statements: new={rel(got[0], truth[0]):.2e} previous(Triton)={rel(previous[0], truth[0]):.2e}")
+            REPORT.append(f"_op_triangle_attention qk_norm={qk_norm} vs fp32 statements: new={rel(got[0], truth[0]):.2e} previous(Triton)={rel(previous[0], truth[0]):.2e}")
             assert rel(got[0], truth[0]) <= 2 * TOL[dtype]
 
     @pytest.mark.parametrize("direction", ["outgoing", "incoming"])
@@ -218,10 +240,10 @@ class TestFacades:
                    randn(d, d, dtype=dtype, scale=0.05, seed=3), randn(d, d, dtype=dtype, scale=0.05, seed=4)]
 
         def call(x, nw, nb, pin, gin, now, nob, pout, gout):
-            return ops.triangle_multiplicative_update(x, direction, mask, nw, nb, pin, gin, now, nob, pout, gout)
+            return _op_triangle_multiplicative_update(x, direction, mask, nw, nb, pin, gin, now, nob, pout, gout)
 
         # fp32: the previous path was already the PyTorch statements (the Triton TriMul is bf16 only), so no Triton launch there
-        check(f"ops.triangle_multiplicative_update {direction}", dtype, call, tensors, grad, expect_old_launch=dtype is torch.bfloat16)
+        check(f"_op_triangle_multiplicative_update {direction}", dtype, call, tensors, grad, expect_old_launch=dtype is torch.bfloat16)
 
     def test_trimul_bidirectional(self, dtype, grad):
         d, length = 128, 64
@@ -233,11 +255,11 @@ class TestFacades:
                    randn(d, 2 * d, dtype=dtype, scale=0.05, seed=5), randn(d, d, dtype=dtype, scale=0.05, seed=6)]
 
         def call(x, nw, nb, wl, wlg, wr, wrg, now, nob, wo, wg):
-            return ops.bidirectional_triangle_multiplicative_update(
+            return _op_bidirectional_triangle_multiplicative_update(
                 x, mask, norm_in_weight=nw, norm_in_bias=nb, to_left_weight=wl, to_left_gate_weight=wlg, to_right_weight=wr,
                 to_right_gate_weight=wrg, norm_out_weight=now, norm_out_bias=nob, to_out_weight=wo, to_gate_weight=wg)
 
-        check("ops.bidirectional_triangle_multiplicative_update", dtype, call, tensors, grad, expect_old_launch=dtype is torch.bfloat16)
+        check("_op_bidirectional_triangle_multiplicative_update", dtype, call, tensors, grad, expect_old_launch=dtype is torch.bfloat16)
 
 
 def _bias_only_pair(dtype):

@@ -274,18 +274,19 @@ def test_ops_entry_points_are_blocked_on_an_unrecorded_card_only(monkeypatch, ma
 def test_ops_swiglu_and_layer_norm_run_the_statements_on_an_unrecorded_card(monkeypatch, manifests):
     import torch.nn.functional as F
 
-    from miniworld_engine import ops
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
 
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
     dev = fake_card(monkeypatch, "Brand New GPU", (8, 9))
     monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))   # the tensors are CPU; the card is faked
     monkeypatch.setattr(dispatch, "_card_of", lambda device=None: ("Brand New GPU", (8, 9)))
     x, wa, wb, ws = torch.randn(4, 16), torch.randn(32, 16), torch.randn(32, 16), torch.randn(16, 32)
     with pytest.warns(UnrecordedCardWarning):
-        out = ops.swiglu_ffn(x, wa, wb, ws)
+        out = _op_swiglu_ffn(x, wa, wb, ws)
     torch.testing.assert_close(out, F.linear(F.silu(F.linear(x, wa)) * F.linear(x, wb), ws))
     w, b = torch.randn(16), torch.randn(16)
     with pytest.warns(UnrecordedCardWarning):
-        out = ops.layer_norm(x, w, b, 1e-5)
+        out = _op_layer_norm(x, w, b, 1e-5)
     torch.testing.assert_close(out, F.layer_norm(x, (16,), w, b, 1e-5))
     assert dev.type == "cuda"
 

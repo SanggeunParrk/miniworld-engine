@@ -5178,7 +5178,7 @@ def bench_swa_component_audit(conf, seq_len, implementation, fabric):
                 projection = self.adaln_modulation[1]
                 assert isinstance(projection, nn.Linear)
                 sh_a, sc_a, g_a, sh_f, sc_f, g_f = projection.weight.chunk(6, dim=0)
-                a, ga = ops.rms_norm_modulation(
+                a, ga = _op_rms_norm_modulation(
                     x, activated, sc_a, sh_a, g_a, eps=torch.finfo(torch.float32).eps
                 )
             else:
@@ -5188,19 +5188,19 @@ def bench_swa_component_audit(conf, seq_len, implementation, fabric):
                 a = self.attn_norm(x) * (1 + sca) + sha
             branch = self.attn(a, ap)
             x = (
-                ops.gated_residual(x, ga, branch)
+                _op_gated_residual(x, ga, branch)
                 if "residual" in self.audit_kernels
                 else x + ga * branch
             )
             if "modulation" in self.audit_kernels:
-                f, gf = ops.rms_norm_modulation(
+                f, gf = _op_rms_norm_modulation(
                     x, activated, sc_f, sh_f, g_f, eps=torch.finfo(torch.float32).eps
                 )
             else:
                 f = self.ffn_norm(x) * (1 + scf) + shf
             branch = self.ffn(f)
             return (
-                ops.gated_residual(x, gf, branch)
+                _op_gated_residual(x, gf, branch)
                 if "residual" in self.audit_kernels
                 else x + gf * branch
             )
@@ -5221,7 +5221,7 @@ def bench_swa_component_audit(conf, seq_len, implementation, fabric):
                     6, dim=0
                 )[:3]
                 if engine:
-                    return ops.rms_norm_modulation(
+                    return _op_rms_norm_modulation(
                         x,
                         activated,
                         scale,
@@ -5241,7 +5241,7 @@ def bench_swa_component_audit(conf, seq_len, implementation, fabric):
             if component == "residual":
                 x, gate, branch = inputs
                 return (
-                    ops.gated_residual(x, gate, branch) if engine else x + gate * branch
+                    _op_gated_residual(x, gate, branch) if engine else x + gate * branch
                 )
             if component == "sigmoid_gate":
                 gate, branch = inputs

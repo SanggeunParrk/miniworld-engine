@@ -5,7 +5,7 @@ already-flattened `(M, D)` tensor. `rows_of` refuses that shape on purpose -- on
 `(B, L, D)` and a pair `(B, L, L, D)` are both 2-D it cannot tell which key to build -- so the
 branch raised `ValueError` on every call it was selected for. It had been that way silently,
 because nothing exercised it: the model's `modules.Transition` carries its own copy of the arch
-dispatch and never routes through the whole-op, and the tests that name `ops.transition` check
+dispatch and never routes through the whole-op, and the tests that name `_op_transition` check
 the export table and the compile surface, not a call.
 
 That is the shape of bug this file exists for. A whole-op is the public entry point, so "does it
@@ -24,7 +24,7 @@ torch = pytest.importorskip("torch")
 if not torch.cuda.is_available():                      # pragma: no cover - guarded by the marker
     pytest.skip("needs a CUDA device", allow_module_level=True)
 
-from miniworld_engine import ops
+from miniworld_engine.kernels.transition.whole_op import transition as _op_transition
 from miniworld_engine.kernels.transition.reference import transition_pytorch
 
 KRYSTAL_WIDTHS = (16, 128, 384, 768)
@@ -52,7 +52,7 @@ def test_transition_whole_op_runs_and_matches_reference(d_hidden: int) -> None:
     kw = _weights(d_hidden, dtype)
 
     with torch.no_grad():
-        got = ops.transition(x, **kw)
+        got = _op_transition(x, **kw)
         want = transition_pytorch(
             x, kw["ln_in_weight"], kw["ln_in_bias"], kw["expand_a_weight"],
             kw["expand_b_weight"], kw["squeeze_weight"], N_EXPAND,

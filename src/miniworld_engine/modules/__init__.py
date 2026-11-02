@@ -14,8 +14,7 @@ from, and they are exactly these four:
     functional.py  free functions the ops compose (sigmoid_gate, swish_gate)
 
 ``functional.py`` is named for torch's own split between layer classes and the free functions
-beside them. It was ``ops.py``, one level below :mod:`miniworld_engine.ops` -- which is the public
-WHOLE-OP contract, the opposite kind of thing.
+beside them. It was ``ops.py``; the whole-op namespace that sat one level above it was removed.
 
 ``tests/cpu/layout/test_module_layout.py`` holds both halves of this rule.
 

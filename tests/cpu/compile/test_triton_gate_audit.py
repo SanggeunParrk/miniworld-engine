@@ -144,41 +144,57 @@ def unrecorded(monkeypatch, manifests):
 
 
 def test_ops_rms_norm_modulation_runs_the_reference_on_an_unrecorded_card(unrecorded):
-    from miniworld_engine import ops
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     from miniworld_engine.kernels.rmsnorm.reference import rmsnorm_adamod_reference
 
     torch.manual_seed(0)
     q, c = torch.randn(3, 8, 16), torch.randn(3, 8, 12)
     w = [torch.randn(16, 12) * 0.1 for _ in range(3)]
     with pytest.warns(UnrecordedCardWarning, match="rms_norm_modulation"):
-        y, g = ops.rms_norm_modulation(q, c, *w, eps=1e-6)
+        y, g = _op_rms_norm_modulation(q, c, *w, eps=1e-6)
     ry, rg = rmsnorm_adamod_reference(q, c, *w, None, 1e-6)
     torch.testing.assert_close(y, ry)
     torch.testing.assert_close(g, rg)
 
 
 def test_ops_layer_norm_linear_and_gated_residual_run_the_statements_on_an_unrecorded_card(unrecorded):
-    from miniworld_engine import ops
-
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     torch.manual_seed(0)
     x, lnw, pw = torch.randn(2, 5, 5, 16), torch.randn(16), torch.randn(4, 16)
     with pytest.warns(UnrecordedCardWarning, match="layer_norm_linear"):
-        out = ops.layer_norm_linear(x, lnw, pw, 1e-5)
+        out = _op_layer_norm_linear(x, lnw, pw, 1e-5)
     torch.testing.assert_close(out, F.linear(F.layer_norm(x, (16,), lnw, None, 1e-5), pw))
     g, b = torch.randn_like(x), torch.randn_like(x)
     with pytest.warns(UnrecordedCardWarning, match="gated_residual"):
-        out = ops.gated_residual(x, g, b)
+        out = _op_gated_residual(x, g, b)
     torch.testing.assert_close(out, x + g * b)
 
 
 def test_ops_conditioned_transition_runs_the_statements_on_an_unrecorded_card(unrecorded):
-    from miniworld_engine import ops
-
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     torch.manual_seed(0)
     x, cond = torch.randn(2, 6, 16), torch.randn(2, 6, 8)
     wa, wb, ws, wsc, bsc = torch.randn(32, 16), torch.randn(32, 16), torch.randn(16, 32), torch.randn(16, 8), torch.randn(16)
     with pytest.warns(UnrecordedCardWarning, match="swiglu_ffn"):
-        out = ops.conditioned_transition(x, cond, expand_a_weight=wa, expand_b_weight=wb, squeeze_weight=ws, to_scale_weight=wsc,
+        out = _op_conditioned_transition(x, cond, expand_a_weight=wa, expand_b_weight=wb, squeeze_weight=ws, to_scale_weight=wsc,
                                          to_scale_bias=bsc, n=2)
     ref = torch.sigmoid(F.linear(cond, wsc, bsc)) * F.linear(F.silu(F.linear(x, wa)) * F.linear(x, wb), ws)
     torch.testing.assert_close(out, ref)
@@ -187,7 +203,13 @@ def test_ops_conditioned_transition_runs_the_statements_on_an_unrecorded_card(un
 @pytest.mark.parametrize("direction", ["outgoing", "incoming"])
 @pytest.mark.parametrize("pair_mask", [False, True])
 def test_ops_triangle_multiplicative_update_runs_the_reference_on_an_unrecorded_card(unrecorded, direction, pair_mask):
-    from miniworld_engine import ops
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     from miniworld_engine.modules.triangle_multiplication.reference import (
         triangle_multiplicative_update_pytorch,
     )
@@ -201,14 +223,20 @@ def test_ops_triangle_multiplicative_update_runs_the_reference_on_an_unrecorded_
              "g_in_weight": torch.randn(2 * d, d) * 0.2, "norm_out_weight": torch.randn(d), "norm_out_bias": torch.randn(d),
              "p_out_weight": torch.randn(d, d) * 0.2, "g_out_weight": torch.randn(d, d) * 0.2}
     with pytest.warns(KernelRefusedWarning, match="bf16 only"):
-        out = ops.triangle_multiplicative_update(x, direction, mask, **w)
+        out = _op_triangle_multiplicative_update(x, direction, mask, **w)
     m2d = res[:, :, None] & res[:, None, :]
     ref = x + triangle_multiplicative_update_pytorch(x, direction, m2d, **w)
     torch.testing.assert_close(out, ref)
 
 
 def test_ops_bidirectional_triangle_multiplicative_update_matches_the_module_reference(monkeypatch, manifests):
-    from miniworld_engine import ops
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     from miniworld_engine.modules.exceptions import ImplementationType
     from miniworld_engine.modules.triangle_multiplication.bidirectional import (
         BidirectionalTriangleMultiplication,
@@ -227,7 +255,7 @@ def test_ops_bidirectional_triangle_multiplicative_update_matches_the_module_ref
         monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
         monkeypatch.setattr(dispatch, "_card_of", lambda device=None: (NEW, (8, 9)))
         with pytest.warns(KernelRefusedWarning, match="bf16 only"):
-            out = ops.bidirectional_triangle_multiplicative_update(
+            out = _op_bidirectional_triangle_multiplicative_update(
                 x, mask, norm_in_weight=module.ln_pair.weight, norm_in_bias=module.ln_pair.bias, to_left_weight=module.to_left.weight,
                 to_left_gate_weight=module.to_left_gate.weight, to_right_weight=module.to_right.weight,
                 to_right_gate_weight=module.to_right_gate.weight, norm_out_weight=module.ln_out.weight, norm_out_bias=module.ln_out.bias,
@@ -256,15 +284,20 @@ def test_mpnn_auto_asks_the_record_and_an_explicit_backend_does_not(unrecorded):
 
 def test_a_bf16_trimul_facade_call_asks_the_record(unrecorded):
     """fp32 is a refusal (above: the kernels are bf16 only); a bf16 call on a card without a record is the unrecorded warning."""
-    from miniworld_engine import ops
-
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     d, L = 16, 5
     x = torch.randn(1, L, L, d).bfloat16()
     w = dict(norm_in_weight=torch.ones(d), norm_in_bias=torch.zeros(d), p_in_weight=torch.randn(2 * d, d).bfloat16(),
              g_in_weight=torch.randn(2 * d, d).bfloat16(), norm_out_weight=torch.ones(d), norm_out_bias=torch.zeros(d),
              p_out_weight=torch.randn(d, d).bfloat16(), g_out_weight=torch.randn(d, d).bfloat16())
     with pytest.warns(UnrecordedCardWarning, match="triangle_multiplication"):
-        out = ops.triangle_multiplicative_update(x, "outgoing", None, **w)
+        out = _op_triangle_multiplicative_update(x, "outgoing", None, **w)
     assert out.shape == x.shape
     assert out.dtype == torch.bfloat16
 
@@ -277,7 +310,7 @@ def test_every_kernel_with_a_row_and_a_former_unregistered_op_is_counted():
         "bias_only_attention_layernorm_gemm_triton", "bias_only_attention_bwd_layernorm_gemm_triton"}
     assert set(records.triton_kernels("bias_only_pair_bias", "bf16", "inference")) == {"bias_only_attention_layernorm_gemm_triton"}
     assert "mpnn_message_fwd_gemm_gelu_reduce_triton" in records.triton_kernels("mpnn_message", "bf16", "inference")
-    # the family-wide patterns of TriangleAttention / ops.gated_linear do not pick up the new rows
+    # the family-wide patterns of TriangleAttention / _op_gated_linear do not pick up the new rows
     for op in ("triangle_attention", "gated_linear"):
         assert not {"gated_projection_fwd_residual_triton", "bias_only_attention_layernorm_gemm_triton"} & set(records.triton_kernels(op))
     assert "augmented_attention_bwd_atomic_triton" in records.triton_kernels("augmented_attention_pair_bias")   # memory_efficient

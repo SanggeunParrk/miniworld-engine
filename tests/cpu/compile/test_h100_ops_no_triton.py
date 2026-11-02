@@ -74,17 +74,35 @@ def test_the_gate_the_facades_ask_is_off_on_h100(h100):
 
 
 def test_swiglu_ffn_runs_the_statements(h100):
-    from miniworld_engine import ops
-
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     torch.manual_seed(0)
     x, wa, wb, ws = torch.randn(2, 5, 16), torch.randn(32, 16), torch.randn(32, 16), torch.randn(16, 32)
-    torch.testing.assert_close(ops.swiglu_ffn(x, wa, wb, ws), F.linear(F.silu(F.linear(x, wa)) * F.linear(x, wb), ws))
+    torch.testing.assert_close(_op_swiglu_ffn(x, wa, wb, ws), F.linear(F.silu(F.linear(x, wa)) * F.linear(x, wb), ws))
 
 
 @pytest.mark.parametrize("row_scale", [False, True])
 def test_layer_norm_takes_the_general_cuda_layernorm_where_it_serves(h100, monkeypatch, row_scale):
-    from miniworld_engine import ops
-
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     calls = []
 
     def fake_cuda(x, weight, bias, eps=1e-5):
@@ -98,58 +116,104 @@ def test_layer_norm_takes_the_general_cuda_layernorm_where_it_serves(h100, monke
     rs = torch.rand(3, 6) if row_scale else None
     ref = F.layer_norm(x, (16,), w, b, 1e-5)
     ref = ref if rs is None else ref * rs[..., None]
-    torch.testing.assert_close(ops.layer_norm(x, w, b, 1e-5, rs), ref)
+    torch.testing.assert_close(_op_layer_norm(x, w, b, 1e-5, rs), ref)
     assert calls == [(3, 6, 16)]
 
 
 def test_layer_norm_runs_the_statements_where_the_cuda_kernel_does_not_serve(h100, monkeypatch):
-    from miniworld_engine import ops
-
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     monkeypatch.setattr(K + "layernorm.cuda.general.supported", lambda x: False)
     monkeypatch.setattr(K + "layernorm.cuda.general.layernorm_cuda", _boom("layernorm_cuda"))
     x, w = torch.randn(4, 16), torch.randn(16)
-    torch.testing.assert_close(ops.layer_norm(x, w, None, 1e-5), F.layer_norm(x, (16,), w, None, 1e-5))
+    torch.testing.assert_close(_op_layer_norm(x, w, None, 1e-5), F.layer_norm(x, (16,), w, None, 1e-5))
 
 
 def test_rms_norm_modulation_runs_the_reference(h100):
-    from miniworld_engine import ops
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     from miniworld_engine.kernels.rmsnorm.reference import rmsnorm_adamod_reference
 
     torch.manual_seed(0)
     q, c = torch.randn(3, 8, 16), torch.randn(3, 8, 12)
     w = [torch.randn(16, 12) * 0.1 for _ in range(3)]
-    y, g = ops.rms_norm_modulation(q, c, *w, eps=1e-6)
+    y, g = _op_rms_norm_modulation(q, c, *w, eps=1e-6)
     ry, rg = rmsnorm_adamod_reference(q, c, *w, None, 1e-6)
     torch.testing.assert_close(y, ry)
     torch.testing.assert_close(g, rg)
 
 
 def test_layer_norm_linear_and_gated_residual_run_the_statements(h100):
-    from miniworld_engine import ops
-
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     torch.manual_seed(0)
     x, lnw, pw = torch.randn(2, 5, 5, 16), torch.randn(16), torch.randn(4, 16)
-    torch.testing.assert_close(ops.layer_norm_linear(x, lnw, pw, 1e-5), F.linear(F.layer_norm(x, (16,), lnw, None, 1e-5), pw))
+    torch.testing.assert_close(_op_layer_norm_linear(x, lnw, pw, 1e-5), F.linear(F.layer_norm(x, (16,), lnw, None, 1e-5), pw))
     g, b = torch.randn_like(x), torch.randn_like(x)
-    torch.testing.assert_close(ops.gated_residual(x, g, b), x + g * b)
+    torch.testing.assert_close(_op_gated_residual(x, g, b), x + g * b)
 
 
 def test_gated_linear_runs_the_statements(h100):
-    from miniworld_engine import ops
-
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     torch.manual_seed(0)
     gate, value = torch.randn(2, 5, 16).bfloat16(), torch.randn(2, 5, 16).bfloat16()
     w, bias = torch.randn(8, 16).bfloat16(), torch.randn(8).bfloat16()
-    torch.testing.assert_close(ops.gated_linear(gate, value, w, bias), F.linear(torch.sigmoid(gate) * value, w, bias))
+    torch.testing.assert_close(_op_gated_linear(gate, value, w, bias), F.linear(torch.sigmoid(gate) * value, w, bias))
 
 
 def test_conditioned_transition_runs_the_statements(h100):
-    from miniworld_engine import ops
-
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     torch.manual_seed(0)
     x, cond = torch.randn(2, 6, 16), torch.randn(2, 6, 8)
     wa, wb, ws, wsc, bsc = torch.randn(32, 16), torch.randn(32, 16), torch.randn(16, 32), torch.randn(16, 8), torch.randn(16)
-    out = ops.conditioned_transition(x, cond, expand_a_weight=wa, expand_b_weight=wb, squeeze_weight=ws, to_scale_weight=wsc,
+    out = _op_conditioned_transition(x, cond, expand_a_weight=wa, expand_b_weight=wb, squeeze_weight=ws, to_scale_weight=wsc,
                                      to_scale_bias=bsc, n=2)
     ref = torch.sigmoid(F.linear(cond, wsc, bsc)) * F.linear(F.silu(F.linear(x, wa)) * F.linear(x, wb), ws)
     torch.testing.assert_close(out, ref)
@@ -163,7 +227,17 @@ def _attention_inputs(dtype, heads=2, length=5, dim=4):
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_augmented_attention_runs_the_reference_where_no_cuda_core_serves(h100, monkeypatch, dtype):
-    from miniworld_engine import ops
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     from miniworld_engine.kernels.augmented_attention.reference import (
         augmented_attention_pair_bias_pytorch,
     )
@@ -171,7 +245,7 @@ def test_augmented_attention_runs_the_reference_where_no_cuda_core_serves(h100, 
     monkeypatch.setattr(K + "augmented_attention.cuda.available", lambda *a, **k: False)
     monkeypatch.setattr(K + "augmented_attention.cuda.augmented_attention_bf16_sm90", _boom("augmented_attention_bf16_sm90"))
     q, k, v, bias, mask = _attention_inputs(dtype)
-    out = ops.augmented_attention_pair_bias(q, k, v, bias, mask)
+    out = _op_augmented_attention_pair_bias(q, k, v, bias, mask)
     ref = augmented_attention_pair_bias_pytorch(q.transpose(2, 3), k.transpose(2, 3), v.transpose(2, 3),
                                                 bias.permute(0, 2, 3, 1), mask).transpose(2, 3)
     assert out.dtype == dtype
@@ -179,8 +253,17 @@ def test_augmented_attention_runs_the_reference_where_no_cuda_core_serves(h100, 
 
 
 def test_augmented_attention_takes_the_cuda_core_for_bf16_where_it_serves(h100, monkeypatch):
-    from miniworld_engine import ops
-
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     seen = []
 
     def core(q, k, v, bias, mask=None):
@@ -190,19 +273,28 @@ def test_augmented_attention_takes_the_cuda_core_for_bf16_where_it_serves(h100, 
     monkeypatch.setattr(K + "augmented_attention.cuda.available", lambda *a, **k: True)
     monkeypatch.setattr(K + "augmented_attention.cuda.augmented_attention_bf16_sm90", core)
     q, k, v, bias, mask = _attention_inputs(torch.bfloat16)
-    out = ops.augmented_attention_pair_bias(q, k, v, bias, mask)
+    out = _op_augmented_attention_pair_bias(q, k, v, bias, mask)
     assert seen == [((2, 1, 5, 2, 4), (1, 5, 5, 2))]            # token-major layout, as modules.AugmentedAttention hands it over
     torch.testing.assert_close(out, q)
     # an fp32 caller never takes the bf16 core
     seen.clear()
-    ops.augmented_attention_pair_bias(*_attention_inputs(torch.float32))
+    _op_augmented_attention_pair_bias(*_attention_inputs(torch.float32))
     assert not seen
 
 
 @pytest.mark.parametrize("qk_norm", [False, True])
 def test_triangle_attention_facade_runs_the_pytorch_core(h100, qk_norm):
-    from miniworld_engine import ops
-
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     torch.manual_seed(0)
     d, heads, length = 16, 2, 6
     pair = torch.randn(1, length, length, d)
@@ -212,7 +304,7 @@ def test_triangle_attention_facade_runs_the_pytorch_core(h100, qk_norm):
         to_query_weight=torch.randn(d, d) * 0.2, to_key_weight=torch.randn(d, d) * 0.2)
     if qk_norm:
         weights.update(norm_query_weight=torch.ones(d // heads), norm_key_weight=torch.ones(d // heads))
-    out = ops.triangle_attention(pair, torch.ones(1, length, dtype=torch.bool), **weights)
+    out = _op_triangle_attention(pair, torch.ones(1, length, dtype=torch.bool), **weights)
     assert out.shape == pair.shape
     assert torch.isfinite(out).all()
 
@@ -223,7 +315,27 @@ def test_trimul_facade_runs_the_statements_in_the_callers_dtype(h100, direction,
     """No Triton and no warning; the hand-CUDA TriMul stays bf16-only and module-bound, so the facade never runs a fp32 CUDA TriMul."""
     import warnings
 
-    from miniworld_engine import ops
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     from miniworld_engine.modules.triangle_multiplication.reference import (
         triangle_multiplicative_update_pytorch,
     )
@@ -237,14 +349,24 @@ def test_trimul_facade_runs_the_statements_in_the_callers_dtype(h100, direction,
          "p_out_weight": (torch.randn(d, d) * 0.2).to(dtype), "g_out_weight": (torch.randn(d, d) * 0.2).to(dtype)}
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        out = ops.triangle_multiplicative_update(x, direction, res, **w)
+        out = _op_triangle_multiplicative_update(x, direction, res, **w)
     ref = x + triangle_multiplicative_update_pytorch(x, direction, res[:, :, None] & res[:, None, :], **w)
     assert out.dtype == dtype
     torch.testing.assert_close(out, ref, rtol=2e-2 if dtype is torch.bfloat16 else 1e-4, atol=2e-2 if dtype is torch.bfloat16 else 1e-4)
 
 
 def test_bidirectional_trimul_facade_runs_the_statements(monkeypatch):
-    from miniworld_engine import ops
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     from miniworld_engine.modules.exceptions import ImplementationType
     from miniworld_engine.modules.triangle_multiplication.bidirectional import (
         BidirectionalTriangleMultiplication,
@@ -259,7 +381,7 @@ def test_bidirectional_trimul_facade_runs_the_statements(monkeypatch):
     with torch.no_grad():
         ref = module(x, mask)                                   # the reference first, on a plain CPU host
         previous = _install(monkeypatch)
-        out = ops.bidirectional_triangle_multiplicative_update(
+        out = _op_bidirectional_triangle_multiplicative_update(
             x, mask, norm_in_weight=module.ln_pair.weight, norm_in_bias=module.ln_pair.bias, to_left_weight=module.to_left.weight,
             to_left_gate_weight=module.to_left_gate.weight, to_right_weight=module.to_right.weight,
             to_right_gate_weight=module.to_right_gate.weight, norm_out_weight=module.ln_out.weight, norm_out_bias=module.ln_out.bias,
@@ -271,12 +393,21 @@ def test_bidirectional_trimul_facade_runs_the_statements(monkeypatch):
 
 def test_the_ab_switch_brings_the_triton_entries_back(h100):
     """``portable_on_hopper_blackwell`` lifts the restriction: the facade reaches its Triton function (poisoned here, so it raises)."""
-    from miniworld_engine import ops
-
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     settings.configure(portable_on_hopper_blackwell=True)
     x = torch.randn(2, 5, 16)
     with pytest.raises(AssertionError, match="Triton"):
-        ops.swiglu_ffn(x, torch.randn(32, 16), torch.randn(32, 16), torch.randn(16, 32))
+        _op_swiglu_ffn(x, torch.randn(32, 16), torch.randn(32, 16), torch.randn(16, 32))
 
 
 def _bias_only_attention():
@@ -406,7 +537,17 @@ def test_the_cuda_wrappers_decline_a_cpu_tensor_and_a_compile_trace(h100):
 
 def test_the_ops_facades_ask_the_cuda_wrappers_first_on_h100(h100, monkeypatch):
     """A facade on a restricted card offers the call to its CUDA wrapper before it runs the statements: the wrapper's answer is the result."""
-    from miniworld_engine import ops
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     from miniworld_engine.kernels import _h100_ops as ops_
 
     marker = torch.full((1,), 7.0)
@@ -414,18 +555,28 @@ def test_the_ops_facades_ask_the_cuda_wrappers_first_on_h100(h100, monkeypatch):
     for name in ("swiglu_ffn", "layer_norm_linear", "gated_linear", "conditioned_transition"):
         monkeypatch.setattr(ops_, name, lambda *a, _n=name, **k: (seen.append(_n), marker)[1])
     x = torch.randn(2, 4, 4, 16)
-    assert ops.swiglu_ffn(x, torch.randn(32, 16), torch.randn(32, 16), torch.randn(16, 32)) is marker
-    assert ops.layer_norm_linear(x, torch.randn(16), torch.randn(4, 16), 1e-5) is marker
+    assert _op_swiglu_ffn(x, torch.randn(32, 16), torch.randn(32, 16), torch.randn(16, 32)) is marker
+    assert _op_layer_norm_linear(x, torch.randn(16), torch.randn(4, 16), 1e-5) is marker
     xb = x.bfloat16()
-    assert ops.gated_linear(xb, xb, torch.randn(8, 16).bfloat16(), None) is marker
-    out = ops.conditioned_transition(x, torch.randn(2, 4, 4, 8), expand_a_weight=torch.randn(32, 16), expand_b_weight=torch.randn(32, 16),
+    assert _op_gated_linear(xb, xb, torch.randn(8, 16).bfloat16(), None) is marker
+    out = _op_conditioned_transition(x, torch.randn(2, 4, 4, 8), expand_a_weight=torch.randn(32, 16), expand_b_weight=torch.randn(32, 16),
                                      squeeze_weight=torch.randn(16, 32), to_scale_weight=torch.randn(16, 8), to_scale_bias=torch.randn(16), n=2)
     assert out is marker
     assert seen == ["swiglu_ffn", "layer_norm_linear", "gated_linear", "conditioned_transition"]
 
 
 def test_the_triangle_facade_takes_the_cuda_core_function_on_h100(h100, monkeypatch):
-    from miniworld_engine import ops
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     from miniworld_engine.kernels import _h100_ops as ops_
 
     calls = []
@@ -438,7 +589,7 @@ def test_the_triangle_facade_takes_the_cuda_core_function_on_h100(h100, monkeypa
     monkeypatch.setattr(ops_, "triangle_core", core)
     torch.manual_seed(0)
     d, heads, length = 16, 2, 6
-    out = ops.triangle_attention(
+    out = _op_triangle_attention(
         torch.randn(1, length, length, d), None, n_head=heads, ln_pair_weight=torch.ones(d), ln_pair_bias=torch.zeros(d),
         to_value_weight=torch.randn(d, d) * 0.2, to_bias_weight=torch.randn(heads, d) * 0.2, to_gate_weight=torch.randn(d, d) * 0.2,
         to_out_weight=torch.randn(d, d) * 0.2, to_query_weight=torch.randn(d, d) * 0.2, to_key_weight=torch.randn(d, d) * 0.2)
@@ -484,14 +635,24 @@ def test_the_pytorch_triangle_core_is_chunked_within_its_score_budget(monkeypatc
 
 def test_rms_norm_modulation_statements_match_the_reference_in_bf16(h100):
     """The activation-dtype form (one RMSNorm, one GEMM, two elementwise kernels) stays within bf16 rounding of the fp32 reference; the gate is the GEMM's slice."""
-    from miniworld_engine import ops
+    from miniworld_engine.kernels.augmented_attention.whole_op import augmented_attention_pair_bias as _op_augmented_attention_pair_bias
+    from miniworld_engine.kernels.trimul_inproj.whole_op import bidirectional_triangle_multiplicative_update as _op_bidirectional_triangle_multiplicative_update
+    from miniworld_engine.kernels.conditioned_transition.whole_op import conditioned_transition as _op_conditioned_transition
+    from miniworld_engine.kernels.gated_projection.whole_op import gated_linear as _op_gated_linear
+    from miniworld_engine.kernels._ops_routed import gated_residual as _op_gated_residual
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
+    from miniworld_engine.kernels._ops_routed import layer_norm_linear as _op_layer_norm_linear
+    from miniworld_engine.kernels._ops_routed import rms_norm_modulation as _op_rms_norm_modulation
+    from miniworld_engine.kernels._ops_routed import swiglu_ffn as _op_swiglu_ffn
+    from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention as _op_triangle_attention
+    from miniworld_engine.kernels.trimul_inproj.whole_op import triangle_multiplicative_update as _op_triangle_multiplicative_update
     from miniworld_engine.kernels.rmsnorm.reference import rmsnorm_adamod_reference
 
     torch.manual_seed(0)
     q, c = torch.randn(3, 8, 32).bfloat16(), torch.randn(3, 8, 16).bfloat16()
     w = [(torch.randn(32, 16) * 0.1).bfloat16() for _ in range(3)]
     weight = torch.randn(32).bfloat16()
-    y, g = ops.rms_norm_modulation(q, c, *w, weight, 1e-5)
+    y, g = _op_rms_norm_modulation(q, c, *w, weight, 1e-5)
     ry, rg = rmsnorm_adamod_reference(q, c, *w, weight, 1e-5)
     assert y.dtype is torch.bfloat16 and g.dtype is torch.bfloat16
     torch.testing.assert_close(y.float(), ry.float(), rtol=3e-2, atol=3e-2)

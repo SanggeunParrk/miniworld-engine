@@ -69,9 +69,8 @@ missing drivers and execution failures are reported separately. See
 [docs/gpus/supported.md](docs/gpus/supported.md) for what has actually been run, and
 [docs/gpus/troubleshooting.md](docs/gpus/troubleshooting.md) when a step does not do this.
 
-**Then:** using the kernels means `from miniworld_engine import ops` — eight whole-op entry points
-that take the same arguments as their torch equivalents. Getting them *fast* on your card means
-building a tuned cache with `miniworld-engine build all`. Its work depends on the GPU,
+**Then:** using the engine means `from miniworld_engine.modules import ...` (the model layers: each holds its weights and picks the kernel backend for your GPU) or, for a single op such as a LayerNorm, the entry point in `miniworld_engine.kernels`. Getting them *fast* on your card means
+Getting them *fast* on your card means building a tuned cache with `miniworld-engine build all`. Its work depends on the GPU,
 current source and existing valid measurements; use `dev coverage` to inspect a specific GPU cache.
 ## Prebuilt CUDA kernels
 
@@ -105,9 +104,8 @@ src/miniworld_engine/
 ├── integrations/       hand-CUDA entry points wired into modules (trimul_h100, token_dit, …)
 ├── autotune/           tuner, cache reader/builder · configs/{default,grid,ab/} · data/ (per-GPU caches)
 ├── build/              cache-build matrix and audits
-├── ops/                whole-op public API (`from miniworld_engine import ops`)
-├── tools/              maintenance commands behind `miniworld-engine dev …` (import-anthropic, …)
-├── viz/  cli.py  settings.py
+├── utils/              atomic writes, typecheck, optimizer migration, h100_master, tools/ (maintenance commands behind `miniworld-engine dev …`), viz/
+├── cli.py  settings.py
 benchmarks/             runners/bench.py + {kernels,modules}/<target>/configs · results/<gpu>/
 tests/                  CPU contracts; `@pytest.mark.gpu` for device tests
 docs/                   see docs/README.md

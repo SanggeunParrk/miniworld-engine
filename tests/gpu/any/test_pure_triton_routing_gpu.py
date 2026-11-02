@@ -35,7 +35,7 @@ def _masked_ln(width=128, rows=512):
 
 @pytest.mark.parametrize("forced", [False, True])
 def test_masked_layernorm_backward_is_chosen_by_ops_layer_norm(monkeypatch, forced):
-    from miniworld_engine import ops
+    from miniworld_engine.kernels._ops_routed import layer_norm as _op_layer_norm
     from miniworld_engine.kernels.layernorm import cuda as ln_cuda
 
     settings.configure(force_portable_kernels=forced)
@@ -43,7 +43,7 @@ def test_masked_layernorm_backward_is_chosen_by_ops_layer_norm(monkeypatch, forc
     calls = []
     monkeypatch.setattr(ln_cuda, "layer_norm_bwd_cuda", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
     x, w, b, rs = _masked_ln()
-    y = ops.layer_norm(x, w, b, 1e-5, rs)
+    y = _op_layer_norm(x, w, b, 1e-5, rs)
     y.sum().backward()
     ref = torch.nn.functional.layer_norm(x.detach().float(), (x.shape[-1],), w.float(), b.float(), 1e-5) * rs.float()[None, :, None]
     assert (y.float() - ref).abs().max() < 0.1
