@@ -400,6 +400,30 @@ def _side(x: torch.Tensor):
     return st
 
 
+_SIDE_PACK = os.environ.get("CT_SIDE_PACK", "1") != "0"
+
+
+def _pack_fp32_split(wa, wb, ws, wsc, side):
+    """``pack_fp32``'s outputs, the forward's [Wa; Wb] packed on the current stream and the three K-major copies only the backward reads on ``side``
+    (joined by the forward's own join of that stream, before its gate pass). Eager / graph-capture only (``_side`` is None under a trace)."""
+    from miniworld_engine.kernels.adaln.cuda import _ext as rows_ext
+
+    nd, d = wa.shape
+    dc = wsc.shape[1]
+    dev, f32 = wa.device, torch.float32
+    wa, wb, ws, wsc = (w.contiguous() for w in (wa, wb, ws, wsc))
+    wab = torch.empty(2 * nd, d, device=dev, dtype=f32)
+    wabT = torch.empty(d, 2 * nd, device=dev, dtype=f32)
+    wsT = torch.empty(nd, d, device=dev, dtype=f32)
+    wscT = torch.empty(dc, d, device=dev, dtype=f32)
+    cur = torch.cuda.current_stream(dev)
+    side.wait_stream(cur)
+    with torch.cuda.stream(side):
+        rows_ext().pack_f32([wa, wb, ws, wsc], [wabT, wabT, wsT, wscT], [[1, 0, 0, 1], [1, 0, nd, 1], [1, 0, 0, 1], [1, 0, 0, 1]])
+    rows_ext().pack_f32([wa, wb], [wab, wab], [[0, 0, 0, 1], [0, nd, 0, 1]])
+    return wab, wabT, wsT, wscT
+
+
 class _Tail(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, res, xn_tf32=False):  # noqa: D102
@@ -408,7 +432,11 @@ class _Tail(torch.autograd.Function):
             wab, wsb, wscb, bscb = cast_weights(wa, wb, ws, wsc, bsc)   # one launch for the five casts and the concatenation
             wabT = wsT = wscT = None
         elif dt is torch.float32 and all(t.dtype is torch.float32 for t in (wa, wb, ws, wsc)) and torch.backends.cuda.matmul.allow_tf32:
-            wab, wabT, wsT, wscT = pack_fp32(wa, wb, ws, wsc)
+            side0 = _side(x) if _SIDE_PACK else None
+            if side0 is not None:   # a few row tiles: [Wa; Wb] here, the backward's K-major copies on the side stream beside the forward GEMMs
+                wab, wabT, wsT, wscT = _pack_fp32_split(wa, wb, ws, wsc, side0)
+            else:
+                wab, wabT, wsT, wscT = pack_fp32(wa, wb, ws, wsc)
             wsb, wscb, bscb = ws.contiguous(), wsc.contiguous(), bsc
         else:
             wab = torch.cat([wa, wb]).to(dt)

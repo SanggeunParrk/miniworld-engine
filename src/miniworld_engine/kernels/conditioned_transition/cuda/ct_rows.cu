@@ -49,6 +49,8 @@ template <> struct Vec<true> {
 __device__ __forceinline__ float sigm(float x) { return 1.f / (1.f + __expf(-x)); }
 // the fp32 forward passes' sigmoid: __fdividef (2 ulp) instead of the IEEE division -- the value feeds a TF32 GEMM or the fp32 output at ~1e-7
 __device__ __forceinline__ float sigm_fast(float x) { return __fdividef(1.f, 1.f + __expf(-x)); }
+// (also the fp32 instantiations of the training passes swiglu_bwd, sigmul_fwd, sigmul_bwd(_x): bf16 keeps the IEEE division)
+template <bool F32> __device__ __forceinline__ float sgf(float x) { return F32 ? sigm_fast(x) : sigm(x); }
 __device__ __forceinline__ float tf32r(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return __uint_as_float(r); }
 
 template <bool F32>
@@ -81,7 +83,7 @@ __global__ void swiglu_bwd_k(const typename Vec<F32>::T* __restrict__ dh, const 
     Vec<F32>::ld(dh + i * V, g);
 #pragma unroll
     for (int k = 0; k < V; ++k) {
-      const float s = sigm(a[k]);
+      const float s = (F32 ? sigm_fast(a[k]) : sigm(a[k]));
       da[k] = g[k] * b[k] * s * (1.f + a[k] * (1.f - s));
       db[k] = g[k] * a[k] * s;
     }
@@ -102,7 +104,7 @@ __global__ void sigmul_fwd_k(const typename Vec<F32>::T* __restrict__ out, const
     Vec<F32>::ld(sp + i * V, s);
     if (RES) Vec<F32>::ld(res + i * V, r);
 #pragma unroll
-    for (int k = 0; k < V; ++k) v[k] = RES ? Vec<F32>::rnd(sigm(s[k]) * o[k]) + r[k] : sigm(s[k]) * o[k];
+    for (int k = 0; k < V; ++k) v[k] = RES ? Vec<F32>::rnd(sgf<F32>(s[k]) * o[k]) + r[k] : sgf<F32>(s[k]) * o[k];
     Vec<F32>::st(y + i * V, v);
   }
 }
@@ -123,7 +125,7 @@ __global__ void sigmul_bwd_k(const typename Vec<F32>::T* __restrict__ dy, const 
     Vec<F32>::ld(sp + i * V, s);
 #pragma unroll
     for (int k = 0; k < V; ++k) {
-      const float g = sigm(s[k]);
+      const float g = (F32 ? sigm_fast(s[k]) : sigm(s[k]));
       a[k] = F32 ? tf32r(d[k] * g) : d[k] * g;   // fp32: dout feeds only TF32 GEMMs; on the grid for the tcgen05 dh GEMM (ct_tc GAB), which truncates
       b[k] = Vec<F32>::rnd(d[k] * o[k] * g * (1.f - g));
       acc[k] += b[k];
@@ -257,7 +259,7 @@ __global__ void __launch_bounds__(32 * TW) sigmul_bwd_x_k(const float* __restric
         Vec<true>::ld(sp + row * D + 128 * c + 4 * lane, s);
 #pragma unroll
         for (int k = 0; k < 4; ++k) {
-          const float g = sigm(s[k]);
+          const float g = sigm_fast(s[k]);
           a[k] = tf32r(d[k] * g);   // dout feeds only TF32 GEMMs (dWs, dh): on the grid, for the tcgen05 dh GEMM that truncates (ct_tc GAB)
           b[k] = d[k] * o[k] * g * (1.f - g);
           acc[k] += b[k];
