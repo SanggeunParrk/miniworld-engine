@@ -137,7 +137,12 @@ def test_inference_launches_the_cuda_kernels_and_matches_the_reference(op, bf16,
     from miniworld_engine.kernels.conditioned_transition.cuda import ct_sm100
 
     ct_head = op == "ct" and bf16 and d > 128 and rows_ <= ct_sm100.BF16_CUBLAS_MAX_ROWS and ct_sm100.HEAD_FUSED
-    if not bf16:
+    # The fp32 ConditionedTransition at the token widths: the whole module as one op with the AdaLN and the gate projection one GEMM on the centred
+    # conditioning (ct_sm100.ct_inference_full_f32: cond_center, adaln_fold_fwd, sigmul_fwd_ld).
+    fold = op == "ct" and not bf16 and d > 128
+    if fold:
+        assert _has(names, "adaln_fold_fwd", "swiglu_fwd", "sigmul_fwd_ld"), names
+    elif not bf16:
         assert _has(names, "ln_cond_fwd", "adaln_fwd_k"), names
     elif ct_head:
         assert _has(names, "head_stats", "ct_head"), names
@@ -185,4 +190,43 @@ def test_training_gradients_match_the_reference(op, bf16, shape):
     assert _has(names, "adaln_bwd"), names
     if op == "ct":
         assert _has(names, "sigmul_bwd"), names
+    assert not any(_is_triton(k) for k in names), names
+
+
+# fp32 training at the row counts where the tail takes its TF32 tcgen05 GEMMs (``ct_train.tc_route``: the expand GEMM with the SwiGLU in its
+# epilogue, the dh GEMM with the SwiGLU backward in its epilogue, ``ct_tc_sm100.cu``), forced down to these small shapes; and the small-row side
+# stream (``ct_train.SIDE_MAX_ROWS``) on and off.
+@pytest.mark.parametrize("shape", [((2, 1, 300), 768, 384), ((1, 1, 333), 768, 768), ((3, 1, 700), 128, 128)], ids=["d768-c384", "d768-c768", "d128-c128"])
+@pytest.mark.parametrize("side", [True, False], ids=["side", "noside"])
+def test_fp32_training_tcgen05_tail_matches_the_reference(shape, side, monkeypatch):
+    from miniworld_engine.kernels.conditioned_transition.cuda import ct_train
+
+    monkeypatch.setattr(ct_train, "TC_MIN_ROWS", {"token": 0, "atom": 0})
+    monkeypatch.setattr(ct_train, "SIDE_MAX_ROWS", 1 << 30 if side else 0)
+    rows, d, dc = shape
+    m = _build("ct", d, dc, IT.MINIWORLD)
+    ref, pt = _ref64("ct", m, d, dc), _build("ct", d, dc, IT.PYTORCH)
+    pt.load_state_dict(m.state_dict())
+    x, c = _inputs(rows, d, dc, torch.float32, grad=True)
+    dy = torch.randn(*rows, d, device="cuda")
+
+    def run(mod, xx, cc):
+        for t in (xx, cc, *mod.parameters()):
+            t.grad = None
+        y = mod(xx, cc)
+        y.backward(dy)
+        return [y.detach()] + [t.grad.detach().clone() for t in (xx, cc, *mod.parameters())]
+
+    mine = run(m, x, c)
+    x64, c64 = x.detach().double().requires_grad_(), c.detach().double().requires_grad_()
+    y64 = ref(x64, c64)
+    y64.backward(dy.double())
+    r64 = [y64.detach()] + [t.grad for t in (x64, c64, *ref.parameters())]
+    theirs = run(pt, x, c)
+    for i, (a, b, p) in enumerate(zip(mine, r64, theirs)):
+        assert _err(a, b) <= 1.5 * _err(p, b) + 1e-6, (i, _err(a, b), _err(p, b))
+    again = run(m, x, c)
+    assert all(torch.equal(u, v) for u, v in zip(mine, again))
+    names = _kernels(lambda: run(m, x, c))
+    assert _has(names, "ctc_sm100"), names
     assert not any(_is_triton(k) for k in names), names

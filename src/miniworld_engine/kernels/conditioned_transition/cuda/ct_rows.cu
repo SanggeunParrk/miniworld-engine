@@ -11,6 +11,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include "tpose.cuh"
+#include "row_math.cuh"
 
 namespace {
 using bf = __nv_bfloat16;
@@ -46,6 +47,9 @@ template <> struct Vec<true> {
   __device__ static float rnd(float x) { return x; }
 };
 __device__ __forceinline__ float sigm(float x) { return 1.f / (1.f + __expf(-x)); }
+// the fp32 forward passes' sigmoid: __fdividef (2 ulp) instead of the IEEE division -- the value feeds a TF32 GEMM or the fp32 output at ~1e-7
+__device__ __forceinline__ float sigm_fast(float x) { return __fdividef(1.f, 1.f + __expf(-x)); }
+__device__ __forceinline__ float tf32r(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return __uint_as_float(r); }
 
 template <bool F32>
 __global__ void swiglu_fwd_k(const typename Vec<F32>::T* __restrict__ ab, typename Vec<F32>::T* __restrict__ h, long chunks, int ndc) {
@@ -54,12 +58,13 @@ __global__ void swiglu_fwd_k(const typename Vec<F32>::T* __restrict__ ab, typena
   asm volatile("griddepcontrol.wait;" ::: "memory");   // launched as a programmatic dependent (bf16): the producer's results are visible after this
 #endif
   for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < chunks; i += (long)gridDim.x * blockDim.x) {
-    const long m = i / ndc, j = i % ndc;                     // row, chunk of the row
+    const unsigned q = (unsigned)i, mu = q / (unsigned)ndc;   // row, chunk of the row (32-bit: chunks < 2^32; a 64-bit division per chunk cost ~10 %)
+    const long m = mu, j = q - mu * (unsigned)ndc;
     float a[V], b[V], o[V];
     Vec<F32>::ld(ab + m * 2 * ndc * V + j * V, a);
     Vec<F32>::ld(ab + m * 2 * ndc * V + ndc * V + j * V, b);
 #pragma unroll
-    for (int k = 0; k < V; ++k) o[k] = a[k] * sigm(a[k]) * b[k];
+    for (int k = 0; k < V; ++k) o[k] = F32 ? tf32r(a[k] * sigm_fast(a[k]) * b[k]) : a[k] * sigm(a[k]) * b[k];   // fp32 h feeds only TF32 GEMMs
     Vec<F32>::st(h + i * V, o);
   }
 }
@@ -68,7 +73,8 @@ __global__ void swiglu_bwd_k(const typename Vec<F32>::T* __restrict__ dh, const 
                              long chunks, int ndc) {
   constexpr int V = Vec<F32>::N;
   for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < chunks; i += (long)gridDim.x * blockDim.x) {
-    const long m = i / ndc, j = i % ndc;
+    const unsigned q = (unsigned)i, mu = q / (unsigned)ndc;
+    const long m = mu, j = q - mu * (unsigned)ndc;
     float a[V], b[V], g[V], da[V], db[V];
     Vec<F32>::ld(ab + m * 2 * ndc * V + j * V, a);
     Vec<F32>::ld(ab + m * 2 * ndc * V + ndc * V + j * V, b);
@@ -118,7 +124,7 @@ __global__ void sigmul_bwd_k(const typename Vec<F32>::T* __restrict__ dy, const 
 #pragma unroll
     for (int k = 0; k < V; ++k) {
       const float g = sigm(s[k]);
-      a[k] = d[k] * g;
+      a[k] = F32 ? tf32r(d[k] * g) : d[k] * g;   // fp32: dout feeds only TF32 GEMMs; on the grid for the tcgen05 dh GEMM (ct_tc GAB), which truncates
       b[k] = Vec<F32>::rnd(d[k] * o[k] * g * (1.f - g));
       acc[k] += b[k];
     }
@@ -229,63 +235,141 @@ __global__ void __launch_bounds__(32 * TW) sigmul_bwd_t_k(const float* __restric
 
 // sigmul_bwd_x: sigmul_bwd (row-major dout, dscale, the block partials) plus the K-major copy of dout, [D, ldd]: the left operand of dWs = dout^T h that cuBLAS runs at
 // ~290 TFLOP/s (with dout read MN-major it is ~185). One more write of dout (56 MB at 18432 x 768) instead of a separate transposing kernel (read + write).
-template <int NCH>
+// Grid (row-tile blocks, D / 128): block (x, c) takes the 128 features of chunk c of the 32-row tiles x, x + gridDim.x, ... and writes columns 128 c .. of partial
+// row x. (Was one block per row-tile walking every chunk in turn: at a few hundred tiles (6144 rows) a block's serial chain of 32-row tiles bounded the pass,
+// 35 us where its traffic is ~17.)
 __global__ void __launch_bounds__(32 * TW) sigmul_bwd_x_k(const float* __restrict__ dy, const float* __restrict__ out, const float* __restrict__ sp, float* __restrict__ dout,
                                                          float* __restrict__ dsc, float* __restrict__ doutT, long ldd, float* __restrict__ part, long R) {
-  constexpr int D = NCH * 128;
-  extern __shared__ float sm[];
-  float* Ta = sm;
+  const int D = (int)gridDim.y * 128, c = (int)blockIdx.y;
+  __shared__ float Ta[128 * tpose::LD];
   const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
-  float acc[NCH][4];
-#pragma unroll
-  for (int c = 0; c < NCH; ++c)
-#pragma unroll
-    for (int k = 0; k < 4; ++k) acc[c][k] = 0.f;
+  float acc[4] = {0.f, 0.f, 0.f, 0.f};
   for (long m0 = (long)blockIdx.x * tpose::TR; m0 < R; m0 += (long)gridDim.x * tpose::TR) {
     const int rows = (int)min((long)tpose::TR, R - m0);
 #pragma unroll
-    for (int c = 0; c < NCH; ++c) {
-      for (int q = 0; q < tpose::TR / TW; ++q) {
-        const int rl = q * TW + wp;
-        if (rl < rows) {
-          const long row = m0 + rl;
-          float d[4], o[4], s[4], a[4], b[4];
-          Vec<true>::ld(dy + row * D + 128 * c + 4 * lane, d);
-          Vec<true>::ld(out + row * D + 128 * c + 4 * lane, o);
-          Vec<true>::ld(sp + row * D + 128 * c + 4 * lane, s);
+    for (int q = 0; q < tpose::TR / TW; ++q) {
+      const int rl = q * TW + wp;
+      if (rl < rows) {
+        const long row = m0 + rl;
+        float d[4], o[4], s[4], a[4], b[4];
+        Vec<true>::ld(dy + row * D + 128 * c + 4 * lane, d);
+        Vec<true>::ld(out + row * D + 128 * c + 4 * lane, o);
+        Vec<true>::ld(sp + row * D + 128 * c + 4 * lane, s);
 #pragma unroll
-          for (int k = 0; k < 4; ++k) {
-            const float g = sigm(s[k]);
-            a[k] = d[k] * g;
-            b[k] = d[k] * o[k] * g * (1.f - g);
-            acc[c][k] += b[k];
-            tpose::put(Ta, 4 * lane + k, rl, a[k]);
-          }
-          Vec<true>::st(dout + row * D + 128 * c + 4 * lane, a);
-          Vec<true>::st(dsc + row * D + 128 * c + 4 * lane, b);
+        for (int k = 0; k < 4; ++k) {
+          const float g = sigm(s[k]);
+          a[k] = tf32r(d[k] * g);   // dout feeds only TF32 GEMMs (dWs, dh): on the grid, for the tcgen05 dh GEMM that truncates (ct_tc GAB)
+          b[k] = d[k] * o[k] * g * (1.f - g);
+          acc[k] += b[k];
+          tpose::put(Ta, 4 * lane + k, rl, a[k]);
         }
+        Vec<true>::st(dout + row * D + 128 * c + 4 * lane, a);
+        Vec<true>::st(dsc + row * D + 128 * c + 4 * lane, b);
       }
-      __syncthreads();
-      tpose::flush(Ta, doutT, ldd, 128 * c, 128, (int)m0, rows, wp, TW, lane);
-      __syncthreads();
     }
+    __syncthreads();
+    tpose::flush(Ta, doutT, ldd, 128 * c, 128, (int)m0, rows, wp, TW, lane);
+    __syncthreads();
   }
-  float (*red)[D] = reinterpret_cast<float (*)[D]>(sm);
+  float (*red)[128] = reinterpret_cast<float (*)[128]>(Ta);
 #pragma unroll
-  for (int c = 0; c < NCH; ++c)
-#pragma unroll
-    for (int k = 0; k < 4; ++k) red[wp][128 * c + 4 * lane + k] = acc[c][k];
+  for (int k = 0; k < 4; ++k) red[wp][4 * lane + k] = acc[k];
   __syncthreads();
-  for (int c = threadIdx.x; c < D; c += 32 * TW) {
+  if (threadIdx.x < 128) {
     float t = 0.f;
 #pragma unroll
-    for (int w = 0; w < TW; ++w) t += red[w][c];
-    part[(long)blockIdx.x * D + c] = t;
+    for (int w = 0; w < TW; ++w) t += red[w][threadIdx.x];
+    part[(long)blockIdx.x * D + 128 * c + threadIdx.x] = t;
   }
 }
 
+
+// ---- fp32 inference with the AdaLN's [scale | bias] projection and the tail's gate projection as ONE GEMM (B200, ct_sm100.ct_inference_full_f32):
+//   cond_center:    cc = cond - mean_c (and the row's mean_c, rstd_c)                    LN(cond) wc W^T = rstd_c (cc (W wc)^T)
+//   raw = cc [Ws wc; Wb wc; Wsc]^T  (cuBLAS TF32)                                         cond Wsc^T = cc Wsc^T + mean_c rowsum(Wsc)
+//   adaln_fold_fwd: y = sigmoid(rstd_c raw_s + bs) * LN(x) + rstd_c raw_b
+//   sigmul_fwd_ld:  y = res + sigmoid(raw_g + mean_c rowsum(Wsc) + bsc) * out            (raw_g: columns 2 D .. 3 D of raw)
+// The conditioning is centred BEFORE the GEMM (the TF32 operand is cond - mean, as LN(cond) is): folding the mean in after the GEMM instead
+// cancels against the TF32 rounding of cond itself (3.4x the error of the PyTorch TF32 statements at a row mean of 10 std, 1.4x at 3).
+// One warp a row (D, DC multiples of 128), as adaln_rows.cu's row kernels.
+template <int N>
+__device__ __forceinline__ void ldrow(const float* __restrict__ p, int lane, float (&v)[N / 32]) {
+#pragma unroll
+  for (int k = 0; k < N / 128; ++k) {
+    const float4 t = *reinterpret_cast<const float4*>(p + 4 * (lane + 32 * k));
+    v[4 * k] = t.x; v[4 * k + 1] = t.y; v[4 * k + 2] = t.z; v[4 * k + 3] = t.w;
+  }
+}
+template <int N>
+__device__ __forceinline__ void strow(float* __restrict__ p, int lane, const float (&v)[N / 32]) {
+#pragma unroll
+  for (int k = 0; k < N / 128; ++k) *reinterpret_cast<float4*>(p + 4 * (lane + 32 * k)) = make_float4(v[4 * k], v[4 * k + 1], v[4 * k + 2], v[4 * k + 3]);
+}
+template <int N>
+__device__ __forceinline__ void rowstats(const float (&v)[N / 32], float eps, float& mean, float& rstd) {
+  float s = 0.f;
+#pragma unroll
+  for (int i = 0; i < N / 32; ++i) s += v[i];
+  mean = rowmath::warp_sum(s) * (1.f / N);
+  float q = 0.f;
+#pragma unroll
+  for (int i = 0; i < N / 32; ++i) q += (v[i] - mean) * (v[i] - mean);
+  rstd = rsqrtf(rowmath::warp_sum(q) * (1.f / N) + eps);
+}
+template <int DC>
+__global__ void __launch_bounds__(256) cond_center_k(const float* __restrict__ C, float* __restrict__ CC, float2* __restrict__ ST, long R, float eps_c) {
+  const int lane = threadIdx.x & 31;
+  const long row = (long)blockIdx.x * 8 + (threadIdx.x >> 5);
+  if (row >= R) return;
+  float c[DC / 32], mc, rc;
+  ldrow<DC>(C + row * DC, lane, c);
+  rowstats<DC>(c, eps_c, mc, rc);
+#pragma unroll
+  for (int i = 0; i < DC / 32; ++i) c[i] -= mc;
+  strow<DC>(CC + row * DC, lane, c);
+  if (lane == 0) ST[row] = make_float2(mc, rc);
+}
+template <int D>
+__global__ void __launch_bounds__(256) adaln_fold_fwd_k(const float* __restrict__ X, const float* __restrict__ RAW, long ldraw, const float2* __restrict__ ST,
+                                                        const float* __restrict__ BS, float* __restrict__ Y, long R, float eps_x) {
+  const int lane = threadIdx.x & 31;
+  const long row = (long)blockIdx.x * 8 + (threadIdx.x >> 5);
+  if (row >= R) return;
+  float x[D / 32], mx, rx, sr[D / 32], br[D / 32], bs[D / 32];
+  ldrow<D>(X + row * D, lane, x);                  // every load issued before the statistics' shuffles
+  ldrow<D>(RAW + row * ldraw, lane, sr);
+  ldrow<D>(RAW + row * ldraw + D, lane, br);
+  ldrow<D>(BS, lane, bs);
+  const float rc = ST[row].y;
+  rowstats<D>(x, eps_x, mx, rx);
+#pragma unroll
+  for (int i = 0; i < D / 32; ++i) x[i] = tf32r(rowmath::modulate(x[i], mx, rx, sigm_fast(rc * sr[i] + bs[i]), rc * br[i]));   // a TF32 GEMM operand
+  strow<D>(Y + row * D, lane, x);
+}
+__global__ void sigmul_fwd_ld_k(const float* __restrict__ out, const float* __restrict__ raw, long ldraw, long goff, const float2* __restrict__ ST,
+                                const float* __restrict__ csg, const float* __restrict__ bsc, const float* __restrict__ res, float* __restrict__ y, long chunks,
+                                int ndc) {
+  for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < chunks; i += (long)gridDim.x * blockDim.x) {
+    const unsigned q = (unsigned)i, mu = q / (unsigned)ndc, j = q - mu * (unsigned)ndc;
+    float o[4], g[4], b[4], cs[4], r[4], v[4];
+    Vec<true>::ld(out + i * 4, o);
+    Vec<true>::ld(raw + (long)mu * ldraw + goff + 4 * j, g);
+    Vec<true>::ld(bsc + 4 * j, b);
+    Vec<true>::ld(csg + 4 * j, cs);
+    if (res) Vec<true>::ld(res + i * 4, r);
+    const float mc = ST[mu].x;
+#pragma unroll
+    for (int k = 0; k < 4; ++k) v[k] = sigm_fast(g[k] + mc * cs[k] + b[k]) * o[k] + (res ? r[k] : 0.f);
+    Vec<true>::st(y + i * 4, v);
+  }
+}
+
+}  // namespace
+namespace {
 cudaStream_t S() { return at::cuda::getCurrentCUDAStream(); }
-unsigned grid_of(long chunks) { return (unsigned)std::min<long>((chunks + 255) / 256, 132L * 16); }
+// one chunk a thread (the grid-stride loops then take one trip): a capped grid left the passes at a few thousand rows a second, partial trip
+// (swiglu_fwd at 3840 x 1536: 10.0 us, the portable pass 8.5)
+unsigned grid_of(long chunks) { return (unsigned)std::max<long>(1, std::min<long>((chunks + 255) / 256, 1L << 30)); }
 // a launch with programmatic stream serialization (PDL): the grid may be scheduled before the previous kernel on the stream has finished
 // (its own griddepcontrol.wait holds it until that kernel's results are visible), so the launch latency overlaps that kernel's tail. Used
 // for the bf16 row passes that follow a cuBLAS GEMM.
@@ -319,6 +403,7 @@ at::Tensor swiglu_fwd(at::Tensor ab) {
   const at::cuda::CUDAGuard g(ab.device());
   auto h = at::empty({M, nd}, ab.options());
   const long chunks = M * nd / V;
+  TORCH_CHECK(chunks < (1L << 32), "swiglu: rows x width");
   if (f) swiglu_fwd_k<true><<<grid_of(chunks), 256, 0, S()>>>(P<float>(ab), PM<float>(h), chunks, (int)(nd / V));
   else launch_pdl(swiglu_fwd_k<false>, grid_of(chunks), 256, P<bf>(ab), PM<bf>(h), chunks, (int)(nd / V));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -333,6 +418,7 @@ at::Tensor swiglu_bwd(at::Tensor dh, at::Tensor ab) {
   const at::cuda::CUDAGuard g(ab.device());
   auto dab = at::empty_like(ab);
   const long chunks = M * nd / V;
+  TORCH_CHECK(chunks < (1L << 32), "swiglu: rows x width");
   if (f) swiglu_bwd_k<true><<<grid_of(chunks), 256, 0, S()>>>(P<float>(dh), P<float>(ab), PM<float>(dab), chunks, (int)(nd / V));
   else swiglu_bwd_k<false><<<grid_of(chunks), 256, 0, S()>>>(P<bf>(dh), P<bf>(ab), PM<bf>(dab), chunks, (int)(nd / V));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -422,17 +508,53 @@ std::vector<at::Tensor> sigmul_bwd_x(at::Tensor dy, at::Tensor out, at::Tensor s
   auto dout = at::empty_like(dy), dsc = at::empty_like(dy), doutT = at::empty({D, ldd}, dy.options());
   const unsigned grid = (unsigned)std::min<long>(grid_blocks, (M + 31) / 32);
   auto part = at::empty({(long)grid, D}, dy.options());
-  const size_t shm = std::max<size_t>(128 * tpose::LD * sizeof(float), (size_t)TW * D * sizeof(float));
-#define SBX(NCH) sigmul_bwd_x_k<NCH><<<grid, 32 * TW, shm, S()>>>(P<float>(dy), P<float>(out), P<float>(sp), PM<float>(dout), PM<float>(dsc), PM<float>(doutT), ldd, PM<float>(part), M)
-  switch (D / 128) {
-    case 1: SBX(1); break; case 2: SBX(2); break; case 3: SBX(3); break; case 4: SBX(4); break;
-    case 5: SBX(5); break; case 6: SBX(6); break; case 7: SBX(7); break; default: SBX(8); break;
-  }
-#undef SBX
+  sigmul_bwd_x_k<<<dim3(grid, (unsigned)(D / 128)), 32 * TW, 0, S()>>>(P<float>(dy), P<float>(out), P<float>(sp), PM<float>(dout), PM<float>(dsc), PM<float>(doutT), ldd,
+                                                             PM<float>(part), M);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dout, dsc, part, doutT};
 }
 
+std::vector<at::Tensor> cond_center(at::Tensor cond, double eps_c) {
+  TORCH_CHECK(is_f32(cond), "fp32");
+  const long R = cond.size(0), DC = cond.size(1);
+  const at::cuda::CUDAGuard g(cond.device());
+  auto cc = at::empty_like(cond);
+  auto st = at::empty({R, 2}, cond.options());
+  const unsigned grid = (unsigned)((R + 7) / 8);
+#define CC_(N) cond_center_k<N><<<grid, 256, 0, S()>>>(P<float>(cond), PM<float>(cc), reinterpret_cast<float2*>(st.data_ptr()), R, (float)eps_c)
+  switch (DC) { case 256: CC_(256); break; case 384: CC_(384); break; case 512: CC_(512); break; case 768: CC_(768); break;
+                default: TORCH_CHECK(false, "cond_center: width"); }
+#undef CC_
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {cc, st};
+}
+at::Tensor adaln_fold_fwd(at::Tensor x, at::Tensor raw, at::Tensor st, at::Tensor bs, double eps_x) {
+  TORCH_CHECK(is_f32(x) && is_f32(st) && is_f32(bs) && raw.scalar_type() == at::kFloat && raw.stride(1) == 1, "fp32");
+  const long R = x.size(0), D = x.size(1);
+  TORCH_CHECK(raw.size(0) == R && raw.size(1) >= 2 * D && bs.numel() == D && st.size(0) == R, "shapes");
+  const at::cuda::CUDAGuard g(x.device());
+  auto y = at::empty_like(x);
+  const unsigned grid = (unsigned)((R + 7) / 8);
+#define AF(N) adaln_fold_fwd_k<N><<<grid, 256, 0, S()>>>(P<float>(x), P<float>(raw), raw.stride(0), reinterpret_cast<const float2*>(st.data_ptr()), P<float>(bs), PM<float>(y), R, (float)eps_x)
+  switch (D) { case 256: AF(256); break; case 384: AF(384); break; case 512: AF(512); break; case 768: AF(768); break;
+               default: TORCH_CHECK(false, "adaln_fold_fwd: width"); }
+#undef AF
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return y;
+}
+at::Tensor sigmul_fwd_ld(at::Tensor out, at::Tensor raw, int64_t goff, at::Tensor st, at::Tensor csg, at::Tensor bsc, c10::optional<at::Tensor> res) {
+  TORCH_CHECK(is_f32(out) && is_f32(bsc) && is_f32(csg) && is_f32(st) && raw.scalar_type() == at::kFloat && raw.stride(1) == 1, "fp32");
+  const long D = out.size(1);
+  TORCH_CHECK(D % 4 == 0 && bsc.numel() == D && csg.numel() == D && raw.size(0) == out.size(0) && goff + D <= raw.size(1), "shapes");
+  if (res) TORCH_CHECK(is_f32(*res) && res->sizes() == out.sizes(), "res");
+  const at::cuda::CUDAGuard g(out.device());
+  auto y = at::empty_like(out);
+  const long chunks = out.numel() / 4;
+  sigmul_fwd_ld_k<<<grid_of(chunks), 256, 0, S()>>>(P<float>(out), P<float>(raw), raw.stride(0), goff, reinterpret_cast<const float2*>(st.data_ptr()),
+                                                   P<float>(csg), P<float>(bsc), res ? P<float>(*res) : nullptr, PM<float>(y), chunks, (int)(D / 4));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return y;
+}
 // ---- t^T of a bf16 matrix [R, C] (32 x 32 tiles through shared memory): Ws^T for the B200 bf16 backward's fused dh GEMM (ct_tg gate7), whose
 // B operand is K-major
 __global__ void __launch_bounds__(256) transpose_bf16_k(const bf* __restrict__ src, bf* __restrict__ dst, int R, int C) {
@@ -522,6 +644,9 @@ at::Tensor head_stats(at::Tensor x, at::Tensor cond, double eps_x, double eps_c)
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("cond_center", &cond_center);
+  m.def("adaln_fold_fwd", &adaln_fold_fwd);
+  m.def("sigmul_fwd_ld", &sigmul_fwd_ld);
   m.def("swiglu_fwd", &swiglu_fwd);
   m.def("swiglu_bwd", &swiglu_bwd);
   m.def("sigmul_fwd", &sigmul_fwd);

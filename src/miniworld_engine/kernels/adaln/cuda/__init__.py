@@ -143,9 +143,23 @@ def _fwd_fake(x2, c2, wc, ws, bs, wb, eps_x, eps_c, rna=False):
     )
 
 
+def _fm(x2, c2) -> bool:
+    """The fp32 feature-major backward (``adaln_bwd_t``) for this call. "auto": a cond of 768 columns or more, except on B200 (sm_100), where the
+    transposing row pass costs more than the K-major weight-gradient GEMMs give back (ConditionedTransition training step d768 c768, CUDA graph,
+    us: 6144 rows 520 -> 508, 36864 rows 2654 -> 2637 without it)."""
+    if x2.dtype is not torch.float32 or x2.shape[-1] not in FEATURE_MAJOR_WIDTHS:
+        return False
+    if _FM == "1":
+        return True
+    if _FM != "auto" or c2.shape[1] < 768:
+        return False
+    idx = x2.device.index if x2.device.index is not None else torch.cuda.current_device()
+    return torch.cuda.get_device_capability(idx) != (10, 0)
+
+
 def _cnt_ok(x2, c2) -> bool:
     """fp32 token-width step whose weight gradient takes LN(cond)^T as the K-major operand (``ln_cond_fwd_t``)."""
-    fm = x2.shape[-1] in FEATURE_MAJOR_WIDTHS and (_FM == "1" or (_FM == "auto" and c2.shape[1] >= 768))   # that route has its own feature-major gradients
+    fm = _fm(x2, c2)   # that route has its own feature-major gradients
     # M <= 24576: at M = 36864 cuBLAS picks a slower "tt" kernel for the K-major copy (dW 222 against 197 us) and the transposed row pass is 28 us dearer (measured: 1050 against 1008 us)
     return _XT and x2.dtype is torch.float32 and c2.shape[1] in (256, 384, 512) and not fm and x2.shape[0] % 4 == 0 and x2.shape[0] <= _XT_MAX_ROWS
 
@@ -156,7 +170,7 @@ def _fwd(
     rna: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(y, LN(cond) wc, its statistics, x's statistics, [scale | bias] pre-activations, the packed [Ws; Wb], and for fp32 its K-major transpose [dc, 2 d] for
-    the backward) of the rows x2 [r, d], c2 [r, dc]. ``rna``: y (fp32) on the TF32 grid, for a consumer whose MMA truncates (an inference call only)."""
+    the backward) of the rows x2 [r, d], c2 [r, dc]. ``rna``: y (fp32) on the TF32 grid, for a consumer whose MMA truncates."""
     e = _ext()
     if _cnt_ok(x2, c2):
         cn, stc, cnT = e.ln_cond_fwd_t(c2, wc.contiguous(), eps_c)
@@ -214,8 +228,7 @@ def _bwd(
             dwcat = torch.mm(cn.t(), dsb).t()
         dbs, dwc = infer.colsum2(pbs, pbc) if has_bs else (pbs.new_empty(0), infer.colsum(pbc))
         return dx, dcond, dwc, dwcat.contiguous(), dbs
-    fm = _FM
-    if x2.dtype is torch.float32 and d in FEATURE_MAJOR_WIDTHS and (fm == "1" or (fm == "auto" and c2.shape[1] >= 768)):
+    if _fm(x2, c2):
         # TF32 weight gradients want the activation rows (K) contiguous: the row pass writes [dscale ; dy]^T feature-major (tpose.cuh)
         m = x2.shape[0]
         dfm, dx, pbs = e.adaln_bwd_t(dy2, x2, sb, stx, dres)
@@ -232,16 +245,51 @@ def _bwd(
         dcn = torch.mm(dsb, wcat)
         dwcat = torch.mm(dsb.t(), cn, out_dtype=torch.float32)  # [2 d, dc]
     else:  # TF32: the layouts cuBLAS runs fastest (measured at 18432 rows: dW 148 -> 119 us, dcn 127 -> 91 us)
+        side = _side_stream(x2) if x2.shape[0] <= SIDE_MAX_ROWS else None
+        if side is not None:   # a few row tiles (B200): the weight gradient beside dcn and the LayerNorm(cond) backward
+            cur = torch.cuda.current_stream(x2.device)
+            dwcat = torch.empty((wcat.shape[0], cn.shape[1]), dtype=torch.float32, device=x2.device)
+            side.wait_stream(cur)
+            with torch.cuda.stream(side):
+                if cnT is not None and cnT.numel() > 0:
+                    torch.mm(dsb.t(), cnT[:, :cn.shape[0]].t(), out=dwcat)
+                else:
+                    torch.mm(dsb.t(), cn, out=dwcat)
         dcn = torch.mm(dsb, wcatT.t())
-        if cnT is not None and cnT.numel() > 0:   # the smaller operand K-major (written by ln_cond_fwd_t): the GEMM comes out [2 d, dc], no transposing copy after it
+        if side is not None:
+            pass   # dwcat: on the side stream above
+        elif cnT is not None and cnT.numel() > 0:   # the smaller operand K-major (written by ln_cond_fwd_t): the GEMM comes out [2 d, dc], no transposing copy after it
             dwcat = torch.mm(dsb.t(), cnT[:, :cn.shape[0]].t())
         else:
-            dwcat = torch.mm(cn.t(), dsb).t()  # [2 d, dc]
+            from miniworld_engine.kernels.conditioned_transition.cuda.ct_train import wgrad_f32   # B200 thin-output split (atom width)
+
+            dwcat = wgrad_f32(dsb, cn) if x2.shape[0] <= 65536 and x2.shape[-1] <= 256 else torch.mm(cn.t(), dsb).t()  # [2 d, dc]
     dcond, pbc = e.ln_cond_bwd(dcn, c2, stc, wc.contiguous(), dcres)
     from .infer import colsum, colsum2   # fixed-order column sums of the block partials: one launch each instead of a PyTorch reduction
 
     dbs, dwc = colsum2(pbs, pbc) if has_bs else (pbs.new_empty(0), colsum(pbc))
+    if x2.dtype is torch.float32 and side is not None:
+        cur.wait_stream(side)
     return dx, dcond, dwc, dwcat.contiguous(), dbs
+
+
+#: fp32 backward on B200 up to SIDE_MAX_ROWS rows: the [Ws; Wb] weight gradient on a side stream beside dcn -> ln_cond_bwd (the GEMMs fill a fraction
+#: of the card at a few row tiles; inside the opaque ``adaln_h100_bwd`` op, so a CUDA graph captures the fork and join under torch.compile too)
+SIDE_MAX_ROWS = int(os.environ.get("ADALN_SIDE_MAX_ROWS", "12288"))
+_SIDE: dict = {}
+
+
+def _side_stream(x2: torch.Tensor):
+    """The side stream of ``x2``'s device for an fp32 B200 call, else None."""
+    if x2.dtype is not torch.float32 or not x2.is_cuda:
+        return None
+    idx = x2.device.index if x2.device.index is not None else torch.cuda.current_device()
+    if torch.cuda.get_device_capability(idx) != (10, 0):
+        return None
+    s = _SIDE.get(idx)
+    if s is None:
+        s = _SIDE[idx] = torch.cuda.Stream(device=idx)
+    return s
 
 
 class _AdaLN(torch.autograd.Function):
@@ -307,8 +355,9 @@ def adaln(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x: float = 1e-5
     if wgmma and not grad:
         y = infer.adaln_inference(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond, rna=rna)
         return (y, x, cond) if streams else y
+    # rna under a backward too for fp32 (the B200 ConditionedTransition's TF32 tcgen05 expand GEMM reads y; the backward never reads y)
     return _AdaLN.apply(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond, wgmma and infer.train_supported(x, cond), streams,
-                        rna and not grad)
+                        rna and (not grad or x.dtype is torch.float32))
 
 
 def wgmma_supported(x, cond) -> bool:

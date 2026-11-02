@@ -704,36 +704,72 @@ struct PackJobs {
   const float* src[8];
   float* dst[8];
   int rows[8], cols[8], ldd[8], row0[8], col0[8], mode[8], rna[8];
-  int tile_end[8];   // prefix sums of the 32 x 32 tile counts
+  int tile_end[8];   // prefix sums of the PK_R x PK_C tile counts
   int n;
 };
+// Tiles of PK_R = 32 source rows x PK_C = 128 source columns, 256 threads: a warp reads 128 consecutive floats of a row (coalesced), a copy (mode 0) writes them
+// straight back out, a transpose (mode 1) goes through shared memory (row stride 129: conflict-free both ways) and writes 32 consecutive floats (128 B) of each of
+// the tile's 128 destination rows. (Was 32 x 32 tiles of four elements a thread: ~3.4 TB/s; the weight packs and the activation transposes of a step are 3 - 77 us.)
+constexpr int PK_R = 32, PK_C = 128;
 __global__ void __launch_bounds__(256) pack_f32_k(PackJobs jb) {
-  __shared__ float tile[32][33];
-  int t = blockIdx.x, j = 0;
-  while (t >= jb.tile_end[j]) ++j;
-  if (j) t -= jb.tile_end[j - 1];
-  const int R = jb.rows[j], C = jb.cols[j], tc = (C + 31) / 32;
-  const int r0 = (t / tc) * 32, c0 = (t % tc) * 32;
-  const int tx = threadIdx.x & 31, ty = threadIdx.x >> 5;
-  float* dst = jb.dst[j];
-  const long ldd = jb.ldd[j];
-  const int mode = jb.mode[j];
-  const bool rna = jb.rna[j] != 0;
+  __shared__ float tile[PK_R][PK_C + 1];
+  // the job's fields by constant indices only (a dynamically indexed kernel-parameter array is copied to local memory by every thread)
+  int t = blockIdx.x, R = 0, C = 0, ldd_ = 0, mode = 0, drow = 0, dcol = 0, rn = 0, t0 = 0;
+  const float* src = nullptr;
+  float* dst = nullptr;
+#pragma unroll
+  for (int k = 0; k < 8; ++k) {
+    const int lo = k ? jb.tile_end[k - 1] : 0;
+    if (k < jb.n && t >= lo && t < jb.tile_end[k]) {
+      R = jb.rows[k]; C = jb.cols[k]; ldd_ = jb.ldd[k]; mode = jb.mode[k]; drow = jb.row0[k]; dcol = jb.col0[k]; rn = jb.rna[k];
+      src = jb.src[k]; dst = jb.dst[k]; t0 = lo;
+    }
+  }
+  t -= t0;
+  const int tc = (C + PK_C - 1) / PK_C;
+  const int r0 = (t / tc) * PK_R, c0 = (t % tc) * PK_C;
+  const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
+  const long ldd = ldd_;
+  const bool rna = rn != 0;
   if (mode == 2) {
 #pragma unroll
-    for (int i = 0; i < 4; ++i) { const int r = r0 + ty + 8 * i, c = c0 + tx; if (r < R && c < C) dst[(long)(jb.row0[j] + r) * ldd + jb.col0[j] + c] = 0.f; }
+    for (int i = 0; i < PK_R / 8; ++i)
+#pragma unroll
+      for (int q = 0; q < PK_C / 32; ++q) {
+        const int r = r0 + wp + 8 * i, c = c0 + lane + 32 * q;
+        if (r < R && c < C) dst[(long)(drow + r) * ldd + dcol + c] = 0.f;
+      }
     return;
   }
-  const float* src = jb.src[j];
+  float v[PK_R / 8][PK_C / 32];
 #pragma unroll
-  for (int i = 0; i < 4; ++i) { const int r = r0 + ty + 8 * i, c = c0 + tx; tile[ty + 8 * i][tx] = (r < R && c < C) ? src[(long)r * C + c] : 0.f; }
-  __syncthreads();
+  for (int i = 0; i < PK_R / 8; ++i)
+#pragma unroll
+    for (int q = 0; q < PK_C / 32; ++q) {
+      const int r = r0 + wp + 8 * i, c = c0 + lane + 32 * q;
+      const float x = (r < R && c < C) ? __ldg(src + (long)r * C + c) : 0.f;
+      v[i][q] = rna ? tf32_rn(x) : x;
+    }
   if (mode == 0) {
 #pragma unroll
-    for (int i = 0; i < 4; ++i) { const int r = r0 + ty + 8 * i, c = c0 + tx; if (r < R && c < C) dst[(long)(jb.row0[j] + r) * ldd + jb.col0[j] + c] = rna ? tf32_rn(tile[ty + 8 * i][tx]) : tile[ty + 8 * i][tx]; }
-  } else {
+    for (int i = 0; i < PK_R / 8; ++i)
 #pragma unroll
-    for (int i = 0; i < 4; ++i) { const int c = c0 + ty + 8 * i, r = r0 + tx; if (r < R && c < C) dst[(long)(jb.row0[j] + c) * ldd + jb.col0[j] + r] = rna ? tf32_rn(tile[tx][ty + 8 * i]) : tile[tx][ty + 8 * i]; }
+      for (int q = 0; q < PK_C / 32; ++q) {
+        const int r = r0 + wp + 8 * i, c = c0 + lane + 32 * q;
+        if (r < R && c < C) dst[(long)(drow + r) * ldd + dcol + c] = v[i][q];
+      }
+    return;
+  }
+#pragma unroll
+  for (int i = 0; i < PK_R / 8; ++i)
+#pragma unroll
+    for (int q = 0; q < PK_C / 32; ++q) tile[wp + 8 * i][lane + 32 * q] = v[i][q];
+  __syncthreads();
+  const int r = r0 + lane;   // the destination column (a source row)
+#pragma unroll 4
+  for (int k = 0; k < PK_C / 8; ++k) {
+    const int cc = wp * (PK_C / 8) + k, c = c0 + cc;   // the destination row (a source column)
+    if (r < R && c < C) dst[(long)(drow + c) * ldd + dcol + r] = tile[lane][cc];
   }
 }
 // srcs[k]: fp32 [R, C] (ignored for mode 2: pass any tensor with the block's shape); dsts[k]: fp32 2-D; spec[k] = (mode, row0, col0)
@@ -753,7 +789,7 @@ void pack_f32(std::vector<at::Tensor> srcs, std::vector<at::Tensor> dsts, std::v
     jb.src[k] = s.data_ptr<float>();
     jb.dst[k] = d.data_ptr<float>();
     jb.rows[k] = R; jb.cols[k] = C; jb.ldd[k] = (int)d.stride(0); jb.row0[k] = row0; jb.col0[k] = col0; jb.mode[k] = mode; jb.rna[k] = spec[k].size() > 3 ? (int)spec[k][3] : 0;
-    tiles += ((R + 31) / 32) * ((C + 31) / 32);
+    tiles += ((R + PK_R - 1) / PK_R) * ((C + PK_C - 1) / PK_C);
     jb.tile_end[k] = tiles;
   }
   jb.n = (int)srcs.size();

@@ -180,11 +180,71 @@ def pack_fp32(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, wsc: torch.T
     wsT = torch.empty(nd, d, device=dev, dtype=f32)
     wscT = torch.empty(dc, d, device=dev, dtype=f32)
     wa, wb, ws, wsc = (w.contiguous() for w in (wa, wb, ws, wsc))
-    rows_ext().pack_f32([wa, wb, wa, wb, ws, wsc], [wab, wab, wabT, wabT, wsT, wscT], [[0, 0, 0], [0, nd, 0], [1, 0, 0], [1, 0, nd], [1, 0, 0], [1, 0, 0]])
+    # every copy on the TF32 grid (round to nearest): the tcgen05 GEMMs (``ct_tc``) truncate their operands; cuBLAS' own rounding of them is the identity
+    rows_ext().pack_f32([wa, wb, wa, wb, ws, wsc], [wab, wab, wabT, wabT, wsT, wscT],
+                        [[0, 0, 0, 1], [0, nd, 0, 1], [1, 0, 0, 1], [1, 0, nd, 1], [1, 0, 0, 1], [1, 0, 0, 1]])
     return wab, wabT, wsT, wscT
 
 
 _XT = os.environ.get("CT_XT", "1") != "0"   # read once at import (the routing runs inside traces)
+
+# ---- B200 fp32: the expand GEMM with the SwiGLU in its epilogue (SWAB) and the dh GEMM with the SwiGLU backward in its epilogue (GAB), TF32 tcgen05
+# (``ct_tc``). Measured (kernels alone, CUDA graph, us), cuBLAS + row pass -> fused:
+#                     expand + swiglu_fwd -> SWAB          dh + swiglu_bwd -> GAB
+#     [36864, 768] n2      315 -> 284 (128 x 2-CTA)          282 -> 233 (256 x 2-CTA)
+#     [18432, 768]         161 -> 145                        146 -> 122
+#     [6144, 768]           55 -> 55                          51 -> 50
+#     [393216, 128] n2     348 -> 301 (64, 1-CTA)            415 -> 303 (64, 1-CTA)
+#     [196608, 128]        180 -> 156                        211 -> 157
+#     [49152, 128]          47 -> 46                          54 -> 47
+# so both from TC_MIN_ROWS rows (token: above the tie at a few thousand rows).
+TC = os.environ.get("CT_TC", "1") != "0"
+TC_MIN_ROWS = {"token": 12288, "atom": 32768}
+
+
+def tc_route(x: torch.Tensor, nd: int, xn_tf32: bool) -> tuple[bool, bool]:
+    """(SWAB forward, GAB backward) for this call: B200, fp32 activations already on the TF32 grid (the AdaLN's ``rna``), the widths the builds tile."""
+    m, d = x.shape
+    if not (TC and xn_tf32 and x.dtype is torch.float32 and x.is_cuda and torch.backends.cuda.matmul.allow_tf32):
+        return False, False
+    if torch.cuda.get_device_capability(x.device) != (10, 0) or d % 32 or nd % 256:
+        return False, False
+    atom = d <= 128
+    if m < TC_MIN_ROWS["atom" if atom else "token"]:
+        return False, False
+    return True, d <= 1024
+
+
+def _tc_bn(d: int, mode: str):  # noqa: D103
+    """Tile choice per width (measured above): the atom width on single CTAs 64 wide, the token widths on CTA pairs."""
+    if d <= 128:
+        return (64, False)
+    return (128, True) if mode == "swab" else (256, True)
+
+
+def _swab_fake(x, wab):
+    """(h [M, ND], [a | b] [M, 2 ND]) like x."""
+    nd = wab.shape[0] // 2
+    return x.new_empty((x.shape[0], nd)), x.new_empty((x.shape[0], 2 * nd))
+
+
+@opaque(fake=_swab_fake, name="conditioned_transition_cuda_swab_f32")
+def swab(x: torch.Tensor, wab: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(h, [a | b]) of x [M, D] (TF32 grid) and [Wa; Wb] [2 ND, D] (TF32 grid): one tcgen05 GEMM with the SwiGLU in its epilogue."""
+    from . import ct_tc
+
+    m, d = x.shape
+    nd = wab.shape[0] // 2
+    h = x.new_empty((m, nd))
+    ab = x.new_empty((m, 2 * nd))
+    ct_tc.gemm("swab", m, nd, x, wab[:nd], h, o1=ab, b1=wab[nd:], k0=d, ld0=nd, ld1=2 * nd, hoff=nd, force=_tc_bn(d, "swab"))
+    return h, ab
+
+
+def _gab_fake(dout, wsT, ab):
+    """[dA | dB] like ab."""
+    return torch.empty_like(ab)
+
 
 # ---- B200 bf16 backward: dh = dout Ws and the SwiGLU backward in ONE tcgen05 GEMM (``tg_gemm.cu`` MODE 7, GATE_AB without h: the epilogue
 # TMA-loads the forward's saved [a | b] tile and writes [dA | dB]; dh never reaches HBM). Replaces cuBLAS dh + ``swiglu_bwd`` (a write and a
@@ -248,6 +308,18 @@ def _gate_ab_fake(dout, wsT, ab):
     return torch.empty_like(ab)
 
 
+@opaque(fake=_gab_fake, name="conditioned_transition_cuda_gab_f32")
+def gab(dout: torch.Tensor, wsT: torch.Tensor, ab: torch.Tensor) -> torch.Tensor:
+    """[dA | dB] = SwiGLU backward of dh = dout Ws (dout [M, D] and Ws^T [ND, D] on the TF32 grid) on the forward's ab: one tcgen05 GEMM, dh never in HBM."""
+    from . import ct_tc
+
+    m, d = dout.shape
+    nd = wsT.shape[0]
+    dab = torch.empty_like(ab)
+    ct_tc.gemm("gab", m, nd, dout, wsT, dab, aux=ab, k0=d, ld0=2 * nd, ldaux=2 * nd, hoff=nd, force=_tc_bn(d, "gab"))
+    return dab
+
+
 @opaque(fake=_gate_ab_fake, name="conditioned_transition_cuda_gate_ab_sm100a")
 def gate_ab(dout: torch.Tensor, wsT: torch.Tensor, ab: torch.Tensor) -> torch.Tensor:
     """[dA | dB] of dh = dout Ws (``wsT`` = Ws^T [ND, D], bf16) and the saved ab = [a | b] [M, 2 ND]: da = dh b silu'(a), db = dh silu(a)."""
@@ -292,9 +364,45 @@ def transpose_f32(t: torch.Tensor) -> torch.Tensor:
     return o
 
 
+#: fp32 weight gradients with thin outputs over many rows (the atom width: [128 .. 512] x [128 .. 256] outputs, K = the rows): cuBLAS picks sm_80
+#: split-K kernels for G^T X; as a batched GEMM over WG_SPLIT row slices plus a sum over the slices it runs its sm_100 kernels (B200, 49152 rows,
+#: kernels alone, us: dWs [128 x 256] 23.2 -> 16.1 (32 slices), [dWa; dWb] [512 x 128] 33.3 -> 28.6 (16), dWsc [128 x 128] 17.0 -> ~12). Up to
+#: WG_SPLIT_MAX_ROWS rows (above it the split-K GEMMs fill the card).
+WG_SPLIT_MAX_ROWS = int(os.environ.get("CT_WG_SPLIT_MAX_ROWS", "65536"))
+
+
+def wgrad_f32(g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """g^T x [P, Q] of fp32 g [M, P], x [M, Q] (TF32), deterministic: as row-slice batches summed in order where that is faster (see above)."""
+    m, p = g.shape
+    q = x.shape[1]
+    s = 32 if p * q <= 32768 else 16
+    if (g.dtype is torch.float32 and m <= WG_SPLIT_MAX_ROWS and m % s == 0 and m // s >= 256 and p <= 512 and q <= 512 and g.is_cuda
+            and torch.cuda.get_device_capability(g.device) == (10, 0)):
+        return torch.bmm(g.view(s, m // s, p).transpose(1, 2), x.view(s, m // s, q)).sum(0)
+    return torch.mm(g.t(), x)
+
+
+#: fp32 at a few row tiles (up to SIDE_MAX_ROWS rows): the GEMMs fill a fraction of the card, so the gate projection (forward) and the gate /
+#: squeeze weight-gradient GEMMs (backward) run on a side stream beside the expand / dh / dx chain (a CUDA graph captures the fork and join as
+#: parallel branches). Not inside a torch.compile trace (the eager graph regime is the deployed one for these kernels).
+SIDE_MAX_ROWS = int(os.environ.get("CT_SIDE_MAX_ROWS", "12288"))
+_SIDE: dict = {}
+
+
+def _side(x: torch.Tensor):
+    """The side stream for this call, or None."""
+    if x.dtype is not torch.float32 or x.shape[0] > SIDE_MAX_ROWS or torch.compiler.is_compiling():
+        return None
+    idx = x.device.index if x.device.index is not None else torch.cuda.current_device()
+    st = _SIDE.get(idx)
+    if st is None:
+        st = _SIDE[idx] = torch.cuda.Stream(device=idx)
+    return st
+
+
 class _Tail(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, res):  # noqa: D102
+    def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, res, xn_tf32=False):  # noqa: D102
         dt = x.dtype
         if dt is torch.bfloat16 and all(t.dtype is torch.float32 for t in (wa, wb, ws, wsc, bsc)):
             wab, wsb, wscb, bscb = cast_weights(wa, wb, ws, wsc, bsc)   # one launch for the five casts and the concatenation
@@ -306,7 +414,19 @@ class _Tail(torch.autograd.Function):
             wab = torch.cat([wa, wb]).to(dt)
             wsb, wscb, bscb = ws.to(dt), wsc.to(dt), bsc.to(dt)
             wabT = wsT = wscT = None
-        if _swab_ok(x, wab):   # B200 bf16: the expand and the SwiGLU in one tcgen05 GEMM
+        tc_f, tc_b = tc_route(x, wab.shape[0] // 2, xn_tf32) if wabT is not None else (False, False)
+        ctx.tc_b = tc_b
+        side = _side(x) if wabT is not None else None
+        ctx.side = side is not None
+        if side is not None:   # the gate projection beside the expand / squeeze chain
+            cur = torch.cuda.current_stream(x.device)
+            sp = torch.empty((x.shape[0], wscb.shape[0]), dtype=dt, device=x.device)
+            side.wait_stream(cur)
+            with torch.cuda.stream(side):
+                torch.addmm(bscb, cond, wscb.t(), out=sp)
+        if tc_f:
+            h, ab = swab(x, wab)
+        elif _swab_ok(x, wab):   # B200 bf16: the expand and the SwiGLU in one tcgen05 GEMM
             h, ab = swiglu_ab(x, wab)
         else:
             ab = torch.mm(x, wab.t())
@@ -315,7 +435,10 @@ class _Tail(torch.autograd.Function):
             y, out, sp = squeeze_gate_save(h, cond, wsb, wscb, bsc.float().contiguous(), res)
         else:
             out = torch.mm(h, wsb.t())
-            sp = torch.addmm(bscb, cond, wscb.t())
+            if side is not None:
+                cur.wait_stream(side)
+            else:
+                sp = torch.addmm(bscb, cond, wscb.t())
             y = sigmul_fwd(out, sp, res)
         ctx.save_for_backward(x, cond, ab, h, out, sp, wab, wsb, wscb, wa, ws, wsc, *([] if wabT is None else [wabT, wsT, wscT]))
         ctx.has_res = res is not None
@@ -337,27 +460,43 @@ class _Tail(torch.autograd.Function):
         else:
             dout, dsc, part = sigmul_bwd(dy, out, sp)
             doutT = transpose_f32(dout) if xt else None
-        if xt:   # TF32 weight gradients: the smaller operand goes K-major (rows contiguous), the big gradient stays as it is (see transpose_f32)
-            dws = torch.mm(doutT[:, :dout.shape[0]], h)   # left operand K-major, [D, ND] straight out (no transposing copy)
-        else:
-            dws = torch.mm(dout.t(), h, out_dtype=f32) if o(ws) else torch.mm(dout.t(), h)
         t = (lambda w: w) if x.dtype is not f32 else None   # TF32: the K-major copies packed by the forward (18432 rows: dh -21, dx -72, dcond -23 us)
         k = (lambda i, w: tw[i].t()) if x.dtype is f32 else (lambda i, w: w)
-        if _gate7_ok(dout, ab):   # B200 bf16: dh and the SwiGLU backward in one tcgen05 GEMM
+        side = _side(x) if ctx.side else None
+        if side is not None:   # dWs, dWsc, dcond beside the dh / dx chain (outputs allocated here, on the backward's stream)
+            cur = torch.cuda.current_stream(x.device)
+            dws = x.new_empty((ws.shape[0], h.shape[1]))
+            dwsc = x.new_empty((wsc.shape[0], cond.shape[1]))
+            dcond = torch.empty_like(cond)
+            side.wait_stream(cur)
+            with torch.cuda.stream(side):
+                torch.mm(doutT[:, :dout.shape[0]] if xt else dout.t(), h, out=dws)
+                torch.mm(dsc.t(), cond, out=dwsc)
+                torch.mm(dsc, k(2, wscb), out=dcond)
+        elif xt:   # TF32 weight gradients: the smaller operand goes K-major (rows contiguous), the big gradient stays as it is (see transpose_f32)
+            dws = torch.mm(doutT[:, :dout.shape[0]], h)   # left operand K-major, [D, ND] straight out (no transposing copy)
+        else:
+            dws = torch.mm(dout.t(), h, out_dtype=f32) if o(ws) else (wgrad_f32(dout, h) if x.dtype is f32 else torch.mm(dout.t(), h))
+        if ctx.tc_b:   # dout from sigmul_bwd_x / sigmul_bwd (fp32): on the TF32 grid
+            dab = gab(dout, tw[1], ab)
+        elif _gate7_ok(dout, ab):   # B200 bf16: dh and the SwiGLU backward in one tcgen05 GEMM
             dab = gate_ab(dout, transpose_bf16(wsb), ab)
         else:
             dh = torch.mm(dout, k(1, wsb))
             dab = swiglu_bwd(dh, ab)
-        if xt:
+        if xt:   # (on the side stream too, beside dx, measured 5 - 10 us slower at 6144 rows)
             dwab = torch.mm(dab.t(), transpose_f32(x).t())
         else:
-            dwab = torch.mm(dab.t(), x, out_dtype=f32) if o(wa) else torch.mm(dab.t(), x)
+            dwab = torch.mm(dab.t(), x, out_dtype=f32) if o(wa) else (wgrad_f32(dab, x) if x.dtype is f32 else torch.mm(dab.t(), x))
         dx = torch.mm(dab, k(0, wab))
-        dwsc = torch.mm(dsc.t(), cond, out_dtype=f32) if o(wsc) else torch.mm(dsc.t(), cond)
-        dcond = torch.mm(dsc, k(2, wscb))
+        if side is not None:
+            cur.wait_stream(side)
+        else:
+            dwsc = torch.mm(dsc.t(), cond, out_dtype=f32) if o(wsc) else (wgrad_f32(dsc, cond) if x.dtype is f32 else torch.mm(dsc.t(), cond))
+            dcond = torch.mm(dsc, k(2, wscb))
         dbsc = colsum(part).to(dsc.dtype if not o(wsc) else f32)   # the block partials of sum(dscale), summed in a fixed order
         nd = wab.shape[0] // 2
-        return dx, dcond, dwab[:nd], dwab[nd:], dws, dwsc, dbsc, (dy if ctx.has_res else None)
+        return dx, dcond, dwab[:nd], dwab[nd:], dws, dwsc, dbsc, (dy if ctx.has_res else None), None
 
 
 
@@ -383,7 +522,7 @@ def _backward_feature_major(ctx, dy, x, cond, ab, h, out, sp, wab, wsb, wscb, tw
     dcond = torch.mm(dscT.t(), tw[2].t())
     dbsc = colsum(part)
     nd = wab.shape[0] // 2
-    return dx, dcond, dwab[:nd], dwab[nd:], dws, dwsc, dbsc, (dy if ctx.has_res else None)
+    return dx, dcond, dwab[:nd], dwab[nd:], dws, dwsc, dbsc, (dy if ctx.has_res else None), None
 
 # ---- D = 768, hidden 2 D, bf16, whole 128-row tiles: the Transition family's wgmma kernels (kernels/transition/cuda/wide), which keep a, b and h of the
 # expand GEMM and fuse the SwiGLU backward into the dh GEMM. The tail's squeeze (h Ws^T) is their squeeze kernel with a zero residual (its rounding is the
@@ -474,14 +613,14 @@ class _TailWide(torch.autograd.Function):
         return dx, dcond, dwab[:nd], dwab[nd:], dws, dwsc, dbsc, (dy if ctx.has_res else None)
 
 
-def ct_tail_train(x, cond, wa, wb, ws, wsc, bsc, residual=None):
+def ct_tail_train(x, cond, wa, wb, ws, wsc, bsc, residual=None, *, xn_tf32: bool = False):
     """``residual + sigmoid(cond Wsc^T + b) * (silu(x Wa^T) * (x Wb^T)) Ws^T`` with a backward; ``x`` (M, D), ``cond`` (M, DC) of one dtype, the weights in
     any dtype (rounded to the activations' dtype per call; gradients in the weights' dtype). bf16 D = 768 / hidden 1536 on whole 128-row tiles runs the
     Transition family's wgmma expand / dh kernels, everything else the row kernels around cuBLAS."""
     x, cond = x.contiguous(), cond.contiguous()
     if _USE_WIDE and x.shape[0] % 128 == 0 and torch.cuda.get_device_capability(x.device) == (9, 0) and wide_supported(x, wa, ws):
         return _TailWide.apply(x, cond, wa, wb, ws, wsc, bsc, residual)
-    return _Tail.apply(x, cond, wa, wb, ws, wsc, bsc, residual)
+    return _Tail.apply(x, cond, wa, wb, ws, wsc, bsc, residual, xn_tf32)
 
 
 __all__ = ["ct_tail_train", "ext", "supported"]

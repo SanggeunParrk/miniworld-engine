@@ -168,7 +168,14 @@ class ConditionedTransition(nn.Module):
                                                               and ct_inference.supported(x2, cond2, nd, d)))):
             return None
         ada = self.ada_ln_in
-        if b200 and ct_sm100.head_supported(x2, cond2, nd, d):   # B200 bf16, few rows: the AdaLN and the gate projection in one kernel
+        if (b200 and compute_dtype is torch.float32 and not ada.ln_in.elementwise_affine and ada.to_bias.bias is None
+                and ct_sm100.full_f32_supported(x2, cond2, nd, d)):
+            # fp32: the whole module as one op, the AdaLN and gate projections one GEMM on the centred cond (ct_sm100.ct_inference_full_f32)
+            fold = residual and x_in.dtype == compute_dtype
+            with torch.autocast(device_type=device_type, enabled=False):
+                y = ct_sm100.ct_inference_full_f32(x2, cond2, ada, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight,
+                                                   self.to_scale.weight, self.to_scale.bias, x2 if fold else None)
+        elif b200 and ct_sm100.head_supported(x2, cond2, nd, d):   # B200 bf16, few rows: the AdaLN and the gate projection in one kernel
             fold = residual and x_in.dtype == compute_dtype
             with torch.autocast(device_type=device_type, enabled=False):
                 y = ct_sm100.head_inference(
@@ -202,7 +209,9 @@ class ConditionedTransition(nn.Module):
             return None
         fold = residual and x_in.dtype == compute_dtype
         xs, cs = x_in, cond
-        got = self.ada_ln_in._cuda_forward(x_in, cond, streams=True) if fold and cond.dtype == compute_dtype else None
+        # fp32: LN output on the TF32 grid (``rna``) -- the B200 tail's tcgen05 expand GEMM truncates its operands (ct_train.tc_route)
+        got = (self.ada_ln_in._cuda_forward(x_in, cond, streams=True, rna=compute_dtype is torch.float32)
+               if fold and cond.dtype == compute_dtype else None)
         if got is not None:   # the AdaLN hands back x and cond as outputs of its own autograd node: the residual and gate-projection gradients join its backward
             xn, xs, cs = got
         else:
@@ -212,7 +221,7 @@ class ConditionedTransition(nn.Module):
         with torch.autocast(device_type=device_type, enabled=False):
             y = ct_train.ct_tail_train(
                 xn, cond2, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.to_scale.weight, self.to_scale.bias,
-                xs.reshape(-1, d) if fold else None)
+                xs.reshape(-1, d) if fold else None, xn_tf32=got is not None and compute_dtype is torch.float32)
         y = y.reshape(*x_in.shape[:-1], d)
         return y if fold or not residual else x_in + y
 

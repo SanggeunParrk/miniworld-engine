@@ -263,4 +263,82 @@ def ct_inference_sm100(xn, cond, wa, wb, ws, wsc, bsc, residual=None):
     return _tail(xn.contiguous(), cond.contiguous(), *ww, res)
 
 
-__all__ = ["ct_inference_sm100", "head_inference", "head_supported", "supported"]
+# ---- fp32 inference of the whole module (AdaLN + tail) as ONE opaque op, the AdaLN's [scale | bias] projection and the tail's gate projection as
+# ONE cuBLAS TF32 GEMM on the centred conditioning (ct_rows.cu: cond_center, adaln_fold_fwd, sigmul_fwd_ld):
+#     LN(cond) wc W^T = rstd_c (cond - mean_c) (W wc)^T,   cond Wsc^T = (cond - mean_c) Wsc^T + mean_c rowsum(Wsc)
+# ln_cond_fwd -> GEMM -> adaln_fwd -> expand -> swiglu_fwd -> squeeze -> gate GEMM -> sigmul_fwd (8 launches) become cond_center -> GEMM [3 D wide]
+# -> adaln_fold_fwd -> expand -> swiglu_fwd -> squeeze -> sigmul_fwd_ld (7). (A gate projection on a side stream instead measured slower in the
+# ladder's CUDA graphs, +2 - 4 us at 640 - 3840 rows; folding the mean in after a GEMM on the raw conditioning, one launch fewer still, loses
+# TF32 precision with the conditioning's row mean: 3.4x the PyTorch statements' error at a mean of 10 std.)
+FOLD_WIDTHS = (256, 384, 512, 768)   # D and DC each (the row kernels' builds)
+#: rows from which this op takes the expand GEMM + SwiGLU as the tcgen05 SW kernel (``ct_tc``, h only) instead of cuBLAS + swiglu_fwd. Kernels
+#: alone (us, d768): 3840 rows 40.1 -> 38.6, 6144 56.3 -> 48.3, 1920 24.0 -> 28.2; but inside this op (ladder, CUDA graph) at 3840 rows the SW
+#: kernel took 38.1 us where cuBLAS's expand GEMM + swiglu_fwd take ~34, so only from 6144 rows.
+SW_MIN_ROWS = 6144
+
+
+def _full_f32_fake(x2, c2, wf, csg, bs, eps_x, eps_c, wab, ws, bsc, res):
+    """Output structure of ``_full_f32``: y [M, D] like x2."""
+    return torch.empty_like(x2)
+
+
+@opaque(fake=_full_f32_fake, name="conditioned_transition_infer_f32_fold_sm100a")
+def _full_f32(x2: torch.Tensor, c2: torch.Tensor, wf: torch.Tensor, csg: torch.Tensor, bs: torch.Tensor, eps_x: float, eps_c: float, wab: torch.Tensor,
+              ws: torch.Tensor, bsc: torch.Tensor, res: torch.Tensor | None) -> torch.Tensor:
+    """y = res + sigmoid(c2 Wsc^T + bsc) * (silu(xn Wa^T) (xn Wb^T)) Ws^T, xn = AdaLN(x2, c2), through the one projection GEMM (see above)."""
+    from miniworld_engine.kernels._tf32 import tf32_matmul
+
+    from .ct_train import ext as rows_ext
+
+    r = rows_ext()
+    d = x2.shape[1]
+    cc, st = r.cond_center(c2, float(eps_c))
+    with tf32_matmul():
+        raw = torch.mm(cc, wf.t())                                  # [M, 3 D]
+        xn = r.adaln_fold_fwd(x2, raw, st, bs, float(eps_x))
+        if x2.shape[0] >= SW_MIN_ROWS and wab.shape[0] % 256 == 0 and d % 32 == 0:   # xn and [Wa; Wb] on the TF32 grid (adaln_fold_fwd, below)
+            from . import ct_tc
+
+            m, nd = x2.shape[0], wab.shape[0] // 2
+            h = torch.empty((m, nd), dtype=x2.dtype, device=x2.device)
+            ct_tc.gemm("sw", m, nd, xn, wab[:nd], h, b1=wab[nd:], k0=d, ld0=nd, force=(128, True))
+        else:
+            h = r.swiglu_fwd(torch.mm(xn, wab.t()))
+        out = torch.mm(h, ws.t())
+    return r.sigmul_fwd_ld(out, raw, 2 * d, st, csg, bsc, res)
+
+
+def _fold_weights(wsa, bsa, wba, wc, wsc, bsc):
+    """(wf = [Ws wc; Wb wc; Wsc] [3 D, DC], rowsum(Wsc) [D], bs [D], bsc [D]) fp32 of the AdaLN (to_scale, its bias, to_bias, the LN(cond) weight)
+    and the gate projection."""
+    d = wsa.shape[0]
+    wf = torch.cat([wsa.float() * wc.float(), wba.float() * wc.float(), wsc.float()]).contiguous()
+    csg = wsc.double().sum(1).float().contiguous()
+    bs = (bsa.float() if bsa is not None else wsa.new_zeros(d, dtype=torch.float32)).contiguous()
+    return wf, csg, bs, bsc.float().contiguous()
+
+
+def full_f32_supported(x2: torch.Tensor, cond2: torch.Tensor, nd: int, d: int) -> bool:
+    """The whole-module fp32 route: B200 fp32 at the widths whose tail takes cuBLAS (``CUBLAS_MIN_D``) and whose AdaLN takes the cuBLAS route, at
+    the widths the folded row pass is built for."""
+    from miniworld_engine.kernels.adaln.cuda import sm100 as adaln_b200
+
+    return (F32_ROUTE == "cublas" and x2.dtype is torch.float32 and d > CUBLAS_MIN_D["fp32"] and d in FOLD_WIDTHS and cond2.shape[-1] in FOLD_WIDTHS
+            and supported(x2, cond2, nd, d) and adaln_b200.F32_ROUTE == "cublas" and adaln_b200.supported(x2, cond2))
+
+
+def ct_inference_full_f32(x2, cond2, ada, wa, wb, ws, wsc, bsc, residual=None):
+    """The fp32 module forward without a backward on B200: x2 [M, D] (the raw stream), cond2 [M, DC]; ``ada`` the module's AdaptiveLayerNorm
+    (no LN affine on x, no bias on to_bias). Returns residual + the gated update (or the update alone)."""
+    params = (ada.to_scale.weight, ada.to_scale.bias, ada.to_bias.weight, ada.ln_cond.weight, wsc, bsc)
+    wf, csg, bs, bsc_ = _capture.param_forms("ct_sm100a_fold_f32", tuple(p for p in params if p is not None),
+                                             lambda: _fold_weights(*params))
+    from miniworld_engine.kernels._tf32 import tf32_grid
+
+    wab, ws_ = _capture.param_forms("ct_sm100a_fold_tail_f32", (wa, wb, ws),
+                                    lambda: (tf32_grid(torch.cat([wa, wb]).float().contiguous()), ws.float().contiguous()))
+    return _full_f32(x2.contiguous(), cond2.contiguous(), wf, csg, bs, float(ada.ln_in.eps), float(ada.ln_cond.eps), wab, ws_, bsc_,
+                     residual.contiguous() if residual is not None else None)
+
+
+__all__ = ["ct_inference_full_f32", "ct_inference_sm100", "full_f32_supported", "head_inference", "head_supported", "supported"]

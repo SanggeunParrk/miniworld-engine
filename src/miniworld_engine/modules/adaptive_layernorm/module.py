@@ -79,7 +79,7 @@ class AdaptiveLayerNorm(nn.Module):
         of the two paths; everywhere else the second and third outputs are ``x`` and ``cond`` themselves."""
         return self._adaln_forward(x, cond, with_stream=True, with_cond=True)
 
-    def _cuda_forward(self, x: torch.Tensor, cond: torch.Tensor, streams: bool = False):
+    def _cuda_forward(self, x: torch.Tensor, cond: torch.Tensor, streams: bool = False, rna: bool = False):
         """The H100 hand-CUDA AdaLN: the one entry ``kernels.adaln.cuda.adaln``, which picks the route by mode, dtype and
         shape. ``None`` when it does not serve the call (another dtype, a width it does not tile, ...): the caller runs the PyTorch reference."""
         from miniworld_engine.kernels.adaln import cuda as adaln_cuda
@@ -95,7 +95,8 @@ class AdaptiveLayerNorm(nn.Module):
             return None
         with torch.autocast(device_type=device_type, enabled=False):
             return adaln_cuda.adaln(
-                x, cond, self.ln_cond.weight, self.to_scale.weight, self.to_scale.bias, self.to_bias.weight, self.ln_in.eps, self.ln_cond.eps, streams=streams)
+                x, cond, self.ln_cond.weight, self.to_scale.weight, self.to_scale.bias, self.to_bias.weight, self.ln_in.eps, self.ln_cond.eps, streams=streams,
+                rna=rna)
 
     def _adaln_forward(self, x: torch.Tensor, cond: torch.Tensor, *, with_stream: bool, with_cond: bool = False):
         backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
