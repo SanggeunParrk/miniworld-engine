@@ -134,6 +134,7 @@ def test_extra_pair_bias_training(masked, L, calls):
         y_ours, g_ours = run(ours, torch.bfloat16)
     assert calls["train"] == 0, "a call with extra_pair_bias must skip the native train path"
     assert _rel(y_ours, y_ref) < 1.3 * _rel(y_bf, y_ref) + 1e-3
-    for name, a, b, c in zip(("single", "pair", "extra", "to_bias", "to_query"), g_ours, g_bf, g_ref):
-        assert a is not None and torch.isfinite(a).all(), name
+    for name, a, b, c in zip(("single", "pair", "extra", "to_bias", "to_query"), g_ours, g_bf, g_ref, strict=True):
+        assert a is not None, name
+        assert torch.isfinite(a).all(), name
         assert _rel(a, c) < 1.3 * _rel(b, c) + 1e-3, (name, _rel(a, c), _rel(b, c))

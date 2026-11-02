@@ -404,7 +404,7 @@ class CrossAttention(nn.Module):
         if kq_norm:
             self.query_layer_norm = nn.LayerNorm(key_dim)
             self.key_layer_norm = nn.LayerNorm(key_dim)
-        adaln = dict(c_x=key_dim, c_single_cond=c_single_cond, use_single_cond=True, identity_scale=identity_scale, eps=norm_eps)
+        adaln = {"c_x": key_dim, "c_single_cond": c_single_cond, "use_single_cond": True, "identity_scale": identity_scale, "eps": norm_eps}
         self.q_adaptive_layernorm = AdaptiveLayerNorm(**adaln)
         self.k_adaptive_layernorm = AdaptiveLayerNorm(**adaln)
         self.q_projection = nn.Linear(key_dim, key_dim, bias=True)

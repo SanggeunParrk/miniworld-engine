@@ -77,7 +77,7 @@ def test_extra_pair_bias_gradient():
         (y[:, :-3].square().sum()).backward()
         grads.append((extra.grad, s.grad, m.to_bias.weight.grad.clone()))
     assert grads[0][0].abs().sum() > 0
-    for got, want in zip(*grads):
+    for got, want in zip(*grads, strict=True):
         torch.testing.assert_close(got, want, atol=1e-4, rtol=1e-4)
 
 

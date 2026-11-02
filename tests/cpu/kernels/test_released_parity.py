@@ -1,4 +1,4 @@
-# ruff: noqa: PT018, PT011, C408
+# ruff: noqa: C408
 """PYTORCH engine modules built ``from_released`` against the frozen oracle of the released checkpoints (``tests/oracles/dense.py``: the dense
 AF3-family blocks as plain fp32 PyTorch, self-contained; the engine's tests need no FoldForge).
 
@@ -160,7 +160,7 @@ def test_pairformer_block_extra_pair_bias(flavour):
     extra = 2 * torch.randn(L, L, generator=torch.Generator().manual_seed(9)).to(DEV)
     dense = _rand(DensePairformerBlock(n_heads=4, c_pair=C, c_single=32, c_hidden_mul=C, n_heads_pair=2, spec=spec), std=0.2)
     cfg = PairformerConfig(d_pair=C, d_hidden_tri_multi=C, d_hidden_tri_attention=C // 2, n_head_tri_attention=2, p_drop=0.0, d_single=32,
-                           n_head_single=4, parallel=spec.parallel_pairformer_block)
+                           n_head_single=4, parallel=spec.parallel_pairformer_block, transposed_bias=False)
     eng = PairformerBlock.from_released(dense.state_dict(), config=cfg).to(DEV)
     want_pair, want_single = dense(pair.clone(), pair_mask, single.clone(), res.float(), extra_pair_bias=extra)
     got_pair, got_single = eng(pair[None], res[None], single[None], extra_pair_bias=extra[None, None])
