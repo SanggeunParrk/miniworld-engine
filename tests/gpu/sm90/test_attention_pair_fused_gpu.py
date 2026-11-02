@@ -29,7 +29,7 @@ def _modules(kind):
             return AugmentedAttentionPairBias(768, 384, 128, 16, implementation=impl)
         if kind == "atom":
             return AugmentedAttentionPairBias(128, 128, 16, 4, implementation=impl)
-        return AttentionPairBias(384, 256, 8, implementation=impl)
+        return AttentionPairBias(384, 128, 8, implementation=impl)  # the declared training row: d_single 384, d_pair 128, 8 heads
 
     torch.manual_seed(3)
     mw = make(IT.MINIWORLD).cuda()
@@ -60,7 +60,7 @@ def _run(m, kind, single, cond, pair, mask, dy, dtype, autocast):
 
 def _case(kind, L, A, fp32=False):
     n = 8 * L if kind == "atom" else L
-    dS, dC, dP = {"token": (768, 384, 128), "token256": (768, 768, 256), "atom": (128, 128, 16), "apb": (384, 384, 256)}[kind]
+    dS, dC, dP = {"token": (768, 384, 128), "token256": (768, 768, 256), "atom": (128, 128, 16), "apb": (384, 384, 128)}[kind]
     a = 1 if kind == "apb" else A
     shape = (1, n, dS) if kind == "apb" else (a, 1, n, dS)
     cshape = (a, 1, n, dC)
@@ -75,7 +75,7 @@ def _case(kind, L, A, fp32=False):
 
 
 @needs_hopper
-@pytest.mark.parametrize(("kind", "L", "A"), [("token", 384, 3), ("token", 384, 5), ("atom", 128, 3), ("apb", 384, 1)])
+@pytest.mark.parametrize(("kind", "L", "A"), [("token", 384, 3), ("token", 384, 48), ("atom", 128, 3), ("apb", 384, 1)])
 def test_bf16_routes_are_taken_and_hold_the_yardstick(kind, L, A):
     from miniworld_engine.kernels.augmented_attention.cuda import fused_pair
 

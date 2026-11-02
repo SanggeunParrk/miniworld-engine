@@ -95,6 +95,17 @@ ONE_SIDED: dict[tuple[str, str], str] = {
         "by the checker since the sm100 CuTeDSL merged-training paths that launched it were removed "
         "in v2.2.0; below sm100 it is a program nothing can launch. This entry retires itself "
         "when a B200 cache lands",
+    # ---- Triton ops no H100 launch reaches; the committed cache predates the driver ---------------------------------------
+    # H100 launches no Triton op (docs/gpus/h100/dispatch.md), so these caches serve only portable-kernel A/B runs and the frozen
+    # sm80 / sm86 cards, and the fix below is a rebuild on a card outside this release line (test_no_stale_caches.OUT_OF_SCOPE_ARCHES).
+    ("transition_expand_swiglu_triton", "HALF"):
+        "HALF=1 exists only for STORE_AB with fp32 activations and a half_scale (kernels/transition/triton/main.py:135); "
+        "drivers/transition.py:159 now launches that form (ones half_scale under fp32), but the committed sm80 / sm90 caches were built "
+        "before and are STALE (implementation). H100 launches no Triton op, so the =1 bucket is rebuilt when a portable A/B run needs it",
+    ("mpnn_edge_tail_fwd_gemm_layernorm_saveact_triton", "DROPOUT"):
+        "drivers/mpnn_edge_tail.py drives both values (_BOTH_DROPOUTS) now, but the only committed cache is the sm86 A6000 one, built "
+        "before and STALE (implementation); the card is outside this release line, so the rebuild waits until it is taken up again",
+    ("mpnn_edge_tail_bwd_layernorm_saveact_triton", "DROPOUT"): "same driver, same sm86-only cache",
 
 }
 

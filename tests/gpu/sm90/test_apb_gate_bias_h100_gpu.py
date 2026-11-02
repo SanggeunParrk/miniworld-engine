@@ -28,9 +28,11 @@ CASES = [
     (16, 384, 256, 1.0),  # Chai-1
     (16, 384, 256, 0.0),
     (16, 384, 128, 1.0),
-    (8, 384, 128, 1.0),
-    (12, 384, 128, 0.5),
+    (16, 384, 128, 0.5),
 ]
+# Only declared shapes (kernels/registry/registry_module.csv, attention_pair_bias rows): 8 x 48 / d_pair 128, and the two Chai-1 rows
+# (16 heads, d_pair 256 or 128, gate_bias option on). The earlier 12-head and 8-head gate-bias cases are not declared, so nothing
+# builds or ships a kernel for them (PrebuiltMissing); the gate bias *value* is a runtime argument, so 0 / 0.5 / 1 / 3 stay covered.
 
 
 def _rel(a, b):

@@ -32,6 +32,7 @@ def test_notes_are_excluded_from_package_data() -> None:
                         text, re.MULTILINE)
     assert section, "no [tool.setuptools.exclude-package-data]; the notes would ship"
     body = section.group("body")
+    # (`__pycache__` is a build artifact, ignored by git and not swept by any package-data glob.)
     # Depth-explicit, not `**`: setuptools' glob does not match across directories here, and the
     # `**` form silently excluded nothing -- the wheel still carried all 20 files.
     patterns = re.findall(r'"kernels/\*/notes/(\*(?:/\*)*)"', body)
@@ -41,7 +42,7 @@ def test_notes_are_excluded_from_package_data() -> None:
     # therefore not enough either -- a gap at depth 2 ships depth 2, whatever depth 3 says.
     covered = {p.count("*") for p in patterns}
     actual = max((len(f.relative_to(d).parts) for d in KERNELS.glob("*/notes")
-                  for f in d.rglob("*") if f.is_file()), default=0)
+                  for f in d.rglob("*") if f.is_file() and "__pycache__" not in f.parts and f.suffix != ".pyc"), default=0)
     missing = sorted(set(range(1, actual + 1)) - covered)
     assert not missing, (
         f"notes reach {actual} levels deep and the exclusion covers {sorted(covered)}; files at "
