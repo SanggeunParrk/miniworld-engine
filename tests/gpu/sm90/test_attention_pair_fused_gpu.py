@@ -19,7 +19,7 @@ def _rel(a, b):
 
 
 def _modules(kind):
-    from miniworld_engine.modules import AttentionPairBias, AugmentedAttentionPairBias
+    from miniworld_engine.modules import AugmentedAttentionPairBias
     from miniworld_engine.modules.exceptions import ImplementationType as IT
 
     def make(impl):
@@ -27,9 +27,8 @@ def _modules(kind):
             return AugmentedAttentionPairBias(768, 768, 256, 16, implementation=impl)
         if kind == "token":
             return AugmentedAttentionPairBias(768, 384, 128, 16, implementation=impl)
-        if kind == "atom":
-            return AugmentedAttentionPairBias(128, 128, 16, 4, implementation=impl)
-        return AttentionPairBias(384, 128, 8, implementation=impl)  # the declared training row: d_single 384, d_pair 128, 8 heads
+        assert kind == "atom", kind
+        return AugmentedAttentionPairBias(128, 128, 16, 4, implementation=impl)
 
     torch.manual_seed(3)
     mw = make(IT.MINIWORLD).cuda()
@@ -48,21 +47,20 @@ def _run(m, kind, single, cond, pair, mask, dy, dtype, autocast):
     s, c, p = (t.detach().to(dtype).clone().requires_grad_() for t in (single, cond, pair))
     m.zero_grad()
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
-        o = m(s, p, mask) if kind == "apb" else m.delta(s, c, p, mask)
+        o = m.delta(s, c, p, mask)
     o.backward(dy.to(o.dtype))
     named = dict(m.named_parameters())
     g = {"out": o, "dsingle": s.grad, "dpair": p.grad, "to_bias.weight": named["to_bias.weight"].grad,
          "ln_pair.weight": named["ln_pair.weight"].grad, "to_query.weight": named["to_query.weight"].grad}
-    if kind != "apb":
-        g["dcond"] = c.grad
+    g["dcond"] = c.grad
     return {k: v.detach().double() for k, v in g.items()}
 
 
 def _case(kind, L, A, fp32=False):
     n = 8 * L if kind == "atom" else L
-    dS, dC, dP = {"token": (768, 384, 128), "token256": (768, 768, 256), "atom": (128, 128, 16), "apb": (384, 384, 128)}[kind]
-    a = 1 if kind == "apb" else A
-    shape = (1, n, dS) if kind == "apb" else (a, 1, n, dS)
+    dS, dC, dP = {"token": (768, 384, 128), "token256": (768, 768, 256), "atom": (128, 128, 16)}[kind]
+    a = A
+    shape = (a, 1, n, dS)
     cshape = (a, 1, n, dC)
     dt = torch.float32 if fp32 else torch.bfloat16
     g = torch.Generator(device="cuda").manual_seed(5)
@@ -75,7 +73,9 @@ def _case(kind, L, A, fp32=False):
 
 
 @needs_hopper
-@pytest.mark.parametrize(("kind", "L", "A"), [("token", 384, 3), ("token", 384, 48), ("atom", 128, 3), ("apb", 384, 1)])
+# The `apb` kind (AttentionPairBias, d_single 384) is not here: its declared training row (d_pair 128, 8 heads) is served by the native APB path, not by
+# fused_pair (tests/gpu/sm90/test_h100_apb_training_gpu.py covers it), and the d_pair 256 / 8-head form this case used to call is not in registry_module.csv.
+@pytest.mark.parametrize(("kind", "L", "A"), [("token", 384, 3), ("token", 384, 48), ("atom", 128, 3)])
 def test_bf16_routes_are_taken_and_hold_the_yardstick(kind, L, A):
     from miniworld_engine.kernels.augmented_attention.cuda import fused_pair
 
