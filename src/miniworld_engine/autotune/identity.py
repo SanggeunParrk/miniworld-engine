@@ -415,14 +415,6 @@ def native_identity(op: str) -> str:
     return h.hexdigest()
 
 
-def native_aggregate(ops: Iterable[str]) -> str:
-    """One digest over several ops' identities (a work generation: moves exactly when one of the ops' graphs moves)."""
-    h = hashlib.sha256()
-    for op in sorted(ops):
-        h.update(f"{op}={native_identity(op)}\n".encode())
-    return h.hexdigest()
-
-
 # ------------------------------------------------------------------------------------------------------ a derivation unit
 def unit_files(executed: Iterable[str], modules: Iterable[str], data: Iterable[str], ops: Iterable[str]) -> list[str]:
     """The files one derivation unit depends on.

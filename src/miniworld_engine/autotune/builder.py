@@ -370,7 +370,7 @@ def cases() -> list[Case]:
              # compile: "Input shapes should have M >= 1, N >= 1 and K >= 16".
              **_shapes("triangle_attention_heads")),
         Case("attention_pair_bias",
-             lambda dims, p, i, dt: AttentionPairBias(**dims).cuda().to(dt),
+             lambda dims, p, i, dt: AttentionPairBias(**dims, implementation=IT(i)).cuda().to(dt),
              lambda b, l, dims, dt, s: (_single(b, l, dims["d_single"], dt),
                                      _pair(b, l, dims["d_pair"], dt), _mask(b, l)),
              **_shapes("attention_pair_bias")),

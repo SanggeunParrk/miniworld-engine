@@ -63,7 +63,6 @@ def _module_builders():
     )
     from miniworld_engine.modules.triangle_attention.module import (
         TriangleAttention,
-        TrianglePairAttention,
     )
     from miniworld_engine.modules.triangle_multiplication.bidirectional import (
         BidirectionalTriangleMultiplication,
@@ -83,9 +82,6 @@ def _module_builders():
             128, 384, 128, 4, implementation=impl
         ),
         "TriangleAttention": lambda impl: TriangleAttention(128, 4, implementation=impl),
-        "TrianglePairAttention": lambda impl: TrianglePairAttention(
-            128, 4, implementation=impl
-        ),
         "BidirectionalTriangleAttention": lambda impl: BidirectionalTriangleAttention(
             128, 4, implementation=impl
         ),

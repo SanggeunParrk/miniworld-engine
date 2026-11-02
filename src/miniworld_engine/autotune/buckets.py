@@ -27,24 +27,12 @@ COMBINED_EDGES = tuple(sorted(set(LINEAR_EDGES + SQUARED_EDGES)))
 def _idx(m: int, edges: tuple[int, ...]) -> int:
     # The top edge is a SATURATING ceiling, not a threshold with an extra overflow bucket:
     # any M above the largest edge reuses the largest edge's config (configs stop changing
-    # once M is big enough — "saturate early"). So bucket_squared caps at 512² — L>512 pair
+    # once M is big enough — "saturate early"). So the squared bucket caps at 512² — L>512 pair
     # work reuses the 512² config instead of tuning a distinct >512² bucket.
     for i, e in enumerate(edges):
         if m <= e:
             return i
     return len(edges) - 1
-
-
-def bucket_squared(pair_rows: int) -> int:
-    """Pair L×L kernel that passes M = L*L (row count)."""
-    return _idx(pair_rows, SQUARED_EDGES)
-
-
-
-
-def bucket_linear(n: int) -> int:
-    """1st-order kernel whose row count scales ~ N."""
-    return _idx(n, LINEAR_EDGES)
 
 
 def bucket_mixed(rows: int) -> int:

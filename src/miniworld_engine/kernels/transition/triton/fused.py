@@ -68,7 +68,6 @@ def _shape_key(shape_key: int | None, rows: int, **axes: int) -> int:
     return both_key(rows, **axes) if shape_key is None else pack(shape_key, **axes)
 
 
-
 # BLOCK_K is a CSV tile. It used to arrive from the launcher as
 # ``BLOCK_K=next_power_of_2(K)`` -- the whole d row in one tile, which is also what forced the
 # smem cliff and the "no config fits" footgun below. The CSV reaches
@@ -248,8 +247,6 @@ def transition_expand_gate(
 # unreachable: measured +13% (1.87 vs 1.66) on the AF3 d=128 shape. The extra axis is worth it; the
 # prune below keeps the resulting sweep small by pinning the two covering extents and only letting
 # BLOCK_N/BLOCK_M1/warps/stages vary.
-
-
 
 
 # ONE tl.constexpr is deliberately absent from the key below, and one is gone from the kernel.
@@ -626,10 +623,6 @@ def transition_b2b(
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
 # `D` is GONE from this kernel, not merely unkeyed: it is ws.shape[0] and K is
 # x2.shape[1], both the module's d_hidden, so `K` (keyed) already partitions this axis. See the
 # longer note on `_transition_b2b_kernel` above. `ND` is independent (n is a module argument).
@@ -779,25 +772,6 @@ def transition_b2b_ktiled(
 # path (expand kernel writes h, then a cuBLAS squeeze). The K-tiled variant above lifts this
 # limit once verified.
 _B2B_MAX_K = 128
-
-
-def _swiglu_b2b_fake(x2, wa, wb, ws, shape_key):
-    """``out`` (M, D) in ``x2``'s dtype -- D is the squeeze weight's row count."""
-    return x2.new_empty((x2.shape[0], ws.shape[0]))
-
-
-@opaque(fake=_swiglu_b2b_fake, name="transition_swiglu_b2b")
-def _swiglu_b2b(x2: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor,
-                shape_key: int) -> torch.Tensor:
-    """The no-LayerNorm b2b launch, and only the launch.
-
-    Opaque for the same reason every other launcher here is: `transition_b2b` is reachable from
-    Dynamo through this autograd Function, and a bare triton launch on a traced path is what
-    `tests/cpu/compile/test_compile_wrap_coverage.py` exists to catch.
-    """
-    empty = x2.new_empty(0)
-    return transition_b2b(x2, empty, empty, wa, wb, ws, 0.0,
-                          has_ln=False, shape_key=shape_key)
 
 
 def triton_swiglu_ffn(

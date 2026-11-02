@@ -102,6 +102,7 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
         *_LN_STRIDED,
         "layernorm/layernorm_fwd_saveact_triton",
         "layernorm/layernorm_bwd_atomic_triton",
+        "layernorm/layernorm_bwd_split_triton",  # AttentionPairBias training: its input LayerNorm backward (recorded since the case builds the MINIWORLD module)
         "layernorm_linear/layernorm_linear_fwd_fp32_triton",
         "layernorm_linear/layernorm_linear_bwd_fp32_triton",
         "layernorm_linear/layernorm_linear_fwd_triton",

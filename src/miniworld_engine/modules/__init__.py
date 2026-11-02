@@ -55,11 +55,10 @@ from miniworld_engine.modules.transition import Transition
 from miniworld_engine.modules.triangle_attention import (
     BidirectionalTriangleAttention,
     TriangleAttention,
-    TrianglePairAttention,
 )
 from miniworld_engine.modules.triangle_multiplication import (
     BidirectionalTriangleMultiplication,
     TriangleMultiplication,
 )
 
-__all__ = ["AdaptiveLayerNorm", "AttentionPairBias", "AugmentedAttentionPairBias", "BidirectionalTriangleAttention", "BidirectionalTriangleMultiplication", "ConditionedTransition", "Dropout", "ImplementationType", "InputFeatureEmbedder", "InvalidImplementationError", "KernelBackend", "LayerNorm", "Linear", "MPLinear", "MSAPairWeightedAveraging", "OuterProduct", "OuterProductMean", "Pairformer", "PairformerBlock", "PairformerConfig", "RMSNorm", "SWA3DRoPEAttention", "Transition", "TriangleAttention", "TriangleMultiplication", "TrianglePairAttention"]
+__all__ = ["AdaptiveLayerNorm", "AttentionPairBias", "AugmentedAttentionPairBias", "BidirectionalTriangleAttention", "BidirectionalTriangleMultiplication", "ConditionedTransition", "Dropout", "ImplementationType", "InputFeatureEmbedder", "InvalidImplementationError", "KernelBackend", "LayerNorm", "Linear", "MPLinear", "MSAPairWeightedAveraging", "OuterProduct", "OuterProductMean", "Pairformer", "PairformerBlock", "PairformerConfig", "RMSNorm", "SWA3DRoPEAttention", "Transition", "TriangleAttention", "TriangleMultiplication"]

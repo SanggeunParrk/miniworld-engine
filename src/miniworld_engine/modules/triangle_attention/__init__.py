@@ -5,11 +5,9 @@ from miniworld_engine.modules.triangle_attention.bidirectional import (
 )
 from miniworld_engine.modules.triangle_attention.module import (
     TriangleAttention,
-    TrianglePairAttention,
 )
 
 __all__ = [
     "BidirectionalTriangleAttention",
     "TriangleAttention",
-    "TrianglePairAttention",
 ]
