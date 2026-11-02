@@ -103,7 +103,7 @@ def _ext():
         return _EXT["mod"]
     from miniworld_engine.kernels._nvcc import load_extension as load
 
-    src = Path(__file__).with_name("csrc") / "opm_epilogue.cu"
+    src = Path(__file__).resolve().parents[1] / "kernels" / "integrations" / "csrc" / "opm_epilogue.cu"
     _EXT["mod"] = load(
         name="miniworld_opm_epilogue",
         sources=[str(src)],

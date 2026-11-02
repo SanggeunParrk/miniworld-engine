@@ -223,6 +223,18 @@ def _run_case(c: dict) -> None:
     args = case.inputs(batch, c["L"], dims, adt, case.stream_for(c["dim"]))
     kwargs = {"compute_dtype": _dt(c["compute"])} if c["compute"] else {}
     _step(module, args, c["train"], autocast, kwargs)
+    if c["case"] == "augmented_attention" and adt is _dt("float32") and not autocast:
+        # fp32 activations take the TF32 pair-fused core (attn_tf32.cu, incl. the 4 x 32 atom layout) under "high" (what MiniWorld's
+        # trainer sets) and ONLY when no compute_dtype is passed (the default call); the passes above (a compute_dtype from the
+        # registry, "highest") build the other paths. All are production.
+        import torch
+
+        before = torch.get_float32_matmul_precision()
+        try:
+            torch.set_float32_matmul_precision("high")
+            _step(module, args, c["train"], autocast, {})
+        finally:
+            torch.set_float32_matmul_precision(before)
 
 
 def _run_block(c: dict) -> None:
