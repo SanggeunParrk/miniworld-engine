@@ -44,11 +44,6 @@ def layer_norm(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tensor 
     from miniworld_engine.modules.dispatch import portable_blocked
 
     if _no_triton(x):
-        # the masked / opted-in bf16 N 128..512 calls keep the hand-CUDA warp-per-row backward they had (CUDA, no Triton: the caller picks it)
-        from miniworld_engine.kernels.layernorm.cuda.masked_bwd import layernorm_cuda_bwd_autograd, use_cuda_bwd
-
-        if use_cuda_bwd(x, row_scale):
-            return layernorm_cuda_bwd_autograd(x, weight, bias, eps, row_scale)
         # H100 / B200: the general CUDA LayerNorm (any width the kernels take, bf16 / fp16 / fp32, forward and backward); the row scale is
         # applied after it (one more rounding than the Triton kernel's in-kernel scale), a call it does not take runs the PyTorch statements
         from miniworld_engine.kernels.layernorm.cuda.general import layernorm_cuda, supported
