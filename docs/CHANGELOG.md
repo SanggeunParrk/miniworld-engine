@@ -114,6 +114,10 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Fixed
 
+## [2.4.0] - 2026-10-29
+
+### Fixed
+
 - H100 native autotune (`autotune/native.py`, `native_compile.py`, `cache.py`, `fused_config.py`):
   - Candidates are timed in the warm CUDA-graph regime (`do_bench_cudagraph`, the measurement records `"regime": "cuda_graph_warm"`).
     Cold-L2 timing had picked a TriMul L384 config slower in the warm model forward.
