@@ -38,14 +38,6 @@ def unit_file_sets(data: dict) -> dict[str, list[str]]:
     return {label: [table[i] for i in ids] for label, ids in data.get("unit_files", {}).items()}
 
 
-def toolchain_moved(data: dict) -> list[str]:
-    """How the toolchain now differs from the one a derivation recorded (``[]``: equal, or an older evidence that recorded none)."""
-    from miniworld_engine.autotune import identity
-
-    stored = data.get("toolchain")
-    return identity.toolchain_diff(stored) if stored is not None else []
-
-
 def stale_units(data: dict, labels=None) -> dict[str, list[str]]:
     """``{label: files that no longer match}`` for every unit of ``data`` (or only ``labels``) whose evidence is out of date.
 
@@ -58,14 +50,12 @@ def stale_units(data: dict, labels=None) -> dict[str, list[str]]:
     fresh = {p: identity.token_matches(p, t, scheme) for p, t in zip(table, tokens, strict=False)}
     safety = identity.safety_files()
     out: dict[str, list[str]] = {}
-    moved = toolchain_moved(data)           # a torch / triton / CUDA version or an engine environment variable the evidence was made under
     for label, ids in data.get("unit_files", {}).items() if data.get("schema") == SCHEMA else ():
         if labels is not None and label not in labels:
             continue
         files = {table[i] for i in ids}
         bad = sorted(p for p in files if not fresh.get(p))
         bad += sorted(p for p in safety if p not in files)
-        bad += [f"<toolchain: {m}>" for m in moved[:3]]
         if bad:
             out[label] = bad
     if data.get("schema") != SCHEMA:
@@ -148,9 +138,7 @@ def status(path: Path | None = None) -> dict:
         data = json.loads((path or EVIDENCE).read_text())
     except (OSError, ValueError):
         return {"units": 0, "stale": {}, "schema": 0, "missing": True}
-    return {"units": len(data.get("units", {})), "stale": stale_units(data), "schema": data.get("schema", 1),
-            "toolchain_recorded": data.get("toolchain") is not None, "toolchain_moved": toolchain_moved(data),
-            "arch": data.get("arch", "")}
+    return {"units": len(data.get("units", {})), "stale": stale_units(data), "schema": data.get("schema", 1)}
 
 
 def label(unit, case) -> str:

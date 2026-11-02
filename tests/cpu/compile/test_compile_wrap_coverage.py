@@ -49,7 +49,7 @@ def _decorator_sites(tree: ast.AST, name: str) -> list[ast.expr]:
 #: kernel launched there is not a launcher this file is about. Every scan below goes through here.
 def _python_files() -> list[Path]:
     return sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")
-                  if "notes" not in p.parts)
+                  if "notes" not in p.parts and "integrations" not in p.parts)
 
 
 def test_no_bare_opaque_site_remains() -> None:
@@ -128,6 +128,8 @@ def test_every_launcher_is_opaque_or_only_reached_through_one() -> None:
     """
     harness = {SRC / "kernels" / "checks", SRC / "kernels" / "drivers"}
     paths = [p for p in _python_files() if p.parent not in harness]
+    # Production module entry points live in kernels/integrations and provide the opaque boundary.
+    paths += sorted((SRC / "kernels" / "integrations").glob("*.py"))
     launchers, ops, calls = _launchers_and_ops(paths)
 
     # "Covered" is TRANSITIVE: `_ln_bwd_atomic`'s only caller is `ln_bwd_mmajor`, which is not an

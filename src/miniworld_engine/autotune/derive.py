@@ -278,7 +278,6 @@ class UnitTrace:
         self.code: set[str] = set()
         self.modules: set[str] = set()
         self.opened: set[str] = set()
-        self.listed: set[str] = set()
 
     def package_files(self) -> tuple[set[str], set[str]]:
         prefix = str(_PKG) + os.sep
@@ -292,74 +291,36 @@ class UnitTrace:
             return out
         return rel(self.code), rel(self.opened)
 
-    def package_dirs(self) -> set[str]:
-        """Package directories the unit listed (``os.listdir`` / ``os.scandir`` / ``glob``): the names in them were an input."""
-        prefix, out = str(_PKG) + os.sep, set()
-        for name in self.listed:
-            path = os.path.abspath(name)
-            if (path + os.sep).startswith(prefix) and "__pycache__" not in path:
-                out.add(Path(path).relative_to(_PKG).as_posix())
-        return out
-
 
 def _install_trace() -> None:
     import builtins
     import importlib
     import importlib.util
     import sys
-    import threading
 
     if _STATE["installed"]:
         return
+    if sys.version_info < (3, 12):
+        raise RuntimeError("dev derive records which files each unit runs with sys.monitoring (Python >= 3.12): the older "
+                           "sys.setprofile cannot see the autograd backward threads, so the evidence would under-approximate")
+    mon = sys.monitoring
+    tool = 3
+    mon.use_tool_id(tool, "miniworld-derive")
 
     def on_start(code, offset):
         trace = _STATE["active"]
         if trace is not None:
             trace.code.add(code.co_filename)
-        return sys.monitoring.DISABLE                        # one event per code object per unit (restart_events re-arms them)
+        return mon.DISABLE                                   # one event per code object per unit (restart_events re-arms them)
 
-    if sys.version_info >= (3, 12):
-        mon = sys.monitoring
-        tool = 3
-        mon.use_tool_id(tool, "miniworld-derive")
-        for event in (mon.events.PY_START, mon.events.PY_RESUME):
-            mon.register_callback(tool, event, on_start)
-        mon.set_events(tool, mon.events.PY_START | mon.events.PY_RESUME)
-        _STATE["backend"] = "monitoring"
-    else:
-        # Python < 3.12 has no sys.monitoring: every ``call`` event of a profile function (a generator resume is one too) names the
-        # file whose code ran, in this thread and in every thread started afterwards (``threading.setprofile``). The autograd
-        # engine's own backward threads are started by C++ and carry no profile function: the backward of an op runs the ``backward``
-        # of its ``autograd.Function``, so the file of that class is named by the ``forward`` of the same class, which does run in a
-        # profiled thread -- and a unit that cannot show it reaches the file through :func:`identity.lazy_reach` of a file that did.
-        def profile(frame, event, arg):
-            if event == "call":
-                trace = _STATE["active"]
-                if trace is not None:
-                    trace.code.add(frame.f_code.co_filename)
-
-        sys.setprofile(profile)
-        threading.setprofile(profile)
-        _STATE["backend"] = "setprofile"
+    for event in (mon.events.PY_START, mon.events.PY_RESUME):
+        mon.register_callback(tool, event, on_start)
+    mon.set_events(tool, mon.events.PY_START | mon.events.PY_RESUME)
 
     def audit(event, args):
         trace = _STATE["active"]
-        if trace is None or not args:
-            return
-        if event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
+        if trace is not None and event == "open" and args and isinstance(args[0], (str, bytes, os.PathLike)):
             trace.opened.add(os.fsdecode(args[0]))
-        elif event in ("os.listdir", "os.scandir") and isinstance(args[0], (str, bytes, os.PathLike)):
-            trace.listed.add(os.fsdecode(args[0]))
-        elif event == "glob.glob" and isinstance(args[0], (str, bytes, os.PathLike)):
-            # the directory part of the pattern up to its first wildcard: the names there decide what the pattern matched
-            head = os.fsdecode(args[0])
-            for i, part in enumerate(head.split(os.sep)):
-                if any(c in part for c in "*?["):
-                    head = os.sep.join(head.split(os.sep)[:i])
-                    break
-            else:
-                head = os.path.dirname(head)
-            trace.listed.add(head or ".")
 
     sys.addaudithook(audit)
 
@@ -398,8 +359,7 @@ def trace_unit():
     import sys
 
     _install_trace()
-    if _STATE.get("backend") == "monitoring":
-        sys.monitoring.restart_events()
+    sys.monitoring.restart_events()
     trace = UnitTrace()
     _STATE["active"] = trace
     try:
@@ -833,8 +793,7 @@ def _collect(rows, on_unit, arch, reuse) -> tuple[dict, list, dict]:
             with trace_unit() as seen:
                 launches, error = record(unit, case_by_name)
             code, opened = seen.package_files()
-            files = identity.unit_files(code, seen.modules, opened, [op for op, _, _ in launches if not op.startswith("<")],
-                                        seen.package_dirs())
+            files = identity.unit_files(code, seen.modules, opened, [op for op, _, _ in launches if not op.startswith("<")])
             tokens = identity.tokens(files)
             moved = identity.changed_since(before, files)
             if moved:
@@ -864,7 +823,7 @@ def evidence_document(arch: str, records: dict, skipped: list) -> dict:
         moved = sorted(p for p, token in r.get("tokens", {}).items() if identity.file_token(p) != token)
         if moved:
             raise ValueError(f"sources changed while {label!r} was derived ({moved[0]}); repeat the derivation")
-    return {"schema": plan.SCHEMA, "arch": normalise_arch(arch), "complete": not skipped, "toolchain": identity.toolchain(),
+    return {"schema": plan.SCHEMA, "arch": normalise_arch(arch), "complete": not skipped,
             "units": {label: r["keys"] for label, r in records.items()},
             "launch_counts": {label: r["counts"] for label, r in records.items()},
             **plan.pack_files({label: r["files"] for label, r in records.items()}),

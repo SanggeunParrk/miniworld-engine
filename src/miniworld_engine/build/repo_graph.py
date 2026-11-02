@@ -244,7 +244,7 @@ def build() -> Graph:
     g.nodes[DERIVATION] = "identity"
     resolve = _Resolver(paths)
     analyzer = repo_paths.Analyzer(set(paths), _text, _module_resolver(resolve))
-    uses = {p: analyzer.use(p) for p in paths if PurePosixPath(p).suffix == ".py"}
+    uses = {p: analyzer.use(p) for p in paths if p.startswith("tests/") and PurePosixPath(p).suffix == ".py"}
     wanted = set()
     for use in uses.values():
         wanted |= {x for x in use.prefixes if x}
@@ -257,7 +257,8 @@ def build() -> Graph:
             continue
         text = _text(p)
         if suffix == ".py":
-            _built_paths(g, p, uses[p], resolve, below)
+            if p.startswith("tests/"):                    # a test that lists or builds a path depends on it; the sources do not (native.py lists every kernel as a salt, not as a dependency)
+                _built_paths(g, p, uses[p], resolve, below)
             for dep, lazy in _python_imports(p, text, resolve).items():
                 g.edge(p, dep, "lazy" if lazy else "import")
         if suffix in CCODE:
@@ -466,7 +467,7 @@ def live_evidence(result: dict, new_only: bool = False, gpu: str = "") -> dict:
     touched = {p.removeprefix(f"{SRC}/") for p in [*result["changed"], *result["cosmetic"]] if p.startswith(f"{SRC}/")}
     native_stale = sorted({r.op for r in rows if r.stale and r.reason.startswith("native implementation changed")})
     plan_file = PKG / "autotune" / "plans" / gpu / "registry_kernel.units.json" if gpu else None
-    status = plan.status(plan_file if plan_file is not None and plan_file.is_file() else None)
+    status = plan.status(plan_file) if plan_file is not None and plan_file.is_file() else plan.status()
     units_stale = status["stale"]
     if new_only:
         rows_changed = set(result.get("rows") or [])

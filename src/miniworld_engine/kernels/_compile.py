@@ -161,9 +161,8 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()):
 
     def decorate(fn):
         if settings.current().compile_wrap == "disable":
-            disabled = torch.compiler.disable(fn)
             if fake is None:
-                return disabled
+                return torch.compiler.disable(fn)
 
             @functools.wraps(fn)
             def call(*args, **kwargs):
@@ -171,9 +170,10 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()):
                 # business running there, so it hands over a predicate and gets the op's fake (same shapes, no launch, no build).
                 if FAKE_WHEN is not None and FAKE_WHEN(fn, args, kwargs):
                     return fake(*args, **kwargs)
-                return disabled(*args, **kwargs)
+                return fn(*args, **kwargs)
 
-            return call
+            # the WHOLE wrapper is opaque to Dynamo: a wrapper that stayed traceable and called a disabled function made fullgraph compiles fail
+            return torch.compiler.disable(call)
         if fake is None:
             raise ValueError(
                 f"compile_wrap='custom_op' needs a fake implementation for "

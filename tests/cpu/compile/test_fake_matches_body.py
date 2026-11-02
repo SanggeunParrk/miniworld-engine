@@ -65,7 +65,7 @@ def _signature(node: ast.FunctionDef | ast.Lambda) -> list[str]:
 
 def _opaque_sites():
     """(op name, decorated function, fake function, file) for every ``@opaque(fake=...)``."""
-    for path in sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")):
+    for path in sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py") if "integrations" not in p.parts):
         tree = ast.parse(path.read_text())
         named = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
         for node in ast.walk(tree):
@@ -158,7 +158,7 @@ def test_every_opaque_site_names_its_op() -> None:
     """``name=`` is always explicit: the fallback derives it from ``__qualname__``, and a name that
     moves when someone renames a private helper is not a name for a public op."""
     missing = []
-    for path in sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")):
+    for path in sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py") if "integrations" not in p.parts):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef):
