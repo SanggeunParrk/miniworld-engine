@@ -12,6 +12,10 @@ is the door callers name.
 
 from __future__ import annotations
 
+from miniworld_engine.kernels.conditioned_transition.cuda.ct_train import (
+    sigmul_bwd,
+    sigmul_fwd,
+)
 from miniworld_engine.kernels.conditioned_transition.triton.dispatch import (
     cond_transition_inference_dispatch,
 )
@@ -22,4 +26,6 @@ from miniworld_engine.kernels.conditioned_transition.triton.training import (
 __all__ = [
     "cond_transition_inference_dispatch",
     "cond_transition_train",
+    "sigmul_bwd",
+    "sigmul_fwd",
 ]

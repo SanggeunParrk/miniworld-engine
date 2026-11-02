@@ -14,6 +14,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
+- `miniworld_engine.kernels` exports `sigmul_fwd` / `sigmul_bwd` (the CUDA sigmoid-gate row kernels, `conditioned_transition/interface.py`) and
+  `gate_use_fused` (`bias_only_attention/interface.py`): FoldForge calls them as standalone ops.
 - `miniworld_engine.kernels` exports `swiglu_ffn`, `transition_layer` (the whole Transition layer with weights as arguments, `transition/interface.py::transition`; not named `transition`, which is the subpackage) and
   `triangle_multiplicative_update` (cuequivariance-signature, residual form): each names a family interface, as FoldForge calls them as standalone ops.
 - `dev code-graph --diff BASE` / `--repo`: the whole repository as one graph (every file a node; import, lazy import, include, reference,
@@ -58,6 +60,10 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Fixed
 
+- OuterProductMean with projection bias on a shallow MSA (1-64 rows) counted the bias twice (rms error 0.4-0.7 against the reference); introduced in 2.4.0.
+- Python 3.10: two f-strings that repeat their own quote inside a replacement field (3.12-only syntax) made `import miniworld_engine.modules`
+  and the H100 TriAttn generic glue raise SyntaxError on 3.10; `tests/cpu/layout/test_the_source_parses_on_python_310.py` keeps every source file 3.10-parsable.
+- The Anthropic OPM epilogue extension (`baselines/anthropic_msa._ext()`) pointed at a deleted source path and could not be built; it is covered in the wheel again.
 - H100 autotune caches for the five Triton kernels registered on 2026-10-31 (grid build, merged): no more "no tuned autotune cache"
   warning for the covered shapes; up to 26% faster (pair-bias backward) and 19% (MPNN no-grad fusion), never slower beyond noise
   (`docs/records/h100_triton_caches_20261101.md`). The pre-registration launch rules apply to the default config set only, so measured

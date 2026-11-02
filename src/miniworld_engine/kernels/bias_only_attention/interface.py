@@ -11,6 +11,7 @@ This module is the family's public door: importers name it rather than the ``tri
 
 from __future__ import annotations
 
+from miniworld_engine.kernels.bias_only_attention.dispatch import gate_use_fused
 from miniworld_engine.kernels.bias_only_attention.triton.gate_out import (
     fused_gate_out,
 )
@@ -26,6 +27,7 @@ from miniworld_engine.kernels.gated_projection.interface import (
 
 __all__ = [
     "fused_gate_out",
+    "gate_use_fused",
     "sigmoid_gate_fused",
     "triton_bias_only_attention",
 ]
