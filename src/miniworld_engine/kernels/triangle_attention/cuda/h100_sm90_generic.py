@@ -37,10 +37,12 @@ TOK = _core_mod.TOK
 
 
 @functools.lru_cache(maxsize=None)
-def _glue():
+def _glue(defs: tuple[str, ...] = ()):
+    """The width-generic glue kernels; `defs` = extra -D knobs (experiments), part of the build name."""
     ensure_cuda_home()
+    tag = "".join(f"_{d.replace("=", "").lower()}" for d in defs)
     return load_extension(
-        name="triattn_h100_generic_v5",
+        name=f"triattn_h100_generic{tag}_v5",
         sources=[str(_SRC / "triattn_generic_sm90.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -49,6 +51,7 @@ def _glue():
             *gencodes("90a"),
             "--use_fast_math",
             "-DNDEBUG",
+            *(f"-D{d}" for d in defs),
         ],
         verbose=True,
     )
@@ -267,6 +270,38 @@ def _wall(wcat, hd):
     return w
 
 
+#: fp16 inference beyond L 256, d_pair 256 (other head layouts than front_c256), <= 8 heads: ``ln_bias_fwd`` (LayerNorm + bias projection
+#: + head-major bias in one kernel; 0.95-0.97x the module; at d_pair 64 / 128 it measured 1.00-1.13x slower, 2026-10-30)
+LN_BIAS = True
+
+
+def _half(wcat):
+    """The packed weights in fp16 (the fp16 inference GEMMs), cached on the packed tensor (a cast kernel per call otherwise)."""
+    w = getattr(wcat, "_triattn_w16", None)
+    if w is None:
+        w = wcat.half()
+        wcat._triattn_w16 = w
+    return w
+
+
+#: fp16 inference beyond L 256 at d_pair 256 with 8 heads x 32: ``front_c256`` (LayerNorm + q | k | v | g + head-major bias
+#: in one kernel; replaces ln_bias_fwd and the projection GEMM)
+FRONT_C256 = True
+
+
+def _front_w16(wcat, hd):
+    """front_c256's weights: q | k | v | g rows [4 HD, C] fp16 permuted within each 64-row chunk, cached on the packed tensor."""
+    w = getattr(wcat, "_triattn_front_w16", None)
+    if w is None:
+        # within each 64-row chunk, accumulator column a = 8 i + 2 t + e of a lane (t = lane % 4, i = 4 s + j) is output column
+        # 32 s + 8 t + 2 j + e: a lane's 16 columns of a row are two runs of 8 (16-byte stores).  Output rows (s, t, j, e) -> (s, j, t, e):
+        # views only (no host-to-device copy: the pack may be rebuilt inside a CUDA-graph capture)
+        c = wcat.shape[1]
+        w = _half(wcat)[: 4 * hd].view(-1, 2, 4, 4, 2, c).permute(0, 1, 3, 2, 4, 5).reshape(4 * hd, c).contiguous()
+        wcat._triattn_front_w16 = w
+    return w
+
+
 def supports(d_pair: int, d_hidden: int, n_head: int, length: int) -> bool:
     """Shapes the generic path takes: d_pair a multiple of 8 up to 512, heads of 16 or 32 channels (at most 16 heads), L a multiple
     of 16 (padded to a multiple of 128 by the caller)."""
@@ -379,6 +414,11 @@ def _forward(
     )
     # inference on the fp16 core (h100_sm90.INFERENCE_FP16): q / k / v and the bias in fp16, from the fused front or (L > 256) fp16 GEMMs
     h16 = (not need) and _core_mod.INFERENCE_FP16 and (fused or L > 256)
+    # fp16 inference beyond L 256 at d_pair 256 (<= 8 heads): LayerNorm, the bias projection and the head-major bias in one kernel
+    # (the bias GEMM re-read all of y for its 8 columns)
+    # d_pair 256: LayerNorm, q | k | v | g and the bias in one kernel (the y round trip and the projection GEMM gone)
+    front256 = (not fused) and h16 and L > 256 and C == 256 and HD == 256 and FRONT_C256
+    lnbias = (not fused) and (not front256) and h16 and L > 256 and C == 256 and H <= 8 and LN_BIAS
     if fused:  # LN + projection + head-major scaled bias: one kernel
         y = mean = rstd = None
         proj, sbias, _ = _front().front(
@@ -399,19 +439,31 @@ def _forward(
         q, k, v, gt = (
             (proj[i].view(torch.float16) if h16 and i < 3 else proj[i]).view(B, L, L, H, D) for i in range(4)
         )
+    elif front256:
+        y = mean = rstd = None
+        qkvg, sbias = g.front_c256(
+            x, lnw.float().contiguous(), lnb.float().contiguous(), _front_w16(wcat, HD), _half(wcat)[4 * HD : 4 * HD + 8], front_mask, eps,
+            B, L, H, trans, scale, False,  # (two-CTA multicast of the weight chunks: measured level, 2026-10-30)
+        )
+    elif lnbias:
+        mean = rstd = None
+        y, sbias = g.ln_bias_fwd(
+            x, lnw.float().contiguous(), lnb.float().contiguous(), wcat[4 * HD : 4 * HD + 8], front_mask, eps, B, L, H, trans, scale
+        )
     else:
         y, mean, rstd = g.ln_fwd(
             x, lnw.float().contiguous(), lnb.float().contiguous(), eps, L, trans, h16  # h16: y in fp16 for fp16 GEMMs
         )
-    if fused:
+    if fused or front256:
         pass
     elif need or L > 256:
-        ww = wcat.half() if h16 else wcat
+        ww = _half(wcat) if h16 else wcat
         qkvg = torch.matmul(y, ww[: 4 * HD].t())  # [M, 4 HD]: q | k | v | g (fp16 with h16, the gate too)
-        bias = torch.matmul(y, ww[4 * HD :].t())  # [M, Hp]
-        sbias = g.front_bias(
-            bias, front_mask, B, L, H, 0, scale
-        )
+        if not lnbias:
+            bias = torch.matmul(y, ww[4 * HD :].t())  # [M, Hp]
+            sbias = g.front_bias(
+                bias, front_mask, B, L, H, 0, scale
+            )
     else:
         # short inference calls: one GEMM for q | k | v | g | bias (a launch less); beyond L 256 the extra tile column costs more
         qkvg = _lt().lt_mm(y, wcat, None, 0, False, None, None)  # [M, 4 HD + Hp]
