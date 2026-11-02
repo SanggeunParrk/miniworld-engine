@@ -8,6 +8,10 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.4.2] - 2026-11-02
+
+(2.4.1 was prepared but never uploaded to PyPI; its changes ship here.)
+
 ### Added
 
 - `miniworld_engine.kernels` exports `swiglu_ffn`, `transition_layer` (the whole Transition layer with weights as arguments, `transition/interface.py::transition`; not named `transition`, which is the subpackage) and
