@@ -81,6 +81,18 @@ class MSAPairWeightedAveraging(nn.Module):
         state_dict.pop(prefix + "ln_pair.bias", None)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
+    @classmethod
+    def from_released(cls, state_dict, *, n_head: int, prefix: str = "", dtype: torch.dtype | None = None, norm_eps: float = 1e-5,
+                      **options) -> "MSAPairWeightedAveraging":
+        """The module from a released checkpoint's ``MSAAttention`` (``act_norm`` / ``pair_norm`` / ``pair_logits`` / ``v_projection`` /
+        ``gating_query`` / ``output_projection``; see ``modules.released``). The pair LayerNorm offset is dropped (softmax-invariant)."""
+        from miniworld_engine.modules import released
+
+        converted = released.msa_pair_weighted_averaging_from_released(state_dict, prefix=prefix)
+        d_hidden = converted["to_value.weight"].shape[0] // n_head
+        d_msa, d_pair = converted["ln_msa.weight"].shape[0], converted["ln_pair.weight"].shape[0]
+        return released.load(cls(d_msa, d_pair, n_head, d_hidden, **options), converted, dtype=dtype, norm_eps=norm_eps)
+
     @typecheck
     def forward(
         self,

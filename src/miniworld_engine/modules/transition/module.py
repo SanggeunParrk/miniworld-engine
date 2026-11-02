@@ -95,6 +95,18 @@ class Transition(nn.Module):
             d_hidden * n, d_hidden, bias=False, init="zero", dtype=torch.bfloat16
         )
 
+    @classmethod
+    def from_released(cls, state_dict, *, prefix: str = "", dtype: torch.dtype | None = None, norm_eps: float = 1e-5,
+                      **options) -> "Transition":
+        """The module from a released checkpoint's transition (``input_layer_norm`` / the single ``transition1`` of ``2 n c`` rows /
+        ``transition2``; see ``modules.released``). ``n`` follows from the weights."""
+        from miniworld_engine.modules import released
+
+        converted = released.transition_from_released(state_dict, prefix=prefix)
+        d_hidden = converted["ln_in.weight"].shape[0]
+        n = converted["squeeze.weight"].shape[1] // d_hidden
+        return released.load(cls(d_hidden, n, **options), converted, dtype=dtype, norm_eps=norm_eps)
+
     @typecheck
     def forward(self, x: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
         """Forward pass. ALWAYS returns the residual output ``y = x + transition(x)`` (the

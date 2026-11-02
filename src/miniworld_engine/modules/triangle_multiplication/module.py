@@ -25,6 +25,7 @@ from miniworld_engine.modules.exceptions import (
 )
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear
+from miniworld_engine.modules.triangle_multiplication.reference import inverse_length
 
 
 @contextmanager
@@ -50,6 +51,10 @@ class TriangleMultiplication(nn.Module):
         On the Triton kernels it is a refusal (a ``KernelRefusedWarning`` and the PyTorch reference); the H100 CUDA kernels serve hidden = 2 d_pair at D64 / D128.
     outgoing : bool
         Whether to use outgoing edges.
+    divide_by_length : bool
+        RoseTTAFold3's form: the contraction is multiplied by ``1 / (number of unmasked residues)`` of its sample (``1 / L``
+        without a mask) before ``ln_out``. Default ``False`` (AF3). Served by the PyTorch statements only: every kernel
+        path declines it.
     implementation : ImplementationType
         Implementation to use.
 
@@ -67,9 +72,14 @@ class TriangleMultiplication(nn.Module):
         implementation: ImplementationType = ImplementationType.PYTORCH,
         ln_implementation: ImplementationType = ImplementationType.PYTORCH,
         p_drop: float = 0.25,
+        divide_by_length: bool = False,
     ) -> None:
         super().__init__()
         self.outgoing = outgoing
+        # RoseTTAFold3: the contraction is divided by the real sequence length (unmasked residues of the sample, L without a
+        # mask) before ``ln_out``. No kernel implements it: a MINIWORLD call REFUSES (one KernelRefusedWarning on a GPU) and runs
+        # the PyTorch statements below, exactly as the reference does.
+        self.divide_by_length = divide_by_length
         # ======================================================================================
         # THIS MODULE ALWAYS APPLIES THE RESIDUAL: y = pair + drop_row(trimul(pair)).
         # The residual connection is UNCONDITIONAL (AF3 pairformer default
@@ -129,6 +139,19 @@ class TriangleMultiplication(nn.Module):
         self.to_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_out = Linear(d_hidden, d_pair, bias=False, init="zero")
 
+    @classmethod
+    def from_released(cls, state_dict, *, outgoing: bool, prefix: str = "", dtype: torch.dtype | None = None,
+                      norm_eps: float = 1e-5, **options) -> "TriangleMultiplication":
+        """The module from a released checkpoint's triangle multiplication (``left_norm_input`` / interleaved ``projection`` and
+        ``gate`` / ``center_norm`` / ``output_projection`` / ``gating_linear``; see ``modules.released``). ``options``: the constructor's
+        (``divide_by_length`` for RoseTTAFold3, ``implementation``, ``p_drop`` ...)."""
+        from miniworld_engine.modules import released
+
+        converted = released.triangle_multiplication_from_released(state_dict, outgoing=outgoing, prefix=prefix)
+        d_hidden, d_pair = converted["to_left.weight"].shape
+        options.setdefault("p_drop", 0.0)
+        return released.load(cls(d_pair, d_hidden=d_hidden, outgoing=outgoing, **options), converted, dtype=dtype, norm_eps=norm_eps)
+
     @typecheck
     def forward(
         self,
@@ -162,6 +185,14 @@ class TriangleMultiplication(nn.Module):
                 if _ds is not None:
                     out = out * _ds
                 return out + _pair_in
+
+            if self.divide_by_length:
+                # no kernel divides the contraction by the length: refuse, run the PyTorch statements (never ignore the option)
+                if self.implementation == ImplementationType.MINIWORLD and pair.is_cuda:
+                    _dispatch.warn_refused("triangle_multiplication", pair.device, "divide_by_length: no kernel takes it")
+                backend = KernelBackend.PYTORCH
+                no_triton = self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(pair.device)
+                return self._forward_reference(pair, mask, _r, no_triton)
 
             # Hand-CUDA B200 inference (integrations.trimul_b200 states its contract).
             if _b200.serves_inference(self, pair, bidirectional=False, dropscale=_ds):
@@ -213,23 +244,29 @@ class TriangleMultiplication(nn.Module):
             if backend != KernelBackend.PYTORCH:
                 raise InvalidImplementationError(self.implementation)
 
-            with _dispatch.fallback_autocast(pair, self, no_triton):
-                pair = self.ln_pair(pair)
-                left = sigmoid_gate(self.to_left_gate(pair), self.to_left(pair))
-                right = sigmoid_gate(self.to_right_gate(pair), self.to_right(pair))
+            return self._forward_reference(pair, mask, _r, no_triton)
 
-                if mask is not None:
-                    mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
-                    left = left * mask_2d[..., None]
-                    right = right * mask_2d[..., None]
+    def _forward_reference(self, pair, mask, _r, no_triton):
+        """The PyTorch statements (also the refusal target of every kernel path)."""
+        with _dispatch.fallback_autocast(pair, self, no_triton):
+            pair = self.ln_pair(pair)
+            left = sigmoid_gate(self.to_left_gate(pair), self.to_left(pair))
+            right = sigmoid_gate(self.to_right_gate(pair), self.to_right(pair))
 
-                if self.outgoing:
-                    out = torch.einsum("bikd,bjkd->bijd", left, right)
-                else:
-                    out = torch.einsum("bkid,bkjd->bijd", left, right)
+            if mask is not None:
+                mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
+                left = left * mask_2d[..., None]
+                right = right * mask_2d[..., None]
 
-                out = self.ln_out(out)
-                return _r(sigmoid_gate(self.to_gate(pair), self.to_out(out)))
+            if self.outgoing:
+                out = torch.einsum("bikd,bjkd->bijd", left, right)
+            else:
+                out = torch.einsum("bkid,bkjd->bijd", left, right)
+
+            if self.divide_by_length:
+                out = out * inverse_length(out, mask)
+            out = self.ln_out(out)
+            return _r(sigmoid_gate(self.to_gate(pair), self.to_out(out)))
 
     # No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
     # so Dynamo traces straight through this. It could never have BEEN an op itself -- see

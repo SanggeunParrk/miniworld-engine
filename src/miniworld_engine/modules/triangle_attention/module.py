@@ -189,6 +189,23 @@ class TriangleAttention(nn.Module):
         # inference and training); False falls through to the b200style path below (the benchmark baseline).
         self._h100_cuda = True
 
+    @classmethod
+    def from_released(cls, state_dict, *, n_head: int, starting: bool, prefix: str = "", dtype: torch.dtype | None = None,
+                      norm_eps: float = 1e-5, **options) -> "TriangleAttention":
+        """The module from a released checkpoint's grid self attention (``act_norm`` / ``pair_bias_projection`` / ``q,k,v_projection`` /
+        ``gating_query`` / ``output_projection``; see ``modules.released``). ``gate_bias`` / ``out_bias`` / ``dual_output`` follow from the
+        weights. ``options``: ``transposed_bias=False`` for AlphaFold 3's ending-node bias orientation, ``untransposed_output``,
+        ``implementation`` ..."""
+        from miniworld_engine.modules import released
+
+        converted = released.triangle_attention_from_released(state_dict, prefix=prefix)
+        d_hidden, d_pair = converted["to_query.weight"].shape[0], converted["to_query.weight"].shape[1]
+        options.setdefault("p_drop", 0.0)
+        options.setdefault("gate_bias", "to_gate.bias" in converted)
+        options.setdefault("out_bias", "to_out.bias" in converted)
+        options.setdefault("dual_output", "to_out_t.weight" in converted)
+        return released.load(cls(d_pair, n_head, d_hidden=d_hidden, starting=starting, **options), converted, dtype=dtype, norm_eps=norm_eps)
+
     def _kernel_triangle_attention(
         self,
         query: torch.Tensor,

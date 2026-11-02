@@ -84,6 +84,20 @@ class AttentionPairBias(nn.Module):
         state_dict.pop(prefix + "ln_pair.bias", None)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
+    @classmethod
+    def from_released(cls, state_dict, *, n_head: int, prefix: str = "", norm_prefix: str = "single_pair_logits_norm",
+                      projection_prefix: str = "single_pair_logits_projection", dtype: torch.dtype | None = None,
+                      norm_eps: float = 1e-5, **options) -> "AttentionPairBias":
+        """The module from a released Pairformer single attention: ``prefix`` is the attention's (``single_attention_``), the pair
+        logits' LayerNorm / projection sit at ``norm_prefix`` / ``projection_prefix`` of the same ``state_dict`` (see ``modules.released``).
+        ``options``: ``gate_bias`` (Chai-1: a constant on the gate logits), ``implementation``."""
+        from miniworld_engine.modules import released
+
+        converted = released.attention_pair_bias_from_released(
+            released._sub(state_dict, prefix), released._sub(state_dict, norm_prefix), released._sub(state_dict, projection_prefix))
+        d_single, d_pair = converted["to_query.weight"].shape[1], converted["to_bias.weight"].shape[1]
+        return released.load(cls(d_single, d_pair, n_head, **options), converted, dtype=dtype, norm_eps=norm_eps)
+
     @typecheck
     def forward(
         self,

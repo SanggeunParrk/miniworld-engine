@@ -8,6 +8,15 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- `TriangleMultiplication(divide_by_length=True)` (and `TriangleMultiplicationReference`): RoseTTAFold3's contraction divided by the real sequence length before `ln_out`; every kernel path refuses it and the PyTorch statements run.
+- `OuterProductMean(count_offset=1e-3)`: AlphaFold 3's `count + 1e-3` divisor (default `None` keeps `clamp(count, 1)`); kernels refuse it, PyTorch statements run.
+- `TriangleAttention` / `PairformerConfig` take the AF3 bias orientation (`transposed_bias=False`) and the gate / out biases through the block (`transposed_bias`, `triangle_attention_gate_bias`, `triangle_attention_out_bias`, `untransposed_output`, `dual_output`).
+- `miniworld_engine.modules.released` and `from_released(state_dict, ...)` on `TriangleMultiplication`, `TriangleAttention`, `Transition`, `OuterProductMean`, `MSAPairWeightedAveraging`, `AttentionPairBias`, `PairformerBlock`, `DiTVariantStack`, `AtomDiTVariantStack`: build the engine module from the released checkpoints' layout (interleaved TriMul projection, fused `transition1`, `output_w`).
+- `PairformerConfig(d_single, n_head_single, single_gate_bias, pair_transition_n, single_transition_n, parallel, divide_by_length)`: the single track and the `parallel` schedule; `PairformerBlock.forward(pair, mask, single)` / `Pairformer.forward` return `(pair, single)` with a single track. Defaults are the old pair-track block.
+- `dit_variant.serving(stack, *inputs)` / `stack.serving(...)`: `"cuda"`, `"portable"` or `"pytorch"`; a PYTORCH variant stack is served (inference and training), not refused. `docs/kernels/released-checkpoints.md`.
+
 ## [2.4.2] - 2026-11-02
 
 (2.4.1 was prepared but never uploaded to PyPI; its changes ship here.)

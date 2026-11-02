@@ -79,6 +79,23 @@ def serves_portable(stack: nn.Module, *inputs: torch.Tensor | None) -> bool:
     return bool(portable.atom_serves(stack, *inputs) if isinstance(stack, AtomDiTVariantStack) else portable.serves(stack, *inputs))
 
 
+def serving(stack: nn.Module, *inputs: torch.Tensor | None) -> str:
+    """Which implementation runs ``stack(*inputs)``: ``"cuda"`` (the H100 hand-CUDA rows), ``"portable"`` (the Triton path of a recorded
+    card) or ``"pytorch"`` (``kernels/dit_variants/reference.py``: differentiable torch statements, any card, inference and training).
+    A ``PYTORCH`` stack is always ``"pytorch"``: it SERVES every call (including a call with a gradient and a mask), it is not a
+    refusal. Callers that count engine-served calls (FoldForge's ``variant_serves``) ask this instead of :func:`serves_portable`."""
+    if stack.implementation == ImplementationType.PYTORCH:
+        return "pytorch"
+    from miniworld_engine.kernels.dit_variants import interface
+    from miniworld_engine.kernels.dit_variants.cuda import infer32, train
+
+    atom = isinstance(stack, AtomDiTVariantStack)
+    for path, name in ((interface, "cuda"), (infer32, "cuda"), (train, "cuda")):
+        if (path.atom_serves if atom else path.serves)(stack, *inputs):
+            return name
+    return "portable" if serves_portable(stack, *inputs) else "pytorch"
+
+
 class DiTVariantStack(nn.Module):
     """``n_blocks`` variant blocks; ``forward(single [A, L, D], cond [L, c_s] (shared by the samples) or [A, L, c_s], pair [L, L, C],
     mask [L] bool or None)`` -> [A, L, D]."""
@@ -89,6 +106,25 @@ class DiTVariantStack(nn.Module):
         self.parallel, self.implementation = parallel, implementation
         self.blocks = nn.ModuleList(
             DiTVariantBlock(d_single, d_cond, d_pair, n_head, n, **options) for _ in range(n_blocks))
+
+    @classmethod
+    def from_released(cls, state_dict, *, n_head: int, parallel: bool, super_block_size: int = 4, prefix: str = "",
+                      implementation: ImplementationType = ImplementationType.PYTORCH, dtype: torch.dtype | None = None,
+                      adaln_eps: float = 1e-5, pair_eps: float = 1e-5, **options) -> "DiTVariantStack":
+        """The stack from a released token ``DiffusionTransformer`` state (``self_attention.i`` / ``transition_block.i`` /
+        ``pair_input_layer_norm`` / ``pair_logits_projection``; Boltz-2, RoseTTAFold3, Chai-1 layouts, see ``modules.released``). The block
+        options follow from the weights; ``options`` override them."""
+        from miniworld_engine.modules import released
+
+        converted, args = released.dit_variant_stack_from_released(state_dict, n_head=n_head, super_block_size=super_block_size, prefix=prefix)
+        args = {**args, **options}
+        stack = cls(args.pop("n_blocks"), args.pop("d_single"), args.pop("d_cond"), args.pop("d_pair"), args.pop("n_head"), args.pop("n"),
+                    parallel=parallel, implementation=implementation, adaln_eps=adaln_eps, pair_eps=pair_eps, **args)
+        return released.load(stack, converted, dtype=dtype)
+
+    def serving(self, *inputs: torch.Tensor | None) -> str:
+        """``"cuda"`` / ``"portable"`` / ``"pytorch"``: see :func:`serving`."""
+        return serving(self, *inputs)
 
     def forward(self, single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         if self.implementation != ImplementationType.PYTORCH:
@@ -172,6 +208,25 @@ class AtomDiTVariantStack(nn.Module):
         self.blocks = nn.ModuleList(
             AtomDiTVariantBlock(d, d_cond, d_pair, n, per_block_pair_norm=per_block_pair_norm, pair_norm_bias=pair_norm_bias,
                                 **options) for _ in range(n_blocks))
+
+    @classmethod
+    def from_released(cls, state_dict, *, parallel: bool, key_window: str = "slide", prefix: str = "",
+                      implementation: ImplementationType = ImplementationType.PYTORCH, dtype: torch.dtype | None = None,
+                      adaln_eps: float = 1e-5, pair_eps: float = 1e-5, **options) -> "AtomDiTVariantStack":
+        """The stack from a released ``DiffusionCrossAttTransformer`` state (``cross_attention.i`` / ``transition_block.i`` /
+        ``pair_input_layer_norm`` / ``pair_logits_projection``; see ``modules.released``)."""
+        from miniworld_engine.modules import released
+
+        converted, args = released.atom_dit_variant_stack_from_released(state_dict, prefix=prefix)
+        args = {**args, **options}
+        stack = cls(args.pop("n_blocks"), args.pop("d"), args.pop("d_cond"), args.pop("d_pair"), args.pop("n"), parallel=parallel,
+                    per_block_pair_norm=args.pop("per_block_pair_norm"), pair_norm_bias=args.pop("pair_norm_bias"), key_window=key_window,
+                    implementation=implementation, adaln_eps=adaln_eps, pair_eps=pair_eps, **args)
+        return released.load(stack, converted, dtype=dtype)
+
+    def serving(self, *inputs: torch.Tensor | None) -> str:
+        """``"cuda"`` / ``"portable"`` / ``"pytorch"``: see :func:`serving`."""
+        return serving(self, *inputs)
 
     def forward(self, single, cond, pair, mask=None, uid=None):
         if self.implementation != ImplementationType.PYTORCH:

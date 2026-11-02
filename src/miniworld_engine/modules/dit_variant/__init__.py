@@ -11,6 +11,7 @@ from miniworld_engine.modules.dit_variant.module import (
     AtomDiTVariantStack,
     DiTVariantStack,
     serves_portable,
+    serving,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "AtomDiTVariantStack",
     "DiTVariantStack",
     "serves_portable",
+    "serving",
 ]

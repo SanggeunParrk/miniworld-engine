@@ -29,6 +29,15 @@ from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear
 
 
+def inverse_length(like: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    """``1 / (real sequence length)`` as ``[B, 1, 1, 1]`` in ``like``'s dtype: the number of unmasked residues of each sample
+    (at least 1), ``L`` when there is no mask. Computed on the device (no host read), so a captured graph takes each replay's mask."""
+    if mask is None:
+        return like.new_full((like.shape[0], 1, 1, 1), 1.0 / like.shape[1])
+    count = mask.sum(-1).clamp_min(1)
+    return count.to(torch.float32).reciprocal().to(like.dtype).view(-1, 1, 1, 1)
+
+
 class TriangleMultiplicationReference(nn.Module):
     """Pure-PyTorch nn.Module reference (forward + backward ground truth).
 
@@ -42,9 +51,13 @@ class TriangleMultiplicationReference(nn.Module):
         *,
         d_hidden: int | None = None,
         outgoing: bool = True,
+        divide_by_length: bool = False,
     ) -> None:
         super().__init__()
         self.outgoing = outgoing
+        #: RoseTTAFold3: the contraction is divided by the real sequence length (the number of unmasked residues of each
+        #: sample, ``L`` without a mask) before the centre norm.
+        self.divide_by_length = divide_by_length
         if d_hidden is None:
             d_hidden = d_pair
 
@@ -84,6 +97,8 @@ class TriangleMultiplicationReference(nn.Module):
         else:
             out = torch.einsum("bkid,bkjd->bijd", left, right)
 
+        if self.divide_by_length:
+            out = out * inverse_length(out, mask)
         out = self.ln_out(out)
         return sigmoid_gate(self.to_gate(x_normed), self.to_out(out))
 
