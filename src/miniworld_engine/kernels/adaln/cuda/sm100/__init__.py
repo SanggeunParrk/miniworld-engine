@@ -104,6 +104,7 @@ def _load_fused2():
 
 
 def _fused2_fake(x2, c2, wc, wb, ws, bs, eps_x, eps_c, rna):
+    """Output structure of ``_fused2``: y [M, D] like x2."""
     return torch.empty_like(x2)
 
 
@@ -302,6 +303,7 @@ def _fold_weights(wc, ws, bs, wb):
 
 
 def _infer_fold_fake(x2, c2, wbw, wsw, bs, ub, us, eps_x, eps_c):
+    """Output structure of ``_infer_fold``: y [M, D] like x2."""
     return torch.empty_like(x2)
 
 
