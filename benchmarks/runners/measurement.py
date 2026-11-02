@@ -206,7 +206,7 @@ def benchmark_source_hash() -> str:
     import hashlib
     from pathlib import Path
 
-    from miniworld_engine.autotune.plan import source_identity
+    from miniworld_engine.autotune.native import source_identity
 
     digest = hashlib.sha256(source_identity().encode())
     for name in ("bench.py", "measurement.py", "bench_policy.py"):
