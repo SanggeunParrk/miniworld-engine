@@ -1,3 +1,4 @@
 # Names a new sm90 bundle may drop relative to prebuilt_names_prev_release.txt: `<name>  # reason`. Empty by default.
 # 2.4.2 and 2.4.3 dropped eleven MiniWorld MSA-module families without a line here (a replay without --keep and no coverage case that
 # reached them); the `msa_module` coverage case in build/bundle_coverage.py and this list are what prevent a repeat.
+miniworld_opm_epilogue_native_tma_static_epi_tma_overlap_half  # unreachable since the fused inference kernel (opm_train._fused_enabled: every (S, N) the gathered-TMA epilogue serves, S 1024/2048 x N 384, takes the fused kernel and turns epi_tma off); 2.4.4 re-keyed opm_epilogue.cu; nothing calls it
