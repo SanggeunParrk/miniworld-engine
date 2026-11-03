@@ -338,7 +338,8 @@ def test_a_nothing_bundle_record_carries_the_bundle_digest_the_release_matches(r
     ctx = actions.Ctx(cli.build_parser().parse_args(["bundle"]), graph=False)
     ctx.nothing("bundle", None, {"bundle_digest": "D"})
     got = rec.latest("bundle", ctx.arch, tree=ctx.tree, version=ctx.version, root=ctx.records)
-    assert got["result"] == "nothing" and got["bundle_digest"] == "D"
+    assert got["result"] == "nothing"
+    assert got["bundle_digest"] == "D"
     _release_setup(records, monkeypatch, tmp_path)
     _write("bundle", rec.tree_hash(REPO), result="nothing", bundle_digest="D")
     assert cli.main(["release"]) == 0

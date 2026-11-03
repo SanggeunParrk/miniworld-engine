@@ -72,3 +72,11 @@ def test_the_evidence_describes_a_commit_and_not_a_working_tree() -> None:
         "the only evidence for this release was produced from a dirty working tree:\n  "
         + "\n  ".join(dirty)
         + "\n  Re-run on a clean checkout so the manifest names something reproducible.")
+
+
+def test_a_run_from_the_checkout_records_the_checkout_version() -> None:
+    """run_all on a checkout (`PYTHONPATH=src`) runs THIS code, whatever wheel the environment has installed: the provenance must name the
+    checkout's version, or the release evidence names the wrong release (a 2.4.4 run was recorded as the installed 2.4.3)."""
+    from miniworld_engine.autotune.devices import _provenance_row
+
+    assert _provenance_row()["backend"] == declared_version()

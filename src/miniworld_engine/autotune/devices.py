@@ -64,6 +64,20 @@ _LEGACY_DTYPE = "bf16"
 _PROVENANCE = "#provenance"
 
 
+def _checkout_version() -> str:
+    """The version of the code that runs when it runs from a checkout (`pyproject.toml` next to `src/`), else "". The installed
+    distribution's metadata names whatever was pip-installed into the environment, which is not the code a `PYTHONPATH=src` run executes
+    (a 2.4.4 run_all on the checkout was recorded as 2.4.3, the version installed in the pixi env)."""
+    import re
+
+    pyproject = _PKG.parent.parent / "pyproject.toml"
+    try:
+        m = re.search(r'^version = "([^"]+)"', pyproject.read_text(), re.MULTILINE)
+    except OSError:
+        return ""
+    return m.group(1) if m else ""
+
+
 def _provenance_row() -> dict:
     import subprocess
     from datetime import datetime, timezone
@@ -76,12 +90,13 @@ def _provenance_row() -> dict:
         except (OSError, subprocess.SubprocessError):
             return ""
 
-    version = ""
-    try:
-        from importlib.metadata import version as _v
-        version = _v("miniworld-engine")
-    except Exception:
-        pass
+    version = _checkout_version()
+    if not version:
+        try:
+            from importlib.metadata import version as _v
+            version = _v("miniworld-engine")
+        except Exception:
+            pass
     return {
         "kernel": _PROVENANCE, "backend": version,
         "family": _git("rev-parse", "HEAD")[:12],
