@@ -19,6 +19,7 @@ import torch.nn as nn
 
 from miniworld_engine.kernels.dit_variants import reference
 from miniworld_engine.modules.exceptions import ImplementationType
+from miniworld_engine.modules.primitives import ImplementationSwitch
 
 #: Each model's options (``DiTVariantStack(n_blocks, **BOLTZ2)`` ...).
 BOLTZ2 = {"d_cond": 768, "d_pair": 128, "parallel": False, "identity_scale": False, "gating": True, "kq_norm": False,
@@ -102,7 +103,7 @@ def serving(stack: nn.Module, *inputs: torch.Tensor | None) -> str:
     return "portable" if serves_portable(stack, *inputs) else "pytorch"
 
 
-class DiTVariantStack(nn.Module):
+class DiTVariantStack(ImplementationSwitch):
     """``n_blocks`` variant blocks; ``forward(single [A, L, D], cond [L, c_s] (shared by the samples) or [A, L, c_s], pair [L, L, C],
     mask [L] bool or None)`` -> [A, L, D]."""
 
@@ -198,7 +199,7 @@ class AtomDiTVariantBlock(nn.Module):
         self.trans_zero = nn.Linear(d_cond, d)
 
 
-class AtomDiTVariantStack(nn.Module):
+class AtomDiTVariantStack(ImplementationSwitch):
     """``n_blocks`` atom variant blocks; ``forward(single [A, N, 128], cond [N, 128] (shared by the samples) or [A, N, 128], pair
     [N / 32, 32, 128, d_pair] (trunked), mask [N] bool (real atoms first) or None, uid [N] (Chai-1's same-conformer mask) or None)``.
     The shared pair projection's output channel ``4 b + h`` is block b's head h. ``key_window``: "slide" (FoldForge's fast mode) or

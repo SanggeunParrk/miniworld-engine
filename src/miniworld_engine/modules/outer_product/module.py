@@ -10,7 +10,12 @@ from miniworld_engine.kernels.integrations import opm_train as _opm_train
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import KernelBackend, resolve
 from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.primitives import LayerNorm, Linear
+from miniworld_engine.modules.primitives import (
+    ImplementationSwitch,
+    LayerNorm,
+    Linear,
+    MasterWeights,
+)
 from miniworld_engine.utils.typecheck import typecheck
 
 
@@ -56,7 +61,7 @@ class OuterProduct(nn.Module):
         return self.to_out(out)
 
 
-class OuterProductMean(nn.Module):
+class OuterProductMean(MasterWeights, ImplementationSwitch):
     """Outer product mean of MSA representation to pair representation.
 
     Normalization uses ``clamp(min=1)`` on the mask count instead of adding a
@@ -100,6 +105,7 @@ class OuterProductMean(nn.Module):
         product_norm_eps: float = 0.1,
         count_offset: float | None = None,
         implementation: ImplementationType = ImplementationType.PYTORCH,
+        master_weights: bool = False,
     ) -> None:
         super().__init__()
         # AlphaFold 3 / Protenix divisor: ``count + count_offset`` (1e-3 in the released code) instead of ``clamp(count, 1)``. None keeps
@@ -113,11 +119,7 @@ class OuterProductMean(nn.Module):
         self.implementation = ImplementationType(implementation)
         # "anthropic" names an MSA payload, not a LayerNorm one: the primitives below are plumbing for
         # the fallback path and take the engine's own auto choice in that case (integrations.anthropic_msa).
-        implementation = (
-            ImplementationType.MINIWORLD
-            if self.implementation == ImplementationType.ANTHROPIC
-            else self.implementation
-        )
+        implementation = self._child_implementation(None, self.implementation)
         self.normalize_before_proj = normalize_before_proj
         # LN over the MSA feature dim — route to the fused miniworld_engine LN (bf16) under
         # the engine implementation; a raw nn.LayerNorm runs fp32-native under autocast and,
@@ -137,6 +139,12 @@ class OuterProductMean(nn.Module):
         self.to_out = Linear(products, d_pair, bias=True, init="zero")
         if groups > 1:
             self.product_norm = nn.LayerNorm(products, eps=product_norm_eps)
+        if master_weights:
+            self.set_master_weights()
+
+    def _child_implementation(self, child, implementation):
+        # "anthropic" names an MSA payload, not a LayerNorm one: the norms take the engine's own auto choice
+        return ImplementationType.MINIWORLD if implementation == ImplementationType.ANTHROPIC else implementation
 
     @classmethod
     def from_released(cls, state_dict, *, prefix: str = "", dtype: torch.dtype | None = None, norm_eps: float = 1e-5,

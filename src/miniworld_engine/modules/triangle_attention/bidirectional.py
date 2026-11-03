@@ -27,7 +27,6 @@ from __future__ import annotations
 import math
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from jaxtyping import Bool, Float
@@ -46,10 +45,15 @@ from miniworld_engine.modules.exceptions import (
     InvalidImplementationError,
 )
 from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.primitives import LayerNorm, Linear
+from miniworld_engine.modules.primitives import (
+    ImplementationSwitch,
+    LayerNorm,
+    Linear,
+    MasterWeights,
+)
 
 
-class BidirectionalTriangleAttention(nn.Module):
+class BidirectionalTriangleAttention(MasterWeights, ImplementationSwitch):
     """Bias-only triangular gated attention computing starting+ending in one block."""
 
     def __init__(
@@ -60,12 +64,12 @@ class BidirectionalTriangleAttention(nn.Module):
         d_hidden: int | None = None,
         use_self_attention: bool = False,
         implementation: ImplementationType = ImplementationType.PYTORCH,
+        master_weights: bool = False,
     ) -> None:
         super().__init__()
         # 'miniworld' (auto) -> the PORTABLE family (fused bidir attention kernels).
         self.implementation = ImplementationType(implementation)
-        self._backend = resolve_triangle_attention(self.implementation)
-        self._train_gate = _dispatch.train_gate("triangle_attention", self.implementation, self._backend)
+        self._resolve_implementation()
         self.n_head = n_head
         self.d_pair = d_pair
         self.d_hidden = d_hidden if d_hidden is not None else d_pair
@@ -87,6 +91,12 @@ class BidirectionalTriangleAttention(nn.Module):
             # Doubled-width Q/K projections: [starting | ending] channels, like value.
             self.to_query = Linear(d_pair, d2, bias=False, init="glorot")
             self.to_key = Linear(d_pair, d2, bias=False, init="glorot")
+        if master_weights:
+            self.set_master_weights()
+
+    def _resolve_implementation(self) -> None:
+        self._backend = resolve_triangle_attention(self.implementation)
+        self._train_gate = _dispatch.train_gate("triangle_attention", self.implementation, self._backend)
 
     # ── shared machinery (bias-only fusion, reused from TriangleAttention) ──────────
     def _layernorm(self, pair: torch.Tensor, backend: KernelBackend) -> torch.Tensor:

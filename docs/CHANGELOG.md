@@ -35,6 +35,12 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 - The sm90 prebuilt bundle again carries the MiniWorld MSA-module kernels (the OPM native `tma_static` family and the native PWA family: `miniworld_opm_epilogue_native_tma_static*`, `miniworld_pwa_{ctr,dgv_bwd_native_v1,fwd2,fwd3,gateout,glue3_native_v1,ln_vg,pair3_native_v1}`) that the 2.4.2 and 2.4.3 bundles dropped, so MiniWorld no longer JIT-compiles them on its first call. The bundle coverage gained the `msa_module` case (MSAPairWeightedAveraging + OuterProductMean at MSA depths 1024 / 2048 / 4096, inference and training) and a test (`tests/cpu/builder/test_bundle_keeps_previous_release_names.py`) fails when a name the previous release bundle carried is missing from the new one.
 
+### Added (implementation switch, master weights)
+
+- `module.set_implementation(ImplementationType.X)` on `TriangleMultiplication` (and bidirectional), `TriangleAttention` (and bidirectional), `Transition`, `OuterProductMean`, `MSAPairWeightedAveraging`, `AttentionPairBias`, `PairformerBlock`, `Pairformer`, `LayerNorm`, `RMSNorm`, `DiTVariantStack`, `AtomDiTVariantStack`: re-resolves `_backend`, `_train_gate` and the children's options so the live module equals one built with that implementation (propagates to children; a refused option restores everything). Switch before `torch.compile` / CUDA-graph capture. `modules.primitives.ImplementationSwitch`, `docs/dispatch.md`.
+- `module.set_master_weights()` / `master_weights=True` on the pair-track modules and `Pairformer`: fp32 parameters stay fp32 under `.bfloat16()` / `.half()` (default off, registry dtypes unchanged); bf16 activations run the H100 bf16 CUDA kernels on cached bf16 packs of the masters. `modules.primitives.MasterWeights`.
+- `utils.h100_master.cached_pack`: `pack` cached while the masters are unchanged (`_capture.param_forms`, invalidated by `_version`); `AttentionPairBias` and `TriangleAttention` use it (they cast fresh on every call before).
+
 ## [2.4.3] - 2026-11-03
 
 ### Added

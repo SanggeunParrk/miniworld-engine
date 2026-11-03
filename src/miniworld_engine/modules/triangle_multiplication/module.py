@@ -7,7 +7,6 @@ Anthropic comparison baselines."""
 from contextlib import contextmanager
 
 import torch
-import torch.nn as nn
 from jaxtyping import Bool, Float
 
 from miniworld_engine.baselines import anthropic_trimul as _anthropic
@@ -23,7 +22,12 @@ from miniworld_engine.modules.exceptions import (
     InvalidImplementationError,
 )
 from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.primitives import LayerNorm, Linear
+from miniworld_engine.modules.primitives import (
+    ImplementationSwitch,
+    LayerNorm,
+    Linear,
+    MasterWeights,
+)
 from miniworld_engine.modules.triangle_multiplication.reference import inverse_length
 from miniworld_engine.utils.typecheck import typecheck
 
@@ -39,7 +43,7 @@ def _nvtx_range(name: str, enabled: bool):
             torch.cuda.nvtx.range_pop()
 
 
-class TriangleMultiplication(nn.Module):
+class TriangleMultiplication(MasterWeights, ImplementationSwitch):
     """Unified implementation of triangular multiplicative update.
 
     Parameters
@@ -73,6 +77,7 @@ class TriangleMultiplication(nn.Module):
         ln_implementation: ImplementationType = ImplementationType.PYTORCH,
         p_drop: float = 0.25,
         divide_by_length: bool = False,
+        master_weights: bool = False,
     ) -> None:
         super().__init__()
         self.outgoing = outgoing
@@ -104,8 +109,7 @@ class TriangleMultiplication(nn.Module):
         # 'miniworld' (auto) -> concrete backend for the running GPU arch. The
         # public option is kept on self.implementation; forward routes on _backend.
         self.implementation = ImplementationType(implementation)
-        self._backend = resolve_triangle_multiplication(self.implementation)
-        self._train_gate = _dispatch.train_gate("triangle_multiplication", self.implementation, self._backend)
+        self._resolve_implementation()
         self.ln_implementation = ln_implementation
         direction = "outgoing" if outgoing else "incoming"
         self.nvtx_enabled = False
@@ -138,6 +142,16 @@ class TriangleMultiplication(nn.Module):
         self.ln_out = LayerNorm(d_hidden, implementation=ln_implementation)
         self.to_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_out = Linear(d_hidden, d_pair, bias=False, init="zero")
+        if master_weights:
+            self.set_master_weights()
+
+    def _resolve_implementation(self) -> None:
+        self._backend = resolve_triangle_multiplication(self.implementation)
+        self._train_gate = _dispatch.train_gate("triangle_multiplication", self.implementation, self._backend)
+
+    def _child_implementation(self, child, implementation):
+        # the norms follow ``ln_implementation`` (constructor argument, PYTORCH by default), not ``implementation``
+        return ImplementationType(self.ln_implementation)
 
     @classmethod
     def from_released(cls, state_dict, *, outgoing: bool, prefix: str = "", dtype: torch.dtype | None = None,

@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from jaxtyping import Bool, Float
@@ -10,11 +9,17 @@ from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import KernelBackend, resolve
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.primitives import Dropout, LayerNorm, Linear
+from miniworld_engine.modules.primitives import (
+    Dropout,
+    ImplementationSwitch,
+    LayerNorm,
+    Linear,
+    MasterWeights,
+)
 from miniworld_engine.utils.typecheck import typecheck
 
 
-class MSAPairWeightedAveraging(nn.Module):
+class MSAPairWeightedAveraging(MasterWeights, ImplementationSwitch):
     """MSA pair-weighted averaging.
 
     Parameters
@@ -42,17 +47,14 @@ class MSAPairWeightedAveraging(nn.Module):
         *,
         implementation: ImplementationType = ImplementationType.PYTORCH,
         p_drop: float = 0.0,
+        master_weights: bool = False,
     ) -> None:
         super().__init__()
         self.n_head = n_head
         self.implementation = ImplementationType(implementation)
         # "anthropic" names an MSA payload, not a LayerNorm one: the primitives below are plumbing for
         # the fallback path and take the engine's own auto choice in that case (integrations.anthropic_msa).
-        implementation = (
-            ImplementationType.MINIWORLD
-            if self.implementation == ImplementationType.ANTHROPIC
-            else self.implementation
-        )
+        implementation = self._child_implementation(None, self.implementation)
         # This layer ALWAYS applies the residual: msa + drop_msa(pwa(msa, pair)). The residual is
         # UNCONDITIONAL (domain standard); the row-broadcast dropout (drop_msa, broadcast_dim=1) is
         # OPTIONAL via p_drop and active only in training. Applied EXPLICITLY (team-gm layer, not
@@ -75,6 +77,12 @@ class MSAPairWeightedAveraging(nn.Module):
 
         self.to_gate = Linear(d_msa, d_hidden * n_head, bias=False, init="gating")
         self.to_out = Linear(d_hidden * n_head, d_msa, bias=False, init="zero")
+        if master_weights:
+            self.set_master_weights()
+
+    def _child_implementation(self, child, implementation):
+        # "anthropic" names an MSA payload, not a LayerNorm one: the norms take the engine's own auto choice
+        return ImplementationType.MINIWORLD if implementation == ImplementationType.ANTHROPIC else implementation
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         # checkpoints written before the offset was removed carry ln_pair.bias; it had no effect on the output, so dropping it is exact
