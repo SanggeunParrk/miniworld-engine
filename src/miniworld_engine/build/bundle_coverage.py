@@ -145,7 +145,19 @@ def cases() -> list[dict]:
     for d in (256, 384, 512):
         for length in TRAIN_TOKENS:
             for prec in ("bfloat16", "master"):   # master: fp32 parameters, bf16 activations (-DMASTER_FP32=1 builds)
-                out.append({"kind": "trimul_wide_train", "L": length, "d": d, "train": True, "dtype": prec, "heavy": length >= 768})
+                for p_drop, masked in ((0.25, True), (0.0, True), (0.0, False)):
+                    out.append({"kind": "trimul_wide_train", "L": length, "d": d, "train": True, "dtype": prec,  # noqa: PERF401
+                                "p": p_drop, "masked": masked, "heavy": length >= 768})
+    # The single-direction TriMul at every declared width in BOTH directions (the registry-driven case builds the outgoing one; MiniWorld's pairformer
+    # runs outgoing and incoming), inference and training, with and without dropout, bf16 and master precision.
+    for train in (False, True):
+        for d in (64, 128, 256, 384):
+            for length in TRAIN_TOKENS:
+                for outgoing in (True, False):
+                    for prec in ("bfloat16", "master"):
+                        for p_drop in ((0.0, 0.25) if train else (0.0,)):
+                            out.append({"kind": "trimul_directions", "L": length, "d": d, "outgoing": outgoing, "train": train,  # noqa: PERF401
+                                        "dtype": prec, "p": p_drop, "heavy": length >= 768})
     # MiniWorld's MSA module (MSAPairWeightedAveraging + OuterProductMean at d_msa 64 / d_pair 128): the native H100 paths pick their kernels
     # by MSA DEPTH (OPM ``_h100_path``: tma_static at S 1024 / 2048 / 4096; PWA ``_h100_training_default``: native aux at S 1024 / 2048 / 4096,
     # N 384 / 768), and the registry-driven cases above run 8 MSA rows, so none of them reaches the tma_static OPM family or the
@@ -333,9 +345,15 @@ def _run_block(c: dict) -> None:
         )
 
         d, n = c["d"], c["L"]
-        model = BidirectionalTriangleMultiplication(d, implementation=impl, p_drop=0.25)
-        mask = torch.rand(1, n, device="cuda") > 0.15
+        model = BidirectionalTriangleMultiplication(d, implementation=impl, p_drop=c.get("p", 0.25))
+        mask = torch.rand(1, n, device="cuda") > 0.15 if c.get("masked", True) else None
         args = (torch.randn(1, n, n, d, device="cuda", dtype=dt), mask)
+    elif c["kind"] == "trimul_directions":
+        from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
+
+        d, n = c["d"], c["L"]
+        model = TriangleMultiplication(d, outgoing=c["outgoing"], implementation=impl, p_drop=c["p"])
+        args = (torch.randn(1, n, n, d, device="cuda", dtype=dt), torch.ones(1, n, device="cuda", dtype=torch.bool))
     elif c["kind"] == "bias_only_dit":
         from miniworld_engine.modules.bias_only_dit import (
             BiasOnlyDiTBlock,
