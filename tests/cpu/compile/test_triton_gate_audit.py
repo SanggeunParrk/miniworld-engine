@@ -49,6 +49,11 @@ MODULE_OPS = {
     "triangle_attention_heads": ("triangle_attention",),
     "triangle_multiplication": ("triangle_multiplication",),
     "triangle_multiplication_bidirectional": ("triangle_multiplication",),
+    # whole DiT blocks: the union of the ops their parts gate on
+    "dit": ("augmented_attention", "conditioned_transition", "adaptive_layernorm"),
+    "bias_only_dit": ("bias_only_pair_bias", "bias_only_core", "conditioned_transition", "adaptive_layernorm"),
+    "local_dit": ("augmented_attention", "conditioned_transition", "adaptive_layernorm"),
+    "swa_dit": ("swa_dit", "swa_atom_attention", "rms_norm_modulation", "gated_residual", "swiglu_ffn"),
 }
 
 

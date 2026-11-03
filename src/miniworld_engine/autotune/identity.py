@@ -47,11 +47,15 @@ _SKIP_DIRS = {"notes", "gen", "__pycache__", "plans", "data"}      # not shipped
 SAFETY_PY = (
     "settings.py", "modules/dispatch.py",
     "autotune/cache.py", "autotune/shape_key.py", "autotune/policy.py", "autotune/builder.py", "autotune/derive.py",
-    "autotune/checkpoint_cases.py", "autotune/module_registry.py", "autotune/native.py", "autotune/fused_config.py",
+    "autotune/checkpoint_cases.py", "autotune/dit_cases.py", "autotune/stack_cases.py", "autotune/mpnn_cases.py", "autotune/module_registry.py", "autotune/native.py", "autotune/fused_config.py",
     "autotune/hopper_cuda_config.py", "autotune/native_history.py",
 )
 SAFETY_DATA = ("kernels/registry/registry.csv", "kernels/registry/registry_module.csv")
 SAFETY_GLOBS = ("build/gpu_to_kernels/*.csv",)
+#: Safety data a derivation unit does NOT depend on: ``registry_module.csv`` only says which units exist. Everything a unit takes from its
+#: row (module, stream, dims, length, impl, dtype, compute, mode, option, augmentation) is in its label, so a row added, edited or removed
+#: runs, re-runs or drops exactly the units whose labels it adds or removes -- never the other rows' units.
+UNIT_EXEMPT_DATA = ("kernels/registry/registry_module.csv",)
 
 _PATH_RE = re.compile(r"(?<![\w/.-])((?:[\w.-]+/)*[\w.-]+\.(?:py|cu|cuh|inc|h|cpp|csv))\b")
 _DOTTED_RE = re.compile(r"\bminiworld_engine(?:\.\w+)+")
@@ -313,6 +317,11 @@ def safety_files(*, data: bool = True) -> list[str]:
     return sorted(set(out))
 
 
+def unit_safety_files() -> list[str]:
+    """The safety set a derivation unit lists: :func:`safety_files` less :data:`UNIT_EXEMPT_DATA`."""
+    return [p for p in safety_files() if p not in UNIT_EXEMPT_DATA]
+
+
 # --------------------------------------------------------------------------------------------------------------- registry rows
 @functools.cache
 def _registry_text(mtime: int) -> dict[str, dict]:
@@ -422,11 +431,11 @@ def unit_files(executed: Iterable[str], modules: Iterable[str], data: Iterable[s
     ``executed`` -- package files whose code ran while the unit was recorded; ``modules`` -- dotted names its import statements
     named (executed lazy imports included); ``data`` -- package files it opened. Plus what a constant imported at module level can
     come from (:func:`strict_closure` of the first two), the files of every kernel it launched (:func:`launch_files`: row file,
-    JIT helpers, driver) and the safety set."""
+    JIT helpers, driver) and the safety set. Never :data:`UNIT_EXEMPT_DATA`, even when the unit opened it."""
     seeds = set(executed)
     for name in modules:
         seeds.update(module_files(name))
-    files = strict_closure(seeds) | set(data) | set(safety_files())
+    files = (strict_closure(seeds) | set(data) | set(unit_safety_files())) - set(UNIT_EXEMPT_DATA)
     for op in set(ops):
         files.update(launch_files(op))
     return sorted(files)

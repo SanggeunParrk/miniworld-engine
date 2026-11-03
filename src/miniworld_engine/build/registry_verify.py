@@ -149,15 +149,16 @@ def verify(args) -> int:
     data = describe(python, tree, arch, unit_env(tree, out / "cache" / "expand", "", extra))
     units: list[dict] = []
     for r in data["rows"]:
-        units.append({"kind": "row", "uid": f"r{r['row']:03d}", "id": r["id"], "calls": r["calls"], "not_arch": r["not_arch"],
-                      "excluded": r["excluded"], "arch": arch, "row": r["row"]})
+        units.append({"kind": "row", "uid": f"r{r['row']:03d}", "id": r["id"], "key": r.get("key", r["id"]), "text": r.get("text", ""),
+                      "calls": r["calls"], "not_arch": r["not_arch"], "excluded": r["excluded"], "arch": arch, "row": r["row"]})
     if not args.no_kernels:
         for k in data["kernels"]:
             units.append({"kind": "kernel", "uid": "k-" + k["kernel"], "id": f"kernel {k['kernel']}", "calls": 1, "not_arch": k["reason"],
                           "excluded": [], "arch": arch, "kernel": k["kernel"], "backend": k["backend"]})
-    if args.row:   # a debugging subset: row numbers (1-based) and / or the word "kernels"
+    kernels = set(getattr(args, "kernel", None) or [])
+    if args.row or kernels:   # a subset (``miniworld-engine verify`` names it from the graph): row numbers (1-based), the word "kernels", kernel names
         keep = {f"r{int(n):03d}" for n in args.row if n != "kernels"}
-        units = [u for u in units if u["uid"] in keep or (u["kind"] == "kernel" and "kernels" in args.row)]
+        units = [u for u in units if u["uid"] in keep or (u["kind"] == "kernel" and ("kernels" in args.row or u["kernel"] in kernels))]
     work = sorted((u for u in units if not u["not_arch"]), key=lambda u: -u["calls"])
     for u in units:
         if u["not_arch"]:
@@ -220,9 +221,12 @@ def verify(args) -> int:
               "missing_artifacts": sorted({n for u in units if u["summary"] for n in u["summary"]["names"]}),
               "seconds": round(time.monotonic() - started)}
     (out / "summary.json").write_text(json.dumps({"totals": totals, "units": units}, indent=1) + "\n")
-    # the artifact names every registry row was served from: tests/cpu/builder/data/registry_row_artifacts_<arch>.json is this file
-    (out / "row_artifacts.json").write_text(json.dumps({"arch": arch, "rows": {u["id"]: u["summary"]["artifacts"] for u in rowu if u["summary"]}},
-                                                       indent=1, sort_keys=True) + "\n")
+    # the artifact names every registry row was served from, per stable row key (module/stream/dims) with the digest of what the row declared:
+    # tests/cpu/builder/data/registry_row_artifacts_<arch>.json holds the clean ones (``miniworld-engine verify`` merges them in)
+    (out / "row_artifacts.json").write_text(json.dumps({"arch": arch, "rows": {
+        u["key"]: {"text": u["text"], "artifacts": u["summary"]["artifacts"], "clean": u["summary"]["ok"] == u["summary"]["calls"],
+                   "missing": sorted(u["summary"]["names"])}
+        for u in rowu if u["summary"]}}, indent=1, sort_keys=True) + "\n")
     text = table(rowu + keru)
     (out / "table.md").write_text(text + "\n")
     print(text)

@@ -65,7 +65,7 @@ def test_a_units_file_set_holds_what_ran_what_it_imports_what_it_launched_and_th
     assert "kernels/_tf32.py" in files                                                   # an executed import
     assert "autotune/configs/grid/adaln_gemm_gate_triton.csv" in files                   # data it opened
     assert "kernels/drivers/adaln.py" in files                                           # the launched kernel's driver
-    assert set(identity.safety_files()) <= files
+    assert set(identity.unit_safety_files()) <= files
     # a file that did not run and is reached from nothing it ran is not in the set
     assert "kernels/rope/triton/main.py" not in files
 
@@ -190,6 +190,19 @@ def test_a_file_added_to_the_safety_set_stales_every_unit(fixture):
     (fixture.pkg / "autotune" / "cache.py").write_text("C = 1\n")
     identity.refresh()
     assert set(plan.stale_units(doc)) == {u.label for u in UNITS}
+
+
+def test_a_registry_module_row_edit_leaves_every_other_unit_reusable(fixture):
+    """``registry_module.csv`` says which units exist; what a unit takes from its row is its label. A unit that opened it does not list it."""
+    (fixture.pkg / "kernels" / "registry").mkdir()
+    csv = fixture.pkg / "kernels" / "registry" / "registry_module.csv"
+    csv.write_text("module,stream\nm1,token_pair\n")
+    identity.refresh()
+    _, doc = _run(fixture, "first")
+    csv.write_text("module,stream\nm1,token_pair\nm3,token_pair\n")
+    identity.refresh()
+    assert plan.stale_units(doc) == {}
+    assert "kernels/registry/registry_module.csv" not in identity.unit_files([], [], ["kernels/registry/registry_module.csv"], [])
 
 
 def test_all_reused_parallel_run_starts_no_worker(fixture):

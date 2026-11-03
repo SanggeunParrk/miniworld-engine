@@ -241,7 +241,7 @@ class LayerNorm(ImplementationSwitch, _Fp32ParamsMixin, nn.LayerNorm):
         # to a static checker and leaves an `int & ~Integral` shard in the else branch.
         shape: tuple[int, ...] = (
             tuple(normalized_shape)
-            if isinstance(normalized_shape, (list, Size))
+            if isinstance(normalized_shape, (list, tuple))   # `Size` is a tuple; `nn.LayerNorm.normalized_shape` is a plain tuple
             else (int(normalized_shape),)
         )
         self.normalized_shape = shape
@@ -283,13 +283,18 @@ class LayerNorm(ImplementationSwitch, _Fp32ParamsMixin, nn.LayerNorm):
             # activation (and for stability); restore the activation dtype.
             orig_type = input.dtype
             return super().forward(input.float()).to(orig_type)
+        # The Triton kernels' shape key reads the activation's (B, L, D) / (B, L, L, D) shape: an unbatched [L, D] (or a single row) is one
+        # batch of it.
+        lead = input.dim() < 3
+        rows = input.reshape(1, -1, input.shape[-1]) if lead else input
         if backend in {KernelBackend.PORTABLE, KernelBackend.CUEQUIVARIANCE}:
-            return kernels.triton_layernorm(
-                input,
+            out = kernels.triton_layernorm(
+                rows,
                 self.weight,
                 self.bias,
                 self.eps,
             )
+            return out.reshape(input.shape) if lead else out
         if backend == KernelBackend.CUDA and input.is_cuda and restricted_card(input.device):
             # H100 / B200 (no Triton there): the general CUDA LayerNorm, any width / row count, bf16 / fp16 / fp32; an input it
             # does not take runs the PyTorch statements.
@@ -306,12 +311,13 @@ class LayerNorm(ImplementationSwitch, _Fp32ParamsMixin, nn.LayerNorm):
             # miniworld = our auto-routing LayerNorm: forward fused triton (HBM-bound,
             # at the bandwidth wall) + backward auto-dispatched per shape
             # (persistent / partial / atomic). See kernels/layernorm.
-            return kernels.layernorm_kernel(
-                input,
+            out = kernels.layernorm_kernel(
+                rows,
                 self.weight,
                 self.bias,
                 self.eps,
             )
+            return out.reshape(input.shape) if lead else out
         raise InvalidImplementationError(self.implementation)
 
 

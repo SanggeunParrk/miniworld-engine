@@ -133,6 +133,8 @@ class Graph:
             return              # a comment or docstring pointing at a doc ("see docs/x.md") is not built from it
         if kind == "ref" and PurePosixPath(dep).suffix in NOT_CODE and PurePosixPath(node).suffix in (".py", *CCODE) and not node.startswith("tests/"):
             return              # a comment naming pyproject.toml or a figure; only a test that reads such a file depends on it
+        if kind == "ref" and PurePosixPath(node).suffix in CCODE and PurePosixPath(dep).suffix == ".py":
+            return              # a C/CUDA comment naming a Python file ("Derived by derive.py"): CUDA source cannot depend on Python
         if node != dep and dep in self.nodes and node in self.nodes:
             self.kinds[(node, dep)].add(kind)
         if node != dep and dep in self.nodes and node in self.nodes and (dep not in self.deps[node] or self.deps[node][dep] == "lazy"):
@@ -514,7 +516,9 @@ def _dispatch(g: Graph, resolve: _Resolver) -> None:
         for op in _op_kernels(rows):
             targets[op].append((records, "OP_KERNELS"))             # an op name resolves through the table, not to every kernel it lists
     for mod in _registry_modules():
-        targets[mod].append((f"{SRC}/kernels/registry/registry_module.csv", None))
+        # one node per module of registry_module.csv: a scope naming a module depends on that module's rows, not on every row
+        g.nodes[f"{MODULE_ROW_PREFIX}{mod}"] = "registry-module-row"
+        targets[mod].append((f"{MODULE_ROW_PREFIX}{mod}", None))
     for p, fs in g.syms.items():
         for scope, names in fs.ext_names.items():
             for name in names:
@@ -761,6 +765,27 @@ def reach_symbolic(g: Graph, seeds: dict[str, set[str]]) -> dict[str, str]:
 
 
 REGISTRY_CSV = f"{SRC}/kernels/registry/registry.csv"
+MODULE_CSV = f"{SRC}/kernels/registry/registry_module.csv"
+MODULE_ROW_PREFIX = "registry-module-row:"
+#: What reads the module registry as DATA: a test that imports one of these (or opens the csv) reads every row, so any row edit reaches it.
+#: Everything else that consumes rows does it through the row-level actions (derive / bundle / verify judge each row by its own digest).
+MODULE_ROW_READERS = (f"{SRC}/autotune/module_registry.py", f"{SRC}/build/registry_calls.py", MODULE_CSV)
+
+
+def module_rows_changed(base: str, head: str | None = None) -> list[str] | None:
+    """The modules whose ``registry_module.csv`` rows were added, removed or edited since ``base``; None when the header changed (the
+    whole file then)."""
+    def rows(text: str):
+        lines = text.splitlines()
+        return (lines[0] if lines else ""), collections.Counter(lines[1:])
+    try:
+        old_head, old = rows(_git("show", f"{base}:{MODULE_CSV}"))
+    except subprocess.CalledProcessError:
+        return None
+    new_head, new = rows(_git("show", f"{head}:{MODULE_CSV}") if head else _text(MODULE_CSV))
+    if old_head != new_head:
+        return None
+    return sorted({line.split(",", 1)[0] for line in (old - new) + (new - old)})
 
 
 def _rows(text: str) -> dict[str, dict]:
@@ -827,9 +852,25 @@ def changes(base: str, head: str | None = None, graph: Graph | None = None, same
             moved[ident] = files_
             seeds.append(ident)
     sym_seeds = changed_symbols(g, changed, base, head, rows, same_tree)
-    return {"graph": g, "changed": changed, "cosmetic": cosmetic, "deleted": deleted, "moved": moved, "rows": rows,
+    module_rows = module_rows_changed(base, head) if MODULE_CSV in changed else None
+    if module_rows is not None:
+        # a row-only edit of registry_module.csv: the scopes naming a changed module, and the tests reading the registry as data -- not
+        # everything the file reaches through the registry readers (a one-row edit selected 371 tests that way)
+        sym_seeds.pop(MODULE_CSV, None)
+        sym_seeds.update({f"{MODULE_ROW_PREFIX}{m}": {symbols.ALL} for m in module_rows if f"{MODULE_ROW_PREFIX}{m}" in g.nodes})
+        readers = set(MODULE_ROW_READERS)
+        # a test that reads the registry but names its modules (`_rows("triangle_multiplication")`) is reached through those modules' row
+        # nodes; one that names none reads every row. It is selected itself, not walked from: a test file is no one's dependency (a
+        # conftest naming test files would carry the walk to every test)
+        row_readers = sorted(t for t, kind in g.nodes.items() if kind in ("test", "test-gpu") and readers & g.deps[t].keys()
+                             and not any(d.startswith(MODULE_ROW_PREFIX) for d in g.deps[t]))
+    else:
+        row_readers = []
+    sym_reached = reach_symbolic(g, sym_seeds)
+    sym_reached.update({t: "reads every registry_module.csv row" for t in row_readers if t not in sym_reached})
+    return {"graph": g, "changed": changed, "cosmetic": cosmetic, "deleted": deleted, "moved": moved, "rows": rows, "module_rows": module_rows,
             "reached": reach(g, seeds), "reached_lazy": reach(g, seeds, lazy=True),
-            "sym_reached": reach_symbolic(g, sym_seeds), "sym_seeds": sym_seeds,
+            "sym_reached": sym_reached, "sym_seeds": sym_seeds,
             "card_reached": reach_cards(g, seeds), "card_reached_lazy": reach_cards(g, seeds, lazy=True)}
 
 
@@ -983,7 +1024,7 @@ def actions(result: dict, card: str = "", accessible: bool = True) -> list[str]:
         for arch in ([card] if card else sorted(derivation_plans())):
             if arch not in derivation_plans():
                 continue
-            todo.append(f"{run if card else ''}dev derive --arch {arch} --out src/miniworld_engine/autotune/plans/{arch}/registry_kernel.csv: re-runs only "
+            todo.append(f"{run if card else ''}miniworld-engine derive (arch {arch}, plans/{arch}): re-runs only "
                         f"the units whose recorded files changed, reuses the rest; then viz.sweep_page "
                         f"-- moved by {len(files_)} file(s): " + ", ".join(files_[:4]) + (" ..." if len(files_) > 4 else ""))
     if result.get("rows"):
@@ -1004,22 +1045,22 @@ def actions(result: dict, card: str = "", accessible: bool = True) -> list[str]:
     cuda_changed = [n for n in by_kind["cuda-source"] if n in changed]
     if rebuilds:
         names = sorted({a for a, _ in rebuilds})
-        todo.append(f"{run}CUDA artifacts that rebuild ({len(names)}): " + ", ".join(names[:8]) + (" ..." if len(names) > 8 else ""))
+        todo.append(f"{run}CUDA artifacts that rebuild ({len(names)}): " + ", ".join(names[:8]) + (" ..." if len(names) > 8 else "") + " -- miniworld-engine bundle")
     elif by_kind["cuda-source"] or cuda_changed:
         todo.append(f"{run}CUDA sources reached ({len(by_kind['cuda-source'])}): "
                     + ("rebuild the prebuilt bundle of this card" if not accessible else "pass --manifest <bundle> to name the artifacts that rebuild"))
     gpu_tests = sorted(by_kind["test-gpu"])
     cpu_tests = sorted(by_kind["test"])
     if cpu_tests:
-        todo.append(f"{tag}CPU tests reached: {len(cpu_tests)} files")
+        todo.append(f"{tag}CPU tests reached: {len(cpu_tests)} files -- miniworld-engine test")
     if gpu_tests:
-        todo.append(f"{run}GPU tests reached: {len(gpu_tests)} files")
+        todo.append(f"{run}GPU tests reached: {len(gpu_tests)} files -- miniworld-engine test")
     docs = sorted(by_kind["doc"])
     if docs:
         todo.append(f"{tag}docs that name what changed ({len(docs)}): " + ", ".join(docs[:8]) + (" ..." if len(docs) > 8 else ""))
     bench = sorted(by_kind["benchmark"])
     if bench:
-        todo.append(f"{run}benchmark files reached: {len(bench)}")
+        todo.append(f"{run}benchmark files reached: {len(bench)} -- miniworld-engine bench")
     return todo
 
 
@@ -1033,7 +1074,7 @@ def pending(result: dict) -> list[str]:
     if ev.get("native_stale"):
         out.append(f"{tag}native caches stale ({len(ev['native_stale'])}): dev restamp-native -- {', '.join(ev['native_stale'][:6])}")
     if ev.get("units_stale"):
-        out.append(f"{tag}derivation: {len(ev['units_stale'])} of {ev.get('units_total', '?')} units stale (the rest are reused): dev derive")
+        out.append(f"{tag}derivation: {len(ev['units_stale'])} of {ev.get('units_total', '?')} units stale (the rest are reused): miniworld-engine derive")
     return out
 
 

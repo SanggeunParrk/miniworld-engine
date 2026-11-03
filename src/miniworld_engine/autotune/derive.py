@@ -39,8 +39,10 @@ import collections
 import contextlib
 import csv
 import dataclasses
+import functools
 import itertools
 import os
+import sys
 from pathlib import Path
 
 import torch
@@ -93,11 +95,11 @@ def units(rows: list[ModuleRow], arch: str | None = None) -> list[DeriveUnit]:
     not, and the cross product is what made the unit count explode.
     """
     from miniworld_engine import build as build_matrix
-    from miniworld_engine.autotune.builder import SWITCHES
+    from miniworld_engine.autotune.builder import switch_applies
 
     sm = "sm_" + normalise_arch(arch).removeprefix("sm") if arch else None
 
-    def applies(option, mode: str) -> bool:
+    def applies(option, mode: str, dtype: str) -> bool:
         """A switch selects among kernels on ONE side of the pass.
 
         ``ln_bwd_path`` pinned during an eval unit changes nothing and records exactly what the
@@ -107,10 +109,7 @@ def units(rows: list[ModuleRow], arch: str | None = None) -> list[DeriveUnit]:
         """
         if option is None:
             return True
-        name = option[0]
-        if name == "p_drop":
-            return mode == "train"
-        return mode in SWITCHES[name][1]
+        return switch_applies(option[0], mode, dtype)
 
     out = []
     for row in rows:
@@ -124,7 +123,7 @@ def units(rows: list[ModuleRow], arch: str | None = None) -> list[DeriveUnit]:
                     from miniworld_engine.autotune import policy
                     if not policy.allows(row.stream, length, mode, impl, option, row.impls):
                         continue
-                    if not applies(option, mode):
+                    if not applies(option, mode, dtype):
                         continue
                     if (sm and option and option[0] == "trimul_impl"
                             and not build_matrix.allows(sm, "triangle_multiplication", option[1], dtype)):
@@ -252,6 +251,12 @@ def _pin(option: tuple[str, str] | None):
     name, raw = option
     if name == "p_drop":
         yield float(raw)
+        return
+    if name not in SWITCH_SETTINGS:          # a torch-level switch (``builder.torch_switch``: the fp32 matmul precision)
+        from miniworld_engine.autotune.builder import torch_switch
+
+        with torch_switch(name, raw):
+            yield 0.0
         return
     field, parse = SWITCH_SETTINGS[name]
     before = getattr(settings.current(), field)
@@ -386,7 +391,9 @@ def record(unit: DeriveUnit, cases: dict) -> tuple[list, str | None]:
 
     case = cases[unit.module]
     dims = dict(unit.dims)
-    dtype = getattr(torch, unit.dtype)
+    from miniworld_engine.autotune.module_registry import torch_dtypes
+
+    dtype, act = torch_dtypes(unit.dtype)          # parameters, activations (``master``: fp32 parameters, bf16 activations)
     compute = getattr(torch, unit.compute) if unit.compute else None
     sink: list = []
     install_recorder(sink)
@@ -400,7 +407,7 @@ def record(unit: DeriveUnit, cases: dict) -> tuple[list, str | None]:
         try:
             module = case.factory(dims, p_drop, unit.impl, dtype)
             module.train(unit.mode == "train")
-            args = case.inputs(unit.augmentation, unit.length, dims, dtype, unit.stream)
+            args = case.inputs(unit.augmentation, unit.length, dims, act, unit.stream)
             kw = {"compute_dtype": compute} if compute is not None else {}
             if unit.mode == "train":
                 args = tuple(
@@ -466,8 +473,70 @@ _FAKED_NATIVE_FAMILIES = tuple(
     for family in (
         "layernorm.cuda.general", "layernorm.cuda.pipe", "rmsnorm.cuda", "adaln.cuda", "conditioned_transition.cuda",
         "dit_variants.cuda", "augmented_attention.cuda", "trimul_inproj.cuda.", "triangle_attention.cuda.h100_triattn",
+        # the H100 Transition launches (fused / wide / generic sm90a) carry fakes; without them the inference path of every
+        # transition and pairformer unit launched on FakeTensors (job 41876: illegal address, then every later unit of the worker)
+        "transition.cuda.",
+        # the SWA atom block: its launches (swa_dit_block_fwd / bwd, the native H100 modulation and casts) carry fakes and record no selector
+        "swa_dit.",
     )
-) + ("miniworld_engine.kernels.integrations.",)
+) + ("miniworld_engine.kernels.integrations.",
+     # ProteinMPNN's feature op (`mpnn_features_radial_dw_v1`: a torch.compile'd backward-only region behind an opaque fake) launched its
+     # inductor kernel on FakeTensors and failed every MPNN training unit with an illegal address
+     "miniworld_engine.modules.mpnn.")
+
+
+@functools.cache
+def _records_selector(module: str) -> bool:
+    """A module of a faked family whose ops record a native selector (``choose_config``) and answer FakeTensors themselves
+    (``transition.cuda.fused_sm90a``): faking its ops skipped the selector, and ``transition_{fwd,bwd}_residual_sm90_cuda`` fell out of the
+    plan. Its ops run; the others of the family stay faked."""
+    import inspect
+
+    try:
+        return "choose_config(" in inspect.getsource(sys.modules[module])
+    except (KeyError, OSError, TypeError):
+        return False
+
+
+class _FakeGuard:
+    """A loaded extension as the derivation sees it: a call with a FakeTensor argument raises instead of launching.
+
+    A pybind launch on FakeTensors reads a null pointer, and the illegal address is sticky: it failed every later unit of the worker
+    (job 41876: 96 units, most of them innocent). A launch with no fake contract (``kernels/_compile.opaque(fake=...)``) now fails its own
+    unit with the extension and function named, and the worker goes on."""
+
+    def __init__(self, ext, name: str) -> None:
+        self._ext, self._name = ext, name
+
+    def __getattr__(self, attr: str):
+        fn = getattr(self._ext, attr)
+        if not callable(fn):
+            return fn
+
+        def call(*args, **kwargs):
+            from torch._subclasses.fake_tensor import is_fake
+
+            flat = [t for a in (*args, *kwargs.values()) for t in (a if isinstance(a, (list, tuple)) else (a,))]
+            if any(torch.is_tensor(t) and is_fake(t) for t in flat):
+                raise RuntimeError(f"derive: {self._name}.{attr} was called on FakeTensors and has no fake contract "
+                                   "(kernels/_compile.opaque fake=...): not launched")
+            return fn(*args, **kwargs)
+        return call
+
+
+def install_extension_guard() -> None:
+    """Every extension ``_nvcc`` loads from here on is wrapped in :class:`_FakeGuard`."""
+    from miniworld_engine.kernels import _nvcc
+
+    if getattr(_nvcc._load, "_derive_guard", False):
+        return
+    original = _nvcc._load
+
+    def guarded(kind_label, name, kwargs, sources=None, inline=False):
+        ext = original(kind_label, name, kwargs, sources=sources, inline=inline)
+        return _FakeGuard(ext, name) if ext is not None else ext
+    guarded._derive_guard = True
+    _nvcc._load = guarded
 
 
 def install_native_recorders() -> None:
@@ -520,7 +589,7 @@ def install_native_recorders() -> None:
         from torch._subclasses.fake_tensor import is_fake
 
         module = getattr(fn, "__module__", "") or ""
-        if not module.startswith(_FAKED_NATIVE_FAMILIES):
+        if not module.startswith(_FAKED_NATIVE_FAMILIES) or _records_selector(module):
             return False
         flat = [t for a in (*args, *kwargs.values()) for t in (a if isinstance(a, (list, tuple)) else (a,))]
         return any(is_fake(t) for t in flat if torch.is_tensor(t))
@@ -582,6 +651,17 @@ def install_native_recorders() -> None:
                 require_fake(first)
                 return fn(first, *args, **kwargs)
             return run
+
+        # The Boltz-2 / RoseTTAFold3 / Chai-1 / AF3 DiT stacks (``kernels.dit_variants.interface``): the native inference composes row
+        # kernels, cubins launched through the driver and extensions with no fakes of their own (a cubin launch on FakeTensors was a sticky
+        # illegal address that failed every later unit of its worker). The stack's contract is its output: the shape of ``single``.
+        from miniworld_engine.kernels.dit_variants import interface as dit_variants
+
+        def stack_contract(stack, single, *args, **kwargs):
+            require_fake(single)
+            return single.new_empty(single.shape)
+        dit_variants.inference = stack_contract  # ty: ignore[invalid-assignment]
+        dit_variants.atom_inference = stack_contract  # ty: ignore[invalid-assignment]
 
         opm_cuda.gather = fake_first(  # ty: ignore[invalid-assignment]
             lambda prod, groups, k, *a, **kw: prod.new_empty(
@@ -778,6 +858,7 @@ def _collect(rows, on_unit, arch, reuse) -> tuple[dict, list, dict]:
         install_no_calibration()
         install_module_apply()
         install_native_recorders()
+        install_extension_guard()
         case_by_name = {c.name: c for c in cases()}
     entries: dict = {}
     skipped: list = []

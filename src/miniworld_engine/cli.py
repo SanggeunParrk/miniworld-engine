@@ -585,20 +585,20 @@ def apply_config_dir(directory: Path) -> int:
 KERNEL_TARGETS: dict[str, tuple[str, ...]] = {
     "dual_gemm_epilogue": ("triangle_multiplication_bidirectional", "triangle_multiplication"),
     "dual_gemm_epilogue_bwd": ("triangle_multiplication",),
-    "gemm_epilogue": ("layernorm_linear_native",),
+    "gemm_epilogue": ("triangle_attention_heads", "attention_pair_bias", "augmented_attention"),   # LayerNorm + Linear inside these modules
     # gemm_epilogue_bwd imports adaln, augmented_attention, bias_only_attention,
     # conditioned_transition, layernorm and layernorm_linear -- it benches the shared GEMM-epilogue
     # backward across all of them, so its cache comes from all of their cases.
     "gemm_epilogue_bwd": ("adaptive_layernorm", "augmented_attention", "attention_pair_bias",
                           "conditioned_transition", "layernorm_native",
-                          "layernorm_linear_native"),
+                          "triangle_attention_heads"),
     "gemm_gate": ("triangle_multiplication",),
     "gemm_gate_bwd": ("triangle_multiplication",),
     "transition_b2b": ("transition",),
     "transition_b2b_bwd": ("transition",),
     "layernorm": ("layernorm_native", "triangle_multiplication"),
     "layernorm_bwd": ("layernorm_native", "triangle_multiplication"),
-    "adaln": ("adaptive_layernorm", "layernorm_linear_native"),
+    "adaln": ("adaptive_layernorm", "dit"),
     "adaln_bwd": ("adaptive_layernorm",),
     "triangle_attention": ("triangle_attention_bidirectional", "triangle_attention_heads"),
     "bias_only_attention": ("attention_pair_bias",),
@@ -1778,6 +1778,64 @@ def cmd_ladder(args: argparse.Namespace) -> int:
     return subprocess.call([sys.executable, str(script), *(args.ladder_args or ["--help"])], cwd=repo, env=env)
 
 
+def cmd_status(args: argparse.Namespace) -> int:
+    """`status`: what every release action would do now, from the code graph (``build.actions``). Does nothing."""
+    from miniworld_engine.build import actions
+    from miniworld_engine.build.action_records import Refused
+
+    try:
+        return actions.cmd_status(args)
+    except Refused as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+
+
+def _run_action(name: str, args: argparse.Namespace) -> int:
+    from miniworld_engine.build import actions
+    from miniworld_engine.build.action_records import Refused
+
+    try:
+        return getattr(actions, f"cmd_{name}")(args)
+    except Refused as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    """`test`: only the test files the code graph names."""
+    return _run_action("test", args)
+
+
+def cmd_bundle(args: argparse.Namespace) -> int:
+    """`bundle`: the graph-stale prebuilt kernels (the internals: `dev bundle-kernels`)."""
+    return _run_action("bundle", args)
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """`verify`: the graph-scoped release gate (the internals: `dev bundle-verify`)."""
+    return _run_action("verify", args)
+
+
+def cmd_derive_action(args: argparse.Namespace) -> int:
+    """`derive`: only the stale derivation units (the internals: `dev derive`)."""
+    return _run_action("derive", args)
+
+
+def cmd_bench_action(args: argparse.Namespace) -> int:
+    """`bench`: only the modules the graph reaches (the internals: `bench_module`)."""
+    return _run_action("bench", args)
+
+
+def cmd_wheel_action(args: argparse.Namespace) -> int:
+    """`wheel`: refused without records (the internals: `dev build-wheel`)."""
+    return _run_action("wheel", args)
+
+
+def cmd_release_action(args: argparse.Namespace) -> int:
+    """`release`: the upload gate; uploads only with --confirm."""
+    return _run_action("release", args)
+
+
 def _resolve_gpus(spec: str) -> list[int]:
     """`--gpus 4` -> [0,1,2,3]; `--gpus 0,3` -> [0,3]; `--gpus all` -> every visible device."""
     if spec == "all":
@@ -2097,7 +2155,7 @@ def build_parser() -> argparse.ArgumentParser:
     rsn.set_defaults(func=cmd_restamp_native)
 
     bnd = dev.add_parser("bundle-kernels",
-                         help="compile every CUDA artifact a production run requests on this arch and package them "
+                         help="INTERNAL (use `bundle`, which scopes this from the code graph): compile every CUDA artifact a production run requests on this arch and package them "
                               "as an installable kernel bundle (docs/kernels/prebuilt-kernels.md)")
     bnd.add_argument("--arch", required=True, help="sm90 / sm100: the arch of this GPU")
     bnd.add_argument("--out", required=True, help="work directory (cache/, records/, logs/, summary.json)")
@@ -2123,7 +2181,7 @@ def build_parser() -> argparse.ArgumentParser:
     bnd.set_defaults(func=cmd_bundle_kernels)
 
     bvf = dev.add_parser("bundle-verify",
-                         help="the release gate: install the wheels, run every call registry_module.csv declares (and the "
+                         help="INTERNAL (use `verify`, which scopes this from the code graph): the release gate: install the wheels, run every call registry_module.csv declares (and the "
                               "kernel-level registry.csv rows) with an empty cache and JIT off; nonzero on any missing / error")
     bvf.add_argument("--wheels", default="", help="directory of the built wheels (the engine wheel and the kernel wheels of "
                                                   "--python's ABI are unzipped into <out>/installed)")
@@ -2133,13 +2191,14 @@ def build_parser() -> argparse.ArgumentParser:
     bvf.add_argument("--out", required=True, help="work directory (installed/, cache/<unit>/, results/, logs/, summary.json, table.md)")
     bvf.add_argument("--gpus", default="", help="GPU indices, one unit runs per GPU at a time (default: CUDA_VISIBLE_DEVICES or 0)")
     bvf.add_argument("--row", nargs="+", default=[], help="debugging subset: registry row numbers and / or 'kernels'")
+    bvf.add_argument("--kernel", action="append", default=[], help="debugging subset: only this kernel-level unit (repeatable)")
     bvf.add_argument("--no-kernels", action="store_true", help="skip the kernel-level (registry.csv) units")
     bvf.add_argument("--env", action="append", default=[], metavar="KEY=VALUE", help="extra environment for the unit processes")
     bvf.add_argument("--timeout", type=float, default=7200.0, help="seconds one unit process may run before it is killed")
     bvf.set_defaults(func=cmd_bundle_verify)
 
     bwh = dev.add_parser("build-wheel",
-                         help="the engine's platform wheel with the prebuilt kernels of this Python ABI "
+                         help="INTERNAL (use `wheel`, which refuses without bundle and verify records): the engine's platform wheel with the prebuilt kernels of this Python ABI "
                               "(docs/kernels/prebuilt-kernels.md)")
     bwh.add_argument("--prebuilt-root", default="", help="default: the package's _prebuilt/")
     bwh.add_argument("--out", default="dist", help="directory for the wheel")
@@ -2214,6 +2273,38 @@ def build_parser() -> argparse.ArgumentParser:
     bm.add_argument("--mode", default="inference", choices=("inference", "training"))
     bm.set_defaults(func=cmd_bench_module, config_type=None)
 
+    # The release actions (docs/actions.md): each runs the code graph first, prints its scope, does only that, writes a record. No path, filter
+    # or family argument exists on any of them; the only widening is `--all --reason "<text>"`.
+    def _graph_action(name: str, help_: str, func) -> argparse.ArgumentParser:
+        p = sub.add_parser(name, help=help_)
+        p.add_argument("--base", default="", help="graph base revision (default: the last uploaded release tag, `git describe --tags --match 'v*'`)")
+        p.add_argument("--all", action="store_true", help="a deliberate FULL run instead of the graph's scope; needs --reason, which is printed and recorded")
+        p.add_argument("--reason", default="", help='why a full run is needed (only with --all), e.g. --reason "torch 2.14 upgrade"')
+        p.add_argument("--retry-failing", action="store_true",
+                       help="also rerun what the last run recorded as failing (after an environment fix the graph cannot see); never widens beyond it")
+        p.set_defaults(func=func)
+        return p
+
+    act = sub.add_parser("status", help="print what every action would do now (the code graph's scope per action); does nothing")
+    act.add_argument("--base", default="", help="graph base revision (default: the last uploaded release tag)")
+    act.set_defaults(func=cmd_status, all=False, reason="")
+    _graph_action("test", "run ONLY the test files the code graph names (CPU together, GPU files one per free GPU)", cmd_test)
+    bun = _graph_action("bundle", "build the prebuilt kernels the graph says are stale (never drops a name the previous release has)", cmd_bundle)
+    bun.add_argument("--workers", type=int, default=16, help="driver processes per GPU")
+    bun.add_argument("--prune-reviewed", default="", metavar="NAMES_FILE",
+                     help="remove the artifacts named in this file from the bundle; every name must be in the reviewed allow-list "
+                          "tests/cpu/builder/data/prebuilt_names_allowed_drops.txt")
+    _graph_action("verify", "empty cache, JIT off: the rows the graph says changed, plus a whole-bundle registry-row audit", cmd_verify)
+    _graph_action("derive", "re-record only the derivation units whose recorded files changed", cmd_derive_action)
+    _graph_action("bench", "time only the benchmark modules the graph reaches (compiled / CUDA-graph, never eager)", cmd_bench_action)
+    whl = sub.add_parser("wheel", help="build the wheel(s); refused without passing bundle and verify records for this exact tree and version")
+    whl.add_argument("--split", action="store_true", help="one kernel wheel per <arch>-cu<XY> and a pure engine wheel (docs/kernels/prebuilt-kernels.md)")
+    whl.add_argument("--strict", action="store_true", help="fail on a binary-check finding")
+    whl.set_defaults(func=cmd_wheel_action, all=False, reason="")
+    rel = sub.add_parser("release", help="check that the built wheels come from the verified bundle of this tree; uploads only with --confirm (the maintainer)")
+    rel.add_argument("--confirm", action="store_true", help="really upload (twine). Without it every check runs and nothing is uploaded")
+    rel.set_defaults(func=cmd_release_action, all=False, reason="")
+
     ld = sub.add_parser("ladder", help="the performance ladder (CUDA < portable < PyTorch): plan | run | report | gate")
     ld.add_argument("ladder_args", nargs=argparse.REMAINDER,
                     help="passed to benchmarks/runners/ladder.py, e.g. `run --tier core --out DIR`, `gate --csv ladder.csv`")
@@ -2222,8 +2313,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: Set by a release action (``build.actions.Ctx``) for its own process and the processes it starts: the internals below run only under it.
+ACTION_ENV = "MINIWORLD_ENGINE_ACTION"
+#: A deliberate direct run of an internal (debugging one kernel, say): the reason, printed. Nothing else lets one run outside an action.
+INTERNAL_ENV = "MINIWORLD_ENGINE_INTERNAL"
+
+
+def internal_refusal(args: argparse.Namespace) -> str | None:
+    """Why this command may not run here, or None. The commands a release action wraps (docs/actions.md) compile, verify, package, derive or
+    time whatever they are pointed at; the action runs them on what the code graph names and nothing else. Called directly they would redo
+    work that is already done, so they refuse unless an action runs them or ``MINIWORLD_ENGINE_INTERNAL`` says why."""
+    internals = {cmd_bundle_kernels: "bundle", cmd_bundle_verify: "verify", cmd_build_wheel: "wheel", cmd_derive: "derive",
+                 cmd_bench_kernel: "bench", cmd_bench_module: "bench"}
+    action = internals.get(getattr(args, "func", None))
+    if action is None or os.environ.get(ACTION_ENV):
+        return None
+    why = os.environ.get(INTERNAL_ENV, "").strip()
+    if why:
+        print(f"[internal] run directly, outside `miniworld-engine {action}`: {why}", file=sys.stderr)
+        return None
+    return (f"this is an internal of `miniworld-engine {action}`, which runs it on what the code graph names and nothing else "
+            f"(docs/actions.md). Run the action. A deliberate direct run: {INTERNAL_ENV}='<why>'.")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    refusal = internal_refusal(args)
+    if refusal:
+        print(f"refused: {refusal}", file=sys.stderr)
+        return 2
     if argv is None and args.func is cmd_derive and os.environ.get("MINIWORLD_COMPILE_WRAP") != "disable":
         # The one setting a kernel module reads when it is imported, so it cannot be set from inside the command: a derivation needs "disable"
         # (a custom op answers a fake tensor with its own fake and records nothing). Run this command again with it set, so nobody has to export it

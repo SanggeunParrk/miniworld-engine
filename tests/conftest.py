@@ -39,6 +39,21 @@ def _default_mathdx_home() -> None:
 _default_mathdx_home()
 
 
+def pytest_configure(config) -> None:
+    """A directory is not a test run here. ``miniworld-engine test`` runs exactly the files the code graph names for what changed (docs/actions.md);
+    ``pytest tests/gpu/any`` reran hours of tests nothing had touched. So a run that names a directory (or nothing, which is the whole suite)
+    refuses, unless an action started it, CI runs it (``CI``), or ``MINIWORLD_ENGINE_INTERNAL`` says why. Naming test files is always allowed:
+    that is how one debugs a test."""
+    import os
+
+    if os.environ.get("MINIWORLD_ENGINE_ACTION") or os.environ.get("CI") or os.environ.get("MINIWORLD_ENGINE_INTERNAL", "").strip():
+        return
+    dirs = sorted({a for a in (str(x).split("::")[0] for x in config.args) if Path(a).is_dir()})
+    if dirs:
+        pytest.exit(f"refused: a directory is not a test run here ({', '.join(dirs)}). Run `miniworld-engine test` (only the files the code "
+                    "graph names), or name the test files. A deliberate directory run: MINIWORLD_ENGINE_INTERNAL='<why>'.", returncode=4)
+
+
 def pytest_collection_modifyitems(config, items) -> None:
     import torch
 

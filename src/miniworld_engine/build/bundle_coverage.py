@@ -183,8 +183,9 @@ def extra_cases() -> list[dict]:
     # by MSA DEPTH (OPM ``_h100_path``: tma_static at S 1024 / 2048 / 4096; PWA ``_h100_training_default``: native aux at S 1024 / 2048 / 4096,
     # N 384 / 768), and the registry-driven cases above run 8 MSA rows, so none of them reaches the tma_static OPM family or the
     # native PWA family (2.4.2 / 2.4.3 shipped without them, MiniWorld JIT-compiled them on its first call).
-    # Training at MiniWorld's lengths only (TRAIN_TOKENS): PWA training at a length outside the native scope (N 128 / 256 / 512 / 640) and then at a native one
-    # in the SAME process fails in pwa_glue3 ("invalid argument"; present in v2.4.3), which would skip every later case of the worker.
+    # Training at MiniWorld's lengths only (TRAIN_TOKENS). (PWA training at a length outside the native scope and then at a native one in the
+    # SAME process failed in pwa_glue3 with "invalid argument" through 2.4.3: the plain and the native build shared their template launchers
+    # by symbol; the builds are -fvisibility=hidden now, tests/gpu/sm90/test_pwa_plain_then_native_training_gpu.py.)
     for train in (False, True):
         for prec in ("bfloat16", "mixed"):
             for depth in MSA_DEPTHS:
@@ -681,13 +682,17 @@ def run(c: dict) -> dict:
     except torch.cuda.OutOfMemoryError as exc:
         status, detail = "oom", str(exc).splitlines()[0]
     except Exception as exc:
+        from miniworld_engine.build.registry_calls import out_of_memory
         from miniworld_engine.kernels.prebuilt import PrebuiltMissing
 
-        # a declared registry call that fails is a broken contract, not "the module refused a shape"
-        status = "error" if isinstance(exc, PrebuiltMissing) or c["kind"].startswith("registry_") else "skip"
         detail = f"{type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}"[:400]
-        if status == "error":
-            traceback.print_exc()
+        if out_of_memory(exc):   # an extension / Triton launch out of memory: retried alone (one case per GPU), like torch's own
+            status = "oom"
+        else:
+            # a declared registry call that fails is a broken contract, not "the module refused a shape"
+            status = "error" if isinstance(exc, PrebuiltMissing) or c["kind"].startswith("registry_") else "skip"
+            if status == "error":
+                traceback.print_exc()
     finally:
         with contextlib.suppress(Exception):
             torch.cuda.empty_cache()

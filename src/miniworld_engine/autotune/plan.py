@@ -48,7 +48,7 @@ def stale_units(data: dict, labels=None) -> dict[str, list[str]]:
     table, tokens = data.get("file_index", []), data.get("file_tokens", [])
     scheme = data.get("norm_scheme", "")
     fresh = {p: identity.token_matches(p, t, scheme) for p, t in zip(table, tokens, strict=False)}
-    safety = identity.safety_files()
+    safety = identity.unit_safety_files()
     out: dict[str, list[str]] = {}
     for label, ids in data.get("unit_files", {}).items() if data.get("schema") == SCHEMA else ():
         if labels is not None and label not in labels:

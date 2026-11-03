@@ -390,7 +390,7 @@ axis values. Transition B2B applies its existing covering prune using the record
 #: The stream vocabulary, as `registry_module.csv` spells it. A row read from
 #: `registry_kernel.csv` already carries one of these, so it passes straight through; the
 #: `pair`/`atom`/`token` spellings are what `OpUnit.side` uses and are translated.
-STREAM_NAMES = frozenset({"token_pair", "token_single", "atom_single", "msa_token", "atom_pair", "noise"})
+STREAM_NAMES = frozenset({"token_pair", "token_single", "atom_single", "msa_token", "atom_pair", "noise", "protein_node"})
 
 
 def shape_name(row: dict, side: str) -> str:

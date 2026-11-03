@@ -36,14 +36,30 @@ def _ext():
     )
 
 
+def _fake(tensors) -> bool:
+    """FakeTensors (the derivation, ``torch.compile`` tracing): the cast is written as the torch ops it is bit-identical to, so no extension
+    is built or launched on a tensor that has no storage (a launch there read a null pointer: a sticky illegal address)."""
+    from torch._subclasses.fake_tensor import is_fake
+
+    return any(is_fake(t) for t in tensors)
+
+
 def cast(tensors, dtypes, force: bool = False) -> list[torch.Tensor]:
     """``[t.to(d).contiguous() for t, d in zip(tensors, dtypes)]`` in one launch (an input already of its dtype is returned as it is)."""
-    return list(_ext().cast(list(tensors), [_TYPES[d] for d in dtypes], force))
+    tensors = list(tensors)
+    if _fake(tensors):
+        return [t.to(d).contiguous().clone() if force or t.dtype != d or not t.is_contiguous() else t for t, d in zip(tensors, dtypes, strict=True)]
+    return list(_ext().cast(tensors, [_TYPES[d] for d in dtypes], force))
 
 
 def cast_into(srcs, dsts) -> None:
     """``d.copy_(s)`` for each pair in one launch: fp32 / bf16 either way, contiguous destinations."""
-    _ext().cast_into(list(srcs), list(dsts))
+    srcs, dsts = list(srcs), list(dsts)
+    if _fake([*srcs, *dsts]):
+        for s, d in zip(srcs, dsts, strict=True):
+            d.copy_(s)
+        return
+    _ext().cast_into(srcs, dsts)
 
 
 __all__ = ["cast", "cast_into"]

@@ -67,8 +67,11 @@ def test_every_option_can_actually_be_pinned(row):
     `p_drop` is the one option that is a constructor argument rather than a settings pin; every
     other one has to appear in `SWITCH_SETTINGS` or `derive` cannot set it.
     """
+    from miniworld_engine.autotune.builder import SWITCHES
+
+    torch_switches = set(SWITCHES) - set(SWITCH_SETTINGS)     # a torch-level pin (`builder.torch_switch`: the fp32 matmul precision)
     for name, _value in row.options:
-        assert name == "p_drop" or name in SWITCH_SETTINGS, (
+        assert name == "p_drop" or name in SWITCH_SETTINGS or name in torch_switches, (
             f"{row.module}: option {name!r} is neither p_drop nor a pinnable switch")
 
 

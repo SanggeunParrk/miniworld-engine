@@ -142,8 +142,8 @@ def test_stale_evidence_of_an_accessible_card_fails_check_and_another_cards_stal
     assert any("3 of 5 units stale" in b for b in rep.blocking)
     assert rep.code(check=True) == 2
     assert "derivation plan   : stale 3 of 5 units (computed from file digests)" in rep.text
-    assert "[sm86] owed, cannot run here: dev derive --arch sm86" in rep.text
-    assert "[sm90] dev derive --arch sm90" in rep.text
+    assert "[sm86] owed, cannot run here: miniworld-engine derive (arch sm86" in rep.text
+    assert "[sm90] miniworld-engine derive (arch sm90" in rep.text
     # the same staleness on sm86 alone: sm86 is not accessible, so it is reported (computed) but does not block
     only86 = rg.evaluate("HEAD", accessible="sm100")
     assert only86.blocking == [] and only86.code(check=True) == 0

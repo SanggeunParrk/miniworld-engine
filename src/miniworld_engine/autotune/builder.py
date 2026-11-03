@@ -42,7 +42,10 @@ import torch
 from miniworld_engine import build as build_matrix
 from miniworld_engine.autotune import triton_cache, width_evidence
 from miniworld_engine.autotune.checkpoint_cases import NAMES as CHECKPOINT_CASE_NAMES
-from miniworld_engine.autotune.module_registry import module_rows
+from miniworld_engine.autotune.dit_cases import NAMES as DIT_CASE_NAMES
+from miniworld_engine.autotune.stack_cases import NAMES as STACK_CASE_NAMES
+from miniworld_engine.autotune.mpnn_cases import NAMES as MPNN_CASE_NAMES
+from miniworld_engine.autotune.module_registry import PRECISIONS, module_rows
 
 BF16 = torch.bfloat16
 
@@ -147,7 +150,35 @@ SWITCHES: dict[str, tuple[tuple, tuple[str, ...]]] = {
     "ln_bwd_path": (("persistent", "atomic", "cuda"), ("train",)),
     "ln_out_bwd_path": (("split", "fused"), ("train",)),
     "trimul_impl": (("portable",), ("eval", "train")),
+    # torch's fp32 matmul precision, not an engine setting: "high" (TF32) is what a trainer sets and what the H100 fp32 paths that run on
+    # TF32 tensor cores need (the generic wgmma Transition); the default "highest" sends them to torch. Acts on fp32 calls only.
+    "matmul_precision": (("high",), ("eval", "train")),
 }
+
+#: switches that act on fp32 calls only (a bf16 call under them is a duplicate of the unpinned one)
+FP32_ONLY_SWITCHES = frozenset({"matmul_precision"})
+
+
+def switch_applies(name: str, mode: str, dtype: str) -> bool:
+    """Whether option ``name`` changes anything for a call of ``mode`` and ``dtype`` (``p_drop``: training only)."""
+    if name == "p_drop":
+        return mode == "train"
+    if name in FP32_ONLY_SWITCHES and dtype != "float32":
+        return False
+    return mode in SWITCHES[name][1]
+
+
+@contextlib.contextmanager
+def torch_switch(name: str, value: str):
+    """Apply a torch-level switch (not an engine setting) for the duration of one call."""
+    if name != "matmul_precision":
+        raise KeyError(name)
+    before = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision(value)
+    try:
+        yield
+    finally:
+        torch.set_float32_matmul_precision(before)
 
 #: switch name -> the ``settings`` field it pins, and how to parse the CLI string back to a value.
 #: A table rather than an if/elif chain in the child: every switch added to SWITCHES must be
@@ -201,6 +232,15 @@ def _mask(batch: int, length: int) -> torch.Tensor:
     return torch.ones(batch, length, dtype=torch.bool, device="cuda")
 
 
+#: registry dims that size an INPUT, not the module: the MSA depth (the native H100 OPM / PWA paths pick their kernels by it; 2.4.2 / 2.4.3 shipped
+#: without the deep-MSA families because every case ran 8 MSA rows). A Case drops them before the constructor.
+INPUT_DIMS = frozenset({"msa_depth", "per_sample_pair", "masked"})
+
+
+def _ctor(dims: dict) -> dict:
+    return {k: v for k, v in dims.items() if k not in INPUT_DIMS}
+
+
 def _swa_params(length: int, dims: dict, dtype: torch.dtype, batch: int = 1) -> tuple:
     """``(cos, sin, seqused, cu_seqlens, max_seqlen, valid)`` for SWA3DRoPEAttention.forward.
 
@@ -240,6 +280,9 @@ CASE_NAMES: tuple[str, ...] = (
     "pairformer_block",
     "swa_atom_attention",
     *CHECKPOINT_CASE_NAMES,
+    *DIT_CASE_NAMES,
+    *STACK_CASE_NAMES,
+    *MPNN_CASE_NAMES,
 )
 
 
@@ -270,7 +313,7 @@ def _shapes(module: str) -> dict:
         "lengths_by_dim": tuple(r.lengths for r in rows),
         "streams": tuple(r.stream for r in rows),
         "lengths": tuple(sorted({n for r in rows for n in r.lengths})),
-        "dtypes": tuple(getattr(torch, d) for d in first.dtypes),
+        "dtypes": tuple(getattr(torch, d) for d in first.dtypes if d not in PRECISIONS),   # ``master`` is a precision, not a dtype axis
         "compute_dtypes": tuple(getattr(torch, d) for d in first.computes),
         "impls": first.impls,
         # p_drop is a constructor argument, not a settings pin, so it is not a Case switch --
@@ -289,6 +332,9 @@ def cases() -> list[Case]:
     build visits is a bucket production falls back to the full grid on.
     """
     from miniworld_engine.autotune.checkpoint_cases import cases as checkpoint_cases
+    from miniworld_engine.autotune.dit_cases import cases as dit_cases
+    from miniworld_engine.autotune.stack_cases import cases as stack_cases
+    from miniworld_engine.autotune.mpnn_cases import cases as mpnn_cases
     from miniworld_engine.modules import (
         AdaptiveLayerNorm,
         AttentionPairBias,
@@ -411,14 +457,14 @@ def cases() -> list[Case]:
              **_shapes("conditioned_transition")),
         Case("msa_pair_weighted_averaging",
              lambda dims, p, i, dt: MSAPairWeightedAveraging(
-                 **dims, implementation=IT(i), p_drop=p).cuda().to(dt),
-             lambda b, l, dims, dt, s: (torch.randn(b, 8, l, dims["d_msa"], device="cuda", dtype=dt),
+                 **_ctor(dims), implementation=IT(i), p_drop=p).cuda().to(dt),
+             lambda b, l, dims, dt, s: (torch.randn(b, dims.get("msa_depth", 8), l, dims["d_msa"], device="cuda", dtype=dt),
                                      _pair(b, l, dims["d_pair"], dt), _mask(b, l)),
              **_shapes("msa_pair_weighted_averaging")),
         Case("outer_product_mean",
-             lambda dims, p, i, dt: OuterProductMean(**dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt, s: (torch.randn(b, 8, l, dims["d_msa"], device="cuda", dtype=dt),
-                                     torch.ones(b, 8, l, dtype=torch.bool, device="cuda")),
+             lambda dims, p, i, dt: OuterProductMean(**_ctor(dims), implementation=IT(i)).cuda().to(dt),
+             lambda b, l, dims, dt, s: (torch.randn(b, dims.get("msa_depth", 8), l, dims["d_msa"], device="cuda", dtype=dt),
+                                     torch.ones(b, dims.get("msa_depth", 8), l, dtype=torch.bool, device="cuda")),
              **_shapes("outer_product_mean")),
         # `implementation` is a SECOND argument to PairformerBlock, not a config field, and it was
         # not being passed -- so every pairformer_block unit built the PyTorch reference and
@@ -452,6 +498,9 @@ def cases() -> list[Case]:
         # forward-only kernel probes: no backward is registered for these, so `train=False`
         # (a train unit would only re-run the same forward and write the same entries).
         *checkpoint_cases(),
+        *dit_cases(),
+        *stack_cases(),
+        *mpnn_cases(),
     ]
 
 

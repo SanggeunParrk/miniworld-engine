@@ -257,7 +257,9 @@ def triton_bucket_reduce(
     # still sitting in the tail when a narrower one ran.  Slicing to the chosen count
     # makes the pass correct by construction rather than by a hook firing at the right
     # moment, and it drops a memset per call.
-    programs = _bucket_reduce_kernel.best_config.kwargs["PROGRAMS"]
+    config = getattr(_bucket_reduce_kernel, "best_config", None)
+    # a derivation records the launch without tuning it (no best_config): every slot then; the summed shapes are the same
+    programs = config.kwargs["PROGRAMS"] if config is not None else _MAX_PROGRAMS
     # Summed in program order, so the result is the same on every run.
     return (
         partial_table[:programs].sum(dim=0)[:buckets],

@@ -7,6 +7,7 @@ from __future__ import annotations
 import inspect
 
 import pytest
+import torch
 
 from miniworld_engine.autotune.module_registry import ModuleRow, module_rows
 from miniworld_engine.build import bundle_coverage, registry_calls
@@ -43,14 +44,15 @@ def test_augmentation_and_the_dim_index_follow_the_row():
 
 
 def test_a_combination_the_arch_refuses_is_listed_not_dropped():
-    # the common rules: the fused transition kernels are bf16, an fp32 run is torch
-    (e,) = registry_calls.expand("sm90", [row(module="transition", dims={"d_hidden": 128}, dtypes=("bfloat16", "float32"))])
+    # the common rules: the trimul fused path is bf16-only, an fp32 run is torch
+    (e,) = registry_calls.expand("sm90", [row(module="triangle_multiplication", dims={"d_pair": 128, "d_hidden": 128}, dtypes=("bfloat16", "float32"))])
     assert {c.dtype for c in e.calls} == {"bfloat16"}
     assert any(x.startswith("miniworld/float32:") for x in e.excluded)
 
 
 def test_a_row_with_nothing_left_is_not_an_arch_row_with_the_registry_text():
-    (e,) = registry_calls.expand("sm90", [row(module="transition", dims={"d_hidden": 128}, dtypes=("float32",), impls=("miniworld",))])
+    (e,) = registry_calls.expand("sm90", [row(module="triangle_multiplication", dims={"d_pair": 128, "d_hidden": 128}, dtypes=("float32",),
+                                              impls=("miniworld",))])
     assert e.calls == []
     reason = e.not_arch_reason
     assert reason and "dtypes=float32" in reason and "impls=miniworld" in reason and "float32" in reason
@@ -65,7 +67,7 @@ def test_a_call_round_trips_through_json():
 def test_every_row_of_the_real_registry_expands_or_says_why_not():
     rows = module_rows()
     expanded = registry_calls.expand("sm90")
-    assert len(expanded) == len(rows) >= 100          # no row dropped
+    assert len(expanded) == len(rows) >= 80           # no row dropped (88 module rows since the leaf probes went, 2026-11-03)
     assert [e.row for e in expanded] == list(range(1, len(rows) + 1))
     for e in expanded:
         assert e.calls or e.not_arch_reason, f"{e.id}: neither calls nor a reason"
@@ -124,3 +126,49 @@ def test_the_default_descriptors_can_be_dealt_to_workers():
 
     default = bundle_coverage.cases("sm90")
     assert len(kernel_bundle._interleave(default)) == len(default)
+
+
+def test_the_transition_runs_fp32_on_sm90_and_not_on_the_bf16_only_cards():
+    # sm_90: the generic wgmma Transition runs fp32 activations on TF32; sm_80 / sm_86 / sm_100 keep the bf16-only rule
+    r = row(module="transition", dims={"d_hidden": 128}, dtypes=("bfloat16", "float32"))
+    (e,) = registry_calls.expand("sm90", [r])
+    assert {c.dtype for c in e.calls} == {"bfloat16", "float32"}
+    (e,) = registry_calls.expand("sm86", [r])
+    assert "float32" not in {c.dtype for c in e.calls}
+
+
+def test_master_is_a_precision_of_its_own():
+    from miniworld_engine.autotune.module_registry import torch_dtypes
+
+    assert torch_dtypes("master") == (torch.float32, torch.bfloat16)
+    assert torch_dtypes("bfloat16") == (torch.bfloat16, torch.bfloat16)
+    (e,) = registry_calls.expand("sm90", [row(module="triangle_multiplication", dims={"d_pair": 128, "d_hidden": 128},
+                                              dtypes=("bfloat16", "master"))])
+    assert {c.dtype for c in e.calls} == {"bfloat16", "master"}           # not refused by the fp32 rule: activations are bf16
+
+
+def test_the_fp32_matmul_precision_switch_acts_on_fp32_calls_only():
+    from miniworld_engine.autotune.builder import switch_applies
+
+    assert switch_applies("matmul_precision", "train", "float32")
+    assert not switch_applies("matmul_precision", "train", "bfloat16")
+    (e,) = registry_calls.expand("sm90", [row(module="transition", dims={"d_hidden": 128}, dtypes=("bfloat16", "float32"),
+                                              options=(("matmul_precision", "high"),))])
+    pinned = [c for c in e.calls if c.option]
+    assert pinned
+    assert {c.dtype for c in pinned} == {"float32"}                         # a bf16 call under it would be a duplicate
+
+
+def test_the_dit_family_declares_its_input_variants_as_rows():
+    rows = {(r.module, tuple(sorted(r.dims))) for r in module_rows()}
+    assert any(m == "bias_only_dit" and "per_sample_pair" in d for m, d in rows)
+    assert any(m == "bias_only_dit" and "masked" in d for m, d in rows)
+    assert any(m == "local_dit" and "esmfold2" in d for m, d in rows)
+    assert any(m == "dit" and "use_qk_norm" in d for m, d in rows)
+
+
+def test_an_extension_or_triton_out_of_memory_is_an_oom():
+    assert registry_calls.out_of_memory(RuntimeError("Triton Error [CUDA]: out of memory"))
+    assert registry_calls.out_of_memory(RuntimeError("CUDA error: out of memory\nCUDA kernel errors might be ..."))
+    assert not registry_calls.out_of_memory(RuntimeError("CUDA error: invalid argument"))
+    assert registry_calls.classify(RuntimeError("Triton Error [CUDA]: out of memory")) == "oom"

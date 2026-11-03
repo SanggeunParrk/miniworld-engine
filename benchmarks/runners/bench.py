@@ -2341,7 +2341,8 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
     cuequivariance has no OuterProductMean kernel, and triton/cuda are not separate module
     options here (the module only swaps its LayerNorm for them), so both are `unsupported`.
     """
-    from miniworld_engine.baselines import anthropic_msa, opm_train
+    from miniworld_engine.baselines import anthropic_msa
+    from miniworld_engine.kernels.integrations import opm_train
     from miniworld_engine.modules import OuterProductMean
 
     key = implementation.strip().lower()
@@ -2583,7 +2584,8 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
       `unsupported`. Needs OPT_CORE_DIR; pwa_train is pinned off for the row (it would otherwise
       serve implementation="anthropic" first).
     """
-    from miniworld_engine.baselines import anthropic_msa, pwa_train
+    from miniworld_engine.baselines import anthropic_msa
+    from miniworld_engine.kernels.integrations import pwa_train
     from miniworld_engine.modules import MSAPairWeightedAveraging
 
     key = implementation.strip().lower()
@@ -7222,7 +7224,9 @@ def main(cfg: DictConfig) -> None:
                     status=status,
                     error=error,
                 )
-                unsuccessful_rows += int(row["status"] != "ok")
+                # an `unsupported` cell (a baseline that does not take this mode or shape, a payload absent here) is recorded as such and is
+                # not a failure of the bench; only a raised error is
+                unsuccessful_rows += int(row["status"] == "failed")
                 writer.writerow(row)
                 if row["status"] != "ok":
                     error = row["error"]

@@ -42,3 +42,13 @@ torch 2.13 + cu129, triton 3.7, Transformer Engine, cuequivariance 0.12, FlashAt
 - Dated measurements and audits: `docs/records/`, never edited after the fact.
 - Local scratch lives outside the checkout. Removed research lives in git (see
   README "Research history").
+
+## Actions
+
+Do not run ad-hoc commands for development, build or release. The real actions are `miniworld-engine status | test | bundle | verify |
+derive | bench | wheel | release` ([docs/actions.md](../docs/actions.md)). Each runs the code graph first, prints its scope, does only that
+(nothing, if nothing is owed), and writes a record that the next one reads. They take no path, filter or family; a full run is
+`--all --reason "<text>"`. `bundle` never drops a name the previous release has; `wheel` and `release` refuse without records for this exact
+tree; an agent never passes `release --confirm`. Still through Slurm, with `--mem`. The internals (`dev bundle-kernels`, `dev bundle-verify`,
+`dev build-wheel`, `dev derive`, `bench_kernel`, `bench_module`) and `pytest <directory>` refuse outside an action; never set
+`MINIWORLD_ENGINE_INTERNAL` to get around that unless the user asked for that run.

@@ -18,16 +18,16 @@ def test_checkpoint_dimensions_reach_build_cases():
     contains("conditioned_transition", d_hidden=768, d_cond=768)
     contains("augmented_attention", d_single=768, d_cond=768, d_pair=256, n_head=16)
     contains("transition", d_hidden=64, n=2)
-    contains("swiglu_ffn", d_hidden=128, d_expanded=256)
-    contains("layernorm_linear_native", d_norm=16, n_head=12)
-    contains("rms_norm_modulation", d_hidden=128, d_cond=128)
+    # the DiT blocks are whole-module rows (their leaves -- swiglu_ffn, rms_norm_modulation, layernorm_linear -- are not rows of their own)
+    contains("dit", d_single=768, d_cond=384, d_pair=128, n_head=16)
+    contains("bias_only_dit", d_single=768, d_cond=768, d_pair=256, n_head=16)
+    contains("local_dit", d_single=128, d_cond=128, d_pair=16, n_head=4)
+    contains("swa_dit", d_atom=128, d_cond=128, n_head=4)
     for width in (16, 267, 451, 831, 833, 2560):
         contains("layernorm_native", d_norm=width)
-    # A non-square template is recorded in the census, not advertised as a
-    # buildable fused TriMul simply because its constructor accepts the numbers.
-    assert not any(
-        d["d_pair"] != d["d_hidden"] for d in all_cases["triangle_multiplication"].dims
-    )
+    # the Protenix-v1 template: hidden = 2 d_pair (the hand-CUDA H100 kernels serve it at D64 / D128, the portable front + back up to
+    # d_pair 256 / d_hidden 512: `trimul_inproj.triton.contract.hidden_refusal`)
+    contains("triangle_multiplication", d_pair=64, d_hidden=128)
 
 
 def test_exact_leaf_axes_do_not_enter_unrelated_gemm_ladders():

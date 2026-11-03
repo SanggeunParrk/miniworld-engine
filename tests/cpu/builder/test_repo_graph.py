@@ -66,7 +66,7 @@ def test_the_actions_name_what_the_edit_owes(graph: rg.Graph) -> None:
     moved = {ident: [KERNEL], rg.DERIVATION: [KERNEL]}
     result = {"graph": graph, "changed": [KERNEL], "cosmetic": [], "deleted": [], "moved": moved, "reached": rg.reach(graph, [KERNEL])}
     owed = " | ".join(rg.actions(result))
-    for phrase in ("restamp 1 of", "dev derive", "reuses the rest", "tuned caches reached", "CPU tests reached"):
+    for phrase in ("restamp 1 of", "miniworld-engine derive", "reuses the rest", "tuned caches reached", "CPU tests reached"):
         assert phrase in owed, phrase
 
 
@@ -86,6 +86,27 @@ def test_registry_rows_compare_by_kernel() -> None:
     assert sorted(k for k in old.keys() | new.keys() if old.get(k) != new.get(k)) == ["b", "c"]
 
 
+def test_a_module_registry_row_is_a_node_its_modules_users_hang_on(graph: rg.Graph) -> None:
+    row = f"{rg.MODULE_ROW_PREFIX}protein_mpnn"
+    assert graph.nodes[row] == "registry-module-row"
+    assert row in graph.deps["src/miniworld_engine/autotune/mpnn_cases.py"]            # the Case names its module: it hangs on that row
+    got = rg.reach_symbolic(graph, {row: {"*"}})
+    assert not any(n.startswith("tests/gpu/") for n in got), sorted(n for n in got if n.startswith("tests/gpu/"))[:5]
+
+
+def test_a_cuda_comment_naming_a_python_file_is_no_dependency(graph: rg.Graph) -> None:
+    cu = "src/miniworld_engine/kernels/trimul_inproj/cuda/h100_sources/d64_train/save_k3_d64.cu"   # "Derived by derive.py"
+    assert "src/miniworld_engine/autotune/derive.py" not in graph.deps[cu]
+
+
+def test_module_registry_rows_compare_by_line(monkeypatch) -> None:
+    texts = {"base": "module,stream\na,x\nb,y\n", "head": "module,stream\na,x\nb,z\nc,x\n"}
+    monkeypatch.setattr(rg, "_git", lambda _show, ref: texts[ref.split(":")[0]])
+    assert rg.module_rows_changed("base", "head") == ["b", "c"]
+    texts["head"] = "module,stream,lengths\na,x,1\n"
+    assert rg.module_rows_changed("base", "head") is None                   # a header edit: the whole file
+
+
 def test_the_check_fails_on_stale_evidence_only() -> None:
     class Row:
         op, gpu, reason = "k", "H100", "kernel source/key changed (op_identity)"
@@ -94,7 +115,7 @@ def test_the_check_fails_on_stale_evidence_only() -> None:
     owed = rg.pending({"evidence": {"stale": [Row()], "native_stale": ["x_cuda"], "units_stale": {"u": ["f.py"]}, "units_total": 9}})
     assert len(owed) == 3
     assert any("dev restamp-native" in o for o in owed)
-    assert any("1 of 9 units stale" in o and "dev derive" in o for o in owed)
+    assert any("1 of 9 units stale" in o and "miniworld-engine derive" in o for o in owed)
 
 
 def test_new_only_keeps_what_the_diff_causes_and_drops_what_was_already_stale(monkeypatch, graph: rg.Graph) -> None:

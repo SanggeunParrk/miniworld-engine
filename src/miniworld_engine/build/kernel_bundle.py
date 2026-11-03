@@ -138,12 +138,14 @@ def _interleave(cases: list[dict]) -> list[dict]:
     return out
 
 
-def run_engine_driver(out: Path, arch: str, gpus: list[str], workers: int, case_filter: str = "", extras: bool = False) -> dict:
+def run_engine_driver(out: Path, arch: str, gpus: list[str], workers: int, case_filter: str = "", extras: bool = False,
+                      only_cases: list[dict] | None = None) -> dict:
     """Deal ``bundle_coverage.cases(arch)`` (the registry expansion; ``extras``: ``extra_cases()``) to ``workers`` processes over ``gpus``;
-    heavy cases run last, one per GPU."""
+    heavy cases run last, one per GPU. ``only_cases``: exactly these descriptors (the scope ``miniworld-engine bundle`` derived from the
+    code graph) instead of the full set."""
     from miniworld_engine.build import bundle_coverage
 
-    cases = bundle_coverage.extra_cases() if extras else bundle_coverage.cases(arch)
+    cases = only_cases if only_cases is not None else bundle_coverage.extra_cases() if extras else bundle_coverage.cases(arch)
     if case_filter:
         cases = [c for c in cases if case_filter in json.dumps(c)]
     light = _interleave([c for c in cases if not c["heavy"]])
@@ -589,7 +591,9 @@ def bundle_kernels(args) -> int:
             gpus = visible_gpus(args.gpus)
             for i, spec in enumerate(args.coverage or ["engine"]):
                 t0 = time.monotonic()
-                if spec == "engine-extras" or spec.startswith("engine-extras:"):
+                if spec.startswith("scoped:"):   # the cases the code graph named (``miniworld-engine bundle``): a JSON list of descriptors
+                    run_engine_driver(out, arch, gpus, args.workers, only_cases=json.loads(Path(spec[7:]).read_text()))
+                elif spec == "engine-extras" or spec.startswith("engine-extras:"):
                     run_engine_driver(out, arch, gpus, args.workers, spec.partition(":")[2], extras=True)
                 elif spec == "engine" or spec.startswith("engine:"):
                     run_engine_driver(out, arch, gpus, args.workers, spec.partition(":")[2])

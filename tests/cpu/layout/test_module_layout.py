@@ -45,6 +45,7 @@ SHARED = {
     "primitives.py",    # layer classes the ops compose (Linear, LayerNorm, Dropout, MPLinear)
     "functional.py",    # free functions the ops compose (sigmoid_gate, swish_gate)
     "released.py",      # released-checkpoint weight adapters (state_dict layout -> the ops' own), used by every op's from_released
+    "runtime.py",       # the runtime controls a model built from the modules calls around them (capture, weight caches, A/B pins)
 }
 
 

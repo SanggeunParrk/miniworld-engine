@@ -32,6 +32,7 @@ STREAM_LADDERS: dict[str, tuple[int, ...]] = {
     "msa_token": (128, 256, 384, 512, 640, 768),
     "atom_pair": (1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192),
     "noise": (1,),
+    "protein_node": (1024, 2048, 4096, 8192),     # ProteinMPNN residues of one packed structure (shape_key.MPNN_NODE_SHAPES)
 }
 
 
@@ -54,6 +55,19 @@ class ModuleRow:
 
     def augmentation(self, mode: str) -> int:
         return self.train_augmentation if mode == "train" else self.eval_augmentation
+
+
+#: registry dtype names that are not one torch dtype: name -> (parameter dtype, activation dtype). ``master``: fp32 parameters fed bf16
+#: activations (a trainer without autocast keeps fp32 master weights; other kernel builds, e.g. TriMul backward with -DMASTER_FP32=1).
+PRECISIONS = {"master": ("float32", "bfloat16")}
+
+
+def torch_dtypes(name: str):
+    """``(parameter dtype, activation dtype)`` of a registry dtype name (the same torch dtype twice for an ordinary one)."""
+    import torch
+
+    param, act = PRECISIONS.get(name, (name, name))
+    return getattr(torch, param), getattr(torch, act)
 
 
 def _ints(raw: str) -> tuple[int, ...]:

@@ -85,7 +85,10 @@ def test_the_non_pair_side_carries_only_the_atom_and_msa_widths(units, rows):
         op_units as _u,  # noqa: F401  (documents source)
     )
     level_of = {r["kernel"]: r["level"] for r in rows}
-    MSA_WIDTHS = {64}
+    from miniworld_engine.autotune.module_registry import module_rows
+
+    # the MSA widths the registry declares (d_msa of the MSA modules, the MSA transitions' width): 64, 128 and IntelliFold2's 256
+    MSA_WIDTHS = {r.dims.get("d_msa", r.dims.get("d_hidden")) for r in module_rows() if r.stream == "msa_token"} - {None}
     bad_atom = sorted({(u.op, u.width) for u in units
                        if u.side == "atom" and level_of.get(u.op) == "atom"
                        and u.width != ATOM_WIDTH})

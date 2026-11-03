@@ -8,3 +8,4 @@
 > Columns: case,impl,dtype,build,reason
 case,impl,dtype,build,reason
 *,cuda,*,no,"the hand-CUDA extensions are compiled -gencode arch=compute_90,code=sm_90a: 'Error building extension transition_b2b_cuda'."
+transition,*,float32,no,"no fp32 transition kernel on this card (the fused kernels are bf16): an fp32 run falls through to torch, nothing to capture. Moved from _common.csv: on sm_90 the generic wgmma Transition runs fp32 on TF32."

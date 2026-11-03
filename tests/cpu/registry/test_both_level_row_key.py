@@ -169,7 +169,10 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
                                               "gated_projection_bwd_residual_triton")
                 else {"pair"} if r["kernel"] in ("bias_only_attention_layernorm_gemm_triton",
                                                  "bias_only_attention_bwd_layernorm_gemm_triton")
-                else {"pair", "atom", "msa"} if r["kernel"] == "transition_fwd_b2b_triton"
+                # the narrow b2b runs the pair (64 / 128) and MSA transitions; the atom side went with the swiglu_ffn atom leaf row
+                else {"pair", "msa"} if r["kernel"] == "transition_fwd_b2b_triton"
+                # the K-tiled b2b runs the wide ones: the pair and single transitions, and IntelliFold2's MSA transition (d_msa 256)
+                else {"pair", "token", "msa"} if r["kernel"] == "transition_fwd_b2b_ktiled_triton"
                 else expect.get(r["family"]))
         got = {x for x in (r.get("sides") or "").split("|") if x}
         if want is None:

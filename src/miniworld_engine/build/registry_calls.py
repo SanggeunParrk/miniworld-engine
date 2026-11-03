@@ -84,11 +84,25 @@ class RowExpansion:
     registry_text: str           # the row as the CSV states it: impls, dtypes, modes, ...
     calls: list[Call]
     excluded: list[str]          # "impl/dtype: reason" for every combination the arch rules refuse
+    augmentation: str = ""       # "<eval>|<train>": two rows may share module, stream and dims and differ only here
+
+    @property
+    def key(self) -> str:
+        """The row's identity without its line number (``module/stream/dims/A=<eval>|<train>``): stable when other rows are added or
+        removed."""
+        dims = ";".join(f"{k}={v}" for k, v in self.dims.items())
+        return f"{self.module}/{self.stream}/{dims}/A={self.augmentation}"
 
     @property
     def id(self) -> str:
-        dims = ";".join(f"{k}={v}" for k, v in self.dims.items())
-        return f"r{self.row:03d} {self.module}/{self.stream}/{dims}"
+        return f"r{self.row:03d} {self.key}"
+
+    @property
+    def text_digest(self) -> str:
+        """Digest of what the row declares (lengths, impls, dtypes, modes, options, augmentation): an edited row is a new row."""
+        import hashlib
+
+        return hashlib.sha256(f"{self.key}|{self.registry_text}".encode()).hexdigest()[:16]
 
     @property
     def not_arch_reason(self) -> str:
@@ -123,7 +137,7 @@ def _sm(arch: str) -> str:
 def expand(arch: str = "sm90", rows=None) -> list[RowExpansion]:
     """Every row of ``registry_module.csv`` (or ``rows``) into its calls for ``arch``; one entry per row, none dropped."""
     from miniworld_engine import build as build_matrix
-    from miniworld_engine.autotune.builder import SWITCHES
+    from miniworld_engine.autotune.builder import switch_applies
     from miniworld_engine.autotune.module_registry import module_rows
 
     rows = module_rows() if rows is None else rows
@@ -133,8 +147,10 @@ def expand(arch: str = "sm90", rows=None) -> list[RowExpansion]:
     for number, row in enumerate(rows, 1):
         dim_index = seen.get(row.module, 0)
         seen[row.module] = dim_index + 1
-        text = (f"impls={'|'.join(row.impls)} dtypes={'|'.join(row.dtypes)} modes={'|'.join(row.modes)} "
-                f"computes={'|'.join(row.computes) or '-'} options={'|'.join(f'{k}={v}' for k, v in row.options) or '-'}")
+        text = (f"lengths={'|'.join(map(str, row.lengths))} impls={'|'.join(row.impls)} dtypes={'|'.join(row.dtypes)} "
+                f"modes={'|'.join(row.modes)} computes={'|'.join(row.computes) or '-'} "
+                f"options={'|'.join(f'{k}={v}' for k, v in row.options) or '-'} "
+                f"augmentation={'|'.join(str(row.augmentation(m)) for m in row.modes)}")
         excluded: list[str] = []
         allowed: set[tuple[str, str]] = set()
         for impl, dtype in itertools.product(row.impls, row.dtypes):
@@ -151,8 +167,8 @@ def expand(arch: str = "sm90", rows=None) -> list[RowExpansion]:
                 for option in (None, *row.options):
                     if option is not None:
                         name = option[0]
-                        if mode not in (("train",) if name == "p_drop" else SWITCHES[name][1]):
-                            continue   # the option acts on the other side of the pass: a duplicate of the default call
+                        if not switch_applies(name, mode, dtype):
+                            continue   # the option acts on the other side of the pass (or on fp32 only): a duplicate of the default call
                         if name == "trimul_impl":
                             ok, why = build_matrix.decide(sm, "triangle_multiplication", option[1], dtype)
                             if not ok:
@@ -161,7 +177,8 @@ def expand(arch: str = "sm90", rows=None) -> list[RowExpansion]:
                     for direction in ("", *([DIRECTIONS[row.module][1]] if row.module in DIRECTIONS else [])):
                         calls.append(Call(number, row.module, row.stream, dim_index, length, impl, dtype, compute, mode,
                                           option, row.augmentation(mode), direction))
-        out.append(RowExpansion(number, row.module, row.stream, dict(row.dims), text, calls, sorted(set(excluded))))
+        out.append(RowExpansion(number, row.module, row.stream, dict(row.dims), text, calls, sorted(set(excluded)),
+                                f"{row.augmentation('eval')}|{row.augmentation('train')}"))
     return out
 
 
@@ -241,32 +258,39 @@ def run_call(call: Call) -> None:
     dims = dict(case.dims[call.dim_index])
     if call.direction:   # the module's other direction: the constructor argument is the flag
         dims[DIRECTIONS[call.module][0]] = False   # incoming / ending
-    dtype = getattr(torch, call.dtype)
+    from miniworld_engine.autotune.module_registry import torch_dtypes
+
+    dtype, act = torch_dtypes(call.dtype)          # parameters, activations (``master``: fp32 parameters, bf16 activations)
     train = call.mode == "train"
-    p_drop, pins = 0.0, {}
+    p_drop, pins, torch_pin = 0.0, {}, contextlib.nullcontext()
     if call.option:
         name, value = call.option
         if name == "p_drop":
             p_drop = float(value)
-        else:
+        elif name in SWITCH_SETTINGS:
             field, parse = SWITCH_SETTINGS[name]
             pins[field] = parse(value)
+        else:                                       # a torch-level switch: the fp32 matmul precision
+            from miniworld_engine.autotune.builder import torch_switch
+
+            torch_pin = torch_switch(name, value)
     if call.impl == "portable":   # an A/B label: the miniworld module under the portable family (builder.run_case)
         pins["force_portable_kernels"] = True
     previous = settings.configure(**pins) if pins else None
     try:
-        module = case.factory(dims, p_drop, call.impl, dtype)
-        module.train(train)
-        args = case.input_args(call.dim_index, call.length, dtype, train=train)
-        kwargs = {"compute_dtype": getattr(torch, call.compute)} if call.compute else {}
-        if train:
-            args = tuple(a.detach().clone().requires_grad_(True) if torch.is_tensor(a) and a.is_floating_point() else a for a in args)
-            out = module(*args, **kwargs)
-            (out.float().sum() if torch.is_tensor(out) else out[0].float().sum()).backward()
-        else:
-            with torch.no_grad():
-                module(*args, **kwargs)
-        torch.cuda.synchronize()
+        with torch_pin:
+            module = case.factory(dims, p_drop, call.impl, dtype)
+            module.train(train)
+            args = case.input_args(call.dim_index, call.length, act, train=train)
+            kwargs = {"compute_dtype": getattr(torch, call.compute)} if call.compute else {}
+            if train:
+                args = tuple(a.detach().clone().requires_grad_(True) if torch.is_tensor(a) and a.is_floating_point() else a for a in args)
+                out = module(*args, **kwargs)
+                (out.float().sum() if torch.is_tensor(out) else out[0].float().sum()).backward()
+            else:
+                with torch.no_grad():
+                    module(*args, **kwargs)
+            torch.cuda.synchronize()
     finally:
         if previous is not None:
             settings.configure(**dataclasses.asdict(previous))
@@ -293,6 +317,14 @@ def run_driver(unit: KernelUnit) -> None:
     torch.cuda.synchronize()
 
 
+def out_of_memory(exc: BaseException) -> bool:
+    """An out-of-memory that is not ``torch.cuda.OutOfMemoryError``: a CUDA extension's allocation (``AcceleratorError: CUDA error: out
+    of memory``) or a Triton launch's (``Triton Error [CUDA]: out of memory``). The same verdict: the shape did not fit, nothing was
+    verified at it."""
+    text = str(exc)
+    return "CUDA error: out of memory" in text or "Triton Error [CUDA]: out of memory" in text
+
+
 def classify(exc: BaseException) -> str:
     """missing: the bundle lacks an artifact. oom: the declared shape does not fit the card (nothing was verified at it). unbundled: the
     artifact compiles NVIDIA MathDx / cuBLASDx, which is never redistributed (it JIT-builds where used). error: anything else."""
@@ -302,7 +334,7 @@ def classify(exc: BaseException) -> str:
 
     if isinstance(exc, (prebuilt.PrebuiltMissing, _nvcc.CutlassMissing)):
         return "missing"
-    if isinstance(exc, torch.cuda.OutOfMemoryError):
+    if isinstance(exc, torch.cuda.OutOfMemoryError) or out_of_memory(exc):
         return "oom"
     if "cuBLASDx headers not found" in str(exc):
         return "unbundled"
@@ -382,8 +414,8 @@ def describe(arch: str) -> dict:
     rows = expand(arch)
     return {
         "arch": arch,
-        "rows": [{"row": e.row, "id": e.id, "module": e.module, "stream": e.stream, "calls": len(e.calls), "registry": e.registry_text,
-                  "not_arch": e.not_arch_reason, "excluded": e.excluded} for e in rows],
+        "rows": [{"row": e.row, "id": e.id, "key": e.key, "text": e.text_digest, "module": e.module, "stream": e.stream, "calls": len(e.calls),
+                  "registry": e.registry_text, "not_arch": e.not_arch_reason, "excluded": e.excluded} for e in rows],
         "kernels": [dataclasses.asdict(k) for k in kernel_units(arch)],
     }
 

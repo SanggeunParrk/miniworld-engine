@@ -216,6 +216,10 @@ def _build(
             "-O3",
             "-gencode=arch=compute_90a,code=sm_90a",
             "--use_fast_math",
+            # hidden symbols: the native and the plain build of one source define the same template launchers (their `static` attribute
+            # flags included); default visibility let a process that loaded both run one build's kernel through the other's launcher,
+            # without its shared-memory attribute ("invalid argument" in pwa_glue3 after a plain-scope training call)
+            "-Xcompiler=-fvisibility=hidden",
             *(["-DMW_PWA_CUDA_AUX=1"] if native else []),
             *(
                 ["-DMW_PWA_ROUND_LOGITS=1"]
@@ -223,7 +227,7 @@ def _build(
                 else []
             ),
         ],
-        extra_cflags=["-O3"],
+        extra_cflags=["-O3", "-fvisibility=hidden"],
     )
     return _EXT[name]
 

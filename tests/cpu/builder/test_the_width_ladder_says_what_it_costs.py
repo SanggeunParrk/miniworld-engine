@@ -11,5 +11,5 @@ def test_every_row_names_a_model_contract():
 
 def test_real_wide_pairs_remain_without_hypothetical_pair768():
     rows = module_rows()
-    assert {r.dims["d_pair"] for r in rows if r.module == "triangle_multiplication"} == {64, 128, 256, 384}
+    assert {r.dims["d_pair"] for r in rows if r.module == "triangle_multiplication"} == {64, 128, 256, 384, 512}   # 512: IntelliFold2
     assert not any(r.stream == "token_pair" and r.dims.get("d_norm") == 768 for r in rows)

@@ -6,5 +6,4 @@
 >
 > Columns: case,impl,dtype,build,reason   ("*" matches anything; last match across both files wins)
 case,impl,dtype,build,reason
-transition,*,float32,no,"the fused transition kernels are bf16; an fp32 run falls through to torch, so there is no autotuner to capture -- 12 fp32 units produced 0 ops each."
 triangle_multiplication,*,float32,no,"the trimul fused path is bf16-only, same miss: 180 fp32 units produced 0 ops (builds 1628031/1628032)."

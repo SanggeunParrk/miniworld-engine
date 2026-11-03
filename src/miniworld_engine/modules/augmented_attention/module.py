@@ -306,6 +306,15 @@ class AugmentedAttentionPairBias(nn.Module):
         checkpoint's own residual) takes :meth:`delta`."""
         return single + self.delta(single, cond, pair, mask, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)
 
+    #: the fp32 attention logits one call may hold, A x B x H x L x L x 4 bytes: above it the augmentation axis is sliced (``delta``)
+    LOGIT_BUDGET_BYTES = 8 << 30
+
+    def augment_chunk(self, single: torch.Tensor) -> int:
+        """How many samples (the augmentation axis A) one call takes: all of them, unless their logits exceed ``LOGIT_BUDGET_BYTES``."""
+        a, b, length = single.shape[:3]
+        per_sample = b * self.n_head * length * length * 4
+        return max(1, min(a, self.LOGIT_BUDGET_BYTES // max(per_sample, 1)))
+
     @typecheck
     def delta(
         self,
@@ -335,6 +344,25 @@ class AugmentedAttentionPairBias(nn.Module):
         whatever the module carries either way. Only the core is cast, and the result comes back
         in the input dtype, so this changes precision and not the module's interface.
         """
+        chunk = self.augment_chunk(single)
+        if chunk < single.shape[0]:
+            # The attention's logits [A, B, H, L, L] would not fit (the atom DiT at 8192 atoms x 48 samples asks 48 GiB): the samples are
+            # independent, so the call runs on slices of the augmentation axis and the outputs are concatenated. The slice size is a
+            # function of the shape only (deterministic, the same every run); the pair is shared, a per-sample mask is sliced with them.
+            # Under autograd every slice is checkpointed: slicing alone bounds the forward's peak, but autograd would still keep every slice's
+            # attention for the backward (the A x H x L x L total again); a checkpointed slice keeps its inputs and recomputes in the backward.
+            from torch.utils.checkpoint import checkpoint
+
+            parts = []
+            grad = torch.is_grad_enabled() and (single.requires_grad or any(p.requires_grad for p in self.parameters()))
+            for i in range(0, single.shape[0], chunk):
+                m = mask[i:i + chunk] if mask is not None and mask.dim() == 3 else mask
+
+                def piece(s, c, _m=m):
+                    return self.delta(s, c, pair, _m, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)
+                s, c = single[i:i + chunk], cond[i:i + chunk]
+                parts.append(checkpoint(piece, s, c, use_reentrant=False) if grad else piece(s, c))
+            return torch.cat(parts)
         in_dtype = single.dtype
         single = self.ada_ln_in(single, cond)
         whole = self._proj_core_gate(single, pair, mask, compute_dtype, extra_pair_bias)
