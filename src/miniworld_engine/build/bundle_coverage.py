@@ -400,7 +400,7 @@ def _run_block(c: dict) -> None:
 
 def _msa_module(c: dict, pdt, dt, autocast: bool) -> None:
     """MiniWorld's MSA module at one (depth, length): MSAPairWeightedAveraging then OuterProductMean (d_msa 64, d_pair 128, 8 heads, hidden 32),
-    inference or forward + backward. The native paths must serve the call where they are specified to (a refusal is reported)."""
+    inference or forward + backward. The native paths must serve the call where they are specified to (a refusal is reported; bf16 only: fp32 activations are refused by design)."""
     import torch
 
     from miniworld_engine.kernels.integrations import pwa_train
@@ -411,7 +411,7 @@ def _msa_module(c: dict, pdt, dt, autocast: bool) -> None:
     from miniworld_engine.modules.outer_product import OuterProductMean
 
     s, n, train = c["S"], c["L"], c["train"]
-    pwa = MSAPairWeightedAveraging(d_msa=64, d_pair=128, n_head=8, implementation=MI.MINIWORLD, p_drop=0.25 if train else 0.0)
+    pwa = MSAPairWeightedAveraging(d_msa=64, d_pair=128, n_head=8, d_hidden=32, implementation=MI.MINIWORLD, p_drop=0.25 if train else 0.0)
     opm = OuterProductMean(d_msa=64, d_pair=128, d_hidden=32, implementation=MI.MINIWORLD)
     msa = torch.randn(1, s, n, 64, device="cuda", dtype=dt)
     pair = torch.randn(1, n, n, 128, device="cuda", dtype=dt)
@@ -421,7 +421,7 @@ def _msa_module(c: dict, pdt, dt, autocast: bool) -> None:
         model.cuda().to(pdt)
         _randomize(model)
         _step(model, args, train, autocast)
-    why = pwa_train.refusal(msa, pair, 64, 128, 8, 32) if n <= pwa_train.NMAX_INFER else None
+    why = pwa_train.refusal(msa, pair, 64, 128, 8, 32) if c["dtype"] == "bfloat16" and n <= pwa_train.NMAX_INFER else None
     if why is not None:
         raise RuntimeError(f"the native PWA path refused the MiniWorld MSA shape S={s} N={n}: {why}")
 
