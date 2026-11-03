@@ -29,7 +29,11 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine.modules.attention_pair_bias import AttentionPairBias
 from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.primitives import Dropout
+from miniworld_engine.modules.primitives import (
+    Dropout,
+    ImplementationSwitch,
+    MasterWeights,
+)
 from miniworld_engine.modules.transition import Transition
 from miniworld_engine.modules.triangle_attention import TriangleAttention
 from miniworld_engine.modules.triangle_multiplication import (
@@ -78,7 +82,7 @@ class PairformerConfig:
     dual_output: bool = False
 
 
-class PairformerBlock(nn.Module):
+class PairformerBlock(MasterWeights, ImplementationSwitch):
     """A single Pairformer block over the pair representation.
 
     Wires two triangle-multiplication updates (outgoing/incoming), two
@@ -91,9 +95,11 @@ class PairformerBlock(nn.Module):
         self,
         config: PairformerConfig,
         implementation: ImplementationType = ImplementationType.PYTORCH,
+        master_weights: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
+        self.implementation = ImplementationType(implementation)
 
         if config.bidirectional_trimul:
             # Single fused bidirectional update (ours = the developed fused-bidir
@@ -176,6 +182,8 @@ class PairformerBlock(nn.Module):
             self.single_transition = Transition(
                 config.d_single, config.single_transition_n, implementation=implementation
             )
+        if master_weights:
+            self.set_master_weights()
 
     @classmethod
     def from_released(cls, state_dict, *, config: PairformerConfig, prefix: str = "", dtype: torch.dtype | None = None,
@@ -259,7 +267,7 @@ class PairformerBlock(nn.Module):
         return total
 
 
-class Pairformer(nn.Module):
+class Pairformer(MasterWeights, ImplementationSwitch):
     """The Pairformer stack: ``n_block`` :class:`PairformerBlock` in sequence.
 
     Pure shell — its only job is to hold the blocks and forward ``implementation``
@@ -278,6 +286,7 @@ class Pairformer(nn.Module):
         self,
         config: PairformerConfig | None = None,
         implementation: ImplementationType | str = ImplementationType.PYTORCH,
+        master_weights: bool = False,
     ) -> None:
         super().__init__()
         self.config = config or PairformerConfig()
@@ -289,6 +298,8 @@ class Pairformer(nn.Module):
                 for _ in range(self.config.n_block)
             ]
         )
+        if master_weights:
+            self.set_master_weights()
 
     @typecheck
     def forward(

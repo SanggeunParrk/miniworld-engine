@@ -27,7 +27,12 @@ from miniworld_engine.modules.exceptions import (
     InvalidImplementationError,
 )
 from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.primitives import LayerNorm, Linear
+from miniworld_engine.modules.primitives import (
+    ImplementationSwitch,
+    LayerNorm,
+    Linear,
+    MasterWeights,
+)
 from miniworld_engine.utils import h100_master as _master
 from miniworld_engine.utils.typecheck import typecheck
 
@@ -43,7 +48,7 @@ def _nvtx_range(name: str, enabled: bool):
             torch.cuda.nvtx.range_pop()
 
 
-class TriangleAttention(nn.Module):
+class TriangleAttention(MasterWeights, ImplementationSwitch):
     """Unified implementation of triangular gated self-attention.
 
     Parameters
@@ -93,6 +98,7 @@ class TriangleAttention(nn.Module):
         out_bias: bool = False,
         untransposed_output: bool = False,
         dual_output: bool = False,
+        master_weights: bool = False,
     ) -> None:
         super().__init__()
         self.n_head = n_head
@@ -132,17 +138,8 @@ class TriangleAttention(nn.Module):
         # themselves per-GPU dispatch fused vs split via _bo_dispatch). Resolution
         # lives in modules.dispatch; forward routes on self._backend.
         self.implementation = ImplementationType(implementation)
-        self._backend = resolve_triangle_attention(self.implementation)
-        self._train_gate = _dispatch.train_gate("triangle_attention", self.implementation, self._backend)
         self.anthropic_row = anthropic_row
-        if self._backend == KernelBackend.ANTHROPIC and not use_self_attention:
-            raise ValueError(
-                "Anthropic TriangleAttention adapter requires use_self_attention=True"
-            )
-        if self._backend == KernelBackend.ANTHROPIC and self._bias_untransposed:
-            raise ValueError(
-                "Anthropic TriangleAttention adapter implements the transposed bias only"
-            )
+        self._resolve_implementation()
         position = "starting" if starting else "ending"
         self.nvtx_enabled = False
         self.nvtx_name = f"triangle_attention/{position}"
@@ -188,6 +185,24 @@ class TriangleAttention(nn.Module):
         # H100 (sm_90a) whole-module CUDA path (integrations.triattn_h100_sm90: raw-PTX wgmma / TMA, every registered width,
         # inference and training); False falls through to the b200style path below (the benchmark baseline).
         self._h100_cuda = True
+        if master_weights:
+            self.set_master_weights()
+
+    def _resolve_implementation(self) -> None:
+        self._backend = resolve_triangle_attention(self.implementation)
+        self._train_gate = _dispatch.train_gate("triangle_attention", self.implementation, self._backend)
+        if self._backend == KernelBackend.ANTHROPIC and not self.use_self_attention:
+            raise ValueError(
+                "Anthropic TriangleAttention adapter requires use_self_attention=True"
+            )
+        if self._backend == KernelBackend.ANTHROPIC and self._bias_untransposed:
+            raise ValueError(
+                "Anthropic TriangleAttention adapter implements the transposed bias only"
+            )
+
+    def _child_implementation(self, child, implementation):
+        # the constructor builds ``ln_pair`` (and the qk norms) with the PyTorch default, whatever ``implementation`` is: unchanged
+        return None
 
     @classmethod
     def from_released(cls, state_dict, *, n_head: int, starting: bool, prefix: str = "", dtype: torch.dtype | None = None,
@@ -600,7 +615,8 @@ class TriangleAttention(nn.Module):
                 and _master.is_h100(pair.device)
             )
             if master:
-                wv, wb, wg, wo = _master.pack(
+                wv, wb, wg, wo = _master.cached_pack(
+                    "triattn",
                     [
                         self.to_value.weight,
                         self.to_bias.weight,
@@ -609,7 +625,7 @@ class TriangleAttention(nn.Module):
                     ]
                 )
                 if self.use_self_attention:
-                    wq, wk = _master.pack([self.to_query.weight, self.to_key.weight])
+                    wq, wk = _master.cached_pack("triattn", [self.to_query.weight, self.to_key.weight])
             fused_projection = False
             if (
                 getattr(self, "_fuse_projection_backward", True)

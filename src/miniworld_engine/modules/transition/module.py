@@ -1,7 +1,6 @@
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/transition.py
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float
 
@@ -9,7 +8,12 @@ from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import KernelBackend, resolve_transition
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.functional import swish_gate
-from miniworld_engine.modules.primitives import LayerNorm, Linear
+from miniworld_engine.modules.primitives import (
+    ImplementationSwitch,
+    LayerNorm,
+    Linear,
+    MasterWeights,
+)
 from miniworld_engine.utils.typecheck import typecheck
 
 
@@ -39,7 +43,7 @@ def _fused_sm80_enabled() -> bool:
     return (not settings.current().force_portable_kernels)
 
 
-class Transition(nn.Module):
+class Transition(MasterWeights, ImplementationSwitch):
     """Transition layer with SwiGLU activation.
 
     Parameters
@@ -61,6 +65,7 @@ class Transition(nn.Module):
         d_hidden: int = 128,
         n: int = 4,
         implementation: ImplementationType = ImplementationType.PYTORCH,
+        master_weights: bool = False,
     ) -> None:
         super().__init__()
         self.d_hidden = d_hidden
@@ -75,12 +80,7 @@ class Transition(nn.Module):
         # (resolve() maps cueq->pytorch for non-trimul ops).
         # Resolution lives in modules.dispatch; forward routes on self._backend.
         self.implementation = ImplementationType(implementation)
-        native_cuda = self._native_cuda_serves()
-        # resolved with no record (the sm_80 fused kernels serve d=128, n=4); a call they turn down per call still needs one (_residual_forward)
-        self._native_cuda_route = native_cuda and self.implementation == ImplementationType.MINIWORLD
-        self._backend = resolve_transition(self.implementation, native_cuda=native_cuda)
-        # a card recorded for the forward kernels but not the backward ones: training calls take the PyTorch reference
-        self._train_gate = _dispatch.train_gate("transition", self.implementation, self._backend, native_cuda=native_cuda)
+        self._resolve_implementation()
 
         self.ln_in = LayerNorm(
             d_hidden, implementation=self.implementation, dtype=torch.bfloat16
@@ -94,6 +94,16 @@ class Transition(nn.Module):
         self.squeeze = Linear(
             d_hidden * n, d_hidden, bias=False, init="zero", dtype=torch.bfloat16
         )
+        if master_weights:
+            self.set_master_weights()
+
+    def _resolve_implementation(self) -> None:
+        native_cuda = self._native_cuda_serves()
+        # resolved with no record (the sm_80 fused kernels serve d=128, n=4); a call they turn down per call still needs one (_residual_forward)
+        self._native_cuda_route = native_cuda and self.implementation == ImplementationType.MINIWORLD
+        self._backend = resolve_transition(self.implementation, native_cuda=native_cuda)
+        # a card recorded for the forward kernels but not the backward ones: training calls take the PyTorch reference
+        self._train_gate = _dispatch.train_gate("transition", self.implementation, self._backend, native_cuda=native_cuda)
 
     @classmethod
     def from_released(cls, state_dict, *, prefix: str = "", dtype: torch.dtype | None = None, norm_eps: float = 1e-5,

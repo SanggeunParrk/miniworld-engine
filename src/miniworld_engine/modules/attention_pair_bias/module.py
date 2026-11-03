@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from jaxtyping import Bool, Float
@@ -13,12 +12,18 @@ from miniworld_engine.modules.exceptions import (
     InvalidImplementationError,
 )
 from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.primitives import LayerNorm, Linear, RMSNorm
+from miniworld_engine.modules.primitives import (
+    ImplementationSwitch,
+    LayerNorm,
+    Linear,
+    MasterWeights,
+    RMSNorm,
+)
 from miniworld_engine.utils import h100_master as _h100_master
 from miniworld_engine.utils.typecheck import typecheck
 
 
-class AttentionPairBias(nn.Module):
+class AttentionPairBias(MasterWeights, ImplementationSwitch):
     """Attention with pair bias.
 
     Parameters
@@ -49,6 +54,7 @@ class AttentionPairBias(nn.Module):
         use_qk_norm: bool = False,
         gate_bias: float = 0.0,
         implementation: ImplementationType = ImplementationType.PYTORCH,
+        master_weights: bool = False,
     ) -> None:
         super().__init__()
         self.n_head = n_head
@@ -56,8 +62,7 @@ class AttentionPairBias(nn.Module):
         self.gate_bias = float(gate_bias)
         self.use_qk_norm = use_qk_norm
         self.implementation = ImplementationType(implementation)
-        self._backend = resolve_augmented_attention(self.implementation)
-        self._train_gate = _dispatch.train_gate("augmented_attention", self.implementation, self._backend)
+        self._resolve_implementation()
         if d_hidden is None:
             if d_single % n_head != 0:
                 msg = f"{d_single=} must be divisible by {n_head=}"
@@ -78,6 +83,12 @@ class AttentionPairBias(nn.Module):
         self.to_bias = Linear(d_pair, n_head, bias=False, init="default")
         self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
         self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
+        if master_weights:
+            self.set_master_weights()
+
+    def _resolve_implementation(self) -> None:
+        self._backend = resolve_augmented_attention(self.implementation)
+        self._train_gate = _dispatch.train_gate("augmented_attention", self.implementation, self._backend)
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         # checkpoints written before the offset was removed carry ln_pair.bias; it had no effect on the output, so dropping it is exact
@@ -136,7 +147,8 @@ class AttentionPairBias(nn.Module):
             and _h100_master.is_h100(single.device)
         )
         if master:
-            wq, wk, wv, wb, wg, wo, bq = _h100_master.pack(
+            wq, wk, wv, wb, wg, wo, bq = _h100_master.cached_pack(
+                "apb",
                 [
                     self.to_query.weight,
                     self.to_key.weight,
