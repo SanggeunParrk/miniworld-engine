@@ -143,10 +143,12 @@ def cases() -> list[dict]:
     # by MSA DEPTH (OPM ``_h100_path``: tma_static at S 1024 / 2048 / 4096; PWA ``_h100_training_default``: native aux at S 1024 / 2048 / 4096,
     # N 384 / 768), and the registry-driven cases above run 8 MSA rows, so none of them reaches the tma_static OPM family or the
     # native PWA family (2.4.2 / 2.4.3 shipped without them, MiniWorld JIT-compiled them on its first call).
+    # Training at MiniWorld's lengths only (TRAIN_TOKENS): PWA training at a length outside the native scope (N 128 / 256 / 512 / 640) and then at a native one
+    # in the SAME process fails in pwa_glue3 ("invalid argument"; present in v2.4.3), which would skip every later case of the worker.
     for train in (False, True):
         for prec in ("bfloat16", "mixed"):
             for depth in MSA_DEPTHS:
-                for length in (block_train if train else TOKEN_RUNGS):
+                for length in (TRAIN_TOKENS if train else TOKEN_RUNGS):
                     out.append({"kind": "msa_module", "L": length, "S": depth, "train": train, "dtype": prec,  # noqa: PERF401
                                 "heavy": length >= HEAVY_TOKENS or depth >= 4096})
     # Boltz-2 / RoseTTAFold3 / Chai-1's variants (kernels/dit_variants, the 64-channel and output-variant TriangleAttention, the biased /
@@ -417,7 +419,7 @@ def _msa_module(c: dict, pdt, dt, autocast: bool) -> None:
     pair = torch.randn(1, n, n, 128, device="cuda", dtype=dt)
     mask = torch.ones(1, n, device="cuda", dtype=torch.bool)
     msa_mask = torch.ones(1, s, n, device="cuda", dtype=torch.bool)
-    for model, args in ((pwa, (msa, pair, mask)), (opm, (msa, msa_mask))):
+    for model, args in ((opm, (msa, msa_mask)), (pwa, (msa, pair, mask))):
         model.cuda().to(pdt)
         _randomize(model)
         _step(model, args, train, autocast)
