@@ -5,9 +5,9 @@ Never edited after the fact (`docs/records/`). Written while preparing 2.4.4.
 ## How it was measured
 
 The 2.4.4 split wheels were installed (cp312, torch 2.13 + cu129), the engine kernel cache empty per file (`XDG_CACHE_HOME`), `CUTLASS_PATH`
-unset / nonexistent, `MINIWORLD_ENGINE_JIT_FALLBACK=0`, and every `tests/gpu/sm90/test_*.py` the code graph names (75 files) was run once, one file per
-GPU, as a work queue on 4 H100s. A kernel the bundle lacks raises `PrebuiltMissing` (or `CutlassMissing` for the CUTLASS ones). 52 files ran clean
-(Error 0, PrebuiltMissing 0); 23 files had failing tests. The same failing files were then run against the **2.4.3** wheels with the same recipe:
+unset / nonexistent, `MINIWORLD_ENGINE_JIT_FALLBACK=0`, and every `tests/gpu/sm90/test_*.py` the code graph names (75 files, 77 queue entries with two extras) was run once, one file per
+GPU, as a work queue on 4 H100s. A kernel the bundle lacks raises `PrebuiltMissing` (or `CutlassMissing` for the CUTLASS ones). 54 queue entries ran clean
+(Error 0, PrebuiltMissing 0); 23 had failing tests. The same failing files were then run against the **2.4.3** wheels with the same recipe:
 the per-file Error / PrebuiltMissing / passed / failed counts are identical on 2.4.3 for every file except `test_trimul_h100_long_l_gpu.py`,
 which fails fewer tests on 2.4.4 (62, against 73) because 2.4.4 added the `trimul_wide_train` coverage. **No regression against 2.4.3.**
 
