@@ -139,6 +139,12 @@ def cases() -> list[dict]:
                         for b in (1, 4):
                             out.append({"kind": "trimul_hidden2x", "L": length, "train": train, "dtype": prec,  # noqa: PERF401
                                         "d": d, "outgoing": outgoing, "batch": b, "heavy": length >= HEAVY_TOKENS})
+    # TriMul's wide-width training kernels (trimul_h100/wide_train: front_d256, front_pre_d384, front_pre_d512 ...): bidirectional, hidden 256 / 384 / 512, masked, dropout on,
+    # forward + backward, MiniWorld's training lengths. No release up to 2.4.3 carried front_d256 / front_pre_d512 (tests/gpu/sm90/test_h100_module_wiring_gpu.py
+    # failed with PrebuiltMissing from a wheel).
+    for d in (256, 384, 512):
+        for length in TRAIN_TOKENS:
+            out.append({"kind": "trimul_wide_train", "L": length, "d": d, "train": True, "dtype": "bfloat16", "heavy": length >= 768})
     # MiniWorld's MSA module (MSAPairWeightedAveraging + OuterProductMean at d_msa 64 / d_pair 128): the native H100 paths pick their kernels
     # by MSA DEPTH (OPM ``_h100_path``: tma_static at S 1024 / 2048 / 4096; PWA ``_h100_training_default``: native aux at S 1024 / 2048 / 4096,
     # N 384 / 768), and the registry-driven cases above run 8 MSA rows, so none of them reaches the tma_static OPM family or the
@@ -320,6 +326,15 @@ def _run_block(c: dict) -> None:
         model = TriangleMultiplication(d, d_hidden=2 * d, outgoing=c["outgoing"], implementation=MI.MINIWORLD,
                                        p_drop=0.25 if c["train"] else 0.0)
         args = (torch.randn(b, n, n, d, device="cuda", dtype=dt), torch.ones(b, n, device="cuda", dtype=torch.bool))
+    elif c["kind"] == "trimul_wide_train":
+        from miniworld_engine.modules.triangle_multiplication import (
+            BidirectionalTriangleMultiplication,
+        )
+
+        d, n = c["d"], c["L"]
+        model = BidirectionalTriangleMultiplication(d, implementation=impl, p_drop=0.25)
+        mask = torch.rand(1, n, device="cuda") > 0.15
+        args = (torch.randn(1, n, n, d, device="cuda", dtype=dt), mask)
     elif c["kind"] == "bias_only_dit":
         from miniworld_engine.modules.bias_only_dit import (
             BiasOnlyDiTBlock,
