@@ -163,6 +163,46 @@ evidence of an accessible card; the unverifiable cards are listed with a count, 
 gate. `--tests` prints the tests that run on an accessible card (stdout, for pytest) and the ones that need another card on stderr as comments
 (`# needs another card ...`): nothing is claimed verified there.
 
+**What the graph says about the H100 (sm90), precisely** (`build/symbols.py`, `build/repo_graph.py::reach_symbolic` / `_dispatch`,
+`build/cards.py::builder_cards` / `EXEMPT_KINDS`). Three rules, each tested in `tests/cpu/builder/test_code_graph_h100.py`:
+
+1. *Test selection that never under-selects, and is narrower than "everything".* The file-level graph sent a change to a widely imported file
+   (`modules/primitives.py`, `utils/h100_master.py`) to ~400 of the 420 test files, because two hubs joined everything: a registry row **names** its
+   kernel file / driver / check (that edge, kind `names`, is no longer walked: the registry does not read them), and a docstring or comment that
+   mentions a path counted as a dependency on it (a python `ref` is now the scope that holds the *string*, and only where that file can run or load
+   it; a table of file names that is hashed is not one). `--tests` now walks Python at the granularity of symbols: `from x import A` depends on
+   `A`'s definition and on what `A` calls (a unit that uses a changed name is changed too), `import x` / a module object used bare / a star import
+   stay conservative, and the changed *symbols* of an edit are read from the syntax tree of the old and the new file. A change in a function or class
+   body selects the tests that reach that symbol; a change at module level, in a decorator, in an import, in a file that does not parse or in one
+   with `globals()` / a module `__getattr__` is the whole file. Names that resolve only by string are edges of their own (kind `dispatch`, to the
+   `(file, symbol)` a name resolves to, never wider than that): a registry kernel name in a test or tool -> the kernel file / its `symbol` / its
+   driver / its check; an extension name (`load_extension(name=...)`) -> the function that builds it; an `OP_KERNELS` op or a string key of a
+   `modules/dispatch.py` table -> that table; `ImplementationType` -> the routers of `modules/dispatch.py`; a tool that imports a module by a computed
+   name (`import_module(row[...])`, outside `kernels/`) -> every python file a registry row names, except where it only hashes the module's source
+   (the cache key: an identity, the walk ends there); a test -> the `conftest.py` fixture it requests by parameter name (or `usefixtures`), and every
+   test below a conftest -> its module level, hooks and autouse fixtures. Imports of first-party helpers (`from tests.paths import ...`,
+   `from oracles.dense import ...`) are edges too, and `next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())` resolves
+   to the repository root, so the test that parses every source file on Python 3.10 is selected for any `src` edit.
+   The proof is a back-test (`test_historic_fix_is_selected`, it skips when a commit is not in the checkout): for 20 real fix commits (the OPM
+   projection bias counted twice `608a88fad`, the Python 3.10 f-strings `0a58dc716`, the SWA SwiGLUFFN wiring `de295bf04`, the MPNN backward bands
+   `2d5829e9f`, APB `extra_pair_bias` `53d858827`, OPM `count_offset` `27bc2b54a`, and 14 more) the tests that commit added or changed, and the
+   test that catches its bug, are all selected by the graph for the commit's non-test diff. It also ran against the graph of each commit's *own*
+   tree, not only today's. Measured on the graph of each commit's own tree: a fix that edits a function reaches 128-170 of the ~300-410 test files in the leaf cases
+   (OPM, Transition, TriAttn, APB, SWA SwiGLUFFN, TriMul) and 200-300 where the function is used widely, where the file-level graph selected all but a
+   handful; an edit at module level of a hub (`registry.csv`, `dispatch.py`, `identity.py`, `settings.py`) still reaches 316-380, because
+   everything really does import it. `dev code-graph --diff ... ` prints both numbers (`symbol-level selection: the whole-file reach would run N`).
+2. *A `.cu` with no card in its path or registry row takes the arches of the nvcc call that builds it.* `builder_cards` reads the
+   `gencodes("90a")` / `-arch=sm_90a` arguments of the `load_extension(... "x.cu" ...)` call that names the file (else the arches of its builder file),
+   so an unhinted source that only the H100 builds is `sm90` only, and one built with `gencodes("80", "90", "100")` stays `sm90+sm100`. A header
+   follows the sources that include it. Of the 105 unhinted CUDA sources 72 are sm90, 21 sm90+sm100 and 12 sm100 (was 58 / 35 / 12); none of the sm100
+   ones is built in the sm90 bundle manifests, and 59 of the 72 sm90 ones are.
+3. *An H100 keeps no Triton caches, and the graph says so.* A tuned cache of a registry row with `backend=triton` is its own node kind,
+   `triton-cache`, and `cards.EXEMPT_KINDS` (`{"sm90": {"triton-cache"}}`) is the documented set of node kinds a card does not keep evidence of. On
+   sm90 such a cache is neither pending (`--check` does not fail on it, it no longer shows as `STALE now`) nor hidden: the evidence block counts the
+   committed rows under the sm90 file names and how many are stale by digest (`triton caches : EXEMPT on sm90 by policy ...`). They are the fallback
+   cards' evidence, so under sm80 / sm86 the same rows read `UNVERIFIABLE-HERE (owed on sm80, a fallback card)`, computed from digests, never counted
+   as fresh. Native (`*_cuda`) H100 caches are still judged.
+
 ## Building the prebuilt kernels
 
 ```bash

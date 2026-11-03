@@ -186,4 +186,4 @@ def test_the_code_graph_change_itself_reaches_no_kernel_identity(graph) -> None:
     """build/ is in no kernel key: an edit to it reaches no CUDA source, no native identity, no tuned cache."""
     got = rg.reach_cards(graph, [f"{SRC}/build/cards.py", f"{SRC}/build/repo_graph.py"])
     kinds = {graph.nodes[n] for n in got}
-    assert not kinds & {"cuda-source", "cache", "identity"}
+    assert not kinds & {"cuda-source", "cache", "triton-cache", "identity"}

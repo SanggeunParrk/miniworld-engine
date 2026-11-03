@@ -6,7 +6,7 @@ a change to B can change A. Edges come from what the files themselves say, not f
 * ``import``  -- Python ``import`` / ``from ... import`` anywhere in a file (a function-level import is a dependency too);
 * ``include`` -- ``#include "..."`` in ``.cu`` / ``.cuh`` / ``.inc`` / ``.h`` / ``.cpp``;
 * ``ref``     -- a repo path or a ``miniworld_engine.x.y`` dotted name written in a source, doc, YAML or registry file
-  (registry rows name each kernel's file, driver and check; a doc names the code it describes);
+  (a doc names the code it describes; a registry row only NAMES a kernel file, see ``names``);
 * ``ref`` (built paths) -- a path a python file BUILDS from segments (``ROOT / "docs" / name``, ``Path(__file__).parents[2] / "src"``,
   ``glob`` / ``rglob`` / ``iterdir`` of a directory): :mod:`repo_paths` evaluates the expression; a known path is an edge to the file, a prefix
   or an enumerated directory an edge to every file below it (never narrower than what the code can reach);
@@ -17,6 +17,17 @@ a change to B can change A. Edges come from what the files themselves say, not f
   ``registry_kernel.units.json`` / ``registry_kernel.csv`` / the packaged plans and through them the sweep page. Their edges go to the
   op's closure (and the safety set), and to the union of the files the derivation's units recorded: an edit outside them reaches
   nothing here.
+
+* ``names``   -- a registry row names its kernel file, driver and check; the registry does not read them: not walked (this edge made every
+  kernel edit reach every reader of the registry);
+* ``dispatch`` -- string dispatch, resolved statically: a scope holding a registry kernel name, an extension name, an ``OP_KERNELS`` op or a
+  ``modules/dispatch.py`` table key depends on what it names; ``tests/conftest.py`` fixtures by parameter name; a scope that imports a module by a
+  computed name depends on every file the registry names (:func:`_dispatch`);
+* symbol level (:mod:`symbols`, :func:`reach_symbolic`) -- for the TEST SELECTION a Python import is an edge to the imported *names*, not to the
+  file: ``from x import A`` depends on A's definition and what it calls; ``import x`` and a module object used bare stay conservative; a changed
+  function / class body selects the tests that reach that symbol, and a change at module level, in a decorator, an import or an unparsable file is
+  the whole file. A ``ref`` from python code is the scope that holds the string (and a table of file names that nothing runs or loads is no
+  dependency on them).
 
 ``changes(base)`` takes the files that differ from ``base`` (``git diff``, plus untracked), drops the ones whose normalized content
 is unchanged (comments, whitespace) -- a native identity hashes a ``.py`` by bytes, so those still seed it; a derivation token and a
@@ -35,6 +46,7 @@ from __future__ import annotations
 
 import ast
 import collections
+import contextlib
 import csv
 import functools
 import hashlib
@@ -43,13 +55,21 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 from miniworld_engine.build import cards as card_mod
-from miniworld_engine.build import repo_paths
+from miniworld_engine.build import repo_paths, symbols
 
 PKG = Path(__file__).resolve().parents[1]
 ROOT = PKG.parents[1]
 SRC = "src/miniworld_engine"
 NATIVE_PREFIX, DERIVATION = "identity:native:", "identity:derivation"
+TRITON_CACHE = "triton-cache"                  # the node kind of a tuned cache of a Triton kernel (a registry row with backend=triton)
+CACHE_KINDS = ("cache", TRITON_CACHE)
 
+#: names whose use in a scope means the scope can run or load a python file it names by string
+#: names whose use in a scope that imports a module by a computed name means it only hashes the module's source (the cache key: the graph
+#: models that as an identity node, the walk ends there), not that it runs it
+HASHING_NAMES = {"inspect", "getsource", "getsourcefile", "getsourcelines", "hashlib", "sha256", "md5", "blake2b"}
+EXEC_NAMES = {"subprocess", "runpy", "importlib", "import_module", "Popen", "check_call", "check_output", "spawn", "run_path", "run_module",
+              "exec_module", "spec_from_file_location", "__import__", "system"}
 CCODE = {".cu", ".cuh", ".inc", ".h", ".cpp"}
 #: files whose text is scanned for references. Measured data, benchmark tables, figures and lock files name nothing.
 SCANNED = {".py", ".md", ".yaml", ".yml"} | CCODE      # not .toml: pyproject names the CLI entry point, it is not built from it
@@ -100,12 +120,21 @@ class Graph:
         self.users: dict[str, dict[str, str]] = collections.defaultdict(dict)      # dependency -> {node: edge kind}
         self.cards: dict[str, frozenset[str]] = {}          # node -> the cards it depends on (card_mod.ALL: card-independent)
         self.known_cards: frozenset[str] = frozenset()
+        self.kinds: dict[tuple[str, str], set[str]] = collections.defaultdict(set)    # (node, dep) -> every kind of edge between them
+        self.resolve = None
+        self.syms: dict[str, symbols.FileSyms] = {}                                   # python file -> its units / bindings
+        self.pair_binds: dict[tuple[str, str], list[symbols.Bind]] = collections.defaultdict(list)    # (importer, imported) -> bindings
+        self.refs: dict[tuple[str, str], set[str]] = collections.defaultdict(set)     # (python user, file) -> the scopes whose strings name that file
+        self.whole_refs: set[tuple[str, str]] = set()                                 # (user, file) pairs that depend on the file as a whole (a built path, an include)
+        self.dispatch: dict[tuple[str, str], list[tuple[str, str | None]]] = collections.defaultdict(list)    # (user, defining file) -> [(user scope, symbol)]
 
     def edge(self, node: str, dep: str, kind: str) -> None:
         if kind == "ref" and self.nodes.get(dep) == "doc" and self.nodes.get(node) != "doc":
             return              # a comment or docstring pointing at a doc ("see docs/x.md") is not built from it
         if kind == "ref" and PurePosixPath(dep).suffix in NOT_CODE and PurePosixPath(node).suffix in (".py", *CCODE) and not node.startswith("tests/"):
             return              # a comment naming pyproject.toml or a figure; only a test that reads such a file depends on it
+        if node != dep and dep in self.nodes and node in self.nodes:
+            self.kinds[(node, dep)].add(kind)
         if node != dep and dep in self.nodes and node in self.nodes and (dep not in self.deps[node] or self.deps[node][dep] == "lazy"):
             self.deps[node][dep] = kind                      # a module-level import outranks a lazy one of the same file
             self.users[dep][node] = kind
@@ -130,6 +159,22 @@ class _Resolver:
                 if cand in self.paths:
                     return cand
         return None
+
+    def exact(self, name: str) -> str | None:
+        """The file of the module spelled exactly ``name`` (``miniworld_engine.a.b``, ``tests.paths``, ``oracles.dense``): None when it names
+        a symbol, a third-party or a standard-library module."""
+        parts = name.split(".")
+        roots = ("src/",) if parts[0] == "miniworld_engine" else ("", "tests/", "benchmarks/")
+        for root in roots:
+            base = root + "/".join(parts)
+            for cand in (f"{base}.py", f"{base}/__init__.py"):
+                if cand in self.paths:
+                    return cand
+        return None
+
+    def mod(self, name: str) -> str | None:
+        """What ``import name`` / ``from name import x`` loads: the package's longest module prefix, a first-party helper exactly."""
+        return self.dotted(name) if name.split(".")[0] == "miniworld_engine" else self.exact(name)
 
     def path(self, token: str, here: str) -> str | None:
         norm = PurePosixPath(token)
@@ -220,11 +265,12 @@ def _module_resolver(resolve: _Resolver):
     return find
 
 
-def _built_paths(g: Graph, path: str, use: repo_paths.PathUse, resolve: _Resolver, below: dict[str, list[str]]) -> None:
+def _built_paths(g: Graph, path: str, use: repo_paths.PathUse, resolve: _Resolver, below: dict[str, list[str]], scope: str = symbols.ALL) -> None:
     """The edges of the paths a python file builds: exact ones to their file, prefixes and enumerated directories to every file below."""
     for exact in sorted(use.exact):
         if exact in resolve.paths and exact != path:
             g.edge(path, exact, "ref")
+            g.refs[(path, exact)].add(scope)
     wanted = set(use.prefixes)
     if use.enumerates or use.opaque_enumeration:
         wanted |= {v[1] for v in use.values}
@@ -234,6 +280,7 @@ def _built_paths(g: Graph, path: str, use: repo_paths.PathUse, resolve: _Resolve
         for dep in below.get(prefix, ()):
             if dep != path:
                 g.edge(path, dep, "ref")
+                g.refs[(path, dep)].add(scope)
 
 
 def _files_below(paths: list[str], prefixes: set[str]) -> dict[str, list[str]]:
@@ -245,17 +292,56 @@ def _files_below(paths: list[str], prefixes: set[str]) -> dict[str, list[str]]:
     return out
 
 
-def build() -> Graph:
+def _py_strings(text: str) -> str:
+    """The string constants of a python source, docstrings excluded, one per line: what the code can name by a path or a dotted name. A
+    comment or a docstring that mentions ``kernels/x.py`` is not a dependency on it."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return text
+    skip: set[int] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)) and n.body \
+                and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant):
+            skip.add(id(n.body[0].value))
+    return "\n".join(n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in skip)
+
+
+@contextlib.contextmanager
+def at_root(root: Path):
+    """Build / diff the graph of another checkout of this repository (a worktree of a historic commit): ``ROOT`` is read at call time."""
+    global ROOT
+    old, ROOT = ROOT, Path(root)
+    try:
+        yield
+    finally:
+        ROOT = old
+
+
+def build(light: bool = False) -> Graph:
+    """The graph of the checkout at ``ROOT``. ``light``: no tuned caches / identities (they need the running package's own source, not the
+    checkout's): enough to select tests, and the only form that can be built for another revision."""
     paths = files()
     g = Graph()
     g.nodes.update({p: kind_of(p) for p in paths})
-    g.nodes.update({f"{NATIVE_PREFIX}{op}": "identity" for op in sorted(_native_ops())})
-    g.nodes[DERIVATION] = "identity"
+    if not light:
+        g.nodes.update({f"{NATIVE_PREFIX}{op}": "identity" for op in sorted(_native_ops())})
+        g.nodes[DERIVATION] = "identity"
     resolve = _Resolver(paths)
+    g.resolve = resolve
     analyzer = repo_paths.Analyzer(set(paths), _text, _module_resolver(resolve))
-    uses = {p: analyzer.use(p) for p in paths if p.startswith("tests/") and PurePosixPath(p).suffix == ".py"}
+    syms_of = {p: symbols.analyze(p, _text(p), resolve) for p in paths if PurePosixPath(p).suffix == ".py"}
+    g.syms.update(syms_of)
+    scoped: dict[tuple[str, str], repo_paths.PathUse] = {}                    # (test file, scope) -> the paths that scope computes
+    for p, fs in syms_of.items():
+        if not p.startswith("tests/"):
+            continue
+        nodes = symbols.scope_nodes(_text(p))
+        for scope, stmts in nodes.items():
+            names = fs.names.get(scope, set())
+            scoped[(p, scope)] = analyzer.use(p, stmts, names)
     wanted = set()
-    for use in uses.values():
+    for use in scoped.values():
         wanted |= {x for x in use.prefixes if x}
         if use.enumerates or use.opaque_enumeration:
             wanted |= {v[1] for v in use.values if v[1]}
@@ -265,28 +351,206 @@ def build() -> Graph:
         if suffix not in SCANNED and p not in SCANNED_CSV:
             continue
         text = _text(p)
+        scan = text
+        ref = "names" if p in SCANNED_CSV else "ref"      # a registry row NAMES a kernel file: the registry does not read it
         if suffix == ".py":
+            fs = syms_of[p]
             if p.startswith("tests/"):                    # a test that lists or builds a path depends on it; the sources do not (native.py lists every kernel as a salt, not as a dependency)
-                _built_paths(g, p, uses[p], resolve, below)
-            for dep, lazy in _python_imports(p, text, resolve).items():
+                for scope in fs.scope_names():
+                    use = scoped.get((p, scope))
+                    if use is not None:
+                        _built_paths(g, p, use, resolve, below, scope)
+            lazy_of: dict[str, bool] = {}
+            for b in fs.binds:
+                if b.target:
+                    lazy_of[b.target] = lazy_of.get(b.target, True) and b.lazy
+                    g.pair_binds[(p, b.target)].append(b)
+            for dep, lazy in lazy_of.items():
                 g.edge(p, dep, "lazy" if lazy else "import")
+            if fs.ok:
+                runs = bool(fs.dyn_import) or any(names & EXEC_NAMES for names in fs.names.values())      # the file can run / load what a table of strings names
+                scan = ""
+                for scope, strings in ((symbols.ALL, fs.module.strings), *((n, u.strings) for n, u in fs.units.items())):
+                    blob = "\n".join(strings)
+                    deps = {resolve.path(t, p) for t in _PATH_RE.findall(blob)} | {resolve.dotted(n) for n in _DOTTED_RE.findall(blob)}
+                    can_run = p.startswith("tests/") or runs
+                    for dep in deps - {None, p}:
+                        if dep.endswith(".py") and not can_run:
+                            continue                        # a table of file names (a hash input, a listing) does not run or load them
+                        g.refs[(p, dep)].add(scope)
+                        g.edge(p, dep, "ref")
         if suffix in CCODE:
             for spelling in _INCLUDE_RE.findall(text):
                 for dep in resolve.include(spelling, p):
                     g.edge(p, dep, "include")
-        for token in _PATH_RE.findall(text):
+        for token in _PATH_RE.findall(scan):
             dep = resolve.path(token, p)
             if dep:
-                g.edge(p, dep, "ref")
-        for name in _DOTTED_RE.findall(text):
+                g.edge(p, dep, ref)
+        for name in _DOTTED_RE.findall(scan):
             dep = resolve.dotted(name)
             if dep:
-                g.edge(p, dep, "ref")
-    _caches(g, resolve)
-    _identities(g)
+                g.edge(p, dep, ref)
+    _conftests(g, paths)
+    _dispatch(g, resolve)
+    if not light:
+        _caches(g, resolve)
+        _identities(g)
     card_mod.assign(g, paths, ROOT)
     return g
 
+
+def _conftests(g: Graph, paths: list[str]) -> None:
+    """A test depends on the ``conftest.py`` of every directory above it, by what it asks of it: a fixture it requests by parameter name
+    (or ``usefixtures("name")``) -> that fixture; every test below -> the module level, the ``pytest_*`` hooks and the autouse fixtures."""
+    conf = {p for p in paths if PurePosixPath(p).name == "conftest.py"}
+    for p in paths:
+        if not (p.startswith("tests/") and p.endswith(".py")):
+            continue
+        fs = g.syms.get(p)
+        for parent in PurePosixPath(p).parents:
+            c = str(parent / "conftest.py")
+            if c not in conf or c == p:
+                continue
+            cfs = g.syms.get(c)
+            g.edge(p, c, "dispatch")
+            if cfs is None or fs is None or not cfs.ok:
+                g.dispatch[(p, c)].append((symbols.ALL, None))
+                continue
+            g.dispatch[(p, c)].append((symbols.ALL, symbols.ALL))             # the module level of the conftest
+            for u in cfs.units.values():
+                if u.name.startswith("pytest_") or u.fixture == "autouse":
+                    g.dispatch[(p, c)].append((symbols.ALL, u.name))
+            fixtures = {u.name for u in cfs.units.values() if u.fixture}
+            for scope in fs.scope_names():
+                wanted = fixtures & (fs.names.get(scope, set()) | (fs.units[scope].strings if scope in fs.units else fs.module.strings))
+                for name in wanted:
+                    g.dispatch[(p, c)].append((scope, name))
+
+
+def _tuple_consts(tree: ast.Module) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, (ast.Tuple, ast.List)):
+            out[node.targets[0].id] = [e.value for e in node.value.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+    return out
+
+
+def _op_kernels(rows: list[dict]) -> dict[str, list[dict]]:
+    """``autotune/records.py::OP_KERNELS`` -> ``{op: registry rows}``: its entries are ``"family/kernel"`` or ``"family/*"`` (a ``*_NAME`` splat names a tuple above)."""
+    try:
+        tree = ast.parse(_text(f"{SRC}/autotune/records.py"))
+    except (OSError, SyntaxError):
+        return {}
+    consts = _tuple_consts(tree)
+    out: dict[str, list[dict]] = {}
+    for node in tree.body:
+        target = node.target if isinstance(node, ast.AnnAssign) else node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else None
+        if not (isinstance(target, ast.Name) and target.id == "OP_KERNELS" and isinstance(node.value, ast.Dict)):
+            continue
+        for k, v in zip(node.value.keys, node.value.values, strict=True):
+            if not (isinstance(k, ast.Constant) and isinstance(v, (ast.Tuple, ast.List))):
+                continue
+            entries: list[str] = []
+            for e in v.elts:
+                if isinstance(e, ast.Constant) and isinstance(e.value, str):
+                    entries.append(e.value)
+                elif isinstance(e, ast.Starred) and isinstance(e.value, ast.Name):
+                    entries.extend(consts.get(e.value.id, []))
+            for entry in entries:
+                family, _, name = entry.partition("/")
+                out.setdefault(k.value, []).extend(r for r in rows if r.get("family") == family and name in ("*", r.get("kernel")))
+    return out
+
+
+def _registry_modules() -> set[str]:
+    try:
+        return {r["module"] for r in csv.DictReader(_text(f"{SRC}/kernels/registry/registry_module.csv").splitlines())}
+    except (OSError, KeyError):
+        return set()
+
+
+def _dispatch(g: Graph, resolve: _Resolver) -> None:
+    """String-dispatch edges: the repository connects things by NAME, which an import graph cannot see. A scope (a function, a class, the module
+    level) that holds the string constant of a name depends on what that name resolves to (never wider than a statically known target):
+
+    * a registry kernel name (``registry.csv``) -> the kernel's file (its ``symbol`` when it is a unit of the file), its driver and its check
+      (``module:function``); a ``registry_module.csv`` module name -> that csv;
+    * an ``OP_KERNELS`` op name (``autotune/records.py``) -> the table;
+    * an extension name (``load_extension(name=...)``) -> the function that builds it;
+    * a string key of a table in ``modules/dispatch.py`` -> that table; ``ImplementationType`` -> the routers of ``modules/dispatch.py``;
+    * a scope of a file that reads the registry and imports a module by a computed name (``importlib.import_module(name)``) -> every python
+      file a registry row names.
+
+    An edge is ``(scope of the user, symbol or None of the target)``; ``reach_symbolic`` walks it like a symbol import."""
+    targets: dict[str, list[tuple[str, str | None]]] = collections.defaultdict(list)
+    named: set[str] = set()
+    rows: list[dict] = []
+    with contextlib.suppress(OSError):
+        rows = list(csv.DictReader(_text(REGISTRY_CSV).splitlines()))
+
+    def unit(file: str, name: str) -> str | None:
+        fs = g.syms.get(file)
+        return name if name and fs is not None and name in fs.units else None
+
+    by_row: dict[str, list[tuple[str, str | None]]] = {}
+    for r in rows:
+        found: list[tuple[str, str | None]] = []
+        f = resolve.path(r["file"], "") if r.get("file") else None
+        if f:
+            found.append((f, unit(f, r.get("symbol", ""))))
+        for col in ("driver", "check"):
+            mod, _, fn = (r.get(col) or "").partition(":")
+            tf = resolve.dotted(mod) if mod else None
+            if tf:
+                found.append((tf, unit(tf, fn)))
+        if not r.get("kernel"):
+            continue
+        by_row[r["kernel"]] = found
+        targets[r["kernel"]].extend(found)
+        named |= {t for t, _ in found if t.endswith(".py")}
+    records = f"{SRC}/autotune/records.py"
+    if records in g.syms and "OP_KERNELS" in g.syms[records].units:
+        for op in _op_kernels(rows):
+            targets[op].append((records, "OP_KERNELS"))             # an op name resolves through the table, not to every kernel it lists
+    for mod in _registry_modules():
+        targets[mod].append((f"{SRC}/kernels/registry/registry_module.csv", None))
+    for p, fs in g.syms.items():
+        for scope, names in fs.ext_names.items():
+            for name in names:
+                targets[name].append((p, scope if scope in fs.units else None))
+    dispatch_py = f"{SRC}/modules/dispatch.py"
+    routers: list[str] = []
+    fs = g.syms.get(dispatch_py)
+    if fs is not None:
+        for u in fs.units.values():
+            if u.kind == "assign":
+                for s in u.strings:
+                    targets[s].append((dispatch_py, u.name))
+            if "ImplementationType" in u.uses:
+                routers.append(u.name)
+    for p, fs in g.syms.items():
+        scopes = [(symbols.ALL, fs.module.strings), *((n, u.strings) for n, u in fs.units.items())]
+        for scope, strings in scopes:
+            for s in strings & targets.keys():
+                for dep, sym in targets[s]:
+                    if dep != p and dep in g.nodes:
+                        g.dispatch[(p, dep)].append((scope, sym))
+                        g.edge(p, dep, "dispatch")
+        if p != dispatch_py:
+            for scope in fs.scope_names():
+                if "ImplementationType" in fs.names.get(scope, ()):
+                    for r in routers:
+                        g.dispatch[(p, dispatch_py)].append((scope, r))
+                        g.edge(p, dispatch_py, "dispatch")
+        reads_registry = not p.startswith(f"{SRC}/kernels/") and any(g.kinds.get((p, r)) for r in (REGISTRY_CSV, f"{SRC}/kernels/registry/registry_module.csv"))
+        for scope in sorted(fs.dyn_import if reads_registry else ()):
+            if "identity" in scope or "source" in scope or fs.names.get(scope, set()) & HASHING_NAMES:
+                continue                                             # it hashes the module (a cache key), it does not run it: an identity, not a behaviour
+            for dep in sorted(named):
+                if dep != p:
+                    g.dispatch[(p, dep)].append((scope, None))
+                    g.edge(p, dep, "dispatch")
 
 def _caches(g: Graph, resolve: _Resolver) -> None:
     from miniworld_engine.build import code_graph_extra as extra
@@ -309,6 +573,8 @@ def _caches(g: Graph, resolve: _Resolver) -> None:
             g.edge(p, f"{NATIVE_PREFIX}{op}", "identity")
             continue
         row = registry.get(op)
+        if (row and row.get("backend") == "triton") or (row is None and op.endswith("_triton")):
+            g.nodes[p] = TRITON_CACHE                          # evidence of the fallback cards; an H100 keeps none (cards.EXEMPT_KINDS)
         g.edge(p, f"{grid_dir}/{op}.csv", "cache")
         g.edge(p, f"{SRC}/autotune/configs/default/{op}.csv", "cache")
         g.edge(p, f"registry-row:{op}", "cache")
@@ -355,13 +621,21 @@ def _normalized(path: str, text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def diff(base: str) -> tuple[list[str], list[str], list[str]]:
-    """``(changed, cosmetic, deleted)``: files that differ from ``base`` in content, in bytes only (comments / whitespace), or are gone."""
-    names = set(_git("diff", "--name-only", "-z", base).split("\0")) | set(
-        _git("ls-files", "-z", "--others", "--exclude-standard").split("\0"))
+def diff(base: str, head: str | None = None) -> tuple[list[str], list[str], list[str]]:
+    """``(changed, cosmetic, deleted)``: files that differ from ``base`` in content, in bytes only (comments / whitespace), or are gone.
+    ``head``: compare two revisions (``base..head``) instead of ``base`` against the working tree."""
+    if head:
+        names = set(_git("diff", "--name-only", "-z", base, head).split("\0"))
+    else:
+        names = set(_git("diff", "--name-only", "-z", base).split("\0")) | set(
+            _git("ls-files", "-z", "--others", "--exclude-standard").split("\0"))
     changed, cosmetic, deleted = [], [], []
     for p in sorted(n for n in names if n):
-        if not (ROOT / p).is_file():
+        try:
+            new = _git("show", f"{head}:{p}") if head else _text(p) if (ROOT / p).is_file() else None
+        except (subprocess.CalledProcessError, UnicodeDecodeError):
+            new = None
+        if new is None:
             deleted.append(p)
             continue
         try:
@@ -372,7 +646,6 @@ def diff(base: str) -> tuple[list[str], list[str], list[str]]:
         except UnicodeDecodeError:
             changed.append(p)                                   # a binary file that differs
             continue
-        new = _text(p)
         if old == new:
             continue
         (changed if _normalized(p, old) != _normalized(p, new) else cosmetic).append(p)
@@ -382,7 +655,7 @@ def diff(base: str) -> tuple[list[str], list[str], list[str]]:
 def reach(g: Graph, seeds: list[str], lazy: bool = False) -> dict[str, str]:
     """Every node a change to ``seeds`` reaches, with the node it was reached from (the first one found). A ``lazy`` edge (an import
     inside a function) is walked only when ``lazy`` is True: the strong reach is what loading the code runs, the full reach what any
-    call path could.
+    call path could. A ``names`` edge (a registry row names a kernel file; it does not read it) is not walked.
 
     The walk ends at an identity: what an edit owes the files behind it (the caches a restamp rewrites, the derivation a ``dev derive``
     regenerates) is read off the identity (``derived``), not folded into what the edit itself touches -- or every edit under
@@ -394,9 +667,96 @@ def reach(g: Graph, seeds: list[str], lazy: bool = False) -> dict[str, str]:
         if is_identity(node):
             continue
         for user, kind in g.users.get(node, {}).items():
-            if user not in parent and kind != "identity" and (lazy or kind != "lazy"):
+            if user not in parent and kind not in ("identity", "names") and (lazy or kind != "lazy"):
                 parent[user] = node
                 queue.append(user)
+    return parent
+
+
+#: edge kinds that depend on the whole defining file (a path / dotted name written in code, an include, a cache, a fixture file)
+WHOLE_FILE = {"ref", "include", "cache"}
+
+
+def _binding_scopes(fs: symbols.FileSyms, b: symbols.Bind, got: set[str]) -> tuple[set[str], set[str]]:
+    """``(scopes, names)``: the scopes of the importer a binding reaches when the imported file's changed names are ``got``, and the name it
+    re-exports (a module-level import binds a name others may import from the importer; units that merely read it are the scopes)."""
+    everything = symbols.ALL in got
+    if b.exec_only:
+        return ({b.scope} if everything else set()), set()
+    if b.local == "*":
+        return {symbols.ALL}, set()                            # a star import binds names we cannot list: the whole importer
+    if b.orig is not None:
+        if not (everything or b.orig in got):
+            return set(), set()
+    elif not got:
+        return set(), set()
+    use = [b.scope] if b.scope != symbols.ALL else [s for s in fs.scope_names() if b.local in fs.names.get(s, ())]
+    out: set[str] = set()
+    for scope in use:
+        if b.orig is not None or b.plain or b.local in fs.bare.get(scope, ()):
+            out.add(scope)
+        else:                                                   # a module object read as ``mod.attr``: only the attributes it reads
+            attrs = fs.attrs.get(scope, {}).get(b.local, set())
+            if everything or attrs & got:
+                out.add(scope)
+    if not use and (b.plain or b.scope != symbols.ALL):
+        out.add(b.scope)                                       # a plain import nobody reads (a side effect), a function-level import unused: its scope
+    return out, ({b.local} if b.scope == symbols.ALL and b.local else set())
+
+
+def reach_symbolic(g: Graph, seeds: dict[str, set[str]]) -> dict[str, str]:
+    """:func:`reach` at the granularity of Python symbols (:mod:`symbols`). ``seeds`` maps a node to the names that changed in it
+    (``{ALL}``: the whole file; any non-Python node is whole). A user that imports names reaches only when one of them is changed (or
+    something it is built from: a unit that uses a changed name is changed too); ``import x`` and a module object used bare stay
+    conservative; a ``ref`` / ``include`` / ``cache`` / ``conftest`` edge is the whole file; a ``dispatch`` edge is a name resolved to a
+    ``(file, symbol)``. Returns ``{node: the node it was reached from}`` for every node reached, never a node :func:`reach` would not."""
+    parent = dict.fromkeys(seeds, "")
+    got: dict[str, set[str]] = {}              # node -> changed names (closed over the file) and re-exported names
+    core: dict[str, set[str]] = {}             # node -> the names the closure runs over (no re-exports)
+    queue: collections.deque[str] = collections.deque()
+
+    def push(node: str, syms: set[str], frm: str, names: frozenset[str] | set[str] = frozenset()) -> None:
+        fs = g.syms.get(node)
+        cur = got.setdefault(node, set())
+        base = core.setdefault(node, set())
+        base |= syms
+        new = (symbols.closure(fs, base) if fs is not None else {symbols.ALL}) | set(names)
+        if new - cur:
+            cur |= new
+            base |= new - set(names)
+            parent.setdefault(node, frm)
+            queue.append(node)
+
+    for node, syms in seeds.items():
+        push(node, set(syms), "")
+    while queue:
+        node = queue.popleft()
+        if is_identity(node):
+            continue
+        here = got[node]
+        for user in g.users.get(node, {}):
+            kinds = g.kinds.get((user, node), set())
+            rel = kinds & (WHOLE_FILE | {"import", "lazy", "dispatch"})
+            if not rel:
+                continue                                     # an identity or a names edge
+            ufs = g.syms.get(user)
+            if ufs is None or (rel & WHOLE_FILE and not (rel & WHOLE_FILE == {"ref"} and (user, node) not in g.whole_refs and (user, node) in g.refs)):
+                push(user, {symbols.ALL}, node)
+                continue
+            if "ref" in rel and (user, node) in g.refs:
+                push(user, set(g.refs[(user, node)]), node)
+            if kinds & {"import", "lazy"}:
+                binds = g.pair_binds.get((user, node))
+                if not binds:
+                    push(user, {symbols.ALL}, node)
+                for b in binds or ():
+                    scopes, names = _binding_scopes(ufs, b, here)
+                    if scopes or names:
+                        push(user, scopes, node, names)
+            if "dispatch" in kinds:
+                for scope, sym in g.dispatch.get((user, node), ()):
+                    if sym is None or symbols.ALL in here or sym in here:
+                        push(user, {scope}, node)
     return parent
 
 
@@ -407,21 +767,52 @@ def _rows(text: str) -> dict[str, dict]:
     return {r["kernel"]: r for r in csv.DictReader(text.splitlines())}
 
 
-def registry_rows_changed(base: str) -> list[str]:
+def registry_rows_changed(base: str, head: str | None = None) -> list[str]:
     """The kernels whose ``registry.csv`` row was added, removed or edited since ``base``."""
     try:
         old = _rows(_git("show", f"{base}:{REGISTRY_CSV}"))
     except subprocess.CalledProcessError:
         return []
-    new = _rows(_text(REGISTRY_CSV))
+    new = _rows(_git("show", f"{head}:{REGISTRY_CSV}") if head else _text(REGISTRY_CSV))
     return sorted(k for k in old.keys() | new.keys() if old.get(k) != new.get(k))
 
 
-def changes(base: str) -> dict:
-    g = build()
-    changed, cosmetic, deleted = diff(base)
+def changed_symbols(g: Graph, changed: list[str], base: str, head: str | None, rows: list[str], same_tree: bool = True) -> dict[str, set[str]]:
+    """The seeds of :func:`reach_symbolic`: per changed python file the names whose definition changed (``{ALL}`` when the mapping is not
+    certain), every other changed node whole."""
+    out: dict[str, set[str]] = {}
+    for p in changed:
+        if p not in g.nodes:
+            continue
+        if p not in g.syms:
+            out[p] = {symbols.ALL}
+            continue
+        try:
+            old_text = _git("show", f"{base}:{p}")
+            new_text = _git("show", f"{head}:{p}") if head else _text(p)
+        except (subprocess.CalledProcessError, UnicodeDecodeError):
+            out[p] = {symbols.ALL}                              # new file, or unreadable
+            continue
+        syms = symbols.changed_symbols(symbols.analyze(p, old_text, g.resolve), symbols.analyze(p, new_text, g.resolve))
+        if not same_tree and any(n not in g.syms[p].units for n in syms - {symbols.ALL}):
+            syms = {symbols.ALL}                                # the graph is of another revision: a name it does not know is the whole file
+        out[p] = syms or {symbols.ALL}                          # a difference we cannot name (a reorder) is the whole file
+    for k in rows:
+        if f"registry-row:{k}" in g.nodes:
+            out[f"registry-row:{k}"] = {symbols.ALL}
+    return out
+
+
+def changes(base: str, head: str | None = None, graph: Graph | None = None, same_tree: bool = True, skip_tests: bool = False) -> dict:
+    """What the diff ``base`` -> working tree (or ``base..head``) reaches. ``graph``: a prebuilt graph (``build(light=True)``); ``same_tree``
+    False when it is the graph of another revision than ``head`` (a back-test on today's graph: names it does not know widen to the file);
+    ``skip_tests``: leave the changed test files out of the seeds (what do the non-test edits select?)."""
+    g = graph or build()
+    changed, cosmetic, deleted = diff(base, head)
+    if skip_tests:
+        changed = [p for p in changed if not p.startswith("tests/")]
     seeds = [p for p in changed if p in g.nodes]
-    rows = registry_rows_changed(base) if REGISTRY_CSV in changed else []
+    rows = registry_rows_changed(base, head) if REGISTRY_CSV in changed else []
     seeds += [f"registry-row:{k}" for k in rows if f"registry-row:{k}" in g.nodes]
     # A native identity hashes a .py by bytes (a comment edit moves it) and a .cu normalized; the derivation's file tokens are
     # normalized for both. A changed registry row moves the identity of that kernel only.
@@ -435,8 +826,10 @@ def changes(base: str) -> dict:
         if files_:
             moved[ident] = files_
             seeds.append(ident)
+    sym_seeds = changed_symbols(g, changed, base, head, rows, same_tree)
     return {"graph": g, "changed": changed, "cosmetic": cosmetic, "deleted": deleted, "moved": moved, "rows": rows,
             "reached": reach(g, seeds), "reached_lazy": reach(g, seeds, lazy=True),
+            "sym_reached": reach_symbolic(g, sym_seeds), "sym_seeds": sym_seeds,
             "card_reached": reach_cards(g, seeds), "card_reached_lazy": reach_cards(g, seeds, lazy=True)}
 
 
@@ -453,7 +846,7 @@ def derivation_plans() -> dict[str, Path]:
 
 # ------------------------------------------------------------------------------------------------------------------ cards
 #: node kinds whose correctness or evidence needs the card's hardware (a doc or a core Python file does not)
-HARDWARE_KINDS = {"cuda-source", "cache", "test-gpu", "benchmark", "registry-row", "identity"}
+HARDWARE_KINDS = {"cuda-source", "cache", TRITON_CACHE, "test-gpu", "benchmark", "registry-row", "identity"}
 
 
 def reach_cards(g: Graph, seeds: list[str], lazy: bool = False) -> dict[str, frozenset[str]]:
@@ -465,6 +858,7 @@ def reach_cards(g: Graph, seeds: list[str], lazy: bool = False) -> dict[str, fro
     the kernel it was measured from, whatever cards that kernel serves today (an H100 cache of a Triton kernel goes stale when the kernel
     changes), so it is reached for its own card whenever the kernel is reached at all."""
     known = g.known_cards
+    exempt_cards = {c for c, ks in card_mod.EXEMPT_KINDS.items() if TRITON_CACHE in ks}
 
     def cards_of(node: str) -> frozenset[str]:
         return card_mod.expand(g.cards.get(node, card_mod.ALL), known)
@@ -482,10 +876,12 @@ def reach_cards(g: Graph, seeds: list[str], lazy: bool = False) -> dict[str, fro
             continue
         here = got[node]
         for user, kind in g.users.get(node, {}).items():
-            if kind == "identity" or (kind == "lazy" and not lazy):
+            if kind in ("identity", "names") or (kind == "lazy" and not lazy):
                 continue
             mine = cards_of(user)
             new = set(mine) if kind == "cache" else here & mine
+            if kind == "cache" and g.nodes[user] == TRITON_CACHE and set(mine) & exempt_cards:
+                new |= set(getattr(g, "fallback_cards", ())) & known       # a Triton cache under an exempt card's file name is the fallback cards' evidence
             if new - got.get(user, set()):
                 got.setdefault(user, set()).update(new)
                 queue.append(user)
@@ -524,7 +920,9 @@ def card_evidence(result: dict, card: str, new_only: bool = False, rows: list | 
     rows = cache_status.scan() if rows is None else rows
     mine = [r for r in rows if f"({card})" in r.gpu]
     native = _native_ops()
-    reached_ops = {PurePosixPath(n).parent.name for n in view(result, card) if g.nodes[n] == "cache"}
+    skip = card_mod.exempt_kinds(card)
+    reached_ops = {PurePosixPath(n).parent.name for n in view(result, card) if g.nodes[n] in CACHE_KINDS and g.nodes[n] not in skip}
+    triton_ops = {PurePosixPath(n).parent.name for n in view(result, card) if g.nodes[n] == TRITON_CACHE}
     touched = {p.removeprefix(f"{SRC}/") for p in [*result["changed"], *result["cosmetic"]] if p.startswith(f"{SRC}/")}
     native_stale = sorted({r.op for r in mine if r.stale and r.reason.startswith("native implementation changed")})
     plans = derivation_plans()
@@ -534,13 +932,21 @@ def card_evidence(result: dict, card: str, new_only: bool = False, rows: list | 
     if new_only:
         rows_changed = set(result.get("rows") or [])
         seeds = {*result["changed"], *(f"registry-row:{k}" for k in rows_changed)}
-        direct = {PurePosixPath(n).parent.name for n, kind in g.nodes.items() if kind == "cache" and seeds & set(g.deps[n])}
+        direct = {PurePosixPath(n).parent.name for n, kind in g.nodes.items() if kind in CACHE_KINDS and seeds & set(g.deps[n])}
+        triton_ops &= direct
         native_stale = [op for op in native_stale if op in rows_changed or set(identity.native_files(op)) & touched]
         units_stale = {k: v for k, v in units_stale.items() if set(v) & touched}
         reached_ops &= direct                              # a cache whose own files (kernel, helpers, driver, grid, row) hold a changed file
+    triton_all = {PurePosixPath(p).parent.name for p, k in g.nodes.items() if k == TRITON_CACHE}
+    exempt_cards = {c for c, ks in card_mod.EXEMPT_KINDS.items() if TRITON_CACHE in ks}
+    exempt_here = TRITON_CACHE in skip
+    # the committed rows of a Triton op named for an exempt card (an H100 file name) are evidence of the fallback cards: counted, never dropped
+    kept = [r for r in rows if r.op in triton_all and any(f"({c})" in r.gpu for c in exempt_cards)]
+    triton = {"ops": len(triton_ops), "rows": len(kept) if (exempt_here or card in getattr(g, "fallback_cards", ())) else 0, "stale": sum(1 for r in kept if r.stale),
+              "exempt": exempt_here, "exempt_cards": sorted(exempt_cards)}
     return {"card": card, "stale": [r for r in mine if r.stale and r.op in reached_ops], "native_stale": native_stale,
             "units_stale": units_stale, "units_total": status["units"], "schema": status["schema"], "new_only": new_only,
-            "has_plan": has_plan, "native_rows": sum(1 for r in mine if r.op in native), "tuned_reached": len(reached_ops)}
+            "has_plan": has_plan, "native_rows": sum(1 for r in mine if r.op in native), "tuned_reached": len(reached_ops), "triton": triton}
 
 
 def _chain(parent: dict[str, str], node: str) -> str:
@@ -583,7 +989,12 @@ def actions(result: dict, card: str = "", accessible: bool = True) -> list[str]:
     if result.get("rows"):
         todo.append(f"{tag}registry rows changed ({len(result['rows'])}): " + ", ".join(result["rows"][:8]) + (" ..." if len(result["rows"]) > 8 else "")
                     + " -- their tuned caches, and run_all on each card that holds their manifest rows")
-    caches = sorted(n for n in by_kind["cache"] if n not in changed)
+    skip = card_mod.exempt_kinds(card) if card else frozenset()
+    caches = sorted(n for k in CACHE_KINDS if k not in skip for n in by_kind[k] if n not in changed)
+    exempt = sorted(n for k in CACHE_KINDS if k in skip for n in by_kind[k] if n not in changed)
+    if exempt:
+        todo.append(f"{tag}{len(exempt)} Triton tuned cache files reached ({len({PurePosixPath(n).parent.name for n in exempt})} ops): EXEMPT on {card} "
+                    f"(an H100 keeps no Triton caches; they are the fallback cards' evidence, UNVERIFIABLE-HERE there)")
     ops = sorted({PurePosixPath(n).parent.name for n in caches})
     if ops:
         todo.append(f"{run}tuned caches reached ({len(ops)} ops, {len(caches)} files): retune / `dev cache-status` -- {', '.join(ops[:12])}"
@@ -630,7 +1041,8 @@ def tests(result: dict, kind: str = "all") -> list[str]:
     """The test files the change reaches (through every import, lazy ones included), one repo path each: ``pytest $(... --tests)``."""
     g = result["graph"]
     want = {"cpu": {"test"}, "gpu": {"test-gpu"}, "all": {"test", "test-gpu"}}[kind]
-    return sorted(n for n in result["reached_lazy"] if g.nodes[n] in want and PurePosixPath(n).name.startswith("test_") and n.endswith(".py")
+    sym = result.get("sym_reached")                        # the symbol-level reach (a subset of the whole-file one); absent: whole-file
+    return sorted(n for n in result["reached_lazy"] if (sym is None or n in sym) and g.nodes[n] in want and PurePosixPath(n).name.startswith("test_") and n.endswith(".py")
                   and (ROOT / n).is_file())
 
 
@@ -640,10 +1052,13 @@ def plan_tests(result: dict, kind: str = "all", accessible=frozenset()) -> tuple
     not claimed verified."""
     g = result["graph"]
     want = {"cpu": {"test"}, "gpu": {"test-gpu"}, "all": {"test", "test-gpu"}}[kind]
+    sym = result.get("sym_reached")
     runnable: set[str] = set()
     needs: dict[str, set[str]] = {}
     for card in reached_cards(result):
         for n in view(result, card, lazy=True):
+            if sym is not None and n not in sym:
+                continue
             if g.nodes[n] not in want or not PurePosixPath(n).name.startswith("test_") or not n.endswith(".py") or not (ROOT / n).is_file():
                 continue
             if g.nodes[n] == "test" or card in accessible:
@@ -700,7 +1115,7 @@ def _evidence_lines(card: str, ev: dict, accessible: bool, bound: bool, new_only
     out = [f"evidence [{card}]{scope}:"]
     if ev["has_plan"]:
         n = len(ev["units_stale"])
-        out.append(f"    derivation plan   : " + (f"stale {n} of {ev['units_total']} units (computed from file digests)" if n
+        out.append("    derivation plan   : " + (f"stale {n} of {ev['units_total']} units (computed from file digests)" if n
                                                   else f"fresh, 0 of {ev['units_total']} units stale (computed from file digests)"))
     else:
         out.append("    derivation plan   : no committed plan for this card")
@@ -713,6 +1128,16 @@ def _evidence_lines(card: str, ev: dict, accessible: bool, bound: bool, new_only
     n = len(ev["stale"])
     out.append("    tuned caches      : " + (("none caused by this diff" if new_only else "none reached") if not ev["tuned_reached"] else
                                               f"stale {n} of {ev['tuned_reached']} reached op(s)" if n else f"fresh, {ev['tuned_reached']} reached op(s)"))
+    tr = ev.get("triton") or {}
+    if tr.get("rows"):
+        names = "/".join(tr["exempt_cards"])
+        if tr["exempt"]:
+            out.append(f"    triton caches     : EXEMPT on {card} by policy (this card keeps no Triton caches): {tr['rows']} committed row(s) named {names}, "
+                       f"{tr['stale']} stale by digest, {tr['ops']} op(s) reached by this diff -- the fallback cards' evidence, "
+                       f"UNVERIFIABLE-HERE there; not pending, not dropped")
+        else:
+            out.append(f"    triton caches     : UNVERIFIABLE-HERE (owed on {card}, a fallback card): {tr['rows']} committed row(s) kept under the {names} file names, "
+                       f"{tr['stale']} stale by digest, {tr['ops']} op(s) reached by this diff -- retuning needs {card} hardware")
     if accessible:
         out.append("    hardware evidence : run the owed commands and the tests listed (this card is accessible here)")
     elif bound:
@@ -758,6 +1183,9 @@ def evaluate(base: str, verbose: bool = False, manifests: list[str] = (), new_on
     gpu_here = [t for t in runnable_all if g.nodes[t] == "test-gpu"]
     lines.append(f"tests to run here (--tests): {len(cpu_here)} CPU, {len(gpu_here)} GPU; needing another card: "
                  + (", ".join(f"{c} {len(v)}" for c, v in needs_all.items()) or "none"))
+    if result.get("sym_reached") is not None:
+        whole, whole_needs = plan_tests({**result, "sym_reached": None}, "all", frozenset(here))
+        lines.append(f"  (symbol-level selection: the whole-file reach would run {len(whole)} here, {sum(len(v) for v in whole_needs.values())} on other cards)")
     blocking: list[str] = []
     unverifiable: list[str] = []
     for card in cards:
@@ -817,9 +1245,12 @@ def diff_tests(base: str, kind: str = "all", accessible: str | list[str] = "", g
 
 def summary() -> str:
     g = build()
+    n_dispatch = sum(len(v) for v in g.dispatch.values())
     kinds = collections.Counter(g.nodes.values())
     isolated = sorted(p for p, k in g.nodes.items() if k in ("python", "cuda-source", "test", "test-gpu") and not g.deps.get(p) and not g.users.get(p))
     per_card = collections.Counter(card_mod.label(c) for c in g.cards.values())
     return (f"{len(g.nodes)} nodes {dict(kinds)}\n{sum(len(d) for d in g.deps.values())} edges {dict(g.edge_count())}\n"
             f"nodes per card set: {dict(sorted(per_card.items()))}\n"
+            f"{len(g.syms)} python files read at symbol level ({sum(len(f.units) for f in g.syms.values())} units, {sum(len(f.binds) for f in g.syms.values())} bindings); "
+            f"{n_dispatch} string-dispatch links over {len(g.dispatch)} file pairs\n"
             f"{len(isolated)} code / test files with no edge in or out" + ("".join(f"\n  {p}" for p in isolated[:30])))

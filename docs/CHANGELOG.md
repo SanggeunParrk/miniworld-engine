@@ -8,6 +8,24 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [2.4.4] - 2026-11-04
 
+### Changed (code graph: H100 precision)
+
+- `dev code-graph --diff BASE --tests` selects tests at the granularity of Python symbols (`from x import A` depends on `A` and its callees; a
+  function / class body edit selects the tests that reach that symbol; module level, decorators, imports and unparsable files stay whole-file), so a
+  fix inside a function reaches 128-170 of the ~300-410 test files in the leaf cases (200-300 for a widely used function, 316-380 for a module-level edit of a hub) instead of almost all of them. It never under-selects: a back-test of 20 historic fix commits
+  (`tests/cpu/builder/test_code_graph_h100.py`) asserts that every test a fix added or changed, and the one that catches its bug, is selected.
+- New edges, all read from the files: string dispatch (registry kernel names, extension names, `OP_KERNELS` ops, `modules/dispatch.py` tables,
+  computed-name imports, `conftest.py` fixtures by parameter name), first-party helper imports (`tests.paths`, `oracles.dense`), and the repository
+  root from `next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())` (the Python 3.10 parse test is now selected for any
+  source edit). Removed: the registry -> kernel `ref` edge (kind `names`, not walked: the registry does not read the kernels) and `ref`s from comments,
+  docstrings and tables of file names that nothing runs or loads; together they were the hub through which every kernel edit reached `settings.py`.
+- A `.cu` with no card hint takes the arches of the nvcc call that builds it (`gencodes("90a")` -> sm90): 105 unhinted sources are now 72 sm90, 21
+  sm90+sm100, 12 sm100 (was 58 / 35 / 12).
+- Triton tuned caches are the node kind `triton-cache`; `cards.EXEMPT_KINDS` (`sm90`: that kind) is the documented policy "an H100 keeps no Triton
+  caches": on sm90 they are neither pending (`--check` no longer fails on the 28 stale `adaln*` / `*_triton` caches) nor hidden (counted as `EXEMPT`
+  in the evidence block), and under sm80 / sm86 they read `UNVERIFIABLE-HERE`. Native H100 caches are still judged. No kernel, native identity or
+  CUDA artifact is touched: the change is in `build/`, tests and docs.
+
 ### Added
 
 - `AttentionPairBias.forward(..., extra_pair_bias=)` / `PairformerBlock.forward(..., extra_pair_bias=)` / `Pairformer.forward(..., extra_pair_bias=)`: an additive `[B, n_head, L, L]` term (head axis 1 = shared by every head) on the pair-bias logits, before the key mask and the softmax (the structural-token refiner's extra bias); gradient flows to it. The native CUDA APB paths and the fused-pair kernel compute the bias from `pair` inside the kernel, so a call with the term skips them and runs the attention on the summed bias (H100: PyTorch; portable: the Triton kernel). Calls without it are unchanged.

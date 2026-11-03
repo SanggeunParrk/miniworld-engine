@@ -24,8 +24,8 @@ def test_every_tracked_file_is_a_node(graph: rg.Graph) -> None:
 def test_python_imports_and_registry_names_are_edges(graph: rg.Graph) -> None:
     assert graph.deps[KERNEL].get("src/miniworld_engine/kernels/_tiles.py") == "import"
     registry_csv = "src/miniworld_engine/kernels/registry/registry.csv"
-    assert graph.deps[registry_csv].get(KERNEL) == "ref"                      # a registry row names the kernel's file
-    assert graph.deps[registry_csv].get("src/miniworld_engine/kernels/drivers/adaln.py") == "ref"   # ... and its driver
+    assert graph.deps[registry_csv].get(KERNEL) == "names"                    # a registry row names the kernel's file (it does not read it: not walked)
+    assert graph.deps[registry_csv].get("src/miniworld_engine/kernels/drivers/adaln.py") == "names"   # ... and its driver
 
 
 def test_a_tuned_cache_depends_on_its_kernel_helpers_driver_and_grid(graph: rg.Graph) -> None:
@@ -56,7 +56,7 @@ def test_an_unrelated_kernel_does_not_move_a_native_identity(graph: rg.Graph) ->
 
 def test_an_edit_to_a_kernel_reaches_its_cache_and_its_tests_and_moves_only_the_identities_that_hold_it(graph: rg.Graph) -> None:
     reached = rg.reach(graph, [KERNEL])
-    assert {"cache", "test"} <= {graph.nodes[n] for n in reached}
+    assert {"triton-cache", "test"} <= {graph.nodes[n] for n in reached}      # a Triton kernel's tuned caches are their own node kind
     holders = [i for i in graph.nodes if rg.is_identity(i) and KERNEL in graph.deps[i]]
     assert rg.DERIVATION in holders or not graph.deps[rg.DERIVATION]       # a schema-1 derivation records no files
 
