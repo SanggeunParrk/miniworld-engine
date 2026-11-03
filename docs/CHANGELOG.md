@@ -52,6 +52,7 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 ### Fixed
 
 - The sm90 prebuilt bundle again carries the MiniWorld MSA-module kernels (the OPM native `tma_static` family and the native PWA family: `miniworld_opm_epilogue_native_tma_static*`, `miniworld_pwa_{ctr,dgv_bwd_native_v1,fwd2,fwd3,gateout,glue3_native_v1,ln_vg,pair3_native_v1}`) that the 2.4.2 and 2.4.3 bundles dropped, so MiniWorld no longer JIT-compiles them on its first call. The bundle coverage gained the `msa_module` case (MSAPairWeightedAveraging + OuterProductMean at MSA depths 1024 / 2048 / 4096, inference and training) and a test (`tests/cpu/builder/test_bundle_keeps_previous_release_names.py`) fails when a name the previous release bundle carried is missing from the new one.
+- The sm90 prebuilt bundle now also carries TriMul's wide-width training kernels (bidirectional hidden 256 / 384 / 512, bf16 and fp32-master; `trimul_h100/wide_train/front_d256.cu`, `front_pre_d512.cu`, ...) that no earlier bundle had. The empty-cache wheel check of every sm90 GPU test file found further shapes outside `registry_module.csv` that JIT-compile on first use (identical on 2.4.3): [docs/records/prebuilt_gaps_20261104.md](records/prebuilt_gaps_20261104.md).
 
 ### Added (implementation switch, master weights)
 
