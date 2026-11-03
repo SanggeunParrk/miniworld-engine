@@ -216,7 +216,7 @@ rebuilds it, a JIT root of the build's own (`<out>/cache`), and `MINIWORLD_ENGIN
 `gencodes` request compiles only the bundle's arch (one arch of code per artifact; a fat build of every arch is what
 made `layernorm_general` 32 MB):
 
-* `engine` (default) -- `build/bundle_coverage.py`: every case of `autotune.builder.cases()` (the modules and
+* `engine` (default) -- `build/bundle_coverage.py`: since 2.4.4 the expansion of `registry_module.csv` (see "the contract" below; the text that follows describes the older hand-written cases, now `engine-extras`): every case of `autotune.builder.cases()` (the modules and
   checkpoint leaves of `registry_module.csv`, each row at its own widths, in each declared dtype / compute dtype and
   bf16-mixed) at MiniWorld's inference ladder (token rungs 128 ... 2560, atom rungs 1024 ... 49152) and the training
   lengths (128 ... 768 tokens, the registry's atom ladder), two batched samples on the pair stream, and the
@@ -319,6 +319,40 @@ few instructions shorter under ptxas 13, the generated unit 111k vs 67k instruct
 and its extensions imported against PyPI torch `2.13.0+cu130`, but not run: the H100 cluster's driver 575 cannot run
 CUDA 13 (that needs a driver >= 580).
 
+## `registry_module.csv` is the contract: coverage and verify are generated from it
+
+What the engine promises to serve from the wheel is what `kernels/registry/registry_module.csv` declares. Both ends of a release are
+generated from that file by ONE expansion (`build/registry_calls.py`), so the loop "a test fails -> add a kernel -> rebuild the wheel -> verify"
+cannot start from a hand-written list that drifted:
+
+* **Expansion.** Every row becomes its calls: `length x impl x dtype x compute x mode x option` (a module the trunk runs both ways, TriangleMultiplication outgoing / incoming and TriangleAttention starting / ending, is called in both directions: the builder factories construct only the first). Options are swept one at a time against the
+  default, and only on the side of the pass they act on (`autotune.builder.SWITCHES`: `ln_bwd_path` / `ln_out_bwd_path` / `p_drop` are training,
+  `gate_backend` / `infer_concat` / `trimul_impl` both). `eval` is a forward under `no_grad`, `train` a forward + backward on inputs that require
+  grad, at the row's own augmentation (`eval_augmentation` / `train_augmentation`: the number of batched samples). The module is built by the
+  autotune builder's own `Case` factory. A (impl, dtype) the arch's rule files (`build/gpu_to_kernels/`) refuse is listed in the row's
+  `excluded` with the rule's reason; a row with no call left is reported as "not an sm90 row" with the registry text. No row is dropped silently
+  (`tests/cpu/builder/test_registry_expansion.py`). The kernel level is `registry.csv`: the developed hand-CUDA kernels of the arch with a driver
+  are called once through it; every other row (Triton: the H100 / B200 path is hand-CUDA) is listed with its reason.
+* **Coverage.** `dev bundle-kernels --arch sm90` (driver `engine`, the default) runs exactly that expansion (kinds `registry_module`,
+  `registry_kernel` in `build/bundle_coverage.py`). The older hand-written cases (`case`, `pairformer`, `diffusion`, `bias_only_dit`, `swa_atom`,
+  `local_dit`, `trimul_wide_train`, `trimul_directions`, `msa_module`, ...) are **extras**, `--coverage engine-extras[:<filter>]`: a shape belongs in
+  the default only when the registry declares it. Declare a shape (a row) and the next coverage and the next verify both carry it.
+* **Verify.** `dev bundle-verify` is the release gate, ONE command:
+
+  ```bash
+  miniworld-engine dev bundle-verify --wheels dist --python /venv-py312-cu129/bin/python --out <work> --gpus 0,1,2,3
+  ```
+
+  It unzips the engine wheel and the kernel wheels of that interpreter's ABI into `<out>/installed`, reads the INSTALLED package's
+  `registry_module.csv`, and runs the expansion in fresh processes, one unit (a registry row or a kernel) per free GPU, each with an empty
+  engine cache (`XDG_CACHE_HOME=<out>/cache/<unit>`), `MINIWORLD_ENGINE_JIT_FALLBACK=0`, no `CUTLASS_PATH`, no nvcc on `PATH`. A line per unit is
+  printed as it ends (calls, ok, `PrebuiltMissing`, `Error`, the names of the missing artifacts), then the per-row table; the exit status is
+  nonzero on any missing artifact, error, or call that never ran. A loader that catches `PrebuiltMissing` and falls back is still counted (the
+  miss is recorded where it is raised). `<out>/row_artifacts.json` lists the artifact names each row was served from; it is the committed
+  `tests/cpu/builder/data/registry_row_artifacts_sm90.json`, which `test_bundle_serves_every_registry_row.py` checks against the bundle manifest
+  (`MINIWORLD_ENGINE_CHECK_BUNDLES=<prebuilt root>`) and against the registry's rows (a changed registry fails until the file is regenerated).
+  An OOM at a declared shape is reported as an error: a declared call must fit the card.
+
 ## Release checklist
 
 Per release, at the engine commit being released (set `version` in `pyproject.toml` first; PyPI takes no local
@@ -367,7 +401,7 @@ The keys are the code graph, so the question per release is which artifacts are 
 
    The root is kept between releases: a key that did not change is reused, only changed kernels rebuild.
 3. **sm100** (a B200): steps 1-2 with `--arch sm100` into the same root (one `manifest.json` per arch); not built yet.
-4. **Check** each wheel in a fresh venv with its torch and an empty cache: `pip install dist/<wheel>`,
+4. **Check** (one command): `miniworld-engine dev bundle-verify --wheels dist --python <venv python> --out <work> --gpus 0,1,2,3` (above); it must end `OK ... 0 missing, 0 error`. By hand, each wheel in a fresh venv with its torch and an empty cache: `pip install dist/<wheel>`,
    `XDG_CACHE_HOME=$(mktemp -d) MINIWORLD_ENGINE_JIT_FALLBACK=0 python -m pytest <smoke set>` -- no
    `[miniworld-engine build]` line, nothing under `$XDG_CACHE_HOME/miniworld_engine_jit`. This needs a driver that runs
    the torch build (CUDA 13 needs driver >= 580).

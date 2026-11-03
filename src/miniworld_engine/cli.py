@@ -1315,6 +1315,16 @@ def cmd_bundle_kernels(args: argparse.Namespace) -> int:
     return bundle_kernels(args)
 
 
+def cmd_bundle_verify(args: argparse.Namespace) -> int:
+    """The release gate: every call ``registry_module.csv`` declares, under the installed wheels (``build.registry_verify``)."""
+    from miniworld_engine.build.registry_verify import verify
+
+    if bool(args.wheels) == bool(args.tree):
+        print("bundle-verify: give exactly one of --wheels and --tree", file=sys.stderr)
+        return 2
+    return verify(args)
+
+
 def cmd_build_wheel(args: argparse.Namespace) -> int:
     """Build the engine wheel carrying the prebuilt kernels (``build.kernel_bundle``)."""
     from miniworld_engine.build.kernel_bundle import build_wheel
@@ -2094,7 +2104,8 @@ def build_parser() -> argparse.ArgumentParser:
     bnd.add_argument("--prebuilt-root", default="",
                      help="where the bundle lives (default: the package's own _prebuilt/, i.e. <arch>/manifest.json there)")
     bnd.add_argument("--coverage", action="append", default=[],
-                     help="coverage driver, repeatable: engine (default), engine:<filter>, pytest:<path,...>, "
+                     help="coverage driver, repeatable: engine (default: the registry_module.csv expansion + callable registry.csv kernels), "
+                          "engine:<filter>, engine-extras[:<filter>] (the older hand-written cases), pytest:<path,...>, "
                           "cmd:<shell command>")
     bnd.add_argument("--workers", type=int, default=16, help="driver processes per GPU")
     bnd.add_argument("--gpus", default="", help="GPU indices (default: the visible ones)")
@@ -2110,6 +2121,22 @@ def build_parser() -> argparse.ArgumentParser:
     bnd.add_argument("--jobs", type=int, default=32, help="parallel rebuilds for --replay")
     bnd.add_argument("--only", default="", help="--replay only recipes whose kind or name contains this")
     bnd.set_defaults(func=cmd_bundle_kernels)
+
+    bvf = dev.add_parser("bundle-verify",
+                         help="the release gate: install the wheels, run every call registry_module.csv declares (and the "
+                              "kernel-level registry.csv rows) with an empty cache and JIT off; nonzero on any missing / error")
+    bvf.add_argument("--wheels", default="", help="directory of the built wheels (the engine wheel and the kernel wheels of "
+                                                  "--python's ABI are unzipped into <out>/installed)")
+    bvf.add_argument("--tree", default="", help="an already unzipped / installed tree to put first on PYTHONPATH (instead of --wheels)")
+    bvf.add_argument("--python", default="", help="interpreter of a clean environment with torch (default: this one)")
+    bvf.add_argument("--arch", default="sm90")
+    bvf.add_argument("--out", required=True, help="work directory (installed/, cache/<unit>/, results/, logs/, summary.json, table.md)")
+    bvf.add_argument("--gpus", default="", help="GPU indices, one unit runs per GPU at a time (default: CUDA_VISIBLE_DEVICES or 0)")
+    bvf.add_argument("--row", nargs="+", default=[], help="debugging subset: registry row numbers and / or 'kernels'")
+    bvf.add_argument("--no-kernels", action="store_true", help="skip the kernel-level (registry.csv) units")
+    bvf.add_argument("--env", action="append", default=[], metavar="KEY=VALUE", help="extra environment for the unit processes")
+    bvf.add_argument("--timeout", type=float, default=7200.0, help="seconds one unit process may run before it is killed")
+    bvf.set_defaults(func=cmd_bundle_verify)
 
     bwh = dev.add_parser("build-wheel",
                          help="the engine's platform wheel with the prebuilt kernels of this Python ABI "

@@ -26,6 +26,27 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   in the evidence block), and under sm80 / sm86 they read `UNVERIFIABLE-HERE`. Native H100 caches are still judged. No kernel, native identity or
   CUDA artifact is touched: the change is in `build/`, tests and docs.
 
+### Changed (bundle coverage and verify are generated from registry_module.csv)
+
+- `registry_module.csv` is the contract of what the wheel serves, and both ends of a release are now generated from it by one expansion
+  (`build/registry_calls.py`: every row x length x impl x dtype x compute x mode x option, options one at a time on the side of the pass they act on,
+  eval = forward under `no_grad`, train = forward + backward at the row's own augmentation; TriangleMultiplication / TriangleAttention rows in both
+  directions; an (impl, dtype) the arch rules refuse is listed with the rule's reason, a row with nothing left is reported "not an sm90 row" with the registry
+  text; no row is dropped silently). The kernel level is `registry.csv`: the developed hand-CUDA kernels of the arch with a driver.
+- `dev bundle-kernels --arch sm90` (driver `engine`) now covers exactly that expansion (new case kinds `registry_module`, `registry_kernel`). The older
+  hand-written cases (`case`, `pairformer`, `diffusion`, `bias_only_dit`, `swa_atom`, `local_dit`, `local_dit_esmfold2`, `trimul_hidden2x`, `trimul_wide_train`,
+  `trimul_directions`, `msa_module`, `model_variants`, `sampler_ops`, `swa_stages`, `anthropic_ext`, `la_proteina_*`) are no longer in the default set: they are
+  `--coverage engine-extras[:filter]`, because a shape belongs in the default only when the registry declares it. None of their code was deleted. The
+  default does not reach what they added beyond the registry (MSA depths 1024 / 2048 / 4096, the bias-only token DiT, the Pairformer / diffusion blocks, the
+  SWA atom transformer, bidirectional TriMul D256 / 384 / 512, bf16-mixed and master precisions, batches, L above 768): a release keeps those artifacts with
+  `--keep` on the previous root, and declares the shape in the registry to make a coverage and a verify carry it.
+- New `dev bundle-verify --wheels DIR --python PY --out DIR --gpus 0,1,2,3` (or `--tree`): the release gate in one command. It unzips the wheels of the interpreter's
+  ABI, runs the same expansion from the INSTALLED package's registry, one unit per free GPU, with an empty engine cache per unit, `MINIWORLD_ENGINE_JIT_FALLBACK=0`,
+  no `CUTLASS_PATH` and no nvcc on `PATH`; prints a line per unit as it ends and a per-row table; exits nonzero on any `PrebuiltMissing` (also when a loader catches
+  it), error, or call that never ran. Out-of-memory at a declared shape and the kernels that compile MathDx (never bundled) are reported as not run.
+- `tests/cpu/builder/test_registry_expansion.py` (the expansion on synthetic rows and on the real file) and `test_bundle_serves_every_registry_row.py` (with
+  `MINIWORLD_ENGINE_CHECK_BUNDLES=<root>`: every artifact name each registry row is served from, `data/registry_row_artifacts_sm90.json`, is in the bundle manifest).
+
 ### Added
 
 - `AttentionPairBias.forward(..., extra_pair_bias=)` / `PairformerBlock.forward(..., extra_pair_bias=)` / `Pairformer.forward(..., extra_pair_bias=)`: an additive `[B, n_head, L, L]` term (head axis 1 = shared by every head) on the pair-bias logits, before the key mask and the softmax (the structural-token refiner's extra bias); gradient flows to it. The native CUDA APB paths and the fused-pair kernel compute the bias from `pair` inside the kernel, so a call with the term skips them and runs the attention on the summed bias (H100: PyTorch; portable: the Triton kernel). Calls without it are unchanged.

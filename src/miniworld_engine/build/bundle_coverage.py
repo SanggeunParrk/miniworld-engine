@@ -71,8 +71,29 @@ def _heavy(stream: str, length: int) -> bool:
     return False
 
 
-def cases() -> list[dict]:
-    """Every descriptor, in a stable order (the expensive ones are flagged ``heavy``)."""
+def cases(arch: str = "sm90") -> list[dict]:
+    """The DEFAULT coverage: what ``registry_module.csv`` declares, expanded by :mod:`registry_calls` (the same expansion
+    ``dev bundle-verify`` runs), plus the kernel-level rows of ``registry.csv`` that are callable on ``arch``. One descriptor per call."""
+    from miniworld_engine.build import registry_calls
+
+    out: list[dict] = []
+    for e in registry_calls.expand(arch):
+        # case / dim / train / dtype: the keys kernel_bundle._interleave deals the workers by (a different row for each worker at a time)
+        out.extend({"kind": "registry_module", "row": e.row, "case": e.module, "dim": e.row, "train": call.mode == "train",
+                    "dtype": call.dtype, "call": call.to_json(), "heavy": False} for call in e.calls)
+    out.extend({"kind": "registry_kernel", "kernel": k.kernel, "arch": arch, "train": False, "dtype": "bfloat16", "heavy": False}
+               for k in registry_calls.kernel_units(arch) if not k.reason)
+    for i, c in enumerate(out):
+        c["id"] = i
+    return out
+
+
+def extra_cases() -> list[dict]:
+    """The hand-written cases that predate the registry-driven coverage. NOT part of the default set (``cases``): a shape belongs in the
+    default only when ``registry_module.csv`` declares it. Kept as explicit extras (``--coverage engine-extras[:filter]``): ``case``
+    (the builder cases at MiniWorld's inference ladder, bf16-mixed / master precisions, two batched samples), ``pairformer``, ``diffusion``,
+    ``bias_only_dit``, ``swa_atom``, ``local_dit``, ``local_dit_esmfold2``, ``trimul_hidden2x``, ``trimul_wide_train``, ``trimul_directions``,
+    ``msa_module``, ``model_variants``, ``sampler_ops``, ``swa_stages``, ``anthropic_ext``, ``la_proteina_*``."""
     from miniworld_engine.autotune.builder import CASE_NAMES, _shapes
 
     out: list[dict] = []
@@ -633,20 +654,37 @@ def _model_variants() -> None:
     torch.cuda.synchronize()
 
 
+def _run_descriptor(c: dict) -> None:
+    kind = c["kind"]
+    if kind == "registry_module":
+        from miniworld_engine.build import registry_calls
+
+        registry_calls.run_call(registry_calls.Call.from_json(c["call"]))
+    elif kind == "registry_kernel":
+        from miniworld_engine.build import registry_calls
+
+        registry_calls.run_driver(next(u for u in registry_calls.kernel_units(c["arch"]) if u.kernel == c["kernel"]))
+    elif kind == "case":
+        _run_case(c)
+    else:
+        _run_block(c)
+
+
 def run(c: dict) -> dict:
     """Run one descriptor; never raises. ``status``: ok / skip (the module refused the shape) / oom / error."""
     import torch
 
     started = time.perf_counter()
     try:
-        (_run_case if c["kind"] == "case" else _run_block)(c)
+        _run_descriptor(c)
         status, detail = "ok", ""
     except torch.cuda.OutOfMemoryError as exc:
         status, detail = "oom", str(exc).splitlines()[0]
     except Exception as exc:
         from miniworld_engine.kernels.prebuilt import PrebuiltMissing
 
-        status = "error" if isinstance(exc, PrebuiltMissing) else "skip"
+        # a declared registry call that fails is a broken contract, not "the module refused a shape"
+        status = "error" if isinstance(exc, PrebuiltMissing) or c["kind"].startswith("registry_") else "skip"
         detail = f"{type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}"[:400]
         if status == "error":
             traceback.print_exc()
@@ -675,10 +713,11 @@ def main(argv: list[str] | None = None) -> int:
     if argv[:1] == ["serve"]:
         return serve()
     if argv[:1] == ["list"]:
-        for c in cases():
+        which = extra_cases() if "--extras" in argv else cases(next((a for a in argv[1:] if a.startswith("sm")), "sm90"))
+        for c in which:
             print(json.dumps(c))
         return 0
-    print("usage: python -m miniworld_engine.build.bundle_coverage serve|list", file=sys.stderr)
+    print("usage: python -m miniworld_engine.build.bundle_coverage serve | list [smNN] [--extras]", file=sys.stderr)
     return 2
 
 

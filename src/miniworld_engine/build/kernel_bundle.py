@@ -138,11 +138,12 @@ def _interleave(cases: list[dict]) -> list[dict]:
     return out
 
 
-def run_engine_driver(out: Path, arch: str, gpus: list[str], workers: int, case_filter: str = "") -> dict:
-    """Deal ``bundle_coverage.cases()`` to ``workers`` processes over ``gpus``; heavy cases run last, one per GPU."""
+def run_engine_driver(out: Path, arch: str, gpus: list[str], workers: int, case_filter: str = "", extras: bool = False) -> dict:
+    """Deal ``bundle_coverage.cases(arch)`` (the registry expansion; ``extras``: ``extra_cases()``) to ``workers`` processes over ``gpus``;
+    heavy cases run last, one per GPU."""
     from miniworld_engine.build import bundle_coverage
 
-    cases = bundle_coverage.cases()
+    cases = bundle_coverage.extra_cases() if extras else bundle_coverage.cases(arch)
     if case_filter:
         cases = [c for c in cases if case_filter in json.dumps(c)]
     light = _interleave([c for c in cases if not c["heavy"]])
@@ -588,14 +589,16 @@ def bundle_kernels(args) -> int:
             gpus = visible_gpus(args.gpus)
             for i, spec in enumerate(args.coverage or ["engine"]):
                 t0 = time.monotonic()
-                if spec == "engine" or spec.startswith("engine:"):
+                if spec == "engine-extras" or spec.startswith("engine-extras:"):
+                    run_engine_driver(out, arch, gpus, args.workers, spec.partition(":")[2], extras=True)
+                elif spec == "engine" or spec.startswith("engine:"):
                     run_engine_driver(out, arch, gpus, args.workers, spec.partition(":")[2])
                 elif spec.startswith("pytest:"):
                     run_pytest_driver(out, arch, gpus, args.workers, spec[7:].split(","), f"pytest{i}")
                 elif spec.startswith("cmd:"):
                     run_cmd_driver(out, arch, spec[4:], f"cmd{i}")
                 else:
-                    log(f"unknown coverage driver {spec!r} (engine | pytest:<paths> | cmd:<command>)")
+                    log(f"unknown coverage driver {spec!r} (engine | engine-extras | pytest:<paths> | cmd:<command>)")
                     return 2
                 timings[spec[:40]] = time.monotonic() - t0
         records = sorted((out / "records").glob("*.jsonl"))

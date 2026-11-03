@@ -55,7 +55,7 @@ def test_the_name_list_format(tmp_path: Path):
 
 
 def test_the_coverage_has_the_msa_module_at_every_depth_and_mode():
-    cases = [c for c in bundle_coverage.cases() if c["kind"] == "msa_module"]
+    cases = [c for c in bundle_coverage.extra_cases() if c["kind"] == "msa_module"]
     for train in (False, True):
         depths = {c["S"] for c in cases if c["train"] is train}
         assert set(bundle_coverage.MSA_DEPTHS) <= depths
