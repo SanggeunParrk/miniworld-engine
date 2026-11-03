@@ -144,7 +144,8 @@ def cases() -> list[dict]:
     # failed with PrebuiltMissing from a wheel).
     for d in (256, 384, 512):
         for length in TRAIN_TOKENS:
-            out.append({"kind": "trimul_wide_train", "L": length, "d": d, "train": True, "dtype": "bfloat16", "heavy": length >= 768})
+            for prec in ("bfloat16", "master"):   # master: fp32 parameters, bf16 activations (-DMASTER_FP32=1 builds)
+                out.append({"kind": "trimul_wide_train", "L": length, "d": d, "train": True, "dtype": prec, "heavy": length >= 768})
     # MiniWorld's MSA module (MSAPairWeightedAveraging + OuterProductMean at d_msa 64 / d_pair 128): the native H100 paths pick their kernels
     # by MSA DEPTH (OPM ``_h100_path``: tma_static at S 1024 / 2048 / 4096; PWA ``_h100_training_default``: native aux at S 1024 / 2048 / 4096,
     # N 384 / 768), and the registry-driven cases above run 8 MSA rows, so none of them reaches the tma_static OPM family or the
