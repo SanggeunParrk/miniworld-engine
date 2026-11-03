@@ -48,11 +48,11 @@ what a test adds beyond it is not. Next step per family: a registry decision (de
 | `test_transition_n2_sm90a_gpu.py` | 3 | a-guess | `transition_fused_sm90a_c66_r15_s1_..._n2`, `transition_wide_sm90a_d512_c132_n2` |
 | `test_transition_wide_sm90a_gpu.py` | 5 | a | d 512 and `saved_ab_v1` at d 384 (`transition_wide_sm90a_d384_c132_saved_ab_v1`, `..._d512_c132`); declared pair widths 128 / 256 / 384 |
 | `test_triattn_h100_b200style_gpu.py` | 74 | a | `CutlassMissing: triattn_h100_b200style_module_v1` (74 parameters, widths 64 .. 512). The b200style `h100_triattn` module is the explicit benchmark baseline ("Explicit entry point only: no production dispatch changes"); `TriangleAttention` serves every registered width with `triattn_h100_sm90` first and reaches the b200style path only with `_h100_cuda = False` or `_h100_b200style_cuda`. An environment difference of the wheel run (no CUTLASS, nothing bundled) rather than an engine bug |
-| `test_h100_master_weights_gpu.py` | 12 | b-candidate | see "Fixed in 2.4.4" below |
+| `test_h100_master_weights_gpu.py` | 12 (7 after the 2.4.4 coverage) | b-candidate | bidirectional TriMul D256 / 384 / 512 and single-direction D256 / 384 incoming, fp32 master vs bf16, L 384 / 768. 2.4.4 added `trimul_wide_train` (master and bf16, dropout and none) and `trimul_directions` coverage; still missing from the wheel: `trimul_h100/generated/mw_b200style_k1_direct` (3), `generated/mw_wide_front` (2), `output/save_k3.cu`, `b200style/k1ssregtune.cu`. The test runs forward + `autograd.grad` on an input that requires grad with `autotune_miss_cap=1`; the coverage case does not yet reach the variant that selects these. Open |
 
 ## Fixed in 2.4.4
 
-* `trimul_wide_train` coverage (bidirectional TriMul hidden 256 / 384 / 512, L 384 / 768, masked, dropout, training, bf16 and **master** (fp32
+* `trimul_wide_train` coverage (bidirectional TriMul hidden 256 / 384 / 512, L 384 / 768, training, with and without dropout / mask, bf16 and **master** (fp32
   parameters, bf16 activations: the `-DMASTER_FP32=1` builds)): `front_d256`, `front_pre_d512` and the wide-training kernels were in no bundle up to
   2.4.3. `test_h100_module_wiring_gpu.py` (nine failures from a wheel before) now passes from the wheels.
 * `msa_module` coverage (see CHANGELOG 2.4.4).
