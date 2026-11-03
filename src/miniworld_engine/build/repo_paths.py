@@ -220,6 +220,12 @@ class Analyzer:
             return [_parent(self._as_path(v)) for v in self.eval(node.args[0], env, path)]
         if name in ("with_name", "with_suffix", "with_stem") and receiver is not None:
             return [("p", _parent(self._as_path(v))[1], True) if v[0] != "x" else v for v in self.eval(receiver, env, path)]
+        if name == "next" and node.args and isinstance(node.args[0], ast.GeneratorExp):
+            gen = node.args[0]                          # next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
+            comp = gen.generators[0] if gen.generators else None
+            if comp is not None and isinstance(comp.iter, ast.Attribute) and comp.iter.attr == "parents" \
+                    and any(isinstance(c, ast.Constant) and c.value in ("pyproject.toml", ".git") for i in comp.ifs for c in ast.walk(i)):
+                return [("p", "", False)]               # the first parent that holds the marker file: the repository root
         if name in ("cwd", "getcwd"):
             return [("p", "", False)]
         if name in ("home", "gettempdir", "mkdtemp", "TemporaryDirectory", "NamedTemporaryFile", "tmp_path_factory"):
@@ -227,19 +233,21 @@ class Analyzer:
         return [UNKNOWN]
 
     # --------------------------------------------------------------------------------------------------- a file
-    def use(self, path: str) -> PathUse:
-        """Every path ``path`` computes, split into complete paths and prefixes, and whether it lists directories."""
+    def use(self, path: str, nodes: list[ast.AST] | None = None, names: set[str] | None = None) -> PathUse:
+        """Every path ``path`` computes, split into complete paths and prefixes, and whether it lists directories. ``nodes`` / ``names``:
+        only what those statements compute and the module-level path constants they read (one scope of the file)."""
         out = PathUse()
         tree = self.tree(path)
         if tree is None:
             return out
         env = self.env(path)
         for name, vals in env.items():
-            if name != "__file__":
+            if name != "__file__" and (names is None or name in names):
                 out.values.update(v for v in vals if v[0] == "p")
-        children = {id(c) for n in ast.walk(tree) if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div)
+        walk = [n for root in (nodes if nodes is not None else [tree]) for n in ast.walk(root)]
+        children = {id(c) for n in walk if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div)
                     for c in (n.left,) if isinstance(c, ast.BinOp | ast.Call | ast.Attribute)}
-        for node in ast.walk(tree):
+        for node in walk:
             if isinstance(node, ast.Call):
                 fn = node.func
                 name = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else ""

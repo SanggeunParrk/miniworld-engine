@@ -28,6 +28,12 @@ import re
 import subprocess
 from pathlib import Path, PurePosixPath
 
+#: Node kinds whose evidence a card does NOT keep, by policy: an H100 keeps no Triton tuned caches (it runs hand-written CUDA or the PyTorch
+#: reference; the Triton fallback exists for the other cards, docs/gpus/h100/dispatch.md). On such a card a node of an exempt kind is neither
+#: pending (``--check`` does not fail on it) nor dropped: it is counted and shown as exempt, and shown under the fallback cards (the cards
+#: whose evidence a Triton cache is) as UNVERIFIABLE-HERE. Only sm90 is audited so far.
+EXEMPT_KINDS: dict[str, frozenset[str]] = {"sm90": frozenset({"triton-cache"})}
+
 #: card-independent. A frozenset (not a string) so ``cards & other`` works; use :func:`expand` before intersecting.
 ALL: frozenset[str] = frozenset({"*"})
 
@@ -43,6 +49,10 @@ _NEEDS_SM100 = re.compile(r"tcgen05|\bsm_?100|__CUDA_ARCH__\s*>=\s*1000|UMMA")
 _NEEDS_SM90 = re.compile(r"\bwgmma\b|wgmma\.|\bsm_?90|__CUDA_ARCH__\s*(?:>=|==)\s*900")
 _CCODE = {".cu", ".cuh", ".inc", ".h", ".cpp"}
 _FALLBACK_MAJORS = (9, 10)           # used only when dispatch.restricted_card cannot be parsed
+
+
+def exempt_kinds(card: str) -> frozenset[str]:
+    return EXEMPT_KINDS.get(card, frozenset())
 
 
 def card_name(number: str | int) -> str:
@@ -219,6 +229,38 @@ class Assigner:
         return (frozenset(need) & self.known) or None
 
 
+_GENCODE_RE = re.compile(r"(?:-arch=sm_|compute_|sm_)(\d{2,3})a?")
+
+
+def _arches_in(node: ast.AST) -> set[str]:
+    """The cards a build call asks nvcc for: ``gencodes("90a", ...)`` arguments and ``-arch=sm_90a`` / ``compute_100`` flag strings under ``node``."""
+    found: set[str] = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call) and (n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", "")) == "gencodes":
+            for a in n.args:
+                if isinstance(a, ast.Constant) and isinstance(a.value, str) and re.fullmatch(r"\d{2,3}a?", a.value):
+                    found.add(card_name(a.value.rstrip("a")))
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.startswith("-"):      # an nvcc flag, not prose
+            found |= {card_name(m) for m in _GENCODE_RE.findall(n.value)}
+    return found
+
+
+def builder_cards(root: Path, pyfile: str, cu: str) -> frozenset[str]:
+    """The cards the python file ``pyfile`` builds ``cu`` for: the arches of the build call(s) that name the file's basename (a
+    ``load_extension(... sources=[... "x.cu"] ..., *gencodes("90a"))``), else every arch the file asks for. Empty: it says nothing."""
+    try:
+        tree = ast.parse(_read(root, pyfile))
+    except SyntaxError:
+        return frozenset()
+    name = PurePosixPath(cu).name
+    exact: set[str] = set()
+    for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+        names = {c.value for c in ast.walk(call) if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+        if any(PurePosixPath(s).name == name for s in names):
+            exact |= _arches_in(call)
+    return frozenset(exact or _arches_in(tree))
+
+
 def assign(g, paths, root: Path) -> Assigner:
     """Fill ``g.cards`` (node -> frozenset of cards or ``ALL``). ``g`` is a ``repo_graph.Graph``."""
     a = Assigner(paths, root)
@@ -244,6 +286,16 @@ def assign(g, paths, root: Path) -> Assigner:
         content = a.content_cards(node)
         if content:
             cards[node] = content
+    for node in undecided:                         # a source its builder names: the arches of the nvcc call that compiles it
+        if node in cards or PurePosixPath(node).suffix in (".h", ".cuh", ".inc"):      # a header follows the files that include it
+            continue
+        built: set[str] = set()
+        for u, k in g.users.get(node, {}).items():
+            if k == "ref" and u.endswith(".py") and u.startswith(f"{SRC}/") and not u.startswith(f"{SRC}/build/"):
+                built |= builder_cards(root, u, node)
+        built &= a.restricted
+        if built:
+            cards[node] = frozenset(built)
     for _ in range(4):                             # a header takes the cards of the files that include it
         for node in undecided:
             if node in cards:
