@@ -36,14 +36,24 @@ returns just the engine-named tensors (pure reshapes, CPU-safe). Sizes, biases a
 * Pairformer block: `PairformerBlock.from_released(state, config=PairformerConfig(...))`.
 * Token / atom DiT variant stacks: `DiTVariantStack.from_released` / `AtomDiTVariantStack.from_released` (below).
 
-## DiT variant stacks (Boltz-2, RoseTTAFold3, Chai-1) and `serving`
+## DiT variant stacks (AlphaFold 3, Boltz-2, RoseTTAFold3, Chai-1) and `serving`
 
 `DiTVariantStack` / `AtomDiTVariantStack` with `ImplementationType.PYTORCH` run `kernels/dit_variants/reference.py` (differentiable torch
 statements, any card, inference and training); `serves_portable` is the Triton-only question and is False for PYTORCH. `serving(stack, *inputs)`
 (also `stack.serving(...)`) answers the question a caller that counts engine-served calls needs: `"cuda"`, `"portable"` or `"pytorch"`, and a
 PYTORCH stack is always `"pytorch"` (served, not refused).
 
-Still open (not in this release): AlphaFold 3's own DiT / `LocalDiTBlock` atom stacks and ESMFold2's rotary / `extra_pair_bias` DiT are not
-`DiTVariantStack` configurations (the FoldForge builder refuses them with `unconditioned_or_identity_scale`, `rotary_*`, `extra_pair_bias_*`,
-`stack_structure_mismatch`); the atom oracle test only pins the strict load of the released names, not the numerics of the sliding key window
-(`key_window="slide"|"pad"`) against the dense `DiffusionCrossAttTransformer`.
+**AlphaFold 3's own stacks are configurations too**: `DiTVariantStack(n, **AF3)` (sequential, sigmoid AdaLN, gating query, plain SwiGLU transition,
+d_cond 384, pair 128, ONE scale-only pair LayerNorm, one projection matrix per super block) and `AtomDiTVariantStack(n, **AF3_ATOM)`
+(`key_window="slide"`, shared pair LayerNorm + `Linear(d_pair, 4 n_blocks)`) are the Boltz-2 rows with `up_gate` off; `from_released` takes
+FoldForge's `DiffusionTransformer` / `DiffusionCrossAttTransformer` names unchanged (`super_block_size` splits the shared projection). They run
+on the same CUDA rows / cores (inference bf16 and fp32, training bf16 and fp32); every flag is a runtime argument of the existing kernels,
+nothing was added. Numerics are pinned against the frozen oracle `tests/oracles/af3_dit_oracle.pt` (made once by
+`tests/oracles/make_af3_dit_oracle.py` from FoldForge's dense classes; the tests never import FoldForge), forward and the input gradients, in
+`tests/cpu/kernels/test_af3_dit_oracle.py`; the H100 rows are in `tests/gpu/sm90/test_dit_variant_af3_h100_gpu.py`.
+What the dense classes need beyond that is not a stack option: the unconditioned `AdaptiveLayerNorm` / `DiffusionTransition` of the diffusion
+head's pair and single conditioning are a plain affine LayerNorm + SwiGLU (the engine's `Transition` / `swiglu_ffn`), and the dense atom stack
+takes the queries / keys layout (`GatherInfo`) where the engine takes `[A, N, 128]` with the trunked pair (the caller's layout conversion).
+
+Still open: ESMFold2's rotary / `extra_pair_bias` DiT and atom stack (RMS / SiLU AdaLN, raw gates, rank-based window, `LocalDiTBlock(**ESMFOLD2)`)
+are not `DiTVariantStack` configurations; the structural-token refiner's `extra_pair_bias` has no slot either.

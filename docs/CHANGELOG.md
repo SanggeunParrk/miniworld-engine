@@ -16,6 +16,16 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 - `tests/cpu/kernels/test_released_parity.py` runs against a frozen oracle (`tests/oracles/dense.py`, the dense AF3-family blocks as self-contained fp32 PyTorch) and no longer needs FoldForge; the FoldForge-backed run of the same cases is `test_released_parity_foldforge.py` (optional, `FOLDFORGE_SRC`).
 
+### Added (AlphaFold 3 DiT as variant-stack configurations)
+
+- `dit_variant.AF3` / `dit_variant.AF3_ATOM`: AlphaFold 3's own token DiT and atom (`DiffusionCrossAttTransformer`) stacks as `DiTVariantStack` /
+  `AtomDiTVariantStack` configurations (sequential, sigmoid AdaLN, gating query, plain SwiGLU transition, one shared pair LayerNorm, slid key window).
+  `from_released` takes FoldForge's `DiffusionTransformer` / `DiffusionCrossAttTransformer` names unchanged; they run on the existing H100 CUDA rows
+  and attention cores (inference and training); no new kernel, no registry row.
+- `tests/oracles/af3_dit_oracle.pt` (+ its one-off generator `make_af3_dit_oracle.py`): frozen weights, inputs, outputs and input gradients of the dense
+  AF3 stacks; `tests/cpu/kernels/test_af3_dit_oracle.py` pins the numerics (forward and backward, the atom stack's sliding window included) without FoldForge;
+  `tests/gpu/sm90/test_dit_variant_af3_h100_gpu.py` the H100 inference and training rows.
+
 ## [2.4.3] - 2026-11-03
 
 ### Added

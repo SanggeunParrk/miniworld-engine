@@ -4,9 +4,10 @@ flags). The math is in ``kernels/dit_variants/reference.py``; on H100 a bf16 cal
 TF32) ``kernels/dit_variants/cuda/train.py`` (CUDA row kernels forward and backward, cuBLAS, the sm_90a attention cores), anything else the
 portable path or the reference.
 
-The three models' options:
+The four models' options (AlphaFold 3's own token / atom stacks are the ``AF3`` / ``AF3_ATOM`` presets):
 
-    Boltz-2   sequential, sigmoid AdaLN, gating query, up-gate transition (silu(g) v u), d_cond 768, pair 128
+    AF3       sequential, sigmoid AdaLN, gating query, plain transition, d_cond 384, pair 128, one shared pair LayerNorm
+    Boltz-2  sequential, sigmoid AdaLN, gating query, up-gate transition (silu(g) v u), d_cond 768, pair 128
     RF3       parallel, sigmoid AdaLN, gating query, kq-norm (LayerNorm over the flat q / k), d_cond 384, pair 128
     Chai-1    parallel, identity AdaLN ((W s + 1) LN(x) + W s), no gating query, d_cond 384, pair 256 (affine pair LN)
 """
@@ -26,6 +27,11 @@ ROSETTAFOLD3 = {"d_cond": 384, "d_pair": 128, "parallel": True, "identity_scale"
                 "up_gate": False, "pair_norm_bias": False}
 CHAI1 = {"d_cond": 384, "d_pair": 256, "parallel": True, "identity_scale": True, "gating": False, "kq_norm": False,
          "up_gate": False, "pair_norm_bias": True}
+#: AlphaFold 3's own token DiT (FoldForge's ``DiffusionTransformer`` with spec ``ALPHAFOLD3``): sequential, sigmoid AdaLN, gating query, a
+#: plain SwiGLU transition (no up-gate), d_cond 384, pair 128, ONE scale-only pair LayerNorm whose projection is one matrix per super block of
+#: four blocks (``from_released(..., super_block_size=4)`` slices it per block). The same kernels as Boltz-2's, with ``up_gate`` off.
+AF3 = {"d_cond": 384, "d_pair": 128, "parallel": False, "identity_scale": False, "gating": True, "kq_norm": False,
+       "up_gate": False, "pair_norm_bias": False}
 
 
 class VariantAdaLN(nn.Module):
@@ -154,6 +160,11 @@ ROSETTAFOLD3_ATOM = {"parallel": True, "identity_scale": False, "gating": True, 
                      "up_gate": False, "per_block_pair_norm": True, "pair_norm_bias": False}
 CHAI1_ATOM = {"parallel": True, "identity_scale": True, "gating": False, "project_output": False, "kq_norm": False, "up_gate": False,
               "per_block_pair_norm": False, "pair_norm_bias": True}
+#: AlphaFold 3's atom stack (``DiffusionCrossAttTransformer`` with spec ``ALPHAFOLD3``, ``key_window="slide"``): sequential, sigmoid AdaLN on
+#: the queries and (separately, both of the block input) on the keys, gating query, output projection, plain SwiGLU transition, one shared pair
+#: LayerNorm + ``Linear(d_pair, 4 * n_blocks)``.
+AF3_ATOM = {"parallel": False, "identity_scale": False, "gating": True, "project_output": True, "kq_norm": False, "up_gate": False,
+            "per_block_pair_norm": False, "pair_norm_bias": False}
 
 
 class AtomDiTVariantBlock(nn.Module):
