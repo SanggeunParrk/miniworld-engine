@@ -38,6 +38,8 @@ TOKEN_RUNGS = (128, 256, 384, 512, 768, 1024, 1536, 2048, 2560)
 ATOM_RUNGS = (1024, 2048, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152)
 TRAIN_TOKENS = (384, 768)
 BATCHED = 2  # samples per call for the batched pair-stream runs
+#: MSA depths MiniWorld runs the MSA module at (the native OPM / PWA kernels are chosen per depth).
+MSA_DEPTHS = (1024, 2048, 4096)
 #: Shapes that want most of a GPU: run one at a time per GPU, after the rest.
 HEAVY_TOKENS = 1024
 HEAVY_ATOMS = 16384
@@ -137,6 +139,16 @@ def cases() -> list[dict]:
                         for b in (1, 4):
                             out.append({"kind": "trimul_hidden2x", "L": length, "train": train, "dtype": prec,  # noqa: PERF401
                                         "d": d, "outgoing": outgoing, "batch": b, "heavy": length >= HEAVY_TOKENS})
+    # MiniWorld's MSA module (MSAPairWeightedAveraging + OuterProductMean at d_msa 64 / d_pair 128): the native H100 paths pick their kernels
+    # by MSA DEPTH (OPM ``_h100_path``: tma_static at S 1024 / 2048 / 4096; PWA ``_h100_training_default``: native aux at S 1024 / 2048 / 4096,
+    # N 384 / 768), and the registry-driven cases above run 8 MSA rows, so none of them reaches the tma_static OPM family or the
+    # native PWA family (2.4.2 / 2.4.3 shipped without them, MiniWorld JIT-compiled them on its first call).
+    for train in (False, True):
+        for prec in ("bfloat16", "mixed"):
+            for depth in MSA_DEPTHS:
+                for length in (block_train if train else TOKEN_RUNGS):
+                    out.append({"kind": "msa_module", "L": length, "S": depth, "train": train, "dtype": prec,  # noqa: PERF401
+                                "heavy": length >= HEAVY_TOKENS or depth >= 4096})
     # Boltz-2 / RoseTTAFold3 / Chai-1's variants (kernels/dit_variants, the 64-channel and output-variant TriangleAttention, the biased /
     # grouped OuterProductMean, the parallel Pairformer sum): bf16 inference; their extensions take no shape keys, one small case covers them.
     out.append({"kind": "model_variants", "train": False, "dtype": "bfloat16", "heavy": False})
@@ -348,6 +360,9 @@ def _run_block(c: dict) -> None:
         _randomize(model)
         _step(model, args, False, autocast, {"rope": (angles.cos(), angles.sin())})
         return
+    elif c["kind"] == "msa_module":
+        _msa_module(c, pdt, dt, autocast)
+        return
     elif c["kind"] == "model_variants":
         _model_variants()
         return
@@ -381,6 +396,34 @@ def _run_block(c: dict) -> None:
     model = model.cuda().to(pdt)
     _randomize(model)
     _step(model, args, c["train"], autocast)
+
+
+def _msa_module(c: dict, pdt, dt, autocast: bool) -> None:
+    """MiniWorld's MSA module at one (depth, length): MSAPairWeightedAveraging then OuterProductMean (d_msa 64, d_pair 128, 8 heads, hidden 32),
+    inference or forward + backward. The native paths must serve the call where they are specified to (a refusal is reported)."""
+    import torch
+
+    from miniworld_engine.kernels.integrations import pwa_train
+    from miniworld_engine.modules.exceptions import ImplementationType as MI
+    from miniworld_engine.modules.msa_pair_weighted_averaging import (
+        MSAPairWeightedAveraging,
+    )
+    from miniworld_engine.modules.outer_product import OuterProductMean
+
+    s, n, train = c["S"], c["L"], c["train"]
+    pwa = MSAPairWeightedAveraging(d_msa=64, d_pair=128, n_head=8, implementation=MI.MINIWORLD, p_drop=0.25 if train else 0.0)
+    opm = OuterProductMean(d_msa=64, d_pair=128, d_hidden=32, implementation=MI.MINIWORLD)
+    msa = torch.randn(1, s, n, 64, device="cuda", dtype=dt)
+    pair = torch.randn(1, n, n, 128, device="cuda", dtype=dt)
+    mask = torch.ones(1, n, device="cuda", dtype=torch.bool)
+    msa_mask = torch.ones(1, s, n, device="cuda", dtype=torch.bool)
+    for model, args in ((pwa, (msa, pair, mask)), (opm, (msa, msa_mask))):
+        model.cuda().to(pdt)
+        _randomize(model)
+        _step(model, args, train, autocast)
+    why = pwa_train.refusal(msa, pair, 64, 128, 8, 32) if n <= pwa_train.NMAX_INFER else None
+    if why is not None:
+        raise RuntimeError(f"the native PWA path refused the MiniWorld MSA shape S={s} N={n}: {why}")
 
 
 def _la_proteina_pair() -> None:

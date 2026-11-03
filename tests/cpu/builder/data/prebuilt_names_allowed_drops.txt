@@ -1,0 +1,3 @@
+# Names a new sm90 bundle may drop relative to prebuilt_names_prev_release.txt: `<name>  # reason`. Empty by default.
+# 2.4.2 and 2.4.3 dropped eleven MiniWorld MSA-module families without a line here (a replay without --keep and no coverage case that
+# reached them); the `msa_module` coverage case in build/bundle_coverage.py and this list are what prevent a repeat.

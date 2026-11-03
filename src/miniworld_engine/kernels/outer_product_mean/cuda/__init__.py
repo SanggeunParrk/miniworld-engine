@@ -34,7 +34,7 @@ def split_groups(x, b, s, n, groups, k):
 
 def bias_finish(out, c1, c2, count, c, dmin=1.0, doff=0.0):
     """In place: out += (c1 + c2) / max(count, 1) + (count > 0) c (out bf16 [..., F]; c1 / c2 fp32 like it; count fp32 per row; c fp32 [F]).
-    With the divisor d = max(count, dmin) + doff other than the clamp (``count_offset`` / ``divide_by_length``): out += (c1 + c2 + count c) / d."""
+    With the divisor d = max(count, dmin) + doff other than the clamp (``count_offset``): out += (c1 + c2 + count c) / d."""
     ext().opm_bias_finish(out, c1, c2, count, c, float(dmin), float(doff))
 
 

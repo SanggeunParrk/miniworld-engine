@@ -112,7 +112,7 @@ __global__ void __launch_bounds__(256) split_kernel(const bf16* __restrict__ X, 
 }
 
 // out[m, f] += (c1[m, f] + c2[m, f]) / max(cnt[m], 1) + (cnt[m] > 0 ? c[f] : 0)  (RoseTTAFold3's projection-bias terms, in place)
-// With a divisor other than the clamp (count_offset / divide_by_length), d = max(cnt, dmin) + doff: out += (c1 + c2 + cnt c) / d.
+// With a divisor other than the clamp (count_offset), d = max(cnt, dmin) + doff: out += (c1 + c2 + cnt c) / d.
 __global__ void __launch_bounds__(256) bias_finish_kernel(bf16* __restrict__ OUT, const float* __restrict__ C1, const float* __restrict__ C2,
                                                           const float* __restrict__ CNT, const float* __restrict__ C, int F, long n2, float dmin, float doff) {
   const bool dflt = dmin == 1.f && doff == 0.f;

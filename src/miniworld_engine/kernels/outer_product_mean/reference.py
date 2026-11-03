@@ -12,13 +12,12 @@ def outer_product_mean_reference(msa: torch.Tensor, mask: torch.Tensor | None, l
                                  normalize_before_proj: bool = True, b_left: torch.Tensor | None = None,
                                  b_right: torch.Tensor | None = None, groups: int = 1,
                                  product_norm_weight: torch.Tensor | None = None, product_norm_bias: torch.Tensor | None = None,
-                                 product_norm_eps: float = 0.1, count_offset: float | None = None,
-                                 divide_by_length: bool = False) -> torch.Tensor:
+                                 product_norm_eps: float = 0.1, count_offset: float | None = None) -> torch.Tensor:
     """msa [B, S, L, CM], mask [B, S, L] bool -> [B, L, L, CZ] (+ residual). Same order of operations as the module.
 
     ``b_left`` / ``b_right``: RoseTTAFold3's projection biases (masked rows lose them too). ``groups`` > 1: Chai-1's grouped outer
     products, LayerNorm'd (``product_norm_*``), projected, with no division by the pair counts. ``count_offset``: the divisor is
-    ``count + count_offset`` (no clamp). ``divide_by_length``: the divisor is the MSA depth S (``msa.shape[1]``) for every pair."""
+    ``count + count_offset`` (no clamp)."""
     y = F.layer_norm(msa, (msa.shape[-1],), ln_weight, ln_bias, eps)
     left, right = y @ w_left.t(), y @ w_right.t()
     if b_left is not None:
@@ -35,9 +34,7 @@ def outer_product_mean_reference(msa: torch.Tensor, mask: torch.Tensor | None, l
         return residual + pair if residual is not None else pair
     out = torch.einsum("bmid,bmje->bijde", left, right).flatten(-2)
     count = torch.einsum("bmi,bmj->bij", mask.float(), mask.float())
-    if divide_by_length:        # RoseTTAFold3: the pair output is divided by the MSA depth S, not by the pair count
-        norm = torch.full_like(count, float(msa.shape[1]))[..., None]
-    elif count_offset is not None:   # AlphaFold 3 / Protenix: count + offset
+    if count_offset is not None:   # AlphaFold 3 / Protenix: count + offset
         norm = (count + count_offset)[..., None]
     else:
         norm = count.clamp(min=1)[..., None]

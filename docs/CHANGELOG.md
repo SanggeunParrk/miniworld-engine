@@ -6,7 +6,7 @@ here. Format loosely follows
 
 The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
-## [Unreleased]
+## [2.4.4] - 2026-11-04
 
 ### Added
 
@@ -26,11 +26,14 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   AF3 stacks; `tests/cpu/kernels/test_af3_dit_oracle.py` pins the numerics (forward and backward, the atom stack's sliding window included) without FoldForge;
   `tests/gpu/sm90/test_dit_variant_af3_h100_gpu.py` the H100 inference and training rows.
 
-- `OuterProductMean(divide_by_length=True)` (RoseTTAFold3): the pair output is divided by the MSA depth S instead of the per-pair count (excludes `count_offset`; `groups == 1`).
 
 ### Changed
 
-- **`OuterProductMean(count_offset=...)` and `divide_by_length` run the H100 hand-CUDA paths** (inference and training; `opm_train`, `composed.biased_wide` / `biased_on_fused` / `inference`) instead of the PyTorch statements: the pair divisor is two kernel scalars, `max(count, dmin) + doff` ((1, 0) the default clamp, (0, offset), (S, 0)), in the existing epilogues (`opm_epilogue`, `opm_fused_infer`, the count table, `bias_finish`). A call outside their contract (not bf16, batch > 1, widths outside `opm_train.SHAPES`) still refuses with a `KernelRefusedWarning` and runs the PyTorch statements. The default call is bit-identical. Re-keys the prebuilt `opm_epilogue.cu` and `gather.cu` artifacts.
+- **`OuterProductMean(count_offset=...)` runs the H100 hand-CUDA paths** (inference and training; `opm_train`, `composed.biased_wide` / `biased_on_fused` / `inference`) instead of the PyTorch statements: the pair divisor is two kernel scalars, `max(count, dmin) + doff` ((1, 0) the default clamp, (0, offset)), in the existing epilogues (`opm_epilogue`, `opm_fused_infer`, the count table, `bias_finish`). A call outside their contract (not bf16, batch > 1, widths outside `opm_train.SHAPES`) still refuses with a `KernelRefusedWarning` and runs the PyTorch statements. The default call is bit-identical. Re-keys the prebuilt `opm_epilogue.cu` and `gather.cu` artifacts.
+
+### Fixed
+
+- The sm90 prebuilt bundle again carries the MiniWorld MSA-module kernels (the OPM native `tma_static` family and the native PWA family: `miniworld_opm_epilogue_native_tma_static*`, `miniworld_pwa_{ctr,dgv_bwd_native_v1,fwd2,fwd3,gateout,glue3_native_v1,ln_vg,pair3_native_v1}`) that the 2.4.2 and 2.4.3 bundles dropped, so MiniWorld no longer JIT-compiles them on its first call. The bundle coverage gained the `msa_module` case (MSAPairWeightedAveraging + OuterProductMean at MSA depths 1024 / 2048 / 4096, inference and training) and a test (`tests/cpu/builder/test_bundle_keeps_previous_release_names.py`) fails when a name the previous release bundle carried is missing from the new one.
 
 ## [2.4.3] - 2026-11-03
 

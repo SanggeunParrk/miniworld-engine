@@ -1,4 +1,4 @@
-"""H100: OuterProductMean's ``count_offset`` (AlphaFold 3 / Protenix: divisor ``count + 1e-3``) and ``divide_by_length`` (RoseTTAFold3: divisor S) on the
+"""H100: OuterProductMean's ``count_offset`` (AlphaFold 3 / Protenix: divisor ``count + 1e-3``) on the
 hand-CUDA paths, inference and training, against the fp64 PyTorch statements (``_variant_reference``), the engine's bf16 error held to the bf16
 statements' own. Only registry-declared rows (``registry_module.csv``): MiniWorld (64 / 128), Protenix-v2 / ESMFold2 (128 / 256), OpenDDE
 (128 / 384), RoseTTAFold3 (64 / 128 with projection biases), at their lengths. A served call must not warn ``KernelRefusedWarning``; the default
@@ -32,7 +32,7 @@ ROWS = {
     "opendde": (128, 384, False),
     "rf3": (64, 128, True),
 }
-OPTIONS = {"count_offset": {"count_offset": 1e-3}, "divide_by_length": {"divide_by_length": True}}
+OPTIONS = {"count_offset": {"count_offset": 1e-3}}
 
 
 def _build(row, option, before, train):
@@ -136,7 +136,6 @@ def test_opm_default_divisor_is_unchanged(train):
     a = _build("miniworld", "count_offset", True, train=False)
     a.count_offset = None
     b = copy.deepcopy(a)
-    b.divide_by_length = False
     c = copy.deepcopy(a)
     c.count_offset = 1e-3
     g = torch.Generator(device="cuda").manual_seed(1)

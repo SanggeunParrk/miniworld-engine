@@ -8,7 +8,7 @@
     (b, g)); the rows (i, j) of the G K K products (``cuda.gather``, Chai-1's product LayerNorm in the same pass); the out-projection
     (cuBLAS), and for RoseTTAFold3 the division by the pair counts (clamped at 1) before or after it (``normalize_before_proj``).
 
-``count_offset`` (divisor ``count + offset``) and ``divide_by_length`` (divisor S) change only the divisor: ``opm_train.divisor_params`` gives
+``count_offset`` (divisor ``count + offset``) changes only the divisor: ``opm_train.divisor_params`` gives
 (dmin, doff) with divisor = max(count, dmin) + doff, which every count consumer below takes (the epilogues, ``bias_finish``).
 """
 

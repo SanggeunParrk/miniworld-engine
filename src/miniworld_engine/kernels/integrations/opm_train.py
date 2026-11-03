@@ -103,7 +103,7 @@ def refusal(
 ) -> str | None:
     """None if this path can run this training call, else why it cannot. Never raises.
 
-    ``custom_divisor``: the module divides by ``count + count_offset`` or by the MSA depth (``divisor_params``); only the sm_90a kernels take it."""
+    ``custom_divisor``: the module divides by ``count + count_offset`` (``divisor_params``); only the sm_90a kernels take it."""
     try:
         if not _enabled():
             return "settings.opm_train=False disables the native path"
@@ -121,7 +121,7 @@ def refusal(
         if cap not in ((9, 0), (10, 0)):
             return "the kernels are built for sm_90a and sm_100a"
         if cap == (10, 0) and custom_divisor:
-            return "the sm_100a kernels divide by the clamped pair count only (no count_offset / divide_by_length)"
+            return "the sm_100a kernels divide by the clamped pair count only (no count_offset)"
         if cap == (10, 0) and torch.is_grad_enabled() and not _SM100_TRAIN:
             return "the sm_100a backward kernels are not built yet"
         if cap == (10, 0) and (
@@ -142,10 +142,7 @@ def refusal(
 
 def divisor_params(module, depth: int) -> tuple[float, float]:
     """(dmin, doff) of the pair divisor ``max(count, dmin) + doff`` the kernels take (``depth`` = the MSA rows S before any padding):
-    (1, 0) the clamp of the count at 1 (default); ``count_offset`` -> (0, offset), AlphaFold 3's ``count + offset``;
-    ``divide_by_length`` -> (S, 0): a count never exceeds S, so the divisor is the constant S (RoseTTAFold3)."""
-    if getattr(module, "divide_by_length", False):
-        return float(depth), 0.0
+    (1, 0) the clamp of the count at 1 (default); ``count_offset`` -> (0, offset), AlphaFold 3's ``count + offset``."""
     offset = getattr(module, "count_offset", None)
     if offset is not None:
         return 0.0, float(offset)
@@ -979,7 +976,7 @@ def outer_product_mean(
     cz = module.to_out.weight.shape[0]
     n0 = msa.shape[2]
     msa_in = msa
-    dmin, doff = divisor_params(module, msa.shape[1])   # before the depth is padded: divide_by_length divides by the real S
+    dmin, doff = divisor_params(module, msa.shape[1])   # before the depth is padded
     pn, ps = -n0 % 64, -msa.shape[1] % 256
     if pn or ps:
         msa = torch.nn.functional.pad(msa, (0, 0, 0, pn, 0, ps))

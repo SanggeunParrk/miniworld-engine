@@ -934,3 +934,20 @@ def code_graph(args) -> int:
         print(f"  flags: {json.dumps(m.get('flags'))}")
         print(f"  arch {m.get('arch')}  torch {m.get('torch')}  cuda {m.get('cuda')}  python {m.get('python')}")
     return 0
+
+
+# --------------------------------------------------------------------------------------------------- release continuity
+def artifact_names(manifest: dict) -> set[str]:
+    """The ``name`` of every artifact of a bundle manifest (one name covers its keys and Python ABIs)."""
+    return {a["name"] for a in manifest.get("artifacts", {}).values()}
+
+
+def dropped_names(manifest: dict, previous: set[str], allowed: set[str] = frozenset()) -> list[str]:
+    """Names the previous release's bundle carried that this manifest lacks and no allowlist entry explains."""
+    return sorted(previous - artifact_names(manifest) - set(allowed))
+
+
+def read_name_list(path: Path) -> set[str]:
+    """A names file: one per line, ``#`` starts a comment (a whole line or after the name)."""
+    names = (line.split("#", 1)[0].strip() for line in path.read_text().splitlines())
+    return {n for n in names if n}
