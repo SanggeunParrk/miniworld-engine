@@ -102,8 +102,120 @@ class _Fp32ParamsMixin(nn.Module):
         return super()._apply(fp32_fn, *args, **kwargs)
 
 
-class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
+class ImplementationSwitch(nn.Module):
+    """``module.set_implementation(ImplementationType.X)``: change a live module's ``implementation`` after construction.
+
+    The constructor resolves the public option into private fields (``_backend``, ``_train_gate``, a Transition's ``_native_cuda_route``,
+    the children's own ``implementation`` / ``_backend``). ``set_implementation`` redoes exactly that resolution, so afterwards the module
+    (and every engine child) is in the state a module constructed with the new option would be in; the parameters are untouched (the
+    weights are the same tensors, an optimizer built before the switch stays valid). It returns ``self`` and, on a refused option (an
+    ``ANTHROPIC`` request on an op without that payload), restores every module it had touched and raises.
+
+    The switch reaches every :class:`ImplementationSwitch` below the module (``PairformerBlock`` and ``Pairformer`` propagate to
+    their sub-modules). A child receives the option the constructor would have given it: the parent's, ``MINIWORLD`` where the parent
+    is ``ANTHROPIC`` (its norms are plumbing for the fallback path), the module's own ``ln_implementation`` for a TriangleMultiplication's
+    norms, and no change for children the constructor never tied to ``implementation`` (a TriangleAttention's ``ln_pair``).
+
+    Per-op backends that are integrations of a caller (cuEquivariance, Anthropic) are chosen the same way: switch the op's module and leave
+    the others. Switch BEFORE ``torch.compile`` / CUDA-graph capture: the resolved backend is read as a constant by a compiled forward and a
+    captured graph replays the kernels it recorded, so a switch after either does not reach them (re-compile / re-capture).
+    ``TriangleMultiplication`` / ``BidirectionalTriangleMultiplication`` keep the parameter layout they were constructed with (the bidirectional
+    d = 128 MINIWORLD module stores its four front matrices column-major); that is a layout, the result is the same.
+    """
+
+    def _resolve_implementation(self) -> None:
+        """Recompute the private fields derived from ``self.implementation`` (already assigned). The default has none."""
+
+    def _child_implementation(self, child: nn.Module, implementation: ImplementationType) -> ImplementationType | None:
+        """The option ``child`` gets from this module when it is switched to ``implementation`` (None: leave it alone)."""
+        return implementation
+
+    def _switch_children(self, implementation: ImplementationType):
+        def walk(module: nn.Module):
+            for child in module.children():
+                if isinstance(child, ImplementationSwitch):
+                    yield child
+                else:
+                    yield from walk(child)
+
+        for child in walk(self):
+            target = self._child_implementation(child, implementation)
+            if target is not None:
+                yield child, ImplementationType(target)
+
+    def _switch(self, implementation: ImplementationType, undo: list) -> None:
+        undo.append((self, dict(self.__dict__)))
+        self.implementation = implementation
+        self._resolve_implementation()
+        for child, target in self._switch_children(implementation):
+            child._switch(target, undo)
+
+    def set_implementation(self, implementation: ImplementationType | str):
+        """Switch this module and its engine children to ``implementation`` (see the class docstring); returns ``self``."""
+        implementation = ImplementationType(implementation)
+        undo: list = []
+        try:
+            self._switch(implementation, undo)
+        except Exception:
+            for module, state in reversed(undo):
+                module.__dict__.clear()
+                module.__dict__.update(state)
+            raise
+        return self
+
+
+class MasterWeights(nn.Module):
+    """fp32 master weights under bf16 compute: ``module.set_master_weights()`` (or the constructor's ``master_weights=True``).
+
+    The parameters stay fp32 (the master: what the optimizer updates and an fp32 checkpoint loads into) while the module is called with bf16
+    activations; a bulk ``.bfloat16()`` / ``.to(torch.bfloat16)`` / ``.half()`` of a model that contains it no longer rounds them
+    (the same pin ``LayerNorm`` has for its affine). On the H100 kernel paths a bf16 activation next to an fp32 master runs the bf16 CUDA kernels on
+    bf16 copies of the weights, and the weight / bias gradients come back fp32 and unrounded onto the masters:
+
+    * the copies are CACHED while the master is unchanged (``kernels._capture.param_forms`` / ``utils.h100_master.cached_pack``: keyed on
+      pointer and ``_version`` of every master) and made again after an optimizer step bumps a version. An optimizer that writes a
+      tensor without bumping its version (``Adam(fused=True)``) needs ``torch.autograd.graph.increment_version(params)`` after ``step()``;
+    * under ``torch.compile`` the casts are part of the graph, in a CUDA-graph capture they are made once per capture
+      (``static_weights()`` shares the eager entry);
+    * the other legs (the PyTorch reference, a call no CUDA path serves) run the same statements under bf16 autocast on a CUDA device
+      (``dispatch.fallback_autocast``).
+
+    ``master_weights`` is False by default: a module cast to bf16 keeps bf16 matrices (the layout the registry rows are recorded for);
+    both layouts run the same kernels. ``set_master_weights(False)`` only clears the pin (it does not cast down).
+    """
+
+    #: ``True`` after :meth:`set_master_weights`: floating parameters / buffers stay fp32 under a cast to bf16 / fp16.
+    master_weights: bool = False
+
+    def set_master_weights(self, enabled: bool = True):
+        """Pin (or unpin) the fp32 masters of this module and every :class:`MasterWeights` below it; ``True`` also upcasts parameters that are
+        not fp32 yet (in place: the same ``Parameter`` objects, an optimizer built earlier stays valid). Returns ``self``."""
+        for module in self.modules():
+            if isinstance(module, MasterWeights):
+                module.master_weights = bool(enabled)
+        if enabled:
+            self.float()
+        return self
+
+    def _apply(self, fn, *args, **kwargs):
+        if self.master_weights:
+            inner = fn
+
+            def pinned(t):
+                out = inner(t)
+                if isinstance(out, torch.Tensor) and out.dtype in (torch.bfloat16, torch.float16):
+                    out = out.to(torch.float32)
+                return out
+
+            fn = pinned
+        return super()._apply(fn, *args, **kwargs)
+
+
+class LayerNorm(ImplementationSwitch, _Fp32ParamsMixin, nn.LayerNorm):
     """A LayerNorm layer with precision control (fp32-pinned affine; see mixin)."""
+
+    def _resolve_implementation(self) -> None:
+        self._backend = resolve_layernorm(self.implementation)
 
     def __init__(
         self,
@@ -203,7 +315,7 @@ class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
         raise InvalidImplementationError(self.implementation)
 
 
-class RMSNorm(nn.RMSNorm):
+class RMSNorm(ImplementationSwitch, nn.RMSNorm):
     """State-dict-compatible RMSNorm with the existing engine forward/backward.
 
     Preserve torch 2.10's accumulation-dtype epsilon when eps=None; BF16/FP16
@@ -214,6 +326,9 @@ class RMSNorm(nn.RMSNorm):
                  device=None, dtype=None, *, implementation=ImplementationType.PYTORCH):
         super().__init__(normalized_shape, eps, elementwise_affine, device=device, dtype=dtype)
         self.implementation = ImplementationType(implementation)
+        self._resolve_implementation()
+
+    def _resolve_implementation(self) -> None:
         self._backend = resolve_rmsnorm(self.implementation)
         # A MINIWORLD request that the B200 policy (``dispatch._torch_on_hopper_blackwell``) resolved to PYTORCH stands in for the kernel and
         # returns what the kernel returns, the input dtype. Torch's ``rms_norm`` runs in fp32 under autocast and returns fp32

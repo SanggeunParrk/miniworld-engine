@@ -8,6 +8,12 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added (implementation switch, master weights)
+
+- `module.set_implementation(ImplementationType.X)` on `TriangleMultiplication` (and bidirectional), `TriangleAttention` (and bidirectional), `Transition`, `OuterProductMean`, `MSAPairWeightedAveraging`, `AttentionPairBias`, `PairformerBlock`, `Pairformer`, `LayerNorm`, `RMSNorm`, `DiTVariantStack`, `AtomDiTVariantStack`: re-resolves `_backend`, `_train_gate` and the children's options so the live module equals one built with that implementation (propagates to children; a refused option restores everything). Switch before `torch.compile` / CUDA-graph capture. `modules.primitives.ImplementationSwitch`, `docs/dispatch.md`.
+- `module.set_master_weights()` / `master_weights=True` on the pair-track modules and `Pairformer`: fp32 parameters stay fp32 under `.bfloat16()` / `.half()` (default off, registry dtypes unchanged); bf16 activations run the H100 bf16 CUDA kernels on cached bf16 packs of the masters. `modules.primitives.MasterWeights`.
+- `utils.h100_master.cached_pack`: `pack` cached while the masters are unchanged (`_capture.param_forms`, invalidated by `_version`); `AttentionPairBias` and `TriangleAttention` use it (they cast fresh on every call before).
+
 ## [2.4.3] - 2026-11-03
 
 ### Added

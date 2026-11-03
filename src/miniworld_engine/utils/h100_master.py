@@ -3,6 +3,7 @@
 import torch
 import torch.nn.functional as F
 
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
 
 
@@ -27,6 +28,15 @@ def pack(weights):
     """Fresh casts on every call/replay; the projection owns the raw parameter gradient."""
     with torch.no_grad():
         return _pack(list(weights))
+
+
+def cached_pack(tag, weights):
+    """``pack(weights)``, cached while the very same master tensors are unmodified (``kernels._capture.param_forms``: pointer + ``_version`` of
+    each, the entry replaced when an optimizer step bumps a version; ``torch.autograd.graph.increment_version`` after a fused optimizer step).
+    The bf16 copies carry no autograd history; the projection (``linear``) owns the raw fp32 parameter gradient. Traced by ``torch.compile``
+    the casts are computed in the graph; in a CUDA-graph capture without ``static_weights()`` they are made inside the capture."""
+    weights = list(weights)
+    return _capture.param_forms(("h100_master_pack", tag), weights, lambda: pack(weights))
 
 
 class _Linear(torch.autograd.Function):

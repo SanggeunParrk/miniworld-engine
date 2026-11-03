@@ -36,10 +36,15 @@ from miniworld_engine.modules.exceptions import (
     InvalidImplementationError,
 )
 from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.primitives import LayerNorm, Linear
+from miniworld_engine.modules.primitives import (
+    ImplementationSwitch,
+    LayerNorm,
+    Linear,
+    MasterWeights,
+)
 
 
-class BidirectionalTriangleMultiplication(nn.Module):
+class BidirectionalTriangleMultiplication(MasterWeights, ImplementationSwitch):
     """Triangular multiplicative update computing outgoing+incoming in one block."""
 
     def __init__(
@@ -49,14 +54,14 @@ class BidirectionalTriangleMultiplication(nn.Module):
         *,
         implementation: ImplementationType = ImplementationType.PYTORCH,
         p_drop: float = 0.25,
+        master_weights: bool = False,
     ) -> None:
         super().__init__()
         # Keep the PUBLIC option on self.implementation (contract: modules never overwrite it
         # with the resolved backend). 'miniworld' (auto) -> concrete backend for the running
         # GPU arch is resolved ONCE into self._backend; forward routes on that.
         self.implementation = ImplementationType(implementation)
-        self._backend = _resolve_trimul_backend(implementation)  # concrete KernelBackend
-        self._train_gate = _dispatch.train_gate("triangle_multiplication", self.implementation, self._backend)
+        self._resolve_implementation()
         # ======================================================================================
         # THIS MODULE ALWAYS APPLIES THE RESIDUAL: y = pair + drop_row(bidir_trimul(pair)).
         # The residual connection is UNCONDITIONAL (AF3 default; residual is the domain standard) —
@@ -103,6 +108,16 @@ class BidirectionalTriangleMultiplication(nn.Module):
                 projection.weight = nn.Parameter(
                     weight.detach().t().contiguous().t(), requires_grad=weight.requires_grad
                 )
+        if master_weights:
+            self.set_master_weights()
+
+    def _resolve_implementation(self) -> None:
+        self._backend = _resolve_trimul_backend(self.implementation)  # concrete KernelBackend
+        self._train_gate = _dispatch.train_gate("triangle_multiplication", self.implementation, self._backend)
+
+    def _child_implementation(self, child, implementation):
+        # "anthropic" names a TriMul payload, not a LayerNorm one: the norms take the engine's own auto choice
+        return ImplementationType.MINIWORLD if implementation == ImplementationType.ANTHROPIC else implementation
 
     @typecheck
     def _make_drop_row_scale(self, pair: torch.Tensor, p: float) -> torch.Tensor:

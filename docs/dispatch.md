@@ -176,6 +176,34 @@ This is the behaviour of every release so far and is left as it is; whether `min
 An `implementation` outside the four values raises a `ValueError` that lists them. `settings.configure` rejects an unknown setting, and names the
 replacement when the name is one that 2.3.12 removed (see the CHANGELOG).
 
+## Switching a live module: `set_implementation`
+
+`module.set_implementation(ImplementationType.X)` (also a string) re-resolves what the constructor resolved: `implementation`, `_backend`,
+`_train_gate`, a Transition's `_native_cuda_route`, and the same fields of every engine child (LayerNorm, RMSNorm, the sub-modules of a
+`PairformerBlock` / `Pairformer`). Afterwards the module is in the state a module built with `X` is in (a test compares every field of every
+child); the parameters are the same tensors, so an optimizer built before stays valid. It returns the module; an option the module refuses
+(`anthropic` on an op without that payload) raises and leaves every module it had touched as it was.
+Available on `TriangleMultiplication` (and bidirectional), `TriangleAttention` (and bidirectional), `Transition`, `OuterProductMean`,
+`MSAPairWeightedAveraging`, `AttentionPairBias`, `PairformerBlock`, `Pairformer`, `LayerNorm`, `RMSNorm`, `DiTVariantStack`, `AtomDiTVariantStack`.
+Children get what the constructor gives them: the parent's option, `miniworld` where the parent is `anthropic` (OPM, PWA, bidirectional TriMul),
+a TriMul's own `ln_implementation` for its norms, nothing for a TriangleAttention's norms (the constructor never tied them to `implementation`).
+To choose per op (cuEquivariance for one, the engine for the others) switch the op's module, not the block.
+**Switch before `torch.compile` / CUDA-graph capture**: a compiled forward reads `_backend` as a constant and a captured graph replays the
+kernels it recorded; re-compile or re-capture after a switch. The bidirectional TriMul's column-major d = 128 storage is chosen at construction and kept.
+
+## fp32 master weights under bf16 compute: `master_weights`
+
+`module.set_master_weights()` or `Module(..., master_weights=True)` on the pair-track modules (the seven above, bidirectional variants, `Pairformer`):
+the parameters stay fp32 (what the optimizer updates and an fp32 checkpoint loads into; a bulk `.bfloat16()` / `.half()` no longer rounds them, as
+for the norm affines) and the module is called with bf16 activations. Default `False`: a module cast to bf16 keeps bf16 matrices (the layout the
+registry rows are recorded for) and both layouts run the same kernels on the same values.
+On H100 the bf16 CUDA kernels run on bf16 copies of the weights; weight and bias gradients are fp32 and unrounded on the masters.
+The copies are cached while the master is unchanged (`utils.h100_master.cached_pack`, i.e. `kernels._capture.param_forms`: pointer and `_version` of each
+master) and made again after an optimizer step; `Adam(fused=True)` does not bump `_version`: call `torch.autograd.graph.increment_version(params)`
+after `step()`. Under `torch.compile` the casts are in the graph; in a CUDA-graph capture they are made once per capture (`static_weights()` shares the
+eager entry). The PyTorch legs run the same statements under bf16 autocast (`dispatch.fallback_autocast`). Qualification and cost:
+[records/h100_master_weights_20261005.md](records/h100_master_weights_20261005.md).
+
 ## Limits of the rule as implemented
 
 * The route is resolved when the module is built, from the current device (or the `device` the resolver is given). A module built on a
