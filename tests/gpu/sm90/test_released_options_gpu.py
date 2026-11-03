@@ -2,7 +2,7 @@
 """H100: the released-checkpoint options on the MINIWORLD implementation. An option no kernel implements is REFUSED (a ``KernelRefusedWarning``,
 then the PyTorch statements), never ignored; an option a kernel serves agrees with the PyTorch implementation.
 
-``divide_by_length`` (TriMul) and ``count_offset`` (OPM): refused, bit-equal to the PYTORCH implementation. ``transposed_bias=False`` / the gate and out biases
+``divide_by_length`` (TriMul): refused, bit-equal to the PYTORCH implementation. ``count_offset`` (OPM): refused outside the kernels' contract (the served calls: test_opm_divisor_gpu.py). ``transposed_bias=False`` / the gate and out biases
 (TriangleAttention) and the single-track / ``parallel`` PairformerBlock: MINIWORLD vs PYTORCH within bf16 tolerance.
 """
 from __future__ import annotations
@@ -83,10 +83,11 @@ def test_trimul_divide_by_length_trains():
 
 
 @pytest.mark.parametrize("before", [True, False])
-def test_opm_count_offset_is_refused_not_ignored(before):
+def test_opm_count_offset_outside_the_kernel_contract_is_refused_not_ignored(before):
+    """Batch 2 is outside opm_train / composed (one MSA stack per call): refused (warning), bit-equal to PYTORCH. The served calls: test_opm_divisor_gpu.py."""
     g = torch.Generator(device="cuda").manual_seed(2)
-    msa = torch.randn(1, 16, L, 64, device="cuda", dtype=torch.bfloat16, generator=g)
-    mask = torch.rand(1, 16, L, device="cuda", generator=g) > 0.2
+    msa = torch.randn(2, 16, L, 64, device="cuda", dtype=torch.bfloat16, generator=g)
+    mask = torch.rand(2, 16, L, device="cuda", generator=g) > 0.2
     kw = {"d_msa": 64, "d_pair": C, "d_hidden": 32, "count_offset": 1e-3, "normalize_before_proj": before}
     fast, ref = _pair_of(OuterProductMean, **kw)
     with torch.no_grad(), warnings.catch_warnings(record=True) as caught:

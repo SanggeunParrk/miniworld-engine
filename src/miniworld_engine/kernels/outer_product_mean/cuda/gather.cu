@@ -112,12 +112,14 @@ __global__ void __launch_bounds__(256) split_kernel(const bf16* __restrict__ X, 
 }
 
 // out[m, f] += (c1[m, f] + c2[m, f]) / max(cnt[m], 1) + (cnt[m] > 0 ? c[f] : 0)  (RoseTTAFold3's projection-bias terms, in place)
+// With a divisor other than the clamp (count_offset / divide_by_length), d = max(cnt, dmin) + doff: out += (c1 + c2 + cnt c) / d.
 __global__ void __launch_bounds__(256) bias_finish_kernel(bf16* __restrict__ OUT, const float* __restrict__ C1, const float* __restrict__ C2,
-                                                          const float* __restrict__ CNT, const float* __restrict__ C, int F, long n2) {
+                                                          const float* __restrict__ CNT, const float* __restrict__ C, int F, long n2, float dmin, float doff) {
+  const bool dflt = dmin == 1.f && doff == 0.f;
   for (long p = (long)blockIdx.x * 256 + threadIdx.x; p < n2; p += (long)gridDim.x * 256) {
     const long e = 2 * p, m = e / F;
     const int f = (int)(e % F);
-    const float cnt = CNT[m], inv = 1.f / fmaxf(cnt, 1.f), on = cnt > 0.f ? 1.f : 0.f;
+    const float cnt = CNT[m], inv = 1.f / (fmaxf(cnt, dmin) + doff), on = dflt ? (cnt > 0.f ? 1.f : 0.f) : cnt * inv;   // dflt: the clamp (cnt c / cnt = c)
     const float2 a = *reinterpret_cast<const float2*>(C1 + e), b = *reinterpret_cast<const float2*>(C2 + e);
     __nv_bfloat162 o = *reinterpret_cast<__nv_bfloat162*>(OUT + e);
     const float x = __low2float(o) + (a.x + b.x) * inv + on * C[f], y = __high2float(o) + (a.y + b.y) * inv + on * C[f + 1];
@@ -161,7 +163,7 @@ at::Tensor opm_split_groups(at::Tensor x, int64_t B, int64_t S, int64_t N, int64
   return out;
 }
 
-void opm_bias_finish(at::Tensor out, at::Tensor c1, at::Tensor c2, at::Tensor cnt, at::Tensor c) {
+void opm_bias_finish(at::Tensor out, at::Tensor c1, at::Tensor c2, at::Tensor cnt, at::Tensor c, double dmin = 1.0, double doff = 0.0) {
   const int64_t F = out.size(-1);
   TORCH_CHECK(out.is_contiguous() && out.scalar_type() == at::kBFloat16 && F % 2 == 0, "out: contiguous bf16 [..., F], F even");
   for (auto* t : {&c1, &c2})
@@ -172,11 +174,11 @@ void opm_bias_finish(at::Tensor out, at::Tensor c1, at::Tensor c2, at::Tensor cn
   const long n2 = out.numel() / 2;
   const int grid = (int)std::min<long>((n2 + 255) / 256, 132L * 32);
   bias_finish_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<bf16*>(out.data_ptr()), c1.data_ptr<float>(),
-      c2.data_ptr<float>(), cnt.data_ptr<float>(), c.data_ptr<float>(), (int)F, n2);
+      c2.data_ptr<float>(), cnt.data_ptr<float>(), c.data_ptr<float>(), (int)F, n2, (float)dmin, (float)doff);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_gather", &opm_gather);
   m.def("opm_split_groups", &opm_split_groups);
-  m.def("opm_bias_finish", &opm_bias_finish);
+  m.def("opm_bias_finish", &opm_bias_finish, py::arg("out"), py::arg("c1"), py::arg("c2"), py::arg("cnt"), py::arg("c"), py::arg("dmin") = 1.0, py::arg("doff") = 0.0);
 }

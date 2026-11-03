@@ -7,6 +7,9 @@
     m = LN(msa); L, R = mask (m W^T [+ b]) (cuBLAS); per group g: prod_g = L_g^T R_g over the MSA rows (one batched GEMM, [N K, N K] per
     (b, g)); the rows (i, j) of the G K K products (``cuda.gather``, Chai-1's product LayerNorm in the same pass); the out-projection
     (cuBLAS), and for RoseTTAFold3 the division by the pair counts (clamped at 1) before or after it (``normalize_before_proj``).
+
+``count_offset`` (divisor ``count + offset``) and ``divide_by_length`` (divisor S) change only the divisor: ``opm_train.divisor_params`` gives
+(dmin, doff) with divisor = max(count, dmin) + doff, which every count consumer below takes (the epilogues, ``bias_finish``).
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ def serves(module, msa: torch.Tensor, mask: torch.Tensor | None) -> bool:
 
 
 def inference(module, msa, mask, token_asym_id=None, residual=None):
+    from miniworld_engine.kernels.integrations import opm_train
     from miniworld_engine.kernels.outer_product_mean import cuda
 
     B, S, N, _ = msa.shape
@@ -52,7 +56,8 @@ def inference(module, msa, mask, token_asym_id=None, residual=None):
     else:
         rows = cuda.gather(prod, G, K).view(B, N, N, K * K)
         mf = (mask if mask is not None else torch.ones(B, S, N, dtype=torch.bool, device=msa.device)).float()
-        count = torch.einsum("bsi,bsj->bij", mf, mf).clamp(min=1)[..., None]
+        dmin, doff = opm_train.divisor_params(module, S)
+        count = (torch.einsum("bsi,bsj->bij", mf, mf).clamp(min=dmin) + doff)[..., None]
         if module.normalize_before_proj:
             pair = module.to_out((rows / count).to(rows.dtype))
         else:
@@ -97,7 +102,7 @@ def biased_on_fused(module, msa, mask, token_asym_id=None, residual=None):
     count = torch.bmm(keep_t, keep, out_dtype=torch.float32)                             # [B, N, N]
     c1 = torch.mm(rs.view(-1, K).to(bf), a.to(bf).t(), out_dtype=torch.float32)
     c2 = torch.mm(ls.reshape(-1, K).to(bf), bm.to(bf).t(), out_dtype=torch.float32)
-    cuda.bias_finish(out, c1, c2, count, c.contiguous())
+    cuda.bias_finish(out, c1, c2, count, c.contiguous(), *opm_train.divisor_params(module, S))
     if module.mask_interchain and token_asym_id is not None:
         out = out * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(out.dtype)
     return residual + out if residual is not None else out
@@ -125,6 +130,7 @@ def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
     cz = module.to_out.weight.shape[0]
     fused = opm_train._fused_enabled(m.shape[0], n, training=False, cm=cm, cz=cz) and torch.cuda.get_device_capability(msa.device) == (9, 0)
     ext = opm_train._ext(msa.device, native=True, tma=False, cm=cm, cz=cz, fused=fused)
+    dmin, doff = opm_train.divisor_params(module, msa.shape[1])
     mk = (mask[0] if mask is not None else torch.ones(m.shape[:2], dtype=torch.bool, device=msa.device)).contiguous()
     if mk.dtype != torch.bool:
         mk = mk != 0
@@ -146,13 +152,14 @@ def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
                     torch.cat([module.to_left.bias, module.to_right.bias]).float().contiguous())
     gam, bet, wa16, wb16, wo_epi, bo_epi, pbias = _capture.param_forms("opm_biased_wide", params, forms)
     # the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table): no count kernel
+    dkw = {} if (dmin, doff) == (1.0, 0.0) else {"dmin": dmin, "doff": doff}   # the pair divisor max(count, dmin) + doff
     a2, bt, _, _, norm = ext.opm_prologue_wide(m, mk, gam, bet, wa16, wb16, float(getattr(module.ln_msa, "eps", 1e-5)), False, pbias, False)
     interchain = module.mask_interchain and token_asym_id is not None
     res = None if interchain else residual
     if fused:   # the products stay in shared memory (norm is the mask bit table here)
-        z = ext.opm_fused_infer(a2, bt, norm, opm_train._fused_weight(module.to_out.weight), bo_epi, res, int(not module.normalize_before_proj))
+        z = ext.opm_fused_infer(a2, bt, norm, opm_train._fused_weight(module.to_out.weight), bo_epi, res, int(not module.normalize_before_proj), **dkw)
     else:
-        z = ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo_epi, bo_epi, n, n, res, int(not module.normalize_before_proj))
+        z = ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo_epi, bo_epi, n, n, res, int(not module.normalize_before_proj), **dkw)
     z = z.view(1, n, n, cz)
     if interchain:
         z = z * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(z.dtype)

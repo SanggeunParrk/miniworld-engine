@@ -156,7 +156,7 @@ __global__ void opm_count_native(const unsigned* bits, float* norm, int S, int N
 // (row stride W + 1 words, so the 16 j-rows hit 16 distinct banks and the i-rows broadcast).  Replaces the
 // thread-per-pair loop whose loads strided across the whole bits array.  Exact: popcount of the AND.
 #define OPM_COUNT_TILE 16
-__global__ void __launch_bounds__(256) opm_count_tiled(const unsigned* __restrict__ bits, float* __restrict__ norm, int W, int N) {
+__global__ void __launch_bounds__(256) opm_count_tiled(const unsigned* __restrict__ bits, float* __restrict__ norm, int W, int N, float dmin, float doff) {
   extern __shared__ unsigned count_sm[];
   const int ld=W+1, i0=blockIdx.y*OPM_COUNT_TILE, j0=blockIdx.x*OPM_COUNT_TILE;
   unsigned* bi=count_sm; unsigned* bj=count_sm+OPM_COUNT_TILE*ld;
@@ -171,14 +171,14 @@ __global__ void __launch_bounds__(256) opm_count_tiled(const unsigned* __restric
   int v=0;
   #pragma unroll 8
   for(int k=0;k<W;++k) v+=__popc(pi[k]&pj[k]);
-  norm[(long)(i0+threadIdx.y)*N+j0+threadIdx.x]=float(max(v,1));
+  norm[(long)(i0+threadIdx.y)*N+j0+threadIdx.x]=fmaxf(float(v),dmin)+doff;   // divisor = max(count, dmin) + doff: (1, 0) the clamp, (0, offset) count + offset, (S, 0) the MSA depth
 }
-static void opm_count_launch(const unsigned* bits, float* norm, int S, int N) {
+static void opm_count_launch(const unsigned* bits, float* norm, int S, int N, float dmin = 1.0f, float doff = 0.0f) {
   const int W=S/32;
   TORCH_CHECK(N%OPM_COUNT_TILE==0 && S%32==0,"OPM count tile contract");
   cudaKernel_t kernel; C10_CUDA_CHECK(cudaGetKernel(&kernel, opm_count_tiled));
   const unsigned* bp=bits; float* np=norm; int w=W, n=N;
-  void* argv[]={&bp,&np,&w,&n};
+  void* argv[]={&bp,&np,&w,&n,&dmin,&doff};
   C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(N/OPM_COUNT_TILE,N/OPM_COUNT_TILE),
       dim3(OPM_COUNT_TILE,OPM_COUNT_TILE),argv,size_t(2*OPM_COUNT_TILE*(W+1))*sizeof(unsigned),at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -1144,6 +1144,7 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
     const float* __restrict__ BIAS,           // [CZ]  bf16-rounded bias, held in fp32
     const __nv_bfloat16* __restrict__ RESIDUAL, // optional [1, NI, NJ, CZ]
     int NI, int NJ, long M, int AFTER,  // AFTER: divide after the projection AND its bias (ESMFold2), not before it
+    float DMIN, float DOFF,  // the divisor of a pair is max(count, DMIN) + DOFF (BITS path; the NORM table already holds it)
     // NJ is a BLOCK of j columns when the caller bounds the workspace
     // z[i, j, :] as a 4-D box: (64 z) x j x (2 halves of z) x i.  j sits INSIDE the z half on
     // purpose: it is what makes the accumulator's eight rows land on eight distinct swizzle chunks,
@@ -1194,7 +1195,7 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
         const uint4 x = __ldg(bi + k), y = __ldg(bj + k);
         cnt += __popc(x.x & y.x) + __popc(x.y & y.y) + __popc(x.z & y.z) + __popc(x.w & y.w);
       }
-      sInv[tid] = 1.0f / float(max(cnt, 1));
+      sInv[tid] = 1.0f / (fmaxf(float(cnt), DMIN) + DOFF);   // (1, 0): 1 / clamp(count, 1), bit-identical to the former form
     } else {
       sInv[tid] = 1.0f / NORM[(i0 + il) * NJ + (j0 + jl)];
     }
@@ -2241,7 +2242,8 @@ std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor norm, torch
 }
 
 torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf, torch::Tensor bias,
-                           int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual, int64_t after, c10::optional<torch::Tensor> out_) {
+                           int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual, int64_t after, c10::optional<torch::Tensor> out_,
+                           double dmin = 1.0, double doff = 0.0) {
   TORCH_CHECK(O.is_cuda() && O.scalar_type() == torch::kBFloat16 && O.is_contiguous(), "O: contiguous cuda bf16");
   const bool from_bits = norm.scalar_type() == torch::kInt32;   // inference: the prologue's mask bit rows [N, S/32] instead of the fp32 count
   TORCH_CHECK((from_bits && norm.dim() == 2 && norm.size(1) % 4 == 0) || norm.scalar_type() == torch::kFloat32, "norm: fp32 count [N, N] or int32 mask bits [N, S/32]");
@@ -2306,9 +2308,9 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
       bias.data_ptr<float>(),
       residual.has_value() ? reinterpret_cast<const __nv_bfloat16*>(residual->data_ptr<at::BFloat16>()) : nullptr,
 #if defined(MINIWORLD_OPM_EPILOGUE_TMA_OVERLAP)
-      (int)ni, (int)nj, M, (int)after, out_map, o_map, w_map);
+      (int)ni, (int)nj, M, (int)after, (float)dmin, (float)doff, out_map, o_map, w_map);
 #else
-      (int)ni, (int)nj, M, (int)after, out_map);
+      (int)ni, (int)nj, M, (int)after, (float)dmin, (float)doff, out_map);
 #endif
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
@@ -2355,7 +2357,7 @@ std::vector<torch::Tensor> opm_native_pack(std::vector<torch::Tensor> p, bool in
   return {g,b,a,c,o,ob,ot,bw};
 }
 std::vector<torch::Tensor> opm_native_prologue_tma(torch::Tensor m,torch::Tensor mask,
- std::vector<torch::Tensor> p,double eps,bool save_stats,bool with_norm){
+ std::vector<torch::Tensor> p,double eps,bool save_stats,bool with_norm,double dmin=1.0,double doff=0.0){
  TORCH_CHECK(m.is_cuda()&&m.is_contiguous()&&m.scalar_type()==torch::kBFloat16&&m.dim()==3&&m.size(2)==64,"TMA prologue BF16 [S,N,64]");
  int S=m.size(0),N=m.size(1);
  TORCH_CHECK(S%256==0&&N%64==0&&mask.is_contiguous()&&mask.scalar_type()==torch::kBool&&mask.device()==m.device()&&mask.numel()==S*N&&p.size()==8,"TMA prologue shape/mask");
@@ -2388,12 +2390,12 @@ std::vector<torch::Tensor> opm_native_prologue_tma(torch::Tensor m,torch::Tensor
  C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(grid),dim3(512),args,opm_pro_tma::SMEM,at::cuda::getCurrentCUDAStream()));
  C10_CUDA_KERNEL_LAUNCH_CHECK();
  if(!with_norm) return {a,b,stats,mk,bits};   // inference: the epilogue counts from the mask bits
- opm_count_launch(bitp,norm.data_ptr<float>(),S,N);
+ opm_count_launch(bitp,norm.data_ptr<float>(),S,N,float(dmin),float(doff));
  return {a,b,stats,mk,norm};
 }
 
 std::vector<torch::Tensor> opm_native_prologue(torch::Tensor m,torch::Tensor mask,
-    std::vector<torch::Tensor> p,double eps,bool save_stats,bool with_norm) {
+    std::vector<torch::Tensor> p,double eps,bool save_stats,bool with_norm,double dmin=1.0,double doff=0.0) {
   TORCH_CHECK(m.is_cuda() && m.is_contiguous() && m.scalar_type()==torch::kBFloat16 && m.dim()==3 && m.size(2)==64,
       "native OPM input must be contiguous BF16 [S,N,64]");
   int S=m.size(0),N=m.size(1);
@@ -2413,7 +2415,7 @@ std::vector<torch::Tensor> opm_native_prologue(torch::Tensor m,torch::Tensor mas
       save_stats?stats.data_ptr<float>():nullptr,S,N,float(eps));
   opm_native_launch(opm_mask_bits_native,dim3((S*N+255)/256),dim3(256),mask.data_ptr<bool>(),reinterpret_cast<unsigned*>(bits.data_ptr()),S,N);
   if(!with_norm) return {a,b,stats,mk,bits};
-  opm_count_launch(reinterpret_cast<const unsigned*>(bits.data_ptr()),norm.data_ptr<float>(),S,N);
+  opm_count_launch(reinterpret_cast<const unsigned*>(bits.data_ptr()),norm.data_ptr<float>(),S,N,float(dmin),float(doff));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {a,b,stats,mk,norm};
 }
@@ -2422,7 +2424,7 @@ std::vector<torch::Tensor> opm_native_prologue(torch::Tensor m,torch::Tensor mas
 // the bit mask the prologue wrote).  Parameters arrive already as gamma / beta fp32 [CM] and Wa / Wb bf16 [32, CM].
 std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask, torch::Tensor gamma, torch::Tensor beta,
                                              torch::Tensor wa, torch::Tensor wb, double eps, bool save_stats,
-                                             c10::optional<torch::Tensor> pbias, bool with_norm) {
+                                             c10::optional<torch::Tensor> pbias, bool with_norm, double dmin = 1.0, double doff = 0.0) {
   using Cf = opm_pro_wide::Cfg<CM_MSA>;
   TORCH_CHECK(m.is_cuda() && m.is_contiguous() && m.scalar_type() == torch::kBFloat16 && m.dim() == 3 && m.size(2) == CM_MSA,
               "wide OPM prologue: m is contiguous bf16 [S, N, ", CM_MSA, "]");
@@ -2477,7 +2479,7 @@ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask
                                   at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   if (!with_norm) return {a, b, stats, mk, bits};   // inference: the epilogue counts from the mask bits
-  opm_count_launch(bitp, norm.data_ptr<float>(), S, N);
+  opm_count_launch(bitp, norm.data_ptr<float>(), S, N, float(dmin), float(doff));
   return {a, b, stats, mk, norm};
 }
 
@@ -2571,7 +2573,7 @@ __device__ __forceinline__ void mma_m64n256k16_ss(uint64_t da, uint64_t db, floa
 __global__ __launch_bounds__(384, 1) void opm_fused_kernel(
     const __grid_constant__ CUtensorMap AMAP, const __grid_constant__ CUtensorMap BMAP, const __grid_constant__ CUtensorMap WMAP,
     const unsigned* __restrict__ BITS, int BW, const float* __restrict__ BIAS, const __nv_bfloat16* __restrict__ RESIDUAL,
-    __nv_bfloat16* __restrict__ Z, int L, int nk, int AFTER) {
+    __nv_bfloat16* __restrict__ Z, int L, int nk, int AFTER, float dmin, float doff) {   // divisor = max(count, dmin) + doff
   using namespace opm_pro_tma;
   const int DBG = AFTER >> 4; AFTER &= 1;   // DBG (probe only): 1 = no projection, 2 = also no Opair conversion, 3 = no epilogue
   extern __shared__ char smem_raw[];
@@ -2655,7 +2657,7 @@ __global__ __launch_bounds__(384, 1) void opm_fused_kernel(
         const uint4 x = __ldg(bi + k), y = __ldg(bj + k);
         cnt += __popc(x.x & y.x) + __popc(x.y & y.y) + __popc(x.z & y.z) + __popc(x.w & y.w);
       }
-      sInv[ctid] = 1.0f / float(max(cnt, 1));
+      sInv[ctid] = 1.0f / (fmaxf(float(cnt), dmin) + doff);
     }
 #pragma unroll 1
     for (int q = 0; q < 4; ++q) {
@@ -2760,7 +2762,7 @@ __global__ __launch_bounds__(384, 1) void opm_fused_kernel(
 }  // namespace opm_fused
 
 torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor bits, torch::Tensor wperm, torch::Tensor bias,
-                              c10::optional<torch::Tensor> residual, int64_t after) {
+                              c10::optional<torch::Tensor> residual, int64_t after, double dmin = 1.0, double doff = 0.0) {
   using namespace opm_fused;
   TORCH_CHECK(CZ == 128 && CM_MSA == 64, "the fused kernel is written for the MiniWorld widths (c_z 128)");
   TORCH_CHECK(a2.is_cuda() && a2.scalar_type() == torch::kBFloat16 && a2.is_contiguous() && a2.dim() == 2 && bt.sizes() == a2.sizes() && bt.is_contiguous(),
@@ -2803,7 +2805,7 @@ torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor 
   opm_fused_kernel<<<std::min(sms, ntiles), 384, SMEM, at::cuda::getCurrentCUDAStream()>>>(
       amap, bmap, wmap, reinterpret_cast<const unsigned*>(bits.data_ptr<int>()), (int)bits.size(1), bias.data_ptr<float>(),
       residual.has_value() ? reinterpret_cast<const __nv_bfloat16*>(residual->data_ptr<at::BFloat16>()) : nullptr,
-      reinterpret_cast<__nv_bfloat16*>(z.data_ptr<at::BFloat16>()), (int)N, (int)(S / BK), (int)after);
+      reinterpret_cast<__nv_bfloat16*>(z.data_ptr<at::BFloat16>()), (int)N, (int)(S / BK), (int)after, (float)dmin, (float)doff);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return z;
 }
@@ -2811,7 +2813,7 @@ torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_epilogue", &opm_epilogue, "fused OPM epilogue (div-norm + proj_out + bias + optional residual)",
-        py::arg("O"), py::arg("norm"), py::arg("bf"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("out") = py::none());
+        py::arg("O"), py::arg("norm"), py::arg("bf"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("out") = py::none(), py::arg("dmin") = 1.0, py::arg("doff") = 0.0);
   m.def("opm_dgrad", &opm_dgrad, "fused OPM dO: (dz @ Wo) / n straight into the grouped layout",
         py::arg("dz"), py::arg("norm"), py::arg("bw"), py::arg("ni"), py::arg("nj"), py::arg("after") = 0);
   m.def("opm_dwo", &opm_dwo, "dWo straight off the grouped outer product, no permute");
@@ -2821,11 +2823,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("raw_weights")=std::vector<torch::Tensor>{});
   m.def("opm_prologue_wide", &opm_prologue_wide, "persistent TMA OPM prologue at this build's d_msa (64 / 128) + exact mask count",
         py::arg("m"), py::arg("mask"), py::arg("gamma"), py::arg("beta"), py::arg("wa"), py::arg("wb"), py::arg("eps"), py::arg("save_stats"),
-        py::arg("pbias") = py::none(), py::arg("with_norm") = true);
+        py::arg("pbias") = py::none(), py::arg("with_norm") = true, py::arg("dmin") = 1.0, py::arg("doff") = 0.0);
   m.def("opm_native_pack",&opm_native_pack,py::arg("p"),py::arg("infer")=false,py::arg("pbl")=py::none(),py::arg("pbr")=py::none());
-  m.def("opm_native_prologue",&opm_native_prologue,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true);
-  m.def("opm_native_prologue_tma",&opm_native_prologue_tma,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true);
+  m.def("opm_native_prologue",&opm_native_prologue,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true,py::arg("dmin")=1.0,py::arg("doff")=0.0);
+  m.def("opm_native_prologue_tma",&opm_native_prologue_tma,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true,py::arg("dmin")=1.0,py::arg("doff")=0.0);
 #if defined(MINIWORLD_OPM_FUSED)
-  m.def("opm_fused_infer", &opm_fused_infer, "fused outer product + projection (inference)", py::arg("a2"), py::arg("bt"), py::arg("bits"), py::arg("wperm"), py::arg("bias"), py::arg("residual") = py::none(), py::arg("after") = 0);
+  m.def("opm_fused_infer", &opm_fused_infer, "fused outer product + projection (inference)", py::arg("a2"), py::arg("bt"), py::arg("bits"), py::arg("wperm"), py::arg("bias"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("dmin") = 1.0, py::arg("doff") = 0.0);
 #endif
 }
