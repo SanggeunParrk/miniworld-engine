@@ -141,6 +141,28 @@ main already carries counts); `--new-only` keeps only what the diff causes (nati
 recorded one). `--tests [cpu|gpu|all]` prints the reached test files one repo path per line (through lazy imports too): `pytest $(dev
 code-graph --diff main --tests cpu)`. `-v` prints the chain that reaches every node and the stale units.
 
+**One graph, every card** (`build/cards.py`). Engine development spans several GPUs and only some are reachable from a given session, so the
+graph carries that: every node has a `cards` set. `ALL` is a card-independent node (a core Python file, a reference, utils, modules, CPU
+tests, docs); anything else lists the cards it depends on, computed from the repository -- a hand-CUDA source by its `registry.csv` row's `arch`
+(else the `sm90` / `h100` / `sm100` / `b200` in its path, else the arch its text needs: `wgmma` is sm90, `tcgen05` is sm100, else the cards of
+the files that include it), a Triton kernel by the fallback cards (those `modules.dispatch.restricted_card` does not restrict: sm80 / sm86,
+not H100 / B200, see [gpus/h100/dispatch.md](../gpus/h100/dispatch.md)), plans (`autotune/plans/<card>/`), tuned and native caches,
+manifests, `docs/gpus/<card>/` pages, per-card benchmark results and `tests/gpu/<card>/` by their own card. A module that imports a
+card-specific kernel stays `ALL`; the edge carries the card (`reach_cards`): a change to an sm100 kernel reaches its importers for sm100 only,
+a change to a card-independent file reaches every card, and a tuned cache is reached for its own card whenever the kernel it was measured from
+changes.
+
+`--diff` prints one section per card the change reaches: reached nodes by kind, `owed:` (per card: `[sm90] dev derive --arch sm90 ...`,
+`[sm100] owed, cannot run here: dev derive --arch sm100 ...`), tests, and the evidence state. The cards this environment can run on are
+**accessible** (`--accessible sm90[,sm100]`, else `$MINIWORLD_ACCESSIBLE_CARDS`, else the visible GPU, else sm90: this repo's environment is an
+H100; `--gpu` is a deprecated alias): their evidence is judged. Every other card the change reaches hardware-bound nodes of (a CUDA source, a
+tuned cache, a GPU test, an identity, a card-specific kernel) prints `UNVERIFIABLE-HERE (owed on <card>)` for what needs its hardware (tests,
+CUDA build, retune, bench) and is never shown as fresh or dropped. What file digests decide -- a card's derivation plan, its native and tuned
+caches -- is computed for every card with committed evidence (`fresh` / `stale`, "computed from file digests"). `--check` exits 2 only on stale
+evidence of an accessible card; the unverifiable cards are listed with a count, and `--strict-cards` (exit 3) makes them fail too, for a release
+gate. `--tests` prints the tests that run on an accessible card (stdout, for pytest) and the ones that need another card on stderr as comments
+(`# needs another card ...`): nothing is claimed verified there.
+
 ## Building the prebuilt kernels
 
 ```bash

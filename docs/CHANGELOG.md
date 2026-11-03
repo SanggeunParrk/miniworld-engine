@@ -41,6 +41,12 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 - `module.set_master_weights()` / `master_weights=True` on the pair-track modules and `Pairformer`: fp32 parameters stay fp32 under `.bfloat16()` / `.half()` (default off, registry dtypes unchanged); bf16 activations run the H100 bf16 CUDA kernels on cached bf16 packs of the masters. `modules.primitives.MasterWeights`.
 - `utils.h100_master.cached_pack`: `pack` cached while the masters are unchanged (`_capture.param_forms`, invalidated by `_version`); `AttentionPairBias` and `TriangleAttention` use it (they cast fresh on every call before).
 
+### Changed (code graph: one graph, per-card evidence)
+
+- `dev code-graph` is one graph for every card. Every node has a `cards` attribute (`build/cards.py`): `ALL` for a card-independent node (core Python, references, utils, modules, CPU tests, docs), else the cards it depends on, computed from the repo: hand-CUDA by its `registry.csv` row's `arch`, else the `sm90` / `h100` / `sm100` / `b200` name in its path, else the arch its text needs (`wgmma`, `tcgen05`), else the cards of the files that include it; Triton kernels belong to the fallback cards (the cards `modules.dispatch.restricted_card` does not restrict: sm80 / sm86, not H100 / B200); plans, tuned and native caches, manifests, `docs/gpus/<card>/` pages, per-card benchmark results and `tests/gpu/<card>/` carry their own card.
+- `--diff BASE` prints one section per card the change reaches (reached nodes by kind, owed actions, tests, evidence state). Cards this environment can run on (`--accessible sm90[,sm100]`, else `$MINIWORLD_ACCESSIBLE_CARDS`, else the visible GPU, else sm90) are judged; every other card the change reaches hardware-bound nodes of is `UNVERIFIABLE-HERE (owed on <card>)`, its commands printed as `[sm100] owed, cannot run here: ...`, never as fresh. Staleness that file digests decide (derivation plans, native and tuned caches) is computed for every card.
+- `--check` fails (exit 2) only on stale evidence of an accessible card, so an H100-only session is not blocked by B200 / A-series evidence; `--strict-cards` also fails (exit 3) on unverifiable cards (a release gate). `--tests` prints the tests that run on an accessible card (stdout, for pytest) and lists the ones that need another card on stderr. `--gpu` stays as a deprecated alias of `--accessible`. The `DERIVED_ARCH` constant is gone: every card with a plan directory is judged on its own plan.
+
 ## [2.4.3] - 2026-11-03
 
 ### Added

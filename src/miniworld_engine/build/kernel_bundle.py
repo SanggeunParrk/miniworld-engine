@@ -874,11 +874,17 @@ def code_graph(args) -> int:
 
     if args.diff:
         if args.tests:
-            print("\n".join(repo_graph.diff_tests(args.diff, args.tests)))
+            # stdout: the tests that run on an accessible card (pass to pytest); stderr: the tests that need another card (not run here)
+            runnable, needs = repo_graph.diff_tests(args.diff, args.tests, accessible=args.accessible, gpu=args.gpu)
+            print("\n".join(runnable))
+            for card, files_ in needs.items():
+                print(f"# needs another card, not verifiable here: [{card}] {len(files_)} test(s)", file=sys.stderr)
+                print("\n".join(f"# [{card}] {f}" for f in files_), file=sys.stderr)
             return 0
-        text, owed = repo_graph.report(args.diff, verbose=args.verbose, manifests=args.manifest, new_only=args.new_only, gpu=args.gpu)
-        print(text)
-        return 2 if args.check and owed else 0
+        rep = repo_graph.evaluate(args.diff, verbose=args.verbose, manifests=args.manifest, new_only=args.new_only, gpu=args.gpu,
+                                  accessible=args.accessible)
+        print(rep.text)
+        return rep.code(args.check, args.strict_cards)
     if args.repo:
         print(repo_graph.summary())
         return 0

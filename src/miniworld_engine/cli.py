@@ -2137,16 +2137,22 @@ def build_parser() -> argparse.ArgumentParser:
                           "and what the change owes (restamp, derive, retune, tests, docs)")
     cgr.add_argument("--repo", action="store_true", help="the whole-repo graph: node and edge counts, files with no edge")
     cgr.add_argument("--check", action="store_true",
-                     help="with --diff: exit 2 when the committed evidence is stale (a stale tuned cache the change reaches, a native identity or "
-                          "derivation that no longer matches the sources)")
+                     help="with --diff: exit 2 when the committed evidence of an ACCESSIBLE card is stale (a stale tuned cache the change reaches, a native "
+                          "identity or derivation that no longer matches the sources). Cards this environment cannot run on are listed as UNVERIFIABLE-HERE "
+                          "and do not fail it (unless --strict-cards)")
+    cgr.add_argument("--strict-cards", action="store_true",
+                     help="with --diff --check: also exit 3 when a card the change reaches hardware-bound nodes of is UNVERIFIABLE-HERE (a release gate)")
+    cgr.add_argument("--accessible", default="", metavar="CARDS",
+                     help="with --diff: the cards this environment can run on, comma separated (e.g. sm90 or sm90,sm100). Default: $MINIWORLD_ACCESSIBLE_CARDS, "
+                          "else the visible GPU, else sm90 (this repo's H100 environment). Every other known card is judged UNVERIFIABLE-HERE, never fresh")
     cgr.add_argument("-v", "--verbose", action="store_true", help="with --diff: every reached node and the chain that reaches it")
     cgr.add_argument("--new-only", action="store_true",
                      help="with --diff --check: report only the staleness this diff causes (native ops whose graph holds a changed file, "
                           "derivation units that recorded one), not staleness that was already there")
     cgr.add_argument("--gpu", default="", metavar="ARCH",
-                     help="with --diff: judge only this card's evidence (e.g. sm90): its tuned and native caches and its derivation plan; the other cards' staleness is not counted")
+                     help="DEPRECATED alias of --accessible ARCH (the card to judge here; every other card is still listed as UNVERIFIABLE-HERE, no longer silently dropped)")
     cgr.add_argument("--tests", nargs="?", const="all", choices=["all", "cpu", "gpu"], default="",
-                     help="with --diff: print the reached test files, one repo path per line (pass them to pytest)")
+                     help="with --diff: print the test files that run on an accessible card, one repo path per line (pass them to pytest); the tests that need another card go to stderr as comments, not claimed verified")
     cgr.set_defaults(func=cmd_code_graph)
 
     aud = dev.add_parser("audit",

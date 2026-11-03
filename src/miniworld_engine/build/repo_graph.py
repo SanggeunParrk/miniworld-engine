@@ -23,6 +23,12 @@ is unchanged (comments, whitespace) -- a native identity hashes a ``.py`` by byt
 ``.cu`` do not -- and walks the edges backwards.
 The result is every node the edit reaches, with the kind of node it is: tests (and which of them need a GPU), docs, tuned caches,
 identities, derived pages, CUDA sources. ``actions`` turns that into the list of things the edit owes.
+
+One graph serves every card (:mod:`cards`): each node has a ``cards`` set (``ALL`` for a card-independent node). ``reach_cards`` walks the
+same edges but carries, per node, the cards the change reaches it for -- an edge into a card-specific kernel carries that kernel's card, a
+card-independent seed carries every card. The report is then one section per card, with the evidence state of that card: computed
+(``fresh`` / ``stale``) for the cards this environment can run on (``cards.accessible``) and ``UNVERIFIABLE-HERE (owed on <card>)`` for the
+rest. ``--check`` fails only on stale evidence of an accessible card (``--strict-cards``: on unverifiable ones too).
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ import re
 import subprocess
 from pathlib import Path, PurePosixPath
 
+from miniworld_engine.build import cards as card_mod
 from miniworld_engine.build import repo_paths
 
 PKG = Path(__file__).resolve().parents[1]
@@ -91,6 +98,8 @@ class Graph:
         self.nodes: dict[str, str] = {}
         self.deps: dict[str, dict[str, str]] = collections.defaultdict(dict)       # node -> {dependency: edge kind}
         self.users: dict[str, dict[str, str]] = collections.defaultdict(dict)      # dependency -> {node: edge kind}
+        self.cards: dict[str, frozenset[str]] = {}          # node -> the cards it depends on (card_mod.ALL: card-independent)
+        self.known_cards: frozenset[str] = frozenset()
 
     def edge(self, node: str, dep: str, kind: str) -> None:
         if kind == "ref" and self.nodes.get(dep) == "doc" and self.nodes.get(node) != "doc":
@@ -275,6 +284,7 @@ def build() -> Graph:
                 g.edge(p, dep, "ref")
     _caches(g, resolve)
     _identities(g)
+    card_mod.assign(g, paths, ROOT)
     return g
 
 
@@ -426,12 +436,240 @@ def changes(base: str) -> dict:
             moved[ident] = files_
             seeds.append(ident)
     return {"graph": g, "changed": changed, "cosmetic": cosmetic, "deleted": deleted, "moved": moved, "rows": rows,
-            "reached": reach(g, seeds), "reached_lazy": reach(g, seeds, lazy=True)}
+            "reached": reach(g, seeds), "reached_lazy": reach(g, seeds, lazy=True),
+            "card_reached": reach_cards(g, seeds), "card_reached_lazy": reach_cards(g, seeds, lazy=True)}
 
 
 def cuda_rebuilds(result: dict, manifests: list[str]) -> list[tuple[str, str]]:
     """``(artifact, changed file)`` for every known CUDA artifact (local JIT cache, installed bundles, ``manifests``) whose recorded graph
     holds a changed ``.cu`` / ``.cuh`` whose normalized content now differs from the recorded one: what a rebuild will compile."""
+    return sorted({(a, p) for a, p, _ in _rebuild_triples(result, manifests)})
+
+
+def derivation_plans() -> dict[str, Path]:
+    """``{arch: units.json}`` of every committed per-card plan."""
+    return {p.parent.name: p for p in sorted((PKG / "autotune" / "plans").glob("*/registry_kernel.units.json"))}
+
+
+# ------------------------------------------------------------------------------------------------------------------ cards
+#: node kinds whose correctness or evidence needs the card's hardware (a doc or a core Python file does not)
+HARDWARE_KINDS = {"cuda-source", "cache", "test-gpu", "benchmark", "registry-row", "identity"}
+
+
+def reach_cards(g: Graph, seeds: list[str], lazy: bool = False) -> dict[str, frozenset[str]]:
+    """Like :func:`reach`, but per card: ``{node: the cards the change reaches it for}``.
+
+    A seed carries its own cards (a card-independent one carries every card). The walk intersects: a user is reached for the cards its
+    dependency was reached for AND that the user itself depends on, so an edge into an sm100 kernel carries ``sm100`` only and an
+    sm100-only test is never reached by an sm90 change. The exception is a ``cache`` edge: a tuned cache is evidence *of its own card* for
+    the kernel it was measured from, whatever cards that kernel serves today (an H100 cache of a Triton kernel goes stale when the kernel
+    changes), so it is reached for its own card whenever the kernel is reached at all."""
+    known = g.known_cards
+
+    def cards_of(node: str) -> frozenset[str]:
+        return card_mod.expand(g.cards.get(node, card_mod.ALL), known)
+
+    got: dict[str, set[str]] = {}
+    queue = collections.deque()
+    for s in seeds:
+        c = cards_of(s)
+        if c:
+            got[s] = set(c)
+            queue.append(s)
+    while queue:
+        node = queue.popleft()
+        if is_identity(node):
+            continue
+        here = got[node]
+        for user, kind in g.users.get(node, {}).items():
+            if kind == "identity" or (kind == "lazy" and not lazy):
+                continue
+            mine = cards_of(user)
+            new = set(mine) if kind == "cache" else here & mine
+            if new - got.get(user, set()):
+                got.setdefault(user, set()).update(new)
+                queue.append(user)
+    return {n: frozenset(c) for n, c in got.items()}
+
+
+def view(result: dict, card: str, lazy: bool = False) -> set[str]:
+    """The nodes the change reaches for ``card``."""
+    return {n for n, c in result["card_reached_lazy" if lazy else "card_reached"].items() if card in c}
+
+
+def reached_cards(result: dict) -> list[str]:
+    seen: set[str] = set()
+    for c in result["card_reached_lazy"].values():
+        seen |= c
+    return card_mod.sort_cards(seen)
+
+
+def hardware_bound(g: Graph, nodes) -> bool:
+    """Does what the change reaches for a card need that card's hardware: a CUDA source, a tuned cache, a GPU test, a registry row, an
+    identity, a benchmark, a kernel file that is itself card-specific. (A doc or a core Python file reached for every card is not.)"""
+    return any(g.nodes[n] in HARDWARE_KINDS or (g.nodes[n] == "python" and g.cards.get(n, card_mod.ALL) != card_mod.ALL) for n in nodes)
+
+
+def card_evidence(result: dict, card: str, new_only: bool = False, rows: list | None = None) -> dict:
+    """What the committed evidence of ``card`` says NOW, against the working tree (CPU only, computable for every card from file digests):
+    the stale tuned caches among the ones reached, the native ops whose cache no longer matches their graph, and the derivation units of
+    that card's plan (``autotune/plans/<card>/``) whose recorded files moved. A derive on one card re-records that card's plan only, so a
+    card's plan is never judged by another's.
+
+    ``new_only``: keep only what the diff itself causes -- the native ops whose graph holds a changed file and the units that recorded
+    one -- not staleness that was already there at ``base``."""
+    from miniworld_engine.autotune import cache_status, identity, plan
+
+    g = result["graph"]
+    rows = cache_status.scan() if rows is None else rows
+    mine = [r for r in rows if f"({card})" in r.gpu]
+    native = _native_ops()
+    reached_ops = {PurePosixPath(n).parent.name for n in view(result, card) if g.nodes[n] == "cache"}
+    touched = {p.removeprefix(f"{SRC}/") for p in [*result["changed"], *result["cosmetic"]] if p.startswith(f"{SRC}/")}
+    native_stale = sorted({r.op for r in mine if r.stale and r.reason.startswith("native implementation changed")})
+    plans = derivation_plans()
+    has_plan = card in plans
+    status = plan.status(plans[card]) if has_plan else {"units": 0, "stale": {}, "schema": 0}
+    units_stale = status["stale"]
+    if new_only:
+        rows_changed = set(result.get("rows") or [])
+        seeds = {*result["changed"], *(f"registry-row:{k}" for k in rows_changed)}
+        direct = {PurePosixPath(n).parent.name for n, kind in g.nodes.items() if kind == "cache" and seeds & set(g.deps[n])}
+        native_stale = [op for op in native_stale if op in rows_changed or set(identity.native_files(op)) & touched]
+        units_stale = {k: v for k, v in units_stale.items() if set(v) & touched}
+        reached_ops &= direct                              # a cache whose own files (kernel, helpers, driver, grid, row) hold a changed file
+    return {"card": card, "stale": [r for r in mine if r.stale and r.op in reached_ops], "native_stale": native_stale,
+            "units_stale": units_stale, "units_total": status["units"], "schema": status["schema"], "new_only": new_only,
+            "has_plan": has_plan, "native_rows": sum(1 for r in mine if r.op in native), "tuned_reached": len(reached_ops)}
+
+
+def _chain(parent: dict[str, str], node: str) -> str:
+    out = [node]
+    while parent.get(out[-1]):
+        out.append(parent[out[-1]])
+    return " <- ".join(out[:4]) + (" <- ..." if len(out) > 4 else "")
+
+
+def actions(result: dict, card: str = "", accessible: bool = True) -> list[str]:
+    """What the change owes. ``card`` restricts it to the nodes reached for that card and labels each line: a command is a plain
+    ``[sm90] <command>`` on an accessible card and ``[sm100] owed, cannot run here: <command>`` on any other (running it needs that
+    card's hardware). Without ``card``: everything reached, unlabelled."""
+    g, changed = result["graph"], set(result["changed"])
+    reached = set(view(result, card)) if card else set(result["reached"])
+    if card:
+        changed = {p for p in changed if card in result["card_reached"].get(p, ())}
+    by_kind: dict[str, list[str]] = collections.defaultdict(list)
+    for node in reached:
+        by_kind[g.nodes[node]].append(node)
+    tag = f"[{card}] " if card else ""
+    run = tag if accessible else f"{tag}owed, cannot run here: "
+    todo = []
+    moved = {i: f for i, f in result.get("moved", {}).items() if not card or card in result["card_reached"].get(i, ())}
+    native_moved = {i.removeprefix(NATIVE_PREFIX): f for i, f in moved.items() if i.startswith(NATIVE_PREFIX)}
+    if native_moved:
+        every = sorted(i.removeprefix(NATIVE_PREFIX) for i in g.nodes if i.startswith(NATIVE_PREFIX)
+                       and (not card or card in card_mod.expand(g.cards.get(i, card_mod.ALL), g.known_cards)))
+        todo.append(f"{run}restamp {len(native_moved)} of {len(every)} native ops (dev restamp-native; the other {len(every) - len(native_moved)} stay): "
+                    + ", ".join(sorted(native_moved)[:8]) + " -- moved by "
+                    + ", ".join(sorted({PurePosixPath(p).name for fs in native_moved.values() for p in fs})[:4]))
+    if result.get("moved", {}).get(DERIVATION):
+        files_ = result["moved"][DERIVATION]
+        for arch in ([card] if card else sorted(derivation_plans())):
+            if arch not in derivation_plans():
+                continue
+            todo.append(f"{run if card else ''}dev derive --arch {arch} --out src/miniworld_engine/autotune/plans/{arch}/registry_kernel.csv: re-runs only "
+                        f"the units whose recorded files changed, reuses the rest; then viz.sweep_page "
+                        f"-- moved by {len(files_)} file(s): " + ", ".join(files_[:4]) + (" ..." if len(files_) > 4 else ""))
+    if result.get("rows"):
+        todo.append(f"{tag}registry rows changed ({len(result['rows'])}): " + ", ".join(result["rows"][:8]) + (" ..." if len(result["rows"]) > 8 else "")
+                    + " -- their tuned caches, and run_all on each card that holds their manifest rows")
+    caches = sorted(n for n in by_kind["cache"] if n not in changed)
+    ops = sorted({PurePosixPath(n).parent.name for n in caches})
+    if ops:
+        todo.append(f"{run}tuned caches reached ({len(ops)} ops, {len(caches)} files): retune / `dev cache-status` -- {', '.join(ops[:12])}"
+                    + (" ..." if len(ops) > 12 else ""))
+    todo.extend(f"  STALE now: {r.op} [{r.gpu}] {r.reason}" for r in (result.get("evidence") or {}).get("stale", [])[:10])
+    rebuilds = (result.get("rebuilds_by_card", {}).get(card, []) if card else result.get("rebuilds")) or []
+    cuda_changed = [n for n in by_kind["cuda-source"] if n in changed]
+    if rebuilds:
+        names = sorted({a for a, _ in rebuilds})
+        todo.append(f"{run}CUDA artifacts that rebuild ({len(names)}): " + ", ".join(names[:8]) + (" ..." if len(names) > 8 else ""))
+    elif by_kind["cuda-source"] or cuda_changed:
+        todo.append(f"{run}CUDA sources reached ({len(by_kind['cuda-source'])}): "
+                    + ("rebuild the prebuilt bundle of this card" if not accessible else "pass --manifest <bundle> to name the artifacts that rebuild"))
+    gpu_tests = sorted(by_kind["test-gpu"])
+    cpu_tests = sorted(by_kind["test"])
+    if cpu_tests:
+        todo.append(f"{tag}CPU tests reached: {len(cpu_tests)} files")
+    if gpu_tests:
+        todo.append(f"{run}GPU tests reached: {len(gpu_tests)} files")
+    docs = sorted(by_kind["doc"])
+    if docs:
+        todo.append(f"{tag}docs that name what changed ({len(docs)}): " + ", ".join(docs[:8]) + (" ..." if len(docs) > 8 else ""))
+    bench = sorted(by_kind["benchmark"])
+    if bench:
+        todo.append(f"{run}benchmark files reached: {len(bench)}")
+    return todo
+
+
+def pending(result: dict) -> list[str]:
+    """What the committed evidence of a card cannot be trusted for, as of now: stale caches among the ones the change reaches, native ops
+    whose cache no longer matches their graph, derivation units whose recorded files moved. ``result["evidence"]`` is one card's
+    :func:`card_evidence`."""
+    ev = result.get("evidence") or {}
+    tag = f"[{ev['card']}] " if ev.get("card") else ""
+    out = [f"{tag}stale cache {r.op} [{r.gpu}]: {r.reason}" for r in ev.get("stale", [])]
+    if ev.get("native_stale"):
+        out.append(f"{tag}native caches stale ({len(ev['native_stale'])}): dev restamp-native -- {', '.join(ev['native_stale'][:6])}")
+    if ev.get("units_stale"):
+        out.append(f"{tag}derivation: {len(ev['units_stale'])} of {ev.get('units_total', '?')} units stale (the rest are reused): dev derive")
+    return out
+
+
+def tests(result: dict, kind: str = "all") -> list[str]:
+    """The test files the change reaches (through every import, lazy ones included), one repo path each: ``pytest $(... --tests)``."""
+    g = result["graph"]
+    want = {"cpu": {"test"}, "gpu": {"test-gpu"}, "all": {"test", "test-gpu"}}[kind]
+    return sorted(n for n in result["reached_lazy"] if g.nodes[n] in want and PurePosixPath(n).name.startswith("test_") and n.endswith(".py")
+                  and (ROOT / n).is_file())
+
+
+def plan_tests(result: dict, kind: str = "all", accessible=frozenset()) -> tuple[list[str], dict[str, list[str]]]:
+    """``(runnable here, {card: tests that need that card})``. A CPU test is card-independent and runs here. A GPU test reached for an
+    accessible card runs here; one reached only for another card (or bound to it: ``tests/gpu/sm100/``) is listed under that card and is
+    not claimed verified."""
+    g = result["graph"]
+    want = {"cpu": {"test"}, "gpu": {"test-gpu"}, "all": {"test", "test-gpu"}}[kind]
+    runnable: set[str] = set()
+    needs: dict[str, set[str]] = {}
+    for card in reached_cards(result):
+        for n in view(result, card, lazy=True):
+            if g.nodes[n] not in want or not PurePosixPath(n).name.startswith("test_") or not n.endswith(".py") or not (ROOT / n).is_file():
+                continue
+            if g.nodes[n] == "test" or card in accessible:
+                runnable.add(n)
+            else:
+                needs.setdefault(card, set()).add(n)
+    return sorted(runnable), {c: sorted(v) for c, v in sorted(needs.items(), key=lambda kv: card_mod._order(kv[0]))}
+
+
+# ------------------------------------------------------------------------------------------------------------------ report
+class Report:
+    """The per-card report. ``blocking``: pending items of ACCESSIBLE cards (``--check`` fails on them); ``unverifiable``: the cards this
+    environment cannot judge that the change reaches hardware-bound nodes of (``--strict-cards`` fails on them)."""
+
+    def __init__(self, text: str, blocking: list[str], unverifiable: list[str]) -> None:
+        self.text, self.blocking, self.unverifiable = text, blocking, unverifiable
+
+    def code(self, check: bool = True, strict: bool = False) -> int:
+        if not check:
+            return 0
+        if self.blocking:
+            return 2
+        return 3 if strict and self.unverifiable else 0
+
+
+def _rebuild_triples(result: dict, manifests: list[str]) -> list[tuple[str, str, str]]:
     from miniworld_engine.build import kernel_bundle as kb
     from miniworld_engine.kernels import _codegraph as cg
 
@@ -446,171 +684,142 @@ def cuda_rebuilds(result: dict, manifests: list[str]) -> list[tuple[str, str]]:
         for a in known:
             nodes = {n[0]: n[1] for n in (a.get("material") or {}).get("nodes") or []}
             if label in nodes and nodes[label] != digest:
-                out.append((a["name"], p))
+                out.append((a["name"], p, a.get("where", "")))
     return sorted(set(out))
 
 
-#: The card the engine is derived and released for. The derivation check judges THIS card's plan (``autotune/plans/<arch>/``) unless
-#: ``--gpu`` names another: a plan is valid per card (``dev derive --arch X`` re-records only X), so reading a different card's plan
-#: right after deriving this one reports that other plan's stale units as if the derive had not run -- all of them when a file every
-#: unit lists (the safety set: ``settings.py``, ``modules/dispatch.py``, the registry CSVs ...) changed ("1156 of 1156 stale").
-DERIVED_ARCH = "sm90"
+def _bundle_card(where: str) -> str:
+    m = re.search(r"(sm\d+)-cu\d+", where)
+    return m.group(1) if m else ""
 
 
-def derivation_plans() -> dict[str, Path]:
-    """``{arch: units.json}`` of every committed per-card plan."""
-    return {p.parent.name: p for p in sorted((PKG / "autotune" / "plans").glob("*/registry_kernel.units.json"))}
-
-
-def live_evidence(result: dict, new_only: bool = False, gpu: str = "") -> dict:
-    """What the committed evidence says NOW, against the working tree (CPU only): the stale tuned caches among the ones reached, the
-    native ops whose cache no longer matches their graph, and the derivation units whose recorded files moved.
-
-    ``new_only``: keep only what the diff itself causes -- the native ops whose graph holds a changed file and the units that
-    recorded one -- not staleness that was already there at ``base``.
-
-    ``gpu`` (``"sm90"``): judge only that card's evidence -- its tuned caches and native caches, and the derivation plan of that arch
-    (``autotune/plans/<gpu>/``); the other cards' staleness is not this diff's business and not counted."""
-    from miniworld_engine.autotune import cache_status, identity, plan
-
-    g = result["graph"]
-    rows = [r for r in cache_status.scan() if not gpu or f"({gpu})" in r.gpu]
-    reached_ops = {PurePosixPath(n).parent.name for n in result["reached"] if g.nodes[n] == "cache"}
-    touched = {p.removeprefix(f"{SRC}/") for p in [*result["changed"], *result["cosmetic"]] if p.startswith(f"{SRC}/")}
-    native_stale = sorted({r.op for r in rows if r.stale and r.reason.startswith("native implementation changed")})
-    plans = derivation_plans()
-    arch = gpu or DERIVED_ARCH
-    status = plan.status(plans[arch]) if arch in plans else plan.status()
-    units_stale = status["stale"]
-    # the other cards' plans: counted for the report, never judged (a derive on one card does not refresh them)
-    other = {a: len(plan.status(p)["stale"]) for a, p in plans.items() if a != arch}
-    if new_only:
-        rows_changed = set(result.get("rows") or [])
-        seeds = {*result["changed"], *(f"registry-row:{k}" for k in rows_changed)}
-        direct = {PurePosixPath(n).parent.name for n, kind in g.nodes.items() if kind == "cache" and seeds & set(g.deps[n])}
-        native_stale = [op for op in native_stale if op in rows_changed or set(identity.native_files(op)) & touched]
-        units_stale = {k: v for k, v in units_stale.items() if set(v) & touched}
-        reached_ops &= direct                              # a cache whose own files (kernel, helpers, driver, grid, row) hold a changed file
-    return {"stale": [r for r in rows if r.stale and r.op in reached_ops], "native_stale": native_stale,
-            "units_stale": units_stale, "units_total": status["units"], "schema": status["schema"], "new_only": new_only,
-            "units_arch": arch if arch in plans else "", "units_other": other}
-
-
-def _chain(parent: dict[str, str], node: str) -> str:
-    out = [node]
-    while parent.get(out[-1]):
-        out.append(parent[out[-1]])
-    return " <- ".join(out[:4]) + (" <- ..." if len(out) > 4 else "")
-
-
-def actions(result: dict) -> list[str]:
-    g, reached, changed = result["graph"], result["reached"], set(result["changed"])
-    by_kind: dict[str, list[str]] = collections.defaultdict(list)
-    for node in reached:
-        by_kind[g.nodes[node]].append(node)
-    todo = []
-    moved = result.get("moved", {})
-    native_moved = {i.removeprefix(NATIVE_PREFIX): f for i, f in moved.items() if i.startswith(NATIVE_PREFIX)}
-    if native_moved:
-        every = sorted(i.removeprefix(NATIVE_PREFIX) for i in g.nodes if i.startswith(NATIVE_PREFIX))
-        todo.append(f"restamp {len(native_moved)} of {len(every)} native ops (dev restamp-native; the other {len(every) - len(native_moved)} stay): "
-                    + ", ".join(sorted(native_moved)[:8]) + " -- moved by "
-                    + ", ".join(sorted({PurePosixPath(p).name for fs in native_moved.values() for p in fs})[:4]))
-    if moved.get(DERIVATION):
-        todo.append(f"dev derive --arch {DERIVED_ARCH} --out src/miniworld_engine/autotune/plans/{DERIVED_ARCH}/registry_kernel.csv: re-runs only the units "
-                    f"whose recorded files changed, reuses the rest; then viz.sweep_page "
-                    f"-- moved by {len(moved[DERIVATION])} file(s): " + ", ".join(moved[DERIVATION][:4]) + (" ..." if len(moved[DERIVATION]) > 4 else ""))
-    if result.get("rows"):
-        todo.append(f"registry rows changed ({len(result['rows'])}): " + ", ".join(result["rows"][:8]) + (" ..." if len(result["rows"]) > 8 else "")
-                    + " -- their tuned caches, and run_all on each card that holds their manifest rows")
-    caches = sorted(n for n in by_kind["cache"] if n not in changed)
-    ops = sorted({PurePosixPath(n).parent.name for n in caches})
-    if ops:
-        todo.append(f"tuned caches reached ({len(ops)} ops, {len(caches)} files): retune / `dev cache-status` -- {', '.join(ops[:12])}"
-                    + (" ..." if len(ops) > 12 else ""))
-    todo.extend(f"  STALE now: {r.op} [{r.gpu}] {r.reason}" for r in (result.get("evidence") or {}).get("stale", [])[:10])
-    rebuilds = result.get("rebuilds") or []
-    if rebuilds:
-        names = sorted({a for a, _ in rebuilds})
-        todo.append(f"CUDA artifacts that rebuild ({len(names)}): " + ", ".join(names[:8]) + (" ..." if len(names) > 8 else ""))
-    elif by_kind["cuda-source"] or any(g.nodes.get(p) == "cuda-source" for p in changed):
-        todo.append(f"CUDA sources reached ({len(by_kind['cuda-source'])}): pass --manifest <bundle> to name the artifacts that rebuild")
-    gpu = sorted(by_kind["test-gpu"])
-    cpu = sorted(by_kind["test"])
-    if cpu:
-        todo.append(f"CPU tests reached: {len(cpu)} files")
-    if gpu:
-        todo.append(f"GPU tests reached: {len(gpu)} files")
-    docs = sorted(by_kind["doc"])
-    if docs:
-        todo.append(f"docs that name what changed ({len(docs)}): " + ", ".join(docs[:8]) + (" ..." if len(docs) > 8 else ""))
-    bench = sorted(by_kind["benchmark"])
-    if bench:
-        todo.append(f"benchmark files reached: {len(bench)}")
-    return todo
-
-
-def pending(result: dict) -> list[str]:
-    """What the committed evidence cannot be trusted for, as of now: stale caches among the ones the change reaches, native ops whose
-    cache no longer matches their graph, derivation units whose recorded files moved. ``--check`` fails on any."""
-    ev = result.get("evidence") or {}
-    out = [f"stale cache {r.op} [{r.gpu}]: {r.reason}" for r in ev.get("stale", [])]
-    if ev.get("native_stale"):
-        out.append(f"native caches stale ({len(ev['native_stale'])}): dev restamp-native -- {', '.join(ev['native_stale'][:6])}")
-    if ev.get("units_stale"):
-        out.append(f"derivation: {len(ev['units_stale'])} of {ev.get('units_total', '?')} units stale (the rest are reused): dev derive")
+def _evidence_lines(card: str, ev: dict, accessible: bool, bound: bool, new_only: bool) -> list[str]:
+    """The state per evidence kind. Staleness of committed files is computed from digests for every card; whatever needs the card's
+    hardware (running the tests, building CUDA, retuning, benchmarking) is ``UNVERIFIABLE-HERE`` on a card this environment cannot run."""
+    scope = " (new-only: what this diff causes)" if new_only else ""
+    out = [f"evidence [{card}]{scope}:"]
+    if ev["has_plan"]:
+        n = len(ev["units_stale"])
+        out.append(f"    derivation plan   : " + (f"stale {n} of {ev['units_total']} units (computed from file digests)" if n
+                                                  else f"fresh, 0 of {ev['units_total']} units stale (computed from file digests)"))
+    else:
+        out.append("    derivation plan   : no committed plan for this card")
+    if ev["native_rows"]:
+        n = len(ev["native_stale"])
+        out.append("    native caches     : " + (f"stale {n} op(s) (computed from identity digests)" if n
+                                                 else f"fresh, {ev['native_rows']} committed (computed from identity digests)"))
+    else:
+        out.append("    native caches     : none committed for this card")
+    n = len(ev["stale"])
+    out.append("    tuned caches      : " + (("none caused by this diff" if new_only else "none reached") if not ev["tuned_reached"] else
+                                              f"stale {n} of {ev['tuned_reached']} reached op(s)" if n else f"fresh, {ev['tuned_reached']} reached op(s)"))
+    if accessible:
+        out.append("    hardware evidence : run the owed commands and the tests listed (this card is accessible here)")
+    elif bound:
+        out.append(f"    hardware evidence : UNVERIFIABLE-HERE (owed on {card}): tests, CUDA build, retune, bench")
+    else:
+        out.append("    hardware evidence : nothing reached needs this card's hardware")
     return out
 
 
-def tests(result: dict, kind: str = "all") -> list[str]:
-    """The test files the change reaches (through every import, lazy ones included), one repo path each: ``pytest $(... --tests)``."""
-    g = result["graph"]
-    want = {"cpu": {"test"}, "gpu": {"test-gpu"}, "all": {"test", "test-gpu"}}[kind]
-    return sorted(n for n in result["reached_lazy"] if g.nodes[n] in want and PurePosixPath(n).name.startswith("test_") and n.endswith(".py")
-                  and (ROOT / n).is_file())
+def evaluate(base: str, verbose: bool = False, manifests: list[str] = (), new_only: bool = False, gpu: str = "",
+             accessible: str | list[str] = "") -> Report:
+    from miniworld_engine.autotune import cache_status
 
-
-def report(base: str, verbose: bool = False, manifests: list[str] = (), new_only: bool = False, gpu: str = "") -> tuple[str, int]:
     result = changes(base)
-    result["rebuilds"] = cuda_rebuilds(result, list(manifests))
-    result["evidence"] = live_evidence(result, new_only=new_only, gpu=gpu)
-    g, reached = result["graph"], result["reached"]
+    g = result["graph"]
+    triples = _rebuild_triples(result, list(manifests))
+    result["rebuilds"] = sorted({(a, p) for a, p, _ in triples})
+    here, source = card_mod.accessible(gpu or accessible)
+    known = set(g.known_cards) | set(here)
+    cards = reached_cards(result)
+    by_card: dict[str, list] = {}
+    for a, p, where in triples:
+        for c in ([_bundle_card(where)] if _bundle_card(where) else card_mod.sort_cards(result["card_reached"].get(p, ()))):
+            by_card.setdefault(c, []).append((a, p))
+    result["rebuilds_by_card"] = by_card
+    rows = cache_status.scan()
+    reached = result["reached"]
     lines = [(f"{len(result['changed'])} changed, {len(result['cosmetic'])} cosmetic (comments / whitespace), {len(result['deleted'])} deleted "
               f"vs {base}; the graph: {len(g.nodes)} nodes, {sum(len(d) for d in g.deps.values())} edges {dict(g.edge_count())}")]
     for label, group in (("changed", result["changed"]), ("cosmetic", result["cosmetic"])):
-        lines.extend(f"  {label:8s} {p}  ->  {len(reach(g, [p])) - 1 if p in g.nodes else 0} nodes" for p in group)
+        lines.extend(f"  {label:8s} {p}  ->  {len(reach(g, [p])) - 1 if p in g.nodes else 0} nodes  [{card_mod.label(g.cards.get(p, card_mod.ALL))}]"
+                     for p in group)
     lines.extend(f"  deleted  {p}  (not traced: its users still name it)" for p in result["deleted"])
+    lines.append(f"cards: accessible here {', '.join(card_mod.sort_cards(here))} (from {source}); known {', '.join(card_mod.sort_cards(known))}; "
+                 f"reached {', '.join(cards) or 'none'}" + (f"; not reached {', '.join(card_mod.sort_cards(known - set(cards)))}" if known - set(cards) else ""))
     counts = collections.Counter(g.nodes[n] for n in reached)
-    lines.append("reached: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+    lines.append("reached (all cards): " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
     extra = collections.Counter(g.nodes[n] for n in result["reached_lazy"] if n not in reached)
     if extra:
         lines.append("  plus through lazy imports (an import inside a function): " + ", ".join(f"{k} {v}" for k, v in sorted(extra.items())))
-    lines.append(f"tests to run (--tests): {len(tests(result, 'cpu'))} CPU, {len(tests(result, 'gpu'))} GPU")
-    lines.append("owed:")
-    lines.extend(f"  - {a}" for a in actions(result) or ["nothing"])
-    ev = result["evidence"]
-    arch_tag = " [" + ev["units_arch"] + "]" if ev.get("units_arch") else ""
-    others = ", ".join(a + " " + str(n) for a, n in sorted(ev.get("units_other", {}).items()))
-    not_judged = f" (not judged: {others} stale)" if others else ""
-    lines.append(f"evidence{' (new-only: what this diff causes)' if new_only else ''}{f' [{gpu} only]' if gpu else ''}: derivation{arch_tag} "
-                 f"{len(ev['units_stale'])} of {ev['units_total']} units stale{not_judged}, "
-                 f"native {len(ev['native_stale'])} op(s) stale, tuned {len(ev['stale'])} reached cache(s) stale")
-    owed = pending(result)
-    lines.append(f"check: {len(owed)} pending" + ("" if not owed else " -- " + "; ".join(owed[:4]) + (" ..." if len(owed) > 4 else "")))
-    if verbose:
-        lines.append("reached nodes:")
-        lines.extend(f"  {g.nodes[n]:12s} {_chain(reached, n)}" for n in sorted(reached))
-        lines.extend(f"  stale unit  {label}  <- {', '.join(files[:3])}" for label, files in sorted(ev["units_stale"].items())[:200])
-    return "\n".join(lines), len(owed)
+    runnable_all, needs_all = plan_tests(result, "all", frozenset(here))
+    cpu_here = [t for t in runnable_all if g.nodes[t] == "test"]
+    gpu_here = [t for t in runnable_all if g.nodes[t] == "test-gpu"]
+    lines.append(f"tests to run here (--tests): {len(cpu_here)} CPU, {len(gpu_here)} GPU; needing another card: "
+                 + (", ".join(f"{c} {len(v)}" for c, v in needs_all.items()) or "none"))
+    blocking: list[str] = []
+    unverifiable: list[str] = []
+    for card in cards:
+        nodes = view(result, card)
+        nodes_lazy = view(result, card, lazy=True)
+        ok = card in here
+        bound = hardware_bound(g, nodes_lazy)
+        state = "accessible here" if ok else ("UNVERIFIABLE-HERE (owed on " + card + ")" if bound else "not hardware-bound")
+        lines.append(f"== [{card}] {state} ==")
+        kinds = collections.Counter(g.nodes[n] for n in nodes)
+        lines.append("  reached: " + ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())))
+        card_extra = collections.Counter(g.nodes[n] for n in nodes_lazy if n not in nodes)
+        if card_extra:
+            lines.append("    plus through lazy imports: " + ", ".join(f"{k} {v}" for k, v in sorted(card_extra.items())))
+        run, needs = plan_tests({**result, "card_reached_lazy": {n: frozenset({card}) for n in nodes_lazy}}, "all", frozenset(here))
+        if ok:
+            lines.append(f"  tests to run: {len([t for t in run if g.nodes[t] == 'test'])} CPU, {len([t for t in run if g.nodes[t] == 'test-gpu'])} GPU")
+        else:
+            gpu_needed = needs.get(card, [])
+            lines.append(f"  tests needing {card} (not run, not claimed verified): {len(gpu_needed)} GPU"
+                         + (f"; {len([t for t in run if g.nodes[t] == 'test'])} CPU tests run anywhere (counted above)" if run else ""))
+        ev = card_evidence(result, card, new_only=new_only, rows=rows)
+        result["evidence"] = ev
+        todo = actions(result, card, accessible=ok) if (ok or bound) else []
+        lines.append("  owed:")
+        lines.extend(f"    - {a}" for a in todo or ["nothing"])
+        if ok or bound:
+            lines.extend("  " + ln for ln in _evidence_lines(card, ev, ok, bound, new_only))
+        if ok:
+            blocking.extend(pending(result))
+        elif bound:
+            unverifiable.append(card)
+        if verbose:
+            parents = result["reached_lazy"]
+            lines.append(f"  reached nodes [{card}]:")
+            lines.extend(f"    {g.nodes[n]:12s} {_chain(parents, n)}" for n in sorted(nodes))
+            lines.extend(f"    stale unit  {label}  <- {', '.join(files[:3])}" for label, files in sorted(ev["units_stale"].items())[:200])
+    lines.append(f"check: {len(blocking)} pending on accessible cards ({', '.join(card_mod.sort_cards(here))})"
+                 + ("" if not blocking else " -- " + "; ".join(blocking[:4]) + (" ..." if len(blocking) > 4 else "")))
+    lines.append(f"unverifiable here: {len(unverifiable)} card(s)" + ("" if not unverifiable else
+                 f" ({', '.join(unverifiable)}): owed on those cards, not judged, never counted as fresh; --strict-cards makes them fail --check"))
+    result["evidence"] = {}
+    return Report("\n".join(lines), blocking, unverifiable)
 
 
-def diff_tests(base: str, kind: str = "all") -> list[str]:
-    return tests(changes(base), kind)
+def report(base: str, verbose: bool = False, manifests: list[str] = (), new_only: bool = False, gpu: str = "",
+           accessible: str | list[str] = "") -> tuple[str, int]:
+    r = evaluate(base, verbose=verbose, manifests=manifests, new_only=new_only, gpu=gpu, accessible=accessible)
+    return r.text, len(r.blocking)
+
+
+def diff_tests(base: str, kind: str = "all", accessible: str | list[str] = "", gpu: str = "") -> tuple[list[str], dict[str, list[str]]]:
+    """``(tests that run here, {card: tests that need that card})`` for the files that differ from ``base``."""
+    here, _ = card_mod.accessible(gpu or accessible)
+    return plan_tests(changes(base), kind, frozenset(here))
 
 
 def summary() -> str:
     g = build()
     kinds = collections.Counter(g.nodes.values())
     isolated = sorted(p for p, k in g.nodes.items() if k in ("python", "cuda-source", "test", "test-gpu") and not g.deps.get(p) and not g.users.get(p))
+    per_card = collections.Counter(card_mod.label(c) for c in g.cards.values())
     return (f"{len(g.nodes)} nodes {dict(kinds)}\n{sum(len(d) for d in g.deps.values())} edges {dict(g.edge_count())}\n"
+            f"nodes per card set: {dict(sorted(per_card.items()))}\n"
             f"{len(isolated)} code / test files with no edge in or out" + ("".join(f"\n  {p}" for p in isolated[:30])))

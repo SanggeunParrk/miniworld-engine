@@ -101,22 +101,23 @@ def test_new_only_keeps_what_the_diff_causes_and_drops_what_was_already_stale(mo
     from miniworld_engine.autotune import cache_status, identity, plan
 
     class Row:
-        gpu, stale, reason = "H100", True, "native implementation changed"
+        gpu, stale, reason = "H100 (sm90)", True, "native implementation changed"
 
         def __init__(self, op):
             self.op = op
 
     monkeypatch.setattr(cache_status, "scan", lambda: [Row("layernorm_fwd_cuda"), Row("trimul_fwd_sm90_cuda")])
     monkeypatch.setattr(plan, "status", lambda path=None: {"units": 3, "schema": 2, "stale": {"a": ["kernels/x.py"], "b": ["kernels/y.py"]}})
+    monkeypatch.setattr(rg, "derivation_plans", lambda: {"sm90": "plan"})
     touched = next(p for p in identity.native_files("layernorm_fwd_cuda") if p.startswith("kernels/layernorm/"))
-    result = {"graph": graph, "changed": [f"src/miniworld_engine/{touched}"], "cosmetic": [], "reached": {}, "rows": []}
-    everything = rg.live_evidence(result)
+    result = {"graph": graph, "changed": [f"src/miniworld_engine/{touched}"], "cosmetic": [], "reached": {}, "rows": [], "card_reached": {}}
+    everything = rg.card_evidence(result, "sm90")
     assert everything["native_stale"] == ["layernorm_fwd_cuda", "trimul_fwd_sm90_cuda"]
     assert set(everything["units_stale"]) == {"a", "b"}
-    new = rg.live_evidence(result, new_only=True)
+    new = rg.card_evidence(result, "sm90", new_only=True)
     assert "layernorm_fwd_cuda" in new["native_stale"]
     result["changed"] = ["src/miniworld_engine/kernels/x.py"]
-    new = rg.live_evidence(result, new_only=True)
+    new = rg.card_evidence(result, "sm90", new_only=True)
     assert set(new["units_stale"]) == {"a"}
     assert "layernorm_fwd_cuda" not in new["native_stale"] or "kernels/x.py" in identity.native_files("layernorm_fwd_cuda")
 
@@ -129,27 +130,25 @@ def test_tests_lists_reached_test_files_one_path_each(graph: rg.Graph) -> None:
     assert set(rg.tests(result, "all")) == set(cpu) | set(rg.tests(result, "gpu"))
 
 
-def test_the_derivation_is_judged_on_the_card_that_was_derived_not_on_another_cards_plan(monkeypatch, graph: rg.Graph, tmp_path) -> None:
-    """``dev derive --arch sm90`` re-records the sm90 plan only. The check used to read the default (sm86) plan whatever was derived, so a
-    change to a file every unit lists (the safety set) read as "1156 of 1156 stale" right after a successful derive. Now the plan of
-    ``DERIVED_ARCH`` (or ``--gpu``) is judged, and the other cards' plans are only counted in the report."""
+def test_each_cards_derivation_is_judged_on_its_own_plan(monkeypatch, graph: rg.Graph, tmp_path) -> None:
+    """``dev derive --arch sm90`` re-records the sm90 plan only, so a card's plan is judged on its own file digests, never on another's:
+    the sm90 plan is fresh right after its derive while the sm86 plan (not re-derived) is stale -- both computed, neither hidden. There is
+    no hard-wired derived card: every card that has a plan directory is judged."""
     from miniworld_engine.autotune import cache_status, plan
 
     plans = {"sm86": tmp_path / "sm86.json", "sm90": tmp_path / "sm90.json"}
     states = {plans["sm86"]: {"units": 4, "schema": 2, "stale": {f"u{i}": ["settings.py"] for i in range(4)}},
               plans["sm90"]: {"units": 4, "schema": 2, "stale": {}}}
     monkeypatch.setattr(rg, "derivation_plans", lambda: plans)
-    monkeypatch.setattr(plan, "status", lambda path=None: states[path] if path else states[plans["sm86"]])
+    monkeypatch.setattr(plan, "status", lambda path=None: states[path])
     monkeypatch.setattr(cache_status, "scan", lambda: [])
-    result = {"graph": graph, "changed": ["src/miniworld_engine/settings.py"], "cosmetic": [], "reached": {}, "rows": []}
+    assert not hasattr(rg, "DERIVED_ARCH")
+    result = {"graph": graph, "changed": ["src/miniworld_engine/settings.py"], "cosmetic": [], "reached": {}, "rows": [], "card_reached": {}}
 
-    after_sm90_derive = rg.live_evidence(result, new_only=True)
-    assert rg.DERIVED_ARCH == "sm90"
-    assert after_sm90_derive["units_arch"] == "sm90" and after_sm90_derive["units_stale"] == {}
-    assert after_sm90_derive["units_other"] == {"sm86": 4}
-    assert rg.pending({"evidence": after_sm90_derive}) == []
-
-    sm86 = rg.live_evidence(result, new_only=True, gpu="sm86")
-    assert sm86["units_arch"] == "sm86" and len(sm86["units_stale"]) == 4
-    assert sm86["units_other"] == {"sm90": 0}
-    assert any("4 of 4 units stale" in o for o in rg.pending({"evidence": sm86}))
+    sm90 = rg.card_evidence(result, "sm90", new_only=True)
+    assert sm90["has_plan"] and sm90["units_stale"] == {}
+    assert rg.pending({"evidence": sm90}) == []
+    sm86 = rg.card_evidence(result, "sm86", new_only=True)
+    assert len(sm86["units_stale"]) == 4
+    assert any("[sm86]" in o and "4 of 4 units stale" in o for o in rg.pending({"evidence": sm86}))
+    assert rg.card_evidence(result, "sm100")["has_plan"] is False
