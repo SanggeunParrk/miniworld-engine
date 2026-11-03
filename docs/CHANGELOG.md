@@ -8,6 +8,14 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- `AttentionPairBias.forward(..., extra_pair_bias=)` / `PairformerBlock.forward(..., extra_pair_bias=)` / `Pairformer.forward(..., extra_pair_bias=)`: an additive `[B, n_head, L, L]` term (head axis 1 = shared by every head) on the pair-bias logits, before the key mask and the softmax (the structural-token refiner's extra bias); gradient flows to it. The native CUDA APB paths and the fused-pair kernel compute the bias from `pair` inside the kernel, so a call with the term skips them and runs the attention on the summed bias (H100: PyTorch; portable: the Triton kernel). Calls without it are unchanged.
+
+### Changed
+
+- `tests/cpu/kernels/test_released_parity.py` runs against a frozen oracle (`tests/oracles/dense.py`, the dense AF3-family blocks as self-contained fp32 PyTorch) and no longer needs FoldForge; the FoldForge-backed run of the same cases is `test_released_parity_foldforge.py` (optional, `FOLDFORGE_SRC`).
+
 ## [2.4.3] - 2026-11-03
 
 ### Added

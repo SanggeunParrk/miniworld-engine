@@ -192,13 +192,17 @@ class PairformerBlock(nn.Module):
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
         single: Float[torch.Tensor, "B L d_single"] | None = None,
+        extra_pair_bias: Float[torch.Tensor, "B H L L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"] | tuple[Float[torch.Tensor, "B L L d_pair"], Float[torch.Tensor, "B L d_single"]]:
         """Forward pass (residual updates). Pair track only: returns ``pair``. With ``config.d_single`` the single track is
-        added and ``(pair, single)`` is returned (``single`` is then required)."""
+        added and ``(pair, single)`` is returned (``single`` is then required). ``extra_pair_bias`` [B, n_head_single, L, L] is
+        added to the single attention's pair-bias logits (see ``AttentionPairBias.forward``); it needs the single track."""
         if self.config.d_single and single is None:
             raise ValueError("a block with a single track (config.d_single) needs the single representation")
         if not self.config.d_single and single is not None:
             raise ValueError("this block has no single track (config.d_single == 0)")
+        if extra_pair_bias is not None and not self.config.d_single:
+            raise ValueError("extra_pair_bias biases the single attention: the block needs the single track (config.d_single)")
         pair_in = pair
         if self.config.parallel:
             pair = pair_in + self._pair_updates(pair_in, mask)
@@ -209,10 +213,10 @@ class PairformerBlock(nn.Module):
         # A parallel block's single reads the pair ENTERING it; a sequential one the pair its own track just produced.
         logits_pair = pair_in if self.config.parallel else pair
         if self.config.parallel:
-            single = (single + (self.single_attention(single, logits_pair, mask) - single)
+            single = (single + (self.single_attention(single, logits_pair, mask, extra_pair_bias) - single)
                       + (self.single_transition(single) - single))
         else:
-            single = self.single_transition(self.single_attention(single, logits_pair, mask))
+            single = self.single_transition(self.single_attention(single, logits_pair, mask, extra_pair_bias))
         return pair, single
 
     def _sequential_pair(self, pair, mask):
@@ -292,12 +296,16 @@ class Pairformer(nn.Module):
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
         single: Float[torch.Tensor, "B L d_single"] | None = None,
+        extra_pair_bias: Float[torch.Tensor, "B H L L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"] | tuple[Float[torch.Tensor, "B L L d_pair"], Float[torch.Tensor, "B L d_single"]]:
-        """Run the pair representation (and the single, with ``config.d_single``) through every block."""
+        """Run the pair representation (and the single, with ``config.d_single``) through every block; ``extra_pair_bias``
+        (single track only) is added to every block's single-attention logits."""
         if single is None:
+            if extra_pair_bias is not None:
+                raise ValueError("extra_pair_bias biases the single attention: pass the single representation")
             for block in self.pairformer_blocks:
                 pair = block(pair, mask)
             return pair
         for block in self.pairformer_blocks:
-            pair, single = block(pair, mask, single)
+            pair, single = block(pair, mask, single, extra_pair_bias)
         return pair, single

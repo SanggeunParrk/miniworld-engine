@@ -1,40 +1,34 @@
-# ruff: noqa: PT018, PT011, C408
-"""PYTORCH engine modules built ``from_released`` against FoldForge's dense modules, the numerical oracle of the released checkpoints.
+# ruff: noqa: C408
+"""PYTORCH engine modules built ``from_released`` against the frozen oracle of the released checkpoints (``tests/oracles/dense.py``: the dense
+AF3-family blocks as plain fp32 PyTorch, self-contained; the engine's tests need no FoldForge).
 
-Skipped unless FoldForge is importable (``FOLDFORGE_SRC=<.../FoldForge/src>`` or ``foldforge`` installed): the engine does not depend on it.
-Both sides are built from the same random weights; the oracle returns raw deltas, the engine modules the residual output.
+Both sides are built from the same seeded random weights; the oracle returns raw deltas, the engine modules the residual output.
+``test_released_parity_foldforge.py`` runs the same cases against FoldForge's live dense classes (optional, ``FOLDFORGE_SRC``).
 """
 from __future__ import annotations
 
-import os
-import sys
 from dataclasses import replace
 
 import pytest
 import torch
-
-if os.environ.get("FOLDFORGE_SRC"):
-    sys.path.insert(0, os.environ["FOLDFORGE_SRC"])
-pytest.importorskip("foldforge.modules.dense.spec")
-
-from foldforge.modules.dense.attention import (
+from oracles.dense import (
+    ALPHAFOLD3,
     GridSelfAttention,
     MSAAttention,
+    length_divided_triangle,
 )
-from foldforge.modules.dense.pairformer import (
-    PairformerBlock as DensePairformerBlock,
-)
-from foldforge.modules.dense.primitives import (
+from oracles.dense import (
     OuterProductMean as DenseOPM,
 )
-from foldforge.modules.dense.primitives import (
+from oracles.dense import (
+    PairformerBlock as DensePairformerBlock,
+)
+from oracles.dense import (
     Transition as DenseTransition,
 )
-from foldforge.modules.dense.spec import ALPHAFOLD3
-from foldforge.modules.dense.triangle_multiplication import (
+from oracles.dense import (
     TriangleMultiplication as DenseTriMul,
 )
-from foldforge.modules.engine.routing import _length_divided_triangle
 
 from miniworld_engine.modules.msa_pair_weighted_averaging import (
     MSAPairWeightedAveraging,
@@ -79,8 +73,8 @@ def test_trimul(outgoing, divide, hidden):
     pair, res, pair_mask = _inputs()
     dense = _rand(DenseTriMul(C, outgoing, hidden_dim=hidden, divide_by_length=divide))
     eng = TriangleMultiplication.from_released(dense.state_dict(), outgoing=outgoing, divide_by_length=divide).to(DEV)
-    # the dense module's forward is the plain update; FoldForge applies divide_by_length in routing (the oracle of the RoseTTAFold3 form)
-    delta = _length_divided_triangle(dense, pair, pair_mask) if divide else dense(pair, pair_mask)
+    # the dense module's forward is the plain update; the oracle applies divide_by_length in length_divided_triangle (the oracle of the RoseTTAFold3 form)
+    delta = length_divided_triangle(dense, pair, pair_mask) if divide else dense(pair, pair_mask)
     got = eng(pair[None], res[None])[0]
     torch.testing.assert_close(got, pair + delta, **TOL)
 
@@ -157,8 +151,28 @@ def test_pairformer_block(flavour):
     torch.testing.assert_close(got_single[0][res], want_single[res], **TOL)
 
 
+@pytest.mark.parametrize("flavour", ["sequential", "parallel"])
+def test_pairformer_block_extra_pair_bias(flavour):
+    """The structural-token refiner's [L, L] term, added to every head of the single attention's logits (the engine takes [B, 1, L, L])."""
+    spec = replace(ALPHAFOLD3, parallel_pairformer_block=flavour == "parallel")
+    pair, res, pair_mask = _inputs()
+    single = torch.randn(L, 32, generator=torch.Generator().manual_seed(8)).to(DEV)
+    extra = 2 * torch.randn(L, L, generator=torch.Generator().manual_seed(9)).to(DEV)
+    dense = _rand(DensePairformerBlock(n_heads=4, c_pair=C, c_single=32, c_hidden_mul=C, n_heads_pair=2, spec=spec), std=0.2)
+    cfg = PairformerConfig(d_pair=C, d_hidden_tri_multi=C, d_hidden_tri_attention=C // 2, n_head_tri_attention=2, p_drop=0.0, d_single=32,
+                           n_head_single=4, parallel=spec.parallel_pairformer_block, transposed_bias=False)
+    eng = PairformerBlock.from_released(dense.state_dict(), config=cfg).to(DEV)
+    want_pair, want_single = dense(pair.clone(), pair_mask, single.clone(), res.float(), extra_pair_bias=extra)
+    got_pair, got_single = eng(pair[None], res[None], single[None], extra_pair_bias=extra[None, None])
+    torch.testing.assert_close(got_pair[0][res][:, res], want_pair[res][:, res], **TOL)
+    torch.testing.assert_close(got_single[0][res], want_single[res], **TOL)
+    # the term is not a no-op on the real rows
+    plain = eng(pair[None], res[None], single[None])[1]
+    assert not torch.allclose(got_single[0][res], plain[0][res], atol=1e-3)
+
+
 # ------------------------------------------------------------------------------------------------------------------- DiT variant stacks
-from foldforge.modules.dense.diffusion_transformer import (
+from oracles.dense import (
     DiffusionCrossAttTransformer,
     DiffusionTransformer,
 )
