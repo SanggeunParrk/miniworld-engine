@@ -621,6 +621,14 @@ def audit_rows(recorded: dict[str, list[str]], expected: set[str], have: set[str
             "ok": not no_record and not gone}
 
 
+#: Modules whose rows are not CUDA holes when no engine kernel serves them (the maintainer's decisions, 2026-11-04): an external library is
+#: fine, and ProteinMPNN gets no CUDA development (it stays on Triton on every card). Every other row without an engine kernel is a hole.
+NO_ENGINE_KERNEL_EXEMPT = {
+    "protein_mpnn": "no CUDA development for ProteinMPNN (Triton on every card)",
+    "swa_atom_attention": "FlashAttention-4, an external library",
+}
+
+
 def audit_bundle(arch: str, repo: Path) -> dict:
     """Every registry row of ``arch`` has a clean verify record for what it declares now, and every artifact of it is in each CUDA build of the
     bundle. No GPU."""
@@ -632,7 +640,7 @@ def audit_bundle(arch: str, repo: Path) -> dict:
     manifests = prebuilt_manifests(None, arch)
     if not manifests:
         return {"rows": len(expected), "no_record": sorted(expected - set(recorded)), "missing": {"<bundle>": ["no prebuilt manifest for " + arch]}, "stale_record": [],
-                "no_engine_kernel": [], "ok": False}
+                "no_engine_kernel": [], "no_engine_kernel_exempt": {}, "ok": False}
     rep = audit_rows(recorded, expected, set())
     out = {"rows": len(expected), "no_record": rep["no_record"], "missing": {}, "stale_record": rep["stale_record"]}
     for mf in manifests:
@@ -641,8 +649,11 @@ def audit_bundle(arch: str, repo: Path) -> dict:
             out["missing"].setdefault(row, []).extend(f"{n} [{mf.parent.name}]" for n in names)
     out["ok"] = not out["no_record"] and not out["missing"]
     # the path classification of the card: a clean row that loaded NO bundle artifact ran on no engine kernel here (cuBLAS, an external
-    # library, or the PyTorch statements). Registry rule: a row runs on CUDA on this card; such a row is a hole to look at, listed every time.
-    out["no_engine_kernel"] = sorted(k for k, names in recorded.items() if not names)
+    # library, or the PyTorch statements). Registry rule: a row runs on CUDA on this card; such a row is a hole to look at, listed every time,
+    # unless its module is exempt (NO_ENGINE_KERNEL_EXEMPT: listed apart, with the reason, never counted as a hole)
+    bare = sorted(k for k, names in recorded.items() if not names)
+    out["no_engine_kernel"] = [k for k in bare if k.split("/", 1)[0] not in NO_ENGINE_KERNEL_EXEMPT]
+    out["no_engine_kernel_exempt"] = {k: NO_ENGINE_KERNEL_EXEMPT[k.split("/", 1)[0]] for k in bare if k.split("/", 1)[0] in NO_ENGINE_KERNEL_EXEMPT}
     return out
 
 

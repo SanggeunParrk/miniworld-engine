@@ -174,9 +174,9 @@ def expand(arch: str = "sm90", rows=None) -> list[RowExpansion]:
                             if not ok:
                                 excluded.append(f"{name}={option[1]}/{dtype}: {why}")
                                 continue
-                    calls.extend(Call(number, row.module, row.stream, dim_index, length, impl, dtype, compute, mode, option,
-                                      row.augmentation(mode), direction)
-                                 for direction in ("", *([DIRECTIONS[row.module][1]] if row.module in DIRECTIONS else [])))
+                    for direction in ("", *([DIRECTIONS[row.module][1]] if row.module in DIRECTIONS else [])):
+                        calls.append(Call(number, row.module, row.stream, dim_index, length, impl, dtype, compute, mode,
+                                          option, row.augmentation(mode), direction))
         out.append(RowExpansion(number, row.module, row.stream, dict(row.dims), text, calls, sorted(set(excluded)),
                                 f"{row.augmentation('eval')}|{row.augmentation('train')}"))
     return out

@@ -147,13 +147,14 @@ def verify(args) -> int:
     gpus = [g for g in (args.gpus or os.environ.get("CUDA_VISIBLE_DEVICES", "0")).split(",") if g != ""]
     arch = args.arch if args.arch.startswith("sm") else f"sm{args.arch}"
     data = describe(python, tree, arch, unit_env(tree, out / "cache" / "expand", "", extra))
-    units: list[dict] = [{"kind": "row", "uid": f"r{r['row']:03d}", "id": r["id"], "key": r.get("key", r["id"]), "text": r.get("text", ""),
-                      "calls": r["calls"], "not_arch": r["not_arch"], "excluded": r["excluded"], "arch": arch, "row": r["row"]}
-                         for r in data["rows"]]
+    units: list[dict] = []
+    for r in data["rows"]:
+        units.append({"kind": "row", "uid": f"r{r['row']:03d}", "id": r["id"], "key": r.get("key", r["id"]), "text": r.get("text", ""),
+                      "calls": r["calls"], "not_arch": r["not_arch"], "excluded": r["excluded"], "arch": arch, "row": r["row"]})
     if not args.no_kernels:
-        units.extend({"kind": "kernel", "uid": "k-" + k["kernel"], "id": f"kernel {k['kernel']}", "calls": 1, "not_arch": k["reason"],
-                          "excluded": [], "arch": arch, "kernel": k["kernel"], "backend": k["backend"]}
-                     for k in data["kernels"])
+        for k in data["kernels"]:
+            units.append({"kind": "kernel", "uid": "k-" + k["kernel"], "id": f"kernel {k['kernel']}", "calls": 1, "not_arch": k["reason"],
+                          "excluded": [], "arch": arch, "kernel": k["kernel"], "backend": k["backend"]})
     kernels = set(getattr(args, "kernel", None) or [])
     if args.row or kernels:   # a subset (``miniworld-engine verify`` names it from the graph): row numbers (1-based), the word "kernels", kernel names
         keep = {f"r{int(n):03d}" for n in args.row if n != "kernels"}
@@ -192,10 +193,10 @@ def verify(args) -> int:
             built = sorted(p.name for p in (out / "cache" / u["uid"]).rglob("*") if p.suffix in (".so", ".cubin"))
             u["built"] = built
             with lock:
-                print(f"{datetime.datetime.now().astimezone():%H:%M:%S} gpu{gpu} {time.monotonic() - t0:6.0f}s {u['id']}: calls={s['calls']} ok={s['ok']} "
+                print(f"{datetime.datetime.now():%H:%M:%S} gpu{gpu} {time.monotonic() - t0:6.0f}s {u['id']}: calls={s['calls']} ok={s['ok']} "
                       f"PrebuiltMissing={s['missing']} Error={s['error']}" + (f" oom={s['oom']}" if s["oom"] else "") + (f" unbundled={s['unbundled']}" if s["unbundled"] else "") + (f" never_ran={s['never_ran']}" if s["never_ran"] else "")
                       + (f" missing={sorted(s['names'])}" if s["names"] else "")
-                      + (f" first_error={next(iter(s['errors']))!r}" if s["errors"] else "")
+                      + (f" first_error={list(s['errors'])[0]!r}" if s["errors"] else "")
                       + (f" BUILT_IN_CACHE={built}" if built else ""), flush=True)
 
     threads = [threading.Thread(target=worker, args=(g,)) for g in gpus]

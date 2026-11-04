@@ -43,9 +43,9 @@ from miniworld_engine import build as build_matrix
 from miniworld_engine.autotune import triton_cache, width_evidence
 from miniworld_engine.autotune.checkpoint_cases import NAMES as CHECKPOINT_CASE_NAMES
 from miniworld_engine.autotune.dit_cases import NAMES as DIT_CASE_NAMES
-from miniworld_engine.autotune.module_registry import PRECISIONS, module_rows
-from miniworld_engine.autotune.mpnn_cases import NAMES as MPNN_CASE_NAMES
 from miniworld_engine.autotune.stack_cases import NAMES as STACK_CASE_NAMES
+from miniworld_engine.autotune.mpnn_cases import NAMES as MPNN_CASE_NAMES
+from miniworld_engine.autotune.module_registry import PRECISIONS, module_rows
 
 BF16 = torch.bfloat16
 
@@ -333,8 +333,8 @@ def cases() -> list[Case]:
     """
     from miniworld_engine.autotune.checkpoint_cases import cases as checkpoint_cases
     from miniworld_engine.autotune.dit_cases import cases as dit_cases
-    from miniworld_engine.autotune.mpnn_cases import cases as mpnn_cases
     from miniworld_engine.autotune.stack_cases import cases as stack_cases
+    from miniworld_engine.autotune.mpnn_cases import cases as mpnn_cases
     from miniworld_engine.modules import (
         AdaptiveLayerNorm,
         AttentionPairBias,
