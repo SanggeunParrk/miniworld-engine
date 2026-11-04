@@ -34,10 +34,10 @@ def quiet(monkeypatch):
     """No GPU, no committed caches: the CPU-only part of the evaluation, with the change set injected."""
     from miniworld_engine.autotune import cache_status, plan
 
-    monkeypatch.setattr(cache_status, "scan", lambda: [])
+    monkeypatch.setattr(cache_status, "scan", list)
     monkeypatch.setattr(rg, "_rebuild_triples", lambda result, manifests: [])
     monkeypatch.setattr(plan, "status", lambda path=None: {"units": 0, "stale": {}, "schema": 2})
-    monkeypatch.setattr(rg, "derivation_plans", lambda: {})
+    monkeypatch.setattr(rg, "derivation_plans", dict)
 
     def evaluate(graph, seeds, **kw):
         moved = kw.pop("moved", None)
@@ -61,13 +61,15 @@ def test_hand_cuda_takes_the_card_its_registry_row_or_path_names(graph) -> None:
     assert graph.cards[next(p for p in graph.nodes if "/triangle_attention/cuda/h100_sources/" in p and p.endswith(".cu"))] == {"sm90"}
     for p, c in graph.cards.items():
         if p.endswith(".cu") and p.startswith(f"{SRC}/kernels/"):
-            assert c != cm.ALL and c <= graph.known_cards, p      # a CUDA source is never card-independent
+            assert c != cm.ALL, p      # a CUDA source is never card-independent
+            assert c <= graph.known_cards, p
 
 
 def test_a_triton_kernel_belongs_to_the_fallback_cards_not_h100_or_b200(graph) -> None:
     fallback = graph.cards[TRITON]
     assert fallback == graph.fallback_cards
-    assert "sm90" not in fallback and "sm100" not in fallback
+    assert "sm90" not in fallback
+    assert "sm100" not in fallback
     assert {"sm80", "sm86"} <= fallback
     assert graph.restricted_cards == {"sm90", "sm100"}                     # read from modules/dispatch.restricted_card
 
@@ -101,14 +103,15 @@ def test_an_edge_into_a_card_specific_kernel_carries_that_card(graph) -> None:
 # --------------------------------------------------------------------------------------------------------- accessibility
 def test_accessible_cards_come_from_the_flag_then_the_environment_then_the_device_then_the_repo_default(monkeypatch) -> None:
     monkeypatch.delenv(cm.ENV_ACCESSIBLE, raising=False)
-    monkeypatch.setattr(cm, "visible_card", lambda: [])
+    monkeypatch.setattr(cm, "visible_card", list)
     assert cm.accessible("sm90, sm100") == ({"sm90", "sm100"}, "--accessible")
-    assert cm.accessible()[0] == {"sm90"} and "default" in cm.accessible()[1]
+    assert cm.accessible()[0] == {"sm90"}
+    assert "default" in cm.accessible()[1]
     monkeypatch.setattr(cm, "visible_card", lambda: ["sm100"])
     assert cm.accessible() == ({"sm100"}, "visible device")
     monkeypatch.setenv(cm.ENV_ACCESSIBLE, "sm86")
     assert cm.accessible() == ({"sm86"}, cm.ENV_ACCESSIBLE)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="not a card"):
         cm.parse_cards("h100")
 
 
@@ -119,7 +122,8 @@ def test_a_change_reaching_an_sm100_node_lists_it_unverifiable_and_does_not_fail
     assert "hardware evidence : UNVERIFIABLE-HERE (owed on sm100)" in rep.text
     assert "[sm100] owed, cannot run here:" in rep.text
     assert "== [sm90]" not in rep.text                                    # an sm100 kernel is not an H100 change
-    assert rep.unverifiable == ["sm100"] and rep.blocking == []
+    assert rep.unverifiable == ["sm100"]
+    assert rep.blocking == []
     assert "unverifiable here: 1 card(s) (sm100)" in rep.text
     assert rep.code(check=True) == 0
     assert rep.code(check=True, strict=True) != 0
@@ -138,7 +142,8 @@ def test_stale_evidence_of_an_accessible_card_fails_check_and_another_cards_stal
     moved = {rg.DERIVATION: [f"{SRC}/settings.py"]}
     monkeypatch.setattr(rg, "changes", lambda base: _result(graph, seeds, moved))
     rep = rg.evaluate("HEAD", accessible="sm90")
-    assert rep.blocking and all(b.startswith("[sm90]") for b in rep.blocking)
+    assert rep.blocking
+    assert all(b.startswith("[sm90]") for b in rep.blocking)
     assert any("3 of 5 units stale" in b for b in rep.blocking)
     assert rep.code(check=True) == 2
     assert "derivation plan   : stale 3 of 5 units (computed from file digests)" in rep.text
@@ -146,8 +151,10 @@ def test_stale_evidence_of_an_accessible_card_fails_check_and_another_cards_stal
     assert "[sm90] miniworld-engine derive (arch sm90" in rep.text
     # the same staleness on sm86 alone: sm86 is not accessible, so it is reported (computed) but does not block
     only86 = rg.evaluate("HEAD", accessible="sm100")
-    assert only86.blocking == [] and only86.code(check=True) == 0
-    assert "derivation plan   : stale 3 of 5 units" in only86.text and "UNVERIFIABLE-HERE (owed on sm86)" in only86.text
+    assert only86.blocking == []
+    assert only86.code(check=True) == 0
+    assert "derivation plan   : stale 3 of 5 units" in only86.text
+    assert "UNVERIFIABLE-HERE (owed on sm86)" in only86.text
 
 
 def test_a_card_independent_change_lists_every_card_with_its_evidence_kind(graph, quiet) -> None:
@@ -161,25 +168,29 @@ def test_a_card_independent_change_lists_every_card_with_its_evidence_kind(graph
 
 def test_a_doc_edit_is_not_a_hardware_obligation_on_any_card(graph, quiet) -> None:
     rep = quiet(graph, ["docs/CHANGELOG.md"], accessible="sm90")
-    assert rep.unverifiable == [] and rep.code(check=True, strict=True) == 0
+    assert rep.unverifiable == []
+    assert rep.code(check=True, strict=True) == 0
     assert "not hardware-bound" in rep.text
     assert "UNVERIFIABLE" not in rep.text.replace("unverifiable here: 0 card(s)", "")
 
 
 def test_gpu_alias_selects_the_accessible_card(graph, quiet) -> None:
     rep = quiet(graph, [SM100_CU], gpu="sm100")
-    assert "== [sm100] accessible here ==" in rep.text and rep.unverifiable == []
+    assert "== [sm100] accessible here ==" in rep.text
+    assert rep.unverifiable == []
 
 
 def test_tests_that_need_another_card_are_listed_apart_and_not_claimed(graph) -> None:
     result = _result(graph, [SM100_TEST])
     runnable, needs = rg.plan_tests(result, "all", frozenset({"sm90"}))
-    assert SM100_TEST not in runnable and needs == {"sm100": [SM100_TEST]}
+    assert SM100_TEST not in runnable
+    assert needs == {"sm100": [SM100_TEST]}
     runnable, needs = rg.plan_tests(result, "all", frozenset({"sm90", "sm100"}))
-    assert SM100_TEST in runnable and needs == {}
+    assert SM100_TEST in runnable
+    assert needs == {}
     core, needs = rg.plan_tests(_result(graph, [f"{SRC}/kernels/_tiles.py"]), "all", frozenset({"sm90"}))
     assert not any(t.startswith("tests/gpu/sm100/") for t in core)         # an sm100-bound GPU test is not an H100 obligation
-    assert all(t.startswith("tests/gpu/sm100/") or t.startswith("tests/gpu/") for c in needs.values() for t in c)
+    assert all(t.startswith(("tests/gpu/sm100/", "tests/gpu/")) for c in needs.values() for t in c)
 
 
 def test_the_code_graph_change_itself_reaches_no_kernel_identity(graph) -> None:

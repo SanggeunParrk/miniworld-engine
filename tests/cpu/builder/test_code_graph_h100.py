@@ -110,9 +110,12 @@ def test_the_mapping_falls_back_to_the_whole_file_when_it_is_not_certain() -> No
 def test_fixtures_are_requested_by_parameter_name() -> None:
     conf = "import pytest\n\n@pytest.fixture\ndef force():\n    return 1\n\n@pytest.fixture(autouse=True)\ndef always():\n    return 2\n\ndef pytest_configure(c):\n    pass\n"
     fs = sy.analyze("tests/conftest.py", conf, rg._Resolver([]))
-    assert fs.units["force"].fixture == "fixture" and fs.units["always"].fixture == "autouse" and fs.units["pytest_configure"].fixture == ""
+    assert fs.units["force"].fixture == "fixture"
+    assert fs.units["always"].fixture == "autouse"
+    assert fs.units["pytest_configure"].fixture == ""
     test = sy.analyze("tests/cpu/test_x.py", "def test_a(force):\n    pass\n\ndef test_b():\n    pass\n", rg._Resolver([]))
-    assert "force" in test.names["test_a"] and "force" not in test.names["test_b"]
+    assert "force" in test.names["test_a"]
+    assert "force" not in test.names["test_b"]
 
 
 # ------------------------------------------------------------------------------------------------------- the real graph
@@ -134,7 +137,9 @@ def test_a_comment_or_a_docstring_naming_a_file_is_not_a_dependency_on_it() -> N
     ''')
     seen = rg._py_strings(text)
     assert "kernels/_tiles.py" in seen                                  # a string the code can use
-    assert "inference.py" not in seen and "layernorm" not in seen and "dispatch.md" not in seen
+    assert "inference.py" not in seen
+    assert "layernorm" not in seen
+    assert "dispatch.md" not in seen
 
 
 def test_the_symbol_level_reach_is_a_subset_and_narrower_than_the_whole_file(graph: rg.Graph) -> None:
@@ -155,7 +160,8 @@ def test_a_registry_kernel_name_in_a_test_is_an_edge_to_the_kernel_file(graph: r
     hits = [(u, d) for (u, d), v in graph.dispatch.items() if u.startswith("tests/") and d in by_name.values() and v]
     assert hits, "no test names a registry kernel: the dispatch index is empty"
     user, dep = hits[0]
-    assert dep in graph.deps[user] and graph.deps[user][dep] in ("dispatch", "import", "lazy", "ref")
+    assert dep in graph.deps[user]
+    assert graph.deps[user][dep] in ("dispatch", "import", "lazy", "ref")
 
 
 def test_a_fixture_edge_goes_to_the_fixture_not_to_every_test_below_the_conftest(graph: rg.Graph) -> None:
@@ -211,13 +217,16 @@ def test_unhinted_cuda_sources_are_sm90_only_when_only_the_h100_builds_them(grap
     assert graph.cards[p("layernorm/cuda/general/ln_fwd.cu")] == {"sm90", "sm100"}  # gencodes("80", "90", "100"): both restricted cards build it
     for path, c in graph.cards.items():
         if path.endswith(".cu") and path.startswith(f"{SRC}/kernels/"):
-            assert c and c != cm.ALL and c <= graph.known_cards, path
+            assert c, path
+            assert c != cm.ALL, path
+            assert c <= graph.known_cards, path
 
 
 # --------------------------------------------------------------------------------------------- Triton caches on sm90
 def test_the_sm90_policy_is_a_documented_set_of_exempt_node_kinds(graph: rg.Graph) -> None:
     assert {"sm90": frozenset({rg.TRITON_CACHE})} == cm.EXEMPT_KINDS
-    assert cm.exempt_kinds("sm90") == {"triton-cache"} and cm.exempt_kinds("sm80") == frozenset()
+    assert cm.exempt_kinds("sm90") == {"triton-cache"}
+    assert cm.exempt_kinds("sm80") == frozenset()
     assert "H100 keeps no Triton" in (cm.__doc__ or "") + Path(cm.__file__).read_text(encoding="utf-8")
     assert graph.nodes[TRITON_CACHE] == rg.TRITON_CACHE
     native = f"{SRC}/autotune/data/trimul_fwd_sm90_cuda/NVIDIA H100 80GB HBM3 (sm90).json"
@@ -249,21 +258,25 @@ def test_stale_triton_caches_are_neither_pending_on_sm90_nor_hidden(graph, trito
     monkeypatch.setattr(cache_status, "scan", lambda: rows)
     assert TRITON_CACHE in rg.view(triton_result, "sm90")
     ev = rg.card_evidence(triton_result, "sm90", rows=rows)
-    assert ev["stale"] == [] and ev["tuned_reached"] == 0           # not pending ...
+    assert ev["stale"] == []
+    assert ev["tuned_reached"] == 0
     assert ev["triton"] == {"ops": ev["triton"]["ops"], "rows": 2, "stale": 2, "exempt": True, "exempt_cards": ["sm90"]}      # ... and counted
     assert ev["triton"]["ops"] >= 1
     assert rg.pending({"evidence": ev}) == []
     lines = "\n".join(rg._evidence_lines("sm90", ev, True, True, False))
-    assert "EXEMPT on sm90 by policy" in lines and "2 committed row(s) named sm90, 2 stale by digest" in lines
+    assert "EXEMPT on sm90 by policy" in lines
+    assert "2 committed row(s) named sm90, 2 stale by digest" in lines
     # under a fallback card the same rows are UNVERIFIABLE-HERE (they are that card's evidence), not exempt
     fb = rg.card_evidence(triton_result, "sm86", rows=rows)
-    assert fb["triton"]["exempt"] is False and fb["triton"]["rows"] == 2
+    assert fb["triton"]["exempt"] is False
+    assert fb["triton"]["rows"] == 2
     assert [r.gpu for r in fb["stale"]] == ["NVIDIA RTX A6000 (sm86)"]                                 # its own row is judged on its own
     text = "\n".join(rg._evidence_lines("sm86", fb, False, True, False))
     assert "UNVERIFIABLE-HERE (owed on sm86, a fallback card): 2 committed row(s) kept under the sm90 file names" in text
     assert TRITON_CACHE in rg.view(triton_result, "sm86") or any(graph.nodes[n] == rg.TRITON_CACHE for n in rg.view(triton_result, "sm86"))
     owed = " | ".join(rg.actions(triton_result, "sm90"))
-    assert "EXEMPT on sm90" in owed and "tuned caches reached" not in owed.split("EXEMPT on sm90")[0]
+    assert "EXEMPT on sm90" in owed
+    assert "tuned caches reached" not in owed.split("EXEMPT on sm90")[0]
     assert "tuned caches reached" in " | ".join(rg.actions(triton_result, "sm86", accessible=False))
 
 
@@ -275,9 +288,11 @@ def test_check_on_sm90_does_not_fail_on_stale_triton_caches(graph, triton_result
     monkeypatch.setattr(rg, "_rebuild_triples", lambda result, manifests: [])
     monkeypatch.setattr(rg, "changes", lambda base: triton_result)
     rep = rg.evaluate("HEAD", accessible="sm90")
-    assert rep.blocking == [] and rep.code(check=True) == 0
+    assert rep.blocking == []
+    assert rep.code(check=True) == 0
     assert "EXEMPT on sm90 by policy" in rep.text                   # shown, not dropped
-    assert "UNVERIFIABLE-HERE (owed on sm80, a fallback card)" in rep.text and "UNVERIFIABLE-HERE (owed on sm86, a fallback card)" in rep.text
+    assert "UNVERIFIABLE-HERE (owed on sm80, a fallback card)" in rep.text
+    assert "UNVERIFIABLE-HERE (owed on sm86, a fallback card)" in rep.text
     # a native H100 cache is still judged: the exemption is for the Triton kind only
     native = [_Row("trimul_fwd_sm90_cuda", "NVIDIA H100 80GB HBM3 (sm90)")]
     native[0].reason = "native implementation changed (op_identity)"

@@ -14,8 +14,8 @@ from miniworld_engine.build import bundle_coverage, registry_calls
 
 
 def row(**kw) -> ModuleRow:
-    base = dict(module="projected_attention", stream="token_pair", lengths=(128, 256), dims={"n_head": 4, "d_hidden": 128}, options=(),
-                impls=("miniworld",), dtypes=("bfloat16",), computes=(), modes=("eval", "train"), source="synthetic")
+    base = {"module": "projected_attention", "stream": "token_pair", "lengths": (128, 256), "dims": {"n_head": 4, "d_hidden": 128}, "options": (),
+                "impls": ("miniworld",), "dtypes": ("bfloat16",), "computes": (), "modes": ("eval", "train"), "source": "synthetic"}
     base.update(kw)
     return ModuleRow(**base)
 
@@ -55,7 +55,10 @@ def test_a_row_with_nothing_left_is_not_an_arch_row_with_the_registry_text():
                                               impls=("miniworld",))])
     assert e.calls == []
     reason = e.not_arch_reason
-    assert reason and "dtypes=float32" in reason and "impls=miniworld" in reason and "float32" in reason
+    assert reason
+    assert "dtypes=float32" in reason
+    assert "impls=miniworld" in reason
+    assert "float32" in reason
 
 
 def test_a_call_round_trips_through_json():
@@ -88,7 +91,8 @@ def test_every_declared_module_has_a_builder_case():
 def test_the_kernel_level_rows_are_all_accounted_for():
     units = registry_calls.kernel_units("sm90")
     callable_ = [u for u in units if not u.reason]
-    assert callable_ and all(u.backend == "cuda" and u.arch == "sm90" and u.driver for u in callable_)
+    assert callable_
+    assert all(u.backend == "cuda" and u.arch == "sm90" and u.driver for u in callable_)
     assert all(u.reason for u in units if u.backend != "cuda")   # Triton rows: a reason, never silent
 
 
@@ -100,7 +104,10 @@ def test_the_default_coverage_is_the_registry_expansion_and_the_older_cases_are_
     assert sum(c["kind"] == "registry_module" for c in default) == calls
     assert [c["id"] for c in default] == list(range(len(default)))
     extras = {c["kind"] for c in bundle_coverage.extra_cases()}
-    assert extras.isdisjoint(kinds) and "case" in extras and "msa_module" in extras and "trimul_wide_train" in extras
+    assert extras.isdisjoint(kinds)
+    assert "case" in extras
+    assert "msa_module" in extras
+    assert "trimul_wide_train" in extras
 
 
 def test_every_default_kind_has_a_runner():

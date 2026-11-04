@@ -62,7 +62,9 @@ def test_the_build_matrix_only_drives_widths_a_kernel_can_serve() -> None:
     for case in builder.cases():
         if not case.name.startswith("triangle_multiplication"):
             continue
-        from miniworld_engine.kernels.trimul_inproj.triton.contract import hidden_refusal
+        from miniworld_engine.kernels.trimul_inproj.triton.contract import (
+            hidden_refusal,
+        )
 
         # an asymmetric pair is driven only where a kernel serves it (`hidden_refusal`: the portable front + back; the H100 hand-CUDA D64 /
         # D128 kernels at hidden = 2 d_pair): the Protenix-v1 template, d_pair 64 / d_hidden 128

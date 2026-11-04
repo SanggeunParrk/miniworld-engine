@@ -1,4 +1,4 @@
-# ruff: noqa: PT018, PT011, C408
+# ruff: noqa: PT018, PT011
 """The released-checkpoint options of the engine modules (CPU, no oracle needed): what each option means, that every default is
 unchanged, and that the released-layout adapters are exact tensor reshuffles.
 
@@ -146,7 +146,9 @@ def test_opm_kernel_reference_and_divisor_params_agree_with_the_module(before, o
     """``kernels.outer_product_mean.reference`` (the oracle of the GPU tests) and ``opm_train.divisor_params`` (the kernels' two scalars,
     divisor = max(count, dmin) + doff) say what the module says."""
     from miniworld_engine.kernels.integrations.opm_train import divisor_params
-    from miniworld_engine.kernels.outer_product_mean.reference import outer_product_mean_reference
+    from miniworld_engine.kernels.outer_product_mean.reference import (
+        outer_product_mean_reference,
+    )
 
     msa, mask = _opm_data()
     opm = OuterProductMean(24, C, 8, normalize_before_proj=before, projection_bias=bias, **option)

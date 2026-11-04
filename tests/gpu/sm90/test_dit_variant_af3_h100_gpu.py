@@ -13,7 +13,12 @@ import torch
 
 from miniworld_engine.kernels.dit_variants import interface
 from miniworld_engine.kernels.dit_variants.cuda import train
-from miniworld_engine.modules.dit_variant import AF3, AF3_ATOM, AtomDiTVariantStack, DiTVariantStack
+from miniworld_engine.modules.dit_variant import (
+    AF3,
+    AF3_ATOM,
+    AtomDiTVariantStack,
+    DiTVariantStack,
+)
 from miniworld_engine.modules.exceptions import ImplementationType
 
 pytestmark = [

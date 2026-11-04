@@ -137,7 +137,7 @@ def extra_cases() -> list[dict]:
                         if pair == "per_sample" and length > TRAIN_TOKENS[-1]:
                             continue
                         for masked, hoist in ((False, False), (True, False), *(((True, True),) if train else ())):
-                            out.append({"kind": "bias_only_dit", "L": length, "train": train, "dtype": prec,  # noqa: PERF401
+                            out.append({"kind": "bias_only_dit", "L": length, "train": train, "dtype": prec,
                                         "d_cond": d_cond, "d_pair": d_pair, "pair": pair, "masked": masked, "hoist": hoist,
                                         "samples": 48 if train else 5,
                                         "heavy": length >= HEAVY_TOKENS or (pair == "per_sample" and length >= 640)})
@@ -149,7 +149,7 @@ def extra_cases() -> list[dict]:
                 out.append({"kind": "local_dit", "N": n, "train": train, "dtype": prec,
                             "samples": 48 if train else 5, "heavy": n >= HEAVY_ATOMS})
                 if not train:   # ESMFold2's atom block (RMS / SiLU AdaLN, raw gates, rotary q / k, 192-key +/- 64 window): inference
-                    out.append({"kind": "local_dit_esmfold2", "N": n, "train": False, "dtype": prec,  # noqa: PERF401
+                    out.append({"kind": "local_dit_esmfold2", "N": n, "train": False, "dtype": prec,
                                 "samples": 5, "heavy": n >= HEAVY_ATOMS})
     # Template-stack TriMul: one direction, hidden twice the pair width (pair 64 / hidden 128, 128 / 256), B 1 and 4 templates.
     for train in (False, True):
@@ -167,7 +167,7 @@ def extra_cases() -> list[dict]:
         for length in TRAIN_TOKENS:
             for prec in ("bfloat16", "master"):   # master: fp32 parameters, bf16 activations (-DMASTER_FP32=1 builds)
                 for p_drop, masked in ((0.25, True), (0.0, True), (0.0, False)):
-                    out.append({"kind": "trimul_wide_train", "L": length, "d": d, "train": True, "dtype": prec,  # noqa: PERF401
+                    out.append({"kind": "trimul_wide_train", "L": length, "d": d, "train": True, "dtype": prec,
                                 "p": p_drop, "masked": masked, "heavy": length >= 768})
     # The single-direction TriMul at every declared width in BOTH directions (the registry-driven case builds the outgoing one; MiniWorld's pairformer
     # runs outgoing and incoming), inference and training, with and without dropout, bf16 and master precision.
@@ -316,10 +316,10 @@ def _run_block(c: dict) -> None:
         args = (torch.randn(a, b, n, 768, device="cuda", dtype=dt), torch.randn(a, b, n, 384, device="cuda", dtype=dt),
                 torch.randn(b, n, n, c["options"].get("d_pair", 128), device="cuda", dtype=dt))
     elif c["kind"] == "swa_atom":
+        from miniworld_engine.modules.swa_atom_attention import build_attention_params
         from miniworld_engine.modules.swa_atom_transformer import (
             SWAAtomTransformer,
         )
-        from miniworld_engine.modules.swa_atom_attention import build_attention_params
 
         # esmfold2 runs the fused block (kernels/swa_dit), as MiniWorld does (MINIWORLD_SWA_FUSED); the config pins it whatever
         # settings.swa_dit_fused says (2.3.0 - 2.3.6 got the fused block's extensions from MiniWorld only).
@@ -371,7 +371,9 @@ def _run_block(c: dict) -> None:
         mask = torch.rand(1, n, device="cuda") > 0.15 if c.get("masked", True) else None
         args = (torch.randn(1, n, n, d, device="cuda", dtype=dt), mask)
     elif c["kind"] == "trimul_directions":
-        from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
+        from miniworld_engine.modules.triangle_multiplication import (
+            TriangleMultiplication,
+        )
 
         d, n = c["d"], c["L"]
         model = TriangleMultiplication(d, outgoing=c["outgoing"], implementation=impl, p_drop=c["p"])

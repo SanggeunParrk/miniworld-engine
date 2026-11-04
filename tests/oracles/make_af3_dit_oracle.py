@@ -17,7 +17,6 @@ from __future__ import annotations
 import sys
 
 import torch
-
 from foldforge.modules.dense.diffusion_transformer import (
     CrossAttention,
     DiffusionCrossAttTransformer,

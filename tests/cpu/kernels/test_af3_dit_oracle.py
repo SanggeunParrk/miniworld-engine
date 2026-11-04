@@ -13,7 +13,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from miniworld_engine.modules.dit_variant import AF3, AF3_ATOM, AtomDiTVariantStack, DiTVariantStack
+from miniworld_engine.modules.dit_variant import (
+    AF3,
+    AF3_ATOM,
+    AtomDiTVariantStack,
+    DiTVariantStack,
+)
 from miniworld_engine.modules.exceptions import ImplementationType
 
 ORACLE = Path(__file__).resolve().parents[2] / "oracles" / "af3_dit_oracle.pt"
@@ -48,7 +53,8 @@ def test_token_stack_is_the_af3_configuration(oracle):
     block = stack.blocks[0]
     assert (block.attn_adaln.identity_scale, block.gating, block.kq_norm, block.up_gate) == (
         AF3["identity_scale"], AF3["gating"], AF3["kq_norm"], AF3["up_gate"])
-    assert stack.parallel == AF3["parallel"] and block.pair_norm.bias is None
+    assert stack.parallel == AF3["parallel"]
+    assert block.pair_norm.bias is None
     # the preset builds the same parameter set the weights show
     d, d_cond, d_pair = block.to_q.weight.shape[0], block.attn_zero.weight.shape[1], block.pair_norm.weight.shape[0]
     preset = DiTVariantStack(len(stack.blocks), d, d_cond, d_pair, case["n_head"], 2,

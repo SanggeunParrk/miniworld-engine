@@ -1,4 +1,4 @@
-# ruff: noqa: PT018, PT011, C408
+# ruff: noqa: C408
 """OPTIONAL extra: the cases of ``test_released_parity.py`` against FoldForge's own dense modules (the live implementation the frozen oracle
 ``tests/oracles/dense.py`` was written from). The engine's own suite runs ``test_released_parity.py`` and needs no FoldForge; this file
 only guards the oracle against drifting from FoldForge.
