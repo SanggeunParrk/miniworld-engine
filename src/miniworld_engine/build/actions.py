@@ -233,8 +233,19 @@ def _junit_files(xml_path: Path, files: list[str]) -> dict[str, bool]:
     return {f: bool(v) for f, v in status.items()}
 
 
+def cpu_shards(files: list[str], cpus: int | None = None) -> list[list[str]]:
+    """The CPU test files split round-robin into one shard per two CPUs of this allocation (at most 8, at least 1; none without files): each
+    shard is one pytest process, so the imports are paid once per shard and the shards run at the same time (one process ran 76 files in
+    4.5 minutes)."""
+    if cpus is None:
+        cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    n = max(1, min(8, cpus // 2, len(files)))
+    return [files[i::n] for i in range(n)] if files else []
+
+
 def run_tests(scope: sc.Scope, repo: Path, logdir: Path) -> dict[str, bool]:
-    """CPU files together in one pytest process; GPU files as a work queue over the allocation's GPUs, one file per GPU at a time. A line is
+    """CPU files in parallel pytest processes (`cpu_shards`: one per two CPUs of the allocation, at most 8); GPU files as a work queue over
+    the allocation's GPUs, one file per GPU at a time. A line is
     printed as each file finishes. Returns file -> passed."""
     logdir.mkdir(parents=True, exist_ok=True)
     cpu, gpu_files = scope.payload["cpu"], scope.payload["gpu"]
@@ -248,19 +259,17 @@ def run_tests(scope: sc.Scope, repo: Path, logdir: Path) -> dict[str, bool]:
             results[f] = ok
             say(f"[test] {time.monotonic() - t0:6.0f}s {'PASS' if ok else 'FAIL'} {f} ({secs:.0f}s, {where}) [{len(results)}/{len(scope.items)}]")
 
-    def run_cpu() -> None:
-        if not cpu:
-            return
-        xml = logdir / "cpu.xml"
+    def run_cpu_shard(i: int, files: list[str]) -> None:
+        xml, log = logdir / f"cpu{i}.xml", logdir / f"cpu{i}.log"
         started = time.monotonic()
-        with (logdir / "cpu.log").open("w") as fh:
-            rc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"--junitxml={xml}", *cpu], cwd=repo,
+        with log.open("w") as fh:
+            rc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"--junitxml={xml}", *files], cwd=repo,
                                 stdout=fh, stderr=subprocess.STDOUT).returncode
-        per = _junit_files(xml, cpu)
-        for f in cpu:
-            report(f, per[f] and rc in (0, 1, 5), (time.monotonic() - started) / len(cpu), "cpu")
+        per = _junit_files(xml, files)
+        for f in files:
+            report(f, per[f] and rc in (0, 1, 5), (time.monotonic() - started) / len(files), f"cpu {i}")
         if rc not in (0, 5):
-            say(f"[test] cpu pytest exit {rc}; log {logdir / 'cpu.log'}")
+            say(f"[test] cpu pytest exit {rc}; log {log}")
 
     def run_gpu_queue(gpu: str, queue: list[str]) -> None:
         while True:
@@ -281,8 +290,9 @@ def run_tests(scope: sc.Scope, repo: Path, logdir: Path) -> dict[str, bool]:
     if gpu_files and not gpus:
         say(f"[test] {len(gpu_files)} GPU test file(s) in scope but this allocation shows no GPU: not run, not claimed")
     queue = list(gpu_files) if gpus else []
-    with cf.ThreadPoolExecutor(max_workers=1 + max(1, len(gpus))) as pool:
-        workers.append(pool.submit(run_cpu))
+    shards = cpu_shards(cpu)
+    with cf.ThreadPoolExecutor(max_workers=len(shards) + max(1, len(gpus))) as pool:
+        workers.extend(pool.submit(run_cpu_shard, i, files) for i, files in enumerate(shards))
         workers.extend(pool.submit(run_gpu_queue, g, queue) for g in gpus)
         for w in workers:
             w.result()

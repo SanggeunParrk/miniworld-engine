@@ -362,3 +362,13 @@ def test_an_external_library_or_proteinmpnn_row_is_not_a_cuda_hole(monkeypatch, 
     assert audit["no_engine_kernel"] == ["chai_window/atom_single/d=1/A=5|48"]
     assert sorted(audit["no_engine_kernel_exempt"]) == sorted(keys[:2])
     assert "FlashAttention-4" in audit["no_engine_kernel_exempt"][keys[1]]
+
+
+def test_cpu_test_files_run_in_parallel_shards():
+    files = [f"tests/cpu/t{i}.py" for i in range(20)]
+    shards = actions.cpu_shards(files, cpus=16)
+    assert len(shards) == 8
+    assert sorted(f for s in shards for f in s) == sorted(files)
+    assert actions.cpu_shards(files[:3], cpus=16) == [[files[0]], [files[1]], [files[2]]]
+    assert actions.cpu_shards(files, cpus=1) == [files]
+    assert actions.cpu_shards([], cpus=16) == []
