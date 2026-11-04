@@ -344,3 +344,21 @@ def test_a_nothing_bundle_record_carries_the_bundle_digest_the_release_matches(r
     _write("bundle", rec.tree_hash(REPO), result="nothing", bundle_digest="D")
     assert cli.main(["release"]) == 0
     assert "every check passed" in capsys.readouterr().out
+
+
+def test_an_external_library_or_proteinmpnn_row_is_not_a_cuda_hole(monkeypatch, tmp_path):
+    """Maintainer's decisions: a row served by an external library (SWA atom attention on FlashAttention-4) and ProteinMPNN (no CUDA
+    development) are listed apart, with the reason; any other row without an engine kernel is still a hole."""
+    mf = tmp_path / "sm90-cu129" / "manifest.json"
+    mf.parent.mkdir()
+    mf.write_text(json.dumps({"artifacts": {}}))
+    monkeypatch.setattr(actions, "prebuilt_manifests", lambda root, arch: [mf])
+    keys = ("protein_mpnn/protein_node/d=1/A=1|1", "swa_atom_attention/atom_single/d=1/A=5|48", "chai_window/atom_single/d=1/A=5|48")
+    monkeypatch.setattr(actions, "read_row_record", lambda arch, repo: {k: {"text": "t", "artifacts": []} for k in keys})
+    from miniworld_engine.build import registry_calls
+
+    monkeypatch.setattr(registry_calls, "expand", lambda arch: [types.SimpleNamespace(key=k, text_digest="t", calls=[1]) for k in keys])
+    audit = actions.audit_bundle("sm90", tmp_path)
+    assert audit["no_engine_kernel"] == ["chai_window/atom_single/d=1/A=5|48"]
+    assert sorted(audit["no_engine_kernel_exempt"]) == sorted(keys[:2])
+    assert "FlashAttention-4" in audit["no_engine_kernel_exempt"][keys[1]]

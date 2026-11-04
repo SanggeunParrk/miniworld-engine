@@ -730,8 +730,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
         f"they declare now, {len(audit['missing'])} with artifacts missing from the bundle")
     for row in audit["no_record"][:10]:
         say(f"[verify]   no record: {row}")
-    say(f"[verify] rows served by no engine kernel on {ctx.arch} (cuBLAS, an external library or PyTorch; a CUDA hole to look at): "
+    say(f"[verify] rows served by no engine kernel on {ctx.arch} (cuBLAS or PyTorch; a CUDA hole to look at): "
         f"{len(audit['no_engine_kernel'])}" + (": " + ", ".join(audit["no_engine_kernel"][:8]) if audit["no_engine_kernel"] else ""))
+    for row, why in audit.get("no_engine_kernel_exempt", {}).items():
+        say(f"[verify]   not a hole: {row} ({why})")
     for row, names in list(audit["missing"].items())[:10]:
         say(f"[verify]   {row}: missing {names[:4]}")
     extra["audit"] = {k: v for k, v in audit.items() if k != "missing"} | {"missing": len(audit["missing"])}
@@ -938,7 +940,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         say(f"[{action}] record for this tree: " + (f"{r['result']} ({r['time']})" if r else f"none (run: miniworld-engine {action})"))
     audit = audit_bundle(ctx.arch, ctx.repo)
     say(f"[verify] registry-row audit: {audit['rows']} rows, {len(audit['no_record'])} unrecorded, {len(audit['missing'])} with missing artifacts, "
-        f"{len(audit['no_engine_kernel'])} served by no engine kernel" + (": " + ", ".join(audit["no_engine_kernel"][:6]) if audit["no_engine_kernel"] else ""))
+        f"{len(audit['no_engine_kernel'])} served by no engine kernel" + (": " + ", ".join(audit["no_engine_kernel"][:6]) if audit["no_engine_kernel"] else "")
+        + f" ({len(audit.get('no_engine_kernel_exempt', {}))} more exempt: an external library or ProteinMPNN)")
     say("[release] needs: wheel record for this tree, names diff reviewed, run_all evidence for " + ctx.version + ": "
         + (", ".join(rec_cards) if (rec_cards := release_evidence(ctx.repo, ctx.version)) else "NONE yet"))
     return 0
