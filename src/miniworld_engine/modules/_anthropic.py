@@ -74,23 +74,20 @@ def missing(module: str, *, path: str = "common/opt_core") -> str | None:
     """Why ``load(module, path=path)`` fails (a short reason), or ``None`` when it loads."""
     try:
         load(module, path=path)
-    except Exception as e:  # noqa: BLE001 -- any import failure is the reason the backend cannot run
+    except Exception as e:  # any import failure is the reason the backend cannot run
         return f"release {module} unavailable: {type(e).__name__}: {e}"
     return None
 
 
 def unavailable(module: str, device, *, path: str = "common/opt_core") -> str | None:
-    """:func:`missing` plus the device: the release's kernels used by the shared modules run on CUDA tensors of an H100 (their measured
-    sm_90 cells); the reason they cannot serve here, or ``None``."""
+    """:func:`missing` plus the device: the release's kernels run on CUDA tensors; which card it serves is the release's own decision
+    (its providers select a cell for the device and refuse by name when they have none, see :func:`kernel_selection`), not this
+    adapter's. The reason it cannot serve here, or ``None``."""
     why = missing(module, path=path)
     if why is not None:
         return why
-    import torch
-
     if getattr(device, "type", device) != "cuda":
         return "the release's kernels run on CUDA tensors only"
-    if torch.cuda.get_device_capability(device) != (9, 0):
-        return f"the release cells used here are the H100 (sm_90) ones, got sm_{''.join(map(str, torch.cuda.get_device_capability(device)))}"
     return None
 
 
