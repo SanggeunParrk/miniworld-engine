@@ -55,40 +55,12 @@ struct AuxPack {
   bf* dst; const void* w[4]; int rows,cols;
   int s0[4],s1[4],fp32[4];
 };
-// Autograd steals a dense gradient only when it has its parameter's layout.
-// D128 front matrices are column-major leaves; keep this copy in owned CUDA.
-struct AuxGradLayout {
-  const void* src[6]; void* dst[6];
-  int rows[6],cols[6],s0[6],s1[6],fp32[6];
-};
-extern "C" __global__ void mw_aux_grad_layout(AuxGradLayout p) {
-  int leaf=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
-  if(i>=p.rows[leaf]*p.cols[leaf])return;
-  int j=(i/p.cols[leaf])*p.s0[leaf]+(i%p.cols[leaf])*p.s1[leaf];
-  if(p.fp32[leaf])static_cast<unsigned int*>(p.dst[leaf])[j]=static_cast<const unsigned int*>(p.src[leaf])[i];
-  else static_cast<unsigned short*>(p.dst[leaf])[j]=static_cast<const unsigned short*>(p.src[leaf])[i];
-}
 extern "C" __global__ void mw_aux_pack(AuxPack p) {
   int i=blockIdx.x*256+threadIdx.x;
   if(i>=4*p.rows*p.cols)return;
   int row=i/p.cols,col=i%p.cols,source=(row/64)*32+row%32;
   int leaf=2*(source>=p.rows)+(row%64<32),r=source%p.rows;
   p.dst[i]=__float2bfloat16_rn(aux_read(p.w[leaf],r*p.s0[leaf]+col*p.s1[leaf],p.fp32[leaf]));
-}
-// Column-major bf16 leaves (unit row stride): a 32 x 32 tile is read along the leaf rows and written along the packed columns, so both
-// sides are coalesced. Same element mapping as mw_aux_pack; rows and cols are multiples of 32.
-extern "C" __global__ void mw_aux_pack_t(AuxPack p) {
-  __shared__ unsigned short tile[32][34];
-  const int row0=blockIdx.x*32,ct=blockIdx.y,tx=threadIdx.x,ty=threadIdx.y;
-  const int base=(row0/64)*32,leaf=2*(base>=p.rows)+(row0%64<32),r0=base%p.rows;
-  const unsigned short* src=static_cast<const unsigned short*>(p.w[leaf]);
-  const int ld=p.s1[leaf];
-#pragma unroll
-  for(int k=0;k<4;++k)tile[tx][ty+8*k]=src[(size_t)(ct*32+ty+8*k)*ld+(r0+tx)];
-  __syncthreads();
-  unsigned short* dst=reinterpret_cast<unsigned short*>(p.dst);
-#pragma unroll
-  for(int k=0;k<4;++k)dst[(size_t)(row0+ty+8*k)*p.cols+ct*32+tx]=tile[ty+8*k][tx];
 }
 extern "C" __global__ void mw_aux_pack_vec(AuxPack p) {
   int i=blockIdx.x*256+threadIdx.x,cols=p.cols/8;
@@ -111,22 +83,7 @@ extern "C" __global__ void mw_aux_pack_training_pair(bf* packed,bf* stacked,
   const int outrow=(source/32)*64+source%32+(leaf%2?0:32);
   reinterpret_cast<uint4*>(packed)[outrow*cols+c]=value;
 }
-extern "C" __global__ void mw_aux_norm(const bf* x,const float* g,const float* b,
-                                        bf* y,float* stats,int width) {
-  int row=blockIdx.x; float sum=0.f;
-  for(int c=threadIdx.x;c<width;c+=256)sum=__fadd_rn(sum,__bfloat162float(x[row*width+c]));
-  float mean=aux_sum(sum)/width,var=0.f;
-  for(int c=threadIdx.x;c<width;c+=256){
-    float z=__bfloat162float(x[row*width+c])-mean;
-    var=__fadd_rn(var,__fmul_rn(z,z));
-  }
-  float rs=rsqrtf(aux_sum(var)/width+1e-5f);
-  if(!threadIdx.x&&stats){stats[2*row]=mean;stats[2*row+1]=rs;}
-  for(int c=threadIdx.x;c<width;c+=256)
-    y[row*width+c]=__float2bfloat16_rn(fmaf((__bfloat162float(x[row*width+c])-mean)*rs,g[c],b[c]));
-}
 // Eight rows per CTA, with inputs retained through both warp reductions.
-// Keep mw_aux_norm above as the frozen CTA-per-row comparator.
 __device__ float aux_warp_sum(float v) {
   for(int q=16;q;q>>=1)v=__fadd_rn(v,__shfl_xor_sync(0xffffffff,v,q));
   return v;
@@ -186,11 +143,6 @@ __device__ __forceinline__ float aux_pair_mask(const void* mask,int i,int length
   return kind==0?1.f:token?
     float(aux_mask_read(mask,i/length,kind)!=0.f&&aux_mask_read(mask,(samples>1?i/(length*length)*length:0)+i%length,kind)!=0.f):
     aux_mask_read(mask,i,kind);
-}
-extern "C" __global__ void mw_aux_train_mask(const void* mask,float* pair,int length,int kind,int token,int samples) {
-  int i=blockIdx.x*256+threadIdx.x;
-  if(i>=samples*length*length)return;
-  pair[i]=aux_pair_mask(mask,i,length,kind,token,samples);
 }
 extern "C" __global__ void mw_aux_unit_scale(bf* scale,int count) {
   int i=blockIdx.x*256+threadIdx.x;
@@ -264,27 +216,6 @@ extern "C" __global__ void mw_aux_ln_affine_finish(const float* partial,float* d
   dg[c]=g;db[c]=b;
 }
 struct AuxStack {const bf* w[5];bf* dst;int rows[5],s0[5],s1[5],width;};
-// Fixed CTA-index reduction of the selected TMA LayerNorm kernels' affine sums.
-extern "C" __global__ void mw_aux_affine_cta_finish(const float* pg,const float* pb,
-    float* dg,float* db,int width,int blocks){
-  const int lane=threadIdx.x%32,warp=threadIdx.x/32,c=blockIdx.x*32+lane;
-  __shared__ float sums[2][4][32];
-  float g=0.f,b=0.f;
-  if(c<width)for(int k=warp;k<blocks;k+=4){g+=pg[k*width+c];b+=pb[k*width+c];}
-  sums[0][warp][lane]=g;sums[1][warp][lane]=b;__syncthreads();
-  if(warp==0&&c<width){
-    g=0.f;b=0.f;
-    #pragma unroll
-    for(int w=0;w<4;++w){g+=sums[0][w][lane];b+=sums[1][w][lane];}
-    dg[c]=g;db[c]=b;
-  }
-}
-extern "C" __global__ void mw_aux_stack(AuxStack p){
-  int leaf=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
-  if(i>=p.rows[leaf]*p.width)return;
-  int offset=0;for(int k=0;k<leaf;++k)offset+=p.rows[k]*p.width;
-  p.dst[offset+i]=p.w[leaf][(i/p.width)*p.s0[leaf]+(i%p.width)*p.s1[leaf]];
-}
 extern "C" __global__ void mw_aux_stack_vec(AuxStack p){
   int leaf=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
   if(i>=p.rows[leaf]*(p.width/8))return;

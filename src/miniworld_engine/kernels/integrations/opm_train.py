@@ -941,8 +941,8 @@ def outer_product_mean(
 ) -> torch.Tensor:
     """OPM with optional pair residual fused into the CUDA epilogue; no OPM dropout in the model.
 
-    ``with_bias=False`` ignores the module's projection biases (``to_left.bias`` / ``to_right.bias``): the caller adds their terms itself
-    (``composed.biased_on_fused``); with the biases passed here as well they would be counted twice.
+    ``with_bias=False`` ignores the module's projection biases (``to_left.bias`` / ``to_right.bias``): the caller adds their terms itself;
+    with the biases passed here as well they would be counted twice.
 
     A length that is not a multiple of 64 or an MSA depth that is not a multiple of 256 is padded with rows that carry mask 0
     (they add nothing to any count or product and the prologue zeroes their projections), and the pair output is cut back; the

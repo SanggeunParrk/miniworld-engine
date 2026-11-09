@@ -31,8 +31,6 @@ Judging: [measure](../measure.md), [modules](../modules.md), [kernels](../kernel
 | `layernorm_bwd_persistent` | layernorm, backward | Triton `_ln_bwd_persistent` (`triton/persistent.py`): persistent grid, one partial row per program, small final reduce, no atomics |
 | `layernorm_fwd_saveact_strided`, `layernorm_bwd_atomic_strided` | layernorm_linear, forward_train / backward | `te_style.py`: LN materialise from an arbitrary-stride x (TriMul's m-major `[B, D, L, L]` view) and its atomic backward writing dx in x's strides |
 | `layernorm_bwd_split_mmajor` | layernorm_linear, backward | `mmajor_bwd.py`: atomic-free m-major LN backward (persistent, partial rows + reduce, M-contiguous vector loads); small M keeps the atomic kernel |
-| `layernorm_linear_fwd` | layernorm_linear, forward_infer | `_lnl_fwd_kernel` (`fused.py`): Y = LN(x) W^T + b in one kernel, the row's K fits one tile |
-| `layernorm_linear_fwd_fp32`, `layernorm_linear_bwd_fp32` | layernorm_linear, forward_train / backward | `pair_bias.py`: LN + projection to n_head without materialising the normalised pair, and its backward |
 
 RMSNorm kernels (not in `requirements_kernel.csv`): the general extension built with the mean and bias dropped (`RMS` template flag),
 the pipe kernels with `rms=True`, and Triton `rmsnorm_fwd_kernel` / `rmsnorm_bwd_kernel` (`kernels/rmsnorm/triton/main.py`).

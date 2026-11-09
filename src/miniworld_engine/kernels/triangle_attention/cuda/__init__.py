@@ -37,7 +37,7 @@ def prebuild(target, rows):
         if needs(like="triangle_attention_generic_"):
             yield h100_sm90_generic._glue
             yield h100_sm90_generic._lt
-        if needs("triangle_attention_generic_front_c256_sm90", "triangle_attention_front_fused_sm90"):
+        if needs("triangle_attention_front_fused_sm90"):
             yield lambda: h100_sm90_generic._front_ext(cutlass_include())
         # the MSA row dropout's Philox keep-mask (pwa_train: ``extension("pack").drop_keep``)
         if needs("triangle_attention_drop_scale_sm90", "triangle_attention_graph_rng_write_sm90"):

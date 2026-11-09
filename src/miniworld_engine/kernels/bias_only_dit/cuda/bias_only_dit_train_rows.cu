@@ -1285,26 +1285,12 @@ at::Tensor repeat90(at::Tensor input,int64_t samples){
      dim3(std::min<int64_t>(512,(n+255)/256)),dim3(256),args,0,S()));
  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
-__global__ void shared_grad90_kernel(const bf*in,bf*out,int64_t period,int samples){
- for(int64_t i=(int64_t)blockIdx.x*blockDim.x+threadIdx.x;i<period;i+=(int64_t)blockDim.x*gridDim.x){
-  float sum=0.f;for(int a=0;a<samples;++a)sum+=__bfloat162float(in[(int64_t)a*period+i]);
-  out[i]=__float2bfloat16_rn(sum);
- }
-}
-at::Tensor shared_grad90(at::Tensor input){
- TORCH_CHECK(input.is_contiguous()&&input.scalar_type()==at::kBFloat16,"shared gradient source");
- at::cuda::CUDAGuard guard(input.device());auto sizes=input.sizes().vec();int samples=sizes[0];sizes[0]=1;
- auto out=at::empty(sizes,input.options());int64_t period=out.numel();
- shared_grad90_kernel<<<std::min<int64_t>(512,(period+255)/256),256,0,S()>>>(reinterpret_cast<bf*>(input.data_ptr()),reinterpret_cast<bf*>(out.data_ptr()),period,samples);
- C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
-}
 
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pack90", &pack90);
   m.def("repeat90", &repeat90);
-  m.def("shared_grad90", &shared_grad90);
   m.def("cond_ln_cuda", &cond_ln);
   m.def("swiglu_cuda", &swiglu);
   m.def("pair_bias_cuda", &pair_bias);

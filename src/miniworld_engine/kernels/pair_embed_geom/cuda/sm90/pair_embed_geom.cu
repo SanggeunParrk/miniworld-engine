@@ -65,14 +65,18 @@ __device__ __forceinline__ V3 unit(V3 a) { float n = fmaxf(nrm(a), 1e-8f); retur
 __device__ __forceinline__ float dihedral(V3 a, V3 b, V3 c, V3 d) {
   V3 b0 = sub(b, a), b1 = sub(c, b), b2 = sub(d, c);
   V3 n1 = unit(cross(b0, b1)), n2 = unit(cross(b1, b2));
+  // An exact zero is +0, as torch's +0-seeded vecdot gives it: a degenerate dihedral (CB_j == CB_i on the diagonal: n2 = 0) can leave the FMA
+  // chain at -0, and atan2(0, -0) = pi lands in the last bin where torch has atan2(0, +0) = 0.
   float cosv = dot(n1, n2);
+  cosv = cosv == 0.f ? 0.f : cosv;
   V3 x = cross(n1, n2);
   float s = dot(x, b1), sg = (s > 0.f) - (s < 0.f);
   return atan2f(sg * nrm(x), cosv);
 }
 __device__ __forceinline__ float bond(V3 a, V3 b, V3 c) {
   V3 b0 = unit(sub(b, a)), b1 = unit(sub(c, a));
-  return atan2f(nrm(cross(b0, b1)), dot(b0, b1));
+  const float dt = dot(b0, b1);
+  return atan2f(nrm(cross(b0, b1)), dt == 0.f ? 0.f : dt);  // +0 for an exact zero, as in dihedral()
 }
 // torch.bucketize(v, lim) with the boundaries ascending (as bucketize requires): the number of limits strictly below v, by a binary search over the
 // (shared-memory) limits; NaN gives 0 as in the linear count.  n <= 31.

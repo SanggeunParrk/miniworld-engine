@@ -2,11 +2,11 @@
 (cuBLAS).
 
 H100 inference and training use native CUDA by default for the required buckets.
-The B200 pair-weight (Wb) gradient fails the FP32 oracle cosine at the required
-buckets, so H100 training reconstructs that FP32 rounding with native CUDA and
-cuBLAS (ln_pair has no beta, so only dWb is repaired). This accuracy-first shadow
-materializes extra FP32 workspaces: the B200 tensor lifetimes and former fast-path
-latency do not describe this training default.
+H100 training keeps the fused pair-weight (Wb) gradient by default (bf16 operands, fp32
+accumulation: the same error as the bf16 PyTorch module). ``EXACT_DWB = True`` (below) opts
+into the fp32 "shadow": the Wb gradient recomputed from bf16-rounded inputs with native CUDA
+and cuBLAS at L 384 / 768 for the five head layouts (ln_pair has no beta, so only dWb is
+repaired), which materializes extra FP32 workspaces and costs about 2x the step.
 
 Contract: bf16 activations, B = 1, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention),
 or d_single 512 as 16 x 32, d_pair
@@ -54,6 +54,11 @@ LOG2E = math.log2(math.e)
 NEG = -1e30  # masked keys: finite, so a fully masked sample stays NaN-free
 _packs: dict = {}
 _cores: dict = {}
+#: Opt-in fp32 pair-weight gradient ("shadow") of H100 training at L 384 / 768 for the SHAPES head layouts (2.4.x
+#: ``settings.apb_h100_exact_dwb``). False (default): the fused kernel's dWb (bf16 operands, fp32 accumulation; the same error
+#: as the bf16 PyTorch module and every other gradient of the block). True: recompute dWb in fp32 from bf16-rounded inputs
+#: (about 2x lower error on that one gradient, about 2.4x the step). A plain switch: set it before the training forward.
+EXACT_DWB = False
 
 
 def refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool) -> str | None:
@@ -579,7 +584,8 @@ class _Training(torch.autograd.Function):
         ) in ((8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
         # ln_pair has no beta: the shadow only repairs the pair-weight gradient.
         ctx.exact_dwb = (
-            ctx.beta_shadow
+            EXACT_DWB
+            and ctx.beta_shadow
             and qualified_exact_dwb
         )
         leaves = _kernel_leaves(leaves)

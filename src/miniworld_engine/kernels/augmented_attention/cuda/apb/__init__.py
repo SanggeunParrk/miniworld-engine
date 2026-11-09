@@ -29,7 +29,7 @@ def acc_n(heads: int, d: int = 384) -> int:
 
 
 def ext(shadow: bool = False):
-    """The row / pair extension. ``shadow`` (H100 only) also builds the fp32 pair-weight oracle (``apb_h100_exact_dwb``), which
+    """The row / pair extension. ``shadow`` (H100 only) also builds the fp32 pair-weight oracle (``integrations.attention_pair_bias_b200.EXACT_DWB``), which
     needs CUTLASS 4.2 headers (``CUTLASS_PATH``); the default build has no such dependency."""
     arch = "90a" if torch.cuda.get_device_capability() == (9, 0) else "100"
     return _ext(arch, shadow and arch == "90a")

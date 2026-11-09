@@ -56,10 +56,9 @@ stages; without FlashAttention-4 installed `_supports_cuda` refuses the call.
 | `swa_fp32.cu` (`fp32`) | `fwd`, `bwd`, `prep` | the whole fp32 block on tf32 wgmma (weight gradients excluded) |
 | `swa_wgrad_wg.cu` (`wgwg`), `swa_wgrad.cu` (`wgrad`) | `wgrad`, `wgrad_f32` | the five weight gradients of the backward in one launch (TMA + wgmma; mma.sync fallback) |
 | `swa_wgrad_wg_f32.cu` (`wgwg32`) | `wgrad_f32` | the same on fp32 operands as bf16 hi / lo planes |
-| `swa_pack.cu` (`pack`) | `pack_ffn` | the four weight layouts of the wgmma FFN kernels in one launch |
 | `swa_mod.cu` (`mod`) | `mod_fwd`, `mod_bwd` | built (the composed path requires it) but not launched by any current code path |
 
-`requirements_kernel.csv` lists 44 `swa_dit` kernels: `swa_dit_*_sm90` names for the composed and fp32 stages (`inproj`, `softmax`,
+`requirements_kernel.csv` lists 43 `swa_dit` kernels: `swa_dit_*_sm90` names for the composed and fp32 stages (`inproj`, `softmax`,
 `output_swiglu`, `swiglu`, `output`, `dw`, `transpose`, plus `_rows` and `_fp32` variants), `swa_dit_native_{rows,copy,mod_bwd}_sm90`,
 `swa_dit_tiled_attn_{fwd,bwd_dq,bwd_dkdv}_sm90`, `swa_dit_fused_{oproj,qkvg}_bwd_sm90`, and the Triton kernel names without suffix
 (`swa_dit_inproj_fwd`, `swa_dit_softmax_fwd`, ...; `kernels/swa_dit/triton/`).

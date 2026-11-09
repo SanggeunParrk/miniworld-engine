@@ -34,7 +34,7 @@ Judging: [measure](../measure.md), [modules](../modules.md), [kernels](../kernel
 | `pair_weighted_averaging_bwd_dgv_sm90`, `..._bwd_dgv_reduce_sm90` | backward | `dgv_bwd_kernel` (+ `pwa_dgv_reduce`): dy = dgv [Wg; Wv] in registers, dWgv, LN backward + residual -> dm, dgamma, dbeta |
 | `pair_weighted_averaging_bwd_pair_sm90`, `..._bwd_pair_reduce1_sm90`, `..._bwd_pair_reduce2_sm90` | backward | `pair_bwd_kernel` (pair3) + `pwa_pair_reduce1/2`: softmax backward -> proj_z backward -> LN_z backward -> dz, dWb, dgamma_z |
 | `pair_weighted_averaging_transpose_sm90`, `..._wgv_pack_sm90` | backward | `pwa_transpose_kernel` (Wo^T, w^T), `pwa_wgv_kernel` ([Wg; Wv]^T) |
-| `pair_weighted_averaging_pair_softmax`, `pair_weighted_averaging_bwd_pair` | forward_train / backward | Triton `_pair_fwd_kernel` / `_pair_bwd_kernel` inside `pwa_train.py` |
+| `pair_weighted_averaging_bwd_pair` | forward_train / backward | Triton `_pair_fwd_kernel` / `_pair_bwd_kernel` inside `pwa_train.py` |
 | `pair_weighted_averaging_pair_softmax_wide_sm90`, `..._bwd_pair_wide_sm90` | forward / backward | `pair_wide.cu`: the pair kernels with d_pair a compile-time width (128 / 256 / 384) |
 | `pair_weighted_averaging_layernorm_value_wide_sm90` | forward | `ln_vg_w` (`pwa_wide.cu`): y = LN(m) + statistics, v head-major |
 | `pair_weighted_averaging_gate_out_wide_sm90` | forward | `gate_out_w`: gate, o * sigmoid(gate) from registers into the out projection, dropout, residual |

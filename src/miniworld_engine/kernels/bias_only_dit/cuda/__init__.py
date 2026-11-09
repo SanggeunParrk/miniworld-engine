@@ -1050,14 +1050,13 @@ def prebuild(target, rows):
     family are launched through ``augmented_attention.cuda.sm100`` (B200 only)."""
     if target.arch != "sm90":
         return
-    from . import hoist, tf32, train
+    from . import tf32, train
 
     bf16, fp32, eval_, train_ = {"bfloat16"}, {"float32"}, {"eval"}, {"train"}
     builds = (
         (h100_ext, None, None),  # pv_gate_inf.cu: the attention core (bf16 pv_cta / fp32 pv_cta_tf32), dpb, swiglu pipeline
         (h100_gemm_ext, bf16, eval_),  # one-launch conditioning tables, squeeze + out-projection (the bf16 inference step)
         (functools.partial(_rows_ext, True), bf16, None), (functools.partial(train._rows_ext, True), bf16, train_),
-        (hoist.ext, None, None), (hoist.pass_ext, None, None), (hoist.bwd_ext, None, train_),  # the hoisted pair bias
         (tf32.rows32, fp32, None),  # the fp32 row kernels
     )
     served = {("bfloat16" if r["dtype"] == "master" else r["dtype"], r["mode"]) for r in rows}

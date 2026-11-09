@@ -45,7 +45,7 @@ The kernels take one conditioning row set shared by the samples; a `cond` that d
 | `dit_variants_edge_attn_fwd_sm90` | forward | `edge.cu`: the slid key window's five edge windows (fp32), plus their bias and backward entry points |
 | `augmented_attention_fwd_sm90`, `_fwd_tf32_sm90`, `_bwd_dqb_sm90`, `_bwd_dq_sm90`, `_bwd_dkv_sm90`, `_bwd_dqb_tf32_sm90`, `_bwd_dkv_tf32_sm90` | forward / backward | token attention cores (see [token_dit.md](token_dit.md)) |
 | `augmented_attention_local_pair_bias_fwd_sm90`, `augmented_attention_local_attn_*_sm90`, `augmented_attention_local_*bias_bwd*_sm90` | forward / backward | atom window attention (`attn_fwd_mma` / `attn_bwd_mma`, bf16 and TF32) and the window pair bias (`pair_bias_mma`) of the local atom DiT |
-| `layernorm_linear_fwd`, `cond_transition_token_layernorm_rows_sm90`, `cond_transition_token_transpose_sm90` | forward | shared LayerNorm rows (pair rows of the bf16 inference bias) and helpers attributed to these classes |
+| `cond_transition_token_layernorm_rows_sm90`, `cond_transition_token_transpose_sm90` | forward | shared LayerNorm rows (pair rows of the bf16 inference bias) and helpers attributed to these classes |
 
 ## Token stack
 

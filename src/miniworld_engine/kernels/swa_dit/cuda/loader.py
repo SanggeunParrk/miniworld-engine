@@ -42,8 +42,7 @@ SOURCES = {"qkvg": "swa_qkvg_fwd", "fwd": "swa_ffn_fwd", "bwd": "swa_ffn_bwd",
            "mod": "swa_mod",
            "wgrad": "swa_wgrad",
            "wgwg": "swa_wgrad_wg",
-           "wgwg32": "swa_wgrad_wg_f32",
-           "pack": "swa_pack"}   # the wgmma FFN kernels\' four weight layouts in one launch, see swa_pack.cu
+           "wgwg32": "swa_wgrad_wg_f32"}
 SOURCES.update(qkvg_small="swa_qkvg_fwd", fwd_small="swa_ffn_fwd", bwd_overwrite="swa_ffn_bwd")
 
 # Separate build identities preserve the legacy kernels and their schedules.

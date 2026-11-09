@@ -215,10 +215,6 @@ def pack_into_cuda(dst, wl, wlg, wr, wrg):
     vector = (T.preserve_training(d)
               and T.d256_glue_enabled()
               and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in quad))
-    if (not vector and r % 32 == 0 and d % 32 == 0
-            and all(w.dtype == torch.bfloat16 and w.stride(0) == 1 and w.stride(1) >= r for w in quad)):
-        _aux_unit().kernel("mw_aux_pack_t").launch((4 * r // 32, d // 32, 1), (32, 8, 1), [p])
-        return
     _launch("mw_aux_pack_vec" if vector else "mw_aux_pack",
             (((4*r*d//8 if vector else 4*r*d)+255)//256, 1, 1), [p])
 
@@ -303,11 +299,7 @@ def dense_copy_into(dst, src):
 
 def finish_affine_partials(pg, pb, dg, db):
     blocks, width = pg.shape
-    parallel = T.d256_glue_enabled()
-    columns = 4 if parallel else 32
-    _aux_unit().kernel("mw_aux_affine_cta_finish_parallel" if parallel
-                       else "mw_aux_affine_cta_finish").launch(
-        ((width+columns-1)//columns,1,1), (128,1,1), [pg,pb,dg,db,width,blocks])
+    _aux_unit().kernel("mw_aux_affine_cta_finish_parallel").launch(((width+3)//4,1,1), (128,1,1), [pg,pb,dg,db,width,blocks])
 
 
 def fused_wide_glue(width, length, bidirectional=False, selected=False):
@@ -403,10 +395,8 @@ def normalize_into(dst, x, g, b, stats=None, *, warp=False):
     width, rows = x.shape[-1], x.numel()//x.shape[-1]
     if width not in (64, 128, 256, 384, 512):
         raise ValueError("Hopper CUDA normalization requires a supported pair width")
-    if warp or rows >= 4096:    # one warp per row (8 rows per block); the one-block-per-row kernel only serves tiny inputs
-        _launch("mw_aux_norm_warp", ((rows+7)//8, 1, 1), [x, g, b, dst, stats, width, rows])
-    else:
-        _launch("mw_aux_norm", (rows, 1, 1), [x, g, b, dst, stats, width])
+    # one warp per row (8 rows per block) at every size (``warp`` is accepted for the callers, it no longer selects a kernel)
+    _launch("mw_aux_norm_warp", ((rows+7)//8, 1, 1), [x, g, b, dst, stats, width, rows])
 
 
 def fold_into(wp, go, bo, wpf, wg, gi, bi, wgf, uv, gate=False):
@@ -452,14 +442,8 @@ def _gradient_layout(grads: list[torch.Tensor], weights: list[torch.Tensor]) -> 
            for g, w in zip(grads, weights, strict=True)):
         raise ValueError("native gradient layout requires matching dense matrices")
     out = _gradient_layout_fake(grads, weights)
-    pad = lambda values, fill=0: list(values) + [fill] * (6-len(grads))
-    with T.native_context(grads[0].device):
-        p = T._launch_module().Struct([
-            *pad(grads, None), *pad(out, None),
-            *pad(w.shape[0] for w in weights), *pad(w.shape[1] for w in weights),
-            *pad(w.stride(0) for w in weights), *pad(w.stride(1) for w in weights),
-            *pad(int(w.dtype == torch.float32) for w in weights)])
-        _launch("mw_aux_grad_layout", ((max(g.numel() for g in grads)+255)//256,len(grads),1), [p])
+    for o, g in zip(out, grads, strict=True):
+        o.copy_(g)
     return out
 
 
@@ -490,15 +474,14 @@ def _training_gradient_copies(grads: list[torch.Tensor],weights: list[torch.Tens
 def stack_backward_weights(weights):
     """Small live [gate,left,left_gate,right,right_gate] matrix stack."""
     width = weights[0].shape[1]
+    if width % 8 or any(w.dtype != torch.bfloat16 or not w.is_contiguous() or w.shape[1] != width for w in weights):
+        raise ValueError("the backward weight stack takes contiguous BF16 matrices of one width (a multiple of 8)")
     out = weights[0].new_empty((sum(w.shape[0] for w in weights), width))
     p = T._launch_module().Struct([
         *weights, out, *(w.shape[0] for w in weights),
         *(w.stride(0) for w in weights), *(w.stride(1) for w in weights), width])
-    vector = (T.preserve_training(width)
-              and T.d256_glue_enabled()
-              and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in weights))
-    count = max(w.numel() for w in weights) // (8 if vector else 1)
-    _launch("mw_aux_stack_vec" if vector else "mw_aux_stack", ((count+255)//256, 5, 1), [p])
+    count = max(w.numel() for w in weights) // 8
+    _launch("mw_aux_stack_vec", ((count+255)//256, 5, 1), [p])
     return out
 
 
@@ -518,21 +501,6 @@ def deterministic_ln_backward(x, dy, gamma, *, planes=False, stats=None, residua
             [x, dy, mu, rs, partial, rows, width, int(planes)])
     _launch("mw_aux_ln_affine_finish", ((width+255)//256, 1, 1), [partial, dg, db, width, blocks])
     return dx, dg, db
-
-
-def training_pair_mask(mask, length, device, samples=1):
-    """Owned FP32 pair mask [B L, L], built directly from token [B L] / pair [B L L] / absent masks (B = ``samples``, b-major)."""
-    out = torch.empty((samples * length, length), device=device, dtype=torch.float32)
-    absent = mask is None or mask.numel() == 0
-    if not absent and (not mask.is_contiguous() or mask.dtype not in
-                       (torch.bool, torch.bfloat16, torch.float32)
-                       or mask.numel() not in (samples * length, samples * length * length)):
-        raise ValueError("native TriMul mask requires contiguous token or square pair data")
-    kind = 0 if absent else 1 if mask.dtype == torch.bool else 2 if mask.dtype == torch.bfloat16 else 3
-    token = int(not absent and mask.numel() == samples * length)
-    _launch("mw_aux_train_mask", ((samples*length*length+255)//256, 1, 1),
-            [None if absent else mask, out, length, kind, token, samples])
-    return out
 
 
 def _training_unit_scale_fake(pair):

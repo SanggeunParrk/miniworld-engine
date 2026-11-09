@@ -73,7 +73,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
         See :class:`BackendModule`.
 
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
 

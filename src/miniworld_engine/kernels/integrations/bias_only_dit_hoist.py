@@ -24,18 +24,14 @@ is the two-term split [bf16(LN0) | bf16(LN0 - bf16(LN0))] (K = 256; hi + lo = LN
 to fp32 accumulation; on the fp32 path Y = LN0 (fp32, the TF32 GEMM's operand). LN0 is not kept from the forward.
 
 Per training step that replaces, per block, the pair LayerNorm + projection (``pair_bias``), its backward (``pair_bias_bwd``) and
-the accumulation of a [L, L, 128] pair gradient, by one pass of each for all blocks. Hopper: the forward is ONE kernel (``bo_hoist_pass.cu`` hoist_fwd, N <= 64: LN0 and the projection on the tensor cores, the normalised pair never
-written), the backward of one block of 16 heads is ONE kernel (hoist_bwd1: d LN0, the LN0 backward and dW' in a single pass over the pair, bf16 and
-fp32/TF32); more blocks keep the bf16 ``bo_hoist_bwd.cu`` kernel (N <= 192), fp32 the two cuBLAS GEMMs (TF32) around the LN0 rows.
+the accumulation of a [L, L, 128] pair gradient, by one pass of each for all blocks.
 
 bf16 (pair bf16; the weights in any dtype, folded in fp32 and rounded to bf16 as the per-block pack rounds Wf): bf16 operands, fp32
 accumulation, the bias in bf16, d LN0 and dW' in fp32, d pair in the pair's dtype. fp32 (pair and weights fp32, no autocast): the
 same structure, the GEMMs on TF32 tensor cores (``tf32_gemms``), every tensor fp32.
 
-``serves()`` is the gate (B200 or H100, an engine implementation, pair [1, L, L, C] bf16 or fp32, C = 128 or 256 on H100, 128 on B200);
-anything else takes the PyTorch fold of ``modules.token_dit.pair_bias_all``. At C = 256 (the widths written 128 above) every kernel is the same
-template at the other width, except the multi-block bf16 backward (``bo_hoist_bwd.cu``, 128 only): more than one block of 16 heads takes the
-two GEMMs around ``ln0_bwd_rows`` there.
+``serves()`` is the gate (B200, an engine implementation, pair [1, L, L, 128] bf16 or fp32); anything else (H100 included) takes the
+PyTorch fold of ``modules.token_dit.pair_bias_all``.
 """
 
 from __future__ import annotations
@@ -47,8 +43,6 @@ import torch
 from miniworld_engine.kernels._compile import opaque
 
 DP = 128
-#: the pair widths of the fused hoist: 128 everywhere, 256 on H100 (the sm_90 kernels are templates on the width)
-DPS = (128, 256)
 BF = torch.bfloat16
 F32 = torch.float32
 #: the attribute of each hoisted bias that names its slot of the shared gradient buffer: (``_Sink``, block index)
@@ -56,20 +50,19 @@ SINK_ATTR = "_bias_only_dit_hoist_sink"
 
 
 def serves(implementation, attns, pair) -> bool:
-    """The fused hoist serves ``pair`` [1, L, L, C] (C = 128, or 256 on H100) and the attention modules ``attns`` (eps / head count / no
+    """The fused hoist serves ``pair`` [1, L, L, 128] on a B200 and the attention modules ``attns`` (eps / head count / no
     offset checked by the caller)."""
 
     if implementation != "miniworld":
         return False
-    if not pair.is_cuda or torch.cuda.get_device_capability(pair.device) not in ((10, 0), (9, 0)):
+    if not pair.is_cuda or torch.cuda.get_device_capability(pair.device) != (10, 0):
         return False
     dp = pair.shape[-1]
     if (
         pair.ndim != 4
         or pair.shape[0] != 1
         or pair.shape[1] != pair.shape[2]
-        or dp not in DPS
-        or (dp != DP and torch.cuda.get_device_capability(pair.device) != (9, 0))
+        or dp != DP
         or pair.shape[1] == 0
     ):
         return False
@@ -111,8 +104,6 @@ def _hoist_fwd(pair2d: torch.Tensor, wf: torch.Tensor, eps: float) -> torch.Tens
     """bias_all^T [N, R] (head-major, every block's) in the pair's dtype, freshly allocated (LN0 is a temporary)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
-    if HK.pass_fwd_served(pair2d, wf):
-        return HK.pass_fwd(pair2d, wf, eps)  # LayerNorm + projection in one pass over the pair (bo_hoist_pass.cu)
     ln0 = torch.empty_like(pair2d)
     HK.ln0_rows(pair2d, ln0, eps)
     with _gemms(pair2d.dtype):
@@ -134,11 +125,6 @@ def _hoist_bwd(
 
     N, R = dball.shape
     f32 = pair2d.dtype is F32
-    if HK.pass_bwd_served(pair2d, wf):
-        return list(HK.pass_bwd(pair2d, wf, dball, eps))  # one block of 16 heads, bf16 / fp32: one pass over the pair (bo_hoist_pass.cu)
-    if HK.fused_bwd_served(pair2d, wf):
-        dpair, dwf = HK.hoist_bwd_fused(pair2d, wf, dball, eps)  # one pass over the pair (bo_hoist_bwd.cu)
-        return [dpair, dwf]
     dp = pair2d.shape[-1]
     K = HK.operand_cols(pair2d.dtype, dp)
     with _gemms(pair2d.dtype):

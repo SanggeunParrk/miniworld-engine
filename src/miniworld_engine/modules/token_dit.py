@@ -615,8 +615,8 @@ def pair_bias_all(blocks, pair: torch.Tensor) -> tuple[torch.Tensor, ...]:
                 or getattr(a.to_bias, "bias", None) is not None or a.ln_pair.weight is None):
             raise ValueError("pair_bias_all: the blocks must share eps and head count, ln_pair must have a weight and no offset, "
                              "to_bias no bias")
-    # the "cuda" backend on an H100: the fused hoist (one pass over the pair in the forward, the blocks' bias gradients written into one
-    # buffer and one backward pass); pair [1, L, L, 128 / 256] bf16 or fp32 -- any other pair takes the PyTorch fold below
+    # the "cuda" backend on a B200: the fused hoist (one LayerNorm and one GEMM for every block, the blocks' bias gradients written into
+    # one buffer); pair [1, L, L, 128] bf16 or fp32 -- any other pair (and every H100 call) takes the PyTorch fold below
     if getattr(mods[0], "backend", "pytorch") == "cuda":
         from miniworld_engine.kernels.integrations import bias_only_dit_hoist
 

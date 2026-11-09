@@ -10,7 +10,7 @@ kept beside its output and is not imported or shipped (``gen/`` is not a package
 #: modes are required comes from the requirements rows.
 _STAGES = {
     "qkvg": (None, None), "qkvg_small": (None, None), "fwd": (None, None), "fwd_small": (None, None), "attn": (None, None),
-    "slab": (None, None), "pack": (None, None), "mod": (None, None), "wgrad": (None, None),
+    "slab": (None, None), "mod": (None, None), "wgrad": (None, None),
     "bwd": (None, {"train"}), "bwd_overwrite": (None, {"train"}), "wgwg": ({"bfloat16"}, {"train"}),
     "fp32": ({"float32"}, None), "wgwg32": ({"float32"}, {"train"}),
 }

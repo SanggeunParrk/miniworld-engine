@@ -3,8 +3,8 @@
 Scope: `TokenDiTMiniWorldBiasOnly` (`TokenDiT(model="miniworld_bias_only")`): AF3 Alg. 23 with the attention's query-key half removed --
 `BiasOnlyAttention` computes `a + sigmoid(to_scale(s)) * to_out(sigmoid(g) * softmax(bias) v)` with `bias = to_bias(LN(pair))` -- then
 the conditioned SwiGLU transition. Backends: `"pytorch"` (the reference) and `"cuda"` (below); there is no `"triton"` and no
-`"anthropic"` backend (no release has this block). `pair_bias_all(blocks, pair)` hoists every block's bias from one pass over the pair
-and takes the `"cuda"` path when the first block's backend is `"cuda"`. Requirement rows: `token_single`, L 128-768, d_single 768,
+`"anthropic"` backend (no release has this block). `pair_bias_all(blocks, pair)` hoists every block's bias from one LayerNorm and
+one GEMM over the pair (PyTorch on H100; the fused hoist kernels are B200-only). Requirement rows: `token_single`, L 128-768, d_single 768,
 16 heads x 48, n = 2, d_cond 384 (MiniWorld) and the engine-own d_cond 768 / d_pair 256 rows; dtypes `float32` and `master`; modes
 `eval` (5 samples) and `train` (1 and 48 samples). Measurement and judging: [../measure.md](../measure.md); conventions:
 [../modules.md](../modules.md), [../kernels.md](../kernels.md).
@@ -27,8 +27,6 @@ therefore a different algorithm from the token DiT's: P is made once per pair, a
 | `bias_only_dit_cond_tables_gemm_sm90` | forward_infer | `bo_gemm_sm90.cu cond_tables`: both conditioning-table GEMMs as one wgmma launch (up to 384 table rows) |
 | `bias_only_dit_train_*_sm90` | forward_train / backward | `bias_only_dit_train_rows.cu`: weight pack, cond LN, AdaLN, pair bias (mma.sync), residual passes and their backwards, unfold, finalize |
 | `bias_only_dit_f32_*` | forward / backward | `bias_only_dit_f32_rows.cu`: the fp32 rows, the fp32 pair bias (exact FMA or TF32 mma.sync) and its backward, the fp32 softmax |
-| `bias_only_dit_hoist_fwd_sm90`, `_hoist_fwd_fp32_sm90` | forward | `bo_hoist_pass.cu`: LN0(pair) and every block's projection in one pass (N <= 64 bias rows) |
-| `bias_only_dit_hoist_bwd_sm90`, `_hoist_bwd_fp32_sm90`, `_hoist_bwd_fused_sm90`, `bias_only_dit_hoist_ln0_bwd_rows` | backward | the hoist's backward: one pass for one block of 16 heads, `bo_hoist_bwd.cu` up to 192 rows (bf16, d_pair 128), else two GEMMs around `ln0_bwd_rows` |
 | `cond_transition_gemm_swiglu_sm90` | forward_infer | the token DiT's expand GEMM with the SwiGLU epilogue (bf16 inference) |
 
 ## Inference (`kernels/integrations/bias_only_dit.py` -> `bias_only_dit/cuda/runner.py`, `FusedBiasOnlyDiT`)
@@ -60,8 +58,8 @@ One autograd Function per block (`_Block` bf16, `_Block32` fp32, `_BlockH` with 
 - fp32 forward: the same steps on TF32 GEMMs and the fp32 rows; pair bias `pair_bias_tc` (TF32 mma.sync); `pvx32` reads v^T and g from
   one flat buffer. fp32 backward: `gate_bwd_fold` writes dO head-major with the samples folded into the columns, so `dV^T = dO^T P` and
   `dP = dO v^T` are each ONE batched cuBLAS TF32 GEMM over the heads (no permute copies); `dbias = P o (dP - D)`.
-- With `bias=` (from `pair_bias_all`): the block skips the pair kernels; its dbias is written straight into its slice of the hoist's
-  gradient buffer, and `ln_pair` / `to_bias` get their gradients from the hoist.
+- With `bias=` (from `pair_bias_all`): the block skips the pair kernels; its dbias leaves as the gradient of the `bias` input,
+  and `ln_pair` / `to_bias` get their gradients through `pair_bias_all`.
 
 ## Kernel design
 

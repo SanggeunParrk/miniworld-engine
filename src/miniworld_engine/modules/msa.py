@@ -166,10 +166,8 @@ class OuterProductMean(BackendModule, MasterWeights):
     #:       forward + backward) at d_hidden 32, (d_msa, d_pair) in ``opm_train.SHAPES``, batch 1; inference of other widths:
     #:       ``kernels.outer_product_mean.composed.inference`` (cuBLAS + the ``cuda.gather`` pass; d_hidden % 8, d_hidden^2 in 512 / 1024)
     #:   projection biases (RoseTTAFold3)  training: ``opm_train`` (biases in the prologue); inference: ``composed.biased_wide``
-    #:       (S % 256, N % 64, d_msa 64 / 128, d_pair 128 / 256 / 384), else ``composed.biased_on_fused`` (on opm_train's range), else
-    #:       ``composed.inference``
-    #:   groups (Chai-1, 8 x 8)  ``kernels.outer_product_mean.chai`` (fused CUDA passes, forward + backward; d_msa 64, N % 64), inference of
-    #:       other grouped forms: ``composed.inference``
+    #:       (S % 256, N % 64, d_msa 64 / 128, d_pair 128 / 256 / 384), else ``composed.inference``
+    #:   groups (Chai-1, 8 x 8)  ``kernels.outer_product_mean.chai`` (fused CUDA passes, forward + backward; d_msa 64, N % 64)
     #: ``"triton"``: ``kernels.outer_product_mean.triton.main.triton_outer_product_mean`` (forward + backward, bf16 activations; d_msa /
     #: d_hidden powers of two >= 16, d_pair % 32; divides by the clamped count only: no ``count_offset``; no ``mask_interchain``).
     backends = ("pytorch", "cuda", "triton")
@@ -209,11 +207,8 @@ class OuterProductMean(BackendModule, MasterWeights):
         if self.groups > 1:
             if chai.serves(self, msa, mask, training=grad, interchain=interchain):
                 return "chai", None
-            if not grad and same_dtype and composed.serves(self, msa, mask):
-                return "composed", None
             return None, (f"grouped OPM (groups {self.groups} x {self.group_width}, d_msa {msa.shape[-1]}, N {msa.shape[2]}, batch {msa.shape[0]}"
-                          f", grad {grad}): the Chai-1 kernels take 8 x 8 groups, d_msa 64, N % 64, batch 1 (training without interchain)"
-                          "; the composed inference path needs no grad")
+                          f", grad {grad}): the Chai-1 kernels take 8 x 8 groups, d_msa 64, N % 64, batch 1 (training without interchain)")
         why = opm_train.refusal(msa, *dims, interchain=interchain if grad or self.to_left.bias is None else False,
                                 normalize_before_proj=self.normalize_before_proj, custom_divisor=custom)
         if self.to_left.bias is None:
@@ -226,11 +221,9 @@ class OuterProductMean(BackendModule, MasterWeights):
             return ("opm_train", None) if why is None else (None, f"projection-bias OPM training: opm_train: {why}")
         if composed.biased_wide_serves(self, msa, mask):
             return "biased_wide", None
-        if why is None:
-            return "biased_on_fused", None
         if same_dtype and composed.serves(self, msa, mask):
             return "composed", None
-        return None, f"projection-bias OPM inference: neither the wide composition, opm_train ({why}) nor the composed path serves it"
+        return None, "projection-bias OPM inference: neither the wide composition nor the composed path serves it"
 
     def _supports_cuda(self, msa, mask=None, token_asym_id=None, residual=None) -> str | None:
         return self._cuda_route(msa, mask, token_asym_id, residual)[1]
@@ -248,8 +241,6 @@ class OuterProductMean(BackendModule, MasterWeights):
             return composed.inference(self, msa, mask, token_asym_id, residual)
         if route == "biased_wide":
             return composed.biased_wide(self, msa, mask, token_asym_id, residual)
-        if route == "biased_on_fused":
-            return composed.biased_on_fused(self, msa, mask, token_asym_id, residual)
         # opm_train (never with the interchain mask: _cuda_route refuses it there); the residual is fused in its epilogue
         full = mask if mask is not None else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
         return opm_train.outer_product_mean(self, msa, full, residual=residual)

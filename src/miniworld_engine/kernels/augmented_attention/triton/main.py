@@ -368,13 +368,26 @@ def _attn_bwd_dqdkdv(
     return dk, dv
 
 
+def _fits_dq_slots(configs, named_args, **kw):
+    """``early_config_prune``: keep the configs whose ``cdiv(N_CTX, BLOCK_M2)`` key blocks fit the slots of ``DQ``.
+
+    The callers size ``DQ`` (``dq_expand`` / ``dq_slots``) from ``_bwd_min_block_n()`` over the default and table configs; a
+    candidate outside that set (the pretuner's, e.g. BLOCK_M2=32) with a smaller BLOCK_M2 would write past the buffer. A
+    correctness exclusion only."""
+    args = {**named_args, **kw}
+    slots, n_ctx = args["DQ"].shape[0], args["N_CTX"]
+    keep = [c for c in configs if triton.cdiv(n_ctx, c.kwargs["BLOCK_M2"]) <= slots]
+    if not keep:
+        raise ValueError(f"no config's BLOCK_M2 fits {slots} dQ split slots at N_CTX={n_ctx}")
+    return keep
 
 
 # AUTOTUNE KEY: `A`/`B` out for the same reason as the forward -- `A` is unread here, and `B` only
 # folds into the constant M_offset stride (B*H*N_CTX).
 @configured('augmented_attention_bwd_split_triton',
             key=['shape_key', 'CHUNKED'],
-            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
+            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2),
+            prune=_fits_dq_slots)
 @triton.jit
 def _attn_bwd(
     Q,

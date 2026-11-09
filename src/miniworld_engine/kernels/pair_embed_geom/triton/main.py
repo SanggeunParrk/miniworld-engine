@@ -60,6 +60,9 @@ def _dihedral(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz):
     c2x, c2y, c2z = _cross(b1x, b1y, b1z, b2x, b2y, b2z)
     n2x, n2y, n2z = _unit(c2x, c2y, c2z)
     cosv = n1x * n2x + n1y * n2y + n1z * n2z
+    # an exact zero is +0, as torch's +0-seeded vecdot gives it: a degenerate dihedral (CB_j == CB_i on the diagonal: n2 = 0) can leave the
+    # FMA chain at -0, and atan2(0, -0) = pi lands in the last bin where torch has atan2(0, +0) = 0
+    cosv = tl.where(cosv == 0.0, 0.0, cosv)
     xx, xy, xz = _cross(n1x, n1y, n1z, n2x, n2y, n2z)
     s = xx * b1x + xy * b1y + xz * b1z
     sg = tl.where(s > 0.0, 1.0, tl.where(s < 0.0, -1.0, 0.0))
@@ -71,7 +74,8 @@ def _bond(ax, ay, az, bx, by, bz, cx, cy, cz):
     b0x, b0y, b0z = _unit(bx - ax, by - ay, bz - az)
     b1x, b1y, b1z = _unit(cx - ax, cy - ay, cz - az)
     xx, xy, xz = _cross(b0x, b0y, b0z, b1x, b1y, b1z)
-    return libdevice.atan2(tl.sqrt_rn(xx * xx + xy * xy + xz * xz), b0x * b1x + b0y * b1y + b0z * b1z)
+    c = b0x * b1x + b0y * b1y + b0z * b1z
+    return libdevice.atan2(tl.sqrt_rn(xx * xx + xy * xy + xz * xz), tl.where(c == 0.0, 0.0, c))   # +0 for an exact zero, as in _dihedral
 
 
 @triton.jit

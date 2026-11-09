@@ -53,8 +53,6 @@ Names from `requirements/requirements_kernel.csv` (family `triangle_attention`);
 | `triangle_attention_wgrad_sm90`, `triangle_attention_wgrad_reduce_sm90`, `triangle_attention_param_finish_sm90` | backward | `tri_wgrad` (d128): weight / LN-parameter gradients from per-CTA partial slots, summed in a fixed order, then the parameter algebra `dW_t = gamma M_t + beta cs_t` |
 | `triangle_attention_generic_pack_sm90` | forward | glue `pack`: Wcat = [Wq; Wk; Wv; Wg; Wb (heads rounded up to 8 rows)] bf16 and Wo; 16-channel heads zero-padded to 32 |
 | `triangle_attention_generic_layernorm_fwd_sm90` | forward | glue `ln_fwd`: y = LN(x) (bf16, or fp16 for fp16 inference GEMMs) + fp32 mean / rstd; also the dh path's LN |
-| `triangle_attention_generic_layernorm_bias_fwd_sm90` | forward_infer | glue `ln_bias_fwd`: LN + bias projection + head-major bias in one pass (d_pair 256, <= 8 heads, L > 256) |
-| `triangle_attention_generic_front_c256_sm90` | forward_infer | glue `front_c256`: LN + q / k / v / g + bias in one kernel (d_pair = d_hidden = 256, L > 256) |
 | `triangle_attention_front_fused_sm90` | forward_infer | `front_fused3_sm90.cu` `front`: LN + [Wq; Wk; Wv; Wg; Wb] in one kernel for short inference (`_FRONT_L`: d_pair 64 up to L768, wider up to L128) |
 | `triangle_attention_generic_front_bias_sm90` | forward | glue `front_bias`: the bias GEMM's [M, Hp] output -> head-major scaled / masked sbias |
 | `triangle_attention_generic_residual_sm90` | forward_train | glue `residual`: `x + drop o t` (training with dropout; without dropout the residual is in the cublasLt epilogue) |
@@ -120,8 +118,7 @@ residual kernels and cuBLAS GEMMs (bf16 in, fp32 accumulate).
 - forward: `ln_fwd` -> `[q | k | v | g | bias] = y Wcat^T` -> `front_bias` -> core with the gate in its epilogue (`u = sigmoid(g)
   o O`; O itself only when the backward needs it) -> `x + u Wo^T` (cublasLt, residual and RF3 out bias in the epilogue) or, with
   dropout, `t = u Wo^T` then `residual`. Short inference uses one GEMM for q | k | v | g | bias (L <= 256) or the one-kernel front
-  (`front_fused3`, `_FRONT_L`); fp16 inference beyond L 256 uses fp16 GEMMs, and at d_pair 256 `front_c256` (d_hidden 256) or
-  `ln_bias_fwd` (<= 8 heads).
+  (`front_fused3`, `_FRONT_L`); fp16 inference beyond L 256 uses fp16 GEMMs.
 - backward: `gate_bwd_in` -> `du = ddrop Wo`, `dWo = ddrop^T u` (fp32 result) -> `gate_bwd_out` -> `triattn_bwd_kv` /
   `triattn_bwd_q` write dk / dv / dq into their columns of `dall [M, 4 HD + Hp]` -> `assemble` -> `dyln = dall Wcat` (bf16),
   `dW = dall^T y` (fp32 result) -> `ln_bwd` (dx = dy + LN backward; gamma / beta partials summed by torch).

@@ -244,7 +244,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
                 _rows_ext().pair_bias_rows32(pair.view(L * L, dp), wf, bias, mask, int(L), 1e-5, -1e30)
             elif dp == 128 and _FUSED_PAIR_BIAS_F32 and heads in (12, 16, 24) and pair.is_contiguous() and wf.is_contiguous():
                 # LayerNorm + the projections + the key permutation + the mask in ONE pass over the pair (the LN, a cuBLAS GEMM and
-                # the mask fill read / wrote it three times: 302 MB each at fp32); masked keys take the same -1e30 as token_mask90
+                # the mask fill read / wrote it three times: 302 MB each at fp32); masked keys take -1e30 like the fallback below
                 from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32
 
                 bias = single.new_empty((heads, L, L))
@@ -254,8 +254,8 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
                 zh = single.new_empty((L * L, dp))
                 _ext().layernorm128_rows(pair.view(L * L, dp), zh, 1e-5, True)
                 bias = torch.mm(wf, zh.t()).view(heads, L, L)
-                if mask is not None:
-                    _ext().token_mask90(bias, mask)
+                if mask is not None:   # the masked keys in key_perm order
+                    bias.masked_fill_(~mask[key_perm(L, single.device)], -1e30)
             if extra is not None:
                 # the TF32 core reads the keys in key_perm order: the extra term is laid out the same way (masked keys stay at -1e30)
                 bias += (extra.float() * 1.4426950408889634)[:, key_perm(L, single.device)]

@@ -630,18 +630,6 @@ void token_stage90(std::vector<at::Tensor> weights,std::vector<at::Tensor> out,i
  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-__global__ void token_mask90_k(float* bias,const bool* mask,int64_t N,int L) {
- long i=(long)blockIdx.x*256+threadIdx.x;if(i>=N)return;
- int k=i%L,p=(k&~7)+4*(k&1)+((k&7)>>1);
- if(!mask[p])bias[i]=-1e30f;
-}
-void token_mask90(at::Tensor bias,at::Tensor mask) {
- TORCH_CHECK(bias.is_cuda()&&bias.is_contiguous()&&bias.scalar_type()==at::kFloat&&mask.is_cuda()&&mask.scalar_type()==at::kBool&&mask.is_contiguous(),"native token FP32 mask");
- const at::cuda::CUDAGuard guard(bias.device());
- token_mask90_k<<<(bias.numel()+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(bias.data_ptr<float>(),mask.data_ptr<bool>(),bias.numel(),mask.numel());
- C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
 // ---- fp32 pair bias in ONE pass over the pair ------------------------------------------------------------------------------
 // out[h, i L + pos(j)] = (Wf[h] . LN(z[i L + j])) for h < NH, -inf where MASK[j] is false; z [R, 128] fp32, Wf [NH, 128] fp32 (the
 // LayerNorm weight and any log2 e scale folded in). One thread per pair row, a 128-row tile through shared memory (read once,
@@ -734,7 +722,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("token_pack_vector", &token_pack_vector);
   m.def("token_alloc90", &token_alloc90);
   m.def("token_stage90", &token_stage90);
-  m.def("token_mask90", &token_mask90);
   m.def("adaln_rows_cuda", &adaln_rows);
   m.def("resgate_adaln_rows_cuda", &resgate_adaln_rows);
   m.def("resgate_adaln_rows_r_cuda", &resgate_adaln_rows_r);

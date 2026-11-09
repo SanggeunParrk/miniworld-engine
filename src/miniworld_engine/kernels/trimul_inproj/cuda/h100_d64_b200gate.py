@@ -179,12 +179,8 @@ def _output(x, tri, wg, wp, gi, bi, go, bo, ds, y, stats):
 
 def _prepare(leaves, mask):
     x, wl, wlg, wr, wrg = leaves[:5]
-    bsz, n = x.shape[0], x.shape[1]
+    n = x.shape[1]
     w1 = x.new_empty((4 * HIDDEN, WIDTH))
-    if T.cuda_training_aux_enabled():
-        from ._h100_pack import pack_into_cuda, training_pair_mask
-        pack_into_cuda(w1, wl, wlg, wr, wrg)
-        return w1, training_pair_mask(mask, n, x.device, bsz)
     T.pack_into(w1, wl, wlg, wr, wrg)
     # An owned FP32 copy (also for FP32 callers: a saved output must not alias an input);
     # K1 reads it now and the backward reuses it.

@@ -163,7 +163,7 @@ def _composed_cuda(device: torch.device, extra: str | None = None) -> bool:
 def _composed_builds(device: torch.device, extra: str | None) -> bool:
     from miniworld_engine.kernels.swa_dit.cuda.loader import extension
 
-    stages = ("qkvg", "fwd", "bwd", "attn", "slab", "pack", "mod", "wgrad") + ((extra,) if extra else ())
+    stages = ("qkvg", "fwd", "bwd", "attn", "slab", "mod", "wgrad") + ((extra,) if extra else ())
     return all(extension(which) is not None for which in stages)
 
 
@@ -574,28 +574,9 @@ def _pack_ffn(
     return wab, wd.t().contiguous(), wab.t().contiguous()
 
 
-_PACK_CACHE: dict[int, tuple] = {}
-
-
 def _ffn_packs(wu: torch.Tensor, wd: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """(wab64, wab32, wdt, wabt) of the wgmma FFN kernels: one launch (``cuda/swa_pack.cu``), kept for the next call on the same
-    weight tensors at the same version (the backward of the step the forward packed for) -- not while a CUDA graph is captured,
-    where every replay has to repack the weights an optimizer step changed. The torch copies where the extension does not build."""
-    import weakref
-
-    ext = _cuda("pack", True, wu.device) if wu.dtype == torch.bfloat16 and wu.is_contiguous() and wd.is_contiguous() else None
-    if ext is None:
-        wab = _pack_ffn(wu, wd)
-        return (_pack_ffn64(wu), *wab)
-    if torch.cuda.is_current_stream_capturing():
-        return tuple(ext.pack_ffn(wu, wd))
-    dev = wu.device.index if wu.device.index is not None else torch.cuda.current_device()
-    hit = _PACK_CACHE.get(dev)
-    if hit is not None and hit[0]() is wu and hit[1]() is wd and hit[2] == (wu._version, wd._version):
-        return hit[3]
-    packs = tuple(ext.pack_ffn(wu, wd))
-    _PACK_CACHE[dev] = (weakref.ref(wu), weakref.ref(wd), (wu._version, wd._version), packs)
-    return packs
+    """(wab64, wab32, wdt, wabt) of the wgmma FFN kernels: the torch layout copies (``_pack_ffn64``, ``_pack_ffn``)."""
+    return (_pack_ffn64(wu), *_pack_ffn(wu, wd))
 
 
 def _swa_dit_block_fwd_fake(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save):

@@ -25,7 +25,7 @@ Names from `requirements_kernel.csv`; the `cond_transition_*` rows belong to the
 | `cond_transition_token_resgate_adaln_rows_sm90` | forward_infer | `x += sigmoid(gate) y` (fp32) then the transition's AdaLN; optional RNA rounding to TF32 |
 | `cond_transition_token_swiglu_rows_sm90` | forward | `silu(a) b` where the fused expand GEMM is not used |
 | `cond_transition_token_resgate_out_rows_sm90` | forward_infer | the last residual, written in the output dtype |
-| `cond_transition_token_layernorm_rows_sm90`, `cond_transition_token_mask_sm90` | forward | pair LayerNorm rows (no affine; optional key permutation) and the masked-key fill of the fp32 bias |
+| `cond_transition_token_layernorm_rows_sm90` | forward | pair LayerNorm rows (no affine; optional key permutation) |
 | `cond_transition_gemm_swiglu_sm90` | forward_infer | `gemm_swiglu_sm90.cu`: expand GEMM with SwiGLU in the epilogue, `[a \| b]` never stored |
 | `augmented_attention_apb_pair_bias_fwd_sm90` | forward | bf16 pair bias: LN(pair) . Wf on mma.sync, head-major, masked keys -inf (shared with AttentionPairBias) |
 | `bias_only_dit_f32_pair_bias_tc` | forward | fp32 pair bias at d_pair 128 (`pair_bias_tok`): LN + projection + key permutation + mask in one pass |
@@ -47,7 +47,7 @@ No autograd, one opaque op per block call (`token_dit_h100_infer`), autocast off
 2. **Pair bias**, hoisted: `bias [H, L, L]` in log2 units, masked keys -1e30, built once per (pair, mask, Wf) and cached through
    `_capture.lookup_inputs` (the pair is held by a weak storage reference, so a freed pair evicts its entry). bf16: the APB pair kernel
    (d_pair 128) or CUDA LayerNorm rows + one cuBLAS GEMM (d_pair 256). fp32: written in the TF32 core's key order (below), by
-   `pair_bias_tok` (128) or `pair_bias_rows32` (256, 16 heads), else LayerNorm rows + GEMM + `token_mask90`. An `extra_pair_bias`
+   `pair_bias_tok` (128) or `pair_bias_rows32` (256, 16 heads), else LayerNorm rows + GEMM + a torch masked fill of the keys in the core's order. An `extra_pair_bias`
    [L, L] is added once here (times log2 e; key-permuted in fp32).
 3. **Conditioning**: `cond_rows`, then two GEMMs: `g1 [P, 4, D]` (AdaLN scale / shift of both halves) and `g2 [P, 2, D]` (the two
    output gates). P = L rows when the samples share the conditioning (sample axis 1 or stride 0), A L rows otherwise.

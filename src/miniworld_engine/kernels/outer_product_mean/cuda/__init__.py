@@ -27,16 +27,6 @@ def gather(prod, groups, k, weight=None, bias=None, eps=0.1):
     return ext().opm_gather(prod, int(groups), int(k), weight, bias, float(eps))
 
 
-def split_groups(x, b, s, n, groups, k):
-    """x [B S N, G K] bf16 (the projection rows) -> [B G, S, N K] bf16: per group, the rows' K channels in row order."""
-    return ext().opm_split_groups(x, int(b), int(s), int(n), int(groups), int(k))
-
-
-def bias_finish(out, c1, c2, count, c, dmin=1.0, doff=0.0):
-    """In place: out += (c1 + c2) / max(count, 1) + (count > 0) c (out bf16 [..., F]; c1 / c2 fp32 like it; count fp32 per row; c fp32 [F]).
-    With the divisor d = max(count, dmin) + doff other than the clamp (``count_offset``): out += (c1 + c2 + count c) / d."""
-    ext().opm_bias_finish(out, c1, c2, count, c, float(dmin), float(doff))
-
 
 @functools.lru_cache(maxsize=None)
 def chai_ext():
@@ -79,13 +69,13 @@ def chai_projbwd(x, mask, da, db, gamma, beta, stats, wlr):
 
 def prebuild(target, rows):
     """Every build of this module for the requirements ``rows`` (kernels/_prebuild.py); the training OPM extensions are in
-    kernels/integrations/opm_train.py. The gather build serves the inference kernels (``gather`` / ``split_groups`` /
-    ``bias_finish``) of every row that has them; the Chai-1 build serves the ``chai_*`` kernels, which only a grouped
+    kernels/integrations/opm_train.py. The gather build serves the inference kernel (``gather``) of every
+    row that has it; the Chai-1 build serves the ``chai_*`` kernels, which only a grouped
     (``groups``) OuterProductMean row launches."""
     from miniworld_engine.kernels._prebuild import _kv
 
     names = set().union(*(r["kernels"] for r in rows)) if rows else set()
-    if names & {"outer_product_mean_gather_sm90", "outer_product_mean_split_groups_sm90", "outer_product_mean_bias_finish_sm90"}:
+    if "outer_product_mean_gather_sm90" in names:
         yield ext
     if any("groups" in _kv(r["options"]) and any("_chai_" in k for k in r["kernels"]) for r in rows):
         yield chai_ext

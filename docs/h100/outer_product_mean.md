@@ -38,8 +38,7 @@ once per (d_msa, d_pair) and variant flags), `kernels/outer_product_mean/cuda/ch
 | `outer_product_mean_bwd_reduce_sm90` | backward | `opm_reduce_partials_chunked`: fixed-order sum of per-CTA partials (dWo, the dgrad's dbias, the prologue backward's weight / affine sums) |
 | `outer_product_mean_bwd_prologue_sm90` | backward | `opm_prologue_bwd_kernel`: mask, both projection backwards and the LN backward in one pass -> dm and per-CTA partials of dWa, dWb, dgamma, dbeta |
 | `outer_product_mean_bwd_finish_sm90` | backward | `opm_finish_native` (d_msa 64 native path): turns the reduced partials into dWa, dWb (gamma / beta applied) and dgamma, dbeta |
-| `outer_product_mean_gather_sm90`, `..._split_groups_sm90` | forward_infer | `gather_kernel` / `split_kernel` (`gather.cu`) of the composed inference path |
-| `outer_product_mean_bias_finish_sm90` | forward_infer | `bias_finish_kernel`: adds the RF3 bias terms to the fused output (`composed.biased_on_fused`) |
+| `outer_product_mean_gather_sm90` | forward_infer | `gather_kernel` (`gather.cu`) of the composed inference path |
 | `outer_product_mean_chai_proj_sm90`, `..._chai_epilogue_sm90` | forward | Chai-1: LN + projections + mask into group-major a, b; per-pair product LayerNorm + projection + bias + residual |
 | `outer_product_mean_chai_bwd_sm90`, `..._chai_projbwd_sm90` | backward | Chai-1: product-LN backward scattered into the grouped layout; projection + MSA LN backward |
 | `outer_product_mean_layernorm_gemm`, `_epilogue`, `_bwd_epilogue_dx`, `_bwd_epilogue_dw`, `_bwd_layernorm_gemm`, `_epilogue_ln`, `_bwd_epilogue_ln_dx`, `_bwd_epilogue_ln_dw` | forward / backward | the Triton backend (`triton/main.py`) |
@@ -54,8 +53,8 @@ The outer product itself (O = A2 BT^T), dA / dB and the composed paths' projecti
 |---|---|---|
 | groups 1, no projection bias | any | `opm_train.outer_product_mean` when `opm_train.refusal` is None; else, without grad, `composed.inference` |
 | projection bias (RF3) | grad | `opm_train` (biases in the prologue) |
-| projection bias | no grad | `composed.biased_wide` (S % 256, N % 64, d_msa 64 / 128, d_pair 128 / 256 / 384), else `composed.biased_on_fused`, else `composed.inference` |
-| groups > 1 (Chai-1) | any | `chai.forward` (8 x 8, d_msa 64, N % 64, batch 1, d_pair % 128; training without interchain), else no-grad `composed.inference` |
+| projection bias | no grad | `composed.biased_wide` (S % 256, N % 64, d_msa 64 / 128, d_pair 128 / 256 / 384), else `composed.inference` |
+| groups > 1 (Chai-1) | any | `chai.forward` (8 x 8, d_msa 64, N % 64, batch 1, d_pair % 128; training without interchain) |
 
 ### `opm_train` (groups 1)
 
@@ -94,11 +93,9 @@ chunk); `opm_dgrad` uses 64-column passes so three CTAs fit per SM, and larger C
 
 ### Composed inference (`composed.py`)
 
-For the forms `opm_train` does not take, without grad: `m = LN(msa)` (the module's own `ln_msa`), the projections as cuBLAS GEMMs (bias
-in the epilogue, mask after it), the per-group outer product as one batched GEMM `[(b g), (i k), (j l)]`, then `gather` writes the
-`[B N N, G K K]` rows (Chai-1's product LayerNorm in the same pass; G K K must be 512 or 1024), the out-projection, and for groups 1 the
-fp32 count division before or after it. `biased_on_fused` runs the fused path without biases and adds the bias terms
-`(Rs A^T + Ls Bm^T) / cnt + c` (`bias_finish`).
+For the groups-1 forms `opm_train` does not take (d_hidden 32), without grad: `m = LN(msa)` (the module's own `ln_msa`), the
+projections as cuBLAS GEMMs (bias in the epilogue, mask after it), the outer product as one batched GEMM `[b, (i k), (j l)]`, then
+`gather` writes the `[B N N, K K]` rows, the out-projection, and the fp32 count division before or after it.
 
 ### Chai-1 (`chai.py`)
 

@@ -30,7 +30,7 @@ serves bf16 activations only, so of the requirement dtypes it takes `master` (bf
 | `augmented_attention_apb_acc_reduce_sm90`, `augmented_attention_apb_finalize_sm90` | backward | fixed-order tree reduce of the per-block partial rows; every parameter gradient into its own fp32 tensor |
 | `augmented_attention_fwd`, `_bwd_pre`, `_bwd_split`, `_bwd_reduce` | forward / backward | the Triton core of the `"triton"` backend |
 
-`requirements_kernel.csv` also attributes the shared `layernorm*`, `layernorm_linear_fwd` and `cond_transition_caller_grad_*` kernels to
+`requirements_kernel.csv` also attributes the shared `layernorm*` and `cond_transition_caller_grad_*` kernels to
 this module; they are documented with their own families.
 
 ## Inference (one opaque op, `apb_b200_inference`)
