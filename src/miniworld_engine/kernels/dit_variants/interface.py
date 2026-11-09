@@ -1,4 +1,4 @@
-"""H100 inference of the DiT block variants (``modules.dit_variant``): the AF3 token step's structure with the variants' changes.
+"""H100 inference of the DiT block variants (the Boltz-2, RoseTTAFold3 and Chai-1 token and atom DiT blocks, ``modules.token_dit`` / ``modules.atom_dit``): the AF3 token step's structure with the variants' changes.
 
 Per step, for the whole stack:
   * the conditioning tables: ONE GEMM for every block's AdaLN scale / shift (the weight-only cond LayerNorm folded into the
@@ -19,8 +19,8 @@ import math
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels.dit_variants.cuda.infer32 import _atom_biases, _static_pack
 
 LOG2E = 1.4426950408889634
 #: gate logits of a block without a gating query: sigmoid(1e4) == 1.0 in fp32
@@ -29,27 +29,12 @@ _PACKS: dict = {}
 _BIASES: dict = {}
 
 
-def _static_pack(store: dict, stack, build):
-    """The stack's folded bf16 weights, made once per (parameter pointer, version) and reused by every later call, a CUDA-graph capture
-    and its replays included: these modules are inference only, so their weights do not change under a graph, and repacking in every
-    replay (what ``_capture.lookup``'s capture scope does) cost more than the step's kernels (RoseTTAFold3, 24 blocks, L 384: 5.75 against
-    2.59 ms). A first call inside a capture records the pack (its replays repack); an in-place weight change after a capture needs a new
-    capture, as it would for any cached state."""
-    key = (id(stack), *((p.data_ptr(), p._version) for p in stack.parameters()))
-    hit = store.get(key)
-    if hit is None:
-        if len(store) >= 8:
-            store.pop(next(iter(store)))
-        hit = store[key] = build(stack)
-    return hit
-
-
 def serves(stack, single, cond, pair, mask) -> bool:
     """A bf16 call without a gradient on H100 at the AF3 token core's layout (768 wide, 16 x 48 heads, L a multiple of 128),
     the conditioning shared by the samples."""
     if torch.is_grad_enabled() or not single.is_cuda or single.dtype is not torch.bfloat16:
         return False
-    if torch.cuda.get_device_capability(single.device) != (9, 0) or settings.current().force_portable_kernels:
+    if torch.cuda.get_device_capability(single.device) != (9, 0):
         return False
     from miniworld_engine.kernels.augmented_attention.cuda import (
         inference_core_supported,
@@ -202,7 +187,7 @@ _ATOM_BIASES: dict = {}
 def atom_serves(stack, single, cond, pair, mask, uid) -> bool:
     if torch.is_grad_enabled() or not single.is_cuda or single.dtype is not torch.bfloat16 or single.ndim != 3:
         return False
-    if torch.cuda.get_device_capability(single.device) != (9, 0) or settings.current().force_portable_kernels:
+    if torch.cuda.get_device_capability(single.device) != (9, 0):
         return False
     _, n, d = single.shape
     shared = cond.ndim == 2 or (cond.ndim == 3 and (cond.shape[0] == 1 or cond.stride(0) == 0))
@@ -257,49 +242,6 @@ def _atom_pack(stack):
         "mod_w": torch.cat(mod_w).to(bf).contiguous(), "mod_b": torch.cat(mod_b).to(bf).contiguous(),
         "gate_w": torch.cat(gate_w).to(bf).contiguous(), "gate_b": torch.cat(gate_b).to(bf).contiguous(), "blocks": per,
     }
-
-
-def _atom_biases(pack, z, kmask, uid, n, eps, slide):
-    """Per block: the clipped windows' bias (``pair_bias_mma``, log2 units, -inf off the keys, Chai-1's other-conformer keys -inf) and,
-    for the slid key window, its edge windows' (window index [5], key index [5, 128], bias [5, h, 32, 128] natural units with -inf off
-    the keys): everything that depends on the pair / mask / uid only, made once per pair."""
-    from miniworld_engine.kernels.augmented_attention.cuda import (
-        sm100_atom_local as local,
-    )
-
-    nwin = n // 32
-    same = None
-    if uid is not None:
-        # the clipped window's key of slot j: 32 w - 48 + j; keys outside [0, N) are -inf already. A padding query keeps its keys.
-        idx = (32 * torch.arange(nwin, device=z.device) - 48)[:, None] + torch.arange(128, device=z.device)
-        same = (uid.view(nwin, 32, 1) == uid[idx.clamp(0, n - 1)][:, None, :]) | ~kmask.view(nwin, 32, 1)
-    edge = None
-    if slide:
-        # windows 0, 1 and the last three real ones: the only ones whose slid window is not the clipped one (chosen on the device)
-        n_real = kmask.sum()
-        last = (n_real - 1) // 32
-        widx = torch.stack([last * 0, last * 0 + 1, last - 2, last - 1, last]).clamp(0, nwin - 1)
-        starts = torch.minimum((32 * widx - 48).clamp(min=0), (n_real - 128).clamp(min=0))
-        keys = starts[:, None] + torch.arange(128, device=z.device)
-        valid = (keys < n_real)[:, None, :]                                             # [5, 1, 128]
-        keys = keys.clamp(max=n - 1)
-        if uid is not None:
-            rows = 32 * widx[:, None] + torch.arange(32, device=z.device)
-            valid = valid & ((uid[rows][:, :, None] == uid[keys][:, None, :]) | ~kmask[rows][:, :, None])
-        zz = z[widx].float()
-        edge = (widx, keys, valid, zz)
-    out = []
-    for w in pack["blocks"]:
-        b = local.pair_bias_mma(z, w["gamma"], w["wb"], kmask, n, eps)
-        if same is not None:
-            b.masked_fill_(~same[None], float("-inf"))
-        e = None
-        if edge is not None:
-            widx, keys, valid, zz = edge
-            eb = F.linear(F.layer_norm(zz, zz.shape[-1:], w["gamma"], None, eps), w["wb"]).permute(0, 3, 1, 2)   # [5, h, 32, 128]
-            e = (widx, keys, eb.masked_fill(~valid[:, None], float("-inf")).contiguous())
-        out.append((b, e))
-    return out
 
 
 def _atom_edges(o, q, k, v, edge, a, n):

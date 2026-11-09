@@ -9,16 +9,15 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
-
 _dir = Path(__file__).parent
 C = 256
 NBLK = 33
 DX_CHUNK_BYTES = 1 << 29     # the backward's dx scratch (bf16 grad of the table sum) is built for at most this many bytes of pairs at a time
+BWD_IMPL = 1                 # table gradient on the tensor cores (wgmma); the .cu keeps 0 (shared-memory read-modify-write) as its A/B variant
 
 
 @functools.lru_cache(maxsize=None)
-def _ext():
+def ext():
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
@@ -32,14 +31,11 @@ def forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim, clim, n
     B, n = idx.shape
     out = torch.empty(B, n, n, C, device=tbl.device, dtype=torch.bfloat16)
     bins = torch.empty(B, n, n, device=tbl.device, dtype=torch.int32)
-    _ext().forward(tbl, lnw, lnb, gamma, beta, xt, sc, int(has_sc), idx, mask, xlim, clim, out, bins, int(nS), int(nX), float(eps1), float(eps2))
+    ext().forward(tbl, lnw, lnb, gamma, beta, xt, sc, int(has_sc), idx, mask, xlim, clim, out, bins, int(nS), int(nX), float(eps1), float(eps2))
     return out, bins
 
 
-IMPL = settings.current().pair_embed_bwd_impl   # 1: table gradient on the tensor cores (wgmma), 0: the shared-memory read-modify-write kernel (A/B)
-
-
-def backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2, impl=None):
+def backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2):
     """(dtbl [NT, 256], dln_w, dln_b [256], dgamma, dbeta [B, 256]) from d pair = dout [B, n, n, 256] bf16."""
     B, n = bins.shape[:2]
     NT = tbl.shape[0]
@@ -55,6 +51,6 @@ def backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2, impl=None):
     dbeta = torch.empty(B, C, device=dev, dtype=torch.float32)
     dlw = torch.empty(C, device=dev, dtype=torch.float32)
     dlb = torch.empty(C, device=dev, dtype=torch.float32)
-    _ext().backward(tbl, lnw, lnb, gamma, bins, dout, dx, part, tpart, dtbl, dgamma, dbeta, dlw, dlb, int(IMPL if impl is None else impl), int(chunk_b), int(nS), int(nX),
-                    float(eps1), float(eps2))
+    ext().backward(tbl, lnw, lnb, gamma, bins, dout, dx, part, tpart, dtbl, dgamma, dbeta, dlw, dlb, BWD_IMPL, int(chunk_b), int(nS), int(nX),
+                   float(eps1), float(eps2))
     return dtbl, dlw, dlb, dgamma, dbeta

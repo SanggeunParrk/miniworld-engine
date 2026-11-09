@@ -70,12 +70,6 @@ def _tf32_allowed() -> bool:
     )
 
 
-def _settings():
-    from miniworld_engine import settings
-
-    return settings.current()
-
-
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """sm_90, bf16 (or fp32 with TF32 allowed), D a multiple of 64 up to 1024, hidden a multiple of 128, weights bf16 or fp32 (cast to the activation dtype inside; the
     weight gradients come back in the weights' own dtype).  Any row count."""
@@ -113,7 +107,7 @@ _PREFER_GENERIC_ROWS = {
 def prefers_generic(x: torch.Tensor, training: bool, n: int = 4) -> bool:
     """Whether the generic kernels are the faster pick for this call even though a fused / wide build would also take it.
     D = 64 inference: the wide kernel (one launch, 64-row tiles up to 20 480 rows) beats the three generic ones at every row count."""
-    if x.dtype is not torch.bfloat16 or not _settings().transition_generic_small:
+    if x.dtype is not torch.bfloat16:
         return False
     limits = _PREFER_GENERIC_ROWS.get(x.shape[-1])
     if limits is None:

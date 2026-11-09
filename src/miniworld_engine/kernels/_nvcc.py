@@ -14,6 +14,7 @@ Two failures this fixes, both observed rather than guessed:
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import functools
 import importlib
 import os
@@ -24,6 +25,7 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
+
 
 
 @functools.lru_cache(maxsize=1)
@@ -91,11 +93,6 @@ def supported_arches() -> frozenset[str]:
     except (OSError, subprocess.SubprocessError):
         return frozenset()
     return frozenset(line.strip() for line in out.split("\n") if line.strip())
-
-
-#: Set by ``dev bundle-kernels`` (``sm90`` / ``sm100``): a build keeps only that arch out of a multi-arch ``gencodes``
-#: request, so a bundle carries one arch's code. The artifact's key is computed from the request, not from this.
-BUNDLE_ARCH_ENV = "MINIWORLD_ENGINE_BUNDLE_ARCH"
 
 
 def gencodes(*arches: str, ptx: tuple[str, ...] = ()) -> list[str]:
@@ -209,8 +206,8 @@ def host_flags() -> list[str]:
 
 
 def expand_flags(flags: list[str] | tuple[str, ...]) -> list[str]:
-    """``flags`` with the :func:`host_flags` / :func:`gencodes` placeholders replaced by real nvcc flags. Under
-    ``dev bundle-kernels`` (``MINIWORLD_ENGINE_BUNDLE_ARCH``) a multi-arch request keeps only the bundle's arch."""
+    """``flags`` with the :func:`host_flags` / :func:`gencodes` placeholders replaced by real nvcc flags (every requested
+    arch: an artifact is what its flags ask for, whichever GPU the building machine has, or none)."""
     from miniworld_engine.kernels._codegraph import (
         GENCODE_MARKER,
         HOST_MARKER,
@@ -232,11 +229,6 @@ def expand_flags(flags: list[str] | tuple[str, ...]) -> list[str]:
         else:
             out.append(f)
     if slot is not None:
-        bundle = os.environ.get(BUNDLE_ARCH_ENV, "").removeprefix("sm").removeprefix("_")
-        if bundle:
-            keep = [a for a in arches if a.rstrip("a") == bundle.rstrip("a")]
-            if keep:
-                arches, ptx = keep, [a for a in ptx if a.rstrip("a") == bundle.rstrip("a")]
         out[slot:slot] = real_gencodes(*arches, ptx=tuple(ptx))
     return out
 
@@ -337,6 +329,8 @@ def cutlass_include() -> Path:
     return inc if root and (inc / "cute" / "tensor.hpp").is_file() else CUTLASS_STANDIN
 
 
+
+
 # ---------------------------------------------------------------------------------------------
 # Build progress. Every JIT build is silent (verbose=False everywhere), so a first call that spends
 # minutes in nvcc looked exactly like a hang. One line when a compile starts, one when it ends,
@@ -345,10 +339,6 @@ def cutlass_include() -> Path:
 
 #: Prefix of every line this module prints.
 LOG_PREFIX = "[miniworld-engine build]"
-
-#: A torch extension load whose ``.so`` cannot be located counts as a build when it took longer
-#: than this; a no-op ninja check plus the import is far below it.
-LOAD_BUILD_SECONDS = 2.0
 
 #: How often a waiter on another process's build says it is still waiting.
 WAIT_LOG_SECONDS = 60.0
@@ -369,18 +359,25 @@ _BUILT: list[Built] = []
 _BUILT_GUARD = threading.Lock()
 
 
-def _log_enabled() -> bool:
-    try:
-        from miniworld_engine import settings
-    except ImportError:
-        return True
-    return bool(getattr(settings.current(), "jit_build_log", True))
+def engine_jit_root() -> Path:
+    """Directory the JIT-built kernels are cached in: $XDG_CACHE_HOME (else ~/.cache) / miniworld_engine_jit."""
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    return (Path(xdg).expanduser() if xdg else Path.home() / ".cache") / "miniworld_engine_jit"
+
+
+#: Prebuilt artifacts shipped inside the package: the same layout as :func:`engine_jit_root` (a copy of the prebuilt part
+#: of a cache, see ``kernels/_prebuild.py``), read-only, looked up first.
+PACKAGED_ROOT = Path(__file__).resolve().parents[1] / "_prebuilt"
+
+
+def artifact_roots() -> list[Path]:
+    """Where an artifact is looked up, in order: the packaged prebuilt kernels, then the local cache (where builds go)."""
+    return [PACKAGED_ROOT, engine_jit_root()]
 
 
 def build_log(message: str) -> None:
-    """Print one ``[miniworld-engine build]`` line to stderr (unless ``settings.jit_build_log`` is off)."""
-    if _log_enabled():
-        print(f"{LOG_PREFIX} {message}", file=sys.stderr, flush=True)
+    """Print one ``[miniworld-engine build]`` line to stderr."""
+    print(f"{LOG_PREFIX} {message}", file=sys.stderr, flush=True)
 
 
 def built_this_process() -> tuple[Built, ...]:
@@ -409,135 +406,11 @@ def building(name: str, kind: str) -> Iterator[None]:
     _record(name, kind, time.perf_counter() - started)
 
 
-def cache_roots() -> list[Path]:
-    """The JIT cache directories that exist here: ``settings.engine_jit_root()`` (every cubin and
-    every extension built with a ``build_directory``) and torch's extensions root (``$TORCH_EXTENSIONS_DIR``,
-    else torch's default, for ``load_extension`` calls without one). See docs/kernels/jit-cache.md."""
-    from miniworld_engine import settings
-
-    roots = [settings.engine_jit_root()]
-    torch_root = os.environ.get("TORCH_EXTENSIONS_DIR")
-    if not torch_root:
-        try:
-            from torch.utils.cpp_extension import get_default_build_root
-            torch_root = get_default_build_root()
-        except Exception:  # no torch, no torch cache
-            torch_root = None
-    if torch_root:
-        roots.append(Path(torch_root))
-    out: list[Path] = []
-    for r in roots:
-        if r.is_dir() and r.resolve() not in {o.resolve() for o in out}:
-            out.append(r)
-    return out
-
-
-# ---------------------------------------------------------------------------------------------
-# JIT extension loading, with the two failure modes that cost five GPU-hours.
-#
-# `torch.utils.cpp_extension.load` serialises concurrent builds with a `FileBaton` on
-# `<build dir>/lock`, and `FileBaton.wait()` polls for that file to disappear FOREVER, with no
-# timeout and no message. A build that is killed -- a cancelled Slurm job, a Ctrl-C -- leaves the
-# lock behind, and every later run on that machine blocks on it indefinitely.
-#
-# That happened. A run left a 13-hour-old lock in `layer_norm_cuda/`; three subsequent GPU jobs
-# (45 min killed, 4 h timed out, one stalled at test 42 of 100) all sat on it, and all three looked
-# exactly like "slow". Deleting the file moved the stalled job forward within 20 seconds.
-#
-# So: reclaim a lock that is too old to be real, say once a minute that we are waiting on a live
-# one, and raise naming the file only when the wait is beyond any real build. The remedy is one `rm`.
-# ---------------------------------------------------------------------------------------------
-
-#: A lock older than this cannot belong to a live build -- the longest real build here is a few
-#: minutes -- so it is a leftover and gets reclaimed, also while waiting on it. `build --reclaim`
-#: makes the same judgement about the builder's own O_EXCL claims.
-STALE_LOCK_SECONDS = 1800.0
-
-#: Upper bound on a wait for another process's build. A waiter does not give up on a live build
-#: (it waits until the lock is gone, or reclaims it once stale); this only fires when something is
-#: clearly wrong, such as a lock that cannot be removed or whose timestamps never age.
-LOCK_WAIT_SECONDS = 7200.0
-
-
-def _build_lock(name: str, build_directory: str | None = None) -> Path | None:
-    """The lock file `torch.utils.cpp_extension.load` will use for `name`, if it can be located.
-
-    `load(build_directory=...)` puts the baton there, not under TORCH_EXTENSIONS_DIR. Checking the
-    default dir instead left a 3-day-old leftover in ~/.cache/miniworld_engine_jit/miniworld_pwa_ctr
-    unguarded, and every rank of a MiniWorld training job sat in torch's unbounded
-    FileBaton.wait() (2026-09-28).
-    """
-    if build_directory:
-        return Path(build_directory) / "lock"
-    try:
-        from torch.utils.cpp_extension import _get_build_directory
-    except ImportError:      # torch too old / not installed: let `load` do whatever it does
-        return None
-    try:
-        return Path(_get_build_directory(name, verbose=False)) / "lock"
-    except Exception:        # locating the lock must never be what fails a build
-        return None
-
-
-def clear_stale_lock(lock: Path, stale_after: float = STALE_LOCK_SECONDS) -> bool:
-    """Delete `lock` if it is too old to belong to a running build. True if it was reclaimed."""
-    try:
-        st = lock.stat()
-    except OSError:
-        return False
-    # NFSv3 exclusive create (torch's FileBaton uses O_CREAT|O_EXCL) stores the create verifier
-    # in atime/mtime, so a LIVE lock on an NFS home can show an mtime in 1981. Trusting it deleted
-    # another rank's lock mid-build (2026-09-27): the builder's baton.release() raised
-    # FileNotFoundError and the job hung. ctime is set by the server; take the newer of the two,
-    # and never reclaim a timestamp from before 2000.
-    stamp = max(st.st_mtime, st.st_ctime)
-    if stamp < 946684800:
-        return False
-    age = time.time() - stamp
-    if age < stale_after:
-        return False
-    try:
-        lock.unlink()
-    except OSError:
-        return False
-    print(f"{LOG_PREFIX} reclaimed a stale build lock ({age / 60:.0f} min old): {lock}",
-          file=sys.stderr, flush=True)
-    return True
-
-
-def wait_for_lock(lock: Path, limit: float = LOCK_WAIT_SECONDS, name: str | None = None,
-                  stale_after: float = STALE_LOCK_SECONDS, poll: float = 2.0) -> None:
-    """Wait while another process builds behind `lock`; return once it is gone or reclaimed as stale.
-
-    Says so once a minute (after a few quiet seconds: a cached load holds the lock briefly too).
-    Raises, naming the file, only past `limit` -- far beyond any real build.
-    """
-    if not lock.exists():
-        return
-    what = name or lock.parent.name
-    started = time.monotonic()
-    next_report = started + min(WAIT_QUIET_SECONDS, limit)
-    while lock.exists():
-        if clear_stale_lock(lock, stale_after):
-            return
-        now = time.monotonic()
-        if now - started > limit:
-            msg = (f"waited {(now - started) / 60:.0f} min for another process's build lock and it "
-                   f"is still there:\n    {lock}\n"
-                   f"If no build is running, it is a leftover from a killed one -- torch waits on "
-                   f"it forever, which is why this raises instead. Remove it:\n"
-                   f"    rm {lock}")
-            raise TimeoutError(msg)
-        if now >= next_report:
-            build_log(f"waiting for {what}, built by another process ({now - started:.0f} s)")
-            next_report = now + WAIT_LOG_SECONDS
-        time.sleep(poll)
-
-
 def flock_wait(handle: Any, name: str) -> None:
     """``fcntl.flock(handle, LOCK_EX)``, saying once a minute that another process holds it.
 
-    No upper bound and no stale check: the kernel drops a flock when its holder dies.
+    No upper bound and no stale check: the kernel drops a flock when its holder dies, so a killed build never leaves a lock
+    that blocks the next one (torch's own ``FileBaton`` lock lives inside the private temporary build directory).
     """
     import fcntl
 
@@ -556,92 +429,26 @@ def flock_wait(handle: Any, name: str) -> None:
         time.sleep(0.2)
 
 
-def _mtime(path: Path | None) -> float | None:
-    if path is None:
-        return None
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return None
+def _tmp_name(final: Path) -> Path:
+    """A private sibling of ``final`` to build into; renamed onto ``final`` only when complete."""
+    import socket
 
-
-def _will_build(library: Path, before: float | None, sources: list[str] | None) -> bool:
-    """Cheaply predict that torch's ninja is about to compile: no library yet, or (when the sources are
-    known) a ``build.ninja`` that does not name them -- another checkout built this cache -- or a source
-    newer than the library. Included headers are not checked; a rebuild they cause gets only the
-    "built" line."""
-    if before is None:
-        return True
-    if not sources:
-        return False
-    try:
-        ninja = (library.parent / "build.ninja").read_text()
-    except OSError:
-        return True
-    for s in sources:
-        path = os.path.abspath(s)
-        if path not in ninja:
-            return True
-        mtime = _mtime(Path(path))
-        if mtime is not None and mtime > before:
-            return True
-    return False
-
-
-def _guarded_load(name: str, kind: str, build_directory: str | None, call: Callable[[], Any],
-                  sources: list[str] | None = None) -> Any:
-    """Run a torch JIT load behind the lock guard, and log it if it compiled.
-
-    torch decides internally whether to rebuild (ninja), so the build is confirmed afterwards: the
-    library ``<build dir>/<name>.so`` is new or changed. When that is predictable up front
-    (:func:`_will_build`) the "compiling" line comes first.
-    """
-    lock = _build_lock(name, build_directory)
-    if lock is not None and not clear_stale_lock(lock):
-        wait_for_lock(lock, name=name)
-    library = lock.parent / f"{name}.so" if lock is not None else None
-    before = _mtime(library)
-    announced = library is not None and _will_build(library, before, sources)
-    if announced:
-        build_log(f"compiling {name} ({kind}) ...")
-    started = time.perf_counter()
-    try:
-        ext = call()
-    except BaseException:
-        # torch does not always release its baton when the build raises, and the leftover is
-        # indistinguishable from a live build -- so the NEXT call in this same process waits on a
-        # lock nobody holds. Seen for real: one nvcc failure in `transition_cuda_ext_v2` left the
-        # lock, and the following checker sat in `wait_for_lock` until its deadline. Guarding only
-        # the lock that exists on entry (above) covers another process; this covers our own.
-        if lock is not None:
-            lock.unlink(missing_ok=True)
-        if announced:
-            build_log(f"failed to build {name} after {time.perf_counter() - started:.1f} s")
-        raise
-    seconds = time.perf_counter() - started
-    if library is not None:
-        after = _mtime(library)
-        compiled = after is not None and after != before
-    else:
-        compiled = seconds > LOAD_BUILD_SECONDS
-    if compiled:
-        _record(name, kind, seconds)
-    elif announced:
-        build_log(f"{name} needed no rebuild")
-    return ext
+    return final.with_name(f".{final.name}.tmp-{socket.gethostname()}-{os.getpid()}")
 
 
 # ---------------------------------------------------------------------------------------------
-# Artifact resolution: installed bundle -> local cache -> build. Every compiled artifact (a torch extension or a cubin)
-# is named by a content key from its code graph (kernels/_codegraph.py), the same on every machine. A bundle hit loads
-# the shipped binary and never touches nvcc; a cache hit loads the local one; only a miss compiles, and with
-# settings.jit_fallback False a miss raises instead. See docs/kernels/prebuilt-kernels.md.
+# Artifact resolution: packaged prebuilt -> local cache -> build. Every compiled artifact (a torch extension or a cubin) is
+# named by a content key from its code graph (kernels/_codegraph.py), the same on every machine; its path relative to a root
+# is ``torch_extensions/<name>-<key16>/`` or ``<family>/<stem>-<key16>.cubin``. A build writes into a private temporary
+# path and renames it into place when complete, so a killed build leaves nothing a later process mistakes for an artifact.
+#
+# Planning (``planning()``, used by kernels/_prebuild.py): a load records what it would build and returns a stand-in instead
+# of looking anything up, so a build list comes from calling the very functions the runtime calls.
 # ---------------------------------------------------------------------------------------------
 
 #: key of every artifact this process resolved, by path (derived artifacts key off their base).
 _KEY_OF: dict[str, str] = {}
 _LOADED: dict[str, Any] = {}
-_MISS_EXPLAINED = False
 
 
 def key_of_artifact(path: str | Path) -> str | None:
@@ -649,38 +456,79 @@ def key_of_artifact(path: str | Path) -> str | None:
     return _KEY_OF.get(str(path))
 
 
-def _jit_fallback() -> bool:
+@dataclasses.dataclass
+class Spec:
+    """One artifact a load asked for while planning: enough to build it in another process (``call`` replays the load)."""
+
+    kind: str  # "ext" | "cubin" | "derived"
+    name: str
+    key: str
+    rel: str  # path relative to an artifact root
+    call: dict
+    site: str  # "<file relative to kernels/>::<function>" of the call
+    overlay: dict  # generated headers (path -> text) the build writes first
+    files: list  # package files in its code graph (sources and headers)
+
+
+_PLAN: list[Spec] | None = None
+#: True in a prebuild worker: build a torch extension without failing when this machine cannot import it (no GPU driver).
+_BUILD_ONLY = False
+
+
+class Planned(RuntimeError):
+    """A planned (not built) artifact was used."""
+
+
+class _Stub:
+    def __init__(self, name: str):
+        self._name = name
+
+    def __getattr__(self, attr: str) -> Any:
+        raise Planned(f"{self._name}.{attr}: only planned")
+
+
+@contextlib.contextmanager
+def planning() -> Iterator[list[Spec]]:
+    """Within the block, every load records a :class:`Spec` and returns a stand-in (an extension stub, a cubin's would-be
+    path) instead of looking up or building anything. Yields the list the specs are appended to."""
+    global _PLAN
+    previous, _PLAN = _PLAN, []
     try:
-        from miniworld_engine import settings
-    except ImportError:
-        return True
-    return bool(getattr(settings.current(), "jit_fallback", True))
+        yield _PLAN
+    finally:
+        _PLAN = previous
 
 
-def _before_build(kind: str, name: str, key: str) -> None:
-    """A miss: say so (once per artifact), or raise when builds are not allowed."""
-    global _MISS_EXPLAINED
-    from miniworld_engine.kernels import prebuilt
-
-    if not _jit_fallback():
-        raise prebuilt.PrebuiltMissing(
-            f"{name} ({kind}, key {key[:16]}) is not in the prebuilt kernel bundle ({prebuilt.describe()}) and "
-            "settings.jit_fallback is False, so it is not compiled. Rebuild the bundle with this artifact covered "
-            "(docs/kernels/prebuilt-kernels.md), or allow JIT builds.")
-    if prebuilt.enabled():
-        why = "" if _MISS_EXPLAINED else f" ({prebuilt.describe()})"
-        _MISS_EXPLAINED = True
-        build_log(f"not in the prebuilt bundle: {name}{why}")
+def _site() -> str:
+    """``file::function`` of the first caller outside this module and TriMul's thin compile wrappers."""
+    here = Path(__file__).resolve().parent
+    skip = {Path(__file__).resolve(), here / "trimul_inproj" / "cuda" / "_h100_runtime.py"}
+    f = sys._getframe(1)
+    while f is not None and Path(f.f_code.co_filename).resolve() in skip:
+        f = f.f_back
+    if f is None:
+        return "?"
+    p = Path(f.f_code.co_filename).resolve()
+    rel = p.relative_to(here).as_posix() if p.is_relative_to(here) else p.name
+    return f"{rel}::{f.f_code.co_name}"
 
 
-def _resolved(kind: str, name: str, key: str, path: Path, origin: str, material: dict, **extra: Any) -> None:
-    _KEY_OF[str(path)] = key
-    from miniworld_engine.kernels import prebuilt
+def _plan(kind: str, name: str, key: str, rel: Path, graph: Any, call: dict) -> None:
+    from miniworld_engine.kernels import _codegraph as cg
 
-    if prebuilt.recording():
-        sidecars = [s for s in (".ptxas.log",) if path.with_suffix(s).is_file()] if kind == "cubin" else []
-        prebuilt.record({"kind": kind, "name": name, "key": key, "path": str(path), "origin": origin,
-                         "material": material, "sidecars": sidecars, **extra})
+    overlay = {p: t for p in graph.paths if (t := cg.overlay_text(p)) is not None} if graph is not None else {}
+    assert _PLAN is not None
+    files = [p for p in graph.paths if cg._under(p, cg.PKG_ROOT) is not None] if graph is not None else []
+    _PLAN.append(Spec(kind, name, key, rel.as_posix(), call, _site(), overlay, files))
+
+
+def _find(rel: Path, marker: str | None = None) -> Path | None:
+    """The first root holding ``rel`` (a directory holding ``marker``, or a file)."""
+    for root in artifact_roots():
+        p = root / rel
+        if (p / marker).is_file() if marker else p.is_file():
+            return p
+    return None
 
 
 def _write_json(path: Path, data: dict) -> None:
@@ -692,6 +540,14 @@ def _write_json(path: Path, data: dict) -> None:
         json.dump(data, fh, indent=1, sort_keys=True)
     Path(fh.name).replace(path)
 
+
+def _safe(stem: str) -> str:
+    import re
+
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "artifact"
+
+
+# -------------------------------------------------------------------------------- toolchains (only on a build)
 
 # -------------------------------------------------------------------------------- toolchains (only on a build)
 def _toolchain_torch() -> tuple[str, list[str]]:
@@ -744,82 +600,80 @@ TOOLCHAINS: dict[str, Callable[[], tuple[str, list[str]]]] = {
 }
 
 
-def _safe(stem: str) -> str:
-    import re
-
-    return re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "artifact"
-
-
 def cubin(name: str, flags: list[str] | tuple[str, ...], *, source: str | Path | None = None, text: str | None = None,
           family: str | None = None, toolchain: str = "torch", ptxas_log: bool = False,
           timeout: float | None = 900) -> Path:
-    """The cubin of ``source`` (or of the generated ``text``) compiled with ``flags``: from an installed kernel bundle,
+    """The cubin of ``source`` (or of the generated ``text``) compiled with ``flags``: from the packaged prebuilt kernels,
     else from the local cache (``engine_jit_root/<family>/<name>-<key>.cubin``), else built with ``toolchain``.
 
     ``name`` identifies the artifact (``<family>/<what>``, no hash); the key (``_codegraph``) covers the sources and
     headers it reaches, the flags and the versions. ``ptxas_log`` keeps nvcc's output next to the cubin
     (``<cubin stem>.ptxas.log``), for callers that read the register report.
     """
-    from miniworld_engine import settings
     from miniworld_engine.kernels import _codegraph as cg
-    from miniworld_engine.kernels import prebuilt
 
     if (source is None) == (text is None):
         raise ValueError("cubin() takes a source path or a text, not both")
     flags = [str(f) for f in flags]
     family = family or name.split("/", 1)[0]
-    fam_dir = settings.engine_jit_root() / family
+    fam_dir = engine_jit_root() / family
     ctx = cg.context()
     root: str | cg.TextRoot = cg.TextRoot(f"text:{name}", text, str(fam_dir)) if text is not None else str(source)
     graph = cg.closure([root], cg.include_dirs_of(flags), ctx)
     material = cg.key_material("cubin", name, graph, flags, ctx=ctx)
     key = cg.key_of(material)
-    recipe = {"fn": "cubin", "name": name, "flags": flags, "source": None if source is None else str(source), "text": text,
-              "family": family, "toolchain": toolchain, "ptxas_log": ptxas_log, "timeout": timeout, "jit": ctx.jit,
-              "overlay": {p: t for p in graph.paths if (t := cg.overlay_text(p)) is not None}}
-    hit = prebuilt.find("cubin", name, key)
+    rel = Path(family) / f"{_safe(name.split('/', 1)[-1])}-{key[:16]}.cubin"
+    if _PLAN is not None:
+        _plan("cubin", name, key, rel, graph, {"name": name, "flags": flags, "source": None if source is None else str(source),
+                                               "text": text, "family": family, "toolchain": toolchain,
+                                               "ptxas_log": ptxas_log, "timeout": timeout})
+        out = engine_jit_root() / rel
+        _KEY_OF[str(out)] = key
+        return out
+    hit = _find(rel)
     if hit is not None:
-        _resolved("cubin", name, key, hit.path, "prebuilt", material, recipe=recipe)
-        return hit.path
-    out = fam_dir / f"{_safe(name.split('/', 1)[-1])}-{key[:16]}.cubin"
-    if not out.exists():
-        _before_build("cubin", name, key)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with out.with_suffix(".lock").open("w") as lock:
-            flock_wait(lock, name)
-            if not out.exists():
-                with building(f"{name} [{key[:8]}]", "cubin"):
-                    nvcc, host = TOOLCHAINS[toolchain]()
-                    cg.materialize(graph.paths)
-                    src = Path(source) if source is not None else out.with_suffix(".cu")
-                    if text is not None and not src.exists():
-                        tmp_src = src.with_name(f"{src.name}.{os.getpid()}.tmp")
-                        tmp_src.write_text(text)
-                        tmp_src.replace(src)
-                    tmp = out.with_name(f"{out.stem}.{os.getpid()}.tmp")
-                    res = subprocess.run([nvcc, *host, *expand_flags(flags), str(src), "-o", str(tmp)],
-                                         capture_output=True, text=True, timeout=timeout, check=False)
-                    if ptxas_log:
-                        out.with_suffix(".ptxas.log").write_text(res.stdout + res.stderr)
-                    if res.returncode != 0:
-                        tmp.unlink(missing_ok=True)
-                        raise RuntimeError(f"nvcc failed on {name}:\n{res.stderr[-4000:]}")
-                    _write_json(out.with_suffix(".json"), {"name": name, "key": key, "material": material})
-                    os.replace(tmp, out)
-                _resolved("cubin", name, key, out, "built", material, recipe=recipe)
-                return out
-    _resolved("cubin", name, key, out, "cache", material, recipe=recipe)
+        _KEY_OF[str(hit)] = key
+        return hit
+    out = engine_jit_root() / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.with_suffix(".lock").open("w") as lock:
+        flock_wait(lock, name)
+        if not out.exists():
+            with building(f"{name} [{key[:8]}]", "cubin"):
+                nvcc, host = TOOLCHAINS[toolchain]()
+                cg.materialize(graph.paths)
+                src = Path(source) if source is not None else out.with_suffix(".cu")
+                if text is not None and not src.exists():
+                    tmp_src = _tmp_name(src)
+                    tmp_src.write_text(text)
+                    tmp_src.replace(src)
+                tmp = _tmp_name(out)
+                res = subprocess.run([nvcc, *host, *expand_flags(flags), str(src), "-o", str(tmp)],
+                                     capture_output=True, text=True, timeout=timeout, check=False)
+                if res.returncode != 0:
+                    tmp.unlink(missing_ok=True)
+                    raise RuntimeError(f"nvcc failed on {name}:\n{res.stderr[-4000:]}")
+                if ptxas_log:
+                    _replace_text(out.with_suffix(".ptxas.log"), res.stdout + res.stderr)
+                _write_json(out.with_suffix(".json"), {"name": name, "key": key, "material": material})
+                os.replace(tmp, out)  # last: the cubin's presence means its sidecars are complete
+    _KEY_OF[str(out)] = key
     return out
+
+
+def _replace_text(path: Path, text: str) -> None:
+    tmp = _tmp_name(path)
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 def derived_cubin(name: str, base: str | Path, params: Any, produce: Callable[[Path], bool],
                   family: str | None = None, replay: tuple[str, list] | None = None) -> Path | None:
     """A cubin made from another one by ``produce(tmp_path) -> bool`` (a post-link patch, no compiler): keyed by the
     base's key and ``params`` (which should carry a digest of the patch code). None when ``produce`` declines (the
-    caller keeps the base)."""
-    from miniworld_engine import settings
+    caller keeps the base). ``replay`` = ("module:function", args): ``function(base_cubin, *args)`` redoes it (a prebuild
+    calls it once the base is built)."""
     from miniworld_engine.kernels import _codegraph as cg
-    from miniworld_engine.kernels import prebuilt
 
     base_key = key_of_artifact(base)
     if base_key is None:
@@ -827,27 +681,27 @@ def derived_cubin(name: str, base: str | Path, params: Any, produce: Callable[[P
     material = {"scheme": cg.KEY_SCHEME, "kind": "cubin", "name": name, "derived_from": base_key,
                 "params": repr(params)}
     key = cg.key_of(material)
-    # how to redo it elsewhere: "module:function" called as function(base_cubin, *args)
-    recipe = {"fn": "derived", "name": name, "base_key": base_key, "replay": list(replay) if replay else None}
-    hit = prebuilt.find("cubin", name, key)
-    if hit is not None:
-        _resolved("cubin", name, key, hit.path, "prebuilt", material, recipe=recipe)
-        return hit.path
     family = family or name.split("/", 1)[0]
-    out = settings.engine_jit_root() / family / f"{_safe(name.split('/', 1)[-1])}-{key[:16]}.cubin"
-    if not out.exists():
-        _before_build("cubin", name, key)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_name(f"{out.stem}.{os.getpid()}.tmp")
-        with building(f"{name} [{key[:8]}]", "derived cubin"):
-            ok = produce(tmp)
-        if not ok:
-            tmp.unlink(missing_ok=True)
-            return None
-        os.replace(tmp, out)
-        _resolved("cubin", name, key, out, "built", material, recipe=recipe)
-        return out
-    _resolved("cubin", name, key, out, "cache", material, recipe=recipe)
+    rel = Path(family) / f"{_safe(name.split('/', 1)[-1])}-{key[:16]}.cubin"
+    if _PLAN is not None:
+        if replay is None:
+            raise RuntimeError(f"derived_cubin {name}: no replay, so a prebuild cannot make it")
+        _plan("derived", name, key, rel, None, {"base_key": base_key, "replay": list(replay)})
+        return engine_jit_root() / rel
+    hit = _find(rel)
+    if hit is not None:
+        _KEY_OF[str(hit)] = key
+        return hit
+    out = engine_jit_root() / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _tmp_name(out)
+    with building(f"{name} [{key[:8]}]", "derived cubin"):
+        ok = produce(tmp)
+    if not ok:
+        tmp.unlink(missing_ok=True)
+        return None
+    os.replace(tmp, out)
+    _KEY_OF[str(out)] = key
     return out
 
 
@@ -890,9 +744,9 @@ def _ext_key(name: str, kwargs: dict, sources: list[str] | None, inline: bool) -
 
 def _pinned_cutlass(kwargs: dict) -> dict | None:
     """``kwargs`` with every CUTLASS include directory of another release than ``_codegraph.CUTLASS_PINNED`` replaced by
-    ``CUTLASS_STANDIN`` (keyed as the pinned release), or None when there is none: the key a prebuilt bundle holds the artifact
-    under.  A CUTLASS_PATH to another checkout (4.8.0 in FoldForge's runs, 2026-10-30) otherwise re-keyed every CUTLASS
-    extension and compiled the shipped ones again on the first call."""
+    ``CUTLASS_STANDIN`` (keyed as the pinned release), or None when there is none: the key the prebuilt artifact has. A
+    CUTLASS_PATH to another checkout (4.8.0 in FoldForge's runs, 2026-10-30) otherwise re-keyed every CUTLASS extension and
+    compiled the prebuilt ones again on the first call."""
     from miniworld_engine.kernels import _codegraph as cg
 
     incs = [str(p) for p in kwargs.get("extra_include_paths") or []]
@@ -913,74 +767,75 @@ def _import_ext(so: Path, module: str, python_module: bool) -> Any:
     return _import_module_from_library(module, str(so.parent), python_module)
 
 
-def _load(kind_label: str, name: str, kwargs: dict, sources: list[str] | None = None, inline: bool = False) -> Any:
+def _ext_rel(name: str, key: str) -> Path:
+    return Path("torch_extensions") / f"{name}-{key[:16]}"
+
+
+def _load_built(directory: Path, key: str, python_module: bool) -> Any:
     import json
 
-    from miniworld_engine import settings
-    from miniworld_engine.kernels import _codegraph as cg
-    from miniworld_engine.kernels import prebuilt
+    info = json.loads((directory / "artifact.json").read_text())
+    so = directory / info["file"]
+    ext = _import_ext(so, info["module"], python_module)
+    _KEY_OF[str(so)] = key
+    return ext
 
+
+def _load(kind_label: str, name: str, kwargs: dict, sources: list[str] | None = None, inline: bool = False) -> Any:
     # Lists copied: torch's load appends its own link flags to `extra_ldflags` in place, which changed the caller's list
-    # and the recorded recipe after the key was computed (a replay then keyed the artifact differently).
+    # after the key was computed.
     kwargs = {k: list(v) if isinstance(v, list) else v for k, v in kwargs.items()}
     kwargs.pop("build_directory", None)  # content-addressed below: one directory per key, never rebuilt in place
     material, key, graph = _ext_key(name, kwargs, sources, inline)
+    rel = _ext_rel(name, key)
+    if _PLAN is not None:
+        _plan("ext", name, key, rel, graph, {"kind_label": kind_label, "name": name, "kwargs": kwargs, "sources": sources,
+                                             "inline": inline})
+        return _Stub(name)
     if key in _LOADED:
         return _LOADED[key]
-    recipe = {"fn": "ext", "name": name, "inline": inline, "sources": sources, "jit": str(settings.engine_jit_root()),
-              "kwargs": {k: v for k, v in kwargs.items() if k != "verbose"}}
     python_module = bool(kwargs.get("is_python_module", True))
-    hit = prebuilt.find("ext", name, key)
-    pinned = _pinned_cutlass(kwargs) if hit is None else None
-    if pinned is not None:
-        # CUTLASS_PATH names another CUTLASS release than the bundle was built with: the headers only matter to a build, so the
-        # shipped binary of the pinned release is the artifact (the local build key stays this checkout's, for a build below)
-        p_material, p_key, _ = _ext_key(name, pinned, sources, inline)
-        p_hit = prebuilt.find("ext", name, p_key)
-        if p_hit is not None:
-            module = p_hit.entry.get("module", name)
-            ext = _import_ext(p_hit.path, module, python_module)
-            _resolved("ext", name, p_key, p_hit.path, "prebuilt", p_material, module=module, python_module=python_module,
-                      recipe=recipe)
-            _LOADED[key] = _LOADED[p_key] = ext
-            return ext
-    if hit is not None:
-        module = hit.entry.get("module", name)
-        ext = _import_ext(hit.path, module, python_module)
-        _resolved("ext", name, key, hit.path, "prebuilt", material, module=module, python_module=python_module, recipe=recipe)
-        _LOADED[key] = ext
-        return ext
-    build = settings.engine_jit_root() / "torch_extensions" / f"{name}-{key[:16]}"
-    marker = build / "artifact.json"
+    hit = _find(rel, "artifact.json")
+    if hit is None and (pinned := _pinned_cutlass(kwargs)) is not None:
+        # CUTLASS_PATH names another CUTLASS release than the prebuilt artifacts were built with: the headers only matter to a
+        # build, so the pinned release's artifact is the one (a build below still uses this checkout's key)
+        _, p_key, _ = _ext_key(name, pinned, sources, inline)
+        hit = _find(_ext_rel(name, p_key), "artifact.json")
+        if hit is not None:
+            key = p_key
+    if hit is None:
+        hit = _build_ext(kind_label, name, kwargs, sources, inline, key, material, graph)
+    if _BUILD_ONLY:
+        return hit
+    ext = _load_built(hit, key, python_module)
+    _LOADED[key] = ext
+    return ext
 
-    def cached() -> Any:
-        try:
-            info = json.loads(marker.read_text())
-        except (OSError, ValueError):
-            return None
-        so = build / info["file"]
-        if not so.is_file():
-            return None
-        ext = _import_ext(so, info["module"], python_module)
-        _resolved("ext", name, key, so, "cache", material, module=info["module"], python_module=python_module, recipe=recipe)
-        return ext
 
-    ext = cached()
-    if ext is None:
-        lock = build / "lock"
-        if lock.exists() and not clear_stale_lock(lock):
-            wait_for_lock(lock, name=name)
-            ext = cached()
-    if ext is None:
-        if str(CUTLASS_STANDIN) in [os.path.abspath(p) for p in kwargs.get("extra_include_paths") or []]:
-            raise CutlassMissing(f"{name} compiles CUTLASS 4.2 / CuTe headers and is not in the prebuilt kernels: set "
-                                 "CUTLASS_PATH to a CUTLASS 4.2 checkout to build it")
-        _before_build("ext", name, key)
+def _build_ext(kind_label: str, name: str, kwargs: dict, sources: list[str] | None, inline: bool, key: str,
+               material: dict, graph: Any) -> Path:
+    """Build the extension into a private temporary directory and rename it to its key's directory; returns that directory.
+    A flock (dropped by the kernel when its holder dies) keeps two processes from building the same key at once."""
+    import shutil
+
+    from miniworld_engine.kernels import _codegraph as cg
+
+    if str(CUTLASS_STANDIN) in [os.path.abspath(p) for p in kwargs.get("extra_include_paths") or []]:
+        raise CutlassMissing(f"{name} compiles CUTLASS {cg.CUTLASS_PINNED} / CuTe headers and is not prebuilt: set "
+                             f"CUTLASS_PATH to a CUTLASS {cg.CUTLASS_PINNED} checkout to build it")
+    final = engine_jit_root() / _ext_rel(name, key)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    with final.with_name(f".{final.name}.lock").open("w") as lock:
+        flock_wait(lock, name)
+        if (final / "artifact.json").is_file():
+            return final  # another process built it while this one waited
         ensure_cuda_home()
-        build.mkdir(parents=True, exist_ok=True)
         cg.materialize(graph.paths)
+        tmp = _tmp_name(final)
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir()
         call_kwargs = {k: list(v) if isinstance(v, list) else v for k, v in kwargs.items()}
-        call_kwargs["build_directory"] = str(build)
+        call_kwargs["build_directory"] = str(tmp)
         for f in ("extra_cflags", "extra_cuda_cflags"):
             if call_kwargs.get(f):
                 call_kwargs[f] = expand_flags(call_kwargs[f])
@@ -988,34 +843,42 @@ def _load(kind_label: str, name: str, kwargs: dict, sources: list[str] | None = 
         cu = call_kwargs.get("extra_cuda_cflags") or []
         if forced and not any(str(f) == "-ccbin" or str(f).startswith(("-ccbin=", "--compiler-bindir")) for f in cu):
             call_kwargs["extra_cuda_cflags"] = [*cu, "-ccbin", forced]  # a pinned release toolchain covers every .cu
-        if inline:
-            from torch.utils.cpp_extension import load_inline
+        python_module = bool(kwargs.get("is_python_module", True))
+        built = lambda: sorted(tmp.glob("*.so"))  # torch names it <name>.so, or <name>_v<n>.so on a rebuild in one process
+        try:
+            with building(f"{name} [{key[:8]}]", kind_label):
+                try:
+                    if inline:
+                        from torch.utils.cpp_extension import load_inline
 
-            ext = _guarded_load(name, kind_label, str(build), lambda: load_inline(name=name, **call_kwargs))
-        else:
-            from torch.utils.cpp_extension import load
+                        load_inline(name=name, **call_kwargs)
+                    else:
+                        from torch.utils.cpp_extension import load
 
-            ext = _guarded_load(name, kind_label, str(build),
-                                lambda: load(name=name, sources=sources, **call_kwargs), sources=sources)
-        if python_module:
-            so, module = Path(ext.__file__), ext.__name__
-        else:
-            so = Path(str(ext))
-            module = so.name[: -len(".so")] if so.name.endswith(".so") else so.stem
-        _write_json(marker, {"name": name, "key": key, "file": so.name, "module": module, "material": material})
-        _resolved("ext", name, key, so, "built", material, module=module, python_module=python_module, recipe=recipe)
-    _LOADED[key] = ext
-    return ext
+                        load(name=name, sources=sources, **call_kwargs)
+                except (ImportError, OSError):
+                    if not (_BUILD_ONLY and built()):
+                        raise  # a prebuild worker may not be able to import a CUDA extension; the build itself succeeded
+            if len(built()) != 1:
+                raise RuntimeError(f"{name}: the build produced {len(built())} shared libraries")
+            so = built()[0]
+            for junk in tmp.glob("*.o"):  # objects are only build intermediates
+                junk.unlink()
+            _write_json(tmp / "artifact.json", {"name": name, "key": key, "file": so.name, "module": so.name[: -len(".so")],
+                                                "python_module": python_module, "material": material})
+            os.rename(tmp, final)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return final
 
 
 def load_extension(name: str, sources: list[str], **kwargs: Any) -> Any:
-    """`torch.utils.cpp_extension.load`, resolved through the prebuilt bundle and a content-keyed cache.
+    """`torch.utils.cpp_extension.load`, resolved through the packaged prebuilt kernels and a content-keyed cache.
 
-    The extension's key (its code graph, flags and versions) picks a shipped binary when an installed kernel bundle has
-    it, else ``engine_jit_root/torch_extensions/<name>-<key>/`` when this machine built it before; only a miss runs
-    torch's build, into that directory. An edit that does not reach the extension's sources never rebuilds it, and an
-    edit that does always does (a new directory). The build still cannot hang on a leftover lock (reclaimed when too
-    old to be real, else waited on, saying so) and says when it compiles. ``build_directory`` is ignored.
+    The extension's key (its code graph, flags and versions) picks ``<root>/torch_extensions/<name>-<key>/`` in the packaged
+    prebuilt kernels or the local cache; only a miss runs torch's build, into a private directory renamed into place when
+    complete. An edit that does not reach the extension's sources never rebuilds it, and an edit that does always does (a new
+    directory). ``build_directory`` is ignored.
     """
     return _load("torch extension", name, kwargs, sources=[str(s) for s in sources])
 

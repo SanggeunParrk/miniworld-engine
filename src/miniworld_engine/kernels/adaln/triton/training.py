@@ -22,7 +22,7 @@ mirror of the forward's single fused GEMM.
 from __future__ import annotations
 
 from miniworld_engine.kernels._compile import device_constant, opaque
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 import torch
 import torch.nn.functional as F
@@ -80,13 +80,15 @@ def _mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # because the `@opaque` fakes share the signature.
 # (This used to say the default covered a caller handing in a genuinely 2-D activation
 # (nothing folded into the rows, so shape[-2] IS L), which is what the drivers and checkers do.
-from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, pack, rows_of
+from miniworld_engine.kernels._shape_key import atom_key, both_key, length_of, pack, rows_of
 # `both_key` is only for the borrowed layernorm_linear helpers (`_ln_materialize`/`_ln_bwd`):
 # those kernels are level=both in registry.csv and bucket against the union set. This family's
 # own kernels stay on `atom_key`. Same L, different bucket set.
 
 
-@triton.autotune(configs=configs_for("adaln_epilogue_saveact_triton"), key=['shape_key', 'HAS_SB'])
+@configured('adaln_epilogue_saveact_triton',
+            key=['shape_key', 'HAS_SB'],
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=2, num_stages=2))
 @triton.jit
 def _epilogue_train_kernel(
     X, SB, Y, MeanX, RstdX, Gate, ScaleBias, M, N: tl.constexpr, eps,
@@ -212,7 +214,10 @@ def _epilogue_train(x: torch.Tensor, sb: torch.Tensor, eps: float,
 # it is a CSV tile, and the row reduction is what makes this a two-pass kernel.
 
 
-@triton.autotune(configs=configs_for("adaln_bwd_pre_dx_triton"), key=["shape_key", "HAS_DSB"], reset_to_zero=["DSB"])
+@configured('adaln_bwd_pre_dx_triton',
+            key=["shape_key", "HAS_DSB"],
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2),
+            reset_to_zero=["DSB"])
 @triton.jit
 def _bwd_x_kernel(
     DY, X, MeanX, RstdX, Gate, D, DX, M, N: tl.constexpr,
@@ -385,9 +390,10 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
 
 
 
-@triton.autotune(configs=configs_for("adaln_bwd_dx_dlnw_triton"),
-                 key=['shape_key'],
-                 reset_to_zero=['DLNW'])
+@configured('adaln_bwd_dx_dlnw_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K_K2=32, BLOCK_K_NC=32, BLOCK_M1=64, num_warps=4, num_stages=2),
+            reset_to_zero=['DLNW'])
 @triton.jit
 def _dgrad_condln_kernel(
     D, Wcat, Cond, MeanC, RstdC, LNW, DCond, DLNW, M, NC: tl.constexpr, K2,
@@ -559,7 +565,9 @@ _DGRAD_TRITON = None
 _DGRAD_TRITON_NC_MAX = 256   # fused triton dgrad wins for NC ≤ this (memory-bound regime)
 
 
-@triton.autotune(configs=configs_for("adaln_fwd_gate_triton"), key=["shape_key"])
+@configured('adaln_fwd_gate_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2))
 @triton.jit
 def _adaln_fwd_gate_kernel(
     CondN, SW, SB, BW, X, Rstd, C1, Y, Gate,
@@ -688,7 +696,7 @@ class AdaLNTrainFn(torch.autograd.Function):
     def forward(ctx, x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
                 eps_x, eps_cond, with_stream=False, with_cond=False):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
-        from miniworld_engine.utils.h100_master import is_h100
+        from miniworld_engine.kernels._h100_master import is_h100
         raw_weights = (scale_weight, scale_bias, bias_weight)
         ctx.dtypes = (x.dtype, cond.dtype, cond_ln_weight.dtype,
                       scale_weight.dtype, scale_bias.dtype, bias_weight.dtype)
@@ -702,7 +710,7 @@ class AdaLNTrainFn(torch.autograd.Function):
                 saved_wcat, scale_bias = cast_pack([scale_weight, bias_weight, scale_bias], 2)
                 scale_weight, bias_weight = saved_wcat[:scale_weight.shape[0]], saved_wcat[scale_weight.shape[0]:]
             else:
-                from miniworld_engine.utils.h100_master import pack as pack_master
+                from miniworld_engine.kernels._h100_master import pack as pack_master
 
                 scale_weight, scale_bias, bias_weight = pack_master(raw_weights)
         orig_x_shape = x.shape

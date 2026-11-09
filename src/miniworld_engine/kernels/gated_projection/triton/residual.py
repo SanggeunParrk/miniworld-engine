@@ -9,12 +9,14 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
 
 
-@triton.autotune(configs=configs_for("gated_projection_fwd_residual_triton"), key=["shape_key"])
+@configured('gated_projection_fwd_residual_triton',
+            key=["shape_key"],
+            default=dict(BLOCK=256, num_warps=4, num_stages=3))
 @triton.jit
 def _forward(X, G, B, Y, N, shape_key, BLOCK: tl.constexpr):
     i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
@@ -27,7 +29,9 @@ def _forward(X, G, B, Y, N, shape_key, BLOCK: tl.constexpr):
     tl.store(Y + i, x + product, mask)
 
 
-@triton.autotune(configs=configs_for("gated_projection_bwd_residual_triton"), key=["shape_key"])
+@configured('gated_projection_bwd_residual_triton',
+            key=["shape_key"],
+            default=dict(BLOCK=256, num_warps=4, num_stages=3))
 @triton.jit
 def _backward(DY, G, B, DG, DB, N, shape_key, BLOCK: tl.constexpr):
     i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)

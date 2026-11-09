@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from miniworld_engine import settings
 
 _DIR = Path(__file__).resolve().parent
 
@@ -44,7 +43,6 @@ SOURCES = {"qkvg": "swa_qkvg_fwd", "fwd": "swa_ffn_fwd", "bwd": "swa_ffn_bwd",
            "wgrad": "swa_wgrad",
            "wgwg": "swa_wgrad_wg",
            "wgwg32": "swa_wgrad_wg_f32",
-           "modwg": "swa_mod_wg",
            "pack": "swa_pack"}   # the wgmma FFN kernels\' four weight layouts in one launch, see swa_pack.cu
 SOURCES.update(qkvg_small="swa_qkvg_fwd", fwd_small="swa_ffn_fwd", bwd_overwrite="swa_ffn_bwd")
 
@@ -91,32 +89,37 @@ def extension(which: str) -> Any:
         if not is_sm90():
             ERRORS[which] = "not an sm_90 device"
             return None
-        from miniworld_engine.kernels._nvcc import (
-            ensure_cuda_home,
-            host_flags,
-            load_extension,
-        )
-
-        ensure_cuda_home()
-        src = SOURCES[which]
-        name = f"miniworld_swa_dit_{src}"
-        if which in _VARIANT_FLAGS:
-            name += f"_{which}"
-        _EXT[which] = load_extension(
-            name,
-            [str(_DIR / f"{src}.cu")],
-            extra_include_paths=[str(_DIR)],
-            extra_cuda_cflags=[
-                *host_flags(),
-                "-O3",
-                "-gencode=arch=compute_90a,code=sm_90a",
-                "--use_fast_math",
-                *_VARIANT_FLAGS.get(which, []),
-            ],
-            extra_cflags=["-O3"],
-            extra_ldflags=["-lcublas"],
-            verbose=False,
-        )
+        _EXT[which] = _build(which)
     except Exception as ex:  # noqa: BLE001 -- fall back to Triton
         ERRORS[which] = repr(ex)
     return _EXT[which]
+
+
+def _build(which: str) -> Any:
+    """Build (or load) the extension of stage ``which`` (no device check: ``extension`` asks the device, this does not)."""
+    from miniworld_engine.kernels._nvcc import (
+        ensure_cuda_home,
+        host_flags,
+        load_extension,
+    )
+
+    ensure_cuda_home()
+    src = SOURCES[which]
+    name = f"miniworld_swa_dit_{src}"
+    if which in _VARIANT_FLAGS:
+        name += f"_{which}"
+    return load_extension(
+        name,
+        [str(_DIR / f"{src}.cu")],
+        extra_include_paths=[str(_DIR)],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-gencode=arch=compute_90a,code=sm_90a",
+            "--use_fast_math",
+            *_VARIANT_FLAGS.get(which, []),
+        ],
+        extra_cflags=["-O3"],
+        extra_ldflags=["-lcublas"],
+        verbose=False,
+    )

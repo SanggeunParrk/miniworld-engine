@@ -19,14 +19,16 @@ import triton.language as tl
 
 from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import pack
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import pack
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._fastmath import sigmoid_fast
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 
-@triton.autotune(configs=configs_for("transition_bwd_squeeze_swiglu_triton"), key=["shape_key", "SAVED", "HALF"])
+@configured('transition_bwd_squeeze_swiglu_triton',
+            key=["shape_key", "SAVED", "HALF"],
+            default=dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=3))
 @triton.jit
 def _squeeze_swiglu_bwd_kernel(
     X, Wab, G, W, H, DAB, SA, SB, SCALE, M, ND: tl.constexpr, K: tl.constexpr,

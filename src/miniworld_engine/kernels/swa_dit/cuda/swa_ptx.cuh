@@ -89,7 +89,7 @@ __device__ __forceinline__ void load_4d(const void* map, uint32_t dst, uint64_t*
 }
 }  // namespace swa_tma
 
-// the mbarrier wait and 2-D TMA load of the one-warpgroup kernels (swa_mod_wg, swa_wgrad_wg, swa_wgrad_wg_f32)
+// the mbarrier wait and 2-D TMA load of the one-warpgroup kernels (swa_wgrad_wg, swa_wgrad_wg_f32)
 namespace swa_tma1 {
 __device__ __forceinline__ void wait(uint64_t* b, uint32_t parity) {
   asm volatile("{\n.reg .pred p;\nW_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra W_%=;\n}\n" :: "r"(sa(b)), "r"(parity) : "memory");

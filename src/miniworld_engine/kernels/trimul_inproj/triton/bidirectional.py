@@ -5,7 +5,7 @@ identity-residual gradient. Forward saved tensors and rounding points remain.
 """
 
 from __future__ import annotations
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 import torch
 
@@ -22,7 +22,7 @@ from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _ln_materialize,
 )
 from miniworld_engine.kernels.trimul_inproj.triton.output_fused import output_f567_train
-from miniworld_engine.autotune.shape_key import both_key, pack, token_key
+from miniworld_engine.kernels._shape_key import both_key, pack, token_key
 from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
 from miniworld_engine.kernels.trimul_inproj.triton.contract import packed_forward, packed_backward
@@ -43,8 +43,9 @@ from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
 # are already in registers, so the BODY reads as a pure store, but the swing in store traffic is
 # what picks the tile here. See gate_elem.py for the same distinction, and adaln/triton/ln_strided.py
 # for the GEMM where the opposite reading was the measured one.
-@triton.autotune(configs=configs_for("trimul_gemm_gate_mmajor_triton"),
-                 key=['shape_key', 'SAVE_PREACT'])
+@configured('trimul_gemm_gate_mmajor_triton',
+            key=['shape_key', 'SAVE_PREACT'],
+            default=dict(BLOCK_K_D=32, BLOCK_K_H2=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _bidir_front_kernel(
     x_ptr, w_ptr,

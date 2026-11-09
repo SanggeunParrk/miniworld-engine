@@ -7,13 +7,15 @@ import triton
 import triton.language as tl
 
 from miniworld_engine.kernels._tf32 import tf32_dot
+from miniworld_engine.kernels._launch_config import configured
 
 from miniworld_engine.kernels._compile import opaque
 
 STAT_W = 128
 
-@triton.autotune(configs=[triton.Config({"BJ": bj, "BN": bn}, num_warps=w, num_stages=s)
-                          for bj in (64, 128) for bn in (64, 128) for w in (4, 8) for s in (2, 3)], key=["L", "NB"])
+# No measured table yet: the default is the centre of the space this kernel used to search at runtime (BJ, BN 64 / 128,
+# 4 / 8 warps, 2 / 3 stages); the row kernels below likewise (BR 1..8, 4 / 8 warps).
+@configured("token_dit_pair_bias_all_triton", key=["L", "NB"], default=dict(BJ=128, BN=128, num_warps=4, num_stages=3))
 @triton.jit
 def _pair_bias_all_kernel(Z, WT, OUT, L, sz, eps, C: tl.constexpr, NB: tl.constexpr,
                           BJ: tl.constexpr, BN: tl.constexpr):
@@ -58,11 +60,7 @@ def pair_bias_all(z2d: torch.Tensor, wt: torch.Tensor, out: torch.Tensor, L: int
 # 39 us for cuBLAS + a separate AdaLN pass. v2 leaves the four GEMMs to cuBLAS and fuses everything between them
 # into row kernels that cross the module boundaries: the residual update of one half-block and the AdaLN of the
 # next are ONE pass, and the gate of the attention output is applied on its way into the output projection.
-def _rows_cfgs():
-    return [triton.Config({"BR": br}, num_warps=w) for br in (1, 2, 4, 8) for w in (4, 8)]
-
-
-@triton.autotune(configs=_rows_cfgs(), key=["M", "L"])
+@configured("token_dit_adaln_rows_triton", key=["M", "L"], default=dict(BR=4, num_warps=4))
 @triton.jit
 def _adaln_rows_kernel(X, MS, MB, OUT, M, L, sx, sms, smb, eps, D: tl.constexpr, DP: tl.constexpr, BR: tl.constexpr):
     rows = tl.program_id(0) * BR + tl.arange(0, BR)
@@ -88,7 +86,7 @@ def adaln_rows(x, ms, mb, out, L, eps=1e-5):
 
 
 # restore_value: X is the residual, updated in place; without it every config the autotuner benches would add again.
-@triton.autotune(configs=_rows_cfgs(), key=["M", "L", "HAS_ADALN"], restore_value=["X"])
+@configured("token_dit_resgate_adaln_rows_triton", key=["M", "L", "HAS_ADALN"], restore_value=["X"], default=dict(BR=4, num_warps=4))
 @triton.jit
 def _resgate_adaln_rows_kernel(X, Y, GL, MS, MB, OUT, M, L, sx, sy, sgl, sms, smb, eps,
                                D: tl.constexpr, DP: tl.constexpr, HAS_ADALN: tl.constexpr, BR: tl.constexpr):
@@ -131,7 +129,7 @@ def resgate_adaln_rows(x: torch.Tensor, y: torch.Tensor, gl: torch.Tensor, ms: t
         (ms if has else gl).stride(0), (mb if has else gl).stride(0), eps, D=D, DP=triton.next_power_of_2(D), HAS_ADALN=has)
 
 
-@triton.autotune(configs=_rows_cfgs(), key=["M"])
+@configured("token_dit_gate_rows_triton", key=["M"], default=dict(BR=4, num_warps=4))
 @triton.jit
 def _gate_rows_kernel(O, G, OUT, M, so, sg, D: tl.constexpr, DP: tl.constexpr, BR: tl.constexpr):
     rows = tl.program_id(0) * BR + tl.arange(0, BR)
@@ -149,7 +147,7 @@ def gate_rows(o, g, out):
                                                            D=D, DP=triton.next_power_of_2(D))
 
 
-@triton.autotune(configs=_rows_cfgs(), key=["M"])
+@configured("token_dit_swiglu_rows_triton", key=["M"], default=dict(BR=4, num_warps=4))
 @triton.jit
 def _swiglu_rows_kernel(AB, OUT, M, sab, N: tl.constexpr, NP: tl.constexpr, BR: tl.constexpr):
     rows = tl.program_id(0) * BR + tl.arange(0, BR)

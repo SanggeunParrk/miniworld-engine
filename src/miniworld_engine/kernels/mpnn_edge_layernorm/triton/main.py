@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.layernorm.compile_native import (
     _bwd_atomic_impl,

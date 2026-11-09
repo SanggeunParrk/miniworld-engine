@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _te_backward,
     _te_forward,

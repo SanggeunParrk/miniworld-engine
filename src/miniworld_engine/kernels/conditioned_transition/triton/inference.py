@@ -22,7 +22,7 @@ fp32 inputs with TF32 tensor-core matmuls (input_precision="tf32"). Practical wh
 
 from __future__ import annotations
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import torch
 
 from miniworld_engine.kernels._compile import opaque
@@ -59,7 +59,7 @@ from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_ord
 # and hands the result to the inner launchers as `shape_key`. `length=None` falls back to
 # `length_of(x.shape)` == M for the direct callers that have no un-flattened tensor to read (the
 # registry drivers/checkers, and train_12_345.py), which is exactly the old behaviour.
-from miniworld_engine.autotune.shape_key import atom_key, length_of
+from miniworld_engine.kernels._shape_key import atom_key, length_of
 
 
 # `D` is GONE from this kernel, not merely unkeyed. It came from `ws.shape[0]` and `K` from
@@ -70,7 +70,9 @@ from miniworld_engine.autotune.shape_key import atom_key, length_of
 # with D == K. Its one read was the squeeze output mask, which `K` states exactly as well. ND is
 # a different matter and stays keyed: n varies per module (2 here, 4 in transition/), and the
 # driver harness perturbs ND on its own axis, so ND is not recoverable from K.
-@triton.autotune(configs=configs_for("cond_transition_fwd_b2b_triton"), key=['shape_key'])
+@configured('cond_transition_fwd_b2b_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K_D=32, BLOCK_K_DC=32, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _cond_transition_inference_kernel(
     x_ptr, cond_ptr, wa_ptr, wb_ptr, ws_ptr, wsc_ptr, bsc_ptr, out_ptr,

@@ -20,7 +20,7 @@ M = B*L*L (rows), dh = d_hidden (contraction), N = d_pair (output width).
 from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels.gated_projection.triton.main import sigmoid_gate_fused
 
 import torch
@@ -32,7 +32,7 @@ from miniworld_engine.kernels._tf32 import tf32_dot
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 
 
-from miniworld_engine.autotune.shape_key import both_key, length_of, pack, rows_of, token_key
+from miniworld_engine.kernels._shape_key import both_key, length_of, pack, rows_of, token_key
 
 
 
@@ -52,7 +52,9 @@ def _key_of(shape) -> int:
     return token_key(length_of(shape))
 
 
-@triton.autotune(configs=configs_for("gated_projection_gate_gemm_triton"), key=['shape_key'])
+@configured('gated_projection_gate_gemm_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _gate_out_fwd(
     gate_ptr,   # [M, DH]
@@ -114,7 +116,9 @@ def _gate_out_fwd(
 # free (non-reduced) axis here -- the contraction is N -- so it moves onto the grid. ``BLOCK_N`` is not
 # constrained, so its candidate values live in the CSV like every other axis; they are the
 # canonical 2-D set.
-@triton.autotune(configs=configs_for("gated_projection_bwd_dx_triton"), key=['shape_key'])
+@configured('gated_projection_bwd_dx_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _dgrad_epi(
     do_ptr,     # [M, N]   = grad_out

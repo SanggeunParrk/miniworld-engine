@@ -22,7 +22,7 @@ eager/compiled path runs — one launch, cond_aff read once, TF32 policy for fp3
 
 from __future__ import annotations
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 # The weighted-LayerNorm kernel that used to live here was fused3.py's `_ln_kernel` with
 # HAS_W=True -- bitwise equal on the output (.bench/direct.out). Imported now.
@@ -90,7 +90,7 @@ def _fp32_matmul_ctx(dtype):
 # because the `@opaque` fakes share the signature.
 # (This used to claim the default covered a genuinely 2-D activation.) Which
 # is what the drivers and checkers do.
-from miniworld_engine.autotune.shape_key import atom_key, length_of, pack
+from miniworld_engine.kernels._shape_key import atom_key, length_of, pack
 
 
 def _cond_affine_fake(cond, lnw, eps, out_dtype=None, shape_key=None):
@@ -165,7 +165,9 @@ def _cond_affine_stats(cond: torch.Tensor, lnw: torch.Tensor, eps: float, x: tor
 # ───── step 3: y = sigmoid(scale)·LN(x) + bias  (fused LN(x) + gate epilogue) ─────
 
 
-@triton.autotune(configs=configs_for("adaln_epilogue_triton"), key=['shape_key'])
+@configured('adaln_epilogue_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=2, num_stages=2))
 @triton.jit
 def _adaln_epilogue_kernel(
     X, SB, Y, M, N: tl.constexpr, eps,
@@ -275,7 +277,9 @@ def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float,
 _THIN_K_TILE = 32
 
 
-@triton.autotune(configs=configs_for("adaln_gemm_gate_triton"), key=["shape_key"])
+@configured('adaln_gemm_gate_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2))
 @triton.jit
 def _adaln_gemm_gate_kernel(
     CondN, SW, SB, BW, X, Rstd, C1, Y,
@@ -461,7 +465,9 @@ def adaln_inference_materialize(
 # autotune/cache.py). The dtype component is strictly finer (it separates bf16 from fp16, which
 # USE_LOW does not), so keying on USE_LOW as well would add no partition. Unlike the training
 # kernels in main.py, nothing here consults autocast, so the two cannot diverge.
-@triton.autotune(configs=configs_for("adaln_fwd_triton"), key=['shape_key'])
+@configured('adaln_fwd_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K_NC=32, BLOCK_K_NX=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _adaln_fused_kernel(  # noqa: PLR0915
     X, Cond, LnW, ScaleW, ScaleB, BiasW, Y,

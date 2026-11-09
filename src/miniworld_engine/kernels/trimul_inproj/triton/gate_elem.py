@@ -23,7 +23,7 @@ B=1, bf16.
 """
 
 from __future__ import annotations
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 import torch
 
@@ -32,7 +32,7 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import length_of, pack, token_key
+from miniworld_engine.kernels._shape_key import length_of, pack, token_key
 
 
 
@@ -69,7 +69,9 @@ from miniworld_engine.autotune.shape_key import length_of, pack, token_key
 #   further 1.35x on top of it in training. The fused form is also the more ACCURATE one --
 #   it accumulates in fp32 and rounds to bf16 once, where the split path rounds twice:
 #   rel_err vs an fp32 reference 1.4e-03 (A) against 1.7e-03 (B/C).
-@triton.autotune(configs=configs_for("gated_projection_gate_dropres_triton"), key=['shape_key'])
+@configured('gated_projection_gate_dropres_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _gate_mul_train_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, L,
                            N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
@@ -109,8 +111,9 @@ def _gate_mul_train_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_pt
 # 0, so the flag had exactly one live value. Leaving it in the key would have been worse than
 # useless: the committed A100 cache holds `USE_DROPOUT=0` only, so every backward would have
 # missed its bucket and fallen back to the heuristic subset.
-@triton.autotune(configs=configs_for("gated_projection_bwd_gate_dropres_triton"),
-                 key=['shape_key', 'FROM_PREACT'])
+@configured('gated_projection_bwd_gate_dropres_triton',
+            key=['shape_key', 'FROM_PREACT'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _gate_elem_bwd_ew_kernel(
     dy_ptr, proj_ptr, gate_ptr,    # (M, N)

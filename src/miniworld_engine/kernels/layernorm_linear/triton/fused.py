@@ -14,7 +14,7 @@ falls back to eager torch for larger K.
 """
 
 from __future__ import annotations
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 import torch
 
@@ -31,7 +31,7 @@ import triton.language as tl
 # 1024 == the wrapper's K ceiling, so "one tile holds the whole row" (the schedule this
 # kernel was written for) is still reachable; every smaller candidate is made correct by the
 # k-loops below rather than silently wrong.
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._shape_key import both_key
 
 
 # HAS_BIAS is keyed: it is constexpr, so the two variants already compile separately, but the
@@ -73,9 +73,41 @@ def _prefer_covering_lnl(configs, nargs, **_):
     return selected
 
 
-@triton.autotune(configs=configs_for("layernorm_linear_fwd_triton"),
-                 key=['shape_key', 'HAS_BIAS', 'SAVE_STATS'],
-                 prune_configs_by={'early_config_prune': _prefer_covering_lnl})
+@configured('layernorm_linear_fwd_triton',
+            key=['shape_key', 'HAS_BIAS', 'SAVE_STATS'],
+            default=[dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=16, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=128, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=256, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=512, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, num_warps=4, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=8, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=3),
+            dict(BLOCK_K=32, BLOCK_M1=32, BLOCK_N=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=32, num_warps=4, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=2, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=1),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=256, num_warps=4, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=1, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=4),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=5),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=8, num_stages=3),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, num_warps=4, num_stages=3),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, num_warps=8, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, num_warps=8, num_stages=3),
+            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, num_warps=4, num_stages=3),
+            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, num_warps=8, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, num_warps=8, num_stages=3),
+            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, num_warps=4, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, num_warps=4, num_stages=3),
+            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, num_warps=8, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, num_warps=8, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, num_warps=8, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, num_warps=8, num_stages=3)],
+            prune=_prefer_covering_lnl)
 @triton.jit
 def _lnl_fwd_kernel(
     x_ptr, w_ptr, b_ptr, g_ptr, beta_ptr, y_ptr,

@@ -16,8 +16,8 @@ from __future__ import annotations
 import torch
 import triton
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 import triton.language as tl
 
@@ -36,10 +36,9 @@ def _gelu_grad(x):
     return cdf + pdf_term
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_message_fwd_gemm_triton"),
-    key=["shape_key"],
-)
+@configured('mpnn_message_fwd_gemm_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _projection_fwd_kernel(
     preactivation_ptr,
@@ -89,10 +88,9 @@ def _projection_fwd_kernel(
     )
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_message_fwd_gelu_reduce_triton"),
-    key=["shape_key"],
-)
+@configured('mpnn_message_fwd_gelu_reduce_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _gelu_reduce_fwd_kernel(
     projected_ptr,
@@ -154,11 +152,10 @@ def _gelu_reduce_fwd_kernel(
 # bias reduction. It is not reachable from the library's own dispatch.
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_message_bwd_reduce_dbias_triton"),
-    key=["shape_key"],
-    reset_to_zero=["grad_bias_output_ptr"],
-)
+@configured('mpnn_message_bwd_reduce_dbias_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+            reset_to_zero=["grad_bias_output_ptr"])
 @triton.jit
 def _gelu_reduce_db_bwd_kernel(
     grad_ptr,
@@ -251,10 +248,9 @@ def _zero_bias_grad_kernel(
     tl.store(grad_bias_ptr + columns, 0.0, mask=columns < HIDDEN)
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_message_bwd_dx_triton"),
-    key=["shape_key"],
-)
+@configured('mpnn_message_bwd_dx_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _projection_dx_kernel(
     grad_projected_ptr,

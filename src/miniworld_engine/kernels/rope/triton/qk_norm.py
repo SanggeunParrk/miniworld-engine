@@ -9,8 +9,8 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
 
 
@@ -113,7 +113,9 @@ def _body(
     tl.store(OK + row[:, None] * D + col[None, :], ok, mask)
 
 
-@triton.autotune(configs=configs_for("qk_norm_rope_fwd_triton"), key=["shape_key"])
+@configured('qk_norm_rope_fwd_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, num_warps=4, num_stages=1))
 @triton.jit
 def qk_norm_rope_fwd_kernel(
     Q,
@@ -197,7 +199,9 @@ def qk_norm_rope_fwd_kernel(
     )
 
 
-@triton.autotune(configs=configs_for("qk_norm_rope_bwd_triton"), key=["shape_key"])
+@configured('qk_norm_rope_bwd_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, num_warps=4, num_stages=1))
 @triton.jit
 def qk_norm_rope_bwd_kernel(
     Q,

@@ -10,8 +10,8 @@ latency do not describe this training default.
 
 Contract: bf16 activations, B = 1, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention),
 or d_single 512 as 16 x 32, d_pair
-128, no QK-norm, ``implementation="miniworld"`` (engine backend not forced to Triton), sm_100. Inference: L a multiple of 16;
-training: L a multiple of 128.
+128 (256 for 16 x 24, H100 inference; gate_bias likewise inference only), no QK-norm, sm_90 (H100: ``refusal`` is the whole gate, the
+``cuda`` backend of ``modules.attention.AttentionPairBias`` states it) or sm_100. H100: L a multiple of 128.
 
 16 x 24 runs 32 wide per head: the packed q | k | v | g weights carry 8 zero rows after each head's 24 (and Wo 8 zero columns),
 so q, k, v, g, O and every gradient on that side are W = 512 wide with exact zeros in the pads; the attention kernels see heads
@@ -38,10 +38,8 @@ import math
 import torch
 from torch.autograd.function import once_differentiable
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _capture, _cast_cuda
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.modules.exceptions import ImplementationType
 
 DP = 128
 WIDE_DP, WIDE_HEADS = 256, 16  # Chai-1: d_pair 256 with 16 x 24 heads (H100 inference)
@@ -58,79 +56,42 @@ _packs: dict = {}
 _cores: dict = {}
 
 
-def _eligible(
-    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
-) -> bool:
-    if (
-        module.implementation != ImplementationType.MINIWORLD
-        or settings.current().force_portable_kernels
-    ):
-        return False
-    H, D = module.n_head, single.shape[-1]
-    if (
-        module.use_qk_norm
-        or (H, D) not in SHAPES
-        or tuple(module.to_query.weight.shape) != (D, D)
-    ):
-        return False
-    # Chai-1's pairformer single attention (16 x 24, d_pair 256, gate bias 1.0) is served on H100 for inference only: the gate bias
-    # and the 256-wide pair are the H100 inference op's (module docstring); every other call keeps d_pair 128 and no gate bias.
+def refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool) -> str | None:
+    """Why the H100 (sm_90) native path cannot take this call (``grad``: the training Function, else the inference op), or ``None``.
+    The ``cuda`` backend of ``AttentionPairBias`` states exactly this."""
+    if not single.is_cuda:
+        return "CUDA tensors only"
+    if torch.cuda.get_device_capability(single.device) != (9, 0):
+        return "the H100 (sm_90) kernels only"
+    if module.use_qk_norm:
+        return "per-head q / k RMSNorm (the packed q | k | v | g projection has no norm between the GEMM and the core)"
+    if single.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
+        return f"dtype {single.dtype} / {pair.dtype}: bfloat16 activations only (the cores are bf16 wgmma; parameters bf16 or fp32 masters)"
+    if single.ndim != 3 or single.shape[0] != 1 or not single.is_contiguous():
+        return "single must be one contiguous [1, L, d_single] row (B == 1)"
+    H, D = module.n_head, single.shape[2]
+    if (H, D) not in SHAPES or tuple(module.to_query.weight.shape) != (D, D):
+        return (f"{H} heads x d_single {D}: the kernels are built for (heads, d_single) in {SHAPES} with n_head * d_hidden == d_single")
     dp = module.to_bias.weight.shape[1]
-    hopper = torch.cuda.get_device_capability(single.device) == (9, 0)
     if dp == WIDE_DP:
-        if not (hopper and H == WIDE_HEADS and not torch.is_grad_enabled()):
-            return False
-    elif dp != DP or (module.gate_bias and (not hopper or torch.is_grad_enabled())):
-        return False
-    if (
-        tuple(module.to_bias.weight.shape) != (H, dp)
-        or module.ln_single.weight is None
-        or module.ln_pair.weight is None
-    ):
-        return False
-    if (
-        not single.is_cuda
-        or single.dtype != torch.bfloat16
-        or pair.dtype != torch.bfloat16
-    ):
-        return False
-    if (
-        single.ndim != 3
-        or single.shape[0] != 1
-        or single.shape[2] != D
-        or not single.is_contiguous()
-    ):
-        return False
+        if H != WIDE_HEADS or D != 384:
+            return f"d_pair {WIDE_DP}: served for 16 heads x d_single 384 only"
+        if grad:
+            return f"d_pair {WIDE_DP}: inference only (the training kernels take d_pair {DP})"
+    elif dp != DP:
+        return f"d_pair {dp}: the pair kernels take {DP} (or {WIDE_DP} for 16 heads, inference)"
+    if module.gate_bias and grad:
+        return "gate_bias in training (the gate constant rides on the inference op's packed bias only)"
+    if module.ln_single.weight is None or module.ln_pair.weight is None:
+        return "the kernels take the affine LayerNorms"
     L = single.shape[1]
+    if L % 128:
+        return f"L {L}: a multiple of 128 only"
     if tuple(pair.shape) != (1, L, L, dp) or not pair.is_contiguous():
-        return False
-    if mask is not None and tuple(mask.shape) != (1, L):
-        return False
-    capability = torch.cuda.get_device_capability(single.device)
-    return capability == (10, 0) or (
-        capability == (9, 0)
-        and L % 128 == 0
-    )
-
-
-def serves_inference(
-    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None
-) -> bool:
-    return (
-        not torch.is_grad_enabled()
-        and single.shape[1] % 16 == 0
-        and _eligible(module, single, pair, mask)
-    )
-
-
-def serves_train(
-    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None
-) -> bool:
-    return (
-        torch.is_grad_enabled()
-        and single.shape[1] % 128 == 0
-        and _eligible(module, single, pair, mask)
-    )
+        return f"pair must be one contiguous [1, {L}, {L}, {dp}] row"
+    if mask is not None and (tuple(mask.shape) != (1, L) or mask.dtype != torch.bool):
+        return f"mask must be a bool [1, {L}] key mask"
+    return None
 
 
 def _leaves(module) -> list[torch.Tensor]:
@@ -620,7 +581,6 @@ class _Training(torch.autograd.Function):
         ctx.exact_dwb = (
             ctx.beta_shadow
             and qualified_exact_dwb
-            and settings.current().apb_h100_exact_dwb
         )
         leaves = _kernel_leaves(leaves)
         y, *saved = forward(single, pair, mask, leaves, eps_s, eps_p)

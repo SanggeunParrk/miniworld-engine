@@ -42,7 +42,6 @@ from miniworld_engine.kernels.bias_only_dit.cuda import (
     _Launch,
     _Runs,
 )
-from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 _SMEM_MAX = 232448
@@ -93,7 +92,7 @@ _PV_GROUPS = {32: (1, 2, 4, 8), 48: (1, 2, 4, 5), 64: (1, 2, 4)}
 def pv_batched() -> bool:
     """pv_gate_tf32.cu -DBATCHN: one MMA per K step for all of an item's samples (N = SG x 32-channel atoms) instead of one per
     sample. settings.bias_only_dit_pv_batch=0: one per sample (the round-2 kernel)."""
-    return settings.current().bias_only_dit_pv_batch
+    return True
 
 
 def pv_groups(dh: int) -> tuple[int, ...]:
@@ -118,10 +117,6 @@ def pick_group_tf32(S: int, L: int, nsm: int, nh: int, dh: int) -> int:
     """Samples per work item: the fewest bytes into the busiest SM -- rounds x (the P tile once, SG samples' v tiles, their g in and
     a out). settings.bias_only_dit_sg forces one (clamped to the built groups)."""
     groups = [g for g in pv_groups(dh) if g <= max(S, 1)]
-    forced = settings.current().bias_only_dit_sg
-    if forced:
-        f = int(forced)
-        return max([g for g in groups if g <= f] or [1])
     best = None
     for sg in groups:
         items = nh * (L // 128) * -(-S // sg)
@@ -325,10 +320,7 @@ def glu_op(device_index: int, bwd: bool):
     fp32 rows. Backward on by default (settings.bias_only_dit_tf32_glu_bwd=0: off); forward OFF by default
     (settings.bias_only_dit_tf32_glu=1: on) -- its GEMM runs at ~530 TF/s against cuBLAS's ~680, which eats the SwiGLU pass it
     removes (L768 per launch 329 against 254 + 99 us; whole step not better)."""
-    current = settings.current()
-    if not (
-        current.bias_only_dit_tf32_glu_bwd if bwd else current.bias_only_dit_tf32_glu
-    ):
+    if not bwd:  # the forward GLU kernel is off (old settings.bias_only_dit_tf32_glu default; the backward one is on)
         return None
     key = (device_index, bwd)
     if key in _GLU_FAILED:
@@ -366,10 +358,9 @@ def dpb32_pair(L: int, nh: int = 16, nsm: int = 148) -> bool:
     product; L768 A = 48, 16 x 48: 148.2 -> 104.0 us, in-process A/B) -- the default where 256-key tiles divide L and the pairs' items
     fill the SM pairs (the bf16 rule, ``dpb_pair_on``): at L 128-768 that is L768. settings.bias_only_dit_tf32_dpb_pair=0 / 1 (read per
     call) keeps dpb32_sm100.cu / takes the pairs wherever 256 divides L."""
-    forced = settings.current().bias_only_dit_tf32_dpb_pair
-    if L % 256 or forced is False:
+    if L % 256:
         return False
-    return forced is True or nh * (L // 256) * (L // 256) >= nsm // 2
+    return nh * (L // 256) * (L // 256) >= nsm // 2
 
 
 _DPBX2_FAILED: set = set()
@@ -504,7 +495,7 @@ _SLOT, _NS, _NA = 16384, 3, 4
 def inf3_on() -> bool:
     """The fp32 inference step as three kernels per block (front, core, tail) behind the hoisted conditioning tables -- the default;
     settings.bias_only_dit_inf3=0 keeps the cuBLAS + rows step (12 launches per block). Read per call."""
-    return settings.current().bias_only_dit_inf3
+    return True
 
 
 def front_smem(cl: int, da: int) -> int:
@@ -537,7 +528,7 @@ TAIL_PAIR = 4
 
 def tail_pair_on() -> bool:
     """The pair tail where it saves a round (the default); settings.bias_only_dit_inf3_2cta=0 (read per call) keeps CL 8 / CL 6."""
-    return settings.current().bias_only_dit_inf3_2cta
+    return True
 
 
 def tail_rows(M: int, cl: int) -> int:
@@ -622,10 +613,6 @@ def clear_trace(kernel) -> None:
 def front_cluster(n_tiles: int, nsm: int) -> int:
     """The front cluster for ``n_tiles`` without the kernels at hand (estimate: 148-SM B200, 15 / 22 / 33 resident clusters of
     8 / 6 / 4); ``FrontTF32.cluster`` asks the driver. settings.bias_only_dit_inf3_cl=4 / 6 / 8 forces one."""
-    forced = settings.current().bias_only_dit_inf3_cl
-    if forced:
-        assert forced in (4, 6, 8), forced
-        return forced
     return pick_cluster(
         n_tiles,
         {
@@ -755,10 +742,6 @@ class FrontTF32:
     def cluster(self, n_tiles: int) -> int:
         """CTAs per row tile: the least modelled time over the sizes built (rounds of resident clusters x per-CTA time ~ 1 / CL).
         settings.bias_only_dit_inf3_cl forces one."""
-        forced = settings.current().bias_only_dit_inf3_cl
-        if forced:
-            assert int(forced) in self.clusters(), (forced, self.da)
-            return int(forced)
         return pick_cluster(
             n_tiles,
             {cl: (max_clusters(self.kernel(cl), cl), 8 / cl) for cl in self.clusters()},
@@ -881,10 +864,6 @@ class TailTF32:
         products, xt streamed twice). A = 5: CL 6 at L512 only (20 tiles: one round of 22 against two of 15).
         Unless settings.bias_only_dit_inf3_2cta=0, the pair tail (``TAIL_PAIR``) where it takes fewer rounds than both (A = 5: L640 /
         L768, 25 / 30 tiles in one round of clusters of two tiles). settings.bias_only_dit_inf3_tail_cl=8 / 6 / 4 forces one."""
-        forced = settings.current().bias_only_dit_inf3_tail_cl
-        if forced:
-            assert int(forced) in (*TAIL_CLUSTERS, TAIL_PAIR), forced
-            return int(forced)
         n8, n6 = max_clusters(self.kernel(8), 8), max_clusters(self.kernel(6), 6)
         if tail_pair_on():
             rounds = min(-(-n_tiles // max(n8, 1)), -(-n_tiles // max(n6, 1)))
@@ -1076,7 +1055,7 @@ def tf32_ready(index: int, nh: int, dh: int, train: bool) -> bool:
     ungated core and the bias gradient) -- False (after one warning) when a toolchain or driver problem keeps the module path.
     settings.bias_only_dit_tf32=0 turns the fp32 path off. A constant to ``torch.compile``."""
     global _FAILED
-    if _FAILED or (not settings.current().bias_only_dit_tf32):
+    if _FAILED:
         return False
     key = (index, nh, dh, train)
     if key in _READY:

@@ -118,18 +118,12 @@ import functools
 
 import torch
 
-from miniworld_engine import settings
-
 #: Ops already registered in this process, by qualified name. ``torch.library.custom_op`` raises on
 #: a duplicate name, and a module can legitimately be imported twice (a test that reconfigures
 #: ``compile_wrap`` and reloads, ``importlib.reload``, a re-entrant plugin import). Re-registering
 #: the same launcher is a no-op in intent, so hand back the op that is already there rather than
 #: making import order decide whether the library loads at all.
 _REGISTERED: dict[str, object] = {}
-
-#: Set by `autotune.derive` only: `(fn, args, kwargs) -> bool`, true when the opaque launch `fn` is to return its fake instead of running
-#: (compile_wrap="disable" only: the custom-op mode already dispatches to the fake under FakeTensorMode).
-FAKE_WHEN = None
 
 
 def _op_name(fn, name: str | None) -> str:
@@ -147,7 +141,7 @@ def _op_name(fn, name: str | None) -> str:
 
 
 def opaque(fake=None, *, name: str | None = None, mutates_args=()):
-    """Mark a kernel launch as untraceable by Dynamo, per ``settings.compile_wrap``.
+    """Mark a kernel launch as untraceable by Dynamo, as an opaque ``torch.library`` custom op.
 
     ``fake(*args, **kwargs)`` returns output tensors of the right shape/dtype/device without doing
     the work. It is required only by ``custom_op`` mode -- Dynamo needs it to keep shape inference
@@ -160,25 +154,10 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()):
     """
 
     def decorate(fn):
-        if settings.current().compile_wrap == "disable":
-            if fake is None:
-                return torch.compiler.disable(fn)
-
-            @functools.wraps(fn)
-            def call(*args, **kwargs):
-                # `autotune.derive` runs the modules on FakeTensors and asks which kernels they launch: a native launch has no
-                # business running there, so it hands over a predicate and gets the op's fake (same shapes, no launch, no build).
-                if FAKE_WHEN is not None and FAKE_WHEN(fn, args, kwargs):
-                    return fake(*args, **kwargs)
-                return fn(*args, **kwargs)
-
-            # the WHOLE wrapper is opaque to Dynamo: a wrapper that stayed traceable and called a disabled function made fullgraph compiles fail
-            return torch.compiler.disable(call)
         if fake is None:
             raise ValueError(
-                f"compile_wrap='custom_op' needs a fake implementation for "
-                f"{getattr(fn, '__qualname__', fn.__name__)}; pass opaque(fake=...) or run with "
-                f"compile_wrap='disable'")
+                f"opaque() needs a fake implementation for "
+                f"{getattr(fn, '__qualname__', fn.__name__)}; pass opaque(fake=...)")
         qualname = f"miniworld_engine::{_op_name(fn, name)}"
         cached = _REGISTERED.get(qualname)
         if cached is not None:

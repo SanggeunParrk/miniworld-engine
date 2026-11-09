@@ -75,3 +75,17 @@ def chai_bwd(dy, y, stats, n):
 def chai_projbwd(x, mask, da, db, gamma, beta, stats, wlr):
     """Backward of ``chai_proj``: -> [dcat [T, 128], ln16 [T, 64], dx [T, 64], per-block [dgamma | dbeta] partials [T / 64, 128] fp32]."""
     return chai_ext().chai_projbwd(x, mask, da, db, gamma, beta, stats, wlr)
+
+
+def prebuild(target, rows):
+    """Every build of this module for the requirements ``rows`` (kernels/_prebuild.py); the training OPM extensions are in
+    kernels/integrations/opm_train.py. The gather build serves the inference kernels (``gather`` / ``split_groups`` /
+    ``bias_finish``) of every row that has them; the Chai-1 build serves the ``chai_*`` kernels, which only a grouped
+    (``groups``) OuterProductMean row launches."""
+    from miniworld_engine.kernels._prebuild import _kv
+
+    names = set().union(*(r["kernels"] for r in rows)) if rows else set()
+    if names & {"outer_product_mean_gather_sm90", "outer_product_mean_split_groups_sm90", "outer_product_mean_bias_finish_sm90"}:
+        yield ext
+    if any("groups" in _kv(r["options"]) and any("_chai_" in k for k in r["kernels"]) for r in rows):
+        yield chai_ext

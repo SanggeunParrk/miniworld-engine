@@ -1,14 +1,39 @@
-# docs
+# Documentation
 
-| | |
+The engine in four parts. Every page describes the current code; where a page and the code disagree, the code is right.
+Scope is H100 (sm90) only.
+
+| page | covers |
 |---|---|
-| [gpus/](gpus/README.md) | one page per GPU: how to run there, and **which op is finished for which shapes** (성능 확인: the maintainer's) — [H100](gpus/h100/h100.md) ([dispatch](gpus/h100/dispatch.md)) · [B200](gpus/b200/b200.md) · [A100](gpus/a100/a100.md) · [A6000/A5000](gpus/ampere-workstation/ampere-workstation.md) · [what has run where](gpus/supported.md) · [troubleshooting](gpus/troubleshooting.md) |
-| [kernels/](kernels/) | per-op notes — [TriMul module](kernels/triangle-multiplication-module.md), [trimul_inproj](kernels/trimul-inproj.md), [tm1](kernels/tm1.md)/[tm2](kernels/tm2.md), [triangle attention](kernels/triangle-attention.md), [LayerNorm](kernels/layernorm.md), [LN+Linear](kernels/layernorm-linear.md), [RMSNorm-AdaMod](kernels/rmsnorm-adamod.md), [bias-only attention](kernels/bias-only-attention.md), [Anthropic kernels](kernels/anthropic-integration.md) ([payload](kernels/anthropic-trimul-payload.md)); tuning — [dispatch cache](kernels/autotune-dispatch-cache.md), [key](kernels/autotune-key.md), [grid sweep](kernels/autotune-grid-sweep.md), [L2 swizzle](kernels/autotune-l2-swizzle.md), [training shapes](kernels/autotune-training-shape-policy.md), [sweep page](kernels/autotune-sweep-grid.html), [thresholds](kernels/thresholds.md); JIT builds — [cache, keys, locks, prebuild](kernels/jit-cache.md), [prebuilt kernel bundles, code-graph keys](kernels/prebuilt-kernels.md); writing kernels — [contributing](kernels/contributing.md), [naming](kernels/naming.md), [lab notebooks](kernels/lab-notebooks.md) |
-| [records/](records/) | dated measurements and audits, never edited after the fact; a GPU module page links the records that hold its earlier measurements |
-| [actions.md](actions.md) | the release actions (`status`, `test`, `bundle`, `verify`, `derive`, `bench`, `wheel`, `release`): each runs the code graph first, does only what it names, writes a record; no scope arguments |
-| [dispatch.md](dispatch.md) | where `miniworld` runs each op on each card: CUDA, Triton on a recorded card, or a warning and PyTorch |
-| [CHANGELOG.md](CHANGELOG.md) | what each version changed |
-| [standards.md](standards.md) | project direction, library and product standards |
+| [requirements.md](requirements.md) | the two requirement tables, the derive rule (kernel range = its module rows), the accuracy rule |
+| [modules.md](modules.md) | the `BackendModule` contract, the backends, selectors, class versions, master weights, `make_inputs` |
+| [kernels.md](kernels.md) | kernel families, launch-config tables and shape keys, the prebuilder, the pretuner |
+| [measure.md](measure.md) | the accuracy measurer (fp64 gold, lights) and the speed measurer (CUDA-graph timing) |
+| [judge.md](judge.md) | versions, tokens, verdicts (carried / owed / pending), the Slurm measurement cycle |
 
-Benchmark docs live beside the harness in [`benchmarks/`](../benchmarks/README.md). Older docs,
-records removed from the tree and release pages are in git (README, "Research history").
+## H100 kernel notes
+
+Design notes per kernel family (layout, tiling, saved tensors, numerics, limits). Numbers in them are labelled historical: they were
+not measured by the current measurer.
+
+| module(s) | note |
+|---|---|
+| TriangleAttention (+ AF3 / RF3 / Chai1 / Chai1Confidence) | [h100/triangle_attention.md](h100/triangle_attention.md) |
+| TriangleMultiplication, BidirectionalTriangleMultiplication | [h100/trimul.md](h100/trimul.md) |
+| Transition, ConditionedTransition | [h100/transition.md](h100/transition.md) |
+| OuterProductMean | [h100/outer_product_mean.md](h100/outer_product_mean.md) |
+| MSAPairWeightedAveraging | [h100/pair_weighted_averaging.md](h100/pair_weighted_averaging.md) |
+| LayerNorm, LayerNormLinear, RMSNorm | [h100/layernorm.md](h100/layernorm.md) |
+| AttentionPairBias | [h100/attention_pair_bias.md](h100/attention_pair_bias.md) |
+| TokenDiTProtenix / TokenDiTMiniWorld | [h100/token_dit.md](h100/token_dit.md) |
+| TokenDiTMiniWorldBiasOnly | [h100/bias_only_dit.md](h100/bias_only_dit.md) |
+| Boltz-2 / RoseTTAFold3 / Chai-1 token and atom DiT variants | [h100/dit_variants.md](h100/dit_variants.md) |
+| AtomDiTProtenix / AtomDiTOpenFold3 (local atom attention) | [h100/local_atom_dit.md](h100/local_atom_dit.md) |
+| AtomDiTMiniWorld / AtomDiTESMFold2 / SWAAtomTransformer | [h100/swa_atom_dit.md](h100/swa_atom_dit.md) |
+| AugmentNoise, AlignEuler, PoolAtoms | [h100/sampler_ops.md](h100/sampler_ops.md) |
+| SmoothLddtLoss | [h100/smooth_lddt.md](h100/smooth_lddt.md) |
+| PairEmbedAdaLN / PairEmbedGeom / PairEmbedCA, TokenPairInit | [h100/pair_embed.md](h100/pair_embed.md) |
+| ProteinMPNN | [h100/mpnn.md](h100/mpnn.md) |
+
+The earlier documentation (dispatch, autotune, registry, pass tokens, other GPUs, dated records) described systems that no longer
+exist; it is in git `HEAD` under `docs/` for history.

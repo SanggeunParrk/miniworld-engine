@@ -12,7 +12,7 @@ Cartesian ``configs/grid`` ladders from offering tiles ``tl.dot`` cannot compile
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 
 def _rows_at_least_16(configs, named_args, **kwargs):
@@ -47,8 +47,33 @@ def _presum_add(DMOD, x, col0, ab_idx, b, S, ok_at, C: tl.constexpr, MODW: tl.co
 
 
 # NH=32 with 8 warps, SP=2, AT=32 faults (Triton codegen) -- team-gm's note; no config set offers NH=32.
-@triton.autotune(configs=configs_for("swa_dit_swiglu_bwd_triton"), key=["shape_key", "DWOPS"], restore_value=["DMOD"],
-                 prune_configs_by={"early_config_prune": _rows_at_least_16})
+@configured('swa_dit_swiglu_bwd_triton',
+            key=["shape_key", "DWOPS"],
+            default=[dict(SP=2, AT=16, NH=64, num_warps=4, num_stages=1),
+            dict(SP=2, AT=16, NH=64, num_warps=8, num_stages=1),
+            dict(SP=2, AT=16, NH=128, num_warps=4, num_stages=1),
+            dict(SP=2, AT=16, NH=128, num_warps=8, num_stages=1),
+            dict(SP=4, AT=8, NH=64, num_warps=4, num_stages=1),
+            dict(SP=4, AT=8, NH=64, num_warps=8, num_stages=1),
+            dict(SP=4, AT=8, NH=128, num_warps=4, num_stages=1),
+            dict(SP=4, AT=8, NH=128, num_warps=8, num_stages=1),
+            dict(SP=2, AT=32, NH=64, num_warps=4, num_stages=1),
+            dict(SP=2, AT=32, NH=64, num_warps=8, num_stages=1),
+            dict(SP=2, AT=32, NH=128, num_warps=4, num_stages=1),
+            dict(SP=2, AT=32, NH=128, num_warps=8, num_stages=1),
+            dict(SP=4, AT=16, NH=64, num_warps=4, num_stages=1),
+            dict(SP=4, AT=16, NH=64, num_warps=8, num_stages=1),
+            dict(SP=4, AT=16, NH=128, num_warps=4, num_stages=1),
+            dict(SP=4, AT=16, NH=128, num_warps=8, num_stages=1),
+            dict(SP=1, AT=32, NH=64, num_warps=4, num_stages=1),
+            dict(SP=1, AT=32, NH=64, num_warps=8, num_stages=1),
+            dict(SP=1, AT=32, NH=128, num_warps=4, num_stages=1),
+            dict(SP=1, AT=32, NH=128, num_warps=8, num_stages=1),
+            dict(SP=16, AT=1, NH=64, num_warps=4, num_stages=1),
+            dict(SP=2, AT=8, NH=64, num_warps=4, num_stages=1),
+            dict(SP=8, AT=2, NH=64, num_warps=4, num_stages=1)],
+            prune=_rows_at_least_16,
+            restore_value=["DMOD"])
 @triton.jit(do_not_specialize=["S", "A", "B"])
 def _swa_ffn_bwd_kernel(DQ2, Q1, MOD, WU, WD, YS, FFS, DQ1, DAB, HH, DFFN, DMOD, S, A, B, eps, shape_key,
                         C: tl.constexpr, NHID: tl.constexpr, MODW: tl.constexpr, DWOPS: tl.constexpr, SP: tl.constexpr, AT: tl.constexpr,
@@ -91,7 +116,10 @@ def _swa_ffn_bwd_kernel(DQ2, Q1, MOD, WU, WD, YS, FFS, DQ1, DAB, HH, DFFN, DMOD,
     tl.store(DQ1 + ofs, (dq2 + rstd[:, None] * (dxh - xh * (tl.sum(dxh * xh, axis=1) / C)[:, None])).to(DQ1.dtype.element_ty), mask=m2)
 
 
-@triton.autotune(configs=configs_for("swa_dit_swiglu_dw_triton"), key=["shape_key"], reset_to_zero=["DWU", "DWD"])
+@configured('swa_dit_swiglu_dw_triton',
+            key=["shape_key"],
+            default=dict(BR=32, HS=32, num_warps=4, num_stages=1),
+            reset_to_zero=["DWU", "DWD"])
 @triton.jit(do_not_specialize=["M", "S", "B"])
 def _swa_ffn_dw_kernel(DQ2, MOD, WU, WD, YS, DWU, DWD, M, S, B, shape_key, NSPLIT,
                        C: tl.constexpr, NHID: tl.constexpr, MODW: tl.constexpr, BR: tl.constexpr, HS: tl.constexpr):
@@ -121,8 +149,26 @@ def _swa_ffn_dw_kernel(DQ2, MOD, WU, WD, YS, DWU, DWD, M, S, B, shape_key, NSPLI
     tl.atomic_add(DWD + cc[:, None] * NHID + (hs * HS + hr)[None, :], acc_d, sem="relaxed")
 
 
-@triton.autotune(configs=configs_for("swa_dit_output_bwd_triton"), key=["shape_key"], restore_value=["DMOD"],
-                 prune_configs_by={"early_config_prune": _rows_at_least_16})
+@configured('swa_dit_output_bwd_triton',
+            key=["shape_key"],
+            default=[dict(SP=2, AT=16, num_warps=4, num_stages=1),
+            dict(SP=2, AT=16, num_warps=8, num_stages=1),
+            dict(SP=4, AT=8, num_warps=4, num_stages=1),
+            dict(SP=4, AT=8, num_warps=8, num_stages=1),
+            dict(SP=2, AT=32, num_warps=4, num_stages=1),
+            dict(SP=2, AT=32, num_warps=8, num_stages=1),
+            dict(SP=4, AT=16, num_warps=4, num_stages=1),
+            dict(SP=4, AT=16, num_warps=8, num_stages=1),
+            dict(SP=1, AT=32, num_warps=4, num_stages=1),
+            dict(SP=1, AT=32, num_warps=8, num_stages=1),
+            dict(SP=16, AT=1, num_warps=2, num_stages=1),
+            dict(SP=16, AT=1, num_warps=4, num_stages=1),
+            dict(SP=4, AT=4, num_warps=2, num_stages=1),
+            dict(SP=4, AT=4, num_warps=4, num_stages=1),
+            dict(SP=2, AT=8, num_warps=2, num_stages=1),
+            dict(SP=2, AT=8, num_warps=4, num_stages=1)],
+            prune=_rows_at_least_16,
+            restore_value=["DMOD"])
 @triton.jit(do_not_specialize=["S", "A", "B"])
 def _swa_oproj_bwd_kernel(DQ1, O, G, MOD, WO, ATS, DOUT_, DG, DVv, DATT, GATED, DMOD, S, A, B, shape_key,
                           C: tl.constexpr, H: tl.constexpr, D: tl.constexpr, MODW: tl.constexpr, SP: tl.constexpr, AT: tl.constexpr):
@@ -153,7 +199,9 @@ def _swa_oproj_bwd_kernel(DQ1, O, G, MOD, WO, ATS, DOUT_, DG, DVv, DATT, GATED, 
     tl.store(DVv + (n[:, None] * H + hh_[None, :]) * S + s_[:, None], dvv, mask=m2)
 
 
-@triton.autotune(configs=configs_for("swa_dit_softmax_bwd_dq_triton"), key=["shape_key", "HW"])
+@configured('swa_dit_softmax_bwd_dq_triton',
+            key=["shape_key", "HW"],
+            default=dict(BM=64, BN=64, num_warps=4, num_stages=1))
 @triton.jit(do_not_specialize=["S"])
 def _swa_attn_bwd_dq_kernel(QH, KH, VH, DOUT_, LSE, DVv, SEQU, DQH, S, scale, shape_key,
                             C: tl.constexpr, H: tl.constexpr, D: tl.constexpr, HW: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr):
@@ -184,7 +232,9 @@ def _swa_attn_bwd_dq_kernel(QH, KH, VH, DOUT_, LSE, DVv, SEQU, DQH, S, scale, sh
     tl.store(DQH + hb + qi[:, None] * D + dc[None, :], (dq * scale).to(tl.bfloat16), mask=(qi < S)[:, None])
 
 
-@triton.autotune(configs=configs_for("swa_dit_softmax_bwd_dkdv_triton"), key=["shape_key", "HW"])
+@configured('swa_dit_softmax_bwd_dkdv_triton',
+            key=["shape_key", "HW"],
+            default=dict(BM=64, BN=64, num_warps=4, num_stages=1))
 @triton.jit(do_not_specialize=["S"])
 def _swa_attn_bwd_dkv_kernel(QH, KH, VH, DOUT_, LSE, DVv, SEQU, DKH, DVH, S, scale, shape_key,
                              C: tl.constexpr, H: tl.constexpr, D: tl.constexpr, HW: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr):
@@ -238,8 +288,26 @@ def _head_rms_bwd(p, dy, eps, BR: tl.constexpr, H: tl.constexpr, D: tl.constexpr
     return tl.reshape(r[:, :, None] * (d3 - yh * (tl.sum(d3 * yh, axis=2) / D)[:, :, None]), (BR, H * D))
 
 
-@triton.autotune(configs=configs_for("swa_dit_inproj_bwd_triton"), key=["shape_key"], restore_value=["DMOD"],
-                 prune_configs_by={"early_config_prune": _rows_at_least_16})
+@configured('swa_dit_inproj_bwd_triton',
+            key=["shape_key"],
+            default=[dict(SP=2, AT=16, num_warps=4, num_stages=1),
+            dict(SP=2, AT=16, num_warps=8, num_stages=1),
+            dict(SP=4, AT=8, num_warps=4, num_stages=1),
+            dict(SP=4, AT=8, num_warps=8, num_stages=1),
+            dict(SP=2, AT=32, num_warps=4, num_stages=1),
+            dict(SP=2, AT=32, num_warps=8, num_stages=1),
+            dict(SP=4, AT=16, num_warps=4, num_stages=1),
+            dict(SP=4, AT=16, num_warps=8, num_stages=1),
+            dict(SP=8, AT=4, num_warps=4, num_stages=1),
+            dict(SP=8, AT=4, num_warps=8, num_stages=1),
+            dict(SP=16, AT=2, num_warps=4, num_stages=1),
+            dict(SP=16, AT=2, num_warps=8, num_stages=1),
+            dict(SP=1, AT=16, num_warps=4, num_stages=1),
+            dict(SP=1, AT=16, num_warps=8, num_stages=1),
+            dict(SP=1, AT=32, num_warps=4, num_stages=1),
+            dict(SP=1, AT=32, num_warps=8, num_stages=1)],
+            prune=_rows_at_least_16,
+            restore_value=["DMOD"])
 @triton.jit(do_not_specialize=["S", "A", "B"])
 def _swa_qkvg_bwd_kernel(QI, MOD, COS, SIN, WQKV, WG, PQS, PKS, DQH, DKH, DVH, DG, DQ1, DQ, DP, DMOD, S, A, B, eps, qk_eps, shape_key,
                          C: tl.constexpr, H: tl.constexpr, D: tl.constexpr, MODW: tl.constexpr, SP: tl.constexpr, AT: tl.constexpr):

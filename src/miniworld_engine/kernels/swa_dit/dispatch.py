@@ -39,7 +39,7 @@ attention included (TF32 Q / K / V / P, fp32 softmax) -- for inference. A traini
 backward, and there is none at the moment (``_tf32_bwd_ready``: the first one was removed for giving different gradients on identical
 steps), so fp32 training runs the Triton fp32 path. ``settings.swa_dit_tf32=0`` (or ``settings.swa_dit_sm100=0`` /
 ``force_portable_kernels=True``) keeps the Triton fp32 path for inference too, and so does a build or load failure (warned once). The
-hoisted modulation has the same split (``swa_dit_mod_fwd_tf32`` without a gradient).
+hoisted modulation (``native_h100_mod_fwd`` / ``native_h100_mod_bwd``) is not a kernel of these stages.
 
 fp32 stages elsewhere (q fp32): on sm_90 with TF32 allowed (matmul precision "high" or
 "medium"), every stage is the hand-CUDA extension ``cuda/swa_fp32.cu`` -- one ``fwd`` and one ``bwd`` call, tf32 wgmma
@@ -59,13 +59,12 @@ from typing import Any
 import torch
 import triton
 
-from miniworld_engine import settings
-from miniworld_engine.autotune.shape_key import atom_key
+from miniworld_engine.kernels._shape_key import atom_key
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
-from miniworld_engine.kernels.swa_dit.interface import (
+from miniworld_engine.kernels.swa_dit._common import (
     D_ATOM,
     FP32_EPS,
     HALF_WINDOW,
@@ -128,11 +127,7 @@ def native_h100_enabled(q, training=None):
     """Whether H100 serves this fused-block call (every sm_90 call unless ``settings.swa_dit_h100_native`` is False); which
     stages run it is :func:`native_h100_stages`."""
     from miniworld_engine.kernels.swa_dit.cuda.loader import is_sm90
-    override = settings.current().swa_dit_h100_native
-    if override is not None:
-        return override and is_sm90(q.device)
-    # the A/B switch: force_portable_kernels=True runs the Triton kernels of triton/ on H100 as it does for the other families
-    return is_sm90(q.device) and not settings.current().force_portable_kernels
+    return is_sm90(q.device)
 
 
 def native_h100_stages(q) -> bool:
@@ -149,8 +144,6 @@ def native_h100_stages(q) -> bool:
     """
     if not native_h100_enabled(q):
         return False
-    if settings.current().swa_dit_h100_native is True:
-        return True
     if q.dtype == torch.float32:
         # _fp32_cuda's test, with the precision read as a constant under torch.compile (this runs in the autograd.Function's forward)
         composed = (_matmul_precision() != "highest"
@@ -163,7 +156,7 @@ def native_h100_stages(q) -> bool:
 def _composed_cuda(device: torch.device, extra: str | None = None) -> bool:
     """Whether every hand-CUDA extension the composed bf16 stages use (and ``extra``: "fp32" for the fp32 ones) builds / loads on
     ``device`` (the prebuilt bundle or the JIT); ``force_portable_kernels=True`` asks for their Triton kernels instead."""
-    return (not settings.current().force_portable_kernels) and _composed_builds(device, extra)
+    return _composed_builds(device, extra)
 
 
 @functools.lru_cache(maxsize=8)
@@ -201,8 +194,6 @@ def _tiled_serves(qh, d_out=None):
 
 def _native_h100_extension(which="qkvg"):
     from miniworld_engine.kernels.swa_dit.cuda.loader import ERRORS, extension
-    if settings.current().force_portable_kernels:
-        raise RuntimeError("native H100 SWA rejects force_portable_kernels")
     ext = extension(which)
     if ext is None:
         raise RuntimeError(f"native H100 SWA {which} extension unavailable: {ERRORS.get(which)}")
@@ -430,7 +421,7 @@ def _augments(N: int, B: int) -> int:
 
 def _cuda(which: str, wanted: bool, device: torch.device) -> Any:
     """The hand-CUDA extension for stage ``which``, or None -> the Triton kernel serves the stage."""
-    if not wanted or settings.current().force_portable_kernels:
+    if not wanted:
         return None
     from miniworld_engine.kernels.swa_dit.cuda.loader import extension, is_sm90
 
@@ -445,11 +436,7 @@ _SM100_FAILED = False
 def _sm100(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
     """The sm_100a kernels (``cuda/sm100``) when they serve this bf16 call, else None -> the Triton path."""
     global _SM100_FAILED
-    if (
-        _SM100_FAILED
-        or (not settings.current().swa_dit_sm100)
-        or settings.current().force_portable_kernels
-    ):
+    if _SM100_FAILED:
         return None
     from miniworld_engine.kernels.swa_dit.cuda import sm100
 
@@ -477,11 +464,7 @@ _TF32_FAILED = False
 
 def _tf32_off() -> bool:
     """The switches that keep the Triton fp32 path: ``settings.swa_dit_tf32=0``, ``settings.swa_dit_sm100=0``, force_portable_kernels."""
-    return (
-        (not settings.current().swa_dit_tf32)
-        or (not settings.current().swa_dit_sm100)
-        or settings.current().force_portable_kernels
-    )
+    return False
 
 
 def _device_index(device: torch.device) -> int:
@@ -554,9 +537,7 @@ def _rows_cuda(which: str, wanted: bool, M: int, A: int, device: torch.device) -
     does not build falls back to the wgmma one."""
     if not wanted:
         return "", None
-    impl = settings.current().swa_dit_rows_impl
-    if impl == "auto":
-        impl = "wgmma" if A % 8 == 0 and _WGMMA_MIN_ROWS[which] <= M else "slab"
+    impl = "wgmma" if A % 8 == 0 and _WGMMA_MIN_ROWS[which] <= M else "slab"
     if impl == "slab":
         ext = _cuda("slab", True, device)
         if ext is not None:
@@ -1110,9 +1091,8 @@ def swa_dit_block_bwd(
     Ak = _augments(N, B)
     NHID = wd.shape[1]
     dev = q.device
-    policy = settings.current()
-    fused_dw = policy.swa_dit_ffn_dw == "fused"
-    dq1_dtype = torch.float32 if policy.swa_dit_dq1 == "fp32" else torch.bfloat16
+    fused_dw = False  # "mat": dW from cuBLAS (the fused Triton dW kernel is slower; old settings.swa_dit_ffn_dw default)
+    dq1_dtype = torch.bfloat16  # old settings.swa_dit_dq1 default
     dq1 = torch.empty(M, C, device=dev, dtype=dq1_dtype)
     dO = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
     dG = torch.empty_like(dO)
@@ -1536,89 +1516,3 @@ def _swa_dit_bwd_fp32_triton(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd
         q.reshape(M, C), mod, cos, sin, wqkv, wg, pq, pk, dQh, dKh, dVh, dG, dq1, dq, dP, dmod, S, A, B, eps, FP32_EPS,
         shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C)
     return [dq, dmod, dP, datt, gated, dab, hh, dffn]
-
-
-def _swa_dit_mod_fwd_sm100_fake(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
-    """Shape of the output: [R, 6C] fp32."""
-    return c.new_empty((c.shape[0], wmod.shape[0]), dtype=torch.float32)
-
-
-@opaque(fake=_swa_dit_mod_fwd_sm100_fake, name="swa_dit_mod_fwd_sm100")
-def swa_dit_mod_fwd_sm100(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
-    """silu(c) Wmod^T [R, 6C] fp32 on the sm_100a mod_fwd kernel; c [R, C] bf16 contiguous, Wmod [6C, C] bf16."""
-    from miniworld_engine.kernels.swa_dit.cuda import sm100
-
-    return sm100.mod_fwd(c, wmod)
-
-
-def _swa_dit_mod_bwd_sm100_fake(
-    g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor
-) -> list[torch.Tensor]:
-    """Shapes of the outputs: dc like c, dWmod fp32 in Wmod's shape."""
-    return [
-        torch.empty_like(c),
-        torch.empty(wmod.shape, dtype=torch.float32, device=wmod.device),
-    ]
-
-
-@opaque(fake=_swa_dit_mod_bwd_sm100_fake, name="swa_dit_mod_bwd_sm100")
-def swa_dit_mod_bwd_sm100(
-    g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor
-) -> list[torch.Tensor]:
-    """[dc (bf16), dWmod (fp32)] of :func:`swa_dit_mod_fwd_sm100` from g = d mod [R, 6C] fp32; R a multiple of 128."""
-    from miniworld_engine.kernels.swa_dit.cuda import sm100
-
-    dc, dw = sm100.mod_bwd(g, c, wmod)
-    return [dc, dw]
-
-
-def _swa_dit_mod_fwd_tf32_fake(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
-    """Shape of the output: [R, 6C] fp32."""
-    return c.new_empty((c.shape[0], wmod.shape[0]), dtype=torch.float32)
-
-
-@opaque(fake=_swa_dit_mod_fwd_tf32_fake, name="swa_dit_mod_fwd_tf32")
-def swa_dit_mod_fwd_tf32(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
-    """silu(c) Wmod^T [R, 6C] fp32 on the sm_100a TF32 mod_fwd_tf32 kernel; c [R, C] fp32 contiguous, Wmod [6C, C] fp32."""
-    from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
-
-    return tf32_fwd.mod_fwd_tf32(c, wmod)
-
-
-def _swa_dit_mod_fwd_sm90_fake(c: torch.Tensor, wmod: torch.Tensor, save: bool) -> list[torch.Tensor]:
-    """Shapes of the outputs: [R, 6C] fp32 and silu(c) ([R, C] bf16 when ``save``, else [0])."""
-    return [c.new_empty((c.shape[0], wmod.shape[0]), dtype=torch.float32),
-            c.new_empty((c.shape[0], c.shape[1]) if save else (0,), dtype=torch.bfloat16)]
-
-
-@opaque(fake=_swa_dit_mod_fwd_sm90_fake, name="swa_dit_mod_fwd_sm90")
-def swa_dit_mod_fwd_sm90(c: torch.Tensor, wmod: torch.Tensor, save: bool) -> list[torch.Tensor]:
-    """[silu(c) Wmod^T [R, 6C] fp32, silu(c)] on the sm_90a ``mod_fwd`` kernel; c [R, C] and Wmod [6C, C] contiguous, bf16.
-    ``save`` also returns silu(c) (bf16) for the backward, else an empty tensor. Call :func:`mod_sm90` first."""
-    ext = _cuda("modwg", True, c.device) or _cuda("mod", True, c.device)     # TMA + wgmma forward (10.4 -> 8.3 us at R = 4096)
-    mod, a = ext.mod_fwd(c, wmod, save)
-    return [mod, a]
-
-
-def _swa_dit_mod_bwd_sm90_fake(g: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
-    """Shapes of the outputs: dc like c, dWmod like Wmod."""
-    return [torch.empty_like(c), torch.empty_like(wmod)]
-
-
-@opaque(fake=_swa_dit_mod_bwd_sm90_fake, name="swa_dit_mod_bwd_sm90")
-def swa_dit_mod_bwd_sm90(g: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
-    """[dc, dWmod] of :func:`swa_dit_mod_fwd_sm90` from g = d mod [R, 6C] fp32 and the saved silu(c) ``a``."""
-    dc, dw = _cuda("mod", True, c.device).mod_bwd(g, c, a, wmod, True, True)
-    return [dc, dw]
-
-
-def mod_sm90(c: torch.Tensor, wmod: torch.Tensor) -> bool:
-    """Whether the hoisted modulation runs on the sm_90a kernels: sm_90, d_cond = C = 128, Wmod [6C, C], c and Wmod both bf16
-    (any matmul precision: the products are exact) and the extension builds. fp32 c stays on torch's GEMMs: the kernels'
-    fp32 variant (bf16 hi / lo planes, 2^-17) is the more accurate but not the faster one next to cuBLAS's TF32."""
-    policy = settings.current()
-    if policy.force_portable_kernels or not c.is_cuda:
-        return False
-    if c.shape[-1] != D_ATOM or tuple(wmod.shape) != (6 * D_ATOM, D_ATOM) or c.dtype != wmod.dtype or c.dtype != torch.bfloat16:
-        return False
-    return _cuda("mod", True, c.device) is not None

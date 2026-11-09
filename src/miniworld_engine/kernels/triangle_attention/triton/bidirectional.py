@@ -20,7 +20,7 @@ import torch
 import triton
 from einops import rearrange, reduce
 
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.kernels._shape_key import token_key
 
 from .main import (
     _attn_bwd_dkdv,

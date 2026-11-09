@@ -27,8 +27,8 @@ import triton.language as tl
 
 from miniworld_engine.kernels._tf32 import tf32_dot
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import atom_key, pack
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import atom_key, pack
 from miniworld_engine.kernels._compile import opaque
 
 QUERIES = 32
@@ -40,15 +40,17 @@ MAX_KEYS = 256
 def plan(starts_rule: str, n: int, nwin: int, keys: int, keep: torch.Tensor | None, device) -> torch.Tensor:
     """``[B, nwin]`` int32 first key of every window. ``"pad"``: ``32 w - (keys - 32) / 2`` (the clipped window; keys outside
     ``[0, N)`` and masked keys are off). ``"slide"``: AlphaFold 3's rule, shifted back inside the real atoms (``keep`` counts them;
-    real atoms come first), as ``modules.local_dit.slide_starts``."""
+    real atoms come first), as the old ``modules.local_dit.slide_starts``."""
     first = QUERIES * torch.arange(nwin, device=device) - (keys - QUERIES) // 2
     if starts_rule == "pad":
         b = 1 if keep is None else keep.shape[0]
         return first[None].expand(b, -1).to(torch.int32).contiguous()
-    from miniworld_engine.modules.local_dit.module import slide_starts
-
     n_real = (torch.full((1,), n, device=device, dtype=torch.long) if keep is None else keep.long().sum(-1))
-    return slide_starts(n_real, nwin, keys).to(torch.int32).contiguous()
+    if keys == 128:  # AlphaFold 3: clamped inside the real atoms, from 0 below 128 of them
+        starts = torch.minimum(first.clamp(min=0)[None], (n_real - 128)[:, None]).clamp(min=0)
+    else:  # a wider subset: the rule as written (may begin before atom 0 below `keys` real atoms)
+        starts = torch.where(first[None] < 0, 0, torch.minimum(first[None], (n_real - keys)[:, None]))
+    return starts.to(torch.int32).contiguous()
 
 
 def fold_range(starts: torch.Tensor, n: int, keys: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -84,7 +86,9 @@ def _live(w, start, N, keep_ptr, uid_ptr, b, iq, ik, KEYS: tl.constexpr, WINDOW_
     return live, kpos, kin
 
 
-@triton.autotune(configs=configs_for("augmented_attention_fwd_window_triton"), key=["shape_key"])
+@configured('augmented_attention_fwd_window_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_N=128, num_warps=4, num_stages=2))
 @triton.jit
 def _window_fwd(
     Q, K, V, Bias, Starts, Keep, Uid, Out, Lse, sm_scale,
@@ -132,7 +136,9 @@ def _window_fwd(
              mask=(qpos < N)[:, None] & dm[None, :])
 
 
-@triton.autotune(configs=configs_for("augmented_attention_bwd_window_triton"), key=["shape_key"])
+@configured('augmented_attention_bwd_window_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_N=128, num_warps=4, num_stages=2))
 @triton.jit
 def _window_bwd(
     Q, K, V, Bias, Starts, Keep, Uid, Out, Lse, DO, DQ, DKP, DVP, DB, sm_scale,
@@ -195,7 +201,9 @@ def _window_bwd(
                  mask=qin[:, None] & dm[None, :])
 
 
-@triton.autotune(configs=configs_for("augmented_attention_bwd_reduce_window_triton"), key=["shape_key"])
+@configured('augmented_attention_bwd_reduce_window_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_D=32, num_warps=4, num_stages=2))
 @triton.jit
 def _window_fold(
     DKP, DVP, DK, DV, Starts, Lo, Hi,

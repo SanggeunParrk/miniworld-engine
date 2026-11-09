@@ -17,7 +17,7 @@ from __future__ import annotations
 import torch
 import triton
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 from miniworld_engine.kernels.mpnn_message.triton.main import _shape_key
 import triton.language as tl
@@ -33,10 +33,9 @@ def _gelu(x):
     return 0.5 * x * (1.0 + tl.erf(x * 0.7071067811865476))
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_edge_mlp_fwd_gemm_triton"),
-    key=["shape_key"],
-)
+@configured('mpnn_edge_mlp_fwd_gemm_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _compute_stage_fwd_kernel(
     input_ptr,

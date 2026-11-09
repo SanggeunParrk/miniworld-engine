@@ -24,7 +24,6 @@ from types import SimpleNamespace
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
 
@@ -67,11 +66,10 @@ _RUNNERS: dict = {}
 
 def _native_fp32_inference(module, single) -> bool:
     """The qualified Hopper FP32 inference family, independent of BF16 experiments."""
-    from miniworld_engine.modules.dispatch import KernelBackend
 
     return (
         not torch.is_grad_enabled()
-        and module.attention._backend == KernelBackend.PORTABLE
+        and module.attention._backend == "portable"
         and getattr(getattr(module.attention, "to_bias", None), "weight", None)
         is not None
         and module.attention.to_bias.weight.shape[1] in PAIR_WIDTHS_H100   # 128; 256: Protenix-v2's diffusion pair
@@ -84,8 +82,6 @@ def _native_fp32_inference(module, single) -> bool:
 
 def _check_native_fp32(module, single, cond, pair, compute_dtype):
     """Reject unsupported Hopper FP32 calls instead of entering a portable fallback."""
-    if settings.current().force_portable_kernels:
-        raise ValueError("Hopper FP32 token inference requires the native CUDA backend")
     if compute_dtype not in (None, torch.float32):
         raise ValueError("Hopper FP32 token inference requires FP32 compute operands")
     if (
@@ -147,14 +143,13 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
             # no CUDA path for this call: the block runs its own statements (H100 has no Triton fallback; they are PyTorch there)
             return False
         return True
-    if torch.is_grad_enabled() or settings.current().force_portable_kernels:
+    if torch.is_grad_enabled():
         return False
     a = module.attention
     # the engine's kernels (implementation MINIWORLD resolve to them), as the attention cores and the training
     # path gate on; PYTORCH keeps the reference
-    from miniworld_engine.modules.dispatch import KernelBackend
 
-    if a._backend != KernelBackend.PORTABLE:
+    if a._backend != "portable":
         return False
     if not single.is_cuda or single.dtype not in (torch.bfloat16, torch.float32):
         return False
@@ -281,10 +276,6 @@ def _infer(
             )
     # The caller picks the runner class: the pure-Triton one under force_portable_kernels, else the one with the hand-CUDA rows /
     # SwiGLU GEMM / attention cores of the card (it degrades to the Triton hooks where the card has none).
-    if settings.current().force_portable_kernels:
-        from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
-            FusedTokenDiT,
-        )
     else:
         from miniworld_engine.kernels.conditioned_transition.cuda.token_dit_composed import (
             FusedTokenDiTComposed as FusedTokenDiT,

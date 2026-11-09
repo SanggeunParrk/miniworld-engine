@@ -1,22 +1,19 @@
 # vendored from team-gm origin/miniworld@7c3c67e : src/team_gm/modules/kernels/gated_projection.py
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import os
 
 import torch
 
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._tf32 import tf32_grid_tile
-from miniworld_engine import settings
 import triton
 import triton.language as tl
 
 from einops import rearrange
 from jaxtyping import Float
 
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
-from miniworld_engine.utils.typecheck import typecheck
+from miniworld_engine.kernels._shape_key import both_key, length_of, rows_of, pack
 
-AUTOTUNE = settings.current().autotunes("tri_attention")
 # BOTH tile axes are searched. BLOCK_N used to be pinned at the launch site to
 # next_power_of_2(R) — a whole-row register tile decided by the shape, not by measurement, and
 # one that grows without bound as the hidden width grows. The R axis now loops in BLOCK_N tiles.
@@ -33,8 +30,9 @@ AUTOTUNE = settings.current().autotunes("tri_attention")
 # `R` (the launcher's N = hidden/projection width) IS a real config axis -- it is the extent of the
 # BLOCK_K column loop -- and was absent from the key, so a new width recompiled (it is constexpr
 # here) but silently reused the config tuned for a different width. It is a searched axis now.
-@triton.autotune(configs=configs_for("gated_projection_gate_triton"),
-                 key=['shape_key'])
+@configured('gated_projection_gate_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def sigmoid_gate_fwd_kernel(
     gate_ptr,
@@ -72,8 +70,9 @@ def sigmoid_gate_fwd_kernel(
 # AUTOTUNE KEY: ['shape_key', 'R'] -- same reasoning as the forward: `n_elements` receives the raw
 # row count M (shape_key is its bucket), and `R` (the column-loop extent, a plain runtime arg here)
 # is the second real axis.
-@triton.autotune(configs=configs_for("gated_projection_bwd_gate_triton"),
-                 key=['shape_key'])
+@configured('gated_projection_bwd_gate_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def sigmoid_gate_bwd_kernel(
     gate_ptr,
@@ -154,7 +153,6 @@ def _sigmoid_gate_bwd(gate: torch.Tensor, x: torch.Tensor, grad_out: torch.Tenso
 
 
 class TritonGatedProjectionFunction(torch.autograd.Function):
-    @typecheck
     @staticmethod
     def forward(
         ctx,
@@ -218,7 +216,9 @@ triton_gated_projection = TritonGatedProjectionFunction.apply
 # training.py carried a bitwise-equal copy of each (.bench/direct.out); both files import
 # these now. The tiled kernels above take (M, N, strides); these take one element count and
 # assume every operand is contiguous.
-@triton.autotune(configs=configs_for("gated_projection_gate_flat_triton"), key=['shape_key'])
+@configured('gated_projection_gate_flat_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
 @triton.jit
 def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLOCK_E: tl.constexpr, shape_key, r_ptr=None, HAS_RES: tl.constexpr = False):
     off = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E)
@@ -232,7 +232,9 @@ def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLOCK_E: tl.constexpr, shape_key, r_ptr=
     tl.store(a_ptr + off, a, mask=m)
 
 
-@triton.autotune(configs=configs_for("gated_projection_bwd_gate_flat_triton"), key=['shape_key'])
+@configured('gated_projection_bwd_gate_flat_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_E=64, num_warps=2, num_stages=2))
 @triton.jit
 def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLOCK_E: tl.constexpr, shape_key, ROUND_DO: tl.constexpr = False):
     off = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E)

@@ -63,7 +63,7 @@ from __future__ import annotations
 # wiring of its own, and a hand-written `bucket_of` could only disagree with it.
 import torch
 import triton
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import triton.language as tl
 
 # One helper for the whole family: the sibling module's is generic over the axes, and a
@@ -170,10 +170,9 @@ def _row_gemm(
 # tuned tile choice can depend on.
 
 # ---- forward -------------------------------------------------------------------------
-@triton.autotune(
-    configs=configs_for("mpnn_edge_tail_fwd_gemm_gather_saveact_triton"),
-    key=["shape_key"],
-)
+@configured('mpnn_edge_tail_fwd_gemm_gather_saveact_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _project_edge(
     edge_ptr, query_ptr, table_ptr, index_ptr, w1_ptr,
@@ -226,10 +225,9 @@ def _project_edge(
     )
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_edge_tail_fwd_gemm_b2b_saveact_triton"),
-    key=["shape_key"],
-)
+@configured('mpnn_edge_tail_fwd_gemm_b2b_saveact_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _project_hidden(
     activated_ptr, w2_ptr, b2_ptr, hidden_ptr, activated_hidden_ptr,
@@ -262,10 +260,9 @@ def _project_hidden(
     )
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_edge_tail_fwd_gemm_layernorm_saveact_triton"),
-    key=["shape_key", "DROPOUT"],
-)
+@configured('mpnn_edge_tail_fwd_gemm_layernorm_saveact_triton',
+            key=["shape_key", "DROPOUT"],
+            default=dict(BLOCK_M1=64, BLOCK_K=32, num_warps=4, num_stages=2))
 @triton.jit
 def _project_output(
     activated_hidden_ptr, w3_ptr, b3_ptr, edge_ptr, gamma_ptr, beta_ptr, seed_ptr,
@@ -317,13 +314,12 @@ def _project_output(
 
 
 # ---- backward ------------------------------------------------------------------------
-@triton.autotune(
-    configs=configs_for("mpnn_edge_tail_bwd_layernorm_saveact_triton"),
-    key=["shape_key", "DROPOUT"],
-    reset_to_zero=[
+@configured('mpnn_edge_tail_bwd_layernorm_saveact_triton',
+            key=["shape_key", "DROPOUT"],
+            default=dict(BLOCK_M1=64, num_warps=4, num_stages=2),
+            reset_to_zero=[
         "grad_norm_weight_ptr", "grad_norm_bias_ptr", "grad_output_bias_ptr"
-    ],
-)
+    ])
 @triton.jit
 def _norm_backward(
     grad_out_ptr, values_ptr, keep_ptr, gamma_ptr,
@@ -389,11 +385,10 @@ def _norm_backward(
     )
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_edge_tail_bwd_dx_saveact_triton"),
-    key=["shape_key", "EMIT_BIAS"],
-    reset_to_zero=["grad_bias_ptr"],
-)
+@configured('mpnn_edge_tail_bwd_dx_saveact_triton',
+            key=["shape_key", "EMIT_BIAS"],
+            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
+            reset_to_zero=["grad_bias_ptr"])
 @triton.jit
 def _project_backward(
     grad_out_ptr, weight_ptr, preactivation_ptr, grad_in_ptr, activated_ptr,
@@ -447,11 +442,10 @@ def _project_backward(
         )
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_edge_tail_bwd_dx_gather_saveact_triton"),
-    key=["shape_key"],
-    reset_to_zero=["grad_query_ptr"],
-)
+@configured('mpnn_edge_tail_bwd_dx_gather_saveact_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
+            reset_to_zero=["grad_query_ptr"])
 @triton.jit
 def _edge_backward(
     grad_preactivation_ptr, w1_ptr, grad_values_ptr,

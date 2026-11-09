@@ -2,16 +2,14 @@
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._device import num_sms
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/layernorm.py
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import torch
 import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
+from miniworld_engine.kernels._shape_key import both_key, length_of, rows_of, pack
 
-
-# (The hand-CUDA warp-per-row LN backward is NOT here: it lives in kernels/layernorm/cuda/masked_bwd.py and is chosen by the caller.)
 
 # The two shipped kernels (`layer_norm_fwd_fused`, `layer_norm_bwd_dx_fused`) tile the FEATURE
 # axis too. It used to arrive as BLOCK_N = triton.next_power_of_2(N) from every launch site — the
@@ -38,8 +36,9 @@ def _persistent_programs(device: torch.device) -> int:
 
 # `eps` is constexpr but deliberately NOT keyed: it only appears in `1 / sqrt(var + eps)`, so it
 # branches nothing and shifts no work -- keying it would just multiply the bucket count.
-@triton.autotune(configs=configs_for("layernorm_fwd_saveact_triton"),
-                 key=['shape_key', 'HAS_ROWSCALE'])
+@configured('layernorm_fwd_saveact_triton',
+            key=['shape_key', 'HAS_ROWSCALE'],
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def layer_norm_fwd_fused(
     X, Y, W, B, Mean, Rstd, Rowscale,
@@ -137,9 +136,10 @@ def layer_norm_fwd_fused(
 # HAS_ROWSCALE is keyed: it is constexpr, so the two variants already compile separately, but the
 # autotune cache is keyed only on `key=[...]` -- without it the tile measured on the dense path is
 # reused by the masked one, which does strictly more work per row.
-@triton.autotune(configs=configs_for("layernorm_bwd_atomic_triton"),
-                 key=['shape_key', 'HAS_ROWSCALE'],
-                 reset_to_zero=['DW', 'DB'])
+@configured('layernorm_bwd_atomic_triton',
+            key=['shape_key', 'HAS_ROWSCALE'],
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2),
+            reset_to_zero=['DW', 'DB'])
 @triton.jit
 def layer_norm_bwd_dx_fused(
     DX, DY, DW, DB,

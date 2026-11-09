@@ -1,8 +1,0 @@
-> A100 (Ampere, compute capability 8.0).
->
-> This file SUBTRACTS -- see sm_86.csv for why it is a deny-list rather than an allow-list.
->
-> Columns: case,impl,dtype,build,reason
-case,impl,dtype,build,reason
-*,cuda,*,no,"the hand-CUDA extensions are compiled -gencode arch=compute_90,code=sm_90a and will not build here."
-transition,*,float32,no,"no fp32 transition kernel on this card (the fused kernels are bf16): an fp32 run falls through to torch, nothing to capture. Moved from _common.csv: on sm_90 the generic wgmma Transition runs fp32 on TF32."

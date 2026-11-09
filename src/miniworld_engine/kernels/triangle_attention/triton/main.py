@@ -2,7 +2,7 @@
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/triangle_attention_pair_bias.py
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import torch
 import triton
 import triton.language as tl
@@ -10,8 +10,7 @@ import triton.language as tl
 from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
-from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.autotune.shape_key import pack, token_key
+from miniworld_engine.kernels._shape_key import pack, token_key
 
 
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
@@ -21,7 +20,9 @@ from miniworld_engine.autotune.shape_key import pack, token_key
 
 
 
-@triton.autotune(configs=configs_for("triangle_attention_fwd_triton"), key=['shape_key'])
+@configured('triangle_attention_fwd_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_fwd(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, m_ptr, out_ptr,
@@ -100,8 +101,9 @@ def _attn_fwd(
 # was receiving the SAME H*L value and being keyed on it: token-derived, so it partitioned the cache
 # per sequence length and made the shape_key bucket beside it redundant -- for a duplicate the body
 # never read. Both the parameter and the key entry are gone.
-@triton.autotune(configs=configs_for("triangle_attention_bwd_pre_triton"),
-                 key=['shape_key'])
+@configured('triangle_attention_bwd_pre_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, num_warps=2, num_stages=2))
 @triton.jit
 def _attn_bwd_preprocess(
     o, DO, Delta,
@@ -146,8 +148,9 @@ def _attn_bwd_preprocess(
 _SMEM_FUDGE = 2.8
 
 
-@triton.autotune(configs=configs_for("triangle_attention_bwd_dkdv_triton"),
-                 key=['shape_key'])
+@configured('triangle_attention_bwd_dkdv_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_bwd_dkdv(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dk_ptr, dv_ptr, dbias_ptr, m_ptr, d_ptr,
@@ -247,8 +250,9 @@ def _attn_bwd_dkdv(
 
 
 
-@triton.autotune(configs=configs_for("triangle_attention_bwd_dq_triton"),
-                 key=['shape_key'])
+@configured('triangle_attention_bwd_dq_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_bwd_dq(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dq_ptr, m_ptr, d_ptr,
@@ -451,7 +455,6 @@ def _tri_attn_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch
 
 
 class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
-    @typecheck
     @staticmethod
     def forward(
         ctx,

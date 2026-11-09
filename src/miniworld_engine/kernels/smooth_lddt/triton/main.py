@@ -21,8 +21,8 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import atom_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import atom_key
 from miniworld_engine.kernels._compile import opaque
 
 BLK = 32   # atoms per flag tile edge, fixed; the kernels' own tiles (BLOCK_I x BLOCK_J, 32 / 64 / 128) are tuned over it
@@ -58,7 +58,9 @@ def _dscore(w):
     return 0.25 * w * n / (q * q)
 
 
-@triton.autotune(configs=configs_for("smooth_lddt_prep_triton"), key=["shape_key"])
+@configured('smooth_lddt_prep_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_P=64, num_warps=4, num_stages=2))
 @triton.jit
 def smooth_lddt_prep_kernel(
     G, NUC, M, TILE, CNT,
@@ -106,7 +108,9 @@ def _tile_has(TILE, b, NF, i0, j0, BIT: tl.constexpr, BLOCK_I: tl.constexpr, BLO
     return tl.max(tl.max(((fl >> BIT) & 1).to(tl.int32), axis=1), axis=0) != 0
 
 
-@triton.autotune(configs=configs_for("smooth_lddt_fwd_triton"), key=["shape_key"])
+@configured('smooth_lddt_fwd_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_I=64, BLOCK_J=64, num_warps=4, num_stages=2))
 @triton.jit
 def smooth_lddt_fwd_kernel(
     X, G, NUC, M, TILE, OUT,
@@ -154,7 +158,9 @@ def smooth_lddt_fwd_kernel(
     tl.store(OUT + ab * N + ri, acc)
 
 
-@triton.autotune(configs=configs_for("smooth_lddt_bwd_triton"), key=["shape_key"])
+@configured('smooth_lddt_bwd_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_I=64, BLOCK_J=64, num_warps=4, num_stages=2))
 @triton.jit
 def smooth_lddt_bwd_kernel(
     X, G, NUC, M, TILE, GO, GX,

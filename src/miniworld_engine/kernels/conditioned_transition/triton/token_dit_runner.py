@@ -48,7 +48,7 @@ def attention_in_place(q, k, v, bias, mask, m, key):
     its own q tile before it writes that same tile, and no other program reads it.
     """
     import triton
-    from miniworld_engine.autotune.shape_key import pack
+    from miniworld_engine.kernels._shape_key import pack
     from miniworld_engine.kernels.augmented_attention.triton.main import _attn_fwd
 
     A, B, L, H, D = q.shape
@@ -343,7 +343,7 @@ class FusedTokenDiT:
     def _run(self, single, g1, g2, bias, tag, want):
         """The blocks for one group of samples: (output [S*L, D], fresh). With the CUDA rows the input is read and the
         output written by the first / last row pass (a fresh ``want`` tensor); otherwise (the fp32 residual buffer, False)."""
-        from miniworld_engine.autotune.shape_key import atom_key
+        from miniworld_engine.kernels._shape_key import atom_key
 
         S, B, L, D = single.shape
         M, H = S * L, self.h

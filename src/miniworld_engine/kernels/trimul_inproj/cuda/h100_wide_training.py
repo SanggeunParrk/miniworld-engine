@@ -996,3 +996,54 @@ def backward(leaves, mask, ds, saved, dy, master=False):
         main.wait_stream(side)  # dWproj/dWgate join at the end, as qualified
     del side_workspace
     return [dx, *dw, dwg, dwp, dgi, dbi, dgo, dbo]
+
+
+# --------------------------------------------------------------------------- prebuild (kernels/_prebuild.py)
+def prebuild_units(D, n, masters):
+    """``(source, include, defines, pool)`` of every ``_unit`` the cell (D, n) can build: the same define tuples as the launchers
+    above (forward, backward; one ``master`` build per entry of ``masters`` -- the parameter dtypes the requirements ask for -- and
+    the preserved-native ``MW_LN_PARTIALS`` builds both ways, as the scopes decide at run time)."""
+    fw, up = "forward", "upstream"
+    cfg = _K1[D]
+    common = _defines(MW_MINB=cfg[4], MW_K1_STREAM=int(len(cfg) > 5 and cfg[5] == 2),
+                      TMN_SIGMOID_TANH=1, TMN_WSKIP=1, TMN_MASK_TEMPLATE=1)
+    units = [("front_d256.cu" if D == 256 else "front_pre_d384.cu" if D == 384 else "front_pre_d512.cu", fw, common, None)]
+    dense = _defines(MW_MINB=1, MW_K1_STREAM=0, TMN_SIGMOID_TANH=1, WIDTH=D, GROUPS=1, KCHUNK=1)
+    norm = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D, OUTPUT_ROWS=32, OUTPUT_THREADS=128)
+    units.append(("output_dense.cu", fw, dense, None))
+    if D == 384:
+        units.append(("forward_norm_d384.cu", fw, norm, None))
+    if D == 512:
+        compact = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D)
+        units += [("delta_norm_d512.cu", fw, norm, None), ("delta_norm_fallback_d512.cu", fw, norm, None),
+                  ("compact_projection_d512.cu", fw, compact, None), ("compact_projection_fallback_d512.cu", fw, compact, None)]
+    gate = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D) + (_defines(TMN_SIGMOID_TANH=1) if D != 512 else ())
+    units.append(("gate_affine.cu" if n == 384 else "gate.cu", fw, gate, None))
+    rows = 32 if D == 256 or (D, n) == (384, 768) else 16
+    out_ln = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0,
+                      LN_MINBLOCKS=3 if D == 256 else 2)
+    out_src = f"output_ln_d{D}_l{n}.cu" if n == 384 or D == 512 else "output_ln_l768.cu"
+    for native in (False, True):
+        units.append((out_src, up, out_ln + (_defines(MW_LN_PARTIALS=1) if native else ()), None))
+    if D == 256:
+        if n == 384:
+            units.append(("contract_d256_l384.cu", up, _defines(ROW_GROUPS=2, GRID_ORDER=1, MIN_BLOCKS=1, CONTRACT_SLOTS=3), None))
+        splits = _defines(WEIGHT_SPLITS=8 if n == 384 else 16)
+        units.append(("source_d256_l384.cu", up, splits, ("mw_d256_register_budget_source", 120, 208)))
+        if n == 768:
+            units.append(("source_d256_l768.cu", up, splits, None))
+    else:
+        src = ("contract_gp_l768.cu" if n == 768 else "contract_gp_d384_l384.cu" if D == 384 else "contract_gp_d512_l384.cu")
+        units.append((src, up, _defines(WIDTH=D), None))
+    if (D, n) == (512, 768):
+        for master in masters:
+            units.append(("weight_reduce_d512_l768.cu", up, _defines(MASTER_FP32=int(master), WIDTH=D, WEIGHT_SPLITS=32), None))
+    if n == 384:
+        in_src = "input_ln_d384_l384.cu" if D == 384 else "input_ln_l384.cu"
+    else:
+        in_src = "input_reduce_d512_l768.cu" if D == 512 else "input_reduce_l768.cu"
+    for master in masters:
+        base = _defines(WIDTH=D, INPUT_ROWS=16, INPUT_THREADS=128, INPUT_MINBLOCKS=4, MASTER_FP32=int(master))
+        for native in (False, True):
+            units.append((in_src, up, base + (_defines(MW_LN_PARTIALS=1) if native else ()), None))
+    return units

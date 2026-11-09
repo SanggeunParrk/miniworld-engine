@@ -7,7 +7,6 @@ from __future__ import annotations
 import functools
 from pathlib import Path
 
-import torch
 
 _dir = Path(__file__).parent
 
@@ -70,15 +69,6 @@ def ln_rows(z, out, eps=1e-5):
     rows.layernorm_rows(z, out, eps)
 
 
-def available() -> bool:
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)
-
-
-def parallel_residual(x, outputs):
-    """x + sum_i (y_i - x) with fp32 sums and one rounding: a parallel block's output from the residual outputs y_i = x + f_i(x) of its
-    parts (each engine module owns its residual). x / y_i contiguous, one shape, bf16 or fp32; one to eight outputs."""
-    return ext().parallel_residual(x, list(outputs))
-
 
 @functools.lru_cache(maxsize=None)
 def train_ext():
@@ -124,3 +114,16 @@ def edge_ext():
         extra_cflags=["-std=c++17"],
         verbose=False,
     )
+
+
+def prebuild(target, rows):
+    """Every build of the DiT-variant family (kernels/_prebuild.py), by the (activation dtype, mode) pairs the requirements rows ask
+    for (a ``master`` row computes in bfloat16 activations; the builds take no model dims). ``ext`` (``rows.cu``) is the bf16
+    inference rows; ``train_ext`` / ``edge_ext`` serve the training path and the fp32 (TF32) inference (``infer32.py``). Which
+    build serves which pair is this family's knowledge."""
+    served = {("bfloat16" if r["dtype"] == "master" else r["dtype"], r["mode"]) for r in rows}
+    if ("bfloat16", "eval") in served:
+        yield ext
+    if ("float32", "eval") in served or any(mode == "train" for _, mode in served):
+        yield train_ext
+        yield edge_ext

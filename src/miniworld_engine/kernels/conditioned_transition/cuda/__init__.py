@@ -238,7 +238,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
                 # the 256-wide pair (Protenix-v2's diffusion pair), 16 heads: the same one pass, built per width for the augmented
                 # attention's TF32 path (``augmented_attention/cuda/pair_rows.cu`` bias32_k: LN + the projections + the key
                 # permutation + the mask, Wf in shared memory)
-                from miniworld_engine.kernels.augmented_attention.cuda.fused_pair import _rows_ext
+                from miniworld_engine.kernels.augmented_attention.cuda import _rows_ext
 
                 bias = single.new_empty((heads, L, L))
                 _rows_ext().pair_bias_rows32(pair.view(L * L, dp), wf, bias, mask, int(L), 1e-5, -1e30)
@@ -475,3 +475,51 @@ __all__ = [
     "resgate_out_rows",
     "swiglu_rows",
 ]
+
+
+#: Prefixes of the requirements_kernel.csv names held by the layout-specialized training rows extension (token_dit_train_rows.cu).
+_TOKEN_ROWS_KERNELS = ("cond_transition_token_train_", "cond_transition_token_transpose_", "cond_transition_caller_grad_")
+
+
+def prebuild(target, rows):
+    """Every build of the ConditionedTransition / token-DiT row family for ``target`` (kernels/_prebuild.py), from the requirements
+    ``rows``: a build is planned when a row needs one of the kernels it holds (the rows are already restricted to the modes each
+    kernel's role runs in). The training row kernels are specialized per model layout: the H100 training path builds rpb 2
+    (``integrations.token_dit_train._native_rpb``) for the layout (d_single, n_head, d_cond, d_pair, n) of every token-DiT row
+    that trains, when the kernels support it; rpb 8 is the default the pair-bias callers take. The 5-sample uniform-mask
+    variant (``empty_uniform``) follows the sample count of a row, which ``rows`` does not carry: both are planned."""
+    if target.arch != "sm90":
+        return
+    import itertools
+
+    from miniworld_engine.kernels._prebuild import _kv
+
+    from . import train
+    from .gemm_swiglu import GemmSwigluSm90
+
+    needed = set().union(*(r["kernels"] for r in rows)) if rows else set()
+
+    def holds(*prefixes):
+        return any(k.startswith(prefixes) for k in needed)
+
+    train_rows = holds(*_TOKEN_ROWS_KERNELS)
+    if any(k.startswith("cond_transition_token_") and "_train_" not in k and "transpose" not in k for k in needed):
+        yield functools.partial(_arch_ext, "90a")
+    if holds("cond_transition_gemm_swiglu"):
+        yield functools.partial(GemmSwigluSm90, 0)
+    if train_rows:
+        yield train.owned_gemm_ext
+        yield functools.partial(train.rows_ext, hopper=True)
+    layouts = set()
+    for r in rows:
+        dims = _kv(r["dims"])
+        if r["mode"] != "train" or not any(k.startswith(_TOKEN_ROWS_KERNELS) for k in r["kernels"]) \
+                or not {"d_single", "n_head", "d_cond", "d_pair"} <= dims.keys():
+            continue
+        d, h = int(dims["d_single"]), int(dims["n_head"])
+        dc, dp, n = int(dims["d_cond"]), int(dims["d_pair"]), int(dims.get("n", 2))
+        if (d, d // h) in ((768, 48), (768, 32), (768, 64), (1024, 64)) and dc in (128, 256, 384, 768) and n in (2, 4) \
+                and dp in (128, 256):
+            layouts.add((d, d // h, dc, n, dp))
+    for (d, hd, dc, n, dp), empty in itertools.product(sorted(layouts), (False, True)):
+        yield functools.partial(train.rows_ext, d, hd, 2, empty_uniform=empty, dc=dc, n=n, dp=dp, hopper=True)

@@ -53,7 +53,6 @@ import warnings
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels.integrations.bias_only_dit_hoist import SINK_ATTR
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
@@ -99,28 +98,22 @@ TRN = (
 NAMES = ["attention." + n for n in ATT] + ["transition." + n for n in TRN]
 
 
-def serves(module, single, cond, pair, mask=None, bias=None, per_sample=False) -> bool:
-    """``bias``: the block's hoisted pair bias [1, H, L, L] (then ``pair`` is not read and may be None). ``per_sample``: the bias
-    of its own per sample, [H, A, L, L] head-major, natural logits (``serves_psb``; H100 only, ``pair`` is not read)."""
-    from miniworld_engine.modules.exceptions import ImplementationType
+def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
+    """``bias``: the block's hoisted pair bias [1, H, L, L] (then ``pair`` is not read and may be None)."""
 
-    if (not settings.current().bias_only_dit_train) or not torch.is_grad_enabled():
+    if not torch.is_grad_enabled():
         return False
-    if module.implementation != ImplementationType.MINIWORLD:
-        return False
-    if settings.current().force_portable_kernels:
+    if module.implementation != "miniworld":
         return False
     from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
 
     if not (
         single.is_cuda
         and (
-            (torch.cuda.get_device_capability(single.device) == (10, 0) and not per_sample)
+            (torch.cuda.get_device_capability(single.device) == (10, 0))
             or h100_enabled(single.device)
         )
     ):
-        return False
-    if per_sample and bias is None:
         return False
     dt = single.dtype
     src = pair if bias is None else bias  # the pair, or the block's hoisted bias
@@ -165,11 +158,7 @@ def serves(module, single, cond, pair, mask=None, bias=None, per_sample=False) -
         return False
     if bias is None and tuple(pair.shape) != (1, L, L, d_pair):
         return False
-    want = (
-        (module.attention.n_head, single.shape[0], L, L)
-        if per_sample
-        else (1, module.attention.n_head, L, L)
-    )
+    want = (1, module.attention.n_head, L, L)
     if bias is not None and (
         tuple(bias.shape) != want or bias.device != single.device
     ):
@@ -181,13 +170,7 @@ def serves(module, single, cond, pair, mask=None, bias=None, per_sample=False) -
         da // at.n_head,
     ) not in LAYOUTS or module.transition.expand_a.weight.shape[0] != 2 * D:
         return False
-    if mask is not None and not (
-        mask.ndim == 2
-        and (
-            tuple(mask.shape) == (1, single.shape[2])
-            or (per_sample and tuple(mask.shape) == (single.shape[0], single.shape[2]))
-        )
-    ):
+    if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])):
         return False
     norms = (
         at.ada_ln_in.ln_in,
@@ -226,13 +209,13 @@ def _pack1() -> bool:
     """The weight pack as ONE launch (``pack16_cuda``, the same values bit for bit) instead of 19 torch casts / cats / products --
     a captured training step repacks every replay (the weights change between steps), ~50 us at ~3 us per small kernel. The default;
     settings.bias_only_dit_train_pack1=0 (read per call) keeps the torch pack."""
-    return settings.current().bias_only_dit_train_pack1
+    return True
 
 
 def _dg_direct() -> bool:
     """The dxt / dxa data gradients written by cuBLAS straight into their d-shift columns of dG (the LayerNorm backward rows then
     read them there and do not copy them). The default; settings.bias_only_dit_bwd_dg=0 (read per call) keeps the copies."""
-    return settings.current().bias_only_dit_bwd_dg
+    return True
 
 
 # Hopper candidates measured and dropped (see git history): the SwiGLU backward in the dh GEMM's epilogue (509 vs 318 us at
@@ -571,21 +554,9 @@ def _width(params):
     return params[NAMES.index("attention.to_value.weight")].shape[0]
 
 
-def _psb_core(f32=False, L=0) -> str:
-    """The per-sample attention core: "recompute" (bo_psb.cu, bf16: the forward keeps two floats per softmax row and no P, the backward
-    rebuilds P from the bias). fp32 (bo_psb32.cu, TF32) has it up to L 512 (the forward keeps v resident); longer L takes "cublas" (the
-    v0 core: batched cuBLAS GEMMs + torch elementwise ops, P stored)."""
-    if f32:
-        from miniworld_engine.kernels.bias_only_dit.cuda import PSB32_MAX_L
-
-        return "cublas" if L > PSB32_MAX_L else "recompute"
-    return "recompute"
-
-
-def _saved_like(single, pair, H, DA, DC, at=BF, psb=False):
+def _saved_like(single, pair, H, DA, DC, at=BF):
     """Shapes / dtypes of the forward's saved activations (the fake implementation and the contract of _fwd / _fwd32); H heads,
-    DA attention channels, ``at`` the activations' dtype (bf16, or fp32 on the TF32 path). ``psb``: the per-sample attention
-    weights P [H, A, L, L], no P^T (dV reads P transposed)."""
+    DA attention channels, ``at`` the activations' dtype (bf16, or fp32 on the TF32 path)."""
     A, _, L, _ = single.shape
     M, R, e = A * L, L * L, single.new_empty
     f32 = torch.float32
@@ -597,8 +568,8 @@ def _saved_like(single, pair, H, DA, DC, at=BF, psb=False):
         e((M, 2), dtype=f32),
         e((M, D), dtype=at),
         e((M, 2 * DA), dtype=at),
-        (e((H, A, L, 2), dtype=f32) if _psb_core(at is F32, L) == "recompute" else e((H, A, L, L), dtype=at)) if psb else e((H, L, L), dtype=at),
-        e((0,) if psb else (H, L, L), dtype=at),
+        e((H, L, L), dtype=at),
+        e((H, L, L), dtype=at),
         e((M, DA), dtype=at),
         e((M, D), dtype=at),
         e((M, 2), dtype=f32),
@@ -622,25 +593,6 @@ def _fwdh_fake(single, cond, bias, mask, params):
         torch.empty_like(single),
         *_saved_like(single, None, _heads(params), _width(params), _dc(params))[:-1],
     ]
-
-
-def _fwdp_fake(single, cond, bias, mask, params):
-    return [
-        torch.empty_like(single),
-        *_saved_like(single, None, _heads(params), _width(params), _dc(params), psb=True)[:-1],
-    ]
-
-
-@opaque(fake=_fwdp_fake, name="bias_only_dit_train_sm90_fwd_psb")
-def _fwdp(
-    single: torch.Tensor,
-    cond: torch.Tensor,
-    bias: torch.Tensor,
-    mask: torch.Tensor | None,
-    params: list[torch.Tensor],
-) -> list[torch.Tensor]:
-    """The block's forward on a per-sample bias [H, A, L, L] (natural logits): [out, *saved] without the pair statistics."""
-    return _fwd_impl(single, cond, None, bias, mask, params, psb=True)
 
 
 @opaque(fake=_fwd_fake, name="bias_only_dit_train_sm100_fwd")
@@ -667,55 +619,9 @@ def _fwdh(
     return _fwd_impl(single, cond, None, bias, mask, params)
 
 
-def _psb_split(t, A, L, H, dh):
-    """[A L, H dh] (any row stride) -> [H, A, L, dh] contiguous: the per-sample attention's batch is (head, sample)."""
-    return t.view(A, L, H, dh).permute(2, 0, 1, 3).contiguous()
 
-
-def _psb_merge(t, out, A, L, H, dh):
-    """Write [H, A, L, dh] into the [A L, H dh] view ``out`` (any row stride)."""
-    out.view(A, L, H, dh).copy_(t.view(H, A, L, dh).permute(1, 2, 0, 3))
-
-
-def _psb_mask(mask, A, L, f32):
-    """The key mask as the softmax reads it: bool [L] (one for all samples) or [A, L]."""
-    if mask is None:
-        return None
-    mask = mask.reshape(-1) if mask.shape[0] == 1 else mask
-    return mask.to(torch.bool).contiguous() if f32 else mask.contiguous()
-
-
-def _psb_fwd_core(vg, P, A, L, H, DA):
-    """a = sigmoid(g) (P v) per (head, sample) as ONE batched GEMM over A H (fp32 result, gated, rounded once); P [H, A, L, L]
-    from the per-sample softmax. v | g = vg [A L, 2 DA]. The v0 core: cuBLAS and the permutes around it."""
-    dh = DA // H
-    v = _psb_split(vg[:, :DA], A, L, H, dh)
-    kw = {} if vg.dtype is F32 else {"out_dtype": F32}
-    o = torch.bmm(P.view(H * A, L, L), v.view(H * A, L, dh), **kw)
-    g = torch.sigmoid(_psb_split(vg[:, DA:], A, L, H, dh).float())
-    og = torch.empty(A * L, DA, device=vg.device, dtype=vg.dtype)
-    _psb_merge((o.view(H, A, L, dh) * g).to(vg.dtype), og, A, L, H, dh)
-    return og
-
-
-def _psb_bwd_core(do, vg, P, dd, dvg_v, dbias, A, L, H, DA):
-    """dV = P^T dO into ``dvg_v`` (the v columns of dvg) and dbias = P o (dO v^T - D) into ``dbias`` [H, A, L, L] (per sample:
-    nothing summed over the samples; masked keys have P = 0): two batched GEMMs over A H. D = dd [A, H, L]."""
-    dh = DA // H
-    dO = _psb_split(do, A, L, H, dh).view(H * A, L, dh)
-    v = _psb_split(vg[:, :DA], A, L, H, dh).view(H * A, L, dh)
-    P3 = P.view(H * A, L, L)
-    kw = {} if vg.dtype is F32 else {"out_dtype": F32}
-    _psb_merge(torch.bmm(P3.transpose(1, 2), dO).view(H, A, L, dh), dvg_v, A, L, H, dh)
-    dP = torch.bmm(dO, v.transpose(1, 2), **kw)  # [H A, L, L] fp32
-    dP.sub_(dd.permute(1, 0, 2).reshape(H * A, L, 1))
-    dP.mul_(P3)
-    dbias.view(H * A, L, L).copy_(dP)
-
-
-def _fwd_impl(single, cond, pair, bias, mask, params, psb=False):
-    """``_fwd`` (``bias`` None: the bias from the pair) or ``_fwdh`` (the given bias; the saved list then ends before pst).
-    ``psb``: ``bias`` is the per-sample [H, A, L, L] (natural logits), P is [H, A, L, L] and there is no P^T."""
+def _fwd_impl(single, cond, pair, bias, mask, params):
+    """``_fwd`` (``bias`` None: the bias from the pair) or ``_fwdh`` (the given bias; the saved list then ends before pst)."""
     DC = cond.shape[-1]
     from miniworld_engine.kernels.bias_only_dit import cuda as C
     from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as bo_ext
@@ -729,8 +635,6 @@ def _fwd_impl(single, cond, pair, bias, mask, params, psb=False):
 
     def pair_part():
         """The attention weights P (and P^T): pair bias -> softmax. Reads the pair and the mask only."""
-        if psb:  # per-sample bias: no P, the forward keeps the two row statistics the backward rebuilds it from (bo_psb.cu)
-            return torch.empty(H, A, L, 2, device=dev), torch.empty(0, device=dev, dtype=BF), None
         P = torch.empty(H, L, L, device=dev, dtype=BF)
         if bias is None:
             p2 = pair.reshape(R, pair.shape[-1])
@@ -770,14 +674,10 @@ def _fwd_impl(single, cond, pair, bias, mask, params, psb=False):
     BT.adaln_a_cuda(x, G, W["bs1"], xa, xst, EPS)
     vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
     P, Pt, pst = pair_part()
-    if psb:
-        og = torch.empty(M, DA, device=dev, dtype=BF)
-        C.psb_fwd(bias.reshape(H * A * L, L), None, _psb_mask(mask, A, L, False), vg, og, A, H, DA // H, stats=P)
-    else:
-        og = torch.empty(M, DA, device=dev, dtype=BF)
-        _op("pv", dev, H, DA // H)(
-            vg[:, :DA], P.view(H * L, L), og, A, g=vg[:, DA:]
-        )  # a = sigmoid(g) (P v)
+    og = torch.empty(M, DA, device=dev, dtype=BF)
+    _op("pv", dev, H, DA // H)(
+        vg[:, :DA], P.view(H * L, L), og, A, g=vg[:, DA:]
+    )  # a = sigmoid(g) (P v)
     y = torch.mm(og, W["Wo"].t())
     xt = torch.empty(M, D, device=dev, dtype=BF)
     x1st = torch.empty(M, 2, device=dev)
@@ -949,30 +849,6 @@ def _bwd(
     return _bwd_impl(single, cond, pair, mask, params, saved, dout, None)
 
 
-def _bwdp_fake(single, cond, bias, mask, params, saved, dout, dbias):
-    return [torch.empty_like(single), torch.empty_like(cond), *_grad_bufs_like(params)]
-
-
-@opaque(
-    fake=_bwdp_fake,
-    name="bias_only_dit_train_sm90_bwd_psb",
-    mutates_args=("dbias",),
-)
-def _bwdp(
-    single: torch.Tensor,
-    cond: torch.Tensor,
-    bias: torch.Tensor,
-    mask: torch.Tensor | None,
-    params: list[torch.Tensor],
-    saved: list[torch.Tensor],
-    dout: torch.Tensor,
-    dbias: torch.Tensor,
-) -> list[torch.Tensor]:
-    """The backward of a block on a per-sample bias: the bias gradient into ``dbias`` [H, A, L, L] (the "recompute" core rebuilds P
-    from ``bias``); returns [d single, d cond, *d params]."""
-    return _bwd_impl(single, cond, None, mask, params, saved, dout, dbias, psb=True, bias=bias)
-
-
 @opaque(
     fake=_bwdh_fake,
     name="bias_only_dit_train_sm100_bwd_hoisted",
@@ -992,9 +868,8 @@ def _bwdh(
     return _bwd_impl(single, cond, None, mask, params, saved, dout, dbias)
 
 
-def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=False, bias=None):
-    """``_bwd`` (``dbias_out`` None) or ``_bwdh`` (``pair`` None, the bias gradient written into ``dbias_out``). ``psb``: the bias is
-    per sample (``_bwdp``): P is [H, A, L, L], dbias_out [H, A, L, L]."""
+def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
+    """``_bwd`` (``dbias_out`` None) or ``_bwdh`` (``pair`` None, the bias gradient written into ``dbias_out``)."""
     DC = cond.shape[-1]
     from miniworld_engine.kernels.bias_only_dit import cuda as C
     from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as bo_ext
@@ -1026,7 +901,7 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fals
     # the big weight gradients leave cuBLAS in their parameter's dtype (fp32 accumulation either way), one GEMM per group of
     # parameters that share an input (_BIG): no fp32 -> bf16 copy afterwards; _Block.backward splits them into views
     pdt = {n: p.dtype for n, p in zip(NAMES, params, strict=True)}
-    fused = None if psb else _bwd_fused(dev, H, DA)
+    fused = _bwd_fused(dev, H, DA)
     if fused is not None:
         return _bwd_fused_step(
             fused,
@@ -1085,30 +960,15 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fals
     do = torch.empty(M, DA, device=dev, dtype=BF)
     dd = torch.empty(A, H, L, device=dev)
     C.gate_bwd_rows(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
-    if psb:  # one pass over the bias: P rebuilt, dV and the bias gradient (bo_psb.cu)
-        C.psb_bwd(
-            bias.reshape(H * A * L, L),
-            do,
-            vg,
-            dd,
-            dbias_out.view(H * A * L, L),
-            dvg,
-            A,
-            H,
-            DA // H,
-            stats=P,
-            mask=_psb_mask(mask, A, L, False),
-        )
-    else:
-        dbias = (
-            torch.empty(H * L, L, device=dev, dtype=BF)
-            if dbias_out is None
-            else dbias_out.view(H * L, L)
-        )
-        _op("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do
-        _op("dpb", dev, H, DA // H)(
-            do, vg[:, :DA], P.view(H * L, L), dd, dbias, A
-        )  # P o (dP - D); masked keys get P = 0
+    dbias = (
+        torch.empty(H * L, L, device=dev, dtype=BF)
+        if dbias_out is None
+        else dbias_out.view(H * L, L)
+    )
+    _op("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do
+    _op("dpb", dev, H, DA // H)(
+        do, vg[:, :DA], P.view(H * L, L), dd, dbias, A
+    )  # P o (dP - D); masked keys get P = 0
     dxa = (
         torch.mm(dvg, Wvg, out=dG[:, D : 2 * D]) if dg_direct else torch.mm(dvg, Wvg)
     )  # d shift1 = dxa: straight into dG
@@ -1577,7 +1437,7 @@ _OPS32: dict = {}
 def _pair_terms() -> int:
     """Products of the training pair bias / its backward on TF32 tensor cores: 1 (TF32, the recipe's rounding of every product) or
     3 (split fp32, ~exact: settings.bias_only_dit_pair_exact=1)."""
-    return 3 if settings.current().bias_only_dit_pair_exact else 1
+    return 1
 
 
 def _cm(W, name):
@@ -1597,9 +1457,8 @@ def _wgrad32(a, b):
     -> 250, whole step -168; L384 the same except dWab (2.4 M outputs: 120 -> 131), whole step -82. Default S = 4, the large dWab
     output only from M = 32768 rows. settings.bias_only_dit_wgrad_split=S forces S for all six (0 / 1: one GEMM each)."""
     M, N, K = a.shape[0], a.shape[1], b.shape[1]
-    forced = settings.current().bias_only_dit_wgrad_split
-    S = int(forced) if forced else (4 if N * K < 2_000_000 or M >= 32768 else 1)
-    if not forced and torch.cuda.get_device_capability(a.device) == (9, 0):
+    S = 4 if N * K < 2_000_000 or M >= 32768 else 1
+    if torch.cuda.get_device_capability(a.device) == (9, 0):
         S = 1  # Hopper TF32: one GEMM per weight is faster (split-4 costs +746 us a step at A = 48, L768: B200 tuning)
     if S <= 1 or M % S:
         if b.shape[1] <= 384:   # narrow outputs: cuBLAS TF32 runs (b^T a)^T 1.3 - 1.5x faster than a^T b (M = 12288: dWn 228 -> 154 us, dWgg 93 -> 93 at 24576: 199 -> 148)
@@ -1664,25 +1523,6 @@ def _fwd32(
     return _fwd32_impl(single, cond, pair, None, mask, params)
 
 
-def _fwd32p_fake(single, cond, bias, mask, params):
-    return [
-        torch.empty_like(single),
-        *_saved_like(single, None, _heads(params), _width(params), _dc(params), F32, psb=True)[:-1],
-    ]
-
-
-@opaque(fake=_fwd32p_fake, name="bias_only_dit_train_tf32_fwd_psb")
-def _fwd32p(
-    single: torch.Tensor,
-    cond: torch.Tensor,
-    bias: torch.Tensor,
-    mask: torch.Tensor | None,
-    params: list[torch.Tensor],
-) -> list[torch.Tensor]:
-    """``_fwdp`` on the fp32 path: the per-sample bias [H, A, L, L] fp32 (natural logits)."""
-    return _fwd32_impl(single, cond, None, bias, mask, params, psb=True)
-
-
 @opaque(fake=_fwd32h_fake, name="bias_only_dit_train_tf32_fwd_hoisted")
 def _fwd32h(
     single: torch.Tensor,
@@ -1695,9 +1535,8 @@ def _fwd32h(
     return _fwd32_impl(single, cond, None, bias, mask, params)
 
 
-def _fwd32_impl(single, cond, pair, bias, mask, params, psb=False):
-    """``_fwd32`` (``bias`` None) or ``_fwd32h`` (the saved list then ends before pst). ``psb``: ``bias`` is per sample
-    [H, A, L, L] (natural logits), P likewise, no P^T."""
+def _fwd32_impl(single, cond, pair, bias, mask, params):
+    """``_fwd32`` (``bias`` None) or ``_fwd32h`` (the saved list then ends before pst)."""
     DC = cond.shape[-1]
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32
 
@@ -1716,7 +1555,7 @@ def _fwd32_impl(single, cond, pair, bias, mask, params, psb=False):
         Gg = torch.mm(c2, W["Wg"].t())  # [M, 2D] gate1 | gate2
         xa, xst = e(M, D), e(M, 2)
         F.adaln_a_cuda(x, G, W["bs1"], xa, xst, EPS)
-        if _hopper(dev) and not psb:
+        if _hopper(dev):
             # one flat buffer [M, 2 DA] holding v^T [DA, M] (the wgmma core reads K-major v, the dV / dP GEMMs of the backward feature-major v) then
             # the gate g [M, DA]: the two GEMMs of one v | g GEMM, no second v^T GEMM
             vg = e(M, 2 * DA)
@@ -1725,20 +1564,8 @@ def _fwd32_impl(single, cond, pair, bias, mask, params, psb=False):
             torch.mm(xa, W["Wvg"][DA:].t(), out=vg.view(-1)[M * DA :].view(M, DA))
         else:
             vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
-        if psb:
-            Pt, pst = torch.empty(0, device=dev), None
-            if _psb_core(True, L) == "recompute":  # bo_psb32.cu: the row statistics instead of P, the softmax inside the core below
-                P = e(H, A, L, 2)
-            else:
-                P = e(H, A, L, L)
-                F.softmax_t_cuda(
-                    bias.reshape(H * A * L, L), P.view(H * A * L, L), None, _psb_mask(mask, A, L, True), A
-                )
-        else:
-            P = e(H, L, L)
-        if psb:
-            pass
-        elif bias is None:
+        P = e(H, L, L)
+        if bias is None:
             pst = e(R, 2)
             F.pair_bias_tc_cuda(
                 pair.reshape(R, pair.shape[-1]).contiguous(), W["Wf"], P, pst, EPS, _pair_terms()
@@ -1749,21 +1576,15 @@ def _fwd32_impl(single, cond, pair, bias, mask, params, psb=False):
                 None,
                 bias.reshape(H * L, L),
             )  # hoisted (pair_bias_all): read, not written
-        if not psb:
-            Pt = e(H, L, L)
-            F.softmax_t_cuda(
-                logits,
-                P.view(H * L, L),
-                Pt.view(H * L, L),
-                None if mask is None else mask.reshape(L).to(torch.bool).contiguous(),
-            )
-        og = e(M, DA) if (not psb or _psb_core(True, L) == "recompute") else _psb_fwd_core(vg, P, A, L, H, DA)
-        if psb:
-            if _psb_core(True, L) == "recompute":
-                from miniworld_engine.kernels.bias_only_dit import cuda as C32
-
-                C32.psb32_fwd(bias.reshape(H * A * L, L), P, _psb_mask(mask, A, L, True), vg, og, A, H, DA // H)
-        elif _hopper(dev):
+        Pt = e(H, L, L)
+        F.softmax_t_cuda(
+            logits,
+            P.view(H * L, L),
+            Pt.view(H * L, L),
+            None if mask is None else mask.reshape(L).to(torch.bool).contiguous(),
+        )
+        og = e(M, DA)
+        if _hopper(dev):
             # TF32 wgmma reads K-major operands only: v^T (feature-major, computed above beside g)
             from miniworld_engine.kernels.bias_only_dit.cuda import PvGateCoreH100TF32
 
@@ -1825,25 +1646,6 @@ def _bwd32(
 
 
 @opaque(
-    fake=_bwdp_fake,
-    name="bias_only_dit_train_tf32_bwd_psb",
-    mutates_args=("dbias",),
-)
-def _bwd32p(
-    single: torch.Tensor,
-    cond: torch.Tensor,
-    bias: torch.Tensor,
-    mask: torch.Tensor | None,
-    params: list[torch.Tensor],
-    saved: list[torch.Tensor],
-    dout: torch.Tensor,
-    dbias: torch.Tensor,
-) -> list[torch.Tensor]:
-    """``_bwdp`` on the fp32 path: the per-sample bias gradient into ``dbias`` [H, A, L, L] fp32 (``bias`` unused: P is stored)."""
-    return _bwd32_impl(single, cond, None, mask, params, saved, dout, dbias, psb=True, bias=bias)
-
-
-@opaque(
     fake=_bwdh_fake,
     name="bias_only_dit_train_tf32_bwd_hoisted",
     mutates_args=("dbias",),
@@ -1861,7 +1663,7 @@ def _bwd32h(
     return _bwd32_impl(single, cond, None, mask, params, saved, dout, dbias)
 
 
-def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=False, bias=None):
+def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
     """``_bwd32`` (``dbias_out`` None) or ``_bwd32h`` (``pair`` None; no pair_bias_bwd_tc, finalize without dWf rows)."""
     DC = cond.shape[-1]
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32
@@ -1928,23 +1730,14 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fa
         dWo = _wgrad32(dy, og)
         # the bias-only attention's backward
         dvg, do, dd = e(M, 2 * DA), e(M, DA), e(A, H, L)
-        hop = _hopper(dev) and not psb  # feature-major v^T | g (see _fwd32_impl); dO leaves the gate pass in the head-major (d, a)-minor layout
+        hop = _hopper(dev)  # feature-major v^T | g (see _fwd32_impl); dO leaves the gate pass in the head-major (d, a)-minor layout
         if hop:
             vt, gg = vg.view(-1)[: M * DA].view(DA, M), vg.view(-1)[M * DA :].view(M, DA)
             F.gate_bwd_fold_cuda(dog, og, gg, do, dvg[:, DA:], dd, L)
         else:
             F.gate_bwd_cuda(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
-        dbias = None if psb else e(H * L, L) if dbias_out is None else dbias_out.view(H * L, L)
-        if psb and _psb_core(True, L) == "recompute":  # bo_psb32.cu: P rebuilt from the bias, dV and the bias gradient in one pass
-            from miniworld_engine.kernels.bias_only_dit import cuda as C32
-
-            C32.psb32_bwd(
-                bias.reshape(H * A * L, L), P, _psb_mask(mask, A, L, True), do, vg, dd,
-                dbias_out.view(H * A * L, L), dvg, A, H, DA // H,
-            )
-        elif psb:  # per-sample P: batched GEMMs over (head, sample)
-            _psb_bwd_core(do, vg, P, dd, dvg[:, :DA], dbias_out, A, L, H, DA)
-        elif hop:
+        dbias = e(H * L, L) if dbias_out is None else dbias_out.view(H * L, L)
+        if hop:
             # feature-major, as the portable core: dO is [H, L, (d, a)] (gate_bwd_fold), v^T [H, (d, a), L] is a view of the forward's v^T, so dV^T = dO^T P and
             # dP = sum_(d, a) dO v^T are each ONE batched cuBLAS TF32 GEMM over the heads and need no permute copy
             dh_ = DA // H
@@ -2085,64 +1878,6 @@ class _BlockH(torch.autograd.Function):
         )
 
 
-class _BlockPSB(torch.autograd.Function):
-    """A block on a bias of its own per sample, bf16 or fp32 (Hopper): ``bias`` [H, A, L, L] head-major, natural logits (the layout
-    ``token_dit_pair_bias.pair_biases`` leaves, there in log2 units); the bias gradient (same layout and units) is the gradient of
-    ``bias``."""
-
-    @staticmethod
-    def forward(ctx, single, cond, bias, mask, sink, *params):
-        f32 = single.dtype is F32
-        if cond.stride(0) == 0:  # an expanded shared cond: materialized by the Hopper kernel
-            cond = _repeat_shared(cond, single.shape[0])
-        out, *saved = (_fwd32p if f32 else _fwdp)(
-            single, cond, bias, mask, list(params)
-        )
-        ctx.save_for_backward(single, cond, bias, *params, *saved)
-        ctx.meta = (mask, len(params), f32, tuple(bias.shape), bias.dtype, sink)
-        return out
-
-    @staticmethod
-    def backward(ctx, dout):
-        mask, npar, f32, bshape, bdt, sink = ctx.meta
-        vals = ctx.saved_tensors
-        single, cond, bias = vals[:3]
-        params, saved = list(vals[3 : 3 + npar]), list(vals[3 + npar :])
-        db = (  # the block's slot of the hoist's shared gradient buffer when the bias names one
-            sink[0].slot(sink[1], bdt, single.device)
-            if (ctx.needs_input_grad[2] and sink is not None)
-            else None
-        )
-        db = torch.empty(bshape, device=single.device, dtype=bdt) if db is None else db.view(bshape)
-        dx, dc, *bufs = (_bwd32p if f32 else _bwdp)(
-            single, cond, bias, mask, params, saved, dout.contiguous(), db
-        )
-        pg = _split_grads(bufs, params, skip=PAIR_PARAMS)
-        return (
-            dx,
-            dc,
-            db if ctx.needs_input_grad[2] else None,
-            None,
-            None,
-            *(g if ctx.needs_input_grad[5 + i] else None for i, g in enumerate(pg)),
-        )
-
-
-def serves_psb(module, single, cond, bias, mask=None) -> bool:
-    """Can ``block_psb`` run this call: the Hopper bf16 / fp32 (TF32) training block on a bias of its own per sample, ``bias``
-    [H, A, L, L] natural logits (A = single.shape[0], one batch row), L a multiple of 128 up to 768, a key mask [1, L] or [A, L]
-    (bool) or none. Anything else keeps the module's PyTorch composition."""
-    return serves(module, single, cond, None, mask, bias=bias, per_sample=True)
-
-
-def block_psb(module, single, cond, bias, mask=None, sink=None):
-    """One BiasOnlyDiTBlock on a bias of its own per sample ([H, A, L, L] head-major, natural logits); ``single`` / ``cond``
-    [A, 1, L, d]. ``sink``: the (``_Sink``, block index) of the hoist's shared gradient buffer (``bias_only_dit_hoist.SINK_ATTR`` of the
-    hoisted bias), where the bias gradient is written in place. Call ``serves_psb`` first."""
-    params = [module.get_parameter(n) for n in NAMES]
-    return _BlockPSB.apply(single, cond, bias.contiguous(), mask, sink, *params)
-
-
 def block(module, single, cond, pair, mask=None, bias=None):
     """One BiasOnlyDiTBlock (attention + transition, both residuals) through the fused training path. Call ``serves`` first.
     ``bias``: the block's hoisted pair bias [1, H, L, L] (``pair_bias_all``); ``pair`` is then not read."""
@@ -2172,15 +1907,4 @@ def block(module, single, cond, pair, mask=None, bias=None):
     return out
 
 
-__all__ = ["NAMES", "PAIR_PARAMS", "block", "block_psb", "serves", "serves_psb"]
-
-
-def h100_infer(module, single, cond, pair, mask):
-    """Opt-in Hopper inference, preserving the fused training forward boundaries."""
-    from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
-
-    if cond.shape[0] == 1 and single.shape[0] != 1:
-        cond = ext().repeat90(cond, single.shape[0])
-    elif cond.stride(0) == 0:
-        cond = ext().repeat90(cond[:1].contiguous(), single.shape[0])
-    return _fwd(single, cond, pair, mask, [module.get_parameter(n) for n in NAMES])[0]
+__all__ = ["NAMES", "PAIR_PARAMS", "block", "serves"]

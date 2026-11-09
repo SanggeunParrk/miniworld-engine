@@ -19,7 +19,7 @@ import torch
 import triton
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._tiles import tile_grid
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels.mpnn_message.triton.main import _shape_key
 import triton.language as tl
 
@@ -32,10 +32,9 @@ def _gelu(x):
     return 0.5 * x * (1.0 + tl.erf(x * 0.7071067811865476))
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_edge_mlp_fwd_gemm_b2b_triton"),
-    key=["shape_key"],
-)
+@configured('mpnn_edge_mlp_fwd_gemm_b2b_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _edge_mlp_fwd_kernel(
     preactivation_ptr,

@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
@@ -37,24 +37,22 @@ def _policy_groups(groups: int) -> int:
     return 1 if groups <= _SMALL_GROUP_LIMIT else 2
 
 
-_DEFAULTS = configs_for("mpnn_message_fwd_gemm_gelu_reduce_triton")
-
-
 def _prune(configs, nargs, **meta):
-    """Configs whose row tile holds their groups (always); over the DEFAULT config set and outside a build, the policy's groups per CTA
-    for this group count. A tuned cache's measured winners (handed through this prune again as new Config objects) are left as they are."""
-    from miniworld_engine import settings
-
+    """Configs whose row tile holds their groups (always); over the kernel's DEFAULT configs, the policy's groups per CTA for this
+    group count. Measured table entries (other Config objects) are left as they are."""
     valid = [c for c in configs if c.kwargs["BLOCK_M"] >= c.kwargs["GROUPS_PER_CTA"] * _NEIGHBORS]
-    if settings.current().run_autotune or not all(any(c is d for d in _DEFAULTS) for c in configs):
+    if not all(any(c is d for d in _message_inference_kernel.default) for c in configs):
         return valid
     groups = int(nargs["groups"] if "groups" in nargs else meta["groups"])
     keep = [c for c in valid if c.kwargs["GROUPS_PER_CTA"] == _policy_groups(groups)]
     return keep or valid
 
 
-@triton.autotune(configs=configs_for("mpnn_message_fwd_gemm_gelu_reduce_triton"), key=["shape_key"],
-                 prune_configs_by={"early_config_prune": _prune})
+@configured('mpnn_message_fwd_gemm_gelu_reduce_triton',
+            key=["shape_key"],
+            default=[dict(GROUPS_PER_CTA=1, BLOCK_M=64, BLOCK_K=16, COALESCED_WEIGHT_LOAD=1, num_warps=2, num_stages=3),
+            dict(GROUPS_PER_CTA=2, BLOCK_M=128, BLOCK_K=32, COALESCED_WEIGHT_LOAD=0, num_warps=4, num_stages=3)],
+            prune=_prune)
 @triton.jit
 def _message_inference_kernel(
     preactivation_ptr,

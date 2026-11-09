@@ -12,17 +12,15 @@ without a graph break -- surviving ``torch.compile`` is the entire point.
 """
 
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import torch
 
 from miniworld_engine.kernels._device import num_sms
-from miniworld_engine import settings
 import triton
 import triton.language as tl
 
 from jaxtyping import Float
 
-from miniworld_engine.utils.typecheck import typecheck
 from miniworld_engine.kernels._compile import opaque
 
 # tl.dot needs every dim >= 16; below this the backward uses the scalar loop.
@@ -38,11 +36,12 @@ MIN_TL_DOT_DIM = 16
 
 # shape_key is keyed: the grid is cdiv(M, BLOCK_M1) and M is the pair row count (B*L^2), so one
 # BLOCK_M1 was being reused from L=128 to L=1024+.
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
+from miniworld_engine.kernels._shape_key import both_key, length_of, rows_of, pack
 
 
-@triton.autotune(configs=configs_for("layernorm_linear_fwd_fp32_triton"),
-                 key=['shape_key', 'TC'])
+@configured('layernorm_linear_fwd_fp32_triton',
+            key=['shape_key', 'TC'],
+            default=dict(BLOCK_K_D=32, BLOCK_K_NH=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _layer_norm_linear_fwd(
     x_ptr,
@@ -156,9 +155,10 @@ def _layer_norm_linear_fwd(
 # USE_DOT is deliberately NOT keyed even though it selects a code path (tl.dot tensor-core
 # projection vs the scalar `tl.static_range(NH)` loop): the sole launcher passes `NH=nh` and
 # `USE_DOT=nh >= MIN_TL_DOT_DIM`, so it is a pure function of NH -- which is folded into shape_key.
-@triton.autotune(configs=configs_for("layernorm_linear_bwd_fp32_triton"),
-                 key=['shape_key', 'TC'],
-                 reset_to_zero=['dlnw_ptr', 'dpw_ptr'])
+@configured('layernorm_linear_bwd_fp32_triton',
+            key=['shape_key', 'TC'],
+            default=dict(BLOCK_K_D=32, BLOCK_K_NH=32, BLOCK_M1=64, num_warps=4, num_stages=2),
+            reset_to_zero=['dlnw_ptr', 'dpw_ptr'])
 @triton.jit
 def _layer_norm_linear_bwd(
     dout_ptr,
@@ -452,7 +452,6 @@ class _LayerNormLinearPairBias(torch.autograd.Function):
         return dx.reshape(ctx.xshape), dlnw, dpw, None   # eps takes no gradient
 
 
-@typecheck
 def triton_layer_norm_linear(
     x: Float[torch.Tensor, "*batch d"],
     ln_weight: Float[torch.Tensor, " d"],

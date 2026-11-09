@@ -18,8 +18,8 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import token_key
 
 C = 256
 NBLK = 192                   # pair slices of the table-gradient kernel (fixed)
@@ -69,7 +69,9 @@ def _forward_tile(TBL, w, live, lw, lb, c, nS: tl.constexpr, nX: tl.constexpr, e
     return yh1, r1, yc * r2[:, None], r2
 
 
-@triton.autotune(configs=configs_for("pair_embed_adaln_fwd_triton"), key=["shape_key", "HAS_SC"])
+@configured('pair_embed_adaln_fwd_triton',
+            key=["shape_key", "HAS_SC"],
+            default=dict(BLOCK_J=16, num_warps=4, num_stages=1))
 @triton.jit
 def _adaln_fwd(TBL, LNW, LNB, GAMMA, BETA, XT, SC, IDX, MASK, XLIM, CLIM, OUT, BINS, n, e1, e2,
                HAS_SC: tl.constexpr, nS: tl.constexpr, nX: tl.constexpr, NXL: tl.constexpr, NCL: tl.constexpr, BLOCK_J: tl.constexpr, shape_key):
@@ -95,7 +97,9 @@ def _adaln_fwd(TBL, LNW, LNB, GAMMA, BETA, XT, SC, IDX, MASK, XLIM, CLIM, OUT, B
     tl.store(OUT + (ri * n + j)[:, None] * 256 + c[None, :], tl.where(live[:, None], o, 0.0).to(tl.bfloat16), mask=jin[:, None])
 
 
-@triton.autotune(configs=configs_for("pair_embed_adaln_bwd_triton"), key=["shape_key"])
+@configured('pair_embed_adaln_bwd_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_J=16, num_warps=4, num_stages=1))
 @triton.jit
 def _adaln_bwd(TBL, LNW, LNB, GAMMA, BINS, DOUT, DX, PART, b0, n, nrb, e1, e2,
                nS: tl.constexpr, nX: tl.constexpr, RB: tl.constexpr, BLOCK_J: tl.constexpr, shape_key):
@@ -141,7 +145,9 @@ def _adaln_bwd(TBL, LNW, LNB, GAMMA, BINS, DOUT, DX, PART, b0, n, nrb, e1, e2,
     tl.store(base + 768 + c, dl)
 
 
-@triton.autotune(configs=configs_for("pair_embed_adaln_dw_triton"), key=["shape_key"])
+@configured('pair_embed_adaln_dw_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_P=64, num_warps=4, num_stages=2))
 @triton.jit
 def _adaln_dw(DX, BINS, PART, P, per, nS: tl.constexpr, nX: tl.constexpr, nC: tl.constexpr, RS: tl.constexpr, RX: tl.constexpr, RC: tl.constexpr,
               BLOCK_P: tl.constexpr, shape_key):
@@ -173,7 +179,9 @@ def _adaln_dw(DX, BINS, PART, P, per, nS: tl.constexpr, nX: tl.constexpr, nC: tl
     tl.store(base + (nS + nX + rc)[:, None] * 256 + cc[None, :], acc_c, mask=(rc < nC)[:, None])
 
 
-@triton.autotune(configs=configs_for("pair_embed_adaln_bwd_reduce_triton"), key=["shape_key"])
+@configured('pair_embed_adaln_bwd_reduce_triton',
+            key=["shape_key"],
+            default=dict(BLOCK=256, num_warps=4, num_stages=1))
 @triton.jit
 def _adaln_bwd_reduce(PART, OUT, total, count, stride, off, BLOCK: tl.constexpr, shape_key):
     """OUT[g, k] = sum over r < count of PART[(g * count + r) * stride + off + k], in the order r = 0, 1, ..."""

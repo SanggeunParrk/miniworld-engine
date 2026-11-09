@@ -30,19 +30,9 @@ MAX_HEAD_DIM = 64
 
 
 def _leg_allowed(stack, single, op: str) -> bool:
-    """The Triton leg of the ``miniworld`` backend for ``op`` (``dit_variant`` / ``dit_variant_atom`` of ``autotune.records``): not on
-    H100 / B200 (PyTorch is the fallback there by design) and, off them, only on a card the engine holds a record for -- every kernel
-    the call launches has an ``ok`` manifest row, the backward ones only when the call needs a gradient; otherwise one
-    ``UnrecordedCardWarning`` and the reference. ``settings.force_portable_kernels`` allows it everywhere."""
-    from miniworld_engine.modules import dispatch
-    from miniworld_engine.modules.exceptions import ImplementationType
-
-    if stack.implementation != ImplementationType.MINIWORLD:
-        return False
-    # the precision the attention core and the pair-bias kernels run at: the activations' (fp32 asks the card's fp32 rows)
-    return dispatch.portable_leg_allowed(
-        single.device, op, training=dispatch.needs_backward(stack, single), dtype=dispatch.record_dtype(single)
-    )
+    """The Triton leg of the ``miniworld`` backend for ``op``. The per-card record gate of the old dispatch layer is gone: backend
+    selection belongs to the caller (modules/, explicit ``backend=``)."""
+    return stack.implementation == "miniworld"
 
 
 def serves(stack, single, cond, pair, mask) -> bool:

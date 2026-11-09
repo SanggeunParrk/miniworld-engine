@@ -42,7 +42,6 @@ from ..._nvcc import (
     load_extension,
     nvcc_path,
 )
-from miniworld_engine import settings
 
 _dir = Path(__file__).parent / "sm100"
 
@@ -55,7 +54,7 @@ DW_REPL = 9
 
 
 def _repl() -> int:
-    return settings.current().transition_sm100_repl or DW_REPL
+    return DW_REPL
 
 
 # ------------------------------------------------------------------------------------------------------------------ build
@@ -136,12 +135,7 @@ def kernel_toolchain() -> tuple[str, tuple[int, int], tuple[str, ...]]:
     """(nvcc, release, host flags) that build the kernel cubins: settings.transition_sm100_nvcc if set, else the newest of
     ``/usr/local/cuda*/bin/nvcc`` and the torch-matched nvcc that knows sm_100, is no newer (major) than the driver, and can
     drive a host compiler."""
-    override = settings.current().transition_sm100_nvcc or None
-    cands = (
-        [override]
-        if override
-        else [*map(str, Path("/usr/local").glob("cuda*/bin/nvcc")), nvcc_path()]
-    )
+    cands = [*map(str, Path("/usr/local").glob("cuda*/bin/nvcc")), nvcc_path()]
     driver_major = _driver_major()
     found = {}
     for c in cands:
@@ -153,7 +147,7 @@ def kernel_toolchain() -> tuple[str, tuple[int, int], tuple[str, ...]]:
         ):
             rel = _release(c)
             # a cubin from a newer major toolkit than the driver supports does not load (cssb's 575 driver stops at CUDA 12.9)
-            if rel and (driver_major is None or rel[0] <= driver_major or override):
+            if rel and (driver_major is None or rel[0] <= driver_major):
                 found[os.path.realpath(c)] = rel
     for nvcc, rel in sorted(found.items(), key=lambda kv: kv[1], reverse=True):
         flags = _host_for(nvcc)
@@ -214,8 +208,6 @@ def _is_b200(index: int) -> bool:
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """The kernels' own requirements: sm_100, bf16 activations, D = 128 / hidden 512 (tile shapes are literals), whole 128-row tiles.
     The weights may be bf16 or fp32 (an fp32 master): the entry casts them to bf16 outside autograd."""
-    if not settings.current().transition_fused_sm100a:
-        return False
     if not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
     if not _is_b200(

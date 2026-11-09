@@ -24,12 +24,14 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import atom_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import atom_key
 from miniworld_engine.kernels._compile import opaque
 
 
-@triton.autotune(configs=configs_for("rope_fwd_triton"), key=["shape_key"])
+@configured('rope_fwd_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, num_warps=2, num_stages=2))
 @triton.jit
 def rope_3d_kernel(
     X, COS, SIN, Y,

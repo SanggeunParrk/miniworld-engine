@@ -2,7 +2,7 @@
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm origin/exp/miniworld@32e3897 : src/team_gm/modules/kernels/augmented_attention_pair_bias_compute_efficient.py
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import torch
 import triton
 import triton.language as tl
@@ -11,16 +11,14 @@ from miniworld_engine.kernels._tf32 import tf32_dot
 
 from jaxtyping import Bool, Float
 
-from miniworld_engine.autotune.shape_key import atom_key, pack
-from miniworld_engine.utils.typecheck import typecheck
-
+from miniworld_engine.kernels._shape_key import atom_key, pack
 
 # HEAD_DIM_PAD is a launcher value, not a CSV axis. Tensor-core dot products need
 # at least 16 reduction lanes, including for small heads (e.g. D=8). Loads and
 # stores mask the padded lanes; delta reduces over the same padded dimension.
 
-# The config list is read once and reused -- by the decorator below and by the split-count
-# arithmetic, which has to agree with the BLOCK_M2 the backward actually runs.
+# The split-count arithmetic reads the backward kernel's own configs (its default plus this GPU's table entries), so it
+# agrees with every BLOCK_M2 the backward can launch with.
 
 def _bwd_min_block_n() -> int:
     """Smallest BLOCK_N the backward can be launched with, read from its own config set.
@@ -32,12 +30,10 @@ def _bwd_min_block_n() -> int:
     end of `dq_expand` into the next allocation -- observed as NaN in `bias`, an argument this
     kernel only reads, and as an illegal memory access at tile (32, 16).
     """
-    blocks = [c.kwargs["BLOCK_M2"] for c in configs_for("augmented_attention_bwd_split_triton")
-              if "BLOCK_M2" in c.kwargs]
+    blocks = [c.kwargs["BLOCK_M2"] for c in _attn_bwd.configs if "BLOCK_M2" in c.kwargs]
     if not blocks:
         raise RuntimeError(
-            "augmented_attention_bwd has no configs: dq_expand's split count is undefined. "
-            "Select a config directory that covers this op.")
+            "augmented_attention_bwd has no configs: dq_expand's split count is undefined.")
     return min(blocks)
 
 
@@ -109,8 +105,9 @@ def _attn_fwd_inner(
 # for two integer ops. What does set the work shape is folded into shape_key -- HEAD_DIM (and with it
 # HEAD_DIM_PAD = next_power_of_2(HEAD_DIM)), H (also the q/k/v row-stride multiplier H*D), and
 # shape_key (the L bucket).
-@triton.autotune(configs=configs_for("augmented_attention_fwd_triton"),
-                 key=['shape_key'])
+@configured('augmented_attention_fwd_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_fwd(
     Q,
@@ -241,8 +238,9 @@ def _attn_fwd(
 # entries already in the key; and stride_z == L*H*HEAD_DIM would key on the exact L instead of its
 # bucket -- one cache entry per sequence length, which is what shape_key exists to prevent. None of
 # them changes the tile or the loop trip count: they only shift each program's base pointer.
-@triton.autotune(configs=configs_for("augmented_attention_bwd_pre_triton"),
-                 key=['shape_key'])
+@configured('augmented_attention_bwd_pre_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_bwd_preprocess(
     O,
@@ -374,8 +372,9 @@ def _attn_bwd_dqdkdv(
 
 # AUTOTUNE KEY: `A`/`B` out for the same reason as the forward -- `A` is unread here, and `B` only
 # folds into the constant M_offset stride (B*H*N_CTX).
-@triton.autotune(configs=configs_for("augmented_attention_bwd_split_triton"),
-                 key=['shape_key', 'CHUNKED'])
+@configured('augmented_attention_bwd_split_triton',
+            key=['shape_key', 'CHUNKED'],
+            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_bwd(
     Q,
@@ -541,24 +540,14 @@ def _attn_bwd(
 # reappear, reproduce the failure before trusting any explanation.
 
 
-# ``_dq_reduce`` used to bucket its own flat element count A*B*L*H*D through the helper below,
-# because that count is above 1e5 for every real shape and saturated the old LINEAR edge set. It now
-# keys on `atom_key(L)` like every other kernel in this family: L is what the config was tuned
-# against, and the element count is a function of it (times fixed A/H/D), so nothing is lost by
-# keying the cause instead of the product -- and the family stops holding two bucket spaces at once.
-#
-# NOT called from this file any more. Kept only because ``checks/augmented_attention.py`` still imports it.
-def get_elem_group(n_elem) -> int:
-    """Bucket a flat ELEMENT count (canonical autotune.buckets). Superseded by `atom_key(L)`."""
-    from miniworld_engine.autotune.buckets import bucket_mixed
-    return bucket_mixed(n_elem)
-
 
 # AUTOTUNE KEY: ['shape_key'] -- was ['N_ELEM'], the raw element count A*B*L*H*D, so this
 # backward-path kernel re-swept its whole config space at every new sequence length seen in a
 # training run. `N_ELEM` is still the body's bound; `shape_key` is its bucket and is never read
 # by the kernel, so the generated code -- and the gradient -- are unchanged.
-@triton.autotune(configs=configs_for("augmented_attention_bwd_reduce_triton"), key=['shape_key'])
+@configured('augmented_attention_bwd_reduce_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
 @triton.jit
 def _dq_reduce(
     DQ_Expand,  # (num_splits, A, B, L, H, D)
@@ -872,7 +861,6 @@ _MAX_HEAD_DIM = 64
 
 
 class TritonAugmentedAttentionFunction(torch.autograd.Function):
-    @typecheck
     @staticmethod
     def forward(
         ctx,

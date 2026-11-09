@@ -27,14 +27,14 @@ from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._device import num_sms
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 import torch
 import triton
 import triton.language as tl
 
 from .main import layer_norm_fwd_fused
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
+from miniworld_engine.kernels._shape_key import both_key, length_of, rows_of, pack
 
 # Persistent grid = (#SMs * PERSIST_WAVES) blocks on axis 0. A couple of blocks per SM keeps
 # the memory system saturated while keeping the partial buffer (and its final
@@ -53,7 +53,9 @@ PERSIST_WAVES = 2
 
 # shape_key is in the key: the grid is FIXED at g programs, so BLOCK_M1 alone sets num_tiles and
 # whether the persistent grid is even filled -- the row count picks the winner.
-@triton.autotune(configs=configs_for("layernorm_bwd_split_triton"), key=['shape_key'])
+@configured('layernorm_bwd_split_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _ln_bwd_persistent(
     DX, PART_DW, PART_DB, DY, X, W, Mean, Rstd,

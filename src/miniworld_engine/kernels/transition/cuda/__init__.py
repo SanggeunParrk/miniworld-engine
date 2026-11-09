@@ -1,37 +1,6 @@
 """CUDA implementations for Transition forward kernels."""
 
-from pathlib import Path
-
 import torch
-from ..._compile import opaque
-
-
-from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension, mathdx_includes
-
-_dir = Path(__file__).parent
-_EXTENSIONS = {}
-
-
-def _ext(kind, width, config):
-    from miniworld_engine.autotune.hopper_cuda_config import defines
-    flags = defines(kind, width, config)
-    key = (kind, width, tuple(sorted(config.items())))
-    if key not in _EXTENSIONS:
-        ensure_cuda_home()
-        suffix = "_".join(f"{k}{v}" for k, v in sorted(config.items()))
-        _EXTENSIONS[key] = load_extension(
-            name=f"transition_{kind}_cuda_k{width}_{suffix}",
-            sources=[str(_dir / f"transition_{kind}_kernel.cu")],
-            extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "--use_fast_math",
-                               "--expt-relaxed-constexpr", "--expt-extended-lambda",
-                               *gencodes("90a"), *mathdx_includes(), *flags,
-                               "-DCUBLASDX_IGNORE_NVBUG_5218000_ASSERT",
-                               "-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__",
-                               "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_HALF2_OPERATORS__",
-                               "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__"],
-            extra_cflags=["-std=c++17"], verbose=False,
-        )
-    return _EXTENSIONS[key]
 
 
 def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n):
@@ -58,73 +27,101 @@ def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n):
     return None
 
 
-def _b2b_launch_fake(x, rstd, c1, g, beta, wa, wb, ws, bn, stages, warpgroups, kt, min_blocks):
-    """Allocate outputs with the same shape, dtype and strides as _b2b_launch."""
-    return torch.empty_like(x)
+def _table_configs(gpu, op, keep):
+    """Every config the launch-config table of ``gpu`` holds for ``op`` (all ranks: ``tune`` times them), filtered by
+    ``keep(dims, kwargs)`` -- what ``_launch_config.choose`` may return besides a kernel's default."""
+    from miniworld_engine.kernels._launch_config import _parse, table
+
+    out = []
+    for key, cfgs in table("transition", gpu).get(op, {}).items():
+        _, dims, _ = _parse(key)
+        for c in cfgs:
+            if keep(dict(dims), c["kwargs"]) and c["kwargs"] not in out:
+                out.append(dict(c["kwargs"]))
+    return out
 
 
-@opaque(fake=_b2b_launch_fake, name="transition_b2b_fwd_cuda")
-def _b2b_launch(
-    x: torch.Tensor, rstd: torch.Tensor, c1: torch.Tensor,
-    g: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor,
-    wb: torch.Tensor, ws: torch.Tensor, bn: int, stages: int,
-    warpgroups: int, kt: int, min_blocks: int,
-) -> torch.Tensor:
-    """Native inference launch boundary; keep surrounding LN/reshapes traceable."""
-    config = dict(bn=bn, stages=stages, warpgroups=warpgroups, kt=kt, min_blocks=min_blocks)
-    return _ext("b2b", x.shape[-1], config).transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws, True)
+def _shapes(rows):
+    """``{(d, n): {(dtype, mode): row counts}}`` of the requirements rows: the channel width ``d`` and hidden multiple ``n`` of the
+    Transition each row's module builds (``Transition``: d_hidden / n; ``PairformerBlock``: its pair transition, d_pair, n = 4;
+    the token DiT classes: d_single / n), and the row counts (M = L * L on the pair stream, L otherwise) it runs at."""
+    from miniworld_engine.kernels._prebuild import _kv
+
+    out = {}
+    for r in rows:
+        dims = _kv(r["dims"])
+        d = dims.get("d_hidden") or dims.get("d_single") or dims.get("d_pair")
+        if d is None:   # a row of a module that builds no hand-CUDA Transition (atom blocks: d_atom)
+            continue
+        d = int(d)
+        n = int(dims.get("n", 4))
+        counts = out.setdefault((d, n), {}).setdefault((r["dtype"], r["mode"]), set())
+        counts.update(L * L if r["stream"] == "token_pair" else L for L in r["lengths"])
+    return out
 
 
-def _run_configured(kind, symbol, tensors, *, config=None, residual=False):
-    from miniworld_engine.autotune.hopper_cuda_config import candidates
-    from miniworld_engine.autotune.native import choose_config, tensor_key
-    x = tensors[0]
-    width = x.shape[-1]
-    grid = candidates(kind, width)
-    # Current CUDA kernels require a whole warpgroup tile of rows. Configs
-    # must also divide the actual workload, not just a coarse cache bucket.
-    grid = [c for c in grid if x.shape[0] % (64 * c["warpgroups"]) == 0]
-    if config is None:
-        config = choose_config(
-            {"b2b": "transition_fwd_b2b_sm90_cuda", "gatebwd": "transition_bwd_gate_sm90_cuda",
-             "expand_gate": "transition_expand_gate_sm90_cuda"}[kind], grid, dtype=str(x.dtype),
-            bucket=tensor_key(*tensors, extra=(residual,)), device_index=x.device.index,
-            run=lambda c: _run_configured(kind, symbol, tensors, config=c, residual=residual),
-        )
-    if config not in grid:
-        raise ValueError("CUDA transition config does not support the input row count")
-    if kind == "b2b" and residual:
-        return _b2b_launch(*tensors, **config)
-    fn = getattr(_ext(kind, width, config), symbol)
-    return fn(*tensors, True) if residual else fn(*tensors)
+def prebuild(target, rows):
+    """Every build of the Transition family on ``target`` for the requirements ``rows`` (kernels/_prebuild.py). From the rows: the
+    channel widths and hidden multiples (d, n) each build is specialized for; which dtypes reach it (the fused / wide builds take
+    bf16 activations, i.e. the ``bfloat16`` and ``master`` rows; the generic build also takes the ``float32`` rows); eval -> the
+    inference forward (no saved tensors), train -> the saving forward, the backward and, where a width keeps a / b, the saved-a/b
+    build at the row counts the rows run. Family knowledge: the launch-config table entries for ``target.gpu`` and each kernel's
+    default (and the first of its grid that a row count off the default's tile leaves), ``target.sms``, the fixed schedules."""
+    import functools as ft
 
+    shapes = _shapes(rows)
+    half = {k: {m for (dt, m) in v if dt in ("bfloat16", "master")} for k, v in shapes.items()}  # modes served on bf16 activations
+    if target.arch == "sm90":
+        from . import fused_generic_sm90a, fused_sm90a, fused_wide_sm90a
 
-def transition_expand_gatebwd_wgmma(x, rstd, c1, g, beta, wa, wb, grad_expand, *, config=None):
-    """Hopper WGMMA fused expand + SwiGLU gate backward. Returns (h, dAB, xn):
-    h=(M,ND) silu(a)*b, dAB=(M,2ND) [dA|dB], xn=(M,K). Matches the Triton
-    ``_transition_expand_gatebwd_stacked`` (Version A) for sm90 K in {128,256,512}."""
-    return _run_configured("gatebwd", "transition_expand_gatebwd_wgmma",
-                           (x, rstd, c1, g.contiguous(), beta.contiguous(),
-                            wa.contiguous(), wb.contiguous(), grad_expand.contiguous()),
-                           config=config)
+        fused = {n: half[(128, n)] for n in fused_sm90a.NS if (128, n) in half}
+        wide = {(d, n): half[(d, n)] for d, ns in fused_wide_sm90a.NS.items() for n in ns if (d, n) in half}
+        if any(fused.values()) or any(wide.values()):
+            yield fused_sm90a._native_ext
+        # D = 128 fused: (ctas, dw_repl, save, n) of every schedule choose() can return; eval runs the non-saving forward,
+        # train the saving forward and the backward
+        builds = set()
+        for n, modes in fused.items():
+            for mode in modes:
+                for backward in ((False, True) if mode == "train" else (False,)):
+                    grid = fused_sm90a.transition_candidates(target.sms, backward=backward, n=n)
+                    op = "transition_bwd_residual_sm90_cuda" if backward else "transition_fwd_residual_sm90_cuda"
+                    configs = [grid[0], *_table_configs(
+                        target.gpu, op, lambda dims, c, n=n, g=grid: dims.get("SMS") == target.sms
+                        and dims.get("ND") == 128 * n and c in g)]
+                    for c in configs:
+                        builds.add((c["ctas"], c["dw_repl"], mode == "train", n))
+                builds.add((target.sms, fused_sm90a.DW_REPL, mode == "train", n))  # _ext_for: the fixed DW_REPL schedule
+        for args in sorted(builds):
+            yield ft.partial(fused_sm90a._build_ext, *args)
+        # the wide widths: every build _ext_for picks (the row count only selects a saved-a/b D512 cell)
+        exts = {}
+        for (d, n), modes in wide.items():
+            for mode in modes:
+                counts = set().union(*(c for (dt, m), c in shapes[(d, n)].items() if m == mode and dt != "float32"))
+                for save_ab in ((False, True) if mode == "train" else (False,)):
+                    for m in sorted(counts):
+                        if save_ab and not fused_wide_sm90a.save_ab_enabled(d, m):
+                            continue  # the saving build is requested only where save_ab_enabled (the training forward / backward)
+                        args, kwargs = fused_wide_sm90a._ext_args(d, m, save_ab, n, target.sms)
+                        exts[(args, tuple(sorted(kwargs.items())))] = (args, kwargs)
+        for args, kwargs in exts.values():
+            yield ft.partial(fused_wide_sm90a._ext, *args, **kwargs)
+        # the generic build: float32 (TF32) rows, shapes the fused / wide builds do not take, and the row counts
+        # ``prefers_generic`` hands it
+        def generic(d, n, dtype, mode, counts):
+            served = (d == 128 and n in fused_sm90a.NS) or n in fused_wide_sm90a.NS.get(d, ())
+            small = fused_generic_sm90a._PREFER_GENERIC_ROWS.get(d, (0, 0))[mode == "train"]
+            return dtype == "float32" or not served or any(m <= small for m in counts)
+        if any(generic(d, n, dt, m, c) for (d, n), v in shapes.items() for (dt, m), c in v.items()):
+            yield fused_generic_sm90a._ext
+    elif target.arch == "sm100":
+        from . import fused_sm100a, fused_wide_sm100a
 
-
-def transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws, *, config=None):
-    """Fused LN + SwiGLU expand + squeeze forward for fixed AF3 transition shapes.
-    Returns ``y = transition(x) + x``.
-
-    The residual is folded into the squeeze epilogue (residual == x) and is not optional: this
-    is the Transition op, and every launcher of it defines the op that way. The C++ entry still
-    takes the flag -- it is one `bool` in `transition_b2b_kernel.cu` -- but nothing can pass
-    False through here, which is what "no variable" means for a Python caller.
-    """
-    return _run_configured("b2b", "transition_b2b_fwd",
-                           (x, rstd, c1, g, beta, wa, wb, ws), config=config, residual=True)
-
-
-def transition_expand_gate_fwd(x, rstd, c1, g, beta, wa, wb, *, config=None):
-    """Fused LN + SwiGLU expand/gate forward returning h[M, ND]."""
-    return _run_configured("expand_gate", "transition_expand_gate_fwd",
-                           (x, rstd, c1, g, beta, wa, wb), config=config)
-
-
+        if any(half.values()):
+            yield fused_sm100a._cubins
+            yield fused_sm100a._ext
+        for d, n in fused_wide_sm100a.SHAPES:
+            if half.get((d, n)):
+                yield ft.partial(fused_sm100a.build_cubins, f"d{d}n{n}", fused_wide_sm100a._specs(d, n))
+    # fused_sm80 (an sm80 build) has no target here

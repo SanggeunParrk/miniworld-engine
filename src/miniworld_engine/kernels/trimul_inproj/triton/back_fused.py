@@ -11,7 +11,7 @@ Outputs: dx_n (M,D), dWL/dWLg/dWR/dWRg (D,D).
 """
 
 from __future__ import annotations
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 import torch
 
@@ -20,7 +20,7 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import pack, token_key
+from miniworld_engine.kernels._shape_key import pack, token_key
 
 
 # `_dx_kernel` and `_dw_kernel` were removed here. Both were @triton.jit with NO autotune and no
@@ -33,7 +33,9 @@ from miniworld_engine.autotune.shape_key import pack, token_key
 
 
 
-@triton.autotune(configs=configs_for("trimul_bwd_gate_packed_triton"), key=['shape_key'])
+@configured('trimul_bwd_gate_packed_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
 @triton.jit
 def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, pair_mask_ptr, M, DM, D: tl.constexpr, BLOCK_E: tl.constexpr,
                     shape_key):
@@ -142,7 +144,9 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, *, pair_mask=No
 # ── σ(gate) backward: reconstruct GLU grads from lr + sg (no preact) ──────────────────────────
 
 
-@triton.autotune(configs=configs_for("trimul_bwd_gate_packed_recompute_triton"), key=['shape_key'])
+@configured('trimul_bwd_gate_packed_recompute_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
 @triton.jit
 def _dconcat_sig_kernel(dL_ptr, dR_ptr, lrL_ptr, lrR_ptr, sg_ptr, out, M, DM,
                         D: tl.constexpr, BLOCK_E: tl.constexpr, shape_key):

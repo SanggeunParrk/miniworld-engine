@@ -28,24 +28,20 @@ the tensor core, every sum is fp32. Against an fp64 truth, O / dq / dk / dv / db
 floor (O 4.7e-3 against a floor of 4.4e-3 at unit-variance inputs); in the token DiT block the error is that of the
 engine's bf16 Triton core (tests/gpu/sm90/test_augmented_attention_bf16_sm90_gpu.py).
 
-``supported()`` is the whole gate: sm_90, 16 heads x 48, B == 1, L a multiple of 128. Everything else keeps the
-Triton path, and so do fake tensors and torch.compile tracing (``available()``): the op is a plain autograd Function
-around native extensions, with no fake implementation.
+The gate is the callers' own (``integrations/token_dit_train.serves``, ``dit_variants``' ``serves``, ``integrations/attention_pair_bias_b200.refusal``):
+this module holds the launchers (``forward`` / ``backward`` / ``gated_inference`` and their TF32 forms, ``ApbInferenceCore`` /
+``apb_*`` of AttentionPairBias) and the build recipes (``prebuild``).
 """
 
 from __future__ import annotations
 
 import functools
-import math
-import os
-import warnings
 from pathlib import Path
 
 import torch
 import triton
 import triton.language as tl
 
-from ..._compile import device_constant, opaque
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _dir = Path(__file__).parent
@@ -54,7 +50,6 @@ _tmn = (
 )  # tmn_kernels.cuh (TMA / mbarrier helpers)
 
 H, D = 16, 48
-LOG2E = 1.0 / math.log(2.0)
 # AttentionPairBias (B = 1): key splits per 64 query rows -- APB_KS warpgroups, each walking every APB_KS-th key block, merged in
 # shared memory. Measured on H100 (L768, 8 x 48): 2 splits take 1-2 us off each core (about 0.5 % of the step); the default stays 1.
 _APB_KS = {"fwd": 1, "inf": 1, "dq": 1, "dkv": 1}
@@ -81,6 +76,20 @@ def _ext(name: str, defs: tuple[str, ...] = ()):
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             *("-D" + d for d in defs),
         ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def _rows_ext():
+    """``pair_rows.cu``: the fp32 pair -> bias pass the token DiT's TF32 inference builds its 256-wide bias with
+    (``conditioned_transition/cuda/__init__.py``, ``pair_bias_rows32``)."""
+    ensure_cuda_home()
+    return load_extension(
+        name="augattn_sm90_pair_rows",
+        sources=[str(_dir / "pair_rows.cu")],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"), "--expt-relaxed-constexpr"],
         extra_cflags=["-std=c++17"],
         verbose=False,
     )
@@ -175,91 +184,7 @@ def _is_hopper(index: int) -> bool:
     return torch.cuda.get_device_capability(index) == (9, 0)
 
 
-#: (heads, head width) the bf16 cores serve: the token stack (16 x 48) and the dense atom stack (4 x 32).
-BF16_LAYOUTS = ((16, 48), (4, 32))
-
-
-def supported(
-    q: torch.Tensor, bias: torch.Tensor, bias_head_major: bool = False
-) -> bool:
-    """q [A, 1, L, h, d] with (h, d) in ``BF16_LAYOUTS`` (any float dtype) and a bias of [1, L, L, h] (``bias_head_major``: [h, 1, L, L]) on sm_90
-    with L a multiple of 128. The requirements are the kernels' own tile shapes, not a policy."""
-    if not q.is_cuda or q.dim() != 5 or not q.is_floating_point():
-        return False
-    A, B, L, h, d = q.shape
-    if B != 1 or (h, d) not in BF16_LAYOUTS or L % 128 or L == 0:
-        return False
-    if tuple(bias.shape) != ((h, 1, L, L) if bias_head_major else (1, L, L, h)):
-        return False
-    return _is_hopper(
-        q.device.index if q.device.index is not None else torch.cuda.current_device()
-    )
-
-
-_BUILD_FAILED = False
-
-
-def available(
-    q: torch.Tensor, bias: torch.Tensor, bias_head_major: bool = False
-) -> bool:
-    """``supported()`` plus successful builds; a build failure warns once and keeps the Triton path."""
-    if _BUILD_FAILED or not supported(q, bias, bias_head_major):
-        return False
-    # Under FakeTensorMode outside a compile (``dev derive``) keep the Triton path: it is the one with autotune keys to
-    # record. Under torch.compile the cores are reachable: the forward and backward launches are opaque ops with fakes.
-    from torch._subclasses.fake_tensor import FakeTensor
-
-    if not torch.compiler.is_compiling() and (isinstance(q, FakeTensor) or isinstance(bias, FakeTensor)):
-        return False
-    return _builds(int(q.shape[3]), int(q.shape[4]))
-
-
-@device_constant
-def _builds(nh: int, dh: int) -> bool:
-    """The forward extension for this head layout builds (a constant to a compiled graph); a failure warns once and keeps the
-    portable path."""
-    global _BUILD_FAILED
-    try:
-        _ext("attn_fwd", fwd_defs(nh, dh))
-    except Exception as exc:  # noqa: BLE001
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"sm90 bf16 augmented attention unavailable, keeping the portable path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
-    return True
-
-
-# --------------------------------------------------------------------------------------------------- glue
-def _bf16_rows(t, w):
-    """[rows, w] bf16 view of ``t`` (a copy only when it is not already contiguous bf16)."""
-    t = t.reshape(-1, w)
-    if t.dtype is not torch.bfloat16:
-        t = t.to(torch.bfloat16)
-    return t if t.is_contiguous() else t.contiguous()
-
-
-def _scale_bf16(x, scale):
-    """``(x * scale)`` rounded to bf16, the arithmetic of ``_scale_bf16_kernel`` as PyTorch ops (fp32 multiply, one rounding to bf16): H100 / B200 launch
-    no Triton (docs/gpus/h100/dispatch.md), and these helpers sit on the CUDA path of every call. bf16 / fp32 inputs multiply in fp32 directly
-    (PyTorch's scalar multiply computes in fp32 for a bf16 tensor); anything else is widened first."""
-    if x.dtype not in (torch.bfloat16, torch.float32):
-        x = x.float()
-    if x.dtype is torch.bfloat16:
-        return x * scale
-    out = torch.empty(x.shape, device=x.device, dtype=torch.bfloat16)
-    return torch.mul(x, scale, out=out)    # fp32: one kernel (the product is rounded to bf16 on the store, no fp32 temporary)
-
-
-def _prep_qkv(q, k, v, scale):
-    """q scaled into the core's log2 units (one pass) and the bf16 rows of q, k, v: k and v are used as they are when already contiguous bf16."""
-    w = q.shape[-2] * q.shape[-1]
-    qs = _scale_bf16(q.contiguous(), scale).reshape(-1)
-    return qs.view(-1, w), _bf16_rows(k, w), _bf16_rows(v, w)
-
-
+# --------------------------------------------------------------------------------------------------- Triton leftovers (kept)
 @triton.jit
 def _prep_do_kernel(
     do,
@@ -286,17 +211,6 @@ def _prep_do_kernel(
     tl.store(dd + ((r // L)[:, None] * NH + hh[None, :]) * L + (r % L)[:, None], s)
 
 
-def _prep_do(do, o, A, L, nh=H, dh=D, write_dob=True):
-    """dO -> bf16 and D = rowsum(dO * O) as [A, H, L] fp32. ``write_dob=False``: D only (dO is already the bf16 rows the core reads; it is returned as is).
-    PyTorch ops (fp32 products, fp32 row sums): H100 / B200 launch no Triton; ``tests/gpu/sm90/_triton_records.prep_do_triton`` is the former one-pass kernel launch, kept."""
-    do = do.reshape(A * L, nh * dh).contiguous()
-    dob = do.to(torch.bfloat16) if write_dob else do
-    prod = do.float().view(A, L, nh, dh) * o.reshape(A, L, nh, dh).float()
-    return dob, prod.sum(-1).permute(0, 2, 1).contiguous()
-
-
-
-
 @triton.jit
 def _scale_bf16_kernel(b, out, n, scale, BLOCK: tl.constexpr):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -308,84 +222,20 @@ def _scale_bf16_kernel(b, out, n, scale, BLOCK: tl.constexpr):
     )
 
 
-def _bias_prep(bias_hll):
-    """[H, L, L] bias -> bf16 bias * log2 e (log2 units, as the kernels seed it)."""
-    return _scale_bf16(bias_hll.contiguous(), LOG2E)
 
-
-
-
-# --------------------------------------------------------------------------------------------------- forward op
-# The forward kernel is a torch.library op so selective activation checkpointing can name it: with
-# ``checkpoint_context_keeping_attention()`` a checkpointed block keeps O and the LSE from its first forward and the
-# recompute skips the kernel (see that function).
-#: Forward kernel launches in this process (tests use it to see a checkpoint recompute skip the kernel).
-FWD_LAUNCHES = [0]
-
-
-def _fwd_launch_fake(qs, kb, vb, bb, km, out_bf16: bool = False):
-    """O [A L, H D] (qs's shape; fp32, or bf16 with ``out_bf16``) and the LSE fp32 [A, H, L]."""
-    L = bb.shape[1]
-    return (
-        qs.new_empty(qs.shape, dtype=torch.bfloat16 if out_bf16 else torch.float32),
-        qs.new_empty((qs.shape[0] // L, bb.shape[0], L), dtype=torch.float32),
-    )
-
-
-@opaque(fake=_fwd_launch_fake, name="augmented_attention_bf16_sm90_fwd")
-def _fwd_launch(
-    qs: torch.Tensor,
-    kb: torch.Tensor,
-    vb: torch.Tensor,
-    bb: torch.Tensor,
-    km: torch.Tensor | None,
-    out_bf16: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Attention forward on the prepared operands: (O fp32 or bf16, LSE fp32)."""
-    FWD_LAUNCHES[0] += 1
-    L = bb.shape[1]
-    nh = bb.shape[0]
-    return forward(qs, kb, vb, bb, km, qs.shape[0] // L, L, nh=nh, dh=qs.shape[1] // nh, out_bf16=out_bf16)
-
-
-def _fwd_natural_launch_fake(q, kb, vb, bias, km, out_bf16: bool = False):
-    """O like q (fp32, or bf16 with ``out_bf16``) and the LSE fp32 [A, H, L]."""
-    return _fwd_launch_fake(q, kb, vb, bias, km, out_bf16)
-
-
-@opaque(fake=_fwd_natural_launch_fake, name="augmented_attention_bf16_sm90_fwd_natural")
-def _fwd_natural_launch(
-    q: torch.Tensor,
-    kb: torch.Tensor,
-    vb: torch.Tensor,
-    bias: torch.Tensor,
-    km: torch.Tensor | None,
-    out_bf16: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """The forward on natural-unit operands (``APB_NATURAL``: q unscaled, bias [H, L, L] bf16 as the module computed it; the
-    kernel applies 1 / sqrt(d) and log2 e itself), so an inference call needs no scale pass over q or the bias. (O, LSE)."""
-    L, nh = bias.shape[1], bias.shape[0]
-    A, dh = q.shape[0] // L, q.shape[1] // nh
-    lse = torch.empty(A, nh, L, device=q.device, dtype=torch.float32)
-    o = torch.empty(A * L, nh * dh, device=q.device, dtype=torch.bfloat16 if out_bf16 else torch.float32)
-    defs = (*fwd_defs(nh, dh), "APB_NATURAL=1", f"RSQDV={dh**-0.5!r}f", *(("FWD_BF16=1",) if out_bf16 else ()))
-    _ext("attn_fwd", defs).attn_fwd(q, kb, vb, bias, km, o, lse)
-    return o, lse
-
-
-def forward(qs, kb, vb, bb, km, A, L, qkvg=None, nh=H, dh=D, out_bf16=False):
+def forward(qs, kb, vb, bb, km, A, L, qkvg=None, nh=H, dh=D):
     """The forward kernel on prepared operands, no op wrapper (for callers that are themselves one opaque op, as the fused
     token DiT training block): qs = q log2 e / sqrt 48, kb, vb [A L, 768] bf16 contiguous; bb [16, L, L] bf16 in log2
     units; km None or an additive key mask [A, L] fp32. Returns O fp32 [A L, 768] and the LSE [A, 16, L] (log2); with
     ``qkvg`` (the block's [A L, 3072] q|k|v|g GEMM output) og = sigmoid(g) O in bf16 instead of O -- all the token DiT
     block keeps (its backward takes D = rowsum(dO O) = rowsum(d og * og))."""
     lse = torch.empty(A, nh, L, device=qs.device, dtype=torch.float32)
-    ext = _ext("attn_fwd", (*fwd_defs(nh, dh), *(("FWD_BF16=1",) if out_bf16 else ())))
+    ext = _ext("attn_fwd", fwd_defs(nh, dh))
     if qkvg is not None:
         og = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.bfloat16)
         ext.attn_fwd_og(qs, kb, vb, bb, km, qkvg, og, lse)
         return og, lse
-    o = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.bfloat16 if out_bf16 else torch.float32)
+    o = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
     ext.attn_fwd(qs, kb, vb, bb, km, o, lse)
     return o, lse
 
@@ -510,12 +360,10 @@ def dqb_chunks(A: int) -> int:
     return max(c for c in (1, 2, 3, 4) if groups % c == 0)
 
 
-def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D, out_bf16=False):
-    """dQ, dK, dV [A L, 768] fp32 (bf16 with ``out_bf16``; with respect to the unscaled q, k, v) and dbias [16, L, L] fp32 (natural units;
+def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D):
+    """dQ, dK, dV [A L, 768] fp32 (with respect to the unscaled q, k, v) and dbias [16, L, L] fp32 (natural units;
     a transposed view when A is not a multiple of 3). dob [A L, 768] bf16 and dd = rowsum(dO O) [A, 16, L] fp32; the other operands as ``forward`` took them."""
-    odt = torch.bfloat16 if out_bf16 else torch.float32
-    bd = ("BWD_BF16=1",) if out_bf16 else ()
-    dq = torch.empty(A * L, nh * dh, device=qs.device, dtype=odt)
+    dq = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
     dk, dv = torch.empty_like(dq), torch.empty_like(dq)
     ld = fwd_defs(nh, dh)
     if (
@@ -523,235 +371,192 @@ def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D, out_bf16=False)
     ):  # dbias in the dQ pass, three samples summed on chip before the L2 reds
         chunks = dqb_chunks(A)
         dbc = torch.zeros(chunks, nh, L, L, device=qs.device, dtype=torch.float32)
-        _ext("attn_dqb", (*ld, *bd)).attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, dbc)
+        _ext("attn_dqb", ld).attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, dbc)
         db = dbc.sum(0)  # the chunks in order: bitwise repeatable
-        _ext("attn_dkv", ("DBIAS=0", *ld, *bd)).attn_dkv(
+        _ext("attn_dkv", ("DBIAS=0", *ld)).attn_dkv(
             qs, kb, vb, dob, bb, km, lse, dd, dk, dv, db
         )
         return dq, dk, dv, db
     # dbias by per-sample L2 atomics in the dK / dV pass (transposed)
-    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *dq_defs(nh, dh), *bd)).attn_dq(
+    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *dq_defs(nh, dh))).attn_dq(
         qs, kb, vb, dob, bb, km, lse, dd, dq
     )
     dbt = torch.zeros(nh, L, L, device=qs.device, dtype=torch.float32)
-    _ext("attn_dkv", (*ld, *bd)).attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, dbt)
+    _ext("attn_dkv", ld).attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, dbt)
     return dq, dk, dv, dbt.transpose(1, 2)
 
 
-def _bwd_launch_fake(qs, kb, vb, dob, bb, km, lse, dd, out_bf16: bool = False):
-    """dQ, dK, dV like qs (fp32, or bf16 with ``out_bf16``) and dbias fp32 [H, L, L]."""
-    dq = qs.new_empty(qs.shape, dtype=torch.bfloat16 if out_bf16 else torch.float32)
-    return dq, torch.empty_like(dq), torch.empty_like(dq), qs.new_empty((bb.shape[0], bb.shape[1], bb.shape[1]), dtype=torch.float32)
-
-
-@opaque(fake=_bwd_launch_fake, name="augmented_attention_bf16_sm90_bwd")
-def _bwd_launch(
-    qs: torch.Tensor,
-    kb: torch.Tensor,
-    vb: torch.Tensor,
-    dob: torch.Tensor,
-    bb: torch.Tensor,
-    km: torch.Tensor | None,
-    lse: torch.Tensor,
-    dd: torch.Tensor,
-    out_bf16: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``backward`` as one op (so a compiled graph reaches it): dbias comes back as the kernels wrote it, [key, query] per head
-    when A is not a multiple of 3 -- the caller transposes; nh and dh follow from bb and qs."""
-    L, nh = bb.shape[1], bb.shape[0]
-    A = qs.shape[0] // L
-    dq, dk, dv, db = backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=nh, dh=qs.shape[1] // nh, out_bf16=out_bf16)
-    return dq, dk, dv, (db.transpose(1, 2) if A % 3 else db)
-
-
-# --------------------------------------------------------------------------------------------------- per-sample bias
-# The same cores with one bias PER SAMPLE (build define ``PSB=1``): bias [H, A, L, L], the layout a stacked bias GEMM leaves
-# (rows of the [H A L, L] TMA map are (head A + sample) L + query). Nothing is shared between the samples any more, so the
-# backward writes each sample's dbias itself (``attn_dkv`` ``DB_PER_SAMPLE``: plain stores, no atomics, no reduction).
-def forward_psb(qs, kb, vb, bb, km, A, L, qkvg=None, nh=H, dh=D):
-    """``forward`` with a per-sample bias: bb [H, A, L, L] bf16 in log2 units. Returns (O, LSE), or (og, LSE) with ``qkvg``."""
-    lse = torch.empty(A, nh, L, device=qs.device, dtype=torch.float32)
-    ext = _ext("attn_fwd", (*fwd_defs(nh, dh), "PSB=1"))
-    if qkvg is not None:
-        og = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.bfloat16)
-        ext.attn_fwd_og(qs, kb, vb, bb, km, qkvg, og, lse)
-        return og, lse
-    o = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
-    ext.attn_fwd(qs, kb, vb, bb, km, o, lse)
-    return o, lse
-
-
-def backward_psb(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D):
-    """``backward`` with a per-sample bias bb [H, A, L, L]: dQ, dK, dV [A L, 768] fp32 and the bias's gradient [H, A, L(query),
-    L(key)] bf16 in the bias's own (log2) units -- the dQ pass writes it from the dS registers (``PSB_DB``); the dK / dV pass
-    keeps no dbias. Deterministic: every output element has one writer."""
-    dq = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
-    dk, dv = torch.empty_like(dq), torch.empty_like(dq)
-    dbias = torch.empty(nh, A, L, L, device=qs.device, dtype=torch.bfloat16)
-    ld = fwd_defs(nh, dh)
-    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *dq_defs(nh, dh), "PSB=1", "PSB_DB=1")).attn_dq_psb(
-        qs, kb, vb, dob, bb, km, lse, dd, dq, dbias
-    )
-    _ext("attn_dkv", ("DBIAS=0", "PSB=1", *ld)).attn_dkv(
-        qs, kb, vb, dob, bb, km, lse, dd, dk, dv, torch.empty(1, device=qs.device)
-    )
-    return dq, dk, dv, dbias
-
-
-# What the checkpoint policy matches: the registered OpOverload under compile_wrap="custom_op" (the default). Under
-# "disable" there is no op to name, so FWD_OP is the plain launcher and the policy recomputes it like everything else --
-# same results, without the saving.
-FWD_OP = (
-    torch.ops.miniworld_engine.augmented_attention_bf16_sm90_fwd.default
-    if hasattr(torch.ops.miniworld_engine, "augmented_attention_bf16_sm90_fwd")
-    else _fwd_launch
-)
-
-
-def checkpoint_context_keeping_attention():
-    """``context_fn`` for ``torch.utils.checkpoint`` (non-reentrant): keep this core's forward outputs (O fp32 and the
-    LSE, 115 MB a call at L768 / A48) and recompute everything else. Under per-block checkpointing the backward's
-    recompute then skips the attention forward (334 us a block at L768); the cost is O and LSE held from the forward
-    to the backward for every checkpointed block."""
-    from torch.utils.checkpoint import (
-        CheckpointPolicy,
-        create_selective_checkpoint_contexts,
-    )
-
-    def policy(ctx, op, *args, **kwargs):
-        return (
-            CheckpointPolicy.MUST_SAVE
-            if op == FWD_OP
-            else CheckpointPolicy.PREFER_RECOMPUTE
-        )
-
-    return create_selective_checkpoint_contexts(policy)
-
-
-def _key_mask(mask, A, L):
-    """The additive key mask [A, L] fp32 the kernels read (0 attend, -1e30 masked), or None."""
-    return None if mask is None else torch.where(mask.reshape(A, L), 0.0, -1e30).float().contiguous()
-
-
-# --------------------------------------------------------------------------------------------------- op
-class _AttentionBf16Sm90(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, q, k, v, bias, mask, bias_head_major):  # noqa: D102
-        A, _, L, nh, dh = q.shape
-        km = _key_mask(mask, A, L)
-        bf = all(t.dtype is torch.bfloat16 for t in (q, k, v))
-        qs, kb, vb = _prep_qkv(q, k, v, LOG2E / math.sqrt(dh))
-        bb = _bias_prep(bias.reshape(nh, L, L) if bias_head_major else bias[0].permute(2, 0, 1))
-        # bf16 q / k / v (the module under autocast): O and, backward, dQ / dK / dV leave the kernels as bf16 -- the dtype autograd
-        # and the next op want them in, with no cast pass over them
-        o, lse = FWD_OP(qs, kb, vb, bb, km, bf)  # nh, dh follow from bb and qs
-        if torch.is_grad_enabled() or any(ctx.needs_input_grad):
-            ctx.save_for_backward(
-                qs,
-                kb,
-                vb,
-                bb,
-                km if km is not None else torch.empty(0, device=q.device),
-                o,
-                lse,
-            )
-        ctx.has_mask, ctx.head_major, ctx.dims, ctx.bf = km is not None, bias_head_major, (A, L, nh, dh), bf
-        return o.view(A, 1, L, nh, dh)
-
-    @staticmethod
-    def backward(ctx, do):  # noqa: D102
-        qs, kb, vb, bb, km, o, lse = ctx.saved_tensors
-        km = km if ctx.has_mask else None
-        A, L, nh, dh = ctx.dims
-        dob, dd = _prep_do(do, o, A, L, nh, dh, write_dob=do.dtype is not torch.bfloat16)
-        dq, dk, dv, db = _bwd_launch(qs, kb, vb, dob, bb, km, lse, dd, ctx.bf)
-        if A % 3:
-            db = db.transpose(1, 2)  # the kernels wrote it [key, query]
-        shp = (A, 1, L, nh, dh)
-        dbias = db.unsqueeze(1) if ctx.head_major else db.permute(1, 2, 0).unsqueeze(0)
-        return dq.view(shp), dk.view(shp), dv.view(shp), dbias, None, None
-
-
-def augmented_attention_bf16_sm90(
-    q, k, v, bias, mask=None, *, bias_head_major: bool = False
-):
-    """``softmax(q k^T / sqrt(48) + bias) v`` in bf16 with fp32 accumulation; returns [A, 1, L, 16, 48], bf16 when q, k and v are bf16
-    (and so their gradients), else fp32.
-
-    q, k, v: [A, 1, L, 16, 48] (fp32 or bf16). bias: [1, L, L, 16], or [16, 1, L, L] with ``bias_head_major`` (the
-    layout the token DiT's hoisted pair bias is produced in -- no permute copy). mask: key mask [A, 1, L] or [1, L]
-    (True = attend). Call ``available()`` first."""
-    if mask is not None and mask.dim() == 2:
-        mask = mask[None].expand(q.shape[0], *mask.shape)
-    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v, bias))):
-        # no gradient: the natural-unit build reads q and the bias as they are (no scale pass over either)
-        A, _, L, nh, dh = q.shape
-        w = nh * dh
-        bhll = bias.reshape(nh, L, L) if bias_head_major else bias[0].permute(2, 0, 1)
-        o, _ = _fwd_natural_launch(
-            _bf16_rows(q, w), _bf16_rows(k, w), _bf16_rows(v, w), bhll.to(torch.bfloat16).contiguous(), _key_mask(mask, A, L),
-            all(t.dtype is torch.bfloat16 for t in (q, k, v)),
-        )
-        return o.view(A, 1, L, nh, dh)
-    return _AttentionBf16Sm90.apply(q, k, v, bias, mask, bias_head_major)
-
-
-class _AttentionBf16Sm90Psb(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, q, k, v, bias, mask):  # noqa: D102
-        A, _, L, _, _ = q.shape
-        qs, kb, vb = _prep_qkv(q, k, v, LOG2E / math.sqrt(D))
-        bb = _bias_prep(bias.reshape(H, A, L, L))
-        km = None
-        if mask is not None:
-            km = torch.where(mask.reshape(A, L), 0.0, -1e30).float().contiguous()
-        o, lse = forward_psb(qs, kb, vb, bb, km, A, L)
-        if torch.is_grad_enabled() or any(ctx.needs_input_grad):
-            ctx.save_for_backward(
-                qs, kb, vb, bb, km if km is not None else torch.empty(0, device=q.device), o, lse
-            )
-        ctx.has_mask, ctx.dims = km is not None, (A, L)
-        return o.view(A, 1, L, H, D)
-
-    @staticmethod
-    def backward(ctx, do):  # noqa: D102
-        qs, kb, vb, bb, km, o, lse = ctx.saved_tensors
-        km = km if ctx.has_mask else None
-        A, L = ctx.dims
-        dob, dd = _prep_do(do, o, A, L)
-        dq, dk, dv, dbias = backward_psb(qs, kb, vb, dob, bb, km, lse, dd, A, L)
-        shp = (A, 1, L, H, D)
-        # the kernel's gradient is wrt the log2-unit bias the cores read; this op's input is the natural-unit bias times log2 e
-        return dq.view(shp), dk.view(shp), dv.view(shp), dbias * LOG2E, None
-
-
-def augmented_attention_bf16_sm90_psb(q, k, v, bias, mask=None):
-    """``softmax(q k^T / sqrt(48) + bias[sample]) v`` with a bias of its own per sample, in bf16 with fp32 accumulation.
-
-    q, k, v: [A, 1, L, 16, 48]; bias: [16, A, L, L] head-major (``A`` samples, as the token DiT's stacked bias GEMM leaves it);
-    mask: key mask [A, 1, L] or [1, L] (True = attend). Returns fp32 [A, 1, L, 16, 48]; the gradient of the bias comes back in
-    the bias's layout. Same gate as ``augmented_attention_bf16_sm90``."""
-    if mask is not None and mask.dim() == 2:
-        mask = mask[None].expand(q.shape[0], *mask.shape)
-    return _AttentionBf16Sm90Psb.apply(q, k, v, bias, mask)
-
 
 __all__ = [
-    "FWD_OP",
-    "augmented_attention_bf16_sm90",
-    "augmented_attention_bf16_sm90_psb",
-    "backward_psb",
-    "dq_defs",
-    "forward_psb",
-    "available",
     "backward",
-    "checkpoint_context_keeping_attention",
+    "dq_defs",
     "forward",
     "gated_inference",
     "inference_core_supported",
-    "supported",
+    "tf32_backward",
     "tf32_forward",
     "tf32_gated_inference",
-    "tf32_backward",
     "tf32_inference_core_supported",
 ]
+
+
+_P = "augmented_attention_"
+#: requirements_kernel.csv kernels (names without ``augmented_attention_`` / ``_sm90``) of the attn_*.cu extensions, by what they build
+_ATTN_BF16_FWD = {"fwd"}  # bf16 / master activations: attn_fwd (forward, gated inference)
+_ATTN_BF16_BWD = {"bwd_dqb", "bwd_dq", "bwd_dkv"}  # attn_dqb / attn_dq / attn_dkv (backward)
+_ATTN_TF32_FWD = {"fwd_tf32"}  # float32 activations: attn_tf32 forward
+_ATTN_TF32_BWD = {"bwd_dkv_tf32", "bwd_dqb_tf32"}  # attn_tf32 backward
+#: sm90_atom kind -> the atom kernels it launches (``tf32`` builds: float32 rows; ``pack`` / ``finalize`` have no tf32 build)
+_ATOM_KINDS = {
+    "finalize": "atom_finalize_bwd", "pack": "atom_pack", "cond": "atom_cond_fwd", "cond_split": "atom_cond_fwd_split",
+    "pre": "atom_pre_fwd", "pre_split": "atom_pre_fwd_split", "post": "atom_post_fwd", "tr_bwd": "atom_tr_bwd",
+    "post_bwd": "atom_post_bwd", "post_bwd_s": "atom_post_bwd", "pre_bwd": "atom_pre_bwd", "cond_bwd": "atom_cond_bwd",
+    "cond_bwd_s": "atom_cond_bwd", "cond_bwd_sh": "atom_cond_bwd_shared",
+}
+#: sm100_atom ``_HOPPER_KERNELS`` source stem -> atom kernels built from it
+_ATOM_STEMS = {
+    "cond_fwd": ("atom_cond_fwd", "atom_cond_fwd_split", "atom_pack"), "pre_fwd": ("atom_pre_fwd", "atom_pre_fwd_split"),
+    "post_fwd": ("atom_post_fwd",), "tr_bwd_gate": ("atom_tr_bwd",), "post_bwd": ("atom_post_bwd",),
+    "pre_bwd": ("atom_pre_bwd", "atom_finalize_bwd"), "cond_bwd": ("atom_cond_bwd", "atom_cond_bwd_shared"),
+}
+#: sm_90a local-attention source stem -> local kernels built from it
+_LOCAL_STEMS = {
+    "lattn90": ("local_pair_bias_fwd", "local_attn_fwd", "local_attn_bwd_dq", "local_attn_bwd_dkv", "local_pair_bias_bwd"),
+    "lattn_fwd": ("local_attn_fwd",), "lattn_dq": ("local_attn_bwd_dq",),
+    "lattn_dkv": ("local_attn_bwd_dkv", "local_bias_bwd_samples"),
+    "lbias": ("local_pair_bias_fwd", "local_pair_bias_bwd", "local_pair_bias_bwd_fin"), "lcross": ("local_attn_fwd",),
+    "lattn90_tf32": ("local_attn_fwd_tf32", "local_attn_bwd_dq_tf32", "local_attn_bwd_dkv_tf32"),
+}
+
+
+def prebuild(target, rows):
+    """Every build of the AttentionPairBias / augmented attention family on ``target`` (kernels/_prebuild.py), expanded from the
+    requirements ``rows`` (each row names the kernels that need it; the kernel's role fixes its modes):
+
+    * attn_*.cu head layouts: the TokenDiT rows' ``n_head`` x ``d_single / n_head`` (every build below is specialised per layout), the
+      AttentionPairBias rows' ``(n_head, d_single)`` for ``apb.GEOMETRY``;
+    * dtype: float32 rows -> the TF32 builds, bfloat16 / master rows (bf16 activations) -> the bf16 builds;
+    * mode: a build of a backward kernel exists only when a train row needs it, AttentionPairBias inference vs training defines come
+      from its eval / train rows.
+
+    What stays here: which extension / source stem / define set implements which kernel (the tables above and the define sets of the
+    launchers: attn_dq L % 192, the empty-token variants, KS), and the B200 builds (not enumerated by requirement).
+    Each is a call of the loader itself, so the planned key is the runtime's."""
+    import functools as ft
+
+    from miniworld_engine.kernels._prebuild import _kv
+
+    from . import apb, sm90_atom, sm100_atom, sm100_atom_local
+
+    calls = []
+    if target.arch == "sm90":
+        def act(r):
+            return "f32" if r["dtype"] == "float32" else "bf16"  # master computes in bf16 activations
+
+        def need_row(r, names):
+            return bool(r["kernels"] & {f"{_P}{n}_sm90" for n in names})
+
+        def need(names, dtype=None):
+            """Some row needs one of the kernels ``names`` (without the family prefix / ``_sm90``), for activations ``dtype``."""
+            return any(need_row(r, names) and (dtype is None or act(r) == dtype) for r in rows)
+
+        def layouts(names, dtype, token_only=False):
+            """(n_heads, head width) of the rows that need ``names`` (every module but AttentionPairBias, whose layouts are
+            ``apb.GEOMETRY``; ``token_only``: the TokenDiT rows)."""
+            out = set()
+            for r in rows:
+                if (r["module"].startswith("TokenDiT") if token_only else r["module"] != "AttentionPairBias") and need_row(r, names) and act(r) == dtype:
+                    d = _kv(r["dims"])
+                    out.add((int(d["n_head"]), int(d["d_single"]) // int(d["n_head"])))
+            return sorted(out)
+
+        ext = lambda name, defs=(): calls.append(ft.partial(_ext, name, tuple(defs)))  # noqa: E731
+        ldefs = [(), ("NWG=2",)]  # attn_dq: L % 192 == 0 or not
+        empty = [(), ("TOKEN_EMPTY_UNIFORM=1",)]  # token_dit_train._native_attn_bwd90
+        # token DiT, bf16 activations (forward / gated_inference; backward; dit_variants/cuda/train.py's FWD_BF16 forward)
+        for nh, dh in layouts(_ATTN_BF16_FWD, "bf16"):
+            fd = fwd_defs(nh, dh)
+            ext("attn_fwd", fd)
+            ext("attn_fwd", (*fd, "FWD_BF16=1"))
+        for nh, dh in layouts(_ATTN_BF16_BWD, "bf16"):
+            fd = fwd_defs(nh, dh)
+            for e in empty:
+                ext("attn_dqb", (*fd, *e))
+                ext("attn_dkv", ("DBIAS=0", *fd, *e))
+                ext("attn_dkv", ("DB_PER_SAMPLE=1", *fd, *e))
+                for nw in ldefs:
+                    ext("attn_dq", (*nw, *dq_defs(nh, dh), *e))
+            ext("attn_dkv", fd)  # backward, A % 3 != 0
+        # token DiT, float32 activations (TF32 tensor cores)
+        for nh, dh in layouts(_ATTN_TF32_FWD, "f32"):
+            ext("attn_tf32", tf32_fwd_defs(nh, dh))  # tf32_forward / tf32_gated_inference
+        for nh, dh in layouts(_ATTN_TF32_BWD, "f32"):
+            td = tf32_defs(nh, dh)
+            ext("attn_tf32", td)  # tf32_backward
+            for e in empty:
+                ext("attn_tf32", ("DB_PER_SAMPLE=1", *td, *e))
+        # Pairformer AttentionPairBias (integrations/attention_pair_bias_b200): the (heads, d_single) of its rows, eval -> inference
+        # core, train -> training forward / backward
+        modes: dict[tuple[int, int], set[str]] = {}
+        for r in rows:
+            if r["module"] == "AttentionPairBias":
+                d = _kv(r["dims"])
+                modes.setdefault((int(d["n_head"]), int(d["d_single"])), set()).add(r["mode"])
+        for (heads, d), ms in sorted(modes.items()):
+            _, dhp = apb.GEOMETRY[(heads, d)]
+            td = _apb_training_defs(heads, d)
+            if "eval" in ms:
+                ext("attn_fwd", (f"DHP={dhp}", f"ROW_WIDTH={apb.width(heads, d)}", "NWG=1", f"APB_KS={_APB_KS['inf']}"))
+            if "train" in ms:
+                ext("attn_fwd", td)
+                ext("attn_fwd", (*td, f"APB_KS={_APB_KS['fwd']}"))
+                ext("attn_dq", (*td, f"APB_KS={_APB_KS['dq']}"))
+                ext("attn_dkv", (*td, "DBIAS=0", f"APB_KS={_APB_KS['dkv']}"))
+        if any(k.startswith(f"{_P}apb_") for r in rows for k in r["kernels"]):
+            calls.append(ft.partial(apb._ext, "90a", False))
+            if any("train" in ms for ms in modes.values()):
+                # the training backward's exact fp32 pair-weight gradient on H100 (integrations/attention_pair_bias_b200._pair_weight_shadow)
+                calls.append(ft.partial(apb._ext, "90a", True))
+        if any(k.startswith((f"{_P}pair_rows", f"{_P}pair_bias_fwd_fp32", f"{_P}prep_fwd_fp32", f"{_P}bwd_pre_fp32",
+                             f"{_P}bias_transpose", f"{_P}gate_mul")) for r in rows for k in r["kernels"]):
+            calls.append(_rows_ext)
+        # dense atom block (sm90_atom): the kinds of the atom kernels some row needs; tf32 for float32 rows, bf16 otherwise
+        for kind, kernel in _ATOM_KINDS.items():
+            for tf32 in (False, True):
+                if tf32 and kind in ("pack", "finalize"):
+                    continue  # no tf32 build
+                if any(need_row(r, [kernel]) and (kind in ("pack", "finalize") or act(r) == ("f32" if tf32 else "bf16")) for r in rows):
+                    calls.append(ft.partial(sm90_atom.kernel_cubin, kind, tf32))
+        # sm_90a halves of the sm100_atom / sm100_atom_local sources
+        for stem, _, _, _, *defs in sm100_atom._HOPPER_KERNELS.values():
+            if need(_ATOM_STEMS[stem]):
+                calls.append(ft.partial(sm100_atom.cubin, stem, *defs, hopper=True))
+        for stem, names in _LOCAL_STEMS.items():
+            if need(names, "f32" if stem.endswith("tf32") else None):
+                calls.append(ft.partial(sm100_atom_local.cubin, stem, True))
+    else:
+        calls.append(ft.partial(apb._ext, "100", False))
+        atom = sm100_atom.KERNELS.values()
+        # (the augattn_sm100/* cubins, sm100.cubin, take stems / defines from many B200 launchers: not enumerated here)
+        for stem in sorted({s for s, *_ in sm100_atom.KERNELS_TF32.values()} | {s for s, *_ in sm100_atom.KERNELS_FUSED32.values()}):
+            calls.append(ft.partial(sm100_atom.cubin_tf32, stem))
+        for f32 in (False, True):  # sm100_atom.AtomDw
+            bkr, ns = (32, 2) if f32 else (16, 5)
+            calls.append(ft.partial(sm100_atom.cubin_tf32, "dw_atom",
+                                    (f"DW_BKR={bkr}", f"NS={ns}", "DW_F32") if f32 else (f"NS={ns}",)))
+        for stem in sorted({s for s, *_ in sm100_atom_local.KERNELS_TF32.values()}):
+            calls.append(ft.partial(sm100_atom_local.cubin, stem))
+        for stem, _, _, _, *defs in atom:
+            calls.append(ft.partial(sm100_atom.cubin, stem, *defs, hopper=False))
+        local = {*sm100_atom_local.KERNELS, *sm100_atom_local._HOPPER_CROSS, *sm100_atom_local._MMA_KERNELS,
+                 *sm100_atom_local._MMA_KERNELS32, "fwd", "dq", "dkv", "db_samples",
+                 "kv_bias_part", "reduce_columns", "zero_kv", "add_cond", "cross_grad_pack", "kv_pack"}
+        stems = set()
+        for name in local:
+            try:
+                stems.add(sm100_atom_local._resolve(name, False)[0])
+            except NotImplementedError:
+                pass
+        for stem in sorted(stems):
+            calls.append(ft.partial(sm100_atom_local.cubin, stem, False))
+    yield from calls

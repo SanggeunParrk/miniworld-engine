@@ -11,13 +11,20 @@ import functools
 from pathlib import Path
 
 import torch
-from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 
 
 @functools.lru_cache(maxsize=None)
 def ext(d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = False, dc: int = 384, n: int = 2, dp: int = 128):
+    """``rows_ext`` for this device (sm_90a on an H100, the portable arch list elsewhere)."""
+    return rows_ext(d, hd, rpb, empty_uniform=empty_uniform, dc=dc, n=n, dp=dp,
+                    hopper=torch.cuda.get_device_capability() == (9, 0))
+
+
+@functools.lru_cache(maxsize=None)
+def rows_ext(d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = False, dc: int = 384, n: int = 2, dp: int = 128,
+             hopper: bool = True):
     """The row kernels for model width ``d``, head dim ``hd``, conditioning width ``dc`` (a multiple of 128: 384, 768, 256, 128),
     transition expansion ``n`` (SwiGLU hidden width n * d) and pair channels ``dp`` of the ln_pair / to_bias weights; one build per
     combination (layouts 768 x 48 / 32 / 64, 1024 x 64)."""
@@ -28,7 +35,6 @@ def ext(d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = False
     assert dc in (128, 256, 384, 768), dc
     assert n in (2, 4) and dp in (128, 256), (n, dp)
     ensure_cuda_home()
-    hopper = torch.cuda.get_device_capability() == (9, 0)
     name = (
         "token_dit_train_rows_cuda"
         if (d, hd) == (768, 48)

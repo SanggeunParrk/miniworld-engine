@@ -1,0 +1,11 @@
+"""Per-architecture implementations of the pair-embedding + adaptive-LayerNorm kernels (``PairEmbedAdaLN``)."""
+
+
+def prebuild(target, rows):
+    """The build of the ``pair_embed_adaln`` family (kernels/_prebuild.py): one shape-independent extension (``pair_embed_adaln_sm90``, every size is a
+    runtime launch parameter), H100 (sm_90a) only, built once when some requirements row (of ``PairEmbedAdaLN``, the module that launches it) needs
+    the family."""
+    from .sm90 import ext
+
+    if rows and target.arch == "sm90":
+        yield ext

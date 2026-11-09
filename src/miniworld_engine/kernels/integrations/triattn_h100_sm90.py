@@ -15,10 +15,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
-from miniworld_engine.modules.dispatch import KernelBackend
 
 FUSED, GENERIC = 0, 1
 
@@ -53,12 +51,8 @@ def _trains(module, pair) -> bool:
 
 def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None) -> int | None:
     """FUSED, GENERIC or None (not served): the mathematical and resource contract, before touching the CUDA builder."""
-    # `_h100_cuda = False` keeps the existing path (the benchmark baseline), as `_b200_cuda` does on B200.
-    if (
-        getattr(module, "_backend", None) != KernelBackend.PORTABLE
-        or not getattr(module, "_h100_cuda", True)
-        or settings.current().force_portable_kernels
-    ):
+    # The caller (the module's "cuda" backend, modules/triangle.py) chose this path; `_h100_cuda = False` still opts a module out.
+    if not getattr(module, "_h100_cuda", True):
         return None
     if not module.use_self_attention or module.use_qk_norm:
         return None
@@ -429,7 +423,7 @@ def _padded(length: int) -> int:
 
 
 # ---------------------------------------------------------------- batched samples and chunking
-#: Samples one launch takes, per path (``FUSED`` / ``GENERIC``, see ``kind_of``).  Every kernel of both paths takes B samples in one
+#: Samples one launch takes, per path (``FUSED`` / ``GENERIC``).  Every kernel of both paths takes B samples in one
 #: launch: the front, tail, LayerNorm, gate and weight-gradient kernels walk the B L^2 rows (b, i, j), the attention core and its
 #: backward walk (sample, head, tile) tasks, the key mask [B, L] and the dropout scale [B, L, C] are read per sample, and the parameter
 #: gradients are reduced over every sample of the launch.  The bound is what was validated (B up to 48 against B one-sample calls and
@@ -448,11 +442,6 @@ def max_batch(kind: int, length: int | None = None) -> int:
         lp = _padded(length)
         limit = min(limit, (2**31 - 1) // (lp * lp))
     return max(1, limit)
-
-
-def kind_of(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> int | None:
-    """``FUSED``, ``GENERIC`` or None (not served): the path a call takes, the key of ``max_batch``."""
-    return _kind(module, pair, mask)
 
 
 #: Chunking.  A call is split when it has more samples than one launch takes (``max_batch``) or when its working set would not fit

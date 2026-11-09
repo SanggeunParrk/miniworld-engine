@@ -25,7 +25,7 @@ from miniworld_engine.kernels._compile import opaque
 # Its "low register" claim was not in the code: the body matched main.py's statement for
 # statement with HAS_ROWSCALE=False. Only the launcher below survives, as a bench probe.
 from .main import layer_norm_fwd_fused
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
+from miniworld_engine.kernels._shape_key import both_key, length_of, rows_of, pack
 
 import torch
 import triton

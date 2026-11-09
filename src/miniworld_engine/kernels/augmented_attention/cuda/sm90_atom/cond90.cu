@@ -4,7 +4,6 @@
 //   mod = [ s1 | bi1 | so | s2 | bi2 | st ]   [M, 768]    s1 = sigmoid(n W1s' + b), bi1 = n W1b', s2 / bi2 likewise from n W2*',
 //                                                       so = sigmoid(c Wso + b), st = sigmoid(c Wst + b)
 //   mkv = [ pre | shift ]            [M, 256]    n Wkv'  (the K / V AdaLN's modulation; its sigmoid and bias are applied by pre90)
-// -DRMS=1 (ESMFold2): n = silu(c) for all eight matrices, no sigmoid -- the scale biases are 1 (the identity-centred scale), the gate biases 0.
 // One CTA = 2 warpgroups = 128 rows; the eight 128 x 128 weights stream through shared memory in 64-row units (swizzled K-major tiles).
 // SPDX-License-Identifier: Apache-2.0
 #include "rms90.cuh"
@@ -14,14 +13,8 @@ using namespace r90;
 __device__ constexpr int OUT_COL[8] = {0, 128, 384, 512, 0, 128, 256, 640};
 __device__ constexpr int BIAS_IX[8] = {0, -1, 1, -1, -1, -1, 2, 3};
 
-// the operand of the conditioning products, in place: LN(c), or (RMS, ESMFold2) silu(c) -- which then also feeds the two gates
+// the operand of the conditioning products, in place: LN(c)
 DEVI void cond_in(Tile& x, float eps) {
-#if RMS
-#pragma unroll
-  for (int nt = 0; nt < 16; ++nt)
-#pragma unroll
-    for (int e = 0; e < 4; ++e) x.f[nt][e] = silu(x.f[nt][e]);
-#else
   float m0, r0, m1, r1;
   ln_stats(x, eps, m0, r0, m1, r1);
 #pragma unroll
@@ -29,7 +22,6 @@ DEVI void cond_in(Tile& x, float eps) {
     x.f[nt][0] = (x.f[nt][0] - m0) * r0; x.f[nt][1] = (x.f[nt][1] - m0) * r0;
     x.f[nt][2] = (x.f[nt][2] - m1) * r1; x.f[nt][3] = (x.f[nt][3] - m1) * r1;
   }
-#endif
 }
 
 extern "C" __global__ __launch_bounds__(NTHR, MINB) void cond90_fwd(const T* __restrict__ c, const T* __restrict__ w, const float* __restrict__ bias,
@@ -54,7 +46,7 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void cond90_fwd(const T* __r
 #pragma unroll   // bf16: specialised units (335 -> 278 us); the fp32 build spills when unrolled (433 -> 1095 us)
 #endif
   for (int u = 0; u < 16; ++u) {
-    if (!RMS && u == 12) { ld_tile(x, c + row0 * 128, 128, 0, g, t); rna(x); }  // the last two matrices read the raw conditioning
+    if (u == 12) { ld_tile(x, c + row0 * 128, 128, 0, g, t); rna(x); }  // the last two matrices read the raw conditioning
     cp_wait<RING - 1>();
     proxy_fence();
     __syncthreads();
@@ -95,7 +87,7 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void cond90_split(const T* __re
   if (upc > 1) issue(1); else cp_commit();
   Tile x;
   ld_tile(x, c + row0 * 128, 128, 0, g, t);
-  if (RMS || u0 < 12) cond_in(x, eps);  // matrices 0 .. 5 read LN(c), 6 and 7 the raw conditioning (RMS: all eight read silu(c))
+  if (u0 < 12) cond_in(x, eps);  // matrices 0 .. 5 read LN(c), 6 and 7 the raw conditioning
   rna(x);
 #pragma unroll 1
   for (int ul = 0; ul < upc; ++ul) {

@@ -32,7 +32,6 @@ import torch
 
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
-from miniworld_engine import settings
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -67,8 +66,6 @@ def _is_ampere(index: int) -> bool:
 
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """The kernels' own requirements: sm_80, bf16, D = 128 / hidden 512 (tile shapes are literals), whole 256-row tiles."""
-    if not settings.current().transition_fused_sm80:
-        return False
     if not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
     if not _is_ampere(

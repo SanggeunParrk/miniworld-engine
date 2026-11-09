@@ -13,7 +13,7 @@ forward reaches, and the file is now named for it.
 from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 import torch
 import triton
@@ -44,13 +44,15 @@ import triton.language as tl
 # because the `@opaque` fakes share the signature.
 # (This used to claim the default covered a caller handing in a genuinely 2-D activation.) The drivers and
 # checkers do exactly that.
-from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, pack, rows_of
+from miniworld_engine.kernels._shape_key import atom_key, both_key, length_of, pack, rows_of
 # `both_key` is for the borrowed layernorm_linear helpers only (`_ln_materialize`/`_ln_bwd`):
 # those kernels are level=both in registry.csv, so they bucket against the union set, while
 # this family's own kernels stay on `atom_key`. Same L either way -- different bucket set.
 
 
-@triton.autotune(configs=configs_for("layernorm_fwd_strided_triton"), key=['shape_key', 'HAS_W'])
+@configured('layernorm_fwd_strided_triton',
+            key=['shape_key', 'HAS_W'],
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=2, num_stages=2))
 @triton.jit
 def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
               X2, R2, C2, N2, eps2, sx20,

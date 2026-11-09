@@ -2,7 +2,7 @@
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/bias_only_attention.py
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import torch
 import triton
 import triton.language as tl
@@ -12,8 +12,7 @@ from miniworld_engine.kernels._tf32 import tf32_dot
 from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
-from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.autotune.shape_key import pack, token_key
+from miniworld_engine.kernels._shape_key import pack, token_key
 
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
 # reduction over d, so it tiles with an accumulating loop and HEAD_DIM_PAD joins the sweep.
@@ -66,8 +65,9 @@ def _attn_fwd_inner(
 
 
 
-@triton.autotune(configs=configs_for("bias_only_attention_fwd_triton"),
-                 key=['shape_key'])
+@configured('bias_only_attention_fwd_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_fwd(
     v_ptr,
@@ -174,8 +174,9 @@ def _attn_fwd(
 # The launcher hands the backward H*L, not H: v is the "B (H L) L2 D" rearrangement. Naming it H and
 # keying on it partitioned the cache per sequence length -- defeating the shape_key bucket next to it --
 # for a value this kernel never reads. Dropped.
-@triton.autotune(configs=configs_for("bias_only_attention_bwd_pre_triton"),
-                 key=['shape_key'])
+@configured('bias_only_attention_bwd_pre_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_bwd_preprocess(
     o,
@@ -272,8 +273,9 @@ def _attn_bwd_dvdbias(
 
 # HL, not H: `bhid` runs over B*HL, so the decode below divides by H*L. Keyed on shape_key only --
 # keying the raw product would partition the cache per sequence length.
-@triton.autotune(configs=configs_for("bias_only_attention_bwd_triton"),
-                 key=['shape_key'])
+@configured('bias_only_attention_bwd_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_bwd(
     v_ptr,
@@ -459,7 +461,6 @@ def _bias_only_bwd(v: torch.Tensor, bias: torch.Tensor, grad_output: torch.Tenso
 
 
 class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
-    @typecheck
     @staticmethod
     def forward(
         ctx,

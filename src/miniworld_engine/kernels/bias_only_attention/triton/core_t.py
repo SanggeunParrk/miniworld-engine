@@ -29,7 +29,7 @@ from __future__ import annotations
 import torch
 import triton
 
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._cast import cast_pack
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.gated_projection.triton.main import _sigmul_bwd, _sigmul_fwd

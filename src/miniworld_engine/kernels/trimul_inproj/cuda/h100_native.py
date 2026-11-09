@@ -1,3 +1,4 @@
+from functools import lru_cache
 from pathlib import Path
 import torch
 
@@ -5,8 +6,8 @@ from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
 
-@T.device_cache
-def headers():
+@lru_cache(None)
+def headers():  # device-independent (publishes transformed headers): a plain cache, so a prebuild can call it
     src = T._upstream() / "csrc"
     dst = T.cache_dir() / ("native_headers_" + T._source_digest().hex()[:16])
     # Preserve upstream; relax only the minimum CTA occupancy for wide K1.

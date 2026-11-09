@@ -7,7 +7,6 @@
 // q, k, v only feed MMAs (TF32: rounded to nearest on the way out). SAVE also writes x1 and xkv for the backward.
 // PAR (AlphaFold 3's K / V norm): xkv = LN(x) * sigmoid(...) + ..., the second AdaLN of the raw x next to the first, not of x1 (inference only: with PAR the
 // backward of the chained form does not apply).
-// -DRMS=1 (ESMFold2): both AdaLNs normalise with an RMSNorm and the K / V scale is mkv pre + bs (bs = 1), no sigmoid; RMS runs with PAR.
 // SPDX-License-Identifier: Apache-2.0
 #include "rms90.cuh"
 using namespace r90;

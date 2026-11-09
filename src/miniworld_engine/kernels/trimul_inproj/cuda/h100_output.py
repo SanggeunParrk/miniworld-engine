@@ -5,36 +5,32 @@ from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
 R = T.SOURCES / "output"
-K1 = (3, 64, 8, 2, -1, 232, 2)  # 192-token tile, as the inference table: K1 106 -> 93 us (L384), 450 -> 407 us (L768)
+K1 = (3, 64, 8, 2, -1, 232, 2)  # only K1[0] (MW_K1_BI) enters the K3 build flags
 K3 = (2, 64, 4, 1, 1, 1)
 
 
 @T.device_cache
 def kernel(kind, ln=0, stats=0, pg=False, method=0):
     inc = T._upstream() / "csrc"
-    src = R / ("original_k1.cu" if kind == "k1" else "save_k3.cu")
+    src = R / "save_k3.cu"
     defs = dict(MW_SAVE_PG=int(pg), MW_PG_METHOD=method, XHAT_FP32=method, MW_K1_BI=K1[0])
-    if kind == "k1":
-        smem = T.k1_smem(K1) + (32768 if pg and method == 0 else 0)
-        threads = 384
-    else:
-        bi, bj, slots, acc, regs, serial = K3
-        defs.update(
-            MW_SAVE_IN=ln & 1,
-            MW_SAVE_OUT=0,
-            MW_STORE_METHOD=0,
-            MW_SAVE_STATS_IN=stats & 1,
-            MW_SAVE_STATS_OUT=(stats >> 1) & 1,
-            MW_BI=bi,
-            MW_BJ=bj,
-            MW_SLOT=slots,
-            MW_ACC=acc,
-            TMN_K3_REGS_24_240=regs,
-            MW_SERIAL=serial,
-            MW_FUSED=1,
-        )
-        smem = T.k3_smem(K3) + (32768 if pg and method == 0 else 0)
-        threads = 384
+    bi, bj, slots, acc, regs, serial = K3
+    defs.update(
+        MW_SAVE_IN=ln & 1,
+        MW_SAVE_OUT=0,
+        MW_STORE_METHOD=0,
+        MW_SAVE_STATS_IN=stats & 1,
+        MW_SAVE_STATS_OUT=(stats >> 1) & 1,
+        MW_BI=bi,
+        MW_BJ=bj,
+        MW_SLOT=slots,
+        MW_ACC=acc,
+        TMN_K3_REGS_24_240=regs,
+        MW_SERIAL=serial,
+        MW_FUSED=1,
+    )
+    smem = T.k3_smem(K3) + (32768 if pg and method == 0 else 0)
+    threads = 384
     assert smem <= 232448
     flags = [
         "-std=c++17",
@@ -59,7 +55,7 @@ def kernel(kind, ln=0, stats=0, pg=False, method=0):
         {},
         str(out),
     )
-    k = unit.kernel("infer_k1" if kind == "k1" else "save_k3")
+    k = unit.kernel("save_k3")
     k.set_max_dynamic_smem(smem)
     return k, smem
 
@@ -68,72 +64,6 @@ def tm(t, box, dims, strides):
     return T._launch_module().tensor_map(
         t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B"
     )
-
-
-def front(d, pg=False, method=0, bufs=None):
-    n = d["n"]
-    x = d["x"]
-    m = n * n
-    bi, bj = K1[:2]
-    L = T._launch_module()
-    k, smem = kernel("k1", pg=pg, method=method)
-    ab, pre = (
-        bufs
-        if bufs
-        else (
-            torch.empty((512, n, n), device=x.device, dtype=x.dtype),
-            torch.empty((1024, m), device=x.device, dtype=x.dtype) if pg else None,
-        )
-    )
-    mz = tm(x, [64, bj, bi], [128, n, n], [256, n * 256])
-    mw = tm(d["w1"], [64, 64], [128, 1024], [256])
-    ma = tm(ab, [64, 1, 32], [n, n, 512], [n * 2, m * 2])
-    mg = tm(pre, [64, 1, 32], [n, n, 512], [n * 2, m * 4]) if pg else ma
-    mp = tm(pre[1], [64, 1, 32], [n, n, 512], [n * 2, m * 4]) if pg else ma
-    tj = (n + bj - 1) // bj
-    tiles = ((n + bi - 1) // bi) * tj
-    base = L.Struct.fixed("h100_output:1",
-        [
-            mz,
-            mw,
-            ma,
-            d["mask"],
-            d["gi"],
-            d["bi"],
-            ab,
-            None,
-            None,
-            n,
-            n,
-            tj,
-            tiles,
-            1,
-            n,
-            1,
-            1e-5,
-            n * 128,
-            128,
-            0,
-            int(d["mask"].ndim == 1),   # token mask [n]: K1 forms m[i] & m[j]
-        ]
-    )
-    p = base
-    k.launch(
-        (
-            min(
-                tiles,
-                num_sms(
-                    torch.cuda.current_device()
-                ),
-            ),
-            1,
-            1,
-        ),
-        (128 * (K1[0] * K1[1] // 64 + 1), 1, 1),
-        [p],
-        smem,
-    )
-    return ab, pre
 
 
 def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):

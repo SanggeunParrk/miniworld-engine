@@ -14,11 +14,6 @@ from miniworld_engine.kernels._device import num_sms
 _dir = str(Path(__file__).parent)
 
 
-def interleave(wa: torch.Tensor, wb: torch.Tensor) -> torch.Tensor:
-    """[H, K] gate and up weights -> [2H, K] with rows a0, b0, a1, b1, ..."""
-    return torch.stack([wa, wb], 1).reshape(-1, wa.shape[1]).contiguous()
-
-
 #: Below this many rows the (tile pair, chunk) items leave most SM pairs idle in the last round (L384, S = 5: 96 items on 74
 #: pairs, 14.0 us against cuBLAS + the SwiGLU row pass's 13.7); at M = 3840 (L768) it is 18.4 against 22.3 us.
 MIN_ROWS = 3840
@@ -202,4 +197,4 @@ class GemmSwigluSm90:
         return out
 
 
-__all__ = ["GemmSwiglu", "GemmSwigluSm90", "interleave", "supported", "supported_sm90"]
+__all__ = ["GemmSwiglu", "GemmSwigluSm90", "supported", "supported_sm90"]

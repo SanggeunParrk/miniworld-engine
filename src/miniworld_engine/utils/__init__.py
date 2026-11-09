@@ -1,1 +1,0 @@
-"""Shared helpers that are not a kernel, a module or evidence: atomic file writes, the opt-in type check, the optimizer checkpoint migration, the H100 FP32-master projection, the maintenance scripts (``tools``) and the figure / page drawing (``viz``)."""

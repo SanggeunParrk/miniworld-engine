@@ -1,0 +1,17 @@
+# Every requirement module, every backend it has (pytorch = the reference; anthropic / cueq = external baselines, informational light).
+# Run:  python -m miniworld_engine.measure.accuracy src/miniworld_engine/measure/configs/all.yaml --out /scratch/dir
+modules: all
+backends: [pytorch, anthropic, cueq]
+external: [anthropic, cueq]
+rows: []          # requirements_module.csv data-row numbers; [] = every row of the modules
+dtypes: []        # filter: bfloat16 | float32 | master
+modes: []         # filter: eval | train
+lengths: min      # min | all | [128, 256]
+depths: min
+samples: all      # min | all
+device: cuda
+seed: 0
+fixed:            # the fixed standard per dtype (criterion 2)
+  bfloat16: 8.0e-3
+  master: 8.0e-3
+  float32: 1.0e-5

@@ -12,7 +12,7 @@ import threading
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine import settings
+from miniworld_engine.kernels._nvcc import engine_jit_root
 
 SOURCES = Path(__file__).with_name("h100_sources")
 _d256_scope = threading.local()
@@ -242,7 +242,7 @@ def read_config(relative_path):
 def cache_dir():
     """Where TriMul H100 cubins (and, when a build needs them, the generated headers) live. Not created here: a process
     that loads prebuilt or cached cubins writes nothing."""
-    return settings.engine_jit_root() / "trimul_h100"
+    return engine_jit_root() / "trimul_h100"
 
 
 @lru_cache(None)

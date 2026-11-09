@@ -1,0 +1,11 @@
+"""Per-architecture implementations of the backbone pair-embedding kernels (``PairEmbedGeom`` / ``PairEmbedCA``)."""
+
+
+def prebuild(target, rows):
+    """The build of the ``pair_embed_geom`` family (kernels/_prebuild.py): one shape-independent extension (``pair_embed_geom_sm90``, every size is a
+    runtime launch parameter; the encoder and the decoder pair, the table gradient and the LayerNorm backward are entry points of it), H100 (sm_90a)
+    only, built once when some requirements row (of ``PairEmbedGeom`` / ``PairEmbedCA``, the modules that launch it) needs the family."""
+    from .sm90 import ext
+
+    if rows and target.arch == "sm90":
+        yield ext

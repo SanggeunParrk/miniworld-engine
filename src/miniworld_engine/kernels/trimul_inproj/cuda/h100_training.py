@@ -99,32 +99,29 @@ def _contract_grads(ab, dt, n, direction=0):
     return dl, dr
 
 
-USE_INFERENCE_K1 = True  # D128 front: the tuned inference K1 (same planes, accuracy unchanged, 94.6 -> 81 us at L384)
-
 
 def _front(d):
-    """Input LayerNorm + gated projections -> planes [512, n, n]; the inference K1 build when it is selected, else the training front."""
-    if USE_INFERENCE_K1 and d["x"].shape[-1] == 128:
-        from miniworld_engine.kernels.trimul_inproj.cuda import _h100_infer_kernel as K
-        from miniworld_engine.kernels.trimul_inproj.cuda import h100_inference as INF
+    """D128 front: input LayerNorm + gated projections -> planes [512, n, n] on the tuned inference K1 build (D256 / D384 / D512 take the
+    wide port, ``h100_wide_training``: ``WIDE.supports`` is true on every cell ``trimul_h100`` routes here)."""
+    if d["x"].shape[-1] != 128:
+        raise NotImplementedError("h100_training._front: D128 only")
+    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_infer_kernel as K
+    from miniworld_engine.kernels.trimul_inproj.cuda import h100_inference as INF
 
-        n = d["n"]
-        x = d["x"]
-        bsz = x.shape[0]
-        rows = bsz * n
-        # batched samples: one K1 over the B samples stacked along the slow token axis (planes [512, B n, n]), as at D64
-        ab = x.new_empty((512, rows, n))
-        cfg = (2, 64, 4, 2) if n == 128 else K.TILE_TABLE[("sm_90a", 128, 256, "b")]["k1"]
-        w = {"w1": d["w1"], "ln_in_w": d["gi"], "ln_in_b": d["bi"], "ln_out_w": d["go"], "ln_out_b": d["bo"], "wo": d["wp"],
-             "wg": d["leaves"][5]}
-        mask = d["mask"]
-        INF._kernels().k1(x[0] if bsz == 1 else x.view(rows, n, 128), mask if mask.ndim == 1 else mask.reshape(rows, n).float(),
-                          w, ab, N=n, Np=n, cz=128, ch=256, cfg=cfg, lnm=2, eps=1e-5, cache={}, token_mask=mask.ndim == 1,
-                          rows=None if bsz == 1 else rows)
-        return ab
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_output as O
-
-    return O.front(d)[0]
+    n = d["n"]
+    x = d["x"]
+    bsz = x.shape[0]
+    rows = bsz * n
+    # batched samples: one K1 over the B samples stacked along the slow token axis (planes [512, B n, n]), as at D64
+    ab = x.new_empty((512, rows, n))
+    cfg = (2, 64, 4, 2) if n == 128 else K.TILE_TABLE[("sm_90a", 128, 256, "b")]["k1"]
+    w = {"w1": d["w1"], "ln_in_w": d["gi"], "ln_in_b": d["bi"], "ln_out_w": d["go"], "ln_out_b": d["bo"], "wo": d["wp"],
+         "wg": d["leaves"][5]}
+    mask = d["mask"]
+    INF._kernels().k1(x[0] if bsz == 1 else x.view(rows, n, 128), mask if mask.ndim == 1 else mask.reshape(rows, n).float(),
+                      w, ab, N=n, Np=n, cz=128, ch=256, cfg=cfg, lnm=2, eps=1e-5, cache={}, token_mask=mask.ndim == 1,
+                      rows=None if bsz == 1 else rows)
+    return ab
 
 
 def _forward_fake(leaves, mask, ds, direction=0):

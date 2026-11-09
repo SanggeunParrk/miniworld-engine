@@ -12,12 +12,10 @@ from __future__ import annotations
 
 import ctypes
 import functools
-import re
 from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._tf32 import tf32_grid
 
@@ -45,8 +43,7 @@ def cubin(
         "-lineinfo",
         f"-I{_dir}",
     )
-    rms = "_rms" if "-DRMS=1" in defs else ""
-    return str(_nvcc.cubin(f"atom_sm90/{stem}_{'tf32' if tf32 else 'bf16'}_w{nwarp}m{minb}{rms}", flags,
+    return str(_nvcc.cubin(f"atom_sm90/{stem}_{'tf32' if tf32 else 'bf16'}_w{nwarp}m{minb}", flags,
                            source=_dir / f"{stem}.cu"))
 
 
@@ -115,18 +112,22 @@ _KERNELS = {
 }
 
 
+def kernel_cubin(kind: str, tf32: bool) -> str:
+    """The cubin of kernel ``kind`` (``"<kind>_g"``: the grouped-sample launch, same code, larger dynamic shared memory)."""
+    base = kind.removesuffix("_g")
+    stem, _, *rest = _KERNELS[base]
+    defs = rest[0] if rest else ()
+    return cubin(stem, tf32, nwarp(base, tf32), _MINB.get((base, tf32), 1), defs)
+
+
 @functools.lru_cache(maxsize=None)
-def kernel(kind: str, tf32: bool, device_index: int, rms: bool = False):
+def kernel(kind: str, tf32: bool, device_index: int):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
-    base = kind.removesuffix(
-        "_g"
-    )  # "<kind>_g": the grouped-sample launch (same code, larger dynamic shared memory)
-    stem, func, *rest = _KERNELS[base]
-    defs = (*(rest[0] if rest else ()), *(("-DRMS=1",) if rms else ()))
+    func = _KERNELS[kind.removesuffix("_g")][1]
     with torch.cuda.device(device_index):
         return driver.Kernel(
-            cubin(stem, tf32, nwarp(base, tf32), _MINB.get((base, tf32), 1), defs),
+            kernel_cubin(kind, tf32),
             func,
             _smem(kind, tf32),
             pdl=True,
@@ -366,15 +367,15 @@ def _split_for(tiles: int, choices) -> int:
     return choices[-1] if tiles * choices[-1] < _SM_FILL else 1
 
 
-def cond_fwd(c, p, tf32: bool, eps: float = 1e-5, rms: bool = False):
-    """c [M, 128] -> mod [M, 768], mkv [M, 256] (M a multiple of 128). ``rms``: ESMFold2's tables (products of silu(c), no sigmoid)."""
+def cond_fwd(c, p, tf32: bool, eps: float = 1e-5):
+    """c [M, 128] -> mod [M, 768], mkv [M, 256] (M a multiple of 128)."""
     M = c.shape[0]
     dt = torch.float32 if tf32 else torch.bfloat16
     mod = torch.empty(M, 768, device=c.device, dtype=dt)
     mkv = torch.empty(M, 256, device=c.device, dtype=dt)
     tiles = M // ROWS
     ns = _split_for(tiles, (1, 2, 4, 8, 16))
-    kernel("cond_split" if ns > 1 else "cond", tf32, _dev(c), rms)(
+    kernel("cond_split" if ns > 1 else "cond", tf32, _dev(c))(
         (tiles, ns, 1),
         (NWARP * 32, 1, 1),
         c,
@@ -398,10 +399,9 @@ def pre_fwd(
     eps: float = 1e-5,
     nmod: int = 0,
     parallel_kv: bool = False,
-    rms: bool = False,
 ):
     """-> q, sg, k, v [M, 128] (and x1, xkv when ``save``). ``parallel_kv``: the K / V AdaLN reads the raw x beside the first AdaLN
-    (AlphaFold 3), not its output (Protenix). ``rms``: ESMFold2's RMSNorm AdaLNs (with ``parallel_kv``, inference)."""
+    (AlphaFold 3), not its output (Protenix)."""
     M = x.shape[0]
     new = lambda: torch.empty(M, DS, device=x.device, dtype=x.dtype)  # noqa: E731
     q, sg, k, v = new(), new(), new(), new()
@@ -410,7 +410,7 @@ def pre_fwd(
     # the unsplit TF32 kernel round-trips the exact x1 through memory (registers hold it rounded); the split one keeps it in registers
     x1 = new() if (save or (tf32 and ns == 1)) else None
     xkv = new() if save else None
-    kernel("pre_split" if ns > 1 else "pre", tf32, _dev(x), rms)(
+    kernel("pre_split" if ns > 1 else "pre", tf32, _dev(x))(
         (tiles, ns, 1),
         (NWARP * 32, 1, 1),
         x,
@@ -435,14 +435,14 @@ def pre_fwd(
 
 
 def post_fwd(
-    a, o, sg, mod, p, tf32: bool, save: bool = False, eps: float = 1e-5, nmod: int = 0, rms: bool = False
+    a, o, sg, mod, p, tf32: bool, save: bool = False, eps: float = 1e-5, nmod: int = 0
 ):
-    """-> out [M, 128] (and u, a2, x2, t when ``save``). ``rms``: ESMFold2's RMSNorm AdaLN 2."""
+    """-> out [M, 128] (and u, a2, x2, t when ``save``)."""
     M = a.shape[0]
     new = lambda: torch.empty(M, DS, device=a.device, dtype=a.dtype)  # noqa: E731
     out = new()
     u, a2, x2, t = (new(), new(), new(), new()) if save else (None,) * 4
-    kernel("post", tf32, _dev(a), rms)(
+    kernel("post", tf32, _dev(a))(
         (M // ROWS, 1, 1),
         (NWARP * 32, 1, 1),
         a,

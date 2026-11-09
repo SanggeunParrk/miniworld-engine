@@ -66,9 +66,9 @@ from __future__ import annotations
 import torch
 import triton
 
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import triton.language as tl
 
 
@@ -118,10 +118,9 @@ def _shape_key(rows: int, buckets: int, width: int) -> int:
     return both_key(rows, BUCKETS=buckets, WIDTH=width)
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_relative_position_bwd_reduce_triton"),
-    key=["shape_key"],
-)
+@configured('mpnn_relative_position_bwd_reduce_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, PROGRAMS=64, num_warps=4, num_stages=2))
 @triton.jit
 def _bucket_reduce_kernel(
     grad_ptr,
@@ -239,7 +238,13 @@ def triton_bucket_reduce(
         (_MAX_PROGRAMS, padded, width), dtype=torch.float32
     )
     partial_bias = grad_output.new_empty((_MAX_PROGRAMS, width), dtype=torch.float32)
-    _bucket_reduce_kernel[lambda meta: (meta["PROGRAMS"],)](
+    launched: list[int] = []   # the program count of each launch the config layer makes (timing runs, then the chosen one last)
+
+    def grid(meta):
+        launched.append(meta["PROGRAMS"])
+        return (meta["PROGRAMS"],)
+
+    _bucket_reduce_kernel[grid](
         grad_output.reshape(rows, width),
         bucket.reshape(rows),
         partial_table,
@@ -257,9 +262,7 @@ def triton_bucket_reduce(
     # still sitting in the tail when a narrower one ran.  Slicing to the chosen count
     # makes the pass correct by construction rather than by a hook firing at the right
     # moment, and it drops a memset per call.
-    config = getattr(_bucket_reduce_kernel, "best_config", None)
-    # a derivation records the launch without tuning it (no best_config): every slot then; the summed shapes are the same
-    programs = config.kwargs["PROGRAMS"] if config is not None else _MAX_PROGRAMS
+    programs = launched[-1]
     # Summed in program order, so the result is the same on every run.
     return (
         partial_table[:programs].sum(dim=0)[:buckets],

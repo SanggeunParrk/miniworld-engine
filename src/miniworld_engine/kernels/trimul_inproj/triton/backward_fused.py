@@ -8,8 +8,8 @@ import triton
 import triton.language as tl
 from miniworld_engine.kernels._tiles import tile_order, tile_grid
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import both_key,rows_of,pack,token_key,ShapeKeyTooWide
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import both_key,rows_of,pack,token_key,ShapeKeyTooWide
 from miniworld_engine.kernels.layernorm.triton.main import _ln_fwd
 
 
@@ -25,9 +25,42 @@ def prune_ln(configs,named_args,**meta):
     return kept or list(configs)
 
 
-@triton.autotune(configs=configs_for("trimul_input_ln_residual_bwd_triton"),
-                 key=['shape_key', 'HAS_ROWSCALE'],
-                 reset_to_zero=['DW', 'DB'], prune_configs_by={'early_config_prune': prune_ln})
+@configured('trimul_input_ln_residual_bwd_triton',
+            key=['shape_key', 'HAS_ROWSCALE'],
+            default=[dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=128, BLOCK_M1=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=256, BLOCK_M1=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=512, BLOCK_M1=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=1024, BLOCK_M1=64, num_warps=4, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=128, num_warps=4, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=64, num_warps=8, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=32, num_warps=4, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=64, num_warps=2, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=1),
+            dict(BLOCK_K=64, BLOCK_M1=16, num_warps=4, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=64, num_warps=1, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=4),
+            dict(BLOCK_K=64, BLOCK_M1=8, num_warps=4, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=5),
+            dict(BLOCK_K=64, BLOCK_M1=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=2, num_warps=4, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=1, num_warps=4, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=64, num_warps=8, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=128, num_warps=4, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=128, num_warps=8, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=128, num_warps=8, num_stages=3),
+            dict(BLOCK_K=128, BLOCK_M1=64, num_warps=4, num_stages=3),
+            dict(BLOCK_K=128, BLOCK_M1=64, num_warps=8, num_stages=2),
+            dict(BLOCK_K=128, BLOCK_M1=64, num_warps=8, num_stages=3),
+            dict(BLOCK_K=128, BLOCK_M1=128, num_warps=4, num_stages=2),
+            dict(BLOCK_K=128, BLOCK_M1=128, num_warps=4, num_stages=3),
+            dict(BLOCK_K=128, BLOCK_M1=128, num_warps=8, num_stages=2),
+            dict(BLOCK_K=128, BLOCK_M1=32, num_warps=2, num_stages=3),
+            dict(BLOCK_K=128, BLOCK_M1=16, num_warps=2, num_stages=3),
+            dict(BLOCK_K=1024, BLOCK_M1=8, num_warps=4, num_stages=1)],
+            prune=prune_ln,
+            reset_to_zero=['DW', 'DB'])
 @triton.jit
 def _ln_bwd_residual_kernel(
     DX, DY, DW, DB, RES,
@@ -184,9 +217,41 @@ def prune_dual(configs,named_args,**meta):
     return kept or list(configs)
 
 
-@triton.autotune(configs=configs_for('trimul_input_dual_bwd_triton'),
- key=['shape_key','M','gs0','gs1','fs0','fs1','ws0','ws1','vs0','vs1'],
- prune_configs_by={'early_config_prune':prune_dual})
+@configured('trimul_input_dual_bwd_triton',
+            key=['shape_key','M','gs0','gs1','fs0','fs1','ws0','ws1','vs0','vs1'],
+            default=[dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=1, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=128, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=8, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=3),
+            dict(BLOCK_M1=32, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=32, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=4),
+            dict(BLOCK_M1=16, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=256, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=2, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=8, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=8, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=8, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=4, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=8, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=8, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=4, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=8, num_warps=8, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=8, num_warps=8, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2)],
+            prune=prune_dual)
 @triton.jit
 def _input_dual_bwd_kernel(G,F,W,V,Y,M,
     KG:tl.constexpr,KP:tl.constexpr,N:tl.constexpr,

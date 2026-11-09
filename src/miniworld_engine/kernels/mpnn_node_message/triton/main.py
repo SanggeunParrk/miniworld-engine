@@ -34,9 +34,9 @@ from __future__ import annotations
 import torch
 import triton
 
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import triton.language as tl
 
 
@@ -110,10 +110,9 @@ def _shape_key(groups: int, **axes: int) -> int:
     return both_key(groups, **axes)
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_node_message_fwd_gemm_triton"),
-    key=["shape_key", "SAVE_PREACT"],
-)
+@configured('mpnn_node_message_fwd_gemm_triton',
+            key=["shape_key", "SAVE_PREACT"],
+            default=dict(GROUPS=16, num_warps=4, num_stages=2))
 @triton.jit
 def _node_message_fwd_kernel(
     edge_ptr,
@@ -191,11 +190,10 @@ def _node_message_fwd_kernel(
         )
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_node_message_bwd_recompute_triton"),
-    key=["shape_key"],
-    reset_to_zero=["grad_hidden_bias_ptr"],
-)
+@configured('mpnn_node_message_bwd_recompute_triton',
+            key=["shape_key"],
+            default=dict(GROUPS=16, num_warps=4, num_stages=2),
+            reset_to_zero=["grad_hidden_bias_ptr"])
 @triton.jit
 def _node_message_replay_kernel(
     grad_reduced_ptr,
@@ -298,11 +296,10 @@ def _node_message_replay_kernel(
     tl.atomic_add(grad_hidden_bias_ptr + columns, grad_hidden_bias)
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_node_message_bwd_dx_triton"),
-    key=["shape_key"],
-    reset_to_zero=["grad_neighbor_ptr"],
-)
+@configured('mpnn_node_message_bwd_dx_triton',
+            key=["shape_key"],
+            default=dict(GROUPS=16, num_warps=4, num_stages=2),
+            reset_to_zero=["grad_neighbor_ptr"])
 @triton.jit
 def _node_message_dx_kernel(
     preactivation_ptr,

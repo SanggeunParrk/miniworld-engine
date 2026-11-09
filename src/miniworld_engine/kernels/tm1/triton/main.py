@@ -2,7 +2,7 @@
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/tm1.py
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import torch
 import triton
 import triton.language as tl
@@ -12,8 +12,7 @@ from miniworld_engine.kernels._tiles import tile_grid, tile_order
 from einops import rearrange
 from jaxtyping import Float
 
-from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.autotune.shape_key import length_of, token_key, pack
+from miniworld_engine.kernels._shape_key import length_of, token_key, pack
 
 
 # Real cross-product tile search (was: 2 fwd / 1 bwd pinned configs, only num_warps varied).
@@ -27,7 +26,9 @@ from miniworld_engine.autotune.shape_key import length_of, token_key, pack
 
 
 
-@triton.autotune(configs=configs_for("trimul_gemm_gate_triton"), key=['shape_key'])
+@configured('trimul_gemm_gate_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def fused_sigmoid_gate_fwd_kernel(
     x_ptr,
@@ -120,7 +121,9 @@ def fused_sigmoid_gate_fwd_kernel(
 
 
 
-@triton.autotune(configs=configs_for("trimul_bwd_gate_recompute_triton"), key=['shape_key'])
+@configured('trimul_bwd_gate_recompute_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def fused_sigmoid_gate_bwd_kernel(
     x_ptr,
@@ -319,7 +322,6 @@ def _tm1_bwd(
 
 
 class TritonTM1Function(torch.autograd.Function):
-    @typecheck
     @staticmethod
     def forward(
         ctx,

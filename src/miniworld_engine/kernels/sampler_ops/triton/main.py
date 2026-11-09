@@ -20,8 +20,8 @@ import triton
 import triton.language as tl
 from triton.language.extra import libdevice
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import atom_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import atom_key
 
 CHUNK = 1024                 # atoms per program of the partial-sum passes at most (a launch smaller than ~2 waves of programs halves it, see ``chunk_for``)
 _MIN_PROGRAMS = 264          # two waves of an H100
@@ -36,7 +36,9 @@ def _psum(PART_PTR, b, C, k, CP: tl.constexpr):
     return tl.sum(tl.load(PART_PTR + (b * C + c) * 16 + k, mask=c < C, other=0.0), axis=0)
 
 
-@triton.autotune(configs=configs_for("sampler_ops_stats_triton"), key=["shape_key", "TWO"])
+@configured('sampler_ops_stats_triton',
+            key=["shape_key", "TWO"],
+            default=dict(BLOCK=512, num_warps=4, num_stages=1))
 @triton.jit
 def _stats(M, R, W, PARTS, n, TWO: tl.constexpr, CHUNK: tl.constexpr, BLOCK: tl.constexpr, shape_key):
     """PARTS[b, chunk] = (sum w, sum w m_xyz, [sum w r_xyz]) over the atoms of the chunk (sub-tiles of BLOCK atoms in order, then a tree sum)."""
@@ -69,7 +71,9 @@ def _stats(M, R, W, PARTS, n, TWO: tl.constexpr, CHUNK: tl.constexpr, BLOCK: tl.
         tl.store(base + 6, tl.sum(s6, axis=0))
 
 
-@triton.autotune(configs=configs_for("sampler_ops_augment_triton"), key=["shape_key"])
+@configured('sampler_ops_augment_triton',
+            key=["shape_key"],
+            default=dict(BLOCK=512, num_warps=4, num_stages=1))
 @triton.jit
 def _augment(P, W, PARTS, RV, TR, NOISE, SIGMA, SIGMA_NEXT, OUT, SC, n, C, gamma, gamma_min, sigma_min, sigma_max, noise_scale, variance_floor,
              WINDOW: tl.constexpr, CLAMP: tl.constexpr, CHUNK: tl.constexpr, CP: tl.constexpr, BLOCK: tl.constexpr, shape_key):
@@ -125,7 +129,9 @@ def _augment(P, W, PARTS, RV, TR, NOISE, SIGMA, SIGMA_NEXT, OUT, SC, n, C, gamma
         tl.store(OUT + o + 2, libdevice.add_rn(libdevice.mul_rn(libdevice.add_rn(a2, tz), w), libdevice.mul_rn(mag, tl.load(NOISE + o + 2, mask=ok, other=0.0))), mask=ok)
 
 
-@triton.autotune(configs=configs_for("sampler_ops_cov_triton"), key=["shape_key"])
+@configured('sampler_ops_cov_triton',
+            key=["shape_key"],
+            default=dict(BLOCK=512, num_warps=4, num_stages=1))
 @triton.jit
 def _cov(M, R, W, PARTS, COV, n, C, CHUNK: tl.constexpr, CP: tl.constexpr, BLOCK: tl.constexpr, shape_key):
     """COV[b, chunk, 3p + q] = sum over the chunk of w (m_p - cm_p) (r_q - cr_q)."""
@@ -240,7 +246,9 @@ def _horn(sxx, sxy, sxz, syx, syy, syz, szx, szy, szz):
     return r00, r10, r20, r01, r11, r21, r02, r12, r22     # row-major rot, transposed: rot[a, c] = Q[c, a]
 
 
-@triton.autotune(configs=configs_for("sampler_ops_align_triton"), key=["shape_key"])
+@configured('sampler_ops_align_triton',
+            key=["shape_key"],
+            default=dict(BLOCK=512, num_warps=4, num_stages=1))
 @triton.jit
 def _align(M, R, PARTS, COV, SC, SIGMA_NEXT, OUT, step_scale, n, C, CHUNK: tl.constexpr, CP: tl.constexpr, BLOCK: tl.constexpr, shape_key):
     chunk = tl.program_id(0)
@@ -272,7 +280,9 @@ def _align(M, R, PARTS, COV, SC, SIGMA_NEXT, OUT, step_scale, n, C, CHUNK: tl.co
         tl.store(OUT + o + 2, libdevice.add_rn(al2, libdevice.mul_rn(k, d2)), mask=ok)
 
 
-@triton.autotune(configs=configs_for("sampler_ops_pool_triton"), key=["shape_key"])
+@configured('sampler_ops_pool_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_C=256, num_warps=2, num_stages=1))
 @triton.jit
 def _pool(X, IDX, GM, AM, OUT, A, T, R, C, BLOCK_C: tl.constexpr, shape_key):
     """OUT[s, t, c] = sum_a m[t, a] relu(g[t, a] x[s, idx[t, a], c]) / max(sum_a m[t, a], 1e-10), bf16; the atoms in order, as the CUDA kernel."""

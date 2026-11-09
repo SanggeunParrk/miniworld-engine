@@ -48,10 +48,8 @@ def head_dim(module) -> int:
 def serves(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
     if torch.is_grad_enabled() or (module.training and module.p_drop > 0.0):
         return False
-    from miniworld_engine import settings
-    from miniworld_engine.modules.dispatch import KernelBackend
 
-    if getattr(module, "_backend", None) != KernelBackend.PORTABLE or settings.current().force_portable_kernels:
+    if getattr(module, "_backend", None) != "portable":
         return False  # the engine implementation only (implementation="pytorch" keeps the torch statements)
     if not module.use_self_attention or module.use_qk_norm:
         return False

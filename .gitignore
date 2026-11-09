@@ -3,13 +3,10 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
-# anchored: setuptools' build artefacts live at the repo root only, and an unanchored "build/"
-# also swallows src/miniworld_engine/build/ -- a real package, whose absence from git shows up as
-# an ImportError in the cache builder rather than as a missing file.
 /build/
 dist/
 
-# pixi materialized environments (regenerate from pixi.lock)
+# pixi environment (regenerated from pixi.lock)
 .pixi/
 **/.pixi/
 
@@ -18,100 +15,25 @@ dist/
 .pytest_cache/
 .mypy_cache/
 
-# profiling / large artifacts
+# built kernels and profiler dumps (the prebuilder writes to ~/.cache/miniworld_engine_jit; a release bundle is added by the wheel build)
+*.so
+*.cubin
+src/miniworld_engine/_prebuilt/
 *.nsys-rep
 *.ncu-rep
 *.sqlite
-*.tar.gz
-*.so
-
-# profiler capture outputs live in <target>/profiles/ (siblings of artifacts/); keep the dir, drop captures
-benchmarks/**/profiles/*
-!benchmarks/**/profiles/.gitkeep
-
-# --- benchmark layout: per target, benchmarks/{modules,kernels}/<target>/ holds ---
-#   artifacts/  raw bench output (CSVs, autotune summaries)  -> SCRATCH, ignored
-#   plots/      raw plot_csv.py SVG output                    -> SCRATCH, ignored
-#   results/    CURATED results kept in git                   -> TRACKED
-#               results/<gpu>/tables/*.csv  -- the data, TRACKED
-#               results/<gpu>/plots/*.svg  -- renders of it, ignored: `plot_csv.py` makes
-#               them from the csv beside them, all 45 plot directories have their tables/,
-#               and no doc, README or source cited one of the 360 (5.9 MB of the 9.1 MB
-#               tracked here). Same rule as the profiler dumps under kernels/*/notes/: a
-#               render nothing names is output, the data it came from is the record.
-# Scratch is scoped to the target level (benchmarks/*/*/{artifacts,plots}); the deeper
-# results/<gpu>/plots/ is NOT matched by that (it is 2 levels below), so curated results
-# track by default. Raw dumps (*.out/*.ncu-rep/*.so) stay ignored everywhere via the global
-# rules. Policy: kernels commit CSV only — any .svg under kernels/*/results/ is ignored.
-benchmarks/*/*/artifacts/**
-!benchmarks/*/*/artifacts/**/
-!benchmarks/*/*/artifacts/**/.gitkeep
-benchmarks/*/*/plots/**
-!benchmarks/*/*/plots/**/
-!benchmarks/*/*/plots/**/.gitkeep
-benchmarks/kernels/*/results/**/*.svg
-benchmarks/kernels/*/results/**/*.pdf
-benchmark/logs/
-benchmark/
-config/
-src/**/benchmark/
 *.out
 
-# local scratch/vendor workspaces kept outside package boundaries
-_ct_tmp/
-_trans_tmp/
-# experiments/ was removed in 2.2.0 (README "Research history"); keep stray runs out.
-/experiments/
-# vendored CUTLASS checkout (166M) — build dependency, never tracked
+# measurement records and plans live outside the repo (scratch); never commit them here
+/records/
+/plans/
 
-# editor
+# local
+.privates/
 .vscode/
-
-# hydra run outputs (transient)
-outputs/
-/results/
-
-# secrets / local agent worktrees / scratch (added by checkpoint)
-notion_token
-_fold_t.py
-# Everything under .claude/ is per-user state -- settings.local.json, session scratch -- EXCEPT
-# agent definitions, which are project config. An agent is a written-down method; leaving it
-# untracked means the next person re-derives it by hand. A directory ignored with a trailing slash
-# cannot be reopened from inside, so this ignores the CONTENTS and un-ignores the one subtree.
 .claude/*
+!.claude/CLAUDE.md
 !.claude/agents/
-!.claude/agents/*.md
 
-# job logs (SLURM .out etc.) — sibling of artifacts/
-benchmarks/**/logs/
-
-# Local scratch belongs outside the checkout (~/miniworld-engine-scratch); keep strays out.
-.bench/
-
-benchmarks/*/*/results/*/plots/
-
-# scratch: one-off sbatch scripts and their logs (they belong in a scratchpad, not here)
-*.sbatch
-*.log
-
-# and the two shapes of scratch that are NOT a .sbatch or a .log, both of which have been swept
-# into a commit by `git add -A` before. Probe OUTPUT (`bands_bf16_1.json` and friends: per-kernel
-# relative errors, the input to a band re-derivation) and .scratch/, which holds probe SCRIPTS.
-# The latter lives in the repo rather than a temp dir on purpose: a compute node cannot see the
-# login node's scratchpad, so a script srun has to read must sit on a shared path.
-bands_*.json
-.scratch/
-
-# Cache merge synchronization; contents are runtime state.
-src/miniworld_engine/autotune/data/.merge.lock
-
-/.release-build/
-
-# Local H100 wiring validation build products (historical verdicts: tag archive/docs-20260928)
-/verdicts/
-
-# local run artifacts (experiments, outputs, results, raw benchmark dumps): one directory, never tracked
-/runs/
-
-# release-time prebuilt kernels (miniworld-engine dev bundle-kernels); shipped in wheels, never in git
-src/miniworld_engine/_prebuilt/
+# the Anthropic release is cloned locally (third_party/anthropic/UPSTREAM.json pins it); never tracked
+third_party/anthropic/upstream/

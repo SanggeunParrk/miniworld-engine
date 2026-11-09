@@ -980,7 +980,7 @@ def kernels(index: int) -> _Kernels:
 
 def supported(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> bool:
     """The shapes and dtypes the kernels serve (``S % 128`` is checked by the block, which refuses instead of falling back)."""
-    from miniworld_engine.kernels.swa_dit.interface import is_global
+    from miniworld_engine.kernels.swa_dit._common import is_global
 
     return (
         q.is_cuda
@@ -1094,7 +1094,7 @@ def attn_global_bwd(Qh, Kh, Vh, O, dO, lse, seqused, dQh, dKh, dVh):
 def block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window=HW):
     """The bf16 forward: [out] or, with ``save``, [out, Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, Att, Y, FF] -- the layout of
     ``dispatch.swa_dit_block_fwd``. ``half_window`` is the window (64) or a global-attention value (``is_global``)."""
-    from miniworld_engine.kernels.swa_dit.interface import is_global
+    from miniworld_engine.kernels.swa_dit._common import is_global
 
     N, S, _ = q.shape
     need_s128(S)
@@ -1162,7 +1162,7 @@ def block_bwd(
     half_window=HW,
 ):
     """The bf16 backward: [dq, dmod, dWqkv, dWg, dWo, dWu, dWd] -- the layout of ``dispatch.swa_dit_block_bwd``."""
-    from miniworld_engine.kernels.swa_dit.interface import is_global
+    from miniworld_engine.kernels.swa_dit._common import is_global
 
     N, S, _ = q.shape
     need_s128(S)

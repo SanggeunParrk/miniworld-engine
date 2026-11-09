@@ -1,9 +1,9 @@
 // row_math.cuh -- the elementary pieces every AdaLN-shaped row pass of the engine shares (one definition, behaviour of each user unchanged):
 //   warp_sum    xor-butterfly sum over the 32 lanes (all lanes get the total)
 //   sigmoid     1 / (1 + exp(-v)) with __expf: the exact-division form (the gate of the row kernels)
-//   sigmoid_fast  ex2.approx + rcp.approx form (the GEMM epilogues of adaln_sm90.cu / ct_sm90.cu: ~1 ulp, no division)
-//   modulate    y = gate * ((x - mean) * rstd) + shift: the adaptive LayerNorm output (adaln_rows.cu ``adaln_fwd``, adaln_sm90.cu epilogue)
-// Users: adaln/cuda/adaln_rows.cu, adaln/cuda/adaln_sm90.cu, conditioned_transition/cuda/token_dit_common.cuh (hence the token DiT, bias-only DiT,
+//   sigmoid_fast  ex2.approx + rcp.approx form (~1 ulp, no division)
+//   modulate    y = gate * ((x - mean) * rstd) + shift: the adaptive LayerNorm output
+// Users: conditioned_transition/cuda/token_dit_common.cuh (hence the token DiT, bias-only DiT,
 // DiT-variant and AugmentedAttention row kernels). The token DiT's own ``adaln_a`` pass computes gate * d * rstd + shift (the product in another
 // order: not bit-identical to ``modulate``), so it keeps its expression and shares only warp_sum and sigmoid.
 #pragma once

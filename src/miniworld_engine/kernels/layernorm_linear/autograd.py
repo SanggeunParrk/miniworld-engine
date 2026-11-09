@@ -16,7 +16,7 @@ import triton
 # `layer_norm_bwd_dx_fused` is level=both in kernels/registry/registry.csv -> both_key. The key is L (the
 # token/atom count), never the row count M: the saved x here is already the flattened (M, K)
 # matrix, so L has to arrive from the caller (see `LayerNormLinearTritonFn.forward`'s `length` input).
-from miniworld_engine.autotune.shape_key import both_key, pack
+from miniworld_engine.kernels._shape_key import both_key, pack
 from miniworld_engine.kernels._compile import opaque
 
 # torch/triton-only — safe to import eagerly; this IS the LN-part backward.
@@ -117,6 +117,21 @@ class LayerNormLinearTritonFn(torch.autograd.Function):
         return dx.reshape(ctx.input_shape), dg, db_ln, dW, db, None, None
 
 
+def _layernorm(x, weight, bias, eps):
+    """CUDA LayerNorm of ``x`` (the deleted ``layernorm.interface.layernorm_kernel`` for a CUDA tensor): the pipelined H100
+    hand-CUDA kernels where they serve, else the Triton LayerNorm."""
+    from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
+
+    if weight is None or bias is None:
+        return triton_layernorm(x, weight, bias, eps)
+    from miniworld_engine.kernels.layernorm.cuda import pipe
+
+    x, weight, bias = x.contiguous(), weight.contiguous(), bias.contiguous()
+    if pipe.serves(x):
+        return pipe.layernorm_pipe(x, weight, bias, eps)
+    return triton_layernorm(x, weight, bias, eps)
+
+
 def layernorm_linear_triton_fn(x, ln_weight, ln_bias, weight, bias=None, eps: float = 1e-5,
                                length: int | None = None):
     """Trainable LayerNormLinear (Triton fwd + cuBLAS/Triton bwd).
@@ -129,9 +144,7 @@ def layernorm_linear_triton_fn(x, ln_weight, ln_bias, weight, bias=None, eps: fl
             x.to(acc), (x.shape[-1],), ln_weight.to(acc), ln_bias.to(acc), eps)
         return torch.nn.functional.linear(xn.to(x.dtype), weight, bias)
     if x.dtype == torch.float32:
-        from miniworld_engine.kernels.layernorm.interface import layernorm_kernel
         # Keep a pre-flatten leading dimension for the norm's cache-key contract.
-        xn = layernorm_kernel(x.unsqueeze(0) if x.ndim == 2 else x,
-                              ln_weight, ln_bias, eps).reshape(x.shape)
+        xn = _layernorm(x.unsqueeze(0) if x.ndim == 2 else x, ln_weight, ln_bias, eps).reshape(x.shape)
         return torch.nn.functional.linear(xn, weight, bias)
     return LayerNormLinearTritonFn.apply(x, ln_weight, ln_bias, weight, bias, eps, length)

@@ -8,15 +8,17 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 # Both recompute kernels are level=both in kernels/registry/registry.csv, so the key is `both_key(L)` --
 # L is the token/atom count, NOT the row count M these launchers receive (x reaches them already
 # flattened, and M = L*L for a pair view). Both launchers take it from their caller.
-from miniworld_engine.autotune.shape_key import both_key, pack
+from miniworld_engine.kernels._shape_key import both_key, pack
 
 
-@triton.autotune(configs=configs_for("layernorm_fwd_recompute_triton"), key=['shape_key'])
+@configured('layernorm_fwd_recompute_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _xnormed_kernel(x_ptr, g_ptr, b_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1,
                     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key):
@@ -64,7 +66,9 @@ def _recompute_xnormed(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
     )
     return y
 
-@triton.autotune(configs=configs_for("layernorm_fwd_recompute_noaffine_triton"), key=['shape_key'])
+@configured('layernorm_fwd_recompute_noaffine_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _xhat_kernel(x_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1,
                  BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key):

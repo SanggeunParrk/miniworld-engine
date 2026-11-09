@@ -1,44 +1,85 @@
-"""Production ProteinMPNN model with semantic module and checkpoint structure."""
+"""ProteinMPNN: backbone KNN features, a node/edge message-passing encoder, a teacher-forced decoder (with its decoding masks) and the
+output projection.
+
+Each module is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forward_pytorch`` is the reference.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
-from miniworld_engine.kernels.mpnn_edge_dropout import EdgeDropoutBackend
-from miniworld_engine.kernels.mpnn_edge_layernorm import EdgeNormBackend
-from miniworld_engine.kernels.mpnn_edge_mlp import EdgeMLPBackend
-from miniworld_engine.kernels.mpnn_edge_tail import EdgeTailBackend
-from miniworld_engine.kernels.mpnn_message import MessageBackend
-from miniworld_engine.kernels.mpnn_node_message import NodeMessageBackend
-from miniworld_engine.kernels.mpnn_relative_position import RelativePositionBackend
-from miniworld_engine.modules.mpnn._functional import gather_neighbors, lecun_normal_
-from miniworld_engine.modules.mpnn.features import (
-    BackboneFeatures,
-    FeatureBackend,
-    KNNBackend,
-)
-from miniworld_engine.modules.mpnn.layers import (
-    DEFAULT_BLOCK_LINEAR_MIN_EDGES,
-    DecoderLayer,
-    DecoderNodeW1Recompute,
-    EdgeW1Recompute,
-    EncoderExecutionPath,
-    EncoderLayer,
-    EncoderNodeW1Recompute,
-    TransitionRecompute,
-)
-from miniworld_engine.modules.mpnn.masking import build_decoding_masks
+from miniworld_engine.modules.mpnn._functional import lecun_normal_
+from miniworld_engine.modules.mpnn.features import BackboneFeatures
+from miniworld_engine.modules.mpnn.layers import DecoderLayer, EncoderLayer
+from miniworld_engine.modules.primitives import BackendModule, key_mask, random_input
+
+
+def build_decoding_masks(
+    neighbor_indices: torch.Tensor,
+    residue_mask: torch.Tensor,
+    decoding_order: torch.Tensor,
+    patch_index: torch.Tensor,
+    fixed_decoding_order_length: int | torch.Tensor = 0,
+    edge_mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return future/backbone and past/sequence masks for each graph edge."""
+    batch, length = decoding_order.shape
+    decode_rank = torch.empty_like(decoding_order)
+    steps = torch.arange(length, device=decoding_order.device).expand(batch, -1)
+    decode_rank.scatter_(1, decoding_order, steps)
+    decode_group = torch.gather(patch_index, 1, decode_rank)
+    neighbor_group = torch.gather(
+        decode_group.unsqueeze(1).expand(-1, length, -1),
+        2,
+        neighbor_indices,
+    )
+    past = (decode_group.unsqueeze(2) > neighbor_group).unsqueeze(-1)
+    if isinstance(fixed_decoding_order_length, torch.Tensor):
+        fixed_lengths = fixed_decoding_order_length.to(
+            device=decode_rank.device, dtype=decode_rank.dtype
+        )
+        if fixed_lengths.ndim == 0:
+            fixed_lengths = fixed_lengths.expand(batch)
+        if fixed_lengths.shape != (batch,):
+            raise ValueError(
+                "fixed_decoding_order_length must be a scalar or have shape [batch]"
+            )
+        motif = decode_rank < fixed_lengths.unsqueeze(1)
+        has_fixed_positions = True
+    else:
+        motif = decode_rank < fixed_decoding_order_length
+        has_fixed_positions = fixed_decoding_order_length != 0
+
+    if has_fixed_positions:
+        motif_neighbor = torch.gather(
+            motif.unsqueeze(1).expand(-1, length, -1), 2, neighbor_indices
+        )
+        past = past | motif_neighbor.unsqueeze(-1)
+        query_index = torch.arange(length, device=neighbor_indices.device).view(
+            1, length, 1
+        )
+        motif_self_edge = (neighbor_indices == query_index) & motif.unsqueeze(-1)
+        past = past & ~motif_self_edge.unsqueeze(-1)
+
+    if edge_mask is None:
+        valid_edge = residue_mask.reshape(-1, length, 1, 1)
+    else:
+        if edge_mask.shape != neighbor_indices.shape:
+            raise ValueError("edge_mask must have the same shape as neighbor_indices")
+        valid_edge = edge_mask.unsqueeze(-1)
+    past_mask = valid_edge * past
+    future_mask = valid_edge * (~past)
+    return future_mask, past_mask
 
 
 @dataclass(frozen=True)
 class ProteinMPNNConfig:
-    """Architecture and execution policy for :class:`ProteinMPNN`."""
+    """Architecture of :class:`ProteinMPNN`."""
 
     sequence_vocabulary: int = 21
     output_vocabulary: int = 21
@@ -50,22 +91,10 @@ class ProteinMPNNConfig:
     k_neighbors: int = 32
     coordinate_noise: float = 0.5
     dropout: float = 0.1
-    block_linear_min_edges: int = DEFAULT_BLOCK_LINEAR_MIN_EDGES
-    message_backend: MessageBackend = "auto"
-    edge_mlp_backend: EdgeMLPBackend = "auto"
-    edge_norm_backend: EdgeNormBackend = "auto"
-    feature_backend: FeatureBackend = "auto"
-    relative_position_backend: RelativePositionBackend = "off"
-    knn_backend: KNNBackend = "cdist"
-    knn_query_chunk: int = 2048
-    knn_cutoff: float = 16.0
-    edge_w1_recompute: EdgeW1Recompute = "off"
-    encoder_node_w1_recompute: EncoderNodeW1Recompute = "off"
-    decoder_node_w1_recompute: DecoderNodeW1Recompute = "off"
-    transition_recompute: TransitionRecompute = "off"
-    edge_dropout_backend: EdgeDropoutBackend = "auto"
-    edge_tail_backend: EdgeTailBackend = "off"
-    node_message_backend: NodeMessageBackend = "off"
+    #: The `"triton"` backend: the encoder layers run the fused node-message and edge-tail kernels (the unfused children otherwise).
+    fused_encoder: bool = True
+    #: The `"triton"` backend, training: kernels recompute their GEMM outputs in backward instead of saving them (less memory, more time).
+    replay_in_backward: bool = False
 
     def __post_init__(self) -> None:
         positive = {
@@ -85,115 +114,6 @@ class ProteinMPNNConfig:
             raise ValueError("coordinate_noise must be non-negative")
         if not 0 <= self.dropout < 1:
             raise ValueError("dropout must satisfy 0 <= dropout < 1")
-        if self.block_linear_min_edges < 0:
-            raise ValueError("block_linear_min_edges must be non-negative")
-        if self.message_backend not in {
-            "auto",
-            "pytorch",
-            "triton",
-            "triton_compute",
-            "triton_memory",
-        }:
-            raise ValueError(
-                "message_backend must be one of 'auto', 'pytorch', 'triton', "
-                "'triton_compute', or 'triton_memory'"
-            )
-        if self.edge_mlp_backend not in {
-            "auto",
-            "pytorch",
-            "triton_compute",
-            "triton_memory",
-        }:
-            raise ValueError(
-                "edge_mlp_backend must be one of 'auto', 'pytorch', "
-                "'triton_compute', or 'triton_memory'"
-            )
-        if self.edge_norm_backend not in {"auto", "pytorch", "memory"}:
-            raise ValueError(
-                "edge_norm_backend must be one of 'auto', 'pytorch', or 'memory'"
-            )
-        if self.edge_dropout_backend not in {"auto", "pytorch", "bitpack"}:
-            raise ValueError(
-                "edge_dropout_backend must be one of 'auto', 'pytorch', or 'bitpack'"
-            )
-        if self.feature_backend not in {"auto", "pytorch", "recompute", "memory"}:
-            raise ValueError(
-                "feature_backend must be one of 'auto', 'pytorch', 'recompute', or 'memory'"
-            )
-        if self.relative_position_backend not in {"off", "index_add", "triton"}:
-            raise ValueError(
-                "relative_position_backend must be one of 'off', 'index_add', "
-                "or 'triton'"
-            )
-        if self.knn_backend not in {"cdist", "chunked", "grid_cutoff", "segment"}:
-            raise ValueError(
-                "knn_backend must be one of 'cdist', 'chunked', 'grid_cutoff', "
-                "or 'segment'"
-            )
-        if self.knn_query_chunk <= 0:
-            raise ValueError("knn_query_chunk must be positive")
-        if self.knn_cutoff <= 0:
-            raise ValueError("knn_cutoff must be positive")
-        if self.edge_w1_recompute not in {"off", "checkpoint"}:
-            raise ValueError("edge_w1_recompute must be one of 'off' or 'checkpoint'")
-        if (
-            self.edge_w1_recompute == "checkpoint"
-            and self.edge_mlp_backend != "triton_memory"
-        ):
-            raise ValueError(
-                "edge_w1_recompute='checkpoint' requires "
-                "edge_mlp_backend='triton_memory'"
-            )
-        if self.encoder_node_w1_recompute not in {"off", "checkpoint"}:
-            raise ValueError(
-                "encoder_node_w1_recompute must be one of 'off' or 'checkpoint'"
-            )
-        if (
-            self.encoder_node_w1_recompute == "checkpoint"
-            and self.message_backend != "triton_memory"
-        ):
-            raise ValueError(
-                "encoder_node_w1_recompute='checkpoint' requires "
-                "message_backend='triton_memory'"
-            )
-        if self.decoder_node_w1_recompute not in {"off", "checkpoint"}:
-            raise ValueError(
-                "decoder_node_w1_recompute must be one of 'off' or 'checkpoint'"
-            )
-        if (
-            self.decoder_node_w1_recompute == "checkpoint"
-            and self.message_backend != "triton_memory"
-        ):
-            raise ValueError(
-                "decoder_node_w1_recompute='checkpoint' requires "
-                "message_backend='triton_memory'"
-            )
-        if self.transition_recompute not in {"off", "update"}:
-            raise ValueError("transition_recompute must be one of 'off' or 'update'")
-        if self.edge_tail_backend not in {"off", "triton", "triton_compute"}:
-            raise ValueError(
-                "edge_tail_backend must be one of 'off', 'triton', or 'triton_compute'"
-            )
-        if self.node_message_backend not in {"off", "triton", "triton_compute"}:
-            raise ValueError("node_message_backend must be off, triton, or triton_compute")
-        if (
-            self.node_message_backend != "off"
-            and self.encoder_node_w1_recompute != "off"
-        ):
-            # Both fused policies own the complete projection, so a checkpoint
-            # around the separate projection would never engage.
-            raise ValueError(
-                f"node_message_backend={self.node_message_backend!r} subsumes encoder_node_w1_recompute; "
-                "set encoder_node_w1_recompute='off'"
-            )
-        if self.edge_tail_backend != "off" and self.edge_w1_recompute != "off":
-            # The fused tail already replays the whole edge update in backward, so a
-            # second checkpoint around part of it would be dead configuration that
-            # silently never engages.
-            raise ValueError(
-                "a fused edge_tail_backend subsumes edge_w1_recompute; set "
-                "edge_w1_recompute='off'"
-            )
 
 
 @dataclass(frozen=True)
@@ -204,18 +124,19 @@ class EncodedMPNN:
     edge_states: torch.Tensor
     neighbor_indices: torch.Tensor
     residue_mask: torch.Tensor
+    edge_mask: torch.Tensor
     _owner_id: int
     _module_training: bool
     _training_messages: bool
-    edge_mask: torch.Tensor | None = None
 
 
-class MPNNEncoder(nn.Module):
-    """Stack of semantic node/edge encoder layers."""
+class MPNNEncoder(BackendModule):
+    """Stack of node/edge encoder layers."""
 
-    def __init__(self, config: ProteinMPNNConfig) -> None:
+    backends = ("pytorch",)
+
+    def __init__(self, config: ProteinMPNNConfig, *, backend: str = "pytorch") -> None:
         super().__init__()
-        self.encoder_node_w1_recompute = config.encoder_node_w1_recompute
         self.layers = nn.ModuleList(
             [
                 EncoderLayer(
@@ -224,20 +145,15 @@ class MPNNEncoder(nn.Module):
                     config.hidden_width,
                     config.dropout,
                     config.k_neighbors,
-                    config.message_backend,
-                    config.edge_mlp_backend,
-                    config.edge_w1_recompute,
-                    config.edge_norm_backend,
-                    config.transition_recompute,
-                    config.edge_dropout_backend,
-                    config.edge_tail_backend,
-                    config.node_message_backend,
+                    fused=config.fused_encoder,
+                    replay_in_backward=config.replay_in_backward,
                 )
                 for _ in range(config.encoder_depth)
             ]
         )
+        self.set_backend(backend)
 
-    def forward(
+    def _forward_pytorch(
         self,
         node_states: torch.Tensor,
         edge_states: torch.Tensor,
@@ -246,55 +162,29 @@ class MPNNEncoder(nn.Module):
         neighbor_mask: torch.Tensor,
         *,
         training_messages: bool,
-        block_linear: bool,
         checkpoint_layers: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         for index, layer in enumerate(self.layers):
-            checkpoint_node_w1 = (
-                training_messages
-                and block_linear
-                and not checkpoint_layers
-                and self.encoder_node_w1_recompute == "checkpoint"
-            )
-            if checkpoint_node_w1 and index == 0:
-                execution_path: EncoderExecutionPath = "zero_node_recompute"
-            elif checkpoint_node_w1:
-                execution_path = "node_recompute"
-            elif training_messages and block_linear and index == 0:
-                execution_path = "zero_node_training"
-            elif training_messages and not block_linear:
-                execution_path = "dense_training"
-            else:
-                execution_path = "block"
-
+            # Layer 0 sees zero node states: in training its node message takes only the edge block of the projection.
+            zero_nodes = training_messages and index == 0
             if checkpoint_layers:
                 node_states, edge_states = torch.utils.checkpoint.checkpoint(
-                    layer,
-                    node_states,
-                    edge_states,
-                    neighbor_indices,
-                    residue_mask,
-                    neighbor_mask,
-                    use_reentrant=False,
-                    execution_path=execution_path,
-                    allow_transition_recompute=False,
+                    layer, node_states, edge_states, neighbor_indices, residue_mask, neighbor_mask,
+                    use_reentrant=False, zero_nodes=zero_nodes,
                 )
             else:
                 node_states, edge_states = layer(
-                    node_states,
-                    edge_states,
-                    neighbor_indices,
-                    residue_mask,
-                    neighbor_mask,
-                    execution_path=execution_path,
+                    node_states, edge_states, neighbor_indices, residue_mask, neighbor_mask, zero_nodes=zero_nodes
                 )
         return node_states, edge_states
 
 
-class MPNNDecoder(nn.Module):
+class MPNNDecoder(BackendModule):
     """Stack of teacher-forced decoder layers."""
 
-    def __init__(self, config: ProteinMPNNConfig) -> None:
+    backends = ("pytorch",)
+
+    def __init__(self, config: ProteinMPNNConfig, *, backend: str = "pytorch") -> None:
         super().__init__()
         self.layers = nn.ModuleList(
             [
@@ -304,15 +194,14 @@ class MPNNDecoder(nn.Module):
                     config.hidden_width,
                     config.dropout,
                     config.k_neighbors,
-                    config.message_backend,
-                    config.transition_recompute,
-                    config.decoder_node_w1_recompute,
+                    replay_in_backward=config.replay_in_backward,
                 )
                 for _ in range(config.decoder_depth)
             ]
         )
+        self.set_backend(backend)
 
-    def forward(
+    def _forward_pytorch(
         self,
         encoder_nodes: torch.Tensor,
         edge_states: torch.Tensor,
@@ -323,129 +212,87 @@ class MPNNDecoder(nn.Module):
         past_mask: torch.Tensor,
         edge_mask: torch.Tensor,
         *,
-        training_messages: bool,
-        block_linear: bool,
         checkpoint_layers: bool,
     ) -> torch.Tensor:
         node_states = encoder_nodes
-        if training_messages and not block_linear:
-            edge_context = (future_mask + past_mask).to(edge_states.dtype) * edge_states
-            sequence_context = past_mask.to(sequence_features.dtype) * gather_neighbors(
-                sequence_features, neighbor_indices
-            )
-            encoder_context = future_mask.to(encoder_nodes.dtype) * gather_neighbors(
-                encoder_nodes, neighbor_indices
-            )
-            for decoder_layer in self.layers:
-                layer = cast(DecoderLayer, decoder_layer)
-                if checkpoint_layers:
-                    node_states = torch.utils.checkpoint.checkpoint(
-                        layer.forward_dense_training,
-                        node_states,
-                        edge_context,
-                        sequence_context,
-                        encoder_context,
-                        neighbor_indices,
-                        past_mask,
-                        residue_mask,
-                        edge_mask,
-                        use_reentrant=False,
-                        allow_transition_recompute=False,
-                    )
-                else:
-                    node_states = layer.forward_dense_training(
-                        node_states,
-                        edge_context,
-                        sequence_context,
-                        encoder_context,
-                        neighbor_indices,
-                        past_mask,
-                        residue_mask,
-                        edge_mask,
-                    )
-            return node_states
-
-        # Every layer's packed projection feeds this same tensor to an autocast
-        # ``F.linear``, which casts it to the autocast dtype. Autocast caches that
-        # cast only for leaves, so three layers would each retain a distinct
-        # edge-sized copy of the identical value. Casting once collapses them into
-        # one saved tensor without changing any result.
+        # Every layer's packed projection feeds this same tensor to an autocast ``F.linear``, which casts it to the autocast dtype.
+        # Autocast caches that cast only for leaves, so three layers would each retain a distinct edge-sized copy of the identical
+        # value. Casting once collapses them into one saved tensor without changing any result.
         if torch.is_autocast_enabled("cuda") and edge_states.is_cuda:
             autocast_dtype = torch.get_autocast_dtype("cuda")
             if edge_states.dtype != autocast_dtype:
                 edge_states = edge_states.to(autocast_dtype)
 
         for layer in self.layers:
+            args = (node_states, edge_states, sequence_features, encoder_nodes, neighbor_indices, future_mask, past_mask,
+                    residue_mask, edge_mask)
             if checkpoint_layers:
-                node_states = torch.utils.checkpoint.checkpoint(
-                    layer,
-                    node_states,
-                    edge_states,
-                    sequence_features,
-                    encoder_nodes,
-                    neighbor_indices,
-                    future_mask,
-                    past_mask,
-                    residue_mask,
-                    edge_mask,
-                    use_reentrant=False,
-                    allow_transition_recompute=False,
-                )
+                node_states = torch.utils.checkpoint.checkpoint(layer, *args, use_reentrant=False)
             else:
-                node_states = layer(
-                    node_states,
-                    edge_states,
-                    sequence_features,
-                    encoder_nodes,
-                    neighbor_indices,
-                    future_mask,
-                    past_mask,
-                    residue_mask,
-                    edge_mask,
-                )
+                node_states = layer(*args)
         return node_states
 
 
-class ProteinMPNN(nn.Module):
-    """Clean production MPNN preserving the frozen reference mathematics."""
+class ProteinMPNN(BackendModule):
+    """ProteinMPNN preserving the frozen reference mathematics.
 
-    def __init__(self, config: ProteinMPNNConfig | None = None) -> None:
+    No ``"anthropic"`` backend: the release's proteinmpnn/ kit binds no kernel for the model's math (it drives the stock dauparas package in
+    fp32 under no_grad, neighbour scale 30 where this module divides by ``k_neighbors``; its one Triton kernel is the sampler's multinomial
+    draw), and cuEquivariance has no message-passing op.
+
+    ``"triton"``: the composition with every child that has a ``"triton"`` backend set to it. Features: the relative-position embedding
+    (:class:`~miniworld_engine.modules.mpnn.features.RelativePositionEmbedding`, its bucket-reduction backward). Encoder layers
+    (:class:`~miniworld_engine.modules.mpnn.layers.EncoderLayer`): the fused node-message and edge-tail kernels (``config.fused_encoder``,
+    the default), or the unfused children -- the node message on the message-reduction kernels, the edge message on the edge-MLP kernels
+    with the packed-mask edge dropout and the memory edge LayerNorm. Decoder layers: the node messages on the message-reduction kernels.
+    ``config.replay_in_backward`` picks the recompute kernels over the saved-activation ones in training. Packed projections,
+    transitions, the other norms and the output projection are the PyTorch statements. Each child states its range (bf16, widths 128,
+    48 neighbours) and raises ``BackendUnsupported`` outside it; CUDA has no kernel of these families (``kernels/mpnn_*`` hold Triton
+    only), so no ``"cuda"`` backend."""
+    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    backends = ("pytorch", "triton")
+
+    def __init__(self, config: ProteinMPNNConfig | None = None, *, backend: str = "pytorch") -> None:
         super().__init__()
         self.config = config or ProteinMPNNConfig()
         config = self.config
 
         self.backbone_features = BackboneFeatures(
-            config.edge_width,
-            k_neighbors=config.k_neighbors,
-            coordinate_noise=config.coordinate_noise,
-            feature_backend=config.feature_backend,
-            relative_position_backend=config.relative_position_backend,
-            edge_norm_backend=config.edge_norm_backend,
-            knn_backend=config.knn_backend,
-            knn_query_chunk=config.knn_query_chunk,
-            knn_cutoff=config.knn_cutoff,
+            config.edge_width, k_neighbors=config.k_neighbors, coordinate_noise=config.coordinate_noise
         )
-        self.edge_input_projection = nn.Linear(
-            config.edge_width, config.edge_width, bias=True
-        )
-        self.sequence_embedding = nn.Embedding(
-            config.sequence_vocabulary, config.node_width
-        )
+        self.edge_input_projection = nn.Linear(config.edge_width, config.edge_width, bias=True)
+        self.sequence_embedding = nn.Embedding(config.sequence_vocabulary, config.node_width)
         self.encoder = MPNNEncoder(config)
         self.decoder = MPNNDecoder(config)
-        self.output_projection = nn.Linear(
-            config.node_width, config.output_vocabulary, bias=True
-        )
+        self.output_projection = nn.Linear(config.node_width, config.output_vocabulary, bias=True)
 
         lecun_normal_(self.edge_input_projection)
         lecun_normal_(self.sequence_embedding)
         nn.init.zeros_(self.edge_input_projection.bias)
         nn.init.zeros_(self.output_projection.weight)
         nn.init.zeros_(self.output_projection.bias)
+        self.set_backend(backend)
 
-    def _uses_block_linear(self, edge_states: torch.Tensor) -> bool:
-        total_edges = edge_states.shape[0] * edge_states.shape[1] * edge_states.shape[2]
-        return total_edges >= self.config.block_linear_min_edges
+    def set_backend(self, backend: str = "pytorch"):
+        super().set_backend(backend)
+        for sub in self.modules():
+            if sub is not self and isinstance(sub, BackendModule):
+                sub.set_backend(backend if backend in sub.backends else "pytorch")
+        return self
+
+    def _supports_triton(self, backbone: torch.Tensor, *args, **kwargs) -> str | None:
+        if backbone.device.type != "cuda":
+            return "the Triton kernels run on CUDA tensors only"
+        c = self.config
+        if (c.node_width, c.edge_width, c.hidden_width) != (128, 128, 128):
+            return "the message kernels are built for node / edge / hidden width 128"
+        if c.k_neighbors != 48:
+            return f"k_neighbors {c.k_neighbors}: the message kernels are built for 48 neighbours"
+        return None
+
+    def _forward_triton(self, *args, **kwargs) -> torch.Tensor:
+        return self._forward_pytorch(*args, **kwargs)   # the composition; the message children run their "triton" backends
 
     def encode_backbone(
         self,
@@ -459,30 +306,14 @@ class ProteinMPNN(nn.Module):
     ) -> EncodedMPNN:
         """Encode geometry once for reuse across parallel sequence scores."""
         batch, length = backbone.shape[:2]
-        graph = self.backbone_features.build_graph(
-            backbone,
-            residue_mask,
-            residue_index,
-            chain_index,
-            segment_lengths,
-        )
+        graph = self.backbone_features(backbone, residue_mask, residue_index, chain_index, segment_lengths)
         edge_states = self.edge_input_projection(graph.edge_features)
-        edge_states = torch.where(
-            graph.edge_mask.bool().unsqueeze(-1),
-            edge_states,
-            torch.zeros_like(edge_states),
-        )
+        edge_states = torch.where(graph.edge_mask.bool().unsqueeze(-1), edge_states, torch.zeros_like(edge_states))
         node_states = edge_states.new_zeros((batch, length, self.config.node_width))
         training_messages = self.training and torch.is_grad_enabled()
         node_states, edge_states = self.encoder(
-            node_states,
-            edge_states,
-            graph.neighbor_indices,
-            residue_mask,
-            graph.edge_mask,
-            training_messages=training_messages,
-            block_linear=self._uses_block_linear(edge_states),
-            checkpoint_layers=checkpoint_layers,
+            node_states, edge_states, graph.neighbor_indices, residue_mask, graph.edge_mask,
+            training_messages=training_messages, checkpoint_layers=checkpoint_layers,
         )
         return EncodedMPNN(
             node_states=node_states,
@@ -510,46 +341,24 @@ class ProteinMPNN(nn.Module):
         training_messages = self.training and torch.is_grad_enabled()
         if encoded._owner_id != id(self):
             raise ValueError("encoded backbone belongs to a different model instance")
-        if (
-            encoded._module_training != self.training
-            or encoded._training_messages != training_messages
-        ):
+        if encoded._module_training != self.training or encoded._training_messages != training_messages:
             raise ValueError("encoded backbone was created in a different model mode")
 
         edge_mask = encoded.edge_mask
-        if edge_mask is None:
-            edge_mask = gather_neighbors(
-                encoded.residue_mask.unsqueeze(-1), encoded.neighbor_indices
-            ).squeeze(-1)
-            edge_mask = encoded.residue_mask.unsqueeze(-1) * edge_mask
         sequence_features = self.sequence_embedding(sequence)
         future_mask, past_mask = build_decoding_masks(
-            encoded.neighbor_indices,
-            encoded.residue_mask,
-            decoding_order,
-            patch_index,
-            fixed_decoding_order_length,
-            edge_mask,
+            encoded.neighbor_indices, encoded.residue_mask, decoding_order, patch_index, fixed_decoding_order_length, edge_mask
         )
         node_states = self.decoder(
-            encoded.node_states,
-            encoded.edge_states,
-            sequence_features,
-            encoded.neighbor_indices,
-            encoded.residue_mask,
-            future_mask,
-            past_mask,
-            edge_mask,
-            training_messages=training_messages,
-            block_linear=self._uses_block_linear(encoded.edge_states),
-            checkpoint_layers=checkpoint_layers,
+            encoded.node_states, encoded.edge_states, sequence_features, encoded.neighbor_indices, encoded.residue_mask,
+            future_mask, past_mask, edge_mask, checkpoint_layers=checkpoint_layers,
         )
         logits = self.output_projection(node_states)
         if return_log_prob:
             return F.log_softmax(logits, dim=-1)
         return logits.permute(0, 2, 1)
 
-    def forward(
+    def _forward_pytorch(
         self,
         backbone: torch.Tensor,
         sequence: torch.Tensor,
@@ -564,20 +373,27 @@ class ProteinMPNN(nn.Module):
         checkpoint_layers: bool = False,
         return_log_prob: bool = False,
     ) -> torch.Tensor:
+        """Logits ``[B, output_vocabulary, L]`` (or log-probabilities ``[B, L, output_vocabulary]`` with ``return_log_prob``)."""
         encoded = self.encode_backbone(
-            backbone,
-            residue_mask,
-            residue_index,
-            chain_index,
-            segment_lengths,
-            checkpoint_layers=checkpoint_layers,
+            backbone, residue_mask, residue_index, chain_index, segment_lengths, checkpoint_layers=checkpoint_layers
         )
         return self.score_sequence(
-            encoded,
-            sequence,
-            decoding_order,
-            patch_index,
-            fixed_decoding_order_length=fixed_decoding_order_length,
-            checkpoint_layers=checkpoint_layers,
+            encoded, sequence, decoding_order, patch_index,
+            fixed_decoding_order_length=fixed_decoding_order_length, checkpoint_layers=checkpoint_layers,
             return_log_prob=return_log_prob,
         )
+
+    def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
+        """``samples`` chains-of-two backbones of ``length`` residues (a random walk of 3.8 A CA steps, N / C / O within ~1 A of their CA;
+        real residues first), a random sequence and decoding order, one decoding patch per position."""
+        step = random_input((samples, length, 3), dtype=torch.float32, device=device, generator=generator)
+        ca = torch.cumsum(3.8 * step / step.norm(dim=-1, keepdim=True), dim=1)
+        offsets = random_input((samples, length, 4, 3), dtype=torch.float32, device=device, generator=generator)
+        offsets[:, :, 1] = 0.0
+        index = torch.arange(length, device=device).expand(samples, length).contiguous()
+        return {"backbone": (ca[:, :, None] + offsets).to(dtype),
+                "sequence": torch.randint(0, self.config.sequence_vocabulary, (samples, length), device=device, generator=generator),
+                "residue_mask": key_mask(samples, length, device=device), "residue_index": index,
+                "chain_index": (index >= length // 2).long(),
+                "decoding_order": torch.argsort(torch.rand((samples, length), device=device, generator=generator), dim=-1),
+                "patch_index": index}

@@ -40,7 +40,6 @@ from pathlib import Path
 import torch
 
 from miniworld_engine.kernels._device import num_sms
-from miniworld_engine import settings
 from miniworld_engine.kernels._tf32 import tf32_grid
 
 NH, DH, DM, DP = 4, 32, 128, 16
@@ -762,9 +761,6 @@ def _nfull(tiles, nsm_):
     costs 0.7-0.8 of a full one (round 5, 3072 / 6144 atoms). So: every tile split when the halves fit one wave; otherwise the tail beyond the
     whole waves split when ITS halves fit one wave (4096 atoms on 148 SMs: 148 full + 24 halves, 1.75 waves instead of 2); else none.
     settings.tf32_fused_units=full / half forces either."""
-    mode = settings.current().tf32_fused_units
-    if mode in ("full", "half"):
-        return tiles if mode == "full" else 0
     if 2 * tiles <= nsm_:
         return 0
     full = tiles // nsm_ * nsm_

@@ -7,12 +7,12 @@ import functools
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._device import num_sms
-from miniworld_engine.modules.exceptions import ImplementationType
 
 #: Widths with a packaged bidirectional CUDA training path (D64, D128 and the wide port).
 TRAINING_WIDTHS = (64, 128, 256, 384, 512)
+#: The old ``settings.trimul_h100_training_widths`` default (the settings module is gone).
+_POLICY_TRAINING_WIDTHS = (64, 128, 256, 384, 512)
 #: Widths with a single-direction CUDA training path (D64: port of the bidirectional D64 kernels; D128: B1/B7;
 #: D256/384: the wide sources at hidden D).$
 SINGLE_TRAINING_WIDTHS = (64, 128, 256, 384, 512)
@@ -63,11 +63,6 @@ PER_SAMPLE_LEGACY_TRAINING = {
     (384, 384, True): 4, (384, 384, False): 4, (384, 768, True): 16, (384, 768, False): 4,
     (512, 384, True): 16, (512, 384, False): 16, (512, 768, True): 16, (512, 768, False): 16,
 }
-#: Bidirectional hidden 2 D at D64 (``h100_d64_h2``), one sample per launch, bytes per pair token per channel (D = 64), from the planes
-#: it allocates (K1 planes 1024 B + contraction 512 B + statistics per token held; backward adds dt / dl / dr / dp / dgl / dxn):
-#: held from forward to backward, and the forward + backward peak (x / dy excluded).
-_H2_HELD_PER_CHANNEL = 26.0
-_H2_PEAK_PER_CHANNEL = 70.0
 #: The preserved kernels at B = 1, bytes per pair token per channel (measured, x / dy excluded): held from forward to backward and
 #: the forward + backward peak, (D, bidirectional).
 _LEGACY_HELD_PER_CHANNEL = {(256, True): 24.1, (384, True): 40.1, (512, True): 40.1,
@@ -91,18 +86,9 @@ def _hidden_twice(module, pair) -> bool:
     return hasattr(module, "outgoing") and pair.shape[-1] in (64, 128) and module.d_hidden == 2 * pair.shape[-1]
 
 
-def _hidden_twice_bidirectional(module, pair) -> bool:
-    """The bidirectional module with hidden width 2 D (per direction) at D64: 8 D planes out of K1, LN_out over 4 D = 256 channels.
-    Inference: the packaged K1 / K3 unit (c_z 64, 256 channels, ``TILE_TABLE``); training: ``h100_d64_h2`` (the 256 channels run as
-    two halves of the D64 backward, ``d64_h2_bwd.cu``)."""
-    return not hasattr(module, "outgoing") and pair.shape[-1] == 64 and module.d_hidden == 128
-
-
 def _hidden_ok(module, pair) -> bool:
-    """The hidden widths the D64 / D128 native paths take: the pair width, or twice it in one direction (``_hidden_twice``); at D64 the
-    bidirectional module also takes hidden 2 D (``_hidden_twice_bidirectional``)."""
-    return (module.d_hidden == pair.shape[-1] or _hidden_twice(module, pair)
-            or _hidden_twice_bidirectional(module, pair))
+    """The hidden widths the D64 / D128 native paths take: the pair width, or twice it in one direction (``_hidden_twice``)."""
+    return module.d_hidden == pair.shape[-1] or _hidden_twice(module, pair)
 
 
 def _plan(module, pair, inference):
@@ -118,14 +104,6 @@ def _plan(module, pair, inference):
     tokens = d * n * n                                 # bytes per sample = coefficient x tokens
     peak = _WORKING_SET_PER_CHANNEL[(not inference, planes4, d <= 128)] * 1.05
     budget = CHUNK_MEMORY_FRACTION * _total_memory(pair.device.index if pair.device.index is not None else 0)
-    if _hidden_twice_bidirectional(module, pair):
-        if not inference:
-            # one sample per launch (``h100_d64_h2``): plain when every sample's saved state fits next to one sample's backward
-            # workspace and the caller's x / y / dy / dx, checkpointed otherwise
-            held = _H2_HELD_PER_CHANNEL * 1.05
-            plain = (bsz * (_CALLER_PER_CHANNEL + held - 2.0) + (_H2_PEAK_PER_CHANNEL * 1.05 - held)) * tokens <= budget
-            return 1, not plain
-        peak *= 1.8                                    # 8 D planes out of K1 instead of 4 (an over-estimate: only the planes double)
     limit = max(1, min(max_batch(d), (2 ** 31 - 1) // (n * n)))
     if (not inference and d >= 256 and bsz <= PER_SAMPLE_LEGACY_TRAINING.get((d, pair.shape[1], bidirectional), 0)
             and _legacy_native_faster(module, pair, False)):
@@ -289,12 +267,6 @@ def _selected_d64_training(module, pair):
                         not hasattr(module, "outgoing"))
 
 
-def _selected_wide_training(module, pair):
-    """The qualified D256+ native cells (the D128 default stays on the framework RNG so the module compiles fullgraph)."""
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import bidi_training
-    return _selected_uni_d256(module, pair) or (not hasattr(module, "outgoing") and bidi_training(pair))
-
-
 def _selected_native_training(module, pair):
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
         bidi_training,
@@ -312,16 +284,11 @@ def serves(module, pair: torch.Tensor) -> bool:
 
 
 def _serves_one(module, pair: torch.Tensor) -> bool:
-    policy = settings.current()
-    if (
-        module.implementation != ImplementationType.MINIWORLD
-        or policy.force_portable_kernels
-    ):
-        return False
+    # the caller (the module's "cuda" backend) chose this path; the old settings default of the training widths is inlined
     if _b200style_serves(module, pair):
-        return pair.shape[-1] in policy.trimul_h100_training_widths
+        return pair.shape[-1] in _POLICY_TRAINING_WIDTHS
     if (
-        pair.shape[-1] not in policy.trimul_h100_training_widths
+        pair.shape[-1] not in _POLICY_TRAINING_WIDTHS
         or pair.shape[-1] not in TRAINING_WIDTHS
     ):
         return False
@@ -475,8 +442,6 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
     """Use native FP32 master gradients where qualified; preserve cast-based fallbacks."""
     if _b200style_serves(module, pair):
         return _b200style_update(module, pair, mask, dropscale, bidirectional)
-    if _hidden_twice_bidirectional(module, pair):
-        return _update_hidden2(module, pair, mask, dropscale)
     from miniworld_engine.kernels.trimul_inproj.cuda.h100_training import (
         bidirectional_trimul,
     )
@@ -488,26 +453,6 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
     # hidden 2 D in one direction: the bidirectional D64 / D128 kernels (``_hidden_twice``), whatever the bucket policy
     planes4 = bidirectional or _hidden_twice(module, pair)
     preserve = preserve_training(d) or _selected_native_training(module, pair)
-    # (B samples take the preserved D128 kernels below: the general buckets run one sample)
-    if (_native_buckets_enabled(pair) and d != 64 and not preserve and pair.shape[0] == 1
-            and (bidirectional or not planes4)):
-        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import (
-            training_unit_scale,
-        )
-        from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_training import (
-            native_buckets,
-            single_trimul,
-        )
-        empty_mask = torch.empty(0,device=pair.device,dtype=torch.bool) if mask is None else mask
-        scale = training_unit_scale(pair) if dropscale is None else dropscale.reshape(n,d)
-        args = (pair, module.to_left.weight, module.to_left_gate.weight,
-                module.to_right.weight, module.to_right_gate.weight,
-                module.to_gate.weight, module.to_out.weight,
-                module.ln_pair.weight, module.ln_pair.bias,
-                module.ln_out.weight, module.ln_out.bias, empty_mask, scale)
-        if not bidirectional:
-            return single_trimul(module.outgoing, *args)
-        return native_buckets(True, True, *args)
     # Bidirectional D128 (and hidden 2 D in one direction, its kernels) takes the token mask [n]: its front K1 and B7 form m[i] & m[j]
     # themselves. The other paths read a bf16 pair mask in forward and backward, so it is built once here.
     token_path = planes4 and d == 128 and (mask is None or mask.ndim == 2)
@@ -590,41 +535,11 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
     )
 
 
-def _update_hidden2(module, pair, mask, dropscale):
-    """Bidirectional hidden 2 D at D64 (``_hidden_twice_bidirectional``): the dedicated hidden-256 training path."""
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import (
-        training_unit_scale,
-    )
-    from miniworld_engine.kernels.trimul_inproj.cuda.h100_d64_h2 import (
-        bidirectional_trimul,
-    )
-
-    rows = pair.shape[0] * pair.shape[1]
-    token = torch.empty(0, device=pair.device, dtype=torch.bool) if mask is None else mask.contiguous()
-    scale = training_unit_scale(pair) if dropscale is None else dropscale.reshape(rows, pair.shape[-1]).contiguous()
-    weights = (module.to_left.weight, module.to_left_gate.weight, module.to_right.weight, module.to_right_gate.weight,
-               module.to_gate.weight, module.to_out.weight)
-    return bidirectional_trimul(
-        pair,
-        *(w if w.dtype in (torch.bfloat16, torch.float32) else w.to(pair.dtype).contiguous() for w in weights),
-        module.ln_pair.weight, module.ln_pair.bias, module.ln_out.weight, module.ln_out.bias, token, scale)
-
-
 def _native_training_enabled():
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
         cuda_training_aux_enabled,
     )
     return cuda_training_aux_enabled()
-
-
-def native_training_dropout(module, pair, probability):
-    """Share the hand-CUDA Philox primitive; preserve PyTorch RNG progression. (B samples: the selection of one launch's chunk.)"""
-    one = _one_chunk(module, pair, False)
-    if not (_b200style_serves(module, one) or _selected_wide_training(module, one) or _selected_d64_training(module, one) or (one.shape[-1] == 64 and _native_training_enabled())) or not _serves_one(module, one):
-        return None
-    from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import _drop_scale
-    return _drop_scale(pair.detach(), probability).reshape(
-        pair.shape[0], 1, pair.shape[1], pair.shape[-1])
 
 
 def _native_residual_bucket(module, pair):
@@ -641,11 +556,7 @@ def serves_inference(
 
 
 def _serves_inference_one(module, pair, *, bidirectional, dropscale=None):
-    if (
-        module.implementation != ImplementationType.MINIWORLD
-        or settings.current().force_portable_kernels
-    ):
-        return False
+    # the caller (the module's "cuda" backend) chose this path
     if torch.is_grad_enabled() or dropscale is not None:
         return False
     if _b200style_serves(module, pair, inference=True) or _b200style_serves(module, pair, inference=True, padded=True):

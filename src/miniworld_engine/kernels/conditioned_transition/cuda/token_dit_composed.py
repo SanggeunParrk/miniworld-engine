@@ -15,7 +15,6 @@ import functools
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels.conditioned_transition.triton import token_dit_kernels as K
 from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import FusedTokenDiT
 

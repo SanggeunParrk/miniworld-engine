@@ -31,7 +31,7 @@ x_normed materialization.
 """
 
 from __future__ import annotations
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._compile import opaque
 
 import contextlib
@@ -42,7 +42,7 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import both_key, pack  # every kernel here is level=both
+from miniworld_engine.kernels._shape_key import both_key, pack  # every kernel here is level=both
 
 # ── dtype support ──────────────────────────────────────────────────────────────────────────────
 # The Triton LN kernels are dtype-generic (compute in fp32, store `element_ty`), so fp32/bf16/fp16
@@ -93,7 +93,9 @@ def _fp32_matmul_ctx(dtype):
 # register cap never won on `_ln_mat_kernel` (it was added for the m-major `_ln_bwd_kernel`).
 
 
-@triton.autotune(configs=configs_for("layernorm_fwd_saveact_strided_triton"), key=['shape_key'])
+@configured('layernorm_fwd_saveact_strided_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _ln_mat_kernel(X, Xn, Mean, Rstd, G, B, M, N: tl.constexpr, eps,
                    sx0, sx1, sn0, sn1,
@@ -197,9 +199,10 @@ def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, ep
 # ───────── backward: ONE LN-backward kernel → dx (arbitrary strides) + dγ + dβ (M-reduce) ─────
 
 
-@triton.autotune(configs=configs_for("layernorm_bwd_atomic_strided_triton"),
-                 key=['shape_key'],
-                 reset_to_zero=['DG', 'DB'])
+@configured('layernorm_bwd_atomic_strided_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, num_warps=4, num_stages=2),
+            reset_to_zero=['DG', 'DB'])
 @triton.jit
 def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
                    sdn0, sdn1, sx0, sx1, sdx0, sdx1,

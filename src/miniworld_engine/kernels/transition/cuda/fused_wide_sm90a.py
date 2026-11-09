@@ -33,7 +33,6 @@ from miniworld_engine.kernels import _cast_cuda
 from ..._compile import opaque
 from ._weights import transposed_contiguous
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
-from miniworld_engine import settings
 
 from .fused_sm90a import _cuda_prepare, _native_ext
 
@@ -81,7 +80,7 @@ def save_h_enabled(d: int) -> bool:
     switches it on for every D >= 384."""
     if d < 384:
         return False
-    return (d == 384 and _SAVE_H_D384) or settings.current().transition_wide_save_h
+    return (d == 384 and _SAVE_H_D384)
 
 
 def save_ab_enabled(d: int, rows: int = 0) -> bool:
@@ -181,28 +180,22 @@ def _ext(
 
 
 def _ext_for(x: torch.Tensor, save_ab: bool = False, n: int = 4):
-    if (
-        x.shape[-1] == 768
-    ):  # n = 2 only: saved a / b and the split forward are the whole path
-        return _ext(768, num_sms(x.device), save_ab=True, split_fwd=True, n=n)
-    if (
-        n != 4
-    ):  # the n = 4 experiments below are tuned for hidden = 4 D; other n runs the plain build
+    args, kwargs = _ext_args(x.shape[-1], x.shape[0], save_ab, n, num_sms(x.device))
+    return _ext(*args, **kwargs)
+
+
+def _ext_args(d: int, rows: int, save_ab: bool, n: int, sms: int) -> tuple[tuple, dict]:
+    """The ``_ext`` build that ``_ext_for`` picks for width ``d``, ``rows`` rows and ``sms`` SMs (no device asked)."""
+    if d == 768:  # n = 2 only: saved a / b and the split forward are the whole path
+        return (768, sms), {"save_ab": True, "split_fwd": True, "n": n}
+    if n != 4:  # the n = 4 experiments below are tuned for hidden = 4 D; other n runs the plain build
         # D64 backward: weight CTAs = hidden slices (n) x replicas; measured best 26 replicas at n = 2 (16 at n = 4)
-        repl = 26 if x.shape[-1] == 64 else 16
-        return _ext(x.shape[-1], num_sms(x.device), repl, n=n)
+        repl = 26 if d == 64 else 16
+        return (d, sms, repl), {"n": n}
     # The selected L768/D512 training path retains a/b; inference passes save_ab=False.
-    saved_tma = x.shape[-1] == 512 and _d512_saved_rows(x.shape[0]) and save_ab
-    return _ext(
-        x.shape[-1],
-        num_sms(x.device),
-        16,
-        save_ab,
-        save_ab and split_fwd_enabled(x.shape[-1], x.shape[0]),
-        affine_parallel=x.shape[-1] == 64,
-        gate_saved_tma=saved_tma,
-        gate_saved_no_h_stage=saved_tma,
-    )
+    saved_tma = d == 512 and _d512_saved_rows(rows) and save_ab
+    return (d, sms, 16, save_ab, save_ab and split_fwd_enabled(d, rows)), {
+        "affine_parallel": d == 64, "gate_saved_tma": saved_tma, "gate_saved_no_h_stage": saved_tma}
 
 
 @functools.lru_cache(maxsize=8)

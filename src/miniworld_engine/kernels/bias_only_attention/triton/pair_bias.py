@@ -30,8 +30,8 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels._tf32 import tf32_dot
@@ -47,12 +47,9 @@ def _bwd_warps(c: int) -> int:
 
 
 def _bwd_prune(configs, nargs, **meta):
-    """Over the DEFAULT config set and outside a build, the warps ``_bwd_warps`` picks for this channel count (the launch these kernels
-    had before they were tuned). A build (``settings.run_autotune``) searches every config, and a tuned cache's measured winners -- the
-    cache reader hands them through this prune again, as new Config objects -- are left as they are."""
-    from miniworld_engine import settings
-
-    if settings.current().run_autotune or not _from(configs, _BWD_DEFAULTS):
+    """Over the kernel's DEFAULT configs, the warps ``_bwd_warps`` picks for this channel count (the launch these kernels had before
+    they were tuned). Measured table entries (other Config objects) are left as they are."""
+    if not _from(configs, _ln_bias_bwd_kernel.default):
         return configs
     want = _bwd_warps(int(nargs["C"] if "C" in nargs else meta["C"]))   # C reaches the prune as a launch keyword
     keep = [c for c in configs if c.num_warps == want]
@@ -60,14 +57,13 @@ def _bwd_prune(configs, nargs, **meta):
 
 
 def _from(configs, live) -> bool:
-    """Are these configs (by identity) the live default list ``configs_for`` handed the autotuner, rather than measured winners?"""
+    """Are these configs (by identity) the kernel's own default list, rather than measured table entries?"""
     return all(any(c is d for d in live) for c in configs)
 
 
-_BWD_DEFAULTS = configs_for("bias_only_attention_bwd_layernorm_gemm_triton")
-
-
-@triton.autotune(configs=configs_for("bias_only_attention_layernorm_gemm_triton"), key=["shape_key"])
+@configured('bias_only_attention_layernorm_gemm_triton',
+            key=["shape_key"],
+            default=dict(BR=64, num_warps=4, num_stages=2))
 @triton.jit
 def _ln_bias_fwd_kernel(X, W, OUT, MEAN, RSTD, R, eps, shape_key, C: tl.constexpr, N: tl.constexpr, NP: tl.constexpr, BR: tl.constexpr):
     pid = tl.program_id(0).to(tl.int64)
@@ -87,8 +83,12 @@ def _ln_bias_fwd_kernel(X, W, OUT, MEAN, RSTD, R, eps, shape_key, C: tl.constexp
     tl.store(RSTD + rows, rstd, mask=rm)
 
 
-@triton.autotune(configs=configs_for("bias_only_attention_bwd_layernorm_gemm_triton"), key=["shape_key"],
-                 prune_configs_by={"early_config_prune": _bwd_prune}, reset_to_zero=["DW"])
+@configured('bias_only_attention_bwd_layernorm_gemm_triton',
+            key=["shape_key"],
+            default=[dict(BR=64, num_warps=4, num_stages=2),
+            dict(BR=64, num_warps=8, num_stages=2)],
+            prune=_bwd_prune,
+            reset_to_zero=["DW"])
 @triton.jit
 def _ln_bias_bwd_kernel(X, W, DL, MEAN, RSTD, DX, DW, R, shape_key, C: tl.constexpr, N: tl.constexpr, NP: tl.constexpr, BR: tl.constexpr):
     pid = tl.program_id(0).to(tl.int64)

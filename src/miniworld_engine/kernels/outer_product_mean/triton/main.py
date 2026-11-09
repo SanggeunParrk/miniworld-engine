@@ -37,8 +37,8 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import length_of, token_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import length_of, token_key
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._device import num_sms
 
@@ -58,7 +58,9 @@ def _divides(**axes):
 
 
 # ---------------------------------------------------------------------------------------------------- kernels
-@triton.autotune(configs=configs_for("outer_product_mean_layernorm_gemm_triton"), key=["shape_key", "HAS_MASK", "HAS_PBIAS", "K"])
+@configured('outer_product_mean_layernorm_gemm_triton',
+            key=["shape_key", "HAS_MASK", "HAS_PBIAS", "K"],
+            default=dict(BT=64, num_warps=4, num_stages=2))
 @triton.jit
 def _opm_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, BL, BR, A, B, T_, eps, shape_key,
                                CM: tl.constexpr, CH: tl.constexpr, K: tl.constexpr, HAS_MASK: tl.constexpr,
@@ -93,8 +95,41 @@ def _opm_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, BL, BR, A, B, T_, eps,
     tl.store(B + dst, b, mask=rm[:, None])
 
 
-@triton.autotune(configs=configs_for("outer_product_mean_epilogue_triton"), key=["shape_key", "HAS_RES", "NORM_FIRST"],
-                 prune_configs_by={"early_config_prune": _divides(BN="CZ", BKD="CH")})
+@configured('outer_product_mean_epilogue_triton',
+            key=["shape_key", "HAS_RES", "NORM_FIRST"],
+            default=[dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=2),
+            dict(TI=2, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=128, BN=64, BKD=4, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=128, BKD=4, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKD=2, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=8, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=3),
+            dict(TI=1, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=32, BN=64, BKD=4, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=32, BKD=4, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKD=1, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=2, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=1),
+            dict(TI=4, BJ=16, BN=64, BKD=4, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=256, BKD=4, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=1, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=4),
+            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=5),
+            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=6),
+            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=8, num_stages=3),
+            dict(TI=4, BJ=64, BN=64, BKD=2, num_warps=4, num_stages=3),
+            dict(TI=4, BJ=64, BN=64, BKD=2, num_warps=8, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKD=2, num_warps=8, num_stages=3),
+            dict(TI=4, BJ=64, BN=128, BKD=4, num_warps=4, num_stages=3),
+            dict(TI=4, BJ=64, BN=128, BKD=4, num_warps=8, num_stages=2),
+            dict(TI=4, BJ=64, BN=128, BKD=4, num_warps=8, num_stages=3),
+            dict(TI=4, BJ=64, BN=128, BKD=2, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=128, BKD=2, num_warps=4, num_stages=3),
+            dict(TI=4, BJ=64, BN=128, BKD=2, num_warps=8, num_stages=2),
+            dict(TI=4, BJ=64, BN=128, BKD=2, num_warps=8, num_stages=3),
+            dict(TI=4, BJ=128, BN=64, BKD=4, num_warps=4, num_stages=3),
+            dict(TI=4, BJ=128, BN=64, BKD=4, num_warps=8, num_stages=2)],
+            prune=_divides(BN="CZ", BKD="CH"))
 @triton.jit
 def _opm_epilogue_kernel(O, WOT, BIAS, NORM, RES, OUT, L, shape_key,
                          CH: tl.constexpr, CZ: tl.constexpr, HAS_RES: tl.constexpr, NORM_FIRST: tl.constexpr,
@@ -128,8 +163,41 @@ def _opm_epilogue_kernel(O, WOT, BIAS, NORM, RES, OUT, L, shape_key,
     tl.store(OUT + ptr, z.to(tl.bfloat16), mask=rm[:, None])
 
 
-@triton.autotune(configs=configs_for("outer_product_mean_bwd_epilogue_dx_triton"), key=["shape_key"],
-                 prune_configs_by={"early_config_prune": _divides(BKC="CZ", BN="CH2")})
+@configured('outer_product_mean_bwd_epilogue_dx_triton',
+            key=["shape_key"],
+            default=[dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=2),
+            dict(TI=2, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=128, BN=64, BKC=64, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=128, BKC=64, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKC=128, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=8, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=3),
+            dict(TI=1, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=32, BN=64, BKC=64, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=32, BKC=64, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKC=32, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=2, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=1),
+            dict(TI=4, BJ=16, BN=64, BKC=64, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=256, BKC=64, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKC=16, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=1, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=4),
+            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=5),
+            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=6),
+            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=8, num_stages=3),
+            dict(TI=4, BJ=64, BN=64, BKC=128, num_warps=4, num_stages=3),
+            dict(TI=4, BJ=64, BN=64, BKC=128, num_warps=8, num_stages=2),
+            dict(TI=4, BJ=64, BN=64, BKC=128, num_warps=8, num_stages=3),
+            dict(TI=4, BJ=64, BN=128, BKC=64, num_warps=4, num_stages=3),
+            dict(TI=4, BJ=64, BN=128, BKC=64, num_warps=8, num_stages=2),
+            dict(TI=4, BJ=64, BN=128, BKC=64, num_warps=8, num_stages=3),
+            dict(TI=4, BJ=64, BN=128, BKC=128, num_warps=4, num_stages=2),
+            dict(TI=4, BJ=64, BN=128, BKC=128, num_warps=4, num_stages=3),
+            dict(TI=4, BJ=64, BN=128, BKC=128, num_warps=8, num_stages=2),
+            dict(TI=4, BJ=64, BN=128, BKC=128, num_warps=8, num_stages=3),
+            dict(TI=4, BJ=128, BN=64, BKC=64, num_warps=4, num_stages=3)],
+            prune=_divides(BKC="CZ", BN="CH2"))
 @triton.jit
 def _opm_bwd_epilogue_dx_kernel(DZ, NORM, WO, DZN, DO, L, CH2, shape_key,
                                 CH: tl.constexpr, CZ: tl.constexpr, TI: tl.constexpr, BJ: tl.constexpr, BN: tl.constexpr,
@@ -160,8 +228,42 @@ def _opm_bwd_epilogue_dx_kernel(DZ, NORM, WO, DZN, DO, L, CH2, shape_key,
     tl.store(DO + orow[:, None] + (d.to(tl.int64) * ldo + e)[None, :], acc.to(tl.bfloat16), mask=rm[:, None])
 
 
-@triton.autotune(configs=configs_for("outer_product_mean_bwd_epilogue_dw_triton"), key=["shape_key"], reset_to_zero=["DWO"],
-                 prune_configs_by={"early_config_prune": _divides(BM="CZ", BN="CH2")})
+@configured('outer_product_mean_bwd_epilogue_dw_triton',
+            key=["shape_key"],
+            default=[dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=128, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=128, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=8, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=3),
+            dict(BM=32, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=32, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=32, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=32, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=2, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=1),
+            dict(BM=16, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=256, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=16, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=16, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=1, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=4),
+            dict(BM=64, BN=64, BK=64, SPLIT=8, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=5),
+            dict(BM=64, BN=64, BK=64, SPLIT=4, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=6),
+            dict(BM=64, BN=64, BK=64, SPLIT=2, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=1, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=8, num_stages=3),
+            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=4, num_stages=3),
+            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=8, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=8, num_stages=3),
+            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=4, num_stages=3),
+            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=8, num_stages=2),
+            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=8, num_stages=3)],
+            prune=_divides(BM="CZ", BN="CH2"),
+            reset_to_zero=["DWO"])
 @triton.jit
 def _opm_bwd_epilogue_dw_kernel(DZN, O, DWO, L, CH2, shape_key,
                                 CH: tl.constexpr, CZ: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
@@ -190,8 +292,10 @@ def _opm_bwd_epilogue_dw_kernel(DZN, O, DWO, L, CH2, shape_key,
     tl.atomic_add(DWO + m[:, None] * (CH * CH) + n[None, :], acc)
 
 
-@triton.autotune(configs=configs_for("outer_product_mean_bwd_layernorm_gemm_triton"), key=["shape_key", "HAS_MASK", "HAS_PBIAS", "K"],
-                 reset_to_zero=["DWL", "DWR", "DG", "DBETA", "DBL", "DBR"])
+@configured('outer_product_mean_bwd_layernorm_gemm_triton',
+            key=["shape_key", "HAS_MASK", "HAS_PBIAS", "K"],
+            default=dict(BT=64, PPS=16, num_warps=4, num_stages=2),
+            reset_to_zero=["DWL", "DWR", "DG", "DBETA", "DBL", "DBR"])
 @triton.jit
 def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, DWR, DG, DBETA, DBL, DBR, T_, eps, shape_key,
                                    CM: tl.constexpr, CH: tl.constexpr, K: tl.constexpr, HAS_MASK: tl.constexpr,
@@ -256,7 +360,9 @@ def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, D
 # for the pair (i, j) the G K^2 products p[g, k, l] = O_g[i K + k, j K + l]. Chai-1 LayerNorms those P = G K^2 products (``product_norm``,
 # its own eps) and projects them; there is no division by the pair counts. The gather + LayerNorm is the only part that is not a GEMM: it
 # is a row-wise pass over the pair map (kernels below), the projection and its gradient dy = dz W_out are cuBLAS, dW_out a split-K kernel.
-@triton.autotune(configs=configs_for("outer_product_mean_epilogue_ln_triton"), key=["shape_key", "P"])
+@configured('outer_product_mean_epilogue_ln_triton',
+            key=["shape_key", "P"],
+            default=dict(BJ=16, num_warps=4, num_stages=1))
 @triton.jit
 def _opm_grouped_epilogue_kernel(O, GAM, BET, Y, L, eps, shape_key,
                                  K: tl.constexpr, P: tl.constexpr, BJ: tl.constexpr):
@@ -282,8 +388,10 @@ def _opm_grouped_epilogue_kernel(O, GAM, BET, Y, L, eps, shape_key,
     tl.store(Y + (i * L + j)[:, None] * P + tl.arange(0, P)[None, :], y.to(tl.bfloat16), mask=(j < L)[:, None])
 
 
-@triton.autotune(configs=configs_for("outer_product_mean_bwd_epilogue_ln_dx_triton"), key=["shape_key", "P"],
-                 reset_to_zero=["DGAM", "DBET"])
+@configured('outer_product_mean_bwd_epilogue_ln_dx_triton',
+            key=["shape_key", "P"],
+            default=dict(BJ=8, PPS=2, num_warps=4, num_stages=1),
+            reset_to_zero=["DGAM", "DBET"])
 @triton.jit
 def _opm_grouped_bwd_epilogue_dx_kernel(DY, O, GAM, DO, DGAM, DBET, L, eps, shape_key,
                                         K: tl.constexpr, P: tl.constexpr, BJ: tl.constexpr, PPS: tl.constexpr):
@@ -327,8 +435,42 @@ def _opm_grouped_bwd_epilogue_dx_kernel(DY, O, GAM, DO, DGAM, DBET, L, eps, shap
     tl.atomic_add(DBET + pg, dbs)
 
 
-@triton.autotune(configs=configs_for("outer_product_mean_bwd_epilogue_ln_dw_triton"), key=["shape_key", "P"], reset_to_zero=["DWO"],
-                 prune_configs_by={"early_config_prune": _divides(BM="CZ", BN="P")})
+@configured('outer_product_mean_bwd_epilogue_ln_dw_triton',
+            key=["shape_key", "P"],
+            default=[dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=128, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=128, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=8, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=3),
+            dict(BM=32, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=32, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=32, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=32, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=2, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=1),
+            dict(BM=16, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=256, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=16, SPLIT=64, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=16, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=1, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=4),
+            dict(BM=64, BN=64, BK=64, SPLIT=8, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=5),
+            dict(BM=64, BN=64, BK=64, SPLIT=4, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=6),
+            dict(BM=64, BN=64, BK=64, SPLIT=2, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=1, num_warps=4, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=8, num_stages=3),
+            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=4, num_stages=3),
+            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=8, num_stages=2),
+            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=8, num_stages=3),
+            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=4, num_stages=3),
+            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=8, num_stages=2),
+            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=8, num_stages=3)],
+            prune=_divides(BM="CZ", BN="P"),
+            reset_to_zero=["DWO"])
 @triton.jit
 def _opm_grouped_bwd_epilogue_dw_kernel(DZ, Y, DWO, NPAIR, shape_key,
                                         P: tl.constexpr, CZ: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,

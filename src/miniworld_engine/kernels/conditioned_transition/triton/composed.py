@@ -15,7 +15,7 @@ Both matmuls are K-tiled (loop BLOCK_K over the contraction dim), so any K compi
 fp32 io with TF32 tensor cores (``input_precision="tf32"``).
 """
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import torch
 
 from miniworld_engine.kernels._compile import opaque
@@ -47,10 +47,12 @@ from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many
 # the key at the caller. Every live caller passes `length`; the drivers and checkers pass
 # `shape_key=` directly.
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
-from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, pack
+from miniworld_engine.kernels._shape_key import atom_key, both_key, length_of, pack
 
 
-@triton.autotune(configs=configs_for("cond_transition_expand_swiglu_triton"), key=['shape_key'])
+@configured('cond_transition_expand_swiglu_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _expand_swiglu_kernel(
     x_ptr, wa_ptr, wb_ptr, h_ptr,
@@ -109,7 +111,9 @@ def _expand_swiglu_kernel(
 
 
 # fmt: off
-@triton.autotune(configs=configs_for("cond_transition_squeeze_gate_triton"), key=['shape_key'])
+@configured('cond_transition_squeeze_gate_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K_DC=32, BLOCK_K_ND=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _squeeze_gate_kernel(
     h_ptr, cond_ptr, ws_ptr, wsc_ptr, bsc_ptr, out_ptr, res_ptr,

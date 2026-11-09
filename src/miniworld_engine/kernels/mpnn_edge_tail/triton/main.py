@@ -37,9 +37,9 @@ from __future__ import annotations
 import torch
 import triton
 
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import triton.language as tl
 
 
@@ -138,10 +138,9 @@ def _shape_key(rows: int, **axes: int) -> int:
     return both_key(rows, **axes)
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_edge_tail_fwd_gemm_recompute_triton"),
-    key=["shape_key"],
-)
+@configured('mpnn_edge_tail_fwd_gemm_recompute_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, TILES=4, num_warps=4, num_stages=2))
 @triton.jit
 def _edge_tail_project_kernel(
     edge_ptr,
@@ -210,10 +209,9 @@ def _edge_tail_project_kernel(
         tl.store(hidden_ptr + offsets, hidden, mask=row_valid[:, None])
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_edge_tail_fwd_gemm_layernorm_recompute_triton"),
-    key=["shape_key", "DROPOUT"],
-)
+@configured('mpnn_edge_tail_fwd_gemm_layernorm_recompute_triton',
+            key=["shape_key", "DROPOUT"],
+            default=dict(BLOCK_M1=64, BLOCK_K=32, TILES=4, num_warps=4, num_stages=2))
 @triton.jit
 def _edge_tail_norm_kernel(
     hidden_ptr,
@@ -307,15 +305,14 @@ def _edge_tail_norm_kernel(
 # shapes together, and the direct measurement overturned it.
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_edge_tail_bwd_recompute_triton"),
-    key=["shape_key", "DROPOUT"],
-    reset_to_zero=[
+@configured('mpnn_edge_tail_bwd_recompute_triton',
+            key=["shape_key", "DROPOUT"],
+            default=dict(BLOCK_M1=64, TILES=4, num_warps=4, num_stages=2),
+            reset_to_zero=[
         "grad_output_bias_ptr",
         "grad_norm_weight_ptr",
         "grad_norm_bias_ptr",
-    ],
-)
+    ])
 @triton.jit
 def _edge_tail_replay_kernel(
     grad_out_ptr,
@@ -482,11 +479,10 @@ def _edge_tail_replay_kernel(
     tl.atomic_add(grad_norm_bias_ptr + columns, grad_norm_bias)
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_edge_tail_bwd_dx_recompute_triton"),
-    key=["shape_key"],
-    reset_to_zero=["grad_query_ptr", "grad_neighbor_ptr", "grad_hidden_bias_ptr"],
-)
+@configured('mpnn_edge_tail_bwd_dx_recompute_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_M1=64, TILES=4, num_warps=4, num_stages=2),
+            reset_to_zero=["grad_query_ptr", "grad_neighbor_ptr", "grad_hidden_bias_ptr"])
 @triton.jit
 def _edge_tail_dx_kernel(
     preactivation_ptr,

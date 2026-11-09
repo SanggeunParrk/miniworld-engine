@@ -2,10 +2,12 @@
 
 import json
 from collections import OrderedDict
+from itertools import product
 
 import torch
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._launch_config import choose
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_infer_kernel as K
 
@@ -112,9 +114,28 @@ def inference_into(
     _run_inference(x, weights, mask, direction, eps, config, out)
 
 
+def trimul_candidates(cz, ch, length, direction):
+    """K1 / K3 schedules of the packaged H100 TriMul inference, the measured default first (ported from the old
+    autotune/fused_config.py): the tile table's lookup for this shape, then every K1 x K3 variant it declares."""
+    table = K.TILE_TABLE.get(("sm_90a", cz, ch, "b"))
+    if table is None:
+        return []
+    default = K.lookup("sm_90a", cz, ch, "b", length, "incoming" if direction == 2 else "outgoing", True)
+
+    def pack(k1, k3):
+        return {**{f"k1_{i}": v for i, v in enumerate(k1)}, **{f"k3_{i}": v for i, v in enumerate(k3)}}
+
+    first = pack(default["k1"], default["k3"])
+    grid = [pack(a, b) for a, b in product(table.get("k1_variants", [table["k1"]]), table.get("k3_variants", [table["k3"]]))]
+    return [first] + [c for c in grid if c != first]
+
+
+def unpack_trimul(config):
+    # Some K3 variants carry a fifth layout/mode tag: keep the whole tuple (truncating it would change the measured default).
+    return {part: tuple(config[key] for key in sorted(config) if key.startswith(part + "_")) for part in ("k1", "k3")}
+
+
 def _select_config(x, weights, mask, direction, eps):
-    from miniworld_engine.autotune.fused_config import trimul_candidates, validator
-    from miniworld_engine.autotune.native import choose_config, tensor_key
     grid = trimul_candidates(x.shape[-1], weights[0].shape[0], x.shape[1], direction)
     if (x.shape[-1] == 128 and weights[0].shape[0] == 256
             and x.shape[1] == 128 and direction == 0):
@@ -124,9 +145,9 @@ def _select_config(x, weights, mask, direction, eps):
         short = dict(grid[0], k1_0=2, k1_1=64, k1_2=4, k1_3=2)
         grid = [short, *[c for c in grid if c != short]]
     run = lambda c: _run_inference(x, weights, mask, direction, eps, c)
-    return choose_config("trimul_fwd_sm90_cuda", grid, dtype=str(x.dtype),
-                         bucket=tensor_key(x, *weights, mask, extra=(direction, eps)),
-                         device_index=x.device.index, run=run, validate=validator(run, grid[0]))
+    dims = {"B": x.shape[0], "L": x.shape[1], "CZ": x.shape[-1], "CH": weights[0].shape[0], "DIR": direction,
+            "MASK": 0 if mask is None else mask.ndim}
+    return choose("trimul_inproj", "trimul_fwd_sm90_cuda", dims, x.dtype, grid, device=x.device, near=("B", "L"), run=run)
 
 
 def _run_inference(x, weights, mask, direction, eps, config, dest=None):
@@ -149,7 +170,6 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
         # so toggling the opt-in never reuses a cubin with different arithmetic.
         native_residual = cz == ch == 384 and n == 512 and direction == 1
         kk = _kernels(True) if native_residual else _kernels()
-        from miniworld_engine.autotune.fused_config import unpack_trimul
         cfg = unpack_trimul(config)
         # K1 reads row-major weights in place (no pack kernel, nothing snapshotted); any other layout is packed live, which a
         # CUDA graph captures like every other launch. (A transposed-B K1 for the column-major D128 bidirectional storage was

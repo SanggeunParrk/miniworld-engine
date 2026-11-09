@@ -14,7 +14,7 @@ consumes (Y = rstd*acc - c1*S + B2), so no extra math downstream.
 from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 import torch
 import triton
@@ -32,10 +32,12 @@ import triton.language as tl
 # takes a handful of values; M is the row count and is effectively continuous, so keying on it
 # would mint a fresh autotune (a full-grid sweep on a cache miss) for every distinct M the model
 # runs, which is a per-shape stall, not a better config.
-from miniworld_engine.autotune.shape_key import both_key, rows_of, pack
+from miniworld_engine.kernels._shape_key import both_key, rows_of, pack
 
 
-@triton.autotune(configs=configs_for("layernorm_stats_triton"), key=['shape_key'])
+@configured('layernorm_stats_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _stats_kernel(
     x_ptr, rstd_ptr, c1_ptr, M, K, eps,

@@ -23,7 +23,6 @@ import torch
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
 LOG2E = 1.4426950408889634
@@ -313,14 +312,10 @@ class _PairLN(torch.autograd.Function):
 def serves(stack, single, cond, pair, mask) -> bool:
     """A token stack call with a gradient on H100: bf16, D = 768 with 16 heads, L a multiple of 128, one conditioning row set shared by
     the samples, the CUDA training switch on."""
-    from miniworld_engine.modules.exceptions import ImplementationType
 
-    if stack.implementation == ImplementationType.PYTORCH or not single.is_cuda or single.ndim != 3:
+    if stack.implementation == "pytorch" or not single.is_cuda or single.ndim != 3:
         return False
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *stack.parameters()))):
-        return False
-    cfg = settings.current()
-    if cfg.force_portable_kernels:
         return False
     if torch.cuda.get_device_capability(single.device) != (9, 0):
         return False
@@ -665,14 +660,10 @@ class _AtomPairBias(torch.autograd.Function):
 def atom_serves(stack, single, cond, pair, mask, uid) -> bool:
     """An atom stack call with a gradient on H100: bf16, 128 wide, N a multiple of 64, a conditioning row set shared by the samples, pair
     channels 16, the CUDA training switch on."""
-    from miniworld_engine.modules.exceptions import ImplementationType
 
-    if stack.implementation == ImplementationType.PYTORCH or not single.is_cuda or single.ndim != 3:
+    if stack.implementation == "pytorch" or not single.is_cuda or single.ndim != 3:
         return False
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *stack.parameters()))):
-        return False
-    cfg = settings.current()
-    if cfg.force_portable_kernels:
         return False
     if torch.cuda.get_device_capability(single.device) != (9, 0):
         return False

@@ -21,7 +21,7 @@ Launched from ``kernels/swa_dit/dispatch.py``, which also picks the hand-CUDA tw
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 
 @triton.jit
@@ -44,7 +44,9 @@ def _head_rms(x, eps, BR: tl.constexpr, H: tl.constexpr, D: tl.constexpr):
 
 
 # ================================================================ ① qkvg ===============================================================
-@triton.autotune(configs=configs_for("swa_dit_inproj_fwd_triton"), key=["shape_key", "SAVE"])
+@configured('swa_dit_inproj_fwd_triton',
+            key=["shape_key", "SAVE"],
+            default=dict(BR=32, num_warps=4, num_stages=1))
 @triton.jit(do_not_specialize=["NROWS", "S", "B"])
 def _swa_qkvg_fwd_kernel(Q, MOD, COS, SIN, WQKV, WG, QO, KO, VO, GO, RSTD, XS, PQS, PKS, NROWS, S, B, eps, qk_eps, shape_key,
                          C: tl.constexpr, H: tl.constexpr, D: tl.constexpr, MODW: tl.constexpr, SAVE: tl.constexpr, BR: tl.constexpr):
@@ -86,7 +88,9 @@ def _swa_qkvg_fwd_kernel(Q, MOD, COS, SIN, WQKV, WG, QO, KO, VO, GO, RSTD, XS, P
 
 
 # ================================================================ ② window attention (one head per program) ==========================
-@triton.autotune(configs=configs_for("swa_dit_softmax_fwd_triton"), key=["shape_key", "HW"])
+@configured('swa_dit_softmax_fwd_triton',
+            key=["shape_key", "HW"],
+            default=dict(BM=64, BN=64, num_warps=4, num_stages=1))
 @triton.jit(do_not_specialize=["S"])
 def _swa_attn_fwd_kernel(QH, KH, VH, SEQU, O, LSE, S, scale, shape_key,
                          C: tl.constexpr, H: tl.constexpr, D: tl.constexpr, HW: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr):
@@ -125,7 +129,9 @@ def _swa_attn_fwd_kernel(QH, KH, VH, SEQU, O, LSE, S, scale, shape_key,
 
 
 # ================================================================ ③ out-proj + gated residual + FFN ===================================
-@triton.autotune(configs=configs_for("swa_dit_output_swiglu_fwd_triton"), key=["shape_key", "SAVE"])
+@configured('swa_dit_output_swiglu_fwd_triton',
+            key=["shape_key", "SAVE"],
+            default=dict(BR=32, NH=64, num_warps=4, num_stages=1))
 @triton.jit(do_not_specialize=["NROWS", "S", "B"])
 def _swa_oproj_ffn_fwd_kernel(QI, O, G, MOD, WO, WU, WD, Q1, OUT, RSTD, ATS, YS, ABS, FFS, NROWS, S, B, eps, shape_key,
                               C: tl.constexpr, NHID: tl.constexpr, MODW: tl.constexpr, SAVE: tl.constexpr, BR: tl.constexpr, NH: tl.constexpr):

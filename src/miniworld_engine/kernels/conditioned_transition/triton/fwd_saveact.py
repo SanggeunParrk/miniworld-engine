@@ -20,7 +20,7 @@ from __future__ import annotations
 # bf16. Nothing reached it -- it has no bench path -- so the break sat here unnoticed until a
 # driver launched it directly. Use the one that upcasts.
 from miniworld_engine.kernels.gated_projection.triton.main import _sigmul_bwd
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 import torch
 
@@ -48,7 +48,7 @@ from miniworld_engine.kernels._tiles import tile_grid, tile_order
 # and hands the result to the inner launchers as `shape_key`. `length=None` falls back to
 # `length_of(x.shape)` == M for the direct callers that have no un-flattened tensor to read (the
 # registry drivers/checkers, and train_12_345.py), which is exactly the old behaviour.
-from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, pack, rows_of
+from miniworld_engine.kernels._shape_key import atom_key, both_key, length_of, pack, rows_of
 
 
 # ============================================================================
@@ -60,7 +60,9 @@ from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, p
 # fmt: off
 
 
-@triton.autotune(configs=configs_for("cond_transition_expand_swiglu_saveact_triton"), key=['shape_key'])
+@configured('cond_transition_expand_swiglu_saveact_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _fwd_expand_swiglu_kernel(
     x_ptr, wa_ptr, wb_ptr, h_ptr, ab_ptr,
@@ -110,7 +112,9 @@ def _fwd_expand_swiglu_kernel(
 # fmt: off
 
 
-@triton.autotune(configs=configs_for("cond_transition_squeeze_gate_saveact_triton"), key=['shape_key'])
+@configured('cond_transition_squeeze_gate_saveact_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K_DC=32, BLOCK_K_ND=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _fwd_squeeze_gate_kernel(
     h_ptr, cond_ptr, ws_ptr, wsc_ptr, bsc_ptr, y_ptr, out_ptr, scale_ptr,

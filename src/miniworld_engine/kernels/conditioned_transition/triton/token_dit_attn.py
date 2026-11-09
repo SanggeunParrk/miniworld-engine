@@ -17,15 +17,13 @@ import triton
 import triton.language as tl
 
 from miniworld_engine.kernels._tf32 import tf32_dot
+from miniworld_engine.kernels._launch_config import configured
 
 
-def _cfgs():
-    return [triton.Config({"BLOCK_M1": m1, "BLOCK_M2": m2}, num_warps=w, num_stages=s)
-            for m1 in (32, 64, 128) for m2 in (32, 64, 128) for w in (4, 8) for s in (2, 3, 4)]
-
-
-# restore_value: the output overwrites q, and autotuning runs the kernel once per config.
-@triton.autotune(configs=_cfgs(), key=["N_CTX", "H", "HEAD_DIM", "PREC"], restore_value=["Q"])
+# restore_value: the output overwrites q, and tune mode runs the kernel once per config. No measured table yet: the default is
+# the centre of the space this kernel used to search at runtime (BLOCK_M1, BLOCK_M2 in 32..128, 4 / 8 warps, 2-4 stages).
+@configured("token_dit_attn_fwd_gated_triton", key=["N_CTX", "H", "HEAD_DIM", "PREC"], restore_value=["Q"],
+            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=3))
 @triton.jit
 def _attn_fwd_gated(Q, K, V, G, Bias, Mask, sm_scale,
                     stride_qz, stride_qm, stride_qh, stride_qk,
@@ -119,13 +117,10 @@ def attention_gated_in_place(q, k, v, g, bias, mask, prescaled=False, precision=
 # is a multiple of the key tile; no key mask is applied in the loop (it is folded into the hoisted bias as -inf, which
 # is free because it is sample-invariant); K and V are loaded [BLOCK_N, D] and transposed, the canonical wgmma layout.
 
-def _cfgs2():
-    return [triton.Config({"BLOCK_M1": m1, "BLOCK_M2": m2}, num_warps=w, num_stages=s)
-            for m1 in (64, 128) for m2 in (32, 64, 128) for w in (4, 8) for s in (2, 3, 4)]
-
-
-# restore_value: the output overwrites q, and autotuning runs the kernel once per config.
-@triton.autotune(configs=_cfgs2(), key=["N_CTX", "H", "HEAD_DIM", "PREC"], restore_value=["Q"])
+# restore_value: the output overwrites q, and tune mode runs the kernel once per config. No measured table yet: the default is
+# the centre of the space this kernel used to search at runtime (BLOCK_M1 64 / 128, BLOCK_M2 32..128, 4 / 8 warps, 2-4 stages).
+@configured("token_dit_attn_fwd_gated2_triton", key=["N_CTX", "H", "HEAD_DIM", "PREC"], restore_value=["Q"],
+            default=dict(BLOCK_M1=128, BLOCK_M2=64, num_warps=4, num_stages=3))
 @triton.jit
 def _attn_fwd_gated2(Q, K, V, G, Bias, brow0,
                      stride_qz, stride_qm, stride_qh, stride_qk,

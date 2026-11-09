@@ -1,0 +1,20 @@
+# The canonical speed run: every requirement case, every backend. The judge (miniworld_engine.judge) decides which of them are owed.
+modules: all
+backends: [pytorch, cuda, triton, anthropic, cueq]
+external: [anthropic, cueq]
+rows: []
+dtypes: []
+modes: []
+lengths: all
+depths: min
+samples: min
+timing: [graph]
+warmup: 5
+iterations: 50
+flush_l2: true
+device: cuda
+seed: 0
+fixed:
+  bfloat16: 8.0e-3
+  master: 8.0e-3
+  float32: 1.0e-5

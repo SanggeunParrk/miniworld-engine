@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import triton
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.mpnn_message.triton.main import _shape_key
 import triton.language as tl
@@ -15,10 +15,9 @@ _PACK_BLOCK_BYTES = 256
 _BACKWARD_BLOCK_ELEMENTS = 256
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_edge_dropout_fwd_packed_triton"),
-    key=["shape_key"],
-)
+@configured('mpnn_edge_dropout_fwd_packed_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_BYTES=128, num_warps=4, num_stages=2))
 @triton.jit
 def _pack_bool_kernel(
     mask_ptr,
@@ -45,10 +44,9 @@ def _pack_bool_kernel(
     )
 
 
-@triton.autotune(
-    configs=configs_for("mpnn_edge_dropout_bwd_packed_triton"),
-    key=["shape_key"],
-)
+@configured('mpnn_edge_dropout_bwd_packed_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_ELEMENTS=256, num_warps=4, num_stages=2))
 @triton.jit
 def _packed_dropout_backward_kernel(
     grad_output_ptr,

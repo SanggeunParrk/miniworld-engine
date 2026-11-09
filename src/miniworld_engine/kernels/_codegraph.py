@@ -16,7 +16,8 @@ in an installed kernel bundle, and when the local JIT cache decides whether it h
 * the compile flags as they reach the compiler, normalized: machine paths become ``pkg:<path in the package>``
   (``-I`` into the engine), ``gen`` (a generated directory under the JIT root, whose files are in the graph),
   ``cuda:`` / ``prefix:`` (the toolkit / environment), host-compiler choices (``-ccbin``) dropped;
-* the target arch (``sm90`` / ``sm100``), torch and CUDA versions, and the Python ABI for torch extensions.
+* torch and CUDA versions, and the Python ABI for torch extensions. The target arch is not asked of any device: it is in
+  the flags (``-gencode`` / ``-arch``), which are part of the key.
 
 Per-file parses are cached by (path, mtime, size), so a key costs a few stat calls once its files have been read.
 Generated headers (TriMul's transformed upstream headers) live in an in-memory overlay (:func:`publish`) and are only
@@ -39,7 +40,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 #: Bumped when the key material changes shape, so old bundles / caches stop matching instead of matching wrongly.
-KEY_SCHEME = 1
+KEY_SCHEME = 2
 
 #: The CUTLASS release the engine's CUTLASS-based kernels are written against. A CUTLASS include directory that is not
 #: present on this machine is keyed with this version (a prebuilt artifact needs no headers); one that is present is
@@ -236,11 +237,9 @@ def materialize(paths: Iterable[str]) -> None:
 
 # --------------------------------------------------------------------------------------------------- directories
 def _jit_root() -> Path | None:
-    try:
-        from miniworld_engine import settings
-    except ImportError:
-        return None
-    return settings.engine_jit_root()
+    from miniworld_engine.kernels._nvcc import engine_jit_root
+
+    return engine_jit_root()
 
 
 def _under(path: str, root: Path | str | None) -> str | None:
@@ -493,24 +492,8 @@ def python_abi() -> str:
     return sys.implementation.cache_tag or f"py{sys.version_info[0]}{sys.version_info[1]}"
 
 
-def target_arch() -> str:
-    """``sm90`` / ``sm100`` / ...: the current CUDA device's arch (what a bundle is built for), ``cpu`` without one."""
-    forced = os.environ.get("MINIWORLD_ENGINE_TARGET_ARCH")
-    if forced:
-        return forced
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            major, minor = torch.cuda.get_device_capability()
-            return f"sm{major}{minor}"
-    except Exception:
-        pass
-    return "cpu"
-
-
-def key_material(kind: str, name: str, graph: Graph, flags: dict | Sequence[str], *, arch: str | None = None,
-                 python: bool = False, ctx: Context | None = None, versions: dict | None = None) -> dict:
+def key_material(kind: str, name: str, graph: Graph, flags: dict | Sequence[str], *, python: bool = False,
+                 ctx: Context | None = None, versions: dict | None = None) -> dict:
     """Everything the key hashes, as a JSON-able dict (``dev code-graph`` prints it)."""
     ctx = ctx or context()
     if isinstance(flags, dict):
@@ -523,7 +506,6 @@ def key_material(kind: str, name: str, graph: Graph, flags: dict | Sequence[str]
         "name": name,
         **graph.material(),
         "flags": norm,
-        "arch": arch or target_arch(),
         **(versions or _versions()),
         "python": python_abi() if python else "-",
     }

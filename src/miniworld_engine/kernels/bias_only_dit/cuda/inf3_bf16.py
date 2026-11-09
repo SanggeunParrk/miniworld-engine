@@ -23,7 +23,6 @@ import torch
 
 from miniworld_engine.kernels._compile import device_constant
 from miniworld_engine.kernels.bias_only_dit.cuda import PTR, _descriptors, _Runs, _dir
-from miniworld_engine import settings
 
 TAIL_CLUSTERS = (8, 6)
 TAIL_PAIR = 4  # the pair tail's "cluster" code (bo_tail2_bf16.cu)
@@ -37,7 +36,7 @@ def tail_rows(M: int, cl: int) -> int:
 def inf3_bf16_on() -> bool:
     """The bf16-mixed inference step as three kernels per block (front, PDL core, tail) behind the hoisted pre-sigmoided bf16
     conditioning tables -- the default; settings.bias_only_dit_inf3_bf16=0 keeps the 12-launch bf16 step. Read per call."""
-    return settings.current().bias_only_dit_inf3_bf16
+    return True
 
 
 def tail_smem(cl: int) -> int:
@@ -148,10 +147,6 @@ class FrontBF16:
         fp32 front's model). settings.bias_only_dit_inf3_cl forces one."""
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import pick_cluster
 
-        forced = settings.current().bias_only_dit_inf3_cl
-        if forced:
-            assert int(forced) in self.clusters(), (forced, self.da)
-            return int(forced)
         return pick_cluster(
             n_tiles,
             {
@@ -298,9 +293,6 @@ class TailBF16:
         than both (A = 5: L640 / L768). settings.bias_only_dit_inf3_tail_cl=8 / 6 / 4 forces one."""
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import pick_cluster
 
-        forced = settings.current().bias_only_dit_inf3_tail_cl
-        if forced in (8, 6, 4):
-            return forced
         n8, n6 = _max_clusters(self.kernel(8), 8), _max_clusters(self.kernel(6), 6)
         rounds = min(-(-n_tiles // max(n8, 1)), -(-n_tiles // max(n6, 1)))
         if -(-n_tiles // max(2 * _max_clusters(self.kernel(TAIL_PAIR), 8), 1)) < rounds:

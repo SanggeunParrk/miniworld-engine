@@ -63,3 +63,10 @@ def cast_into(srcs, dsts) -> None:
 
 
 __all__ = ["cast", "cast_into"]
+
+
+def prebuild(target, rows):
+    """The build of this module (kernels/_prebuild.py): one multi-arch extension (the dtype is a launch argument, not a build
+    switch), built when a requirement row needs a cast."""
+    if rows:
+        yield _ext

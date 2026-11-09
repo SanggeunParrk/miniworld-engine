@@ -1,0 +1,16 @@
+# The canonical accuracy run: every requirement case, every backend. The judge (miniworld_engine.judge) decides which of them are owed.
+modules: all
+backends: [pytorch, cuda, triton, anthropic, cueq]
+external: [anthropic, cueq]
+rows: []
+dtypes: []
+modes: []
+lengths: all
+depths: min
+samples: min
+device: cuda
+seed: 0
+fixed:
+  bfloat16: 8.0e-3
+  master: 8.0e-3
+  float32: 1.0e-5

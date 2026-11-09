@@ -14,7 +14,7 @@ back-half kernel (``_back_kernel``), just without the proj/gate.
 """
 
 from __future__ import annotations
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 import torch
 
@@ -32,10 +32,12 @@ from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 # forced D to be a power of two and left no column mask. It is the REDUCE axis (mean/var over D),
 # so it is a CSV tile; a row at or above the extent keeps the whole-row schedule
 # is still reachable and the tuner picks it wherever the second pass is not worth the registers.
-from miniworld_engine.autotune.shape_key import both_key, pack
+from miniworld_engine.kernels._shape_key import both_key, pack
 
 
-@triton.autotune(configs=configs_for("layernorm_fwd_mmajor_triton"), key=['shape_key'])
+@configured('layernorm_fwd_mmajor_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _ln_transpose_dbn_kernel(
     x_ptr,   # (D, M) channel-major: x[k, m] at k*M + m

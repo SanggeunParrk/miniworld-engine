@@ -24,6 +24,7 @@ are the same LayerNorm statistics, the intermediate roundings happen at the same
 """
 
 import functools
+import itertools
 import warnings
 from pathlib import Path
 
@@ -31,10 +32,10 @@ import torch
 
 from miniworld_engine.kernels._device import num_sms
 
+from ..._launch_config import choose
 from ..._compile import opaque
 from ._weights import transposed_contiguous
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
-from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 
@@ -348,10 +349,22 @@ def _bwd_launch(
     )
 
 
-def _select_schedule(args, *, backward, save):
-    from miniworld_engine.autotune.fused_config import transition_candidates, validator
-    from miniworld_engine.autotune.native import choose_config, tensor_key
+def transition_candidates(sms, *, backward=False, n=4):
+    """Schedules of the D128 fused Transition, the measured default first (ported from the old autotune/fused_config.py).
+    The backward gives the weight role ``2 n`` hidden slices times ``dw_repl`` replicas; the best split moves with the
+    slice count (8 at n = 4, 15 at n = 2)."""
+    if sms <= 8:
+        raise ValueError("fused Transition requires more than 8 SMs")
+    slices = 2 * n
+    replica = min(15 if n == 2 else 8, (sms - 1) // slices)  # measured on H100 (n = 2: 14-15 best, 16 is 4 % slower)
+    default = {"ctas": sms, "dw_repl": replica}
+    ctas = (sms, max(16, sms // 2), sms * 2)
+    replicas = ((replica, 2, 4, 8, 12) + ((16, 24) if n < 4 else ())) if backward else (replica,)
+    grid = [{"ctas": c, "dw_repl": r} for c, r in itertools.product(ctas, replicas) if c > slices * r]
+    return [default] + [c for c in grid if c != default]
 
+
+def _select_schedule(args, *, backward, save):
     x = args[1] if backward else args[0]
     n = (args[6] if backward else args[3]).shape[0] // 128
     sms = num_sms(x.device)
@@ -361,23 +374,11 @@ def _select_schedule(args, *, backward, save):
     def run(c):
         return tuple(getattr(_ext(c["ctas"], c["dw_repl"], save, n), symbol)(*args))
 
-    tensors = args[:-1] if backward else args[:6]
-    op = (
-        "transition_bwd_residual_sm90_cuda"
-        if backward
-        else "transition_fwd_residual_sm90_cuda"
-    )
-    return choose_config(
-        op,
-        grid,
-        dtype=str(x.dtype),
-        bucket=tensor_key(
-            *tensors, extra=(save, args[-2] if not backward else args[-1], sms)
-        ),
-        device_index=x.device.index,
-        run=run,
-        validate=validator(run, grid[0], output_only=not save),
-    )
+    wa = args[6] if backward else args[3]
+    dims = {"M": x.numel() // x.shape[-1], "K": x.shape[-1], "ND": wa.shape[0], "SMS": sms,
+            **({"FP32_DW": int(args[-1])} if backward else {"SAVE": int(save)})}
+    op = "transition_bwd_residual_sm90_cuda" if backward else "transition_fwd_residual_sm90_cuda"
+    return choose("transition", op, dims, x.dtype, grid, device=x.device, run=run)
 
 
 class _FusedTransitionSM90A(torch.autograd.Function):

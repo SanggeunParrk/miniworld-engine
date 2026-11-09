@@ -1,0 +1,32 @@
+{
+ "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+ "source": "Converted from the old autotune/data/<op>/*sm90*.json (git HEAD): ranked by measured ms, top 4 kept. Keys: '<dtypes>|<shape bucket>[|<flags>]'. Shape: M = row bucket, L = length bucket (old shape_key floor-clamp rule), other names = exact width axes.",
+ "ops": {
+  "mpnn_message_fwd_gemm_gelu_reduce_triton": {
+   "bfloat16+float32|G=1,M=16384": [
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 64, "COALESCED_WEIGHT_LOAD": 0, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.041376},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 64, "COALESCED_WEIGHT_LOAD": 1, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.041472},
+    {"kwargs": {"BLOCK_K": 16, "BLOCK_M": 64, "COALESCED_WEIGHT_LOAD": 1, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.041632},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 128, "COALESCED_WEIGHT_LOAD": 1, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.04208}
+   ],
+   "bfloat16+float32|G=1,M=65536": [
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 64, "COALESCED_WEIGHT_LOAD": 1, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.071968},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 64, "COALESCED_WEIGHT_LOAD": 0, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.072},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 128, "COALESCED_WEIGHT_LOAD": 1, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.072416},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 128, "COALESCED_WEIGHT_LOAD": 0, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.072576}
+   ],
+   "bfloat16+float32|G=2,M=147456": [
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 64, "COALESCED_WEIGHT_LOAD": 1, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.133152},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 64, "COALESCED_WEIGHT_LOAD": 0, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.133216},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 128, "COALESCED_WEIGHT_LOAD": 0, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.133504},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 128, "COALESCED_WEIGHT_LOAD": 1, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.135104}
+   ],
+   "bfloat16+float32|G=2,M=262144": [
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 128, "COALESCED_WEIGHT_LOAD": 1, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.25376},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 64, "COALESCED_WEIGHT_LOAD": 1, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.254912},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 64, "COALESCED_WEIGHT_LOAD": 0, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.255232},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M": 128, "COALESCED_WEIGHT_LOAD": 0, "GROUPS_PER_CTA": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.256624}
+   ]
+  }
+ }
+}

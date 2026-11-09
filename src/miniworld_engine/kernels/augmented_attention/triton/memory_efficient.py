@@ -2,7 +2,7 @@
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/augmented_attention_pair_bias.py
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 # The forward and the delta preprocess here were byte-for-byte copies of main.py's (bitwise
 # equal on M/Out and on Delta -- see .bench/eq_*.out). Only the backward differs: this file
@@ -16,8 +16,7 @@ from miniworld_engine.kernels._tf32 import tf32_dot
 
 from jaxtyping import Bool, Float
 
-from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.autotune.shape_key import atom_key, pack
+from miniworld_engine.kernels._shape_key import atom_key, pack
 
 
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
@@ -113,9 +112,10 @@ def _attn_bwd_dqdkdv(
 # AUTOTUNE KEY: same as main.py's split backward -- `A` is never read by this body and `B` only
 # folds into the constant M_offset stride (B*H*N_CTX), so neither can change which config wins;
 # keying them would partition the cache per augmentation count and per batch size.
-@triton.autotune(configs=configs_for("augmented_attention_bwd_atomic_triton"),
-                 key=['shape_key'],
-                 reset_to_zero=['DQ', 'DBias'])
+@configured('augmented_attention_bwd_atomic_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2),
+            reset_to_zero=['DQ', 'DBias'])
 @triton.jit
 def _attn_bwd(
     Q,
@@ -412,7 +412,6 @@ _MAX_HEAD_DIM = 64
 
 
 class TritonAugmentedAttentionFunction(torch.autograd.Function):
-    @typecheck
     @staticmethod
     def forward(
         ctx,

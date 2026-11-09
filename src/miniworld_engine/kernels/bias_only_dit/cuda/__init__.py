@@ -26,7 +26,6 @@ from pathlib import Path
 import torch
 
 from miniworld_engine.kernels._device import num_sms
-from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 H, DH = 16, 48  # the default heads x width
@@ -87,83 +86,6 @@ def h100_ext():
 
 
 @functools.lru_cache(maxsize=None)
-def psb_ext():
-    """``bo_psb.cu``: the attention core on a pair bias of its own per sample (single-pass mma.sync forward / backward). Built on first use."""
-    from miniworld_engine.kernels._nvcc import (
-        ensure_cuda_home,
-        gencodes,
-        host_flags,
-        load_extension,
-    )
-
-    ensure_cuda_home()
-    return load_extension(
-        name="bias_only_dit_psb_sm90a",
-        sources=[str(_dir / "bo_psb.cu")],
-        extra_cuda_cflags=[
-            *host_flags(),
-            "-O3",
-            "-std=c++17",
-            *gencodes("90a"),
-            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        ],
-        extra_cflags=["-std=c++17"],
-        verbose=False,
-    )
-
-
-@functools.lru_cache(maxsize=None)
-def psb32_ext():
-    """``bo_psb32.cu``: the fp32 (TF32 tensor cores) attention core on a pair bias of its own per sample, recompute form. Built on first use."""
-    from miniworld_engine.kernels._nvcc import (
-        ensure_cuda_home,
-        gencodes,
-        host_flags,
-        load_extension,
-    )
-
-    ensure_cuda_home()
-    return load_extension(
-        name="bias_only_dit_psb32_sm90a",
-        sources=[str(_dir / "bo_psb32.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a")],
-        extra_cflags=["-std=c++17"],
-        verbose=False,
-    )
-
-
-#: Longest L of the fp32 per-sample forward (v of the (head, sample) stays resident in shared memory)
-PSB32_MAX_L = 512
-
-
-def psb32_fwd(bias, stats, mask, vg, og, samples, heads, dh):
-    """fp32: og = sigmoid(g) (P v) with P = softmax(bias + key mask) on TF32 tensor cores; ``stats`` [H A L, 2] fp32 get (mc, 1 / sum), the
-    backward rebuilds P from them. bias [H A L, L]; vg [A L, 2 H dh]; og [A L, H dh]; mask bool [L] or [A, L] or None."""
-    psb32_ext().psb32_fwd(bias, stats, mask, vg, og, int(samples), int(heads), int(dh))
-
-
-def psb32_bwd(bias, stats, mask, dout, vg, dd, dbias, dvg, samples, heads, dh):
-    """fp32: dV = P^T dO into the v columns of ``dvg`` and dbias = P o (dO v^T - D) into ``dbias`` [H A L, L], P rebuilt from the bias,
-    the forward's statistics and the key mask; dd [A, H, L]."""
-    psb32_ext().psb32_bwd(bias, stats, mask, dout, vg, dd, dbias, dvg, int(samples), int(heads), int(dh))
-
-
-def psb_fwd(bias, p, mask, vg, og, samples, heads, dh, stats=None):
-    """og = sigmoid(g) (P v), P = softmax(bias + key mask). bias [H A L, L] bf16 head-major; vg [A L, 2 H dh] = v | g; og [A L, H dh]; mask
-    bool [L] or [A, L] or None. One pass, bf16. Either P is written to ``p`` (``stats`` None), or ``p`` is None and the row statistics
-    (mc, 1 / sum) go to ``stats`` [H A L, 2] fp32 -- the backward then rebuilds P from the bias (``psb_bwd(..., stats=...)``)."""
-    psb_ext().psb_fwd(bias, p, stats, mask, vg, og, int(samples), int(heads), int(dh))
-
-
-def psb_bwd(p, dout, vg, dd, dbias, dvg, samples, heads, dh, stats=None, mask=None):
-    """dV = P^T dO into the v columns of ``dvg`` and dbias = P o (dO v^T - D) into ``dbias`` [H A L, L]; dd [A, H, L] fp32. One pass.
-    ``stats`` None: ``p`` is P. Else ``p`` is the bias and P is rebuilt from the forward's row statistics (and the key mask)."""
-    psb_ext().psb_bwd(p, stats, mask, dout, vg, dd, dbias, dvg, int(samples), int(heads), int(dh))
-
-
-@functools.lru_cache(maxsize=None)
 def h100_gemm_ext():
     """``bo_gemm_sm90.cu``: Hopper wgmma GEMMs with a row pass in the epilogue -- the one-launch conditioning tables (dispatched), and
     the squeeze + last residual and out-projection gradient + gate backward fusions (measured slower; probes). Built on first use."""
@@ -202,10 +124,15 @@ def _head_defs(nh: int, dh: int) -> tuple[str, ...]:
 
 @functools.lru_cache(maxsize=None)
 def _ext():
+    return _rows_ext(h100_enabled(torch.cuda.current_device()))
+
+
+@functools.lru_cache(maxsize=None)
+def _rows_ext(hopper: bool):
+    """The row kernels, built for sm_90a (``hopper``) or the portable arch list."""
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
-    hopper = h100_enabled(torch.cuda.current_device())
     return load_extension(
         name="bias_only_dit_rows_cuda" + ("_sm90a" if hopper else ""),
         sources=[str(_dir / "bias_only_dit_rows.cu")],
@@ -293,9 +220,6 @@ def _pv_vb(L: int, S: int, dh: int = DH) -> int:
     16 x 48, in-process A/B of VB 192 / 256, us: forward 65.21 / 58.28, dV 55.15 / 49.94 -- fewer v tiles, each costing ~90 ns
     beside its products); else 192 or 256 when one divides L (A = 48, gated / ungated us: L384 26.0 / 23.6 against 27.3 / 25.7 at
     128). settings.bias_only_dit_pv_vb forces one (read per call)."""
-    forced = settings.current().bias_only_dit_pv_vb
-    if forced:
-        return int(forced)
     if S < 16:
         return 128
     if L == 768 and dh == 48:
@@ -310,9 +234,6 @@ _GROUPS = (1, 2, 3, 4, 5, 6, 8, 12, 16, 24, 48)
 def pick_group(S: int, L: int, nsm: int, nh: int = H, dh: int = DH) -> int:
     """Samples per work item: the fewest bytes into the busiest SM, rounds x 2 L (128 + 48 SG) (the P tile once, SG samples'
     v tiles); the epilogue hides under the next sample's products, so bytes are the cost."""
-    forced = settings.current().bias_only_dit_sg
-    if forced:
-        return max(1, min(int(forced), S))
     best = None
     for sg in (g for g in _GROUPS if g <= S):
         items = nh * (L // 128) * -(-S // sg)
@@ -330,8 +251,6 @@ def core_supported(
     stream P through a TMA ring: no length bound of their own; the sampler's token rungs reach 2560).
     settings.bias_only_dit_core=0 turns it off.
     fp32: the TF32 core (``tf32.py``; same layouts and lengths), once the fp32 path's kernels load (``tf32_ready``)."""
-    if not settings.current().bias_only_dit_core:
-        return False
     if h100_enabled(device_index):  # Hopper: ``pvx`` (bf16) / the TF32 wgmma core ``pvx32`` (fp32), head widths 32 / 48 / 64
         return (
             dtype in (torch.bfloat16, torch.float32)
@@ -512,7 +431,7 @@ class PvGateCore:
 
     def early(self) -> bool:
         """This call takes the P_EARLY build: ``p_early`` and not settings.bias_only_dit_inf3_p_early=0."""
-        return self.p_early and settings.current().bias_only_dit_inf3_p_early
+        return self.p_early
 
     def kernel(
         self, sg: int, gate: bool = True, vb: int = 128, early: bool | None = None
@@ -651,10 +570,9 @@ def dpb_pair_on(L: int, nh: int = H, hp: int = 1, nsm: int = 148) -> bool:
     16 x 48: 61.2 -> 47.4 us, in-process A/B) -- the default where 256-key tiles divide L and the pairs' items fill the SM pairs (fewer
     leave SMs idle that dpb_sm100.cu's 128-query items would use): at L 128-768 that is L768. settings.bias_only_dit_dpb_pair=0 / 1
     (read per call) keeps dpb_sm100.cu / takes the pairs wherever 256 divides L."""
-    forced = settings.current().bias_only_dit_dpb_pair
-    if L % 256 or forced is False:
+    if L % 256:
         return False
-    return forced is True or (nh // hp) * (L // 256) * (L // 256) >= nsm // 2
+    return (nh // hp) * (L // 256) * (L // 256) >= nsm // 2
 
 
 class DpbKernel:
@@ -1118,11 +1036,31 @@ __all__ = [
     "pick_group",
     "resgate_adaln_rows",
     "resgate_out_rows",
-    "psb32_bwd",
-    "psb32_fwd",
-    "psb_bwd",
-    "psb_fwd",
     "softmax_t",
     "softmax_rows",
     "swiglu_rows",
 ]
+
+
+def prebuild(target, rows):
+    """Every build of the bias-only token DiT family for ``target`` (kernels/_prebuild.py): each extension some requirements row
+    (activation dtype, mode) asks for. Which extension serves which dtype / mode is this family's knowledge (the tuples below:
+    activation dtypes it serves, modes it runs in; ``None`` = any; a ``master`` row computes in bfloat16 activations); the dtypes and
+    modes required come from ``rows``. The extensions take no model dims (one build serves every width). The sm_100a cubins of this
+    family are launched through ``augmented_attention.cuda.sm100`` (B200 only)."""
+    if target.arch != "sm90":
+        return
+    from . import hoist, tf32, train
+
+    bf16, fp32, eval_, train_ = {"bfloat16"}, {"float32"}, {"eval"}, {"train"}
+    builds = (
+        (h100_ext, None, None),  # pv_gate_inf.cu: the attention core (bf16 pv_cta / fp32 pv_cta_tf32), dpb, swiglu pipeline
+        (h100_gemm_ext, bf16, eval_),  # one-launch conditioning tables, squeeze + out-projection (the bf16 inference step)
+        (functools.partial(_rows_ext, True), bf16, None), (functools.partial(train._rows_ext, True), bf16, train_),
+        (hoist.ext, None, None), (hoist.pass_ext, None, None), (hoist.bwd_ext, None, train_),  # the hoisted pair bias
+        (tf32.rows32, fp32, None),  # the fp32 row kernels
+    )
+    served = {("bfloat16" if r["dtype"] == "master" else r["dtype"], r["mode"]) for r in rows}
+    for build, dtypes, modes in builds:
+        if any((dtypes is None or d in dtypes) and (modes is None or m in modes) for d, m in served):
+            yield build

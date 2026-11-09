@@ -43,7 +43,5 @@ def on_h100(*tensors: torch.Tensor) -> bool:
 
 def no_triton(x: torch.Tensor) -> bool:
     """H100 / B200 (and no A/B switch): a routed entry point must not launch a Triton kernel on this tensor
-    (``modules.dispatch.restricted_card``)."""
-    from miniworld_engine.modules.dispatch import restricted_card
-
-    return x.is_cuda and restricted_card(x.device)
+    (the cards that run hand-written CUDA, no portable fallback)."""
+    return x.is_cuda and torch.cuda.get_device_capability(x.device.index)[0] in (9, 10)

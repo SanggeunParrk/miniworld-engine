@@ -36,8 +36,8 @@ from miniworld_engine.kernels._device import num_sms
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import both_key, pack, rows_of
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import both_key, pack, rows_of
 from miniworld_engine.kernels._compile import opaque
 
 #: Programs per SM in the persistent forward and backward. 8 keeps enough tiles in flight to saturate HBM at the
@@ -50,7 +50,9 @@ def _persistent_programs(device: torch.device) -> int:
     return num_sms(device) * _PERSIST_WAVES
 
 
-@triton.autotune(configs=configs_for("rmsnorm_fwd_triton"), key=["shape_key", "HAS_WEIGHT"])
+@configured('rmsnorm_fwd_triton',
+            key=["shape_key", "HAS_WEIGHT"],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def rmsnorm_fwd_kernel(
     X, Y, W, Rstd,
@@ -121,8 +123,10 @@ def rmsnorm_fwd_kernel(
                 tl.store(Y + rows[:, None] * stride_r + cols[None, :] * stride_c, y, mask=mask)
 
 
-@triton.autotune(configs=configs_for("rmsnorm_bwd_triton"), key=["shape_key", "HAS_WEIGHT"],
-                 reset_to_zero=["DW"])
+@configured('rmsnorm_bwd_triton',
+            key=["shape_key", "HAS_WEIGHT"],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2),
+            reset_to_zero=["DW"])
 @triton.jit
 def rmsnorm_bwd_kernel(
     DX, DY, DW, X, W, Rstd,
@@ -224,8 +228,9 @@ def rmsnorm_bwd_kernel(
                 tl.store(DX + rows[:, None] * stride_r + cols[None, :] * stride_c, dx, mask=mask)
 
 
-@triton.autotune(configs=configs_for("rmsnorm_adamod_fwd_triton"),
-                 key=["shape_key", "HAS_WEIGHT"])
+@configured('rmsnorm_adamod_fwd_triton',
+            key=["shape_key", "HAS_WEIGHT"],
+            default=dict(BLOCK_N=64, BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def rmsnorm_adamod_fwd_kernel(
     Q, C, WSC, WSH, WG, W, Y, Rstd, GATE,
@@ -454,8 +459,10 @@ def triton_rmsnorm(x: torch.Tensor, weight: torch.Tensor | None = None,
     return _RMSNorm.apply(x, weight, eps)
 
 
-@triton.autotune(configs=configs_for("rmsnorm_adamod_bwd_triton"),
-                 key=["shape_key", "HAS_WEIGHT"], reset_to_zero=["DW"])
+@configured('rmsnorm_adamod_bwd_triton',
+            key=["shape_key", "HAS_WEIGHT"],
+            default=dict(BLOCK_N=64, BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2),
+            reset_to_zero=["DW"])
 @triton.jit
 def rmsnorm_adamod_bwd_kernel(
     DQ, DSD, DW, DY, Q, C, WSC, W, Rstd,

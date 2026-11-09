@@ -16,11 +16,17 @@ _dir = Path(__file__).parent
 
 @functools.lru_cache(maxsize=None)
 def ext():
+    from . import h100_enabled
+
+    return _rows_ext(h100_enabled(torch.cuda.current_device()))
+
+
+@functools.lru_cache(maxsize=None)
+def _rows_ext(hopper: bool):
+    """The training row kernels, built for sm_90a (``hopper``) or the portable arch list."""
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
-    from . import h100_enabled
-    hopper = h100_enabled(torch.cuda.current_device())
     return load_extension(
         name="bias_only_dit_train_rows_cuda" + ("_sm90a" if hopper else ""),
         sources=[str(_dir / "bias_only_dit_train_rows.cu")],

@@ -43,7 +43,6 @@ from miniworld_engine.kernels._device import num_sms
 
 from ..._compile import opaque
 from .fused_sm100a import _ext, _is_b200, build_cubins
-from miniworld_engine import settings
 
 #: (D, n) with a build here; (128, 4) is ``fused_sm100a``. Each builds its own cubins on first use.
 SHAPES = (
@@ -77,7 +76,7 @@ SMALL_TILES = 16
 
 
 def _small(tiles: int) -> bool:
-    return tiles <= (settings.current().transition_wide_small_tiles or SMALL_TILES)
+    return tiles <= SMALL_TILES
 
 
 #: D = 384 forward at small M: one kernel per tile cluster, LayerNorm + expand + SwiGLU + squeeze + residual with the hidden
@@ -102,7 +101,7 @@ def _resident_clusters(d: int, n: int, cl: int, index: int) -> int:
 def _small_cl(d: int, n: int, tiles: int, index: int) -> int:
     """Cluster size of the small-M forward for this call, 0 when the per-tile path runs."""
     if d != 384 or tiles > (
-        settings.current().transition_wide_small_fwd_tiles or SMALL_FWD_TILES
+        SMALL_FWD_TILES
     ):
         return 0
     return next(
@@ -116,7 +115,7 @@ def _dn(x: torch.Tensor, wa: torch.Tensor) -> tuple[int, int]:
 
 
 def _repl(d: int, n: int) -> int:
-    return settings.current().transition_wide_repl or REPL[(d, n)]
+    return REPL[(d, n)]
 
 
 def _ndw(d: int, n: int) -> int:
@@ -197,8 +196,6 @@ def _load(d: int, n: int):
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """Whether these kernels can run this call: sm_100 (B200), bf16, (D, n) in ``SHAPES`` with hidden n D, whole 128-row tiles,
     and for the two-role backward enough SMs for both roles. The requirements are the kernels' own, not a policy."""
-    if not settings.current().transition_fused_sm100a:
-        return False
     if not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
     index = (

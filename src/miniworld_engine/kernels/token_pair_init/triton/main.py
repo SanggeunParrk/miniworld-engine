@@ -18,8 +18,8 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import token_key
 
 P = 128
 NBLK = 192                   # pair slices of the table-gradient kernel (fixed)
@@ -57,7 +57,9 @@ def _row(T, r, m, c):
     return tl.load(T + r[:, None] * 128 + c[None, :], mask=m[:, None], other=0.0)
 
 
-@triton.autotune(configs=configs_for("token_pair_init_fwd_triton"), key=["shape_key"])
+@configured('token_pair_init_fwd_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_J=16, num_warps=4, num_stages=1))
 @triton.jit
 def _tpi_fwd(LEFT, RIGHT, TBL, IDS, BOND, OUT, L, BL, rmax: tl.constexpr, smax: tl.constexpr, BLOCK_J: tl.constexpr, shape_key):
     jb = tl.program_id(0)
@@ -82,7 +84,9 @@ def _tpi_fwd(LEFT, RIGHT, TBL, IDS, BOND, OUT, L, BL, rmax: tl.constexpr, smax: 
     tl.store(OUT + (ri * L + j)[:, None] * 128 + c[None, :], o, mask=jin[:, None])
 
 
-@triton.autotune(configs=configs_for("token_pair_init_dw_triton"), key=["shape_key"])
+@configured('token_pair_init_dw_triton',
+            key=["shape_key"],
+            default=dict(CH=64, BLOCK_P=128, num_warps=8, num_stages=2))
 @triton.jit
 def _tpi_dw(G, IDS, BOND, PART, L, BL, P_total, per, rmax: tl.constexpr, smax: tl.constexpr, RBB: tl.constexpr, CH: tl.constexpr, BLOCK_P: tl.constexpr, shape_key):
     """PART[t, row, channels of slice q] = sum over the pairs of slice t of onehot(row) * dz[pair, channels]; pair tiles in order, dz split into 3 bf16 terms.
@@ -140,7 +144,9 @@ def _tpi_dw(G, IDS, BOND, PART, L, BL, P_total, per, rmax: tl.constexpr, smax: t
     tl.store(base + rb[:, None] * 128 + cc[None, :], acc_b, mask=(rb < nbin)[:, None])
 
 
-@triton.autotune(configs=configs_for("token_pair_init_dw_reduce_triton"), key=["shape_key"])
+@configured('token_pair_init_dw_reduce_triton',
+            key=["shape_key"],
+            default=dict(BLOCK=256, num_warps=4, num_stages=1))
 @triton.jit
 def _tpi_dw_reduce(PART, OUT, total, NBLK: tl.constexpr, BLOCK: tl.constexpr, shape_key):
     k = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -151,7 +157,9 @@ def _tpi_dw_reduce(PART, OUT, total, NBLK: tl.constexpr, BLOCK: tl.constexpr, sh
     tl.store(OUT + k, acc, mask=m)
 
 
-@triton.autotune(configs=configs_for("token_pair_init_bwd_dx_triton"), key=["shape_key", "OVER_I"])
+@configured('token_pair_init_bwd_dx_triton',
+            key=["shape_key", "OVER_I"],
+            default=dict(BLOCK_J=16, num_warps=4, num_stages=1))
 @triton.jit
 def _tpi_dx(G, OUT, L, OVER_I: tl.constexpr, BLOCK_J: tl.constexpr, shape_key):
     """OVER_I = 0: OUT[b, i, :] = sum over j of G[b, i, j, :]; OVER_I = 1: OUT[b, j, :] = sum over i of G[b, i, j, :]. Fixed order (j blocks / i rows in turn)."""

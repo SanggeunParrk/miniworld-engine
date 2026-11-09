@@ -9,9 +9,8 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine.kernels.token_pair_init.cuda.sm100 import P, check_packable, n_rel
-
 _dir = Path(__file__).parent
+P = 128   # d_pair
 RB = 8
 
 
@@ -21,7 +20,7 @@ def fwd_rows(L: int) -> int:
 
 
 @functools.lru_cache(maxsize=None)
-def _ext():
+def ext():
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
@@ -33,17 +32,14 @@ def _ext():
 def forward(left, right, tbl, ids, bond, r_max: int, s_max: int) -> torch.Tensor:
     """z [B, L, L, 128] fp32 from left / right [B, L, 128], the table [nbin, 128], ids [5, B*L] int32, bond [B*L*L] uint8."""
     B, L, _ = left.shape
-    check_packable(r_max, s_max)
     out = torch.empty(B, L, L, P, device=left.device, dtype=torch.float32)
-    _ext().forward(left, right, tbl, ids, bond, out, int(r_max), int(s_max), fwd_rows(L))
+    ext().forward(left, right, tbl, ids, bond, out, int(r_max), int(s_max), fwd_rows(L))
     return out
 
 
-def backward(g, ids, bond, r_max: int, s_max: int):
-    """(dleft [B, L, 128], dright [B, L, 128], dtbl [nbin, 128]) of :func:`forward` from dz = g [B, L, L, 128] fp32."""
+def backward(g, ids, bond, nbin: int, r_max: int, s_max: int):
+    """(dleft [B, L, 128], dright [B, L, 128], dtbl [nbin, 128]) of :func:`forward` from dz = g [B, L, L, 128] fp32 (``nbin`` = table rows = n_rel + 2)."""
     B, L = g.shape[:2]
-    check_packable(r_max, s_max)
-    nbin = n_rel(r_max, s_max) + 2
     nrb = (L + RB - 1) // RB
     dev = g.device
     dleft = torch.empty(B, L, P, device=dev, dtype=torch.float32)
@@ -51,7 +47,7 @@ def backward(g, ids, bond, r_max: int, s_max: int):
     dtbl = torch.empty(nbin, P, device=dev, dtype=torch.float32)
     dpart = torch.empty(B * nrb * L * P, device=dev, dtype=torch.float32)
     wpart = torch.empty(B * nrb * 4 * nbin * 32, device=dev, dtype=torch.float32)
-    _ext().backward(g, ids, bond, dleft, dright, dtbl, dpart, wpart, int(r_max), int(s_max))
+    ext().backward(g, ids, bond, dleft, dright, dtbl, dpart, wpart, int(r_max), int(s_max))
     return dleft, dright, dtbl
 
 
@@ -60,5 +56,5 @@ def prep(id_tensors, w_rel, w_bond):
     n = id_tensors[0].numel()
     ids = torch.empty(5, n, device=w_rel.device, dtype=torch.int32)
     tbl = torch.empty(w_rel.shape[1] + 2, P, device=w_rel.device, dtype=torch.float32)
-    _ext().prep(list(id_tensors), w_rel, w_bond, ids, tbl)
+    ext().prep(list(id_tensors), w_rel, w_bond, ids, tbl)
     return ids, tbl

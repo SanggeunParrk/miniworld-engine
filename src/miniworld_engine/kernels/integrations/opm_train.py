@@ -36,7 +36,6 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _cast_cuda
 
 CM, CH, CZ = 64, 32, 128
@@ -47,11 +46,8 @@ _EXT: dict[str, Any] = {}
 
 
 def _enabled() -> bool:
-    """``settings.opm_train``: False disables the path; None (the default) is automatic."""
-    from miniworld_engine import settings
-
-    value = settings.current().opm_train
-    return True if value is None else value
+    """The fused OPM training path is on (the old ``settings.opm_train`` default: automatic)."""
+    return True
 
 
 _CUDA_PROLOGUE_FOR_LEGACY = True  # inference cells that used the Triton prologue run the CUDA one (`opm_prologue_wide`): 1.5-5.5 % faster at all 11 such cells (2026-10-13)
@@ -76,19 +72,6 @@ def _h100_path(s: int, n: int, *, training: bool, wide: bool = False) -> str:
     if s in (1024, 2048, 4096) and n in (128, 256, 384, 512, 640, 768):
         return "legacy"
     return "native"
-
-
-def wanted(implementation) -> bool:
-    from miniworld_engine import settings
-    from miniworld_engine.modules.exceptions import ImplementationType
-
-    # ``ANTHROPIC`` is not asked here: an explicit ``implementation="anthropic"`` is the Anthropic release's path
-    # (integrations.anthropic_msa), not this engine's own H100 path.
-    return (
-        _enabled()
-        and (not settings.current().force_portable_kernels)
-        and implementation == ImplementationType.MINIWORLD
-    )
 
 
 def refusal(
@@ -163,14 +146,6 @@ def serves(*a, **kw) -> bool:
     if why is None:
         STATS["served"] += 1
         return True
-    if (
-        settings.current().opm_train is not None and why not in STATS["refused"]
-    ):  # opted in but not served: say why, once per reason
-        import logging
-
-        logging.getLogger("miniworld_engine").warning(
-            "opm_train: the fused training path is not taken: %s", why
-        )
     STATS["refused"][why] = STATS["refused"].get(why, 0) + 1
     return False
 
@@ -190,8 +165,7 @@ def _epilogue_half_enabled(s: int, n: int, *, training: bool) -> bool:
 def _fused_enabled(s: int, n: int, *, training: bool, cm: int = CM, cz: int = CZ) -> bool:
     """The inference outer product + projection as ONE kernel (`opm_fused_infer`, csrc/opm_epilogue.cu): the grouped product never goes to HBM.
     MiniWorld / RF3 widths (d_msa 64, d_pair 128), N % 16, S % 64, either normalisation order, with or without the pair residual."""
-    return (not training and (cm, cz) == (CM, CZ) and n % 16 == 0 and s % 64 == 0 and s >= 64
-            and not settings.current().force_portable_kernels)
+    return (not training and (cm, cz) == (CM, CZ) and n % 16 == 0 and s % 64 == 0 and s >= 64)
 
 
 def _fused_weight(wo):
@@ -233,11 +207,13 @@ def _ext(
     cm: int = CM,
     cz: int = CZ,
     fused: bool = False,
+    arch: str | None = None,
 ):
     """This repo's fused OPM kernels for the current card: `csrc/opm_epilogue.cu` (sm_90a) or
     `csrc/sm100/opm_sm100.cu` (sm_100a, the same kernels and signatures on tcgen05 / TMEM).
-    (cm, cz) other than MiniWorld's build the same source with -DOPM_CM / -DOPM_CZ (one extension per width)."""
-    sm100 = torch.cuda.get_device_capability(device) == (10, 0)
+    (cm, cz) other than MiniWorld's build the same source with -DOPM_CM / -DOPM_CZ (one extension per width). ``arch`` (``sm90`` / ``sm100``) names the card
+    instead of asking ``device``'s."""
+    sm100 = arch == "sm100" if arch else torch.cuda.get_device_capability(device) == (10, 0)
     wide = (cm, cz) != (CM, CZ)
     native = True if native is None else native
     # Gathered O/W TMA stages with overlapping WGMMA groups (chosen per shape by the callers).
@@ -259,7 +235,7 @@ def _ext(
     if epi_half:
         key += "_half"
     if fused and not sm100 and not wide:   # the fused outer product + projection kernel (csrc/opm_epilogue.cu, MINIWORLD_OPM_FUSED)
-        key += "_fused" + settings.current().opm_fused_defs.replace(" ", "").replace("=", "").replace("-D", "_")
+        key += "_fused"
     if wide and not sm100:
         key += f"_{cm}_{cz}"
     if key in _EXT:
@@ -288,7 +264,7 @@ def _ext(
         if epi_half:
             suffix += "_half"
         if fused and not wide:
-            suffix += "_fused" + settings.current().opm_fused_defs.replace(" ", "").replace("=", "").replace("-D", "_")
+            suffix += "_fused"
         if wide:
             suffix += f"_{cm}_{cz}"
         _EXT[key] = load(
@@ -298,7 +274,7 @@ def _ext(
             + ([f"-DOPM_CM={cm}", f"-DOPM_CZ={cz}"] if wide else [])
             + (["-DMINIWORLD_OPM_EPILOGUE_TMA_OVERLAP=1"] if epi_tma else [])
             + (["-DMINIWORLD_OPM_EPILOGUE_TMA_HALF=1"] if epi_half else [])
-            + (["-DMINIWORLD_OPM_FUSED=1", *settings.current().opm_fused_defs.split()] if fused and not wide else []),
+            + (["-DMINIWORLD_OPM_FUSED=1"] if fused and not wide else []),
             extra_cflags=["-O3"],
         )
     return _EXT[key]
@@ -1004,7 +980,7 @@ def outer_product_mean(
         pbias,
     ]
     if torch.is_grad_enabled():
-        save_o = settings.current().opm_train_save_o
+        save_o = True
         out = OpmTrainFn.apply(*tensors, eps, save_o, after, dmin, doff)
         if torch.cuda.get_device_capability(msa.device) == (9, 0):
             from miniworld_engine.kernels.integrations.token_dit_train import (

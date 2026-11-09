@@ -34,7 +34,6 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine import settings
 from miniworld_engine.kernels.integrations import pwa_wide as _wide
 from miniworld_engine.kernels import _cast_cuda
 
@@ -59,6 +58,11 @@ def _split_contraction(n: int) -> bool:
     return n >= _SPLIT_MIN_N
 
 
+def _training_default_shape(s: int, n: int) -> bool:
+    """The six required training shapes (MSA depth s, length n) with full native accuracy qualification."""
+    return s in (1024, 2048, 4096) and n in (384, 768)
+
+
 def _h100_training_default(msa: torch.Tensor) -> bool:
     """The six required training shapes with full native accuracy qualification."""
     return (
@@ -67,8 +71,7 @@ def _h100_training_default(msa: torch.Tensor) -> bool:
         and msa.ndim == 4
         and msa.shape[0] == 1
         and msa.shape[3] == D
-        and msa.shape[1] in (1024, 2048, 4096)
-        and msa.shape[2] in (384, 768)
+        and _training_default_shape(msa.shape[1], msa.shape[2])
     )
 
 
@@ -84,28 +87,9 @@ def native_inference_enabled(device: torch.device) -> bool:
     return device.type == "cuda" and torch.cuda.get_device_capability(device) == (9, 0)
 
 
-def payload_dir():  # kept for symmetry with anthropic_msa: this path needs no payload
-    return None
-
-
 def _enabled() -> bool:
-    """Grad-enabled calls follow ``settings.pwa_train``; inference follows ``pwa_infer`` and falls back to it. None = automatic."""
-    current = settings.current()
-    value = current.pwa_train
-    if not torch.is_grad_enabled() and current.pwa_infer is not None:
-        value = current.pwa_infer
-    return True if value is None else value
-
-
-def wanted(implementation) -> bool:
-    """Grad-enabled calls: ``settings.pwa_train``. Grad-free calls (inference) take the same forward kernels, controlled by
-    ``settings.pwa_infer`` and, when that is unset, ``settings.pwa_train`` (no payload needed; faster than the upstream cell)."""
-    from miniworld_engine.modules.exceptions import ImplementationType
-
-    on = _enabled() and (not settings.current().force_portable_kernels)
-    # ``ANTHROPIC`` is not asked here: an explicit ``implementation="anthropic"`` is the Anthropic release's cell
-    # (integrations.anthropic_msa), not this engine's own H100 path.
-    return on and implementation == ImplementationType.MINIWORLD
+    """The native PWA path is on for grad-enabled and inference calls (the old ``settings.pwa_train`` / ``pwa_infer`` default: automatic)."""
+    return True
 
 
 def refusal(
@@ -121,7 +105,7 @@ def refusal(
     """None if this path can run this training call, else why it cannot. Never raises."""
     try:
         if not _enabled():
-            return "settings.pwa_train / pwa_infer disables the native path"
+            return "the native path is disabled"
         wide = (d_msa, d_pair, n_head, d_hidden) != (D, DZ, H, C)
         if wide and not _wide.supported(d_msa, d_pair, n_head, d_hidden):
             return (
@@ -178,14 +162,6 @@ def serves(*a, **kw) -> bool:
     if why is None:
         STATS["served"] += 1
         return True
-    if (
-        settings.current().pwa_train is not None and why not in STATS["refused"]
-    ):  # opted in but not served: say why, once per reason
-        import logging
-
-        logging.getLogger("miniworld_engine").warning(
-            "pwa_train: the fused training path is not taken: %s", why
-        )
     STATS["refused"][why] = STATS["refused"].get(why, 0) + 1
     return False
 
@@ -525,7 +501,7 @@ def _cast_h100_matrices(*weights):
     if torch.cuda.get_device_capability(weights[0].device) == (9, 0) and any(
         w.dtype != torch.bfloat16 for w in weights
     ):
-        from miniworld_engine.utils.h100_master import pack
+        from miniworld_engine.kernels._h100_master import pack
 
         return tuple(pack(weights))
     return tuple(w.to(torch.bfloat16).contiguous() for w in weights)

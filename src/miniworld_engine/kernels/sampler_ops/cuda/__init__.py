@@ -20,3 +20,10 @@ def ext():
         extra_cflags=["-std=c++17"],
         verbose=False,
     )
+
+
+def prebuild(target, rows):
+    """The build of the sampler glue family (kernels/_prebuild.py): one shape-independent extension (``sampler_ops_sm90a``, every size is a runtime launch
+    parameter), built once when some requirements row (of ``AugmentNoise`` / ``AlignEuler`` / ``PoolAtoms``, the modules that launch it) needs the family."""
+    if rows:
+        yield ext

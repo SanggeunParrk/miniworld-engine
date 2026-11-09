@@ -13,7 +13,7 @@ x_n is (M, D) blld contiguous. B=1, K=N=D=128, bf16.
 """
 
 from __future__ import annotations
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 import torch
 
@@ -22,7 +22,7 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.kernels._shape_key import token_key
 
 
 # B200 (sm_100) pruned set. Swept BM in {32,64,128,256,512} x warps {4,8,16}
@@ -60,7 +60,9 @@ from miniworld_engine.autotune.shape_key import token_key
 # There is no ADD_RESIDUAL. The pairformer residual is part of what this op IS, not an option
 # it offers, so `residual` is required and the add is unconditional -- see gate_elem.py for the
 # measurement (1.27x at both production lengths, and the more accurate of the two forms).
-@triton.autotune(configs=configs_for("trimul_outproj_layernorm_gemm_gate_triton"), key=['shape_key'])
+@configured('trimul_outproj_layernorm_gemm_gate_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2))
 @triton.jit
 def _back_kernel(
     tri_ptr,  # (K, M) channel-major: tri[k, m] at k*M + m

@@ -23,7 +23,7 @@ tile for BOTH the A and B projections across the N-loop.
 from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 
 import os
 
@@ -31,7 +31,6 @@ import torch
 
 # FP32 projections follow torch's TF32 switch (kernels/_dot_precision.py) in the expand + gate backward kernel: IEEE dot
 # precision unless torch allows TF32. BF16 tensor-core arithmetic is unchanged.
-from miniworld_engine import settings
 import triton
 import triton.language as tl
 
@@ -42,16 +41,14 @@ from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_ord
 
 from jaxtyping import Float
 
-from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.autotune.shape_key import both_key, pack, length_of, rows_of
+from miniworld_engine.kernels._shape_key import both_key, pack, length_of, rows_of
 from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 
-AUTOTUNE = settings.current().autotunes("transition")
 _TRANSITION_LNBWD_PRIVATIZE_REPLICAS = 64
 
 
 def _transition_fuse_stats_enabled() -> bool:
-    return settings.current().transition_fuse_stats
+    return False
 
 
 def _shape_key(shape_key: int | None, rows: int, **axes: int) -> int:
@@ -76,8 +73,9 @@ def _shape_key(shape_key: int | None, rows: int, **axes: int) -> int:
 
 
 # fmt: off
-@triton.autotune(configs=configs_for("transition_layernorm_expand_swiglu_triton"),
-                 key=['shape_key', 'SAVE_XN'])
+@configured('transition_layernorm_expand_swiglu_triton',
+            key=['shape_key', 'SAVE_XN'],
+            default=dict(BLOCK_K_D=32, BLOCK_K_ND=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _transition_expand_gate_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
@@ -313,9 +311,41 @@ def _prefer_covering_b2b(configs, nargs, **_):
 # combination nothing could launch -- so folding it in removes a variable without removing a
 # behaviour. The add itself is free: D == K here, so the epilogue reloads the kernel's OWN
 # pre-LN input tile (L2-hot from the LN load) instead of taking a residual tensor argument.
-@triton.autotune(configs=configs_for("transition_fwd_b2b_triton"),
-                 key=['shape_key', 'SAVE_XN', 'FUSE_STATS', 'HAS_LN'],
-                 prune_configs_by={'early_config_prune': _prefer_covering_b2b})
+@configured('transition_fwd_b2b_triton',
+            key=['shape_key', 'SAVE_XN', 'FUSE_STATS', 'HAS_LN'],
+            default=[dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=16, BLOCK_N=64, BLOCK_K_ND=16, BLOCK_M1=64, GROUP_M=1, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=1, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=64, BLOCK_N=64, BLOCK_K_ND=64, BLOCK_M1=64, GROUP_M=1, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=128, BLOCK_N=64, BLOCK_K_ND=128, BLOCK_M1=64, GROUP_M=1, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=256, BLOCK_N=64, BLOCK_K_ND=256, BLOCK_M1=64, GROUP_M=1, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=64, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=128, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=64, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=128, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=8, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=3),
+            dict(BLOCK_K_D=128, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=32, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=128, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=32, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=2, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=1),
+            dict(BLOCK_K_D=256, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=16, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=256, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=16, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=1, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=4),
+            dict(BLOCK_K_D=16, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=256, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=16, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=5),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=6),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=8),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=8, num_stages=3),
+            dict(BLOCK_K_D=32, BLOCK_N=64, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=1, num_warps=4, num_stages=3)],
+            prune=_prefer_covering_b2b)
 @triton.jit
 def _transition_b2b_kernel(
     x_ptr, rstd_ptr, c1_ptr, rstd_out_ptr, c1_out_ptr, g_ptr, beta_ptr,
@@ -627,7 +657,9 @@ def transition_b2b(
 # x2.shape[1], both the module's d_hidden, so `K` (keyed) already partitions this axis. See the
 # longer note on `_transition_b2b_kernel` above. `ND` is independent (n is a module argument).
 # fmt: off
-@triton.autotune(configs=configs_for("transition_fwd_b2b_ktiled_triton"), key=['shape_key'])
+@configured('transition_fwd_b2b_ktiled_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K_D=32, BLOCK_K_ND=32, BLOCK_M1=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _transition_b2b_ktiled_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
@@ -824,12 +856,9 @@ def triton_swiglu_ffn(
 
 
 # fmt: off
-@triton.autotune(configs=configs_for("transition_bwd_swiglu_recompute_triton"),
-# STORE_H IS in the key: its guarded store is a whole extra (M, ND) tensor on a kernel whose
-# other five stores are the outputs. STACK_DAB is NOT, and the difference is volume, not shape:
-# both of its branches store the SAME two tiles with the same masks, into one 2*ND-wide buffer or
-# two ND-wide ones, so only the addressing changes.
-                 key=['shape_key', 'NORMALIZE', 'STORE_H'])
+@configured('transition_bwd_swiglu_recompute_triton',
+            key=['shape_key', 'NORMALIZE', 'STORE_H'],
+            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _transition_expand_gatebwd_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr, wa_ptr, wb_ptr, ge_ptr,
@@ -1062,9 +1091,10 @@ def _transition_expand_gatebwd_savedxn_stacked(
 # _TRANSITION_LNBWD_PRIVATIZE_REPLICAS (64) when privatizing and 1 otherwise -- i.e. a function of
 # PRIVATIZE_DGDB, and dead code on the non-privatized branch. Nothing (settings, env, launcher
 # argument) can vary it independently, so PRIVATIZE_DGDB above already separates its two values.
-@triton.autotune(configs=configs_for("layernorm_bwd_foldstats_triton"),
-                 key=['shape_key', 'PRIVATIZE_DGDB'],
-                 reset_to_zero=['dg_ptr', 'db_ptr'])
+@configured('layernorm_bwd_foldstats_triton',
+            key=['shape_key', 'PRIVATIZE_DGDB'],
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2),
+            reset_to_zero=['dg_ptr', 'db_ptr'])
 @triton.jit
 def _transition_ln_bwd_kernel(
     dxn_ptr, x_ptr, rstd_ptr, c1_ptr, g_ptr, dx_ptr, dg_ptr, db_ptr,
@@ -1174,7 +1204,7 @@ def _transition_ln_bwd(dxn, x2, rstd, c1, gamma, *, shape_key: int | None = None
     # Default ON: privatizing dgamma/dbeta atomics across N replicas cuts atomic contention
     # (measured 1.31x @L=1024, ncu confirmed membar was the top stall). Set to 0/false/off to
     # restore the single-accumulator atomic path.
-    privatize_dgdb = settings.current().transition_lnbwd_privatize
+    privatize_dgdb = True
     if privatize_dgdb:
         num_replicas = _TRANSITION_LNBWD_PRIVATIZE_REPLICAS
         dgamma_acc = torch.zeros((num_replicas, K), device=x2.device, dtype=torch.float32)
@@ -1464,7 +1494,6 @@ def make_fused_function(fwd, bwd):
         Both share the LayerNorm-backward kernel (which always needs raw x + stats for x_hat).
         """
 
-        @typecheck
         @staticmethod
         def forward(
             ctx,

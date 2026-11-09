@@ -19,7 +19,7 @@ tiles -> persistent grid underfilled + reduce-launch overhead dominates) the wra
 back to the te_style atomic kernel, which is faster there.
 """
 from __future__ import annotations
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._device import num_sms
 
 
@@ -28,15 +28,14 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import both_key, pack  # kernels here are level=both
+from miniworld_engine.kernels._shape_key import both_key, pack  # kernels here are level=both
 from ...layernorm.triton.persistent import _ln_bwd_persistent as _ln_bwd_persistent_jit
 from .te_style import _ln_bwd_kernel  # atomic small-M fallback
-from miniworld_engine import settings
 
 # Escape hatch / A-B control: force one path. "atomic" = the old te_style plain-atomic kernel.
 def _override() -> str | None:
     """Read at call time; see layernorm.compile_native._ln_bwd_override."""
-    return settings.current().layernorm_out_bwd_path
+    return None
 
 _WAVES = 2
 
@@ -55,7 +54,9 @@ _WAVES = 2
 # hint): the sole launcher (`_ln_bwd_persistent_new`) passes `N=K` and `VEC_HINT=(K <= 128)`, so it
 # is a pure function of N -- which is folded into shape_key. Keying it too would only duplicate a partition the
 # cache makes anyway.
-@triton.autotune(configs=configs_for("layernorm_bwd_split_mmajor_triton"), key=['shape_key'])
+@configured('layernorm_bwd_split_mmajor_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _ln_bwd_mmajor_kernel(
     DX, PDG, PDB, DXn, X, G, Mean, Rstd,

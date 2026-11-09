@@ -1,252 +1,61 @@
 # miniworld-engine
 
-GPU kernel library for MiniWorld / AF3-style ops. Each op is cut out of the model and
-optimized in isolation: **hand-written CUDA where it exists, a portable kernel fallback on every other GPU**
-(H100 and B200 have none, on purpose: they fall back to PyTorch), and a PyTorch reference that defines what "correct" means.
+PyTorch modules of AF3-style structure-prediction models (pair stack, MSA ops, token / atom diffusion transformers, sampler glue,
+ProteinMPNN, losses), each with a PyTorch reference and hand-written H100 kernels as alternative backends, plus the tooling that
+states what each module must serve and judges whether a backend is accurate and fast enough.
 
-> **Where this fits.** miniworld-engine is the bottom layer of a three-layer stack: it owns
-> the fused kernels and building-block ops; **team-gm** composes them into representative AF3
-> blocks; terminal product repos assemble those into full models. Boundary rules live in
-> team-gm's `docs/ARCHITECTURE.md`.
+Scope: **H100 (sm90) only.** The `cuda` backends are built for sm_90a; the launch-config tables, the prebuilder's default target and
+the judge's recorded environment are H100.
 
-**Version 2.3.12** — CUDA + portable kernels only (CuTe/quack removed), torch 2.13 (CUDA 12.9 or 13.0), prebuilt H100 kernels,
-cuequivariance 0.12. [Changelog](docs/CHANGELOG.md) ·
-[attribution](licenses/THIRD_PARTY_NOTICES.md).
+## The four parts
 
-| I want to… | go to |
-|---|---|
-| run on a GPU, or see what is finished there for which shapes | [docs/gpus/](docs/gpus/README.md) |
-| find a dated measurement or audit (never edited after the fact) | [docs/records/](docs/records/) |
-| read everything else | [docs/README.md](docs/README.md) |
-| work on this repo as an agent | [.claude/CLAUDE.md](.claude/CLAUDE.md) |
+| part | where | what |
+|---|---|---|
+| requirements | `src/miniworld_engine/requirements/` | `requirements_module.csv`: every (module class, dims, options) a downstream model builds, with lengths, dtypes, modes. `requirements_kernel.csv`: every kernel a module backend launches, its family, role and human-managed `version`. |
+| modules + backends | `src/miniworld_engine/modules/` | One `BackendModule` per op. `pytorch` is the reference; `cuda` / `triton` are the engine's kernels; `anthropic` / `cueq` are external baselines. A backend states its range in `_supports_<backend>` and never falls back. |
+| kernels | `src/miniworld_engine/kernels/` | Kernel families (CUDA and Triton), per-GPU launch-config tables, the prebuilder (CUDA artifacts ahead of time) and the pretuner (launch-config tables). |
+| measure + judge | `src/miniworld_engine/measure/`, `src/miniworld_engine/judge/` | Measurers for accuracy (fp64 gold) and speed (CUDA graphs); the judge turns records into tokens and decides which cases are owed a measurement, by human-managed versions. |
 
-## Quickstart
+## Quick usage
 
-Four steps, and the first three need no GPU. Every command in this section is executed by
-`tests/cpu/layout/test_quickstart_runs.py`, so it cannot drift from what the code does.
+Build a module with a backend:
 
-**1. Install.** The library is a normal wheel; `[bench]` and `[baselines]` are extras you do not need
-to read a number.
+```python
+import torch
+from miniworld_engine.modules import TriangleMultiplication, TokenDiT
 
-```bash
-# cpu
-python -m pip install -e .
+tri = TriangleMultiplication(128, backend="cuda").cuda()     # H100 kernels
+ref = TriangleMultiplication(128).cuda()                     # backend="pytorch", the reference
+ref.load_state_dict(tri.state_dict())                        # same parameter names for every backend
+tri.set_backend("triton")                                    # switch later; ValueError if the class has no such backend
+
+dit = TokenDiT(model="boltz2", ...)                          # selector: builds the model's own class (TokenDiTBoltz2)
 ```
 
-**2. Check what you have.** Prints the version and the config set every kernel will search
-if you do nothing else.
+A call outside a backend's range raises `BackendUnsupported` with the reason; it is never run by another backend.
 
-```bash
-# cpu
-python -c "import miniworld_engine as m; print(m.__version__)"
-python -c "from miniworld_engine.autotune import configs; print(configs.default_config_dir())"
-```
-
-**3. See what the library declares.** One row per kernel: which backend, which arch it requires,
-which tolerance it is held to.
-
-```bash
-# cpu
-python -c "
-import csv, collections, miniworld_engine.kernels as k, pathlib
-reg = pathlib.Path(k.__file__).parent / 'registry' / 'registry.csv'
-rows = list(csv.DictReader(reg.open()))
-print(len(rows), 'kernels;', dict(collections.Counter(r['backend'] for r in rows)))"
-```
-
-**4. Run them, on a GPU.** This launches every kernel that has a driver and compares each against
-its torch reference. It is the fastest way to find out whether this library works on your card,
-and it writes `autotune/manifests/<your card>.csv` recording what it found.
-
-```bash
-# gpu
-python -m miniworld_engine.autotune.run_all
-```
-
-The summary reports `declared`, `driven`, `ok`, `failed`, and `skipped` counts for the
-current registry and device. `skipped` distinguishes unsupported architecture/dtype cases;
-missing drivers and execution failures are reported separately. See
-[docs/gpus/supported.md](docs/gpus/supported.md) for what has actually been run, and
-[docs/gpus/troubleshooting.md](docs/gpus/troubleshooting.md) when a step does not do this.
-
-**Then:** using the engine means `from miniworld_engine.modules import ...` (the model layers: each holds its weights and picks the kernel backend for your GPU) or, for a single op such as a LayerNorm, the entry point in `miniworld_engine.kernels`. Getting them *fast* on your card means
-Getting them *fast* on your card means building a tuned cache with `miniworld-engine build all`. Its work depends on the GPU,
-current source and existing valid measurements; use `dev coverage` to inspect a specific GPU cache.
-## Prebuilt CUDA kernels
-
-The hand-written CUDA kernels compile on first use (tens of minutes for a new environment) unless the installed engine
-is a binary wheel: release wheels (`miniworld_engine-<version>-cp3XX-cp3XX-manylinux_2_28_x86_64.whl`) carry the
-compiled kernels for H100 (sm_90a) in `miniworld_engine/_prebuilt/` for both CUDA builds of torch 2.13 (the default
-PyPI one, CUDA 13.0, and the cu129 one) and pin `torch==2.13.*`, so the first call loads binaries and never runs nvcc:
-
-```bash
-pip install miniworld-engine     # with the torch it pins; an sdist / git install keeps the JIT path
-# torch's CUDA 12.9 build instead (NVIDIA driver 575-579, which cannot run CUDA 13):
-pip install miniworld-engine --index-url https://download.pytorch.org/whl/cu129 --extra-index-url https://pypi.org/simple
-```
-
-Shipped kernels that do not match the running torch / CUDA or GPU are ignored, and anything they do not cover still
-compiles (`MINIWORLD_ENGINE_JIT_FALLBACK=0` makes that an error). How kernels are keyed by their include graph, how
-the release builds and checks them (`miniworld-engine dev bundle-kernels`, `dev build-wheel`), and the release
-checklist: [docs/kernels/prebuilt-kernels.md](docs/kernels/prebuilt-kernels.md).
-
-## Layout
-
-```
-src/miniworld_engine/
-├── kernels/            fusion units — one folder per family
-│   ├── <family>/       reference.py · interface.py · [dispatch.py] · [whole_op.py]
-│   │                   cuda/ · triton/ backends · notes/ (dated optimization logs)
-│   ├── integrations/   hand-CUDA entry points wired into modules (trimul_h100, token_dit, …) + their csrc/
-│   ├── drivers/  checks/   autotune-capture harness: one module per registry family
-│   └── registry/       registry.csv (declared kernels) · registry_module.csv (model shapes)
-│                       · registry_kernel.csv (derived plan) · exemption / evidence lists
-├── modules/            model ops: connect kernels, no backend folders
-├── baselines/          adapters that call external baselines (Anthropic release)
-├── autotune/           tuner, cache reader/builder · configs/{default,grid,ab/} · data/ (per-GPU caches)
-├── build/              cache-build matrix and audits
-├── utils/              atomic writes, typecheck, optimizer migration, h100_master, tools/ (maintenance commands behind `miniworld-engine dev …`), viz/
-├── cli.py  settings.py
-benchmarks/             runners/bench.py + {kernels,modules}/<target>/configs · results/<gpu>/
-tests/                  CPU contracts; `@pytest.mark.gpu` for device tests
-docs/                   see docs/README.md
-third_party/  licenses/ upstream provenance and license texts
-```
-
-Every kernel family has the same shape, enforced by `tests/cpu/layout/test_kernel_layout.py`:
-`reference.py` (the torch definition checks compare against), `interface.py` (the family's one
-public door), optional `dispatch.py` (a choice among implementations) and `whole_op.py`
-(a whole layer with weights as arguments), and backend packages `cuda/` / `triton/`.
-
-## Benchmarking
-
-One entry point: `benchmarks/runners/bench.py` with a target's `configs/bench.yaml`
-(`target=<name> level=module|kernel`). Final numbers are compiled and CUDA-graph timed; the
-CSV is the source of truth and plots are rendered from it. Conventions:
-[docs/benchmarks/](benchmarks/README.md) · traps: [cautions](benchmarks/cautions.md) ·
-cluster commands per GPU: [docs/gpus/](docs/gpus/README.md).
-
-## torch.compile
-
-Every kernel entry point is registered as an opaque `torch.library` op, so a compiled model is
-ONE graph rather than one per kernel — a pairformer block traces to 1 graph / 0 breaks instead of
-27 / 26. That is `settings.compile_wrap="custom_op"`, the default.
-
-```bash
-MINIWORLD_COMPILE_WRAP=disable   # the other mode: a graph break at every kernel entry
-```
-
-`disable` is kept for A/B and as the escape hatch: it is the mode that needs no `fake`, so it
-still works if one is ever wrong. It has to come from the environment because the value is read
-when the kernel modules IMPORT — `settings.configure()` from a parent process is too late.
-
-The default matters beyond fusion. Under `disable`, inductor's cudagraph-trees
-(`mode="reduce-overhead"`) bail on the breaks and end up SLOWER than eager, and a manual
-`torch.cuda.graph` capture over a compiled module dies with `cudaErrorStreamCaptureInvalidated`.
-Numbers, and the scripts that produced them: `benchmarks/compile_wrap/`.
-
-## Supported hardware
-
-Every kernel declares its minimum architecture in `kernels/registry/registry.csv`'s `arch` column, and the
-table below is checked against that column by `tests/cpu/registry/test_hardware_support.py` — so it cannot drift
-from the code.
-
-<!-- BEGIN GENERATED: hardware-support -->
-| arch | GPUs | kernels | backends |
-|---|---|---|---|
-| **sm80+** | A100, A5000, A6000, RTX 4090 | 170 | triton 164, cuda 6 |
-| **sm90+** | H100 | 30 | cuda 30 |
-<!-- END GENERATED: hardware-support -->
-
-**The minimum supported architecture is sm80.** The generated table above states each
-registered kernel's minimum architecture; it is not a numerical qualification for every
-listed GPU. The values of `implementation` are `pytorch`, `miniworld`, `cuequivariance` and `anthropic`; `miniworld` routes per card
-automatically. It runs the engine's CUDA path where one serves the call; on a card without one
-it routes to the engine's portable kernels only if the engine holds a record for that exact card
-(`autotune/manifests/`), else it warns and runs the PyTorch reference
-([docs/dispatch.md](docs/dispatch.md)). `settings.force_portable_kernels` is the internal A/B switch that
-forces the portable kernels. Native CUDA variants can require a newer architecture.
-
-One extension is **not** in the table because it is not in the registry: `transition_b2b_cuda`,
-which the `Transition` module builds on demand, is compiled for `sm_90a` and fails to build on
-sm_86 ("Error building extension"). `autotune/builder.py` excludes `cuda` from that case's
-implementations for exactly this reason.
-
-The B200 (sm_100a) kernels are not in the table either: like the H100 hand-CUDA paths they are
-integrations wired into the modules (`integrations/`, gated on compute capability 10.0), not
-registry kernels. What runs there, for which shapes: [docs/gpus/b200/b200.md](docs/gpus/b200/b200.md).
-## CLI
-
-`miniworld-engine` (installed by the package; `python -m miniworld_engine.cli` works too):
-
-```bash
-miniworld-engine build all            # verify the current model plan, then fill its cache gaps
-miniworld-engine build all --resume   # default: reuse compatible completed measurements
-miniworld-engine dev coverage --arch sm86    # default cache key: NVIDIA RTX A6000 (sm86)
-miniworld-engine dev audit            # registry, tuning and build-system contract checks
-```
-
-`build all` runs only the configured FoldForge/MiniWorld module shapes, then checks
-required cache coverage after merging. Unreachable diagnostic kernels are not appended to
-the default build; use explicit `--per-op` for a separate kernel experiment.
-Model shape policy (`archive/records-20260928:docs/records/model-shape-cleanup-20260916.md`). Declared invocations, selected work and cache keys
-are different counts; the command prints them for the current source and GPU.
-A claim file alone does not prove completion: resume requires reusable measurement shards
-and matching provenance. `--no-resume` disables completed-shard reuse.
-
-`build` writes to the installed package's `autotune/data/` directory
-(`src/miniworld_engine/autotune/data/` in a checkout). It requires a writable installation
-or checkout and does not automatically commit results. A successful cache build does not
-replace module numerical tests or benchmarks. Full policy:
-[dispatch-cache.md](docs/kernels/autotune-dispatch-cache.md).
-## Research history
-
-Research capsules and older docs were removed from the tree; only the fastest variant of each
-kernel lives in `src/`. Everything is still in git:
-
-| where | contains |
-|---|---|
-| tag `archive/experiments-20260928` | the last tree with `experiments/`: `transition_fused`, `trimul_b7b12`, `trimul_k1k3_inference`, `token_dit_fused`, `token_dit_overlap`, `token_dit_train` |
-| tag `archive/wip-main-20260928` | the Sept 27–28 local-H100/Vast research: `trimul_large_d_vast`, `transition_wide_fusion`, `transition_shapes_vast`, `triattn_baseline_20260927`, `triattn_compare_20260927`, `triattn_local_d128`, `trimul_config_audit_20260927`, `trimul_d128_config_20260927` |
-| tag `archive/pre-tidy-20260927` | `trimul_training_v2` (2.0.0 training capsule, 6,625 run files), `legacy_branches`, `legacy_h100_runtime`, retired cache blobs |
-| tag `archive/docs-20260928`, `archive/records-20260928` | removed docs: dated records, verdicts, design proposals, analyses, release pages |
-| tag `archive/scripts-20260928` | the Sept H100 bring-up scripts |
-| tag `archive/a100-sm80-branch-20260928` | the A100 branch as merged: `experiments/a100_trimul_fwd` (sm_80 CUDA TriMul, not ported), `a100_transition_*`, `a100_msa_fwd`, `a100_anthropic_baseline`, `a100_trimul_triton`, `msa_triton` |
+Prebuild the CUDA kernels (CPU node, no GPU needed):
 
 ```sh
-git show archive/experiments-20260928:experiments/transition_fused/README.md
-git archive archive/experiments-20260928 experiments/trimul_k1k3_inference | tar -x -C /tmp/restore
-git show archive/wip-main-20260928:experiments/trimul_large_d_vast/LATENCY_TABLE.md
+python -m miniworld_engine.kernels._prebuild --list            # plan from the code + requirements, what is missing
+python -m miniworld_engine.kernels._prebuild --jobs 16 --cutlass $CUTLASS_PATH
 ```
 
-Where each capsule ended up in `src/`:
+Measure and judge (the measurers need a GPU; the judge runs on a CPU):
 
-| capsule | production code |
-|---|---|
-| `transition_fused`, `transition_shapes_vast` | `kernels/transition/cuda/fused_sm90a.py`, `fused_wide_sm90a.py` |
-| `trimul_k1k3_inference` | `kernels/trimul_inproj/cuda/h100_inference.py` (byte-identical K1/K3 overlay sources) |
-| `trimul_b7b12`, `trimul_training_v2` | `kernels/trimul_inproj/cuda/h100_training.py` (D128 B1/B7) |
-| `trimul_large_d_vast` | `kernels/trimul_inproj/cuda/h100_wide_training.py` (D256/384/512 training) |
-| `token_dit_train` | `kernels/augmented_attention/cuda/` |
-| `token_dit_fused`, `token_dit_overlap` | not yet ported (quack-GEMM dependent); see the v2.2.0 pending list in `docs/CHANGELOG.md` |
-| `transition_wide_fusion` | not ported (explicit 1.03x D384/512 candidate) |
-
-## Toolchain
-
-One-time, per clone — git will not let a repository point itself at its own hooks:
-
-```bash
-git config core.hooksPath .githooks   # refuses to commit tuned cache data with code
+```sh
+python -m miniworld_engine.judge owed --plan $DIR             # which cases are owed; writes configs + groups G1..G4
+# one 1-GPU, 10-minute job per group: for each line "<kind> <module> <cfg>" of $DIR/G<i>
+python -m miniworld_engine.measure.<kind> <cfg> --out $DIR/out/<kind>.<module>.jsonl
+python -m miniworld_engine.judge issue $DIR/out               # records made by current versions -> tokens
+python -m miniworld_engine.judge status
 ```
 
-```bash
-pixi run ruff-check     # lint  (src tests benchmarks)
-pixi run types          # ty    (src tests benchmarks) -- gates CI, no findings allowed
-pixi run test           # all tests not marked gpu, on an allocated CPU node
-pixi run test-gpu       # all tests marked gpu, on an allocated GPU node
-pixi run ci             # all three, in CI's order
-```
+## Documentation
 
-`ty`, not pyright: pyright cannot parse jaxtyping shape strings
-(`Float[torch.Tensor, "N S 3"]`) and reported 144 parse errors and no real findings, so
-`[tool.pyright]` turns it off and exists only to keep an editor quiet.
+[docs/README.md](docs/README.md) is the index: requirements, modules, kernels, measurement, judge, and per-family H100 kernel notes.
+
+## License
+
+MIT (copyright 2026 Sanggeun Park). The license text and third-party notices are `LICENSE` and `licenses/` at the repository root;
+the external release used by the `anthropic` backends is under `third_party/anthropic/`.

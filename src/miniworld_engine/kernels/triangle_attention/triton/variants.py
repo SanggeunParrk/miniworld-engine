@@ -58,9 +58,8 @@ def triton_triangle_attention_variant(
 ) -> torch.Tensor:
     """The triangle-attention update (no residual, no dropout), differentiable. pair [B, L, L, C] bf16, mask [B, L] bool over keys."""
     B, L, _, _ = pair.shape
-    from miniworld_engine import kernels
     from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
-    from miniworld_engine.kernels.bias_only_attention import dispatch as bo_dispatch
+    from miniworld_engine.kernels.gated_projection.triton.main import sigmoid_gate_fused
 
     # fp32 master parameters under bf16 activations (the mixed-precision layout): the products run in the activation dtype, the casts are
     # autograd ops, so every gradient comes back in the master dtype (bf16 parameters pass through unchanged). The norm affine stays fp32.
@@ -68,7 +67,7 @@ def triton_triangle_attention_variant(
     w_query, w_key, w_value, w_bias, w_gate, b_gate, w_out, b_out, w_out_t, b_out_t = (
         cast(w) for w in (w_query, w_key, w_value, w_bias, w_gate, b_gate, w_out, b_out, w_out_t, b_out_t))
 
-    x = triton_layernorm(pair, ln_weight, ln_bias, eps) if bo_dispatch.use_kernels(L) else F.layer_norm(
+    x = triton_layernorm(pair, ln_weight, ln_bias, eps) if L >= 384 else F.layer_norm(  # 384: launch-overhead crossover (old bias_only_attention KERNEL_MIN_L)
         pair.float(), (pair.shape[-1],), ln_weight, ln_bias, eps).to(pair.dtype)     # the affine is fp32; short sequences: torch's
     xt = x if starting else x.transpose(1, 2).contiguous()
     bias = rearrange(F.linear(x if (starting or not transposed_bias) else xt, w_bias), "B L L2 H -> B H L L2")
@@ -76,7 +75,7 @@ def triton_triangle_attention_variant(
         bias = bias.masked_fill(~mask[:, None, None, :], torch.finfo(bias.dtype).min)
     q, k, v = (rearrange(F.linear(xt, w), "B L L2 (H D) -> B H L L2 D", H=n_head) for w in (w_query, w_key, w_value))
     o = rearrange(triton_triangle_attention_pair_bias(q, k, v, bias), "B H L L2 D -> B L L2 (H D)")
-    u = kernels.sigmoid_gate_fused(F.linear(xt, w_gate, b_gate), o)
+    u = sigmoid_gate_fused(F.linear(xt, w_gate, b_gate), o)
     out = F.linear(u, w_out, b_out)
     if dual_output:
         other = F.linear(u, w_out_t, b_out_t)

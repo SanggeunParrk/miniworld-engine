@@ -52,13 +52,7 @@ def serves(x: torch.Tensor) -> bool:
     """The H100 rung of LayerNorm / RMSNorm: these kernels take ``x`` on sm_90 (``supported(x)``) unless the portable rung is
     forced. Every CUDA norm entry asks this one gate (``layernorm.interface.layernorm_kernel``, ``general.layernorm_cuda``,
     ``rmsnorm.cuda.rmsnorm_cuda``)."""
-    from miniworld_engine import settings
-
-    return (
-        supported(x)
-        and torch.cuda.get_device_capability(x.device) == (9, 0)
-        and not settings.current().force_portable_kernels
-    )
+    return supported(x) and torch.cuda.get_device_capability(x.device) == (9, 0)
 
 
 def _affine_args(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tensor | None):

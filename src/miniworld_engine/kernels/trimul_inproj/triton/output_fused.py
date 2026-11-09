@@ -12,8 +12,8 @@ import triton
 import triton.language as tl
 from miniworld_engine.kernels._tiles import tile_order, tile_grid
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import token_key
 from miniworld_engine.kernels._compile import opaque
 
 
@@ -42,11 +42,41 @@ def prune_output_configs(configs, named_args, **meta):
     return kept or list(configs)
 
 
-@triton.autotune(
-    configs=configs_for('trimul_output_f567_train_triton'),
-    key=['shape_key', 'M', 'L', 'wp0', 'wp1', 'wg0', 'wg1'],
-    prune_configs_by={'early_config_prune': prune_output_configs},
-)
+@configured('trimul_output_f567_train_triton',
+            key=['shape_key', 'M', 'L', 'wp0', 'wp1', 'wg0', 'wg1'],
+            default=[dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=16, GROUP_M=1, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=1, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=128, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=8, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=3),
+            dict(BLOCK_M1=32, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=32, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=2, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=4),
+            dict(BLOCK_M1=16, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=256, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=16, GROUP_M=8, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=2, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=1, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=8, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=8, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=8, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=4, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=8, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=8, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=4, num_stages=3),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=2),
+            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=3)],
+            prune=prune_output_configs)
 @triton.jit
 def _output_f567_kernel(
     XN, X, WP, WG, PROJ, GATE, Y, RES, DS,

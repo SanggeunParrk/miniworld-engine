@@ -5,8 +5,8 @@ import triton.language as tl
 
 from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import both_key, pack, rows_of
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import both_key, pack, rows_of
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
@@ -19,7 +19,9 @@ from miniworld_engine.kernels.transition.triton.training import swiglu_squeeze_b
 from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import input_ln_residual
 
 
-@triton.autotune(configs=configs_for("transition_squeeze_residual_triton"), key=["shape_key"])
+@configured('transition_squeeze_residual_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=256, GROUP_M=4, num_warps=8, num_stages=4))
 @triton.jit
 def _squeeze_residual_kernel(
     H, W, R, Y, M, N: tl.constexpr, K: tl.constexpr,

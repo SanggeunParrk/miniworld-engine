@@ -30,8 +30,8 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import length_of, token_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import length_of, token_key
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._device import num_sms
 
@@ -53,8 +53,9 @@ def _divides(**axes):
 
 
 # ---------------------------------------------------------------------------------------------------- forward kernels
-@triton.autotune(configs=configs_for("pair_weighted_averaging_layernorm_gemm_softmax_triton"),
-                 key=["shape_key", "DZP", "HP", "HAS_MASK"])   # DZP / HP: padding implied by DZ / NH (the key folds <= 3 axes)
+@configured('pair_weighted_averaging_layernorm_gemm_softmax_triton',
+            key=["shape_key", "DZP", "HP", "HAS_MASK"],
+            default=dict(BJ=64, num_warps=4, num_stages=2))   # DZP / HP: padding implied by DZ / NH (the key folds <= 3 axes)
 @triton.jit
 def _pwa_layernorm_gemm_softmax_kernel(Z, MASK, LNW, WB, W, L, eps, shape_key,
                                        DZ: tl.constexpr, DZP: tl.constexpr, NH: tl.constexpr, HP: tl.constexpr,
@@ -91,8 +92,35 @@ def _pwa_layernorm_gemm_softmax_kernel(Z, MASK, LNW, WB, W, L, eps, shape_key,
                 tl.store(W + (hh[None, :] * L + i) * L + j[:, None], pr.to(tl.bfloat16), mask=jm[:, None] & (hh < NH)[None, :])
 
 
-@triton.autotune(configs=configs_for("pair_weighted_averaging_layernorm_gemm_triton"), key=["shape_key"],
-                 prune_configs_by={"early_config_prune": _divides(BN="HC")})
+@configured('pair_weighted_averaging_layernorm_gemm_triton',
+            key=["shape_key"],
+            default=[dict(BS=64, BN=64, num_warps=4, num_stages=2),
+            dict(BS=128, BN=64, num_warps=4, num_stages=2),
+            dict(BS=64, BN=128, num_warps=4, num_stages=2),
+            dict(BS=64, BN=64, num_warps=8, num_stages=2),
+            dict(BS=64, BN=64, num_warps=4, num_stages=3),
+            dict(BS=32, BN=64, num_warps=4, num_stages=2),
+            dict(BS=64, BN=32, num_warps=4, num_stages=2),
+            dict(BS=64, BN=64, num_warps=2, num_stages=2),
+            dict(BS=64, BN=64, num_warps=4, num_stages=1),
+            dict(BS=16, BN=64, num_warps=4, num_stages=2),
+            dict(BS=64, BN=16, num_warps=4, num_stages=2),
+            dict(BS=64, BN=64, num_warps=1, num_stages=2),
+            dict(BS=64, BN=64, num_warps=4, num_stages=4),
+            dict(BS=64, BN=256, num_warps=4, num_stages=2),
+            dict(BS=64, BN=512, num_warps=4, num_stages=2),
+            dict(BS=64, BN=64, num_warps=8, num_stages=3),
+            dict(BS=64, BN=128, num_warps=4, num_stages=3),
+            dict(BS=64, BN=128, num_warps=8, num_stages=2),
+            dict(BS=64, BN=128, num_warps=8, num_stages=3),
+            dict(BS=128, BN=64, num_warps=4, num_stages=3),
+            dict(BS=128, BN=64, num_warps=8, num_stages=2),
+            dict(BS=128, BN=64, num_warps=8, num_stages=3),
+            dict(BS=128, BN=128, num_warps=4, num_stages=2),
+            dict(BS=128, BN=128, num_warps=4, num_stages=3),
+            dict(BS=128, BN=128, num_warps=8, num_stages=2),
+            dict(BS=128, BN=128, num_warps=8, num_stages=3)],
+            prune=_divides(BN="HC"))
 @triton.jit
 def _pwa_layernorm_gemm_kernel(M, LNW, LNB, WV, V, S, L, eps, shape_key,
                                D: tl.constexpr, HC: tl.constexpr, C: tl.constexpr, BS: tl.constexpr, BN: tl.constexpr):
@@ -114,7 +142,9 @@ def _pwa_layernorm_gemm_kernel(M, LNW, LNB, WV, V, S, L, eps, shape_key,
     tl.store(V + (h[None, :].to(tl.int64) * L + j) * (S * C) + s[:, None] * C + cc[None, :], v, mask=sm[:, None])
 
 
-@triton.autotune(configs=configs_for("pair_weighted_averaging_gate_gemm_triton"), key=["shape_key", "HAS_KEEP", "CP"])
+@configured('pair_weighted_averaging_gate_gemm_triton',
+            key=["shape_key", "HAS_KEEP", "CP"],
+            default=dict(BS=64, num_warps=4, num_stages=2))
 @triton.jit
 def _pwa_gate_gemm_kernel(M, O, LNW, LNB, WG, WO, KEEP, OUT, S, L, eps, scale, shape_key,
                           D: tl.constexpr, NH: tl.constexpr, C: tl.constexpr, CP: tl.constexpr, HAS_KEEP: tl.constexpr,
@@ -146,8 +176,10 @@ def _pwa_gate_gemm_kernel(M, O, LNW, LNB, WG, WO, KEEP, OUT, S, L, eps, scale, s
 
 
 # ---------------------------------------------------------------------------------------------------- backward kernels
-@triton.autotune(configs=configs_for("pair_weighted_averaging_bwd_gate_gemm_triton"), key=["shape_key", "HAS_KEEP", "CP"],
-                 reset_to_zero=["DWO", "DWG"])
+@configured('pair_weighted_averaging_bwd_gate_gemm_triton',
+            key=["shape_key", "HAS_KEEP", "CP"],
+            default=dict(BS=64, PPS=16, num_warps=4, num_stages=2),
+            reset_to_zero=["DWO", "DWG"])
 @triton.jit
 def _pwa_bwd_gate_gemm_kernel(M, DR, O, LNW, LNB, WG, WO, KEEP, DO, DGP, DWO, DWG, S, L, eps, scale, shape_key,
                               D: tl.constexpr, NH: tl.constexpr, C: tl.constexpr, CP: tl.constexpr, HAS_KEEP: tl.constexpr,
@@ -193,7 +225,10 @@ def _pwa_bwd_gate_gemm_kernel(M, DR, O, LNW, LNB, WG, WO, KEEP, DO, DGP, DWO, DW
     tl.atomic_add(DWG + (h * C + cc)[:, None] * D + k[None, :], dwg, mask=cm[:, None])
 
 
-@triton.autotune(configs=configs_for("pair_weighted_averaging_bwd_layernorm_gemm_dw_triton"), key=["shape_key", "CP"], reset_to_zero=["DWV"])
+@configured('pair_weighted_averaging_bwd_layernorm_gemm_dw_triton',
+            key=["shape_key", "CP"],
+            default=dict(BS=64, PPS=16, num_warps=4, num_stages=2),
+            reset_to_zero=["DWV"])
 @triton.jit
 def _pwa_bwd_layernorm_gemm_dw_kernel(M, DV, LNW, LNB, DWV, S, L, eps, shape_key,
                                       D: tl.constexpr, C: tl.constexpr, CP: tl.constexpr, BS: tl.constexpr, PPS: tl.constexpr):
@@ -222,8 +257,10 @@ def _pwa_bwd_layernorm_gemm_dw_kernel(M, DV, LNW, LNB, DWV, S, L, eps, shape_key
     tl.atomic_add(DWV + (h * C + cc)[:, None] * D + k[None, :], acc, mask=cm[:, None])
 
 
-@triton.autotune(configs=configs_for("pair_weighted_averaging_bwd_layernorm_gemm_dx_dlnw_triton"), key=["shape_key", "CP"],
-                 reset_to_zero=["DG", "DB"])
+@configured('pair_weighted_averaging_bwd_layernorm_gemm_dx_dlnw_triton',
+            key=["shape_key", "CP"],
+            default=dict(BS=64, PPS=16, num_warps=4, num_stages=2),
+            reset_to_zero=["DG", "DB"])
 @triton.jit
 def _pwa_bwd_layernorm_gemm_dx_dlnw_kernel(M, DR, DGP, DV, LNW, WG, WV, DM, DG, DB, S, L, eps, shape_key,
                                            D: tl.constexpr, NH: tl.constexpr, C: tl.constexpr, CP: tl.constexpr, BS: tl.constexpr,
@@ -268,9 +305,10 @@ def _pwa_bwd_layernorm_gemm_dx_dlnw_kernel(M, DR, DGP, DV, LNW, WG, WV, DM, DG, 
     tl.atomic_add(DB + k, dbs)
 
 
-@triton.autotune(configs=configs_for("pair_weighted_averaging_bwd_layernorm_gemm_softmax_triton"),
-                 key=["shape_key", "DZP", "HP", "HAS_MASK"],
-                 reset_to_zero=["DWB", "DGZ"])
+@configured('pair_weighted_averaging_bwd_layernorm_gemm_softmax_triton',
+            key=["shape_key", "DZP", "HP", "HAS_MASK"],
+            default=dict(BJ=64, num_warps=4, num_stages=2),
+            reset_to_zero=["DWB", "DGZ"])
 @triton.jit
 def _pwa_bwd_layernorm_gemm_softmax_kernel(Z, W, DW, MASK, LNW, WB, DZ, DWB, DGZ, L, eps, shape_key,
                                            DZC: tl.constexpr, DZP: tl.constexpr, NH: tl.constexpr, HP: tl.constexpr,

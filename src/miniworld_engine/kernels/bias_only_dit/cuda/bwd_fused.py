@@ -24,7 +24,6 @@ import torch
 from miniworld_engine.kernels._device import num_sms
 
 from miniworld_engine.kernels.bias_only_dit.cuda import _descriptors, _dir
-from miniworld_engine import settings
 
 D, DC = 768, 384
 SMEM_TAIL = 230912  # bo_bwd_tail.cu SMEM_BYTES
@@ -39,7 +38,7 @@ T_R1, T_G1, T_G2, T_R2, T_G4 = 0, 1, 2, 3, 4
 def bwd_fused_on() -> bool:
     """The fused bf16 training backward (the persistent kernels for the launches they replace) -- the default;
     settings.bias_only_dit_bwd_fused=0 keeps the per-step launches. Read per call."""
-    return settings.current().bias_only_dit_bwd_fused
+    return True
 
 
 def tail_mode() -> str:
@@ -47,14 +46,14 @@ def tail_mode() -> str:
     ([R1, G1, G2], [R2], [G4]; GEMM items M 256 x N with cta_group::2, 4 operand stages; graph node A/B 270.3 -> 268.8 / 533.4 -> 526.9
     us at L384 / L768 against the seven launches); "off" -- the seven launches (res_c_bwd, mm dh, swiglu_bwd, mm dxt,
     res_adaln_b_bwd, mm dog, gate_bwd). Read per call."""
-    return settings.current().bias_only_dit_bwd_tail
+    return "split3"
 
 
 def pbfin_on() -> bool:
     """pair_bias_bwd and finalize in one launch (bias_only_dit_train_rows.cu pair_bias_bwd_fin_k: a grid barrier between the pair
     LayerNorm backward and finalize's 248 jobs) -- the default: one launch fewer at the same speed (graph node A/B +0.3 / +0.5 us at
     L384 / L768, inside the 0.1-33 us spread); settings.bias_only_dit_bwd_pbfin=0 keeps the two launches. Read per call."""
-    return settings.current().bias_only_dit_bwd_pbfin
+    return True
 
 
 def mid_on() -> bool:
@@ -64,7 +63,7 @@ def mid_on() -> bool:
     TMA intake (~70 GB/s per SM: 0.43 us per G5 / G6 k-block, 0.57 per G7's), so G6's N 192 tiles move more bytes per FLOP than
     cuBLAS's dcg, and G7's cond-LN epilogue (16 us, single TMEM buffer) is not hidden. Read per call (and by the weight pack, which
     then adds the kernel's transposed weights)."""
-    return settings.current().bias_only_dit_bwd_mid
+    return False
 
 
 def pvdpb_on() -> bool:
@@ -72,7 +71,7 @@ def pvdpb_on() -> bool:
     dependent) where the bias gradient runs on single CTAs (not ``dpb_pair_on``: dpbx2's cta_group::2 MMAs cannot share a function
     with pv dV's cta_group::1 ones) -- the default (bwdf6 node A/B, L384: 37.6 -> 36.0 us); settings.bias_only_dit_bwd_pvdpb=0 keeps
     the two launches. Read per call."""
-    return settings.current().bias_only_dit_bwd_pvdpb
+    return True
 
 
 def step_bufs(dev) -> None:

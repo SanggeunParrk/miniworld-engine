@@ -25,8 +25,8 @@ import triton
 import triton.language as tl
 from triton.language.extra import libdevice
 
-from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._shape_key import token_key
 
 C = 256
 NT = 317                      # 127 sep + 4 x 21 dist + 5 x 21 angle + 1 chain
@@ -118,7 +118,9 @@ def _gather_tile(TBL, w0, w1, cvb, live, c, MODE: tl.constexpr):
     return x
 
 
-@triton.autotune(configs=configs_for("pair_embed_geom_bins_triton"), key=["shape_key"])
+@configured('pair_embed_geom_bins_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_J=128, num_warps=4, num_stages=1))
 @triton.jit
 def _geom_bins(BB, CA, CB, MASK, IDX, CHN, DLIM, ALIM, CODES, n, BLOCK_J: tl.constexpr, shape_key):
     """The 16-byte code of every pair (b, i, j): word 0 = sequence-separation bin | four distance bins << 8, 13, 18, 23 | flags (bit 28 distances, bit 29
@@ -187,7 +189,9 @@ def _geom_bins(BB, CA, CB, MASK, IDX, CHN, DLIM, ALIM, CODES, n, BLOCK_J: tl.con
     tl.store(CODES + cb_ + 3, tl.zeros([BLOCK_J], dtype=tl.int32), mask=jin)
 
 
-@triton.autotune(configs=configs_for("pair_embed_ca_bins_triton"), key=["shape_key"])
+@configured('pair_embed_ca_bins_triton',
+            key=["shape_key"],
+            default=dict(BLOCK_J=128, num_warps=4, num_stages=1))
 @triton.jit
 def _ca_bins(CAX, MASK, IDX, DLIM, CODES, n, ND: tl.constexpr, BLOCK_J: tl.constexpr, shape_key):
     """The decoder pair's code: word 0 = sequence-separation bin | CA-distance bin << 8 | bit 31 = live pair; words 1 .. 3 = 0."""
@@ -215,7 +219,9 @@ def _ca_bins(CAX, MASK, IDX, DLIM, CODES, n, ND: tl.constexpr, BLOCK_J: tl.const
     tl.store(CODES + cb_ + 3, tl.zeros([BLOCK_J], dtype=tl.int32), mask=jin)
 
 
-@triton.autotune(configs=configs_for("pair_embed_geom_fwd_gather_triton"), key=["shape_key", "MODE", "LN"])
+@configured('pair_embed_geom_fwd_gather_triton',
+            key=["shape_key", "MODE", "LN"],
+            default=dict(BLOCK_P=8, num_warps=4, num_stages=1))
 @triton.jit
 def _geom_fwd_gather(TBL, CODES, OUT, P, eps, MODE: tl.constexpr, LN: tl.constexpr, BLOCK_P: tl.constexpr, shape_key):
     """pair = the sum of the table rows the codes name, rounded to bf16 (LN: the LayerNorm of the bf16-rounded sum over the 256 channels, no affine)."""
@@ -243,7 +249,9 @@ def _geom_fwd_gather(TBL, CODES, OUT, P, eps, MODE: tl.constexpr, LN: tl.constex
 # ---------------------------------------------------------------------------------------------------------------------------------------
 # backward
 # ---------------------------------------------------------------------------------------------------------------------------------------
-@triton.autotune(configs=configs_for("pair_embed_geom_dw_triton"), key=["shape_key", "MODE"])
+@configured('pair_embed_geom_dw_triton',
+            key=["shape_key", "MODE"],
+            default=dict(CH=128, BLOCK_P=128, num_warps=4, num_stages=2))
 @triton.jit
 def _geom_dw(G, CODES, PART, P, per, MODE: tl.constexpr, CH: tl.constexpr, BLOCK_P: tl.constexpr, shape_key):
     """PART[t, row, channels of slice q] = sum over the pairs of slice t of onehot(row) * G[pair, channels]; the pair tiles are visited in order.
@@ -294,7 +302,9 @@ def _geom_dw(G, CODES, PART, P, per, MODE: tl.constexpr, CH: tl.constexpr, BLOCK
             tl.store(base + 316 * 256 + cc, acc_h)
 
 
-@triton.autotune(configs=configs_for("pair_embed_geom_bwd_reduce_triton"), key=["shape_key"])
+@configured('pair_embed_geom_bwd_reduce_triton',
+            key=["shape_key"],
+            default=dict(BLOCK=256, num_warps=4, num_stages=1))
 @triton.jit
 def _geom_dw_reduce(PART, DTBL, total, NBLK: tl.constexpr, BLOCK: tl.constexpr, shape_key):
     k = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -305,7 +315,9 @@ def _geom_dw_reduce(PART, DTBL, total, NBLK: tl.constexpr, BLOCK: tl.constexpr, 
     tl.store(DTBL + k, acc.to(tl.bfloat16), mask=m)
 
 
-@triton.autotune(configs=configs_for("pair_embed_geom_bwd_ln_triton"), key=["shape_key", "MODE"])
+@configured('pair_embed_geom_bwd_ln_triton',
+            key=["shape_key", "MODE"],
+            default=dict(BLOCK_P=8, num_warps=4, num_stages=1))
 @triton.jit
 def _geom_ln_bwd(TBL, CODES, DH, DX, P, eps, MODE: tl.constexpr, BLOCK_P: tl.constexpr, shape_key):
     """dx = rstd * (dh - mean(dh) - hat * mean(dh * hat)) with hat = LN(bf16(sum of the table rows of the pair)); zeros for padding."""

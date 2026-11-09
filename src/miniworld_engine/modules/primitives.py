@@ -1,4 +1,34 @@
-# vendored from team-gm psk/benchmark : src/team_gm/modules/primitives.py
+"""Shared PyTorch building blocks of the modules: the backend mechanism, initialisers, Linear, Dropout, fp32 master weights.
+
+Backends
+--------
+Every module has one forward per *backend*, and ``"pytorch"`` is the reference: the single source of truth of the op's math. A kernel is
+added later as another backend of the same module and is checked against ``"pytorch"`` (same parameters, same inputs). The mechanism is
+:class:`BackendModule`, and it is all there is::
+
+    class Transition(BackendModule):
+        backends = ("pytorch",)                       # each name has a ``_forward_<name>``; "pytorch" is always there
+
+        def __init__(self, d_hidden, *, backend="pytorch"):
+            super().__init__()
+            ...
+            self.set_backend(backend)                 # validated against ``backends``
+
+        def _forward_pytorch(self, x):                # the reference
+            ...
+
+    Transition(128)(x)                                # forward() calls self._forward_<self.backend>(x)
+    Transition(128, backend="cuda")                   # ValueError until a "cuda" backend is added to ``backends``
+
+``backend`` is a plain attribute (not in the state dict): a checkpoint loads into any backend, and ``set_backend`` switches it later.
+
+A non-reference backend declares what it covers in ``_supports_<name>(*args, **kwargs) -> str | None`` (None = runs; a string = why not).
+``forward`` raises :class:`BackendUnsupported` with that reason instead of falling back: a backend never silently becomes another one.
+
+Every class keeps the public name and the parameter / buffer names of the engine's earlier modules, so their state dicts load unchanged.
+"""
+
+import contextlib
 import math
 from enum import Enum
 from functools import partial
@@ -7,32 +37,17 @@ from typing import Literal
 import numpy as np
 import torch
 import torch.nn as nn
-from jaxtyping import Float
-from torch import Size
-from torch.nn.parameter import Parameter
-
-from miniworld_engine import kernels
-from miniworld_engine.modules.dispatch import (
-    KernelBackend,
-    portable_blocked,
-    resolve_layernorm,
-    resolve_rmsnorm,
-    restricted_card,
-)
-from miniworld_engine.modules.exceptions import (
-    ImplementationType,
-    InvalidImplementationError,
-)
+import torch.nn.functional as F
 
 
 def _trunc_normal_init(
-    weights: Float[torch.Tensor, "fan_out fan_in"],
+    weights: torch.Tensor,
     scale: float = 1.0,
     a: float = -2,
     b: float = 2,
     fan: Literal["in", "out", "avg"] = "in",
 ) -> None:
-    """Initialize weights with truncated normal distribution."""
+    """Initialize weights ``[fan_out, fan_in]`` with a truncated normal distribution."""
     fan_out, fan_in = weights.shape
     if fan == "in":
         f = fan_in
@@ -44,8 +59,7 @@ def _trunc_normal_init(
         msg = f"Invalid fan option: {fan}. Choose from 'in', 'out', 'avg'."
         raise ValueError(msg)
 
-    # SciPy is a core dependency because ordinary modules use this initializer.
-    # Import lazily so importing kernels alone does not load scipy.stats.
+    # Imported lazily so that importing the package does not load scipy.stats.
     from scipy.stats import truncnorm
 
     scale = scale / max(1, f)
@@ -73,95 +87,112 @@ class InitType(Enum):
         self.value(data)
 
 
-_shape_t = int | list[int] | Size
+class BackendUnsupported(RuntimeError):
+    """A backend was asked for a call outside its stated range. Raised, never silently replaced by another backend."""
 
 
-class _Fp32ParamsMixin(nn.Module):
-    """Pin this module's floating-point params/buffers to fp32 under ANY dtype cast.
+class BackendModule(nn.Module):
+    """A module with one forward per backend (see the module docstring): ``forward`` calls ``self._forward_<self.backend>``.
 
-    Norm affine params (gamma init 1.0, beta 0.0) stagnate when stored bf16: at value 1.0
-    the bf16 ULP is 2**-7 = 0.0078 > Adam's per-step update (~lr = 1.8e-3), so updates
-    round back to 1.0 and gamma never trains. Keeping gamma/beta fp32 (trunk stays bf16)
-    lets the update land. Overriding ``_apply`` — the funnel for ``.to``/``.bfloat16`` —
-    makes the pin survive later bulk ``.to(torch.bfloat16)`` of the parent trunk. The fused
-    kernels already upcast the norm weight to fp32 internally and return grads in the
-    parameter dtype, so a fp32 weight flows through unchanged.
-
-    Declared as an ``nn.Module`` subclass, not a bare mixin: ``super()._apply`` only exists
-    because this class is always mixed in FRONT of one (``LayerNorm(_Fp32ParamsMixin,
-    nn.LayerNorm)``), and stating that is what makes the delegation checkable. The MRO is
-    unchanged -- ``nn.Module`` still resolves after the concrete norm class."""
-
-    def _apply(self, fn, *args, **kwargs):
-        def fp32_fn(t):
-            out = fn(t)
-            if isinstance(out, torch.Tensor) and out.is_floating_point():
-                out = out.to(torch.float32)
-            return out
-
-        return super()._apply(fp32_fn, *args, **kwargs)
-
-
-class ImplementationSwitch(nn.Module):
-    """``module.set_implementation(ImplementationType.X)``: change a live module's ``implementation`` after construction.
-
-    The constructor resolves the public option into private fields (``_backend``, ``_train_gate``, a Transition's ``_native_cuda_route``,
-    the children's own ``implementation`` / ``_backend``). ``set_implementation`` redoes exactly that resolution, so afterwards the module
-    (and every engine child) is in the state a module constructed with the new option would be in; the parameters are untouched (the
-    weights are the same tensors, an optimizer built before the switch stays valid). It returns ``self`` and, on a refused option (an
-    ``ANTHROPIC`` request on an op without that payload), restores every module it had touched and raises.
-
-    The switch reaches every :class:`ImplementationSwitch` below the module (``PairformerBlock`` and ``Pairformer`` propagate to
-    their sub-modules). A child receives the option the constructor would have given it: the parent's, ``MINIWORLD`` where the parent
-    is ``ANTHROPIC`` (its norms are plumbing for the fallback path), the module's own ``ln_implementation`` for a TriangleMultiplication's
-    norms, and no change for children the constructor never tied to ``implementation`` (a TriangleAttention's ``ln_pair``).
-
-    Per-op backends that are integrations of a caller (cuEquivariance, Anthropic) are chosen the same way: switch the op's module and leave
-    the others. Switch BEFORE ``torch.compile`` / CUDA-graph capture: the resolved backend is read as a constant by a compiled forward and a
-    captured graph replays the kernels it recorded, so a switch after either does not reach them (re-compile / re-capture).
-    ``TriangleMultiplication`` / ``BidirectionalTriangleMultiplication`` keep the parameter layout they were constructed with (the bidirectional
-    d = 128 MINIWORLD module stores its four front matrices column-major); that is a layout, the result is the same.
+    A subclass lists its backends in ``backends`` (``"pytorch"``, the reference, always among them), defines ``_forward_<name>`` for each,
+    and calls :meth:`set_backend` with its constructor's ``backend`` argument.
     """
 
-    def _resolve_implementation(self) -> None:
-        """Recompute the private fields derived from ``self.implementation`` (already assigned). The default has none."""
+    #: The backends this class implements, each as a method ``_forward_<name>``. ``"pytorch"`` is the reference.
+    backends: tuple[str, ...] = ("pytorch",)
+    #: The backend ``forward`` runs.
+    backend: str = "pytorch"
+    #: Human-managed version of the class's results: bump it when a change to the class's math, its reference or a backend adapter can
+    #: change an accuracy or speed result (not for a refactor or a comment). A subclass inherits it; the judge
+    #: (miniworld_engine.judge) owes a new measurement of every case of a class whose version changed.
+    version: int = 1
 
-    def _child_implementation(self, child: nn.Module, implementation: ImplementationType) -> ImplementationType | None:
-        """The option ``child`` gets from this module when it is switched to ``implementation`` (None: leave it alone)."""
-        return implementation
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        missing = [name for name in ("pytorch", *cls.backends) if not callable(getattr(cls, f"_forward_{name}", None))]
+        if missing:
+            raise TypeError(f"{cls.__name__}: no _forward_{missing[0]} (backends {cls.backends}; 'pytorch' is required)")
 
-    def _switch_children(self, implementation: ImplementationType):
-        def walk(module: nn.Module):
-            for child in module.children():
-                if isinstance(child, ImplementationSwitch):
-                    yield child
-                else:
-                    yield from walk(child)
-
-        for child in walk(self):
-            target = self._child_implementation(child, implementation)
-            if target is not None:
-                yield child, ImplementationType(target)
-
-    def _switch(self, implementation: ImplementationType, undo: list) -> None:
-        undo.append((self, dict(self.__dict__)))
-        self.implementation = implementation
-        self._resolve_implementation()
-        for child, target in self._switch_children(implementation):
-            child._switch(target, undo)
-
-    def set_implementation(self, implementation: ImplementationType | str):
-        """Switch this module and its engine children to ``implementation`` (see the class docstring); returns ``self``."""
-        implementation = ImplementationType(implementation)
-        undo: list = []
-        try:
-            self._switch(implementation, undo)
-        except Exception:
-            for module, state in reversed(undo):
-                module.__dict__.clear()
-                module.__dict__.update(state)
-            raise
+    def set_backend(self, backend: str = "pytorch"):
+        """Select the backend ``forward`` runs; ``ValueError`` if this class has no such backend. Returns ``self``."""
+        if backend not in self.backends:
+            raise ValueError(f"{type(self).__name__} has no backend {backend!r}; available: {', '.join(self.backends)}")
+        self.backend = backend
         return self
+
+    def unsupported(self, *args, **kwargs) -> str | None:
+        """Why the selected backend cannot run this call (a short reason), or ``None`` if it can.
+
+        A non-reference backend states its own range in ``_supports_<name>(*args, **kwargs) -> str | None`` (shapes, dtypes, modes, device, the
+        upstream library being importable); without one it claims every call. ``"pytorch"`` runs everything."""
+        check = getattr(self, f"_supports_{self.backend}", None)
+        return None if check is None else check(*args, **kwargs)
+
+    def forward(self, *args, **kwargs):
+        reason = self.unsupported(*args, **kwargs) if self.backend != "pytorch" else None
+        if reason is not None:
+            raise BackendUnsupported(f"{type(self).__name__} backend {self.backend!r}: {reason}")
+        return getattr(self, f"_forward_{self.backend}")(*args, **kwargs)
+
+    def extra_repr(self) -> str:
+        inner = super().extra_repr()
+        return f"{inner}, backend={self.backend}" if inner else f"backend={self.backend}"
+
+    def make_inputs(
+        self,
+        *,
+        length: int,
+        samples: int,
+        depth: int | None,
+        dtype: torch.dtype,
+        device,
+        generator: torch.Generator,
+        stream: str | None = None,
+    ) -> dict:
+        """The forward kwargs of one measurement call (``self(**inputs)``): random activations of the right shapes in ``dtype``, key masks
+        with some padding (:func:`key_mask`), and any structural inputs. ``length`` / ``samples`` / ``depth`` / ``stream`` are the
+        requirements row's (``depth`` the MSA depth, ``stream`` e.g. ``token_pair``: the layout of a row-wise op's input). The only
+        module-specific part of the measurement code (``miniworld_engine.measure``); it never changes the forward math."""
+        raise NotImplementedError(f"{type(self).__name__} has no make_inputs: a requirement class defines its measurement inputs")
+
+
+# ------------------------------------------------------------------------------------------------------------ compute precision floor
+def wide(*refs: torch.Tensor | torch.dtype) -> torch.dtype:
+    """The "at least fp32" compute dtype of ``refs`` (tensors or dtypes): float32 for bf16 / fp16 / fp32 (and integer / bool) operands,
+    float64 when any operand is float64. A statement the modules pin to fp32 for low-precision inputs uses this, never a bare
+    ``.float()``: bf16 / fp16 / fp32 calls compute exactly as in fp32, and a float64 call (the accuracy gold) stays float64."""
+    out = torch.float32
+    for r in refs:
+        out = torch.promote_types(out, r.dtype if isinstance(r, torch.Tensor) else r)
+    return out
+
+
+# --------------------------------------------------------------------------------------------------- measurement inputs (make_inputs)
+def random_input(shape, *, dtype: torch.dtype, device, generator: torch.Generator, scale: float = 1.0) -> torch.Tensor:
+    """Standard-normal values (times ``scale``) drawn in fp32 from ``generator`` (on ``device``), rounded to ``dtype``."""
+    return (scale * torch.randn(tuple(shape), device=device, generator=generator)).to(dtype)
+
+
+def key_mask(rows: int, length: int, *, device, pad: int | None = None) -> torch.Tensor:
+    """A bool key mask ``[rows, length]``: real positions first, the last ``pad`` (default ``length // 8``) padding."""
+    pad = length // 8 if pad is None else min(pad, length - 1)
+    return (torch.arange(length, device=device) < length - pad).expand(rows, length).contiguous()
+
+
+def stream_shape(stream: str | None, *, samples: int, length: int, depth: int | None, width: int) -> tuple[int, ...]:
+    """The activation shape of a row-wise op (LayerNorm, Transition) on a requirements stream: ``token_pair`` ``[S, L, L, w]``, an MSA
+    (``msa_token`` or a depth) ``[S, depth, L, w]``, any other ``[S, L, w]``."""
+    if stream == "token_pair":
+        return (samples, length, length, width)
+    if stream == "msa_token" or depth:
+        return (samples, depth or 1, length, width)
+    return (samples, length, width)
+
+
+def pair_inputs(d_pair: int, *, length: int, samples: int, dtype, device, generator) -> dict:
+    """``pair`` ``[S, L, L, d_pair]`` and its key ``mask`` ``[S, L]``: the inputs of every pair-track update."""
+    return {"pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+            "mask": key_mask(samples, length, device=device)}
 
 
 class MasterWeights(nn.Module):
@@ -169,19 +200,12 @@ class MasterWeights(nn.Module):
 
     The parameters stay fp32 (the master: what the optimizer updates and an fp32 checkpoint loads into) while the module is called with bf16
     activations; a bulk ``.bfloat16()`` / ``.to(torch.bfloat16)`` / ``.half()`` of a model that contains it no longer rounds them
-    (the same pin ``LayerNorm`` has for its affine). On the H100 kernel paths a bf16 activation next to an fp32 master runs the bf16 CUDA kernels on
-    bf16 copies of the weights, and the weight / bias gradients come back fp32 and unrounded onto the masters:
+    (the same pin ``LayerNorm`` has for its affine). On a CUDA device a bf16 activation next to fp32 master matrices runs the module's
+    statements under bf16 autocast (:func:`master_autocast`), or a projection as a bf16 GEMM whose weight / bias gradients come back fp32 and
+    unrounded onto the masters (:func:`master_linear`).
 
-    * the copies are CACHED while the master is unchanged (``kernels._capture.param_forms`` / ``utils.h100_master.cached_pack``: keyed on
-      pointer and ``_version`` of every master) and made again after an optimizer step bumps a version. An optimizer that writes a
-      tensor without bumping its version (``Adam(fused=True)``) needs ``torch.autograd.graph.increment_version(params)`` after ``step()``;
-    * under ``torch.compile`` the casts are part of the graph, in a CUDA-graph capture they are made once per capture
-      (``static_weights()`` shares the eager entry);
-    * the other legs (the PyTorch reference, a call no CUDA path serves) run the same statements under bf16 autocast on a CUDA device
-      (``dispatch.fallback_autocast``).
-
-    ``master_weights`` is False by default: a module cast to bf16 keeps bf16 matrices (the layout the registry rows are recorded for);
-    both layouts run the same kernels. ``set_master_weights(False)`` only clears the pin (it does not cast down).
+    ``master_weights`` is False by default: a module cast to bf16 keeps bf16 matrices. ``set_master_weights(False)`` only clears the pin (it
+    does not cast down).
     """
 
     #: ``True`` after :meth:`set_master_weights`: floating parameters / buffers stay fp32 under a cast to bf16 / fp16.
@@ -211,163 +235,48 @@ class MasterWeights(nn.Module):
         return super()._apply(fn, *args, **kwargs)
 
 
-class LayerNorm(ImplementationSwitch, _Fp32ParamsMixin, nn.LayerNorm):
-    """A LayerNorm layer with precision control (fp32-pinned affine; see mixin)."""
-
-    def _resolve_implementation(self) -> None:
-        self._backend = resolve_layernorm(self.implementation)
-
-    def __init__(
-        self,
-        normalized_shape: _shape_t,
-        eps: float = 1e-5,
-        elementwise_affine: bool = True,
-        bias: bool = True,
-        device=None,
-        dtype=None,
-        implementation: ImplementationType = ImplementationType.PYTORCH,
-    ) -> None:
-        factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__(
-            normalized_shape,
-            eps=eps,
-            elementwise_affine=elementwise_affine,
-            bias=bias,
-            **factory_kwargs,
-        )
-        # A new name rather than rebinding the parameter: `_shape_t` admits a bare int, and
-        # `tuple(int)` is not a thing -- the int case has to become a 1-tuple first. Test the
-        # sequence side rather than `numbers.Integral`, whose ABC registration is invisible
-        # to a static checker and leaves an `int & ~Integral` shard in the else branch.
-        shape: tuple[int, ...] = (
-            tuple(normalized_shape)
-            if isinstance(normalized_shape, (list, tuple))   # `Size` is a tuple; `nn.LayerNorm.normalized_shape` is a plain tuple
-            else (int(normalized_shape),)
-        )
-        self.normalized_shape = shape
-        self.eps = eps
-        self.elementwise_affine = elementwise_affine
-        self.implementation = ImplementationType(implementation)
-        # Resolve the public option (incl. MINIWORLD auto) to a concrete internal
-        # backend once; forward dispatches on this, never on ImplementationType.
-        self._backend = resolve_layernorm(self.implementation)
-        if self.elementwise_affine:
-            self.weight = Parameter(
-                torch.empty(self.normalized_shape, **factory_kwargs)
-            )
-            if bias:
-                self.bias = Parameter(
-                    torch.empty(self.normalized_shape, **factory_kwargs)
-                )
-            else:
-                self.register_parameter("bias", None)
-        else:
-            self.register_parameter("weight", None)
-            self.register_parameter("bias", None)
-
-        self.reset_parameters()
-        # fp32-pin affine params from construction, even when a bf16 dtype is requested
-        # (norm gamma stagnates in bf16 at 1.0; see _Fp32ParamsMixin). _apply keeps them
-        # fp32 through later .to() casts; this covers the never-cast case.
-        with torch.no_grad():
-            if self.weight is not None and self.weight.is_floating_point():
-                self.weight.data = self.weight.data.float()
-            if self.bias is not None and self.bias.is_floating_point():
-                self.bias.data = self.bias.data.float()
-
-    def forward(self, input: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
-        """Forward pass. Routes on the resolved internal backend (``_backend``)."""
-        backend = self._backend
-        if backend == KernelBackend.PYTORCH:
-            # Compute in fp32 so a fp32-pinned affine weight never dtype-mismatches a bf16
-            # activation (and for stability); restore the activation dtype.
-            orig_type = input.dtype
-            return super().forward(input.float()).to(orig_type)
-        # The Triton kernels' shape key reads the activation's (B, L, D) / (B, L, L, D) shape: an unbatched [L, D] (or a single row) is one
-        # batch of it.
-        lead = input.dim() < 3
-        rows = input.reshape(1, -1, input.shape[-1]) if lead else input
-        if backend in {KernelBackend.PORTABLE, KernelBackend.CUEQUIVARIANCE}:
-            out = kernels.triton_layernorm(
-                rows,
-                self.weight,
-                self.bias,
-                self.eps,
-            )
-            return out.reshape(input.shape) if lead else out
-        if backend == KernelBackend.CUDA and input.is_cuda and restricted_card(input.device):
-            # H100 / B200 (no Triton there): the general CUDA LayerNorm, any width / row count, bf16 / fp16 / fp32; an input it
-            # does not take runs the PyTorch statements.
-            from miniworld_engine.kernels.layernorm.cuda.general import layernorm_cuda, supported
-
-            if len(self.normalized_shape) == 1 and supported(input):
-                return layernorm_cuda(input, self.weight, self.bias, self.eps)
-            return super().forward(input.float()).to(input.dtype)
-        if backend == KernelBackend.CUDA and input.is_cuda and portable_blocked("layernorm", input.device, input, self.weight):
-            # the build-time resolve asked the bf16 forward kernels; a training call (the backward kernels) or an fp32 call asks again (one
-            # UnrecordedCardWarning, the PyTorch statements)
-            return super().forward(input.float()).to(input.dtype)
-        if backend == KernelBackend.CUDA:
-            # miniworld = our auto-routing LayerNorm: forward fused triton (HBM-bound,
-            # at the bandwidth wall) + backward auto-dispatched per shape
-            # (persistent / partial / atomic). See kernels/layernorm.
-            out = kernels.layernorm_kernel(
-                rows,
-                self.weight,
-                self.bias,
-                self.eps,
-            )
-            return out.reshape(input.shape) if lead else out
-        raise InvalidImplementationError(self.implementation)
+def master_autocast(x: torch.Tensor, module: nn.Module):
+    """Context for a module's statements: a bf16 CUDA activation next to fp32 master matrices (the mixed-precision layout) runs them under bf16
+    autocast, as the caller's own autocast would; anything else runs as is."""
+    if (
+        x.is_cuda
+        and x.dtype == torch.bfloat16
+        and not torch.is_autocast_enabled("cuda")
+        and any(p.dtype == torch.float32 for p in module.parameters() if p.ndim >= 2)
+    ):
+        return torch.autocast("cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext()
 
 
-class RMSNorm(ImplementationSwitch, nn.RMSNorm):
-    """State-dict-compatible RMSNorm with the existing engine forward/backward.
+class _MasterLinear(torch.autograd.Function):
+    """``F.linear`` with bf16 compute copies of fp32 masters: the GEMMs in bf16, the weight / bias gradients fp32 onto the masters."""
 
-    Preserve torch 2.10's accumulation-dtype epsilon when eps=None; BF16/FP16
-    accumulate in FP32. Input-dtype epsilon would materially change small inputs.
-    """
+    @staticmethod
+    def forward(ctx, x, weight, bias, compute_weight, compute_bias):
+        ctx.save_for_backward(x, weight, bias, compute_weight, compute_bias)
+        with torch.autocast("cuda", enabled=False):
+            return F.linear(x, compute_weight, compute_bias)
 
-    def __init__(self, normalized_shape, eps=None, elementwise_affine=True,
-                 device=None, dtype=None, *, implementation=ImplementationType.PYTORCH):
-        super().__init__(normalized_shape, eps, elementwise_affine, device=device, dtype=dtype)
-        self.implementation = ImplementationType(implementation)
-        self._resolve_implementation()
+    @staticmethod
+    def backward(ctx, dy):
+        x, _weight, bias, compute_weight, _ = ctx.saved_tensors
+        x2 = x.reshape(-1, x.shape[-1])
+        dy2 = dy.reshape(-1, dy.shape[-1])
+        with torch.autocast("cuda", enabled=False):
+            dx = torch.mm(dy2, compute_weight).reshape(x.shape)
+            dw = torch.mm(dy2.t(), x2, out_dtype=torch.float32)
+            db = dy2.sum(0, dtype=torch.float32) if bias is not None else None
+        return dx, dw, db, None, None
 
-    def _resolve_implementation(self) -> None:
-        self._backend = resolve_rmsnorm(self.implementation)
-        # A MINIWORLD request that the B200 policy (``dispatch._torch_on_hopper_blackwell``) resolved to PYTORCH stands in for the kernel and
-        # returns what the kernel returns, the input dtype. Torch's ``rms_norm`` runs in fp32 under autocast and returns fp32
-        # (torch 2.13): a qk-norm then hands the attention kernels an fp32 q next to a bf16 k. An explicit PYTORCH request
-        # keeps torch's behaviour.
-        self._returns_input_dtype = (
-            self.implementation == ImplementationType.MINIWORLD and self._backend in (KernelBackend.PYTORCH, KernelBackend.CUDA)
-        )
-        if len(self.normalized_shape) != 1 and self._backend == KernelBackend.PORTABLE:
-            raise ValueError("Engine RMSNorm supports one normalized dimension")
 
-    def forward(self, x):
-        if self._backend == KernelBackend.CUDA and x.is_cuda and len(self.normalized_shape) == 1:
-            # H100 / B200 (no Triton there): the general CUDA RMSNorm; an input it does not take runs the PyTorch statements below
-            from miniworld_engine.kernels.rmsnorm.cuda import rmsnorm_cuda, supported
-
-            if supported(x):
-                return rmsnorm_cuda(x, self.weight, self.effective_eps(x.dtype))
-        if self._backend in (KernelBackend.PYTORCH, KernelBackend.CUDA) or not x.is_cuda:
-            out = super().forward(x)
-            return out.to(x.dtype) if self._returns_input_dtype else out
-        if self._backend != KernelBackend.PORTABLE:
-            raise InvalidImplementationError(self.implementation)
-        if portable_blocked("rmsnorm", x.device, x, self.weight):
-            # the build-time resolve asked the bf16 forward kernels; a training call (the backward) or an fp32 call asks again
-            return super().forward(x).to(x.dtype)
-        eps = self.effective_eps(x.dtype)
-        return kernels.triton_rmsnorm(x, self.weight, eps)
-
-    def effective_eps(self, dtype):
-        if self.eps is not None:
-            return self.eps
-        return torch.finfo(torch.float32 if dtype in (torch.bfloat16, torch.float16) else dtype).eps
+def master_linear(module: nn.Linear, x: torch.Tensor) -> torch.Tensor:
+    """``module(x)`` where a bf16 CUDA activation meets fp32 master parameters: bf16 GEMM, fp32 (unrounded) weight / bias gradients.
+    Any other combination is the module itself."""
+    w = module.weight
+    if x.is_cuda and x.dtype == torch.bfloat16 and w.dtype == torch.float32:
+        b = module.bias
+        return _MasterLinear.apply(x, w, b, w.to(torch.bfloat16), None if b is None else b.to(torch.bfloat16))
+    return module(x)
 
 
 class Linear(nn.Linear):
@@ -444,7 +353,7 @@ class Dropout(nn.Module):
         self.broadcast_dim = broadcast_dim
         self.p_drop = p_drop
 
-    def forward(self, x: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass."""
         if not self.training or self.p_drop == 0.0:
             return x
@@ -455,7 +364,7 @@ class Dropout(nn.Module):
         return x * mask / (1.0 - self.p_drop)
 
 
-# --- magnitude-preserving (EDM2) primitives, ported from team-gm (for SWA/DiT) ---
+# --- magnitude-preserving (EDM2) primitives (for SWA/DiT) ---
 def magnitude_normalize(
     x: torch.Tensor,
     eps: float = 1e-4,
@@ -477,16 +386,16 @@ class MPLinear(Linear):
 
     Two pieces (Karras et al., arXiv:2312.02696, §2.2-2.3, Algorithm 1):
 
-    * **forced weight normalization** — during training the *stored* weight is
+    * **forced weight normalization** -- during training the *stored* weight is
       projected back onto the unit hypersphere at the start of each forward
       (``copy_``), pinning ``||w||`` so the effective learning rate stays equal
       across layers and uncontrolled magnitude growth is eliminated;
-    * **on-use weight normalization** — the forward always uses
+    * **on-use weight normalization** -- the forward always uses
       ``normalize(w) / sqrt(fan_in)``, so output magnitude is preserved and the
       loss gradient is projected onto the tangent plane.
 
     The projection happens before the normalized weight participates in the
-    autograd graph; small MLP checks show this compiles cleanly with Inductor.
+    autograd graph.
     """
 
     def __init__(

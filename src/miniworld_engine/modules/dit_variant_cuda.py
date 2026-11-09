@@ -1,0 +1,274 @@
+"""The ``"cuda"`` backend of the DiT block variants: :class:`~miniworld_engine.modules.token_dit.TokenDiTBoltz2` /
+``TokenDiTRoseTTAFold3`` / ``TokenDiTChai1`` and :class:`~miniworld_engine.modules.atom_dit.AtomDiTBoltz2` / ``AtomDiTRoseTTAFold3`` /
+``AtomDiTChai1`` (the classes the ``dit_variants_*`` requirement rows name).
+
+The kernels (``kernels/dit_variants``: ``rows.cu`` / ``train_rows.cu`` / ``edge.cu`` and the cuBLAS products, the token / local DiT attention
+cores of ``kernels/augmented_attention``) were written against a stack of variant blocks (``reference.py``'s parameter names). A block of
+these modules is such a stack of one block: :class:`_Stack` is its read-only view onto the module's own submodules (nothing is copied; a
+weight change is seen on the next call). Three attribute differences are bridged here:
+
+  * ``expand`` is the concatenation of ``transition.expand_a`` / ``expand_b`` (the kernels' ``[g | v]`` rows; ``up`` follows it);
+  * a bias-free query (RoseTTAFold3) is a zero bias;
+  * AdaLN: ``to_bias`` is the kernels' ``to_shift``; the sigmoid form's ``ln_cond.weight`` is ``cond_norm_weight``; one AdaLN for q and k / v
+    (every atom class here) is the kernels' ``q_adaln`` AND ``k_adaln``.
+
+The path by dtype and gradient (the first whose range holds): bf16 inference ``kernels/dit_variants/interface.py``; fp32 (TF32) inference
+``cuda/infer32.py``; any call with a gradient (bf16 or fp32) ``cuda/train.py`` (autograd Functions, forward and backward). Outside every range
+:meth:`_supports_cuda` states why; there is no other backend behind it. The kernels take ONE conditioning row set shared by the samples: a
+``cond`` that differs per sample runs one kernel call per sample (same kernels, same result per sample).
+"""
+
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+
+from miniworld_engine.modules.norm import IdentityAdaptiveLayerNorm
+
+_BF, _F32 = torch.bfloat16, torch.float32
+
+
+class _AdaLN:
+    """An AdaLN in the kernels' layout (``VariantAdaLN``): sigmoid form (``cond_norm_weight``, ``to_scale`` with bias) or identity form."""
+
+    def __init__(self, ada) -> None:
+        self._ada = ada
+        self.identity_scale = isinstance(ada, IdentityAdaptiveLayerNorm)
+
+    @property
+    def cond_norm_weight(self):
+        return self._ada.ln_cond.weight
+
+    @property
+    def to_scale(self):
+        return self._ada.to_scale
+
+    @property
+    def to_shift(self):
+        return self._ada.to_bias
+
+
+class _Expand:
+    """``expand.weight`` = ``[expand_a.weight; expand_b.weight]`` (made at access, so a gradient reaches both)."""
+
+    def __init__(self, transition) -> None:
+        self._tr = transition
+
+    @property
+    def weight(self):
+        return torch.cat([self._tr.expand_a.weight, self._tr.expand_b.weight])
+
+
+class _ZeroBiasQuery:
+    """A query projection without a bias (RoseTTAFold3), as the kernels' ``to_q`` with a zero bias."""
+
+    def __init__(self, linear) -> None:
+        self._linear, self._zeros = linear, None
+
+    @property
+    def weight(self):
+        return self._linear.weight
+
+    @property
+    def bias(self):
+        w = self._linear.weight
+        if self._zeros is None or self._zeros.device != w.device:
+            self._zeros = torch.zeros(w.shape[0], dtype=_F32, device=w.device)
+        return self._zeros
+
+
+class _Block:
+    def __init__(self, attention, transition, *, atom: bool) -> None:
+        self._att, self._tr = attention, transition
+        self.n_head = attention.n_head
+        self.gating = hasattr(attention, "to_gate")
+        self.kq_norm = hasattr(attention, "norm_query")
+        self.up_gate = hasattr(transition, "up")
+        self.project_output = not isinstance(attention.to_out, nn.Identity)
+        self.to_q = attention.to_query if attention.to_query.bias is not None else _ZeroBiasQuery(attention.to_query)
+        self.expand = _Expand(transition)
+        adaln = _AdaLN(attention.ada_ln_in)
+        if atom:
+            self.q_adaln = self.k_adaln = adaln
+        else:
+            self.attn_adaln = adaln
+        self.trans_adaln = _AdaLN(transition.ada_ln_in)
+
+    to_k = property(lambda self: self._att.to_key)
+    to_v = property(lambda self: self._att.to_value)
+    to_g = property(lambda self: self._att.to_gate)
+    to_out = property(lambda self: self._att.to_out)
+    q_norm = property(lambda self: self._att.norm_query)
+    k_norm = property(lambda self: self._att.norm_key)
+    attn_zero = property(lambda self: self._att.to_scale)
+    pair_norm = property(lambda self: self._att.ln_pair)
+    to_pair_bias = property(lambda self: self._att.to_bias)
+    up = property(lambda self: self._tr.up)
+    squeeze = property(lambda self: self._tr.squeeze)
+    trans_zero = property(lambda self: self._tr.to_scale)
+    adaln_eps = property(lambda self: self._att.ada_ln_in.ln_in.eps)
+
+
+class _Stack:
+    """The module as a one-block variant stack (the interface of ``DiTVariantStack`` / ``AtomDiTVariantStack`` the kernels read)."""
+
+    implementation = "miniworld"
+    per_block_pair_norm = True
+
+    def __init__(self, module, *, atom: bool) -> None:
+        self._module = module
+        self.parallel = module.parallel
+        self.key_window = getattr(module, "key_window", "slide")
+        self.blocks = [_Block(module.attention, module.transition, atom=atom)]
+
+    def parameters(self):
+        return self._module.parameters()
+
+
+def _stack(module, *, atom: bool) -> _Stack:
+    view = module.__dict__.get("_variant_stack")
+    if view is None:
+        view = module.__dict__["_variant_stack"] = _Stack(module, atom=atom)
+    return view
+
+
+def _eps_reason(module) -> str | None:
+    """The kernels take one AdaLN epsilon for every LayerNorm of the block and 1e-5 for the conditioning LayerNorm."""
+    att, tr = module.attention, module.transition
+    adalns = [att.ada_ln_in, tr.ada_ln_in] + ([att.ada_ln_kv] if hasattr(att, "ada_ln_kv") else [])
+    eps = {a.ln_in.eps for a in adalns}
+    if len(eps) != 1:
+        return f"AdaLN epsilons differ across the block's parts ({sorted(eps)}; the kernels take one)"
+    if any(not isinstance(a, IdentityAdaptiveLayerNorm) and a.ln_cond.eps != 1e-5 for a in adalns):
+        return "conditioning LayerNorm epsilon != 1e-5"
+    return None
+
+
+def _call_reason(module, single, cond, pair, mask) -> str | None:
+    if not single.is_cuda:
+        return "CUDA tensors only"
+    if torch.cuda.get_device_capability(single.device) != (9, 0):
+        return "the H100 (sm_90) kernels only"
+    if torch.is_autocast_enabled("cuda"):
+        return "autocast (the kernels fix their own precision: bfloat16 or TF32 operands)"
+    if single.ndim != 4 or single.shape[1] != 1:
+        return f"single must be [A, 1, L, d] (one pair per call), got {tuple(single.shape)}"
+    if single.dtype not in (_BF, _F32) or cond.dtype != single.dtype or pair.dtype != single.dtype:
+        return f"dtypes {single.dtype} / {cond.dtype} / {pair.dtype} (single, cond, pair all bfloat16 or all float32)"
+    if cond.ndim != 4 or tuple(cond.shape[1:3]) != tuple(single.shape[1:3]) or cond.shape[0] not in (1, single.shape[0]):
+        return f"cond must be [A, 1, L, d_cond], got {tuple(cond.shape)}"
+    return _eps_reason(module)
+
+
+def _wants_grad(module, *tensors) -> bool:
+    return torch.is_grad_enabled() and (any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
+                                        or any(p.requires_grad for p in module.parameters()))
+
+
+def _shared_cond(cond: torch.Tensor) -> bool:
+    """One conditioning row set for all samples (a single sample, or an expanded stride-0 cond): metadata only, no device read."""
+    return cond.shape[0] == 1 or cond.stride(0) == 0
+
+
+def _first_hit(checks, stack, *call):
+    for serves, fn in checks:
+        if serves(stack, *call):
+            return fn
+    return None
+
+
+def _run(fn, stack, single, cond, call, *, wants_grad: bool):
+    """``fn(stack, single [A, N, d], cond [N, c], *call)`` once for a shared ``cond``, else once per sample; -> [A, 1, N, d]."""
+    s = single[:, 0]
+    with torch.set_grad_enabled(wants_grad):
+        if _shared_cond(cond):
+            out = fn(stack, s, cond[0, 0], *call)
+        else:
+            out = torch.cat([fn(stack, s[i:i + 1], cond[i, 0], *call) for i in range(s.shape[0])])
+    return out.unsqueeze(1)
+
+
+class VariantTokenCuda:
+    """Mixin of the Boltz-2 / RoseTTAFold3 / Chai-1 token DiT blocks: ``_supports_cuda`` / ``_forward_cuda`` on ``kernels/dit_variants``."""
+
+    def _token_serving(self, single, cond, pair, mask, compute_dtype, extra_pair_bias):
+        """(the kernel function that serves the call, its trailing arguments) or (None, why not)."""
+        if compute_dtype is not None:
+            return None, "compute_dtype (the kernels fix their own precision)"
+        if extra_pair_bias is not None:
+            return None, "extra_pair_bias (not an input of the DiT variant kernels)"
+        why = _call_reason(self, single, cond, pair, mask)
+        if why is not None:
+            return None, why
+        length = single.shape[2]
+        if (single.shape[-1], self.attention.n_head) != (768, 16) or self.transition.expand_a.weight.shape[0] != 2 * 768 or pair.shape[-1] not in (128, 256):
+            return None, ("geometry: the token DiT kernels are built for 768 wide x 16 heads of 48, transition n = 2, pair 128 / 256 wide, "
+                          f"got {single.shape[-1]} wide x {self.attention.n_head} heads, pair {pair.shape[-1]}")
+        if pair.ndim != 4 or pair.shape[0] != 1 or tuple(pair.shape[1:3]) != (length, length):
+            return None, f"pair must be [1, L, L, d_pair], got {tuple(pair.shape)}"
+        if mask is not None:
+            if mask.ndim == 3 and not (mask.shape[0] == 1 or mask.stride(0) == 0):
+                return None, "a key mask that differs across the samples (the kernels take one [L] mask)"
+            mask = mask[0] if mask.ndim == 3 else mask
+            if tuple(mask.shape) != (1, length):
+                return None, f"mask must be [B, L] or [A, B, L], got {tuple(mask.shape)}"
+            mask = mask[0]
+        from miniworld_engine.kernels.dit_variants import interface
+        from miniworld_engine.kernels.dit_variants.cuda import infer32, train
+
+        with torch.set_grad_enabled(_wants_grad(self, single, cond, pair)):
+            fn = _first_hit(((interface.serves, interface.inference), (infer32.serves, infer32.inference),
+                             (train.serves, train.stack_train)), _stack(self, atom=False), single[:, 0], cond[0, 0], pair[0], mask)
+        if fn is None:
+            return None, ("outside the kernels' range (bfloat16 / float32, [A, 1, L, 768] with L a multiple of 128, 16 heads, pair 128 / 256, "
+                          "a key mask shared by the samples; no gradient: bfloat16 or float32 inference, a gradient: the training path)")
+        return fn, (pair[0], mask)
+
+    def _supports_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> str | None:
+        fn, why = self._token_serving(single, cond, pair, mask, compute_dtype, extra_pair_bias)
+        return why if fn is None else None
+
+    def _forward_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> torch.Tensor:
+        fn, call = self._token_serving(single, cond, pair, mask, compute_dtype, extra_pair_bias)
+        return _run(fn, _stack(self, atom=False), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair))
+
+
+class VariantAtomCuda:
+    """Mixin of the Boltz-2 / RoseTTAFold3 / Chai-1 atom DiT blocks: ``_supports_cuda`` / ``_forward_cuda`` on ``kernels/dit_variants``."""
+
+    def _atom_serving(self, single, cond, pair, mask, uid):
+        """(the kernel function that serves the call, its trailing arguments) or (None, why not)."""
+        if self.key_window not in ("pad", "slide"):
+            return None, f"key_window {self.key_window!r} (the kernels know the clipped 'pad' window and the slid one)"
+        why = _call_reason(self, single, cond, pair, mask)
+        if why is not None:
+            return None, why
+        n = single.shape[2]
+        if (single.shape[-1], self.attention.n_head, pair.shape[-1]) != (128, 4, 16) or self.transition.expand_a.weight.shape[0] != 2 * 128:
+            return None, ("geometry: the atom DiT kernels are built for 128 wide x 4 heads of 32, transition n = 2, pair 16 wide, got "
+                          f"{single.shape[-1]} wide x {self.attention.n_head} heads, pair {pair.shape[-1]}")
+        if tuple(pair.shape) != (1, n // 32, 32, 128, 16):
+            return None, f"pair must be the trunked atom pair [1, N / 32, 32, 128, 16] (N a multiple of 32), got {tuple(pair.shape)}"
+        if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != (1, n)):
+            return None, "mask must be a bool [1, N] key mask"
+        if uid is not None and tuple(uid.shape) != (1, n):
+            return None, f"uid must be [1, N], got {tuple(uid.shape)}"
+        from miniworld_engine.kernels.dit_variants import interface
+        from miniworld_engine.kernels.dit_variants.cuda import infer32, train
+
+        m, u = (None if mask is None else mask[0]), (None if uid is None else uid[0])
+        with torch.set_grad_enabled(_wants_grad(self, single, cond, pair)):
+            fn = _first_hit(((interface.atom_serves, interface.atom_inference), (infer32.atom_serves, infer32.atom_inference),
+                             (train.atom_serves, train.atom_stack_train)), _stack(self, atom=True), single[:, 0], cond[0, 0], pair[0], m, u)
+        if fn is None:
+            return None, ("outside the kernels' range (bfloat16 / float32, [A, 1, N, 128] with N a multiple of 32 (float32 and training: of 64), "
+                          "pair 16 wide; no gradient: bfloat16 or float32 inference, a gradient: the training path)")
+        return fn, (pair[0], m, u)
+
+    def _supports_cuda(self, single, cond, pair, mask=None, uid=None) -> str | None:
+        fn, why = self._atom_serving(single, cond, pair, mask, uid)
+        return why if fn is None else None
+
+    def _forward_cuda(self, single, cond, pair, mask=None, uid=None) -> torch.Tensor:
+        fn, call = self._atom_serving(single, cond, pair, mask, uid)
+        return _run(fn, _stack(self, atom=True), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair))

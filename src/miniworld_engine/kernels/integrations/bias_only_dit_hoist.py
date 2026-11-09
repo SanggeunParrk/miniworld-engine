@@ -1,5 +1,5 @@
 """Every bias-only DiT block's pair bias from ONE LayerNorm and ONE GEMM on B200 (sm_100), forward and backward: the fused path
-of ``modules.bias_only_dit.pair_bias_all``.
+of ``modules.token_dit.pair_bias_all``.
 
 Block b's logits are bias_b = to_bias_b(ln_pair_b(pair)). ``ln_pair`` has no offset, so ln_pair_b(pair) = LN0(pair) diag(g_b), LN0 the
 LayerNorm without affine (its statistics are the same for every block), and with the fold W'_b = W_b diag(g_b)
@@ -33,7 +33,7 @@ accumulation, the bias in bf16, d LN0 and dW' in fp32, d pair in the pair's dtyp
 same structure, the GEMMs on TF32 tensor cores (``tf32_gemms``), every tensor fp32.
 
 ``serves()`` is the gate (B200 or H100, an engine implementation, pair [1, L, L, C] bf16 or fp32, C = 128 or 256 on H100, 128 on B200);
-anything else takes the PyTorch fold of ``modules.bias_only_dit.hoist``. At C = 256 (the widths written 128 above) every kernel is the same
+anything else takes the PyTorch fold of ``modules.token_dit.pair_bias_all``. At C = 256 (the widths written 128 above) every kernel is the same
 template at the other width, except the multi-block bf16 backward (``bo_hoist_bwd.cu``, 128 only): more than one block of 16 heads takes the
 two GEMMs around ``ln0_bwd_rows`` there.
 """
@@ -44,7 +44,6 @@ import contextlib
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
 DP = 128
@@ -56,22 +55,18 @@ F32 = torch.float32
 SINK_ATTR = "_bias_only_dit_hoist_sink"
 
 
-def serves(implementation, attns, pair, per_sample=False) -> bool:
-    """The fused hoist serves ``pair`` and the attention modules ``attns`` (eps / head count / no offset checked by the caller).
-    ``per_sample``: ``pair`` is [A, L, L, C] with A > 1 (a pair of its own per sample, the samples in the batch axis) instead of
-    [1, L, L, C]; C = 128, or 256 on H100."""
-    from miniworld_engine.modules.exceptions import ImplementationType
+def serves(implementation, attns, pair) -> bool:
+    """The fused hoist serves ``pair`` [1, L, L, C] (C = 128, or 256 on H100) and the attention modules ``attns`` (eps / head count / no
+    offset checked by the caller)."""
 
-    if implementation != ImplementationType.MINIWORLD:
-        return False
-    if settings.current().force_portable_kernels:
+    if implementation != "miniworld":
         return False
     if not pair.is_cuda or torch.cuda.get_device_capability(pair.device) not in ((10, 0), (9, 0)):
         return False
     dp = pair.shape[-1]
     if (
         pair.ndim != 4
-        or (pair.shape[0] < 2 if per_sample else pair.shape[0] != 1)
+        or pair.shape[0] != 1
         or pair.shape[1] != pair.shape[2]
         or dp not in DPS
         or (dp != DP and torch.cuda.get_device_capability(pair.device) != (9, 0))
@@ -176,11 +171,11 @@ class _Sink:
     time); a gradient that does not sit in its slot (autograd summed it with another, a reentrant checkpoint copied the input) is
     copied in, a missing one is zero."""
 
-    __slots__ = ("buf", "device", "dtype", "given", "h", "nb", "psb", "r")
+    __slots__ = ("buf", "device", "dtype", "given", "h", "nb", "r")
 
-    def __init__(self, nb, h, r, dtype, device, psb=False):
+    def __init__(self, nb, h, r, dtype, device):
         self.nb, self.h, self.r, self.dtype, self.device = nb, h, r, dtype, device
-        self.buf, self.given, self.psb = None, set(), psb
+        self.buf, self.given = None, set()
 
     def slot(self, i, dtype, device):
         """Block i's [H, R] slice of the buffer, or None (another dtype / device, or the slot already handed out)."""
@@ -233,16 +228,13 @@ class _Hoist(torch.autograd.Function):
     def forward(ctx, pair, eps, nb, sink, *params):  # params: ln_pair.weight, to_bias.weight of each block
         L, dp = pair.shape[1], pair.shape[-1]
         H = params[1].shape[0]
-        A = pair.shape[0] if sink.psb else 1
         gam, wts, wf = _fold(params, pair.dtype)
         ctx.set_materialize_grads(
             False
         )  # an unused block's bias: None, not a zero tensor
-        ball = _hoist_fwd(pair.reshape(A * L * L, dp), wf, eps)
+        ball = _hoist_fwd(pair.reshape(L * L, dp), wf, eps)
         ctx.save_for_backward(pair, wf, gam, wts)
         ctx.meta = (eps, nb, H, sink, [p.dtype for p in params])
-        if sink.psb:  # per-sample: block b's slice is the head-major [H, A, L, L]
-            return tuple(ball[i * H : (i + 1) * H].view(H, A, L, L) for i in range(nb))
         return tuple(ball[i * H : (i + 1) * H].view(1, H, L, L) for i in range(nb))
 
     @staticmethod
@@ -250,7 +242,7 @@ class _Hoist(torch.autograd.Function):
         pair, wf, gam, wts = ctx.saved_tensors
         eps, nb, H, sink, pdts = ctx.meta
         L, dp = pair.shape[1], pair.shape[-1]
-        R = (pair.shape[0] if sink.psb else 1) * L * L
+        R = L * L
         dball = sink.take(grads)
         dpair, dwf = _hoist_bwd(pair.reshape(R, dp), wf, dball, eps, _split(R))
         del dball
@@ -288,57 +280,4 @@ def pair_bias_all(attns, pair) -> tuple[torch.Tensor, ...]:
     return tuple(outs)
 
 
-def _infer_fake(pair2d, wf, eps):
-    return pair2d.new_empty((wf.shape[0], pair2d.shape[0]))
-
-
-@opaque(fake=_infer_fake, name="bias_only_dit_hoist_fwd_infer")
-def _hoist_fwd_infer(pair2d: torch.Tensor, wf: torch.Tensor, eps: float) -> torch.Tensor:
-    """``_hoist_fwd`` for a call with no gradient (inference): bias_all^T [N, R] head-major in the pair's dtype. For 12, 16 or 24 weight
-    rows (one block's heads) ONE pass over the pair: the LayerNorm stays on chip and the projection runs on the tensor cores
-    (``pair_bias_k`` bf16, ``pair_bias_tc_k`` fp32 on TF32), so the pair (268 MB at A = 4, L = 512, bf16) is read once and never written
-    back as LN0 -- ``_hoist_fwd`` writes LN0 and reads it again for a GEMM (3 passes). More rows: ``_hoist_fwd``."""
-    n, r = wf.shape[0], pair2d.shape[0]
-    f32 = pair2d.dtype is F32
-    if n not in (12, 16, 24) or r % 128:
-        return _hoist_fwd(pair2d, wf, eps)
-    bias = torch.empty(n, r, device=pair2d.device, dtype=pair2d.dtype)
-    pst = torch.empty(r, 2, device=pair2d.device, dtype=F32)  # the row statistics: only the backward reads them
-    if f32:
-        from miniworld_engine.kernels.bias_only_dit.cuda import tf32
-
-        tf32.rows32().pair_bias_tc_cuda(pair2d, wf, bias, pst, eps, 3 if settings.current().bias_only_dit_pair_exact else 1)
-    else:
-        from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
-
-        ext().pair_bias_cuda(pair2d, wf, bias, pst, eps)
-    return bias
-
-
-def pair_bias_all_infer(attns, pair) -> tuple[torch.Tensor, ...]:
-    """``pair_bias_all_psb`` without a gradient: each block's bias [A, H, L, L] (the permuted view of one head-major [H, A, L, L] slice of
-    ONE buffer), from one pass over the pair for a single block (``_hoist_fwd_infer``). Call ``serves(..., per_sample=True)`` first."""
-    nb, H, A, L = len(attns), attns[0].to_bias.weight.shape[0], pair.shape[0], pair.shape[1]
-    _, _, wf = _fold([p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)], pair.dtype)
-    ball = _hoist_fwd_infer(pair.contiguous().view(A * L * L, pair.shape[-1]), wf, float(attns[0].ln_pair.eps))
-    return tuple(ball[i * H : (i + 1) * H].view(H, A, L, L).permute(1, 0, 2, 3) for i in range(nb))
-
-
-def pair_bias_all_psb(attns, pair) -> tuple[torch.Tensor, ...]:
-    """Each attention module's bias [A, H, L, L] for a pair of its own per sample ``pair`` [A, L, L, 128] (A > 1): the ``[A, H, L, L]``
-    view of block b's head-major [H, A, L, L] slice of ONE buffer (one LayerNorm pass and one GEMM for every block); differentiable in
-    the pair and in every ``ln_pair.weight`` / ``to_bias.weight``. The fused per-sample block reads the head-major buffer without a
-    copy and writes its bias gradient into the same slot of the shared gradient buffer. Call ``serves(..., per_sample=True)`` first."""
-    nb, H, A, L = len(attns), attns[0].to_bias.weight.shape[0], pair.shape[0], pair.shape[1]
-    sink = _Sink(nb, H, A * L * L, pair.dtype, pair.device, psb=True)
-    params = [p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)]
-    outs = _Hoist.apply(pair.contiguous(), float(attns[0].ln_pair.eps), nb, sink, *params)
-    res = []
-    for i, o in enumerate(outs):
-        v = o.permute(1, 0, 2, 3)
-        setattr(v, SINK_ATTR, (sink, i))
-        res.append(v)
-    return tuple(res)
-
-
-__all__ = ["SINK_ATTR", "pair_bias_all", "pair_bias_all_infer", "pair_bias_all_psb", "serves"]
+__all__ = ["SINK_ATTR", "pair_bias_all", "serves"]

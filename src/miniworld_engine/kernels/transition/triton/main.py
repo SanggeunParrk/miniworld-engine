@@ -2,7 +2,7 @@
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/transition.py
 
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import torch
 
 # FP32 projections follow torch's TF32 switch (kernels/_dot_precision.py): IEEE dot precision unless torch allows TF32
@@ -18,8 +18,7 @@ from miniworld_engine.kernels._tiles import tile_grid, tile_order
 
 from jaxtyping import Float
 
-from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.autotune.shape_key import both_key, length_of, pack, rows_of
+from miniworld_engine.kernels._shape_key import both_key, length_of, pack, rows_of
 
 # Cache-narrowing prunes composed OVER the smem safety prune (see autotune package). Bucket on
 # the autotune key (shape_key, ND, K); dtype from x (defaults bf16). Separate op ids for fwd/bwd
@@ -33,8 +32,33 @@ def _whole_k_tiles(configs, named_args, **meta):
         return list(configs)
     return [c for c in configs if int(a["K"]) % c.kwargs["BLOCK_K"] == 0] or list(configs)
 
-@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=["shape_key", "STORE_AB", "HALF"],
-                 prune_configs_by={"early_config_prune": _whole_k_tiles})
+@configured('transition_expand_swiglu_triton',
+            key=["shape_key", "STORE_AB", "HALF"],
+            default=[dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=4, num_warps=8, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=4, num_warps=8, num_stages=4),
+            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=4),
+            dict(BLOCK_K=64, BLOCK_M1=256, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=64, GROUP_M=16, num_warps=8, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=16, num_warps=8, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=256, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=4),
+            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=3),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=3),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=4),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, GROUP_M=4, num_warps=4, num_stages=4),
+            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, GROUP_M=4, num_warps=8, num_stages=3),
+            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=3),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, GROUP_M=4, num_warps=4, num_stages=3),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=2, num_stages=2),
+            dict(BLOCK_K=16, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, GROUP_M=16, num_warps=4, num_stages=3),
+            dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=16, num_warps=8, num_stages=4)],
+            prune=_whole_k_tiles)
 @triton.jit
 def transition_fwd_kernel(
     x_ptr,
@@ -235,7 +259,6 @@ def swiglu_squeeze_backward(
     return dx, grad_ab[:nd], grad_ab[nd:], grad_squeeze_weight
 
 class TritonTransitionFunction(torch.autograd.Function):
-    @typecheck
     @staticmethod
     def forward(
         ctx,

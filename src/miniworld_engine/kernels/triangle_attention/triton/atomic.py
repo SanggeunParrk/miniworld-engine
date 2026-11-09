@@ -1,9 +1,8 @@
 # vendored from team-gm origin/miniworld@7c3c67e : src/team_gm/modules/kernels/triangle_attention_pair_bias.py
-from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._launch_config import configured
 import torch
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine import settings
 import triton
 import triton.language as tl
 
@@ -11,10 +10,9 @@ import os
 
 from einops import rearrange, repeat, reduce
 
-from miniworld_engine.autotune.shape_key import pack, token_key
+from miniworld_engine.kernels._shape_key import pack, token_key
 
 
-AUTOTUNE = settings.current().autotunes("tri_attention")
 
 
 @triton.jit
@@ -88,8 +86,9 @@ def _attn_fwd_inner(
 # fmt: off
 
 
-@triton.autotune(configs=configs_for("triangle_attention_fwd_contig_triton"),
-                 key=['shape_key'])
+@configured('triangle_attention_fwd_contig_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_fwd(
     Q, K, V, Bias, sm_scale,
@@ -219,8 +218,9 @@ def _attn_fwd(
 # The launcher hands this kernel H*L, not H, because q is the "B (H L) L2 D" rearrangement. The
 # parameter was named H and keyed on: token-derived, so it partitioned the cache per sequence length
 # and defeated the shape_key bucket sitting next to it -- for a value the body never reads. Dropped.
-@triton.autotune(configs=configs_for("triangle_attention_bwd_pre_contig_triton"),
-                 key=['shape_key'])
+@configured('triangle_attention_bwd_pre_contig_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, num_warps=2, num_stages=2))
 @triton.jit
 def _attn_bwd_preprocess(
     O, DO, Delta,
@@ -352,9 +352,10 @@ def _attn_bwd_dqdkdv(
 # HL, not H: `bhid` runs over B*HL because q is the "B (H L) L2 D" rearrangement, so the decode
 # below divides by H*L. Keying it would partition the cache per sequence length and make shape_key
 # redundant, so only the bucket is keyed.
-@triton.autotune(configs=configs_for("triangle_attention_bwd_atomic_triton"),
-                 key=['shape_key'],
-                 reset_to_zero=['DQ'])
+@configured('triangle_attention_bwd_atomic_triton',
+            key=['shape_key'],
+            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2),
+            reset_to_zero=['DQ'])
 @triton.jit
 def _attn_bwd(
     Q, K, V, Bias, sm_scale,
