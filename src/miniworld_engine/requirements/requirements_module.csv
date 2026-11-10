@@ -25,17 +25,17 @@ LayerNorm,,noise,1,,normalized_shape=256,bias=True;elementwise_affine=True,float
 LayerNorm,,token_single,128|256|384|512|640|768,,normalized_shape=2560,bias=True;elementwise_affine=True,master,eval|train,1,1,engine-own (no FoldForge / MiniWorld constructor builds it; legacy r52: AF3/Protenix/OpenDDE/ESMFold2 single/LM/conditioning norms)
 Transition,,token_pair,128|256|384|512|640|768,,d_hidden=64;n=2,,master,eval|train,1,1,FoldForge af3 chai1 opendde openfold3 openfold3-preview2 protenix1 protenix2
 Transition,,token_pair,128|256|384|512|640|768,,d_hidden=64;n=4,,master,eval|train,1,1,FoldForge boltz2 rosettafold3; MiniWorld confidencex4 diffusionx18 distogramx34
-Transition,,token_pair,128|256|384|512|640|768,,d_hidden=128;n=2,,master,eval|train,1,1,FoldForge af3 boltz2 opendde openfold3 openfold3-preview2 protenix1 rosettafold3; MiniWorld confidencex4 diffusionx18
+Transition,,token_pair,128|256|384|512|640|768,,d_hidden=128;n=2,,float32|master,eval|train,1,1,FoldForge af3 boltz2 opendde openfold3 openfold3-preview2 protenix1 rosettafold3; MiniWorld confidencex4 diffusionx18
 Transition,,token_pair,128|256|384|512|640|768,,d_hidden=128;n=4,,master,eval|train,1,1,FoldForge af3 boltz2 openfold3 openfold3-preview2 protenix1 rosettafold3; MiniWorld confidencex4 diffusionx18 distogramx35
-Transition,,token_pair,128|256|384|512|640|768,,d_hidden=256;n=2,,master,eval|train,1,1,FoldForge chai1 esmfold2 esmfold2-fast intellifold2 protenix2
+Transition,,token_pair,128|256|384|512|640|768,,d_hidden=256;n=2,,float32|master,eval|train,1,1,FoldForge chai1 esmfold2 esmfold2-fast intellifold2 protenix2
 Transition,,token_pair,128|256|384|512|640|768,,d_hidden=256;n=4,,master,eval|train,1,1,FoldForge chai1 esmfold2 esmfold2-fast protenix2
 Transition,,token_pair,128|256|384|512|640|768,,d_hidden=384;n=2,,master,eval|train,1,1,FoldForge opendde
 Transition,,token_pair,128|256|384|512|640|768,,d_hidden=384;n=4,,master,eval|train,1,1,FoldForge opendde
-Transition,,token_pair,128|256|384|512|640|768,,d_hidden=512;n=2,,master,eval|train,1,1,FoldForge intellifold2
+Transition,,token_pair,128|256|384|512|640|768,,d_hidden=512;n=2,,float32|master,eval|train,1,1,FoldForge intellifold2
 Transition,,token_pair,128|256|384|512|640|768,,d_hidden=512;n=4,,master,eval|train,1,1,FoldForge intellifold2
-Transition,,token_single,128|256|384|512|640|768,,d_hidden=384;n=2,,master,eval|train,1,1,FoldForge af3 chai1 intellifold2 opendde openfold3 openfold3-preview2 protenix1 protenix2 rosettafold3; MiniWorld confidencex4 diffusionx18
+Transition,,token_single,128|256|384|512|640|768,,d_hidden=384;n=2,,float32|master,eval|train,1,1,FoldForge af3 chai1 intellifold2 opendde openfold3 openfold3-preview2 protenix1 protenix2 rosettafold3; MiniWorld confidencex4 diffusionx18
 Transition,,token_single,128|256|384|512|640|768,,d_hidden=384;n=4,,master,eval|train,1,1,FoldForge af3 boltz2 esmfold2 esmfold2-fast intellifold2 opendde openfold3 openfold3-preview2 protenix1 protenix2 rosettafold3; MiniWorld confidencex4
-Transition,,token_single,128|256|384|512|640|768,,d_hidden=768;n=2,,master,eval|train,1,1,FoldForge boltz2 esmfold2 esmfold2-fast
+Transition,,token_single,128|256|384|512|640|768,,d_hidden=768;n=2,,float32|master,eval|train,1,1,FoldForge boltz2 esmfold2 esmfold2-fast
 Transition,,msa_token,128|256|384|512|640|768,384|512|1024|2048,d_hidden=64;n=4,,master,eval|train,1,1,FoldForge af3 boltz2 chai1 openfold3 openfold3-preview2 protenix1 rosettafold3; MiniWorld confidencex4 diffusionx18 distogramx35
 Transition,,msa_token,128|256|384|512|640|768,1024,d_hidden=128;n=4,,master,eval|train,1,1,FoldForge esmfold2 opendde protenix2
 Transition,,msa_token,128|256|384|512|640|768,1024,d_hidden=256;n=4,,master,eval|train,1,1,FoldForge intellifold2

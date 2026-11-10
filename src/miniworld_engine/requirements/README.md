@@ -11,9 +11,11 @@ What every engine module must serve, and how a backend of it is judged.
   bf16-parameter requirement, so no row says `bfloat16`; a class without parameters runs its bf16 activations as `master`); `modes` among
   `eval|train`.
   The trunk-side classes (pairformer / evoformer: TriangleMultiplication*, TriangleAttention*, OuterProductMean,
-  MSAPairWeightedAveraging, the Bidirectional* classes, PairformerBlock, Transition) are `master` only: FoldForge builds the trunk as
-  master (`modules/engine/modules.py`); its `--precision fp32` runs the trunk in fp32 with TF32 off, which the engine's fp32 `cuda` paths
-  do not serve (they need TF32) and the `pytorch` reference does (user decision 2026-11-10 for Transition).
+  MSAPairWeightedAveraging, the Bidirectional* classes, PairformerBlock, the trunk Transitions) are `master` only: FoldForge builds the
+  trunk as master (`modules/engine/modules.py`); its `--precision fp32` runs the trunk in fp32 with TF32 off, which the `pytorch`
+  reference serves. Exception: the diffusion head's conditioning Transitions (`engine/graph.py make_conditioning_transition`, n = 2:
+  pair 128 / 256 / 512, single 384 / 768) run fp32 + TF32 under `af3_default` / `model_default`, so those five Transition rows keep
+  `float32|master` (user decisions 2026-11-10).
   `dims` / `options` are constructor arguments: `options` holds only arguments that change the class's math (not ones the class
   ignores, e.g. a flag only its caller reads) and, for the model classes (`TokenDiT*` / `AtomDiT*`), only values that differ from the
   class default (each model class defaults to its release's values). Rows with equal (module, stream, dims, options) are one row: the
