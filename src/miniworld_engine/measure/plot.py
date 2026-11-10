@@ -67,9 +67,14 @@ def load(source: list[str], gpu: str) -> tuple[list[dict], str]:
     else:
         paths, what = [Path(s) for s in source], "speed records " + ", ".join(f"`{s}`" for s in source)
     out = []
+    wanted = None
+    if source == ["tokens"]:                                 # only the cases the requirements ask for now (not the unused tokens)
+        from miniworld_engine import judge
+
+        wanted = {judge.case_key("speed", r) for r in judge.required("speed")}
     for rec in _lines(paths):
         if "case" in rec:                                    # a token
-            if rec.get("kind") != "speed":
+            if rec.get("kind") != "speed" or (wanted is not None and rec.get("case_key") not in wanted):
                 continue
             case, res = rec["case"], rec["result"]
         else:                                                # a speed record (measure/speed.py)

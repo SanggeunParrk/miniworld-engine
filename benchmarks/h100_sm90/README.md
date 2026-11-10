@@ -29,17 +29,17 @@ Per class and mode: the geometric mean over its cases of the speedup vs PyTorch 
 | PairEmbedCA | 14.84x (n=12) |  |  | 8.32x (n=12) |  |  |
 | PairEmbedGeom | 18.18x (n=12) |  |  | 9.68x (n=12) |  |  |
 | PairformerBlock | 12.83x (n=6) | 8.24x (n=6) |  | 7.84x (n=6) |  |  |
-| PoolAtoms | 5.00x (n=8) | 1.67x (n=8) |  |  |  |  |
+| PoolAtoms | 5.31x (n=8) | 1.67x (n=8) |  |  |  |  |
 | SWAAtomTransformer | 17.99x (n=48) | 11.80x (n=48) |  | 10.39x (n=44) |  |  |
 | SmoothLddtLoss | 476.79x (n=16) |  |  | 455.83x (n=16) |  |  |
-| TokenDiTBoltz2 | 2.98x (n=12) | 1.31x (n=12) | 1.28x (n=12) | 1.58x (n=12) |  | 1.42x (n=12) |
-| TokenDiTChai1 | 2.68x (n=24) | 1.18x (n=24) | 1.15x (n=24) | 1.54x (n=24) |  | 1.35x (n=24) |
+| TokenDiTBoltz2 | 3.04x (n=12) | 1.30x (n=12) | 1.27x (n=12) | 1.78x (n=12) |  | 1.42x (n=12) |
+| TokenDiTChai1 | 2.74x (n=24) | 1.19x (n=24) | 1.15x (n=24) | 1.81x (n=24) |  | 1.35x (n=24) |
 | TokenDiTMiniWorld | 4.14x (n=12) |  |  | 2.63x (n=12) |  |  |
 | TokenDiTMiniWorldBiasOnly | 2.19x (n=48) |  |  | 2.27x (n=48) |  |  |
 | TokenDiTProtenix | 3.56x (n=84) | 1.22x (n=84) | 1.02x (n=84) | 2.50x (n=84) |  | 1.05x (n=84) |
-| TokenDiTRoseTTAFold3 | 3.06x (n=12) | 1.14x (n=12) | 1.32x (n=12) | 1.56x (n=12) |  | 1.45x (n=12) |
+| TokenDiTRoseTTAFold3 | 3.12x (n=12) | 1.14x (n=12) | 1.32x (n=12) | 1.77x (n=12) |  | 1.45x (n=12) |
 | TokenPairInit | 12.65x (n=6) |  |  | 3.82x (n=6) |  |  |
-| Transition | 4.11x (n=192) | 2.91x (n=126) |  | 2.84x (n=192) |  |  |
+| Transition | 4.37x (n=126) | 2.62x (n=90) |  | 3.14x (n=126) |  |  |
 | TriangleAttention | 12.57x (n=72) | 6.53x (n=71) | 3.11x (n=70) | 6.59x (n=70) |  | 2.08x (n=68) |
 | TriangleAttentionAF3 | 9.90x (n=48) | 9.02x (n=36) | 2.98x (n=46) | 5.48x (n=48) |  | 2.01x (n=46) |
 | TriangleAttentionChai1 | 10.00x (n=24) | 4.72x (n=24) | 4.17x (n=24) | 8.00x (n=24) |  | 3.11x (n=24) |
@@ -62,7 +62,7 @@ The same over the requirement rows whose `source` names af3 (25 rows).
 | MSAPairWeightedAveraging | 8.14x (n=6) | 2.73x (n=6) |  | 3.98x (n=6) |  |  |
 | OuterProductMean | 3.50x (n=6) | 2.70x (n=6) |  | 2.34x (n=6) |  |  |
 | TokenDiTProtenix | 4.00x (n=12) | 1.37x (n=12) | 1.29x (n=12) | 2.61x (n=12) |  | 1.45x (n=12) |
-| Transition | 4.83x (n=72) | 3.87x (n=66) |  | 3.34x (n=72) |  |  |
+| Transition | 5.34x (n=48) | 3.65x (n=42) |  | 3.89x (n=48) |  |  |
 | TriangleAttentionAF3 | 13.49x (n=24) | 9.44x (n=24) | 3.31x (n=22) | 6.56x (n=24) |  | 2.19x (n=22) |
 | TriangleMultiplication | 12.28x (n=24) | 9.50x (n=24) | 5.93x (n=24) | 10.82x (n=24) |  | 4.04x (n=24) |
 
@@ -100,7 +100,7 @@ The same over the requirement rows whose `source` names af3 (25 rows).
 | [TokenDiTProtenix](TokenDiTProtenix/README.md) | 168 | 11 | 3 |
 | [TokenDiTRoseTTAFold3](TokenDiTRoseTTAFold3/README.md) | 24 | 2 | 0 |
 | [TokenPairInit](TokenPairInit/README.md) | 12 | 1 | 0 |
-| [Transition](Transition/README.md) | 384 | 16 | 2 |
+| [Transition](Transition/README.md) | 252 | 16 | 2 |
 | [TriangleAttention](TriangleAttention/README.md) | 144 | 12 | 4 |
 | [TriangleAttentionAF3](TriangleAttentionAF3/README.md) | 96 | 8 | 2 |
 | [TriangleAttentionChai1](TriangleAttentionChai1/README.md) | 48 | 4 | 0 |
