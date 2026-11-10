@@ -11,6 +11,7 @@ The output is bf16 (what the attention-bias projection consumes) for fp32 / bf16
 """
 
 import math
+from typing import ClassVar
 
 import torch
 import torch.nn as nn
@@ -23,13 +24,13 @@ N_ROWS_GEOM = 317   # 127 sequence separations | 4 x 21 distances | 5 x 21 angle
 N_ROWS_CA = 157     # 127 sequence separations | 30 CA distances
 
 
-def _cuda_h100(device: torch.device) -> str | None:
-    """Why the hand-written CUDA kernels cannot run on ``device`` (they are the H100 sm_90a build), or ``None``."""
+def _cuda_arch(device: torch.device) -> str | None:
+    """Why the hand-written CUDA kernels cannot run on ``device`` (their builds are H100 sm_90a and A100 sm_80), or ``None``."""
     if device.type != "cuda":
         return "the kernels run on CUDA tensors only"
     cc = torch.cuda.get_device_capability(device)
-    if cc != (9, 0):
-        return f"the CUDA kernels are the H100 (sm_90a) build, got sm_{cc[0]}{cc[1]}"
+    if cc not in ((9, 0), (8, 0)):
+        return f"the CUDA kernels are built for H100 (sm_90a) and A100 (sm_80), got sm_{cc[0]}{cc[1]}"
     return None
 
 
@@ -89,11 +90,12 @@ class PairEmbedAdaLN(BackendModule):
     Parameters
     ----------
     backend : str
-        See :class:`BackendModule`. ``"cuda"`` (H100 sm_90a): the engine's hand-written CUDA kernels (``kernels/pair_embed_adaln/cuda``: row gather, both
+        See :class:`BackendModule`. ``"cuda"`` (H100 sm_90a; A100 sm_80: the same source's sm_80 build): the engine's hand-written CUDA kernels (``kernels/pair_embed_adaln/cuda``: row gather, both
         LayerNorms and the adaptive scale in one kernel; a bitwise deterministic backward), at most 220 table rows (``n_sep + n_xt + n_sc``).
         ``"triton"``: the portable Triton kernels (``kernels/pair_embed_adaln/triton``), any CUDA card. Both pack each bin into 8 bits (every ``n_*`` <= 255).
     """
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: the sm_80 build of the H100 kernels
 
     backends = ("pytorch", "cuda", "triton")
 
@@ -157,7 +159,7 @@ class PairEmbedAdaLN(BackendModule):
         return None
 
     def _supports_cuda(self, xt, sc, residue_idx, mask, gamma, beta) -> str | None:
-        why = _first(self._supports_kernels(xt, sc, residue_idx, mask, gamma, beta), _cuda_h100(xt.device) if xt.device.type == "cuda" else None)
+        why = _first(self._supports_kernels(xt, sc, residue_idx, mask, gamma, beta), _cuda_arch(xt.device) if xt.device.type == "cuda" else None)
         if why is not None:
             return why
         if self.n_sep + self.n_xt + self.n_sc > 220:
@@ -255,11 +257,12 @@ class PairEmbedGeom(BackendModule):
     ln_eps : float | None
         ``None``: the pair itself; else its LayerNorm with this eps.
     backend : str
-        See :class:`BackendModule`. ``"cuda"`` (H100 sm_90a): the engine's hand-written CUDA kernels (``kernels/pair_embed_geom/cuda``: a gather of up to ten
+        See :class:`BackendModule`. ``"cuda"`` (H100 sm_90a; A100 sm_80: the same source's sm_80 build): the engine's hand-written CUDA kernels (``kernels/pair_embed_geom/cuda``: a gather of up to ten
         table rows, the LayerNorm folded in, a tensor-core table gradient). ``"triton"``: the portable Triton kernels, any CUDA card. Both read ``bb`` in
         fp32 or bf16 (computed in fp32).
     """
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: the sm_80 build of the H100 kernels
 
     backends = ("pytorch", "cuda", "triton")
     rows = N_ROWS_GEOM
@@ -304,7 +307,7 @@ class PairEmbedGeom(BackendModule):
         return None
 
     def _supports_cuda(self, bb, ca_mask, has_cb, mask, residue_idx, chains) -> str | None:
-        return _first(self._supports_kernels(bb, ca_mask, has_cb, mask, residue_idx, chains), _cuda_h100(bb.device) if bb.device.type == "cuda" else None)
+        return _first(self._supports_kernels(bb, ca_mask, has_cb, mask, residue_idx, chains), _cuda_arch(bb.device) if bb.device.type == "cuda" else None)
 
     def _supports_triton(self, bb, ca_mask, has_cb, mask, residue_idx, chains) -> str | None:
         return self._supports_kernels(bb, ca_mask, has_cb, mask, residue_idx, chains)
@@ -350,10 +353,11 @@ class PairEmbedCA(BackendModule):
     ln_eps : float | None
         ``None``: the pair itself; else its LayerNorm with this eps.
     backend : str
-        See :class:`BackendModule`. ``"cuda"`` (H100 sm_90a): the decoder-pair entry points of the same CUDA extension as :class:`PairEmbedGeom`.
+        See :class:`BackendModule`. ``"cuda"`` (H100 sm_90a; A100 sm_80: the same source's sm_80 build): the decoder-pair entry points of the same CUDA extension as :class:`PairEmbedGeom`.
         ``"triton"``: the portable Triton kernels, any CUDA card.
     """
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: the sm_80 build of the H100 kernels
 
     backends = ("pytorch", "cuda", "triton")
     rows = N_ROWS_CA
@@ -398,7 +402,7 @@ class PairEmbedCA(BackendModule):
         return None
 
     def _supports_cuda(self, ca, mask, residue_idx=None) -> str | None:
-        return _first(self._supports_kernels(ca, mask, residue_idx), _cuda_h100(ca.device) if ca.device.type == "cuda" else None)
+        return _first(self._supports_kernels(ca, mask, residue_idx), _cuda_arch(ca.device) if ca.device.type == "cuda" else None)
 
     def _supports_triton(self, ca, mask, residue_idx=None) -> str | None:
         return self._supports_kernels(ca, mask, residue_idx)

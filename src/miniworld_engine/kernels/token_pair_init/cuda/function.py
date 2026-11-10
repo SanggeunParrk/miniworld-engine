@@ -1,4 +1,4 @@
-"""The CUDA backend of ``TokenPairInit``: the prep / forward / backward launches of ``sm90`` (``token_pair_init.cu``, H100 sm_90a) as opaque ops and an
+"""The CUDA backend of ``TokenPairInit``: the prep / forward / backward launches of ``sm90`` (``token_pair_init.cu``, H100 sm_90a; on an A100 the sm_80 build of the same source, ``sm80``) as opaque ops and an
 autograd function. Inputs are the module's prepared tensors (``modules/token_pair_init.py``): ``left`` / ``right`` [B, L, 128], the table ``tbl``
 [n_rel + 2, 128] (= [W_rel^T ; W_bond^T]), ``ids`` [5, B * L] int32 (asym, residue, token, entity, sym) and ``bond`` [B * L * L] uint8. The kernels compute in fp32
 and return z fp32; every gradient goes back in its input's dtype."""
@@ -21,9 +21,9 @@ def _token_pair_init_fwd_fake(left, right, tbl, ids, bond, r_max, s_max):
 def token_pair_init_fwd(left: torch.Tensor, right: torch.Tensor, tbl: torch.Tensor, ids: torch.Tensor, bond: torch.Tensor, r_max: int,
                         s_max: int) -> torch.Tensor:
     """z [B, L, L, 128] from left / right [B, L, 128], tbl [n_rel + 2, 128], ids [5, B*L] int32, bond [B*L*L] uint8."""
-    from miniworld_engine.kernels.token_pair_init.cuda import sm90
+    from miniworld_engine.kernels.token_pair_init.cuda.sm80 import device_build
 
-    return sm90.forward(left, right, tbl, ids, bond, r_max, s_max)
+    return device_build().forward(left, right, tbl, ids, bond, r_max, s_max)
 
 
 def _token_pair_init_bwd_fake(g, ids, bond, nbin, r_max, s_max):
@@ -36,9 +36,9 @@ def _token_pair_init_bwd_fake(g, ids, bond, nbin, r_max, s_max):
 @opaque(fake=_token_pair_init_bwd_fake, name="token_pair_init_bwd_sm90")
 def token_pair_init_bwd(g: torch.Tensor, ids: torch.Tensor, bond: torch.Tensor, nbin: int, r_max: int, s_max: int) -> list[torch.Tensor]:
     """[dleft, dright, dtbl] from dz = g [B, L, L, 128] fp32 (``nbin`` = table rows)."""
-    from miniworld_engine.kernels.token_pair_init.cuda import sm90
+    from miniworld_engine.kernels.token_pair_init.cuda.sm80 import device_build
 
-    return list(sm90.backward(g, ids, bond, nbin, r_max, s_max))
+    return list(device_build().backward(g, ids, bond, nbin, r_max, s_max))
 
 
 def _token_pair_init_prep_fake(asym, residue, token, entity, sym, w_rel, w_bond):
@@ -51,9 +51,9 @@ def _token_pair_init_prep_fake(asym, residue, token, entity, sym, w_rel, w_bond)
 def token_pair_init_prep(asym: torch.Tensor, residue: torch.Tensor, token: torch.Tensor, entity: torch.Tensor, sym: torch.Tensor,
                          w_rel: torch.Tensor, w_bond: torch.Tensor) -> list[torch.Tensor]:
     """[ids [5, B*L] int32, tbl [n_rel + 2, 128] fp32] in one launch (forward-only calls: no gradient flows through it)."""
-    from miniworld_engine.kernels.token_pair_init.cuda import sm90
+    from miniworld_engine.kernels.token_pair_init.cuda.sm80 import device_build
 
-    return list(sm90.prep([asym, residue, token, entity, sym], w_rel, w_bond))
+    return list(device_build().prep([asym, residue, token, entity, sym], w_rel, w_bond))
 
 
 class TokenPairInitFunction(torch.autograd.Function):

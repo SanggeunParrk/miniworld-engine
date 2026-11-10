@@ -7,12 +7,13 @@ for the gradients of ``left``, ``right`` and both weights.
 """
 
 import math
+from typing import ClassVar
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from miniworld_engine.modules.pair_embed import _cuda_h100, _first
+from miniworld_engine.modules.pair_embed import _cuda_arch, _first
 from miniworld_engine.modules.primitives import BackendModule, random_input, wide
 
 D_PAIR = 128
@@ -59,12 +60,13 @@ class TokenPairInit(BackendModule):
     Parameters
     ----------
     backend : str
-        See :class:`BackendModule`. ``"cuda"`` (H100 sm_90a): the engine's hand-written CUDA kernels (``kernels/token_pair_init/cuda``; a bitwise
+        See :class:`BackendModule`. ``"cuda"`` (H100 sm_90a; A100 sm_80: the same source's sm_80 build): the engine's hand-written CUDA kernels (``kernels/token_pair_init/cuda``; a bitwise
         deterministic backward, a one-launch glue for the ids and the table on forward-only calls). ``"triton"``: the portable Triton kernels
         (``kernels/token_pair_init/triton``), any CUDA card. Both read ``left`` / ``right`` / the weights in fp32 or bf16 and pack each relative-position bin
         into 8 bits (``n_rel - 2 <= 255``).
     """
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: the sm_80 build of the H100 kernels
 
     backends = ("pytorch", "cuda", "triton")
 
@@ -114,7 +116,7 @@ class TokenPairInit(BackendModule):
 
     def _supports_cuda(self, left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond) -> str | None:
         return _first(self._supports_kernels(left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond),
-                      _cuda_h100(left.device) if left.device.type == "cuda" else None)
+                      _cuda_arch(left.device) if left.device.type == "cuda" else None)
 
     def _supports_triton(self, left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond) -> str | None:
         return self._supports_kernels(left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond)
