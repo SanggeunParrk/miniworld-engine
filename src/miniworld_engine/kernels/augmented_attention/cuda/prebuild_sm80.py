@@ -3,9 +3,6 @@
 
 * the token DiT attention (``kernels/integrations/augattn_sm80.py``: TokenDiTProtenix, TokenDiTBoltz2, TokenDiTMiniWorld -- its per-head
   q / k RMSNorm runs inside that path): the core / glue / TF32 extensions of ``sm80.py``;
-* the general sm_80 composition of the QK-norm token DiT (``kernels/integrations/a100_families.token``): no wired class reaches it any more
-  (GENERIC is empty; the block stays for a class that routes there again): the native rows of ``kernels/cuda_native.py`` and the
-  LayerNorm / RMSNorm / SwiGLU builds it calls;
 * the atom block (``kernels/integrations/local_dit_sm80_block.py``: AtomDiTProtenix): the row extension of ``sm80_atom_rows`` and the
   window-attention / pair-bias cubins of ``sm80_atom_local``.
 
@@ -16,8 +13,6 @@ from __future__ import annotations
 
 #: classes whose A100 "cuda" backend runs the token attention of integrations/augattn_sm80
 TOKEN = frozenset({"TokenDiTProtenix", "TokenDiTBoltz2", "TokenDiTMiniWorld"})
-#: classes whose A100 "cuda" backend runs the general sm_80 composition (integrations/a100_families.token: the per-head q / k RMSNorm)
-GENERIC: frozenset[str] = frozenset()
 #: classes whose A100 "cuda" backend runs integrations/local_dit_sm80_block
 ATOM = frozenset({"AtomDiTProtenix"})
 #: the window attention / pair-bias / glue sources of sm80_atom_local (one cubin each)
@@ -44,14 +39,6 @@ def prebuild_sm80(rows):
         yield sm80._glue_ext
         if any(r["module"] == "AttentionPairBias" and r["dtype"] == "float32" for r in rows):
             yield sm80._tf32_rna_ext
-    if modules & GENERIC:   # the native rows of kernels/cuda_native.py and the norm / SwiGLU builds a100_families.token calls
-        from miniworld_engine.kernels import cuda_native
-        from miniworld_engine.kernels.layernorm.cuda import sm80 as norm_sm80
-        from miniworld_engine.kernels.transition.cuda import fused_wide_sm80
-
-        yield cuda_native._ext
-        yield norm_sm80.ext
-        yield fused_wide_sm80._ext
     if modules & ATOM:
         from . import sm80_atom_local, sm80_atom_rows
 
