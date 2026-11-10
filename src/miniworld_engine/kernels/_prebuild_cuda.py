@@ -217,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
             log(f"  {'have' if s.key not in absent else 'todo'} {s.kind:7s} {s.name}  [{s.key[:8]}]  {s.site}")
         return 0
     results = _prebuild.build(specs, args.jobs or _prebuild.default_jobs(), args.stop_after,
-                              {"sm90": "9.0a", "sm100": "10.0a"}[t.arch])
+                              {"sm80": "8.0", "sm90": "9.0a", "sm100": "10.0a"}[t.arch])
     failed = {k: v for k, v in results.items() if v[1] is not None}
     left = sum(_prebuild.present(s) is None for s in specs)
     log(f"done: {len(results) - len(failed)} built, {len(failed)} failed, {left} of {len(specs)} still absent; "

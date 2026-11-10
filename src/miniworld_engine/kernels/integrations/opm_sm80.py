@@ -28,6 +28,8 @@ from miniworld_engine.kernels._compile import opaque
 
 _FAILED = False
 CH = 32
+#: The port's E053 short training pipeline (``pipeline_sm80``), an opt-in experiment: off.
+_PIPELINE = False
 
 
 @torch.compiler.assume_constant_result
@@ -218,7 +220,7 @@ def _mask_epilogue_enabled(
 def _pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
     # E053 measures host dispatch overhead. The grouped GEMMs still use cuBLAS.
     return (
-        False
+        _PIPELINE
         and msa.shape[1] == 1024
         and msa.shape[-1] == 64
         and leaves[4].shape[0] == 128

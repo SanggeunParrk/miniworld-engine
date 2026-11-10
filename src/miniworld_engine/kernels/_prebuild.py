@@ -597,7 +597,7 @@ def main(argv: list[str] | None = None) -> int:
         for s in specs:
             log(f"  {'have' if present(s) else 'todo'} {s.kind:7s} {s.name}  [{s.key[:8]}]  {s.site}")
         return check(t, specs, problems) and 1 if args.check else 0
-    results = build(specs, args.jobs or default_jobs(), args.stop_after, {"sm90": "9.0a", "sm100": "10.0a"}[t.arch])
+    results = build(specs, args.jobs or default_jobs(), args.stop_after, {"sm80": "8.0", "sm90": "9.0a", "sm100": "10.0a"}[t.arch])
     failed = {k: v for k, v in results.items() if v[1] is not None}
     index = write_index(t, specs)
     left = sum(present(s) is None for s in specs)
