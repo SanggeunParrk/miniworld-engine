@@ -67,6 +67,100 @@ _TUNING: dict = {}
 _RUNNERS: dict = {}
 
 
+# ------------------------------------------------------------------------------------------------ the models' options
+# ONE token DiT algorithm for every model (TokenDiTProtenix / MiniWorld / Boltz2 / RoseTTAFold3 / Chai1): a model's differences are
+# options of it, read off the block's own modules (``options``), and its parameters are mapped onto the canonical leaves WEIGHTS
+# (``leaves``): a part the model does not have is a constant leaf that makes the canonical math the model's --
+#   bias-free query (RoseTTAFold3)        to_query.bias = 0
+#   identity AdaLN (Chai-1)               ln_cond.weight = 1 (the tables read the raw conditioning), to_scale.bias = 1 (the "+ 1")
+#   no gating query (Chai-1)              to_gate.weight = 0 (the kernels then skip its columns: option ``gated``)
+#   flat q / k LayerNorm (RoseTTAFold3)   QK_WEIGHTS = 1 (unused), its affine appended to the leaves (option ``kq_ln``)
+#   up-gate transition (Boltz-2)          transition.up.weight appended to the leaves (option ``up``)
+_CONST: dict = {}
+
+
+def _const(value: float, shape, device) -> torch.Tensor:
+    """A cached fp32 constant leaf (one tensor per value / shape / device: its pointer and version keep the weight packs' keys stable)."""
+    key = (float(value), tuple(shape), str(device))
+    t = _CONST.get(key)
+    if t is None:
+        t = _CONST[key] = torch.full(tuple(shape), float(value), dtype=torch.float32, device=device)
+    return t
+
+
+def _identity_adaln(ada) -> bool:
+    return not hasattr(ada, "ln_cond")   # IdentityAdaptiveLayerNorm: no cond LayerNorm, no biases
+
+
+def options(module) -> tuple[float, ...] | None:
+    """The block's options in ``conditioned_transition.cuda.VARIANT_DEFAULT`` order (parallel, sigmoid AdaLN, AdaLN eps, gating query,
+    up-gate transition, flat q / k LayerNorm, its eps, fp32 q / k rounding), or None when the block is outside the algorithm (mixed AdaLN forms / epsilons,
+    q and k norms of different epsilons)."""
+    a, t = module.attention, module.transition
+    ident = _identity_adaln(a.ada_ln_in)
+    if ident != _identity_adaln(t.ada_ln_in) or a.ada_ln_in.ln_in.eps != t.ada_ln_in.ln_in.eps:
+        return None
+    if not ident and (a.ada_ln_in.ln_cond.eps != 1e-5 or t.ada_ln_in.ln_cond.eps != 1e-5):
+        return None
+    kq_ln = hasattr(a, "norm_query") and not a.use_qk_norm   # FlatQKNormAugmentedAttention: a LayerNorm of the flat q / k
+    if kq_ln and (a.norm_query.eps != a.norm_key.eps or a.norm_query.bias is None or a.norm_key.bias is None):
+        return None
+    parallel, gated, up = bool(getattr(module, "parallel", False)), hasattr(a, "to_gate"), hasattr(t, "up")
+    # qk_rna (fp32 q / k rounded to nearest before the TF32 core) for the blocks with any of the options: the models whose fp32
+    # accuracy depends on it (Chai-1's identity AdaLN scale is unbounded); the default block keeps its tuned path
+    rna = parallel or ident or not gated or up or kq_ln
+    return (float(parallel), float(not ident), float(a.ada_ln_in.ln_in.eps), float(gated), float(up), float(kq_ln),
+            float(a.norm_query.eps) if kq_ln else 1e-5, float(rna))
+
+
+def _leaf(module, name):
+    """The parameter of WEIGHTS / QK_WEIGHTS ``name``, or the constant leaf that stands for a part the block does not have."""
+    a = module.attention
+    part, _, rest = name.partition(".")
+    owner = getattr(module, part)
+    d, dev = a.to_query.weight.shape[0], a.to_query.weight.device
+    if rest == "to_query.bias" and a.to_query.bias is None:
+        return _const(0.0, (d,), dev)
+    if rest == "to_gate.weight" and not hasattr(a, "to_gate"):
+        return _const(0.0, (d, d), dev)
+    if rest.startswith("ada_ln_in.") and _identity_adaln(owner.ada_ln_in):
+        if rest == "ada_ln_in.ln_cond.weight":
+            return _const(1.0, (owner.ada_ln_in.to_scale.weight.shape[1],), dev)
+        if rest == "ada_ln_in.to_scale.bias":
+            return _const(1.0, (owner.ada_ln_in.to_scale.weight.shape[0],), dev)
+    if rest in ("norm_query.weight", "norm_key.weight") and not a.use_qk_norm:
+        return _const(1.0, (d // a.n_head,), dev)
+    return module.get_parameter(name)
+
+
+def leaves(module, opts) -> list[torch.Tensor]:
+    """The block's leaves for ``conditioned_transition.cuda.token_inference``: WEIGHTS (+ QK_WEIGHTS for a q / k norm), then the up-gate
+    weight, then the flat q / k LayerNorm affine."""
+    a = module.attention
+    names = WEIGHTS + (QK_WEIGHTS if (a.use_qk_norm or opts[5]) else ())
+    out = [_leaf(module, n) for n in names]
+    if opts[4]:
+        out.append(module.transition.up.weight)
+    if opts[5]:
+        out += [a.norm_query.weight, a.norm_query.bias, a.norm_key.weight, a.norm_key.bias]
+    return out
+
+
+def _cond_width(module) -> int:
+    return module.attention.ada_ln_in.to_scale.weight.shape[1]
+
+
+def _norms_ok(module, *, h100: bool) -> bool:
+    """The block is inside the algorithm: its options are defined, the pair LayerNorm eps is 1e-5; off H100 (B200) only the default
+    options at AdaLN eps 1e-5 (the other options are H100 kernels)."""
+    from miniworld_engine.kernels.conditioned_transition.cuda import VARIANT_DEFAULT
+
+    opts = options(module)
+    if opts is None or module.attention.ln_pair.eps != 1e-5:
+        return False
+    return h100 or opts == VARIANT_DEFAULT
+
+
 def _native_fp32_inference(module, single) -> bool:
     """The qualified Hopper FP32 inference family, independent of BF16 experiments."""
 
@@ -104,7 +198,7 @@ def _check_native_fp32(module, single, cond, pair, compute_dtype):
         or cond.shape[0] not in (1, A)
         or cond.shape[1:3] != (1, L)
         or cond.shape[3] not in COND_WIDTHS_H100
-        or cond.shape[3] != module.attention.ada_ln_in.ln_cond.weight.numel()
+        or cond.shape[3] != _cond_width(module)
         or tuple(pair.shape) != (1, L, L, module.attention.to_bias.weight.shape[1])
         or cond.dtype is not torch.float32
         or pair.dtype is not torch.float32
@@ -120,15 +214,8 @@ def _check_native_fp32(module, single, cond, pair, compute_dtype):
         raise ValueError(
             "Hopper FP32 token inference requires a 16x48 / 24x32 / 12x64 (d 768) or 16x64 (d 1024) layout and a 2d-wide transition"
         )
-    norms = (
-        a.ada_ln_in.ln_in,
-        a.ada_ln_in.ln_cond,
-        a.ln_pair,
-        module.transition.ada_ln_in.ln_in,
-        module.transition.ada_ln_in.ln_cond,
-    )
-    if any(norm.eps != 1e-5 for norm in norms):
-        raise ValueError("Hopper FP32 token inference requires LayerNorm eps=1e-5")
+    if not _norms_ok(module, h100=True):
+        raise ValueError("Hopper FP32 token inference requires the token DiT's options (LayerNorm eps=1e-5, the AdaLN's any)")
     if any(
         p.dtype is not torch.float32 or p.device != single.device
         for p in module.parameters()
@@ -174,7 +261,7 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
     if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] != 2 * d:
         return False
     # cond 384; 768 (ESMFold2's token DiT) on H100, where the weight pack and the conditioning rows are built per cond width
-    if cond.shape[-1] != a.ada_ln_in.ln_cond.weight.numel() or not (
+    if cond.shape[-1] != _cond_width(module) or not (
         cond.shape[-1] == 384
         or (cond.shape[-1] in COND_WIDTHS_H100 and torch.cuda.get_device_capability(single.device) == (9, 0))
     ):
@@ -193,14 +280,7 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         or cond.shape[1:3] != single.shape[1:3]
     ):
         return False
-    norms = (
-        a.ada_ln_in.ln_in,
-        a.ada_ln_in.ln_cond,
-        a.ln_pair,
-        module.transition.ada_ln_in.ln_in,
-        module.transition.ada_ln_in.ln_cond,
-    )
-    if any(norm.eps != 1e-5 for norm in norms):
+    if not _norms_ok(module, h100=torch.cuda.get_device_capability(single.device) == (9, 0)):
         return False
     cap = torch.cuda.get_device_capability(single.device)
     if a.use_qk_norm and not (cap in ((9, 0), (10, 0)) and _cuda_rows()):
@@ -257,7 +337,7 @@ def _cuda_rows_available() -> bool:
         return False
 
 
-def _fake(single, cond, pair, mask, weights, qk, eq, ek, heads, extra):
+def _fake(single, cond, pair, mask, weights, qk, eq, ek, heads, extra, variant):
     return torch.empty_like(single)
 
 
@@ -273,8 +353,10 @@ def _infer(
     ek: float,
     heads: int,
     extra: torch.Tensor | None,
+    variant: list[float],
 ) -> torch.Tensor:
-    """``weights``: WEIGHTS, then QK_WEIGHTS when the block has QK-norm (eq / ek its RMSNorm eps; unused otherwise).
+    """``weights``: the block's ``leaves`` (WEIGHTS, then QK_WEIGHTS when the block has QK-norm -- eq / ek its RMSNorm eps; unused
+    otherwise -- or a flat q / k LayerNorm, then the option leaves); ``variant``: its ``options`` (H100; off H100 the defaults only).
 
     ``extra``: an [L, L] logit bias for every head (Hopper CUDA path only; ``serves`` rejects it elsewhere)."""
     if torch.cuda.get_device_capability(single.device) == (9, 0):
@@ -283,7 +365,7 @@ def _infer(
 
         with _tf32(single.dtype is torch.float32):
             return cuda.token_inference(
-                single, cond, pair.contiguous(), mask, weights, qk, eq, ek, heads, extra
+                single, cond, pair.contiguous(), mask, weights, qk, eq, ek, heads, extra, variant
             )
     # Off H100 the runner with the hand-CUDA rows / SwiGLU GEMM / attention cores of the card (it degrades to the Triton hooks where
     # the card has none).
@@ -402,18 +484,19 @@ def update(module, single, cond, pair, mask, extra=None):
     # the pair as the caller holds it: _infer keys its pair-bias cache on this tensor and makes it contiguous on a miss
     a = module.attention
     qk = bool(a.use_qk_norm)
-    names = WEIGHTS + (QK_WEIGHTS if qk else ())
     eq = float(a.norm_query.effective_eps(single.dtype)) if qk else 0.0
     ek = float(a.norm_key.effective_eps(single.dtype)) if qk else 0.0
+    opts = options(module)
     return _infer(
         single.contiguous(),
         cond,
         pair,
         mask,
-        [module.get_parameter(name) for name in names],
+        leaves(module, opts),
         qk,
         eq,
         ek,
         int(a.n_head),
         extra,
+        list(opts),
     )

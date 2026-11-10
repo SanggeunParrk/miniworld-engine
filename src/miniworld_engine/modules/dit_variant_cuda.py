@@ -1,8 +1,9 @@
-"""The ``"cuda"`` backend of the DiT block variants: :class:`~miniworld_engine.modules.token_dit.TokenDiTBoltz2` /
-``TokenDiTRoseTTAFold3`` / ``TokenDiTChai1`` and :class:`~miniworld_engine.modules.atom_dit.AtomDiTBoltz2` / ``AtomDiTRoseTTAFold3`` /
-``AtomDiTChai1`` (the classes the ``dit_variants_*`` requirement rows name).
+"""The ``"cuda"`` backend of the ATOM DiT block variants (:class:`~miniworld_engine.modules.atom_dit.AtomDiTBoltz2` / ``AtomDiTRoseTTAFold3`` /
+``AtomDiTChai1``, the classes the ``dit_variants_*`` requirement rows name), and the A100 paths of the token variants
+(:class:`~miniworld_engine.modules.token_dit.TokenDiTBoltz2` / ``TokenDiTRoseTTAFold3`` / ``TokenDiTChai1``, :class:`VariantTokenCuda`). On
+H100 the token variants run the one token DiT algorithm (TokenDiTProtenix's ``"cuda"`` route with the model's options).
 
-The kernels (``kernels/dit_variants``: ``rows.cu`` / ``train_rows.cu`` / ``edge.cu`` and the cuBLAS products, the token / local DiT attention
+The kernels (``kernels/dit_variants``: ``rows.cu`` / ``train_rows.cu`` / ``edge.cu`` and the cuBLAS products, the local DiT attention
 cores of ``kernels/augmented_attention``) were written against a stack of variant blocks (``reference.py``'s parameter names). A block of
 these modules is such a stack of one block: :class:`_Stack` is its read-only view onto the module's own submodules (nothing is copied; a
 weight change is seen on the next call). Three attribute differences are bridged here:
@@ -16,9 +17,8 @@ The path by dtype and gradient (the first whose range holds): bf16 inference ``k
 ``cuda/infer32.py``; any call with a gradient (bf16 or fp32) ``cuda/train.py`` (autograd Functions, forward and backward). bf16 includes
 the master layout (fp32 parameters, bf16 activations under bf16 autocast): inference runs with autocast off (its operands are packed bf16),
 training under the caller's autocast (the conditioning tables are the module's own layers on the fp32 masters; the kernels cast the weights). Outside every range
-:meth:`_supports_cuda` states why; there is no other backend behind it. The token inference paths take a ``cond`` that differs per sample in
-one call (per-row conditioning tables, [A L, ...]); elsewhere the kernels take ONE conditioning row set shared by the samples and such a
-``cond`` runs one kernel call per sample (same kernels, same result per sample).
+:meth:`_supports_cuda` states why; there is no other backend behind it. The H100 atom kernels take ONE conditioning row set shared by the
+samples and a ``cond`` that differs per sample runs one kernel call per sample (same kernels, same result per sample).
 """
 
 from __future__ import annotations
@@ -100,12 +100,12 @@ class _Block:
         self.project_output = not isinstance(attention.to_out, nn.Identity)
         self.to_q = attention.to_query if attention.to_query.bias is not None else _ZeroBiasQuery(attention.to_query)
         self.expand = _Expand(transition)
+        # ``atom``: the atom blocks are the only callers (the token blocks run the one token DiT algorithm); one AdaLN for q and k / v, or
+        # a K / V AdaLN of its own (the AF3 blocks on A100: OpenFold3, Protenix)
+        assert atom, "the token DiT blocks run kernels/integrations/token_dit (TokenDiTProtenix's cuda route)"
         adaln = _AdaLN(attention.ada_ln_in)
-        if atom:   # one AdaLN for q and k / v, or a K / V AdaLN of its own (the AF3 blocks on A100: OpenFold3, Protenix)
-            kv = getattr(attention, "ada_ln_kv", None)
-            self.q_adaln, self.k_adaln = adaln, (adaln if kv is None else _AdaLN(kv))
-        else:
-            self.attn_adaln = adaln
+        kv = getattr(attention, "ada_ln_kv", None)
+        self.q_adaln, self.k_adaln = adaln, (adaln if kv is None else _AdaLN(kv))
         self.trans_adaln = _AdaLN(transition.ada_ln_in)
 
     to_k = property(lambda self: self._att.to_key)
@@ -220,40 +220,9 @@ def _run(fn, stack, single, cond, call, *, wants_grad: bool, keep_autocast: bool
 
 
 class VariantTokenCuda:
-    """Mixin of the Boltz-2 / RoseTTAFold3 / Chai-1 token DiT blocks: ``_supports_cuda`` / ``_forward_cuda`` on ``kernels/dit_variants``."""
-
-    def _token_serving(self, single, cond, pair, mask, compute_dtype, extra_pair_bias):
-        """(the kernel function that serves the call, its trailing arguments) or (None, why not)."""
-        if compute_dtype is not None:
-            return None, "compute_dtype (the kernels fix their own precision)"
-        if extra_pair_bias is not None:
-            return None, "extra_pair_bias (not an input of the DiT variant kernels)"
-        why = _call_reason(self, single, cond, pair, mask)
-        if why is not None:
-            return None, why
-        length = single.shape[2]
-        if (single.shape[-1], self.attention.n_head) != (768, 16) or self.transition.expand_a.weight.shape[0] != 2 * 768 or pair.shape[-1] not in (128, 256):
-            return None, ("geometry: the token DiT kernels are built for 768 wide x 16 heads of 48, transition n = 2, pair 128 / 256 wide, "
-                          f"got {single.shape[-1]} wide x {self.attention.n_head} heads, pair {pair.shape[-1]}")
-        if pair.ndim != 4 or pair.shape[0] != 1 or tuple(pair.shape[1:3]) != (length, length):
-            return None, f"pair must be [1, L, L, d_pair], got {tuple(pair.shape)}"
-        if mask is not None:
-            if mask.ndim == 3 and not (mask.shape[0] == 1 or mask.stride(0) == 0):
-                return None, "a key mask that differs across the samples (the kernels take one [L] mask)"
-            mask = mask[0] if mask.ndim == 3 else mask
-            if tuple(mask.shape) != (1, length):
-                return None, f"mask must be [B, L] or [A, B, L], got {tuple(mask.shape)}"
-            mask = mask[0]
-        from miniworld_engine.kernels.dit_variants import interface
-        from miniworld_engine.kernels.dit_variants.cuda import infer32, train
-
-        with torch.set_grad_enabled(_wants_grad(self, single, cond, pair)):
-            fn = _first_hit(((interface.serves, interface.inference), (infer32.serves, infer32.inference),
-                             (train.serves, train.stack_train)), _stack(self, atom=False), single[:, 0], cond[0, 0], pair[0], mask)
-        if fn is None:
-            return None, ("outside the kernels' range (bfloat16 / float32, [A, 1, L, 768] with L a multiple of 128, 16 heads, pair 128 / 256, "
-                          "a key mask shared by the samples; no gradient: bfloat16 or float32 inference, a gradient: the training path)")
-        return fn, (pair.squeeze(0), mask)   # a view whose backward is a view too (pair[0] would zero-fill and copy a [1, L, L, c] gradient)
+    """Mixin of the Boltz-2 / RoseTTAFold3 / Chai-1 token DiT blocks: their A100 (sm_80) ``"cuda"`` paths. On H100 the block runs THE token
+    DiT algorithm, TokenDiTProtenix's ``"cuda"`` route (kernels/integrations/token_dit, token_dit_train) with its options
+    (``token_dit.options``: parallel block, identity AdaLN, no gating query, up-gate transition, flat q / k LayerNorm, bias-free query)."""
 
     # A100 (sm_80): the attention runs on kernels/integrations/augattn_sm80 (the module's AdaLN, then cuBLAS projections, the pair bias
     # kernels, the mma.sync core and the gates, forward and backward; bf16 or the TF32 core), including its variants: the flat q / k
@@ -295,8 +264,8 @@ class VariantTokenCuda:
     def _supports_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> str | None:
         if _a100(single):
             return self._a100_token_reason(single, cond, pair, mask, compute_dtype, extra_pair_bias)
-        fn, why = self._token_serving(single, cond, pair, mask, compute_dtype, extra_pair_bias)
-        return why if fn is None else None
+        # H100: the one token DiT algorithm (TokenDiTProtenix's "cuda" route with this block's options)
+        return super()._supports_cuda(single, cond, pair, mask, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)
 
     def _forward_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> torch.Tensor:
         if _a100(single):
@@ -306,13 +275,8 @@ class VariantTokenCuda:
             if not self.parallel:
                 return self.transition(single_a, cond)
             return single_a + self._a100_transition_delta(single, cond)
-        fn, call = self._token_serving(single, cond, pair, mask, compute_dtype, extra_pair_bias)
-        from miniworld_engine.kernels.dit_variants import interface
-        from miniworld_engine.kernels.dit_variants.cuda import infer32
-
-        # the inference paths (bf16, fp32) take one conditioning per sample in the same launches (their tables are [A L, ...]); training loops
-        return _run(fn, _stack(self, atom=False), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair),
-                    per_sample=fn in (interface.inference, infer32.inference))
+        # H100: the one token DiT algorithm (TokenDiTProtenix's "cuda" route with this block's options), inference and training
+        return super()._forward_cuda(single, cond, pair, mask, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)
 
 
 class VariantAtomCuda:

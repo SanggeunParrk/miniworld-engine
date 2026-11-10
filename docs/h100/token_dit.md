@@ -4,12 +4,39 @@ Scope: `TokenDiTProtenix` (AF3 Alg. 23: AdaLN + `AugmentedAttentionPairBias` + c
 `TokenDiT(model=...)` for `af3`, `openfold3`, `openfold3_preview2`, `protenix`, `protenix_v2`, `opendde`, `intellifold2`, `esmfold2`) and
 `TokenDiTMiniWorld` (the same block with the per-head q / k RMSNorm, `miniworld`). Backends: `"pytorch"` (the reference), `"triton"`
 (the block's own statements with only the attention core on the Triton pair-bias kernel), `"cuda"` (the fused H100 blocks below) and,
-for `TokenDiTProtenix` only, `"anthropic"` (the release's attention core, eval only). The bias-only block is in
-[bias_only_dit.md](bias_only_dit.md); the Boltz-2 / RoseTTAFold3 / Chai-1 blocks in [dit_variants.md](dit_variants.md). Requirement rows
+for `TokenDiTProtenix` only, `"anthropic"` (the release's attention core, eval only). `TokenDiTBoltz2`, `TokenDiTRoseTTAFold3` and
+`TokenDiTChai1` run the SAME `"cuda"` blocks with their model options ([Model options](#model-options-one-algorithm) below). The
+bias-only block (a different algorithm: no query / key) is in [bias_only_dit.md](bias_only_dit.md); the atom variants in
+[dit_variants.md](dit_variants.md). Requirement rows
 (`requirements_module.csv`): `token_single`, L 128-768, d_single 768 (1024 engine-own), 16 heads (12 / 24 engine-own), d_cond 384
 (ESMFold2: 768), d_pair 128 / 256 (Protenix-v2) / 512 (IntelliFold2), n = 2; dtypes `float32` and `master` (bf16 activations, fp32
 parameters, bf16 autocast); modes `eval` and `train`. How accuracy and speed are judged: [../measure.md](../measure.md); module and
 backend conventions: [../modules.md](../modules.md), [../kernels.md](../kernels.md).
+
+## Model options (one algorithm)
+
+Every token DiT class but the bias-only one is ONE implementation: the inference block (`kernels/integrations/token_dit.py` ->
+`conditioned_transition.cuda.token_inference`) and the training block (`kernels/integrations/token_dit_train.py`), the same row
+kernels, packs, pair-bias hoist and attention cores. A model's differences are options read off the block's own modules
+(`token_dit.options`), and its parameters are mapped onto the canonical leaves (`token_dit.leaves`; a part the model lacks is a cached
+constant leaf):
+
+| option | models | inference | training |
+|---|---|---|---|
+| parallel `a + dA(a) + dT(a)` | RoseTTAFold3, Chai-1 | `adaln_in_rows` writes both AdaLNs of the one LN(x); `resgate_out_rows` adds both updates | `adaln_a` writes xt (`OPT_PAR`), `res_adaln_b` skips the AdaLN of x1, `adaln_a_bwd` takes dxa and dxt into one LN backward |
+| identity AdaLN `(1 + W_s c) LN(a) + W_b c`, eps 0.1 / 1e-5 | Chai-1 | tables from the raw c (ln_cond leaf 1, scale bias leaf 1: the "+ 1"); rows without the sigmoid | `OPT_IDENT` rows; the cond gradient is dchat + dcg (no cond LN) |
+| no gating query | Chai-1 | gate columns +1e4 (sigmoid = 1); the q\|k(\|v) GEMM writes the other columns only | gate rows zero, gate bias +1e4 (its gradient is 0) |
+| up-gate transition `silu(W_a h) (W_b h) (W_u h)` | Boltz-2 | cuBLAS `[a \| b \| u]` + `swiglu_rows(up)` | `[W_a; W_b; W_u]`, `swiglu_bwd(up)` |
+| flat q / k LayerNorm with affine | RoseTTAFold3 | `qk_ln_rows` (logit scale folded into q's affine) | `qknorm` / `qknorm_bwd` mode 2 (`dwq dwk dbq dbk` partials) |
+| bias-free query | RoseTTAFold3 | zero to_query.bias leaf | the same |
+| per-head q / k RMSNorm | MiniWorld | `qknorm_rows` | `qknorm` mode 1 |
+| fp32 q / k / v^T rounded to TF32 (nearest) before the TF32 core | Boltz-2, RoseTTAFold3, Chai-1 | `rna_rows` (fused into `qk_ln_rows` for RF3) | -- |
+| per-sample conditioning | all | `[A L, *]` tables | `[A L, *]` rows |
+| fp32 (TF32) / bf16 / master, eval / train | all | | |
+
+The default options are Protenix's (bit-identical to the pre-unification block). The options other than the defaults are H100 kernels;
+on B200 the block serves the defaults only. The training block packs a model with options through its torch pack and finishes the weight
+gradients in torch (the fused `train_pack90` / `train_final90` kernels map the canonical leaves of the default block).
 
 ## Kernels
 
@@ -22,6 +49,8 @@ Names from `requirements_kernel.csv`; the `cond_transition_*` rows belong to the
 | `cond_transition_token_cond_rows_sm90` | forward_infer | conditioning LayerNorm and its GEMM-dtype copy, one warp-per-row pass |
 | `cond_transition_token_adaln_in_rows_sm90` | forward_infer | copies the step input into the fp32 residual and writes `AdaLN(x)`, one pass |
 | `cond_transition_token_qknorm_rows_sm90` | forward_infer | per-head q / k RMSNorm in place on the q / k columns of the q\|k\|v\|g GEMM output |
+| `cond_transition_token_qk_ln_rows_sm90` | forward_infer | RoseTTAFold3's flat q / k LayerNorm with affine in place (optionally rounded to TF32) |
+| `cond_transition_token_rna_rows_sm90` | forward_infer | fp32 rows rounded to TF32 to nearest in place (q \| k, v^T) before the TF32 core, which truncates |
 | `cond_transition_token_resgate_adaln_rows_sm90` | forward_infer | `x += sigmoid(gate) y` (fp32) then the transition's AdaLN; optional RNA rounding to TF32 |
 | `cond_transition_token_swiglu_rows_sm90` | forward | `silu(a) b` where the fused expand GEMM is not used |
 | `cond_transition_token_resgate_out_rows_sm90` | forward_infer | the last residual, written in the output dtype |

@@ -137,8 +137,29 @@ def _pair_bias_wide(z2d, wf, mask, L):
     return bias
 
 
-def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=None):
+#: The token DiT's model options (``variant`` of :func:`token_inference`; the defaults are AF3 Alg. 23 / Protenix):
+#:   parallel  out = a + dA(a) + dT(a) (RoseTTAFold3, Chai-1) instead of a' = a + dA(a), out = a' + dT(a')
+#:   sig       the sigmoid AdaLN (else Chai-1's identity AdaLN (1 + W_s c) LN(a) + W_b c of the raw conditioning)
+#:   eps       the epsilon of the AdaLNs' LayerNorm of a (Chai-1's release: 0.1)
+#:   gated     the gating query sigmoid(W_g a) (Chai-1: none -- the core's gate columns are +1e4, sigmoid = 1)
+#:   up        the up-gate transition silu(W_a h) (W_b h) (W_u h) (Boltz-2; else SwiGLU)
+#:   kq_ln     the affine LayerNorm of the flat q / k over all heads (RoseTTAFold3; ``qk`` is the per-head RMSNorm, MiniWorld)
+#:   kq_eps    its epsilon
+#:   qk_rna    fp32: q and k rounded to TF32 to nearest before the TF32 core, which truncates its operands (Boltz-2, RoseTTAFold3, Chai-1:
+#:             the identity AdaLN's unbounded scale makes the truncation bias visible; one fused pass, or none where a q / k norm runs)
+#: A bias-free query (RoseTTAFold3) is a zero to_query.bias leaf, the identity AdaLN a ones ln_cond / to_scale.bias leaf, no gating
+#: query a zero to_gate leaf: the caller's leaf list (``kernels/integrations/token_dit.leaves``).
+VARIANT_DEFAULT = (0.0, 1.0, 1e-5, 1.0, 0.0, 0.0, 1e-5, 0.0)
+_STATIC_PACKS: dict = {}   # the weight packs of the blocks with model options (``token_inference``)
+_NO_GATE = 1.0e4   # gate logits of a block without a gating query: sigmoid(1e4) == 1.0 in fp32
+
+
+def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=None, variant=None):
     """Hopper port of the B200 token block's fusion and saved-buffer boundaries.
+
+    ``variant``: the model options (:data:`VARIANT_DEFAULT`'s order), None for the defaults. ``weights``: the canonical leaves
+    (``kernels/integrations/token_dit.WEIGHTS``, + ``QK_WEIGHTS`` with ``qk`` or ``kq_ln``), then ``transition.up.weight`` (``up``),
+    then the flat q / k LayerNorm's weight / bias of q and k (``kq_ln``).
 
     Live CUDA weight packing, fused pair normalization/bias, gated TMA/WGMMA
     attention, fused residual/AdaLN rows and WGMMA SwiGLU. All other products
@@ -175,20 +196,40 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         raise ValueError("Hopper token extra pair bias requires an [L, L] bias")
     qs = math.log2(math.e) / math.sqrt(D // heads)
     fp32 = single.dtype is torch.float32
-    asynchronous = _CANDIDATE_INFER_ASYNC
+    v = VARIANT_DEFAULT if variant is None else tuple(variant)
+    parallel, sig, ada_eps, gated, up, kq_ln, kq_eps = bool(v[0]), bool(v[1]), float(v[2]), bool(v[3]), bool(v[4]), bool(v[5]), float(v[6])
+    qk_rna = fp32 and bool(v[7])
+    plain = v == VARIANT_DEFAULT
+    pack_qk = qk or kq_ln            # the pack leaves q unscaled when a norm of q follows (the norm's weight carries the scale)
+    nbase = 25 if pack_qk else 23
+    base, tail = weights[:nbase], weights[nbase:]
+    asynchronous = _CANDIDATE_INFER_ASYNC if plain else 0
     key = (
         asynchronous,
         qk,
         heads,
         single.dtype,
+        v,
         *((w.data_ptr(), w._version) for w in weights),
     )
+
+    def variant_pack():
+        """The pieces the canonical pack has no slot for: [W_a; W_b; W_u] in the GEMM dtype (up-gate), the flat q / k LayerNorm affine
+        in fp32 with the logit scale folded into q's (kq_ln)."""
+        out = {}
+        dt = torch.float32 if fp32 else torch.bfloat16
+        if up:
+            out["wab3"] = torch.cat([base[20], base[21], tail[0]]).to(dt).contiguous()
+        if kq_ln:
+            wq, bq, wk, bk = (t.float() for t in tail[-4:])
+            out["kq"] = ((wq * qs).contiguous(), (bq * qs).contiguous(), wk.contiguous(), bk.contiguous())
+        return out
 
     def prepare():
         if not asynchronous:
             return (
-                token_pack(weights, heads, qk, qs, single.dtype),
-                weights,
+                token_pack(base, heads, pack_qk, qs, single.dtype),
+                (weights, None if plain else variant_pack()),
                 None,
                 None,
                 None,
@@ -208,7 +249,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
             _ext().token_stage90(weights, out, heads, qk, qs, fp32, 0, 5)
             return (
                 out,
-                weights,
+                (weights, None),
                 None,
                 torch.cuda.Event(),
                 {"stream": stream, "pending": True},
@@ -221,11 +262,27 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
             _ext().token_stage90(weights, out, heads, qk, qs, fp32, 5, 13)
             matrix_ready.record(stream)
         _ext().token_stage90(weights, out, heads, qk, qs, fp32, 4, 5)
-        return out, weights, cond_ready, matrix_ready, None
+        return out, (weights, None), cond_ready, matrix_ready, None
 
-    packed, _, cond_ready, matrix_ready, late_pack = _capture.lookup(
-        _TOKEN_PACKS, key, prepare, limit=_capture.BLOCK_CACHE_LIMIT
-    )
+    if plain:
+        packed, (_, vpack), cond_ready, matrix_ready, late_pack = _capture.lookup(
+            _TOKEN_PACKS, key, prepare, limit=_capture.BLOCK_CACHE_LIMIT
+        )
+    else:
+        # a block with model options keeps its weight pack across CUDA-graph captures and replays (per weight pointer / version, as the
+        # variants' inference packs always did: the blocks are inference only here, so their weights do not change under a graph; a
+        # first call inside a capture records the pack, an in-place weight change after a capture needs a new capture)
+        hit = _STATIC_PACKS.get(key)
+        if hit is None:
+            if len(_STATIC_PACKS) >= _capture.BLOCK_CACHE_LIMIT:
+                _STATIC_PACKS.pop(next(iter(_STATIC_PACKS)))
+            hit = prepare()
+            if not gated and not fp32:
+                # bf16, no gating query: the gate rows of the q|k|v|g pack are zero, their bias +1e4 (sigmoid = 1): the one GEMM writes
+                # the gate columns (no fill per call)
+                hit[0][6][3 * D:] = _NO_GATE
+            _STATIC_PACKS[key] = hit
+        packed, (_, vpack), cond_ready, matrix_ready, late_pack = hit
     w1, b1, w2, b2, wf, wqkvg, bqkvg, wo, wab_fp32, ws, nq, nk, wab = packed
     # B trunk_seeds of one input share the key mask (the caller passes it expanded over B, stride 0): its first row serves them all
     mask = None if mask is None else mask.reshape(-1, L)[0]
@@ -315,60 +372,89 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         late_pack["pending"] = False
     if cond_ready is not None:
         torch.cuda.current_stream(single.device).wait_event(cond_ready)
-    g1 = torch.addmm(b1, cn, w1.t()).view(P, 4, D)
+    # the AdaLN tables: the sigmoid form reads LN(c) (its cond-LN weight folded into w1), the identity form the raw c (its + 1 in b1)
+    g1 = torch.addmm(b1, cn if sig else cc, w1.t()).view(P, 4, D)
     g2 = torch.addmm(b2, cc, w2.t()).view(P, 2, D)
     M = A * B * L
     x = single.new_empty((M, D), dtype=torch.float32)
     xa = single.new_empty((M, D))
-    adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, 1e-5)
+    # the fused kernel loses to cuBLAS + the SwiGLU rows below ~768 rows (its 128 x 256 tiles leave SMs idle): measured per cell
+    fused_expand = fp32 and _FP32_SWIGLU_GEMM and not up and M >= 768 and _swiglu_gemm_ok(xa, wab_fp32)
+    if parallel:
+        # both parts read the block input: the transition's AdaLN comes out of the same LN pass (TF32-rounded for the fused expand)
+        xt = torch.empty_like(xa)
+        adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, ada_eps, sig, second=(g1[:, 2], g1[:, 3], xt),
+                      rnd2=fused_expand)
+    else:
+        xt = xa
+        adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, ada_eps, sig)
     if matrix_ready is not None:
         torch.cuda.current_stream(single.device).wait_event(matrix_ready)
-    qkvg = (
-        torch.addmm(bqkvg[: 3 * D], xa, wqkvg[: 3 * D].t())
-        if fp32
-        else torch.addmm(bqkvg, xa, wqkvg.t())
-    )
+    if gated or not fp32:   # bf16 without a gating query: the pack's gate bias is +1e4 (above)
+        qkvg = (
+            torch.addmm(bqkvg[: 3 * D], xa, wqkvg[: 3 * D].t())
+            if fp32
+            else torch.addmm(bqkvg, xa, wqkvg.t())
+        )
+    else:
+        # fp32, no gating query: the core's gate columns hold +1e4 (sigmoid = 1); the TF32 GEMM writes the q | k columns only
+        qkvg = single.new_empty((M, 3 * D))
+        qkvg[:, 2 * D:].fill_(_NO_GATE)
+        torch.addmm(bqkvg[: 2 * D], xa, wqkvg[: 2 * D].t(), out=qkvg[:, : 2 * D])
     if qk:
         qknorm_rows(qkvg, nq, nk, eq, ek, D)
+    elif kq_ln:
+        qk_ln_rows(qkvg, *vpack["kq"], kq_eps, D, rnd=qk_rna)   # q / k rounded on the way (qk_rna)
+    elif qk_rna:
+        rna_rows(qkvg, 2 * D)
     if fp32:
         vt = torch.mm(wqkvg[3 * D :], xa.t())
+        if qk_rna:
+            rna_rows(vt, M)   # v^T rounded as q / k (the core truncates)
         attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D, heads, D // heads)
     else:
         attention.gated_inference(qkvg, bias, 0, A * B, heads, D // heads, B)
-    y = torch.mm(qkvg[:, :D], wo.t())
-    # the fused kernel loses to cuBLAS + the SwiGLU rows below ~768 rows (its 128 x 256 tiles leave SMs idle): measured per cell
-    fused_expand = fp32 and _FP32_SWIGLU_GEMM and M >= 768 and _swiglu_gemm_ok(xa, wab_fp32)
-    resgate_adaln_rows(x, y, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, 1e-5, tf32_round=fused_expand)
+    ya = torch.mm(qkvg[:, :D], wo.t())
+    if not parallel:
+        resgate_adaln_rows(x, ya, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, ada_eps, tf32_round=fused_expand, sig=sig)
     h = single.new_empty((M, ws.shape[1]))
-    if fused_expand:
-        # expand + SwiGLU as one TF32 wgmma GEMM: xa is TF32-rounded by its row kernel and the weights once per pack, so the
+    if up:
+        ab = torch.mm(xt, vpack["wab3"].t())   # [M, 3 n D] a | b | u
+        swiglu_rows(ab, h, up=True)
+    elif fused_expand:
+        # expand + SwiGLU as one TF32 wgmma GEMM: xt is TF32-rounded by its row kernel and the weights once per pack, so the
         # TMA-fed (truncating) operands carry cuBLAS's rounding; [a | b] never reaches HBM
         op = _token_swiglu(single.device.index)
         ht = _swiglu_ht(M, ws.shape[1], op.nsm)
-        op.ext.gemm_swiglu(xa, _tf32_wab(wab_fp32, ht), h, op.nsm, ht)
+        op.ext.gemm_swiglu(xt, _tf32_wab(wab_fp32, ht), h, op.nsm, ht)
     elif fp32:
-        ab = torch.mm(xa, wab_fp32.t())
+        ab = torch.mm(xt, wab_fp32.t())
         swiglu_rows(ab, h)
     else:
         op = _token_swiglu(single.device.index)
-        op.ext.gemm_swiglu(xa, wab, h, op.nsm)
+        op.ext.gemm_swiglu(xt, wab, h, op.nsm)
     y = torch.mm(h, ws.t())
     out = torch.empty_like(xa)
-    resgate_out_rows(x, y, g2[:, 1], out, P)
+    if parallel:
+        resgate_out_rows(x, ya, g2[:, 0], out, P, y2=y, gl2=g2[:, 1])
+    else:
+        resgate_out_rows(x, y, g2[:, 1], out, P)
     return out.view(A, B, L, D)
 
 
-def adaln_rows(x, ms, mb, out, L, eps=1e-5):
-    """out = LN(x) * sigmoid(ms[row % L]) + mb[row % L]; x fp32 [M, D] (D 768 or 1024), ms / mb per-token tables."""
-    _ext().adaln_rows_cuda(x, ms, mb, out, int(L), float(eps))
+def adaln_rows(x, ms, mb, out, L, eps=1e-5, sig=True):
+    """out = LN(x) * f(ms[row % L]) + mb[row % L]; x fp32 [M, D] (D 768 or 1024), ms / mb per-token tables; f = sigmoid (``sig``) or
+    the identity (Chai-1's identity AdaLN, its + 1 in the table)."""
+    _ext().adaln_rows_cuda(x, ms, mb, out, int(L), float(eps), bool(sig))
 
 
-def resgate_adaln_rows(x, y, gl, ms, mb, out, L, eps=1e-5, tf32_round=False):
-    """x += sigmoid(gl[row % L]) * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block."""
+def resgate_adaln_rows(x, y, gl, ms, mb, out, L, eps=1e-5, tf32_round=False, sig=True):
+    """x += sigmoid(gl[row % L]) * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block (f as in
+    ``adaln_rows``)."""
     if tf32_round:
-        _ext().resgate_adaln_rows_r_cuda(x, y, gl, ms, mb, out, int(L), float(eps))
+        _ext().resgate_adaln_rows_r_cuda(x, y, gl, ms, mb, out, int(L), float(eps), bool(sig))
     else:
-        _ext().resgate_adaln_rows_cuda(x, y, gl, ms, mb, out, int(L), float(eps))
+        _ext().resgate_adaln_rows_cuda(x, y, gl, ms, mb, out, int(L), float(eps), bool(sig))
 
 
 def gate_rows(o, g, out):
@@ -376,20 +462,35 @@ def gate_rows(o, g, out):
     _ext().gate_rows_cuda(o, g, out)
 
 
-def swiglu_rows(ab, out):
-    """out = silu(a) * b for ab = [a | b]."""
-    _ext().swiglu_rows_cuda(ab, out)
+def swiglu_rows(ab, out, up=False):
+    """out = silu(a) * b for ab = [a | b]; ``up``: out = silu(a) * b * u for ab = [a | b | u] (Boltz-2's up-gate transition)."""
+    _ext().swiglu_rows_cuda(ab, out, bool(up))
 
 
-def adaln_in_rows(xin, x, ms, mb, out, L, eps=1e-5):
-    """x = xin (the step's input rows, fp32 or bf16, into the fp32 residual [M, 768]) and out = LN(x) * sigmoid(ms) + mb,
-    one pass (adaln_rows after a copy, without the copy)."""
-    _ext().adaln_in_rows_cuda(xin, x, ms, mb, out, int(L), float(eps))
+def adaln_in_rows(xin, x, ms, mb, out, L, eps=1e-5, sig=True, second=None, rnd2=False):
+    """x = xin (the step's input rows, fp32 or bf16, into the fp32 residual [M, 768]) and out = LN(x) * f(ms) + mb, one pass
+    (adaln_rows after a copy, without the copy). ``second`` = (ms2, mb2, out2): a second AdaLN of the same LN(x) in the same pass (the
+    parallel block's transition input); ``rnd2``: out2 rounded to TF32."""
+    ms2, mb2, out2 = second if second is not None else (None, None, None)
+    _ext().adaln_in_rows_cuda(xin, x, ms, mb, out, int(L), float(eps), bool(sig), ms2, mb2, out2, bool(rnd2))
 
 
-def resgate_out_rows(x, y, gl, out, L):
-    """out = x + sigmoid(gl[row % L]) * y in out's dtype: the block's last residual, straight into the step's output."""
-    _ext().resgate_out_rows_cuda(x, y, gl, out, int(L))
+def resgate_out_rows(x, y, gl, out, L, y2=None, gl2=None):
+    """out = x + sigmoid(gl[row % L]) * y [+ sigmoid(gl2[row % L]) * y2] in out's dtype: the block's last residual, straight into the
+    step's output (``y2``: the parallel block's second update)."""
+    _ext().resgate_out_rows_cuda(x, y, gl, out, int(L), y2, gl2)
+
+
+def qk_ln_rows(qk, wq, bq, wk, bk, eps, d=768, rnd=False):
+    """The flat q / k LayerNorm with affine in place: q = qk[:, 0:d] <- LN(q) wq + bq, k = qk[:, d:2d] <- LN(k) wk + bk (fp32 [d] affine,
+    any logit scale folded into q's): RoseTTAFold3's kq-norm. ``rnd``: the results rounded to TF32 (fp32 rows)."""
+    _ext().qk_ln_rows_cuda(qk, wq, bq, wk, bk, float(eps), int(d), bool(rnd))
+
+
+def rna_rows(t, cols):
+    """The first ``cols`` columns of every fp32 row of ``t`` rounded to TF32 to nearest in place (q | k of the qkvg rows, v^T whole): the
+    operands of the TF32 attention core, which truncates."""
+    _ext().rna_rows_cuda(t, int(cols))
 
 
 def layernorm_rows(z, out, eps=1e-5):
@@ -471,6 +572,8 @@ __all__ = [
     "key_perm",
     "layernorm_rows",
     "pair_bias_all",
+    "qk_ln_rows",
+    "rna_rows",
     "qknorm_rows",
     "resgate_adaln_rows",
     "resgate_out_rows",

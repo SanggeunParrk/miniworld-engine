@@ -623,9 +623,10 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
     #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
-    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 3}
+    #: 4 (2026-11-10): H100 on the one token DiT algorithm (TokenDiTProtenix's cuda route with this block's options), eval and train
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 4}
 
-    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
+    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": H100 the one token DiT algorithm (its options), A100 VariantTokenCuda
 
     transition_part = UpGatedConditionedTransition
 
@@ -690,9 +691,10 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
     #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
-    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 3}
+    #: 4 (2026-11-10): H100 on the one token DiT algorithm (TokenDiTProtenix's cuda route with this block's options), eval and train
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 4}
 
-    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
+    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": H100 the one token DiT algorithm (its options), A100 VariantTokenCuda
 
     parallel = True
     attention_part = FlatQKNormAugmentedAttention
@@ -726,9 +728,10 @@ class TokenDiTChai1(VariantTokenCuda, TokenDiTProtenix):
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
     #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
-    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 3}
+    #: 4 (2026-11-10): H100 on the one token DiT algorithm (TokenDiTProtenix's cuda route with this block's options), eval and train
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 4}
 
-    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
+    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": H100 the one token DiT algorithm (its options), A100 VariantTokenCuda
 
     parallel = True
     attention_part = UngatedAugmentedAttention
