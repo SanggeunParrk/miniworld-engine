@@ -50,7 +50,9 @@ class Transition(BackendModule, MasterWeights):
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:h100_sm90": 4, "cuda:a100_sm80": 2}   # 2026-11-10: kits; H100 d384 cuBLAS; fp32 eval f32io; fp32 fused fwd d256 / d512 + train; A100 capture forms + fp32 (TF32) build
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:h100_sm90": 4, "cuda:a100_sm80": 3, "triton:a100_sm80": 2}
+    # 2026-11-10: kits; H100 d384 cuBLAS; fp32 eval f32io; fp32 fused fwd d256 / d512 + train; A100 capture forms + fp32 (TF32) build.
+    # 2026-11-11 (A100): cuda 3 = the fused D 64 / 128 builds again + the fused fp32 eval forward; triton 2 = TF32-tuned fp32 d768 keys
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
