@@ -1,4 +1,4 @@
-// tw_gemm_sm80.cuh -- the tile GEMM of the wide-width A100 (sm_80) Transition kernels: C[BM x BN] += A[BM x K] B^T, bf16 -> fp32, mma.sync.m16n8k16.
+// tw_gemm_sm80.cuh -- the tile GEMM of the wide-width A100 (sm_80) Transition kernels: C[BM x BN] += A[BM x K] B^T, bf16 -> fp32, mma.sync.m16n8k16 (F16Of<...> configs: fp16 operands, the fp32 Transition).
 //
 //   * operands stream through a ST-stage cp.async ring (one __syncthreads per BK slice: the barrier publishes the landed slice AND frees
 //     the stage the next load overwrites), A and B tiles are XOR-swizzled so ldmatrix and the 16-byte stores are conflict-free;
@@ -28,6 +28,7 @@ template <int BM_, int BN_, int BK_, int WM_, int WN_, int ST_, bool BKN_ = fals
 struct GCfg {
   static constexpr int BM = BM_, BN = BN_, BK = BK_, WM = WM_, WN = WN_, ST = ST_;
   static constexpr bool BKN = BKN_;
+  static constexpr bool F16 = false;                       // operand type of the MMA: bf16 (F16Of<...>: fp16)
   static constexpr int NWARP = WM * WN, NTHR = 32 * NWARP;
   static constexpr int MINB = NTHR <= 128 ? 2 : 1;          // resident CTAs per SM the register budget is built for
   static constexpr int MT = BM / (16 * WM);                 // m16 tiles per warp
@@ -37,6 +38,12 @@ struct GCfg {
   static constexpr int A_STAGE = BM * BK * 2, B_STAGE = BN * BK * 2;
   static constexpr int SMEM = ST * (A_STAGE + B_STAGE);
   static_assert(BM % (16 * WM) == 0 && BN % (8 * WN) == 0 && NT % 2 == 0 && BK % 16 == 0, "warp tiling");
+};
+
+// a tile config whose operands are fp16 (the fp32 Transition: the same tiles, fp16 MMA)
+template <class C>
+struct F16Of : C {
+  static constexpr bool F16 = true;
 };
 
 // one cp.async copy of a 16-byte chunk; src_bytes 0 zero-fills (a row past the end: the pointer stays valid)
@@ -100,8 +107,8 @@ DEVI void gemm_mainloop(float (&acc)[C::MT][C::NT][4], uint32_t smem, int KT, co
       for (int mt = 0; mt < C::MT; ++mt)
 #pragma unroll
         for (int np = 0; np < C::NT / 2; ++np) {
-          mma16816(acc[mt][2 * np], fa[cb][mt], fb[cb][np][0], fb[cb][np][1]);
-          mma16816(acc[mt][2 * np + 1], fa[cb][mt], fb[cb][np][2], fb[cb][np][3]);
+          mma_op<C::F16>(acc[mt][2 * np], fa[cb][mt], fb[cb][np][0], fb[cb][np][1]);
+          mma_op<C::F16>(acc[mt][2 * np + 1], fa[cb][mt], fb[cb][np][2], fb[cb][np][3]);
         }
     }
     rd = rd + 1 == C::ST ? 0 : rd + 1;
@@ -177,8 +184,8 @@ DEVI void gemm_mainloop_lean(float (&acc)[C::MT][C::NT][4], uint32_t smem, int K
     for (int mt = 0; mt < C::MT; ++mt)
 #pragma unroll
       for (int np = 0; np < C::NT / 2; ++np) {
-        mma16816(acc[mt][2 * np], fa[buf][mt], fb[buf][np][0], fb[buf][np][1]);
-        mma16816(acc[mt][2 * np + 1], fa[buf][mt], fb[buf][np][2], fb[buf][np][3]);
+        mma_op<C::F16>(acc[mt][2 * np], fa[buf][mt], fb[buf][np][0], fb[buf][np][1]);
+        mma_op<C::F16>(acc[mt][2 * np + 1], fa[buf][mt], fb[buf][np][2], fb[buf][np][3]);
       }
   };
 #if TW_PIPE

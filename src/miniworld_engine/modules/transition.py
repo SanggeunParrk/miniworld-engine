@@ -50,7 +50,7 @@ class Transition(BackendModule, MasterWeights):
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:h100_sm90": 4, "cuda:a100_sm80": 2}   # 2026-11-10: kits; H100 d384 cuBLAS; fp32 eval f32io; fp32 fused fwd d256 / d512 + train
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:h100_sm90": 4, "cuda:a100_sm80": 2}   # 2026-11-10: kits; H100 d384 cuBLAS; fp32 eval f32io; fp32 fused fwd d256 / d512 + train; A100 capture forms + fp32 (TF32) build
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -311,18 +311,30 @@ class Transition(BackendModule, MasterWeights):
     def _supports_cuda_sm80(self, x: torch.Tensor) -> str | None:
         """A100: ``kernels/transition/cuda.transition_sm80`` (``fused_sm80`` at D 128 / n 4 with whole 256-row tiles and enough rows,
         ``fused_wide_sm80`` at D 64 / 128 / 256 / 384 / 512 / 768 with a hidden width a multiple of 64, any row count): bf16 activations,
-        bf16 or fp32-master parameters, forward and backward."""
+        bf16 or fp32-master parameters, forward and backward; fp32 activations where torch allows TF32 (``fused_wide_sm80.transition_f32_sm80``:
+        fp16 products at TF32's rounding, a TF32 backward)."""
         from miniworld_engine.kernels.transition.cuda import fused_wide_sm80
 
         why = self._supports_engine(x)
         if why is not None:
             return why
-        if x.dtype is not torch.bfloat16:
-            return f"dtype {x.dtype}: the sm_80 Transition kernels take bfloat16 activations (no fp32 / TF32 A100 build)"
+        if x.dtype not in (torch.bfloat16, torch.float32):
+            return f"dtype {x.dtype}: the sm_80 Transition kernels take bfloat16 (float32 on TF32) activations"
         matrices = (self.expand_a.weight, self.expand_b.weight, self.squeeze.weight)
         if any(p.dtype not in (torch.bfloat16, torch.float32) for p in matrices) or len({p.dtype for p in matrices}) != 1:
             return "the projections must share one dtype, bfloat16 or float32"
         wa, ws = self.expand_a.weight, self.squeeze.weight
+        if x.dtype is torch.float32:
+            from miniworld_engine.kernels.transition.cuda.fused_generic_sm90a import _tf32_allowed
+
+            if not _tf32_allowed():
+                return "float32 activations run on TF32 tensor cores only (torch does not allow TF32 here)"
+            if not fused_wide_sm80.f32_supported(x, wa, ws):
+                return (f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no sm_80 fp32 build takes it (D in {fused_wide_sm80.F32_WIDTHS}, hidden a "
+                        "multiple of 64)")
+            if not fused_wide_sm80.f32_available(x, wa, ws):
+                return "the sm_80 Transition extension failed to build"
+            return None
         if not fused_wide_sm80.supported(x, wa, ws):
             return (f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no sm_80 build takes it (D in {fused_wide_sm80.WIDTHS}, hidden a "
                     "multiple of 64)")

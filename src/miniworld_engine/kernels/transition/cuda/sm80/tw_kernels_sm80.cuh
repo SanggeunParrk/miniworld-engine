@@ -9,7 +9,13 @@
 //   ln_bwd_kernel      d_xn (fp32), x, (mean, rstd), gamma, dy -> dx = rstd (g - mean(g) - xhat mean(g xhat)) + dy, dgamma / dbeta partials per CTA
 //   ln_finalize_kernel the partials -> dgamma, dbeta in a fixed order
 // The squeeze GEMM (+ residual) and the weight / d_xn GEMMs are cuBLAS (transition_wide_sm80.cu).
+// The fp32 Transition (F16Of configs, F32IO row kernels): the same kernels on fp16 operands with device scales, gate_f16_kernel (dh and a | b in one CTA), the
+// fp16 forms (f32_forms_*), dy_absmax / dy_convert (the backward's dy in fp16) and split_res (the few-rows split-K squeeze's reduction).
 #pragma once
+#include <cuda_fp16.h>
+
+#include <type_traits>
+
 #include "tw_gemm_sm80.cuh"
 
 #ifndef TW_ROUND_SWIGLU
@@ -19,9 +25,12 @@
 namespace a100 {
 
 // ===================================================================================================================== LayerNorm forward
-template <int D>
-__global__ void __launch_bounds__(256) ln_fwd_kernel(const __nv_bfloat16* __restrict__ x, const float* __restrict__ gamma, const float* __restrict__ beta,
-                                                     __nv_bfloat16* __restrict__ xn, float2* __restrict__ stats, int M, float eps) {
+// F32IO (the fp32 Transition): x fp32, xn written as fp16 xn * sc[0] (the scale of the fp16 operand).
+template <int D, bool F32IO = false>
+__global__ void __launch_bounds__(256) ln_fwd_kernel(const void* __restrict__ x_, const float* __restrict__ gamma, const float* __restrict__ beta,
+                                                     __nv_bfloat16* __restrict__ xn, float2* __restrict__ stats, int M, float eps,
+                                                     const float* __restrict__ sc = nullptr) {
+  const float s_x = F32IO ? __ldg(sc) : 1.f;
   constexpr int CH = D / 8, LPR = CH < 32 ? CH : 32, RPW = 32 / LPR, XPL = (CH + LPR - 1) / LPR;
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, sub = lane / LPR, cl = lane % LPR;
   for (int base = (blockIdx.x * 8 + warp) * RPW; base < M; base += gridDim.x * 8 * RPW) {
@@ -32,11 +41,23 @@ __global__ void __launch_bounds__(256) ln_fwd_kernel(const __nv_bfloat16* __rest
 #pragma unroll
     for (int i = 0; i < XPL; ++i) {
       const int c = cl + i * LPR;
-      uint4 u = make_uint4(0u, 0u, 0u, 0u);
-      if (valid && c < CH) u = *reinterpret_cast<const uint4*>(x + (size_t)row * D + c * 8);
-      const uint32_t w[4] = {u.x, u.y, u.z, u.w};
+      if constexpr (F32IO) {
+        float4 f0 = make_float4(0.f, 0.f, 0.f, 0.f), f1 = f0;
+        if (valid && c < CH) {
+          const float* xr = reinterpret_cast<const float*>(x_) + (size_t)row * D + c * 8;
+          f0 = *reinterpret_cast<const float4*>(xr);
+          f1 = *reinterpret_cast<const float4*>(xr + 4);
+        }
+        const float f[8] = {f0.x, f0.y, f0.z, f0.w, f1.x, f1.y, f1.z, f1.w};
 #pragma unroll
-      for (int e = 0; e < 4; ++e) { v[i][2 * e] = bf16lo(w[e]); v[i][2 * e + 1] = bf16hi(w[e]); s += v[i][2 * e] + v[i][2 * e + 1]; }
+        for (int e = 0; e < 8; ++e) { v[i][e] = f[e]; s += f[e]; }
+      } else {
+        uint4 u = make_uint4(0u, 0u, 0u, 0u);
+        if (valid && c < CH) u = *reinterpret_cast<const uint4*>(reinterpret_cast<const __nv_bfloat16*>(x_) + (size_t)row * D + c * 8);
+        const uint32_t w[4] = {u.x, u.y, u.z, u.w};
+#pragma unroll
+        for (int e = 0; e < 4; ++e) { v[i][2 * e] = bf16lo(w[e]); v[i][2 * e + 1] = bf16hi(w[e]); s += v[i][2 * e] + v[i][2 * e + 1]; }
+      }
     }
 #pragma unroll
     for (int o = LPR / 2; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
@@ -60,9 +81,17 @@ __global__ void __launch_bounds__(256) ln_fwd_kernel(const __nv_bfloat16* __rest
         const float4 b0 = *reinterpret_cast<const float4*>(beta + c * 8), b1 = *reinterpret_cast<const float4*>(beta + c * 8 + 4);
         const float gg[8] = {g0.x, g0.y, g0.z, g0.w, g1.x, g1.y, g1.z, g1.w}, bb[8] = {b0.x, b0.y, b0.z, b0.w, b1.x, b1.y, b1.z, b1.w};
         uint32_t o[4];
+        if constexpr (F32IO) {
+          float y[8];
 #pragma unroll
-        for (int e = 0; e < 4; ++e)
-          o[e] = pack_bf16(fmaf(v[i][2 * e] * rstd, gg[2 * e], bb[2 * e]), fmaf(v[i][2 * e + 1] * rstd, gg[2 * e + 1], bb[2 * e + 1]));
+          for (int e = 0; e < 8; ++e) y[e] = fmaf(v[i][e] * rstd, gg[e], bb[e]);
+#pragma unroll
+          for (int e = 0; e < 4; ++e) o[e] = pack_f16(y[2 * e] * s_x, y[2 * e + 1] * s_x);
+        } else {
+#pragma unroll
+          for (int e = 0; e < 4; ++e)
+            o[e] = pack_bf16(fmaf(v[i][2 * e] * rstd, gg[2 * e], bb[2 * e]), fmaf(v[i][2 * e + 1] * rstd, gg[2 * e + 1], bb[2 * e + 1]));
+        }
         *reinterpret_cast<uint4*>(xn + (size_t)row * D + c * 8) = make_uint4(o[0], o[1], o[2], o[3]);
       }
     }
@@ -71,10 +100,18 @@ __global__ void __launch_bounds__(256) ln_fwd_kernel(const __nv_bfloat16* __rest
 
 // ===================================================================================================================== LayerNorm backward
 // One row per warp (lanes spread over the chunks) or several rows per warp for D <= 128; dgamma / dbeta are summed per lane over the rows the lane's warp visits, then per CTA.
-template <int D, bool RES = true>
-__global__ void __launch_bounds__(128) ln_bwd_kernel(const float* __restrict__ dxn, const __nv_bfloat16* __restrict__ x, const float2* __restrict__ stats,
-                                                     const float* __restrict__ gamma, const __nv_bfloat16* __restrict__ dy, __nv_bfloat16* __restrict__ dx,
-                                                     float* __restrict__ part, int M) {
+
+// F32IO (the fp32 Transition): x, dy and dx fp32.
+template <int D, bool RES = true, bool F32IO = false>
+__global__ void __launch_bounds__(128) ln_bwd_kernel(const float* __restrict__ dxn, const void* __restrict__ x_, const float2* __restrict__ stats,
+                                                     const float* __restrict__ gamma, const void* __restrict__ dy_, void* __restrict__ dx_,
+                                                     float* __restrict__ part, int M, const float* __restrict__ dscale = nullptr) {
+  // F32IO: dscale (if given) multiplies dxn (the fp16 d_xn GEMM's output scale)
+  const float ds = (F32IO && dscale != nullptr) ? __ldg(dscale) : 1.f;
+  using T = typename std::conditional<F32IO, float, __nv_bfloat16>::type;
+  const T* x = reinterpret_cast<const T*>(x_);
+  const T* dy = reinterpret_cast<const T*>(dy_);
+  T* dx = reinterpret_cast<T*>(dx_);
   constexpr int CH = D / 8, LPR = CH < 32 ? CH : 32, RPW = 32 / LPR, XPL = (CH + LPR - 1) / LPR;
   __shared__ float sred[4][2][D];
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, sub = lane / LPR, cl = lane % LPR;
@@ -93,22 +130,32 @@ __global__ void __launch_bounds__(128) ln_bwd_kernel(const float* __restrict__ d
     for (int i = 0; i < XPL; ++i) {
       const int c = cl + i * LPR;
       uint4 u = make_uint4(0u, 0u, 0u, 0u);
-      float4 d0 = make_float4(0.f, 0.f, 0.f, 0.f), d1 = d0, g0 = d0, g1 = d0;
+      float4 d0 = make_float4(0.f, 0.f, 0.f, 0.f), d1 = d0, g0 = d0, g1 = d0, x0 = d0, x1 = d0;
       if (valid && c < CH) {
-        u = *reinterpret_cast<const uint4*>(x + (size_t)row * D + c * 8);
+        if constexpr (F32IO) {
+          x0 = *reinterpret_cast<const float4*>(x + (size_t)row * D + c * 8);
+          x1 = *reinterpret_cast<const float4*>(x + (size_t)row * D + c * 8 + 4);
+        } else {
+          u = *reinterpret_cast<const uint4*>(x + (size_t)row * D + c * 8);
+        }
         d0 = *reinterpret_cast<const float4*>(dxn + (size_t)row * D + c * 8);
         d1 = *reinterpret_cast<const float4*>(dxn + (size_t)row * D + c * 8 + 4);
+        if constexpr (F32IO) {
+          d0.x *= ds; d0.y *= ds; d0.z *= ds; d0.w *= ds; d1.x *= ds; d1.y *= ds; d1.z *= ds; d1.w *= ds;
+        }
         g0 = *reinterpret_cast<const float4*>(gamma + c * 8);
         g1 = *reinterpret_cast<const float4*>(gamma + c * 8 + 4);
       }
       const uint32_t w[4] = {u.x, u.y, u.z, u.w};
+
       const float dd[8] = {d0.x, d0.y, d0.z, d0.w, d1.x, d1.y, d1.z, d1.w}, gm[8] = {g0.x, g0.y, g0.z, g0.w, g1.x, g1.y, g1.z, g1.w};
+      const float xf[8] = {x0.x, x0.y, x0.z, x0.w, x1.x, x1.y, x1.z, x1.w};
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
 #pragma unroll
         for (int k = 0; k < 2; ++k) {
           const int j = 2 * e + k;
-          const float xv = k ? bf16hi(w[e]) : bf16lo(w[e]);
+          const float xv = F32IO ? xf[j] : (k ? bf16hi(w[e]) : bf16lo(w[e]));
           xh[i][j] = (xv - st.x) * st.y;
           dn[i][j] = dd[j];
           g[i][j] = gm[j] * dd[j];
@@ -125,7 +172,20 @@ __global__ void __launch_bounds__(128) ln_bwd_kernel(const float* __restrict__ d
 #pragma unroll
     for (int i = 0; i < XPL; ++i) {
       const int c = cl + i * LPR;
-      if (valid && c < CH) {
+      if constexpr (F32IO) {
+        if (valid && c < CH) {
+          float yv[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+          if (RES) {
+            const float4 y0 = *reinterpret_cast<const float4*>(dy + (size_t)row * D + c * 8), y1 = *reinterpret_cast<const float4*>(dy + (size_t)row * D + c * 8 + 4);
+            yv[0] = y0.x; yv[1] = y0.y; yv[2] = y0.z; yv[3] = y0.w; yv[4] = y1.x; yv[5] = y1.y; yv[6] = y1.z; yv[7] = y1.w;
+          }
+          float o[8];
+#pragma unroll
+          for (int e = 0; e < 8; ++e) o[e] = fmaf(g[i][e] - fmaf(xh[i][e], c1, c2), st.y, yv[e]);
+          *reinterpret_cast<float4*>(dx + (size_t)row * D + c * 8) = make_float4(o[0], o[1], o[2], o[3]);
+          *reinterpret_cast<float4*>(dx + (size_t)row * D + c * 8 + 4) = make_float4(o[4], o[5], o[6], o[7]);
+        }
+      } else if (valid && c < CH) {
         const uint4 y = RES ? *reinterpret_cast<const uint4*>(dy + (size_t)row * D + c * 8) : make_uint4(0u, 0u, 0u, 0u);   // RES: dx carries the residual branch dy
         const uint32_t yw[4] = {y.x, y.y, y.z, y.w};
         uint32_t o[4];
@@ -174,8 +234,30 @@ template <> DEVI void put<__nv_bfloat16>(__nv_bfloat16& o, float v) { o = __floa
 
 // dgamma | dbeta [2][D] = the sums over the nblk partials of ln_bwd_kernel
 // 32 columns per CTA, the partials split over 8 warps (warp g sums b = g, g + 8, ... in order; the 8 sums are added in warp order: a fixed order, no atomics)
+// The fp32 Transition also hands it the weight gradients' scaling (scale2_rows, blocks from fin_blocks on): one launch for both.
+struct Scale2 {
+  float4* a = nullptr; long long na4 = 0; const float* sa = nullptr;
+  float4* b = nullptr; long long nb4 = 0; const float* sb = nullptr;
+  int fin_blocks = 0;   // 0: no scaling blocks
+};
+DEVI void scale2_rows(const Scale2& s, long long i0, long long step) {
+  const float x = __ldg(s.sa), y = __ldg(s.sb);
+  for (long long i = i0; i < s.na4 + s.nb4; i += step) {
+    const bool first = i < s.na4;
+    float4* p = first ? s.a + i : s.b + (i - s.na4);
+    const float f = first ? x : y;
+    float4 v = *p;
+    v.x *= f; v.y *= f; v.z *= f; v.w *= f;
+    *p = v;
+  }
+}
 template <class TA>
-__global__ void __launch_bounds__(256) ln_finalize_kernel(const float* __restrict__ part, int nblk, int D, TA* __restrict__ dgamma, TA* __restrict__ dbeta) {
+__global__ void __launch_bounds__(256) ln_finalize_kernel(const float* __restrict__ part, int nblk, int D, TA* __restrict__ dgamma, TA* __restrict__ dbeta,
+                                                          const Scale2 sj = Scale2()) {
+  if (sj.fin_blocks > 0 && (int)blockIdx.x >= sj.fin_blocks) {
+    scale2_rows(sj, (long long)(blockIdx.x - sj.fin_blocks) * blockDim.x + threadIdx.x, (long long)(gridDim.x - sj.fin_blocks) * blockDim.x);
+    return;
+  }
   __shared__ float red[8][33];
   const int c = threadIdx.x & 31, g = threadIdx.x >> 5, k = blockIdx.x * 32 + c;
   float s = 0.f;
@@ -215,6 +297,10 @@ struct DualParams {
   __nv_bfloat16* dab;          // gate backward: [M][2H] out (dA | dB)
   __nv_bfloat16* ab;           // forward (training): [M][2H] out (a | b, rounded to bf16) or nullptr; gate_dh: [M][2H] in
   const __nv_bfloat16* wsT;    // gate_dh: Ws^T [H][K] (K = D)
+  // the fp32 Transition (fp16 operands in the 16-bit slots above: a = fp16 xn * sc[0], wa / wb = fp16 W / s_w): sc = [1 / s_x, s_x s_w, 1 / s_h, s_h s_ws]
+  const float* sc;             // the forward / gate_f16: [8] (f32_forms_apply_kernel)
+  const __nv_bfloat16* a2;     // gate_f16: dy16 [M][K] (fp16 dy / s_dy); wsT: Ws16^T [H][K]
+  const float* bs;             // gate_f16: the backward scales [8] (dy_convert_kernel)
   int M, K, H;
 };
 
@@ -274,8 +360,10 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) dual_swiglu_kernel(const Dua
   dual_mainloop<C>(acc, smem, p, m0, hn0, fr, tid);
 
   // SwiGLU: a = acc[mt][j], b = acc[mt][NT / 2 + j]; h = rn(silu(a) b) staged as [BM][HN] bf16 (swizzled); p.ab != nullptr (training): a and b are staged too ([h | a | b])
-  const bool save_ab = p.ab != nullptr;
+  // C::F16 (the fp32 Transition): a = acc s_x s_w, b likewise, h = silu(a) b in full fp32 precision, staged as fp16 h / s_h
+  const bool save_ab = !C::F16 && p.ab != nullptr;
   const uint32_t sa_ = smem + C::OUT_TILE, sb_ = smem + 2 * C::OUT_TILE;
+  const float s_ab = C::F16 ? __ldg(p.sc + 1) : 1.f, s_h = C::F16 ? __ldg(p.sc + 2) : 1.f;
 #pragma unroll
   for (int mt = 0; mt < C::MT; ++mt)
 #pragma unroll
@@ -292,6 +380,12 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) dual_swiglu_kernel(const Dua
 #pragma unroll
         for (int k = 0; k < 2; ++k) {
           float av = acc[mt][j][2 * hh + k], bv = acc[mt][C::NT / 2 + j][2 * hh + k];
+          if constexpr (C::F16) {
+            static_assert(EPI == 0, "the fp32 forward is the SwiGLU");
+            av *= s_ab; bv *= s_ab;
+            hv[k] = av * sigmoid_f32(av) * bv * s_h;
+            continue;
+          }
           if constexpr (TW_ROUND_SWIGLU && EPI == 0) {
             if (p.K == 256) { av = round_bf16f(av); bv = round_bf16f(bv); }
           }
@@ -301,7 +395,7 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) dual_swiglu_kernel(const Dua
           }
         }
         const uint32_t row = (uint32_t)(wm * C::MT * 16 + 16 * mt + 8 * hh + g8), chunk = (uint32_t)(wn * (C::HPW / 8) + j);
-        sts32(smem + swz_off<C::CPH>(row, chunk) + 4 * q, pack_bf16(hv[0], hv[1]));
+        sts32(smem + swz_off<C::CPH>(row, chunk) + 4 * q, C::F16 ? pack_f16(hv[0], hv[1]) : pack_bf16(hv[0], hv[1]));
       }
   __syncthreads();
 #pragma unroll
@@ -486,6 +580,74 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) gate_dh_kernel(const DualPar
   }
 }
 
+// ===================================================================================================================== gate backward, fp16 (the fp32 Transition, many rows)
+// Two fp16 GEMMs per [BM x HN] tile, one after the other on the same shared-memory ring: dh = dy16 Ws16 (A = dy16 [M][D], B = Ws16^T [H][D]; dh = acc s_dy s_ws) and
+// a | b = xn16 [Wa16; Wb16]^T (the forward's dual GEMM, a = acc s_x s_w). The SwiGLU backward in fp32, the outputs fp16 for the fp16 cuBLAS weight / d_xn GEMMs:
+//   h16 = fp16(silu(a) b / s_h)  [M][H],  dab16 = fp16([dA | dB] / s_dab)  [M][2H]
+template <class C>
+__global__ void __launch_bounds__(C::NTHR, C::MINB) gate_f16_kernel(const DualParams p) {
+  static_assert(C::F16, "gate_f16: fp16 operands");
+  using Dh = F16Of<GCfg<C::BM, C::HPW * C::WN, C::BK, C::WM, C::WN, C::ST, false>>;
+  static_assert(Dh::MT == C::MT && 2 * Dh::NT == C::NT, "the dh tile is the a (or b) half of the dual tile");
+  extern __shared__ __align__(128) uint8_t smem_raw[];
+  const uint32_t smem = smem_u32(smem_raw);
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g8 = lane >> 2, q = lane & 3;
+  const int wm = warp / C::WN, wn = warp % C::WN;
+  const int hn0 = blockIdx.x * C::HPW * C::WN, m0 = blockIdx.y * C::BM;
+  float dacc[Dh::MT][Dh::NT][4];
+  zero_acc<Dh>(dacc);
+  const int KT = p.K / C::BK;
+  if (m0 + C::BM <= p.M) {
+    using L = LeanCopies<Dh>;
+    const char* pa[L::NJA];
+    const char* pb[L::NJB];
+    const int ra = tid / Dh::CPA, ca = tid % Dh::CPA, rb = tid / Dh::CPB, cb = tid % Dh::CPB;
+#pragma unroll
+    for (int j = 0; j < L::NJA; ++j) pa[j] = reinterpret_cast<const char*>(p.a2 + (size_t)(m0 + ra + j * L::RPJA) * p.K) + ca * 16;
+#pragma unroll
+    for (int j = 0; j < L::NJB; ++j) pb[j] = reinterpret_cast<const char*>(p.wsT + (size_t)(hn0 + rb + j * L::RPJB) * p.K) + cb * 16;
+    gemm_mainloop_lean<Dh>(dacc, smem, KT, pa, pb, LeanFrag<Dh>(wm, wn, lane), tid);
+  } else {
+    auto load_a = [&](uint32_t stage, int kt) {
+      load_rows_k<Dh::BM, Dh::CPA, Dh::NTHR>(stage, kt * Dh::BK, [&](int r) { return m0 + r < p.M ? p.a2 + (size_t)(m0 + r) * p.K : nullptr; }, tid);
+    };
+    auto load_b = [&](uint32_t stage, int kt) {
+      load_rows_k<Dh::BN, Dh::CPB, Dh::NTHR>(stage, kt * Dh::BK, [&](int r) { return p.wsT + (size_t)(hn0 + r) * p.K; }, tid);
+    };
+    gemm_mainloop<Dh>(dacc, smem, KT, load_a, load_b, Frag<Dh>(wm, wn, lane));
+  }
+  Frag<C> fr(wm, wn, lane);
+  float acc[C::MT][C::NT][4];
+  zero_acc<C>(acc);
+  dual_mainloop<C>(acc, smem, p, m0, hn0, fr, tid);
+  const float s_ab = __ldg(p.sc + 1), s_h = __ldg(p.sc + 2), s_dh = __ldg(p.bs + 5), inv_dab = __ldg(p.bs + 4);
+  uint32_t* h16 = reinterpret_cast<uint32_t*>(p.h);
+  uint32_t* dab16 = reinterpret_cast<uint32_t*>(p.dab);
+#pragma unroll
+  for (int mt = 0; mt < C::MT; ++mt)
+#pragma unroll
+    for (int hh = 0; hh < 2; ++hh) {
+      const int row = m0 + wm * C::MT * 16 + 16 * mt + 8 * hh + g8;
+      if (row >= p.M) continue;
+#pragma unroll
+      for (int j = 0; j < C::NT / 2; ++j) {
+        const int col = hn0 + (wn * (C::HPW / 8) + j) * 8 + 2 * q;
+        float hv[2], dav[2], dbv[2];
+#pragma unroll
+        for (int k = 0; k < 2; ++k) {
+          const float av = acc[mt][j][2 * hh + k] * s_ab, bv = acc[mt][C::NT / 2 + j][2 * hh + k] * s_ab, d = dacc[mt][j][2 * hh + k] * s_dh;
+          const float sg = sigmoid_f32(av), silu = av * sg;
+          hv[k] = silu * bv * s_h;
+          dbv[k] = d * silu * inv_dab;
+          dav[k] = d * bv * fmaf(silu, 1.f - sg, sg) * inv_dab;
+        }
+        h16[((size_t)row * p.H + col) >> 1] = pack_f16(hv[0], hv[1]);
+        dab16[((size_t)row * 2 * p.H + col) >> 1] = pack_f16(dav[0], dav[1]);
+        dab16[((size_t)row * 2 * p.H + p.H + col) >> 1] = pack_f16(dbv[0], dbv[1]);
+      }
+    }
+}
+
 // ===================================================================================================================== GEMM + residual
 // out = rn(rn(A W^T) + res)  (the squeeze projection with the residual folded in; res == nullptr: out = rn(A W^T)).  A [M][K], W [N][K] (the weight of an nn.Linear), N % BN == 0.
 struct ResParams {
@@ -493,6 +655,11 @@ struct ResParams {
   const __nv_bfloat16* w;      // [N][K]
   const __nv_bfloat16* res;    // [M][N] or nullptr
   __nv_bfloat16* out;          // [M][N]
+  // the fp32 Transition (F16Of configs): a = fp16 h * sc[2], w = fp16 Ws / s_ws; out32 = acc sc[3] + res32 (fp32 [M][N])
+  const float* sc;
+  const float* res32;
+  float* out32;
+  int kt;                      // split K (F16Of configs, grid.z splits): K tiles per split, the fp32 partial of split z into out32 + z M N (no scale, no residual); 0: all
   int M, N, K;
 };
 
@@ -506,11 +673,13 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) gemm_res_kernel(const ResPar
   Frag<C> fr(wm, wn, lane);
   float acc[C::MT][C::NT][4];
   zero_acc<C>(acc);
+  const int KT = p.kt > 0 ? p.kt : p.K / C::BK;          // the K tiles of this CTA's split (blockIdx.z)
+  const size_t koff = (size_t)blockIdx.z * KT * C::BK;
   auto load_a = [&](uint32_t stage, int kt) {
-    load_rows_k<C::BM, C::CPA, C::NTHR>(stage, kt * C::BK, [&](int r) { return m0 + r < p.M ? p.a + (size_t)(m0 + r) * p.K : nullptr; }, tid);
+    load_rows_k<C::BM, C::CPA, C::NTHR>(stage, kt * C::BK, [&](int r) { return m0 + r < p.M ? p.a + (size_t)(m0 + r) * p.K + koff : nullptr; }, tid);
   };
   auto load_b = [&](uint32_t stage, int kt) {
-    load_rows_k<C::BN, C::CPB, C::NTHR>(stage, kt * C::BK, [&](int r) { return p.w + (size_t)(n0 + r) * p.K; }, tid);
+    load_rows_k<C::BN, C::CPB, C::NTHR>(stage, kt * C::BK, [&](int r) { return p.w + (size_t)(n0 + r) * p.K + koff; }, tid);
   };
   if (m0 + C::BM <= p.M) {                                  // a whole tile: the lean loop
     using L = LeanCopies<C>;
@@ -518,12 +687,33 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) gemm_res_kernel(const ResPar
     const char* pb[L::NJB];
     const int ra = tid / C::CPA, ca = tid % C::CPA, rb = tid / C::CPB, cb = tid % C::CPB;
 #pragma unroll
-    for (int j = 0; j < L::NJA; ++j) pa[j] = reinterpret_cast<const char*>(p.a + (size_t)(m0 + ra + j * L::RPJA) * p.K) + ca * 16;
+    for (int j = 0; j < L::NJA; ++j) pa[j] = reinterpret_cast<const char*>(p.a + (size_t)(m0 + ra + j * L::RPJA) * p.K + koff) + ca * 16;
 #pragma unroll
-    for (int j = 0; j < L::NJB; ++j) pb[j] = reinterpret_cast<const char*>(p.w + (size_t)(n0 + rb + j * L::RPJB) * p.K) + cb * 16;
-    gemm_mainloop_lean<C>(acc, smem, p.K / C::BK, pa, pb, LeanFrag<C>(wm, wn, lane), tid);
+    for (int j = 0; j < L::NJB; ++j) pb[j] = reinterpret_cast<const char*>(p.w + (size_t)(n0 + rb + j * L::RPJB) * p.K + koff) + cb * 16;
+    gemm_mainloop_lean<C>(acc, smem, KT, pa, pb, LeanFrag<C>(wm, wn, lane), tid);
   } else {
-    gemm_mainloop<C>(acc, smem, p.K / C::BK, load_a, load_b, fr);
+    gemm_mainloop<C>(acc, smem, KT, load_a, load_b, fr);
+  }
+  if constexpr (C::F16) {
+    // the fp32 Transition: out32 = acc s_h s_ws + res32, straight from the fragments (a quad covers 8 consecutive floats of a row: whole 32-byte sectors)
+    const bool split = gridDim.z > 1;
+    const float s_o = split ? 1.f : __ldg(p.sc + 3);
+    float* out = p.out32 + (split ? (size_t)blockIdx.z * p.M * p.N : 0);
+    const float* res = split ? nullptr : p.res32;
+#pragma unroll
+    for (int mt = 0; mt < C::MT; ++mt)
+#pragma unroll
+      for (int hh = 0; hh < 2; ++hh) {
+        const int row = m0 + wm * C::MT * 16 + 16 * mt + 8 * hh + g8;
+        if (row >= p.M) continue;
+#pragma unroll
+        for (int nt = 0; nt < C::NT; ++nt) {
+          const size_t o = (size_t)row * p.N + n0 + (wn * C::NT + nt) * 8 + 2 * q;
+          const float2 r = res != nullptr ? *reinterpret_cast<const float2*>(res + o) : make_float2(0.f, 0.f);
+          *reinterpret_cast<float2*>(out + o) = make_float2(fmaf(acc[mt][nt][2 * hh], s_o, r.x), fmaf(acc[mt][nt][2 * hh + 1], s_o, r.y));
+        }
+      }
+    return;
   }
   // rn(acc) staged as [BM][BN] bf16, then the residual is added on 16-byte vectors
   constexpr int CPO = C::BN / 8;
@@ -554,6 +744,137 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) gemm_res_kernel(const ResPar
       stg128(p.out + (size_t)(m0 + r) * p.N + n0 + c * 8, y);
     }
   }
+}
+
+// ===================================================================================================================== fp32 Transition: fp16 weight forms and scales
+// The sm_90a f32io family's scheme (wide/f32io.cu f32_forms_*), runtime D / H (D % 32 == 0). stats (zeroed first): [0] max|gamma|, [1] max|beta|, [2] max(|Wa|, |Wb|),
+// [3] max row L1 of Wa, Wb, [4] max|Ws| -- nonnegative floats, so atomicMax on their bit patterns is the float max (order-free: deterministic).
+constexpr float F16_BOUND = 30000.f;   // fp16 range kept by the scales (fused_wide_sm90a._F16_BOUND)
+
+__global__ void __launch_bounds__(256) f32_forms_stats_kernel(const float* __restrict__ gamma, const float* __restrict__ beta, const float* __restrict__ wa,
+                                                             const float* __restrict__ wb, const float* __restrict__ ws, float* __restrict__ st, int D, int H) {
+  const int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5, lane = threadIdx.x & 31, nwarps = (gridDim.x * blockDim.x) >> 5;
+  float mg = 0.f, mb = 0.f, mw = 0.f, ml = 0.f, ms = 0.f;
+  if (warp == 0)
+    for (int c = lane; c < D; c += 32) { mg = fmaxf(mg, fabsf(gamma[c])); mb = fmaxf(mb, fabsf(beta[c])); }
+  const int d4 = D / 4;
+  for (int r = warp; r < 2 * H; r += nwarps) {           // rows of Wa then Wb: absmax and L1 (16-byte loads)
+    const float4* p = reinterpret_cast<const float4*>(r < H ? wa + (size_t)r * D : wb + (size_t)(r - H) * D);
+    float l1 = 0.f;
+#pragma unroll 4
+    for (int c = lane; c < d4; c += 32) {
+      const float4 v = __ldg(p + c);
+      const float a0 = fabsf(v.x), a1 = fabsf(v.y), a2 = fabsf(v.z), a3 = fabsf(v.w);
+      l1 += (a0 + a1) + (a2 + a3);
+      mw = fmaxf(mw, fmaxf(fmaxf(a0, a1), fmaxf(a2, a3)));
+    }
+#pragma unroll
+    for (int o = 16; o; o >>= 1) l1 += __shfl_xor_sync(0xffffffffu, l1, o);
+    ml = fmaxf(ml, l1);
+  }
+  const float4* w4 = reinterpret_cast<const float4*>(ws);
+  for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < (long long)D * H / 4; i += (long long)gridDim.x * blockDim.x) {
+    const float4 v = __ldg(w4 + i);
+    ms = fmaxf(ms, fmaxf(fmaxf(fabsf(v.x), fabsf(v.y)), fmaxf(fabsf(v.z), fabsf(v.w))));
+  }
+#pragma unroll
+  for (int o = 16; o; o >>= 1) {
+    mg = fmaxf(mg, __shfl_xor_sync(0xffffffffu, mg, o)); mb = fmaxf(mb, __shfl_xor_sync(0xffffffffu, mb, o));
+    mw = fmaxf(mw, __shfl_xor_sync(0xffffffffu, mw, o)); ms = fmaxf(ms, __shfl_xor_sync(0xffffffffu, ms, o));
+  }
+  __shared__ float red[5][8];                             // per block first: one atomic per block and statistic, not per warp
+  const int w = threadIdx.x >> 5;
+  if (lane == 0) { red[0][w] = mg; red[1][w] = mb; red[2][w] = mw; red[3][w] = ml; red[4][w] = ms; }
+  __syncthreads();
+  if (threadIdx.x < 5) {
+    float m = 0.f;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) m = fmaxf(m, red[threadIdx.x][i]);
+    atomicMax(reinterpret_cast<int*>(st) + threadIdx.x, __float_as_int(m));
+  }
+}
+
+DEVI uint2 pack_f16x4(float4 v, float s) { return make_uint2(pack_f16(v.x / s, v.y / s), pack_f16(v.z / s, v.w / s)); }
+
+// sc [8] = [1 / s_x, s_x s_w, 1 / s_h, s_h s_ws, a_max, D max|Ws|, -, -]: the forward's scales and the backward's bounds (|a|, |b|, |silu(a)| <= a_max;
+// |dh| <= max|dy| D max|Ws|). Wab16 = [Wa; Wb] / s_w (fp16 [2H][D], stacked: the backward's d_xn operand), Ws16 = Ws / s_ws (fp16 [D][H]) and, when wst16 is
+// given, Ws16^T (fp16 [H][D], the backward's dh operand). Each scale is max(bound / F16_BOUND, 1): |xn| <= sqrt(D) max|gamma| + max|beta|,
+// |a|, |b| <= |xn|max max-row-L1, |h| <= |a|max |b|max. Blocks [0, nflat) cast (16-byte loads), the others transpose 32 x 32 tiles of Ws.
+__global__ void __launch_bounds__(256) f32_forms_apply_kernel(const float* __restrict__ wa, const float* __restrict__ wb, const float* __restrict__ ws,
+                                                             const float* __restrict__ st, uint16_t* __restrict__ wab16, uint16_t* __restrict__ ws16,
+                                                             uint16_t* __restrict__ wst16, float* __restrict__ sc, int D, int H, int nflat) {
+  const float xn_max = sqrtf((float)D) * st[0] + st[1];
+  const float s_x = fmaxf(xn_max / F16_BOUND, 1.f), s_w = fmaxf(st[2] / F16_BOUND, 1.f);
+  const float a_max = xn_max * st[3];
+  const float s_h = fmaxf(a_max * a_max / F16_BOUND, 1.f), s_ws = fmaxf(st[4] / F16_BOUND, 1.f);
+  if ((int)blockIdx.x < nflat) {
+    const long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x, step = (long long)nflat * blockDim.x, n4 = (long long)D * H / 4;
+    if (tid == 0) {
+      sc[0] = 1.f / s_x; sc[1] = s_x * s_w; sc[2] = 1.f / s_h; sc[3] = s_h * s_ws; sc[4] = a_max; sc[5] = (float)D * st[4]; sc[6] = 0.f; sc[7] = 0.f;
+    }
+    const float4 *a4 = reinterpret_cast<const float4*>(wa), *b4 = reinterpret_cast<const float4*>(wb), *s4 = reinterpret_cast<const float4*>(ws);
+    uint2* o = reinterpret_cast<uint2*>(wab16);
+    uint2* os = reinterpret_cast<uint2*>(ws16);
+    for (long long i = tid; i < n4; i += step) {
+      o[i] = pack_f16x4(__ldg(a4 + i), s_w);
+      o[n4 + i] = pack_f16x4(__ldg(b4 + i), s_w);
+      os[i] = pack_f16x4(__ldg(s4 + i), s_ws);
+    }
+    return;
+  }
+  // Ws [D][H] -> Ws16^T [H][D]: one 32 x 32 tile per block (8 rows per pass of the 256 threads)
+  __shared__ float tile[32][33];
+  const int t = blockIdx.x - nflat, tiles_h = H / 32, d0 = (t / tiles_h) * 32, h0 = (t % tiles_h) * 32;
+  const int tx = threadIdx.x & 31, ty = threadIdx.x >> 5;
+#pragma unroll
+  for (int r = ty; r < 32; r += 8) tile[r][tx] = __ldg(ws + (size_t)(d0 + r) * H + h0 + tx);
+  __syncthreads();
+#pragma unroll
+  for (int r = ty; r < 32; r += 8) wst16[(size_t)(h0 + r) * D + d0 + tx] = __half_as_ushort(__float2half_rn(tile[tx][r] / s_ws));
+}
+
+// out = res + s sum_z part[z] (the split-K squeeze's reduction, the splits summed in order; s = sc[3])
+__global__ void __launch_bounds__(256) split_res_kernel(const float4* __restrict__ part, int splits, long long n4, const float4* __restrict__ res,
+                                                        const float* __restrict__ sc, float4* __restrict__ out) {
+  const float s = __ldg(sc + 3);
+  for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (long long)gridDim.x * blockDim.x) {
+    float4 a = __ldg(part + i);
+    for (int z = 1; z < splits; ++z) {
+      const float4 b = __ldg(part + (size_t)z * n4 + i);
+      a.x += b.x; a.y += b.y; a.z += b.z; a.w += b.w;
+    }
+    const float4 r = __ldg(res + i);
+    out[i] = make_float4(fmaf(a.x, s, r.x), fmaf(a.y, s, r.y), fmaf(a.z, s, r.z), fmaf(a.w, s, r.w));
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------- the backward's dy in fp16
+// dy_absmax: max|dy| into *mx (zeroed first; atomicMax on the bit patterns: deterministic). dy_convert: dy16 = fp16(dy / s_dy), s_dy = max|dy| / F16_BOUND (any
+// magnitude: tiny gradients are scaled up), and block 0 writes the backward's scale vector bs [8] (see the bindings): with s_dab = (bound of |dA|, |dB|) / F16_BOUND,
+//   bs = [s_dy s_h (dWs), s_dab s_x ([dWa; dWb]), s_dab s_w (d_xn), 1 / s_dy, 1 / s_dab, s_dy s_ws (dh), -, -]
+__global__ void __launch_bounds__(256) dy_absmax_kernel(const float4* __restrict__ dy, long long n4, int* __restrict__ mx) {
+  float m = 0.f;
+  for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (long long)gridDim.x * blockDim.x) {
+    const float4 v = __ldg(dy + i);
+    m = fmaxf(m, fmaxf(fmaxf(fabsf(v.x), fabsf(v.y)), fmaxf(fabsf(v.z), fabsf(v.w))));
+  }
+#pragma unroll
+  for (int o = 16; o; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+  if ((threadIdx.x & 31) == 0) atomicMax(mx, __float_as_int(m));
+}
+
+DEVI float pos_or_one(float v) { return v > 0.f && v < 3.0e38f ? v : 1.f; }
+
+__global__ void __launch_bounds__(256) dy_convert_kernel(const float4* __restrict__ dy, long long n4, const int* __restrict__ mx, const float* __restrict__ sc,
+                                                         uint2* __restrict__ dy16, float* __restrict__ bs) {
+  const float dymax = __int_as_float(__ldg(mx));
+  const float s_dy = pos_or_one(dymax / F16_BOUND);
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    const float s_x = 1.f / sc[0], s_w = sc[1] * sc[0], s_h = 1.f / sc[2], s_ws = sc[3] * sc[2];
+    const float s_dab = pos_or_one(dymax * sc[5] * sc[4] * 1.1f / F16_BOUND);   // |dA| <= |dh| |b| max silu' (< 1.1), |dB| <= |dh| |silu(a)|
+    bs[0] = s_dy * s_h; bs[1] = s_dab * s_x; bs[2] = s_dab * s_w; bs[3] = 1.f / s_dy; bs[4] = 1.f / s_dab; bs[5] = s_dy * s_ws; bs[6] = 0.f; bs[7] = 0.f;
+  }
+  for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (long long)gridDim.x * blockDim.x) dy16[i] = pack_f16x4(__ldg(dy + i), s_dy);
 }
 
 }  // namespace a100

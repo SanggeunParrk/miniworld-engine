@@ -34,9 +34,11 @@ def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps):
     hidden 512, whole 256-row tiles, at least ``fused_wide_sm80.FUSED_MIN_ROWS`` rows: one forward kernel, a two-kernel backward) or else
     ``fused_wide_sm80`` (D in ``fused_wide_sm80.WIDTHS``, hidden a multiple of 64, any row count), or ``None`` when neither takes the call or
     builds (the caller refuses: there is no fallback). bf16 activations; the parameters bf16 or fp32 masters (cast inside, outside autograd, so
-    a master's gradient is fp32)."""
+    a master's gradient is fp32). fp32 activations (TF32 allowed): ``fused_wide_sm80.transition_f32_sm80`` (D in ``F32_WIDTHS``, hidden a multiple of 64)."""
     from . import fused_sm80, fused_wide_sm80
 
+    if x.dtype is torch.float32:   # fp32 (TF32 allowed): the wide fp32 path (fp16 products at TF32's rounding, a TF32 backward)
+        return fused_wide_sm80.transition_f32_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps) if fused_wide_sm80.f32_available(x, wa, ws) else None
     route = fused_wide_sm80.route(x, wa, ws)
     if route == "fused":
         return fused_sm80.transition_fused_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps)
@@ -151,13 +153,15 @@ def prebuild(target, rows):
                 yield ft.partial(fused_sm100a.build_cubins, f"d{d}n{n}", fused_wide_sm100a._specs(d, n))
     elif target.arch == "sm80":
         # A100 (transition_sm80): fused_sm80 at D 128 / n 4 with bf16 weights, the wide extension at every other width (and as fused_sm80's small-row path), its
-        # one-kernel forward / backward builds (fused_fwd_sm80 / fused_bwd_sm80: (D, H) in their SHAPES) and the fp32-master cast; bf16 rows only
+        # one-kernel forward / backward builds (fused_fwd_sm80 / fused_bwd_sm80: (D, H) in their SHAPES) and the fp32-master cast; bf16 rows, and the float32 rows on the wide extension
         from . import fused_bwd_sm80, fused_fwd_sm80, fused_sm80, fused_wide_sm80, parameter_cast_sm80
 
         served = {k: v for k, v in half.items() if v and k[0] in fused_wide_sm80.WIDTHS}
+        # the float32 rows (TF32): the wide extension's fp32 bindings (transition_f32_sm80) at D in F32_WIDTHS
+        f32 = any(dt == "float32" for (d, _n), v in shapes.items() if d in fused_wide_sm80.F32_WIDTHS for (dt, _m) in v)
         if any(dt == "bfloat16" for (dt, _m) in shapes.get((128, 4), {})):   # fused_sm80 takes bf16 weights only (no master row reaches it)
             yield fused_sm80._ext
-        if served:
+        if served or f32:
             yield fused_wide_sm80._ext
             yield parameter_cast_sm80._ext
         if any((d, d * n) in fused_fwd_sm80.SHAPES for d, n in served):

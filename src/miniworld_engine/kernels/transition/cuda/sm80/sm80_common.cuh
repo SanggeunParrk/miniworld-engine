@@ -52,6 +52,19 @@ DEVI void mma16816(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t 
                : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 
+// ---- mma.sync m16n8k16 fp16 x fp16 -> fp32 (the fp32 Transition: fp16 operands carry TF32's 10-bit mantissa, device scales keep them in range)
+DEVI void mma16816_f16(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
+  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+               : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+               : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+// the tile GEMMs' MMA by operand type (F16: fp16, else bf16)
+template <bool F16>
+DEVI void mma_op(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
+  if constexpr (F16) mma16816_f16(d, a, b0, b1);
+  else mma16816(d, a, b0, b1);
+}
+
 // ---- shared / global vector access
 DEVI uint2 lds64(uint32_t a) { uint2 v; asm volatile("ld.shared.v2.u32 {%0,%1}, [%2];\n" : "=r"(v.x), "=r"(v.y) : "r"(a)); return v; }
 DEVI void sts64(uint32_t a, uint2 v) { asm volatile("st.shared.v2.u32 [%0], {%1,%2};\n" ::"r"(a), "r"(v.x), "r"(v.y) : "memory"); }
@@ -79,9 +92,15 @@ DEVI uint32_t add_bf16x2(uint32_t a, uint32_t b) {   // bf16(a + b) per half: th
   uint32_t r; asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(a), "r"(0x3f803f80u), "r"(b)); return r;   // a * 1 + b, one rounding (sm_80 has no add.bf16x2)
 }
 
+// ---- fp16 packing (round to nearest)
+DEVI uint32_t pack_f16(float lo, float hi) {
+  uint32_t r; asm("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(r) : "f"(hi), "f"(lo)); return r;
+}
+
 // ---- arithmetic statement
 DEVI float tanh_approx(float x) { float y; asm("tanh.approx.f32 %0, %1;\n" : "=f"(y) : "f"(x)); return y; }
 DEVI float sigmoid(float g) { return fmaf(tanh_approx(0.5f * g), 0.5f, 0.5f); }   // one MUFU op
+DEVI float sigmoid_f32(float g) { return 1.f / (1.f + __expf(-g)); }   // the fp32 paths: __expf (a few ulp of fp32), not tanh.approx (2^-11)
 DEVI float quad_sum(float v) {
   v += __shfl_xor_sync(0xffffffffu, v, 1);
   v += __shfl_xor_sync(0xffffffffu, v, 2);
