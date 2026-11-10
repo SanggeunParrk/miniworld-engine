@@ -77,16 +77,10 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
     y, mmean, mrstd = g.ln_fwd(mf, lnm_w, lnm_b, eps_m, L, False)
     vg = torch.mm(y, wvg.t())                                                      # [S L, 512] = [v | g]
     u = torch.empty(S * L, HC, device=msa.device, dtype=torch.bfloat16)
-    if save:   # training: v and o head-major (the backward's dw = do v^T contracts over S 32)
-        v_hm = torch.empty(HEADS, L, S * D_HIDDEN, device=msa.device, dtype=torch.bfloat16)
-        e.to_hm(vg, v_hm, S, L)
-        o_hm = torch.bmm(w, v_hm)
-        e.gate_fwd(o_hm, vg, HC, u, S, L)
-    else:      # inference: the contraction per head on the natural layout
-        o = torch.empty(S * L, HC, device=msa.device, dtype=torch.bfloat16)
-        e.head_bmm(w, vg, o, S, L)
-        e.gate_fwd(o, vg, HC, u, S, L)
-        del o
+    v_hm = torch.empty(HEADS, L, S * D_HIDDEN, device=msa.device, dtype=torch.bfloat16)
+    e.to_hm(vg, v_hm, S, L)
+    o_hm = torch.bmm(w, v_hm)
+    e.gate_fwd(o_hm, vg, HC, u, S, L)
     if keep is None:   # m + u Wo^T in one cublasLt call (D != C: no copy of m into the output first)
         out = _lt().lt_mm(u, wo, mf, 0, False, None, None)
     else:
