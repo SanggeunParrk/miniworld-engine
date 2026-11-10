@@ -51,7 +51,12 @@ Names are the `requirements/requirements_kernel.csv` rows of family `transition`
 | `transition_generic_prepare_weights_sm90` | forward | `prep_bwd_kernel`: Ws^T, [Wa;Wb]^T and TF32-rounded copies, chosen by a job mask, one launch |
 | `transition_generic_h16_absmax_sm90`, `transition_generic_h16_apply_sm90` | forward | the fp16-intermediate scales of the large-row fp32 forward (see Numerics) |
 | `transition_generic_swiglu_fp32_sm90`, `transition_generic_bwd_swiglu_fp32_sm90` | forward_train / backward | elementwise SwiGLU / SwiGLU backward of the small-row fp32 cuBLAS plan |
-| `transition_fwd_f32io_sm90` | forward_infer | `transition_fwd_f32io` (`wide/kernels/transition_fwd_f32io.cu`, bound by `wide/f32io.cu`): the fp32 inference forward at D 64 / 128 (n 2, 4) in one launch (see below) |
+| `transition_fwd_f32io_sm90` | forward | `transition_fwd_f32io` (`wide/kernels/transition_fwd_f32io.cu`, bound by `wide/f32io.cu`): the fp32 forward at D 64 / 128 in one launch; the `SAVE` build (D 128, training) also writes xn, rstd, c1 (see below) |
+| `transition_fwd_f32xs_sm90` | forward | `transition_fwd_f32xs` (`wide/kernels/transition_fwd_f32xs.cu`): the fp32 forward at D 256 in one launch, xn in shared memory; inference and the saving build |
+| `transition_lnsg_f32_sm90` | forward | `transition_lnsg_f32` (`wide/kernels/transition_lnsg_f32.cu`): fp32 D 512, LayerNorm inside the expand GEMM, fp16 h (scaled); the squeeze is `transition_generic_squeeze_residual_sm90` (`squeeze_res_h16`) |
+| `transition_f32_forms_stats_sm90`, `transition_f32_forms_apply_sm90` | forward | `f32_forms_stats` / `f32_forms_apply` (`wide/f32io.cu`): the fp16 weight forms and the four device scales of the fp32 forwards, two launches |
+| `transition_bwd_f32dx_sm90`, `transition_f32_part_reduce_sm90` | backward | `transition_bwd_f32dx` (`wide/kernels/transition_bwd_f32dx.cu`): fp32 D 128 dgrad, TF32 (dh, a, b, SwiGLU backward, d_xn, LayerNorm backward, residual) + `f32_part_reduce` (fixed-order dgamma / dbeta) |
+| `transition_bwd_f32dw_sm90`, `transition_f32_dw_reduce_sm90` | backward | `transition_bwd_f32dw` (`wide/kernels/transition_bwd_f32dw.cu`): fp32 D 128 weight gradients, TF32, per hidden slice on chip + `f32_dw_reduce` (fixed-order replica sum) |
 | `transition_expand_swiglu` | forward | Triton `transition_fwd_kernel` (`triton/main.py`) |
 | `transition_squeeze_residual`, `transition_squeeze_residual_splitk_reduce` | forward | Triton `_squeeze_residual_kernel` and its split-K sum `_split_k_residual_kernel` (`triton/residual.py`) |
 | `transition_bwd_squeeze_swiglu` | backward | Triton `_squeeze_swiglu_bwd_kernel` (`triton/training.py`) |
@@ -63,6 +68,8 @@ cuBLAS (`torch.mm` / `addmm`), not engine kernels.
 
 `kernels/transition/cuda/__init__.py::transition_sm90a` takes the first build that serves the call:
 
+0. fp32 with TF32 allowed at the f32io shapes (`F32_SHAPES` inference, `F32_TRAIN_SHAPES` training): `fused_wide_sm90a.transition_f32_sm90a`
+   (below).
 1. `fused_generic_sm90a`, if `prefers_generic` (bf16 only; at few rows the row-tile-per-CTA builds leave SMs idle). Row limits per D,
    (inference, training): D64 (3072, 3072), D128 (6144, 3072), D256 (6144, 12288), D384 (16384, 16384), D512 (16384, 12288). D64
    inference never prefers it; D128 inference prefers it up to 512 rows (n 2) / 4096 rows (n 4).
@@ -104,14 +111,51 @@ hidden axis and reduce-scattered d_xn through DSMEM was 2.5x slower and was drop
 At D >= 256 a single fused backward does not fit (the dW accumulators exceed the register file), so h and [dA|dB] round-trip HBM.
 D384 keeps the forward's h for the backward (`save_h_enabled`); D512 keeps a / b only at 384^2 and 768^2 rows (`save_ab_enabled`).
 
-### fp32 inference at D 64 / 128 (`fused_wide_sm90a.transition_f32_sm90a`, f32io)
+### fp32 (`fused_wide_sm90a.transition_f32_sm90a`, the f32io family)
 
-One fused kernel, the D64 forward's structure (LNFRAG) with fp32 x / y: a persistent CTA per 64-row tile per consumer warpgroup; the
-fp32 x tile is TMA-loaded as 32-column 128-B-swizzled blocks, the LayerNorm runs in fp32 in the wgmma A-fragment layout and leaves xn in
-registers as fp16; [Wa_j; Wb_j] and Ws^T_j (fp16) stream through a two-slot TMA ring; SwiGLU on the fp32 accumulators goes straight into
-the A fragments of the squeeze; y = x + acc in fp32 over the x tile, one TMA store per half. HBM traffic is x in and y out (the three-launch
-TF32 path also moved xn and h). Builds (`wide/f32io.cu` switch; `_f32_variant` picks 1): D64 `<HS 64, 1 WG, 1 x buffer, 3 CTAs / SM>`,
-D128 `<HS 64, 2 WGs, 2 x buffers, 1 CTA / SM>`. Training keeps the generic path.
+fp32 activations take the bf16 builds' structure; every kernel is bound by `wide/f32io.cu` (one extension per (D, n)). Shapes:
+`F32_SHAPES` (inference: D 64 / 128 with n 2 / 4, D 256 / 512 with n 2) and `F32_TRAIN_SHAPES` (training: D 128 / 256 / 512, n 2 -- the
+float32 train requirement rows, the diffusion head's conditioning pair Transitions). The token-stream fp32 rows (D 384 / 768, n 2, at most
+768 rows) stay on the generic build, as the bf16 rows of those shapes do (`prefers_generic`).
+
+| D | forward (inference and the saving training build) | backward (training) |
+|---|---|---|
+| 64, 128 | `transition_fwd_f32io`: one fused kernel | D 128: `transition_bwd_f32dx` + `transition_bwd_f32dw` (from 65 536 rows), else generic |
+| 256 | `transition_fwd_f32xs`: one fused kernel | generic recompute: `gate` -> cuBLAS TF32 dW -> `dxn_gemm` -> `ln_bwd` |
+| 512 | `transition_lnsg_f32` (LayerNorm inside the expand GEMM, h fp16) + generic `squeeze_res_h16` | generic recompute (the bf16 D 512 structure) |
+
+- `transition_fwd_f32io` (D 64 / 128): the D64 forward's structure (LNFRAG) with fp32 x / y: a persistent CTA per 64-row tile per consumer
+  warpgroup; the fp32 x tile is TMA-loaded as 32-column 128-B-swizzled blocks, the LayerNorm runs in fp32 in the wgmma A-fragment layout and
+  leaves xn in registers as fp16; [Wa_j; Wb_j] and Ws^T_j (fp16) stream through a two-slot TMA ring; SwiGLU on the fp32 accumulators goes
+  straight into the A fragments of the squeeze; y = x + acc in fp32 over the x tile, one TMA store per half. Builds (`_f32_variant` picks
+  1): D64 `<HS 64, 1 WG, 1 x buffer, 3 CTAs / SM>`, D128 `<HS 64, 2 WGs, 2 x buffers, 1 CTA / SM>`; the D128 `SAVE` build also writes xn
+  (fp32), rstd and c1 for the backward.
+- `transition_fwd_f32xs` (D 256): the bf16 D256 kernel's row split -- a 128-row tile, two warpgroups of 64 rows, the 64 x 256 output
+  accumulator held across all hidden chunks (HS 32): [a|b] = xn [Wa_j; Wb_j]^T SS, h_j into the squeeze's A fragments, acc += h_j Ws^T_j RS.
+  The fp32 x tile (128 KB) does not fit next to the three-slot weight ring, so the LayerNorm reads x from global memory (warp per row) and
+  leaves xn in shared memory as fp16; the residual re-reads x in the fragment layout and y is stored directly (32-byte sectors per quad).
+- `transition_lnsg_f32` (D 512): the bf16 `ln_swiglu_gemm` with fp32 x: a CTA per 128-row block, the LayerNorm (from global) into a
+  resident fp16 xn tile, every 64-hidden-unit N tile of the block against it (16 KB weight slabs through a four-stage ring), h16 = h / s_h
+  staged and TMA-stored; the squeeze with the residual is the generic `squeeze_res_h16`.
+- Weight forms: `forms` (`f32_forms_stats` + `f32_forms_apply`) makes Wa16, Wb16, (Ws / s_ws)^T fp16 and the scales; inference caches
+  them per parameter version (`param_forms`), training makes them once per step.
+- `transition_bwd_f32dx` (D 128 dgrad, TF32): the DX role of the bf16 D128 backward. A 128-row tile per CTA (producer + two consumer
+  warpgroups), hidden chunks of 32 units through a two-slot ring (Ws^T_j, [Wa_j; Wb_j], [Wa_j; Wb_j]^T: 80 KB per slot) next to the
+  resident xn tile; per chunk dh (RS, dy in A-fragment registers loaded once per tile and rounded to nearest TF32), [a|b] (SS), the SwiGLU
+  backward in the accumulators, and d_xn += [dA|dB] [Wa_j; Wb_j] as an RS m64n128 whose A fragments are the dA / dB accumulators. A TF32 A
+  fragment holds k-step columns (q, q + 4), a C fragment (2q, 2q + 1): the RS B operands (Ws^T over d, [Wa; Wb]^T over the hidden units) are
+  stored with their K columns permuted per 8 as (0, 2, 4, 6, 1, 3, 5, 7) (`_k8_perm`). LayerNorm backward + residual in the fragment
+  layout; dgamma / dbeta: one private global row per warp, `f32_part_reduce` sums them in a fixed order.
+- `transition_bwd_f32dw` (D 128 wgrad, TF32): the DW role. CTA b owns hidden slice b % 8 (32 units, Ws^T_s / [Wa_s; Wb_s] resident, 48 KB)
+  and every (b / 8)-th 128-row tile; per tile it recomputes dh, a, b, writes h, dA, dB transposed to shared memory ([hidden][rows]: TF32
+  wgmma reads only K-major operands and the contraction runs over the rows), then each warpgroup accumulates its d half of
+  dW_ab^T = xn^T [dA|dB] and dW_s = dy^T h, the xn^T / dy^T A fragments read from the row-major tiles. Per-CTA partials; `f32_dw_reduce`
+  sums the replicas in a fixed order. h and [dA|dB] never reach memory (the generic backward writes and re-reads 3 x M x HID fp32).
+- Measured and dropped: a TF32 d_xn GEMM with the LayerNorm backward in its epilogue (the bf16 D256 `dxln`, as a generic `MODE_LNB`) was
+  slower than `dxn_gemm` + `ln_bwd` (768^2 rows: D 128 1.12 against 0.99 ms, D 256 2.67 against 1.91 ms: the row epilogue does not overlap
+  the GEMM); a 128-unit generic gate tile (faster at D 128, slower at D 256 / 512); an L2 prefetch of the next tile and a warpgroup skew
+  in the dgrad kernel (both slower). Open: both D128 backward kernels are bound by L2 -> SM traffic (fp32 weights streamed per 128-row tile
+  in dgrad; every row tile read by all 8 hidden slices in wgrad); TMA multicast over a cluster is the next step.
 
 ### Generic (`fused_generic_sm90a`, sources `generic_sm90a/`)
 
@@ -151,9 +195,12 @@ bf16 / fp16 / fp32 activations; parameters cast to the activation dtype.
 - fp32 activations: every operand the TF32 MMA reads next (xn, h, dA / dB, the weights) is rounded to nearest TF32 where it is produced;
   truncation by the tensor core was a one-sided error. fp32 needs TF32 allowed (`allow_tf32` or matmul precision not `"highest"`);
   the measurement's PyTorch reference runs with TF32 allowed too.
-- fp32 inference at D 64 / 128 (f32io): the products run on fp16 tensor cores with fp32 accumulation. fp16 has TF32's 10-bit mantissa and
-  rounds to nearest, so xn, Wa, Wb, h and Ws are rounded as the TF32 path rounds them; four device scales (`_f32_forms`, made once per
-  parameter version: xn, [Wa, Wb], h, Ws) keep each fp16 operand below 30000 (all 1 for ordinary weights).
+- fp32 forwards of the f32io family (inference and training): the products run on fp16 tensor cores with fp32 accumulation. fp16 has
+  TF32's 10-bit mantissa and rounds to nearest, so xn, Wa, Wb, h and Ws are rounded as the TF32 path rounds them; four device scales
+  (`_f32_forms`: xn, [Wa, Wb], h, Ws) keep each fp16 operand below 30000 (all 1 for ordinary weights). The saved xn is the fp16 operand
+  times s_x rounded to nearest TF32: the backward's TF32 products read the value the forward multiplied. The backward (gradients have
+  no static bound) runs on native TF32 tensor cores; the D128 kernels round dy to nearest TF32 where it enters an MMA (the generic gate
+  lets the tensor core truncate it), which halves the gradient error against the fp64 reference (768^2 rows: dx 2.3e-4 against 4.1e-4).
 - fp32 at >= 16384 rows keeps h in fp16 between the two GEMMs (`_fwd_h16`): `h16_absmax` / `h16_apply` compute device scales from
   `bound = (sqrt(D) max|gamma| + max|beta|) * max row L1 of Wa, Wb` so h and Ws stay inside fp16's range (scale 1 for ordinary weights).
 - The fp32 small-row training plan (cuBLAS) and the hand-kernel inference are two TF32 GEMM plans: the no-grad forward is not bit-equal to

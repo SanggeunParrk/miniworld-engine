@@ -372,7 +372,15 @@ transition_generic_h16_absmax_sm90,transition,Transition,forward,1
 transition_generic_h16_apply_sm90,transition,Transition,forward,1
 transition_generic_swiglu_fp32_sm90,transition,Transition,forward_train,1
 transition_generic_bwd_swiglu_fp32_sm90,transition,Transition,backward,1
-transition_fwd_f32io_sm90,transition,Transition,forward_infer,1
+transition_fwd_f32io_sm90,transition,Transition,forward,1
+transition_fwd_f32xs_sm90,transition,Transition,forward,1
+transition_lnsg_f32_sm90,transition,Transition,forward,1
+transition_f32_forms_stats_sm90,transition,Transition,forward,1
+transition_f32_forms_apply_sm90,transition,Transition,forward,1
+transition_bwd_f32dx_sm90,transition,Transition,backward,1
+transition_f32_part_reduce_sm90,transition,Transition,backward,1
+transition_bwd_f32dw_sm90,transition,Transition,backward,1
+transition_f32_dw_reduce_sm90,transition,Transition,backward,1
 layernorm_general_fwd,layernorm,LayerNorm,forward,1
 layernorm_general_bwd,layernorm,LayerNorm,backward,1
 layernorm_general_bwd_reduce,layernorm,LayerNorm,backward,1

@@ -15,7 +15,7 @@ def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n):
     from . import fused_generic_sm90a, fused_sm90a, fused_wide_sm90a
 
     training = torch.is_grad_enabled() and any(t.requires_grad for t in (x, ln_weight, wa, wb, ws))
-    if fused_wide_sm90a.f32_available(x, wa, ws, training):   # fp32 inference at D 64 / 128: one fused launch (fp16 MMA at TF32 rounding)
+    if fused_wide_sm90a.f32_available(x, wa, ws, training):   # fp32: the f32io family (fused forwards, fp16 MMA at TF32 rounding; TF32 backward)
         return fused_wide_sm90a.transition_f32_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps)
     if fused_generic_sm90a.prefers_generic(x, training, n) and fused_generic_sm90a.available(x, wa, ws):
         return fused_generic_sm90a.transition_generic_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps)
@@ -133,8 +133,12 @@ def prebuild(target, rows):
             return dtype == "float32" or not served or any(m <= small for m in counts)
         if any(generic(d, n, dt, m, c) for (d, n), v in shapes.items() for (dt, m), c in v.items()):
             yield fused_generic_sm90a._ext
-        # the fp32 inference forward (one build per (D, n), every variant inside): the float32 eval rows at its shapes
-        for d, n in sorted(k for k, v in shapes.items() if k[1] in fused_wide_sm90a.F32_SHAPES.get(k[0], ()) and ("float32", "eval") in v):
+        # the fp32 forwards (one build per (D, n): every variant, the inference and the saving forward, the weight forms): the float32 eval
+        # rows at F32_SHAPES, the float32 train rows at F32_TRAIN_SHAPES (their backward is the generic build's, planned above)
+        def f32(d, n, v):
+            return (("float32", "eval") in v and n in fused_wide_sm90a.F32_SHAPES.get(d, ())) or (
+                ("float32", "train") in v and n in fused_wide_sm90a.F32_TRAIN_SHAPES.get(d, ()))
+        for d, n in sorted(k for k, v in shapes.items() if f32(*k, v)):
             yield ft.partial(fused_wide_sm90a._f32_ext, d, n)
     elif target.arch == "sm100":
         from . import fused_sm100a, fused_wide_sm100a

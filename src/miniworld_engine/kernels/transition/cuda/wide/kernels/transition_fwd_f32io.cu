@@ -14,10 +14,12 @@
 //   sc[2] = 1 / s_h            h16 = h / s_h
 //   sc[3] = s_h s_ws           y = x + acc sc[3]                  (Ws16 = Ws / s_ws)
 // The traffic is x in and y out (512 B / row at D = 64): the three-launch TF32 path moved xn and h through HBM as well.
+#pragma once
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 
 TMN_DEVI uint32_t pack_f16(float lo, float hi) { uint32_t r; asm("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(r) : "f"(hi), "f"(lo)); return r; }
+TMN_DEVI float f32io_tf32(float v) { uint32_t u; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(u) : "f"(v)); return __uint_as_float(u); }   // round to nearest TF32
 TMN_DEVI float f32io_sigmoid(float a) {                // the kit's sigmoid (as transition_fwd_d64.cu): rcp.approx(1 + ex2.approx(-a log2 e))
   return rcpf(__fadd_rn(1.f, ex2f(__fmul_rn(-1.4426950408889634f, a))));
 }
@@ -59,11 +61,14 @@ struct F32Cfg {
   static_assert((SMEM + 1024) * CPS <= 231424, "shared memory budget (each block also reserves 1 KB)");
 };
 
-template <int D, int N, int HS, int NWG, int NBUF, int CPS>
+// SAVE (the training forward): also writes xn (the fp16 operand times s_x, rounded to nearest TF32: the value the backward's TF32 products
+// read), rstd and c1 = mean rstd for the rows below M.
+template <int D, int N, int HS, int NWG, int NBUF, int CPS, bool SAVE = false>
 __global__ void __launch_bounds__(128 * NWG, CPS)
 transition_fwd_f32io(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mwa, const __grid_constant__ CUtensorMap mwb,
                      const __grid_constant__ CUtensorMap mwst, const __grid_constant__ CUtensorMap mout, const float* __restrict__ gamma,
-                     const float* __restrict__ beta, const float* __restrict__ sc, int tiles, float eps) {
+                     const float* __restrict__ beta, const float* __restrict__ sc, int tiles, float eps,
+                     float* __restrict__ xn_out = nullptr, float* __restrict__ rstd_out = nullptr, float* __restrict__ c1_out = nullptr, int M = 0) {
   using C = F32Cfg<D, N, HS, NWG, NBUF, CPS>;
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
@@ -162,7 +167,26 @@ transition_fwd_f32io(const __grid_constant__ CUtensorMap mx, const __grid_consta
           const int c = 16 * ks + 8 * (reg >> 1) + 2 * q, R = reg & 1;
           const float2 g = __ldg(reinterpret_cast<const float2*>(gamma + c)), b = __ldg(reinterpret_cast<const float2*>(beta + c));
           af[ks][reg] = pack_f16(((xv[ks][reg][0] - mean[R]) * rs[R] * g.x + b.x) * s_inx, ((xv[ks][reg][1] - mean[R]) * rs[R] * g.y + b.y) * s_inx);
+          if constexpr (SAVE) {
+            const int row = trow + r0 + 8 * R;
+            if (row < M) {
+              const __half2 hv = *reinterpret_cast<const __half2*>(&af[ks][reg]);
+              uint32_t u0, u1;
+              asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(u0) : "f"(__low2float(hv) / s_inx));
+              asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(u1) : "f"(__high2float(hv) / s_inx));
+              stg64f(xn_out + (size_t)row * D + c, __uint_as_float(u0), __uint_as_float(u1));
+            }
+          }
         }
+      if constexpr (SAVE) {
+        if (q == 0) {
+#pragma unroll
+          for (int R = 0; R < 2; ++R) {
+            const int row = trow + r0 + 8 * R;
+            if (row < M) { rstd_out[row] = rs[R]; c1_out[row] = mean[R] * rs[R]; }
+          }
+        }
+      }
     }
     // ---------------------------------------------------------------- the hidden chunks
     float acc[C::NA][32];

@@ -38,8 +38,9 @@ class Transition(BackendModule, MasterWeights):
         ``"cuda"`` (H100): the engine's sm_90a Transition kernels (``kernels/transition/cuda.transition_sm90a``: LayerNorm + SwiGLU expand +
         squeeze with the residual in its epilogue, forward and backward): ``fused_sm90a`` (d 128, n 2 / 4), ``fused_wide_sm90a`` (d 64 /
         256 / 384 / 512 with n 2 / 4, d 768 with n 2; whole 128-row tiles) and ``fused_generic_sm90a`` (d a multiple of 64 up to 1024,
-        hidden a multiple of 128, any row count; fp32 activations on TF32 tensor cores, so only where torch allows TF32); fp32 inference at
-        d 64 / 128 (n 2 / 4) runs ``fused_wide_sm90a.transition_f32_sm90a`` instead (one launch, fp16 products at TF32's rounding). bf16 / fp32
+        hidden a multiple of 128, any row count; fp32 activations on TF32 tensor cores, so only where torch allows TF32); fp32 at d 64 / 128
+        (n 2 / 4), 256 / 512 (n 2) inference and d 128 / 256 / 512 (n 2) training runs ``fused_wide_sm90a.transition_f32_sm90a`` instead
+        (the bf16 builds' fused forwards with fp16 products at TF32's rounding; the generic TF32 backward). bf16 / fp32
         parameters (fp32 masters cast inside, their gradients fp32). ``"triton"``: the Triton split Transition
         (``kernels/transition/triton/residual.transition_residual``: the LayerNorm that also hands back the residual, the expand-SwiGLU,
         the squeeze with the residual in its epilogue, and their backward), any width, bf16 / fp16 / fp32 (fp32 dots IEEE unless torch
@@ -49,7 +50,7 @@ class Transition(BackendModule, MasterWeights):
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:h100_sm90": 3}   # 2026-11-10: kits; H100 d384 cuBLAS; fp32 eval f32io
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:h100_sm90": 4}   # 2026-11-10: kits; H100 d384 cuBLAS; fp32 eval f32io; fp32 fused fwd d256 / d512 + train
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
