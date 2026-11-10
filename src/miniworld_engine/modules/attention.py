@@ -211,8 +211,10 @@ class AttentionPairBias(BackendModule, MasterWeights):
     # float32 activations with float32 parameters (the TF32 path: attn_tf32 core, fp32 row / pair kernels, fp32 GEMMs), one batch row,
     # 8 x 48 / 12 x 32 / 16 x 24 / 24 x 16 heads at d_single 384 or 16 x 32 at 512, d_pair 128, 256 / 384 (8 or 16 heads) or 512 (16 heads),
     # gate_bias, no QK-norm, no extra_pair_bias, L a multiple of 128; everything else is refused, never run elsewhere.
-    # A100 (sm_80): kernels/integrations/attention_pair_bias_sm80.py (bf16 activations, B = 1, the same head layouts, d_pair 128, any L, no
-    # QK-norm, no gate_bias, no extra_pair_bias; inference and training); its ``refusal`` is the range there.
+    # A100 (sm_80): kernels/integrations/attention_pair_bias_sm80.py -- the fused C++ step (bf16 activations, B = 1, the same head layouts,
+    # d_pair 128, any L, no gate_bias) and, for fp32 (TF32 core), the wider pairs (256 / 384 / 512) and gate_bias, the path composed from
+    # the sm_80 attention kernels (B = 1, L a multiple of 128, head dims 16-64); no QK-norm, no extra_pair_bias; inference and training.
+    # Its ``refusal`` is the range there.
     def _supports_cuda(self, single, pair, mask=None, extra_pair_bias=None) -> str | None:
         from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as native
 

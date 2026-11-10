@@ -820,12 +820,12 @@ def pair_bias_generic(
 
 
 #: pair-bias backward at any width (``pair_bias_gen_bwd``): the widths (-> elements per tile) and head counts it is instantiated for
-_GEN_BWD_TE = {64: 128, 128: 64, 256: 32, 512: 16}
+_GEN_BWD_TE = {64: 128, 128: 64, 256: 32, 384: 16, 512: 16}
 GEN_BWD_HEADS = (8, 12, 16, 24)
 
 
 def pair_bias_generic_bwd_supported(dp: int, heads: int, dtype: torch.dtype) -> bool:
-    """The generic pair-bias backward's requirements: bf16 / fp32 pair, a width of 64 / 128 / 256 / 512, 8 / 12 / 16 / 24 heads, the tile in shared memory."""
+    """The generic pair-bias backward's requirements: bf16 / fp32 pair, a width of 64 / 128 / 256 / 384 / 512, 8 / 12 / 16 / 24 heads, the tile in shared memory."""
     te = _GEN_BWD_TE.get(dp)
     return (
         te is not None

@@ -471,8 +471,9 @@ void launch_gen_bwd_c(int64_t C, int64_t H, const torch::Tensor& z, const torch:
   if (C == 64) launch_gen_bwd_h<64, T>(H, z, wcm, db, dz, pw, kvp, N, NZ, rows, eps);
   else if (C == 128) launch_gen_bwd_h<128, T>(H, z, wcm, db, dz, pw, kvp, N, NZ, rows, eps);
   else if (C == 256) launch_gen_bwd_h<256, T>(H, z, wcm, db, dz, pw, kvp, N, NZ, rows, eps);
+  else if (C == 384) launch_gen_bwd_h<384, T>(H, z, wcm, db, dz, pw, kvp, N, NZ, rows, eps);   // AttentionPairBias d_pair 384 (TE 16)
   else if (C == 512) launch_gen_bwd_h<512, T>(H, z, wcm, db, dz, pw, kvp, N, NZ, rows, eps);
-  else TORCH_CHECK(false, "pair_bias_gen_bwd: C 64, 128, 256 or 512");
+  else TORCH_CHECK(false, "pair_bias_gen_bwd: C 64, 128, 256, 384 or 512");
 }
 }  // namespace
 
