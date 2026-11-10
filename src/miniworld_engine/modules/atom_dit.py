@@ -619,6 +619,8 @@ class AtomDiTProtenix(_LocalAtomDiT):
     backends = ("pytorch", "anthropic", "cuda", "triton")
     key_window = "pad"
     kv_norm = "chained"
+    #: 2026-11-10: H100 "slide": the five edge windows on the edge kernels (dit_variants edge.cu; were torch)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 2}
 
 
 class AtomDiTOpenFold3(_LocalAtomDiT):
@@ -629,6 +631,8 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
+    #: 2026-11-10: H100 "slide" / "slide_qblock": the five edge windows on the edge kernels (dit_variants edge.cu; were torch)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 2}
 
 
 class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
@@ -648,9 +652,9 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
     kv_norm = "shared"
     transition_part = UpGatedConditionedTransition
     #: H100: the one atom DiT implementation (local_dit_h100: one AdaLN, the up-gate transition) for these key windows
-    _h100_local = ("pad",)
-    #: 2026-11-10: H100 "pad" on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants)
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 2}
+    _h100_local = ("pad", "slide")
+    #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
     _release_module = "boltz_atom_kernels"
     _release_path = "boltz2/opt/forward/atom/src"
 
@@ -707,10 +711,10 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     parallel = True
     attention_part = FlatQKNormAugmentedAttention
     #: H100: the one atom DiT implementation (local_dit_h100: one AdaLN, parallel, the flat q / k LayerNorm, a bias-free query) for these
-    #: key windows; "slide" stays on kernels/dit_variants until the slid edge windows are on CUDA there
-    _h100_local = ("pad",)
-    #: 2026-11-10: H100 "pad" on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants)
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 2}
+    #: key windows
+    _h100_local = ("pad", "slide")
+    #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
 
 
 class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
@@ -728,12 +732,11 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
     kv_norm = "shared"
     parallel = True
     attention_part = UngatedAugmentedAttention
-    #: H100: the one atom DiT implementation (local_dit_h100: one AdaLN, identity AdaLN, parallel, uid) for these key windows; "slide"
-    #: stays on kernels/dit_variants until the slid edge windows are on CUDA there (its small-N training was slower). Accepted: fp32 eval
-    #: at N >= 5120 is YELLOW on one element (1.13e-3 vs tol 9.6e-4; the old path's worst element, 8.1e-4), every case faster
-    _h100_local = ("pad",)
-    #: 2026-11-10: H100 "pad" on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants)
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 2}
+    #: H100: the one atom DiT implementation (local_dit_h100: one AdaLN, identity AdaLN, parallel, uid) for these key windows. Accepted:
+    #: "pad" fp32 eval at N >= 5120 is YELLOW on one element (1.13e-3 vs tol 9.6e-4; the old path's worst element, 8.1e-4), every case faster
+    _h100_local = ("pad", "slide")
+    #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
 
     def __init__(self, d_single: int = 128, d_cond: int = 128, d_pair: int = 16, n_head: int = 4, n: int = 2, *,
                  key_window: str | None = None, adaln_eps: float = 0.1, backend: str = "pytorch") -> None:

@@ -7,7 +7,7 @@ run the TF32 kernels; operands are rounded to nearest tf32, the residual stream,
     inference  cond90 (hoisted) -> pre90 -> window attention -> post90
     training   the same forward saving its activations; tr_bwd90 -> post_bwd90 -> window attention backward -> pre_bwd90 (pre_bwd90_par:
                the parallel K / V AdaLN) -> cond_bwd90 -> finalize90. The slid window (AF3 "slide", IntelliFold2 "slide_qblock"): the clipped
-               kernels for every window, the five edge windows recomputed in torch (forward) and differentiated in torch (backward).
+               kernels for every window, the five edge windows recomputed and differentiated by the edge kernels (dit_variants edge.cu).
 """
 
 from __future__ import annotations
@@ -30,15 +30,22 @@ _HOIST_BIAS: dict = {}
 _HOIST_EDGES: dict = {}  # (pair tensor, LN / bias weights) -> the slid edge windows' indices, key mask and pair bias
 
 
+def _edge_ext():
+    """The slid edge window kernels (kernels/dit_variants/cuda/edge.cu, sm_90a; the A100 atom path builds the same source for sm_80)."""
+    from miniworld_engine.kernels.dit_variants import cuda
+
+    return cuda.edge_ext()
+
+
 def _edge_tables(z, gamma, wb, n, kmask, n0, qblock=False, uid=None):
-    """What the slid edge windows read that does not change between the steps of a fold: the five window indices, their key positions and
-    validity, and their pair bias [5, h, 32, 128] (the pair LayerNorm and projection of those windows only). It depends on the real atom
-    count, the pair and the block's LN / bias weights, so it is built once per pair (``_HOIST_EDGES``) and read at every step."""
+    """What the slid edge windows read that does not change between the steps of a fold: the five window indices [5], their key positions
+    [5, 128] and their pair bias [5, h, 32, 128] (fp32, natural units, -inf off the valid keys: ``edge_bias_fwd``, the pair LayerNorm and
+    projection of those windows only). It depends on the real atom count, the pair and the block's LN / bias weights, so inference builds it
+    once per pair (``_HOIST_EDGES``) and reads it at every step."""
     idx, keys, valid = _edge_index(z, n, kmask, n0, qblock)
-    valid = _edge_valid(valid, idx, keys, kmask, uid)
-    bias = _edge_bias(z[idx].float(), gamma.float(), wb.float())
-    mask = ~valid[None, :, None, :, :]
-    return idx, keys, mask, bias[None].contiguous()
+    valid = _edge_valid(valid, idx, keys, kmask, uid).expand(5, 32, DS).to(torch.uint8).contiguous()
+    ebias = _edge_ext().edge_bias_fwd(z[idx].contiguous(), gamma.float().contiguous(), wb.float().contiguous(), valid, _ld.EPS)
+    return idx, keys.contiguous(), ebias
 
 
 def _edge_index(z, n, kmask, n0, qblock=False):
@@ -71,100 +78,56 @@ def _edge_valid(valid, idx, keys, kmask, uid):
     return valid[:, None, :] & same
 
 
-def _edge_bias(ze, gamma, wb):
-    """The pair bias [5, h, 32, 128] of the edge windows' pair rows ``ze`` [5, 32, 128, 16] (fp32): LN(z) gamma . Wb."""
-    import torch.nn.functional as F
-
-    zz = F.layer_norm(ze, (DP,), gamma, None, _ld.EPS)
-    return F.linear(zz, wb).permute(0, 3, 1, 2)
-
-
-def _slid_edges_bwd(do, dd, q, k, v, z, gamma, wb, n, kmask, n0, qblock, a, uid=None):
-    """The backward of ``_slid_edges`` (training, one pair), before the window kernels. Those must not see the five edge windows (their
-    forward output was replaced): their rows of ``do`` / ``dd`` are zeroed in place, so the kernels give them no dq / dk / dv / dbias.
-    Their gradients are taken here in fp32 torch, the backward of the forward's math (a window chosen twice, small systems, counts once:
-    the first choice) -> what ``_slid_edges_add`` adds once the kernels have written dp and dz."""
-    h, dh = NH, DS // NH
-    nwin = n // 32
-    idx, keys, valid = _edge_index(z, n, kmask, n0, qblock)
-    valid = _edge_valid(valid, idx, keys, kmask, uid)
-    first = torch.ones(5, device=z.device, dtype=torch.bool)
-    for j in range(1, 5):
-        first[j] = (idx[j] != idx[:j]).all()
-    g_out = do.view(a, nwin, 32, DS)[:, idx].float() * first[None, :, None, None]   # [a, 5, 32, 128]
-    do.view(a, nwin, 32, DS).index_fill_(1, idx, 0)
-    dd.view(a, NH, nwin, 32).index_fill_(2, idx, 0)
-    kf = keys.reshape(-1)                                                        # [640]
-    # written out (the opaque op runs below autograd): the window softmax backward, then the pair LayerNorm / projection backward
-    qs = q.view(a, nwin, 32, h, dh)[:, idx].float()                              # [a, 5, 32, h, d]
-    ks = k.view(a, n, h, dh)[:, kf].float().view(a, 5, DS, h, dh)                # [a, 5, 128, h, d]
-    vs = v.view(a, n, h, dh)[:, kf].float().view(a, 5, DS, h, dh)
-    gf, wf = gamma.float(), wb.float()
-    ze = z[idx].float()                                                          # [5, 32, 128, 16]
-    mu = ze.mean(-1, keepdim=True)
-    rstd = torch.rsqrt(((ze - mu) ** 2).mean(-1, keepdim=True) + _ld.EPS)
-    zn = (ze - mu) * rstd
-    zg = zn * gf
-    bias = torch.einsum("wqkc,hc->whqk", zg, wf)                                 # [5, h, 32, 128]
-    scale = dh**-0.5
-    logits = torch.einsum("awqhd,awkhd->awhqk", qs, ks) * scale + bias[None]
-    logits = logits.masked_fill(~valid[None, :, None, :, :], float("-inf"))
-    probs = torch.nan_to_num(torch.softmax(logits, dim=-1))                      # [a, 5, h, 32, 128]
-    g = g_out.view(a, 5, 32, h, dh)
-    dprob = torch.einsum("awqhd,awkhd->awhqk", g, vs)
-    dvs = torch.einsum("awhqk,awqhd->awkhd", probs, g)
-    ds = probs * (dprob - (probs * dprob).sum(-1, keepdim=True))                 # d logits (0 at masked keys)
-    dqs = torch.einsum("awhqk,awkhd->awqhd", ds, ks) * scale
-    dks = torch.einsum("awhqk,awqhd->awkhd", ds, qs) * scale
-    dbias = ds.sum(0)                                                            # [5, h, 32, 128]
-    dwb = torch.einsum("whqk,wqkc->hc", dbias, zg)
-    dzg = torch.einsum("whqk,hc->wqkc", dbias, wf)
-    dgamma = (dzg * zn).sum((0, 1, 2))
-    dzn = dzg * gf
-    dze = rstd * (dzn - dzn.mean(-1, keepdim=True) - zn * (dzn * zn).mean(-1, keepdim=True))
-    return idx, kf, (dqs, dks, dvs, dze, dgamma, dwb)
-
-
-def _slid_edges_add(edges, dp, dz):
-    """Add ``_slid_edges_bwd``'s gradients: dq into ``dp[:, 128:256]`` (the edge windows' rows, zero from the kernels), dk / dv into
-    ``dp[:, 256:512]`` at the slid key positions (each touched row summed once in fp32 and written back: no atomics, deterministic),
-    d z into ``dz`` at the edge windows (zero from the kernels). -> dz, the extra d gamma_pair and d Wb."""
-    idx, kf, (dq, dk, dv, dze, dg, dwb) = edges
-    a, n = dq.shape[0], dp.shape[0] // dq.shape[0]
-    nwin = n // 32
-    dp[:, DS : 2 * DS].view(a, nwin, 32, DS).index_add_(1, idx, dq.reshape(a, 5, 32, DS).to(dp.dtype))
-    same = (kf[:, None] == kf[None, :]).float()                                  # [640, 640]: rows of one key position
-    for col, g in ((2 * DS, dk), (3 * DS, dv)):
-        tgt = dp[:, col : col + DS].view(a, n, DS)
-        with _fp32_exact():   # 0 / 1 weights: an exact fp32 sum
-            tot = tgt[:, kf].float() + torch.einsum("ij,ajc->aic", same, g.reshape(a, 5 * DS, DS))
-        tgt.index_copy_(1, kf, tot.to(dp.dtype))   # a repeated position writes the same total
-    dz.index_add_(0, idx, dze.to(dz.dtype))
-    return dz, dg, dwb
-
-
 def _slid_edges(o, q, k, v, tables, a, groups, n):
     """Overwrite the attention output ``o`` [A, N, 128] of the windows whose slid key window is not the clipped one with the attention
-    over their slid key windows (torch, fp32). Those are windows 0 and 1 and the last three real windows (a window ends at
-    ``32 w + 80``, so at most three end past the last real atom): five windows chosen on the device from the real atom count, so there
-    is no host read and the call can be captured. A window chosen twice is computed twice with the same result.
+    over their slid key windows. Those are windows 0 and 1 and the last three real windows (a window ends at ``32 w + 80``, so at most three
+    end past the last real atom): five windows chosen on the device from the real atom count, so there is no host read and the call can be
+    captured. A window chosen twice is computed twice with the same result.
 
-    ``a`` samples laid out [a / G][G] over G pairs (G = 1: one pair): ONE set of torch ops over [a / G, G, ...]. The five windows, their key
-    positions and validity depend on the real atom count only, which the G pairs of one input share (``tables[g][:3]`` are equal); only the
-    pair bias differs, ``tables[g][3]`` stacked to [G, 5, h, 32, 128]. ``tables``: one ``_edge_tables`` per pair."""
-    idx, keys, mask, _ = tables[0]
-    bias = torch.cat([t[3] for t in tables], 0)
+    One pair: ``edge_attn_fwd`` (fp32 in the kernel). ``a`` samples laid out [a / G][G] over G > 1 pairs (bf16 inference only): the kernel
+    once per pair on that pair's samples (strided [a / G] rows: a contiguous copy in and out). The five windows and their key positions
+    depend on the real atom count only, which the G pairs of one input share; only the bias differs. ``tables``: one ``_edge_tables`` per
+    pair."""
+    idx, keys, _ = tables[0]
+    ext = _edge_ext()
+    if groups == 1:
+        ext.edge_attn_fwd(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), keys, idx, tables[0][2], o.view(a, n, DS))
+        return
     ag = a // groups
-    h, d = NH, DS // NH
-    nwin = n // 32
-    qs = q.view(ag, groups, nwin, 32, h, d)[:, :, idx].float()
-    ks = k.view(ag, groups, n, h, d)[:, :, keys].float()
-    vs = v.view(ag, groups, n, h, d)[:, :, keys].float()
-    logits = torch.einsum("agwqhd,agwkhd->agwhqk", qs, ks) * d**-0.5 + bias[None]
-    logits = logits.masked_fill(mask[None], float("-inf"))
-    probs = torch.nan_to_num(torch.softmax(logits, dim=-1))
-    out = torch.einsum("agwhqk,agwkhd->agwqhd", probs, vs).reshape(ag, groups, 5, 32, DS)
-    o.view(ag, groups, nwin, 32, DS).index_copy_(2, idx, out.to(o.dtype))
+    for g, t in enumerate(tables):
+        qg, kg, vg = (x.view(ag, groups, n, DS)[:, g].contiguous() for x in (q, k, v))
+        og = o.view(ag, groups, n, DS)[:, g].contiguous()
+        ext.edge_attn_fwd(qg, kg, vg, keys, idx, t[2], og)
+        o.view(ag, groups, n, DS)[:, g].copy_(og)
+
+
+def _slid_edges_bwd(do, dd, q, k, v, tables, a, n):
+    """The edge windows' backward before the window kernels (one pair, training): ``edge_bwd_compute`` takes their dq / dk / dv (fp32 side
+    buffers) and d bias (per sample) and zeroes their rows of ``do`` / ``dd``, so the kernels give them no dq / dk / dv / dbias (their
+    forward output was replaced). A window chosen twice counts once. -> what ``_slid_edges_add`` adds once the kernels wrote dp and dz."""
+    idx, keys, ebias = tables
+    dev = q.device
+    dqe = torch.empty(a, 5, 32, DS, device=dev, dtype=F32)
+    dke = torch.empty(a, 5, DS, DS, device=dev, dtype=F32)
+    dve = torch.empty(a, 5, DS, DS, device=dev, dtype=F32)
+    dbp = torch.empty(a, 5, NH, 32, DS, device=dev, dtype=F32)
+    _edge_ext().edge_bwd_compute(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), do.view(a, n, DS), dd, keys, idx, ebias, dqe, dke,
+                                 dve, dbp)
+    return dqe, dke, dve, dbp
+
+
+def _slid_edges_add(edges, tables, dp, dz, z, gamma, wb, a, n):
+    """Add ``_slid_edges_bwd``'s gradients: dq / dk / dv into ``dp[:, 128:512]`` (``edge_bwd_apply``: one CTA per (sample, head, 8 columns)
+    adds the five windows in order, deterministic), and the pair LayerNorm / projection backward of the edge windows' bias
+    (``edge_bias_bwd``) into ``dz`` at the edge windows. -> dz, the extra d gamma_pair [16] and d Wb [h, 16]."""
+    idx, keys, _ = tables
+    dqe, dke, dve, dbp = edges
+    ext = _edge_ext()
+    ext.edge_bwd_apply(dp[:, DS:], keys, idx, dqe, dke, dve, a, n)
+    dz_e, part = ext.edge_bias_bwd(z[idx].contiguous(), gamma.float().contiguous(), wb.float().contiguous(), dbp.sum(0), _ld.EPS)
+    dz.index_add_(0, idx, dz_e.to(dz.dtype))
+    tot = part.sum(0)
+    return dz, tot[:DP], tot[DP:].view(NH, DP)
 
 
 # --------------------------------------------------------------------------------------------------------------------- the ops
@@ -417,8 +380,9 @@ def _bwd(
         da2, du, gated, do, dd, cs_so, cs_sc2 = k90.post_bwd(
             dab, dyp, s2 if pars else a2, mod, u, sg, o, pb, dmod, dp, n, tf32, eps=eps, nmod=nmod, shared=sh, options=opts
         )
-        if slide:  # the edge windows: their do / dd rows zeroed for the kernels, their gradients from torch
-            edges = _slid_edges_bwd(do, dd, q, k, v, z, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0, qblock, a, uid)
+        if slide:  # the edge windows: their do / dd rows zeroed for the window kernels, their gradients from the edge kernels
+            etab = _edge_tables(z, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0, qblock, uid)
+            edges = _slid_edges_bwd(do, dd, q, k, v, etab, a, n)
         dbias = local.attn_bwd_mma(
             q.view(a, n, DS),
             k.view(a, n, DS),
@@ -432,7 +396,7 @@ def _bwd(
         )
         dzk, dgamma_pair, dwb = local.pair_bias_bwd_mma(z, p["gamma"], p["wbias"], dbias)
         if slide:  # after the kernels wrote dp and dz: add the edge windows' dq / dk / dv / d z
-            dz, dg_e, dwb_e = _slid_edges_add(edges, dp, dzk)
+            dz, dg_e, dwb_e = _slid_edges_add(edges, etab, dp, dzk, z, weights[_ld._GAMMA], weights[_ld._WBIAS], a, n)
             dgamma_pair, dwb = dgamma_pair + dg_e, dwb + dwb_e
         else:
             dz = dzk
