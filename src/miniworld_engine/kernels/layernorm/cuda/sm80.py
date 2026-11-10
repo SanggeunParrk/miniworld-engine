@@ -13,15 +13,14 @@ into the epilogue).  A row is read once and written once (the byte floor of the 
   chunks of rows from a work counter, so which rows land in which partial row varies and ``dw`` / ``db`` agree between runs to fp32 rounding (``dx`` and the forward are always
   bit-reproducible).
 
-``supports`` is the whole gate (capability 8.0, engine backend not forced to Triton, ``settings.norms_sm80`` not 0, a bf16 / fp32 activation, widths up to 4096); everything it
-refuses keeps the Triton path.  A failed extension build warns once and keeps it too.  Training is an autograd function over two opaque ops (the forward saves x and the
+:func:`refusal` / :func:`supports` are the whole range (capability 8.0, a bf16 / fp32 activation, widths up to 4096, an fp32 / bf16 affine); the caller (the ``cuda`` backend of
+``modules.LayerNorm`` / ``modules.RMSNorm``) refuses everything else -- there is no fallback.  Training is an autograd function over two opaque ops (the forward saves x and the
 row statistics; the backward needs no recomputation); parameter gradients come back in the parameters' dtype.  ``kernels/rmsnorm/cuda/sm80.py`` drives the RMSNorm side.
 """
 
 from __future__ import annotations
 
 import functools
-import hashlib
 import warnings
 from pathlib import Path
 
@@ -29,7 +28,6 @@ import torch
 from torch import Tensor
 from torch.autograd.function import once_differentiable
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
 
@@ -42,16 +40,10 @@ _FAILED = False
 
 @functools.lru_cache(maxsize=1)
 def ext():
-    """The row-kernel extension, built on first use (``settings.norms_sm80_flags``: extra nvcc flags for A/B experiments, their own build)."""
+    """The row-kernel extension (``norm_rows_sm80``), built on first use (or taken from the prebuilt / JIT cache)."""
     ensure_cuda_home()
-    extra = settings.current().norms_sm80_flags.split()
-    tag = (
-        ""
-        if not extra
-        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
-    )
     return load_extension(
-        name=f"norm_rows_sm80{tag}",
+        name="norm_rows_sm80",
         sources=[str(_dir / "norm_rows.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -59,7 +51,6 @@ def ext():
             "-O3",
             "-gencode=arch=compute_80,code=sm_80",
             f"-I{_dir}",
-            *extra,
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
@@ -68,7 +59,7 @@ def ext():
 
 @torch.compiler.assume_constant_result
 def loads() -> bool:
-    """Builds (first call) or loads the extension; False, with one warning, when the toolchain fails (the Triton path then serves).
+    """Builds (first call) or loads the extension; False, with one warning, when the toolchain fails (the caller then refuses the call).
 
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
     global _FAILED
@@ -76,13 +67,9 @@ def loads() -> bool:
         return False
     try:
         ext()
-    except Exception as exc:  # noqa: BLE001 -- any toolchain problem keeps the Triton path
+    except Exception as exc:  # noqa: BLE001 -- any toolchain problem: the backend refuses
         _FAILED = True
-        warnings.warn(
-            f"sm_80 norm kernels unavailable, keeping the Triton path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+        warnings.warn(f"sm_80 norm kernels unavailable: {exc!r}", RuntimeWarning, stacklevel=2)
         return False
     return True
 
@@ -94,15 +81,10 @@ def _is_a100(index: int) -> bool:
 
 
 def enabled(device: torch.device) -> bool:
-    """The switches every norm kernel of this card shares: ``settings.norms_sm80`` not 0, the engine backend not forced to Triton, capability exactly 8.0."""
-    if (
-        settings.current().norms_sm80 == "0"
-        or settings.current().engine_backend == "triton"
-    ):
+    """Capability exactly 8.0 (the card every norm kernel of this file is built for)."""
+    if device.type != "cuda":
         return False
-    return _is_a100(
-        device.index if device.index is not None else torch.cuda.current_device()
-    )
+    return _is_a100(device.index if device.index is not None else torch.cuda.current_device())
 
 
 def _params_ok(n: int, *params: Tensor | None) -> bool:
@@ -110,57 +92,32 @@ def _params_ok(n: int, *params: Tensor | None) -> bool:
     seen = {p.dtype for p in params if p is not None}
     if len(seen) > 1 or not seen <= {torch.float32, torch.bfloat16}:
         return False
-    return all(
-        p is None or (p.is_cuda and p.ndim == 1 and p.shape[0] == n) for p in params
-    )
+    return all(p is None or (p.is_cuda and p.ndim == 1 and p.shape[0] == n) for p in params)
 
 
-#: Training steps this small are launch-bound: the forward, the backward and the dw / db reduction are three kernels of ~3 us each, and the Triton path's forward + one atomic backward wins by 3-35 % there
-#: (measured 2026-10-04, one process, CUDA graph: token_single L128 at 384 / 768 wide, the MSA stream at L128 / 64 wide; no cell above 100 K elements, none below 20 K, was slower).  Those calls keep the Triton path;
-#: ``settings.norms_sm80=force`` runs the CUDA rows at every size (the kernels are reachable, and tested, for them).
-_TINY_TRAIN_ELEMS = (20_000, 100_000)
-_TINY_TRAIN_WIDTHS = (64, 768)
+def refusal(x: Tensor, weight: Tensor | None, bias: Tensor | None, row_scale: Tensor | None = None) -> str | None:
+    """Why the kernels cannot run this call, or ``None``: a CUDA bf16 / fp32 activation of width 1..4096 on an A100, an fp32 / bf16 affine (or none) of one dtype, the
+    extension built.  Shapes, dtypes and the device only (capture-safe)."""
+    if not x.is_cuda:
+        return "the sm_80 norm kernels run on CUDA tensors only"
+    if not enabled(x.device):
+        return "the sm_80 norm kernels are the A100 (capability 8.0) builds"
+    if x.dtype not in (torch.bfloat16, torch.float32):
+        return f"dtype {x.dtype}: the sm_80 norm kernels take bfloat16 / float32 activations"
+    if x.ndim < 1 or not 1 <= x.shape[-1] <= MAX_N or x.numel() == 0:
+        return f"width {x.shape[-1] if x.ndim else 0}: the sm_80 norm kernels take rows of 1..{MAX_N} elements (non-empty)"
+    if not _params_ok(x.shape[-1], weight, bias):
+        return "the affine must be CUDA vectors of the row width, all float32 or all bfloat16"
+    if row_scale is not None and row_scale.numel() != x.numel() // x.shape[-1]:
+        return "row_scale must hold one factor per row"
+    if not loads():
+        return "the sm_80 norm extension failed to build"
+    return None
 
 
-def _triton_wins(x: Tensor, weight: Tensor | None, bias: Tensor | None) -> bool:
-    """A training call (a gradient is needed) of a vector-path width over so few elements that the Triton path is faster; False otherwise.  Shapes and flags only: ``torch.compile`` traces it."""
-    n = x.shape[-1]
-    if (
-        n % 8
-        or not _TINY_TRAIN_WIDTHS[0] <= n <= _TINY_TRAIN_WIDTHS[1]
-        or not _TINY_TRAIN_ELEMS[0] <= x.numel() <= _TINY_TRAIN_ELEMS[1]
-    ):
-        return False
-    return torch.is_grad_enabled() and (
-        x.requires_grad
-        or (weight is not None and weight.requires_grad)
-        or (bias is not None and bias.requires_grad)
-    )
-
-
-def supports(
-    x: Tensor,
-    weight: Tensor | None,
-    bias: Tensor | None,
-    row_scale: Tensor | None = None,
-) -> bool:
-    """Whether the kernels run this call: a CUDA bf16 / fp32 activation of width 1..4096, an fp32 / bf16 affine (or none), A100, switches on, extension built, and not one of the tiny training
-    steps the Triton path wins (:func:`_triton_wins`; ``settings.norms_sm80=force`` serves those too)."""
-    if (
-        not x.is_cuda
-        or x.dtype not in (torch.bfloat16, torch.float32)
-        or x.ndim < 1
-        or not 1 <= x.shape[-1] <= MAX_N
-        or x.numel() == 0
-    ):
-        return False
-    if not _params_ok(x.shape[-1], weight, bias) or (
-        row_scale is not None and row_scale.numel() != x.numel() // x.shape[-1]
-    ):
-        return False
-    if _triton_wins(x, weight, bias) and settings.current().norms_sm80 != "force":
-        return False
-    return enabled(x.device) and loads()
+def supports(x: Tensor, weight: Tensor | None, bias: Tensor | None, row_scale: Tensor | None = None) -> bool:
+    """Whether the kernels run this call (:func:`refusal` is ``None``)."""
+    return refusal(x, weight, bias, row_scale) is None
 
 
 # ------------------------------------------------------------------------------------------------------------------ forward ops

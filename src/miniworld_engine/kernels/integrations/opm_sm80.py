@@ -2,7 +2,8 @@
 
 Contract: bf16 MSA ``[1, S, L, d_msa]`` (d_msa 64 or 128, any S, any L), d_hidden 32, d_pair 128 / 256 / 384, an optional bool mask ``[1, S, L]``, an optional bf16
 pair residual ``[1, L, L, d_pair]`` (fused into the epilogue; its gradient is the output's), either normalisation order (``normalize_before_proj``), no interchain
-mask, ``implementation="miniworld"`` with the engine backend not forced to Triton, capability 8.0. Everything else keeps the module's previous path (Triton).
+mask, no projection bias / groups / count_offset, capability 8.0. ``refusal`` is the range; ``modules.OuterProductMean``'s ``cuda`` backend refuses everything else
+(no fallback).
 
 The step (``kernels/outer_product_mean/cuda/sm80``; ``kernels/outer_product_mean/cuda/sm80.py`` documents the kernels):
 
@@ -11,11 +12,9 @@ The step (``kernels/outer_product_mean/cuda/sm80``; ``kernels/outer_product_mean
   backward  dgrad (dz / n -> dO in the grouped layout, dbo) -> dA = B dO^T, dB = A dO (own CUDA at S1024/L128/CM64/CZ128; cuBLAS elsewhere) -> dwo (split over rows of i, fixed-order sum off the kept O)
             -> prologue_bwd (mask, both projection gradients, the LayerNorm backward -> dmsa, dWl, dWr, dgamma, dbeta).
 
-Inference is one opaque op; training is one autograd Function whose forward and backward are each one opaque op. ``settings.opm_sm80 = False`` turns the path off
-(``settings.opm_sm80_save_o = False`` recomputes O in the backward instead of keeping it: 1.2 GB at L768). Numerics and timings: ``docs/gpus/a100/outer_product/``.
+Inference is one opaque op; training is one autograd Function whose forward and backward are each one opaque op. The backward keeps O (1.2 GB at L768). Numerics and timings: ``docs/gpus/a100/outer_product/``.
 
 The qualified short training pipeline uses C++ stage dispatch and two own-CUDA gradient GEMMs; its forward outer product still uses cuBLAS.
-``settings.opm_sm80_native128_pipeline = False`` selects the previous short training implementation.
 """
 
 from __future__ import annotations
@@ -24,10 +23,8 @@ import warnings
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.modules.exceptions import ImplementationType
 
 _FAILED = False
 CH = 32
@@ -60,52 +57,45 @@ def _sm80():
     return sm80
 
 
-def _eligible(
+def refusal(
     module,
     msa: torch.Tensor,
     mask: torch.Tensor | None,
     token_asym_id: torch.Tensor | None,
     residual: torch.Tensor | None,
-) -> bool:
-    if not settings.current().opm_sm80:
-        return False
-    if (
-        module.implementation != ImplementationType.MINIWORLD
-        or settings.current().engine_backend == "triton"
-    ):
-        return False
+) -> str | None:
+    """Why the sm_80 kernels cannot run this call, or ``None`` (the contract above). Shapes, dtypes and the device only, plus the build."""
+    if not msa.is_cuda or torch.cuda.get_device_capability(msa.device) != (8, 0):
+        return "the sm_80 OuterProductMean kernels are the A100 (capability 8.0) builds"
+    if getattr(module, "groups", 1) > 1:
+        return "grouped OPM (Chai-1): no sm_80 build"
+    if module.to_left.bias is not None:
+        return "projection biases (RoseTTAFold3): no sm_80 build"
+    if getattr(module, "count_offset", None) is not None:
+        return "count_offset: the sm_80 epilogue divides by the clamped pair count only"
     if module.mask_interchain and token_asym_id is not None:
-        return False
+        return "the interchain mask: no sm_80 build"
     ch, d_msa = module.to_left.weight.shape
     cz = module.to_out.weight.shape[0]
-    if (
-        module.ln_msa.weight is None
-        or not _sm80().supported(d_msa, ch, cz)
-        or module.to_out.weight.shape[1] != ch * ch
-    ):
-        return False
-    if (
-        not msa.is_cuda
-        or msa.dtype != torch.bfloat16
-        or msa.ndim != 4
-        or msa.shape[0] != 1
-        or msa.shape[3] != d_msa
-        or msa.shape[1] < 1
-    ):
-        return False
+    if module.ln_msa.weight is None or module.ln_msa.bias is None or not _sm80().supported(d_msa, ch, cz) or module.to_out.weight.shape[1] != ch * ch:
+        return (f"d_msa {d_msa}, d_hidden {ch}, d_pair {cz}: not an sm_80 build (d_hidden {CH}, d_msa {_sm80().D_MSA}, d_pair {_sm80().D_PAIR}, "
+                "affine LayerNorm)")
+    if msa.dtype != torch.bfloat16 or msa.ndim != 4 or msa.shape[3] != d_msa or msa.shape[1] < 1:
+        return "msa must be a bfloat16 [1, S, L, d_msa]"
+    if msa.shape[0] != 1:
+        return f"batch {msa.shape[0]}: the sm_80 kernels take one sample (batch 1)"
     length = msa.shape[2]
-    if residual is not None and (
-        residual.dtype != torch.bfloat16
-        or tuple(residual.shape) != (1, length, length, cz)
-    ):
-        return False
-    if mask is not None and (
-        tuple(mask.shape) != tuple(msa.shape[:3]) or mask.dtype != torch.bool
-    ):
-        return False
-    if torch.cuda.get_device_capability(msa.device) != (8, 0):
-        return False
-    return _loads()
+    if residual is not None and (residual.dtype != torch.bfloat16 or tuple(residual.shape) != (1, length, length, cz)):
+        return "the pair residual must be a bfloat16 [1, L, L, d_pair]"
+    if mask is not None and (tuple(mask.shape) != tuple(msa.shape[:3]) or mask.dtype != torch.bool):
+        return "mask must be a bool [1, S, L] mask"
+    if not _loads():
+        return "the sm_80 OuterProductMean extension failed to build"
+    return None
+
+
+def _eligible(module, msa, mask, token_asym_id, residual) -> bool:
+    return refusal(module, msa, mask, token_asym_id, residual) is None
 
 
 def serves_inference(
@@ -172,7 +162,7 @@ def _norm(
     """The mask counts n_ij = sum_s mask[s, i] mask[s, j] clamped to >= 1 (fp32 [L, L], exact: a bf16 0 / 1 product with fp32 accumulation), or (None, S) without a mask."""
     if mask is None:
         return None, float(depth)
-    override = settings.current().opm_sm80_mask_count_native
+    override = None
     native = (
         override
         if override is not None
@@ -206,7 +196,7 @@ def _mask_u8(mask: torch.Tensor | None) -> torch.Tensor | None:
 def _mask_epilogue_enabled(
     m: torch.Tensor, wo: torch.Tensor, training: bool = False
 ) -> bool:
-    override = settings.current().opm_sm80_mask_epilogue
+    override = None
     if override is not None:
         return override
     return (
@@ -228,7 +218,7 @@ def _mask_epilogue_enabled(
 def _pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
     # E053 measures host dispatch overhead. The grouped GEMMs still use cuBLAS.
     return (
-        settings.current().opm_sm80_pipeline
+        False
         and msa.shape[1] == 1024
         and msa.shape[-1] == 64
         and leaves[4].shape[0] == 128
@@ -237,7 +227,7 @@ def _pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
 
 def _native128_pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
     return (
-        settings.current().opm_sm80_native128_pipeline
+        True
         and msa.shape[1:3] == (1024, 128)
         and msa.shape[-1] == 64
         and leaves[4].shape[0] == 128
@@ -293,7 +283,7 @@ def inference(
             norm, nconst = _norm(
                 None if mk is None else mk,
                 m.shape[0],
-                clamp=(not settings.current().a100_cleanup),
+                clamp=True,   # the reference divides by clamp(n, 1)
             )
             out = sm.epilogue(
                 o,
@@ -488,7 +478,7 @@ def backward(
         dm, dwl, dwr, dg, dbt = sm.prologue_bwd(
             da, db, msa[0], stats, mk, lnw, lnb, wl, wr
         )
-    if settings.current().opm_sm80_typed_grad:
+    if False:
         from miniworld_engine.kernels.outer_product_mean.cuda import finalize_typed_sm80
 
         typed = finalize_typed_sm80.result(
@@ -543,7 +533,7 @@ class _Training(torch.autograd.Function):
 def update_train(
     module, msa: torch.Tensor, mask: torch.Tensor | None, residual: torch.Tensor | None
 ) -> torch.Tensor:
-    save_o = settings.current().opm_sm80_save_o
+    save_o = True
     return _Training.apply(
         float(module.ln_msa.eps),
         bool(module.normalize_before_proj),

@@ -7,13 +7,11 @@ the C fragments, squeeze in f16 with the residual as the accumulator's initial v
 """
 
 import functools
-import hashlib
 import warnings
 from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
 from ... import _capture
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 
@@ -27,16 +25,8 @@ CH = 32
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    extra = (
-        settings.current().transition_fwd_sm80_flags.split()
-    )  # experiments: extra nvcc flags (their own build)
-    tag = (
-        ""
-        if not extra
-        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
-    )
     return load_extension(
-        name=f"transition_fwd_sm80{tag}",
+        name="transition_fwd_sm80",
         sources=[str(_dir / "transition_fwd_sm80.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -44,10 +34,9 @@ def _ext():
             "-O3",
             "-gencode=arch=compute_80,code=sm_80",
             f"-I{_dir}",
-            *extra,
         ],
         extra_cflags=["-std=c++17", "-O3"],
-        verbose=bool(extra),
+        verbose=False,
     )
 
 
@@ -81,7 +70,7 @@ MIN_ROWS = {(64, 128): 2048, (64, 256): 4096, (128, 256): 10240, (128, 512): 122
 
 def supports(d: int, h: int, rows: int | None = None) -> bool:
     """A build exists for (d, h), the switch is not off and, when ``rows`` is given, the kernel is the faster path at that row count."""
-    if (d, h) not in SHAPES or not settings.current().transition_fused_fwd_sm80:
+    if (d, h) not in SHAPES:
         return False
     return rows is None or rows >= MIN_ROWS[(d, h)]
 

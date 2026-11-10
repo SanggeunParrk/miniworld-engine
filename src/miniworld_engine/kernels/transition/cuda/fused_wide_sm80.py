@@ -9,18 +9,15 @@ wgmma / tcgen05.  What is hand CUDA and what cuBLAS was decided by measurement (
               (cuBLAS, fp32 d_xn)  ->  ln_bwd (row kernel: dx = LN backward + dy, dgamma / dbeta partials per CTA, reduced in a fixed order)
 
 ``supported()`` is the whole gate: sm_80, bf16, width D in ``WIDTHS`` with hidden H a multiple of 64, any row count.  The reductions run in a
-fixed order (no atomics), so a replay is bit-identical.  ``settings.transition_wide_sm80=0`` (or ``settings.transition_fused_sm80=0``, the one switch
-of every A100 Transition path) turns it off.
+fixed order (no atomics), so a replay is bit-identical.
 """
 
 import functools
-import hashlib
 import warnings
 from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
 from ... import _capture
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
@@ -36,15 +33,8 @@ WIDTHS = (64, 128, 256, 384, 512, 768)
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # settings.transition_wide_sm80_flags: extra nvcc flags for experiments (their own build; "-Xptxas -v" shows the registers / spills)
-    extra = settings.current().transition_wide_sm80_flags.split()
-    tag = (
-        ""
-        if not extra
-        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
-    )
     return load_extension(
-        name=f"transition_wide_sm80{tag}",
+        name="transition_wide_sm80",
         sources=[str(_dir / "transition_wide_sm80.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -52,10 +42,9 @@ def _ext():
             "-O3",
             "-gencode=arch=compute_80,code=sm_80",
             f"-I{_dir}",
-            *extra,
         ],
         extra_cflags=["-std=c++17", "-O3"],
-        verbose=bool(extra),
+        verbose=False,
     )
 
 
@@ -81,22 +70,11 @@ def _loads() -> bool:
     return True
 
 
-def switched_off() -> bool:
-    """``settings.transition_wide_sm80=0`` or ``settings.transition_fused_sm80=0`` (the one switch of every A100 Transition path)."""
-    return (
-        not settings.current().transition_wide_sm80
-        or not settings.current().transition_fused_sm80
-    )
-
-
 _WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 
 
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """The kernels' own requirements: sm_80, bf16, D in WIDTHS, H % 64 == 0, any row count; the weights bf16 or fp32 (an fp32 master: the entries cast them to bf16 outside autograd); ``settings.transition_wide_sm80=0`` /
-    ``settings.transition_fused_sm80=0`` turn it off."""
-    if switched_off():
-        return False
+    """The kernels' own requirements: sm_80, bf16, D in WIDTHS, H % 64 == 0, any row count; the weights bf16 or fp32 (an fp32 master: the entries cast them to bf16 outside autograd)."""
     if (
         not x.is_cuda
         or x.dtype is not torch.bfloat16
@@ -222,7 +200,6 @@ def _save_ab(m: int, d: int, h: int, save: bool) -> bool:
         save
         and d >= SAVE_AB_MIN_D
         and m >= SAVE_AB_MIN_ROWS
-        and settings.current().transition_wide_save_ab
         and not (fused_bwd_sm80.supports(d, h, m) and fused_bwd_sm80.loads())
     )
 
@@ -360,18 +337,11 @@ def _bwd_launch(
         dab, hid = ext.gate_bwd(a_in, wa, wb, dh, dual)  # dA | dB [M, 2H], h [M, H]
     # B200's wide backward also keeps weight accumulators in FP32. Direct BF16
     # GEMM outputs fail the existing expand-weight gradient band at protocol D256.
-    full_precision_grad = d == 256 and settings.current().transition_wide_grad_fp32
+    full_precision_grad = d == 256
     mm_w = _mm_f32 if wdt is torch.float32 or full_precision_grad else torch.mm
     dws = mm_w(dy.t(), hid)  # [D, H]
     dwab = mm_w(dab.t(), a_in)  # [2H, D] = [dWa; dWb]
-    if (
-        full_precision_grad
-        and wdt is torch.bfloat16
-        and settings.current().transition_wide_grad_cast
-    ):
-        dwab, dws = ext.grad_cast(dwab, dws)
-    else:
-        dwab, dws = dwab.to(wdt), dws.to(wdt)
+    dwab, dws = dwab.to(wdt), dws.to(wdt)   # (the grad_cast kernel of the extension is the opt-in alternative; not used)
     wab = _wab(wa, wb)  # [2H, D]
     if ln:
         dxn = _mm_f32(dab, wab)  # [M, D] f32

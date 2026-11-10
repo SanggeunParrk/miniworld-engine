@@ -7,7 +7,6 @@ grad_reduce_fused_sm80 at the end of backward.
 
 import torch
 
-from miniworld_engine import settings
 
 from . import sm80
 
@@ -35,7 +34,7 @@ def glue(m, dres, o, lnw, lnb, wg, wo, keep, eps, dscale, tuned):
             partial,
             eps,
             dscale,
-            2 if settings.current().pwa_sm80_glue_pipeline else 1,
+            2 if False else 1,
         )
     else:
         sm80.ext().glue(
@@ -61,6 +60,6 @@ def pair(z, w, dw, mask, lnw, lnb, wb, eps):
     dz = torch.empty_like(z)
     pm = z.new_empty((z.shape[0], 1024), dtype=torch.float32)
     ps = z.new_empty((z.shape[0], 8), dtype=torch.float32)
-    variant = settings.current().pwa_sm80_pb
+    variant = 0
     sm80.ext().pair_bwd(z, w, dw, mask_tensor, lnw, lnb, wb, dz, pm, ps, eps, variant)
     return dz, pm, ps

@@ -191,6 +191,11 @@ class OuterProductMean(BackendModule, MasterWeights):
         why = self._common_refusal(msa, mask, residual)
         if why is not None:
             return None, why
+        if torch.cuda.get_device_capability(msa.device) == (8, 0):   # A100: kernels.integrations.opm_sm80 (forward + backward)
+            from miniworld_engine.kernels.integrations import opm_sm80
+
+            why = opm_sm80.refusal(self, msa, mask, token_asym_id, residual)
+            return ("sm80", None) if why is None else (None, f"opm_sm80: {why}")
         if torch.cuda.get_device_capability(msa.device) != (9, 0):
             return None, "the cuda backend is the H100 (sm_90a) kernels"
         from miniworld_engine.kernels.integrations import opm_train
@@ -233,6 +238,12 @@ class OuterProductMean(BackendModule, MasterWeights):
         from miniworld_engine.kernels.outer_product_mean import chai, composed
 
         route, _ = self._cuda_route(msa, mask, token_asym_id, residual)
+        if route == "sm80":
+            from miniworld_engine.kernels.integrations import opm_sm80
+
+            if torch.is_grad_enabled():
+                return opm_sm80.update_train(self, msa, mask, residual)
+            return opm_sm80.update_inference(self, msa, mask, residual)
         if route == "chai":
             return chai.forward(self, msa, mask, token_asym_id, residual)
         if route == "composed":
@@ -402,6 +413,11 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         why = self._common_refusal(msa, pair, mask)
         if why is not None:
             return why
+        if torch.cuda.get_device_capability(msa.device) == (8, 0):   # A100: kernels.integrations.pwa_sm80 (forward + backward)
+            from miniworld_engine.kernels.integrations import pwa_sm80
+
+            why = pwa_sm80.refusal(self, msa, pair, mask)
+            return None if why is None else f"pwa_sm80: {why}"
         if torch.cuda.get_device_capability(msa.device) != (9, 0):
             return "the cuda backend is the H100 (sm_90a) kernels"
         from miniworld_engine.kernels.integrations import pwa_train
@@ -411,6 +427,12 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
     def _forward_cuda(self, msa, pair, mask=None) -> torch.Tensor:
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return msa
+        if torch.cuda.get_device_capability(msa.device) == (8, 0):
+            from miniworld_engine.kernels.integrations import pwa_sm80
+
+            if self._trains():
+                return pwa_sm80.update_train(self, msa, pair, mask)
+            return pwa_sm80.update_inference(self, msa, pair, mask)
         from miniworld_engine.kernels.integrations import pwa_train
 
         if self._trains():

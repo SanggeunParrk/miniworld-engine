@@ -21,7 +21,6 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
 
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
@@ -96,7 +95,7 @@ def prologue(
     )
     if variant is None:
         variant = (
-            settings.current().opm_sm80_pl
+            0
         )  # schedule experiments (tile buffers); 0 is the shipped one
     ext().prologue(
         m,
@@ -129,7 +128,7 @@ def epilogue(
     out = o.new_empty((length, length, wo.shape[0]))
     if variant is None:
         variant = (
-            settings.current().opm_sm80_epi
+            0
         )  # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
     ext().epilogue(
         o,
@@ -159,7 +158,7 @@ def dgrad(
     dzn = torch.empty_like(dz)
     if variant is None:
         variant = (
-            settings.current().opm_sm80_dg
+            0
         )  # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
     bi = (
         2 if (variant == 3 and cz != 128) else 4
@@ -207,7 +206,7 @@ def prologue_bwd(
     S, L, cm = m.shape
     if variant is None:
         variant = (
-            settings.current().opm_sm80_pb
+            0
         )  # schedule experiments (buffers / CTAs per SM); 0 is the shipped one
     ntile = -(-S // 64) * -(-L // 2)
     nblk = min(

@@ -17,10 +17,9 @@ from .fused_sm80 import _is_fake
 
 
 def supported(x: torch.Tensor, d_out: int) -> bool:
-    """bf16 on an A100, width 128 / 256 / 512 in (the row kernels) and a multiple of 128 out (the tile GEMM's N), the wide switches on, the extension builds."""
+    """bf16 on an A100, width 128 / 256 / 512 in (the row kernels) and a multiple of 128 out (the tile GEMM's N), the extension builds."""
     if (
-        _wide.switched_off()
-        or not x.is_cuda
+        not x.is_cuda
         or x.dtype is not torch.bfloat16
         or x.shape[-1] not in (128, 256, 512)
         or d_out % 128

@@ -4,7 +4,6 @@ import functools
 from pathlib import Path
 import torch
 
-from miniworld_engine import settings
 
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 
@@ -49,8 +48,8 @@ def forward(m, mask, residual, leaves, eps, norm_first, training, save_o):
         norm_first,
         training,
         save_o,
-        settings.current().opm_sm80_pl,
-        settings.current().opm_sm80_epi,
+        0,
+        0,
     )
 
 
@@ -69,6 +68,6 @@ def backward(m, mask, leaves, saved, dz, norm_first):
         norm,
         dz,
         norm_first,
-        settings.current().opm_sm80_dg,
-        settings.current().opm_sm80_pb,
+        0,
+        0,
     )

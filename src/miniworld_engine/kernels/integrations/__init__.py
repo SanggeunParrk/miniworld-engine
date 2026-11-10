@@ -25,6 +25,9 @@ def prebuild(target, _rows):
         yield functools.partial(opm_train._ext, arch="sm100")
         yield pwa_train._k100
         return
+    if target.arch == "sm80":
+        yield from _prebuild_sm80()
+        return
     if target.arch != "sm90":
         return
     ext = functools.partial(opm_train._ext, None, arch="sm90")
@@ -84,3 +87,47 @@ def prebuild(target, _rows):
         yield functools.partial(pwa_wide._pair, dz)
     for dm, dh in sorted(value):
         yield functools.partial(pwa_wide._value, dm, dh)
+
+
+def _prebuild_sm80():
+    """A100: the extensions ``opm_sm80`` / ``pwa_sm80`` reach (their default selections), when a bf16 (master) OuterProductMean /
+    MSAPairWeightedAveraging row is in their range (``kernels/outer_product_mean/cuda/sm80.supported``, ``.../pair_weighted_averaging/cuda/sm80.supported``).
+    Each is one shape-independent extension (the sizes are launch parameters)."""
+    from miniworld_engine.kernels._prebuild import _kv, family_rows
+    from miniworld_engine.kernels.outer_product_mean.cuda import mask_count_ballot_sm80, mask_epilogue_sm80, pipeline_native128_sm80
+    from miniworld_engine.kernels.outer_product_mean.cuda import sm80 as opm
+    from miniworld_engine.kernels.pair_weighted_averaging.cuda import (
+        broadcast_native_sm80,
+        contract_gate_fused_sm80,
+        dw_native_sm80,
+        glue_tuned_sm80,
+        grad_reduce_fused_sm80,
+        grad_reduce_vector_sm80,
+        pair_partial_sm80,
+    )
+    from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80 as pwa
+
+    def plain(o):
+        return not any(k in o for k in ("groups", "projection_bias", "count_offset"))
+
+    opm_rows = [r for r in family_rows("outer_product_mean") if r["dtype"] in ("bfloat16", "master") and plain(_kv(r["options"]))
+                and opm.supported(int(_kv(r["dims"])["d_msa"]), int(_kv(r["dims"])["d_hidden"]), int(_kv(r["dims"])["d_pair"]))]
+    if opm_rows:
+        yield opm.ext
+        yield mask_count_ballot_sm80._ext
+        yield mask_epilogue_sm80._ext
+        if any(r["mode"] == "train" for r in opm_rows):
+            yield pipeline_native128_sm80._ext
+    pwa_rows = []
+    for r in family_rows("pair_weighted_averaging"):
+        d = _kv(r["dims"])
+        if r["dtype"] in ("bfloat16", "master") and pwa.supported(int(d["d_msa"]), int(d["d_pair"]), int(d.get("n_head", 8)),
+                                                                   int(d.get("d_hidden", int(d["d_msa"]) // int(d.get("n_head", 8))))):
+            pwa_rows.append(r)
+    if pwa_rows:
+        yield pwa.ext
+        yield pwa._bmm_ext
+        yield contract_gate_fused_sm80._ext
+        if any(r["mode"] == "train" for r in pwa_rows):
+            yield from (broadcast_native_sm80._ext, dw_native_sm80._ext, glue_tuned_sm80._ext, grad_reduce_fused_sm80._ext,
+                        grad_reduce_vector_sm80._ext, pair_partial_sm80._ext)

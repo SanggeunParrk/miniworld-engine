@@ -27,6 +27,22 @@ def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n):
     return None
 
 
+def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps):
+    """The sm_80 (A100) Transition dispatch of ``modules.Transition``'s ``cuda`` backend: ``x + transition(x)`` from ``fused_sm80`` (D = 128 /
+    hidden 512, whole 256-row tiles, at least ``fused_wide_sm80.FUSED_MIN_ROWS`` rows: one forward kernel, a two-kernel backward) or else
+    ``fused_wide_sm80`` (D in ``fused_wide_sm80.WIDTHS``, hidden a multiple of 64, any row count), or ``None`` when neither takes the call or
+    builds (the caller refuses: there is no fallback). bf16 activations; the parameters bf16 or fp32 masters (cast inside, outside autograd, so
+    a master's gradient is fp32)."""
+    from . import fused_sm80, fused_wide_sm80
+
+    route = fused_wide_sm80.route(x, wa, ws)
+    if route == "fused":
+        return fused_sm80.transition_fused_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps)
+    if route == "wide":
+        return fused_wide_sm80.transition_wide_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps)
+    return None
+
+
 def _table_configs(gpu, op, keep):
     """Every config the launch-config table of ``gpu`` holds for ``op`` (all ranks: ``tune`` times them), filtered by
     ``keep(dims, kwargs)`` -- what ``_launch_config.choose`` may return besides a kernel's default."""
@@ -124,4 +140,18 @@ def prebuild(target, rows):
         for d, n in fused_wide_sm100a.SHAPES:
             if half.get((d, n)):
                 yield ft.partial(fused_sm100a.build_cubins, f"d{d}n{n}", fused_wide_sm100a._specs(d, n))
-    # fused_sm80 (an sm80 build) has no target here
+    elif target.arch == "sm80":
+        # A100 (transition_sm80): fused_sm80 at D 128 / n 4, the wide extension at every other width (and as fused_sm80's small-row path), its
+        # one-kernel forward / backward builds (fused_fwd_sm80 / fused_bwd_sm80: (D, H) in their SHAPES) and the fp32-master cast; bf16 rows only
+        from . import fused_bwd_sm80, fused_fwd_sm80, fused_sm80, fused_wide_sm80, parameter_cast_sm80
+
+        served = {k: v for k, v in half.items() if v and k[0] in fused_wide_sm80.WIDTHS}
+        if (128, 4) in served:
+            yield fused_sm80._ext
+        if served:
+            yield fused_wide_sm80._ext
+            yield parameter_cast_sm80._ext
+        if any((d, d * n) in fused_fwd_sm80.SHAPES for d, n in served):
+            yield fused_fwd_sm80._ext
+        if any((d, d * n) in fused_fwd_sm80.SHAPES and "train" in modes for (d, n), modes in served.items()):
+            yield fused_bwd_sm80._ext

@@ -1,4 +1,6 @@
 """Split Transition with residual in the squeeze and input-LN gradient epilogues."""
+import functools
+
 import torch
 import triton
 import triton.language as tl
@@ -19,9 +21,25 @@ from miniworld_engine.kernels.transition.triton.training import swiglu_squeeze_b
 from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import input_ln_residual
 
 
+@functools.cache
+def _smem_optin(index: int) -> int:
+    return torch.cuda.get_device_properties(index).shared_memory_per_block_optin
+
+
+def _fits_shared_memory(configs, named_args, **meta):
+    """Keep the configs whose operand ring (``num_stages - 1`` stages of an h and a W tile) fits the card's shared memory: the first default
+    needs 288 KB with fp32 operands, beyond an A100 (163 KB) and an H100 (227 KB); a stored table entry always fits the card it was measured on."""
+    h = named_args["H"]
+    limit = _smem_optin(h.device.index if h.device.index is not None else torch.cuda.current_device())
+    fit = [c for c in configs if (c.num_stages - 1) * (c.kwargs["BLOCK_M1"] + c.kwargs["BLOCK_N"]) * c.kwargs["BLOCK_K"] * h.element_size() <= limit]
+    return fit or list(configs)
+
+
 @configured('transition_squeeze_residual_triton',
             key=["shape_key"],
-            default=dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=256, GROUP_M=4, num_warps=8, num_stages=4))
+            default=[dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=256, GROUP_M=4, num_warps=8, num_stages=4),
+                     dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, GROUP_M=4, num_warps=8, num_stages=4)],
+            prune=_fits_shared_memory)
 @triton.jit
 def _squeeze_residual_kernel(
     H, W, R, Y, M, N: tl.constexpr, K: tl.constexpr,

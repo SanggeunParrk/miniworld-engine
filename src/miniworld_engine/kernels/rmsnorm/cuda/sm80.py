@@ -3,7 +3,7 @@
 **RMSNorm**: ``y = x rstd w`` over the last axis, ``rstd = 1 / sqrt(mean(x^2) + eps)`` in fp32: the RMS mode of the LayerNorm family's row kernels
 (``kernels/layernorm/cuda/sm80/norm_rows.cu``: one 16-byte chunk per lane, the statistic a shuffle over the lanes of a row; the backward keeps ``dw`` as register column partials
 over the persistent loop and adds one partial row per CTA in a fixed order).  The widths of the q / k head norms (32 / 48 / 64 / 128) and of the DiT block (128) are all vector
-widths.  Same gate as the LayerNorm rows (``layernorm.cuda.sm80.supports``: capability 8.0, engine backend not Triton, ``settings.norms_sm80`` not 0); training is an autograd
+widths.  Same gate as the LayerNorm rows (``layernorm.cuda.sm80.refusal``: capability 8.0, bf16 / fp32, widths up to 4096); training is an autograd
 function over two opaque ops (the forward saves x and the row statistic ``rstd``).
 
 **RMSNorm + adaLN modulation** (``rms_norm_modulation``, the atom stream: d_hidden = d_cond = 128, bf16; ``sm80/adamod_sm80.cu``): ``y = rmsnorm(q) (1 + c Wsc^T) + c Wsh^T``,
@@ -14,7 +14,6 @@ The backward recomputes the scale on the tensor cores and writes the stacked ``[
 from __future__ import annotations
 
 import functools
-import hashlib
 import warnings
 from pathlib import Path
 
@@ -22,7 +21,6 @@ import torch
 from torch import Tensor
 from torch.autograd.function import once_differentiable
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
 from miniworld_engine.kernels.layernorm.cuda import sm80 as _rows
@@ -33,6 +31,11 @@ _common = (
 )  # norm_common.cuh: the helpers shared with the row kernels
 _ADAMOD_FAILED = False
 D_MOD = 128  # d_hidden = d_cond of the modulation kernel
+
+
+def refusal(x: Tensor, weight: Tensor | None) -> str | None:
+    """Why the row kernels cannot run ``rmsnorm(x, weight)``, or ``None``: see ``layernorm.cuda.sm80.refusal`` (an RMSNorm has no bias)."""
+    return _rows.refusal(x, weight, None)
 
 
 def supports(x: Tensor, weight: Tensor | None) -> bool:
@@ -146,16 +149,10 @@ def rmsnorm_backward(
 # ------------------------------------------------------------------------------------------------------------------ RMSNorm + adaLN modulation
 @functools.lru_cache(maxsize=1)
 def adamod_ext():
-    """The modulation extension, built on first use (``settings.norms_sm80_flags``: extra nvcc flags for A/B experiments, their own build)."""
+    """The modulation extension (``adamod_sm80``), built on first use."""
     ensure_cuda_home()
-    extra = settings.current().norms_sm80_flags.split()
-    tag = (
-        ""
-        if not extra
-        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
-    )
     return load_extension(
-        name=f"adamod_sm80{tag}",
+        name="adamod_sm80",
         sources=[str(_dir / "adamod_sm80.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -163,7 +160,6 @@ def adamod_ext():
             "-O3",
             "-gencode=arch=compute_80,code=sm_80",
             f"-I{_common}",
-            *extra,
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,

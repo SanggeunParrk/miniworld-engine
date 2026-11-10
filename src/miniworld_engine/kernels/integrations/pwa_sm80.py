@@ -1,8 +1,8 @@
 """Automatic dispatch to the A100 (sm_80) MSAPairWeightedAveraging: hand CUDA around cuBLAS, inference and training.
 
 Contract: bf16 MSA ``[1, S, L, d_msa]`` (d_msa 64 or 128, any S) and bf16 pair ``[1, L, L, d_pair]`` (d_pair 128 / 256 / 384; L a multiple of 16, at most 1024), 8 heads of 8 / 16 / 32
-channels (``d_hidden``; d_msa 128 with 32-wide heads is not built), an optional bool key mask ``[1, L]``, the module's residual and row dropout (``drop_msa``, training), ``implementation=
-"miniworld"`` with the engine backend not forced to Triton, capability 8.0. Everything else keeps the module's previous path (Triton, or the statements for ``d_hidden = 8``).
+channels (``d_hidden``; d_msa 128 with 32-wide heads is not built), an optional bool key mask ``[1, L]``, the module's residual and row dropout (``drop_msa``, training), capability 8.0.
+``refusal`` is the range; ``modules.MSAPairWeightedAveraging``'s ``cuda`` backend refuses everything else (no fallback).
 
 The step (``kernels/pair_weighted_averaging/cuda/sm80``; ``.../cuda/sm80.py`` documents the kernels):
 
@@ -10,7 +10,7 @@ The step (``kernels/pair_weighted_averaging/cuda/sm80``; ``.../cuda/sm80.py`` do
             ->  gate_out (sigmoid gate, output projection, dropout, residual -> out)
   backward  see ``backward`` below.
 
-Inference is one opaque op; training is one autograd Function whose forward and backward are each one opaque op. ``settings.pwa_sm80 = False`` turns the path off.
+Inference is one opaque op; training is one autograd Function whose forward and backward are each one opaque op.
 Numerics and timings: ``docs/gpus/a100/msa_pair_weighted_averaging/``.
 """
 
@@ -20,10 +20,8 @@ import warnings
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.modules.exceptions import ImplementationType
 
 _FAILED = False
 
@@ -55,58 +53,42 @@ def _sm80():
     return sm80
 
 
-def _eligible(
-    module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
-) -> bool:
-    if not settings.current().pwa_sm80:
-        return False
-    if (
-        module.implementation != ImplementationType.MINIWORLD
-        or settings.current().engine_backend == "triton"
-    ):
-        return False
-    d_msa = msa.shape[-1] if msa.ndim == 4 else 0
+def refusal(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None:
+    """Why the sm_80 kernels cannot run this call, or ``None`` (the contract above). Shapes, dtypes and the device only, plus the build."""
+    if not msa.is_cuda or torch.cuda.get_device_capability(msa.device) != (8, 0):
+        return "the sm_80 MSAPairWeightedAveraging kernels are the A100 (capability 8.0) builds"
+    if msa.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
+        return "the sm_80 kernels take bfloat16 msa / pair"
+    if msa.ndim != 4 or pair.ndim != 4:
+        return "msa must be [1, S, L, d_msa] and pair [1, L, L, d_pair]"
+    d_msa, d_pair = msa.shape[-1], pair.shape[-1]
     d_hidden = module.to_value.weight.shape[0] // module.n_head
-    d_pair = pair.shape[-1] if pair.ndim == 4 else 0
     sm = _sm80()
-    if not sm.supported(
-        d_msa, d_pair, module.n_head, d_hidden
-    ) or module.to_value.weight.shape != (module.n_head * d_hidden, d_msa):
-        return False
-    if (
-        module.ln_msa.weight is None
-        or module.ln_pair.weight is None
-        or module.to_bias.weight.shape != (module.n_head, d_pair)
-    ):
-        return False
-    if (
-        not msa.is_cuda
-        or msa.dtype != torch.bfloat16
-        or pair.dtype != torch.bfloat16
-        or msa.shape[0] != 1
-        or msa.shape[1] < 1
-    ):
-        return False
+    if not sm.supported(d_msa, d_pair, module.n_head, d_hidden) or module.to_value.weight.shape != (module.n_head * d_hidden, d_msa):
+        return (f"d_msa {d_msa}, d_pair {d_pair}, {module.n_head} heads x {d_hidden}: not an sm_80 build (8 heads of 8 / 16 / 32, d_msa {sm.D_MSA}, "
+                f"d_pair {sm.D_PAIR}, d_msa x d_hidden <= 2048, not d_msa 128 with 32-wide heads)")
+    if module.ln_msa.weight is None or module.ln_pair.weight is None or module.to_bias.weight.shape != (module.n_head, d_pair):
+        return "the kernels take the affine msa / pair LayerNorms and a bias-free [n_head, d_pair] logit projection"
+    if msa.shape[0] != 1 or msa.shape[1] < 1:
+        return f"batch {msa.shape[0]}: the sm_80 kernels take one sample (batch 1) with at least one MSA row"
     length = msa.shape[2]
-    if (
-        length % 16
-        or length > sm.MAX_LEN
-        or tuple(pair.shape) != (1, length, length, d_pair)
-    ):
-        return False
-    if mask is not None and (
-        tuple(mask.shape) != (1, length) or mask.dtype != torch.bool
-    ):
-        return False
-    if torch.cuda.get_device_capability(msa.device) != (8, 0):
-        return False
-    return _loads()
+    if length % 16 or length > sm.MAX_LEN or tuple(pair.shape) != (1, length, length, d_pair):
+        return f"L {length}: the sm_80 kernels take L a multiple of 16 up to {sm.MAX_LEN} and a [1, L, L, d_pair] pair"
+    if mask is not None and (tuple(mask.shape) != (1, length) or mask.dtype != torch.bool):
+        return "mask must be a bool [1, L] key mask"
+    if not _loads():
+        return "the sm_80 MSAPairWeightedAveraging extension failed to build"
+    return None
+
+
+def _eligible(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
+    return refusal(module, msa, pair, mask) is None
 
 
 def serves_inference(
     module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None
 ) -> bool:
-    """A grad-free call that is not a live dropout (``MSAPairWeightedAveraging.forward`` routes those, like the grad-enabled ones, through the training step)."""
+    """A grad-free call that is not a live dropout (those, like the grad-enabled ones, take the training step)."""
     return (
         not torch.is_grad_enabled()
         and not (module.training and module.drop_msa.p_drop > 0)
@@ -170,7 +152,7 @@ def _key_mask(mask: torch.Tensor | None) -> torch.Tensor | None:
 
 
 def _fused_contract_enabled(m: torch.Tensor, wg: torch.Tensor, training: bool) -> bool:
-    fused = settings.current().pwa_sm80_contract_gate_fused
+    fused = None
     if fused is None:
         fused = not training
     return (
@@ -230,11 +212,11 @@ def inference(
                 m, w, v, lnm_w, lnm_b, wg, wo, eps=eps_m, mode=1
             )
         else:
-            o = sm.lt_bcast(w, v) if ns > 1 and settings.current().pwa_sm80_lt else None
+            o = sm.lt_bcast(w, v) if ns > 1 and False else None
             if o is None:
                 o = (
                     sm.broadcast_bmm(w, v)
-                    if ns > 1 and settings.current().a100_cleanup
+                    if ns > 1
                     else torch.bmm(_expand(w, ns), v)
                 )
             del v, w
@@ -285,7 +267,7 @@ def _broadcast_contract(
 ) -> torch.Tensor:
     """Native contractions for qualified L128 training rows; preserve the faster path elsewhere."""
     if (
-        settings.current().pwa_sm80_broadcast_native
+        True
         and w.shape[1] == 128
         and v.shape[2] % 128 == 0
         and w.is_contiguous()
@@ -293,7 +275,7 @@ def _broadcast_contract(
         and w.dtype == torch.bfloat16
         and v.dtype == torch.bfloat16
     ):
-        short_mode = settings.current().pwa_sm80_broadcast_pipeline
+        short_mode = "0"
         if (
             short_mode in ("1", "2", "3")
             and w.shape[0] == 8
@@ -319,7 +301,7 @@ def _broadcast_contract(
 
         return broadcast_native_sm80.result(w, v, transpose, 0)
     if (
-        settings.current().pwa_sm80_lt
+        False
         and w.dim() == 3
         and v.shape[0] % 8 == 0
         and v.shape[0] > 8
@@ -336,7 +318,7 @@ def _broadcast_contract(
 def _weight_contract(do: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """Native dw for qualified L384/640 rows; explicit1 tests other candidates."""
     if (
-        settings.current().pwa_sm80_dw_short
+        False
         and do.shape == v.shape
         and do.shape == (32, 128, 8192)
         and do.is_contiguous()
@@ -347,7 +329,7 @@ def _weight_contract(do: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         from miniworld_engine.kernels.pair_weighted_averaging.cuda import dw_early_sm80
 
         return dw_early_sm80.result(do, v, 2, 9)
-    override = settings.current().pwa_sm80_dw_native
+    override = None
     native = override if override is not None else do.shape[1] in (384, 640)
     if (
         native
@@ -363,7 +345,7 @@ def _weight_contract(do: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         from miniworld_engine.kernels.pair_weighted_averaging.cuda import dw_native_sm80
 
         return dw_native_sm80.result(do, v, 4 if do.shape[1] == 256 else 1, 0)
-    if settings.current().pwa_sm80_lt and do.shape == v.shape and do.dim() == 3:
+    if False and do.shape == v.shape and do.dim() == 3:
         out = _sm80().lt_dw(
             do, v
         )  # cuBLASLt with the searched algorithm (1.2-1.4x the heuristic default)
@@ -491,14 +473,14 @@ def backward(
     with torch.cuda.device(msa.device):
         m, z = msa[0], pair[0]
         dres = dy[0].contiguous()
-        typed_override = settings.current().pwa_sm80_typed_grad
+        typed_override = None
         typed = (
             typed_override
             if typed_override is not None
             else m.shape[1] in (128, 256, 384)
         )
         glue = sm.glue
-        glue_override = settings.current().pwa_sm80_glue_tuned
+        glue_override = None
         tuned_glue = (
             glue_override
             if glue_override is not None
@@ -515,11 +497,11 @@ def backward(
                 glue_tuned_sm80,
             )
 
-            glue_mode = 2 if settings.current().pwa_sm80_glue_pipeline else 1
+            glue_mode = 1
             glue = lambda *args, **kwargs: glue_tuned_sm80.glue(
                 *args, **kwargs, mode=glue_mode
             )
-        grad_reduce_forced = settings.current().pwa_sm80_grad_reduce
+        grad_reduce_forced = None
         if grad_reduce_forced is None:
             grad_reduce_forced = (
                 m.shape == (1024, 128, 64)
@@ -570,7 +552,7 @@ def backward(
         do, dgp = glued[:2]
         dv = _broadcast_contract(w, do, transpose=True)  # [8 ns, L(j), S C / ns]
         partial_pair = (
-            settings.current().pwa_sm80_pair_partial
+            True
             and do.shape == v.shape == (32, 128, 8192)
             and do.dtype == v.dtype == torch.bfloat16
             and do.is_contiguous()

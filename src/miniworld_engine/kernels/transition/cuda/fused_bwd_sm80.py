@@ -7,13 +7,11 @@ whole 256-row tiles.  It consumes what the wide forward and the fused forward sa
 """
 
 import functools
-import hashlib
 import warnings
 from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 from .fused_fwd_sm80 import SHAPES, _o_perm
 
@@ -27,16 +25,8 @@ MIN_ROWS = {(64, 128): 8192, (64, 256): 2048, (128, 256): 8192, (128, 512): 8192
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    extra = (
-        settings.current().transition_bwd_sm80_flags.split()
-    )  # experiments: extra nvcc flags (their own build)
-    tag = (
-        ""
-        if not extra
-        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
-    )
     return load_extension(
-        name=f"transition_bwd_sm80{tag}",
+        name="transition_bwd_sm80",
         sources=[str(_dir / "transition_bwd_sm80.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -45,10 +35,9 @@ def _ext():
             "-gencode=arch=compute_80,code=sm_80",
             f"-I{_dir}",
             "-DPW_XN",
-            *extra,
         ],
         extra_cflags=["-std=c++17", "-O3"],
-        verbose=bool(extra),
+        verbose=False,
     )
 
 
@@ -78,7 +67,7 @@ def supports(d: int, h: int, rows: int) -> bool:
     """A build exists for (d, h), whole 256-row tiles, enough rows to fill the card, the switch is not off."""
     if (d, h) not in SHAPES or rows % 256 or rows < MIN_ROWS[(d, h)]:
         return False
-    return settings.current().transition_fused_bwd_sm80
+    return True
 
 
 def _layout_bwd(wa, wb, ws, dev, d, h):
@@ -132,7 +121,7 @@ def backward(
     packed = torch.empty(idx16.numel(), dtype=torch.bfloat16, device=wa.device)
     ext = _ext()
     ext.pack(wa, wb, ws, idx16, packed)
-    nrep = settings.current().transition_bwd_sm80_nrep
+    nrep = 0   # the kernel default replication
     return tuple(
         ext.bwd(
             d,

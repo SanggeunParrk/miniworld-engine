@@ -34,6 +34,12 @@ def h100_unsupported(*tensors: torch.Tensor) -> str | None:
     return None
 
 
+def a100(t: torch.Tensor) -> bool:
+    """A CUDA tensor on an A100 (capability 8.0): the ``"cuda"`` backends of the classes that have sm_80 builds route there to them (the H100
+    path is unchanged). Device only: capture-safe."""
+    return t.device.type == "cuda" and torch.cuda.get_device_capability(t.device) == (8, 0)
+
+
 def triton_unsupported(*tensors: torch.Tensor) -> str | None:
     """Why the engine's ``"triton"`` backends cannot take these tensors (not CUDA), or ``None``."""
     if tensors[0].device.type != "cuda":
@@ -158,6 +164,10 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         return None
 
     def _supports_cuda(self, input: torch.Tensor) -> str | None:
+        if a100(input):   # A100: the sm_80 row kernels (kernels/layernorm/cuda/sm80.py)
+            from miniworld_engine.kernels.layernorm.cuda import sm80
+
+            return self._supports_engine(input) or sm80.refusal(input, self.weight, self.bias)
         from miniworld_engine.kernels.layernorm.cuda.general import supported
 
         why = h100_unsupported(input) or self._supports_engine(input)
@@ -168,6 +178,10 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         return None
 
     def _forward_cuda(self, input: torch.Tensor) -> torch.Tensor:
+        if a100(input):
+            from miniworld_engine.kernels.layernorm.cuda import sm80
+
+            return sm80.layernorm(input, self.weight, self.bias, self.eps)
         from miniworld_engine.kernels.layernorm.cuda.general import layernorm_cuda
 
         return layernorm_cuda(input, self.weight, self.bias, self.eps)
@@ -227,6 +241,10 @@ class RMSNorm(BackendModule, nn.RMSNorm):
         return None
 
     def _supports_cuda(self, x: torch.Tensor) -> str | None:
+        if a100(x):   # A100: the RMS mode of the sm_80 row kernels (kernels/rmsnorm/cuda/sm80.py)
+            from miniworld_engine.kernels.rmsnorm.cuda import sm80
+
+            return self._supports_engine(x) or sm80.refusal(x, self.weight)
         from miniworld_engine.kernels.layernorm.cuda.general import supported
 
         why = h100_unsupported(x) or self._supports_engine(x)
@@ -237,6 +255,10 @@ class RMSNorm(BackendModule, nn.RMSNorm):
         return None
 
     def _forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        if a100(x):
+            from miniworld_engine.kernels.rmsnorm.cuda import sm80
+
+            return sm80.rmsnorm(x, self.weight, self.effective_eps(x.dtype))
         from miniworld_engine.kernels.rmsnorm.cuda import rmsnorm_cuda
 
         return rmsnorm_cuda(x, self.weight, self.effective_eps(x.dtype))

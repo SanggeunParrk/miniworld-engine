@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from miniworld_engine.modules.functional import swish_gate
-from miniworld_engine.modules.norm import AdaptiveLayerNorm, LayerNorm, _as_rows3, h100_unsupported, triton_unsupported
+from miniworld_engine.modules.norm import AdaptiveLayerNorm, LayerNorm, _as_rows3, a100, h100_unsupported, triton_unsupported
 from miniworld_engine.modules.primitives import BackendModule, Linear, MasterWeights, master_linear, random_input, stream_shape
 
 
@@ -162,6 +162,8 @@ class Transition(BackendModule, MasterWeights):
         return None
 
     def _supports_cuda(self, x: torch.Tensor) -> str | None:
+        if a100(x):
+            return self._supports_cuda_sm80(x)
         from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a, fused_sm90a, fused_wide_sm90a
 
         why = h100_unsupported(x) or self._supports_engine(x)
@@ -183,6 +185,16 @@ class Transition(BackendModule, MasterWeights):
     def _forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return x
+        if a100(x):
+            from miniworld_engine.kernels.transition.cuda import transition_sm80
+
+            out = transition_sm80(x, self.ln_in.weight, self.ln_in.bias, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight,
+                                  self.ln_in.eps)
+            if out is None:
+                from miniworld_engine.modules.primitives import BackendUnsupported
+
+                raise BackendUnsupported("Transition backend 'cuda': no sm_80 Transition build is available (the extension failed to build)")
+            return out
         from miniworld_engine.kernels.transition.cuda import transition_sm90a
 
         out = transition_sm90a(x, self.ln_in.weight, self.ln_in.bias, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight,
@@ -192,6 +204,28 @@ class Transition(BackendModule, MasterWeights):
 
             raise BackendUnsupported("Transition backend 'cuda': no sm_90a Transition build is available (the extension failed to build)")
         return out
+
+    def _supports_cuda_sm80(self, x: torch.Tensor) -> str | None:
+        """A100: ``kernels/transition/cuda.transition_sm80`` (``fused_sm80`` at D 128 / n 4 with whole 256-row tiles and enough rows,
+        ``fused_wide_sm80`` at D 64 / 128 / 256 / 384 / 512 / 768 with a hidden width a multiple of 64, any row count): bf16 activations,
+        bf16 or fp32-master parameters, forward and backward."""
+        from miniworld_engine.kernels.transition.cuda import fused_wide_sm80
+
+        why = self._supports_engine(x)
+        if why is not None:
+            return why
+        if x.dtype is not torch.bfloat16:
+            return f"dtype {x.dtype}: the sm_80 Transition kernels take bfloat16 activations (no fp32 / TF32 A100 build)"
+        matrices = (self.expand_a.weight, self.expand_b.weight, self.squeeze.weight)
+        if any(p.dtype not in (torch.bfloat16, torch.float32) for p in matrices) or len({p.dtype for p in matrices}) != 1:
+            return "the projections must share one dtype, bfloat16 or float32"
+        wa, ws = self.expand_a.weight, self.squeeze.weight
+        if not fused_wide_sm80.supported(x, wa, ws):
+            return (f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no sm_80 build takes it (D in {fused_wide_sm80.WIDTHS}, hidden a "
+                    "multiple of 64)")
+        if fused_wide_sm80.route(x, wa, ws) is None:
+            return "the sm_80 Transition extension failed to build"
+        return None
 
     def _supports_triton(self, x: torch.Tensor) -> str | None:
         why = triton_unsupported(x) or self._supports_engine(x)
