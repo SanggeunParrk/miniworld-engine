@@ -1,0 +1,57 @@
+{
+ "gpu": "NVIDIA A100 80GB PCIe (sm80)",
+ "source": "Pretuned by kernels/_pretune.py (PRETUNE_VERSION 1): every candidate timed at the launches the requirements reach (triton.testing.do_bench, L2 flushed, median), top 4 kept, fastest first. Keys not re-tuned: converted from the old autotune/data/<op>/*sm90*.json (git HEAD). Keys: '<dtypes>|<shape bucket>[|<flags>]'. Shape: M = row bucket, L = length bucket, other names = exact width axes.",
+ "version": 1,
+ "ops": {
+  "mpnn_node_message_fwd_gemm_triton": {
+   "bfloat16+float32|M=1024,NEIGHBORS=48|SAVE_PREACT=0": [
+    {"kwargs": {"GROUPS": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.115712},
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 2, "ms": 0.11776},
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 2, "ms": 0.119808},
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 3, "ms": 0.12288}
+   ],
+   "bfloat16+float32|M=1024,NEIGHBORS=48|SAVE_PREACT=1": [
+    {"kwargs": {"GROUPS": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.128},
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 2, "ms": 0.131072},
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 3, "ms": 0.13312},
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 2, "ms": 0.13312}
+   ],
+   "bfloat16+float32|M=2048,NEIGHBORS=48|SAVE_PREACT=0": [
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 2, "ms": 0.177152},
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 3, "ms": 0.185344},
+    {"kwargs": {"GROUPS": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.2048},
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 2, "ms": 0.224256}
+   ],
+   "bfloat16+float32|M=2048,NEIGHBORS=48|SAVE_PREACT=1": [
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 2, "ms": 0.197632},
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 3, "ms": 0.201728},
+    {"kwargs": {"GROUPS": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.233472},
+    {"kwargs": {"GROUPS": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.246784}
+   ],
+   "bfloat16+float32|M=4096,NEIGHBORS=48|SAVE_PREACT=0": [
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 2, "ms": 0.289792},
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 3, "ms": 0.304128},
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 2, "ms": 0.331776},
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 3, "ms": 0.349184}
+   ],
+   "bfloat16+float32|M=4096,NEIGHBORS=48|SAVE_PREACT=1": [
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 2, "ms": 0.325632},
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 3, "ms": 0.331776},
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 2, "ms": 0.374784},
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 3, "ms": 0.380928}
+   ],
+   "bfloat16+float32|M=8192,NEIGHBORS=48|SAVE_PREACT=0": [
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 2, "ms": 0.548864},
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 2, "ms": 0.561152},
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 3, "ms": 0.576512},
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 3, "ms": 0.589824}
+   ],
+   "bfloat16+float32|M=8192,NEIGHBORS=48|SAVE_PREACT=1": [
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 2, "ms": 0.630784},
+    {"kwargs": {"GROUPS": 16}, "num_warps": 8, "num_stages": 3, "ms": 0.638976},
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 2, "ms": 0.642048},
+    {"kwargs": {"GROUPS": 8}, "num_warps": 8, "num_stages": 3, "ms": 0.661504}
+   ]
+  }
+ }
+}
