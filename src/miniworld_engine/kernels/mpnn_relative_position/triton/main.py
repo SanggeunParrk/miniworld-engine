@@ -120,7 +120,7 @@ def _shape_key(rows: int, buckets: int, width: int) -> int:
 
 @configured('mpnn_relative_position_bwd_reduce_triton',
             key=["shape_key"],
-            default=dict(BLOCK_M1=64, PROGRAMS=64, num_warps=4, num_stages=2))
+            default=dict(BLOCK_M1=64, PROGRAMS=64, num_warps=4, num_stages=2), scratch=("partial_table_ptr", "partial_bias_ptr"))
 @triton.jit
 def _bucket_reduce_kernel(
     grad_ptr,

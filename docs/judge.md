@@ -84,7 +84,9 @@ python -m miniworld_engine.judge status                 # token counts per (kind
 4. Repeat from step 1: cases a job did not reach are still owed and go into the next plan. Stop when `owed` reports 0 owed; answer
    any pending questions with `sign`.
 
-There is no runner script for step 2 in the tree; the job script is the loop above.
+`tools/slurm/cycle.sh PLAN_DIR [owed options]` runs steps 1-3 once (plus a prebuild of anything the cache lacks); site settings
+(`SLURM_ACCOUNT`, `SLURM_PARTITION`, `SLURM_QOS`, `GPU_GRES`, `ENGINE_ENV`) come from the environment. Run it again while `owed` reports
+owed cases.
 
 ## When to bump what
 

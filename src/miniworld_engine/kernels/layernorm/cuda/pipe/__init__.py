@@ -49,9 +49,8 @@ def supported(x: torch.Tensor) -> bool:
 
 
 def serves(x: torch.Tensor) -> bool:
-    """The H100 rung of LayerNorm / RMSNorm: these kernels take ``x`` on sm_90 (``supported(x)``) unless the portable rung is
-    forced. Every CUDA norm entry asks this one gate (``layernorm.interface.layernorm_kernel``, ``general.layernorm_cuda``,
-    ``rmsnorm.cuda.rmsnorm_cuda``)."""
+    """The H100 kernels of LayerNorm / RMSNorm: they take ``x`` on sm_90 when ``supported(x)``. Every CUDA norm entry
+    asks this one gate (``general.layernorm_cuda``, ``rmsnorm.cuda.rmsnorm_cuda``, ``layernorm_linear.autograd._layernorm``)."""
     return supported(x) and torch.cuda.get_device_capability(x.device) == (9, 0)
 
 

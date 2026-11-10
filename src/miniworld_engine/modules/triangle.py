@@ -701,10 +701,7 @@ class BidirectionalTriangleAttention(BackendModule, MasterWeights):
         """``pair`` ``[B, L, L, d_pair]``, ``mask`` ``[B, L]`` (bool). ALWAYS returns the residual output ``pair + bidir_attention(pair)``."""
         with master_autocast(pair, self):
             pln = self.ln_pair(pair)
-            if self.use_self_attention:
-                out = self._attend_sa(pln, mask)
-            else:
-                out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
+            out = self._attend_sa(pln, mask) if self.use_self_attention else self._attend(self.to_value(pln), self.to_bias(pln), mask)
             return pair + self.to_out(sigmoid_gate(self.to_gate(pln), out))
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
@@ -845,10 +842,7 @@ class _TriangleMultiplicationBase(BackendModule, MasterWeights):
                 left = left * mask_2d[..., None]
                 right = right * mask_2d[..., None]
 
-            if self.outgoing:
-                out = torch.einsum("bikd,bjkd->bijd", left, right)
-            else:
-                out = torch.einsum("bkid,bkjd->bijd", left, right)
+            out = torch.einsum("bikd,bjkd->bijd", left, right) if self.outgoing else torch.einsum("bkid,bkjd->bijd", left, right)
 
             if self.divide_by_length:
                 out = out * inverse_length(out, mask)
@@ -1053,10 +1047,9 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         if getattr(self, "_anthropic_key", None) != key:   # the face caches its weight packs by tensor: a new dict once the parameters change
             self._anthropic_key, self._anthropic_cache = key, {}
         cache = self._anthropic_cache
-        out = prov.triangle_multiplication(pair.contiguous(), self._pair_mask(pair, mask), direction="outgoing" if self.outgoing else "incoming",
-                                           weights={k: t.detach() for k, t in weights.items()}, selection=sel, residual=True, cache=cache,
-                                           eps=self.ln_pair.eps)
-        return out
+        return prov.triangle_multiplication(pair.contiguous(), self._pair_mask(pair, mask), direction="outgoing" if self.outgoing else "incoming",
+                                            weights={k: t.detach() for k, t in weights.items()}, selection=sel, residual=True, cache=cache,
+                                            eps=self.ln_pair.eps)
 
 
 class TriangleMultiplicationRF3(_TriangleMultiplicationBase):

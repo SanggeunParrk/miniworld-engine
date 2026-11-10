@@ -145,8 +145,8 @@ class _LocalAtomDiT(BackendModule):
     (``kernels/augmented_attention/triton/window.py``, forward and backward), the block's other statements (AdaLN, projections, gates, the
     transition) as ``"pytorch"``'s (:meth:`_supports_triton`).
 
-    ``backend="cuda"`` (:class:`AtomDiTProtenix`, :class:`AtomDiTOpenFold3`): the whole block on the H100 warp-level kernels
-    (``kernels/integrations/local_dit_h100.py``: conditioning tables, pre / post row kernels, the mma.sync window attention; bf16 or TF32),
+    ``backend="cuda"`` (:class:`AtomDiTProtenix`, :class:`AtomDiTOpenFold3`): the whole block on the H100 kernels
+    (``kernels/integrations/local_dit_h100.py``: conditioning tables, pre / post row kernels on wgmma, the mma.sync window attention; bf16 or TF32),
     forward and backward; training for the chained K / V AdaLN and the clipped window only (:meth:`_supports_cuda`).
     :class:`AtomDiTBoltz2`, :class:`AtomDiTRoseTTAFold3` and :class:`AtomDiTChai1` have their own ``"cuda"``
     (``modules/dit_variant_cuda.py`` on ``kernels/dit_variants``: bf16 / fp32 inference, a gradient on the training path).
@@ -192,10 +192,7 @@ class _LocalAtomDiT(BackendModule):
             z = F.layer_norm(pair, (pair.shape[-1],), att.ln_pair.weight.to(pair.dtype), None, att.ln_pair.eps)
         bias = F.linear(z, att.to_bias.weight.to(z.dtype)).permute(0, 4, 1, 2, 3)
         q = att.to_query(x)
-        if self.kv_norm == "shared":
-            xkv = x
-        else:
-            xkv = att.ada_ln_kv(single if self.kv_norm == "parallel" else x, cond)
+        xkv = x if self.kv_norm == "shared" else att.ada_ln_kv(single if self.kv_norm == "parallel" else x, cond)
         k = att.to_key(xkv)
         v = att.to_value(xkv)
         q, k = att.flat_qk_norm(q, k)
@@ -312,7 +309,8 @@ class _LocalAtomDiT(BackendModule):
     # -------------------------------------------------------------------------------------------------------------- "cuda"
     # The H100 warp-level block (``kernels/integrations/local_dit_h100.run_block``): the module's 27 parameters by name
     # (``local_dit.WEIGHTS`` + ``CROSS_WEIGHTS``), the K / V AdaLN chained (Protenix) or parallel (AlphaFold 3), the clipped window or AlphaFold
-    # 3's slid one (its edge windows recomputed, inference only). Listed only by the classes with a K / V AdaLN (Protenix, OpenFold3).
+    # 3's slid one or IntelliFold2's slide_qblock (their edge windows recomputed, inference only). Listed only by the classes with a K / V
+    # AdaLN (Protenix, OpenFold3).
     def _supports_cuda(self, single, cond, pair, mask=None, **kw) -> str | None:
         if kw:
             return f"{', '.join(kw)} (not an input of the H100 atom block)"
@@ -320,8 +318,6 @@ class _LocalAtomDiT(BackendModule):
             return "the H100 atom block kernels run on an H100 (sm_90) CUDA tensor only"
         if self.kv_norm == "shared":
             return "one AdaLN for q and k / v (the H100 atom block is the cross-attention one: a K / V AdaLN of its own)"
-        if self.key_window == "slide_qblock":
-            return "key_window 'slide_qblock' (the H100 kernels know the clipped 'pad' and AlphaFold 3's 'slide' windows)"
         att, tr = self.attention, self.transition
         params = list(self.parameters())
         dts = (single.dtype, cond.dtype, pair.dtype)
@@ -516,7 +512,7 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     ``"intellifold2"``): the K / V AdaLN of the raw atoms next to the query one (parallel: AF3 ``cross_attention``'s 'q' / 'k' adaptive
     layernorms, OF3 ``CrossAttentionPairBias.layer_norm_a_q`` / ``_k``), the slid 128-key window (AF3 ``features.py``; IntelliFold2's JAX
     release runs this code). ``key_window="slide_qblock"``: IntelliFold2's torch release; ``"pad"``: the clipped window."""
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
 
@@ -530,7 +526,7 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
     ``BOLTZ_ATOM=fused`` lever): rows [q | k | v] 384 wide and sigmoid(g) 128 wide, the clipped "pad" window, the key mask Boltz's
     ``(1 - mask) * -1e6``, the bias read in place from the trunked [B, nwin, 32, 128, 4]; bf16 operands (bf16) or ieee fp32 dots (fp32);
     128 = 4 x 32 wide, N a multiple of 32."""
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
     key_window = "pad"
@@ -575,7 +571,7 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     ``attention.norm_query`` / ``attention.norm_key``, over all heads; ``FlatQKNormAugmentedAttention``), the parallel schedule
     (``no_residual_connection_between_attention_and_transition: true``) and the clipped window (``indicesK``/``maskK``;
     ``key_window="pad"``, the default). No ``"anthropic"`` backend: RoseTTAFold3's release keeps its stock atom attention (no kernel)."""
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
     key_window = "pad"
@@ -592,7 +588,7 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
     keys are masked; ``key_window="pad"``, the default) and ``forward(..., uid=uid)`` [B, N]: a real query sees only the keys of its own
     conformer (``get_blocked_atom_pair_dists`` ANDs the same-``ref_space_uid`` mask into the block mask in place). No ``"anthropic"`` backend:
     Chai-1's release keeps its stock atom attention (no kernel)."""
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
     key_window = "pad"
@@ -858,7 +854,7 @@ class AtomDiTMiniWorld(BackendModule):
         from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction, SWADiTModulationH100
         from miniworld_engine.kernels.swa_dit.dispatch import native_h100_mod_fwd, swa_dit_block_fwd
 
-        n, s = x.shape[:2]
+        n, _s = x.shape[:2]
         cos, sin, seqused = attention_params[:3]
         cos, sin = cos.reshape(-1, cos.shape[-1]).contiguous(), sin.reshape(-1, sin.shape[-1]).contiguous()
         c = cond.reshape(-1, cond.shape[-1]).contiguous()

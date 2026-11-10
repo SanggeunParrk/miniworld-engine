@@ -76,8 +76,8 @@ def save_h_enabled(d: int) -> bool:
     """Keep the forward's SwiGLU intermediate h [M, 4D] for the D >= 384
     backward instead of recomputing-and-storing it in the gate kernel. The D >= 384 forward writes h to HBM anyway (between
     its two kernels), so this costs no forward time -- only activation memory, M x 4D bf16 per layer (453 MB at D = 384,
-    604 MB at D = 512 for a 384 x 384 pair). D384 keeps it by default; ``settings.transition_wide_save_h``
-    switches it on for every D >= 384."""
+    604 MB at D = 512 for a 384 x 384 pair). D384 keeps it (``_SAVE_H_D384``); the other widths recompute it (the
+    old switch that kept it for every D >= 384 is gone)."""
     if d < 384:
         return False
     return (d == 384 and _SAVE_H_D384)

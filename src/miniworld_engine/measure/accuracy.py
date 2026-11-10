@@ -166,7 +166,7 @@ def measure_case(case, cfg, *, device) -> list[dict]:
     head = {**cfgmod.describe(case, cfg), "meta": cfgmod.run_meta(cfg, "accuracy", ACCURACY_VERSION)}
     try:
         backends = cfgmod.backends_of(cfg, case)
-    except Exception as exc:  # noqa: BLE001 -- recorded: no such class
+    except Exception as exc:  # recorded: no such class
         return [{**head, "backend": "pytorch", "external": False, "status": "error", "reason": f"{type(exc).__name__}: {exc}"}]
     fixed = float(cfg.fixed[case.dtype])
     train, autocast = case.mode == "train", cfgmod.autocast(case)
@@ -183,7 +183,7 @@ def measure_case(case, cfg, *, device) -> list[dict]:
         del gold_module, gold_inputs
         _reference_precision()
         ref, _ = _run(cfgmod.clone(base), inputs, train=train, autocast=autocast, upstream=upstream, generator=None)
-    except Exception as exc:  # noqa: BLE001 -- recorded: the case could not be measured at all
+    except Exception as exc:  # recorded: the case could not be measured at all
         reason = f"reference: {type(exc).__name__}: {exc}"[:600]
         if os.environ.get("ACCURACY_TRACEBACK"):
             traceback.print_exc()
@@ -209,7 +209,7 @@ def measure_case(case, cfg, *, device) -> list[dict]:
             rec.update(_verdict(values, ref, gold, fixed))
         except BackendUnsupported as exc:
             rec.update(status="unsupported", reason=str(exc)[:600])
-        except Exception as exc:  # noqa: BLE001 -- recorded, never measured another way
+        except Exception as exc:  # recorded, never measured another way
             rec.update(status="error", reason=f"{type(exc).__name__}: {exc}"[:600])
             if os.environ.get("ACCURACY_TRACEBACK"):
                 traceback.print_exc()
@@ -264,7 +264,7 @@ def run(cfg, out_path: str) -> list[dict]:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("config", help="a measurement config (.yaml / .toml, see miniworld_engine.measure.config)")
-    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005 -- a local-time file name
     p.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "miniworld-accuracy"),
                    help="a .jsonl file, or a directory for accuracy-<time>.jsonl (default: under the system temp dir, never the repo)")
     p.add_argument("--module", nargs="+", help="override the config's modules")

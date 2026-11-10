@@ -13,6 +13,7 @@ import torch
 
 from miniworld_engine.kernels._h100_master import is_h100
 from miniworld_engine.kernels._h100_master import pack as pack_master
+from miniworld_engine.kernels.swa_dit._common import FP32_EPS
 from miniworld_engine.kernels.swa_dit.dispatch import (
     _h100_global,
     native_h100_cast,
@@ -22,7 +23,6 @@ from miniworld_engine.kernels.swa_dit.dispatch import (
     swa_dit_block_bwd,
     swa_dit_block_fwd,
 )
-from miniworld_engine.kernels.swa_dit._common import FP32_EPS
 
 
 class SWADiTBlockFunction(torch.autograd.Function):

@@ -27,7 +27,8 @@ those paths into ``miniworld_engine/_prebuilt/`` (``_nvcc.PACKAGED_ROOT``, same 
 **Parallel.** A process pool of builds (each torch extension with ``MAX_JOBS=1``). The worker count defaults to
 min(CPUs, memory / :data:`PEAK_GB`); PEAK_GB is the measured peak RSS of the heaviest single build plus margin.
 
-Triton kernels are out of scope (they JIT in seconds).
+Triton kernels are out of scope (they JIT in seconds). The other tuning candidates of the native ``choose`` sites (only the defaults and
+the tables' entries are planned here) are built by ``_prebuild_cuda`` (opt-in, for the pretuner).
 """
 
 from __future__ import annotations
@@ -47,8 +48,7 @@ import re
 import subprocess
 import sys
 import time
-import traceback
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from pathlib import Path
 
 from miniworld_engine.kernels import _nvcc
@@ -169,24 +169,34 @@ def plan(t: Target, only: Iterable[str] = ()) -> tuple[list[_nvcc.Spec], list[st
             # a recipe taking ``rows`` expands its variants from the requirements (family_rows); one taking only the target is
             # a hand-written list (being replaced)
             calls = list(recipe(t, family_rows(family)) if len(inspect.signature(recipe).parameters) > 1 else recipe(t))
-        except Exception as exc:  # noqa: BLE001 -- reported, the other families still plan
+        except Exception as exc:  # reported, the other families still plan
             problems.append(f"{family}: recipe {where} failed: {type(exc).__name__}: {exc}")
             continue
-        for i, call in enumerate(calls):
-            error = None
-            with _nvcc.planning() as got:
-                try:
-                    call()
-                except _nvcc.Planned:
-                    pass  # the loader used its stand-in (after recording, or one an lru_cache kept from an earlier call)
-                except Exception as exc:  # noqa: BLE001 -- reported
-                    error = f"{type(exc).__name__}: {exc}"
-            if error is not None and not got:
-                problems.append(f"{family}: call {i} ({getattr(call, '__name__', call)}) recorded nothing: {error}")
-            for s in got:
-                s.call["_family"] = family
-                specs.setdefault(s.key, s)
+        for s in record(family, calls, problems):
+            specs.setdefault(s.key, s)
     return list(specs.values()), problems
+
+
+def record(family: str, calls: Iterable, problems: list[str]) -> list[_nvcc.Spec]:
+    """Run ``calls`` (zero-argument calls of a family's loaders) under ``_nvcc.planning()``: the specs they record, each tagged with
+    ``family``, in call order. A call that raises without recording anything is appended to ``problems``. (Also the planner of
+    ``_prebuild_cuda``.)"""
+    out: list[_nvcc.Spec] = []
+    for i, call in enumerate(calls):
+        error = None
+        with _nvcc.planning() as got:
+            try:
+                call()
+            except _nvcc.Planned:
+                pass  # the loader used its stand-in (after recording, or one an lru_cache kept from an earlier call)
+            except Exception as exc:  # reported
+                error = f"{type(exc).__name__}: {exc}"
+        if error is not None and not got:
+            problems.append(f"{family}: call {i} ({getattr(call, '__name__', call)}) recorded nothing: {error}")
+        for s in got:
+            s.call["_family"] = family
+        out += got
+    return out
 
 
 def present(spec: _nvcc.Spec) -> Path | None:
@@ -226,7 +236,7 @@ def _build(spec: _nvcc.Spec) -> tuple[str, float, str | None, int]:
             raise RuntimeError(f"unknown kind {spec.kind}")
         if present(spec) is None:
             err = f"built, but not at {spec.rel}: the worker computed another key than the plan"
-    except Exception as exc:  # noqa: BLE001 -- reported per artifact
+    except Exception as exc:  # reported per artifact
         err = f"{type(exc).__name__}: {exc}"
     rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss // 1024
     return spec.key, time.perf_counter() - started, err, rss
@@ -289,7 +299,7 @@ def build(specs: list[_nvcc.Spec], jobs: int, stop_after: float | None = None, a
             started = time.perf_counter()
             try:
                 err = _derive(s, by_key)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"
             results[s.key] = (time.perf_counter() - started, err)
             log(f"{'ok' if err is None else 'FAIL'} {results[s.key][0]:7.1f} s  {s.name}  [{s.key[:8]}]  (derived)"
@@ -307,7 +317,7 @@ def _sweep_tmp(age: float = 3600.0) -> None:
         try:
             if now - p.stat().st_mtime > age:
                 shutil.rmtree(p) if p.is_dir() else p.unlink()
-        except OSError:
+        except OSError:  # noqa: PERF203 -- per path: one vanished path must not stop the sweep
             pass
 
 
@@ -354,7 +364,7 @@ def prebuild_meta(t: Target, specs: list[_nvcc.Spec]) -> dict:
     try:
         env["nvcc"] = subprocess.run([_nvcc.nvcc_path() or "nvcc", "--version"], capture_output=True, text=True,
                                      timeout=20).stdout.strip().splitlines()[-1]
-    except Exception:  # noqa: BLE001 -- recorded as absent
+    except Exception:  # recorded as absent
         env["nvcc"] = None
     req = KERNELS.parent / "requirements"
     return {"prebuild_version": PREBUILD_VERSION, "arch": t.arch, "sms": t.sms, "env": env,
@@ -400,12 +410,12 @@ def call_sites() -> set[str]:
                     name = child.name
                 if isinstance(child, ast.Call):
                     f = child.func
-                    hit = (isinstance(f, ast.Name) and f.id in alias) or (
+                    hit = (isinstance(f, ast.Name) and f.id in alias) or (  # noqa: B023 -- visit runs inside this iteration
                         isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and (
                             (f.value.id == "_nvcc" and f.attr in ("cubin", "derived_cubin", "load_extension"))
                             or (f.value.id == "T" and f.attr in ("compile", "compile_text"))))
                     if hit:
-                        sites.add(f"{path.relative_to(KERNELS).as_posix()}::{fn}")
+                        sites.add(f"{path.relative_to(KERNELS).as_posix()}::{fn}")  # noqa: B023 -- visit runs inside this iteration
                 visit(child, name)
 
         visit(tree, "<module>")
@@ -505,9 +515,9 @@ def _requirements(specs: list[_nvcc.Spec]) -> int:
             per_family[fam] = per_family.get(fam, 0) + 1
     #: requirements families whose files live under another kernels/ directory (the training glue of PWA / OPM: kernels/integrations/csrc)
     lives_in = {"pair_weighted_averaging": "integrations", "outer_product_mean": "integrations"}
-    for fam in sorted({r["family"] for r in rows if r["name"].endswith("_sm90")}):
-        if not per_family.get(fam) and not per_family.get(lives_in.get(fam, fam)):
-            findings.append(f"family {fam}: has *_sm90 rows but no planned artifact compiles a file of kernels/{fam}/")
+    findings.extend(f"family {fam}: has *_sm90 rows but no planned artifact compiles a file of kernels/{fam}/"
+                    for fam in sorted({r["family"] for r in rows if r["name"].endswith("_sm90")})
+                    if not per_family.get(fam) and not per_family.get(lives_in.get(fam, fam)))
     log("H100 families with *_sm90 rows and the planned artifacts compiling their files: " + ", ".join(
         f"{fam} {per_family.get(fam, 0)}" for fam in sorted({r["family"] for r in rows if r["name"].endswith("_sm90")})))
     for f in findings:

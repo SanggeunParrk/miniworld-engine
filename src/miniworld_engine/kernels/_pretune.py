@@ -22,11 +22,14 @@ by default: every requirements row, every length, min depth, min samples, the ro
 own ``make_step``) runs once, eagerly, with this module installed as ``_launch_config.PRETUNE``: at every configured launch whose
 ``(gpu, op, table key)`` no shard holds yet, every candidate that survives the kernel's ``prune`` is launched once (a compile error, out of
 resources or any exception: recorded as failed), its outputs compared with the first candidate's (the decorator default when it runs;
-every tensor argument after the launch, ``max|x - ref| / max|ref|`` within 2e-2 for 16-bit and 1e-3 for 32-bit tensors, integers exact:
-a config that computes something else is recorded failed as ``mismatch``), then timed with ``triton.testing.do_bench`` (L2 flushed,
+every tensor argument after the launch except the ones the kernel declares ``scratch`` (``@configured(..., scratch=...)``: per-block
+partials / split slots whose layout follows the config), ``max|x - ref| / max|ref|`` within 2e-2 for 16-bit and 1e-3 for 32-bit
+tensors (equal values, infinities included, and NaN against NaN do not differ), integers exact: a config that computes something
+else is recorded failed as ``mismatch``), then timed with ``triton.testing.do_bench`` (L2 flushed,
 warmup 25 ms, rep 100 ms, median; the kernel's ``reset_to_zero`` / ``restore_value`` honoured, ``_launch_config``'s own timer); the
 ranking goes to the shard at once and the launch proceeds with the winner. A native ``choose(..., run=)`` site is tuned the same way
-over its candidates (dims key, exact); a candidate whose extension is not prebuilt is skipped (``not prebuilt``: nothing is compiled).
+over its candidates (dims key, exact); a candidate whose extension is not prebuilt is skipped (``not prebuilt``: nothing is compiled;
+``_prebuild_cuda`` builds every candidate of every site).
 Nothing is timed under CUDA-graph capture or a torch.compile trace. The table key is the one ``_launch_config`` looks up
 (``<dtypes>|<shape>[|<flags>]``): the packed ``shape_key`` is decoded by recording what ``_shape_key.pack`` / ``*_key`` were called with.
 
@@ -129,22 +132,16 @@ def _pow2_neighbours(v: int) -> list[int]:
 def _generated(defaults: list[dict]) -> list[dict]:
     out: list[dict] = []
     for d in defaults:
-        tiles = [k for k, v in d["kwargs"].items() if (k.startswith("BLOCK") or k.startswith("GROUP")) and isinstance(v, int) and v >= 1]
+        tiles = [k for k, v in d["kwargs"].items() if k.startswith(("BLOCK", "GROUP")) and isinstance(v, int) and v >= 1]
         w, s = d["num_warps"], d["num_stages"]
         for k in tiles:
-            for v in _pow2_neighbours(d["kwargs"][k]):
-                out.append(_cfg_dict({**d["kwargs"], k: v}, w, s, d.get("maxnreg")))
-        for w2 in _pow2_neighbours(w):
-            if w2 <= 16:
-                out.append(_cfg_dict(d["kwargs"], w2, s, d.get("maxnreg")))
-        for s2 in (s - 1, s + 1):
-            if s2 >= 1:
-                out.append(_cfg_dict(d["kwargs"], w, s2, d.get("maxnreg")))
+            out.extend(_cfg_dict({**d["kwargs"], k: v}, w, s, d.get("maxnreg")) for v in _pow2_neighbours(d["kwargs"][k]))
+        out.extend(_cfg_dict(d["kwargs"], w2, s, d.get("maxnreg")) for w2 in _pow2_neighbours(w) if w2 <= 16)
+        out.extend(_cfg_dict(d["kwargs"], w, s2, d.get("maxnreg")) for s2 in (s - 1, s + 1) if s2 >= 1)
         choices = [[d["kwargs"][k], *_pow2_neighbours(d["kwargs"][k])] for k in tiles]
         for combo in itertools.product(*choices):
-            for w2 in (w, *_pow2_neighbours(w)):
-                if w2 <= 16:
-                    out.append(_cfg_dict({**d["kwargs"], **dict(zip(tiles, combo))}, w2, s, d.get("maxnreg")))
+            out.extend(_cfg_dict({**d["kwargs"], **dict(zip(tiles, combo, strict=True))}, w2, s, d.get("maxnreg"))
+                       for w2 in (w, *_pow2_neighbours(w)) if w2 <= 16)
     return out
 
 
@@ -186,7 +183,7 @@ def configured_kernels() -> tuple[dict, list[str]]:
         name = ".".join(rel.parts).removesuffix(".__init__")
         try:
             mod = importlib.import_module(name)
-        except Exception as exc:  # noqa: BLE001 -- reported
+        except Exception as exc:  # reported
             failed.append(f"{name}: {type(exc).__name__}: {str(exc)[:160]}")
             continue
         for v in vars(mod).values():
@@ -235,7 +232,7 @@ def import_candidates() -> int:
         lines = ["{"]
         for i, (op, cfgs) in enumerate(sorted(ops_.items())):
             body = ",\n".join("  " + json.dumps(c) for c in cfgs)
-            lines.append(f' {json.dumps(op)}: [\n{body}\n ]' + ("," if i < len(ops_) - 1 else ""))
+            lines.append(f" {json.dumps(op)}: [\n{body}\n ]" + ("," if i < len(ops_) - 1 else ""))
         lines.append("}")
         path.write_text("\n".join(lines) + "\n")
         log(f"wrote {path.relative_to(REPO)}: {len(ops_)} ops, {sum(map(len, ops_.values()))} configs")
@@ -350,7 +347,7 @@ def alive(job: str, host: str, pid: int) -> bool:
             r = subprocess.run(["squeue", "-h", "-j", job, "-o", "%T"], capture_output=True, text=True, timeout=30)
             state = r.stdout.strip()
             hit = (time.time(), state in ("RUNNING", "COMPLETING", "PENDING", "CONFIGURING"))
-        except Exception:  # noqa: BLE001 -- no squeue: assume alive
+        except Exception:  # no squeue: assume alive
             hit = (time.time(), True)
         _SQUEUE[job] = hit
     return hit[1]
@@ -371,7 +368,7 @@ def _healthy() -> bool:
     try:
         torch.cuda.synchronize()
         return True
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
 
 
@@ -418,8 +415,9 @@ def _mismatch(live: dict, ref: dict) -> str | None:
             return f"{n}: shape {tuple(t.shape)} vs {tuple(r.shape)}"
         if t.is_floating_point():
             a, b = t.float(), r.float()
-            both_nan = torch.isnan(a) & torch.isnan(b)
-            d = torch.where(both_nan, torch.zeros_like(a), (a - b).abs().nan_to_num(nan=math.inf))
+            # equal values (equal infinities too: inf - inf is NaN) and NaN against NaN do not differ
+            same = (a == b) | (torch.isnan(a) & torch.isnan(b))
+            d = torch.where(same, torch.zeros_like(a), (a - b).abs().nan_to_num(nan=math.inf))
             scale = b.abs().nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).max().item() if b.numel() else 0.0
             err = d.max().item() / scale if scale > 0 else (d.max().item() if d.numel() else 0.0)
             tol = TOLERANCE.get(t.element_size() * 8, 1e-3)
@@ -439,7 +437,7 @@ class Pretuner:
         self.run, self.hard_deadline = run, hard_deadline
         (run / "shards").mkdir(parents=True, exist_ok=True)
         self.shard_path = run / "shards" / f"{_JOB}_{_HOST}_{_PID}.jsonl"
-        self.shard = open(self.shard_path, "a")
+        self.shard = open(self.shard_path, "a")  # noqa: SIM115 -- kept open for the run, closed by close()
         self.device = torch.cuda.get_device_name(0)
         self.results: dict[tuple, dict] = {}     # (gpu, op, key) -> key record
         self.crash_lines: dict[tuple, set] = {}  # (gpu, op, key) -> candidate idents recorded as crashed
@@ -554,7 +552,7 @@ class Pretuner:
             if ranked and k.prune:
                 try:
                     ranked = list(k.prune(ranked, named, **kwargs))
-                except Exception:  # noqa: BLE001
+                except Exception:
                     ranked = []
             return ranked[0] if ranked else None
 
@@ -564,13 +562,11 @@ class Pretuner:
         if k.prune:
             try:
                 kept = list(k.prune(cands, named, **kwargs))
-            except Exception:  # noqa: BLE001 -- one at a time
+            except Exception:  # one at a time
                 kept = []
                 for c in cands:
-                    try:
+                    with contextlib.suppress(Exception):
                         kept += list(k.prune([c], named, **kwargs))
-                    except Exception:  # noqa: BLE001
-                        pass
             cands = [c for c in cands if c in kept]
         crashed = self.crashed(ident)
         tensors = {n: v for n, v in every.items() if isinstance(v, torch.Tensor)}
@@ -603,10 +599,8 @@ class Pretuner:
             import concurrent.futures as cf
 
             def warm(c):
-                try:
+                with contextlib.suppress(Exception):  # the checked launch below records it
                     launch(c, compile_only=True)
-                except Exception:  # noqa: BLE001 -- the checked launch below records it
-                    pass
             self._check_deadline()
             with cf.ThreadPoolExecutor(PRECOMPILE_THREADS) as ex:
                 list(ex.map(warm, todo))
@@ -626,7 +620,8 @@ class Pretuner:
                 bad = None
                 if verify:
                     if ref is None:
-                        ref = {n: t.clone() for n, t in tensors.items()}
+                        # the declared scratch (config-dependent intermediates) is restored like every argument, not compared
+                        ref = {n: t.clone() for n, t in tensors.items() if n not in k.scratch}
                     else:
                         bad = _mismatch(tensors, ref)
                 if bad is not None:
@@ -639,7 +634,7 @@ class Pretuner:
             except _Deadline:
                 restore()
                 raise
-            except Exception as exc:  # noqa: BLE001 -- recorded
+            except Exception as exc:  # recorded
                 if not _healthy():
                     self._fatal(ident, cid, exc)
                 if isinstance(exc, torch.cuda.OutOfMemoryError):
@@ -702,7 +697,7 @@ class Pretuner:
                 raise
             except NotPrebuilt as exc:
                 failed.append({**d, "reason": f"not prebuilt: {exc}"})
-            except Exception as exc:  # noqa: BLE001 -- recorded
+            except Exception as exc:  # recorded
                 if not _healthy():
                     self._fatal(ident, cid, exc)
                 failed.append({**d, "reason": _reason(exc)})
@@ -789,7 +784,7 @@ def run_unit(hook: Pretuner, cfg, case, *, device) -> dict:
                 status[backend] = "skipped: out of memory"
             except _Deadline:
                 raise
-            except Exception as exc:  # noqa: BLE001 -- recorded
+            except Exception as exc:  # recorded
                 status[backend] = f"failed: {_reason(exc)}"
                 if os.environ.get("PRETUNE_TRACEBACK"):
                     traceback.print_exc()
@@ -805,7 +800,7 @@ def run_unit(hook: Pretuner, cfg, case, *, device) -> dict:
         status["build"] = "skipped: out of memory"
     except _Deadline:
         raise
-    except Exception as exc:  # noqa: BLE001 -- recorded
+    except Exception as exc:  # recorded
         status["build"] = f"failed: {_reason(exc)}"
     finally:
         base = None
@@ -913,8 +908,7 @@ def drop(args) -> int:
            or (r["op"], r["key"]) in want]
     now = time.time()
     with open(run / "shards" / f"drop_cpu_{_PID}.jsonl", "a") as fh:
-        for r in hit:
-            fh.write(json.dumps({"t": "drop", "gpu": r["gpu"], "op": r["op"], "key": r["key"], "time": now}) + "\n")
+        fh.writelines(json.dumps({"t": "drop", "gpu": r["gpu"], "op": r["op"], "key": r["key"], "time": now}) + "\n" for r in hit)
     reopened = set()
     for r in hit:
         uid = r.get("unit")
@@ -923,7 +917,7 @@ def drop(args) -> int:
             (run / "claims" / f"{uid}.json").unlink(missing_ok=True)
             reopened.add(uid)
         log(f"drop {r['op']} {r['key']} (unit {uid}): "
-            + "; ".join(sorted({f['reason'][:80] for f in r['failed'] if f['reason'].startswith(('mismatch', 'OutOfMemory'))}))[:300])
+            + "; ".join(sorted({f["reason"][:80] for f in r["failed"] if f["reason"].startswith(("mismatch", "OutOfMemory"))}))[:300])
     missing = want - {(r["op"], r["key"]) for r in hit}
     for m in sorted(missing):
         log(f"no record for {m}")
@@ -968,8 +962,7 @@ def _entry(c: dict) -> dict:
 
 def _dump_table(data: dict) -> str:
     lines = ["{"]
-    for k in ("gpu", "source", "version"):
-        lines.append(f" {json.dumps(k)}: {json.dumps(data[k])},")
+    lines.extend(f" {json.dumps(k)}: {json.dumps(data[k])}," for k in ("gpu", "source", "version"))
     lines.append(' "ops": {')
     ops = data["ops"]
     for i, op in enumerate(sorted(ops)):

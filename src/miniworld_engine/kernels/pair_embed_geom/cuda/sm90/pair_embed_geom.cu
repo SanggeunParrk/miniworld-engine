@@ -239,12 +239,13 @@ pg_fwd_ca(const __nv_bfloat16* tbl, const float* ca, const uint8_t* mask, const 
 // Backward of both builders w.r.t. the table: dT[r][c] = sum over the pairs that use row r of dpair[pair][c]  (x the chain product for the chain row).
 //
 // The forward leaves one 16-byte code per pair: word 0 = the packed bins (bit 31: the pair is live, i.e. not padding), word 1 = the five angle bins,
-// word 2 = the chain product (float). dT is a product of the one-hot matrix F^T [rows x pairs] and the gradient G [pairs x 256]: the tensor-core
-// kernel (impl 1) builds the bf16 one-hot A fragments of each feature group straight from the codes (nothing is materialised), takes the B
+// word 2 = the chain product (float). dT is a product of the one-hot matrix F^T [rows x pairs] and the gradient G [pairs x 256]: the mma.sync
+// kernel pg_bwd_mma (impl 2, kept for A/B) builds the bf16 one-hot A fragments of each feature group straight from the codes (nothing is materialised), takes the B
 // fragments of a 64-pair x 64-channel tile of G with ldmatrix.trans from a cp.async ring, and accumulates in fp32 registers. Warp w owns two
 // 16-row m-tiles of one feature group (sequence separation + chain: 4 warps, each of the 4 distances: 1, each of the 5 angles: 1; decoder: 4 + 1),
 // CTA (q, t) = channel slice q (64) of pair slice t (a contiguous range, tiles in order); the 33 slice partials are added in slice order by
-// pg_reduce_tbl. Bitwise deterministic, no atomics. impl 0 is the earlier shared-memory read-modify-write kernel (kept for A/B).
+// pg_reduce_tbl. Bitwise deterministic, no atomics. impl 0 is the earlier shared-memory read-modify-write kernel (kept for A/B). The
+// launched kernel (impl 1, sm90/__init__.py BWD_IMPL) is pg_bwd_mma4 below: the same product on wgmma.
 // ---------------------------------------------------------------------------------------------------------------------------------------
 constexpr int NBLK = 33, TU = 4;
 __device__ __forceinline__ int code_bin(const uint4& c, int kind, int k) {
@@ -745,7 +746,8 @@ void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// mode 0: geometry table [317][256]; mode 1: decoder table [157][256]. impl 1: tensor cores (pg_bwd_mma2), impl 2: the first tensor-core kernel, impl 0: shared-memory read-modify-write.
+// mode 0: geometry table [317][256]; mode 1: decoder table [157][256]. impl 1 (launched): wgmma (pg_bwd_mma4), impl 2: the first tensor-core kernel (pg_bwd_mma, mma.sync), impl 0: shared-memory
+// read-modify-write (pg_bwd_tbl).
 // dtbl bf16 [NTAB][256], tpart fp32 scratch [NBLK][NTAB][256].
 void backward(torch::Tensor g, torch::Tensor codes, torch::Tensor tpart, torch::Tensor dtbl, int64_t mode, int64_t impl) {
   const at::cuda::CUDAGuard guard(g.device());

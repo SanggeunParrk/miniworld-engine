@@ -54,7 +54,12 @@ Lookup:
 
 - Triton: `@configured(op, key=..., default=..., prune=...)` wraps a `@triton.jit` kernel. A launch uses rank 1 of the exact
   (dtype, shape bucket, flags) entry that the kernel's `prune` keeps. No entry, an unknown GPU or no CUDA: the kernel's own default,
-  warned once per (op, gpu).
+  warned once per (op, gpu). `scratch=("DQ",)` names tensor arguments whose contents after the launch are config-dependent
+  intermediates (per-block partials or split slots whose layout follows the tile config, summed by a later kernel); only the pretuner
+  reads it (it does not compare them between candidates). Declared on `augmented_attention_bwd_split_triton` (`DQ`),
+  `layernorm_bwd_split_triton` (`PART_DW`, `PART_DB`), `layernorm_bwd_split_mmajor_triton` (`PDG`, `PDB`) and
+  `mpnn_relative_position_bwd_reduce_triton` (`partial_table_ptr`, `partial_bias_ptr`). A partial buffer with a fixed layout (fixed
+  slice count, e.g. the `PART` of the pair-embedding table gradients, `sampler_ops`' `PARTS`) is compared and is not scratch.
 - CUDA: `choose(family, op, dims, dtype, candidates, near=("M",), run=None)` returns the table entry for `dims` (exact, else the nearest
   measured dims: same dtype and non-`near` fields, least summed |log ratio| over `near`) if it is among the kernel's `candidates`,
   else `candidates[0]` (warned once).
@@ -103,6 +108,29 @@ python -m miniworld_engine.kernels._prebuild [--arch sm90a] [--jobs N] [--only F
 - After a build, `prebuilt-<arch>.json` in the cache root lists the plan's artifacts by relative path (the content of a bundle).
 - External headers: CUTLASS 4.2 (`--cutlass` / `CUTLASS_PATH`) and mathdx / cuBLASDx (`--mathdx` / `MATHDX_HOME`).
 - Triton kernels are out of scope (they JIT in seconds).
+- Native `choose` sites: only each site's default and the configs the tables hold are planned (what the runtime can launch). The other
+  tuning candidates are built by `_prebuild_cuda` (below).
+
+### Candidate prebuild (`_prebuild_cuda.py`, opt-in, for tuning)
+
+```sh
+python -m miniworld_engine.kernels._prebuild_cuda [--arch sm90a] [--list] [--check] [--jobs N] [--match REGEX]
+                                                  [--stop-after SECONDS] [--cutlass DIR] [--mathdx DIR]
+```
+
+- A native kernel picks its schedule with `_launch_config.choose(..., candidates, run=...)`; each candidate is a compiled artifact (or
+  several share one). The pretuner skips a candidate whose artifact is absent (`not prebuilt`). This tool builds them all: for every
+  site in `SITES` and every requirements shape that reaches it (`family_rows` of the site's family, read as the family's recipe reads
+  them), the full candidate list the site passes to `choose`, through the family's own loader.
+- Sites (H100): `transition/cuda/fused_sm90a.py::_select_schedule` (D128 fused Transition, n = 4 / 2; candidates
+  `transition_candidates(sms, backward, n)`, one build per `(ctas, dw_repl, save, n)`: eval the non-saving forward, train the saving
+  forward and the backward) and `trimul_inproj/cuda/h100_inference.py::_select_config` (packaged K1 / K3 inference; every K1 / K3
+  variant is an instantiation inside the one unit of its `(cz, ch)`, so the candidates add no artifact). 2026-11-10: 54 + 72 keys,
+  384 + 1686 candidates, 37 + 7 artifacts, of which 15 (Transition backward) were not built by `_prebuild`.
+- Same planning (`_prebuild.record`), content keys, cache, parallel builder and resume as `_prebuild`. It writes no
+  `prebuilt-<arch>.json`: candidates are not part of a bundle.
+- `--list` prints per site the keys (`op dtype|dims`) with their candidate counts and artifacts; `--check` fails when a `choose(` call
+  under `kernels/` is not one of the sites (add the new site's enumeration to `SITES`).
 
 `PREBUILD_VERSION` (human-managed) is bumped when a change to how the prebuilder builds can make the kernels compute or run differently.
 Every measurement record carries it; the judge asks once whether results made with the previous builds still stand.
@@ -126,9 +154,11 @@ python -m miniworld_engine.kernels._pretune --merge [--run DIR ...] [--dry-run] 
 - **Work list** = every case of the speed config (`measure/configs/speed.yaml` by default) for the `cuda` / `triton` backends. Each
   case's step (the speed measurer's `make_step`) runs once eagerly with the pretuner installed as `_launch_config.PRETUNE`. At every
   configured launch whose (gpu, op, key) no shard holds yet, every candidate that survives `prune` is launched, its outputs compared with
-  the first candidate's (relative max error within 2e-2 for 16-bit and 1e-3 for 32-bit tensors; a different result is recorded failed),
-  then timed with `do_bench` (L2 flushed, median). The launch proceeds with the winner. A candidate whose CUDA extension is not prebuilt
-  is skipped; nothing is compiled. Nothing is timed under capture or a compile trace.
+  the first candidate's (every tensor argument except the kernel's declared `scratch`, all restored before each candidate; relative max
+  error within 2e-2 for 16-bit and 1e-3 for 32-bit tensors, equal values including equal infinities and NaN against NaN do not differ;
+  a different result is recorded failed as `mismatch`), then timed with `do_bench` (L2 flushed, median). The launch proceeds with the
+  winner. A candidate whose CUDA extension is not prebuilt is skipped (`not prebuilt`); nothing is compiled; `_prebuild_cuda` builds
+  them. Nothing is timed under capture or a compile trace.
 - **Units and resume.** A unit is one case (`r<row>-<n>`), claimed by creating `<run>/claims/<unit>.json` exclusively and finished with
   `<run>/done/<unit>.json`; a claim of a dead process is taken over; a unit claimed three times is failed. Shards
   `<run>/shards/<job>_<host>_<pid>.jsonl` hold one record per tuned key; keys already in a shard are not re-timed. `--deadline` starts no

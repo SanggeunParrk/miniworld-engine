@@ -146,7 +146,7 @@ def _hoist_bwd(
             )  # [N, K] fp32
         else:
             p = torch.mm(dball, y) if f32 else torch.mm(dball, y, out_dtype=F32)
-        dwf = p if K == dp else p[:, :dp] + p[:, dp:]  # hi + lo
+        dwf = p if dp == K else p[:, :dp] + p[:, dp:]  # hi + lo
     return [dpair, dwf]
 
 

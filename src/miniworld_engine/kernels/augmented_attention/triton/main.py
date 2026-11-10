@@ -387,7 +387,7 @@ def _fits_dq_slots(configs, named_args, **kw):
 @configured('augmented_attention_bwd_split_triton',
             key=['shape_key', 'CHUNKED'],
             default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2),
-            prune=_fits_dq_slots)
+            prune=_fits_dq_slots, scratch=("DQ",))
 @triton.jit
 def _attn_bwd(
     Q,

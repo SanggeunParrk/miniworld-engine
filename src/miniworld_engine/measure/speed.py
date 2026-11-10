@@ -115,7 +115,9 @@ def make_step(module, inputs: dict, *, backend: str, train: bool, autocast: torc
     module.set_backend(backend)
     module.train(train)
     params = [p for p in module.parameters() if p.is_floating_point()] if train else []
-    leaves = [t for t in _floats(inputs) if t.is_leaf] if train else []
+    # the accuracy measurer's rule: a top-level floating input is a differentiable activation; a tensor inside a nested structure
+    # (e.g. the SWA attention_params tuple: fp32 RoPE cos/sin, sequence lengths) is a constant and gets no gradient
+    leaves = [v for v in inputs.values() if isinstance(v, torch.Tensor) and v.is_floating_point() and v.is_leaf] if train else []
     for t in leaves:
         t.requires_grad_(True)
     with _context(train, autocast):
@@ -175,14 +177,14 @@ class _Timer:
         torch.cuda.synchronize(self.device)
         if head_start_ms > 0:
             torch.cuda._sleep(int(min(head_start_ms, 2000.0) * self.cycles_per_ms()))
-        for s, e in zip(starts, ends):
+        for s, e in zip(starts, ends, strict=True):
             if self.flush is not None:
                 self.flush.zero_()
             s.record()
             fn()
             e.record()
         torch.cuda.synchronize(self.device)
-        return [s.elapsed_time(e) for s, e in zip(starts, ends)]
+        return [s.elapsed_time(e) for s, e in zip(starts, ends, strict=True)]
 
 
 def _stats(ms: list[float]) -> dict:
@@ -325,7 +327,7 @@ def run(cfg, out_path: str, *, device: str = "cuda") -> list[dict]:
                                    **measure(step, timer, timing=timing, warmup=warmup, iterations=iterations))
                     except BackendUnsupported as exc:
                         rec.update(status="unsupported", reason=str(exc))
-                    except Exception as exc:  # noqa: BLE001 -- recorded
+                    except Exception as exc:  # recorded
                         # out of memory: the case does not fit on the card, it is skipped (not a failure of the backend)
                         rec.update(status="skipped" if isinstance(exc, torch.cuda.OutOfMemoryError) else "failed", reason=_reason(exc))
                         if os.environ.get("SPEED_TRACEBACK"):
@@ -345,7 +347,7 @@ def run(cfg, out_path: str, *, device: str = "cuda") -> list[dict]:
                                 timed = measure(step, timer, timing="eager", warmup=warmup, iterations=iterations)
                                 rec.update(status="ok", timed_as="eager", capture_error=rec.pop("reason"),
                                            tf32_matmul=torch.backends.cuda.matmul.allow_tf32, **timed)
-                            except Exception as exc2:  # noqa: BLE001 -- recorded: not even the eager step runs
+                            except Exception as exc2:  # recorded: not even the eager step runs
                                 rec["reason"] = f"{rec.get('reason', '')} ; eager: {_reason(exc2)}"
                     finally:
                         step = module = inputs = None
@@ -384,7 +386,7 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("config", help="an accuracy-format config with the speed keys (see the module docstring)")
-    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005 -- a local-time file name
     p.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "miniworld-speed", f"speed-{stamp}.jsonl"),
                    help="JSONL output path (default: under the system temp dir, never the repo)")
     p.add_argument("--timing", nargs="+", choices=TIMING_MODES, help="override the config's timing modes")

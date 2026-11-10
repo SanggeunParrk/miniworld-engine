@@ -131,7 +131,7 @@ class Transition(BackendModule, MasterWeights):
     def _forward_anthropic(self, x: torch.Tensor) -> torch.Tensor:
         if self.dead:   # inference only: a dead instance returns the residual input (as the reference does)
             return x
-        prov, (sel, why) = self._anthropic_select(x)
+        prov, (sel, _why) = self._anthropic_select(x)
         if sel.row in ("engine_module", "compile"):   # the provider measured the caller's own module fastest for this cell: the release runs it
             return self._forward_pytorch(x)
         params = (self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.ln_in.weight, self.ln_in.bias)

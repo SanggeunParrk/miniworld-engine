@@ -261,7 +261,7 @@ def _dw_aside_enabled(rows: int | None = None, d: int | None = None) -> bool:
 class _weight_grads_aside:
     """Run the enclosed weight-gradient GEMMs on a second stream (fork after the gate, join at the end of the backward).  Inside a CUDA
     graph this is a parallel branch.  The tensors the branch reads are ``record_stream``-ed so the allocator does not reuse them under it.
-    ``MINIWORLD_TRANSITION_GENERIC_DW_ASIDE=0`` runs them in line."""
+    Above the row limits of ``_DW_ASIDE_ROWS`` (or at a width it does not list) they run in line; there is no switch."""
 
     def __init__(
         self, *reads: torch.Tensor, rows: int | None = None, d: int | None = None

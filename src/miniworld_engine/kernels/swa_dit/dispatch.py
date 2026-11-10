@@ -1,17 +1,17 @@
 """The fused SWA atom DiT block's host side: which implementation serves each stage, and its launches.
 
-Required H100 shapes retain the accurate legacy composition until native candidates pass all acceptance gates.
-settings.swa_dit_h100_native=True forces handwritten CUDA and cuBLAS (False disables it); the Hopper implementation of the B200
-fusion boundaries follows the shape default.
+Every sm_90 call is served on H100 (``native_h100_enabled``); whether it runs the composed hand-CUDA stages or the native ones is
+a fixed rule of dtype, matmul precision and the extensions building (``native_h100_stages``) -- there is no switch.
 Unsupported native contracts and failed builds raise. Candidate timings do not describe the default path.
 
 Moved from team-gm ``swa_fused_triton.block_fwd`` / ``block_bwd`` (commit 14f2c73). The launch sequence, the buffers and
 the arguments are team-gm's; what differs is the engine plumbing:
 
 * team-gm's per-stage CUDA switches (``SWA_QKVG_FWD`` / ``SWA_FFN_FWD`` / ``SWA_FFN_BWD``) are gone: every hand-CUDA stage
-  serves wherever its kernel does, and ``force_portable_kernels=True`` turns every CUDA stage off, as it does for the
-  other families (``SWA_FFN_DW`` -> ``swa_dit_ffn_dw``, ``SWA_DQ1`` -> ``swa_dit_dq1``; same defaults);
-* the CUDA kernels build through ``cuda/loader.py`` (``settings.engine_jit_root``) and any failure falls back to Triton;
+  serves wherever its kernel does (``SWA_FFN_DW`` and ``SWA_DQ1`` are fixed at team-gm's defaults: materialised dW operands,
+  a bf16 dq1);
+* the CUDA kernels come from ``cuda/loader.py`` (the packaged prebuilt bundle, else the JIT cache of ``_nvcc.engine_jit_root``);
+  on H100 a missing composed-stage extension sends the call to the native stages (``native_h100_stages``);
 * each Triton launch passes ``shape_key=atom_key(S, A=..., C=C[, NHID=NHID])`` where team-gm passed ``SB = log2(rows)``:
   the atom count S bucketed like every other atom-level kernel, and the AUGMENT COUNT A = N // B exactly, always -- the
   input feature embedder calls with A = 1 and diffusion with its num_augment (48 in training), and the row tiles of the
@@ -19,26 +19,24 @@ the arguments are team-gm's; what differs is the engine plumbing:
 * the forward and the backward are each ONE opaque op (``kernels._compile.opaque``): the per-stage choice is as
   untraceable as the launches, so it sits inside the same op. ``autograd.SWADiTBlockFunction`` owns the saved tensors.
 
-bf16 stages -- every one hand-CUDA on sm_90 (each with its own switch; Triton on other cards, on a failed build, or with
-``force_portable_kernels=True``). Forward: qkvg -> window attention (``cuda/swa_attn.cu``) -> out-projection + gated residual
-+ FFN. Backward: FFN (materialised dW operands; Triton with ``swa_dit_ffn_dw="fused"``) -> out-projection -> attention dq,
+bf16 stages -- every one hand-CUDA on sm_90 (Triton on other cards). Forward: qkvg -> window attention (``cuda/swa_attn.cu``)
+-> out-projection + gated residual + FFN. Backward: FFN (materialised dW operands) -> out-projection -> attention dq,
 dk, dv in one kernel -> qkvg, then the weight gradients as cuBLAS GEMMs over the saved operands. The qkvg forward, the
 out-projection + FFN forward and the FFN backward have two CUDA implementations: team-gm's 64-row wgmma kernels
 (``swa_qkvg_fwd.cu``, ``swa_ffn_fwd.cu``, ``swa_ffn_bwd.cu``) and the slab kernels of ``swa_slab.cu`` (16-row slabs per
 4-warp group, built for the small row counts the block mostly runs at; the out-projection and qkvg backwards are slab
-kernels too); ``swa_dit_rows_impl`` picks, "auto" by row count and augment count (``_WGMMA_MIN_ROWS``). On the CUDA
+kernels too); ``_rows_cuda`` picks by row count and augment count (``_WGMMA_MIN_ROWS``). On the CUDA
 backward the attention side shares one [M, 4C] buffer (see ``_bwd_attention_side``).
 
 B200 (sm_100a), bf16, the served widths (``cuda/sm100.supported``): every stage on the hand-written sm_100a kernels of
 ``cuda/sm100`` (``_sm100``); the atom count must be a multiple of 128 there -- the block refuses otherwise.
-``settings.swa_dit_sm100=0`` keeps the Triton path; a build or load failure warns once and keeps it too.
+A build or load failure there warns once and keeps the Triton path.
 
 fp32 stages, B200 (sm_100a) at the served widths with S a multiple of 128 (``cuda/sm100/tf32_fwd.supported_tf32``): every stage on
 the hand-written TF32 tensor-core kernels (``tcgen05.mma kind::tf32``) -- ``tf32_fwd.block_fwd_tf32`` (``_tf32``), the window
 attention included (TF32 Q / K / V / P, fp32 softmax) -- for inference. A training forward (``save``) would take them only with a TF32
 backward, and there is none at the moment (``_tf32_bwd_ready``: the first one was removed for giving different gradients on identical
-steps), so fp32 training runs the Triton fp32 path. ``settings.swa_dit_tf32=0`` (or ``settings.swa_dit_sm100=0`` /
-``force_portable_kernels=True``) keeps the Triton fp32 path for inference too, and so does a build or load failure (warned once). The
+steps), so fp32 training runs the Triton fp32 path. A build or load failure (warned once) keeps the Triton fp32 path for inference too. The
 hoisted modulation (``native_h100_mod_fwd`` / ``native_h100_mod_bwd``) is not a kernel of these stages.
 
 fp32 stages elsewhere (q fp32): on sm_90 with TF32 allowed (matmul precision "high" or
@@ -46,8 +44,7 @@ fp32 stages elsewhere (q fp32): on sm_90 with TF32 allowed (matmul precision "hi
 with rna-rounded operands (split weights in the FFN) and a bf16 window attention; otherwise ``triton/forward_fp32.py``
 and ``triton/backward_fp32.py`` for qkvg, out-projection + FFN and their backwards, around the SAME window-attention
 kernels on bf16 operands (what FlashAttention-4 runs in the per-op fp32 path). Both write the same saved tensors and the
-same dW operands. ``swa_dit_ffn_dw`` and ``swa_dit_dq1`` are bf16 knobs; the fp32 backward always materialises the dW
-operands and keeps dq1 in fp32.
+same dW operands. The fp32 backward materialises the dW operands as the bf16 one does and keeps dq1 in fp32.
 """
 
 from __future__ import annotations
@@ -59,11 +56,10 @@ from typing import Any
 import torch
 import triton
 
-from miniworld_engine.kernels._shape_key import atom_key
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.kernels._device import num_sms
-from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
+from miniworld_engine.kernels._shape_key import atom_key
 from miniworld_engine.kernels.swa_dit._common import (
     D_ATOM,
     FP32_EPS,
@@ -73,6 +69,7 @@ from miniworld_engine.kernels.swa_dit._common import (
     _matmul_precision,
     is_global,
 )
+from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
 from miniworld_engine.kernels.swa_dit.triton.backward import (
     _swa_attn_bwd_dkv_kernel,
     _swa_attn_bwd_dq_kernel,
@@ -124,7 +121,7 @@ def _native_b200_default(q, training=None):
 
 
 def native_h100_enabled(q, training=None):
-    """Whether H100 serves this fused-block call (every sm_90 call unless ``settings.swa_dit_h100_native`` is False); which
+    """Whether H100 serves this fused-block call (every sm_90 call); which
     stages run it is :func:`native_h100_stages`."""
     from miniworld_engine.kernels.swa_dit.cuda.loader import is_sm90
     return is_sm90(q.device)
@@ -139,8 +136,7 @@ def native_h100_stages(q) -> bool:
     A stage whose CUDA build is missing would fall to its Triton kernel, which H100 does not run: the native stages then.
     fp32 under TF32 (matmul precision "high" / "medium") takes the composed stages too, ``swa_fp32.cu`` on tf32 wgmma: 1.3 - 1.5x
     faster than the native stages and no less accurate (A 5, 1024 - 24 576 atoms, inference: 0.069 against 0.104 ms, 1.23 against
-    1.65 ms). Under "highest" fp32 keeps the native stages (exact fp32 cuBLAS projections). ``settings.swa_dit_h100_native=True``
-    forces the native stages.
+    1.65 ms). Under "highest" fp32 keeps the native stages (exact fp32 cuBLAS projections).
     """
     if not native_h100_enabled(q):
         return False
@@ -155,7 +151,7 @@ def native_h100_stages(q) -> bool:
 
 def _composed_cuda(device: torch.device, extra: str | None = None) -> bool:
     """Whether every hand-CUDA extension the composed bf16 stages use (and ``extra``: "fp32" for the fp32 ones) builds / loads on
-    ``device`` (the prebuilt bundle or the JIT); ``force_portable_kernels=True`` asks for their Triton kernels instead."""
+    ``device`` (the prebuilt bundle or the JIT)."""
     return _composed_builds(device, extra)
 
 
@@ -463,7 +459,7 @@ _TF32_FAILED = False
 
 
 def _tf32_off() -> bool:
-    """The switches that keep the Triton fp32 path: ``settings.swa_dit_tf32=0``, ``settings.swa_dit_sm100=0``, force_portable_kernels."""
+    """Always False: no switch keeps the Triton fp32 path any more (the old TF32 / sm_100 / portable-kernel switches are gone)."""
     return False
 
 
@@ -482,7 +478,7 @@ def _tf32_bwd_ready(device: torch.device) -> bool:
 
 @device_constant
 def _tf32_ready(device: torch.device, save: bool) -> bool:
-    """Whether the sm_100a TF32 kernels serve fp32 calls on ``device``: the switches, B200, and the forward kernels build and load
+    """Whether the sm_100a TF32 kernels serve fp32 calls on ``device``: B200, and the forward kernels build and load
     -- with ``save`` (a training forward, whose fp32 saves only the TF32 backward reads) the backward's too. Build and load happen
     here, once per device; a failure warns once and keeps the Triton fp32 path. A constant to the compiled graph
     (``device_constant``): Dynamo bakes the answer in and never traces the build."""
@@ -510,7 +506,7 @@ def _tf32_ready(device: torch.device, save: bool) -> bool:
 def _tf32(q: torch.Tensor, nhid: int, half_window: int, eps: float, save: bool) -> Any:
     """The sm_100a TF32 forward module (``cuda/sm100/tf32_fwd``) when it serves this fp32 call, else None -> the Triton fp32 path.
     Traceable: tensor metadata (``tf32_fwd.supported_tf32``) and the per-device constant ``_tf32_ready``. A deterministic function
-    of the call (shapes, dtype, device, switches, earlier failures), so the op's fake reaches the same answer as the launch."""
+    of the call (shapes, dtype, device, earlier failures), so the op's fake reaches the same answer as the launch."""
     if q.dtype != torch.float32 or not tf32_fwd.supported_tf32(
         q, nhid, half_window, eps
     ):
@@ -522,7 +518,7 @@ def _tf32(q: torch.Tensor, nhid: int, half_window: int, eps: float, save: bool) 
 
 
 
-#: ``swa_dit_rows_impl="auto"``: the team-gm wgmma kernels serve a stage from this many rows (N*S) on, and only when the
+#: ``_rows_cuda``: the team-gm wgmma kernels serve a stage from this many rows (N*S) on, and only when the
 #: augment count is a multiple of 8 (their forward tiles are 8 augments x 8 atoms: at A = 1 seven eighths of every tile is
 #: padding); below, and at every other A, the slab kernels (``cuda/swa_slab.cu``). Measured on H100 (graph replay, per call):
 #: qkvg / out-projection + FFN forward cross over between M = 4096 (A = 8: slab 10.8 / 13.3 us, wgmma 12.6 / 15.1) and 6144
@@ -750,7 +746,7 @@ def _fp32_cuda(C: int, NHID: int, half_window: int, device: torch.device) -> Any
     MiniWorld's trainer sets, and what the per-op path's cuBLAS projections then run at): its FFN splits the weights but
     not the activations, which matches the per-op path under TF32, not under "highest", where the per-op FFN is exact
     fp32. There the Triton kernels' tf32x3 FFN serves instead, off H100 / B200 (there "highest" never reaches this: the callers run the
-    PyTorch statements, interface.highest_fp32_on_hopper_blackwell). Read on every call, like the other settings.
+    PyTorch statements, interface.highest_fp32_on_hopper_blackwell). The precision is read on every call.
     """
     wanted = (torch.get_float32_matmul_precision() != "highest"
               and C == D_ATOM and NHID == N_HIDDEN and half_window == HALF_WINDOW)
@@ -1072,8 +1068,8 @@ def swa_dit_block_bwd(
     Ak = _augments(N, B)
     NHID = wd.shape[1]
     dev = q.device
-    fused_dw = False  # "mat": dW from cuBLAS (the fused Triton dW kernel is slower; old settings.swa_dit_ffn_dw default)
-    dq1_dtype = torch.bfloat16  # old settings.swa_dit_dq1 default
+    fused_dw = False  # "mat": dW from cuBLAS (the fused Triton dW kernel is slower; team-gm's default)
+    dq1_dtype = torch.bfloat16  # team-gm's default
     dq1 = torch.empty(M, C, device=dev, dtype=dq1_dtype)
     dO = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
     dG = torch.empty_like(dO)

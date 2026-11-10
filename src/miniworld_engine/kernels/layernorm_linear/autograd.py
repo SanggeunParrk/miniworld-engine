@@ -13,11 +13,11 @@ from __future__ import annotations
 import torch
 import triton
 
-# `layer_norm_bwd_dx_fused` is level=both in kernels/registry/registry.csv -> both_key. The key is L (the
-# token/atom count), never the row count M: the saved x here is already the flattened (M, K)
-# matrix, so L has to arrive from the caller (see `LayerNormLinearTritonFn.forward`'s `length` input).
-from miniworld_engine.kernels._shape_key import both_key, pack
 from miniworld_engine.kernels._compile import opaque
+
+# `layer_norm_bwd_dx_fused` is launched from both levels (token / atom and pair) -> both_key: its launch-config key buckets the
+# ROW count M (``_shape_key``), which `LayerNormLinearTritonFn.forward` reads off the flattened (M, K) x.
+from miniworld_engine.kernels._shape_key import both_key, pack
 
 # torch/triton-only — safe to import eagerly; this IS the LN-part backward.
 from miniworld_engine.kernels.layernorm.triton.main import layer_norm_bwd_dx_fused
@@ -44,7 +44,7 @@ def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
     Feeds ``dy = dx_normed`` (grad w.r.t. the LN output) so the kernel's dx/dw/db become the
     LNL grads dx / dγ / dβ. dw, db come back fp32 (atomic-accumulated over M).
 
-    ``shape_key`` is ``both_key(L)`` from the Function's `length` input. None -> smallest bucket,
+    ``shape_key`` is ``both_key(M)`` from the Function's forward (the row count). None -> smallest bucket,
     an explicit "L not supplied" label (bench / driver entry only)."""
     M, K = x.shape
     dx = torch.empty_like(dx_normed)
@@ -71,7 +71,7 @@ def _compose_backward(dY, x, mean, rstd, gamma, beta, W, has_bias, *,
     dx_normed = dY @ W and dW = dYᵀ @ x_normed via cuBLAS; x_normed recomputed from saved
     mean/rstd; dx/dγ/dβ from the reused Triton LN backward; db = Σ_m dY.
 
-    ``shape_key`` is ``both_key(L)`` from the Function's `length` input; it labels both Triton
+    ``shape_key`` is ``both_key(M)`` from the Function's forward (the row count); it labels both Triton
     launches here (`_recompute_xnormed` and `_ln_backward`)."""
     dY = dY.contiguous()
     dx_normed = torch.matmul(dY, W)
@@ -137,7 +137,7 @@ def layernorm_linear_triton_fn(x, ln_weight, ln_bias, weight, bias=None, eps: fl
     """Trainable LayerNormLinear (Triton fwd + cuBLAS/Triton bwd).
 
     ``length`` is L -- the TOKEN/ATOM count of the activation before it was flattened (a trimul
-    pair view has M = L*L) -- used only as the backward's autotune-cache label."""
+    pair view has M = L*L) -- kept for the call signature; the backward's launch-config key is the row count M (``both_key``)."""
     if not x.is_cuda or x.dtype == torch.float64 or x.shape[-1] > 1024 or x.numel() == 0:
         acc = torch.float64 if x.dtype == torch.float64 else torch.float32
         xn = torch.nn.functional.layer_norm(

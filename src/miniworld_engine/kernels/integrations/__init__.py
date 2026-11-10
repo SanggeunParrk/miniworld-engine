@@ -18,8 +18,7 @@ def prebuild(target, _rows):
     import functools
 
     from miniworld_engine.kernels._prebuild import _kv, family_rows
-
-    from . import opm_train, pwa_train, pwa_wide
+    from miniworld_engine.kernels.integrations import opm_train, pwa_train, pwa_wide
 
     if target.arch == "sm100":
         yield functools.partial(opm_train._ext, arch="sm100")

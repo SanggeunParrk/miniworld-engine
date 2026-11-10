@@ -55,7 +55,7 @@ PERSIST_WAVES = 2
 # whether the persistent grid is even filled -- the row count picks the winner.
 @configured('layernorm_bwd_split_triton',
             key=['shape_key'],
-            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2), scratch=("PART_DW", "PART_DB"))
 @triton.jit
 def _ln_bwd_persistent(
     DX, PART_DW, PART_DB, DY, X, W, Mean, Rstd,

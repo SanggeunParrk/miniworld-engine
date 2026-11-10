@@ -13,12 +13,16 @@ weight change is seen on the next call). Three attribute differences are bridged
     (every atom class here) is the kernels' ``q_adaln`` AND ``k_adaln``.
 
 The path by dtype and gradient (the first whose range holds): bf16 inference ``kernels/dit_variants/interface.py``; fp32 (TF32) inference
-``cuda/infer32.py``; any call with a gradient (bf16 or fp32) ``cuda/train.py`` (autograd Functions, forward and backward). Outside every range
+``cuda/infer32.py``; any call with a gradient (bf16 or fp32) ``cuda/train.py`` (autograd Functions, forward and backward). bf16 includes
+the master layout (fp32 parameters, bf16 activations under bf16 autocast): inference runs with autocast off (its operands are packed bf16),
+training under the caller's autocast (the conditioning tables are the module's own layers on the fp32 masters; the kernels cast the weights). Outside every range
 :meth:`_supports_cuda` states why; there is no other backend behind it. The kernels take ONE conditioning row set shared by the samples: a
 ``cond`` that differs per sample runs one kernel call per sample (same kernels, same result per sample).
 """
 
 from __future__ import annotations
+
+import contextlib
 
 import torch
 import torch.nn as nn
@@ -149,8 +153,10 @@ def _call_reason(module, single, cond, pair, mask) -> str | None:
         return "CUDA tensors only"
     if torch.cuda.get_device_capability(single.device) != (9, 0):
         return "the H100 (sm_90) kernels only"
-    if torch.is_autocast_enabled("cuda"):
-        return "autocast (the kernels fix their own precision: bfloat16 or TF32 operands)"
+    if torch.is_autocast_enabled("cuda") and (torch.get_autocast_dtype("cuda") != _BF or single.dtype != _BF):
+        # the master-weight layout (fp32 parameters, bf16 activations under bf16 autocast) is served, as the pre-redesign engine did
+        # (git 596d568b8 modules/dit_variant: "a call with a gradient (bf16 under autocast ...)"); fp32 activations run without autocast
+        return "autocast: bfloat16 activations under bfloat16 autocast only (float32 activations run without autocast, on TF32)"
     if single.ndim != 4 or single.shape[1] != 1:
         return f"single must be [A, 1, L, d] (one pair per call), got {tuple(single.shape)}"
     if single.dtype not in (_BF, _F32) or cond.dtype != single.dtype or pair.dtype != single.dtype:
@@ -180,7 +186,10 @@ def _first_hit(checks, stack, *call):
 def _run(fn, stack, single, cond, call, *, wants_grad: bool):
     """``fn(stack, single [A, N, d], cond [N, c], *call)`` once for a shared ``cond``, else once per sample; -> [A, 1, N, d]."""
     s = single[:, 0]
-    with torch.set_grad_enabled(wants_grad):
+    # inference packs its own bf16 operands (an enclosing autocast must not recast its torch glue, e.g. the fp32 slid edge windows); the
+    # training path keeps the caller's autocast: its conditioning tables run the module's own layers on the fp32 master weights
+    off = torch.autocast("cuda", enabled=False) if not wants_grad else contextlib.nullcontext()
+    with torch.set_grad_enabled(wants_grad), off:
         if _shared_cond(cond):
             out = fn(stack, s, cond[0, 0], *call)
         else:

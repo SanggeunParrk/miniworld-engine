@@ -9,16 +9,17 @@ fp32 (single, cond and pair fp32, the block's weights fp32, no CUDA autocast) ru
 cores (``kernels/bias_only_dit/cuda/tf32.py``: the ``pv_gate_tf32`` core, the fp32 rows and pair bias, cuBLAS forced to TF32);
 the fp32 kernels build on first use and a failed build warns once and keeps the module path. The fp32 step runs as three kernels
 per block -- ``bo_front_tf32`` (LN + AdaLN + v|g GEMM), ``pv_gate_tf32``, ``bo_tail_tf32`` (everything after the core) -- behind
-conditioning tables hoisted once per conditioning tensor (``runner._tables3``; ``kernels._capture.lookup_inputs`` rules);
-settings.bias_only_dit_inf3=0 (read per call) keeps the 12-launch cuBLAS + rows step. bf16 likewise runs three kernels per block
+conditioning tables hoisted once per conditioning tensor (``runner._tables3``; ``kernels._capture.lookup_inputs`` rules) on B200; H100,
+and a layout or build ``tf32.inf3_ready`` refuses, run the 12-launch cuBLAS + rows step (there is no switch). bf16 likewise runs three kernels per block on B200
 (``kernels/bias_only_dit/cuda/inf3_bf16.py``: ``bo_front_bf16``, ``pv_gate_inf`` with PDL, ``bo_tail_bf16`` or the pair tail
-``bo_tail2_bf16``) behind bf16 tables (``runner._tables3b``); settings.bias_only_dit_inf3_bf16=0 (read per call) keeps the 12-launch
-bf16 step, which is also what a failed build falls back to.
+``bo_tail2_bf16``) behind bf16 tables (``runner._tables3b``); H100, and a failed build (warned once), run the
+12-launch bf16 step.
 
-``serves()`` is the whole gate: no autograd, the engine's kernels (implementation MINIWORLD), B200 or H100, bf16 or fp32, the
+``serves()`` is the whole gate: no autograd, the engine's kernels (the block's ``cuda`` backend, through its kernel view), B200 or
+H100, bf16 or fp32, the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128, or 256 on H100 / transition n = 2), B == 1, L a multiple of 128 (up to 768; 3072 on H100: ``core_supported``), a key mask [1, L] or
 none, LayerNorm eps 1e-5. The conditioning may be one per sample or one shared by the samples (sample axis 1 or stride 0).
-settings.bias_only_dit=0 turns it off. Anything else keeps the module's PyTorch composition.
+Anything else is refused: the block's ``cuda`` backend raises ``BackendUnsupported`` (``_supports_cuda``), never another path.
 
 A block given its pair bias precomputed (``bias`` [1, H, L, L] in the step's dtype, from ``pair_bias_all``) runs the same step on
 P = softmax(bias) made per call (the softmax rows, the key mask folded in) instead of the per-pair cache: the caller owns the bias.
@@ -93,7 +94,7 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         module.attention.to_value.weight.dtype is not torch.float32
         or torch.is_autocast_enabled("cuda")
     ):
-        return False  # fp32 = an fp32 block; under autocast the module path keeps its casts
+        return False  # fp32 = an fp32 block; under autocast the call is refused (the kernels do not apply its casts)
     if (
         single.ndim != 4
         or single.shape[1] != 1

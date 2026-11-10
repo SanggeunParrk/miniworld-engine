@@ -1,0 +1,33 @@
+{
+ "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+ "source": "Pretuned by kernels/_pretune.py (PRETUNE_VERSION 1): every candidate timed at the launches the requirements reach (triton.testing.do_bench, L2 flushed, median), top 4 kept, fastest first. Keys not re-tuned: converted from the old autotune/data/<op>/*sm90*.json (git HEAD). Keys: '<dtypes>|<shape bucket>[|<flags>]'. Shape: M = row bucket, L = length bucket, other names = exact width axes.",
+ "version": 2,
+ "ops": {
+  "mpnn_relative_position_bwd_reduce_triton": {
+   "float32|BUCKETS=66,M=147456,WIDTH=16": [
+    {"kwargs": {"BLOCK_M1": 64, "PROGRAMS": 512}, "num_warps": 4, "num_stages": 2, "ms": 0.052896},
+    {"kwargs": {"BLOCK_M1": 64, "PROGRAMS": 1024}, "num_warps": 4, "num_stages": 2, "ms": 0.05376},
+    {"kwargs": {"BLOCK_M1": 128, "PROGRAMS": 128}, "num_warps": 4, "num_stages": 3, "ms": 0.058592},
+    {"kwargs": {"BLOCK_M1": 64, "PROGRAMS": 256}, "num_warps": 4, "num_stages": 2, "ms": 0.060416}
+   ],
+   "float32|BUCKETS=66,M=16384,WIDTH=16": [
+    {"kwargs": {"BLOCK_M1": 128, "PROGRAMS": 128}, "num_warps": 4, "num_stages": 3, "ms": 0.020128},
+    {"kwargs": {"BLOCK_M1": 64, "PROGRAMS": 1024}, "num_warps": 4, "num_stages": 2, "ms": 0.02064},
+    {"kwargs": {"BLOCK_M1": 64, "PROGRAMS": 512}, "num_warps": 4, "num_stages": 2, "ms": 0.020672},
+    {"kwargs": {"BLOCK_M1": 64, "PROGRAMS": 256}, "num_warps": 4, "num_stages": 2, "ms": 0.020704}
+   ],
+   "float32|BUCKETS=66,M=262144,WIDTH=16": [
+    {"kwargs": {"BLOCK_M1": 64, "PROGRAMS": 512}, "num_warps": 4, "num_stages": 2, "ms": 0.099072},
+    {"kwargs": {"BLOCK_M1": 64, "PROGRAMS": 1024}, "num_warps": 4, "num_stages": 2, "ms": 0.099616},
+    {"kwargs": {"BLOCK_M1": 128, "PROGRAMS": 128}, "num_warps": 4, "num_stages": 3, "ms": 0.10976},
+    {"kwargs": {"BLOCK_M1": 64, "PROGRAMS": 256}, "num_warps": 4, "num_stages": 2, "ms": 0.11224}
+   ],
+   "float32|BUCKETS=66,M=65536,WIDTH=16": [
+    {"kwargs": {"BLOCK_M1": 64, "PROGRAMS": 512}, "num_warps": 4, "num_stages": 2, "ms": 0.030656},
+    {"kwargs": {"BLOCK_M1": 64, "PROGRAMS": 1024}, "num_warps": 4, "num_stages": 2, "ms": 0.031296},
+    {"kwargs": {"BLOCK_M1": 128, "PROGRAMS": 128}, "num_warps": 4, "num_stages": 3, "ms": 0.032576},
+    {"kwargs": {"BLOCK_M1": 64, "PROGRAMS": 256}, "num_warps": 4, "num_stages": 2, "ms": 0.034272}
+   ]
+  }
+ }
+}

@@ -106,7 +106,7 @@ def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor
 
     msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, _ = args
     a, b, y, st, st1 = kept
-    bf, f32 = torch.bfloat16, torch.float32
+    f32 = torch.float32
     _, s, n, _ = msa.shape
     t = s * n
     cz = wo.shape[0]
@@ -163,10 +163,7 @@ def forward(module, msa, mask, token_asym_id=None, residual=None):
             module.to_right.weight, module.product_norm.weight, module.product_norm.bias, module.to_out.weight, module.to_out.bias,
             residual.contiguous() if fuse else empty]
     eps, eps_prod = float(module.ln_msa.eps), float(module.product_norm.eps)
-    if torch.is_grad_enabled():
-        z = _ChaiFn.apply(eps, eps_prod, *args)
-    else:
-        z = _fwd_op(args, eps, eps_prod, False)[0]
+    z = _ChaiFn.apply(eps, eps_prod, *args) if torch.is_grad_enabled() else _fwd_op(args, eps, eps_prod, False)[0]
     z = z.view(1, n, n, -1)
     if interchain:
         z = z * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(z.dtype)

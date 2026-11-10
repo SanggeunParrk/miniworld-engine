@@ -7,8 +7,8 @@ only OVERRIDES its hooks with the hand-CUDA choices that used to be made inside 
 * the expand GEMM with the SwiGLU epilogue (``gemm_swiglu``): sm_100a bf16, sm_90a bf16 / fp32;
 * the attention core: the upstream B200 bf16 / TF32 cores or the H100 bf16 16 x 48 core, and the H100 fp32 TF32 core.
 
-Whoever builds a runner picks the class (``kernels/integrations/token_dit.py``): this one by default, the Triton runner under
-``settings.force_portable_kernels``. On a card with no CUDA choice (every hook returns Triton / None) the two behave the same.
+Whoever builds a runner picks the class (``kernels/integrations/token_dit.py``): this one off H100 (the switch that picked the
+Triton runner, ``force_portable_kernels``, is gone). On a card with no CUDA choice (every hook returns Triton / None) the two behave the same.
 """
 
 import functools

@@ -226,10 +226,7 @@ class MPNNDecoder(BackendModule):
         for layer in self.layers:
             args = (node_states, edge_states, sequence_features, encoder_nodes, neighbor_indices, future_mask, past_mask,
                     residue_mask, edge_mask)
-            if checkpoint_layers:
-                node_states = torch.utils.checkpoint.checkpoint(layer, *args, use_reentrant=False)
-            else:
-                node_states = layer(*args)
+            node_states = torch.utils.checkpoint.checkpoint(layer, *args, use_reentrant=False) if checkpoint_layers else layer(*args)
         return node_states
 
 

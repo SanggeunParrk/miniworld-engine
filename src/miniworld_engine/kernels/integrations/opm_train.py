@@ -17,13 +17,13 @@ grouped outer product, and this repo's `csrc/opm_epilogue.cu` for everything els
 Forward:   fused_prologue -> A2 [(i,c), s], BT [(j,e), s] bf16 (+ stats [S,N,2]);  O = A2 . BT^T (cuBLAS, grouped layout);
            norm = mask^T mask (fp32, clamp 1);  opm_epilogue: [i,j,c,e] -> [(i,j),(c,e)] permute, / norm, bf16, c_hidden^2 -> c_z + bias.
 Backward:  opm_dgrad (dz/norm . Wo straight into the grouped layout, dbo on the side), two cuBLAS GEMMs for dA / dB,
-           opm_dwo (dWo off the grouped O: kept from the forward when settings.opm_train_save_o != 0, else one GEMM recomputes it),
+           opm_dwo (dWo off the grouped O, which a training forward keeps: ``save_o``; without it one GEMM recomputes O),
            opm_prologue_bwd (mask, both projections and the LayerNorm backward in one pass -> dm, dWa, dWb, dgamma, dbeta).
 Measured H100, L=384, S=1024, bf16: fwd+bwd 2.23 ms / 796 MB (O kept) or 2.63 ms / 557 MB, vs this engine's own path
 5.80 ms / 1624 MB; every gradient checked against fp32 autograd of the same statements.
 
-Automatic for supported inputs (settings.opm_train=0 disables it; no external payload needed). Serves a module built with
-implementation="miniworld" or "anthropic" when: d_msa=64, d_hidden=32, d_pair=128, batch 1, N % 64 == 0, S % 256 == 0,
+The training path of OuterProductMean's ``cuda`` backend (``modules/msa.py``; no external payload needed). ``refusal`` names why a
+call is outside it, and the backend then raises ``BackendUnsupported`` -- no other path runs. It serves: d_msa=64, d_hidden=32, d_pair=128, batch 1, N % 64 == 0, S % 256 == 0,
 bf16 on sm_90a, normalize_before_proj, no interchain mask. Fuses the optional pair residual in the output epilogue. Inference omits LN statistics.
 """
 

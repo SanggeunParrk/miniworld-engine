@@ -14,29 +14,32 @@ operands, fp32 accumulation, weight gradients in the parameter's dtype), the exp
 fp32 (the TF32 recipe): single, cond and pair fp32, the block's weights fp32, no CUDA autocast -> the same composition with every
 activation, saved tensor and gradient fp32: cuBLAS GEMMs forced to TF32 tensor cores (the dxt / dxa data gradients written straight
 into their d shift columns of dG; the six weight gradients as batches of row chunks, ``_wgrad32``); the dh GEMM with the SwiGLU
-backward in its epilogue (``gemm_glu_tf32.cu``; settings.bias_only_dit_tf32_glu_bwd=0: cuBLAS + the rows; the expand GEMM with the
-SwiGLU in its epilogue is opt-in, settings.bias_only_dit_tf32_glu=1); the fp32 rows (``bias_only_dit_f32_rows.cu``); the pair bias
-and its backward on TF32 mma.sync (``pair_bias_tc`` / ``pair_bias_bwd_tc``; settings.bias_only_dit_pair_exact=1: split fp32,
-~exact); the weight pack in one launch; the attention core ``pv_gate_tf32`` (forward and dV) and the bias gradient ``dpb32_sm100``
+backward in its epilogue (``gemm_glu_tf32.cu``; the expand GEMM with the SwiGLU in its epilogue is off: its GEMM is slower than
+cuBLAS's); the fp32 rows (``bias_only_dit_f32_rows.cu``); the pair bias
+and its backward on TF32 mma.sync (``pair_bias_tc`` / ``pair_bias_bwd_tc``; one TF32 product,
+``_pair_terms``); the weight pack in one launch; the attention core ``pv_gate_tf32`` (forward and dV) and the bias gradient ``dpb32_sm100``
 (the fp32 port of the bf16 ``dpb_sm100``; it replaces ``dpb_tf32.cu``, removed for non-repeatable results) on kind::tf32 MMAs
 (``kernels/bias_only_dit/cuda/tf32.py``). A failed build of those warns once and keeps the module path.
 
 bf16 step (2026-10-08; in-process node A/B, A = 48, 16 x 48, L384 / L768): the weight pack is ONE launch (``pack16`` of the training
-rows: 49.7 / 57.2 -> 9.6 / 11.2 us; settings.bias_only_dit_train_pack1=0: the torch casts / cats); the dxt / dxa GEMMs write into
+rows: 49.7 / 57.2 -> 9.6 / 11.2 us); the dxt / dxa GEMMs write into
 their d-shift columns of dG, so the LayerNorm backward rows read them there instead of copying them (the fp32 path's way: 108.7 /
-208.0 -> 101.8 / 193.6 us for the two rows; settings.bias_only_dit_bwd_dg=0: the copies); the bias gradient on CTA pairs where
-256-key tiles divide L (``dpbx2_sm100.cu``, L768 61.2 -> 47.4 us; settings.bias_only_dit_dpb_pair=0: dpb_sm100). The switches are
-read per call. fp32: the TF32 build of ``dpbx2_sm100.cu`` by the same rule (L768 148.2 -> 104.0 us; settings.bias_only_dit_tf32_dpb_pair=0: dpb32_sm100).
+208.0 -> 101.8 / 193.6 us for the two rows); the bias gradient on CTA pairs where
+256-key tiles divide L (``dpbx2_sm100.cu``, L768 61.2 -> 47.4 us; elsewhere dpb_sm100). These are fixed
+defaults (the old per-step switches are gone). fp32: the TF32 build of ``dpbx2_sm100.cu`` by the same rule (L768 148.2 -> 104.0 us;
+elsewhere dpb32_sm100).
 The bf16 backward runs as 11 launches instead of 23 at the defaults (12 at L768, where dbias runs on CTA pairs;
 ``kernels/bias_only_dit/cuda/bwd_fused.py``): ``bo_bwd_tail`` x 3 for d out -> do / dg / D / dx1 / the transition half of dG
-(settings.bias_only_dit_bwd_tail=off: its seven launches), ``bo_pvdpb`` for pv dV + dbias where dbias runs on single CTAs (_BWD_PVDPB),
+(``bwd_fused.tail_mode``, fixed at "split3"; "off" names its seven launches), ``bo_pvdpb`` for pv dV + dbias where dbias runs on single CTAs (_BWD_PVDPB),
 the dxa GEMM / adaln_a_bwd / dchat + dcg GEMMs / cond_bwd (``bo_bwd_mid`` x 3 with _BWD_MID=1: 9 launches), ``bo_wgrad`` for the six
-weight gradients and the unfold, ``pair_bias_bwd_fin`` for pair_bias_bwd + finalize (_BWD_PBFIN). settings.bias_only_dit_bwd_fused=0,
-read per call, or a failed build: the per-step launches.
+weight gradients and the unfold, ``pair_bias_bwd_fin`` for pair_bias_bwd + finalize (_BWD_PBFIN). Hopper, and
+a failed build, run the per-step launches.
 
-``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD), B200, bf16 or fp32 inputs, the
+``serves()`` is the whole gate: autograd on, the engine's kernels (the block's ``cuda`` backend, through its kernel view), B200 or H100,
+bf16 or fp32 inputs, the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128, or 256 on H100 / transition n = 2), B == 1, L a multiple of 128 up to 768, a per-sample
-conditioning [A, 1, L, 384], a key mask [1, L] or none, LayerNorm eps 1e-5. settings.bias_only_dit_train=0 turns it off.
+conditioning [A, 1, L, 384], a key mask [1, L] or none, LayerNorm eps 1e-5. Anything else
+is refused: the block's ``cuda`` backend raises ``BackendUnsupported`` (``_supports_cuda``), never another path.
 
 Hoisted pair bias (``block(..., bias=b)``, b [1, H, L, L] in the step's dtype from ``pair_bias_all``,
 ``kernels/integrations/bias_only_dit_hoist.py``): the block's own autograd function without the pair -- the forward skips ``pair_bias``
@@ -53,13 +56,13 @@ import warnings
 
 import torch
 
-from miniworld_engine.kernels.integrations.bias_only_dit_hoist import SINK_ATTR
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels.integrations.bias_only_dit_hoist import SINK_ATTR
 
 D, DP = 768, 128
 #: the conditioning widths the compiled row kernels take (chunks of 128 per row, a template parameter): the block's d_cond is read off
-#: its weights; Hopper serves both, the sm_100 fused tails only 384; another width keeps the module's PyTorch composition
+#: its weights; Hopper serves both, the sm_100 fused tails only 384; another width is refused
 KERNEL_D_CONDS = (384, 768)
 #: the pair widths the pair-bias kernels take (a template parameter of pair_bias / pair_bias_bwd / pair_bias_tc / pair_bias_bwd_tc and
 #: of finalize's ln_pair / to_bias jobs): read off to_bias.weight; Hopper serves both, sm_100 128 (DP)
@@ -127,7 +130,7 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         module.attention.to_value.weight.dtype is not F32
         or torch.is_autocast_enabled("cuda")
     ):
-        return False  # fp32 = an fp32 block; under autocast the module path keeps its casts
+        return False  # fp32 = an fp32 block; under autocast the call is refused (the kernels do not apply its casts)
     if (
         dt is F32
         and torch.cuda.get_device_capability(single.device) != (10, 0)
@@ -207,14 +210,14 @@ _PACKS: dict = {}
 
 def _pack1() -> bool:
     """The weight pack as ONE launch (``pack16_cuda``, the same values bit for bit) instead of 19 torch casts / cats / products --
-    a captured training step repacks every replay (the weights change between steps), ~50 us at ~3 us per small kernel. The default;
-    settings.bias_only_dit_train_pack1=0 (read per call) keeps the torch pack."""
+    a captured training step repacks every replay (the weights change between steps), ~50 us at ~3 us per small kernel. Always on
+    (the torch-pack switch is gone)."""
     return True
 
 
 def _dg_direct() -> bool:
     """The dxt / dxa data gradients written by cuBLAS straight into their d-shift columns of dG (the LayerNorm backward rows then
-    read them there and do not copy them). The default; settings.bias_only_dit_bwd_dg=0 (read per call) keeps the copies."""
+    read them there and do not copy them). Always on (the switch that kept the copies is gone)."""
     return True
 
 
@@ -234,8 +237,8 @@ def _fp32_logits(dev) -> bool:
 
 
 def _bwd_fused(dev, H, DA):
-    """(TailBwd, Wgrad) of ``kernels/bias_only_dit/cuda/bwd_fused.py`` when the fused bf16 backward is on (the default;
-    settings.bias_only_dit_bwd_fused=0, read per call: the per-step launches) and its kernels built, else None."""
+    """(TailBwd, Wgrad) of ``kernels/bias_only_dit/cuda/bwd_fused.py`` when the fused bf16 backward serves (``bwd_fused_on``,
+    always on; sm_100 only) and its kernels built, else None (the per-step launches)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
     from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
 
@@ -1062,7 +1065,7 @@ def _bwd_fused_step(
     L,
     dbias_out=None,
 ):
-    """The bf16 backward with the fused kernels (settings.bias_only_dit_bwd_fused): the tail (bo_bwd_tail x 3 with
+    """The bf16 backward with the fused kernels (``bwd_fused.bwd_fused_on``): the tail (bo_bwd_tail x 3 with
     _BWD_TAIL=split3, else its seven launches: d out -> do, dg, D, dx1, dG's transition half, dGg) -> bo_pvdpb (pv dV + dbias where the
     bias gradient runs on single CTAs; _BWD_PVDPB) -> bo_bwd_mid x 3 (dxa, adaln_a_bwd, dchat / dcg, cond_bwd; _BWD_MID=1) or their
     five launches -> bo_wgrad (the six weight gradients and the unfold) -> pair_bias_bwd_fin (_BWD_PBFIN=1) or pair_bias_bwd +
@@ -1099,7 +1102,7 @@ def _bwd_fused_step(
     )
     if (
         BWF.tail_mode() == "off"
-    ):  # the seven launches bo_bwd_tail replaces (settings.bias_only_dit_bwd_tail=off)
+    ):  # the seven launches bo_bwd_tail replaces (tail_mode "off")
         nc = BT.res_c_bwd_cuda(dout, z, Gg, W["bg2"], dz, dGg, part[0])
         BT.swiglu_bwd_cuda(torch.mm(dz, W["Wsq"]), ab, dab)
         torch.mm(dab, W["Wab"], out=dG[:, 3 * D :])  # d shift2 = dxt: straight into dG
@@ -1431,7 +1434,7 @@ _OPS32: dict = {}
 
 def _pair_terms() -> int:
     """Products of the training pair bias / its backward on TF32 tensor cores: 1 (TF32, the recipe's rounding of every product) or
-    3 (split fp32, ~exact: settings.bias_only_dit_pair_exact=1)."""
+    3 (split fp32, ~exact; not selected: the switch is gone)."""
     return 1
 
 
@@ -1450,7 +1453,7 @@ def _wgrad32(a, b):
     GEMMs as one launch at 360-500 TF/s (the data gradients at 600-670); a batch of chunks fills every SM with full tiles. Measured
     (A = 48, us, one GEMM -> S = 4): L768 dWsq 163 -> 126, dWo 102 -> 75, dWvg 163 -> 131, dWn 171 -> 145, dWgg 119 -> 82, dWab 267
     -> 250, whole step -168; L384 the same except dWab (2.4 M outputs: 120 -> 131), whole step -82. Default S = 4, the large dWab
-    output only from M = 32768 rows. settings.bias_only_dit_wgrad_split=S forces S for all six (0 / 1: one GEMM each)."""
+    output only from M = 32768 rows; Hopper takes one GEMM per weight."""
     M, N, K = a.shape[0], a.shape[1], b.shape[1]
     S = 4 if N * K < 2_000_000 or M >= 32768 else 1
     if torch.cuda.get_device_capability(a.device) == (9, 0):
@@ -1672,7 +1675,7 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
     (chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z) = saved[:16]
     pst = saved[16] if dbias_out is None else None
     W = _pack32(dict(zip(NAMES, params, strict=True)), single.device)
-    Wn, Wraw, Wg, Wvg, Wo, _Wab, Wsq = (
+    _Wn, Wraw, _Wg, _Wvg, Wo, _Wab, Wsq = (
         W["Wn"],
         W["Wraw"],
         W["Wg"],

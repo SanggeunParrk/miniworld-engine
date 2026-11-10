@@ -56,7 +56,7 @@ _WAVES = 2
 # cache makes anyway.
 @configured('layernorm_bwd_split_mmajor_triton',
             key=['shape_key'],
-            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
+            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2), scratch=("PDG", "PDB"))
 @triton.jit
 def _ln_bwd_mmajor_kernel(
     DX, PDG, PDB, DXn, X, G, Mean, Rstd,

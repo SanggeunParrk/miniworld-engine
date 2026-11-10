@@ -52,8 +52,8 @@ WEIGHTS = (
     "transition.expand_b.weight",
     "transition.squeeze.weight",
 )
-#: (heads, d_single) layouts the fused step serves: 16 x 48 everywhere; 24 x 32, 12 x 64 and 16 x 64 (d 1024) on B200 (bf16, and
-#: fp32 through the TF32 core built per layout)
+#: (heads, d_single) layouts the fused step serves: 16 x 48 everywhere; 24 x 32, 12 x 64 and 16 x 64 (d 1024) with the CUDA rows, on
+#: H100 and B200 (bf16, and fp32 through the TF32 core built per layout)
 LAYOUTS = ((16, 768), (24, 768), (12, 768), (16, 1024))
 #: pair widths of the Hopper step (bf16 and fp32): 128, and 256 (Protenix-v2's diffusion pair); only the hoisted bias reads the pair
 PAIR_WIDTHS_H100 = (128, 256)
@@ -140,14 +140,14 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         try:
             _check_native_fp32(module, single, cond, pair, compute_dtype)
         except ValueError:
-            # no CUDA path for this call: the block runs its own statements (H100 has no Triton fallback; they are PyTorch there)
+            # no CUDA path for this call: the block's ``cuda`` backend refuses it (BackendUnsupported; no fallback)
             return False
         return True
     if torch.is_grad_enabled():
         return False
     a = module.attention
-    # the engine's kernels (implementation MINIWORLD resolve to them), as the attention cores and the training
-    # path gate on; PYTORCH keeps the reference
+    # the engine's kernels (the kernel view sets ``_backend``), as the attention cores and the training
+    # path gate on
 
     if a._backend != "portable":
         return False
@@ -267,15 +267,15 @@ def _infer(
 
     ``extra``: an [L, L] logit bias for every head (Hopper CUDA path only; ``serves`` rejects it elsewhere)."""
     if torch.cuda.get_device_capability(single.device) == (9, 0):
-        from miniworld_engine.kernels.integrations.token_dit_train import _tf32
         from miniworld_engine.kernels.conditioned_transition import cuda
+        from miniworld_engine.kernels.integrations.token_dit_train import _tf32
 
         with _tf32(single.dtype is torch.float32):
             return cuda.token_inference(
                 single, cond, pair.contiguous(), mask, weights, qk, eq, ek, heads, extra
             )
-    # The caller picks the runner class: the pure-Triton one under force_portable_kernels, else the one with the hand-CUDA rows /
-    # SwiGLU GEMM / attention cores of the card (it degrades to the Triton hooks where the card has none).
+    # Off H100 the runner with the hand-CUDA rows / SwiGLU GEMM / attention cores of the card (it degrades to the Triton hooks where
+    # the card has none).
     else:
         from miniworld_engine.kernels.conditioned_transition.cuda.token_dit_composed import (
             FusedTokenDiTComposed as FusedTokenDiT,

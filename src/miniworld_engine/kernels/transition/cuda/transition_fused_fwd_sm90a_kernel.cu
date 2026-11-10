@@ -77,7 +77,7 @@ __device__ unsigned long long g_trace[64];
 #define RESIDENT 0   // 1: every weight chunk resident (needs NCH <= 4, LNFRAG, and at most one tile per CTA)
 #endif
 #ifndef LNFRAG
-#define LNFRAG 0   // DISABLED: D128 fragment-LN path measured wrong vs fp64
+#define LNFRAG 0   // a bare build's default only: fused_sm90a.py passes -DLNFRAG=1 (inference, _FWD_TUNING) and 0 (the saving build)
 #endif
 constexpr int D_ = 128, H_ = MW_N * 128, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64;
 

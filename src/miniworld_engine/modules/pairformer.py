@@ -120,10 +120,7 @@ class PairformerBlock(BackendModule, MasterWeights):
         if extra_pair_bias is not None and not self.config.d_single:
             raise ValueError("extra_pair_bias biases the single attention: the block needs the single track (config.d_single)")
         pair_in = pair
-        if self.config.parallel:
-            pair = pair_in + self._pair_updates(pair_in, mask)
-        else:
-            pair = self._sequential_pair(pair, mask)
+        pair = pair_in + self._pair_updates(pair_in, mask) if self.config.parallel else self._sequential_pair(pair, mask)
         if not self.config.d_single:
             return pair
         # A parallel block's single reads the pair ENTERING it; a sequential one the pair its own track just produced.

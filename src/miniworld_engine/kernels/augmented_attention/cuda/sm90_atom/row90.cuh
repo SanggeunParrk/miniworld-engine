@@ -1,4 +1,4 @@
-// row90.cuh — warp-level building blocks of the H100 atom-block row kernels (mma.sync; bf16 or TF32).
+// row90.cuh — building blocks of the H100 atom-block row kernels (wgmma, the A operand from registers; bf16 or TF32).
 //
 // A warp owns 16 rows x 128 columns held as C fragments, f[16][4]: f[nt][0..1] = (row g, cols 8 nt + 2 t, +1), f[nt][2..3] = (row g + 8, same
 // columns), g = lane / 4, t = lane % 4. A C fragment is its own next A operand: bf16 m16n8k16 packs (f[2ks], f[2ks+1]) pairs, TF32 m16n8k8

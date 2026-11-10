@@ -615,10 +615,8 @@ class BiasOnlyAttention(BackendModule):
 
     def _attention_weights(self, pair, mask, bias, dtype):
         """softmax over the keys of the pair bias (masked keys at the largest negative finite logit): [B, H, L, L], shared by every sample."""
-        if bias is None:
-            logits = self.to_bias(self.ln_pair(pair)).permute(0, 3, 1, 2)   # (B, H, L, L)
-        else:
-            logits = bias.to(dtype)                                         # hoisted (pair_bias_all), head-major already
+        # (B, H, L, L) from the pair, or the hoisted bias (pair_bias_all), head-major already
+        logits = self.to_bias(self.ln_pair(pair)).permute(0, 3, 1, 2) if bias is None else bias.to(dtype)
         if mask is not None:
             logits = logits.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min)
         return torch.softmax(logits, dim=-1)

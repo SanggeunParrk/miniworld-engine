@@ -17,7 +17,7 @@ One case no key can catch: an update that writes a tensor without bumping its ``
 
 **Static weights.** A graph whose weights never change between replays (inference: a sampling run, a served model) gains nothing
 from repacking and pays for it: every replay then re-runs the packing kernels (tens of small copies and casts per block -- a token
-DiT inference block goes from 84 us to 200 us). ``static_weights()`` (or ``settings.static_weights=1``) declares that contract: the
+DiT inference block goes from 84 us to 200 us). ``static_weights()`` (or ``set_static_weights(True)``) declares that contract: the
 scoping is off and a capture serves from, and fills, the same caches as an eager call, as the integrations did before the scoping.
 Under it an in-place weight update after the capture is *not* seen by replays -- do not set it around a training graph, nor around a
 sampling run inside one. The benchmark harness sets it for ``mode=inference``.
@@ -31,7 +31,6 @@ import functools
 import weakref
 
 import torch
-
 
 #: Entries a per-block cache must hold: its key names the block's own weights, so one model run touches one entry per block
 #: (24 token-DiT blocks, 48 pairformer blocks). A limit below the block count evicts every entry before its block comes

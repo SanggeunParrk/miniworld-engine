@@ -4,7 +4,7 @@
 //   mod = [ s1 | bi1 | so | s2 | bi2 | st ]   [M, 768]    s1 = sigmoid(n W1s' + b), bi1 = n W1b', s2 / bi2 likewise from n W2*',
 //                                                       so = sigmoid(c Wso + b), st = sigmoid(c Wst + b)
 //   mkv = [ pre | shift ]            [M, 256]    n Wkv'  (the K / V AdaLN's modulation; its sigmoid and bias are applied by pre90)
-// One CTA = 2 warpgroups = 128 rows; the eight 128 x 128 weights stream through shared memory in 64-row units (swizzled K-major tiles).
+// One CTA = NWARP warps x 16 rows: the launcher builds NWARP = 4, one warpgroup = 64 rows; the eight 128 x 128 weights stream through shared memory in 64-row units (swizzled K-major tiles).
 // SPDX-License-Identifier: Apache-2.0
 #include "rms90.cuh"
 using namespace r90;

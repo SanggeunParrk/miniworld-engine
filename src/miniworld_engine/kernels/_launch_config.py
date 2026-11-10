@@ -105,7 +105,7 @@ def _best(exact, cands, time_one, after=None):
         for c in cands:
             try:
                 ms.append(time_one(c))
-            except (OutOfResources, CompileTimeAssertionFailure, PTXASError):
+            except (OutOfResources, CompileTimeAssertionFailure, PTXASError):  # noqa: PERF203 -- per candidate: one failure must not stop the timing
                 ms.append(math.inf)
         _WON[exact] = cands[ms.index(min(ms))]
         if after is not None:
@@ -116,9 +116,10 @@ def _best(exact, cands, time_one, after=None):
 class Configured:
     """A ``@triton.jit`` kernel launched with one explicit config from the tables; ``kernel[grid](...)`` as before."""
 
-    def __init__(self, fn, op, key, default, prune=None, reset_to_zero=(), restore_value=()):
+    def __init__(self, fn, op, key, default, prune=None, reset_to_zero=(), restore_value=(), scratch=()):
         self.fn, self.op, self.key, self.prune, self.arg_names = fn, op, list(key), prune, fn.arg_names
         self.reset_to_zero, self.restore_value = list(reset_to_zero), list(restore_value)
+        self.scratch = tuple(scratch)  # read by the pretuner only (see configured)
         self.default = [_cfg(c) for c in ([default] if isinstance(default, dict) else default)]
         jit = fn
         while not hasattr(jit, "module"):
@@ -147,7 +148,7 @@ class Configured:
         return lambda *args, **kwargs: self.run(*args, grid=grid, **kwargs)
 
     def run(self, *args, grid, warmup=False, **kwargs):
-        named = dict(zip(self.arg_names, args))
+        named = dict(zip(self.arg_names, args, strict=False))
         every = {**named, **kwargs}
         tensors = [v for v in every.values() if isinstance(v, torch.Tensor)]
         gpu = gpu_key(tensors[0].device if tensors else None)
@@ -190,10 +191,13 @@ class Configured:
         return launch(_best(exact, cands, time_one, zero))
 
 
-def configured(op, *, key, default, prune=None, reset_to_zero=(), restore_value=()):
+def configured(op, *, key, default, prune=None, reset_to_zero=(), restore_value=(), scratch=()):
     """Decorator for a ``@triton.jit`` kernel. ``default``: the kernel's own config (a dict of tile kwargs + num_warps /
-    num_stages), or a list of them that ``prune`` (an ``early_config_prune``) takes the first valid one from."""
-    return lambda fn: Configured(fn, op, key, default, prune, reset_to_zero, restore_value)
+    num_stages), or a list of them that ``prune`` (an ``early_config_prune``) takes the first valid one from. ``scratch``: names of
+    tensor arguments whose contents after the launch are config-dependent intermediates (per-block partials / split slots whose
+    layout follows the tile config, summed by a later kernel); the pretuner does not compare them between candidates. The launch
+    ignores it."""
+    return lambda fn: Configured(fn, op, key, default, prune, reset_to_zero, restore_value, scratch)
 
 
 @functools.cache
@@ -220,8 +224,7 @@ def _ranked(family, gpu, op, dtype, dims, near):
 def choose(family, op, dims, dtype, candidates, *, device=None, near=("M",), run=None):
     """A native (CUDA) kernel's config: the ranked table entry for ``dims`` (exact, else nearest, see ``_ranked``) kept where
     it is one of ``candidates``; else ``candidates[0]``, warned once. Tune on and ``run(config)`` given: the survivors are timed."""
-    config = _choose(family, op, dims, dtype, candidates, device=device, near=near, run=run)
-    return config
+    return _choose(family, op, dims, dtype, candidates, device=device, near=near, run=run)
 
 
 def _choose(family, op, dims, dtype, candidates, *, device=None, near=("M",), run=None):

@@ -9,10 +9,9 @@
 // forward : y = (x - mean) * rstd * w + b (RMS: mean = 0, no bias), fp32 statistics. The training forward also stores (mean, rstd) per row (8
 //           bytes, 3% of a D128 bf16 row) so the backward is one reduction per row instead of three.
 // backward: dx from x, dy and the saved statistics; the affine gradients are kept in registers per lane, summed over the warps of the CTA in
-//           shared memory and added into a zeroed fp32 workspace with one atomic per column per CTA; the last CTA to finish converts the sums to
-//           the weight dtype, writes dw / db and clears the workspace for the next call. One kernel, no reduce launch, no cast. The atomics
-//           add in an unspecified order (fp32 rounding differs from replay to replay; the general kernels in ../general are bit-reproducible
-//           and stay the choice for a caller that needs that).
+//           shared memory and stored as one fp32 partial row per CTA (plain stores, no atomics); pipe_reduce, launched behind it with
+//           programmatic dependent launch, adds the partial rows in a fixed order and writes dw / db in the weight dtype. Deterministic:
+//           the gradients are bit-reproducible from call to call and replay to replay.
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -885,8 +884,8 @@ bool dispatch_bwd(int tpr, int ch, const T* dy, const T* x, const void* w, const
 
 }  // namespace mwpipe
 
-// x [M, N] contiguous, rows 16-byte aligned; w, b [N] (bf16 / fp16 / fp32, 16-byte aligned) or empty. Returns y; `ws` (fp32 [2N + 1]) is
-// zeroed by the kernel when given and `stats` (fp32 [M, 2]: mean, rstd) written when given: the training forward hands both to the backward.
+// x [M, N] contiguous, rows 16-byte aligned; w, b [N] (bf16 / fp16 / fp32, 16-byte aligned) or empty. Returns y; `ws` (fp32 [1]) only flags
+// that the backward wants affine gradients (the kernel zeroes it when given) and `stats` (fp32 [M, 2]: mean, rstd) written when given: the training forward hands both to the backward.
 torch::Tensor pipe_forward(torch::Tensor x, torch::Tensor w, torch::Tensor b, double eps, bool rms, torch::Tensor ws, torch::Tensor stats,
                            int64_t per_sm) {
   TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous(), "x must be contiguous CUDA [M, N]");

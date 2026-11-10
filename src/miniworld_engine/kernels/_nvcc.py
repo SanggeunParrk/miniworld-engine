@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 
-
 @functools.lru_cache(maxsize=1)
 def nvcc_path() -> str | None:
     """An nvcc whose release matches ``torch.version.cuda``, preferring this environment's own."""
@@ -254,7 +253,7 @@ def real_host_flags() -> list[str]:
 # mathdx (cuBLASDx) headers. Three transition extensions include them; their include paths were
 # written in as `-I/<a developer home>/mathdx_dl/...`, unbuildable for anyone else and, by the
 # time it was found, for the author too -- the directory was gone and nothing noticed, because
-# those extensions are absent from registry.csv and their build is lazy. Resolve instead, and on
+# those extensions were absent from the old registry.csv and their build is lazy. Resolve instead, and on
 # failure name the variable to set rather than emitting a missing-header error.
 # ---------------------------------------------------------------------------------------------
 

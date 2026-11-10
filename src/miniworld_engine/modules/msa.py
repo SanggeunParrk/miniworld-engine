@@ -152,10 +152,7 @@ class OuterProductMean(BackendModule, MasterWeights):
                 # the counts in at least fp32 (>256 counts are not bf16-exact); the normalized product goes back to the projection dtype
                 norm = torch.einsum("bmi,bmj->bij", mask.to(wide(out)), mask.to(wide(out)))
                 norm = (norm + self.count_offset if self.count_offset is not None else norm.clamp(min=1))[..., None]
-                if self.normalize_before_proj:
-                    pair = self.to_out((out / norm).to(left.dtype))
-                else:
-                    pair = (self.to_out(out) / norm).to(left.dtype)
+                pair = self.to_out((out / norm).to(left.dtype)) if self.normalize_before_proj else (self.to_out(out) / norm).to(left.dtype)
             if self.mask_interchain and token_asym_id is not None:
                 pair = pair * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(pair.dtype)
             return residual + pair if residual is not None else pair

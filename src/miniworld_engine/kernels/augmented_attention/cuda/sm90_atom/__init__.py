@@ -1,4 +1,4 @@
-"""sm_90a (H100) row kernels of the AF3 atom block on warp-level tensor-core MMAs (mma.sync), bf16 and TF32.
+"""sm_90a (H100) row kernels of the AF3 atom block on tensor-core wgmma (the A operand from registers), bf16 and TF32.
 
   cond90.cu  c -> mod [M, 768] = [s1 | bi1 | so | s2 | bi2 | st] and mkv [M, 256] = [pre | shift]
   pre90.cu   AdaLN 1, q | gate, the K / V AdaLN, k | v

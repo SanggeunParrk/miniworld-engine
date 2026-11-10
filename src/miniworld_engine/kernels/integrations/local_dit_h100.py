@@ -1,5 +1,5 @@
-"""The AF3 atom transformer block on H100 (sm_90a): warp-level tensor-core row kernels (mma.sync, bf16 or TF32) and the mma.sync window
-attention, no tcgen05 / wgmma, cuBLAS only for the weight gradients.
+"""The AF3 atom transformer block on H100 (sm_90a): tensor-core row kernels on wgmma (the A operand from registers; bf16 or TF32) and
+the mma.sync window attention, no tcgen05, cuBLAS only for the weight gradients.
 
 The gate is ``AtomDiT._supports_cuda`` (modules/atom_dit.py). fp32 activations and parameters (no autocast)
 run the TF32 kernels; operands are rounded to nearest tf32, the residual stream, LayerNorms, softmax and every stored activation stay fp32.
@@ -14,9 +14,9 @@ import contextlib
 import torch
 from torch.autograd.function import once_differentiable
 
-from miniworld_engine.kernels.integrations import local_dit as _ld
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._tf32 import tf32_matmul
+from miniworld_engine.kernels.integrations import local_dit as _ld
 
 DS, DC, DP, NH = 128, 128, 16, 4
 F32 = torch.float32
@@ -26,7 +26,7 @@ _HOIST_BIAS: dict = {}
 _HOIST_EDGES: dict = {}  # (pair tensor, LN / bias weights) -> the slid edge windows' indices, key mask and pair bias
 
 
-def _edge_tables(z, gamma, wb, n, kmask, n0):
+def _edge_tables(z, gamma, wb, n, kmask, n0, qblock=False):
     """What the slid edge windows read that does not change between the steps of a fold: the five window indices, their key positions and
     validity, and their pair bias [5, h, 32, 128] (the pair LayerNorm and projection of those windows only). It depends on the real atom
     count, the pair and the block's LN / bias weights, so it is built once per pair (``_HOIST_EDGES``) and read at every step."""
@@ -38,9 +38,12 @@ def _edge_tables(z, gamma, wb, n, kmask, n0):
         if kmask is not None
         else torch.full((), n0, device=z.device, dtype=torch.int64)
     )
+    # IntelliFold2's "slide_qblock": the slid rule against the real count rounded up to a whole query window
+    # (``atom_dit._window_positions``); the keys past the real atoms stay masked (``valid``)
+    n_rule = (n_real + 31) // 32 * 32 if qblock else n_real
     last = (n_real - 1) // 32
     idx = torch.stack([last * 0, last * 0 + 1, last - 2, last - 1, last]).clamp(0, nwin - 1)  # [5]
-    starts = torch.minimum((32 * idx - 48).clamp(min=0), (n_real - DS).clamp(min=0))
+    starts = torch.minimum((32 * idx - 48).clamp(min=0), (n_rule - DS).clamp(min=0))
     keys = starts[:, None] + torch.arange(DS, device=z.device)  # [5, 128]
     valid = keys < n_real  # a system under 128 real atoms has keys past them
     zz = F.layer_norm(z[idx].float(), (DP,), gamma.float(), None, _ld.EPS)
@@ -93,7 +96,7 @@ def _dims(single):
     return a * g, n0, n, a * g * n
 
 
-def _fwd_fake(single, cond, pair, kmask, weights, save, parallel_kv=False, slide=False):
+def _fwd_fake(single, cond, pair, kmask, weights, save, parallel_kv=False, slide=False, qblock=False):
     out = torch.empty_like(single)
     if not save:
         return [out]
@@ -130,6 +133,7 @@ def _fwd(
     save: bool,
     parallel_kv: bool = False,
     slide: bool = False,
+    qblock: bool = False,
 ) -> list[torch.Tensor]:
     """``parallel_kv``: AlphaFold 3's K/V AdaLN of the raw atoms; ``slide``: its slid key window (inference only).
     The block output [A, 1, N, 128] and, when ``save``, the tensors the backward reads (bias2, mod, mkv, q, k, v, sg, x1, xkv, o, lse, u, a2,
@@ -190,9 +194,9 @@ def _fwd(
         o, lse = attn(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2, **({"groups": groups} if groups > 1 else {}))
         if slide:
             def edges():
-                return [_edge_tables(zg, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0) for zg in zs]
+                return [_edge_tables(zg, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0, qblock) for zg in zs]
 
-            tables = _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk), edges) if hoist else edges()
+            tables = _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk, qblock), edges) if hoist else edges()
             _slid_edges(o, q, k, v, tables, a, groups, n)
         o = o.view(m, DS)
         if not save:
@@ -470,5 +474,6 @@ def run_block(module, single, cond, pair, mask=None):
         return _H100Block.apply(kmask, single, cond, pair, *weights)
     parallel = module.kv_norm == "parallel"
     return _fwd(
-        single, cond, pair, kmask, weights, False, parallel, module.key_window == "slide"
+        single, cond, pair, kmask, weights, False, parallel, module.key_window in ("slide", "slide_qblock"),
+        module.key_window == "slide_qblock",
     )[0]

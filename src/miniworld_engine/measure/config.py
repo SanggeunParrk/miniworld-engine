@@ -40,7 +40,6 @@ from pathlib import Path
 
 import torch
 
-
 REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements" / "requirements_module.csv"
 # Input activation dtype per case dtype. master (bf16-mixed training): fp32 parameters, bf16 activations (what a module inside a
 # bf16-autocast model receives from the previous module), the forward under bf16 autocast.
@@ -176,7 +175,7 @@ def _value(raw: str):
     for cast in (int, float):
         try:
             return cast(raw)
-        except ValueError:
+        except ValueError:  # noqa: PERF203 -- the next cast is tried
             pass
     return {"True": True, "False": False, "None": None}.get(raw, raw)
 
@@ -243,7 +242,7 @@ def describe(case: Case, cfg: Config | None = None) -> dict:
     ``version`` of those kernels' families' launch-config tables."""
     return {"label": case.label, "row": case.row, "module": case.module, "model": case.model, "stream": case.stream,
             "kwargs": case.kwargs, "length": case.length, "depth": case.depth, "samples": case.samples, "dtype": case.dtype,
-            "mode": case.mode, "versions": versions(case.module, case.mode)}
+            "mode": case.mode, "gpu": result_gpu(), "versions": versions(case.module, case.mode)}
 
 
 # ------------------------------------------------------------------------------------------------------------------- record identity
@@ -261,27 +260,38 @@ def _table(path: str) -> list[dict]:
         return list(csv.DictReader(fh))
 
 
-def versions(module: str, mode: str) -> dict:
+def versions(module: str, mode: str, gpu: str | None = None) -> dict:
     """Human-managed versions a result depends on: ``module`` (the class attribute ``version``: bump it when the class's math, its
     reference or a backend adapter changes a result) and ``kernels`` (name -> the ``version`` column of requirements_kernel.csv for
-    every kernel listed for the class whose role serves ``mode``: bump a kernel's when its algorithm changes a result)."""
+    every kernel listed for the class whose role serves ``mode``: bump a kernel's when its algorithm changes a result). ``tables``: the launch-config table versions of
+    those kernels' families for ``gpu`` (default: the card this process measures on, :func:`result_gpu`)."""
     cls = module_class(module)
     rows = [r for r in _table(str(KERNELS))
             if module in (r.get("modules") or "").split("|") and mode in ROLE_MODES.get(r.get("role", ""), ())]
     kernels = {r["name"]: r.get("version") or "1" for r in rows}
-    tables = {f: table_version(f) for f in sorted({r["family"] for r in rows})}
+    gpu = gpu or result_gpu()
+    tables = {f: table_version(f, gpu) for f in sorted({r["family"] for r in rows})}
     return {"module": str(getattr(cls, "version", "1")), "kernels": dict(sorted(kernels.items())), "tables": tables}
 
 
-#: The card the engine's results are for (H100 only): its launch-config tables are the ones whose versions a record carries.
-TABLE_GPU = "h100_sm90"
+#: The card assumed when no CUDA device is visible (a CPU-side judge run without --gpu).
+DEFAULT_GPU = "h100_sm90"
 
 
-@functools.lru_cache(maxsize=None)
-def table_version(family: str) -> str:
-    """The ``version`` of a kernel family's launch-config table for :data:`TABLE_GPU` (``kernels/<family>/configs/<gpu>.json``,
+def result_gpu() -> str:
+    """The card key results are for (``kernels._launch_config.gpu_key``, e.g. ``h100_sm90``, ``a100_sm80``): the current CUDA device, else
+    :data:`DEFAULT_GPU`. Tokens, launch-config tables and their versions are per card."""
+    from miniworld_engine.kernels import _launch_config
+
+    key = _launch_config.gpu_key()
+    return DEFAULT_GPU if key == "cpu" else key
+
+
+@functools.cache
+def table_version(family: str, gpu: str = DEFAULT_GPU) -> str:
+    """The ``version`` of a kernel family's launch-config table for ``gpu`` (``kernels/<family>/configs/<gpu>.json``,
     incremented by the pretuner's merge when the table's content changes); "1" when the table has none or does not exist."""
-    path = Path(__file__).resolve().parents[1] / "kernels" / family / "configs" / f"{TABLE_GPU}.json"
+    path = Path(__file__).resolve().parents[1] / "kernels" / family / "configs" / f"{gpu}.json"
     try:
         return str(json.loads(path.read_text()).get("version", 1))
     except (OSError, ValueError):
@@ -296,7 +306,7 @@ def environment() -> dict:
         import triton
 
         env["triton"] = triton.__version__
-    except Exception:  # noqa: BLE001 -- recorded as absent
+    except Exception:  # recorded as absent
         env["triton"] = None
     if torch.cuda.is_available():
         props = torch.cuda.get_device_properties(0)
@@ -304,7 +314,7 @@ def environment() -> dict:
         try:
             env["driver"] = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"], capture_output=True,
                                            text=True, timeout=10).stdout.splitlines()[0].strip()
-        except Exception:  # noqa: BLE001 -- recorded as absent
+        except Exception:  # recorded as absent
             env["driver"] = None
     return env
 

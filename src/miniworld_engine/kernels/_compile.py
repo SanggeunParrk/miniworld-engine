@@ -1,17 +1,12 @@
-"""How a kernel entry point is exposed to ``torch.compile``. One switch, one wrapper.
+"""How a kernel entry point is exposed to ``torch.compile``: one wrapper, :func:`opaque`.
 
 A Triton or CuTeDSL launcher cannot be traced by Dynamo, so every entry point has to declare what
-Dynamo should do with it. There are exactly two answers and they are interchangeable -- the kernel
-runs the same and returns the same numbers either way:
+Dynamo should do with it. The answer is ``custom_op``: the launcher is registered as an opaque
+``torch.library`` op, so it stays in the compiled graph and the surrounding ops keep fusing across it.
+(The other answer, ``disable`` -- a graph break: Dynamo stops, runs the launcher eagerly, resumes after
+-- was a ``settings`` field once; the switch went with the settings module, and only ``custom_op`` is left.)
 
-``disable``    graph break: Dynamo stops, runs the launcher eagerly, resumes after. Default.
-``custom_op``  the launcher is registered as an opaque ``torch.library`` op, so it stays in the
-               compiled graph and the surrounding ops keep fusing across it.
-
-This is a backend choice like ``layernorm_bwd_path`` or ``trimul_impl``, not a per-kernel property,
-so it is one ``settings`` field applied uniformly rather than a decision hardcoded per file.
-
-``custom_op`` is the default. ``disable`` held that spot only because it was the only mode that
+``disable`` was once the default only because it was the only mode that
 could LOAD: 47 of the 58 entry points wrapped an ``autograd.Function`` method, which ``custom_op``
 cannot register, so choosing it raised on import. Measured on an A6000 (Pairformer x4, L=384),
 once every launch has a fake:
@@ -23,11 +18,9 @@ once every launch has a fake:
 The last two are the point. A graph break does not merely cost fusion: inductor's cudagraph-trees
 bail on one, so ``reduce-overhead`` silently degraded into something slower than eager, and a
 manual capture over a compiled module died with ``cudaErrorStreamCaptureInvalidated`` because part
-of the region dropped back to eager mid-capture. ``disable`` stays available for A/B, and as the
-escape hatch if a fake is ever wrong -- it needs none.
+of the region dropped back to eager mid-capture.
 
-The mode is read at import time because registration has to happen at import; changing it after the
-kernel modules are loaded has no effect.
+Registration happens at import: the decorator registers the op when the kernel module loads.
 
 
 WHAT GOES IN AN OP
@@ -96,7 +89,7 @@ where the compiler's remaining leverage is:
   two more dispatches.
 * **11 wrap a DISPATCH** -- ``layernorm``'s bwd-path choice, ``transition``'s fused fwd/bwd, the
   bidirectional triangle attention, the FA4 entry. These pick among launchers using
-  ``torch.cuda.get_device_capability``, a ``settings`` read, or a ``try``/``except`` around a
+  ``torch.cuda.get_device_capability`` or a ``try``/``except`` around a
   build that may not exist. The choice is as untraceable as the launch, so the rule puts it in the
   same op. Hoisting it to the caller would not shrink the opaque region, it would only move the
   device knowledge somewhere that has no business holding it.
@@ -114,7 +107,6 @@ save intermediates, and keeps the eager path byte-identical to what shipped.
 from __future__ import annotations
 
 import contextlib
-import functools
 
 import torch
 
@@ -144,9 +136,8 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()):
     """Mark a kernel launch as untraceable by Dynamo, as an opaque ``torch.library`` custom op.
 
     ``fake(*args, **kwargs)`` returns output tensors of the right shape/dtype/device without doing
-    the work. It is required only by ``custom_op`` mode -- Dynamo needs it to keep shape inference
-    going across the opaque node -- and a missing one fails loudly there instead of silently
-    downgrading to a graph break, which would make the mode a no-op that still looks enabled.
+    the work. Dynamo needs it to keep shape inference going across the opaque node; a missing one fails
+    loudly at decoration instead of silently downgrading to a graph break.
 
     ``name`` overrides the op name (default: the decorated function's qualified name).
     ``mutates_args`` names arguments the launch writes into, for launchers that fill a caller-owned
@@ -187,7 +178,7 @@ def device_constant(fn):
     Dynamo evaluates ``fn`` once at trace time and inlines the result, so a device-property query
     or a calibrated-choice lookup stops splitting the graph. Use it only for values that cannot
     change within a run: the card's identity, its compute capability, a choice read from the
-    committed dispatch cache. A recompile re-evaluates it, so a value that legitimately changes
+    committed launch-config tables (``kernels/_launch_config.py``). A recompile re-evaluates it, so a value that legitimately changes
     between runs is still picked up -- but one that changes DURING a run would be missed, which is
     exactly why this is not the default for anything shape-dependent.
     """

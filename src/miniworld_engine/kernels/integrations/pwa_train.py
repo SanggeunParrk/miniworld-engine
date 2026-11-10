@@ -18,9 +18,9 @@ On sm_100a (B200) the same boundaries run `csrc/sm100/pwa_sm100.cu`: forward pai
 cuBLAS bmm (o = w . v), pwa_gate_out; backward pwa_glue2 (do, dyg = dgp . Wg, dWo, dWg -- dgp stays on chip), cuBLAS bmm
 (dv = w^T . do, dw = do . v^T), dv_bwd, pair_bwd.
 
-Automatic in auto mode; settings.pwa_train=0 disables this path. It serves a grad-enabled call of a module built with
-implementation="miniworld" or "anthropic" when the shapes fit (d_msa=64, d_pair=128, 8 heads x 32, batch 1,
-N a multiple of 128, S even, bf16 activations on sm_90a); anything else falls through to the module's own statements. The residual AND the
+The path of MSAPairWeightedAveraging's ``cuda`` backend (``modules/msa.py``). It serves a call when the shapes fit (d_msa=64,
+d_pair=128, 8 heads x 32, batch 1, N a multiple of 128, S even, bf16 activations on sm_90a); ``refusal`` names why not, and the
+backend then raises ``BackendUnsupported`` -- no other path runs. The residual AND the
 module's row-broadcast dropout on the update are applied inside the kernel: the module returns this path's output as is.
 """
 
@@ -34,8 +34,8 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.kernels.integrations import pwa_wide as _wide
 from miniworld_engine.kernels import _cast_cuda
+from miniworld_engine.kernels.integrations import pwa_wide as _wide
 
 H, C, D, DZ = 8, 32, 64, 128
 HC = H * C
@@ -234,7 +234,7 @@ def _k100():
 
 
 def _k(native: bool | None = None, fp32_logits: bool = True):
-    """The CUDA extensions, built once (JIT, cached under settings.engine_jit_root). The forward comes from
+    """The CUDA extensions, built once (the prebuilt bundle, else JIT-built into ``_nvcc.engine_jit_root()``). The forward comes from
     `pwa_fwd3.cu` (register-resident y tiles, 48 KB stages); `pwa_fwd2.cu` stays for the plain forward (`pwa_plain2`)."""
     native = native_aux_enabled() if native is None else native
     key = "all_native" if native else "all"

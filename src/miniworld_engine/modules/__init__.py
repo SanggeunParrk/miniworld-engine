@@ -48,6 +48,8 @@ from miniworld_engine.modules.norm import AdaptiveLayerNorm, AdaptiveRMSNorm, Id
 from miniworld_engine.modules.pair_embed import PairEmbedAdaLN, PairEmbedCA, PairEmbedGeom
 from miniworld_engine.modules.pairformer import Pairformer, PairformerBlock, PairformerConfig
 from miniworld_engine.modules.primitives import BackendModule, Dropout, Linear, MasterWeights, MPLinear
+from miniworld_engine.modules.sampler_ops import AlignEuler, AugmentNoise, PoolAtoms
+from miniworld_engine.modules.smooth_lddt import SmoothLddtLoss
 from miniworld_engine.modules.token_dit import (
     TokenDiT,
     TokenDiTBoltz2,
@@ -57,8 +59,6 @@ from miniworld_engine.modules.token_dit import (
     TokenDiTProtenix,
     TokenDiTRoseTTAFold3,
 )
-from miniworld_engine.modules.sampler_ops import AlignEuler, AugmentNoise, PoolAtoms
-from miniworld_engine.modules.smooth_lddt import SmoothLddtLoss
 from miniworld_engine.modules.token_pair_init import TokenPairInit
 from miniworld_engine.modules.transition import ConditionedTransition, Transition, UpGatedConditionedTransition
 from miniworld_engine.modules.triangle import (
@@ -74,6 +74,8 @@ from miniworld_engine.modules.triangle import (
 )
 
 __all__ = [
+    "AdaptiveLayerNorm",
+    "AdaptiveRMSNorm",
     "AlignEuler",
     "AtomDiT",
     "AtomDiTBoltz2",
@@ -83,30 +85,18 @@ __all__ = [
     "AtomDiTOpenFold3",
     "AtomDiTProtenix",
     "AtomDiTRoseTTAFold3",
-    "AugmentNoise",
     "AttentionPairBias",
+    "AugmentNoise",
     "AugmentedAttentionPairBias",
-    "BiasOnlyAttention",
-    "FlatQKNormAugmentedAttention",
-    "UngatedAugmentedAttention",
-    "InputFeatureEmbedder",
-    "SWA3DRoPEAttention",
-    "SWAAtomTransformer",
-    "TokenDiT",
-    "TokenDiTBoltz2",
-    "TokenDiTChai1",
-    "TokenDiTMiniWorld",
-    "TokenDiTMiniWorldBiasOnly",
-    "TokenDiTProtenix",
-    "TokenDiTRoseTTAFold3",
-    "AdaptiveLayerNorm",
-    "AdaptiveRMSNorm",
-    "IdentityAdaptiveLayerNorm",
     "BackendModule",
+    "BiasOnlyAttention",
     "BidirectionalTriangleAttention",
     "BidirectionalTriangleMultiplication",
     "ConditionedTransition",
     "Dropout",
+    "FlatQKNormAugmentedAttention",
+    "IdentityAdaptiveLayerNorm",
+    "InputFeatureEmbedder",
     "LayerNorm",
     "Linear",
     "MPLinear",
@@ -122,10 +112,18 @@ __all__ = [
     "PairformerConfig",
     "PoolAtoms",
     "RMSNorm",
+    "SWA3DRoPEAttention",
+    "SWAAtomTransformer",
     "SmoothLddtLoss",
+    "TokenDiT",
+    "TokenDiTBoltz2",
+    "TokenDiTChai1",
+    "TokenDiTMiniWorld",
+    "TokenDiTMiniWorldBiasOnly",
+    "TokenDiTProtenix",
+    "TokenDiTRoseTTAFold3",
     "TokenPairInit",
     "Transition",
-    "UpGatedConditionedTransition",
     "TriangleAttention",
     "TriangleAttentionAF3",
     "TriangleAttentionChai1",
@@ -133,4 +131,6 @@ __all__ = [
     "TriangleAttentionRF3",
     "TriangleMultiplication",
     "TriangleMultiplicationRF3",
+    "UngatedAugmentedAttention",
+    "UpGatedConditionedTransition",
 ]
