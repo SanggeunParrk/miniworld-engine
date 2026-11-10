@@ -283,7 +283,9 @@ void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tenso
 // ---------------------------------------------------------------------------------------------------------------------------------------
 // Decoder pair embedding: pair[b,i,j] = M_ij * (T[sep] + T[127 + bin(|ca_i - ca_j|)]),  table [157][256] (127 sequence separations, 30 CA distances).
 // ---------------------------------------------------------------------------------------------------------------------------------------
-template <bool GT, bool CS = false>
+// HL: the LayerNorm output by half-warps (see below); HP pairs per half-warp and step
+constexpr int HP = 2;
+template <bool GT, bool CS = false, bool HL = false>
 __global__ void __launch_bounds__(GT ? GT_THREADS : NWCA * 32, GT ? GT_CPS : 1)
 pg_fwd_ca(const __nv_bfloat16* tbl, const float* ca, const uint8_t* mask, const int* idx, const float* dlim, __nv_bfloat16* out, uint4* codes,
           int B, int n, int nd, int ln, float eps, int jp) {
@@ -317,6 +319,72 @@ pg_fwd_ca(const __nv_bfloat16* tbl, const float* ca, const uint8_t* mask, const 
       }
       if (codes != nullptr && j < jend) codes[(size_t)row * n + j] = make_uint4(w0 ^ MASKED, 0u, 0u, 0u);
       int cnt = jend - j0;
+      if (HL && ln) {
+        // LayerNorm output: a half-warp per pair (16 lanes x 16 channels), the two halves on two pairs: each 4-level butterfly serves two
+        // pairs (2.5x fewer shuffles per pair than a warp per pair; the shuffles bound this kernel). HP pairs per half and step.
+        const int hh = lane >> 4, cc = (lane & 15) * 16;
+        for (int t0 = 0; t0 < cnt; t0 += 2 * HP) {
+          float x[HP][16];
+#pragma unroll
+          for (int u = 0; u < HP; u++) {
+            const uint32_t p0 = __shfl_sync(0xffffffffu, w0, t0 + 2 * u + hh);   // < 32; a lane past the chunk holds MASKED
+#pragma unroll
+            for (int e = 0; e < 16; e++) x[u][e] = 0.f;
+            if (!(p0 & MASKED)) {
+              auto add = [&](int r) {
+#pragma unroll
+                for (int k = 0; k < 2; k++) {
+                  const uint4 v = trow<GT>(T, r, cc + 8 * k);
+                  float* y = x[u] + 8 * k;
+                  y[0] += bf_lo(v.x); y[1] += bf_hi(v.x); y[2] += bf_lo(v.y); y[3] += bf_hi(v.y);
+                  y[4] += bf_lo(v.z); y[5] += bf_hi(v.z); y[6] += bf_lo(v.w); y[7] += bf_hi(v.w);
+                }
+              };
+              add(p0 & 127);
+              add(R_CAD + ((p0 >> 8) & 31));
+            }
+          }
+          float s[HP], q[HP];
+#pragma unroll
+          for (int u = 0; u < HP; u++) {
+            s[u] = 0.f;
+#pragma unroll
+            for (int e = 0; e < 16; e++) { x[u][e] = __bfloat162float(__float2bfloat16_rn(x[u][e])); s[u] += x[u][e]; }
+          }
+#pragma unroll
+          for (int o = 8; o; o >>= 1)
+#pragma unroll
+            for (int u = 0; u < HP; u++) s[u] += __shfl_xor_sync(0xffffffffu, s[u], o);
+#pragma unroll
+          for (int u = 0; u < HP; u++) {
+            s[u] *= 1.f / C;
+            q[u] = 0.f;
+#pragma unroll
+            for (int e = 0; e < 16; e++) { const float d = x[u][e] - s[u]; q[u] += d * d; }
+          }
+#pragma unroll
+          for (int o = 8; o; o >>= 1)
+#pragma unroll
+            for (int u = 0; u < HP; u++) q[u] += __shfl_xor_sync(0xffffffffu, q[u], o);
+#pragma unroll
+          for (int u = 0; u < HP; u++) {
+            const int t = t0 + 2 * u + hh;
+            if (t >= cnt) continue;
+            const float rstd = rsqrtf(q[u] * (1.f / C) + eps);
+#pragma unroll
+            for (int k = 0; k < 2; k++) {
+              uint4 w;
+              __nv_bfloat162* hw = reinterpret_cast<__nv_bfloat162*>(&w);
+#pragma unroll
+              for (int e = 0; e < 4; e++) hw[e] = __floats2bfloat162_rn((x[u][8 * k + 2 * e] - s[u]) * rstd, (x[u][8 * k + 2 * e + 1] - s[u]) * rstd);
+              uint4* d = reinterpret_cast<uint4*>(orow + (size_t)(j0 + t) * C + cc + 8 * k);
+              if constexpr (CS) __stcs(d, w);
+              else *d = w;
+            }
+          }
+        }
+        continue;
+      }
       for (int t0 = 0; t0 < cnt; t0 += PU) {        // PU pairs per step (see pg_fwd)
         float x[PU][8];
 #pragma unroll
@@ -847,7 +915,7 @@ void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::
   auto st = at::cuda::getCurrentCUDAStream();
   if (gt) {
     const Launch L = fwd_launch(B, n, sms, 2 * GT_CPS, GT_THREADS / 32, (int)jp, 16);   // the decoder pair bins cheaply: chunks of at most 16 (fastest at L 384)
-    auto f = pg_fwd_ca<true, true>;
+    auto f = pg_fwd_ca<true, true, true>;   // the LayerNorm output by half-warps
     f<<<L.grid, L.nw * 32, 0, st>>>(tp, ca.data_ptr<float>(), mask.data_ptr<uint8_t>(), idx.data_ptr<int>(), dlim.data_ptr<float>(), op,
                                                   cp, B, n, (int)dlim.numel(), (int)ln, (float)eps, L.jp);
   } else {

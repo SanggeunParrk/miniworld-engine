@@ -41,7 +41,7 @@ def _fold(wo, gam, bet, bo):
     return (w * gam.float()[None, :]).to(torch.bfloat16).contiguous(), (bo.float() + w @ bet.float()).contiguous()
 
 
-def _forms(lnw, lnb, wl, wr, gam, bet, wo, bo):
+def _forms(lnw, lnb, wl, wr, gam, bet, wo, bo, infer: bool = False):
     """The kernel-dtype forms of the weights, made once while the weights are unchanged (`_capture.param_forms`): (LayerNorm gamma / beta fp32,
     [W_left; W_right] bf16, W' bf16, b' fp32). With fp32 master parameters this was a handful of cast kernels per call."""
     from miniworld_engine.kernels import _capture
@@ -50,7 +50,9 @@ def _forms(lnw, lnb, wl, wr, gam, bet, wo, bo):
         wf, bf = _fold(wo, gam, bet, bo)
         return lnw.float().contiguous(), lnb.float().contiguous(), torch.cat([wl, wr]).to(torch.bfloat16).contiguous(), wf, bf
 
-    return _capture.param_forms("chai_forms", [lnw, lnb, wl, wr, gam, bet, wo, bo], build)
+    # ``infer`` (the inference forward): a capture reads the entry its eager warm-up made (the 4 fold / cast kernels, ~10 us at L 128, leave
+    # the graph); training keeps the forms of the weights as they are at each replay
+    return _capture.param_forms("chai_forms", [lnw, lnb, wl, wr, gam, bet, wo, bo], build, capture_reads_eager=infer)
 
 
 def _front(msa, mask, forms, eps, save):
@@ -85,7 +87,7 @@ def _fwd_op(args: list[torch.Tensor], eps: float, eps_prod: float, train: bool) 
     """The Chai-1 OPM forward: prologue, grouped products, fused epilogue. args = [msa, mask, lnw, lnb, wl, wr, gamma, beta, wo, bo, residual] (empty tensors for no mask / residual)."""
     from miniworld_engine.kernels.outer_product_mean import cuda
     msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual = args
-    forms = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo)
+    forms = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo, infer=not train)
     a, b, st1, o = _front(msa, mask, forms, eps, train)
     wf, bf = forms[3], forms[4]
     z, y, st = cuda.chai_epilogue(o, wf, bf, residual if residual.numel() else None, train, eps_prod)
