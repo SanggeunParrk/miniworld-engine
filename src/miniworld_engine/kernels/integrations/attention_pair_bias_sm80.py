@@ -648,9 +648,10 @@ def _bias_stats_gemm(z: torch.Tensor, wcm: torch.Tensor, mask, L: int, eps: floa
     row statistics from one reduction: the d_pair 512 bias at L128, where the kernel's 8192 multiply-adds a thread are latency-bound (A100, 16 heads: 74 against 86 us)."""
     dp, heads = wcm.shape
     z2 = z.reshape(L * L, dp)
-    sd, mu = torch.std_mean(z2, -1, correction=0, keepdim=True)
-    g = torch.mm(z2, wcm)
-    bias = ((g - mu * wcm.sum(0)) * torch.rsqrt(sd * sd + eps)).t().reshape(heads, L, L).contiguous()
+    sd, mu = torch.std_mean(z2, -1, correction=0)
+    rstd = torch.rsqrt(sd.square_().add_(eps))
+    bias = torch.addmm(torch.outer(wcm.sum(0), mu).neg_(), wcm.t(), z2.t())    # [H, L L] = W' z^T - sum W' mean, head-major as it comes out
+    bias = bias.mul_(rstd).view(heads, L, L)
     if mask is not None:
         bias.masked_fill_(~mask.view(1, 1, L), -1e4)
     return bias
