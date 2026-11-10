@@ -13,6 +13,10 @@ from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.norm import LayerNorm
 from miniworld_engine.modules.primitives import BackendModule, Dropout, Linear, MasterWeights, key_mask, master_autocast, random_input, wide
 
+#: Release directories of the model kits' own MSA kernels (the ``"anthropic"`` backends; ``modules/_anthropic.load(..., path=...)``).
+_AF3T_KERNELS = "af3_torch/opt/forward/af3t/kernels/third_party"   # af3t_opm.py: torch + triton only
+_EF2_DRIVER = "esmfold2/opt/forward/fast_inference/driver"         # ef2_msa_v2.py: torch + triton only
+
 
 class OuterProduct(BackendModule):
     """Outer product single representation to pair representation.
@@ -168,7 +172,161 @@ class OuterProductMean(BackendModule, MasterWeights):
     #:   groups (Chai-1, 8 x 8)  ``kernels.outer_product_mean.chai`` (fused CUDA passes, forward + backward; d_msa 64, N % 64)
     #: ``"triton"``: ``kernels.outer_product_mean.triton.main.triton_outer_product_mean`` (forward + backward, bf16 activations; d_msa /
     #: d_hidden powers of two >= 16, d_pair % 32; divides by the clamped count only: no ``count_offset``; no ``mask_interchain``).
-    backends = ("pytorch", "cuda", "triton")
+    #: ``"anthropic"`` (inference only; the residual and the interchain mask are the module's): the model kit's own OPM kernel by the
+    #: module's form (the module is model-agnostic: the kit of the models its rows serve):
+    #:   normalize_before_proj, groups 1, d_pair 128 (Boltz-2, MiniWorld; RoseTTAFold3's biased projections in the same form)  the boltz2
+    #:       kit's ``fpf_msa.boltz2.outer_product_mean`` (``opt_core.ops.msa_opm`` form ``mask_norm``: LN + a | b (+ bias) x mask prologue,
+    #:       the outer GEMM over the depth, / clamp(n, 1) before the projection, proj_o + bias in its epilogue)
+    #:   divide after the projection, d_msa 64, d_hidden 32, d_pair 128, no projection bias (AlphaFold 3, OpenFold3, Protenix-v1)  the
+    #:       af3_torch kit's ``af3t_opm.ln_proj2`` + cuBLAS outer GEMM + ``af3t_opm.opm_out`` (the kit's ``af3t_msa.opm_kernels`` driver
+    #:       restated: that module imports xfold); the kernel divides by ``bf16(norm + eps)`` of a caller-given norm, so the module's
+    #:       ``clamp(n, 1)`` is handed in with eps 0 (``count_offset``: the unclamped n with eps = count_offset, AF3's own form)
+    #:   divide after the projection, d_msa 128, d_hidden 32, d_pair % 256, no projection bias (ESMFold2, Protenix-v2)  the esmfold2 kit's
+    #:       ``ef2_msa_v2.opm_fused`` (LN + W x row mask producer, cuBLAS, projection + bias / clamp(n, 1) + pair residual epilogue)
+    backends = ("pytorch", "anthropic", "cuda", "triton")
+
+    # ------------------------------------------------------------------------------------------------------------------ anthropic
+    def _anthropic_route(self, msa, mask, residual) -> tuple[str | None, str | None]:
+        """``(route, None)``: ``"boltz2"`` | ``"af3"`` | ``"ef2"``, else ``(None, reason)``."""
+        from miniworld_engine.modules import _anthropic
+
+        if torch.is_grad_enabled():
+            return None, "inference only (no kit carries an OuterProductMean backward): call under torch.no_grad() / inference_mode"
+        if not msa.is_cuda:
+            return None, "the release's kernels run on CUDA tensors only"
+        if msa.dtype != torch.bfloat16:
+            return None, f"dtype {msa.dtype}: the kits' OPM kernels take bfloat16 activations (bf16 autocast)"
+        if msa.dim() != 4:
+            return None, f"msa must be [B, M, L, d_msa], got {tuple(msa.shape)}"
+        if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != tuple(msa.shape[:3])):
+            return None, "mask must be a bool [B, M, L] mask"
+        if residual is not None and residual.dtype != msa.dtype:
+            return None, "the pair residual must be in the msa's dtype"
+        if self.groups > 1:
+            return None, ("grouped OPM (Chai-1: 8 groups, product LayerNorm, no count division): the chai1 kit has no OPM kernel (its eager "
+                          "trunk restates the TorchScript graph in torch) and no other kit computes the grouped form")
+        d_msa, d_hidden, d_pair = self.to_left.weight.shape[1], self.to_left.weight.shape[0], self.to_out.weight.shape[0]
+        biased = self.to_left.bias is not None
+        if self.normalize_before_proj:
+            if self.count_offset is not None:
+                return None, "count_offset with normalize_before_proj: the boltz2 kit's mask_norm form divides by clamp(n, 1) only"
+            if (d_hidden, d_pair) != (32, 128):
+                return None, f"d_hidden {d_hidden}, d_pair {d_pair}: the boltz2 kit pins its mask_norm cell to (c_hidden, c_z) = (32, 128)"
+            if d_msa & (d_msa - 1) or d_msa < 16:
+                return None, f"d_msa {d_msa}: the fused prologue takes a power-of-two width"
+            return ("boltz2", None) if (why := _anthropic.missing("fpf_msa.boltz2", path="boltz2/opt/forward")) is None else (None, why)
+        if biased:
+            return None, ("projection biases with the division after the projection: the af3_torch / esmfold2 kernels have no projection bias, "
+                          "and RoseTTAFold3's kit divides by the MSA depth (a scalar) instead of the pair counts")
+        if (d_msa, d_hidden, d_pair) == (64, 32, 128):
+            return ("af3", None) if (why := _anthropic.missing("af3t_opm", path=_AF3T_KERNELS)) is None else (None, why)
+        if d_msa == 128 and d_hidden == 32 and d_pair % 256 == 0:
+            if self.count_offset is not None:
+                return None, "count_offset: the esmfold2 kernel divides by clamp(n, 1)"
+            return ("ef2", None) if (why := _anthropic.missing("ef2_msa_v2", path=_EF2_DRIVER)) is None else (None, why)
+        return None, (f"(d_msa, d_hidden, d_pair) = ({d_msa}, {d_hidden}, {d_pair}) dividing after the projection: the kits' kernels take "
+                      "(64, 32, 128) (af3_torch) or (128, 32, 256k) (esmfold2)")
+
+    def _supports_anthropic(self, msa, mask=None, token_asym_id=None, residual=None) -> str | None:
+        return self._anthropic_route(msa, mask, residual)[1]
+
+    def _anthropic_key(self) -> tuple:
+        return tuple((p.data_ptr(), p._version, p.dtype) for p in self.parameters())
+
+    def _forward_anthropic(self, msa, mask=None, token_asym_id=None, residual=None) -> torch.Tensor:
+        if self.dead and residual is not None:   # inference only: a dead instance returns the residual input (as the reference does)
+            return residual
+        route, _ = self._anthropic_route(msa, mask, residual)
+        if mask is None:
+            mask = torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
+        interchain = self._interchain(token_asym_id)
+        if route == "boltz2":
+            pair = self._anthropic_boltz2(msa, mask)
+        elif route == "af3":
+            pair = self._anthropic_af3(msa, mask)
+        else:
+            pair = self._anthropic_ef2(msa, mask, None if interchain else residual)
+            if not interchain and residual is not None:
+                return pair
+        if interchain:
+            pair = pair * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(pair.dtype)
+        return residual + pair if residual is not None else pair
+
+    def _anthropic_boltz2(self, msa, mask):
+        """The boltz2 kit's entry point on a namespace of Boltz-2's attribute schema (norm / proj_a / proj_b / proj_o / c_hidden); the kit
+        caches its weight pack on that object, so a new one is made when the parameters change."""
+        from types import SimpleNamespace
+
+        from miniworld_engine.modules import _anthropic
+
+        kit = _anthropic.load("fpf_msa.boltz2", path="boltz2/opt/forward")
+        key = self._anthropic_key()
+        if getattr(self, "_anthropic_ns_key", None) != key:
+            self._anthropic_ns = SimpleNamespace(norm=self.ln_msa, proj_a=self.to_left, proj_b=self.to_right, proj_o=self.to_out,
+                                                 c_hidden=self.group_width)
+            self._anthropic_ns_key = key
+        with master_autocast(msa, self):
+            return kit.outer_product_mean(self._anthropic_ns, msa.contiguous(), mask.to(msa.dtype).contiguous(), None)
+
+    def _anthropic_af3(self, msa, mask):
+        """The af3_torch kit's OPM kernels, driven as its ``af3t_msa.opm_kernels`` does (per sample: ln_proj2, then per chunk of 256 left
+        tokens one cuBLAS bf16 GEMM and opm_out)."""
+        from miniworld_engine.modules import _anthropic
+
+        ko = _anthropic.load("af3t_opm", path=_AF3T_KERNELS)
+        key = self._anthropic_key()
+        if getattr(self, "_anthropic_w_key", None) != key:
+            with torch.no_grad():
+                self._anthropic_w = {
+                    "WT": torch.cat([self.to_left.weight, self.to_right.weight], 0).to(torch.bfloat16).t().contiguous(),   # [c_m, 2c]
+                    "W16": self.to_out.weight.to(torch.bfloat16).t().contiguous(),                                       # [c*c, c_z], rows (c, e)
+                    "bias": self.to_out.bias.float().contiguous(), "lnw": self.ln_msa.weight.float().contiguous(),
+                    "lnb": self.ln_msa.bias.float().contiguous()}
+            self._anthropic_w_key = key
+        W = self._anthropic_w
+        B, S, N, _ = msa.shape
+        CO, F = self.group_width, self.to_out.weight.shape[0]
+        rows = min(256, N)
+        eps = 0.0 if self.count_offset is None else float(self.count_offset)
+        outs = []
+        with torch.autocast("cuda", enabled=False):
+            for b in range(B):
+                m_b = mask[b].to(torch.bfloat16).contiguous()
+                LT, R = ko.ln_proj2(msa[b].contiguous(), W["lnw"], W["lnb"], W["WT"], m_b, float(self.ln_msa.eps), BA=64, num_warps=4)
+                norm = torch.mm(m_b.t(), m_b)                     # exact integer counts in bf16 (the kit's _mask_norm)
+                norm16 = (norm.clamp(min=1) if self.count_offset is None else norm).contiguous()
+                A, Bm = LT.view(N * CO, S), R.view(S, N * CO)
+                T = torch.empty((rows * CO, N * CO), device=msa.device, dtype=torch.bfloat16)
+                dst = torch.empty((N, N, F), device=msa.device, dtype=torch.float32)
+                for b0 in range(0, N, rows):
+                    nb = min(rows, N - b0)
+                    torch.mm(A[b0 * CO:(b0 + nb) * CO], Bm, out=T[: nb * CO])
+                    ko.opm_out(T[: nb * CO], W["W16"], W["bias"], norm16, eps, b0, nb, N, dst, False, BD=64, num_warps=4)
+                outs.append(dst.to(msa.dtype))
+        return torch.stack(outs, 0)
+
+    def _anthropic_ef2(self, msa, mask, residual):
+        """The esmfold2 kit's ``opm_fused`` on its token-major layout ([1, L, M, c_m]) per sample; the pair residual in its epilogue."""
+        from types import SimpleNamespace
+
+        from miniworld_engine.modules import _anthropic
+
+        kit = _anthropic.load("ef2_msa_v2", path=_EF2_DRIVER)
+        key = self._anthropic_key()
+        if getattr(self, "_anthropic_ns_key", None) != key:
+            with torch.no_grad():
+                w = torch.cat([self.to_left.weight, self.to_right.weight], 0)        # ESMFold2's W: [a | b] rows
+            self._anthropic_ns = SimpleNamespace(W=SimpleNamespace(weight=w, bias=None), Wout=self.to_out, norm=self.ln_msa,
+                                                 d_hidden=self.group_width, _chunk_size=None, divide_outer_before_proj=False)
+            self._anthropic_ns_key = key
+        outs = []
+        with master_autocast(msa, self):
+            for b in range(msa.shape[0]):
+                m_t = msa[b].transpose(0, 1).contiguous()[None]                          # [1, L, M, c_m]
+                mk = mask[b].transpose(0, 1).float().contiguous()[None]                  # [1, L, M]
+                pair = None if residual is None else residual[b:b + 1].contiguous()
+                outs.append(kit.opm_fused(self._anthropic_ns, m_t, mk, pair))
+        return torch.cat(outs, 0)
 
     def _interchain(self, token_asym_id) -> bool:
         return bool(self.mask_interchain and token_asym_id is not None)
@@ -314,8 +472,123 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     #: "cuda": the H100 kernels (kernels.integrations.pwa_train / pwa_wide); "triton": kernels.pair_weighted_averaging.triton (see the
-    #: _supports_ docstrings for the ranges).
-    backends = ("pytorch", "cuda", "triton")
+    #: _supports_ docstrings for the ranges). "anthropic" (inference only): the model kits' own masked PWA kernels (see _supports_anthropic).
+    backends = ("pytorch", "anthropic", "cuda", "triton")
+
+    # ------------------------------------------------------------------------------------------------------------------ anthropic
+    def _anthropic_route(self, msa, pair, mask) -> tuple[str | None, str | None]:
+        """``("boltz2" | "ef2", None)`` or ``(None, reason)``. The module is model-agnostic: the masked kernels of the kits whose models its
+        rows serve --
+          d_msa 64, 8 heads x 32 (Boltz-2, RoseTTAFold3, MiniWorld)  the boltz2 kit's ``fpf_msa.boltz2.msa_pair_weighted_avg``
+              (``opt_core.ops.msa_pwa`` form ``masked``: torch LN_z / proj_z / masked fp32 softmax, the fused LN_m -> v | sigmoid(g)
+              prologue, the contraction + gate + proj_o kernel);
+          d_msa 128, d_pair 256, 8 heads x 2^k (ESMFold2; Protenix-v2 at 8 x 8: its own kit's MSA cells take no mask)  the esmfold2 kit's
+              ``ef2_msa_v2.pwa_fused`` (LN + Wv | Wg producer, LN_z + bias + key mask + fp32 softmax kernel, cuBLAS bmm, gate + Wout +
+              residual epilogue).
+        Not served: the af3_torch kit fuses only the LN prologues (the rest is stock torch), Protenix's / AF3's 8 x 8 core form takes no mask,
+        Chai-1's kit has no PWA kernel."""
+        from miniworld_engine.modules import _anthropic
+
+        if torch.is_grad_enabled():
+            return None, "inference only (no kit carries a pair-weighted-averaging backward): call under torch.no_grad() / inference_mode"
+        if not msa.is_cuda:
+            return None, "the release's kernels run on CUDA tensors only"
+        if msa.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
+            return None, f"dtype {msa.dtype} / {pair.dtype}: the kits' PWA kernels take bfloat16 activations (bf16 autocast)"
+        if msa.dim() != 4 or pair.dim() != 4:
+            return None, "msa must be [B, M, L, d_msa] and pair [B, L, L, d_pair]"
+        if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != (msa.shape[0], msa.shape[2])):
+            return None, "mask must be a bool [B, L] key mask"
+        if self.training and self.drop_msa.p_drop > 0:
+            return None, "the row dropout is live (training mode): inference only"
+        d_msa, d_pair, H, D = self._widths()
+        if (d_msa, H, D) == (64, 8, 32):
+            return ("boltz2", None) if (why := _anthropic.missing("fpf_msa.boltz2", path="boltz2/opt/forward")) is None else (None, why)
+        if d_msa == 128 and d_pair == 256 and not (H * D) & (H * D - 1) and H * D <= 256 and not D & (D - 1):
+            return ("ef2", None) if (why := _anthropic.missing("ef2_msa_v2", path=_EF2_DRIVER)) is None else (None, why)
+        if d_msa == 64 and d_pair == 128 and H <= 16 and 2 * H * D >= 16 and not (2 * H * D) & (2 * H * D - 1):
+            # AlphaFold 3 / OpenFold3 / Protenix-v1 (8 x 8): the af3_torch kit's MSAAttention path (levers pwa_lnl + pwa_msa: lnl_fused.ln_linear
+            # for LN(pair) -> logits planes and LN(msa) -> v | gate; softmax, the weighted sum, the gate and the out-projection its torch statements)
+            return ("af3", None) if (why := _anthropic.missing("lnl_fused", path=_AF3T_KERNELS)) is None else (None, why)
+        return None, (f"d_msa {d_msa}, d_pair {d_pair}, {H} heads x {D}: the kits' masked PWA kernels take d_msa 64 with 8 x 32 (boltz2), "
+                      "d_msa 64 / d_pair 128 (af3_torch's fused prologues) or d_msa 128, d_pair 256, power-of-two heads x width <= 256 (esmfold2); "
+                      "OpenDDE / IntelliFold2 have no kit")
+
+    def _supports_anthropic(self, msa, pair, mask=None) -> str | None:
+        return self._anthropic_route(msa, pair, mask)[1]
+
+    def _anthropic_af3(self, msa, pair, mask):
+        """af3_torch's ``_msaattn_forward`` with both fused prologues on (per sample: the kit's kernels are unbatched), the module's key mask
+        added as the kit adds its MSA-derived one (``+ 1e9 * (mask - 1)``)."""
+        from miniworld_engine.modules import _anthropic
+
+        kit = _anthropic.load("lnl_fused", path=_AF3T_KERNELS)
+        H, D = self.n_head, self._widths()[3]
+        key = tuple((p.data_ptr(), p._version, p.dtype) for p in self.parameters())
+        if getattr(self, "_anthropic_af3_key", None) != key:
+            with torch.no_grad():
+                C = self.to_bias.weight.shape[1]
+                wb = torch.zeros(max(16, 1 << (H - 1).bit_length()), C, device=msa.device, dtype=torch.bfloat16)   # zero-padded logit planes
+                wb[:H] = self.to_bias.weight.to(torch.bfloat16)
+                self._anthropic_af3_w = {
+                    "Wb": wb, "lnw_z": self.ln_pair.weight.float().contiguous(), "lnb_z": torch.zeros_like(self.ln_pair.weight, dtype=torch.float32),
+                    "Wvg": torch.cat([self.to_value.weight, self.to_gate.weight], 0).to(torch.bfloat16).contiguous(),
+                    "lnw_m": self.ln_msa.weight.float().contiguous(), "lnb_m": self.ln_msa.bias.float().contiguous()}
+            self._anthropic_af3_key = key
+        W = self._anthropic_af3_w
+        HD = H * D
+        outs = []
+        with master_autocast(msa, self):
+            for b in range(msa.shape[0]):
+                _, planes = kit.ln_linear(pair[b].contiguous(), W["lnw_z"], W["lnb_z"], W["Wb"], eps=self.ln_pair.eps, planes=True)
+                logits = planes[:H].float()
+                if mask is not None:
+                    logits = logits + 1e9 * (mask[b].float() - 1.0)
+                weights = torch.softmax(logits, dim=-1)                                       # [H, i, j] over the keys j
+                _, vg = kit.ln_linear(msa[b].contiguous(), W["lnw_m"], W["lnb_m"], W["Wvg"], eps=self.ln_msa.eps)   # [M, L, 2 H D] bf16
+                v, gate = vg[..., :HD].unflatten(-1, (H, D)), vg[..., HD:]
+                v_avg = torch.einsum("hqk,bkhc->bqhc", weights, v).reshape(*v.shape[:2], HD)
+                outs.append(msa[b] + self.to_out(v_avg * torch.sigmoid(gate)))
+        return torch.stack(outs, 0)
+
+    def _anthropic_ns(self, kind: str):
+        from types import SimpleNamespace
+
+        key = (kind, *((p.data_ptr(), p._version, p.dtype) for p in self.parameters()))
+        if getattr(self, "_anthropic_ns_key", None) != key:   # the kits cache their weight packs on this object: a new one per parameter set
+            H, D = self.n_head, self._widths()[3]
+            if kind == "boltz2":
+                ns = SimpleNamespace(norm_m=self.ln_msa, proj_m=self.to_value, proj_g=self.to_gate, norm_z=self.ln_pair, proj_z=self.to_bias,
+                                     proj_o=self.to_out, inf=1e6, num_heads=H, c_h=D)
+            else:
+                ns = SimpleNamespace(n_heads=H, head_width=D, Wv=self.to_value, Wgate=self.to_gate, Wout=self.to_out,
+                                     compute_bias=(self.ln_pair, self.to_bias), norm_single=self.ln_msa)
+            self._anthropic_ns_obj, self._anthropic_ns_key = ns, key
+        return self._anthropic_ns_obj
+
+    def _forward_anthropic(self, msa, pair, mask=None) -> torch.Tensor:
+        if self.dead:   # inference only: a dead instance returns the residual input (as the reference does)
+            return msa
+        from miniworld_engine.modules import _anthropic
+
+        route, _ = self._anthropic_route(msa, pair, mask)
+        B, _, L, _ = msa.shape
+        if mask is None:
+            mask = torch.ones((B, L), dtype=torch.bool, device=msa.device)
+        pair_mask = mask[:, None, :].expand(B, L, L)          # row i's keys j: the module's key mask
+        if route == "af3":
+            return self._anthropic_af3(msa, pair, mask)
+        ns = self._anthropic_ns(route)
+        with master_autocast(msa, self):
+            if route == "boltz2":
+                kit = _anthropic.load("fpf_msa.boltz2", path="boltz2/opt/forward")
+                return msa + kit.msa_pair_weighted_avg(ns, msa.contiguous(), pair.contiguous(), pair_mask.to(torch.float32), False)
+            kit = _anthropic.load("ef2_msa_v2", path=_EF2_DRIVER)
+            outs = []
+            for b in range(B):   # the kit's token-major layout [1, L, M, c_m], batch 1; it returns m + pwa
+                m_t = msa[b].transpose(0, 1).contiguous()[None]
+                outs.append(kit.pwa_fused(ns, m_t, pair[b:b + 1].contiguous(), pair_mask[b:b + 1].contiguous())[0].transpose(0, 1))
+            return torch.stack(outs, 0)
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
