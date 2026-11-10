@@ -28,6 +28,13 @@ def _weights(module) -> tuple[torch.Tensor, ...]:
     )
 
 
+def _detached_casts(leaves) -> tuple[torch.Tensor, ...]:
+    """bf16 copies of ``leaves`` with no autograd history: a cached form built under grad (the training gate checks the inference forms) held a
+    ``ToCopyBackward`` -> ``AccumulateGrad`` chain of the warm-up, and a CUDA-graph capture of the training step then failed on its stale stream."""
+    with torch.no_grad():
+        return tuple(t.to(torch.bfloat16).contiguous() for t in leaves)
+
+
 def _inference_forms(module) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
     """The five projection weights and the output weight in the kernels' dtype for an inference call. fp32 master parameters (the harness's
     ``bf16-mixed``: fp32 parameters over bf16 activations, as the trainer feeds the model) are cast once and cached while the parameters are
@@ -41,7 +48,7 @@ def _inference_forms(module) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
     forms = _capture.param_forms(
         "triattn_sm80",
         list(leaves),
-        lambda: tuple(t.to(bf).contiguous() for t in leaves),
+        lambda: _detached_casts(leaves),
     )
     return tuple(forms[:5]), forms[5]
 
@@ -142,7 +149,7 @@ def _variant_params(module, train: bool):
     else:
         present = [t for t in extra if t is not None]
         if any(t.dtype != bf for t in present):
-            forms = iter(_capture.param_forms("triattn_sm80_variant", present, lambda: tuple(t.to(bf).contiguous() for t in present)))
+            forms = iter(_capture.param_forms("triattn_sm80_variant", present, lambda: _detached_casts(present)))
             extra = [None if t is None else next(forms) for t in extra]
     return weights, wo, *extra
 
