@@ -34,6 +34,7 @@ import itertools
 import json
 import math
 import platform
+import re
 import subprocess
 import typing
 from pathlib import Path
@@ -270,13 +271,16 @@ def _table(path: str) -> list[dict]:
 def versions(module: str, mode: str, gpu: str | None = None) -> dict:
     """Human-managed versions a result depends on: ``module`` (the class attribute ``version``: bump it when the class's math, its
     reference or a backend adapter changes a result) and ``kernels`` (name -> the ``version`` column of requirements_kernel.csv for
-    every kernel listed for the class whose role serves ``mode``: bump a kernel's when its algorithm changes a result). ``tables``: the launch-config table versions of
+    every kernel listed for the class whose role serves ``mode`` and, for a card-specific kernel (name suffix ``_smNN``), only on that card: bump a kernel's when its algorithm changes a result). ``tables``: the launch-config table versions of
     those kernels' families for ``gpu`` (default: the card this process measures on, :func:`result_gpu`)."""
     cls = module_class(module)
     rows = [r for r in _table(str(KERNELS))
             if module in (r.get("modules") or "").split("|") and mode in ROLE_MODES.get(r.get("role", ""), ())]
-    kernels = {r["name"]: r.get("version") or "1" for r in rows}
     gpu = gpu or result_gpu()
+    # a kernel built for one card (name ending "_sm80", "_sm90", "_sm90a", ...) counts only for that card's results
+    card_sm = re.search(r"sm(\d+)", gpu)
+    rows = [r for r in rows if (m := re.search(r"_sm(\d+)a?$", r["name"])) is None or (card_sm and m.group(1) == card_sm.group(1))]
+    kernels = {r["name"]: r.get("version") or "1" for r in rows}
     tables = {f: table_version(f, gpu) for f in sorted({r["family"] for r in rows})}
     adapters = {b: str(v) for b, v in sorted(getattr(cls, "backend_versions", {}).items())}
     return {"module": str(getattr(cls, "version", "1")), "kernels": dict(sorted(kernels.items())), "tables": tables,
