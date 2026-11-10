@@ -374,6 +374,83 @@ __global__ void __launch_bounds__(DW * 32) direct2_fwd(const T* __restrict__ x, 
   }
 }
 
+// Inference forward of multi-chunk rows (CH = 2..4 chunks of 16 bytes per lane, a warp per row): the direct forward for wide rows. The
+// persistent cp.async ring (pipe_fwd) measured 2-5% behind the HBM floor here (bf16 384 / 512, fp32 256 / 384 / 512 at L384-768 pair
+// streams, from 48 MB); a warp that loads its whole row up front (CH x 16 bytes per lane in flight) and lets the hardware schedule the CTAs keeps
+// HBM busier. The affine values (WT: the activation dtype or fp32) are loaded after the row, vectorized, once per warp.
+#ifndef MWP_DCH
+#define MWP_DCH 1
+#endif
+#ifndef MWP_DCH_MIN
+#define MWP_DCH_MIN (int64_t(48) << 20)  // activation bytes from which it runs (below: 4-11% slower than the ring at L128, 12-34 MB)
+#endif
+#ifndef MWP_DCHW
+#define MWP_DCHW 4  // warps per CTA
+#endif
+template <typename T, typename WT, int CH, int VEC, bool RMS, bool PAD>
+__global__ void __launch_bounds__(MWP_DCHW * 32) directch_fwd(const T* __restrict__ x, const WT* __restrict__ w, const WT* __restrict__ b,
+                                                              T* __restrict__ y, int64_t M, int N, float eps) {
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int64_t row = int64_t(blockIdx.x) * MWP_DCHW + warp;
+  if (row >= M) return;
+  uint4 raw[CH];
+  bool cv[CH];
+#pragma unroll
+  for (int c = 0; c < CH; ++c) {
+    const int col = (c * 32 + lane) * VEC;
+    cv[c] = !PAD || col < N;
+    raw[c] = make_uint4(0, 0, 0, 0);
+    if (cv[c])
+      asm volatile("ld.global.v4.u32 {%0,%1,%2,%3}, [%4];\n" : "=r"(raw[c].x), "=r"(raw[c].y), "=r"(raw[c].z), "=r"(raw[c].w) : "l"(x + row * N + col));
+  }
+  float v[CH * VEC];
+#pragma unroll
+  for (int c = 0; c < CH; ++c) {
+    const Pack<T, VEC> pk = *reinterpret_cast<const Pack<T, VEC>*>(&raw[c]);
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) v[c * VEC + i] = to_f<T>(pk.v[i]);
+  }
+  const float inv_n = 1.f / float(N);
+  float mean = 0.f;
+  if constexpr (!RMS) {
+    float s = 0.f;
+#pragma unroll
+    for (int e = 0; e < CH * VEC; ++e) s += v[e];
+    mean = group_sum<32>(s) * inv_n;
+  }
+  float q = 0.f;
+#pragma unroll
+  for (int c = 0; c < CH; ++c)
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) {
+      const float d = cv[c] ? v[c * VEC + i] - mean : 0.f;
+      q = fmaf(d, d, q);
+    }
+  const float rstd = rsqrtf(group_sum<32>(q) * inv_n + eps);
+#pragma unroll
+  for (int c = 0; c < CH; ++c) {
+    if (!cv[c]) continue;
+    const int col = (c * 32 + lane) * VEC;
+    float wr[VEC], br[VEC];
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) { wr[i] = 1.f; br[i] = 0.f; }
+    if (w != nullptr) {
+      const Pack<WT, VEC> pw = *reinterpret_cast<const Pack<WT, VEC>*>(w + col);
+#pragma unroll
+      for (int i = 0; i < VEC; ++i) wr[i] = to_f<WT>(pw.v[i]);
+    }
+    if (!RMS && b != nullptr) {
+      const Pack<WT, VEC> pb = *reinterpret_cast<const Pack<WT, VEC>*>(b + col);
+#pragma unroll
+      for (int i = 0; i < VEC; ++i) br[i] = to_f<WT>(pb.v[i]);
+    }
+    Pack<T, VEC> o;
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) o.v[i] = from_f<T>((v[c * VEC + i] - mean) * rstd * wr[i] + br[i]);
+    *reinterpret_cast<Pack<T, VEC>*>(y + row * N + col) = o;
+  }
+}
+
 // Inference forward of exact-fit single-chunk rows on sm_90 (no statistics, no workspace): rows are contiguous, so a tile of BK_TB bytes is ONE
 // TMA bulk copy (cp.async.bulk, no tensor map) into shared memory, normalised in place by the CTA and written back by ONE bulk store. A
 // persistent CTA keeps BK_ST tiles in flight; the copy engine moves the bytes instead of 16-byte thread loads and stores. Taken for the activation
@@ -786,6 +863,24 @@ void launch_fwd_pad(const T* x, const void* w, const void* b, int wcode, T* y, f
       return;
     }
   }
+#if MWP_DCH
+  if constexpr (CH > 1 && TPR == 32) {
+    if (stats == nullptr && ws == nullptr && per_sm == 0 && M * int64_t(N) * int64_t(sizeof(T)) >= MWP_DCH_MIN) {  // inference, large: the direct multi-chunk forward
+      constexpr int WC = std::is_same<T, float>::value ? 0 : (std::is_same<T, __nv_bfloat16>::value ? 1 : 2);
+      const int g = int((M + MWP_DCHW - 1) / MWP_DCHW);
+      if (wcode == 0) {
+        directch_fwd<T, float, CH, VEC, RMS, PAD><<<g, MWP_DCHW * 32, 0, s>>>(x, static_cast<const float*>(w), static_cast<const float*>(b), y, M, N, eps);
+        return;
+      }
+      if constexpr (WC != 0) {
+        if (wcode == WC) {
+          directch_fwd<T, T, CH, VEC, RMS, PAD><<<g, MWP_DCHW * 32, 0, s>>>(x, static_cast<const T*>(w), static_cast<const T*>(b), y, M, N, eps);
+          return;
+        }
+      }
+    }
+  }
+#endif
   constexpr size_t smem = size_t(WARPS) * stages<CH>() * CH * 32 * 16;
   auto k = pipe_fwd<T, TPR, CH, VEC, RMS, PAD>;
   if (smem > 48 * 1024) cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, int(smem));

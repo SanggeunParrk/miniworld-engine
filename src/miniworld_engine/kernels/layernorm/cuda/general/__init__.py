@@ -2,6 +2,7 @@
 statistics, optional weight and bias (cast to fp32), forward and backward (dx and the affine gradients without atomics: a replay is
 bit-identical). Plain CUDA (sm_80+), built on first use; every launch is an opaque op with a fake, so it traces under torch.compile
 and captures in a CUDA graph. The same extension serves RMSNorm (`kernels/rmsnorm/cuda`): a template flag drops the mean and the bias.
+On H100 the rows that are not a 16-byte multiple (267 / 451 / 651 / 831 / 833) take the row kernels of ``ln_rows.cu`` instead (:func:`rows_serves`).
 
 Layout (``ln_common.cuh``): TPR threads per row, each holding CHUNKS vectors of VEC elements in registers; :func:`config` picks them
 from the width: the fewest idle lanes, at most 32 values per thread, and TPR as close to 128 as that allows (measured on H100: 128
@@ -60,8 +61,8 @@ def _ext():
 
     ensure_cuda_home()
     return load_extension(
-        name="layernorm_general_cuda_v3",
-        sources=[str(_dir / "bind.cpp"), str(_dir / "ln_fwd.cu"), str(_dir / "ln_bwd.cu")],
+        name="layernorm_general_cuda_v4",
+        sources=[str(_dir / "bind.cpp"), str(_dir / "ln_fwd.cu"), str(_dir / "ln_bwd.cu"), str(_dir / "ln_rows.cu")],
         extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "--expt-relaxed-constexpr", *gencodes("80", "90", "100")],
         extra_cflags=["-O3", "-std=c++17"],
         verbose=False,
@@ -137,16 +138,83 @@ class _LayerNorm(torch.autograd.Function):
         return dx, gw, gb, None
 
 
+#: Widest row (elements) of the row kernels (``ln_rows.cu``: up to 32 values per lane of a warp-per-row pass).
+ROWS_MAX_N = 1024
+
+
+def rows_serves(x: torch.Tensor) -> bool:
+    """The H100 row kernels (``ln_rows.cu``) take rows that are not a 16-byte multiple (267 / 451 / 651 / 831 / 833 ...: no row is a whole
+    number of 16-byte vectors) of 32 .. ``ROWS_MAX_N`` elements. Forward: up to 1 024 rows a CTA per row (the token streams), 2-byte
+    activations from 4 096 rows the staged kernel (tiles of U rows, a whole number of 16-byte chunks, copied through shared memory),
+    otherwise a warp per row; backward: a warp per row, persistent. The general kernels keep every other width."""
+    n = x.shape[-1]
+    return (x.is_cuda and x.dtype in DTYPES and (n * x.element_size()) % 16 != 0 and 32 <= n <= ROWS_MAX_N
+            and torch.cuda.get_device_capability(x.device) == (9, 0))
+
+
+def _rows_fwd_fake(x, w, b, eps, save):
+    m = x.shape[0] if save else 0
+    f32 = dict(dtype=torch.float32, device=x.device)
+    return torch.empty_like(x), torch.empty((m,), **f32), torch.empty((m,), **f32)
+
+
+@opaque(fake=_rows_fwd_fake, name="layernorm_rows_fwd_sm90")
+def _rows_fwd(x: torch.Tensor, w: torch.Tensor, b: torch.Tensor, eps: float, save: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Row-kernel LayerNorm forward of contiguous x [M, N] (``rows_serves``); (y, mean, rstd), the statistics only when ``save``."""
+    return tuple(_ext().rows_fwd(x, w, b, float(eps), bool(save), 0))
+
+
+def _rows_bwd_fake(dy, x, w, mean, rstd, wgrad):
+    f32 = dict(dtype=torch.float32, device=x.device)
+    n = x.shape[1] if wgrad else 0
+    return torch.empty_like(x), torch.empty((n,), **f32), torch.empty((n,), **f32)
+
+
+@opaque(fake=_rows_bwd_fake, name="layernorm_rows_bwd_sm90")
+def _rows_bwd(dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor,
+              wgrad: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Row-kernel LayerNorm backward from the saved mean / rstd: (dx, dw, db), the affine gradients (fp32) only when ``wgrad``."""
+    return tuple(_ext().rows_bwd(dy, x, w, mean, rstd, bool(wgrad), 0, 0))
+
+
+class _RowsLayerNorm(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x2, weight, bias, eps):
+        w, b = _affine(weight, x2), _affine(bias, x2)
+        y, mean, rstd = _rows_fwd(x2, w, b, eps, True)
+        ctx.save_for_backward(x2, w, mean, rstd)
+        ctx.has = (weight is not None, bias is not None)
+        ctx.dtypes = (None if weight is None else weight.dtype, None if bias is None else bias.dtype)
+        return y
+
+    @staticmethod
+    def backward(ctx, dy):
+        x2, w, mean, rstd = ctx.saved_tensors
+        has_w, has_b = ctx.has
+        wgrad = (has_w and ctx.needs_input_grad[1]) or (has_b and ctx.needs_input_grad[2])
+        dy = dy.contiguous()
+        dx, dw, db = _rows_bwd(dy, x2, w, mean, rstd, bool(wgrad))
+        gw = dw.to(ctx.dtypes[0]) if has_w and ctx.needs_input_grad[1] else None
+        gb = db.to(ctx.dtypes[1]) if has_b and ctx.needs_input_grad[2] else None
+        return dx, gw, gb, None
+
+
 def layernorm_cuda(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tensor | None, eps: float = 1e-5) -> torch.Tensor:
     """LayerNorm over the last dimension; ``y`` in ``x``'s dtype, fp32 statistics; weight / bias optional, any float dtype (fp32
     gradients handed back in the parameters' dtype). On H100 the rows ``pipe`` takes go to its pipelined kernels (``pipe.serves``), as
-    in ``rmsnorm_cuda``: one CUDA LayerNorm entry, the general kernels for every other width or card."""
+    in ``rmsnorm_cuda``; rows that are not a 16-byte multiple to the row kernels (``rows_serves``); the general kernels for every other
+    width or card."""
     from miniworld_engine.kernels.layernorm.cuda import pipe
 
     if pipe.serves(x):
         return pipe.layernorm_pipe(x, weight, bias, eps)
     shape = x.shape
     x2 = x.reshape(-1, shape[-1]).contiguous()
+    if rows_serves(x2):
+        needs_grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, weight, bias))
+        if not needs_grad:
+            return _rows_fwd(x2, _affine(weight, x2), _affine(bias, x2), float(eps), False)[0].reshape(shape)
+        return _RowsLayerNorm.apply(x2, weight, bias, float(eps)).reshape(shape)
     needs_grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, weight, bias))
     if not needs_grad:
         y, _, _ = _fwd(x2, _affine(weight, x2), _affine(bias, x2), float(eps), False)

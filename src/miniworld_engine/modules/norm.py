@@ -187,7 +187,8 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
     patched sources (:func:`_fastln`). ``"cueq"``: cuEquivariance's ``layer_norm_transpose`` ("nd->nd"), forward and backward.
 
     ``"cuda"`` (H100): the engine's CUDA LayerNorm (``kernels/layernorm/cuda/general.layernorm_cuda``): rows of 144-2048 bytes (16-byte
-    multiples) on the pipelined kernels (``cuda/pipe``), every other width on the general kernels; fp32 statistics, forward and backward
+    multiples) on the pipelined kernels (``cuda/pipe``), rows that are not a 16-byte multiple (267 / 451 / 651 / 831 / 833) on the row
+    kernels (``cuda/general/ln_rows.cu``), every other width on the general kernels; fp32 statistics, forward and backward
     (dx and the affine gradients, no atomics). ``"triton"``: the Triton LayerNorm (``kernels/layernorm/triton/main.triton_layernorm``:
     the fused forward that saves the row statistics, the persistent dx / dgamma / dbeta backward). Both: one normalised dimension,
     bf16 / fp16 / fp32 activations, the result in the input dtype."""

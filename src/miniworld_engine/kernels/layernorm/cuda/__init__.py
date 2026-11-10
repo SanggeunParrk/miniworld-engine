@@ -14,7 +14,8 @@ def prebuild(target, rows):
     from . import general, pipe
 
     if any(row["kernels"] & {"layernorm_pipe_direct_fwd", "layernorm_pipe_direct2_fwd", "layernorm_pipe_bulk_fwd", "layernorm_pipe_bwd",
-                             "layernorm_pipe_reduce_bwd", "layernorm_pipe_fwd"} for row in rows):
+                             "layernorm_pipe_reduce_bwd", "layernorm_pipe_fwd", "layernorm_pipe_directch_fwd_sm90"} for row in rows):
         yield pipe._ext
-    if any(row["kernels"] & {"layernorm_general_fwd", "layernorm_general_bwd", "layernorm_general_bwd_reduce"} for row in rows):
+    if any(row["kernels"] & {"layernorm_general_fwd", "layernorm_general_bwd", "layernorm_general_bwd_reduce",
+                             "layernorm_rows_fwd_sm90", "layernorm_rows_bwd_sm90", "layernorm_rows_bwd_reduce_sm90"} for row in rows):
         yield general._ext

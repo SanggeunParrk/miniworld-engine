@@ -377,6 +377,10 @@ layernorm_general_fwd,layernorm,LayerNorm,forward,1
 layernorm_general_bwd,layernorm,LayerNorm,backward,1
 layernorm_general_bwd_reduce,layernorm,LayerNorm,backward,1
 layernorm_pipe_fwd,layernorm,LayerNorm|InputFeatureEmbedder,forward,1
+layernorm_pipe_directch_fwd_sm90,layernorm,LayerNorm|InputFeatureEmbedder,forward_infer,1
+layernorm_rows_fwd_sm90,layernorm,LayerNorm,forward,1
+layernorm_rows_bwd_sm90,layernorm,LayerNorm,backward,1
+layernorm_rows_bwd_reduce_sm90,layernorm,LayerNorm,backward,1
 outer_product_mean_pack_weights_sm90,outer_product_mean,OuterProductMean,forward,1
 outer_product_mean_prologue_sm90,outer_product_mean,OuterProductMean,forward,1
 outer_product_mean_mask_bits_sm90,outer_product_mean,OuterProductMean,forward,1
