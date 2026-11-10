@@ -44,7 +44,9 @@ def prebuild(target, _rows):
             continue
         if r["mode"] == "eval" and (cm, cz) in opm_train.TRAIN_ONLY:   # inference at these widths is composed.inference's
             continue
-        wide = (cm, cz) != base or o.get("normalize_before_proj") == "True" or o.get("projection_bias") == "True"
+        # _OpmMath.forward runs _forward_wide for the other widths, the divide-after-projection order (normalize_before_proj False) and
+        # projection biases
+        wide = (cm, cz) != base or o.get("normalize_before_proj", "True") == "False" or o.get("projection_bias") == "True"
         training = r["mode"] == "train"
         for s in r["depths"]:
             for n in r["lengths"]:

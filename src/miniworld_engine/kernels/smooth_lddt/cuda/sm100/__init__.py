@@ -22,15 +22,26 @@ FORCE_TILE = False  # tests set it to compare the tile kernel with the whole-str
 
 
 def _full(n: int) -> bool:
-    return not FORCE_TILE and n * 32 <= FULL_SMEM
+    return not FORCE_TILE and FORCE_SPLIT <= 0 and n * 32 <= FULL_SMEM
 
 
 FORCE_FWD = ""   # tests / probes: a fixed forward variant "<threads>s<threads per row>" of FWD_VARIANTS (the whole-structure kernel)
 FORCE_FB = 0     # ... and a fixed backward CTA size (128 / 256 / 512)
 FWD_VARIANTS = ("128s1", "256s1", "512s1", "256s2", "512s2", "512s4")
 FBLK_FILL = 2   # H100 backward: the largest CTA (512 / 256 / 128 threads) whose grid keeps FBLK_FILL CTAs per SM (else the smallest)
+SPLIT_FILL = 8  # H100 tile kernels: the column tiles are split into KS parts until the grid has SPLIT_FILL CTAs per SM (at most NB parts)
+FORCE_SPLIT = 0  # tests / probes: > 0 a fixed KS of the split tile kernels (and the tile path), < 0 never split
 
 
+def _split(x: torch.Tensor, n_augment_batch: int, nb: int) -> int:
+    """KS, the column-tile parts of the H100 tile kernels (``slddt_*_split``, grid (A * B, NB, KS)): 1 elsewhere. A * B * NB CTAs of 4 warps
+    (A1 x N4096: 32 CTAs on 132 SMs) leave most SMs idle; a part of the column tiles per CTA spreads the launch over the GPU."""
+    if FORCE_SPLIT:
+        return max(1, min(nb, FORCE_SPLIT))
+    if _arch(_dev(x)) != "sm_90a":
+        return 1
+    ctas = n_augment_batch * nb
+    return max(1, min(nb, -(-SPLIT_FILL * num_sms(_dev(x)) // ctas)))
 
 
 def _fblk(x: torch.Tensor, n_augment_batch: int, n: int) -> int:
@@ -81,7 +92,8 @@ def _kernels(index: int):
 
     with torch.cuda.device(index):
         # the whole-structure kernels take N * 32 B of dynamic shared memory: the attribute is raised once, the launch size is set per call
-        names = ("slddt_prep", "slddt_fwd", "slddt_bwd", *(f"slddt_fwd_full_{v}" for v in FWD_VARIANTS), *(f"slddt_bwd_full_{fb}" for fb in (128, 256, 512)))
+        names = ("slddt_prep", "slddt_fwd", "slddt_bwd", "slddt_fwd_split", "slddt_bwd_split", *(f"slddt_fwd_full_{v}" for v in FWD_VARIANTS),
+                 *(f"slddt_bwd_full_{fb}" for fb in (128, 256, 512)))
         return {name: driver.Kernel(cubin(_arch(index)), name, FULL_SMEM if "_full" in name else 0) for name in names}
 
 
@@ -110,13 +122,18 @@ def forward(x, gt, tile, fm):
     nb = N // BLK
     ks = _kernels(_dev(x))
     out = torch.empty(A * B, nb, device=x.device, dtype=torch.float32)
+    parts = _split(x, A * B, nb)   # H100: a split launch beats the whole-structure kernels too (A1: 0.051 / 0.079 ms at N 1024)
     with torch.cuda.device(x.device):
-        if _full(N):
+        if _full(N) and parts == 1:
             v = _fwd_variant(x, A * B, N)
             fb, s = (int(p) for p in v.split("s"))
             k = ks[f"slddt_fwd_full_{v}"]
             k.smem = N * 32
             k((A * B, -(-N // (fb // s)), 1), (fb, 1, 1), x, gt, fm, out, int(B), int(N), int(nb))
+        elif parts > 1:
+            part = torch.empty(A * B, nb, parts, device=x.device, dtype=torch.float32)
+            ks["slddt_fwd_split"]((A * B, nb, parts), (BLK, 1, 1), x, gt, tile, fm, part, int(B), int(N), int(nb), int(parts))
+            torch.sum(part, dim=2, out=out)
         else:
             ks["slddt_fwd"]((A * B, nb, 1), (BLK, 1, 1), x, gt, tile, fm, out, int(B), int(N), int(nb))
     return out
@@ -128,12 +145,17 @@ def backward(x, gt, nuc, tile, um, go):
     nb = N // BLK
     ks = _kernels(_dev(x))
     gx = torch.empty_like(x)
+    parts = _split(x, A * B, nb)
     with torch.cuda.device(x.device):
-        if _full(N):
+        if _full(N) and parts == 1:
             fb = _fblk(x, A * B, N)
             k = ks[f"slddt_bwd_full_{fb}"]
             k.smem = N * 32
             k((A * B, -(-N // fb), 1), (fb, 1, 1), x, gt, nuc, um, go, gx, int(B), int(N), int(nb))
+        elif parts > 1:
+            part = torch.empty(parts, *x.shape, device=x.device, dtype=torch.float32)
+            ks["slddt_bwd_split"]((A * B, nb, parts), (BLK, 1, 1), x, gt, nuc, tile, um, go, part, int(B), int(N), int(nb), int(parts))
+            torch.sum(part, dim=0, out=gx)
         else:
             ks["slddt_bwd"]((A * B, nb, 1), (BLK, 1, 1), x, gt, nuc, tile, um, go, gx, int(B), int(N), int(nb))
     return gx

@@ -83,7 +83,7 @@ class OuterProductMean(BackendModule, MasterWeights):
         Dimension of hidden layer.
 
     """
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False

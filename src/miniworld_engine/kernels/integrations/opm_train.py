@@ -41,10 +41,10 @@ from miniworld_engine.kernels import _cast_cuda
 CM, CH, CZ = 64, 32, 128
 # (d_msa, d_pair) served on sm_90a: MiniWorld, Protenix-v2 / ESMFold2, OpenDDE, IntelliFold2 (d_hidden 32 throughout).  The widths
 # other than MiniWorld's run the wide composition: persistent TMA prologue at d_msa 64 / 128 / 256, cuBLAS contraction, the
-# c_z-sliced epilogue.  IntelliFold2's (256, 512) is served in TRAINING only (TRAIN_ONLY): its inference stays on
-# `outer_product_mean.composed` (the module routes there when this path refuses a grad-free call).
+# c_z-sliced epilogue.  TRAIN_ONLY: widths served in training only (their inference would stay on `outer_product_mean.composed`);
+# IntelliFold2's (256, 512) inference runs here too since 2026-11-10 (0.17 / 0.91 / 3.5 ms at L 128 / 384 / 768, composed 0.71 / 2.7 / 7.7).
 SHAPES = ((64, 128), (128, 256), (128, 384), (256, 512))
-TRAIN_ONLY = ((256, 512),)
+TRAIN_ONLY: tuple = ()
 _EXT: dict[str, Any] = {}
 
 
@@ -60,8 +60,12 @@ def _h100_path(s: int, n: int, *, training: bool, wide: bool = False) -> str:
     """Only stable paired wins below the eligible historical timing are promoted."""
     if wide:  # d_msa / d_pair other than MiniWorld's: the wide composition (persistent TMA prologue at that d_msa)
         return "wide"
+    # depth 512 (Boltz-2 / MiniWorld's depth 384, padded to 512): the TMA prologue beats the native one (inference 0.067 / 0.111 ms,
+    # training 0.254 / 0.298 ms at L 128; H100 2026-11-10)
     if training:
-        return "tma" if s in (1024, 2048, 4096) else "native"
+        return "tma" if s in (512, 1024, 2048, 4096) else "native"
+    if s == 512:
+        return "tma"
     if (s, n) in (
         (1024, 128),
         (1024, 256),

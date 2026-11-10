@@ -26,12 +26,12 @@ def ext():
                           verbose=False)
 
 
-def forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim, clim, nS, nX, eps1, eps2):
+def forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim, clim, nS, nX, eps1, eps2, jp=0):
     """(pair [B, n, n, 256] bf16, bins [B, n, n] int32)."""
     B, n = idx.shape
     out = torch.empty(B, n, n, C, device=tbl.device, dtype=torch.bfloat16)
     bins = torch.empty(B, n, n, device=tbl.device, dtype=torch.int32)
-    ext().forward(tbl, lnw, lnb, gamma, beta, xt, sc, int(has_sc), idx, mask, xlim, clim, out, bins, int(nS), int(nX), float(eps1), float(eps2))
+    ext().forward(tbl, lnw, lnb, gamma, beta, xt, sc, int(has_sc), idx, mask, xlim, clim, out, bins, int(nS), int(nX), float(eps1), float(eps2), int(jp))
     return out, bins
 
 

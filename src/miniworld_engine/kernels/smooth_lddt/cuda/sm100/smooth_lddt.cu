@@ -17,6 +17,8 @@
 //   slddt_bwd    grid (A * B, NB): d(sum of scores)/d(x_pred) for the CTA's 128 rows. Every atom collects the gradient of BOTH roles it
 //                plays in a pair (first and second index, weight [g < cut_i] + [g < cut_j]), so there are no float atomics and the result
 //                is deterministic.
+//   slddt_*_split  the same with grid (A * B, NB, KS): CTA (., ., ks) walks the ks-th of KS parts of the column tiles and writes its own
+//                partial (fwd [A * B, NB, KS], bwd [KS, A, B, N, 3]), summed in part order by the launcher (H100: launches of few CTAs)
 //
 // Layout: x [A, B, N, 3] fp32, g [B, N, 3] fp32, nuc [B, N] int8, tile [B, NB, NB] int8, FM / UM [B, N, N / 32] uint32; N % 128 == 0.
 #include <cuda_runtime.h>
@@ -105,10 +107,11 @@ slddt_prep(const float* __restrict__ G, const int8_t* __restrict__ NUC, const in
     if (t == 0) TILE[((size_t)b * NB + ib) * NB + jb] = (int8_t)((af != 0) | ((au != 0) << 1));
 }
 
-extern "C" __global__ void __launch_bounds__(BLK)
-slddt_fwd(const float* __restrict__ X, const float* __restrict__ G, const int8_t* __restrict__ TILE, const uint32_t* __restrict__ FM,
-          float* __restrict__ OUT, int B, int N, int NB) {
+// The tile kernels over the column tiles jb in [KS-th part ks of 0 .. NB) (KS = 1: all of them); OUT / GX hold one partial per part.
+__device__ __forceinline__ void slddt_fwd_impl(const float* __restrict__ X, const float* __restrict__ G, const int8_t* __restrict__ TILE,
+                                               const uint32_t* __restrict__ FM, float* __restrict__ OUT, int B, int N, int NB, int ks, int KS) {
     const int ab = blockIdx.x, ib = blockIdx.y, b = ab % B, t = threadIdx.x;
+    const int jb0 = (int)((long)ks * NB / KS), jb1 = (int)((long)(ks + 1) * NB / KS);
     __shared__ float sx0[BLK], sx1[BLK], sx2[BLK], sg0[BLK], sg1[BLK], sg2[BLK];
     __shared__ float red[BLK / 32];
     const float* xb = X + (size_t)ab * N * 3;
@@ -117,7 +120,7 @@ slddt_fwd(const float* __restrict__ X, const float* __restrict__ G, const int8_t
     const float xi0 = xb[i * 3], xi1 = xb[i * 3 + 1], xi2 = xb[i * 3 + 2];
     const float gi0 = gb[i * 3], gi1 = gb[i * 3 + 1], gi2 = gb[i * 3 + 2];
     float acc = 0.f;
-    for (int jb = 0; jb < NB; ++jb) {
+    for (int jb = jb0; jb < jb1; ++jb) {
         if (!(TILE[((size_t)b * NB + ib) * NB + jb] & 1)) continue;  // uniform over the CTA
         __syncthreads();
         const int j = jb * BLK + t;
@@ -146,14 +149,28 @@ slddt_fwd(const float* __restrict__ X, const float* __restrict__ G, const int8_t
     if (t == 0) {
         float s = 0.f;
         for (int w = 0; w < BLK / 32; ++w) s += red[w];
-        OUT[(size_t)ab * NB + ib] = s;
+        OUT[((size_t)ab * NB + ib) * KS + ks] = s;
     }
 }
 
 extern "C" __global__ void __launch_bounds__(BLK)
-slddt_bwd(const float* __restrict__ X, const float* __restrict__ G, const int8_t* __restrict__ NUC, const int8_t* __restrict__ TILE,
-          const uint32_t* __restrict__ UM, const float* __restrict__ GO, float* __restrict__ GX, int B, int N, int NB) {
+slddt_fwd(const float* __restrict__ X, const float* __restrict__ G, const int8_t* __restrict__ TILE, const uint32_t* __restrict__ FM,
+          float* __restrict__ OUT, int B, int N, int NB) {
+    slddt_fwd_impl(X, G, TILE, FM, OUT, B, N, NB, 0, 1);
+}
+
+// H100: grid (A * B, NB, KS), OUT [A * B, NB, KS]: a launch of few (augment, row block) CTAs also spreads over the column tiles
+extern "C" __global__ void __launch_bounds__(BLK)
+slddt_fwd_split(const float* __restrict__ X, const float* __restrict__ G, const int8_t* __restrict__ TILE, const uint32_t* __restrict__ FM,
+                float* __restrict__ OUT, int B, int N, int NB, int KS) {
+    slddt_fwd_impl(X, G, TILE, FM, OUT, B, N, NB, blockIdx.z, KS);
+}
+
+__device__ __forceinline__ void slddt_bwd_impl(const float* __restrict__ X, const float* __restrict__ G, const int8_t* __restrict__ NUC,
+                                               const int8_t* __restrict__ TILE, const uint32_t* __restrict__ UM, const float* __restrict__ GO,
+                                               float* __restrict__ GX, int B, int N, int NB, int ks, int KS) {
     const int ab = blockIdx.x, ib = blockIdx.y, b = ab % B, t = threadIdx.x;
+    const int jb0 = (int)((long)ks * NB / KS), jb1 = (int)((long)(ks + 1) * NB / KS);
     __shared__ float sx0[BLK], sx1[BLK], sx2[BLK], sg0[BLK], sg1[BLK], sg2[BLK], scut2[BLK];
     const float* xb = X + (size_t)ab * N * 3;
     const float* gb = G + (size_t)b * N * 3;
@@ -163,7 +180,7 @@ slddt_bwd(const float* __restrict__ X, const float* __restrict__ G, const int8_t
     const float ci = NUC[b * N + i] ? NUC_CUT : OTHER_CUT;
     const float ci2 = ci * ci;
     float a0 = 0.f, a1 = 0.f, a2 = 0.f;
-    for (int jb = 0; jb < NB; ++jb) {
+    for (int jb = jb0; jb < jb1; ++jb) {
         if (!(TILE[((size_t)b * NB + ib) * NB + jb] & 2)) continue;
         __syncthreads();
         const int j = jb * BLK + t;
@@ -196,8 +213,21 @@ slddt_bwd(const float* __restrict__ X, const float* __restrict__ G, const int8_t
         }
     }
     const float go = GO[ab];
-    float* gx = GX + (size_t)ab * N * 3;
+    float* gx = GX + ((size_t)ks * gridDim.x + ab) * N * 3;   // part ks of [KS, A * B, N, 3]
     gx[i * 3] = a0 * go; gx[i * 3 + 1] = a1 * go; gx[i * 3 + 2] = a2 * go;
+}
+
+extern "C" __global__ void __launch_bounds__(BLK)
+slddt_bwd(const float* __restrict__ X, const float* __restrict__ G, const int8_t* __restrict__ NUC, const int8_t* __restrict__ TILE,
+          const uint32_t* __restrict__ UM, const float* __restrict__ GO, float* __restrict__ GX, int B, int N, int NB) {
+    slddt_bwd_impl(X, G, NUC, TILE, UM, GO, GX, B, N, NB, 0, 1);
+}
+
+// H100: grid (A * B, NB, KS), GX [KS, A, B, N, 3] partial gradients (summed in part order by the caller)
+extern "C" __global__ void __launch_bounds__(BLK)
+slddt_bwd_split(const float* __restrict__ X, const float* __restrict__ G, const int8_t* __restrict__ NUC, const int8_t* __restrict__ TILE,
+                const uint32_t* __restrict__ UM, const float* __restrict__ GO, float* __restrict__ GX, int B, int N, int NB, int KS) {
+    slddt_bwd_impl(X, G, NUC, TILE, UM, GO, GX, B, N, NB, blockIdx.z, KS);
 }
 
 // ---- whole-structure variants -------------------------------------------------------------------------------------------------------

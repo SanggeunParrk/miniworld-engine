@@ -12,6 +12,7 @@ import torch
 _dir = Path(__file__).parent
 NBLK = 33
 N_ROWS = {0: 317, 1: 157}
+GT = 1         # forwards: 1 reads the table through the L1 (8-warp CTAs, high occupancy; the faster), 0 keeps a copy in shared memory (A/B)
 BWD_IMPL = 1   # table gradient on the tensor cores (wgmma); the .cu keeps 2 (mma.sync) and 0 (shared-memory read-modify-write) as its A/B variants
 
 
@@ -25,22 +26,22 @@ def ext():
                           verbose=False)
 
 
-def forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, with_codes=False, ln_eps=None):
+def forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, with_codes=False, ln_eps=None, jp=0, gt=GT):
     """pair [B, n, n, 256] bf16 (and, for the backward, the binned pair codes [B, n, n, 4] int32 when ``with_codes``). ``ln_eps``: the output is
     LayerNorm(pair) (no affine, that eps) instead of the pair."""
     B, n = idx.shape
     out = torch.empty(B, n, n, 256, device=tbl.device, dtype=torch.bfloat16)
     codes = torch.empty(B, n, n, 4, device=tbl.device, dtype=torch.int32) if with_codes else torch.empty(0, device=tbl.device, dtype=torch.int32)
-    ext().forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, out, codes, int(ln_eps is not None), float(ln_eps or 0.0))
+    ext().forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, out, codes, int(ln_eps is not None), float(ln_eps or 0.0), int(jp), int(gt))
     return (out, codes) if with_codes else out
 
 
-def forward_ca(tbl, ca, mask, idx, dlim, with_codes=False, ln_eps=None):
+def forward_ca(tbl, ca, mask, idx, dlim, with_codes=False, ln_eps=None, jp=0, gt=GT):
     """Decoder pair [B, n, n, 256] bf16 from the table [157, 256] (sequence separation | CA distance bins)."""
     B, n = idx.shape
     out = torch.empty(B, n, n, 256, device=tbl.device, dtype=torch.bfloat16)
     codes = torch.empty(B, n, n, 4, device=tbl.device, dtype=torch.int32) if with_codes else torch.empty(0, device=tbl.device, dtype=torch.int32)
-    ext().forward_ca(tbl, ca, mask, idx, dlim, out, codes, int(ln_eps is not None), float(ln_eps or 0.0))
+    ext().forward_ca(tbl, ca, mask, idx, dlim, out, codes, int(ln_eps is not None), float(ln_eps or 0.0), int(jp), int(gt))
     return (out, codes) if with_codes else out
 
 

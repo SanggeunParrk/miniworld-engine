@@ -40,7 +40,7 @@ class Transition(BackendModule, MasterWeights):
         allows TF32), the parameters cast to the activation dtype.
 
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
 

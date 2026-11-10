@@ -101,6 +101,9 @@ _PREFER_GENERIC_ROWS = {
     256: (6144, 12288),
     384: (16384, 16384),
     512: (16384, 12288),
+    # D 768 (n = 2: Boltz-2 / ESMFold2 token single, at most 768 rows): the wide build runs one 128-row tile per CTA (1 .. 6 CTAs, ~63 us
+    # flat); the generic kernels take 34 - 40 us inference / 59 - 84 us training at 128 - 768 rows (H100 2026-11-10, below triton at each)
+    768: (768, 768),
 }
 
 

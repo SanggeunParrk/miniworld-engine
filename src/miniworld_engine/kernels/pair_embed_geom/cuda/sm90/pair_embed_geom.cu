@@ -55,6 +55,53 @@ __device__ __forceinline__ void store_pair(__nv_bfloat16* dst, float (&x)[8], bo
   for (int k = 0; k < 4; k++) h[k] = __floats2bfloat162_rn(x[2 * k], x[2 * k + 1]);
   *reinterpret_cast<uint4*>(dst) = u;
 }
+// store_pair of PU pairs at once (pairs t0 .. t0 + PU - 1 of a chunk, the ones < cnt stored): the warp sums of the PU LayerNorms are
+// interleaved (independent shuffle chains in flight); each pair's sums are the same butterfly as store_pair's, so the result is bitwise the same.
+constexpr int PU = 4;
+template <bool CS = false>
+__device__ __forceinline__ void store_pairs(__nv_bfloat16* dst0, int t0, int cnt, float (&x)[PU][8], bool ln, float eps) {
+  if (ln) {
+    float s[PU], q[PU], mean[PU], rstd[PU];
+#pragma unroll
+    for (int u = 0; u < PU; u++) {
+      s[u] = 0.f;
+#pragma unroll
+      for (int e = 0; e < 8; e++) { x[u][e] = __bfloat162float(__float2bfloat16_rn(x[u][e])); s[u] += x[u][e]; }
+    }
+#pragma unroll
+    for (int o = 16; o; o >>= 1)
+#pragma unroll
+      for (int u = 0; u < PU; u++) s[u] += __shfl_xor_sync(0xffffffffu, s[u], o);
+#pragma unroll
+    for (int u = 0; u < PU; u++) {
+      mean[u] = s[u] * (1.f / C);
+      q[u] = 0.f;
+#pragma unroll
+      for (int e = 0; e < 8; e++) { float d = x[u][e] - mean[u]; q[u] += d * d; }
+    }
+#pragma unroll
+    for (int o = 16; o; o >>= 1)
+#pragma unroll
+      for (int u = 0; u < PU; u++) q[u] += __shfl_xor_sync(0xffffffffu, q[u], o);
+#pragma unroll
+    for (int u = 0; u < PU; u++) {
+      rstd[u] = rsqrtf(q[u] * (1.f / C) + eps);
+#pragma unroll
+      for (int e = 0; e < 8; e++) x[u][e] = (x[u][e] - mean[u]) * rstd[u];
+    }
+  }
+#pragma unroll
+  for (int u = 0; u < PU; u++) {
+    if (t0 + u >= cnt) break;
+    uint4 w;
+    __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&w);
+#pragma unroll
+    for (int k = 0; k < 4; k++) h[k] = __floats2bfloat162_rn(x[u][2 * k], x[u][2 * k + 1]);
+    uint4* d = reinterpret_cast<uint4*>(dst0 + (size_t)(t0 + u) * C);
+    if constexpr (CS) __stcs(d, w);   // streaming (evict-first): the pair is not read again by this kernel
+    else *d = w;
+  }
+}
 
 struct V3 { float x, y, z; };
 __device__ __forceinline__ V3 sub(V3 a, V3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
@@ -95,26 +142,63 @@ __device__ __forceinline__ V3 atom(const float* bb, int b, int n, int i, int a) 
   return {p[0], p[1], p[2]};
 }
 
-__global__ void __launch_bounds__(NW * 32, 1)
+// Launch of the two forwards: work items of jp pairs (jp <= 0: chosen here), at most cps CTAs per SM (the table fills shared memory), nw warps
+// per CTA (<= nw_max). The chunk is the largest of 32 / 16 that still gives a quarter of the GPU's warp slots an item each, else 8 (the
+// fastest chunk at L 128 / 256 / 384 on H100); a launch with fewer items than warp slots narrows its CTAs so that it still spreads over
+// every SM.
+struct Launch { int grid, nw, jp; };
+static Launch fwd_launch(int B, int n, int sms, int cps, int nw_max, int jp, int jp_max = 32) {
+  const long long slots = (long long)sms * cps * nw_max;
+  if (jp <= 0) {
+    jp = 8;
+    for (int c : {32, 16}) if (c <= jp_max && 4LL * B * n * ((n + c - 1) / c) >= slots) { jp = c; break; }
+  }
+  const long long items = (long long)B * n * ((n + jp - 1) / jp);
+  const int ctas = sms * cps;
+  const int nw = (int)std::min<long long>(nw_max, std::max<long long>(4, (items + ctas - 1) / ctas));
+  const int grid = (int)std::max<long long>(1, std::min<long long>(ctas, (items + nw - 1) / nw));
+  return {grid, nw, jp};
+}
+
+// A 16-byte slice of table row r: from shared memory (GT false: the CTA's copy) or through the L1 from global memory (GT true)
+template <bool GT>
+__device__ __forceinline__ uint4 trow(const __nv_bfloat16* T, int r, int c0) {
+  const uint4* p = reinterpret_cast<const uint4*>(T + (size_t)r * C + c0);
+  if constexpr (GT) return __ldg(p);
+  else return *p;
+}
+// GT (global table): no shared-memory copy, small CTAs, several per SM (occupancy hides the gather latency); else one CTA per SM
+// holding the table in shared memory.
+constexpr int GT_THREADS = 256, GT_CPS = 4;
+
+template <bool GT, bool CS = false>
+__global__ void __launch_bounds__(GT ? GT_THREADS : NW * 32, GT ? GT_CPS : 1)
 pg_fwd(const __nv_bfloat16* tbl, const float* bb, const uint8_t* ca, const uint8_t* cb, const uint8_t* mask, const int* idx, const int* chains,
-       const float* dlim, const float* alim, __nv_bfloat16* out, uint4* codes, int B, int n, int ln, float eps) {
+       const float* dlim, const float* alim, __nv_bfloat16* out, uint4* codes, int B, int n, int ln, float eps, int jp) {
   extern __shared__ __align__(16) unsigned char smem[];
-  __nv_bfloat16* T = reinterpret_cast<__nv_bfloat16*>(smem);          // [NT][C]
+  const __nv_bfloat16* T = GT ? tbl : reinterpret_cast<const __nv_bfloat16*>(smem);          // [NT][C]
   __shared__ float dlim_s[32], alim_s[32];
-  for (int k = threadIdx.x; k < NT * C / 8; k += NW * 32) reinterpret_cast<uint4*>(T)[k] = reinterpret_cast<const uint4*>(tbl)[k];
+  const int nwb = blockDim.x >> 5;
+  if (!GT)
+    for (int k = threadIdx.x; k < NT * C / 8; k += blockDim.x) reinterpret_cast<uint4*>(smem)[k] = reinterpret_cast<const uint4*>(tbl)[k];
   if (threadIdx.x < 32) { dlim_s[threadIdx.x] = threadIdx.x < 20 ? dlim[threadIdx.x] : 0.f; alim_s[threadIdx.x] = threadIdx.x < 20 ? alim[threadIdx.x] : 0.f; }
   __syncthreads();
   int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, c0 = lane * 8;
-  for (int row = blockIdx.x * NW + warp; row < B * n; row += gridDim.x * NW) {
+  // work item = one chunk of jp (8, 16 or 32) pairs of one (b, i) row: lanes < jp bin the chunk, then the warp gathers and stores pair by pair. A
+  // chunk finer than a row keeps every SM busy at the short lengths (one row per warp left most SMs idle: B * n rows over 16-warp CTAs).
+  const int nch = (n + jp - 1) / jp;
+  for (long long item = (long long)blockIdx.x * nwb + warp; item < (long long)B * n * nch; item += (long long)gridDim.x * nwb) {
+    const int row = (int)(item / nch), j0 = (int)(item - (long long)row * nch) * jp;
     int b = row / n, i = row % n;
     bool mi = mask[b * n + i], cai = ca[b * n + i], cbi = cb[b * n + i];
     V3 Ni = atom(bb, b, n, i, 0), CAi = atom(bb, b, n, i, 1), CBi = atom(bb, b, n, i, 3);
     __nv_bfloat16* orow = out + (size_t)row * n * C;
-    for (int j0 = 0; j0 < n; j0 += 32) {
+    {
       int j = j0 + lane;
+      const int jend = min(n, j0 + jp);
       uint32_t w0 = MASKED, w1 = 0;
       float cv = 0.f;
-      if (j < n && mi && mask[b * n + j]) {
+      if (j < jend && mi && mask[b * n + j]) {
         int s = min(max(idx[b * n + i] - idx[b * n + j] + 63, 0), 126);
         w0 = (uint32_t)s;
         cv = (float)(chains[b * n + i] * chains[b * n + j]);
@@ -132,71 +216,89 @@ pg_fwd(const __nv_bfloat16* tbl, const float* bb, const uint8_t* ca, const uint8
           }
         }
       }
-      if (codes != nullptr && j < n) codes[(size_t)row * n + j] = make_uint4(w0 ^ MASKED, w1, __float_as_uint(cv), 0u);   // the backward replays the binning from these (bit 31: live pair)
-      int cnt = min(32, n - j0);
-      for (int t = 0; t < cnt; t++) {
-        uint32_t p0 = __shfl_sync(0xffffffffu, w0, t), p1 = __shfl_sync(0xffffffffu, w1, t);
-        float pc = __shfl_sync(0xffffffffu, cv, t);
-        float x[8];
+      if (codes != nullptr && j < jend) codes[(size_t)row * n + j] = make_uint4(w0 ^ MASKED, w1, __float_as_uint(cv), 0u);   // the backward replays the binning from these (bit 31: live pair)
+      int cnt = jend - j0;
+      for (int t0 = 0; t0 < cnt; t0 += PU) {        // PU pairs per step: their gathers and LayerNorm sums overlap
+        float x[PU][8];
 #pragma unroll
-        for (int e = 0; e < 8; e++) x[e] = 0.f;
-        if (!(p0 & MASKED)) {
-          auto add = [&](int r, float scale) {
-            const uint4 u = *reinterpret_cast<const uint4*>(T + (size_t)r * C + c0);
-            x[0] += scale * bf_lo(u.x); x[1] += scale * bf_hi(u.x); x[2] += scale * bf_lo(u.y); x[3] += scale * bf_hi(u.y);
-            x[4] += scale * bf_lo(u.z); x[5] += scale * bf_hi(u.z); x[6] += scale * bf_lo(u.w); x[7] += scale * bf_hi(u.w);
-          };
-          add(p0 & 127, 1.f);
-          if (p0 & F_DIST) {
-            add(R_DIST + ((p0 >> 8) & 31), 1.f);
-            add(R_DIST + 21 + ((p0 >> 13) & 31), 1.f);
-            add(R_DIST + 42 + ((p0 >> 18) & 31), 1.f);
-            add(R_DIST + 63 + ((p0 >> 23) & 31), 1.f);
-          }
-          if (p0 & F_ORI) {
+        for (int u = 0; u < PU; u++) {
+          const int t = t0 + u;                       // < 32 (cnt <= 32, PU | 32); a lane past the chunk holds MASKED
+          uint32_t p0 = __shfl_sync(0xffffffffu, w0, t), p1 = __shfl_sync(0xffffffffu, w1, t);
+          float pc = __shfl_sync(0xffffffffu, cv, t);
 #pragma unroll
-            for (int k = 0; k < 5; k++) add(R_ANG + 21 * k + ((p1 >> (5 * k)) & 31), 1.f);
+          for (int e = 0; e < 8; e++) x[u][e] = 0.f;
+          if (!(p0 & MASKED)) {
+            auto add = [&](int r, float scale) {
+              const uint4 v = trow<GT>(T, r, c0);
+              x[u][0] += scale * bf_lo(v.x); x[u][1] += scale * bf_hi(v.x); x[u][2] += scale * bf_lo(v.y); x[u][3] += scale * bf_hi(v.y);
+              x[u][4] += scale * bf_lo(v.z); x[u][5] += scale * bf_hi(v.z); x[u][6] += scale * bf_lo(v.w); x[u][7] += scale * bf_hi(v.w);
+            };
+            add(p0 & 127, 1.f);
+            if (p0 & F_DIST) {
+              add(R_DIST + ((p0 >> 8) & 31), 1.f);
+              add(R_DIST + 21 + ((p0 >> 13) & 31), 1.f);
+              add(R_DIST + 42 + ((p0 >> 18) & 31), 1.f);
+              add(R_DIST + 63 + ((p0 >> 23) & 31), 1.f);
+            }
+            if (p0 & F_ORI) {
+#pragma unroll
+              for (int k = 0; k < 5; k++) add(R_ANG + 21 * k + ((p1 >> (5 * k)) & 31), 1.f);
+            }
+            if (pc != 0.f) add(R_CHAIN, pc);
           }
-          if (pc != 0.f) add(R_CHAIN, pc);
         }
-        store_pair(orow + (size_t)(j0 + t) * C + c0, x, ln != 0, eps);
+        store_pairs<CS>(orow + (size_t)j0 * C + c0, t0, cnt, x, ln != 0, eps);
       }
     }
   }
 }
 
 void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tensor cb, torch::Tensor mask, torch::Tensor idx, torch::Tensor chains,
-             torch::Tensor dlim, torch::Tensor alim, torch::Tensor out, torch::Tensor codes, int64_t ln, double eps) {
+             torch::Tensor dlim, torch::Tensor alim, torch::Tensor out, torch::Tensor codes, int64_t ln, double eps, int64_t jp, int64_t gt) {
   const at::cuda::CUDAGuard guard(tbl.device());
   TORCH_CHECK(dlim.numel() <= 31 && alim.numel() <= 31, "at most 31 bin limits");
   int B = idx.size(0), n = idx.size(1);
-  size_t smem = (size_t)NT * C * sizeof(__nv_bfloat16);
-  cudaFuncSetAttribute(pg_fwd, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
-  int grid = std::min(sms, (B * n + NW - 1) / NW);
-  pg_fwd<<<grid, NW * 32, smem, at::cuda::getCurrentCUDAStream()>>>(
-      reinterpret_cast<const __nv_bfloat16*>(tbl.data_ptr<at::BFloat16>()), bb.data_ptr<float>(), ca.data_ptr<uint8_t>(), cb.data_ptr<uint8_t>(),
-      mask.data_ptr<uint8_t>(), idx.data_ptr<int>(), chains.data_ptr<int>(), dlim.data_ptr<float>(), alim.data_ptr<float>(),
-      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), codes.defined() && codes.numel() > 0 ? reinterpret_cast<uint4*>(codes.data_ptr<int>()) : nullptr, B, n, (int)ln, (float)eps);
+  auto* tp = reinterpret_cast<const __nv_bfloat16*>(tbl.data_ptr<at::BFloat16>());
+  auto* op = reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>());
+  uint4* cp = codes.defined() && codes.numel() > 0 ? reinterpret_cast<uint4*>(codes.data_ptr<int>()) : nullptr;
+  auto st = at::cuda::getCurrentCUDAStream();
+  if (gt) {
+    const Launch L = fwd_launch(B, n, sms, 2 * GT_CPS, GT_THREADS / 32, (int)jp);
+    auto f = pg_fwd<true, true>;   // the table through the L1, streaming stores
+    f<<<L.grid, L.nw * 32, 0, st>>>(tp, bb.data_ptr<float>(), ca.data_ptr<uint8_t>(), cb.data_ptr<uint8_t>(), mask.data_ptr<uint8_t>(),
+                                               idx.data_ptr<int>(), chains.data_ptr<int>(), dlim.data_ptr<float>(), alim.data_ptr<float>(), op, cp, B, n,
+                                               (int)ln, (float)eps, L.jp);
+  } else {
+    size_t smem = (size_t)NT * C * sizeof(__nv_bfloat16);
+    cudaFuncSetAttribute(pg_fwd<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+    const Launch L = fwd_launch(B, n, sms, 1, NW, (int)jp);
+    pg_fwd<false><<<L.grid, L.nw * 32, smem, st>>>(tp, bb.data_ptr<float>(), ca.data_ptr<uint8_t>(), cb.data_ptr<uint8_t>(), mask.data_ptr<uint8_t>(),
+                                                   idx.data_ptr<int>(), chains.data_ptr<int>(), dlim.data_ptr<float>(), alim.data_ptr<float>(), op, cp,
+                                                   B, n, (int)ln, (float)eps, L.jp);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
 // Decoder pair embedding: pair[b,i,j] = M_ij * (T[sep] + T[127 + bin(|ca_i - ca_j|)]),  table [157][256] (127 sequence separations, 30 CA distances).
 // ---------------------------------------------------------------------------------------------------------------------------------------
-__global__ void __launch_bounds__(NWCA * 32, 1)
+template <bool GT, bool CS = false>
+__global__ void __launch_bounds__(GT ? GT_THREADS : NWCA * 32, GT ? GT_CPS : 1)
 pg_fwd_ca(const __nv_bfloat16* tbl, const float* ca, const uint8_t* mask, const int* idx, const float* dlim, __nv_bfloat16* out, uint4* codes,
-          int B, int n, int nd, int ln, float eps) {
+          int B, int n, int nd, int ln, float eps, int jp) {
   extern __shared__ __align__(16) unsigned char smem[];
-  __nv_bfloat16* T = reinterpret_cast<__nv_bfloat16*>(smem);          // [NT_CA][C]
+  const __nv_bfloat16* T = GT ? tbl : reinterpret_cast<const __nv_bfloat16*>(smem);          // [NT_CA][C]
   __shared__ float dlim_s[32];
-  for (int k = threadIdx.x; k < NT_CA * C / 8; k += NWCA * 32) reinterpret_cast<uint4*>(T)[k] = reinterpret_cast<const uint4*>(tbl)[k];
+  const int nwb = blockDim.x >> 5;
+  if (!GT)
+    for (int k = threadIdx.x; k < NT_CA * C / 8; k += blockDim.x) reinterpret_cast<uint4*>(smem)[k] = reinterpret_cast<const uint4*>(tbl)[k];
   if (threadIdx.x < 32) dlim_s[threadIdx.x] = threadIdx.x < nd ? dlim[threadIdx.x] : 0.f;
   __syncthreads();
   int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, c0 = lane * 8;
-  // work item = one chunk of 32 pairs of one row (finer than a row: the tail wave of a launch of a few rows per warp is short)
-  const int nch = (n + 31) / 32;
-  for (long long item = (long long)blockIdx.x * NWCA + warp; item < (long long)B * n * nch; item += (long long)gridDim.x * NWCA) {
+  // work item = one chunk of jp (8, 16 or 32) pairs of one row (finer than a row: the tail wave of a launch of a few rows per warp is short)
+  const int nch = (n + jp - 1) / jp;
+  for (long long item = (long long)blockIdx.x * nwb + warp; item < (long long)B * n * nch; item += (long long)gridDim.x * nwb) {
     const int row = (int)(item / nch), jc = (int)(item - (long long)row * nch);
     int b = row / n, i = row % n;
     bool mi = mask[b * n + i];
@@ -204,32 +306,35 @@ pg_fwd_ca(const __nv_bfloat16* tbl, const float* ca, const uint8_t* mask, const 
     float xi = pi[0], yi = pi[1], zi = pi[2];
     __nv_bfloat16* orow = out + (size_t)row * n * C;
     {
-      const int j0 = jc * 32;
+      const int j0 = jc * jp, jend = min(n, j0 + jp);
       int j = j0 + lane;
       uint32_t w0 = MASKED;
-      if (j < n && mi && mask[b * n + j]) {
+      if (j < jend && mi && mask[b * n + j]) {
         const float* pj = ca + ((size_t)b * n + j) * 3;
         float dx = xi - pj[0], dy = yi - pj[1], dz = zi - pj[2];
         float d = sqrtf(dx * dx + dy * dy + dz * dz);
         w0 = (uint32_t)min(max(idx[b * n + i] - idx[b * n + j] + 63, 0), 126) | ((uint32_t)bucket(d, dlim_s, nd) << 8);
       }
-      if (codes != nullptr && j < n) codes[(size_t)row * n + j] = make_uint4(w0 ^ MASKED, 0u, 0u, 0u);
-      int cnt = min(32, n - j0);
-      for (int t = 0; t < cnt; t++) {
-        uint32_t p0 = __shfl_sync(0xffffffffu, w0, t);
-        float x[8];
+      if (codes != nullptr && j < jend) codes[(size_t)row * n + j] = make_uint4(w0 ^ MASKED, 0u, 0u, 0u);
+      int cnt = jend - j0;
+      for (int t0 = 0; t0 < cnt; t0 += PU) {        // PU pairs per step (see pg_fwd)
+        float x[PU][8];
 #pragma unroll
-        for (int e = 0; e < 8; e++) x[e] = 0.f;
-        if (!(p0 & MASKED)) {
-          auto add = [&](int r) {
-            const uint4 u = *reinterpret_cast<const uint4*>(T + (size_t)r * C + c0);
-            x[0] += bf_lo(u.x); x[1] += bf_hi(u.x); x[2] += bf_lo(u.y); x[3] += bf_hi(u.y);
-            x[4] += bf_lo(u.z); x[5] += bf_hi(u.z); x[6] += bf_lo(u.w); x[7] += bf_hi(u.w);
-          };
-          add(p0 & 127);
-          add(R_CAD + ((p0 >> 8) & 31));
+        for (int u = 0; u < PU; u++) {
+          uint32_t p0 = __shfl_sync(0xffffffffu, w0, t0 + u);
+#pragma unroll
+          for (int e = 0; e < 8; e++) x[u][e] = 0.f;
+          if (!(p0 & MASKED)) {
+            auto add = [&](int r) {
+              const uint4 v = trow<GT>(T, r, c0);
+              x[u][0] += bf_lo(v.x); x[u][1] += bf_hi(v.x); x[u][2] += bf_lo(v.y); x[u][3] += bf_hi(v.y);
+              x[u][4] += bf_lo(v.z); x[u][5] += bf_hi(v.z); x[u][6] += bf_lo(v.w); x[u][7] += bf_hi(v.w);
+            };
+            add(p0 & 127);
+            add(R_CAD + ((p0 >> 8) & 31));
+          }
         }
-        store_pair(orow + (size_t)(j0 + t) * C + c0, x, ln != 0, eps);
+        store_pairs<CS>(orow + (size_t)j0 * C + c0, t0, cnt, x, ln != 0, eps);
       }
     }
   }
@@ -731,18 +836,27 @@ __global__ void pg_reduce_tbl(const float* tpart, __nv_bfloat16* dtbl, int NTAB)
 }
 
 
-void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::Tensor idx, torch::Tensor dlim, torch::Tensor out, torch::Tensor codes, int64_t ln, double eps) {
+void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::Tensor idx, torch::Tensor dlim, torch::Tensor out, torch::Tensor codes, int64_t ln, double eps, int64_t jp, int64_t gt) {
   const at::cuda::CUDAGuard guard(tbl.device());
   TORCH_CHECK(dlim.numel() <= 31, "at most 31 bin limits");
   int B = idx.size(0), n = idx.size(1);
-  size_t smem = (size_t)NT_CA * C * sizeof(__nv_bfloat16);
-  cudaFuncSetAttribute(pg_fwd_ca, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
-  int grid = (int)std::min<long long>(sms * 2, ((long long)B * n * ((n + 31) / 32) + NWCA - 1) / NWCA);
-  pg_fwd_ca<<<grid, NWCA * 32, smem, at::cuda::getCurrentCUDAStream()>>>(
-      reinterpret_cast<const __nv_bfloat16*>(tbl.data_ptr<at::BFloat16>()), ca.data_ptr<float>(), mask.data_ptr<uint8_t>(), idx.data_ptr<int>(),
-      dlim.data_ptr<float>(), reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()),
-      codes.defined() && codes.numel() > 0 ? reinterpret_cast<uint4*>(codes.data_ptr<int>()) : nullptr, B, n, (int)dlim.numel(), (int)ln, (float)eps);
+  auto* tp = reinterpret_cast<const __nv_bfloat16*>(tbl.data_ptr<at::BFloat16>());
+  auto* op = reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>());
+  uint4* cp = codes.defined() && codes.numel() > 0 ? reinterpret_cast<uint4*>(codes.data_ptr<int>()) : nullptr;
+  auto st = at::cuda::getCurrentCUDAStream();
+  if (gt) {
+    const Launch L = fwd_launch(B, n, sms, 2 * GT_CPS, GT_THREADS / 32, (int)jp, 16);   // the decoder pair bins cheaply: chunks of at most 16 (fastest at L 384)
+    auto f = pg_fwd_ca<true, true>;
+    f<<<L.grid, L.nw * 32, 0, st>>>(tp, ca.data_ptr<float>(), mask.data_ptr<uint8_t>(), idx.data_ptr<int>(), dlim.data_ptr<float>(), op,
+                                                  cp, B, n, (int)dlim.numel(), (int)ln, (float)eps, L.jp);
+  } else {
+    size_t smem = (size_t)NT_CA * C * sizeof(__nv_bfloat16);
+    cudaFuncSetAttribute(pg_fwd_ca<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+    const Launch L = fwd_launch(B, n, sms, 2, NWCA, (int)jp);
+    pg_fwd_ca<false><<<L.grid, L.nw * 32, smem, st>>>(tp, ca.data_ptr<float>(), mask.data_ptr<uint8_t>(), idx.data_ptr<int>(), dlim.data_ptr<float>(),
+                                                      op, cp, B, n, (int)dlim.numel(), (int)ln, (float)eps, L.jp);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

@@ -104,19 +104,22 @@ __device__ __forceinline__ void fw(uint32_t w, const float* tbl, int c0, const f
 __global__ void __launch_bounds__(NW * 32)
 pe_fwd(const float* tbl, const float* lnw, const float* lnb, const float* gamma, const float* beta, const float* xt, const float* sc,
        int has_sc, const int* idx, const uint8_t* mask, const float* xl, int nxl, const float* cl, int ncl, __nv_bfloat16* out,
-       int* bins, int B, int n, int nS, int nX, float e1, float e2) {
+       int* bins, int B, int n, int nS, int nX, float e1, float e2, int jp) {
+  // one warp per work item = a chunk of jp (4 .. 32) pairs of one (b, i) row: finer than a row, so that the short lengths still fill the GPU
   int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  int row = blockIdx.x * NW + warp;
-  if (row >= B * n) return;
+  const int nch = (n + jp - 1) / jp;
+  const long long item = (long long)blockIdx.x * NW + warp;
+  if (item >= (long long)B * n * nch) return;
+  const int row = (int)(item / nch), j0 = (int)(item - (long long)row * nch) * jp, jend = min(n, j0 + jp);
   int b = row / n, i = row % n, c0 = lane * 8;
   float lw[8], lb[8], gm[8], bt[8];
   ld8(lnw + c0, lw); ld8(lnb + c0, lb); ld8(gamma + (size_t)b * C + c0, gm); ld8(beta + (size_t)b * C + c0, bt);
   __nv_bfloat16* orow = out + (size_t)row * n * C;
-  for (int j0 = 0; j0 < n; j0 += 32) {
+  {
     int j = j0 + lane;
-    uint32_t w = j < n ? bin_word(b, i, j, n, idx, mask, xt, sc, has_sc, xl, nxl, cl, ncl, nS) : MASKED;
-    if (j < n) bins[(size_t)row * n + j] = w;
-    int cnt = min(32, n - j0);
+    uint32_t w = j < jend ? bin_word(b, i, j, n, idx, mask, xt, sc, has_sc, xl, nxl, cl, ncl, nS) : MASKED;
+    if (j < jend) bins[(size_t)row * n + j] = w;
+    int cnt = jend - j0;
     for (int t = 0; t < cnt; t++) {
       uint32_t ww = __shfl_sync(0xffffffffu, w, t);
       float o[8];
@@ -364,15 +367,21 @@ __global__ void pe_reduce_tbl(const float* tpart, float* dtbl, int nparts, int N
 
 void forward(torch::Tensor tbl, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor gamma, torch::Tensor beta, torch::Tensor xt,
              torch::Tensor sc, int64_t has_sc, torch::Tensor idx, torch::Tensor mask, torch::Tensor xl, torch::Tensor cl,
-             torch::Tensor out, torch::Tensor bins, int64_t nS, int64_t nX, double e1, double e2) {
+             torch::Tensor out, torch::Tensor bins, int64_t nS, int64_t nX, double e1, double e2, int64_t jp) {
   const at::cuda::CUDAGuard guard(tbl.device());
   int B = idx.size(0), n = idx.size(1);
-  int grid = (B * n + NW - 1) / NW;
+  if (jp <= 0) {   // the largest chunk of 32 / 16 / 8 that still gives the GPU's warp slots (64 per SM) one item each, else 4
+    const long long slots = (long long)at::cuda::getCurrentDeviceProperties()->multiProcessorCount * 64;
+    jp = 4;
+    for (int c : {32, 16, 8}) if ((long long)B * n * ((n + c - 1) / c) >= slots) { jp = c; break; }
+  }
+  const long long items = (long long)B * n * ((n + jp - 1) / jp);
+  int grid = (int)((items + NW - 1) / NW);
   pe_fwd<<<grid, NW * 32, 0, at::cuda::getCurrentCUDAStream()>>>(
       tbl.data_ptr<float>(), lnw.data_ptr<float>(), lnb.data_ptr<float>(), gamma.data_ptr<float>(), beta.data_ptr<float>(),
       xt.data_ptr<float>(), sc.data_ptr<float>(), (int)has_sc, idx.data_ptr<int>(), mask.data_ptr<uint8_t>(), xl.data_ptr<float>(),
       (int)xl.numel(), cl.data_ptr<float>(), (int)cl.numel(), reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()),
-      bins.data_ptr<int>(), B, n, (int)nS, (int)nX, (float)e1, (float)e2);
+      bins.data_ptr<int>(), B, n, (int)nS, (int)nX, (float)e1, (float)e2, (int)jp);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
