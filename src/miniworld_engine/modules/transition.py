@@ -107,7 +107,7 @@ class Transition(BackendModule, MasterWeights):
         prov = _anthropic.load("opt_core.kernels.transition")
         return prov, _anthropic.kernel_selection(
             prov, "fast", c=self.d_hidden, hidden=self.d_hidden * self.n, n_tokens=int(x.shape[-2]), dtype={torch.bfloat16: "bf16", torch.float32: "fp32"}[x.dtype],
-            family=self._anthropic_family(x), residual=False, cc="9.0", rows_count=x.numel() // self.d_hidden,
+            family=self._anthropic_family(x), residual=False, cc="{}.{}".format(*torch.cuda.get_device_capability(x.device)), rows_count=x.numel() // self.d_hidden,
         )
 
     def _supports_anthropic(self, x: torch.Tensor) -> str | None:
