@@ -630,7 +630,7 @@ def _generic_loads(dt: torch.dtype) -> bool:
         sm80._ext()
         sm80._glue_ext()
         if dt is torch.float32:
-            sm80._tf32_ext()
+            sm80._tf32_rna_ext()
     except Exception as exc:  # a toolchain problem: refused with a reason
         warnings.warn(f"sm_80 attention kernels unavailable: {exc!r}", RuntimeWarning, stacklevel=2)
         return False
@@ -712,14 +712,14 @@ def _gfwd(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, p
             o = torch.empty(L, n, device=x.device, dtype=dt)
             lse = torch.empty(1, heads, L, device=x.device, dtype=torch.float32)
             if f32:
-                sm80.tf32_forward(q, k, v, bias, 1, L, heads, hdp, sm_scale=scale, out=o, lse=lse)
+                sm80.tf32_forward(q, k, v, bias, 1, L, heads, hdp, sm_scale=scale, out=o, lse=lse, rna=True)
             else:
                 sm80.plain_forward(q, k, v, bias, 1, L, heads, hdp, save_lse=True, sm_scale=scale, out=o, lse=lse)
             og = torch.empty_like(o)
             sm80.gate_rows(o, g, og)
         else:
             if f32:
-                sm80.tf32_forward(q, k, v, bias, 1, L, heads, hdp, sm_scale=scale, gate=g, out=q)
+                sm80.tf32_forward(q, k, v, bias, 1, L, heads, hdp, sm_scale=scale, gate=g, out=q, rna=True)
             else:
                 sm80.pgate_forward(q, k, v, g, bias, 1, L, heads, hdp, sm_scale=scale, out=q)
             og = q
@@ -759,7 +759,7 @@ def _gbwd(dout: torch.Tensor, single: torch.Tensor, pair: torch.Tensor, mask: to
         dq, dk, dv = (dqkvg[:, i * n:(i + 1) * n] for i in range(3))
         scale = hd ** -0.5
         if f32:
-            _, _, _, db = sm80.tf32_backward(q, k, v, dob, bias, o, lse.view(1, heads, L), 1, L, heads, hdp, sm_scale=scale, dq=dq, dk=dk, dv=dv)
+            _, _, _, db = sm80.tf32_backward(q, k, v, dob, bias, o, lse.view(1, heads, L), 1, L, heads, hdp, sm_scale=scale, dq=dq, dk=dk, dv=dv, rna=True)
         else:
             _, _, _, db = sm80.plain_backward(q, k, v, dob, bias, o, lse.view(1, heads, L), 1, L, heads, hdp, db_natural=True, sm_scale=scale,
                                               dq=dq, dk=dk, dv=dv)

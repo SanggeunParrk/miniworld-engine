@@ -955,6 +955,27 @@ def _tf32_ext():
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _tf32_rna_ext():
+    """``_tf32_ext`` built with ``-DAA80_TF32_RNA``: the same kernels with every tensor-core operand rounded to the nearest TF32 (the APB composed fp32 path,
+    ``integrations/attention_pair_bias_sm80.py``, whose gradients need the extra bit)."""
+    ensure_cuda_home()
+    return load_extension(
+        name="augmented_attention_tf32_rna_sm80",
+        sources=[str(_dir / "ops_tf32.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-DAA80_TF32_RNA",
+            "-gencode=arch=compute_80,code=sm_80",
+            f"-I{_dir}",
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
+    )
+
+
 def supported_tf32(
     dtype: torch.dtype, length: int, d: int, heads: int, index: int
 ) -> bool:
@@ -990,6 +1011,7 @@ def tf32_forward(
     lse: torch.Tensor | None = None,
     kpen: torch.Tensor | None = None,
     kps: int = 0,
+    rna: bool = False,
 ):
     """``softmax(q k^T / sqrt(hd) + bias) v`` for ``samples`` problems that share the bias, fp32 operands on the TF32 tensor cores: ``q`` / ``k`` / ``v`` token-major fp32 views
     ``[A L, H hd]`` (row strides >= H hd and a multiple of 4), ``bias`` head-major fp32 ``[H, L, L]`` in natural units, masked keys ``-inf``.  Returns ``(o, lse)``: ``o`` fp32
@@ -1012,7 +1034,7 @@ def tf32_forward(
         )
     pen, kps = _penalty(kpen, kps, length)
     scl, bscl = (1.0, 1.0) if prescaled else (_L2E * sm_scale, _L2E)
-    _tf32_ext().attn_fwd_tf32(
+    (_tf32_rna_ext() if rna else _tf32_ext()).attn_fwd_tf32(
         q,
         k,
         v,
@@ -1063,12 +1085,13 @@ def tf32_backward(
     dq: torch.Tensor | None = None,
     dk: torch.Tensor | None = None,
     dv: torch.Tensor | None = None,
+    rna: bool = False,
 ):
     """The backward of :func:`tf32_forward` (without the gate): ``dob`` the output's gradient fp32 ``[A L, H hd]``, ``o`` / ``lse`` the forward's, ``bias`` fp32 natural units.
     Returns ``(dq, dk, dv, db)``: fp32 ``[A L, H hd]`` each (or the views passed) and the bias gradient fp32 ``[H, L, L]`` (the sum over the samples; masked keys 0), summed from fp32
     partials of 1-2 samples in a fixed order: a replay is bit-identical."""
     assert head_dim in TF32_MODULE_HEAD_DIMS, head_dim
-    ext = _tf32_ext()
+    ext = _tf32_rna_ext() if rna else _tf32_ext()  # rna: operands rounded to the nearest TF32
     dev, m, d = q.device, samples * length, heads * head_dim
     sm_scale = 1.0 / math.sqrt(head_dim) if sm_scale is None else sm_scale
     scl = sm_scale * _L2E

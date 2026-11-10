@@ -36,6 +36,13 @@ def prebuild_sm80(rows):
         yield sm80._glue_ext
         if any(r["module"] in TOKEN and r["dtype"] == "float32" for r in rows):
             yield sm80._tf32_ext
+    if "AttentionPairBias" in modules:   # integrations/attention_pair_bias_sm80's composed path (fp32, the wide pairs, gate_bias)
+        from . import sm80
+
+        yield sm80._ext
+        yield sm80._glue_ext
+        if any(r["module"] == "AttentionPairBias" and r["dtype"] == "float32" for r in rows):
+            yield sm80._tf32_rna_ext
     if modules & GENERIC:   # the native rows of kernels/cuda_native.py and the norm / SwiGLU builds a100_families.token calls
         from miniworld_engine.kernels import cuda_native
         from miniworld_engine.kernels.layernorm.cuda import sm80 as norm_sm80

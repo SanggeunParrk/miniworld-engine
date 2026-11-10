@@ -21,7 +21,18 @@
 
 namespace aa80 {
 
-DEVI void mma1688_tf32(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
+// -DAA80_TF32_RNA (the ``_tf32_rna_ext`` build): every operand rounded to the nearest TF32 (cvt.rna) before the tensor core, instead of the hardware's
+// truncation of the low 13 mantissa bits -- half the operand error, a few conversions per fragment.
+DEVI void mma1688_tf32(float (&d)[4], const uint32_t (&a_in)[4], uint32_t b0, uint32_t b1) {
+#ifdef AA80_TF32_RNA
+  uint32_t a[4];
+#pragma unroll
+  for (int i = 0; i < 4; ++i) asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(a[i]) : "f"(__uint_as_float(a_in[i])));
+  asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(b0) : "f"(__uint_as_float(b0)));
+  asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(b1) : "f"(__uint_as_float(b1)));
+#else
+  const uint32_t (&a)[4] = a_in;
+#endif
   asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
                : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
                : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
