@@ -253,7 +253,7 @@ class VariantTokenCuda:
         if fn is None:
             return None, ("outside the kernels' range (bfloat16 / float32, [A, 1, L, 768] with L a multiple of 128, 16 heads, pair 128 / 256, "
                           "a key mask shared by the samples; no gradient: bfloat16 or float32 inference, a gradient: the training path)")
-        return fn, (pair[0], mask)
+        return fn, (pair.squeeze(0), mask)   # a view whose backward is a view too (pair[0] would zero-fill and copy a [1, L, L, c] gradient)
 
     # A100 (sm_80): the attention runs on kernels/integrations/augattn_sm80 (the module's AdaLN, then cuBLAS projections, the pair bias
     # kernels, the mma.sync core and the gates, forward and backward; bf16 or the TF32 core), including its variants: the flat q / k

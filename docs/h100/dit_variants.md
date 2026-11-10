@@ -41,7 +41,7 @@ The kernels take one conditioning row set shared by the samples; a `cond` that d
 | `dit_variants_gate_rows_fwd_sm90` | forward_infer | atom `o <- o * sigmoid(g)` in place |
 | `dit_variants_glu_rows_fwd_sm90` | forward_infer | `silu(g) v [u]` (Boltz-2's up-gate) |
 | `dit_variants_ln_mod_fwd_sm90`, `_qkv_prep_fwd_sm90`, `_res_ln_fwd_sm90`, `_res_out_fwd_sm90`, `_gate_fwd_sm90`, `_glu_fwd_sm90`, `_pair_ln_fwd_sm90` | forward | `train_rows.cu`: the training forward rows (also the fp32 inference rows) and the pair LayerNorm |
-| `dit_variants_res_bwd_sm90`, `_glu_bwd_sm90`, `_res_adaln_bwd_sm90`, `_gate_o_bwd_sm90`, `_qkv_bwd_sm90`, `_adaln_bwd_sm90`, `_pair_ln_bwd_sm90` | backward | the training backward rows |
+| `dit_variants_res_bwd_sm90`, `_glu_bwd_sm90`, `_res_adaln_bwd_sm90`, `_gate_o_bwd_sm90`, `_qkv_bwd_sm90`, `_adaln_bwd_sm90`, `_pair_ln_bwd_sm90`, `_bias_tperm_bwd_sm90` | backward | the training backward rows; `bias_tperm`: the TF32 core's transposed bias from the key-permuted one |
 | `dit_variants_edge_attn_fwd_sm90` | forward | `edge.cu`: the slid key window's five edge windows (fp32), plus their bias and backward entry points |
 | `augmented_attention_fwd_sm90`, `_fwd_tf32_sm90`, `_bwd_dqb_sm90`, `_bwd_dq_sm90`, `_bwd_dkv_sm90`, `_bwd_dqb_tf32_sm90`, `_bwd_dkv_tf32_sm90` | forward / backward | token attention cores (see [token_dit.md](token_dit.md)) |
 | `augmented_attention_local_pair_bias_fwd_sm90`, `augmented_attention_local_attn_*_sm90`, `augmented_attention_local_*bias_bwd*_sm90` | forward / backward | atom window attention (`attn_fwd_mma` / `attn_bwd_mma`, bf16 and TF32) and the window pair bias (`pair_bias_mma`) of the local atom DiT |
@@ -60,7 +60,9 @@ The kernels take one conditioning row set shared by the samples; a `cond` that d
   the bias key-permuted for the TF32 core, v^T from its own GEMM, `tf32_gated_inference`.
 - **Training** (`train.py`): conditioning tables and pair biases are made by ordinary torch ops outside the block Function (autograd
   chains their gradients): one pair LayerNorm (`pair_ln_fwd` / `pair_ln_bwd` as an autograd Function) and one stacked GEMM
-  `[nb H, C] x [C, L L]` with log2 e folded into the weights (Chai-1's LN offset is dropped: it only shifts a row's logits). Per block one
+  `[nb H, C] x [C, L L]` with log2 e folded into the weights (Chai-1's LN offset is dropped: it only shifts a row's logits); fp32: the
+  LayerNorm writes the pair rows in the TF32 core's key order (`key_perm`, within groups of 8), so the GEMM emits the key-permuted bias, its
+  gradient comes back in that order and `bias_tperm` makes the core's `[h, key, q position]` copy in one pass (no gathers). Per block one
   `_TokenBlock` Function: `ln_mod_fwd` -> q\|k\|v\|g GEMM -> `qkv_prep` -> core (bf16 `attn_fwd` with the gate epilogue + `attn_dqb` /
   `attn_dkv`; fp32 the TF32 core with v^T and the key-permuted layouts by `transpose2d`) -> out GEMM -> `res_ln_fwd` / `res_out_fwd`
   -> expand GEMM -> `glu_fwd` -> squeeze GEMM. Backward: `res_bwd`, `glu_bwd`, `res_adaln_bwd`, `gate_o_bwd` (do, dg and

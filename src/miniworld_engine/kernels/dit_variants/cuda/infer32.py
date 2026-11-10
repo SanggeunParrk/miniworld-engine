@@ -173,10 +173,10 @@ def _token_bias(pack, pair, mask, eps, nbh):
     from miniworld_engine.kernels.dit_variants.cuda.train import _key_perm
 
     length, c = pair.shape[0], pair.shape[-1]
-    zhat = train.pair_ln_fwd(pair.reshape(length * length, c).contiguous(), eps, False)
+    # the LayerNorm writes the pair rows in key_perm order: the GEMM's output is the key-permuted bias the TF32 core reads
+    zhat = train.pair_ln_fwd(pair.reshape(length * length, c).contiguous(), eps, False, True)
     bias = torch.mm(pack["pair_w"], zhat.t()).view(nbh, length, length)
     perm = _key_perm(length, pair.device)
-    bias = bias[..., perm].contiguous()
     if mask is not None:
         bias.masked_fill_(~mask.bool()[perm][None, None, :], float("-inf"))
     return bias, pair, mask

@@ -102,9 +102,9 @@ def token_fwd(x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.
     wq, bql, wk, bkl = (qkw if kq else (None, None, None, None))
     scale = LOG2E / math.sqrt(HEAD_DIM)
     ext.qkv_prep(qkvg[:, :D], qkvg[:, D:2 * D], qkvg[:, 2 * D:3 * D], qs, kb, vb, buf["stqk"] if kq else None, wq, bql, wk, bkl, scale, eps_qk, kq, at == torch.float32)
-    if at == torch.float32:                       # the TF32 core: key-permuted bias / mask, v^T
+    if at == torch.float32:                       # the TF32 core: key-permuted bias (made so by _pair_biases) / mask, v^T
         perm = _key_perm(L, x.device)
-        bias_p = bias[..., perm].contiguous()
+        bias_p = bias
         km_p = None if km is None else km[:, perm].contiguous()
         vt = _transpose(vb)
         if gating:
@@ -152,18 +152,19 @@ def _key_perm(length, device):
 
 
 def _tf32_attn_bwd(qs, kb, vb, dob, bias, km, lse, dd, A, L):
-    """The TF32 attention backward (``attn_tf32.cu``): dQ (for the unscaled q), dK, dV [A L, 768] fp32 and dbias [16, L, L] fp32 (natural key
-    order; the bias passed in is natural order too). The core takes q, k, dO transposed, and its bias / LSE / D / key mask in permuted orders."""
+    """The TF32 attention backward (``attn_tf32.cu``): dQ (for the unscaled q), dK, dV [A L, 768] fp32 and dbias [16, L, L] fp32, the bias
+    and its gradient in ``_key_perm`` key order (as ``_pair_biases`` makes it). The core takes q, k, dO transposed, the bias also as
+    [h, key, q position] (``bias_tperm``: one tiled pass), and its LSE / D / key mask in permuted orders."""
     from miniworld_engine.kernels.augmented_attention import cuda as attn
 
     perm = _key_perm(L, qs.device)
-    inv = torch.argsort(perm)
-    bias_p = bias[..., perm].contiguous()
-    bias_tp = bias_p[:, perm][..., inv].transpose(1, 2).contiguous()      # [h, key, q position]
+    bias_p = bias                                                           # key-permuted already (_pair_biases)
+    bias_tp = torch.empty_like(bias_p)
+    _ext().bias_tperm(bias_p, bias_tp)                                      # [h, key, q position]
     km_p = None if km is None else km[:, perm].contiguous()
     dq, dk, dv, db_p = attn.tf32_backward(qs, kb, vb, dob, _transpose(qs), _transpose(kb), _transpose(dob), bias_p, bias_tp, lse, dd,
                                           lse[..., perm].contiguous(), dd[..., perm].contiguous(), km, km_p, A, L)
-    return dq, dk, dv, db_p[..., inv]
+    return dq, dk, dv, db_p
 
 
 def _token_bwd_fake(dout, x, tab, bias, km, saved, qkw, par, sig, gating, kq, up, length, eps, eps_qk):
@@ -269,44 +270,45 @@ class _TokenBlock(torch.autograd.Function):
 
 
 
-def _pair_ln_fwd_fake(z, eps, out_bf16):
+def _pair_ln_fwd_fake(z, eps, out_bf16, perm=False):
     """The normalised rows: bf16 or z's dtype."""
     return z.new_empty(z.shape, dtype=torch.bfloat16 if out_bf16 else z.dtype)
 
 
 @opaque(fake=_pair_ln_fwd_fake, name="dit_variants_pair_ln_fwd")
-def pair_ln_fwd(z: torch.Tensor, eps: float, out_bf16: bool) -> torch.Tensor:
-    """LayerNorm (no affine) of the pair rows z [R, C] (C 128 | 256), bf16 or in z's dtype."""
+def pair_ln_fwd(z: torch.Tensor, eps: float, out_bf16: bool, perm: bool = False) -> torch.Tensor:
+    """LayerNorm (no affine) of the pair rows z [R, C] (C 128 | 256), bf16 or in z's dtype. ``perm``: the rows of each group of 8 written in
+    the TF32 core's key order (``_key_perm``; pair rows q L + k, L a multiple of 8), so ``W zhat^T`` is the key-permuted bias."""
     out = torch.empty(z.shape, device=z.device, dtype=torch.bfloat16 if out_bf16 else z.dtype)
-    _ext().pair_ln_fwd(z, out, eps)
+    _ext().pair_ln_fwd(z, out, eps, perm)
     return out
 
 
-def _pair_ln_bwd_fake(z, g, eps):
+def _pair_ln_bwd_fake(z, g, eps, perm=False):
     """dz: z's shape and dtype."""
     return torch.empty_like(z)
 
 
 @opaque(fake=_pair_ln_bwd_fake, name="dit_variants_pair_ln_bwd")
-def pair_ln_bwd(z: torch.Tensor, g: torch.Tensor, eps: float) -> torch.Tensor:
-    """The LayerNorm backward of the pair rows: dz (z's dtype) from the gradient g of the normalised rows."""
+def pair_ln_bwd(z: torch.Tensor, g: torch.Tensor, eps: float, perm: bool = False) -> torch.Tensor:
+    """The LayerNorm backward of the pair rows: dz (z's dtype) from the gradient g of the normalised rows (in ``pair_ln_fwd``'s row order)."""
     dz = torch.empty_like(z)
-    _ext().pair_ln_bwd(z, g, dz, eps)
+    _ext().pair_ln_bwd(z, g, dz, eps, perm)
     return dz
 
 
 class _PairLN(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, z, eps, out_bf16):  # noqa: D102
+    def forward(ctx, z, eps, out_bf16, perm):  # noqa: D102
         ctx.save_for_backward(z)
-        ctx.eps = eps
-        return pair_ln_fwd(z, eps, out_bf16)
+        ctx.eps, ctx.perm = eps, perm
+        return pair_ln_fwd(z, eps, out_bf16, perm)
 
     @staticmethod
     @once_differentiable
     def backward(ctx, g):  # noqa: D102
         (z,) = ctx.saved_tensors
-        return pair_ln_bwd(z, g.contiguous(), ctx.eps), None, None
+        return pair_ln_bwd(z, g.contiguous(), ctx.eps, ctx.perm), None, None, None
 
 # ------------------------------------------------------------------------------------------------------------------ glue
 def serves(stack, single, cond, pair, mask) -> bool:
@@ -344,13 +346,15 @@ def _tables(blk, s):
 
 def _pair_biases(stack, pair):
     """The blocks' biases [H, L, L] in log2 units (activation dtype), one LayerNorm of the pair and one stacked GEMM; the LN bias (Chai-1)
-    only shifts a head's logits by a constant, which the softmax cancels (its gradient is exactly zero), so it is left out."""
+    only shifts a head's logits by a constant, which the softmax cancels (its gradient is exactly zero), so it is left out. fp32: the keys
+    in ``_key_perm`` order (the TF32 core's layout; the block Function takes and returns the bias gradient in that order)."""
     blocks = list(stack.blocks)
     length, c = pair.shape[0], pair.shape[-1]
     h = blocks[0].n_head
     eps = blocks[0].pair_norm.eps
     dt = torch.bfloat16 if pair.dtype == torch.bfloat16 or torch.is_autocast_enabled("cuda") else pair.dtype
-    zhat = _PairLN.apply(pair.reshape(length * length, c).contiguous(), eps, dt == torch.bfloat16)
+    # fp32: the TF32 core's key-permuted bias straight out of the GEMM (the LayerNorm writes the rows in key_perm order), no gather
+    zhat = _PairLN.apply(pair.reshape(length * length, c).contiguous(), eps, dt == torch.bfloat16, dt == torch.float32)
     w = torch.cat([b.to_pair_bias.weight.float() * b.pair_norm.weight.float()[None, :] for b in blocks]) * LOG2E
     out = torch.mm(w.to(dt), zhat.t())                          # [nb H, L L]
     return [out[h * i:h * (i + 1)].view(h, length, length) for i in range(len(blocks))]

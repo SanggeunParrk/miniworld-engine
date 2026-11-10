@@ -445,8 +445,12 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) adaln_bwd_k(const XT* __rest
 
 
 // ---------------------------------------------------------------------------------------------------- pair LayerNorm rows
-// LayerNorm of C-wide pair rows (C = 128 or 256, no affine), one warp per row: out = (z - mean) rstd
-template <int C, typename ZT, typename OT>
+// LayerNorm of C-wide pair rows (C = 128 or 256, no affine), one warp per row: out = (z - mean) rstd. PERM: the normalised row of pair
+// row r goes to row kperm_row(r), the H100 TF32 core's key order within each group of 8 keys (``key_perm``: position 2 j + i holds key
+// 4 i + j). L is a multiple of 8, so row q L + k has key position r % 8 and the bias GEMM over these rows comes out key-permuted.
+__device__ __forceinline__ long kperm_row(long r) { return (r & ~7L) | (2 * (r & 3) + ((r >> 2) & 1)); }
+
+template <int C, typename ZT, typename OT, bool PERM>
 __global__ void __launch_bounds__(256) pair_ln_fwd_k(const ZT* __restrict__ Z, OT* __restrict__ OUT, long R, float eps) {
   constexpr int K = C / 128;
   const long row = (long)blockIdx.x * 8 + threadIdx.x / 32;
@@ -461,23 +465,25 @@ __global__ void __launch_bounds__(256) pair_ln_fwd_k(const ZT* __restrict__ Z, O
 #pragma unroll
   for (int k = 0; k < K; ++k) { z[k] = sub4(z[k], make_float4(mean, mean, mean, mean)); q += sum4(mul4(z[k], z[k])); }
   const float r = rsqrtf(warp_sum(q) / C + eps);
+  const long orow = PERM ? kperm_row(row) : row;
 #pragma unroll
-  for (int k = 0; k < K; ++k) V4<OT>::store(OUT + row * C + k * 128 + lane * 4, mul4(z[k], r));
+  for (int k = 0; k < K; ++k) V4<OT>::store(OUT + orow * C + k * 128 + lane * 4, mul4(z[k], r));
 }
 
-// dz = rstd (dxhat - mean(dxhat) - xhat mean(dxhat xhat)), the statistics recomputed from z
-template <int C, typename ZT, typename OT>
+// dz = rstd (dxhat - mean(dxhat) - xhat mean(dxhat xhat)), the statistics recomputed from z; PERM: dxhat of row r is at row kperm_row(r)
+template <int C, typename ZT, typename OT, bool PERM>
 __global__ void __launch_bounds__(256) pair_ln_bwd_k(const ZT* __restrict__ Z, const OT* __restrict__ DXH, ZT* __restrict__ DZ, long R, float eps) {
   constexpr int K = C / 128;
   const long row = (long)blockIdx.x * 8 + threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
   if (row >= R) return;
+  const long grow = PERM ? kperm_row(row) : row;
   float4 z[K], g[K];
   float s = 0.f;
 #pragma unroll
   for (int k = 0; k < K; ++k) {
     z[k] = V4<ZT>::load(Z + row * C + k * 128 + lane * 4);
-    g[k] = V4<OT>::load(DXH + row * C + k * 128 + lane * 4);
+    g[k] = V4<OT>::load(DXH + grow * C + k * 128 + lane * 4);
     s += sum4(z[k]);
   }
   const float mean = warp_sum(s) / C;
@@ -726,37 +732,41 @@ void adaln_bwd(at::Tensor x, at::Tensor st, at::Tensor pass, std::vector<at::Ten
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-template <int C, typename ZT, typename OT> void pln_fwd_launch(const at::Tensor& z, const at::Tensor& out, double eps) {
+template <int C, typename ZT, typename OT> void pln_fwd_launch(const at::Tensor& z, const at::Tensor& out, double eps, bool perm) {
   const long r = z.size(0);
-  pair_ln_fwd_k<C, ZT, OT><<<(r + 7) / 8, 256, 0, S_()>>>(CP<ZT>(z), P<OT>(out), r, (float)eps);
+  if (perm) pair_ln_fwd_k<C, ZT, OT, true><<<(r + 7) / 8, 256, 0, S_()>>>(CP<ZT>(z), P<OT>(out), r, (float)eps);
+  else pair_ln_fwd_k<C, ZT, OT, false><<<(r + 7) / 8, 256, 0, S_()>>>(CP<ZT>(z), P<OT>(out), r, (float)eps);
 }
-template <int C, typename ZT, typename OT> void pln_bwd_launch(const at::Tensor& z, const at::Tensor& dxh, const at::Tensor& dz, double eps) {
+template <int C, typename ZT, typename OT> void pln_bwd_launch(const at::Tensor& z, const at::Tensor& dxh, const at::Tensor& dz, double eps, bool perm) {
   const long r = z.size(0);
-  pair_ln_bwd_k<C, ZT, OT><<<(r + 7) / 8, 256, 0, S_()>>>(CP<ZT>(z), CP<OT>(dxh), P<ZT>(dz), r, (float)eps);
+  if (perm) pair_ln_bwd_k<C, ZT, OT, true><<<(r + 7) / 8, 256, 0, S_()>>>(CP<ZT>(z), CP<OT>(dxh), P<ZT>(dz), r, (float)eps);
+  else pair_ln_bwd_k<C, ZT, OT, false><<<(r + 7) / 8, 256, 0, S_()>>>(CP<ZT>(z), CP<OT>(dxh), P<ZT>(dz), r, (float)eps);
 }
 
-// out = LN(z) rows [R, C] (C 128 | 256); z / out bf16 or fp32 in any combination
-void pair_ln_fwd(at::Tensor z, at::Tensor out, double eps) {
+// out = LN(z) rows [R, C] (C 128 | 256); z / out bf16 or fp32 in any combination; perm: z row r -> out row kperm_row(r) (R % 8 == 0)
+void pair_ln_fwd(at::Tensor z, at::Tensor out, double eps, bool perm) {
   const c10::cuda::CUDAGuard guard(z.device());
   const int64_t c = z.size(1);
   TORCH_CHECK((c == 128 || c == 256) && z.is_contiguous() && out.is_contiguous() && out.sizes() == z.sizes(), "pair_ln_fwd: contiguous [rows, 128 | 256]");
+  TORCH_CHECK(!perm || z.size(0) % 8 == 0, "pair_ln_fwd: perm needs rows % 8 == 0");
   const bool zb = is_bf(z), ob = is_bf(out);
-#define PLN(C) if (zb) { if (ob) pln_fwd_launch<C, bf, bf>(z, out, eps); else pln_fwd_launch<C, bf, float>(z, out, eps); } \
-               else { if (ob) pln_fwd_launch<C, float, bf>(z, out, eps); else pln_fwd_launch<C, float, float>(z, out, eps); }
+#define PLN(C) if (zb) { if (ob) pln_fwd_launch<C, bf, bf>(z, out, eps, perm); else pln_fwd_launch<C, bf, float>(z, out, eps, perm); } \
+               else { if (ob) pln_fwd_launch<C, float, bf>(z, out, eps, perm); else pln_fwd_launch<C, float, float>(z, out, eps, perm); }
   if (c == 128) { PLN(128) } else { PLN(256) }
 #undef PLN
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// dz (z's dtype) = LN backward of the gradient dxh (bf16 or fp32) of the normalised rows
-void pair_ln_bwd(at::Tensor z, at::Tensor dxh, at::Tensor dz, double eps) {
+// dz (z's dtype) = LN backward of the gradient dxh (bf16 or fp32) of the normalised rows; perm: dxh in pair_ln_fwd's permuted row order
+void pair_ln_bwd(at::Tensor z, at::Tensor dxh, at::Tensor dz, double eps, bool perm) {
   const c10::cuda::CUDAGuard guard(z.device());
   const int64_t c = z.size(1);
   TORCH_CHECK((c == 128 || c == 256) && z.is_contiguous() && dxh.is_contiguous() && dz.is_contiguous() && dxh.sizes() == z.sizes() && dz.sizes() == z.sizes(),
               "pair_ln_bwd: contiguous [rows, 128 | 256]");
+  TORCH_CHECK(!perm || z.size(0) % 8 == 0, "pair_ln_bwd: perm needs rows % 8 == 0");
   const bool zb = is_bf(z), ob = is_bf(dxh);
-#define PLN(C) if (zb) { if (ob) pln_bwd_launch<C, bf, bf>(z, dxh, dz, eps); else pln_bwd_launch<C, bf, float>(z, dxh, dz, eps); } \
-               else { if (ob) pln_bwd_launch<C, float, bf>(z, dxh, dz, eps); else pln_bwd_launch<C, float, float>(z, dxh, dz, eps); }
+#define PLN(C) if (zb) { if (ob) pln_bwd_launch<C, bf, bf>(z, dxh, dz, eps, perm); else pln_bwd_launch<C, bf, float>(z, dxh, dz, eps, perm); } \
+               else { if (ob) pln_bwd_launch<C, float, bf>(z, dxh, dz, eps, perm); else pln_bwd_launch<C, float, float>(z, dxh, dz, eps, perm); }
   if (c == 128) { PLN(128) } else { PLN(256) }
 #undef PLN
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -775,7 +785,35 @@ void transpose2d(at::Tensor in, at::Tensor out) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// The TF32 attention backward's transposed bias from the key-permuted bias: out[h, k, j] = bp[h, kperm(j), kpos(k)] for bp [H, L, L]
+// (bp[h, q, p] = bias[h, q, key_perm[p]]), i.e. out[h, k, j] = bias[h, key_perm[j], k]: natural keys on the rows, permuted queries on the
+// columns. Both permutations stay inside groups of 8, so a 32 x 32 tile of out comes from one 32 x 32 tile of bp (one pass, smem).
+__device__ __forceinline__ int kperm_of(int p) { return (p & ~7) | (4 * (p & 1) + ((p & 7) >> 1)); }   // key_perm[p]
+__global__ void __launch_bounds__(256) bias_tperm_k(const float* __restrict__ BP, float* __restrict__ OUT, long L) {
+  __shared__ float tile[32][33];
+  const long h = blockIdx.z, q0 = (long)blockIdx.y * 32, p0 = (long)blockIdx.x * 32;
+  const float* src = BP + h * L * L;
+  const int tx = threadIdx.x & 31, ty = threadIdx.x >> 5;
+#pragma unroll
+  for (int i = ty; i < 32; i += 8) tile[i][tx] = src[(q0 + i) * L + p0 + tx];
+  __syncthreads();
+  float* dst = OUT + h * L * L;
+  // out rows k = p0 + kk (natural keys of this column tile), columns j = q0 + jj
+#pragma unroll
+  for (int kk = ty; kk < 32; kk += 8) dst[(p0 + kk) * L + q0 + tx] = tile[kperm_of(tx)][int(kperm_row(kk))];
+}
+
+void bias_tperm(at::Tensor bp, at::Tensor out) {
+  const c10::cuda::CUDAGuard guard(bp.device());
+  TORCH_CHECK(bp.dim() == 3 && bp.is_contiguous() && out.is_contiguous() && out.sizes() == bp.sizes() && bp.size(1) == bp.size(2) && bp.size(1) % 32 == 0 &&
+              bp.scalar_type() == at::kFloat && out.scalar_type() == at::kFloat, "bias_tperm: contiguous fp32 [H, L, L], L % 32 == 0");
+  const long L = bp.size(1);
+  bias_tperm_k<<<dim3(L / 32, L / 32, bp.size(0)), 256, 0, S_()>>>(CP<float>(bp), P<float>(out), L);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("bias_tperm", &bias_tperm);
   m.def("ln_mod_fwd", &ln_mod_fwd);
   m.def("qkv_prep", &qkv_prep);
   m.def("res_ln_fwd", &res_ln_fwd);

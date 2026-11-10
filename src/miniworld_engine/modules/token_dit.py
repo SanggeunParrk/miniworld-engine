@@ -622,7 +622,8 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
     (``transition.up``); the conditioning is 768 wide."""
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
-    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 2}
+    #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 3}
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
 
@@ -688,7 +689,8 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
     of the flat q / k (``kq_norm``: ``attention.norm_query`` / ``attention.norm_key``, over all heads)."""
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
-    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 2}
+    #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 3}
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
 
@@ -723,7 +725,8 @@ class TokenDiTChai1(VariantTokenCuda, TokenDiTProtenix):
     LayerNorm of ``a`` (Chai-1's release, its traced ``layer_norm(x, None, None, 0.1)``: 0.1, the default)."""
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
-    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 2}
+    #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 3}
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
 
