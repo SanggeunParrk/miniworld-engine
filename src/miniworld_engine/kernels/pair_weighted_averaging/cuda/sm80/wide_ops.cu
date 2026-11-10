@@ -11,6 +11,7 @@
 //   gate_bwd   du natural -> do = du sigmoid(g) head-major, dg = du o sigmoid(g) (1 - sigmoid(g)) natural (into the [dv | dg] buffer)
 //   from_hm    dv head-major -> natural (the [dv | dg] buffer's v columns: the A operand of dy = [dv | dg] [Wv; Wg] and of d[Wv; Wg])
 //
+//   pair_logits inference only: LN(z) . Wb^T in one pass over the pair (the 8 logits per pair; training keeps LN(z) for dWb)
 //   head_bmm   inference only: o = w v per head on the natural layout (cuBLAS strided batches over the MSA rows), no head-major copy
 //
 // A thread moves 16 bytes (8 channels); a run of 32 channels is 4 threads, read and written as one 64-byte segment on both sides. The gate
@@ -109,6 +110,62 @@ __global__ void __launch_bounds__(256) gate_bwd_k(const bf16* __restrict__ du, c
   }
 }
 
+// Inference, the pair side in one pass: logits[r, h] = bf16( bf16(LN(z[r, :])) . Wb[h, :] ), one warp per pair row of 512 channels (16 per lane),
+// two-pass statistics, the normalised values rounded to bf16 as the module's LayerNorm output before the 8 dot products (fp32).
+constexpr int DZ = 512;
+__global__ void __launch_bounds__(256) pair_logits_k(const bf16* __restrict__ z, const float* __restrict__ lnw, const float* __restrict__ lnb,
+                                                     const bf16* __restrict__ wb, bf16* __restrict__ out, long R, float eps) {
+  // shared operands in lane-minor order (channel k = 256 a + 8 lane + e at [(a, e)][lane]): a warp's 32 reads of one (a, e) hit 32 banks
+  __shared__ float sw[16][H][32];
+  __shared__ float sg[16][32], sb[16][32];
+  for (int i = threadIdx.x; i < H * DZ; i += 256) {
+    const int h = i / DZ, k = i % DZ;
+    sw[(k >> 8) * 8 + (k & 7)][h][(k >> 3) & 31] = __bfloat162float(wb[i]);
+  }
+  for (int k = threadIdx.x; k < DZ; k += 256) { sg[(k >> 8) * 8 + (k & 7)][(k >> 3) & 31] = lnw[k]; sb[(k >> 8) * 8 + (k & 7)][(k >> 3) & 31] = lnb[k]; }
+  __syncthreads();
+  const int lane = threadIdx.x & 31;
+  const long warps = (long)gridDim.x * 8;
+  for (long r = ((long)blockIdx.x * 256 + threadIdx.x) >> 5; r < R; r += warps) {
+    float v[2][8];
+    unpack8(*reinterpret_cast<const uint4*>(z + r * DZ + lane * 8), v[0]);
+    unpack8(*reinterpret_cast<const uint4*>(z + r * DZ + 256 + lane * 8), v[1]);
+    float s = 0.f;
+#pragma unroll
+    for (int a = 0; a < 2; ++a)
+#pragma unroll
+      for (int e = 0; e < 8; ++e) s += v[a][e];
+#pragma unroll
+    for (int o = 16; o; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+    const float mean = s / DZ;
+    float q = 0.f;
+#pragma unroll
+    for (int a = 0; a < 2; ++a)
+#pragma unroll
+      for (int e = 0; e < 8; ++e) { const float d = v[a][e] - mean; q = fmaf(d, d, q); }
+#pragma unroll
+    for (int o = 16; o; o >>= 1) q += __shfl_xor_sync(0xffffffffu, q, o);
+    const float rstd = rsqrtf(q / DZ + eps);
+    float acc[H];
+#pragma unroll
+    for (int h = 0; h < H; ++h) acc[h] = 0.f;
+#pragma unroll
+    for (int a = 0; a < 2; ++a)
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        const int ae = a * 8 + e;
+        const float y = bfr(fmaf((v[a][e] - mean) * rstd, sg[ae][lane], sb[ae][lane]));
+#pragma unroll
+        for (int h = 0; h < H; ++h) acc[h] = fmaf(y, sw[ae][h][lane], acc[h]);
+      }
+#pragma unroll
+    for (int h = 0; h < H; ++h)
+#pragma unroll
+      for (int o = 16; o; o >>= 1) acc[h] += __shfl_xor_sync(0xffffffffu, acc[h], o);
+    if (lane == 0) reinterpret_cast<uint4*>(out)[r] = pack8(acc);
+  }
+}
+
 int grid(long n) {
   const long sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   return (int)std::max<long>(1, std::min<long>((n + 255) / 256, sms * 16));
@@ -189,7 +246,21 @@ void head_bmm(torch::Tensor w, torch::Tensor v, torch::Tensor o, int64_t S, int6
   }
 }
 
+// z [R, 512] bf16, lnw / lnb fp32 [512], wb [8, 512] bf16 -> logits [R, 8] bf16
+torch::Tensor pair_logits(torch::Tensor z, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wb, double eps) {
+  TORCH_CHECK(z.is_cuda() && z.scalar_type() == at::kBFloat16 && z.is_contiguous() && z.dim() == 2 && z.size(1) == DZ, "pair_logits: z bf16 [R, 512]");
+  TORCH_CHECK(lnw.scalar_type() == at::kFloat && lnb.scalar_type() == at::kFloat && lnw.numel() == DZ && lnb.numel() == DZ && lnw.is_contiguous() && lnb.is_contiguous(),
+              "pair_logits: lnw / lnb fp32 [512]");
+  TORCH_CHECK(wb.scalar_type() == at::kBFloat16 && wb.is_contiguous() && wb.numel() == H * DZ, "pair_logits: wb bf16 [8, 512]");
+  const long R = z.size(0);
+  auto out = torch::empty({R, H}, z.options());
+  pair_logits_k<<<grid(R * 32), 256, 0, st()>>>(cp(z), lnw.data_ptr<float>(), lnb.data_ptr<float>(), cp(wb), mp(out), R, (float)eps);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("pair_logits", &pair_logits);
   m.def("head_bmm", &head_bmm);
   m.def("to_hm", &to_hm);
   m.def("from_hm", &from_hm);

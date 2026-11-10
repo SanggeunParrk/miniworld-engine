@@ -5,7 +5,7 @@ its kernels for the same reason, ``csrc/pwa_wide.cu``). Here every product is a 
 LayerNorm (the TriangleAttention glue's ``ln_fwd`` / ``ln_bwd``, its sm_80 build) and four layout / gate kernels
 (``pair_weighted_averaging/cuda/sm80/wide_ops.cu``) between them::
 
-    pair     zn = LN(z)                       glue ln_fwd              [L L, 512]
+    pair     zn = LN(z)                       glue ln_fwd              [L L, 512]         (inference: pair_logits, LN and the 8 dots in one pass)
              logits = zn Wb^T                 GEMM                     [L L, 8] -> masked softmax over the keys -> w [8, L, L] bf16
     msa      y = LN(m)                        glue ln_fwd              [S L, 256]
              vg = y [Wv; Wg]^T                GEMM                     [S L, 512]  (v | g, natural rows (s, j))
@@ -65,14 +65,17 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
     lnm_w, lnm_b, wvg, lnz_w, lnz_b, wb, wo = _weights(leaves)
     _, S, L, _ = msa.shape
     zf = pair[0].reshape(L * L, D_PAIR)
-    zn, zmean, zrstd = g.ln_fwd(zf, lnz_w, lnz_b, eps_z, L, False)
-    logits = torch.mm(zn, wb.t()).view(L, L, HEADS).permute(2, 0, 1)            # [h, i, j], the module's to_bias output (bf16)
+    if save:   # training: LN(z) and its statistics are kept (dWb, the LayerNorm backward)
+        zn, zmean, zrstd = g.ln_fwd(zf, lnz_w, lnz_b, eps_z, L, False)
+        logits = torch.mm(zn, wb.t())
+    else:      # inference: one pass over the pair
+        zn = zmean = zrstd = None
+        logits = e.pair_logits(zf, lnz_w, lnz_b, wb, eps_z)
+    logits = logits.view(L, L, HEADS).permute(2, 0, 1)                            # [h, i, j], the module's to_bias output (bf16)
     key = None if mask is None else mask[0]
     if key is not None:
         logits = logits.masked_fill(~key[None, None, :], torch.finfo(torch.bfloat16).min)
     w = torch.softmax(logits.float(), -1).to(torch.bfloat16)                      # [8, L, L] bf16 (fp32 softmax, as F.softmax on bf16)
-    if not save:
-        del zn
     mf = msa[0].reshape(S * L, D_MSA)
     y, mmean, mrstd = g.ln_fwd(mf, lnm_w, lnm_b, eps_m, L, False)
     vg = torch.mm(y, wvg.t())                                                      # [S L, 512] = [v | g]
