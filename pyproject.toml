@@ -25,11 +25,15 @@ dependencies = [
 
 [project.optional-dependencies]
 # External baselines (backends "cueq" / "anthropic" connect to them; never required by the engine's own backends).
-baselines = ["cuequivariance-torch>=0.12,<0.13"]
+#   transformers: the fork Anthropic's esmfold2 kit pins (its ef2_msa / ef2_w4 levers import transformers.models.esmfold2).
+baselines = [
+  "cuequivariance-torch>=0.12,<0.13",
+  "transformers @ git+https://github.com/huggingface/transformers.git@ef32577f55da19a4989cd7b22e004dc43a4998cb",
+]
 # FlashAttention-4 (CuTe DSL, sm90+): the global-attention path of the SWA atom transformer's cuda backend. Prerelease wheel:
 #   uv pip install --prerelease=allow "flash-attn-4[cu13]"
 flash = ["flash-attn-4"]
-dev = ["ruff==0.16.9", "pyright"]
+dev = ["ruff==0.16.9", "pyright", "matplotlib"]   # matplotlib: measure/plot.py (benchmarks/)
 
 [build-system]
 requires = ["setuptools>=77"]  # >=77 for PEP 639 (SPDX `license` + `license-files`)
