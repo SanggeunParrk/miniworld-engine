@@ -6,6 +6,9 @@
 // so each weight byte is fetched once per 128 rows. LN is computed once per tile into
 // shared memory; Q/K/V/G leave through TMA stores, the head bias is transposed in
 // shared memory so each head writes contiguous keys.
+// HD = 32 H (heads padded to 32 channels) or 16 H (16-channel heads kept compact for the fp16 core's 3-D loads).  ``flip`` (bit 1 of tr):
+// the ending node on AlphaFold 3's bias orientation -- the bias written transposed with the key mask on the transposed axis (what
+// h100_sm90.flip_bias did as three more kernels).
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -86,7 +89,7 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
       #pragma unroll
       for(int i=0;i<PER;++i) {
         int64_t prow=row;
-        if(tr){int64_t ll=int64_t(L)*L,bb=row/ll,rem=row-bb*ll,ii=rem/L,jj=rem-ii*L;prow=bb*ll+jj*L+ii;}   // ending node: physical row (b, j, i)
+        if(tr&1){int64_t ll=int64_t(L)*L,bb=row/ll,rem=row-bb*ll,ii=rem/L,jj=rem-ii*L;prow=bb*ll+jj*L+ii;}   // ending node: physical row (b, j, i)
         uint4 vv=*reinterpret_cast<uint4 const*>(x+prow*C+(sub+T*i)*8);
         auto const* v=reinterpret_cast<Element const*>(&vv);
         #pragma unroll
@@ -195,6 +198,18 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
         int64_t row0=base+wgi*64;int b=row0/(int64_t(L)*L),q=(row0/L)%L,key0=row0%L;
         uint4 vec=*reinterpret_cast<uint4 const*>(stg+h*64+c*8);
         auto* v=reinterpret_cast<Element*>(&vec);
+        if(tr&2) {
+          // flip (the ending node on AlphaFold 3's bias orientation): the transpose -- token (q, key) is bias[b, h, key, q] -- with the
+          // key mask on the transposed axis (q): 16-bit stores at stride L (the bias stays L2-resident; the sectors merge there)
+          const bool keep=!mask || mask[b*L+q];
+          auto* bb=reinterpret_cast<uint16_t*>(bias)+(int64_t(b)*H+h)*L*int64_t(L)+q;
+          #pragma unroll
+          for(int e=0;e<8;++e) {
+            uint16_t bits=reinterpret_cast<uint16_t const*>(v)[e];
+            if(!keep) bits=h16?uint16_t(0xFC00u):uint16_t(0xFF80u);     // -inf (as the unfused flip masks: fp16 / bf16)
+            bb[int64_t(key0+c*8+e)*L]=bits;
+          }
+        } else {
         if(mask) {
           #pragma unroll
           for(int e=0;e<8;++e) if(!mask[b*L+key0+c*8+e]) {
@@ -203,6 +218,7 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
           }
         }
         *reinterpret_cast<uint4*>(bias+((int64_t(b)*H+h)*L+q)*L+key0+c*8)=vec;
+        }
       }
       }
     }
@@ -224,10 +240,10 @@ template<int C,int HD> void launch(torch::Tensor x,torch::Tensor lnw,torch::Tens
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,int L,int H,int HD,double eps,double inv_scale,bool trans,bool h16) {
+std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,int L,int H,int HD,double eps,double inv_scale,bool trans,bool h16,bool flip) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type()==torch::kBFloat16 && x.is_contiguous() && x.dim()==2,"contiguous BF16 matrix required");
   c10::cuda::CUDAGuard guard(x.device());int C=x.size(1),rows=x.size(0),B=rows/(L*L);
-  TORCH_CHECK(L>0 && L%128==0 && rows==B*L*L && HD==32*H && H<=16 && HD%64==0,"invalid pair/head dimensions");
+  TORCH_CHECK(L>0 && L%128==0 && rows==B*L*L && (HD==32*H || HD==16*H) && H<=16 && HD%64==0,"invalid pair/head dimensions");
   TORCH_CHECK(weights.device()==x.device() && weights.scalar_type()==torch::kBFloat16 && weights.is_contiguous() && weights.sizes()==torch::IntArrayRef({4*HD+64,C}),"packed weights mismatch");
   for(auto t:{lnw,lnb}) TORCH_CHECK(t.device()==x.device() && t.scalar_type()==torch::kFloat32 && t.is_contiguous() && t.numel()==C,"FP32 LN affines required");
   TORCH_CHECK(mask.device()==x.device() && mask.is_contiguous() && mask.scalar_type()==torch::kBool && (mask.numel()==0 || mask.sizes()==torch::IntArrayRef({B,L})),"mask mismatch");
@@ -236,18 +252,18 @@ std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch
   auto stats=torch::empty({rows,2},x.options().dtype(torch::kFloat32));
   const int key=C*1000+HD;
   switch(key){
-    case 64064: launch<64,64>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
-    case 64128: launch<64,128>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
-    case 128128: launch<128,128>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
-    case 128256: launch<128,256>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
-    case 256256: launch<256,256>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
-    case 384384: launch<384,384>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
-    case 512512: launch<512,512>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
+    case 64064: launch<64,64>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans)|(int(flip)<<1),int(h16));break;
+    case 64128: launch<64,128>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans)|(int(flip)<<1),int(h16));break;
+    case 128128: launch<128,128>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans)|(int(flip)<<1),int(h16));break;
+    case 128256: launch<128,256>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans)|(int(flip)<<1),int(h16));break;
+    case 256256: launch<256,256>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans)|(int(flip)<<1),int(h16));break;
+    case 384384: launch<384,384>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans)|(int(flip)<<1),int(h16));break;
+    case 512512: launch<512,512>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans)|(int(flip)<<1),int(h16));break;
     default: TORCH_CHECK(false,"unsupported (d_pair, heads x 32) pair");
   }
   return {p,bias,stats};
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
   m.def("front",&front_forward,py::arg("x"),py::arg("lnw"),py::arg("lnb"),py::arg("weights"),py::arg("mask"),py::arg("L"),py::arg("H"),py::arg("HD"),
-        py::arg("eps"),py::arg("inv_scale"),py::arg("trans"),py::arg("h16")=false);
+        py::arg("eps"),py::arg("inv_scale"),py::arg("trans"),py::arg("h16")=false,py::arg("flip")=false);
 }

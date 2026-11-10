@@ -11,7 +11,9 @@ gradients, and the small hand-written kernels of ``h100_sources/triattn_generic_
             dall = [dq | dk | dv | dg | dbias] -> dyln = dall Wcat (GEMM), dW = dall^T y (GEMM) -> LN backward (+ residual)
 
 A head of 16 channels is zero-padded to 32 in the packed weights (padded q / k / v / g channels are 0 and meet zero columns of Wo); the
-softmax scale stays 1 / sqrt(16).
+softmax scale stays 1 / sqrt(16).  Inference on the fused front and the fp16 core keeps such heads compact instead (``COMPACT``: 16 channels
+a head through the front's stores, the core's loads -- which zero-pad them to 32 -- and the out-projection; bit-identical, half the bytes),
+and the fused front also writes AF3's flipped ending-node bias (no separate transpose / mask kernels).
 
 Training also serves the module variants (AF3 / RF3 / Chai-1 ending-node bias flip, RF3 gate / out biases, Chai-1 untransposed / dual output)
 and heads of 64 channels, whose core is the mma.sync core of ``h100_dh`` (forward with O / LSE and its backward).
@@ -237,7 +239,7 @@ def _front():
 
 def _front_ext(cutlass_inc):
     return load_extension(
-        name="triattn_h100_front3_sm90_v1",
+        name="triattn_h100_front3_sm90_v2",
         sources=[str(_SRC / "front_fused3_sm90.cu")],
         extra_include_paths=[str(_SRC), str(_SRC.parent), str(cutlass_inc)],
         extra_cflags=["-O3"],
@@ -279,6 +281,33 @@ def _wall(wcat, hd):
             ]
         ).contiguous()
         wcat._triattn_wall = w
+    return w
+
+
+#: heads of this many channels run compact on the fused inference path (``_forward``: q / k / v / g / u at 16 channels a head)
+COMPACT = 16
+
+
+def _wall16(wcat, n_head):
+    """The fused front's weights for 16-channel heads kept compact: [Wq; Wk; Wv; Wg] without the zero rows that pad each head to 32,
+    then the bias rows zero-padded to 64: [4 H 16 + 64, C], cached on the packed tensor."""
+    w = getattr(wcat, "_triattn_wall16", None)
+    if w is None:
+        C = wcat.shape[1]
+        w4 = wcat[: 4 * n_head * D].view(4, n_head, D, C)[:, :, :COMPACT].reshape(4 * n_head * COMPACT, C)
+        wb = wcat[4 * n_head * D :]
+        w = torch.cat([w4, F.pad(wb, (0, 0, 0, 64 - wb.shape[0]))]).contiguous()
+        wcat._triattn_wall16 = w
+    return w
+
+
+def _compact_out(wo_p, n_head):
+    """The out-projection [C, H 32] (heads zero-padded) -> [C, H 16] for compact 16-channel heads, cached on the packed tensor."""
+    w = getattr(wo_p, "_triattn_wo16", None)
+    if w is None:
+        C = wo_p.shape[0]
+        w = wo_p.view(C, n_head, D)[:, :, :COMPACT].reshape(C, n_head * COMPACT).contiguous()
+        wo_p._triattn_wo16 = w
     return w
 
 
@@ -432,25 +461,32 @@ def _forward(
     )
     # inference on the fp16 core (h100_sm90.INFERENCE_FP16): q / k / v and the bias in fp16, from the fused front or (L > 256) fp16 GEMMs
     h16 = (not need) and _core_mod.INFERENCE_FP16 and (fused or L > 256)
-    if fused:  # LN + projection + head-major scaled bias: one kernel
+    # heads of 16 channels on the fused front + fp16 core: q / k / v / g / u stay compact (16 channels a head; the core's loads zero-pad
+    # them to 32), half the bytes of the padded layout through the front's stores, the core's loads and the out-projection
+    compact = fused and h16 and head_dim == COMPACT and (C, H * COMPACT) in _FRONT_L and L <= _FRONT_L[(C, H * COMPACT)]
+    dq = COMPACT if compact else dc  # channels a head in q / k / v / g / u
+    wo_use = _compact_out(wo_p, H) if compact else wo_p
+    if fused:  # LN + projection + head-major scaled bias: one kernel (and the flip of AF3's ending node in its bias store)
         y = mean = rstd = None
         proj, sbias, _ = _front().front(
             x,
             lnw.float().contiguous(),
             lnb.float().contiguous(),
-            _wall(wcat, HD),
-            front_mask,
+            _wall16(wcat, H) if compact else _wall(wcat, HD),
+            mask if flip and mask is not None else front_mask,
             L,
             H,
-            HD,
+            H * dq,
             eps,
             1.0 / scale,
             trans,
             h16,
+            flip,
         )
+        flip = False
         qkvg = None
         q, k, v, gt = (
-            (proj[i].view(torch.float16) if h16 and i < 3 else proj[i]).view(B, L, L, H, D) for i in range(4)
+            (proj[i].view(torch.float16) if h16 and i < 3 else proj[i]).view(B, L, L, H, dq) for i in range(4)
         )
     else:
         y, mean, rstd = g.ln_fwd(
@@ -482,9 +518,9 @@ def _forward(
         q, k, v, gt = _views(qkvg, B, L, HD, H, dc)
     if flip:
         sbias = _core_mod.flip_bias(sbias, mask)
-    if gate_bias is not None and not need:  # RoseTTAFold3's gate bias, laid out like the gate's (heads padded to 32 channels)
+    if gate_bias is not None and not need:  # RoseTTAFold3's gate bias, laid out like the gate's (heads padded to its channels)
         hd = gate_bias.numel() // H
-        gt.add_(F.pad(gate_bias.view(H, hd), (0, D - hd)).to(gt.dtype))
+        gt.add_(F.pad(gate_bias.view(H, hd), (0, dq - hd)).to(gt.dtype))
     # the core's epilogue applies the gate: u = sigmoid(g) o (and writes o only when the backward needs it)
     if dh:
         from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
@@ -499,7 +535,7 @@ def _forward(
     # rounding at the residual's scale
     bo = None if out_bias is None else out_bias.to(torch.bfloat16).contiguous()
     lt = _lt()
-    u2 = u.view(M, HD)
+    u2 = u.view(M, H * dq)
     if out_mode != STANDARD:
         # Chai-1's layouts (training): the update in the pair's own row order -- untransposed: u Wo^T as it is; dual: the projection
         # that lands untransposed, then the other one's rows transposed onto it (cublasLt's strided batch over i, the residual operand
@@ -516,7 +552,7 @@ def _forward(
             out = torch.addcmul(x.view(B, L, L, C), t.view(B, L, L, C), _drop_view(drop, B, L, C, trans))
     elif drop is None:
         out = lt.lt_mm(
-            u2, wo_p, x, L, trans, out, bo
+            u2, wo_use, x, L, trans, out, bo
         )  # x + u Wo^T [+ bo]: the residual in the GEMM epilogue (D != C, no staging copy)
     else:
         if bo is None:

@@ -19,6 +19,9 @@
 // Precision: q / k / v in fp16 carry 3 more mantissa bits than bf16 (the module's front rounds them from fp32 either way); the score sum is
 // rounded to fp16 (11 bits) once per k16 step, P as well (bf16 P has 8); measured against an fp32 reference about a third of the bf16
 // core's error.  Range: |q . k + bias / scale| < 65504; masked keys -inf.  Offsets are fp16 values (the exponentials subtract exactly them).
+// Heads of 16 channels (DH 16): q / k / v / gate / out / u are compact [.., H, 16] in global memory; the loads read them through a 3-D map
+// [rows][H][16] whose 32-channel box zero-fills the 16 channels past the dimension, so the math is the D = 32 kernel's on zero-padded heads
+// (bit-identical results) at half the bytes through the front's stores, these loads and the out-projection.
 #include <torch/extension.h>
 #include <cuda_fp16.h>
 #include "sm90.cuh"
@@ -122,7 +125,7 @@ __device__ __forceinline__ float hround(float x) { return __half2float(__float2h
 // SPEC: the speculative offset (fix list written to FIX); else the exact form, which with FIX set runs the tasks of that list (static schedule).
 // ORD1: task order query tile, head in its group of hg, row group, head group (the CTAs running together share the bias of hg heads; hg = 1:
 // one head), else query tile, head, row group.
-template <bool SPEC, bool ORD1>
+template <bool SPEC, bool ORD1, int DH>   // DH: channels per head in q / k / v / gate / out / U: 32, or 16 (compact; the core pads to 32)
 __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     int N, int H, int S, int ntasks, float scl,          // scl = scale * log2(e)
     int hg,                                              // ORD1: heads per group (a divisor of H)
@@ -178,6 +181,14 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   // the Q tiles' arrive, read after its completion; -1 ends the CTA)
   volatile int* slot = reinterpret_cast<volatile int*>(smb + (bar0 - sB) + 240);
 
+  // a head's [128 rows][32 channels] tile of q / k / v: 2-D at column h * 32, or (dh 16: heads of 16 channels stored compact) the 3-D map
+  // [rows][H][16] whose box of 32 channels reads the head's 16 and zero-fills the 16 past the dimension (padded channels are 0, as the
+  // padded weights made them)
+  auto load_head = [&](const CUtensorMap* map, uint32_t dst, uint32_t bar, int h, int row) {
+    if (DH == D) load_2d(map, dst, bar, h * D, row);
+    else asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];\n"
+                      :: "r"(dst), "l"(map), "r"(bar), "r"(0), "r"(h), "r"(row) : "memory");
+  };
   if (wg == 0) {
     reg_dealloc<40>();
     if (tid == 0) {
@@ -188,7 +199,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
         wait(qe, (lt & 1) ^ 1);
         if (SCHED) *slot = t;
         expect_tx(qf, R * QT * 2);
-        for (int r = 0; r < R; ++r) load_2d(&qmap, sQ + r * QT * 2, qf, h * D, row0(b, g * R + r) + qt * BM);
+        for (int r = 0; r < R; ++r) load_head(&qmap, sQ + r * QT * 2, qf, h, row0(b, g * R + r) + qt * BM);
         for (int j = 0; j < NK; ++j) {
           wait(bem(bs), bph ^ 1);
           expect_tx(bfu(bs), BT * 2);
@@ -198,8 +209,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
             wait(kve(st), kph ^ 1);
             expect_tx(kvf(st), 2 * KVT * 2);
             const int rw = row0(b, g * R + r) + j * BN;
-            load_2d(&kmap, sKV + st * STG * 2, kvf(st), h * D, rw);
-            load_2d(&vmap, sKV + (st * STG + KVT) * 2, kvf(st), h * D, rw);
+            load_head(&kmap, sKV + st * STG * 2, kvf(st), h, rw);
+            load_head(&vmap, sKV + (st * STG + KVT) * 2, kvf(st), h, rw);
             if (++st == NKV) { st = 0; kph ^= 1; }
           }
         }
@@ -378,7 +389,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
           const int n = min(g * R + r, N - 1);
 #pragma unroll
           for (int half = 0; half < 2; ++half)
-            gpre[r][half] = __ldg(reinterpret_cast<const uint4*>(GATE + ((size_t)row0(b, n) + qt * BM + qrow + g8 + 8 * half) * ldg + h * D + 8 * t4));
+            gpre[r][half] = 8 * t4 < DH ? __ldg(reinterpret_cast<const uint4*>(GATE + ((size_t)row0(b, n) + qt * BM + qrow + g8 + 8 * half) * ldg + h * DH + 8 * t4)) : make_uint4(0, 0, 0, 0);
         }
       }
       step(1);
@@ -422,8 +433,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
           for (int i = 0; i < 4; ++i) if (didx == i) outw[i] = recv;
         }
         const size_t orow = (size_t)row0(b, n) + q0 + 8 * half;
-        if (OUT != nullptr) *reinterpret_cast<uint4*>(OUT + orow * (H * D) + h * D + 8 * t4) = make_uint4(outw[0], outw[1], outw[2], outw[3]);
-        if (GATE != nullptr) {
+        if (OUT != nullptr && 8 * t4 < DH) *reinterpret_cast<uint4*>(OUT + orow * (H * DH) + h * DH + 8 * t4) = make_uint4(outw[0], outw[1], outw[2], outw[3]);
+        if (GATE != nullptr && 8 * t4 < DH) {
           const uint4 gv = gpre[r][half];
           const uint32_t gw[4] = {gv.x, gv.y, gv.z, gv.w};
           uint32_t uw[4];
@@ -432,7 +443,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
             const float2 gg = gate_h16 ? make_float2(hlo(gw[i]), hhi(gw[i])) : bf2f(gw[i]), oo = bf2f(outw[i]);
             uw[i] = pack2(oo.x / (1.f + __expf(-gg.x)), oo.y / (1.f + __expf(-gg.y)));
           }
-          *reinterpret_cast<uint4*>(U + orow * (H * D) + h * D + 8 * t4) = make_uint4(uw[0], uw[1], uw[2], uw[3]);
+          *reinterpret_cast<uint4*>(U + orow * (H * DH) + h * DH + 8 * t4) = make_uint4(uw[0], uw[1], uw[2], uw[3]);
         }
       }
     }
@@ -468,19 +479,23 @@ torch::Tensor& flags_for(const torch::Device& dev) {
 // could not absorb and the exact launch recomputed; u = sigmoid(gate) o out when `gate` is given)
 std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor sbias, double scale, bool want_lse,
                                            c10::optional<torch::Tensor> gate, bool want_out) {
-  TORCH_CHECK(q.is_cuda() && q.dim() == 5 && q.size(4) == D, "q [B, N, S, H, 32]");
+  TORCH_CHECK(q.is_cuda() && q.dim() == 5 && (q.size(4) == D || q.size(4) == 16), "q [B, N, S, H, 32 | 16]");
+  const long dh = q.size(4);   // 16: heads of 16 channels stored compact (zero-padded to 32 by the loads)
   const long B = q.size(0), N = q.size(1), S = q.size(2), H = q.size(3);
   TORCH_CHECK(S % BM == 0 && S > 0, "S % 128 == 0");
   const long ld = q.stride(2);
   for (const auto* t : {&q, &k, &v}) {
-    TORCH_CHECK(t->scalar_type() == torch::kHalf && t->sizes() == q.sizes() && t->stride(4) == 1 && t->stride(3) == D &&
-                t->stride(2) == ld && t->stride(1) == S * ld && t->stride(0) == N * S * ld && ld % 8 == 0 && ld >= H * D,
-                "q / k / v: [B, N, S, H, 32] fp16 rows at one common stride");
+    TORCH_CHECK(t->scalar_type() == torch::kHalf && t->sizes() == q.sizes() && t->stride(4) == 1 && t->stride(3) == dh &&
+                t->stride(2) == ld && t->stride(1) == S * ld && t->stride(0) == N * S * ld && ld % 8 == 0 && ld >= H * dh,
+                "q / k / v: [B, N, S, H, 32 | 16] fp16 rows at one common stride");
   }
   TORCH_CHECK(sbias.is_cuda() && sbias.scalar_type() == torch::kHalf && sbias.is_contiguous() && sbias.numel() == B * H * S * S,
               "sbias: fp16 [B, H, S, S] contiguous (bias / scale)");
   const uint64_t rows = (uint64_t)(B * N * S);
   auto m2 = [&](const torch::Tensor& t, const char* what) {
+    if (dh != D)   // [rows][H][16], box (32, 1, 128): the 16 channels past the dimension read as zeros
+      return make_map<3>(t.data_ptr(), {(uint64_t)dh, (uint64_t)H, rows}, {(uint64_t)dh, (uint64_t)ld}, {32, 1, 128}, CU_TENSOR_MAP_SWIZZLE_64B,
+                         what, CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
     return make_map<2>(t.data_ptr(), {(uint64_t)(H * D), rows}, {(uint64_t)ld}, {32, 128}, CU_TENSOR_MAP_SWIZZLE_64B, what,
                        CU_TENSOR_MAP_DATA_TYPE_FLOAT16); };
   CUtensorMap qm = m2(q, "q"), km = m2(k, "k"), vm = m2(v, "v");
@@ -489,19 +504,13 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
   const bool has_gate = gate.has_value();
   const bool store_out = want_out || !has_gate;
   TORCH_CHECK(!has_gate || ((gate->scalar_type() == torch::kBFloat16 || gate->scalar_type() == torch::kHalf) && gate->is_cuda() && gate->sizes() == q.sizes() && gate->stride(4) == 1 &&
-              gate->stride(3) == D && gate->stride(2) % 8 == 0 && gate->stride(1) == S * gate->stride(2) && gate->stride(0) == N * S * gate->stride(2)),
-              "gate: [B, N, S, H, 32] bf16 or fp16, rows at one stride");
+              gate->stride(3) == dh && gate->stride(2) % 8 == 0 && gate->stride(1) == S * gate->stride(2) && gate->stride(0) == N * S * gate->stride(2)),
+              "gate: [B, N, S, H, 32 | 16] bf16 or fp16, rows at one stride");
   const auto bf = q.options().dtype(torch::kBFloat16);
-  auto out = torch::empty({store_out ? B : 0, N, S, H, D}, bf);
-  auto u = torch::empty({has_gate ? B : 0, N, S, H, D}, bf);
+  auto out = torch::empty({store_out ? B : 0, N, S, H, dh}, bf);
+  auto u = torch::empty({has_gate ? B : 0, N, S, H, dh}, bf);
   auto lse = torch::empty({want_lse ? B : 0, N, H, S}, q.options().dtype(torch::kFloat32));
   auto& flags = flags_for(q.device());
-  static bool attr = false;
-  if (!attr) {
-    for (auto kk : {triattn_h16_sm90<false, false>, triattn_h16_sm90<false, true>, triattn_h16_sm90<true, false>, triattn_h16_sm90<true, true>})
-      C10_CUDA_CHECK(cudaFuncSetAttribute(kk, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM));
-    attr = true;
-  }
   const long ntasks = B * H * ((N + R - 1) / R) * (S / BM);
   const int grid = (int)std::min<long>(ntasks, num_sms(q.device().index()));
   const bool dyn = TA_DYN && ntasks >= 16L * grid;
@@ -523,15 +532,29 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
       has_gate ? reinterpret_cast<const __nv_bfloat16*>(gate->data_ptr()) : nullptr, (int)(has_gate && gate->scalar_type() == torch::kHalf),
       has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L, sch, fx);
   };
-  if (spec) {
-    launch(ord1 ? triattn_h16_sm90<true, true> : triattn_h16_sm90<true, false>, dyn ? sched.data_ptr<int>() : nullptr, list ? fix.data_ptr<int>() : nullptr);
-    if (list) {
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
-      launch(ord1 ? triattn_h16_sm90<false, true> : triattn_h16_sm90<false, false>, nullptr, fix.data_ptr<int>());
+  // the head width is a template argument: the 32-channel kernels are the ones without the compact form, instruction for instruction
+  auto run = [&](auto dhc) {
+    constexpr int DH = decltype(dhc)::value;
+    static bool attr = false;
+    if (!attr) {
+      for (auto kk : {triattn_h16_sm90<false, false, DH>, triattn_h16_sm90<false, true, DH>, triattn_h16_sm90<true, false, DH>,
+                      triattn_h16_sm90<true, true, DH>})
+        C10_CUDA_CHECK(cudaFuncSetAttribute(kk, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM));
+      attr = true;
     }
-  } else {
-    launch(ord1 ? triattn_h16_sm90<false, true> : triattn_h16_sm90<false, false>, dyn ? sched.data_ptr<int>() : nullptr, nullptr);
-  }
+    if (spec) {
+      launch(ord1 ? triattn_h16_sm90<true, true, DH> : triattn_h16_sm90<true, false, DH>, dyn ? sched.data_ptr<int>() : nullptr,
+             list ? fix.data_ptr<int>() : nullptr);
+      if (list) {
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        launch(ord1 ? triattn_h16_sm90<false, true, DH> : triattn_h16_sm90<false, false, DH>, nullptr, fix.data_ptr<int>());
+      }
+    } else {
+      launch(ord1 ? triattn_h16_sm90<false, true, DH> : triattn_h16_sm90<false, false, DH>, dyn ? sched.data_ptr<int>() : nullptr, nullptr);
+    }
+  };
+  if (dh == D) run(std::integral_constant<int, D>{});
+  else run(std::integral_constant<int, 16>{});
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {out, lse, flags, u};
 }

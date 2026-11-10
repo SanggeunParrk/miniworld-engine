@@ -148,7 +148,9 @@ def _packed(kind: int, weights: tuple[torch.Tensor, ...]):
 
             return pack_weights(*weights)
 
-    return _capture.param_forms(("triattn_h100_sm90", kind), weights, build)
+    # inference-only packs (the training ops take the parameters as they are): a capture is served the pack its eager warm-up made
+    # (``capture_reads_eager``, the portable kernels' contract), so a replay runs no packing kernel
+    return _capture.param_forms(("triattn_h100_sm90", kind), weights, build, capture_reads_eager=True)
 
 
 # ---------------------------------------------------------------- custom ops

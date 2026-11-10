@@ -57,7 +57,7 @@ def _core_h16(defs: tuple[str, ...] = ()):
     ensure_cuda_home()
     tag = "".join(f"_{d.replace('=', '').lower()}" for d in defs)
     return load_extension(
-        name=f"triattn_h100_core_h16{tag}_v1",
+        name=f"triattn_h100_core_h16{tag}_v2",
         sources=[str(_SRC / "triattn_h16_sm90.cu")],
         extra_cuda_cflags=[*_flags(), *(f"-D{d}" for d in defs)],
         verbose=True,
