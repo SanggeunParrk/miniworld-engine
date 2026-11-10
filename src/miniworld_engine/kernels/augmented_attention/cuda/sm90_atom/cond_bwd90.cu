@@ -5,6 +5,9 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "row90.cuh"
 using namespace r90;
+#ifndef IDENT
+#define IDENT 0   // 1: the identity AdaLN (Chai-1): its tables read the raw c (no LayerNorm backward; n = c)
+#endif
 #ifndef SPLITK
 #define SPLITK 0   // 1: the split-K build for small row counts (grid.y CTAs per tile)
 #endif
@@ -37,6 +40,10 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void cond_bwd90(const T* __r
   auto ln_bwd = [&]() {
     Tile n;
     ld_tile(n, c + row0 * 128, 128, 0, g, t);
+    if (IDENT) {   // the identity AdaLN read the raw c: dn passes through, the weight gradients read c itself
+      st_tile(n, n_out + row0 * 128, 128, 0, g, t);
+      return;
+    }
     float m0, r0, m1, r1;
     ln_stats(n, eps, m0, r0, m1, r1);
     float p0 = 0.f, q0 = 0.f, p1 = 0.f, q1 = 0.f;

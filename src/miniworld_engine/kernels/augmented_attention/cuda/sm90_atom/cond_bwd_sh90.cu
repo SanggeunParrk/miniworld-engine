@@ -7,6 +7,9 @@
 #include "row90.cuh"
 using namespace r90;
 
+#ifndef IDENT
+#define IDENT 0   // 1: the identity AdaLN (Chai-1): no LayerNorm backward of c (n = c)
+#endif
 #ifndef PUNR
 #define PUNR 2
 #endif
@@ -53,6 +56,9 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void cond_bwd_sh90(
         for (int e = 0; e < 4; ++e) { lc.f[nt][e] = acc0[4 * nt + e]; lc.f[8 + nt][e] = acc1[4 * nt + e]; }
       Tile n;
       ld_tile(n, c + row0 * 128, 128, 0, g, t);
+#if IDENT   // the identity AdaLN read the raw c: dn passes through, the weight gradients read c itself
+      st_f32<16>(n.f, n_out + row0 * 128, 128, 0, g, t);
+#else
       float m0, r0, m1, r1;
       ln_stats(n, eps, m0, r0, m1, r1);
       float p0 = 0.f, q0 = 0.f, p1 = 0.f, q1 = 0.f;
@@ -72,6 +78,7 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void cond_bwd_sh90(
 #pragma unroll
         for (int e = 0; e < 4; ++e)
           lc.f[nt][e] = (e < 2 ? r0 : r1) * (lc.f[nt][e] - (e < 2 ? p0 : p1) - n.f[nt][e] * (e < 2 ? q0 : q1));
+#endif
     }
     const bool kv = kb == 4 || kb == 5;
     const T* src = kv ? dmkvp : dmodp;

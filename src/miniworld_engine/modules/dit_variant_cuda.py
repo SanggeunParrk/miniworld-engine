@@ -320,11 +320,27 @@ class VariantAtomCuda:
                           "pair 16 wide; no gradient: bfloat16 or float32 inference, a gradient: the training path)")
         return fn, (pair[0], m, u)
 
+    #: H100: the class runs the one atom DiT implementation (``_LocalAtomDiT``'s "cuda": kernels/integrations/local_dit_h100 with its options)
+    #: instead of this mixin's kernels/dit_variants path, for the key windows listed; set by a class once its move met the acceptance
+    _h100_local: tuple = ()
+
+    def _h100_local_route(self, single) -> bool:
+        return (self.key_window in self._h100_local and single.is_cuda
+                and torch.cuda.get_device_capability(single.device) == (9, 0))
+
     def _supports_cuda(self, single, cond, pair, mask=None, uid=None) -> str | None:
+        if self._h100_local_route(single):
+            from miniworld_engine.modules.atom_dit import _LocalAtomDiT
+
+            return _LocalAtomDiT._supports_cuda(self, single, cond, pair, mask, uid=uid)
         fn, why = self._atom_serving(single, cond, pair, mask, uid)
         return why if fn is None else None
 
     def _forward_cuda(self, single, cond, pair, mask=None, uid=None) -> torch.Tensor:
+        if self._h100_local_route(single):
+            from miniworld_engine.modules.atom_dit import _LocalAtomDiT
+
+            return _LocalAtomDiT._forward_cuda(self, single, cond, pair, mask, uid)
         fn, call = self._atom_serving(single, cond, pair, mask, uid)
         a100 = _a100(single)
         return _run(fn, _stack(self, atom=True), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair), keep_autocast=a100,

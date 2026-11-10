@@ -6,10 +6,14 @@
 //   dx = da2 + LN'(dx1 s1)
 // pre_bwd90_par (AlphaFold 3's parallel K / V AdaLN, pre90 PAR): n1 = LN(x), and LN'(dxkv sk) goes to dx, not into dx1:
 //   dx = da2 + LN'(dx1 s1) + LN'(dxkv sk)
-// One body, two entry points in the same cubin (PAR a template parameter: the chained entry compiles as before).
+// One body, three entry points in the same cubin (KVM a template parameter: the chained entry compiles as before); pre_bwd90_sh: one
+// AdaLN for q and k / v, dx1 = dg Wg + dq Wq + dk Wk + dv Wv.
 // SPDX-License-Identifier: Apache-2.0
 #include "row90.cuh"
 using namespace r90;
+#ifndef IDENT
+#define IDENT 0   // 1: the identity AdaLN (Chai-1): d s1 = dx1 n (the stored scale is 1 + W c)
+#endif
 
 // dn -> LN backward given the normalised row n: out = rstd (dn - mean(dn) - n mean(dn n))
 DEVI void ln_bwd(Tile& out, const Tile& dn, const Tile& n, float r0, float r1) {
@@ -30,7 +34,7 @@ DEVI void ln_bwd(Tile& out, const Tile& dn, const Tile& n, float r0, float r1) {
   }
 }
 
-template <bool PAR>
+template <int KVM>   // the K / V source: 0 chained (Protenix), 1 parallel (AF3), 2 one AdaLN for q and k / v (Boltz-2, RF3, Chai-1)
 DEVI void pre_bwd_body(
     const T* __restrict__ dp, const T* __restrict__ x1, const T* __restrict__ x, const T* __restrict__ mod, const T* __restrict__ mkv,
     const T* __restrict__ da2, const T* __restrict__ wbt /*[4 kb: Wg Wq Wk Wv][2 half][64,128]: W^T tiles*/, const float* __restrict__ bs,
@@ -81,14 +85,19 @@ DEVI void pre_bwd_body(
       __syncthreads();
       if (s + 2 < 8) issue(s + 2); else cp_commit();
     }
-    if (ph == 1) {  // dxkv complete -> the K / V AdaLN backward
+    if (KVM == 2 && ph == 1) {  // one AdaLN: dxkv joins dx1 as is (no K / V AdaLN; dmkv is the caller's zeros)
+#pragma unroll
+      for (int nt = 0; nt < 8; ++nt)
+#pragma unroll
+        for (int e = 0; e < 4; ++e) { lkeep.f[nt][e] = acc0[4 * nt + e]; lkeep.f[8 + nt][e] = acc1[4 * nt + e]; }
+    } else if (ph == 1) {  // dxkv complete -> the K / V AdaLN backward
       // c (the A tile of dv) is dead: it holds dxkv
 #pragma unroll
       for (int nt = 0; nt < 8; ++nt)
 #pragma unroll
         for (int e = 0; e < 4; ++e) { c.f[nt][e] = round_store(acc0[4 * nt + e]); c.f[8 + nt][e] = round_store(acc1[4 * nt + e]); }
       Tile n1;
-      ld_tile(n1, (PAR ? x : x1) + row0 * 128, 128, 0, g, t);   // PAR: the K / V AdaLN normalised the raw x
+      ld_tile(n1, (KVM == 1 ? x : x1) + row0 * 128, 128, 0, g, t);   // PAR: the K / V AdaLN normalised the raw x
       float m0, r0, m1, r1;
       ln_stats(n1, eps, m0, r0, m1, r1);
       float p0 = 0.f, q0 = 0.f, p1 = 0.f, q1 = 0.f;
@@ -143,7 +152,7 @@ DEVI void pre_bwd_body(
   for (int nt = 0; nt < 8; ++nt)
 #pragma unroll
     for (int e = 0; e < 4; ++e) {
-      if constexpr (PAR) {   // the K / V branch's contribution goes to dx (below), not into dx1
+      if constexpr (KVM == 1) {   // the K / V branch's contribution goes to dx (below), not into dx1
         c.f[nt][e] = round_store(acc0[4 * nt + e]);
         c.f[8 + nt][e] = round_store(acc1[4 * nt + e]);
       } else {
@@ -188,9 +197,9 @@ DEVI void pre_bwd_body(
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
           const float nv = n0.f[nt][e], sv = s1[i][e], dx = c.f[nt][e];
-          ds1[i][e] = dx * nv * sv * (1.f - sv);
+          ds1[i][e] = IDENT ? dx * nv : dx * nv * sv * (1.f - sv);
           o[i][e] = d2[i][e] + (e < 2 ? r0 : r1) * (dx * sv - (e < 2 ? p0 : p1) - nv * (e < 2 ? q0 : q1));
-          if constexpr (PAR) o[i][e] += lkeep.f[nt][e];
+          if constexpr (KVM == 1) o[i][e] += lkeep.f[nt][e];
         }
       }
       if (shared) grp_put<4>(ds1, gred + (size_t)gpar * FBUF, 32 * H, warp, g, t); else st_nt<4, false>(ds1, dmod + row0 * 768, 768, 32 * H, g, t);
@@ -213,5 +222,6 @@ DEVI void pre_bwd_body(
       float* __restrict__ dmkv_acc, int spc, int natoms
 #define PRE_BWD_PASS dp, x1, x, mod, mkv, da2, wbt, bs, dmod, dmkv, dx_out, colpart, M, nmod, eps, dmod_acc, dmkv_acc, spc, natoms
 
-extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre_bwd90(PRE_BWD_ARGS) { pre_bwd_body<false>(PRE_BWD_PASS); }
-extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre_bwd90_par(PRE_BWD_ARGS) { pre_bwd_body<true>(PRE_BWD_PASS); }
+extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre_bwd90(PRE_BWD_ARGS) { pre_bwd_body<0>(PRE_BWD_PASS); }
+extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre_bwd90_par(PRE_BWD_ARGS) { pre_bwd_body<1>(PRE_BWD_PASS); }
+extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre_bwd90_sh(PRE_BWD_ARGS) { pre_bwd_body<2>(PRE_BWD_PASS); }

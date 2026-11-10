@@ -338,14 +338,20 @@ class _LocalAtomDiT(BackendModule):
     # 3's slid one or IntelliFold2's slide_qblock (their edge windows recomputed and differentiated in torch), inference and training.
     # Listed only by the classes with a K / V AdaLN (Protenix, OpenFold3).
     def _supports_cuda(self, single, cond, pair, mask=None, **kw) -> str | None:
+        uid = kw.pop("uid", None)
         if kw:
             return f"{', '.join(kw)} (not an input of the H100 atom block)"
         if _a100(single):
             return self._a100_reason(single, cond, pair, mask)
         if not _h100(single):
             return "the H100 atom block kernels run on an H100 (sm_90) CUDA tensor only"
-        if self.kv_norm == "shared":
-            return "one AdaLN for q and k / v (the H100 atom block is the cross-attention one: a K / V AdaLN of its own)"
+        from miniworld_engine.kernels.integrations import local_dit_h100
+
+        if local_dit_h100.options(self) is None:
+            return ("outside the H100 atom block's options (mixed AdaLN forms or epsilons, a q / k norm, the up-gate transition: those "
+                    "blocks are still on kernels/dit_variants)")
+        if uid is not None and (uid.ndim != 2 or tuple(uid.shape) != (1, single.shape[2])):
+            return f"uid must be [1, N], got {tuple(uid.shape)}"
         att, tr = self.attention, self.transition
         params = list(self.parameters())
         dts = (single.dtype, cond.dtype, pair.dtype)
@@ -370,14 +376,10 @@ class _LocalAtomDiT(BackendModule):
             return "mask must be a bool [1, N] key mask"
         geometry = (att.n_head, att.to_query.weight.shape[0], att.to_query.weight.shape[1], att.to_bias.weight.shape[1],
                     tr.expand_a.weight.shape[0], tr.d_cond)
-        if geometry != (4, 128, 128, 16, 256, 128) or att.to_query.bias is None:
-            return "geometry: the kernels are built for 128 / cond 128 / pair 16, 4 heads x 32, transition n = 2, a query bias"
-        if att.use_qk_norm:
-            return "q / k norm (the AF3 atom block has none)"
-        norms = (att.ada_ln_in.ln_in, att.ada_ln_in.ln_cond, att.ln_pair, tr.ada_ln_in.ln_in, tr.ada_ln_in.ln_cond,
-                 att.ada_ln_kv.ln_in, att.ada_ln_kv.ln_cond)
-        if any(nm.eps != 1e-5 for nm in norms):
-            return "LayerNorm eps != 1e-5"
+        if geometry != (4, 128, 128, 16, 256, 128):
+            return "geometry: the kernels are built for 128 / cond 128 / pair 16, 4 heads x 32, transition n = 2"
+        if att.ln_pair.eps != 1e-5:
+            return "pair LayerNorm eps != 1e-5"
         if any(not p.is_contiguous() for p in params):
             return "a non-contiguous parameter"
         return None
@@ -401,7 +403,7 @@ class _LocalAtomDiT(BackendModule):
             return None
         fn, why = VariantAtomCuda._atom_serving(self, single, cond, pair, mask, None)
         return None if fn is not None else why
-    def _forward_cuda(self, single, cond, pair, mask=None):
+    def _forward_cuda(self, single, cond, pair, mask=None, uid=None):
         if _a100(single):
             if not self._a100_rows(single, cond, pair, mask):
                 from miniworld_engine.modules import dit_variant_cuda as dv
@@ -420,7 +422,7 @@ class _LocalAtomDiT(BackendModule):
         # the kernels' precision is their own (bf16 operands, or TF32 for fp32): an enclosing autocast must not recast their torch glue
         with torch.autocast("cuda", enabled=False):
             return local_dit_h100.run_block(self, single.contiguous(), cond, pair.contiguous(),
-                                            None if mask is None else mask.contiguous())
+                                            None if mask is None else mask.contiguous(), uid)
 
     def _forward_pytorch(self, single, cond, pair, mask=None):
         """``single`` [A, B, N, d_single], ``cond`` [A, B, N, d_cond], trunked ``pair`` [B, nwin, 32, keys, d_pair], key ``mask`` [B, N]
@@ -700,6 +702,11 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     kv_norm = "shared"
     parallel = True
     attention_part = FlatQKNormAugmentedAttention
+    #: H100: the one atom DiT implementation (local_dit_h100: one AdaLN, parallel, the flat q / k LayerNorm, a bias-free query) for these
+    #: key windows; "slide" stays on kernels/dit_variants until the slid edge windows are on CUDA there
+    _h100_local = ("pad",)
+    #: 2026-11-10: H100 "pad" on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 2}
 
 
 class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
@@ -717,6 +724,11 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
     kv_norm = "shared"
     parallel = True
     attention_part = UngatedAugmentedAttention
+    #: H100: the one atom DiT implementation (local_dit_h100: one AdaLN, identity AdaLN, parallel, uid) for these key windows; "slide"
+    #: stays on kernels/dit_variants until the slid edge windows are on CUDA there (its small-N training was slower)
+    #: stays () for now: on local_dit_h100 every case is faster and no train / master light is worse, but fp32 eval at N >= 5120 went
+    #: GREEN -> YELLOW on one element (1.13e-3 vs tol 9.6e-4; the same element is the old path's worst, 8.1e-4): kept on dit_variants
+    _h100_local: tuple = ()
 
     def __init__(self, d_single: int = 128, d_cond: int = 128, d_pair: int = 16, n_head: int = 4, n: int = 2, *,
                  key_window: str | None = None, adaln_eps: float = 0.1, backend: str = "pytorch") -> None:

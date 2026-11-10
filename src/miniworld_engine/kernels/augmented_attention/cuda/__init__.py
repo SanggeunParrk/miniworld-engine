@@ -412,7 +412,12 @@ _ATOM_KINDS = {
     "pre": "atom_pre_fwd", "pre_split": "atom_pre_fwd_split", "post": "atom_post_fwd", "tr_bwd": "atom_tr_bwd",
     "post_bwd": "atom_post_bwd", "post_bwd_s": "atom_post_bwd", "pre_bwd": "atom_pre_bwd", "cond_bwd": "atom_cond_bwd",
     "cond_bwd_s": "atom_cond_bwd", "cond_bwd_sh": "atom_cond_bwd_shared",
+    "pre_bwd_one": "atom_pre_bwd", "kqln_bwd": "atom_kqln_bwd",
 }
+#: the model options of the classes on the sm90_atom family (``integrations/local_dit_h100.options``) as its build defines, and the classes
+#: with one AdaLN for q and k / v (the ``pre_bwd_one`` entry)
+_ATOM_OPTIONS = {"AtomDiTRoseTTAFold3": ("KQLN", "PARS"), "AtomDiTChai1": ("IDENT", "NOOUT", "PARS")}
+_ATOM_ONE_ADALN = frozenset({"AtomDiTBoltz2", "AtomDiTRoseTTAFold3", "AtomDiTChai1"})
 #: sm100_atom ``_HOPPER_KERNELS`` source stem -> atom kernels built from it
 _ATOM_STEMS = {
     "cond_fwd": ("atom_cond_fwd", "atom_cond_fwd_split", "atom_pack"), "pre_fwd": ("atom_pre_fwd", "atom_pre_fwd_split"),
@@ -537,8 +542,11 @@ def prebuild(target, rows):
             for tf32 in (False, True):
                 if tf32 and kind in ("pack", "finalize"):
                     continue  # no tf32 build
-                if any(need_row(r, [kernel]) and (kind in ("pack", "finalize") or act(r) == ("f32" if tf32 else "bf16")) for r in rows):
-                    calls.append(ft.partial(sm90_atom.kernel_cubin, kind, tf32))
+                optsets = {_ATOM_OPTIONS.get(r["module"], ()) for r in rows
+                           if need_row(r, [kernel]) and (kind in ("pack", "finalize") or act(r) == ("f32" if tf32 else "bf16"))
+                           and (kind != "pre_bwd_one" or r["module"] in _ATOM_ONE_ADALN)}
+                for opts in sorted(optsets):
+                    calls.append(ft.partial(sm90_atom.kernel_cubin, kind, tf32, opts))
         # sm_90a halves of the sm100_atom / sm100_atom_local sources
         for stem, _, _, _, *defs in sm100_atom._HOPPER_KERNELS.values():
             if need(_ATOM_STEMS[stem]):

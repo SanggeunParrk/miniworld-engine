@@ -8,6 +8,9 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "rms90.cuh"
 using namespace r90;
+#ifndef IDENT
+#define IDENT 0   // 1: the identity AdaLN (Chai-1): s1 / s2 = 1 + W c of the raw conditioning, no LayerNorm of c, no sigmoid
+#endif
 
 // matrix p = [Ws1', Wb1', Ws2', Wb2', Wkv_pre', Wkv_shift', Wso, Wst]: output column base (mod unless p is 4 / 5) and bias index
 __device__ constexpr int OUT_COL[8] = {0, 128, 384, 512, 0, 128, 256, 640};
@@ -40,7 +43,7 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void cond90_fwd(const T* __r
   for (int r = 0; r < RING; ++r) issue(r);
   Tile x;
   ld_tile(x, c + row0 * 128, 128, 0, g, t);
-  cond_in(x, eps);
+  if (!IDENT) cond_in(x, eps);   // IDENT: the identity AdaLN reads the raw conditioning
   rna(x);
 #if !TF32
 #pragma unroll   // bf16: specialised units (335 -> 278 us); the fp32 build spills when unrolled (433 -> 1095 us)
@@ -64,7 +67,8 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void cond90_fwd(const T* __r
       for (int e = 0; e < 4; ++e) v[nt][e] = acc[4 * nt + e];
       if (bi >= 0) {
         const float2 b = colv(bias + bi * 128 + 64 * half, nt, t);
-        v[nt][0] = cond_act(v[nt][0] + b.x); v[nt][1] = cond_act(v[nt][1] + b.y); v[nt][2] = cond_act(v[nt][2] + b.x); v[nt][3] = cond_act(v[nt][3] + b.y);
+        if (IDENT && (p == 0 || p == 2)) { v[nt][0] += b.x; v[nt][1] += b.y; v[nt][2] += b.x; v[nt][3] += b.y; }   // the identity AdaLN: 1 + W c (the 1 in b)
+        else { v[nt][0] = cond_act(v[nt][0] + b.x); v[nt][1] = cond_act(v[nt][1] + b.y); v[nt][2] = cond_act(v[nt][2] + b.x); v[nt][3] = cond_act(v[nt][3] + b.y); }
       }
     }
     st_nt<8, false>(v, dst + row0 * ld, ld, col, g, t);
@@ -87,7 +91,7 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void cond90_split(const T* __re
   if (upc > 1) issue(1); else cp_commit();
   Tile x;
   ld_tile(x, c + row0 * 128, 128, 0, g, t);
-  if (u0 < 12) cond_in(x, eps);  // matrices 0 .. 5 read LN(c), 6 and 7 the raw conditioning
+  if (!IDENT && u0 < 12) cond_in(x, eps);  // matrices 0 .. 5 read LN(c) (IDENT: the raw c), 6 and 7 the raw conditioning
   rna(x);
 #pragma unroll 1
   for (int ul = 0; ul < upc; ++ul) {
@@ -111,7 +115,8 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void cond90_split(const T* __re
       for (int e = 0; e < 4; ++e) v[nt][e] = acc[4 * nt + e];
       if (bi >= 0) {
         const float2 b = colv(bias + bi * 128 + 64 * half, nt, t);
-        v[nt][0] = cond_act(v[nt][0] + b.x); v[nt][1] = cond_act(v[nt][1] + b.y); v[nt][2] = cond_act(v[nt][2] + b.x); v[nt][3] = cond_act(v[nt][3] + b.y);
+        if (IDENT && (p == 0 || p == 2)) { v[nt][0] += b.x; v[nt][1] += b.y; v[nt][2] += b.x; v[nt][3] += b.y; }   // the identity AdaLN: 1 + W c (the 1 in b)
+        else { v[nt][0] = cond_act(v[nt][0] + b.x); v[nt][1] = cond_act(v[nt][1] + b.y); v[nt][2] = cond_act(v[nt][2] + b.x); v[nt][3] = cond_act(v[nt][3] + b.y); }
       }
     }
     st_nt<8, false>(v, dst + row0 * ld, ld, col, g, t);

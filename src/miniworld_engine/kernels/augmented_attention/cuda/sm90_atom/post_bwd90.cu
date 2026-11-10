@@ -8,6 +8,15 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "row90.cuh"
 using namespace r90;
+#ifndef IDENT
+#define IDENT 0   // 1: the identity AdaLN (Chai-1): d s2 = dx2 n (the stored scale is 1 + W c)
+#endif
+#ifndef NOOUT
+#define NOOUT 0   // 1: no gating query, no out projection (Chai-1): u = o, so do = du and dg = 0
+#endif
+#ifndef PARS
+#define PARS 0    // 1: the parallel block: ``a2`` is the block input a (x2 = LN(a)); da2_out = dy + LN'(dx2 s2), du = dy so
+#endif
 #ifndef SPLITK
 #define SPLITK 0   // 1: the split-K build for small row counts (grid.y CTAs per tile)
 #endif
@@ -139,6 +148,9 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void post_bwd90(
 #pragma unroll
     for (int H = 0; H < 4; ++H) {
       float s2[4][4], y[4][4], ds2[4][4];
+#if PARS
+      float dain[4][4];
+#endif
       ld_nt<4>(s2, mod + mrow * 768, 768, 384 + 32 * H, g, t);
       ld_nt<4>(y, dy + row0 * 128, 128, 32 * H, g, t);
 #pragma unroll
@@ -147,17 +159,29 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void post_bwd90(
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
           const float nv = an.f[nt][e], sv = s2[i][e], dx = c.f[nt][e];
-          ds2[i][e] = dx * nv * sv * (1.f - sv);
-          c.f[nt][e] = round_store(y[i][e] + (e < 2 ? r0 : r1) * (dx * sv - (e < 2 ? p0 : p1) - nv * (e < 2 ? q0 : q1)));
+          ds2[i][e] = IDENT ? dx * nv : dx * nv * sv * (1.f - sv);
+          const float lnv = (e < 2 ? r0 : r1) * (dx * sv - (e < 2 ? p0 : p1) - nv * (e < 2 ? q0 : q1));
+#if PARS   // the parallel block: x2 normalised the block input a, so its LN backward joins the residual gradient of a (da2_out),
+           // while a2 = a + so u carries only dy (du below)
+          dain[i][e] = round_store(y[i][e] + lnv);
+          c.f[nt][e] = round_store(y[i][e]);
+#else
+          c.f[nt][e] = round_store(y[i][e] + lnv);
+#endif
         }
       }
+#if PARS
+      st_nt<4, false>(dain, da2_out + row0 * 128, 128, 32 * H, g, t);
+#endif
       if (shared) grp_put<4>(ds2, gred + (size_t)gpar * FBUF, 32 * H, warp, g, t); else st_nt<4, false>(ds2, dmod + row0 * 768, 768, 384 + 32 * H, g, t);
       col_partial_nt<4>(ds2, 4 * H, red + NWARP * 128, warp, lane, t);
     }
     GFLUSH(dmod_acc, 768, 384);
   }
   // c = da2: du = da2 so, d sopre = da2 u so (1 - so)
+#if !PARS
   st_tile(c, da2_out + row0 * 128, 128, 0, g, t);
+#endif
 #pragma unroll
   for (int H = 0; H < 4; ++H) {
     float so[4][4], uu[4][4], dso[4][4], du[4][4];
@@ -179,7 +203,9 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void post_bwd90(
     st_nt<4, false>(du, du_out + row0 * 128, 128, 32 * H, g, t);
   }
   GFLUSH(dmod_acc, 768, 256);
+#if !NOOUT
   rna(c);  // du: the A operand of dgated = du Wo
+#endif
   float g0[32], g1[32];
 #pragma unroll
   for (int hf = 0; hf < 2; ++hf) {
@@ -187,7 +213,11 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void post_bwd90(
     cp_wait<1>();
     proxy_fence();
     __syncthreads();
+#if NOOUT
+    (void)g0; (void)g1;
+#else
     wg_gemm<64, KSTEPS>(hf ? g1 : g0, c, base + (s & 1) * UNIT, 0);
+#endif
     __syncthreads();
     cp_commit();
   }
@@ -204,8 +234,13 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void post_bwd90(
       for (int i = 0; i < 4; ++i)
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
+#if NOOUT   // u = o: do = du, no gate (dg 0), "gated" = o
+          const float dgv = c.f[4 * H + i][e];
+          const float sv = 1.f, ov = oo[i][e];
+#else
           const float dgv = round_store((H >= 2 ? g1 : g0)[4 * (i + 4 * (H & 1)) + e]);
           const float sv = ss[i][e], ov = oo[i][e];
+#endif
           const float dov = round_store(dgv * sv);
           gd[i][e] = dov;
           dg[i][e] = dgv * ov * sv * (1.f - sv);

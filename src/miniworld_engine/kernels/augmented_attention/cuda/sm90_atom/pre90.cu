@@ -6,7 +6,7 @@
 //   k   = xkv Wk^T           v  = xkv Wv^T
 // q, k, v only feed MMAs (TF32: rounded to nearest on the way out). SAVE also writes x1 and xkv for the backward.
 // PAR (AlphaFold 3's K / V norm): xkv = LN(x) * sigmoid(...) + ..., the second AdaLN of the raw x next to the first, not of x1 (its backward: pre_bwd90_par;
-// the chained one is pre_bwd90).
+// the chained one is pre_bwd90). par 2: ONE AdaLN for q and k / v (Boltz-2, RF3, Chai-1): xkv = x1 (not written; its backward: pre_bwd90_sh).
 // SPDX-License-Identifier: Apache-2.0
 #include "rms90.cuh"
 using namespace r90;
@@ -33,11 +33,45 @@ DEVI void adaln_half(Tile& c, const T* p, int ld, int scol, int bcol, const floa
   }
 }
 
+#ifndef KQLN
+#define KQLN 0   // 1: RoseTTAFold3's affine LayerNorm of the flat q / k (over all 128 columns), after their projections
+#endif
+
+// KQLN: the two 64-column units of q (mat 0) or k (mat 2) are held in registers; at the second, LN(.) w + b of the whole row is stored for
+// both halves (kq = [wq | bq | wk | bk] fp32 [4][128]; the raw projections go to qkr [M, 256] for the backward). -> true: the unit is done.
+DEVI bool kq_ln_unit(Tile& hold, float (*v)[4], int mat, int h, const float* kq, float kq_eps, T* dst, T* qkr, size_t row0, int g, int t) {
+  if (mat != 0 && mat != 2) return false;
+#pragma unroll
+  for (int nt = 0; nt < 8; ++nt)
+#pragma unroll
+    for (int e = 0; e < 4; ++e) hold.f[8 * h + nt][e] = v[nt][e];
+  if (qkr) st_nt<8, false>(v, qkr + row0 * 256, 256, (mat == 2 ? 128 : 0) + 64 * h, g, t);
+  if (h == 0) return true;
+  float m0, r0, m1, r1;
+  ln_stats(hold, kq_eps, m0, r0, m1, r1);
+  const float* w = kq + (mat == 2 ? 256 : 0);
+  const float* b = w + 128;
+#pragma unroll
+  for (int hh = 0; hh < 2; ++hh) {
+    float o[8][4];
+#pragma unroll
+    for (int nt = 0; nt < 8; ++nt) {
+      const float2 ww = colv(w + 64 * hh, nt, t), bb = colv(b + 64 * hh, nt, t);
+#pragma unroll
+      for (int e = 0; e < 4; ++e)
+        o[nt][e] = (hold.f[8 * hh + nt][e] - (e < 2 ? m0 : m1)) * (e < 2 ? r0 : r1) * ((e & 1) ? ww.y : ww.x) + ((e & 1) ? bb.y : bb.x);
+    }
+    st_nt<8, true>(o, dst + row0 * 128, 128, 64 * hh, g, t);
+  }
+  return true;
+}
+
 extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_fwd(const T* __restrict__ x, const T* __restrict__ mod, const T* __restrict__ mkv,
                                                                const T* __restrict__ w /*[Wq;Wg;Wk;Wv] 512 x 128*/, const float* __restrict__ bq,
                                                                const float* __restrict__ bs, T* __restrict__ q, T* __restrict__ sg,
                                                                T* __restrict__ k, T* __restrict__ v, T* __restrict__ x1s, T* __restrict__ xkvs,
-                                                               int M, int nmod, float eps, int save, int par) {
+                                                               int M, int nmod, float eps, int save, int par,
+                                                               const float* __restrict__ kq, float kq_eps, T* __restrict__ qkr) {
   pdl_wait();
   extern __shared__ uint8_t sm_raw[];
   constexpr int UNIT = 64 * 128 * ES;
@@ -49,6 +83,8 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_fwd(const T* __restr
   issue(0);
   issue(1);
   Tile c;
+  Tile hold;   // KQLN: the q / k row of the two 64-column units
+  (void)hold;
   ld_tile(c, x + row0 * 128, 128, 0, g, t);
   float m0, r0, m1, r1;
   norm_stats(c, eps, m0, r0, m1, r1);
@@ -60,7 +96,11 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_fwd(const T* __restr
   rna(c);
 #endif
   for (int u = 0; u < 8; ++u) {
-    if (u == 4) {  // c = x1: write it, then the K / V AdaLN of it
+    if (u == 4 && par == 2) {  // one AdaLN for q and k / v (Boltz-2 / RF3 / Chai-1): k, v read x1 (c holds it, as the MMAs read it)
+#if !TF32
+      if (save) st_tile(c, x1s + row0 * 128, 128, 0, g, t);
+#endif
+    } else if (u == 4) {  // c = x1: write it, then the K / V AdaLN of it
 #if TF32
       ld_tile(c, x1s + row0 * 128, 128, 0, g, t);
 #else
@@ -95,6 +135,7 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_fwd(const T* __restr
         for (int e = 0; e < 4; ++e) v[nt][e] = sigm(v[nt][e]);
       }
     }
+    if (KQLN && kq_ln_unit(hold, v, mat, u & 1, kq, kq_eps, dst, save ? qkr : nullptr, row0, g, t)) continue;
     if (mat == 1) st_nt<8, false>(v, dst + row0 * 128, 128, col, g, t);
     else st_nt<8, true>(v, dst + row0 * 128, 128, col, g, t);
   }
@@ -106,7 +147,8 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_fwd(const T* __restr
 extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_split(const T* __restrict__ x, const T* __restrict__ mod, const T* __restrict__ mkv,
                                                                 const T* __restrict__ w, const float* __restrict__ bq, const float* __restrict__ bs,
                                                                 T* __restrict__ q, T* __restrict__ sg, T* __restrict__ k, T* __restrict__ v,
-                                                                T* __restrict__ x1s, T* __restrict__ xkvs, int M, int nmod, float eps, int save, int par) {
+                                                                T* __restrict__ x1s, T* __restrict__ xkvs, int M, int nmod, float eps, int save, int par,
+                                                               const float* __restrict__ kq, float kq_eps, T* __restrict__ qkr) {
   pdl_wait();
   extern __shared__ uint8_t sm_raw[];
   constexpr int UNIT = 64 * 128 * ES;
@@ -119,13 +161,15 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_split(const T* __res
   issue(0);
   if (upc > 1) issue(1); else cp_commit();
   Tile c;
+  Tile hold;   // KQLN: the q / k row of the two 64-column units
+  (void)hold;
   ld_tile(c, x + row0 * 128, 128, 0, g, t);
   float m0, r0, m1, r1;
   norm_stats(c, eps, m0, r0, m1, r1);
   adaln_half<0>(c, mod + mrow * 768, 768, 0, 128, nullptr, m0, r0, m1, r1, g, t);
   adaln_half<1>(c, mod + mrow * 768, 768, 0, 128, nullptr, m0, r0, m1, r1, g, t);
   if (save && u0 == 0) st_tile(c, x1s + row0 * 128, 128, 0, g, t);
-  if (u0 >= 4) {  // k, v: xkv = LN(x1) * sigmoid(mkv pre + bs) + mkv shift (PAR: LN(x))
+  if (u0 >= 4 && par != 2) {  // k, v: xkv = LN(x1) * sigmoid(mkv pre + bs) + mkv shift (PAR: LN(x); par 2: x1 itself)
     if (par) ld_tile(c, x + row0 * 128, 128, 0, g, t);
     norm_stats(c, eps, m0, r0, m1, r1);
     adaln_half<0>(c, mkv + mrow * 256, 256, 0, 128, bs, m0, r0, m1, r1, g, t);
@@ -158,6 +202,7 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_split(const T* __res
         for (int e = 0; e < 4; ++e) vv[nt][e] = sigm(vv[nt][e]);
       }
     }
+    if (KQLN && kq_ln_unit(hold, vv, mat, u & 1, kq, kq_eps, dst, save ? qkr : nullptr, row0, g, t)) continue;
     if (mat == 1) st_nt<8, false>(vv, dst + row0 * 128, 128, col, g, t);
     else st_nt<8, true>(vv, dst + row0 * 128, 128, col, g, t);
   }

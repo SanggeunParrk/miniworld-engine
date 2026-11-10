@@ -9,6 +9,12 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "rms90.cuh"
 using namespace r90;
+#ifndef NOOUT
+#define NOOUT 0   // 1: no gating query and no out projection (Chai-1): u = o (the attention output itself)
+#endif
+#ifndef PARS
+#define PARS 0   // 1: the parallel block (RF3, Chai-1): x2 = LN(a) s2 + bi2 of the block input a (out = a + so u + st t either way)
+#endif
 
 extern "C" __global__ __launch_bounds__(NTHR, 1) void post90_fwd(const T* __restrict__ a, const T* __restrict__ o, const T* __restrict__ sg,
                                                                 const T* __restrict__ mod, const T* __restrict__ wo /*[128,128]*/,
@@ -53,15 +59,24 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void post90_fwd(const T* __rest
     cp_wait<1>();
     proxy_fence();
     __syncthreads();
+#if NOOUT
+    (void)c;
+#else
     float acc[32];
     wg_gemm<64, KSTEPS>(acc, c, base + (s & 1) * BUF, 0);
+#endif
     __syncthreads();
     issue(s + 2);
+#if !NOOUT
 #pragma unroll
     for (int nt = 0; nt < 8; ++nt)
 #pragma unroll
       for (int e = 0; e < 4; ++e) a2.f[8 * s + nt][e] = acc[4 * nt + e];
+#endif
   }
+#if NOOUT   // no gating query, no out projection (Chai-1): u = o, exact
+  ld_tile(a2, o + row0 * 128, 128, 0, g, t);
+#endif
   {  // a2 = a + so * u  (u rounded as stored)
     Tile aa, so;
     ld_tile(aa, a + row0 * 128, 128, 0, g, t);
@@ -77,18 +92,25 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void post90_fwd(const T* __rest
     if (save) st_tile(c, us + row0 * 128, 128, 0, g, t);
   }
   if (save) st_tile(a2, a2s + row0 * 128, 128, 0, g, t);
-  {  // x2 = LN(a2) * s2 + bi2   (into c)
+  {  // x2 = LN(a2) * s2 + bi2   (into c); PARS (the parallel block): LN(a) of the block input
     Tile s2, b2;
     ld_tile(s2, mod + mrow * 768, 768, 384, g, t);
     ld_tile(b2, mod + mrow * 768, 768, 512, g, t);
     float m0, r0, m1, r1;
+#if PARS
+    ld_tile(c, a + row0 * 128, 128, 0, g, t);
+    norm_stats(c, eps, m0, r0, m1, r1);
+    const Tile& xin = c;
+#else
     norm_stats(a2, eps, m0, r0, m1, r1);
+    const Tile& xin = a2;
+#endif
 #pragma unroll
     for (int nt = 0; nt < 16; ++nt) {
-      c.f[nt][0] = round_store((a2.f[nt][0] - m0) * r0 * s2.f[nt][0] + b2.f[nt][0]);
-      c.f[nt][1] = round_store((a2.f[nt][1] - m0) * r0 * s2.f[nt][1] + b2.f[nt][1]);
-      c.f[nt][2] = round_store((a2.f[nt][2] - m1) * r1 * s2.f[nt][2] + b2.f[nt][2]);
-      c.f[nt][3] = round_store((a2.f[nt][3] - m1) * r1 * s2.f[nt][3] + b2.f[nt][3]);
+      c.f[nt][0] = round_store((xin.f[nt][0] - m0) * r0 * s2.f[nt][0] + b2.f[nt][0]);
+      c.f[nt][1] = round_store((xin.f[nt][1] - m0) * r0 * s2.f[nt][1] + b2.f[nt][1]);
+      c.f[nt][2] = round_store((xin.f[nt][2] - m1) * r1 * s2.f[nt][2] + b2.f[nt][2]);
+      c.f[nt][3] = round_store((xin.f[nt][3] - m1) * r1 * s2.f[nt][3] + b2.f[nt][3]);
     }
     if (save) st_tile(c, x2s + row0 * 128, 128, 0, g, t);
     rna(c);

@@ -55,7 +55,7 @@ def _grp_bytes(nw: int, tf32: bool) -> int:
 
 def _smem(kind: str, tf32: bool) -> int:
     es = 4 if tf32 else 2
-    if kind in ("finalize", "pack"):
+    if kind in ("finalize", "pack", "kqln_bwd"):
         return 0
     if kind in ("cond", "cond_split"):
         return 2 * 64 * 128 * es + 1024
@@ -107,31 +107,54 @@ _KERNELS = {
     "post_bwd_s": ("post_bwd90", "post_bwd90", ("-DSPLITK=1",)),
     "pre_bwd": ("pre_bwd90", "pre_bwd90"),
     "pre_bwd_par": ("pre_bwd90", "pre_bwd90_par"),  # AlphaFold 3's parallel K / V AdaLN: the same cubin, its PAR entry
+    "pre_bwd_one": ("pre_bwd90", "pre_bwd90_sh"),   # one AdaLN for q and k / v (Boltz-2, RF3, Chai-1): the same cubin, its KVM 2 entry
     "cond_bwd": ("cond_bwd90", "cond_bwd90"),
     "cond_bwd_s": ("cond_bwd90", "cond_bwd90", ("-DSPLITK=1",)),
     "cond_bwd_sh": ("cond_bwd_sh90", "cond_bwd_sh90"),
+    "kqln_bwd": ("kqln_bwd90", "kqln_bwd90"),   # RoseTTAFold3's flat q / k LayerNorm backward (KQLN), in place on dp
+}
+
+#: The model options (``kernels/integrations/local_dit_h100.options``) as build defines, and the kernels each one changes:
+#:   IDENT  the identity AdaLN (Chai-1): conditioning tables of the raw c, no sigmoid on the AdaLN scales
+#:   PARS   the parallel block (RF3, Chai-1): the transition's AdaLN normalises the block input
+#:   NOOUT  no gating query and no out projection (Chai-1): u = o exactly (no out-projection GEMM, forward or backward)
+#:   KQLN   the affine LayerNorm of the flat q / k (RF3): in pre90, its backward the kqln_bwd90 row pass
+#: (one AdaLN for q and k / v is a runtime mode of pre90 and the pre_bwd90_sh entry.)
+_OPTION_KERNELS = {
+    "IDENT": ("cond", "cond_split", "post_bwd", "post_bwd_s", "pre_bwd", "pre_bwd_par", "pre_bwd_one", "cond_bwd", "cond_bwd_s",
+              "cond_bwd_sh"),
+    "PARS": ("post", "post_bwd", "post_bwd_s"),
+    "NOOUT": ("post", "post_bwd", "post_bwd_s"),
+    "KQLN": ("pre", "pre_split"),
 }
 
 
-def kernel_cubin(kind: str, tf32: bool) -> str:
-    """The cubin of kernel ``kind`` (``"<kind>_g"``: the grouped-sample launch, same code, larger dynamic shared memory)."""
+def _defs_for(kind: str, options: tuple) -> tuple:
+    """The build defines of ``options`` (names of :data:`_OPTION_KERNELS`) that change kernel ``kind``."""
     base = kind.removesuffix("_g")
-    build = base.removesuffix("_par")  # an entry point of another kind's cubin: built as that kind
+    return tuple(f"-D{o}=1" for o in sorted(options) if base in _OPTION_KERNELS[o])
+
+
+def kernel_cubin(kind: str, tf32: bool, options: tuple = ()) -> str:
+    """The cubin of kernel ``kind`` (``"<kind>_g"``: the grouped-sample launch, same code, larger dynamic shared memory) under the model
+    ``options`` (build defines; none: the AF3 / Protenix block)."""
+    base = kind.removesuffix("_g")
+    build = base.removesuffix("_par").removesuffix("_one")  # an entry point of another kind's cubin: built as that kind
     stem, _, *rest = _KERNELS[base]
-    defs = rest[0] if rest else ()
+    defs = (*(rest[0] if rest else ()), *_defs_for(kind, options))
     return cubin(stem, tf32, nwarp(build, tf32), _MINB.get((build, tf32), 1), defs)
 
 
 @functools.lru_cache(maxsize=None)
-def kernel(kind: str, tf32: bool, device_index: int):
+def kernel(kind: str, tf32: bool, device_index: int, options: tuple = ()):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     func = _KERNELS[kind.removesuffix("_g")][1]
     with torch.cuda.device(device_index):
         return driver.Kernel(
-            kernel_cubin(kind, tf32),
+            kernel_cubin(kind, tf32, options),
             func,
-            _smem(kind, tf32),
+            _smem(kind.replace("_one", ""), tf32),
             pdl=True,
         )
 
@@ -369,7 +392,7 @@ def _split_for(tiles: int, choices) -> int:
     return choices[-1] if tiles * choices[-1] < _SM_FILL else 1
 
 
-def cond_fwd(c, p, tf32: bool, eps: float = 1e-5):
+def cond_fwd(c, p, tf32: bool, eps: float = 1e-5, options: tuple = ()):
     """c [M, 128] -> mod [M, 768], mkv [M, 256] (M a multiple of 128)."""
     M = c.shape[0]
     dt = torch.float32 if tf32 else torch.bfloat16
@@ -377,7 +400,7 @@ def cond_fwd(c, p, tf32: bool, eps: float = 1e-5):
     mkv = torch.empty(M, 256, device=c.device, dtype=dt)
     tiles = M // ROWS
     ns = _split_for(tiles, (1, 2, 4, 8, 16))
-    kernel("cond_split" if ns > 1 else "cond", tf32, _dev(c))(
+    kernel("cond_split" if ns > 1 else "cond", tf32, _dev(c), options)(
         (tiles, ns, 1),
         (NWARP * 32, 1, 1),
         c,
@@ -401,18 +424,25 @@ def pre_fwd(
     eps: float = 1e-5,
     nmod: int = 0,
     parallel_kv: bool = False,
+    options: tuple = (),
+    kq=None,
+    kq_eps: float = 1e-5,
 ):
-    """-> q, sg, k, v [M, 128] (and x1, xkv when ``save``). ``parallel_kv``: the K / V AdaLN reads the raw x beside the first AdaLN
-    (AlphaFold 3), not its output (Protenix)."""
+    """-> q, sg, k, v [M, 128] (and x1, xkv when ``save``). ``parallel_kv``: the K / V source -- 0 (False) the K / V AdaLN of the first
+    AdaLN's output (Protenix), 1 (True) of the raw x beside the first AdaLN (AlphaFold 3), 2 one AdaLN for q and k / v (xkv is x1).
+    """
     M = x.shape[0]
     new = lambda: torch.empty(M, DS, device=x.device, dtype=x.dtype)  # noqa: E731
     q, sg, k, v = new(), new(), new(), new()
     tiles = M // ROWS
-    ns = _split_for(tiles, (1, 2, 4, 8))
+    kqln = "KQLN" in options
+    # KQLN: a CTA must hold both 64-column units of q (and of k): at most 4 CTAs per tile
+    ns = _split_for(tiles, (1, 2, 4) if kqln else (1, 2, 4, 8))
     # the unsplit TF32 kernel round-trips the exact x1 through memory (registers hold it rounded); the split one keeps it in registers
     x1 = new() if (save or (tf32 and ns == 1)) else None
-    xkv = new() if save else None
-    kernel("pre_split" if ns > 1 else "pre", tf32, _dev(x))(
+    xkv = new() if (save and int(parallel_kv) != 2) else None
+    qkr = torch.empty(M, 2 * DS, device=x.device, dtype=x.dtype) if (kqln and save) else None
+    kernel("pre_split" if ns > 1 else "pre", tf32, _dev(x), options)(
         (tiles, ns, 1),
         (NWARP * 32, 1, 1),
         x,
@@ -432,19 +462,34 @@ def pre_fwd(
         float(eps),
         int(save),
         int(parallel_kv),
+        kq,
+        float(kq_eps),
+        qkr,
     )
-    return (q, sg, k, v, x1, xkv) if save else (q, sg, k, v)
+    if save:
+        out = (q, sg, k, v, x1, x1 if int(parallel_kv) == 2 else xkv)
+        return (*out, qkr) if kqln else out
+    return q, sg, k, v
+
+
+def kqln_bwd(dp, qkr, kq, tf32: bool, eps: float):
+    """RoseTTAFold3's flat q / k LayerNorm backward in place on dp's dq / dk blocks (the gradients of LN(x) w + b -> of the raw x); -> the
+    column sums [512] = d wq | d bq | d wk | d bk (fp32)."""
+    M = dp.shape[0]
+    colpart = torch.empty(M // ROWS, 512, device=dp.device, dtype=torch.float32)
+    kernel("kqln_bwd", tf32, _dev(dp))((M // ROWS, 1, 1), (NWARP * 32, 1, 1), dp, qkr, kq, colpart, int(M), float(eps))
+    return colpart.sum(0)
 
 
 def post_fwd(
-    a, o, sg, mod, p, tf32: bool, save: bool = False, eps: float = 1e-5, nmod: int = 0
+    a, o, sg, mod, p, tf32: bool, save: bool = False, eps: float = 1e-5, nmod: int = 0, options: tuple = ()
 ):
     """-> out [M, 128] (and u, a2, x2, t when ``save``)."""
     M = a.shape[0]
     new = lambda: torch.empty(M, DS, device=a.device, dtype=a.dtype)  # noqa: E731
     out = new()
     u, a2, x2, t = (new(), new(), new(), new()) if save else (None,) * 4
-    kernel("post", tf32, _dev(a))(
+    kernel("post", tf32, _dev(a), options)(
         (M // ROWS, 1, 1),
         (NWARP * 32, 1, 1),
         a,
@@ -576,6 +621,7 @@ def post_bwd(
     eps: float = 1e-5,
     nmod: int = 0,
     shared=None,
+    options: tuple = (),
 ):
     """-> da2, du, gated, do [M, 128]; writes dp[:, 0:128] (dg), dmod blocks 2-4 (``dmod`` as returned by ``tr_bwd``: per-sample rows, or the
     [M / 4N, N, 768] group sums when ``shared``); dd [A, 4, N] fp32."""
@@ -599,6 +645,7 @@ def post_bwd(
         ("post_bwd_s" if ns > 1 else "post_bwd") + ("_g" if shared else ""),
         tf32,
         _dev(dy),
+        options,
     )(
         grid,
         (NWARP * 32, 1, 1),
@@ -648,6 +695,7 @@ def pre_bwd(
     nmod: int = 0,
     shared=None,
     parallel_kv: bool = False,
+    options: tuple = (),
 ):
     """-> dx [M, 128], dmkv [M, 256] (``shared``: group sums [M / 4N, N, 256]); writes dmod blocks 0, 1 (group sums when shared).
     ``parallel_kv``: the K / V AdaLN of the raw x (AlphaFold 3, ``pre_fwd(parallel_kv=True)``): its LN backward goes to dx, not dx1."""
@@ -655,14 +703,15 @@ def pre_bwd(
     dx = torch.empty(M, DS, device=x.device, dtype=x.dtype)
     spc, natoms, sp = shared or (0, 0, 1)
     dmkv = (
-        torch.empty(M // (4 * natoms), natoms, 256, device=x.device, dtype=x.dtype)
+        (torch.zeros if int(parallel_kv) == 2 else torch.empty)(M // (4 * natoms), natoms, 256, device=x.device, dtype=x.dtype)
         if shared
-        else torch.empty(M, 256, device=x.device, dtype=x.dtype)
+        else (torch.zeros if int(parallel_kv) == 2 else torch.empty)(M, 256, device=x.device, dtype=x.dtype)
     )
     grid = (M // ROWS, 1, 1)
     colpart = torch.empty(grid[0] * grid[1], 384, device=x.device, dtype=torch.float32)
-    kind = "pre_bwd_par" if parallel_kv else "pre_bwd"
-    kernel(kind + "_g" if shared else kind, tf32, _dev(x))(
+    kvm = int(parallel_kv)   # 0 chained, 1 parallel (AF3), 2 one AdaLN (its dmkv: zeros, the zero K / V weights' gradients read them)
+    kind = ("pre_bwd", "pre_bwd_par", "pre_bwd_one")[kvm]
+    kernel(kind + "_g" if shared else kind, tf32, _dev(x), options)(
         grid,
         (NWARP * 32, 1, 1),
         dp,
@@ -689,7 +738,7 @@ def pre_bwd(
     return dx, dmkv, cs[:128], cs[128:256], cs[256:]
 
 
-def cond_bwd(dmod, dmkv, c, pb, tf32: bool, eps: float = 1e-5):
+def cond_bwd(dmod, dmkv, c, pb, tf32: bool, eps: float = 1e-5, options: tuple = ()):
     """-> dc [M, 128], n = LN(c) [M, 128]."""
     M = c.shape[0]
     dc = torch.empty(M, DS, device=c.device, dtype=c.dtype)
@@ -702,7 +751,7 @@ def cond_bwd(dmod, dmkv, c, pb, tf32: bool, eps: float = 1e-5):
         else None
     )
     ctr = torch.zeros(tiles, device=c.device, dtype=torch.int32) if ns > 1 else None
-    kernel("cond_bwd_s" if ns > 1 else "cond_bwd", tf32, _dev(c))(
+    kernel("cond_bwd_s" if ns > 1 else "cond_bwd", tf32, _dev(c), options)(
         (tiles, ns, 1),
         (NWARP * 32, 1, 1),
         dmod,
@@ -719,13 +768,13 @@ def cond_bwd(dmod, dmkv, c, pb, tf32: bool, eps: float = 1e-5):
     return dc, n
 
 
-def cond_bwd_shared(dmodp, dmkvp, c, pb, tf32: bool, a: int, eps: float = 1e-5):
+def cond_bwd_shared(dmodp, dmkvp, c, pb, tf32: bool, a: int, eps: float = 1e-5, options: tuple = ()):
     """Shared conditioning, c [N, 128], partial modulation gradients dmodp [P, N, 768] / dmkvp [P, N, 256] (P sample groups) ->
     dc / a [N, 128], n = LN(c), the fp32 sums ds [N, 768] and dk [N, 256]; all fp32."""
     P, N = dmodp.shape[0], dmodp.shape[1]
     f = lambda *s: torch.empty(*s, device=c.device, dtype=torch.float32)  # noqa: E731
     dc, nrm, ds, dk = f(N, DS), f(N, DS), f(N, 768), f(N, 256)
-    kernel("cond_bwd_sh", tf32, _dev(c))(
+    kernel("cond_bwd_sh", tf32, _dev(c), options)(
         (N // ROWS, 1, 1),
         (NWARP * 32, 1, 1),
         dmodp,
