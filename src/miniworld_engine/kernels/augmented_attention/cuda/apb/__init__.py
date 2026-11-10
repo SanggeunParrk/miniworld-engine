@@ -6,7 +6,6 @@ never at import; ``kernels/integrations/attention_pair_bias_b200.py`` drives the
 from __future__ import annotations
 
 import functools
-import os
 from pathlib import Path
 
 import torch
@@ -37,15 +36,14 @@ def ext(shadow: bool = False):
 
 @functools.lru_cache(maxsize=None)
 def _ext(arch: str, shadow: bool = False):
-    from ...._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from ...._nvcc import cutlass_include, ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
     includes, shadow_flags = [], []
     if shadow:
-        root = os.environ.get("CUTLASS_PATH")
-        if not root or not (Path(root) / "include/cutlass/cutlass.h").is_file():
-            raise RuntimeError("H100 APB requires CUTLASS_PATH pointing to CUTLASS 4.2 headers")
-        includes = [str(Path(root) / "include")]
+        # only a build needs the headers: unset, the stand-in keys as the pinned CUTLASS 4.2 and the prebuilt artifact loads
+        # (a build without them raises _nvcc.CutlassMissing)
+        includes = [str(cutlass_include())]
         shadow_flags = ["-DAPB_H100_FP32_SHADOW=1"]
     return load_extension(
         name=f"apb_rows_cuda_sm{arch}" + ("_shadow" if shadow else ""),
