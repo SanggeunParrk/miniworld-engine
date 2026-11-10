@@ -560,6 +560,8 @@ transition_wide_f32_forms_sm80,transition,Transition,forward,1
 transition_wide_ln_fwd_f32_sm80,transition,Transition,forward,1
 transition_wide_dual_swiglu_f16_sm80,transition,Transition,forward,1
 transition_wide_gemm_res_f32_sm80,transition,Transition,forward,1
+transition_fused_fwd_f32_sm80,transition,Transition,forward,1
+transition_fused_fwd_f32_pack_sm80,transition,Transition,forward,1
 transition_wide_dy_f16_sm80,transition,Transition,backward,1
 transition_wide_gate_f16_sm80,transition,Transition,backward,1
 transition_wide_ln_bwd_f32_sm80,transition,Transition,backward,1

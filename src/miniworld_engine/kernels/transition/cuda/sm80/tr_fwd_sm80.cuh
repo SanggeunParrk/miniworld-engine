@@ -43,6 +43,10 @@ struct TrParams {
   __nv_bfloat16* xn;           // training: LN(x) bf16 [T][128] for the backward (the GEMM's bits), or nullptr
   int T, num_tiles;
   float eps;
+  // the fp32 Transition (TrCfgT<D, H, true>): x / out fp32, the fp16 weight forms with their scales sc (f32_forms: [1 / s_x, s_x s_w, 1 / s_h, s_h s_ws, ..])
+  const float* x32;
+  float* out32;
+  const float* sc;
 };
 
 #ifndef TANH16
@@ -51,11 +55,15 @@ struct TrParams {
 #ifndef TR_NWARP
 #define TR_NWARP 8
 #endif
-template <int D_ = 128, int H_ = 512>
+template <int D_ = 128, int H_ = 512, bool F32_ = false>
 struct TrCfgT {
   // 8 warps: one CTA per SM, 4-slot ring; 4 warps: two independent CTAs per SM (the SM sub-partition's two warps belong to different
   // CTAs), 2-slot ring in lockstep
-  static constexpr int D = D_, H = H_, NWARP = TR_NWARP, NTHR = 32 * NWARP, MINB = 8 / NWARP, BM = 32 * NWARP;
+  // F32: fp32 x / out on fp16 tensor cores with fp32 accumulation (the wide family's fp32 scheme, fused): 16 rows per warp (MTF = 1: the fp32
+  // output accumulator takes the registers of the second m16 tile), inference only
+  static constexpr bool F32 = F32_;
+  static constexpr int MTF = F32 ? 1 : 2;   // m16 tiles per warp of a full work item
+  static constexpr int D = D_, H = H_, NWARP = TR_NWARP, NTHR = 32 * NWARP, MINB = 8 / NWARP, BM = 16 * MTF * NWARP;
   static constexpr int NS = D / 16, NJ = D / 8, NV = D / 32;   // GEMM1 k steps, GEMM2 n8 tiles, 16-byte vectors per row of a quad thread
 #ifndef TR_CH
 #define TR_CH 32
@@ -99,9 +107,6 @@ DEVI void mma16816_h(uint32_t (&d)[2], const uint32_t (&a)[4], uint32_t b0, uint
   asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};\n"
                : "+r"(d[0]), "+r"(d[1]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
-DEVI uint32_t pack_f16(float lo, float hi) {
-  uint32_t r; asm("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(r) : "f"(hi), "f"(lo)); return r;
-}
 DEVI float2 unpack_f16(uint32_t v) { return __half22float2(*reinterpret_cast<const __half2*>(&v)); }
 DEVI uint32_t tanh_f16x2(uint32_t v) { uint32_t r; asm("tanh.approx.f16x2 %0, %1;\n" : "=r"(r) : "r"(v)); return r; }
 DEVI uint32_t hfma2(uint32_t a, uint32_t b, uint32_t c) { uint32_t r; asm("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(a), "r"(b), "r"(c)); return r; }
@@ -114,6 +119,12 @@ DEVI uint32_t swiglu2(float a0, float b0, float a1, float b1) {
   const float p0 = a0 * b0, p1 = a1 * b1;
   return pack_f16(fmaf(tanh_approx(a0), p0, p0), fmaf(tanh_approx(a1), p1, p1));
 #endif
+}
+
+// the fp32 path: a = acc s_ab, b likewise, h = silu(a) b in fp32 (sigmoid_f32, as the wide fp32 kernels), fp16 h / s_h (s_h = sc[2] = 1 / s_h)
+DEVI uint32_t swiglu2_f32(float a0, float b0, float a1, float b1, float s_ab, float s_h) {
+  a0 *= s_ab; b0 *= s_ab; a1 *= s_ab; b1 *= s_ab;
+  return pack_f16(a0 * sigmoid_f32(a0) * b0 * s_h, a1 * sigmoid_f32(a1) * b1 * s_h);
 }
 
 // per-warp state that survives across tiles
@@ -160,9 +171,10 @@ template <class G>
 DEVI void load_x(const TrParams& p, const TrWarp& w, int r0, int mt) {  // this warp's 16 mt rows from r0 -> its staging (zero-filled past T)
 #if !TR_XSTAGE
   if (w.lane < 16 * mt && r0 + w.lane < p.T) {                // no staging: pull the rows into L2 (two 128 B lines per row)
-    const char* a = reinterpret_cast<const char*>(p.x + (size_t)(r0 + w.lane) * G::D);
+    const char* a = G::F32 ? reinterpret_cast<const char*>(p.x32 + (size_t)(r0 + w.lane) * G::D)
+                           : reinterpret_cast<const char*>(p.x + (size_t)(r0 + w.lane) * G::D);
 #pragma unroll
-    for (int l = 0; l < G::D / 64; ++l) asm volatile("prefetch.global.L2::evict_last [%0];\n" ::"l"(a + 128 * l));
+    for (int l = 0; l < G::D * (G::F32 ? 4 : 2) / 128; ++l) asm volatile("prefetch.global.L2::evict_last [%0];\n" ::"l"(a + 128 * l));
   }
   return;
 #endif
@@ -187,6 +199,7 @@ template <int MT, class G, bool LN = true>
 DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt) {
   constexpr int D = G::D, NCHUNK = G::NCHUNK, NST = G::NST, NS = G::NS, NJ = G::NJ, NV = G::NV;
   const int g8 = w.g8, q = w.q;
+  const float s_ab = G::F32 ? __ldg(p.sc + 1) : 0.f, s_h = G::F32 ? __ldg(p.sc + 2) : 0.f;   // the fp32 path's scales
 
   // ---- LayerNorm of rows (16 mt + 8 hr + g8) straight into the A fragments: word v = 2 s + e2 of the thread's 2 D / 4 bytes -> fa[mt][s][hr + 2 e2].
   //      The same bytes (as f16) initialise the output accumulator: word J = accumulator tile J, so the residual costs nothing at the end.
@@ -197,6 +210,47 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
   mbar_wait_bo(w.barX, xpar);
 #endif
   STAMP(1);
+  float acc2f[MT][NJ][4];                                       // F32: the fp32 output accumulator [mt][n8 tile J][c0..c3]
+  if constexpr (G::F32) {
+    // fp32 rows: the LayerNorm in fp32, the A fragments fp16 xn / s_x (sc[0] = 1 / s_x); the accumulator starts at 0 (the residual is added in fp32 at the store)
+    const float s_x = __ldg(p.sc);
+#pragma unroll
+    for (int mt = 0; mt < MT; ++mt)
+#pragma unroll
+      for (int hr = 0; hr < 2; ++hr) {
+        const int r = 16 * mt + 8 * hr + g8;
+        const bool ok = r0 + r < p.T;
+        float xv[8 * NV];
+#pragma unroll
+        for (int i = 0; i < NV; ++i) {
+          uint4 u0 = make_uint4(0, 0, 0, 0), u1 = u0;
+          if (ok) {
+            const float* src = p.x32 + (size_t)(r0 + r) * D + 32 * i + 8 * q;
+            u0 = ldg_nc_na(src);
+            u1 = ldg_nc_na(src + 4);
+          }
+          xv[8 * i] = __uint_as_float(u0.x); xv[8 * i + 1] = __uint_as_float(u0.y); xv[8 * i + 2] = __uint_as_float(u0.z); xv[8 * i + 3] = __uint_as_float(u0.w);
+          xv[8 * i + 4] = __uint_as_float(u1.x); xv[8 * i + 5] = __uint_as_float(u1.y); xv[8 * i + 6] = __uint_as_float(u1.z); xv[8 * i + 7] = __uint_as_float(u1.w);
+        }
+#pragma unroll
+        for (int j = 0; j < NJ; ++j) { acc2f[mt][j][2 * hr] = 0.f; acc2f[mt][j][2 * hr + 1] = 0.f; }
+        float sm = 0.f;
+#pragma unroll
+        for (int e = 0; e < 8 * NV; ++e) sm += xv[e];
+        const float mean = quad_sum(sm) * (1.f / D);
+        float sq = 0.f;
+#pragma unroll
+        for (int e = 0; e < 8 * NV; ++e) { xv[e] -= mean; sq = fmaf(xv[e], xv[e], sq); }
+        const float rstd = rsqrtf(quad_sum(sq) * (1.f / D) + p.eps);
+#pragma unroll
+        for (int i = 0; i < NS; ++i) {
+          const uint4 gi = lds128(w.sGB + (i * 4 + q) * 16), bi = lds128(w.sGB + 4 * D + (i * 4 + q) * 16);
+          const float4 gv = *reinterpret_cast<const float4*>(&gi), bv = *reinterpret_cast<const float4*>(&bi);
+          fa[mt][i][hr] = pack_f16(fmaf(xv[4 * i] * rstd, gv.x, bv.x) * s_x, fmaf(xv[4 * i + 1] * rstd, gv.y, bv.y) * s_x);
+          fa[mt][i][hr + 2] = pack_f16(fmaf(xv[4 * i + 2] * rstd, gv.z, bv.z) * s_x, fmaf(xv[4 * i + 3] * rstd, gv.w, bv.w) * s_x);
+        }
+      }
+  } else {
   uint4 xin[MT][2][NV];                                         // the thread's NV x 16 B of each of its rows
   auto ld_rows = [&](int mt) {
 #pragma unroll
@@ -275,6 +329,7 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
         for (int i = 0; i < NS; ++i) { fa[mt][i][hr] = wv[2 * i]; fa[mt][i][hr + 2] = wv[2 * i + 1]; }
       }
     }
+  }   // !F32
   __syncwarp();
   STAMP(2);
   if (nmt > 0) load_x<G>(p, w, nr0, nmt);                     // the staging is free: the next item's rows land under this one
@@ -319,10 +374,10 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
         }
 #pragma unroll
         for (int mt = 0; mt < MT; ++mt) {
-          mma16816(acc1[mt][0], fa[mt][s], ba[cb][0], ba[cb][1]);
-          mma16816(acc1[mt][1], fa[mt][s], ba[cb][2], ba[cb][3]);
-          mma16816(acc1[mt][2], fa[mt][s], bb[cb][0], bb[cb][1]);
-          mma16816(acc1[mt][3], fa[mt][s], bb[cb][2], bb[cb][3]);
+          mma_op<G::F32>(acc1[mt][0], fa[mt][s], ba[cb][0], ba[cb][1]);   // F32: fp16 operands, fp32 accumulation
+          mma_op<G::F32>(acc1[mt][1], fa[mt][s], ba[cb][2], ba[cb][3]);
+          mma_op<G::F32>(acc1[mt][2], fa[mt][s], bb[cb][0], bb[cb][1]);
+          mma_op<G::F32>(acc1[mt][3], fa[mt][s], bb[cb][2], bb[cb][3]);
         }
       }
 #ifndef G2_AHEAD
@@ -339,8 +394,13 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
         // n8 tiles n (hidden 8 n + 2 q ..): (c0, c1) row g8 -> A-fragment word 2 n, (c2, c3) row g8 + 8 -> word 2 n + 1
 #pragma unroll
         for (int n = 0; n < 2; ++n) {
-          ha[mt][2 * n] = swiglu2(acc1[mt][n][0], acc1[mt][2 + n][0], acc1[mt][n][1], acc1[mt][2 + n][1]);
-          ha[mt][2 * n + 1] = swiglu2(acc1[mt][n][2], acc1[mt][2 + n][2], acc1[mt][n][3], acc1[mt][2 + n][3]);
+          if constexpr (G::F32) {
+            ha[mt][2 * n] = swiglu2_f32(acc1[mt][n][0], acc1[mt][2 + n][0], acc1[mt][n][1], acc1[mt][2 + n][1], s_ab, s_h);
+            ha[mt][2 * n + 1] = swiglu2_f32(acc1[mt][n][2], acc1[mt][2 + n][2], acc1[mt][n][3], acc1[mt][2 + n][3], s_ab, s_h);
+          } else {
+            ha[mt][2 * n] = swiglu2(acc1[mt][n][0], acc1[mt][2 + n][0], acc1[mt][n][1], acc1[mt][2 + n][1]);
+            ha[mt][2 * n + 1] = swiglu2(acc1[mt][n][2], acc1[mt][2 + n][2], acc1[mt][n][3], acc1[mt][2 + n][3]);
+          }
         }
       }
       // GEMM2: acc2 += h Ws^T over these 16 hidden units (f16 accumulation)
@@ -350,8 +410,13 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
         if (j + G2_AHEAD < NS) ldsm_x4(bs[(j + G2_AHEAD) % NB], wb + w.w2_off + ps * (32 * D) + (j + G2_AHEAD) * 256);
 #pragma unroll
         for (int mt = 0; mt < MT; ++mt) {
-          mma16816_h(acc2[mt][2 * j], ha[mt], bs[cb][0], bs[cb][1]);
-          mma16816_h(acc2[mt][2 * j + 1], ha[mt], bs[cb][2], bs[cb][3]);
+          if constexpr (G::F32) {   // fp32 accumulation
+            mma16816_f16(acc2f[mt][2 * j], ha[mt], bs[cb][0], bs[cb][1]);
+            mma16816_f16(acc2f[mt][2 * j + 1], ha[mt], bs[cb][2], bs[cb][3]);
+          } else {
+            mma16816_h(acc2[mt][2 * j], ha[mt], bs[cb][0], bs[cb][1]);
+            mma16816_h(acc2[mt][2 * j + 1], ha[mt], bs[cb][2], bs[cb][3]);
+          }
         }
       }
     }
@@ -367,6 +432,37 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
   }
 
   STAMP(19);
+  if constexpr (G::F32) {
+    // ---- fp32 store: out = acc s_h s_ws + x (x re-read from L2, where the item's prefetch put it); tiles J = 4 i .. 4 i + 3 are the thread's 8 floats
+    // at columns 32 i + 8 q .. + 7 of its rows (32 contiguous bytes)
+    const float s_o = __ldg(p.sc + 3);
+#pragma unroll
+    for (int mt = 0; mt < MT; ++mt)
+#pragma unroll
+      for (int hr = 0; hr < 2; ++hr) {
+        const int r = r0 + 16 * mt + 8 * hr + g8;
+        if (r < p.T) {
+#pragma unroll
+          for (int i = 0; i < NV; ++i) {
+            const float* xs = p.x32 + (size_t)r * D + 32 * i + 8 * q;
+            const uint4 u0 = ldg_nc_na(xs), u1 = ldg_nc_na(xs + 4);
+            const float xr[8] = {__uint_as_float(u0.x), __uint_as_float(u0.y), __uint_as_float(u0.z), __uint_as_float(u0.w),
+                                 __uint_as_float(u1.x), __uint_as_float(u1.y), __uint_as_float(u1.z), __uint_as_float(u1.w)};
+            float o[8];
+#pragma unroll
+            for (int k = 0; k < 4; ++k) {
+              o[2 * k] = fmaf(acc2f[mt][4 * i + k][2 * hr], s_o, xr[2 * k]);
+              o[2 * k + 1] = fmaf(acc2f[mt][4 * i + k][2 * hr + 1], s_o, xr[2 * k + 1]);
+            }
+            float* dst = p.out32 + (size_t)r * D + 32 * i + 8 * q;
+            *reinterpret_cast<float4*>(dst) = make_float4(o[0], o[1], o[2], o[3]);
+            *reinterpret_cast<float4*>(dst + 4) = make_float4(o[4], o[5], o[6], o[7]);
+          }
+        }
+      }
+    STAMP(20);
+    return;
+  }
   // ---- store: word J of the thread's 64 B = accumulator tile J (x already in it)
 #pragma unroll
   for (int mt = 0; mt < MT; ++mt)
@@ -403,7 +499,7 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) tr_fwd_kernel(const TrParams
   // at once, is then half as large -- then full tiles b, b + grid, ...
   const int f = p.num_tiles / grid, rem = p.num_tiles - f * grid;
   const int rem_rows = p.T - f * grid * BM, nh = (rem_rows + BM / 2 - 1) / (BM / 2);
-  const bool half_mode = rem > 0 && nh <= grid;
+  const bool half_mode = G::MTF == 2 && rem > 0 && nh <= grid;   // F32 items are one m16 tile per warp: no half tiles
   const int n_full = half_mode ? f : f + (b < rem ? 1 : 0);
   const int n_half = (half_mode && b < nh) ? 1 : 0;
   const int n_items = n_full + n_half;
@@ -412,7 +508,7 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) tr_fwd_kernel(const TrParams
   for (int it = tid; it <= G::MAX_ITEMS; it += G::NTHR) {
     int e = -1;
     if (it < n_items && it < G::MAX_ITEMS)
-      e = it < n_half ? ((f * grid * BM + b * (BM / 2)) << 2) | 1 : (((b + (it - n_half) * grid) * BM) << 2) | 2;
+      e = it < n_half ? ((f * grid * BM + b * (BM / 2)) << 2) | 1 : (((b + (it - n_half) * grid) * BM) << 2) | G::MTF;
     sched[it] = e;
   }
 
@@ -460,7 +556,8 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) tr_fwd_kernel(const TrParams
 #ifdef TR_TRACE
     w.tr = p.trace + ((size_t)(b * G::NWARP + warp) * 32 + (it & 31)) * 40;
 #endif
-    if (mt == 2) tile<2, G, LN>(p, w, r0, it & 1, nr0, nmt);
+    if constexpr (G::MTF == 1) tile<1, G, LN>(p, w, r0, it & 1, nr0, nmt);
+    else if (mt == 2) tile<2, G, LN>(p, w, r0, it & 1, nr0, nmt);
     else tile<1, G, LN>(p, w, r0, it & 1, nr0, nmt);
     e = en;
   }
