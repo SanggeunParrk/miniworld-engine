@@ -638,9 +638,22 @@ def _generic_loads(dt: torch.dtype) -> bool:
 
 
 def _gen_rows(L: int) -> int:
-    """Rows a thread of the one-pass pair-bias kernel takes: 1 at L <= 256 (its grid is (L / 64) x (L / 4 rows) CTAs: at L128 two rows a thread leave 32 CTAs
-    for 108 SMs), else the kernel's default 2."""
-    return 1 if L <= 256 else 2
+    """Rows a thread of the one-pass pair-bias kernel takes: 1 at L128 (its grid is (L / 64) x (L / 4 rows) CTAs: two rows a thread leave 32 CTAs for 108
+    SMs; A100, 16 heads, fp32: d_pair 384 69 -> 55 us, 512 107 -> 86 us), else the kernel's default 2 (L256 d_pair 512: 180 against 258 us at one row)."""
+    return 1 if L <= 128 else 2
+
+
+def _bias_stats_gemm(z: torch.Tensor, wcm: torch.Tensor, mask, L: int, eps: float) -> torch.Tensor:
+    """The fp32 pair bias [H, L, L] (natural units, masked keys -1e4) as the one-pass kernel's identity rstd (z W' - mean sum W') with z W' on TF32 cuBLAS and the
+    row statistics from one reduction: the d_pair 512 bias at L128, where the kernel's 8192 multiply-adds a thread are latency-bound (A100, 16 heads: 74 against 86 us)."""
+    dp, heads = wcm.shape
+    z2 = z.reshape(L * L, dp)
+    sd, mu = torch.std_mean(z2, -1, correction=0, keepdim=True)
+    g = torch.mm(z2, wcm)
+    bias = ((g - mu * wcm.sum(0)) * torch.rsqrt(sd * sd + eps)).t().reshape(heads, L, L).contiguous()
+    if mask is not None:
+        bias.masked_fill_(~mask.view(1, 1, L), -1e4)
+    return bias
 
 
 #: the longest L whose fp32 wide-pair backward runs as LayerNorm + TF32 GEMMs (``_bias_gemm_bwd``); beyond it the one-pass backward kernel is faster
@@ -733,7 +746,8 @@ def _gfwd(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, p
         qkvg = torch.addmm(b, s, w.t())
         q, k, v, g = (qkvg[:, i * n:(i + 1) * n] for i in range(4))
         m = None if mask is None else mask.reshape(L)
-        bias = sm80.pair_bias_generic(pair[0], wcm, m, L, eps_p, oscale=1.0 if f32 else math.sqrt(hd), rows=_gen_rows(L))
+        bias = (_bias_stats_gemm(pair[0], wcm, m, L, eps_p) if f32 and pair.shape[-1] >= 512 and L <= 128
+                else sm80.pair_bias_generic(pair[0], wcm, m, L, eps_p, oscale=1.0 if f32 else math.sqrt(hd), rows=_gen_rows(L)))
         scale = hd ** -0.5
         if save:
             o = torch.empty(L, n, device=x.device, dtype=dt)
