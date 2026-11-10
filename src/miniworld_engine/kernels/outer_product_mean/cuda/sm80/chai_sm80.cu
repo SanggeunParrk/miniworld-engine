@@ -25,7 +25,7 @@ constexpr int KB = 32, NKB = P / KB, NS = 4;   // K blocks of 32 products (4 chu
 
 DEVI uint32_t r64(int row, int chunk) { return row * 64u + (((chunk ^ (row >> 1)) & 3u) << 4); }      // 64-byte rows (4 chunks)
 
-template <int ZT>   // outputs per CTA task: 256 (the pair tile read from O once), 128 at short lengths (twice the tasks: the last wave is shorter; O sits in L2)
+template <int ZT>   // outputs per CTA task: 256, the pair tile read from O once (128-output tasks at L128 / 256 measured slower)
 struct EpiCfg {
   static constexpr int NTHR = 256, WM = BM / 2, MT = WM / 16, WN = ZT / 4, NT = WN / 8;   // 2 x 4 warps: 32 pairs x 64 outputs each
   static constexpr int A_ST = BM * KB * 2, B_ST = ZT * KB * 2, STAGE = A_ST + B_ST;   // 4 + 16 KiB
@@ -235,7 +235,7 @@ std::vector<at::Tensor> chai_epilogue(at::Tensor O, at::Tensor wfold, at::Tensor
   auto out = at::empty({1, N, N, CZ}, O.options());
   at::Tensor y = save ? at::empty({N * N, P}, O.options()) : at::empty({0}, O.options());
   at::Tensor st = save ? at::empty({N * N, 2}, O.options().dtype(at::kFloat)) : at::empty({0}, O.options().dtype(at::kFloat));
-  const int zt = 256;   // (128: measured slower at L128 / 256)
+  const int zt = 256;
   const int tasks = (int)(N * N / BM * (CZ / zt));
   const at::Tensor colsum = wfold.to(at::kFloat).sum(1).contiguous();      // the epilogue's mean term: sum_p W'[o, p]
   const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
@@ -248,11 +248,8 @@ std::vector<at::Tensor> chai_epilogue(at::Tensor O, at::Tensor wfold, at::Tensor
         save ? reinterpret_cast<bf16*>(y.data_ptr()) : nullptr, save ? st.data_ptr<float>() : nullptr, (int)N, (int)CZ, tasks, (float)eps);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   };
-  if (zt == 128) {
-    if (save) launch(chai_epilogue_kernel<128, true>, EpiCfg<128>::SMEM); else launch(chai_epilogue_kernel<128, false>, EpiCfg<128>::SMEM);
-  } else {
-    if (save) launch(chai_epilogue_kernel<256, true>, EpiCfg<256>::SMEM); else launch(chai_epilogue_kernel<256, false>, EpiCfg<256>::SMEM);
-  }
+  if (save) launch(chai_epilogue_kernel<256, true>, EpiCfg<256>::SMEM);
+  else launch(chai_epilogue_kernel<256, false>, EpiCfg<256>::SMEM);
   return {out, y, st};
 }
 
