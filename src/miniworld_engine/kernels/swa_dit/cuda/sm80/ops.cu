@@ -12,6 +12,7 @@
 #include "qkvg_bwd_sm80.cuh"
 #include "attn_bwd_sm80.cuh"
 #include "rows_sm80.cuh"
+#include "fp32_fwd_sm80.cuh"
 
 #define CHECK_CUDA_BF16(x) TORCH_CHECK((x).is_cuda() && (x).scalar_type() == torch::kBFloat16, #x " must be a CUDA bf16 tensor")
 #define CHECK_CUDA_F32(x) TORCH_CHECK((x).is_cuda() && (x).scalar_type() == torch::kFloat32, #x " must be a CUDA fp32 tensor")
@@ -25,14 +26,14 @@ inline int num_sms() { return at::cuda::getCurrentDeviceProperties()->multiProce
 }  // namespace
 
 template <class G>
-void launch_qkvg(const sw80::QkvgFwdParams& p) {
+void launch_qkvg(const sw80::QkvgFwdParams& p, int64_t max_ctas) {
   static bool attr = false;
   if (!attr) {
     cudaFuncSetAttribute(sw80::qkvg_fwd_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM);
     attr = true;
   }
-  const int ntile = (p.M + G::ROWS - 1) / G::ROWS;
-  const unsigned ctas = (unsigned)std::min(num_sms(), ntile);
+  const int nitem = (p.M + G::ROWS - 1) / G::ROWS * p.nsplit;   // work items: (tile, block group)
+  const unsigned ctas = (unsigned)std::max(1, std::min({num_sms(), nitem, max_ctas > 0 ? (int)max_ctas : nitem}));
   sw80::qkvg_fwd_kernel<G><<<ctas, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -69,7 +70,8 @@ void swa_attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
 // qkvg stage: x [M, C] bf16 (M = N S), mod [B S, 6C] fp32, cos / sin [B S, 16] fp32, Wqkv [3C, C], Wg [C, C] -> Qh, Kh, Vh [N, H, S, 32], G [M, C]; with save also x, p_q, p_k [M, C]
 void swa_qkvg_fwd(torch::Tensor x, torch::Tensor mod, torch::Tensor cos, torch::Tensor sin, torch::Tensor wqkv, torch::Tensor wg, torch::Tensor qh,
                   torch::Tensor kh, torch::Tensor vh, torch::Tensor g, torch::Tensor xs, torch::Tensor pqs, torch::Tensor pks, int64_t S, int64_t B,
-                  double eps, double qk_eps, bool save, int64_t cfg) {
+                  double eps, double qk_eps, bool save, int64_t cfg, bool tm, int64_t nsplit, int64_t max_ctas) {
+  TORCH_CHECK(nsplit == 1 || nsplit == 2 || nsplit == 4 || nsplit == 8, "nsplit must be 1, 2, 4 or 8");
   CHECK_CUDA_BF16(x); CHECK_CUDA_BF16(wqkv); CHECK_CUDA_BF16(wg); CHECK_CUDA_BF16(qh); CHECK_CUDA_BF16(kh); CHECK_CUDA_BF16(vh); CHECK_CUDA_BF16(g);
   CHECK_CUDA_F32(mod); CHECK_CUDA_F32(cos); CHECK_CUDA_F32(sin);
   CHECK_CONTIG(x); CHECK_CONTIG(mod); CHECK_CONTIG(cos); CHECK_CONTIG(sin); CHECK_CONTIG(wqkv); CHECK_CONTIG(wg);
@@ -80,11 +82,11 @@ void swa_qkvg_fwd(torch::Tensor x, torch::Tensor mod, torch::Tensor cos, torch::
   if (save) { CHECK_CUDA_BF16(xs); CHECK_CUDA_BF16(pqs); CHECK_CUDA_BF16(pks); CHECK_CONTIG(xs); CHECK_CONTIG(pqs); CHECK_CONTIG(pks); }
   c10::cuda::CUDAGuard guard(x.device());
   sw80::QkvgFwdParams p{bptr(x), mod.data_ptr<float>(), cos.data_ptr<float>(), sin.data_ptr<float>(), bptr(wqkv), bptr(wg), bptr_w(qh), bptr_w(kh), bptr_w(vh), bptr_w(g),
-                        save ? bptr_w(xs) : nullptr, save ? bptr_w(pqs) : nullptr, save ? bptr_w(pks) : nullptr, (int)M, (int)S, (int)B, (float)eps, (float)qk_eps};
+                        save ? bptr_w(xs) : nullptr, save ? bptr_w(pqs) : nullptr, save ? bptr_w(pks) : nullptr, (int)M, (int)S, (int)B, (float)eps, (float)qk_eps, tm ? 1 : 0, (int)nsplit};
   switch (cfg) {
-    case 0: launch_qkvg<sw80::QkvgCfg<8, 2>>(p); break;
-    case 1: launch_qkvg<sw80::QkvgCfg<16, 1>>(p); break;
-    case 2: launch_qkvg<sw80::QkvgCfg<8, 1>>(p); break;
+    case 0: launch_qkvg<sw80::QkvgCfg<8, 2>>(p, max_ctas); break;
+    case 1: launch_qkvg<sw80::QkvgCfg<16, 1>>(p, max_ctas); break;
+    case 2: launch_qkvg<sw80::QkvgCfg<8, 1>>(p, max_ctas); break;
     default: TORCH_CHECK(false, "unknown qkvg configuration");
   }
 }
@@ -118,6 +120,8 @@ void swa_ffn_fwd(torch::Tensor qi, torch::Tensor g, torch::Tensor o, torch::Tens
                        prof.numel() ? reinterpret_cast<unsigned long long*>(prof.data_ptr()) : nullptr};
   switch (cfg) {
     case 0: launch_ffn<sw80::FfnCfg<8>>(p); break;
+    case 1: launch_ffn<sw80::FfnCfg<4>>(p); break;   // fewer warps per CTA: more CTAs on a call of few tiles
+    case 2: launch_ffn<sw80::FfnCfg<2>>(p); break;
     default: TORCH_CHECK(false, "unknown ffn configuration");
   }
 }
@@ -413,6 +417,98 @@ void swa_attn_delta(torch::Tensor d_o, torch::Tensor o, torch::Tensor dvv, int64
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+
+// ================================================================== the fp32 inference forward on TF32 (fp32_fwd_sm80.cuh)
+template <int MT>
+void launch_qkvg_f32(const sw80f::QkvgParams& p) {
+  static bool attr = false;
+  if (!attr) {
+    cudaFuncSetAttribute(sw80f::qkvg_f32_kernel<MT>, cudaFuncAttributeMaxDynamicSharedMemorySize, sw80f::qkvg_smem<MT>());
+    attr = true;
+  }
+  const int ntile = (p.M + 16 * MT - 1) / (16 * MT);
+  const unsigned ctas = (unsigned)std::min(num_sms(), ntile);
+  sw80f::qkvg_f32_kernel<MT><<<ctas, sw80f::NTHR, sw80f::qkvg_smem<MT>(), at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// qkvg stage, fp32: q [M, C] fp32, mod [B S, 6C], cos / sin [B S, 16], w the packed [Wq; Wk; Wv; Wg] (composed.py pack_qkvg) -> Qh, Kh, Vh bf16 head-major [N, H, S, 32]
+// (hm) or token-major [M, H, 32], G [M, C] fp32. mt: rows per CTA tile / 16 (1, 2 or 4)
+void swa_qkvg_f32(torch::Tensor q, torch::Tensor mod, torch::Tensor cos, torch::Tensor sin, torch::Tensor w, torch::Tensor qh, torch::Tensor kh, torch::Tensor vh,
+                  torch::Tensor g, int64_t S, int64_t B, double eps, double qk_eps, bool hm, int64_t mt) {
+  CHECK_CUDA_F32(q); CHECK_CUDA_F32(mod); CHECK_CUDA_F32(cos); CHECK_CUDA_F32(sin); CHECK_CUDA_F32(w); CHECK_CUDA_F32(g);
+  CHECK_CUDA_BF16(qh); CHECK_CUDA_BF16(kh); CHECK_CUDA_BF16(vh);
+  for (const auto* t : {&q, &mod, &cos, &sin, &w, &qh, &kh, &vh, &g}) CHECK_CONTIG(*t);
+  const int64_t M = q.numel() / 128;
+  TORCH_CHECK(q.numel() == M * 128 && M % S == 0 && mod.numel() == B * S * 768 && cos.numel() == B * S * 16 && sin.numel() == B * S * 16 && w.numel() == 512 * 128,
+              "bad operand sizes");
+  TORCH_CHECK(qh.numel() == M * 128 && kh.numel() == M * 128 && vh.numel() == M * 128 && g.numel() == M * 128, "bad output sizes");
+  if (M == 0) return;
+  c10::cuda::CUDAGuard guard(q.device());
+  sw80f::QkvgParams p{q.data_ptr<float>(), mod.data_ptr<float>(), cos.data_ptr<float>(), sin.data_ptr<float>(), w.data_ptr<float>(), bptr_w(qh), bptr_w(kh), bptr_w(vh),
+                      g.data_ptr<float>(), (int)M, (int)S, (int)B, hm ? 1 : 0, (float)eps, (float)qk_eps};
+  switch (mt) {
+    case 1: launch_qkvg_f32<1>(p); break;
+    case 2: launch_qkvg_f32<2>(p); break;
+    case 4: launch_qkvg_f32<4>(p); break;
+    default: TORCH_CHECK(false, "mt must be 1, 2 or 4");
+  }
+}
+
+template <int MT>
+void launch_ffn_f32(const sw80f::FfnParams& p) {
+  static bool attr = false;
+  if (!attr) {
+    cudaFuncSetAttribute(sw80f::ffn_f32_kernel<MT>, cudaFuncAttributeMaxDynamicSharedMemorySize, sw80f::ffn_smem<MT>());
+    attr = true;
+  }
+  const int ntile = (p.M + 16 * MT - 1) / (16 * MT);
+  const unsigned ctas = (unsigned)std::min(num_sms(), ntile);
+  sw80f::ffn_f32_kernel<MT><<<ctas, sw80f::NTHR, sw80f::ffn_smem<MT>(), at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// out-projection + gated residual + FFN, fp32: q, G [M, C] fp32, O [M, C] fp32 or bf16, mod [B S, 6C], the packed Wo / Wu / Wd (composed.py pack_*) -> out [M, C] fp32
+void swa_ffn_f32(torch::Tensor q, torch::Tensor g, torch::Tensor o, torch::Tensor mod, torch::Tensor wo, torch::Tensor wu, torch::Tensor wd, torch::Tensor out, int64_t S,
+                 int64_t B, double eps, int64_t mt) {
+  CHECK_CUDA_F32(q); CHECK_CUDA_F32(g); CHECK_CUDA_F32(mod); CHECK_CUDA_F32(wo); CHECK_CUDA_F32(wu); CHECK_CUDA_F32(wd); CHECK_CUDA_F32(out);
+  TORCH_CHECK(o.is_cuda() && (o.scalar_type() == torch::kFloat32 || o.scalar_type() == torch::kBFloat16), "o must be a CUDA fp32 or bf16 tensor");
+  for (const auto* t : {&q, &g, &o, &mod, &wo, &wu, &wd, &out}) CHECK_CONTIG(*t);
+  const int64_t M = q.numel() / 128;
+  TORCH_CHECK(q.numel() == M * 128 && g.numel() == M * 128 && o.numel() == M * 128 && out.numel() == M * 128 && M % S == 0 && mod.numel() == B * S * 768, "bad operand sizes");
+  TORCH_CHECK(wo.numel() == 128 * 128 && wu.numel() == 512 * 128 && wd.numel() == 128 * 256, "bad weight sizes");
+  if (M == 0) return;
+  c10::cuda::CUDAGuard guard(q.device());
+  sw80f::FfnParams p{q.data_ptr<float>(), g.data_ptr<float>(), o.data_ptr(), mod.data_ptr<float>(), wo.data_ptr<float>(), wu.data_ptr<float>(), wd.data_ptr<float>(),
+                     out.data_ptr<float>(), (int)M, (int)S, (int)B, o.scalar_type() == torch::kBFloat16 ? 1 : 0, (float)eps};
+  switch (mt) {
+    case 1: launch_ffn_f32<1>(p); break;
+    case 2: launch_ffn_f32<2>(p); break;
+    default: TORCH_CHECK(false, "mt must be 1 or 2");
+  }
+}
+
+// the variable-length layout of the global attention (sm80/composed.py ``_varlen``) in one launch: sample n is the sequences [n S, n S + u_n) and [n S + u_n, (n + 1) S),
+// the second without keys -> cu [2N + 1], used_k [2N] int32
+__global__ void varlen_kernel(const int* __restrict__ seqused, int* cu, int* used_k, int N, int S) {
+  const int n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n < N) {
+    const int u = seqused[n];
+    cu[2 * n] = n * S; cu[2 * n + 1] = n * S + u;
+    used_k[2 * n] = u; used_k[2 * n + 1] = 0;
+  }
+  if (n == 0) cu[2 * N] = N * S;
+}
+void swa_varlen(torch::Tensor seqused, int64_t S, torch::Tensor cu, torch::Tensor used_k) {
+  TORCH_CHECK(seqused.is_cuda() && seqused.scalar_type() == torch::kInt32 && seqused.is_contiguous(), "seqused must be CUDA int32 contiguous");
+  const int64_t N = seqused.numel();
+  TORCH_CHECK(cu.scalar_type() == torch::kInt32 && cu.numel() == 2 * N + 1 && used_k.scalar_type() == torch::kInt32 && used_k.numel() == 2 * N, "bad varlen outputs");
+  c10::cuda::CUDAGuard guard(seqused.device());
+  varlen_kernel<<<(unsigned)((N + 127) / 128 + (N == 0)), 128, 0, at::cuda::getCurrentCUDAStream()>>>(seqused.data_ptr<int>(), cu.data_ptr<int>(), used_k.data_ptr<int>(),
+                                                                                                    (int)N, (int)S);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swa_attn_fwd", &swa_attn_fwd);
   m.def("swa_attn_bwd", &swa_attn_bwd);
@@ -426,4 +522,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swa_qkvg_bwd", &swa_qkvg_bwd);
   m.def("native_rows", &native_rows);   // the row stages of the fp32 block (rows_sm80.cuh)
   m.def("native_copy", &native_copy);
+  m.def("swa_qkvg_f32", &swa_qkvg_f32);   // the fp32 inference forward on TF32 (fp32_fwd_sm80.cuh)
+  m.def("swa_ffn_f32", &swa_ffn_f32);
+  m.def("swa_varlen", &swa_varlen);
 }

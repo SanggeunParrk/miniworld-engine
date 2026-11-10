@@ -31,6 +31,8 @@ struct QkvgFwdParams {
   __nv_bfloat16 *xs, *pqs, *pks;                     // [M][128] or nullptr (save)
   int M, S, B;
   float eps, qk_eps;
+  int tm;                                            // 1: Q / K / V token-major [M][4][32] (the global attention's layout) instead of head-major
+  int nsplit;                                        // 1, 2, 4 or 8: a work item is (tile, 8 / nsplit of the 8 output blocks); small calls split the blocks over warps
 };
 
 // packed row s -> the output channel it holds: in a block of 64 rows the 8 n tiles are (og, j) = (nt >> 2, nt & 3) and column n of a tile holds channel 32 og + 8 (n >> 1) + 2 j + (n & 1)
@@ -46,6 +48,11 @@ struct QkvgCfg {
 };
 
 DEVI float rn(float x) { return round_bf16f(x); }
+
+// element offset of (row r = n S + s, head) in Q / K / V: head-major [N][4][S][32] or token-major [M][4][32]
+DEVI size_t qkv_off(const QkvgFwdParams& p, int r, int n, int s, int head) {
+  return p.tm ? ((size_t)r * 4 + head) * 32 : (((size_t)n * 4 + head) * p.S + s) * 32;
+}
 
 // 8 consecutive channels d = 8 q4 .. 8 q4 + 7 of a head: RoPE with the partner d +- 16 (the lane q4 ^ 2); cs / sn = cos / sin of f = d mod 16
 DEVI void rope8(float (&x)[8], const float (&cs)[8], const float (&sn)[8], int q4) {
@@ -82,9 +89,13 @@ __global__ void __launch_bounds__(G::NTHR, 1) qkvg_fwd_kernel(const QkvgFwdParam
   for (int kb = 0; kb < 4; ++kb) wb[kb] = sb + qf_woff(g8, 4 * kb + q4);
 
   // tiles are dealt out round-robin over the CTAs (the first gridDim.x tiles go to the warp 0 of every CTA, ...): a problem with few tiles still uses every SM
-  const int ntile = (p.M + G::ROWS - 1) / G::ROWS;
-  for (int tile = warp * gridDim.x + blockIdx.x; tile < ntile; tile += G::NW * gridDim.x) {
+  // a work item is (tile, block group): with nsplit > 1 the 8 output blocks of a tile go to nsplit warps (each recomputes the tile's A fragments), so a call of few tiles
+  // keeps more warps busy
+  const int ntile = (p.M + G::ROWS - 1) / G::ROWS, nsplit = p.nsplit, nitem = ntile * nsplit, bper = 8 / nsplit;
+  for (int item = warp * gridDim.x + blockIdx.x; item < nitem; item += G::NW * gridDim.x) {
+    const int tile = item / nsplit, bgrp = item - tile * nsplit;
     const int t0 = tile * G::ROWS;
+    const bool first = bgrp == 0;                                // the saves of x are written once per tile
 
     // ---- rows (mt, hh): r = t0 + 16 mt + g8 + 8 hh;  n, s, and the modulation row
     int rr[G::MT][2], mrow[G::MT][2], sidx[G::MT][2], nidx[G::MT][2];
@@ -138,14 +149,14 @@ __global__ void __launch_bounds__(G::NTHR, 1) qkvg_fwd_kernel(const QkvgFwdParam
           const uint32_t n0 = pack_bf16(y[0], y[1]), n1 = pack_bf16(y[2], y[3]), n2 = pack_bf16(y[4], y[5]), n3 = pack_bf16(y[6], y[7]);
           a[mt][2 * kb][hh] = n0;      a[mt][2 * kb][2 + hh] = n1;
           a[mt][2 * kb + 1][hh] = n2;  a[mt][2 * kb + 1][2 + hh] = n3;
-          if (p.xs != nullptr && rok[mt][hh])
+          if (p.xs != nullptr && first && rok[mt][hh])
             stg128(p.xs + (size_t)rr[mt][hh] * 128 + 32 * kb + 8 * q4, make_uint4(n0, n1, n2, n3));
         }
       }
 
     // ---- 8 blocks of 64 output channels: q | k | v | g, 2 heads (og) per block
 #pragma unroll 1
-    for (int blk = 0; blk < 8; ++blk) {
+    for (int blk = bgrp * bper; blk < (bgrp + 1) * bper; ++blk) {
       float acc[G::MT][8][4];
 #pragma unroll
       for (int mt = 0; mt < G::MT; ++mt)
@@ -184,7 +195,7 @@ __global__ void __launch_bounds__(G::NTHR, 1) qkvg_fwd_kernel(const QkvgFwdParam
               uint4 u;
               u.x = pack_bf16(v[0], v[1]); u.y = pack_bf16(v[2], v[3]); u.z = pack_bf16(v[4], v[5]); u.w = pack_bf16(v[6], v[7]);
               if (rok[mt][hh]) {
-                if (proj == 2) stg128(p.vh + (((size_t)nidx[mt][hh] * 4 + head) * p.S + sidx[mt][hh]) * 32 + 8 * q4, u);
+                if (proj == 2) stg128(p.vh + qkv_off(p, rr[mt][hh], nidx[mt][hh], sidx[mt][hh], head) + 8 * q4, u);
                 else stg128(p.g + row * 128 + col, u);
               }
             } else {                                                  // q, k: round, head RMS norm, round, RoPE, round
@@ -215,7 +226,7 @@ __global__ void __launch_bounds__(G::NTHR, 1) qkvg_fwd_kernel(const QkvgFwdParam
               rope8(x, cs, sn, q4);
               uint4 u;
               u.x = pack_bf16(x[0], x[1]); u.y = pack_bf16(x[2], x[3]); u.z = pack_bf16(x[4], x[5]); u.w = pack_bf16(x[6], x[7]);
-              if (rok[mt][hh]) stg128((proj == 0 ? p.qh : p.kh) + (((size_t)nidx[mt][hh] * 4 + head) * p.S + sidx[mt][hh]) * 32 + 8 * q4, u);
+              if (rok[mt][hh]) stg128((proj == 0 ? p.qh : p.kh) + qkv_off(p, rr[mt][hh], nidx[mt][hh], sidx[mt][hh], head) + 8 * q4, u);
             }
           }
     }

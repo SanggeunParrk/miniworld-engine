@@ -153,14 +153,18 @@ def qkvg_fwd(
     qk_eps: float,
     save: bool,
     cfg: int = 1,
+    tm: bool = False,
+    nsplit: int = 1,
+    max_ctas: int = 0,
 ):
     """The qkvg stage: ``x`` [M, 128] bf16 (M = N S, N = A b), ``mod`` [b S, 768] fp32, ``cos`` / ``sin`` [b S, 16] fp32.  Returns ``(Qh, Kh, Vh, G, X, PQ, PK)``: head-major
-    [N, 4, S, 32] and row-major [M, 128] bf16; X, PQ, PK are the saves of the backward (G itself, unused, when ``save`` is False)."""
+    [N, 4, S, 32] and row-major [M, 128] bf16; X, PQ, PK are the saves of the backward (G itself, unused, when ``save`` is False).  ``tm``: Q / K / V token-major [M, 4, 32]
+    (the global attention's layout) instead of head-major; ``nsplit`` (1 / 2 / 4 / 8): the 8 output blocks of a row tile over that many warps; ``max_ctas`` (0: none) caps the grid."""
     m = x.shape[0]
     n = m // s
     dev = x.device
     qh, kh, vh = (
-        torch.empty(n, H, s, D, device=dev, dtype=torch.bfloat16) for _ in range(3)
+        torch.empty(*((m, H, D) if tm else (n, H, s, D)), device=dev, dtype=torch.bfloat16) for _ in range(3)
     )
     g = torch.empty(m, C, device=dev, dtype=torch.bfloat16)
     xs, pqs, pks = (
@@ -188,6 +192,9 @@ def qkvg_fwd(
         qk_eps,
         save,
         cfg,
+        tm,
+        nsplit,
+        max_ctas,
     )
     return qh, kh, vh, g, xs, pqs, pks
 
@@ -509,14 +516,26 @@ def block_fwd(
         cos.reshape(-1, D // 2).contiguous(),
         sin.reshape(-1, D // 2).contiguous(),
     )
+    qcfg, fcfg = ({}, 0) if save else infer_cfg(n * s)
     qh, kh, vh, g, xs, pqs, pks = qkvg_fwd(
-        qf, mod, cos2, sin2, wqkv, wg, b, s, eps, qk_eps, save
+        qf, mod, cos2, sin2, wqkv, wg, b, s, eps, qk_eps, save, **qcfg
     )
     o, lse = attn_fwd(
         qh, kh, vh, seqused, save_lse=save
     )
-    out, q1s, atts, ys, ffs = ffn_fwd(qf, g, o, mod, wo, wu, wd, b, s, eps, save)
+    out, q1s, atts, ys, ffs = ffn_fwd(qf, g, o, mod, wo, wu, wd, b, s, eps, save, cfg=fcfg)
     outputs = [out.view(n, s, C)]
     if save:
         outputs += [qh, kh, vh, g, o, lse, q1s, xs, pqs, pks, atts, ys, ffs]
     return outputs
+
+
+#: the inference launch shapes of the bf16 qkvg / FFN stages by the row count M (rows <= the bound): ``qkvg_fwd`` keywords (``cfg``, ``nsplit``,
+#: ``max_ctas``) and the ``ffn_fwd`` cfg. A call of few row tiles splits the qkvg output blocks over more warps and runs the FFN on CTAs of
+#: fewer warps (more CTAs): the training forward keeps the defaults (its saves are written per tile).
+_INFER_CFG = ((3072, dict(cfg=1, nsplit=8), 1), (5120, dict(cfg=1, nsplit=2), 1))
+
+
+def infer_cfg(m: int) -> tuple[dict, int]:
+    """(qkvg keywords, ffn cfg) of an inference call over ``m`` rows (``_INFER_CFG``; past its last bound the defaults)."""
+    return next(((q, f) for top, q, f in _INFER_CFG if m <= top), ({}, 0))

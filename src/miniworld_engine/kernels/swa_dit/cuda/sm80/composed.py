@@ -4,6 +4,7 @@ activations and global attention. ``AtomDiTMiniWorld._forward_a100`` calls :func
 * bf16 (``master``: fp32 weights rounded to bf16, gradients handed back unrounded in fp32): the sm_80 stages of this package -- ``mod_fwd``,
   ``qkvg_fwd``, the window attention, ``ffn_fwd`` and their backwards ``ffn_bwd`` -> ``oproj_bwd`` -> ``attn_bwd`` -> ``qkvg_bwd`` ->
   ``mod_bwd`` (one modulation row per sequence row: ``MODE_SINGLE``); the weight gradients are cuBLAS GEMMs with an fp32 result.
+* fp32 inference under TF32 (``block``): the two fused TF32 row kernels of ``fp32_fwd_sm80.cuh`` around the attention (``_infer_fp32``).
 * fp32: the H100 native fp32 stages (``dispatch._native_h100_fwd`` / ``_bwd``) ported -- the row stages of ``rows_sm80.cuh`` around
   cuBLAS projections (fp32, TF32 as torch's matmul flag says) and the bf16 window attention of this package (the H100 fp32 block also
   runs its attention on bf16 Q / K / V).
@@ -39,12 +40,12 @@ def _mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # ------------------------------------------------------------------------------------------------------------------- the attention
 def _varlen(seqused: torch.Tensor, s: int) -> tuple[torch.Tensor, torch.Tensor]:
     """(cu_seqlens [2N + 1], seqused_k [2N]) int32: sample n is the sequences [n s, n s + u_n) and [n s + u_n, (n + 1) s), the second
-    without keys."""
+    without keys (one small kernel, ``ops.cu`` swa_varlen)."""
     n = seqused.shape[0]
-    base = torch.arange(n, device=seqused.device, dtype=torch.int32) * s
-    used = seqused.to(torch.int32)
-    cu = torch.cat([torch.stack([base, base + used], 1).reshape(-1), base.new_full((1,), n * s)])
-    return cu, torch.stack([used, torch.zeros_like(used)], 1).reshape(-1)
+    cu = torch.empty(2 * n + 1, device=seqused.device, dtype=torch.int32)
+    used_k = torch.empty(2 * n, device=seqused.device, dtype=torch.int32)
+    sm80._ext().swa_varlen(seqused.to(torch.int32).contiguous(), s, cu, used_k)
+    return cu, used_k
 
 
 def _token_major(t: torch.Tensor) -> torch.Tensor:
@@ -197,6 +198,104 @@ def _bwd_fp32(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g
             _mm(dffn.t(), hh)]
 
 
+# ------------------------------------------------------------------------------------------------------------------- inference
+# The inference forward (no saves) of what ``block`` serves: bf16 global attention (the bf16 window goes to ``sm80.block_fwd``) and fp32.
+# fp32 under TF32 (torch's matmul flag, as the composed stages' cuBLAS projections follow it) runs the two fused TF32 row kernels of
+# ``fp32_fwd_sm80.cuh`` around the attention -- 3 launches in place of 12; exact fp32 products (TF32 off) keep the composed stages.
+# Global attention takes Q / K / V token-major straight from the qkvg kernel (FlashAttention-2's varlen layout, no transposes).
+
+def _tf32_rna(w: torch.Tensor) -> torch.Tensor:
+    """w rounded to tf32 (cvt.rna: to nearest, ties away from zero -- the kernels round their activations so), fp32."""
+    wi = w.contiguous().view(torch.int32)
+    return ((wi + 0x1000) & -8192).view(torch.float32)
+
+
+def _pack(w: torch.Tensor, rows: torch.Tensor | None = None) -> torch.Tensor:
+    """[N, K] fp32 weight (its rows reordered by ``rows``: packed row -> source row) -> tf32 B fragments in ``fp32_fwd_sm80.cuh``'s
+    ``warp_gemm`` order, [8 warps][K / 16][NT][8 g][4 t][2][2] with NT = N / 64: warp w's n tile nt is packed rows 8 (w NT + nt) .."""
+    if rows is not None:
+        w = w.index_select(0, rows)
+    n, k = w.shape
+    nt = n // 64
+    return _tf32_rna(w).view(8, nt, 8, k // 16, 2, 4, 2).permute(0, 3, 1, 2, 5, 4, 6).contiguous()
+
+
+def _qkvg_rows(device) -> torch.Tensor:
+    """Packed row -> output channel of [Wq; Wk; Wv; Wg] (the f1 order, ``qf_channel``: thread t's 4 n tiles of a head are 8 consecutive
+    channels 8t ..)."""
+    s = torch.arange(512, device=device)
+    loc = s % 64
+    return (s - loc) + 32 * ((loc >> 5) & 1) + 8 * ((loc >> 1) & 3) + 2 * ((loc >> 3) & 3) + (loc & 1)
+
+
+def _wu_rows(device) -> torch.Tensor:
+    """Packed row -> row of Wu: warp w's n tiles 0..3 are a units 32 w .., 4..7 the b units 256 + 32 w .."""
+    w = torch.arange(8, device=device)[:, None, None]
+    half = torch.arange(2, device=device)[None, :, None]
+    r = torch.arange(32, device=device)[None, None, :]
+    return (half * 256 + 32 * w + r).reshape(-1)
+
+
+def _fp32_packs(wqkv, wg, wo, wu, wd) -> list[torch.Tensor]:
+    dev = wqkv.device
+    return [_pack(torch.cat([wqkv, wg]), _qkvg_rows(dev)), _pack(wo), _pack(wu, _wu_rows(dev)), _pack(wd)]
+
+
+#: rows per CTA tile / 16 of the fp32 TF32 kernels (the FFN kernel at most 2): None = the shortest tile whose tile count fits one wave of
+#: CTAs (one per SM), else 4 (a weight pass per tile: longer tiles stream fewer); a tuple ((max rows, mt), ..) overrides (experiments)
+_F32_MT = None
+
+
+def _f32_mt(m: int) -> int:
+    if _F32_MT is not None:
+        return next((mt for top, mt in _F32_MT if m <= top), 4)
+    sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    return next((mt for mt in (1, 2) if -(-m // (16 * mt)) <= sms), 4)
+
+
+def _attention_infer(qkv: tuple, seqused, n: int, s: int, half_window: int, o32: bool) -> torch.Tensor:
+    """O [N S, 128] of the inference attention: the window kernel on head-major Q / K / V (fp32 O for the fp32 block), FlashAttention-2
+    on token-major ones (bf16 O)."""
+    qh, kh, vh = qkv
+    if not is_global(half_window):
+        o = torch.empty(n * s, C, device=qh.device, dtype=_F32 if o32 else _BF)
+        sm80._ext().swa_attn_fwd(qh.transpose(1, 2), kh.transpose(1, 2), vh.transpose(1, 2), seqused, o,
+                                 torch.empty(0, device=qh.device, dtype=_F32))
+        return o
+    cu, used_k = _varlen(seqused, s)
+    o = torch.ops.aten._flash_attention_forward(qh, kh, vh, cu, cu, s, s, 0.0, False, False, scale=D ** -0.5, seqused_k=used_k)[0]
+    return o.reshape(n * s, C)
+
+
+def _infer_bf16(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int) -> torch.Tensor:
+    """The bf16 inference block with global attention: ``_fwd_bf16`` without saves, Q / K / V token-major for FlashAttention-2."""
+    n, s, _ = q.shape
+    qf = q.reshape(n * s, C)
+    qcfg, fcfg = sm80.infer_cfg(n * s)
+    qh, kh, vh, g, *_ = sm80.qkvg_fwd(qf, mod, cos, sin, wqkv, wg, n, s, FP32_EPS, FP32_EPS, False, tm=True, **qcfg)
+    o = _attention_infer((qh, kh, vh), seqused, n, s, half_window, False)
+    return sm80.ffn_fwd(qf, g, o, mod, wo, wu, wd, n, s, FP32_EPS, False, cfg=fcfg)[0].view(n, s, C)
+
+
+def _infer_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int) -> torch.Tensor:
+    """The fp32 inference block on the TF32 row kernels: qkvg -> attention -> out-projection + FFN (``_fwd_fp32``'s statements)."""
+    from miniworld_engine.kernels.swa_dit.dispatch import eval_form
+
+    n, s, _ = q.shape
+    m = n * s
+    dev = q.device
+    w1, wop, wup, wdp = eval_form("swa_a100_fp32_tf32_packs", (wqkv, wg, wo, wu, wd), lambda: _fp32_packs(wqkv, wg, wo, wu, wd))
+    glob = is_global(half_window)
+    qkv = [torch.empty(*((m, H, D) if glob else (n, H, s, D)), device=dev, dtype=_BF) for _ in range(3)]
+    g = torch.empty(m, C, device=dev, dtype=_F32)
+    mt = _f32_mt(m)
+    sm80._ext().swa_qkvg_f32(q, mod, cos, sin, w1, *qkv, g, s, n, FP32_EPS, FP32_EPS, not glob, mt)
+    o = _attention_infer(qkv, seqused, n, s, half_window, True)
+    out = torch.empty(m, C, device=dev, dtype=_F32)
+    sm80._ext().swa_ffn_f32(q, g, o, mod, wop, wup, wdp, out, s, n, FP32_EPS, min(mt, 2))
+    return out.view(n, s, C)
+
+
 # ------------------------------------------------------------------------------------------------------------------- modulation
 def _mod_fwd(c: torch.Tensor, wmod: torch.Tensor, save: bool) -> list[torch.Tensor]:
     """``[mod]`` = silu(c) Wmod^T [R, 768] fp32 (with ``save`` also the backward's operand a = silu(c)): bf16 on ``sm80.mod_fwd``, fp32 as
@@ -237,8 +336,13 @@ def block(x, cond, cos, sin, seqused, half_window: int, weights) -> torch.Tensor
     x, c, cos, sin, ws = _prepare(x, cond, cos, sin, weights, save=False)
     with torch.autocast("cuda", enabled=False):
         mod = _mod_fwd(c, ws[0], False)[0]
-        fwd = _fwd_bf16 if x.dtype == _BF else _fwd_fp32
-        return fwd(x, mod, cos, sin, seqused, *ws[1:], half_window, False)[0]
+        if x.dtype == _BF:
+            if is_global(half_window):
+                return _infer_bf16(x, mod, cos, sin, seqused, *ws[1:], half_window)
+            return _fwd_bf16(x, mod, cos, sin, seqused, *ws[1:], half_window, False)[0]
+        if torch.backends.cuda.matmul.allow_tf32:
+            return _infer_fp32(x, mod, cos, sin, seqused, *ws[1:], half_window)
+        return _fwd_fp32(x, mod, cos, sin, seqused, *ws[1:], half_window, False)[0]
 
 
 class SWABlockA100(torch.autograd.Function):

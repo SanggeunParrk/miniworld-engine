@@ -898,7 +898,7 @@ class AtomDiTMiniWorld(BackendModule):
 
     backends = ("pytorch", "anthropic", "cuda")
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 3, "cuda:h100_sm90": 2}
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 4, "cuda:h100_sm90": 2}
 
     def __init__(
         self,
@@ -1036,7 +1036,9 @@ class AtomDiTMiniWorld(BackendModule):
     # A100 (sm_80): kernels/swa_dit/cuda/sm80. bf16 inference with the window: the fused stages (modulation mod_fwd, then block_fwd:
     # qkvg + q / k RMSNorm + 3D RoPE, the window attention, out-projection + gated residual + SwiGLU FFN; mma.sync). Training, fp32 and
     # global attention: sm80/composed.py (the same bf16 stages and their backwards; fp32 on the row stages around cuBLAS projections and
-    # the bf16 attention, as the H100 native fp32 block; global attention on PyTorch's FlashAttention-2). Range: bf16 or fp32 activations
+    # the bf16 attention, as the H100 native fp32 block; global attention on PyTorch's FlashAttention-2). fp32 inference under TF32: the two
+    # fused TF32 row kernels (sm80/fp32_fwd_sm80.cuh: qkvg, out-projection + FFN) around the attention; a bf16 global inference call takes
+    # Q / K / V token-major from the qkvg kernel (no transposes for FlashAttention-2). Range: bf16 or fp32 activations
     # (weights in that dtype or fp32 masters), d_atom 128 = 4 heads x 32, d_cond 128, SwiGLU hidden 256, half_window 64 or global.
     def _a100_linears(self):
         return (self.adaln_modulation[1], self.attn.Wqkv, self.attn.gate_proj, self.attn.out_proj, self.ffn.w_up, self.ffn.w_down)
@@ -1185,7 +1187,7 @@ class SWAAtomTransformer(BackendModule):
 
     backends = ("pytorch", "anthropic", "cuda")
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 3, "cuda:h100_sm90": 2}
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 4, "cuda:h100_sm90": 2}
 
     class Config(BaseModel):
         """Configuration for the SWA atom transformer."""
