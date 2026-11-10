@@ -637,20 +637,20 @@ def _generic_loads(dt: torch.dtype) -> bool:
     return True
 
 
+def _gen_rows(L: int) -> int:
+    """Rows a thread of the one-pass pair-bias kernel takes: 1 at L <= 256 (its grid is (L / 64) x (L / 4 rows) CTAs: at L128 two rows a thread leave 32 CTAs
+    for 108 SMs), else the kernel's default 2."""
+    return 1 if L <= 256 else 2
+
+
+#: the longest L whose fp32 wide-pair backward runs as LayerNorm + TF32 GEMMs (``_bias_gemm_bwd``); beyond it the one-pass backward kernel is faster
+GEMM_BWD_MAX_L = 384
+
+
 def _gemm_pair(pair: torch.Tensor, f32: bool) -> bool:
-    """fp32 pairs of 256 channels or more take the pair bias as a LayerNorm pass + a TF32 cuBLAS GEMM: the one-pass kernel's FMA projection (dp x H
-    multiply-adds per pair element) costs more than both there (A100, 16 heads, L128: the block 1.2x slower than Triton's LayerNorm + GEMM at d_pair 384 / 512)."""
-    return f32 and pair.shape[-1] >= 256
-
-
-def _bias_gemm(z: torch.Tensor, wcm: torch.Tensor, mask, L: int, eps: float) -> torch.Tensor:
-    """bias [H, L, L] fp32 natural units = Wf LN0(z)^T, masked keys at -1e4 (the one-pass kernel's fill): z [L, L, dp] fp32, wcm = Wf channel-major [dp, H]."""
-    dp, heads = wcm.shape
-    zn = torch.native_layer_norm(z.reshape(L * L, dp), (dp,), None, None, eps)[0]
-    bias = torch.mm(wcm.t(), zn.t()).view(heads, L, L)
-    if mask is not None:
-        bias.masked_fill_(~mask.view(1, 1, L), -1e4)
-    return bias
+    """The backward of an fp32 pair of 256 channels or more at L <= ``GEMM_BWD_MAX_L``: a LayerNorm recompute + TF32 cuBLAS GEMMs + the LayerNorm backward,
+    faster there than the one-pass kernel (A100, 16 heads, L128 train: d_pair 512 0.58 -> 0.49 ms, 384 0.48 -> 0.44); at L768 the one-pass kernel is faster."""
+    return f32 and pair.shape[-1] >= 256 and pair.shape[1] <= GEMM_BWD_MAX_L
 
 
 def _bias_gemm_bwd(z: torch.Tensor, wcm: torch.Tensor, db: torch.Tensor, L: int, eps: float):
@@ -733,8 +733,7 @@ def _gfwd(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, p
         qkvg = torch.addmm(b, s, w.t())
         q, k, v, g = (qkvg[:, i * n:(i + 1) * n] for i in range(4))
         m = None if mask is None else mask.reshape(L)
-        bias = (_bias_gemm(pair[0], wcm, m, L, eps_p) if _gemm_pair(pair, f32)
-                else sm80.pair_bias_generic(pair[0], wcm, m, L, eps_p, oscale=1.0 if f32 else math.sqrt(hd)))
+        bias = sm80.pair_bias_generic(pair[0], wcm, m, L, eps_p, oscale=1.0 if f32 else math.sqrt(hd), rows=_gen_rows(L))
         scale = hd ** -0.5
         if save:
             o = torch.empty(L, n, device=x.device, dtype=dt)
