@@ -41,7 +41,8 @@ def _glue():
 
 
 def _lt():
-    from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _lt as lt   # host-only cublasLt glue (no device code)
+    # the TriangleAttention family's host-only cublasLt glue (no device code: the same build serves every card)
+    from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _lt as lt
 
     return lt()
 
@@ -97,7 +98,7 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
 
 def _backward(dy, msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, saved):
     g, e = _glue(), _ext()
-    lnm_w, lnm_b, wvg, lnz_w, lnz_b, wb, wo = _weights(leaves)
+    lnm_w, _, wvg, lnz_w, _, wb, wo = _weights(leaves)
     zn, zmean, zrstd, w, y, mmean, mrstd, vg, v_hm, o_hm, u = saved
     _, S, L, _ = msa.shape
     f32 = torch.float32
