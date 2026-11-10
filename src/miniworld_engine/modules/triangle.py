@@ -1131,12 +1131,12 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     #: ``"cuda"``: :class:`TriangleMultiplication`'s H100 TriMul kernels (``kernels/integrations/trimul_h100``) with the length factor
     #: folded into the left projection: ``W_a -> W_a / n`` scales ``a`` and so the contraction by ``1 / n`` exactly (the gate, the mask and
     #: the backward are linear in it; ``W_a``'s gradient comes back through the product), one launch per sample when the samples' masks
-    #: differ. H100 only (the A100 TriMul is not wired to the factor). ``"triton"``: the portable Triton TriMul the same way.
+    #: differ; on an A100 the same on ``kernels/integrations/trimul_sm80``. ``"triton"``: the portable Triton TriMul the same way.
     backends = ("pytorch", "cuda", "triton")
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
-        if pair.is_cuda and torch.cuda.get_device_capability(pair.device) != (9, 0):
-            return "the RF3 length factor is wired to the H100 (sm_90a) TriMul kernels only"
+        if pair.is_cuda and torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0)):
+            return "the RF3 length factor is wired to the H100 (sm_90a) / A100 (sm_80) TriMul kernels only"
         one = pair[:1] if mask is not None and pair.shape[0] > 1 else pair    # per-sample launches: one sample's contract
         return _trimul_cuda_route(self, one, None if mask is None else mask[:one.shape[0]], dropout_p, bidirectional=False)[1]
 
@@ -1153,7 +1153,12 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
         outs = []
         for b in range(pair.shape[0]):
             view, x, m = _LeftScaled(self, factor[b:b + 1]), pair[b:b + 1], mask[b:b + 1]
-            if _trimul_cuda_route(view, x, m, p, bidirectional=False)[0] == "infer":
+            route = _trimul_cuda_route(view, x, m, p, bidirectional=False)[0]
+            if route == "sm80":   # A100: the same folded factor on kernels/integrations/trimul_sm80
+                from miniworld_engine.kernels.integrations import trimul_sm80
+
+                outs.append(trimul_sm80.update(view, x, m, None if drop is None else drop[b:b + 1], bidirectional=False))
+            elif route == "infer":
                 outs.append(trimul_h100.update_inference(view, x, m, bidirectional=False))
             else:
                 outs.append(trimul_h100.update(view, x, m, None if drop is None else drop[b:b + 1], bidirectional=False))
