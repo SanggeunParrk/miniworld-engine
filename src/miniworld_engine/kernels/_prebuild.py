@@ -62,12 +62,12 @@ PEAK_GB = 5.0
 
 @dataclasses.dataclass(frozen=True)
 class Target:
-    arch: str  # "sm90" / "sm100"
+    arch: str  # "sm80" / "sm90" / "sm100"
     sms: int  # SM count of the card the SM-count-specialized builds are made for
     gpu: str  # launch-config table key (_launch_config.gpu_key) of that card
 
 
-TARGETS = {"sm90": Target("sm90", 132, "h100_sm90"), "sm100": Target("sm100", 148, "b200_sm100")}
+TARGETS = {"sm80": Target("sm80", 108, "a100_sm80"), "sm90": Target("sm90", 132, "h100_sm90"), "sm100": Target("sm100", 148, "b200_sm100")}
 
 
 def target(arch: str) -> Target:
