@@ -966,7 +966,7 @@ def _params(module) -> list[torch.Tensor]:
         module.to_query.bias,
         module.to_key.weight,
         module.to_value.weight,
-        module.to_gate.weight,
+        module.to_gate.weight if _gated(module) else module.to_query.weight,  # replaced below when ungated
         module.to_out.weight,
         module.to_scale.weight,
         module.to_scale.bias,
