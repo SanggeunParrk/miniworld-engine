@@ -1,4 +1,4 @@
-"""A100 (sm_80) hand-CUDA OuterProductMean, forward and backward (bf16, d_hidden 32, d_msa 64 / 128, d_pair 128 / 256 / 384).
+"""A100 (sm_80) hand-CUDA OuterProductMean, forward and backward (bf16, d_hidden 32, d_msa 64 / 128 / 256, d_pair 128 / 256 / 384 / 512).
 
 ``OuterProductMean`` is LN(msa) -> two projections -> the outer product of the projected rows averaged over the MSA depth -> the 32 x 32 -> d_pair
 projection. The outer product is one GEMM in the *grouped* layout, O[(i, c), (j, e)] = sum_s a[s, i, c] b[s, j, e] (M = N = 32 L, K = S): cuBLAS runs
@@ -27,9 +27,9 @@ from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 _dir = Path(__file__).parent / "sm80"
 
 CH = 32  # d_hidden
-D_MSA = (64, 128)
-D_PAIR = (128, 256, 384)
-SPLITS = {128: 24, 256: 12, 384: 8}  # dWo: splits over rows of i (CTAs ~ 192 per card)
+D_MSA = (64, 128, 256)
+D_PAIR = (128, 256, 384, 512)
+SPLITS = {128: 24, 256: 12, 384: 8, 512: 6}  # dWo: splits over rows of i (CTAs ~ 192 per card)
 
 
 @functools.lru_cache(maxsize=1)
@@ -165,8 +165,8 @@ def dgrad(
             0
         )  # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
     bi = (
-        2 if (variant == 3 and cz != 128) else 4
-    )  # variant 3: the 64-pair CTA (two per SM) at d_pair 256 / 384
+        2 if (variant == 3 and cz != 128) or cz == 512 else 4
+    )  # variant 3: the 64-pair CTA (two per SM) at d_pair 256 / 384; d_pair 512 always
     parts = dz.new_empty((-(-length // 32) * -(-length // bi), cz), dtype=torch.float32)
     ext().dgrad(
         dz,
@@ -212,7 +212,7 @@ def prologue_bwd(
         variant = (
             0
         )  # schedule experiments (buffers / CTAs per SM); 0 is the shipped one
-    ntile = -(-S // 64) * -(-L // 2)
+    ntile = -(-S // (32 if cm == 256 else 64)) * -(-L // 2)   # d_msa 256: the wide kernel's tiles of 32 rows x 2 tokens
     nblk = min(
         ntile,
         torch.cuda.get_device_properties(m.device).multi_processor_count

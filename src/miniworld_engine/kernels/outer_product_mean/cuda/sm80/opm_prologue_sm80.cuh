@@ -33,10 +33,11 @@ struct PrologueParams {
 };
 
 template <int CM, int NB> struct PrologueCfg {                              // NB: m tile buffers (the prefetch runs NB - 1 tiles ahead)
-  static constexpr int NTHR = 256, NTOK = 128, NCH = CM / 8;                 // 16-byte chunks per m row
+  // d_msa 256: 64 tokens (4 warps x 16) per tile, so that two 32 KiB m buffers, the 32 KiB weights and the staging fit (128 tokens would take 176 KiB)
+  static constexpr int NTOK = CM == 256 ? 64 : 128, NTHR = 2 * NTOK, NCH = CM / 8;   // 16-byte chunks per m row
   static constexpr int MB = NTOK * CM * 2, WB = 64 * CM * 2, OB = 2 * NTOK * 64;   // one m tile, stacked weights, the staged a | b tiles ([128][32] bf16 each)
   static constexpr int SMEM = NB * MB + WB + OB + 2 * CM * 4;
-  static_assert(CM == 64 || CM == 128, "d_msa");
+  static_assert(CM == 64 || CM == 128 || CM == 256, "d_msa");
   static_assert(NB >= 2 && NB <= 4, "buffers");
   static_assert(SMEM <= 166912, "sm_80 shared memory");
 };
@@ -54,7 +55,7 @@ DEVI void pl_load(const PrologueParams& p, uint32_t dst, int tl, int tid) {
 }
 
 template <int CM, int NB, bool SAVE_STATS, int NMINB>
-__global__ void __launch_bounds__(256, NMINB) opm_prologue_kernel(const PrologueParams p) {
+__global__ void __launch_bounds__(PrologueCfg<CM, NB>::NTHR, NMINB) opm_prologue_kernel(const PrologueParams p) {
   using C = PrologueCfg<CM, NB>;
   extern __shared__ __align__(128) unsigned char smem[];
   __shared__ uint8_t smask[C::NTOK];

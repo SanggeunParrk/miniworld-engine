@@ -134,7 +134,8 @@ void prologue(torch::Tensor m, torch::Tensor mask, torch::Tensor lnw, torch::Ten
   const bool save = stats.numel() > 0;
   if (CM == 64) { if (save) launch_prologue_v<64, true>(p, L, (int)variant, st); else launch_prologue_v<64, false>(p, L, (int)variant, st); }
   else if (CM == 128) { if (save) launch_prologue_v<128, true>(p, L, (int)variant, st); else launch_prologue_v<128, false>(p, L, (int)variant, st); }
-  else TORCH_CHECK(false, "prologue: d_msa must be 64 or 128");
+  else if (CM == 256) { if (save) launch_prologue<256, 3, true>(p, L, st); else launch_prologue<256, 3, false>(p, L, st); }   // the 64-token tile
+  else TORCH_CHECK(false, "prologue: d_msa must be 64, 128 or 256");
 }
 
 // O [L 32, L 32] bf16, norm fp32 [L, L] (empty: the constant norm_const), wo [CZ, 1024] bf16, bias fp32 [CZ], residual [L, L, CZ] bf16 (empty: none) -> out [L, L, CZ] bf16
@@ -157,6 +158,9 @@ void epilogue(torch::Tensor O, torch::Tensor norm, double norm_const, torch::Ten
     if (variant == 1) launch_epilogue<128, 3, 1>(p, st);        // one CTA per SM, 3 stages
     else if (variant == 2) launch_epilogue<128, 4, 1>(p, st);   // one CTA, 4 stages
     else launch_epilogue<128, 2, 2>(p, st);                     // two CTAs per SM, 2 stages: the shipped schedule
+  } else if (CZ == 512) {                                                       // four column tiles of 128 channels on the d_pair 128 CTA
+    p.ntile = 4;
+    launch_epilogue<128, 2, 2>(p, st);
   } else if (CZ == 256 || CZ == 384) {
     if (variant == 1) {                                                          // wide: 16 warps, 128 pairs and all d_pair channels, one CTA per SM
       if (CZ == 256) launch_epilogue<256, 2, 1, true>(p, st); else launch_epilogue<384, 2, 1, true>(p, st);
@@ -167,7 +171,7 @@ void epilogue(torch::Tensor O, torch::Tensor norm, double norm_const, torch::Ten
       launch_epilogue<128, 2, 2>(p, st);
     }
   } else {
-    TORCH_CHECK(false, "epilogue: d_pair must be 128, 256 or 384");
+    TORCH_CHECK(false, "epilogue: d_pair must be 128, 256, 384 or 512");
   }
 }
 
@@ -177,7 +181,7 @@ void dgrad(torch::Tensor dz, torch::Tensor norm, double norm_const, torch::Tenso
   check_bf16(dz, "dz"); check_bf16(wo, "wo"); check_bf16(dO, "dO"); check_bf16(dzn, "dzn"); check_f32(dbo_part, "dbo_part");
   const int L = (int)dz.size(0), CZ = (int)dz.size(2);
   TORCH_CHECK(dz.dim() == 3 && dz.size(1) == L && dO.size(0) == (int64_t)L * 32 && dO.size(1) == (int64_t)L * 32 && dzn.sizes() == dz.sizes(), "dz / dO / dzn shapes");
-  const int bi = (variant == 3 && CZ != 128) ? 2 : 4;                                                              // variant 3: the 64-pair CTA (two per SM) at d_pair 256 / 384
+  const int bi = ((variant == 3 && CZ != 128) || CZ == 512) ? 2 : 4;                                                              // variant 3: the 64-pair CTA (two per SM) at d_pair 256 / 384
   const int gx = (L + 31) / 32, gy = (L + bi - 1) / bi;
   TORCH_CHECK(dbo_part.numel() == (int64_t)gx * gy * CZ, "dbo_part: [gx * gy, CZ]");
   TORCH_CHECK(norm.numel() == 0 || (norm.is_cuda() && norm.scalar_type() == at::kFloat && norm.is_contiguous() && norm.numel() == (int64_t)L * L), "norm: fp32 [L, L]");
@@ -198,8 +202,10 @@ void dgrad(torch::Tensor dz, torch::Tensor norm, double norm_const, torch::Tenso
   } else if (CZ == 384) {                                                                   // 64 rows (96 KB dz tile + 2 x 32 KB ring + 32 KB output tile); 32 rows = variant 1
     if (variant == 1) launch_dgrad<384, 3, 1>(p, st); else if (variant == 3) launch_dgrad<384, 2, 2, 2>(p, st);
     else launch_dgrad<384, 2, 1, 4, 64>(p, st);
+  } else if (CZ == 512) {                                                                   // 64 pairs (64 KB dz tile + 2 x 16 KB ring of 64-row Wo chunks + 16 KB output tile)
+    launch_dgrad<512, 2, 1, 2, 64>(p, st);
   } else {
-    TORCH_CHECK(false, "dgrad: d_pair must be 128, 256 or 384");
+    TORCH_CHECK(false, "dgrad: d_pair must be 128, 256, 384 or 512");
   }
 }
 
@@ -232,7 +238,7 @@ void prologue_bwd(torch::Tensor dA, torch::Tensor dB, torch::Tensor m, torch::Te
   const int S = (int)m.size(0), L = (int)m.size(1), CM = (int)m.size(2);
   TORCH_CHECK(dA.dim() == 2 && dA.size(0) >= S && dA.size(1) == (int64_t)L * 32 && dB.sizes() == dA.sizes() && dm.sizes() == m.sizes(), "dA / dB / dm shapes");
   TORCH_CHECK(mask.numel() == 0 || (mask.is_cuda() && mask.scalar_type() == at::kByte && mask.is_contiguous() && mask.numel() == (int64_t)S * L), "mask: uint8 [S, L]");
-  const int ntile_s = (S + 63) / 64, ntile = ntile_s * ((L + 1) / 2);
+  const int ntile_s = CM == 256 ? (S + 31) / 32 : (S + 63) / 64, ntile = ntile_s * ((L + 1) / 2);   // d_msa 256: tiles of 32 rows x 2 tokens
   const int nblk = (int)part.size(0);
   TORCH_CHECK(part.dim() == 2 && part.size(1) == 66 * CM && nblk >= 1 && nblk <= ntile, "part: [nblk <= tiles, 66 CM]");
   const at::cuda::CUDAGuard guard(m.device());
@@ -245,7 +251,12 @@ void prologue_bwd(torch::Tensor dA, torch::Tensor dB, torch::Tensor m, torch::Te
   // variant 0 (shipped): one tile buffer, two CTAs per SM (d_msa 64); variant 1: double-buffered tiles, one CTA per SM
   if (CM == 64) { if (variant == 1) launch_pb<64, 2, 1>(p, nblk, st); else launch_pb<64, 1, 2>(p, nblk, st); }
   else if (CM == 128) launch_pb<128, 2, 1>(p, nblk, st);
-  else TORCH_CHECK(false, "prologue_bwd: d_msa must be 64 or 128");
+  else if (CM == 256) {
+    raise_smem(opm80::opm_prologue_bwd_wide_kernel, opm80::PbWide::SMEM);
+    opm80::opm_prologue_bwd_wide_kernel<<<nblk, opm80::PbWide::NTHR, opm80::PbWide::SMEM, st>>>(p);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  else TORCH_CHECK(false, "prologue_bwd: d_msa must be 64, 128 or 256");
 }
 
 // in fp32 [R, W] -> out [W] (fp32 or bf16): the rows summed in order. W a multiple of 4.
