@@ -437,7 +437,7 @@ def backward(
 
 # ------------------------------------------------------------------------------------------------- the attention module's core (any head dim of HEAD_DIMS)
 #: head dims the plain-epilogue kernels are instantiated for: 32 (the atom DiT: 4 heads) and 48 (the token DiT: 16 heads)
-HEAD_DIMS = (32, 48)
+HEAD_DIMS = (32, 48, 64)
 _MODE_PLAIN, _MODE_PGATE = 2, 3
 #: the pair bias of the atom width: 16 pair channels, 4 heads of 32 (``aux_sm80.cuh``); a masked or padded key's bias is this in natural units (bf16 -9984)
 PAIR_C, PAIR_H, PAIR_HD, MASKED_BIAS = 16, 4, 32, -1e4
@@ -931,6 +931,8 @@ def pair_bias_backward(
 # ------------------------------------------------------------------------------------------------- fp32 operands on the TF32 tensor cores (``ops_tf32.cu``)
 #: head dims the TF32 kernels are instantiated for
 TF32_HEAD_DIMS = (32, 48)
+#: head dims of the module-level TF32 core (``tf32_forward`` / ``tf32_backward``; the gated inference core keeps TF32_HEAD_DIMS)
+TF32_MODULE_HEAD_DIMS = (32, 48, 64)
 #: the fp32 bias-gradient partials of one backward launch are at most this many bytes (the query tiles are run in chunks beyond it)
 _DBP_BUDGET = 2 << 30
 
@@ -960,7 +962,7 @@ def supported_tf32(
     return (
         dtype is torch.float32
         and d % heads == 0
-        and d // heads in TF32_HEAD_DIMS
+        and d // heads in TF32_MODULE_HEAD_DIMS
         and length % 128 == 0
         and _is_ampere(index)
     )
@@ -994,7 +996,7 @@ def tf32_forward(
     ``[A L, H hd]``, ``lse`` fp32 ``[A, H, L]`` (the scaled base-2 log-sum-exp); with ``gate`` (a token-major fp32 view like q) ``o = sigmoid(gate) softmax(...) v`` is written
     to ``out`` (default: over ``q``'s view) and ``lse`` is None.  ``prescaled``: q is already scaled by sm_scale log2 e and the bias by log2 e (the fused token DiT's pack).
     ``kpen`` / ``kps`` / ``out`` / ``lse``: as for :func:`plain_forward`."""
-    assert head_dim in TF32_HEAD_DIMS, head_dim
+    assert head_dim in TF32_MODULE_HEAD_DIMS, head_dim
     sm_scale = 1.0 / math.sqrt(head_dim) if sm_scale is None else sm_scale
     dev = q.device
     o = (
@@ -1065,7 +1067,7 @@ def tf32_backward(
     """The backward of :func:`tf32_forward` (without the gate): ``dob`` the output's gradient fp32 ``[A L, H hd]``, ``o`` / ``lse`` the forward's, ``bias`` fp32 natural units.
     Returns ``(dq, dk, dv, db)``: fp32 ``[A L, H hd]`` each (or the views passed) and the bias gradient fp32 ``[H, L, L]`` (the sum over the samples; masked keys 0), summed from fp32
     partials of 1-2 samples in a fixed order: a replay is bit-identical."""
-    assert head_dim in TF32_HEAD_DIMS, head_dim
+    assert head_dim in TF32_MODULE_HEAD_DIMS, head_dim
     ext = _tf32_ext()
     dev, m, d = q.device, samples * length, heads * head_dim
     sm_scale = 1.0 / math.sqrt(head_dim) if sm_scale is None else sm_scale

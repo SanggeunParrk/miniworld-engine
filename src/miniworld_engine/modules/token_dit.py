@@ -339,7 +339,7 @@ class TokenDiTProtenix(BackendModule):
     # mma.sync core, the gates; bf16 or the TF32 core for fp32), or for the per-head q / k RMSNorm (TokenDiTMiniWorld) the general sm_80
     # composition kernels/integrations/a100_families.token (CUDA rows, cuBLAS, a materialised-score attention). The transition:
     # kernels/integrations/conditioned_transition_sm80 (AdaLN rows + the SwiGLU tail, bf16 or TF32). Range = their gates: bf16 / master /
-    # fp32, head dim 32 or 48, LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none, no extra_pair_bias.
+    # fp32, head dim 32, 48 or 64, LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none, no extra_pair_bias.
     def _a100_route(self, single, cond, pair, mask, compute_dtype, extra_pair_bias):
         from miniworld_engine.kernels.integrations import augattn_sm80
         from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
@@ -365,7 +365,7 @@ class TokenDiTProtenix(BackendModule):
             return "a100_generic", km
         if not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond=cond):
             return None, ("A100: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or "
-                          "fp32, head dim 32 or 48, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)")
+                          "fp32, head dim 32, 48 or 64, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)")
         return "a100", None
 
     def _forward_a100(self, route, single, cond, pair, mask, km):

@@ -98,6 +98,7 @@ void attn_fwd_tf32(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
   FWD32(32, 3, 1, 0, 0) FWD32(32, 3, 1, 1, 0) FWD32(32, 3, 1, 0, 1) FWD32(32, 3, 1, 1, 1)
   FWD32(48, 2, 1, 0, 0) FWD32(48, 2, 1, 1, 0) FWD32(48, 2, 1, 0, 1) FWD32(48, 2, 1, 1, 1)
   FWD32(48, 3, 1, 0, 0) FWD32(48, 3, 1, 1, 0) FWD32(48, 3, 1, 0, 1) FWD32(48, 3, 1, 1, 1)
+  FWD32(64, 2, 1, 0, 0) FWD32(64, 2, 1, 1, 0) FWD32(64, 2, 1, 0, 1) FWD32(64, 2, 1, 1, 1)
 #undef FWD32
   TORCH_CHECK(false, "attn_fwd_tf32: unsupported schedule (hd, nkv, minb, gate, kpen)");
 }
@@ -127,7 +128,7 @@ void attn_bwd_dq_tf32(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::
   const int64_t km = p.kpen != nullptr, cfg = (((hd * 10 + rows) * 10 + nkv) * 10 + minb) * 10 + km;
 #define DQ32(HD, R, NKV, MINB, KM) \
   if (cfg == (((int64_t(HD) * 10 + (R)) * 10 + (NKV)) * 10 + (MINB)) * 10 + (KM)) { launch_dq32<aa80::Dq32Cfg<HD, R, NKV, MINB, KM>>(p, (int)A, (int)nqt); return; }
-  DQ32(32, 1, 2, 1, 0) DQ32(32, 2, 2, 1, 0) DQ32(48, 1, 2, 1, 0) DQ32(32, 1, 2, 1, 1) DQ32(32, 2, 2, 1, 1) DQ32(48, 1, 2, 1, 1)
+  DQ32(32, 1, 2, 1, 0) DQ32(32, 2, 2, 1, 0) DQ32(48, 1, 2, 1, 0) DQ32(32, 1, 2, 1, 1) DQ32(32, 2, 2, 1, 1) DQ32(48, 1, 2, 1, 1) DQ32(64, 1, 2, 1, 0) DQ32(64, 1, 2, 1, 1)
 #undef DQ32
   TORCH_CHECK(false, "attn_bwd_dq_tf32: unsupported schedule (hd, rows, nkv, minb, kpen)");
 }
@@ -165,7 +166,7 @@ void attn_bwd_dkv_tf32(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch:
   const int64_t km = p.kpen != nullptr, cfg = ((hd * 10 + nst) * 10 + minb) * 10 + km;
 #define DKV32(HD, NST, MINB, KM) \
   if (cfg == ((int64_t(HD) * 10 + (NST)) * 10 + (MINB)) * 10 + (KM)) { launch_dkv32<aa80::Dkv32Cfg<HD, NST, MINB, KM>>(p, (int)A); return; }
-  DKV32(32, 2, 1, 0) DKV32(48, 2, 1, 0) DKV32(32, 2, 1, 1) DKV32(48, 2, 1, 1) DKV32(32, 3, 1, 0)
+  DKV32(32, 2, 1, 0) DKV32(48, 2, 1, 0) DKV32(32, 2, 1, 1) DKV32(48, 2, 1, 1) DKV32(32, 3, 1, 0) DKV32(64, 2, 1, 0) DKV32(64, 2, 1, 1)
 #undef DKV32
   TORCH_CHECK(false, "attn_bwd_dkv_tf32: unsupported schedule (hd, nst, minb, kpen)");
 }
@@ -190,6 +191,7 @@ void attn_delta32(torch::Tensor dO, torch::Tensor O, torch::Tensor delta, int64_
   auto st = at::cuda::getCurrentCUDAStream();
   if (hd == 32) aa80::attn_delta32_kernel<32><<<grid, 128, 0, st>>>(dO.data_ptr<float>(), O.data_ptr<float>(), delta.data_ptr<float>(), dO.stride(0), O.stride(0), (int)L, (int)H, T);
   else if (hd == 48) aa80::attn_delta32_kernel<48><<<grid, 128, 0, st>>>(dO.data_ptr<float>(), O.data_ptr<float>(), delta.data_ptr<float>(), dO.stride(0), O.stride(0), (int)L, (int)H, T);
+  else if (hd == 64) aa80::attn_delta32_kernel<64><<<grid, 128, 0, st>>>(dO.data_ptr<float>(), O.data_ptr<float>(), delta.data_ptr<float>(), dO.stride(0), O.stride(0), (int)L, (int)H, T);
   else TORCH_CHECK(false, "attn_delta32: head dim 32 or 48");
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

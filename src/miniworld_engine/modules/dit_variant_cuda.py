@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 
 from miniworld_engine.modules.norm import IdentityAdaptiveLayerNorm
+from miniworld_engine.modules.transition import ConditionedTransition
 
 _BF, _F32 = torch.bfloat16, torch.float32
 
@@ -246,16 +247,17 @@ class VariantTokenCuda:
                           "a key mask shared by the samples; no gradient: bfloat16 or float32 inference, a gradient: the training path)")
         return fn, (pair[0], mask)
 
-    # A100 (sm_80): the sequential block with the plain pair-bias attention (TokenDiTBoltz2) runs its attention on
-    # kernels/integrations/augattn_sm80 (the module's AdaLN, then cuBLAS projections, the pair bias kernels, the mma.sync core and the gates,
-    # forward and backward; bf16 or the TF32 core) and its up-gate transition as the module's own statements. The parallel blocks
-    # (RoseTTAFold3, Chai-1) have no sm_80 path.
+    # A100 (sm_80): the attention runs on kernels/integrations/augattn_sm80 (the module's AdaLN, then cuBLAS projections, the pair bias
+    # kernels, the mma.sync core and the gates, forward and backward; bf16 or the TF32 core), including its variants: the flat q / k
+    # LayerNorm and the bias-free query (RoseTTAFold3), no gating query (Chai-1). The transition: the sm_80 ConditionedTransition
+    # (kernels/integrations/conditioned_transition_sm80) where it serves the module (RoseTTAFold3), else the module's own statements
+    # (Boltz-2's up-gate transition, Chai-1's identity AdaLN). The parallel blocks add the transition's update of the block input.
     def _a100_token_reason(self, single, cond, pair, mask, compute_dtype, extra_pair_bias) -> str | None:
         from miniworld_engine.kernels.integrations import augattn_sm80
         from miniworld_engine.modules.attention import AugmentedAttentionPairBias
 
-        if self.parallel or type(self.attention) is not AugmentedAttentionPairBias:
-            return "A100: no sm_80 port of the DiT-variant kernels (kernels/dit_variants are sm_90a only)"
+        if not isinstance(self.attention, AugmentedAttentionPairBias):
+            return f"A100: attention {type(self.attention).__name__} (no sm_80 path)"
         if extra_pair_bias is not None:
             return "A100: extra_pair_bias (not an input of the sm_80 attention kernels)"
         dt = single.dtype
@@ -267,8 +269,20 @@ class VariantTokenCuda:
             return f"A100: compute_dtype {compute_dtype} (the sm_80 kernels run in the activations' dtype)"
         if not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond=cond):
             return ("A100: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or fp32, "
-                    "head dim 32 or 48, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)")
+                    "head dim 32, 48 or 64, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)")
         return None
+
+    def _a100_transition_delta(self, single, cond):
+        """The transition's update of the block input (no residual): the sm_80 ConditionedTransition where it serves the module, else its own
+        statements."""
+        from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
+
+        grad = _wants_grad(self, single, cond)
+        if (type(self.transition) is ConditionedTransition and not isinstance(self.transition.ada_ln_in, IdentityAdaptiveLayerNorm)
+                and ct_sm80.serves(self.transition, single, cond, single.dtype, grad):
+            with torch.autocast("cuda", enabled=False):
+                return ct_sm80.update(self.transition, single, cond, False, single.dtype, grad)
+        return self.transition.delta(single, cond)
 
     def _supports_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> str | None:
         if _a100(single):
@@ -280,7 +294,10 @@ class VariantTokenCuda:
         if _a100(single):
             from miniworld_engine.kernels.integrations import augattn_sm80
 
-            return self.transition(augattn_sm80.forward(self.attention, single, cond, pair, mask), cond)
+            single_a = augattn_sm80.forward(self.attention, single, cond, pair, mask)
+            if not self.parallel:
+                return self.transition(single_a, cond)
+            return single_a + self._a100_transition_delta(single, cond)
         fn, call = self._token_serving(single, cond, pair, mask, compute_dtype, extra_pair_bias)
         return _run(fn, _stack(self, atom=False), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair))
 

@@ -147,6 +147,9 @@ void attn_fwd_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
   FWD_CFG(48, 1, 4, 2, 3, 0) FWD_CFG(48, 2, 3, 2, 3, 0) FWD_CFG(32, 1, 4, 2, 3, 0) FWD_CFG(32, 2, 3, 2, 3, 0)
   FWD_CFG(48, 1, 4, 2, 2, 1) FWD_CFG(48, 2, 3, 2, 2, 1) FWD_CFG(32, 1, 4, 2, 2, 1) FWD_CFG(32, 2, 3, 2, 2, 1)
   FWD_CFG(48, 1, 4, 2, 3, 1) FWD_CFG(48, 2, 3, 2, 3, 1) FWD_CFG(32, 1, 4, 2, 3, 1) FWD_CFG(32, 2, 3, 2, 3, 1)
+  // head dim 64 (12 heads at d_single 768): the module-level core, training (MODE_PLAIN) and inference (MODE_PGATE / MODE_PLAIN), shared or per-sample mask
+  FWD_CFG(64, 1, 4, 2, 2, 0) FWD_CFG(64, 2, 3, 2, 2, 0) FWD_CFG(64, 1, 4, 2, 3, 0) FWD_CFG(64, 2, 3, 2, 3, 0)
+  FWD_CFG(64, 1, 4, 2, 2, 1) FWD_CFG(64, 2, 3, 2, 2, 1) FWD_CFG(64, 1, 4, 2, 3, 1) FWD_CFG(64, 2, 3, 2, 3, 1)
   // the one-sample gated inference core (APB): CTAs of 2 or 4 warps (32 / 64 queries)
   FWD_CFGN(48, 1, 4, 4, 0, 0, 2) FWD_CFGN(48, 1, 4, 2, 0, 0, 4) FWD_CFGN(32, 1, 4, 4, 0, 0, 2) FWD_CFGN(32, 1, 4, 2, 0, 0, 4) FWD_CFGN(16, 1, 4, 4, 0, 0, 2) FWD_CFGN(16, 1, 4, 2, 0, 0, 4)
   // ... and the training forward (MODE_PLAIN, raw-unit bias, log-sum-exp)
@@ -214,6 +217,8 @@ void attn_bwd_dq_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::
   DQ_CFG(16, 1, 3, 2, 1, 0)
   // a per-sample key mask: the module-level core's schedules (bf16 gradients)
   DQ_CFG(48, 4, 3, 1, 1, 1) DQ_CFG(48, 2, 4, 1, 1, 1) DQ_CFG(48, 1, 3, 2, 1, 1) DQ_CFG(32, 4, 3, 1, 1, 1) DQ_CFG(32, 2, 4, 1, 1, 1) DQ_CFG(32, 1, 3, 2, 1, 1)
+  // head dim 64: the module-level core's schedules (bf16 gradients)
+  DQ_CFG(64, 4, 3, 1, 1, 0) DQ_CFG(64, 2, 4, 1, 1, 0) DQ_CFG(64, 1, 3, 2, 1, 0) DQ_CFG(64, 4, 3, 1, 1, 1) DQ_CFG(64, 2, 4, 1, 1, 1) DQ_CFG(64, 1, 3, 2, 1, 1)
   // one sample, bf16 gradients (the APB training step): CTAs of 2 or 4 warps (32 / 64 queries)
   DQ_CFGN(48, 1, 3, 4, 1, 0, 2) DQ_CFGN(48, 1, 3, 2, 1, 0, 4) DQ_CFGN(32, 1, 3, 4, 1, 0, 2) DQ_CFGN(32, 1, 3, 2, 1, 0, 4) DQ_CFGN(16, 1, 3, 4, 1, 0, 2) DQ_CFGN(16, 1, 3, 2, 1, 0, 4)
 #undef DQ_CFG
@@ -285,6 +290,7 @@ void attn_bwd_dkv_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch:
   DKV_CFG(48, 3, 2, 0, 0) DKV_CFG(48, 3, 2, 1, 0) DKV_CFG(48, 4, 2, 0, 0) DKV_CFG(48, 4, 1, 0, 0) DKV_CFG(48, 3, 1, 0, 0) DKV_CFG(48, 2, 2, 0, 0)
   DKV_CFG(32, 3, 2, 0, 0) DKV_CFG(32, 3, 2, 1, 0) DKV_CFG(32, 4, 2, 0, 0) DKV_CFG(32, 4, 2, 1, 0) DKV_CFG(32, 4, 1, 1, 0)
   DKV_CFG(48, 3, 2, 1, 1) DKV_CFG(32, 4, 2, 1, 1)
+  DKV_CFG(64, 3, 2, 1, 0) DKV_CFG(64, 3, 2, 1, 1)
   DKV_CFG(16, 3, 2, 1, 0)
   // one sample's APB training step (bf16 gradients): CTAs of 2 or 4 warps (32 / 64 keys)
   DKV_CFGN(48, 3, 4, 1, 0, 2) DKV_CFGN(48, 3, 2, 1, 0, 4) DKV_CFGN(32, 3, 4, 1, 0, 2) DKV_CFGN(32, 3, 2, 1, 0, 4) DKV_CFGN(16, 3, 4, 1, 0, 2) DKV_CFGN(16, 3, 2, 1, 0, 4)
@@ -339,6 +345,7 @@ void attn_delta(torch::Tensor dO, torch::Tensor O, torch::Tensor delta, int64_t 
   else if (hd == 32) aa80::attn_delta_kernel<32, float><<<grid, 128, 0, st>>>(d, O.data_ptr<float>(), delta.data_ptr<float>(), lddo, ldo, (int)L, (int)H, tokens);
   else if (hd == 48 && bf) aa80::attn_delta_kernel<48, __nv_bfloat16><<<grid, 128, 0, st>>>(d, reinterpret_cast<const __nv_bfloat16*>(O.data_ptr()), delta.data_ptr<float>(), lddo, ldo, (int)L, (int)H, tokens);
   else if (hd == 48) aa80::attn_delta_kernel<48, float><<<grid, 128, 0, st>>>(d, O.data_ptr<float>(), delta.data_ptr<float>(), lddo, ldo, (int)L, (int)H, tokens);
+  else if (hd == 64 && bf) aa80::attn_delta_kernel<64, __nv_bfloat16><<<grid, 128, 0, st>>>(d, reinterpret_cast<const __nv_bfloat16*>(O.data_ptr()), delta.data_ptr<float>(), lddo, ldo, (int)L, (int)H, tokens);
   else TORCH_CHECK(false, "attn_delta: head dim 32 or 48");
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
