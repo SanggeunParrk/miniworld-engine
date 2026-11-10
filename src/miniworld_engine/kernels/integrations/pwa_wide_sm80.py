@@ -47,6 +47,16 @@ def _lt():
     return lt()
 
 
+_SIDE: dict = {}
+
+
+def _side_stream(device) -> torch.cuda.Stream:
+    """One side stream per device (forked from and joined to the caller's stream: CUDA-graph capturable)."""
+    if device not in _SIDE:
+        _SIDE[device] = torch.cuda.Stream(device=device)
+    return _SIDE[device]
+
+
 def _ext():
     from miniworld_engine.kernels.pair_weighted_averaging.cuda import wide_sm80
 
@@ -75,14 +85,21 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
     if save:   # training: LN(z) and its statistics are kept (dWb, the LayerNorm backward)
         zn, zmean, zrstd = g.ln_fwd(zf, lnz_w, lnz_b, eps_z, L, False)
         logits = torch.mm(zn, wb.t())
-    else:      # inference: one pass over the pair
+    key = zf.new_empty((0,), dtype=torch.uint8) if mask is None else mask[0].contiguous().view(torch.uint8)
+    if save:
+        w = e.softmax_keys(logits, key, L)                                         # [8, L, L] bf16: the masked softmax over the keys j
+    else:      # inference: one pass over the pair (pair_logits), on a side stream while the MSA side runs its LayerNorm and projection
         zn = zmean = zrstd = None
-        logits = e.pair_logits(zf, lnz_w, lnz_b, wb, eps_z, 0)
-    key = logits.new_empty((0,), dtype=torch.uint8) if mask is None else mask[0].contiguous().view(torch.uint8)
-    w = e.softmax_keys(logits, key, L)                                             # [8, L, L] bf16: the masked softmax over the keys j
+        main, side = torch.cuda.current_stream(), _side_stream(msa.device)
+        side.wait_stream(main)
+        with torch.cuda.stream(side):
+            w = e.softmax_keys(e.pair_logits(zf, lnz_w, lnz_b, wb, eps_z, 0), key, L)
+        w.record_stream(main)
     mf = msa[0].reshape(S * L, D_MSA)
     y, mmean, mrstd = g.ln_fwd(mf, lnm_w, lnm_b, eps_m, L, False)
     vg = _lt().lt_mm(y, wvg, None, 0, False, None, None)                           # [S L, 512] = [v | g] (cublasLt, the timed algorithm)
+    if not save:
+        main.wait_stream(side)   # w joins before the contraction
     u = torch.empty(S * L, HC, device=msa.device, dtype=torch.bfloat16)
     v_hm = torch.empty(HEADS, L, S * D_HIDDEN, device=msa.device, dtype=torch.bfloat16)
     e.to_hm(vg, v_hm, S, L)
