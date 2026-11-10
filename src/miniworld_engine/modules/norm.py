@@ -81,7 +81,9 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
 
     Backends: ``"anthropic"`` is the af3_torch kit's LayerNorm (``af3_torch_opt.ln_rows``: xfold's fastnn Triton kernel, several rows per
     program; rows wider than 512 bytes take that kernel's stock one-row launch, as the kit does) -- the same statement (fp32 statistics and
-    affine, the result stored in the input dtype), forward only.
+    affine, the result stored in the input dtype), forward only. (The release's LayerNorms with a backward are not reachable here: the
+    Protenix / OpenDDE fast_layernorm CUDA ``.so`` ship prebuilt for cp311 + torch 2.13.0+cu130 / 2.7.1+cu126 only, ``ef2_fused_ln`` is
+    dx-only for frozen affines.) ``"cueq"``: cuEquivariance's ``layer_norm_transpose`` ("nd->nd"), forward and backward.
 
     ``"cuda"`` (H100): the engine's CUDA LayerNorm (``kernels/layernorm/cuda/general.layernorm_cuda``): rows of 144-2048 bytes (16-byte
     multiples) on the pipelined kernels (``cuda/pipe``), every other width on the general kernels; fp32 statistics, forward and backward
@@ -90,7 +92,7 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
     bf16 / fp16 / fp32 activations, the result in the input dtype."""
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "anthropic", "cuda", "triton")
+    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
 
     def __init__(
         self,
@@ -149,6 +151,36 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         if y is None:   # a row wider than the kit's 512-byte blocking: xfold's own one-row-per-program launch of the same kernel body
             y = _anthropic.load(stock, path=stock_path).LayerNormTritonFunc.apply(input, self.normalized_shape, self.weight, self.bias, self.eps)
         return y
+
+    # ------------------------------------------------------------------------------------------------------------- "cueq"
+    # NVIDIA cuEquivariance's fused LayerNorm ``cuequivariance_ops_torch.layer_norm_transpose`` (Triton, forward and backward: dx and the
+    # affine gradients) in its "nd->nd" layout: the rows [M, D], the affine handed to the op in the activation's dtype (``.to(input.dtype)``:
+    # the master layout's fp32 gamma / beta cast like the engine's other library calls; the gradient reaches the fp32 parameters through the
+    # cast); no offset -> zeros, no affine -> elementwise_affine=False.
+    def _supports_cueq(self, input: torch.Tensor) -> str | None:
+        from miniworld_engine.modules import _cueq
+
+        why = _cueq.unavailable(input.device)
+        if why is not None:
+            return why
+        if len(self.normalized_shape) != 1:
+            return "the op normalises the last dimension only"
+        if input.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+            return f"dtype {input.dtype} (bfloat16 / float16 / float32 only)"
+        if input.numel() == 0 or input.shape[-1] != self.normalized_shape[0]:
+            return f"input {tuple(input.shape)} for normalized_shape {tuple(self.normalized_shape)}"
+        return None
+
+    def _forward_cueq(self, input: torch.Tensor) -> torch.Tensor:
+        import importlib
+
+        lnt = importlib.import_module("cuequivariance_ops_torch").layer_norm_transpose
+        d = self.normalized_shape[0]
+        affine = self.weight is not None
+        w = self.weight.to(input.dtype) if affine else input.new_ones(d)
+        b = self.bias.to(input.dtype) if self.bias is not None else input.new_zeros(d)
+        y = lnt(input.reshape(-1, d), w, b, eps=self.eps, elementwise_affine=affine, layout="nd->nd")
+        return y.reshape(input.shape)
 
     # ------------------------------------------------------------------------------------------------------------- engine kernels
     def _supports_engine(self, input: torch.Tensor) -> str | None:
