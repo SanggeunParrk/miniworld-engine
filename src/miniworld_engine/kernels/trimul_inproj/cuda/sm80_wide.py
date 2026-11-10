@@ -23,6 +23,7 @@ from pathlib import Path
 
 import torch
 
+from ... import _capture
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 from . import sm80 as _d128
@@ -276,7 +277,10 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     T = n * n
     zf = _aligned(z.reshape(T, d))
     ds = _aligned(ds) if ds.numel() else ds
-    pk = _pack_leaves(leaves)
+    # inference (no saves, grad off): the folded weights once per weight version, read by a CUDA-graph capture as its eager warm-up made them
+    # (``capture_reads_eager``: no pack kernel per replay); training packs every call (a captured step must repack after an optimizer step)
+    pk = (_capture.param_forms(("trimul_sm80_wide_pack", leaves[0].dtype), list(leaves[1:]), lambda: _pack_leaves(leaves), capture_reads_eager=True)
+          if not save and not torch.is_grad_enabled() else _pack_leaves(leaves))
     hs = pk["hs"]
     # bf16, hidden width <= 128: k1w computes the input rows' statistics from its own tile and k3w the output stage's LayerNorm_out statistics -- the two statistics kernels and
     # their reads of z / X are gone (every k-tile of both operands is still in its ring slot when its GEMM ends)

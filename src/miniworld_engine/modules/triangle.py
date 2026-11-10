@@ -104,7 +104,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     """
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cueq": 2, "cuda:a100_sm80": 2}   # 2026-11-10: kits; sm_80 paths
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cueq": 2, "cuda:a100_sm80": 3}   # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -1111,7 +1111,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
     #: ``kernels/integrations/trimul_h100`` (``serves_inference`` / ``update_inference`` without grad or live dropout, else
     #: ``serves_single`` / ``update``), bf16 only.
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cueq": 2}   # 2026-11-10: rewired to the model kits
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cueq": 2, "cuda:a100_sm80": 2}   # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         return _trimul_cuda_route(self, pair, mask, dropout_p, bidirectional=False)[1]
@@ -1263,7 +1263,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     #: differ; on an A100 the same on ``kernels/integrations/trimul_sm80``. ``"triton"``: the portable Triton TriMul the same way.
     #: ``"anthropic"``: see the anthropic section below.
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: sm_80 paths
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3}   # 2026-11-10: sm_80 paths; 3: the inference pack read by captures
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         if pair.is_cuda and torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0)):

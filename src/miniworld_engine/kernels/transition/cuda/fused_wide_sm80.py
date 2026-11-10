@@ -143,7 +143,9 @@ def _f32(t: torch.Tensor, cache: bool) -> torch.Tensor:
         return t
     if not cache:
         return t.float().contiguous()
-    key = (t.data_ptr(), t._version)
+    if not torch.is_grad_enabled():   # grad off: a capture reads the eager cast (no cast kernel per replay)
+        return _capture.param_forms("transition_sm80_affine", [t], lambda: t.float().contiguous(), capture_reads_eager=True)
+    key =(t.data_ptr(), t._version)
     # keyed on the parameter and scoped by ``_capture``; the parameter stays alive with its cast: a recycled data_ptr cannot alias it
     return _capture.lookup(_affine, key, lambda: (t.float().contiguous(), t), limit=16)[
         0
@@ -184,7 +186,11 @@ def _kernel_weights(wa, wb, ws, dtype, cache: bool):
         return ws_
     if not cache:
         return tuple(w.to(dtype).contiguous() for w in ws_)
-    key = tuple((w.data_ptr(), w._version, w.dtype) for w in ws_) + (dtype,)
+    if not torch.is_grad_enabled():
+        # grad off: a CUDA-graph capture reads the casts its eager warm-up made (``capture_reads_eager``): no cast kernel per replay
+        return _capture.param_forms(("transition_sm80_weights", dtype), list(ws_), lambda: tuple(w.to(dtype).contiguous() for w in ws_),
+                                    capture_reads_eager=True)
+    key =tuple((w.data_ptr(), w._version, w.dtype) for w in ws_) + (dtype,)
     # the parameters stay alive with their casts: a recycled data_ptr cannot alias the entry
     return _capture.lookup(
         _kernel_forms,

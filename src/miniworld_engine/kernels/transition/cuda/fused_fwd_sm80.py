@@ -162,6 +162,10 @@ def pack(gamma, beta, wa, wb, ws, cache: bool):
 
     if not cache:
         return build()[:2]
+    if not torch.is_grad_enabled():
+        # grad off: a CUDA-graph capture reads the pack its eager warm-up made (``capture_reads_eager``): no cast / pack kernel per replay
+        params = [gamma, beta, wa, wb, ws] if ln else [wa, wb, ws]
+        return _capture.param_forms(("transition_sm80_pack", d, h, ln), params, lambda: build()[:2], capture_reads_eager=True)
     key = tuple(
         (t.data_ptr(), t._version, t.dtype)
         for t in ((gamma, beta, wa, wb, ws) if ln else (wa, wb, ws))

@@ -898,7 +898,7 @@ class AtomDiTMiniWorld(BackendModule):
 
     backends = ("pytorch", "anthropic", "cuda")
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2, "cuda:h100_sm90": 2}
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 3, "cuda:h100_sm90": 2}
 
     def __init__(
         self,
@@ -1087,8 +1087,11 @@ class AtomDiTMiniWorld(BackendModule):
             return composed.SWABlockA100.apply(x, cond, cos, sin, seqused.contiguous(), hw, *weights)
         if x.dtype != _BF or hw != HALF_WINDOW:
             return composed.block(x, cond, cos, sin, seqused.contiguous(), hw, weights)
+        from miniworld_engine.kernels.swa_dit.dispatch import eval_form
+
         cos, sin = cos.reshape(-1, cos.shape[-1]).contiguous(), sin.reshape(-1, sin.shape[-1]).contiguous()
-        wmod, *weights = (w.to(_BF).contiguous() for w in weights)
+        # the bf16 forms of the (fp32 master) weights once per weight version; a capture reads the eager forms (no six casts per replay)
+        wmod, *weights = eval_form("swa_a100_bf16", weights, lambda: [w.to(_BF).contiguous() for w in weights])
         with torch.autocast("cuda", enabled=False):
             mod = sm80.mod_fwd(cond.reshape(-1, cond.shape[-1]).contiguous(), wmod, False)[0]
             # one modulation row per sequence row: b = N
@@ -1182,7 +1185,7 @@ class SWAAtomTransformer(BackendModule):
 
     backends = ("pytorch", "anthropic", "cuda")
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2, "cuda:h100_sm90": 2}
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 3, "cuda:h100_sm90": 2}
 
     class Config(BaseModel):
         """Configuration for the SWA atom transformer."""

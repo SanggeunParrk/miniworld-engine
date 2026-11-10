@@ -310,6 +310,10 @@ def _inference_packs(params):
             params,
         )
 
+    if not torch.is_grad_enabled():
+        # grad off: a CUDA-graph capture reads the pack its eager warm-up made (``capture_reads_eager``), so a replay runs no cast / pack kernel
+        keyed = [t for i, t in enumerate(params) if i != 9]
+        return _capture.param_forms("apb_sm80_inference", keyed, lambda: build()[:7], capture_reads_eager=True)
     key = tuple((t.data_ptr(), t._version) for i, t in enumerate(params) if i != 9)
     return _capture.lookup(_packs, key, build, limit=8)[:7]
 
@@ -705,7 +709,7 @@ def _unpad_rows(w: torch.Tensor, heads: int, hd: int, hdp: int) -> torch.Tensor:
     return w if hd == hdp else w.reshape(heads, hdp, *w.shape[1:])[:, :hd].reshape(heads * hd, *w.shape[1:])
 
 
-def _gpack(params, heads: int, gate_bias: float, dt: torch.dtype):
+def _gpack(params, heads: int, gate_bias: float, dt: torch.dtype, save: bool = True):
     """(W q | k | v | g [4 H hdp, D], its bias [bq | 0 | 0 | gate_bias], Wo [D, H hdp], Wf channel-major fp32 [dp, H]) in ``dt``, per parameter version."""
     from miniworld_engine.kernels.integrations.adaln_sm80 import cached
 
@@ -723,6 +727,10 @@ def _gpack(params, heads: int, gate_bias: float, dt: torch.dtype):
         wcm = (wb.float() * lnpw.float()[None]).t().contiguous()
         return w, b, wop, wcm
 
+    if not save and not torch.is_grad_enabled():
+        # inference: a CUDA-graph capture reads the pack its eager warm-up made (``capture_reads_eager``), so a replay runs none of the pack's
+        # ~20 casts / pads / fills; a training call keeps the capture-scoped cache (a captured step repacks after an optimizer step)
+        return _capture.param_forms(("apb_sm80_generic", dt, gate_bias, heads), list(params), build, capture_reads_eager=True)
     return cached(f"apb_sm80_generic_{dt}_{gate_bias}", tuple(params), build)
 
 
@@ -749,7 +757,7 @@ def _gfwd(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, p
     hd = params[2].shape[0] // heads
     hdp = _hdp(hd)
     n = heads * hdp
-    w, b, wop, wcm = _gpack(params, heads, gate_bias, dt)
+    w, b, wop, wcm = _gpack(params, heads, gate_bias, dt, save)
     x = single.reshape(L, D)
     with torch.cuda.device(single.device), _tf32(f32):
         s32, mu, rs = torch.native_layer_norm(x.float(), (D,), params[0].float(), params[1].float(), eps_s)

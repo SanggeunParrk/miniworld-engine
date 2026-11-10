@@ -137,7 +137,9 @@ def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
 
     x = empty(m, C)
     _rows(0, [q, mod], [x], n, s, False)
-    wstack = torch.cat([wqkv, wg])
+    from miniworld_engine.kernels.swa_dit.dispatch import eval_form
+
+    wstack = eval_form("swa_a100_fp32_wstack", (wqkv, wg), lambda: torch.cat([wqkv, wg]), save)   # per weight version in inference
     p = _mm(x, wstack.t())
     qh, kh, vh = (empty(n, H, s, D, dtype=_BF) for _ in range(3))
     g, pq, pk = (empty(m, C) for _ in range(3))
@@ -217,9 +219,13 @@ def _mod_bwd(dmod: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod: torch.T
 
 
 # ------------------------------------------------------------------------------------------------------------------- the block
-def _prepare(x, cond, cos, sin, weights):
+def _prepare(x, cond, cos, sin, weights, save: bool = True):
+    from miniworld_engine.kernels.swa_dit.dispatch import eval_form
+
     dt = x.dtype
-    ws = [w.detach().to(dt).contiguous() for w in weights]
+    # the weights in x's dtype (casts of fp32 masters): once per weight version in inference (``save`` false), read by a capture as its warm-up
+    # made them; a training call casts every time
+    ws = eval_form(("swa_a100_composed", dt), weights, lambda: [w.detach().to(dt).contiguous() for w in weights], save)
     c = cond.reshape(-1, cond.shape[-1]).to(dt).contiguous()
     cos, sin = (t.reshape(-1, t.shape[-1]).contiguous() for t in (cos, sin))
     return x.contiguous(), c, cos, sin, ws
@@ -228,7 +234,7 @@ def _prepare(x, cond, cos, sin, weights):
 def block(x, cond, cos, sin, seqused, half_window: int, weights) -> torch.Tensor:
     """Inference: ``x`` / ``cond`` [N, S, 128] (bf16 or fp32, the same), ``cos`` / ``sin`` fp32 [N, S, 16], ``seqused`` [N] int32,
     ``weights`` = (Wmod, Wqkv, Wg, Wo, Wu, Wd) in x's dtype or fp32 -> [N, S, 128] in x's dtype."""
-    x, c, cos, sin, ws = _prepare(x, cond, cos, sin, weights)
+    x, c, cos, sin, ws = _prepare(x, cond, cos, sin, weights, save=False)
     with torch.autocast("cuda", enabled=False):
         mod = _mod_fwd(c, ws[0], False)[0]
         fwd = _fwd_bf16 if x.dtype == _BF else _fwd_fp32

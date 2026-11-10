@@ -7,6 +7,7 @@ Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forwar
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 import torch.nn as nn
@@ -55,6 +56,7 @@ class PairformerBlock(BackendModule, MasterWeights):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-11: the A100 sub-modules' inference weight forms read by captures
 
     def __init__(self, config: PairformerConfig, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()

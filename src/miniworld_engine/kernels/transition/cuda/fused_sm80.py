@@ -378,7 +378,13 @@ def transition_fused_sm80(x, gamma, beta, wa, wb, ws, eps):
         and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
     ):
         shape = x.shape
-        w, gb, _, _, _, _ = _pack(gamma, beta, wa, wb, ws)
+        if torch.is_grad_enabled():
+            w, gb, _, _, _, _ = _pack(gamma, beta, wa, wb, ws)
+        else:   # grad off: the pack once per weight version; a CUDA-graph capture reads the eager pack (no pack kernel per replay)
+            from ... import _capture
+
+            w, gb = _capture.param_forms("transition_fused_sm80_pack", [gamma, beta, wa, wb, ws], lambda: _pack(gamma, beta, wa, wb, ws)[:2],
+                                         capture_reads_eager=True)
         out, _, _ = _fwd_launch(
             x.reshape(-1, shape[-1]).contiguous(), w, gb, float(eps), False
         )

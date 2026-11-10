@@ -95,7 +95,7 @@ class InputFeatureEmbedder(BackendModule):
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2, "cuda:h100_sm90": 2}
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 3, "cuda:h100_sm90": 2}
     #: The engine backends this composition hands to its children.
     _ENGINE_BACKENDS = ("cuda", "triton")
 
