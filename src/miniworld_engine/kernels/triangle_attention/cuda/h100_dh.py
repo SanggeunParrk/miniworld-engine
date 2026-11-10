@@ -48,6 +48,10 @@ def train_core(proj, bias, n_head, d, scale):
     return ext().triattn_dh_forward_train(proj, bias, n_head, d, scale)
 
 
+#: query-side backward: True (default) one bf16 dS plane per pair row, summed here in fp32 (the Triton backward's data flow; RoseTTAFold3 L 640 /
+#: 768 training 10.4 / 17.0 ms, the fp32 slab read-modify-write 12.5 / 19.8 ms); False the fp32 slab partials of `slabs`
+ROWS = True
+
 #: dbias slabs of the query-side backward: enough (b, h, query tile, slab) CTAs for ~3 waves of 132 SMs, at most this many slabs
 MAX_SLABS = 8
 
@@ -59,12 +63,12 @@ def slabs(batch: int, length: int, n_head: int) -> int:
 
 
 def backward(proj, bias, do, lse, delta, dall, n_head, d, scale):
-    """The core backward: dq / dk / dv into columns 0 / H d / 2 H d of ``dall``; -> dbias fp32 [B, H, S, S] (natural units), the slabs
-    summed in order."""
+    """The core backward: dq / dk / dv into columns 0 / H d / 2 H d of ``dall``; -> dbias fp32 [B, H, S, S] (natural units), the slabs (``ROWS``:
+    the per-row bf16 planes) summed in fp32 in order."""
     B, _, S, _ = bias.shape
     slabs_ = ext().triattn_dh_backward(proj, bias, do, lse, delta, dall, 0, n_head * d, 2 * n_head * d, n_head, d, scale,
-                                       slabs(B, S, n_head))
-    return slabs_.sum(0) if slabs_.shape[0] > 1 else slabs_[0]
+                                       S if ROWS else slabs(B, S, n_head), ROWS)
+    return slabs_.sum(0, dtype=torch.float32) if slabs_.shape[0] > 1 else slabs_[0].float()
 
 
 def head_dim(module) -> int:

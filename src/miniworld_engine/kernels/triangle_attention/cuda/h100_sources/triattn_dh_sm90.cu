@@ -378,7 +378,10 @@ template <int D> struct SmemQ {
   bf16 b[2][BM * LB];
 };
 
-template <int D>
+// ROWS (the launched build): one pair row per slab (NSLAB = S), the row's dS written once as a bf16 plane (DB is then bf16 [S, B, H, S, S]:
+// no read-modify-write, a grid of B S (S / 64) H short CTAs) and dQ += dS K on the bf16 dS alone -- the data flow and the operand of the
+// Triton backward; the caller sums the planes in fp32. ROWS false: fp32 slab partials read-modified-written row by row, dS as hi + lo.
+template <int D, bool ROWS = false>
 __global__ void __launch_bounds__(THREADS) triattn_dh_bwd_q(const bf16* __restrict__ P, const bf16* __restrict__ BIAS, const bf16* __restrict__ DO,
     const float* __restrict__ LSE, const float* __restrict__ DELTA, bf16* __restrict__ DQ, float* __restrict__ DB, long ldd, int B, int S, int H,
     int NSLAB, float scale) {
@@ -443,9 +446,9 @@ __global__ void __launch_bounds__(THREADS) triattn_dh_bwd_q(const bf16* __restri
       }
       // the slab's partial so far (the first row of the slab writes it)
       float* dbt = dbias + (long)(q0 + r0) * S + j * BN + 2 * t;
-      float2 old[BN / 8][2];
+      float2 old[ROWS ? 1 : BN / 8][2];
 #pragma unroll
-      for (int nn = 0; nn < BN / 8; ++nn) {
+      for (int nn = 0; nn < (ROWS ? 0 : BN / 8); ++nn) {
         if (n == n0) { old[nn][0] = make_float2(0.f, 0.f); old[nn][1] = make_float2(0.f, 0.f); }
         else {
           old[nn][0] = *reinterpret_cast<const float2*>(dbt + nn * 8);
@@ -484,8 +487,14 @@ __global__ void __launch_bounds__(THREADS) triattn_dh_bwd_q(const bf16* __restri
         sa[nn / 2][(nn % 2) * 2 + 1] = pk(s2, s3);
         sl[nn / 2][(nn % 2) * 2] = pk_lo(s0, s1, sa[nn / 2][(nn % 2) * 2]);
         sl[nn / 2][(nn % 2) * 2 + 1] = pk_lo(s2, s3, sa[nn / 2][(nn % 2) * 2 + 1]);
-        *reinterpret_cast<float2*>(dbt + nn * 8) = make_float2(old[nn][0].x + s0, old[nn][0].y + s1);
-        *reinterpret_cast<float2*>(dbt + 8L * S + nn * 8) = make_float2(old[nn][1].x + s2, old[nn][1].y + s3);
+        if constexpr (ROWS) {
+          bf16* dbh = reinterpret_cast<bf16*>(DB) + ((((long)p * B + b) * H + h) * S + q0 + r0) * S + j * BN + 2 * t;
+          *reinterpret_cast<uint32_t*>(dbh + nn * 8) = pk(s0, s1);
+          *reinterpret_cast<uint32_t*>(dbh + 8L * S + nn * 8) = pk(s2, s3);
+        } else {
+          *reinterpret_cast<float2*>(dbt + nn * 8) = make_float2(old[nn][0].x + s0, old[nn][0].y + s1);
+          *reinterpret_cast<float2*>(dbt + 8L * S + nn * 8) = make_float2(old[nn][1].x + s2, old[nn][1].y + s3);
+        }
       }
       // dQ += dS K: k = 64 keys (4 steps of 16), n = D dims
 #pragma unroll
@@ -496,8 +505,10 @@ __global__ void __launch_bounds__(THREADS) triattn_dh_bwd_q(const bf16* __restri
           ldsm4t(kb, su(&sm.k[s][(kk * 16 + (lane % 8) + ((lane / 8) % 2) * 8) * LD + nn * 8 + (lane / 16) * 8]));
           mma(dq[nn], sa[kk], kb[0], kb[1]);
           mma(dq[nn + 1], sa[kk], kb[2], kb[3]);
-          mma(dq[nn], sl[kk], kb[0], kb[1]);
-          mma(dq[nn + 1], sl[kk], kb[2], kb[3]);
+          if constexpr (!ROWS) {
+            mma(dq[nn], sl[kk], kb[0], kb[1]);
+            mma(dq[nn + 1], sl[kk], kb[2], kb[3]);
+          }
         }
       }
       __syncthreads();
@@ -526,7 +537,7 @@ void launch(const at::Tensor& proj, const at::Tensor& bias, at::Tensor& u, const
 
 template <int D>
 void launch_bwd(const at::Tensor& proj, const at::Tensor& bias, const at::Tensor& dout, const at::Tensor& lse, const at::Tensor& delta,
-                at::Tensor& dall, int64_t dqcol, int64_t dkcol, int64_t dvcol, at::Tensor& dbias, int B, int S, int H, int nslab, double scale) {
+                at::Tensor& dall, int64_t dqcol, int64_t dkcol, int64_t dvcol, at::Tensor& dbias, int B, int S, int H, int nslab, double scale, bool rows) {
   auto stream = at::cuda::getCurrentCUDAStream();
   const bf16* P = reinterpret_cast<const bf16*>(proj.data_ptr());
   const bf16* BI = reinterpret_cast<const bf16*>(bias.data_ptr());
@@ -542,11 +553,11 @@ void launch_bwd(const at::Tensor& proj, const at::Tensor& bias, const at::Tensor
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   {
-    auto f = triattn_dh_bwd_q<D>;
+    auto f = rows ? triattn_dh_bwd_q<D, true> : triattn_dh_bwd_q<D, false>;
     const int smem = (int)sizeof(SmemQ<D>);
     cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
     dim3 grid(S / BM, H, (unsigned)B * nslab);
-    f<<<grid, THREADS, smem, stream>>>(P, BI, DOp, lse.data_ptr<float>(), delta.data_ptr<float>(), DA + dqcol, dbias.data_ptr<float>(), ldd, B, S,
+    f<<<grid, THREADS, smem, stream>>>(P, BI, DOp, lse.data_ptr<float>(), delta.data_ptr<float>(), DA + dqcol, reinterpret_cast<float*>(dbias.data_ptr()), ldd, B, S,
                                        H, nslab, (float)scale);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
@@ -593,7 +604,7 @@ std::vector<at::Tensor> triattn_dh_forward_train(at::Tensor proj, at::Tensor bia
 // backward: dout [B S S, H D] bf16, lse / delta fp32 [B, S, H, S]; dq / dk / dv are written into columns dqcol / dkcol / dvcol (+ h D) of
 // dall [B S S, *] bf16 (row stride dall.stride(0)) -> dbias slabs fp32 [nslab, B, H, S, S] (the caller sums them over the first axis)
 at::Tensor triattn_dh_backward(at::Tensor proj, at::Tensor bias, at::Tensor dout, at::Tensor lse, at::Tensor delta, at::Tensor dall, int64_t dqcol,
-                               int64_t dkcol, int64_t dvcol, int64_t H, int64_t D, double scale, int64_t nslab) {
+                               int64_t dkcol, int64_t dvcol, int64_t H, int64_t D, double scale, int64_t nslab, bool rows) {
   check_core(proj, bias, H, D);
   const int B = (int)bias.size(0), S = (int)bias.size(2);
   TORCH_CHECK(dout.scalar_type() == at::kBFloat16 && dout.is_contiguous() && dout.size(0) == proj.size(0) && dout.size(1) == H * D, "dout [B S S, H D]");
@@ -603,9 +614,10 @@ at::Tensor triattn_dh_backward(at::Tensor proj, at::Tensor bias, at::Tensor dout
               dall.stride(0) % 8 == 0 && dqcol % 8 == 0 && dkcol % 8 == 0 && dvcol % 8 == 0, "dall bf16 [B S S, *], 16-byte aligned columns");
   TORCH_CHECK(nslab >= 1 && nslab <= S, "1 <= nslab <= S");
   const at::cuda::OptionalCUDAGuard guard(proj.device());
-  auto dbias = at::empty({nslab, B, H, S, S}, proj.options().dtype(at::kFloat));
-  if (D == 64) launch_bwd<64>(proj, bias, dout, lse, delta, dall, dqcol, dkcol, dvcol, dbias, B, S, (int)H, (int)nslab, scale);
-  else launch_bwd<32>(proj, bias, dout, lse, delta, dall, dqcol, dkcol, dvcol, dbias, B, S, (int)H, (int)nslab, scale);
+  TORCH_CHECK(!rows || nslab == S, "rows: one slab per pair row");
+  auto dbias = at::empty({nslab, B, H, S, S}, proj.options().dtype(rows ? at::kBFloat16 : at::kFloat));
+  if (D == 64) launch_bwd<64>(proj, bias, dout, lse, delta, dall, dqcol, dkcol, dvcol, dbias, B, S, (int)H, (int)nslab, scale, rows);
+  else launch_bwd<32>(proj, bias, dout, lse, delta, dall, dqcol, dkcol, dvcol, dbias, B, S, (int)H, (int)nslab, scale, rows);
   return dbias;
 }
 
