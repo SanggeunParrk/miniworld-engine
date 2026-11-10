@@ -238,8 +238,12 @@ def _native_h100_fwd(q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, B, hw, eps, sav
         return torch.empty(shape, device=q.device, dtype=q.dtype if dtype is None else dtype)
     def rows(stage, ins, outs):
         ext.native_rows(ins, outs, stage, A, B, S, bf, eps)
-    wstack = empty(512, 128)
-    ext.native_copy([wqkv, wg], [wstack[:384], wstack[384:]], 0)
+
+    def stack():
+        w = empty(512, 128)
+        ext.native_copy([wqkv, wg], [w[:384], w[384:]], 0)
+        return w
+    wstack = eval_form("swa_native_wstack", (wqkv, wg), stack, save)
     if bf:
         qkvg_ext = _native_h100_extension("qkvg_small") if small else ext
         qh, kh, vh, g, x, pq, pk = qkvg_ext.qkvg_fwd(q.reshape(M, 128), mod, cs, sn, wstack, A, B, S, eps, FP32_EPS, save)
@@ -263,8 +267,12 @@ def _native_h100_fwd(q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, B, hw, eps, sav
         attention([qh, kh, vh, sequ], [o, lse], 0)
     if bf:
         ffn_ext = _native_h100_extension("fwd_small" if small else "fwd")
-        packed_wu = torch.empty_like(wu)
-        ext.native_copy([wu], [packed_wu], 2)
+
+        def pack():
+            w = torch.empty_like(wu)
+            ext.native_copy([wu], [w], 2)
+            return w
+        packed_wu = eval_form("swa_native_wu", (wu,), pack, save)
         out, q1, att, y, ffn = ffn_ext.ffn_fwd(q.reshape(M, 128), g, o, mod, wo, packed_wu, wd, A, B, S, eps, save)
     else:
         gated = empty(M, 128)
@@ -385,6 +393,78 @@ def native_h100_mod_fwd(c: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor,
             # The fp32 copies ran an FFMA GEMM (A 5, 8192 atoms: 49 us shared, 228 us per-sample conditioning rows).
             return torch.mm(a.to(torch.bfloat16), w.t(), out_dtype=torch.float32), a, w32
         return _native_mm(a, w32.t()), a, w32
+
+
+def eval_form(tag, params, build, save: bool = False):
+    """``build()`` -- a kernel form of some weights (a cast, a stack, a pack) -- made once per weight version for an inference call
+    (``save`` false) -- with grad off read by a CUDA-graph capture as its warm-up made it (``_capture.param_forms(capture_reads_eager=True)``,
+    the inference contract of the portable kernels' TF32 forms: the weights do not change between replays of an inference graph), with
+    grad on scoped to the capture as every weight pack; a training call (``save``) builds it every time. At L 1024 the per-call forms
+    were a third of an inference block's launches (master: five weight casts, the q|k|v|g stack, the w_up pack)."""
+    if save:
+        return build()
+    return _capture.param_forms(tag, params, build, capture_reads_eager=not torch.is_grad_enabled())
+
+
+def native_h100_eval_weights(weights, dtype: torch.dtype) -> list[torch.Tensor]:
+    """The block's weights contiguous in ``dtype`` (fp32 masters under a bf16 block: their bf16 casts), cached per weight version for an
+    inference call (:func:`eval_form`)."""
+    weights = list(weights)
+    if all(w.dtype == dtype and w.is_contiguous() for w in weights):
+        return weights
+    return list(eval_form(("swa_block_weights", dtype), weights, lambda: [w.to(dtype).contiguous() for w in weights]))
+
+
+def _native_h100_silu_fake(c: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(c)
+
+
+@opaque(fake=_native_h100_silu_fake, name="swa_dit_h100_native_silu")
+def native_h100_silu(c: torch.Tensor) -> torch.Tensor:
+    """silu(c) in c's dtype (bf16: rounded once, the value :func:`native_h100_mod_fwd` multiplies), contiguous [R, d_cond]: the modulation's
+    operand, which every block of a stack conditioned on the same c shares."""
+    a = torch.empty_like(c)
+    _native_h100_extension().native_copy([c], [a], 1)
+    return a
+
+
+def _native_h100_mod_eval_fake(a: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    return a.new_empty((a.shape[0], w.shape[0]), dtype=torch.float32)
+
+
+@opaque(fake=_native_h100_mod_eval_fake, name="swa_dit_h100_native_mod_eval")
+def native_h100_mod_eval(a: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """The inference modulation [R, 768] fp32 from ``a = native_h100_silu(c)``: the first output of :func:`native_h100_mod_fwd`, the same
+    GEMM on the same values, without the fp32 copies only its backward reads (w a bf16 cast of an fp32 master under a bf16 block, cached
+    per weight version)."""
+    with torch.autocast("cuda", enabled=False):
+        if a.dtype == torch.bfloat16:
+            wb = native_h100_eval_weights([w], torch.bfloat16)[0]
+            return torch.mm(a, wb.t(), out_dtype=torch.float32)
+        return _native_mm(a, w.contiguous().t())
+
+
+def _fp32_global_cuda(q: torch.Tensor, half_window: int, save: bool) -> Any:
+    """The fp32 CUDA extension when it serves this global-attention call's row stages (an H100 inference call under TF32, as the windowed
+    fp32 block: ``_fp32_cuda``), else None -> the native stages."""
+    if save or q.dtype != torch.float32 or not _h100_global(q, half_window) or _matmul_precision() == "highest":
+        return None
+    return _cuda("fp32", True, q.device)
+
+
+def _swa_dit_fwd_fp32_global(ext, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, eps):
+    """The fp32 inference block with global attention: the fp32 block's qkvg and out-projection + FFN kernels (``swa_fp32.cu``, the
+    windowed block's own stages and precision) around FlashAttention-4 -- four launches where the native stages ran fourteen (L 1024:
+    six row passes and four cuBLAS GEMMs per block)."""
+    from miniworld_engine.kernels.swa_dit.cuda.sm100 import attn_global_fwd
+
+    N, S, C = q.shape
+    wpre = eval_form("swa_fp32_prep", (wqkv, wg, wo, wu, wd), lambda: ext.prep(wqkv, wg, wo, wu, wd, True))
+    qh, kh, vh, g = ext.fwd_qkvg(q, mod, cos, sin, B, eps, FP32_EPS, wpre)
+    o = torch.zeros(N * S, C, device=q.device, dtype=torch.bfloat16)   # FA4 skips the rows past seqused: they must read zero
+    lse = torch.empty(N, N_HEAD, S, device=q.device, dtype=torch.float32)
+    attn_global_fwd(qh, kh, vh, seqused, o, lse)
+    return [ext.fwd_ffn(q, mod, cos, sin, g, o, B, eps, wpre)[0].view(N, S, C)]
 
 
 def _native_h100_mod_bwd_fake(dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor, w32: torch.Tensor,
@@ -624,6 +704,9 @@ def swa_dit_block_fwd(
     """The block forward. q [N, S, C] bf16 or fp32 (the weights in the same dtype); mod [B*S, 6C] fp32 (hoisted adaLN
     modulation of this block); cos / sin [B*S, D/2] fp32; seqused [N] int32. Returns [out] or, with ``save``,
     [out, Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, Att, Y, FF] (the tensors the backward reads)."""
+    ext32 = _fp32_global_cuda(q, half_window, save)
+    if ext32 is not None:
+        return _swa_dit_fwd_fp32_global(ext32, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, eps)
     if native_h100_stages(q) or _h100_global(q, half_window):
         # The native stages take an fp32 modulation; a bf16 one comes from the composed bf16 hoist (global attention, which only the
         # native stages serve on H100, under a bf16 call that the composed stages otherwise take).
@@ -766,9 +849,10 @@ def _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B,
     dev = q.device
     ext = _fp32_cuda(C, NHID, half_window, dev)
     if ext is not None:
-        # An inference call reads the weights as prepared (tf32-rounded / split, K-permuted) once per weight version, not per call: scoped to
-        # the CUDA-graph capture like every pack (``_capture.param_forms``), so a replay under ``static_weights()`` runs no prep kernel.
-        wpre = None if save else _capture.param_forms("swa_fp32_prep", (wqkv, wg, wo, wu, wd), lambda: ext.prep(wqkv, wg, wo, wu, wd, True))
+        # An inference call reads the weights as prepared (tf32-rounded / split, K-permuted) once per weight version, not per call
+        # (``eval_form``: a grad-off capture reads its warm-up's prep, so a replay runs no prep kernel); with it the three kernels go out
+        # with programmatic dependent launch (swa_fp32.cu ``launch_*``).
+        wpre = None if save else eval_form("swa_fp32_prep", (wqkv, wg, wo, wu, wd), lambda: ext.prep(wqkv, wg, wo, wu, wd, True))
         outputs = ext.fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, FP32_EPS, save, wpre)
         outputs[0] = outputs[0].view(N, S, C)
         return outputs

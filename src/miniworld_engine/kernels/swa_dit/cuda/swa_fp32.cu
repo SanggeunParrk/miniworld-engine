@@ -40,6 +40,7 @@
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
 #include "swa_ptx.cuh"
+#include "pdl.cuh"
 
 namespace {
 constexpr int C = 128, H = 4, D = 32, NHID = 256, MODW = 6 * C, HWIN = 64;
@@ -442,6 +443,7 @@ __global__ void __launch_bounds__(TPB, 1) qkvg_fwd_kernel(QkvgFwdArgs args, cons
     tma::load_2d(&mw1, slots + sl * STAGE, full + sl, (s & 3) * 32, (2 * r + (s >> 2)) * 128);
   };
   ROW_START(Q1_NST, Q1_NSW, 1)
+  pdl_gate();                                              // PDL: the weight ring above reads only the prep; rows and mod after the gate
   unsigned char *qb = smem + Q1_QB, *sp = smem + Q1_SP, *sh = smem + Q1_SH;
   uint64_t* qfull = full + Q1_NST;
   auto load_q = [&](int k) { TileC T; tile_of(k, T); tma::expect_tx(qfull, 32768); ld_rows(&mq, qb, qfull, 0, 4, T); };
@@ -583,6 +585,7 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(TPB, 1)
     else tma::load_2d(q == 4 ? &mwdh : &mwdl, dst, bar, 32 * j, 0);
   };
   ROW_START(F4_NST, F4_NSW, 4)
+  pdl_gate();                                              // PDL: the weight ring above reads only the prep; rows and mod after the gate
   unsigned char *gb = smem + F4_GB, *ob = smem + F4_OB, *qb = smem + F4_QB, *stg = smem + F4_ST;
   const float2* xb = reinterpret_cast<const float2*>(smem + F4_XB);
   uint64_t *gfull = full + F4_NST, *qfull = full + F4_NST + 1, *xbar = full + F4_NST + 2;
@@ -1315,6 +1318,7 @@ __global__ void __launch_bounds__(128) attn_fwd_kernel(AttnArgs args) {
   __shared__ __align__(128) unsigned char sq[64 * 64], sk[AR * 64], sv[AR * 64];
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, t = lane & 3;
   const int tile = blockIdx.x, nh = blockIdx.y, n = nh / H, h = nh % H;
+  pdl_gate();                                              // PDL: nothing of the stream is read before the gate
   const int S = args.S, su = args.sequ[n];
   const int i0 = 64 * tile, k0 = i0 - HWIN;
   const long hb = (long)nh * S * D;
@@ -1617,6 +1621,64 @@ torch::Tensor prep(const torch::Tensor& wqkv, const torch::Tensor& wg, const tor
   return out;
 }
 
+// The forward's three launches. ``pdl``: programmatic dependent launch -- each kernel's weight prologue runs under its predecessor's
+// tail, pdl_gate() before its first read of anything the stream writes. Only with the weights as a prep made before the call (``wpre``,
+// an inference call): a prep launched by this call would be read by the qkvg prologue before it completed.
+namespace {
+void launch_qkvg(const torch::Tensor& q, const torch::Tensor& mod, const torch::Tensor& cs, const torch::Tensor& sn, const float* w,
+                 const Geo& geo, double eps, double qk_eps, bool save, bool pdl, torch::Tensor& Qh, torch::Tensor& Kh, torch::Tensor& Vh,
+                 torch::Tensor& G, torch::Tensor& X, torch::Tensor& PQ, torch::Tensor& PK) {
+  static bool attr = false;
+  if (!attr) { smem_attr(qkvg_fwd_kernel, Q1_BYTES); attr = true; }
+  const CUtensorMap mG = map_rows(G, geo, C);
+  QkvgFwdArgs a{mod.data_ptr<float>(), cs.data_ptr<float>(), sn.data_ptr<float>(), geo, (float)eps, (float)qk_eps, save ? 1 : 0};
+  C10_CUDA_CHECK(pdl_launch(qkvg_fwd_kernel, dim3(pair_grid(geo, q.device().index())), dim3(TPB), Q1_BYTES,
+                            at::cuda::getCurrentCUDAStream(), pdl, a, map_w(w + F_W1, 512, C, 128), map_rows(q, geo, C),
+                            save ? map_rows(X, geo, C) : mG, save ? map_rows(PQ, geo, C) : mG, save ? map_rows(PK, geo, C) : mG, mG,
+                            map_hm(Qh, geo), map_hm(Kh, geo), map_hm(Vh, geo)));
+}
+
+void launch_attn(const torch::Tensor& Qh, const torch::Tensor& Kh, const torch::Tensor& Vh, const torch::Tensor& sequ, torch::Tensor& O,
+                 torch::Tensor& lse, long N, long S, bool pdl) {
+  AttnArgs a{};
+  a.Q = bfp(Qh); a.K = bfp(Kh); a.V = bfp(Vh); a.sequ = sequ.data_ptr<int>();
+  a.O = bfp_mut(O); a.lse = lse.data_ptr<float>(); a.S = (int)S; a.scale = 1.f / sqrtf((float)D);
+  C10_CUDA_CHECK(pdl_launch(attn_fwd_kernel, dim3((unsigned)((S + 63) / 64), (unsigned)(N * H)), dim3(128), 0,
+                            at::cuda::getCurrentCUDAStream(), pdl, a));
+}
+
+void launch_ffn(const torch::Tensor& q, const torch::Tensor& mod, const torch::Tensor& G, const torch::Tensor& O, const float* w,
+                const Geo& geo, double eps, bool save, bool pdl, torch::Tensor& out, torch::Tensor& Q1, torch::Tensor& Att,
+                torch::Tensor& Y, torch::Tensor& FF) {
+  static bool attr = false;
+  if (!attr) { smem_attr(oproj_ffn_fwd_kernel, F4_BYTES); attr = true; }
+  FfnFwdArgs a{mod.data_ptr<float>(), geo, (float)eps, save ? 1 : 0};
+  const CUtensorMap mout = map_rows(out, geo, C);
+  C10_CUDA_CHECK(pdl_launch(oproj_ffn_fwd_kernel, dim3(pair_grid(geo, q.device().index())), dim3(TPB), F4_BYTES,
+                            at::cuda::getCurrentCUDAStream(), pdl, a, map_w(w + F_WO, C, C, 128), map_w(w + F_WABH, 512, C, 64),
+                            map_w(w + F_WABL, 512, C, 64), map_w(w + F_WDH, C, NHID, 128), map_w(w + F_WDL, C, NHID, 128),
+                            map_rows(q, geo, C), map_rows(G, geo, C), map_rows_bf(O, geo), mout, save ? map_rows(Q1, geo, C) : mout,
+                            save ? map_rows(Att, geo, C) : mout, save ? map_rows(Y, geo, C) : mout, save ? map_rows(FF, geo, C) : mout));
+}
+
+// the checks every forward entry makes: q [N, S, 128], mod [B*S, 768], cos / sin [B*S, 16] fp32
+Geo fwd_geo(const torch::Tensor& q, const torch::Tensor& mod, const torch::Tensor& cs, const torch::Tensor& sn, int64_t B) {
+  TORCH_CHECK(q.dim() == 3 && q.size(2) == C, "q [N, S, 128]");
+  const long N = q.size(0), S = q.size(1), A = N / B;
+  TORCH_CHECK(A * B == N && S > 0, "N % B, S > 0");
+  check_rows(q, N * S, C, "q");
+  check_rows(mod, B * S, MODW, "mod");
+  check_rows(cs, B * S, D / 2, "cos");
+  check_rows(sn, B * S, D / 2, "sin");
+  return make_geo(A, B, S, bwd_sp(A));
+}
+
+const float* prep_ptr(const torch::Tensor& W) {
+  TORCH_CHECK(W.is_cuda() && W.scalar_type() == torch::kFloat && W.numel() == F_END, "wpre: the forward prep");
+  return W.data_ptr<float>();
+}
+}  // namespace
+
 // Forward. q [N, S, C]; mod [B*S, 768]; cos / sin [B*S, 16]; seqused [N] int32; weights fp32.
 // Returns [out [N*S, C]] or, with save, [out, Q, K, V (bf16 [N, H, S, D]), G, O (bf16 [N*S, C]), lse [N, H, S], q1, x, pq, pk,
 // att, y, ffn] -- the layout of the Triton fp32 forward.
@@ -1625,23 +1687,15 @@ std::vector<torch::Tensor> fwd(torch::Tensor q, torch::Tensor mod, torch::Tensor
                                int64_t B, int64_t half_window, double eps, double qk_eps, bool save,
                                c10::optional<torch::Tensor> wpre) {
   TORCH_CHECK(half_window == HWIN, "the fp32 CUDA block serves half_window 64");
-  TORCH_CHECK(q.dim() == 3 && q.size(2) == C, "q [N, S, 128]");
-  const long N = q.size(0), S = q.size(1), M = N * S, A = N / B;
-  TORCH_CHECK(A * B == N && S > 0, "N % B, S > 0");
-  check_rows(q, M, C, "q");
-  check_rows(mod, B * S, MODW, "mod");
-  check_rows(cs, B * S, D / 2, "cos");
-  check_rows(sn, B * S, D / 2, "sin");
+  const Geo geo = fwd_geo(q, mod, cs, sn, B);
+  const long N = q.size(0), S = q.size(1), M = N * S;
   TORCH_CHECK(sequ.is_cuda() && sequ.scalar_type() == torch::kInt && sequ.numel() == N && sequ.is_contiguous(), "seqused int32 [N]");
   const c10::cuda::CUDAGuard guard(q.device());
-  const int dev = q.device().index();
   // wpre: the weights as ``prep(..., true)`` returned them (the caller keeps them while the weights are unchanged: an inference call)
-  auto W = (wpre && wpre->defined()) ? *wpre : prep(wqkv, wg, wo, wu, wd, true);
-  TORCH_CHECK(W.is_cuda() && W.scalar_type() == torch::kFloat && W.numel() == F_END, "wpre: the forward prep");
-  const float* w = W.data_ptr<float>();
+  const bool pre = wpre && wpre->defined();
+  auto W = pre ? *wpre : prep(wqkv, wg, wo, wu, wd, true);
+  const float* w = prep_ptr(W);
   auto f32 = q.options(), bf = q.options().dtype(torch::kBFloat16);
-  auto stream = at::cuda::getCurrentCUDAStream();
-  const Geo geo = make_geo(A, B, S, bwd_sp(A));
   auto Qh = torch::empty({N, H, S, D}, bf), Kh = torch::empty_like(Qh), Vh = torch::empty_like(Qh);
   auto G = torch::empty({M, C}, f32);
   torch::Tensor X, PQ, PK, Q1, Att, Y, FF;
@@ -1649,39 +1703,42 @@ std::vector<torch::Tensor> fwd(torch::Tensor q, torch::Tensor mod, torch::Tensor
     X = torch::empty({M, C}, f32); PQ = torch::empty_like(X); PK = torch::empty_like(X);
     Q1 = torch::empty_like(X); Att = torch::empty_like(X); Y = torch::empty_like(X); FF = torch::empty_like(X);
   }
-  const CUtensorMap mG = map_rows(G, geo, C);
-  {
-    static bool attr = false;
-    if (!attr) { smem_attr(qkvg_fwd_kernel, Q1_BYTES); attr = true; }
-    QkvgFwdArgs a{mod.data_ptr<float>(), cs.data_ptr<float>(), sn.data_ptr<float>(), geo, (float)eps, (float)qk_eps, save ? 1 : 0};
-    qkvg_fwd_kernel<<<pair_grid(geo, dev), TPB, Q1_BYTES, stream>>>(
-        a, map_w(w + F_W1, 512, C, 128), map_rows(q, geo, C), save ? map_rows(X, geo, C) : mG, save ? map_rows(PQ, geo, C) : mG,
-        save ? map_rows(PK, geo, C) : mG, mG, map_hm(Qh, geo), map_hm(Kh, geo), map_hm(Vh, geo));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-  }
+  launch_qkvg(q, mod, cs, sn, w, geo, eps, qk_eps, save, pre, Qh, Kh, Vh, G, X, PQ, PK);
   auto O = torch::empty({M, C}, bf);
   auto lse = torch::empty({N, H, S}, f32);
-  {
-    AttnArgs a{};
-    a.Q = bfp(Qh); a.K = bfp(Kh); a.V = bfp(Vh); a.sequ = sequ.data_ptr<int>();
-    a.O = bfp_mut(O); a.lse = lse.data_ptr<float>(); a.S = (int)S; a.scale = 1.f / sqrtf((float)D);
-    attn_fwd_kernel<<<dim3((unsigned)((S + 63) / 64), (unsigned)(N * H)), 128, 0, stream>>>(a);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-  }
+  launch_attn(Qh, Kh, Vh, sequ, O, lse, N, S, pre);
   auto out = torch::empty({M, C}, f32);
-  {
-    static bool attr = false;
-    if (!attr) { smem_attr(oproj_ffn_fwd_kernel, F4_BYTES); attr = true; }
-    FfnFwdArgs a{mod.data_ptr<float>(), geo, (float)eps, save ? 1 : 0};
-    const CUtensorMap mout = map_rows(out, geo, C);
-    oproj_ffn_fwd_kernel<<<pair_grid(geo, dev), TPB, F4_BYTES, stream>>>(
-        a, map_w(w + F_WO, C, C, 128), map_w(w + F_WABH, 512, C, 64), map_w(w + F_WABL, 512, C, 64), map_w(w + F_WDH, C, NHID, 128),
-        map_w(w + F_WDL, C, NHID, 128), map_rows(q, geo, C), mG, map_rows_bf(O, geo), mout, save ? map_rows(Q1, geo, C) : mout,
-        save ? map_rows(Att, geo, C) : mout, save ? map_rows(Y, geo, C) : mout, save ? map_rows(FF, geo, C) : mout);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-  }
+  launch_ffn(q, mod, G, O, w, geo, eps, save, pre, out, Q1, Att, Y, FF);
   if (!save) return {out};
   return {out, Qh, Kh, Vh, G, O, lse, Q1, X, PQ, PK, Att, Y, FF};
+}
+
+// The inference forward's two row stages around an attention the caller runs (global attention: FlashAttention-4), the weights as
+// ``prep(..., true)`` made them (wpre). fwd_qkvg -> [Qh, Kh, Vh (bf16 [N, H, S, D]), G [N*S, C]]; fwd_ffn(.., G, O bf16 [N*S, C]) ->
+// [out [N*S, C]]. The same kernels and values as ``fwd`` without saves.
+std::vector<torch::Tensor> fwd_qkvg(torch::Tensor q, torch::Tensor mod, torch::Tensor cs, torch::Tensor sn, int64_t B, double eps,
+                                    double qk_eps, torch::Tensor wpre) {
+  const Geo geo = fwd_geo(q, mod, cs, sn, B);
+  const long N = q.size(0), S = q.size(1);
+  const c10::cuda::CUDAGuard guard(q.device());
+  auto Qh = torch::empty({N, H, S, D}, q.options().dtype(torch::kBFloat16)), Kh = torch::empty_like(Qh), Vh = torch::empty_like(Qh);
+  auto G = torch::empty({N * S, C}, q.options());
+  torch::Tensor none;
+  launch_qkvg(q, mod, cs, sn, prep_ptr(wpre), geo, eps, qk_eps, false, true, Qh, Kh, Vh, G, none, none, none);
+  return {Qh, Kh, Vh, G};
+}
+
+std::vector<torch::Tensor> fwd_ffn(torch::Tensor q, torch::Tensor mod, torch::Tensor cs, torch::Tensor sn, torch::Tensor G,
+                                   torch::Tensor O, int64_t B, double eps, torch::Tensor wpre) {
+  const Geo geo = fwd_geo(q, mod, cs, sn, B);
+  const long M = q.size(0) * q.size(1);
+  check_rows(G, M, C, "G");
+  TORCH_CHECK(O.is_cuda() && O.scalar_type() == torch::kBFloat16 && O.is_contiguous() && O.numel() == M * C, "O bf16 [N*S, 128]");
+  const c10::cuda::CUDAGuard guard(q.device());
+  auto out = torch::empty({M, C}, q.options());
+  torch::Tensor none;
+  launch_ffn(q, mod, G, O, prep_ptr(wpre), geo, eps, false, true, out, none, none, none, none);
+  return {out};
 }
 
 // Backward from the forward's saved tensors. Returns [dq [N*S, C], dmod [B*S, 768], dP [N*S, 512], datt, gated [N*S, C],
@@ -1762,6 +1819,8 @@ std::vector<torch::Tensor> bwd(torch::Tensor dy, torch::Tensor q, torch::Tensor 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fwd", &fwd, "ESMFold2 SWA atom DiT block forward, fp32 (tf32 wgmma, split-tf32 FFN, bf16 window attention)");
+  m.def("fwd_qkvg", &fwd_qkvg, "the inference forward's qkvg stage (prepped weights)");
+  m.def("fwd_ffn", &fwd_ffn, "the inference forward's out-projection + FFN stage (prepped weights)");
   m.def("bwd", &bwd, "ESMFold2 SWA atom DiT block backward, fp32 (weight gradients excluded)");
   m.def("prep", &prep, "the weights as the fp32 block's GEMMs stream them (tf32-rounded / split, K-permuted, transposed)");
 }

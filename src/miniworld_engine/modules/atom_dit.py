@@ -897,7 +897,8 @@ class AtomDiTMiniWorld(BackendModule):
     """
 
     backends = ("pytorch", "anthropic", "cuda")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2}   # 2026-11-10: kits; sm_80 paths
+    # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2, "cuda:h100_sm90": 2}
 
     def __init__(
         self,
@@ -989,7 +990,8 @@ class AtomDiTMiniWorld(BackendModule):
     # The whole block on the fused SWA kernels (kernels/swa_dit: the H100 sm_90a stages -- modulation silu(c) W^T, qkvg + q / k RMSNorm +
     # 3D RoPE, the window attention, out-projection + gated residual + SwiGLU FFN; a gradient: SWADiTBlockFunction / SWADiTModulationH100,
     # their backwards on the same family; global attention (a half window >= the global threshold) on FlashAttention-4 between the native
-    # stages). Range: H100, bf16 / fp32 / master activations (weights in the activation dtype or fp32), d_atom 128 = 4 heads x 32, d_cond
+    # stages, an fp32 inference call's between the fp32 block's own row stages). Inference (``_h100_eval``) caches the weight casts / packs
+    # per weight version and skips the backward's modulation copies; a stack shares silu(c) over its blocks. Range: H100, bf16 / fp32 / master activations (weights in the activation dtype or fp32), d_atom 128 = 4 heads x 32, d_cond
     # 128, SwiGLU hidden 256, half_window 64 or global (FlashAttention-4 installed), the 6-tuple of build_attention_params (fp32 RoPE without
     # gradient, int32 front-packed seqused [N]). fp32: TF32 composed stages (swa_fp32.cu) when TF32 is allowed, the native stages with exact
     # fp32 cuBLAS projections under matmul precision "highest" (kernels/swa_dit/dispatch.native_h100_stages).
@@ -1095,9 +1097,8 @@ class AtomDiTMiniWorld(BackendModule):
     def _forward_cuda(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> torch.Tensor:
         if _a100(x):
             return self._forward_a100(x, cond, attention_params)
-        from miniworld_engine.kernels.swa_dit._common import FP32_EPS
         from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction, SWADiTModulationH100
-        from miniworld_engine.kernels.swa_dit.dispatch import native_h100_mod_fwd, swa_dit_block_fwd
+        from miniworld_engine.kernels.swa_dit.dispatch import native_h100_silu
 
         n, _s = x.shape[:2]
         cos, sin, seqused = attention_params[:3]
@@ -1113,9 +1114,19 @@ class AtomDiTMiniWorld(BackendModule):
             mod = _native_caller_output(SWADiTModulationH100.apply(c, wmod), cond, wmod, force=True)
             # one modulation row per sequence row: B = N (no augment structure is known here)
             return SWADiTBlockFunction.apply(q, mod, cos, sin, seqused, *weights, n, self.attn.half_window)
-        mod = native_h100_mod_fwd(c, wmod)[0]
-        dt = q.dtype
-        return swa_dit_block_fwd(q, mod, cos, sin, seqused, *(w.to(dt) for w in weights), n, self.attn.half_window, FP32_EPS, False)[0]
+        return self._h100_eval(q, native_h100_silu(c), cos, sin, seqused)
+
+    def _h100_eval(self, q: torch.Tensor, a: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, seqused: torch.Tensor) -> torch.Tensor:
+        """The H100 inference block from ``a = silu(cond)`` (``native_h100_silu``, [N*S, d_cond] in q's dtype; a stack conditioned on one
+        cond computes it once): the modulation GEMM, then the fused block, its weights cast / packed once per weight version
+        (``dispatch.eval_form``). q [N, S, 128] contiguous, cos / sin [N*S, 16] -> [N, S, 128]."""
+        from miniworld_engine.kernels.swa_dit._common import FP32_EPS
+        from miniworld_engine.kernels.swa_dit.dispatch import native_h100_eval_weights, native_h100_mod_eval, swa_dit_block_fwd
+
+        mod = native_h100_mod_eval(a, self.adaln_modulation[1].weight)
+        weights = native_h100_eval_weights((self.attn.Wqkv.weight, self.attn.gate_proj.weight, self.attn.out_proj.weight,
+                                            self.ffn.w_up.weight, self.ffn.w_down.weight), q.dtype)
+        return swa_dit_block_fwd(q, mod, cos, sin, seqused, *weights, q.shape[0], self.attn.half_window, FP32_EPS, False)[0]
 
     def forward_hoisted(self, x: torch.Tensor, c_base: torch.Tensor, attention_params: tuple) -> torch.Tensor:
         """The block over ``N = A * B`` rows whose conditioning repeats over the augments: ``cond[a*B + b] == c_base[b]``, with
@@ -1170,7 +1181,8 @@ class SWAAtomTransformer(BackendModule):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2}   # 2026-11-10: kits; sm_80 paths
+    # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2, "cuda:h100_sm90": 2}
 
     class Config(BaseModel):
         """Configuration for the SWA atom transformer."""
@@ -1238,6 +1250,19 @@ class SWAAtomTransformer(BackendModule):
         return self.blocks[0]._supports_cuda(q, c, attention_params) if len(self.blocks) else None
 
     def _forward_cuda(self, q, c, attention_params, c_base=None):
+        blocks = list(self.blocks)
+        if (len(blocks) > 1 and _h100(q) and self.config.n_checkpoint_segments is None
+                and not (torch.is_grad_enabled() and (q.requires_grad or c.requires_grad or any(p.requires_grad for p in self.parameters())))):
+            # H100 inference: every block is conditioned on the same c, so silu(c) -- the modulation GEMM's operand -- is made once
+            from miniworld_engine.kernels.swa_dit.dispatch import native_h100_silu
+
+            cos, sin, seqused = attention_params[:3]
+            cos, sin = cos.reshape(-1, cos.shape[-1]).contiguous(), sin.reshape(-1, sin.shape[-1]).contiguous()
+            a = native_h100_silu(c.reshape(-1, c.shape[-1]).contiguous())
+            q = q.contiguous()
+            for block in blocks:
+                q = block._h100_eval(q, a, cos, sin, seqused)
+            return q
         return self._forward_pytorch(q, c, attention_params, c_base)   # the blocks run their own backend
 
     def _forward_anthropic(self, q, c, attention_params, c_base=None):
