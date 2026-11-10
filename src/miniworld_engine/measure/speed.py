@@ -59,9 +59,8 @@ The policies
 - Clocks are not locked (no root on the cluster): boost / thermal state varies run to run; compare numbers from one job.
 - Seeds: the module is built after ``torch.manual_seed(seed)`` once per case and deep-copied for every backend (same weights); the inputs
   come from ``make_inputs`` with a ``torch.Generator`` seeded the same way for every backend; the upstream gradients from a seeded
-  generator. TF32: the ``pytorch`` and ``triton`` backends run with TF32 products allowed in float32 (the engine's fp32 kernels compute
-  in TF32 too, and the accuracy measurer judges against the same reference); every other backend runs with TF32 off wherever it calls
-  PyTorch's own matmuls. The flags of the run are in each record (``tf32_matmul``).
+  generator. TF32: every backend runs with TF32 products allowed in float32 PyTorch matmuls (the engine's fp32 kernels compute
+  in TF32 too, and the accuracy measurer judges against the same reference; measure/config.py ``TF32_BACKENDS``). The flags of the run are in each record (``tf32_matmul``).
 """
 
 from __future__ import annotations
@@ -88,7 +87,7 @@ TIMING_MODES = ("graph", "compile+graph", "eager")
 #: Human-managed version of this measurer's meaning (how a step is timed: graph capture, L2 flush, statistics, the TF32 rule): bump it
 #: when a change can alter a speed record, not for refactors. Recorded in ``meta`` with the config's version, the measurement settings and the
 #: environment.
-SPEED_VERSION = "2"
+SPEED_VERSION = "3"
 _FLUSH_BYTES = 256 * 1024 * 1024
 
 

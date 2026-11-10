@@ -53,8 +53,8 @@ Per case the module is built once and deep-copied for each run:
   LayerNorm affine becomes fp64; every `wide(...)` statement runs in fp64); no autocast.
 - **reference**: the `pytorch` backend at the case dtype, with TF32 allowed for fp32 matmuls (the engine's fp32 kernels compute in TF32
   too).
-- **`triton`** runs with TF32 allowed too (user decision 2026-11-10).
-- **each other backend** of the config the class has, with TF32 off wherever it calls PyTorch's own matmuls. The range check
+- **every backend** runs with TF32 allowed (user decision 2026-11-10: "TF32 on for all, always"; `measure/config.py` `TF32_BACKENDS`).
+- **each other backend** of the config the class has, with TF32 on like the reference. The range check
   (`unsupported`) runs first in the call's grad / autocast context; a refusal is recorded `unsupported` with its reason.
 
 Measured tensors: the forward outputs and, in `train`, the gradient of every floating input and every parameter for one seeded random
@@ -106,7 +106,7 @@ Policies:
 - L2: a 256 MB write before every timed call, outside its events (`flush_l2: false` for warm L2).
 - Queueing: the GPU is held by `torch.cuda._sleep` until the CPU has enqueued every timed call.
 - Statistics: median, p10, p90 of the per-call times. Same weights (one seeded build per case, deep-copied) and inputs for every backend.
-- TF32 as in accuracy: allowed for `pytorch` and `triton`, off for the others' PyTorch matmuls; recorded as `tf32_matmul`.
+- TF32 as in accuracy: allowed for every backend; recorded as `tf32_matmul`.
 - Clocks are not locked: compare numbers from one job. The record's `env` carries GPU, torch, CUDA, TF32 flags, L2 / warmup / iterations.
 
 `SPEED_TRACEBACK=1` prints tracebacks.
