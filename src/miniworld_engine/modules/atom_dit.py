@@ -106,6 +106,7 @@ def _needs_grad(module: nn.Module, *tensors) -> bool:
     return torch.is_grad_enabled() and (any(p.requires_grad for p in module.parameters())
                                         or any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors))
 
+
 def windows(n: int) -> int:
     return (n + QUERIES - 1) // QUERIES
 
