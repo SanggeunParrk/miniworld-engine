@@ -76,14 +76,113 @@ class _Fp32ParamsMixin(nn.Module):
         return super()._apply(fp32_fn, *args, **kwargs)
 
 
+# ----------------------------------------------------------------------------------------------- Protenix's fast_layernorm (anthropic, train)
+# The release ships Protenix 2.0's apex-derived ``fast_layer_norm_cuda_v2`` (forward + backward) as a stream-correct prebuilt .so for
+# cp311 + torch 2.13.0+cu130 / 2.7.1+cu126 only, together with its patched sources (``fastln_prebuilt_cu130/patched_src``: the stock sources
+# with the current stream at every launch). The same sources are built here for this environment through the engine's extension cache
+# (``kernels/_nvcc.load_extension``: sm_80 / sm_90, the build under the cache, never in the release tree), after checking each file's
+# sha256 against the release manifest.
+_FASTLN_SRC = "protenix_v2/opt/forward/flashpairformer/third_party/fastln_prebuilt_cu130/patched_src"
+_FASTLN_FILES = ("compat.h", "type_shim.h", "layer_norm_cuda.cpp", "layer_norm_cuda_kernel.cu")
+
+
+def _fastln():
+    """The built extension (cached per process; the build is cached on disk by its sources and flags)."""
+    hit = _FASTLN_STATE.get("ext")
+    if hit is not None:
+        return hit
+    import hashlib
+
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from miniworld_engine.modules import _anthropic
+
+    base = _anthropic.root() / _FASTLN_SRC
+    manifest = _anthropic._manifest()
+    for name in _FASTLN_FILES:
+        rel = f"{_FASTLN_SRC}/{name}"
+        want = manifest.get(rel)
+        if want is None or hashlib.sha256((base / name).read_bytes()).hexdigest() != want:
+            raise _anthropic.ReleaseMissing(f"{rel} is missing or differs from release {_anthropic.REVISION[:8]}")
+    from pathlib import Path
+
+    home = ensure_cuda_home()
+    # the binding is a .cpp (host compiler): it needs the toolkit's headers, which a conda toolkit keeps under targets/<arch>/include
+    cuda_inc = [str(p) for p in (Path(home) / "include", Path(home) / "targets" / "x86_64-linux" / "include")
+                if home and (p / "cuda_runtime.h").is_file()]
+    ext = load_extension(
+        name="anthropic_protenix_fast_layer_norm_v1",
+        sources=[str(base / "layer_norm_cuda.cpp"), str(base / "layer_norm_cuda_kernel.cu")],
+        extra_include_paths=[str(base), *cuda_inc],
+        extra_cuda_cflags=[*host_flags(), "-O3", *gencodes("80", "90")],
+        extra_cflags=["-O3"],
+        verbose=False,
+    )
+    _FASTLN_STATE["ext"] = ext
+    return ext
+
+
+_FASTLN_STATE: dict = {}
+
+
+def _fastln_reason() -> str | None:
+    if "why" not in _FASTLN_STATE:
+        try:
+            _fastln()
+            _FASTLN_STATE["why"] = None
+        except Exception as e:   # the reason the backend cannot serve the training call
+            _FASTLN_STATE["why"] = f"Protenix fast_layernorm unavailable: {type(e).__name__}: {str(e)[:200]}"
+    return _FASTLN_STATE["why"]
+
+
+class _FastLayerNormFunction(torch.autograd.Function):
+    """Protenix's ``FusedLayerNormAffineFunction`` (protenix/model/layer_norm/layer_norm.py) on the built extension: the affine cast to the
+    activation's dtype (the master layout's bf16 compute copy), fp32 statistics saved for the backward, the affine gradients returned in
+    the parameters' dtype."""
+
+    @staticmethod
+    def forward(ctx, input, weight, bias, normalized_shape, eps):
+        ext = _fastln()
+        d = input.dtype
+        x = input.contiguous()
+        if weight is None and bias is None:
+            out, mean, invvar = ext.forward_none_affine(x, normalized_shape, eps)
+        elif weight is None:
+            out, mean, invvar = ext.forward_with_bias_affine(x, normalized_shape, bias.to(d), eps)
+        elif bias is None:
+            out, mean, invvar = ext.forward_with_weight_affine(x, normalized_shape, weight.to(d), eps)
+        else:
+            out, mean, invvar = ext.forward_with_both_affine(x, normalized_shape, weight.to(d), bias.to(d), eps)
+        ctx.save_for_backward(x, weight, bias, mean, invvar)
+        ctx.shape, ctx.eps = normalized_shape, eps
+        return out.view(input.shape)
+
+    @staticmethod
+    def backward(ctx, dout):
+        ext = _fastln()
+        x, weight, bias, mean, invvar = ctx.saved_tensors
+        d = dout.dtype
+        g = dout.contiguous()
+        if weight is None and bias is None:
+            dx, dw, db = ext.backward_none_affine(g, mean, invvar, x, ctx.shape, ctx.eps)
+        elif weight is None:
+            dx, dw, db = ext.backward_with_bias_affine(g, mean, invvar, x, ctx.shape, bias.to(d), ctx.eps)
+        elif bias is None:
+            dx, dw, db = ext.backward_with_weight_affine(g, mean, invvar, x, ctx.shape, weight.to(d), ctx.eps)
+        else:
+            dx, dw, db = ext.backward_with_both_affine(g, mean, invvar, x, ctx.shape, weight.to(d), bias.to(d), ctx.eps)
+        dw = None if weight is None else dw.to(weight.dtype)
+        db = None if bias is None else db.to(bias.dtype)
+        return dx, dw, db, None, None
+
+
 class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
     """A LayerNorm with an fp32-pinned affine (see :class:`_Fp32ParamsMixin`), computed in fp32 and returned in the input dtype.
 
     Backends: ``"anthropic"`` is the af3_torch kit's LayerNorm (``af3_torch_opt.ln_rows``: xfold's fastnn Triton kernel, several rows per
     program; rows wider than 512 bytes take that kernel's stock one-row launch, as the kit does) -- the same statement (fp32 statistics and
-    affine, the result stored in the input dtype), forward only. (The release's LayerNorms with a backward are not reachable here: the
-    Protenix / OpenDDE fast_layernorm CUDA ``.so`` ship prebuilt for cp311 + torch 2.13.0+cu130 / 2.7.1+cu126 only, ``ef2_fused_ln`` is
-    dx-only for frozen affines.) ``"cueq"``: cuEquivariance's ``layer_norm_transpose`` ("nd->nd"), forward and backward.
+    affine, the result stored in the input dtype) for a call without a gradient; a call with a gradient runs Protenix's fast_layernorm
+    (``FusedLayerNormAffineFunction`` on ``fast_layer_norm_cuda_v2``, forward and backward), built for this environment from the release's
+    patched sources (:func:`_fastln`). ``"cueq"``: cuEquivariance's ``layer_norm_transpose`` ("nd->nd"), forward and backward.
 
     ``"cuda"`` (H100): the engine's CUDA LayerNorm (``kernels/layernorm/cuda/general.layernorm_cuda``): rows of 144-2048 bytes (16-byte
     multiples) on the pipelined kernels (``cuda/pipe``), every other width on the general kernels; fp32 statistics, forward and backward
@@ -126,26 +225,33 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
 
     _KIT_LN = (("af3_torch_opt.ln_rows", "af3_torch/opt"), ("xfold.fastnn.layer_norm", "af3_torch/opt/forward/af3t/af3_torch"))
 
+    def _wants_grad(self, input: torch.Tensor) -> bool:
+        return torch.is_grad_enabled() and (input.requires_grad or any(p.requires_grad for p in self.parameters()))
+
     def _supports_anthropic(self, input: torch.Tensor) -> str | None:
         from miniworld_engine.modules import _anthropic
 
-        for module, path in self._KIT_LN:
-            why = _anthropic.unavailable(module, input.device, path=path)
-            if why is not None:
-                return why
-        if torch.is_grad_enabled():
-            return "the kit's LayerNorm kernel has no backward (inference only: call under torch.no_grad() / inference_mode)"
         if input.dtype not in (torch.bfloat16, torch.float32):
             return f"dtype {input.dtype}: the backend is verified for bfloat16 / float32 activations"
         if len(self.normalized_shape) != 1:
             return "the kernel normalises the last dimension only"
         if self.weight is not None and self.weight.dtype != torch.float32:
             return "the affine must be fp32 (the module's pinned layout)"
+        if self._wants_grad(input):   # training: Protenix's fast_layernorm (forward + backward), built for this environment
+            if getattr(input.device, "type", None) != "cuda":
+                return "the release's kernels run on CUDA tensors only"
+            return _fastln_reason()
+        for module, path in self._KIT_LN:
+            why = _anthropic.unavailable(module, input.device, path=path)
+            if why is not None:
+                return why
         return None
 
     def _forward_anthropic(self, input: torch.Tensor) -> torch.Tensor:
         from miniworld_engine.modules import _anthropic
 
+        if self._wants_grad(input):
+            return _FastLayerNormFunction.apply(input, self.weight, self.bias, tuple(self.normalized_shape), self.eps)
         (rows, rows_path), (stock, stock_path) = self._KIT_LN
         y = _anthropic.load(rows, path=rows_path).layer_norm_rows(input, self.normalized_shape, self.weight, self.bias, self.eps)
         if y is None:   # a row wider than the kit's 512-byte blocking: xfold's own one-row-per-program launch of the same kernel body
