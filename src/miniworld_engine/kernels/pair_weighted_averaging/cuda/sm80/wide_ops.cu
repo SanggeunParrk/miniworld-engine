@@ -112,15 +112,81 @@ __global__ void __launch_bounds__(256) gate_bwd_k(const bf16* __restrict__ du, c
 
 // Inference, the pair side in one pass: logits[r, h] = bf16( bf16(LN(z[r, :])) . Wb[h, :] ), one warp per pair row of 512 channels (16 per lane),
 // two-pass statistics, the normalised values rounded to bf16 as the module's LayerNorm output before the 8 dot products (fp32).
-constexpr int DZ = 512;
-__global__ void __launch_bounds__(256) pair_logits_k(const bf16* __restrict__ z, const float* __restrict__ lnw, const float* __restrict__ lnb,
-                                                     const bf16* __restrict__ wb, bf16* __restrict__ out, long R, float eps) {
-  // a lane's 16 channels (8 lane + e, 256 + 8 lane + e) of the 8 Wb rows and of the LayerNorm affine stay in registers for every row
+constexpr int DZ = 512, PL_PF = 3;
+// one row: the lane's 16 channels (8 lane + e, 256 + 8 lane + e) -> its head's logit (lanes with lane % 4 == 0 store it)
+__device__ __forceinline__ void pl_row(const uint4 (&raw)[2], const __nv_bfloat162 (&wr)[2][4][H], const float (*sg)[32], const float (*sb)[32], int lane,
+                                       float eps, bf16* __restrict__ out_row) {
+  float v[2][8];
+  unpack8(raw[0], v[0]);
+  unpack8(raw[1], v[1]);
+  float s = 0.f;
+#pragma unroll
+  for (int a = 0; a < 2; ++a)
+#pragma unroll
+    for (int e = 0; e < 8; ++e) s += v[a][e];
+#pragma unroll
+  for (int o = 16; o; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+  const float mean = s / DZ;
+  float q = 0.f;
+#pragma unroll
+  for (int a = 0; a < 2; ++a)
+#pragma unroll
+    for (int e = 0; e < 8; ++e) { const float d = v[a][e] - mean; q = fmaf(d, d, q); }
+#pragma unroll
+  for (int o = 16; o; o >>= 1) q += __shfl_xor_sync(0xffffffffu, q, o);
+  const float rstd = rsqrtf(q / DZ + eps);
+  float acc[H];
+#pragma unroll
+  for (int h = 0; h < H; ++h) acc[h] = 0.f;
+#pragma unroll
+  for (int a = 0; a < 2; ++a)
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const int e0 = a * 8 + 2 * i;
+      const float y0 = bfr(fmaf((v[a][2 * i] - mean) * rstd, sg[e0][lane], sb[e0][lane]));
+      const float y1 = bfr(fmaf((v[a][2 * i + 1] - mean) * rstd, sg[e0 + 1][lane], sb[e0 + 1][lane]));
+#pragma unroll
+      for (int h = 0; h < H; ++h) {
+        const float2 wv = __bfloat1622float2(wr[a][i][h]);
+        acc[h] = fmaf(y1, wv.y, fmaf(y0, wv.x, acc[h]));
+      }
+    }
+  // the 8 warp sums by halving exchanges (9 shuffles, not 40): lane l ends with head 4 b4 + 2 b3 + b2 of its lane bits
+#pragma unroll
+  for (int h = 0; h < 4; ++h) {
+    const bool up = lane & 16;
+    const float send = up ? acc[h] : acc[h + 4], keep = up ? acc[h + 4] : acc[h];
+    acc[h] = keep + __shfl_xor_sync(0xffffffffu, send, 16);
+  }
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+    const bool up = lane & 8;
+    const float send = up ? acc[h] : acc[h + 2], keep = up ? acc[h + 2] : acc[h];
+    acc[h] = keep + __shfl_xor_sync(0xffffffffu, send, 8);
+  }
+  {
+    const bool up = lane & 4;
+    const float send = up ? acc[0] : acc[1], keep = up ? acc[1] : acc[0];
+    acc[0] = keep + __shfl_xor_sync(0xffffffffu, send, 4);
+  }
+  acc[0] += __shfl_xor_sync(0xffffffffu, acc[0], 2);
+  acc[0] += __shfl_xor_sync(0xffffffffu, acc[0], 1);
+  if ((lane & 3) == 0) out_row[((lane >> 4) & 1) * 4 + ((lane >> 3) & 1) * 2 + ((lane >> 2) & 1)] = __float2bfloat16_rn(acc[0]);
+}
+
+// Wb (bf16 pairs) in registers, the LayerNorm affine in shared memory ([(a, e)][lane]: conflict-free), PL_PF rows' loads in flight per warp
+__global__ void __launch_bounds__(256, 2) pair_logits_k(const bf16* __restrict__ z, const float* __restrict__ lnw, const float* __restrict__ lnb,
+                                                        const bf16* __restrict__ wb, bf16* __restrict__ out, long R, float eps) {
+  __shared__ float sg[16][32], sb[16][32];
+  for (int k = threadIdx.x; k < DZ; k += 256) {
+    const int ae = (k >> 8) * 8 + (k & 7), l = (k >> 3) & 31;
+    sg[ae][l] = lnw[k];
+    sb[ae][l] = lnb[k];
+  }
   const int lane = threadIdx.x & 31;
   __nv_bfloat162 wr[2][4][H];
-  float gr[2][8], br[2][8];
 #pragma unroll
-  for (int a = 0; a < 2; ++a) {
+  for (int a = 0; a < 2; ++a)
 #pragma unroll
     for (int h = 0; h < H; ++h) {
       const uint4 q = *reinterpret_cast<const uint4*>(wb + h * DZ + a * 256 + lane * 8);
@@ -128,79 +194,25 @@ __global__ void __launch_bounds__(256) pair_logits_k(const bf16* __restrict__ z,
 #pragma unroll
       for (int i = 0; i < 4; ++i) wr[a][i][h] = p[i];
     }
+  __syncthreads();
+  const long W = (long)gridDim.x * 8, r0 = ((long)blockIdx.x * 256 + threadIdx.x) >> 5;
+  uint4 buf[PL_PF][2];
 #pragma unroll
-    for (int e = 0; e < 8; ++e) { gr[a][e] = lnw[a * 256 + lane * 8 + e]; br[a][e] = lnb[a * 256 + lane * 8 + e]; }
+  for (int p = 0; p < PL_PF; ++p) {
+    const long rr = r0 + p * W;
+    if (rr < R) { buf[p][0] = *reinterpret_cast<const uint4*>(z + rr * DZ + lane * 8); buf[p][1] = *reinterpret_cast<const uint4*>(z + rr * DZ + 256 + lane * 8); }
   }
-  const long warps = (long)gridDim.x * 8;
-  // rows r, r + W, r + 2 W, ... of this warp (W = the grid's warps); the next PF rows' loads are in flight while a row is reduced
-  constexpr int PF = 3;
-  const long r0 = ((long)blockIdx.x * 256 + threadIdx.x) >> 5;
-  uint4 buf[PF][2];
-  auto fetch = [&](long rr, uint4 (&d)[2]) {
-    if (rr < R) { d[0] = *reinterpret_cast<const uint4*>(z + rr * DZ + lane * 8); d[1] = *reinterpret_cast<const uint4*>(z + rr * DZ + 256 + lane * 8); }
-  };
+  for (long r = r0; r < R; r += PL_PF * W) {
 #pragma unroll
-  for (int p = 0; p < PF; ++p) fetch(r0 + p * warps, buf[p]);
-  for (long r = r0, it = 0; r < R; r += warps, ++it) {
-    float v[2][8];
-    const int slot = (int)(it % PF);
-    uint4 cur[2];
-#pragma unroll
-    for (int p = 0; p < PF; ++p) if (p == slot) { cur[0] = buf[p][0]; cur[1] = buf[p][1]; fetch(r + PF * warps, buf[p]); }
-    unpack8(cur[0], v[0]);
-    unpack8(cur[1], v[1]);
-    float s = 0.f;
-#pragma unroll
-    for (int a = 0; a < 2; ++a)
-#pragma unroll
-      for (int e = 0; e < 8; ++e) s += v[a][e];
-#pragma unroll
-    for (int o = 16; o; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
-    const float mean = s / DZ;
-    float q = 0.f;
-#pragma unroll
-    for (int a = 0; a < 2; ++a)
-#pragma unroll
-      for (int e = 0; e < 8; ++e) { const float d = v[a][e] - mean; q = fmaf(d, d, q); }
-#pragma unroll
-    for (int o = 16; o; o >>= 1) q += __shfl_xor_sync(0xffffffffu, q, o);
-    const float rstd = rsqrtf(q / DZ + eps);
-    float acc[H];
-#pragma unroll
-    for (int h = 0; h < H; ++h) acc[h] = 0.f;
-#pragma unroll
-    for (int a = 0; a < 2; ++a)
-#pragma unroll
-      for (int i = 0; i < 4; ++i) {
-        const float y0 = bfr(fmaf((v[a][2 * i] - mean) * rstd, gr[a][2 * i], br[a][2 * i]));
-        const float y1 = bfr(fmaf((v[a][2 * i + 1] - mean) * rstd, gr[a][2 * i + 1], br[a][2 * i + 1]));
-#pragma unroll
-        for (int h = 0; h < H; ++h) {
-          const float2 wv = __bfloat1622float2(wr[a][i][h]);
-          acc[h] = fmaf(y1, wv.y, fmaf(y0, wv.x, acc[h]));
-        }
+    for (int p = 0; p < PL_PF; ++p) {
+      const long rr = r + p * W;
+      if (rr < R) {
+        const uint4 cur[2] = {buf[p][0], buf[p][1]};
+        const long nx = rr + PL_PF * W;
+        if (nx < R) { buf[p][0] = *reinterpret_cast<const uint4*>(z + nx * DZ + lane * 8); buf[p][1] = *reinterpret_cast<const uint4*>(z + nx * DZ + 256 + lane * 8); }
+        pl_row(cur, wr, sg, sb, lane, eps, out + rr * H);
       }
-    // the 8 warp sums by halving exchanges (9 shuffles, not 40): after them lane l holds head 4 b4 + 2 b3 + b2 of its lane bits
-#pragma unroll
-    for (int h = 0; h < 4; ++h) {
-      const bool up = lane & 16;
-      const float send = up ? acc[h] : acc[h + 4], keep = up ? acc[h + 4] : acc[h];
-      acc[h] = keep + __shfl_xor_sync(0xffffffffu, send, 16);
     }
-#pragma unroll
-    for (int h = 0; h < 2; ++h) {
-      const bool up = lane & 8;
-      const float send = up ? acc[h] : acc[h + 2], keep = up ? acc[h + 2] : acc[h];
-      acc[h] = keep + __shfl_xor_sync(0xffffffffu, send, 8);
-    }
-    {
-      const bool up = lane & 4;
-      const float send = up ? acc[0] : acc[1], keep = up ? acc[1] : acc[0];
-      acc[0] = keep + __shfl_xor_sync(0xffffffffu, send, 4);
-    }
-    acc[0] += __shfl_xor_sync(0xffffffffu, acc[0], 2);
-    acc[0] += __shfl_xor_sync(0xffffffffu, acc[0], 1);
-    if ((lane & 3) == 0) out[r * H + ((lane >> 4) & 1) * 4 + ((lane >> 3) & 1) * 2 + ((lane >> 2) & 1)] = __float2bfloat16_rn(acc[0]);
   }
 }
 
