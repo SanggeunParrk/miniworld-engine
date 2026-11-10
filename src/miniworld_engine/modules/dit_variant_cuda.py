@@ -92,8 +92,9 @@ class _Block:
         self.to_q = attention.to_query if attention.to_query.bias is not None else _ZeroBiasQuery(attention.to_query)
         self.expand = _Expand(transition)
         adaln = _AdaLN(attention.ada_ln_in)
-        if atom:
-            self.q_adaln = self.k_adaln = adaln
+        if atom:   # one AdaLN for q and k / v, or a K / V AdaLN of its own (the AF3 blocks on A100: OpenFold3, Protenix)
+            kv = getattr(attention, "ada_ln_kv", None)
+            self.q_adaln, self.k_adaln = adaln, (adaln if kv is None else _AdaLN(kv))
         else:
             self.attn_adaln = adaln
         self.trans_adaln = _AdaLN(transition.ada_ln_in)
@@ -122,6 +123,8 @@ class _Stack:
     def __init__(self, module, *, atom: bool) -> None:
         self._module = module
         self.parallel = module.parallel
+        #: the K / V AdaLN normalises the query AdaLN's output (Protenix) instead of the raw atoms
+        self.chain = getattr(module, "kv_norm", "shared") == "chained"
         self.key_window = getattr(module, "key_window", "slide")
         self.blocks = [_Block(module.attention, module.transition, atom=atom)]
 
@@ -152,12 +155,13 @@ def _a100(single) -> bool:
     return single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0)
 
 
-def _call_reason(module, single, cond, pair, mask) -> str | None:
+def _call_reason(module, single, cond, pair, mask, *, a100: bool = False) -> str | None:
     if not single.is_cuda:
         return "CUDA tensors only"
     if _a100(single):
-        return "A100: no sm_80 port of the DiT-variant kernels (kernels/dit_variants are sm_90a only)"
-    if torch.cuda.get_device_capability(single.device) != (9, 0):
+        if not a100:
+            return "A100: no sm_80 port of the DiT-variant kernels (kernels/dit_variants are sm_90a only)"
+    elif torch.cuda.get_device_capability(single.device) != (9, 0):
         return "the H100 (sm_90) kernels only"
     if torch.is_autocast_enabled("cuda") and (torch.get_autocast_dtype("cuda") != _BF or single.dtype != _BF):
         # the master-weight layout (fp32 parameters, bf16 activations under bf16 autocast) is served, as the pre-redesign engine did
@@ -189,15 +193,18 @@ def _first_hit(checks, stack, *call):
     return None
 
 
-def _run(fn, stack, single, cond, call, *, wants_grad: bool):
-    """``fn(stack, single [A, N, d], cond [N, c], *call)`` once for a shared ``cond``, else once per sample; -> [A, 1, N, d]."""
+def _run(fn, stack, single, cond, call, *, wants_grad: bool, keep_autocast: bool = False, per_sample: bool = False):
+    """``fn(stack, single [A, N, d], cond [N, c], *call)`` once for a shared ``cond``, else once per sample; -> [A, 1, N, d]. ``per_sample``: a
+    ``cond`` that differs per sample goes to ``fn`` whole, [A, N, c], in one call (the A100 atom path's per-row tables)."""
     s = single[:, 0]
     # inference packs its own bf16 operands (an enclosing autocast must not recast its torch glue, e.g. the fp32 slid edge windows); the
     # training path keeps the caller's autocast: its conditioning tables run the module's own layers on the fp32 master weights
-    off = torch.autocast("cuda", enabled=False) if not wants_grad else contextlib.nullcontext()
+    off = torch.autocast("cuda", enabled=False) if not (wants_grad or keep_autocast) else contextlib.nullcontext()
     with torch.set_grad_enabled(wants_grad), off:
         if _shared_cond(cond):
             out = fn(stack, s, cond[0, 0], *call)
+        elif per_sample:
+            out = fn(stack, s, cond[:, 0], *call)
         else:
             out = torch.cat([fn(stack, s[i:i + 1], cond[i, 0], *call) for i in range(s.shape[0])])
     return out.unsqueeze(1)
@@ -283,9 +290,10 @@ class VariantAtomCuda:
 
     def _atom_serving(self, single, cond, pair, mask, uid):
         """(the kernel function that serves the call, its trailing arguments) or (None, why not)."""
-        if self.key_window not in ("pad", "slide"):
+        a100 = _a100(single)
+        if self.key_window not in (("pad", "slide", "slide_qblock") if a100 else ("pad", "slide")):
             return None, f"key_window {self.key_window!r} (the kernels know the clipped 'pad' window and the slid one)"
-        why = _call_reason(self, single, cond, pair, mask)
+        why = _call_reason(self, single, cond, pair, mask, a100=True)
         if why is not None:
             return None, why
         n = single.shape[2]
@@ -302,6 +310,14 @@ class VariantAtomCuda:
         from miniworld_engine.kernels.dit_variants.cuda import infer32, train
 
         m, u = (None if mask is None else mask[0]), (None if uid is None else uid[0])
+        if a100:
+            # A100 (sm_80): every call -- inference included -- on the training path (train.py: the row kernels, the mma.sync window
+            # attention and the edge kernels, built for sm_80 by cuda/sm80.py), bf16 or fp32 (TF32), the caller's autocast kept
+            if not train.atom_serves(_stack(self, atom=True), single[:, 0], cond[0, 0] if _shared_cond(cond) else cond[:, 0], pair[0], m, u,
+                                     need_grad=False):
+                return None, ("A100: outside the sm_80 atom training path's range (bfloat16 / float32, [A, 1, N, 128] with N a multiple of 64, "
+                              "pair 16 wide, a conditioning shared by the samples or one per sample)")
+            return train.atom_stack_train, (pair[0], m, u)
         with torch.set_grad_enabled(_wants_grad(self, single, cond, pair)):
             fn = _first_hit(((interface.atom_serves, interface.atom_inference), (infer32.atom_serves, infer32.atom_inference),
                              (train.atom_serves, train.atom_stack_train)), _stack(self, atom=True), single[:, 0], cond[0, 0], pair[0], m, u)
@@ -316,4 +332,6 @@ class VariantAtomCuda:
 
     def _forward_cuda(self, single, cond, pair, mask=None, uid=None) -> torch.Tensor:
         fn, call = self._atom_serving(single, cond, pair, mask, uid)
-        return _run(fn, _stack(self, atom=True), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair))
+        a100 = _a100(single)
+        return _run(fn, _stack(self, atom=True), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair), keep_autocast=a100,
+                    per_sample=a100)

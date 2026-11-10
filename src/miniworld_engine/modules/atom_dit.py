@@ -372,29 +372,33 @@ class _LocalAtomDiT(BackendModule):
             return "a non-contiguous parameter"
         return None
 
-    # A100 (sm_80): the whole block on kernels/integrations/local_dit_sm80_block (conditioning, pre / post row kernels and the transition
-    # on mma.sync, the 32 x 128 window attention and the trunked pair bias of kernels/augmented_attention/cuda/sm80_atom_local; forward and
-    # backward). Range = its gate: the chained K / V AdaLN (Protenix), the clipped "pad" window, bf16 activations (bf16 or fp32 master
-    # parameters), the atom widths, B = 1, a bool [1, N] key mask or none, LayerNorm eps 1e-5.
-    def _a100_reason(self, single, cond, pair, mask) -> str | None:
+    # A100 (sm_80), two paths:
+    #   * the chained K / V AdaLN (Protenix), the clipped "pad" window, bf16 activations (bf16 or fp32 master parameters): the whole block on
+    #     kernels/integrations/local_dit_sm80_block (conditioning, pre / post row kernels and the transition on mma.sync, the 32 x 128 window
+    #     attention and the trunked pair bias of kernels/augmented_attention/cuda/sm80_atom_local; forward and backward), within its gate;
+    #   * everything else (the parallel K / V AdaLN of OpenFold3, the slid windows "slide" / "slide_qblock", fp32 on TF32): the atom
+    #     DiT-variant path on its sm_80 builds (modules/dit_variant_cuda.VariantAtomCuda: kernels/dit_variants/cuda/train.py, inference
+    #     included).
+    def _a100_rows(self, single, cond, pair, mask) -> bool:
         from miniworld_engine.kernels.integrations import local_dit_sm80_block
 
-        if self.kv_norm != "chained":
-            return (f"A100: kv_norm={self.kv_norm!r} (the sm_80 atom block kernels know the chained K / V AdaLN of Protenix only; "
-                    "no sm_80 kernel for the parallel one)")
-        if self.key_window != "pad":
-            return f"A100: key_window={self.key_window!r} (the sm_80 atom block kernels read the clipped 'pad' window only)"
-        if (single.dtype, cond.dtype, pair.dtype) != (_BF, _BF, _BF):
-            return "A100: the sm_80 atom block kernels are bfloat16 only (single / cond / pair bfloat16; float32 has no sm_80 atom block)"
-        if torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") != _BF:
-            return "A100: autocast to a dtype other than bfloat16"
-        if not local_dit_sm80_block.serves(_A100View(self), single, cond, pair, mask):
-            return ("A100: outside the sm_80 atom block's range (128 / cond 128 / pair 16, 4 heads x 32, transition n = 2, [A, 1, N, 128] "
-                    "with the trunked contiguous pair [1, N / 32, 32, 128, 16], a bool contiguous [1, N] key mask or none, eps 1e-5)")
-        return None
+        return (self.kv_norm == "chained" and self.key_window == "pad" and (single.dtype, cond.dtype, pair.dtype) == (_BF, _BF, _BF)
+                and not (torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") != _BF)
+                and local_dit_sm80_block.serves(_A100View(self), single, cond, pair, mask))
 
+    def _a100_reason(self, single, cond, pair, mask) -> str | None:
+        if self._a100_rows(single, cond, pair, mask):
+            return None
+        fn, why = VariantAtomCuda._atom_serving(self, single, cond, pair, mask, None)
+        return None if fn is not None else why
     def _forward_cuda(self, single, cond, pair, mask=None):
         if _a100(single):
+            if not self._a100_rows(single, cond, pair, mask):
+                from miniworld_engine.modules import dit_variant_cuda as dv
+
+                fn, call = VariantAtomCuda._atom_serving(self, single, cond, pair, mask, None)
+                return dv._run(fn, dv._stack(self, atom=True), single, cond, call, wants_grad=dv._wants_grad(self, single, cond, pair),
+                               keep_autocast=True, per_sample=True)
             from miniworld_engine.kernels.integrations import local_dit_sm80_block
 
             with torch.autocast("cuda", enabled=False):   # the kernels run on bf16 packs of their own

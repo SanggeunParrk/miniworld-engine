@@ -384,20 +384,41 @@ ATOM_D, ATOM_H, ATOM_DH, ATOM_WQ, ATOM_WK = 128, 4, 32, 32, 128
 A_SC_Q, A_SH_Q, A_SC_K, A_SH_K, A_G_A, A_SC_T, A_SH_T, A_G_T = range(8)
 ATOM_SPLITS = 2
 _ANAMES = ("out", "xq", "xk", "xt", "q", "k", "v", "qn", "kn", "stqk", "g", "og", "lse", "ya", "y2", "xp", "st1", "st2", "ab", "h",
-           "w_gq", "w_kv", "w_o", "w_exp", "w_sq")
+           "w_gq", "w_kv", "w_o", "w_exp", "w_sq", "stk")
 _ASAVED = _ANAMES[1:]
 
 
-def _local():
+def _sm80(t: torch.Tensor) -> bool:
+    """An A100 tensor: the atom path runs on the sm_80 builds of the same kernels (``cuda/sm80.py``)."""
+    return torch.cuda.get_device_capability(t.device) == (8, 0)
+
+
+def _atom_ext(t: torch.Tensor):
+    """The training row kernels (``train_rows.cu``) for ``t``'s card."""
+    if _sm80(t):
+        from miniworld_engine.kernels.dit_variants.cuda import sm80
+
+        return sm80.train_ext()
+    return _ext()
+
+
+def _local(t: torch.Tensor):
+    """The window attention / pair bias kernels for ``t``'s card: ``sm100_atom_local``'s mma.sync wrappers (sm_90a), their sm_80 builds."""
+    if _sm80(t):
+        from miniworld_engine.kernels.dit_variants.cuda import sm80
+
+        return sm80.LOCAL
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
 
     return local
 
 
+def _edge(t: torch.Tensor):
+    """The slid edge window kernels (``edge.cu``) for ``t``'s card."""
+    if _sm80(t):
+        from miniworld_engine.kernels.dit_variants.cuda import sm80
 
-
-
-def _edge():
+        return sm80.edge_ext()
     from miniworld_engine.kernels.dit_variants import cuda
 
     return cuda.edge_ext()
@@ -410,19 +431,19 @@ class _EdgeBias(torch.autograd.Function):
     def forward(ctx, z, gamma, wb, widx, valid, eps):  # noqa: D102
         ctx.save_for_backward(z, gamma, wb, widx)
         ctx.eps = eps
-        return _edge().edge_bias_fwd(z.index_select(0, widx).contiguous(), gamma.float().contiguous(), wb.float().contiguous(), valid, eps)
+        return _edge(z).edge_bias_fwd(z.index_select(0, widx).contiguous(), gamma.float().contiguous(), wb.float().contiguous(), valid, eps)
 
     @staticmethod
     @once_differentiable
     def backward(ctx, deb):  # noqa: D102
         z, gamma, wb, widx = ctx.saved_tensors
-        dz_e, part = _edge().edge_bias_bwd(z.index_select(0, widx).contiguous(), gamma.float().contiguous(), wb.float().contiguous(), deb.contiguous(), ctx.eps)
+        dz_e, part = _edge(z).edge_bias_bwd(z.index_select(0, widx).contiguous(), gamma.float().contiguous(), wb.float().contiguous(), deb.contiguous(), ctx.eps)
         dz = torch.zeros_like(z)
         dz.index_add_(0, widx, dz_e)
         tot = part.sum(0)
         return dz, tot[:16].to(gamma.dtype), tot[16:].view(4, 16).to(wb.dtype), None, None, None
 
-def _afwd_specs(M, N, at, xdt, par, gating, proj, kq, up):
+def _afwd_specs(M, N, at, xdt, par, gating, proj, kq, up, chain=False):
     D = ATOM_D
     f32 = torch.float32
     hid = 2 * D
@@ -434,13 +455,14 @@ def _afwd_specs(M, N, at, xdt, par, gating, proj, kq, up):
         "y2": ((M, D), at), "xp": ((0,) if par else (M, D), f32), "st1": ((M, 2), f32), "st2": ((0,) if par else (M, 2), f32),
         "ab": ((M, nab * hid), at), "h": ((M, hid), at),
         "w_gq": (((2 if gating else 1) * D, D), at), "w_kv": ((2 * D, D), at), "w_o": ((D, D) if proj else (0,), at), "w_exp": ((nab * hid, D), at),
-        "w_sq": ((D, hid), at),
+        "w_sq": ((D, hid), at), "stk": ((M, 2) if chain else (0,), f32),
     }
 
 
-def _atom_fwd_fake(x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length, eps, eps_qk):
+def _atom_fwd_fake(x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length, eps, eps_qk,
+                   chain=False):
     """The saved tensors of the atom block forward (``_ANAMES``): shapes and dtypes from ``_afwd_specs``."""
-    spec = _afwd_specs(x.shape[0], length, tab.dtype, x.dtype, par, gating, proj, kq, up)
+    spec = _afwd_specs(x.shape[0], length, tab.dtype, x.dtype, par, gating, proj, kq, up, chain)
     return [x.new_empty(spec[n][0], dtype=spec[n][1]) for n in _ANAMES]
 
 
@@ -448,27 +470,31 @@ def _atom_fwd_fake(x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wex
 def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torch.Tensor, keys: torch.Tensor, ebias: torch.Tensor, wq: torch.Tensor,
              bq: torch.Tensor, wk: torch.Tensor, wv: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, wexp: torch.Tensor, wsq: torch.Tensor,
              qkw: list[torch.Tensor], par: bool, sig: bool, gating: bool, proj: bool, kq: bool, up: bool, slide: bool, length: int, eps: float,
-             eps_qk: float) -> list[torch.Tensor]:
+             eps_qk: float, chain: bool = False) -> list[torch.Tensor]:
     """One atom block's forward: [out, saved ...] (``_ANAMES``). x [A N, 128], tab [N, 8 D], bias2 [4, nwin, 32, 128] fp32 (log2, -inf off the
     keys); the slid edge windows (widx [5], keys [5, 128], ebias [5, 4, 32, 128] natural units) when ``slide``."""
-    ext = _ext()
-    local = _local()
+    ext = _atom_ext(x)
+    local = _local(x)
     M, D = x.shape
     N, A = length, M // length
     at = tab.dtype
+    T = tab.shape[0]   # the table rows: N (one conditioning for every sample) or A N (one per sample)
     w_q, w_k, w_v, w_exp, w_sq = (w.to(at, copy=True) for w in (wq, wk, wv, wexp, wsq))
     w_gq = torch.cat([wg, wq]).to(at) if gating else w_q.clone()
     w_kv = torch.cat([wk, wv]).to(at)
     w_o = wo.to(at, copy=True) if proj else wo.new_empty(0)
-    spec = _afwd_specs(M, N, at, x.dtype, par, gating, proj, kq, up)
+    spec = _afwd_specs(M, N, at, x.dtype, par, gating, proj, kq, up, chain)
     skip = ("w_gq", "w_kv", "w_o", "w_exp", "w_sq", "q", "og", "lse", "ya")
     buf = {n: torch.empty(spec[n][0], device=x.device, dtype=spec[n][1]) for n in _ANAMES if n not in skip}
     cols = lambda c: c * D  # noqa: E731
     xq, xk, xt, st1, k, v = buf["xq"], buf["xk"], buf["xt"], buf["st1"], buf["k"], buf["v"]
     if par:
-        ext.ln_mod_fwd(x, tab, [cols(A_SC_Q), cols(A_SC_K), cols(A_SC_T)], [cols(A_SH_Q), cols(A_SH_K), cols(A_SH_T)], [xq, xk, xt], st1, N, eps, sig)
+        ext.ln_mod_fwd(x, tab, [cols(A_SC_Q), cols(A_SC_K), cols(A_SC_T)], [cols(A_SH_Q), cols(A_SH_K), cols(A_SH_T)], [xq, xk, xt], st1, T, eps, sig)
+    elif chain:   # the K / V AdaLN of the query AdaLN's output (Protenix): LN-modulate xq again
+        ext.ln_mod_fwd(x, tab, [cols(A_SC_Q)], [cols(A_SH_Q)], [xq], st1, T, eps, sig)
+        ext.ln_mod_fwd(xq, tab, [cols(A_SC_K)], [cols(A_SH_K)], [xk], buf["stk"], T, eps, sig)
     else:
-        ext.ln_mod_fwd(x, tab, [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SH_Q), cols(A_SH_K)], [xq, xk], st1, N, eps, sig)
+        ext.ln_mod_fwd(x, tab, [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SH_Q), cols(A_SH_K)], [xq, xk], st1, T, eps, sig)
     q = torch.addmm(bq.to(at), xq, w_q.t())
     torch.mm(xk, w_kv[:D].t(), out=k)
     torch.mm(xk, w_kv[D:].t(), out=v)
@@ -486,7 +512,7 @@ def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torc
     o, lse = local.attn_fwd_mma(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2) if at == torch.bfloat16 else local.attn_fwd_mma32(
         qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2)
     if slide:
-        _edge().edge_attn_fwd(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), keys, widx, ebias, o)
+        _edge(x).edge_attn_fwd(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), keys, widx, ebias, o)
     o = o.view(M, D)
     if gating:
         og = torch.empty_like(o)
@@ -500,19 +526,19 @@ def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torc
         torch.mm(xt, w_exp.t(), out=ab)
         ext.glu_fwd(ab, h, up)
         torch.mm(h, w_sq.t(), out=y2)
-        ext.res_out_fwd(x, ya, tab, cols(A_G_A), y2, cols(A_G_T), out, N, False)
+        ext.res_out_fwd(x, ya, tab, cols(A_G_A), y2, cols(A_G_T), out, T, False)
     else:
-        ext.res_ln_fwd(x, ya, tab, cols(A_G_A), cols(A_SC_T), cols(A_SH_T), buf["xp"], xt, buf["st2"], N, eps, sig)
+        ext.res_ln_fwd(x, ya, tab, cols(A_G_A), cols(A_SC_T), cols(A_SH_T), buf["xp"], xt, buf["st2"], T, eps, sig)
         torch.mm(xt, w_exp.t(), out=ab)
         ext.glu_fwd(ab, h, up)
         torch.mm(h, w_sq.t(), out=y2)
-        ext.res_out_fwd(buf["xp"], y2, tab, cols(A_G_T), None, 0, out, N, False)
+        ext.res_out_fwd(buf["xp"], y2, tab, cols(A_G_T), None, 0, out, T, False)
     res = dict(buf, q=q, og=og, lse=lse, ya=ya if proj else ya.new_empty(0), w_gq=w_gq, w_kv=w_kv, w_o=w_o, w_exp=w_exp, w_sq=w_sq)
     return [res[n] for n in _ANAMES]
 
 
 def _atom_bwd_fake(dout, x, tab, bias2, widx, keys, ebias, saved, wq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length,
-                   eps, eps_qk):
+                   eps, eps_qk, chain=False):
     """dx, dtab, dbias2, debias, the weight gradients (fp32) and the four qk-norm vectors."""
     D = ATOM_D
     f32 = torch.float32
@@ -526,19 +552,20 @@ def _atom_bwd_fake(dout, x, tab, bias2, widx, keys, ebias, saved, wq, wk, wv, wg
 def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torch.Tensor, keys: torch.Tensor, ebias: torch.Tensor,
              saved: list[torch.Tensor], wq: torch.Tensor, wk: torch.Tensor, wv: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, wexp: torch.Tensor,
              wsq: torch.Tensor, qkw: list[torch.Tensor], par: bool, sig: bool, gating: bool, proj: bool, kq: bool, up: bool, slide: bool,
-             length: int, eps: float, eps_qk: float) -> list[torch.Tensor]:
+             length: int, eps: float, eps_qk: float, chain: bool = False) -> list[torch.Tensor]:
     """The atom block's backward: [dx, dtab, dbias2, debias, dwq, dbq, dwk, dwv, dwg, dwo, dwexp, dwsq, dwq_ln, dbq_ln, dwk_ln, dbk_ln]."""
-    ext = _ext()
-    local = _local()
+    ext = _atom_ext(x)
+    local = _local(x)
     s = dict(zip(_ASAVED, saved, strict=True))
     M, D = x.shape
     N, A = length, M // length
     at = tab.dtype
-    S = min(A, ATOM_SPLITS)
+    T = tab.shape[0]   # the table rows: N (one conditioning for every sample) or A N (one per sample)
+    S = min(M // T, ATOM_SPLITS)
     dev = x.device
     f32 = torch.float32
     dout = dout.to(x.dtype).contiguous()
-    part = torch.empty(S, N, 8 * D, device=dev, dtype=f32)
+    part = torch.empty(S, T, 8 * D, device=dev, dtype=f32)
     cols = lambda c: c * D  # noqa: E731
     w_gq, w_kv, w_o, w_exp, w_sq = s["w_gq"], s["w_kv"], s["w_o"], s["w_exp"], s["w_sq"]
     xq, xk, xt, og, ya, y2, ab, h = (s[n] for n in ("xq", "xk", "xt", "og", "ya", "y2", "ab", "h"))
@@ -547,9 +574,9 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
     dya = torch.empty(M, D, device=dev, dtype=at)
     dy2 = torch.empty(M, D, device=dev, dtype=at)
     if par:
-        ext.res_bwd(dout, ya, tab, cols(A_G_A), dya, y2, cols(A_G_T), dy2, part, cols(A_G_A), cols(A_G_T), N, S, False)
+        ext.res_bwd(dout, ya, tab, cols(A_G_A), dya, y2, cols(A_G_T), dy2, part, cols(A_G_A), cols(A_G_T), T, S, False)
     else:
-        ext.res_bwd(dout, y2, tab, cols(A_G_T), dy2, None, 0, None, part, cols(A_G_T), 0, N, S, False)
+        ext.res_bwd(dout, y2, tab, cols(A_G_T), dy2, None, 0, None, part, cols(A_G_T), 0, T, S, False)
     dh = torch.mm(dy2, w_sq)
     dwsq = _mm_t(dy2, h)
     dab = torch.empty_like(ab)
@@ -558,7 +585,7 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
     dwexp = _mm_t(dab, xt)
     if not par:
         dxp = torch.empty(M, D, device=dev, dtype=f32)
-        ext.res_adaln_bwd(dout, dt, s["xp"], s["st2"], tab, cols(A_SC_T), cols(A_G_A), ya, dxp, dya, part, cols(A_SC_T), cols(A_SH_T), cols(A_G_A), N, S, sig)
+        ext.res_adaln_bwd(dout, dt, s["xp"], s["st2"], tab, cols(A_SC_T), cols(A_G_A), ya, dxp, dya, part, cols(A_SC_T), cols(A_SH_T), cols(A_G_A), T, S, sig)
     dog = torch.mm(dya, w_o) if proj else dya
     dwo = _mm_t(dya, og) if proj else wo.new_empty(wo.shape, dtype=f32)
     dO = torch.empty(M, D, device=dev, dtype=at)
@@ -572,11 +599,11 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
         dke = torch.empty(A, 5, ATOM_WK, D, device=dev, dtype=f32)
         dve = torch.empty(A, 5, ATOM_WK, D, device=dev, dtype=f32)
         dbp = torch.empty(A, 5, ATOM_H, ATOM_WQ, ATOM_WK, device=dev, dtype=f32)
-        _edge().edge_bwd_compute(qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), dd, keys, widx, ebias, dqe, dke, dve, dbp)
+        _edge(x).edge_bwd_compute(qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), dd, keys, widx, ebias, dqe, dke, dve, dbp)
     dbias2 = local.attn_bwd_mma(qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), bias2, s["lse"], dd, dp[:, D:],
                                 at == torch.float32)
     if slide:
-        _edge().edge_bwd_apply(dp[:, D:], keys, widx, dqe, dke, dve, A, N)
+        _edge(x).edge_bwd_apply(dp[:, D:], keys, widx, dqe, dke, dve, A, N)
         debias = dbp.sum(0)
     else:
         debias = ebias.new_empty(ebias.shape, dtype=f32)
@@ -606,10 +633,14 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
     dx = torch.empty_like(x)
     if par:
         ext.adaln_bwd(x, s["st1"], dout, [dxq, dxk, dt], tab, [cols(A_SC_Q), cols(A_SC_K), cols(A_SC_T)], [cols(A_SC_Q), cols(A_SC_K), cols(A_SC_T)],
-                      [cols(A_SH_Q), cols(A_SH_K), cols(A_SH_T)], dx, part, N, S, sig)
+                      [cols(A_SH_Q), cols(A_SH_K), cols(A_SH_T)], dx, part, T, S, sig)
+    elif chain:   # through the K / V AdaLN into xq, then the query AdaLN
+        dxq_t = torch.empty_like(xq)
+        ext.adaln_bwd(xq, s["stk"], dxq, [dxk], tab, [cols(A_SC_K)], [cols(A_SC_K)], [cols(A_SH_K)], dxq_t, part, T, S, sig)
+        ext.adaln_bwd(x, s["st1"], dxp, [dxq_t], tab, [cols(A_SC_Q)], [cols(A_SC_Q)], [cols(A_SH_Q)], dx, part, T, S, sig)
     else:
         ext.adaln_bwd(x, s["st1"], dxp, [dxq, dxk], tab, [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SH_Q), cols(A_SH_K)], dx,
-                      part, N, S, sig)
+                      part, T, S, sig)
     dtab = part.sum(0)
     return [dx, dtab, dbias2, debias, dwq.clone(), dbq, dwkv[:D].clone(), dwkv[D:].clone(), dwg.clone(), dwo, dwexp, dwsq,
             dwq_ln, dbq_ln, dwk_ln, dbk_ln]
@@ -618,10 +649,11 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
 class _AtomBlock(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl, cfg):  # noqa: D102
-        par, sig, gating, proj, kq, up, slide, length, eps, eps_qk = cfg
+        par, sig, gating, proj, kq, up, slide, length, eps, eps_qk, *chain = cfg
+        chain = bool(chain and chain[0])
         qkw = [wql, bql, wkl, bkl] if kq else []
         out, *saved = atom_fwd(x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length,
-                               eps, eps_qk)
+                               eps, eps_qk, chain)
         ctx.save_for_backward(x, tab, bias2, widx, keys, ebias, *saved, wq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl)
         ctx.cfg, ctx.n_saved = cfg, len(saved)
         return out
@@ -629,12 +661,13 @@ class _AtomBlock(torch.autograd.Function):
     @staticmethod
     @once_differentiable
     def backward(ctx, dout):  # noqa: D102
-        par, sig, gating, proj, kq, up, slide, length, eps, eps_qk = ctx.cfg
+        par, sig, gating, proj, kq, up, slide, length, eps, eps_qk, *chain = ctx.cfg
+        chain = bool(chain and chain[0])
         x, tab, bias2, widx, keys, ebias, *rest = ctx.saved_tensors
         saved, (wq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl) = rest[:ctx.n_saved], rest[ctx.n_saved:]
         qkw = [wql, bql, wkl, bkl] if kq else []
         res = atom_bwd(dout, x, tab, bias2, widx, keys, ebias, list(saved), wq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide,
-                       length, eps, eps_qk)
+                       length, eps, eps_qk, chain)
         dx, dtab, dbias2, debias, dwq, dbq, dwk, dwv, dwg, dwo, dwexp, dwsq, dwql, dbql, dwkl, dbkl = res
         return (dx, dtab.to(tab.dtype), dbias2, None, None, debias if slide else None, dwq, dbq, dwk, dwv, dwg if gating else None,
                 dwo if proj else None, dwexp, dwsq, *((dwql, dbql, dwkl, dbkl) if kq else (None, None, None, None)), None)
@@ -647,28 +680,28 @@ class _AtomPairBias(torch.autograd.Function):
     def forward(ctx, z, gamma, wb, kmask, n, eps):  # noqa: D102
         ctx.save_for_backward(z, gamma, wb)
         ctx.eps = eps
-        return _local().pair_bias_mma(z, gamma, wb, kmask, n, eps)
+        return _local(z).pair_bias_mma(z, gamma, wb, kmask, n, eps)
 
     @staticmethod
     @once_differentiable
     def backward(ctx, dbias):  # noqa: D102
         z, gamma, wb = ctx.saved_tensors
-        dz, dgamma, dwb = _local().pair_bias_bwd_mma(z, gamma, wb, dbias.contiguous(), ctx.eps)
+        dz, dgamma, dwb = _local(z).pair_bias_bwd_mma(z, gamma, wb, dbias.contiguous(), ctx.eps)
         return dz, dgamma.to(gamma.dtype), dwb.to(wb.dtype), None, None, None
 
 
-def atom_serves(stack, single, cond, pair, mask, uid) -> bool:
-    """An atom stack call with a gradient on H100: bf16, 128 wide, N a multiple of 64, a conditioning row set shared by the samples, pair
-    channels 16, the CUDA training switch on."""
+def atom_serves(stack, single, cond, pair, mask, uid, *, need_grad: bool = True) -> bool:
+    """An atom stack call with a gradient (``need_grad``; A100 runs its inference here too) on H100 or A100: bf16 or fp32, 128 wide, N a
+    multiple of 64, a conditioning row set shared by the samples [N, d] or one per sample [A, N, d] (its tables then [A N, 8 d]), pair channels 16."""
 
     if stack.implementation == "pytorch" or not single.is_cuda or single.ndim != 3:
         return False
-    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *stack.parameters()))):
+    if need_grad and not (torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *stack.parameters()))):
         return False
-    if torch.cuda.get_device_capability(single.device) != (9, 0):
+    if torch.cuda.get_device_capability(single.device) not in ((9, 0), (8, 0)):
         return False
     a, n, d = single.shape
-    return (single.dtype in (torch.bfloat16, torch.float32) and d == ATOM_D and n % 64 == 0 and cond.ndim == 2 and tuple(cond.shape) == (n, d)
+    return (single.dtype in (torch.bfloat16, torch.float32) and d == ATOM_D and n % 64 == 0 and tuple(cond.shape) in ((n, d), (a, n, d))
             and tuple(pair.shape) == (n // 32, 32, 128, 16) and (mask is None or tuple(mask.shape) == (n,))
             and (uid is None or tuple(uid.shape) == (n,)) and stack.blocks[0].expand.weight.shape[0] == 4 * d and a > 0)
 
@@ -692,10 +725,12 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
     """The atom stack's forward under autograd on the H100 training kernels: x [A, N, 128] -> [A, N, 128]."""
     blocks = list(stack.blocks)
     a, n, d = single.shape
+    if cond.ndim == 3:   # one conditioning per sample (A100): per-row tables [A N, 8 d], which the row kernels index by row
+        cond = cond.reshape(a * n, cond.shape[-1])
     nwin = n // ATOM_WQ
     dev = single.device
     kmask = torch.ones(n, dtype=torch.bool, device=dev) if mask is None else mask.bool()
-    slide = stack.key_window == "slide"
+    slide = stack.key_window in ("slide", "slide_qblock")
     j = torch.arange(ATOM_WK, device=dev)
     # the clipped window's key of slot j: 32 w - 48 + j (outside [0, N): -inf already); a padding query keeps its keys
     same = None
@@ -707,7 +742,9 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
         n_real = kmask.sum()
         last = (n_real - 1) // 32
         widx = torch.stack([last * 0, last * 0 + 1, last - 2, last - 1, last]).clamp(0, nwin - 1)
-        starts = torch.minimum((ATOM_WQ * widx - 48).clamp(min=0), (n_real - ATOM_WK).clamp(min=0))
+        # slide_qblock (IntelliFold2): the slid rule against R rounded up to a whole query window; its keys past R are masked below
+        n_win = (n_real + ATOM_WQ - 1) // ATOM_WQ * ATOM_WQ if stack.key_window == "slide_qblock" else n_real
+        starts = torch.minimum((ATOM_WQ * widx - 48).clamp(min=0), (n_win - ATOM_WK).clamp(min=0))
         keys = starts[:, None] + j
         valid = (keys < n_real)[:, None, :]
         keys = keys.clamp(max=n - 1)
@@ -731,7 +768,7 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
         tab = _atom_tables(blk, cond)
         qk = (blk.q_norm.weight, blk.q_norm.bias, blk.k_norm.weight, blk.k_norm.bias) if blk.kq_norm else (empty,) * 4
         cfg = (stack.parallel, not blk.q_adaln.identity_scale, blk.gating, blk.project_output, blk.kq_norm, blk.up_gate, slide, n, blk.adaln_eps,
-               blk.q_norm.eps if blk.kq_norm else 1e-5)
+               blk.q_norm.eps if blk.kq_norm else 1e-5, getattr(stack, "chain", False))
         wg = blk.to_g.weight if blk.gating else empty
         wo = blk.to_out.weight if blk.project_output else empty
         wexp = torch.cat([blk.expand.weight, *((blk.up.weight,) if blk.up_gate else ())])

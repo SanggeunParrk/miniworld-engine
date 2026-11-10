@@ -121,7 +121,21 @@ def prebuild(target, rows):
     for (a ``master`` row computes in bfloat16 activations; the builds take no model dims). ``ext`` (``rows.cu``) is the bf16
     inference rows; ``train_ext`` / ``edge_ext`` serve the training path and the fp32 (TF32) inference (``infer32.py``). Which
     build serves which pair is this family's knowledge."""
-    if target.arch == "sm80":   # no sm_80 port of these kernels (the A100 TokenDiTBoltz2 attention is augmented_attention's)
+    if target.arch == "sm80":
+        # A100: the atom blocks' training path (every atom call, inference included: cuda/sm80.py); the A100 TokenDiTBoltz2 attention is
+        # augmented_attention's
+        if rows:
+            import functools as ft
+
+            from miniworld_engine.kernels.augmented_attention.cuda import sm80_atom_local
+
+            from . import sm80
+
+            yield sm80.train_ext
+            yield sm80.edge_ext
+            yield ft.partial(sm80.cubin, "lattn90")
+            yield ft.partial(sm80.cubin, "lattn90_tf32")
+            yield ft.partial(sm80_atom_local.cubin, "lbias")
         return
     served = {("bfloat16" if r["dtype"] == "master" else r["dtype"], r["mode"]) for r in rows}
     if ("bfloat16", "eval") in served:
