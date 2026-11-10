@@ -101,7 +101,15 @@ def _packed_linear(att, names: tuple[str, ...], x: torch.Tensor) -> torch.Tensor
     ``bz_sampler_dit._State``, openfold3 ``dit_glue._weights``)."""
     mods = [getattr(att, n) for n in names]
     params = [p for m in mods for p in (m.weight, m.bias) if p is not None]
-    key = (names, tuple((p.data_ptr(), p._version, p.dtype) for p in params))
+    if torch.is_grad_enabled() and any(p.requires_grad for p in params):   # a gradient: the pack is part of the graph, never cached
+        w = torch.cat([m.weight for m in mods], 0)
+        b = None
+        if any(m.bias is not None for m in mods):
+            b = torch.cat([m.bias if m.bias is not None else m.weight.new_zeros(m.weight.shape[0]) for m in mods], 0)
+        if not torch.is_autocast_enabled(x.device.type) and w.dtype != x.dtype:
+            w, b = w.to(x.dtype), None if b is None else b.to(x.dtype)
+        return F.linear(x, w, b)
+    key =(names, tuple((p.data_ptr(), p._version, p.dtype) for p in params))
     hit = att.__dict__.get("_anthropic_pack")
     if hit is None or hit[0] != key:
         with torch.no_grad():
@@ -133,7 +141,39 @@ def _bias_planes(att, pair: torch.Tensor, extra_pair_bias: torch.Tensor | None) 
     return planes
 
 
-def _release_delta(att, single, cond, pair, mask, extra_pair_bias, core, *, fused_gate: bool = False) -> torch.Tensor:
+def _cueq_bias_planes(att, pair: torch.Tensor, extra_pair_bias: torch.Tensor | None) -> torch.Tensor:
+    """:func:`_bias_planes` on cuEquivariance's ``pair_repr_to_attention_bias`` (LayerNorm -> Linear, forward and backward; head-major
+    [B, H, L, L]): the LayerNorm affine handed as a pair (``ln_pair`` has no offset: zeros) and every operand in the pair's dtype -- the
+    op's homogeneous form; a partial affine or mixed dtypes would send it to its own PyTorch formula. No mask here: the core masks."""
+    import importlib
+
+    op = importlib.import_module("cuequivariance_ops_torch").pair_repr_to_attention_bias
+    dt = pair.dtype
+    w_ln = att.ln_pair.weight.to(dt)
+    b_ln = att.ln_pair.bias.to(dt) if getattr(att.ln_pair, "bias", None) is not None else torch.zeros_like(w_ln)
+    b_proj = att.to_bias.bias.to(dt) if att.to_bias.bias is not None else None
+    with torch.autocast(pair.device.type, enabled=False):
+        planes, _ = op(pair, None, att.to_bias.weight.to(dt), b_proj, w_ln, b_ln, att.to_bias.weight.shape[0], 1, att.ln_pair.eps)
+    if extra_pair_bias is not None:
+        planes = planes + extra_pair_bias.to(planes.dtype)[None, None]
+    return planes
+
+
+def _core_torch(q, k, v, bias, mask, gate):
+    """The reference's core statements (scores and softmax in at least fp32) on head-major bias planes; the gate fused as the caller asks."""
+    a, b, n, h, d = q.shape
+    w = wide(q)
+    with torch.autocast(q.device.type, enabled=False):
+        s = torch.einsum("abqhd,abkhd->abhqk", q.to(w), k.to(w)) * d ** -0.5 + bias.to(w)[None]
+        if mask is not None:
+            s = s.masked_fill(~mask.bool()[:, :, None, None, :], float("-inf"))
+        o = torch.einsum("abhqk,abkhd->abqhd", torch.softmax(s, -1), v.to(w)).reshape(a, b, n, h * d)
+        if gate is not None:
+            o = sigmoid_gate(gate.to(w), o)
+    return o.to(q.dtype)
+
+
+def _release_delta(att, single, cond, pair, mask, extra_pair_bias, core, *, fused_gate: bool = False, bias_fn=None) -> torch.Tensor:
     """``AugmentedAttentionPairBias.delta`` (no residual) with ``core(q, k, v, bias, mask, gate)`` -> [A, B, L, H * D] as its attention core:
     q / k / v [A, B, L, H, D] (column views of one packed GEMM), bias [B, H, L, L] head-major (+ ``extra_pair_bias``; the core may fold the
     mask into it in place), mask [A, B, L] or None, gate the gating query's logits ``to_gate(a)`` [A, B, L, H * D] when the release op fuses
@@ -149,7 +189,7 @@ def _release_delta(att, single, cond, pair, mask, extra_pair_bias, core, *, fuse
     h = att.n_head
     d = c // h
     query, key, value = (t.unflatten(-1, (h, d)) for t in (query, key, value))
-    bias = _bias_planes(att, pair, extra_pair_bias)
+    bias = (bias_fn or _bias_planes)(att, pair, extra_pair_bias)
     if mask is not None and mask.ndim == 2:
         mask = mask[None].expand(a, -1, -1)
     gate = rows[..., 3 * c:] if fused_gate else None
@@ -315,7 +355,7 @@ class TokenDiTProtenix(BackendModule):
     """
     version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "anthropic", "cuda", "triton")
+    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
 
     #: The q / k RMSNorm of the attention (:class:`TokenDiTMiniWorld`).
     qk_norm: bool = False
@@ -530,6 +570,40 @@ class TokenDiTProtenix(BackendModule):
             return single + delta + self.transition.delta(single, cond)
         return self.transition(single + delta, cond)
 
+    # ------------------------------------------------------------------------------------------------------------ "cueq"
+    # The pair-bias producer ``to_bias(ln_pair(pair))`` on cuEquivariance's ``pair_repr_to_attention_bias`` (LayerNorm -> Linear, Triton,
+    # forward and backward), head-major [B, H, L, L]; everything else is the module's statements (the attention core the reference's,
+    # scores and softmax in fp32). cuEquivariance's ``attention_pair_bias`` cannot take the block: it applies its own LayerNorm to the
+    # single, not the AdaLN. Eval and train.
+    def _supports_cueq(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> str | None:
+        import importlib
+
+        from miniworld_engine.modules import _cueq
+
+        why = _cueq.unavailable(single.device)
+        if why is not None:
+            return why
+        if compute_dtype is not None:
+            return "compute_dtype (the module's core runs in the activations' dtype here)"
+        if getattr(self.attention, "use_qk_norm", False):
+            return "per-head q / k RMSNorm (not this backend's form)"
+        if mask is not None and (mask.ndim not in (2, 3) or tuple(mask.shape[-2:]) != tuple(single.shape[1:3])):
+            return f"mask must be [B, L] or [A, B, L], got {tuple(mask.shape)}"
+        if pair.dtype not in (torch.bfloat16, torch.float16, torch.float32) or pair.ndim != 4:
+            return f"pair {pair.dtype} {tuple(pair.shape)} (a [B, L, L, d_pair] bf16 / fp16 / fp32 pair)"
+        threshold = int(importlib.import_module("cuequivariance_ops_torch.pair_repr_to_attention_bias").CUEQ_ATTENTION_PAIR_BIAS_FALLBACK_THRESHOLD)
+        if pair.shape[1] * pair.shape[2] <= threshold ** 2:
+            return f"L <= {threshold} (the op runs its own PyTorch formula there)"
+        return None
+
+    def _forward_cueq(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> torch.Tensor:
+        gated = hasattr(self.attention, "to_gate") and self._release_fused_gate
+        delta = _release_delta(self.attention, single, cond, pair, mask, extra_pair_bias, _core_torch, fused_gate=gated,
+                               bias_fn=_cueq_bias_planes)
+        if self.parallel:
+            return single + delta + self.transition.delta(single, cond)
+        return self.transition(single + delta, cond)
+
 
 class TokenDiTMiniWorld(TokenDiTProtenix):
     """MiniWorld's token DiT block: :class:`TokenDiTProtenix` with the per-head q / k RMSNorm (``attention.norm_query`` /
@@ -545,7 +619,7 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
     (``transition.up``); the conditioning is 768 wide."""
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "anthropic", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
+    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
 
     transition_part = UpGatedConditionedTransition
 
@@ -609,7 +683,7 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
     of the flat q / k (``kq_norm``: ``attention.norm_query`` / ``attention.norm_key``, over all heads)."""
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "anthropic", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
+    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
 
     parallel = True
     attention_part = FlatQKNormAugmentedAttention
@@ -642,7 +716,7 @@ class TokenDiTChai1(VariantTokenCuda, TokenDiTProtenix):
     LayerNorm of ``a`` (Chai-1's release, its traced ``layer_norm(x, None, None, 0.1)``: 0.1, the default)."""
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "anthropic", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
+    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
 
     parallel = True
     attention_part = UngatedAugmentedAttention
