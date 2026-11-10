@@ -55,7 +55,7 @@ void attn2_set_sched(int64_t dq, int64_t dkv) { g_dq_sched = (int)dq; g_dkv_sche
 // (the shared key mask folded in: masked = bf16 min); rowmask [z, L, L] uint8 (the per-row key mask) or empty; lse [z, H, L, L] fp32 or empty.  The default schedule (2 rows, 32 keys, 2 CTAs / SM).
 void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor rowmask, torch::Tensor out, torch::Tensor lse, std::vector<int64_t> lq,
                std::vector<int64_t> lk, std::vector<int64_t> lv, std::vector<int64_t> lo, int64_t L, int64_t H, int64_t Z, int64_t hd, double scl, int64_t fixed, int64_t sched) {
-  TORCH_CHECK(hd == 16 || hd == 32, "attn2_fwd: head dim 16 or 32");
+  TORCH_CHECK(hd == 16 || hd == 32 || hd == 64, "attn2_fwd: head dim 16, 32 or 64");
   TORCH_CHECK(L % 128 == 0 && L >= 128 && Z * H <= 65535 && L / 2 <= 65535, "attn2_fwd: L a multiple of 128, grid");
   const a100::Lay Lq = lay_of(lq), Lk = lay_of(lk), Lv = lay_of(lv), Lo = lay_of(lo);
   check_strided(q, Lq, Z, L, H, hd, "attn2_fwd q");
@@ -100,6 +100,12 @@ void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor 
     return;
   }
 #undef FWD2S
+  if (hd == 64) {                                    // 64-channel heads: one pair row per CTA (the 128 B Q / K / V rows), 4 stages, online softmax, 2 CTAs / SM
+    const dim3 g((unsigned)(L / a100::T2_BM), (unsigned)L, (unsigned)(Z * H));
+    if (mask) { using G = a100::Attn2Cfg<64, 1, 4, 32, 2, true, 0>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, g, p); }
+    else { using G = a100::Attn2Cfg<64, 1, 4, 32, 2, false, 0>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, g, p); }
+    return;
+  }
   if (hd == 32) { if (mask) FWD2(32, true, 0) else if (fixed) FWD2(32, false, 1) else FWD2(32, false, 0) }
   else { if (mask) FWD2(16, true, 0) else if (fixed == 2) FWD2(16, false, 2) else if (fixed) FWD2(16, false, 1) else FWD2(16, false, 0) }
 #undef FWD2
@@ -110,7 +116,8 @@ void attn2_bwd_dq(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
                   torch::Tensor dbp, std::vector<int64_t> lq, std::vector<int64_t> lk, std::vector<int64_t> lv, std::vector<int64_t> ld, std::vector<int64_t> ldq, int64_t L, int64_t H,
                   int64_t Z, int64_t hd, double scl, double sm_scale) {
   constexpr int ROWS = 4;
-  TORCH_CHECK(hd == 16 || hd == 32, "attn2_bwd_dq: head dim 16 or 32");
+  constexpr int ROWS64 = 2;                                   // 64-channel heads: Q and dO of 2 rows (128 B rows) fit the shared memory
+  TORCH_CHECK(hd == 16 || hd == 32 || hd == 64, "attn2_bwd_dq: head dim 16, 32 or 64");
   TORCH_CHECK(L % 128 == 0 && L >= 128 && Z * H <= 65535 && L / ROWS <= 65535, "attn2_bwd_dq: L a multiple of 128, grid");
   const a100::Lay Lq = lay_of(lq), Lk = lay_of(lk), Lv = lay_of(lv), Ld = lay_of(ld), Ldq = lay_of(ldq);
   check_strided(q, Lq, Z, L, H, hd, "attn2_bwd_dq q");
@@ -122,7 +129,7 @@ void attn2_bwd_dq(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
   check_mask(rowmask, Z, L, "attn2_bwd_dq");
   for (const torch::Tensor* t : {&lse, &delta})
     TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kFloat && t->is_contiguous() && t->numel() == Z * H * L * L, "attn2_bwd_dq: lse / delta [z, H, L, L] fp32");
-  TORCH_CHECK(dbp.is_cuda() && dbp.scalar_type() == at::kBFloat16 && dbp.is_contiguous() && dbp.numel() == (L / ROWS) * Z * H * L * L, "attn2_bwd_dq: dbp [L / 4, z H, L, L] bf16");
+  TORCH_CHECK(dbp.is_cuda() && dbp.scalar_type() == at::kBFloat16 && dbp.is_contiguous() && dbp.numel() == (L / (hd == 64 ? ROWS64 : ROWS)) * Z * H * L * L, "attn2_bwd_dq: dbp [L / rows, z H, L, L] bf16 (rows 4; 2 for 64-channel heads)");
   const c10::cuda::CUDAGuard guard(q.device());
   a100::Dq2Params p;
   p.q = reinterpret_cast<const bf*>(q.data_ptr()); p.k = reinterpret_cast<const bf*>(k.data_ptr()); p.v = reinterpret_cast<const bf*>(v.data_ptr());
@@ -133,6 +140,12 @@ void attn2_bwd_dq(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
   const bool mask = rowmask.numel() != 0;
 #define DQ2(HD, MASK) { using G = a100::Dq2Cfg<HD, ROWS, 3, 32, 1, MASK>; launch<G>(a100::attn2_bwd_dq_kernel<G>, G::SMEM, grid, p); }
 #define DQ2S(NKV_, BN_, MINB_) { using G = a100::Dq2Cfg<16, ROWS, NKV_, BN_, MINB_, false>; launch<G>(a100::attn2_bwd_dq_kernel<G>, G::SMEM, grid, p); }
+  if (hd == 64) {
+    const dim3 g((unsigned)(L / a100::T2_BM), (unsigned)(L / ROWS64), (unsigned)(Z * H));
+    if (mask) { using G = a100::Dq2Cfg<64, ROWS64, 3, 32, 1, true>; launch<G>(a100::attn2_bwd_dq_kernel<G>, G::SMEM, g, p); }
+    else { using G = a100::Dq2Cfg<64, ROWS64, 3, 32, 1, false>; launch<G>(a100::attn2_bwd_dq_kernel<G>, G::SMEM, g, p); }
+    return;
+  }
   if (hd == 16 && !mask && g_dq_sched != 0) {                                 // schedule experiments of the 16-channel query side (rows stay 4: the bias-gradient partials)
     switch (g_dq_sched) {
       case 1: DQ2S(2, 32, 1) break;
@@ -178,7 +191,7 @@ void attn2_bias_transpose(torch::Tensor bias, torch::Tensor bias_t, int64_t L) {
 void attn2_bwd_dkv(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor dov, torch::Tensor bias_t, torch::Tensor rowmask, torch::Tensor lse, torch::Tensor delta, torch::Tensor dk,
                    torch::Tensor dv, std::vector<int64_t> lq, std::vector<int64_t> lk, std::vector<int64_t> lv, std::vector<int64_t> ld, std::vector<int64_t> ldk, std::vector<int64_t> ldv,
                    int64_t L, int64_t H, int64_t Z, int64_t hd, double scl, double sm_scale) {
-  TORCH_CHECK(hd == 16 || hd == 32, "attn2_bwd_dkv: head dim 16 or 32");
+  TORCH_CHECK(hd == 16 || hd == 32 || hd == 64, "attn2_bwd_dkv: head dim 16, 32 or 64");
   TORCH_CHECK(L % 128 == 0 && L >= 128 && Z * H <= 65535 && L <= 65535, "attn2_bwd_dkv: L a multiple of 128, grid");
   const a100::Lay Lq = lay_of(lq), Lk = lay_of(lk), Lv = lay_of(lv), Ld = lay_of(ld), Ldk = lay_of(ldk), Ldv = lay_of(ldv);
   check_strided(q, Lq, Z, L, H, hd, "attn2_bwd_dkv q");
@@ -201,6 +214,11 @@ void attn2_bwd_dkv(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
   const bool mask = rowmask.numel() != 0;
 #define DKV2(HD, MASK) { using G = a100::Dkv2Cfg<HD, 4, 32, 2, MASK>; launch<G>(a100::attn2_bwd_dkv_kernel<G>, G::SMEM, grid, p); }
 #define DKV2S(NST_, MINB_) { using G = a100::Dkv2Cfg<16, NST_, 32, MINB_, false>; launch<G>(a100::attn2_bwd_dkv_kernel<G>, G::SMEM, grid, p); }
+  if (hd == 64) {                                              // K | V resident (2 x 16 KiB), 3 query-tile stages, 1 CTA / SM (the accumulators of 64 channels)
+    if (mask) { using G = a100::Dkv2Cfg<64, 3, 32, 1, true>; launch<G>(a100::attn2_bwd_dkv_kernel<G>, G::SMEM, grid, p); }
+    else { using G = a100::Dkv2Cfg<64, 3, 32, 1, false>; launch<G>(a100::attn2_bwd_dkv_kernel<G>, G::SMEM, grid, p); }
+    return;
+  }
   if (hd == 16 && !mask && g_dkv_sched != 0) {
     switch (g_dkv_sched) {
       case 1: DKV2S(3, 2) break;
@@ -221,7 +239,7 @@ void attn2_bwd_dkv(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
 
 // delta [z, H, L rows, L queries] fp32 = sum_d o . do for the strided [z, a, j, h, d] views o (Lay lo) and dov (Lay ld): the backward's row term.
 void attn2_delta(torch::Tensor o, torch::Tensor dov, torch::Tensor delta, std::vector<int64_t> lo, std::vector<int64_t> ld, int64_t L, int64_t H, int64_t Z, int64_t hd) {
-  TORCH_CHECK(hd == 16 || hd == 32, "attn2_delta: head dim 16 or 32");
+  TORCH_CHECK(hd == 16 || hd == 32 || hd == 64, "attn2_delta: head dim 16, 32 or 64");
   TORCH_CHECK(L % 128 == 0 && L >= 128 && Z * H <= 65535 && L <= 65535, "attn2_delta: L a multiple of 128, grid");
   const a100::Lay Lo = lay_of(lo), Ld = lay_of(ld);
   check_strided(o, Lo, Z, L, H, hd, "attn2_delta o");
@@ -232,7 +250,8 @@ void attn2_delta(torch::Tensor o, torch::Tensor dov, torch::Tensor delta, std::v
   p.o = reinterpret_cast<const bf*>(o.data_ptr()); p.dov = reinterpret_cast<const bf*>(dov.data_ptr()); p.delta = delta.data_ptr<float>();
   p.lo = Lo; p.ld = Ld; p.L = (int)L; p.H = (int)H;
   const dim3 grid((unsigned)((L + 127) / 128), (unsigned)L, (unsigned)(Z * H));
-  if (hd == 32) a100::attn2_delta_kernel<32><<<grid, 128, 0, at::cuda::getCurrentCUDAStream()>>>(p);
+  if (hd == 64) a100::attn2_delta_kernel<64><<<grid, 128, 0, at::cuda::getCurrentCUDAStream()>>>(p);
+  else if (hd == 32) a100::attn2_delta_kernel<32><<<grid, 128, 0, at::cuda::getCurrentCUDAStream()>>>(p);
   else a100::attn2_delta_kernel<16><<<grid, 128, 0, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

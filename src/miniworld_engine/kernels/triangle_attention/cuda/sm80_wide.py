@@ -1155,3 +1155,315 @@ def trainable(
     return _Training.apply(
         *leaves, mk, d, float(eps), bool(transposed), cfg.h, cfg.hd, cfg.fused
     )
+
+
+# ------------------------------------------------------------------------------------------------------------------------------ the variants
+# The module variants the H100 width-generic path serves in its glue (``h100_sm90_generic._forward`` / ``train_backward``), on the rows engine: AlphaFold 3's ending-node bias
+# orientation (``flip``: the bias planes of the pair as it is, read in the transposed frame), RoseTTAFold3's gate / out-projection biases, Chai-1's untransposed (ending node) and
+# dual (confidence head) outputs, and heads of 64 channels.  The front is ``ln_rows`` and one GEMM (the gate bias in its epilogue), the core the generalised core (``sm80_core2``:
+# head dim 32 -- a 16-channel head zero-padded as above -- or 64), the back ``gate_rows`` and the out-projection GEMM(s) (the out bias in the epilogue) with the residual.
+# A 64-channel head packs as two 32-channel heads (q | k | v | g rows in their natural order; the bias heads' weight padded with zero rows), so every row kernel and the
+# weight-gradient finalizer run unchanged; only the core and the row term (summed over the two halves) see the real heads.
+STANDARD, UNTRANSPOSED, DUAL = 0, 1, 2
+
+
+class VCfg(NamedTuple):
+    """A variant geometry: ``d`` = d_pair, ``h`` heads of ``hd`` (16 / 32 / 64) channels; ``pack`` the rows-engine geometry of the packed weights, ``ch`` the core's head dim."""
+
+    d: int
+    h: int
+    hd: int
+
+    @property
+    def pack(self) -> Cfg:
+        return Cfg(self.d, 2 * self.h, 32) if self.hd == 64 else Cfg(self.d, self.h, self.hd)
+
+    @property
+    def ch(self) -> int:
+        return 64 if self.hd == 64 else HD_CORE
+
+
+def variant_cfg(d_pair: int, d_hidden: int, n_head: int) -> VCfg | None:
+    """The variant geometry when the rows engine serves it (d_pair a multiple of 64 in 64 .. 512, heads of 16 / 32 channels up to 16, of 64 channels up to 8), else None."""
+    if n_head < 1 or d_hidden % n_head or d_pair % 64 or not 64 <= d_pair <= MAX_D:
+        return None
+    hd = d_hidden // n_head
+    if hd not in (16, 32, 64) or n_head * (2 if hd == 64 else 1) > MAX_H:
+        return None
+    return VCfg(d_pair, n_head, hd)
+
+
+def variant_supports(pair, vc: VCfg | None, weights, wo, ln_w, ln_b, mask=None, *, gate_bias=None, out_bias=None, wo_t=None, train=False) -> bool:
+    """``supports()`` for the variant path: the same pair / weight / LayerNorm / mask contract, the variants' parameters bf16 (gate bias ``[H hd]``, out bias and ``wo_t`` as
+    ``to_out``'s), and for ``train`` the bias-gradient partials within ``sm80_core2.MAX_DBP_BYTES``."""
+    if vc is None:
+        return False
+    if not supports(pair, Cfg(vc.d, vc.h, vc.hd), weights, wo, ln_w, ln_b, mask):  # (the train budget below, at the core's rows per partial)
+        return False
+    dh = vc.h * vc.hd
+    for t, shape in ((gate_bias, (dh,)), (out_bias, (vc.d,)), (wo_t, (vc.d, dh))):
+        if t is not None and (t.dtype is not BF or t.device != pair.device or tuple(t.shape) != shape):
+            return False
+    if train and not _core2.dbp_fits(pair.shape[1], vc.h, pair.shape[0], vc.ch):
+        return False
+    return _core2.loads() and _loads()
+
+
+def _v_weights(weights, vc: VCfg) -> list[torch.Tensor]:
+    """The packed geometry's (q, k, v, g, bias) weights: a 64-channel head's bias weight padded with zero rows to the two halves' head count."""
+    ws = [w.contiguous() for w in weights]
+    if vc.hd == 64:
+        ws[4] = torch.cat([ws[4], ws[4].new_zeros(ws[4].shape)])
+    return ws
+
+
+def _v_drop_view(ds: torch.Tensor, b: int, length: int, d: int, transposed: bool) -> torch.Tensor:
+    """The module's dropout scale ``[B, L, C]`` in the pair's own frame: starting ``[B, 1, L, C]``, ending ``[B, L, 1, C]``."""
+    return ds.view(b, length, 1, d) if transposed else ds.view(b, 1, length, d)
+
+
+def _v_lays(vc: VCfg, length: int, n: int):
+    tm = _core2.token_major
+    return tm(length, n, vc.ch), tm(length, vc.h * vc.ch, vc.ch), tm(length, 4 * vc.h * vc.ch, vc.ch)
+
+
+def _variant_forward_fake(x, weights, wo, ln_w, ln_b, mask, ds, gb, bo, wt, eps, transposed, n_head, hd, flip, out_mode, save):
+    vc = VCfg(x.shape[-1], n_head, hd)
+    pc = vc.pack
+    b, length = x.shape[0], x.shape[1]
+    t = b * length * length
+    out = [x.new_empty(x.shape)]
+    if save:
+        out += [
+            x.new_empty((t, pc.d + 8)),
+            x.new_empty((t, 2), dtype=F32),
+            x.new_empty((t, pc.n)),
+            x.new_empty((b, vc.h, length, length)),
+            x.new_empty((t, pc.dhp)),
+            x.new_empty((b, vc.h, length, length), dtype=F32),
+        ]
+    return out
+
+
+@opaque(fake=_variant_forward_fake, name="triangle_attention_sm80w_variant_forward")
+def variant_forward_ops(
+    x: torch.Tensor,
+    weights: list[torch.Tensor],
+    wo: torch.Tensor,
+    ln_w: torch.Tensor,
+    ln_b: torch.Tensor,
+    mask: torch.Tensor,
+    ds: torch.Tensor,
+    gb: torch.Tensor,
+    bo: torch.Tensor,
+    wt: torch.Tensor,
+    eps: float,
+    transposed: bool,
+    n_head: int,
+    hd: int,
+    flip: bool,
+    out_mode: int,
+    save: bool,
+) -> list[torch.Tensor]:
+    """``pair + drop(update(pair))`` of a variant: ``mask`` ``[B, L]`` uint8 or empty, ``ds`` ``[B, L, D]`` or empty, ``gb`` / ``bo`` / ``wt`` the gate bias, the out bias and the
+    second out-projection (empty when absent).  Returns [out] and, with ``save``, [xh, stats, y, bias, o, lse]."""
+    vc = VCfg(x.shape[-1], n_head, hd)
+    pc, ch, h = vc.pack, vc.ch, n_head
+    rows = _rows()
+    b, length = x.shape[0], x.shape[1]
+    t, d, dhp, n = b * length * length, vc.d, pc.dhp, pc.n
+    x2 = x.view(t, d)
+    dev = x.device
+    wp = _pack_folded(_v_weights(weights, vc), ln_w, ln_b, pc, 8, n)
+    xh = torch.empty((t, d + 8), dtype=BF, device=dev)
+    stats = torch.empty((t, 2), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
+    rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
+    if gb.numel():  # RoseTTAFold3's gate bias in the GEMM's epilogue (one rounding, as the reference's biased projection)
+        bvec = torch.zeros((n,), dtype=BF, device=dev)
+        bvec[3 * dhp : 4 * dhp] = torch.nn.functional.pad(gb.view(h, hd), (0, ch - hd)).reshape(-1)
+        y = torch.addmm(bvec, xh, wp.t())
+    else:
+        y = torch.mm(xh, wp.t())
+    bias = torch.empty((b, h, length, length), dtype=BF, device=dev)
+    if flip:  # the bias planes of the pair as it is, read in the transposed frame: planes unmasked, transposed, then the key mask
+        rows.bias_planes(y, x.new_empty((0,), dtype=torch.uint8), bias, 4 * dhp, h, length)
+        bias = bias.transpose(-1, -2).contiguous()
+        if mask.numel():
+            bias.masked_fill_(mask.view(b, 1, 1, length) == 0, torch.finfo(BF).min)
+    else:
+        rows.bias_planes(y, mask, bias, 4 * dhp, h, length)
+    lay_y, lay_o, _ = _v_lays(vc, length, n)
+    o = torch.empty((t, dhp), dtype=BF, device=dev)
+    lse = torch.empty((b, h, length, length), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
+    q, k, v, g = (y[:, i * dhp : (i + 1) * dhp] for i in range(4))
+    _core2.forward(q, k, v, bias, x.new_empty((0,), dtype=torch.uint8), o, lse, (lay_y, lay_y, lay_y, lay_o), length, h, b, ch, 1.0 / math.sqrt(hd))
+    a = torch.empty((t, dhp), dtype=BF, device=dev)
+    rows.gate_rows(o, g, a)
+    wo_p = _wo_padded(wo, pc)
+    bo_ = bo if bo.numel() else None
+
+    def proj(w):
+        return torch.mm(a, w.t()) if bo_ is None else torch.addmm(bo_, a, w.t())
+
+    out = torch.empty_like(x)
+    if out_mode == STANDARD:
+        rows.out_rows(proj(wo_p), x2, ds, out.view(t, d), length, int(transposed))
+    elif out_mode == UNTRANSPOSED:  # Chai-1's ending node: the update at the attended pair's own positions
+        yo = proj(wo_p)
+        if ds.numel():
+            out = x + yo.view(x.shape) * _v_drop_view(ds, b, length, d, transposed)
+        else:
+            rows.out_rows(yo, x2, ds, out.view(t, d), length, 0)
+    else:  # Chai-1's confidence head: one projection lands untransposed, the other transposed (starting: W_o u + (W_t u)^T; ending: (W_o u)^T + W_t u)
+        wt_p = _wo_padded(wt, pc)
+        first, second = (wt_p, wo_p) if transposed else (wo_p, wt_p)
+        upd = proj(first).view(x.shape) + torch.mm(a, second.t()).view(x.shape).transpose(1, 2)
+        if ds.numel():
+            upd = upd * _v_drop_view(ds, b, length, d, transposed)
+        out = x + upd
+    return [out, xh, stats, y, bias, o, lse] if save else [out]
+
+
+def _variant_backward_fake(x, weights, wo, ln_w, ln_b, mask, ds, gb, bo, wt, saved, dout, transposed, n_head, hd, flip, out_mode):
+    return [x.new_empty(x.shape), *(w.new_empty(w.shape) for w in weights), wo.new_empty(wo.shape), ln_w.new_empty(ln_w.shape), ln_b.new_empty(ln_b.shape),
+            gb.new_empty(gb.shape), bo.new_empty(bo.shape), wt.new_empty(wt.shape)]
+
+
+@opaque(fake=_variant_backward_fake, name="triangle_attention_sm80w_variant_backward")
+def variant_backward_ops(
+    x: torch.Tensor,
+    weights: list[torch.Tensor],
+    wo: torch.Tensor,
+    ln_w: torch.Tensor,
+    ln_b: torch.Tensor,
+    mask: torch.Tensor,
+    ds: torch.Tensor,
+    gb: torch.Tensor,
+    bo: torch.Tensor,
+    wt: torch.Tensor,
+    saved: list[torch.Tensor],
+    dout: torch.Tensor,
+    transposed: bool,
+    n_head: int,
+    hd: int,
+    flip: bool,
+    out_mode: int,
+) -> list[torch.Tensor]:
+    """The gradients of ``variant_forward_ops``: [dpair, dwq, dwk, dwv, dwg, dwb, dwo, dln_w, dln_b, dgb, dbo, dwt] (an absent parameter's gradient empty)."""
+    rows = _rows()
+    xh, stats, y, bias, o, lse = saved
+    vc = VCfg(x.shape[-1], n_head, hd)
+    pc, ch, h = vc.pack, vc.ch, n_head
+    b, length = x.shape[0], x.shape[1]
+    t, d, dhp, n = b * length * length, vc.d, pc.dhp, pc.n
+    dev = x.device
+    dout2 = dout.contiguous().view(t, d)
+    wo_p = _wo_padded(wo, pc)
+    wt_p = _wo_padded(wt, pc) if out_mode == DUAL else None
+    # the update's gradient in the attended frame, for each out-projection
+    if out_mode == STANDARD:
+        if transposed or ds.numel():
+            dy = torch.empty((t, d), dtype=BF, device=dev)
+            rows.dy_rows(dout2, ds, dy, length, int(transposed))
+        else:
+            dy = dout2
+        da, dy_t = torch.mm(dy, wo_p), None
+    else:
+        dt = dout2 if not ds.numel() else (dout2.view(x.shape) * _v_drop_view(ds, b, length, d, transposed)).view(t, d)
+        if out_mode == UNTRANSPOSED:
+            dy, dy_t = dt, None
+            da = torch.mm(dy, wo_p)
+        else:
+            dtt = dt.view(x.shape).transpose(1, 2).contiguous().view(t, d)
+            dy, dy_t = (dtt, dt) if transposed else (dt, dtt)  # (for Wo, for Wo_t)
+            da = torch.addmm(torch.mm(dy, wo_p), dy_t, wt_p)
+    dqkvg = torch.empty((t, 4 * dhp), dtype=BF, device=dev)
+    dov = torch.empty((t, dhp), dtype=BF, device=dev)
+    a = torch.empty((t, dhp), dtype=BF, device=dev)
+    delta = torch.empty((b, pc.h, length, length), dtype=F32, device=dev)
+    rows.gate_bwd(da, o, y[:, 3 * dhp : 4 * dhp], dqkvg[:, 3 * dhp :], dov, a, delta, length, pc.h)
+    del da
+    if vc.hd == 64:  # the row term of a 64-channel head: its two 32-channel halves
+        delta = delta.view(b, h, 2, length, length).sum(2)
+    go = torch.mm(dy.t(), a, out_dtype=F32)  # dWo [D, H ch]
+    dwt = wt.new_empty((0,))
+    if dy_t is not None:
+        gt = torch.mm(dy_t.t(), a, out_dtype=F32)
+        dwt = (gt if vc.hd != 16 else gt.view(d, h, HD_CORE)[:, :, :16].reshape(d, h * 16)).to(wt.dtype)
+    dbo = bo.new_empty((0,)) if not bo.numel() else torch.sum(dy, 0, dtype=F32).to(bo.dtype)
+    del a
+    lay_y, lay_o, lay_d = _v_lays(vc, length, n)
+    q, k, v = (y[:, i * dhp : (i + 1) * dhp] for i in range(3))
+    dq, dk, dv = (dqkvg[:, i * dhp : (i + 1) * dhp] for i in range(3))
+    db = _core2.backward(q, k, v, dov, bias, x.new_empty((0,), dtype=torch.uint8), lse, delta, dq, dk, dv,
+                         (lay_y, lay_y, lay_y, lay_o, lay_d, lay_d, lay_d), length, h, b, ch, 1.0 / math.sqrt(hd))
+    del dov, delta
+    if flip:  # the core's bias was the transpose of the projected planes
+        db = db.transpose(-1, -2).contiguous()
+    dgb = gb.new_empty((0,))
+    if gb.numel():
+        dgb = torch.sum(dqkvg[:, 3 * dhp : 4 * dhp], 0, dtype=F32).view(h, ch)[:, :hd].reshape(-1).to(gb.dtype)
+    ws = _v_weights(weights, vc)
+    dpair = torch.empty_like(x)
+    dxn = torch.mm(dqkvg, _pack_plain(ws, pc))
+    rows.ln_bwd(dxn, db, weights[4].contiguous(), x.view(t, d), stats, dout2, ln_w.detach().float().contiguous(), dpair.view(t, d), length, h, int(transposed))
+    del dxn
+    parts = [torch.mm(dqkvg.t(), xh, out_dtype=F32), torch.mm(db.permute(1, 0, 2, 3).reshape(h, t), xh, out_dtype=F32)]
+    if pc.h != h:
+        parts.append(xh.new_zeros((pc.h - h, d + 8), dtype=F32))
+    g = torch.cat(parts)  # [4 DHp + H', D + 8]
+    dws = [torch.empty_like(w) for w in ws]
+    dwo = torch.empty_like(wo)
+    dg, dbeta = torch.empty_like(ln_w), torch.empty_like(ln_b)
+    rows.wgrad_w(g, go, *ws, *dws, dwo, ln_w.detach().contiguous(), ln_b.detach().contiguous(), dg, dbeta, d, pc.h, pc.hd)
+    dws[4] = dws[4][:h].clone() if pc.h != h else dws[4]
+    return [dpair, *dws, dwo, dg, dbeta, dgb, dbo, dwt]
+
+
+class _VariantTraining(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, wq, wk, wv, wg, wb, wo, ln_w, ln_b, gb, bo, wt, mask, ds, eps, transposed, n_head, hd, flip, out_mode):
+        weights = [wq, wk, wv, wg, wb]
+        out, *saved = variant_forward_ops(x, weights, wo, ln_w, ln_b, mask, ds, gb, bo, wt, eps, transposed, n_head, hd, flip, out_mode, True)
+        ctx.save_for_backward(x, wq, wk, wv, wg, wb, wo, ln_w, ln_b, gb, bo, wt, mask, ds, *saved)
+        ctx.cfg = (transposed, n_head, hd, flip, out_mode)
+        return out
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, dout):
+        x, wq, wk, wv, wg, wb, wo, ln_w, ln_b, gb, bo, wt, mask, ds, *saved = ctx.saved_tensors
+        grads = variant_backward_ops(x, [wq, wk, wv, wg, wb], wo, ln_w, ln_b, mask, ds, gb, bo, wt, saved, dout.contiguous(), *ctx.cfg)
+        grads = [gr if gr.numel() else None for gr in grads]
+        return (*grads, None, None, None, None, None, None, None, None)
+
+
+def variant(
+    pair: torch.Tensor,
+    vc: VCfg,
+    weights: Sequence[torch.Tensor],
+    wo: torch.Tensor,
+    ln_w: torch.Tensor,
+    ln_b: torch.Tensor,
+    eps: float,
+    mask: torch.Tensor | None = None,
+    *,
+    transposed: bool = False,
+    flip: bool = False,
+    out_mode: int = STANDARD,
+    gate_bias: torch.Tensor | None = None,
+    out_bias: torch.Tensor | None = None,
+    wo_t: torch.Tensor | None = None,
+    ds: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """``pair + drop(update(pair))`` of a variant, with autograd when a leaf wants a gradient: ``weights`` = (q, k, v, g, bias), ``ds`` the dropout scale ``[B, L, D]`` or None.
+    Call ``variant_supports()`` first."""
+    empty = pair.new_empty((0,))
+    gb, bo, wt = (t if t is not None else empty for t in (gate_bias, out_bias, wo_t))
+    leaves = (pair, *weights, wo, ln_w, ln_b, gb, bo, wt)
+    mk = _mask_u8(mask, pair.device)
+    d = _dropout_scale(ds, pair)
+    args = (float(eps), bool(transposed), vc.h, vc.hd, bool(flip), int(out_mode))
+    if not (torch.is_grad_enabled() and any(t.requires_grad for t in leaves)):
+        return variant_forward_ops(pair, list(weights), wo, ln_w, ln_b, mk, d, gb, bo, wt, *args, False)[0]
+    return _VariantTraining.apply(*leaves, mk, d, *args)

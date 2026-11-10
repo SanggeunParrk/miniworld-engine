@@ -61,9 +61,13 @@ def prebuild(target, rows):
         yield from _sm80(rows)
 
 
+#: the classes whose A100 calls (some or all) take the variant path (AF3 bias orientation, projection biases, Chai-1 output layouts)
+_SM80_VARIANTS = frozenset({"TriangleAttentionAF3", "TriangleAttentionRF3", "TriangleAttentionChai1", "TriangleAttentionChai1Confidence"})
+
+
 def _sm80(rows):
     """The A100 builds (``kernels/integrations/triattn_sm80``) for the bf16 / master TriangleAttention rows whose geometry the A100 path takes
-    (heads of 16 / 32 channels): the core extension (``sm80``: the fused d_pair-128 path and the core of the wide path), the wide path's
+    (heads of 16 / 32 / 64 channels): the core extension (``sm80``: the fused d_pair-128 path and the core of the wide path), the wide path's
     row kernels (``sm80_wide``), the 16-channel-head core (``sm80_core2``), and the shape-gated helpers the A100 path reaches (the
     training front / backward pieces at their lengths, the d_pair-256 fused output at L128)."""
     from miniworld_engine.kernels._prebuild import _kv
@@ -87,10 +91,15 @@ def _sm80(rows):
         d = _kv(r["dims"])
         dp, h = int(d["d_pair"]), int(d["n_head"])
         hd = int(d.get("d_hidden") or dp) // h
-        if hd not in (16, 32):
+        if hd not in (16, 32, 64):
             continue
         lengths, train = set(r["lengths"]), r["mode"] == "train"
         calls[sm80._ext] = None
+        if hd == 64 or r["module"] in _SM80_VARIANTS:  # the variant path (sm80_wide.variant): the row kernels and the generalised core
+            calls[sm80_wide._rows] = None
+            calls[sm80_core2.ext] = None
+            if hd == 64:
+                continue
         if (dp, hd * h, h) != (128, 128, 4):
             calls[sm80_wide._rows] = None
         if hd == 16:

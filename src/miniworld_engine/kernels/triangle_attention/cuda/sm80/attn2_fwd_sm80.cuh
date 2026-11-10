@@ -18,14 +18,15 @@ struct Lay {
 
 template <int HD>
 struct Hd {
-  static_assert(HD == 16 || HD == 32, "head dim");
+  static_assert(HD == 16 || HD == 32 || HD == 64, "head dim");
   static constexpr int GR = HD / 8;                           // 16-byte granules per row of a tile
   static constexpr int ROWB = HD * 2;                         // bytes per row
   static constexpr int KS = HD / 16;                          // 16-wide k steps of the score product
   static constexpr int NTV = HD / 8;                          // n tiles (8 channels) of the output
-  // 64 B rows: 16 B granule g of row r at g ^ ((r >> 1) & 3);  32 B rows: g ^ ((r >> 2) & 1): the 8 rows of one ldmatrix matrix cover all 32 banks either way
+  // 128 B rows (HD 64): g ^ (r & 7);  64 B rows: 16 B granule g of row r at g ^ ((r >> 1) & 3);  32 B rows: g ^ ((r >> 2) & 1): the 8 rows of one ldmatrix matrix cover all 32 banks
   static DEVI uint32_t swz(uint32_t row, uint32_t g) {
-    if constexpr (HD == 32) return row * 64u + ((g ^ ((row >> 1) & 3u)) << 4);
+    if constexpr (HD == 64) return row * 128u + ((g ^ (row & 7u)) << 4);
+    else if constexpr (HD == 32) return row * 64u + ((g ^ ((row >> 1) & 3u)) << 4);
     else return row * 32u + ((g ^ ((row >> 2) & 1u)) << 4);
   }
 };

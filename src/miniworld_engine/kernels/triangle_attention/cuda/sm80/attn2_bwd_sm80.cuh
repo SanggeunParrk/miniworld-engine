@@ -235,22 +235,26 @@ struct Dkv2Cfg {
 template <class G>
 struct Qd2Loader {
   static constexpr int BN = G::BN, BI = BN / 16, GR = Hd<G::HD>::GR, QG = BN * GR;       // granules of a Q (dO) tile
-  uint32_t qd_dst, rt_dst, b_dst[BI];
-  const __nv_bfloat16 *qd_src, *b_src[BI];
+  static constexpr int QN = (QG + 127) / 128;                  // granules per thread (HD 64: 256 granules over 128 threads)
+  uint32_t qd_dst[QN], rt_dst, b_dst[BI];
+  const __nv_bfloat16 *qd_src[QN], *b_src[BI];
   const float* rt_src;
   long long qd_tok;
-  bool is_q, qd_ok;
+  bool is_q, qd_ok[QN];
   int tid;
 
   DEVI Qd2Loader(const Dkv2Params& p, long long plane, int row, int z, int kt, int h, int L, int tid_) : tid(tid_) {
     is_q = tid < 128;                                          // threads 0-127: Q, 128-255: dO
-    const int c = tid & 127;
-    qd_ok = c < QG;
-    const int token = c / GR, g = c % GR;
     const Lay& l = is_q ? p.lq : p.ld;
-    qd_dst = (is_q ? 0 : G::QD_BYTES) + Hd<G::HD>::swz(token, g);
     qd_tok = l.tok;
-    qd_src = (is_q ? p.q : p.dov) + z * l.z + row * l.row + token * l.tok + h * l.head + g * 8;
+#pragma unroll
+    for (int i = 0; i < QN; ++i) {
+      const int c = (tid & 127) + 128 * i;
+      qd_ok[i] = c < QG;
+      const int token = c / GR, g = c % GR;
+      qd_dst[i] = (is_q ? 0 : G::QD_BYTES) + Hd<G::HD>::swz(token, g);
+      qd_src[i] = (is_q ? p.q : p.dov) + z * l.z + row * l.row + token * l.tok + h * l.head + g * 8;
+    }
     {                                                          // lse | delta of the BN queries: 2 x BN floats = 16 chunks of 16 B (threads 0-15)
       const int which = (tid >> 3) & 1, cc = tid & 7;
       rt_src = (which ? p.delta : p.lse) + (plane + row) * L + cc * 4;
@@ -267,7 +271,9 @@ struct Qd2Loader {
   DEVI void issue(uint32_t sbase, int s, int NJ) const {
     if (s < NJ) {
       const uint32_t st = sbase + G::OFF_STAGE + (s % G::NST) * G::STAGE;
-      if (qd_ok) cp_async16(st + qd_dst, qd_src + (long long)(s * BN) * qd_tok);
+#pragma unroll
+      for (int i = 0; i < QN; ++i)
+        if (qd_ok[i]) cp_async16(st + qd_dst[i], qd_src[i] + (long long)(s * BN) * qd_tok);
       if (tid < 16) cp_async16(st + rt_dst, rt_src + s * BN);
 #pragma unroll
       for (int i = 0; i < BI; ++i) cp_async16(st + b_dst[i], b_src[i] + s * BN);

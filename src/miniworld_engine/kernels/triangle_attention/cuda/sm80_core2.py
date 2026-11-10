@@ -1,4 +1,4 @@
-"""The generalised A100 (sm_80) triangle-attention core (``sm80/attn2_fwd_sm80.cuh``, ``attn2_bwd_sm80.cuh``): head dim 16 or 32, element strides for every operand (token-major packed
+"""The generalised A100 (sm_80) triangle-attention core (``sm80/attn2_fwd_sm80.cuh``, ``attn2_bwd_sm80.cuh``): head dim 16, 32 or 64, element strides for every operand (token-major packed
 buffers and head-major ``[A, B, H, L, D]`` tensors alike), an optional per-pair-row key mask.  The arithmetic and the schedules are those of ``sm80.py``'s core (the same kernels with the
 widths and the addressing as template parameters); this module only builds the extension and wraps the launches -- callers (the module-level path of ``sm80_wide.py``, the
 ``projected_attention`` leaf) put them inside their own opaque ops.
@@ -138,17 +138,22 @@ def delta_rows(o, dov, out, lays, length, heads, batch, head_dim) -> None:
     ext().attn2_delta(o, dov, out, list(lo), list(ld), length, heads, batch, head_dim)
 
 
+def dq_rows(head_dim: int) -> int:
+    """The pair rows per bias-gradient partial of the query side: 4 (``DQ_ROWS``), 2 for 64-channel heads (their Q and dO tiles of 2 rows fill the shared memory)."""
+    return 2 if head_dim == 64 else DQ_ROWS
+
+
 #: the transient memory of a training step (the bias gradient's partials, cubic in L) above which the callers' Triton path serves the gradient
 MAX_DBP_BYTES = 16 << 30
 
 
-def dbp_bytes(length: int, heads: int, batch: int) -> int:
+def dbp_bytes(length: int, heads: int, batch: int, head_dim: int = 32) -> int:
     """The bias gradient's bf16 partials of ``backward`` (one ``[B H, L, L]`` plane per group of ``DQ_ROWS`` pair rows): the transient memory of the training step (cubic in L)."""
-    return (length // DQ_ROWS) * batch * heads * length * length * 2
+    return (length // dq_rows(head_dim)) * batch * heads * length * length * 2
 
 
-def dbp_fits(length: int, heads: int, batch: int) -> bool:
-    return dbp_bytes(length, heads, batch) <= MAX_DBP_BYTES
+def dbp_fits(length: int, heads: int, batch: int, head_dim: int = 32) -> bool:
+    return dbp_bytes(length, heads, batch, head_dim) <= MAX_DBP_BYTES
 
 
 def backward(
@@ -176,7 +181,7 @@ def backward(
     e = ext()
     scl = sm_scale * _L2E
     e.attn2_set_sched(DQ_SCHED, DKV_SCHED)
-    groups = length // DQ_ROWS
+    groups = length // dq_rows(head_dim)
     dbp = torch.empty(
         (groups, batch * heads, length, length), dtype=BF, device=q.device
     )

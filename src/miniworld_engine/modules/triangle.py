@@ -304,8 +304,8 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
 
     def _cuda_route_sm80(self, pair: torch.Tensor, mask: torch.Tensor | None) -> tuple[str | None, str | None]:
         """``("sm80" | "sm80_train", None)``: the A100 path (``kernels/integrations/triattn_sm80``: the whole update, inference or with
-        autograd), else ``(None, reason)``. The standard orientation without projection biases only (TriangleAttention; the starting nodes of
-        AF3 / Chai-1), bf16, d_pair 128 / 4 x 32 or d_pair 64 .. 512 with heads of 16 / 32 channels, L % 128 == 0."""
+        autograd), else ``(None, reason)``. bf16, d_pair 128 / 4 x 32 or d_pair 64 .. 512 with heads of 16 / 32 / 64 channels, L % 128 == 0;
+        every variant (AF3 / RF3 / Chai-1 bias orientation, RF3 projection biases, Chai-1 untransposed / dual output) on the variant path."""
         why = self._core_refusal(pair, mask)
         if why is not None:
             return None, why

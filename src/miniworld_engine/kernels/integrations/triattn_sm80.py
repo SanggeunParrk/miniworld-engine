@@ -7,6 +7,8 @@ Two whole-module paths, picked by the module's geometry:
   * ``fused``: d_pair 128, 4 heads x 32 (``sm80.py``): the front, the core and the back are three persistent kernels with the weights resident in shared memory;
   * ``wide``: every other width the model code uses (``sm80_wide.py``): d_pair 64 .. 512 (a multiple of 64), 1 .. 16 heads of 16 or 32 channels: hand-CUDA row kernels around cuBLAS GEMMs
     and the same core.
+  * ``variant``: what neither takes (``sm80_wide.variant``): AlphaFold 3's ending-node bias orientation (AF3 / RF3 / Chai-1), RoseTTAFold3's gate / out-projection biases,
+    Chai-1's untransposed / dual outputs, heads of 64 channels -- the rows engine on the generalised core, the variants as the H100 width-generic path has them.
 """
 
 from __future__ import annotations
@@ -97,6 +99,90 @@ def _serves_kind(
     ) and sm80_wide.loads(kind[1])
 
 
+def _features(module) -> bool:
+    """The module has a variant feature the fused / wide paths lack: the ending node's AF3 bias orientation, projection biases, Chai-1's output layouts."""
+    return (
+        module._bias_untransposed
+        or module.to_gate.bias is not None
+        or module.to_out.bias is not None
+        or module.dual_output
+        or (module.untransposed_output and not module.starting)
+    )
+
+
+def _is_variant(module, pair: torch.Tensor) -> bool:
+    """The call goes to the variant path: a variant feature, or a geometry only it takes (heads of 64 channels). Plain modules the fused / wide paths
+    serve stay there."""
+    if _features(module):
+        return True
+    from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
+
+    d_hidden, d_pair = module.to_query.weight.shape
+    if (d_pair, d_hidden, module.n_head) == (128, 128, 4) or sm80_wide.cfg_for(d_pair, d_hidden, module.n_head) is not None:
+        return False
+    return sm80_wide.variant_cfg(d_pair, d_hidden, module.n_head) is not None
+
+
+def _out_mode(module) -> int:
+    from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
+
+    if module.dual_output:
+        return sm80_wide.DUAL
+    return sm80_wide.UNTRANSPOSED if (module.untransposed_output and not module.starting) else sm80_wide.STANDARD
+
+
+def _variant_params(module, train: bool):
+    """(q, k, v, g, bias weights), wo, gate bias, out bias, second out-projection in the kernels' dtype (bf16; fp32 masters cast as ``_inference_forms`` /
+    ``_train_forms`` do)."""
+    weights, wo = _train_forms(module) if train else _inference_forms(module)
+    extra = [module.to_gate.bias, module.to_out.bias, module.to_out_t.weight if module.dual_output else None]
+    bf = torch.bfloat16
+    if train:
+        extra = [t if t is None or t.dtype == bf else t.to(bf) for t in extra]
+    else:
+        present = [t for t in extra if t is not None]
+        if any(t.dtype != bf for t in present):
+            forms = iter(_capture.param_forms("triattn_sm80_variant", present, lambda: tuple(t.to(bf).contiguous() for t in present)))
+            extra = [None if t is None else next(forms) for t in extra]
+    return weights, wo, *extra
+
+
+def _variant_refusal(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: bool) -> str | None:
+    from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
+
+    d_hidden, d_pair = module.to_query.weight.shape
+    vc = sm80_wide.variant_cfg(d_pair, d_hidden, module.n_head)
+    if vc is None:
+        return (f"d_pair {d_pair}, {module.n_head} heads x {d_hidden // module.n_head}: outside the A100 kernels (d_pair 64 .. 512 a multiple of 64, "
+                "heads of 16 / 32 channels up to 16 or of 64 channels up to 8)")
+    if module.dual_output and (module.to_out_t.bias is not None or module.to_out.bias is not None):
+        return "a biased second out-projection: no model has one, not part of the A100 kernels"
+    weights, wo, gb, bo, wt = _variant_params(module, train=False)
+    ln = module.ln_pair
+    if not sm80_wide.variant_supports(pair, vc, weights, wo, ln.weight, ln.bias, mask, gate_bias=gb, out_bias=bo, wo_t=wt, train=train):
+        return (f"L {pair.shape[1]}, d_pair {d_pair}, {module.n_head} heads, {'training' if train else 'inference'}: refused by the A100 variant path's gates "
+                "(L % 128 == 0, contiguous [B, L, L, d_pair], a bool [B, L] mask, the training bias-gradient budget) or its extensions failed to build")
+    return None
+
+
+def _variant_forward(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: bool) -> torch.Tensor:
+    """``pair + drop(update(pair))`` on ``sm80_wide.variant`` (with autograd when ``train``)."""
+    from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
+
+    d_hidden, d_pair = module.to_query.weight.shape
+    vc = sm80_wide.variant_cfg(d_pair, d_hidden, module.n_head)
+    weights, wo, gb, bo, wt = _variant_params(module, train=train)
+    ln = module.ln_pair
+    ds = None
+    if train and module.training and module.p_drop > 0.0:
+        b, length = pair.shape[:2]
+        ds = module._make_drop_scale(pair, module.p_drop).reshape(b, length, pair.shape[-1])
+    return sm80_wide.variant(
+        pair, vc, weights, wo, ln.weight, ln.bias, ln.eps, mask, transposed=not module.starting, flip=module._bias_untransposed,
+        out_mode=_out_mode(module), gate_bias=gb, out_bias=bo, wo_t=wt, ds=ds,
+    )
+
+
 def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: bool) -> str | None:
     """Why the A100 path cannot take this call of ``module`` (a ``_TriangleAttentionBase``), or ``None``. ``train``: the autograd path
     (``forward_train``: gradients or the live dropout), else the inference path (``forward``). Shapes / dtypes / flags, then the kernels'
@@ -105,19 +191,12 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: boo
         return "bias-only attention (use_self_attention=False) is not part of the A100 kernels"
     if module.use_qk_norm:
         return "q / k RMSNorm is not part of the A100 kernels"
-    if module.to_gate.bias is not None or module.to_out.bias is not None:
-        return "gate / out-projection biases (RoseTTAFold3): not part of the A100 kernels"
-    if module._bias_untransposed:
-        return ("AlphaFold 3's ending-node bias (the pair as it is, read in the transposed frame): the A100 front computes the bias of the "
-                "attended (transposed) pair only")
-    if module.dual_output:
-        return "the second, transposed out-projection (Chai-1 confidence head): not part of the A100 kernels"
-    if module.untransposed_output and not module.starting:
-        return "Chai-1's ending node returns its update untransposed: the A100 back writes the standard orientation only"
     if pair.dtype != torch.bfloat16:
         return f"dtype {pair.dtype}: the A100 TriangleAttention kernels are bf16 only (no fp32 kernel)"
-    kind = _kind(module, pair, mask)
     d_hidden, d_pair = module.to_query.weight.shape
+    if _is_variant(module, pair):
+        return _variant_refusal(module, pair, mask, train=train)
+    kind = _kind(module, pair, mask)
     if kind is None:
         return (f"d_pair {d_pair}, {module.n_head} heads x {d_hidden // module.n_head}: outside the A100 kernels (d_pair 128 / 4 x 32 fused; "
                 "d_pair 64 .. 512 a multiple of 64 with 1 .. 16 heads of 16 / 32 channels)")
@@ -138,6 +217,8 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
     """``pair + TriangleAttention(pair)``.  ``fused``: front (LayerNorm, q | k | v | g, bias), attention (with device-side key compaction on large masked calls), back (gate, output projection,
     residual).  ``wide``: ``sm80_wide.forward`` (row kernels around two GEMMs and the core).  The ending node reads and writes its transposed positions inside the kernels
     (no transposing copies)."""
+    if _is_variant(module, pair):
+        return _variant_forward(module, pair, mask, train=False)
     kind = _kind(module, pair, mask)
     ln = module.ln_pair
     ending = not module.starting
@@ -190,6 +271,8 @@ def forward_train(
 ) -> torch.Tensor:
     """``pair + drop(TriangleAttention(pair))`` with autograd.  The dropout scale is the module's own draw on the original layout (``[B, 1, L, C]`` starting /
     ``[B, L, 1, C]`` ending); in the kernels' starting frame both index the token's second index, so either is ``[B, L, C]`` as it is."""
+    if _is_variant(module, pair):
+        return _variant_forward(module, pair, mask, train=True)
     kind = _kind(module, pair, mask)
     ln = module.ln_pair
     weights, wo = _train_forms(module)
