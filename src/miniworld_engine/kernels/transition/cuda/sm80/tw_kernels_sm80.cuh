@@ -649,6 +649,11 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) gate_f16_kernel(const DualPa
 }
 
 // ===================================================================================================================== GEMM + residual
+#ifndef RES_PF_SLICE
+#define RES_PF_SLICE 0   // the k slice behind which gemm_res_kernel prefetches its residual tile into L2
+#endif
+// a 128-byte line into L2 (no register, no shared memory; a hint: nothing waits on it)
+DEVI void prefetch_l2(const void* p) { asm volatile("prefetch.global.L2 [%0];\n" ::"l"(p)); }
 // out = rn(rn(A W^T) + res)  (the squeeze projection with the residual folded in; res == nullptr: out = rn(A W^T)).  A [M][K], W [N][K] (the weight of an nn.Linear), N % BN == 0.
 struct ResParams {
   const __nv_bfloat16* a;      // [M][K]
@@ -690,7 +695,22 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) gemm_res_kernel(const ResPar
     for (int j = 0; j < L::NJA; ++j) pa[j] = reinterpret_cast<const char*>(p.a + (size_t)(m0 + ra + j * L::RPJA) * p.K + koff) + ca * 16;
 #pragma unroll
     for (int j = 0; j < L::NJB; ++j) pb[j] = reinterpret_cast<const char*>(p.w + (size_t)(n0 + rb + j * L::RPJB) * p.K + koff) + cb * 16;
-    gemm_mainloop_lean<C>(acc, smem, KT, pa, pb, LeanFrag<C>(wm, wn, lane), tid);
+    // the bf16 residual tile is pulled into L2 behind slice RES_PF_SLICE (prefetch.global.L2, no registers / shared memory): the epilogue's residual loads then hit L2
+    // instead of exposing a DRAM round trip after the mainloop (measured at D 256 / H 512)
+    auto pre = [&](int kt) {
+      if constexpr (!C::F16) {
+        if (kt == (KT > RES_PF_SLICE ? RES_PF_SLICE : 0) && p.res != nullptr) {
+          constexpr int LPR = C::BN * 2 / 128;            // 128-byte lines per residual tile row
+          static_assert(LPR >= 1 && LPR * 128 == C::BN * 2, "residual prefetch: BN a multiple of 64");
+#pragma unroll
+          for (int i = tid; i < C::BM * LPR; i += C::NTHR) {
+            const int r = i / LPR, l = i % LPR;
+            prefetch_l2(p.res + (size_t)(m0 + r) * p.N + n0 + l * 64);
+          }
+        }
+      }
+    };
+    gemm_mainloop_lean<C>(acc, smem, KT, pa, pb, LeanFrag<C>(wm, wn, lane), tid, pre);
   } else {
     gemm_mainloop<C>(acc, smem, KT, load_a, load_b, fr);
   }
