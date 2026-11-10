@@ -725,10 +725,11 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
     parallel = True
     attention_part = UngatedAugmentedAttention
     #: H100: the one atom DiT implementation (local_dit_h100: one AdaLN, identity AdaLN, parallel, uid) for these key windows; "slide"
-    #: stays on kernels/dit_variants until the slid edge windows are on CUDA there (its small-N training was slower)
-    #: stays () for now: on local_dit_h100 every case is faster and no train / master light is worse, but fp32 eval at N >= 5120 went
-    #: GREEN -> YELLOW on one element (1.13e-3 vs tol 9.6e-4; the same element is the old path's worst, 8.1e-4): kept on dit_variants
-    _h100_local: tuple = ()
+    #: stays on kernels/dit_variants until the slid edge windows are on CUDA there (its small-N training was slower). Accepted: fp32 eval
+    #: at N >= 5120 is YELLOW on one element (1.13e-3 vs tol 9.6e-4; the old path's worst element, 8.1e-4), every case faster
+    _h100_local = ("pad",)
+    #: 2026-11-10: H100 "pad" on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 2}
 
     def __init__(self, d_single: int = 128, d_cond: int = 128, d_pair: int = 16, n_head: int = 4, n: int = 2, *,
                  key_window: str | None = None, adaln_eps: float = 0.1, backend: str = "pytorch") -> None:
