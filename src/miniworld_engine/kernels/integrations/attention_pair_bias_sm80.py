@@ -582,7 +582,7 @@ GENERIC_HEAD_DIMS = (16, 24, 32, 48, 64)
 
 def _hdp(hd: int) -> int:
     """The head width the core runs: 32 for the narrow heads, else the head dim."""
-    return 32 if hd < 32 else hd
+    return max(hd, 32)
 
 
 def _generic_refusal(module, single, pair, mask, grad: bool) -> str | None:
@@ -599,7 +599,7 @@ def _generic_refusal(module, single, pair, mask, grad: bool) -> str | None:
         return f"parameters must be {ok} for {dt} activations"
     if single.ndim != 3 or single.shape[0] != 1:
         return "single must be [1, L, d_single] (B == 1)"
-    L, D, H = single.shape[1], single.shape[2], module.n_head
+    L, H = single.shape[1], module.n_head
     if L % 128:
         return f"L {L}: a multiple of 128"
     hd = module.to_query.weight.shape[0] // H
