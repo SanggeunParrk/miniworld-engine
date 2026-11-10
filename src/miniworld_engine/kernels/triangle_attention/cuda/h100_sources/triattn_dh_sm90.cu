@@ -376,6 +376,7 @@ template <int D> struct SmemQ {
   bf16 k[2][BN * LD];
   bf16 v[2][BN * LD];
   bf16 b[2][BM * LB];
+  bf16 ds[BM * LB];         // ROWS: the tile's bf16 dS, each warp its own 16 rows, stored out as 16-byte rows
 };
 
 // ROWS (the launched build): one pair row per slab (NSLAB = S), the row's dS written once as a bf16 plane (DB is then bf16 [S, B, H, S, S]:
@@ -487,14 +488,23 @@ __global__ void __launch_bounds__(THREADS) triattn_dh_bwd_q(const bf16* __restri
         sa[nn / 2][(nn % 2) * 2 + 1] = pk(s2, s3);
         sl[nn / 2][(nn % 2) * 2] = pk_lo(s0, s1, sa[nn / 2][(nn % 2) * 2]);
         sl[nn / 2][(nn % 2) * 2 + 1] = pk_lo(s2, s3, sa[nn / 2][(nn % 2) * 2 + 1]);
-        if constexpr (ROWS) {
-          bf16* dbh = reinterpret_cast<bf16*>(DB) + ((((long)p * B + b) * H + h) * S + q0 + r0) * S + j * BN + 2 * t;
-          *reinterpret_cast<uint32_t*>(dbh + nn * 8) = pk(s0, s1);
-          *reinterpret_cast<uint32_t*>(dbh + 8L * S + nn * 8) = pk(s2, s3);
+        if constexpr (ROWS) {   // staged: 4-byte fragment stores scattered over 8 rows per warp instruction cost more than the 16-byte rows below
+          *reinterpret_cast<uint32_t*>(&sm.ds[r0 * LB + col]) = sa[nn / 2][(nn % 2) * 2];
+          *reinterpret_cast<uint32_t*>(&sm.ds[(r0 + 8) * LB + col]) = sa[nn / 2][(nn % 2) * 2 + 1];
         } else {
           *reinterpret_cast<float2*>(dbt + nn * 8) = make_float2(old[nn][0].x + s0, old[nn][0].y + s1);
           *reinterpret_cast<float2*>(dbt + 8L * S + nn * 8) = make_float2(old[nn][1].x + s2, old[nn][1].y + s3);
         }
+      }
+      if constexpr (ROWS) {   // the warp's 16 dS rows of this key tile (64 bf16 = 128 bytes each), 16 bytes per lane, streaming (read once by the sum)
+        __syncwarp();
+        bf16* dbh = reinterpret_cast<bf16*>(DB) + ((((long)p * B + b) * H + h) * S + q0 + warp * 16) * S + j * BN;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          const int c = i * 32 + lane, r = c / 8, col = (c % 8) * 8;
+          __stcs(reinterpret_cast<int4*>(dbh + (long)r * S + col), *reinterpret_cast<const int4*>(&sm.ds[(warp * 16 + r) * LB + col]));
+        }
+        __syncwarp();
       }
       // dQ += dS K: k = 64 keys (4 steps of 16), n = D dims
 #pragma unroll
