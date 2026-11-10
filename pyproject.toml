@@ -18,6 +18,9 @@ dependencies = [
   "pydantic",       # modules/atom_dit.py: SWA atom block configs
   "pyyaml",         # measure/config.py: measurement configs
   "cuda-bindings",  # kernels/trimul_inproj/cuda: the H100 TriMul driver API
+  # The prebuilt H100 kernels (CUDA 12.9 / torch 2.13 / CPython 3.12), installed into miniworld_engine/_prebuilt/; elsewhere a kernel
+  # JIT-builds on first use (needs nvcc and, for the CUTLASS kernels, CUTLASS_PATH).
+  'miniworld-engine-kernels-sm90-cu129==2.5.0; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
 ]
 
 [project.optional-dependencies]
@@ -44,8 +47,10 @@ exclude = ["*.swa_dit.cuda.gen"]
 #   **/configs/*.json                       launch-config tables per GPU and candidate lists (kernels/<family>/configs/)
 #   requirements/*.csv                      the requirement lists the measurers, the judge and the prebuild plan read
 #   measure/configs/*.yaml                  the canonical measurement configs
-#   judge/tokens/*.jsonl, judge/answers.jsonl  the judge's state
-miniworld_engine = ["**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.inc", "**/*.json", "**/*.csv", "**/*.yaml", "**/*.jsonl"]
+# Not shipped: judge/tokens/ and judge/answers.jsonl (the judge's measurement state, kept in the repository, not runtime).
+miniworld_engine = ["**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.inc", "**/*.json", "**/*.csv", "**/*.yaml"]
+[tool.setuptools.exclude-package-data]
+miniworld_engine = ["judge/tokens/**", "judge/answers.jsonl"]
 
 # ----------------------------------------------------------------------------------------------------------------------------- ruff
 [tool.ruff]
