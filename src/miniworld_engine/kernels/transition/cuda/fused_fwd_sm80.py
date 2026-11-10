@@ -182,3 +182,43 @@ def forward(
     w, gb = pack(gamma if ln else None, beta if ln else None, wa, wb, ws, cache)
     out, xn, stats = _ext().fwd(d, h, ln, x, w, gb, eps, save and ln)
     return out, xn, stats
+
+
+# ------------------------------------------------------------------------------------------------------------------ fp32 (inference)
+#: (D, H) of the fp32 build (``TrCfgT<D, H, true>``: x / out fp32, the wide family's fp32 scheme -- fp16 operands at TF32's rounding with the f32_forms
+#: scales, fp32 accumulation -- in the one-kernel forward, 16 rows per warp): the float32 eval rows where the three-launch wide chain is slower than the
+#: kits (token_pair d 128 n 2).
+F32_SHAPES = ((128, 256),)
+#: Fewest rows for which the fused fp32 forward serves (below it the wide chain's few-rows split-K squeeze).
+F32_MIN_ROWS = {(128, 256): 8192}
+
+
+def f32_supports(d: int, h: int, rows: int) -> bool:
+    """The fp32 build exists for (d, h) and serves ``rows``."""
+    return (d, h) in F32_SHAPES and rows >= F32_MIN_ROWS[(d, h)]
+
+
+@functools.lru_cache(maxsize=16)
+def _tables_f32(dev, d, h):
+    """Gather tables of ``pack_raw`` (the fp16 forms copied as they are: no x0.5, no conversion) and the affine slots (as ``_tables``)."""
+    n = h * d
+    code = lambda src: torch.arange(n, device=dev, dtype=torch.int64) | (src << 26)  # noqa: E731
+    w1, w2 = _layout_fwd(code(0).view(h, d), code(1).view(h, d), code(2).view(d, h), dev, d, h)
+    idx16 = torch.cat([w1, w2], 1).reshape(-1).to(torch.int32).contiguous()
+    return idx16, _tables(dev, d, h)[1]
+
+
+def pack_f32(gamma, beta, wab16, ws16):
+    """(w, gb) of the fp32 build from the forms (``fused_wide_sm80._f32_forms``: wab16 [2H, D], ws16 [D, H] fp16) and the fp32 affine: one launch."""
+    d, h = ws16.shape
+    idx16, idx32 = _tables_f32(ws16.device, d, h)
+    out16 = torch.empty(idx16.numel(), dtype=torch.float16, device=ws16.device)
+    gb = torch.empty(idx32.numel(), dtype=torch.float32, device=ws16.device)
+    _ext().pack_raw(wab16, ws16, gamma, beta, idx16, idx32, out16, gb)
+    return out16, gb
+
+
+def forward_f32(x, w, gb, sc, eps: float):
+    """x + transition(x) of fp32 rows x [M, D] (inference) from ``pack_f32``'s layout and the forms' scales ``sc``."""
+    d, h = x.shape[1], w.numel() // (3 * x.shape[1])
+    return _ext().fwd_f32(d, h, x, w, gb, sc, eps)

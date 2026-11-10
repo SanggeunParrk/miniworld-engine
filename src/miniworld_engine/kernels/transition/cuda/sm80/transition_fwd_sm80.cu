@@ -51,6 +51,26 @@ std::vector<torch::Tensor> fwd_t(torch::Tensor x, torch::Tensor w, torch::Tensor
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {out, xn, stats};
 }
+// the fp32 Transition (inference): x [T, D] fp32 -> out fp32; w the raw-packed fp16 forms (pack_raw), sc the forms' scales
+template <int D, int H>
+torch::Tensor fwd_f32_t(torch::Tensor x, torch::Tensor w, torch::Tensor gb, torch::Tensor sc, double eps) {
+  using G = a100::TrCfgT<D, H, true>;
+  TORCH_CHECK(x.is_cuda() && x.is_contiguous() && x.dim() == 2 && x.size(1) == D && x.scalar_type() == at::kFloat, "x: [T, D] fp32");
+  TORCH_CHECK(w.numel() == (int64_t)G::NCHUNK * G::SLOT / 2 && gb.numel() == 2 * D && sc.scalar_type() == at::kFloat && sc.numel() >= 4, "packed forms");
+  const int64_t T = x.size(0);
+  auto out = torch::empty_like(x);
+  if (T == 0) return out;
+  a100::TrParams p{};
+  p.x = nullptr; p.w = cptr<__nv_bfloat16>(w); p.gb = cptr<float4>(gb); p.out = nullptr; p.stats = nullptr; p.xn = nullptr; p.trace = nullptr;
+  p.x32 = cptr<float>(x); p.out32 = mptr<float>(out); p.sc = cptr<float>(sc);
+  p.T = (int)T; p.num_tiles = (p.T + G::BM - 1) / G::BM; p.eps = (float)eps;
+  const int g = std::min(p.num_tiles, num_sms() * G::MINB);
+  TORCH_CHECK(p.num_tiles / g + 2 <= G::MAX_ITEMS, "fwd_f32: too many work items per CTA");
+  set_smem(a100::tr_fwd_kernel<G, true>, G::SMEM);
+  a100::tr_fwd_kernel<G, true><<<g, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
 }  // namespace
 
 // ln: the LayerNorm + residual Transition; else the bare SwiGLU FFN (no LayerNorm, no residual: xn / stats are never written, gb is not read)
@@ -60,6 +80,13 @@ std::vector<torch::Tensor> fwd(int64_t D, int64_t H, bool ln, torch::Tensor x, t
   FWD_CASE(64, 128) FWD_CASE(64, 256) FWD_CASE(128, 256) FWD_CASE(128, 512)
 #undef FWD_CASE
   TORCH_CHECK(false, "fused forward: no build for D = ", D, ", H = ", H);
+  return {};
+}
+
+// builds of the fp32 forward (fused_fwd_sm80.F32_SHAPES)
+torch::Tensor fwd_f32(int64_t D, int64_t H, torch::Tensor x, torch::Tensor w, torch::Tensor gb, torch::Tensor sc, double eps) {
+  if (D == 128 && H == 256) return fwd_f32_t<128, 256>(x, w, gb, sc, eps);
+  TORCH_CHECK(false, "fused fp32 forward: no build for D = ", D, ", H = ", H);
   return {};
 }
 
@@ -80,6 +107,34 @@ __global__ void pack_kernel(const __nv_bfloat16* __restrict__ wa, const __nv_bfl
   }
 }
 
+// the fp32 forms' packing: out16[j] = the 16-bit code src[idx16[j]] unchanged (sources: Wa16 / Wb16 = the halves of wab16 [2H][D], Ws16 [D][H], fp16 already
+// scaled by f32_forms; the x0.5 / f16 flags are not used), out32[j] = the fp32 affine as pack()
+__global__ void pack_raw_kernel(const uint16_t* __restrict__ wa, const uint16_t* __restrict__ wb, const uint16_t* __restrict__ ws, const float* __restrict__ gamma,
+                                const float* __restrict__ beta, const int* __restrict__ idx16, int n16, uint16_t* __restrict__ out16, const int* __restrict__ idx32,
+                                int n32, float* __restrict__ out32) {
+  const int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j < n16) {
+    const int e = idx16[j], k = e & 0x3ffffff, src = (e >> 26) & 3;
+    out16[j] = (src == 0 ? wa : src == 1 ? wb : ws)[k];
+  } else if (j - n16 < n32) {
+    const int e = idx32[j - n16];
+    out32[j - n16] = ((e >> 26) & 1 ? beta : gamma)[e & 0x3ffffff];
+  }
+}
+
+void pack_raw(torch::Tensor wab16, torch::Tensor ws16, torch::Tensor gamma, torch::Tensor beta, torch::Tensor idx16, torch::Tensor idx32, torch::Tensor out16,
+              torch::Tensor out32) {
+  TORCH_CHECK(wab16.scalar_type() == at::kHalf && ws16.scalar_type() == at::kHalf && wab16.is_contiguous() && ws16.is_contiguous(), "fp16 forms");
+  TORCH_CHECK(gamma.scalar_type() == at::kFloat && beta.scalar_type() == at::kFloat, "f32 affine");
+  const int n16 = (int)idx16.numel(), n32 = (int)idx32.numel();
+  TORCH_CHECK(out16.numel() == n16 && out32.numel() == n32, "pack sizes");
+  const uint16_t* a = cptr<uint16_t>(wab16);
+  pack_raw_kernel<<<(n16 + n32 + 255) / 256, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      a, a + wab16.numel() / 2, cptr<uint16_t>(ws16), cptr<float>(gamma), cptr<float>(beta), cptr<int>(idx16), n16, mptr<uint16_t>(out16), cptr<int>(idx32), n32,
+      mptr<float>(out32));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 void pack(torch::Tensor wa, torch::Tensor wb, torch::Tensor ws, torch::Tensor gamma, torch::Tensor beta, torch::Tensor idx16, torch::Tensor idx32,
           torch::Tensor out16, torch::Tensor out32) {
   TORCH_CHECK(wa.scalar_type() == at::kBFloat16 && wb.scalar_type() == at::kBFloat16 && ws.scalar_type() == at::kBFloat16, "bf16 weights");
@@ -96,4 +151,6 @@ void pack(torch::Tensor wa, torch::Tensor wb, torch::Tensor ws, torch::Tensor ga
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fwd", &fwd);
   m.def("pack", &pack);
+  m.def("fwd_f32", &fwd_f32);
+  m.def("pack_raw", &pack_raw);
 }

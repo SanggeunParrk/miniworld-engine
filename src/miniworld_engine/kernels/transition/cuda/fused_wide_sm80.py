@@ -694,6 +694,35 @@ def _f32_bwd(dy: torch.Tensor, x: torch.Tensor, xn16: torch.Tensor, stats: torch
     return dx, dgam, dbeta, dwab, dws
 
 
+def _f32_fused_pack_fake(gamma, beta, wa, wb, ws):
+    h, d = wa.shape
+    return (torch.empty((3 * h * d,), dtype=torch.float16, device=wa.device), torch.empty((2 * d,), dtype=torch.float32, device=wa.device),
+            torch.empty((8,), dtype=torch.float32, device=wa.device))
+
+
+@opaque(fake=_f32_fused_pack_fake, name="transition_fused_fwd_f32_pack_sm80")
+def _f32_fused_pack(gamma: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
+                    ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(the fused fp32 forward's weight layout, its affine slots, the scales sc) from the parameters: the forms (two launches) and their packing (one)."""
+    if _is_fake(wa):
+        return _f32_fused_pack_fake(gamma, beta, wa, wb, ws)
+    wab16, ws16, _wst16, sc = _f32_forms(gamma, beta, wa, wb, ws, False)
+    w, gb = fused_fwd_sm80.pack_f32(gamma.float().contiguous(), beta.float().contiguous(), wab16, ws16)
+    return w, gb, sc
+
+
+def _f32_fused_fwd_fake(x, w, gb, sc, eps):
+    return torch.empty_like(x)
+
+
+@opaque(fake=_f32_fused_fwd_fake, name="transition_fused_fwd_f32_sm80")
+def _f32_fused_fwd(x: torch.Tensor, w: torch.Tensor, gb: torch.Tensor, sc: torch.Tensor, eps: float) -> torch.Tensor:
+    """x + transition(x), fp32 rows, the fused fp32 forward (inference)."""
+    if _is_fake(x, w):
+        return _f32_fused_fwd_fake(x, w, gb, sc, eps)
+    return fused_fwd_sm80.forward_f32(x, w, gb, sc, eps)
+
+
 class _F32TransitionSM80(torch.autograd.Function):
     """fp32 training: the saving forward (fp16 products at TF32's rounding, the forms made once per step) and the backward above."""
 
@@ -726,6 +755,11 @@ def transition_f32_sm80(x, gamma, beta, wa, wb, ws, eps):
     shape = x.shape
     flat = x.reshape(-1, shape[-1]).contiguous()
     gf, bf = _f32(gamma, True), _f32(beta, True)
+    if fused_fwd_sm80.f32_supports(flat.shape[1], wa.shape[0], flat.shape[0]) and fused_fwd_sm80.loads():
+        # enough rows at a fused fp32 shape: the one-kernel forward (the same forms and scales, packed once per parameter version)
+        wpk, gbk, sc = _capture.param_forms("transition_fused_fwd_f32_pack_sm80", (gamma, beta, wa, wb, ws),
+                                            lambda: _f32_fused_pack(gf, bf, wa, wb, ws), capture_reads_eager=True)
+        return _f32_fused_fwd(flat, wpk, gbk, sc, float(eps)).reshape(shape)
     wab16, ws16, _wst16, sc = _capture.param_forms("transition_wide_f32_forms_sm80", (gamma, beta, wa, wb, ws),
                                                    lambda: _f32_forms(gamma, beta, wa, wb, ws, False), capture_reads_eager=True)
     return _f32_fwd(flat, gf, bf, wab16, ws16, sc, float(eps), False)[0].reshape(shape)
