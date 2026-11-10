@@ -473,8 +473,5 @@ def update(
         cs = cs.to(compute_dtype).reshape(-1, dc).contiguous()
     ps = (module.to_scale.weight, module.to_scale.bias, module.to_bias.weight)
     eps = (float(module.ln_in.eps), float(module.ln_cond.eps))
-    if grad:
-        y = _Training.apply(xs, cs, module.ln_cond.weight, *ps, *eps)
-    else:
-        y = inference(xs, cs, module.ln_cond.weight, *ps, *eps)
-    return y.reshape(x.shape)
+    run = _Training.apply if grad else inference
+    return run(xs, cs, module.ln_cond.weight, *ps, *eps).reshape(x.shape)

@@ -111,10 +111,8 @@ def triangle(
         m = None if mask is None else mask.unsqueeze(0).expand(l, -1, -1)
         from miniworld_engine.kernels.triangle_attention.cuda import sm80_projected
 
-        if sm80_projected.serves(q, k, v, bias, m):
-            out = sm80_projected.attention(q, k, v, bias, m)
-        else:
-            out = C.attention(q, k, v, bias, m)
+        attend = sm80_projected.attention if sm80_projected.serves(q, k, v, bias, m) else C.attention
+        out = attend(q, k, v, bias, m)
     else:
         p = C.softmax(bias, None if mask is None else mask[:, None, None, :])
         out = _bias_value(p, v)
