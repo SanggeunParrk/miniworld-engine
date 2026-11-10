@@ -432,7 +432,7 @@ class TokenDiTProtenix(BackendModule):
     # kernels and weight packs are built per cond / pair width), transition n = 2, LayerNorm eps 1e-5,
     # a key mask shared by the samples; inference L a multiple of 128, training any L (padded to 128).
     def _cuda_route(self, single, cond, pair, mask, compute_dtype, extra_pair_bias):
-        """("infer" | "train", the [B, L] key mask), ("a100" | "a100_generic", the key mask) or (None, why not)."""
+        """("infer" | "train", the [B, L] key mask), ("a100", None) or (None, why not)."""
         if _a100(single):
             return self._a100_route(single, cond, pair, mask, compute_dtype, extra_pair_bias)
         why = _h100_reason(single)
@@ -464,8 +464,8 @@ class TokenDiTProtenix(BackendModule):
 
     def _forward_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> torch.Tensor:
         route, km = self._cuda_route(single, cond, pair, mask, compute_dtype, extra_pair_bias)
-        if route in ("a100", "a100_generic"):
-            return self._forward_a100(route, single, cond, pair, mask, km)
+        if route == "a100":
+            return self._forward_a100(single, cond, pair, mask)
         view = _kernel_view(self)
         if route == "train":
             from miniworld_engine.kernels.integrations import token_dit_train
@@ -477,8 +477,8 @@ class TokenDiTProtenix(BackendModule):
 
     # A100 (sm_80): the block's two parts on their sm_80 paths, forward and backward. The attention: kernels/integrations/augattn_sm80 (the
     # module's AdaLN, then one autograd Function from the AdaLN output to the residual: cuBLAS projections, the pair bias kernels, the
-    # mma.sync core, the gates; bf16 or the TF32 core for fp32), or for the per-head q / k RMSNorm (TokenDiTMiniWorld) the general sm_80
-    # composition kernels/integrations/a100_families.token (CUDA rows, cuBLAS, a materialised-score attention). The transition:
+    # mma.sync core, the gates; bf16 or the TF32 core for fp32; the per-head q / k RMSNorm of TokenDiTMiniWorld on the q / k columns of the
+    # projection between the GEMM and the core, forward and backward). The transition:
     # kernels/integrations/conditioned_transition_sm80 (AdaLN rows + the SwiGLU tail, bf16 or TF32). Range = their gates: bf16 / master /
     # fp32, head dim 32, 48 or 64, LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none, no extra_pair_bias.
     def _a100_route(self, single, cond, pair, mask, compute_dtype, extra_pair_bias):
@@ -495,27 +495,13 @@ class TokenDiTProtenix(BackendModule):
         if not ct_sm80.serves(self.transition, single, cond, dt, _wants_grad(self, single, cond, pair)):
             return None, ("A100: outside the sm_80 ConditionedTransition kernels' range (bf16 / fp32, widths of their table, sigmoid AdaLN "
                           "without a shift bias, bias-free SwiGLU)")
-        if self.attention.use_qk_norm:
-            from miniworld_engine.kernels import cuda_native
-
-            km, shared = _shared_key_mask(mask)
-            if not shared:
-                return None, "A100: a key mask that differs across the samples (the sm_80 QK-norm composition takes one [B, L] mask)"
-            if not cuda_native.enabled(single) or single.shape[-1] % self.attention.n_head:
-                return None, "A100: outside the sm_80 QK-norm composition's range (bf16 / fp32, whole heads)"
-            return "a100_generic", km
         if not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond=cond):
             return None, ("A100: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or "
                           "fp32, head dim 32, 48 or 64, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)")
         return "a100", None
 
-    def _forward_a100(self, route, single, cond, pair, mask, km):
+    def _forward_a100(self, single, cond, pair, mask):
         from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
-
-        if route == "a100_generic":
-            from miniworld_engine.kernels.integrations import a100_families
-
-            return a100_families.token(self, single, cond, pair, km)
         from miniworld_engine.kernels.integrations import augattn_sm80
 
         grad = _wants_grad(self, single, cond, pair)
@@ -612,6 +598,9 @@ class TokenDiTMiniWorld(TokenDiTProtenix):
     """MiniWorld's token DiT block: :class:`TokenDiTProtenix` with the per-head q / k RMSNorm (``attention.norm_query`` /
     ``attention.norm_key``). No ``"anthropic"`` backend: no release folder has the QK-RMSNorm token DiT."""
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    #: 4 (2026-11-11): A100 on the token DiT's sm_80 attention (augattn_sm80, the per-head q / k RMSNorm inside it) and the sm_80 transition;
+    #: was the general composition with a materialised-score attention (a100_families.token)
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:a100_sm80": 4}
 
     backends = ("pytorch", "cuda", "triton")
     qk_norm = True

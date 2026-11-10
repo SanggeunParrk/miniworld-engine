@@ -1,10 +1,11 @@
 """The A100 (sm_80) builds of this family's token / atom DiT attention (``kernels/_prebuild.py``, ``prebuild(target, rows)`` with
 ``target.arch == "sm80"``), from the requirements rows of the module classes whose ``"cuda"`` backend reaches them on an A100:
 
-* the token DiT attention (``kernels/integrations/augattn_sm80.py``: TokenDiTProtenix, TokenDiTBoltz2): the core / glue / TF32
-  extensions of ``sm80.py``;
-* the general sm_80 composition of the QK-norm token DiT (``kernels/integrations/a100_families.token``: TokenDiTMiniWorld): the native
-  rows of ``kernels/cuda_native.py`` and the LayerNorm / RMSNorm / SwiGLU builds it calls;
+* the token DiT attention (``kernels/integrations/augattn_sm80.py``: TokenDiTProtenix, TokenDiTBoltz2, TokenDiTMiniWorld -- its per-head
+  q / k RMSNorm runs inside that path): the core / glue / TF32 extensions of ``sm80.py``;
+* the general sm_80 composition of the QK-norm token DiT (``kernels/integrations/a100_families.token``): no wired class reaches it any more
+  (GENERIC is empty; the block stays for a class that routes there again): the native rows of ``kernels/cuda_native.py`` and the
+  LayerNorm / RMSNorm / SwiGLU builds it calls;
 * the atom block (``kernels/integrations/local_dit_sm80_block.py``: AtomDiTProtenix): the row extension of ``sm80_atom_rows`` and the
   window-attention / pair-bias cubins of ``sm80_atom_local``.
 
@@ -14,9 +15,9 @@ The sm_80 AttentionPairBias builds (``apb`` with ``-DAPB_SM80``, ``integrations/
 from __future__ import annotations
 
 #: classes whose A100 "cuda" backend runs the token attention of integrations/augattn_sm80
-TOKEN = frozenset({"TokenDiTProtenix", "TokenDiTBoltz2"})
+TOKEN = frozenset({"TokenDiTProtenix", "TokenDiTBoltz2", "TokenDiTMiniWorld"})
 #: classes whose A100 "cuda" backend runs the general sm_80 composition (integrations/a100_families.token: the per-head q / k RMSNorm)
-GENERIC = frozenset({"TokenDiTMiniWorld"})
+GENERIC: frozenset[str] = frozenset()
 #: classes whose A100 "cuda" backend runs integrations/local_dit_sm80_block
 ATOM = frozenset({"AtomDiTProtenix"})
 #: the window attention / pair-bias / glue sources of sm80_atom_local (one cubin each)

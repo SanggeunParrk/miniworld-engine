@@ -21,7 +21,7 @@ mask that differs per sample [A, B, L] goes through the kernels' per-key penalti
 L is padded to a multiple of 128 inside the call (zero rows, the padded keys masked), B > 1 runs one core call per batch element on b-major staged streams.
 
 ``serves()`` is the whole gate: the engine's kernel backend (implementation TRITON or MINIWORLD), A100 (sm_80), single / cond / pair and module weights all bf16 or all fp32
-(``compute_dtype`` None or that dtype; bf16 activations also take fp32 master parameters: cast to bf16 inside the ops, unrounded fp32 weight gradients), no QK-norm, head dim 32, 48 or 64, any A, B and L (the flat q / k LayerNorm, a bias-free query and no gating query too), a key mask [B, L] or [A, B, L] (bool) or none, LayerNorm eps 1e-5. Anything else
+(``compute_dtype`` None or that dtype; bf16 activations also take fp32 master parameters: cast to bf16 inside the ops, unrounded fp32 weight gradients), head dim 32, 48 or 64, any A, B and L (the per-head q / k RMSNorm of TokenDiTMiniWorld, the flat q / k LayerNorm, a bias-free query and no gating query too), a key mask [B, L] or [A, B, L] (bool) or none, LayerNorm eps 1e-5. Anything else
 keeps the module path, and a failed extension build warns once and keeps the module path.
 Numerics and timings: ``docs/gpus/a100/token_dit/token_dit.md``, ``docs/gpus/a100/a100.md``.
 
@@ -129,7 +129,7 @@ def _mask_kind(mask, a: int, b: int, length: int) -> int | None:
 
 
 def serves(module, single, pair, mask, compute_dtype=None, cond=None) -> bool:
-    if module.use_qk_norm:
+    if module.use_qk_norm and (_flat_ln(module) or not _head_rms(module)):
         return False
     if _flat_ln(module) and any(n.eps != _flat_ln(module)[0].eps or n.weight is None or n.bias is None for n in _flat_ln(module)):
         return False
@@ -144,6 +144,8 @@ def serves(module, single, pair, mask, compute_dtype=None, cond=None) -> bool:
     if module.to_query.weight.dtype not in _weight_dtypes(
         dt
     ) or module.to_key.weight.dtype not in _weight_dtypes(dt):
+        return False
+    if any(n.weight.dtype not in _weight_dtypes(dt) for n in _head_rms(module)):
         return False
     if (
         single.ndim != 4
@@ -165,7 +167,7 @@ def serves(module, single, pair, mask, compute_dtype=None, cond=None) -> bool:
         return False
     if module.ln_pair.eps != EPS:
         return False
-    if (_flat_ln(module) or not _gated(module)) and (heads, d // heads) == (4, 32):
+    if (_flat_ln(module) or _head_rms(module) or not _gated(module)) and (heads, d // heads) == (4, 32):
         return False  # the atom width's extra passes (shared-mask uniform rows, per-sample uniform rows) assume the gated attention
     if (
         not _fused_params_ok(module, dt)
@@ -205,6 +207,18 @@ def _flat_ln(module):
     from miniworld_engine.modules.attention import FlatQKNormAugmentedAttention
 
     return (module.norm_query, module.norm_key) if isinstance(module, FlatQKNormAugmentedAttention) else ()
+
+
+def _head_rms(module):
+    """``(norm_query, norm_key)``: the per-head RMSNorms of q / k after the head split (``use_qk_norm``, TokenDiTMiniWorld: one weight [head dim] shared by
+    the heads, the same epsilon for both), or () (also when they are not that form: :func:`serves` refuses the module then)."""
+    if not module.use_qk_norm or _flat_ln(module):
+        return ()
+    nq, nk = module.norm_query, module.norm_key
+    hd = module.to_query.weight.shape[0] // module.n_head
+    if nq.weight is None or nk.weight is None or tuple(nq.weight.shape) != (hd,) or tuple(nk.weight.shape) != (hd,) or nq.eps != nk.eps:
+        return ()
+    return nq, nk
 
 
 _ZEROS: dict = {}
@@ -416,8 +430,10 @@ def _fwd_fake(
             x.new_empty((m, d)),
             x.new_empty((batch, heads, padded, padded)),
         ]
-        if len(params) > 10:  # the flat q / k LayerNorm: its inputs and statistics
+        if len(params) == 14:  # the flat q / k LayerNorm: its inputs and statistics
             outs += [x.new_empty((m, 2 * d)), x.new_empty((4, m, 1), dtype=torch.float32)]
+        elif len(params) == 12:  # the per-head q / k RMSNorm: its inputs and 1 / rms per (row, q | k, head)
+            outs += [x.new_empty((m, 2 * d)), x.new_empty((m, 2 * heads), dtype=torch.float32)]
     return outs
 
 
@@ -460,7 +476,7 @@ def _fwd(
     xs, cs = _stage(x, batch, padded), _stage(cond, batch, padded)
     rs = None if res is None else _stage(res, batch, padded)
     gated = params[4].shape[0] > 0  # an ungated attention packs [Wq; Wk; Wv] (params[4] is an empty stand-in)
-    flat = params[10:]  # the flat q / k LayerNorm's (weight, bias) x 2, or none
+    flat = params[10:]  # the flat q / k LayerNorm's (weight, bias) x 2 (4 tensors), the per-head RMSNorm's weights q, k (2 tensors), or none
     qkvg_native = gated and not flat and not save and batch == 1 and a == 5 and length in (2048, 4096)
     tiled_qkvg = (
         gated
@@ -489,7 +505,16 @@ def _fwd(
     else:
         qkvg = torch.addmm(bvec, xs, wqkvg.t())  # [M, 4 d]
     qk_saved = None
-    if flat:  # the affine LayerNorm of the flat q and k (all heads), in fp32, written over their columns
+    if len(flat) == 2:  # the per-head RMSNorm of q and k (one weight [hd] each, shared by the heads), in fp32, written over their columns
+        cols = qkvg[:, : 2 * d].view(m, 2, heads, hd)
+        if save:
+            qk_saved = qkvg[:, : 2 * d].clone()
+        xf = cols.float()
+        rstd = torch.rsqrt(xf.square().mean(-1, keepdim=True).add_(flat_eps))  # [M, 2, H, 1]
+        w = torch.stack([flat[0], flat[1]]).float().view(1, 2, 1, hd)
+        cols.copy_(xf.mul_(rstd).mul_(w))
+        stats = rstd.view(m, 2 * heads)
+    elif flat:  # the affine LayerNorm of the flat q and k (all heads), in fp32, written over their columns
         stats = torch.empty(4, m, 1, device=dev, dtype=torch.float32)
         if save:
             qk_saved = qkvg[:, : 2 * d].clone()
@@ -840,7 +865,17 @@ def _bwd(
             dw_sum = dwf_b if dw_sum is None else dw_sum + dwf_b
     dpair = dzs[0].view(pair.shape) if batch == 1 else torch.stack(dzs)
     flat_grads = []
-    if flat:  # the flat q / k LayerNorm's backward (fp32), from the core's dq / dk to the projection's
+    if len(flat) == 2:  # the per-head RMSNorm's backward (fp32): dx = rstd (g - xhat mean(g xhat)), g = w dy; dw = sum over rows and heads of dy xhat
+        qk_pre, rstd = saved[7], saved[8].view(m, 2, heads, 1)
+        cols = dqkvg[:, : 2 * d].view(m, 2, heads, hd)
+        dyf = cols.float()
+        xhat = qk_pre.view(m, 2, heads, hd).float() * rstd  # out of place: an fp32 qk_pre is the saved tensor itself
+        dwn = (dyf * xhat).sum(dim=(0, 2))  # [2, hd]
+        gq = dyf.mul_(torch.stack([flat[0], flat[1]]).float().view(1, 2, 1, hd))
+        dot = (gq * xhat).mean(-1, keepdim=True)
+        cols.copy_(gq.sub_(xhat.mul_(dot)).mul_(rstd))
+        flat_grads += [dwn[0], dwn[1]]
+    elif flat:  # the flat q / k LayerNorm's backward (fp32), from the core's dq / dk to the projection's
         qk_pre, stats = saved[7], saved[8]
         for i in range(2):
             cols = dqkvg[:, i * d : (i + 1) * d]
@@ -979,12 +1014,18 @@ def _params(module) -> list[torch.Tensor]:
         params[4] = _zeros(module.to_query.weight, (0, module.to_query.weight.shape[1]))
     for norm in _flat_ln(module):  # the flat q / k LayerNorm (RoseTTAFold3)
         params += [norm.weight, norm.bias]
+    for norm in _head_rms(module):  # the per-head q / k RMSNorm (TokenDiTMiniWorld)
+        params.append(norm.weight)
     return params
 
 
-def _flat_eps(module) -> float:
+def _flat_eps(module, dtype=F32) -> float:
+    """The epsilon of the q / k norm: the flat LayerNorm's, or the per-head RMSNorm's effective one (torch's fp32 epsilon when unset)."""
     flat = _flat_ln(module)
-    return float(flat[0].eps) if flat else EPS
+    if flat:
+        return float(flat[0].eps)
+    rms = _head_rms(module)
+    return float(rms[0].effective_eps(dtype)) if rms else EPS
 
 
 def _fused_update(module, x, cond, pair, mask, res):

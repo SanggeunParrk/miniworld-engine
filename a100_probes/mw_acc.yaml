@@ -1,0 +1,11 @@
+modules: [TokenDiTMiniWorld]
+backends: [pytorch, cuda]
+lengths: all
+depths: min
+samples: min
+device: cuda
+seed: 0
+fixed:
+  bfloat16: 8.0e-3
+  master: 8.0e-3
+  float32: 1.0e-5
