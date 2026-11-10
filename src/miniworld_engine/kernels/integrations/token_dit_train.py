@@ -129,9 +129,10 @@ def serves(module, single, cond, pair, mask, compute_dtype=None, extra=None) -> 
     ):
         return False
     d = single.shape[-1]
-    # the pair: 128 channels, or 256 (Protenix-v2's diffusion pair) on H100 -- the pair kernels are built per width (``ext(dp=)``)
+    # the pair: 128 channels, or 256 (Protenix-v2's diffusion pair) / 512 (IntelliFold2's) on H100 -- the pair kernels are built per
+    # width (``ext(dp=)``)
     dp = pair.shape[-1] if pair.ndim == 4 else 0
-    if dp != a.ln_pair.weight.numel() or not (dp == DP or (dp == 256 and cap == (9, 0))):
+    if dp != a.ln_pair.weight.numel() or not (dp == DP or (dp in (256, 512) and cap == (9, 0))):
         return False
     # cond 768 (ESMFold2 / Boltz-2 widths) on H100: the training row kernels take the cond width as a build argument (``rows_ext(dc=)``,
     # prebuilt for 128 / 256 / 384 / 768; the pre-redesign engine ran cond 768 on them through its batched route, PSB_COND)
@@ -650,8 +651,8 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP):
 def _pair_fused(h100, fp32, dp) -> bool:
     """The H100 bf16 block builds its bias with the one-pass pair kernel (LN(pair) Wf^T on TF32 tensor cores, the extra term added in the same
     pass, no LN(pair) written) and differentiates it with its one-pass backward (dpair and the dWf partials): it keeps no LN(pair) either.
-    Both pair widths it serves (128; 256, Protenix-v2's diffusion pair): the kernels are built per width."""
-    return h100 and not fp32 and dp in (128, 256)
+    Every pair width it serves (128; 256, Protenix-v2's diffusion pair; 512, IntelliFold2's): the kernels are built per width."""
+    return h100 and not fp32 and dp in (128, 256, 512)
 
 
 def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, extra=None):

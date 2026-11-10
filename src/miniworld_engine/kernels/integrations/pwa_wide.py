@@ -31,12 +31,27 @@ H = 8
 DMSA = (64, 128)
 DPAIR = (128, 256, 384)
 DHID = (8, 16)
+# (d_msa, d_pair, d_hidden) served by the BIG build of `pwa_wide.cu` (8 heads x 32 = 256 hidden channels, IntelliFold2): the gate /
+# out pass of `gate_out_w` split at the gated product into `gate_w` and `out_w` (each with one 128 KiB weight resident), the gate
+# backward with the forward's sigmoid gate saved (`gate_bwd_big_w`), and dy = [dgp | dv] [Wg; Wv] on cuBLAS ahead of the
+# LayerNorm backward (`ln_bwd_w`); the pair side is `pair_wide.cu` at d_pair 512
+BIG = ((256, 512, 32),)
 NMAX = 1024  # the pair kernels hold one row of logits in shared memory
 _EXT: dict[str, Any] = {}
 
 
 def supported(d_msa: int, d_pair: int, n_head: int, d_hidden: int) -> bool:
-    return n_head == H and d_msa in DMSA and d_pair in DPAIR and d_hidden in DHID
+    return n_head == H and ((d_msa in DMSA and d_pair in DPAIR and d_hidden in DHID) or (d_msa, d_pair, d_hidden) in BIG)
+
+
+def is_big(d_msa: int, d_hidden: int) -> bool:
+    """The value / gate widths that the BIG build serves (H * d_hidden > 128 or d_msa * H * d_hidden > 16384)."""
+    return H * d_hidden > 128 or d_msa * H * d_hidden > 16384
+
+
+def describe() -> str:
+    return (f"d_msa in {DMSA}, d_pair in {DPAIR}, {H} heads x d_hidden in {DHID}, or (d_msa, d_pair, d_hidden) in {BIG} with "
+            f"{H} heads")
 
 
 def _load(name: str, src: str, flags: list[str]):
@@ -61,7 +76,7 @@ def _load(name: str, src: str, flags: list[str]):
 
 
 # d_pair -> (warps per CTA, CTAs per SM) of the pair kernels
-PAIR_CFG: dict[int, tuple[int, int]] = {128: (8, 2), 256: (4, 3), 384: (6, 1)}
+PAIR_CFG: dict[int, tuple[int, int]] = {128: (8, 2), 256: (4, 3), 384: (6, 1), 512: (4, 1)}   # 512: two 16 KiB tiles per warp
 
 
 def _pair(d_pair: int):
@@ -113,10 +128,16 @@ def _forward_math(
         )
         dscale = 1.0 / (1.0 - p_drop)
     wg16, wo16 = wg.detach().to(bf).contiguous(), wo.detach().to(bf).contiguous()
+    if is_big(d_msa, hc // H):  # gate_out_w split at the gated product; training keeps the sigmoid gate g for the backward
+        if not save:
+            a, _ = kv.gate_w(o, m, wg16, False, lnw, lnb, eps_m)
+            return kv.out_w(a, m, wo16, dmask, dscale)
+        a, g = kv.gate_w(o, y, wg16, True)
+        return kv.out_w(a, m, wo16, dmask, dscale), w16, v, y, stats, o, dmask, g
     if not save:
         return kv.gate_out_w(o, m, m, wg16, wo16, dmask, dscale, lnw, lnb, eps_m)
     out = kv.gate_out_w(o, y, m, wg16, wo16, dmask, dscale)
-    return out, w16, v, y, stats, o, dmask
+    return out, w16, v, y, stats, o, dmask, None
 
 
 def _forward_fake(args, eps_m, eps_z, p_drop):
@@ -132,6 +153,7 @@ def _forward_fake(args, eps_m, eps_z, p_drop):
         torch.empty((s, n, 2), device=dev, dtype=torch.float32),
         torch.empty((H, n, s * (hc // H)), device=dev, dtype=bf),
         torch.empty((n, d) if p_drop else (0,), device=dev, dtype=bf),
+        torch.empty((s, n, hc) if is_big(d, hc // H) else (0,), device=dev, dtype=bf),
     ]
 
 
@@ -139,7 +161,7 @@ def _forward_fake(args, eps_m, eps_z, p_drop):
 def _forward_op(
     args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float
 ) -> list[torch.Tensor]:
-    out, w16, v, y, stats, o, dmask = _forward_math(args, eps_m, eps_z, p_drop, True)
+    out, w16, v, y, stats, o, dmask, g = _forward_math(args, eps_m, eps_z, p_drop, True)
     return [
         out,
         w16,
@@ -148,6 +170,7 @@ def _forward_op(
         stats,
         o,
         dmask if dmask is not None else args[0].new_empty((0,)),
+        g if g is not None else args[0].new_empty((0,)),   # the BIG build's sigmoid gate [S, N, HC]
     ]
 
 
@@ -178,7 +201,7 @@ def _backward_op(
     p_drop: float,
 ) -> list[torch.Tensor]:
     msa, pair, _pm, lnm_w, lnm_b, wv, wg, lnz_w, wb, wo = args
-    w16, v, y, stats, o, dmask = kept
+    w16, v, y, stats, o, dmask, g = kept
     bf = torch.bfloat16
     m, z = msa[0], pair[0]
     s, n, d_msa = m.shape
@@ -199,19 +222,31 @@ def _backward_op(
     dgv = torch.empty(
         (s, n, 2 * hc), device=m.device, dtype=bf
     )  # [dgp | dv], natural layout
-    do, go = kv.gate_bwd_w(o, y, dout, wg16, wo16.t().contiguous(), dgv)
+    big = is_big(d_msa, hc // H)
+    if big:  # the gate is the forward's g (no Wg on chip)
+        do, go = kv.gate_bwd_big_w(o, g, dout, wo16.t().contiguous(), dgv)
+    else:
+        do, go = kv.gate_bwd_w(o, y, dout, wg16, wo16.t().contiguous(), dgv)
     dwo = torch.mm(dout.view(s * n, d_msa).t(), go.view(s * n, hc))  # [D, HC]
     dv = torch.bmm(w16.transpose(1, 2), do)  # head-major [H, N, S*C]
     dw = torch.bmm(do, v.transpose(1, 2))  # [H, N, N]; PyTorch's dw is bf16 too
-    dm, dlw, dlb = kv.dm_bwd_w(
-        dv,
-        dgv,
-        m,
-        stats,
-        dres,
-        torch.cat([wg16, wv16], 0).t().contiguous(),
-        lnm_w.detach().float().contiguous(),
-    )
+    if big:
+        # dv into the natural [dgp | dv] buffer, dy = [dgp | dv] [Wg; Wv] on cuBLAS in fp32 (a 256 KiB weight: no room on chip next to
+        # the tiles), then the LayerNorm backward + the residual gradient
+        c = hc // H
+        dgv[..., hc:].view(s, n, H, c).copy_(dv.view(H, n, s, c).permute(2, 1, 0, 3))
+        dy = torch.mm(dgv.view(s * n, 2 * hc), torch.cat([wg16, wv16], 0), out_dtype=torch.float32)
+        dm, dlw, dlb = kv.ln_bwd_w(dy, m, stats, dres, lnm_w.detach().float().contiguous())
+    else:
+        dm, dlw, dlb = kv.dm_bwd_w(
+            dv,
+            dgv,
+            m,
+            stats,
+            dres,
+            torch.cat([wg16, wv16], 0).t().contiguous(),
+            lnm_w.detach().float().contiguous(),
+        )
     dwgv = torch.mm(
         dgv.view(s * n, 2 * hc).t(), y.view(s * n, d_msa)
     )  # [2 HC, D]: dWg over dWv

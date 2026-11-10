@@ -4,6 +4,9 @@
 //   dx1 += LN'(dxkv sk)
 //   n0 = LN(x):  d bi1 = dx1 -> dmod[:, 128:256],  d s1pre = dx1 n0 s1 (1 - s1) -> dmod[:, 0:128]
 //   dx = da2 + LN'(dx1 s1)
+// pre_bwd90_par (AlphaFold 3's parallel K / V AdaLN, pre90 PAR): n1 = LN(x), and LN'(dxkv sk) goes to dx, not into dx1:
+//   dx = da2 + LN'(dx1 s1) + LN'(dxkv sk)
+// One body, two entry points in the same cubin (PAR a template parameter: the chained entry compiles as before).
 // SPDX-License-Identifier: Apache-2.0
 #include "row90.cuh"
 using namespace r90;
@@ -27,7 +30,8 @@ DEVI void ln_bwd(Tile& out, const Tile& dn, const Tile& n, float r0, float r1) {
   }
 }
 
-extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre_bwd90(
+template <bool PAR>
+DEVI void pre_bwd_body(
     const T* __restrict__ dp, const T* __restrict__ x1, const T* __restrict__ x, const T* __restrict__ mod, const T* __restrict__ mkv,
     const T* __restrict__ da2, const T* __restrict__ wbt /*[4 kb: Wg Wq Wk Wv][2 half][64,128]: W^T tiles*/, const float* __restrict__ bs,
     T* __restrict__ dmod, T* __restrict__ dmkv, T* __restrict__ dx_out, float* __restrict__ colpart, int M, int nmod, float eps, float* __restrict__ dmod_acc, float* __restrict__ dmkv_acc, int spc, int natoms) {
@@ -84,7 +88,7 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre_bwd90(
 #pragma unroll
         for (int e = 0; e < 4; ++e) { c.f[nt][e] = round_store(acc0[4 * nt + e]); c.f[8 + nt][e] = round_store(acc1[4 * nt + e]); }
       Tile n1;
-      ld_tile(n1, x1 + row0 * 128, 128, 0, g, t);
+      ld_tile(n1, (PAR ? x : x1) + row0 * 128, 128, 0, g, t);   // PAR: the K / V AdaLN normalised the raw x
       float m0, r0, m1, r1;
       ln_stats(n1, eps, m0, r0, m1, r1);
       float p0 = 0.f, q0 = 0.f, p1 = 0.f, q1 = 0.f;
@@ -139,8 +143,13 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre_bwd90(
   for (int nt = 0; nt < 8; ++nt)
 #pragma unroll
     for (int e = 0; e < 4; ++e) {
-      c.f[nt][e] = round_store(acc0[4 * nt + e] + lkeep.f[nt][e]);
-      c.f[8 + nt][e] = round_store(acc1[4 * nt + e] + lkeep.f[8 + nt][e]);
+      if constexpr (PAR) {   // the K / V branch's contribution goes to dx (below), not into dx1
+        c.f[nt][e] = round_store(acc0[4 * nt + e]);
+        c.f[8 + nt][e] = round_store(acc1[4 * nt + e]);
+      } else {
+        c.f[nt][e] = round_store(acc0[4 * nt + e] + lkeep.f[nt][e]);
+        c.f[8 + nt][e] = round_store(acc1[4 * nt + e] + lkeep.f[8 + nt][e]);
+      }
     }
   {  // AdaLN 1
     Tile n0;
@@ -181,6 +190,7 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre_bwd90(
           const float nv = n0.f[nt][e], sv = s1[i][e], dx = c.f[nt][e];
           ds1[i][e] = dx * nv * sv * (1.f - sv);
           o[i][e] = d2[i][e] + (e < 2 ? r0 : r1) * (dx * sv - (e < 2 ? p0 : p1) - nv * (e < 2 ? q0 : q1));
+          if constexpr (PAR) o[i][e] += lkeep.f[nt][e];
         }
       }
       if (shared) grp_put<4>(ds1, gred + (size_t)gpar * FBUF, 32 * H, warp, g, t); else st_nt<4, false>(ds1, dmod + row0 * 768, 768, 32 * H, g, t);
@@ -195,3 +205,13 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre_bwd90(
   col_finish(red + NWARP * 128, colpart + ((size_t)blockIdx.y * gridDim.x + blockIdx.x) * 384 + 128, tid);
   col_finish(red + 2 * NWARP * 128, colpart + ((size_t)blockIdx.y * gridDim.x + blockIdx.x) * 384 + 256, tid);
 }
+
+#define PRE_BWD_ARGS                                                                                                                      \
+  const T* __restrict__ dp, const T* __restrict__ x1, const T* __restrict__ x, const T* __restrict__ mod, const T* __restrict__ mkv,      \
+      const T* __restrict__ da2, const T* __restrict__ wbt, const float* __restrict__ bs, T* __restrict__ dmod, T* __restrict__ dmkv,     \
+      T* __restrict__ dx_out, float* __restrict__ colpart, int M, int nmod, float eps, float* __restrict__ dmod_acc,                      \
+      float* __restrict__ dmkv_acc, int spc, int natoms
+#define PRE_BWD_PASS dp, x1, x, mod, mkv, da2, wbt, bs, dmod, dmkv, dx_out, colpart, M, nmod, eps, dmod_acc, dmkv_acc, spc, natoms
+
+extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre_bwd90(PRE_BWD_ARGS) { pre_bwd_body<false>(PRE_BWD_PASS); }
+extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre_bwd90_par(PRE_BWD_ARGS) { pre_bwd_body<true>(PRE_BWD_PASS); }

@@ -197,7 +197,7 @@ class TokenDiTProtenix(BackendModule):
     ``backend="anthropic"``: the release's af3_torch attention core (bf16: ``opt_core.attn.apb_core``; fp32: ``dtk_kernels.flash_bias_attn``),
     the rest of the block as ``"pytorch"``; eval only, CUDA H100, head dim <= 64 (:meth:`_supports_anthropic`).
     """
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
 
@@ -269,8 +269,8 @@ class TokenDiTProtenix(BackendModule):
     # H100: no gradient -> kernels/integrations/token_dit (the fused inference block: hoisted pair bias, CUDA rows, cuBLAS, the sm_90a
     # gated attention core); a gradient -> kernels/integrations/token_dit_train (one autograd Function, forward + backward on CUDA rows,
     # cuBLAS and the sm_90a cores). Range = the two gates: bf16 / fp32, [A, 1, L, 768] (B > 1 trunk_seeds: bf16 inference only, one
-    # pair per trunk_seed, the key mask expanded over B), 16 heads x 48, cond 384 (H100 training: 384 or 768), pair 128 / 256,
-    # transition n = 2, LayerNorm eps 1e-5,
+    # pair per trunk_seed, the key mask expanded over B), 16 heads x 48, cond 384 or 768, pair 128 / 256 / 512 (the fused blocks' row
+    # kernels and weight packs are built per cond / pair width), transition n = 2, LayerNorm eps 1e-5,
     # a key mask shared by the samples; inference L a multiple of 128, training any L (padded to 128).
     def _cuda_route(self, single, cond, pair, mask, compute_dtype, extra_pair_bias):
         """("infer" | "train", the [B, L] key mask) or (None, why not)."""
@@ -287,7 +287,7 @@ class TokenDiTProtenix(BackendModule):
             if token_dit_train.serves(view, single, cond, pair, km, compute_dtype, extra_pair_bias):
                 return "train", km
             return None, ("training: outside the fused H100 training block's range (bf16 / fp32, [A, 1, L, d] with heads x head width "
-                          "16 x 48 / 24 x 32 / 12 x 64 (d 768) or 16 x 64 (d 1024), cond 384 or 768, pair 128 / 256, n = 2, key mask [1, L], eps 1e-5)")
+                          "16 x 48 / 24 x 32 / 12 x 64 (d 768) or 16 x 64 (d 1024), cond 384 or 768, pair 128 / 256 / 512, n = 2, key mask [1, L], eps 1e-5)")
         if single.shape[1] > 1 and km is not None and km.stride(0) != 0:
             return None, "B > 1 trunk_seeds take one key mask expanded over B (stride 0)"
         from miniworld_engine.kernels.integrations import token_dit
@@ -295,7 +295,7 @@ class TokenDiTProtenix(BackendModule):
         if token_dit.serves(view, single, cond, pair, compute_dtype, extra_pair_bias):
             return "infer", km
         return None, ("inference: outside the fused H100 inference block's range (bf16 / fp32, [A, 1, L, d] with L a multiple of 128 and "
-                      "heads x head width 16 x 48 / 24 x 32 / 12 x 64 (d 768) or 16 x 64 (d 1024), cond 384, pair 128 / 256, n = 2, eps 1e-5)")
+                      "heads x head width 16 x 48 / 24 x 32 / 12 x 64 (d 768) or 16 x 64 (d 1024), cond 384 or 768, pair 128 / 256 / 512, n = 2, eps 1e-5)")
 
     def _supports_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> str | None:
         route, why = self._cuda_route(single, cond, pair, mask, compute_dtype, extra_pair_bias)
@@ -511,7 +511,7 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     :func:`pair_bias_all`); ``pair`` may be None. A pair of its own per sample is ``single`` [1, B, L, d] with ``pair`` [B, L, L, d_pair].
     No ``"anthropic"`` backend: no release folder has the bias-only attention.
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "cuda")
 
@@ -554,7 +554,7 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # H100: no gradient -> kernels/integrations/bias_only_dit (the fused inference block: P = softmax(pair bias) once per pair, the
     # pv_gate core, CUDA rows, cuBLAS); a gradient -> kernels/integrations/bias_only_dit_train (one autograd Function on the CUDA rows,
     # cuBLAS and the bias-only cores). Range = the two gates: bf16 / fp32 (fp32 = fp32 weights, no autocast), [A, 1, L, 768] with L a
-    # multiple of 128 (training L <= 768), 16 heads x 48, cond 384 (training also 128 / 256 / 768), pair 128 / 256, n = 2, eps 1e-5,
+    # multiple of 128 (training L <= 768), 16 heads x 48, cond 384 or 768 (training also 128 / 256), pair 128 / 256, n = 2, eps 1e-5,
     # key mask [1, L] or none, the pair or the block's hoisted bias [1, H, L, L].
     def _cuda_route(self, single, cond, pair, mask, bias):
         why = _h100_reason(single)
@@ -574,7 +574,7 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
         if bias_only_dit.serves(view, single, cond, pair, mask, bias=bias):
             return "infer", None
         return None, ("inference: outside the fused H100 bias-only inference block's range (bf16 / fp32 weights without autocast, "
-                      "[A, 1, L, 768] with L a multiple of 128, heads x head width 16 x 48 / 24 x 32 / 12 x 64 / 16 x 64, cond 384, "
+                      "[A, 1, L, 768] with L a multiple of 128, heads x head width 16 x 48 / 24 x 32 / 12 x 64 / 16 x 64, cond 384 or 768, "
                       "pair 128 / 256, n = 2, key mask [1, L], eps 1e-5)")
 
     def _supports_cuda(self, single, cond, pair=None, mask=None, *, bias=None) -> str | None:

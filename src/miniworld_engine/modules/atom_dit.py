@@ -85,12 +85,6 @@ def _h100(t: torch.Tensor) -> bool:
     return t.is_cuda and torch.cuda.get_device_capability(t.device) == (9, 0)
 
 
-def _needs_grad(module: nn.Module, *tensors) -> bool:
-    return torch.is_grad_enabled() and (any(p.requires_grad for p in module.parameters())
-                                        or any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors))
-
-
-
 def windows(n: int) -> int:
     return (n + QUERIES - 1) // QUERIES
 
@@ -309,8 +303,8 @@ class _LocalAtomDiT(BackendModule):
     # -------------------------------------------------------------------------------------------------------------- "cuda"
     # The H100 warp-level block (``kernels/integrations/local_dit_h100.run_block``): the module's 27 parameters by name
     # (``local_dit.WEIGHTS`` + ``CROSS_WEIGHTS``), the K / V AdaLN chained (Protenix) or parallel (AlphaFold 3), the clipped window or AlphaFold
-    # 3's slid one or IntelliFold2's slide_qblock (their edge windows recomputed, inference only). Listed only by the classes with a K / V
-    # AdaLN (Protenix, OpenFold3).
+    # 3's slid one or IntelliFold2's slide_qblock (their edge windows recomputed and differentiated in torch), inference and training.
+    # Listed only by the classes with a K / V AdaLN (Protenix, OpenFold3).
     def _supports_cuda(self, single, cond, pair, mask=None, **kw) -> str | None:
         if kw:
             return f"{', '.join(kw)} (not an input of the H100 atom block)"
@@ -352,9 +346,6 @@ class _LocalAtomDiT(BackendModule):
             return "LayerNorm eps != 1e-5"
         if any(not p.is_contiguous() for p in params):
             return "a non-contiguous parameter"
-        if _needs_grad(self, single, cond, pair) and (self.kv_norm != "chained" or self.key_window != "pad"):
-            return ("training: the backward kernels know the chained K / V AdaLN and the clipped 'pad' window only "
-                    f"(this block: kv_norm={self.kv_norm!r}, key_window={self.key_window!r}; eval only)")
         return None
 
     def _forward_cuda(self, single, cond, pair, mask=None):
@@ -500,7 +491,7 @@ class AtomDiTProtenix(_LocalAtomDiT):
     either way. ``"slide"`` takes the real atom count ``N`` from the key mask, whose real atoms must come first; under 128 real atoms there is
     no valid window and the keys past ``N`` are masked.
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     key_window = "pad"
@@ -512,7 +503,7 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     ``"intellifold2"``): the K / V AdaLN of the raw atoms next to the query one (parallel: AF3 ``cross_attention``'s 'q' / 'k' adaptive
     layernorms, OF3 ``CrossAttentionPairBias.layer_norm_a_q`` / ``_k``), the slid 128-key window (AF3 ``features.py``; IntelliFold2's JAX
     release runs this code). ``key_window="slide_qblock"``: IntelliFold2's torch release; ``"pad"``: the clipped window."""
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
 

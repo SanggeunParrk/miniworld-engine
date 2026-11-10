@@ -127,7 +127,7 @@ def _tf32_wab(wab, ht=128):
 
 def _pair_bias_wide(z2d, wf, mask, L):
     """``apb.pair_bias`` for a pair wider than its 128-wide ring at the token DiT's 12 / 16 / 24 heads (256: Protenix-v2's diffusion
-    pair): the CUDA LayerNorm rows, one cuBLAS GEMM, the masked keys at -1e30. Built once per trajectory (the hoisted bias), so the
+    pair; 512: IntelliFold2's): the CUDA LayerNorm rows, one cuBLAS GEMM, the masked keys at -1e30. Built once per trajectory (the hoisted bias), so the
     two passes and the mask fill cost nothing a solver step."""
     zh = torch.empty_like(z2d)
     layernorm_rows(z2d, zh)
@@ -154,6 +154,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     from ...augmented_attention.cuda import apb
 
     A, B, L, D = single.shape
+    DC = cond.shape[-1]   # the conditioning width: 384, or 768 (the pack's cond tables are built for the weights' width)
     if (
         torch.is_grad_enabled()
         or single.dtype not in (torch.bfloat16, torch.float32)
@@ -161,14 +162,14 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         or (B != 1 and single.dtype is not torch.bfloat16)   # B trunk_seeds: bf16 only (the TF32 core keeps one shared bias)
         or (heads, D) not in ((16, 768), (24, 768), (12, 768), (16, 1024))
         or L % 128
-        or cond.shape[-1] != 384
+        or cond.shape[-1] not in (384, 768)   # 768: ESMFold2's token DiT, conditioned at its own width
         or tuple(pair.shape[:3]) != (B, L, L)
-        or pair.shape[3] not in (128, 256)   # 256: Protenix-v2's diffusion pair
+        or pair.shape[3] not in (128, 256, 512)   # 256: Protenix-v2's diffusion pair; 512: IntelliFold2's
         or not pair.is_contiguous()
         or torch.cuda.get_device_capability(single.device) != (9, 0)
     ):
         raise ValueError(
-            "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768 (12 / 16 / 24 heads) or 1024 (16 heads) / 384 / pair 128 or 256"
+            "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768 (12 / 16 / 24 heads) or 1024 (16 heads) / cond 384 or 768 / pair 128, 256 or 512"
         )
     if extra is not None and tuple(extra.shape) != (L, L):
         raise ValueError("Hopper token extra pair bias requires an [L, L] bias")
@@ -250,7 +251,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
                 bias = single.new_empty((heads, L, L))
                 rows32().pair_bias_tok_cuda(pair.view(L * L, 128), wf, bias, mask, int(L), 1e-5, True, -1e30)
             else:
-                # LayerNorm rows written in the TF32 core's key order, one cuBLAS GEMM, the mask (128 or 256 channels)
+                # LayerNorm rows written in the TF32 core's key order, one cuBLAS GEMM, the mask (128, 256 or 512 channels)
                 zh = single.new_empty((L * L, dp))
                 _ext().layernorm128_rows(pair.view(L * L, dp), zh, 1e-5, True)
                 bias = torch.mm(wf, zh.t()).view(heads, L, L)
@@ -300,9 +301,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         alive=lambda e: not e[1].expired(),
     )[0]
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
-    c = cond[0].reshape(-1, 384) if shared else cond.reshape(-1, 384)   # shared: the [B L] table of the trunk_seeds (rows are [A][B][L]: row % (B L))
+    c = cond[0].reshape(-1, DC) if shared else cond.reshape(-1, DC)   # shared: the [B L] table of the trunk_seeds (rows are [A][B][L]: row % (B L))
     P = c.shape[0]
-    cn = single.new_empty((P, 384))
+    cn = single.new_empty((P, DC))
     cc = torch.empty_like(cn)
     cond_rows(c, cn, cc, 1e-5)
     if late_pack is not None and late_pack["pending"]:
@@ -392,13 +393,13 @@ def resgate_out_rows(x, y, gl, out, L):
 
 
 def layernorm_rows(z, out, eps=1e-5):
-    """out = LN(z) over 128, 256 or 384 columns, no affine (the conditioning rows, the DiT variants' pair rows), z / out fp32
+    """out = LN(z) over 128, 256, 384 or 512 columns, no affine (the conditioning rows, the DiT variants' pair rows), z / out fp32
     or bf16."""
     _ext().layernorm_rows_cuda(z, out, float(eps))
 
 
 def cond_rows(c, cn, cc, eps=1e-5):
-    """cn = LN(c), cc = c, both in the GEMM dtype, in one warp-per-row pass over 384 conditioning columns."""
+    """cn = LN(c), cc = c, both in the GEMM dtype, in one warp-per-row pass over the 384 or 768 conditioning columns."""
     _ext().cond_rows_cuda(c, cn, cc, float(eps))
 
 
@@ -519,7 +520,7 @@ def prebuild(target, rows):
         d, h = int(dims["d_single"]), int(dims["n_head"])
         dc, dp, n = int(dims["d_cond"]), int(dims["d_pair"]), int(dims.get("n", 2))
         if (d, d // h) in ((768, 48), (768, 32), (768, 64), (1024, 64)) and dc in (128, 256, 384, 768) and n in (2, 4) \
-                and dp in (128, 256):
+                and dp in (128, 256, 512):
             layouts.add((d, d // h, dc, n, dp))
     for (d, hd, dc, n, dp), empty in itertools.product(sorted(layouts), (False, True)):
         yield functools.partial(train.rows_ext, d, hd, 2, empty_uniform=empty, dc=dc, n=n, dp=dp, hopper=True)

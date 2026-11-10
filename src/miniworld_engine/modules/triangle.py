@@ -86,8 +86,9 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
 
     The engine's own backends. ``"cuda"`` (H100 sm_90a, bf16 activations and parameters): the whole update (LN, projections, core, gate,
     out-projection, residual, dropout) on ``kernels/integrations/triattn_h100_sm90`` (d_pair <= 512 multiple of 8, heads of 16 / 32
-    channels, <= 16 heads, L % 16 == 0; inference and training -- training only for the standard orientation without projection biases and
-    no q / k norm) or, inference only, ``kernels/triangle_attention/cuda/h100_dh`` (heads of 32 / 64 channels, Chai-1's output variants).
+    channels -- training also 64 --, <= 16 heads, L % 16 == 0, no q / k norm; training for every variant: AF3's ending-node bias, RF3's
+    projection biases, Chai-1's untransposed / dual output) or, inference only, ``kernels/triangle_attention/cuda/h100_dh`` (heads of
+    32 / 64 channels, Chai-1's output variants).
     ``"triton"``: the attention core on ``kernels/triangle_attention/triton/main`` (flash-style, forward + backward), every other statement
     the module's own (as the library cores), bf16 only.
     """
@@ -282,14 +283,17 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
             return None, f"dtype {pair.dtype}: the H100 TriangleAttention kernels are bf16 only (no fp32 kernel)"
         trains = self._trains(pair)
         c, d = pair.shape[-1], self._head_dim()
-        if not (self.untransposed_output or self.dual_output):
-            from miniworld_engine.kernels.integrations import triattn_h100_sm90
+        from miniworld_engine.kernels.integrations import triattn_h100_sm90
 
+        if trains:
+            # every variant trains on the sm90 route (bias flip, projection biases, Chai-1's output layouts in its glue; 64-channel
+            # heads on the h100_dh core)
             if triattn_h100_sm90.serves(self, pair, mask):
                 return "sm90", None
-        if trains:
-            return None, ("training: the H100 backward covers the standard output and bias orientation without projection biases, "
-                          "d_pair <= 512, heads of 16 / 32 channels, L % 16 == 0 (Chai-1 / RF3 / AF3-ending variants are inference only)")
+            return None, ("training: the H100 kernels take d_pair = to_query in-features <= 512 (multiple of 8), heads of 16 / 32 / 64 "
+                          f"channels, <= 16 heads, L % 16 == 0 (got d_pair {c}, head width {d}, {self.n_head} heads, L {pair.shape[1]})")
+        if not (self.untransposed_output or self.dual_output) and triattn_h100_sm90.serves(self, pair, mask):
+            return "sm90", None
         if d in (32, 64) and c % 8 == 0 and c <= 512 and self.to_query.weight.shape[1] == c:
             return "dh", None
         return None, f"d_pair {c}, head width {d}, L {pair.shape[1]}: outside the H100 kernels (heads 16 / 32 / 64, d_pair <= 512, L % 16)"
@@ -490,7 +494,7 @@ class TriangleAttentionAF3(_TriangleAttentionBase):
 
     Parameters as :class:`TriangleAttention` (always self-attention, no q / k norm).
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     transposed_bias = False
 
@@ -550,7 +554,7 @@ class TriangleAttentionRF3(_TriangleAttentionFp32Softmax):
 
     Parameters as :class:`TriangleAttentionAF3`.
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     _projection_biases = True
 
@@ -561,7 +565,7 @@ class TriangleAttentionChai1(_TriangleAttentionFp32Softmax):
 
     Parameters as :class:`TriangleAttentionAF3`.
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     untransposed_output = True
 
@@ -572,7 +576,7 @@ class TriangleAttentionChai1Confidence(_TriangleAttentionFp32Softmax):
 
     Parameters as :class:`TriangleAttentionAF3`.
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     dual_output = True
 

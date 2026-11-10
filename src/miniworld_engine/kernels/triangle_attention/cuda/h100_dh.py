@@ -11,7 +11,8 @@ standard output) do not take: heads of 64 channels (Chai-1's trunk, RoseTTAFold3
     dual               Chai-1's confidence head: kept = u Wo^T, other = u Wo_t^T; starting: kept + other^T, ending: kept^T + other
                        (``dual_output``)
 
-Inference only (no grad, no dropout).
+``forward`` is inference only (no grad, no dropout). ``train_core`` / ``backward``: the same core in training, for 64-channel heads of the
+width-generic training path (``h100_sm90_generic``).
 """
 
 from __future__ import annotations
@@ -39,6 +40,31 @@ def ext():
         extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"), "--use_fast_math", "-DNDEBUG"],
         verbose=False,
     )
+
+
+def train_core(proj, bias, n_head, d, scale):
+    """The training forward of the core (``h100_sm90_generic`` at 64-channel heads): proj [M, 4 H d] (q | k | v | g, the gate as it
+    is), bias [B, H, S, S] bf16 natural units (masked keys -inf) -> (o [M, H d], lse fp32 [B, S, H, S] base 2, u = sigmoid(g) o)."""
+    return ext().triattn_dh_forward_train(proj, bias, n_head, d, scale)
+
+
+#: dbias slabs of the query-side backward: enough (b, h, query tile, slab) CTAs for ~3 waves of 132 SMs, at most this many slabs
+MAX_SLABS = 8
+
+
+def slabs(batch: int, length: int, n_head: int) -> int:
+    """Slabs of pair rows the query-side backward splits into (each sums its rows' dbias into its own slab): a pure function of shapes."""
+    ctas = batch * n_head * (length // 64)
+    return max(1, min(MAX_SLABS, length, -(-3 * 132 // ctas)))
+
+
+def backward(proj, bias, do, lse, delta, dall, n_head, d, scale):
+    """The core backward: dq / dk / dv into columns 0 / H d / 2 H d of ``dall``; -> dbias fp32 [B, H, S, S] (natural units), the slabs
+    summed in order."""
+    B, _, S, _ = bias.shape
+    slabs_ = ext().triattn_dh_backward(proj, bias, do, lse, delta, dall, 0, n_head * d, 2 * n_head * d, n_head, d, scale,
+                                       slabs(B, S, n_head))
+    return slabs_.sum(0) if slabs_.shape[0] > 1 else slabs_[0]
 
 
 def head_dim(module) -> int:

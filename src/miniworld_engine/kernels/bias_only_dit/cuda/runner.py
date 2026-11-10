@@ -61,6 +61,8 @@ EPS = 1e-5
 #: Code switches for two measured-slower kernel paths kept for A/B (formerly settings.bias_only_dit_cond / _resln, default off).
 _COND_TABLES = False
 _RESLN_GEMM = False
+#: fp32 hoist of the 256-wide pair (``FusedBiasOnlyDiT.hoist``): products of the TF32 pair-bias kernel (``pair_bias_tc``), 3 = split fp32
+_HOIST_TC_TERMS = 3
 
 
 def _tf32():
@@ -168,7 +170,17 @@ class FusedBiasOnlyDiT:
                 self.nb * self.h, L, L, device=pair.device, dtype=torch.float32
             )
             z32 = z2d.float().contiguous()
+            # the 256-wide pair: the same LayerNorm + projection with the products on TF32 tensor cores, split fp32 (3 terms, ~exact)
+            # -- on the FMA pipe its 2 x 256 x H FMAs per pair row were the whole step (~1 ms of 1.85 at L768, the block no faster
+            # than PyTorch); 128 keeps the FMA kernel
+            pst = torch.empty(L * L, 2, device=pair.device) if self.dp == 256 else None
             for b in range(self.nb):
+                if pst is not None:
+                    R32.pair_bias_tc_cuda(
+                        z32, self.pw[b * self.h : (b + 1) * self.h].contiguous(), P[b * self.h : (b + 1) * self.h], pst, EPS,
+                        _HOIST_TC_TERMS,
+                    )
+                    continue
                 R32.pair_bias_cuda(
                     z32,
                     self.pw[b * self.h : (b + 1) * self.h],

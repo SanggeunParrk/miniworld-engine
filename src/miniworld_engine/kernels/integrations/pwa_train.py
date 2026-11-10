@@ -39,6 +39,28 @@ from miniworld_engine.kernels.integrations import pwa_wide as _wide
 
 H, C, D, DZ = 8, 32, 64, 128
 HC = H * C
+# d_pair other than 128 at MiniWorld's MSA widths (Chai-1: d_pair 256): these kernels on the MSA side, pwa_wide's pair kernels
+# (`pair_wide.cu` at that d_pair: LN_z -> proj_z -> mask -> softmax and its backward) on the pair side; the w [H, N, N] they
+# exchange is the same bf16 tensor
+PAIR_WIDE = (256, 384, 512)
+
+
+def pair_only_wide(d_msa: int, d_pair: int, n_head: int, d_hidden: int) -> bool:
+    """MiniWorld's MSA widths (64, 8 x 32) with a d_pair the pwa_wide pair kernels serve."""
+    return (d_msa, n_head, d_hidden) == (D, H, C) and d_pair in PAIR_WIDE
+
+
+def _wide_pair_fwd(z, pm, lnz_w, eps_z, wb):
+    """w [H, N, N] bf16 from pwa_wide's pair kernel at z's d_pair; ``pm`` is the [N, N] bf16 key mask of this path (every row the same)."""
+    return _wide._pair(z.shape[-1]).pair_fwd3(z, pm[0].contiguous(), lnz_w.detach().float().contiguous(),
+                                              torch.zeros_like(lnz_w, dtype=torch.float32), eps_z, wb.detach())
+
+
+def _wide_pair_bwd(z, w16, dw16, lnz_w, eps_z, wb):
+    """(dz, dWb, dgamma_z) from pwa_wide's pair backward (dw in bf16, as cuBLAS returns it)."""
+    dz, dwb, dzw, _ = _wide._pair(z.shape[-1]).pair_bwd3(z, w16, dw16, lnz_w.detach().float().contiguous(),
+                                                         torch.zeros_like(lnz_w, dtype=torch.float32), eps_z, wb.detach())
+    return dz, dwb, dzw
 _EXT: dict[str, Any] = {}
 _NATIVE_TRAINING_SCOPE: ContextVar[bool] = ContextVar(
     "pwa_native_training", default=False
@@ -106,11 +128,12 @@ def refusal(
     try:
         if not _enabled():
             return "the native path is disabled"
-        wide = (d_msa, d_pair, n_head, d_hidden) != (D, DZ, H, C)
+        pair_only = pair_only_wide(d_msa, d_pair, n_head, d_hidden)
+        wide = (d_msa, d_pair, n_head, d_hidden) != (D, DZ, H, C) and not pair_only
         if wide and not _wide.supported(d_msa, d_pair, n_head, d_hidden):
             return (
-                f"the kernels serve (d_msa={D}, d_pair={DZ}, n_head={H}, d_hidden={C}) and, wide, d_msa in {_wide.DMSA}, "
-                f"d_pair in {_wide.DPAIR}, {H} heads x d_hidden in {_wide.DHID}; got ({d_msa}, {d_pair}, {n_head}, {d_hidden})"
+                f"the kernels serve (d_msa={D}, n_head={H}, d_hidden={C}) with d_pair in {(DZ, *PAIR_WIDE)} and, wide, "
+                f"{_wide.describe()}; got ({d_msa}, {d_pair}, {n_head}, {d_hidden})"
             )
         if msa.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
             return f"the kernels are bf16, got {msa.dtype} / {pair.dtype}"
@@ -137,6 +160,8 @@ def refusal(
             if not 0 < n <= _wide.NMAX or s == 0:
                 return f"the wide pair kernels hold one row of logits: 0 < N <= {_wide.NMAX}, got N={n}, S={s}"
             return None
+        if pair_only and (cap != (9, 0) or n > _wide.NMAX):  # the pair side is pwa_wide's (sm_90a, one row of N <= 1024 logits)
+            return f"d_pair {d_pair}: the pair side is pwa_wide's sm_90a kernels (N <= {_wide.NMAX}), got N={n} on sm_{cap[0]}{cap[1]}"
         if n % 128 or s % 2:
             return f"N must be a multiple of 128 and S even, got N={n}, S={s}"
         if cap == (10, 0) and (
@@ -535,6 +560,8 @@ class _PwaMath(torch.autograd.Function):
             w16 = k["pwa"].pair_fwd(
                 z, pm, lnz_w.detach().contiguous(), eps_z, wb.detach().contiguous()
             )
+        elif z.shape[-1] != DZ:  # pair_only_wide: the pair side at this d_pair is pwa_wide's
+            w16 = _wide_pair_fwd(z, pm, lnz_w, eps_z, wb)
         elif k["pair3"] is not None and N % 16 == 0 and N <= 1024:
             (zw,) = _h100_float(lnz_w.detach())
             wb16 = (
@@ -726,6 +753,7 @@ class _PwaMath(torch.autograd.Function):
             )
             k["fwd"].pwa_plain2(wt, d_o, 4, dgv)  # dv -> dgv[..., HC:]
         dw = torch.bmm(d_o, v.transpose(1, 2))  # [H][N][N], K = S*C
+        dw16 = dw  # pwa_wide's pair backward (pair_only_wide) takes it in bf16
         dw, mw, zw = _h100_float(dw, lnm_w, lnz_w)
         wgvT = (
             k["pair3"].wgv(wg16, wv16)
@@ -746,11 +774,15 @@ class _PwaMath(torch.autograd.Function):
             dv_hm,
         )
         dWg, dWv = dWgv[:HC], dWgv[HC:]
+        wide_pair = z.shape[-1] != DZ
         if native:
-            (wb16,) = _cast_h100_matrices(wb)
-            key = getattr(ctx, "key_mask", None)
-            key = key if key is not None and key.numel() else None
-            dz, dWb, dzw = k["pair3"].pair_bwd3(z, w16, dw, zw, eps_z, wb16, key)
+            if wide_pair:
+                dz, dWb, dzw = _wide_pair_bwd(z, w16, dw16, lnz_w, eps_z, wb)
+            else:
+                (wb16,) = _cast_h100_matrices(wb)
+                key = getattr(ctx, "key_mask", None)
+                key = key if key is not None and key.numel() else None
+                dz, dWb, dzw = k["pair3"].pair_bwd3(z, w16, dw, zw, eps_z, wb16, key)
             leaves = _cast_cuda.cast(
                 [dlw, dlb, dWv, dWg, dzw, dWb, dWo],
                 [
@@ -760,7 +792,10 @@ class _PwaMath(torch.autograd.Function):
                 True,
             )
             return (dm.view(S, N, D)[None], dz[None], None, *leaves, None, None, None)
-        dz, dWb, dzw = pair_bwd(z, w16, dw, zw, eps_z, wb, BJ=32)
+        if wide_pair:
+            dz, dWb, dzw = _wide_pair_bwd(z, w16, dw16, lnz_w, eps_z, wb)
+        else:
+            dz, dWb, dzw = pair_bwd(z, w16, dw, zw, eps_z, wb, BJ=32)
         # Separate small weight/LN gradient views at the custom-op boundary.
         return (
             dm.view(S, N, D)[None],
@@ -862,7 +897,9 @@ def _inference_math(
     else:
         lnz_w = module.ln_pair.weight.detach().float().contiguous()
         wb16 = module.to_bias.weight.detach()
-    if k["pair3"] is not None and n % 16 == 0 and n <= NMAX_INFER:
+    if z.shape[-1] != DZ:  # pair_only_wide: the pair side at this d_pair is pwa_wide's
+        w16 = _wide_pair_fwd(z, pm, module.ln_pair.weight, eps_z, module.to_bias.weight)
+    elif k["pair3"] is not None and n % 16 == 0 and n <= NMAX_INFER:
         w16 = k["pair3"].pair_fwd3(z, pm, lnz_w, eps_z, wb16)
     else:
         w16 = pair_fwd(z, pm, lnz_w, eps_z, module.to_bias.weight.detach(), H, BJ=64)
@@ -897,13 +934,15 @@ def _inference_math(
 
 
 def _is_wide(module) -> bool:
-    """True for a module whose widths are not MiniWorld's (served by `pwa_wide`)."""
-    return (
+    """True for a module whose MSA widths are not MiniWorld's (served by `pwa_wide`); MiniWorld's MSA widths with another d_pair
+    (`pair_only_wide`) stay on this path."""
+    shape = (
         module.to_value.weight.shape[1],
         module.to_bias.weight.shape[1],
         module.n_head,
         module.to_value.weight.shape[0] // module.n_head,
-    ) != (D, DZ, H, C)
+    )
+    return shape != (D, DZ, H, C) and not pair_only_wide(*shape)
 
 
 def pair_weighted_averaging(

@@ -5,6 +5,9 @@ The gate is ``AtomDiT._supports_cuda`` (modules/atom_dit.py). fp32 activations a
 run the TF32 kernels; operands are rounded to nearest tf32, the residual stream, LayerNorms, softmax and every stored activation stay fp32.
 
     inference  cond90 (hoisted) -> pre90 -> window attention -> post90
+    training   the same forward saving its activations; tr_bwd90 -> post_bwd90 -> window attention backward -> pre_bwd90 (pre_bwd90_par:
+               the parallel K / V AdaLN) -> cond_bwd90 -> finalize90. The slid window (AF3 "slide", IntelliFold2 "slide_qblock"): the clipped
+               kernels for every window, the five edge windows recomputed in torch (forward) and differentiated in torch (backward).
 """
 
 from __future__ import annotations
@@ -30,8 +33,14 @@ def _edge_tables(z, gamma, wb, n, kmask, n0, qblock=False):
     """What the slid edge windows read that does not change between the steps of a fold: the five window indices, their key positions and
     validity, and their pair bias [5, h, 32, 128] (the pair LayerNorm and projection of those windows only). It depends on the real atom
     count, the pair and the block's LN / bias weights, so it is built once per pair (``_HOIST_EDGES``) and read at every step."""
-    import torch.nn.functional as F
+    idx, keys, valid = _edge_index(z, n, kmask, n0, qblock)
+    bias = _edge_bias(z[idx].float(), gamma.float(), wb.float())
+    mask = ~valid[None, :, None, None, :]
+    return idx, keys, mask, bias[None].contiguous()
 
+
+def _edge_index(z, n, kmask, n0, qblock=False):
+    """The five slid edge windows of ``_edge_tables``: their indices [5], key positions [5, 128] and key validity [5, 128]."""
     nwin = n // 32
     n_real = (
         kmask.sum()
@@ -45,11 +54,78 @@ def _edge_tables(z, gamma, wb, n, kmask, n0, qblock=False):
     idx = torch.stack([last * 0, last * 0 + 1, last - 2, last - 1, last]).clamp(0, nwin - 1)  # [5]
     starts = torch.minimum((32 * idx - 48).clamp(min=0), (n_rule - DS).clamp(min=0))
     keys = starts[:, None] + torch.arange(DS, device=z.device)  # [5, 128]
-    valid = keys < n_real  # a system under 128 real atoms has keys past them
-    zz = F.layer_norm(z[idx].float(), (DP,), gamma.float(), None, _ld.EPS)
-    bias = F.linear(zz, wb.float()).permute(0, 3, 1, 2)  # [5, h, 32, 128]
-    mask = ~valid[None, :, None, None, :]
-    return idx, keys, mask, bias[None].contiguous()
+    return idx, keys, keys < n_real  # a system under 128 real atoms has keys past them
+
+
+def _edge_bias(ze, gamma, wb):
+    """The pair bias [5, h, 32, 128] of the edge windows' pair rows ``ze`` [5, 32, 128, 16] (fp32): LN(z) gamma . Wb."""
+    import torch.nn.functional as F
+
+    zz = F.layer_norm(ze, (DP,), gamma, None, _ld.EPS)
+    return F.linear(zz, wb).permute(0, 3, 1, 2)
+
+
+def _slid_edges_bwd(do, dd, q, k, v, z, gamma, wb, n, kmask, n0, qblock, a):
+    """The backward of ``_slid_edges`` (training, one pair), before the window kernels. Those must not see the five edge windows (their
+    forward output was replaced): their rows of ``do`` / ``dd`` are zeroed in place, so the kernels give them no dq / dk / dv / dbias.
+    Their gradients are taken here in fp32 torch, the backward of the forward's math (a window chosen twice, small systems, counts once:
+    the first choice) -> what ``_slid_edges_add`` adds once the kernels have written dp and dz."""
+    h, dh = NH, DS // NH
+    nwin = n // 32
+    idx, keys, valid = _edge_index(z, n, kmask, n0, qblock)
+    first = torch.ones(5, device=z.device, dtype=torch.bool)
+    for j in range(1, 5):
+        first[j] = (idx[j] != idx[:j]).all()
+    g_out = do.view(a, nwin, 32, DS)[:, idx].float() * first[None, :, None, None]   # [a, 5, 32, 128]
+    do.view(a, nwin, 32, DS).index_fill_(1, idx, 0)
+    dd.view(a, NH, nwin, 32).index_fill_(2, idx, 0)
+    kf = keys.reshape(-1)                                                        # [640]
+    # written out (the opaque op runs below autograd): the window softmax backward, then the pair LayerNorm / projection backward
+    qs = q.view(a, nwin, 32, h, dh)[:, idx].float()                              # [a, 5, 32, h, d]
+    ks = k.view(a, n, h, dh)[:, kf].float().view(a, 5, DS, h, dh)                # [a, 5, 128, h, d]
+    vs = v.view(a, n, h, dh)[:, kf].float().view(a, 5, DS, h, dh)
+    gf, wf = gamma.float(), wb.float()
+    ze = z[idx].float()                                                          # [5, 32, 128, 16]
+    mu = ze.mean(-1, keepdim=True)
+    rstd = torch.rsqrt(((ze - mu) ** 2).mean(-1, keepdim=True) + _ld.EPS)
+    zn = (ze - mu) * rstd
+    zg = zn * gf
+    bias = torch.einsum("wqkc,hc->whqk", zg, wf)                                 # [5, h, 32, 128]
+    scale = dh**-0.5
+    logits = torch.einsum("awqhd,awkhd->awhqk", qs, ks) * scale + bias[None]
+    logits = logits.masked_fill(~valid[None, :, None, None, :], float("-inf"))
+    probs = torch.nan_to_num(torch.softmax(logits, dim=-1))                      # [a, 5, h, 32, 128]
+    g = g_out.view(a, 5, 32, h, dh)
+    dprob = torch.einsum("awqhd,awkhd->awhqk", g, vs)
+    dvs = torch.einsum("awhqk,awqhd->awkhd", probs, g)
+    ds = probs * (dprob - (probs * dprob).sum(-1, keepdim=True))                 # d logits (0 at masked keys)
+    dqs = torch.einsum("awhqk,awkhd->awqhd", ds, ks) * scale
+    dks = torch.einsum("awhqk,awqhd->awkhd", ds, qs) * scale
+    dbias = ds.sum(0)                                                            # [5, h, 32, 128]
+    dwb = torch.einsum("whqk,wqkc->hc", dbias, zg)
+    dzg = torch.einsum("whqk,hc->wqkc", dbias, wf)
+    dgamma = (dzg * zn).sum((0, 1, 2))
+    dzn = dzg * gf
+    dze = rstd * (dzn - dzn.mean(-1, keepdim=True) - zn * (dzn * zn).mean(-1, keepdim=True))
+    return idx, kf, (dqs, dks, dvs, dze, dgamma, dwb)
+
+
+def _slid_edges_add(edges, dp, dz):
+    """Add ``_slid_edges_bwd``'s gradients: dq into ``dp[:, 128:256]`` (the edge windows' rows, zero from the kernels), dk / dv into
+    ``dp[:, 256:512]`` at the slid key positions (each touched row summed once in fp32 and written back: no atomics, deterministic),
+    d z into ``dz`` at the edge windows (zero from the kernels). -> dz, the extra d gamma_pair and d Wb."""
+    idx, kf, (dq, dk, dv, dze, dg, dwb) = edges
+    a, n = dq.shape[0], dp.shape[0] // dq.shape[0]
+    nwin = n // 32
+    dp[:, DS : 2 * DS].view(a, nwin, 32, DS).index_add_(1, idx, dq.reshape(a, 5, 32, DS).to(dp.dtype))
+    same = (kf[:, None] == kf[None, :]).float()                                  # [640, 640]: rows of one key position
+    for col, g in ((2 * DS, dk), (3 * DS, dv)):
+        tgt = dp[:, col : col + DS].view(a, n, DS)
+        with _fp32_exact():   # 0 / 1 weights: an exact fp32 sum
+            tot = tgt[:, kf].float() + torch.einsum("ij,ajc->aic", same, g.reshape(a, 5 * DS, DS))
+        tgt.index_copy_(1, kf, tot.to(dp.dtype))   # a repeated position writes the same total
+    dz.index_add_(0, idx, dze.to(dz.dtype))
+    return dz, dg, dwb
 
 
 def _slid_edges(o, q, k, v, tables, a, groups, n):
@@ -135,7 +211,8 @@ def _fwd(
     slide: bool = False,
     qblock: bool = False,
 ) -> list[torch.Tensor]:
-    """``parallel_kv``: AlphaFold 3's K/V AdaLN of the raw atoms; ``slide``: its slid key window (inference only).
+    """``parallel_kv``: AlphaFold 3's K/V AdaLN of the raw atoms; ``slide``: its slid key window (``qblock``: IntelliFold2's rule); the
+    saved ``o`` holds the slid edge windows' output, ``lse`` the clipped kernel's (``_bwd`` takes those windows from torch).
     The block output [A, 1, N, 128] and, when ``save``, the tensors the backward reads (bias2, mod, mkv, q, k, v, sg, x1, xkv, o, lse, u, a2,
     x2, t): fresh tensors."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm90_atom as k90
@@ -185,8 +262,8 @@ def _fwd(
             bias2 = pair_bias()
         if save:
             q, sg, k, v, x1, xkv = k90.pre_fwd(
-                s2, mod, mkv, p, tf32, save=True, nmod=nmod
-            )  # the training path is the chained K/V norm only (``_supports_cuda``)
+                s2, mod, mkv, p, tf32, save=True, nmod=nmod, parallel_kv=parallel_kv
+            )
         else:
             q, sg, k, v = k90.pre_fwd(
                 s2, mod, mkv, p, tf32, nmod=nmod, parallel_kv=parallel_kv
@@ -227,7 +304,7 @@ def _fwd(
     ]
 
 
-def _bwd_fake(dy, single, cond, pair, kmask, weights, saved):
+def _bwd_fake(dy, single, cond, pair, kmask, weights, saved, parallel_kv=False, slide=False, qblock=False):
     return [
         torch.empty_like(single),
         torch.empty_like(cond),
@@ -245,8 +322,11 @@ def _bwd(
     kmask: torch.Tensor | None,
     weights: list[torch.Tensor],
     saved: list[torch.Tensor],
+    parallel_kv: bool = False,
+    slide: bool = False,
+    qblock: bool = False,
 ) -> list[torch.Tensor]:
-    """d single, d cond, d pair, then one gradient per parameter (its dtype)."""
+    """d single, d cond, d pair, then one gradient per parameter (its dtype). The flags: the forward's (``_fwd``)."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm90_atom as k90
     from miniworld_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
@@ -278,6 +358,8 @@ def _bwd(
         da2, du, gated, do, dd, cs_so, cs_sc2 = k90.post_bwd(
             dab, dyp, a2, mod, u, sg, o, pb, dmod, dp, n, tf32, nmod=nmod, shared=sh
         )
+        if slide:  # the edge windows: their do / dd rows zeroed for the kernels, their gradients from torch
+            edges = _slid_edges_bwd(do, dd, q, k, v, z, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0, qblock, a)
         dbias = local.attn_bwd_mma(
             q.view(a, n, DS),
             k.view(a, n, DS),
@@ -289,9 +371,14 @@ def _bwd(
             dp[:, DS:],
             tf32,
         )
-        dz, dgamma_pair, dwb = local.pair_bias_bwd_mma(z, p["gamma"], p["wbias"], dbias)
+        dzk, dgamma_pair, dwb = local.pair_bias_bwd_mma(z, p["gamma"], p["wbias"], dbias)
+        if slide:  # after the kernels wrote dp and dz: add the edge windows' dq / dk / dv / d z
+            dz, dg_e, dwb_e = _slid_edges_add(edges, dp, dzk)
+            dgamma_pair, dwb = dgamma_pair + dg_e, dwb + dwb_e
+        else:
+            dz = dzk
         dx, dmkv, cs_sc1, cs_bs, cs_bq = k90.pre_bwd(
-            dp, x1, s2, mod, mkv, da2, pb, p, dmod, tf32, nmod=nmod, shared=sh
+            dp, x1, s2, mod, mkv, da2, pb, p, dmod, tf32, nmod=nmod, shared=sh, parallel_kv=parallel_kv
         )
         if shared:
             if (
@@ -443,8 +530,9 @@ class _H100Block(torch.autograd.Function):
     """The whole block: forward saving what the backward kernels read, backward on the same warp-level kernels."""
 
     @staticmethod
-    def forward(ctx, kmask, single, cond, pair, *weights):
-        out, *saved = _fwd(single, cond, pair, kmask, list(weights), True)
+    def forward(ctx, kmask, flags, single, cond, pair, *weights):
+        out, *saved = _fwd(single, cond, pair, kmask, list(weights), True, *flags)
+        ctx.flags = flags
         ctx.save_for_backward(kmask, single, cond, pair, *saved, *weights)
         ctx.n_saved = len(saved)
         return out
@@ -454,8 +542,8 @@ class _H100Block(torch.autograd.Function):
     def backward(ctx, dy):
         kmask, single, cond, pair, *rest = ctx.saved_tensors
         saved, weights = rest[: ctx.n_saved], rest[ctx.n_saved :]
-        grads = _bwd(dy, single, cond, pair, kmask, list(weights), list(saved))
-        return (None, *grads)
+        grads = _bwd(dy, single, cond, pair, kmask, list(weights), list(saved), *ctx.flags)
+        return (None, None, *grads)
 
 
 def _weights_of(module):
@@ -468,12 +556,9 @@ def run_block(module, single, cond, pair, mask=None):
     weights = _weights_of(module)
     n0 = single.shape[2]
     kmask = _ld._keys(mask, n0, _ld._padded_length(n0))
+    flags = (module.kv_norm == "parallel", module.key_window in ("slide", "slide_qblock"), module.key_window == "slide_qblock")
     if torch.is_grad_enabled() and any(
         t.requires_grad for t in (single, cond, pair, *weights)
     ):
-        return _H100Block.apply(kmask, single, cond, pair, *weights)
-    parallel = module.kv_norm == "parallel"
-    return _fwd(
-        single, cond, pair, kmask, weights, False, parallel, module.key_window in ("slide", "slide_qblock"),
-        module.key_window == "slide_qblock",
-    )[0]
+        return _H100Block.apply(kmask, flags, single, cond, pair, *weights)
+    return _fwd(single, cond, pair, kmask, weights, False, *flags)[0]

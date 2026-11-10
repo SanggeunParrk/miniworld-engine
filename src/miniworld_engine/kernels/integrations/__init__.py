@@ -13,8 +13,9 @@ def prebuild(target, _rows):
     OPM: for each row (width ``d_msa`` / ``d_pair``, the two normalisation orders, projection bias, mode) and each (depth, length) it
     covers, the extension the forward / backward of ``opm_train`` selects (the same predicates: ``_h100_path``, ``_fused_enabled``,
     ``_epilogue_*_enabled`` and the wide-composition routing); widths other than MiniWorld's only where ``opm_train.SHAPES`` serves
-    them. PWA: ``_k(native)`` for the base width by the training-default shape (train) / inference (eval), ``pwa_wide`` pair / value
-    kernels for the rows ``pwa_wide.supported`` accepts. d_hidden 64 / grouped OPM rows are the Chai kernels of ``outer_product_mean``."""
+    them (``opm_train.TRAIN_ONLY`` widths: train rows only). PWA: ``_k(native)`` for the base width by the training-default shape (train) /
+    inference (eval) -- with the ``pwa_wide`` pair kernel of its d_pair for ``pwa_train.pair_only_wide`` rows --, ``pwa_wide`` pair / value
+    kernels for the rows ``pwa_wide.supported`` accepts (the BIG value build included). d_hidden 64 / grouped OPM rows are the Chai kernels of ``outer_product_mean``."""
     import functools
 
     from miniworld_engine.kernels._prebuild import _kv, family_rows
@@ -37,6 +38,8 @@ def prebuild(target, _rows):
         d, o = _kv(r["dims"]), _kv(r["options"])
         cm, cz = int(d["d_msa"]), int(d["d_pair"])
         if int(d["d_hidden"]) != opm_train.CH or "groups" in o or ((cm, cz) != base and (cm, cz) not in opm_train.SHAPES):
+            continue
+        if r["mode"] == "eval" and (cm, cz) in opm_train.TRAIN_ONLY:   # inference at these widths is composed.inference's
             continue
         wide = (cm, cz) != base or o.get("normalize_before_proj") == "True" or o.get("projection_bias") == "True"
         training = r["mode"] == "train"
@@ -64,7 +67,9 @@ def prebuild(target, _rows):
     for r in family_rows("pair_weighted_averaging"):
         d = _kv(r["dims"])
         shape = (int(d["d_msa"]), int(d["d_pair"]), int(d["n_head"]), int(d["d_hidden"]))
-        if shape == base:
+        if shape == base or pwa_train.pair_only_wide(*shape):   # pair_only_wide: these MSA kernels + pwa_wide's pair kernels
+            if shape != base:
+                pair.add(shape[1])
             if r["mode"] == "eval":
                 natives.add(True)  # inference runs the native kernels on H100
             else:

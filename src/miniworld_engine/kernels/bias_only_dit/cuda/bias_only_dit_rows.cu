@@ -1,6 +1,6 @@
 // Bias-only token DiT row kernels (CUDA): the passes between the GEMMs of the fused inference step.
 //
-//   ln_rows             out = LN(x), no affine                                   (the conditioning rows, width 384)
+//   ln_rows             out = LN(x), no affine                                   (the conditioning rows, width 384 or 768)
 //   adaln_in_rows       x = single (fp32 copy of the input); out = LN(x) * sigmoid(ms[tok]) + mb[tok]
 //   resgate_adaln_rows  x += sigmoid(gl[tok]) * y (fp32, in place); then, when ms is given, out = LN(x) * sigmoid(ms) + mb
 //   resgate_out_rows    out = x + sigmoid(gl[tok]) * y in the output dtype      (the last half-block: no fp32 round trip)
@@ -261,12 +261,13 @@ unsigned blocks(int64_t rows) { return (unsigned)((rows + WPB - 1) / WPB); }
 
 void ln_rows(at::Tensor x, at::Tensor out, double eps) {
   const int64_t M = x.size(0), D = x.size(1);
-  TORCH_CHECK(D == 384 && out.is_contiguous() && out.size(0) == M && out.size(1) == D, "ln_rows: width 384, contiguous out");
+  TORCH_CHECK((D == 384 || D == 768) && out.is_contiguous() && out.size(0) == M && out.size(1) == D, "ln_rows: width 384 or 768, contiguous out");
   check_rows(x, "ln_rows x", D);
   const at::cuda::CUDAGuard g(x.device());
   BOR_DISPATCH(x.scalar_type(), IT, [&] {
     BOR_DISPATCH(out.scalar_type(), OT, [&] {
-      ln_rows_kernel<3, IT, OT><<<blocks(M), WPB * 32, 0, at::cuda::getCurrentCUDAStream()>>>(ptr<const IT>(x), ptr<OT>(out), M,
+      auto kern = D == 384 ? ln_rows_kernel<3, IT, OT> : ln_rows_kernel<6, IT, OT>;   // 768: a token DiT conditioned at its own width
+      kern<<<blocks(M), WPB * 32, 0, at::cuda::getCurrentCUDAStream()>>>(ptr<const IT>(x), ptr<OT>(out), M,
           x.stride(0), (float)eps);
     });
   });

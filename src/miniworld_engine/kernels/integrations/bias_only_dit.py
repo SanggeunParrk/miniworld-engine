@@ -17,7 +17,8 @@ and a layout or build ``tf32.inf3_ready`` refuses, run the 12-launch cuBLAS + ro
 
 ``serves()`` is the whole gate: no autograd, the engine's kernels (the block's ``cuda`` backend, through its kernel view), B200 or
 H100, bf16 or fp32, the
-token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128, or 256 on H100 / transition n = 2), B == 1, L a multiple of 128 (up to 768; 3072 on H100: ``core_supported``), a key mask [1, L] or
+token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384, or 768 on H100 / pair 128, or 256 on H100 /
+transition n = 2), B == 1, L a multiple of 128 (up to 768; 3072 on H100: ``core_supported``), a key mask [1, L] or
 none, LayerNorm eps 1e-5. The conditioning may be one per sample or one shared by the samples (sample axis 1 or stride 0).
 Anything else is refused: the block's ``cuda`` backend raises ``BackendUnsupported`` (``_supports_cuda``), never another path.
 
@@ -37,6 +38,8 @@ from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 
 D, DC, DP = 768, 384, 128
+#: the conditioning widths on H100 (the conditioning LayerNorm rows are built for both; the table GEMMs take any width): 384, and 768
+DCS_H100 = (384, 768)
 #: the pair widths of the pair-bias hoist (``FusedBiasOnlyDiT.hoist``: the LayerNorm rows template, the fp32 one-pass ``pair_bias`` template): 128,
 #: and 256 on H100
 DPS = (128, 256)
@@ -105,7 +108,9 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
     A, _, L, _ = single.shape
     if (
         cond.ndim != 4
-        or tuple(cond.shape[1:]) != (1, L, DC)
+        or tuple(cond.shape[1:3]) != (1, L)
+        or cond.shape[3] != module.attention.ada_ln_in.ln_cond.weight.numel()
+        or not (cond.shape[3] == DC or (cond.shape[3] in DCS_H100 and torch.cuda.get_device_capability(single.device) == (9, 0)))
         or cond.shape[0] not in (1, A)
     ):
         return False

@@ -10,6 +10,7 @@ Scope is H100 (sm90) only.
 | [kernels.md](kernels.md) | kernel families, launch-config tables and shape keys, the prebuilder, the pretuner |
 | [measure.md](measure.md) | the accuracy measurer (fp64 gold, lights) and the speed measurer (CUDA-graph timing) |
 | [judge.md](judge.md) | versions, tokens, verdicts (carried / owed / pending), the Slurm measurement cycle |
+| [ladder.md](ladder.md) | the performance ladder cuda < triton < pytorch: how it is checked, exceptions (LayerNorm, RMSNorm) |
 
 ## H100 kernel notes
 

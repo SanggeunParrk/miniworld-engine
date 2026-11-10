@@ -5,8 +5,8 @@
 //   xkv = LN(x1) * sigmoid(mkv[:, 0:128] + bs) + mkv[:, 128:256]
 //   k   = xkv Wk^T           v  = xkv Wv^T
 // q, k, v only feed MMAs (TF32: rounded to nearest on the way out). SAVE also writes x1 and xkv for the backward.
-// PAR (AlphaFold 3's K / V norm): xkv = LN(x) * sigmoid(...) + ..., the second AdaLN of the raw x next to the first, not of x1 (inference only: with PAR the
-// backward of the chained form does not apply).
+// PAR (AlphaFold 3's K / V norm): xkv = LN(x) * sigmoid(...) + ..., the second AdaLN of the raw x next to the first, not of x1 (its backward: pre_bwd90_par;
+// the chained one is pre_bwd90).
 // SPDX-License-Identifier: Apache-2.0
 #include "rms90.cuh"
 using namespace r90;

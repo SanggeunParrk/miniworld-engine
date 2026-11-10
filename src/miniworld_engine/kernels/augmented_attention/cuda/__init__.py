@@ -512,6 +512,13 @@ def prebuild(target, rows):
                 ext("attn_fwd", (*td, f"APB_KS={_APB_KS['fwd']}"))
                 ext("attn_dq", (*td, f"APB_KS={_APB_KS['dq']}"))
                 ext("attn_dkv", (*td, "DBIAS=0", f"APB_KS={_APB_KS['dkv']}"))
+        # AttentionPairBias with float32 activations: the TF32 core (attn_tf32.cu) at the padded layout of each head shape (head width 48
+        # stays 48, every other width pads to 32), forward / inference and backward builds
+        for heads, d in sorted({(int(_kv(r["dims"])["n_head"]), int(_kv(r["dims"])["d_single"])) for r in rows
+                                if r["module"] == "AttentionPairBias" and r["dtype"] == "float32"}):
+            dhp = 48 if d // heads == 48 else 32
+            ext("attn_tf32", tf32_fwd_defs(heads, dhp))
+            ext("attn_tf32", tf32_defs(heads, dhp))
         if any(k.startswith(f"{_P}apb_") for r in rows for k in r["kernels"]):
             calls.append(ft.partial(apb._ext, "90a", False))
             if any("train" in ms for ms in modes.values()):

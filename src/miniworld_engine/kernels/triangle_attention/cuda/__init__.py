@@ -42,7 +42,8 @@ def prebuild(target, rows):
         # the MSA row dropout's Philox keep-mask (pwa_train: ``extension("pack").drop_keep``)
         if needs("triangle_attention_drop_scale_sm90", "triangle_attention_graph_rng_write_sm90"):
             yield ft.partial(h100_triattn.extension, "pack")
-        if needs("triangle_attention_dh_fwd_sm90"):
+        if needs("triangle_attention_dh_fwd_sm90", "triangle_attention_dh_fwd_train_sm90", "triangle_attention_dh_bwd_kv_sm90",
+                 "triangle_attention_dh_bwd_q_sm90"):
             yield h100_dh.ext
     elif target.arch == "sm100":
         from . import b200_triattn

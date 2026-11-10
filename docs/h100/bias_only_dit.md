@@ -36,9 +36,11 @@ is never taken on H100.
 
 1. **Hoist** (once per pair and mask, cached on the runner while the pair / mask tensors' pointer and version are unchanged, capture
    scoped): bf16 -- LayerNorm rows (`layernorm128_rows`, or the 256-wide row template), one cuBLAS GEMM for every block, `softmax_rows`
-   in place: P `[nb H, L, L]` bf16. fp32 -- `pair_bias_cuda` per block (LayerNorm and the H projections on the FMA pipe, exact fp32,
-   LN(pair) never stored), fp32 `softmax_rows`. A block given `bias=` makes P per call from it instead.
-2. **Conditioning tables**: `ln_rows` then the two table GEMMs (bf16 up to 384 table rows: one `cond_tables` wgmma launch; otherwise two
+   in place: P `[nb H, L, L]` bf16. fp32 -- `pair_bias_cuda` per block at d_pair 128 (LayerNorm and the H projections on the FMA pipe, exact fp32,
+   LN(pair) never stored), `pair_bias_tc_cuda` at 256 (the same pass with the products on TF32 mma, split fp32: 3 terms; the FMA form was
+   ~1 ms of a 1.85 ms L768 step),
+   then fp32 `softmax_rows`. A block given `bias=` makes P per call from it instead.
+2. **Conditioning tables**: `ln_rows` (d_cond 384 or 768) then the two table GEMMs (bf16 up to 384 table rows: one `cond_tables` wgmma launch; otherwise two
    cuBLAS GEMMs). T = L rows for a shared conditioning, A L rows otherwise.
 3. **Per block**: `adaln_in_rows` (the first residual pass, `resgate_adaln_rows_in`, reads the input itself: no fp32 copy of it) ->
    v\|g GEMM (fp32: v^T and g as two GEMMs, since TF32 wgmma takes K-major operands) -> `pvx` / `pvx32` -> out GEMM ->
@@ -94,10 +96,9 @@ No CUDA kernel here reads a launch-config table: tiles and groups are build defi
 | call | result |
 |---|---|
 | not CUDA / not sm_90 | refused |
-| inference: dtype other than bf16 / fp32 (fp32 = fp32 weights, no autocast), not `[A, 1, L, 768]` with L % 128 == 0 and L <= 3072, `(heads, head width)` not 16 x 48 / 24 x 32 / 12 x 64 / 16 x 64, cond not 384, pair not 128 / 256, n != 2, eps != 1e-5, mask not `[1, L]` | refused |
+| inference: dtype other than bf16 / fp32 (fp32 = fp32 weights, no autocast), not `[A, 1, L, 768]` with L % 128 == 0 and L <= 3072, `(heads, head width)` not 16 x 48 / 24 x 32 / 12 x 64 / 16 x 64, cond not 384 / 768, pair not 128 / 256, n != 2, eps != 1e-5, mask not `[1, L]` | refused |
 | training: the same with L <= 768, cond 384 or 768, pair 128 / 256 | refused |
 | B > 1 (a pair per sample, `single [1, B, L, d]`) | refused (PyTorch backend only) |
-| the d_cond 768 requirement rows in eval | refused (inference cond is 384 only) |
 
 ## History
 

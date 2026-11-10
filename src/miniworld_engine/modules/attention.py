@@ -73,7 +73,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
         See :class:`BackendModule`.
 
     """
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
 
@@ -207,10 +207,10 @@ class AttentionPairBias(BackendModule, MasterWeights):
     # H100 (sm_90): the whole op as hand CUDA + cuBLAS (kernels/integrations/attention_pair_bias_b200.py, its H100 branches; the residual is
     # folded there). No gradient -> the inference op (LayerNorm rows, one packed q | k | v | g GEMM, pair LayerNorm + head projection pass,
     # the gated sm_90a wgmma core, to_out accumulated onto the residual); a gradient -> one autograd Function (forward + backward on the same
-    # rows / cores, fp32 weight gradients onto the parameters). Range = ``refusal``: bf16 activations (parameters bf16 or fp32 masters), one
-    # batch row, 8 x 48 / 12 x 32 / 16 x 24 / 24 x 16 heads at d_single 384 or 16 x 32 at 512, d_pair 128 (256 for 16 heads x d_single 384,
-    # inference only), gate_bias inference only, no QK-norm, no extra_pair_bias, L a multiple of 128. float32 activations and every other
-    # d_pair (384 / 512) have no CUDA path: refused, never run elsewhere.
+    # rows / cores, fp32 weight gradients onto the parameters). Range = ``refusal``: bf16 activations (parameters bf16 or fp32 masters) or
+    # float32 activations with float32 parameters (the TF32 path: attn_tf32 core, fp32 row / pair kernels, fp32 GEMMs), one batch row,
+    # 8 x 48 / 12 x 32 / 16 x 24 / 24 x 16 heads at d_single 384 or 16 x 32 at 512, d_pair 128, 256 / 384 (8 or 16 heads) or 512 (16 heads),
+    # gate_bias, no QK-norm, no extra_pair_bias, L a multiple of 128; everything else is refused, never run elsewhere.
     def _supports_cuda(self, single, pair, mask=None, extra_pair_bias=None) -> str | None:
         from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as native
 

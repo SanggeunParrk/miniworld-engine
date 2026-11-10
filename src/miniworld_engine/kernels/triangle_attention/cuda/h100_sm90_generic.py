@@ -12,6 +12,9 @@ gradients, and the small hand-written kernels of ``h100_sources/triattn_generic_
 
 A head of 16 channels is zero-padded to 32 in the packed weights (padded q / k / v / g channels are 0 and meet zero columns of Wo); the
 softmax scale stays 1 / sqrt(16).
+
+Training also serves the module variants (AF3 / RF3 / Chai-1 ending-node bias flip, RF3 gate / out biases, Chai-1 untransposed / dual output)
+and heads of 64 channels, whose core is the mma.sync core of ``h100_dh`` (forward with O / LSE and its backward).
 """
 
 import functools
@@ -29,11 +32,20 @@ from miniworld_engine.kernels._nvcc import (
 from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as _core_mod
 
 _SRC = Path(__file__).with_name("h100_sources")
-D = 32  # head dim the core takes
+D = 32  # head dim the wgmma core takes
 HEAD_DIMS = (16, 32)  # head widths served (16 is padded to 32)
+#: training also takes heads of 64 channels: the core is then the mma.sync core of ``h100_dh`` (forward with O / LSE, its backward)
+TRAIN_HEAD_DIMS = (16, 32, 64)
+#: output layouts of the update (the module's ``untransposed_output`` / ``dual_output``), training only
+STANDARD, UNTRANSPOSED, DUAL = 0, 1, 2
 MAX_HEADS = 16
 MAX_C = 512
 TOK = _core_mod.TOK
+
+
+def core_width(head_dim: int) -> int:
+    """Channels per head the core runs: 32 (the wgmma core; 16-channel heads padded) or 64 (the ``h100_dh`` core)."""
+    return D if head_dim <= D else 64
 
 
 @functools.lru_cache(maxsize=None)
@@ -279,9 +291,9 @@ def _half(wcat):
     return w
 
 
-def supports(d_pair: int, d_hidden: int, n_head: int, length: int) -> bool:
-    """Shapes the generic path takes: d_pair a multiple of 8 up to 512, heads of 16 or 32 channels (at most 16 heads), L a multiple
-    of 16 (padded to a multiple of 128 by the caller)."""
+def supports(d_pair: int, d_hidden: int, n_head: int, length: int, train: bool = False) -> bool:
+    """Shapes the generic path takes: d_pair a multiple of 8 up to 512, heads of 16 or 32 channels (training: also 64) and at most 16
+    heads, L a multiple of 16 (padded to a multiple of 128 by the caller)."""
     if (
         d_pair % 8
         or not 8 <= d_pair <= MAX_C
@@ -290,7 +302,8 @@ def supports(d_pair: int, d_hidden: int, n_head: int, length: int) -> bool:
         or d_hidden % n_head
     ):
         return False
-    return d_hidden // n_head in HEAD_DIMS and length >= 16 and length % 16 == 0
+    widths = TRAIN_HEAD_DIMS if train else HEAD_DIMS
+    return d_hidden // n_head in widths and length >= 16 and length % 16 == 0
 
 
 def _hp(n_head: int) -> int:
@@ -313,12 +326,24 @@ def pack_weights(wq, wk, wv, wg, wb, wo):
         wcat = wall[: 4 * n_head * D + _hp(n_head)]
         wcat._triattn_wall = wall
         return wcat, wo_p
-    return pack_weights_torch(*ws)
+    return pack_weights_torch(*ws, dc=core_width(hd))
 
 
-def pack_weights_torch(wq, wk, wv, wg, wb, wo):
-    """``pack_weights`` by torch statements only (no extension launch): the fallback for other dtypes, and the form a derivation on
-    FakeTensors records."""
+def pack_out(wo, n_head, dc=D):
+    """An out-projection [C, H hd] -> bf16 [C, H dc] (heads zero-padded to the core width)."""
+    C, hdh = wo.shape
+    hd = hdh // n_head
+    wo = wo.to(torch.bfloat16)
+    if hd != dc:
+        wop = wo.new_zeros(C, n_head, dc)
+        wop[:, :, :hd] = wo.view(C, n_head, hd)
+        wo = wop.view(C, n_head * dc)
+    return wo.contiguous()
+
+
+def pack_weights_torch(wq, wk, wv, wg, wb, wo, dc=D):
+    """``pack_weights`` by torch statements only (no extension launch): the fallback for other dtypes, the 64-channel heads (``dc``
+    64, no padding), and the form a derivation on FakeTensors records."""
     n_head = wb.shape[0]
     hd = wq.shape[0] // n_head
     C = wq.shape[1]
@@ -326,11 +351,11 @@ def pack_weights_torch(wq, wk, wv, wg, wb, wo):
 
     def pad_rows(w):
         w = w.to(bf)
-        if hd == D:
+        if hd == dc:
             return w
-        out = w.new_zeros(n_head, D, C)
+        out = w.new_zeros(n_head, dc, C)
         out[:, :hd] = w.view(n_head, hd, C)
-        return out.view(n_head * D, C)
+        return out.view(n_head * dc, C)
 
     wbp = wb.new_zeros(_hp(n_head), C, dtype=bf)
     wbp[:n_head] = wb.to(bf)
@@ -338,20 +363,31 @@ def pack_weights_torch(wq, wk, wv, wg, wb, wo):
         [pad_rows(wq), pad_rows(wk), pad_rows(wv), pad_rows(wg), wbp]
     ).contiguous()
     wo = wo.to(bf)
-    if hd != D:
-        wop = wo.new_zeros(C, n_head, D)
+    if hd != dc:
+        wop = wo.new_zeros(C, n_head, dc)
         wop[:, :, :hd] = wo.view(C, n_head, hd)
-        wo = wop.view(C, n_head * D)
+        wo = wop.view(C, n_head * dc)
     return wcat, wo.contiguous()
 
 
-def _views(qkvg, B, L, HD, H):
-    """q, k, v, g of the GEMM output [M, 4 HD] as [B, N, S, H, 32] views at the common row stride."""
+def _views(qkvg, B, L, HD, H, dc=D):
+    """q, k, v, g of the GEMM output [M, 4 HD] as [B, N, S, H, dc] views at the common row stride."""
     ld = qkvg.shape[1]
-    s = (L * L * ld, L * ld, ld, D, 1)
+    s = (L * L * ld, L * ld, ld, dc, 1)
     base = qkvg.view(-1)
-    shp = (B, L, L, H, D)
+    shp = (B, L, L, H, dc)
     return [base.as_strided(shp, s, i * HD) for i in range(4)]
+
+
+def _drop_view(drop, B, L, C, trans):
+    """The module's dropout scale [B, L, C] in its broadcast form over the pair's own layout: [B, 1, L, C] (starting node: the column)
+    or [B, L, 1, C] (ending node: the row)."""
+    return drop.view(B, L, 1, C) if trans else drop.view(B, 1, L, C)
+
+
+def _t(a, B, L):
+    """[M, C] in (b, i, j) row order -> the same rows in (b, j, i) order (a copy)."""
+    return a.view(B, L, L, -1).transpose(1, 2).contiguous().view(B * L * L, -1)
 
 
 def _forward(
@@ -371,16 +407,21 @@ def _forward(
     flip=False,
     gate_bias=None,
     out_bias=None,
+    out_mode=STANDARD,
+    wt_p=None,
 ):
     B, L, _, C = pair.shape
     H = n_head
-    HD = H * D
+    dc = core_width(head_dim)
+    dh = dc != D  # 64-channel heads: the h100_dh core (training only)
+    assert need or not dh, "64-channel heads: the width-generic path is the training core"
+    HD = H * dc
     M = B * L * L
     g = _glue()
     x = pair.contiguous().view(M, C)
     scale = head_dim**-0.5
     empty = torch.empty(0, device=pair.device)
-    # ``flip`` (the ending node on AF3's bias orientation, inference): the bias is made unmasked and masked after the transpose
+    # ``flip`` (the ending node on AF3's bias orientation): the bias is made unmasked and masked after the transpose
     front_mask = mask if mask is not None and not flip else empty.bool()
     fused = (
         (not need)
@@ -419,10 +460,17 @@ def _forward(
         pass
     elif need or L > 256:
         ww = _half(wcat) if h16 else wcat
-        qkvg = torch.matmul(y, ww[: 4 * HD].t())  # [M, 4 HD]: q | k | v | g (fp16 with h16, the gate too)
+        if need and gate_bias is not None:
+            # training with RoseTTAFold3's gate bias: in the GEMM's epilogue (one rounding, as the reference's biased projection)
+            hd = gate_bias.numel() // H
+            bvec = torch.cat([ww.new_zeros(3 * HD), F.pad(gate_bias.view(H, hd), (0, dc - hd)).reshape(-1).to(ww.dtype)])
+            qkvg = torch.addmm(bvec, y, ww[: 4 * HD].t())
+        else:
+            qkvg = torch.matmul(y, ww[: 4 * HD].t())  # [M, 4 HD]: q | k | v | g (fp16 with h16, the gate too)
         bias = torch.matmul(y, ww[4 * HD :].t())  # [M, Hp]
+        # the dh core takes the bias in natural units, the wgmma core pre-divided by the scale
         sbias = g.front_bias(
-            bias, front_mask, B, L, H, 0, scale
+            bias, front_mask, B, L, H, 0, 1.0 if dh else scale
         )
     else:
         # short inference calls: one GEMM for q | k | v | g | bias (a launch less); beyond L 256 the extra tile column costs more
@@ -431,28 +479,50 @@ def _forward(
             qkvg, front_mask, B, L, H, 4 * HD, scale
         )
     if not fused:
-        q, k, v, gt = _views(qkvg, B, L, HD, H)
+        q, k, v, gt = _views(qkvg, B, L, HD, H, dc)
     if flip:
         sbias = _core_mod.flip_bias(sbias, mask)
-    if gate_bias is not None:  # RoseTTAFold3's gate bias, laid out like the gate's (heads padded to 32 channels)
+    if gate_bias is not None and not need:  # RoseTTAFold3's gate bias, laid out like the gate's (heads padded to 32 channels)
         hd = gate_bias.numel() // H
         gt.add_(F.pad(gate_bias.view(H, hd), (0, D - hd)).to(gt.dtype))
     # the core's epilogue applies the gate: u = sigmoid(g) o (and writes o only when the backward needs it)
-    core = _core_mod._core_h16().triattn_fwd_h16 if h16 else _core_mod._core().triattn_fwd
-    o, lse, _, u = core(q, k, v, sbias, scale, need, gt, need)
+    if dh:
+        from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
+
+        o, lse, u = h100_dh.train_core(qkvg, sbias, H, dc, scale)
+    else:
+        core = _core_mod._core_h16().triattn_fwd_h16 if h16 else _core_mod._core().triattn_fwd
+        o, lse, _, u = core(q, k, v, sbias, scale, need, gt, need)
     # (the ending node's out-projection writes its transposed rows as a strided batch over i: one cublasLt GEMM per sample; one GEMM
     # + the residual kernel's transposed store was slower except at d_pair 64 L128, measured 2026-10-20)
     # RoseTTAFold3's out bias in the same epilogue, before its one rounding: added to the bf16 sum afterwards it was a second
     # rounding at the residual's scale
     bo = None if out_bias is None else out_bias.to(torch.bfloat16).contiguous()
-    if drop is None:
-        out = _lt().lt_mm(
-            u.view(M, HD), wo_p, x, L, trans, out, bo
+    lt = _lt()
+    u2 = u.view(M, HD)
+    if out_mode != STANDARD:
+        # Chai-1's layouts (training): the update in the pair's own row order -- untransposed: u Wo^T as it is; dual: the projection
+        # that lands untransposed, then the other one's rows transposed onto it (cublasLt's strided batch over i, the residual operand
+        # the first result) -- then x + drop o update
+        first, second = (wo_p, None) if out_mode == UNTRANSPOSED else ((wt_p, wo_p) if trans else (wo_p, wt_p))
+        if drop is None:
+            out = lt.lt_mm(u2, first, x, L, False, None, bo)
+            if second is not None:
+                out = lt.lt_mm(u2, second, out, L, True, None, None)
+        else:
+            t = lt.lt_mm(u2, first, None, 0, False, None, bo)
+            if second is not None:
+                t = lt.lt_mm(u2, second, t, L, True, None, None)
+            out = torch.addcmul(x.view(B, L, L, C), t.view(B, L, L, C), _drop_view(drop, B, L, C, trans))
+    elif drop is None:
+        out = lt.lt_mm(
+            u2, wo_p, x, L, trans, out, bo
         )  # x + u Wo^T [+ bo]: the residual in the GEMM epilogue (D != C, no staging copy)
     else:
-        t = torch.matmul(u.view(M, HD), wo_p.t())
-        if bo is not None:
-            t = t + bo
+        if bo is None:
+            t = torch.matmul(u2, wo_p.t())
+        else:
+            t = lt.lt_mm(u2, wo_p, None, 0, False, None, bo)  # u Wo^T + bo, one rounding
         out = g.residual(x, t, drop, L, trans)
     out = out.view(B, L, L, C)
     return out, (y, mean, rstd, qkvg, sbias, o, lse, u)
@@ -503,12 +573,21 @@ def train_forward(
     n_head,
     head_dim,
     trans=False,
+    flip=False,
+    gate_bias=None,
+    out_bias=None,
+    wo_t=None,
+    out_mode=STANDARD,
 ):
-    """-> (out [B, L, L, C], (y, mean, rstd, qkvg, sbias, o, lse, u)): the tensors the backward reads (o, u as [B, N, S, H, 32]).  Every
-    returned tensor is a fresh allocation (none aliases an argument), so it can be an output of a custom op."""
+    """-> (out [B, L, L, C], (y, mean, rstd, qkvg, sbias, o, lse, u)): the tensors the backward reads (o, u as [B, N, S, H, dc]).  Every
+    returned tensor is a fresh allocation (none aliases an argument), so it can be an output of a custom op.
+
+    The module variants: ``flip`` (the ending node's bias from the pair as it is, AF3 / RF3 / Chai-1), ``gate_bias`` / ``out_bias``
+    (RF3), ``out_mode`` UNTRANSPOSED (Chai-1's ending node) / DUAL (Chai-1's confidence head, second out-projection ``wo_t``)."""
     wcat, wo_p = pack_weights(wq, wk, wv, wg, wb, wo)
+    wt_p = None if wo_t is None else pack_out(wo_t, n_head, core_width(head_dim))
     return _forward(
-        pair, lnw, lnb, wcat, wo_p, mask, eps, drop, n_head, head_dim, True, trans
+        pair, lnw, lnb, wcat, wo_p, mask, eps, drop, n_head, head_dim, True, trans, None, flip, gate_bias, out_bias, out_mode, wt_p
     )
 
 
@@ -529,54 +608,95 @@ def train_backward(
     head_dim,
     saved,
     trans=False,
+    flip=False,
+    gate_bias=None,
+    out_bias=None,
+    wo_t=None,
+    out_mode=STANDARD,
 ):
-    """Gradients (pair, lnw, lnb, wq, wk, wv, wg, wb, wo) of `train_forward`, each in its input's dtype."""
+    """Gradients (pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gate_bias, out_bias, wo_t) of `train_forward`, each in its input's dtype (None
+    for an absent one)."""
     y, mean, rstd, qkvg, sbias, o, lse, u = saved
     B, L, _, C = pair.shape
     H, hd = n_head, head_dim
-    HD = H * D
+    dc = core_width(hd)
+    dh = dc != D
+    HD = H * dc
     M = B * L * L
     wcat, wo_p = pack_weights(wq, wk, wv, wg, wb, wo)
     lw = lnw.float().contiguous()
     x = pair.contiguous().view(M, C)
     o, u = o.view(M, HD), u.view(M, HD)
     g = _glue()
-    e = _core_mod._bwd()
     dy = dy.contiguous().view(M, C)
-    ddrop = g.gate_bwd_in(dy, drop if drop is not None else dy.new_empty(0), L, trans)
-    du = torch.matmul(ddrop, wo_p)
-    dwo = _mm_f32(ddrop.t(), u)
+    dwt = None
+    if out_mode == STANDARD:
+        ddrop = g.gate_bwd_in(dy, drop if drop is not None else dy.new_empty(0), L, trans)
+        du = torch.matmul(ddrop, wo_p)
+        dwo = _mm_f32(ddrop.t(), u)
+    else:
+        # the update's gradient in the pair's own layout, then each out-projection's in u's row order
+        dt = dy if drop is None else (dy.view(B, L, L, C) * _drop_view(drop, B, L, C, trans)).view(M, C)
+        if out_mode == UNTRANSPOSED:
+            ddrop = dt
+            du = torch.matmul(ddrop, wo_p)
+        else:
+            ddrop, dtt = (_t(dt, B, L), dt) if trans else (dt, _t(dt, B, L))   # (for Wo, for Wo_t)
+            wt_p = pack_out(wo_t, H, dc)
+            du = torch.addmm(torch.matmul(ddrop, wo_p), dtt, wt_p)
+            dwt = _mm_f32(dtt.t(), u)
+        dwo = _mm_f32(ddrop.t(), u)
+    dbo = None if out_bias is None else torch.sum(ddrop, 0, dtype=torch.float32)
     dall = torch.empty(M, wcat.shape[0], device=x.device, dtype=torch.bfloat16)
-    do, delta = g.gate_bwd_out(du, qkvg, o, dall, 3 * HD, H, L)
-    shp = (B, L, L, H, D)
-    q, k, v, _ = _views(qkvg, B, L, HD, H)
-    do5 = do.view(shp)
+    # Delta per 32-channel group; a 64-channel head is two groups
+    do, delta = g.gate_bwd_out(du, qkvg, o, dall, 3 * HD, HD // D, L)
+    if dh:
+        delta = delta.view(B, L, H, 2, L).sum(3)
+    shp = (B, L, L, H, dc)
     scale = hd**-0.5
-    dall5 = dall.view(-1).as_strided(
-        shp, (L * L * dall.shape[1], L * dall.shape[1], dall.shape[1], D, 1), 0
-    )
+    if dh:
+        from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
 
-    def slot(i):  # columns [i HD, (i + 1) HD) of dall
-        return dall5.as_strided(shp, dall5.stride(), i * HD)
+        dbias = h100_dh.backward(qkvg, sbias, do, lse, delta, dall, H, dc, scale)
+    else:
+        e = _core_mod._bwd()
+        q, k, v, _ = _views(qkvg, B, L, HD, H)
+        do5 = do.view(shp)
+        dall5 = dall.view(-1).as_strided(
+            shp, (L * L * dall.shape[1], L * dall.shape[1], dall.shape[1], D, 1), 0
+        )
 
-    e.triattn_bwd_kv(q, k, v, sbias, do5, lse, delta, scale, slot(1), slot(2))
-    dbias = torch.zeros(B, H, L, L, device=x.device, dtype=torch.float32)
-    _core_mod.bwd_q(e, q, k, v, sbias, do5, lse, delta, scale, dbias, slot(0))
+        def slot(i):  # columns [i HD, (i + 1) HD) of dall
+            return dall5.as_strided(shp, dall5.stride(), i * HD)
+
+        e.triattn_bwd_kv(q, k, v, sbias, do5, lse, delta, scale, slot(1), slot(2))
+        dbias = torch.zeros(B, H, L, L, device=x.device, dtype=torch.float32)
+        _core_mod.bwd_q(e, q, k, v, sbias, do5, lse, delta, scale, dbias, slot(0))
+    if flip:  # the core's bias was the transpose of the projected one
+        dbias = dbias.transpose(-1, -2).contiguous()
     g.assemble(dbias, dall, H, L, HD)
-    dyln = torch.matmul(dall, wcat)  # bf16 (the reference module's own precision here)
+    # bf16 (the reference module's own precision here) for the standard module; the variants (served since class version 2) keep it in
+    # fp32 into the LN backward (their LN-parameter gradients sat at the tolerance with the bf16 rounding)
+    plain = out_mode == STANDARD and not flip and gate_bias is None and out_bias is None and not dh
+    dyln = torch.matmul(dall, wcat) if plain else _mm_f32(dall, wcat)
     dx, part = g.ln_bwd(dyln, x, dy, lw, mean, rstd, L, trans)
     dg_db = part.sum(0)
     dw = _mm_f32(dall.t(), y)  # [4 HD + Hp, C]
 
-    def unpad(w):  # [H * 32, C] -> [H * hd, C]
-        return w if hd == D else w.view(H, D, -1)[:, :hd].reshape(H * hd, -1)
+    def unpad(w):  # [H * dc, C] -> [H * hd, C]
+        return w if hd == dc else w.view(H, dc, -1)[:, :hd].reshape(H * hd, -1)
+
+    def unpad_out(w):  # [C, H * dc] -> [C, H * hd]
+        return w if hd == dc else w.view(C, H, dc)[:, :, :hd].reshape(C, H * hd)
 
     # (clones: the outputs of a custom op may not alias each other, and these are slices of one buffer)
     dwq, dwk, dwv, dwg = (
         unpad(dw[i * HD : (i + 1) * HD]).to(wq.dtype).clone() for i in range(4)
     )
     dwb = dw[4 * HD : 4 * HD + H].to(wb.dtype).clone()
-    dwo = dwo if hd == D else dwo.view(C, H, D)[:, :, :hd].reshape(C, H * hd)
+    dgb = None
+    if gate_bias is not None:
+        dgb = unpad(torch.sum(dall[:, 3 * HD : 4 * HD], 0, dtype=torch.float32).view(H * dc, 1)).view(-1).to(gate_bias.dtype)
     return (
         dx.view(B, L, L, C),
         dg_db[0].to(lnw.dtype).clone(),
@@ -586,7 +706,10 @@ def train_backward(
         dwv,
         dwg,
         dwb,
-        dwo.to(wo.dtype).clone(),
+        unpad_out(dwo).to(wo.dtype).clone(),
+        dgb,
+        None if dbo is None else dbo.to(out_bias.dtype),
+        None if dwt is None else unpad_out(dwt).to(wo_t.dtype).clone(),
     )
 
 
@@ -642,7 +765,7 @@ class TriAttnGeneric(torch.autograd.Function):
             head_dim,
             saved,
         )
-        return (*grads, None, None, None, None, None)
+        return (*grads[:9], None, None, None, None, None)
 
 
 def triangle_attention(

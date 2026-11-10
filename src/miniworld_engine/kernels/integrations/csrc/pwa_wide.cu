@@ -38,7 +38,16 @@ constexpr int H = 8, C = PW_C, D = PW_D, HC = H * C, TS = 64, NWG = PW_NWG, NT =
 constexpr int NKD = D / 64, NKH = HC / 64, NK2 = 2 * HC / 64, NCD = D / 64, NCH = HC / 64;
 constexpr int TILE = TS * 64;                              // elements of one [64 rows][64 cols] block
 static_assert(D % 64 == 0 && HC % 64 == 0 && C % 8 == 0, "d_msa must be a multiple of 64, 8 * d_hidden of 64");
+// The BIG build (8 x 32 = 256 hidden channels at d_msa 256, IntelliFold2): one 128 KiB weight is what fits next to a double-buffered
+// tile, so gate_out_w is split at the gated product into gate_w (Wg resident) and out_w (Wo resident), the gate backward reads the
+// forward's sigmoid gate instead of recomputing it (only Wo^T resident), and dy = [dgp | dv] [Wg; Wv] (a 256 KiB weight) runs on
+// cuBLAS ahead of ln_bwd_w.  ln_vg_w is shared (its GEMM in two passes of 128 hidden channels).
+#define PW_BIG ((PW_C) * 8 > 128 || (PW_D) * (PW_C) * 8 > 16384)
+#if PW_BIG
+static_assert(HC == 256 && D == 256, "the BIG build is written for d_msa 256 x (8 heads x 32): staging tiles of [64][256]");
+#else
 static_assert(HC <= 128 && D * HC <= 16384, "register / shared budget of the wide kernels");
+#endif
 
 __device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
 // 16-byte chunk `chunk` of row r in a [rows][64] block of block-index kb, 128-byte swizzle (element offset)
@@ -180,30 +189,37 @@ __global__ void __launch_bounds__(NT) ln_vg_kernel(const bf16* __restrict__ X, c
     ln_tile(sx, wtid, g, b, eps, Y, STATS, n, s0, S, N);
     wgw::proxy_fence();
     wg_sync(wgi);
-    float acc[NCH][32];
+    // the value GEMM in passes of NCB 64-column blocks: one pass (all NCH blocks) up to 128 hidden channels; the BIG build (256) runs
+    // two, so the accumulator stays at 64 registers next to the LayerNorm's gamma / beta
+    constexpr int NCB = NCH > 2 ? 2 : NCH;
+#pragma unroll
+    for (int jb = 0; jb < NCH; jb += NCB) {
+    float acc[NCB][32];
     wgw::fence();
 #pragma unroll
     for (int ks = 0; ks < D / 16; ++ks)
 #pragma unroll
-      for (int j = 0; j < NCH; ++j)
-        wgw::ss64(wgw::desc(sx + (ks >> 2) * TILE + (ks & 3) * 16), wgw::desc(sW + ((ks >> 2) * HC + 64 * j) * 64 + (ks & 3) * 16), acc[j], ks == 0 ? 0 : 1);
+      for (int j = 0; j < NCB; ++j)
+        wgw::ss64(wgw::desc(sx + (ks >> 2) * TILE + (ks & 3) * 16), wgw::desc(sW + ((ks >> 2) * HC + 64 * (jb + j)) * 64 + (ks & 3) * 16), acc[j], ks == 0 ? 0 : 1);
     wgw::commit();
     wgw::wait();
 #pragma unroll
-    for (int j = 0; j < NCH; ++j)
+    for (int j = 0; j < NCB; ++j)
 #pragma unroll
       for (int nt = 0; nt < 8; ++nt) {
-        const int col = j * 64 + nt * 8 + q2, h = col / C, c = col % C;
+        const int col = (jb + j) * 64 + nt * 8 + q2, h = col / C, c = col % C;
 #pragma unroll
         for (int rr = 0; rr < 2; ++rr) {
           const int s = s0 + r0 + rr * 8;
           if (s < S) *reinterpret_cast<uint32_t*>(V + ((long)h * N + n) * ((long)S * C) + (long)s * C + c) = pack2(acc[j][nt * 4 + rr * 2], acc[j][nt * 4 + rr * 2 + 1]);
         }
       }
+    }
     wg_sync(wgi);
   }
 }
 
+#if !PW_BIG
 // ---------------------------------------------------------------------------------------------------------------
 // K2: gate, gated product, out projection, dropout, residual.  LN: the tile source Y is the raw MSA and y = LN(m) is formed in place
 // (inference, which keeps no y); otherwise Y is the y that ln_vg_w stored.
@@ -586,6 +602,344 @@ __global__ void __launch_bounds__(NT) dm_bwd_kernel(const bf16* __restrict__ DVH
   }
 }
 
+#else  // PW_BIG
+// head-major layout [H][N][S*C], heads h0 .. h0 + NHP - 1 of a staged [64 rows][NHP * C] tile (one half of the hidden channels)
+template <int NHP>
+__device__ __forceinline__ void st_flush_hm_part(const bf16* st, int wtid, bf16* base, int h0, int n, int N, int s0, int S) {
+  constexpr int PER = TS * (C / 8);
+  for (int v = wtid; v < NHP * PER; v += 128) {
+    const int hl = v / PER, rem = v % PER, row = rem % TS, c8 = rem / TS;   // rows fastest (see st_flush_hm)
+    if (s0 + row < S)
+      *reinterpret_cast<uint4*>(base + ((long)(h0 + hl) * N + n) * ((long)S * C) + (long)(s0 + row) * C + c8 * 8) = st_get(st, row, hl * (C / 8) + c8);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// K2a (BIG): gate and gated product -- the first half of gate_out_kernel.  g = sigmoid(bf16(y . Wg^T)) rounded to bf16 (the module's
+// bf16 linear and sigmoid), a = bf16(o * g) with o head-major from the bmm; both leave in the natural [S, N, HC] layout (a for out_w,
+// g kept for the backward when G is set).  LN: the tile source Y is the raw MSA and y = LN(m) is formed in place (inference).
+// ---------------------------------------------------------------------------------------------------------------
+template <bool LN>
+__global__ void __launch_bounds__(NT) gate_big_kernel(const bf16* __restrict__ O, const bf16* __restrict__ Y, const bf16* __restrict__ WG,
+                                                      const float* __restrict__ LNW, const float* __restrict__ LNB, float eps,
+                                                      bf16* __restrict__ A, bf16* __restrict__ G, int N, int S, int ntile) {
+  extern __shared__ unsigned char smem_raw[];
+  bf16* sY = reinterpret_cast<bf16*>(align1k(smem_raw));         // [2][NKD][TILE]; after the GEMM the tile stages a, then g
+  bf16* sWg = sY + NWG * 2 * NKD * TILE;                        // [NKD][HC][64]      Wg [HC][D]: rows = hidden, k = d
+  const int tid = threadIdx.x, wgi = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
+  auto load = [&](int buf, int t) {
+    const int n = t % N, s0 = (t / N) * TS;
+    for (int v = wtid; v < TS * (D / 8); v += 128) {
+      const int row = v / (D / 8), ch = v % (D / 8);
+      const bool ok = s0 + row < S;
+      cp16(sa(sY + (wgi * 2 + buf) * NKD * TILE + so(ch >> 3, TS, row, ch & 7)), ok ? Y + ((long)(s0 + row) * N + n) * D + ch * 8 : Y, ok);
+    }
+  };
+  for (int v = tid; v < HC * (D / 8); v += NT) {
+    const int n = v / (D / 8), c8 = v % (D / 8);
+    cp16(sa(sWg + so(c8 >> 3, HC, n, c8 & 7)), WG + (long)n * D + c8 * 8, true);
+  }
+  __shared__ float sGB[LN ? 2 * D : 1];
+  if (LN)
+    for (int k = tid; k < 2 * D; k += NT) sGB[k] = k < D ? LNW[k] : LNB[k - D];
+  cp_commit();                                                   // the weights
+  cp_wait<0>();
+  __syncthreads();                                               // (the only block-wide barrier)
+  if ((int)(blockIdx.x * NWG + wgi) < ntile) load(0, blockIdx.x * NWG + wgi);
+  cp_commit();
+  const int r0 = warp * 16 + (lane >> 2), q2 = (lane & 3) * 2;
+  for (int it = 0;; ++it) {
+    const int t = (int)(blockIdx.x * NWG + wgi) + it * (int)(gridDim.x * NWG);
+    if (t >= ntile) break;
+    const int buf = it & 1, tn = t + (int)(gridDim.x * NWG);
+    if (tn < ntile) load(buf ^ 1, tn);
+    cp_commit();
+    const int n = t % N, s0 = (t / N) * TS;
+    cp_wait<1>();
+    bf16* sy = sY + (wgi * 2 + buf) * NKD * TILE;
+    if (LN) {
+      wg_sync(wgi);                                              // the tile landed: normalise it in place
+      float g[32], b[32];
+#pragma unroll
+      for (int k = 0; k < 32; ++k) { g[k] = sGB[(wtid % (D / 32)) * 32 + k]; b[k] = sGB[D + (wtid % (D / 32)) * 32 + k]; }
+      ln_tile(sy, wtid, g, b, eps, nullptr, nullptr, n, s0, S, N);
+    }
+    wgw::proxy_fence();
+    wg_sync(wgi);
+    float gacc[NCH][32];
+    wgw::fence();
+#pragma unroll
+    for (int ks = 0; ks < D / 16; ++ks)
+#pragma unroll
+      for (int j = 0; j < NCH; ++j)
+        wgw::ss64(wgw::desc(sy + (ks >> 2) * TILE + (ks & 3) * 16), wgw::desc(sWg + ((ks >> 2) * HC + 64 * j) * 64 + (ks & 3) * 16), gacc[j], ks == 0 ? 0 : 1);
+    wgw::commit();
+    wgw::wait();
+#pragma unroll
+    for (int j = 0; j < NCH; ++j)
+#pragma unroll
+      for (int k = 0; k < 32; ++k) gacc[j][k] = rbf(1.f / (1.f + __expf(-rbf(gacc[j][k]))));   // g = bf16(sigmoid(bf16(gate)))
+    wg_sync(wgi);                                                // every warp is past the gate GEMM: the y tile becomes the staging
+#pragma unroll 1
+    for (int round = 0; round < (G != nullptr ? 2 : 1); ++round) {
+#pragma unroll
+      for (int j = 0; j < NCH; ++j)
+#pragma unroll
+        for (int nl = 0; nl < 8; ++nl) {
+          const int col = j * 64 + nl * 8 + q2, h = col / C, c = col % C;
+#pragma unroll
+          for (int rr = 0; rr < 2; ++rr) {
+            const int s = s0 + r0 + rr * 8;
+            const float g0 = gacc[j][nl * 4 + rr * 2], g1 = gacc[j][nl * 4 + rr * 2 + 1];
+            uint32_t v;
+            if (round == 0) {
+              const float2 o = s < S ? unpack2(*reinterpret_cast<const uint32_t*>(O + ((long)h * N + n) * ((long)S * C) + (long)s * C + c)) : make_float2(0.f, 0.f);
+              v = pack2(o.x * g0, o.y * g1);
+            } else {
+              v = pack2(g0, g1);
+            }
+            st_put(sy, r0 + rr * 8, col, v);
+          }
+        }
+      wg_sync(wgi);
+      st_flush_nat<HC>(sy, wtid, round == 0 ? A : G, HC, 0, n, N, s0, S);
+      wg_sync(wgi);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// K2b (BIG): out projection, dropout, residual -- the second half of gate_out_kernel, with the gated product a [S, N, HC] as a staged
+// A operand (cp.async double-buffered) instead of registers.
+// ---------------------------------------------------------------------------------------------------------------
+__global__ void __launch_bounds__(NT) out_big_kernel(const bf16* __restrict__ A, const bf16* __restrict__ X, const bf16* __restrict__ WO,
+                                                     const bf16* __restrict__ DMASK, float dscale, bf16* __restrict__ OUT, int N, int S, int ntile) {
+  extern __shared__ unsigned char smem_raw[];
+  bf16* sA = reinterpret_cast<bf16*>(align1k(smem_raw));         // [2][NKH][TILE]; after the GEMM the tile stages the output
+  bf16* sWo = sA + NWG * 2 * NKH * TILE;                        // [NKH][D][64]       Wo [D][HC]: rows = d, k = hidden
+  const int tid = threadIdx.x, wgi = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
+  auto load = [&](int buf, int t) {
+    const int n = t % N, s0 = (t / N) * TS;
+    for (int v = wtid; v < TS * (HC / 8); v += 128) {
+      const int row = v / (HC / 8), ch = v % (HC / 8);
+      const bool ok = s0 + row < S;
+      cp16(sa(sA + (wgi * 2 + buf) * NKH * TILE + so(ch >> 3, TS, row, ch & 7)), ok ? A + ((long)(s0 + row) * N + n) * HC + ch * 8 : A, ok);
+    }
+  };
+  for (int v = tid; v < D * (HC / 8); v += NT) {
+    const int n = v / (HC / 8), c8 = v % (HC / 8);
+    cp16(sa(sWo + so(c8 >> 3, D, n, c8 & 7)), WO + (long)n * HC + c8 * 8, true);
+  }
+  cp_commit();                                                   // the weights
+  cp_wait<0>();
+  __syncthreads();                                               // (the only block-wide barrier)
+  if ((int)(blockIdx.x * NWG + wgi) < ntile) load(0, blockIdx.x * NWG + wgi);
+  cp_commit();
+  const int r0 = warp * 16 + (lane >> 2), q2 = (lane & 3) * 2;
+  for (int it = 0;; ++it) {
+    const int t = (int)(blockIdx.x * NWG + wgi) + it * (int)(gridDim.x * NWG);
+    if (t >= ntile) break;
+    const int buf = it & 1, tn = t + (int)(gridDim.x * NWG);
+    if (tn < ntile) load(buf ^ 1, tn);
+    cp_commit();
+    cp_wait<1>();
+    wgw::proxy_fence();
+    wg_sync(wgi);
+    const int n = t % N, s0 = (t / N) * TS;
+    bf16* sa_ = sA + (wgi * 2 + buf) * NKH * TILE;
+    float oacc[NCD][32];
+    wgw::fence();
+#pragma unroll
+    for (int kk = 0; kk < HC / 16; ++kk)
+#pragma unroll
+      for (int jn = 0; jn < NCD; ++jn)
+        wgw::ss64(wgw::desc(sa_ + (kk >> 2) * TILE + (kk & 3) * 16), wgw::desc(sWo + ((kk >> 2) * D + 64 * jn) * 64 + (kk & 3) * 16), oacc[jn], kk == 0 ? 0 : 1);
+    wgw::commit();
+    wgw::wait();
+    wg_sync(wgi);                                                // every warp is past the GEMM: the a tile becomes the output staging
+#pragma unroll
+    for (int jn = 0; jn < NCD; ++jn)
+#pragma unroll
+      for (int nt = 0; nt < 8; ++nt) {
+        const int col = jn * 64 + nt * 8 + q2;
+        float2 dm = make_float2(1.f, 1.f);
+        if (DMASK != nullptr) { dm = unpack2(*reinterpret_cast<const uint32_t*>(DMASK + (long)n * D + col)); dm.x *= dscale; dm.y *= dscale; }
+#pragma unroll
+        for (int rr = 0; rr < 2; ++rr) {
+          const int s = s0 + r0 + rr * 8;
+          // the stock module rounds the update to bf16 before the (dropout and the) residual add
+          float u0 = rbf(oacc[jn][nt * 4 + rr * 2]), u1 = rbf(oacc[jn][nt * 4 + rr * 2 + 1]);
+          if (DMASK != nullptr) { u0 = rbf(u0 * dm.x); u1 = rbf(u1 * dm.y); }
+          const float2 xr = s < S ? unpack2(*reinterpret_cast<const uint32_t*>(X + ((long)s * N + n) * D + col)) : make_float2(0.f, 0.f);
+          st_put(sa_, r0 + rr * 8, col, pack2(xr.x + u0, xr.y + u1));
+        }
+      }
+    wg_sync(wgi);
+    st_flush_nat<D>(sa_, wtid, OUT, D, 0, n, N, s0, S);
+    wg_sync(wgi);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// K3 (BIG): gate backward with the forward's g = sigmoid(gate) read back (no Wg on chip): do' = dout . Wo in two passes of 128 hidden
+// channels; per pass go = g o, dgp = do' o g (1 - g), do = do' g (head-major), staged and written as 16-byte rows.
+// ---------------------------------------------------------------------------------------------------------------
+__global__ void __launch_bounds__(NT) gate_bwd_big_kernel(const bf16* __restrict__ O, const bf16* __restrict__ G, const bf16* __restrict__ DOUT,
+                                                          const bf16* __restrict__ WOT, bf16* __restrict__ DOH, bf16* __restrict__ GO,
+                                                          bf16* __restrict__ DGV, int N, int S, int ntile) {
+  constexpr int NHB = 2, HALF = NHB * 64;                        // 64-column blocks per pass, hidden channels per pass
+  extern __shared__ unsigned char smem_raw[];
+  bf16* sD = reinterpret_cast<bf16*>(align1k(smem_raw));         // [2][NKD][TILE]  dout
+  bf16* sWt = sD + NWG * 2 * NKD * TILE;                        // [NKD][HC][64]   Wo^T [HC][D]
+  bf16* sSt = sWt + NKD * HC * 64;                               // [NWG][NHB][TILE] staging of one pass
+  const int tid = threadIdx.x, wgi = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
+  auto load = [&](int buf, int t) {
+    const int n = t % N, s0 = (t / N) * TS;
+    for (int v = wtid; v < TS * (D / 8); v += 128) {
+      const int row = v / (D / 8), ch = v % (D / 8);
+      const bool ok = s0 + row < S;
+      cp16(sa(sD + (wgi * 2 + buf) * NKD * TILE + so(ch >> 3, TS, row, ch & 7)), ok ? DOUT + ((long)(s0 + row) * N + n) * D + ch * 8 : DOUT, ok);
+    }
+  };
+  for (int v = tid; v < HC * (D / 8); v += NT) {
+    const int n = v / (D / 8), c8 = v % (D / 8);
+    cp16(sa(sWt + so(c8 >> 3, HC, n, c8 & 7)), WOT + (long)n * D + c8 * 8, true);
+  }
+  cp_commit();                                                   // the weights
+  cp_wait<0>();
+  __syncthreads();                                               // (the only block-wide barrier)
+  if ((int)(blockIdx.x * NWG + wgi) < ntile) load(0, blockIdx.x * NWG + wgi);
+  cp_commit();
+  const int r0 = warp * 16 + (lane >> 2), q2 = (lane & 3) * 2;
+  bf16* st = sSt + wgi * NHB * TILE;
+  for (int it = 0;; ++it) {
+    const int t = (int)(blockIdx.x * NWG + wgi) + it * (int)(gridDim.x * NWG);
+    if (t >= ntile) break;
+    const int buf = it & 1, tn = t + (int)(gridDim.x * NWG);
+    if (tn < ntile) load(buf ^ 1, tn);
+    cp_commit();
+    cp_wait<1>();
+    wgw::proxy_fence();
+    wg_sync(wgi);
+    const int n = t % N, s0 = (t / N) * TS;
+    const bf16* sd = sD + (wgi * 2 + buf) * NKD * TILE;
+#pragma unroll 1
+    for (int half = 0; half < NCH / NHB; ++half) {
+      float dacc[NHB][32];
+      wgw::fence();
+#pragma unroll
+      for (int ks = 0; ks < D / 16; ++ks)
+#pragma unroll
+        for (int j = 0; j < NHB; ++j)
+          wgw::ss64(wgw::desc(sd + (ks >> 2) * TILE + (ks & 3) * 16), wgw::desc(sWt + ((ks >> 2) * HC + 64 * (half * NHB + j)) * 64 + (ks & 3) * 16), dacc[j], ks == 0 ? 0 : 1);
+      wgw::commit();
+      wgw::wait();
+      uint32_t of[NHB * 8][2], gf[NHB * 8][2];
+#pragma unroll
+      for (int nt = 0; nt < NHB * 8; ++nt) {
+        const int col = half * HALF + nt * 8 + q2, h = col / C, c = col % C;
+#pragma unroll
+        for (int rr = 0; rr < 2; ++rr) {
+          const int s = s0 + r0 + rr * 8;
+          of[nt][rr] = s < S ? *reinterpret_cast<const uint32_t*>(O + ((long)h * N + n) * ((long)S * C) + (long)s * C + c) : 0u;
+          gf[nt][rr] = s < S ? *reinterpret_cast<const uint32_t*>(G + ((long)s * N + n) * HC + col) : 0u;
+        }
+      }
+#pragma unroll
+      for (int round = 0; round < 3; ++round) {
+#pragma unroll
+        for (int j = 0; j < NHB; ++j)
+#pragma unroll
+          for (int nl = 0; nl < 8; ++nl) {
+            const int nt = j * 8 + nl, lcol = nt * 8 + q2;
+#pragma unroll
+            for (int rr = 0; rr < 2; ++rr) {
+              const float2 o = unpack2(of[nt][rr]), g = unpack2(gf[nt][rr]);
+              const float d0 = dacc[j][nl * 4 + rr * 2], d1 = dacc[j][nl * 4 + rr * 2 + 1];
+              uint32_t v;
+              if (round == 0) v = pack2(o.x * g.x, o.y * g.y);
+              else if (round == 1) v = pack2(d0 * o.x * g.x * (1.f - g.x), d1 * o.y * g.y * (1.f - g.y));
+              else v = pack2(d0 * g.x, d1 * g.y);
+              st_put(st, r0 + rr * 8, lcol, v);
+            }
+          }
+        wg_sync(wgi);
+        if (round == 0) st_flush_nat<HALF>(st, wtid, GO, HC, half * HALF, n, N, s0, S);
+        else if (round == 1) st_flush_nat<HALF>(st, wtid, DGV, 2 * HC, half * HALF, n, N, s0, S);
+        else st_flush_hm_part<HALF / C>(st, wtid, DOH, half * (HALF / C), n, N, s0, S);
+        wg_sync(wgi);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// K4 (BIG): LayerNorm backward + the residual gradient off a dy [S*N, D] fp32 that cuBLAS formed as [dgp | dv] [Wg; Wv] (dm_bwd_kernel's
+// epilogue without its GEMM): one warp per row (D / 32 contiguous channels a lane), persistent; dgamma / dbeta per-CTA partials summed
+// over the warps in a fixed order.
+// ---------------------------------------------------------------------------------------------------------------
+constexpr int LB_WARPS = 8, LB_CPL = D / 32;
+static_assert(LB_CPL % 8 == 0, "a lane's channels are whole 16-byte bf16 chunks");
+__global__ void __launch_bounds__(LB_WARPS * 32) ln_bwd_big_kernel(const float* __restrict__ DY, const bf16* __restrict__ X, const float* __restrict__ STATS,
+                                                                   const bf16* __restrict__ DRES, const float* __restrict__ LNW, bf16* __restrict__ DM,
+                                                                   float* __restrict__ PART, long rows) {
+  __shared__ float sRed[LB_WARPS][2][D];
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, c0 = lane * LB_CPL;
+  float gam[LB_CPL], dgs[LB_CPL], dbs[LB_CPL];
+#pragma unroll
+  for (int k = 0; k < LB_CPL; ++k) { gam[k] = LNW[c0 + k]; dgs[k] = 0.f; dbs[k] = 0.f; }
+  for (long r = (long)blockIdx.x * LB_WARPS + warp; r < rows; r += (long)gridDim.x * LB_WARPS) {
+    float dy[LB_CPL], x[LB_CPL], rf[LB_CPL];
+#pragma unroll
+    for (int q = 0; q < LB_CPL / 4; ++q) {
+      const float4 f = *reinterpret_cast<const float4*>(DY + r * D + c0 + q * 4);
+      dy[q * 4] = f.x; dy[q * 4 + 1] = f.y; dy[q * 4 + 2] = f.z; dy[q * 4 + 3] = f.w;
+    }
+#pragma unroll
+    for (int q = 0; q < LB_CPL / 8; ++q) {
+      const uint4 u = *reinterpret_cast<const uint4*>(X + r * D + c0 + q * 8), w = *reinterpret_cast<const uint4*>(DRES + r * D + c0 + q * 8);
+      const uint32_t* pu = reinterpret_cast<const uint32_t*>(&u);
+      const uint32_t* pw = reinterpret_cast<const uint32_t*>(&w);
+#pragma unroll
+      for (int k = 0; k < 4; ++k) {
+        const float2 a = unpack2(pu[k]), b = unpack2(pw[k]);
+        x[q * 8 + k * 2] = a.x; x[q * 8 + k * 2 + 1] = a.y; rf[q * 8 + k * 2] = b.x; rf[q * 8 + k * 2 + 1] = b.y;
+      }
+    }
+    const float2 st = *reinterpret_cast<const float2*>(STATS + r * 2);
+    float sg = 0.f, sgx = 0.f;
+#pragma unroll
+    for (int k = 0; k < LB_CPL; ++k) {
+      x[k] = (x[k] - st.x) * st.y;                               // xhat
+      const float d = dy[k] * gam[k];
+      sg += d; sgx += d * x[k];
+      dgs[k] += dy[k] * x[k]; dbs[k] += dy[k];
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) { sg += __shfl_xor_sync(0xffffffffu, sg, o); sgx += __shfl_xor_sync(0xffffffffu, sgx, o); }
+    sg *= (1.f / D); sgx *= (1.f / D);
+    uint32_t outv[LB_CPL / 2];
+#pragma unroll
+    for (int k = 0; k < LB_CPL / 2; ++k) {
+      const float d0 = dy[2 * k] * gam[2 * k], d1 = dy[2 * k + 1] * gam[2 * k + 1];
+      outv[k] = pack2(st.y * (d0 - sg - x[2 * k] * sgx) + rf[2 * k], st.y * (d1 - sg - x[2 * k + 1] * sgx) + rf[2 * k + 1]);
+    }
+#pragma unroll
+    for (int q = 0; q < LB_CPL / 8; ++q)
+      *reinterpret_cast<uint4*>(DM + r * D + c0 + q * 8) = make_uint4(outv[q * 4], outv[q * 4 + 1], outv[q * 4 + 2], outv[q * 4 + 3]);
+  }
+#pragma unroll
+  for (int k = 0; k < LB_CPL; ++k) { sRed[warp][0][c0 + k] = dgs[k]; sRed[warp][1][c0 + k] = dbs[k]; }
+  __syncthreads();
+  for (int k = tid; k < 2 * D; k += LB_WARPS * 32) {
+    const int w = k / D, col = k % D;
+    float a = 0.f;
+    for (int q = 0; q < LB_WARPS; ++q) a += sRed[q][w][col];                // fixed order
+    PART[((long)blockIdx.x * 2 + w) * D + col] = a;
+  }
+}
+#endif  // PW_BIG
+
 // persistent grid: one CTA per resident slot; the launch attribute and the occupancy are queried once per kernel (keyed by the
 // function, not its type: gate_out_kernel<true> and <false> share one)
 template <typename K>
@@ -627,6 +981,7 @@ std::vector<torch::Tensor> ln_vg_w(torch::Tensor m, torch::Tensor lnw, torch::Te
   return {v, y, stats};
 }
 
+#if !PW_BIG
 // y is the stored LN(m) from ln_vg_w, or -- with lnw / lnb -- the raw m, normalised inside (inference: nothing stores y)
 torch::Tensor gate_out_w(torch::Tensor o, torch::Tensor y, torch::Tensor m, torch::Tensor wg, torch::Tensor wo, c10::optional<torch::Tensor> dmask, double dscale,
                          c10::optional<torch::Tensor> lnw, c10::optional<torch::Tensor> lnb, double eps) {
@@ -691,10 +1046,101 @@ std::vector<torch::Tensor> dm_bwd_w(torch::Tensor dvh, torch::Tensor dgv, torch:
   return {dm, red[0], red[1]};
 }
 
+#else  // PW_BIG
+// -> {a [S, N, HC], g [S, N, HC] (save_g, else empty)}: y is the stored LN(m) from ln_vg_w, or -- with lnw / lnb -- the raw m
+std::vector<torch::Tensor> gate_w(torch::Tensor o, torch::Tensor y, torch::Tensor wg, bool save_g, c10::optional<torch::Tensor> lnw,
+                                  c10::optional<torch::Tensor> lnb, double eps) {
+  check_bf16(o, "o"); check_bf16(y, "y"); check_bf16(wg, "wg");
+  const int S = (int)y.size(0), N = (int)y.size(1);
+  TORCH_CHECK(y.dim() == 3 && y.size(2) == D && o.sizes() == torch::IntArrayRef({H, N, (long)S * C}), "shapes");
+  TORCH_CHECK(wg.sizes() == torch::IntArrayRef({HC, D}), "wg: [HC, D]");
+  const bool ln = lnw.has_value();
+  TORCH_CHECK(ln == lnb.has_value(), "lnw and lnb come together");
+  if (ln) TORCH_CHECK(lnw->scalar_type() == torch::kFloat && lnw->numel() == D && lnb->scalar_type() == torch::kFloat && lnb->numel() == D, "LN params fp32 [D]");
+  auto a = torch::empty({S, N, (long)HC}, y.options());
+  auto g = save_g ? torch::empty({S, N, (long)HC}, y.options()) : torch::empty({0}, y.options());
+  const int ntile = N * ((S + TS - 1) / TS);
+  const int smem = 1024 + (NWG * 2 * NKD * TILE + NKD * HC * 64) * 2;
+  const float* gp = ln ? lnw->data_ptr<float>() : nullptr;
+  const float* bp = ln ? lnb->data_ptr<float>() : nullptr;
+  auto stream = at::cuda::getCurrentCUDAStream();
+  bf16* gptr = save_g ? W(g) : nullptr;
+  if (ln) {
+    const int grid = grid_for(gate_big_kernel<true>, smem, (ntile + NWG - 1) / NWG, y.device().index());
+    gate_big_kernel<true><<<grid, NT, smem, stream>>>(P(o), P(y), P(wg), gp, bp, (float)eps, W(a), gptr, N, S, ntile);
+  } else {
+    const int grid = grid_for(gate_big_kernel<false>, smem, (ntile + NWG - 1) / NWG, y.device().index());
+    gate_big_kernel<false><<<grid, NT, smem, stream>>>(P(o), P(y), P(wg), gp, bp, 0.f, W(a), gptr, N, S, ntile);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {a, g};
+}
+
+// out = m + drop(Wo . a)
+torch::Tensor out_w(torch::Tensor a, torch::Tensor m, torch::Tensor wo, c10::optional<torch::Tensor> dmask, double dscale) {
+  check_bf16(a, "a"); check_bf16(m, "m"); check_bf16(wo, "wo");
+  const int S = (int)m.size(0), N = (int)m.size(1);
+  TORCH_CHECK(m.dim() == 3 && m.size(2) == D && a.sizes() == torch::IntArrayRef({S, N, (long)HC}), "shapes");
+  TORCH_CHECK(wo.sizes() == torch::IntArrayRef({D, HC}), "wo: [D, HC]");
+  if (dmask.has_value()) { check_bf16(*dmask, "dmask"); TORCH_CHECK(dmask->sizes() == torch::IntArrayRef({N, D}), "dmask: [N, D]"); }
+  auto out = torch::empty_like(m);
+  const int ntile = N * ((S + TS - 1) / TS);
+  const int smem = 1024 + (NWG * 2 * NKH * TILE + NKH * D * 64) * 2;
+  const int grid = grid_for(out_big_kernel, smem, (ntile + NWG - 1) / NWG, m.device().index());
+  out_big_kernel<<<grid, NT, smem, at::cuda::getCurrentCUDAStream()>>>(P(a), P(m), P(wo), dmask.has_value() ? P(*dmask) : nullptr, (float)dscale, W(out), N, S, ntile);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
+// -> {do (head-major), go [S, N, HC]}; dgp lands in dgv[..., :HC].  g: the forward's sigmoid gate [S, N, HC]
+std::vector<torch::Tensor> gate_bwd_big_w(torch::Tensor o, torch::Tensor g, torch::Tensor dout, torch::Tensor wot, torch::Tensor dgv) {
+  check_bf16(o, "o"); check_bf16(g, "g"); check_bf16(dout, "dout"); check_bf16(wot, "wot"); check_bf16(dgv, "dgv");
+  const int S = (int)dout.size(0), N = (int)dout.size(1);
+  TORCH_CHECK(dout.dim() == 3 && dout.size(2) == D && o.sizes() == torch::IntArrayRef({H, N, (long)S * C}), "shapes");
+  TORCH_CHECK(g.sizes() == torch::IntArrayRef({S, N, (long)HC}), "g: [S, N, HC]");
+  TORCH_CHECK(wot.sizes() == torch::IntArrayRef({HC, D}), "wot: Wo^T [HC, D]");
+  TORCH_CHECK(dgv.sizes() == torch::IntArrayRef({S, N, 2 * HC}), "dgv: [S, N, 2 HC]");
+  auto doh = torch::empty_like(o);
+  auto go = torch::empty({S, N, (long)HC}, dout.options());
+  const int ntile = N * ((S + TS - 1) / TS);
+  const int smem = 1024 + (NWG * 2 * NKD * TILE + NKD * HC * 64 + NWG * 2 * TILE) * 2;
+  const int grid = grid_for(gate_bwd_big_kernel, smem, (ntile + NWG - 1) / NWG, dout.device().index());
+  gate_bwd_big_kernel<<<grid, NT, smem, at::cuda::getCurrentCUDAStream()>>>(P(o), P(g), P(dout), P(wot), W(doh), W(go), W(dgv), N, S, ntile);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {doh, go};
+}
+
+// -> {dm [S, N, D], dgamma [D], dbeta [D]}: dy is fp32 [S, N, D] (= [dgp | dv] [Wg; Wv])
+std::vector<torch::Tensor> ln_bwd_w(torch::Tensor dy, torch::Tensor m, torch::Tensor stats, torch::Tensor dres, torch::Tensor lnw) {
+  check_bf16(m, "m"); check_bf16(dres, "dres");
+  TORCH_CHECK(m.dim() == 3 && m.size(2) == D && dres.sizes() == m.sizes(), "m / dres: [S, N, D]");
+  TORCH_CHECK(dy.is_cuda() && dy.scalar_type() == torch::kFloat && dy.is_contiguous() && dy.numel() == m.numel(), "dy: contiguous fp32 [S, N, D]");
+  TORCH_CHECK(stats.scalar_type() == torch::kFloat && stats.is_contiguous() && stats.numel() == m.numel() / D * 2, "stats: fp32 [S, N, 2]");
+  TORCH_CHECK(lnw.scalar_type() == torch::kFloat && lnw.is_contiguous() && lnw.numel() == D, "lnw: fp32 [D]");
+  auto dm = torch::empty_like(m);
+  const long rows = m.numel() / D;
+  int sms = 0;
+  cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, m.device().index());
+  const int grid = (int)std::max<long>(1, std::min<long>((rows + LB_WARPS - 1) / LB_WARPS, (long)sms * 8));
+  auto part = torch::empty({grid, 2, (long)D}, m.options().dtype(torch::kFloat));
+  ln_bwd_big_kernel<<<grid, LB_WARPS * 32, 0, at::cuda::getCurrentCUDAStream()>>>(dy.data_ptr<float>(), P(m), stats.data_ptr<float>(), P(dres), lnw.data_ptr<float>(), W(dm), part.data_ptr<float>(), rows);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  auto red = part.sum(0);
+  return {dm, red[0], red[1]};
+}
+#endif  // PW_BIG
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
   mod.def("ln_vg_w", &ln_vg_w, "LayerNorm + value projection: (v head-major [H, N, S*C], y [S, N, D], stats [S, N, 2]); save_y=False leaves y and stats empty",
           py::arg("m"), py::arg("lnw"), py::arg("lnb"), py::arg("wv"), py::arg("eps"), py::arg("save_y") = true);
+#if !PW_BIG
   mod.def("gate_out_w", &gate_out_w, "gate, gated product, out projection, dropout, residual", py::arg("o"), py::arg("y"), py::arg("m"), py::arg("wg"), py::arg("wo"), py::arg("dmask") = py::none(), py::arg("dscale") = 1.0, py::arg("lnw") = py::none(), py::arg("lnb") = py::none(), py::arg("eps") = 1e-5);
   mod.def("gate_bwd_w", &gate_bwd_w, "gate backward: (do head-major, go); dgp into dgv[..., :HC]");
   mod.def("dm_bwd_w", &dm_bwd_w, "dy = [dgp | dv] . [Wg; Wv], LayerNorm backward + residual: (dm, dgamma, dbeta); dv into dgv[..., HC:]");
+#else
+  mod.def("gate_w", &gate_w, "BIG: gate + gated product: (a [S, N, HC], g [S, N, HC] when save_g)", py::arg("o"), py::arg("y"), py::arg("wg"), py::arg("save_g"), py::arg("lnw") = py::none(), py::arg("lnb") = py::none(), py::arg("eps") = 1e-5);
+  mod.def("out_w", &out_w, "BIG: out projection of a, dropout, residual", py::arg("a"), py::arg("m"), py::arg("wo"), py::arg("dmask") = py::none(), py::arg("dscale") = 1.0);
+  mod.def("gate_bwd_big_w", &gate_bwd_big_w, "BIG: gate backward from the saved gate: (do head-major, go); dgp into dgv[..., :HC]");
+  mod.def("ln_bwd_w", &ln_bwd_w, "BIG: LayerNorm backward of a fp32 dy + residual: (dm, dgamma, dbeta)");
+#endif
 }

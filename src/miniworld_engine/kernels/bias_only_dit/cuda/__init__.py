@@ -151,7 +151,7 @@ def _rows_ext(hopper: bool):
 
 
 def ln_rows(x, out, eps=1e-5):
-    """out = LN(x), no affine; x [M, 384]."""
+    """out = LN(x), no affine; x [M, 384] or [M, 768] (the conditioning rows)."""
     _ext().ln_rows_cuda(x, out, float(eps))
 
 

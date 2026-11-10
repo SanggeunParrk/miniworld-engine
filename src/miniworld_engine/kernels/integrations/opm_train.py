@@ -39,9 +39,12 @@ import triton.language as tl
 from miniworld_engine.kernels import _cast_cuda
 
 CM, CH, CZ = 64, 32, 128
-# (d_msa, d_pair) served on sm_90a: MiniWorld, Protenix-v2 / ESMFold2, OpenDDE (d_hidden 32 throughout).  The widths other than
-# MiniWorld's run the wide composition: persistent TMA prologue at d_msa 64 / 128, cuBLAS contraction, the c_z-sliced epilogue.
-SHAPES = ((64, 128), (128, 256), (128, 384))
+# (d_msa, d_pair) served on sm_90a: MiniWorld, Protenix-v2 / ESMFold2, OpenDDE, IntelliFold2 (d_hidden 32 throughout).  The widths
+# other than MiniWorld's run the wide composition: persistent TMA prologue at d_msa 64 / 128 / 256, cuBLAS contraction, the
+# c_z-sliced epilogue.  IntelliFold2's (256, 512) is served in TRAINING only (TRAIN_ONLY): its inference stays on
+# `outer_product_mean.composed` (the module routes there when this path refuses a grad-free call).
+SHAPES = ((64, 128), (128, 256), (128, 384), (256, 512))
+TRAIN_ONLY = ((256, 512),)
 _EXT: dict[str, Any] = {}
 
 
@@ -92,6 +95,8 @@ def refusal(
             return "settings.opm_train=False disables the native path"
         if d_hidden != CH or (d_msa, d_pair) not in SHAPES:
             return f"the kernels serve d_hidden={CH} and (d_msa, d_pair) in {SHAPES}, got ({d_msa}, {d_hidden}, {d_pair})"
+        if (d_msa, d_pair) in TRAIN_ONLY and not torch.is_grad_enabled():
+            return f"(d_msa, d_pair) = ({d_msa}, {d_pair}) is served in training only (its inference is the composed path's)"
         if interchain:
             return (
                 "mask_interchain is applied after the projection and is not fused here"
@@ -484,7 +489,7 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
 def _forward_wide(
     ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residual, save_stats, after, pbias=None, dmin=1.0, doff=0.0
 ):
-    """The wide composition (d_msa 64 / 128, d_pair 128 / 256 / 384, either normalisation order): the persistent TMA prologue
+    """The wide composition (d_msa 64 / 128 / 256, d_pair 128 / 256 / 384 / 512, either normalisation order): the persistent TMA prologue
     (LN + both projections + mask -> A2 / BT, the statistics and the exact mask count), cuBLAS for the grouped outer product,
     and the epilogue, which cuts c_z into 128-wide slices.  `after` divides by the count after the projection and its bias."""
     bf = torch.bfloat16

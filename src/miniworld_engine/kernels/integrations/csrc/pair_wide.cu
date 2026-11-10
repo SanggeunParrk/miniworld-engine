@@ -89,6 +89,8 @@ __global__ void __launch_bounds__(THREADS, PW_MINB) pair_fwd_kernel(const __nv_b
     cp_wait<1>();
     __syncwarp();
     const uint32_t tile = tbase + stage * TILEB;
+    float c[4] = {0.f, 0.f, 0.f, 0.f};
+    if constexpr (DZ < 512) {
     uint32_t a[KS_][4];
 #pragma unroll
     for (int ks = 0; ks < KS_; ++ks) ldm_a(tile, ks, lane, a[ks]);
@@ -109,7 +111,7 @@ __global__ void __launch_bounds__(THREADS, PW_MINB) pair_fwd_kernel(const __nv_b
     }
     const float rs0 = 1.f / sqrtf(qsum(v0) * (1.f / DZ) + eps), rs1 = 1.f / sqrtf(qsum(v1) * (1.f / DZ) + eps);
     // zn = bf16((x - mean) * rstd * gamma + beta) into A fragments, then the projection
-    float c[4] = {0.f, 0.f, 0.f, 0.f};
+    // (c declared above)
 #pragma unroll
     for (int ks = 0; ks < KS_; ++ks) {
       const int col = 16 * ks + 2 * q;
@@ -122,6 +124,41 @@ __global__ void __launch_bounds__(THREADS, PW_MINB) pair_fwd_kernel(const __nv_b
       zn[2] = pack2((x2.x - m0) * rs0 * g1.x + b1.x, (x2.y - m0) * rs0 * g1.y + b1.y);
       zn[3] = pack2((x3.x - m1) * rs1 * g1.x + b1.x, (x3.y - m1) * rs1 * g1.y + b1.y);
       mma_bf16(c, zn, bw[ks][0], bw[ks][1]);
+    }
+    } else {
+    // d_pair 512: the 128 fragment registers of the tile do not fit next to the projection weight's 64, so the three passes (mean,
+    // centred variance, normalise + project) each re-read the staged tile with ldmatrix -- the same values in the same order
+    float s0 = 0.f, s1 = 0.f;
+#pragma unroll
+    for (int ks = 0; ks < KS_; ++ks) {
+      uint32_t a[4]; ldm_a(tile, ks, lane, a);
+      const float2 x0 = unpack2(a[0]), x2 = unpack2(a[2]), x1 = unpack2(a[1]), x3 = unpack2(a[3]);
+      s0 += x0.x + x0.y + x2.x + x2.y; s1 += x1.x + x1.y + x3.x + x3.y;
+    }
+    const float m0 = qsum(s0) * (1.f / DZ), m1 = qsum(s1) * (1.f / DZ);
+    float v0 = 0.f, v1 = 0.f;
+#pragma unroll
+    for (int ks = 0; ks < KS_; ++ks) {
+      uint32_t a[4]; ldm_a(tile, ks, lane, a);
+      const float2 x0 = unpack2(a[0]), x2 = unpack2(a[2]), x1 = unpack2(a[1]), x3 = unpack2(a[3]);
+      v0 += (x0.x - m0) * (x0.x - m0) + (x0.y - m0) * (x0.y - m0) + (x2.x - m0) * (x2.x - m0) + (x2.y - m0) * (x2.y - m0);
+      v1 += (x1.x - m1) * (x1.x - m1) + (x1.y - m1) * (x1.y - m1) + (x3.x - m1) * (x3.x - m1) + (x3.y - m1) * (x3.y - m1);
+    }
+    const float rs0 = 1.f / sqrtf(qsum(v0) * (1.f / DZ) + eps), rs1 = 1.f / sqrtf(qsum(v1) * (1.f / DZ) + eps);
+#pragma unroll
+    for (int ks = 0; ks < KS_; ++ks) {
+      uint32_t a[4]; ldm_a(tile, ks, lane, a);
+      const int col = 16 * ks + 2 * q;
+      const float2 g0 = *reinterpret_cast<const float2*>(sg + col), g1 = *reinterpret_cast<const float2*>(sg + col + 8);
+      const float2 b0 = *reinterpret_cast<const float2*>(sg + DZ + col), b1 = *reinterpret_cast<const float2*>(sg + DZ + col + 8);
+      const float2 x0 = unpack2(a[0]), x1 = unpack2(a[1]), x2 = unpack2(a[2]), x3 = unpack2(a[3]);
+      uint32_t zn[4];
+      zn[0] = pack2((x0.x - m0) * rs0 * g0.x + b0.x, (x0.y - m0) * rs0 * g0.y + b0.y);
+      zn[1] = pack2((x1.x - m1) * rs1 * g0.x + b0.x, (x1.y - m1) * rs1 * g0.y + b0.y);
+      zn[2] = pack2((x2.x - m0) * rs0 * g1.x + b1.x, (x2.y - m0) * rs0 * g1.y + b1.y);
+      zn[3] = pack2((x3.x - m1) * rs1 * g1.x + b1.x, (x3.y - m1) * rs1 * g1.y + b1.y);
+      mma_bf16(c, zn, bw[ks][0], bw[ks][1]);
+    }
     }
     // c0, c1: (row r, heads 2q, 2q+1); c2, c3: (row r+8)
     const int j0 = gi * GJ;

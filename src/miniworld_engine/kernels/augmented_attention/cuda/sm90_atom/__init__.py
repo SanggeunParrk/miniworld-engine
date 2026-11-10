@@ -64,7 +64,7 @@ def _smem(kind: str, tf32: bool) -> int:
     grp = kind.endswith(
         "_g"
     )  # the grouped-sample build of a backward kernel: + the staging slabs
-    kind = kind.removesuffix("_g").removesuffix("_s")
+    kind = kind.removesuffix("_g").removesuffix("_s").removesuffix("_par")
     if kind in ("post_bwd", "pre_bwd"):
         return (
             2 * 64 * 128 * es
@@ -106,6 +106,7 @@ _KERNELS = {
     "post_bwd": ("post_bwd90", "post_bwd90"),
     "post_bwd_s": ("post_bwd90", "post_bwd90", ("-DSPLITK=1",)),
     "pre_bwd": ("pre_bwd90", "pre_bwd90"),
+    "pre_bwd_par": ("pre_bwd90", "pre_bwd90_par"),  # AlphaFold 3's parallel K / V AdaLN: the same cubin, its PAR entry
     "cond_bwd": ("cond_bwd90", "cond_bwd90"),
     "cond_bwd_s": ("cond_bwd90", "cond_bwd90", ("-DSPLITK=1",)),
     "cond_bwd_sh": ("cond_bwd_sh90", "cond_bwd_sh90"),
@@ -115,9 +116,10 @@ _KERNELS = {
 def kernel_cubin(kind: str, tf32: bool) -> str:
     """The cubin of kernel ``kind`` (``"<kind>_g"``: the grouped-sample launch, same code, larger dynamic shared memory)."""
     base = kind.removesuffix("_g")
+    build = base.removesuffix("_par")  # an entry point of another kind's cubin: built as that kind
     stem, _, *rest = _KERNELS[base]
     defs = rest[0] if rest else ()
-    return cubin(stem, tf32, nwarp(base, tf32), _MINB.get((base, tf32), 1), defs)
+    return cubin(stem, tf32, nwarp(build, tf32), _MINB.get((build, tf32), 1), defs)
 
 
 @functools.lru_cache(maxsize=None)
@@ -645,8 +647,10 @@ def pre_bwd(
     eps: float = 1e-5,
     nmod: int = 0,
     shared=None,
+    parallel_kv: bool = False,
 ):
-    """-> dx [M, 128], dmkv [M, 256] (``shared``: group sums [M / 4N, N, 256]); writes dmod blocks 0, 1 (group sums when shared)."""
+    """-> dx [M, 128], dmkv [M, 256] (``shared``: group sums [M / 4N, N, 256]); writes dmod blocks 0, 1 (group sums when shared).
+    ``parallel_kv``: the K / V AdaLN of the raw x (AlphaFold 3, ``pre_fwd(parallel_kv=True)``): its LN backward goes to dx, not dx1."""
     M = x.shape[0]
     dx = torch.empty(M, DS, device=x.device, dtype=x.dtype)
     spc, natoms, sp = shared or (0, 0, 1)
@@ -657,7 +661,8 @@ def pre_bwd(
     )
     grid = (M // ROWS, 1, 1)
     colpart = torch.empty(grid[0] * grid[1], 384, device=x.device, dtype=torch.float32)
-    kernel("pre_bwd_g" if shared else "pre_bwd", tf32, _dev(x))(
+    kind = "pre_bwd_par" if parallel_kv else "pre_bwd"
+    kernel(kind + "_g" if shared else kind, tf32, _dev(x))(
         grid,
         (NWARP * 32, 1, 1),
         dp,

@@ -195,33 +195,35 @@ template <typename C> auto ptr(const at::Tensor& t) { return reinterpret_cast<C*
     constexpr int NT = 256; return __VA_ARGS__();                                                    \
   }()
 
-// The conditioning rows of a step (L of them, d_cond = 384): cn = LN(c) and cc = c in the GEMM dtype. One warp per row, a lane
-// owning 12 columns -- no block barriers: at L rows the kernel is latency-bound, not bandwidth-bound.
-template <typename CT, typename OT>
+// The conditioning rows of a step (L of them, d_cond = DC: 384, or 768 -- ESMFold2's token DiT conditioned at its own width):
+// cn = LN(c) and cc = c in the GEMM dtype. One warp per row, a lane owning DC / 32 columns -- no block barriers: at L rows the kernel
+// is latency-bound, not bandwidth-bound.
+template <int DC, typename CT, typename OT>
 __global__ void __launch_bounds__(256) cond_rows_kernel(const CT* __restrict__ C, long sc, OT* __restrict__ CN, OT* __restrict__ CC,
     int L, float eps) {
+  constexpr int NV = DC / 128;
   const int row = blockIdx.x * 8 + threadIdx.x / 32, lane = threadIdx.x % 32;
   if (row >= L) return;
-  float4 v[3];
+  float4 v[NV];
   float s = 0.f;
 #pragma unroll
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < NV; ++i) {
     v[i] = V4<CT>::load(C + row * sc + (i * 32 + lane) * 4);
-    V4<OT>::store(CC + (long)row * 384 + (i * 32 + lane) * 4, v[i]);
+    V4<OT>::store(CC + (long)row * DC + (i * 32 + lane) * 4, v[i]);
     s += v[i].x + v[i].y + v[i].z + v[i].w;
   }
-  const float mean = warp_sum(s) / 384.f;
+  const float mean = warp_sum(s) / (float)DC;
   float q = 0.f;
 #pragma unroll
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < NV; ++i) {
     v[i].x -= mean; v[i].y -= mean; v[i].z -= mean; v[i].w -= mean;
     q += v[i].x * v[i].x + v[i].y * v[i].y + v[i].z * v[i].z + v[i].w * v[i].w;
   }
-  const float rstd = rsqrtf(warp_sum(q) / 384.f + eps);
+  const float rstd = rsqrtf(warp_sum(q) / (float)DC + eps);
 #pragma unroll
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < NV; ++i) {
     const int col = (i * 32 + lane) * 4;
-    V4<OT>::store(CN + (long)row * 384 + col, make_float4(v[i].x * rstd, v[i].y * rstd, v[i].z * rstd, v[i].w * rstd));
+    V4<OT>::store(CN + (long)row * DC + col, make_float4(v[i].x * rstd, v[i].y * rstd, v[i].z * rstd, v[i].w * rstd));
   }
 }
 
@@ -336,16 +338,17 @@ void launch_layernorm_rows(const at::Tensor& z, const at::Tensor& out, double ep
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// out = LN(z), no affine, C = 128, 256 or 384 columns (fp32 or bf16 in / out)
+// out = LN(z), no affine, C = 128, 256, 384 or 512 columns (fp32 or bf16 in / out; 512: IntelliFold2's diffusion pair)
 void layernorm_rows(at::Tensor z, at::Tensor out, double eps) {
   const int64_t R = z.size(0), C = z.size(1);
-  TORCH_CHECK((C == 128 || C == 256 || C == 384) && out.is_contiguous() && out.size(1) == C && out.size(0) == R,
-              "layernorm_rows: [R, 128 | 256 | 384]");
+  TORCH_CHECK((C == 128 || C == 256 || C == 384 || C == 512) && out.is_contiguous() && out.size(1) == C && out.size(0) == R,
+              "layernorm_rows: [R, 128 | 256 | 384 | 512]");
   check_rows(z, "z", C);
   const at::cuda::CUDAGuard g(z.device());
   if (C == 128) launch_layernorm_rows<128>(z, out, eps, false);
   else if (C == 256) launch_layernorm_rows<256>(z, out, eps, false);
-  else launch_layernorm_rows<384>(z, out, eps, false);
+  else if (C == 384) launch_layernorm_rows<384>(z, out, eps, false);
+  else launch_layernorm_rows<512>(z, out, eps, false);
 }
 
 void gate_rows(at::Tensor o, at::Tensor gt, at::Tensor out) {
@@ -377,27 +380,31 @@ void swiglu_rows(at::Tensor ab, at::Tensor out) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// the pair rows of the hoisted bias, 128 (the name's) or 256 columns (Protenix-v2's diffusion pair); ``perm``: rows written in the
-// TF32 core's key order
+// the pair rows of the hoisted bias, 128 (the name's), 256 (Protenix-v2's diffusion pair) or 512 columns (IntelliFold2's);
+// ``perm``: rows written in the TF32 core's key order
 void layernorm128_rows(at::Tensor z, at::Tensor out, double eps, bool perm) {
   const int64_t R = z.size(0), C = z.size(1);
-  TORCH_CHECK((C == 128 || C == 256) && out.is_contiguous() && out.size(1) == C && out.size(0) == R, "layernorm128_rows: [R, 128 | 256]");
+  TORCH_CHECK((C == 128 || C == 256 || C == 512) && out.is_contiguous() && out.size(1) == C && out.size(0) == R,
+              "layernorm128_rows: [R, 128 | 256 | 512]");
   check_rows(z, "z", C);
   const at::cuda::CUDAGuard g(z.device());
   if (C == 128) launch_layernorm_rows<128>(z, out, eps, perm);
-  else launch_layernorm_rows<256>(z, out, eps, perm);
+  else if (C == 256) launch_layernorm_rows<256>(z, out, eps, perm);
+  else launch_layernorm_rows<512>(z, out, eps, perm);
 }
 
-// d: the model width (q = columns 0 .. d - 1, k = d .. 2d - 1); the head dim is the weights' length (d / heads)
+// the conditioning rows: c [L, DC], DC = 384 or 768
 void cond_rows(at::Tensor c, at::Tensor cn, at::Tensor cc, double eps) {
-  const int64_t L = c.size(0);
-  check_rows(c, "cond_rows c", 384);
-  TORCH_CHECK(c.size(1) == 384 && cn.is_contiguous() && cc.is_contiguous() && cn.sizes() == c.sizes() && cc.sizes() == c.sizes()
-              && cn.scalar_type() == cc.scalar_type(), "cond_rows: [L, 384]");
+  const int64_t L = c.size(0), DC = c.size(1);
+  TORCH_CHECK(DC == 384 || DC == 768, "cond_rows: [L, 384 | 768]");
+  check_rows(c, "cond_rows c", DC);
+  TORCH_CHECK(cn.is_contiguous() && cc.is_contiguous() && cn.sizes() == c.sizes() && cc.sizes() == c.sizes()
+              && cn.scalar_type() == cc.scalar_type(), "cond_rows: [L, 384 | 768]");
   const at::cuda::CUDAGuard g(c.device());
   TDR_DISPATCH(c.scalar_type(), CT, [&] {
     TDR_DISPATCH(cn.scalar_type(), OT, [&] {
-      cond_rows_kernel<CT, OT><<<(unsigned)((L + 7) / 8), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      auto kern = DC == 384 ? cond_rows_kernel<384, CT, OT> : cond_rows_kernel<768, CT, OT>;
+      kern<<<(unsigned)((L + 7) / 8), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
           ptr<const CT>(c), c.stride(0), ptr<OT>(cn), ptr<OT>(cc), (int)L, (float)eps);
     });
   });
@@ -405,6 +412,7 @@ void cond_rows(at::Tensor c, at::Tensor cn, at::Tensor cc, double eps) {
 }
 
 
+// d: the model width (q = columns 0 .. d - 1, k = d .. 2d - 1); the head dim is the weights' length (d / heads)
 void qknorm_rows(at::Tensor qk, at::Tensor wq, at::Tensor wk, double eq, double ek, int64_t d) {
   check_rows(qk, "qk", 2 * d);
   const int64_t hd = wq.numel();
@@ -435,13 +443,20 @@ struct TokenPack {
   const void* src[25]; bool fp32[25];
   void* dst[13]; int size[13]; int blocks[13];
   int D, DC, H, HH; float qs; bool qk; bool out_fp32;
-  int DP;   // pair width: the to_bias / ln_pair columns (128; Protenix-v2's diffusion pair, 256)
+  int DP;   // pair width: the to_bias / ln_pair columns (128; Protenix-v2's diffusion pair, 256; IntelliFold2's, 512)
 };
 // the pair width of a token DiT leaf list: ln_pair.weight (leaf 12) has DP entries, to_bias.weight (leaf 13) is [heads, DP]
 static int pair_width(const std::vector<at::Tensor>& weights) {
   const int DP=weights[12].numel();
-  TORCH_CHECK((DP==128 || DP==256) && weights[13].numel()%DP==0,"token DiT pair width: 128 or 256");
+  TORCH_CHECK((DP==128 || DP==256 || DP==512) && weights[13].numel()%DP==0,"token DiT pair width: 128, 256 or 512");
   return DP;
+}
+// the conditioning width of a token DiT leaf list (attention.ada_ln_in.ln_cond.weight, leaf 6) on the H100 (vector) pack:
+// 384, or 768 (ESMFold2's token DiT, conditioned at its own width)
+static int cond_width90(const std::vector<at::Tensor>& weights) {
+  const int DC=weights[6].numel();
+  TORCH_CHECK(DC==384 || DC==768,"Hopper token pack: cond width 384 or 768");
+  return DC;
 }
 __device__ float pack_read(const TokenPack& p,int j,int i) {
   return p.fp32[j] ? static_cast<const float*>(p.src[j])[i]
@@ -525,14 +540,14 @@ __device__ __forceinline__ float4 pack_mul4(float4 a, float4 b) {
 __device__ __forceinline__ float4 pack_scale4(float4 a,float b) {
   return make_float4(a.x*b,a.y*b,a.z*b,a.w*b);
 }
-template <int D>
+// DC: the conditioning width (a template argument: constant divisions, as D)
+template <int D, int DC>
 __global__ void token_pack_vector_kernel(TokenPack p) {
   int block=blockIdx.x, out=0;
   for(;out<13;++out) {if(block<p.blocks[out])break;block-=p.blocks[out];}
   if(out==13)return;
   const int i=(block*256+threadIdx.x)*4;
   if(i>=p.size[out])return;
-  constexpr int DC=384;
   float4 v=make_float4(0.f,0.f,0.f,0.f);
   if(out==0) {
     const int s=i/(D*DC),j=i%(D*DC),c=i%DC;
@@ -561,13 +576,21 @@ __global__ void token_pack_vector_kernel(TokenPack p) {
   else tdr::V4<__nv_bfloat16>::store(static_cast<__nv_bfloat16*>(p.dst[out])+i,v);
 }
 
+// the vector pack kernel for (D, DC)
+static cudaKernel_t token_pack_vector_fn(int D,int DC) {
+  cudaKernel_t kernel;
+  if(D==768)C10_CUDA_CHECK(cudaGetKernel(&kernel,DC==384?token_pack_vector_kernel<768,384>:token_pack_vector_kernel<768,768>));
+  else C10_CUDA_CHECK(cudaGetKernel(&kernel,DC==384?token_pack_vector_kernel<1024,384>:token_pack_vector_kernel<1024,768>));
+  return kernel;
+}
+
 std::vector<at::Tensor> token_pack_vector(std::vector<at::Tensor> weights,int64_t heads,bool qk,double qs,bool out_fp32) {
   TORCH_CHECK(weights.size()==(qk?25:23),"token DiT leaf count");
   const at::cuda::CUDAGuard guard(weights[0].device());
-  const int D=weights[0].size(1),DC=weights[6].numel(),HH=weights[20].size(0);
+  const int D=weights[0].size(1),DC=cond_width90(weights),HH=weights[20].size(0);
   const int DP=pair_width(weights);
-  TORCH_CHECK(((D==768 && (heads==12 || heads==16 || heads==24)) || (D==1024 && heads==16)) && DC==384 && HH%128==0,
-              "Hopper token pack requires 768 x (12, 16, 24 heads) or 1024 x 16 heads, cond 384, hidden multiple of 128");
+  TORCH_CHECK(((D==768 && (heads==12 || heads==16 || heads==24)) || (D==1024 && heads==16)) && HH%128==0,
+              "Hopper token pack requires 768 x (12, 16, 24 heads) or 1024 x 16 heads, cond 384 / 768, hidden multiple of 128");
   TokenPack p{};p.D=D;p.DC=DC;p.H=heads;p.HH=HH;p.qs=qs;p.qk=qk;p.out_fp32=out_fp32;p.DP=DP;
   for(int j=0;j<(int)weights.size();++j) {
     const auto& t=weights[j];
@@ -586,7 +609,7 @@ std::vector<at::Tensor> token_pack_vector(std::vector<at::Tensor> weights,int64_
     TORCH_CHECK(outputs.back().numel()<=2147483647,"token pack requires 32-bit buffer offsets");
     p.dst[j]=outputs.back().data_ptr();p.size[j]=outputs.back().numel();p.blocks[j]=(p.size[j]+1023)/1024;blocks+=p.blocks[j];
   }
-  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,D==768?token_pack_vector_kernel<768>:token_pack_vector_kernel<1024>));
+  cudaKernel_t kernel=token_pack_vector_fn(D,DC);
   void* args[]={&p};
   C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return outputs;
@@ -597,7 +620,7 @@ std::vector<at::Tensor> token_pack_vector(std::vector<at::Tensor> weights,int64_
 std::vector<at::Tensor> token_alloc90(std::vector<at::Tensor> weights,int64_t heads,bool qk,bool fp32) {
  TORCH_CHECK(weights.size()==(qk?25:23)&&(heads==12||heads==16||heads==24),"native inference pack layout");
  const at::cuda::CUDAGuard guard(weights[0].device());
- const int D=weights[0].size(1),DC=384,HH=weights[20].size(0);
+ const int D=weights[0].size(1),DC=cond_width90(weights),HH=weights[20].size(0);
  TORCH_CHECK(D==768||(D==1024&&heads==16),"native inference pack width");
  const int DP=pair_width(weights);
  std::vector<std::vector<int64_t>> shapes={{4*D,DC},{4*D},{2*D,DC},{2*D},{heads,DP},{4*D,D},{4*D},{D,D},
@@ -613,7 +636,7 @@ std::vector<at::Tensor> token_alloc90(std::vector<at::Tensor> weights,int64_t he
 void token_stage90(std::vector<at::Tensor> weights,std::vector<at::Tensor> out,int64_t heads,bool qk,double qs,bool fp32,int begin,int end) {
  TORCH_CHECK(out.size()==13&&weights.size()==(qk?25:23)&&0<=begin&&begin<end&&end<=13,"native inference pack stage");
  const at::cuda::CUDAGuard guard(weights[0].device());
- TokenPack p{};p.D=weights[0].size(1);p.DC=384;p.H=heads;p.HH=weights[20].size(0);p.qs=qs;p.qk=qk;p.out_fp32=fp32;p.DP=pair_width(weights);
+ TokenPack p{};p.D=weights[0].size(1);p.DC=cond_width90(weights);p.H=heads;p.HH=weights[20].size(0);p.qs=qs;p.qk=qk;p.out_fp32=fp32;p.DP=pair_width(weights);
  TORCH_CHECK(p.D==768||(p.D==1024&&heads==16),"native inference pack width");
  for(int j=0;j<(int)weights.size();++j){
   TORCH_CHECK(weights[j].device()==weights[0].device()&&weights[j].is_contiguous()
@@ -625,8 +648,8 @@ void token_stage90(std::vector<at::Tensor> weights,std::vector<at::Tensor> out,i
   const int a=o==7?5:o==9?22:-1;if(a>=0&&p.fp32[a]==fp32)continue;
   p.dst[o]=out[o].data_ptr();p.size[o]=out[o].numel();p.blocks[o]=(p.size[o]+1023)/1024;blocks+=p.blocks[o];
  }
- if(p.D==768)token_pack_vector_kernel<768><<<blocks,256,0,at::cuda::getCurrentCUDAStream()>>>(p);
- else token_pack_vector_kernel<1024><<<blocks,256,0,at::cuda::getCurrentCUDAStream()>>>(p);
+ void* args[]={&p};
+ C10_CUDA_CHECK(cudaLaunchKernel((void*)token_pack_vector_fn(p.D,p.DC),dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

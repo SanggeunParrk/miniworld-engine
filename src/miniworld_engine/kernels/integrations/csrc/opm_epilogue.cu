@@ -32,9 +32,9 @@ namespace {
 
 constexpr int CH = 32;             // c_hidden
 // d_msa and d_pair are compile-time: the extension is built once per (OPM_CM, OPM_CZ) pair.  The H100
-// kernels were written for 64 / 128; 128 / 256 and 128 / 384 reuse the same tiles -- the c_z axis is cut
+// kernels were written for 64 / 128; 128 / 256, 128 / 384 and 256 / 512 reuse the same tiles -- the c_z axis is cut
 // into 128-wide slices that run as separate CTAs (epilogue, dWo), or run as a longer contraction (dgrad),
-// and the prologue backward widens its LayerNorm phase to 128 channels.
+// and the prologue backward widens its LayerNorm phase to 128 / 256 channels.
 #ifndef OPM_CZ
 #define OPM_CZ 128
 #endif
@@ -888,7 +888,8 @@ __global__ __launch_bounds__(512,1) void opm_prologue_tma_hopper(
 namespace opm_pro_wide {
 template <int CMT>
 struct Cfg {
-  static constexpr int KB = CMT / 64, BS = 128, NST = 3, XT = BS * CMT, TT = 8192, MT = 2048, WT = 64 * CMT;
+  // d_msa 256: two x stages (a 64 KiB stage; three would not fit next to the 32 KiB weight)
+  static constexpr int KB = CMT / 64, BS = 128, NST = CMT >= 256 ? 2 : 3, XT = BS * CMT, TT = 8192, MT = 2048, WT = 64 * CMT;
   static constexpr int SMEM = (NST * XT + 2 * TT + WT) * 2 + NST * MT + 2 * CMT * 4 + 128 + 1024;
 };
 }
@@ -941,6 +942,9 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
       int slot = g % NST, i = t / nsb, s0 = (t % nsb) * C::BS;
       wait(xf + slot, (g / NST) & 1);
       __nv_bfloat16* row = sx + slot * XT + r * 64;                        // + kb * 8192: the kb-th 64-column block
+      float mean, rs;
+      bool keep = sm[slot * MT + r * 16 + (i & 15)] != 0; uint32_t keep32 = keep ? 0xffffffffu : 0u;
+      if constexpr (CMT <= 128) {
       float vals[CMT / 2];
       float sum0 = 0.f, sum1 = 0.f;
 #pragma unroll
@@ -958,15 +962,14 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
         }
       }
       float sum = sum0 + sum1; sum += __shfl_xor_sync(0xffffffff, sum, 16);
-      float mean = sum * (1.f / CMT), v0 = 0.f, v1 = 0.f;
+      mean = sum * (1.f / CMT); float v0 = 0.f, v1 = 0.f;
 #pragma unroll
       for (int k = 0; k < CMT / 4; ++k) {
         vals[k * 2] -= mean; vals[k * 2 + 1] -= mean;
         v0 = fmaf(vals[k * 2], vals[k * 2], v0); v1 = fmaf(vals[k * 2 + 1], vals[k * 2 + 1], v1);
       }
       float var = v0 + v1; var += __shfl_xor_sync(0xffffffff, var, 16);
-      float rs = 1.f / sqrtf(var * (1.f / CMT) + eps);
-      bool keep = sm[slot * MT + r * 16 + (i & 15)] != 0; uint32_t keep32 = keep ? 0xffffffffu : 0u;
+      rs = 1.f / sqrtf(var * (1.f / CMT) + eps);
 #pragma unroll
       for (int kb = 0; kb < KB; ++kb) {
 #pragma unroll
@@ -981,6 +984,59 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
           }
           *reinterpret_cast<uint4*>(row + kb * 8192 + (((hf * 4 + k) ^ (r & 7)) * 8)) = make_uint4(q[0], q[1], q[2], q[3]);
         }
+      }
+      } else {
+      // d_msa 256: a thread's 128 values do not fit in registers next to the 128-register budget of 512 threads, so the row is
+      // read from the staged tile three times (sum, centred sum of squares, normalise) -- the same arithmetic in the same order
+      float sum0 = 0.f, sum1 = 0.f;
+#pragma unroll
+      for (int kb = 0; kb < KB; ++kb) {
+#pragma unroll
+        for (int k = 0; k < 4; ++k) {
+          uint4 v = *reinterpret_cast<uint4*>(row + kb * 8192 + (((hf * 4 + k) ^ (r & 7)) * 8));
+          uint32_t q[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+          for (int j = 0; j < 4; ++j) {
+            float2 f = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&q[j]));
+            sum0 += f.x; sum1 += f.y;
+          }
+        }
+      }
+      float sum = sum0 + sum1; sum += __shfl_xor_sync(0xffffffff, sum, 16);
+      mean = sum * (1.f / CMT); float v0 = 0.f, v1 = 0.f;
+#pragma unroll
+      for (int kb = 0; kb < KB; ++kb) {
+#pragma unroll
+        for (int k = 0; k < 4; ++k) {
+          uint4 v = *reinterpret_cast<uint4*>(row + kb * 8192 + (((hf * 4 + k) ^ (r & 7)) * 8));
+          uint32_t q[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+          for (int j = 0; j < 4; ++j) {
+            float2 f = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&q[j]));
+            const float a = f.x - mean, b = f.y - mean;
+            v0 = fmaf(a, a, v0); v1 = fmaf(b, b, v1);
+          }
+        }
+      }
+      float var = v0 + v1; var += __shfl_xor_sync(0xffffffff, var, 16);
+      rs = 1.f / sqrtf(var * (1.f / CMT) + eps);
+#pragma unroll
+      for (int kb = 0; kb < KB; ++kb) {
+#pragma unroll
+        for (int k = 0; k < 4; ++k) {
+          uint4 v = *reinterpret_cast<uint4*>(row + kb * 8192 + (((hf * 4 + k) ^ (r & 7)) * 8));
+          uint32_t q[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+          for (int j = 0; j < 4; ++j) {
+            float2 f = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&q[j]));
+            int c = kb * 64 + hf * 32 + k * 8 + j * 2;
+            float y0 = __fadd_rn(__fmul_rn((f.x - mean) * rs, sl[c]), sl[CMT + c]);
+            float y1 = __fadd_rn(__fmul_rn((f.y - mean) * rs, sl[c + 1]), sl[CMT + c + 1]);
+            __nv_bfloat162 z = __floats2bfloat162_rn(y0, y1); q[j] = *reinterpret_cast<uint32_t*>(&z) & keep32;
+          }
+          *reinterpret_cast<uint4*>(row + kb * 8192 + (((hf * 4 + k) ^ (r & 7)) * 8)) = make_uint4(q[0], q[1], q[2], q[3]);
+        }
+      }
       }
       if (hf == 0) {
         long ix = (long)(s0 + r) * N + i; mask16[ix] = __float2bfloat16_rn(keep ? 1.f : 0.f);
@@ -1394,8 +1450,9 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
   // 1 KiB boundary; the launch allocates one extra KiB for the alignment.
   const uint32_t sbase = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
   __nv_bfloat16* sA = reinterpret_cast<__nv_bfloat16*>(smem + ((1024u - (sbase & 1023u)) & 1023u));
-  // KZ >= 384 (one CTA per SM either way): the Wo^T chunk is double buffered, so the next chunk's weights stream in under this one's wgmma
-  constexpr int WBUF = KZ >= 384 ? 2 : 1;
+  // KZ = 384 (one CTA per SM either way): the Wo^T chunk is double buffered, so the next chunk's weights stream in under this one's wgmma.
+  // KZ = 512 single-buffers it: the dz tile is 128 KiB and two 64 KiB weight chunks would not fit next to it.
+  constexpr int WBUF = (KZ >= 384 && KZ < 512) ? 2 : 1;
   constexpr int WSZ = (KZ / 64) * CHUNK * 64;
   __nv_bfloat16* sW = sA + (KZ / 64) * DG_NP * 64;                     // dz/n then Wo^T, both swizzled
   // The store-out tile, in TMA box order: [i][c][j/2][64] with the 128-byte XOR swizzle.  It used to
@@ -1570,6 +1627,7 @@ constexpr int PB_CPT = 8;                // channels per thread
 constexpr int PB_PART = CM_MSA / PB_CPT; // threads per row: 8 (d_msa 64) or 16 (128)
 constexpr int PB_DAB = 2 * CH;           // 64: the stacked da | db columns, the K of the projection
 static_assert(CM_MSA % 64 == 0, "d_msa must be a multiple of 64 (whole 128-byte swizzle blocks)");
+static_assert(CM_MSA == 64 || CM_MSA == 128 || CM_MSA == 256, "the prologue backward is written for d_msa 64 / 128 / 256");
 // sdy carries the same 128-byte XOR swizzle as the operand tiles rather than an 8-element pad.  It
 // is conflict-free for all three access patterns (accumulator columns, whole rows, column pairs) and
 // 2 KiB smaller, which is exactly what the double-buffered staging tile below costs.
@@ -1589,7 +1647,8 @@ constexpr int PB_SB = 8;
 constexpr int PB_PW = 2 * CH * CM_MSA + 2 * CH;
 constexpr int PB_RED = CM_MSA + 12;      // padded stride of the cross-warpgroup reduction buffer: 72 columns, 8 rows per bank cycle
 
-__global__ __launch_bounds__(PB_THREADS, (CM_MSA == 64 ? 3 : 2)) void opm_prologue_bwd_kernel(   // asking for four
+// d_msa 256: one block per SM (the dW accumulator is 132 registers, the shared tiles 145 KiB)
+__global__ __launch_bounds__(PB_THREADS, (CM_MSA == 64 ? 3 : CM_MSA == 128 ? 2 : 1)) void opm_prologue_bwd_kernel(   // asking for four
                                           // instead spills 48 more bytes per thread and loses:
                                           // 0.143 -> 0.165 ms   // three blocks per SM (asking
     const __nv_bfloat16* __restrict__ DA,     // [S, N*CH]: a row's channels lie next to each other
@@ -1841,9 +1900,17 @@ __global__ __launch_bounds__(PB_THREADS, (CM_MSA == 64 ? 3 : 2)) void opm_prolog
       if constexpr (CM_MSA == 64)
         wg::mma_m64n72k16_mn(wg::desc_mn(sdb_ + wg::off_mn(0, k0, 0, PB_ROWS), 1),
                              wg::desc_mn(sy + wg::off_mn(0, k0, 0, PB_ROWS), PB_LBO), wacc, 1);
-      else
+      else if constexpr (CM_MSA == 128)
         wg::mma_m64n136k16_mn(wg::desc_mn(sdb_ + wg::off_mn(0, k0, 0, PB_ROWS), 1),
                               wg::desc_mn(sy + wg::off_mn(0, k0, 0, PB_ROWS), PB_LBO), wacc, 1);
+      else {
+        // d_msa 256: n = 256 + 8 is past wgmma's 256, so two instructions over the same A tile -- xh blocks 0-1 (n 128), then
+        // xh blocks 2-3 and the mask block (n 136).  The two accumulators are consecutive register runs of one n 264 tile.
+        wg::mma_m64n128k16_mn(wg::desc_mn(sdb_ + wg::off_mn(0, k0, 0, PB_ROWS), 1),
+                              wg::desc_mn(sy + wg::off_mn(0, k0, 0, PB_ROWS), PB_LBO), wacc, 1);
+        wg::mma_m64n136k16_mn(wg::desc_mn(sdb_ + wg::off_mn(0, k0, 0, PB_ROWS), 1),
+                              wg::desc_mn(sy + wg::off_mn(2, k0, 0, PB_ROWS), PB_LBO), wacc + (CM_MSA >= 256 ? 64 : 0), 1);
+      }
     }
     wg::commit();
     wg::wait();
@@ -2128,7 +2195,8 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
   const int pb_smem = 1024 + (2 * PB_ROWS * PB_DAB + CM_MSA * PB_DAB + (CM_MSA / 64 + 1) * PB_ROWS * 64) * 2;   // sdab x2, sw, sdy (= sy), mask block
   static bool pb_attr = false;
   if (!pb_attr) {
-    cudaFuncSetAttribute(opm_prologue_bwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 128 * 1024);
+    // d_msa 256 needs 146 KiB (four xh blocks); the narrower builds keep their 128 KiB carve-out
+    cudaFuncSetAttribute(opm_prologue_bwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, pb_smem > 128 * 1024 ? pb_smem : 128 * 1024);
     pb_attr = true;
   }
   auto fopts = opts.dtype(torch::kFloat32);
@@ -2208,7 +2276,7 @@ std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor norm, torch
   auto dO = torch::empty({ni * CH, nj * CH}, dz.options());
   auto dzp = torch::empty({ni, nj, (long)CZ}, dz.options());
   auto dbo_part = torch::empty({(ni / DG_BI) * (nj / DG_BJ), (long)CZ}, dz.options().dtype(torch::kFloat32));
-  const int smem = 1024 + ((KZ / 64) * DG_NP * 64 + (KZ >= 384 ? 2 : 1) * (KZ / 64) * CHUNK * 64 + DG_NP * CHUNK) * 2;
+  const int smem = 1024 + ((KZ / 64) * DG_NP * 64 + ((KZ >= 384 && KZ < 512) ? 2 : 1) * (KZ / 64) * CHUNK * 64 + DG_NP * CHUNK) * 2;
   static bool attr = false;                      // 256-wide chunks push past the 48 KiB static limit
   if (!attr) {
     cudaFuncSetAttribute(opm_dgrad_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 227 * 1024);
@@ -2821,7 +2889,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("dA"),py::arg("dB"),py::arg("m"),py::arg("stats"),py::arg("mask"),py::arg("gamma"),py::arg("beta"),
         py::arg("eps"),py::arg("bwp"),py::arg("N"),py::arg("S"),py::arg("native_finish")=false,
         py::arg("raw_weights")=std::vector<torch::Tensor>{});
-  m.def("opm_prologue_wide", &opm_prologue_wide, "persistent TMA OPM prologue at this build's d_msa (64 / 128) + exact mask count",
+  m.def("opm_prologue_wide", &opm_prologue_wide, "persistent TMA OPM prologue at this build's d_msa (64 / 128 / 256) + exact mask count",
         py::arg("m"), py::arg("mask"), py::arg("gamma"), py::arg("beta"), py::arg("wa"), py::arg("wb"), py::arg("eps"), py::arg("save_stats"),
         py::arg("pbias") = py::none(), py::arg("with_norm") = true, py::arg("dmin") = 1.0, py::arg("doff") = 0.0);
   m.def("opm_native_pack",&opm_native_pack,py::arg("p"),py::arg("infer")=false,py::arg("pbl")=py::none(),py::arg("pbr")=py::none());

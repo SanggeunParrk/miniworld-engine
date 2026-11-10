@@ -55,8 +55,11 @@ WEIGHTS = (
 #: (heads, d_single) layouts the fused step serves: 16 x 48 everywhere; 24 x 32, 12 x 64 and 16 x 64 (d 1024) with the CUDA rows, on
 #: H100 and B200 (bf16, and fp32 through the TF32 core built per layout)
 LAYOUTS = ((16, 768), (24, 768), (12, 768), (16, 1024))
-#: pair widths of the Hopper step (bf16 and fp32): 128, and 256 (Protenix-v2's diffusion pair); only the hoisted bias reads the pair
-PAIR_WIDTHS_H100 = (128, 256)
+#: pair widths of the Hopper step (bf16 and fp32): 128, 256 (Protenix-v2's diffusion pair) and 512 (IntelliFold2's); only the hoisted
+#: bias reads the pair
+PAIR_WIDTHS_H100 = (128, 256, 512)
+#: conditioning widths of the Hopper step: 384, and 768 (ESMFold2's token DiT, conditioned at its own width)
+COND_WIDTHS_H100 = (384, 768)
 #: the QK-norm weights, appended to WEIGHTS when the block has use_qk_norm
 QK_WEIGHTS = ("attention.norm_query.weight", "attention.norm_key.weight")
 _TUNING: dict = {}
@@ -72,7 +75,7 @@ def _native_fp32_inference(module, single) -> bool:
         and module.attention._backend == "portable"
         and getattr(getattr(module.attention, "to_bias", None), "weight", None)
         is not None
-        and module.attention.to_bias.weight.shape[1] in PAIR_WIDTHS_H100   # 128; 256: Protenix-v2's diffusion pair
+        and module.attention.to_bias.weight.shape[1] in PAIR_WIDTHS_H100   # 128; 256: Protenix-v2's diffusion pair; 512: IntelliFold2's
         and (module.attention.n_head, single.shape[-1]) in LAYOUTS  # 16 x 48, 24 x 32, 12 x 64 (d 768), 16 x 64 (d 1024)
         and single.is_cuda
         and single.dtype is torch.float32
@@ -99,7 +102,9 @@ def _check_native_fp32(module, single, cond, pair, compute_dtype):
     if (
         cond.ndim != 4
         or cond.shape[0] not in (1, A)
-        or tuple(cond.shape[1:]) != (1, L, 384)
+        or cond.shape[1:3] != (1, L)
+        or cond.shape[3] not in COND_WIDTHS_H100
+        or cond.shape[3] != module.attention.ada_ln_in.ln_cond.weight.numel()
         or tuple(pair.shape) != (1, L, L, module.attention.to_bias.weight.shape[1])
         or cond.dtype is not torch.float32
         or pair.dtype is not torch.float32
@@ -166,13 +171,19 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
     ):
         return False
     d = single.shape[-1]
-    if (a.n_head, d) not in LAYOUTS or (cond.shape[-1], module.transition.expand_a.weight.shape[0]) != (384, 2 * d):
+    if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] != 2 * d:
         return False
-    # the pair enters once per sample, through the bias hoist: 128 everywhere; 256 (Protenix-v2's diffusion pair) on H100, where
-    # the hoist normalises it with the CUDA LayerNorm rows (``conditioned_transition.cuda._pair_bias_wide``; fp32 takes
-    # ``_native_fp32_inference`` above)
+    # cond 384; 768 (ESMFold2's token DiT) on H100, where the weight pack and the conditioning rows are built per cond width
+    if cond.shape[-1] != a.ada_ln_in.ln_cond.weight.numel() or not (
+        cond.shape[-1] == 384
+        or (cond.shape[-1] in COND_WIDTHS_H100 and torch.cuda.get_device_capability(single.device) == (9, 0))
+    ):
+        return False
+    # the pair enters once per sample, through the bias hoist: 128 everywhere; 256 (Protenix-v2's diffusion pair) and 512
+    # (IntelliFold2's) on H100, where the hoist normalises it with the CUDA LayerNorm rows (``conditioned_transition.cuda._pair_bias_wide``;
+    # fp32 takes ``_native_fp32_inference`` above)
     if pair.shape[-1] != 128 and not (
-        pair.shape[-1] == 256 and single.dtype is torch.bfloat16 and torch.cuda.get_device_capability(single.device) == (9, 0)
+        pair.shape[-1] in PAIR_WIDTHS_H100 and single.dtype is torch.bfloat16 and torch.cuda.get_device_capability(single.device) == (9, 0)
     ):
         return False
     # One conditioning shared by the samples (a sampling step: L table rows) or one per sample (S L rows); the runner

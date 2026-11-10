@@ -33,7 +33,7 @@ def rows_ext(d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = 
     assert (d, hd) in ((768, 48), (768, 32), (768, 64), (1024, 64)), (d, hd)
     assert rpb in (1, 2, 4, 8), rpb
     assert dc in (128, 256, 384, 768), dc
-    assert n in (2, 4) and dp in (128, 256), (n, dp)
+    assert n in (2, 4) and dp in (128, 256, 512), (n, dp)
     ensure_cuda_home()
     name = (
         "token_dit_train_rows_cuda"

@@ -46,10 +46,10 @@ No autograd, one opaque op per block call (`token_dit_h100_infer`), autocast off
    records the pack once; each replay re-packs the weights as they are then.
 2. **Pair bias**, hoisted: `bias [H, L, L]` in log2 units, masked keys -1e30, built once per (pair, mask, Wf) and cached through
    `_capture.lookup_inputs` (the pair is held by a weak storage reference, so a freed pair evicts its entry). bf16: the APB pair kernel
-   (d_pair 128) or CUDA LayerNorm rows + one cuBLAS GEMM (d_pair 256). fp32: written in the TF32 core's key order (below), by
+   (d_pair 128) or CUDA LayerNorm rows + one cuBLAS GEMM (d_pair 256 / 512). fp32: written in the TF32 core's key order (below), by
    `pair_bias_tok` (128) or `pair_bias_rows32` (256, 16 heads), else LayerNorm rows + GEMM + a torch masked fill of the keys in the core's order. An `extra_pair_bias`
    [L, L] is added once here (times log2 e; key-permuted in fp32).
-3. **Conditioning**: `cond_rows`, then two GEMMs: `g1 [P, 4, D]` (AdaLN scale / shift of both halves) and `g2 [P, 2, D]` (the two
+3. **Conditioning**: `cond_rows` (d_cond 384 or 768; the weight pack is built for the weights' width), then two GEMMs: `g1 [P, 4, D]` (AdaLN scale / shift of both halves) and `g2 [P, 2, D]` (the two
    output gates). P = L rows when the samples share the conditioning (sample axis 1 or stride 0), A L rows otherwise.
 4. **Per block**: `adaln_in_rows` -> q\|k\|v\|g GEMM (bf16) or q\|k\|g GEMM + a second GEMM for v^T (fp32) -> `qknorm_rows`
    (TokenDiTMiniWorld; the logit scale is folded into the q-norm weight) -> gated core (writes `sigmoid(g) o` over q) -> out GEMM ->
@@ -114,9 +114,8 @@ by default; other layouts take the kernel's default.
 |---|---|
 | not CUDA / not sm_90 | refused |
 | key mask that differs across samples (`[A, B, L]` not stride-0) | refused |
-| training: outside bf16 / fp32, `[A, 1, L, d]`, `(heads, d)` in 16 x 768, 24 x 768, 12 x 768, 16 x 1024, cond 384, pair 128 / 256, n = 2, key mask `[1, L]`, all LayerNorm eps 1e-5 | refused |
+| training: outside bf16 / fp32, `[A, 1, L, d]`, `(heads, d)` in 16 x 768, 24 x 768, 12 x 768, 16 x 1024, cond 384 / 768, pair 128 / 256 / 512, n = 2, key mask `[1, L]`, all LayerNorm eps 1e-5 | refused |
 | inference: the same, plus L a multiple of 128; B > 1 only bf16 with one pair per trunk_seed and a stride-0 mask; fp32 needs fp32 parameters and a bool `[1, L]` mask | refused |
-| d_cond 768 (ESMFold2 rows), d_pair 512 (IntelliFold2 rows) | refused in both modes |
 | `"anthropic"`: grad, `compute_dtype`, QK-norm, head dim > 64, a fully masked row | refused |
 | `"triton"`: head dim > 64, dtype other than bf16 / fp32 | refused |
 

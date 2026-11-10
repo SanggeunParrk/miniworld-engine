@@ -27,11 +27,11 @@ Coverage of the requirement rows by the `cuda` backend (head width = d_hidden / 
 | `TriangleAttention` | 128, 4, 32 | fused d128 path | fused d128 path |
 | `TriangleAttention` | 256, 8, 32 | wide fused front (d256 x 8 heads) | width-generic path |
 | `TriangleAttention` | 64 (2 x 32, 4 x 16, 4 x 32), 384 (12 x 32) | width-generic path | width-generic path |
-| `TriangleAttentionAF3` | 64 (4 x 16), 128, 256 (8 x 32) | sm90 (ending node: bias transposed after the front, `flip_bias`) | starting node only; ending node unsupported |
-| `TriangleAttentionAF3` | 512, 8, 64 | dh | unsupported |
-| `TriangleAttentionRF3` | 128, 4, 32 | fused d128 path (gate / out biases in the tail) | unsupported (projection biases) |
-| `TriangleAttentionRF3` | 64, 4, 64 | dh | unsupported |
-| `TriangleAttentionChai1`, `...Confidence` | all rows | dh (untransposed / dual output) | unsupported |
+| `TriangleAttentionAF3` | 64 (4 x 16), 128, 256 (8 x 32) | sm90 (ending node: bias transposed after the front, `flip_bias`) | starting: as `TriangleAttention`; ending: width-generic path (bias flip, dbias flipped back) |
+| `TriangleAttentionAF3` | 512, 8, 64 | dh | width-generic path, dh training core |
+| `TriangleAttentionRF3` | 128, 4, 32 | fused d128 path (gate / out biases in the tail) | width-generic path (gate bias in the projection GEMM epilogue, out bias in the out-projection epilogue) |
+| `TriangleAttentionRF3` | 64, 4, 64 | dh | width-generic path, dh training core |
+| `TriangleAttentionChai1`, `...Confidence` | all rows | dh (untransposed / dual output) | width-generic path (untransposed / dual output in the glue; 64-channel heads on the dh training core) |
 | `BidirectionalTriangleAttention` | 128 | — (`pytorch` only) | — |
 
 ## Kernels
@@ -60,6 +60,8 @@ Names from `requirements/requirements_kernel.csv` (family `triangle_attention`);
 | `triangle_attention_generic_assemble_bwd_sm90` | backward | glue `assemble`: fp32 dbias -> the bf16 bias columns of `dall` |
 | `triangle_attention_generic_layernorm_bwd_sm90` | backward | glue `ln_bwd`: dx = dy + LN backward of `dall Wcat`, per-CTA gamma / beta partials |
 | `triangle_attention_dh_fwd_sm90` | forward_infer | `triattn_dh_sm90.cu`: mma.sync core for head widths 32 / 64 with the gate fused (`u = sigmoid(g [+ gb]) o softmax(...) v`) |
+| `triangle_attention_dh_fwd_train_sm90` | forward_train | the same kernel with `TRAIN`: also writes O (bf16) and the base-2 LSE for the backward (64-channel heads in training) |
+| `triangle_attention_dh_bwd_kv_sm90`, `triangle_attention_dh_bwd_q_sm90` | backward | `triattn_dh_sm90.cu`: mma.sync FlashAttention-2 backward, P recomputed from the LSE; key side dK / dV, query side dQ and dbias into per-slab fp32 partials (deterministic) |
 | `triangle_attention_fwd`, `..._bwd_pre`, `..._bwd_dkdv`, `..._bwd_dq` | forward / backward | Triton core (`triton/main.py`): flash-style forward with fp32 LSE, FA2-split backward (delta, key-side dK / dV / per-row dbias, query-side dQ) |
 | `triangle_attention_drop_scale_sm90`, `triangle_attention_graph_rng_write_sm90` | forward_train | `pack.cu` (`h100_triattn.extension("pack")`): Philox keep-mask; used by `integrations/pwa_train.py` (MSA row dropout), not by the triangle modules |
 
@@ -125,8 +127,17 @@ residual kernels and cuBLAS GEMMs (bf16 in, fp32 accumulate).
 - Saved for the backward: y, mean, rstd, q | k | v | g, sbias, o, lse, u.
 - The ending node's rows are the pair's columns: the kernels read / write the transposed layout (`trans`); the inference
   out-projection writes transposed rows as a strided cublasLt batch over i (one GEMM per sample).
+- Training variants (`h100_sm90_generic.train_forward` / `train_backward`, flags from `integrations/triattn_h100_sm90._variant`):
+  AF3 / RF3 / Chai-1 ending-node bias (`flip`: sbias transposed after `front_bias`, the core's dbias transposed back before
+  `assemble`); RF3 gate bias (a bias vector `[0 | 0 | 0 | gb]` in the q | k | v | g GEMM epilogue, `dgb` = column sum of dg) and out
+  bias (cublasLt bias epilogue, `dbo` = column sum of the update's gradient); Chai-1's untransposed output (`u Wo^T` in the pair's own
+  row order) and the confidence head's dual output (the untransposed projection, then the other one's rows transposed onto it with
+  cublasLt's strided batch; backward: the update's gradient and its transposed copy, `du = dA Wo + dB Wt`); with dropout the residual
+  is `addcmul(x, update, drop)` on the broadcast scale. Heads of 64 channels run the dh core (`h100_dh.train_core` / `backward`:
+  bias in natural units, Delta from `gate_bwd_out` per 32-channel group summed in pairs, dS as a bf16 hi + lo pair in the dQ / dK
+  MMAs, dbias in `h100_dh.slabs` fp32 slabs summed in order). The variants keep `dyln` in fp32 (the standard module: bf16).
 
-## dh path: heads of 32 / 64 channels, Chai-1 output variants (inference)
+## dh path: heads of 32 / 64 channels, Chai-1 output variants (inference; its core also trains 64-channel heads)
 
 `cuda/h100_dh.py` + `triattn_dh_sm90.cu`. LN (`ln_fwd`; the ending node reads the pair transposed) -> `q | k | v | g = y W^T` and
 the pair bias on cuBLAS (from the transposed pair or, `transposed_bias=False`, from the pair as it is; masked keys -inf) ->
@@ -181,8 +192,8 @@ layout. The per-row dbias buffer is `[B, H*L, L, L]` in the bias dtype, reduced 
 
 `cuda` (`_cuda_route`): CUDA tensor on capability (9, 0); bf16 pair (no fp32 kernel); self-attention, no q / k RMSNorm; square
 pair, bool `[B, L]` mask. sm90 route: d_pair = to_query in-features, multiple of 8, <= 512; head width 16 / 32; <= 16 heads; L % 16
-== 0. Training (grad or live dropout) only on the sm90 route and only for the standard output and bias orientation without
-projection biases (so not RF3, the AF3 ending node, Chai-1). dh route (inference only): head width 32 / 64, d_pair % 8 == 0 and <=
+== 0 (training: head width 16 / 32 / 64). Training (grad or live dropout) runs on the sm90 route for every class and variant (fused for
+the standard module at d128 x 4 heads, else width-generic). dh route (inference only): head width 32 / 64, d_pair % 8 == 0 and <=
 512. Everything else returns a reason (`BackendUnsupported`). `triton`: bf16 pair only; the bias-only form
 (`use_self_attention=False`) is refused by every library / engine backend. Heads of 96 / 128 channels and
 `BidirectionalTriangleAttention` have no engine kernel.

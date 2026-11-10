@@ -83,7 +83,7 @@ class OuterProductMean(BackendModule, MasterWeights):
         Dimension of hidden layer.
 
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -160,7 +160,8 @@ class OuterProductMean(BackendModule, MasterWeights):
     # ------------------------------------------------------------------------------------------------------------- engine kernels
     #: ``"cuda"``: the H100 (sm_90a) kernels, bf16 activations (bf16 or fp32-master parameters), one call routed by the module's form:
     #:   standard (groups 1, no projection bias)  ``kernels.integrations.opm_train`` (WGMMA / TMA prologue, cuBLAS contraction, CUDA epilogue;
-    #:       forward + backward) at d_hidden 32, (d_msa, d_pair) in ``opm_train.SHAPES``, batch 1; inference of other widths:
+    #:       forward + backward) at d_hidden 32, (d_msa, d_pair) in ``opm_train.SHAPES`` (``opm_train.TRAIN_ONLY``: training only), batch 1;
+    #:       inference of other widths:
     #:       ``kernels.outer_product_mean.composed.inference`` (cuBLAS + the ``cuda.gather`` pass; d_hidden % 8, d_hidden^2 in 512 / 1024)
     #:   projection biases (RoseTTAFold3)  training: ``opm_train`` (biases in the prologue); inference: ``composed.biased_wide``
     #:       (S % 256, N % 64, d_msa 64 / 128, d_pair 128 / 256 / 384), else ``composed.inference``
@@ -299,7 +300,7 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         Row dropout of the update (training only).
 
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     #: "cuda": the H100 kernels (kernels.integrations.pwa_train / pwa_wide); "triton": kernels.pair_weighted_averaging.triton (see the
     #: _supports_ docstrings for the ranges).
@@ -394,9 +395,10 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         return None
 
     def _supports_cuda(self, msa, pair, mask=None) -> str | None:
-        """``kernels.integrations.pwa_train`` (d_msa 64, d_pair 128, 8 heads x 32: N % 128, S even, N <= 2048 inference / 1024 training)
-        and ``pwa_wide`` (d_msa 64 / 128, d_pair 128 / 256 / 384, 8 heads x 8 / 16, N <= 1024): bf16 activations, batch 1, sm_90a, forward
-        + backward (the residual and the row dropout in the kernels)."""
+        """``kernels.integrations.pwa_train`` (d_msa 64, d_pair 128, 8 heads x 32: N % 128, S even, N <= 2048 inference / 1024 training;
+        d_pair 256 / 384 / 512 with pwa_wide's pair kernels: N <= 1024) and ``pwa_wide`` (d_msa 64 / 128, d_pair 128 / 256 / 384, 8 heads x
+        8 / 16, or d_msa 256, d_pair 512, 8 heads x 32 (the BIG build); N <= 1024): bf16 activations, batch 1, sm_90a, forward + backward
+        (the residual and the row dropout in the kernels)."""
         why = self._common_refusal(msa, pair, mask)
         if why is not None:
             return why

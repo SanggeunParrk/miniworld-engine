@@ -13,7 +13,7 @@
 //             gate_o       og = sigmoid(g) o
 //             res_adaln_b  x1 = x + sigmoid(Gg[:, 0:D] + bg1) y;  xt = sigmoid(G[:, 2D:3D] + bs2) LN(x1) + G[:, 3D:4D]
 //             res_c        out = x1 + sigmoid(Gg[:, D:2D] + bg2) z
-//             pair_ln      p_hat = LN(pair) bf16 and (mean, rstd)                                  (d_pair = TD_DP: 128 or 256)
+//             pair_ln      p_hat = LN(pair) bf16 and (mean, rstd)                                  (d_pair = TD_DP: 128, 256, 512)
 //             pair_bias    (fp32 path) LN(pair) folded straight into the head-major bias, key mask as -inf
 //   backward  res_c_bwd, swiglu_bwd, res_adaln_b_bwd, gate_o_bwd, qknorm_bwd, adaln_a_bwd, cond_bwd, unfold_lnw, pair_ln_bwd,
 //             pair_bias_bwd (fp32 path: dpair and the dWf partials in one pass)
