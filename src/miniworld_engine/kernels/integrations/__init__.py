@@ -108,7 +108,7 @@ def _prebuild_sm80():
     from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80 as pwa
 
     def plain(o):
-        return not any(k in o for k in ("groups", "projection_bias", "count_offset"))
+        return not any(k in o for k in ("groups", "count_offset"))   # projection biases: the sm_80 prologue adds them
 
     opm_rows = [r for r in family_rows("outer_product_mean") if r["dtype"] in ("bfloat16", "master") and plain(_kv(r["options"]))
                 and opm.supported(int(_kv(r["dims"])["d_msa"]), int(_kv(r["dims"])["d_hidden"]), int(_kv(r["dims"])["d_pair"]))]

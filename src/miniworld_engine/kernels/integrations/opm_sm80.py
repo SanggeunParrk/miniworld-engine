@@ -2,7 +2,7 @@
 
 Contract: bf16 MSA ``[1, S, L, d_msa]`` (d_msa 64 or 128, any S, any L), d_hidden 32, d_pair 128 / 256 / 384, an optional bool mask ``[1, S, L]``, an optional bf16
 pair residual ``[1, L, L, d_pair]`` (fused into the epilogue; its gradient is the output's), either normalisation order (``normalize_before_proj``), no interchain
-mask, no projection bias / groups / count_offset, capability 8.0. ``refusal`` is the range; ``modules.OuterProductMean``'s ``cuda`` backend refuses everything else
+mask, RoseTTAFold3's projection biases (added by the prologue), no groups / count_offset, capability 8.0. ``refusal`` is the range; ``modules.OuterProductMean``'s ``cuda`` backend refuses everything else
 (no fallback).
 
 The step (``kernels/outer_product_mean/cuda/sm80``; ``kernels/outer_product_mean/cuda/sm80.py`` documents the kernels):
