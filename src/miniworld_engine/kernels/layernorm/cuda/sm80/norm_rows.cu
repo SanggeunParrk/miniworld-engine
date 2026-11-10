@@ -15,7 +15,7 @@
 //             finish at different times), which makes the order of the rows inside the partial rows -- dw / db, not dx -- vary from run to run (fp32 rounding); small M: static
 //             assignment, bit-reproducible.
 // Scalar path (any other width / alignment): a warp per row, lane l on columns l, l + 32, ...; with the row cached in registers up to 32 * VS columns.
-// Staged path (odd widths, many rows): tiles of rows copied to shared memory with cp.async, normalised there, copied back out.
+// Staged path (odd widths, many rows): tiles of rows copied to shared memory with cp.async by 4-warp CTAs, normalised there (the affine in registers), copied back out.
 #include "norm_common.cuh"
 
 #include <torch/extension.h>
@@ -196,7 +196,6 @@ __device__ __forceinline__ void bwd_groups(long rg0, long step, int cnt, const X
 
 // row groups in flight per iteration of a backward warp: more when a group is little data
 template <int V> constexpr int bwd_unroll() { return V == 1 ? 4 : (V == 2 ? 2 : 1); }
-
 
 // DYN: the warps take chunks of CHUNK_GROUPS row groups from the work counter CTR (zeroed by the host); otherwise a static grid-stride assignment.
 // The CTA is capped at two per SM (128 registers) for V >= 2, which is what a row of 768 bf16 needs (V = 3 chunks per lane, 24 dw and 24 db partials).
@@ -436,29 +435,61 @@ __global__ void __launch_bounds__(NTF) fwd_scalar(const XT* __restrict__ X, XT* 
 
 // ------------------------------------------------------------------------------------------------------------------ staged path (odd widths, M large)
 // A row of N elements is not a whole number of 16-byte chunks, but U rows are (U = 16 / gcd(16, row bytes), 8 bf16 rows of 267): a unit of U rows is contiguous, 16-byte
-// aligned and a whole number of chunks.  The CTA copies a tile of R rows (a multiple of U) into shared memory with cp.async (coalesced, 16 bytes a lane), the warps normalise
-// their rows there (lane l on columns l + 32 k: scalar shared-memory accesses, which never miss) and the tile is copied back out the same way.  The tail rows (M mod U) are the
-// scalar kernel's.  NTG threads per CTA; VS = ceil(N / 32) rounded up to a built value.
-constexpr int NTG = 256, NWG = NTG / 32;
+// aligned and a whole number of chunks.  A CTA of NW warps copies a tile of R rows (a multiple of U) into shared memory with cp.async (coalesced, 16 bytes a lane), the warps
+// normalise their rows there in place (lane l on columns l + 32 k: scalar shared-memory accesses, which never miss) and the tile is copied back out the same way.  The tail rows
+// (M mod U) are the scalar kernel's.  The weight / bias of the lane's columns are loaded into registers once, while the tile's copy is in flight (per row they were two more
+// loads an element: the kernel is issue bound at 2-byte elements).  Small CTAs and tiles (many resident per SM) overlap one CTA's copy with another's arithmetic (the H100
+// staged forward, general/ln_rows.cu, is the same scheme).  VS = ceil(N / 32) rounded up to a built value (an exact fit for the requirement widths: idle slots are issue).
+constexpr int NTG = 256, NWG = NTG / 32;   // the staged backward's CTA
 
-template <typename XT, int VS, bool RMS>
-__global__ void __launch_bounds__(NTG) fwd_stage(const XT* __restrict__ X, XT* __restrict__ Y, const void* __restrict__ W, const void* __restrict__ B, bool w_bf,
-                                                 const XT* __restrict__ RS, float* __restrict__ MEAN, float* __restrict__ RSTD, long Mfull, int N, int R, float eps) {
+template <typename XT, int VS, bool RMS, int NW>
+__global__ void __launch_bounds__(NW * 32) fwd_stage(const XT* __restrict__ X, XT* __restrict__ Y, const void* __restrict__ W, const void* __restrict__ B, bool w_bf,
+                                                     const XT* __restrict__ RS, float* __restrict__ MEAN, float* __restrict__ RSTD, long Mfull, int N, int R, float eps) {
   extern __shared__ __align__(16) unsigned char smem[];
+  constexpr int NT = NW * 32;
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const long rowb = (long)N * sizeof(XT);
   const long row0 = (long)blockIdx.x * R;
   const int nr = (int)min((long)R, Mfull - row0);
   const int nchunks = (int)((long)nr * rowb / 16);
   const unsigned char* gx = reinterpret_cast<const unsigned char*>(X) + row0 * rowb;
-  for (int c = tid; c < nchunks; c += NTG) cp_async16(smem + 16 * c, gx + 16 * c);
+  for (int c = tid; c < nchunks; c += NT) cp_async16(smem + 16 * c, gx + 16 * c);
   cp_async_commit();
+  float wr[VS], br[VS];
+#pragma unroll
+  for (int k = 0; k < VS; ++k) {
+    const int c = lane + 32 * k;
+    wr[k] = (W && c < N) ? param_at(W, w_bf, c) : 1.f;
+    br[k] = (B && c < N) ? param_at(B, w_bf, c) : 0.f;
+  }
+  const float invN = 1.f / (float)N;
   cp_async_wait<0>();
   __syncthreads();
-  for (int r = warp; r < nr; r += NWG) {
+  for (int r = warp; r < nr; r += NW) {
     XT* xs = reinterpret_cast<XT*>(smem + (long)r * rowb);
-    float mean, rstd;
-    norm_row_scalar<XT, VS, RMS>(xs, xs, N, lane, W, B, w_bf, RS ? to_f(RS[row0 + r]) : 1.f, eps, mean, rstd);
+    float v[VS];
+    float s = 0.f;
+#pragma unroll
+    for (int k = 0; k < VS; ++k) {
+      const int c = lane + 32 * k;
+      v[k] = c < N ? to_f(xs[c]) : 0.f;
+      s += v[k];
+    }
+    float mean = 0.f;
+    if constexpr (!RMS) mean = warp_sum(s) * invN;
+    float q = 0.f;
+#pragma unroll
+    for (int k = 0; k < VS; ++k) {
+      const float d = lane + 32 * k < N ? v[k] - mean : 0.f;
+      q = fmaf(d, d, q);
+    }
+    const float rstd = rsqrtf(warp_sum(q) * invN + eps);
+    const float rs = RS ? to_f(RS[row0 + r]) : 1.f;
+#pragma unroll
+    for (int k = 0; k < VS; ++k) {
+      const int c = lane + 32 * k;
+      if (c < N) xs[c] = from_f<XT>(fmaf((v[k] - mean) * rstd, wr[k], br[k]) * rs);
+    }
     if (lane == 0) {
       if (MEAN) MEAN[row0 + r] = mean;
       if (RSTD) RSTD[row0 + r] = rstd;
@@ -466,7 +497,7 @@ __global__ void __launch_bounds__(NTG) fwd_stage(const XT* __restrict__ X, XT* _
   }
   __syncthreads();
   unsigned char* gy = reinterpret_cast<unsigned char*>(Y) + row0 * rowb;
-  for (int c = tid; c < nchunks; c += NTG) *reinterpret_cast<uint4*>(gy + 16 * c) = *reinterpret_cast<const uint4*>(smem + 16 * c);
+  for (int c = tid; c < nchunks; c += NT) *reinterpret_cast<uint4*>(gy + 16 * c) = *reinterpret_cast<const uint4*>(smem + 16 * c);
 }
 
 // one row of the backward: xs = x, ds = dy (scaled by the row scale) in, dxs = dx out (ds and dxs may be the same place); the lane's columns l + 32 k keep their dw / db partials in aw / ab
@@ -901,6 +932,7 @@ void launch_fwd_scalar(const XT* X, XT* Y, const void* W, const void* B, bool w_
   else if (N <= 256) run_fwd_scalar<XT, RMS, 8>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
   else if (N <= 384) run_fwd_scalar<XT, RMS, 12>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
   else if (N <= 512) run_fwd_scalar<XT, RMS, 16>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
+  else if (N <= 672) run_fwd_scalar<XT, RMS, 21>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
   else if (N <= 864) run_fwd_scalar<XT, RMS, 27>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
   else if (N <= 1024) run_fwd_scalar<XT, RMS, 32>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
   else run_fwd_scalar<XT, RMS, 0>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
@@ -922,30 +954,35 @@ template <typename XT> StageGeom stage_geom(int N, bool bwd) {
   return {U, (int)(TU * U), rowb};
 }
 int vs_bucket(int N) { return N <= 96 ? 3 : N <= 160 ? 5 : N <= 288 ? 9 : N <= 384 ? 12 : N <= 480 ? 15 : N <= 576 ? 18 : N <= 864 ? 27 : 32; }
+// the staged forward's values per lane: an exact fit for the requirement widths (9: 267, 15: 451, 21: 651, 27: 831 / 833)
+int vs_fwd_bucket(int N) { return N <= 96 ? 3 : N <= 160 ? 5 : N <= 288 ? 9 : N <= 384 ? 12 : N <= 480 ? 15 : N <= 576 ? 18 : N <= 672 ? 21 : N <= 864 ? 27 : 32; }
+
+// The staged forward's geometry: CTAs of 4 warps, tiles of the whole units in 16 KB (both dtypes; probe on A100, graph timing, L2 flushed, 267 / 651 x L128-768:
+// 2 / 8 warps and 4-41 KB tiles were the same or up to 20 % slower; 8 warps of 10 KB, the old geometry, were 15-25 % slower on the bf16 rows).
+constexpr int STAGE_FWD_NW = 4;
+constexpr long STAGE_FWD_TILE = 16384;
 
 template <typename XT, bool RMS, int VS>
-void run_fwd_stage(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long Mfull, int N, const StageGeom& g, float eps, cudaStream_t st) {
-  const size_t smem = (size_t)g.R * g.rowb;
-  auto k = fwd_stage<XT, VS, RMS>;
+void run_fwd_stage(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long Mfull, int N, int R, long rowb, float eps, cudaStream_t st) {
+  const size_t smem = (size_t)R * rowb;
+  auto k = fwd_stage<XT, VS, RMS, STAGE_FWD_NW>;
   if (smem > 48 * 1024) cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
-  const long grid = (Mfull + g.R - 1) / g.R;
-  k<<<(unsigned)grid, NTG, smem, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, g.R, eps);
+  const long grid = (Mfull + R - 1) / R;
+  k<<<(unsigned)grid, STAGE_FWD_NW * 32, smem, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, R, eps);
 }
 
 template <typename XT, bool RMS>
 bool launch_fwd_stage(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
   if (N > STAGE_MAX_N || M < STAGE_MIN_ROWS || !aligned16(X) || !aligned16(Y)) return false;
-  const StageGeom g = stage_geom<XT>(N, false);
-  const long Mfull = (M / g.U) * g.U;
-  switch (vs_bucket(N)) {
-    case 3: run_fwd_stage<XT, RMS, 3>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, g, eps, st); break;
-    case 5: run_fwd_stage<XT, RMS, 5>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, g, eps, st); break;
-    case 9: run_fwd_stage<XT, RMS, 9>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, g, eps, st); break;
-    case 12: run_fwd_stage<XT, RMS, 12>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, g, eps, st); break;
-    case 15: run_fwd_stage<XT, RMS, 15>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, g, eps, st); break;
-    case 18: run_fwd_stage<XT, RMS, 18>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, g, eps, st); break;
-    case 27: run_fwd_stage<XT, RMS, 27>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, g, eps, st); break;
-    default: run_fwd_stage<XT, RMS, 32>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, g, eps, st); break;
+  const long rowb = (long)N * (long)sizeof(XT);
+  const int U = 16 / gcd_i(16, (int)(rowb % 16 == 0 ? 16 : rowb % 16));
+  const int R = (int)(std::max<long>(1, STAGE_FWD_TILE / ((long)U * rowb)) * U);
+  const long Mfull = (M / U) * U;
+  switch (vs_fwd_bucket(N)) {
+#define VSC(vs) case vs: run_fwd_stage<XT, RMS, vs>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, R, rowb, eps, st); break;
+    VSC(3) VSC(5) VSC(9) VSC(12) VSC(15) VSC(18) VSC(21) VSC(27)
+#undef VSC
+    default: run_fwd_stage<XT, RMS, 32>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, R, rowb, eps, st); break;
   }
   if (Mfull < M)   // the tail rows
     launch_fwd_scalar<XT, RMS>(X + Mfull * N, Y + Mfull * N, W, B, w_bf, RS ? RS + Mfull : nullptr, MEAN ? MEAN + Mfull : nullptr, RSTD ? RSTD + Mfull : nullptr, M - Mfull, N, eps, st);
