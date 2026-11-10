@@ -46,6 +46,9 @@ REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements" / "requireme
 DTYPES = {"bfloat16": torch.bfloat16, "float32": torch.float32, "master": torch.bfloat16}
 FIXED = {"bfloat16": 8e-3, "master": 8e-3, "float32": 1e-5}
 EXTERNAL = ("anthropic", "cueq")
+#: Backends measured with TF32 products allowed in float32 PyTorch matmuls (user decision 2026-11-10: the reference and the portable
+#: Triton rung); every other backend runs PyTorch's own fp32 matmuls without TF32.
+TF32_BACKENDS = ("pytorch", "triton")
 #: Keys read by measure/speed.py only, allowed at the top level (collected into ``Config.speed``).
 SPEED_KEYS = ("timing", "warmup", "iterations", "flush_l2", "compile_mode")
 

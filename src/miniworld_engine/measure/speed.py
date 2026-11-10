@@ -59,9 +59,9 @@ The policies
 - Clocks are not locked (no root on the cluster): boost / thermal state varies run to run; compare numbers from one job.
 - Seeds: the module is built after ``torch.manual_seed(seed)`` once per case and deep-copied for every backend (same weights); the inputs
   come from ``make_inputs`` with a ``torch.Generator`` seeded the same way for every backend; the upstream gradients from a seeded
-  generator. TF32: the ``pytorch`` backend runs with TF32 products allowed in float32 (the engine's fp32 kernels compute in TF32 too, and the
-  accuracy measurer judges against the same reference); every other backend runs with TF32 off wherever it calls PyTorch's own matmuls. The
-  flags of the run are in each record (``tf32_matmul``).
+  generator. TF32: the ``pytorch`` and ``triton`` backends run with TF32 products allowed in float32 (the engine's fp32 kernels compute
+  in TF32 too, and the accuracy measurer judges against the same reference); every other backend runs with TF32 off wherever it calls
+  PyTorch's own matmuls. The flags of the run are in each record (``tf32_matmul``).
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ TIMING_MODES = ("graph", "compile+graph", "eager")
 #: Human-managed version of this measurer's meaning (how a step is timed: graph capture, L2 flush, statistics, the TF32 rule): bump it
 #: when a change can alter a speed record, not for refactors. Recorded in ``meta`` with the config's version, the measurement settings and the
 #: environment.
-SPEED_VERSION = "1"
+SPEED_VERSION = "2"
 _FLUSH_BYTES = 256 * 1024 * 1024
 
 
@@ -109,7 +109,7 @@ def make_step(module, inputs: dict, *, backend: str, train: bool, autocast: torc
     """The callable one replay runs, or raise ``BackendUnsupported`` with the backend's reason.
 
     ``compile_mode`` None: the backend's forward as is; a string: ``torch.compile(forward, dynamic=False, mode=...)``."""
-    allow = backend == "pytorch"          # the reference at its fastest fp32 (TF32 allowed); the others run PyTorch's own matmuls without it
+    allow = backend in config.TF32_BACKENDS   # pytorch (the reference) and triton in TF32; the others' PyTorch fp32 matmuls without it
     torch.backends.cuda.matmul.allow_tf32 = allow
     torch.backends.cudnn.allow_tf32 = allow
     module.set_backend(backend)

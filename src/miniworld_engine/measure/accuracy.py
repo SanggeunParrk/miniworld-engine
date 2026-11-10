@@ -10,8 +10,8 @@ Per case (:mod:`miniworld_engine.measure.config`) the module is built once (rand
   a parameter the module pins to fp32 under bf16, the LayerNorm affine, becomes fp64 too; every statement the modules compute "in at least
   fp32" (``primitives.wide``) runs in fp64), no autocast;
 - ``pytorch``: the reference at the case dtype (``master``: fp32 parameters, forward under ``torch.autocast("cuda", bfloat16)``), with
-  TF32 products allowed in float32 (``torch.backends.cuda.matmul.allow_tf32``); every other backend runs with TF32 off wherever it
-  calls PyTorch's own matmuls;
+  TF32 products allowed in float32 (``torch.backends.cuda.matmul.allow_tf32``); ``triton`` runs the same way (its PyTorch matmuls in
+  TF32), every other backend with TF32 off wherever it calls PyTorch's own matmuls;
 - every other backend of the config the class has, the same way.
 
 Measured tensors: the forward output(s) and, in ``train``, the gradient of every floating input and every parameter, for one random
@@ -49,7 +49,7 @@ from miniworld_engine.modules.primitives import BackendUnsupported
 YELLOW_FACTOR = 5.0
 #: Human-managed version of this measurer's meaning (the light's rule, the tensors measured, the gold, the inputs): bump it when a change
 #: can alter an accuracy record, not for refactors. It is recorded in ``meta`` with the config's version, the measurement settings and the environment.
-ACCURACY_VERSION = "1"
+ACCURACY_VERSION = "2"
 
 
 # ------------------------------------------------------------------------------------------------------------------------- tensors
@@ -204,7 +204,7 @@ def measure_case(case, cfg, *, device) -> list[dict]:
                 why = module.unsupported(**probe) if backend != "pytorch" else None
             if why is not None:
                 raise BackendUnsupported(why)
-            (_reference_precision if backend == "pytorch" else _backend_precision)()
+            (_reference_precision if backend in cfgmod.TF32_BACKENDS else _backend_precision)()
             values, _ = _run(module, inputs, train=train, autocast=autocast, upstream=upstream, generator=None)
             rec.update(_verdict(values, ref, gold, fixed))
         except BackendUnsupported as exc:

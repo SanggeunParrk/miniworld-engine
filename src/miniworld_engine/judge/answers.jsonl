@@ -1,0 +1,2 @@
+{"date": "2026-11-10T13:02:31", "new": "2", "old": "1", "part": "measurer:accuracy", "reason": "TF32 rule changed for the triton backend only (user 2026-11-10); every other backend measures the same; triton is measured again with --again triton", "verdict": "keep"}
+{"date": "2026-11-10T13:02:31", "new": "2", "old": "1", "part": "measurer:speed", "reason": "TF32 rule changed for the triton backend only (user 2026-11-10); every other backend measures the same; triton is measured again with --again triton", "verdict": "keep"}
