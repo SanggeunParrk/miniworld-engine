@@ -28,7 +28,8 @@ template <typename F> void with_width(int64_t width, const char* what, F&& f) {
     case 128: f(std::integral_constant<int, 128>{}); break;
     case 384: f(std::integral_constant<int, 384>{}); break;
     case 768: f(std::integral_constant<int, 768>{}); break;
-    default: TORCH_CHECK(false, what, ": row width 128, 384 or 768, got ", width);
+    case 1024: f(std::integral_constant<int, 1024>{}); break;   // the 1024-wide token DiT (8 vectors a lane)
+    default: TORCH_CHECK(false, what, ": row width 128, 384, 768 or 1024, got ", width);
   }
 }
 template <typename F> void with_dtype(const at::Tensor& t, const char* what, F&& f) {

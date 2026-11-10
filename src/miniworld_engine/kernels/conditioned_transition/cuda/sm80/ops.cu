@@ -95,7 +95,8 @@ void gate_res_bwd(at::Tensor dy, at::Tensor z, at::Tensor g, at::Tensor dz, at::
   if (d == 128) run(std::integral_constant<int, 32>{}, std::integral_constant<int, 8>{});
   else if (d == 384) run(std::integral_constant<int, 96>{}, std::integral_constant<int, 2>{});
   else if (d == 768) run(std::integral_constant<int, 192>{}, std::integral_constant<int, 1>{});
-  else TORCH_CHECK(false, "gate_res_bwd: width 128, 384 or 768, got ", d);
+  else if (d == 1024) run(std::integral_constant<int, 256>{}, std::integral_constant<int, 1>{});
+  else TORCH_CHECK(false, "gate_res_bwd: width 128, 384, 768 or 1024, got ", d);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

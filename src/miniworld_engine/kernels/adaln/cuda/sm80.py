@@ -6,7 +6,7 @@
     bwd_x        D = [dscale | dy], dx, the column sums of dscale
     cond_bwd     dcond = LN-backward(dcond_aff), the column sums of dcond_aff cond_hat
 
-Rows are fp32 or bf16 (statistics and sums always fp32), widths 128 / 384 / 768.  Built on first use (``load_extension``), never at import.
+Rows are fp32 or bf16 (statistics and sums always fp32), widths 128 / 384 / 768 / 1024.  Built on first use (``load_extension``), never at import.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 _dir = Path(__file__).parent / "sm80"
 
 #: row widths of the row kernels, and the rows one block takes (``adaln_rows.cuh``)
-ROWS_PER_BLOCK = {128: 8, 384: 2, 768: 1}
+ROWS_PER_BLOCK = {128: 8, 384: 2, 768: 1, 1024: 1}
 WIDTHS = tuple(ROWS_PER_BLOCK)
 
 

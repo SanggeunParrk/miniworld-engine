@@ -6,7 +6,7 @@
     y = x + sigmoid(g) z                        # one pass; ``delta`` (no residual) leaves the x out
 
 Contract: the engine's kernel backend (implementation TRITON or MINIWORLD) with the engine backend not forced to Triton, sm_80, bf16 or fp32 operands (the module's compute dtype; fp32 runs
-on TF32 tensor cores), ``d_hidden`` and ``d_cond`` each one of 128 / 384 / 768, any expansion ``n``, ``cond`` with the leading dims of ``x`` (one conditioning per row) or, with no
+on TF32 tensor cores), ``d_hidden`` and ``d_cond`` each one of 128 / 384 / 768 / 1024, any expansion ``n``, ``cond`` with the leading dims of ``x`` (one conditioning per row) or, with no
 gradient, one conditioning shared by the samples of ``x`` (the first dim expanded: stride 0, or size 1: the AdaLN and gate tables then have the L rows of one sample).
 A failed extension build warns once and keeps the module path.
 

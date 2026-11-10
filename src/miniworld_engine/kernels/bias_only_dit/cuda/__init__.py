@@ -1048,6 +1048,17 @@ def prebuild(target, rows):
     activation dtypes it serves, modes it runs in; ``None`` = any; a ``master`` row computes in bfloat16 activations); the dtypes and
     modes required come from ``rows``. The extensions take no model dims (one build serves every width). The sm_100a cubins of this
     family are launched through ``augmented_attention.cuda.sm100`` (B200 only)."""
+    if target.arch == "sm80":  # A100 (integrations/bias_only_dit_sm80.py): the sm_80 cores and the portable row kernels (bf16; fp32 rows32)
+        from . import sm80, tf32
+
+        served = {"bfloat16" if r["dtype"] == "master" else r["dtype"] for r in rows}
+        if served:
+            yield sm80._ext
+        if "bfloat16" in served:
+            yield functools.partial(_rows_ext, False)
+        if "float32" in served:
+            yield tf32.rows32
+        return
     if target.arch != "sm90":
         return
     from . import tf32, train

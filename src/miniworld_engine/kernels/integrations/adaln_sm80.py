@@ -2,7 +2,7 @@
 
 ``AdaptiveLayerNorm`` computes ``y = sigmoid(scale) LN(x) + bias`` with ``[scale | bias] = (LN(cond) w) [Ws | Wb]^T + [sb | 0]`` (LN of x without affine, ``w`` the cond
 norm's weight, ``Wb`` has no bias).  Contract: the engine's kernel backend (implementation TRITON or MINIWORLD) with the engine backend not forced to Triton, sm_80, bf16 or
-fp32 operands (the module's compute dtype; fp32 runs on TF32 tensor cores), ``d_hidden`` and ``d_cond`` each one of 128 / 384 / 768, ``cond`` with the leading dims of ``x`` (one
+fp32 operands (the module's compute dtype; fp32 runs on TF32 tensor cores), ``d_hidden`` and ``d_cond`` each one of 128 / 384 / 768 / 1024, ``cond`` with the leading dims of ``x`` (one
 conditioning per row) or, with no gradient, one conditioning shared by the samples of ``x`` (the first dim expanded: stride 0, or size 1).  A failed extension build warns once and keeps the module's path.
 
 Inference (one opaque op): ``cond_ln`` (aff = LN(cond) w, one pass over the cond rows -- the L rows of a shared conditioning) -> one cuBLAS GEMM [S | B] = aff [Ws | Wb]^T (the weights
@@ -25,7 +25,7 @@ import torch
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 
-WIDTHS = (128, 384, 768)
+WIDTHS = (128, 384, 768, 1024)
 BF = torch.bfloat16
 _packs: dict = {}
 _FAILED = False

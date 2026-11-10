@@ -12,12 +12,12 @@ from miniworld_engine.modules.primitives import BackendModule, random_input
 
 
 def _cuda_h100(device: torch.device) -> str | None:
-    """Why the hand-written CUDA kernels cannot run on ``device`` (they are the H100 sm_90a build), or ``None``."""
+    """Why the hand-written CUDA kernels cannot run on ``device`` (they are built for the H100, sm_90a, and the A100, sm_80), or ``None``."""
     if device.type != "cuda":
         return "the kernels run on CUDA tensors only"
     cc = torch.cuda.get_device_capability(device)
-    if cc != (9, 0):
-        return f"the CUDA kernels are the H100 (sm_90a) build, got sm_{cc[0]}{cc[1]}"
+    if cc not in ((9, 0), (8, 0)):
+        return f"the CUDA kernels are the H100 (sm_90a) and A100 (sm_80) builds, got sm_{cc[0]}{cc[1]}"
     return None
 
 
