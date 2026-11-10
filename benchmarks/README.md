@@ -11,7 +11,9 @@ Speed figures and tables of the engine's requirement cases, one folder per card 
 
 Layout of `<gpu>/`:
 
-- `README.md`: the index (classes, case counts, figure counts, the source and the speed measurer version);
+- `summary.svg` + the table in `README.md`: **one figure over every class**, the geometric mean of the speedup vs PyTorch per class,
+  backend and mode (eval / train), over the cases both ran;
+- `README.md`: the summary and the index (classes, case counts, figure counts, the source and the speed measurer version);
 - `<Module>/L__<slice>.svg`: **L sweep**, median latency (log) and speedup vs PyTorch over the case length, one column per
   (dtype, mode): the engine (CUDA, gold) against the external baselines (Anthropic orange, cuEquivariance teal) and the PyTorch
   reference (grey). The engine's Triton rung is in the tables, not the figures (`--backends` draws others);
