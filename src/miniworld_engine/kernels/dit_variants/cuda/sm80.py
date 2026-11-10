@@ -1,9 +1,9 @@
 """A100 (sm_80) builds of the atom DiT-variant training path (``train.py``: ``atom_fwd`` / ``atom_bwd`` and the pair-bias / edge
-Functions), which on H100 runs on plain CUDA rows (``train_rows.cu``, ``edge.cu``) and the mma.sync window attention of
+Functions): plain CUDA rows (``train_rows.cu``, ``edge.cu``) and the mma.sync window attention of
 ``augmented_attention/cuda/sm100_atom_local/lattn90*.cu``. None of those use an sm_90 feature but programmatic dependent launch, so the
 A100 builds are the same sources:
 
-* ``train_rows.cu`` / ``edge.cu``: torch extensions for sm_80 (their own names; the sm_90a builds are untouched);
+* ``train_rows.cu`` / ``edge.cu``: torch extensions for sm_80 (their own names; ``edge.cu``'s sm_90a build serves local_dit_h100);
 * ``lattn90.cu`` / ``lattn90_tf32.cu``: cubins for sm_80 of the source text with the two ``griddepcontrol`` statements (``pdl_wait`` /
   ``pdl_trigger``) emptied -- without a dependent launch they have nothing to wait for -- so there is one source of these kernels;
 * the two small reductions the H100 wrappers take from sm_90a-only files: the per-sample dbias sum (``local_bias_samples_sm90``) as a

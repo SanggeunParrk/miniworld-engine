@@ -647,12 +647,10 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
     packed GEMM; 128 = 4 x 32 wide, N a multiple of 32."""
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "anthropic", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
+    backends = ("pytorch", "anthropic", "cuda", "triton")   # "cuda": H100 local_dit_h100, A100 kernels/dit_variants (modules/dit_variant_cuda.py)
     key_window = "pad"
     kv_norm = "shared"
     transition_part = UpGatedConditionedTransition
-    #: H100: the one atom DiT implementation (local_dit_h100: one AdaLN, the up-gate transition) for these key windows
-    _h100_local = ("pad", "slide")
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
     backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
     _release_module = "boltz_atom_kernels"
@@ -705,14 +703,11 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     ``key_window="pad"``, the default). No ``"anthropic"`` backend: RoseTTAFold3's release keeps its stock atom attention (no kernel)."""
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
+    backends = ("pytorch", "cuda", "triton")   # "cuda": H100 local_dit_h100, A100 kernels/dit_variants (modules/dit_variant_cuda.py)
     key_window = "pad"
     kv_norm = "shared"
     parallel = True
     attention_part = FlatQKNormAugmentedAttention
-    #: H100: the one atom DiT implementation (local_dit_h100: one AdaLN, parallel, the flat q / k LayerNorm, a bias-free query) for these
-    #: key windows
-    _h100_local = ("pad", "slide")
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
     backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
 
@@ -727,14 +722,11 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
     Chai-1's release keeps its stock atom attention (no kernel)."""
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
+    backends = ("pytorch", "cuda", "triton")   # "cuda": H100 local_dit_h100, A100 kernels/dit_variants (modules/dit_variant_cuda.py)
     key_window = "pad"
     kv_norm = "shared"
     parallel = True
     attention_part = UngatedAugmentedAttention
-    #: H100: the one atom DiT implementation (local_dit_h100: one AdaLN, identity AdaLN, parallel, uid) for these key windows. Accepted:
-    #: "pad" fp32 eval at N >= 5120 is YELLOW on one element (1.13e-3 vs tol 9.6e-4; the old path's worst element, 8.1e-4), every case faster
-    _h100_local = ("pad", "slide")
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
     backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
 

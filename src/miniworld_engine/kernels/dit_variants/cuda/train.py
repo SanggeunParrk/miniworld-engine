@@ -1,5 +1,5 @@
-"""TRAINING of the ATOM DiT block variants (Boltz-2, RoseTTAFold3, Chai-1; ``modules.atom_dit``), H100 and (``cuda/sm80.py``) A100: hand-written
-CUDA row kernels (``train_rows.cu``, forward and backward), cuBLAS for every GEMM and the local DiT's window attention, in an
+"""The A100 (sm_80) path of the ATOM DiT blocks (``modules.atom_dit``; every A100 atom call, inference included), on the sm_80 builds of
+``cuda/sm80.py`` (H100 runs the one atom DiT implementation, ``kernels/integrations/local_dit_h100``): hand-written CUDA row kernels (``train_rows.cu``, forward and backward), cuBLAS for every GEMM and the local DiT's window attention, in an
 ``autograd.Function`` per block whose forward and backward are each one opaque op.
 
 What the block Function owns is the work over the A x N sample rows; everything on the N atom rows (the conditioning tables, the pair bias)
@@ -23,12 +23,6 @@ LOG2E = 1.4426950408889634
 QKV_RPB = 16
 
 
-def _ext():
-    from miniworld_engine.kernels.dit_variants import cuda
-
-    return cuda.train_ext()
-
-
 def _mm_t(a, b):
     """a^T b (a, b [M, *]) in fp32: bf16 products with fp32 accumulation (never rounded to bf16), TF32 under the caller's allow_tf32."""
     if a.dtype == torch.bfloat16:
@@ -49,40 +43,25 @@ _ANAMES = ("out", "xq", "xk", "xt", "q", "k", "v", "qn", "kn", "stqk", "g", "og"
 _ASAVED = _ANAMES[1:]
 
 
-def _sm80(t: torch.Tensor) -> bool:
-    """An A100 tensor: the atom path runs on the sm_80 builds of the same kernels (``cuda/sm80.py``)."""
-    return torch.cuda.get_device_capability(t.device) == (8, 0)
-
-
 def _atom_ext(t: torch.Tensor):
-    """The training row kernels (``train_rows.cu``) for ``t``'s card."""
-    if _sm80(t):
-        from miniworld_engine.kernels.dit_variants.cuda import sm80
+    """The training row kernels (``train_rows.cu``, sm_80)."""
+    from miniworld_engine.kernels.dit_variants.cuda import sm80
 
-        return sm80.train_ext()
-    return _ext()
+    return sm80.train_ext()
 
 
 def _local(t: torch.Tensor):
-    """The window attention / pair bias kernels for ``t``'s card: ``sm100_atom_local``'s mma.sync wrappers (sm_90a), their sm_80 builds."""
-    if _sm80(t):
-        from miniworld_engine.kernels.dit_variants.cuda import sm80
+    """The window attention / pair bias kernels: the sm_80 builds of ``sm100_atom_local``'s mma.sync wrappers."""
+    from miniworld_engine.kernels.dit_variants.cuda import sm80
 
-        return sm80.LOCAL
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
-
-    return local
+    return sm80.LOCAL
 
 
 def _edge(t: torch.Tensor):
-    """The slid edge window kernels (``edge.cu``) for ``t``'s card."""
-    if _sm80(t):
-        from miniworld_engine.kernels.dit_variants.cuda import sm80
+    """The slid edge window kernels (``edge.cu``, sm_80)."""
+    from miniworld_engine.kernels.dit_variants.cuda import sm80
 
-        return sm80.edge_ext()
-    from miniworld_engine.kernels.dit_variants import cuda
-
-    return cuda.edge_ext()
+    return sm80.edge_ext()
 
 
 class _EdgeBias(torch.autograd.Function):
@@ -352,14 +331,14 @@ class _AtomPairBias(torch.autograd.Function):
 
 
 def atom_serves(stack, single, cond, pair, mask, uid, *, need_grad: bool = True) -> bool:
-    """An atom stack call with a gradient (``need_grad``; A100 runs its inference here too) on H100 or A100: bf16 or fp32, 128 wide, N a
+    """An atom stack call with a gradient (``need_grad``; A100 runs its inference here too) on A100: bf16 or fp32, 128 wide, N a
     multiple of 64, a conditioning row set shared by the samples [N, d] or one per sample [A, N, d] (its tables then [A N, 8 d]), pair channels 16."""
 
     if stack.implementation == "pytorch" or not single.is_cuda or single.ndim != 3:
         return False
     if need_grad and not (torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *stack.parameters()))):
         return False
-    if torch.cuda.get_device_capability(single.device) not in ((9, 0), (8, 0)):
+    if torch.cuda.get_device_capability(single.device) != (8, 0):   # A100 only (H100: the one atom DiT implementation, local_dit_h100)
         return False
     a, n, d = single.shape
     return (single.dtype in (torch.bfloat16, torch.float32) and d == ATOM_D and n % 64 == 0 and tuple(cond.shape) in ((n, d), (a, n, d))

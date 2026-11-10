@@ -1,5 +1,5 @@
 """The portable path of the DiT block variants (Boltz-2, RoseTTAFold3, Chai-1): the structure of ``reference.py`` with its attention
-cores on the engine's Triton kernels, for the cards that have no hand-written CUDA path (``interface.py`` is the H100 one).
+cores on the engine's Triton kernels, for the cards that have no hand-written CUDA path (H100: kernels/integrations/local_dit_h100; A100: ``cuda/train.py``).
 
     token stack   ``kernels/augmented_attention/triton/main.py`` (pair-bias attention over the whole sequence, differentiable)
     atom stack    ``kernels/augmented_attention/triton/window.py`` (32 queries x 128 keys per window, per-window bias, the slid / clipped

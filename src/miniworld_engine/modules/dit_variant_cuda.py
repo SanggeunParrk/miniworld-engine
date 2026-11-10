@@ -1,9 +1,10 @@
-"""The ``"cuda"`` backend of the ATOM DiT block variants (:class:`~miniworld_engine.modules.atom_dit.AtomDiTBoltz2` / ``AtomDiTRoseTTAFold3`` /
-``AtomDiTChai1``, the classes the ``dit_variants_*`` requirement rows name), and the A100 paths of the token variants
+"""The A100 ``"cuda"`` paths of the ATOM DiT block variants (:class:`~miniworld_engine.modules.atom_dit.AtomDiTBoltz2` /
+``AtomDiTRoseTTAFold3`` / ``AtomDiTChai1``, :class:`VariantAtomCuda`) and of the token variants
 (:class:`~miniworld_engine.modules.token_dit.TokenDiTBoltz2` / ``TokenDiTRoseTTAFold3`` / ``TokenDiTChai1``, :class:`VariantTokenCuda`). On
-H100 the token variants run the one token DiT algorithm (TokenDiTProtenix's ``"cuda"`` route with the model's options).
+H100 the token variants run the one token DiT algorithm (TokenDiTProtenix's ``"cuda"`` route with the model's options) and the atom
+variants the one atom DiT implementation (``_LocalAtomDiT``'s ``"cuda"``: kernels/integrations/local_dit_h100 with the model's options).
 
-The kernels (``kernels/dit_variants``: ``rows.cu`` / ``train_rows.cu`` / ``edge.cu`` and the cuBLAS products, the local DiT attention
+The A100 kernels (``kernels/dit_variants``: ``train_rows.cu`` / ``edge.cu`` and the cuBLAS products, the local DiT attention
 cores of ``kernels/augmented_attention``) were written against a stack of variant blocks (``reference.py``'s parameter names). A block of
 these modules is such a stack of one block: :class:`_Stack` is its read-only view onto the module's own submodules (nothing is copied; a
 weight change is seen on the next call). Three attribute differences are bridged here:
@@ -13,12 +14,10 @@ weight change is seen on the next call). Three attribute differences are bridged
   * AdaLN: ``to_bias`` is the kernels' ``to_shift``; the sigmoid form's ``ln_cond.weight`` is ``cond_norm_weight``; one AdaLN for q and k / v
     (every atom class here) is the kernels' ``q_adaln`` AND ``k_adaln``.
 
-The path by dtype and gradient (the first whose range holds): bf16 inference ``kernels/dit_variants/interface.py``; fp32 (TF32) inference
-``cuda/infer32.py``; any call with a gradient (bf16 or fp32) ``cuda/train.py`` (autograd Functions, forward and backward). bf16 includes
-the master layout (fp32 parameters, bf16 activations under bf16 autocast): inference runs with autocast off (its operands are packed bf16),
-training under the caller's autocast (the conditioning tables are the module's own layers on the fp32 masters; the kernels cast the weights). Outside every range
-:meth:`_supports_cuda` states why; there is no other backend behind it. The H100 atom kernels take ONE conditioning row set shared by the
-samples and a ``cond`` that differs per sample runs one kernel call per sample (same kernels, same result per sample).
+A100 atom calls, inference included, run ``cuda/train.py`` (autograd Functions, forward and backward) on the sm_80 builds, bf16 or fp32
+(TF32), under the caller's autocast (the master layout: fp32 parameters, bf16 activations under bf16 autocast; the conditioning tables are
+the module's own layers on the fp32 masters, the kernels cast the weights). Outside the range :meth:`_supports_cuda` states why; there is
+no other backend behind it.
 """
 
 from __future__ import annotations
@@ -195,13 +194,6 @@ def _shared_cond(cond: torch.Tensor) -> bool:
     return cond.shape[0] == 1 or cond.stride(0) == 0
 
 
-def _first_hit(checks, stack, *call):
-    for serves, fn in checks:
-        if serves(stack, *call):
-            return fn
-    return None
-
-
 def _run(fn, stack, single, cond, call, *, wants_grad: bool, keep_autocast: bool = False, per_sample: bool = False):
     """``fn(stack, single [A, N, d], cond [N, c], *call)`` once for a shared ``cond``, else once per sample; -> [A, 1, N, d]. ``per_sample``: a
     ``cond`` that differs per sample goes to ``fn`` whole, [A, N, c], in one call (the A100 atom path's per-row tables)."""
@@ -280,16 +272,19 @@ class VariantTokenCuda:
 
 
 class VariantAtomCuda:
-    """Mixin of the Boltz-2 / RoseTTAFold3 / Chai-1 atom DiT blocks: ``_supports_cuda`` / ``_forward_cuda`` on ``kernels/dit_variants``."""
+    """Mixin of the Boltz-2 / RoseTTAFold3 / Chai-1 atom DiT blocks: on H100 THE atom DiT implementation (``_LocalAtomDiT``'s ``"cuda"``:
+    kernels/integrations/local_dit_h100 with the model's options, every key window), on A100 ``kernels/dit_variants`` (``cuda/train.py``
+    on the sm_80 builds)."""
 
     def _atom_serving(self, single, cond, pair, mask, uid):
-        """(the kernel function that serves the call, its trailing arguments) or (None, why not)."""
-        a100 = _a100(single)
-        if self.key_window not in (("pad", "slide", "slide_qblock") if a100 else ("pad", "slide")):
+        """A100: (the kernel function that serves the call, its trailing arguments) or (None, why not)."""
+        if self.key_window not in ("pad", "slide", "slide_qblock"):
             return None, f"key_window {self.key_window!r} (the kernels know the clipped 'pad' window and the slid one)"
         why = _call_reason(self, single, cond, pair, mask, a100=True)
         if why is not None:
             return None, why
+        if not _a100(single):
+            return None, "kernels/dit_variants serve A100 only (H100: the one atom DiT implementation)"
         n = single.shape[2]
         if (single.shape[-1], self.attention.n_head, pair.shape[-1]) != (128, 4, 16) or self.transition.expand_a.weight.shape[0] != 2 * 128:
             return None, ("geometry: the atom DiT kernels are built for 128 wide x 4 heads of 32, transition n = 2, pair 16 wide, got "
@@ -300,36 +295,23 @@ class VariantAtomCuda:
             return None, "mask must be a bool [1, N] key mask"
         if uid is not None and tuple(uid.shape) != (1, n):
             return None, f"uid must be [1, N], got {tuple(uid.shape)}"
-        from miniworld_engine.kernels.dit_variants import interface
-        from miniworld_engine.kernels.dit_variants.cuda import infer32, train
+        from miniworld_engine.kernels.dit_variants.cuda import train
 
         m, u = (None if mask is None else mask[0]), (None if uid is None else uid[0])
-        if a100:
-            # A100 (sm_80): every call -- inference included -- on the training path (train.py: the row kernels, the mma.sync window
-            # attention and the edge kernels, built for sm_80 by cuda/sm80.py), bf16 or fp32 (TF32), the caller's autocast kept
-            if not train.atom_serves(_stack(self, atom=True), single[:, 0], cond[0, 0] if _shared_cond(cond) else cond[:, 0], pair[0], m, u,
-                                     need_grad=False):
-                return None, ("A100: outside the sm_80 atom training path's range (bfloat16 / float32, [A, 1, N, 128] with N a multiple of 64, "
-                              "pair 16 wide, a conditioning shared by the samples or one per sample)")
-            return train.atom_stack_train, (pair[0], m, u)
-        with torch.set_grad_enabled(_wants_grad(self, single, cond, pair)):
-            fn = _first_hit(((interface.atom_serves, interface.atom_inference), (infer32.atom_serves, infer32.atom_inference),
-                             (train.atom_serves, train.atom_stack_train)), _stack(self, atom=True), single[:, 0], cond[0, 0], pair[0], m, u)
-        if fn is None:
-            return None, ("outside the kernels' range (bfloat16 / float32, [A, 1, N, 128] with N a multiple of 32 (float32 and training: of 64), "
-                          "pair 16 wide; no gradient: bfloat16 or float32 inference, a gradient: the training path)")
-        return fn, (pair[0], m, u)
+        # A100 (sm_80): every call -- inference included -- on the training path (train.py: the row kernels, the mma.sync window attention
+        # and the edge kernels, built for sm_80 by cuda/sm80.py), bf16 or fp32 (TF32), the caller's autocast kept
+        if not train.atom_serves(_stack(self, atom=True), single[:, 0], cond[0, 0] if _shared_cond(cond) else cond[:, 0], pair[0], m, u,
+                                 need_grad=False):
+            return None, ("A100: outside the sm_80 atom training path's range (bfloat16 / float32, [A, 1, N, 128] with N a multiple of 64, "
+                          "pair 16 wide, a conditioning shared by the samples or one per sample)")
+        return train.atom_stack_train, (pair[0], m, u)
 
-    #: H100: the class runs the one atom DiT implementation (``_LocalAtomDiT``'s "cuda": kernels/integrations/local_dit_h100 with its options)
-    #: instead of this mixin's kernels/dit_variants path, for the key windows listed; set by a class once its move met the acceptance
-    _h100_local: tuple = ()
-
-    def _h100_local_route(self, single) -> bool:
-        return (self.key_window in self._h100_local and single.is_cuda
-                and torch.cuda.get_device_capability(single.device) == (9, 0))
+    @staticmethod
+    def _h100(single) -> bool:
+        return single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0)
 
     def _supports_cuda(self, single, cond, pair, mask=None, uid=None) -> str | None:
-        if self._h100_local_route(single):
+        if self._h100(single):
             from miniworld_engine.modules.atom_dit import _LocalAtomDiT
 
             return _LocalAtomDiT._supports_cuda(self, single, cond, pair, mask, uid=uid)
@@ -337,11 +319,10 @@ class VariantAtomCuda:
         return why if fn is None else None
 
     def _forward_cuda(self, single, cond, pair, mask=None, uid=None) -> torch.Tensor:
-        if self._h100_local_route(single):
+        if self._h100(single):
             from miniworld_engine.modules.atom_dit import _LocalAtomDiT
 
             return _LocalAtomDiT._forward_cuda(self, single, cond, pair, mask, uid)
         fn, call = self._atom_serving(single, cond, pair, mask, uid)
-        a100 = _a100(single)
-        return _run(fn, _stack(self, atom=True), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair), keep_autocast=a100,
-                    per_sample=a100)
+        return _run(fn, _stack(self, atom=True), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair), keep_autocast=True,
+                    per_sample=True)
