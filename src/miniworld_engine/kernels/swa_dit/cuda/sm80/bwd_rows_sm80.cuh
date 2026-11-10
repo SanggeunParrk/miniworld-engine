@@ -43,7 +43,9 @@ DEVI RowMap row_map(int tile, int M, int S, int B, int g8) {
       m.nrow[hh] = nsm;
       m.rok[hh] = tile < ntile && s < S;
       m.rr[hh] = nsm * S + s;
-      m.mrow[hh] = (nsm % B) * S + s;
+      // a row past the call (the last tiles of the grid's last group, atoms >= S when S % 16) reads modulation / RoPE row 0: those
+      // loads are not guarded by rok, and an unclamped row lies past the end of mod (S = 4096 x 1 sample: an illegal address)
+      m.mrow[hh] = m.rok[hh] ? (nsm % B) * S + s : 0;
     }
   } else {
     const int ntile = S * B * (M / S / B / 16), s = tile % S, rest = tile / S, bb = rest % B;
