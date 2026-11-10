@@ -183,7 +183,8 @@ def _token_bias(pack, pair, mask, eps, nbh):
 
 
 def inference(stack, single, cond, pair, mask):
-    """The fp32 token stack's forward, no gradient: x [A, L, D] -> [A, L, D]."""
+    """The fp32 token stack's forward, no gradient: x [A, L, D] -> [A, L, D]. ``cond``: one row set shared by the samples [L, c], or one per
+    sample [A, L, c] (the samples' tables come out of the same two GEMMs, [A L, ...], and every sample runs in the same launches)."""
     from miniworld_engine.kernels.augmented_attention import cuda as attn
 
     ext = _ext()
@@ -195,10 +196,13 @@ def inference(stack, single, cond, pair, mask):
     dev = single.device
     pack = _static_pack(_PACKS, stack, _token_pack)
     sig = not b0.attn_adaln.identity_scale
-    s = cond.float().contiguous()
+    s = cond.float().reshape(-1, cond.shape[-1]).contiguous()          # [T, c]: T = L (shared) or A L (per sample)
+    rows = s.shape[0]                                                 # the row kernels read table row (x row % rows)
     sm = F.layer_norm(s, s.shape[-1:], eps=1e-5) if sig else s
-    t_mod = torch.addmm(pack["mod_b"], sm, pack["mod_w"].t())          # [L, nb 4 D]: per block scA | shA | scT | shT
-    t_gate = torch.addmm(pack["gate_b"], s, pack["gate_w"].t())        # [L, nb 2 D]: per block gA | gT
+    # one table [T, nb 6 D]: [per block scA | shA | scT | shT, ..., per block gA | gT, ...], written in place by the two GEMMs
+    tab = torch.empty(rows, nb * 6 * d, device=dev, dtype=torch.float32)
+    torch.addmm(pack["mod_b"], sm, pack["mod_w"].t(), out=tab[:, :nb * 4 * d])
+    torch.addmm(pack["gate_b"], s, pack["gate_w"].t(), out=tab[:, nb * 4 * d:])
     key = (pair.data_ptr(), pair._version, tuple(pair.shape), None if mask is None else (mask.data_ptr(), mask._version), pack["pair_w"].data_ptr())
     bias_all = _capture.lookup_inputs(_TOKEN_BIASES, key, lambda: _token_bias(pack, pair, mask, b0.pair_norm.eps, nb * heads), limit=2)[0]
 
@@ -217,13 +221,13 @@ def inference(stack, single, cond, pair, mask):
     if not b0.gating:
         qkg[:, 2 * d:].fill_(_NO_GATE)
     x = single.reshape(m, d).contiguous()
-    cols = lambda c: c * d  # noqa: E731
     for i, (blk, w) in enumerate(zip(blocks, pack["blocks"], strict=True)):
-        tab = torch.cat([t_mod[:, 4 * d * i:4 * d * (i + 1)], t_gate[:, 2 * d * i:2 * d * (i + 1)]], dim=1)
+        # block i's columns of the table: its four mod blocks at 4 D i, its two gate blocks at nb 4 D + 2 D i
+        cols = lambda c, i=i: (4 * i + c) * d if c < T_G_A else (4 * nb + 2 * i + c - T_G_A) * d  # noqa: E731
         if stack.parallel:
-            ext.ln_mod_fwd(x, tab, [cols(T_SC_A), cols(T_SC_T)], [cols(T_SH_A), cols(T_SH_T)], [xa, xt], st, length, b0.adaln_eps, sig)
+            ext.ln_mod_fwd(x, tab, [cols(T_SC_A), cols(T_SC_T)], [cols(T_SH_A), cols(T_SH_T)], [xa, xt], st, rows, b0.adaln_eps, sig)
         else:
-            ext.ln_mod_fwd(x, tab, [cols(T_SC_A)], [cols(T_SH_A)], [xa], st, length, b0.adaln_eps, sig)
+            ext.ln_mod_fwd(x, tab, [cols(T_SC_A)], [cols(T_SH_A)], [xa], st, rows, b0.adaln_eps, sig)
         torch.addmm(w["bqkg"], xa, w["wqkg"].t(), out=qkg[:, :(3 if blk.gating else 2) * d])
         torch.mm(w["wv"], xa.t(), out=vt)
         if blk.kq_norm:
@@ -238,13 +242,13 @@ def inference(stack, single, cond, pair, mask):
             torch.mm(xt, w["wexp"].t(), out=ab)
             ext.glu_fwd(ab, h, blk.up_gate)
             torch.mm(h, w["wsq"].t(), out=y2)
-            ext.res_out_fwd(x, ya, tab, cols(T_G_A), y2, cols(T_G_T), out, length, False)
+            ext.res_out_fwd(x, ya, tab, cols(T_G_A), y2, cols(T_G_T), out, rows, False)
         else:
-            ext.res_ln_fwd(x, ya, tab, cols(T_G_A), cols(T_SC_T), cols(T_SH_T), xp, xt, st, length, b0.adaln_eps, sig)
+            ext.res_ln_fwd(x, ya, tab, cols(T_G_A), cols(T_SC_T), cols(T_SH_T), xp, xt, st, rows, b0.adaln_eps, sig)
             torch.mm(xt, w["wexp"].t(), out=ab)
             ext.glu_fwd(ab, h, blk.up_gate)
             torch.mm(h, w["wsq"].t(), out=y2)
-            ext.res_out_fwd(xp, y2, tab, cols(T_G_T), None, 0, out, length, False)
+            ext.res_out_fwd(xp, y2, tab, cols(T_G_T), None, 0, out, rows, False)
         x = out
     return x.view(a, length, d)
 

@@ -621,6 +621,8 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
     """Boltz-2's token DiT block: :class:`TokenDiTProtenix` with the up-gate transition ``silu(W_a h) (W_b h) (W_u h)``
     (``transition.up``); the conditioning is 768 wide."""
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+    #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 2}
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
 
@@ -685,6 +687,8 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
     (``no_residual_connection_between_attention_and_transition: true``), a bias-free query (``to_q``: ``bias=False``) and an affine LayerNorm
     of the flat q / k (``kq_norm``: ``attention.norm_query`` / ``attention.norm_key``, over all heads)."""
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+    #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 2}
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
 
@@ -718,6 +722,8 @@ class TokenDiTChai1(VariantTokenCuda, TokenDiTProtenix):
     (``attention.ada_ln_in``, ``transition.ada_ln_in``), no gating query; the pair is 256 wide. ``adaln_eps``: the epsilon of both AdaLNs'
     LayerNorm of ``a`` (Chai-1's release, its traced ``layer_norm(x, None, None, 0.1)``: 0.1, the default)."""
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+    #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 2}
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": kernels/dit_variants (modules/dit_variant_cuda.py)
 

@@ -16,8 +16,9 @@ The path by dtype and gradient (the first whose range holds): bf16 inference ``k
 ``cuda/infer32.py``; any call with a gradient (bf16 or fp32) ``cuda/train.py`` (autograd Functions, forward and backward). bf16 includes
 the master layout (fp32 parameters, bf16 activations under bf16 autocast): inference runs with autocast off (its operands are packed bf16),
 training under the caller's autocast (the conditioning tables are the module's own layers on the fp32 masters; the kernels cast the weights). Outside every range
-:meth:`_supports_cuda` states why; there is no other backend behind it. The kernels take ONE conditioning row set shared by the samples: a
-``cond`` that differs per sample runs one kernel call per sample (same kernels, same result per sample).
+:meth:`_supports_cuda` states why; there is no other backend behind it. The token inference paths take a ``cond`` that differs per sample in
+one call (per-row conditioning tables, [A L, ...]); elsewhere the kernels take ONE conditioning row set shared by the samples and such a
+``cond`` runs one kernel call per sample (same kernels, same result per sample).
 """
 
 from __future__ import annotations
@@ -54,14 +55,21 @@ class _AdaLN:
 
 
 class _Expand:
-    """``expand.weight`` = ``[expand_a.weight; expand_b.weight]`` (made at access, so a gradient reaches both)."""
+    """``expand.weight`` = ``[expand_a.weight; expand_b.weight]``: made at access while a gradient is recorded (so it reaches both), else
+    kept per (pointer, version) of the two weights (every range check reads its shape: no concatenation per call, none inside a graph)."""
 
     def __init__(self, transition) -> None:
-        self._tr = transition
+        self._tr, self._key, self._cat = transition, None, None
 
     @property
     def weight(self):
-        return torch.cat([self._tr.expand_a.weight, self._tr.expand_b.weight])
+        wa, wb = self._tr.expand_a.weight, self._tr.expand_b.weight
+        if torch.is_grad_enabled() and (wa.requires_grad or wb.requires_grad):
+            return torch.cat([wa, wb])
+        key = (wa.data_ptr(), wa._version, wb.data_ptr(), wb._version, wa.dtype)
+        if key != self._key:
+            self._cat, self._key = torch.cat([wa, wb]), key
+        return self._cat
 
 
 class _ZeroBiasQuery:
@@ -299,7 +307,12 @@ class VariantTokenCuda:
                 return self.transition(single_a, cond)
             return single_a + self._a100_transition_delta(single, cond)
         fn, call = self._token_serving(single, cond, pair, mask, compute_dtype, extra_pair_bias)
-        return _run(fn, _stack(self, atom=False), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair))
+        from miniworld_engine.kernels.dit_variants import interface
+        from miniworld_engine.kernels.dit_variants.cuda import infer32
+
+        # the inference paths (bf16, fp32) take one conditioning per sample in the same launches (their tables are [A L, ...]); training loops
+        return _run(fn, _stack(self, atom=False), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair),
+                    per_sample=fn in (interface.inference, infer32.inference))
 
 
 class VariantAtomCuda:

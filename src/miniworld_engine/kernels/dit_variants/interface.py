@@ -124,7 +124,11 @@ def inference(stack, single, cond, pair, mask):
     M = A * L
     pack = _static_pack(_PACKS, stack, _pack)
     bf = torch.bfloat16
-    s = (cond if cond.ndim == 2 else cond[0]).to(bf).contiguous()
+    # one conditioning row set [L, c] shared by the samples, or one per sample [A, L, c]: the tables are then [A L, ...] (same GEMMs, one
+    # launch per op for every sample) and the row kernels index them by row % (A L)
+    shared = cond.ndim == 2 or cond.shape[0] == 1 or cond.stride(0) == 0
+    s = (cond if cond.ndim == 2 else cond[0] if shared else cond.reshape(-1, cond.shape[-1])).to(bf).contiguous()
+    LT = s.shape[0]
     sig = not b0.attn_adaln.identity_scale
     sm = F.layer_norm(s.float(), s.shape[-1:], eps=1e-5).to(bf) if sig else s
     t_mod = torch.addmm(pack["mod_b"], sm, pack["mod_w"].t())     # [L, nb 4 D]: per block scA | shA | scT | shT
@@ -151,7 +155,7 @@ def inference(stack, single, cond, pair, mask):
         last = out if i == nb - 1 else None
         mods = [(msa, mba, xa), *([(mst, mbt, xt)] if stack.parallel else [])]
         if i == 0 or stack.parallel:   # a sequential block's LN + AdaLN is the previous block's last residual pass (below)
-            cuda.ln_mod_rows(x, mods, L, eps, sig, xin=single.reshape(M, D) if i == 0 else None)
+            cuda.ln_mod_rows(x, mods, LT, eps, sig, xin=single.reshape(M, D) if i == 0 else None)
         torch.addmm(w["bqkv"], xa, w["wqkv"].t(), out=qkvg if blk.gating else qkvg[:, :3 * D])
         if blk.kq_norm:
             wq, bq, wk, bk, qeps = w["qk"]
@@ -161,16 +165,16 @@ def inference(stack, single, cond, pair, mask):
         if stack.parallel:
             torch.mm(xt, w["wexp"].t(), out=ab)
             cuda.glu_rows(ab, h, blk.up_gate)
-            cuda.res_rows(x, ya, ga, L, yt=torch.mm(h, w["wsq"].t()), gt=gt, final=last)
+            cuda.res_rows(x, ya, ga, LT, yt=torch.mm(h, w["wsq"].t()), gt=gt, final=last)
         else:
-            cuda.res_rows(x, ya, ga, L, ms=mst, mb=mbt, out_ln=xt, eps=eps, sig=sig)
+            cuda.res_rows(x, ya, ga, LT, ms=mst, mb=mbt, out_ln=xt, eps=eps, sig=sig)
             torch.mm(xt, w["wexp"].t(), out=ab)
             cuda.glu_rows(ab, h, blk.up_gate)
             if i + 1 < nb:
                 o = 4 * (i + 1) * D
-                cuda.res_rows(x, torch.mm(h, w["wsq"].t()), gt, L, ms=t_mod[:, o:o + D], mb=t_mod[:, o + D:o + 2 * D], out_ln=xa, eps=eps, sig=sig)
+                cuda.res_rows(x, torch.mm(h, w["wsq"].t()), gt, LT, ms=t_mod[:, o:o + D], mb=t_mod[:, o + D:o + 2 * D], out_ln=xa, eps=eps, sig=sig)
             else:
-                cuda.res_rows(x, torch.mm(h, w["wsq"].t()), gt, L, final=last)
+                cuda.res_rows(x, torch.mm(h, w["wsq"].t()), gt, LT, final=last)
     return out.view(A, L, D)
 
 
