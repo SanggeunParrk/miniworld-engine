@@ -1,4 +1,4 @@
-"""The A100 (sm_80) port's switches, at the defaults the pre-redesign engine shipped (git 08424b16a ``settings.py``).
+"""The A100 (sm_80) port's switches, at the defaults the pre-redesign A100 port shipped (2.4.1 + sm80, ``settings.py``).
 
 The sm_80 kernels and integrations were ported as they were; they read their A/B switches through ``settings.current()``. The redesign
 has no run-time switches: nothing here is configured by the engine, the measurers or a module, so every sm_80 path runs at these defaults.
@@ -12,7 +12,6 @@ from typing import Literal
 
 AutotuneKernel = Literal["transition", "tri_attention", "adaln"]
 DispatchMode = Literal["auto", "off", "force"]
-
 
 @dataclasses.dataclass(frozen=True)
 class Settings:
@@ -32,34 +31,26 @@ class Settings:
     layernorm_dispatch: DispatchMode = "auto"
     pin_gate_backend: Literal["fused", "split"] | None = None
     pin_infer_concat: bool | None = None
-    engine_backend: Literal["auto", "triton"] = "auto"
+    force_portable_kernels: bool = False
+    portable_on_hopper_blackwell: bool = False
     trimul_h100_training_widths: tuple[int, ...] = (64, 128, 256, 384, 512)
     transition_cuda_b2b: bool = True
-    transition_fused_sm90a: bool = True
-    augmented_attention_bf16_sm90: bool = True
     augmented_attention_bf16_sm100: bool = True
-    transition_gatebwd_wgmma: bool = True
     transition_fuse_stats: bool = False
-    transition_lnbwd_cuda: bool = True
-    transition_savedxn_split_bwd: bool = False
     transition_lnbwd_privatize: bool = True
     layernorm_bwd_path: Literal["persistent", "atomic", "cuda"] | None = None
-    layernorm_cuda_bwd: bool = False
     layernorm_out_bwd_path: str | None = None
     trimul_impl: str | None = None
     swa_dit_fused: bool = True
-    b200_engine_triton: bool = False
+    b200_portable_kernels: bool = False
     rope_angles_bf16_compat: bool = False
-    swa_dit_qkvg_fwd_cuda: bool = True
-    swa_dit_ffn_fwd_cuda: bool = True
-    swa_dit_ffn_bwd_cuda: bool = True
+    swa_dit_rows_impl: Literal["auto", "slab", "wgmma"] = "auto"
     swa_dit_ffn_dw: Literal["mat", "fused"] = "mat"
     swa_dit_dq1: Literal["bf16", "fp32"] = "bf16"
     typecheck: bool = False
     swa_check_front_packed: bool = False
     swa_flash_saves_lse: bool = True
     bias_only_dit: bool = True
-    bias_only_dit_hoist: bool = True
     bias_only_dit_train: bool = True
     bias_only_dit_train_pack1: bool = True
     bias_only_dit_bwd_dg: bool = True
@@ -67,7 +58,6 @@ class Settings:
     bias_only_dit_bwd_pbfin: bool = True
     bias_only_dit_bwd_mid: bool = False
     bias_only_dit_bwd_pvdpb: bool = True
-    bias_only_dit_bwd_pvpdl: bool = True
     bias_only_dit_pair_exact: bool = False
     bias_only_dit_core: bool = True
     bias_only_dit_inf3: bool = True
@@ -83,19 +73,14 @@ class Settings:
     local_dit_tf32: bool = True
     local_dit_sm100: bool = True
     opm_train_save_o: bool = True
-    token_dit_rows_cuda: bool = True
     token_dit_train: bool = True
-    augattn_bf16_sm90: bool = True
-    augattn_bf16_sm100: bool = True
-    tf32_pdl: bool = True
     swa_dit_sm100: bool = True
     swa_dit_tf32: bool = True
-    swa_fused: bool = False
     swa_global_bf16: bool = False
     transition_fused_sm100a: bool = True
     transition_fused_sm80: bool = True
-    transition_wide_sm90a: bool = True
     transition_wide_save_h: bool = False
+    transition_generic_small: bool = True
     bias_only_dit_tf32_glu: bool = False
     bias_only_dit_tf32_glu_bwd: bool = True
     static_weights: bool = False
@@ -104,12 +89,10 @@ class Settings:
     bias_only_dit_sg: int | None = None
     bias_only_dit_inf3_cl: int | None = None
     bias_only_dit_inf3_tail_cl: int | None = None
-    bias_only_dit_hoist_wsplit: int | None = None
     bias_only_dit_wgrad_split: int | None = None
     bias_only_dit_dpb_pair: bool | None = None
     bias_only_dit_tf32_dpb_pair: bool | None = None
     bias_only_dit_bwd_tail: str = "split3"
-    token_dit_gemm_swiglu: str = "auto"
     tf32_fused_units: str = "auto"
     transition_sm100_repl: int = 0
     transition_wide_small_tiles: int = 0
@@ -118,10 +101,15 @@ class Settings:
     plan_cache_dir: str = ""
     transition_sm100_nvcc: str = ""
     engine_jit_root: str = ""
+    jit_build_log: bool = True
+    prebuilt_kernels: bool = True
+    jit_fallback: bool = False   # the redesign never falls back
     opm_train: bool | None = None
     pwa_train: bool | None = None
     pwa_infer: bool | None = None
     token_pair_init_fused: bool = True
+    apb_h100_exact_dwb: bool = False
+    swa_dit_h100_native: bool | None = None
     a100_cleanup: bool = True
     augattn_sm80: bool = True
     augattn_sm80_fused: bool = True
@@ -144,6 +132,12 @@ class Settings:
     apb_sm80_train16: bool = True
     apb_sm80_typed_grad: bool = True
     apb_sm80_save_natural: bool = True
+    apb_sm80_overlap: bool = True
+    apb_sm80_cpp_step: bool = True
+    apb_sm80_attn_bn: int = 32
+    apb_sm80_bwd_mode: int = 1
+    apb_sm80_bwd_pair_grid: int = 0
+    apb_sm80_attn_warps: int = 0
     bias_only_attn_sm80: str = "1"
     bias_only_dit_prep: bool = True
     bias_only_dit_sm80_stages: int = 2
@@ -168,6 +162,8 @@ class Settings:
     pwa_sm80_dw_native: bool | None = None
     pwa_sm80_typed_grad: bool | None = None
     pwa_sm80_glue_tuned: bool | None = None
+    pwa_sm80_glue_pipeline: bool = True
+    pwa_sm80_lt: bool = True
     pwa_sm80_grad_reduce: bool | None = None
     pwa_sm80_pair_partial: bool = True
     pwa_sm80_split: int | None = None
@@ -178,6 +174,7 @@ class Settings:
     triattn_sm80_tuned: bool = True
     triattn_sm80_softmax: bool = True
     triattn_sm80_gemm_pad: bool = True
+    triattn_sm80_out_lt: bool = True
     triattn_sm80_native_rng: bool = True
     triattn_sm80_train_capture_aware: bool = True
     triattn_sm80_train_inner: bool = False
@@ -235,9 +232,11 @@ class Settings:
     transition_fwd_sm80_flags: str = ""
     transition_wide_grad_cast: bool = False
     transition_wide_grad_fp32: bool = True
+    transition_wide_save_ab: bool = True
     transition_wide_sm80: bool = True
     transition_wide_sm80_flags: str = ""
     local_dit_sm80: bool = True
+    local_dit_sm80_rows: bool = True
     mpnn_edge_flags: str = ""
     mpnn_edge_ptxas: bool = False
     mpnn_edge_sm80: bool = True
@@ -262,14 +261,11 @@ class Settings:
     token_dit_sm80_native_train_pack: bool = False
     token_dit_typed_grad: bool = False
 
-
 _ACTIVE = Settings()
-
 
 def current() -> Settings:
     """The active settings."""
     return _ACTIVE
-
 
 def configure(**kwargs) -> Settings:
     """Replace the active settings (kernel experiments only); returns the previous value."""
@@ -281,8 +277,13 @@ def configure(**kwargs) -> Settings:
     _ACTIVE = dataclasses.replace(previous, **kwargs)
     return previous
 
-
 def reset() -> None:
     """Restore the defaults."""
     global _ACTIVE
     _ACTIVE = Settings()
+
+def engine_jit_root():
+    """The JIT build cache (``kernels._nvcc.engine_jit_root``)."""
+    from miniworld_engine.kernels._nvcc import engine_jit_root as root
+
+    return root()
