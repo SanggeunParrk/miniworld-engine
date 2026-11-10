@@ -258,11 +258,19 @@ class AttentionPairBias(BackendModule, MasterWeights):
             return f"dtype {single.dtype}: bfloat16 / float32 only"
         return None
 
-    # "anthropic": the af3_torch kit's lever apb -- the shared core's pair-bias attention provider (opt_core.kernels.apb) by the tier word
-    # "fast" for the Pairformer cell (pf_h16d24; other geometries: no cell word, the provider names its boundary's row), the row it selects
-    # served as the release serves it (on the H100 cells measured here: its SDPA row); q / k / v / gate, the pair logits (+ extra bias, the key
-    # mask folded as -1e9, as the kit does) and the out-projection are the module's.
-    def _anthropic_select(self, single):
+    # "anthropic": the kits' Pairformer single attention (af3_torch's lever ``apb``: ``_pair_logits_fused`` / ``_apb_planes`` + ``_selfattn_forward`` /
+    # ``_apb_attention``; openfold3's ``cells/apb_trunk`` and protenix's ``pf_attn`` bind the same two faces) on the shared core's pair-bias
+    # provider (opt_core.kernels.apb), by the kits' tier word "fast":
+    #   * the PRODUCER ``pair_bias_planes`` -- bias = W_b LN_p(pair), head-major, on the row the provider selects for the cell
+    #     bias_c<d_pair>h<H> (ln_proj / lnl_ln_linear / fpf_pf_bias; a geometry no cell lists: the provider names its stock row);
+    #   * the CORE ``pair_bias_attention`` -- sigmoid(g) * softmax(q k^T / sqrt(D) + bias) v, the cell pf_h16d24 (other geometries: no cell
+    #     word, the provider names its boundary's row), the key mask folded as -1e9 as the kits do.
+    # Every row served as the release serves it; LN(single), q / k / v / gate and the out-projection are the module's statements (the kits'
+    # too). The module is model-agnostic and every kit binds the same provider, so one wiring serves every requirement row. ``ln_pair`` has no
+    # offset: the producer gets a zero LayerNorm bias (exact). Forward only: no kit carries a backward for this op (every carried row of the
+    # provider's table is ``backward: false``; only its stock rows -- SDPA, cuEquivariance, torch -- differentiate), so a call with a
+    # gradient is refused.
+    def _anthropic_core_select(self, single):
         from miniworld_engine.modules import _anthropic
 
         prov = _anthropic.load("opt_core.kernels.apb")
@@ -272,6 +280,29 @@ class AttentionPairBias(BackendModule, MasterWeights):
         return prov, cell, _anthropic.kernel_selection(prov, tuple(torch.cuda.get_device_capability(single.device)), dt, cell,
                                                        int(single.shape[1]), word="fast", samples=int(single.shape[0]), head_dim=d, heads=h)
 
+    def _anthropic_producer_select(self, pair):
+        from miniworld_engine.modules import _anthropic
+
+        prov = _anthropic.load("opt_core.kernels.apb")
+        h, c = self.n_head, int(pair.shape[-1])
+        cell = prov.cell_word("bias", heads=h, c_z=c)
+        # no producer cell for this geometry: the producer boundary's stock row by name (a cell-less tier word would name the CORE's stock row)
+        word = "fast" if cell is not None else prov.STOCK_OF_BOUNDARY["producer"]
+        return _anthropic.kernel_selection(prov, tuple(torch.cuda.get_device_capability(pair.device)), pair.dtype, cell, int(pair.shape[1]),
+                                           word=word, c_z=c, heads=h)
+
+    def _anthropic_producer_params(self):
+        """fp32 contiguous LayerNorm weight / zero offset / projection the producer rows pack or cast from (the kits hand fp32 copies too),
+        rebuilt only when a parameter changes (identity + version), so the provider's packed-weight cache keeps hitting."""
+        w_ln, w_b = self.ln_pair.weight, self.to_bias.weight
+        key = (id(w_ln), w_ln._version, id(w_b), w_b._version)
+        held = self.__dict__.get("_anthropic_params")
+        if held is None or held[0] != key:
+            lnw = w_ln.detach().float().contiguous()
+            held = (key, (lnw, torch.zeros_like(lnw), w_b.detach().float().contiguous()), {})
+            self.__dict__["_anthropic_params"] = held
+        return held[1], held[2]
+
     def _supports_anthropic(self, single, pair, mask=None, extra_pair_bias=None) -> str | None:
         from miniworld_engine.modules import _anthropic
 
@@ -279,14 +310,19 @@ class AttentionPairBias(BackendModule, MasterWeights):
         if why is not None:
             return why
         if torch.is_grad_enabled():
-            return "inference only (the provider's pair-bias rows are the kits' inference path): call under torch.no_grad() / inference_mode"
-        return self._anthropic_select(single)[2][1]
+            return ("inference only: no kit carries a backward for the pair-bias attention (the provider's carried rows are all forward only): "
+                    "call under torch.no_grad() / inference_mode")
+        why = self._anthropic_producer_select(pair)[1]
+        if why is not None:
+            return f"pair-bias producer: {why}"
+        return self._anthropic_core_select(single)[2][1]
 
     def _forward_anthropic(self, single, pair, mask=None, extra_pair_bias=None):
         if self.dead:
             return single
         with master_autocast(single, self):
-            prov, cell, (sel, _why) = self._anthropic_select(single)
+            prov, cell, (sel, _why) = self._anthropic_core_select(single)
+            psel, _pwhy = self._anthropic_producer_select(pair)
             b, n = single.shape[:2]
             h, d = self.n_head, self._head_dim()
             s = self.ln_single(single)
@@ -296,7 +332,10 @@ class AttentionPairBias(BackendModule, MasterWeights):
             gate = self.to_gate(s)
             if self.gate_bias:
                 gate = gate + self.gate_bias
-            bias = self.to_bias(self.ln_pair(pair)).permute(0, 3, 1, 2)
+            (lnw, lnb, w_b), cache = self._anthropic_producer_params()
+            bias, _served = prov.pair_bias_planes(pair.contiguous(), lnw, lnb, w_b, selection=psel, eps=self.ln_pair.eps, out_layout="hij",
+                                                  out_dtype=q.dtype, cache=cache)
+            bias = bias[..., :h, :, :n]                                               # rows writing [B, H, L, ld] planes (ld = L rounded to 8)
             if extra_pair_bias is not None:
                 bias = bias + extra_pair_bias.to(bias.dtype)
             if mask is not None:
