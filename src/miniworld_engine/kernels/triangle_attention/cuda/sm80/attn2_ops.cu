@@ -100,10 +100,9 @@ void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor 
     return;
   }
 #undef FWD2S
-  if (hd == 64) {                                    // 64-channel heads: one pair row per CTA (the 128 B Q / K / V rows), 4 stages, online softmax, 2 CTAs / SM
-    const dim3 g((unsigned)(L / a100::T2_BM), (unsigned)L, (unsigned)(Z * H));
-    if (mask) { using G = a100::Attn2Cfg<64, 1, 4, 32, 2, true, 0>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, g, p); }
-    else { using G = a100::Attn2Cfg<64, 1, 4, 32, 2, false, 0>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, g, p); }
+  if (hd == 64) {      // 64-channel heads: 2 pair rows, 3 stages (the prefetch stays within the two bias buffers: R = 1 would need NKV <= 2), online softmax, 72 KiB
+    if (mask) { using G = a100::Attn2Cfg<64, 2, 3, 32, 2, true, 0>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, grid, p); }
+    else { using G = a100::Attn2Cfg<64, 2, 3, 32, 2, false, 0>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, grid, p); }
     return;
   }
   if (hd == 32) { if (mask) FWD2(32, true, 0) else if (fixed) FWD2(32, false, 1) else FWD2(32, false, 0) }
