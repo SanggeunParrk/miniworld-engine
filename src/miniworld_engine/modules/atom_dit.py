@@ -85,6 +85,27 @@ def _h100(t: torch.Tensor) -> bool:
     return t.is_cuda and torch.cuda.get_device_capability(t.device) == (9, 0)
 
 
+def _a100(t: torch.Tensor) -> bool:
+    """A CUDA tensor on an A100 (sm_80): the card of the ``"cuda"`` backends' sm_80 paths (``kernels/integrations/*_sm80.py``)."""
+    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (8, 0)
+
+
+class _A100View:
+    """The block as the sm_80 atom block integration reads it (``local_dit_sm80_block``, written against the earlier ``LocalDiTBlock``):
+    ``cross_attention`` = a K / V AdaLN of its own; everything else (parameters, submodules, ``get_parameter``) is the module's."""
+
+    def __init__(self, module) -> None:
+        object.__setattr__(self, "_module", module)
+        object.__setattr__(self, "cross_attention", module.kv_norm != "shared")
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_module"), name)
+
+
+def _needs_grad(module: nn.Module, *tensors) -> bool:
+    return torch.is_grad_enabled() and (any(p.requires_grad for p in module.parameters())
+                                        or any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors))
+
 def windows(n: int) -> int:
     return (n + QUERIES - 1) // QUERIES
 
@@ -308,6 +329,8 @@ class _LocalAtomDiT(BackendModule):
     def _supports_cuda(self, single, cond, pair, mask=None, **kw) -> str | None:
         if kw:
             return f"{', '.join(kw)} (not an input of the H100 atom block)"
+        if _a100(single):
+            return self._a100_reason(single, cond, pair, mask)
         if not _h100(single):
             return "the H100 atom block kernels run on an H100 (sm_90) CUDA tensor only"
         if self.kv_norm == "shared":
@@ -348,7 +371,33 @@ class _LocalAtomDiT(BackendModule):
             return "a non-contiguous parameter"
         return None
 
+    # A100 (sm_80): the whole block on kernels/integrations/local_dit_sm80_block (conditioning, pre / post row kernels and the transition
+    # on mma.sync, the 32 x 128 window attention and the trunked pair bias of kernels/augmented_attention/cuda/sm80_atom_local; forward and
+    # backward). Range = its gate: the chained K / V AdaLN (Protenix), the clipped "pad" window, bf16 activations (bf16 or fp32 master
+    # parameters), the atom widths, B = 1, a bool [1, N] key mask or none, LayerNorm eps 1e-5.
+    def _a100_reason(self, single, cond, pair, mask) -> str | None:
+        from miniworld_engine.kernels.integrations import local_dit_sm80_block
+
+        if self.kv_norm != "chained":
+            return (f"A100: kv_norm={self.kv_norm!r} (the sm_80 atom block kernels know the chained K / V AdaLN of Protenix only; "
+                    "no sm_80 kernel for the parallel one)")
+        if self.key_window != "pad":
+            return f"A100: key_window={self.key_window!r} (the sm_80 atom block kernels read the clipped 'pad' window only)"
+        if (single.dtype, cond.dtype, pair.dtype) != (_BF, _BF, _BF):
+            return "A100: the sm_80 atom block kernels are bfloat16 only (single / cond / pair bfloat16; float32 has no sm_80 atom block)"
+        if torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") != _BF:
+            return "A100: autocast to a dtype other than bfloat16"
+        if not local_dit_sm80_block.serves(_A100View(self), single, cond, pair, mask):
+            return ("A100: outside the sm_80 atom block's range (128 / cond 128 / pair 16, 4 heads x 32, transition n = 2, [A, 1, N, 128] "
+                    "with the trunked contiguous pair [1, N / 32, 32, 128, 16], a bool contiguous [1, N] key mask or none, eps 1e-5)")
+        return None
+
     def _forward_cuda(self, single, cond, pair, mask=None):
+        if _a100(single):
+            from miniworld_engine.kernels.integrations import local_dit_sm80_block
+
+            with torch.autocast("cuda", enabled=False):   # the kernels run on bf16 packs of their own
+                return local_dit_sm80_block.block(_A100View(self), single, cond, pair, mask)
         from miniworld_engine.kernels.integrations import local_dit_h100
 
         if not (cond.is_contiguous() or local_dit_h100._shared(cond)):
@@ -807,6 +856,8 @@ class AtomDiTMiniWorld(BackendModule):
     def _supports_cuda(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> str | None:
         from miniworld_engine.kernels.swa_dit._common import D_ATOM, HALF_WINDOW, N_HEAD, N_HIDDEN, is_global
 
+        if _a100(x):
+            return self._a100_reason(x, cond, attention_params)
         if not x.is_cuda or torch.cuda.get_device_capability(x.device) != (9, 0):
             return "the H100 (sm_90) kernels only"
         if len(attention_params) != 6:
@@ -840,7 +891,60 @@ class AtomDiTMiniWorld(BackendModule):
             return "seqused must be int32 [N]"
         return None
 
+    # A100 (sm_80): inference on the sm_80 stages of kernels/swa_dit/cuda/sm80 (modulation mod_fwd, then block_fwd: qkvg + q / k RMSNorm +
+    # 3D RoPE, the window attention, out-projection + gated residual + SwiGLU FFN; mma.sync, bf16). Range: bf16 activations (weights bf16
+    # or fp32 masters, cast to bf16), d_atom 128 = 4 heads x 32, d_cond 128, SwiGLU hidden 256, half_window 64, no gradient.
+    def _a100_linears(self):
+        return (self.adaln_modulation[1], self.attn.Wqkv, self.attn.gate_proj, self.attn.out_proj, self.ffn.w_up, self.ffn.w_down)
+
+    def _a100_reason(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> str | None:
+        from miniworld_engine.kernels.swa_dit._common import D_ATOM, HALF_WINDOW, N_HEAD, N_HIDDEN
+
+        if len(attention_params) != 6:
+            return "attention_params must be the 6-tuple of build_attention_params"
+        if x.dtype != _BF or cond.dtype != _BF:
+            return (f"A100: x / cond dtype {x.dtype} / {cond.dtype} (the sm_80 SWA block kernels are bfloat16 only; float32 has no "
+                    "sm_80 SWA block)")
+        if torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") != _BF:
+            return "A100: autocast to a dtype other than bfloat16"
+        linears = self._a100_linears()
+        if _needs_grad(self, x, cond):
+            return ("A100: training: the sm_80 SWA block's backward kernels (kernels/swa_dit/cuda/sm80 *_bwd) have no autograd in this "
+                    "engine (eval only)")
+        if x.ndim != 3 or x.shape[-1] != D_ATOM or self.attn.n_heads != N_HEAD or tuple(cond.shape) != (*x.shape[:2], D_ATOM):
+            return f"A100: x / cond must be [N, S, {D_ATOM}] with {N_HEAD} heads"
+        if self.attn.half_window != HALF_WINDOW:
+            return f"A100: half_window {self.attn.half_window} (the sm_80 window kernels: {HALF_WINDOW}; no global attention)"
+        if any(type(m) is not Linear or m.bias is not None for m in linears):
+            return "the kernels read bias-free (non magnitude-preserving) Linear weights"
+        if tuple(self.ffn.w_up.weight.shape) != (2 * N_HIDDEN, D_ATOM):
+            return f"SwiGLU hidden {self.ffn.w_up.weight.shape[0] // 2} (the kernels: {N_HIDDEN})"
+        if any(m.weight.dtype not in (_BF, _F32) for m in linears):
+            return "weights must be bfloat16 or fp32"
+        cos, sin, seqused = attention_params[:3]
+        for t in (cos, sin):
+            if t.dtype != _F32 or t.shape[-1] != D_ATOM // N_HEAD // 2 or t.numel() != x.shape[0] * x.shape[1] * t.shape[-1]:
+                return "cos / sin must be fp32 [N, S, head_dim / 2]"
+        if seqused.dtype != torch.int32 or tuple(seqused.shape) != (x.shape[0],):
+            return "seqused must be int32 [N]"
+        return None
+
+    def _forward_a100(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> torch.Tensor:
+        from miniworld_engine.kernels.swa_dit._common import FP32_EPS
+        from miniworld_engine.kernels.swa_dit.cuda import sm80
+
+        n = x.shape[0]
+        cos, sin, seqused = attention_params[:3]
+        cos, sin = cos.reshape(-1, cos.shape[-1]).contiguous(), sin.reshape(-1, sin.shape[-1]).contiguous()
+        wmod, *weights = (m.weight.to(_BF).contiguous() for m in self._a100_linears())
+        with torch.autocast("cuda", enabled=False):
+            mod = sm80.mod_fwd(cond.reshape(-1, cond.shape[-1]).contiguous(), wmod, False)[0]
+            # one modulation row per sequence row: b = N
+            return sm80.block_fwd(x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, FP32_EPS, FP32_EPS, False)[0]
+
     def _forward_cuda(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> torch.Tensor:
+        if _a100(x):
+            return self._forward_a100(x, cond, attention_params)
         from miniworld_engine.kernels.swa_dit._common import FP32_EPS
         from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction, SWADiTModulationH100
         from miniworld_engine.kernels.swa_dit.dispatch import native_h100_mod_fwd, swa_dit_block_fwd

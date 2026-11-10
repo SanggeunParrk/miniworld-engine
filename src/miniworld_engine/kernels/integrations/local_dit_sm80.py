@@ -25,10 +25,8 @@ def serves(block, single, cond, pair, mask):
         or settings.current().engine_backend == "triton"
     ):
         return False
-    from miniworld_engine.modules.dispatch import KernelBackend
-
     att = block.attention
-    if att._backend != KernelBackend.TRITON or att.use_qk_norm:
+    if att.use_qk_norm:
         return False
     if not single.is_cuda or torch.cuda.get_device_capability(single.device) != (8, 0):
         return False

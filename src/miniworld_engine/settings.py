@@ -143,12 +143,6 @@ class Settings:
     apb_sm80: bool = True
     apb_sm80_train16: bool = True
     apb_sm80_typed_grad: bool = True
-    apb_sm80_attn_bn: int = 32
-    apb_sm80_attn_warps: int = 0
-    apb_sm80_bwd_mode: int = 1
-    apb_sm80_bwd_pair_grid: int = 0
-    apb_sm80_cpp_step: bool = True
-    apb_sm80_overlap: bool = True
     apb_sm80_save_natural: bool = True
     bias_only_attn_sm80: str = "1"
     bias_only_dit_prep: bool = True
@@ -195,7 +189,6 @@ class Settings:
     triattn_sm80_native_out: bool | None = None
     triattn_sm80_exact_gamma: str = "2"
     triattn_sm80_flags: str = ""
-    triattn_sm80_out_lt: bool = True
     trimul_sm80: bool = True
     trimul_sm80_wide: bool = True
     trimul_sm80_wide512: bool = True

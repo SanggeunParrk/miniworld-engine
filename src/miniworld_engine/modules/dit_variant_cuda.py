@@ -148,9 +148,15 @@ def _eps_reason(module) -> str | None:
     return None
 
 
+def _a100(single) -> bool:
+    return single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0)
+
+
 def _call_reason(module, single, cond, pair, mask) -> str | None:
     if not single.is_cuda:
         return "CUDA tensors only"
+    if _a100(single):
+        return "A100: no sm_80 port of the DiT-variant kernels (kernels/dit_variants are sm_90a only)"
     if torch.cuda.get_device_capability(single.device) != (9, 0):
         return "the H100 (sm_90) kernels only"
     if torch.is_autocast_enabled("cuda") and (torch.get_autocast_dtype("cuda") != _BF or single.dtype != _BF):
@@ -233,11 +239,41 @@ class VariantTokenCuda:
                           "a key mask shared by the samples; no gradient: bfloat16 or float32 inference, a gradient: the training path)")
         return fn, (pair[0], mask)
 
+    # A100 (sm_80): the sequential block with the plain pair-bias attention (TokenDiTBoltz2) runs its attention on
+    # kernels/integrations/augattn_sm80 (the module's AdaLN, then cuBLAS projections, the pair bias kernels, the mma.sync core and the gates,
+    # forward and backward; bf16 or the TF32 core) and its up-gate transition as the module's own statements. The parallel blocks
+    # (RoseTTAFold3, Chai-1) have no sm_80 path.
+    def _a100_token_reason(self, single, cond, pair, mask, compute_dtype, extra_pair_bias) -> str | None:
+        from miniworld_engine.kernels.integrations import augattn_sm80
+        from miniworld_engine.modules.attention import AugmentedAttentionPairBias
+
+        if self.parallel or type(self.attention) is not AugmentedAttentionPairBias:
+            return "A100: no sm_80 port of the DiT-variant kernels (kernels/dit_variants are sm_90a only)"
+        if extra_pair_bias is not None:
+            return "A100: extra_pair_bias (not an input of the sm_80 attention kernels)"
+        dt = single.dtype
+        if dt not in (_BF, _F32) or cond.dtype != dt or pair.dtype != dt:
+            return f"A100: dtypes {single.dtype} / {cond.dtype} / {pair.dtype} (all bfloat16 or all float32)"
+        if torch.is_autocast_enabled("cuda") and (torch.get_autocast_dtype("cuda") != _BF or dt != _BF):
+            return "A100: autocast: bfloat16 activations under bfloat16 autocast only (float32 activations run without autocast, on TF32)"
+        if compute_dtype not in (None, dt):
+            return f"A100: compute_dtype {compute_dtype} (the sm_80 kernels run in the activations' dtype)"
+        if not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond=cond):
+            return ("A100: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or fp32, "
+                    "head dim 32 or 48, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)")
+        return None
+
     def _supports_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> str | None:
+        if _a100(single):
+            return self._a100_token_reason(single, cond, pair, mask, compute_dtype, extra_pair_bias)
         fn, why = self._token_serving(single, cond, pair, mask, compute_dtype, extra_pair_bias)
         return why if fn is None else None
 
     def _forward_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> torch.Tensor:
+        if _a100(single):
+            from miniworld_engine.kernels.integrations import augattn_sm80
+
+            return self.transition(augattn_sm80.forward(self.attention, single, cond, pair, mask), cond)
         fn, call = self._token_serving(single, cond, pair, mask, compute_dtype, extra_pair_bias)
         return _run(fn, _stack(self, atom=False), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair))
 

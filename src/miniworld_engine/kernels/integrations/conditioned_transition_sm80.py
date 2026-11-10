@@ -24,7 +24,7 @@ import warnings
 import torch
 
 from miniworld_engine import settings
-from miniworld_engine.integrations.adaln_sm80 import (
+from miniworld_engine.kernels.integrations.adaln_sm80 import (
     WIDTHS,
     Branch,
     _mm,

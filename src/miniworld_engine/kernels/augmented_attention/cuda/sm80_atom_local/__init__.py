@@ -5,13 +5,11 @@ The block dispatches here after full-module accuracy and paired performance vali
 """
 
 import functools
-from miniworld_engine import settings
-import hashlib
-import os
 from pathlib import Path
-import subprocess
+
 import torch
-from miniworld_engine.kernels._nvcc import host_flags, nvcc_path
+
+from miniworld_engine.kernels import _nvcc
 
 NH, DH, DM, DP, WQ, WK = 4, 32, 128, 16, 32, 128
 PREFETCH = False  # L2 prefetch of the next sample pair's rows in the attention kernels: measured slower (A = 48, N = 4096: fwd 208 -> 294 us, dq +11 %, dkv +17 %), so off; True and clear the caches of ``cubin`` / ``_load`` to repeat
@@ -32,40 +30,10 @@ KERNELS = {
 
 @functools.lru_cache(maxsize=None)
 def cubin(stem):
-    nvcc = nvcc_path()
-    if nvcc is None:
-        raise RuntimeError("A100 local attention needs nvcc")
-    flags = [
-        *host_flags(),
-        "-std=c++17",
-        "-O3",
-        "-arch=sm_80",
-        "-cubin",
-        "-lineinfo",
-        f"-DATT_PF={int(PREFETCH)}",
-        f"-I{_dir}",
-    ]
-    digest = hashlib.sha256(" ".join([nvcc, *flags]).encode())
-    for source in [_dir / "local.cuh", _dir / f"{stem}.cu"]:
-        digest.update(source.read_bytes())
-    root = settings.engine_jit_root()
-    output = root / "atom_local_sm80" / f"{stem}_{digest.hexdigest()[:16]}.cubin"
-    if not output.exists():
-        output.parent.mkdir(parents=True, exist_ok=True)
-        temporary = output.with_suffix(f".{os.getpid()}.tmp")
-        process = subprocess.run(
-            [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(temporary)],
-            capture_output=True,
-            text=True,
-            timeout=900,
-        )
-        if process.returncode:
-            temporary.unlink(missing_ok=True)
-            raise RuntimeError(
-                f"A100 {stem} CUDA build failed:\n{process.stderr[-4000:]}"
-            )
-        os.replace(temporary, output)
-    return str(output)
+    """The cubin of ``<stem>.cu`` (sm_80), through ``_nvcc.cubin``: the packaged prebuilt kernels, the content-keyed cache, else built
+    (``kernels/_prebuild.py`` plans it)."""
+    flags = ["-std=c++17", "-O3", "-arch=sm_80", "-cubin", "-lineinfo", f"-DATT_PF={int(PREFETCH)}", f"-I{_dir}"]
+    return str(_nvcc.cubin(f"atom_local_sm80/{stem}", flags, source=_dir / f"{stem}.cu"))
 
 
 @functools.lru_cache(maxsize=None)

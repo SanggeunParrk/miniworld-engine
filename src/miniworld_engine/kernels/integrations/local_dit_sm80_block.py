@@ -27,13 +27,9 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine import settings
-from miniworld_engine.integrations.local_dit import (
+from miniworld_engine.kernels.integrations.local_dit import (
     CROSS_WEIGHTS,
-    DC_,
-    DP_,
-    DS_,
     KEYS,
-    NH_,
     QUERIES,
     WEIGHTS,
 )
@@ -43,6 +39,7 @@ from miniworld_engine.kernels._compile import device_constant, opaque
 BF = torch.bfloat16
 F32 = torch.float32
 EPS = 1e-5
+DS_, DC_, DP_, NH_ = 128, 128, 16, 4   # the atom widths the kernels are built for
 _FAILED = False
 _GAMMA, _WBIAS = (
     WEIGHTS.index("attention.ln_pair.weight"),
@@ -82,10 +79,8 @@ def serves(module, single, cond, pair, mask) -> bool:
         or settings.current().engine_backend == "triton"
     ):
         return False
-    from miniworld_engine.modules.dispatch import KernelBackend
-
     a, tr = module.attention, module.transition
-    if a._backend != KernelBackend.TRITON or a.use_qk_norm:
+    if a.use_qk_norm:
         return False
     if not (
         single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0)

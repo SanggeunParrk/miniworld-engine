@@ -489,6 +489,9 @@ def prebuild(target, rows):
     (``integrations.token_dit_train._native_rpb``) for the layout (d_single, n_head, d_cond, d_pair, n) of every token-DiT row
     that trains, when the kernels support it; rpb 8 is the default the pair-bias callers take. The 5-sample uniform-mask
     variant (``empty_uniform``) follows the sample count of a row, which ``rows`` does not carry: both are planned."""
+    if target.arch == "sm80":   # A100: the token DiT transition of integrations/conditioned_transition_sm80 (its AdaLN rows + tail)
+        yield from _prebuild_sm80(rows)
+        return
     if target.arch != "sm90":
         return
     import itertools
@@ -524,3 +527,25 @@ def prebuild(target, rows):
             layouts.add((d, d // h, dc, n, dp))
     for (d, hd, dc, n, dp), empty in itertools.product(sorted(layouts), (False, True)):
         yield functools.partial(train.rows_ext, d, hd, 2, empty_uniform=empty, dc=dc, n=n, dp=dp, hopper=True)
+
+
+#: classes whose A100 "cuda" backend runs integrations/conditioned_transition_sm80 (TokenDiTProtenix._forward_a100)
+_SM80_TOKEN = frozenset({"TokenDiTProtenix", "TokenDiTMiniWorld"})
+
+
+def _prebuild_sm80(rows):
+    """The A100 builds the token DiT transition reaches: the tail extension (``sm80.py``) and the AdaLN rows it composes with
+    (``kernels/adaln/cuda/sm80.py``). Width-independent: one build each when a row of those classes exists."""
+    if not any(r["module"] in _SM80_TOKEN for r in rows):
+        return
+    from miniworld_engine.kernels.adaln.cuda import sm80 as adaln_sm80
+
+    from . import sm80
+
+    yield sm80._ext
+    yield adaln_sm80._ext
+    if any(r["module"] in _SM80_TOKEN and r["mode"] == "train" for r in rows):   # the training path's parameter casts (transition family)
+        from miniworld_engine.kernels.transition.cuda import parameter_cast_pack_sm80, parameter_cast_sm80
+
+        yield parameter_cast_sm80._ext
+        yield parameter_cast_pack_sm80._ext

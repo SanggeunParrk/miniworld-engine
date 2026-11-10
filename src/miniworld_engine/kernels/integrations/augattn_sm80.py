@@ -78,7 +78,6 @@ def _loads() -> bool:
         sm80 = _sm80()
         sm80._ext()
         sm80._glue_ext()
-        _apb().ext()
     except Exception as exc:  # a toolchain problem keeps the module path
         _FAILED = True
         warnings.warn(
@@ -146,9 +145,7 @@ def serves(module, single, pair, mask, compute_dtype=None, cond=None) -> bool:
         or settings.current().engine_backend == "triton"
     ):
         return False
-    from miniworld_engine.modules.dispatch import KernelBackend
-
-    if module._backend != KernelBackend.TRITON or module.use_qk_norm:
+    if module.use_qk_norm:
         return False
     dt = single.dtype
     if (
@@ -335,14 +332,11 @@ def _pack(params: list[torch.Tensor], heads: int, dt: torch.dtype, save: bool = 
 
 
 def _kind(dp: int, heads: int, dt: torch.dtype = BF) -> str:
-    """Which pair-bias producer: the atom width's (bf16 or fp32), AttentionPairBias's 128-channel kernel (bf16, 8 / 12 / 16 heads), or the generic ATen + cuBLAS one."""
-    return (
-        "atom"
-        if (dp, heads) == (_ATOM[2], _ATOM[0])
-        else "apb"
-        if dp == 128 and heads in (8, 12, 16) and dt is BF
-        else "generic"
-    )
+    """Which pair-bias producer: the atom width's (bf16 or fp32) or the generic one (the streaming kernel or ATen + cuBLAS).
+
+    AttentionPairBias's 128-channel kernel (``"apb"``: bf16, 8 / 12 / 16 heads) needs the sm_80 build of ``kernels/augmented_attention/cuda/apb``
+    (``apb_rows.cu`` with ``-DAPB_SM80``), which the redesign's ``apb`` does not have: the generic producer serves those widths."""
+    return "atom" if (dp, heads) == (_ATOM[2], _ATOM[0]) else "generic"
 
 
 def _bias_into(

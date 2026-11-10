@@ -167,6 +167,24 @@ def _h100_reason(single: torch.Tensor) -> str | None:
     return None
 
 
+def _a100(single: torch.Tensor) -> bool:
+    """A CUDA tensor on an A100 (sm_80): the card of the ``"cuda"`` backend's sm_80 paths (``kernels/integrations/*_sm80.py``)."""
+    return single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0)
+
+
+def _a100_dtype(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor | None, compute_dtype) -> tuple[torch.dtype | None, str | None]:
+    """(the dtype the A100 kernels run the block in, None) or (None, why not): bf16 activations (bf16 or fp32 master parameters, with or
+    without bf16 autocast) or fp32 activations without autocast (TF32 tensor cores)."""
+    dt = single.dtype
+    if dt not in (torch.bfloat16, torch.float32) or cond.dtype != dt or (pair is not None and pair.dtype != dt):
+        return None, f"A100: dtypes {single.dtype} / {cond.dtype} / {None if pair is None else pair.dtype} (all bfloat16 or all float32)"
+    if torch.is_autocast_enabled("cuda") and (torch.get_autocast_dtype("cuda") != torch.bfloat16 or dt != torch.bfloat16):
+        return None, "A100: autocast: bfloat16 activations under bfloat16 autocast only (float32 activations run without autocast, on TF32)"
+    if compute_dtype not in (None, dt):
+        return None, f"A100: compute_dtype {compute_dtype} (the sm_80 kernels run in the activations' dtype)"
+    return dt, None
+
+
 def _wants_grad(module: torch.nn.Module, *tensors) -> bool:
     return torch.is_grad_enabled() and (any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
                                         or any(p.requires_grad for p in module.parameters()))
@@ -273,7 +291,9 @@ class TokenDiTProtenix(BackendModule):
     # kernels and weight packs are built per cond / pair width), transition n = 2, LayerNorm eps 1e-5,
     # a key mask shared by the samples; inference L a multiple of 128, training any L (padded to 128).
     def _cuda_route(self, single, cond, pair, mask, compute_dtype, extra_pair_bias):
-        """("infer" | "train", the [B, L] key mask) or (None, why not)."""
+        """("infer" | "train", the [B, L] key mask), ("a100" | "a100_generic", the key mask) or (None, why not)."""
+        if _a100(single):
+            return self._a100_route(single, cond, pair, mask, compute_dtype, extra_pair_bias)
         why = _h100_reason(single)
         if why is not None:
             return None, why
@@ -303,6 +323,8 @@ class TokenDiTProtenix(BackendModule):
 
     def _forward_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> torch.Tensor:
         route, km = self._cuda_route(single, cond, pair, mask, compute_dtype, extra_pair_bias)
+        if route in ("a100", "a100_generic"):
+            return self._forward_a100(route, single, cond, pair, mask, km)
         view = _kernel_view(self)
         if route == "train":
             from miniworld_engine.kernels.integrations import token_dit_train
@@ -311,6 +333,54 @@ class TokenDiTProtenix(BackendModule):
         from miniworld_engine.kernels.integrations import token_dit
 
         return token_dit.update(view, single, cond, pair, km, extra_pair_bias)
+
+    # A100 (sm_80): the block's two parts on their sm_80 paths, forward and backward. The attention: kernels/integrations/augattn_sm80 (the
+    # module's AdaLN, then one autograd Function from the AdaLN output to the residual: cuBLAS projections, the pair bias kernels, the
+    # mma.sync core, the gates; bf16 or the TF32 core for fp32), or for the per-head q / k RMSNorm (TokenDiTMiniWorld) the general sm_80
+    # composition kernels/integrations/a100_families.token (CUDA rows, cuBLAS, a materialised-score attention). The transition:
+    # kernels/integrations/conditioned_transition_sm80 (AdaLN rows + the SwiGLU tail, bf16 or TF32). Range = their gates: bf16 / master /
+    # fp32, head dim 32 or 48, LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none, no extra_pair_bias.
+    def _a100_route(self, single, cond, pair, mask, compute_dtype, extra_pair_bias):
+        from miniworld_engine.kernels.integrations import augattn_sm80
+        from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
+
+        if extra_pair_bias is not None:
+            return None, "A100: extra_pair_bias (not an input of the sm_80 attention kernels)"
+        dt, why = _a100_dtype(single, cond, pair, compute_dtype)
+        if why is not None:
+            return None, why
+        if single.ndim != 4 or cond.ndim != 4:
+            return None, f"A100: single / cond must be [A, B, L, d], got {tuple(single.shape)} / {tuple(cond.shape)}"
+        if not ct_sm80.serves(self.transition, single, cond, dt, _wants_grad(self, single, cond, pair)):
+            return None, ("A100: outside the sm_80 ConditionedTransition kernels' range (bf16 / fp32, widths of their table, sigmoid AdaLN "
+                          "without a shift bias, bias-free SwiGLU)")
+        if self.attention.use_qk_norm:
+            from miniworld_engine.kernels import cuda_native
+
+            km, shared = _shared_key_mask(mask)
+            if not shared:
+                return None, "A100: a key mask that differs across the samples (the sm_80 QK-norm composition takes one [B, L] mask)"
+            if not cuda_native.enabled(single) or single.shape[-1] % self.attention.n_head:
+                return None, "A100: outside the sm_80 QK-norm composition's range (bf16 / fp32, whole heads)"
+            return "a100_generic", km
+        if not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond=cond):
+            return None, ("A100: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or "
+                          "fp32, head dim 32 or 48, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)")
+        return "a100", None
+
+    def _forward_a100(self, route, single, cond, pair, mask, km):
+        from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
+
+        if route == "a100_generic":
+            from miniworld_engine.kernels.integrations import a100_families
+
+            return a100_families.token(self, single, cond, pair, km)
+        from miniworld_engine.kernels.integrations import augattn_sm80
+
+        grad = _wants_grad(self, single, cond, pair)
+        single = augattn_sm80.forward(self.attention, single, cond, pair, mask)
+        with torch.autocast("cuda", enabled=False):
+            return ct_sm80.update(self.transition, single, cond, True, single.dtype, grad)
 
     # ------------------------------------------------------------------------------------------------------------ "anthropic"
     #: the release op this class's attention core runs on, and whether that op fuses the gating query's sigmoid
@@ -557,6 +627,9 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # multiple of 128 (training L <= 768), 16 heads x 48, cond 384 or 768 (training also 128 / 256), pair 128 / 256, n = 2, eps 1e-5,
     # key mask [1, L] or none, the pair or the block's hoisted bias [1, H, L, L].
     def _cuda_route(self, single, cond, pair, mask, bias):
+        if _a100(single):
+            return None, ("A100: the sm_80 bias-only cores (kernels/bias_only_dit/cuda/sm80) have no fused block in this engine (their "
+                          "A100 branches of the bias-only runner / training block were not ported)")
         why = _h100_reason(single)
         if why is not None:
             return None, why

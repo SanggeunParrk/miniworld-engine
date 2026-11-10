@@ -60,7 +60,7 @@ class _GateResidual(torch.autograd.Function):
     @staticmethod
     @once_differentiable
     def backward(ctx, dy):
-        from miniworld_engine.integrations.local_dit_sm80 import _gate_bwd
+        from miniworld_engine.kernels.integrations.local_dit_sm80 import _gate_bwd
 
         dgate, dprojection = _gate_bwd(dy, *ctx.saved_tensors)
         return (dy, dgate, dprojection, None, None)

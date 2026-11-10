@@ -446,6 +446,11 @@ def prebuild(target, rows):
 
     from miniworld_engine.kernels._prebuild import _kv
 
+    if target.arch == "sm80":   # the A100 builds: prebuild_sm80.py
+        from .prebuild_sm80 import prebuild_sm80
+
+        yield from prebuild_sm80(rows)
+        return
     from . import apb, sm90_atom, sm100_atom, sm100_atom_local
 
     calls = []
