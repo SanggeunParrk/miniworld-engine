@@ -531,6 +531,10 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         if self.training and self.drop_msa.p_drop > 0:
             return None, "the row dropout is live (training mode): inference only"
         d_msa, d_pair, H, D = self._widths()
+        if self.anthropic_word == "exact" and (d_msa, d_pair, H, D) == (64, 128, 8, 32):
+            # the exact tier: opt_core.ops.msa_pwa2 (the boltz2 kit's pwa2x cell: torch LN / proj_z / masked softmax, Triton v | g, the
+            # K = N contraction in a cuBLAS summation structure, proj_o)
+            return ("pwa2", None) if (why := _anthropic.missing("opt_core.ops.msa_pwa2")) is None else (None, why)
         if (d_msa, H, D) == (64, 8, 32):
             return ("boltz2", None) if (why := _anthropic.missing("fpf_msa.boltz2", path="boltz2/opt/forward")) is None else (None, why)
         if d_msa == 128 and d_pair == 256 and not (H * D) & (H * D - 1) and H * D <= 256 and not D & (D - 1):
@@ -585,6 +589,10 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
                 outs.append(msa[b] + self.to_out(v_avg * torch.sigmoid(gate)))
         return torch.stack(outs, 0)
 
+    #: The release tier the ``"anthropic"`` backend asks for: ``"fast"`` (default, the tier every anthropic backend takes) or ``"exact"``
+    #: (the 64 / 128 / 8 x 32 cell on ``opt_core.ops.msa_pwa2``, the exact-tier replica of the stock statements).
+    anthropic_word: str = "fast"
+
     def _anthropic_ef2_t13(self, msa, pair, mask):
         """The esmfold2 kit's ``ef2_msa.pwa_core_t13`` per sample on its token-major layout; ESMFold2's attribute schema on a namespace
         (compute_bias = LN_z + the bias projection); it returns the update (``Wout(o)``), the residual is the module's."""
@@ -607,6 +615,24 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
                 upd = kit.pwa_core_t13(self._anthropic_t13, m_t, pair[b:b + 1].contiguous(), pm)   # [1, L, M, c_m]
                 outs.append(msa[b] + upd[0].transpose(0, 1))
         return torch.stack(outs, 0)
+
+    def _anthropic_pwa2(self, msa, pair, pair_mask):
+        """``opt_core.ops.msa_pwa2.pwa_forward`` per sample (Boltz-2's attribute schema; batch 1 per call), the unchunked path. The kit's
+        adapter (boltz2 ``msa2.py`` pwa2x) picks the K = N summation structure by a run-time bit-compare against Boltz's stock statements
+        and pins torch 2.12 / CUDA 13.0 as its vouch envelope; the kernels themselves are Triton JIT with no version check, and the
+        structure here is the cell's own first candidate (``distinct_candidates(N)[0]``, cuBLAS's likeliest for the class)."""
+        from miniworld_engine.modules import _anthropic
+
+        P = _anthropic.load("opt_core.ops.msa_pwa2")
+        ns = self._anthropic_ns("boltz2")
+        kmode, R = P.distinct_candidates(int(msa.shape[2]))[0]
+        outs = []
+        with master_autocast(msa, self):
+            for b in range(msa.shape[0]):
+                upd = P.pwa_forward(ns, msa[b:b + 1].contiguous(), pair[b:b + 1].contiguous(), pair_mask[b:b + 1].to(torch.float32), False,
+                                    kmode=kmode, R=R)
+                outs.append(msa[b:b + 1] + upd)
+        return torch.cat(outs, 0)
 
     def _anthropic_ns(self, kind: str):
         from types import SimpleNamespace
@@ -637,6 +663,8 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
             return self._anthropic_af3(msa, pair, mask)
         if route == "ef2_t13":
             return self._anthropic_ef2_t13(msa, pair, mask)
+        if route == "pwa2":
+            return self._anthropic_pwa2(msa, pair, pair_mask)
         ns = self._anthropic_ns(route)
         with master_autocast(msa, self):
             if route == "boltz2":
