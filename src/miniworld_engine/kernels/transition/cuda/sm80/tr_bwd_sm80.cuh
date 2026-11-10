@@ -37,9 +37,9 @@ struct BwdParams {
 };
 
 // ---------------------------------------------------------------------------------------------------------------- ring + schedule
-template <int SLOT_, int NST_, int AHEAD_>
+template <int SLOT_, int NST_, int AHEAD_, int D_ = 128, int H_ = 512>
 struct BwdCfg {
-  static constexpr int D = 128, H = 512, NWARP = 8, NTHR = 256, BM = 256, CH = 32, NCHUNK = 16;
+  static constexpr int D = D_, H = H_, NWARP = 8, NTHR = 256, BM = 256, CH = 32, NCHUNK = H_ / 32;
   static constexpr int SLOT = SLOT_, NST = NST_, AHEAD = AHEAD_;
   static constexpr int SMEM_W = NST * SLOT;
   static constexpr int BAR_BYTES = (2 * NST * 8 + 15) / 16 * 16;
@@ -134,11 +134,12 @@ DEVI int build_sched(int* sched, int T, int num_tiles, int tid) {
   return n_items;
 }
 
+template <int D = 128>
 DEVI void prefetch_rows(const __nv_bfloat16* base, int r0, int nrows, int T, int lane) {   // pull a warp's rows into L2
   if (lane < nrows && r0 + lane < T) {
-    const char* a = reinterpret_cast<const char*>(base + (size_t)(r0 + lane) * 128);
-    asm volatile("prefetch.global.L2::evict_last [%0];\n" ::"l"(a));
-    asm volatile("prefetch.global.L2::evict_last [%0];\n" ::"l"(a + 128));
+    const char* a = reinterpret_cast<const char*>(base + (size_t)(r0 + lane) * D);
+#pragma unroll
+    for (int l = 0; l < D / 64; ++l) asm volatile("prefetch.global.L2::evict_last [%0];\n" ::"l"(a + 128 * l));
   }
 }
 DEVI uint32_t opq(uint32_t v) { uint32_t r; asm volatile("mov.b32 %0, %1;\n" : "=r"(r) : "r"(v)); return r; }
@@ -300,28 +301,28 @@ __global__ void __launch_bounds__(256, 1) tr_bwd_p_kernel(const BwdParams p) {
 }
 
 // ================================================================================================================== X
-template <int MT>
-DEVI void x_tile(const BwdParams& p, const Ring<CfgX>& w, uint32_t sGam, uint32_t sDgb, int r0, int nr0, int nmt, int u0, int total,
+template <class G, bool LN, int MT>
+DEVI void x_tile(const BwdParams& p, const Ring<G>& w, uint32_t sGam, uint32_t sDgb, int r0, int nr0, int nmt, int u0, int total,
                  uint32_t sA) {
-  constexpr int D = 128;
+  constexpr int D = G::D, NJ = D / 8, NV = D / 32, NK = G::H / 16, NCHUNK = G::NCHUNK, WAB = (D / 8) * 512;   // WAB: bytes of the Wa half of a chunk
   const int lane = w.lane, g8 = lane >> 2, q = lane & 3;
-  float acc[MT][16][4];
+  float acc[MT][NJ][4];
 #pragma unroll
   for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
-    for (int j = 0; j < 16; ++j)
+    for (int j = 0; j < NJ; ++j)
 #pragma unroll
       for (int e = 0; e < 4; ++e) acc[mt][j][e] = 0.f;
-  const uint4* const ab = p.ab + (size_t)(r0 / 16) * 3072 + lane;
+  const uint4* const ab = p.ab + (size_t)(r0 / 16) * (NK * 96) + lane;
 #if XA_SMEM
   constexpr int XD = XA_DEPTH;
   const uint32_t sAl = sA + lane * 16;
   auto xa_issue = [&](int K) {                                  // step K's blocks -> slot K % XD; one commit group per step
-    if (K < 32) {
+    if (K < NK) {
 #pragma unroll
       for (int mt = 0; mt < MT; ++mt) {
-        cp_async16_full(sAl + (K % XD) * 2048 + mt * 1024, ab + mt * 3072 + K * 96);
-        cp_async16_full(sAl + (K % XD) * 2048 + mt * 1024 + 512, ab + mt * 3072 + K * 96 + 32);
+        cp_async16_full(sAl + (K % XD) * 2048 + mt * 1024, ab + mt * (NK * 96) + K * 96);
+        cp_async16_full(sAl + (K % XD) * 2048 + mt * 1024 + 512, ab + mt * (NK * 96) + K * 96 + 32);
       }
     }
     cp_async_commit();
@@ -332,13 +333,13 @@ DEVI void x_tile(const BwdParams& p, const Ring<CfgX>& w, uint32_t sGam, uint32_
   // A fragments of step K straight from the blocks, one step ahead of their MMAs (two steps ahead costs registers and spills)
   uint4 fA[MT], fB[MT];
 #pragma unroll
-  for (int mt = 0; mt < MT; ++mt) { fA[mt] = ldg_nc_na(ab + mt * 3072); fB[mt] = ldg_nc_na(ab + mt * 3072 + 32); }
+  for (int mt = 0; mt < MT; ++mt) { fA[mt] = ldg_nc_na(ab + mt * (NK * 96)); fB[mt] = ldg_nc_na(ab + mt * (NK * 96) + 32); }
   (void)sA;
 #endif
   // ldmatrix.trans lane address: matrix mi = lane / 8 -> (n-granule half mi >> 1, hidden half mi & 1)
   const uint32_t b_off = (lane >> 4) * 512 + ((((lane >> 3) & 1) << 3) + (lane & 7)) * 16;
 #pragma unroll 1
-  for (int c = 0; c < 16; ++c) {
+  for (int c = 0; c < NCHUNK; ++c) {
     bool pending;
     const uint32_t wb = w.begin(u0 + c, total, pending);
 #pragma unroll
@@ -361,22 +362,22 @@ DEVI void x_tile(const BwdParams& p, const Ring<CfgX>& w, uint32_t sGam, uint32_
         aA[mt][0] = fA[mt].x; aA[mt][1] = fA[mt].y; aA[mt][2] = fA[mt].z; aA[mt][3] = fA[mt].w;
         aB[mt][0] = fB[mt].x; aB[mt][1] = fB[mt].y; aB[mt][2] = fB[mt].z; aB[mt][3] = fB[mt].w;
       }
-      if (K + 1 < 32) {
+      if (K + 1 < NK) {
 #endif
 #pragma unroll
         for (int mt = 0; mt < MT; ++mt) {
 #if !XA_SMEM
-          fA[mt] = ldg_nc_na(ab + mt * 3072 + (K + 1) * 96);
-          fB[mt] = ldg_nc_na(ab + mt * 3072 + (K + 1) * 96 + 32);
+          fA[mt] = ldg_nc_na(ab + mt * (NK * 96) + (K + 1) * 96);
+          fB[mt] = ldg_nc_na(ab + mt * (NK * 96) + (K + 1) * 96 + 32);
 #endif
         }
       }
 #pragma unroll
       for (int ab = 0; ab < 2; ++ab)
 #pragma unroll
-        for (int j = 0; j < 8; ++j) {
+        for (int j = 0; j < NJ / 2; ++j) {
           uint32_t bw[4];
-          ldsm_x4_t(bw, wb + ab * 8192 + j * 1024 + ps * 256 + b_off);
+          ldsm_x4_t(bw, wb + ab * WAB + j * 1024 + ps * 256 + b_off);
 #pragma unroll
           for (int mt = 0; mt < MT; ++mt) {
             mma16816(acc[mt][2 * j], ab ? aB[mt] : aA[mt], bw[0], bw[1]);
@@ -386,28 +387,44 @@ DEVI void x_tile(const BwdParams& p, const Ring<CfgX>& w, uint32_t sGam, uint32_
     }
     w.end(u0 + c, pending);
   }
-  if (nmt > 0) { prefetch_rows(p.x, nr0, 16 * nmt, p.T, lane); prefetch_rows(p.dy, nr0, 16 * nmt, p.T, lane); }
+  if (LN && nmt > 0) { prefetch_rows<D>(p.x, nr0, 16 * nmt, p.T, lane); prefetch_rows<D>(p.dy, nr0, 16 * nmt, p.T, lane); }
 
-  // ---- LayerNorm backward + residual; accumulator tile J = word J of the thread's 64 B (columns 32 (J / 4) + 8 q + 2 (J % 4) + e)
-  float dgs[32], dbs[32];
+  if (!LN) {                                                    // the bare FFN: dx = d_xn (accumulator tile J = word J of the thread's 2 D / 4 bytes)
 #pragma unroll
-  for (int k = 0; k < 32; ++k) dgs[k] = dbs[k] = 0.f;
+    for (int mt = 0; mt < MT; ++mt)
+#pragma unroll
+      for (int hr = 0; hr < 2; ++hr) {
+        const int r = r0 + 16 * mt + 8 * hr + g8;
+#pragma unroll
+        for (int i = 0; i < NV; ++i) {
+          uint32_t o[4];
+#pragma unroll
+          for (int k = 0; k < 4; ++k) o[k] = pack_bf16(acc[mt][4 * i + k][2 * hr], acc[mt][4 * i + k][2 * hr + 1]);
+          stg128(p.dx + (size_t)r * D + 32 * i + 8 * q, make_uint4(o[0], o[1], o[2], o[3]));
+        }
+      }
+    return;
+  }
+  // ---- LayerNorm backward + residual; accumulator tile J = word J of the thread's 2 D / 4 bytes (columns 32 (J / 4) + 8 q + 2 (J % 4) + e)
+  float dgs[D / 4], dbs[D / 4];
+#pragma unroll
+  for (int k = 0; k < D / 4; ++k) dgs[k] = dbs[k] = 0.f;
 #pragma unroll
   for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
     for (int hr = 0; hr < 2; ++hr) {
       const int r = r0 + 16 * mt + 8 * hr + g8;
       const float2 st = p.stats[r];
-      uint32_t xw[16], dw[16];
+      uint32_t xw[D / 8], dw[D / 8];
 #pragma unroll
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < NV; ++i) {
         const uint4 xi = ldg_nc_na(p.x + (size_t)r * D + 32 * i + 8 * q), di = ldg_nc_na(p.dy + (size_t)r * D + 32 * i + 8 * q);
         xw[4 * i] = xi.x; xw[4 * i + 1] = xi.y; xw[4 * i + 2] = xi.z; xw[4 * i + 3] = xi.w;
         dw[4 * i] = di.x; dw[4 * i + 1] = di.y; dw[4 * i + 2] = di.z; dw[4 * i + 3] = di.w;
       }
-      float xh[32], gd[32], s1 = 0.f, s2 = 0.f;
+      float xh[D / 4], gd[D / 4], s1 = 0.f, s2 = 0.f;
 #pragma unroll
-      for (int J = 0; J < 16; ++J) {
+      for (int J = 0; J < NJ; ++J) {
         const uint32_t col = 32 * (J >> 2) + 8 * q + 2 * (J & 3);
         const uint2 gi = lds64(sGam + col * 4);
         const float g0 = __uint_as_float(gi.x), g1 = __uint_as_float(gi.y);
@@ -425,7 +442,7 @@ DEVI void x_tile(const BwdParams& p, const Ring<CfgX>& w, uint32_t sGam, uint32_
       }
       const float ca = quad_sum(s1) * (1.f / D), cb = quad_sum(s2) * (1.f / D);
 #pragma unroll
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < NV; ++i) {
         uint32_t o[4];
 #pragma unroll
         for (int k = 0; k < 4; ++k) {
@@ -439,7 +456,7 @@ DEVI void x_tile(const BwdParams& p, const Ring<CfgX>& w, uint32_t sGam, uint32_
     }
   // dgamma / dbeta: over the warp's 8 row groups (lanes with the same q), then one shared-memory atomic per column
 #pragma unroll
-  for (int k = 0; k < 32; ++k) {
+  for (int k = 0; k < D / 4; ++k) {
 #pragma unroll
     for (int o = 4; o < 32; o <<= 1) {
       dgs[k] += __shfl_xor_sync(0xffffffffu, dgs[k], o);
@@ -448,20 +465,23 @@ DEVI void x_tile(const BwdParams& p, const Ring<CfgX>& w, uint32_t sGam, uint32_
   }
   if (g8 == 0) {
 #pragma unroll
-    for (int J = 0; J < 16; ++J)
+    for (int J = 0; J < NJ; ++J)
 #pragma unroll
       for (int e = 0; e < 2; ++e) {
         const uint32_t col = 32 * (J >> 2) + 8 * q + 2 * (J & 3) + e;
-        // this warp's own slot (1 KB per warp): a plain read-modify-write in a fixed order, so the sums are bit-reproducible
-        const uint32_t wslot = sDgb + (threadIdx.x >> 5) * 1024;
+        // this warp's own slot (8 D bytes per warp): a plain read-modify-write in a fixed order, so the sums are bit-reproducible
+        const uint32_t wslot = sDgb + (threadIdx.x >> 5) * (8 * D);
         sts32(wslot + col * 4, __float_as_uint(__uint_as_float(lds32(wslot + col * 4)) + dgs[2 * J + e]));
-        sts32(wslot + 512 + col * 4, __float_as_uint(__uint_as_float(lds32(wslot + 512 + col * 4)) + dbs[2 * J + e]));
+        sts32(wslot + 4 * D + col * 4, __float_as_uint(__uint_as_float(lds32(wslot + 4 * D + col * 4)) + dbs[2 * J + e]));
       }
   }
 }
 
-__global__ void __launch_bounds__(256, 1) tr_bwd_x_kernel(const BwdParams p) {
-  using G = CfgX;
+// the X role of one CTA: d_xn = [dA | dB] [Wa; Wb] over its row tiles, then (LN) the LayerNorm backward + residual -> dx and the per-CTA dgamma / dbeta partials,
+// or (!LN, the bare FFN) dx = d_xn
+template <class G, bool LN>
+DEVI void x_role(const BwdParams& p) {
+  constexpr int D = G::D, NCHUNK = G::NCHUNK;
   extern __shared__ __align__(128) uint8_t smem[];
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   uint8_t* bars = smem + G::SMEM_W;
@@ -471,14 +491,16 @@ __global__ void __launch_bounds__(256, 1) tr_bwd_x_kernel(const BwdParams p) {
   const int n_items = build_sched<G>(sched, p.T, p.num_tiles, tid);
   Ring<G> w;
   w.sW = smem_u32(smem); w.bars = smem_u32(bars); w.src = p.wx + tid * 8; w.tid = tid; w.lane = lane;
-  const int total = n_items * 16;
+  const int total = n_items * NCHUNK;
   if (tid == 0)
     for (int s = 0; s < G::NST; ++s) { mbar_init(w.full(s), G::NTHR); mbar_init(w.empty(s), G::NWARP); }
-  for (int k = tid; k < 128; k += G::NTHR) sGam[k] = p.gamma[k];
-  for (int k = tid; k < G::NWARP * 256; k += G::NTHR) sDgb[k] = 0.f;
+  if (LN) {
+    for (int k = tid; k < D; k += G::NTHR) sGam[k] = p.gamma[k];
+    for (int k = tid; k < G::NWARP * 2 * D; k += G::NTHR) sDgb[k] = 0.f;
+  }
   __syncthreads();
   if (n_items > 0) {
-    for (int c = 0; c < G::AHEAD && c < total; ++c) w.issue(c % 16, c);
+    for (int c = 0; c < G::AHEAD && c < total; ++c) w.issue(c % NCHUNK, c);
     int e = sched[0];
 #pragma unroll 1
     for (int it = 0; e >= 0; ++it) {
@@ -486,19 +508,25 @@ __global__ void __launch_bounds__(256, 1) tr_bwd_x_kernel(const BwdParams p) {
       const int mt = e & 3, nmt = en >= 0 ? en & 3 : 0;
       const int r0 = (e >> 2) + 16 * mt * warp, nr0 = (en >> 2) + 16 * nmt * warp;
       const uint32_t sA = smem_u32(smem) + G::SMEM + warp * XA_DEPTH * 2048;
-      if (mt == 2) x_tile<2>(p, w, smem_u32(sGam), smem_u32(sDgb), r0, nr0, nmt, 16 * it, total, sA);
-      else x_tile<1>(p, w, smem_u32(sGam), smem_u32(sDgb), r0, nr0, nmt, 16 * it, total, sA);
+      if (mt == 2) x_tile<G, LN, 2>(p, w, smem_u32(sGam), smem_u32(sDgb), r0, nr0, nmt, NCHUNK * it, total, sA);
+      else x_tile<G, LN, 1>(p, w, smem_u32(sGam), smem_u32(sDgb), r0, nr0, nmt, NCHUNK * it, total, sA);
       e = en;
     }
     cp_async_wait<0>();
   }
-  __syncthreads();
-  for (int k = tid; k < 256; k += G::NTHR) {                    // the 8 warp slots in a fixed order
-    float v = 0.f;
+  if (LN) {
+    __syncthreads();
+    for (int k = tid; k < 2 * D; k += G::NTHR) {                // the 8 warp slots in a fixed order
+      float v = 0.f;
 #pragma unroll
-    for (int wi = 0; wi < G::NWARP; ++wi) v += sDgb[wi * 256 + k];
-    p.dgb[(size_t)blockIdx.x * 256 + k] = v;
+      for (int wi = 0; wi < G::NWARP; ++wi) v += sDgb[wi * 2 * D + k];
+      p.dgb[(size_t)blockIdx.x * 2 * D + k] = v;
+    }
   }
 }
+
+__global__ void __launch_bounds__(256, 1) tr_bwd_x_kernel(const BwdParams p) { x_role<CfgX, true>(p); }
+template <class G, bool LN>
+__global__ void __launch_bounds__(256, 1) tr_bwd_xg_kernel(const BwdParams p) { x_role<G, LN>(p); }
 
 }  // namespace a100
