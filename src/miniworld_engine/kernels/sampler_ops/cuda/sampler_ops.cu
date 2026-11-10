@@ -452,8 +452,9 @@ __global__ void pool_atoms_fast_k(const __nv_bfloat16* __restrict__ x, const voi
 
 
 // Wide variant (channels % 8 == 0, the one launched): a thread owns 8 consecutive channels (one 16-byte load per atom row), the rows of SUB atoms are requested at once; the atom loop runs over
-// the real atom count (no 32-wide padding), the channel order of the sums is the atom order, exactly as pool_atoms_fast_k.
-template <int IC, int GC, int MC, int SUB = 4>
+// the real atom count (no 32-wide padding), the channel order of the sums is the atom order, exactly as pool_atoms_fast_k. SUB = 8 (was 4):
+// a 24-atom token is 3 rounds of row loads instead of 6 (latency bound at L2-cold token counts; H100 L1024 9.7 -> 9.4 us, same bits).
+template <int IC, int GC, int MC, int SUB = 8>
 __global__ void pool_atoms_wide_k(const __nv_bfloat16* __restrict__ x, const void* idx, const void* gm, const void* am, __nv_bfloat16* out, int atoms,
                                   int tokens, int rows, int channels) {
   const int t = blockIdx.x, s = blockIdx.y, c = threadIdx.x * 8, lane = threadIdx.x & 31;
@@ -467,7 +468,8 @@ __global__ void pool_atoms_wide_k(const __nv_bfloat16* __restrict__ x, const voi
       const long k = (long)t * atoms + g0 + lane;
       ml = ldt<MC>(am, k);
       const float gl = ldt<GC>(gm, k);
-      if (ml != 0.f && gl != 0.f) rl = (int)(long)ldt<IC>(idx, k);
+      const int ri = (int)(long)ldt<IC>(idx, k);   // read with the masks (not behind them): one memory round trip, not two
+      if (ml != 0.f && gl != 0.f) rl = ri;
     }
     const int nvalid = min(32, atoms - g0);
     for (int u0 = 0; u0 < nvalid; u0 += SUB) {

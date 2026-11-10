@@ -33,7 +33,7 @@ in `requirements_kernel.csv`, role `forward_infer`):
 | `moments2_k<K>` | align_euler | per-chunk partials of both point sets |
 | `cov_k<K>` | align_euler | centred, weighted covariance partials |
 | `align_euler_k<K>` | align_euler | sums the partials, Horn rotation (dominant eigenvector of the 4 x 4 matrix by 12 squarings, no SVD, warp 0), Euler update |
-| `pool_atoms_wide_k` | pool_atoms | `C % 8 == 0` (the launched case): a thread owns 8 consecutive channels (one 16-byte load per atom row), SUB atoms requested at once, loop over the real atom count |
+| `pool_atoms_wide_k` | pool_atoms | `C % 8 == 0` (the launched case): a thread owns 8 consecutive channels (one 16-byte load per atom row), SUB = 8 atoms requested at once (the index read with the masks), loop over the real atom count |
 | `pool_atoms_fast_k` | pool_atoms | `C % 4 == 0`: one warp-batch of up to 32 atoms per round trip (a lane loads one atom's masks / index, shuffled to the others) |
 | `pool_atoms_k` | pool_atoms | generic fallback for index / mask dtype combinations the templated kernels do not instantiate |
 

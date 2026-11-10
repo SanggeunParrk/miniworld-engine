@@ -499,7 +499,7 @@ smooth_lddt_fwd,smooth_lddt,SmoothLddtLoss,forward,1
 smooth_lddt_bwd,smooth_lddt,SmoothLddtLoss,backward,1
 sampler_ops_augment_noise_sm90,sampler_ops,AugmentNoise,forward_infer,1
 sampler_ops_align_euler_sm90,sampler_ops,AlignEuler,forward_infer,1
-sampler_ops_pool_atoms_sm90,sampler_ops,PoolAtoms,forward_infer,1
+sampler_ops_pool_atoms_sm90,sampler_ops,PoolAtoms,forward_infer,2
 sampler_ops_stats,sampler_ops,AugmentNoise|AlignEuler,forward_infer,1
 sampler_ops_augment,sampler_ops,AugmentNoise,forward_infer,1
 sampler_ops_cov,sampler_ops,AlignEuler,forward_infer,1
