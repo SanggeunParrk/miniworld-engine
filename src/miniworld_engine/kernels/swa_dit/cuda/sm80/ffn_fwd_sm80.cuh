@@ -90,7 +90,7 @@ __global__ void __launch_bounds__(G::NTHR, 1) ffn_fwd_kernel(const FfnFwdParams 
       const int s = 16 * tsi + g8 + 8 * hh;
       rok[hh] = tile < ntile && s < p.S;
       rr[hh] = nsm * p.S + s;
-      mrow[hh] = (nsm % p.B) * p.S + s;
+      mrow[hh] = rok[hh] ? (nsm % p.B) * p.S + s : 0;   // a row past the call reads row 0 (the modulation loads are not guarded)
     }
     // every input of the tile is requested before anything waits for it
     uint4 ug[2][4], uo[2][4], uq[2][4];
