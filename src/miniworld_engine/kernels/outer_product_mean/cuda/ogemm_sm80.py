@@ -31,9 +31,10 @@ def live_tokens(mask_u8: torch.Tensor) -> torch.Tensor:
     return mask_u8.amax(0).contiguous()
 
 
-def outer(a: torch.Tensor, b: torch.Tensor, live: torch.Tensor) -> torch.Tensor:
-    """a, b [S, 32 L] bf16 -> O [32 L, 32 L] bf16 = a^T b (the dead tokens' blocks written as zeros without the product)."""
+def outer(a: torch.Tensor, b: torch.Tensor, live: torch.Tensor, ch: int = 32, out: torch.Tensor | None = None) -> torch.Tensor:
+    """a, b [S, ch L] bf16 -> O [ch L, ch L] bf16 = a^T b (the dead tokens' blocks written as zeros without the product); ``ch`` 32 (OPM) or 8 (a
+    Chai-1 group); ``out`` a contiguous buffer to write into."""
     m = a.shape[1]
-    out = a.new_empty((m, m))
-    ext().ogemm_skip(a, b, live, out)
+    out = a.new_empty((m, m)) if out is None else out
+    ext().ogemm_skip(a, b, live, out, int(ch))
     return out

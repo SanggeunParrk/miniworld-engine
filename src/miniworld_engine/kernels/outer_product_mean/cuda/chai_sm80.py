@@ -40,3 +40,19 @@ def chai_bwd(dy, y, stats, n):
 
 def chai_projbwd(x, mask, da, db, gamma, beta, stats, wlr):
     return ext().chai_projbwd(x, mask, da, db, gamma, beta, stats, wlr)
+
+
+def chai_products(a, b, mask, s, n):
+    """O [8, N K, N K] = a_g^T b_g per group (a, b [8, S N, 8]): with a mask the CUTLASS product that skips the tokens masked in every MSA row
+    (``ogemm_sm80``; their blocks are exactly 0), one launch per group; without one the cuBLAS batched GEMM."""
+    import torch
+
+    if mask is None:
+        return torch.bmm(a.view(8, s, n * 8).transpose(1, 2), b.view(8, s, n * 8))
+    from . import ogemm_sm80
+
+    live = mask.view(s, n).to(torch.uint8).amax(0).contiguous()
+    o = a.new_empty((8, n * 8, n * 8))
+    for g in range(8):
+        ogemm_sm80.outer(a[g].view(s, n * 8), b[g].view(s, n * 8), live, 8, o[g])
+    return o

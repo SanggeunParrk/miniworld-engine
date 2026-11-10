@@ -11,7 +11,7 @@
 
 namespace {
 using bf = cutlass::bfloat16_t;
-constexpr int TM = 128, TN = 128, TK = 32, CH = 32;
+constexpr int TM = 128, TN = 128, TK = 32;
 using Gemm = cutlass::gemm::device::Gemm<bf, cutlass::layout::ColumnMajor, bf, cutlass::layout::RowMajor, bf, cutlass::layout::RowMajor, float,
                                          cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80, cutlass::gemm::GemmShape<TM, TN, TK>,
                                          cutlass::gemm::GemmShape<64, 64, TK>, cutlass::gemm::GemmShape<16, 8, 16>,
@@ -20,13 +20,17 @@ using Gemm = cutlass::gemm::device::Gemm<bf, cutlass::layout::ColumnMajor, bf, c
 using GK = Gemm::GemmKernel;
 
 __global__ void __launch_bounds__(GK::kThreadCount) ogemm_skip_kernel(typename GK::Params params, const uint8_t* __restrict__ live, bf* __restrict__ out,
-                                                                     int ldo) {
+                                                                     int ldo, int ch) {   // ch: channels per token (32: the OPM, 8: a Chai-1 group)
   extern __shared__ __align__(16) unsigned char smem[];
   typename GK::ThreadblockSwizzle sw;
   const cutlass::gemm::GemmCoord tile = sw.get_tile_offset(params.swizzle_log_tile);
   if (params.grid_tiled_shape.m() <= tile.m() || params.grid_tiled_shape.n() <= tile.n()) return;
-  const int t0 = tile.m() * (TM / CH), u0 = tile.n() * (TN / CH);
-  const uint32_t lm = *reinterpret_cast<const uint32_t*>(live + t0), ln = *reinterpret_cast<const uint32_t*>(live + u0);   // 4 tokens each
+  const int tpt = TM / ch, t0 = tile.m() * tpt, u0 = tile.n() * tpt;      // tokens per tile side (4 or 16), 4-byte words of the liveness bytes
+  uint32_t lm = 0u, ln = 0u;
+  for (int w = 0; w < tpt / 4; ++w) {
+    lm |= *reinterpret_cast<const uint32_t*>(live + t0 + 4 * w);
+    ln |= *reinterpret_cast<const uint32_t*>(live + u0 + 4 * w);
+  }
   if (lm != 0u && ln != 0u) {
     GK op;
     op(params, *reinterpret_cast<typename GK::SharedStorage*>(smem));
@@ -41,15 +45,16 @@ __global__ void __launch_bounds__(GK::kThreadCount) ogemm_skip_kernel(typename G
 }
 }  // namespace
 
-// a, b [S, 32 L] bf16 (row-major), live [L] uint8 (0 = a token masked in every MSA row), out [32 L, 32 L] bf16 = a^T b
-void ogemm_skip(torch::Tensor a, torch::Tensor b, torch::Tensor live, torch::Tensor out) {
+// a, b [S, ch L] bf16 (row-major), live [L] uint8 (0 = a token masked in every MSA row), out [ch L, ch L] bf16 = a^T b; ch = 32 or 8 (128 / ch tokens a tile side)
+void ogemm_skip(torch::Tensor a, torch::Tensor b, torch::Tensor live, torch::Tensor out, int64_t ch) {
+  TORCH_CHECK(ch == 32 || ch == 8, "ogemm_skip: 32 or 8 channels a token");
   TORCH_CHECK(a.is_cuda() && a.scalar_type() == at::kBFloat16 && a.is_contiguous() && b.sizes() == a.sizes() && b.is_contiguous() && b.scalar_type() == at::kBFloat16,
               "ogemm_skip: a / b contiguous bf16 [S, 32 L]");
   const int K = (int)a.size(0), M = (int)a.size(1);
-  TORCH_CHECK(M % TM == 0 && K % 8 == 0, "ogemm_skip: 32 L a multiple of 128 (L % 4), S % 8");
-  TORCH_CHECK(live.is_cuda() && live.scalar_type() == at::kByte && live.is_contiguous() && live.numel() == M / CH && reinterpret_cast<uintptr_t>(live.data_ptr()) % 4 == 0,
+  TORCH_CHECK(M % TM == 0 && K % 8 == 0, "ogemm_skip: ch L a multiple of 128, S % 8");
+  TORCH_CHECK(live.is_cuda() && live.scalar_type() == at::kByte && live.is_contiguous() && live.numel() == M / ch && reinterpret_cast<uintptr_t>(live.data_ptr()) % 4 == 0,
               "ogemm_skip: live [L] uint8, 4-byte aligned");
-  TORCH_CHECK(out.is_cuda() && out.scalar_type() == at::kBFloat16 && out.is_contiguous() && out.size(0) == M && out.size(1) == M, "ogemm_skip: out [32 L, 32 L] bf16");
+  TORCH_CHECK(out.is_cuda() && out.scalar_type() == at::kBFloat16 && out.is_contiguous() && out.size(0) == M && out.size(1) == M, "ogemm_skip: out [ch L, ch L] bf16");
   const at::cuda::CUDAGuard guard(a.device());
   bf* A = reinterpret_cast<bf*>(a.data_ptr());
   bf* B = reinterpret_cast<bf*>(b.data_ptr());
@@ -65,7 +70,7 @@ void ogemm_skip(torch::Tensor a, torch::Tensor b, torch::Tensor live, torch::Ten
     C10_CUDA_CHECK(cudaFuncSetAttribute(ogemm_skip_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
     configured = true;
   }
-  ogemm_skip_kernel<<<grid, GK::kThreadCount, smem, at::cuda::getCurrentCUDAStream()>>>(params, reinterpret_cast<const uint8_t*>(live.data_ptr()), C, M);
+  ogemm_skip_kernel<<<grid, GK::kThreadCount, smem, at::cuda::getCurrentCUDAStream()>>>(params, reinterpret_cast<const uint8_t*>(live.data_ptr()), C, M, (int)ch);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

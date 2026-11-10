@@ -76,9 +76,10 @@ def prebuild(target, rows):
 
     if target.arch == "sm80":   # A100: the sm_80 OPM builds are planned by kernels/integrations (opm_sm80); the grouped rows' passes here
         if any("groups" in _kv(r["options"]) and r["dtype"] in ("bfloat16", "master") for r in rows):
-            from . import chai_sm80
+            from . import chai_sm80, ogemm_sm80
 
             yield chai_sm80.ext
+            yield ogemm_sm80.ext   # the masked grouped product
         return
     names = set().union(*(r["kernels"] for r in rows)) if rows else set()
     if "outer_product_mean_gather_sm90" in names:

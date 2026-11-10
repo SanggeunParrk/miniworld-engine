@@ -80,7 +80,10 @@ def _front(msa, mask, forms, eps, save):
             mk = mk != 0
     lnw32, lnb32, w, _, _ = forms
     a, b, st1 = cuda.chai_proj(x, mk, lnw32, lnb32, w, eps, save)
-    o = torch.bmm(a.view(G, s, n * K).transpose(1, 2), b.view(G, s, n * K))     # [8, N K, N K]
+    if hasattr(cuda, "chai_products"):   # A100: the masked product skips the dead tokens
+        o = cuda.chai_products(a, b, mk, s, n)
+    else:
+        o = torch.bmm(a.view(G, s, n * K).transpose(1, 2), b.view(G, s, n * K))     # [8, N K, N K]
     return a, b, st1, o
 
 
