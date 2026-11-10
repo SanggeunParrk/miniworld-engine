@@ -46,6 +46,24 @@ Per class and mode: the geometric mean over its cases of the speedup vs PyTorch 
 | TriangleAttentionRF3 | 13.89x (n=24) |  |  | 6.92x (n=24) |  |  |
 | TriangleMultiplication | 9.75x (n=72) |  |  | 8.65x (n=72) |  |  |
 
+## Summary: af3 only
+
+The same over the requirement rows whose `source` names af3 (25 rows).
+
+![](summary_af3.png)
+
+| class | eval Engine (CUDA) | eval Anthropic | eval cuEquivariance | train Engine (CUDA) | train Anthropic | train cuEquivariance |
+|---|---|---|---|---|---|---|
+| AtomDiTOpenFold3 | 5.41x (n=16) | 0.66x (n=8) |  | 2.78x (n=16) |  |  |
+| AttentionPairBias | 4.54x (n=12) | 0.97x (n=12) | 0.89x (n=12) | 3.40x (n=12) |  | 0.93x (n=12) |
+| LayerNorm | 3.56x (n=114) | 2.78x (n=114) |  | 2.89x (n=114) |  |  |
+| MSAPairWeightedAveraging | 8.13x (n=6) |  |  | 3.99x (n=6) |  |  |
+| OuterProductMean | 3.50x (n=6) |  |  | 2.35x (n=6) |  |  |
+| TokenDiTProtenix | 4.00x (n=12) | 0.81x (n=12) |  | 2.61x (n=12) |  |  |
+| Transition | 5.91x (n=36) | 3.65x (n=66) |  | 4.75x (n=36) |  |  |
+| TriangleAttentionAF3 | 12.50x (n=24) |  |  | 6.56x (n=24) |  |  |
+| TriangleMultiplication | 12.27x (n=24) |  |  | 10.80x (n=24) |  |  |
+
 ## Classes
 
 | class | cases | L sweeps | D sweeps |
