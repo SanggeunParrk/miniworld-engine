@@ -13,6 +13,7 @@
 #   ARCH       (default sm90a)                  the prebuild target (sm80 for an A100)
 #   PARALLEL   (default 4)                      measurement jobs (GPUs) at once
 #   PLAN_GROUPS (default PARALLEL)              groups the plan is split into (more groups than GPUs keeps every free GPU busy)
+#   NODELIST   (optional)                       --nodelist for every job (a cluster where only some nodes are free)
 set -u
 if [ "${1:-}" = "--job" ]; then                       # inside a measurement job: work through one group file
   shift; PLAN=$1; GROUP=$2
@@ -40,6 +41,7 @@ SB=(sbatch --parsable --time=00:10:00)
 [ -n "${SLURM_ACCOUNT:-}" ] && SB+=(--account="$SLURM_ACCOUNT")
 [ -n "${SLURM_PARTITION:-}" ] && SB+=(--partition="$SLURM_PARTITION")
 [ -n "${SLURM_QOS:-}" ] && SB+=(--qos="$SLURM_QOS")
+[ -n "${NODELIST:-}" ] && SB+=(--nodelist="$NODELIST")
 mkdir -p "$PLAN/logs"; S=$PLAN/status.txt; say() { echo "$(date +%T) $*" | tee -a "$S"; }
 wait_job() { while squeue -j "$1" -h 2>/dev/null | grep -q .; do sleep 15; done; }
 cpu() {  # cpu NAME CPUS MEM COMMAND... : one CPU job, waited for, its log printed
