@@ -24,6 +24,9 @@ from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 
 _FAILED = False
+#: Opt-in experiments of the port, off: the searched cuBLASLt algorithms (``sm80.lt_bcast`` / ``lt_dw``) and the early-dw kernel.
+_LT = False
+_DW_EARLY = False
 
 
 @torch.compiler.assume_constant_result
@@ -212,7 +215,7 @@ def inference(
                 m, w, v, lnm_w, lnm_b, wg, wo, eps=eps_m, mode=1
             )
         else:
-            o = sm.lt_bcast(w, v) if ns > 1 and False else None
+            o = sm.lt_bcast(w, v) if ns > 1 and _LT else None
             if o is None:
                 o = (
                     sm.broadcast_bmm(w, v)
@@ -301,7 +304,7 @@ def _broadcast_contract(
 
         return broadcast_native_sm80.result(w, v, transpose, 0)
     if (
-        False
+        _LT
         and w.dim() == 3
         and v.shape[0] % 8 == 0
         and v.shape[0] > 8
@@ -318,7 +321,7 @@ def _broadcast_contract(
 def _weight_contract(do: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """Native dw for qualified L384/640 rows; explicit1 tests other candidates."""
     if (
-        False
+        _DW_EARLY
         and do.shape == v.shape
         and do.shape == (32, 128, 8192)
         and do.is_contiguous()
@@ -345,7 +348,7 @@ def _weight_contract(do: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         from miniworld_engine.kernels.pair_weighted_averaging.cuda import dw_native_sm80
 
         return dw_native_sm80.result(do, v, 4 if do.shape[1] == 256 else 1, 0)
-    if False and do.shape == v.shape and do.dim() == 3:
+    if _LT and do.shape == v.shape and do.dim() == 3:
         out = _sm80().lt_dw(
             do, v
         )  # cuBLASLt with the searched algorithm (1.2-1.4x the heuristic default)
