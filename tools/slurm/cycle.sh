@@ -11,6 +11,7 @@
 #   CUTLASS_PATH, MATHDX_HOME                    forwarded to the prebuild job (see docs/kernels.md)
 #   CARD       (default h100_sm90)              the card the plan, the tokens and the records are for (a100_sm80 on an A100 cluster)
 #   ARCH       (default sm90a)                  the prebuild target (sm80 for an A100)
+#   PARALLEL   (default 4)                      measurement jobs (GPUs) at once
 set -u
 if [ "${1:-}" = "--job" ]; then                       # inside a measurement job: work through one group file
   shift; PLAN=$1; GROUP=$2
@@ -22,7 +23,10 @@ if [ "${1:-}" = "--job" ]; then                       # inside a measurement job
     echo "=== $kind $module (budget ${left}s) $(date +%T)"
     timeout $left python -m miniworld_engine.measure.$kind "$cfg" --out "$PLAN/out/$kind.$module.jsonl" \
       > "$PLAN/logs/$kind.$module.${SLURM_JOB_ID:-local}.log" 2>&1; rc=$?
-    echo "=== $kind $module rc=$rc $(date +%T)"; [ $rc -ne 124 ] && touch "$PLAN/done/$kind.$module"
+    echo "=== $kind $module rc=$rc $(date +%T)"
+    # done either way: a module cut by the time limit keeps the records it wrote and its other cases are owed again next cycle
+    # (re-running it from the start every round would block its group for good)
+    touch "$PLAN/done/$kind.$module"
   done < "$PLAN/$GROUP"
   echo GROUP DONE; exit 0
 fi
@@ -58,6 +62,9 @@ run_group() {
   done
   say "$g NOT DONE after 12 jobs"
 }
-for g in $(ls "$PLAN" | grep -E '^G[0-9]+$'); do run_group "$g" & done; wait
+for g in $(ls "$PLAN" | grep -E '^G[0-9]+$'); do
+  while [ "$(jobs -rp | wc -l)" -ge "${PARALLEL:-4}" ]; do sleep 15; done
+  run_group "$g" &
+done; wait
 say "issue"; cpu judge-issue 8 32G "python -m miniworld_engine.judge --gpu ${CARD:-h100_sm90} issue $PLAN/out && python -m miniworld_engine.judge --gpu ${CARD:-h100_sm90} owed"
 say "cycle finished (run again while owed > 0)"
