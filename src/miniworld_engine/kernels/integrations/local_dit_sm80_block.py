@@ -27,14 +27,14 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine import settings
+from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.kernels.integrations.local_dit import (
     CROSS_WEIGHTS,
     KEYS,
     QUERIES,
     WEIGHTS,
 )
-from miniworld_engine.kernels import _capture
-from miniworld_engine.kernels._compile import device_constant, opaque
 
 BF = torch.bfloat16
 F32 = torch.float32
