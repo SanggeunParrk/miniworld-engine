@@ -11,7 +11,6 @@ Two whole-module paths, picked by the module's geometry:
 
 from __future__ import annotations
 
-
 import torch
 
 from miniworld_engine import settings
