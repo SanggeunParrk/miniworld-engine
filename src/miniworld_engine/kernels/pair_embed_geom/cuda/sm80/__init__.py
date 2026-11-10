@@ -37,8 +37,19 @@ def _on_this_build(fn):
 
 forward = _on_this_build(_h100.forward)
 forward_ca = _on_this_build(_h100.forward_ca)
-backward = _on_this_build(_h100.backward)
 ln_backward = _on_this_build(_h100.ln_backward)
+#: the table gradient per mode on this card (measured L128-L384, L2 flushed): the encoder table (mode 0, 317 rows) on the warpgroup kernel
+#: (impl 1, here mma.sync on its swizzled operands), the decoder's (mode 1, 157 rows) on the first tensor-core kernel (impl 2): 3-8 % faster
+BWD_IMPL = {0: 1, 1: 2}
+
+
+def backward(g, codes, mode):
+    """Table gradient [N_ROWS[mode], 256] bf16 from d pair = g [B, n, n, 256] bf16 (the H100 launcher's arguments and scratch)."""
+    nt = _h100.N_ROWS[mode]
+    tpart = torch.empty(_h100.NBLK * nt * 256, device=g.device, dtype=torch.float32)
+    dtbl = torch.empty(nt, 256, device=g.device, dtype=torch.bfloat16)
+    ext().backward(g, codes, tpart, dtbl, int(mode), BWD_IMPL[mode])
+    return dtbl
 
 
 def device_build():

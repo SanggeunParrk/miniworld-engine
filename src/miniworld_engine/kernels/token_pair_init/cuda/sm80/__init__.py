@@ -35,6 +35,8 @@ def _on_this_build(fn):
     return types.FunctionType(fn.__code__, _G, fn.__name__, fn.__defaults__, fn.__closure__)
 
 
+#: rows of z per forward CTA on this card (measured L128 / L256 / L384, L2 flushed: 2 / 3 / 2 rows; the H100 takes 4 up to L 256)
+_G["fwd_rows"] = lambda L: 3 if 128 < L <= 256 else 2
 forward = _on_this_build(_h100.forward)
 backward = _on_this_build(_h100.backward)
 prep = _on_this_build(_h100.prep)
