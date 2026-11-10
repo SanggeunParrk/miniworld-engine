@@ -12,7 +12,7 @@
 #   CARD       (default h100_sm90)              the card the plan, the tokens and the records are for (a100_sm80 on an A100 cluster)
 #   ARCH       (default sm90a)                  the prebuild target (sm80 for an A100)
 #   PARALLEL   (default 4)                      measurement jobs (GPUs) at once
-#   GROUPS     (default PARALLEL)               groups the plan is split into (more groups than GPUs keeps every free GPU busy)
+#   PLAN_GROUPS (default PARALLEL)              groups the plan is split into (more groups than GPUs keeps every free GPU busy)
 set -u
 if [ "${1:-}" = "--job" ]; then                       # inside a measurement job: work through one group file
   shift; PLAN=$1; GROUP=$2
@@ -47,7 +47,7 @@ cpu() {  # cpu NAME CPUS MEM COMMAND... : one CPU job, waited for, its log print
   wait_job "$j"; grep -h "\[judge\]\|\[prebuild\] done\|Error\|Traceback" "$PLAN/logs/$1-$j.log"
 }
 
-say "plan"; cpu judge-owed 8 32G "python -m miniworld_engine.judge --gpu ${CARD:-h100_sm90} owed $* --groups ${GROUPS:-${PARALLEL:-4}} --plan $PLAN"
+say "plan"; cpu judge-owed 8 32G "python -m miniworld_engine.judge --gpu ${CARD:-h100_sm90} owed $* --groups ${PLAN_GROUPS:-${PARALLEL:-4}} --plan $PLAN"
 say "prebuild"; for round in 1 2 3; do
   out=$(cpu prebuild 48 240G "python -m miniworld_engine.kernels._prebuild --arch ${ARCH:-sm90a} --stop-after 480")
   echo "$out" | tee -a "$S" | grep -q " 0 of .* still absent" && break
