@@ -892,52 +892,62 @@ class AtomDiTMiniWorld(BackendModule):
             return "seqused must be int32 [N]"
         return None
 
-    # A100 (sm_80): inference on the sm_80 stages of kernels/swa_dit/cuda/sm80 (modulation mod_fwd, then block_fwd: qkvg + q / k RMSNorm +
-    # 3D RoPE, the window attention, out-projection + gated residual + SwiGLU FFN; mma.sync, bf16). Range: bf16 activations (weights bf16
-    # or fp32 masters, cast to bf16), d_atom 128 = 4 heads x 32, d_cond 128, SwiGLU hidden 256, half_window 64, no gradient.
+    # A100 (sm_80): kernels/swa_dit/cuda/sm80. bf16 inference with the window: the fused stages (modulation mod_fwd, then block_fwd:
+    # qkvg + q / k RMSNorm + 3D RoPE, the window attention, out-projection + gated residual + SwiGLU FFN; mma.sync). Training, fp32 and
+    # global attention: sm80/composed.py (the same bf16 stages and their backwards; fp32 on the row stages around cuBLAS projections and
+    # the bf16 attention, as the H100 native fp32 block; global attention on PyTorch's FlashAttention-2). Range: bf16 or fp32 activations
+    # (weights in that dtype or fp32 masters), d_atom 128 = 4 heads x 32, d_cond 128, SwiGLU hidden 256, half_window 64 or global.
     def _a100_linears(self):
         return (self.adaln_modulation[1], self.attn.Wqkv, self.attn.gate_proj, self.attn.out_proj, self.ffn.w_up, self.ffn.w_down)
 
     def _a100_reason(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> str | None:
-        from miniworld_engine.kernels.swa_dit._common import D_ATOM, HALF_WINDOW, N_HEAD, N_HIDDEN
+        from miniworld_engine.kernels.swa_dit._common import D_ATOM, HALF_WINDOW, N_HEAD, N_HIDDEN, is_global
 
         if len(attention_params) != 6:
             return "attention_params must be the 6-tuple of build_attention_params"
-        if x.dtype != _BF or cond.dtype != _BF:
-            return (f"A100: x / cond dtype {x.dtype} / {cond.dtype} (the sm_80 SWA block kernels are bfloat16 only; float32 has no "
-                    "sm_80 SWA block)")
-        if torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") != _BF:
-            return "A100: autocast to a dtype other than bfloat16"
+        if x.dtype not in (_BF, _F32) or cond.dtype != x.dtype:
+            return f"A100: x / cond dtype {x.dtype} / {cond.dtype} (bfloat16 or float32, the same)"
+        if torch.is_autocast_enabled("cuda") and (x.dtype != _BF or torch.get_autocast_dtype("cuda") != _BF):
+            return "A100: autocast: bfloat16 activations under bfloat16 autocast only"
         linears = self._a100_linears()
-        if _needs_grad(self, x, cond):
-            return ("A100: training: the sm_80 SWA block's backward kernels (kernels/swa_dit/cuda/sm80 *_bwd) have no autograd in this "
-                    "engine (eval only)")
         if x.ndim != 3 or x.shape[-1] != D_ATOM or self.attn.n_heads != N_HEAD or tuple(cond.shape) != (*x.shape[:2], D_ATOM):
             return f"A100: x / cond must be [N, S, {D_ATOM}] with {N_HEAD} heads"
-        if self.attn.half_window != HALF_WINDOW:
-            return f"A100: half_window {self.attn.half_window} (the sm_80 window kernels: {HALF_WINDOW}; no global attention)"
+        hw = self.attn.half_window
+        if is_global(hw):
+            if not torch.backends.cuda.is_flash_attention_available():
+                return "A100: global attention needs PyTorch's FlashAttention-2 (not in this build)"
+        elif hw != HALF_WINDOW:
+            return f"A100: half_window {hw} (the sm_80 kernels: {HALF_WINDOW} or global)"
         if any(type(m) is not Linear or m.bias is not None for m in linears):
             return "the kernels read bias-free (non magnitude-preserving) Linear weights"
         if tuple(self.ffn.w_up.weight.shape) != (2 * N_HIDDEN, D_ATOM):
             return f"SwiGLU hidden {self.ffn.w_up.weight.shape[0] // 2} (the kernels: {N_HIDDEN})"
-        if any(m.weight.dtype not in (_BF, _F32) for m in linears):
-            return "weights must be bfloat16 or fp32"
+        if any(m.weight.dtype not in (x.dtype, _F32) for m in linears):
+            return "weights must be in the activation dtype or fp32"
         cos, sin, seqused = attention_params[:3]
         for t in (cos, sin):
-            if t.dtype != _F32 or t.shape[-1] != D_ATOM // N_HEAD // 2 or t.numel() != x.shape[0] * x.shape[1] * t.shape[-1]:
-                return "cos / sin must be fp32 [N, S, head_dim / 2]"
+            if (t.dtype != _F32 or t.shape[-1] != D_ATOM // N_HEAD // 2 or t.numel() != x.shape[0] * x.shape[1] * t.shape[-1]
+                    or (t.requires_grad and torch.is_grad_enabled())):
+                return "cos / sin must be fp32 [N, S, head_dim / 2] without gradient"
         if seqused.dtype != torch.int32 or tuple(seqused.shape) != (x.shape[0],):
             return "seqused must be int32 [N]"
         return None
 
     def _forward_a100(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> torch.Tensor:
-        from miniworld_engine.kernels.swa_dit._common import FP32_EPS
+        from miniworld_engine.kernels.swa_dit._common import FP32_EPS, HALF_WINDOW
         from miniworld_engine.kernels.swa_dit.cuda import sm80
+        from miniworld_engine.kernels.swa_dit.cuda.sm80 import composed
 
         n = x.shape[0]
         cos, sin, seqused = attention_params[:3]
+        hw = self.attn.half_window
+        weights = [m.weight for m in self._a100_linears()]
+        if _needs_grad(self, x, cond):
+            return composed.SWABlockA100.apply(x, cond, cos, sin, seqused.contiguous(), hw, *weights)
+        if x.dtype != _BF or hw != HALF_WINDOW:
+            return composed.block(x, cond, cos, sin, seqused.contiguous(), hw, weights)
         cos, sin = cos.reshape(-1, cos.shape[-1]).contiguous(), sin.reshape(-1, sin.shape[-1]).contiguous()
-        wmod, *weights = (m.weight.to(_BF).contiguous() for m in self._a100_linears())
+        wmod, *weights = (w.to(_BF).contiguous() for w in weights)
         with torch.autocast("cuda", enabled=False):
             mod = sm80.mod_fwd(cond.reshape(-1, cond.shape[-1]).contiguous(), wmod, False)[0]
             # one modulation row per sequence row: b = N

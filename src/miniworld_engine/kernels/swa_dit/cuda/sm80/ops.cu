@@ -11,6 +11,7 @@
 #include "ffn_bwd_sm80.cuh"
 #include "qkvg_bwd_sm80.cuh"
 #include "attn_bwd_sm80.cuh"
+#include "rows_sm80.cuh"
 
 #define CHECK_CUDA_BF16(x) TORCH_CHECK((x).is_cuda() && (x).scalar_type() == torch::kBFloat16, #x " must be a CUDA bf16 tensor")
 #define CHECK_CUDA_F32(x) TORCH_CHECK((x).is_cuda() && (x).scalar_type() == torch::kFloat32, #x " must be a CUDA fp32 tensor")
@@ -421,4 +422,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swa_oproj_bwd", &swa_oproj_bwd);
   m.def("swa_ffn_bwd", &swa_ffn_bwd);
   m.def("swa_qkvg_bwd", &swa_qkvg_bwd);
+  m.def("native_rows", &native_rows);   // the row stages of the fp32 block (rows_sm80.cuh)
+  m.def("native_copy", &native_copy);
 }

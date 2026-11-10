@@ -30,8 +30,9 @@ def prebuild(target, rows):
             if any((dtypes is None or d in dtypes) and (modes is None or m in modes) for d, m in served):
                 yield ft.partial(loader._build, which)
     elif target.arch == "sm80":
-        # A100: the sm_80 stages of AtomDiTMiniWorld._forward_a100 (bf16 inference: mod_fwd + block_fwd, one extension)
-        if any(r["dtype"] in ("bfloat16", "master") and r["mode"] == "eval" for r in rows):
+        # A100: the sm_80 stages of AtomDiTMiniWorld._forward_a100 (one extension: the bf16 stages and their backwards, the fp32 row
+        # stages of sm80/composed.py), for every dtype and mode
+        if rows:
             from . import sm80
 
             yield sm80._ext
