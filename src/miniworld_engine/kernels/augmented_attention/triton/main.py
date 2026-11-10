@@ -3,6 +3,7 @@ from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm origin/exp/miniworld@32e3897 : src/team_gm/modules/kernels/augmented_attention_pair_bias_compute_efficient.py
 
 from miniworld_engine.kernels._launch_config import configured
+import functools
 import torch
 import triton
 import triton.language as tl
@@ -908,15 +909,32 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             dy = dy.to(q.dtype)
 
         A, B, L, H, _ = q.shape
+        head_major = _head_major_dbias(q.device)
         if A * B * H * L * L * 4 > _SPLIT_BIAS_BUDGET_BYTES:
             dq, dk, dv, dbias = _aa_bwd_chunked(
                 dy.contiguous(), q, k, v, bias, mask, o, m, atom_key(L))
         else:
             dq, dk, dv, dbias = _aa_bwd(
                 dy.contiguous(), q, k, v, bias, mask, o, m, atom_key(L))
-            dbias = dbias.sum(dim=0)
+            dbias = dbias[0] if A == 1 and head_major else dbias.sum(dim=0)
+        if head_major:
+            # A100: the (B, H, L, L) accumulator rounded to the bias dtype and handed back as its (B, L, L, H) view (no
+            # transposing copy). The bias producer's backward (to_bias: dW = dbias^T x, dx = dbias W) then reads the
+            # head-major operand, which cuBLAS on sm_80 serves with its aligned bf16 kernels (2.2x faster than on the
+            # contiguous (B, L, L, H) copy, where it picks an align-1 kernel); the values are the same.
+            return dq, dk, dv, dbias.to(bias.dtype).permute(0, 2, 3, 1), None
         dbias = dbias.permute(0, 2, 3, 1).contiguous()
         return dq, dk, dv, dbias, None   # mask takes no gradient
+
+
+@functools.lru_cache(maxsize=None)
+def _head_major_capability(index: int) -> bool:
+    return torch.cuda.get_device_capability(index) == (8, 0)
+
+
+def _head_major_dbias(device: torch.device) -> bool:
+    """Whether the backward returns dbias as the head-major view (A100, sm_80); other cards keep the contiguous copy."""
+    return device.type == "cuda" and _head_major_capability(device.index if device.index is not None else torch.cuda.current_device())
 
 
 triton_augmented_attention_pair_bias = TritonAugmentedAttentionFunction.apply

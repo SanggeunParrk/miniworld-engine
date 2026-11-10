@@ -358,7 +358,7 @@ class TokenDiTProtenix(BackendModule):
     version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 3}   # 2026-11-10: kits; sm_80 paths; 3: transition weight casts read by captures
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 3, "triton:a100_sm80": 2}   # 2026-11-10: kits; sm_80 paths; 3: transition weight casts read by captures; triton:a100_sm80 2 (2026-11-11): the Triton attention core returns its bias gradient head-major on the A100 (every subclass)
 
     #: The q / k RMSNorm of the attention (:class:`TokenDiTMiniWorld`).
     qk_norm: bool = False

@@ -72,7 +72,7 @@ class AugmentNoise(BackendModule):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: sm_80 paths
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3}   # 2026-11-10: sm_80 paths; 3 (2026-11-11): small launches (B * C * N <= 2^18 atom reads) as one kernel
 
     def __init__(self, *, window: bool = False, gamma: float = 0.8, gamma_min: float = 1.0, sigma_min: float = 0.0, sigma_max: float = float("inf"),
                  noise_scale: float = 1.003, variance_floor: float = 0.0, clamp: bool = False, backend: str = "pytorch") -> None:
