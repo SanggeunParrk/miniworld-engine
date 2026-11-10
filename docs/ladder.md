@@ -24,14 +24,13 @@ or the kernel has a performance bug. A violation is never resolved by dropping a
 | class | why |
 |---|---|
 | `LayerNorm`, `RMSNorm` | user decision (2026-11-10): a single normalisation is memory-bound and runs at a few microseconds, where the rungs differ by launch and scheduling effects rather than by kernel quality; they are measured and reported, not held to the ladder. |
+| small L | user decision (2026-11-10): a miss that occurs only at L <= 256 (the shortest lengths, where a step is tens of microseconds and launch / scheduling effects dominate) is accepted; every miss at L >= 384 must be fixed. |
 
-Classes with only a `pytorch` backend (e.g. `TriangleMultiplicationRF3`, `BidirectionalTriangleAttention`) have no ladder.
+Classes with only a `pytorch` backend have no ladder; `BidirectionalTriangleAttention` has `cuda` and `pytorch` only (cuda < pytorch).
 
 ## Status
 
-The status is recomputed from the tokens after every measurement cycle (not stored in this page). The H100 check of 2026-11-10
-(tokens at main 57c6dc26d) found the pairformer-side classes (`TriangleAttention*`, `TriangleMultiplication`,
-`BidirectionalTriangleMultiplication`, `MSAPairWeightedAveraging`, `PairformerBlock`) with no violation, and violations in
-`Transition` and `OuterProductMean` (mostly `triton` vs `pytorch`), `TokenDiT*` (the `dit_variants` `cuda` path slower than
-`pytorch` on about half the Chai-1 / Boltz-2 / RoseTTAFold3 cases; `triton` vs `pytorch` on Protenix), `PairEmbed*` (`cuda`
-slower than `triton`) and `AttentionPairBias` (`triton` vs `pytorch`).
+The status is recomputed from the tokens after every measurement cycle (only the cases the requirements ask for). H100, tokens at main
+5383def09 (2026-11-10): no violation outside the exceptions above (the remaining misses: APB / OuterProductMean / PairEmbedCA cuda vs
+triton at L <= 256, at most 3.7 %). The same check against the external baselines (cuda vs `anthropic` / `cueq`, not a ladder rule but
+the engine's target): only LayerNorm misses (exception).
