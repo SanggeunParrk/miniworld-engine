@@ -626,10 +626,14 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # cuBLAS and the bias-only cores). Range = the two gates: bf16 / fp32 (fp32 = fp32 weights, no autocast), [A, 1, L, 768] with L a
     # multiple of 128 (training L <= 768), 16 heads x 48, cond 384 or 768 (training also 128 / 256), pair 128 / 256, n = 2, eps 1e-5,
     # key mask [1, L] or none, the pair or the block's hoisted bias [1, H, L, L].
+    # A100 (sm_80): kernels/integrations/bias_only_dit_sm80 (the AdaLN and ConditionedTransition sm_80 paths around one autograd Function
+    # for the attention: cuBLAS, the generic sm_80 pair bias, the row softmax, the sm_80 bias-only cores PvGate / Dpb; bf16 / master / fp32).
     def _cuda_route(self, single, cond, pair, mask, bias):
         if _a100(single):
-            return None, ("A100: the sm_80 bias-only cores (kernels/bias_only_dit/cuda/sm80) have no fused block in this engine (their "
-                          "A100 branches of the bias-only runner / training block were not ported)")
+            from miniworld_engine.kernels.integrations import bias_only_dit_sm80
+
+            why = bias_only_dit_sm80.refusal(self, single, cond, pair, mask, bias, _wants_grad(self, single, cond, pair, bias))
+            return (None, why) if why is not None else ("a100", None)
         why = _h100_reason(single)
         if why is not None:
             return None, why
@@ -656,6 +660,10 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
 
     def _forward_cuda(self, single, cond, pair=None, mask=None, *, bias=None) -> torch.Tensor:
         route, _ = self._cuda_route(single, cond, pair, mask, bias)
+        if route == "a100":
+            from miniworld_engine.kernels.integrations import bias_only_dit_sm80
+
+            return bias_only_dit_sm80.block(self, single, cond, pair, mask, _wants_grad(self, single, cond, pair, bias))
         view = _kernel_view(self)
         if route == "train":
             from miniworld_engine.kernels.integrations import bias_only_dit_train
