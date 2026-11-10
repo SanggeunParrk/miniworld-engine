@@ -104,7 +104,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     """
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cueq": 2}   # 2026-11-10: rewired to the model kits
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cueq": 2, "cuda:a100_sm80": 2}   # 2026-11-10: kits; sm_80 paths
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -1263,6 +1263,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     #: differ; on an A100 the same on ``kernels/integrations/trimul_sm80``. ``"triton"``: the portable Triton TriMul the same way.
     #: ``"anthropic"``: see the anthropic section below.
     backends = ("pytorch", "anthropic", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: sm_80 paths
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         if pair.is_cuda and torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0)):

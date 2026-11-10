@@ -178,7 +178,7 @@ class _LocalAtomDiT(BackendModule):
     """
 
     backends = ("pytorch", "anthropic", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2}   # 2026-11-10: kits; sm_80 paths
 
     #: The default of the constructor's ``key_window``: one of :data:`KEY_WINDOWS` (see the module docstring).
     key_window: str = "slide"
@@ -897,7 +897,7 @@ class AtomDiTMiniWorld(BackendModule):
     """
 
     backends = ("pytorch", "anthropic", "cuda")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2}   # 2026-11-10: kits; sm_80 paths
 
     def __init__(
         self,
@@ -1170,7 +1170,7 @@ class SWAAtomTransformer(BackendModule):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2}   # 2026-11-10: kits; sm_80 paths
 
     class Config(BaseModel):
         """Configuration for the SWA atom transformer."""

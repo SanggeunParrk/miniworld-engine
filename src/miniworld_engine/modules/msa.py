@@ -4,6 +4,8 @@
 Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forward_pytorch`` is the reference.
 """
 
+from typing import ClassVar
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -184,6 +186,7 @@ class OuterProductMean(BackendModule, MasterWeights):
     #:   divide after the projection, d_msa 128, d_hidden 32, d_pair % 256, no projection bias (ESMFold2, Protenix-v2)  the esmfold2 kit's
     #:       ``ef2_msa_v2.opm_fused`` (LN + W x row mask producer, cuBLAS, projection + bias / clamp(n, 1) + pair residual epilogue)
     backends = ("pytorch", "anthropic", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: sm_80 paths
 
     # ------------------------------------------------------------------------------------------------------------------ anthropic
     def _anthropic_route(self, msa, mask, residual) -> tuple[str | None, str | None]:

@@ -78,7 +78,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
     version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2}   # 2026-11-10: kits; sm_80 paths
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False

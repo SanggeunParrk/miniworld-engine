@@ -117,7 +117,12 @@ def differences(kind: str, tok: dict, now: Now) -> list[tuple[str, str, object, 
     if str(old_v["module"]) != str(cur_v["module"]):
         out.append(("owed", f"module:{case['module']}", old_v["module"], cur_v["module"]))
     b = case["backend"]
-    o, n = (old_v.get("backends") or {}).get(b, "1"), (cur_v.get("backends") or {}).get(b, "1")   # tokens made before: "1"
+
+    def adapter(v: dict) -> str:   # "<backend>:<card>" (one card's adapter, e.g. "cuda:a100_sm80") before "<backend>"; tokens made before: "1"
+        a = v.get("backends") or {}
+        return str(a.get(f"{b}:{now.gpu}", a.get(b, "1")))
+
+    o, n = adapter(old_v), adapter(cur_v)
     if str(o) != str(n):
         out.append(("owed", f"adapter:{b}", o, n))
     if case["dtype"] == "float32":                    # the TF32 rule only touches float32 matmuls

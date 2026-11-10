@@ -94,7 +94,7 @@ class InputFeatureEmbedder(BackendModule):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2}   # 2026-11-10: kits; sm_80 paths
     #: The engine backends this composition hands to its children.
     _ENGINE_BACKENDS = ("cuda", "triton")
 

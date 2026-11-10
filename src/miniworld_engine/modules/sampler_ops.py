@@ -5,6 +5,8 @@ Each is a :class:`~miniworld_engine.modules.primitives.BackendModule` without pa
 a step by a few launches; the churn arithmetic stays on device scalars (no host read), the random numbers are drawn by the caller.
 """
 
+from typing import ClassVar
+
 import torch
 
 from miniworld_engine.modules import _anthropic
@@ -70,6 +72,7 @@ class AugmentNoise(BackendModule):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: sm_80 paths
 
     def __init__(self, *, window: bool = False, gamma: float = 0.8, gamma_min: float = 1.0, sigma_min: float = 0.0, sigma_max: float = float("inf"),
                  noise_scale: float = 1.003, variance_floor: float = 0.0, clamp: bool = False, backend: str = "pytorch") -> None:
@@ -139,6 +142,7 @@ class AlignEuler(BackendModule):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: sm_80 paths
 
     def __init__(self, *, step_scale: float = 1.5, backend: str = "pytorch") -> None:
         super().__init__()
@@ -235,6 +239,7 @@ class PoolAtoms(BackendModule):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: sm_80 paths
 
     #: Channels of ``make_inputs``' atom features (the atom encoder's ``d_single``) and atoms per token (the token-atoms layout's width).
     _C, _A = 128, 24
