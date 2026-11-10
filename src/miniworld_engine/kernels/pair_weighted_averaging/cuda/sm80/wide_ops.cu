@@ -11,12 +11,15 @@
 //   gate_bwd   du natural -> do = du sigmoid(g) head-major, dg = du o sigmoid(g) (1 - sigmoid(g)) natural (into the [dv | dg] buffer)
 //   from_hm    dv head-major -> natural (the [dv | dg] buffer's v columns: the A operand of dy = [dv | dg] [Wv; Wg] and of d[Wv; Wg])
 //
+//   head_bmm   inference only: o = w v per head on the natural layout (cuBLAS strided batches over the MSA rows), no head-major copy
+//
 // A thread moves 16 bytes (8 channels); a run of 32 channels is 4 threads, read and written as one 64-byte segment on both sides. The gate
 // follows the reference's rounding (modules/functional.sigmoid_gate on bf16: sigmoid rounded to bf16, then the product).
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <cuda_bf16.h>
+#include <cublas_v2.h>
 #include <algorithm>
 #include <cstdint>
 
@@ -66,6 +69,7 @@ __global__ void __launch_bounds__(256) from_hm_k(const bf16* __restrict__ src, b
 }
 
 // natural chunk order (row, k): u / g / du / dg contiguous, the head-major side in 64-byte segments
+template <bool HM>
 __global__ void __launch_bounds__(256) gate_fwd_k(const bf16* __restrict__ o, const bf16* __restrict__ vg, long ld, int gcol, bf16* __restrict__ u, int S,
                                                   int L) {
   const long n = (long)S * L * (HC / 8);
@@ -75,7 +79,7 @@ __global__ void __launch_bounds__(256) gate_fwd_k(const bf16* __restrict__ o, co
     const int s = (int)(row / L), j = (int)(row % L);
     float g[8], ov[8], r[8];
     unpack8(*reinterpret_cast<const uint4*>(vg + row * ld + gcol + k * 8), g);
-    unpack8(*reinterpret_cast<const uint4*>(o + hm_off(s, j, k, S, L)), ov);
+    unpack8(*reinterpret_cast<const uint4*>(o + (HM ? hm_off(s, j, k, S, L) : row * HC + k * 8)), ov);   // HM: o head-major, else natural [S L, 256]
 #pragma unroll
     for (int e = 0; e < 8; ++e) r[e] = bfr(sigm(g[e])) * ov[e];
     reinterpret_cast<uint4*>(u)[i] = pack8(r);
@@ -139,14 +143,17 @@ void from_hm(torch::Tensor src, torch::Tensor dst, int64_t S, int64_t L) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// o [8, L, S 32], vg [S L, ld] (g at columns gcol..gcol+255) -> u [S L, 256]
+// o [8, L, S 32] (head-major) or [S L, 256] (natural), vg [S L, ld] (g at columns gcol..gcol+255) -> u [S L, 256]
 void gate_fwd(torch::Tensor o, torch::Tensor vg, int64_t gcol, torch::Tensor u, int64_t S, int64_t L) {
-  check_hm(o, (int)S, (int)L, "gate_fwd o");
+  const bool hm = o.dim() == 3;
+  if (hm) check_hm(o, (int)S, (int)L, "gate_fwd o");
+  else { check_nat(o, S * L, HC, "gate_fwd o"); TORCH_CHECK(o.is_contiguous(), "gate_fwd: natural o contiguous"); }
   check_nat(vg, S * L, (int)gcol + HC, "gate_fwd vg");
   TORCH_CHECK(gcol % 8 == 0 && u.is_contiguous(), "gate_fwd: gcol % 8, u contiguous");
   check_nat(u, S * L, HC, "gate_fwd u");
   const long n = (long)S * L * (HC / 8);
-  gate_fwd_k<<<grid(n), 256, 0, st()>>>(cp(o), cp(vg), vg.stride(0), (int)gcol, mp(u), (int)S, (int)L);
+  if (hm) gate_fwd_k<true><<<grid(n), 256, 0, st()>>>(cp(o), cp(vg), vg.stride(0), (int)gcol, mp(u), (int)S, (int)L);
+  else gate_fwd_k<false><<<grid(n), 256, 0, st()>>>(cp(o), cp(vg), vg.stride(0), (int)gcol, mp(u), (int)S, (int)L);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -164,7 +171,26 @@ void gate_bwd(torch::Tensor du, torch::Tensor vg, int64_t gcol, torch::Tensor o,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// The key contraction on the natural layout (inference: no head-major copy of v): per head h, batched over the S MSA rows,
+//   o[s, i, h 32 + c] = sum_j w[h, i, j] v[s, j, h 32 + c]       (cuBLAS, column-major: O_s^T [32 x L] = V_s^T [32 x L] . W_h^T)
+// v [S L, ldv] (columns 0..255), w [8, L, L] bf16 -> o [S L, 256] bf16, fp32 accumulation.
+void head_bmm(torch::Tensor w, torch::Tensor v, torch::Tensor o, int64_t S, int64_t L) {
+  check_nat(v, S * L, HC, "head_bmm v");
+  check_nat(o, S * L, HC, "head_bmm o");
+  TORCH_CHECK(o.is_contiguous() && w.is_contiguous() && w.scalar_type() == at::kBFloat16 && w.numel() == (long)H * L * L, "head_bmm: w [8, L, L] bf16, o contiguous");
+  cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
+  const float alpha = 1.f, beta = 0.f;
+  const long ldv = v.stride(0);
+  for (int h = 0; h < H; ++h) {
+    const cublasStatus_t s = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, C, (int)L, (int)L, &alpha, cp(v) + h * C, CUDA_R_16BF, (int)ldv,
+                                                        L * ldv, cp(w) + (long)h * L * L, CUDA_R_16BF, (int)L, 0, &beta, mp(o) + h * C, CUDA_R_16BF, HC,
+                                                        L * HC, (int)S, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    TORCH_CHECK(s == CUBLAS_STATUS_SUCCESS, "head_bmm: cublasGemmStridedBatchedEx status ", (int)s);
+  }
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("head_bmm", &head_bmm);
   m.def("to_hm", &to_hm);
   m.def("from_hm", &from_hm);
   m.def("gate_fwd", &gate_fwd);

@@ -140,7 +140,10 @@ def _prebuild_sm80():
         from miniworld_engine.kernels.triangle_attention.cuda import sm80_bidir
 
         yield wide_sm80.ext
+        from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90_generic
+
         yield sm80_bidir.glue   # its row LayerNorm (forward and backward)
+        yield h100_sm90_generic._lt   # the residual out-projection (host-only cublasLt glue)
     if pwa_rows:
         yield pwa.ext
         yield pwa._bmm_ext

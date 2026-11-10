@@ -10,9 +10,10 @@ LayerNorm (the TriangleAttention glue's ``ln_fwd`` / ``ln_bwd``, its sm_80 build
     msa      y = LN(m)                        glue ln_fwd              [S L, 256]
              vg = y [Wv; Wg]^T                GEMM                     [S L, 512]  (v | g, natural rows (s, j))
              v_hm                             to_hm                    [8, L, S 32] (head-major)
-             o_hm = w v_hm                    batched GEMM (M = L, N = S 32)
+             o_hm = w v_hm                    batched GEMM (M = L, N = S 32)    (inference: head_bmm, per head on the natural layout)
              u = sigmoid(g) o                 gate_fwd                 [S L, 256]
-             out = m + drop(u Wo^T)           GEMM (+ the residual; the row dropout keep-mask [L, 256] shared by the MSA rows)
+             out = m + drop(u Wo^T)           cublasLt GEMM with the residual as C (D != C); with the row dropout (keep-mask [L, 256] shared
+                                              by the MSA rows) a GEMM and one fused multiply-add
 
     backward dWo = dt^T u, du = dt Wo (dt = drop(dout)) -> gate_bwd (do_hm, dg) -> dv_hm = w^T do_hm (from_hm into [dv | dg]),
              dw = do_hm v_hm^T (fp32) -> dy = [dv | dg] [Wv; Wg], d[Wv; Wg] = [dv | dg]^T y -> glue ln_bwd (+ the residual's gradient)
@@ -37,6 +38,12 @@ def _glue():
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_bidir
 
     return sm80_bidir.glue()
+
+
+def _lt():
+    from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _lt as lt   # host-only cublasLt glue (no device code)
+
+    return lt()
 
 
 def _ext():
@@ -69,13 +76,19 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
     mf = msa[0].reshape(S * L, D_MSA)
     y, mmean, mrstd = g.ln_fwd(mf, lnm_w, lnm_b, eps_m, L, False)
     vg = torch.mm(y, wvg.t())                                                      # [S L, 512] = [v | g]
-    v_hm = torch.empty(HEADS, L, S * D_HIDDEN, device=msa.device, dtype=torch.bfloat16)
-    e.to_hm(vg, v_hm, S, L)
-    o_hm = torch.bmm(w, v_hm)
     u = torch.empty(S * L, HC, device=msa.device, dtype=torch.bfloat16)
-    e.gate_fwd(o_hm, vg, HC, u, S, L)
-    if keep is None:
-        out = torch.addmm(mf, u, wo.t())
+    if save:   # training: v and o head-major (the backward's dw = do v^T contracts over S 32)
+        v_hm = torch.empty(HEADS, L, S * D_HIDDEN, device=msa.device, dtype=torch.bfloat16)
+        e.to_hm(vg, v_hm, S, L)
+        o_hm = torch.bmm(w, v_hm)
+        e.gate_fwd(o_hm, vg, HC, u, S, L)
+    else:      # inference: the contraction per head on the natural layout
+        o = torch.empty(S * L, HC, device=msa.device, dtype=torch.bfloat16)
+        e.head_bmm(w, vg, o, S, L)
+        e.gate_fwd(o, vg, HC, u, S, L)
+        del o
+    if keep is None:   # m + u Wo^T in one cublasLt call (D != C: no copy of m into the output first)
+        out = _lt().lt_mm(u, wo, mf, 0, False, None, None)
     else:
         out = torch.addcmul(mf.view(S, L, D_MSA), torch.mm(u, wo.t()).view(S, L, D_MSA), keep * dscale)   # keep [L, 256] shared by the MSA rows
     saved = (zn, zmean, zrstd, w, y, mmean, mrstd, vg, v_hm, o_hm, u) if save else None
