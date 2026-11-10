@@ -21,8 +21,8 @@ Per class and mode: the geometric mean over its cases of the speedup vs PyTorch 
 | AugmentNoise | 8.09x (n=16) |  |  |  |  |  |
 | BidirectionalTriangleAttention | 2.44x (n=6) |  |  | 2.06x (n=6) |  |  |
 | BidirectionalTriangleMultiplication | 6.95x (n=30) |  |  | 4.69x (n=30) |  |  |
-| InputFeatureEmbedder | 8.17x (n=72) | 5.67x (n=72) |  | 5.48x (n=72) |  |  |
-| LayerNorm | 3.19x (n=270) | 2.69x (n=270) | 2.69x (n=270) | 2.76x (n=270) | 1.59x (n=270) | 1.27x (n=270) |
+| InputFeatureEmbedder | 8.19x (n=72) | 5.66x (n=72) |  | 5.49x (n=72) |  |  |
+| LayerNorm | 3.26x (n=270) | 2.68x (n=270) | 2.67x (n=270) | 2.77x (n=270) | 1.59x (n=270) | 1.27x (n=270) |
 | MSAPairWeightedAveraging | 5.07x (n=42) | 2.33x (n=30) |  | 3.64x (n=42) |  |  |
 | OuterProductMean | 2.89x (n=72) | 1.20x (n=24) |  | 2.05x (n=72) |  |  |
 | PairEmbedAdaLN | 17.23x (n=6) |  |  | 4.33x (n=6) |  |  |
@@ -59,7 +59,7 @@ The same over the requirement rows whose `source` names af3 (25 rows).
 |---|---|---|---|---|---|---|
 | AtomDiTOpenFold3 | 4.77x (n=16) | 1.21x (n=16) |  | 2.82x (n=16) |  |  |
 | AttentionPairBias | 6.04x (n=12) | 2.86x (n=12) | 0.93x (n=12) | 3.76x (n=12) |  | 0.98x (n=12) |
-| LayerNorm | 3.73x (n=114) | 2.91x (n=114) | 3.15x (n=114) | 3.02x (n=114) | 1.79x (n=114) | 1.36x (n=114) |
+| LayerNorm | 3.78x (n=114) | 2.90x (n=114) | 3.14x (n=114) | 3.03x (n=114) | 1.78x (n=114) | 1.36x (n=114) |
 | MSAPairWeightedAveraging | 7.10x (n=6) | 2.55x (n=6) |  | 4.92x (n=6) |  |  |
 | OuterProductMean | 2.61x (n=6) | 2.07x (n=6) |  | 1.95x (n=6) |  |  |
 | TokenDiTProtenix | 2.54x (n=12) | 1.33x (n=12) | 1.28x (n=12) | 1.97x (n=12) |  | 1.40x (n=12) |
