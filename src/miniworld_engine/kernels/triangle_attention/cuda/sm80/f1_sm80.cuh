@@ -33,6 +33,8 @@ struct F1Params {
   __nv_bfloat16* xh;            // [T][136] the normalised input bf16(xh) | 1 | 0 ... (training: the operand of the weight-gradient GEMM, whose ones column gives the column sums) or nullptr
   unsigned ntile;               // T / 32
   int L, transposed;            // T = Z L^2 tokens, L a multiple of 128
+  int flip;                     // AlphaFold 3's ending-node bias orientation: token (a, b) writes bias[z][h][b][a], masked by mask[z][a] (the transpose + key mask the
+                                // unfused path ran as three more kernels)
   float eps;
 };
 
@@ -118,7 +120,7 @@ __global__ void __launch_bounds__(G::NTHR, 1) f1_kernel(const F1Params p) {
 #pragma unroll
     for (int mt = 0; mt < 2; ++mt)
 #pragma unroll
-      for (int hh = 0; hh < 2; ++hh) keep[mt][hh] = p.mask == nullptr || p.mask[z * L + b0 + mt * 16 + g8 + 8 * hh] != 0;
+      for (int hh = 0; hh < 2; ++hh) keep[mt][hh] = p.mask == nullptr || p.mask[z * L + (p.flip ? arow : b0 + mt * 16 + g8 + 8 * hh)] != 0;
 
     // ---- LayerNorm on the registers: a thread holds 32 of the 128 channels of its row, a quad the whole row
     uint32_t a[2][8][4];
@@ -239,7 +241,8 @@ __global__ void __launch_bounds__(G::NTHR, 1) f1_kernel(const F1Params p) {
 #pragma unroll
             for (int e = 0; e < 2; ++e) {
               const float v = acc[mt][2 * hh + e];
-              p.bias[(size_t)(z * 4 + 2 * q4 + e) * LL + rem0 + mt * 16 + g8 + 8 * hh] =
+              const unsigned r = mt * 16 + g8 + 8 * hh;   // flip: token (arow, b0 + r) is bias[z][h][b0 + r][arow] (16-bit stores at stride L; the planes stay L2-resident)
+              p.bias[(size_t)(z * 4 + 2 * q4 + e) * LL + (p.flip ? (size_t)(b0 + r) * L + arow : (size_t)rem0 + r)] =
                   keep[mt][hh] ? __float2bfloat16_rn(v) : __float2bfloat16_rn(-3.3895313892515355e38f);
             }
       }

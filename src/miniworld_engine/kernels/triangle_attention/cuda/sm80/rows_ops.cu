@@ -103,7 +103,7 @@ void ln_rows(torch::Tensor x, torch::Tensor xh, torch::Tensor stats, int64_t D, 
 }
 
 // ---- bias planes: y [T, ldy] (the GEMM's output; the bias heads at columns col0 ..), mask [Z, L] uint8 or empty -> bias [Z, H, L, L]
-void bias_planes(torch::Tensor y, torch::Tensor mask, torch::Tensor bias, int64_t col0, int64_t H, int64_t L) {
+void bias_planes(torch::Tensor y, torch::Tensor mask, torch::Tensor bias, int64_t col0, int64_t H, int64_t L, int64_t flip) {
   const int64_t T = y.size(0);
   check_strided_rows(y, T, y.size(1), "bias_planes y");
   TORCH_CHECK(col0 % 8 == 0 && col0 + (H + 7) / 8 * 8 <= y.size(1) && T % (L * L) == 0 && T < (int64_t(1) << 31), "bias_planes: columns");
@@ -113,7 +113,7 @@ void bias_planes(torch::Tensor y, torch::Tensor mask, torch::Tensor bias, int64_
   TORCH_CHECK(!mask.numel() || (mask.scalar_type() == at::kByte && mask.is_contiguous() && mask.numel() == Z * L), "bias_planes: mask [Z, L] uint8");
   a100::BiasPlanesParams p;
   p.y = bp(y); p.mask = mask.numel() ? mask.data_ptr<uint8_t>() : nullptr; p.bias = bm(bias); p.ldy = y.stride(0);
-  p.T = (unsigned)T; p.col0 = (int)col0; p.H = (int)H; p.L = (int)L;
+  p.T = (unsigned)T; p.col0 = (int)col0; p.H = (int)H; p.L = (int)L; p.flip = (int)flip;
   a100::bias_planes_kernel<<<(unsigned)((T + 255) / 256), 256, 0, stream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -388,7 +388,7 @@ void fused_front(torch::Tensor x, torch::Tensor w, torch::Tensor bvec, torch::Te
   a100::F1Params p;
   p.x = bp(x); p.w = bp(w); p.bvec = bvec.data_ptr<float>(); p.mask = mask.numel() ? mask.data_ptr<uint8_t>() : nullptr;
   p.out = bm(out); p.bias = bm(bias); p.lnst = lnst.numel() ? lnst.data_ptr<float>() : nullptr; p.xh = xh.numel() ? bm(xh) : nullptr;
-  p.L = (int)L; p.transposed = (int)transposed; p.eps = (float)eps; p.ntile = (unsigned)(T / 32);
+  p.L = (int)L; p.transposed = (int)(transposed & 1); p.flip = (int)((transposed >> 1) & 1); p.eps = (float)eps; p.ntile = (unsigned)(T / 32);   // transposed bit 1: flip (F1Params)
   FUSED_WIDTHS(DIN, DH, hd, {
     using G = a100::FusedCfg<kDIN, kDH, 8, 1, kHD>;
     launch_fused<G, 32>(a100::fused_f1_kernel<G>, G::F1_SMEM, p, nsm());

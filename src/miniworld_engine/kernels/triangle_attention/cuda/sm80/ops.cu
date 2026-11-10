@@ -283,7 +283,7 @@ void front(torch::Tensor x, torch::Tensor w, torch::Tensor bvec, torch::Tensor m
   p.lnst = lnst.numel() ? lnst.data_ptr<float>() : nullptr;
   TORCH_CHECK(!xh.numel() || (xh.scalar_type() == at::kBFloat16 && xh.is_contiguous() && xh.numel() == T * 136), "front: xh [T, 136] bf16 (training)");
   p.xh = xh.numel() ? reinterpret_cast<__nv_bfloat16*>(xh.data_ptr()) : nullptr;
-  p.L = (int)L; p.transposed = (int)transposed; p.eps = (float)eps; p.ntile = (unsigned)(T / 32);
+  p.L = (int)L; p.transposed = (int)(transposed & 1); p.flip = (int)((transposed >> 1) & 1); p.eps = (float)eps; p.ntile = (unsigned)(T / 32);   // transposed bit 1: flip (F1Params)
   const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   if (nw == 8) launch_front<a100::F1Cfg<8>>(p, nsm);
   else if (nw == 12) launch_front<a100::F1Cfg<12>>(p, nsm);

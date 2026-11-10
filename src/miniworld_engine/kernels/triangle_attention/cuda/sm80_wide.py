@@ -320,7 +320,7 @@ def _pack_bwd_fused(weights, wo: torch.Tensor, ln_w: torch.Tensor, cfg: Cfg):
 
 # ----------------------------------------------------------------------------------------------------------------------------------- forward
 def _original_forward_ops_fake(
-    x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save
+    x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save, flip=False
 ):
     """[out] and, when ``save``, [xh, stats, y, bias, o, lse]: fresh tensors."""
     cfg = Cfg(x.shape[-1], n_head, hd, fused)
@@ -354,8 +354,9 @@ def _original_forward_ops(
     hd: int,
     fused: bool,
     save: bool,
+    flip: bool = False,
 ) -> list[torch.Tensor]:
-    """``pair + drop(TriangleAttention(pair))`` at any supported width: ``x`` the contiguous pair stack ``[B, L, L, D]``, ``weights`` = (q, k, v, g, bias), ``mask`` ``[B, L]`` uint8 or
+    """``pair + drop(TriangleAttention(pair))`` at any supported width (``flip``: AlphaFold 3's ending-node bias, written transposed by the front): ``x`` the contiguous pair stack ``[B, L, L, D]``, ``weights`` = (q, k, v, g, bias), ``mask`` ``[B, L]`` uint8 or
     empty, ``ds`` the dropout scale ``[B, L, D]`` (indexed by the token's second index) or empty.  Returns [out] and, with ``save``, [xh, stats, y, bias, o, lse] for the backward
     (``xh`` the normalised input followed by the constant column(s), ``y`` the front's output [T, cfg.n])."""
     cfg = Cfg(x.shape[-1], n_head, hd, fused)
@@ -371,7 +372,7 @@ def _original_forward_ops(
         else x.new_empty((0,), dtype=F32)
     )
     if fused:
-        wp, bvec = _pack_fused(weights, ln_w, ln_b, cfg)
+        wp, bvec = _core.eval_form(("triattn_sm80w_fused", cfg), (*weights, ln_w, ln_b), lambda: _pack_fused(weights, ln_w, ln_b, cfg), save)
         y = torch.empty((t, n), dtype=BF, device=dev)
         xh = (
             torch.empty((t, d + 8), dtype=BF, device=dev) if save else x.new_empty((0,))
@@ -386,7 +387,7 @@ def _original_forward_ops(
             stats,
             xh,
             length,
-            int(transposed),
+            int(transposed) | (int(flip) << 1),
             float(eps),
             d,
             dhp,
@@ -410,17 +411,18 @@ def _original_forward_ops(
             # Align each Q/K/V row to 64 bytes as well as the GEMM reduction
             # dimension. The eight bias columns otherwise leave a 16-byte offset.
             n = -(-n // 32) * 32
-        wp = _pack_folded(weights, ln_w, ln_b, cfg, padding, n)
+        wp = _core.eval_form(("triattn_sm80w_folded", cfg, padding, n), (*weights, ln_w, ln_b), lambda: _pack_folded(weights, ln_w, ln_b, cfg, padding, n), save)
         xh = torch.empty((t, d + padding), dtype=BF, device=dev)
         rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
         y = torch.mm(xh, wp.t())  # q | k | v | g | bias heads
-        rows.bias_planes(y, mask, bias, 4 * dhp, cfg.h, length)
+        rows.bias_planes(y, mask, bias, 4 * dhp, cfg.h, length, int(flip))
     lse = (
         torch.empty((b, cfg.h, length, length), dtype=F32, device=dev)
         if save
         else x.new_empty((0,), dtype=F32)
     )
     scl = _core._L2E / math.sqrt(hd)
+    wo_p = _core.eval_form(("triattn_sm80w_wo", cfg), (wo,), lambda: _wo_padded(wo, cfg), save)
     q, k, v, g = (
         y[:, :dhp],
         y[:, dhp : 2 * dhp],
@@ -475,7 +477,7 @@ def _original_forward_ops(
         rows.fused_back(
             o,
             g,
-            _wo_padded(wo, cfg),
+            wo_p,
             x2,
             out.view(t, d),
             ds,
@@ -528,7 +530,7 @@ def _original_forward_ops(
             out_cfg = 4 if transposed else 14
             native_out_fused_sm80.run(
                 a,
-                _wo_padded(wo, cfg),
+                wo_p,
                 x2,
                 ds,
                 out.view(t, d),
@@ -540,12 +542,12 @@ def _original_forward_ops(
             not save
             and not ds.numel()
             and rows.out_gemm_residual(
-                a, _wo_padded(wo, cfg), x2, out.view(t, d), length, int(transposed)
+                a, wo_p, x2, out.view(t, d), length, int(transposed)
             )
         ):
             pass  # out = bf16(x + a Wo^T) written by the GEMM's epilogue
         else:
-            yo = torch.mm(a, _wo_padded(wo, cfg).t())  # [T, D]
+            yo = torch.mm(a, wo_p.t())  # [T, D]
             rows.out_rows(yo, x2, ds, out.view(t, d), length, int(transposed))
     return [out, xh, stats, y, bias, o, lse] if save else [out]
 
@@ -626,7 +628,7 @@ def _accurate_training_forward_ops(
         xh = torch.empty((t, d + padding), dtype=BF, device=dev)
         rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
         y = torch.mm(xh, wp.t())
-        rows.bias_planes(y, mask, bias, 4 * dhp, cfg.h, length)
+        rows.bias_planes(y, mask, bias, 4 * dhp, cfg.h, length, 0)
     lse = (
         torch.empty((b, cfg.h, length, length), dtype=F32, device=dev)
         if save
@@ -754,7 +756,7 @@ def _accurate_training_forward_ops(
 
 
 def forward_ops(
-    x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save
+    x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save, flip=False
 ):
     if save and fused:
         cfg = Cfg(x.shape[-1], n_head, hd, fused)
@@ -777,7 +779,7 @@ def forward_ops(
                 save,
             )
     return _original_forward_ops(
-        x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save
+        x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save, flip
     )
 
 
@@ -797,8 +799,10 @@ def forward(
     *,
     transposed: bool = False,
     ds: torch.Tensor | None = None,
+    flip: bool = False,
 ) -> torch.Tensor:
-    """``pair + drop(TriangleAttention(pair))`` without autograd (inference): ``weights`` = (q, k, v, g, bias).  Call ``supports()`` first."""
+    """``pair + drop(TriangleAttention(pair))`` without autograd (inference): ``weights`` = (q, k, v, g, bias); ``flip``: AlphaFold 3's ending-node bias
+    orientation (the variant path's ``flip``, written by the front).  Call ``supports()`` first."""
     return forward_ops(
         pair,
         list(weights),
@@ -813,6 +817,7 @@ def forward(
         cfg.hd,
         cfg.fused,
         False,
+        bool(flip),
     )[0]
 
 
@@ -1274,7 +1279,7 @@ def variant_forward_ops(
     t, d, dhp, n = b * length * length, vc.d, pc.dhp, pc.n
     x2 = x.view(t, d)
     dev = x.device
-    wp = _pack_folded(_v_weights(weights, vc), ln_w, ln_b, pc, 8, n)
+    wp = _core.eval_form(("triattn_sm80w_variant", vc), (*weights, ln_w, ln_b), lambda: _pack_folded(_v_weights(weights, vc), ln_w, ln_b, pc, 8, n), save)
     xh = torch.empty((t, d + 8), dtype=BF, device=dev)
     stats = torch.empty((t, 2), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
@@ -1285,13 +1290,9 @@ def variant_forward_ops(
     else:
         y = torch.mm(xh, wp.t())
     bias = torch.empty((b, h, length, length), dtype=BF, device=dev)
-    if flip:  # the bias planes of the pair as it is, read in the transposed frame: planes unmasked, transposed, then the key mask
-        rows.bias_planes(y, x.new_empty((0,), dtype=torch.uint8), bias, 4 * dhp, h, length)
-        bias = bias.transpose(-1, -2).contiguous()
-        if mask.numel():
-            bias.masked_fill_(mask.view(b, 1, 1, length) == 0, torch.finfo(BF).min)
-    else:
-        rows.bias_planes(y, mask, bias, 4 * dhp, h, length)
+    # flip: the bias planes of the pair as it is, read in the transposed frame -- the kernel writes the planes transposed with the key mask on
+    # the transposed axis (bit-identical to the unmasked planes, a transposing copy and a masked_fill, which were three more kernels)
+    rows.bias_planes(y, mask, bias, 4 * dhp, h, length, int(flip))
     lay_y, lay_o, _ = _v_lays(vc, length, n)
     o = torch.empty((t, dhp), dtype=BF, device=dev)
     lse = torch.empty((b, h, length, length), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
@@ -1299,7 +1300,7 @@ def variant_forward_ops(
     _core2.forward(q, k, v, bias, x.new_empty((0,), dtype=torch.uint8), o, lse, (lay_y, lay_y, lay_y, lay_o), length, h, b, ch, 1.0 / math.sqrt(hd))
     a = torch.empty((t, dhp), dtype=BF, device=dev)
     rows.gate_rows(o, g, a)
-    wo_p = _wo_padded(wo, pc)
+    wo_p = _core.eval_form(("triattn_sm80w_variant_wo", pc), (wo,), lambda: _wo_padded(wo, pc), save)
     bo_ = bo if bo.numel() else None
 
     def proj(w):

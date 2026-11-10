@@ -45,10 +45,12 @@ def _inference_forms(module) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         t.dtype not in (bf, torch.float32) for t in leaves
     ):
         return leaves[:5], leaves[5]
+    # grad off (inference): a CUDA-graph capture is served the casts its eager warm-up made, so a replay runs no cast kernel (six per call)
     forms = _capture.param_forms(
         "triattn_sm80",
         list(leaves),
         lambda: _detached_casts(leaves),
+        capture_reads_eager=not torch.is_grad_enabled(),
     )
     return tuple(forms[:5]), forms[5]
 
@@ -106,10 +108,11 @@ def _serves_kind(
     ) and sm80_wide.loads(kind[1])
 
 
-def _features(module) -> bool:
-    """The module has a variant feature the fused / wide paths lack: the ending node's AF3 bias orientation, projection biases, Chai-1's output layouts."""
+def _features(module, *, train: bool = True) -> bool:
+    """The module has a variant feature the fused / wide paths lack: the ending node's AF3 bias orientation (training only: the inference fronts write
+    the flipped bias themselves), projection biases, Chai-1's output layouts."""
     return (
-        module._bias_untransposed
+        (module._bias_untransposed and train)
         or module.to_gate.bias is not None
         or module.to_out.bias is not None
         or module.dual_output
@@ -117,10 +120,10 @@ def _features(module) -> bool:
     )
 
 
-def _is_variant(module, pair: torch.Tensor) -> bool:
+def _is_variant(module, pair: torch.Tensor, *, train: bool = True) -> bool:
     """The call goes to the variant path: a variant feature, or a geometry only it takes (heads of 64 channels). Plain modules the fused / wide paths
     serve stay there."""
-    if _features(module):
+    if _features(module, train=train):
         return True
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
 
@@ -149,7 +152,8 @@ def _variant_params(module, train: bool):
     else:
         present = [t for t in extra if t is not None]
         if any(t.dtype != bf for t in present):
-            forms = iter(_capture.param_forms("triattn_sm80_variant", present, lambda: _detached_casts(present)))
+            forms = iter(_capture.param_forms("triattn_sm80_variant", present, lambda: _detached_casts(present),
+                                              capture_reads_eager=not torch.is_grad_enabled()))
             extra = [None if t is None else next(forms) for t in extra]
     return weights, wo, *extra
 
@@ -201,7 +205,7 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: boo
     if pair.dtype != torch.bfloat16:
         return f"dtype {pair.dtype}: the A100 TriangleAttention kernels are bf16 only (no fp32 kernel)"
     d_hidden, d_pair = module.to_query.weight.shape
-    if _is_variant(module, pair):
+    if _is_variant(module, pair, train=train):
         return _variant_refusal(module, pair, mask, train=train)
     kind = _kind(module, pair, mask)
     if kind is None:
@@ -224,7 +228,7 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
     """``pair + TriangleAttention(pair)``.  ``fused``: front (LayerNorm, q | k | v | g, bias), attention (with device-side key compaction on large masked calls), back (gate, output projection,
     residual).  ``wide``: ``sm80_wide.forward`` (row kernels around two GEMMs and the core).  The ending node reads and writes its transposed positions inside the kernels
     (no transposing copies)."""
-    if _is_variant(module, pair):
+    if _is_variant(module, pair, train=False):
         return _variant_forward(module, pair, mask, train=False)
     kind = _kind(module, pair, mask)
     ln = module.ln_pair
@@ -243,11 +247,12 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
             ln.eps,
             mask,
             transposed=ending,
+            flip=module._bias_untransposed,
         )
     from miniworld_engine.kernels.triangle_attention.cuda import sm80
 
     qkvg, bias, _ = sm80.front(
-        pair, weights, ln.weight, ln.bias, ln.eps, mask, transposed=ending
+        pair, weights, ln.weight, ln.bias, ln.eps, mask, transposed=ending, flip=module._bias_untransposed
     )
     q, k, v, _ = sm80.qkv_views(qkvg)
     out, _ = sm80.attention(q, k, v, bias, compact_key_mask=mask)

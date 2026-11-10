@@ -149,7 +149,7 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) fused_f1_kernel(const F1Para
 #pragma unroll
     for (int mt = 0; mt < 2; ++mt)
 #pragma unroll
-      for (int hh = 0; hh < 2; ++hh) keep[mt][hh] = p.mask == nullptr || p.mask[z * L + b0 + mt * 16 + g8 + 8 * hh] != 0;
+      for (int hh = 0; hh < 2; ++hh) keep[mt][hh] = p.mask == nullptr || p.mask[z * L + (p.flip ? arow : b0 + mt * 16 + g8 + 8 * hh)] != 0;
 
     uint32_t a[2][2 * KBI][4];
 #pragma unroll
@@ -263,7 +263,8 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) fused_f1_kernel(const F1Para
 #pragma unroll
             for (int e = 0; e < 2; ++e) {
               const float v = acc[mt][2 * hh + e];
-              p.bias[(size_t)(z * H + 2 * q4 + e) * LL + rem0 + mt * 16 + g8 + 8 * hh] =
+              const unsigned r = mt * 16 + g8 + 8 * hh;   // flip: token (arow, b0 + r) is bias[z][h][b0 + r][arow] (16-bit stores at stride L; the planes stay L2-resident)
+              p.bias[(size_t)(z * H + 2 * q4 + e) * LL + (p.flip ? (size_t)(b0 + r) * L + arow : (size_t)rem0 + r)] =
                   keep[mt][hh] ? __float2bfloat16_rn(v) : __float2bfloat16_rn(-3.3895313892515355e38f);
             }
       }

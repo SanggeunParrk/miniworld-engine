@@ -46,6 +46,7 @@ from pathlib import Path
 import torch
 from torch.autograd.function import once_differentiable
 
+from ... import _capture
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 
@@ -362,9 +363,25 @@ def _mask_u8(mask: torch.Tensor | None, device) -> torch.Tensor:
     return mask.contiguous().view(torch.uint8)
 
 
-def _pack_front(ext, weights, ln_w, ln_b):
+def eval_form(tag, params, build, save: bool = False):
+    """``build()`` -- a weight pack of the inference kernels (the front's folded weights, the padded out-projection) -- made once per weight
+    version for an inference call (``save`` false, grad off) and read by a CUDA-graph capture as its eager warm-up made it
+    (``_capture.param_forms(capture_reads_eager=True)``: the weights do not change between replays of an inference graph), so a replay runs
+    no pack kernel; a training call (``save``) or one under grad packs every time (a captured training step must repack after an optimizer
+    step)."""
+    if save or torch.is_grad_enabled():
+        return build()
+    return _capture.param_forms(tag, list(params), build, capture_reads_eager=True)
+
+
+def _pack_front(ext, weights, ln_w, ln_b, save: bool = True):
     """The front's weights in its layout, one launch (``f1_sm80.cuh``): W' = bf16(W diag gamma) ``[520, 128]`` (the LayerNorm scale folded in,
-    rows 516-519 zero) and b = W beta ``[520]`` fp32 (the shift).  Never cached: a captured CUDA graph must repack after an optimizer step."""
+    rows 516-519 zero) and b = W beta ``[520]`` fp32 (the shift).  Packed at every training call (a captured CUDA graph must repack after an
+    optimizer step); an inference call reads the pack of the weights' version (``eval_form``)."""
+    return eval_form("triattn_sm80_front", (*weights, ln_w, ln_b), lambda: _pack_front_now(ext, weights, ln_w, ln_b), save)
+
+
+def _pack_front_now(ext, weights, ln_w, ln_b):
     wp = torch.empty((520, 128), dtype=torch.bfloat16, device=ln_w.device)
     bvec = torch.empty((520,), dtype=torch.float32, device=ln_w.device)
     ext.front_pack(
@@ -377,7 +394,7 @@ def _pack_front(ext, weights, ln_w, ln_b):
     return wp, bvec
 
 
-def _front_fake(x, weights, ln_w, ln_b, mask, eps, transposed, save_stats, save_xh):
+def _front_fake(x, weights, ln_w, ln_b, mask, eps, transposed, save_stats, save_xh, flip=False):
     """[qkvg [B, L, L, 512], bias [B, 4, L, L], stats [B * L * L, 2] fp32 when ``save_stats`` else empty, xh [B, L, L, 136] when ``save_xh`` else empty]."""
     b, length = x.shape[0], x.shape[1]
     stats = (
@@ -405,14 +422,16 @@ def _front(
     transposed: bool,
     save_stats: bool,
     save_xh: bool,
+    flip: bool = False,
 ) -> list[torch.Tensor]:
-    """LayerNorm + q | k | v | g + bias projections of the contiguous pair stack ``x`` ``[B, L, L, 128]`` (``weights``: q, k, v, g, bias;
+    """LayerNorm + q | k | v | g + bias projections of the contiguous pair stack ``x`` ``[B, L, L, 128]`` (``flip``: AlphaFold 3's ending-node bias, the planes
+    written transposed with the key mask on the transposed axis) (``weights``: q, k, v, g, bias;
     ``mask``: ``[B, L]`` uint8 or empty); returns [qkvg, bias, stats, xh] (``stats`` = per-token (mean, rstd), empty unless ``save_stats``; ``xh`` = the
     normalised input bf16(xh) followed by a column of ones and zeros, ``[B, L, L, 136]``, empty unless ``save_xh``).
     """
     ext = _ext()
     b, length = x.shape[0], x.shape[1]
-    wp, bvec = _pack_front(ext, weights, ln_w, ln_b)
+    wp, bvec = _pack_front(ext, weights, ln_w, ln_b, save=save_stats or save_xh)
     qkvg = torch.empty((b, length, length, QKVG), dtype=torch.bfloat16, device=x.device)
     bias = torch.empty((b, 4, length, length), dtype=torch.bfloat16, device=x.device)
     stats = (
@@ -435,7 +454,7 @@ def _front(
         stats,
         xh,
         length,
-        int(transposed),
+        int(transposed) | (int(flip) << 1),
         eps,
         FRONT_WARPS,
     )
@@ -452,6 +471,7 @@ def front(
     *,
     transposed: bool = False,
     save_stats: bool = False,
+    flip: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """The input LayerNorm of ``pair`` ``[B, L, L, 128]`` and its five projections (``weights`` = q, k, v, g, bias) in one pass over the tensor.
     Returns ``(qkvg, bias, stats)``: ``qkvg`` ``[B, L, L, 512]`` token-major (q | k | v | g, 128 channels = 4 heads of 32 each; ``qkv_views``
@@ -468,6 +488,7 @@ def front(
         bool(transposed),
         bool(save_stats),
         False,
+        bool(flip),
     )
     return qkvg, bias, (stats if save_stats else None)
 

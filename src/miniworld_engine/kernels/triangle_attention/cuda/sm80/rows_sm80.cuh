@@ -162,14 +162,17 @@ struct BiasPlanesParams {
   long long ldy;
   unsigned T;
   int col0, H, L;
+  int flip;                     // AlphaFold 3's ending-node orientation: token (a, b) is written to bias[z][h][b][a], masked by keep(z, a)
 };
 
-// bias[z][h][a][b] = keep(z, b) ? y[t][col0 + h] : bf16 min (the module's masked_fill); one thread per token, the stores of a warp are 64 consecutive bytes of a plane.
+// bias[z][h][a][b] = keep(z, b) ? y[t][col0 + h] : bf16 min (the module's masked_fill); one thread per token, the stores of a warp are 64 consecutive bytes of a plane
+// (flip: bias[z][h][b][a] = keep(z, a) ? ... -- the transpose and the key mask on the transposed axis in the same pass, 16-bit stores at stride L).
 __global__ void __launch_bounds__(256) bias_planes_kernel(const BiasPlanesParams p) {
   const size_t t = (size_t)blockIdx.x * 256 + threadIdx.x;
   if (t >= p.T) return;
-  const size_t LL = (size_t)p.L * p.L, z = t / LL, rem = t - z * LL, b = rem % p.L;
-  const bool keep = p.mask == nullptr || p.mask[z * p.L + b] != 0;
+  const size_t LL = (size_t)p.L * p.L, z = t / LL, rem0 = t - z * LL, b = rem0 % p.L, a = rem0 / p.L;
+  const size_t rem = p.flip ? b * p.L + a : rem0;
+  const bool keep = p.mask == nullptr || p.mask[z * p.L + (p.flip ? a : b)] != 0;
   const __nv_bfloat16 neg = __float2bfloat16_rn(bf16_min_f());
   for (int g = 0; g * 8 < p.H; ++g) {
     const uint4 u = *reinterpret_cast<const uint4*>(p.y + t * p.ldy + p.col0 + 8 * g);
