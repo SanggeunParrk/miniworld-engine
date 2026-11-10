@@ -26,9 +26,13 @@ def ext():
                           verbose=False)
 
 
+#: the launchers' module globals: the H100 launcher module's, with ``ext`` this build (and this card's choices, set below)
+_G = {**vars(_h100), "ext": ext}
+
+
 def _on_this_build(fn):
-    """The H100 launcher ``fn`` with ``ext`` resolved to this build."""
-    return types.FunctionType(fn.__code__, {**vars(_h100), "ext": ext}, fn.__name__, fn.__defaults__, fn.__closure__)
+    """The H100 launcher ``fn`` reading ``_G``."""
+    return types.FunctionType(fn.__code__, _G, fn.__name__, fn.__defaults__, fn.__closure__)
 
 
 forward = _on_this_build(_h100.forward)
