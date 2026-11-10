@@ -629,10 +629,24 @@ class BidirectionalTriangleAttention(BackendModule, MasterWeights):
 
     The gate follows :class:`TriangleAttention` (on the hidden-width output, applied *before* ``to_out``), not the trimul convention.
     Model: MiniWorld.
+
+    ``"cuda"`` (H100 sm_90a, bias-only, bf16 activations; forward and backward): ``kernels/integrations/bidir_triattn_h100`` -- each
+    direction the TriangleAttention family's node form in its own frame (the ending node on the transposed pair), the family's glue
+    LayerNorm / gate kernels around cuBLAS GEMMs over channel planes (the softmax formed once per head: it does not depend on the row).
     """
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch",)
+    backends = ("pytorch", "cuda")
+
+    def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> str | None:
+        from miniworld_engine.kernels.integrations import bidir_triattn_h100
+
+        return bidir_triattn_h100.refusal(self, pair, mask)
+
+    def _forward_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        from miniworld_engine.kernels.integrations import bidir_triattn_h100
+
+        return bidir_triattn_h100.forward(self, pair, mask)
 
     def __init__(
         self,
@@ -1113,6 +1127,69 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     divide_by_length = True
+
+    #: ``"cuda"``: :class:`TriangleMultiplication`'s H100 TriMul kernels (``kernels/integrations/trimul_h100``) with the length factor
+    #: folded into the left projection: ``W_a -> W_a / n`` scales ``a`` and so the contraction by ``1 / n`` exactly (the gate, the mask and
+    #: the backward are linear in it; ``W_a``'s gradient comes back through the product), one launch per sample when the samples' masks
+    #: differ. H100 only (the A100 TriMul is not wired to the factor). ``"triton"``: the portable Triton TriMul the same way.
+    backends = ("pytorch", "cuda", "triton")
+
+    def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
+        if pair.is_cuda and torch.cuda.get_device_capability(pair.device) != (9, 0):
+            return "the RF3 length factor is wired to the H100 (sm_90a) TriMul kernels only"
+        one = pair[:1] if mask is not None and pair.shape[0] > 1 else pair    # per-sample launches: one sample's contract
+        return _trimul_cuda_route(self, one, None if mask is None else mask[:one.shape[0]], dropout_p, bidirectional=False)[1]
+
+    def _forward_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> torch.Tensor:
+        if self.dead and not (self.training or torch.is_grad_enabled()):
+            return pair
+        factor = inverse_length(pair, mask).reshape(-1)   # [B], the reference's factor (in the pair's dtype)
+        if mask is None or pair.shape[0] == 1:
+            return _trimul_cuda_forward(_LeftScaled(self, factor[:1]), pair, mask, dropout_p, bidirectional=False)
+        from miniworld_engine.kernels.integrations import trimul_h100
+
+        p = self.p_drop if dropout_p is None else dropout_p
+        drop = dropout_scale(pair, p, 1) if p and p > 0.0 and self.training else None   # drawn for the batch, as the reference does
+        outs = []
+        for b in range(pair.shape[0]):
+            view, x, m = _LeftScaled(self, factor[b:b + 1]), pair[b:b + 1], mask[b:b + 1]
+            if _trimul_cuda_route(view, x, m, p, bidirectional=False)[0] == "infer":
+                outs.append(trimul_h100.update_inference(view, x, m, bidirectional=False))
+            else:
+                outs.append(trimul_h100.update(view, x, m, None if drop is None else drop[b:b + 1], bidirectional=False))
+        return torch.cat(outs)
+
+    def _supports_triton(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
+        return _trimul_triton_refusal(self, pair, mask, self.d_hidden)
+
+    def _forward_triton(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> torch.Tensor:
+        from miniworld_engine.kernels.trimul_inproj.triton.unidirectional import trimul_triton
+
+        if self.dead and not (self.training or torch.is_grad_enabled()):
+            return pair
+
+        def one(x, m, ds):
+            w = lambda lin: lin.weight.to(x.dtype)   # fp32 master matrices: cast in autograd, the gradient lands on the master
+            left = (self.to_left.weight * inverse_length(x, m).reshape(()).to(self.to_left.weight.dtype)).to(x.dtype)
+            return trimul_triton(x, left, w(self.to_left_gate), w(self.to_right), w(self.to_right_gate),
+                                 w(self.to_gate), w(self.to_out), self.ln_pair.weight, self.ln_pair.bias, self.ln_out.weight,
+                                 self.ln_out.bias, self.ln_pair.eps, self.ln_out.eps, self.d_hidden, self.outgoing, mask=m, dropscale=ds)
+
+        return _per_sample(self, pair, mask, dropout_p, one)
+
+
+class _LeftScaled:
+    """:class:`TriangleMultiplicationRF3` as the TriMul kernels see it: ``to_left.weight`` multiplied by the sample's length factor
+    (a tensor in the autograd graph of the master), every other attribute -- the parameters, the LayerNorms, the flags -- the module's."""
+
+    def __init__(self, module: TriangleMultiplicationRF3, scale: torch.Tensor) -> None:
+        from types import SimpleNamespace
+
+        self._module = module
+        self.to_left = SimpleNamespace(weight=module.to_left.weight * scale.to(module.to_left.weight.dtype))
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
 
 
 #: ``TriangleMultiplication(model=name)`` -> the class it builds.

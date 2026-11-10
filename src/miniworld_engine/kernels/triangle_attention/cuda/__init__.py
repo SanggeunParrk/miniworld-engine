@@ -1,4 +1,4 @@
-"""H100 / B200 / A100 TriangleAttention CUDA: the loaders live in ``h100_sm90`` / ``h100_sm90_generic`` / ``h100_dh`` / ``h100_triattn``
+"""H100 / B200 / A100 TriangleAttention CUDA: the loaders live in ``h100_sm90`` / ``h100_sm90_generic`` / ``h100_dh`` / ``h100_triattn`` / ``h100_bidir``
 (sm90), ``b200_triattn`` (sm100) and ``sm80`` / ``sm80_wide`` / ``sm80_core2`` (sm80); this module holds the prebuild recipe."""
 from __future__ import annotations
 
@@ -37,6 +37,10 @@ def prebuild(target, rows):
         if needs(like="triangle_attention_generic_"):
             yield h100_sm90_generic._glue
             yield h100_sm90_generic._lt
+        if needs("triangle_attention_bidir_gate_bwd_sm90"):
+            from . import h100_bidir
+
+            yield h100_bidir.ext
         if needs("triangle_attention_front_fused_sm90"):
             yield lambda: h100_sm90_generic._front_ext(cutlass_include())
         # the MSA row dropout's Philox keep-mask (pwa_train: ``extension("pack").drop_keep``)
