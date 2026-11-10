@@ -132,10 +132,23 @@ __global__ void __launch_bounds__(256) pair_logits_k(const bf16* __restrict__ z,
     for (int e = 0; e < 8; ++e) { gr[a][e] = lnw[a * 256 + lane * 8 + e]; br[a][e] = lnb[a * 256 + lane * 8 + e]; }
   }
   const long warps = (long)gridDim.x * 8;
-  for (long r = ((long)blockIdx.x * 256 + threadIdx.x) >> 5; r < R; r += warps) {
+  // rows r, r + W, r + 2 W, ... of this warp (W = the grid's warps); the next PF rows' loads are in flight while a row is reduced
+  constexpr int PF = 3;
+  const long r0 = ((long)blockIdx.x * 256 + threadIdx.x) >> 5;
+  uint4 buf[PF][2];
+  auto fetch = [&](long rr, uint4 (&d)[2]) {
+    if (rr < R) { d[0] = *reinterpret_cast<const uint4*>(z + rr * DZ + lane * 8); d[1] = *reinterpret_cast<const uint4*>(z + rr * DZ + 256 + lane * 8); }
+  };
+#pragma unroll
+  for (int p = 0; p < PF; ++p) fetch(r0 + p * warps, buf[p]);
+  for (long r = r0, it = 0; r < R; r += warps, ++it) {
     float v[2][8];
-    unpack8(*reinterpret_cast<const uint4*>(z + r * DZ + lane * 8), v[0]);
-    unpack8(*reinterpret_cast<const uint4*>(z + r * DZ + 256 + lane * 8), v[1]);
+    const int slot = (int)(it % PF);
+    uint4 cur[2];
+#pragma unroll
+    for (int p = 0; p < PF; ++p) if (p == slot) { cur[0] = buf[p][0]; cur[1] = buf[p][1]; fetch(r + PF * warps, buf[p]); }
+    unpack8(cur[0], v[0]);
+    unpack8(cur[1], v[1]);
     float s = 0.f;
 #pragma unroll
     for (int a = 0; a < 2; ++a)

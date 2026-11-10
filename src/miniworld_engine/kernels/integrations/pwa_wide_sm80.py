@@ -78,7 +78,7 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
     w = torch.softmax(logits.float(), -1).to(torch.bfloat16)                      # [8, L, L] bf16 (fp32 softmax, as F.softmax on bf16)
     mf = msa[0].reshape(S * L, D_MSA)
     y, mmean, mrstd = g.ln_fwd(mf, lnm_w, lnm_b, eps_m, L, False)
-    vg = torch.mm(y, wvg.t())                                                      # [S L, 512] = [v | g]
+    vg = _lt().lt_mm(y, wvg, None, 0, False, None, None)                           # [S L, 512] = [v | g] (cublasLt, the timed algorithm)
     u = torch.empty(S * L, HC, device=msa.device, dtype=torch.bfloat16)
     v_hm = torch.empty(HEADS, L, S * D_HIDDEN, device=msa.device, dtype=torch.bfloat16)
     e.to_hm(vg, v_hm, S, L)
