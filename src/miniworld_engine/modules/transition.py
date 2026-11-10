@@ -4,6 +4,8 @@ AdaLN + SwiGLU + sigmoid conditioning gate + residual) and Boltz-2's ``UpGatedCo
 Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forward_pytorch`` is the reference.
 """
 
+from typing import ClassVar
+
 import torch
 import torch.nn.functional as F
 
@@ -46,6 +48,7 @@ class Transition(BackendModule, MasterWeights):
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False

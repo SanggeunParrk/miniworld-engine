@@ -51,6 +51,8 @@ Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forwar
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -176,6 +178,7 @@ class _LocalAtomDiT(BackendModule):
     """
 
     backends = ("pytorch", "anthropic", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
 
     #: The default of the constructor's ``key_window``: one of :data:`KEY_WINDOWS` (see the module docstring).
     key_window: str = "slide"
@@ -894,6 +897,7 @@ class AtomDiTMiniWorld(BackendModule):
     """
 
     backends = ("pytorch", "anthropic", "cuda")
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
 
     def __init__(
         self,
@@ -1166,6 +1170,7 @@ class SWAAtomTransformer(BackendModule):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda")
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
 
     class Config(BaseModel):
         """Configuration for the SWA atom transformer."""

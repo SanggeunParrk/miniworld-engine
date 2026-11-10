@@ -49,6 +49,10 @@ EXTERNAL = ("anthropic", "cueq")
 #: Backends measured with TF32 products allowed in float32 PyTorch matmuls: every backend (user decisions 2026-11-10: first the
 #: reference and the Triton rung, then "TF32 on for all, always").
 TF32_BACKENDS = ("pytorch", "triton", "cuda", *EXTERNAL)
+#: Human-managed version of the TF32 rule each backend is measured under (backend -> version): bump a backend's entry when its TF32
+#: treatment changes. Only float32 cases depend on it (bf16 / master matmuls never use TF32), so the judge owes exactly those.
+#: 1: TF32 for pytorch only (measurers v1); 2: TF32 for every backend (2026-11-10).
+TF32_RULE = {"pytorch": "1", "triton": "2", "cuda": "2", "anthropic": "2", "cueq": "2"}
 #: Keys read by measure/speed.py only, allowed at the top level (collected into ``Config.speed``).
 SPEED_KEYS = ("timing", "warmup", "iterations", "flush_l2", "compile_mode")
 
@@ -274,7 +278,9 @@ def versions(module: str, mode: str, gpu: str | None = None) -> dict:
     kernels = {r["name"]: r.get("version") or "1" for r in rows}
     gpu = gpu or result_gpu()
     tables = {f: table_version(f, gpu) for f in sorted({r["family"] for r in rows})}
-    return {"module": str(getattr(cls, "version", "1")), "kernels": dict(sorted(kernels.items())), "tables": tables}
+    adapters = {b: str(v) for b, v in sorted(getattr(cls, "backend_versions", {}).items())}
+    return {"module": str(getattr(cls, "version", "1")), "kernels": dict(sorted(kernels.items())), "tables": tables,
+            "backends": adapters, "tf32": dict(TF32_RULE)}
 
 
 #: The card assumed when no CUDA device is visible (a CPU-side judge run without --gpu).

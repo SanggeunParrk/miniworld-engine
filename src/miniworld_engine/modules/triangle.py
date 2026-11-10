@@ -28,6 +28,8 @@ BidirectionalTriangleMultiplication    MiniWorld: outgoing + incoming in one blo
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import torch
 import torch.nn.functional as F
 from einops import rearrange
@@ -102,6 +104,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     """
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cueq": 2}   # 2026-11-10: rewired to the model kits
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -1108,6 +1111,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
     #: ``kernels/integrations/trimul_h100`` (``serves_inference`` / ``update_inference`` without grad or live dropout, else
     #: ``serves_single`` / ``update``), bf16 only.
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cueq": 2}   # 2026-11-10: rewired to the model kits
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         return _trimul_cuda_route(self, pair, mask, dropout_p, bidirectional=False)[1]

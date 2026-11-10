@@ -4,6 +4,8 @@ AdaptiveRMSNorm.
 Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forward_pytorch`` is the reference.
 """
 
+from typing import ClassVar
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -192,6 +194,7 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
 
     def __init__(
         self,

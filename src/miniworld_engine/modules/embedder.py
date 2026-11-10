@@ -26,7 +26,7 @@ A :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forward_pytorc
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 import torch
 import torch.nn.functional as F
@@ -94,6 +94,7 @@ class InputFeatureEmbedder(BackendModule):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
     #: The engine backends this composition hands to its children.
     _ENGINE_BACKENDS = ("cuda", "triton")
 

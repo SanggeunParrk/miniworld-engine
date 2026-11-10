@@ -30,6 +30,8 @@ Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forwar
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import torch
 import torch.nn.functional as F
 
@@ -356,6 +358,7 @@ class TokenDiTProtenix(BackendModule):
     version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
 
     #: The q / k RMSNorm of the attention (:class:`TokenDiTMiniWorld`).
     qk_norm: bool = False

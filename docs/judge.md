@@ -11,7 +11,7 @@ Each record (and the token made from it) carries:
 | part | values | who changes it |
 |---|---|---|
 | case | module, model, stream, constructor kwargs, length, depth, samples, dtype, mode, backend, kind (`accuracy` / `speed`), timing | the requirements / the canonical configs |
-| versions | the module class's `version`; the `version` of every kernel `requirements_kernel.csv` lists for the class whose role serves the mode; the `version` of those families' `h100_sm90.json` tables | a person (class, kernel); the pretuner's merge (table) |
+| versions | the module class's `version`; the class's `backend_versions` entry for the case's backend (one adapter, e.g. an external library rewired); for float32 cases the backend's entry of `measure/config.py` `TF32_RULE` (the TF32 rule it is measured under); the `version` of every kernel `requirements_kernel.csv` lists for the class whose role serves the mode; the `version` of those families' `h100_sm90.json` tables | a person (class, kernel); the pretuner's merge (table) |
 | measurer | `ACCURACY_VERSION` / `SPEED_VERSION`, `CONFIG_VERSION`, `PREBUILD_VERSION` | a person |
 | settings | seed, `fixed` standard, speed settings of the canonical config | a person (config file) |
 | env | GPU capability, torch, CUDA, Triton versions | the installation |
@@ -27,7 +27,7 @@ timing of `speed.yaml`):
 | verdict | when | effect |
 |---|---|---|
 | carried | the token's versions, settings, measurer versions and env equal now (or a measurer / env difference was answered `keep`) | nothing to do |
-| owed | no token; a module, kernel or table version changed; the settings changed; or a `sign ... remeasure` answer covers the difference | measured by the next run |
+| owed | no token; a module, backend-adapter, TF32-rule (float32 cases), kernel or table version changed; the settings changed; or a `sign ... remeasure` answer covers the difference | measured by the next run |
 | pending | a measurer / config / prebuild version or the env changed and nobody answered yet | neither carried nor re-run; blocks a release only |
 
 A pending difference is one question per (part, old, new), answered once for every case it affects:
@@ -68,8 +68,7 @@ python -m miniworld_engine.judge status                 # token counts per (kind
   to answer each.
 - `--redo STATUS ...`: also owe current tokens whose result has that status (after a measurer fix that changes no other result, so its
   version stays).
-- `--again BACKEND ...`: also owe current tokens of those backends (a person asked for it). `--again-dtype DTYPE ...` restricts it to those case dtypes
-  (e.g. `--again triton cuda --again-dtype float32` after a rule that changes only fp32 matmuls, like the TF32 rule).
+- `--again BACKEND ...`: also owe current tokens of those backends (a person asked for it).
 - `--plan DIR` writes the owed run: `DIR/cfg/<kind>.<Module>.yaml` per (kind, module), the canonical config narrowed to the owed rows,
   lengths, backends (plus `pytorch`), dtypes and modes (a superset of the owed cases when they do not form a product: the extra cases are
   measured again, harmlessly), and four groups `DIR/G1` .. `DIR/G4` balanced by owed-case count, one line `<kind> <Module> <cfg path>`
@@ -93,7 +92,9 @@ owed cases.
 
 | change | bump |
 |---|---|
-| a module's math, its reference, or a backend adapter that can change a result | the class `version` |
+| a module's math or its reference that can change a result | the class `version` |
+| one backend's adapter only (e.g. an external library wired to other kernels) | the class `backend_versions[backend]` |
+| how a backend uses TF32 (float32 matmuls) | its entry in `measure/config.py` `TF32_RULE` |
 | a kernel's algorithm that can change a result | its `version` in `requirements_kernel.csv` |
 | a launch-config table's content | automatic (the pretuner's merge increments the table `version`) |
 | how a case is built or what a record means | `CONFIG_VERSION` |

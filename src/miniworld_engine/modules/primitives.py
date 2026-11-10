@@ -32,7 +32,7 @@ import contextlib
 import math
 from enum import Enum
 from functools import partial
-from typing import Literal
+from typing import ClassVar, Literal
 
 import numpy as np
 import torch
@@ -106,6 +106,10 @@ class BackendModule(nn.Module):
     #: change an accuracy or speed result (not for a refactor or a comment). A subclass inherits it; the judge
     #: (miniworld_engine.judge) owes a new measurement of every case of a class whose version changed.
     version: int = 1
+    #: Human-managed version of ONE backend's adapter in this class (backend name -> version, missing = 1): bump a backend's entry when
+    #: its adapter changes that backend's results only (e.g. an external library wired to other kernels); the judge then owes the cases
+    #: of that backend alone. A subclass inherits it.
+    backend_versions: ClassVar[dict[str, int]] = {}
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
