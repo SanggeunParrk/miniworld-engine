@@ -60,6 +60,12 @@ def _token_dit_inputs(block, *, length, samples, dtype, device, generator) -> di
 # ================================================================================================= the "anthropic" backend (the release)
 # One adapter per release op; the block's statements around the attention core are the ones of ``AugmentedAttentionPairBias.delta``
 # (``_release_delta``), the core is the model's release kernel. Every release op here is forward only (no backward).
+#
+# The glue is laid out the way the kits' own sampler steps lay it out (af3_torch FusedDiT / dtk_modules, Boltz-2 bz_sampler_dit, openfold3
+# dit_glue): ONE GEMM against the packed [W_q | W_k | W_v | W_g] (packed once per weight version, not per call) gives the q / k / v / gate
+# rows the cores read in place (column views, no cat), and the pair bias comes out of its GEMM head-major [B, H, L, L] (no permute copy;
+# a core that takes the key mask inside the bias folds it in place). fp32 products follow the engine's TF32 rule
+# (``torch.backends.cuda.matmul.allow_tf32``) through each kit's own precision word (dtk ``in_prec`` tf32 / ieee, Boltz-2 tf32 / ieee).
 
 
 def _grad_reason(module: torch.nn.Module, *tensors) -> str | None:
@@ -74,6 +80,11 @@ def _core_dtype(single: torch.Tensor) -> torch.dtype:
     return torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else single.dtype
 
 
+def _tf32() -> bool:
+    """The engine's fp32 rule for this call: TF32 products allowed (the measurers allow them for every backend)."""
+    return bool(torch.backends.cuda.matmul.allow_tf32)
+
+
 def _token_mask_reason(mask: torch.Tensor | None, single: torch.Tensor) -> str | None:
     if mask is None:
         return None
@@ -84,56 +95,142 @@ def _token_mask_reason(mask: torch.Tensor | None, single: torch.Tensor) -> str |
     return None
 
 
+def _packed_linear(att, names: tuple[str, ...], x: torch.Tensor) -> torch.Tensor:
+    """``cat([att.<name>(x) for name in names], -1)`` as ONE GEMM against the packed weight (and bias, zeros where a part has none), packed
+    once per parameter version and cached on ``att`` (the kits pack W_qkvg once: af3_torch ``dtk_modules`` FusedDiT, Boltz-2
+    ``bz_sampler_dit._State``, openfold3 ``dit_glue._weights``)."""
+    mods = [getattr(att, n) for n in names]
+    params = [p for m in mods for p in (m.weight, m.bias) if p is not None]
+    key = (names, tuple((p.data_ptr(), p._version, p.dtype) for p in params))
+    hit = att.__dict__.get("_anthropic_pack")
+    if hit is None or hit[0] != key:
+        with torch.no_grad():
+            w = torch.cat([m.weight for m in mods], 0).contiguous()
+            b = None
+            if any(m.bias is not None for m in mods):
+                b = torch.cat([m.bias if m.bias is not None else m.weight.new_zeros(m.weight.shape[0]) for m in mods], 0).contiguous()
+        hit = (key, w, b)
+        att.__dict__["_anthropic_pack"] = hit
+    _, w, b = hit
+    if not torch.is_autocast_enabled(x.device.type) and w.dtype != x.dtype:
+        w, b = w.to(x.dtype), None if b is None else b.to(x.dtype)
+    return F.linear(x, w, b)
+
+
+def _bias_planes(att, pair: torch.Tensor, extra_pair_bias: torch.Tensor | None) -> torch.Tensor:
+    """``to_bias(ln_pair(pair))`` (+ ``extra_pair_bias``) head-major [B, H, L, L], contiguous: the bias GEMM written as ``W z^T`` so its
+    output is the planes the cores read (the kits' head-major bias hoist), no [B, L, L, H] -> [B, H, L, L] copy."""
+    z = att.ln_pair(pair)
+    bsz, n = z.shape[0], z.shape[1]
+    w = att.to_bias.weight
+    if not torch.is_autocast_enabled(z.device.type) and w.dtype != z.dtype:
+        w = w.to(z.dtype)
+    planes = torch.matmul(w, z.reshape(bsz, n * n, z.shape[-1]).transpose(1, 2)).view(bsz, -1, n, n)   # [B, H, L, L]
+    if att.to_bias.bias is not None:
+        planes = planes + att.to_bias.bias.to(planes.dtype)[None, :, None, None]
+    if extra_pair_bias is not None:
+        planes = planes + extra_pair_bias.to(planes.dtype)[None, None]
+    return planes
+
+
 def _release_delta(att, single, cond, pair, mask, extra_pair_bias, core, *, fused_gate: bool = False) -> torch.Tensor:
     """``AugmentedAttentionPairBias.delta`` (no residual) with ``core(q, k, v, bias, mask, gate)`` -> [A, B, L, H * D] as its attention core:
-    q / k / v [A, B, L, H, D], bias [B, L, L, H] (+ ``extra_pair_bias``), mask [A, B, L] or None, gate the gating query's logits
-    ``to_gate(a)`` [A, B, L, H * D] when the release op fuses ``sigmoid(gate) *`` (``fused_gate``; then only ``to_out`` follows), else None."""
+    q / k / v [A, B, L, H, D] (column views of one packed GEMM), bias [B, H, L, L] head-major (+ ``extra_pair_bias``; the core may fold the
+    mask into it in place), mask [A, B, L] or None, gate the gating query's logits ``to_gate(a)`` [A, B, L, H * D] when the release op fuses
+    ``sigmoid(gate) *`` (``fused_gate``; then only ``to_out`` follows), else None."""
     in_dtype = single.dtype
     x = att.ada_ln_in(single, cond)
-    query, key = att.flat_qk_norm(att.to_query(x), att.to_key(x))
-    value = att.to_value(x)
-    a, b, n = query.shape[:3]
+    names = ("to_query", "to_key", "to_value") + (("to_gate",) if fused_gate else ())
+    rows = _packed_linear(att, names, x)                                               # [A, B, L, (3 | 4) C]
+    c = att.to_query.weight.shape[0]
+    query, key = att.flat_qk_norm(rows[..., :c], rows[..., c:2 * c])
+    value = rows[..., 2 * c:3 * c]
+    a = query.shape[0]
     h = att.n_head
-    d = query.shape[-1] // h
-    query, key, value = (t.view(a, b, n, h, d) for t in (query, key, value))
-    bias = att.to_bias(att.ln_pair(pair))
-    if extra_pair_bias is not None:
-        bias = bias + extra_pair_bias.to(bias.dtype)[None, :, :, None]
+    d = c // h
+    query, key, value = (t.unflatten(-1, (h, d)) for t in (query, key, value))
+    bias = _bias_planes(att, pair, extra_pair_bias)
     if mask is not None and mask.ndim == 2:
         mask = mask[None].expand(a, -1, -1)
-    gate = att.to_gate(x) if fused_gate else None
+    gate = rows[..., 3 * c:] if fused_gate else None
     out = core(query, key, value, bias, mask, gate).to(in_dtype)
     out = att.to_out(out) if fused_gate else att.gate_project(x, out)
     return sigmoid_gate(att.to_scale(cond), out)
 
 
+def _shared_mask_rows(mask: torch.Tensor | None) -> torch.Tensor | None:
+    """The [B, L] key mask an [A, B, L] mask holds for every sample (metadata only: A == 1 or stride 0), else None."""
+    if mask is None:
+        return None
+    return mask[0] if (mask.shape[0] == 1 or mask.stride(0) == 0) else None
+
+
+def _fold_mask(bias: torch.Tensor, mask_rows: torch.Tensor | None, value: float) -> torch.Tensor:
+    """``bias`` [B, H, L, L] with ``value`` on every masked key, in place (the planes are this call's own)."""
+    if mask_rows is not None:
+        bias.masked_fill_(~mask_rows.bool()[:, None, None, :], value)
+    return bias
+
+
 def _core_af3_apb(q, k, v, bias, mask, gate):
     """af3_torch's token core in 16 bit: ``opt_core.attn.apb_core.pair_bias_attention`` (the apb_attn Triton kernel the kit's DTK step and
-    its ``apb`` lever call), one launch per batch row for its A samples sharing the row's bias."""
+    its ``apb`` lever call, openfold3's ``dit_glue`` core), one launch per batch row for its A samples sharing the row's head-major bias,
+    the key mask by name and the gate fused (as ``dit_glue`` passes them)."""
     apb = _anthropic.load("opt_core.attn.apb_core")
     outs = []
     for j in range(q.shape[1]):
         km = None if mask is None else mask[:, j]
         outs.append(apb.pair_bias_attention(q[:, j].transpose(1, 2), k[:, j].transpose(1, 2), v[:, j].transpose(1, 2),
-                                            bias[j].permute(2, 0, 1), km, layout="shnd"))   # [A, L, H * D]
+                                            bias[j], km, gate=None if gate is None else gate[:, j], layout="shnd"))   # [A, L, H * D]
     return torch.stack(outs, 1)
 
 
 def _core_dtk_flash(q, k, v, bias, mask, gate, *, dtype=None):
     """``opt_core.kernels.dtk_kernels.flash_bias_attn``, one [H, L, D] problem per (sample, batch row): af3_torch's DTK per-sample core
-    (its fp32 path), and the core RoseTTAFold3's kit calls (``rosettafold3_opt.dtk.attn``: bias re-laid in the activation dtype, no mask)."""
+    (``dtk_modules`` FusedDiT's last arm), and the core RoseTTAFold3's kit calls (``rosettafold3_opt.dtk.attn``: one launch per sample, the
+    bias in the activation dtype, no mask). fp32 products: ``in_prec`` tf32 under the engine's TF32 rule, else ieee (the kit's default)."""
     dk = _anthropic.load("opt_core.kernels.dtk_kernels")
     a, b, n, h, d = q.shape
     dt = dtype or q.dtype
+    prec = "tf32" if dt == torch.float32 and _tf32() else "ieee"
     out = torch.empty(a, b, n, h * d, dtype=dt, device=q.device)
     for j in range(b):
-        bh = bias[j].permute(2, 0, 1).to(dt).contiguous()                      # [H, L, L]
+        bh = bias[j].to(dt)                                                        # [H, L, L], head-major already
         for i in range(a):
             km = None if mask is None else mask[i, j].to(torch.int32)
             dk.flash_bias_attn(q[i, j].to(dt).transpose(0, 1), k[i, j].to(dt).transpose(0, 1), v[i, j].to(dt).transpose(0, 1),
-                               bias=bh, key_mask=km, out=out[i, j], out_dtype=dt, scale=d ** -0.5)
+                               bias=bh, key_mask=km, gate=None if gate is None else gate[i, j], out=out[i, j], out_dtype=dt,
+                               scale=d ** -0.5, in_prec=prec)
     return out
 
+
+#: The tier word the token cores ask opt_core's pair-bias provider with: the kits' speed mode (protenix_v2 / opendde / af3_torch / Chai-1
+#: ``fast``); the selection is the graphed column (the measurer and the kits' samplers replay CUDA graphs).
+_PROVIDER_WORD = "fast"
+
+
+def _provider_selection(n: int, samples: int, d: int, h: int, dtype: torch.dtype, device, cell: str = "dit_h16d48"):
+    """``(Selection, None)`` or ``(None, reason)``: the row opt_core's pair-bias provider (``opt_core.kernels.apb``) selects for the call."""
+    provider = _anthropic.load("opt_core.kernels.apb")
+    cc = tuple(torch.cuda.get_device_capability(device))
+    return _anthropic.kernel_selection(provider, cc, dtype, cell, int(n), word=_PROVIDER_WORD, samples=int(samples), timing="graphed",
+                                       capture=True, head_dim=int(d), heads=int(h))
+
+
+def _core_provider(q, k, v, bias, mask_rows, gate, sel, *, cell: str = "dit_h16d48"):
+    """``opt_core.kernels.apb.pair_bias_attention`` with the selection ``sel``: the A samples of a batch row in one call (the kits' DiT
+    site: protenix_v2 ``apb_core._make_dit_forward``, opendde ``odde_apb_bind.dit_views``, af3_torch ``FusedDiT.forward_batched``), q / k /
+    v / gate the [A, L, H, D] column views, the row's [1, H, L, L] bias with the key mask folded in (-1e9, af3_torch's fold)."""
+    provider = _anthropic.load("opt_core.kernels.apb")
+    a, b, n, h, d = q.shape
+    _fold_mask(bias, mask_rows, -1e9)
+    out = torch.empty(a, b, n, h * d, dtype=q.dtype, device=q.device)
+    for j in range(b):
+        g = None if gate is None else gate[:, j].unflatten(-1, (h, d))
+        o, _ = provider.pair_bias_attention(q[:, j], k[:, j], v[:, j], bias[j][None], None, g, selection=sel, layout="snhd", cell=cell,
+                                            capture=True)
+        out[:, j] = o.reshape(a, n, h * d)
+    return out
 
 
 # ================================================================================================= the "cuda" backend (the engine's H100 kernels)
@@ -212,7 +309,8 @@ class TokenDiTProtenix(BackendModule):
 
     AlphaFold 3's own token DiT is this block (registered as ``"af3"``).
 
-    ``backend="anthropic"``: the release's af3_torch attention core (bf16: ``opt_core.attn.apb_core``; fp32: ``dtk_kernels.flash_bias_attn``),
+    ``backend="anthropic"``: the release's attention core (bf16: ``opt_core.attn.apb_core``; fp32: opt_core's pair-bias provider
+    ``opt_core.kernels.apb`` by the tier word "fast", else ``dtk_kernels.flash_bias_attn`` per sample),
     the rest of the block as ``"pytorch"``; eval only, CUDA H100, head dim <= 64 (:meth:`_supports_anthropic`).
     """
     version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
@@ -384,13 +482,25 @@ class TokenDiTProtenix(BackendModule):
 
     # ------------------------------------------------------------------------------------------------------------ "anthropic"
     #: the release op this class's attention core runs on, and whether that op fuses the gating query's sigmoid
+    #: AF3 / OpenFold3 / Protenix / OpenDDE / IntelliFold2 / ESMFold2 (one block for all of them):
+    #:   16 bit  opt_core.attn.apb_core.pair_bias_attention (af3_torch's DTK apb lever, openfold3's dit_glue core): the A samples of a batch
+    #:           row in one launch, key mask by name, gate fused;
+    #:   fp32    opt_core.kernels.apb.pair_bias_attention by the tier word "fast" (the fp32 DiT site of protenix_v2 apb_core / opendde
+    #:           odde_apb_bind / af3_torch FusedDiT): the row the provider selects for the cell, the key mask folded into the bias; a call the
+    #:           provider refuses (a key mask that differs per sample, a head layout without a cell) takes af3_torch FusedDiT's last arm, the
+    #:           per-sample dtk_kernels.flash_bias_attn.
     _release_module = "opt_core.attn.apb_core"
     _release_path = "common/opt_core"
-    _release_fused_gate = False
+    _release_fused_gate = True
 
     def _release_core(self, q, k, v, bias, mask, gate):
         if q.dtype in (torch.bfloat16, torch.float16):
             return _core_af3_apb(q, k, v, bias, mask, gate)
+        a, _, n, h, d = q.shape
+        rows = _shared_mask_rows(mask)
+        sel = _provider_selection(n, a, d, h, q.dtype, q.device)[0] if mask is None or rows is not None else None
+        if sel is not None:
+            return _core_provider(q, k, v, bias, rows, gate, sel)
         return _core_dtk_flash(q, k, v, bias, mask, gate)
 
     def _release_range(self, single, cond, pair, mask) -> str | None:
@@ -399,7 +509,7 @@ class TokenDiTProtenix(BackendModule):
             return f"core dtype {_core_dtype(single)} (bfloat16 / float32 only)"
         if single.shape[-1] // self.attention.n_head > 64:
             return "head dim > 64 (the release kernels' limit)"
-        return _anthropic.missing("opt_core.kernels.dtk_kernels")
+        return _anthropic.missing("opt_core.kernels.dtk_kernels") or _anthropic.missing("opt_core.kernels.apb")
 
     def _supports_anthropic(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> str | None:
         why = _anthropic.unavailable(self._release_module, single.device, path=self._release_path)
@@ -445,7 +555,8 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
 
     # "anthropic": Boltz-2's own flash pair-bias kernel (boltz2/opt/forward/sampler/src/bz_sampler_dit.py ``_flash_bias_kernel``, the core of
     # its ``dit_fused`` sampler lever): rows [q | k | v | g], sigmoid(g) fused, one bias per batch row shared by the samples with the key mask
-    # folded in as Boltz's ``(1 - mask) * -1e6``; bf16 operands (bf16) or ieee fp32 dots (fp32); head dim 48 only.
+    # folded in as Boltz's ``(1 - mask) * -1e6``; bf16 operands (bf16) or fp32 dots (fp32: Boltz-2's ``tf32`` word under the engine's TF32
+    # rule, else ``ieee``); head dim 48 only. The rows are the packed q / k / v / g GEMM's output read in place (Boltz-2's per-layer qkvg GEMM).
     _release_module = "bz_sampler_dit"
     _release_path = "boltz2/opt/forward/sampler/src"
     _release_fused_gate = True
@@ -456,22 +567,30 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
         bz = _anthropic.load(self._release_module, path=self._release_path)
         a, b, n, h, d = q.shape
         c, dt = h * d, q.dtype
-        prec = "bf16" if dt == torch.bfloat16 else "ieee"
+        prec = "bf16" if dt == torch.bfloat16 else ("tf32" if _tf32() else "ieee")
         bq, bkv, warps, stages = bz._flash_cfg(n, prec)
         qb = torch.zeros(c, dtype=dt, device=q.device)              # the q bias is in q already (to_query's bias)
         out = torch.empty(a, b, n, c, dtype=dt, device=q.device)
+        packed = q.flatten(-2)                                      # [A, B, L, C] column view of the [A, B, L, 4 C] q / k / v / g rows
         for j in range(b):
-            rows = torch.cat([t[:, j].reshape(a * n, c) for t in (q, k, v, gate)], -1).contiguous()   # [A * L, 4 C]
-            pb = bias[j].permute(2, 0, 1).float()
+            t = packed[:, j]
+            if t.stride(1) == 4 * c and gate is not None and gate.data_ptr() == q.data_ptr() + 3 * c * q.element_size() \
+                    and t.stride(0) == n * t.stride(1):
+                rows = torch.as_strided(t, (a * n, 4 * c), (4 * c, 1))                                     # [A * L, 4 C] in place
+            else:
+                rows = torch.cat([u[:, j].reshape(a * n, c) for u in (q, k, v, gate)], -1).contiguous()
+            pb = bias[j]                                                                                   # [H, L, L] head-major
             if mask is not None:
-                pb = pb + (1 - mask[0, j].float())[None, None, :] * -1e6
+                pb = pb.float().add_((1 - mask[0, j].float())[None, None, :] * -1e6)
             pb = pb.to(dt).contiguous()
-            ctx = torch.empty(a * n, c, dtype=dt, device=q.device)
+            o = out[:, j]
+            ctx = o.view(a * n, c) if o.is_contiguous() else torch.empty(a * n, c, dtype=dt, device=q.device)
             bz._flash_bias_kernel[(triton.cdiv(n, bq), h, a)](
                 rows, qb, pb, ctx, n, rows.stride(0), pb.stride(0), pb.stride(1), ctx.stride(0), float(d ** -0.5),
-                H=h, HD=d, D=c, PREC=3 if prec == "bf16" else 0, OUT_BF16=dt == torch.bfloat16, BQ=bq, BKV=bkv,
+                H=h, HD=d, D=c, PREC={"bf16": 3, "tf32": 1, "ieee": 0}[prec], OUT_BF16=dt == torch.bfloat16, BQ=bq, BKV=bkv,
                 num_warps=warps, num_stages=stages)
-            out[:, j] = ctx.view(a, n, c)
+            if not o.is_contiguous():
+                o.copy_(ctx.view(a, n, c))
         return out
 
     def _release_range(self, single, cond, pair, mask) -> str | None:
@@ -499,8 +618,10 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
         return {**super().make_inputs(**kwargs), "mask": None}   # the model calls the block without a key mask
 
     # "anthropic": the core RoseTTAFold3's kit runs (rosettafold3/opt/rosettafold3_opt/dtk.py ``attn``: opt_core's
-    # ``dtk_kernels.flash_bias_attn`` per sample, the bias re-laid in the activation dtype, no key mask; the gate stays outside).
+    # ``dtk_kernels.flash_bias_attn`` per sample, the bias in the activation dtype, no key mask; the gate stays outside, as the kit applies
+    # it in torch; fp32 products tf32 under the engine's TF32 rule).
     _release_module = "opt_core.kernels.dtk_kernels"
+    _release_fused_gate = False
 
     def _release_core(self, q, k, v, bias, mask, gate):
         return _core_dtk_flash(q, k, v, bias, None, None)
@@ -537,32 +658,27 @@ class TokenDiTChai1(VariantTokenCuda, TokenDiTProtenix):
 
     # "anthropic": the core Chai-1's kit serves (chai1/opt/forward/dstep_megakernel/chai1_fastln/dit_attn.py ``_serve4``): opt_core's
     # pair-bias provider with the row it selects for fp32 cell dit_h16d48 under the tier word "fast" (graphed, capture), [S, H, N, D] with one
-    # [1, H, N, N] bias, no gate, no key mask (Chai-1 folds its mask into the bias). A stock row the provider selects (SDPA ...) is served as the release serves it.
+    # [1, H, N, N] bias, no gate, no key mask (Chai-1 folds its mask into the bias). A stock row the provider selects (SDPA ...) is served as the
+    # release serves it. Chai-1's denoiser runs this core in fp32 only (its Router takes fp32 q / k / v): under the master layout (bf16
+    # activations) the core's operands are widened to fp32 as Chai-1's fp32 DiT has them, the rest of the block stays in autocast.
     _release_module = "opt_core.kernels.apb"
+    _release_fused_gate = False   # no gating query
     _CELL = "dit_h16d48"
 
     def _chai_selection(self, n: int, samples: int, d: int, h: int, device):
-        provider = _anthropic.load(self._release_module)
-        cc = tuple(torch.cuda.get_device_capability(device))
-        return _anthropic.kernel_selection(provider, cc, torch.float32, self._CELL, int(n), word="fast", samples=int(samples),
-                                           timing="graphed", capture=True, head_dim=int(d), heads=int(h))
+        return _provider_selection(n, samples, d, h, torch.float32, device, self._CELL)
 
     def _release_core(self, q, k, v, bias, mask, gate):
-        provider = _anthropic.load(self._release_module)
-        a, b, n, h, d = q.shape
+        a, _, n, h, d = q.shape
         sel, why = self._chai_selection(n, a, d, h, q.device)
         if sel is None:
             raise RuntimeError(why)
-        out = torch.empty(a, b, n, h * d, dtype=q.dtype, device=q.device)
-        for j in range(b):
-            o, _ = provider.pair_bias_attention(q[:, j].transpose(1, 2), k[:, j].transpose(1, 2), v[:, j].transpose(1, 2),
-                                                bias[j].permute(2, 0, 1)[None], selection=sel, layout="shnd", cell=self._CELL, capture=True)
-            out[:, j] = o.transpose(1, 2).reshape(a, n, h * d)
-        return out
+        q, k, v, bias = (t.float() for t in (q, k, v, bias))
+        return _core_provider(q, k, v, bias, None, None, sel, cell=self._CELL)
 
     def _release_range(self, single, cond, pair, mask) -> str | None:
-        if _core_dtype(single) != torch.float32:
-            return f"core dtype {_core_dtype(single)} (Chai-1's release core serves float32 only)"
+        if _core_dtype(single) not in (torch.bfloat16, torch.float32):
+            return f"core dtype {_core_dtype(single)} (bfloat16 / float32 only; Chai-1's release core runs float32)"
         if mask is not None and not bool(mask.all()):
             return "a key mask (Chai-1's release core takes the mask inside its bias, not as a mask)"
         h = self.attention.n_head
