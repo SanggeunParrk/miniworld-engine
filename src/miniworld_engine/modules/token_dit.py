@@ -501,8 +501,8 @@ class TokenDiTProtenix(BackendModule):
         return "a100", None
 
     def _forward_a100(self, single, cond, pair, mask):
-        from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
         from miniworld_engine.kernels.integrations import augattn_sm80
+        from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
 
         grad = _wants_grad(self, single, cond, pair)
         single = augattn_sm80.forward(self.attention, single, cond, pair, mask)
