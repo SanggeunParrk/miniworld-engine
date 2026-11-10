@@ -188,8 +188,6 @@ def serves(module, single, pair, mask, compute_dtype=None, cond=None) -> bool:
         else sm80.supported_tf32(F32, _pad(length), d, heads, idx)
     ):
         return False
-    if not fused:
-        return True
     return _loads() if dt is BF else _loads_tf32()
 
 
