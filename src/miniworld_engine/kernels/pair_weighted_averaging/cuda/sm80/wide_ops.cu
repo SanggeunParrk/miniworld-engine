@@ -115,16 +115,22 @@ __global__ void __launch_bounds__(256) gate_bwd_k(const bf16* __restrict__ du, c
 constexpr int DZ = 512;
 __global__ void __launch_bounds__(256) pair_logits_k(const bf16* __restrict__ z, const float* __restrict__ lnw, const float* __restrict__ lnb,
                                                      const bf16* __restrict__ wb, bf16* __restrict__ out, long R, float eps) {
-  // shared operands in lane-minor order (channel k = 256 a + 8 lane + e at [(a, e)][lane]): a warp's 32 reads of one (a, e) hit 32 banks
-  __shared__ float sw[16][H][32];
-  __shared__ float sg[16][32], sb[16][32];
-  for (int i = threadIdx.x; i < H * DZ; i += 256) {
-    const int h = i / DZ, k = i % DZ;
-    sw[(k >> 8) * 8 + (k & 7)][h][(k >> 3) & 31] = __bfloat162float(wb[i]);
-  }
-  for (int k = threadIdx.x; k < DZ; k += 256) { sg[(k >> 8) * 8 + (k & 7)][(k >> 3) & 31] = lnw[k]; sb[(k >> 8) * 8 + (k & 7)][(k >> 3) & 31] = lnb[k]; }
-  __syncthreads();
+  // a lane's 16 channels (8 lane + e, 256 + 8 lane + e) of the 8 Wb rows and of the LayerNorm affine stay in registers for every row
   const int lane = threadIdx.x & 31;
+  __nv_bfloat162 wr[2][4][H];
+  float gr[2][8], br[2][8];
+#pragma unroll
+  for (int a = 0; a < 2; ++a) {
+#pragma unroll
+    for (int h = 0; h < H; ++h) {
+      const uint4 q = *reinterpret_cast<const uint4*>(wb + h * DZ + a * 256 + lane * 8);
+      const __nv_bfloat162* p = reinterpret_cast<const __nv_bfloat162*>(&q);
+#pragma unroll
+      for (int i = 0; i < 4; ++i) wr[a][i][h] = p[i];
+    }
+#pragma unroll
+    for (int e = 0; e < 8; ++e) { gr[a][e] = lnw[a * 256 + lane * 8 + e]; br[a][e] = lnb[a * 256 + lane * 8 + e]; }
+  }
   const long warps = (long)gridDim.x * 8;
   for (long r = ((long)blockIdx.x * 256 + threadIdx.x) >> 5; r < R; r += warps) {
     float v[2][8];
@@ -152,17 +158,36 @@ __global__ void __launch_bounds__(256) pair_logits_k(const bf16* __restrict__ z,
 #pragma unroll
     for (int a = 0; a < 2; ++a)
 #pragma unroll
-      for (int e = 0; e < 8; ++e) {
-        const int ae = a * 8 + e;
-        const float y = bfr(fmaf((v[a][e] - mean) * rstd, sg[ae][lane], sb[ae][lane]));
+      for (int i = 0; i < 4; ++i) {
+        const float y0 = bfr(fmaf((v[a][2 * i] - mean) * rstd, gr[a][2 * i], br[a][2 * i]));
+        const float y1 = bfr(fmaf((v[a][2 * i + 1] - mean) * rstd, gr[a][2 * i + 1], br[a][2 * i + 1]));
 #pragma unroll
-        for (int h = 0; h < H; ++h) acc[h] = fmaf(y, sw[ae][h][lane], acc[h]);
+        for (int h = 0; h < H; ++h) {
+          const float2 wv = __bfloat1622float2(wr[a][i][h]);
+          acc[h] = fmaf(y1, wv.y, fmaf(y0, wv.x, acc[h]));
+        }
       }
+    // the 8 warp sums by halving exchanges (9 shuffles, not 40): after them lane l holds head 4 b4 + 2 b3 + b2 of its lane bits
 #pragma unroll
-    for (int h = 0; h < H; ++h)
+    for (int h = 0; h < 4; ++h) {
+      const bool up = lane & 16;
+      const float send = up ? acc[h] : acc[h + 4], keep = up ? acc[h + 4] : acc[h];
+      acc[h] = keep + __shfl_xor_sync(0xffffffffu, send, 16);
+    }
 #pragma unroll
-      for (int o = 16; o; o >>= 1) acc[h] += __shfl_xor_sync(0xffffffffu, acc[h], o);
-    if (lane == 0) reinterpret_cast<uint4*>(out)[r] = pack8(acc);
+    for (int h = 0; h < 2; ++h) {
+      const bool up = lane & 8;
+      const float send = up ? acc[h] : acc[h + 2], keep = up ? acc[h + 2] : acc[h];
+      acc[h] = keep + __shfl_xor_sync(0xffffffffu, send, 8);
+    }
+    {
+      const bool up = lane & 4;
+      const float send = up ? acc[0] : acc[1], keep = up ? acc[1] : acc[0];
+      acc[0] = keep + __shfl_xor_sync(0xffffffffu, send, 4);
+    }
+    acc[0] += __shfl_xor_sync(0xffffffffu, acc[0], 2);
+    acc[0] += __shfl_xor_sync(0xffffffffu, acc[0], 1);
+    if ((lane & 3) == 0) out[r * H + ((lane >> 4) & 1) * 4 + ((lane >> 3) & 1) * 2 + ((lane >> 2) & 1)] = __float2bfloat16_rn(acc[0]);
   }
 }
 
