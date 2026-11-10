@@ -109,7 +109,9 @@ def make_step(module, inputs: dict, *, backend: str, train: bool, autocast: torc
     """The callable one replay runs, or raise ``BackendUnsupported`` with the backend's reason.
 
     ``compile_mode`` None: the backend's forward as is; a string: ``torch.compile(forward, dynamic=False, mode=...)``."""
-    allow = backend in config.TF32_BACKENDS   # pytorch (the reference) and triton in TF32; the others' PyTorch fp32 matmuls without it
+    from miniworld_engine.measure.config import TF32_BACKENDS
+
+    allow = backend in TF32_BACKENDS   # pytorch (the reference) and triton in TF32; the others' PyTorch fp32 matmuls without it
     torch.backends.cuda.matmul.allow_tf32 = allow
     torch.backends.cudnn.allow_tf32 = allow
     module.set_backend(backend)
