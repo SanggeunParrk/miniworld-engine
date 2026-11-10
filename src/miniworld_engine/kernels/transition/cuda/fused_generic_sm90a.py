@@ -204,8 +204,9 @@ def _fwd_h16(ext, x, xn, gamma, beta, wa, wb, ws, cache=False):
 #: fill them (measured, H100: d 768, 128 rows: the hand SwiGLU GEMM 21 us against two cuBLAS GEMMs of 6 us, training step 109 -> 81 us;
 #: d 384 at 768 rows the hand kernels stay ahead, 77 against 84 us).
 _F32_CUBLAS_MAX_ROWS = 2048
-#: ... and only from this width on: at d 384 the hand kernels (one weight prep per step) stay ahead of it at every row count.
-_F32_CUBLAS_MIN_D = 512
+#: ... and only from this width on (2026-11-10, H100 graph, training step, n 4: d 384 at 128 / 256 / 384 rows the cuBLAS plan 63 / 70 / 91-94 us
+#: against the hand kernels 83 / 91 / 98 us and the Triton rung 75 / 84 / 95 us; at d 384 above D rows the hand kernels stay ahead).
+_F32_CUBLAS_MIN_D = 384
 #: fp32 inference rows up to which the squeeze is a cuBLAS addmm (residual as its C): one 128-row tile of the hand GEMM per CTA leaves the card
 #: mostly idle there (d 768, 128 rows: 11 us against cuBLAS split-K).
 _F32_SQUEEZE_CUBLAS_ROWS = 512
