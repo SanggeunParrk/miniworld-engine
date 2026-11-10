@@ -11,6 +11,9 @@ from miniworld_engine.modules.functional import swish_gate
 from miniworld_engine.modules.norm import AdaptiveLayerNorm, LayerNorm, _as_rows3, a100, h100_unsupported, triton_unsupported
 from miniworld_engine.modules.primitives import BackendModule, Linear, MasterWeights, master_linear, random_input, stream_shape
 
+#: The OpenDDE kit's transition composition (``fpf_transition_odde``), a release directory for ``modules/_anthropic.load``.
+_ODDE_ARMT = "opendde/opt/forward/fast_inference/levers/ARMT/third_party"
+
 
 class Transition(BackendModule, MasterWeights):
     """Transition layer with SwiGLU activation::
@@ -110,27 +113,122 @@ class Transition(BackendModule, MasterWeights):
             family=self._anthropic_family(x), residual=False, cc="{}.{}".format(*torch.cuda.get_device_capability(x.device)), rows_count=x.numel() // self.d_hidden,
         )
 
+    def _anthropic_core_refusal(self, x: torch.Tensor) -> str | None:
+        sel, why = self._anthropic_select(x)[1]
+        if sel is not None and any(c in str(sel.cell_key) for c in self._ANTHROPIC_EXCLUDED_CELLS):
+            return f"the provider cell {sel.cell_key} dumps core on this H100 stack (driver 575 / CUDA 12.9): refused by name"
+        return why
+
+    #: Where the shared core's provider has no cell for the call, the kits' own transition kernels of that form (the module is model-agnostic:
+    #: the kit of the models the row serves):
+    #:   ``"ef2"``  an MSA stream of width 128, bf16 (ESMFold2 / OpenDDE / Protenix-v2 rows): the esmfold2 kit's ``ef2_msa_v2.mtr_fused``
+    #:              (LN + W12 + silu(x1) * x2 + W3 + the residual in one Triton kernel per row block; hidden a multiple of 64)
+    #:   ``"pf"``   otherwise: ``opt_core.attn.pair_fused.transition`` (impl fpf, LN in the kernel; the pair transition the Boltz-2 pairfuse and
+    #:              OpenFold3 kits install), served where its cell table / safe settings take (C, n*C)
+    def _anthropic_route(self, x: torch.Tensor) -> tuple[str | None, str | None]:
+        from miniworld_engine.modules import _anthropic
+
+        if (self._anthropic_family(x) == "pair" and (self.d_hidden, self.d_hidden * self.n) == (384, 1536)
+                and x.dtype == torch.bfloat16 and not self.training):
+            # the pair transition of OpenDDE (c_z 384 x 4; the row is OpenDDE's alone): its kit's own composition (fpf_transition_odde sep16:
+            # the module's LN -> bf16, two cuBLAS GEMMs, the Triton silu(a) * b kernel, the out GEMM)
+            why = _anthropic.missing("fpf_transition_odde", path=_ODDE_ARMT)
+            if why is None:
+                return "odde", None
+        why_core = self._anthropic_core_refusal(x)
+        if why_core is None:
+            return "core", None
+        if x.dtype == torch.bfloat16 and self._anthropic_family(x) == "rows" and self.d_hidden == 128 and (self.d_hidden * self.n) % 64 == 0:
+            why = _anthropic.missing("ef2_msa_v2", path="esmfold2/opt/forward/fast_inference/driver")
+            if why is None:
+                return "ef2", None
+            why_core += f"; esmfold2 mtr_fused: {why}"
+        why = _anthropic.missing("opt_core.attn.pair_fused")
+        if why is None:
+            ok, why = _anthropic.load("opt_core.attn.pair_fused").supported_transition(x, self._anthropic_pf_weights(x), impl="fpf", ln="fused",
+                                                                                        residual=False)
+            if ok:
+                return "pf", None
+        return None, f"{why_core}; pair_fused.transition: {why}"
+
+    def _anthropic_pf_weights(self, x: torch.Tensor):
+        from miniworld_engine.modules import _anthropic
+
+        params = (self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.ln_in.weight, self.ln_in.bias)
+        key = (x.device, *((p.data_ptr(), p._version, p.dtype) for p in params))
+        if getattr(self, "_anthropic_pf_key", None) != key:
+            self._anthropic_pf = _anthropic.load("opt_core.attn.pair_fused").pack_transition_weights(
+                w_out=params[2], ln_w=params[3], ln_b=params[4], w_a=params[0], w_b=params[1], eps=self.ln_in.eps, device=x.device)
+            self._anthropic_pf_key = key
+        return self._anthropic_pf
+
     def _supports_anthropic(self, x: torch.Tensor) -> str | None:
         from miniworld_engine.modules import _anthropic
 
         why = _anthropic.unavailable("opt_core.kernels.transition", x.device)
         if why is not None:
             return why
-        if torch.is_grad_enabled():
-            return ("inference only: the provider's differentiable transition (transition_autograd) keeps the weights frozen (no weight "
-                    "gradients); call under torch.no_grad() / inference_mode")
         if x.dtype not in self._ANTHROPIC_DTYPES:
             return f"dtype {x.dtype}: the provider has bfloat16 / float32 cells only"
         if x.dim() < 2:
             return "x must be [..., L, d_hidden]"
-        sel, why = self._anthropic_select(x)[1]
-        if sel is not None and any(c in str(sel.cell_key) for c in self._ANTHROPIC_EXCLUDED_CELLS):
-            return f"the provider cell {sel.cell_key} dumps core on this H100 stack (driver 575 / CUDA 12.9): refused by name"
-        return why
+        if torch.is_grad_enabled():
+            if any(p.requires_grad for p in self.parameters()):
+                return ("training with parameter gradients: the kits' differentiable transitions (opt_core transition_autograd rows esm_kd3*, "
+                        "ef2inv LNLinearSwiGLUFrozen) are dX-only with frozen weights; freeze the parameters or call under torch.no_grad()")
+            return self._anthropic_autograd_select(x)[1][1]
+        return self._anthropic_route(x)[1]
+
+    def _anthropic_autograd_select(self, x: torch.Tensor):
+        """The provider's differentiable row (``transition_autograd``: esm_kd3 / esm_t15_kd3 / esm_t16_kd3, forward + dX backward, frozen
+        weights) for a frozen module whose input takes a gradient."""
+        from miniworld_engine.modules import _anthropic
+
+        prov = _anthropic.load("opt_core.kernels.transition")
+        return prov, _anthropic.kernel_selection(
+            prov, "fast", c=self.d_hidden, hidden=self.d_hidden * self.n, n_tokens=int(x.shape[-2]),
+            dtype={torch.bfloat16: "bf16", torch.float32: "fp32"}[x.dtype], direction="fwdbwd", family="esmpair", residual=True,
+            cc="{}.{}".format(*torch.cuda.get_device_capability(x.device)), rows_count=x.numel() // self.d_hidden)
 
     def _forward_anthropic(self, x: torch.Tensor) -> torch.Tensor:
         if self.dead:   # inference only: a dead instance returns the residual input (as the reference does)
             return x
+        if torch.is_grad_enabled():   # a frozen module, the input takes a gradient: the provider's differentiable row (dX backward)
+            prov, (sel, _why) = self._anthropic_autograd_select(x)
+            with torch.no_grad():
+                pack = prov.pack(w_a=self.expand_a.weight.to(x.dtype), w_b=self.expand_b.weight.to(x.dtype), w_o=self.squeeze.weight.to(x.dtype),
+                                 ln_w=self.ln_in.weight.to(x.dtype), ln_b=self.ln_in.bias.to(x.dtype), eps=self.ln_in.eps)
+            return prov.transition_autograd(x.contiguous(), pack, word="fast", n_tokens=int(x.shape[-2]), _sel=sel)[0]
+        route, _ = self._anthropic_route(x)
+        if route == "odde":
+            from types import SimpleNamespace
+
+            from miniworld_engine.modules import _anthropic
+
+            kit = _anthropic.load("fpf_transition_odde", path=_ODDE_ARMT)
+            if getattr(self, "_anthropic_odde", None) is None:   # OpenDDE's attribute schema; the kit caches its bf16 weights by version
+                self._anthropic_odde = SimpleNamespace(c_in=self.d_hidden, linear_no_bias_a=self.expand_a, linear_no_bias_b=self.expand_b,
+                                                       linear_no_bias=self.squeeze, layernorm1=self.ln_in, training=False)
+            return kit.forward_sep16(self._anthropic_odde, x.contiguous()).to(x.dtype) + x
+        if route == "ef2":
+            from types import SimpleNamespace
+
+            from miniworld_engine.modules import _anthropic
+
+            kit = _anthropic.load("ef2_msa_v2", path="esmfold2/opt/forward/fast_inference/driver")
+            key = tuple((p.data_ptr(), p._version) for p in self.parameters())
+            if getattr(self, "_anthropic_ef2_key", None) != key:   # the kit caches W12^T / W3^T on this object by the weights' identity
+                with torch.no_grad():
+                    w12 = torch.cat([self.expand_a.weight, self.expand_b.weight], 0)        # [x1 | x2] rows: x1 the silu branch
+                self._anthropic_ef2 = SimpleNamespace(norm=self.ln_in, ffn=SimpleNamespace(w12=SimpleNamespace(weight=w12), w3=self.squeeze))
+                self._anthropic_ef2_key = key
+            return kit.mtr_fused(self._anthropic_ef2, x.contiguous())                        # x + transition(x), bf16
+        if route == "pf":
+            from miniworld_engine.modules import _anthropic
+
+            PF = _anthropic.load("opt_core.attn.pair_fused")
+            x = x.contiguous()
+            return PF.transition(x, self._anthropic_pf_weights(x), residual=False, ln="fused", impl="fpf").to(x.dtype) + x
         prov, (sel, _why) = self._anthropic_select(x)
         if sel.row in ("engine_module", "compile"):   # the provider measured the caller's own module fastest for this cell: the release runs it
             return self._forward_pytorch(x)
