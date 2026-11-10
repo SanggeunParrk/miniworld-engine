@@ -202,3 +202,165 @@ __global__ void __launch_bounds__(128, 2) k1w_kernel(const K1wParams p) {
 }
 
 }  // namespace a100
+
+namespace a100 {
+
+// ---------------------------------------------------------------------------------------------------------------------------------- k1w64
+// k1w for D = 64 (bf16, in-kernel statistics): the same planes, bit for bit (the same MMAs in the same k order, the same two-pass statistics of each
+// token row by one thread, the same epilogue arithmetic), with the work of a token tile in ONE persistent CTA instead of 4 Hs / 128 short CTAs.
+//
+// At D = 64 the k1w GEMM is two k-tiles: a k1w CTA is a prologue (both operand tiles from L2 / DRAM), 64 HMMA per warp, the epilogue and its stores, and
+// it re-reads its token tile and recomputes its statistics once per n-tile -- latency-bound at 2 CTAs / SM (12 % occupancy, ~0.6 TB/s).  Here every CTA
+// keeps all 4 Hs packed weight rows resident in shared memory (loaded once), walks the token tiles blockIdx.x, + gridDim.x, ... with the next tile's
+// input rows streaming into the other half of a double buffer under the current tile's work, holds the tile's A fragments (all of K) in registers
+// across the n-tiles, and stores the plane words straight from the accumulators (4 channels x 32 contiguous bytes per warp store: whole sectors).
+//
+// 8 warps: 4 (32 tokens each) x 2 (64 packed rows = 32 channels of each 128-row n-tile).
+template <int HS>
+struct K1w64 {
+  static constexpr int D = 64, NCOL = 4 * HS, NTN = NCOL / 128, NTHR = 256;
+  static constexpr int W_KT = NCOL * 64;                 // bytes of one 32-wide k-tile of the packed weights (wkmaj rows)
+  static constexpr int Z_KT = 128 * 64;                  // bytes of one k-tile of a 128-token input tile
+  static constexpr int ZOFF = 2 * W_KT, ZBUF = 2 * Z_KT;  // two input buffers after the weights
+  static constexpr int STOFF = ZOFF + 2 * ZBUF;           // (mean, rstd) of the current tile's 128 tokens
+  static constexpr int SMEM = STOFF + 128 * 8;
+};
+
+template <int HS>
+__global__ void __launch_bounds__(256, HS == 64 ? 2 : 1) k1w64_kernel(const K1wParams p) {
+  using C = K1w64<HS>;
+  extern __shared__ __align__(128) uint8_t smem[];
+  const uint32_t s0 = smem_u32(smem);
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, wm = warp >> 1, wn = warp & 1, g8 = lane >> 2, q = lane & 3;
+  const int ntiles = p.T >> 7;
+  // input tile loader: 1024 granules (128 rows x 2 k-tiles x 4), 4 per thread
+  auto issue_z = [&](int tile, int buf) {
+    const __nv_bfloat16* src = p.z + (size_t)tile * 128 * C::D;
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+      const int g = tid + C::NTHR * e, row = g >> 3, kt = (g >> 2) & 1, c = g & 3;
+      cp_async16(s0 + C::ZOFF + buf * C::ZBUF + kt * C::Z_KT + wkmaj(row, c), src + row * C::D + kt * 32 + c * 8);
+    }
+  };
+  // ---- the packed weights (once) + the first tile
+#pragma unroll
+  for (int e = 0; e < C::NCOL * 8 / C::NTHR; ++e) {
+    const int g = tid + C::NTHR * e, row = g >> 3, kt = (g >> 2) & 1, c = g & 3;
+    cp_async16(s0 + kt * C::W_KT + wkmaj(row, c), p.w1 + (size_t)row * C::D + kt * 32 + c * 8);
+  }
+  int tile = blockIdx.x;
+  if (tile < ntiles) issue_z(tile, 0);
+  cp_async_commit();
+  // lane-constant fragment offsets: A (RP token permutation, as WTile) and B, per k16 step kk (k-tile kk >> 1)
+  const int mi = lane >> 3, r8 = lane & 7;
+  uint32_t aoff[4], boff[4];
+#pragma unroll
+  for (int kk = 0; kk < 4; ++kk) {
+    aoff[kk] = (kk >> 1) * C::Z_KT + wkmaj(32 * wm + 2 * r8 + (mi & 1), 2 * (kk & 1) + (mi >> 1));        // + 1024 per m16 tile
+    boff[kk] = (kk >> 1) * C::W_KT + wkmaj(64 * wn + r8 + (mi >> 1) * 8, 2 * (kk & 1) + (mi & 1));        // + 1024 per n16, + 8192 per n-tile
+  }
+#pragma unroll 1
+  for (int buf = 0; tile < ntiles; tile += gridDim.x, buf ^= 1) {
+    const int t0 = tile * 128;
+    // the next tile into the other buffer (its readers finished before the previous iteration's second barrier)
+    if (tile + (int)gridDim.x < ntiles) issue_z(tile + gridDim.x, buf ^ 1);
+    cp_async_commit();
+    cp_async_wait<1>();
+    __syncthreads();
+    const uint32_t zb = s0 + C::ZOFF + buf * C::ZBUF;
+    if (tid < 128) {   // k1w's STATS statistics: one thread per token row, two passes, the same order
+      float sum = 0.f;
+#pragma unroll
+      for (int kt = 0; kt < 2; ++kt)
+#pragma unroll
+        for (int c = 0; c < 4; ++c) {
+          const uint4 v = lds128(zb + kt * C::Z_KT + wkmaj(tid, c));
+          sum += (bf16lo(v.x) + bf16hi(v.x)) + (bf16lo(v.y) + bf16hi(v.y)) + ((bf16lo(v.z) + bf16hi(v.z)) + (bf16lo(v.w) + bf16hi(v.w)));
+        }
+      const float mean = sum * (1.f / C::D);
+      float q2 = 0.f;
+#pragma unroll
+      for (int kt = 0; kt < 2; ++kt)
+#pragma unroll
+        for (int c = 0; c < 4; ++c) {
+          const uint4 v = lds128(zb + kt * C::Z_KT + wkmaj(tid, c));
+          const uint32_t w[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+          for (int i = 0; i < 4; ++i) { const float a = bf16lo(w[i]) - mean, b = bf16hi(w[i]) - mean; q2 = fmaf(a, a, fmaf(b, b, q2)); }
+        }
+      const float rstd = rsqrtf(q2 * (1.f / C::D) + p.eps);
+      sts64(s0 + C::STOFF + tid * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
+      p.stw[t0 + tid] = make_float2(mean, rstd);
+    }
+    uint32_t af[2][4][4];
+#pragma unroll
+    for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+      for (int kk = 0; kk < 4; ++kk) ldsm_x4(af[mt][kk], zb + aoff[kk] + mt * 1024);
+    __syncthreads();
+    float rs[2][2], mr[2][2], mk[2][2];
+#pragma unroll
+    for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+      for (int rh = 0; rh < 2; ++rh) {
+        const int lt = 32 * wm + 16 * mt + 2 * g8 + rh, tok = t0 + lt;
+        const uint2 u = lds64(s0 + C::STOFF + lt * 8);
+        const float mean = __uint_as_float(u.x), rstd = __uint_as_float(u.y);
+        rs[mt][rh] = rstd; mr[mt][rh] = mean * rstd;
+        float m = 1.f;
+        if (p.mask != nullptr) {
+          const int i = tok / p.L, j = tok - i * p.L;
+          m = (__ldg(p.mask + i) != 0 && __ldg(p.mask + j) != 0) ? 1.f : 0.f;
+        }
+        mk[mt][rh] = m;
+      }
+#pragma unroll 1
+    for (int nt = 0; nt < C::NTN; ++nt) {
+      float acc[2][8][4];
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+        for (int n = 0; n < 8; ++n)
+#pragma unroll
+          for (int e = 0; e < 4; ++e) acc[mt][n][e] = 0.f;
+#pragma unroll
+      for (int kk = 0; kk < 4; ++kk)
+#pragma unroll
+        for (int np = 0; np < 4; ++np) {
+          uint32_t bf[4];
+          ldsm_x4(bf, s0 + boff[kk] + nt * 8192 + np * 1024);
+#pragma unroll
+          for (int mt = 0; mt < 2; ++mt) {
+            mma16816(acc[mt][2 * np], af[mt][kk], bf[0], bf[1]);
+            mma16816(acc[mt][2 * np + 1], af[mt][kk], bf[2], bf[3]);
+          }
+        }
+#pragma unroll
+      for (int np = 0; np < 4; ++np) {
+        const int R = nt * 128 + 64 * wn + 16 * np + 2 * q;
+        const float2 sg = __ldg(reinterpret_cast<const float2*>(p.vs + R)), sp = __ldg(reinterpret_cast<const float2*>(p.vs + R + 8));
+        const float2 bg = __ldg(reinterpret_cast<const float2*>(p.vb + R)), bp = __ldg(reinterpret_cast<const float2*>(p.vb + R + 8));
+        const int ch = nt * 64 + 32 * wn + 8 * np + 2 * q;
+#pragma unroll
+        for (int mt = 0; mt < 2; ++mt) {
+          float u[2][2];
+#pragma unroll
+          for (int rh = 0; rh < 2; ++rh)
+#pragma unroll
+            for (int cc = 0; cc < 2; ++cc) {
+              const float ag = acc[mt][2 * np][2 * rh + cc], ap = acc[mt][2 * np + 1][2 * rh + cc];
+              const float g = fmaf(rs[mt][rh], ag, fmaf(-mr[mt][rh], cc ? sg.y : sg.x, cc ? bg.y : bg.x));
+              const float pp = fmaf(rs[mt][rh], ap, fmaf(-mr[mt][rh], cc ? sp.y : sp.x, cc ? bp.y : bp.x));
+              u[rh][cc] = round_bf16f(fmaf(pp, tanh_approx(g), pp)) * mk[mt][rh];
+            }
+          __nv_bfloat16* o = p.planes + (size_t)ch * p.T + t0 + 32 * wm + 16 * mt + 2 * g8;
+          stg32(o, pack_bf16(u[0][0], u[1][0]));
+          stg32(o + p.T, pack_bf16(u[0][1], u[1][1]));
+        }
+      }
+    }
+  }
+  cp_async_wait<0>();
+}
+
+}  // namespace a100

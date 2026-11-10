@@ -1111,7 +1111,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
     #: ``kernels/integrations/trimul_h100`` (``serves_inference`` / ``update_inference`` without grad or live dropout, else
     #: ``serves_single`` / ``update``), bf16 only.
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cueq": 2, "cuda:a100_sm80": 2}   # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cueq": 2, "cuda:a100_sm80": 3}   # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64)
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         return _trimul_cuda_route(self, pair, mask, dropout_p, bidirectional=False)[1]
@@ -1263,7 +1263,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     #: differ; on an A100 the same on ``kernels/integrations/trimul_sm80``. ``"triton"``: the portable Triton TriMul the same way.
     #: ``"anthropic"``: see the anthropic section below.
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3}   # 2026-11-10: sm_80 paths; 3: the inference pack read by captures
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 4}   # 2026-11-10: sm_80 paths; 3: the inference pack read by captures; 4: A100 D64 persistent front (k1w64)
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         if pair.is_cuda and torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0)):

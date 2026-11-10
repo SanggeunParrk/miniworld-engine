@@ -122,6 +122,19 @@ void wpack(torch::Tensor wl, torch::Tensor wlg, torch::Tensor wr, torch::Tensor 
 }
 
 // --------------------------------------------------------------------------------------------------------------------------------------------- k1w
+// D64 persistent front: grid = the resident CTAs (one occupancy query and smem attribute per HS instantiation)
+template <int HS>
+void launch_k1w64(const a100::K1wParams& p) {
+  static int grid_cap = 0;
+  if (grid_cap == 0) {
+    set_smem(a100::k1w64_kernel<HS>, a100::K1w64<HS>::SMEM);
+    int per_sm = 0;
+    C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, a100::k1w64_kernel<HS>, 256, a100::K1w64<HS>::SMEM));
+    grid_cap = std::max(1, per_sm) * num_sms();
+  }
+  a100::k1w64_kernel<HS><<<std::min(p.T / 128, grid_cap), 256, a100::K1w64<HS>::SMEM, stream()>>>(p);
+}
+
 // z [T, D], w1 [4 Hs, D], vs / vb [4 Hs], st [T, 2], mask [L] uint8 or empty -> planes [2 Hs, T].  fuse (bf16, D <= 128): st is an OUTPUT, the kernel computes (mean, rstd) of the rows
 // itself (eps); otherwise st holds ln_stats_rows' result
 template <bool ROW_MASK>
@@ -150,6 +163,11 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
     static bool set_row = false;
     if (!set_row) { set_smem(a100::k1w_kernel<false, true>, a100::K1wTile::SMEM); set_row = true; }
     a100::k1w_kernel<false, true><<<(T / 128) * (ncol / 128), 128, a100::K1wTile::SMEM, stream()>>>(p);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
+  if (fuse && D == 64 && (ncol == 256 || ncol == 512)) {   // D64: the persistent variant (same planes and statistics, bit for bit)
+    if (ncol == 256) launch_k1w64<64>(p); else launch_k1w64<128>(p);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return;
   }

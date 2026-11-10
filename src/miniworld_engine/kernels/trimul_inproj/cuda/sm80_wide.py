@@ -9,6 +9,8 @@ The width-generic sibling of ``sm80.py`` (whose fused kernels are literals for D
   contraction planes and the gate GEMM of the raw input rows with both LayerNorms folded into the weights; gate, dropout row scale and residual in the epilogue).
   Training saves the planes, the contraction output, both statistics and p' / g' (bf16, the 0.5-scaled units of the fold).  bf16 with a hidden width <= 128 (D64 in both modules, D128
   one direction) computes both statistics inside k1w / k3w from the operand tiles still resident in their rings: the two statistics kernels are not launched.
+  bf16 D64 (hidden 64 or 128) runs k1w as ``k1w64_kernel`` (``wide_k1.cuh``): the same planes and statistics bit for bit, one persistent CTA per resident slot with
+  all packed weights in shared memory and the next token tile's rows double-buffered (the short per-n-tile k1w CTAs were latency-bound at this width).
 * ``supports()`` is the whole gate; everything it rejects keeps the existing path.
 
 Numerics follow the D128 path (``sm80.py``): the same bf16 rounding points, the 0.5 folded into the weights (``sigmoid(g) p = p' (1 + tanh g')``).  fp32 operands run the same stages
