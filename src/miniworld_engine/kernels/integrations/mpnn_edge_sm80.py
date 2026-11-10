@@ -1,10 +1,10 @@
 """Automatic dispatch of the ProteinMPNN encoder edge side to the A100 (sm_80) hand-CUDA kernels (``kernels/mpnn_edge_tail/cuda``): the fused edge tail, the edge MLP, the
 edge LayerNorm's compressed-save backward and the edge dropout's bit-packed mask.
 
-The family interfaces (``kernels/mpnn_edge_*/interface.py``) ask this module whether a call is served: capability exactly 8.0, ``settings.mpnn_edge_sm80`` on, the engine
+The family interfaces (``kernels/mpnn_edge_*/interface.py``) ask this module whether a call is served: capability exactly 8.0, the engine
 backend not forced to Triton, the Triton contract of the family met (``edge_tail_supported`` ...) and the extension loadable (a failed build warns once and keeps the Triton / PyTorch
 path).  On a served call the Triton policies ``triton`` / ``triton_compute`` / ``triton_memory`` / ``memory`` / ``bitpack`` run the CUDA kernels instead (``backend="cuda"`` names
-them explicitly; ``settings.mpnn_edge_sm80=False`` or ``engine_backend="triton"`` give the Triton kernels back).
+them explicitly).
 
 Edge tail contract: bf16 ``[B, T, K, 128]`` edge states, ``[B, T, 128]`` query / neighbour projections, int64 flat neighbour indices, an edge block that is a slice of the packed
 projection (any row stride that is a multiple of 8), hidden / output weights and biases bf16 or fp32 (autocast), LayerNorm affine bf16 or fp32, any K, dropout p in [0, 1).

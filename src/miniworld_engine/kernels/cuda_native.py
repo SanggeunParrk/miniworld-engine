@@ -14,7 +14,6 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
 
@@ -28,7 +27,6 @@ def enabled(x):
     return (
         x.is_cuda
         and x.dtype in (torch.bfloat16, torch.float32)
-        and settings.current().engine_backend != "triton"
         and _ampere(x.device)
     )
 

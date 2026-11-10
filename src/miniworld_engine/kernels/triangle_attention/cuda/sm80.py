@@ -10,15 +10,13 @@ Masked keys carry the bias bf16-min (the module's ``masked_fill``): weight 0; a 
 Triton kernel.
 
 Large masked inference (L >= 768, divisible by 384) uses 48-key tiles, a two-stage K/V ring and a stable device-side key index. Only bias planes are gathered;
-K/V stay in place and padded key loads are zero-filled. Mask packing is part of the measured call. ``settings.triattn_sm80_compact = False``
-retains the dense core. Calls saving log-sum-exp for backward keep the dense schedule.
+K/V stay in place and padded key loads are zero-filled. Mask packing is part of the measured call. Calls saving log-sum-exp for backward keep the dense schedule.
 
 Dense inference at L >= 256 uses 64-query / 64-key tiles and four warps per CTA, with a two-stage K/V ring and a three-CTA
-register budget. ``settings.triattn_sm80_internal = False`` retains the preceding schedule (128 queries, 48 keys at L divisible
-by 384, otherwise 32 keys). ``settings.triattn_sm80_tuned = False`` selects the original 32-key schedule. Training retains its schedule.
+register budget. Training retains its schedule.
 The wide gated path additionally selects dense or compact attention from a device-side live-key count; see ``sm80_wide.py``.
 Inference at L >= 512 can use a fixed first-tile softmax shift, with CTA-local online-softmax recomputation for
-unseeded, zero-sum or non-finite rows. ``settings.triattn_sm80_softmax = False`` retains the preceding online schedule.
+unseeded, zero-sum or non-finite rows.
 Dense and sparse masked calls keep separately tuned geometries; the current mask selects them on device at every replay.
 
 The front (``f1_sm80.cuh``): the input LayerNorm and the q | k | v | g and pair-bias projections in one pass over the pair tensor (the
@@ -40,7 +38,6 @@ Triton path.
 """
 
 import functools
-import hashlib
 import math
 import warnings
 from collections.abc import Sequence
@@ -48,8 +45,6 @@ from pathlib import Path
 
 import torch
 from torch.autograd.function import once_differentiable
-
-from miniworld_engine import settings
 
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
@@ -69,27 +64,18 @@ _TRAIN_FAST = True
 def _forward_entry(ext, save: bool, *, gate: bool = False):
     """Select inference specializations inside the opaque op; training keeps its core."""
     name = "attn_fwd_gate" if gate else "attn_fwd"
-    if save and settings.current().triattn_sm80_softmax and _TRAIN_FAST:
+    if save and _TRAIN_FAST:
         return getattr(ext, name + "_trainfast")  # the fixed-shift core with the log-sum-exp the backward reads
-    if not save and settings.current().triattn_sm80_tuned:
-        name += "_internal" if settings.current().triattn_sm80_internal else "_tuned"
-        if name.endswith("_internal") and settings.current().triattn_sm80_softmax:
-            name = name.removesuffix("_internal") + "_fast"
+    if not save:
+        name += "_fast"  # the 64 x 64 internal schedule with the fixed first-tile softmax shift
     return getattr(ext, name)
 
 
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # settings.triattn_sm80_flags: extra -D / nvcc flags for A/B experiments (their own build)
-    extra = settings.current().triattn_sm80_flags.split()
-    tag = (
-        ""
-        if not extra
-        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
-    )
     return load_extension(
-        name=f"triattn_sm80{tag}",
+        name="triattn_sm80",
         sources=[str(_dir / "ops.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -97,17 +83,10 @@ def _ext():
             "-O3",
             "-gencode=arch=compute_80,code=sm_80",
             f"-I{_dir}",
-            *extra,
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
     )
-
-
-@functools.lru_cache(maxsize=8)
-def _forced_or(forced: bool | None, default: bool) -> bool:
-    """A forced switch (``settings`` field that is None when unset), else the shape-dependent default."""
-    return default if forced is None else forced
 
 
 def _is_ampere(index: int) -> bool:
@@ -139,8 +118,6 @@ def supports(
 ) -> bool:
     """The kernel's own requirements: sm_80, bf16, head dim 32, a square pair stack with L a multiple of 128, q / k / v token-major
     (the layout ``to_query`` / ``to_key`` / ``to_value`` give), bias ``[B, H, L, L]``."""
-    if not settings.current().triattn_sm80:
-        return False
     for t in (query, key, value, bias):
         if not t.is_cuda or t.dtype is not torch.bfloat16:
             return False
@@ -275,14 +252,7 @@ def _compact_attention(
     indices = torch.empty((b, length), dtype=torch.int32, device=q.device)
     counts = torch.empty((b,), dtype=torch.int32, device=q.device)
     compact_bias = torch.empty_like(bias)
-    switches = settings.current()
-    fast = (
-        switches.triattn_sm80_softmax
-        and switches.triattn_sm80_internal
-        and switches.triattn_sm80_tuned
-    )
-    entry = "compact_attention_fast" if fast else "compact_attention"
-    getattr(_ext(), entry)(
+    _ext().compact_attention_fast(
         q, k, v, bias, mask, out, indices, counts, compact_bias, sm_scale * _L2E
     )
     return [out, q.new_empty((0,), dtype=torch.float32)]
@@ -314,7 +284,6 @@ def attention(
         and not save_lse
         and length >= 768
         and length % 384 == 0
-        and settings.current().triattn_sm80_compact
     ):
         out, lse = _compact_attention(
             q,
@@ -347,8 +316,6 @@ def supports_front(
 ) -> bool:
     """The front's requirements: sm_80, a bf16 ``[B, L, L, 128]`` pair stack with L a multiple of 128, ``weights`` = (q, k, v, g) bf16
     ``[128, 128]`` and the bias weight bf16 ``[4, 128]``, 128-channel LayerNorm parameters, a ``[B, L]`` bool key mask if any."""
-    if not settings.current().triattn_sm80:
-        return False
     if (
         not pair.is_cuda
         or pair.dtype is not torch.bfloat16
@@ -555,8 +522,6 @@ BACK_WARPS = 8
 def supports_back(res: torch.Tensor, wo: torch.Tensor) -> bool:
     """The back's requirements: sm_80, the residual ``res`` bf16 contiguous ``[B, L, L, 128]`` with L a multiple of 128 (the attention output and
     the front's gate columns are shaped like it), ``wo`` bf16 ``[128, 128]``."""
-    if not settings.current().triattn_sm80:
-        return False
     if (
         not res.is_cuda
         or res.dtype is not torch.bfloat16
@@ -813,12 +778,9 @@ def _attention_bwd(
     t = b * length * length
     # Isolated query-tile/row-group candidate, qualified before any default use.
     # Eight rows halve bias-gradient partial traffic at the large lengths.
-    dq_flag = settings.current().triattn_sm80_dq_rows
-    native_dq = length in (128, 640, 768) and (
-        dq_flag or (dq_flag is None and length in (640, 768))
-    )
-    dq_cfg = 3 if length == 128 else 2
-    groups = length // (8 if native_dq and length != 128 else DQ_ROWS)
+    native_dq = length in (640, 768)
+    dq_cfg = 2
+    groups = length // (8 if native_dq else DQ_ROWS)
     dbp = torch.empty(
         (groups, b * h, length, length), dtype=torch.bfloat16, device=q.device
     )
@@ -995,12 +957,10 @@ def _front_weight_products(
     front = torch.mm(dqkvg.view(t, QKVG).T, xh2, out_dtype=torch.float32)
     db2 = db.permute(1, 0, 2, 3).reshape(4, t)
     length = dqkvg.shape[1]
-    if length in (384, 512, 768) and _forced_or(
-        settings.current().triattn_sm80_native_db, length == 768
-    ):
+    if length == 768:
         from . import native_db_nn_sm80
 
-        cfg, chunk = {384: (2, 2048), 512: (0, 1024), 768: (0, 2048)}[length]
+        cfg, chunk = 0, 2048
         bias = native_db_nn_sm80.matmul(db2, xh2, cfg, chunk)
     else:
         bias = torch.mm(db2, xh2, out_dtype=torch.float32)
@@ -1059,7 +1019,7 @@ def front_weight_grads(
 def _capture_aware_training_launch(length: int) -> bool | None:
     # This query runs inside the outer opaque launch, never in its fake or
     # Dynamo trace. Replay executes the captured CUDA work without this CPU path.
-    if length in (128, 256) and settings.current().triattn_sm80_train_capture_aware:
+    if length in (128, 256):
         return not torch.cuda.is_current_stream_capturing()
     return None
 
@@ -1068,8 +1028,6 @@ def _training_launch(op, *args, direct: bool | None = None):
     # The outer training custom op already owns the opaque boundary and fresh
     # scratch. Calling its launch bodies avoids registering that scratch through
     # nested custom-op dispatch while keeping the public stage ops unchanged.
-    if direct is None:
-        direct = settings.current().triattn_sm80_train_inner
     if direct:
         return getattr(op, "__wrapped__", op)(*args)
     return op(*args)
@@ -1188,12 +1146,10 @@ def backward_train(
         bool(transposed),
         direct=launch_direct,
     )
-    if length in (640, 768) and _forced_or(
-        settings.current().triattn_sm80_native_wo, length == 768
-    ):
+    if length == 768:
         from . import native_wo_tn_sm80
 
-        cfg, chunk = (3, 4096) if length == 640 else (6, 8192)
+        cfg, chunk = 6, 8192
         d_wo = native_wo_tn_sm80.matmul(dy.view(t, 128), a.view(t, 128), cfg, chunk)
     else:
         d_wo = torch.mm(dy.view(t, 128).T, a.view(t, 128), out_dtype=torch.float32).to(
@@ -1212,11 +1168,7 @@ def backward_train(
         dqkvg,
         direct=launch_direct,
     )
-    if (
-        length == 384
-        and ln_w.dtype == torch.float32
-        and settings.current().triattn_sm80_exact_gamma == "2"
-    ):
+    if length == 384 and ln_w.dtype == torch.float32:
         from . import b1_finalize_exact_sm80
 
         dpair, grads, d_gamma, d_beta = b1_finalize_exact_sm80.gradients(
@@ -1235,47 +1187,22 @@ def backward_train(
             transposed=transposed,
         )
         return [dpair, *grads, d_wo, d_gamma, d_beta]
-    exact_gamma = None
-    if (
-        length == 384
-        and ln_w.dtype == torch.float32
-        and settings.current().triattn_sm80_exact_gamma == "1"
-    ):
-        # Preserve the existing pair derivative while accumulating the scale
-        # derivative from FP32 normalized input before its saved BF16 rounding.
-        from . import b1_gamma_exact_sm80
-
-        dpair, exact_gamma = b1_gamma_exact_sm80.gradients(
-            dqkvg,
-            db,
-            pair,
-            stats,
-            dout.contiguous(),
-            wt,
-            wbt,
-            gamma32,
-            ln_w,
-            transposed=transposed,
-        )
-    else:
-        dpair = _training_launch(
-            _front_bwd,
-            dqkvg,
-            db,
-            pair,
-            stats,
-            dout.contiguous(),
-            wt,
-            wbt,
-            gamma32,
-            bool(transposed),
-            direct=launch_direct,
-        )
+    dpair = _training_launch(
+        _front_bwd,
+        dqkvg,
+        db,
+        pair,
+        stats,
+        dout.contiguous(),
+        wt,
+        wbt,
+        gamma32,
+        bool(transposed),
+        direct=launch_direct,
+    )
     *grads, d_gamma, d_beta = _training_launch(
         _wgrad, dqkvg, db, xh, weights, ln_w, ln_b, direct=launch_direct
     )
-    if exact_gamma is not None:
-        d_gamma = exact_gamma
     return [dpair, *grads, d_wo, d_gamma, d_beta]
 
 

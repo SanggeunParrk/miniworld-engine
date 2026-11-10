@@ -3,7 +3,6 @@
 import functools
 from pathlib import Path
 import torch
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
 from miniworld_engine.kernels.swa_dit.cuda import sm80
@@ -105,7 +104,7 @@ def block(
             qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg
         )
     o, _ = sm80.attn_fwd(
-        qh, kh, vh, seqused, save_lse=not settings.current().a100_cleanup
+        qh, kh, vh, seqused, save_lse=False
     )
     if ffn_kind == "original":
         out, *_ = sm80.ffn_fwd(qf, g, o, mod, wo, wu, wd, b, s, eps, False)
@@ -127,7 +126,6 @@ def eligible(x, c, ap, weights, n_head, half_window):
         or n_head != 4
         or half_window != 64
         or len(ap) != 6
-        or not settings.current().swa_dit_sm80_infer_tuned
     ):
         return False
     if any(

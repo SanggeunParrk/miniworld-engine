@@ -2,7 +2,6 @@
 
 import functools, pathlib
 import torch
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
 from miniworld_engine.kernels.swa_dit.cuda import sm80
@@ -97,7 +96,7 @@ def forward(
             qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg
         )
     o, _ = sm80.attn_fwd(
-        qh, kh, vh, seqused, save_lse=not settings.current().a100_cleanup
+        qh, kh, vh, seqused, save_lse=False
     )
     out = ffn(qf, g, o, mod, wo, wu, wd, s, b, eps, _SELECT[a, s])
     return out.view(a, s, 128)

@@ -2,7 +2,7 @@
 modules that gate an attention output (``SWA3DRoPEAttention``: the output gate before ``out_proj``).
 
 ``serves()`` is the whole gate: A100 (sm_80), the engine's kernel backend not forced to Triton, ``gate`` and ``x`` of one shape and one dtype (bf16 or fp32), a last dimension
-that is a multiple of 8. ``settings.sigmoid_gate_sm80=False`` turns it off (the module then takes the Triton ``sigmoid_gate_fused``). A failed extension build warns once and keeps
+that is a multiple of 8. A failed extension build warns once and keeps
 the old path. One autograd Function whose forward and backward are each one opaque op (``kernels/_compile.opaque``): no Triton, no Inductor kernel, no eager chain.
 """
 
@@ -12,7 +12,6 @@ import warnings
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
 _FAILED = False
@@ -45,11 +44,6 @@ def _loads() -> bool:
 
 
 def serves(gate: torch.Tensor, x: torch.Tensor) -> bool:
-    if (
-        not settings.current().sigmoid_gate_sm80
-        or settings.current().engine_backend == "triton"
-    ):
-        return False
     if (
         not gate.is_cuda
         or gate.dtype not in (torch.bfloat16, torch.float32)

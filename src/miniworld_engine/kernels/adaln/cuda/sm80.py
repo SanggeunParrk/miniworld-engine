@@ -12,12 +12,10 @@ Rows are fp32 or bf16 (statistics and sums always fp32), widths 128 / 384 / 768.
 from __future__ import annotations
 
 import functools
-import hashlib
 from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent / "sm80"
@@ -30,15 +28,8 @@ WIDTHS = tuple(ROWS_PER_BLOCK)
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # settings.adaln_sm80_flags: extra -D / nvcc flags for A/B experiments (their own build)
-    extra = settings.current().adaln_sm80_flags.split()
-    tag = (
-        ""
-        if not extra
-        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
-    )
     return load_extension(
-        name=f"adaln_sm80{tag}",
+        name="adaln_sm80",
         sources=[str(_dir / "ops.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -49,7 +40,6 @@ def _ext():
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             "-gencode=arch=compute_80,code=sm_80",
             f"-I{_dir}",
-            *extra,
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
@@ -75,7 +65,7 @@ def blocks_for(rows: int, width: int, device: torch.device) -> int:
 
 #: the warp-per-row kernels (``adaln_rows.cuh``): warps (rows) per block, and blocks per SM of the column-sum kernels (each block leaves one row of the partial buffer)
 WARPS_PER_BLOCK = 4
-WARP_BLOCKS_PER_SM = settings.current().adaln_warp_blocks
+WARP_BLOCKS_PER_SM = 4
 
 
 def warp_blocks_for(rows: int, device: torch.device) -> int:
@@ -172,7 +162,6 @@ def atom_supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
         and cond.dtype is torch.bfloat16
         and x.shape[-1] == ATOM_WIDTH
         and cond.shape[-1] == ATOM_WIDTH
-        and settings.current().adaln_atom
     )
 
 
@@ -198,9 +187,7 @@ def atom_fwd(
         if stats
         else None
     )
-    if cfg is None:
-        cfg = settings.current().adaln_atom_cfg
-    if cfg < 0:
+    if cfg is None or cfg < 0:
         cfg = (
             ATOM_FWD_PREFETCH_CFG
             if (m >= ATOM_FWD_PREFETCH_ROWS or m < ATOM_FWD_SMALL_ROWS)
@@ -219,8 +206,6 @@ def atom_tf32_supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
         and cond.dtype is torch.float32
         and x.shape[-1] == ATOM_WIDTH
         and cond.shape[-1] == ATOM_WIDTH
-        and settings.current().adaln_atom
-        and settings.current().adaln_atom_tf32
     )
 
 

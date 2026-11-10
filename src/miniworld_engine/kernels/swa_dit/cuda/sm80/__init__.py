@@ -14,12 +14,10 @@ Written for sm_80 (``mma.sync.m16n8k16`` bf16, ``ldmatrix``, ``cp.async``), d_at
 from __future__ import annotations
 
 import functools
-import hashlib
 from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent
@@ -30,15 +28,8 @@ C, H, D, NHID, HW = 128, 4, 32, 256, 64
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # settings.swa_dit_sm80_flags: extra -D / nvcc flags for A/B experiments (their own build)
-    extra = settings.current().swa_dit_sm80_flags.split()
-    tag = (
-        ""
-        if not extra
-        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
-    )
     return load_extension(
-        name=f"swa_dit_sm80{tag}",
+        name="swa_dit_sm80",
         sources=[str(_dir / "ops.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -47,7 +38,6 @@ def _ext():
             "-gencode=arch=compute_80,code=sm_80",
             f"-I{_dir}",
             "-Xcompiler=-fno-gnu-unique",
-            *extra,
         ],
         extra_cflags=["-std=c++17", "-O3", "-fno-gnu-unique"],
         verbose=False,
@@ -101,9 +91,7 @@ def attn_bwd(
 
 
 def window_supported(q: torch.Tensor, n_heads: int, half_window: int) -> bool:
-    """Whether the window attention of ``modules/swa_atom_attention`` ([N, S, H, D] q) runs on these kernels: an A100, 4 heads x 32, half window 64 (``settings.swa_dit_sm80=False`` keeps flash)."""
-    if not settings.current().swa_dit_sm80:
-        return False
+    """Whether the window attention of ``modules/swa_atom_attention`` ([N, S, H, D] q) runs on these kernels: an A100, 4 heads x 32, half window 64."""
     if (
         not q.is_cuda
         or q.dim() != 4
@@ -229,7 +217,6 @@ def ffn_fwd(
         and m == 48 * s
         and b == 48
         and s in (4096, 8192)
-        and settings.current().swa_dit_sm80_ffn_tuned
     ):
         from ..ffn_fwd_tuned_sm80 import ffn_forward
 
@@ -483,9 +470,7 @@ def _capability(index: int) -> tuple[int, int]:
 
 def supported(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> bool:
     """Whether these kernels serve a forward / backward call: an A100 (cc 8.0), a bf16 ``q`` [N, S, 128], SwiGLU hidden 256, half window 64 (the fp32 eps is the contract of the
-    block).  ``settings.swa_dit_sm80=False`` keeps the Triton stages."""
-    if not settings.current().swa_dit_sm80:
-        return False
+    block)."""
     if (
         not q.is_cuda
         or q.dtype != torch.bfloat16
@@ -528,7 +513,7 @@ def block_fwd(
         qf, mod, cos2, sin2, wqkv, wg, b, s, eps, qk_eps, save
     )
     o, lse = attn_fwd(
-        qh, kh, vh, seqused, save_lse=save or not settings.current().a100_cleanup
+        qh, kh, vh, seqused, save_lse=save
     )
     out, q1s, atts, ys, ffs = ffn_fwd(qf, g, o, mod, wo, wu, wd, b, s, eps, save)
     outputs = [out.view(n, s, C)]

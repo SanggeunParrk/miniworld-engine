@@ -2,9 +2,10 @@
 
 import functools
 from pathlib import Path
+
 import torch
-from miniworld_engine import settings
-from ..._compile import opaque, device_constant
+
+from ..._compile import device_constant, opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 
 
@@ -33,8 +34,7 @@ def _ready():
 
 def supports(reference):
     return (
-        settings.current().dropout_scale_sm80
-        and reference.is_cuda
+        reference.is_cuda
         and reference.dtype in (torch.bfloat16, torch.float32)
         and torch.cuda.get_device_capability(reference.device) == (8, 0)
         and _ready()

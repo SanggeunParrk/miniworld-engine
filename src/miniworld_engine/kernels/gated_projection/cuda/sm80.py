@@ -6,7 +6,7 @@
 * ``sigmoid_gate_fused(gate, out)`` / ``gated_residual(x, gate, branch)``: the one-pass elementwise gates, forward and backward.
 * the triangle-multiplication stages ``tm1`` / ``tm2`` are in ``kernels/tm1/cuda`` and ``kernels/tm2/cuda`` (one extension, this one).
 
-Gate: sm_80, bf16, ``d_hidden`` and ``d_out`` multiples of 64, the engine backend not forced to Triton; ``settings.gated_sm80=0`` turns it off.  The GEMM tile is the
+Gate: sm_80, bf16, ``d_hidden`` and ``d_out`` multiples of 64, the engine backend not forced to Triton.  The GEMM tile is the
 TriMul's (``kernels/trimul_inproj/cuda/sm80/wide_gemm.cuh``).
 """
 
@@ -15,8 +15,6 @@ import warnings
 from pathlib import Path
 
 import torch
-
-from miniworld_engine import settings
 
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
@@ -85,15 +83,9 @@ def shape_ok(dtype, d_hidden: int, d_out: int) -> bool:
     )
 
 
-def enabled() -> bool:
-    return (
-        settings.current().gated_sm80 and settings.current().engine_backend != "triton"
-    )
-
-
 def serves(d_hidden: int, d_out: int, device: torch.device, dtype) -> bool:
     """The gate of ``fused_gate_out`` (a pure function of the shape, the dtype and the card, so the dispatch can fold it at trace time)."""
-    if not enabled() or not shape_ok(dtype, d_hidden, d_out) or device.type != "cuda":
+    if not shape_ok(dtype, d_hidden, d_out) or device.type != "cuda":
         return False
     return (
         _is_ampere(
@@ -106,7 +98,7 @@ def serves(d_hidden: int, d_out: int, device: torch.device, dtype) -> bool:
 def serves_elementwise(*tensors: torch.Tensor) -> bool:
     """The one-pass gates: bf16 contiguous CUDA tensors of one shape on an sm_80 card."""
     t0 = tensors[0]
-    if not enabled() or not t0.is_cuda or t0.dtype is not torch.bfloat16:
+    if not t0.is_cuda or t0.dtype is not torch.bfloat16:
         return False
     if any(
         t.shape != t0.shape or t.dtype is not t0.dtype or t.device != t0.device

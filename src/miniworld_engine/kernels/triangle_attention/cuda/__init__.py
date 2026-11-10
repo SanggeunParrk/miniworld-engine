@@ -60,7 +60,7 @@ def prebuild(target, rows):
 def _sm80(rows):
     """The A100 builds (``kernels/integrations/triattn_sm80``) for the bf16 / master TriangleAttention rows whose geometry the A100 path takes
     (heads of 16 / 32 channels): the core extension (``sm80``: the fused d_pair-128 path and the core of the wide path), the wide path's
-    row kernels (``sm80_wide``), the 16-channel-head core (``sm80_core2``), and the shape-gated helpers the default settings reach (the
+    row kernels (``sm80_wide``), the 16-channel-head core (``sm80_core2``), and the shape-gated helpers the A100 path reaches (the
     training front / backward pieces at their lengths, the d_pair-256 fused output at L128)."""
     from miniworld_engine.kernels._prebuild import _kv
 

@@ -1,7 +1,7 @@
 """Which implementation serves the gated projections: the A100 hand-CUDA kernels (``cuda/sm80.py``) where their gate takes the call, the Triton kernels otherwise.
 
 ``fused_gate_out`` (``(sigmoid(gate) * out_r) @ wo^T``, the registry's ``gated_linear``), ``sigmoid_gate_fused`` (the one-pass gate) and ``gated_residual`` keep their names and
-contracts; ``settings.gated_sm80=0`` or an engine backend forced to Triton keeps the Triton kernels.
+contracts.
 """
 
 from __future__ import annotations

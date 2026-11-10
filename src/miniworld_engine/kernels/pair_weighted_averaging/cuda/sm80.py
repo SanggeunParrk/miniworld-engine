@@ -127,7 +127,7 @@ def pair_fwd(
 def pick_split(depth: int) -> int:
     """The number of chunks the MSA rows are split in for the cuBLAS contractions (head-major tensors [8 ns, L, S C / ns]: one batch per chunk).  o = w v and dv = w^T dO run 15-20 %
     faster as 8 ns short batches than as 8 long ones, and the weight-gradient product dw = dO v^T (K = S C) 20-30 % (its fp32 partials are summed by ``pair_bwd``): 4 when S is a
-    multiple of 512, 2 when it is a multiple of 256, else 1 (8 is not better: the partials of dw double).  ``settings.pwa_sm80_split=<n>`` forces n (1: off; 8 allowed)."""
+    multiple of 512, 2 when it is a multiple of 256, else 1 (8 is not better: the partials of dw double)."""
     forced = None
     if forced is not None:
         n = forced

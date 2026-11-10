@@ -6,14 +6,13 @@ Two whole-module paths, picked by the module's geometry:
 
   * ``fused``: d_pair 128, 4 heads x 32 (``sm80.py``): the front, the core and the back are three persistent kernels with the weights resident in shared memory;
   * ``wide``: every other width the model code uses (``sm80_wide.py``): d_pair 64 .. 512 (a multiple of 64), 1 .. 16 heads of 16 or 32 channels: hand-CUDA row kernels around cuBLAS GEMMs
-    and the same core.  ``settings.triattn_sm80_wide = True`` makes d_pair 128 take this path too (tests, A/B).
+    and the same core.
 """
 
 from __future__ import annotations
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 
 
@@ -69,11 +68,7 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None):
     d_hidden, d_pair = module.to_query.weight.shape
     if pair.shape[-1] != d_pair:
         return None
-    if (d_pair, d_hidden, module.n_head) == (
-        128,
-        128,
-        4,
-    ) and not settings.current().triattn_sm80_wide:
+    if (d_pair, d_hidden, module.n_head) == (128, 128, 4):
         return ("fused", None)
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
 
@@ -106,8 +101,6 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: boo
     """Why the A100 path cannot take this call of ``module`` (a ``_TriangleAttentionBase``), or ``None``. ``train``: the autograd path
     (``forward_train``: gradients or the live dropout), else the inference path (``forward``). Shapes / dtypes / flags, then the kernels'
     own gates (which build or load the extensions)."""
-    if not settings.current().triattn_sm80:
-        return "settings.triattn_sm80 is off"
     if not module.use_self_attention:
         return "bias-only attention (use_self_attention=False) is not part of the A100 kernels"
     if module.use_qk_norm:

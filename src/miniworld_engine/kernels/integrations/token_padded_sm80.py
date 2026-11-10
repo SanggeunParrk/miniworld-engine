@@ -9,8 +9,6 @@ literal original DiT fallback.  This source makes no runtime qualification.
 
 import torch
 
-from miniworld_engine import settings
-
 
 def _typed_eligible(module, single, cond, pair, mask, compute_dtype):
     from miniworld_engine.modules.augmented_attention.module import (
@@ -28,7 +26,7 @@ def _typed_eligible(module, single, cond, pair, mask, compute_dtype):
         or type(module.transition) is not ConditionedTransition
     ):
         return False
-    if torch.is_grad_enabled() or settings.current().engine_backend == "triton":
+    if torch.is_grad_enabled():
         return False
     if (
         module.attention._backend != KernelBackend.TRITON

@@ -8,16 +8,13 @@ attention core: the ``t`` slices are the SAMPLES of ``kernels/bias_only_dit/cuda
     backward  P and P^T (``softmax_t``);  dv = P^T dout (the same core on the transposed P);  D[t, h, m] = sum_d dout out (``delta_planes``);
               dbias[h, m, n] = P (sum_t dout v^T - sum_t D)  (``dpb_planes``: the sum over t is the K loop of one GEMM per plane, so dbias needs no per-t partials)
 
-``serves`` is the gate: A100 (sm_80), bf16, v ``[B, H, L, L, D]`` with D 32 / 48 / 64 and L a multiple of 128 up to 1024, bias ``[B, H, L, L]``; ``settings.bias_only_attn_sm80 = False`` turns the
-path off (the family's ``bias_only_attention`` door then takes Triton). One autograd Function whose forward and backward are each one opaque op.
+``serves`` is the gate: A100 (sm_80), bf16, v ``[B, H, L, L, D]`` with D 32 / 48 / 64 and L a multiple of 128 up to 1024, bias ``[B, H, L, L]`` (the family's ``bias_only_attention`` door takes Triton otherwise). One autograd Function whose forward and backward are each one opaque op.
 """
 
 from __future__ import annotations
 
-
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
 HEAD_DIMS = (32, 48, 64)
@@ -25,8 +22,7 @@ HEAD_DIMS = (32, 48, 64)
 
 def serves(v: torch.Tensor, bias: torch.Tensor) -> bool:
     if (
-        settings.current().bias_only_attn_sm80 == "0"
-        or not v.is_cuda
+        not v.is_cuda
         or v.dtype is not torch.bfloat16
         or bias.dtype is not torch.bfloat16
     ):
@@ -48,7 +44,7 @@ def serves(v: torch.Tensor, bias: torch.Tensor) -> bool:
 
 
 #: a training call (autograd on) below this L keeps the Triton kernels: at L = 128 the CUDA backward (softmax, two cores, the row term, the bias-gradient core) loses to Triton (0.172 against 0.109 ms, 2026-10-04,
-#: ``bench.py target=bias_only_attention``); every other L wins (training 1.7-5.2x Triton from L = 256, inference at every L).  ``settings.bias_only_attn_sm80=all`` takes every call ``serves`` accepts.
+#: ``bench.py target=bias_only_attention``); every other L wins (training 1.7-5.2x Triton from L = 256, inference at every L).
 MIN_TRAIN_LENGTH = 256
 
 
@@ -56,8 +52,6 @@ def wanted(v: torch.Tensor, bias: torch.Tensor) -> bool:
     """The door's choice: ``serves`` and not a small training call (see ``MIN_TRAIN_LENGTH``)."""
     if not serves(v, bias):
         return False
-    if settings.current().bias_only_attn_sm80 == "all":
-        return True
     return not (
         torch.is_grad_enabled()
         and (v.requires_grad or bias.requires_grad)

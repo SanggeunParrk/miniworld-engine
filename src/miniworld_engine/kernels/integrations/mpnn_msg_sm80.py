@@ -2,7 +2,7 @@
 relative-position embedding backward (``mpnn_relative_position``).
 
 The three kernel families keep their Triton paths and their PyTorch references; their ``interface.py`` asks this module first and, on an A100 (capability exactly 8.0, the engine backend not forced to
-Triton, ``settings.mpnn_msg_sm80`` on) for the shapes / dtypes below, runs the CUDA kernels of ``kernels/<family>/cuda/sm80*`` instead of the Triton ones.  A failed extension build warns once and keeps the
+Triton) for the shapes / dtypes below, runs the CUDA kernels of ``kernels/<family>/cuda/sm80*`` instead of the Triton ones.  A failed extension build warns once and keeps the
 old path.  Every public entry returns what its Triton twin returns and keeps its autograd contract: training is an ``autograd.Function`` whose forward and backward are each one opaque op (``torch.compile``
 (fullgraph) and CUDA-graph capture work; no host sync); parameter gradients come back in the parameters' dtype; reductions are deterministic (no atomics anywhere in these paths).
 

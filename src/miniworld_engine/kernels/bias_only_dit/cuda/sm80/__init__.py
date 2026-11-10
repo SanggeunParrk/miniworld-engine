@@ -12,14 +12,13 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent
 #: head widths the kernel is instantiated for
 HEAD_WIDTHS = (32, 48, 64)
-#: depth of the cp.async ring (settings.bias_only_dit_sm80_stages overrides it, for A/B runs)
-STAGES = settings.current().bias_only_dit_sm80_stages
+#: depth of the cp.async ring
+STAGES = 2
 
 
 @functools.lru_cache(maxsize=1)
@@ -44,9 +43,6 @@ def pick_group(S: int, L: int, nh: int, nsm: int) -> int:
     """Samples per CTA (1 .. 4): the fewest CTAs that still fill the card -- a group reads P once for all its samples, and a CTA alone on its SM is request-bound -- i.e. the smallest g with
     ``nh (L / 128) ceil(S / g) <= nsm``, else 2 when even that leaves a second wave (A = 48, 16 x 48: 149 / 458 us at L = 384 / 768 against 171 / 502 us for 4: the smaller group's registers
     let two CTAs share an SM; A = 5, L = 768 is within 1 % of 4 either way)."""
-    forced = settings.current().bias_only_dit_sm80_sg
-    if forced is not None:
-        return max(1, min(forced, 4))
     tiles = nh * (L // 128)
     for g in (1, 2, 3, 4):
         if tiles * -(-S // g) <= nsm:
@@ -91,7 +87,7 @@ class PvGate:
         return out
 
 
-#: m16 tiles per warp of the TF32 core (settings-free experiment knob)
+#: m16 tiles per warp of the TF32 core
 MT32 = 1
 
 
@@ -132,8 +128,8 @@ class PvGateTF32:
         return out
 
 
-#: schedule of the bias-gradient core (``dpb``): 0 two stages x one sample with two CTAs per SM, 1 three x one, 2 two x two, 3 three x two (settings.bias_only_dit_sm80_dpb overrides)
-DPB_CFG = settings.current().bias_only_dit_sm80_dpb
+#: schedule of the bias-gradient core (``dpb``): 0 two stages x one sample with two CTAs per SM, 1 three x one, 2 two x two, 3 three x two
+DPB_CFG = 0
 
 
 class Dpb:
@@ -163,7 +159,7 @@ class Dpb:
             A,
             self.nh,
             self.dh,
-            (DPB_CFG or 0) if cfg is None else cfg,
+            DPB_CFG if cfg is None else cfg,
         )
         return out
 
@@ -235,6 +231,6 @@ def dpb_planes(
 ) -> torch.Tensor:
     """``out [planes L, L] = P (sum_a do v^T - D)`` per head plane, ``D[h, i] = sum_a dd[a, h, i]``: ``do`` / ``v`` bf16 ``[planes samples L, dh]``, ``P`` / ``out`` bf16 ``[planes L, L]``."""
     _ext().dpb_planes(
-        do, v, P, dd, out, samples, planes, dh, (DPB_CFG or 0) if cfg is None else cfg
+        do, v, P, dd, out, samples, planes, dh, DPB_CFG if cfg is None else cfg
     )
     return out

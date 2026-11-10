@@ -1,6 +1,6 @@
 """``ops.layer_norm_linear``: the fused ``Linear(LayerNorm(x))`` to a few outputs, one entry for every backend.
 
-On an A100 (sm_80) bf16 activations run the hand-CUDA kernels (``cuda/sm80.py``; inference and training, ``settings.lnlinear_sm80=0`` turns them off); everything else -- other
+On an A100 (sm_80) bf16 activations run the hand-CUDA kernels (``cuda/sm80.py``; inference and training); everything else -- other
 GPUs, fp32 activations, widths or output counts the kernels do not instantiate, an engine backend forced to Triton -- runs the Triton op (``triton/pair_bias.py``) unchanged.
 """
 

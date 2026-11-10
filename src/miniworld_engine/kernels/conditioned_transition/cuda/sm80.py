@@ -10,12 +10,10 @@ Rows are fp32 or bf16.  Built on first use (``load_extension``), never at import
 from __future__ import annotations
 
 import functools
-import hashlib
 from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 from ...adaln.cuda.sm80 import ROWS_PER_BLOCK, WIDTHS, blocks_for
 
@@ -26,15 +24,8 @@ _adaln_dir = Path(__file__).parents[2] / "adaln" / "cuda" / "sm80"  # adaln_comm
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # settings.condtrans_sm80_flags: extra -D / nvcc flags for A/B experiments (their own build)
-    extra = settings.current().condtrans_sm80_flags.split()
-    tag = (
-        ""
-        if not extra
-        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
-    )
     return load_extension(
-        name=f"conditioned_transition_sm80{tag}",
+        name="conditioned_transition_sm80",
         sources=[str(_dir / "ops.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -46,7 +37,6 @@ def _ext():
             "-gencode=arch=compute_80,code=sm_80",
             f"-I{_dir}",
             f"-I{_adaln_dir}",
-            *extra,
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
@@ -106,7 +96,6 @@ def atom_supported(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor) -> boo
         and x.shape[-1] == 128
         and cond.shape[-1] == 128
         and tuple(wa.shape) == (256, 128)
-        and settings.current().condtrans_atom
     )
 
 
@@ -176,8 +165,6 @@ def atom_tf32_supported(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor) -
         and x.shape[-1] == 128
         and cond.shape[-1] == 128
         and tuple(wa.shape) == (256, 128)
-        and settings.current().condtrans_atom
-        and settings.current().condtrans_atom_tf32
     )
 
 

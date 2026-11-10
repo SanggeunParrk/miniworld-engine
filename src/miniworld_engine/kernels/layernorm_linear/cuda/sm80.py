@@ -6,7 +6,7 @@
 ``sm80/lnl_sm80.cuh``: the forward is one warp per tile of 16 rows with the rows read straight into the ``mma.sync`` A fragments (the LayerNorm on the registers, bf16(n) as the
 operand, fp32 accumulation, bf16 output; training also saves the statistics and the fp32 result ``u``); the backward is slice-local given the saved statistics (``dxn = dout W`` on the
 tensor cores, ``dx`` from the two row sums ``dout . (W gamma)`` and ``dout . u``, the weight and scale gradients from ``Gn = dout^T xhat`` accumulated on the tensor cores and summed in
-a fixed order): one pass over ``x`` in each direction.  ``settings.lnlinear_sm80=0`` keeps the Triton kernels.
+a fixed order): one pass over ``x`` in each direction.
 """
 
 import functools
@@ -15,8 +15,6 @@ from pathlib import Path
 
 import torch
 from torch.autograd.function import once_differentiable
-
-from miniworld_engine import settings
 
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
@@ -77,12 +75,7 @@ def _is_ampere(index: int) -> bool:
 
 def serves(x: torch.Tensor, ln_weight: torch.Tensor, proj_weight: torch.Tensor) -> bool:
     """The path's whole gate: sm_80, bf16 activations ``[..., d]`` (d = 16 or 64 .. 512, see ``WIDTHS``), a bf16 projection weight ``[n_head, d]`` with 1 .. 16 rows, a LayerNorm scale
-    ``[d]`` in fp32 or bf16, fewer than 2^31 rows, the engine's backend not forced to Triton, ``settings.lnlinear_sm80`` not 0."""
-    if (
-        not settings.current().lnlinear_sm80
-        or settings.current().engine_backend == "triton"
-    ):
-        return False
+    ``[d]`` in fp32 or bf16, fewer than 2^31 rows."""
     if not x.is_cuda or x.dtype is not BF or x.ndim < 2 or x.numel() == 0:
         return False
     d = x.shape[-1]

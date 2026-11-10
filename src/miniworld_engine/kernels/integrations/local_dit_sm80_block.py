@@ -12,7 +12,7 @@ The row kernels (``kernels/augmented_attention/cuda/sm80_atom_rows``: conditioni
 same parameter order (``WEIGHTS`` / ``CROSS_WEIGHTS``) and the same activation save list.
 
 ``serves()`` is the whole gate: A100, the engine's kernel backend (implementation MINIWORLD or TRITON), bf16 single / cond / pair, the atom widths (d_single = d_cond = 128,
-4 heads x 32, d_pair = 16, transition n = 2, no QK-norm), B == 1, any N, a [1, N] bool key mask or none, LayerNorm eps 1e-5. ``settings.local_dit_sm80_rows=0`` turns it off.
+4 heads x 32, d_pair = 16, transition n = 2, no QK-norm), B == 1, any N, a [1, N] bool key mask or none, LayerNorm eps 1e-5.
 Parameters may be bf16 or fp32 (an fp32 master under autocast); the kernels run on bf16 packs of them, packed once per set of weights (tensor objects and versions) and
 scoped to a CUDA-graph capture; gradients come back in the parameter's dtype.
 """
@@ -26,7 +26,6 @@ from types import SimpleNamespace
 import torch
 from torch.autograd.function import once_differentiable
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.kernels.integrations.local_dit import (
@@ -73,11 +72,7 @@ def _ready(index: int) -> bool:
 
 
 def serves(module, single, cond, pair, mask) -> bool:
-    if (
-        _FAILED
-        or not settings.current().local_dit_sm80_rows
-        or settings.current().engine_backend == "triton"
-    ):
+    if _FAILED:
         return False
     a, tr = module.attention, module.transition
     if a.use_qk_norm:
@@ -301,11 +296,6 @@ def _weights_bwd(weights):
 _HOIST_COND: dict = {}  # (conditioning tensor, weights) -> mod: the per-item conditioning table of an inference call
 _HOIST_BIAS: dict = {}  # (pair tensor, LN / bias weights) -> the windowed pair bias
 
-
-def _hoisting() -> bool:
-    return settings.current().local_dit_hoist
-
-
 def _tkey(t):
     """A tensor's identity for a cache key: storage address, in-place version, shape, dtype, device."""
     return (t.data_ptr(), t._version, tuple(t.shape), t.dtype, t.device)
@@ -397,7 +387,7 @@ def _block_fwd(
         def make_bias():
             return local.pair_bias_fwd(pair[0], weights[_GAMMA], weights[_WBIAS])
 
-        if save or not _hoisting():
+        if save:
             mod, bias = make_mod(), make_bias()
         else:  # an inference call: both tables depend on one input tensor and the weights only (a sampler's steps share them)
             wkey = tuple((x.data_ptr(), x._version) for x in weights)

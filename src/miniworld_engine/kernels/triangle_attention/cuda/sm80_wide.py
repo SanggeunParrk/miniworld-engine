@@ -5,7 +5,7 @@ same ``sm80/attn_*_sm80.cuh`` kernels, head dim 32, any head count, reading q / 
 
   * ``fused`` (d_pair 64 or 128 with 2 or 4 heads of 32, i.e. hidden 64 / 128; ``sm80/fused_sm80.cuh``): the d_pair-128 kernels with the widths as template parameters.  The front
     (LayerNorm + q | k | v | g + bias projections in one pass), the back (gate + output projection + residual) and their backward are persistent kernels with the weights resident in
-    shared memory.  ``settings.triattn_sm80_rows = True`` takes the other engine at these widths (A/B).
+    shared memory.
   * ``rows`` (every other width, the weights of d_pair 256 are 528 KiB): hand-CUDA row kernels (``sm80/rows_sm80.cuh``) around cuBLAS GEMMs.
         front   ``ln_rows`` (the input LayerNorm -> the normalised input ``xh`` [T, D + 8]; a constant column pair carries the folded shift), ONE GEMM against the packed
                 ``[W diag(gamma) | b_hi | b_lo]`` -> q | k | v | g | bias heads [T, 4 H 32 + Hpad], ``bias_planes`` (the head planes, masked keys = bf16 min)
@@ -29,8 +29,6 @@ from typing import NamedTuple
 
 import torch
 from torch.autograd.function import once_differentiable
-
-from miniworld_engine import settings
 
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
@@ -89,11 +87,7 @@ def cfg_for(d_pair: int, d_hidden: int, n_head: int) -> Cfg | None:
     hd = d_hidden // n_head
     if hd not in (16, 32) or d_pair % 64 or not 64 <= d_pair <= MAX_D:
         return None
-    fused = (
-        d_pair in (64, 128)
-        and n_head in (2, 4)
-        and not settings.current().triattn_sm80_rows
-    )
+    fused = d_pair in (64, 128) and n_head in (2, 4)
     return Cfg(d_pair, n_head, hd, fused)
 
 
@@ -166,10 +160,6 @@ def loads(cfg: Cfg) -> bool:
     return _loads_native() if cfg.native else _loads()
 
 
-def enabled() -> bool:
-    return settings.current().triattn_sm80
-
-
 def supports(
     pair: torch.Tensor,
     cfg: Cfg | None,
@@ -184,7 +174,7 @@ def supports(
     """The path's requirements: sm_80, a bf16 contiguous ``[B, L, L, D]`` pair stack with L a multiple of 128, bf16 weights (q / k / v / g ``[H hd, D]``, bias ``[H, D]``, ``wo``
     ``[D, H hd]``), LayerNorm parameters ``[D]`` in fp32 or bf16, a ``[B, L]`` bool key mask if any; for ``train`` the attention backward's bias-gradient partials must fit
     ``sm80_core2.MAX_DBP_BYTES`` (they are cubic in L)."""
-    if cfg is None or not enabled():
+    if cfg is None:
         return False
     if (
         not pair.is_cuda
@@ -255,19 +245,16 @@ def _pack_folded(
     ``b = W beta`` split into two bf16; then the bias heads' rows (padded to 8).  Never cached: a captured CUDA graph must repack after an optimizer step."""
     count = 4 * cfg.dhp + cfg.hpad
     wp = torch.empty((columns or count, cfg.d + padding), dtype=BF, device=ln_w.device)
-    clean = settings.current().a100_cleanup
     _rows().w_pack(
         *(w.contiguous() for w in weights),
         ln_w.detach().float().contiguous(),
         ln_b.detach().float().contiguous(),
-        wp if clean else wp[:count],
+        wp,
         cfg.d,
         cfg.h,
         cfg.hd,
         1,
     )
-    if not clean and wp.shape[0] > count:
-        wp[count:].zero_()
     return wp
 
 
@@ -416,7 +403,6 @@ def _original_forward_ops(
                     or ((d, cfg.h, cfg.hd, length) == (256, 8, 32, 256))
                     or ((d, cfg.h, cfg.hd, length) == (256, 8, 32, 384))
                 )
-                and settings.current().triattn_sm80_gemm_pad
             )
             else 8
         )
@@ -462,7 +448,7 @@ def _original_forward_ops(
                 b,
                 16,
                 1.0 / math.sqrt(hd),
-                fixed=settings.current().triattn_sm80_softmax,
+                fixed=True,
             )
         else:
             fwd = _core._forward_entry(core, save)
@@ -508,20 +494,12 @@ def _original_forward_ops(
             and mask.numel()
             and length >= 384
             and length % 384 == 0
-            and settings.current().triattn_sm80_internal
-            and settings.current().triattn_sm80_tuned
-            and settings.current().triattn_sm80_compact
         ):
             indices = torch.empty((b, length), dtype=torch.int32, device=dev)
             counts = torch.empty((b,), dtype=torch.int32, device=dev)
             compact_bias = torch.empty_like(bias)
             shape = (b, length, length, dhp)
-            entry = (
-                "compact_attention_gate_fast"
-                if settings.current().triattn_sm80_softmax
-                else "compact_attention_gate"
-            )
-            getattr(core, entry)(
+            core.compact_attention_gate_fast(
                 q.view(shape),
                 k.view(shape),
                 v.view(shape),
@@ -540,20 +518,14 @@ def _original_forward_ops(
                 q, k, v, bias, o, lse, g, a, length, cfg.h, b, n, n, n, dhp, n, dhp, scl
             )
         out = torch.empty_like(x)
-        native_out = settings.current().triattn_sm80_native_out
         if (
             not save
             and (d, cfg.h, hd) == (256, 8, 32)
-            and length in (128, 256, 384, 512, 640, 768)
-            and (native_out or (native_out is None and length == 128))
+            and length == 128
         ):
             from . import native_out_fused_sm80
 
-            out_cfg = (
-                {128: 4, 256: 4, 384: 13, 512: 4, 640: 13, 768: 13}
-                if transposed
-                else {128: 14, 256: 4, 384: 4, 512: 4, 640: 13, 768: 14}
-            )[length]
+            out_cfg = 4 if transposed else 14
             native_out_fused_sm80.run(
                 a,
                 _wo_padded(wo, cfg),
@@ -567,7 +539,6 @@ def _original_forward_ops(
         elif (
             not save
             and not ds.numel()
-            and settings.current().triattn_sm80_out_lt
             and rows.out_gemm_residual(
                 a, _wo_padded(wo, cfg), x2, out.view(t, d), length, int(transposed)
             )
@@ -648,14 +619,7 @@ def _accurate_training_forward_ops(
             cfg.lhd,
         )
     else:
-        padding = (
-            32
-            if not save
-            and d == 256
-            and (length >= 512)
-            and (settings.current().triattn_sm80_gemm_pad)
-            else 8
-        )
+        padding = 32 if not save and d == 256 and length >= 512 else 8
         if padding == 32:
             n = -(-n // 32) * 32
         wp = _pack_folded(weights, ln_w, ln_b, cfg, padding, n)
@@ -696,7 +660,7 @@ def _accurate_training_forward_ops(
                 b,
                 16,
                 1.0 / math.sqrt(hd),
-                fixed=settings.current().triattn_sm80_softmax,
+                fixed=True,
             )
         else:
             fwd = _core._forward_entry(core, save)
@@ -741,20 +705,12 @@ def _accurate_training_forward_ops(
             and mask.numel()
             and (length >= 384)
             and (length % 384 == 0)
-            and (settings.current().triattn_sm80_internal)
-            and (settings.current().triattn_sm80_tuned)
-            and (settings.current().triattn_sm80_compact)
         ):
             indices = torch.empty((b, length), dtype=torch.int32, device=dev)
             counts = torch.empty((b,), dtype=torch.int32, device=dev)
             compact_bias = torch.empty_like(bias)
             shape = (b, length, length, dhp)
-            entry = (
-                "compact_attention_gate_fast"
-                if settings.current().triattn_sm80_softmax
-                else "compact_attention_gate"
-            )
-            getattr(core, entry)(
+            core.compact_attention_gate_fast(
                 q.view(shape),
                 k.view(shape),
                 v.view(shape),
@@ -773,20 +729,14 @@ def _accurate_training_forward_ops(
                 q, k, v, bias, o, lse, g, a, length, cfg.h, b, n, n, n, dhp, n, dhp, scl
             )
         out = torch.empty_like(x)
-        native_out = settings.current().triattn_sm80_native_out
         if (
             not save
             and (d, cfg.h, hd) == (256, 8, 32)
-            and (length in (128, 256, 384, 512, 640, 768))
-            and (native_out or (native_out is None and length == 128))
+            and length == 128
         ):
             from . import native_out_fused_sm80
 
-            out_cfg = (
-                {128: 4, 256: 4, 384: 13, 512: 4, 640: 13, 768: 13}
-                if transposed
-                else {128: 14, 256: 4, 384: 4, 512: 4, 640: 13, 768: 14}
-            )[length]
+            out_cfg = 4 if transposed else 14
             native_out_fused_sm80.run(
                 a,
                 _wo_padded(wo, cfg),

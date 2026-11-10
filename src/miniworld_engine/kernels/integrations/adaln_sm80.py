@@ -3,8 +3,7 @@
 ``AdaptiveLayerNorm`` computes ``y = sigmoid(scale) LN(x) + bias`` with ``[scale | bias] = (LN(cond) w) [Ws | Wb]^T + [sb | 0]`` (LN of x without affine, ``w`` the cond
 norm's weight, ``Wb`` has no bias).  Contract: the engine's kernel backend (implementation TRITON or MINIWORLD) with the engine backend not forced to Triton, sm_80, bf16 or
 fp32 operands (the module's compute dtype; fp32 runs on TF32 tensor cores), ``d_hidden`` and ``d_cond`` each one of 128 / 384 / 768, ``cond`` with the leading dims of ``x`` (one
-conditioning per row) or, with no gradient, one conditioning shared by the samples of ``x`` (the first dim expanded: stride 0, or size 1).  ``settings.adaln_sm80=0`` turns it
-off; a failed extension build warns once and keeps the module's path.
+conditioning per row) or, with no gradient, one conditioning shared by the samples of ``x`` (the first dim expanded: stride 0, or size 1).  A failed extension build warns once and keeps the module's path.
 
 Inference (one opaque op): ``cond_ln`` (aff = LN(cond) w, one pass over the cond rows -- the L rows of a shared conditioning) -> one cuBLAS GEMM [S | B] = aff [Ws | Wb]^T (the weights
 packed once per parameter version) -> ``adaln_epi`` (LN(x), sigmoid, the gate and the sum in one pass; row r reads table row r % period).
@@ -23,7 +22,6 @@ import weakref
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 
@@ -31,6 +29,8 @@ WIDTHS = (128, 384, 768)
 BF = torch.bfloat16
 _packs: dict = {}
 _FAILED = False
+#: fewest rows of fp32 inference at the atom width (d = dc = 128) the sm_80 path serves (the A100 port's verified default)
+FP32_ATOM_MIN_ROWS = 8192
 
 
 @torch.compiler.assume_constant_result
@@ -86,11 +86,6 @@ def serves(
 ) -> bool:
     """Whether ``module`` (an ``AdaptiveLayerNorm`` whose backend resolved to the engine's kernels) runs this call on the sm_80 path: ``compute_dtype`` is the dtype the module
     casts x / cond / the weights to, ``grad`` its ``needs_backward``."""
-    if (
-        not settings.current().adaln_sm80
-        or settings.current().engine_backend == "triton"
-    ):
-        return False
     if not x.is_cuda or not cond.is_cuda or compute_dtype not in (BF, torch.float32):
         return False
     if x.shape[-1] not in WIDTHS or cond.shape[-1] not in WIDTHS or x.numel() == 0:
@@ -108,15 +103,10 @@ def serves(
         and not grad
         and x.shape[-1] == 128
         and cond.shape[-1] == 128
-        and x.numel() // 128 < fp32_atom_min_rows()
+        and x.numel() // 128 < FP32_ATOM_MIN_ROWS
     ):
         return False  # fp32 inference of a few rows at the atom width: Triton's fused kernel is 10-12 % faster there than the TF32 kernel's launch + weight-staging prologue (the registry's N = 1024, A = 5)
     return _period(x, cond, grad) is not None and _loads()
-
-
-def fp32_atom_min_rows() -> int:
-    """Fewest rows of fp32 inference at the atom width (d = dc = 128) the sm_80 path serves (default 8192; ``settings.adaln_fp32_atom_min_rows=0`` serves them all: the fused TF32 kernel runs at any row count)."""
-    return settings.current().adaln_fp32_atom_min_rows
 
 
 @contextlib.contextmanager
@@ -158,21 +148,17 @@ class Branch:
     gradients (nothing needs them until the closing pass) are tensor-bound, the row kernels between them memory-bound, and the small-M GEMMs leave SMs idle in their last wave.  Every ``run`` starts after
     everything queued on the current stream so far; ``join`` (or ``wait`` for one result) makes the current stream wait.  The pattern of ``kernels/trimul_inproj/cuda/sm80.py``'s backward: the inputs
     are ``record_stream``-ed to the side stream, the outputs to the current stream at the join, so the caching allocator never recycles a tensor one stream still uses; CUDA-graph capture and replay fork
-    and join as they do eagerly.  ``settings.adaln_branch=0`` runs everything on the current stream."""
+    and join as they do eagerly."""
 
     def __init__(self, device: torch.device):
         self.main = torch.cuda.current_stream(device)
-        self.enabled = settings.current().adaln_branch
-        if self.enabled:
-            if device not in _SIDE:
-                _SIDE[device] = torch.cuda.Stream(device=device)
-            self.side = _SIDE[device]
+        if device not in _SIDE:
+            _SIDE[device] = torch.cuda.Stream(device=device)
+        self.side = _SIDE[device]
         self.outs: list[torch.Tensor] = []
 
     def run(self, fn, *inputs: torch.Tensor):
         """``fn()`` on the side stream (it may allocate); returns its tensor."""
-        if not self.enabled:
-            return fn()
         self.side.wait_stream(self.main)
         for t in inputs:
             t.record_stream(self.side)
@@ -182,9 +168,7 @@ class Branch:
         return out
 
     def mark(self):
-        """An event at the end of what the side stream has queued so far (None when the branch is off): ``wait`` for it later, while more work is queued behind it."""
-        if not self.enabled:
-            return None
+        """An event at the end of what the side stream has queued so far: ``wait`` for it later, while more work is queued behind it."""
         event = torch.cuda.Event()
         event.record(self.side)
         return event
@@ -197,7 +181,7 @@ class Branch:
                 t.record_stream(self.main)
 
     def join(self) -> None:
-        if self.enabled and self.outs:
+        if self.outs:
             self.main.wait_stream(self.side)
             for t in self.outs:
                 t.record_stream(self.main)
@@ -297,13 +281,10 @@ def inference(
 
 
 # -------------------------------------------------------------------------------------------------------------- training
-def _train_fwd_fake(
-    x, cond, lnw, ws, sb, wb, eps_x, eps_c, native_cast=False, save_cast=False
-):
+def _train_fwd_fake(x, cond, lnw, ws, sb, wb, eps_x, eps_c):
     m, d = x.shape
     p, dc = cond.shape
     e = x.new_empty
-    casts = [torch.empty_like(t, dtype=BF) for t in (ws, sb, wb)] if save_cast else []
     if _kernels().atom_supported(
         x, cond
     ):  # the fused atom kernels keep only the statistics
@@ -314,7 +295,6 @@ def _train_fwd_fake(
             e((0,)),
             e((m, 2), dtype=torch.float32),
             e((0,)),
-            *casts,
         ]
     return [
         torch.empty_like(x),
@@ -323,7 +303,6 @@ def _train_fwd_fake(
         e((p, 2 * d)),
         e((m, 2), dtype=torch.float32),
         e((2 * d, dc)),
-        *casts,
     ]
 
 
@@ -337,31 +316,11 @@ def train_fwd(
     wb: torch.Tensor,
     eps_x: float,
     eps_c: float,
-    native_cast: bool = False,
-    save_cast: bool = False,
 ) -> list[torch.Tensor]:
     """The forward saving what the backward reads: [y, aff [M, dc], cond (mean, rstd) [M, 2], [S | B] [M, 2 d], x (mean, rstd) [M, 2], [Ws; Wb] [2 d, dc]]; cond is one row per row of x.
     At d = dc = 128 (bf16) one kernel writes y and the two statistics, and aff / [S | B] / the packed weights are empty (the backward kernel recomputes them)."""
     k = _kernels()
     with torch.cuda.device(x.device):
-        packed_weights = None
-        if native_cast:
-            if (
-                save_cast
-                and not k.atom_supported(x, cond)
-                and settings.current().adaln_sm80_pack_param_cast
-            ):
-                from miniworld_engine.kernels.transition.cuda.parameter_cast_pack_sm80 import (
-                    result,
-                )
-
-                (ws, sb, wb), (packed_weights,) = result((ws, sb, wb), ((0, 2),))
-            else:
-                from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import (
-                    result,
-                )
-
-                ws, sb, wb = result((ws, sb, wb))
         if k.atom_supported(x, cond):
             y, xst, cst = k.atom_fwd(x, cond, lnw, ws, wb, sb, eps_x, eps_c, stats=True)
             return [
@@ -371,14 +330,12 @@ def train_fwd(
                 x.new_empty((0,)),
                 xst,
                 x.new_empty((0,)),
-            ] + ([ws, sb, wb] if save_cast else [])
+            ]
         aff, cst = k.cond_ln(cond, lnw, x.dtype, eps_c, stats=True)
-        wcat = (
-            packed_weights if packed_weights is not None else torch.cat([ws, wb])
-        )  # saved for the backward
+        wcat = torch.cat([ws, wb])  # saved for the backward
         sbt = _mm_op(aff, wcat.t())
         y, xst = k.epilogue(x, sbt, sb, eps_x, stats=True)
-    return [y, aff, cst, sbt, xst, wcat] + ([ws, sb, wb] if save_cast else [])
+    return [y, aff, cst, sbt, xst, wcat]
 
 
 def like(t: torch.Tensor, fp32: bool) -> torch.Tensor:
@@ -402,7 +359,6 @@ def _train_bwd_fake(
     xst,
     wcat,
     fp32_grads=False,
-    native_cast=False,
 ):
     """Fake of ``train_bwd``: the gradient shapes and dtypes."""
     gd = torch.float32 if fp32_grads else ws.dtype
@@ -431,35 +387,18 @@ def train_bwd(
     xst: torch.Tensor,
     wcat: torch.Tensor,
     fp32_grads: bool = False,
-    native_cast: bool = False,
 ) -> list[torch.Tensor]:
     """[dx, dcond, d lnw, dWs, d sb, dWb] (each in its input's dtype; the weights' and the bias' fp32 when ``fp32_grads``: the master parameters' gradients, unrounded) from the gradient dy [M, d] and the forward's saved tensors."""
     k = _kernels()
     d = x.shape[1]
     with torch.cuda.device(x.device):
-        if native_cast:
-            from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import (
-                result,
-            )
-
-            ws, sb, wb = result((ws, sb, wb))
         if k.atom_supported(
             x, cond
         ):  # d = dc = 128, bf16: the backward in one kernel, the two weight gradients on cuBLAS
             dx, dcond, dsc, aff, psb, plw = k.atom_bwd(
                 dy, x, cond, xst, cst, lnw, ws, wb, sb
             )
-            if settings.current().adaln_sm80_atom_cond_wgrad_fused and x.shape[0] in (
-                48 * 4096,
-                48 * 8192,
-            ):
-                from miniworld_engine.kernels.conditioned_transition.cuda import (
-                    ct_atom_cond_wgrad_fused_sm80,
-                )
-
-                dws, dwb = ct_atom_cond_wgrad_fused_sm80.result_two(dsc, dy, aff)
-            else:
-                dws, dwb = _wgrad(dsc, aff), _wgrad(dy, aff)
+            dws, dwb = _wgrad(dsc, aff), _wgrad(dy, aff)
             dsb, dlnw, dws, dwb = k.finish(
                 [psb, plw],
                 [like(sb, fp32_grads), lnw],
@@ -490,22 +429,8 @@ class _Training(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, lnw, ws, sb, wb, eps_x, eps_c):
         ctx.fp32_grads = master((ws,), x.dtype)
-        ctx.save_cast = (
-            ctx.fp32_grads
-            and all(t.dtype is torch.float32 for t in (ws, sb, wb))
-            and settings.current().adaln_sm80_save_param_cast
-        )
-        ctx.native_cast = ctx.fp32_grads and (
-            ctx.save_cast or settings.current().adaln_sm80_native_param_cast
-        )
-        if not ctx.native_cast:
-            ws, sb, wb = cast_params((ws, sb, wb), x.dtype, False)
-        y, *saved = train_fwd(
-            x, cond, lnw, ws, sb, wb, eps_x, eps_c, ctx.native_cast, ctx.save_cast
-        )
-        if ctx.save_cast:
-            ws, sb, wb = saved[-3:]
-            saved = saved[:-3]
+        ws, sb, wb = cast_params((ws, sb, wb), x.dtype, False)
+        y, *saved = train_fwd(x, cond, lnw, ws, sb, wb, eps_x, eps_c)
         ctx.save_for_backward(x, cond, lnw, ws, sb, wb, *saved)
         return y
 
@@ -523,7 +448,6 @@ class _Training(torch.autograd.Function):
             wb,
             *saved,
             ctx.fp32_grads,
-            ctx.native_cast and not ctx.save_cast,
         )
         return dx, dcond, dlnw, dws, dsb, dwb, None, None
 

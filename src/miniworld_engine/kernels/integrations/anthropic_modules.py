@@ -16,10 +16,6 @@ from miniworld_engine.integrations import anthropic_swa_ops as swa_ops
 
 def _require(x):
     upstream._inference()
-    from miniworld_engine import settings
-
-    if settings.current().engine_backend == "triton":
-        raise ValueError("anthropic conflicts with engine_backend=triton")
     if not x.is_cuda or x.dtype not in (torch.float32, torch.bfloat16, torch.float16):
         raise ValueError("Anthropic module kernels require CUDA floating-point inputs")
 

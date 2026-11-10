@@ -2,7 +2,6 @@
 
 import torch
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine import settings
 from miniworld_engine.kernels.swa_dit.cuda import sm80
 from miniworld_engine.kernels.swa_dit.cuda import (
     inference_rowgrid_ffn_sm80_a100 as rowgrid,
@@ -55,7 +54,7 @@ def block(
         qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg
     )
     o, _ = sm80.attn_fwd(
-        qh, kh, vh, seqused, save_lse=not settings.current().a100_cleanup
+        qh, kh, vh, seqused, save_lse=False
     )
     out = rowgrid.ffn(qf, g, o, mod, wo, wu, wd, s, b, eps, _ROWGRID[(a, s)])
     return out.view(a, s, 128)
