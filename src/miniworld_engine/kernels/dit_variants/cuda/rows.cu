@@ -1,5 +1,5 @@
-// dit_variants rows.cu -- the row passes of the DiT block variants (Boltz-2, RoseTTAFold3, Chai-1 token and atom DiT; inference).
-// Rows of D = 768 (token) or 128 (atom) columns.
+// dit_variants rows.cu -- the row passes of the ATOM DiT block variants (Boltz-2, RoseTTAFold3, Chai-1 atom DiT; bf16 inference).
+// Rows of D = 128 columns. (The token blocks run the one token DiT algorithm: conditioned_transition/cuda/token_dit_rows.cu.)
 //
 //   ln_mod_rows    xhat = LN(x) (no affine); out_i = xhat * f(ms_i[tok]) + mb_i[tok] for up to three (ms, mb, out)
 //                  f = sigmoid (AF3 / Boltz-2 / RF3 AdaLN) or identity (Chai-1: the table already holds W s + 1).
@@ -10,7 +10,6 @@
 //                  folded into q's w / b)
 //   gate_rows_inplace      o <- o * sigmoid(g)
 //   glu_rows       out = silu(g) * v [* u],  row = [g | v | u]  (u: Boltz-2's up-gate)
-//   parallel_residual  out = x + sum_i (y_i - x): a parallel block (Chai-1, RoseTTAFold3) from its parts' residual outputs
 //
 // tok = row % L: the AdaLN / gate tables are per token (atom), shared by the samples. One block per row, a thread owns 4
 // consecutive columns; sums in fp32.
@@ -29,7 +28,7 @@ __device__ __forceinline__ float scl(float v) {
   if constexpr (SIG) return sigm(v); else return v;
 }
 
-// Row geometry: a 768-wide row is a block of NT = 192 threads; a 128-wide row (NT = 32) is a warp, 8 rows to a 256-thread block (a
+// Row geometry: a 128-wide row (NT = 32) is a warp, 8 rows to a 256-thread block (a
 // 32-thread block per row left the SMs half empty: 32 blocks per SM at most).
 template <int NT>
 struct Geo {
@@ -164,24 +163,6 @@ __global__ void __launch_bounds__(256) glu_kernel(const T* __restrict__ AB, T* _
 long flat_grid(long n4) { return std::min<long>((n4 + 255) / 256, 132L * 16); }
 
 
-// out = x + sum_i (y_i - x): a parallel block's update from residual outputs y_i = x + f_i(x) (fp32 sums, one rounding at the end)
-struct Outs {
-  const void* y[8];
-  int n;
-};
-
-template <typename T>
-__global__ void __launch_bounds__(256) parallel_residual_kernel(const T* __restrict__ X, Outs ys, T* __restrict__ OUT, long n4) {
-  for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (long)gridDim.x * blockDim.x) {
-    const float4 x = V4<T>::load(X + 4 * i);
-    float4 acc = x;
-    for (int k = 0; k < ys.n; ++k) {
-      const float4 y = V4<T>::load(reinterpret_cast<const T*>(ys.y[k]) + 4 * i);
-      acc.x += y.x - x.x; acc.y += y.y - x.y; acc.z += y.z - x.z; acc.w += y.w - x.w;
-    }
-    V4<T>::store(OUT + 4 * i, acc);
-  }
-}
 
 // ------------------------------------------------------------------------------------------------ host
 using BF = __nv_bfloat16;
@@ -206,7 +187,7 @@ BF* bfw(const at::Tensor& t) { return reinterpret_cast<BF*>(t.data_ptr()); }
 
 int64_t width(const at::Tensor& x) {
   const int64_t d = x.size(1);
-  TORCH_CHECK(d == 768 || d == 128, "rows of 768 (token) or 128 (atom) columns, got ", d);
+  TORCH_CHECK(d == 128, "rows of 128 (atom) columns, got ", d);
   return d;
 }
 
@@ -232,8 +213,7 @@ void ln_mod_rows(c10::optional<at::Tensor> xin, at::Tensor x, std::vector<at::Te
   auto s = at::cuda::getCurrentCUDAStream();
   const BF* in = ptr<BF>(xin);
   const long sms = ms[0].stride(0);
-  if (d == 768) (sig ? ln_mod_kernel<192, true> : ln_mod_kernel<192, false>)<<<x.size(0), 192, 0, s>>>(in, x.data_ptr<float>(), m, (int)L, sms, (float)eps, x.size(0));
-  else (sig ? ln_mod_kernel<32, true> : ln_mod_kernel<32, false>)<<<Geo<32>::blocks(x.size(0)), Geo<32>::THREADS, 0, s>>>(in, x.data_ptr<float>(), m, (int)L, sms, (float)eps, x.size(0));
+  (sig ? ln_mod_kernel<32, true> : ln_mod_kernel<32, false>)<<<Geo<32>::blocks(x.size(0)), Geo<32>::THREADS, 0, s>>>(in, x.data_ptr<float>(), m, (int)L, sms, (float)eps, x.size(0));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -263,8 +243,7 @@ void res_rows(at::Tensor x, at::Tensor ya, at::Tensor ga, c10::optional<at::Tens
   const long syt = yt ? yt->stride(0) : 0, sms = ms ? ms->stride(0) : 0;
 #define RES_ARGS x.data_ptr<float>(), bf(ya), ya.stride(0), bf(ga), ptr<BF>(yt), syt, ptr<BF>(gt), ptr<BF>(ms), ptr<BF>(mb), oln, fin, \
                  (int)L, ga.stride(0), sms, (float)eps, x.size(0)
-  if (d == 768) (sig ? res_kernel<192, true, BF> : res_kernel<192, false, BF>)<<<x.size(0), 192, 0, s>>>(RES_ARGS);
-  else (sig ? res_kernel<32, true, BF> : res_kernel<32, false, BF>)<<<Geo<32>::blocks(x.size(0)), Geo<32>::THREADS, 0, s>>>(RES_ARGS);
+  (sig ? res_kernel<32, true, BF> : res_kernel<32, false, BF>)<<<Geo<32>::blocks(x.size(0)), Geo<32>::THREADS, 0, s>>>(RES_ARGS);
 #undef RES_ARGS
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -280,8 +259,7 @@ void qk_ln_rows(at::Tensor q, at::Tensor k, at::Tensor wq, at::Tensor bq, at::Te
   auto s = at::cuda::getCurrentCUDAStream();
 #define QK_ARGS bfw(q), q.stride(0), bfw(k), k.stride(0), wq.data_ptr<float>(), bq.data_ptr<float>(), wk.data_ptr<float>(), \
                 bk.data_ptr<float>(), (float)eps, q.size(0)
-  if (d == 768) qk_ln_kernel<192, BF><<<q.size(0), 192, 0, s>>>(QK_ARGS);
-  else qk_ln_kernel<32, BF><<<Geo<32>::blocks(q.size(0)), Geo<32>::THREADS, 0, s>>>(QK_ARGS);
+  qk_ln_kernel<32, BF><<<Geo<32>::blocks(q.size(0)), Geo<32>::THREADS, 0, s>>>(QK_ARGS);
 #undef QK_ARGS
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -311,28 +289,7 @@ void glu_rows(at::Tensor ab, at::Tensor out, bool up) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-at::Tensor parallel_residual(at::Tensor x, std::vector<at::Tensor> ys) {
-  TORCH_CHECK(x.is_cuda() && x.is_contiguous() && (x.scalar_type() == at::kBFloat16 || x.scalar_type() == at::kFloat) && x.numel() % 4 == 0,
-              "x: contiguous bf16 / fp32, numel % 4 == 0");
-  TORCH_CHECK(!ys.empty() && ys.size() <= 8, "one to eight outputs");
-  Outs o{};
-  o.n = (int)ys.size();
-  for (size_t k = 0; k < ys.size(); ++k) {
-    TORCH_CHECK(ys[k].is_contiguous() && ys[k].scalar_type() == x.scalar_type() && ys[k].sizes() == x.sizes(), "outputs: contiguous, like x");
-    o.y[k] = ys[k].data_ptr();
-  }
-  const at::cuda::OptionalCUDAGuard guard(x.device());
-  auto out = at::empty_like(x);
-  const long n4 = x.numel() / 4;
-  const int grid = (int)std::min<long>((n4 + 255) / 256, 132L * 16);
-  auto s = at::cuda::getCurrentCUDAStream();
-  if (x.scalar_type() == at::kBFloat16)
-    parallel_residual_kernel<BF><<<grid, 256, 0, s>>>(bf(x), o, bfw(out), n4);
-  else
-    parallel_residual_kernel<float><<<grid, 256, 0, s>>>(x.data_ptr<float>(), o, out.data_ptr<float>(), n4);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return out;
-}
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -341,5 +298,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("qk_ln_rows", &qk_ln_rows);
   m.def("gate_rows_inplace", &gate_rows_inplace);
   m.def("glu_rows", &glu_rows);
-  m.def("parallel_residual", &parallel_residual);
 }

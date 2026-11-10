@@ -1,6 +1,6 @@
-"""CUDA kernels of the DiT block variants, sm_90a, built on first use (``load_extension``), never at import: ``rows.cu`` (inference rows),
+"""CUDA kernels of the ATOM DiT block variants (Boltz-2, RoseTTAFold3, Chai-1), sm_90a, built on first use (``load_extension``), never at import: ``rows.cu`` (inference rows),
 ``train_rows.cu`` (training rows, forward and backward), ``edge.cu`` (the atom stacks' slid edge windows, training); ``train.py`` is the training
-path (autograd Functions over them)."""
+path (autograd Functions over them). The token blocks run the one token DiT algorithm (``kernels/integrations/token_dit``)."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def ext():
 
 def ln_mod_rows(x, mods, L, eps, sig, *, xin=None):
     """xhat = LN(x) (no affine; x = xin first when given); for each (ms, mb, out) of ``mods`` (one to three): out = xhat * f(ms) + mb,
-    f = sigmoid when ``sig`` else identity; ms / mb [L, D] bf16 table views (one row stride) indexed by row % L. D = 768 or 128."""
+    f = sigmoid when ``sig`` else identity; ms / mb [L, D] bf16 table views (one row stride) indexed by row % L. D = 128 (the atom DiT)."""
     ms, mb, out = (list(t) for t in zip(*mods, strict=True))
     ext().ln_mod_rows(xin, x, ms, mb, out, int(L), float(eps), bool(sig))
 
@@ -47,7 +47,7 @@ def res_rows(x, ya, ga, L, *, yt=None, gt=None, ms=None, mb=None, out_ln=None, f
 
 
 def qk_ln_rows(q, k, wq, bq, wk, bk, eps):
-    """In place: q <- LN(q) * wq + bq, k <- LN(k) * wk + bk over D (768 or 128) columns (bf16 row views; fp32 [D] affine)."""
+    """In place: q <- LN(q) * wq + bq, k <- LN(k) * wk + bk over D (128) columns (bf16 row views; fp32 [D] affine)."""
     ext().qk_ln_rows(q, k, wq, bq, wk, bk, float(eps))
 
 
@@ -59,14 +59,6 @@ def gate_rows_inplace(o, g):
 def glu_rows(ab, out, up):
     """out = silu(g) * v [* u] for ab = [g | v | u] (bf16)."""
     ext().glu_rows(ab, out, bool(up))
-
-
-def ln_rows(z, out, eps=1e-5):
-    """out = LN(z), no affine, z / out bf16 [rows, 128 | 256]: the row extensions' one LN-rows kernel
-    (``conditioned_transition/cuda/token_dit_rows.cu`` ``layernorm_rows``)."""
-    from miniworld_engine.kernels.conditioned_transition import cuda as rows
-
-    rows.layernorm_rows(z, out, eps)
 
 
 
