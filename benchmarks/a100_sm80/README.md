@@ -28,7 +28,7 @@ Per class and mode: the geometric mean over its cases of the speedup vs PyTorch 
 | PairEmbedAdaLN | 17.23x (n=6) |  |  | 4.33x (n=6) |  |  |
 | PairEmbedCA | 18.08x (n=12) |  |  | 8.31x (n=12) |  |  |
 | PairEmbedGeom | 18.89x (n=12) |  |  | 7.53x (n=12) |  |  |
-| PairformerBlock | 9.53x (n=6) | 6.92x (n=6) |  | 6.17x (n=6) |  |  |
+| PairformerBlock | 9.57x (n=6) | 6.92x (n=6) |  | 6.19x (n=6) |  |  |
 | PoolAtoms | 5.52x (n=8) | 1.85x (n=8) |  |  |  |  |
 | ProteinMPNN | 1.52x (n=4) |  |  | 1.40x (n=4) |  |  |
 | SWAAtomTransformer | 15.06x (n=48) | 5.43x (n=48) |  | 8.20x (n=44) |  |  |
@@ -40,7 +40,7 @@ Per class and mode: the geometric mean over its cases of the speedup vs PyTorch 
 | TokenDiTProtenix | 2.54x (n=84) | 1.19x (n=84) | 0.84x (n=84) | 1.73x (n=84) |  | 0.81x (n=84) |
 | TokenDiTRoseTTAFold3 | 2.18x (n=12) | 1.17x (n=12) | 1.31x (n=12) | 1.83x (n=12) |  | 1.40x (n=12) |
 | TokenPairInit | 15.56x (n=6) |  |  | 3.44x (n=6) |  |  |
-| Transition | 3.56x (n=126) | 2.49x (n=90) |  | 2.53x (n=126) |  |  |
+| Transition | 3.56x (n=126) | 2.47x (n=90) |  | 2.52x (n=126) |  |  |
 | TriangleAttention | 10.36x (n=72) | 5.49x (n=72) | 3.19x (n=70) | 5.85x (n=69) |  | 2.22x (n=67) |
 | TriangleAttentionAF3 | 8.20x (n=48) | 7.45x (n=36) | 2.97x (n=46) | 4.69x (n=46) |  | 2.08x (n=44) |
 | TriangleAttentionChai1 | 9.90x (n=24) | 4.43x (n=24) | 4.18x (n=24) | 6.93x (n=24) |  | 3.20x (n=24) |
@@ -63,7 +63,7 @@ The same over the requirement rows whose `source` names af3 (25 rows).
 | MSAPairWeightedAveraging | 7.10x (n=6) | 2.55x (n=6) |  | 4.92x (n=6) |  |  |
 | OuterProductMean | 2.61x (n=6) | 2.07x (n=6) |  | 1.95x (n=6) |  |  |
 | TokenDiTProtenix | 2.54x (n=12) | 1.33x (n=12) | 1.28x (n=12) | 1.97x (n=12) |  | 1.40x (n=12) |
-| Transition | 5.12x (n=48) | 3.66x (n=42) |  | 3.19x (n=48) |  |  |
+| Transition | 5.10x (n=48) | 3.63x (n=42) |  | 3.18x (n=48) |  |  |
 | TriangleAttentionAF3 | 12.93x (n=24) | 8.65x (n=24) | 3.43x (n=22) | 5.90x (n=24) |  | 2.35x (n=22) |
 | TriangleMultiplication | 10.33x (n=24) | 8.98x (n=24) | 6.13x (n=24) | 7.53x (n=24) |  | 4.28x (n=24) |
 
