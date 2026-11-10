@@ -54,7 +54,7 @@ class PairformerBlock(BackendModule, MasterWeights):
     ending, the pair transition; with ``config.d_single`` the single track after it."""
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "cuda", "triton")
+    backends = ("pytorch", "anthropic", "cuda", "triton")
 
     def __init__(self, config: PairformerConfig, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()
@@ -137,6 +137,12 @@ class PairformerBlock(BackendModule, MasterWeights):
     # attentions, the pair transition, and with the single track the AttentionPairBias and the single Transition), and ``forward`` is the
     # reference composition, so each update runs on ITS backend. A sub-module without that backend stays on "pytorch" for the module tree,
     # but ``unsupported`` then refuses the whole call naming it: the block never runs a mixed schedule silently.
+    # ``"anthropic"``: the release's fused pairformer layers are drivers of the same pieces, not one kernel -- the boltz2 kit's pairfuse
+    # (``bz_pairfuse.pfm_forward``, fast row ``trimul=core.fast, triatt=core.fast, transition=core.fast``: the core's TriMul face, pair_fused's
+    # tri_attn_block, the core's transition provider, in the stock layer order) and protenix_v2's BLK2 (c_z 256 only) -- and both patch their
+    # stock model classes (boltz / protenix must be installed). The block's anthropic backend is that composition on the sub-modules' own
+    # anthropic backends (TriangleMultiplication: core TriMul fast; TriangleAttention: tri_attn_block with core tier:fast; Transition: the
+    # core provider), the residuals added by each update instead of folded into the kernels' epilogues.
     def _backend_children(self) -> list[tuple[str, BackendModule]]:
         names = ["tri_multi", "tri_multi_outgoing", "tri_multi_incoming", "tri_atten_starting", "tri_atten_ending", "transition_pair",
                  "single_attention", "single_transition"]
@@ -161,7 +167,7 @@ class PairformerBlock(BackendModule, MasterWeights):
                 return f"{name} ({type(child).__name__}): {why}"
         return None
 
-    _forward_cuda = _forward_triton = _forward_pytorch
+    _forward_anthropic = _forward_cuda = _forward_triton = _forward_pytorch
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
         inputs = pair_inputs(self.config.d_pair, length=length, samples=samples, dtype=dtype, device=device, generator=generator)
@@ -201,7 +207,7 @@ class PairformerBlock(BackendModule, MasterWeights):
 class Pairformer(BackendModule, MasterWeights):
     """The Pairformer stack: ``config.n_block`` :class:`PairformerBlock` in sequence."""
 
-    backends = ("pytorch", "cuda", "triton")
+    backends = ("pytorch", "anthropic", "cuda", "triton")
 
     def __init__(self, config: PairformerConfig | None = None, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()
@@ -240,4 +246,4 @@ class Pairformer(BackendModule, MasterWeights):
     def unsupported(self, pair, mask=None, single=None, extra_pair_bias=None) -> str | None:
         return self.pairformer_blocks[0].unsupported(pair, mask, single, extra_pair_bias) if len(self.pairformer_blocks) else None
 
-    _forward_cuda = _forward_triton = _forward_pytorch
+    _forward_anthropic = _forward_cuda = _forward_triton = _forward_pytorch
