@@ -416,7 +416,7 @@ _ATOM_KINDS = {
 }
 #: the model options of the classes on the sm90_atom family (``integrations/local_dit_h100.options``) as its build defines, and the classes
 #: with one AdaLN for q and k / v (the ``pre_bwd_one`` entry)
-_ATOM_OPTIONS = {"AtomDiTRoseTTAFold3": ("KQLN", "PARS"), "AtomDiTChai1": ("IDENT", "NOOUT", "PARS")}
+_ATOM_OPTIONS = {"AtomDiTBoltz2": ("UP",), "AtomDiTRoseTTAFold3": ("KQLN", "PARS"), "AtomDiTChai1": ("IDENT", "NOOUT", "PARS")}
 _ATOM_ONE_ADALN = frozenset({"AtomDiTBoltz2", "AtomDiTRoseTTAFold3", "AtomDiTChai1"})
 #: sm100_atom ``_HOPPER_KERNELS`` source stem -> atom kernels built from it
 _ATOM_STEMS = {

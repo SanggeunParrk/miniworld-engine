@@ -647,6 +647,10 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
     key_window = "pad"
     kv_norm = "shared"
     transition_part = UpGatedConditionedTransition
+    #: H100: the one atom DiT implementation (local_dit_h100: one AdaLN, the up-gate transition) for these key windows
+    _h100_local = ("pad",)
+    #: 2026-11-10: H100 "pad" on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 2}
     _release_module = "boltz_atom_kernels"
     _release_path = "boltz2/opt/forward/atom/src"
 

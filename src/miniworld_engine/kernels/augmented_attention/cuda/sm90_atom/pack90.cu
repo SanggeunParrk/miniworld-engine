@@ -9,8 +9,8 @@
 #include <stdint.h>
 
 struct Pack {
-  const void* w[27];   // parameters in the ``_I`` order of sm90_atom/__init__.py
-  void* out[16];       // cond wq... see JOBS
+  const void* w[28];   // parameters in the ``_I`` order of sm90_atom/__init__.py; w[27]: the up-gate W_u (Boltz-2, jobs 15 / 16)
+  void* out[17];       // cond wq... see JOBS
   uint32_t wbf;        // parameter i is bf16
   int tf32;
 };
@@ -33,7 +33,7 @@ __device__ __forceinline__ void put(const Pack& p, void* out, size_t i, float v)
 }
 
 // parameter indices (the ``_I`` order)
-enum { G1, SC1_W, SC1_B, BI1_W, WQ, BQ, WK, WV, LN_PAIR, WB, WG, WO, SO_W, SO_B, G2, SC2_W, SC2_B, BI2_W, WA, WB2, WD, ST_W, ST_B, GKV, KV_SC_W, KV_SC_B, KV_BI_W };
+enum { G1, SC1_W, SC1_B, BI1_W, WQ, BQ, WK, WV, LN_PAIR, WB, WG, WO, SO_W, SO_B, G2, SC2_W, SC2_B, BI2_W, WA, WB2, WD, ST_W, ST_B, GKV, KV_SC_W, KV_SC_B, KV_BI_W, WU };
 
 // conditioning matrix m of [Ws1', Wb1', Ws2', Wb2', Wkp', Wks', Wso, Wst]: source parameter and the K-axis scale parameter (-1: none)
 __device__ constexpr int CM_W[8] = {SC1_W, BI1_W, SC2_W, BI2_W, KV_SC_W, KV_BI_W, SO_W, ST_W};
@@ -114,6 +114,18 @@ extern "C" __global__ __launch_bounds__(256) void pack90(const __grid_constant__
         if (i >= 8 * 2 * 64 * 128) return;
         const int m = i >> 14, half = (i >> 13) & 1, r = lp((i >> 7) & 63, gs), hh = lc(i & 127, 128);
         v = cond_val(p, m, hh, half * 64 + r);
+        break;
+      }
+      case 15: {  // wu [nch][hb][128] (UP, forward: chunk j of W_u beside [Wa_j; Wb_j])
+        if (i >= (size_t)nch * hb * 128) return;
+        const int j = i / (hb * 128), rem = i % (hb * 128), r = lp(rem >> 7, gs), c = lc(rem & 127, 128);
+        v = ldw(p, WU, (size_t)(j * hb + r) * 128 + c);
+        break;
+      }
+      case 16: {  // wut [2 kb][2 half][64][128] (UP, backward: the hidden blocks 4, 5 of [Wa; Wb; Wu]^T)
+        if (i >= 2 * 2 * 64 * 128) return;
+        const int kb = i >> 14, half = (i >> 13) & 1, r = lp((i >> 7) & 63, gs), hh = lc(i & 127, 128);
+        v = ldw(p, WU, (size_t)(kb * 128 + hh) * 128 + half * 64 + r);
         break;
       }
       default: {  // the fp32 vectors: bias [512] = sc1_b | sc2_b | so_b | st_b, bq, bs, ln_pair [16], wb [64]

@@ -9,6 +9,31 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "rms90.cuh"
 using namespace r90;
+#ifndef UP
+#define UP 0   // 1: Boltz-2's up-gate transition h = silu(x2 Wa^T) (x2 Wb^T) (x2 Wu^T) (Wu_j streamed with each chunk)
+#endif
+#if UP
+// [a | b] = tile [Wa_j; Wb_j]^T and u = tile Wu_j^T issued together (one commit / wait): the up-gate GEMM overlaps the [a | b] one
+template <int NR1, int NR2, int KS>
+DEVI void wg_gemm2(float* d1, uint32_t w1, float* d2, uint32_t w2, const Tile& c) {
+  wg_fence();
+#pragma unroll
+  for (int ks = 0; ks < KS; ++ks) {
+    uint32_t a[4];
+    afrag(c, ks, a);
+    const uint64_t e1 = wdesc(w1 + (ks >> 2) * (NR1 * 128) + (ks & 3) * 32), e2 = wdesc(w2 + (ks >> 2) * (NR2 * 128) + (ks & 3) * 32);
+#if WG_FIRST
+    if (ks > 0) { wg_mma<NR1>(d1, a, e1, 1); wg_mma<NR2>(d2, a, e2, 1); }
+    else { wg_mma_first<NR1>(d1, a, e1); wg_mma_first<NR2>(d2, a, e2); }
+#else
+    wg_mma<NR1>(d1, a, e1, ks > 0);
+    wg_mma<NR2>(d2, a, e2, ks > 0);
+#endif
+  }
+  wg_commit();
+  wg_wait();
+}
+#endif
 #ifndef NOOUT
 #define NOOUT 0   // 1: no gating query and no out projection (Chai-1): u = o (the attention output itself)
 #endif
@@ -20,11 +45,12 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void post90_fwd(const T* __rest
                                                                 const T* __restrict__ mod, const T* __restrict__ wo /*[128,128]*/,
                                                                 const T* __restrict__ wab /*[NCH][2 HB,128]*/, const T* __restrict__ wd /*[NCH][128,HB]*/,
                                                                 T* __restrict__ out, T* __restrict__ us, T* __restrict__ a2s, T* __restrict__ x2s,
-                                                                T* __restrict__ ts, int M, int nmod, float eps, int save) {
+                                                                T* __restrict__ ts, int M, int nmod, float eps, int save,
+                                                                const T* __restrict__ wu /*UP: [NCH][HB,128]*/) {
   pdl_wait();
   extern __shared__ uint8_t sm_raw[];
   constexpr int NCH = 256 / HB;
-  constexpr int ABB = 2 * HB * 128 * ES, DBB = 128 * 128, BUF = ABB + DBB;   // chunk buffer: [Wa_j; Wb_j] then Wd_j
+  constexpr int ABB = 2 * HB * 128 * ES, UBB = UP ? HB * 128 * ES : 0, DBB = 128 * 128, BUF = ABB + UBB + DBB;   // chunk: [Wa_j; Wb_j] (Wu_j) Wd_j
   static_assert(BUF >= 64 * 128 * ES, "buffer holds a Wo unit");
   const uint32_t base = (su(sm_raw) + 1023u) & ~1023u;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
@@ -38,7 +64,8 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void post90_fwd(const T* __rest
     } else {
       const int j = s - 2;
       load_w(d, wab + (size_t)j * 2 * HB * 128, 128, 2 * HB, 128, tid, NTHR);
-      load_w(d + ABB, wd + (size_t)j * 128 * HB, HB, 128, HB, tid, NTHR);
+      if (UP) load_w(d + ABB, wu + (size_t)j * HB * 128, 128, HB, 128, tid, NTHR);
+      load_w(d + ABB + UBB, wd + (size_t)j * 128 * HB, HB, 128, HB, tid, NTHR);
     }
     cp_commit();
   };
@@ -122,7 +149,12 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void post90_fwd(const T* __rest
     __syncthreads();
     const uint32_t wa = base + ((j + 2) & 1) * BUF;
     float acc[HB];  // [a (HB / 2 regs ... ) | b]: wgmma n = 2 HB, acc = HB regs
+#if UP   // Boltz-2's up-gate: h = silu(a) b u, u = x2 Wu_j^T (one rounding of the product)
+    float au[HB / 2];
+    wg_gemm2<2 * HB, HB, KSTEPS>(acc, wa, au, wa + ABB, c);
+#else
     wg_gemm<2 * HB, KSTEPS>(acc, c, wa, 0);
+#endif
     // h = silu(a) * b : a = n-tiles 0 .. HB / 8 - 1, b = the next HB / 8 -> a 16 x HB tile
     Tile h;
 #pragma unroll
@@ -130,10 +162,14 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void post90_fwd(const T* __rest
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
         const float av = round_store(acc[4 * nt + e]), bv = round_store(acc[4 * (nt + HB / 8) + e]);
+#if UP
+        h.f[nt][e] = round_store(silu(av) * bv * round_store(au[4 * nt + e]));
+#else
         h.f[nt][e] = round_store(round_store(silu(av)) * bv);
+#endif
       }
     rna(h);
-    wg_gemm<128, HB / (TF32 ? 8 : 16)>(o4, h, wa + ABB, j > 0);
+    wg_gemm<128, HB / (TF32 ? 8 : 16)>(o4, h, wa + ABB + UBB, j > 0);
     __syncthreads();
     if (j + 4 < NCH + 2) issue(j + 4); else cp_commit();
   }

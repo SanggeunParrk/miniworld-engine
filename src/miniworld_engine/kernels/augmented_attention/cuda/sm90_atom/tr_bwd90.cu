@@ -7,15 +7,20 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "row90.cuh"
 using namespace r90;
+#ifndef UP
+#define UP 0   // 1: Boltz-2's up-gate transition (h = silu(a) b u; dab = [da | db | du], Wu_j streamed with each chunk)
+#endif
 
 extern "C" __global__ __launch_bounds__(NTHR, 1) void tr_bwd90(const T* __restrict__ dy, const T* __restrict__ tsv, const T* __restrict__ mod,
                                                               const T* __restrict__ x2, const T* __restrict__ wab /*[NCH][2 HB,128]*/,
                                                               const T* __restrict__ wdt /*[NCH][HB,128]*/, T* __restrict__ dt_out,
-                                                              T* __restrict__ dmod, T* __restrict__ hh, T* __restrict__ dab, float* __restrict__ colpart, int M, int nmod, float* __restrict__ dmod_acc, int spc, int natoms) {
+                                                              T* __restrict__ dmod, T* __restrict__ hh, T* __restrict__ dab, float* __restrict__ colpart, int M, int nmod, float* __restrict__ dmod_acc, int spc, int natoms,
+                                                              const T* __restrict__ wu /*UP: [NCH][HB,128]*/) {
   pdl_wait();
   extern __shared__ uint8_t sm_raw[];
   constexpr int NCH = 256 / HB;
-  constexpr int ABB = 2 * HB * 128 * ES, DBB = HB * 128 * ES, BUF = ABB + DBB;
+  constexpr int ABB = 2 * HB * 128 * ES, UBB = UP ? HB * 128 * ES : 0, DBB = HB * 128 * ES, BUF = ABB + UBB + DBB;
+  constexpr int DABW = UP ? 768 : 512;   // dab row width: [da | db] (UP: + du)
   const uint32_t base = (su(sm_raw) + 1023u) & ~1023u;
   float* red = reinterpret_cast<float*>(sm_raw + (base - su(sm_raw)) + 2 * BUF);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
@@ -26,7 +31,8 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void tr_bwd90(const T* __restri
   auto issue = [&](int j) {
     const uint32_t d = base + (j & 1) * BUF;
     load_w(d, wab + (size_t)j * 2 * HB * 128, 128, 2 * HB, 128, tid, NTHR);
-    load_w(d + ABB, wdt + (size_t)j * HB * 128, 128, HB, 128, tid, NTHR);
+    if (UP) load_w(d + ABB, wu + (size_t)j * HB * 128, 128, HB, 128, tid, NTHR);
+    load_w(d + ABB + UBB, wdt + (size_t)j * HB * 128, 128, HB, 128, tid, NTHR);
     cp_commit();
   };
   const int nsmp = 1;   // grouped mode: the samples are the warps of the CTA (see put_grp)
@@ -76,24 +82,43 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void tr_bwd90(const T* __restri
     float ab[HB];
     float dh[HB / 2];
     wg_gemm<2 * HB, KSTEPS>(ab, xt, wa, 0);
-    wg_gemm<HB, KSTEPS>(dh, dtt, wa + ABB, 0);
+    wg_gemm<HB, KSTEPS>(dh, dtt, wa + ABB + UBB, 0);
+#if UP   // Boltz-2's up-gate: u = x2 Wu_j^T recomputed
+    float au[HB / 2];
+    wg_gemm<HB, KSTEPS>(au, xt, wa + ABB, 0);
+#endif
     __syncthreads();
     if (jl + 2 < jper) issue(j + 2); else cp_commit();
     float h4[HB / 8][4], da4[HB / 8][4], db4[HB / 8][4];
+#if UP
+    float du4[HB / 8][4];
+#endif
 #pragma unroll
     for (int nt = 0; nt < HB / 8; ++nt) {
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
         const float a = round_store(ab[4 * nt + e]), b = round_store(ab[4 * (nt + HB / 8) + e]), d = round_store(dh[4 * nt + e]);
         const float s = sigm(a), sl = round_store(a * s);
+#if UP   // h = (silu(a) b) u: da = dh u b silu'(a), db = dh u silu(a), du = dh silu(a) b
+        const float uv = round_store(au[4 * nt + e]), sa = a * s, hab = sa * b, du_ = d * uv;   // the forward's unrounded silu(a) b
+        h4[nt][e] = hab * uv;
+        da4[nt][e] = du_ * b * s * (1.f + a * (1.f - s));
+        db4[nt][e] = du_ * sa;
+        du4[nt][e] = d * hab;
+        (void)sl;
+#else
         h4[nt][e] = sl * b;
         da4[nt][e] = d * b * s * (1.f + a * (1.f - s));
         db4[nt][e] = d * sl;
+#endif
       }
     }
     st_nt<HB / 8, false>(h4, hh + row0 * 256, 256, j * HB, g, t);
-    st_nt<HB / 8, false>(da4, dab + row0 * 512, 512, j * HB, g, t);
-    st_nt<HB / 8, false>(db4, dab + row0 * 512, 512, 256 + j * HB, g, t);
+    st_nt<HB / 8, false>(da4, dab + row0 * DABW, DABW, j * HB, g, t);
+    st_nt<HB / 8, false>(db4, dab + row0 * DABW, DABW, 256 + j * HB, g, t);
+#if UP
+    st_nt<HB / 8, false>(du4, dab + row0 * DABW, DABW, 512 + j * HB, g, t);
+#endif
   }
     __syncthreads();
   }  // samples

@@ -11,6 +11,10 @@ using namespace r90;
 #ifndef IDENT
 #define IDENT 0   // 1: the identity AdaLN (Chai-1): d s2 = dx2 n (the stored scale is 1 + W c)
 #endif
+#ifndef UP
+#define UP 0      // 1: Boltz-2's up-gate: dx2 = [da | db | du] [Wa; Wb; Wu] (K = 768, six hidden blocks)
+#endif
+constexpr int KB = UP ? 6 : 4;
 #ifndef NOOUT
 #define NOOUT 0   // 1: no gating query, no out projection (Chai-1): u = o, so do = du and dg = 0
 #endif
@@ -26,7 +30,7 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void post_bwd90(
     const T* __restrict__ sg, const T* __restrict__ o, const T* __restrict__ wabt /*[4 kb][2 half][64,128]*/, const T* __restrict__ wot /*[2][64,128]*/,
     T* __restrict__ da2_out, T* __restrict__ du_out, T* __restrict__ gated_out, T* __restrict__ do_out, T* __restrict__ dp, T* __restrict__ dmod,
     float* __restrict__ dd, float* __restrict__ colpart, int M, int nmod, int N, float eps, float* __restrict__ dmod_acc, int spc, int natoms,
-    float* __restrict__ part, int* __restrict__ ctr) {
+    float* __restrict__ part, int* __restrict__ ctr, const T* __restrict__ wut /*UP: [2 kb][2 half][64,128], the hidden blocks 4, 5*/) {
   pdl_wait();
   extern __shared__ uint8_t sm_raw[];
   constexpr int UNIT = 64 * 128 * ES;
@@ -40,13 +44,13 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void post_bwd90(
   // split-K over the four dab blocks (small row counts: grid.y = ns CTAs per tile, each its 4 / ns blocks; the last to finish sums the fp32
   // partials in a fixed order and runs the rest alone). Local unit ul: this CTA's wabt units, then the two Wo units (the finisher's).
 #if SPLITK
-  const int ns = (int)gridDim.y, cy = (int)blockIdx.y, kbper = 4 / ns, kb0 = cy * kbper;
+  const int ns = (int)gridDim.y, cy = (int)blockIdx.y, kbper = KB / ns, kb0 = cy * kbper;
 #else
-  constexpr int ns = 1, cy = 0, kbper = 4, kb0 = 0;
+  constexpr int ns = 1, cy = 0, kbper = KB, kb0 = 0;
 #endif
   auto issue = [&](int ul) {
-    const int s = ul < 2 * kbper ? 2 * kb0 + ul : 8 + (ul - 2 * kbper);
-    const T* src = s < 8 ? wabt + (size_t)s * 64 * 128 : wot + (size_t)(s - 8) * 64 * 128;
+    const int s = ul < 2 * kbper ? 2 * kb0 + ul : 2 * KB + (ul - 2 * kbper);
+    const T* src = s < 8 ? wabt + (size_t)s * 64 * 128 : s < 2 * KB ? wut + (size_t)(s - 8) * 64 * 128 : wot + (size_t)(s - 2 * KB) * 64 * 128;
     load_w(base + (ul & 1) * UNIT, src, 128, 64, 128, tid, NTHR);
     cp_commit();
   };
@@ -65,9 +69,9 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void post_bwd90(
   Tile c;  // A operand / working tile
   float acc0[32], acc1[32];
 #pragma unroll
-  for (int kb = 0; kb < 4; ++kb) {
+  for (int kb = 0; kb < KB; ++kb) {
     if (kb >= kbper) break;
-    ld_tile(c, dab + row0 * 512, 512, 128 * (kb0 + kb), g, t);
+    ld_tile(c, dab + row0 * (128 * KB), 128 * KB, 128 * (kb0 + kb), g, t);
     rna(c);
 #pragma unroll
     for (int hf = 0; hf < 2; ++hf) {
@@ -209,7 +213,7 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void post_bwd90(
   float g0[32], g1[32];
 #pragma unroll
   for (int hf = 0; hf < 2; ++hf) {
-    const int s = 8 + hf;
+    const int s = 2 * KB + hf;
     cp_wait<1>();
     proxy_fence();
     __syncthreads();

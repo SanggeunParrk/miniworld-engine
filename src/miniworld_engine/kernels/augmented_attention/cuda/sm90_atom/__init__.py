@@ -53,7 +53,8 @@ def _grp_bytes(nw: int, tf32: bool) -> int:
     return (1 if tf32 else 2) * nw * 16 * (128 + (4 if tf32 else 8)) * es
 
 
-def _smem(kind: str, tf32: bool) -> int:
+def _smem(kind: str, tf32: bool, options: tuple = ()) -> int:
+    up = 2 * 128 * 128 if ("UP" in options and kind.removesuffix("_g") in ("post", "tr_bwd")) else 0   # Wu chunks (two buffers)
     es = 4 if tf32 else 2
     if kind in ("finalize", "pack", "kqln_bwd"):
         return 0
@@ -74,12 +75,12 @@ def _smem(kind: str, tf32: bool) -> int:
         )
     if kind == "tr_bwd":
         return (
-            2 * 3 * 128 * 128
+            2 * 3 * 128 * 128 + up
             + 1024
             + nwarp(kind, tf32) * 128 * 4
             + (_grp_bytes(nwarp(kind, tf32), tf32) if grp else 0)
         )
-    return 2 * (2 * (128 // es) * 128 * es + 128 * 128) + 1024
+    return 2 * (2 * (128 // es) * 128 * es + 128 * 128) + 1024 + up   # post (UP: + a Wu chunk per buffer)
 
 
 #: warps per CTA of a kernel (default NWARP): the fp32 transition backward measured faster with two warpgroups (565 -> 492 us)
@@ -119,6 +120,7 @@ _KERNELS = {
 #:   PARS   the parallel block (RF3, Chai-1): the transition's AdaLN normalises the block input
 #:   NOOUT  no gating query and no out projection (Chai-1): u = o exactly (no out-projection GEMM, forward or backward)
 #:   KQLN   the affine LayerNorm of the flat q / k (RF3): in pre90, its backward the kqln_bwd90 row pass
+#:   UP     the up-gate transition (Boltz-2): Wu chunks beside [Wa; Wb] in post90 / tr_bwd90, a 6-block dx2 in post_bwd90 (the pack90 jobs wu, wut)
 #: (one AdaLN for q and k / v is a runtime mode of pre90 and the pre_bwd90_sh entry.)
 _OPTION_KERNELS = {
     "IDENT": ("cond", "cond_split", "post_bwd", "post_bwd_s", "pre_bwd", "pre_bwd_par", "pre_bwd_one", "cond_bwd", "cond_bwd_s",
@@ -126,6 +128,7 @@ _OPTION_KERNELS = {
     "PARS": ("post", "post_bwd", "post_bwd_s"),
     "NOOUT": ("post", "post_bwd", "post_bwd_s"),
     "KQLN": ("pre", "pre_split"),
+    "UP": ("post", "tr_bwd", "post_bwd", "post_bwd_s"),
 }
 
 
@@ -154,7 +157,7 @@ def kernel(kind: str, tf32: bool, device_index: int, options: tuple = ()):
         return driver.Kernel(
             kernel_cubin(kind, tf32, options),
             func,
-            _smem(kind.replace("_one", ""), tf32),
+            _smem(kind.replace("_one", ""), tf32, options),
             pdl=True,
         )
 
@@ -292,15 +295,17 @@ def _pack_torch(weights, tf32: bool) -> dict:
 
 class _Pack(ctypes.Structure):
     _fields_ = [
-        ("w", ctypes.c_uint64 * 27),
-        ("out", ctypes.c_uint64 * 16),
+        ("w", ctypes.c_uint64 * 28),
+        ("out", ctypes.c_uint64 * 17),
         ("wbf", ctypes.c_uint32),
         ("tf32", ctypes.c_int32),
     ]
 
 
 def _pack_all(weights, tf32: bool):
-    """(forward pack, backward pack) of the 27 parameters from ONE kernel launch (``pack90.cu``); cached per weight version / capture scope."""
+    """(forward pack, backward pack) of the 27 parameters from ONE kernel launch (``pack90.cu``); cached per weight version / capture scope.
+    A 28th parameter is the up-gate W_u (option UP): + ``wu`` (forward) and ``wut`` (backward)."""
+    up = len(weights) > 27
     dev = weights[0].device
     dt = torch.float32 if tf32 else torch.bfloat16
     hb = 128 // (4 if tf32 else 2)
@@ -325,7 +330,7 @@ def _pack_all(weights, tf32: bool):
             new(128, d=f32),
             new(*weights[_I["ln_pair"]].shape, d=f32),
             new(*weights[_I["wb"]].shape, d=f32),
-        ]
+        ] + ([new(nch, hb, 128), new(2, 2, 64, 128)] if up else [])   # UP: wu wut
         s = _Pack()
         for i, w in enumerate(weights):
             s.w[i] = w.data_ptr()
@@ -333,10 +338,8 @@ def _pack_all(weights, tf32: bool):
         for i, o in enumerate(outs):
             s.out[i] = o.data_ptr()
         s.tf32 = int(tf32)
-        kernel("pack", False, _dev(weights[0]))((64, 15, 1), (256, 1, 1), s)
-        cond, pre, wo, wab, wd, wabt, wot, wdt, wbt, wct, bias, bq, bs, gamma, wbias = (
-            outs
-        )
+        kernel("pack", False, _dev(weights[0]))((64, len(outs), 1), (256, 1, 1), s)
+        cond, pre, wo, wab, wd, wabt, wot, wdt, wbt, wct, bias, bq, bs, gamma, wbias = outs[:15]
         fwd = {
             "cond": cond,
             "bias": bias,
@@ -351,9 +354,11 @@ def _pack_all(weights, tf32: bool):
             "dtype": dt,
         }
         bwd = {"wabt": wabt, "wot": wot, "wdt": wdt, "wbt": wbt, "wct": wct}
+        if up:
+            fwd["wu"], bwd["wut"] = outs[15], outs[16]
         return fwd, bwd
 
-    return _capture.param_forms(f"sm90_atom_packall_{int(tf32)}", list(weights), build)
+    return _capture.param_forms(f"sm90_atom_packall_{int(tf32)}{'_up' if up else ''}", list(weights), build)
 
 
 def _kernel_pack_ok(weights) -> bool:
@@ -364,21 +369,21 @@ def _kernel_pack_ok(weights) -> bool:
 
 
 def pack(weights, tf32: bool) -> dict:
-    """The kernels' weight forms (bf16, or tf32-rounded fp32) of one block's 27 parameters; cached per weight version / capture scope."""
-    return (
-        _pack_all(weights, tf32)[0]
-        if _kernel_pack_ok(weights)
-        else _pack_torch(weights, tf32)
-    )
+    """The kernels' weight forms (bf16, or tf32-rounded fp32) of one block's 27 parameters (a 28th: the up-gate W_u, + ``wu``); cached per
+    weight version / capture scope."""
+    if _kernel_pack_ok(weights):
+        return _pack_all(weights, tf32)[0]
+    p = _pack_torch(weights[:27], tf32)
+    return {**p, "wu": _up_forms_torch(weights, tf32)["wu"]} if len(weights) > 27 else p
 
 
 def pack_bwd(weights, tf32: bool) -> dict:
-    """Transposed (K-major B operand) forms of the weights for the backward kernels; cached per weight version / capture scope."""
-    return (
-        _pack_all(weights, tf32)[1]
-        if _kernel_pack_ok(weights)
-        else _pack_bwd_torch(weights, tf32)
-    )
+    """Transposed (K-major B operand) forms of the weights for the backward kernels (a 28th parameter W_u: + ``wut``); cached per weight
+    version / capture scope."""
+    if _kernel_pack_ok(weights):
+        return _pack_all(weights, tf32)[1]
+    p = _pack_bwd_torch(weights[:27], tf32)
+    return {**p, "wut": _up_forms_torch(weights, tf32)["wut"]} if len(weights) > 27 else p
 
 
 _SM_FILL = 132 * 2  # CTAs the split aims for (about two per SM)
@@ -508,8 +513,26 @@ def post_fwd(
         int(nmod or M),
         float(eps),
         int(save),
+        p.get("wu"),
     )
     return (out, u, a2, x2, t) if save else out
+
+
+def _up_forms_torch(weights, tf32: bool) -> dict:
+    """The torch twin of ``pack90``'s up-gate jobs (weights not fp32 / bf16 contiguous): ``wu`` [nch][hb][128] (forward, one chunk of W_u
+    beside each [Wa_j; Wb_j]) and ``wut`` [2 kb][2 half][64][128] (the backward's hidden blocks 4, 5 of [Wa; Wb; Wu]^T); cached per weight
+    version / capture scope."""
+
+    def build():
+        wup = weights[27].detach()
+        wu = round_tf32(wup.float()) if tf32 else wup.to(torch.bfloat16)
+        hb = 128 // (4 if tf32 else 2)
+        return {
+            "wu": _prep(wu.view(256 // hb, hb, 128), tf32).contiguous(),
+            "wut": _prep(wu.t().contiguous().view(2, 64, 2, 128).permute(2, 0, 1, 3), tf32).contiguous(),
+        }
+
+    return _capture.param_forms(f"sm90_atom_up_{int(tf32)}", list(weights), build)
 
 
 def _pack_bwd_torch(weights, tf32: bool) -> dict:
@@ -560,7 +583,7 @@ def _pack_bwd_torch(weights, tf32: bool) -> dict:
     return _capture.param_forms(f"sm90_atom_pack_bwd_{int(tf32)}", list(weights), build)
 
 
-def tr_bwd(dy, t, mod, x2, p, pb, tf32: bool, nmod: int = 0, shared=None):
+def tr_bwd(dy, t, mod, x2, p, pb, tf32: bool, nmod: int = 0, shared=None, options: tuple = ()):
     """-> dt [M, 128], hh [M, 256], dab [M, 512], dmod, column sum of block 5 (d st bias). ``shared`` = (spc, natoms, SP): the shared-conditioning
     grouped-sample mode (``spc`` > 0, ``natoms`` = N, M a multiple of 4 N): dmod is then [M / (4 N), natoms, 768] of the activation dtype, one
     row per four samples (their modulation gradients summed in fp32 inside the CTA)."""
@@ -568,7 +591,7 @@ def tr_bwd(dy, t, mod, x2, p, pb, tf32: bool, nmod: int = 0, shared=None):
     dev = dy.device
     dt = torch.empty(M, DS, device=dev, dtype=dy.dtype)
     hh = torch.empty(M, 256, device=dev, dtype=dy.dtype)
-    dab = torch.empty(M, 512, device=dev, dtype=dy.dtype)
+    dab = torch.empty(M, 768 if "UP" in options else 512, device=dev, dtype=dy.dtype)   # [da | db] (UP: + du)
     nw = nwarp("tr_bwd", tf32)
     rows = nw * 16
     spc, natoms, sp = shared or (0, 0, 1)
@@ -582,7 +605,7 @@ def tr_bwd(dy, t, mod, x2, p, pb, tf32: bool, nmod: int = 0, shared=None):
     ns = _split_for(grid[0], tuple(s for s in (1, 2, 4, 8) if nch % s == 0))
     grid = (grid[0], ns, 1)
     colpart = torch.empty(grid[0] * grid[1], 128, device=dev, dtype=torch.float32)
-    kernel("tr_bwd_g" if shared else "tr_bwd", tf32, _dev(dy))(
+    kernel("tr_bwd_g" if shared else "tr_bwd", tf32, _dev(dy), options)(
         grid,
         (nw * 32, 1, 1),
         dy,
@@ -601,6 +624,7 @@ def tr_bwd(dy, t, mod, x2, p, pb, tf32: bool, nmod: int = 0, shared=None):
         dmod if shared else None,
         int(spc),
         int(natoms),
+        p.get("wu"),
     )
     return dt, hh, dab, dmod, colpart.sum(0)
 
@@ -632,7 +656,7 @@ def post_bwd(
     dd = torch.empty(M // n, 4, n, device=dev, dtype=torch.float32)
     spc, natoms, sp = shared or (0, 0, 1)
     tiles = M // ROWS
-    ns = _split_for(tiles, (1, 2, 4))
+    ns = _split_for(tiles, (1, 2, 3) if "UP" in options else (1, 2, 4))   # UP: six hidden blocks
     grid = (tiles, ns, 1)
     part = (
         torch.empty(tiles * ns * 16 * 512, device=dev, dtype=torch.float32)
@@ -675,6 +699,7 @@ def post_bwd(
         int(natoms),
         part,
         ctr,
+        pb.get("wut"),
     )
     cs = colpart.sum(0)
     return da2, du, gated, do, dd, cs[:128], cs[128:]
