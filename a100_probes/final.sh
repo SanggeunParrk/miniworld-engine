@@ -1,3 +1,0 @@
-ruff check src/miniworld_engine/kernels/integrations/augattn_sm80.py src/miniworld_engine/modules/token_dit.py src/miniworld_engine/modules/smooth_lddt.py src/miniworld_engine/kernels/smooth_lddt/cuda/sm100/__init__.py src/miniworld_engine/kernels/augmented_attention/cuda/prebuild_sm80.py
-sed 's/backends: \[cuda\]/backends: [cuda, triton]/; s/lengths: all/lengths: [384, 768]/' a100_probes/mw_speed_cuda.yaml > /tmp/w3_mw_final.yaml; echo "modes: [train]" >> /tmp/w3_mw_final.yaml
-python -m miniworld_engine.measure.speed /tmp/w3_mw_final.yaml --out /tmp/w3_mw_final.jsonl 2>&1 | grep "| cuda\|| triton\|| pytorch"
