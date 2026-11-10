@@ -19,7 +19,7 @@ def _augment_noise_op(coords: torch.Tensor, mask: torch.Tensor, rv: torch.Tensor
                       sigma_next: torch.Tensor, window: int, gamma: float, gamma_min: float, sigma_min: float, sigma_max: float, noise_scale: float,
                       variance_floor: float, clamp: bool) -> list[torch.Tensor]:
     """``[noisy, sc]`` of the sm_90a kernels (``sc[2:]`` is not written)."""
-    from miniworld_engine.kernels.sampler_ops.cuda import ext
+    from miniworld_engine.kernels.sampler_ops.cuda.sm80 import device_ext as ext
 
     noisy, sc = ext().augment_noise(coords, mask, rv, tr, noise, sigma, sigma_next, window, gamma, gamma_min, sigma_min, sigma_max, noise_scale,
                                     variance_floor, clamp)
@@ -43,7 +43,7 @@ def _align_euler_fake(noisy, denoised, mask, sc, sigma_next, step_scale):
 def _align_euler_op(noisy: torch.Tensor, denoised: torch.Tensor, mask: torch.Tensor, sc: torch.Tensor, sigma_next: torch.Tensor,
                     step_scale: float) -> torch.Tensor:
     """The Euler update of the sm_90a kernels (``cuda/sampler_ops.cu``)."""
-    from miniworld_engine.kernels.sampler_ops.cuda import ext
+    from miniworld_engine.kernels.sampler_ops.cuda.sm80 import device_ext as ext
 
     return ext().align_euler(noisy, denoised, mask, sc, sigma_next, step_scale)
 
@@ -61,7 +61,7 @@ def _pool_atoms_fake(x, idx, gather_mask, atom_mask):
 @opaque(fake=_pool_atoms_fake, name="sampler_ops_pool_atoms_sm90")
 def _pool_atoms_op(x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor, atom_mask: torch.Tensor) -> torch.Tensor:
     """The encoder pooling of the sm_90a kernels (``cuda/sampler_ops.cu``)."""
-    from miniworld_engine.kernels.sampler_ops.cuda import ext
+    from miniworld_engine.kernels.sampler_ops.cuda.sm80 import device_ext as ext
 
     return ext().pool_atoms(x, idx, gather_mask, atom_mask)
 

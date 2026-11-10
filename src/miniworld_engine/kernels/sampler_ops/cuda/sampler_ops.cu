@@ -33,16 +33,8 @@ struct Churn {
 
 // Programmatic dependent launch: a kernel of a chain starts its (input-only) prologue while the previous kernel drains, and ``pdl_wait`` blocks until that
 // kernel is complete and its writes are visible. A kernel launched without the attribute (the first of a chain) makes ``pdl_wait`` a no-op.
-// The A100 build (-DSAMPLER_NO_PDL, sm_80: no griddepcontrol) launches every kernel plainly: stream order alone chains them.
-#ifdef SAMPLER_NO_PDL
-__device__ __forceinline__ void pdl_wait() {}
-__device__ __forceinline__ void pdl_trigger() {}
-constexpr bool kPdl = false;
-#else
 __device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
 __device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
-constexpr bool kPdl = true;
-#endif
 
 template <typename... KArgs, typename... Args>
 void launch(void (*kernel)(KArgs...), dim3 grid, dim3 block, cudaStream_t stream, bool dependent, Args... args) {
@@ -51,7 +43,7 @@ void launch(void (*kernel)(KArgs...), dim3 grid, dim3 block, cudaStream_t stream
   cudaLaunchAttribute attr[1];
   attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
   attr[0].val.programmaticStreamSerializationAllowed = 1;
-  cfg.attrs = attr; cfg.numAttrs = (kPdl && dependent) ? 1 : 0;
+  cfg.attrs = attr; cfg.numAttrs = dependent ? 1 : 0;
   C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, kernel, static_cast<KArgs>(args)...));
 }
 
