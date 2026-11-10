@@ -24,6 +24,7 @@ import warnings
 import torch
 
 from miniworld_engine import settings
+from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.integrations.adaln_sm80 import (
     WIDTHS,
     Branch,
@@ -37,7 +38,6 @@ from miniworld_engine.kernels.integrations.adaln_sm80 import (
     like,
     master,
 )
-from miniworld_engine.kernels._compile import opaque
 
 BF = torch.bfloat16
 _FAILED = False
