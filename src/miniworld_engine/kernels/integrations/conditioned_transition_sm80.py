@@ -729,8 +729,5 @@ def update(
         )  # shared: the first sample's rows are the table
         cs = cs.to(compute_dtype).reshape(-1, dc).contiguous()
     eps = (float(module.ada_ln_in.ln_in.eps), float(module.ada_ln_in.ln_cond.eps))
-    if grad:
-        y = _Training.apply(residual, *eps, xs, cs, *_params(module))
-    else:
-        y = inference(xs, cs, *_params(module), *eps, residual)
+    y = _Training.apply(residual, *eps, xs, cs, *_params(module)) if grad else inference(xs, cs, *_params(module), *eps, residual)
     return y.reshape(x.shape)

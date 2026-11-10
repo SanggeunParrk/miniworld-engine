@@ -16,6 +16,7 @@ DispatchMode = Literal["auto", "off", "force"]
 
 @dataclasses.dataclass(frozen=True)
 class Settings:
+    engine_backend: Literal["auto", "triton"] = "auto"   # the pre-redesign engine-wide Triton switch
     autotune_kernels: frozenset[AutotuneKernel] = frozenset()
     run_autotune: bool = False
     capture: bool = False
