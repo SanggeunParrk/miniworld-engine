@@ -7,6 +7,7 @@ a step by a few launches; the churn arithmetic stays on device scalars (no host 
 
 import torch
 
+from miniworld_engine.modules import _anthropic
 from miniworld_engine.modules.functional import align_euler, augment_noise, pool_atoms
 from miniworld_engine.modules.primitives import BackendModule, random_input
 
@@ -137,7 +138,7 @@ class AlignEuler(BackendModule):
     """
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "cuda", "triton")
+    backends = ("pytorch", "anthropic", "cuda", "triton")
 
     def __init__(self, *, step_scale: float = 1.5, backend: str = "pytorch") -> None:
         super().__init__()
@@ -187,6 +188,34 @@ class AlignEuler(BackendModule):
 
         return align_euler_triton(noisy, denoised, mask, sc, sigma_next, self.step_scale)
 
+    # ------------------------------------------------------------------------------------------------------------- "anthropic"
+    # The rotation on Boltz-2's sync-free Kabsch kernel (boltz2/opt/forward/sampler/src/bz_sampler.py ``kabsch_rotation_device``, its
+    # ``align_jacobi64`` fast-tier lever: one program per batch element, a one-sided Jacobi SVD of the 3 x 3 covariance in fp64 registers,
+    # R = U diag(1, 1, det(U Vh)) Vh -- the rotation of :func:`~miniworld_engine.modules.functional.kabsch_rotation` for ``a @ R ~ b``). The
+    # only Kabsch kernels in the release are Boltz-2's and ESMFold2's copy of it (ef2_dit ``_kabsch3_kernel``); the centring, covariance and
+    # Euler update stay the module's statements, as in Boltz-2's step (the kernel replaces the eager gesvd section only).
+    _release = ("bz_sampler", "boltz2/opt/forward/sampler/src")
+
+    def _supports_anthropic(self, noisy, denoised, mask, sc, sigma_next) -> str | None:
+        return _first(_anthropic.unavailable(self._release[0], noisy.device, path=self._release[1]),
+                      self._supports_kernels(noisy, denoised, mask, sc, sigma_next))
+
+    def _forward_anthropic(self, noisy, denoised, mask, sc, sigma_next):
+        bz = _anthropic.load(self._release[0], path=self._release[1])
+        w = mask[None, :, None]
+        total = w.sum(1, keepdim=True)
+        cm = (noisy * w).sum(1, keepdim=True) / total
+        cr = (denoised * w).sum(1, keepdim=True) / total
+        a, b = noisy - cm, denoised - cr
+        cov = torch.einsum("bnc,bnd->bcd", a * w, b).contiguous()
+        rot = torch.empty_like(cov)
+        det = torch.empty(cov.shape[0], dtype=torch.float32, device=cov.device)
+        smin = torch.empty_like(det)
+        bz.kabsch_rotation_device(cov, rot, det, smin)
+        aligned = a @ rot + cr
+        sigma_hat = sc[0]
+        return aligned + self.step_scale * (sigma_next - sigma_hat) * ((aligned - denoised) / sigma_hat)
+
 
 class PoolAtoms(BackendModule):
     """The atom encoder's pooling of atom features to tokens, in one pass::
@@ -205,7 +234,7 @@ class PoolAtoms(BackendModule):
     """
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "cuda", "triton")
+    backends = ("pytorch", "anthropic", "cuda", "triton")
 
     #: Channels of ``make_inputs``' atom features (the atom encoder's ``d_single``) and atoms per token (the token-atoms layout's width).
     _C, _A = 128, 24
@@ -264,3 +293,23 @@ class PoolAtoms(BackendModule):
         from miniworld_engine.kernels.sampler_ops.triton.function import pool_atoms_triton
 
         return pool_atoms_triton(x, idx, gather_mask, atom_mask)
+
+    # ------------------------------------------------------------------------------------------------------------- "anthropic"
+    # AlphaFold 3's kit kernel for exactly this statement (af3_torch/opt/forward/dtk/af3t_token_agg.py ``token_mean_relu``, the ``token_agg``
+    # lever of the atom-attention encoder): per (sample, token, channel block) one program reads the token's gathered rows once (masked slots
+    # not read), relu, the weights w = atom_mask * gather_mask and the hoisted 1 / clamp(sum atom_mask, 1e-10) (``operands``); fp32 out, cast
+    # to x's dtype like the reference. relu(g x) = g relu(x) needs g >= 0: a bool / non-negative gather mask. The other pooling kernels of the
+    # release (dtk_kernels.seg_reduce, of3_sampler.token_agg, Boltz-2 _k_segmean, ESMFold2 _e6_segmean) pool a sorted atom -> token map, not
+    # this token-atoms gather.
+    _release = ("af3t_token_agg", "af3_torch/opt/forward/dtk")
+
+    def _supports_anthropic(self, x, idx, gather_mask, atom_mask) -> str | None:
+        why = _first(_anthropic.unavailable(self._release[0], x.device, path=self._release[1]), self._supports_kernels(x, idx, gather_mask, atom_mask))
+        if why is None and gather_mask.dtype != torch.bool and bool((gather_mask < 0).any()):
+            return "a negative gather mask weight (the kernel applies the weight after the relu)"
+        return why
+
+    def _forward_anthropic(self, x, idx, gather_mask, atom_mask):
+        agg = _anthropic.load(self._release[0], path=self._release[1])
+        ops = agg.operands(idx, gather_mask, atom_mask)
+        return agg.token_mean_relu(x, ops["agg_idx"], ops["agg_w"], ops["agg_inv"]).to(x.dtype)
