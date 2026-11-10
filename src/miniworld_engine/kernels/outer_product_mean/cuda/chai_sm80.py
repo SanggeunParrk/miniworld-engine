@@ -44,10 +44,10 @@ def chai_projbwd(x, mask, da, db, gamma, beta, stats, wlr):
 
 def chai_products(a, b, mask, s, n):
     """O [8, N K, N K] = a_g^T b_g per group (a, b [8, S N, 8]): with a mask the CUTLASS product that skips the tokens masked in every MSA row
-    (``ogemm_sm80``; their blocks are exactly 0), one launch per group; without one the cuBLAS batched GEMM."""
+    (``ogemm_sm80``; their blocks are exactly 0), one launch per group, from L 384; else the cuBLAS batched GEMM."""
     import torch
 
-    if mask is None:
+    if mask is None or n < 384:   # short lengths: the eight launches cost more than the skipped blocks save (measured L128 1.4x)
         return torch.bmm(a.view(8, s, n * 8).transpose(1, 2), b.view(8, s, n * 8))
     from . import ogemm_sm80
 
