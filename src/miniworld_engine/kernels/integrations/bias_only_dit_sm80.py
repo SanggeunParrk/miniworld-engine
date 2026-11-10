@@ -32,7 +32,7 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels.integrations.adaln_sm80 import _mm_op, _tf32, _wgrad, cached
+from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32, _wgrad, cached
 
 BF = torch.bfloat16
 F32 = torch.float32
@@ -87,7 +87,7 @@ def refusal(module, single, cond, pair, mask, bias, grad: bool) -> str | None:
         return f"A100: parameters must be {' / '.join(str(w) for w in wdt)} for {dt} activations"
     if single.ndim != 4 or single.shape[1] != 1 or cond.ndim != 4:
         return f"A100: single / cond must be [A, 1, L, d], got {tuple(single.shape)} / {tuple(cond.shape)}"
-    a, _, length, d = single.shape
+    a, _, length, _ = single.shape
     if length % 128 or (grad and length > 1024):
         return f"A100: L {length} (a multiple of 128; training at most 1024)"
     if tuple(cond.shape[1:3]) != (1, length) or cond.shape[0] not in (1, a):
