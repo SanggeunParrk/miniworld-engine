@@ -13,6 +13,7 @@ from typing import Literal
 AutotuneKernel = Literal["transition", "tri_attention", "adaln"]
 DispatchMode = Literal["auto", "off", "force"]
 
+
 @dataclasses.dataclass(frozen=True)
 class Settings:
     autotune_kernels: frozenset[AutotuneKernel] = frozenset()
