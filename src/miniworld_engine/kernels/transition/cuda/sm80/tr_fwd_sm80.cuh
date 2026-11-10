@@ -99,9 +99,6 @@ DEVI void mma16816_h(uint32_t (&d)[2], const uint32_t (&a)[4], uint32_t b0, uint
   asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};\n"
                : "+r"(d[0]), "+r"(d[1]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
-DEVI uint32_t pack_f16(float lo, float hi) {
-  uint32_t r; asm("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(r) : "f"(hi), "f"(lo)); return r;
-}
 DEVI float2 unpack_f16(uint32_t v) { return __half22float2(*reinterpret_cast<const __half2*>(&v)); }
 DEVI uint32_t tanh_f16x2(uint32_t v) { uint32_t r; asm("tanh.approx.f16x2 %0, %1;\n" : "=r"(r) : "r"(v)); return r; }
 DEVI uint32_t hfma2(uint32_t a, uint32_t b, uint32_t c) { uint32_t r; asm("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(a), "r"(b), "r"(c)); return r; }
