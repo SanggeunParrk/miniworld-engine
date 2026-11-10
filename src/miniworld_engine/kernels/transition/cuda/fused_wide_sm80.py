@@ -119,6 +119,8 @@ def _tiles(m: int, d: int, h: int) -> tuple[int, int]:
         res = 3  # 128 x 64 tile: the best at D <= 128
     elif d == 256 and m < 32768:
         res = 2  # 64 x 128: 256 CTAs of the 128-row tile are 1.2 waves of the 216 resident slots, 512 are 2.4
+    elif d == 256 and h <= 512:
+        res = 5  # 128 x 128 with a 5-slice ring (80 KB: two CTAs per SM): 3-5 % faster than config 0 at 65 k .. 262 k rows (token_pair d 256 n 2)
     else:
         res = 0
     return dual, res

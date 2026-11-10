@@ -649,8 +649,8 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) gate_f16_kernel(const DualPa
 }
 
 // ===================================================================================================================== GEMM + residual
-#ifndef RES_PF_SLICE
-#define RES_PF_SLICE 0   // the k slice behind which gemm_res_kernel prefetches its residual tile into L2
+#ifndef RES_PF_LEAD
+#define RES_PF_LEAD 4    // gemm_res_kernel prefetches its residual tile into L2 behind k slice KT - RES_PF_LEAD (measured at D 256 / H 512, KT 16: lead 4 is best; earlier prefetches are partly evicted again)
 #endif
 // a 128-byte line into L2 (no register, no shared memory; a hint: nothing waits on it)
 DEVI void prefetch_l2(const void* p) { asm volatile("prefetch.global.L2 [%0];\n" ::"l"(p)); }
@@ -695,11 +695,11 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) gemm_res_kernel(const ResPar
     for (int j = 0; j < L::NJA; ++j) pa[j] = reinterpret_cast<const char*>(p.a + (size_t)(m0 + ra + j * L::RPJA) * p.K + koff) + ca * 16;
 #pragma unroll
     for (int j = 0; j < L::NJB; ++j) pb[j] = reinterpret_cast<const char*>(p.w + (size_t)(n0 + rb + j * L::RPJB) * p.K + koff) + cb * 16;
-    // the bf16 residual tile is pulled into L2 behind slice RES_PF_SLICE (prefetch.global.L2, no registers / shared memory): the epilogue's residual loads then hit L2
+    // the bf16 residual tile is pulled into L2 behind slice KT - RES_PF_LEAD (prefetch.global.L2, no registers / shared memory): the epilogue's residual loads then hit L2
     // instead of exposing a DRAM round trip after the mainloop (measured at D 256 / H 512)
     auto pre = [&](int kt) {
       if constexpr (!C::F16) {
-        if (kt == (KT > RES_PF_SLICE ? RES_PF_SLICE : 0) && p.res != nullptr) {
+        if (kt == (KT > RES_PF_LEAD ? KT - RES_PF_LEAD : 0) && p.res != nullptr) {
           constexpr int LPR = C::BN * 2 / 128;            // 128-byte lines per residual tile row
           static_assert(LPR >= 1 && LPR * 128 == C::BN * 2, "residual prefetch: BN a multiple of 64");
 #pragma unroll
