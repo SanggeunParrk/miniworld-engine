@@ -68,7 +68,8 @@ python -m miniworld_engine.judge status                 # token counts per (kind
   to answer each.
 - `--redo STATUS ...`: also owe current tokens whose result has that status (after a measurer fix that changes no other result, so its
   version stays).
-- `--again BACKEND ...`: also owe current tokens of those backends (a person asked for it).
+- `--again BACKEND ...`: also owe current tokens of those backends (a person asked for it). `--again-dtype DTYPE ...` restricts it to those case dtypes
+  (e.g. `--again triton cuda --again-dtype float32` after a rule that changes only fp32 matmuls, like the TF32 rule).
 - `--plan DIR` writes the owed run: `DIR/cfg/<kind>.<Module>.yaml` per (kind, module), the canonical config narrowed to the owed rows,
   lengths, backends (plus `pytorch`), dtypes and modes (a superset of the owed cases when they do not form a product: the extra cases are
   measured again, harmlessly), and four groups `DIR/G1` .. `DIR/G4` balanced by owed-case count, one line `<kind> <Module> <cfg path>`

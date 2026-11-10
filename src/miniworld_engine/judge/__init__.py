@@ -254,10 +254,11 @@ def required(kind: str):
 
 
 def owed(now: Now, plan_dir: str | None, redo: tuple[str, ...] = (), again: tuple[str, ...] = (), again_modules: tuple[str, ...] = (),
-         again_kinds: tuple[str, ...] = ()) -> int:
+         again_kinds: tuple[str, ...] = (), again_dtypes: tuple[str, ...] = ()) -> int:
     """``redo``: result statuses (e.g. ``failed``) measured again although current (after a measurer fix that changes no other result,
     so its version stays). ``again``: backends measured again although current (a person asked for it). ``again_modules`` (optionally of ``again_kinds`` only):
-    module classes measured again although current (a measurer fix that changes only their results)."""
+    module classes measured again although current (a measurer fix that changes only their results). ``again_dtypes``: restrict
+    ``again`` to these case dtypes (e.g. ``float32`` after a rule that only changes fp32 matmuls)."""
     tokens, given = load_tokens(now.gpu), answers()
     tally, reasons, questions = collections.Counter(), collections.Counter(), collections.Counter()
     todo = collections.defaultdict(lambda: {"rows": set(), "lengths": set(), "backends": set(), "dtypes": set(), "modes": set(), "n": 0})
@@ -271,7 +272,7 @@ def owed(now: Now, plan_dir: str | None, redo: tuple[str, ...] = (), again: tupl
                 state, why = "owed", [("no token", None, None)]
             elif rec["module"] in again_modules and (not again_kinds or kind in again_kinds):
                 state, why = "owed", [(f"again {rec['module']}", None, None)]
-            elif rec["backend"] in again:
+            elif rec["backend"] in again and (not again_dtypes or rec["dtype"] in again_dtypes):
                 state, why = "owed", [(f"again {rec['backend']}", None, None)]
             elif tok["result"].get("status") in redo:
                 state, why = "owed", [(f"redo {tok['result'].get('status')}", None, None)]
@@ -355,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--again", nargs="*", default=(), help="backends to measure again although current (e.g. pytorch cueq anthropic)")
     p.add_argument("--again-module", nargs="*", default=(), help="module classes to measure again although current")
     p.add_argument("--again-kind", nargs="*", default=(), choices=tuple(CONFIGS), help="restrict --again-module to these kinds")
+    p.add_argument("--again-dtype", nargs="*", default=(), help="restrict --again to these case dtypes (e.g. float32)")
     p = sub.add_parser("sign", help="answer a question for every case with that (part, old, new)")
     p.add_argument("part")
     p.add_argument("old")
@@ -366,7 +368,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "issue":
         return issue(a.records, Now(a.gpu))
     if a.cmd == "owed":
-        return owed(Now(a.gpu), a.plan, tuple(a.redo), tuple(a.again), tuple(a.again_module), tuple(a.again_kind))
+        return owed(Now(a.gpu), a.plan, tuple(a.redo), tuple(a.again), tuple(a.again_module), tuple(a.again_kind),
+                    tuple(a.again_dtype))
     if a.cmd == "sign":
         return sign(a.part, a.old, a.new, a.answer, a.reason)
     return status(a.gpu)
