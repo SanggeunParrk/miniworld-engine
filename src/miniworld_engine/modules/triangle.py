@@ -229,7 +229,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         from miniworld_engine.modules import _anthropic
 
         prov = _anthropic.load("opt_core.kernels.triattn")
-        return prov, _anthropic.kernel_selection(prov, "9.0", {torch.bfloat16: "bf16", torch.float32: "fp32"}[pair.dtype], self._head_dim(), self.n_head, int(pair.shape[1]), "fwd", word="fast",
+        return prov, _anthropic.kernel_selection(prov, "{}.{}".format(*torch.cuda.get_device_capability(pair.device)), {torch.bfloat16: "bf16", torch.float32: "fp32"}[pair.dtype], self._head_dim(), self.n_head, int(pair.shape[1]), "fwd", word="fast",
                                                  form="keypad")
 
     def _supports_anthropic(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> str | None:
@@ -272,8 +272,11 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         """``("sm90" | "dh", None)``: the H100 path that serves the call, else ``(None, reason)``. Shapes / dtypes / flags only."""
         if not pair.is_cuda:
             return None, "the kernels run on CUDA tensors only"
-        if torch.cuda.get_device_capability(pair.device) != (9, 0):
-            return None, "the cuda backend is the H100 (sm_90a) kernels"
+        cap = torch.cuda.get_device_capability(pair.device)
+        if cap == (8, 0):
+            return self._cuda_route_sm80(pair, mask)
+        if cap != (9, 0):
+            return None, "the cuda backend is the H100 (sm_90a) / A100 (sm_80) kernels"
         why = self._core_refusal(pair, mask, weights=False)
         if why is not None:
             return None, why
@@ -298,6 +301,21 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
             return "dh", None
         return None, f"d_pair {c}, head width {d}, L {pair.shape[1]}: outside the H100 kernels (heads 16 / 32 / 64, d_pair <= 512, L % 16)"
 
+    def _cuda_route_sm80(self, pair: torch.Tensor, mask: torch.Tensor | None) -> tuple[str | None, str | None]:
+        """``("sm80" | "sm80_train", None)``: the A100 path (``kernels/integrations/triattn_sm80``: the whole update, inference or with
+        autograd), else ``(None, reason)``. The standard orientation without projection biases only (TriangleAttention; the starting nodes of
+        AF3 / Chai-1), bf16, d_pair 128 / 4 x 32 or d_pair 64 .. 512 with heads of 16 / 32 channels, L % 128 == 0."""
+        why = self._core_refusal(pair, mask, weights=False)
+        if why is not None:
+            return None, why
+        from miniworld_engine.kernels.integrations import triattn_sm80
+
+        trains = self._trains(pair)
+        why = triattn_sm80.refusal(self, pair, mask, train=trains)
+        if why is not None:
+            return None, why
+        return ("sm80_train" if trains else "sm80"), None
+
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> str | None:
         return self._cuda_route(pair, mask)[1]
 
@@ -305,6 +323,10 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         if self.dead and not (self.untransposed_output or self.dual_output or self.training or torch.is_grad_enabled()):
             return pair
         route, _ = self._cuda_route(pair, mask)
+        if route in ("sm80", "sm80_train"):
+            from miniworld_engine.kernels.integrations import triattn_sm80
+
+            return triattn_sm80.forward(self, pair, mask) if route == "sm80" else triattn_sm80.forward_train(self, pair, mask)
         if route == "sm90":
             from miniworld_engine.kernels.integrations import triattn_h100_sm90
 
@@ -734,8 +756,11 @@ def _trimul_cuda_route(module, pair, mask, dropout_p, *, bidirectional: bool) ->
     ``(None, reason)``. bf16 only (the H100 TriMul policy: no fp32 TriMul kernel). Shapes / dtypes / flags only."""
     if not pair.is_cuda:
         return None, "the kernels run on CUDA tensors only"
-    if torch.cuda.get_device_capability(pair.device) != (9, 0):
-        return None, "the cuda backend is the H100 (sm_90a) kernels"
+    cap = torch.cuda.get_device_capability(pair.device)
+    if cap == (8, 0):
+        return _trimul_cuda_route_sm80(module, pair, mask)
+    if cap != (9, 0):
+        return None, "the cuda backend is the H100 (sm_90a) / A100 (sm_80) kernels"
     if pair.dtype != torch.bfloat16:
         return None, f"dtype {pair.dtype}: the H100 TriMul kernels are bf16 only (no fp32 TriMul, by policy)"
     if pair.dim() != 4 or pair.shape[1] != pair.shape[2]:
@@ -756,10 +781,31 @@ def _trimul_cuda_route(module, pair, mask, dropout_p, *, bidirectional: bool) ->
                   f"{'' if bidirectional else '_single'}: tile table, lengths, eps 1e-5, fp32 LN affine)")
 
 
+def _trimul_cuda_route_sm80(module, pair, mask) -> tuple[str | None, str | None]:
+    """``("sm80", None)``: the A100 TriMul (``kernels/integrations/trimul_sm80``: the D128 fused set, the wide set for D 64 / 256 / 384 / 512,
+    inference and training, one plane per launch), else ``(None, reason)``. bf16 only (no fp32 TriMul, by policy)."""
+    if pair.dtype != torch.bfloat16:
+        return None, f"dtype {pair.dtype}: the A100 TriMul kernels are bf16 only (no fp32 TriMul, by policy)"
+    if pair.dim() != 4 or pair.shape[1] != pair.shape[2]:
+        return None, f"pair must be [B, L, L, d_pair], got {tuple(pair.shape)}"
+    if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != tuple(pair.shape[:2])):
+        return None, "mask must be a bool [B, L] residue mask"
+    from miniworld_engine.kernels.integrations import trimul_sm80
+
+    why = trimul_sm80.refusal(module, pair, mask)
+    return (None, why) if why is not None else ("sm80", None)
+
+
 def _trimul_cuda_forward(module, pair, mask, dropout_p, *, bidirectional: bool) -> torch.Tensor:
     from miniworld_engine.kernels.integrations import trimul_h100
 
     route, _ = _trimul_cuda_route(module, pair, mask, dropout_p, bidirectional=bidirectional)
+    if route == "sm80":
+        from miniworld_engine.kernels.integrations import trimul_sm80
+
+        dropout_p = module.p_drop if dropout_p is None else dropout_p
+        scale = dropout_scale(pair, dropout_p, 1) if dropout_p and dropout_p > 0.0 and module.training else None
+        return trimul_sm80.update(module, pair, mask, scale, bidirectional=bidirectional)
     if route == "infer":
         return trimul_h100.update_inference(module, pair, mask, bidirectional=bidirectional)
     dropout_p = module.p_drop if dropout_p is None else dropout_p
@@ -1022,7 +1068,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         from miniworld_engine.modules import _anthropic
 
         prov = _anthropic.load("opt_core.kernels.trimul")
-        return prov, _anthropic.kernel_selection(prov, "9.0", {torch.bfloat16: "bf16", torch.float32: "fp32"}[pair.dtype], int(pair.shape[-1]), self.d_hidden, int(pair.shape[1]),
+        return prov, _anthropic.kernel_selection(prov, "{}.{}".format(*torch.cuda.get_device_capability(pair.device)), {torch.bfloat16: "bf16", torch.float32: "fp32"}[pair.dtype], int(pair.shape[-1]), self.d_hidden, int(pair.shape[1]),
                                                  "outgoing" if self.outgoing else "incoming", word="fast",
                                                  exclude=self._ANTHROPIC_EXCLUDED_ROWS, batch=int(pair.shape[0]))
 

@@ -211,6 +211,8 @@ class AttentionPairBias(BackendModule, MasterWeights):
     # float32 activations with float32 parameters (the TF32 path: attn_tf32 core, fp32 row / pair kernels, fp32 GEMMs), one batch row,
     # 8 x 48 / 12 x 32 / 16 x 24 / 24 x 16 heads at d_single 384 or 16 x 32 at 512, d_pair 128, 256 / 384 (8 or 16 heads) or 512 (16 heads),
     # gate_bias, no QK-norm, no extra_pair_bias, L a multiple of 128; everything else is refused, never run elsewhere.
+    # A100 (sm_80): kernels/integrations/attention_pair_bias_sm80.py (bf16 activations, B = 1, the same head layouts, d_pair 128, any L, no
+    # QK-norm, no gate_bias, no extra_pair_bias; inference and training); its ``refusal`` is the range there.
     def _supports_cuda(self, single, pair, mask=None, extra_pair_bias=None) -> str | None:
         from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as native
 
@@ -219,6 +221,10 @@ class AttentionPairBias(BackendModule, MasterWeights):
             return why
         if extra_pair_bias is not None:
             return "extra_pair_bias: the kernels compute the bias from pair inside the pass and take no additive logit input"
+        if single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0):
+            from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
+
+            return sm80.refusal(self, single, pair, mask, self._cuda_grad(single, pair))
         return native.refusal(self, single, pair, mask, self._cuda_grad(single, pair))
 
     def _cuda_grad(self, single, pair) -> bool:
@@ -229,6 +235,12 @@ class AttentionPairBias(BackendModule, MasterWeights):
 
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return single
+        if torch.cuda.get_device_capability(single.device) == (8, 0):
+            from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
+
+            if self._cuda_grad(single, pair):
+                return sm80.update_train(self, single, pair, mask)
+            return sm80.update_inference(self, single, pair, mask)
         if self._cuda_grad(single, pair):
             return native.update_train(self, single, pair, mask)
         return native.update_inference(self, single, pair, mask)

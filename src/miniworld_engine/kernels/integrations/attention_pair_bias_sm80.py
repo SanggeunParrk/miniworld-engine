@@ -25,7 +25,6 @@ import torch
 
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
-from miniworld_engine.modules.exceptions import ImplementationType
 
 DP = 128
 SHAPES = ((8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
@@ -173,59 +172,50 @@ def _sm80():
     return sm80
 
 
+def refusal(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool
+) -> str | None:
+    """Why the A100 (sm_80) path cannot take this call (``grad``: the training Function, else the inference op), or ``None``.
+    The ``cuda`` backend of ``AttentionPairBias`` states exactly this on an A100."""
+    if not settings.current().apb_sm80:
+        return "settings.apb_sm80 is off"
+    if not single.is_cuda or not _is_a100(single.device):
+        return "the A100 (sm_80) kernels only"
+    H, D = module.n_head, single.shape[-1]
+    if module.use_qk_norm:
+        return "per-head q / k RMSNorm (the packed q | k | v | g projection has no norm between the GEMM and the core)"
+    if getattr(module, "gate_bias", 0.0):
+        return "gate_bias: the A100 kernels have no gate constant"
+    if single.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
+        return f"dtype {single.dtype} / {pair.dtype}: bfloat16 activations only (parameters bf16 or fp32 masters)"
+    if single.ndim != 3 or single.shape[0] != 1 or not single.is_contiguous():
+        return "single must be one contiguous [1, L, d_single] row (B == 1)"
+    if (H, D) not in SHAPES or tuple(module.to_query.weight.shape) != (D, D):
+        return f"{H} heads x d_single {D}: the kernels are built for (heads, d_single) in {SHAPES} with n_head * d_hidden == d_single"
+    if tuple(module.to_bias.weight.shape) != (H, DP):
+        return f"d_pair {module.to_bias.weight.shape[1]}: the A100 pair kernels take d_pair {DP}"
+    if module.ln_single.weight is None or module.ln_pair.weight is None:
+        return "the kernels take the affine LayerNorms"
+    L = single.shape[1]
+    if L < 1 or tuple(pair.shape) != (1, L, L, DP) or not pair.is_contiguous():
+        return f"pair must be one contiguous [1, {L}, {L}, {DP}] row"
+    if mask is not None and (tuple(mask.shape) != (1, L) or mask.dtype != torch.bool):
+        return f"mask must be a bool [1, {L}] key mask"
+    if grad and H == 24 and not settings.current().apb_sm80_train16:
+        return "24 x 16 heads in training: settings.apb_sm80_train16 is off"
+    heads_dim = _rows().GEOMETRY[(H, D)][1]
+    idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
+    if not _sm80().supported_gate(torch.bfloat16, _pad(L), H * heads_dim, H, idx):
+        return f"L {L}, {H} x {heads_dim}: outside the A100 attention core's gate (augmented_attention/cuda/sm80.supported_gate)"
+    if not _loads():
+        return "the A100 APB extensions failed to build / load"
+    return None
+
+
 def _eligible(
     module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 ) -> bool:
-    if not settings.current().apb_sm80:
-        return False
-    if (
-        module.implementation != ImplementationType.MINIWORLD
-        or settings.current().engine_backend == "triton"
-    ):
-        return False
-    H, D = module.n_head, single.shape[-1]
-    if (
-        module.use_qk_norm
-        or (H, D) not in SHAPES
-        or tuple(module.to_query.weight.shape) != (D, D)
-    ):
-        return False
-    if (
-        tuple(module.to_bias.weight.shape) != (H, DP)
-        or module.ln_single.weight is None
-        or module.ln_pair.weight is None
-    ):
-        return False
-    if (
-        not single.is_cuda
-        or single.dtype != torch.bfloat16
-        or pair.dtype != torch.bfloat16
-    ):
-        return False
-    if (
-        single.ndim != 3
-        or single.shape[0] != 1
-        or single.shape[2] != D
-        or not single.is_contiguous()
-    ):
-        return False
-    L = single.shape[1]
-    if L < 1 or tuple(pair.shape) != (1, L, L, DP) or not pair.is_contiguous():
-        return False
-    if mask is not None and tuple(mask.shape) != (1, L):
-        return False
-    if not _is_a100(single.device):
-        return False
-    heads_dim = _rows().GEOMETRY[(H, D)][1]
-    idx = (
-        single.device.index
-        if single.device.index is not None
-        else torch.cuda.current_device()
-    )
-    return (
-        _sm80().supported_gate(torch.bfloat16, _pad(L), H * heads_dim, H, idx)
-        and _loads()
-    )
+    return refusal(module, single, pair, mask, torch.is_grad_enabled()) is None
 
 
 def serves_inference(

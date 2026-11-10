@@ -31,9 +31,28 @@ def acc_n(heads: int, d: int = 384, dp: int = DP) -> int:
 
 def ext(shadow: bool = False):
     """The row / pair extension. ``shadow`` (H100 only) also builds the fp32 pair-weight oracle (``integrations.attention_pair_bias_b200.EXACT_DWB``), which
-    needs CUTLASS 4.2 headers (``CUTLASS_PATH``); the default build has no such dependency."""
-    arch = "90a" if torch.cuda.get_device_capability() == (9, 0) else "100"
+    needs CUTLASS 4.2 headers (``CUTLASS_PATH``); the default build has no such dependency. An A100 gets the sm_80 build (``ext_sm80``)."""
+    cap = torch.cuda.get_device_capability()
+    if cap == (8, 0):
+        return ext_sm80()
+    arch = "90a" if cap == (9, 0) else "100"
     return _ext(arch, shadow and arch == "90a")
+
+
+@functools.lru_cache(maxsize=None)
+def ext_sm80():
+    """The A100 (sm_80) build: ``apb_rows_sm80.cu`` with ``-DAPB_SM80`` (its pair passes from ``apb_pair_bias_sm80.cuh``, the C++ steps from
+    ``step_sm80.cuh``); driven by ``kernels/integrations/attention_pair_bias_sm80.py``."""
+    from ...._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+
+    ensure_cuda_home()
+    return load_extension(
+        name="apb_rows_cuda_sm80",
+        sources=[str(_dir / "apb_rows_sm80.cu")],
+        extra_include_paths=[str(_dir)],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+                           "-U__CUDA_NO_BFLOAT162_OPERATORS__", "-DAPB_SM80", *gencodes("80")],
+        extra_cflags=["-std=c++17"], verbose=False)
 
 
 @functools.lru_cache(maxsize=None)
@@ -59,12 +78,16 @@ def _ext(arch: str, shadow: bool = False):
 
 
 def pair_bias(pair2d: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None, L: int, eps: float, neg: float,
-              saved: bool = False):
+              saved: bool = False, padded: int | None = None):
     """bias [H, L, L] bf16 = wf . LN(pair) (no LN affine: fold its weight into ``wf`` [H, dp] bf16; dp 128 with H = 8, 12, 16 or 24,
     or a wide pair of ``PAIR_WIDTHS``), ``neg`` on the keys where ``mask`` [L] is False. pair2d [L L, dp] bf16 contiguous, L a
     multiple of 16. ``saved`` (a wide pair's training forward): returns (bias, row stats [L L, 2], unmasked bias [H, L, L] fp32),
-    what ``pair_bias_bwd`` reads for a wide pair."""
-    out = torch.empty(wf.shape[0], L, L, device=pair2d.device, dtype=torch.bfloat16)
+    what ``pair_bias_bwd`` reads for a wide pair.
+
+    On an A100 (H = 8, 12 or 16; dp 128; any L): ``padded`` (default L) is the attention core's length, L rounded up to a multiple of
+    128; the bias is [H, padded, padded] with ``neg`` on every key >= L and in every query row >= L."""
+    n = L if padded is None else padded
+    out = torch.empty(wf.shape[0], n, n, device=pair2d.device, dtype=torch.bfloat16)
     if not saved:
         ext().pair_bias_fwd(pair2d, wf, mask, out, int(L), float(eps), float(neg))
         return out
@@ -74,16 +97,28 @@ def pair_bias(pair2d: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None,
     return out, st, bu
 
 
+def pair_bias_raw(pair2d: torch.Tensor, wb: torch.Tensor, lpw: torch.Tensor, ws: float, mask: torch.Tensor | None, L: int, eps: float,
+                  neg: float, padded: int) -> torch.Tensor:
+    """``pair_bias`` (A100) with Wf formed in the kernel from the parameters as they are: ``wb`` = to_bias.weight [H, 128] (bf16 or fp32), ``lpw`` = ln_pair.weight [128]
+    fp32, Wf = bf16(wb lpw ws). Nothing to pack beforehand, so the pass can start with the step on a stream of its own."""
+    out = torch.empty(wb.shape[0], padded, padded, device=pair2d.device, dtype=torch.bfloat16)
+    ext().pair_bias_fwd_raw(pair2d, wb, lpw, float(ws), mask, out, int(L), float(eps), float(neg))
+    return out
+
+
 def pair_bias_bwd(pair2d: torch.Tensor, dbias: torch.Tensor, wf: torch.Tensor, L: int, eps: float, acc: torch.Tensor | None = None,
-                  d: int = 384, saved: tuple[torch.Tensor, torch.Tensor] | None = None):
+                  d: int = 384, saved: tuple[torch.Tensor, torch.Tensor] | None = None, grid: int = 0):
     """(dpair [L L, dp] bf16, dWf [H, dp] fp32, per-head dbias sums [H]) of ``pair_bias`` (without the mask: masked keys
     carry zero dbias). dWf and the sums are added into ``acc`` (``acc_n(H, d, dp)`` floats, zeroed by the caller) when given; the
-    returned dWf / sums are views of it. A wide pair (dp > 128) takes ``saved`` = (row stats, unmasked bias) of its forward."""
+    returned dWf / sums are views of it. A wide pair (dp > 128) takes ``saved`` = (row stats, unmasked bias) of its forward.
+    A100: ``grid`` CTAs of the persistent pass (0: the full occupancy)."""
     heads, dp = wf.shape
     if acc is None:
         acc = torch.zeros(acc_n(heads, d, dp), device=pair2d.device)
     dz = torch.empty_like(pair2d)
-    if dp == DP:
+    if dp == DP and grid > 0:
+        ext().pair_bias_bwd_grid(pair2d, dbias.contiguous(), wf, dz, acc, int(L), float(eps), int(d), int(grid))
+    elif dp == DP:
         ext().pair_bias_bwd(pair2d, dbias.contiguous(), wf, dz, acc, int(L), float(eps), int(d))
     else:
         st, bu = saved
@@ -94,4 +129,4 @@ def pair_bias_bwd(pair2d: torch.Tensor, dbias: torch.Tensor, wf: torch.Tensor, L
     return dz, acc[o:o + heads * dp].view(heads, dp), acc[o + heads * dp:]
 
 
-__all__ = ["DP", "GEOMETRY", "PAIR_WIDTHS", "RW", "acc_n", "ext", "pair_bias", "pair_bias_bwd", "width"]
+__all__ = ["DP", "GEOMETRY", "PAIR_WIDTHS", "RW", "acc_n", "ext", "ext_sm80", "pair_bias", "pair_bias_bwd", "pair_bias_raw", "width"]

@@ -84,6 +84,9 @@ def prebuild(target, rows):
 
         yield b200_infer._ext
         return
+    if target.arch == "sm80":
+        yield from _sm80(cells)
+        return
     if target.arch != "sm90":
         return
     yield from _h100(cells)
@@ -243,3 +246,20 @@ def _h100(cells):
             units += UWT.prebuild_units(c.d, n, c.bidir)
     for source, include, defines, pool in dict.fromkeys(units):
         yield _call(WT._unit, source, include, defines, pool)
+
+
+def _sm80(cells):
+    """The A100 builds (``kernels/integrations/trimul_sm80``; bf16 activations only, ``_cells`` already drops float32 rows): the fused D128 set
+    (``sm80``: D128 with 128 hidden channels per direction), the wide set (``sm80_wide``: every other width, and D512 inference) and the D512
+    training rows (``sm80_wide512``)."""
+    from . import sm80, sm80_wide, sm80_wide512
+
+    calls = {}
+    for c in cells:
+        if c.d == 128 and c.ch == (256 if c.bidir else 128):
+            calls[sm80._ext] = None
+            continue
+        calls[sm80_wide._ext] = None
+        if c.d == 512 and "train" in c.modes:
+            calls[sm80_wide512._ext] = None
+    yield from calls

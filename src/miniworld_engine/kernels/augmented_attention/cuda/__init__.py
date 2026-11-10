@@ -541,6 +541,8 @@ def prebuild(target, rows):
         for stem, names in _LOCAL_STEMS.items():
             if need(names, "f32" if stem.endswith("tf32") else None):
                 calls.append(ft.partial(sm100_atom_local.cubin, stem, True))
+    elif target.arch == "sm80":
+        calls.extend(_sm80_apb(rows))
     else:
         calls.append(ft.partial(apb._ext, "100", False))
         atom = sm100_atom.KERNELS.values()
@@ -567,3 +569,20 @@ def prebuild(target, rows):
         for stem in sorted(stems):
             calls.append(ft.partial(sm100_atom_local.cubin, stem, False))
     yield from calls
+
+
+def _sm80_apb(rows):
+    """The A100 builds of AttentionPairBias (``kernels/integrations/attention_pair_bias_sm80``): the row / pair / C++-step extension
+    (``apb.ext_sm80``) and the attention core (``sm80._ext``), when a bf16 / master AttentionPairBias row has a layout the A100 path takes
+    (``apb.GEOMETRY``, d_pair 128)."""
+    from miniworld_engine.kernels._prebuild import _kv
+
+    from . import apb, sm80
+
+    for r in rows:
+        if r["module"] != "AttentionPairBias" or r["dtype"] == "float32":
+            continue
+        d = _kv(r["dims"])
+        if (int(d["n_head"]), int(d["d_single"])) in apb.GEOMETRY and int(d["d_pair"]) == apb.DP and "gate_bias" not in r["options"]:
+            return [apb.ext_sm80, sm80._ext]
+    return []

@@ -561,7 +561,7 @@ __global__ void __launch_bounds__(NT) qkv_bwd_bf_k(const bf* __restrict__ DQ, co
     ldv<V>(DK + r * WD, t); stv<V>(DQKVG + r * 4 * WD + WD, t);
     ldv<V>(DV + r * WD, t); stv<V>(DQKVG + r * 4 * WD + 2 * WD, t);
   }
-  colsum_add<V>(v, red, ABQ);
+  colsum_add<V>(v, red, ABQ, 0);  // acc_stride 0: atomic add (the A100 accumulator is one vector)
 }
 
 // o [>= M, W] bf16, qkvg [., 4 W] bf16, og [M, W] bf16; W = 384 (8 x 48, 12 x 32) or 512 (16 x 24 padded, 16 x 32)

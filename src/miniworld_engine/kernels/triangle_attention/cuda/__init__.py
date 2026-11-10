@@ -1,5 +1,5 @@
-"""H100 / B200 TriangleAttention CUDA: the loaders live in ``h100_sm90`` / ``h100_sm90_generic`` / ``h100_dh`` / ``h100_triattn``
-(sm90) and ``b200_triattn`` (sm100); this module holds the prebuild recipe."""
+"""H100 / B200 / A100 TriangleAttention CUDA: the loaders live in ``h100_sm90`` / ``h100_sm90_generic`` / ``h100_dh`` / ``h100_triattn``
+(sm90), ``b200_triattn`` (sm100) and ``sm80`` / ``sm80_wide`` / ``sm80_core2`` (sm80); this module holds the prebuild recipe."""
 from __future__ import annotations
 
 
@@ -53,3 +53,53 @@ def prebuild(target, rows):
             yield ft.partial(b200_triattn._core, rows_per_task)
         yield b200_triattn._mod
         yield b200_triattn._wide
+    elif target.arch == "sm80":
+        yield from _sm80(rows)
+
+
+def _sm80(rows):
+    """The A100 builds (``kernels/integrations/triattn_sm80``) for the bf16 / master TriangleAttention rows whose geometry the A100 path takes
+    (heads of 16 / 32 channels): the core extension (``sm80``: the fused d_pair-128 path and the core of the wide path), the wide path's
+    row kernels (``sm80_wide``), the 16-channel-head core (``sm80_core2``), and the shape-gated helpers the default settings reach (the
+    training front / backward pieces at their lengths, the d_pair-256 fused output at L128)."""
+    from miniworld_engine.kernels._prebuild import _kv
+
+    from . import (
+        affine_training_sm80,
+        b1_finalize_exact_sm80,
+        dq_rows_candidate_sm80,
+        native_db_nn_sm80,
+        native_out_fused_sm80,
+        native_wo_tn_sm80,
+        sm80,
+        sm80_core2,
+        sm80_wide,
+    )
+
+    calls = {}
+    for r in rows:
+        if not r["module"].startswith("TriangleAttention") or r["dtype"] == "float32":
+            continue
+        d = _kv(r["dims"])
+        dp, h = int(d["d_pair"]), int(d["n_head"])
+        hd = int(d.get("d_hidden") or dp) // h
+        if hd not in (16, 32):
+            continue
+        lengths, train = set(r["lengths"]), r["mode"] == "train"
+        calls[sm80._ext] = None
+        if (dp, hd * h, h) != (128, 128, 4):
+            calls[sm80_wide._rows] = None
+        if hd == 16:
+            calls[sm80_core2.ext] = None
+        if train:
+            calls[affine_training_sm80._ext] = None
+            if lengths & {640, 768}:
+                calls[dq_rows_candidate_sm80._ext] = None
+                calls[native_wo_tn_sm80._ext] = None
+            if 768 in lengths:
+                calls[native_db_nn_sm80._ext] = None
+            if 384 in lengths:
+                calls[b1_finalize_exact_sm80._ext] = None
+        elif (dp, h, hd) == (256, 8, 32) and 128 in lengths:
+            calls[native_out_fused_sm80._ext] = None
+    yield from calls

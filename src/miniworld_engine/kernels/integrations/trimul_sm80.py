@@ -16,7 +16,6 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine import settings
-from miniworld_engine.modules.exceptions import ImplementationType
 
 
 def _wide_hs(module) -> int:
@@ -39,20 +38,24 @@ def _wide_kernels(pair):
 
 
 def serves(module, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
-    """The module's contract (implementation, backend policy, matching LayerNorm eps), then the kernels' own gate."""
-    if (
-        module.implementation != ImplementationType.MINIWORLD
-        or settings.current().engine_backend == "triton"
-    ):
-        return False
+    """``refusal`` is None."""
+    return refusal(module, pair, mask) is None
+
+
+def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None:
+    """Why the A100 kernels cannot take this call (the ``cuda`` backend of the TriMul classes states it on an A100), or ``None``."""
+    if not settings.current().trimul_sm80:
+        return "settings.trimul_sm80 is off"
+    if pair.dtype != torch.bfloat16:
+        return f"dtype {pair.dtype}: the A100 TriMul kernels are bf16 only (no fp32 TriMul, by policy)"
     if module.ln_pair.eps != module.ln_out.eps:
-        return False
+        return "LN_in and LN_out must share one epsilon"
     # the input LayerNorm's gradients are written by the kernel, in the parameters' dtype (bf16 or fp32, both alike)
     if (
         module.ln_pair.weight.dtype != module.ln_pair.bias.dtype
         or module.ln_pair.weight.dtype not in (torch.bfloat16, torch.float32)
     ):
-        return False
+        return "the input LayerNorm's weight and bias must share one dtype, bf16 or fp32"
     # the six weight matrices share one dtype (bf16, or fp32 masters over bf16 activations); the kernels cast them inside the op and write the
     # weight gradients in that dtype
     wd = module.to_left.weight.dtype
@@ -66,14 +69,19 @@ def serves(module, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
             module.to_out,
         )
     ):
-        return False
+        return "the six weight matrices must share one dtype, bf16 or fp32 masters"
+    if pair.dim() != 4 or pair.shape[0] < 1 or not pair.is_contiguous():
+        return "pair must be a contiguous [B, L, L, d_pair] stack"
     from miniworld_engine.kernels.trimul_inproj.cuda import sm80
 
-    if sm80.available(pair, module.d_hidden, mask):
-        return True
-    return _wide_kernels(pair).available(
-        pair, module.d_hidden, mask, hs=_wide_hs(module)
-    )
+    # the kernels take one square plane (a batch runs plane by plane in ``update``): the gate is asked for the first one
+    plane, plane_mask = pair[:1], None if mask is None else mask[:1]
+    if sm80.available(plane, module.d_hidden, plane_mask):
+        return None
+    if _wide_kernels(plane).available(plane, module.d_hidden, plane_mask, hs=_wide_hs(module)):
+        return None
+    return (f"d_pair {pair.shape[-1]}, d_hidden {module.d_hidden}, L {pair.shape[1]}, grad {torch.is_grad_enabled()}: outside the A100 TriMul "
+            "kernels (sm80: D128 fused; sm80_wide / sm80_wide512: D 64 .. 512) or their extensions failed to build")
 
 
 def update(

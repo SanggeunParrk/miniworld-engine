@@ -1,6 +1,6 @@
 """Automatic dispatch of the A100 (sm_80) hand-CUDA triangle attention (``kernels.triangle_attention.cuda``): the whole module in inference (``serves_module`` / ``forward``) and in
-training (``serves_train`` / ``forward_train``: the same forward with what the backward needs, the module's broadcast dropout, and an autograd function), or only the attention core
-of the module's Triton backend (``serves`` / ``attention``) when the rest of the module is outside the contract.
+training (``serves_train`` / ``forward_train``: the same forward with what the backward needs, the module's broadcast dropout, and an autograd function).
+The ``cuda`` backend of the triangle-attention classes (``modules/triangle.py``) states ``refusal`` on an A100.
 
 Two whole-module paths, picked by the module's geometry:
 
@@ -11,47 +11,11 @@ Two whole-module paths, picked by the module's geometry:
 
 from __future__ import annotations
 
-import types
 
 import torch
 
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
-from miniworld_engine.modules.dispatch import KernelBackend
-
-
-def _contract(module) -> bool:
-    """The module's contract: the Triton backend that ``miniworld`` and an explicit ``triton`` resolve to, a non-strict engine backend, the module's
-    ``_sm80_cuda`` switch."""
-    return not (
-        getattr(module, "_backend", None) != KernelBackend.TRITON
-        or not getattr(module, "_sm80_cuda", True)
-        or settings.current().engine_backend == "triton"
-    )
-
-
-def serves(
-    module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    bias: torch.Tensor,
-) -> bool:
-    """The attention core only (inference): the module's contract, no autograd (the backward of the core alone is not written), then the kernel's gate."""
-    if not _contract(module) or torch.is_grad_enabled():
-        return False
-    from miniworld_engine.kernels.triangle_attention.cuda import sm80
-
-    return sm80.available(query, key, value, bias)
-
-
-def attention(
-    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias: torch.Tensor
-) -> torch.Tensor:
-    """``[B, H, L, L2, D]`` out, the layout the module's Triton attention returns; a view of a fresh token-major tensor."""
-    from miniworld_engine.kernels.triangle_attention.cuda import sm80
-
-    return sm80.attention(query, key, value, bias)[0]
 
 
 def _weights(module) -> tuple[torch.Tensor, ...]:
@@ -139,16 +103,43 @@ def _serves_kind(
     ) and sm80_wide.loads(kind[1])
 
 
+def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: bool) -> str | None:
+    """Why the A100 path cannot take this call of ``module`` (a ``_TriangleAttentionBase``), or ``None``. ``train``: the autograd path
+    (``forward_train``: gradients or the live dropout), else the inference path (``forward``). Shapes / dtypes / flags, then the kernels'
+    own gates (which build or load the extensions)."""
+    if not settings.current().triattn_sm80:
+        return "settings.triattn_sm80 is off"
+    if not module.use_self_attention:
+        return "bias-only attention (use_self_attention=False) is not part of the A100 kernels"
+    if module.use_qk_norm:
+        return "q / k RMSNorm is not part of the A100 kernels"
+    if module.to_gate.bias is not None or module.to_out.bias is not None:
+        return "gate / out-projection biases (RoseTTAFold3): not part of the A100 kernels"
+    if module._bias_untransposed:
+        return ("AlphaFold 3's ending-node bias (the pair as it is, read in the transposed frame): the A100 front computes the bias of the "
+                "attended (transposed) pair only")
+    if module.dual_output:
+        return "the second, transposed out-projection (Chai-1 confidence head): not part of the A100 kernels"
+    if module.untransposed_output and not module.starting:
+        return "Chai-1's ending node returns its update untransposed: the A100 back writes the standard orientation only"
+    if pair.dtype != torch.bfloat16:
+        return f"dtype {pair.dtype}: the A100 TriangleAttention kernels are bf16 only (no fp32 kernel)"
+    kind = _kind(module, pair, mask)
+    d_hidden, d_pair = module.to_query.weight.shape
+    if kind is None:
+        return (f"d_pair {d_pair}, {module.n_head} heads x {d_hidden // module.n_head}: outside the A100 kernels (d_pair 128 / 4 x 32 fused; "
+                "d_pair 64 .. 512 a multiple of 64 with 1 .. 16 heads of 16 / 32 channels)")
+    if not _serves_kind(module, pair, mask, train=train):
+        return (f"L {pair.shape[1]}, d_pair {d_pair}, {module.n_head} heads, {'training' if train else 'inference'}: refused by the A100 kernels' "
+                "gates (L % 128 == 0, contiguous [B, L, L, d_pair], the training bias-gradient budget) or their extensions failed to build")
+    return None
+
+
 def serves_module(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
-    """The whole module in inference, ``pair + TriangleAttention(pair)``: the module's contract, no autograd, a self-attention module without q/k norm
-    (dropout off), then the gates of the path its geometry selects."""
-    if (
-        not _contract(module)
-        or torch.is_grad_enabled()
-        or (module.training and module.p_drop > 0.0)
-    ):
+    """The whole module in inference, ``pair + TriangleAttention(pair)``: no autograd, dropout off, then ``refusal``."""
+    if torch.is_grad_enabled() or (module.training and module.p_drop > 0.0):
         return False
-    return _serves_kind(module, pair, mask, train=False)
+    return refusal(module, pair, mask, train=False) is None
 
 
 def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
@@ -188,9 +179,9 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
 
 
 def serves_train(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
-    """The whole module with autograd (training or an eval-mode module under grad): the module's contract, the shapes of the inference path, gradients
-    wanted by the pair tensor or a parameter, then the gates of the path its geometry selects."""
-    if not _contract(module) or not torch.is_grad_enabled():
+    """The whole module with autograd (training or an eval-mode module under grad): gradients wanted by the pair tensor or a parameter, then
+    ``refusal``."""
+    if not torch.is_grad_enabled():
         return False
     wo = module.to_out.weight
     if not (
@@ -199,7 +190,7 @@ def serves_train(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -
         or any(w.requires_grad for w in _weights(module))
     ):
         return False
-    return _serves_kind(module, pair, mask, train=True)
+    return refusal(module, pair, mask, train=True) is None
 
 
 def forward_train(
@@ -213,18 +204,7 @@ def forward_train(
     ds = None
     if module.training and module.p_drop > 0.0:
         b, length = pair.shape[:2]
-        if _native_dropout_after_serves(module, pair, kind, weights, wo, ln):
-            from miniworld_engine.kernels.triangle_attention.cuda import (
-                dropout_row_scale_sm80 as row_scale_sm80,
-            )
-
-            ds = row_scale_sm80.scale(pair, module.p_drop, module._drop_dim).reshape(
-                b, length, pair.shape[-1]
-            )
-        else:
-            ds = module._make_drop_scale(pair, module.p_drop).reshape(
-                b, length, pair.shape[-1]
-            )
+        ds = module._make_drop_scale(pair, module.p_drop).reshape(b, length, pair.shape[-1])
     if kind is not None and kind[0] == "wide":
         from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
 
@@ -253,53 +233,3 @@ def forward_train(
         transposed=not module.starting,
         ds=ds,
     )
-
-
-def _native_dropout_after_serves(module, pair, kind, weights, wo, ln):
-    """Called only inside forward_train after the original serves_train gate.
-
-    That gate already proves own SM80, contiguous BF16 square pair, every
-    projection dtype/device/shape, LN shape/device/matching dtype and mask.
-    Retain the narrower original frozen scope and every explicit override.
-    """
-    # An explicitly installed physical scale/method takes precedence.
-    callback = module._make_drop_scale
-    if not isinstance(callback, types.MethodType):
-        return False
-    if "_make_drop_scale" in module.__dict__:
-        return False
-    from miniworld_engine.modules.triangle_attention.module import TriangleAttention
-
-    if callback.__func__ is not TriangleAttention._sm80_default_drop_scale:
-        return False
-    if settings.current().dropout_scale_sm80:
-        return False
-    if not settings.current().triattn_sm80_native_rng:
-        return False
-    from miniworld_engine.modules.exceptions import ImplementationType
-
-    if module.implementation not in (
-        ImplementationType.MINIWORLD,
-        ImplementationType.TRITON,
-    ):
-        return False
-    if not module.training or module.p_drop != 0.25 or kind is None:
-        return False
-    b, length, _, d = pair.shape
-    if (
-        b != 1
-        or length not in (128, 256, 384, 512, 640, 768)
-        or d not in (64, 128, 256, 384, 512)
-    ):
-        return False
-    if ln.weight.dtype != torch.float32 or ln.bias.dtype != torch.float32:
-        return False
-    # supports() permits strided parameters and makes them contiguous in its
-    # launch bodies. These checks were NOT proven by serves_train, so retain
-    # them instead of widening the old private policy's eligible domain.
-    if not all(t.is_contiguous() for t in (*weights, wo, ln.weight, ln.bias)):
-        return False
-    if kind[0] == "fused":
-        return True
-    cfg = kind[1]
-    return cfg.d == d and cfg.dhp == d and cfg.hd == 32
