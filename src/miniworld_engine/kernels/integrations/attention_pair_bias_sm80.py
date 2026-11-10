@@ -353,6 +353,7 @@ def _prep(leaves, qs: float, ws: float):
         wf,
         qs,
         ws,
+        None,  # wbo: no bf16 copy of Wb (only the backward reads it)
     )
     return wpack, bvec, wf, wop
 
