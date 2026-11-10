@@ -86,6 +86,13 @@ def _sm80(rows):
 
     calls = {}
     for r in rows:
+        if r["module"] == "BidirectionalTriangleAttention" and r["dtype"] != "float32":   # its glue and gate backward, built for sm_80
+            from . import sm80_bidir
+
+            calls[sm80_bidir.glue] = None
+            if r["mode"] == "train":
+                calls[sm80_bidir.ext] = None
+            continue
         if not r["module"].startswith("TriangleAttention") or r["dtype"] == "float32":
             continue
         d = _kv(r["dims"])

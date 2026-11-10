@@ -1,4 +1,4 @@
-"""H100 (sm_90a) :class:`~miniworld_engine.modules.triangle.BidirectionalTriangleAttention`, bias-only (``use_self_attention=False``, the
+"""H100 (sm_90a) and A100 (sm_80: the same kernels built for sm_80, ``triangle_attention/cuda/sm80_bidir``) :class:`~miniworld_engine.modules.triangle.BidirectionalTriangleAttention`, bias-only (``use_self_attention=False``, the
 MiniWorld block), bf16 activations, fp32 masters or bf16 parameters; forward (inference and training) and backward.
 
 The TriangleAttention family's width-generic glue (``h100_sm90_generic._glue``: LayerNorm forward / backward, the gate) around cuBLAS
@@ -31,8 +31,8 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None
     """Why the H100 path does not serve this call (None: it does). Shapes / dtypes / flags only."""
     if not pair.is_cuda:
         return "the kernels run on CUDA tensors only"
-    if torch.cuda.get_device_capability(pair.device) != (9, 0):
-        return "the cuda backend of BidirectionalTriangleAttention is the H100 (sm_90a) path"
+    if torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0)):
+        return "the cuda backend of BidirectionalTriangleAttention is the H100 (sm_90a) and A100 (sm_80) path"
     if module.use_self_attention:
         return "self-attention (use_self_attention=True) is not part of the H100 path (the bias-only block is)"
     if pair.dtype != torch.bfloat16:
@@ -53,13 +53,25 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None
     return None
 
 
+def _a100() -> bool:
+    return torch.cuda.get_device_capability() == (8, 0)
+
+
 def _glue():
+    if _a100():   # the same sources built for sm_80
+        from miniworld_engine.kernels.triangle_attention.cuda import sm80_bidir
+
+        return sm80_bidir.glue()
     from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _glue as glue
 
     return glue()
 
 
 def _ext():
+    if _a100():
+        from miniworld_engine.kernels.triangle_attention.cuda import sm80_bidir
+
+        return sm80_bidir.ext()
     from miniworld_engine.kernels.triangle_attention.cuda import h100_bidir
 
     return h100_bidir.ext()

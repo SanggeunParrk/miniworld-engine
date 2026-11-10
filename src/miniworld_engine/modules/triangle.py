@@ -758,11 +758,12 @@ class BidirectionalTriangleAttention(BackendModule, MasterWeights):
     The gate follows :class:`TriangleAttention` (on the hidden-width output, applied *before* ``to_out``), not the trimul convention.
     Model: MiniWorld.
 
-    ``"cuda"`` (H100 sm_90a, bias-only, bf16 activations; forward and backward): ``kernels/integrations/bidir_triattn_h100`` -- each
+    ``"cuda"`` (H100 sm_90a and A100 sm_80, bias-only, bf16 activations; forward and backward): ``kernels/integrations/bidir_triattn_h100`` -- each
     direction the TriangleAttention family's node form in its own frame (the ending node on the transposed pair), the family's glue
     LayerNorm / gate kernels around cuBLAS GEMMs over channel planes (the softmax formed once per head: it does not depend on the row).
     """
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: the sm_80 build of the H100 path
 
     backends = ("pytorch", "cuda")
 
