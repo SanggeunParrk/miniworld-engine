@@ -262,7 +262,7 @@ def required(kind: str):
 
 
 def owed(now: Now, plan_dir: str | None, redo: tuple[str, ...] = (), again: tuple[str, ...] = (), again_modules: tuple[str, ...] = (),
-         again_kinds: tuple[str, ...] = ()) -> int:
+         again_kinds: tuple[str, ...] = (), n_groups: int = 4) -> int:
     """``redo``: result statuses (e.g. ``failed``) measured again although current (after a measurer fix that changes no other result,
     so its version stays). ``again``: backends measured again although current (a person asked for it). ``again_modules`` (optionally of ``again_kinds`` only):
     module classes measured again although current (a measurer fix that changes only their results)."""
@@ -306,13 +306,14 @@ def owed(now: Now, plan_dir: str | None, redo: tuple[str, ...] = (), again: tupl
     if unused:
         print(f"[judge]   {unused} tokens belong to cases no longer required (kept, unused)")
     if plan_dir:
-        write_plan(plan_dir, todo)
+        write_plan(plan_dir, todo, n_groups)
     return 0
 
 
-def write_plan(plan_dir: str, todo: dict) -> None:
+def write_plan(plan_dir: str, todo: dict, n_groups: int = 4) -> None:
     """The owed run: one config per (kind, module) selecting the owed rows / lengths / backends / dtypes / modes (a superset of the
-    owed cases when they do not form a product: the extra cases are measured again, which is harmless), in four balanced groups."""
+    owed cases when they do not form a product: the extra cases are measured again, which is harmless), in ``n_groups`` balanced groups
+    (one measurement job each, run in parallel)."""
     d = Path(plan_dir)
     (d / "cfg").mkdir(parents=True, exist_ok=True)
     jobs = []
@@ -323,7 +324,7 @@ def write_plan(plan_dir: str, todo: dict) -> None:
         path = d / "cfg" / f"{kind}.{module}.yaml"
         path.write_text(yaml.safe_dump(base, sort_keys=False))
         jobs.append((t["n"], kind, module, str(path)))
-    groups, load = [[] for _ in range(4)], [0] * 4
+    groups, load = [[] for _ in range(n_groups)], [0] * n_groups
     for n, kind, module, path in sorted(jobs, reverse=True):
         i = load.index(min(load))
         groups[i].append(f"{kind} {module} {path}")
@@ -359,6 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("records", nargs="+", help="record files or directories of *.jsonl")
     p = sub.add_parser("owed", help="verdict of every required case")
     p.add_argument("--plan", default=None, help="write the owed run (configs + groups) into this directory")
+    p.add_argument("--groups", type=int, default=4, help="parallel measurement groups (GPUs) of the plan (default %(default)s)")
     p.add_argument("--redo", nargs="*", default=(), help="result statuses to measure again (e.g. failed)")
     p.add_argument("--again", nargs="*", default=(), help="backends to measure again although current (e.g. pytorch cueq anthropic)")
     p.add_argument("--again-module", nargs="*", default=(), help="module classes to measure again although current")
@@ -374,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "issue":
         return issue(a.records, Now(a.gpu))
     if a.cmd == "owed":
-        return owed(Now(a.gpu), a.plan, tuple(a.redo), tuple(a.again), tuple(a.again_module), tuple(a.again_kind))
+        return owed(Now(a.gpu), a.plan, tuple(a.redo), tuple(a.again), tuple(a.again_module), tuple(a.again_kind), a.groups)
     if a.cmd == "sign":
         return sign(a.part, a.old, a.new, a.answer, a.reason)
     return status(a.gpu)
