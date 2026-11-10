@@ -96,6 +96,10 @@ def _value(d_msa: int, d_hidden: int):
     )
 
 
+#: BIG build (d_msa 256 x 8 x 32) inference: ln_vg_w keeps y and gate_w reads it (True), or gate_w normalises m again (False)
+BIG_INFER_Y = True
+
+
 def _forward_math(
     args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float, save: bool
 ):
@@ -115,9 +119,10 @@ def _forward_math(
         wb.detach(),
     )
     lnw, lnb = lnm_w.detach().float().contiguous(), lnm_b.detach().float().contiguous()
+    big = is_big(d_msa, hc // H)
     v, y, stats = kv.ln_vg_w(
-        m, lnw, lnb, wv.detach().to(bf).contiguous(), eps_m, save
-    )  # inference keeps no y: gate_out_w normalises m again
+        m, lnw, lnb, wv.detach().to(bf).contiguous(), eps_m, save or (big and BIG_INFER_Y)
+    )  # inference keeps no y: gate_out_w normalises m again (the BIG build: BIG_INFER_Y)
     o = torch.bmm(w16, v)  # [H, N, N] x [H, N, S*C]: the contraction on cuBLAS
     dmask, dscale = None, 1.0
     if (
@@ -130,7 +135,7 @@ def _forward_math(
     wg16, wo16 = wg.detach().to(bf).contiguous(), wo.detach().to(bf).contiguous()
     if is_big(d_msa, hc // H):  # gate_out_w split at the gated product; training keeps the sigmoid gate g for the backward
         if not save:
-            a, _ = kv.gate_w(o, m, wg16, False, lnw, lnb, eps_m)
+            a, _ = kv.gate_w(o, y, wg16, False) if BIG_INFER_Y else kv.gate_w(o, m, wg16, False, lnw, lnb, eps_m)
             return kv.out_w(a, m, wo16, dmask, dscale)
         a, g = kv.gate_w(o, y, wg16, True)
         return kv.out_w(a, m, wo16, dmask, dscale), w16, v, y, stats, o, dmask, g

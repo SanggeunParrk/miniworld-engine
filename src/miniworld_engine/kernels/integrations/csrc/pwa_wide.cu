@@ -627,6 +627,16 @@ __global__ void __launch_bounds__(NT) gate_big_kernel(const bf16* __restrict__ O
   bf16* sY = reinterpret_cast<bf16*>(align1k(smem_raw));         // [2][NKD][TILE]; after the GEMM the tile stages a, then g
   bf16* sWg = sY + NWG * 2 * NKD * TILE;                        // [NKD][HC][64]      Wg [HC][D]: rows = hidden, k = d
   const int tid = threadIdx.x, wgi = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
+  bf16* sO = sWg + NKD * HC * 64 + wgi * H * TS * C;            // [H][TS][C] the o tile, 16-byte chunks XOR-swizzled by row (OSW)
+  // the o tile of (n, s0) staged while the gate GEMM runs: [H][TS][C] in 16-byte chunks, chunk q of row r at q ^ ((r >> 1) & 3), so the
+  // epilogue's 4-byte reads (8 rows x 4 lanes per warp) hit 8 distinct bank quads; the global reads are whole 64-byte rows
+  auto load_o = [&](int n, int s0) {
+    for (int v = wtid; v < H * TS * (C / 8); v += 128) {
+      const int h = v / (TS * (C / 8)), r = (v / (C / 8)) % TS, q = v % (C / 8);
+      const bool ok = s0 + r < S;
+      cp16(sa(sO + ((h * TS + r) * (C / 8) + (q ^ ((r >> 1) & 3))) * 8), ok ? O + ((long)h * N + n) * ((long)S * C) + (long)(s0 + r) * C + q * 8 : O, ok);
+    }
+  };
   auto load = [&](int buf, int t) {
     const int n = t % N, s0 = (t / N) * TS;
     for (int v = wtid; v < TS * (D / 8); v += 128) {
@@ -652,10 +662,12 @@ __global__ void __launch_bounds__(NT) gate_big_kernel(const bf16* __restrict__ O
     const int t = (int)(blockIdx.x * NWG + wgi) + it * (int)(gridDim.x * NWG);
     if (t >= ntile) break;
     const int buf = it & 1, tn = t + (int)(gridDim.x * NWG);
+    const int n = t % N, s0 = (t / N) * TS;
+    load_o(n, s0);                                               // the o tile first: it lands during the y wait and the gate GEMM
+    cp_commit();
     if (tn < ntile) load(buf ^ 1, tn);
     cp_commit();
-    const int n = t % N, s0 = (t / N) * TS;
-    cp_wait<1>();
+    cp_wait<2>();                                                // groups in flight: y(t), o(t), y(t + 1) -> y(t) landed
     bf16* sy = sY + (wgi * 2 + buf) * NKD * TILE;
     if (LN) {
       wg_sync(wgi);                                              // the tile landed: normalise it in place
@@ -679,6 +691,7 @@ __global__ void __launch_bounds__(NT) gate_big_kernel(const bf16* __restrict__ O
     for (int j = 0; j < NCH; ++j)
 #pragma unroll
       for (int k = 0; k < 32; ++k) gacc[j][k] = rbf(1.f / (1.f + __expf(-rbf(gacc[j][k]))));   // g = bf16(sigmoid(bf16(gate)))
+    cp_wait<1>();                                                // o(t) landed (y(t + 1) may still be in flight)
     wg_sync(wgi);                                                // every warp is past the gate GEMM: the y tile becomes the staging
 #pragma unroll 1
     for (int round = 0; round < (G != nullptr ? 2 : 1); ++round) {
@@ -693,7 +706,9 @@ __global__ void __launch_bounds__(NT) gate_big_kernel(const bf16* __restrict__ O
             const float g0 = gacc[j][nl * 4 + rr * 2], g1 = gacc[j][nl * 4 + rr * 2 + 1];
             uint32_t v;
             if (round == 0) {
-              const float2 o = s < S ? unpack2(*reinterpret_cast<const uint32_t*>(O + ((long)h * N + n) * ((long)S * C) + (long)s * C + c)) : make_float2(0.f, 0.f);
+              const int r = r0 + rr * 8;
+              const float2 o = s < S ? unpack2(*reinterpret_cast<const uint32_t*>(sO + ((h * TS + r) * (C / 8) + ((c >> 3) ^ ((r >> 1) & 3))) * 8 + (c & 7)))
+                                     : make_float2(0.f, 0.f);
               v = pack2(o.x * g0, o.y * g1);
             } else {
               v = pack2(g0, g1);
@@ -718,6 +733,14 @@ __global__ void __launch_bounds__(NT) out_big_kernel(const bf16* __restrict__ A,
   bf16* sA = reinterpret_cast<bf16*>(align1k(smem_raw));         // [2][NKH][TILE]; after the GEMM the tile stages the output
   bf16* sWo = sA + NWG * 2 * NKH * TILE;                        // [NKH][D][64]       Wo [D][HC]: rows = d, k = hidden
   const int tid = threadIdx.x, wgi = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
+  bf16* sX = sWo + NKH * D * 64 + wgi * NCD * TILE;             // [NCD][TILE] the residual tile, staged while the GEMM runs (128-byte swizzle)
+  auto load_x = [&](int n, int s0) {
+    for (int v = wtid; v < TS * (D / 8); v += 128) {
+      const int row = v / (D / 8), ch = v % (D / 8);
+      const bool ok = s0 + row < S;
+      cp16(sa(sX + so(ch >> 3, TS, row, ch & 7)), ok ? X + ((long)(s0 + row) * N + n) * D + ch * 8 : X, ok);
+    }
+  };
   auto load = [&](int buf, int t) {
     const int n = t % N, s0 = (t / N) * TS;
     for (int v = wtid; v < TS * (HC / 8); v += 128) {
@@ -740,12 +763,14 @@ __global__ void __launch_bounds__(NT) out_big_kernel(const bf16* __restrict__ A,
     const int t = (int)(blockIdx.x * NWG + wgi) + it * (int)(gridDim.x * NWG);
     if (t >= ntile) break;
     const int buf = it & 1, tn = t + (int)(gridDim.x * NWG);
+    const int n = t % N, s0 = (t / N) * TS;
+    load_x(n, s0);                                               // the residual tile first: it lands during the a wait and the GEMM
+    cp_commit();
     if (tn < ntile) load(buf ^ 1, tn);
     cp_commit();
-    cp_wait<1>();
+    cp_wait<2>();                                                // groups in flight: a(t), x(t), a(t + 1) -> a(t) landed
     wgw::proxy_fence();
     wg_sync(wgi);
-    const int n = t % N, s0 = (t / N) * TS;
     bf16* sa_ = sA + (wgi * 2 + buf) * NKH * TILE;
     float oacc[NCD][32];
     wgw::fence();
@@ -756,6 +781,7 @@ __global__ void __launch_bounds__(NT) out_big_kernel(const bf16* __restrict__ A,
         wgw::ss64(wgw::desc(sa_ + (kk >> 2) * TILE + (kk & 3) * 16), wgw::desc(sWo + ((kk >> 2) * D + 64 * jn) * 64 + (kk & 3) * 16), oacc[jn], kk == 0 ? 0 : 1);
     wgw::commit();
     wgw::wait();
+    cp_wait<1>();                                                // x(t) landed (a(t + 1) may still be in flight)
     wg_sync(wgi);                                                // every warp is past the GEMM: the a tile becomes the output staging
 #pragma unroll
     for (int jn = 0; jn < NCD; ++jn)
@@ -770,7 +796,8 @@ __global__ void __launch_bounds__(NT) out_big_kernel(const bf16* __restrict__ A,
           // the stock module rounds the update to bf16 before the (dropout and the) residual add
           float u0 = rbf(oacc[jn][nt * 4 + rr * 2]), u1 = rbf(oacc[jn][nt * 4 + rr * 2 + 1]);
           if (DMASK != nullptr) { u0 = rbf(u0 * dm.x); u1 = rbf(u1 * dm.y); }
-          const float2 xr = s < S ? unpack2(*reinterpret_cast<const uint32_t*>(X + ((long)s * N + n) * D + col)) : make_float2(0.f, 0.f);
+          const int rx = r0 + rr * 8;
+          const float2 xr = s < S ? unpack2(*reinterpret_cast<const uint32_t*>(sX + so(col >> 6, TS, rx, (col & 63) >> 3) + (col & 7))) : make_float2(0.f, 0.f);
           st_put(sa_, r0 + rr * 8, col, pack2(xr.x + u0, xr.y + u1));
         }
       }
@@ -1060,7 +1087,7 @@ std::vector<torch::Tensor> gate_w(torch::Tensor o, torch::Tensor y, torch::Tenso
   auto a = torch::empty({S, N, (long)HC}, y.options());
   auto g = save_g ? torch::empty({S, N, (long)HC}, y.options()) : torch::empty({0}, y.options());
   const int ntile = N * ((S + TS - 1) / TS);
-  const int smem = 1024 + (NWG * 2 * NKD * TILE + NKD * HC * 64) * 2;
+  const int smem = 1024 + (NWG * 2 * NKD * TILE + NKD * HC * 64 + NWG * H * TS * C) * 2;   // + the staged o tile
   const float* gp = ln ? lnw->data_ptr<float>() : nullptr;
   const float* bp = ln ? lnb->data_ptr<float>() : nullptr;
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -1085,7 +1112,7 @@ torch::Tensor out_w(torch::Tensor a, torch::Tensor m, torch::Tensor wo, c10::opt
   if (dmask.has_value()) { check_bf16(*dmask, "dmask"); TORCH_CHECK(dmask->sizes() == torch::IntArrayRef({N, D}), "dmask: [N, D]"); }
   auto out = torch::empty_like(m);
   const int ntile = N * ((S + TS - 1) / TS);
-  const int smem = 1024 + (NWG * 2 * NKH * TILE + NKH * D * 64) * 2;
+  const int smem = 1024 + (NWG * 2 * NKH * TILE + NKH * D * 64 + NWG * NCD * TILE) * 2;   // + the staged residual tile
   const int grid = grid_for(out_big_kernel, smem, (ntile + NWG - 1) / NWG, m.device().index());
   out_big_kernel<<<grid, NT, smem, at::cuda::getCurrentCUDAStream()>>>(P(a), P(m), P(wo), dmask.has_value() ? P(*dmask) : nullptr, (float)dscale, W(out), N, S, ntile);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
