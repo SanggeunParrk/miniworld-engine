@@ -83,8 +83,10 @@ def prologue(
     eps: float,
     save_stats: bool,
     variant: int | None = None,
+    bl: torch.Tensor | None = None,
+    br: torch.Tensor | None = None,
 ):
-    """m [S, L, CM] bf16, mask [S, L] uint8 (or None), lnw / lnb fp32 [CM], wl / wr bf16 [32, CM] -> (A, B [S, 32 L] bf16, stats [S, L, 2] fp32 or an empty tensor)."""
+    """m [S, L, CM] bf16, mask [S, L] uint8 (or None), lnw / lnb fp32 [CM], wl / wr bf16 [32, CM], bl / br the projection biases fp32 [32] (or None) -> (A, B [S, 32 L] bf16, stats [S, L, 2] fp32 or an empty tensor)."""
     S, L, _ = m.shape
     a = m.new_empty((S, L * CH))
     b = m.new_empty((S, L * CH))
@@ -109,6 +111,8 @@ def prologue(
         stats,
         eps,
         variant,
+        _none(m, torch.float32) if bl is None else bl,
+        _none(m, torch.float32) if br is None else br,
     )
     return a, b, stats
 

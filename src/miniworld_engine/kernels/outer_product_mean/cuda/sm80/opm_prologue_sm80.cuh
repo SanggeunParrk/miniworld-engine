@@ -28,6 +28,8 @@ struct PrologueParams {
   float2* stats;               // [S][L] (mean, rstd) or nullptr
   int S, L, nti, ntile;        // nti = tiles per MSA row, ntile = S nti
   float eps;
+  const float* bl = nullptr;   // [32] the left / right projection biases (RoseTTAFold3; their bf16 values in fp32) or nullptr
+  const float* br = nullptr;
 };
 
 template <int CM, int NB> struct PrologueCfg {                              // NB: m tile buffers (the prefetch runs NB - 1 tiles ahead)
@@ -145,6 +147,15 @@ __global__ void __launch_bounds__(256, NMINB) opm_prologue_kernel(const Prologue
       }
     }
 
+    // ---- the projection biases (RoseTTAFold3), before the mask and the one rounding (the reference's biased projection, masked rows lose it too)
+    if (p.bl != nullptr) {
+#pragma unroll
+      for (int nt = 0; nt < 4; ++nt) {
+        const float2 bl = *reinterpret_cast<const float2*>(p.bl + 8 * nt + 2 * q), br = *reinterpret_cast<const float2*>(p.br + 8 * nt + 2 * q);
+        acc[nt][0] += bl.x; acc[nt][1] += bl.y; acc[nt][2] += bl.x; acc[nt][3] += bl.y;
+        acc[4 + nt][0] += br.x; acc[4 + nt][1] += br.y; acc[4 + nt][2] += br.x; acc[4 + nt][3] += br.y;
+      }
+    }
     // ---- mask, bf16, into the staged token rows (64 bytes: 4 chunks of 8 channels)
     const bool k0 = smask[r0] != 0, k1 = smask[r1] != 0;
 #pragma unroll

@@ -71,8 +71,6 @@ def refusal(
         return "the sm_80 OuterProductMean kernels are the A100 (capability 8.0) builds"
     if getattr(module, "groups", 1) > 1:
         return "grouped OPM (Chai-1): no sm_80 build"
-    if module.to_left.bias is not None:
-        return "projection biases (RoseTTAFold3): no sm_80 build"
     if getattr(module, "count_offset", None) is not None:
         return "count_offset: the sm_80 epilogue divides by the clamped pair count only"
     if module.mask_interchain and token_asym_id is not None:
@@ -125,7 +123,7 @@ def serves_train(
 
 
 def _leaves(module) -> list[torch.Tensor]:
-    """The module's own parameters (LayerNorm weight / bias, Wl, Wr, Wo, the bias; bf16 or fp32 masters). The opaque ops cast them to the kernels' dtypes (``_kernel_leaves``)
+    """The module's own parameters (LayerNorm weight / bias, Wl, Wr, Wo, the bias, and RoseTTAFold3's left / right projection biases when present; bf16 or fp32 masters). The opaque ops cast them to the kernels' dtypes (``_kernel_leaves``)
     outside autograd, so no cast copy sits in the graph and the weight gradients leave the backward unrounded in each parameter's dtype."""
     return [
         module.ln_msa.weight,
@@ -134,28 +132,28 @@ def _leaves(module) -> list[torch.Tensor]:
         module.to_right.weight,
         module.to_out.weight,
         module.to_out.bias,
-    ]
+    ] + ([] if module.to_left.bias is None else [module.to_left.bias, module.to_right.bias])
 
 
 def _kernel_leaves(leaves: list[torch.Tensor]) -> list[torch.Tensor]:
-    """LayerNorm weight / bias (fp32), Wl, Wr, Wo (bf16), the bias (its bf16 value in fp32), contiguous. Cached while the parameters are unmodified (``_capture.param_forms``:
+    """LayerNorm weight / bias (fp32), Wl, Wr, Wo (bf16), the bias (its bf16 value in fp32), the projection biases when present (their bf16 values in fp32), contiguous. Cached while the parameters are unmodified (``_capture.param_forms``:
     an inference graph under ``static_weights`` and a training step's forward and backward cast them once instead of ~10 small kernels per call)."""
-    lnw, lnb, wl, wr, wo, bo = leaves
+    lnw, lnb, wl, wr, wo, bo = leaves[:6]
     bf = torch.bfloat16
-    return list(
-        _capture.param_forms(
-            "opm_sm80",
-            leaves,
-            lambda: (
+
+    def build():
+        with torch.no_grad():
+            return (
                 lnw.float().contiguous(),
                 lnb.float().contiguous(),
                 wl.to(bf).contiguous(),
                 wr.to(bf).contiguous(),
                 wo.to(bf).contiguous(),
                 bo.to(bf).float().contiguous(),
-            ),
-        )
-    )
+                *(t.to(bf).float().contiguous() for t in leaves[6:]),
+            )
+
+    return list(_capture.param_forms("opm_sm80", leaves, build))
 
 
 def _norm(
@@ -221,6 +219,7 @@ def _pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
     # E053 measures host dispatch overhead. The grouped GEMMs still use cuBLAS.
     return (
         _PIPELINE
+        and len(leaves) == 6
         and msa.shape[1] == 1024
         and msa.shape[-1] == 64
         and leaves[4].shape[0] == 128
@@ -230,6 +229,7 @@ def _pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
 def _native128_pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
     return (
         True
+        and len(leaves) == 6   # (no projection biases)
         and msa.shape[1:3] == (1024, 128)
         and msa.shape[-1] == 64
         and leaves[4].shape[0] == 128
@@ -261,11 +261,11 @@ def inference(
 ) -> torch.Tensor:
     """residual + OuterProductMean(msa): prologue -> cuBLAS grouped outer product -> epilogue (no autograd, nothing saved)."""
     sm = _sm80()
-    lnw, lnb, wl, wr, wo, bo = _kernel_leaves(leaves)
+    lnw, lnb, wl, wr, wo, bo, *pb = _kernel_leaves(leaves)
     with torch.cuda.device(msa.device):
         m = msa[0]
         mk = _mask_u8(mask)
-        a, b, _ = sm.prologue(m, mk, lnw, lnb, wl, wr, eps, False)
+        a, b, _ = sm.prologue(m, mk, lnw, lnb, wl, wr, eps, False, None, *pb)
         o = sm.lt_mm(a, b, True, False)
         del a, b
         if mk is not None and _mask_epilogue_enabled(m, wo):
@@ -378,11 +378,11 @@ def forward(
         )
         return [values[0].unsqueeze(0), *values[1:]]
     sm = _sm80()
-    lnw, lnb, wl, wr, wo, bo = _kernel_leaves(leaves)
+    lnw, lnb, wl, wr, wo, bo, *pb = _kernel_leaves(leaves)
     with torch.cuda.device(msa.device):
         m = msa[0]
         mk = _mask_u8(mask)
-        a, b, stats = sm.prologue(m, mk, lnw, lnb, wl, wr, eps, True)
+        a, b, stats = sm.prologue(m, mk, lnw, lnb, wl, wr, eps, True, None, *pb)
         o = sm.lt_mm(a, b, True, False)
         if mk is not None and _mask_epilogue_enabled(m, wo, training=True):
             from miniworld_engine.kernels.outer_product_mean.cuda import (
@@ -456,7 +456,7 @@ def backward(
         )
         return [values[0].unsqueeze(0), *values[1:]]
     sm = _sm80()
-    lnw, lnb, wl, wr, wo, _ = _kernel_leaves(leaves)
+    lnw, lnb, wl, wr, wo, _, *pb = _kernel_leaves(leaves)
     pdt = [t.dtype for t in leaves]
     a, b, stats, o, norm = saved
     depth, length = msa.shape[1], msa.shape[2]
@@ -472,6 +472,15 @@ def backward(
         )
         da = sm.lt_mm(b, dO, False, True)  # [S, 32 L]: dA[s, (i, c)]
         db = sm.lt_mm(a, dO, False, False)  # dB[s, (j, e)]
+        dpb = []
+        if pb:  # the projection biases: sum over the valid (s, i) of dA | dB (a masked row lost its bias), one bf16 0 / 1 GEMM with fp32 accumulation
+            rows = depth * length
+            ones = (
+                msa.new_ones((1, rows))
+                if mk is None
+                else mk.reshape(1, rows).to(torch.bfloat16)
+            )
+            dpb = [torch.mm(ones, t[:depth].reshape(rows, CH), out_dtype=torch.float32).view(CH) for t in (da, db)]
         del dO
         if o.numel() == 0:
             o = sm.lt_mm(a, b, True, False)
@@ -496,6 +505,7 @@ def backward(
         dwr.to(pdt[3], copy=True),
         dwo,
         dbo.to(pdt[5], copy=True),
+        *(g.to(dt, copy=True) for g, dt in zip(dpb, pdt[6:], strict=True)),
     ]
 
 
@@ -510,6 +520,7 @@ class _Training(torch.autograd.Function):
             norm_first,
             residual is not None,
         )
+        ctx.n_leaves = len(leaves)
         ctx.save_for_backward(msa, mask, *leaves, *saved)
         return out
 
@@ -517,7 +528,8 @@ class _Training(torch.autograd.Function):
     @torch.autograd.function.once_differentiable
     def backward(ctx, dz):
         v = ctx.saved_tensors
-        msa, mask, leaves, saved = v[0], v[1], list(v[2:8]), list(v[8:])
+        n = 2 + ctx.n_leaves
+        msa, mask, leaves, saved = v[0], v[1], list(v[2:n]), list(v[n:])
         grads = backward(
             msa, mask, leaves, ctx.eps, ctx.norm_first, saved, dz.contiguous()
         )

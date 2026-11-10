@@ -111,7 +111,7 @@ template <typename TOut> __global__ void __launch_bounds__(256) reduce_rows_kern
 // m [S, L, CM] bf16, mask uint8 [S, L] (empty: all valid), lnw / lnb fp32 [CM], wl / wr [32, CM] bf16 -> a / b [S, L 32] bf16 (the s-major operands of the outer product),
 // stats fp32 [S, L, 2] (empty: not saved)
 void prologue(torch::Tensor m, torch::Tensor mask, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wl, torch::Tensor wr, torch::Tensor a, torch::Tensor b,
-              torch::Tensor stats, double eps, int64_t variant) {
+              torch::Tensor stats, double eps, int64_t variant, torch::Tensor bl, torch::Tensor br) {
   check_bf16(m, "m"); check_bf16(wl, "wl"); check_bf16(wr, "wr"); check_bf16(a, "a"); check_bf16(b, "b");
   check_f32(lnw, "lnw"); check_f32(lnb, "lnb");
   TORCH_CHECK(m.dim() == 3, "m: [S, L, CM]");
@@ -126,6 +126,9 @@ void prologue(torch::Tensor m, torch::Tensor mask, torch::Tensor lnw, torch::Ten
   p.lnw = lnw.data_ptr<float>(); p.lnb = lnb.data_ptr<float>(); p.wl = ptr<__nv_bfloat16>(wl); p.wr = ptr<__nv_bfloat16>(wr);
   p.a = reinterpret_cast<__nv_bfloat16*>(a.data_ptr()); p.b = reinterpret_cast<__nv_bfloat16*>(b.data_ptr());
   p.stats = stats.numel() ? reinterpret_cast<float2*>(stats.data_ptr()) : nullptr;
+  TORCH_CHECK(bl.numel() == br.numel() && (bl.numel() == 0 || (bl.numel() == 32 && bl.is_cuda() && bl.scalar_type() == at::kFloat && bl.is_contiguous() && br.is_cuda() && br.scalar_type() == at::kFloat && br.is_contiguous())),
+              "bl / br: fp32 [32] (the projection biases) or both empty");
+  p.bl = bl.numel() ? bl.data_ptr<float>() : nullptr; p.br = br.numel() ? br.data_ptr<float>() : nullptr;
   p.S = S; p.L = L; p.eps = (float)eps;
   auto st = at::cuda::getCurrentCUDAStream();
   const bool save = stats.numel() > 0;
