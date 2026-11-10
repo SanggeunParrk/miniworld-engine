@@ -70,7 +70,7 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
         logits = torch.mm(zn, wb.t())
     else:      # inference: one pass over the pair
         zn = zmean = zrstd = None
-        logits = e.pair_logits(zf, lnz_w, lnz_b, wb, eps_z)
+        logits = e.pair_logits(zf, lnz_w, lnz_b, wb, eps_z, 0)
     logits = logits.view(L, L, HEADS).permute(2, 0, 1)                            # [h, i, j], the module's to_bias output (bf16)
     key = None if mask is None else mask[0]
     if key is not None:

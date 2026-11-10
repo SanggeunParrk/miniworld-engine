@@ -23,6 +23,7 @@
 #include <cublas_v2.h>
 #include <algorithm>
 #include <cstdint>
+#include <tuple>
 
 namespace {
 using bf16 = __nv_bfloat16;
@@ -46,73 +47,60 @@ __device__ __forceinline__ float sigm(float x) { return 1.f / (1.f + __expf(-x))
 // natural row (s, j) chunk k (16 bytes: head k / 4, channels 8 (k % 4)..) <-> head-major element offset
 __device__ __forceinline__ long hm_off(int s, int j, int k, int S, int L) { return (((long)(k >> 2) * L + j) * S + s) * C + (k & 3) * 8; }
 
-// head-major chunk order (h, j, s, q): the writes of to_hm are contiguous
+// to_hm / from_hm: one CTA per head-major run block (h, j): its S x 4 chunks, contiguous on the head-major side, 64-byte segments on the other
 __global__ void __launch_bounds__(256) to_hm_k(const bf16* __restrict__ src, long ld, bf16* __restrict__ dst, int S, int L) {
-  const long n = (long)H * L * S * 4;
-  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < n; i += (long)gridDim.x * 256) {
-    const int q = (int)(i & 3);
-    long t = i >> 2;
-    const int s = (int)(t % S); t /= S;
-    const int j = (int)(t % L), h = (int)(t / L);
-    reinterpret_cast<uint4*>(dst)[i] = *reinterpret_cast<const uint4*>(src + ((long)s * L + j) * ld + h * C + q * 8);
-  }
+  const int h = blockIdx.x / L, j = blockIdx.x - h * L;
+  uint4* d = reinterpret_cast<uint4*>(dst) + (long)blockIdx.x * S * 4;
+  const bf16* s0 = src + (long)j * ld + h * C;
+  for (int t = threadIdx.x; t < S * 4; t += 256) d[t] = *reinterpret_cast<const uint4*>(s0 + (long)(t >> 2) * L * ld + (t & 3) * 8);
 }
 
 __global__ void __launch_bounds__(256) from_hm_k(const bf16* __restrict__ src, bf16* __restrict__ dst, long ld, int S, int L) {
-  const long n = (long)H * L * S * 4;
-  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < n; i += (long)gridDim.x * 256) {
-    const int q = (int)(i & 3);
-    long t = i >> 2;
-    const int s = (int)(t % S); t /= S;
-    const int j = (int)(t % L), h = (int)(t / L);
-    *reinterpret_cast<uint4*>(dst + ((long)s * L + j) * ld + h * C + q * 8) = reinterpret_cast<const uint4*>(src)[i];
-  }
+  const int h = blockIdx.x / L, j = blockIdx.x - h * L;
+  const uint4* s_ = reinterpret_cast<const uint4*>(src) + (long)blockIdx.x * S * 4;
+  bf16* d0 = dst + (long)j * ld + h * C;
+  for (int t = threadIdx.x; t < S * 4; t += 256) *reinterpret_cast<uint4*>(d0 + (long)(t >> 2) * L * ld + (t & 3) * 8) = s_[t];
 }
 
-// natural chunk order (row, k): u / g / du / dg contiguous, the head-major side in 64-byte segments
+// gate_fwd / gate_bwd: one CTA per 8 natural rows (a warp per row, a lane per 16-byte chunk): u / g / du / dg contiguous, the head-major
+// side in 64-byte segments
 template <bool HM>
 __global__ void __launch_bounds__(256) gate_fwd_k(const bf16* __restrict__ o, const bf16* __restrict__ vg, long ld, int gcol, bf16* __restrict__ u, int S,
                                                   int L) {
-  const long n = (long)S * L * (HC / 8);
-  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < n; i += (long)gridDim.x * 256) {
-    const int k = (int)(i & 31);
-    const long row = i >> 5;
-    const int s = (int)(row / L), j = (int)(row % L);
-    float g[8], ov[8], r[8];
-    unpack8(*reinterpret_cast<const uint4*>(vg + row * ld + gcol + k * 8), g);
-    unpack8(*reinterpret_cast<const uint4*>(o + (HM ? hm_off(s, j, k, S, L) : row * HC + k * 8)), ov);   // HM: o head-major, else natural [S L, 256]
+  const int row = blockIdx.x * 8 + (threadIdx.x >> 5), k = threadIdx.x & 31;
+  if (row >= S * L) return;
+  const int s = row / L, j = row - s * L;
+  float g[8], ov[8], r[8];
+  unpack8(*reinterpret_cast<const uint4*>(vg + (long)row * ld + gcol + k * 8), g);
+  unpack8(*reinterpret_cast<const uint4*>(o + (HM ? hm_off(s, j, k, S, L) : (long)row * HC + k * 8)), ov);   // HM: o head-major, else natural [S L, 256]
 #pragma unroll
-    for (int e = 0; e < 8; ++e) r[e] = bfr(sigm(g[e])) * ov[e];
-    reinterpret_cast<uint4*>(u)[i] = pack8(r);
-  }
+  for (int e = 0; e < 8; ++e) r[e] = bfr(sigm(g[e])) * ov[e];
+  *reinterpret_cast<uint4*>(u + (long)row * HC + k * 8) = pack8(r);
 }
 
 __global__ void __launch_bounds__(256) gate_bwd_k(const bf16* __restrict__ du, const bf16* __restrict__ vg, long ld, int gcol, const bf16* __restrict__ o,
                                                   bf16* __restrict__ dout, bf16* __restrict__ dvg, long ldd, int S, int L) {
-  const long n = (long)S * L * (HC / 8);
-  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < n; i += (long)gridDim.x * 256) {
-    const int k = (int)(i & 31);
-    const long row = i >> 5;
-    const int s = (int)(row / L), j = (int)(row % L);
-    const long ho = hm_off(s, j, k, S, L);
-    float d[8], g[8], ov[8], a[8], b[8];
-    unpack8(reinterpret_cast<const uint4*>(du)[i], d);
-    unpack8(*reinterpret_cast<const uint4*>(vg + row * ld + gcol + k * 8), g);
-    unpack8(*reinterpret_cast<const uint4*>(o + ho), ov);
+  const int row = blockIdx.x * 8 + (threadIdx.x >> 5), k = threadIdx.x & 31;
+  if (row >= S * L) return;
+  const int s = row / L, j = row - s * L;
+  const long ho = hm_off(s, j, k, S, L);
+  float d[8], g[8], ov[8], a[8], b[8];
+  unpack8(*reinterpret_cast<const uint4*>(du + (long)row * HC + k * 8), d);
+  unpack8(*reinterpret_cast<const uint4*>(vg + (long)row * ld + gcol + k * 8), g);
+  unpack8(*reinterpret_cast<const uint4*>(o + ho), ov);
 #pragma unroll
-    for (int e = 0; e < 8; ++e) {
-      const float sg = sigm(g[e]);
-      a[e] = d[e] * bfr(sg);
-      b[e] = d[e] * ov[e] * sg * (1.f - sg);
-    }
-    *reinterpret_cast<uint4*>(dout + ho) = pack8(a);
-    *reinterpret_cast<uint4*>(dvg + row * ldd + gcol + k * 8) = pack8(b);
+  for (int e = 0; e < 8; ++e) {
+    const float sg = sigm(g[e]);
+    a[e] = d[e] * bfr(sg);
+    b[e] = d[e] * ov[e] * sg * (1.f - sg);
   }
+  *reinterpret_cast<uint4*>(dout + ho) = pack8(a);
+  *reinterpret_cast<uint4*>(dvg + (long)row * ldd + gcol + k * 8) = pack8(b);
 }
 
 // Inference, the pair side in one pass: logits[r, h] = bf16( bf16(LN(z[r, :])) . Wb[h, :] ), one warp per pair row of 512 channels (16 per lane),
 // two-pass statistics, the normalised values rounded to bf16 as the module's LayerNorm output before the 8 dot products (fp32).
-constexpr int DZ = 512, PL_PF = 3;
+constexpr int DZ = 512;
 // one row: the lane's 16 channels (8 lane + e, 256 + 8 lane + e) -> its head's logit (lanes with lane % 4 == 0 store it)
 __device__ __forceinline__ void pl_row(const uint4 (&raw)[2], const __nv_bfloat162 (&wr)[2][4][H], const float (*sg)[32], const float (*sb)[32], int lane,
                                        float eps, bf16* __restrict__ out_row) {
@@ -175,7 +163,8 @@ __device__ __forceinline__ void pl_row(const uint4 (&raw)[2], const __nv_bfloat1
 }
 
 // Wb (bf16 pairs) in registers, the LayerNorm affine in shared memory ([(a, e)][lane]: conflict-free), PL_PF rows' loads in flight per warp
-__global__ void __launch_bounds__(256, 2) pair_logits_k(const bf16* __restrict__ z, const float* __restrict__ lnw, const float* __restrict__ lnb,
+template <int PL_PF, int MINB>
+__global__ void __launch_bounds__(256, MINB) pair_logits_k(const bf16* __restrict__ z, const float* __restrict__ lnw, const float* __restrict__ lnb,
                                                         const bf16* __restrict__ wb, bf16* __restrict__ out, long R, float eps) {
   __shared__ float sg[16][32], sb[16][32];
   for (int k = threadIdx.x; k < DZ; k += 256) {
@@ -236,8 +225,7 @@ cudaStream_t st() { return at::cuda::getCurrentCUDAStream(); }
 void to_hm(torch::Tensor src, torch::Tensor dst, int64_t S, int64_t L) {
   check_nat(src, S * L, HC, "to_hm src");
   check_hm(dst, (int)S, (int)L, "to_hm dst");
-  const long n = (long)H * L * S * 4;
-  to_hm_k<<<grid(n), 256, 0, st()>>>(cp(src), src.stride(0), mp(dst), (int)S, (int)L);
+  to_hm_k<<<(unsigned)(H * L), 256, 0, st()>>>(cp(src), src.stride(0), mp(dst), (int)S, (int)L);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -245,8 +233,7 @@ void to_hm(torch::Tensor src, torch::Tensor dst, int64_t S, int64_t L) {
 void from_hm(torch::Tensor src, torch::Tensor dst, int64_t S, int64_t L) {
   check_hm(src, (int)S, (int)L, "from_hm src");
   check_nat(dst, S * L, HC, "from_hm dst");
-  const long n = (long)H * L * S * 4;
-  from_hm_k<<<grid(n), 256, 0, st()>>>(cp(src), mp(dst), dst.stride(0), (int)S, (int)L);
+  from_hm_k<<<(unsigned)(H * L), 256, 0, st()>>>(cp(src), mp(dst), dst.stride(0), (int)S, (int)L);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -258,9 +245,9 @@ void gate_fwd(torch::Tensor o, torch::Tensor vg, int64_t gcol, torch::Tensor u, 
   check_nat(vg, S * L, (int)gcol + HC, "gate_fwd vg");
   TORCH_CHECK(gcol % 8 == 0 && u.is_contiguous(), "gate_fwd: gcol % 8, u contiguous");
   check_nat(u, S * L, HC, "gate_fwd u");
-  const long n = (long)S * L * (HC / 8);
-  if (hm) gate_fwd_k<true><<<grid(n), 256, 0, st()>>>(cp(o), cp(vg), vg.stride(0), (int)gcol, mp(u), (int)S, (int)L);
-  else gate_fwd_k<false><<<grid(n), 256, 0, st()>>>(cp(o), cp(vg), vg.stride(0), (int)gcol, mp(u), (int)S, (int)L);
+  const unsigned nb = (unsigned)((S * L + 7) / 8);
+  if (hm) gate_fwd_k<true><<<nb, 256, 0, st()>>>(cp(o), cp(vg), vg.stride(0), (int)gcol, mp(u), (int)S, (int)L);
+  else gate_fwd_k<false><<<nb, 256, 0, st()>>>(cp(o), cp(vg), vg.stride(0), (int)gcol, mp(u), (int)S, (int)L);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -273,8 +260,7 @@ void gate_bwd(torch::Tensor du, torch::Tensor vg, int64_t gcol, torch::Tensor o,
   check_hm(o, (int)S, (int)L, "gate_bwd o");
   check_hm(dout, (int)S, (int)L, "gate_bwd dout");
   TORCH_CHECK(gcol % 8 == 0, "gate_bwd: gcol % 8");
-  const long n = (long)S * L * (HC / 8);
-  gate_bwd_k<<<grid(n), 256, 0, st()>>>(cp(du), cp(vg), vg.stride(0), (int)gcol, cp(o), mp(dout), mp(dvg), dvg.stride(0), (int)S, (int)L);
+  gate_bwd_k<<<(unsigned)((S * L + 7) / 8), 256, 0, st()>>>(cp(du), cp(vg), vg.stride(0), (int)gcol, cp(o), mp(dout), mp(dvg), dvg.stride(0), (int)S, (int)L);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -297,20 +283,26 @@ void head_bmm(torch::Tensor w, torch::Tensor v, torch::Tensor o, int64_t S, int6
 }
 
 // z [R, 512] bf16, lnw / lnb fp32 [512], wb [8, 512] bf16 -> logits [R, 8] bf16
-torch::Tensor pair_logits(torch::Tensor z, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wb, double eps) {
+torch::Tensor pair_logits(torch::Tensor z, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wb, double eps, int64_t variant) {
   TORCH_CHECK(z.is_cuda() && z.scalar_type() == at::kBFloat16 && z.is_contiguous() && z.dim() == 2 && z.size(1) == DZ, "pair_logits: z bf16 [R, 512]");
   TORCH_CHECK(lnw.scalar_type() == at::kFloat && lnb.scalar_type() == at::kFloat && lnw.numel() == DZ && lnb.numel() == DZ && lnw.is_contiguous() && lnb.is_contiguous(),
               "pair_logits: lnw / lnb fp32 [512]");
   TORCH_CHECK(wb.scalar_type() == at::kBFloat16 && wb.is_contiguous() && wb.numel() == H * DZ, "pair_logits: wb bf16 [8, 512]");
   const long R = z.size(0);
   auto out = torch::empty({R, H}, z.options());
-  pair_logits_k<<<grid(R * 32), 256, 0, st()>>>(cp(z), lnw.data_ptr<float>(), lnb.data_ptr<float>(), cp(wb), mp(out), R, (float)eps);
+  const auto args = std::make_tuple(cp(z), lnw.data_ptr<float>(), lnb.data_ptr<float>(), cp(wb), mp(out), R, (float)eps);
+  const int g = grid(R * 32);
+  // variant (A/B of the rows in flight and the CTAs per SM): 0 = the shipped (2 rows, 2 CTAs), 1 = (1, 3), 2 = (3, 2), 3 = (2, 1)
+  if (variant == 1) std::apply([&](auto... a) { pair_logits_k<1, 3><<<g, 256, 0, st()>>>(a...); }, args);
+  else if (variant == 2) std::apply([&](auto... a) { pair_logits_k<3, 2><<<g, 256, 0, st()>>>(a...); }, args);
+  else if (variant == 3) std::apply([&](auto... a) { pair_logits_k<2, 1><<<g, 256, 0, st()>>>(a...); }, args);
+  else std::apply([&](auto... a) { pair_logits_k<2, 2><<<g, 256, 0, st()>>>(a...); }, args);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("pair_logits", &pair_logits);
+  m.def("pair_logits", &pair_logits, py::arg("z"), py::arg("lnw"), py::arg("lnb"), py::arg("wb"), py::arg("eps"), py::arg("variant") = 0);
   m.def("head_bmm", &head_bmm);
   m.def("to_hm", &to_hm);
   m.def("from_hm", &from_hm);
