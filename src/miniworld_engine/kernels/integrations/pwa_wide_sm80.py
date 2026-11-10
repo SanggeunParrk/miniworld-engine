@@ -63,7 +63,7 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
     key = None if mask is None else mask[0]
     if key is not None:
         logits = logits.masked_fill(~key[None, None, :], torch.finfo(torch.bfloat16).min)
-    w = torch.softmax(logits, -1).contiguous()                                    # [8, L, L] bf16
+    w = torch.softmax(logits.float(), -1).to(torch.bfloat16)                      # [8, L, L] bf16 (fp32 softmax, as F.softmax on bf16)
     if not save:
         del zn
     mf = msa[0].reshape(S * L, D_MSA)
@@ -128,7 +128,8 @@ class _Training(torch.autograd.Function):
         if p_drop > 0:   # Dropout(broadcast_dim=1): one keep decision per (token, channel), shared by the MSA rows (pwa_sm80's draw)
             keep = (torch.rand(msa.shape[2], msa.shape[3], device=msa.device) > p_drop).to(torch.bfloat16)
             dscale = 1.0 / (1.0 - p_drop)
-        out, saved = _forward(msa, pair, mask, list(leaves), eps_m, eps_z, keep, dscale, True)
+        with torch.autocast("cuda", enabled=False):
+            out, saved = _forward(msa, pair, mask, list(leaves), eps_m, eps_z, keep, dscale, True)
         ctx.args, ctx.saved = (eps_m, eps_z, keep, dscale), saved
         ctx.save_for_backward(msa, pair, mask, *leaves)
         return out
@@ -144,7 +145,7 @@ class _Training(torch.autograd.Function):
 
 
 def update_inference(leaves, msa, pair, mask, eps_m, eps_z) -> torch.Tensor:
-    with torch.cuda.device(msa.device):
+    with torch.cuda.device(msa.device), torch.autocast("cuda", enabled=False):   # the dtypes are the kernels': bf16 activations, fp32 statistics
         return _forward(msa, pair, mask, leaves, eps_m, eps_z, None, 1.0, False)[0]
 
 
