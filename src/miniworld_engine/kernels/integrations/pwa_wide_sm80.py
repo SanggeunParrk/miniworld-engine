@@ -53,11 +53,17 @@ def _ext():
 
 
 def _weights(leaves):
-    """The kernels' forms of the module's parameters: LayerNorm affines fp32, [Wv; Wg] / Wb / Wo bf16."""
-    lnm_w, lnm_b, wv, wg, lnz_w, lnz_b, wb, wo = leaves
+    """The kernels' forms of the module's parameters: LayerNorm affines fp32, [Wv; Wg] / Wb / Wo bf16; the pair LayerNorm's offset is zeros (the
+    module has none: ``pwa_sm80._ln_pair_bias``). Cached while the parameters are unmodified (``_capture.param_forms``)."""
+    from miniworld_engine.kernels import _capture
+
+    lnm_w, lnm_b, wv, wg, lnz_w, _, wb, wo = leaves
     bf, f32 = torch.bfloat16, torch.float32
-    return (lnm_w.to(f32).contiguous(), lnm_b.to(f32).contiguous(), torch.cat([wv, wg]).to(bf).contiguous(), lnz_w.to(f32).contiguous(),
-            lnz_b.to(f32).contiguous(), wb.to(bf).contiguous(), wo.to(bf).contiguous())
+    params = (lnm_w, lnm_b, wv, wg, lnz_w, wb, wo)
+    return _capture.param_forms(
+        "pwa_wide_sm80", params,
+        lambda: (lnm_w.to(f32).contiguous(), lnm_b.to(f32).contiguous(), torch.cat([wv, wg]).to(bf).contiguous(), lnz_w.to(f32).contiguous(),
+                 torch.zeros(lnz_w.shape, dtype=f32, device=lnz_w.device), wb.to(bf).contiguous(), wo.to(bf).contiguous()))
 
 
 def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
