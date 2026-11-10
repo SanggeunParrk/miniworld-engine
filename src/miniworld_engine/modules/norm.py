@@ -195,7 +195,7 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}   # 2026-11-10: rewired to the model kits
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:h100_sm90": 2}   # 2026-11-10: kits; H100 odd-width rows kernels
 
     def __init__(
         self,
