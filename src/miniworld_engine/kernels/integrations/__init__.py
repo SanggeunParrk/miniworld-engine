@@ -129,6 +129,18 @@ def _prebuild_sm80():
         if r["dtype"] in ("bfloat16", "master") and pwa.supported(int(d["d_msa"]), int(d["d_pair"]), int(d.get("n_head", 8)),
                                                                    int(d.get("d_hidden", int(d["d_msa"]) // int(d.get("n_head", 8))))):
             pwa_rows.append(r)
+    from miniworld_engine.kernels.integrations import pwa_wide_sm80
+
+    def wide(r):
+        d = _kv(r["dims"])
+        return pwa_wide_sm80.supported(int(d["d_msa"]), int(d["d_pair"]), int(d.get("n_head", 8)), int(d.get("d_hidden", 0)))
+
+    if any(r["dtype"] in ("bfloat16", "master") and wide(r) for r in family_rows("pair_weighted_averaging")):
+        from miniworld_engine.kernels.pair_weighted_averaging.cuda import wide_sm80
+        from miniworld_engine.kernels.triangle_attention.cuda import sm80_bidir
+
+        yield wide_sm80.ext
+        yield sm80_bidir.glue   # its row LayerNorm (forward and backward)
     if pwa_rows:
         yield pwa.ext
         yield pwa._bmm_ext

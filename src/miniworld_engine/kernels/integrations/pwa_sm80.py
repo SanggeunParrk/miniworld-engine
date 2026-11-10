@@ -1,7 +1,7 @@
 """Automatic dispatch to the A100 (sm_80) MSAPairWeightedAveraging: hand CUDA around cuBLAS, inference and training.
 
 Contract: bf16 MSA ``[1, S, L, d_msa]`` (d_msa 64 or 128, any S) and bf16 pair ``[1, L, L, d_pair]`` (d_pair 128 / 256 / 384; L a multiple of 16, at most 1024), 8 heads of 8 / 16 / 32
-channels (``d_hidden``; d_msa 128 with 32-wide heads is not built), an optional bool key mask ``[1, L]``, the module's residual and row dropout (``drop_msa``, training), capability 8.0.
+channels (``d_hidden``; d_msa 128 with 32-wide heads is not built; d_msa 256 / d_pair 512 / 8 x 32 is ``pwa_wide_sm80``), an optional bool key mask ``[1, L]``, the module's residual and row dropout (``drop_msa``, training), capability 8.0.
 ``refusal`` is the range; ``modules.MSAPairWeightedAveraging``'s ``cuda`` backend refuses everything else (no fallback).
 
 The step (``kernels/pair_weighted_averaging/cuda/sm80``; ``.../cuda/sm80.py`` documents the kernels):
@@ -22,6 +22,7 @@ import torch
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels.integrations import pwa_wide_sm80
 
 _FAILED = False
 #: Opt-in experiments of the port, off: the searched cuBLASLt algorithms (``sm80.lt_bcast`` / ``lt_dw``) and the early-dw kernel.
@@ -67,6 +68,8 @@ def refusal(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
     d_msa, d_pair = msa.shape[-1], pair.shape[-1]
     d_hidden = module.to_value.weight.shape[0] // module.n_head
     sm = _sm80()
+    if pwa_wide_sm80.supported(d_msa, d_pair, module.n_head, d_hidden):   # the BIG width: its own composition (pwa_wide_sm80)
+        return _wide_refusal(module, msa, pair, mask)
     if not sm.supported(d_msa, d_pair, module.n_head, d_hidden) or module.to_value.weight.shape != (module.n_head * d_hidden, d_msa):
         return (f"d_msa {d_msa}, d_pair {d_pair}, {module.n_head} heads x {d_hidden}: not an sm_80 build (8 heads of 8 / 16 / 32, d_msa {sm.D_MSA}, "
                 f"d_pair {sm.D_PAIR}, d_msa x d_hidden <= 2048, not d_msa 128 with 32-wide heads)")
@@ -82,6 +85,25 @@ def refusal(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
     if not _loads():
         return "the sm_80 MSAPairWeightedAveraging extension failed to build"
     return None
+
+
+def _wide_refusal(module, msa, pair, mask) -> str | None:
+    """The range of ``pwa_wide_sm80`` (d_msa 256, d_pair 512, 8 heads x 32) past the width check."""
+    if module.ln_msa.weight is None or module.ln_pair.weight is None or module.to_bias.weight.shape != (module.n_head, pair.shape[-1]):
+        return "the kernels take the affine msa / pair LayerNorms and a bias-free [n_head, d_pair] logit projection"
+    if msa.shape[0] != 1 or msa.shape[1] < 1:
+        return f"batch {msa.shape[0]}: the sm_80 kernels take one sample (batch 1) with at least one MSA row"
+    length = msa.shape[2]
+    if tuple(pair.shape) != (1, length, length, pair.shape[-1]):
+        return "pair must be [1, L, L, d_pair]"
+    if mask is not None and (tuple(mask.shape) != (1, length) or mask.dtype != torch.bool):
+        return "mask must be a bool [1, L] key mask"
+    return None
+
+
+def _wide(module) -> bool:
+    return pwa_wide_sm80.supported(module.to_value.weight.shape[1], module.to_bias.weight.shape[1], module.n_head,
+                                   module.to_value.weight.shape[0] // module.n_head)
 
 
 def _eligible(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
@@ -240,6 +262,9 @@ def inference(
 def update_inference(
     module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 ) -> torch.Tensor:
+    if _wide(module):
+        return pwa_wide_sm80.update_inference(_leaves(module), msa.contiguous(), pair.contiguous(), mask, float(module.ln_msa.eps),
+                                              float(module.ln_pair.eps))
     return inference(
         msa.contiguous(),
         pair.contiguous(),
@@ -704,6 +729,9 @@ def update_train(
     module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 ) -> torch.Tensor:
     p_drop = float(module.drop_msa.p_drop) if module.training else 0.0
+    if _wide(module):
+        return pwa_wide_sm80.update_train(_leaves(module), msa.contiguous(), pair.contiguous(), mask, float(module.ln_msa.eps),
+                                          float(module.ln_pair.eps), p_drop)
     return _Training.apply(
         float(module.ln_msa.eps),
         float(module.ln_pair.eps),

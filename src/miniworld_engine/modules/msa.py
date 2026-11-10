@@ -509,6 +509,7 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
 
     """
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: the BIG width (d_msa 256 / d_pair 512) on sm_80 (pwa_wide_sm80)
 
     #: "cuda": the H100 kernels (kernels.integrations.pwa_train / pwa_wide); "triton": kernels.pair_weighted_averaging.triton (see the
     #: _supports_ docstrings for the ranges). "anthropic" (inference only): the model kits' own masked PWA kernels (see _supports_anthropic).
