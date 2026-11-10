@@ -11,6 +11,7 @@ Scope is H100 (sm90) only.
 | [measure.md](measure.md) | the accuracy measurer (fp64 gold, lights) and the speed measurer (CUDA-graph timing) |
 | [judge.md](judge.md) | versions, tokens, verdicts (carried / owed / pending), the Slurm measurement cycle |
 | [ladder.md](ladder.md) | the performance ladder cuda < triton < pytorch: how it is checked, exceptions (LayerNorm, RMSNorm) |
+| [../benchmarks/](../benchmarks/README.md) | speed figures (L and D sweeps) and tables per card, generated from the speed tokens by `python -m miniworld_engine.measure.plot` |
 
 ## H100 kernel notes
 
