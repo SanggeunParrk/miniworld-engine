@@ -74,7 +74,11 @@ def prebuild(target, rows):
     (``groups``) OuterProductMean row launches."""
     from miniworld_engine.kernels._prebuild import _kv
 
-    if target.arch == "sm80":   # A100: the sm_80 OPM builds are planned by kernels/integrations (opm_sm80)
+    if target.arch == "sm80":   # A100: the sm_80 OPM builds are planned by kernels/integrations (opm_sm80); the grouped rows' passes here
+        if any("groups" in _kv(r["options"]) and r["dtype"] in ("bfloat16", "master") for r in rows):
+            from . import chai_sm80
+
+            yield chai_sm80.ext
         return
     names = set().union(*(r["kernels"] for r in rows)) if rows else set()
     if "outer_product_mean_gather_sm90" in names:

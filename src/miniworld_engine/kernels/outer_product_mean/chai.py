@@ -1,4 +1,5 @@
-"""Chai-1 OuterProductMean (``groups = 8``, d_hidden 64, product LayerNorm) on H100: fused CUDA passes (``cuda/chai.cu``).
+"""Chai-1 OuterProductMean (``groups = 8``, d_hidden 64, product LayerNorm) on H100: fused CUDA passes (``cuda/chai.cu``); on A100 the same passes
+(``cuda/chai_sm80``: mma.sync / cp.async, d_pair 256).
 
     prologue   LayerNorm of the MSA rows + both projections + mask -> a, b [8, S N, 8] (group-major)         ``cuda.chai_proj``
     products   O[g] = a_g^T b_g over the MSA rows: one cuBLAS batched GEMM                                  [8, N K, N K]
@@ -21,7 +22,8 @@ G, K, P, CM = 8, 8, 512, 64
 def serves_dims(msa: torch.Tensor, groups: int, group_width: int, d_pair: int, *, mask: torch.Tensor | None = None, projection_bias: bool = False) -> bool:
     if not msa.is_cuda or msa.dtype != torch.bfloat16 or msa.ndim != 4 or msa.shape[0] != 1:
         return False
-    if torch.cuda.get_device_capability(msa.device) != (9, 0):
+    cap = torch.cuda.get_device_capability(msa.device)
+    if cap not in ((9, 0), (8, 0)) or (cap == (8, 0) and d_pair % 256):   # A100 (cuda/chai_sm80): d_pair a multiple of 256
         return False
     _, s, n, cm = msa.shape
     return (groups == G and group_width == K and cm == CM and n % 64 == 0 and s > 0 and d_pair % 128 == 0 and not projection_bias
@@ -33,6 +35,17 @@ def serves(module, msa: torch.Tensor, mask: torch.Tensor | None, *, training: bo
         return False
     return module.to_out.weight.shape[1] == P and serves_dims(msa, module.groups, module.group_width, module.to_out.weight.shape[0], mask=mask,
                                                             projection_bias=module.to_left.bias is not None)
+
+
+def _kernels(t: torch.Tensor):
+    """The pass kernels of the card: ``cuda`` (``chai.cu``, sm_90a) or ``cuda.chai_sm80`` (A100), the same entry points."""
+    if torch.cuda.get_device_capability(t.device) == (8, 0):
+        from miniworld_engine.kernels.outer_product_mean.cuda import chai_sm80
+
+        return chai_sm80
+    from miniworld_engine.kernels.outer_product_mean import cuda
+
+    return cuda
 
 
 def _fold(wo, gam, bet, bo):
@@ -56,7 +69,7 @@ def _forms(lnw, lnb, wl, wr, gam, bet, wo, bo, infer: bool = False):
 
 
 def _front(msa, mask, forms, eps, save):
-    from miniworld_engine.kernels.outer_product_mean import cuda
+    cuda = _kernels(msa)
 
     _, s, n, _ = msa.shape
     x = msa[0].reshape(s * n, CM).contiguous()
@@ -85,7 +98,7 @@ def _fwd_op_fake(args, eps, eps_prod, train):
 @opaque(fake=_fwd_op_fake, name="outer_product_mean_chai_fwd")
 def _fwd_op(args: list[torch.Tensor], eps: float, eps_prod: float, train: bool) -> list[torch.Tensor]:
     """The Chai-1 OPM forward: prologue, grouped products, fused epilogue. args = [msa, mask, lnw, lnb, wl, wr, gamma, beta, wo, bo, residual] (empty tensors for no mask / residual)."""
-    from miniworld_engine.kernels.outer_product_mean import cuda
+    cuda = _kernels(args[0])
     msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual = args
     forms = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo, infer=not train)
     a, b, st1, o = _front(msa, mask, forms, eps, train)
@@ -104,7 +117,7 @@ def _bwd_op_fake(args, kept, dz, eps, eps_prod):
 @opaque(fake=_bwd_op_fake, name="outer_product_mean_chai_bwd")
 def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor, eps: float, eps_prod: float) -> list[torch.Tensor]:
     """Gradients of ``_fwd_op`` (train): [dmsa, dlnw, dlnb, dwl, dwr, dgamma, dbeta, dwo, dbo] from dz and the saved a, b, y, statistics."""
-    from miniworld_engine.kernels.outer_product_mean import cuda
+    cuda = _kernels(args[0])
 
     msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, _ = args
     a, b, y, st, st1 = kept

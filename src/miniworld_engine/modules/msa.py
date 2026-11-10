@@ -379,6 +379,13 @@ class OuterProductMean(BackendModule, MasterWeights):
         if why is not None:
             return None, why
         if torch.cuda.get_device_capability(msa.device) == (8, 0):   # A100: kernels.integrations.opm_sm80 (forward + backward)
+            if self.groups > 1:   # Chai-1: kernels.outer_product_mean.chai on its sm_80 passes (cuda/chai_sm80)
+                from miniworld_engine.kernels.outer_product_mean import chai
+
+                if chai.serves(self, msa, mask, training=torch.is_grad_enabled(), interchain=self._interchain(token_asym_id)):
+                    return "chai", None
+                return None, (f"grouped OPM (groups {self.groups} x {self.group_width}, d_msa {msa.shape[-1]}, d_pair {self.to_out.weight.shape[0]}, N "
+                              f"{msa.shape[2]}, batch {msa.shape[0]}): the A100 Chai-1 passes take 8 x 8 groups, d_msa 64, d_pair a multiple of 256, N % 64, batch 1")
             from miniworld_engine.kernels.integrations import opm_sm80
 
             why = opm_sm80.refusal(self, msa, mask, token_asym_id, residual)
