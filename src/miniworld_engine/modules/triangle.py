@@ -184,16 +184,15 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     def _head_dim(self) -> int:
         return self.to_value.weight.shape[0] // self.n_head
 
-    def _core_refusal(self, pair: torch.Tensor, mask: torch.Tensor | None, *, weights: bool = True) -> str | None:
-        """What both library cores need from the call (the call's shape / mask; the library's own range is checked by its backend)."""
+    def _core_refusal(self, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None:
+        """What the attention cores need from the call (the call's shape / mask; the library's own range is checked by its backend). The
+        projections are the module's own statements: fp32 masters next to a bf16 pair run them under autocast (:func:`master_autocast`)."""
         if not self.use_self_attention:
             return "bias-only attention (use_self_attention=False) has no query / key: the library op is q.k attention"
         if pair.dim() != 4 or pair.shape[1] != pair.shape[2]:
             return f"pair must be [B, L, L, d_pair], got {tuple(pair.shape)}"
         if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != tuple(pair.shape[:2])):
             return "mask must be a bool [B, L] key mask"
-        if weights and self.to_query.weight.dtype != pair.dtype:
-            return f"the projections ({self.to_query.weight.dtype}) must be in the pair's dtype ({pair.dtype})"
         return None
 
     def _supports_cueq(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> str | None:
@@ -223,7 +222,8 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         return None
 
     def _forward_cueq(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
-        return self._residual(pair, mask, _cueq_core)
+        with master_autocast(pair, self):   # fp32 master matrices under bf16 activations: the projections run bf16, as the reference's do
+            return self._residual(pair, mask, _cueq_core)
 
     def _anthropic_select(self, pair: torch.Tensor):
         from miniworld_engine.modules import _anthropic
@@ -257,7 +257,8 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
             return prov.triangle_attention(q.contiguous(), k.contiguous(), v.contiguous(), bias.float().contiguous(), m5, q.shape[-1] ** -0.5,
                                            word=sel.word, selection=sel, stock=stock)
 
-        return self._residual(pair, mask, core)
+        with master_autocast(pair, self):   # fp32 master matrices under bf16 activations: the projections run bf16, as the reference's do
+            return self._residual(pair, mask, core)
 
     # ------------------------------------------------------------------------------------------------------------- engine kernels
     def _make_drop_scale(self, pair: torch.Tensor, p: float) -> torch.Tensor:
@@ -277,7 +278,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
             return self._cuda_route_sm80(pair, mask)
         if cap != (9, 0):
             return None, "the cuda backend is the H100 (sm_90a) / A100 (sm_80) kernels"
-        why = self._core_refusal(pair, mask, weights=False)
+        why = self._core_refusal(pair, mask)
         if why is not None:
             return None, why
         if self.use_qk_norm:
@@ -305,7 +306,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         """``("sm80" | "sm80_train", None)``: the A100 path (``kernels/integrations/triattn_sm80``: the whole update, inference or with
         autograd), else ``(None, reason)``. The standard orientation without projection biases only (TriangleAttention; the starting nodes of
         AF3 / Chai-1), bf16, d_pair 128 / 4 x 32 or d_pair 64 .. 512 with heads of 16 / 32 channels, L % 128 == 0."""
-        why = self._core_refusal(pair, mask, weights=False)
+        why = self._core_refusal(pair, mask)
         if why is not None:
             return None, why
         from miniworld_engine.kernels.integrations import triattn_sm80
@@ -338,7 +339,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     def _supports_triton(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> str | None:
         if not pair.is_cuda:
             return "the Triton kernels run on CUDA tensors only"
-        why = self._core_refusal(pair, mask, weights=False)
+        why = self._core_refusal(pair, mask)
         if why is not None:
             return why
         if pair.dtype != torch.bfloat16:
@@ -987,8 +988,6 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
             return f"pair must be [B, L, L, d_pair], got {tuple(pair.shape)}"
         if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != tuple(pair.shape[:2])):
             return "mask must be a bool [B, L] residue mask"
-        if self.to_left.weight.dtype != pair.dtype:
-            return f"the projections ({self.to_left.weight.dtype}) must be in the pair's dtype ({pair.dtype}) (no fp32 masters)"
         if self.ln_pair.eps != self.ln_out.eps:
             return "the library op takes one LayerNorm epsilon for LN_in and LN_out"
         return None
@@ -1028,18 +1027,19 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
             return pair
         dropout_p = self.p_drop if dropout_p is None else dropout_p
         scale = dropout_scale(pair, dropout_p, 1) if dropout_p and dropout_p > 0.0 and self.training else None
+        w = lambda lin: lin.weight.to(pair.dtype)   # fp32 master matrices: cast in autograd, the gradient lands on the master
         update = _cueq.torch_api().triangle_multiplicative_update(
             pair,
             direction="outgoing" if self.outgoing else "incoming",
             mask=self._pair_mask(pair, mask),
             norm_in_weight=self.ln_pair.weight,
             norm_in_bias=self.ln_pair.bias,
-            p_in_weight=torch.cat([self.to_left.weight, self.to_right.weight]),          # rows [a; b]
-            g_in_weight=torch.cat([self.to_left_gate.weight, self.to_right_gate.weight]),
+            p_in_weight=torch.cat([w(self.to_left), w(self.to_right)]),          # rows [a; b]
+            g_in_weight=torch.cat([w(self.to_left_gate), w(self.to_right_gate)]),
             norm_out_weight=self.ln_out.weight,
             norm_out_bias=self.ln_out.bias,
-            p_out_weight=self.to_out.weight,
-            g_out_weight=self.to_gate.weight,
+            p_out_weight=w(self.to_out),
+            g_out_weight=w(self.to_gate),
             eps=self.ln_pair.eps,
             precision=None,                                                               # the op's default
         )
@@ -1090,6 +1090,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         if self.dead:   # inference only: a dead instance returns the residual input (as the reference does)
             return pair
         prov, (sel, _why) = self._anthropic_select(pair)
+        # the parameters as they are: the face casts fp32 masters to a bf16 pair's dtype itself ("weights follow z's dtype")
         weights = {"ln_in_w": self.ln_pair.weight, "ln_in_b": self.ln_pair.bias, "w_ag": self.to_left_gate.weight, "w_ap": self.to_left.weight,
                    "w_bg": self.to_right_gate.weight, "w_bp": self.to_right.weight, "ln_out_w": self.ln_out.weight, "ln_out_b": self.ln_out.bias,
                    "w_o": self.to_out.weight, "w_og": self.to_gate.weight}
