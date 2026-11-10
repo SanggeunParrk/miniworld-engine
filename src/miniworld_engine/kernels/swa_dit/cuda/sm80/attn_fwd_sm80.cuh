@@ -38,6 +38,7 @@ struct AttnFwdParams {
   int S;
   float scale, scl2;            // 32^-0.5, scale log2 e
   Str3 qs, ks, vs;              // the strides of q, k, v
+  float* o32;                   // non-null: O is written here in fp32 [N S][128] instead of p.o (the fp32 block)
 };
 
 // the row stride of a tensor in the kernels: HM (the fused block's head-major [N][H][S][32] planes) makes it the compile-time 32, so the address arithmetic of the DiT's kernels is the one it always was
@@ -150,6 +151,13 @@ __global__ void __launch_bounds__(AF_NW * 32, 2) attn_fwd_kernel(const AttnFwdPa
 #pragma unroll
   for (int nt = 0; nt < 4; ++nt) {
     const int col = 8 * nt + 2 * q4;
+    if (p.o32) {
+      float* f0 = p.o32 + ((size_t)n * S + r0) * AF_C + h * AF_HD + col;
+      float* f1 = p.o32 + ((size_t)n * S + r1) * AF_C + h * AF_HD + col;
+      if (r0 < S) *reinterpret_cast<float2*>(f0) = r0 < su ? make_float2(o[nt][0] * il0, o[nt][1] * il0) : make_float2(0.f, 0.f);
+      if (r1 < S) *reinterpret_cast<float2*>(f1) = r1 < su ? make_float2(o[nt][2] * il1, o[nt][3] * il1) : make_float2(0.f, 0.f);
+      continue;
+    }
     if (r0 < S) stg32(orow0 + col, r0 < su ? pack_bf16(o[nt][0] * il0, o[nt][1] * il0) : 0u);
     if (r1 < S) stg32(orow1 + col, r1 < su ? pack_bf16(o[nt][2] * il1, o[nt][3] * il1) : 0u);
   }

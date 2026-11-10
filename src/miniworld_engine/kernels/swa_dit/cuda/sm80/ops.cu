@@ -48,15 +48,17 @@ sw80::Str3 str3(const torch::Tensor& t, const char* what) {
 
 // window attention forward: Q, K, V viewed as [N, S, 4, 32] bf16 (any strides, see str3), seqused [N] int32 -> O [N S, C] bf16, lse [N, H, S] fp32 (preallocated outputs)
 void swa_attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor seqused, torch::Tensor o, torch::Tensor lse) {
-  CHECK_CUDA_BF16(o); CHECK_CONTIG(o); CHECK_CONTIG(lse);
+  TORCH_CHECK(o.is_cuda() && (o.scalar_type() == torch::kBFloat16 || o.scalar_type() == torch::kFloat32), "o must be a CUDA bf16 or fp32 tensor");
+  CHECK_CONTIG(o); CHECK_CONTIG(lse);
+  const bool o32 = o.scalar_type() == torch::kFloat32;   // the fp32 block keeps O in fp32
   const sw80::Str3 qs = str3(q, "q"), ks = str3(k, "k"), vs = str3(v, "v");
   TORCH_CHECK(seqused.scalar_type() == torch::kInt32 && seqused.is_cuda() && seqused.numel() == q.size(0), "seqused must be int32 [N]");
   const int64_t N = q.size(0), S = q.size(1);
   TORCH_CHECK(k.size(0) == N && k.size(1) == S && v.size(0) == N && v.size(1) == S, "q, k, v must have the same [N, S]");
   TORCH_CHECK(o.numel() == N * S * sw80::AF_C && (lse.numel() == 0 || lse.numel() == N * sw80::AF_H * S) && lse.scalar_type() == torch::kFloat32, "bad output sizes");
   c10::cuda::CUDAGuard guard(q.device());
-  sw80::AttnFwdParams p{bptr(q), bptr(k), bptr(v), seqused.data_ptr<int>(), bptr_w(o), lse.numel() ? lse.data_ptr<float>() : nullptr, (int)S,
-                        0.17677669529663687f, 0.17677669529663687f * 1.4426950408889634f, qs, ks, vs};
+  sw80::AttnFwdParams p{bptr(q), bptr(k), bptr(v), seqused.data_ptr<int>(), o32 ? nullptr : bptr_w(o), lse.numel() ? lse.data_ptr<float>() : nullptr, (int)S,
+                        0.17677669529663687f, 0.17677669529663687f * 1.4426950408889634f, qs, ks, vs, o32 ? o.data_ptr<float>() : nullptr};
   const dim3 grid((unsigned)((S + sw80::AF_QT - 1) / sw80::AF_QT), (unsigned)(N * sw80::AF_H));
   const bool hm = qs.s == sw80::AF_HD && ks.s == sw80::AF_HD && vs.s == sw80::AF_HD;       // the fused block's head-major planes: the row strides are compile-time
   if (hm) sw80::attn_fwd_kernel<true><<<grid, sw80::AF_NW * 32, sw80::AF_SMEM, at::cuda::getCurrentCUDAStream()>>>(p);

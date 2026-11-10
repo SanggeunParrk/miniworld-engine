@@ -58,12 +58,19 @@ def _head_major(t: torch.Tensor, n: int, s: int) -> torch.Tensor:
     return t.view(n, s, H, D).transpose(1, 2).contiguous()
 
 
-def attention_fwd(qh, kh, vh, seqused, half_window: int):
+def attention_fwd(qh, kh, vh, seqused, half_window: int, out_dtype: torch.dtype = _BF):
     """The attention of the block on bf16 head-major Q / K / V [N, 4, S, 32]: ``(O [N S, 128] bf16, lse)``, rows >= seqused 0. The
     window (half window 64) on the sm_80 kernel; global attention on FlashAttention-2 (its own lse layout, read back only by
-    :func:`attention_bwd`)."""
+    :func:`attention_bwd`). ``out_dtype`` fp32 (the window kernel only): O
+    unrounded, as the fp32 block takes it."""
     if not is_global(half_window):
-        return sm80.attn_fwd(qh, kh, vh, seqused)
+        if out_dtype == _BF:
+            return sm80.attn_fwd(qh, kh, vh, seqused)
+        n, _, s, _ = qh.shape
+        o = torch.empty(n * s, C, device=qh.device, dtype=_F32)
+        lse = torch.empty(n, H, s, device=qh.device, dtype=_F32)
+        sm80._ext().swa_attn_fwd(qh.transpose(1, 2), kh.transpose(1, 2), vh.transpose(1, 2), seqused, o, lse)
+        return o, lse
     n, _, s, _ = qh.shape
     cu, used_k = _varlen(seqused, s)
     q, k, v = (_token_major(t) for t in (qh, kh, vh))
@@ -120,7 +127,7 @@ def _bwd_bf16(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g
 # ------------------------------------------------------------------------------------------------------------------- fp32 stages
 def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int, save: bool) -> list[torch.Tensor]:
     """The fp32 block (``dispatch._native_h100_fwd``'s fp32 branch on the sm_80 row stages): the same outputs as :func:`_fwd_bf16`, every
-    tensor fp32 but Q / K / V / O (bf16) and lse."""
+    tensor fp32 but Q / K / V (bf16), O (fp32 with the window; bf16 from FlashAttention) and lse."""
     n, s, _ = q.shape
     m = n * s
     dev = q.device
@@ -135,7 +142,7 @@ def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
     qh, kh, vh = (empty(n, H, s, D, dtype=_BF) for _ in range(3))
     g, pq, pk = (empty(m, C) for _ in range(3))
     _rows(1, [p, cos, sin], [qh, kh, vh, g, pq, pk], n, s, False)
-    o, lse = attention_fwd(qh, kh, vh, seqused, half_window)
+    o, lse = attention_fwd(qh, kh, vh, seqused, half_window, _F32)   # fp32 O from the window kernel (global: bf16)
     gated = empty(m, C)
     _rows(2, [o, g], [gated], n, s, False)
     att = _mm(gated, wo.t())
