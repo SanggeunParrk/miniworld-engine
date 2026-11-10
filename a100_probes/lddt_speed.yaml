@@ -1,0 +1,11 @@
+modules: [SmoothLddtLoss]
+backends: [cuda, triton]
+lengths: all
+depths: min
+samples: min
+timing: [graph]
+warmup: 5
+iterations: 50
+flush_l2: true
+device: cuda
+seed: 0

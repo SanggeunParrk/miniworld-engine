@@ -30,6 +30,7 @@ FORCE_FB = 0     # ... and a fixed backward CTA size (128 / 256 / 512)
 FWD_VARIANTS = ("128s1", "256s1", "512s1", "256s2", "512s2", "512s4")
 FBLK_FILL = 2   # H100 backward: the largest CTA (512 / 256 / 128 threads) whose grid keeps FBLK_FILL CTAs per SM (else the smallest)
 SPLIT_FILL = 8  # H100 tile kernels: the column tiles are split into KS parts until the grid has SPLIT_FILL CTAs per SM (at most NB parts)
+SPLIT_FILL_SM80 = 32  # A100: the same split, filled further (A1 x N1024 - N8192 measured: KS = NB best or within 3 %, 2.2-6.5x the unsplit launches)
 FORCE_SPLIT = 0  # tests / probes: > 0 a fixed KS of the split tile kernels (and the tile path), < 0 never split
 
 
@@ -38,10 +39,12 @@ def _split(x: torch.Tensor, n_augment_batch: int, nb: int) -> int:
     (A1 x N4096: 32 CTAs on 132 SMs) leave most SMs idle; a part of the column tiles per CTA spreads the launch over the GPU."""
     if FORCE_SPLIT:
         return max(1, min(nb, FORCE_SPLIT))
-    if _arch(_dev(x)) != "sm_90a":
+    arch = _arch(_dev(x))
+    if arch not in ("sm_90a", "sm_80"):
         return 1
     ctas = n_augment_batch * nb
-    return max(1, min(nb, -(-SPLIT_FILL * num_sms(_dev(x)) // ctas)))
+    fill = SPLIT_FILL if arch == "sm_90a" else SPLIT_FILL_SM80
+    return max(1, min(nb, -(-fill * num_sms(_dev(x)) // ctas)))
 
 
 def _fblk(x: torch.Tensor, n_augment_batch: int, n: int) -> int:
