@@ -44,6 +44,11 @@ def _select(registry: dict[str, type], kind: str, model: str) -> type:
         raise ValueError(f"no {kind} for model {model!r}; known: {', '.join(sorted(registry))}") from None
 
 
+#: pair_fused triangle-attention classes (C, H, D, C_out) the library refused at run time in this process (its Refused: a cell that cannot
+#: build on this stack); the anthropic backends take the core provider for them from then on.
+_PAIR_FUSED_REFUSED: dict[tuple, str] = {}
+
+
 def _key_mask5(mask: torch.Tensor | None, q: torch.Tensor) -> torch.Tensor | None:
     """The module's key mask ``[B, L]`` as the libraries' ``[B, N, 1, 1, K]`` (the same keys for every row ``N`` of ``q [B, N, H, Q, d]``)."""
     if mask is None:
@@ -80,7 +85,10 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     Backends (self-attention only; the bias-only form has no query / key): the attention CORE ``softmax_k(q_ij . k_ik / sqrt(d) + b_jk) v_ik``
     runs in a library kernel, every other statement (LayerNorm, projections, bias orientation, gate, out-projection(s), residual, dropout) is
     the module's own. ``"cueq"``: ``cuequivariance_torch.triangle_attention`` (forward + backward). ``"anthropic"``: the shared core's
-    triangle-attention provider (``opt_core.kernels.triattn``, the af3_torch kit's lever ``triattn``) by its ``fast`` tier word, inference only.
+    triangle-attention provider (``opt_core.kernels.triattn``, the af3_torch / rosettafold3 / chai1 kits' core) by its ``fast`` tier word,
+    inference only; for :class:`TriangleAttention` / :class:`TriangleAttentionAF3` first the whole fused block the Boltz-2 / Protenix /
+    OpenFold3 kits install (``opt_core.attn.pair_fused.tri_attn_block``: LN + projections prologue, core ``tier:fast``, gate + W_o
+    epilogue; the residual the module's), the core provider where the block refuses.
     Masked keys: the kernels drop them (a large negative logit / -inf); the reference fills the dtype's minimum (RF3 / Chai-1: -inf) -- the
     same softmax for every row with at least one unmasked key.
 
@@ -225,12 +233,51 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         with master_autocast(pair, self):   # fp32 master matrices under bf16 activations: the projections run bf16, as the reference's do
             return self._residual(pair, mask, _cueq_core)
 
+    #: The variants whose update is the fused triangle-attention BLOCK of ``opt_core.attn.pair_fused`` (``tri_attn_block``: LN -> q | k | v |
+    #: g | pair-bias prologue, the attention core, the gate x o @ W_o epilogue; the ending node reads z^T by address math). It is the pair
+    #: block the Boltz-2 (``boltz2_opt.pairblock`` / ``pairfuse``), Protenix-v1 (``levers_ptx1._tri_forward``) and OpenFold3 kits
+    #: (``cells/pairfused.tri_att_start_end``; v0.5 / ob0 with ``bias_frame="z"``) install on their models' triangle attention.
+    _anthropic_block: bool = False
+
     def _anthropic_select(self, pair: torch.Tensor):
         from miniworld_engine.modules import _anthropic
 
         prov = _anthropic.load("opt_core.kernels.triattn")
         return prov, _anthropic.kernel_selection(prov, "{}.{}".format(*torch.cuda.get_device_capability(pair.device)), {torch.bfloat16: "bf16", torch.float32: "fp32"}[pair.dtype], self._head_dim(), self.n_head, int(pair.shape[1]), "fwd", word="fast",
                                                  form="keypad")
+
+    def _anthropic_block_call(self, pair: torch.Tensor, mask: torch.Tensor | None):
+        """``(PF, W, kwargs, None)`` for ``pair_fused.tri_attn_block`` on this call, or ``(None, None, None, reason)``."""
+        from miniworld_engine.modules import _anthropic
+
+        if not self._anthropic_block:
+            return None, None, None, "the variant's update (fp32 softmax / output forms) is not pair_fused's block"
+        if self.use_qk_norm:
+            return None, None, None, "q / k RMSNorm is not part of pair_fused's prologue"
+        why = _anthropic.missing("opt_core.attn.pair_fused")
+        if why is not None:
+            return None, None, None, why
+        PF = _anthropic.load("opt_core.attn.pair_fused")
+        key = tuple((p.data_ptr(), p._version, p.dtype) for p in self.parameters())
+        if getattr(self, "_anthropic_pf_key", None) != (key, pair.device):
+            self._anthropic_pf = PF.pack_triattn_weights(
+                ln_w=self.ln_pair.weight, ln_b=self.ln_pair.bias, w_q=self.to_query.weight, w_k=self.to_key.weight, w_v=self.to_value.weight,
+                w_g=self.to_gate.weight, w_b=self.to_bias.weight, w_o=self.to_out.weight, b_g=self.to_gate.bias, b_o=self.to_out.bias,
+                n_heads=self.n_head, head_dim=self._head_dim(), eps=self.ln_pair.eps, device=pair.device)
+            self._anthropic_pf_key = (key, pair.device)
+        W = self._anthropic_pf
+        pow2 = all(v and not v & (v - 1) for v in (W.C, W.H * W.D, W.D, W.C_out))
+        # the fused kernels take power-of-two widths; the torch surround (its declared construction for c_z 384 / 12 heads) the others
+        kw = {"ending": not self.starting, "impl": "fpf" if pow2 else "torch", "core": "tier:fast"}
+        m5 = None if mask is None else mask[:, None, None, None, :].expand(pair.shape[0], pair.shape[1], 1, 1, pair.shape[1])
+        if (W.C, W.H, W.D, W.C_out) in _PAIR_FUSED_REFUSED:
+            return None, None, None, _PAIR_FUSED_REFUSED[(W.C, W.H, W.D, W.C_out)]
+        ok, why = PF.supported_triattn(pair, W, m5, ln="fused", residual=False, **kw)
+        if not ok:
+            return None, None, None, f"pair_fused.tri_attn_block refuses: {why}"
+        # the ending node's bias: from the transposed pair ('x', TriangleAttention) or from the pair as it is ('z', AlphaFold 3's code)
+        kw.update(mask=m5, ln="fused", residual=False, scale=self._head_dim() ** -0.5, bias_frame="z" if self._bias_untransposed else "x")
+        return PF, W, kw, None
 
     def _supports_anthropic(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> str | None:
         from miniworld_engine.modules import _anthropic
@@ -240,12 +287,34 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
             return why
         if torch.is_grad_enabled():
             return "inference only (the provider's backward cells name the cuEquivariance op): call under torch.no_grad() / inference_mode"
+        if self.training and self.p_drop > 0.0:
+            return "the row / column dropout is live (training mode): inference only"
         if pair.dtype not in (torch.bfloat16, torch.float32):
             return f"dtype {pair.dtype}: the provider has bfloat16 / float32 cells only"
-        return self._anthropic_select(pair)[1][1]
+        with master_autocast(pair, self):
+            block_why = self._anthropic_block_call(pair, mask)[3]
+        if block_why is None:
+            return None
+        core_why = self._anthropic_select(pair)[1][1]
+        return None if core_why is None else f"{block_why}; the attention-core provider: {core_why}"
 
     def _forward_anthropic(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
-        prov, (sel, _why) = self._anthropic_select(pair)
+        if self.dead and not (self.untransposed_output or self.dual_output):   # inference only (as the reference's dead instance)
+            return pair
+        with master_autocast(pair, self):
+            PF, W, kw, block_why = self._anthropic_block_call(pair, mask)
+            if block_why is None:
+                try:
+                    return pair + PF.tri_attn_block(pair, W, **kw).to(pair.dtype)
+                except PF.Refused as e:
+                    # the library's own run-time refusal (a cell whose build fails on this stack, e.g. the c512 h8 d64 epilogue's ptxas
+                    # error): it names the lever unusable in this process, so the class is the core provider's from here on
+                    _PAIR_FUSED_REFUSED[(W.C, W.H, W.D, W.C_out)] = block_why = f"pair_fused refused at run time: {str(e)[:200]}"
+        prov, (sel, why) = self._anthropic_select(pair)
+        if sel is None:
+            from miniworld_engine.modules.primitives import BackendUnsupported
+
+            raise BackendUnsupported(f"{block_why}; the attention-core provider: {why}")
         stock = None
         if sel.row in prov.NEEDS_STOCK:   # a stock row the provider names (the cuEquivariance op ...): the kits hand the face their stock op
             from miniworld_engine.modules import _cueq
@@ -481,6 +550,8 @@ class TriangleAttention(_TriangleAttentionBase):
     """
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
+    _anthropic_block = True
+
     def __new__(cls, *args, model: str | None = None, **kwargs):
         target = cls if model is None else _select(TRIANGLE_ATTENTION_MODELS, "triangle attention", model)
         if cls is TriangleAttention and target is not TriangleAttention:
@@ -520,6 +591,7 @@ class TriangleAttentionAF3(_TriangleAttentionBase):
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     transposed_bias = False
+    _anthropic_block = True
 
     def __init__(
         self,
@@ -580,6 +652,59 @@ class TriangleAttentionRF3(_TriangleAttentionFp32Softmax):
     version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
     _projection_biases = True
+
+    # ------------------------------------------------------------------------------------------------------------- anthropic
+    # The rosettafold3 kit's triangle attention (``fpf_rf3_adapter._tri_forward_v2``, arm gflash): ``lnl_fused.ln_linear`` (LN + the bias
+    # projection in one kernel, the normalised pair written in the attention frame), ONE q | k | v | g GEMM (the gate bias only), the core
+    # provider's row (the module's key mask handed to it: RF3's stock call has none), ``gate_transpose`` (sigmoid(g) * o, laid back for the
+    # ending node) and the module's ``to_out`` (with its bias). C 64 / 128 (the kernel's widths); elsewhere the base path (core only).
+    def _anthropic_rf3_ok(self, pair: torch.Tensor) -> bool:
+        from miniworld_engine.modules import _anthropic
+
+        return pair.shape[-1] in (64, 128) and pair.dtype == torch.bfloat16 and _anthropic.missing("opt_core.kernels.lnl_fused") is None
+
+    def _forward_anthropic(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        if self.dead or not self._anthropic_rf3_ok(pair):
+            return super()._forward_anthropic(pair, mask)
+        import torch.nn.functional as Fn
+
+        from miniworld_engine.modules import _anthropic
+
+        rfu = _anthropic.load("opt_core.kernels.lnl_fused")
+        prov, (sel, _why) = self._anthropic_select(pair)
+        stock = None
+        if sel.row in prov.NEEDS_STOCK:
+            from miniworld_engine.modules import _cueq
+
+            stock = _cueq.torch_api().triangle_attention
+        key = tuple((p.data_ptr(), p._version, p.dtype) for p in self.parameters())
+        if getattr(self, "_anthropic_rf3_key", None) != key:   # the kit's _tri_weights
+            with torch.no_grad():
+                bf = torch.bfloat16
+                wcat = torch.cat([self.to_query.weight, self.to_key.weight, self.to_value.weight, self.to_gate.weight], 0).to(bf).contiguous()
+                nq = self.to_query.weight.shape[0]
+                bcat = torch.zeros(wcat.shape[0], device=wcat.device, dtype=bf)
+                bcat[3 * nq:] = self.to_gate.bias.to(bf)
+                wb = torch.zeros((max(16, 1 << (self.n_head - 1).bit_length()), wcat.shape[1]), device=wcat.device, dtype=bf)
+                wb[:self.n_head] = self.to_bias.weight.to(bf)
+                self._anthropic_rf3 = {"Wcat": wcat, "bcat": bcat, "nq": nq, "Wb": wb, "lnw": self.ln_pair.weight.float().contiguous(),
+                                       "lnb": self.ln_pair.bias.float().contiguous()}
+            self._anthropic_rf3_key = key
+        W = self._anthropic_rf3
+        B, L, _, _ = pair.shape
+        H, nq = self.n_head, W["nq"]
+        with master_autocast(pair, self):
+            y16, b16 = rfu.ln_linear(pair.contiguous(), W["lnw"], W["lnb"], W["Wb"], eps=self.ln_pair.eps, write_y=True, transpose=not self.starting)
+            bias = b16[..., :H].permute(0, 3, 1, 2)[:, None].float().contiguous()             # [B, 1, H, i, j]: from LN(pair) as it is (AF3's orientation)
+            qkvg = Fn.linear(y16, W["Wcat"], W["bcat"]).contiguous()                           # [B, i', j', 4 nq] in the attention frame
+            q, k, v = (qkvg[..., s * nq:(s + 1) * nq].view(B, L, L, H, -1).transpose(2, 3).contiguous() for s in range(3))
+            out = prov.triangle_attention(q, k, v, bias, _key_mask5(mask, q), q.shape[-1] ** -0.5, word=sel.word, selection=sel, stock=stock)
+            if out.is_contiguous() and out.dtype == torch.bfloat16:
+                y = rfu.gate_transpose(out, qkvg, 3 * nq, transpose=not self.starting)
+            else:
+                y = torch.sigmoid(qkvg[..., 3 * nq:]) * out.transpose(2, 3).reshape(B, L, L, -1).to(qkvg.dtype)
+                y = y if self.starting else y.transpose(1, 2)
+            return pair + self.to_out(y).to(pair.dtype)
 
 
 class TriangleAttentionChai1(_TriangleAttentionFp32Softmax):
@@ -976,7 +1101,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
     #: LN_out, output projection x output gate; forward + backward); the residual and the row dropout are the module's. ``"anthropic"``: the
     #: shared core's TriMul provider (``opt_core.kernels.trimul``, the af3_torch kit's lever ``trimul``) by its ``fast`` tier word, the
     #: residual folded into its epilogue, inference only. (:class:`TriangleMultiplicationRF3` divides the contraction by the length before
-    #: LN_out, which neither library op does: it has no library backend.) ``"triton"``: the engine's portable fused pipeline
+    #: LN_out, which neither library op does: no cueq backend; its anthropic backend folds the 1 / n into W_b.) ``"triton"``: the engine's portable fused pipeline
     #: ``kernels/trimul_inproj/triton/unidirectional.trimul_triton`` (the whole update, residual and row dropout folded into its gate store;
     #: forward-only inference, an autograd Function in training), one launch per sample (the kernel takes one square plane). ``"cuda"``:
     #: the H100 TriMul kernels (``kernels/trimul_inproj/cuda``: the B200-style sm90 family with the per-cell legacy selection) through
@@ -1132,7 +1257,8 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     #: folded into the left projection: ``W_a -> W_a / n`` scales ``a`` and so the contraction by ``1 / n`` exactly (the gate, the mask and
     #: the backward are linear in it; ``W_a``'s gradient comes back through the product), one launch per sample when the samples' masks
     #: differ; on an A100 the same on ``kernels/integrations/trimul_sm80``. ``"triton"``: the portable Triton TriMul the same way.
-    backends = ("pytorch", "cuda", "triton")
+    #: ``"anthropic"``: see the anthropic section below.
+    backends = ("pytorch", "anthropic", "cuda", "triton")
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         if pair.is_cuda and torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0)):
@@ -1182,6 +1308,42 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
 
         return _per_sample(self, pair, mask, dropout_p, one)
 
+    # ------------------------------------------------------------------------------------------------------------- anthropic
+    #: ``"anthropic"`` (inference only): the shared core's TriMul provider (``opt_core.kernels.trimul``, the face every kit's TriMul calls --
+    #: the rosettafold3 kit's fused rows ``fpf_rf3_trimul_rows.serve_fast`` serve RF3's cuEquivariance statement, which has no 1 / L) on the
+    #: same math restated: the division of the contraction before ``ln_out`` is linear in the ``b`` operand, so each sample runs with its
+    #: ``W_b`` (the right projection, before the gate product) scaled by ``1 / (unmasked residues)`` -- ``t / n = sum_k a_ik (b_jk / n)``;
+    #: one provider call per sample.
+    _ANTHROPIC_EXCLUDED_ROWS = TriangleMultiplication._ANTHROPIC_EXCLUDED_ROWS
+    _library_refusal = TriangleMultiplication._library_refusal
+    _pair_mask = TriangleMultiplication._pair_mask
+
+    def _anthropic_select(self, pair: torch.Tensor):
+        return TriangleMultiplication._anthropic_select(self, pair[:1])   # one sample per call
+
+    def _supports_anthropic(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
+        return TriangleMultiplication._supports_anthropic(self, pair, mask, dropout_p)
+
+    def _forward_anthropic(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> torch.Tensor:
+        if self.dead:   # inference only: a dead instance returns the residual input (as the reference does)
+            return pair
+        prov, (sel, _why) = self._anthropic_select(pair)
+        B, L = pair.shape[:2]
+        count = mask.sum(-1).clamp_min(1).double() if mask is not None else torch.full((B,), float(L), device=pair.device, dtype=torch.float64)
+        inv = count.reciprocal().float()                                              # [B] on the device (no host read)
+        pm = self._pair_mask(pair, mask)
+        base = {"ln_in_w": self.ln_pair.weight, "ln_in_b": self.ln_pair.bias, "w_ag": self.to_left_gate.weight, "w_ap": self.to_left.weight,
+                "w_bg": self.to_right_gate.weight, "ln_out_w": self.ln_out.weight, "ln_out_b": self.ln_out.bias, "w_o": self.to_out.weight,
+                "w_og": self.to_gate.weight}
+        outs = []
+        with torch.no_grad():
+            for b in range(B):
+                weights = {**{k: t.detach() for k, t in base.items()}, "w_bp": self.to_right.weight.detach().float() * inv[b]}
+                outs.append(prov.triangle_multiplication(
+                    pair[b:b + 1].contiguous(), None if pm is None else pm[b:b + 1], direction="outgoing" if self.outgoing else "incoming",
+                    weights=weights, selection=sel, residual=True, cache={}, eps=self.ln_pair.eps))
+        return outs[0] if B == 1 else torch.cat(outs)
+
 
 class _LeftScaled:
     """:class:`TriangleMultiplicationRF3` as the TriMul kernels see it: ``to_left.weight`` multiplied by the sample's length factor
@@ -1195,6 +1357,7 @@ class _LeftScaled:
 
     def __getattr__(self, name):
         return getattr(self._module, name)
+
 
 
 #: ``TriangleMultiplication(model=name)`` -> the class it builds.
