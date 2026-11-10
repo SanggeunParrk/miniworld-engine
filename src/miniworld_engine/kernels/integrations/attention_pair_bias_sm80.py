@@ -643,18 +643,28 @@ def _gen_rows(L: int) -> int:
     return 1 if L <= 128 else 2
 
 
-def _bias_stats_gemm(z: torch.Tensor, wcm: torch.Tensor, mask, L: int, eps: float) -> torch.Tensor:
-    """The fp32 pair bias [H, L, L] (natural units, masked keys -1e4) as the one-pass kernel's identity rstd (z W' - mean sum W') with z W' on TF32 cuBLAS and the
-    row statistics from one reduction: the d_pair 512 bias at L128, where the kernel's 8192 multiply-adds a thread are latency-bound (A100, 16 heads: 74 against 86 us)."""
-    dp, heads = wcm.shape
-    z2 = z.reshape(L * L, dp)
-    sd, mu = torch.std_mean(z2, -1, correction=0)
-    rstd = torch.rsqrt(sd.square_().add_(eps))
-    bias = torch.addmm(torch.outer(wcm.sum(0), mu).neg_(), wcm.t(), z2.t())    # [H, L L] = W' z^T - sum W' mean, head-major as it comes out
-    bias = bias.mul_(rstd).view(heads, L, L)
-    if mask is not None:
-        bias.masked_fill_(~mask.view(1, 1, L), -1e4)
-    return bias
+def _bias_split(z: torch.Tensor, wcm: torch.Tensor, mask, L: int, eps: float) -> torch.Tensor:
+    """The fp32 one-pass pair bias with its heads split in two halves on two streams: at d_pair 512, L128 the kernel's 64 CTAs (8192 multiply-adds a thread)
+    leave the card half idle; two concurrent launches of 8 heads each double the CTAs (A100, 16 heads, cold L2: 99 -> 84 us; four quarters: 101 us)."""
+    sm80 = _sm80()
+    heads, half = wcm.shape[1], wcm.shape[1] // 2
+    out = torch.empty(heads, L, L, device=z.device, dtype=z.dtype)
+    w0, w1 = wcm[:, :half].contiguous(), wcm[:, half:].contiguous()
+    main = torch.cuda.current_stream(z.device)
+    side = _SIDE.get(z.device)
+    if side is None:
+        side = _SIDE[z.device] = torch.cuda.Stream(device=z.device)
+    side.wait_stream(main)
+    for t in (z, w1, out) + (() if mask is None else (mask,)):
+        t.record_stream(side)
+    with torch.cuda.stream(side):
+        sm80.pair_bias_generic(z, w1, mask, L, eps, oscale=1.0, rows=1, out=out[half:])
+    sm80.pair_bias_generic(z, w0, mask, L, eps, oscale=1.0, rows=1, out=out[:half])
+    main.wait_stream(side)
+    return out
+
+
+_SIDE: dict = {}
 
 
 #: the longest L whose fp32 wide-pair backward runs as LayerNorm + TF32 GEMMs (``_bias_gemm_bwd``); beyond it the one-pass backward kernel is faster
@@ -747,7 +757,7 @@ def _gfwd(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, p
         qkvg = torch.addmm(b, s, w.t())
         q, k, v, g = (qkvg[:, i * n:(i + 1) * n] for i in range(4))
         m = None if mask is None else mask.reshape(L)
-        bias = (_bias_stats_gemm(pair[0], wcm, m, L, eps_p) if f32 and pair.shape[-1] >= 512 and L <= 128
+        bias = (_bias_split(pair[0], wcm, m, L, eps_p) if f32 and pair.shape[-1] >= 512 and L <= 128 and heads % 8 == 0
                 else sm80.pair_bias_generic(pair[0], wcm, m, L, eps_p, oscale=1.0 if f32 else math.sqrt(hd), rows=_gen_rows(L)))
         scale = hd ** -0.5
         if save:
