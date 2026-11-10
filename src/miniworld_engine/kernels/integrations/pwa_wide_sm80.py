@@ -77,11 +77,8 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
     else:      # inference: one pass over the pair
         zn = zmean = zrstd = None
         logits = e.pair_logits(zf, lnz_w, lnz_b, wb, eps_z, 0)
-    logits = logits.view(L, L, HEADS).permute(2, 0, 1)                            # [h, i, j], the module's to_bias output (bf16)
-    key = None if mask is None else mask[0]
-    if key is not None:
-        logits = logits.masked_fill(~key[None, None, :], torch.finfo(torch.bfloat16).min)
-    w = torch.softmax(logits.float(), -1).to(torch.bfloat16)                      # [8, L, L] bf16 (fp32 softmax, as F.softmax on bf16)
+    key = logits.new_empty((0,), dtype=torch.uint8) if mask is None else mask[0].contiguous().view(torch.uint8)
+    w = e.softmax_keys(logits, key, L)                                             # [8, L, L] bf16: the masked softmax over the keys j
     mf = msa[0].reshape(S * L, D_MSA)
     y, mmean, mrstd = g.ln_fwd(mf, lnm_w, lnm_b, eps_m, L, False)
     vg = _lt().lt_mm(y, wvg, None, 0, False, None, None)                           # [S L, 512] = [v | g] (cublasLt, the timed algorithm)

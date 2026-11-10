@@ -12,6 +12,7 @@
 //   from_hm    dv head-major -> natural (the [dv | dg] buffer's v columns: the A operand of dy = [dv | dg] [Wv; Wg] and of d[Wv; Wg])
 //
 //   pair_logits inference only: LN(z) . Wb^T in one pass over the pair (the 8 logits per pair; training keeps LN(z) for dWb)
+//   softmax_keys the masked softmax over the keys of the [L L, 8] logits -> w [8, L, L]
 //   head_bmm   inference only: o = w v per head on the natural layout (cuBLAS strided batches over the MSA rows), no head-major copy
 //
 // A thread moves 16 bytes (8 channels); a run of 32 channels is 4 threads, read and written as one 64-byte segment on both sides. The gate
@@ -22,6 +23,7 @@
 #include <cuda_bf16.h>
 #include <cublas_v2.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <tuple>
 
@@ -52,6 +54,7 @@ __global__ void __launch_bounds__(256) to_hm_k(const bf16* __restrict__ src, lon
   const int h = blockIdx.x / L, j = blockIdx.x - h * L;
   uint4* d = reinterpret_cast<uint4*>(dst) + (long)blockIdx.x * S * 4;
   const bf16* s0 = src + (long)j * ld + h * C;
+#pragma unroll 4
   for (int t = threadIdx.x; t < S * 4; t += 256) d[t] = *reinterpret_cast<const uint4*>(s0 + (long)(t >> 2) * L * ld + (t & 3) * 8);
 }
 
@@ -59,6 +62,7 @@ __global__ void __launch_bounds__(256) from_hm_k(const bf16* __restrict__ src, b
   const int h = blockIdx.x / L, j = blockIdx.x - h * L;
   const uint4* s_ = reinterpret_cast<const uint4*>(src) + (long)blockIdx.x * S * 4;
   bf16* d0 = dst + (long)j * ld + h * C;
+#pragma unroll 4
   for (int t = threadIdx.x; t < S * 4; t += 256) *reinterpret_cast<uint4*>(d0 + (long)(t >> 2) * L * ld + (t & 3) * 8) = s_[t];
 }
 
@@ -205,6 +209,28 @@ __global__ void __launch_bounds__(256, MINB) pair_logits_k(const bf16* __restric
   }
 }
 
+// The softmax over the keys: w[h, i, :] = softmax_j(mask_j ? logits[i L + j, h] : bf16 min) (fp32, as F.softmax on the module's bf16 logits after
+// masked_fill with the dtype's min: a row with every key masked is uniform), one warp per (h, i) row, written bf16 [8, L, L].
+__global__ void __launch_bounds__(256) softmax_k(const bf16* __restrict__ logits, const uint8_t* __restrict__ mask, bf16* __restrict__ w, int L) {
+  const int row = blockIdx.x * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+  if (row >= H * L) return;
+  const int h = row / L, i = row - h * L;
+  const bf16* src = logits + (long)i * L * H + h;
+  constexpr float kMin = -3.38953139e38f;   // torch.finfo(torch.bfloat16).min
+  float mx = -INFINITY;
+  for (int j = lane; j < L; j += 32) mx = fmaxf(mx, (mask == nullptr || mask[j]) ? __bfloat162float(src[(long)j * H]) : kMin);
+#pragma unroll
+  for (int o = 16; o; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+  float sum = 0.f;
+  for (int j = lane; j < L; j += 32) sum += __expf(((mask == nullptr || mask[j]) ? __bfloat162float(src[(long)j * H]) : kMin) - mx);
+#pragma unroll
+  for (int o = 16; o; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);
+  const float inv = 1.f / sum;
+  bf16* dst = w + (long)row * L;
+  for (int j = lane; j < L; j += 32)
+    dst[j] = __float2bfloat16_rn(__expf(((mask == nullptr || mask[j]) ? __bfloat162float(src[(long)j * H]) : kMin) - mx) * inv);
+}
+
 int grid(long n) {
   const long sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   return (int)std::max<long>(1, std::min<long>((n + 255) / 256, sms * 16));
@@ -301,7 +327,18 @@ torch::Tensor pair_logits(torch::Tensor z, torch::Tensor lnw, torch::Tensor lnb,
   return out;
 }
 
+// logits [L L, 8] bf16, mask [L] uint8 (or empty) -> w [8, L, L] bf16
+torch::Tensor softmax_keys(torch::Tensor logits, torch::Tensor mask, int64_t L) {
+  TORCH_CHECK(logits.is_cuda() && logits.scalar_type() == at::kBFloat16 && logits.is_contiguous() && logits.numel() == (long)L * L * H, "softmax_keys: logits bf16 [L L, 8]");
+  TORCH_CHECK(mask.numel() == 0 || (mask.scalar_type() == at::kByte && mask.is_contiguous() && mask.numel() == L), "softmax_keys: mask uint8 [L] or empty");
+  auto w = torch::empty({H, L, L}, logits.options());
+  softmax_k<<<(unsigned)((H * L + 7) / 8), 256, 0, st()>>>(cp(logits), mask.numel() ? mask.data_ptr<uint8_t>() : nullptr, mp(w), (int)L);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return w;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("softmax_keys", &softmax_keys);
   m.def("pair_logits", &pair_logits, py::arg("z"), py::arg("lnw"), py::arg("lnb"), py::arg("wb"), py::arg("eps"), py::arg("variant") = 0);
   m.def("head_bmm", &head_bmm);
   m.def("to_hm", &to_hm);
