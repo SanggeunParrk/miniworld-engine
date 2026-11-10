@@ -224,8 +224,12 @@ class OuterProductMean(BackendModule, MasterWeights):
             if self.count_offset is not None:
                 return None, "count_offset: the esmfold2 kernel divides by clamp(n, 1)"
             return ("ef2", None) if (why := _anthropic.missing("ef2_msa_v2", path=_EF2_DRIVER)) is None else (None, why)
+        if d_pair % 256 == 0 and (d_hidden * d_hidden) % 64 == 0 and self.count_offset is None:
+            # the other widths of this form (IntelliFold2 256 / 32 / 512: no kit of its own): the esmfold2 kit's T12 lever
+            # (ef2_msa.opm_core_t12: the module's LN and a | b GEMM, the cuBLAS outer GEMM, the Triton projection + bias / clamp(n, 1) epilogue)
+            return ("ef2_t12", None) if (why := _anthropic.missing("ef2_msa", path=_EF2_DRIVER)) is None else (None, why)
         return None, (f"(d_msa, d_hidden, d_pair) = ({d_msa}, {d_hidden}, {d_pair}) dividing after the projection: the kits' kernels take "
-                      "(64, 32, 128) (af3_torch) or (128, 32, 256k) (esmfold2)")
+                      "(64, 32, 128) (af3_torch) or d_pair a multiple of 256 (esmfold2); OpenDDE's 384 has no kit")
 
     def _supports_anthropic(self, msa, mask=None, token_asym_id=None, residual=None) -> str | None:
         return self._anthropic_route(msa, mask, residual)[1]
@@ -244,6 +248,8 @@ class OuterProductMean(BackendModule, MasterWeights):
             pair = self._anthropic_boltz2(msa, mask)
         elif route == "af3":
             pair = self._anthropic_af3(msa, mask)
+        elif route == "ef2_t12":
+            pair = self._anthropic_ef2_t12(msa, mask)
         else:
             pair = self._anthropic_ef2(msa, mask, None if interchain else residual)
             if not interchain and residual is not None:
@@ -304,6 +310,29 @@ class OuterProductMean(BackendModule, MasterWeights):
                     ko.opm_out(T[: nb * CO], W["W16"], W["bias"], norm16, eps, b0, nb, N, dst, False, BD=64, num_warps=4)
                 outs.append(dst.to(msa.dtype))
         return torch.stack(outs, 0)
+
+    def _anthropic_ef2_t12(self, msa, mask):
+        """The esmfold2 kit's ``ef2_msa.opm_core_t12`` per sample on its token-major layout ([1, L, M, c_m]); ESMFold2's attribute schema
+        (norm / W = [a | b] / Wout / d_hidden) on a namespace (the kit caches its bf16 Wout on it)."""
+        from types import SimpleNamespace
+
+        from miniworld_engine.modules import _anthropic
+
+        kit = _anthropic.load("ef2_msa", path=_EF2_DRIVER)
+        key = self._anthropic_key()
+        if getattr(self, "_anthropic_t12_key", None) != key:
+            with torch.no_grad():
+                w = torch.cat([self.to_left.weight, self.to_right.weight], 0)        # ESMFold2's W: [a | b] rows
+            self._anthropic_t12 = SimpleNamespace(W=lambda x, _w=w: F.linear(x, _w.to(x.dtype)), Wout=self.to_out, norm=self.ln_msa,
+                                                  d_hidden=self.group_width)
+            self._anthropic_t12_key = key
+        outs = []
+        with master_autocast(msa, self):
+            for b in range(msa.shape[0]):
+                m_t = msa[b].transpose(0, 1).contiguous()[None]                          # [1, L, M, c_m]
+                mk = mask[b].transpose(0, 1).float().contiguous()[None]                  # [1, L, M]
+                outs.append(kit.opm_core_t12(self._anthropic_t12, m_t, mk))
+        return torch.cat(outs, 0)
 
     def _anthropic_ef2(self, msa, mask, residual):
         """The esmfold2 kit's ``opm_fused`` on its token-major layout ([1, L, M, c_m]) per sample; the pair residual in its epilogue."""
@@ -510,9 +539,14 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
             # AlphaFold 3 / OpenFold3 / Protenix-v1 (8 x 8): the af3_torch kit's MSAAttention path (levers pwa_lnl + pwa_msa: lnl_fused.ln_linear
             # for LN(pair) -> logits planes and LN(msa) -> v | gate; softmax, the weighted sum, the gate and the out-projection its torch statements)
             return ("af3", None) if (why := _anthropic.missing("lnl_fused", path=_AF3T_KERNELS)) is None else (None, why)
+        if D and not D & (D - 1) and D <= 64:
+            # the other widths (OpenDDE 128 / 384, IntelliFold2 256 / 512: no kit of their own): the esmfold2 kit's T13 lever
+            # (ef2_msa.pwa_core_t13: the module's LN / bias projection / masked fp32 softmax / v / gate, the Triton weighted-sum x gate kernel,
+            # the module's out-projection)
+            return ("ef2_t13", None) if (why := _anthropic.missing("ef2_msa", path=_EF2_DRIVER)) is None else (None, why)
         return None, (f"d_msa {d_msa}, d_pair {d_pair}, {H} heads x {D}: the kits' masked PWA kernels take d_msa 64 with 8 x 32 (boltz2), "
-                      "d_msa 64 / d_pair 128 (af3_torch's fused prologues) or d_msa 128, d_pair 256, power-of-two heads x width <= 256 (esmfold2); "
-                      "OpenDDE / IntelliFold2 have no kit")
+                      "d_msa 64 / d_pair 128 (af3_torch's fused prologues), d_msa 128 / d_pair 256 (esmfold2 v2) or power-of-two heads <= 64 "
+                      "(esmfold2 T13)")
 
     def _supports_anthropic(self, msa, pair, mask=None) -> str | None:
         return self._anthropic_route(msa, pair, mask)[1]
@@ -551,6 +585,29 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
                 outs.append(msa[b] + self.to_out(v_avg * torch.sigmoid(gate)))
         return torch.stack(outs, 0)
 
+    def _anthropic_ef2_t13(self, msa, pair, mask):
+        """The esmfold2 kit's ``ef2_msa.pwa_core_t13`` per sample on its token-major layout; ESMFold2's attribute schema on a namespace
+        (compute_bias = LN_z + the bias projection); it returns the update (``Wout(o)``), the residual is the module's."""
+        from types import SimpleNamespace
+
+        from miniworld_engine.modules import _anthropic
+
+        kit = _anthropic.load("ef2_msa", path=_EF2_DRIVER)
+        if getattr(self, "_anthropic_t13", None) is None:
+            self._anthropic_t13 = SimpleNamespace(n_heads=self.n_head, head_width=self._widths()[3], Wv=self.to_value, Wgate=self.to_gate,
+                                                  Wout=self.to_out, norm_single=self.ln_msa, compute_bias=lambda z: self.to_bias(self.ln_pair(z)))
+        B, _, L, _ = msa.shape
+        if mask is None:
+            mask = torch.ones((B, L), dtype=torch.bool, device=msa.device)
+        outs = []
+        with master_autocast(msa, self):
+            for b in range(B):
+                m_t = msa[b].transpose(0, 1).contiguous()[None]                                   # [1, L, M, c_m]
+                pm = mask[b][None, None, :].expand(1, L, L)                                       # row i's keys j
+                upd = kit.pwa_core_t13(self._anthropic_t13, m_t, pair[b:b + 1].contiguous(), pm)   # [1, L, M, c_m]
+                outs.append(msa[b] + upd[0].transpose(0, 1))
+        return torch.stack(outs, 0)
+
     def _anthropic_ns(self, kind: str):
         from types import SimpleNamespace
 
@@ -578,6 +635,8 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         pair_mask = mask[:, None, :].expand(B, L, L)          # row i's keys j: the module's key mask
         if route == "af3":
             return self._anthropic_af3(msa, pair, mask)
+        if route == "ef2_t13":
+            return self._anthropic_ef2_t13(msa, pair, mask)
         ns = self._anthropic_ns(route)
         with master_autocast(msa, self):
             if route == "boltz2":
