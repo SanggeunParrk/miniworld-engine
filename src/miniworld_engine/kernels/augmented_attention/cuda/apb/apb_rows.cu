@@ -740,9 +740,34 @@ __global__ void __launch_bounds__(32 * fw32<NH>()) pair_bias32_fwd_k(const float
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   const int tpr = L / 32;
   const long ntile = (long)L * tpr;
+  // PF: the pair rows of the block's next tile are loaded while it works on the current one (a tile of loads in flight per warp behind
+  // the arithmetic, the two barriers and the stores of a tile). Measured (H100, fp32 eval, L128-768): 2-6% faster at 16 heads x d_pair
+  // 256 / 384 / 512 and at 24 heads; 3-15% slower at d_pair 128 with 12 / 16 heads and at 8 heads x 384 (the registers it costs)
+  constexpr bool PF = (R == 2 && V >= 2) || R == 1;
+  float4 xn[IT][R][V];
+  auto load_tile = [&](long tt) {
+    const long rb = (long)(tt / tpr) * L + (int)(tt % tpr) * 32;
+#pragma unroll
+    for (int it = 0; it < IT; ++it)
+#pragma unroll
+      for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int v = 0; v < V; ++v)
+          xn[it][r][v] = __ldg(reinterpret_cast<const float4*>(Z + (rb + (warp * IT + it) * R + r) * DPW + 4 * lane + 128 * v));
+  };
+  if (PF && (long)blockIdx.x < ntile) load_tile(blockIdx.x);
   for (long t = blockIdx.x; t < ntile; t += gridDim.x) {
     const int i = (int)(t / tpr), j0 = (int)(t % tpr) * 32;
     const long row0 = (long)i * L + j0;
+    if (!PF) load_tile(t);
+    float4 xc[IT][R][V];
+#pragma unroll
+    for (int it = 0; it < IT; ++it)
+#pragma unroll
+      for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int v = 0; v < V; ++v) xc[it][r][v] = xn[it][r][v];
+    if (PF && t + gridDim.x < ntile) load_tile(t + gridDim.x);
 #pragma unroll
     for (int it = 0; it < IT; ++it) {
       const int k0 = (warp * IT + it) * R;
@@ -750,7 +775,7 @@ __global__ void __launch_bounds__(32 * fw32<NH>()) pair_bias32_fwd_k(const float
 #pragma unroll
       for (int r = 0; r < R; ++r)
 #pragma unroll
-        for (int v = 0; v < V; ++v) x[r][v] = __ldg(reinterpret_cast<const float4*>(Z + (row0 + k0 + r) * DPW + 4 * lane + 128 * v));
+        for (int v = 0; v < V; ++v) x[r][v] = xc[it][r][v];
 #pragma unroll
       for (int r = 0; r < R; ++r) {
         float s = 0.f;
