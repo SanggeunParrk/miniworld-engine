@@ -236,6 +236,16 @@ def _native128_pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -
     )
 
 
+
+def _outer(sm, a, b, mk):
+    """O = A^T B: with a mask the CUTLASS product that skips the tokens masked in every MSA row (``ogemm_sm80``: their O blocks are exactly 0;
+    padding is the common case), else cuBLAS (``sm.lt_mm``)."""
+    if mk is None:
+        return sm.lt_mm(a, b, True, False)
+    from miniworld_engine.kernels.outer_product_mean.cuda import ogemm_sm80
+
+    return ogemm_sm80.outer(a, b, ogemm_sm80.live_tokens(mk))
+
 # ------------------------------------------------------------------------------------------------------------ inference
 def _inference_fake(
     msa: torch.Tensor,
@@ -266,7 +276,7 @@ def inference(
         m = msa[0]
         mk = _mask_u8(mask)
         a, b, _ = sm.prologue(m, mk, lnw, lnb, wl, wr, eps, False, None, *pb)
-        o = sm.lt_mm(a, b, True, False)
+        o = _outer(sm, a, b, mk)
         del a, b
         if mk is not None and _mask_epilogue_enabled(m, wo):
             from miniworld_engine.kernels.outer_product_mean.cuda import (
@@ -383,7 +393,7 @@ def forward(
         m = msa[0]
         mk = _mask_u8(mask)
         a, b, stats = sm.prologue(m, mk, lnw, lnb, wl, wr, eps, True, None, *pb)
-        o = sm.lt_mm(a, b, True, False)
+        o = _outer(sm, a, b, mk)
         if mk is not None and _mask_epilogue_enabled(m, wo, training=True):
             from miniworld_engine.kernels.outer_product_mean.cuda import (
                 mask_epilogue_sm80,

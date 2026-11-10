@@ -116,6 +116,9 @@ def _prebuild_sm80():
                 and opm.supported(int(_kv(r["dims"])["d_msa"]), int(_kv(r["dims"])["d_hidden"]), int(_kv(r["dims"])["d_pair"]))]
     if opm_rows:
         yield opm.ext
+        from miniworld_engine.kernels.outer_product_mean.cuda import ogemm_sm80
+
+        yield ogemm_sm80.ext   # the masked forward product (dead tokens skipped)
         yield mask_count_ballot_sm80._ext
         yield mask_epilogue_sm80._ext
         if any(r["mode"] == "train" for r in opm_rows):
