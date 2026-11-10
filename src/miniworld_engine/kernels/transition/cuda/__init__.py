@@ -15,6 +15,8 @@ def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n):
     from . import fused_generic_sm90a, fused_sm90a, fused_wide_sm90a
 
     training = torch.is_grad_enabled() and any(t.requires_grad for t in (x, ln_weight, wa, wb, ws))
+    if fused_wide_sm90a.f32_available(x, wa, ws, training):   # fp32 inference at D 64 / 128: one fused launch (fp16 MMA at TF32 rounding)
+        return fused_wide_sm90a.transition_f32_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps)
     if fused_generic_sm90a.prefers_generic(x, training, n) and fused_generic_sm90a.available(x, wa, ws):
         return fused_generic_sm90a.transition_generic_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps)
     for kern, entry in (
@@ -131,6 +133,9 @@ def prebuild(target, rows):
             return dtype == "float32" or not served or any(m <= small for m in counts)
         if any(generic(d, n, dt, m, c) for (d, n), v in shapes.items() for (dt, m), c in v.items()):
             yield fused_generic_sm90a._ext
+        # the fp32 inference forward (one build per (D, n), every variant inside): the float32 eval rows at its shapes
+        for d, n in sorted(k for k, v in shapes.items() if k[1] in fused_wide_sm90a.F32_SHAPES.get(k[0], ()) and ("float32", "eval") in v):
+            yield ft.partial(fused_wide_sm90a._f32_ext, d, n)
     elif target.arch == "sm100":
         from . import fused_sm100a, fused_wide_sm100a
 

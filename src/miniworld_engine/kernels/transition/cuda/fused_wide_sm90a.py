@@ -483,6 +483,18 @@ def _cast_weights(weights, dtype):
     return _cuda_prepare(weights[0], weights[1], weights[2], False)[:3]
 
 
+def _inference_forms(wa, wb, ws, transpose):
+    """The inference forward's bf16 weights (and ``Ws^T``) from fp32 masters: cast once per parameter version and reused (``param_forms``,
+    a capture reads the entry its warm-up made, as the fp32 path's TF32-rounded weights) instead of a cast launch per call; bf16 weights
+    pass through ``_cuda_prepare`` as before."""
+    from miniworld_engine.kernels import _capture
+
+    if all(w.dtype == torch.bfloat16 for w in (wa, wb, ws)):
+        return _cuda_prepare(wa, wb, ws, transpose)
+    return _capture.param_forms(("transition_wide_bf16_forms", transpose), (wa, wb, ws), lambda: _cuda_prepare(wa, wb, ws, transpose),
+                                capture_reads_eager=True)
+
+
 class _WideTransitionSM90A(torch.autograd.Function):
     """``y = transition(x) + x`` at D in ``WIDTHS``; the forward saves xn and the LayerNorm statistics."""
 
@@ -565,9 +577,9 @@ def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
             if all(w.dtype == torch.bfloat16 for w in (wa, wb, ws)):
                 wst = transposed_contiguous(ws)
             else:
-                wa, wb, ws, wst = _cuda_prepare(wa, wb, ws)
+                wa, wb, ws, wst = _inference_forms(wa, wb, ws, True)
         else:
-            wa, wb, ws = _cast_weights((wa, wb, ws), x.dtype)
+            wa, wb, ws = _inference_forms(wa, wb, ws, False)[:3]
             wst = None
         out, _, _, _, _ = _fwd_launch(
             x.reshape(-1, shape[-1]).contiguous(),
@@ -585,3 +597,133 @@ def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
     from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_output
 
     return _native_caller_output(out, x, gamma, beta, wa, wb, ws, force=True)
+
+
+# ---------------------------------------------------------------------------------------------------------- fp32 inference (f32io)
+#: Channel widths / hidden multiples of the fp32 inference forward (``wide/kernels/transition_fwd_f32io.cu``): one fused kernel, x and y
+#: fp32, the LayerNorm in fp32, the products on fp16 tensor cores with fp32 accumulation -- fp16's 10-bit mantissa is TF32's, so each
+#: operand is rounded as the TF32 path rounds it; device scales (``_f32_forms``) keep every fp16 operand inside fp16's range.
+F32_SHAPES = {64: (2, 4), 128: (2, 4)}
+_F32_REVISION = "v2"
+
+
+@functools.lru_cache(maxsize=8)
+def _f32_ext(width: int, n: int):
+    ensure_cuda_home()
+    return load_extension(
+        name=f"transition_f32io_sm90a_d{width}_n{n}_{_F32_REVISION}",
+        sources=[str(_dir / "f32io.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            *gencodes("90a"),
+            f"-I{_dir.parent / 'anthropic_v5'}",
+            f"-I{_dir}",
+            f"-DF32_D={width}",
+            f"-DF32_N={n}",
+            "--expt-relaxed-constexpr",
+            "-U__CUDA_NO_HALF_CONVERSIONS__",
+            "-U__CUDA_NO_HALF_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
+
+
+def f32_supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor, training: bool) -> bool:
+    """fp32 inference on sm_90 with TF32 allowed (the precision it reproduces), D / n in ``F32_SHAPES``, weights fp32 or bf16, any row
+    count (the tail tile is zero-filled on the way in, clipped on the way out)."""
+    from .fused_generic_sm90a import _tf32_allowed
+
+    if training or not x.is_cuda or x.dtype is not torch.float32 or x.numel() == 0 or not _tf32_allowed():
+        return False
+    if not _is_hopper(x.device.index if x.device.index is not None else torch.cuda.current_device()):
+        return False
+    d = x.shape[-1]
+    if d not in F32_SHAPES or wa.dim() != 2 or wa.shape[1] != d or wa.shape[0] % d or wa.shape[0] // d not in F32_SHAPES[d]:
+        return False
+    if tuple(ws.shape) != (d, wa.shape[0]):
+        return False
+    return all(w.dtype in (torch.float32, torch.bfloat16) for w in (wa, ws))
+
+
+_F32_BUILD_FAILED: set[tuple[int, int]] = set()
+
+
+def f32_available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor, training: bool) -> bool:
+    """``f32_supported()`` plus a successful build (cached); a build failure warns once and keeps the existing (generic TF32) path."""
+    if not f32_supported(x, wa, ws, training):
+        return False
+    key = (x.shape[-1], wa.shape[0] // x.shape[-1])
+    if key in _F32_BUILD_FAILED:
+        return False
+    if torch.compiler.is_compiling() or _is_fake(x, wa, ws):
+        return True
+    try:
+        _f32_ext(*key)
+    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
+        _F32_BUILD_FAILED.add(key)
+        warnings.warn(f"fp32 sm90a Transition (D={key[0]}, n={key[1]}) unavailable, keeping the existing path: {exc!r}", RuntimeWarning,
+                      stacklevel=2)
+        return False
+    return True
+
+
+#: fp16 range kept by the scales (below 65504 with room for the rounding)
+_F16_BOUND = 30000.0
+
+
+def _f32_forms(gamma, beta, wa, wb, ws):
+    """(Wa16, Wb16, (Ws / s_ws)^T fp16, sc fp32 [4]) -- see the kernel's header for ``sc``. Bounds: |xn| <= sqrt(D) max|gamma| + max|beta|,
+    |a|, |b| <= |xn|max * the largest row L1 norm of Wa, Wb, |h| <= |a|max |b|max. Each scale is 1 unless its bound passes ``_F16_BOUND``.
+    Device arithmetic only (no host sync); made once per parameter version (``param_forms``)."""
+    with torch.no_grad():
+        g, b = gamma.float(), beta.float()
+        wa, wb, ws = wa.float(), wb.float(), ws.float()
+        d = wa.shape[1]
+        xn_max = (d ** 0.5) * g.abs().max() + b.abs().max()
+        s_x = (xn_max / _F16_BOUND).clamp_min(1.0)
+        s_w = (torch.maximum(wa.abs().max(), wb.abs().max()) / _F16_BOUND).clamp_min(1.0)
+        a_max = xn_max * torch.maximum(wa.abs().sum(dim=1).max(), wb.abs().sum(dim=1).max())
+        s_h = (a_max * a_max / _F16_BOUND).clamp_min(1.0)
+        s_ws = (ws.abs().max() / _F16_BOUND).clamp_min(1.0)
+        sc = torch.stack([1.0 / s_x, s_x * s_w, 1.0 / s_h, s_h * s_ws]).contiguous()
+        return (wa / s_w).half().contiguous(), (wb / s_w).half().contiguous(), (ws / s_ws).t().contiguous().half(), sc
+
+
+def _f32_variant(d: int, n: int, rows: int) -> int:
+    """The build of ``wide/f32io.cu`` for (D, n, rows) (see its switch), measured on H100 at n 2 / 4, 16 384 - 589 824 rows:
+    D 64: 1 (64-row tiles, 3 CTAs / SM), D 128: 1 (128-row tiles over two consumer warpgroups, double-buffered x)."""
+    return 1
+
+
+def _f32_launch_fake(x, gamma, beta, wa16, wb16, wst16, sc, eps, variant):
+    return torch.empty_like(x)
+
+
+@opaque(fake=_f32_launch_fake, name="transition_f32io_fwd_sm90a")
+def _f32_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa16: torch.Tensor, wb16: torch.Tensor, wst16: torch.Tensor,
+                sc: torch.Tensor, eps: float, variant: int) -> torch.Tensor:
+    """x fp32 [M, D] -> x + transition(x) (fp32)."""
+    if _is_fake(x, wa16):
+        return _f32_launch_fake(x, gamma, beta, wa16, wb16, wst16, sc, eps, variant)
+    return _f32_ext(x.shape[1], wa16.shape[0] // x.shape[1]).fwd(x, gamma, beta, wa16, wb16, wst16, sc, float(eps), int(variant),
+                                                                 num_sms(x.device))
+
+
+def transition_f32_sm90a(x, gamma, beta, wa, wb, ws, eps, variant: int | None = None):
+    """fp32 inference entry (call ``f32_supported`` first): ``x + transition(x)`` from one launch, the fp16 weight forms and the scales made
+    once per parameter version."""
+    from miniworld_engine.kernels import _capture
+
+    shape = x.shape
+    d = shape[-1]
+    flat = x.reshape(-1, d).contiguous()
+    gf, bf = gamma.float().contiguous(), beta.float().contiguous()
+    wa16, wb16, wst16, sc = _capture.param_forms("transition_f32io_forms", (gamma, beta, wa, wb, ws),
+                                                 lambda: _f32_forms(gamma, beta, wa, wb, ws), capture_reads_eager=True)
+    if variant is None:
+        variant = _f32_variant(d, wa.shape[0] // d, flat.shape[0])
+    return _f32_launch(flat, gf, bf, wa16, wb16, wst16, sc, float(eps), int(variant)).reshape(shape)
