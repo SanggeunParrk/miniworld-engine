@@ -25,7 +25,6 @@ import torch
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
 _FAILED: dict[str, bool] = {}
@@ -34,10 +33,7 @@ _NEIGHBORS = 48
 
 
 def _enabled() -> bool:
-    return (
-        settings.current().mpnn_msg_sm80
-        and settings.current().engine_backend != "triton"
-    )
+    return True   # no switch: the module's "cuda" backend is the only caller
 
 
 def _a100(device: torch.device) -> bool:

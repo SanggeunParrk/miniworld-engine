@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from miniworld_engine.modules.mpnn._functional import MPNNLayerNorm, gather_neighbors, projection_input
+from miniworld_engine.modules.mpnn._functional import MPNNLayerNorm, gather_neighbors, mpnn_sm80_unsupported, projection_input
 from miniworld_engine.modules.primitives import BackendModule, wide
 
 
@@ -43,7 +43,7 @@ class RelativePositionEmbedding(BackendModule):
     and 128 channels, fp32 or bf16, with a bias of its dtype.
     """
 
-    backends = ("pytorch", "triton")
+    backends = ("pytorch", "triton", "cuda")
 
     #: The reduction privatises a whole table per program: the real table is 66 x 16.
     _MAX_BUCKETS = 512
@@ -98,6 +98,25 @@ class RelativePositionEmbedding(BackendModule):
 
         bucket = self._bucket(relative_offset, same_chain).contiguous()
         return relative_position_embed_op(bucket, self.embedding.weight, self.bias, "triton")
+
+    def _supports_cuda(self, relative_offset: torch.Tensor, same_chain: torch.Tensor) -> str | None:
+        """A100: the same lookup, its backward's bucket reduction on the sm_80 one-hot matmul (``kernels/integrations/mpnn_msg_sm80.relative_position_embed``):
+        a 16-channel table of at most 79 buckets."""
+        from miniworld_engine.kernels.integrations import mpnn_msg_sm80
+
+        why = mpnn_sm80_unsupported(relative_offset, mpnn_msg_sm80._relpos_loads) or self._supports_triton(relative_offset, same_chain)
+        if why is not None:
+            return why
+        buckets, width = self.embedding.weight.shape
+        if width != 16 or buckets > 79:
+            return f"table {tuple(self.embedding.weight.shape)}: the sm_80 reduction is built for 16 channels and at most 79 buckets"
+        return None
+
+    def _forward_cuda(self, relative_offset: torch.Tensor, same_chain: torch.Tensor) -> torch.Tensor:
+        from miniworld_engine.kernels.integrations import mpnn_msg_sm80
+
+        bucket = self._bucket(relative_offset, same_chain).contiguous()
+        return mpnn_msg_sm80.relative_position_embed(bucket, self.embedding.weight, self.bias)
 
 
 class BackboneFeatures(BackendModule):

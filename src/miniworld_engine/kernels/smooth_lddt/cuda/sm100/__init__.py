@@ -61,9 +61,9 @@ def _fwd_variant(x: torch.Tensor, n_augment_batch: int, n: int) -> str:
 
 
 def _arch(index: int) -> str:
-    """nvcc arch of the device: sm_100a (B200) or sm_90a (H100). The kernels are plain CUDA-core code, the same source serves both."""
+    """nvcc arch of the device: sm_100a (B200), sm_90a (H100) or sm_80 (A100). The kernels are plain CUDA-core code, the same source serves all."""
     major, _ = torch.cuda.get_device_capability(index)
-    return "sm_90a" if major == 9 else "sm_100a"
+    return "sm_80" if major == 8 else "sm_90a" if major == 9 else "sm_100a"
 
 
 @functools.lru_cache(maxsize=None)

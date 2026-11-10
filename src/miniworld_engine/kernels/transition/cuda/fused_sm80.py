@@ -65,8 +65,9 @@ def _is_ampere(index: int) -> bool:
 
 
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """The kernels' own requirements: sm_80, bf16, D = 128 / hidden 512 (tile shapes are literals), whole 256-row tiles."""
-    if not x.is_cuda or x.dtype is not torch.bfloat16:
+    """The kernels' own requirements: sm_80, bf16 activations and weights (the pack kernel reads bf16: an fp32 master takes the wide path),
+    D = 128 / hidden 512 (tile shapes are literals), whole 256-row tiles."""
+    if not x.is_cuda or x.dtype is not torch.bfloat16 or wa.dtype is not torch.bfloat16 or ws.dtype is not torch.bfloat16:
         return False
     if not _is_ampere(
         x.device.index if x.device.index is not None else torch.cuda.current_device()

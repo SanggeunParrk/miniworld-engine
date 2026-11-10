@@ -21,6 +21,7 @@ from miniworld_engine.modules.mpnn._functional import (
     bf16_projection_unsupported,
     gather_neighbors,
     lecun_normal_,
+    mpnn_sm80_unsupported,
     mpnn_triton_unsupported,
     project_packed_neighbor_inputs,
     projection_input,
@@ -110,7 +111,7 @@ class EdgeDropout(BackendModule, nn.Dropout):
     Evaluation, no-grad and p = 0 are the identity in every backend, so there is nothing to pack and the call is the reference statement.
     """
 
-    backends = ("pytorch", "triton")
+    backends = ("pytorch", "triton", "cuda")
 
     def __init__(self, p: float = 0.5, inplace: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__(p=p, inplace=inplace)
@@ -145,6 +146,21 @@ class EdgeDropout(BackendModule, nn.Dropout):
         from miniworld_engine.kernels.mpnn_edge_dropout.triton import edge_dropout_bitpack
 
         return edge_dropout_bitpack(input, self.p)
+
+    def _supports_cuda(self, input: torch.Tensor) -> str | None:
+        """A100: the same contract, the mask packing and the backward on ``kernels/integrations/mpnn_edge_sm80.edge_dropout_bitpack``."""
+        if self._identity():
+            return None
+        from miniworld_engine.kernels.integrations import mpnn_edge_sm80
+
+        return mpnn_sm80_unsupported(input, mpnn_edge_sm80._loads) or self._supports_triton(input)
+
+    def _forward_cuda(self, input: torch.Tensor) -> torch.Tensor:
+        if self._identity():
+            return self._forward_pytorch(input)
+        from miniworld_engine.kernels.integrations import mpnn_edge_sm80
+
+        return mpnn_edge_sm80.edge_dropout_bitpack(input, self.p)
 
 
 class _MessageUpdate(nn.Module):
@@ -189,7 +205,7 @@ class NodeMessageUpdate(BackendModule, _MessageUpdate):
     leading shape (handed to the kernels as fp32).
     """
 
-    backends = ("pytorch", "triton")
+    backends = ("pytorch", "triton", "cuda")
 
     def __init__(
         self,
@@ -262,6 +278,28 @@ class NodeMessageUpdate(BackendModule, _MessageUpdate):
         bias_scale = edge_mask.sum(dim=-1, keepdim=True) / neighbor_scale
         return self.apply_reduced_hidden(node_states, reduced_hidden, bias_scale)
 
+    def _supports_cuda(
+        self, node_states: torch.Tensor, preactivation: torch.Tensor, edge_mask: torch.Tensor, neighbor_scale: int
+    ) -> str | None:
+        """A100: the same contract, the four lines on ``kernels/integrations/mpnn_msg_sm80.message_hidden_reduce`` (one forward kernel, one
+        replaying backward kernel)."""
+        from miniworld_engine.kernels.integrations import mpnn_msg_sm80
+
+        return mpnn_sm80_unsupported(preactivation, mpnn_msg_sm80._message_loads) or self._supports_triton(
+            node_states, preactivation, edge_mask, neighbor_scale)
+
+    def _forward_cuda(
+        self, node_states: torch.Tensor, preactivation: torch.Tensor, edge_mask: torch.Tensor, neighbor_scale: int
+    ) -> torch.Tensor:
+        from miniworld_engine.kernels.integrations import mpnn_msg_sm80
+
+        pre = preactivation.contiguous()
+        mask = edge_mask.to(torch.float32).contiguous()
+        w, b = self.hidden_projection.weight, self.hidden_projection.bias
+        reduced_hidden = mpnn_msg_sm80.message_hidden_reduce(pre, w, b, mask, neighbor_scale)
+        bias_scale = edge_mask.sum(dim=-1, keepdim=True) / neighbor_scale
+        return self.apply_reduced_hidden(node_states, reduced_hidden, bias_scale)
+
     def apply_reduced_hidden(
         self,
         node_states: torch.Tensor,
@@ -291,7 +329,7 @@ class EdgeMessageUpdate(BackendModule, _MessageUpdate):
     bf16 autocast).
     """
 
-    backends = ("pytorch", "triton")
+    backends = ("pytorch", "triton", "cuda")
 
     def __init__(
         self,
@@ -338,6 +376,19 @@ class EdgeMessageUpdate(BackendModule, _MessageUpdate):
         update = (triton_edge_mlp_update_compute if grad and not self.replay_in_backward else triton_edge_mlp_update)(pre, *params)
         return self.norm(edge_states + self.dropout(update))
 
+    def _supports_cuda(self, edge_states: torch.Tensor, preactivation: torch.Tensor) -> str | None:
+        """A100: the same contract, the update on ``kernels/integrations/mpnn_edge_sm80.edge_mlp_update`` (saves the projection; with
+        ``replay_in_backward`` recomputes it); dropout and norm are the children's own backend."""
+        from miniworld_engine.kernels.integrations import mpnn_edge_sm80
+
+        return mpnn_sm80_unsupported(preactivation, mpnn_edge_sm80._loads) or self._supports_triton(edge_states, preactivation)
+
+    def _forward_cuda(self, edge_states: torch.Tensor, preactivation: torch.Tensor) -> torch.Tensor:
+        from miniworld_engine.kernels.integrations import mpnn_edge_sm80
+
+        update = mpnn_edge_sm80.edge_mlp_update(preactivation.contiguous(), *self._projections(), memory=self.replay_in_backward)
+        return self.norm(edge_states + self.dropout(update))
+
 
 class ResidualTransition(BackendModule):
     """Position-wise feed-forward transition with residual normalization: ``norm(x + dropout(W_2 gelu(W_1 x + b_1) + b_2))``."""
@@ -379,7 +430,7 @@ class EncoderLayer(BackendModule):
     children (:class:`NodeMessageUpdate`, :class:`EdgeMessageUpdate`) run their own ``"triton"`` backends.
     """
 
-    backends = ("pytorch", "triton")
+    backends = ("pytorch", "triton", "cuda")
 
     def __init__(
         self,
@@ -557,6 +608,72 @@ class EncoderLayer(BackendModule):
                 probability,
                 seed,
             ).reshape(edge_states.shape)
+        return node_states, edge_states
+
+    def _supports_cuda(
+        self,
+        node_states: torch.Tensor,
+        edge_states: torch.Tensor,
+        neighbor_indices: torch.Tensor,
+        residue_mask: torch.Tensor,
+        neighbor_mask: torch.Tensor,
+        *,
+        zero_nodes: bool = False,
+    ) -> str | None:
+        """A100: the ``"triton"`` contract, with the fused node message on ``kernels/integrations/mpnn_msg_sm80.node_message_reduce`` and the
+        fused edge tail on ``kernels/integrations/mpnn_edge_sm80.edge_tail_update`` (``replay_in_backward``: the replaying backward).
+        Without ``fused`` the layer is the reference composition whose children run their own ``"cuda"`` backends."""
+        from miniworld_engine.kernels.integrations import mpnn_edge_sm80, mpnn_msg_sm80
+
+        if not self.fused:
+            return mpnn_sm80_unsupported(edge_states)
+        why = mpnn_sm80_unsupported(edge_states, mpnn_msg_sm80._node_loads) or mpnn_sm80_unsupported(edge_states, mpnn_edge_sm80._loads)
+        return why or self._supports_triton(
+            node_states, edge_states, neighbor_indices, residue_mask, neighbor_mask, zero_nodes=zero_nodes
+        )
+
+    def _forward_cuda(
+        self,
+        node_states: torch.Tensor,
+        edge_states: torch.Tensor,
+        neighbor_indices: torch.Tensor,
+        residue_mask: torch.Tensor,
+        neighbor_mask: torch.Tensor,
+        *,
+        zero_nodes: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.fused:
+            return self._forward_pytorch(
+                node_states, edge_states, neighbor_indices, residue_mask, neighbor_mask, zero_nodes=zero_nodes
+            )
+        from miniworld_engine.kernels.integrations import mpnn_edge_sm80, mpnn_msg_sm80
+
+        batch, length = node_states.shape[:2]
+        flat_indices = neighbor_indices if batch == 1 else _flat_neighbor_indices(neighbor_indices, batch, length)
+
+        query, neighbor, edge_weight = self._node_side_projection(self.node_message.input_projection, node_states)
+        hidden = self.node_message.hidden_projection
+        reduced_hidden = mpnn_msg_sm80.node_message_reduce(
+            edge_states, query, neighbor, flat_indices, edge_weight, hidden.weight, hidden.bias, neighbor_mask, self.neighbor_scale
+        )
+        bias_scale = neighbor_mask.sum(dim=-1, keepdim=True) / self.neighbor_scale
+        node_states = self.node_message.apply_reduced_hidden(node_states, reduced_hidden, bias_scale)
+        node_states = self.node_transition(node_states)
+        node_states = residue_mask.unsqueeze(-1).to(node_states.dtype) * node_states
+
+        query, neighbor, edge_weight = self._node_side_projection(self.edge_message.input_projection, node_states)
+        edge_message = self.edge_message
+        probability = edge_message.dropout.p if self.training else 0.0
+        seed = torch.randint(0, 2**31 - 1, (1,), device=edge_states.device, dtype=torch.int64) if probability > 0.0 else torch.zeros(
+            1, device=edge_states.device, dtype=torch.int64
+        )
+        edge_states = mpnn_edge_sm80.edge_tail_update(
+            edge_states, query, neighbor, flat_indices, edge_weight,
+            edge_message.hidden_projection.weight, edge_message.hidden_projection.bias,
+            edge_message.output_projection.weight, edge_message.output_projection.bias,
+            edge_message.norm.weight, edge_message.norm.bias,
+            seed, edge_message.norm.eps, probability, recompute=self.replay_in_backward,
+        )
         return node_states, edge_states
 
     def _forward_pytorch(

@@ -131,3 +131,13 @@ def _prebuild_sm80():
         if any(r["mode"] == "train" for r in pwa_rows):
             yield from (broadcast_native_sm80._ext, dw_native_sm80._ext, glue_tuned_sm80._ext, grad_reduce_fused_sm80._ext,
                         grad_reduce_vector_sm80._ext, pair_partial_sm80._ext)
+    # ProteinMPNN (its "cuda" backend: mpnn_msg_sm80 / mpnn_edge_sm80): the four shape-independent sm_80 extensions, for a bf16 (master) row
+    if any(r["dtype"] in ("bfloat16", "master") for r in family_rows("mpnn_message")):
+        from miniworld_engine.kernels.mpnn_edge_tail.cuda import sm80 as edge
+        from miniworld_engine.kernels.mpnn_message.cuda import sm80 as message
+        from miniworld_engine.kernels.mpnn_node_message.cuda import sm80 as node
+        from miniworld_engine.kernels.mpnn_relative_position.cuda import sm80 as relpos
+
+        yield from (message._ext, node._ext, edge.ext)
+        if any(r["mode"] == "train" for r in family_rows("mpnn_relative_position")):
+            yield relpos._ext

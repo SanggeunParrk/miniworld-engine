@@ -9,4 +9,4 @@ def prebuild(target, rows):
     from .sm100 import cubin
 
     if rows:
-        yield ft.partial(cubin, "sm_90a" if target.arch == "sm90" else "sm_100a")
+        yield ft.partial(cubin, {"sm80": "sm_80", "sm90": "sm_90a"}.get(target.arch, "sm_100a"))

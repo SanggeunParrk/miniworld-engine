@@ -77,7 +77,22 @@ class EdgeLayerNorm(MPNNLayerNorm):
     gradients nothing is saved, so the call is the reference statement itself.
     """
 
-    backends = ("pytorch", "triton")
+    backends = ("pytorch", "triton", "cuda")
+
+    def _supports_cuda(self, input: torch.Tensor) -> str | None:
+        """A100: the same contract, the backward on ``kernels/integrations/mpnn_edge_sm80.edge_layer_norm_memory``."""
+        if not torch.is_grad_enabled():
+            return None
+        from miniworld_engine.kernels.integrations import mpnn_edge_sm80
+
+        return mpnn_sm80_unsupported(input, mpnn_edge_sm80._loads) or self._supports_triton(input)
+
+    def _forward_cuda(self, input: torch.Tensor) -> torch.Tensor:
+        if not torch.is_grad_enabled():
+            return self._forward_pytorch(input)
+        from miniworld_engine.kernels.integrations import mpnn_edge_sm80
+
+        return mpnn_edge_sm80.edge_layer_norm_memory(input, self.weight, self.bias, self.eps)
 
     def _supports_triton(self, input: torch.Tensor) -> str | None:
         if not torch.is_grad_enabled():
@@ -143,6 +158,20 @@ def mpnn_triton_unsupported(x: torch.Tensor) -> str | None:
         return f"activation {tuple(x.shape)}: the kernels are built for [..., {KERNEL_WIDTH}]"
     if x.numel() > _INT32_MAX - (KERNEL_WIDTH * KERNEL_WIDTH - 1):
         return "the activation exceeds the kernels' 32-bit offsets"
+    return None
+
+
+def mpnn_sm80_unsupported(x: torch.Tensor, loads=None) -> str | None:
+    """Why the ``"cuda"`` backends of the MPNN classes cannot run on ``x``'s card: they are the A100 (sm_80) kernels
+    (``kernels/integrations/mpnn_msg_sm80.py``, ``mpnn_edge_sm80.py``); every other card has the Triton kernels only. ``loads``: the
+    extension's loader (a failed build refuses). Device only: capture-safe."""
+    if x.device.type != "cuda":
+        return "the CUDA kernels run on CUDA tensors only"
+    cc = torch.cuda.get_device_capability(x.device)
+    if cc != (8, 0):
+        return f"the MPNN CUDA kernels are the A100 (sm_80) builds, got sm_{cc[0]}{cc[1]} (that card has the Triton kernels only)"
+    if loads is not None and not loads():
+        return "the sm_80 MPNN extension failed to build"
     return None
 
 

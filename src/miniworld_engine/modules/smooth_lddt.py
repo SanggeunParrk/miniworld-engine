@@ -83,8 +83,8 @@ class SmoothLddtLoss(BackendModule):
         if why is not None:
             return why
         cc = torch.cuda.get_device_capability(x_pred.device)
-        if cc not in ((9, 0), (10, 0)):
-            return f"the CUDA kernels are the H100 (sm_90a) and B200 (sm_100a) cubins, got sm_{cc[0]}{cc[1]}"
+        if cc not in ((8, 0), (9, 0), (10, 0)):
+            return f"the CUDA kernels are the A100 (sm_80), H100 (sm_90a) and B200 (sm_100a) cubins, got sm_{cc[0]}{cc[1]}"
         return None
 
     def _supports_triton(self, x_pred: torch.Tensor, gt: torch.Tensor, is_nuc: torch.Tensor, mask: torch.Tensor) -> str | None:

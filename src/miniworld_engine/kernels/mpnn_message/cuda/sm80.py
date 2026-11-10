@@ -8,12 +8,10 @@ the backward is ONE kernel as well, ``msg_bwd_fused_sm80.cuh`` (dP, dW and db; t
 from __future__ import annotations
 
 import functools
-import hashlib
 from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent / "sm80"
@@ -25,15 +23,8 @@ WIDTH = 128
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # settings.mpnn_msg_sm80_flags: extra -D / nvcc flags for A/B experiments (their own build)
-    extra = settings.current().mpnn_msg_sm80_flags.split()
-    tag = (
-        ""
-        if not extra
-        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
-    )
     return load_extension(
-        name=f"mpnn_message_sm80{tag}",
+        name="mpnn_message_sm80",
         sources=[str(_dir / "ops.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -41,10 +32,9 @@ def _ext():
             "-O3",
             "-gencode=arch=compute_80,code=sm_80",
             f"-I{_dir}",
-            *extra,
         ],
         extra_cflags=["-std=c++17", "-O3"],
-        verbose=bool(extra),
+        verbose=False,
     )
 
 
@@ -76,10 +66,10 @@ def backward(
     """``(dP [rows, 128] bf16, dW [128, 128] fp32, db [128] fp32)`` of :func:`forward`, from P [groups * 48, 128] and ``grad_reduced`` [groups, 128] fp32.
 
     One kernel (``msg_bwd_fused_sm80.cuh``): it replays the forward (nothing was saved), writes dP, and accumulates dW = dproj^T a on the tensor cores in registers (per-CTA slices of fp32, summed in CTA order by a
-    small kernel: no atomics, bit-reproducible); db is the fixed-order sum of the CTAs' partial rows.  ``fused=False`` (or settings.mpnn_msg_sm80_bwd="split") selects the older two-step form for A/B runs: the
+    small kernel: no atomics, bit-reproducible); db is the fixed-order sum of the CTAs' partial rows.  ``fused=False`` selects the older two-step form for A/B runs: the
     kernel of ``msg_bwd_sm80.cuh`` writes dP, a and dproj and dW is one cuBLAS GEMM per chunk of rows."""
     if fused is None:
-        fused = settings.current().mpnn_msg_sm80_bwd != "split"
+        fused = True
     if fused:
         return _backward_fused(p, weight, bias, mask, grad_reduced, scale)
     return _backward_split(p, weight, bias, mask, grad_reduced, scale)

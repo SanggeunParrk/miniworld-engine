@@ -244,11 +244,15 @@ class ProteinMPNN(BackendModule):
     with the packed-mask edge dropout and the memory edge LayerNorm. Decoder layers: the node messages on the message-reduction kernels.
     ``config.replay_in_backward`` picks the recompute kernels over the saved-activation ones in training. Packed projections,
     transitions, the other norms and the output projection are the PyTorch statements. Each child states its range (bf16, widths 128,
-    48 neighbours) and raises ``BackendUnsupported`` outside it; CUDA has no kernel of these families (``kernels/mpnn_*`` hold Triton
-    only), so no ``"cuda"`` backend."""
+    48 neighbours) and raises ``BackendUnsupported`` outside it.
+
+    ``"cuda"`` (A100 only): the same composition with the children's ``"cuda"`` backends, the sm_80 kernels of ``kernels/mpnn_*/cuda/sm80``
+    (``kernels/integrations/mpnn_msg_sm80.py``: the hidden-message reduction, the fused node message, the relative-position backward;
+    ``mpnn_edge_sm80.py``: the fused edge tail, the edge MLP, the edge LayerNorm backward, the packed-mask dropout). Other cards have no
+    hand-written CUDA of these families (the H100 runs the Triton kernels), so the backend refuses there."""
     version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "triton")
+    backends = ("pytorch", "triton", "cuda")
 
     def __init__(self, config: ProteinMPNNConfig | None = None, *, backend: str = "pytorch") -> None:
         super().__init__()
@@ -290,6 +294,14 @@ class ProteinMPNN(BackendModule):
 
     def _forward_triton(self, *args, **kwargs) -> torch.Tensor:
         return self._forward_pytorch(*args, **kwargs)   # the composition; the message children run their "triton" backends
+
+    def _supports_cuda(self, backbone: torch.Tensor, *args, **kwargs) -> str | None:
+        from miniworld_engine.modules.mpnn._functional import mpnn_sm80_unsupported
+
+        return mpnn_sm80_unsupported(backbone) or self._supports_triton(backbone, *args, **kwargs)
+
+    def _forward_cuda(self, *args, **kwargs) -> torch.Tensor:
+        return self._forward_pytorch(*args, **kwargs)   # the composition; the children run their "cuda" backends (A100)
 
     def encode_backbone(
         self,

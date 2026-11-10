@@ -141,12 +141,12 @@ def prebuild(target, rows):
             if half.get((d, n)):
                 yield ft.partial(fused_sm100a.build_cubins, f"d{d}n{n}", fused_wide_sm100a._specs(d, n))
     elif target.arch == "sm80":
-        # A100 (transition_sm80): fused_sm80 at D 128 / n 4, the wide extension at every other width (and as fused_sm80's small-row path), its
+        # A100 (transition_sm80): fused_sm80 at D 128 / n 4 with bf16 weights, the wide extension at every other width (and as fused_sm80's small-row path), its
         # one-kernel forward / backward builds (fused_fwd_sm80 / fused_bwd_sm80: (D, H) in their SHAPES) and the fp32-master cast; bf16 rows only
         from . import fused_bwd_sm80, fused_fwd_sm80, fused_sm80, fused_wide_sm80, parameter_cast_sm80
 
         served = {k: v for k, v in half.items() if v and k[0] in fused_wide_sm80.WIDTHS}
-        if (128, 4) in served:
+        if any(dt == "bfloat16" for (dt, _m) in shapes.get((128, 4), {})):   # fused_sm80 takes bf16 weights only (no master row reaches it)
             yield fused_sm80._ext
         if served:
             yield fused_wide_sm80._ext

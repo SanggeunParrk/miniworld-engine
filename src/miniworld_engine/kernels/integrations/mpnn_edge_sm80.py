@@ -19,7 +19,6 @@ import warnings
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
 _FAILED = False
@@ -28,10 +27,7 @@ _WIDTH = 128
 
 def wanted() -> bool:
     """The switch and the engine backend; everything else about a call is `serves_*`."""
-    return (
-        settings.current().mpnn_edge_sm80
-        and settings.current().engine_backend != "triton"
-    )
+    return True   # no switch: the module's "cuda" backend is the only caller
 
 
 def _ext():
