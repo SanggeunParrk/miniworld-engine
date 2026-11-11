@@ -11,17 +11,17 @@ Beside them (other files): bo_pvdpb.cu (pv dV + dbias in one launch, settings.bi
 bias_only_dit_train_rows.cu (pair_bias_bwd + finalize, settings.bias_only_dit_bwd_pbfin).
 
 The tail's tile counters live in a zeroed device buffer per (device, size) that its last CTA zeroes again (graph replays included).
-Build failures warn once and keep the per-step launches.
+Build failures raise _nvcc.KernelBuildError (never a fallback).
 """
 
 from __future__ import annotations
 
 import os
-import warnings
 
 import torch
 
 from miniworld_engine.kernels._device import num_sms
+from miniworld_engine.kernels._nvcc import build_failed
 
 from miniworld_engine.kernels.bias_only_dit.cuda import _descriptors, _dir
 
@@ -573,25 +573,17 @@ class MidBwd:
 
 
 _MID: dict = {}
-_MID_FAILED: set = set()
 
 
 def mid_op(index: int, nh: int, dh: int, sf32: bool, cf32: bool):
-    """MidBwd for the layout and dtypes, built once; None (after one warning) when its build fails: the five launches run."""
+    """MidBwd for the layout and dtypes, built once; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback)."""
     key = (index, nh, dh, sf32, cf32)
-    if key in _MID_FAILED:
-        return None
     if key not in _MID:
         try:
             _MID[key] = MidBwd(index, nh, dh, sf32, cf32)
-        except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps the five launches
-            _MID_FAILED.add(key)
-            warnings.warn(
-                f"bias-only DiT bo_bwd_mid unavailable, keeping the five launches: {exc!r}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            return None
+        except Exception as exc:  # a build / load failure is an error, never a fallback
+            build_failed("bias-only DiT bo_bwd_mid", exc)
+            return None  # reached only while planning (build_failed returns there)
     return _MID[key]
 
 
@@ -699,30 +691,20 @@ def clear_events(kernel):
     torch.cuda.synchronize()
 
 
-_FAILED = False
 _READY: set = set()
 _OPS: dict = {}
 
 
 def bwd_fused_ready(index: int, nh: int, dh: int) -> bool:
-    """Build and load both kernels for (nh, dh) on device ``index`` once; False (after one warning) when a toolchain or driver
-    problem keeps the per-step launches."""
-    global _FAILED
-    if _FAILED:
-        return False
+    """Build and load both kernels for (nh, dh) on device ``index`` once; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback)."""
     key = (index, nh, dh)
     if key in _READY:
         return True
     try:
         ops(index, nh, dh)
-    except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps the per-step launches
-        _FAILED = True
-        warnings.warn(
-            f"bias-only DiT fused bf16 training backward unavailable, keeping the per-step launches: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("bias-only DiT fused bf16 training backward", exc)
+        return False  # reached only while planning (build_failed returns there)
     _READY.add(key)
     return True
 

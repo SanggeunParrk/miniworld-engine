@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import functools
 import math
-import warnings
 
 import torch
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._nvcc import build_failed
 
 DP = 128
 #: the inference core's ``bn`` (key tile) launch argument: the A100 port's verified default
@@ -54,9 +54,6 @@ def _native(schema: str, fake):
         return call
 
     return decorate
-
-
-_FAILED = False
 
 
 @functools.cache
@@ -92,23 +89,15 @@ def _launch(op, *args):
 
 @torch.compiler.assume_constant_result
 def _loads() -> bool:
-    """Builds (first call) or loads the two sm_80 extensions; False, with one warning, when the toolchain fails (the module path then serves).
+    """Builds (first call) or loads the two sm_80 extensions; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).
 
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
-    global _FAILED
-    if _FAILED:
-        return False
     try:
         _rows().ext()
         _sm80()._ext()
-    except Exception as exc:  # a toolchain problem keeps the module path
-        _FAILED = True
-        warnings.warn(
-            f"sm_80 AttentionPairBias kernels unavailable, keeping the module path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 AttentionPairBias", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 
@@ -635,9 +624,9 @@ def _generic_loads(dt: torch.dtype) -> bool:
         sm80._glue_ext()
         if dt is torch.float32:
             sm80._tf32_rna_ext()
-    except Exception as exc:  # a toolchain problem: refused with a reason
-        warnings.warn(f"sm_80 attention kernels unavailable: {exc!r}", RuntimeWarning, stacklevel=2)
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 attention", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

@@ -2,8 +2,8 @@
 edge LayerNorm's compressed-save backward and the edge dropout's bit-packed mask.
 
 The family interfaces (``kernels/mpnn_edge_*/interface.py``) ask this module whether a call is served: capability exactly 8.0, the engine
-backend not forced to Triton, the Triton contract of the family met (``edge_tail_supported`` ...) and the extension loadable (a failed build warns once and keeps the Triton / PyTorch
-path).  On a served call the Triton policies ``triton`` / ``triton_compute`` / ``triton_memory`` / ``memory`` / ``bitpack`` run the CUDA kernels instead (``backend="cuda"`` names
+backend not forced to Triton, the Triton contract of the family met (``edge_tail_supported`` ...) and the extension loadable (a failed build raises ``_nvcc.KernelBuildError``
+rather than keeping the Triton / PyTorch path).  On a served call the Triton policies ``triton`` / ``triton_compute`` / ``triton_memory`` / ``memory`` / ``bitpack`` run the CUDA kernels instead (``backend="cuda"`` names
 them explicitly).
 
 Edge tail contract: bf16 ``[B, T, K, 128]`` edge states, ``[B, T, 128]`` query / neighbour projections, int64 flat neighbour indices, an edge block that is a slice of the packed
@@ -15,13 +15,11 @@ Training (``save``) keeps the GELU outputs ``act1`` / ``act2`` (bf16), their der
 
 from __future__ import annotations
 
-import warnings
-
 import torch
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._nvcc import build_failed
 
-_FAILED = False
 _WIDTH = 128
 
 
@@ -38,22 +36,14 @@ def _ext():
 
 @torch.compiler.assume_constant_result
 def _loads() -> bool:
-    """Builds (first call) or loads the sm_80 extension; False, with one warning, when the toolchain fails (the callers then keep the Triton / PyTorch path).
+    """Builds (first call) or loads the sm_80 extension; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).
 
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
-    global _FAILED
-    if _FAILED:
-        return False
     try:
         _ext()
-    except Exception as exc:  # a toolchain problem keeps the old path
-        _FAILED = True
-        warnings.warn(
-            f"sm_80 MPNN edge kernels unavailable, keeping the Triton / PyTorch path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 MPNN edge", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

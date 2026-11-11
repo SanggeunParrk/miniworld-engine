@@ -28,13 +28,13 @@ import re
 import subprocess
 import sys
 import tempfile
-import warnings
 from pathlib import Path
 
 import torch
 
 from ..._compile import opaque
 from ..._nvcc import (
+    build_failed,
     _HOST_CANDIDATES,
     ensure_cuda_home,
     gencodes,
@@ -182,7 +182,7 @@ def _cubins() -> tuple[str, str]:
 @functools.lru_cache(maxsize=1)
 def _ext():
     """The host binding (built by the torch-matched toolkit) with the kernel cubins loaded into it (on the current device, so a
-    cubin the driver rejects fails here, inside ``available()``, and the call keeps the Triton path)."""
+    cubin the driver rejects fails here, inside ``available()``, which raises ``_nvcc.KernelBuildError``)."""
     ensure_cuda_home()
     ext = load_extension(
         name="transition_fused_sm100a",
@@ -224,27 +224,20 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     return rows > 0 and rows % ROWS == 0
 
 
-_BUILD_FAILED = False
 _WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 
 
 def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """``supported()`` plus a successful (cached) build; a build failure warns once and keeps the existing path."""
-    global _BUILD_FAILED
-    if _BUILD_FAILED or not supported(x, wa, ws):
+    """``supported()`` plus a successful (cached) build; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback)."""
+    if not supported(x, wa, ws):
         return False
     if torch.compiler.is_compiling() or _is_fake(x, wa, ws):
         return True
     try:
         _ext()
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"fused sm100a Transition unavailable, keeping the existing path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("fused sm100a Transition", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

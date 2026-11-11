@@ -22,7 +22,6 @@ The wide widths use a tanh.approx sigmoid (forward and backward alike); D = 64 k
 """
 
 import functools
-import warnings
 from pathlib import Path
 
 import torch
@@ -32,7 +31,7 @@ from miniworld_engine.kernels import _cast_cuda
 
 from ..._compile import opaque
 from ._weights import transposed_contiguous
-from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from ..._nvcc import build_failed, ensure_cuda_home, gencodes, host_flags, load_extension
 
 from .fused_sm90a import _cuda_prepare, _native_ext
 
@@ -220,14 +219,11 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     return (x.numel() // d) % ROWS == 0
 
 
-_BUILD_FAILED: set[tuple[int, int]] = set()
-
-
 def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """``supported()`` plus a successful build of this width, both cached. A build failure is an environment problem, not
-    a dispatch bug: it warns once per width and keeps the existing path."""
+    """``supported()`` plus a successful build of this width, both cached. A build / load failure
+    raises ``_nvcc.KernelBuildError`` (never a fallback)."""
     key = (x.shape[-1], wa.shape[0] // x.shape[-1])
-    if not supported(x, wa, ws) or key in _BUILD_FAILED:
+    if not supported(x, wa, ws):
         return False
     # FakeTensor dispatch records shapes only; it must not invoke nvcc or
     # wait for another process's extension lock. Launch wrappers have fakes.
@@ -237,14 +233,9 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         return True
     try:
         _ext_for(x, n=key[1])
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED.add(key)
-        warnings.warn(
-            f"wide sm90a Transition (D={x.shape[-1]}, n={key[1]}) unavailable, keeping the existing path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed(f"wide sm90a Transition (D={x.shape[-1]}, n={key[1]})", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 
@@ -662,16 +653,11 @@ def f32_supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor, training:
     return all(w.dtype in (torch.float32, torch.bfloat16) for w in (wa, ws))
 
 
-_F32_BUILD_FAILED: set[tuple[int, int]] = set()
-
-
 def f32_available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor, training: bool) -> bool:
-    """``f32_supported()`` plus a successful build (cached); a build failure warns once and keeps the existing (generic TF32) path."""
+    """``f32_supported()`` plus a successful build (cached); a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback)."""
     if not f32_supported(x, wa, ws, training):
         return False
     key = (x.shape[-1], wa.shape[0] // x.shape[-1])
-    if key in _F32_BUILD_FAILED:
-        return False
     if torch.compiler.is_compiling() or _is_fake(x, wa, ws):
         return True
     try:
@@ -680,11 +666,9 @@ def f32_available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor, training:
             from . import fused_generic_sm90a
 
             fused_generic_sm90a._ext()   # the TF32 backward / the D 512 squeeze
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _F32_BUILD_FAILED.add(key)
-        warnings.warn(f"fp32 sm90a Transition (D={key[0]}, n={key[1]}) unavailable, keeping the existing path: {exc!r}", RuntimeWarning,
-                      stacklevel=2)
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed(f"fp32 sm90a Transition (D={key[0]}, n={key[1]})", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

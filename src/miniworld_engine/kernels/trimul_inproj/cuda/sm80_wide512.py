@@ -18,13 +18,12 @@ issued with TF32 enabled whatever ``torch.backends.cuda.matmul.allow_tf32`` says
 
 import contextlib
 import functools
-import warnings
 from pathlib import Path
 
 import torch
 
 from ..._compile import opaque
-from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 from . import sm80 as _d128
 
 _dir = Path(__file__).parent / "sm80"
@@ -103,27 +102,16 @@ def supports(
     )
 
 
-_BUILD_FAILED = False
-
-
 @torch.compiler.assume_constant_result
 def _loads() -> bool:
-    """Builds (first call) or loads the extension; False, with one warning, when the toolchain fails (the existing path then serves).
+    """Builds (first call) or loads the extension; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).
 
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
-    global _BUILD_FAILED
-    if _BUILD_FAILED:
-        return False
     try:
         _ext()
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"sm80 wide TriMul unavailable, keeping the existing path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm80 wide TriMul", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

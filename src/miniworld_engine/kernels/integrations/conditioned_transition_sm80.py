@@ -8,7 +8,7 @@
 Contract: the engine's kernel backend (implementation TRITON or MINIWORLD) with the engine backend not forced to Triton, sm_80, bf16 or fp32 operands (the module's compute dtype; fp32 runs
 on TF32 tensor cores), ``d_hidden`` and ``d_cond`` each one of 128 / 384 / 768 / 1024, any expansion ``n``, ``cond`` with the leading dims of ``x`` (one conditioning per row) or, with no
 gradient, one conditioning shared by the samples of ``x`` (the first dim expanded: stride 0, or size 1: the AdaLN and gate tables then have the L rows of one sample).
-A failed extension build warns once and keeps the module path.
+A failed extension build raises (``_nvcc.KernelBuildError``), never a fallback.
 
 Inference is one opaque op.  Training is an autograd Function whose forward and backward are each one opaque op: the forward saves the AdaLN's tensors (LN(cond) w, the two statistics, [S | B]),
 xa, [a | b], z and the gate logits; the backward runs the gate pass (dz, dg), the squeeze / SwiGLU / expand GEMMs with the SwiGLU backward between them (h is recomputed for the squeeze's
@@ -18,11 +18,10 @@ outputs.  Column sums (the biases, d w) come from per-block partial rows added i
 
 from __future__ import annotations
 
-import warnings
-
 import torch
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._nvcc import build_failed
 from miniworld_engine.kernels.integrations.adaln_sm80 import (
     WIDTHS,
     Branch,
@@ -38,7 +37,6 @@ from miniworld_engine.kernels.integrations.adaln_sm80 import (
 )
 
 BF = torch.bfloat16
-_FAILED = False
 # Paired A100 training measurements: row/cuBLAS wins through 16384 rows;
 # the fused atom kernels win from the next measured size, 24576 rows.
 _ATOM_TRAIN_ROW_THRESHOLD = 16384
@@ -46,21 +44,13 @@ _ATOM_TRAIN_ROW_THRESHOLD = 16384
 
 @torch.compiler.assume_constant_result
 def _loads() -> bool:
-    """Builds (first call) or loads the two sm_80 extensions (the AdaLN rows and the tail's); False, with one warning, when the toolchain fails (the module path then serves)."""
-    global _FAILED
-    if _FAILED:
-        return False
+    """Builds (first call) or loads the two sm_80 extensions (the AdaLN rows and the tail's); a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback)."""
     try:
         _adaln().available()
         _tail().available()
-    except Exception as exc:  # a toolchain problem keeps the module path
-        _FAILED = True
-        warnings.warn(
-            f"sm_80 ConditionedTransition kernels unavailable, keeping the module path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 ConditionedTransition", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

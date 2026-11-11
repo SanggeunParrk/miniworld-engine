@@ -30,13 +30,13 @@ backward the attention side shares one [M, 4C] buffer (see ``_bwd_attention_side
 
 B200 (sm_100a), bf16, the served widths (``cuda/sm100.supported``): every stage on the hand-written sm_100a kernels of
 ``cuda/sm100`` (``_sm100``); the atom count must be a multiple of 128 there -- the block refuses otherwise.
-A build or load failure there warns once and keeps the Triton path.
+A build or load failure there raises ``_nvcc.KernelBuildError`` (never a fallback).
 
 fp32 stages, B200 (sm_100a) at the served widths with S a multiple of 128 (``cuda/sm100/tf32_fwd.supported_tf32``): every stage on
 the hand-written TF32 tensor-core kernels (``tcgen05.mma kind::tf32``) -- ``tf32_fwd.block_fwd_tf32`` (``_tf32``), the window
 attention included (TF32 Q / K / V / P, fp32 softmax) -- for inference. A training forward (``save``) would take them only with a TF32
 backward, and there is none at the moment (``_tf32_bwd_ready``: the first one was removed for giving different gradients on identical
-steps), so fp32 training runs the Triton fp32 path. A build or load failure (warned once) keeps the Triton fp32 path for inference too. The
+steps), so fp32 training runs the Triton fp32 path. A build or load failure raises ``_nvcc.KernelBuildError``. The
 hoisted modulation (``native_h100_mod_fwd`` / ``native_h100_mod_bwd``) is not a kernel of these stages.
 
 fp32 stages elsewhere (q fp32): on sm_90 with TF32 allowed (matmul precision "high" or
@@ -50,7 +50,6 @@ same dW operands. The fp32 backward materialises the dW operands as the bf16 one
 from __future__ import annotations
 
 import functools
-import warnings
 from typing import Any
 
 import torch
@@ -59,6 +58,7 @@ import triton
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.kernels._device import num_sms
+from miniworld_engine.kernels._nvcc import build_failed
 from miniworld_engine.kernels._shape_key import atom_key
 from miniworld_engine.kernels.swa_dit._common import (
     D_ATOM,
@@ -506,14 +506,8 @@ def _cuda(which: str, wanted: bool, device: torch.device) -> Any:
     return extension(which)
 
 
-_SM100_FAILED = False
-
-
 def _sm100(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
     """The sm_100a kernels (``cuda/sm100``) when they serve this bf16 call, else None -> the Triton path."""
-    global _SM100_FAILED
-    if _SM100_FAILED:
-        return None
     from miniworld_engine.kernels.swa_dit.cuda import sm100
 
     if not sm100.supported(q, nhid, half_window, eps):
@@ -524,18 +518,10 @@ def _sm100(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
             if q.device.index is not None
             else torch.cuda.current_device()
         )
-    except Exception as exc:  # a toolchain or driver problem keeps the Triton path
-        _SM100_FAILED = True
-        warnings.warn(
-            f"sm_100a SWA atom DiT kernels unavailable, keeping the portable path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return None
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_100a SWA atom DiT", exc)
+        return None  # reached only while planning (build_failed returns there)
     return sm100
-
-
-_TF32_FAILED = False
 
 
 def _tf32_off() -> bool:
@@ -560,26 +546,19 @@ def _tf32_bwd_ready(device: torch.device) -> bool:
 def _tf32_ready(device: torch.device, save: bool) -> bool:
     """Whether the sm_100a TF32 kernels serve fp32 calls on ``device``: B200, and the forward kernels build and load
     -- with ``save`` (a training forward, whose fp32 saves only the TF32 backward reads) the backward's too. Build and load happen
-    here, once per device; a failure warns once and keeps the Triton fp32 path. A constant to the compiled graph
+    here, once per device; a failure raises ``_nvcc.KernelBuildError``. A constant to the compiled graph
     (``device_constant``): Dynamo bakes the answer in and never traces the build."""
-    global _TF32_FAILED
     if (
-        _TF32_FAILED
-        or device.type != "cuda"
+        device.type != "cuda"
         or _tf32_off()
         or not tf32_fwd.is_b200(device)
     ):
         return False
     try:
         tf32_fwd.kernels_tf32(_device_index(device))
-    except Exception as exc:  # a toolchain or driver problem keeps the Triton path
-        _TF32_FAILED = True
-        warnings.warn(
-            f"sm_100a TF32 SWA atom DiT kernels unavailable, keeping the portable fp32 path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_100a TF32 SWA atom DiT", exc)
+        return False  # reached only while planning (build_failed returns there)
     return not save or _tf32_bwd_ready(device)
 
 

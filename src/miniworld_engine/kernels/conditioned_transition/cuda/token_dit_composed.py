@@ -15,6 +15,7 @@ import functools
 
 import torch
 
+from miniworld_engine.kernels._nvcc import build_failed
 from miniworld_engine.kernels.conditioned_transition.triton import token_dit_kernels as K
 from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import FusedTokenDiT
 
@@ -33,14 +34,8 @@ def _row_kernels(device):
 
             cuda_rows.available()
             return cuda_rows
-        except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton rows
-            import warnings
-
-            warnings.warn(
-                f"token DiT CUDA row kernels unavailable, keeping Triton: {exc!r}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        except Exception as exc:  # a build / load failure is an error, never a fallback
+            build_failed("token DiT CUDA row", exc)
     return K
 
 
@@ -89,14 +84,8 @@ class FusedTokenDiTComposed(FusedTokenDiT):
                         if torch.cuda.get_device_capability(device) == (10, 0)
                         else gemm_swiglu.GemmSwigluSm90(idx)
                     )
-                except Exception as exc:  # noqa: BLE001 -- a failed build keeps cuBLAS + the row pass
-                    import warnings
-
-                    warnings.warn(
-                        f"SwiGLU GEMM unavailable, keeping cuBLAS: {exc!r}",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
+                except Exception as exc:  # a build / load failure is an error, never a fallback
+                    build_failed("SwiGLU GEMM", exc)
             cache[key] = op
         return cache[key]
 
@@ -117,14 +106,8 @@ class FusedTokenDiTComposed(FusedTokenDiT):
                     elif sm90.inference_core_supported(self.dtype, L, D, H, idx):
                         sm90._ext("attn_fwd")
                         core = sm90.gated_inference
-                except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core
-                    import warnings
-
-                    warnings.warn(
-                        f"CUDA token DiT core unavailable, keeping the Triton core: {exc!r}",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
+                except Exception as exc:  # a build / load failure is an error, never a fallback
+                    build_failed("CUDA token DiT core", exc)
             cores[idx] = core
         core = cores[idx]
         multiple = 128 if torch.cuda.get_device_capability(device) == (9, 0) else 8
@@ -154,13 +137,7 @@ class FusedTokenDiTComposed(FusedTokenDiT):
                     nh, dh = self.h, self.d // self.h
                     sm90._ext("attn_tf32", sm90.tf32_fwd_defs(nh, dh))  # build now: a failure keeps Triton
                     core = functools.partial(sm90.tf32_gated_inference, nh=nh, dh=dh)
-                except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core
-                    import warnings
-
-                    warnings.warn(
-                        f"TF32 token DiT core unavailable, keeping the Triton core: {exc!r}",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
+                except Exception as exc:  # a build / load failure is an error, never a fallback
+                    build_failed("TF32 token DiT core", exc)
             cores[idx] = core
         return cores[idx]

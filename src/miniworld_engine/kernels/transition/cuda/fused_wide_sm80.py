@@ -13,14 +13,13 @@ fixed order (no atomics), so a replay is bit-identical.
 """
 
 import functools
-import warnings
 from pathlib import Path
 
 import torch
 
 from ... import _capture
 from ..._compile import opaque
-from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 from . import fused_bwd_sm80, fused_fwd_sm80
 from .fused_sm80 import _is_ampere, _is_fake
 
@@ -48,25 +47,14 @@ def _ext():
     )
 
 
-_BUILD_FAILED = False
-
-
 @torch.compiler.assume_constant_result
 def _loads() -> bool:
-    """The extension builds / loads (cached); a failure warns once and keeps the existing path.  Constant for dynamo: the JIT build is never traced."""
-    global _BUILD_FAILED
-    if _BUILD_FAILED:
-        return False
+    """The extension builds / loads (cached); a failed build / load raises ``_nvcc.KernelBuildError``.  Constant for dynamo: the JIT build is never traced."""
     try:
         _ext()
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"wide sm80 Transition unavailable, keeping the existing path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("wide sm80 Transition", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

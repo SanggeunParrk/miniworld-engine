@@ -26,6 +26,7 @@ import torch
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
+from miniworld_engine.kernels._nvcc import build_failed
 
 WEIGHTS = (
     "attention.to_query.weight",
@@ -331,10 +332,10 @@ def _cuda_rows_available() -> bool:
         from miniworld_engine.kernels.conditioned_transition import cuda as cuda_rows
 
         return cuda_rows.available()
-    except Exception:
-        if torch.cuda.get_device_capability() == (9, 0):
-            raise
-        return False
+    except Exception as exc:  # on the cards the rows are built for, a build / load failure is an error
+        if torch.cuda.get_device_capability() in ((9, 0), (10, 0)):
+            build_failed("token DiT CUDA row", exc)
+        return False  # another card (the rows are built for sm_90a / sm_100a), or planning
 
 
 def _fake(single, cond, pair, mask, weights, qk, eq, ek, heads, extra, variant):

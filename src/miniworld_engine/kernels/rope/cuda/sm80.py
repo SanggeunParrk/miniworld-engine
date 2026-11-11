@@ -13,7 +13,6 @@ everything they refuse keeps the Triton kernels.  Training is an autograd functi
 from __future__ import annotations
 
 import functools
-import warnings
 from pathlib import Path
 
 import torch
@@ -21,14 +20,13 @@ from torch import Tensor
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
+from miniworld_engine.kernels._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 from miniworld_engine.kernels.layernorm.cuda import sm80 as _rows
 
 _dir = Path(__file__).parent / "sm80"
 _common = (
     Path(_rows.__file__).parent / "sm80"
 )  # norm_common.cuh: the helpers shared with the row kernels
-_FAILED = False
 HEAD_DIMS = (32, 64, 128)
 
 
@@ -53,20 +51,12 @@ def ext():
 
 @torch.compiler.assume_constant_result
 def loads() -> bool:
-    """Builds (first call) or loads the extension; False, with one warning, when the toolchain fails (the Triton path then serves).  A process-level constant for ``torch.compile``."""
-    global _FAILED
-    if _FAILED:
-        return False
+    """Builds (first call) or loads the extension; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).  A process-level constant for ``torch.compile``."""
     try:
         ext()
-    except Exception as exc:  # noqa: BLE001 -- any toolchain problem keeps the Triton path
-        _FAILED = True
-        warnings.warn(
-            f"sm_80 RoPE kernels unavailable, keeping the Triton path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 RoPE", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

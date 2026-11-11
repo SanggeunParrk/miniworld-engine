@@ -2,8 +2,8 @@
 relative-position embedding backward (``mpnn_relative_position``).
 
 The three kernel families keep their Triton paths and their PyTorch references; their ``interface.py`` asks this module first and, on an A100 (capability exactly 8.0, the engine backend not forced to
-Triton) for the shapes / dtypes below, runs the CUDA kernels of ``kernels/<family>/cuda/sm80*`` instead of the Triton ones.  A failed extension build warns once and keeps the
-old path.  Every public entry returns what its Triton twin returns and keeps its autograd contract: training is an ``autograd.Function`` whose forward and backward are each one opaque op (``torch.compile``
+Triton) for the shapes / dtypes below, runs the CUDA kernels of ``kernels/<family>/cuda/sm80*`` instead of the Triton ones.  A failed extension build raises ``_nvcc.KernelBuildError``
+(never a fallback).  Every public entry returns what its Triton twin returns and keeps its autograd contract: training is an ``autograd.Function`` whose forward and backward are each one opaque op (``torch.compile``
 (fullgraph) and CUDA-graph capture work; no host sync); parameter gradients come back in the parameters' dtype; reductions are deterministic (no atomics anywhere in these paths).
 
 ``mpnn_message``  (``message_hidden_reduce``): P [..., 48, 128] bf16, W [128, 128] / b [128] bf16 or fp32 under bf16 autocast, mask [..., 48] fp32 -> reduced [..., 128] fp32.  ONE kernel for the
@@ -19,15 +19,13 @@ Numerics and timings: ``docs/gpus/a100/mpnn/mpnn_msg.md``.
 
 from __future__ import annotations
 
-import warnings
-
 import torch
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._nvcc import build_failed
 
-_FAILED: dict[str, bool] = {}
 _WIDTH = 128
 _NEIGHBORS = 48
 
@@ -41,21 +39,14 @@ def _a100(device: torch.device) -> bool:
 
 
 def _load(name: str, module: str) -> bool:
-    """Builds (first call) or loads one family's extension; False, with one warning, when the toolchain fails."""
-    if _FAILED.get(name):
-        return False
+    """Builds (first call) or loads one family's extension; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback)."""
     try:
         import importlib
 
         importlib.import_module(module)._ext()
-    except Exception as exc:  # a toolchain problem keeps the old path
-        _FAILED[name] = True
-        warnings.warn(
-            f"sm_80 MPNN {name} kernels unavailable, keeping the Triton path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=3,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed(f"sm_80 MPNN {name}", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

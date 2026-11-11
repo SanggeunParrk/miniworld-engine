@@ -3,7 +3,7 @@
 ``AdaptiveLayerNorm`` computes ``y = sigmoid(scale) LN(x) + bias`` with ``[scale | bias] = (LN(cond) w) [Ws | Wb]^T + [sb | 0]`` (LN of x without affine, ``w`` the cond
 norm's weight, ``Wb`` has no bias).  Contract: the engine's kernel backend (implementation TRITON or MINIWORLD) with the engine backend not forced to Triton, sm_80, bf16 or
 fp32 operands (the module's compute dtype; fp32 runs on TF32 tensor cores), ``d_hidden`` and ``d_cond`` each one of 128 / 384 / 768 / 1024, ``cond`` with the leading dims of ``x`` (one
-conditioning per row) or, with no gradient, one conditioning shared by the samples of ``x`` (the first dim expanded: stride 0, or size 1).  A failed extension build warns once and keeps the module's path.
+conditioning per row) or, with no gradient, one conditioning shared by the samples of ``x`` (the first dim expanded: stride 0, or size 1).  A failed extension build raises (``_nvcc.KernelBuildError``), never a fallback.
 
 Inference (one opaque op): ``cond_ln`` (aff = LN(cond) w, one pass over the cond rows -- the L rows of a shared conditioning) -> one cuBLAS GEMM [S | B] = aff [Ws | Wb]^T (the weights
 packed once per parameter version) -> ``adaln_epi`` (LN(x), sigmoid, the gate and the sum in one pass; row r reads table row r % period).
@@ -17,40 +17,31 @@ Numerics and timings: ``docs/gpus/a100/adaptive_layernorm/adaptive_layernorm.md`
 from __future__ import annotations
 
 import contextlib
-import warnings
 import weakref
 
 import torch
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._nvcc import build_failed
 
 WIDTHS = (128, 384, 768, 1024)
 BF = torch.bfloat16
 _packs: dict = {}
-_FAILED = False
 #: fewest rows of fp32 inference at the atom width (d = dc = 128) the sm_80 path serves (the A100 port's verified default)
 FP32_ATOM_MIN_ROWS = 8192
 
 
 @torch.compiler.assume_constant_result
 def _loads() -> bool:
-    """Builds (first call) or loads the sm_80 extension; False, with one warning, when the toolchain fails (the module path then serves).
+    """Builds (first call) or loads the sm_80 extension; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).
 
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
-    global _FAILED
-    if _FAILED:
-        return False
     try:
         _kernels().available()
-    except Exception as exc:  # a toolchain problem keeps the module path
-        _FAILED = True
-        warnings.warn(
-            f"sm_80 AdaLN kernels unavailable, keeping the module path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 AdaLN", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

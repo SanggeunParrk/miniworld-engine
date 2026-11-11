@@ -25,13 +25,12 @@ summed in a fixed order (no atomics), so a replay is bit-identical.
 
 import functools
 import hashlib
-import warnings
 from pathlib import Path
 
 import torch
 
 from ..._compile import opaque
-from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -81,26 +80,17 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     return rows > 0 and rows % ROWS == 0
 
 
-_BUILD_FAILED = False
-
-
 def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """``supported()`` plus a successful (cached) build; a build failure warns once and keeps the existing path."""
-    global _BUILD_FAILED
-    if _BUILD_FAILED or not supported(x, wa, ws):
+    """``supported()`` plus a successful (cached) build; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback)."""
+    if not supported(x, wa, ws):
         return False
     if torch.compiler.is_compiling() or _is_fake(x, wa, ws):
         return True
     try:
         _ext()
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"fused sm80 Transition unavailable, keeping the existing path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("fused sm80 Transition", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

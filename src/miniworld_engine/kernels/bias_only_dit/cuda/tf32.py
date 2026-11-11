@@ -18,15 +18,14 @@
                            release, TMA-fed GEMM)
 
 General GEMMs are cuBLAS on TF32 tensor cores (``tf32_gemms``: forced whatever the caller's allow_tf32, restored after), as the
-token DiT's fp32 path. The cubins and the extension build on first use (``tf32_ready``), never at import; a failed build warns
-once and the callers keep the module's PyTorch path.
+token DiT's fp32 path. The cubins and the extension build on first use (``tf32_ready``), never at import; a failed build
+raises ``_nvcc.KernelBuildError`` (never a fallback).
 """
 
 from __future__ import annotations
 
 import functools
 import os
-import warnings
 from pathlib import Path
 
 import torch
@@ -34,6 +33,7 @@ import torch
 from miniworld_engine.kernels._device import num_sms
 
 from miniworld_engine.kernels._compile import device_constant
+from miniworld_engine.kernels._nvcc import build_failed
 from miniworld_engine.kernels._tf32 import tf32_grid, tf32_matmul
 from miniworld_engine.kernels.bias_only_dit.cuda import (
     LAYOUTS,
@@ -312,32 +312,21 @@ class GemmGluTF32:
         return out
 
 
-_GLU_FAILED: set = set()
-
-
 def glu_op(device_index: int, bwd: bool):
-    """The SwiGLU GEMM (``GemmGluTF32``) for the training step, or None: switched off or its build failed (warned once): cuBLAS + the
-    fp32 rows. Backward on by default (settings.bias_only_dit_tf32_glu_bwd=0: off); forward OFF by default
+    """The SwiGLU GEMM (``GemmGluTF32``) for the training step, or None when switched off (cuBLAS + the
+    fp32 rows); a failed build raises ``_nvcc.KernelBuildError``. Backward on by default (settings.bias_only_dit_tf32_glu_bwd=0: off); forward OFF by default
     (settings.bias_only_dit_tf32_glu=1: on) -- its GEMM runs at ~530 TF/s against cuBLAS's ~680, which eats the SwiGLU pass it
     removes (L768 per launch 329 against 254 + 99 us; whole step not better)."""
     if not bwd:  # the forward GLU kernel is off (old settings.bias_only_dit_tf32_glu default; the backward one is on)
         return None
     key = (device_index, bwd)
-    if key in _GLU_FAILED:
-        return None
     op = _GLU_OPS.get(key)
     if op is None:
         try:
             op = _GLU_OPS[key] = GemmGluTF32(device_index, bwd)
-        except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps cuBLAS + the rows
-            _GLU_FAILED.add(key)
-            warnings.warn(
-                f"bias-only DiT fp32 SwiGLU GEMM ({'backward' if bwd else 'forward'}) unavailable, keeping cuBLAS + the "
-                f"fp32 rows: {exc!r}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            return None
+        except Exception as exc:  # a build / load failure is an error, never a fallback
+            build_failed(f"bias-only DiT fp32 SwiGLU GEMM ({'backward' if bwd else 'forward'})", exc)
+            return None  # reached only while planning (build_failed returns there)
     return op
 
 
@@ -361,9 +350,6 @@ def dpb32_pair(L: int, nh: int = 16, nsm: int = 148) -> bool:
     if L % 256:
         return False
     return nh * (L // 256) * (L // 256) >= nsm // 2
-
-
-_DPBX2_FAILED: set = set()
 
 
 class Dpb32:
@@ -458,19 +444,13 @@ class Dpb32:
         )
         pair = (
             dpb32_pair(L, self.nh)
-            and (self.device_index, self.nh, self.dh) not in _DPBX2_FAILED
         )
         if pair and self._pair_k is None:
             try:
                 self._pair_k = self.pair_kernel()
-            except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps dpb32_sm100.cu
-                _DPBX2_FAILED.add((self.device_index, self.nh, self.dh))
-                warnings.warn(
-                    f"bias-only DiT fp32 CTA-pair bias gradient (dpbx2_sm100 TF32) unavailable, keeping dpb32_sm100: {exc!r}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                pair = False
+            except Exception as exc:  # a build / load failure is an error, never a fallback
+                build_failed("bias-only DiT fp32 CTA-pair bias gradient (dpbx2_sm100 TF32)", exc)
+                pair = False  # reached only while planning (build_failed returns there)
         self.last = "pair" if pair else "single"
         key = (
             pair,
@@ -1007,18 +987,14 @@ def round_tf32(t: torch.Tensor) -> torch.Tensor:
     return tf32_grid(t.detach().float().contiguous())
 
 
-_INF3_FAILED = False
 _INF3_READY: set = set()
 
 
 @device_constant
 def inf3_ready(index: int, nh: int, dh: int) -> bool:
     """Build and load the three-kernel step's cubins for (nh, dh) on device ``index`` once (both front clusters, the tail,
-    a representative PDL core); False (after one warning) when a toolchain or driver problem keeps the cuBLAS + rows step.
+    a representative PDL core); a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).
     A constant to ``torch.compile``."""
-    global _INF3_FAILED
-    if _INF3_FAILED:
-        return False
     key = (index, nh, dh)
     if key in _INF3_READY:
         return True
@@ -1031,20 +1007,14 @@ def inf3_ready(index: int, nh: int, dh: int) -> bool:
         for cl in TAIL_CLUSTERS:
             tail.kernel(cl)
         PvGateCoreTF32(index, nh, dh, pdl=True).kernel(1, True)
-    except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps the default fp32 step
-        _INF3_FAILED = True
-        warnings.warn(
-            f"bias-only DiT three-kernel fp32 inference step unavailable, keeping the cuBLAS + rows step: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("bias-only DiT three-kernel fp32 inference step", exc)
+        return False  # reached only while planning (build_failed returns there)
     _INF3_READY.add(key)
     return True
 
 
 # --------------------------------------------------------------------------------------------------- readiness
-_FAILED = False
 _READY: set = set()
 
 
@@ -1052,11 +1022,8 @@ _READY: set = set()
 def tf32_ready(index: int, nh: int, dh: int, train: bool) -> bool:
     """Build and load the fp32 path's kernels for (nh, dh) on device ``index`` once -- the fp32 row extension, the bf16 row
     extensions whose dtype-generic passes the fp32 path shares, a representative attention-core cubin (and, for training, the
-    ungated core and the bias gradient) -- False (after one warning) when a toolchain or driver problem keeps the module path.
+    ungated core and the bias gradient) -- a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).
     settings.bias_only_dit_tf32=0 turns the fp32 path off. A constant to ``torch.compile``."""
-    global _FAILED
-    if _FAILED:
-        return False
     key = (index, nh, dh, train)
     if key in _READY:
         return True
@@ -1074,14 +1041,9 @@ def tf32_ready(index: int, nh: int, dh: int, train: bool) -> bool:
         if train:
             core.kernel(1, False)
             Dpb32(index, nh, dh).kernel()
-    except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps the module path
-        _FAILED = True
-        warnings.warn(
-            f"bias-only DiT fp32 (TF32) kernels unavailable, keeping the module path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("bias-only DiT fp32 (TF32)", exc)
+        return False  # reached only while planning (build_failed returns there)
     _READY.add(key)
     return True
 

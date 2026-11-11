@@ -16,6 +16,7 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._nvcc import build_failed
 
 HEAD_DIMS = (32, 48, 64)
 
@@ -61,30 +62,17 @@ def wanted(v: torch.Tensor, bias: torch.Tensor) -> bool:
 
 @torch.compiler.assume_constant_result
 def _loads() -> bool:
-    """Builds (first call) or loads the extensions; False, with one warning, when the toolchain fails (the Triton path then serves).  A process-level constant for ``torch.compile``."""
-    global _FAILED
-    if _FAILED:
-        return False
+    """Builds (first call) or loads the extensions; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).  A process-level constant for ``torch.compile``."""
     try:
         from miniworld_engine.kernels.bias_only_dit import cuda as rows
         from miniworld_engine.kernels.bias_only_dit.cuda import sm80 as core
 
         rows._ext()
         core._ext()
-    except Exception as exc:  # a toolchain problem keeps the Triton path
-        import warnings
-
-        _FAILED = True
-        warnings.warn(
-            f"sm_80 bias-only attention kernels unavailable, keeping the Triton path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 bias-only attention", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
-
-
-_FAILED = False
 
 
 def _fwd_fake(v, bias):

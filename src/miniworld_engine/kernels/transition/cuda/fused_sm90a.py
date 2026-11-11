@@ -25,7 +25,6 @@ are the same LayerNorm statistics, the intermediate roundings happen at the same
 
 import functools
 import itertools
-import warnings
 from pathlib import Path
 
 import torch
@@ -35,7 +34,7 @@ from miniworld_engine.kernels._device import num_sms
 from ..._launch_config import choose
 from ..._compile import opaque
 from ._weights import transposed_contiguous
-from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from ..._nvcc import build_failed, ensure_cuda_home, gencodes, host_flags, load_extension
 
 _dir = Path(__file__).parent
 
@@ -222,18 +221,13 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     return rows % ROWS == 0
 
 
-_BUILD_FAILED = False
-
-
 def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """``supported()`` plus a successful build, both cached.
 
-    A JIT build needs an nvcc that matches torch. Failing to find one is an environment
-    problem, not a dispatch bug, so it warns once and keeps the existing path rather than
-    taking a training run down.
+    A JIT build needs an nvcc that matches torch. A build / load failure raises ``_nvcc.KernelBuildError``: a
+    silent switch to another path would measure and serve that path instead.
     """
-    global _BUILD_FAILED
-    if _BUILD_FAILED or not supported(x, wa, ws):
+    if not supported(x, wa, ws):
         return False
     # FakeTensor dispatch records shapes only; it must not invoke nvcc or
     # wait for another process's extension lock. Launch wrappers have fakes.
@@ -245,14 +239,9 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         # Build the variant this call will actually use, so inference never pays for the
         # training forward's build.
         _ext_for(x, torch.is_grad_enabled(), wa.shape[0] // 128)
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"fused sm90a Transition unavailable, keeping the existing path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("fused sm90a Transition", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

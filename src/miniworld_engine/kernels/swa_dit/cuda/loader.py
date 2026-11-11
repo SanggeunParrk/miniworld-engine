@@ -14,8 +14,8 @@ Moved from team-gm ``swa_fused_triton._cuda_ext`` (commit 14f2c73). Same sources
   server's ctime, not an NFS create verifier) and bounds the wait on a live one;
 * with ``kernels._nvcc.host_flags()``, so nvcc is driven by a host g++ it can parse.
 
-``extension(which)`` never raises: a card that is not sm_90, a missing toolkit or a failed build all return None and the
-caller takes the Triton kernel. The reason is kept in ``ERRORS[which]``.
+``extension(which)`` returns None on a card that is not sm_90 (the caller takes the Triton kernel; the reason is kept in
+``ERRORS[which]``); a failed build or load on sm_90 raises ``_nvcc.KernelBuildError`` -- never a silent fallback.
 
 The bf16 kernels (``swa_qkvg_fwd.cu``, ``swa_ffn_fwd.cu``, ``swa_ffn_bwd.cu``) serve d_atom 128, 4 heads x 32,
 SwiGLU hidden 256, bf16 operands with fp32 accumulate and an fp32 [B*S, 768] modulation.
@@ -77,21 +77,25 @@ def is_sm90(device: torch.device | None = None) -> bool:
 
 
 def extension(which: str) -> Any:
-    """The built extension for stage ``which`` ("qkvg", "fwd", "bwd" or "fp32"), or None. Never raises.
+    """The built extension for stage ``which`` ("qkvg", "fwd", "bwd" or "fp32"), or None on a card that is not sm_90.
 
-    Built once per process on first use; a failed build is not retried (``ERRORS`` says why).
+    Built once per process on first use; a failed build or load raises ``_nvcc.KernelBuildError``.
     """
     if which in _EXT:
         return _EXT[which]
-    _EXT[which] = None
+    if not is_sm90():
+        ERRORS[which] = "not an sm_90 device"
+        _EXT[which] = None
+        return None
     try:
-        if not is_sm90():
-            ERRORS[which] = "not an sm_90 device"
-            return None
-        _EXT[which] = _build(which)
-    except Exception as ex:  # noqa: BLE001 -- fall back to Triton
-        ERRORS[which] = repr(ex)
-    return _EXT[which]
+        ext = _build(which)
+    except Exception as ex:  # a build / load failure is an error, never a fallback
+        from miniworld_engine.kernels._nvcc import build_failed
+
+        build_failed(f"sm_90a SWA atom DiT extension {which!r}", ex)
+        return None  # reached only while planning (build_failed returns there)
+    _EXT[which] = ext
+    return ext
 
 
 def _build(which: str) -> Any:

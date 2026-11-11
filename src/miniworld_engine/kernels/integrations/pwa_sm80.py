@@ -16,15 +16,13 @@ Numerics and timings: ``docs/gpus/a100/msa_pair_weighted_averaging/``.
 
 from __future__ import annotations
 
-import warnings
-
 import torch
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._nvcc import build_failed
 from miniworld_engine.kernels.integrations import pwa_wide_sm80
 
-_FAILED = False
 #: Opt-in experiments of the port, off: the searched cuBLASLt algorithms (``sm80.lt_bcast`` / ``lt_dw``) and the early-dw kernel.
 _LT = False
 _DW_EARLY = False
@@ -32,22 +30,14 @@ _DW_EARLY = False
 
 @torch.compiler.assume_constant_result
 def _loads() -> bool:
-    """Builds (first call) or loads the sm_80 extension; False, with one warning, when the toolchain fails (the module path then serves).
+    """Builds (first call) or loads the sm_80 extension; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).
 
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
-    global _FAILED
-    if _FAILED:
-        return False
     try:
         _sm80().ext()
-    except Exception as exc:  # a toolchain problem keeps the module path
-        _FAILED = True
-        warnings.warn(
-            f"sm_80 MSAPairWeightedAveraging kernels unavailable, keeping the module path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 MSAPairWeightedAveraging", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

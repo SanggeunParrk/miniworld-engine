@@ -22,7 +22,6 @@ Ampere-only and shape-gated by construction: ``supports()`` is the whole gate; e
 
 import functools
 import math
-import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import NamedTuple
@@ -31,7 +30,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from ..._compile import opaque
-from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 from . import sm80 as _core
 from . import sm80_core2 as _core2
 
@@ -110,48 +109,29 @@ def _rows():
     )
 
 
-_BUILD_FAILED = False
-
-
 @torch.compiler.assume_constant_result
 def _loads() -> bool:
-    """Builds (first call) or loads the two extensions (the row / fused kernels and the attention core); False, with one warning, when the toolchain fails (the Triton path then serves).
+    """Builds (first call) or loads the two extensions (the row / fused kernels and the attention core); a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).
 
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
-    global _BUILD_FAILED
-    if _BUILD_FAILED:
-        return False
     try:
         _rows()
         _core._ext()
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"sm80 triangle attention (all widths) unavailable, keeping the existing path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm80 triangle attention (all widths)", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 
 @torch.compiler.assume_constant_result
 def _loads_native() -> bool:
     """``_loads()`` for the native 16-channel-head geometry: the row / fused kernels and the generalised core (``sm80_core2``) instead of the d_pair-128 core."""
-    global _BUILD_FAILED
-    if _BUILD_FAILED:
-        return False
     try:
         _rows()
         _core2.ext()
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"sm80 triangle attention (16-channel heads) unavailable, keeping the existing path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm80 triangle attention (16-channel heads)", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

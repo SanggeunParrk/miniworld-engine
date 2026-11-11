@@ -22,14 +22,13 @@ plane), L a multiple of 16.
 """
 
 import functools
-import warnings
 from pathlib import Path
 
 import torch
 from torch.autograd.function import once_differentiable
 
 from ..._compile import opaque
-from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -96,28 +95,19 @@ def supports(
     )
 
 
-_BUILD_FAILED = False
-
-
 def available(
     pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None
 ) -> bool:
-    """``supports()`` plus a successful (cached) build; a build failure warns once and keeps the existing path."""
-    global _BUILD_FAILED
-    if _BUILD_FAILED or not supports(pair, d_hidden, mask):
+    """``supports()`` plus a successful (cached) build; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback)."""
+    if not supports(pair, d_hidden, mask):
         return False
     if torch.compiler.is_compiling() or _is_fake(pair):
         return True
     try:
         _ext()
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"sm80 TriMul unavailable, keeping the existing path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm80 TriMul", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

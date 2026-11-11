@@ -51,6 +51,7 @@ import torch
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._device import num_sms
+from miniworld_engine.kernels._nvcc import build_failed
 from miniworld_engine.kernels._tf32 import tf32_matmul as _tf32
 
 D, DC, DP, H, DH = 768, 384, 128, 16, 48  # the default layout; serves() takes LAYOUTS
@@ -584,14 +585,8 @@ def _swiglu_gemm(xt, wab):
             _GSW[idx] = gemm_swiglu.GemmSwiglu(
                 idx, K=wab.shape[1], H=wab.shape[0] // 2, save_ab=True
             )
-        except Exception as exc:  # a failed build keeps cuBLAS + the row pass
-            import warnings
-
-            warnings.warn(
-                f"sm100 SwiGLU GEMM unavailable, keeping cuBLAS: {exc!r}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        except Exception as exc:  # a build / load failure is an error, never a fallback
+            build_failed("sm100 SwiGLU GEMM", exc)
             _GSW[idx] = None
     return _GSW[idx]
 

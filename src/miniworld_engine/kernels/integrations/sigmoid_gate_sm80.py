@@ -2,19 +2,16 @@
 modules that gate an attention output (``SWA3DRoPEAttention``: the output gate before ``out_proj``).
 
 ``serves()`` is the whole gate: A100 (sm_80), the engine's kernel backend not forced to Triton, ``gate`` and ``x`` of one shape and one dtype (bf16 or fp32), a last dimension
-that is a multiple of 8. A failed extension build warns once and keeps
-the old path. One autograd Function whose forward and backward are each one opaque op (``kernels/_compile.opaque``): no Triton, no Inductor kernel, no eager chain.
+that is a multiple of 8. A failed extension build raises ``_nvcc.KernelBuildError``
+(never a fallback). One autograd Function whose forward and backward are each one opaque op (``kernels/_compile.opaque``): no Triton, no Inductor kernel, no eager chain.
 """
 
 from __future__ import annotations
 
-import warnings
-
 import torch
 
 from miniworld_engine.kernels._compile import opaque
-
-_FAILED = False
+from miniworld_engine.kernels._nvcc import build_failed
 
 
 def _sm80():
@@ -25,21 +22,13 @@ def _sm80():
 
 @torch.compiler.assume_constant_result
 def _loads() -> bool:
-    """Builds (first call) or loads the gate extension; False, with one warning, when the toolchain fails (the caller then keeps its old path).  A process-level constant, so
+    """Builds (first call) or loads the gate extension; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).  A process-level constant, so
     ``torch.compile`` evaluates it once at trace time."""
-    global _FAILED
-    if _FAILED:
-        return False
     try:
         _sm80()._glue_ext()
-    except Exception as exc:  # a toolchain problem keeps the old path
-        _FAILED = True
-        warnings.warn(
-            f"sm_80 sigmoid-gate kernels unavailable, keeping the Triton gate: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 sigmoid-gate", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

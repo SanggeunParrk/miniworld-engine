@@ -11,17 +11,17 @@
                     step's output)
   pv_gate_inf.cu    K2 with -DPDL_INF (``PvGateCore(pdl=True)``)
 
-The cubins build on first use (``inf3_bf16_ready``); a failed build warns once and the runner keeps the 12-launch bf16 step.
+The cubins build on first use (``inf3_bf16_ready``); a failed build raises ``_nvcc.KernelBuildError``.
 """
 
 from __future__ import annotations
 
 import os
-import warnings
 
 import torch
 
 from miniworld_engine.kernels._compile import device_constant
+from miniworld_engine.kernels._nvcc import build_failed
 from miniworld_engine.kernels.bias_only_dit.cuda import PTR, _descriptors, _Runs, _dir
 
 TAIL_CLUSTERS = (8, 6)
@@ -407,18 +407,14 @@ class TailBF16:
         return out
 
 
-_FAILED = False
 _READY: set = set()
 
 
 @device_constant
 def inf3_bf16_ready(index: int, nh: int, dh: int) -> bool:
     """Build and load the bf16 step's cubins for (nh, dh) on device ``index`` once (the fronts, the tails and the pair tail for x / out
-    fp32 and bf16, a PDL core); False (after one warning) when a toolchain or driver problem keeps the 12-launch bf16 step. A
+    fp32 and bf16, a PDL core); a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback). A
     constant to ``torch.compile``."""
-    global _FAILED
-    if _FAILED:
-        return False
     key = (index, nh, dh)
     if key in _READY:
         return True
@@ -440,14 +436,9 @@ def inf3_bf16_ready(index: int, nh: int, dh: int) -> bool:
         C.PvGateCore(index, nh=nh, dh=dh, pdl=True, p_early=True).kernel(
             1, True
         )  # the step's core (P_EARLY unless switched off)
-    except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps the 12-launch bf16 step
-        _FAILED = True
-        warnings.warn(
-            f"bias-only DiT bf16 three-kernel inference step unavailable, keeping the 12-launch step: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("bias-only DiT bf16 three-kernel inference step", exc)
+        return False  # reached only while planning (build_failed returns there)
     _READY.add(key)
     return True
 

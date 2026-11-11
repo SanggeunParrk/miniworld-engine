@@ -228,13 +228,12 @@ def _lt():
 
 @functools.lru_cache(maxsize=1)
 def _front():
-    """LN + [Wq; Wk; Wv; Wg; Wb] + head-major scaled / masked bias in one kernel (d_pair 256 inference at short L); None without CUTLASS."""
-    from miniworld_engine.kernels._nvcc import CutlassMissing, cutlass_include
+    """LN + [Wq; Wk; Wv; Wg; Wb] + head-major scaled / masked bias in one kernel (d_pair 256 inference at short L). Prebuilt or cached: no
+    CUTLASS headers needed; a build without them raises (``_nvcc.CutlassMissing``) -- never a silent switch to the unfused front, whose
+    numerics differ."""
+    from miniworld_engine.kernels._nvcc import cutlass_include
 
-    try:  # prebuilt or cached: no CUTLASS headers needed; a build without them -> None, as before
-        return _front_ext(cutlass_include())
-    except CutlassMissing:
-        return None
+    return _front_ext(cutlass_include())
 
 
 def _front_ext(cutlass_inc):

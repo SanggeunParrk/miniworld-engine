@@ -40,13 +40,12 @@ Everything else keeps the Triton path, and so do fake tensors and torch.compile 
 from __future__ import annotations
 
 import functools
-import warnings
 from pathlib import Path
 
 import torch
 
 from miniworld_engine.kernels._device import num_sms
-from miniworld_engine.kernels._nvcc import engine_jit_root
+from miniworld_engine.kernels._nvcc import build_failed, engine_jit_root
 
 H, D = 16, 48
 _dir = Path(__file__).parent
@@ -120,18 +119,14 @@ def supported(
     return _is_blackwell(_index(q))
 
 
-_BUILD_FAILED = False
-
-
 def available(
     q: torch.Tensor,
     bias: torch.Tensor,
     mask: torch.Tensor | None = None,
     bias_head_major: bool = False,
 ) -> bool:
-    """``supported()`` plus successful builds; a build failure warns once and keeps the Triton path."""
-    global _BUILD_FAILED
-    if _BUILD_FAILED or not supported(q, bias, mask, bias_head_major):
+    """``supported()`` plus successful builds; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback)."""
+    if not supported(q, bias, mask, bias_head_major):
         return False
     from torch._subclasses.fake_tensor import FakeTensor
 
@@ -148,14 +143,9 @@ def available(
             ("attn_dkv", "augattn_dkv_sm100"),
         ):
             _sm100_kernel(stem, func, _index(q))
-    except Exception as exc:  # noqa: BLE001
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"sm100 bf16 augmented attention unavailable, keeping the portable path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm100 bf16 augmented attention", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

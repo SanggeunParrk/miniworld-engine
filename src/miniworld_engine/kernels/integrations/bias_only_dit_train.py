@@ -19,7 +19,7 @@ cuBLAS's); the fp32 rows (``bias_only_dit_f32_rows.cu``); the pair bias
 and its backward on TF32 mma.sync (``pair_bias_tc`` / ``pair_bias_bwd_tc``; one TF32 product,
 ``_pair_terms``); the weight pack in one launch; the attention core ``pv_gate_tf32`` (forward and dV) and the bias gradient ``dpb32_sm100``
 (the fp32 port of the bf16 ``dpb_sm100``; it replaces ``dpb_tf32.cu``, removed for non-repeatable results) on kind::tf32 MMAs
-(``kernels/bias_only_dit/cuda/tf32.py``). A failed build of those warns once and keeps the module path.
+(``kernels/bias_only_dit/cuda/tf32.py``). A failed build of those raises ``_nvcc.KernelBuildError``.
 
 bf16 step (2026-10-08; in-process node A/B, A = 48, 16 x 48, L384 / L768): the weight pack is ONE launch (``pack16`` of the training
 rows: 49.7 / 57.2 -> 9.6 / 11.2 us); the dxt / dxa GEMMs write into
@@ -52,12 +52,12 @@ other small gradients. ln_pair / to_bias get their gradients from the hoist.
 from __future__ import annotations
 
 import math
-import warnings
 
 import torch
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._nvcc import build_failed
 from miniworld_engine.kernels.integrations.bias_only_dit_hoist import SINK_ATTR
 
 D, DP = 768, 128
@@ -1023,26 +1023,15 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
     ]
 
 
-_PVDPB_FAILED: set = set()
-
-
 def _pvdpb(dev, H, DA, *args):
-    """bo_pvdpb.cu's launch; False (after one warning per layout) when its build fails, and the two launches run instead."""
-    idx = dev.index if dev.index is not None else torch.cuda.current_device()
-    if (idx, H, DA) in _PVDPB_FAILED:
-        return False
+    """bo_pvdpb.cu's launch; False where the bias gradient runs on CTA pairs; a failed build raises ``_nvcc.KernelBuildError``."""
     try:
         return _op("pvdpb", dev, H, DA // H)(
             *args
         )  # False where the bias gradient runs on CTA pairs (dpbx2)
-    except Exception as exc:  # a toolchain or driver problem keeps pv dV + dpb
-        _PVDPB_FAILED.add((idx, H, DA))
-        warnings.warn(
-            f"bias-only DiT pv dV + dbias launch (bo_pvdpb) unavailable, keeping the two launches: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("bias-only DiT pv dV + dbias launch (bo_pvdpb)", exc)
+        return False  # reached only while planning (build_failed returns there)
 
 
 def _bwd_fused_step(

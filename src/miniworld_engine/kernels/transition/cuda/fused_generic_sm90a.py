@@ -18,13 +18,12 @@ persistent producer-warpgroup (TMA) + two-consumer-warpgroup (wgmma) GEMM skelet
 """
 
 import functools
-import warnings
 from pathlib import Path
 
 import torch
 
 from ..._compile import opaque
-from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from ..._nvcc import build_failed, ensure_cuda_home, gencodes, host_flags, load_extension
 
 _dir = Path(__file__).parent / "generic_sm90a"
 _REVISION = "v31"
@@ -131,9 +130,6 @@ def prefers_generic(x: torch.Tensor, training: bool, n: int = 4) -> bool:
     return rows <= limits[1 if training else 0]
 
 
-_BUILD_FAILED = False
-
-
 def _is_fake(*tensors) -> bool:
     from torch._subclasses.fake_tensor import FakeTensor
 
@@ -141,23 +137,17 @@ def _is_fake(*tensors) -> bool:
 
 
 def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """``supported()`` plus a successful build (cached).  A build failure is an environment problem: it warns once and keeps the
-    existing path."""
-    global _BUILD_FAILED
-    if _BUILD_FAILED or not supported(x, wa, ws):
+    """``supported()`` plus a successful build (cached).  A build / load failure raises ``_nvcc.KernelBuildError``
+    (never a fallback)."""
+    if not supported(x, wa, ws):
         return False
     if torch.compiler.is_compiling() or _is_fake(x, wa, ws):
         return True
     try:
         _ext()
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"generic sm90a Transition unavailable, keeping the existing path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("generic sm90a Transition", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

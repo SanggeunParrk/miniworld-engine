@@ -478,6 +478,26 @@ class Planned(RuntimeError):
     """A planned (not built) artifact was used."""
 
 
+class KernelBuildError(RuntimeError):
+    """A kernel the dispatch decided to use failed to build or load (nvcc / ptxas / the torch extension build / the import or the
+    cubin load). An error, never a reason to take another path: a fallback here silently measured and served the slower path
+    for days (the A100 fused Transition, 2026-11). The original exception is the ``__cause__``."""
+
+
+def build_failed(what: str, exc: BaseException) -> None:
+    """Raise :class:`KernelBuildError` naming ``what`` (the extension / kernel family), chained to ``exc``.
+
+    The one exception is planning (``planning()``: the prebuilder's ``--plan`` / ``--list``): there a load returns a stand-in that
+    raises :class:`Planned` when used, so a caller probing its build sees an exception that is not a failure; this returns and the
+    caller keeps its old answer, so a plan is exactly what it was. Support decisions (shape / dtype / arch / a missing toolkit
+    decided before any build) are not build failures and never come here."""
+    if _PLAN is not None:
+        return
+    if isinstance(exc, KernelBuildError):
+        raise exc
+    raise KernelBuildError(f"{what}: kernel build / load failed: {type(exc).__name__}: {exc}") from exc
+
+
 class _Stub:
     def __init__(self, name: str):
         self._name = name

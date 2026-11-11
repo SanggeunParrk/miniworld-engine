@@ -27,6 +27,10 @@ those paths into ``miniworld_engine/_prebuilt/`` (``_nvcc.PACKAGED_ROOT``, same 
 **Parallel.** A process pool of builds (each torch extension with ``MAX_JOBS=1``). The worker count defaults to
 min(CPUs, memory / :data:`PEAK_GB`); PEAK_GB is the measured peak RSS of the heaviest single build plus margin.
 
+**Exit status.** A build exits 1 when any planned artifact failed to build, a recipe failed to plan, or a planned artifact is still absent
+(each failure is listed again at the end, then ``PREBUILD FAILED``); 0 only when every planned artifact is present. A failed artifact is
+an error, never a skip: the runtime raises ``_nvcc.KernelBuildError`` on a kernel that does not build.
+
 Triton kernels are out of scope (they JIT in seconds). The other tuning candidates of the native ``choose`` sites (only the defaults and
 the tables' entries are planned here) are built by ``_prebuild_cuda`` (opt-in, for the pretuner).
 """
@@ -604,7 +608,18 @@ def main(argv: list[str] | None = None) -> int:
     total = sum(v[0] for v in results.values())
     log(f"done: {len(results) - len(failed)} built, {len(failed)} failed, {left} of {len(specs)} still absent; "
         f"{total:.0f} s of builds in {time.monotonic() - started:.0f} s; index {index}")
-    return 1 if failed or problems or left else 0
+    if failed or problems or left:
+        # repeated at the end, where a long log is read: a planned artifact that does not build is an error (a served call would raise
+        # _nvcc.KernelBuildError on it), never something to fall back from
+        names = {s.key: s.name for s in specs}
+        for key, (_, err) in failed.items():
+            log(f"FAILED {names.get(key, key[:8])}  [{key[:8]}]\n    {_head(err or '')}")
+        for p in problems:
+            log(f"FAILED (plan) {p}")
+        log(f"PREBUILD FAILED for {t.arch}: {len(failed)} artifacts failed to build, {len(problems)} plan problems, "
+            f"{left} of {len(specs)} planned artifacts absent; exit 1")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

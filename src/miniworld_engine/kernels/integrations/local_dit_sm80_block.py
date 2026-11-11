@@ -19,7 +19,6 @@ scoped to a CUDA-graph capture; gradients come back in the parameter's dtype.
 
 from __future__ import annotations
 
-import warnings
 import weakref
 from types import SimpleNamespace
 
@@ -28,6 +27,7 @@ from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
+from miniworld_engine.kernels._nvcc import build_failed
 from miniworld_engine.kernels.integrations.local_dit import (
     CROSS_WEIGHTS,
     KEYS,
@@ -39,7 +39,6 @@ BF = torch.bfloat16
 F32 = torch.float32
 EPS = 1e-5
 DS_, DC_, DP_, NH_ = 128, 128, 16, 4   # the atom widths the kernels are built for
-_FAILED = False
 _GAMMA, _WBIAS = (
     WEIGHTS.index("attention.ln_pair.weight"),
     WEIGHTS.index("attention.to_bias.weight"),
@@ -48,10 +47,7 @@ _GAMMA, _WBIAS = (
 
 @device_constant
 def _ready(index: int) -> bool:
-    """Build and load the row kernels and the local attention kernels on ``index`` once; False (after one warning) when a toolchain or driver problem keeps the previous path."""
-    global _FAILED
-    if _FAILED:
-        return False
+    """Build and load the row kernels and the local attention kernels on ``index`` once; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback)."""
     try:
         from miniworld_engine.kernels.augmented_attention.cuda import (
             sm80_atom_local,
@@ -60,20 +56,13 @@ def _ready(index: int) -> bool:
 
         sm80_atom_rows.ready()
         sm80_atom_local.ready(index)
-    except Exception as exc:  # a toolchain or driver problem keeps the previous path
-        _FAILED = True
-        warnings.warn(
-            f"sm_80 local atom DiT row kernels unavailable, keeping the previous path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 local atom DiT row", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 
 def serves(module, single, cond, pair, mask) -> bool:
-    if _FAILED:
-        return False
     a, tr = module.attention, module.transition
     if a.use_qk_norm:
         return False

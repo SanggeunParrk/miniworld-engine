@@ -20,12 +20,12 @@ The fp32 path (TF32 tensor cores: ``pv_gate_tf32.cu``, ``dpb32_sm100.cu``, ``gem
 from __future__ import annotations
 
 import functools
-import warnings
 from pathlib import Path
 
 import torch
 
 from miniworld_engine.kernels._device import num_sms
+from miniworld_engine.kernels._nvcc import build_failed
 
 _dir = Path(__file__).parent
 H, DH = 16, 48  # the default heads x width
@@ -562,9 +562,6 @@ def _dpbx2_smem() -> int:
     return o_st + (_SMEM_MAX - o_st - 1024) // 32768 * 32768 + 256
 
 
-_DPBX2_FAILED: set = set()
-
-
 def dpb_pair_on(L: int, nh: int = H, hp: int = 1, nsm: int = 148) -> bool:
     """The bias gradient on CTA pairs (``dpbx2_sm100.cu``: 256-query x 256-key items, a third less TMA intake per product; L768 A = 48,
     16 x 48: 61.2 -> 47.4 us, in-process A/B) -- the default where 256-key tiles divide L and the pairs' items fill the SM pairs (fewer
@@ -578,7 +575,7 @@ def dpb_pair_on(L: int, nh: int = H, hp: int = 1, nsm: int = 148) -> bool:
 class DpbKernel:
     """``dpb_sm100.cu``: dbias [nh L, L] = P o (sum_a do v^T - D) per head, D[h, i] = sum_a dd[a, h, i]; do / v [A L, 768]
     bf16 views, P [nh L, L] bf16, dd [A, nh, L] fp32 (nh x width: one of LAYOUTS). Where ``dpb_pair_on(L)``: ``dpbx2_sm100.cu``
-    (the same result on CTA pairs; a failed build warns once and keeps dpb_sm100.cu; ``last`` says which ran)."""
+    (the same result on CTA pairs; a failed build raises ``_nvcc.KernelBuildError``; ``last`` says which ran)."""
 
     def __init__(self, device_index: int, nh: int = H, dh: int | None = None):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
@@ -661,19 +658,13 @@ class DpbKernel:
         hp = 2 if self.dh == 32 else 1
         pair = (
             dpb_pair_on(L, self.nh, hp, self.nsm)
-            and (self.device_index, self.nh, self.dh) not in _DPBX2_FAILED
         )
         if pair and self._pair_k is None:
             try:
                 self._pair_k = self.pair_kernel()
-            except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps dpb_sm100.cu
-                _DPBX2_FAILED.add((self.device_index, self.nh, self.dh))
-                warnings.warn(
-                    f"bias-only DiT CTA-pair bias gradient (dpbx2_sm100) unavailable, keeping dpb_sm100: {exc!r}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                pair = False
+            except Exception as exc:  # a build / load failure is an error, never a fallback
+                build_failed("bias-only DiT CTA-pair bias gradient (dpbx2_sm100)", exc)
+                pair = False  # reached only while planning (build_failed returns there)
         self.last = "pair" if pair else "single"
         key = (
             pair,

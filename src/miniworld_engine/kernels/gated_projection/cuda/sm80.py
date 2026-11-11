@@ -11,13 +11,12 @@ TriMul's (``kernels/trimul_inproj/cuda/sm80/wide_gemm.cuh``).
 """
 
 import functools
-import warnings
 from pathlib import Path
 
 import torch
 
 from ..._compile import opaque
-from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent / "sm80"
 _tile_dir = (
@@ -44,26 +43,15 @@ def _ext():
     )
 
 
-_FAILED = False
-
-
 @torch.compiler.assume_constant_result
 def _loads() -> bool:
-    """Builds (first call) or loads the extension; False, with one warning, when the toolchain fails (the Triton kernels then serve).  A process-level constant for
+    """Builds (first call) or loads the extension; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).  A process-level constant for
     ``torch.compile``."""
-    global _FAILED
-    if _FAILED:
-        return False
     try:
         _ext()
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _FAILED = True
-        warnings.warn(
-            f"sm_80 gated-projection kernels unavailable, keeping the Triton path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 gated-projection", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

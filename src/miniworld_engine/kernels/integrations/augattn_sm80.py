@@ -22,7 +22,7 @@ L is padded to a multiple of 128 inside the call (zero rows, the padded keys mas
 
 ``serves()`` is the whole gate: the engine's kernel backend (implementation TRITON or MINIWORLD), A100 (sm_80), single / cond / pair and module weights all bf16 or all fp32
 (``compute_dtype`` None or that dtype; bf16 activations also take fp32 master parameters: cast to bf16 inside the ops, unrounded fp32 weight gradients), head dim 32, 48 or 64, any A, B and L (the per-head q / k RMSNorm of TokenDiTMiniWorld, the flat q / k LayerNorm, a bias-free query and no gating query too), a key mask [B, L] or [A, B, L] (bool) or none, LayerNorm eps 1e-5. Anything else
-keeps the module path, and a failed extension build warns once and keeps the module path.
+keeps the module path, and a failed extension build raises (``_nvcc.KernelBuildError``).
 Numerics and timings: ``docs/gpus/a100/token_dit/token_dit.md``, ``docs/gpus/a100/a100.md``.
 
 fp32 (all four tensors and the weights): the same flow with the TF32 tensor-core core (``kernels/augmented_attention/cuda/sm80/*_tf32_sm80.cuh``: fp32 operands rounded to
@@ -34,13 +34,13 @@ from __future__ import annotations
 
 import functools
 import math
-import warnings
 
 import torch
 import torch.nn.functional as F
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._nvcc import build_failed
 
 BF = torch.bfloat16
 F32 = torch.float32
@@ -49,7 +49,6 @@ EPS = 1e-5
 #: every row with a valid key
 MASKED = -1e4
 _ATOM = (4, 32, 16)  # (heads, head dim, pair channels) of the fused pair bias
-_FAILED = False
 _NEG_INF = float("-inf")
 
 
@@ -65,47 +64,30 @@ def _pad(length: int) -> int:
 
 @torch.compiler.assume_constant_result
 def _loads() -> bool:
-    """Builds (first call) or loads the extensions of the path (the core, the gates, the AttentionPairBias pair kernels); False, with one warning, when the toolchain fails
-    (the module path then serves).
+    """Builds (first call) or loads the extensions of the path (the core, the gates, the AttentionPairBias pair kernels); a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).
 
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
-    global _FAILED
-    if _FAILED:
-        return False
     try:
         sm80 = _sm80()
         sm80._ext()
         sm80._glue_ext()
-    except Exception as exc:  # a toolchain problem keeps the module path
-        _FAILED = True
-        warnings.warn(
-            f"sm_80 AugmentedAttentionPairBias kernels unavailable, keeping the module path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 AugmentedAttentionPairBias", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 
 @torch.compiler.assume_constant_result
 def _loads_tf32() -> bool:
     """:func:`_loads` for the fp32 path: the core's TF32 extension, the shared pair-bias / gate kernels (no AttentionPairBias kernel: its width is bf16 only)."""
-    global _FAILED
-    if _FAILED:
-        return False
     try:
         sm80 = _sm80()
         sm80._ext()
         sm80._glue_ext()
         sm80._tf32_ext()
-    except Exception as exc:  # a toolchain problem keeps the module path
-        _FAILED = True
-        warnings.warn(
-            f"sm_80 AugmentedAttentionPairBias kernels unavailable, keeping the module path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed("sm_80 AugmentedAttentionPairBias", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 

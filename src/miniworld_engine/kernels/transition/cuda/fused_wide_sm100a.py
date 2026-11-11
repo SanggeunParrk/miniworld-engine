@@ -35,11 +35,11 @@ atomics), so a replay is bit-identical.
 
 import functools
 import os
-import warnings
 
 import torch
 
 from miniworld_engine.kernels._device import num_sms
+from miniworld_engine.kernels._nvcc import build_failed
 
 from ..._compile import opaque
 from .fused_sm100a import _ext, _is_b200, build_cubins
@@ -219,27 +219,18 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     return rows > 0 and rows % ROWS == 0
 
 
-_BUILD_FAILED: set[tuple[int, int]] = set()
-
-
 def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """``supported()`` plus a successful build of this (width, n), both cached; a build failure warns once and keeps the existing
-    path."""
-    if not supported(x, wa, ws) or _dn(x, wa) in _BUILD_FAILED:
+    """``supported()`` plus a successful build of this (width, n), both cached; a build / load failure raises ``_nvcc.KernelBuildError``
+    (never a fallback)."""
+    if not supported(x, wa, ws):
         return False
     if torch.compiler.is_compiling() or _is_fake(x, wa, ws):
         return True
     try:
         _load(*_dn(x, wa))
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED.add(_dn(x, wa))
-        warnings.warn(
-            f"wide sm100a Transition (D={x.shape[-1]}, n={wa.shape[0] // x.shape[-1]}) unavailable, keeping the existing "
-            f"path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # a build / load failure is an error, never a fallback
+        build_failed(f"wide sm100a Transition (D={x.shape[-1]}, n={wa.shape[0] // x.shape[-1]})", exc)
+        return False  # reached only while planning (build_failed returns there)
     return True
 
 
