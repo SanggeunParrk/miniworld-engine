@@ -100,6 +100,7 @@ void wpack_t(torch::Tensor wl, torch::Tensor wlg, torch::Tensor wr, torch::Tenso
   p.wdx = wdx.numel() ? mp<E>(wdx) : nullptr; p.spx = spx.numel() ? spx.data_ptr<float>() : nullptr;
   TORCH_CHECK(!wdx.numel() || wdx.numel() == (int64_t)(4 * Hs + D) * D, "wpack: wdx");
   p.Hs = Hs; p.D = D; p.Hc = Hc;
+  p.wf32 = !E::IS_F32 && is_f32(wl);  // as wide_ops.cu; was never set (stack garbage: 0 or not by host compiler, e.g. GCC 12.4 read bf16 weights as fp32)
   TORCH_CHECK(w1.numel() == (int64_t)4 * Hs * D && wo3.numel() == (int64_t)D * Hc && wg3.numel() == (int64_t)D * D && vs.numel() == 4 * Hs && vb.numel() == 4 * Hs, "wpack: outputs");
   const int items = 4 * Hs + 2 * D;
   a100::wpack_kernel<E><<<(items + 7) / 8, 256, 0, stream()>>>(p);
