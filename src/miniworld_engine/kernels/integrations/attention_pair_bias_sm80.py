@@ -704,9 +704,9 @@ _SIDE: dict = {}
 
 
 def _gemm_pair(pair: torch.Tensor, f32: bool) -> bool:
-    """The backward of an fp32 pair of 256 channels or more: statistics + TF32 cuBLAS GEMMs + the LayerNorm backward, batched over B
-    (``_bias_gemm_bwd``), faster at every L than the one-pass kernel run per row (A100, 16 heads, fp32 train, graph timing; d_pair 512,
-    one sample: L512 4.17 -> 3.74 ms, L768 8.92 -> 7.99 ms with the LN(z) recompute it replaced)."""
+    """The backward of an fp32 pair of 256 channels or more: the statistics pass + TF32 cuBLAS GEMMs + one LayerNorm backward for the
+    batch (``_bias_gemm_bwd``), at every L: faster than the one-pass kernel per row (A100, 16 heads, fp32 train, graph timing, d_pair 512
+    L512: one sample 4.17 -> 3.18 ms, five 20.6 -> 16.0 ms; the earlier L <= 384 LN(z)-recompute variant: 3.74 ms at one sample)."""
     return f32 and pair.shape[-1] >= 256
 
 
@@ -725,7 +725,7 @@ def _bias_gemm_bwd(z: torch.Tensor, wcm: torch.Tensor, db: torch.Tensor, L: int,
     del var
     d3 = db.reshape(B, heads, n)
     dzn = z2.new_empty((B * n, dp))
-    for b in range(B):  # one GEMM per row into its rows of dz-hat (M = L L each: the same call as a one-row batch's, so B rows == B calls)
+    for b in range(B):  # a GEMM per row into its rows of dz-hat (the same call as a one-row batch's: B rows == B calls)
         torch.mm(d3[b].t(), wcm.t(), out=dzn[b * n : (b + 1) * n])
     dz = torch.ops.aten.native_layer_norm_backward(dzn, z2, (dp,), mean, rstd, None, None, [True, False, False])[0]
     del dzn
