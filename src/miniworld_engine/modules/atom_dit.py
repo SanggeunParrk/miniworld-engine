@@ -67,7 +67,7 @@ from miniworld_engine.modules.attention import (
     FlatQKNormAugmentedAttention,
     UngatedAugmentedAttention,
 )
-from miniworld_engine.modules.dit_variant_cuda import VariantAtomCuda
+from miniworld_engine.modules.dit_variant_cuda import MasterEntryCast, VariantAtomCuda, fp32_conditioning
 from miniworld_engine.modules.functional import (
     ATOM_KEYS,
     ATOM_QUERIES,
@@ -792,13 +792,76 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     """AlphaFold 3's atom transformer block in the engine layout (registered as ``"af3"``, ``"openfold3"``, ``"openfold3_preview2"``,
     ``"intellifold2"``): the K / V AdaLN of the raw atoms next to the query one (parallel: AF3 ``cross_attention``'s 'q' / 'k' adaptive
     layernorms, OF3 ``CrossAttentionPairBias.layer_norm_a_q`` / ``_k``), the slid 128-key window (AF3 ``features.py``; IntelliFold2's JAX
-    release runs this code). ``key_window="slide_qblock"``: IntelliFold2's torch release; ``"pad"``: the clipped window."""
+    release runs this code). ``key_window="slide_qblock"``: IntelliFold2's torch release; ``"pad"``: the clipped window.
+
+    ``mask_form`` (FoldForge R13): ``"keys"`` (the default, as every atom DiT block) switches every masked key off for every query; ``"af3"``
+    is AlphaFold 3's own form, whose mask term touches only the pairs where BOTH the query and the key are padding (``+1e9`` there), so a
+    real query reads every key of its window, padding included. The forms differ only below 128 real atoms: from 128 on the slid window
+    (``key_window="slide"``, the only window this form is defined for) lies inside the real atoms; below it every window holds the N real
+    atoms and 128 - N padding keys (AlphaFold 3 ``features.py`` AtomCrossAtt: its windows shifted to start at N - 128 < 0 index padding by
+    wrapping; which padding slots does not matter, as below). One pass, the key mask widened to the first 128 atoms (still a prefix: the
+    window stays [0, 128); the padded atom count must be >= 128), on every backend. Exact for the real rows when the caller's padding atoms
+    are what AlphaFold 3's gathers make them: zero ``single`` / ``cond`` rows (``atom_layout.convert`` fills a padding slot with 0, so every
+    padding key is the same key) and the pair of a padding key the one AlphaFold 3 computes there. The padding rows are not AlphaFold 3's
+    (its padding queries read only padding keys); AlphaFold 3 never reads them -- its keys come from the masked gather -- so zero them
+    before the next block."""
 
     version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     #: 2026-11-10: H100 "slide" / "slide_qblock": the five edge windows on the edge kernels (dit_variants edge.cu; were torch)
     backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 2}
+    #: ``"keys"`` or ``"af3"`` (see the class docstring)
+    mask_form: str = "keys"
+
+    def __init__(
+        self,
+        d_single: int = 128,
+        d_cond: int = 128,
+        d_pair: int = 16,
+        n_head: int = 4,
+        n: int = 2,
+        *,
+        key_window: str | None = None,
+        mask_form: str = "keys",
+        backend: str = "pytorch",
+    ) -> None:
+        super().__init__(d_single, d_cond, d_pair, n_head, n, key_window=key_window, backend=backend)
+        if mask_form not in ("keys", "af3"):
+            raise ValueError(f"mask_form must be 'keys' or 'af3', got {mask_form!r}")
+        if mask_form == "af3" and self.key_window != "slide":
+            raise ValueError(f"mask_form='af3' is AlphaFold 3's form on its slid window (key_window='slide'), got {self.key_window!r}")
+        self.mask_form = mask_form
+
+    def _mask(self, mask):
+        """The key mask every backend runs under: the caller's (``"keys"``), or (``"af3"``) widened to the first 128 atoms, the window below 128
+        real atoms -- a prefix still, so the slid window stays [0, 128); from 128 real atoms on it is the caller's mask."""
+        if self.mask_form == "keys" or mask is None:
+            return mask
+        keep = mask.bool()
+        return keep | (torch.arange(keep.shape[-1], device=keep.device) < KEYS)
+
+    # each backend's entry (the measurers call them directly) takes the form's mask
+    def _forward_pytorch(self, single, cond, pair, mask=None):
+        return super()._forward_pytorch(single, cond, pair, self._mask(mask))
+
+    def _supports_triton(self, single, cond, pair, mask=None, **kw) -> str | None:
+        return super()._supports_triton(single, cond, pair, self._mask(mask), **kw)
+
+    def _forward_triton(self, single, cond, pair, mask=None):
+        return super()._forward_triton(single, cond, pair, self._mask(mask))
+
+    def _supports_cuda(self, single, cond, pair, mask=None, **kw) -> str | None:
+        return super()._supports_cuda(single, cond, pair, self._mask(mask), **kw)
+
+    def _forward_cuda(self, single, cond, pair, mask=None, uid=None):
+        return super()._forward_cuda(single, cond, pair, self._mask(mask), uid)
+
+    def _supports_anthropic(self, single, cond, pair, mask=None, **kw) -> str | None:
+        return super()._supports_anthropic(single, cond, pair, self._mask(mask), **kw)
+
+    def _forward_anthropic(self, single, cond, pair, mask=None):
+        return super()._forward_anthropic(single, cond, pair, self._mask(mask))
 
 
 class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
@@ -911,7 +974,7 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
 
 
-class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
+class AtomDiTChai1(MasterEntryCast, VariantAtomCuda, _LocalAtomDiT):
     """Chai-1's atom transformer block (its TorchScript ``diffusion_module.pt``): ONE identity AdaLN ``(1 + W_s c) LN(a) + W_b c`` for the
     queries and the keys / values (``single_layer_norm``; no ``attention.ada_ln_kv``) and another for the transition
     (``transition.ada_ln_in``), both LayerNorms of the atoms at ``adaln_eps`` (the release: 0.1, the default), no gating query and no output
@@ -921,7 +984,12 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
     Chai-1's release keeps its stock atom attention (no kernel).
 
     Invariant (shared K / V AdaLN): the release's ``single_layer_norm`` output feeds the queries and the keys / values (no
-    ``attention.ada_ln_kv``); as for :class:`AtomDiTBoltz2`, a separate K / V AdaLN in a checkpoint layout must equal the query one."""
+    ``attention.ada_ln_kv``); as for :class:`AtomDiTBoltz2`, a separate K / V AdaLN in a checkpoint layout must equal the query one.
+
+    There is no circular window (FoldForge R9): chai_lab 0.6.1 ``get_qkv_indices_for_blocks`` returns ``kv_mask = (kv_indices < N) &
+    (kv_indices >= 0)`` before ``kv_indices % N`` (the ``%`` only indexes) and ``get_block_atom_pair_mask`` ANDs it in, so a wrapped key is never
+    attended: ``"pad"`` + ``uid`` is the release for every system, also one whose conformer covers both ends of the atom list and one under
+    128 atoms (tests/cpu/test_chai1_key_window.py compares the attended keys with a transcription of the release's mask)."""
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
@@ -959,7 +1027,7 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
         return self._step(single, cond, pair, mask, uid=uid, delta=self._attention_delta_triton)
 
     def make_inputs(self, **kwargs) -> dict:
-        inputs = super().make_inputs(**kwargs)
+        inputs = fp32_conditioning(super().make_inputs(**kwargs), kwargs.get("stream"), kwargs["generator"])
         return {
             **inputs,
             "uid": (torch.arange(inputs["mask"].shape[-1], device=inputs["mask"].device) // 24)[None].expand(inputs["mask"].shape[0], -1),
@@ -1424,7 +1492,10 @@ class AtomDiTESMFold2(AtomDiTMiniWorld):
     bias, an affine-free q / k RMSNorm, the 3D rotary, the band ``|rank_i - rank_j| <= 64`` among the valid atoms, ``sigmoid(gate_proj)`` of
     the normalised input, ``out_proj``) and ``SwiGLUFFN``. It is :class:`AtomDiTMiniWorld` (MiniWorld adopted this block), under
     ESMFold2's constructor: ``forward(x [A * B, S, d_single], cond [A * B, S, d_cond], attention_params)``
-    (:func:`~miniworld_engine.modules.functional.build_attention_params`). ``backend="anthropic"``: ESMFold2's own band core."""
+    (:func:`~miniworld_engine.modules.functional.build_attention_params`). ``backend="anthropic"``: ESMFold2's own band core.
+
+    Not FoldForge's ESMFold2 atom stack (FoldForge R6): that one is the AF3 block over a 32 x 192 atom pair (a pair bias this block has no
+    input for); no option turns one into the other (docs/modules.md, "Downstream requests")."""
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 

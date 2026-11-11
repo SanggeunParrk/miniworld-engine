@@ -167,3 +167,14 @@ versions that backend on one card only and wins over the plain `"<backend>"` key
   module runs under bf16 autocast (`master_autocast`) or bf16 GEMMs with fp32 weight gradients (`master_linear`). This is the
   `master` dtype of the requirements.
 - `LayerNorm` keeps its affine in fp32 under a bf16 cast (`_Fp32ParamsMixin` in `norm.py`).
+
+## Downstream requests the classes do not take (decisions)
+
+FoldForge's engine requests (its `docs/ENGINE-REQUESTS.md`) that are answered by a statement rather than a class:
+
+| request | decision |
+|---|---|
+| R6: ESMFold2 atom stack with the atom pair | Not the same function as `AtomDiTESMFold2`: the engine block is ESMFold2's released pair-free `SWAAtomBlock` (fused `Wqkv`, adaLN-Zero with six modulations, 3D RoPE inside, no pair bias); FoldForge's stack is the AF3 block over a 32 x 192 atom pair with RMS / SiLU AdaLN, raw gates and a rotary keyed by `uid`. No option of either class makes it the other. Serving FoldForge's stack would be a new atom DiT class with a 192-key window (`functional.slide_starts(keys=192)` already states the window) and its own kernels; not taken in this cycle (no requirement row asks for it). |
+| R8: fp32 `TriangleMultiplication` / `TriangleAttention` / `Transition` kernels | Declined by policy: TriMul is bf16 / master only, the trunk (pairformer-side) rows are master-only, `Transition` serves fp32 only on the five diffusion-head conditioning rows. An fp32 fold of the Protenix lineage runs those classes on `pytorch` by design (`_supports_cuda` refuses with that reason). |
+| R9: Chai-1 `circular` key window | Not needed: Chai-1's release masks the wrapped keys (`get_qkv_indices_for_blocks`' `kv_mask`, ANDed in by `get_block_atom_pair_mask`), so `AtomDiTChai1(key_window="pad")` + `uid` is the release for every system (`AtomDiTChai1` docstring; tested in `tests/cpu/test_chai1_key_window.py`). |
+| R11: an MSA block (Chai-1's parallel schedule with `OuterProductMean(groups=8)`, the AF3 / Boltz orders) | Not taken: every part is a served engine class (`OuterProductMean` with `groups=8`, `MSAPairWeightedAveraging`, `Transition`, the triangle classes); a block class would compose them in torch with no kernel of its own and no speed change, which the caller's composition already is. Revisit with R12 (`parallel_residual`) if a fused residual of the parallel parts is wanted. |

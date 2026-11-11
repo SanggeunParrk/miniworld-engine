@@ -43,7 +43,7 @@ from miniworld_engine.modules.attention import (
     FlatQKNormAugmentedAttention,
     UngatedAugmentedAttention,
 )
-from miniworld_engine.modules.dit_variant_cuda import VariantTokenCuda
+from miniworld_engine.modules.dit_variant_cuda import MasterEntryCast, VariantTokenCuda, fp32_conditioning
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.norm import IdentityAdaptiveLayerNorm
 from miniworld_engine.modules.primitives import BackendModule, key_mask, random_input, wide
@@ -820,7 +820,7 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
         return None
 
 
-class TokenDiTChai1(VariantTokenCuda, TokenDiTProtenix):
+class TokenDiTChai1(MasterEntryCast, VariantTokenCuda, TokenDiTProtenix):
     """Chai-1's token DiT block: the parallel schedule, the identity AdaLN ``(1 + W_s s) LN(a) + W_b s`` in both parts
     (``attention.ada_ln_in``, ``transition.ada_ln_in``), no gating query; the pair is 256 wide. ``adaln_eps``: the epsilon of both AdaLNs'
     LayerNorm of ``a`` (Chai-1's release, its traced ``layer_norm(x, None, None, 0.1)``: 0.1, the default)."""
@@ -843,7 +843,8 @@ class TokenDiTChai1(VariantTokenCuda, TokenDiTProtenix):
     attention_part = UngatedAugmentedAttention
 
     def make_inputs(self, **kwargs) -> dict:
-        return {**super().make_inputs(**kwargs), "mask": None}  # the model calls the block without a key mask
+        inputs = {**super().make_inputs(**kwargs), "mask": None}  # the model calls the block without a key mask
+        return fp32_conditioning(inputs, kwargs.get("stream"), kwargs["generator"])
 
     def __init__(
         self,
