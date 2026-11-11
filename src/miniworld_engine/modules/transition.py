@@ -387,6 +387,12 @@ class Transition(BackendModule, MasterWeights):
         if any(p.dtype not in (torch.bfloat16, torch.float32) for p in matrices) or len({p.dtype for p in matrices}) != 1:
             return "the projections must share one dtype, bfloat16 or float32"
         wa, ws = self.expand_a.weight, self.squeeze.weight
+        rows, limit = x.numel() // x.shape[-1], fused_fwd_sm80.max_rows(x.device, x.dtype)
+        if rows > limit and torch.is_grad_enabled() and (x.requires_grad or any(p.requires_grad for p in self.parameters())):
+            return (
+                f"{rows} rows with a gradient: the sm_80 Transition kernels take at most {limit} rows per call (one launch's work lists / row "
+                "grid); inference splits the rows, training does not"
+            )
         if x.dtype is torch.float32:
             from miniworld_engine.kernels.transition.cuda.fused_generic_sm90a import _tf32_allowed
 
@@ -404,12 +410,6 @@ class Transition(BackendModule, MasterWeights):
             return (
                 f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no sm_80 build takes it (D in {fused_wide_sm80.WIDTHS}, hidden a "
                 "multiple of 64)"
-            )
-        rows, limit = x.numel() // x.shape[-1], fused_fwd_sm80.max_rows(x.device)
-        if rows > limit and torch.is_grad_enabled() and (x.requires_grad or any(p.requires_grad for p in self.parameters())):
-            return (
-                f"{rows} rows with a gradient: the sm_80 training kernels take at most {limit} rows per call (one launch's work lists); "
-                "inference splits the rows"
             )
         if fused_wide_sm80.route(x, wa, ws) is None:
             return "the sm_80 Transition extension failed to build"

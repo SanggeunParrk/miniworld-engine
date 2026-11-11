@@ -88,8 +88,8 @@ def route(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> str | None:
     from . import fused_sm80
 
     rows = x.numel() // x.shape[-1]
-    # fused_sm80's forward / backward take one launch: past fused_fwd_sm80.max_rows its work lists overflow, the one-kernel forward here splits the rows
-    if fused_sm80.available(x, wa, ws) and FUSED_MIN_ROWS <= rows <= fused_fwd_sm80.max_rows(x.device):
+    # fused_sm80's forward / backward are one launch each: past fused_fwd_sm80.max_rows their work lists overflow (transition_sm80 splits such inference calls)
+    if fused_sm80.available(x, wa, ws) and FUSED_MIN_ROWS <= rows <= fused_fwd_sm80.max_rows(x.device, x.dtype):
         return "fused"
     return "wide" if available(x, wa, ws) else None
 
