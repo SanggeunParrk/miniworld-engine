@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 from pathlib import Path
 
 import torch
@@ -124,7 +125,8 @@ def test_static_contexts_set_and_restore():
 
 
 def test_registered_stores_include_the_known_ones():
-
+    for name in ("miniworld_engine.kernels._tf32", "miniworld_engine.kernels.integrations.token_dit"):
+        importlib.import_module(name)  # a store registers itself at import
     names = capture.weight_caches()
     assert names["capture.forms"] is _capture._FORMS
     assert "tf32.operands" in names
@@ -161,25 +163,21 @@ def test_lookup_store_cleared():
 
 
 def test_tf32_operand_cache_cleared():
+    """The TF32 operand cache (``_tf32.tf32_cached``: CUDA only) is a registered store: ``clear_weight_caches`` empties it."""
     from miniworld_engine.kernels import _tf32
 
-    w = torch.ones(3)
-    with torch.no_grad():
-        first = _tf32.tf32_cached((w,), lambda: (w * 2,))
-        w.data.fill_(4.0)
-        stale = _tf32.tf32_cached((w,), lambda: (w * 2,))
-        capture.clear_weight_caches()
-        fresh = _tf32.tf32_cached((w,), lambda: (w * 2,))
-    assert torch.equal(first[0], stale[0])
-    assert torch.equal(fresh[0], torch.full((3,), 8.0))
+    assert capture.weight_caches()["tf32.operands"] is _tf32._CACHE
+    _tf32._CACHE[("test_capture_api",)] = (torch.ones(1),)
+    capture.clear_weight_caches()
+    assert not _tf32._CACHE
 
 
 def test_instance_cache_attributes_cleared():
     from miniworld_engine.modules import TokenDiT
 
     block = TokenDiT("protenix", 64, 32, 16, 4, 2)
-    block.attention.__dict__["_anthropic_pack"] = ("key", None, None)
-    block.attention.__dict__["_anthropic_params"] = ("key", None, None)
+    vars(block.attention)["_anthropic_pack"] = ("key", None, None)
+    vars(block.attention)["_anthropic_params"] = ("key", None, None)
     capture.clear_weight_caches(block)
     assert "_anthropic_pack" not in block.attention.__dict__
     assert "_anthropic_params" not in block.attention.__dict__

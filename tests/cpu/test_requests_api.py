@@ -4,6 +4,8 @@ query), R18 the multi-fold contract of the DiT blocks (one call over B folds == 
 
 from __future__ import annotations
 
+import typing
+
 import pytest
 import torch
 
@@ -101,7 +103,8 @@ def test_from_shared_pair_slices_the_projection():
     split = from_shared_pair(w, [proj[:8], proj[8:]], n_blocks=n_blocks, n_head=n_head)
     assert all(torch.equal(a["attention.to_bias.weight"], b["attention.to_bias.weight"]) for a, b in zip(states, split, strict=True))
     stack = AtomDiTStack("protenix", n_blocks).load_shared_pair(w, proj)
-    for b, block in enumerate(stack.blocks):
+    for b, blk in enumerate(stack.blocks):
+        block = typing.cast("typing.Any", blk)
         assert torch.equal(block.attention.to_bias.weight, proj[b * n_head : (b + 1) * n_head])
         assert torch.equal(block.attention.ln_pair.weight, w)
     with pytest.raises(ValueError, match="projection"):
@@ -111,7 +114,7 @@ def test_from_shared_pair_slices_the_projection():
 def test_shared_pair_norm_offset_is_cancelled():
     """The dropped LayerNorm offset adds one constant per head to every logit of a block: the block's output is unchanged."""
     torch.manual_seed(0)
-    block = TokenDiT("protenix", 64, 32, 16, 4, 2)
+    block = typing.cast("typing.Any", TokenDiT("protenix", 64, 32, 16, 4, 2))
     g = _gen(1)
     single, cond, pair = torch.randn(1, 1, 8, 64, generator=g), torch.randn(1, 1, 8, 32, generator=g), torch.randn(1, 8, 8, 16, generator=g)
     beta = torch.randn(16, generator=g)
@@ -120,6 +123,7 @@ def test_shared_pair_norm_offset_is_cancelled():
         # the offset's contribution to the bias: W beta per head, constant over (query, key)
         shift = block.attention.to_bias.weight @ beta
         block.attention.to_bias.bias = torch.nn.Parameter(shift)
+        torch.testing.assert_close(block.attention.to_bias(torch.zeros(16)), shift)  # the projection adds it
         out = block(single, cond, pair)
     torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-5)
 

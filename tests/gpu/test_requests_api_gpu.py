@@ -1,5 +1,5 @@
 """FoldForge API requests on the GPU: R1 (a weight replaced after ``clear_weight_caches`` is picked up by a cached H100 kernel path),
-R18 (the multi-fold call of the DiT blocks on ``cuda`` (H100) and ``triton`` equals one call per fold; A100 ``cuda`` refuses with a reason), R12 (``parallel_residual`` on ``triton``)."""
+R18 (the multi-fold call of the DiT blocks on ``cuda`` (H100) and ``triton`` equals one call per fold; on A100 one sm_80 call per fold), R12 (``parallel_residual`` on ``triton``)."""
 
 from __future__ import annotations
 
@@ -51,10 +51,14 @@ def test_clear_weight_caches_picks_up_a_replaced_weight():
 
 
 # ----------------------------------------------------------------------------------------------------------------------------- R18
+#: (id, block, stream, length, cuda serves on A100): N = 1000 (not a multiple of 32) only on H100; FoldForge's atom layout is whole
+#: 32-atom windows, the sm_80 atom kernels take N a multiple of 64
 FOLD_CASES = [
-    ("token", lambda: TokenDiT("protenix", 768, 384, 128, 16, 2), "token_folds", 128),
-    ("atom-pad", lambda: AtomDiT("protenix"), "atom_folds", 1000),
-    ("atom-slide", lambda: AtomDiT("af3", key_window="slide"), "atom_folds", 1000),
+    ("token", lambda: TokenDiT("protenix", 768, 384, 128, 16, 2), "token_folds", 128, True),
+    ("atom-pad", lambda: AtomDiT("protenix"), "atom_folds", 1000, False),
+    ("atom-slide", lambda: AtomDiT("af3", key_window="slide"), "atom_folds", 1000, False),
+    ("atom-pad-1024", lambda: AtomDiT("protenix"), "atom_folds", 1024, True),
+    ("atom-chai1-uid", lambda: AtomDiT("chai1"), "atom_folds", 1024, True),
 ]
 
 
@@ -62,20 +66,31 @@ def _h100() -> bool:
     return torch.cuda.get_device_capability() == (9, 0)
 
 
+def _one_fold(inp: dict, b: int) -> dict:
+    one = {"single": inp["single"][:, b : b + 1], "cond": inp["cond"][:, b : b + 1], "pair": inp["pair"][b : b + 1]}
+    one["mask"] = inp["mask"][b : b + 1]
+    if "uid" in inp:
+        one["uid"] = inp["uid"][b : b + 1]
+    return one
+
+
 @pytest.mark.parametrize("backend", ["cuda", "triton"])
-@pytest.mark.parametrize(("name", "make", "stream", "length"), FOLD_CASES, ids=[c[0] for c in FOLD_CASES])
-def test_multi_fold_equals_one_call_per_fold(name, make, stream, length, backend):
-    """B folds in one call == B calls of one fold, and the reference. ``cuda``: H100 (A100 refuses B > 1: test below)."""
-    if backend == "cuda" and not _h100():
-        pytest.skip("cuda multi-fold: H100 only")
+@pytest.mark.parametrize(("name", "make", "stream", "length", "a100"), FOLD_CASES, ids=[c[0] for c in FOLD_CASES])
+def test_multi_fold_equals_one_call_per_fold(name, make, stream, length, a100, backend):
+    """B folds in one call == B calls of one fold, and the reference. ``cuda``: H100 (the grouped-bias kernels) and A100 (one sm_80 call
+    per fold)."""
+    if backend == "cuda" and not _h100() and not a100:
+        pytest.skip("N outside the sm_80 atom kernels' range")
     block = _block(make).set_backend(backend)
     folds, samples = 5, 5
-    inp = block.make_inputs(length=length, samples=samples, depth=folds, dtype=torch.bfloat16, device="cuda", generator=_gen(), stream=stream)
+    inp = block.make_inputs(
+        length=length, samples=samples, depth=folds, dtype=torch.bfloat16, device="cuda", generator=_gen(), stream=stream
+    )
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         assert block.unsupported(**inp) is None, block.unsupported(**inp)
         out = block(**inp)
         for b in range(folds):
-            one = block(inp["single"][:, b : b + 1], inp["cond"][:, b : b + 1], inp["pair"][b : b + 1], inp["mask"][b : b + 1])
+            one = block(**_one_fold(inp, b))
             err = (out[:, b : b + 1].float() - one.float()).abs().max() / one.float().abs().max()
             assert err < 1e-2, f"{name}: fold {b} differs from its own call (rel err {err:.3g})"
         ref = block.set_backend("pytorch")(**inp)
@@ -87,13 +102,18 @@ def test_multi_fold_equals_one_call_per_fold(name, make, stream, length, backend
     assert err < 3e-2, f"{name}: the multi-fold {backend} call is off the reference (rel err {err:.3g})"
 
 
-@pytest.mark.h100
-def test_multi_fold_cuda_refuses_training_and_fp32():
-    block = _block(lambda: AtomDiT("protenix"), "float32").set_backend("cuda")
+@pytest.mark.parametrize("model", ["protenix", "chai1"])
+def test_multi_fold_cuda_refuses_training_and_fp32(model):
+    """B > 1 folds on ``cuda``: bf16 inference only (H100 and A100), refused with a reason."""
+    block = _block(lambda: AtomDiT(model), "float32").set_backend("cuda")
     inp = block.make_inputs(length=256, samples=2, depth=3, dtype=torch.float32, device="cuda", generator=_gen(), stream="atom_folds")
     assert "bfloat16" in (block.unsupported(**inp) or "")
     with pytest.raises(BackendUnsupported):
         block(**inp)
+    block = _block(lambda: AtomDiT(model)).set_backend("cuda").train()
+    inp = block.make_inputs(length=256, samples=2, depth=3, dtype=torch.bfloat16, device="cuda", generator=_gen(), stream="atom_folds")
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        assert "inference only" in (block.unsupported(**inp) or "")
 
 
 # ----------------------------------------------------------------------------------------------------------------------------- R12
@@ -114,23 +134,6 @@ def test_parallel_residual_triton(dtype, branches):
     parallel_residual(xs, *yg, backend="triton").backward(up)
     assert all(torch.equal(y.grad, up) for y in yg)  # pyright: ignore[reportArgumentType]
     torch.testing.assert_close(xs.grad, (up.float() * (1 - branches)).to(dtype))
-
-
-@pytest.mark.a100
-@pytest.mark.parametrize(("name", "make", "stream", "length"), FOLD_CASES, ids=[c[0] for c in FOLD_CASES])
-def test_multi_fold_cuda_a100_refuses_with_a_reason(name, make, stream, length):
-    """A100: the sm_80 atom paths take one pair; a B > 1 call is refused with a reason (never a silent fallback)."""
-    del name
-    block = _block(make).set_backend("cuda")
-    inp = block.make_inputs(length=length, samples=2, depth=3, dtype=torch.bfloat16, device="cuda", generator=_gen(), stream=stream)
-    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-        why = block.unsupported(**inp)
-        if why is None:  # served: then it must equal the reference
-            out, ref = block(**inp), block.set_backend("pytorch")(**inp)
-            assert (out.float() - ref.float()).abs().max() / ref.float().abs().max() < 3e-2
-        else:
-            with pytest.raises(BackendUnsupported):
-                block(**inp)
 
 
 @pytest.mark.h100

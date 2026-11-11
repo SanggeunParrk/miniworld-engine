@@ -87,10 +87,11 @@ Sample `(a, b)` (row `single[a, b]`) attends with fold `b`'s pair bias and condi
 out `[A][B]` and the grouped-bias attention reads sample `s`'s bias from pair `s mod B`. The requirement rows with stream `token_folds` /
 `atom_folds` (the `depths` column = the fold count B) are this layout.
 
-Served on: `pytorch` and `triton` everywhere; `cuda` on H100 for bfloat16 (or master) inference (the token block within its inference gate, e.g. L a multiple of 128; the
-atom block: every key window), refused with a reason for fp32 / training on H100 (the TF32 kernels and the backward keep one pair bias) and
-on A100 (the sm_80 atom paths take one pair; the token block per its gate). FoldForge measured its grouped 5 x 5 sampler at 1.5x end to end
-for assemblies up to 256 tokens.
+Served on: `pytorch` and `triton` everywhere; `cuda` for bfloat16 (or master) inference: on H100 in one call over the B folds (the grouped-bias
+kernels; the token block within its inference gate, e.g. L a multiple of 128; the atom block: every key window), on A100 the token block
+within its sm_80 gate and the atom block as one sm_80 call per fold (the sm_80 atom kernels take one pair; N a multiple of 64). A B > 1
+call in fp32 or with a gradient is refused with a reason on both cards (the TF32 kernels and the backward keep one pair bias). FoldForge
+measured its grouped 5 x 5 sampler at 1.5x end to end for assemblies up to 256 tokens.
 
 ## Dead residual modules (the `dead` flag; the loader is not part of the engine)
 

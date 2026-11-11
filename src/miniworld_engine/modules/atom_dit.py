@@ -120,6 +120,43 @@ def _one_row(t: torch.Tensor, folds: int) -> bool:
     return t.shape[0] == 1 or (t.shape[0] == folds and t.stride(0) == 0)
 
 
+def _folds(single: torch.Tensor) -> int:
+    """B, the fold axis of ``single`` [A, B, N, d] (1 for any other rank: the shape checks refuse those)."""
+    return single.shape[1] if single.ndim == 4 else 1
+
+
+def _multi_fold_reason(module: nn.Module, single, cond, pair, mask, uid) -> str | None:
+    """Why the ``"cuda"`` backend does not take this B > 1 fold call (the multi-fold contract, docs/modules.md), or None. The kernels keep
+    one pair bias per launch outside the bf16 inference path: bf16 activations, no gradient; one key mask / ``uid`` row for the folds."""
+    folds = _folds(single)
+    if (single.dtype, cond.dtype, pair.dtype) != (_BF, _BF, _BF):
+        return "B > 1 folds: bfloat16 activations only (the TF32 kernels keep one pair bias)"
+    if _needs_grad(module, single, cond, pair):
+        return "B > 1 folds: inference only (the backward keeps one pair bias)"
+    if cond.ndim != 4 or tuple(cond.shape[:3]) != tuple(single.shape[:3]) or pair.shape[0] != folds:
+        return f"B > 1 folds: cond [A, B, N, d] and pair [B, ...] with B = {folds}, got {tuple(cond.shape)} / {tuple(pair.shape)}"
+    for name, t in (("mask", mask), ("uid", uid)):
+        if t is not None and (t.ndim != 2 or t.shape[1] != single.shape[2] or not _one_row(t, folds)):
+            return f"B > 1 folds: {name} must be one [1, N] row (or that row expanded over the B folds), got {tuple(t.shape)}"
+    return None
+
+
+def _fold(single, cond, pair, mask, uid, b: int):
+    """Fold ``b`` of a multi-fold call as a one-fold call: single [A, 1, N, d] (a contiguous copy), cond [A, 1, N, d] (a sample-expanded
+    conditioning stays the view: its hoisted table is keyed on the fold's storage and reused over the sampler's steps), pair [1, ...],
+    the one mask / uid row."""
+    c = cond[:, b : b + 1]
+    if not (c.shape[0] > 1 and c.stride(0) == 0):
+        c = c.contiguous()
+    return (
+        single[:, b : b + 1].contiguous(),
+        c,
+        pair[b : b + 1],
+        None if mask is None else mask[:1],
+        None if uid is None else uid[:1],
+    )
+
+
 def windows(n: int) -> int:
     return (n + QUERIES - 1) // QUERIES
 
@@ -364,6 +401,11 @@ class _LocalAtomDiT(BackendModule):
         if kw:
             return f"{', '.join(kw)} (not an input of the H100 atom block)"
         if _a100(single):
+            if _folds(single) > 1:  # B > 1 folds: one sm_80 call per fold (the sm_80 atom paths take one pair)
+                why = _multi_fold_reason(self, single, cond, pair, mask, uid)
+                if why is not None:
+                    return f"A100: {why}"
+                single, cond, pair, mask, uid = _fold(single, cond, pair, mask, uid, 0)
             return self._a100_reason(single, cond, pair, mask)
         if not _h100(single):
             return "the H100 atom block kernels run on an H100 (sm_90) CUDA tensor only"
@@ -447,6 +489,8 @@ class _LocalAtomDiT(BackendModule):
         return None if fn is not None else why
 
     def _forward_cuda(self, single, cond, pair, mask=None, uid=None):
+        if _a100(single) and _folds(single) > 1:  # B > 1 folds (``_supports_cuda``): one sm_80 call per fold, in fold order
+            return torch.cat([self._forward_cuda(*_fold(single, cond, pair, mask, uid, b)) for b in range(_folds(single))], 1)
         if _a100(single):
             if not self._a100_rows(single, cond, pair, mask):
                 from miniworld_engine.modules import dit_variant_cuda as dv
@@ -918,8 +962,8 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
         inputs = super().make_inputs(**kwargs)
         return {
             **inputs,
-            "uid": (torch.arange(inputs["mask"].shape[-1], device=inputs["mask"].device) // 24)[None],
-        }  # conformers of 24 atoms
+            "uid": (torch.arange(inputs["mask"].shape[-1], device=inputs["mask"].device) // 24)[None].expand(inputs["mask"].shape[0], -1),
+        }  # conformers of 24 atoms (one row; expanded over the folds of an "atom_folds" call)
 
 
 # ======================================================================================== MiniWorld's sliding-window (SWA) atom block
