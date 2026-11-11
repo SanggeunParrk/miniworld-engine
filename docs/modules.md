@@ -83,11 +83,11 @@ the fold axis is the blocks' `B` axis:
 | `uid` | `[B, N]` | Chai-1's conformer ids, likewise one row expanded over B |
 
 Sample `(a, b)` (row `single[a, b]`) attends with fold `b`'s pair bias and conditioning: the result equals B separate calls of
-`[A, 1, ...]` (one per fold), which is how the tests check it (tests/gpu/test_multi_fold.py). Inside the kernels the `A x B` rows are laid
+`[A, 1, ...]` (one per fold), which is how the tests check it (tests/cpu/test_requests_api.py, tests/gpu/test_requests_api_gpu.py). Inside the kernels the `A x B` rows are laid
 out `[A][B]` and the grouped-bias attention reads sample `s`'s bias from pair `s mod B`. The requirement rows with stream `token_folds` /
 `atom_folds` (the `depths` column = the fold count B) are this layout.
 
-Served on: `pytorch` and `triton` everywhere; `cuda` on H100 for bfloat16 (or master) inference (the token block: L a multiple of 128; the
+Served on: `pytorch` and `triton` everywhere; `cuda` on H100 for bfloat16 (or master) inference (the token block within its inference gate, e.g. L a multiple of 128; the
 atom block: every key window), refused with a reason for fp32 / training on H100 (the TF32 kernels and the backward keep one pair bias) and
 on A100 (the sm_80 atom paths take one pair; the token block per its gate). FoldForge measured its grouped 5 x 5 sampler at 1.5x end to end
 for assemblies up to 256 tokens.

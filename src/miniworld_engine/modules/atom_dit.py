@@ -470,6 +470,12 @@ class _LocalAtomDiT(BackendModule):
 
         if not (cond.is_contiguous() or local_dit_h100._shared(cond)):
             cond = cond.contiguous()
+        # B > 1 folds: the folds' one key mask / conformer ids (``_supports_cuda``); pass the one row, not a materialised [B, N] copy, so
+        # the hoisted pair bias (keyed on the mask's storage) is made once per pair, not once per call
+        if mask is not None and mask.shape[0] > 1:
+            mask = mask[:1]
+        if uid is not None and uid.shape[0] > 1:
+            uid = uid[:1]
         # the kernels' precision is their own (bf16 operands, or TF32 for fp32): an enclosing autocast must not recast their torch glue
         with torch.autocast("cuda", enabled=False):
             return local_dit_h100.run_block(

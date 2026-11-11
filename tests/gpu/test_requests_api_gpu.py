@@ -1,5 +1,5 @@
 """FoldForge API requests on the GPU: R1 (a weight replaced after ``clear_weight_caches`` is picked up by a cached H100 kernel path),
-R18 (the multi-fold call of the DiT blocks on ``cuda`` equals one call per fold), R12 (``parallel_residual`` on ``triton``)."""
+R18 (the multi-fold call of the DiT blocks on ``cuda`` (H100) and ``triton`` equals one call per fold; A100 ``cuda`` refuses with a reason), R12 (``parallel_residual`` on ``triton``)."""
 
 from __future__ import annotations
 
@@ -58,10 +58,17 @@ FOLD_CASES = [
 ]
 
 
-@pytest.mark.h100
+def _h100() -> bool:
+    return torch.cuda.get_device_capability() == (9, 0)
+
+
+@pytest.mark.parametrize("backend", ["cuda", "triton"])
 @pytest.mark.parametrize(("name", "make", "stream", "length"), FOLD_CASES, ids=[c[0] for c in FOLD_CASES])
-def test_multi_fold_cuda_equals_one_call_per_fold(name, make, stream, length):
-    block = _block(make).set_backend("cuda")
+def test_multi_fold_equals_one_call_per_fold(name, make, stream, length, backend):
+    """B folds in one call == B calls of one fold, and the reference. ``cuda``: H100 (A100 refuses B > 1: test below)."""
+    if backend == "cuda" and not _h100():
+        pytest.skip("cuda multi-fold: H100 only")
+    block = _block(make).set_backend(backend)
     folds, samples = 5, 5
     inp = block.make_inputs(length=length, samples=samples, depth=folds, dtype=torch.bfloat16, device="cuda", generator=_gen())
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -73,7 +80,7 @@ def test_multi_fold_cuda_equals_one_call_per_fold(name, make, stream, length):
             assert err < 1e-2, f"{name}: fold {b} differs from its own call (rel err {err:.3g})"
         ref = block.set_backend("pytorch")(**inp)
     err = (out.float() - ref.float()).abs().max() / ref.float().abs().max()
-    assert err < 3e-2, f"{name}: the multi-fold cuda call is off the reference (rel err {err:.3g})"
+    assert err < 3e-2, f"{name}: the multi-fold {backend} call is off the reference (rel err {err:.3g})"
 
 
 @pytest.mark.h100
@@ -103,3 +110,38 @@ def test_parallel_residual_triton(dtype, branches):
     parallel_residual(xs, *yg, backend="triton").backward(up)
     assert all(torch.equal(y.grad, up) for y in yg)  # pyright: ignore[reportArgumentType]
     torch.testing.assert_close(xs.grad, (up.float() * (1 - branches)).to(dtype))
+
+
+@pytest.mark.a100
+@pytest.mark.parametrize(("name", "make", "stream", "length"), FOLD_CASES, ids=[c[0] for c in FOLD_CASES])
+def test_multi_fold_cuda_a100_refuses_with_a_reason(name, make, stream, length):
+    """A100: the sm_80 atom paths take one pair; a B > 1 call is refused with a reason (never a silent fallback)."""
+    del name
+    block = _block(make).set_backend("cuda")
+    inp = block.make_inputs(length=length, samples=2, depth=3, dtype=torch.bfloat16, device="cuda", generator=_gen())
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        why = block.unsupported(**inp)
+        if why is None:  # served: then it must equal the reference
+            out, ref = block(**inp), block.set_backend("pytorch")(**inp)
+            assert (out.float() - ref.float()).abs().max() / ref.float().abs().max() < 3e-2
+        else:
+            with pytest.raises(BackendUnsupported):
+                block(**inp)
+
+
+@pytest.mark.h100
+def test_multi_fold_atom_pair_bias_is_hoisted_once():
+    """The sampler calls a block many times with the same pair / mask objects: the multi-fold call's pair bias is made once (the folds'
+    expanded key mask is read as its one row, not copied per call)."""
+    from miniworld_engine.kernels.integrations import local_dit_h100
+
+    block = _block(lambda: AtomDiT("protenix")).set_backend("cuda")
+    inp = block.make_inputs(length=512, samples=2, depth=3, dtype=torch.bfloat16, device="cuda", generator=_gen())
+    capture.clear_weight_caches(block)
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        first = block(**inp)
+        size = len(local_dit_h100._HOIST_BIAS)
+        for _ in range(3):
+            again = block(**inp)
+    assert size >= 1 and len(local_dit_h100._HOIST_BIAS) == size
+    assert torch.equal(first, again)
