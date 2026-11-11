@@ -232,6 +232,7 @@ environments:
       - pypi: https://download.pytorch.org/whl/tqdm-4.66.5-py3-none-any.whl
       - pypi: https://download.pytorch.org/whl/urllib3-1.26.13-py2.py3-none-any.whl
       - pypi: https://download.pytorch.org/whl/zipp-3.19.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/01/aa/70d453f3457708df6a21ac033243ce07c7a5ce7bad1cbc7bb5ca2f1f9160/miniworld_engine_kernels_sm90_cu129-2.5.2-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/09/86/63cdd5740f566fd9de2cadc106529adee0566f2fcafe69a65767eedc1681/onnx-1.23.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/12/1c/2f7a13626af1edfefb5ad69234d47e3b212064a42ad2e6db59351b5ae002/nvidia_cutlass_dsl_libs_base-4.8.0-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/13/a0/fdde64cc231f52a716107bf1a1246db9dde8cb11b28278b8d9c05f7c87bd/nvidia_cutlass_dsl_libs_cu12-4.8.0-cp312-cp312-manylinux_2_28_x86_64.whl
@@ -241,6 +242,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2d/6a/8a9ac7d5e2f7cf53c459bfef90ebc17a2f8cd54b665af96799d4c534840e/nodeenv-1.12.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/2e/76/932be4b50ef6ccedf9d3c6639b056a967a86258c6d9200643f01269211ca/tokenizers-0.22.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/30/90/e54c10f51883a397c4f851fc61ef41cf61e97f2ed2e050ed3f456031359b/cuequivariance_torch-0.12.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/36/61/1fafe5c4ddca17e7abf5701c695b3bd3fb05c06f99221045d67de7f69a53/miniworld_engine_kernels_sm80_cu129-2.5.2-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/36/e3/98552be936239da279ffb67b9a5b6504832a8850ad39db2eb2938504e8c8/cuequivariance-0.12.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/38/bb/d215ee7c73b61497b28a5503f9f53523f294fcc936762b7caf90e0c1c2b5/pyparsing-3.3.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/3a/5f/62d28cf019460c7f1394105b4d49d9911a9c444cb77ab0bd95a204c5a6de/numpy-2.5.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
@@ -252,7 +254,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/60/3a/723ad221b7fef91ccd947f9fddbe84d38fa573e2723317aaa67bfde41015/platformdirs-4.12.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/67/81/4add07e5172b7ac40d8ed5ff580409a7801a4fe26d529bdd915401dabfbe/typing_inspection-0.4.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6d/56/3c862bdd297a272a37e2ba1149da01446fd3f387ee80855699bb939bf5b2/fonttools-4.66.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/6d/72/83b5ce1391e6863e582b24eef2bed95dc1058379654b9acbbde9db16c2b9/miniworld_engine_kernels_sm90_cu129-2.5.1-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/6e/53/ebfed7b689c338dd8ebeec9c0730c8d56821292f14e2536e5f3ef1a05744/ninja-1.13.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/78/f9/b6831508960d559581c448532ba4df312217072975486dbf2b24fcc5b76f/contourpy-1.4.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/84/21/a35af28dcc61f37ed850a2d64c65c701321dfbf25085e469d5559360cbbf/pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
@@ -3027,7 +3028,8 @@ packages:
   - pyyaml
   - cuda-bindings
   - ninja
-  - miniworld-engine-kernels-sm90-cu129==2.5.1 ; python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'
+  - miniworld-engine-kernels-sm90-cu129==2.5.2 ; python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'
+  - miniworld-engine-kernels-sm80-cu129==2.5.2 ; python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'
   - cuequivariance-torch>=0.12,<0.13 ; extra == 'baselines'
   - flash-attn-4 ; extra == 'flash'
   - ruff==0.16.9 ; extra == 'dev'
@@ -3671,6 +3673,13 @@ packages:
   - jaraco-test ; extra == 'test'
   - importlib-resources ; python_full_version < '3.9' and extra == 'test'
   requires_python: '>=3.8'
+- pypi: https://files.pythonhosted.org/packages/01/aa/70d453f3457708df6a21ac033243ce07c7a5ce7bad1cbc7bb5ca2f1f9160/miniworld_engine_kernels_sm90_cu129-2.5.2-cp312-cp312-manylinux_2_28_x86_64.whl
+  name: miniworld-engine-kernels-sm90-cu129
+  version: 2.5.2
+  sha256: 6229f1920d3ea7958f68482631e9916c9100bd2a9fdba77f9f595e837412bc43
+  requires_dist:
+  - torch==2.13.*
+  requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/09/86/63cdd5740f566fd9de2cadc106529adee0566f2fcafe69a65767eedc1681/onnx-1.23.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
   name: onnx
   version: 1.23.0
@@ -3791,6 +3800,13 @@ packages:
   requires_dist:
   - cuequivariance
   requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/36/61/1fafe5c4ddca17e7abf5701c695b3bd3fb05c06f99221045d67de7f69a53/miniworld_engine_kernels_sm80_cu129-2.5.2-cp312-cp312-manylinux_2_28_x86_64.whl
+  name: miniworld-engine-kernels-sm80-cu129
+  version: 2.5.2
+  sha256: 70b059465839d8d8ab12e661a913faff8f3622d3ca79f35699a4799e03c97cab
+  requires_dist:
+  - torch==2.13.*
+  requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/36/e3/98552be936239da279ffb67b9a5b6504832a8850ad39db2eb2938504e8c8/cuequivariance-0.12.0-py3-none-any.whl
   name: cuequivariance
   version: 0.12.0
@@ -3904,13 +3920,6 @@ packages:
   - skia-pathops>=0.5.0 ; extra == 'all'
   - uharfbuzz>=0.45.0 ; extra == 'all'
   requires_python: '>=3.11'
-- pypi: https://files.pythonhosted.org/packages/6d/72/83b5ce1391e6863e582b24eef2bed95dc1058379654b9acbbde9db16c2b9/miniworld_engine_kernels_sm90_cu129-2.5.1-cp312-cp312-manylinux_2_28_x86_64.whl
-  name: miniworld-engine-kernels-sm90-cu129
-  version: 2.5.1
-  sha256: c843bc8abcd659e9921829ab3b0c825b1dfaccf68d24ec53d5baacfe95f8cb2a
-  requires_dist:
-  - torch==2.13.*
-  requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/6e/53/ebfed7b689c338dd8ebeec9c0730c8d56821292f14e2536e5f3ef1a05744/ninja-1.13.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
   name: ninja
   version: 1.13.2
