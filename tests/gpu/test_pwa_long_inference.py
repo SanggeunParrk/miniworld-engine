@@ -31,7 +31,8 @@ def test_long_inference_on_cuda(d_msa: int, d_pair: int, d_hidden: int, length: 
     base = _module(d_msa, d_pair, d_hidden, gen)
     inp = base.make_inputs(length=length, samples=1, depth=32, dtype=torch.bfloat16, device="cuda", generator=gen)
     kern = copy.deepcopy(base).set_backend("cuda")
-    why = kern.unsupported(**inp)
+    with torch.no_grad():
+        why = kern.unsupported(**inp)
     if _card() == (8, 0) and d_pair == 384 and length == 2048:
         assert why is not None and "inference" in why, why  # past the sm_80 pair forward's shared-memory row of logits (1840)
         return
