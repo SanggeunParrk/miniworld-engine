@@ -1,6 +1,7 @@
 """Automatic dispatch to the A100 (sm_80) AttentionPairBias: hand CUDA but the plain GEMMs (cuBLAS).
 
-Contract: bf16 activations, B = 1, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 (inference only) or 16 x 24 (AF3's Pairformer single attention; run 32 wide per head, as on
+Contract: bf16 activations, B >= 1 (one step per batch row: the FoldForge 5I28 confidence head runs its samples as B),
+d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 (inference only) or 16 x 24 (AF3's Pairformer single attention; run 32 wide per head, as on
 B200), or d_single 512 as 16 x 32; d_pair 128, no QK-norm, any L, ``implementation="miniworld"`` (engine backend not forced to Triton), sm_80.
 
 Inference (one opaque op), the B200 step with this family's A100 pieces:
@@ -161,8 +162,9 @@ def _step_refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.
         return "gate_bias: the A100 kernels have no gate constant"
     if single.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
         return f"dtype {single.dtype} / {pair.dtype}: bfloat16 activations only (parameters bf16 or fp32 masters)"
-    if single.ndim != 3 or single.shape[0] != 1 or not single.is_contiguous():
-        return "single must be one contiguous [1, L, d_single] row (B == 1)"
+    if single.ndim != 3 or single.shape[0] < 1 or not single.is_contiguous():
+        return "single must be one contiguous [B, L, d_single] tensor (B >= 1)"
+    B = single.shape[0]
     if (H, D) not in SHAPES or tuple(module.to_query.weight.shape) != (D, D):
         return f"{H} heads x d_single {D}: the kernels are built for (heads, d_single) in {SHAPES} with n_head * d_hidden == d_single"
     if tuple(module.to_bias.weight.shape) != (H, DP):
@@ -170,10 +172,10 @@ def _step_refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.
     if module.ln_single.weight is None or module.ln_pair.weight is None:
         return "the kernels take the affine LayerNorms"
     L = single.shape[1]
-    if L < 1 or tuple(pair.shape) != (1, L, L, DP) or not pair.is_contiguous():
-        return f"pair must be one contiguous [1, {L}, {L}, {DP}] row"
-    if mask is not None and (tuple(mask.shape) != (1, L) or mask.dtype != torch.bool):
-        return f"mask must be a bool [1, {L}] key mask"
+    if L < 1 or tuple(pair.shape) != (B, L, L, DP) or not pair.is_contiguous():
+        return f"pair must be one contiguous [{B}, {L}, {L}, {DP}] tensor"
+    if mask is not None and (tuple(mask.shape) != (B, L) or mask.dtype != torch.bool):
+        return f"mask must be a bool [{B}, {L}] key mask"
     heads_dim = _rows().GEOMETRY[(H, D)][1]
     idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
     if not _sm80().supported_gate(torch.bfloat16, _pad(L), H * heads_dim, H, idx):
@@ -267,7 +269,13 @@ def _train_leaves(leaves) -> list[torch.Tensor]:
 
 
 def _mask(mask: torch.Tensor | None, L: int) -> torch.Tensor | None:
-    return None if mask is None else mask.reshape(L).to(torch.bool).contiguous()
+    """The key mask as one contiguous bool [B, L] (each row step reads row ``b``, a contiguous [L])."""
+    return None if mask is None else mask.reshape(-1, L).to(torch.bool).contiguous()
+
+
+def _row(t: torch.Tensor | None, b: int) -> torch.Tensor | None:
+    """Row ``b`` of a batched operand (``None`` stays ``None``)."""
+    return None if t is None else t[b]
 
 
 def _geometry(leaves):
@@ -334,17 +342,20 @@ def _inference_fake(single, pair, mask, leaves, eps_s, eps_p):
 
 
 def _inference_cpp(single, pair, mask, leaves, eps_s, eps_p):
-    """The inference step as one C++ call (``step_sm80.cuh``): the cached packs in, the output out."""
+    """The inference step as one C++ call (``step_sm80.cuh``) per batch row: the cached packs in (looked up once), the output out.
+    B > 1: each row's [1, L, D] result is copied into its slice of the one output (the C++ step allocates it; L x D, negligible)."""
+    B = single.shape[0]
     Lp = _pad(single.shape[1])
     H = _geometry(leaves)[0]
     wpack, bvec, wf, wop, lnw, lnb, wo_k = _inference_packs(leaves)
-    return (
-        _rows()
-        .ext()
-        .apb_inference(
-            single,
-            pair,
-            mask,
+    ext = _rows().ext()
+    overlap, warps = _overlap(), _core_warps(Lp, H)
+
+    def step(b):
+        return ext.apb_inference(
+            single[b : b + 1],
+            pair[b : b + 1],
+            _row(mask, b),
             wpack,
             bvec,
             wf,
@@ -353,11 +364,17 @@ def _inference_cpp(single, pair, mask, leaves, eps_s, eps_p):
             lnb,
             eps_s,
             eps_p,
-            _overlap(),
-            _core_warps(Lp, H),
+            overlap,
+            warps,
             _ATTN_BN,
         )
-    )
+
+    if B == 1:
+        return step(0)
+    out = torch.empty_like(single)
+    for b in range(B):
+        out[b : b + 1].copy_(step(b))
+    return out
 
 
 @_native(
@@ -365,7 +382,7 @@ def _inference_cpp(single, pair, mask, leaves, eps_s, eps_p):
     _inference_fake,
 )
 def inference(single, pair, mask, leaves, eps_s, eps_p):
-    """single [1, L, d], pair [1, L, L, 128] bf16, mask [L] bool or None, leaves as ``_leaves`` -> single + APB(single)."""
+    """single [B, L, d], pair [B, L, L, 128] bf16, mask [B, L] bool or None, leaves as ``_leaves`` -> single + APB(single)."""
     return _inference_cpp(single, pair, mask, leaves, eps_s, eps_p)
 
 
@@ -385,59 +402,99 @@ def update_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: tor
 
 # ------------------------------------------------------------------------------------------------------------- training
 def _forward_cpp(single, pair, mask, leaves, eps_s, eps_p, save_natural=False):
+    """[y, *row 0's saved, *row 1's saved, ...]: the C++ training forward per batch row (the step packs the weights itself, per row),
+    y the rows' outputs (B = 1: the step's own output)."""
+    B = single.shape[0]
     H = _geometry(leaves)[0]
     lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, _, wb = leaves
-    return list(
-        _rows()
-        .ext()
-        .apb_train_forward(
-            single,
-            pair,
-            mask,
-            lnw,
-            lnb,
-            wq,
-            bq,
-            wk,
-            wv,
-            wg,
-            wo,
-            lnpw,
-            wb,
-            eps_s,
-            eps_p,
-            save_natural,
-            _overlap(),
-            _core_warps(_pad(single.shape[1]), H),
+    ext = _rows().ext()
+    overlap, warps = _overlap(), _core_warps(_pad(single.shape[1]), H)
+
+    def step(b):
+        return list(
+            ext.apb_train_forward(
+                single[b : b + 1],
+                pair[b : b + 1],
+                _row(mask, b),
+                lnw,
+                lnb,
+                wq,
+                bq,
+                wk,
+                wv,
+                wg,
+                wo,
+                lnpw,
+                wb,
+                eps_s,
+                eps_p,
+                save_natural,
+                overlap,
+                warps,
+            )
         )
-    )
+
+    if B == 1:
+        return step(0)
+    out = torch.empty_like(single)
+    saved = []
+    for b in range(B):
+        y, *row = step(b)
+        out[b : b + 1].copy_(y)
+        saved += row
+    return [out, *saved]
 
 
 def _backward_cpp(single, pair, mask, leaves, eps_s, eps_p, saved, dy, parameter_refs):
+    """[dx, dpair, *parameter gradients]: the C++ training backward per batch row (``saved`` as ``_forward_cpp`` returns it after y);
+    B > 1: dx / dpair copied into their rows, the parameter gradients summed in fp32 over the rows in row order, then cast to the
+    parameters' dtypes (``parameter_refs``; empty: fp32)."""
+    B = single.shape[0]
     H = _geometry(leaves)[0]
     overlap = _overlap()
     pair_stream = overlap
-    return list(
-        _rows()
-        .ext()
-        .apb_train_backward(
-            single,
-            pair,
-            leaves[0],
-            leaves[8],
-            leaves[10],
-            eps_s,
-            eps_p,
-            saved,
-            dy,
-            parameter_refs or leaves,
-            bool(parameter_refs),
-            overlap,
-            pair_stream,
-            _bwd_pair_grid(single.device, H, pair_stream),
-            _core_warps(_pad(single.shape[1]), H),
+    ext = _rows().ext()
+    grid, warps = _bwd_pair_grid(single.device, H, pair_stream), _core_warps(_pad(single.shape[1]), H)
+    r = len(saved) // B
+
+    def step(b, refs):
+        return list(
+            ext.apb_train_backward(
+                single[b : b + 1],
+                pair[b : b + 1],
+                leaves[0],
+                leaves[8],
+                leaves[10],
+                eps_s,
+                eps_p,
+                saved[b * r : (b + 1) * r],
+                dy[b : b + 1],
+                refs or leaves,
+                bool(refs),
+                overlap,
+                pair_stream,
+                grid,
+                warps,
+            )
         )
-    )
+
+    if B == 1:
+        return step(0, parameter_refs)
+    dy = dy.contiguous()
+    dx, dz = torch.empty_like(single), torch.empty_like(pair)
+    total: list[torch.Tensor] = []
+    for b in range(B):
+        dxb, dzb, *grads = step(b, [])
+        dx[b : b + 1].copy_(dxb)
+        dz[b : b + 1].copy_(dzb)
+        del dxb, dzb
+        if b == 0:
+            total = grads
+        else:
+            torch._foreach_add_(total, grads)  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
+    if parameter_refs:
+        total = [g if g.dtype == p.dtype else g.to(p.dtype) for g, p in zip(total, parameter_refs, strict=True)]
+    return [dx, dz, *total]
 
 
 def serves_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
@@ -445,23 +502,24 @@ def serves_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.T
 
 
 def _forward_fake(single, pair, mask, leaves, eps_s, eps_p, save_natural=False):
-    """y and the saved set: xa, (mean, rstd), qkvg, bias, O, LSE, og, W q | k | v | g, Wo [D, W] (and the natural-unit Wf)."""
-    L = single.shape[1]
+    """y and the saved set, per batch row: xa, (mean, rstd), qkvg, bias, O, LSE, og, W q | k | v | g, Wo [D, W] (and the natural-unit
+    Wf)."""
+    B, L = single.shape[:2]
     Lp = _pad(L)
     H, _, W, D = _geometry(leaves)
     e, f32 = single.new_empty, torch.float32
-    out = [
-        torch.empty_like(single),
-        e((Lp, D)),
-        e((L, 2), dtype=f32),
-        e((Lp, 4 * W)),
-        e((H, Lp, Lp)),
-        e((Lp, W)),
-        e((1, H, Lp), dtype=f32),
-        e((L, W)),
-        e((4 * W, D)),
-    ]
-    return out + [e((D, W))] + ([e((H, DP))] if save_natural else [])
+    row = [
+        ((Lp, D), None),
+        ((L, 2), f32),
+        ((Lp, 4 * W), None),
+        ((H, Lp, Lp), None),
+        ((Lp, W), None),
+        ((1, H, Lp), f32),
+        ((L, W), None),
+        ((4 * W, D), None),
+        ((D, W), None),
+    ] + ([((H, DP), None)] if save_natural else [])
+    return [torch.empty_like(single)] + [e(s, dtype=dt or single.dtype) for _ in range(B) for s, dt in row]
 
 
 def _backward_fake(single, pair, mask, leaves, eps_s, eps_p, saved, dy, parameter_refs):
@@ -573,21 +631,21 @@ def _generic_refusal(module, single, pair, mask, grad: bool) -> str | None:
     ok = (torch.bfloat16, torch.float32) if dt is torch.bfloat16 else (torch.float32,)
     if any(p.dtype not in ok for p in module.parameters()):
         return f"parameters must be {ok} for {dt} activations"
-    if single.ndim != 3 or single.shape[0] != 1:
-        return "single must be [1, L, d_single] (B == 1)"
-    L, H = single.shape[1], module.n_head
+    if single.ndim != 3 or single.shape[0] < 1:
+        return "single must be [B, L, d_single] (B >= 1)"
+    B, L, H = single.shape[0], single.shape[1], module.n_head
     if L % 128:
         return f"L {L}: a multiple of 128"
     hd = module.to_query.weight.shape[0] // H
     if hd not in GENERIC_HEAD_DIMS or module.to_query.weight.shape[0] != H * hd:
         return f"head dim {hd} (16 / 24 / 32 / 48 / 64)"
     dp = module.to_bias.weight.shape[1]
-    if tuple(pair.shape) != (1, L, L, dp):
-        return f"pair must be [1, {L}, {L}, {dp}]"
+    if tuple(pair.shape) != (B, L, L, dp):
+        return f"pair must be [{B}, {L}, {L}, {dp}]"
     if not sm80.pair_bias_generic_supported(dp, H, dt) or (grad and not sm80.pair_bias_generic_bwd_supported(dp, H, dt)):
         return f"d_pair {dp} x {H} heads: outside the sm_80 pair-bias kernels"
-    if mask is not None and (tuple(mask.shape) != (1, L) or mask.dtype is not torch.bool):
-        return f"mask must be a bool [1, {L}] key mask"
+    if mask is not None and (tuple(mask.shape) != (B, L) or mask.dtype is not torch.bool):
+        return f"mask must be a bool [{B}, {L}] key mask"
     if module.ln_single.weight is None or module.ln_single.bias is None or module.ln_pair.weight is None:
         return "the kernels take the affine LayerNorms"
     idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
@@ -718,39 +776,34 @@ def _gpack(params, heads: int, gate_bias: float, dt: torch.dtype, save: bool = T
     return cached(f"apb_sm80_generic_{dt}_{gate_bias}", tuple(params), build)
 
 
+#: saved tensors per batch row of the composed training forward: s, the LN statistics, qkvg, bias, o, lse, og
+_GROW = 7
+
+
 def _gfwd_fake(single, pair, mask, params, heads, gate_bias, eps_s, eps_p, save, extra=None):
-    L, D = single.shape[1], single.shape[2]
+    B, L, D = single.shape
     n = heads * _hdp(params[2].shape[0] // heads)
     e = single.new_empty
     outs = [torch.empty_like(single)]
     if save:
         outs += [
-            e((L, D)),
-            e((2, L, 1), dtype=torch.float32),
-            e((L, 4 * n)),
-            e((heads, L, L)),
-            e((L, n)),
-            e((heads, L), dtype=torch.float32),
-            e((L, n)),
+            t
+            for _ in range(B)
+            for t in (
+                e((L, D)),
+                e((2, L, 1), dtype=torch.float32),
+                e((L, 4 * n)),
+                e((heads, L, L)),
+                e((L, n)),
+                e((heads, L), dtype=torch.float32),
+                e((L, n)),
+            )
         ]
     return outs
 
 
-@opaque(fake=_gfwd_fake, name="apb_sm80_generic_fwd")
-def _gfwd(
-    single: torch.Tensor,
-    pair: torch.Tensor,
-    mask: torch.Tensor | None,
-    params: list[torch.Tensor],
-    heads: int,
-    gate_bias: float,
-    eps_s: float,
-    eps_p: float,
-    save: bool,
-    extra: torch.Tensor | None = None,
-) -> list[torch.Tensor]:
-    """single [1, L, D], pair [1, L, L, dp] -> [single + APB(single, pair)], with ``save`` also s, the LN statistics, qkvg, bias, o, lse, og.
-    ``extra`` [1, H, L, L] (inference, ``save`` False): an additive logit term (``extra_pair_bias``) added to the bias in the core's units."""
+def _gfwd_row(single, pair, mask, params, heads, gate_bias, eps_s, eps_p, save, extra, packs) -> list[torch.Tensor]:
+    """One batch row of ``_gfwd``: single [1, L, D], pair [1, L, L, dp], mask [L] or None, extra [1, H, L, L] or None."""
     from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32
 
     sm80 = _sm80()
@@ -760,7 +813,7 @@ def _gfwd(
     hd = params[2].shape[0] // heads
     hdp = _hdp(hd)
     n = heads * hdp
-    w, b, wop, wcm = _gpack(params, heads, gate_bias, dt, save)
+    w, b, wop, wcm = packs
     x = single.reshape(L, D)
     with torch.cuda.device(single.device), _tf32(f32):
         s32, mu, rs = torch.native_layer_norm(x.float(), (D,), params[0].float(), params[1].float(), eps_s)
@@ -797,23 +850,58 @@ def _gfwd(
     return [out, s, torch.stack([mu.view(L, 1), rs.view(L, 1)]), qkvg, bias, o, lse.view(heads, L), og]
 
 
-def _gbwd_fake(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p):
-    return [torch.empty_like(single), torch.empty_like(pair), *(torch.empty_like(p) for p in params)]
-
-
-@opaque(fake=_gbwd_fake, name="apb_sm80_generic_bwd")
-def _gbwd(
-    dout: torch.Tensor,
+@opaque(fake=_gfwd_fake, name="apb_sm80_generic_fwd")
+def _gfwd(
     single: torch.Tensor,
     pair: torch.Tensor,
     mask: torch.Tensor | None,
     params: list[torch.Tensor],
-    saved: list[torch.Tensor],
     heads: int,
     gate_bias: float,
+    eps_s: float,
     eps_p: float,
+    save: bool,
+    extra: torch.Tensor | None = None,
 ) -> list[torch.Tensor]:
-    """The backward of ``_gfwd`` (``save=True``): [d single, d pair, *d params] (each in its input's dtype)."""
+    """single [B, L, D], pair [B, L, L, dp], mask [B, L] or None -> [single + APB(single, pair)], with ``save`` also, per batch row,
+    s, the LN statistics, qkvg, bias, o, lse, og. ``extra`` [B, H, L, L] (inference, ``save`` False): an additive logit term
+    (``extra_pair_bias``) added to the bias in the core's units. B > 1: the one-row composition per batch row, the packs made once,
+    each row's output copied into its slice of the one output."""
+    packs = _gpack(params, heads, gate_bias, single.dtype, save)
+    B = single.shape[0]
+
+    def row(b):
+        return _gfwd_row(
+            single[b : b + 1],
+            pair[b : b + 1],
+            _row(mask, b),
+            params,
+            heads,
+            gate_bias,
+            eps_s,
+            eps_p,
+            save,
+            None if extra is None else extra[b : b + 1],
+            packs,
+        )
+
+    if B == 1:
+        return row(0)
+    out = torch.empty_like(single)
+    saved = []
+    for b in range(B):
+        y, *rest = row(b)
+        out[b : b + 1].copy_(y)
+        saved += rest
+    return [out, *saved]
+
+
+def _gbwd_fake(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p):
+    return [torch.empty_like(single), torch.empty_like(pair), *(torch.empty_like(p) for p in params)]
+
+
+def _gbwd_row(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p, packs) -> list[torch.Tensor]:
+    """One batch row of ``_gbwd``: [d single (its dtype), d pair, *d params (fp32)]."""
     from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32, _wgrad
 
     sm80 = _sm80()
@@ -824,7 +912,7 @@ def _gbwd(
     hd = params[2].shape[0] // heads
     hdp = _hdp(hd)
     n = heads * hdp
-    w, _, wop, wcm = _gpack(params, heads, gate_bias, dt)
+    w, _, wop, wcm = packs
     dy = dout.reshape(L, D)
     with torch.cuda.device(single.device), _tf32(f32):
         dog = torch.mm(dy, wop)  # [L, n]
@@ -869,9 +957,56 @@ def _gbwd(
         (dwf * wb.float()).sum(0),
         dwf * lnpw.float()[None],
     ]
+    return [dx.to(dt).view(single.shape), dz.view(pair.shape), *(g_.reshape(p.shape) for g_, p in zip(grads, params, strict=True))]
+
+
+@opaque(fake=_gbwd_fake, name="apb_sm80_generic_bwd")
+def _gbwd(
+    dout: torch.Tensor,
+    single: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    params: list[torch.Tensor],
+    saved: list[torch.Tensor],
+    heads: int,
+    gate_bias: float,
+    eps_p: float,
+) -> list[torch.Tensor]:
+    """The backward of ``_gfwd`` (``save=True``): [d single, d pair, *d params] (each in its input's dtype). B > 1: the one-row
+    backward per batch row, d single / d pair copied into their rows, the parameter gradients summed in fp32 over the rows in row
+    order before the cast to the parameters' dtypes."""
+    packs = _gpack(params, heads, gate_bias, single.dtype)
+    B = single.shape[0]
+    dout = dout.contiguous()
+    dx, dz = (None, None) if B == 1 else (torch.empty_like(single), torch.empty_like(pair))
+    total: list[torch.Tensor] = []
+    for b in range(B):
+        dxb, dzb, *grads = _gbwd_row(
+            dout[b : b + 1],
+            single[b : b + 1],
+            pair[b : b + 1],
+            _row(mask, b),
+            params,
+            saved[b * _GROW : (b + 1) * _GROW],
+            heads,
+            gate_bias,
+            eps_p,
+            packs,
+        )
+        if B == 1:
+            dx, dz = dxb, dzb
+        else:
+            assert dx is not None and dz is not None
+            dx[b : b + 1].copy_(dxb)
+            dz[b : b + 1].copy_(dzb)
+        if b == 0:
+            total = [g.to(torch.float32, copy=True) for g in grads] if B > 1 else grads
+        else:
+            torch._foreach_add_(total, grads)  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
+    assert dx is not None and dz is not None
     outs = [torch.empty(p.shape, device=p.device, dtype=p.dtype) for p in params]
-    torch._foreach_copy_(outs, [g_.reshape(p.shape) for g_, p in zip(grads, params, strict=True)])  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
-    return [dx.to(dt).view(single.shape), dz.view(pair.shape), *outs]
+    torch._foreach_copy_(outs, total)  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
+    return [dx, dz, *outs]
 
 
 class _Generic(torch.autograd.Function):
@@ -905,8 +1040,8 @@ class _Generic(torch.autograd.Function):
 def update_generic(
     module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool, extra: torch.Tensor | None = None
 ) -> torch.Tensor:
-    """The composed path (``_generic_refusal`` must have returned None): single + APB(single, pair). ``extra``: [1, H, L, L] logit planes
-    (``extra_pair_bias``), inference only."""
+    """The composed path (``_generic_refusal`` must have returned None): single + APB(single, pair), B >= 1 rows. ``extra``: [B, H, L, L]
+    logit planes (``extra_pair_bias``), inference only."""
     if extra is not None and grad:
         raise ValueError("extra_pair_bias: the composed path takes it at inference only")
     args = (module.n_head, float(module.gate_bias), float(module.ln_single.eps), float(module.ln_pair.eps))

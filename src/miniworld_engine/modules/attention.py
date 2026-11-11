@@ -107,10 +107,11 @@ class AttentionPairBias(BackendModule, MasterWeights):
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
-        "cuda:a100_sm80": 3,
+        "cuda:a100_sm80": 4,
+        "cuda:h100_sm90": 2,
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
-    }  # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100
+    }  # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100; cuda:a100_sm80 4 / cuda:h100_sm90 2 (2026-11-11): B > 1 served (one step per batch row, FoldForge 5I28 confidence head)
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -260,14 +261,16 @@ class AttentionPairBias(BackendModule, MasterWeights):
     # folded there). No gradient -> the inference op (LayerNorm rows, one packed q | k | v | g GEMM, pair LayerNorm + head projection pass,
     # the gated sm_90a wgmma core, to_out accumulated onto the residual); a gradient -> one autograd Function (forward + backward on the same
     # rows / cores, fp32 weight gradients onto the parameters). Range = ``refusal``: bf16 activations (parameters bf16 or fp32 masters) or
-    # float32 activations with float32 parameters (the TF32 path: attn_tf32 core, fp32 row / pair kernels, fp32 GEMMs), one batch row,
+    # float32 activations with float32 parameters (the TF32 path: attn_tf32 core, fp32 row / pair kernels, fp32 GEMMs), any batch B
+    # (the one-row step per batch row inside each op, the weight packs made once; FoldForge 5I28 confidence head: its samples as B),
     # 8 x 48 / 12 x 32 / 16 x 24 / 24 x 16 heads at d_single 384 or 16 x 32 at 512, d_pair 128, 256 / 384 (8 or 16 heads) or 512 (16 heads),
     # gate_bias, no QK-norm, L a multiple of 128; everything else is refused, never run elsewhere. extra_pair_bias (eval only, FoldForge R3:
     # OpenDDE's refiner): added to the bias planes the pair pass writes, before the core, in the core's units (exp2; the fp32 core's key order).
-    # A100 (sm_80): kernels/integrations/attention_pair_bias_sm80.py -- the fused C++ step (bf16 activations, B = 1, the same head layouts,
+    # A100 (sm_80): kernels/integrations/attention_pair_bias_sm80.py -- the fused C++ step (bf16 activations, any B, the same head layouts,
     # d_pair 128, any L, no gate_bias) and, for fp32 (TF32 core), the wider pairs (256 / 384 / 512) and gate_bias, the path composed from
-    # the sm_80 attention kernels (B = 1, L a multiple of 128, head dims 16-64); no QK-norm; inference and training. extra_pair_bias (eval
-    # only): the composed path, its planes added to the bias tensor it makes.
+    # the sm_80 attention kernels (any B, L a multiple of 128, head dims 16-64; both one step per batch row); no QK-norm; inference and
+    # training (the weight gradients summed over B). extra_pair_bias (eval only): the composed path, its planes added to the bias tensor
+    # it makes.
     # Its ``refusal`` is the range there.
     def _supports_cuda(self, single, pair, mask=None, extra_pair_bias=None) -> str | None:
         from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as native
