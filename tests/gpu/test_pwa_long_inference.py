@@ -59,7 +59,7 @@ def test_long_inference_on_cuda(d_msa: int, d_pair: int, d_hidden: int, length: 
 
 
 @pytest.mark.skipif(_card() not in ((9, 0), (8, 0)), reason="H100 / A100")
-@pytest.mark.parametrize(("d_msa", "d_pair", "d_hidden"), [(64, 128, 8), (64, 256, 32)])
+@pytest.mark.parametrize(("d_msa", "d_pair", "d_hidden"), [(64, 128, 8), (64, 128, 32), (64, 256, 32)])
 def test_long_training_is_refused(d_msa: int, d_pair: int, d_hidden: int) -> None:
     gen = torch.Generator(device="cuda").manual_seed(0)
     kern = _module(d_msa, d_pair, d_hidden, gen).set_backend("cuda")

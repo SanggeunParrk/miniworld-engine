@@ -152,6 +152,10 @@ def refusal(
         n_max = 1024 if torch.is_grad_enabled() else NMAX_INFER
         if cap == (9, 0) and native and (n == 0 or s == 0 or n > n_max):
             return f"the CUDA-only H100 path needs positive S and N <= {n_max}, got N={n}, S={s}"
+        if cap == (9, 0) and torch.is_grad_enabled() and n > 1024:
+            # past 1024 the training step would run the Triton pair kernels (pair3.cu's backward holds N <= 1024): slower than the triton
+            # backend (H100, boltz2 widths, L 1536: 5.80 vs 5.50 ms) -- refused, as at the other widths (FoldForge 5I28: inference only)
+            return f"training past 1024 tokens: the H100 pair backward (pair3.cu pair_bwd3) holds N <= 1024, got N={n} (inference serves N <= {NMAX_INFER})"
         if wide:  # the wide path pads the length to a multiple of 16 itself; any depth
             if cap != (9, 0):
                 return "the wide kernels are built for sm_90a"
