@@ -773,16 +773,18 @@ def pair_bias_generic_backward(
     mask: torch.Tensor | None,
     n: int,
     eps: float = 1e-5,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The backward of :func:`pair_bias_generic` in natural units: ``z`` ``[NZ, NZ, C]``, ``wcm`` the folded weight fp32 ``[C, H]``, ``db`` fp32 ``[H, n, n]`` (the bias gradient summed over the
     samples), ``mask`` the bool ``[NZ]`` key mask the forward folded in (a masked key's gradient is dropped) or None.  Returns ``(dz, dw)``: ``dz`` in z's dtype and shape, ``dw`` the fp32
-    ``[H, C]`` gradient of the folded weight (summed over the kernel's blocks in a fixed order: a replay is bit-identical)."""
+    ``[H, C]`` gradient of the folded weight (summed over the kernel's blocks in a fixed order: a replay is bit-identical).
+    ``out``: a contiguous buffer of z's shape and dtype that ``dz`` is written into (a batch row of the caller's gradient)."""
     nz, c, heads = z.shape[0], z.shape[-1], wcm.shape[1]
     te = _GEN_BWD_TE[c]
     tiles = -(-nz // te)
     rows = max(1, min(8, nz * tiles // 864))  # about four waves of two blocks per SM
     pw = torch.empty(tiles * -(-nz // rows), heads, c, device=z.device, dtype=torch.float32)
-    dz = torch.empty_like(z)
+    dz = torch.empty_like(z) if out is None else out
     _ext().pair_bias_gen_bwd(
         z.reshape(nz, nz, c),
         wcm,

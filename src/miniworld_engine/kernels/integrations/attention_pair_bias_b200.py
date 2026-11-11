@@ -9,10 +9,11 @@ and cuBLAS at L 384 / 768 for the five head layouts (ln_pair has no beta, so onl
 repaired), which materializes extra FP32 workspaces and costs about 2x the step.
 
 Contract: bf16 activations (parameters bf16 or fp32 masters) or, H100, fp32 activations with fp32 parameters (the TF32 path at the
-end of this file), B = 1, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention), or d_single
-512 as 16 x 32; d_pair 128 (any of those), 256 / 384 (8 or 16 heads) or 512 (16 heads) -- the wide pair kernels, inference and
-training --; gate_bias (a constant on the gate rows of the packed bias); no QK-norm, sm_90 (H100: ``refusal`` is the whole gate, the
-``cuda`` backend of ``modules.attention.AttentionPairBias`` states it) or sm_100. H100: L a multiple of 128.
+end of this file), B >= 1 (one step per batch row, the packs made once: FoldForge 5I28 confidence head), d_single 384 as 8
+heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention), or d_single 512 as 16 x 32; d_pair 128 (any
+of those), 256 / 384 (8 or 16 heads) or 512 (16 heads) -- the wide pair kernels, inference and training --; gate_bias (a
+constant on the gate rows of the packed bias); no QK-norm, sm_90 (H100: ``refusal`` is the whole gate, the ``cuda`` backend of
+``modules.attention.AttentionPairBias`` states it) or sm_100. H100: L a multiple of 128.
 
 16 x 24 runs 32 wide per head: the packed q | k | v | g weights carry 8 zero rows after each head's 24 (and Wo 8 zero columns),
 so q, k, v, g, O and every gradient on that side are W = 512 wide with exact zeros in the pads; the attention kernels see heads
@@ -82,8 +83,9 @@ def refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor
             f"dtype {single.dtype} / {pair.dtype}: bfloat16 activations (bf16 wgmma cores; parameters bf16 or fp32 masters) or float32 "
             "activations with float32 parameters (TF32 cores)"
         )
-    if single.ndim != 3 or single.shape[0] != 1 or not single.is_contiguous():
-        return "single must be one contiguous [1, L, d_single] row (B == 1)"
+    if single.ndim != 3 or single.shape[0] < 1 or not single.is_contiguous():
+        return "single must be one contiguous [B, L, d_single] tensor (B >= 1)"
+    B = single.shape[0]
     H, D = module.n_head, single.shape[2]
     if (H, D) not in SHAPES or tuple(module.to_query.weight.shape) != (D, D):
         return f"{H} heads x d_single {D}: the kernels are built for (heads, d_single) in {SHAPES} with n_head * d_hidden == d_single"
@@ -98,10 +100,10 @@ def refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor
     L = single.shape[1]
     if L % 128:
         return f"L {L}: a multiple of 128 only"
-    if tuple(pair.shape) != (1, L, L, dp) or not pair.is_contiguous():
-        return f"pair must be one contiguous [1, {L}, {L}, {dp}] row"
-    if mask is not None and (tuple(mask.shape) != (1, L) or mask.dtype != torch.bool):
-        return f"mask must be a bool [1, {L}] key mask"
+    if tuple(pair.shape) != (B, L, L, dp) or not pair.is_contiguous():
+        return f"pair must be one contiguous [{B}, {L}, {L}, {dp}] tensor"
+    if mask is not None and (tuple(mask.shape) != (B, L) or mask.dtype != torch.bool):
+        return f"mask must be a bool [{B}, {L}] key mask"
     return None
 
 
@@ -175,7 +177,13 @@ def _inference_core(device, heads: int, d: int):
 
 
 def _mask(mask: torch.Tensor | None, L: int) -> torch.Tensor | None:
-    return None if mask is None else mask.reshape(L).to(torch.bool).contiguous()
+    """The key mask as one contiguous bool [B, L] (the ops hand row ``b``, a contiguous [L], to the kernels)."""
+    return None if mask is None else mask.reshape(-1, L).to(torch.bool).contiguous()
+
+
+def _row(t: torch.Tensor | None, b: int) -> torch.Tensor | None:
+    """Row ``b`` of a batched operand (``None`` stays ``None``)."""
+    return None if t is None else t[b]
 
 
 def _geometry(leaves):
@@ -260,37 +268,42 @@ def inference(
     gate_bias: float = 0.0,
     extra: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """single [1, L, 384], pair [1, L, L, 128] bf16, mask [L] bool or None, leaves as ``_leaves`` -> single + APB(single). ``extra``
-    [1, H, L, L] (any strides): an additive logit term (``extra_pair_bias``), added to the bias planes in their exp2 units."""
-    L = single.shape[1]
+    """single [B, L, 384], pair [B, L, L, 128] bf16, mask [B, L] bool or None, leaves as ``_leaves`` -> single + APB(single). ``extra``
+    [B, H, L, L] (any strides): an additive logit term (``extra_pair_bias``), added to the bias planes in their exp2 units.
+
+    B > 1: the one-row step per batch row (FoldForge 5I28 confidence head: the samples' rows), the weight packs made once, each row
+    written into its slice of the one output -- the per-row math of a B = 1 call, launch for launch."""
+    B, L = single.shape[:2]
     rows, dev = _rows(), single.device
     params = leaves
     leaves = _capture.param_forms("apb_leaves", params, lambda: tuple(_kernel_leaves(params)))
     lnw, lnb = leaves[0], leaves[1]
     H, _, W, D = _geometry(leaves)
     with torch.cuda.device(dev):
-        x = single.view(L, D)
         wpack, bvec, wf, wop, _ = _inference_packs(params, leaves, gate_bias)
         wo = leaves[7] if wop is None else wop
-        xa = torch.empty_like(x)
-        y = torch.empty_like(x)  # residual seed, written by ln_rows; to_out accumulates onto it
-        rows.ext().ln_rows(x, lnw, lnb, xa, None, eps_s, y)
-        qkvg = torch.addmm(bvec, xa, wpack.t())
         neg = -math.inf if torch.cuda.get_device_capability(dev) == (9, 0) else NEG
-        bias = rows.pair_bias(pair.view(L * L, wf.shape[1]), wf, mask, L, eps_p, neg)
-        if extra is not None:  # a masked key stays at -inf (H100) / NEG + extra (B200: finite, still far below every real logit)
-            bias.add_(extra[0].to(bias.dtype), alpha=LOG2E)
         core = _cores.get((dev.index, H, D))
         if core is None:
             core = _cores[(dev.index, H, D)] = _inference_core(dev, H, D)
-        core(qkvg, bias)
-        return y.addmm_(qkvg[:, :W], wo.t()).view(1, L, D)
+        out = torch.empty_like(single)  # each row: the residual seed ln_rows writes; to_out accumulates onto it
+        xa = single.new_empty((L, D))  # one row's LN(single), rewritten row after row (stream order)
+        for b in range(B):
+            x, y = single[b], out[b]
+            rows.ext().ln_rows(x, lnw, lnb, xa, None, eps_s, y)
+            qkvg = torch.addmm(bvec, xa, wpack.t())
+            bias = rows.pair_bias(pair[b].view(L * L, wf.shape[1]), wf, _row(mask, b), L, eps_p, neg)
+            if extra is not None:  # a masked key stays at -inf (H100) / NEG + extra (B200: finite, still far below every real logit)
+                bias.add_(extra[b].to(bias.dtype), alpha=LOG2E)
+            core(qkvg, bias)
+            y.addmm_(qkvg[:, :W], wo.t())
+        return out
 
 
 def update_inference(
     module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, extra: torch.Tensor | None = None
 ) -> torch.Tensor:
-    """``extra``: [1, H, L, L] logit planes (``extra_pair_bias``, natural units) or None."""
+    """``extra``: [B, H, L, L] logit planes (``extra_pair_bias``, natural units) or None."""
     op = inference32 if single.dtype == torch.float32 else inference
     return op(
         single,
@@ -305,15 +318,22 @@ def update_inference(
 
 
 # ------------------------------------------------------------------------------------------------------------- training
+def _row_saved(dp: int) -> int:
+    """Saved tensors per batch row of the bf16 training forward: xa, (mean, rstd), qkvg, bias, O, LSE, og (a wide pair: its row
+    stats and unmasked bias too)."""
+    return 7 + (2 if dp != DP else 0)
+
+
 def _forward_fake(single, pair, mask, leaves, eps_s, eps_p, gate_bias=0.0):
-    """y and the saved set: xa, (mean, rstd), qkvg, bias, O, LSE, og, Wf, W q | k | v | g (and the padded Wo for 16 x 24; a wide
-    pair: its row stats and unmasked bias last)."""
-    L = single.shape[1]
+    """y and the saved set: the packs Wf, W q | k | v | g (and the padded Wo for 16 x 24 / Hopper, Wb bf16 on Hopper), then per batch
+    row xa, (mean, rstd), qkvg, bias, O, LSE, og (a wide pair: its row stats and unmasked bias)."""
+    B, L = single.shape[:2]
     H, _, W, D = _geometry(leaves)
     dp = leaves[9].shape[1]
     e, f32 = single.new_empty, torch.float32
-    out = [
-        torch.empty_like(single),
+    hopper = torch.cuda.get_device_capability(single.device) == (9, 0)
+    packs = [e((H, dp)), e((4 * W, D))] + ([e((D, W))] if W != D or hopper else []) + ([e((H, dp))] if hopper else [])
+    row = [
         e((L, D)),
         e((L, 2), dtype=f32),
         e((L, 4 * W)),
@@ -321,16 +341,8 @@ def _forward_fake(single, pair, mask, leaves, eps_s, eps_p, gate_bias=0.0):
         e((L, W), dtype=f32),
         e((H, L), dtype=f32),
         e((L, W)),
-        e((H, dp)),
-        e((4 * W, D)),
-    ]
-    hopper = torch.cuda.get_device_capability(single.device) == (9, 0)
-    return (
-        out
-        + ([e((D, W))] if W != D or hopper else [])
-        + ([e((H, dp))] if hopper else [])
-        + ([e((L * L, 2), dtype=f32), e((H, L, L), dtype=f32)] if dp != DP else [])
-    )
+    ] + ([e((L * L, 2), dtype=f32), e((H, L, L), dtype=f32)] if dp != DP else [])
+    return [torch.empty_like(single), *packs, *(t.clone() for _ in range(B) for t in row)]
 
 
 @opaque(fake=_forward_fake, name="apb_b200_train_fwd")
@@ -343,36 +355,43 @@ def forward(
     eps_p: float,
     gate_bias: float = 0.0,
 ) -> list[torch.Tensor]:
-    L = single.shape[1]
+    """single [B, L, D], pair [B, L, L, dp] -> [y, *packs, *row 0's saved, *row 1's saved, ...] (``_forward_fake``): the one-row
+    forward per batch row, the packs made once."""
+    B, L = single.shape[:2]
     rows = _rows()
     lnw, lnb = leaves[0], leaves[1]
     H, _, W, D = _geometry(leaves)
+    hopper = torch.cuda.get_device_capability(single.device) == (9, 0)
     with torch.cuda.device(single.device):
-        x = single.view(L, D)
         wpack, bvec, wf, wop, wbo = _prep(leaves, 1.0, 1.0, gate_bias)
         wo = leaves[7] if wop is None else wop
-        xa = torch.empty_like(x)
-        st = x.new_empty((L, 2), dtype=torch.float32)
-        y = torch.empty_like(x)
-        rows.ext().ln_rows(x, lnw, lnb, xa, st, eps_s, y)
-        qkvg = torch.addmm(bvec, xa, wpack.t())
-        neg = -math.inf if torch.cuda.get_device_capability(single.device) == (9, 0) else NEG
+        neg = -math.inf if hopper else NEG
         dp = wf.shape[1]
-        wide = []  # a wide pair: (row stats, unmasked bias) for its backward
-        if dp == DP:
-            bias = rows.pair_bias(pair.view(L * L, DP), wf, mask, L, eps_p, neg)
-        else:
-            bias, *wide = rows.pair_bias(pair.view(L * L, dp), wf, mask, L, eps_p, neg, saved=True)
         core = _training_core(single.device)
-        if torch.cuda.get_device_capability(single.device) == (9, 0):
-            # The gate is the attention epilogue: O (fp32, for the backward's D) and og = sigmoid(g) O in one pass.
-            O, og, LSE = core.apb_forward_gated(qkvg, bias, L, H, D)
-        else:
-            O, LSE = core.apb_forward(qkvg[:, :W], qkvg[:, W : 2 * W], qkvg[:, 2 * W : 3 * W], bias, L, H, D)
-            og = x.new_empty((L, W))
-            rows.ext().gate_rows(O, qkvg, og)
-        y = y.addmm_(og, wo.t()).view(1, L, D)  # in place onto the residual seed: no copy of x into the output
-    return [y, xa, st, qkvg, bias, O, LSE, og, wf, wpack] + ([wop] if wop is not None else []) + ([wbo] if wbo is not None else []) + wide
+        out = torch.empty_like(single)
+        saved = []
+        for b in range(B):
+            x, y, m = single[b], out[b], _row(mask, b)
+            xa = torch.empty_like(x)
+            st = x.new_empty((L, 2), dtype=torch.float32)
+            rows.ext().ln_rows(x, lnw, lnb, xa, st, eps_s, y)
+            qkvg = torch.addmm(bvec, xa, wpack.t())
+            wide = []  # a wide pair: (row stats, unmasked bias) for its backward
+            if dp == DP:
+                bias = rows.pair_bias(pair[b].view(L * L, DP), wf, m, L, eps_p, neg)
+            else:
+                bias, *wide = rows.pair_bias(pair[b].view(L * L, dp), wf, m, L, eps_p, neg, saved=True)
+            if hopper:
+                # The gate is the attention epilogue: O (fp32, for the backward's D) and og = sigmoid(g) O in one pass.
+                O, og, LSE = core.apb_forward_gated(qkvg, bias, L, H, D)
+            else:
+                O, LSE = core.apb_forward(qkvg[:, :W], qkvg[:, W : 2 * W], qkvg[:, 2 * W : 3 * W], bias, L, H, D)
+                og = x.new_empty((L, W))
+                rows.ext().gate_rows(O, qkvg, og)
+            y.addmm_(og, wo.t())  # in place onto the residual seed: no copy of x into the output
+            saved += [xa, st, qkvg, bias, O, LSE, og, *wide]
+    packs = [wf, wpack] + ([wop] if wop is not None else []) + ([wbo] if wbo is not None else [])
+    return [out, *packs, *saved]
 
 
 def _backward_fake(single, pair, mask, leaves, eps_s, eps_p, saved, dy):
@@ -395,58 +414,72 @@ def backward(
     saved: list[torch.Tensor],
     dy: torch.Tensor,
 ) -> list[torch.Tensor]:
-    L = single.shape[1]
+    """The one-row backward per batch row (``saved`` as ``forward`` returns it after y): dx / dpair written into their rows of one
+    gradient each, the parameter gradients (fp32) summed over the rows in row order (what accumulating per-sample calls gives)."""
+    B, L = single.shape[:2]
     rows = _rows()
     E = rows.ext()
     lnw, lnpw = leaves[0], leaves[8]
     H, _, W, D = _geometry(leaves)
-    xa, st, qkvg, bias, O, LSE, og, wf, wpack = saved[:9]
-    dp = wf.shape[1]
-    wide = (saved[-2], saved[-1]) if dp != DP else None  # a wide pair: its forward's row stats and unmasked bias
+    dp = leaves[9].shape[1]
+    r = _row_saved(dp)
+    packs = saved[: len(saved) - B * r]
+    wf, wpack = packs[:2]
     # [D, W] bf16 and Wb bf16: packed by ``prep`` on Hopper (its leaves may be an fp32 master), the leaf itself otherwise
-    wo = saved[9] if len(saved) > 9 else leaves[7]
-    wb = saved[10] if len(saved) > 10 else leaves[9]
+    wo = packs[2] if len(packs) > 2 else leaves[7]
+    wb = packs[3] if len(packs) > 3 else leaves[9]
     f32 = torch.float32
+    hopper = torch.cuda.get_device_capability(single.device) == (9, 0)
     with torch.cuda.device(single.device):
-        x = single.view(L, D)
-        dy2 = dy.contiguous().view(L, D)
-        if torch.cuda.get_device_capability(x.device) == (9, 0):
-            # Every producer owns a block partial row; finalize reduces the rows each grid wrote, in block order (no zero fill).
-            rows_a = (L + rows.RW - 1) // rows.RW
-            rows_b = E.pair_bwd_blocks(x, H, L)
-            acc = torch.empty(max(rows_a, rows_b), rows.acc_n(H, D, dp), device=x.device)
-        else:
-            rows_a = rows_b = 1
-            acc = torch.zeros(rows.acc_n(H, D, dp), device=x.device)
-        dog = dy2 @ wo  # [L, W]: zero in the pads (Wo's pad columns are zero)
-        dwo = torch.mm(dy2.t(), og, out_dtype=f32)  # [D, W]; finalize keeps the real columns
-        dob = x.new_empty((L, W))
-        dd = x.new_empty((H, L), dtype=f32)
-        dqkvg = torch.empty_like(qkvg)
-        E.gate_bwd(dog, O, qkvg, dob, dd, dqkvg)
-        DQ, DK, DV, DB = _training_core(single.device).apb_backward(
-            qkvg[:, :W],
-            qkvg[:, W : 2 * W],
-            qkvg[:, 2 * W : 3 * W],
-            dob,
-            bias,
-            LSE,
-            dd,
-            L,
-            H,
-            D,
-        )
-        E.qkv_bwd(DQ, DK, DV, dqkvg, acc, D)
-        del DQ, DK, DV
-        dxa = dqkvg @ wpack
-        dwp = torch.mm(dqkvg.t(), xa, out_dtype=f32)
-        dx = torch.empty_like(x)
-        E.ln_bwd(dxa, x, st, lnw, dy2, dx, acc)
-        dz, _, _ = rows.pair_bias_bwd(pair.view(L * L, dp), DB, wf, L, eps_p, acc, D, saved=wide)
-        # custom-op outputs may not alias: every parameter gradient leaves as its own tensor, written by one kernel
-        outs = [torch.empty(t.shape, dtype=f32, device=t.device) for t in leaves]
-        E.finalize(dwp, dwo, acc, wb, lnpw, outs, rows_a, rows_b)
-    return [dx.view(single.shape), dz.view(pair.shape), *outs]
+        dyc = dy.contiguous()
+        dx_all = torch.empty_like(single)
+        dz_all = torch.empty_like(pair)
+        outs: list[torch.Tensor] = []
+        for b in range(B):
+            xa, st, qkvg, bias, O, LSE, og, *rest = saved[len(packs) + b * r : len(packs) + (b + 1) * r]
+            wide = (rest[0], rest[1]) if dp != DP else None  # a wide pair: its forward's row stats and unmasked bias
+            x = single[b]
+            dy2 = dyc[b]
+            if hopper:
+                # Every producer owns a block partial row; finalize reduces the rows each grid wrote, in block order (no zero fill).
+                rows_a = (L + rows.RW - 1) // rows.RW
+                rows_b = E.pair_bwd_blocks(x, H, L)
+                acc = torch.empty(max(rows_a, rows_b), rows.acc_n(H, D, dp), device=x.device)
+            else:
+                rows_a = rows_b = 1
+                acc = torch.zeros(rows.acc_n(H, D, dp), device=x.device)
+            dog = dy2 @ wo  # [L, W]: zero in the pads (Wo's pad columns are zero)
+            dwo = torch.mm(dy2.t(), og, out_dtype=f32)  # [D, W]; finalize keeps the real columns
+            dob = x.new_empty((L, W))
+            dd = x.new_empty((H, L), dtype=f32)
+            dqkvg = torch.empty_like(qkvg)
+            E.gate_bwd(dog, O, qkvg, dob, dd, dqkvg)
+            DQ, DK, DV, DB = _training_core(single.device).apb_backward(
+                qkvg[:, :W],
+                qkvg[:, W : 2 * W],
+                qkvg[:, 2 * W : 3 * W],
+                dob,
+                bias,
+                LSE,
+                dd,
+                L,
+                H,
+                D,
+            )
+            E.qkv_bwd(DQ, DK, DV, dqkvg, acc, D)
+            del DQ, DK, DV
+            dxa = dqkvg @ wpack
+            dwp = torch.mm(dqkvg.t(), xa, out_dtype=f32)
+            E.ln_bwd(dxa, x, st, lnw, dy2, dx_all[b], acc)
+            rows.pair_bias_bwd(pair[b].view(L * L, dp), DB, wf, L, eps_p, acc, D, saved=wide, out=dz_all[b].view(L * L, dp))
+            # custom-op outputs may not alias: every parameter gradient leaves as its own tensor, written by one kernel
+            row_outs = [torch.empty(t.shape, dtype=f32, device=t.device) for t in leaves]
+            E.finalize(dwp, dwo, acc, wb, lnpw, row_outs, rows_a, rows_b)
+            if b == 0:
+                outs = row_outs
+            else:
+                torch._foreach_add_(outs, row_outs)  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
+    return [dx_all, dz_all, *outs]
 
 
 def _pair_weight_shadow_fake(single, pair, mask, leaves, eps_s, eps_p, dy):
@@ -593,9 +626,12 @@ class _Training(torch.autograd.Function):
         )
         eps_s, eps_p = ctx.eps
         dx, dz, *grads = backward(single, pair, mask, leaves, eps_s, eps_p, saved, dy)
-        if ctx.exact_dwb:
+        if ctx.exact_dwb:  # per batch row (the shadow is a one-row recompute), summed in row order
             params = list(v[13 + ctx.saved_count :])
-            grads[9] = _pair_weight_shadow(single, pair, mask, params, eps_s, eps_p, dy)
+            dyc = dy.contiguous()
+            for b in range(single.shape[0]):
+                g = _pair_weight_shadow(single[b : b + 1], pair[b : b + 1], _row(mask, b), params, eps_s, eps_p, dyc[b : b + 1])
+                grads[9] = g if b == 0 else grads[9] + g
         if torch.cuda.get_device_capability(single.device) == (9, 0):
             if torch.compiler.is_compiling():
                 grads = [g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)]
@@ -750,47 +786,42 @@ def inference32(
     gate_bias: float = 0.0,
     extra: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """single [1, L, D], pair [1, L, L, dp] fp32, mask [L] bool or None, leaves fp32 as ``_leaves`` -> single + APB(single). ``extra``
-    [1, H, L, L]: an additive logit term, added to the core's bias in its log2 units and key order (``key_perm``)."""
-    L = single.shape[1]
+    """single [B, L, D], pair [B, L, L, dp] fp32, mask [B, L] bool or None, leaves fp32 as ``_leaves`` -> single + APB(single).
+    ``extra`` [B, H, L, L]: an additive logit term, added to the core's bias in its log2 units and key order (``key_perm``). B > 1:
+    the one-row step per batch row, the packs made once (as ``inference``)."""
+    B, L = single.shape[:2]
     H, _, dhp, W, D, dp = _geometry32(leaves)
     E = _rows().ext()
     with torch.cuda.device(single.device):
         w3, b3, wv, wo, wf = _inference32_packs(leaves, gate_bias)
-        x = single.view(L, D)
-        xa, y = torch.empty_like(x), torch.empty_like(x)
-        E.ln_rows(x, leaves[0], leaves[1], xa, None, eps_s, y)
-        qkg = torch.addmm(b3, xa, w3.t())
-        vt = torch.mm(wv, xa.t())
-        bias = x.new_empty((H, L, L))
-        E.pair_bias32_fwd(pair.view(L * L, dp), wf, mask, bias, None, None, L, eps_p, -math.inf)
-        if extra is not None:
-            bias.add_(extra[0].to(bias.dtype)[:, :, _key_perm32(L, single.device)[0]], alpha=LOG2E)
-        _sm90().tf32_gated_inference(qkg, vt, bias, 0, 1, 2 * W, nh=H, dh=dhp)
-        return y.addmm_(qkg[:, :W], wo.t()).view(1, L, D)
+        out = torch.empty_like(single)
+        xa = single.new_empty((L, D))
+        for b in range(B):
+            x, y = single[b], out[b]
+            E.ln_rows(x, leaves[0], leaves[1], xa, None, eps_s, y)
+            qkg = torch.addmm(b3, xa, w3.t())
+            vt = torch.mm(wv, xa.t())
+            bias = x.new_empty((H, L, L))
+            E.pair_bias32_fwd(pair[b].view(L * L, dp), wf, _row(mask, b), bias, None, None, L, eps_p, -math.inf)
+            if extra is not None:
+                bias.add_(extra[b].to(bias.dtype)[:, :, _key_perm32(L, single.device)[0]], alpha=LOG2E)
+            _sm90().tf32_gated_inference(qkg, vt, bias, 0, 1, 2 * W, nh=H, dh=dhp)
+            y.addmm_(qkg[:, :W], wo.t())
+        return out
 
 
 def _forward32_fake(single, pair, mask, leaves, eps_s, eps_p, gate_bias=0.0):
-    """y and the saved set: xa, (mean, rstd), qkvg, qs, k, v, O, og, LSE, bias (key-permuted) and its query-permuted transpose, pair
-    stats (the packs are remade by the backward)."""
-    L = single.shape[1]
+    """y and the saved set, per batch row: xa, (mean, rstd), qkvg, qs, k, v, O, og, LSE, bias (key-permuted) and its query-permuted
+    transpose, pair stats (the packs are remade by the backward)."""
+    B, L = single.shape[:2]
     H, _, _, W, D, _ = _geometry32(leaves)
     e = single.new_empty
-    return [
-        torch.empty_like(single),
-        e((L, D)),
-        e((L, 2)),
-        e((L, 4 * W)),
-        e((L, W)),
-        e((L, W)),
-        e((L, W)),
-        e((L, W)),
-        e((L, W)),
-        e((1, H, L)),
-        e((H, L, L)),
-        e((H, L, L)),
-        e((L * L, 2)),
-    ]
+    row = [(L, D), (L, 2), (L, 4 * W), (L, W), (L, W), (L, W), (L, W), (L, W), (1, H, L), (H, L, L), (H, L, L), (L * L, 2)]
+    return [torch.empty_like(single)] + [e(s) for _ in range(B) for s in row]
+
+
+#: saved tensors per batch row of the fp32 training forward (``_forward32_fake``)
+_ROW_SAVED32 = 12
 
 
 @opaque(fake=_forward32_fake, name="apb_h100_train_fwd_fp32")
@@ -803,26 +834,31 @@ def forward32(
     eps_p: float,
     gate_bias: float = 0.0,
 ) -> list[torch.Tensor]:
-    L = single.shape[1]
-    H, dh, dhp, W, D, dp = _geometry32(leaves)
+    """single [B, L, D], pair [B, L, L, dp] fp32 -> [y, *row 0's saved, *row 1's saved, ...]: the one-row forward per batch row."""
+    B, L = single.shape[:2]
+    H, dh, dhp, W, _, dp = _geometry32(leaves)
     E = _rows().ext()
+    saved = []
     with torch.cuda.device(single.device):
         w4, b4, wop, wf = _train32_packs(leaves, gate_bias)
-        x = single.view(L, D)
-        xa, y = torch.empty_like(x), torch.empty_like(x)
-        st = x.new_empty((L, 2))
-        E.ln_rows(x, leaves[0], leaves[1], xa, st, eps_s, y)
-        qkvg = torch.addmm(b4, xa, w4.t())
-        qs = qkvg[:, :W] * (LOG2E / math.sqrt(dh))  # exp2 units (contiguous)
-        k = qkvg[:, W : 2 * W].contiguous()
-        v = qkvg[:, 2 * W : 3 * W].contiguous()
-        bias, bias_tp = x.new_empty((H, L, L)), x.new_empty((H, L, L))
-        stp = x.new_empty((L * L, 2))
-        E.pair_bias32_fwd(pair.view(L * L, dp), wf * LOG2E, mask, bias, stp, bias_tp, L, eps_p, -math.inf)
-        O, lse = _sm90().tf32_forward(qs, k, v.t().contiguous(), bias, None, 1, L, nh=H, dh=dhp)
-        og = qkvg[:, 3 * W :].sigmoid_() * O  # the g columns keep s = sigmoid(g) for the backward (q | k | v are saved separately)
-        y = y.addmm_(og, wop.t()).view(1, L, D)
-    return [y, xa, st, qkvg, qs, k, v, O, og, lse, bias, bias_tp, stp]
+        out = torch.empty_like(single)
+        for b in range(B):
+            x, y = single[b], out[b]
+            xa = torch.empty_like(x)
+            st = x.new_empty((L, 2))
+            E.ln_rows(x, leaves[0], leaves[1], xa, st, eps_s, y)
+            qkvg = torch.addmm(b4, xa, w4.t())
+            qs = qkvg[:, :W] * (LOG2E / math.sqrt(dh))  # exp2 units (contiguous)
+            k = qkvg[:, W : 2 * W].contiguous()
+            v = qkvg[:, 2 * W : 3 * W].contiguous()
+            bias, bias_tp = x.new_empty((H, L, L)), x.new_empty((H, L, L))
+            stp = x.new_empty((L * L, 2))
+            E.pair_bias32_fwd(pair[b].view(L * L, dp), wf * LOG2E, _row(mask, b), bias, stp, bias_tp, L, eps_p, -math.inf)
+            O, lse = _sm90().tf32_forward(qs, k, v.t().contiguous(), bias, None, 1, L, nh=H, dh=dhp)
+            og = qkvg[:, 3 * W :].sigmoid_() * O  # the g columns keep s = sigmoid(g) for the backward (q | k | v are saved separately)
+            y.addmm_(og, wop.t())
+            saved += [xa, st, qkvg, qs, k, v, O, og, lse, bias, bias_tp, stp]
+    return [out, *saved]
 
 
 def _backward32_fake(single, pair, mask, leaves, eps_s, eps_p, saved, dy, gate_bias=0.0):
@@ -841,75 +877,83 @@ def backward32(
     dy: torch.Tensor,
     gate_bias: float = 0.0,
 ) -> list[torch.Tensor]:
-    L = single.shape[1]
+    """The one-row backward per batch row: dx / dpair into their rows, the parameter gradients summed over the rows in row order."""
+    B, L = single.shape[:2]
     H, dh, dhp, W, D, dp = _geometry32(leaves)
     rows = _rows()
     E = rows.ext()
-    xa, st, qkvg, qs, k, v, O, og, lse, bias, bias_tp, stp = saved
     lnw, lnpw, wb = leaves[0], leaves[8], leaves[9]
+    total: list[torch.Tensor] = []
     with torch.cuda.device(single.device):
         w4, _, wop, wf = _train32_packs(leaves, gate_bias)
-        x = single.view(L, D)
-        z = pair.view(L * L, dp)
-        dy2 = dy.contiguous().view(L, D)
-        dog = dy2 @ wop
-        dwo = dy2.t() @ og
-        s = qkvg[:, 3 * W :]  # sigmoid(g), written by the forward
-        dcat = x.new_empty((L, 4 * W))  # dq | dk | dv (the core writes them in place) | dg
-        dO = dog * s
-        dog.mul_(O)  # dog O
-        dd = (dog * s).view(L, H, dhp).sum(-1).t().contiguous().view(1, H, L)
-        torch.mul(dog, s * (1.0 - s), out=dcat[:, 3 * W :])
-        perm, inv = _key_perm32(L, x.device)
-        dq, _, _, db_p = _sm90().tf32_backward(
-            qs,
-            k,
-            v,
-            dO,
-            qs.t().contiguous(),
-            k.t().contiguous(),
-            dO.t().contiguous(),
-            bias,
-            bias_tp,
-            lse,
-            dd,
-            lse[..., perm].contiguous(),
-            dd[..., perm].contiguous(),
-            None,
-            None,
-            1,
-            L,
-            nh=H,
-            dh=dhp,
-            dpack=dcat,
-        )
-        if dhp != dh:  # the core's dQ carries 1 / sqrt(dhp); the logits were scaled by 1 / sqrt(dh)
-            dq.mul_(math.sqrt(dhp / dh))
-        dxa = dcat @ w4
-        dw4 = dcat.t() @ xa
-        dx = torch.empty_like(x)
-        acc = x.new_empty(((L + rows.RW - 1) // rows.RW, 2 * D))
-        E.ln_bwd(dxa, x, st, lnw, dy2, dx, acc)
-        acc = acc.sum(0)
-        db = db_p[..., inv].contiguous()
-        dz = torch.empty_like(z)
-        E.pair_bias32_bwd(z, stp, db, wf, dz, L)
-        a = db.view(H, L * L) * stp[:, 1]
-        dwf = a @ z - (a @ stp[:, 0])[:, None]
-        grads = [
-            acc[:D],
-            acc[D:],
-            _unpad_rows(dw4[:W], H, dh, dhp),
-            _unpad_rows(dq.sum(0)[:, None], H, dh, dhp)[:, 0],
-            _unpad_rows(dw4[W : 2 * W], H, dh, dhp),
-            _unpad_rows(dw4[2 * W : 3 * W], H, dh, dhp),
-            _unpad_rows(dw4[3 * W :], H, dh, dhp),
-            _unpad_rows(dwo.t(), H, dh, dhp).t(),
-            (dwf * wb).sum(0),
-            dwf * lnpw,
-        ]
-    # custom-op outputs may not alias each other or the inputs: each gradient its own contiguous tensor
-    return [dx.view(single.shape), dz.view(pair.shape), *(g.contiguous().clone() if g._base is not None else g.contiguous() for g in grads)]
+        dyc = dy.contiguous()
+        dx_all, dz_all = torch.empty_like(single), torch.empty_like(pair)
+        perm, inv = _key_perm32(L, single.device)
+        for b in range(B):
+            xa, st, qkvg, qs, k, v, O, og, lse, bias, bias_tp, stp = saved[b * _ROW_SAVED32 : (b + 1) * _ROW_SAVED32]
+            x = single[b]
+            z = pair[b].view(L * L, dp)
+            dy2 = dyc[b]
+            dog = dy2 @ wop
+            dwo = dy2.t() @ og
+            s = qkvg[:, 3 * W :]  # sigmoid(g), written by the forward
+            dcat = x.new_empty((L, 4 * W))  # dq | dk | dv (the core writes them in place) | dg
+            dO = dog * s
+            dog.mul_(O)  # dog O
+            dd = (dog * s).view(L, H, dhp).sum(-1).t().contiguous().view(1, H, L)
+            torch.mul(dog, s * (1.0 - s), out=dcat[:, 3 * W :])
+            dq, _, _, db_p = _sm90().tf32_backward(
+                qs,
+                k,
+                v,
+                dO,
+                qs.t().contiguous(),
+                k.t().contiguous(),
+                dO.t().contiguous(),
+                bias,
+                bias_tp,
+                lse,
+                dd,
+                lse[..., perm].contiguous(),
+                dd[..., perm].contiguous(),
+                None,
+                None,
+                1,
+                L,
+                nh=H,
+                dh=dhp,
+                dpack=dcat,
+            )
+            if dhp != dh:  # the core's dQ carries 1 / sqrt(dhp); the logits were scaled by 1 / sqrt(dh)
+                dq.mul_(math.sqrt(dhp / dh))
+            dxa = dcat @ w4
+            dw4 = dcat.t() @ xa
+            acc = x.new_empty(((L + rows.RW - 1) // rows.RW, 2 * D))
+            E.ln_bwd(dxa, x, st, lnw, dy2, dx_all[b], acc)
+            acc = acc.sum(0)
+            db = db_p[..., inv].contiguous()
+            E.pair_bias32_bwd(z, stp, db, wf, dz_all[b].view(L * L, dp), L)
+            a = db.view(H, L * L) * stp[:, 1]
+            dwf = a @ z - (a @ stp[:, 0])[:, None]
+            grads = [
+                acc[:D],
+                acc[D:],
+                _unpad_rows(dw4[:W], H, dh, dhp),
+                _unpad_rows(dq.sum(0)[:, None], H, dh, dhp)[:, 0],
+                _unpad_rows(dw4[W : 2 * W], H, dh, dhp),
+                _unpad_rows(dw4[2 * W : 3 * W], H, dh, dhp),
+                _unpad_rows(dw4[3 * W :], H, dh, dhp),
+                _unpad_rows(dwo.t(), H, dh, dhp).t(),
+                (dwf * wb).sum(0),
+                dwf * lnpw,
+            ]
+            # custom-op outputs may not alias each other or the inputs: each gradient its own contiguous tensor
+            grads = [g.contiguous().clone() if g._base is not None else g.contiguous() for g in grads]
+            if b == 0:
+                total = grads
+            else:
+                torch._foreach_add_(total, grads)  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
+    return [dx_all, dz_all, *total]
 
 
 class _Training32(torch.autograd.Function):

@@ -67,8 +67,10 @@ class PairformerBlock(BackendModule, MasterWeights):
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:a100_sm80": 2
-    }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures
+        "cuda:a100_sm80": 3,
+        "cuda:h100_sm90": 2,
+    }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; cuda 3 / 2 (2026-11-11): B > 1 without autograd runs
+    # batched (the cuda AttentionPairBias takes B > 1: no refusal-driven per-sample path)
 
     def __init__(self, config: PairformerConfig, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()
@@ -146,13 +148,14 @@ class PairformerBlock(BackendModule, MasterWeights):
         single track is added and ``(pair, single)`` is returned (``single`` ``[B, L, d_single]`` is then required). ``extra_pair_bias``
         ``[B, n_head_single, L, L]`` is added to the single attention's pair-bias logits; it needs the single track.
 
-        Workspace (FoldForge R19): a call without autograd (``torch.no_grad`` / ``inference_mode``) and ``B > 1`` on ``"pytorch"``, or on
-        a backend with a sub-module that takes one sample only (the ``cuda`` ``AttentionPairBias``: ``B == 1``), runs the block one sample
-        at a time into the batched output (every statement acts per sample: the same math), so its temporaries are one sample's (the
-        reference composition's are about 8-10 pair-sized tensors) plus the output, not ``B`` times that. The outputs
-        equal the batched composition's up to GEMM rounding (a GEMM over one sample's rows may run another cuBLAS kernel). A call that
-        records autograd keeps the batched composition (its saved activations are the batch's anyway)."""
-        if _per_sample_call(pair) and (self.backend == "pytorch" or self._refusal(pair, mask, single, extra_pair_bias) is not None):
+        Workspace (FoldForge R19): a call without autograd (``torch.no_grad`` / ``inference_mode``) and ``B > 1`` on ``"pytorch"`` runs
+        the block one sample at a time into the batched output (every statement acts per sample: the same math), so its temporaries
+        are one sample's (the reference composition's are about 8-10 pair-sized tensors) plus the output, not ``B`` times that. The
+        outputs equal the batched composition's up to GEMM rounding (a GEMM over one sample's rows may run another cuBLAS kernel). A
+        call that records autograd keeps the batched composition (its saved activations are the batch's anyway). The kernel backends
+        run the batched composition (every sub-module takes ``B > 1``; the ``cuda`` ``AttentionPairBias`` too, since the FoldForge 5I28
+        confidence-head change)."""
+        if _per_sample_call(pair) and self.backend == "pytorch":
             return self._per_sample(pair, mask, single, extra_pair_bias)
         return self._block(pair, mask, single, extra_pair_bias)
 
@@ -247,18 +250,14 @@ class PairformerBlock(BackendModule, MasterWeights):
         return self
 
     def unsupported(self, pair, mask=None, single=None, extra_pair_bias=None) -> str | None:
-        """The first sub-module that has no such backend, or whose range does not take this call (its own reason); None if all run. A
-        call the block runs one sample at a time (no autograd, ``B > 1``: :meth:`_forward_pytorch`) needs the sub-modules to take one
-        sample: the batched call is refused, then the first sample's decides."""
+        """The first sub-module that has no such backend, or whose range does not take this call (its own reason); None if all run (a
+        kernel backend runs the call batched: :meth:`_forward_pytorch`)."""
         if self.backend == "pytorch":
             return None
-        why = self._refusal(pair, mask, single, extra_pair_bias)
-        if why is None or not _per_sample_call(pair):
-            return why
-        return self._refusal(*(t if t is None or t.shape[0] == 1 else t[:1] for t in (pair, mask, single, extra_pair_bias)))
+        return self._refusal(pair, mask, single, extra_pair_bias)
 
     def _refusal(self, pair, mask=None, single=None, extra_pair_bias=None) -> str | None:
-        """The batched call's refusal on the selected backend (None: every sub-module takes it)."""
+        """The call's refusal on the selected backend (None: every sub-module takes it)."""
         calls = {"single_attention": (single, pair, mask, extra_pair_bias), "single_transition": (single,), "transition_pair": (pair,)}
         for name, child in self._backend_children():
             if self.backend not in child.backends:
