@@ -29,6 +29,9 @@ pip install --extra-index-url https://download.pytorch.org/whl/cu129 miniworld-e
 Extras: `baselines` (cuEquivariance and Anthropic's kit dependencies, for the external comparison backends `cueq` / `anthropic`),
 `flash` (FlashAttention-4, the global-attention path of the SWA atom transformer's `cuda` backend; prerelease:
 `pip install --prerelease=allow "flash-attn-4[cu13]"`), `dev` (ruff, pyright, matplotlib).
+Anthropic's esmfold2 kit also needs a transformers fork, which PyPI metadata cannot carry (a git dependency); pip users install it
+by hand: `pip install "transformers @ git+https://github.com/huggingface/transformers.git@ef32577f55da19a4989cd7b22e004dc43a4998cb"`
+(the pixi environment pins it already).
 
 Developers of the repository use the pixi environment in `pyproject.toml` (`pixi install`, then `pixi run fix-te-cu12`).
 
