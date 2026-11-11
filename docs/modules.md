@@ -93,6 +93,36 @@ within its sm_80 gate and the atom block as one sm_80 call per fold (the sm_80 a
 call in fp32 or with a gradient is refused with a reason on both cards (the TF32 kernels and the backward keep one pair bias). FoldForge
 measured its grouped 5 x 5 sampler at 1.5x end to end for assemblies up to 256 tokens.
 
+## DiT stacks and the shared pair norm (`modules/dit_stack.py`)
+
+`TokenDiTStack(model, n_blocks, ...)` / `AtomDiTStack(model, n_blocks, ...)` hold `n_blocks` blocks of one model's own class in a
+`ModuleList` `blocks` (state-dict keys `blocks.{i}.<block names>`) and run them in order; they add no math. Every block gets the same
+`pair` / `cond` / `mask` / `uid` objects, so each block's hoisted pair bias and conditioning tables are made once per fold;
+`extra_pair_bias` / `compute_dtype` (token) and `uid` (Chai-1's atom blocks) are forwarded. `AtomDiTStack` refuses the pair-free
+ESMFold2 / MiniWorld atom blocks (their stack is `SWAAtomTransformer`). `set_backend` sets every block's backend.
+
+A released AF3-family stack keeps ONE pair LayerNorm and one projection of `n_blocks * n_head` rows (AF3's token DiT: one per super block
+of four, whose row-concatenation is that projection). `from_shared_pair(norm_weight, projection, n_blocks=, n_head=, norm_bias=None)` gives
+each block `attention.ln_pair.weight` (a copy) and its `n_head` rows of `attention.to_bias.weight`; `stack.load_shared_pair(...)` copies
+them in. The LayerNorm offset is dropped: it adds `W_proj beta`, one constant per head for every (query, key), which the softmax cancels.
+
+## Parallel residual (`parallel_residual`, `ParallelResidual`)
+
+A parallel stage whose parts own their residuals (`y_i = x + delta_i`; Chai-1's MSA block) updates `x` by the sum of the deltas:
+`parallel_residual(x, *ys, backend="pytorch" | "triton")` = `x + sum_i (y_i - x)`, the differences and the sum in fp32, one rounding.
+`"triton"` (`kernels/parallel_residual/triton`) is one pass over the tensors (1 to 4 branches, CUDA, one dtype); the backward is torch
+(`d/dy_i = g`, `d/dx = (1 - n) g`). There is no `"cuda"` backend: the Triton pass already streams at the memory bandwidth (H100, bf16, pair
+768 x 768 x 256 with three branches: 1.2 GB read + written in 0.49 ms, about 3.1 TB/s against the card's 3.35), so a hand-written kernel
+has nothing left to gain. Measured on the requirement rows (graph timing, L2 flushed; eval, ms):
+
+| row | H100 pytorch | H100 triton | A100 pytorch | A100 triton |
+|---|---|---|---|---|
+| MSA [1, 1024, 768, 64], 2 branches | 1.356 | 0.138 | 2.381 | 0.250 |
+| pair [1, 768, 768, 256], 3 branches | 5.640 | 0.490 | 9.965 | 0.887 |
+| pair [1, 768, 768, 256], 2 branches | 4.012 | 0.393 | 7.078 | 0.721 |
+
+`PairformerBlock(parallel=True)` keeps its own statements for its parallel schedule.
+
 ## Dead residual modules (the `dead` flag; the loader is not part of the engine)
 
 `Transition`, `AttentionPairBias`, `TriangleAttention`, `TriangleMultiplication`, `OuterProductMean` and `MSAPairWeightedAveraging` keep a
