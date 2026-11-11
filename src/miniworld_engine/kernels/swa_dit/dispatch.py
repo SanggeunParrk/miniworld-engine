@@ -11,7 +11,7 @@ the arguments are team-gm's; what differs is the engine plumbing:
   serves wherever its kernel does (``SWA_FFN_DW`` and ``SWA_DQ1`` are fixed at team-gm's defaults: materialised dW operands,
   a bf16 dq1);
 * the CUDA kernels come from ``cuda/loader.py`` (the packaged prebuilt bundle, else the JIT cache of ``_nvcc.engine_jit_root``);
-  on H100 a missing composed-stage extension sends the call to the native stages (``native_h100_stages``);
+  on H100 a composed-stage extension that fails to build or load raises ``_nvcc.KernelBuildError`` (never the native stages);
 * each Triton launch passes ``shape_key=atom_key(S, A=..., C=C[, NHID=NHID])`` where team-gm passed ``SB = log2(rows)``:
   the atom count S bucketed like every other atom-level kernel, and the AUGMENT COUNT A = N // B exactly, always -- the
   input feature embedder calls with A = 1 and diffusion with its num_augment (48 in training), and the row tiles of the
@@ -133,7 +133,7 @@ def native_h100_stages(q) -> bool:
     bf16 takes the composed stages: every one hand-CUDA on sm_90 (02073e40), no Triton launch anywhere on the grid A 1 - 48 x
     256 - 16384 atoms (ragged included), inference and training, shared and per-sample conditioning, and 1.1 - 6.7x faster than
     the native stages (A 48, 2048 atoms, training: 1.25 against 2.82 ms; A 5, 8192 atoms, inference: 0.22 against 0.31 ms).
-    A stage whose CUDA build is missing would fall to its Triton kernel, which H100 does not run: the native stages then.
+    A composed-stage build that fails raises ``_nvcc.KernelBuildError`` (cuda/loader.py); it never sends the call to the native stages.
     fp32 under TF32 (matmul precision "high" / "medium") takes the composed stages too, ``swa_fp32.cu`` on tf32 wgmma: 1.3 - 1.5x
     faster than the native stages and no less accurate (A 5, 1024 - 24 576 atoms, inference: 0.069 against 0.104 ms, 1.23 against
     1.65 ms). Under "highest" fp32 keeps the native stages (exact fp32 cuBLAS projections).
@@ -588,8 +588,8 @@ _WGMMA_MIN_ROWS = {"qkvg": 5120, "fwd": 5120, "bwd": 20480}
 
 def _rows_cuda(which: str, wanted: bool, M: int, A: int, device: torch.device) -> tuple[str, Any]:
     """Which hand-CUDA kernel serves the qkvg forward ("qkvg"), the out-projection + FFN forward ("fwd") or the FFN
-    backward ("bwd") at M rows and A augments: ("slab", ext), ("wgmma", ext) or ("", None) -> Triton. A slab extension that
-    does not build falls back to the wgmma one."""
+    backward ("bwd") at M rows and A augments: ("slab", ext), ("wgmma", ext) or ("", None) -> Triton (not sm_90, or not wanted). A
+    build or load failure raises ``_nvcc.KernelBuildError``."""
     if not wanted:
         return "", None
     impl = "wgmma" if A % 8 == 0 and _WGMMA_MIN_ROWS[which] <= M else "slab"

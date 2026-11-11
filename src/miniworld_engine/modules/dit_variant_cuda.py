@@ -168,7 +168,7 @@ def _call_reason(module, single, cond, pair, mask, *, a100: bool = False) -> str
         return "CUDA tensors only"
     if _a100(single):
         if not a100:
-            return "A100: no sm_80 port of the DiT-variant kernels (kernels/dit_variants are sm_90a only)"
+            return "A100: this call has no sm_80 path"
     elif torch.cuda.get_device_capability(single.device) != (9, 0):
         return "the H100 (sm_90) kernels only"
     if torch.is_autocast_enabled("cuda") and (torch.get_autocast_dtype("cuda") != _BF or single.dtype != _BF):

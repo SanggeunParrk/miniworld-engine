@@ -298,16 +298,16 @@ class Transition(BackendModule, MasterWeights):
             if out is None:
                 from miniworld_engine.modules.primitives import BackendUnsupported
 
-                raise BackendUnsupported("Transition backend 'cuda': no sm_80 Transition build is available (the extension failed to build)")
+                raise BackendUnsupported("Transition backend 'cuda': no sm_80 Transition build takes this call")
             return out
         from miniworld_engine.kernels.transition.cuda import transition_sm90a
 
         out = transition_sm90a(x, self.ln_in.weight, self.ln_in.bias, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight,
                                self.ln_in.eps, self.n)
-        if out is None:   # every build that takes the call failed to compile: an environment fault, never another backend
+        if out is None:   # no build takes the call (a build failure raises _nvcc.KernelBuildError before this); never another backend
             from miniworld_engine.modules.primitives import BackendUnsupported
 
-            raise BackendUnsupported("Transition backend 'cuda': no sm_90a Transition build is available (the extension failed to build)")
+            raise BackendUnsupported("Transition backend 'cuda': no sm_90a Transition build takes this call")
         return out
 
     def _supports_cuda_sm80(self, x: torch.Tensor) -> str | None:

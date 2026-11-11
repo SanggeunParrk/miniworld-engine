@@ -110,7 +110,7 @@ def make_step(module, inputs: dict, *, backend: str, train: bool, autocast: torc
     ``compile_mode`` None: the backend's forward as is; a string: ``torch.compile(forward, dynamic=False, mode=...)``."""
     from miniworld_engine.measure.config import TF32_BACKENDS
 
-    allow = backend in TF32_BACKENDS   # pytorch (the reference) and triton in TF32; the others' PyTorch fp32 matmuls without it
+    allow = backend in TF32_BACKENDS   # every backend (user decision 2026-11-10, see TF32_RULE); one left out: fp32 without TF32
     torch.backends.cuda.matmul.allow_tf32 = allow
     torch.backends.cudnn.allow_tf32 = allow
     module.set_backend(backend)
