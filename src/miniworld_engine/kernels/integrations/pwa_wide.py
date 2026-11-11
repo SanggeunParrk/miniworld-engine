@@ -20,7 +20,7 @@ Every kernel is built per (d_msa, d_hidden) / d_pair. The MiniWorld shape (64 / 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn.functional as F
@@ -185,7 +185,7 @@ def _infer_fake(args, eps_m, eps_z):
 
 @opaque(fake=_infer_fake, name="pwa_h100w_infer")
 def _inference_op(args: list[torch.Tensor], eps_m: float, eps_z: float) -> torch.Tensor:
-    return _forward_math(args, eps_m, eps_z, 0.0, False)
+    return cast(torch.Tensor, _forward_math(args, eps_m, eps_z, 0.0, False))  # save=False: the output alone
 
 
 def _backward_fake(args, kept, dres, eps_m, eps_z, p_drop):

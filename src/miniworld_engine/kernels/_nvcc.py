@@ -534,6 +534,38 @@ def planning() -> Iterator[list[Spec]]:
         _PLAN = previous
 
 
+#: modules whose caches never hold a stand-in (the code graph's parses, this module, the header resolution): kept by plan_session
+_INFRA_MODULES = ("miniworld_engine.kernels._codegraph", "miniworld_engine.kernels._nvcc", "miniworld_engine.kernels._headers")
+
+
+def _family_caches() -> dict[Any, int]:
+    """Every ``functools.lru_cache`` of the package's kernel code (module-level, methods and closures such as TriMul's
+    ``device_cache``) with its current size."""
+    import gc
+
+    out: dict[Any, int] = {}
+    for o in gc.get_objects():
+        if type(o) is functools._lru_cache_wrapper:  # (type(), not isinstance: no __class__ lookup on lazy proxies)
+            module = getattr(o, "__module__", None) or ""
+            if module.startswith("miniworld_engine.") and module not in _INFRA_MODULES:
+                out[o] = o.cache_info().currsize
+    return out
+
+
+@contextlib.contextmanager
+def plan_session() -> Iterator[None]:
+    """A whole plan (``kernels/_prebuild.plan``, ``kernels/_prebuild_cuda.plan``): on exit, every loader cache that gained entries
+    while it ran is cleared. A loader's ``lru_cache`` keeps the stand-in :func:`planning` made it return, so without this a second
+    plan in the same process recorded nothing for that loader, and a real load after the plan got the stand-in back."""
+    before = _family_caches()
+    try:
+        yield
+    finally:
+        for cache, size in _family_caches().items():
+            if size > before.get(cache, 0):
+                cache.cache_clear()
+
+
 def _site() -> str:
     """``file::function`` of the first caller outside this module and TriMul's thin compile wrappers."""
     here = Path(__file__).resolve().parent
@@ -628,7 +660,7 @@ TOOLCHAINS: dict[str, Callable[[], tuple[str, list[str]]]] = {
     "torch": _toolchain_torch,
     "torch-nohost": _toolchain_torch_nohost,
     # the old name of "torch" for the Hopper atom families, kept so recorded recipes still replay: their "CUDA <= 12.9"
-    # requirement had no reason behind it (the sources build under CUDA 13.0, with the same SASS; docs/kernels/prebuilt-kernels.md)
+    # requirement had no reason behind it (the sources build under CUDA 13.0, with the same SASS)
     "torch-cuda<=12.9": _toolchain_torch,
     "sm100": _toolchain_sm100,
     "path": _toolchain_path,
@@ -887,7 +919,7 @@ def _build_ext(kind_label: str, name: str, kwargs: dict, sources: list[str] | No
         tmp = _tmp_name(final)
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir()
-        call_kwargs = {k: list(v) if isinstance(v, list) else v for k, v in kwargs.items()}
+        call_kwargs: dict[str, Any] = {k: list(v) if isinstance(v, list) else v for k, v in kwargs.items()}
         call_kwargs["build_directory"] = str(tmp)
         for f in ("extra_cflags", "extra_cuda_cflags"):
             if call_kwargs.get(f):
@@ -908,7 +940,7 @@ def _build_ext(kind_label: str, name: str, kwargs: dict, sources: list[str] | No
                     else:
                         from torch.utils.cpp_extension import load
 
-                        load(name=name, sources=sources, **call_kwargs)
+                        load(name=name, sources=sources or [], **call_kwargs)
                 except (ImportError, OSError):
                     if not (_BUILD_ONLY and built()):
                         raise  # a prebuild worker may not be able to import a CUDA extension; the build itself succeeded

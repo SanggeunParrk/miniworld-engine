@@ -2,8 +2,8 @@
 building, reports no problem, and two runs plan the same artifacts (names and content keys). ``--check`` (the plan against the code and
 requirements_kernel.csv) passes.
 
-Each run is its own process: planning is not re-entrant within one process (the loaders' ``lru_cache`` keeps the planning stand-ins, so
-a second plan in the same process records nothing for them)."""
+The --list / --check runs are separate processes (as the CLI is used); ``test_plan_is_reentrant`` plans twice in this one: a plan
+clears the loader caches that kept its stand-ins when it ends (``_nvcc.plan_session``), so the second plan records the same."""
 
 from __future__ import annotations
 
@@ -60,3 +60,17 @@ def test_check_runs(runs):
     _, checked = runs
     assert "requirements_kernel.csv:" in checked.stdout, checked.stdout[-2000:] + checked.stderr[-2000:]
     assert "problem:" not in checked.stdout
+
+
+def test_plan_is_reentrant():
+    """Two plans in one process record the same artifacts: the ``cast`` family's loader is an ``lru_cache``, which kept the first
+    plan's stand-in and made the second plan record nothing before ``plan_session`` cleared it."""
+    from miniworld_engine.kernels import _nvcc, _prebuild
+
+    _nvcc.ensure_cuda_home()  # as the CLI does before planning
+    t = _prebuild.target("sm90a")
+    first, problems = _prebuild.plan(t, ["cast"])
+    second, problems2 = _prebuild.plan(t, ["cast"])
+    assert not problems and not problems2, problems + problems2
+    assert first, "the cast family plans nothing on sm90a"
+    assert [s.key for s in first] == [s.key for s in second]

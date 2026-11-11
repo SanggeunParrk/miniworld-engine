@@ -3,6 +3,8 @@
 The core and pair bias are own CUDA; the surrounding GEMMs remain separate backend work.
 """
 
+from typing import cast
+
 import torch
 from torch.autograd.function import once_differentiable
 
@@ -102,7 +104,7 @@ def _attn_bwd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from miniworld_engine.kernels.augmented_attention.cuda import sm80_atom_local
 
-    return sm80_atom_local.attn_bwd(
+    return cast("tuple[torch.Tensor, torch.Tensor]", sm80_atom_local.attn_bwd(  # packed_output: (dqkv, dbias)
         q,
         k,
         v,
@@ -112,7 +114,7 @@ def _attn_bwd(
         lse,
         None if mask.numel() == 0 else mask,
         packed_output=True,
-    )
+    ))
 
 
 class _Attention(torch.autograd.Function):
@@ -167,7 +169,7 @@ class _PairBias(torch.autograd.Function):
     @staticmethod
     @once_differentiable
     def backward(ctx, dbias):
-        return _bias_bwd(*ctx.saved_tensors, dbias)
+        return _bias_bwd(*ctx.saved_tensors, dbias)  # pyright: ignore[reportCallIssue]  -- the (z, gamma, wb) forward saved
 
 
 def _gate_fwd_fake(gate, x):

@@ -406,7 +406,7 @@ class _NodeMessage(torch.autograd.Function):
             grad_edge_weight,
             grad_hidden_weight,
             grad_hidden_bias,
-        ) = _node_bwd(grad_reduced.contiguous(), *saved, ctx.neighbor_scale)
+        ) = _node_bwd(grad_reduced.contiguous(), *saved, ctx.neighbor_scale)  # pyright: ignore[reportCallIssue]  -- *saved: the tensors forward saved, in _node_bwd's order
         return (
             grad_edge,
             grad_query.to(query_dtype),

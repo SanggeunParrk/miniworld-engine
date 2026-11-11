@@ -37,8 +37,8 @@ a failed build, run the per-step launches.
 
 ``serves()`` is the whole gate: autograd on, the engine's kernels (the block's ``cuda`` backend, through its kernel view), B200 or H100,
 bf16 or fp32 inputs, the
-token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128, or 256 on H100 / transition n = 2), B == 1, L a multiple of 128 up to 768, a per-sample
-conditioning [A, 1, L, 384], a key mask [1, L] or none, LayerNorm eps 1e-5. Anything else
+token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384, or 768 on H100 / pair 128, or 256 on H100 / transition n = 2), B == 1, L a multiple of 128 up to 768, a per-sample
+conditioning [A, 1, L, d_cond], a key mask [1, L] or none, LayerNorm eps 1e-5. Anything else
 is refused: the block's ``cuda`` backend raises ``BackendUnsupported`` (``_supports_cuda``), never another path.
 
 Hoisted pair bias (``block(..., bias=b)``, b [1, H, L, L] in the step's dtype from ``pair_bias_all``,
@@ -1002,6 +1002,7 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
             norms,
         ]
     # the pair LayerNorm backward with d LN(pair) = dbias^T Wf, and dWf = dbias LN(pair), in one kernel (LN(pair) rebuilt on chip)
+    assert pair is not None  # _bwd: dbias_out None, the pair given
     dpair = torch.empty(R, dp, device=dev, dtype=pair.dtype)
     pwf = torch.empty(
         BT.partial_rows(M), H, dp, device=dev
@@ -1785,6 +1786,7 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
     lead = [dx.view(A, 1, L, D).to(single.dtype), dc.view(A, 1, L, DC).to(cond.dtype)]
     if dbias_out is not None:
         return [*lead, *big, flat, norms]
+    assert pair is not None  # dbias_out None: the pair given
     return [*lead, dpair.view(1, L, L, dp).to(pair.dtype), *big, flat, norms]
 
 

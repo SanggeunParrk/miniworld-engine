@@ -403,7 +403,7 @@ class _Chunked(torch.autograd.Function):
         pair, mask, dropscale = ctx.saved_tensors
         params = list(module.parameters())
         dx = torch.empty_like(pair)
-        total = [None] * len(params)
+        total: list[torch.Tensor | None] = [None] * len(params)
         for i, (start, stop) in enumerate(ctx.bounds):
             if checkpoint:
                 x = pair[start:stop].detach().requires_grad_()
@@ -422,7 +422,8 @@ class _Chunked(torch.autograd.Function):
                 rows.copy_(grads[0])
             for k, g in enumerate(grads[1:]):
                 if g is not None:
-                    total[k] = g if total[k] is None else total[k].add_(g)
+                    t = total[k]
+                    total[k] = g if t is None else t.add_(g)
         return (None, dx, None, None, *total)
 
 
@@ -514,14 +515,12 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
             from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_training import (
                 single_trimul,
             )
-        def apply(*args):
-            return single_trimul(module.outgoing, *args)
+        apply = functools.partial(single_trimul, module.outgoing)
     else:
         from miniworld_engine.kernels.trimul_inproj.cuda.h100_single import (
             single_trimul,
         )
-        def apply(*args):
-            return single_trimul(module.outgoing, *args)
+        apply = functools.partial(single_trimul, module.outgoing)
     return apply(
         pair,
         *(w if w.dtype in (torch.bfloat16, torch.float32) else w.to(pair.dtype).contiguous()

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import functools
 import math
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -113,7 +114,8 @@ def _mask_kind(mask, a: int, b: int, length: int) -> int | None:
 def serves(module, single, pair, mask, compute_dtype=None, cond=None) -> bool:
     if module.use_qk_norm and (_flat_ln(module) or not _head_rms(module)):
         return False
-    if _flat_ln(module) and any(n.eps != _flat_ln(module)[0].eps or n.weight is None or n.bias is None for n in _flat_ln(module)):
+    flat = _flat_ln(module)
+    if flat and any(n.eps != flat[0].eps or n.weight is None or n.bias is None for n in flat):
         return False
     dt = single.dtype
     if (
@@ -520,9 +522,9 @@ def _fwd(
                 hd,
                 length,
                 padded,
-                kmask[b] if mask_kind == 1 else None,
+                cast(torch.Tensor, kmask)[b] if mask_kind == 1 else None,
             )
-    kpen = _penalties(kmask, a, batch, length, padded) if mask_kind == 2 else None
+    kpen = _penalties(cast(torch.Tensor, kmask), a, batch, length, padded) if mask_kind == 2 else None
     if save:
         o = torch.empty(m, d, device=dev, dtype=dt)
         lse = torch.empty(batch * a, heads, padded, device=dev, dtype=torch.float32)
@@ -620,7 +622,7 @@ def _fwd(
             )
 
             shared_mask_uniform_sm80.forward(
-                kmask[b],
+                cast(torch.Tensor, kmask)[b],
                 v[rows],
                 None if save else g[rows],
                 o[rows] if save else q[rows],
@@ -644,7 +646,7 @@ def _fwd(
             )
 
             atom_sample_uniform_sm80.forward(
-                kmask[:, b], v[rows], g[rows], q[rows], None, length, padded, a, heads
+                cast(torch.Tensor, kmask)[:, b], v[rows], g[rows], q[rows], None, length, padded, a, heads
             )
     if save and not gated:
         og = o  # no gating query: the core's output feeds to_out (saved once: the og slot is empty)
@@ -744,7 +746,7 @@ def _bwd(
     lnw, wb = params[8], params[9]
     wo, ws = params[5].to(dt), params[6].to(dt)
     pack = _pack(params, heads, dt)
-    wqkvg, wf, w32 = pack[0], pack[2], pack[4]
+    wqkvg, wf, w32 = pack[0], cast(torch.Tensor, pack[2]), pack[4]  # (a save=True pack: every slot set)
     xs, cs = _stage(x, batch, padded), _stage(cond, batch, padded)
     ds = _stage(dout, batch, padded)
     dy = torch.empty(m, d, device=dev, dtype=dt)
@@ -758,7 +760,7 @@ def _bwd(
         sm80.gate_bwd(dog, o, qkvg[:, 3 * d :], dob, dqkvg[:, 3 * d :])
     else:
         dob = dog
-    kpen = _penalties(kmask, a, batch, length, padded) if mask_kind == 2 else None
+    kpen = _penalties(cast(torch.Tensor, kmask), a, batch, length, padded) if mask_kind == 2 else None
     kind = _kind(dp, heads, dt)
     acc = torch.zeros(_apb().acc_n(heads, 384), device=dev) if kind == "apb" else None
     dzs, dw_sum = [], None
@@ -792,7 +794,7 @@ def _bwd(
             )
 
             shared_mask_uniform_sm80.backward(
-                kmask[b],
+                cast(torch.Tensor, kmask)[b],
                 dob[rows],
                 dqkvg[rows, :d],
                 dqkvg[rows, d : 2 * d],
@@ -803,7 +805,7 @@ def _bwd(
                 a,
                 heads,
             )
-        mask_b = kmask[b] if mask_kind == 1 else None
+        mask_b = cast(torch.Tensor, kmask)[b] if mask_kind == 1 else None
         pair_b = pair[b]
         if kind == "atom":
             dz, dw = sm80.pair_bias_backward_w(
@@ -822,7 +824,7 @@ def _bwd(
             dzs.append(dz.view(length, length, dp))
         elif sm80.pair_bias_generic_bwd_supported(dp, heads, pair_b.dtype):  # any supported width: dz and dW' in one pass over the pair
             dz, dw = sm80.pair_bias_generic_backward(
-                pair_b, pack[5], db, mask_b, padded, EPS
+                pair_b, cast(torch.Tensor, pack[5]), db, mask_b, padded, EPS
             )
             dzs.append(dz.view(length, length, dp))
             dw_sum = dw if dw_sum is None else dw_sum + dw
@@ -875,7 +877,8 @@ def _bwd(
     # the pair bias's parameter gradients: d wf (the folded weight, natural units) -> d to_bias.weight = d wf x ln_pair.weight, d ln_pair.weight = sum_h d wf x to_bias.weight
     if kind == "apb":
         o_ = 2 * 384 + _apb().width(heads, 384)
-        dw_sum = acc[o_ : o_ + heads * dp].view(heads, dp)
+        dw_sum = cast(torch.Tensor, acc)[o_ : o_ + heads * dp].view(heads, dp)
+    dw_sum = cast(torch.Tensor, dw_sum)  # set by the loop (batch >= 1) or the apb accumulator
     dlnw = (dw_sum * wb.float()).sum(0)
     dwb = dw_sum * lnw.float()[None]
     grads = [
@@ -892,7 +895,7 @@ def _bwd(
         *flat_grads,
     ]
     outs = [torch.empty(p.shape, device=dev, dtype=p.dtype) for p in params]
-    torch._foreach_copy_(
+    torch._foreach_copy_(  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
         outs, [g_.reshape(p.shape) for g_, p in zip(grads, params, strict=True)]
     )
     return [
@@ -1013,7 +1016,7 @@ def _flat_eps(module, dtype=F32) -> float:
 def _fused_update(module, x, cond, pair, mask, res):
     """The fused path on the AdaLN's output ``x`` (the caller has checked ``serves``): ``res`` + the update, or the update alone when ``res`` is None."""
     a, batch, length, _ = x.shape
-    kind = _mask_kind(mask, a, batch, length)
+    kind = cast(int, _mask_kind(mask, a, batch, length))  # not None: serves() / serves_ops() refused such a mask
     kmask = None if kind == 0 else (mask[0] if mask.ndim == 3 and kind == 1 else mask)
     params = _params(module)
     x, cond, pair = (
@@ -1194,7 +1197,7 @@ def _ops_fwd(
     braw = _pack_bias(
         bias, kmask if mask_kind == 1 else None, length, padded, heads, dim
     )
-    kpen = _penalties(kmask, a, batch, length, padded) if mask_kind == 2 else None
+    kpen = _penalties(cast(torch.Tensor, kmask), a, batch, length, padded) if mask_kind == 2 else None
     o = torch.empty(m, heads * dpad, device=dev, dtype=BF)
     lse = (
         torch.empty(batch * a, heads, padded, device=dev, dtype=torch.float32)
@@ -1274,7 +1277,7 @@ def _ops_bwd(
     n = a * padded
     dev = dout.device
     dob = _stage_heads(dout, a, batch, length, padded, heads, dim)
-    kpen = _penalties(kmask, a, batch, length, padded) if mask_kind == 2 else None
+    kpen = _penalties(cast(torch.Tensor, kmask), a, batch, length, padded) if mask_kind == 2 else None
     dq, dk, dv = (torch.empty(m, heads * dpad, device=dev, dtype=BF) for _ in range(3))
     dbias = torch.empty(batch, heads, length, length, device=dev, dtype=bias_dtype)
     for b in range(batch):
@@ -1354,7 +1357,7 @@ class _OpsAttention(torch.autograd.Function):
 def attention_ops(query, key, value, bias, mask):
     """The whole-op attention on the sm_80 core (call ``serves_ops`` first): [A, B, H, L, D] in, [A, B, H, L, D] out (differentiable in q, k, v and the bias)."""
     a, batch, heads, length, dim = query.shape
-    kind = _mask_kind(mask, a, batch, length)
+    kind = cast(int, _mask_kind(mask, a, batch, length))  # not None: serves() / serves_ops() refused such a mask
     kmask = None if kind == 0 else (mask[0] if mask.ndim == 3 and kind == 1 else mask)
     if torch.is_grad_enabled() and any(
         t.requires_grad for t in (query, key, value, bias)

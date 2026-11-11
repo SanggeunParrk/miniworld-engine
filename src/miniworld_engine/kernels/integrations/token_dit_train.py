@@ -46,6 +46,8 @@ LayerNorm are computed per block rather than once per stack.
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 
 from miniworld_engine.kernels import _capture
@@ -503,7 +505,7 @@ def _pack(P, qk, dev, at, opts=None):
     )
     wp, Wb = _f32(g("attention.ln_pair.weight")), _f32(g("attention.to_bias.weight"))
     Wf = Wb * wp
-    W = {
+    W: dict[str, torch.Tensor] = {
         "w1": w1,
         "w2": w2,
         "Wraw": Wraw,
@@ -775,11 +777,11 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
     else:
         T.cond_prep(c2, chat, cbf, cst, EPS)
     if opt & 1:   # the identity AdaLN: its tables read the raw conditioning (cbf), not LN(cond)
-        chat.copy_(cbf)
+        chat.copy_(cast(torch.Tensor, cbf))  # (a type cast only)
     W = _pack(P, qk, dev, at, None if plain else v)
     Wn, Wg = W["Wn"], W["Wg"]
     G = mm(chat, Wn.t())  # [M, 4D] s1 | sh1 | s2 | sh2
-    Gg = mm(c2 if own_c else cbf, Wg.t())  # [M, 2D] gate1 | gate2
+    Gg = mm(cast(torch.Tensor, c2 if own_c else cbf), Wg.t())  # [M, 2D] gate1 | gate2
     bs1, bs2, bg1, bg2 = W["bs1"], W["bs2"], W["bg1"], W["bg2"]
     xa = torch.empty(M, D, device=dev, dtype=at)
     xst = torch.empty(M, 2, device=dev)
@@ -1379,7 +1381,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     # custom-op outputs may not alias each other: the gradients above are views of a few shared buffers, so each leaves as
     # its own tensor in the parameter's dtype -- one multi-tensor copy kernel for all of them (23 copies were ~45 us)
     outs = [torch.empty(p.shape, device=dev, dtype=p.dtype) for p in params]
-    torch._foreach_copy_(
+    torch._foreach_copy_(  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
         outs, [grads[n].reshape(p.shape) for n, p in zip(names, params, strict=False)]
     )
     return [dx.view(A, 1, L, D), dc.view(cond.shape), dpair.view(1, L, L, dpw), *outs, *_xgrad(DB, extra, H, L)]
@@ -1479,6 +1481,7 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None, extra=None)
     from miniworld_engine.kernels.integrations import token_dit
 
     opts = token_dit.options(module)
+    assert opts is not None  # serves() refused a block outside the algorithm
     params = _leaves(module, _names_for(qk, opts))
     out = _Block.apply(
         single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head),

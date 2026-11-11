@@ -15,6 +15,8 @@ Training (``save``) keeps the GELU outputs ``act1`` / ``act2`` (bf16), their der
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 
 from miniworld_engine.kernels._compile import opaque
@@ -399,7 +401,7 @@ def _replay_bwd(
         gedge,
         gquery,
         gnbr.to(edge.dtype),
-        *[s.to(dt) for s, dt in zip(summed, dtypes, strict=True)],
+        *[cast(torch.Tensor, s).to(dt) for s, dt in zip(summed, dtypes, strict=True)],  # (rows >= 1: every slot summed)
     ]
 
 

@@ -556,6 +556,7 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
     """pair + drop o TriangleAttention(pair) for B samples: one launch per kernel, or launches of ``plan``'s chunk run one after
     another when the call has more samples than one launch takes or would not fit in memory."""
     kind = _kind(module, pair, mask)
+    assert kind is not None  # the caller (serves) checked it
     B, L, _, C = pair.shape
     drop = None
     if module.training and module.p_drop > 0.0:

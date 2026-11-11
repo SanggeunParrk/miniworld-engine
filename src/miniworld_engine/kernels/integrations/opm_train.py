@@ -410,8 +410,8 @@ def fused_prologue(
     NA = triton.cdiv(N, BI) * BI
     NBj = triton.cdiv(N, BJ) * BJ
     SK = triton.cdiv(S, BK) * BK
-    A2 = torch.empty(NA * CH, SK, device=m.device, dtype=torch.bfloat16)
-    BT = torch.empty(NBj * CH, SK, device=m.device, dtype=torch.bfloat16)
+    A2 = torch.empty(NA * CH, SK, device=m.device, dtype=torch.bfloat16)  # pyright: ignore[reportArgumentType]  -- triton.cdiv is typed for constexpr operands; plain ints here
+    BT = torch.empty(NBj * CH, SK, device=m.device, dtype=torch.bfloat16)  # pyright: ignore[reportArgumentType]  -- as above
     assert SK % BS == 0 and m.stride(2) == 1, (SK, BS, m.stride())
     grid = (SK // BS, triton.cdiv(max(NA, NBj), BIP))
     mask_c = mask.contiguous()
@@ -972,7 +972,7 @@ def outer_product_mean(
         and residual.dtype == msa.dtype
         and residual.shape == (1, msa.shape[2], msa.shape[2], cz)
     )
-    r = residual.contiguous() if fuse else msa.new_empty((0,))
+    r = residual.contiguous() if fuse and residual is not None else msa.new_empty((0,))
     # RoseTTAFold3: the left | right projection biases as one fp32 vector (an empty tensor: no biases)
     pbias = (torch.cat([module.to_left.bias, module.to_right.bias]) if with_bias and module.to_left.bias is not None
              else msa.new_empty((0,), dtype=torch.float32))
@@ -1009,6 +1009,7 @@ class _SavedContext:
     eps: float
     save_o: bool
     after: bool = False
+    has_bias: bool = False
 
     def save_for_backward(self, *tensors):
         self.saved_tensors = tensors
@@ -1056,9 +1057,10 @@ def _forward_op(
     args: list[torch.Tensor], eps: float, save_o: bool, after: bool, dmin: float = 1.0, doff: float = 0.0
 ) -> list[torch.Tensor]:
     ctx = _SavedContext()
+    msa, mask, lnw, lnb, wa, wb, wo, bo = args[:8]
     out = _OpmMath.forward(
         ctx,
-        *args[:8],
+        msa, mask, lnw, lnb, wa, wb, wo, bo,
         eps,
         save_o,
         residual=args[8] if args[8].numel() else None,
@@ -1098,7 +1100,7 @@ def _backward_op(
     if k5[0].numel() == 0:
         k5[0] = args[1][0] if args[1].dtype == torch.bool else args[1][0] != 0
     ctx.saved_tensors = (args[0][0], *k5, *args[2:8], *((kept[5],) if save_o else ()))
-    gradients = _OpmMath.backward(ctx, dz)
+    gradients = cast("tuple[Any, ...]", _OpmMath.backward(ctx, dz))  # 10 slots, 11 with the projection biases (_backward_wide)
     db = gradients[10].to(args[9].dtype) if ctx.has_bias else args[9].new_empty((0,))
     return [*(gradients[i] for i in (0, 2, 3, 4, 5, 6, 7)), db]
 
@@ -1154,9 +1156,10 @@ def _inference_op(args: list[torch.Tensor], eps: float, after: bool, dmin: float
             residual=args[8] if args[8].numel() else None,
             save_stats=False,
         )[0]
+    msa, mask, lnw, lnb, wa, wb, wo, bo = args[:8]
     return _OpmMath.forward(
         _SavedContext(),
-        *args[:8],
+        msa, mask, lnw, lnb, wa, wb, wo, bo,
         eps,
         False,
         residual=args[8] if args[8].numel() else None,

@@ -510,7 +510,7 @@ class _Training(torch.autograd.Function):
     def forward(ctx, residual, eps_x, eps_c, x, cond, *params):
         ctx.fp32_grads = master((params[1],), x.dtype)
         leaves = [params[0], *cast_params(tuple(params[1:]), x.dtype, False)]
-        y, *saved = train_fwd(x, cond, *leaves, eps_x, eps_c, residual)
+        y, *saved = train_fwd(x, cond, *leaves, eps_x, eps_c, residual)  # pyright: ignore[reportCallIssue]  -- *leaves: the module's parameters, in train_fwd's order
         ctx.save_for_backward(x, cond, *leaves, *saved)
         ctx.residual = residual
         return y
@@ -519,12 +519,7 @@ class _Training(torch.autograd.Function):
     @torch.autograd.function.once_differentiable
     def backward(ctx, dy):
         v = ctx.saved_tensors
-        grads = train_bwd(
-            dy.contiguous(),
-            *v,
-            ctx.residual,
-            ctx.fp32_grads,
-        )
+        grads = train_bwd(dy.contiguous(), *v, ctx.residual, ctx.fp32_grads)  # pyright: ignore[reportCallIssue]  -- *v: the tensors forward saved, in train_bwd's order
         return (None, None, None, *grads)
 
 
@@ -553,5 +548,5 @@ def update(
         )  # shared: the first sample's rows are the table
         cs = cs.to(compute_dtype).reshape(-1, dc).contiguous()
     eps = (float(module.ada_ln_in.ln_in.eps), float(module.ada_ln_in.ln_cond.eps))
-    y = _Training.apply(residual, *eps, xs, cs, *_params(module)) if grad else inference(xs, cs, *_params(module), *eps, residual)
+    y = _Training.apply(residual, *eps, xs, cs, *_params(module)) if grad else inference(xs, cs, *_params(module), *eps, residual)  # pyright: ignore[reportCallIssue]  -- *_params(module): the parameters, in inference's order
     return y.reshape(x.shape)

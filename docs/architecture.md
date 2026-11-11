@@ -179,7 +179,6 @@ src/miniworld_engine/
     _capture.py, _compile.py, _device.py, _cast*.py, _tf32.py, _dot_precision.py, _fastmath.py, _tiles.py, _h100_master.py
   measure/                               config.py, accuracy.py, speed.py, plot.py, configs/{accuracy,speed,all}.yaml
   judge/                                 __init__.py (the judge), tokens/<card>/, answers.jsonl
-  autotune/data/                         two legacy A100 Triton tuning dumps; the runtime does not read them
 ```
 
 Size (2026-11-11): about 116k lines of Python and 187k lines of CUDA (`.cu` / `.cuh`) under `src/miniworld_engine`, plus the

@@ -3,7 +3,7 @@ name = "miniworld-engine"
 version = "2.5.1"
 requires-python = ">=3.10"
 readme = "README.md"
-description = "H100 CUDA / Triton kernels for AlphaFold3-style modules, with a PyTorch reference backend per module, accuracy and speed measurers, and a version-based judge."
+description = "H100 + A100 CUDA / Triton kernels for AlphaFold3-style modules, with a PyTorch reference backend per module, accuracy and speed measurers, and a version-based judge."
 license = "MIT AND Apache-2.0 AND BSD-3-Clause"
 license-files = ["LICENSE", "licenses/THIRD_PARTY_NOTICES.md", "licenses/Anthropic-Apache-2.0.txt", "licenses/Anthropic-NOTICE",
                  "licenses/CUTLASS-LICENSE.txt", "licenses/FlashAttention-LICENSE.txt"]
@@ -116,7 +116,10 @@ markers = [
 
 # --------------------------------------------------------------------------------------------------------------------------- pyright
 [tool.pyright]
-# The type gate (tools/check.sh): basic mode over the package and the tests; the vendored kernel bodies ruff leaves alone are out.
+# The type gate (tools/check.sh, 0 errors): basic mode over the package and the tests. Out: the kernel bodies ruff leaves alone
+# (kernels/**/triton, kernels/**/cuda: faithful copies of team-gm / FlashAttentionBias / Anthropic kits). Checked, they report ~1000
+# errors in ~90 files, nearly all from idioms the stubs do not model (tl.constexpr parameters given plain values, torch.empty(*shape)
+# unpacking, opaque launch tuples); fixing them means editing @triton.jit sources, whose text keys the Triton cache.
 include = ["src", "tests"]
 exclude = [
   ".pixi", "**/.pixi", "**/__pycache__",

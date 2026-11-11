@@ -90,15 +90,17 @@ def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
     if cm == 64 and cz == 128 and all(t.is_contiguous() and t.dtype in (torch.float32, bf) for t in params):
         # one packing launch for the LayerNorm affine, the bf16 weights, the rounded bias and the projection biases (was six casts and a cat),
         # made once while the weights are unchanged
-        def forms():
+        def packed():
             gam, bet, wa16, wb16, wo16, ob, _, _, pbias = ext.opm_native_pack(params[:6], True, params[6], params[7])
             return gam, bet, wa16, wb16, wo16, ob, pbias
+        forms = packed
     else:
-        def forms():
+        def converted():
             return (module.ln_msa.weight.float().contiguous(), module.ln_msa.bias.float().contiguous(),
                     module.to_left.weight.to(bf).contiguous(), module.to_right.weight.to(bf).contiguous(),
                     module.to_out.weight.to(bf).contiguous(), module.to_out.bias.to(bf).float().contiguous(),
                     torch.cat([module.to_left.bias, module.to_right.bias]).float().contiguous())
+        forms = converted
     gam, bet, wa16, wb16, wo_epi, bo_epi, pbias = _capture.param_forms("opm_biased_wide", params, forms)
     # the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table): no count kernel
     dkw = {} if (dmin, doff) == (1.0, 0.0) else {"dmin": dmin, "doff": doff}   # the pair divisor max(count, dmin) + doff
@@ -110,7 +112,7 @@ def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
     else:
         z = ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo_epi, bo_epi, n, n, res, int(not module.normalize_before_proj), **dkw)
     z = z.view(1, n, n, cz)
-    if interchain:
+    if interchain and token_asym_id is not None:
         z = z * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(z.dtype)
         return residual + z if residual is not None else z
     return z
