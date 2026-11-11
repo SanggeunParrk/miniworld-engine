@@ -1399,7 +1399,10 @@ class AtomDiTESMFold2(AtomDiTMiniWorld):
     bias, an affine-free q / k RMSNorm, the 3D rotary, the band ``|rank_i - rank_j| <= 64`` among the valid atoms, ``sigmoid(gate_proj)`` of
     the normalised input, ``out_proj``) and ``SwiGLUFFN``. It is :class:`AtomDiTMiniWorld` (MiniWorld adopted this block), under
     ESMFold2's constructor: ``forward(x [A * B, S, d_single], cond [A * B, S, d_cond], attention_params)``
-    (:func:`~miniworld_engine.modules.functional.build_attention_params`). ``backend="anthropic"``: ESMFold2's own band core."""
+    (:func:`~miniworld_engine.modules.functional.build_attention_params`). ``backend="anthropic"``: ESMFold2's own band core.
+
+    Not FoldForge's ESMFold2 atom stack (FoldForge R6): that one is the AF3 block over a 32 x 192 atom pair (a pair bias this block has no
+    input for); no option turns one into the other (docs/modules.md, "Downstream requests")."""
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
