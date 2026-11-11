@@ -250,7 +250,7 @@ def _under(path: str, root: Path | str | None) -> str | None:
     if path == root_s:
         return "."
     if path.startswith(root_s.rstrip("/") + "/"):
-        return path[len(root_s.rstrip("/")) + 1:]
+        return path[len(root_s.rstrip("/")) + 1 :]
     return None
 
 
@@ -296,8 +296,11 @@ def classify_dir(directory: str, ctx: Context) -> tuple[str, bool]:
     if _under(d, ctx.jit) is not None:
         return "gen", False
     low = d.lower()
-    if (os.path.isfile(os.path.join(d, "cutlass", "cutlass.h")) or os.path.isfile(os.path.join(d, "cute", "tensor.hpp"))
-            or ("cutlass" in low and "mathdx" not in low)):
+    if (
+        os.path.isfile(os.path.join(d, "cutlass", "cutlass.h"))
+        or os.path.isfile(os.path.join(d, "cute", "tensor.hpp"))
+        or ("cutlass" in low and "mathdx" not in low)
+    ):
         return f"cutlass@{_cutlass_version(d)}", True
     if "mathdx" in low or os.path.isfile(os.path.join(d, "cublasdx.hpp")):
         return "mathdx", True
@@ -333,7 +336,7 @@ def normalize_flags(flags: Sequence[str], ctx: Context) -> list[str]:
                 out.append(f"{prefix.rstrip('=')}{_path_label(value, ctx)}")
                 break
             if flag.startswith(prefix) and len(flag) > len(prefix):
-                out.append(f"{prefix}{_path_label(flag[len(prefix):], ctx)}")
+                out.append(f"{prefix}{_path_label(flag[len(prefix) :], ctx)}")
                 break
         else:
             out.append(_scrub(flag, ctx))
@@ -406,7 +409,7 @@ def include_dirs_of(flags: Sequence[str]) -> list[str]:
                 dirs.append(next(it, ""))
                 break
             if flag.startswith(prefix) and len(flag) > len(prefix):
-                dirs.append(flag[len(prefix):])
+                dirs.append(flag[len(prefix) :])
                 break
     return [os.path.abspath(d) for d in dirs if d]
 
@@ -423,8 +426,7 @@ def _label(path: str, include_dirs: Sequence[str], ctx: Context) -> str:
     return f"inc:{best}" if best is not None else f"file:{os.path.basename(path)}"
 
 
-def closure(roots: Sequence[str | Path | TextRoot], include_dirs: Sequence[str | Path] = (),
-            ctx: Context | None = None) -> Graph:
+def closure(roots: Sequence[str | Path | TextRoot], include_dirs: Sequence[str | Path] = (), ctx: Context | None = None) -> Graph:
     """The include graph of ``roots`` (see the module docstring)."""
     ctx = ctx or context()
     inc = [os.path.abspath(d) for d in include_dirs]
@@ -492,8 +494,16 @@ def python_abi() -> str:
     return sys.implementation.cache_tag or f"py{sys.version_info[0]}{sys.version_info[1]}"
 
 
-def key_material(kind: str, name: str, graph: Graph, flags: dict | Sequence[str], *, python: bool = False,
-                 ctx: Context | None = None, versions: dict | None = None) -> dict:
+def key_material(
+    kind: str,
+    name: str,
+    graph: Graph,
+    flags: dict | Sequence[str],
+    *,
+    python: bool = False,
+    ctx: Context | None = None,
+    versions: dict | None = None,
+) -> dict:
     """Everything the key hashes, as a JSON-able dict (``dev code-graph`` prints it)."""
     ctx = ctx or context()
     if isinstance(flags, dict):

@@ -1,6 +1,6 @@
-
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._device import num_sms
+
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/layernorm.py
 from miniworld_engine.kernels._launch_config import configured
 import torch
@@ -125,8 +125,6 @@ def layer_norm_fwd_fused(
                 y = y * rs[:, None]
             tl.store(Y + rows[:, None] * stride_r + cols[None, :] * stride_c, y, mask=mask)
 # fmt: on
-
-
 # fmt: off
 
 
@@ -261,8 +259,8 @@ def _ln_fwd_fake(x_2d, weight, bias, rs, eps, has_rs, shape_key, store_stats=Tru
     m = x_2d.shape[0] if store_stats else 0
     return (
         torch.empty_like(x_2d),
-        x_2d.new_empty((m,), dtype=torch.float32),   # mean
-        x_2d.new_empty((m,), dtype=torch.float32),   # rstd
+        x_2d.new_empty((m,), dtype=torch.float32),  # mean
+        x_2d.new_empty((m,), dtype=torch.float32),  # rstd
     )
 
 
@@ -320,7 +318,12 @@ class TritonLayerNormFunction(torch.autograd.Function):
         # (no extra (M,N) multiply / HBM round-trip). rs reshaped to [M], broadcast over N.
         rs = row_scale.reshape(-1).to(x_2d.dtype).contiguous() if has_rs else None
         y_2d, mean, rstd = _ln_fwd(
-            x_2d, weight, bias, rs, eps, has_rs,
+            x_2d,
+            weight,
+            bias,
+            rs,
+            eps,
+            has_rs,
             # L = x.shape[-2], read BEFORE the reshape above -- one rule for pair
             # (B, L, L, D) and token/atom (B, L, D). Never the row count M.
             both_key(rows_of(x.shape)),
@@ -350,12 +353,18 @@ class TritonLayerNormFunction(torch.autograd.Function):
     def backward(ctx, dy: torch.Tensor):
         x, weight, mean, rstd, rs = ctx.saved_tensors
         dx, dw, db = _ln_bwd(
-            dy.reshape(-1, dy.shape[-1]).contiguous(), x, weight, mean, rstd, rs,
-            ctx.has_rowscale, list(ctx.input_shape),
+            dy.reshape(-1, dy.shape[-1]).contiguous(),
+            x,
+            weight,
+            mean,
+            rstd,
+            rs,
+            ctx.has_rowscale,
+            list(ctx.input_shape),
             # ctx.input_shape is the forward's PRE-flatten shape; L = its [-2].
             both_key(rows_of(ctx.input_shape)),
         )
-        return dx, dw, db, None, None   # eps, row_scale take no gradient
+        return dx, dw, db, None, None  # eps, row_scale take no gradient
 
 
 def _ln_bwd_fake(dy_2d, x, weight, mean, rstd, rs, has_rs, input_shape, shape_key):

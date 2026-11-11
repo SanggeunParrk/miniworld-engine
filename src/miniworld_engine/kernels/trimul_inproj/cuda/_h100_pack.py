@@ -1,4 +1,5 @@
 """Live weight packing without a nested torch.compile runtime invocation."""
+
 from functools import lru_cache
 from pathlib import Path
 import triton
@@ -109,10 +110,14 @@ def _owned_blas_ext():
     if tuple(map(int, (torch.version.cuda or "0.0").split(".")[:2])) < (12, 0):
         raise RuntimeError("Hopper owned BLAS requires CUDA 12 or newer")
     return load_inline(
-        name="trimul_hopper_owned_blas", cpp_sources=_OWNED_BLAS_CPP,
-        functions=["owned_mm", "owned_mm_out", "owned_bmm"], with_cuda=True,
+        name="trimul_hopper_owned_blas",
+        cpp_sources=_OWNED_BLAS_CPP,
+        functions=["owned_mm", "owned_mm_out", "owned_bmm"],
+        with_cuda=True,
         extra_include_paths=[str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")],
-        extra_cflags=["-O3"], extra_ldflags=["-lcublas"], verbose=False,
+        extra_cflags=["-O3"],
+        extra_ldflags=["-lcublas"],
+        verbose=False,
     )
 
 
@@ -135,41 +140,50 @@ def owned_bmm(a, b, *, out):
 
 
 @triton.jit
-def _pack(DST, WL, WLG, WR, WRG, R: tl.constexpr, D: tl.constexpr,
-          LS0: tl.constexpr, LS1: tl.constexpr,
-          LGS0: tl.constexpr, LGS1: tl.constexpr,
-          RS0: tl.constexpr, RS1: tl.constexpr,
-          RGS0: tl.constexpr, RGS1: tl.constexpr,
-          BLOCK: tl.constexpr):
+def _pack(
+    DST,
+    WL,
+    WLG,
+    WR,
+    WRG,
+    R: tl.constexpr,
+    D: tl.constexpr,
+    LS0: tl.constexpr,
+    LS1: tl.constexpr,
+    LGS0: tl.constexpr,
+    LGS1: tl.constexpr,
+    RS0: tl.constexpr,
+    RS1: tl.constexpr,
+    RGS0: tl.constexpr,
+    RGS1: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     row, col = i // D, i % D
     source_row = (row // 64) * 32 + row % 32
     right = source_row >= R
     gate = row % 64 < 32
     r = source_row % R
-    ptr = tl.where(right,
-                   tl.where(gate, WRG + r * RGS0 + col * RGS1,
-                            WR + r * RS0 + col * RS1),
-                   tl.where(gate, WLG + r * LGS0 + col * LGS1,
-                            WL + r * LS0 + col * LS1))
+    ptr = tl.where(
+        right,
+        tl.where(gate, WRG + r * RGS0 + col * RGS1, WR + r * RS0 + col * RS1),
+        tl.where(gate, WLG + r * LGS0 + col * LGS1, WL + r * LS0 + col * LS1),
+    )
     tl.store(DST + i, tl.load(ptr, i < 4 * R * D, other=0), i < 4 * R * D)
 
 
-def _pack_into_triton_fake(dst: torch.Tensor, wl: torch.Tensor, wlg: torch.Tensor, wr: torch.Tensor,
-                           wrg: torch.Tensor) -> None:
+def _pack_into_triton_fake(dst: torch.Tensor, wl: torch.Tensor, wlg: torch.Tensor, wr: torch.Tensor, wrg: torch.Tensor) -> None:
     """Nothing: the op writes ``dst`` in place."""
     return None
 
 
 @opaque(fake=_pack_into_triton_fake, name="trimul_h100_weight_pack_triton", mutates_args=("dst",))
-def pack_into_triton(dst: torch.Tensor, wl: torch.Tensor, wlg: torch.Tensor, wr: torch.Tensor,
-                     wrg: torch.Tensor) -> None:
+def pack_into_triton(dst: torch.Tensor, wl: torch.Tensor, wlg: torch.Tensor, wr: torch.Tensor, wrg: torch.Tensor) -> None:
     """Pack the four [R, D] leaves into ``dst`` [4R, D] in 32-row groups (the Triton fallback of ``pack_into_cuda``)."""
     r, d = wl.shape
     if r % 32 or dst.shape != (4 * r, d) or not dst.is_contiguous():
         raise ValueError("weight pack requires 32-row groups and contiguous output")
-    if any(w.shape != wl.shape or w.dtype != dst.dtype or w.device != dst.device
-           for w in (wl, wlg, wr, wrg)):
+    if any(w.shape != wl.shape or w.dtype != dst.dtype or w.device != dst.device for w in (wl, wlg, wr, wrg)):
         raise ValueError("weight pack inputs must share shape, dtype and device")
     _pack_blocks(dst, wl, wlg, wr, wrg)
 
@@ -188,12 +202,9 @@ def _pack_blocks(dst: torch.Tensor, wl: torch.Tensor, wlg: torch.Tensor, wr: tor
     dst.view(2 * (r // 32), 2, 32, d).copy_(torch.cat((left, right), 0))
 
 
-
-
 @T.device_cache
 def _aux_unit():
-    path = T.compile(T.SOURCES / "wide_forward/output.cu", [
-        "-std=c++17", "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-DMW_AUX_ONLY=1"])
+    path = T.compile(T.SOURCES / "wide_forward/output.cu", ["-std=c++17", "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-DMW_AUX_ONLY=1"])
     return T.load_unit(str(path), "trimul_live_aux")
 
 
@@ -204,19 +215,19 @@ def _launch(name, grid, args):
 def pack_into_cuda(dst, wl, wlg, wr, wrg):
     r, d = wl.shape
     quad = (wl, wlg, wr, wrg)
-    if (r % 32 or dst.shape != (4 * r, d) or not dst.is_contiguous()
-            or dst.dtype != torch.bfloat16
-            or any(w.shape != wl.shape or w.device != dst.device
-                   or w.dtype not in (torch.bfloat16, torch.float32) for w in quad)):
+    if (
+        r % 32
+        or dst.shape != (4 * r, d)
+        or not dst.is_contiguous()
+        or dst.dtype != torch.bfloat16
+        or any(w.shape != wl.shape or w.device != dst.device or w.dtype not in (torch.bfloat16, torch.float32) for w in quad)
+    ):
         raise ValueError("CUDA weight packing requires BF16 output and BF16/FP32 leaves")
-    p = T._launch_module().Struct([
-        dst, *quad, r, d, *(w.stride(0) for w in quad), *(w.stride(1) for w in quad),
-        *(int(w.dtype == torch.float32) for w in quad)])
-    vector = (T.preserve_training(d)
-              and T.d256_glue_enabled()
-              and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in quad))
-    _launch("mw_aux_pack_vec" if vector else "mw_aux_pack",
-            (((4*r*d//8 if vector else 4*r*d)+255)//256, 1, 1), [p])
+    p = T._launch_module().Struct(
+        [dst, *quad, r, d, *(w.stride(0) for w in quad), *(w.stride(1) for w in quad), *(int(w.dtype == torch.float32) for w in quad)]
+    )
+    vector = T.preserve_training(d) and T.d256_glue_enabled() and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in quad)
+    _launch("mw_aux_pack_vec" if vector else "mw_aux_pack", (((4 * r * d // 8 if vector else 4 * r * d) + 255) // 256, 1, 1), [p])
 
 
 def pack_into(dst, wl, wlg, wr, wrg):
@@ -228,9 +239,10 @@ def pack_into(dst, wl, wlg, wr, wrg):
 
 def cast_weights(weights):
     """One live CUDA launch for the six matrix leaves; BF16 layouts stay aliased."""
-    out = [w if w.dtype == torch.bfloat16 and (i < 4 or w.is_contiguous())
-           else torch.empty(w.shape, device=w.device, dtype=torch.bfloat16)
-           for i, w in enumerate(weights)]
+    out = [
+        w if w.dtype == torch.bfloat16 and (i < 4 or w.is_contiguous()) else torch.empty(w.shape, device=w.device, dtype=torch.bfloat16)
+        for i, w in enumerate(weights)
+    ]
     pairs = [(w, o) for w, o in zip(weights, out) if o is not w]
     if pairs:
         _cast_cuda.cast_into([w for w, _ in pairs], [o for _, o in pairs])
@@ -245,8 +257,11 @@ def dense_native(value, dtype=None):
     if value.ndim != 2 or value.dtype not in (torch.bfloat16, torch.float32) or dtype not in (torch.bfloat16, torch.float32):
         raise ValueError("native dense copy requires a BF16/FP32 matrix")
     out = torch.empty(value.shape, device=value.device, dtype=dtype)
-    _launch("mw_aux_dense_copy", ((value.numel()+255)//256,1,1),
-            [value,out,*value.shape,*value.stride(),int(value.dtype==torch.float32),int(dtype==torch.float32)])
+    _launch(
+        "mw_aux_dense_copy",
+        ((value.numel() + 255) // 256, 1, 1),
+        [value, out, *value.shape, *value.stride(), int(value.dtype == torch.float32), int(dtype == torch.float32)],
+    )
     return out
 
 
@@ -268,56 +283,78 @@ def dense_native_many(values, dtypes):
     pad = lambda xs, fill=0: [xs[i] if i < len(todo) else fill for i in range(6)]
     srcs = [values[i] for i in todo]
     dsts = [out[i] for i in todo]
-    p = T._launch_module().Struct([
-        *pad(srcs, None), *pad(dsts, None), *pad([s.numel() for s in srcs]), *pad([s.shape[1] for s in srcs], 1),
-        *pad([s.stride(0) for s in srcs]), *pad([s.stride(1) for s in srcs]),
-        *pad([int(s.dtype == torch.float32) for s in srcs]), *pad([int(d.dtype == torch.float32) for d in dsts])])
+    p = T._launch_module().Struct(
+        [
+            *pad(srcs, None),
+            *pad(dsts, None),
+            *pad([s.numel() for s in srcs]),
+            *pad([s.shape[1] for s in srcs], 1),
+            *pad([s.stride(0) for s in srcs]),
+            *pad([s.stride(1) for s in srcs]),
+            *pad([int(s.dtype == torch.float32) for s in srcs]),
+            *pad([int(d.dtype == torch.float32) for d in dsts]),
+        ]
+    )
     _launch("mw_aux_copy_n", ((max(s.numel() for s in srcs) + 255) // 256, len(todo), 1), [p])
     return out
 
 
 def zero_native_(out):
     """Initialize an owned numeric workspace without an ATen fill kernel."""
-    size = out.numel()*out.element_size()
+    size = out.numel() * out.element_size()
     if size:
-        _launch("mw_aux_zero_bytes", (min(512,(size+255)//256),1,1), [out,size])
+        _launch("mw_aux_zero_bytes", (min(512, (size + 255) // 256), 1, 1), [out, size])
     return out
 
 
 def zeros_native(shape, *, device, dtype=torch.float32):
-    return zero_native_(torch.empty(shape,device=device,dtype=dtype))
+    return zero_native_(torch.empty(shape, device=device, dtype=dtype))
 
 
 def dense_copy_into(dst, src):
-    if (dst.ndim != 2 or src.shape != dst.shape or not dst.is_contiguous()
-            or dst.dtype not in (torch.bfloat16, torch.float32)
-            or src.dtype not in (torch.bfloat16, torch.float32)):
+    if (
+        dst.ndim != 2
+        or src.shape != dst.shape
+        or not dst.is_contiguous()
+        or dst.dtype not in (torch.bfloat16, torch.float32)
+        or src.dtype not in (torch.bfloat16, torch.float32)
+    ):
         raise ValueError("native dense copy requires matching dense matrices")
-    _launch("mw_aux_dense_copy", ((src.numel()+255)//256,1,1),
-            [src,dst,*src.shape,*src.stride(),int(src.dtype==torch.float32),int(dst.dtype==torch.float32)])
+    _launch(
+        "mw_aux_dense_copy",
+        ((src.numel() + 255) // 256, 1, 1),
+        [src, dst, *src.shape, *src.stride(), int(src.dtype == torch.float32), int(dst.dtype == torch.float32)],
+    )
 
 
 def finish_affine_partials(pg, pb, dg, db):
     blocks, width = pg.shape
-    _aux_unit().kernel("mw_aux_affine_cta_finish_parallel").launch(((width+3)//4,1,1), (128,1,1), [pg,pb,dg,db,width,blocks])
+    _aux_unit().kernel("mw_aux_affine_cta_finish_parallel").launch(((width + 3) // 4, 1, 1), (128, 1, 1), [pg, pb, dg, db, width, blocks])
 
 
 def fused_wide_glue(width, length, bidirectional=False, selected=False):
     """Per-shape live weight layouts and paired deterministic affine finishing."""
-    default = ((width, length, bidirectional) in
-               ((384, 384, False), (384, 768, True)))
-    return (length in (384, 768) and (width == 384 or (width == 512 and bidirectional))
-            and (selected or T.preserve_wide_training(width))
-            and default)
+    default = (width, length, bidirectional) in ((384, 384, False), (384, 768, True))
+    return (
+        length in (384, 768)
+        and (width == 384 or (width == 512 and bidirectional))
+        and (selected or T.preserve_wide_training(width))
+        and default
+    )
+
 
 def fused_d256_glue(width, length, selected=False, *, bidirectional=False):
-    return ((width == 256 and length == 384
-             and (selected or T.preserve_d256_training())
-             and T.d256_glue_enabled(selected))
-            or (width == 256 and length == 768
-                and (selected or T.preserve_d256_training())
-                and T.d256_register_source_enabled(selected and bidirectional))
-            or fused_wide_glue(width, length, bidirectional=bidirectional, selected=selected))
+    return (
+        (width == 256 and length == 384 and (selected or T.preserve_d256_training()) and T.d256_glue_enabled(selected))
+        or (
+            width == 256
+            and length == 768
+            and (selected or T.preserve_d256_training())
+            and T.d256_register_source_enabled(selected and bidirectional)
+        )
+        or fused_wide_glue(width, length, bidirectional=bidirectional, selected=selected)
+    )
+
 
 def pack_training_pair(dst, stack, weights):
     """Read live matrices once, retaining both forward and backward layouts."""
@@ -325,41 +362,36 @@ def pack_training_pair(dst, stack, weights):
     if any(w.dtype != torch.bfloat16 or not w.is_contiguous() for w in weights):
         raise ValueError("fused D256 packing requires dense BF16 working matrices")
     r, d = wl.shape
-    _launch("mw_aux_pack_training_pair", (((wg.numel()+4*r*d)//8+255)//256,1,1),
-            [dst,stack,wg,wl,wlg,wr,wrg,r,d])
+    _launch("mw_aux_pack_training_pair", (((wg.numel() + 4 * r * d) // 8 + 255) // 256, 1, 1), [dst, stack, wg, wl, wlg, wr, wrg, r, d])
 
 
 def finish_affine_pair(first, second):
     """Both LayerNorm affine outputs share one fixed-order finishing launch."""
-    args = [*first,*second,first[0].shape[1],first[0].shape[0],
-            second[0].shape[1],second[0].shape[0]]
-    count = (first[0].shape[1]+second[0].shape[1])//4
-    _aux_unit().kernel("mw_aux_affine_pair_finish").launch((count,1,1),(128,1,1),args)
+    args = [*first, *second, first[0].shape[1], first[0].shape[0], second[0].shape[1], second[0].shape[0]]
+    count = (first[0].shape[1] + second[0].shape[1]) // 4
+    _aux_unit().kernel("mw_aux_affine_pair_finish").launch((count, 1, 1), (128, 1, 1), args)
 
 
 def native_training_grads(grads, leaves):
     result = list(grads)
-    indices = [i for i in range(1,7) if result[i].dtype!=leaves[i].dtype or result[i].stride()!=leaves[i].stride()]
+    indices = [i for i in range(1, 7) if result[i].dtype != leaves[i].dtype or result[i].stride() != leaves[i].stride()]
     if indices:
-        copies = _training_gradient_copies([result[i] for i in indices],
-                                           [leaves[i] for i in indices])
-        for i,g in zip(indices,copies,strict=True):
-            result[i]=g
+        copies = _training_gradient_copies([result[i] for i in indices], [leaves[i] for i in indices])
+        for i, g in zip(indices, copies, strict=True):
+            result[i] = g
     return result
 
 
 def _training_cast_indices(weights):
-    return [i for i,w in enumerate(weights)
-            if w.dtype!=torch.bfloat16 or (i>=4 and not w.is_contiguous())]
+    return [i for i, w in enumerate(weights) if w.dtype != torch.bfloat16 or (i >= 4 and not w.is_contiguous())]
 
 
 def _training_cast_copies_fake(weights: list[torch.Tensor]) -> list[torch.Tensor]:
     """One fresh bf16 tensor per weight that is not already a BF16 alias (see ``_training_cast_indices``)."""
-    return [torch.empty(weights[i].shape,device=weights[i].device,dtype=torch.bfloat16)
-            for i in _training_cast_indices(weights)]
+    return [torch.empty(weights[i].shape, device=weights[i].device, dtype=torch.bfloat16) for i in _training_cast_indices(weights)]
 
 
-@opaque(fake=_training_cast_copies_fake,name="trimul_h100_preserved_weight_copies")
+@opaque(fake=_training_cast_copies_fake, name="trimul_h100_preserved_weight_copies")
 def _training_cast_copies(weights: list[torch.Tensor]) -> list[torch.Tensor]:
     """Fresh BF16 copies of the weights that need one; BF16 aliases are not outputs of the op."""
     with T.native_context(weights[0].device):
@@ -369,34 +401,34 @@ def _training_cast_copies(weights: list[torch.Tensor]) -> list[torch.Tensor]:
 
 def cast_training_weights(weights):
     # A custom op returns only fresh storage; BF16 aliases stay outside its outputs.
-    out=list(weights)
-    indices=_training_cast_indices(weights)
+    out = list(weights)
+    indices = _training_cast_indices(weights)
     if indices:
-        for i,value in zip(indices,_training_cast_copies(weights),strict=True):
-            out[i]=value
+        for i, value in zip(indices, _training_cast_copies(weights), strict=True):
+            out[i] = value
     return out
 
 
-def _owned_training_mask_fake(pair,mask):
+def _owned_training_mask_fake(pair, mask):
     """[B L, L] bf16 mask; ``pair`` supplies only the shape and device."""
-    return pair.new_empty((pair.shape[0]*pair.shape[1],pair.shape[1]),dtype=torch.bfloat16)
+    return pair.new_empty((pair.shape[0] * pair.shape[1], pair.shape[1]), dtype=torch.bfloat16)
 
 
-@opaque(fake=_owned_training_mask_fake,name="trimul_h100_preserved_owned_mask")
-def owned_training_mask(pair: torch.Tensor,mask: torch.Tensor | None) -> torch.Tensor:
+@opaque(fake=_owned_training_mask_fake, name="trimul_h100_preserved_owned_mask")
+def owned_training_mask(pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """The pair mask as an owned [B L, L] BF16 tensor (B samples b-major; B = 1: [L, L])."""
     with T.native_context(pair.device):
-        return owned_bf16_mask(mask,pair.shape[1],pair.device,pair.shape[0])
+        return owned_bf16_mask(mask, pair.shape[1], pair.device, pair.shape[0])
 
 
 def normalize_into(dst, x, g, b, stats=None, *, warp=False):
     if not x.is_contiguous() or x.dtype != torch.bfloat16 or g.dtype != torch.float32 or b.dtype != torch.float32:
         raise ValueError("CUDA input LN requires contiguous BF16 input and FP32 affine")
-    width, rows = x.shape[-1], x.numel()//x.shape[-1]
+    width, rows = x.shape[-1], x.numel() // x.shape[-1]
     if width not in (64, 128, 256, 384, 512):
         raise ValueError("Hopper CUDA normalization requires a supported pair width")
     # one warp per row (8 rows per block) at every size (``warp`` is accepted for the callers, it no longer selects a kernel)
-    _launch("mw_aux_norm_warp", ((rows+7)//8, 1, 1), [x, g, b, dst, stats, width, rows])
+    _launch("mw_aux_norm_warp", ((rows + 7) // 8, 1, 1), [x, g, b, dst, stats, width, rows])
 
 
 def fold_into(wp, go, bo, wpf, wg, gi, bi, wgf, uv, gate=False):
@@ -406,7 +438,7 @@ def fold_into(wp, go, bo, wpf, wg, gi, bi, wgf, uv, gate=False):
 
 def pair_mask(token, length, device):
     out = torch.empty((length, length), device=device, dtype=torch.bfloat16)
-    _launch("mw_aux_mask", ((length*length+255)//256, 1, 1), [token, out, length])
+    _launch("mw_aux_mask", ((length * length + 255) // 256, 1, 1), [token, out, length])
     return out
 
 
@@ -415,14 +447,19 @@ def owned_bf16_mask(mask, length, device, samples=1):
     token mask [B L] or a pair mask [B L L]; [L, L] for one sample."""
     out = torch.empty((samples * length, length), device=device, dtype=torch.bfloat16)
     absent = mask is None or mask.numel() == 0
-    if not absent and (mask.device != torch.device(device) or not mask.is_contiguous() or mask.dtype not in
-                       (torch.bool, torch.bfloat16, torch.float32)
-                       or mask.numel() not in (samples * length, samples * length * length)):
+    if not absent and (
+        mask.device != torch.device(device)
+        or not mask.is_contiguous()
+        or mask.dtype not in (torch.bool, torch.bfloat16, torch.float32)
+        or mask.numel() not in (samples * length, samples * length * length)
+    ):
         raise ValueError("native TriMul mask requires contiguous token or pair data")
     kind = 0 if absent else 1 if mask.dtype == torch.bool else 2 if mask.dtype == torch.bfloat16 else 3
-    _launch("mw_aux_owned_mask", ((samples*length*length+255)//256, 1, 1),
-            [None if absent else mask, out, length, kind,
-             int(not absent and mask.numel() == samples * length), samples])
+    _launch(
+        "mw_aux_owned_mask",
+        ((samples * length * length + 255) // 256, 1, 1),
+        [None if absent else mask, out, length, kind, int(not absent and mask.numel() == samples * length), samples],
+    )
     return out
 
 
@@ -436,10 +473,15 @@ def _gradient_layout(grads: list[torch.Tensor], weights: list[torch.Tensor]) -> 
     """Copy each dense gradient into its weight's (possibly transposed) layout."""
     if not 0 < len(grads) == len(weights) <= 6:
         raise ValueError("one to six parameter gradients required")
-    if any(not g.is_contiguous() or g.shape != w.shape or g.device != w.device
-           or g.dtype != w.dtype or w.dtype not in (torch.bfloat16, torch.float32)
-           or not (w.is_contiguous() or w.t().is_contiguous())
-           for g, w in zip(grads, weights, strict=True)):
+    if any(
+        not g.is_contiguous()
+        or g.shape != w.shape
+        or g.device != w.device
+        or g.dtype != w.dtype
+        or w.dtype not in (torch.bfloat16, torch.float32)
+        or not (w.is_contiguous() or w.t().is_contiguous())
+        for g, w in zip(grads, weights, strict=True)
+    ):
         raise ValueError("native gradient layout requires matching dense matrices")
     out = _gradient_layout_fake(grads, weights)
     for o, g in zip(out, grads, strict=True):
@@ -448,12 +490,12 @@ def _gradient_layout(grads: list[torch.Tensor], weights: list[torch.Tensor]) -> 
 
 
 def preserve_parameter_layout(grads, weights):
-    indices = [i for i,(g,w) in enumerate(zip(grads,weights,strict=True)) if g.stride() != w.stride()]
+    indices = [i for i, (g, w) in enumerate(zip(grads, weights, strict=True)) if g.stride() != w.stride()]
     if not indices:
         return grads
     copies = _gradient_layout([grads[i] for i in indices], [weights[i] for i in indices])
     result = list(grads)
-    for i,g in zip(indices,copies,strict=True):
+    for i, g in zip(indices, copies, strict=True):
         result[i] = g
     return result
 
@@ -463,12 +505,12 @@ def _training_gradient_copies_fake(grads: list[torch.Tensor], weights: list[torc
     return _gradient_layout_fake(grads, weights)
 
 
-@opaque(fake=_training_gradient_copies_fake,name="trimul_h100_preserved_gradient_copies")
-def _training_gradient_copies(grads: list[torch.Tensor],weights: list[torch.Tensor]) -> list[torch.Tensor]:
+@opaque(fake=_training_gradient_copies_fake, name="trimul_h100_preserved_gradient_copies")
+def _training_gradient_copies(grads: list[torch.Tensor], weights: list[torch.Tensor]) -> list[torch.Tensor]:
     """Gradients densified to the weights' dtype, then laid out like the weights."""
     with T.native_context(grads[0].device):
-        dense=dense_native_many(grads,[w.dtype for w in weights])
-        return preserve_parameter_layout(dense,weights)
+        dense = dense_native_many(grads, [w.dtype for w in weights])
+        return preserve_parameter_layout(dense, weights)
 
 
 def stack_backward_weights(weights):
@@ -477,11 +519,11 @@ def stack_backward_weights(weights):
     if width % 8 or any(w.dtype != torch.bfloat16 or not w.is_contiguous() or w.shape[1] != width for w in weights):
         raise ValueError("the backward weight stack takes contiguous BF16 matrices of one width (a multiple of 8)")
     out = weights[0].new_empty((sum(w.shape[0] for w in weights), width))
-    p = T._launch_module().Struct([
-        *weights, out, *(w.shape[0] for w in weights),
-        *(w.stride(0) for w in weights), *(w.stride(1) for w in weights), width])
+    p = T._launch_module().Struct(
+        [*weights, out, *(w.shape[0] for w in weights), *(w.stride(0) for w in weights), *(w.stride(1) for w in weights), width]
+    )
     count = max(w.numel() for w in weights) // 8
-    _launch("mw_aux_stack_vec", ((count+255)//256, 5, 1), [p])
+    _launch("mw_aux_stack_vec", ((count + 255) // 256, 5, 1), [p])
     return out
 
 
@@ -489,17 +531,17 @@ def deterministic_ln_backward(x, dy, gamma, *, planes=False, stats=None, residua
     """Native fixed-order dx/dgamma/dbeta; no atomic reduction or gamma division."""
     width, rows = gamma.numel(), x.numel() // gamma.numel()
     dx = torch.empty_like(x)
-    mu, rs = stats if stats is not None else (
-        torch.empty(rows, device=x.device, dtype=torch.float32),
-        torch.empty(rows, device=x.device, dtype=torch.float32))
-    _launch("mw_aux_ln_backward", (rows, 1, 1),
-            [x, dy, gamma, residual, dx, mu, rs, rows, width, int(planes), int(stats is not None)])
-    blocks = (rows+4095)//4096
+    mu, rs = (
+        stats
+        if stats is not None
+        else (torch.empty(rows, device=x.device, dtype=torch.float32), torch.empty(rows, device=x.device, dtype=torch.float32))
+    )
+    _launch("mw_aux_ln_backward", (rows, 1, 1), [x, dy, gamma, residual, dx, mu, rs, rows, width, int(planes), int(stats is not None)])
+    blocks = (rows + 4095) // 4096
     partial = torch.empty((blocks, 2, width), device=x.device, dtype=torch.float32)
     dg, db = torch.empty_like(gamma), torch.empty_like(gamma)
-    _launch("mw_aux_ln_affine_partial", (width, blocks, 1),
-            [x, dy, mu, rs, partial, rows, width, int(planes)])
-    _launch("mw_aux_ln_affine_finish", ((width+255)//256, 1, 1), [partial, dg, db, width, blocks])
+    _launch("mw_aux_ln_affine_partial", (width, blocks, 1), [x, dy, mu, rs, partial, rows, width, int(planes)])
+    _launch("mw_aux_ln_affine_finish", ((width + 255) // 256, 1, 1), [partial, dg, db, width, blocks])
     return dx, dg, db
 
 
@@ -512,7 +554,7 @@ def _training_unit_scale_fake(pair):
 def _training_unit_scale(pair: torch.Tensor) -> torch.Tensor:
     """The constant [B L, D] BF16 unit-scale tensor of the training path (no derivative; one row block per sample)."""
     out = torch.empty((pair.shape[0] * pair.shape[1], pair.shape[-1]), device=pair.device, dtype=torch.bfloat16)
-    _launch("mw_aux_unit_scale", ((out.numel()+255)//256, 1, 1), [out, out.numel()])
+    _launch("mw_aux_unit_scale", ((out.numel() + 255) // 256, 1, 1), [out, out.numel()])
     return out
 
 
@@ -526,14 +568,18 @@ def _fused_training_prepare_fake(leaves, mask):
     """(packed [4H, D], pair mask [B L, L] fp32, gate [D, D], output [D, H]), shapes read from x and the first weight."""
     x, weight = leaves[:2]
     samples, length, width, hidden = x.shape[0], x.shape[1], x.shape[-1], weight.shape[0]
-    return (x.new_empty((4*hidden, width)),
-            x.new_empty((samples * length, length), dtype=torch.float32),
-            x.new_empty((width, width)), x.new_empty((width, hidden)))
+    return (
+        x.new_empty((4 * hidden, width)),
+        x.new_empty((samples * length, length), dtype=torch.float32),
+        x.new_empty((width, width)),
+        x.new_empty((width, hidden)),
+    )
 
 
 @opaque(fake=_fused_training_prepare_fake, name="trimul_h100_d64_training_prepare")
-def fused_training_prepare(leaves: list[torch.Tensor], mask: torch.Tensor | None
-                           ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def fused_training_prepare(
+    leaves: list[torch.Tensor], mask: torch.Tensor | None
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """One live CUDA launch for D64 K1 packing, output weights and pair mask. x [B, L, L, D] (B samples, b-major): the pair mask is
     [B L, L] fp32 from a token mask [B, L] or a pair mask [B, L, L]."""
     x, *weights = leaves[:7]
@@ -544,19 +590,35 @@ def fused_training_prepare(leaves: list[torch.Tensor], mask: torch.Tensor | None
     if any(w.dtype not in (torch.bfloat16, torch.float32) for w in weights):
         raise ValueError("fused training preparation requires BF16/FP32 matrices")
     absent = mask is None or mask.numel() == 0
-    if not absent and (not mask.is_contiguous() or mask.dtype not in
-                       (torch.bool, torch.bfloat16, torch.float32)
-                       or mask.numel() not in (samples * length, samples * length * length)):
+    if not absent and (
+        not mask.is_contiguous()
+        or mask.dtype not in (torch.bool, torch.bfloat16, torch.float32)
+        or mask.numel() not in (samples * length, samples * length * length)
+    ):
         raise ValueError("native TriMul mask requires contiguous token or square pair data")
     kind = 0 if absent else 1 if mask.dtype == torch.bool else 2 if mask.dtype == torch.bfloat16 else 3
     token = int(not absent and mask.numel() == samples * length)
-    packed = torch.empty((4*hidden, width), device=x.device, dtype=torch.bfloat16)
+    packed = torch.empty((4 * hidden, width), device=x.device, dtype=torch.bfloat16)
     gate = torch.empty((width, width), device=x.device, dtype=torch.bfloat16)
     output = torch.empty((width, hidden), device=x.device, dtype=torch.bfloat16)
     pair_mask = torch.empty((samples * length, length), device=x.device, dtype=torch.float32)
-    p = T._launch_module().Struct([
-        *weights, packed, gate, output, None if absent else mask, pair_mask,
-        *(w.stride(0) for w in weights), *(w.stride(1) for w in weights),
-        *(int(w.dtype == torch.float32) for w in weights), hidden, length, kind, token, samples])
-    _launch("mw_aux_d64_training_prepare", ((max(samples*length*length,4*hidden*width)+255)//256,1,1), [p])
+    p = T._launch_module().Struct(
+        [
+            *weights,
+            packed,
+            gate,
+            output,
+            None if absent else mask,
+            pair_mask,
+            *(w.stride(0) for w in weights),
+            *(w.stride(1) for w in weights),
+            *(int(w.dtype == torch.float32) for w in weights),
+            hidden,
+            length,
+            kind,
+            token,
+            samples,
+        ]
+    )
+    _launch("mw_aux_d64_training_prepare", ((max(samples * length * length, 4 * hidden * width) + 255) // 256, 1, 1), [p])
     return packed, pair_mask, gate, output

@@ -38,9 +38,7 @@ def grouped_weight_gradients8(
     gated: torch.Tensor,
 ) -> tuple[torch.Tensor, ...]:
     """Unrounded FP32 gradients; all four outputs have independent fresh storage."""
-    partial = torch.empty(
-        (2 * 32 * 512 * 128 + 32 * 128 * 128,), device=dp.device, dtype=torch.float32
-    )
+    partial = torch.empty((2 * 32 * 512 * 128 + 32 * 128 * 128,), device=dp.device, dtype=torch.float32)
     qkv = torch.empty((384, 128), device=dp.device, dtype=torch.float32)
     gate = torch.empty((128, 128), device=dp.device, dtype=torch.float32)
     up = torch.empty((512, 128), device=dp.device, dtype=torch.float32)

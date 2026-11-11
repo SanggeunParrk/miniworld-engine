@@ -25,9 +25,7 @@ from miniworld_engine.kernels._nvcc import build_failed, ensure_cuda_home, host_
 from miniworld_engine.kernels.layernorm.cuda import sm80 as _rows
 
 _dir = Path(__file__).parent / "sm80"
-_common = (
-    Path(_rows.__file__).parent / "sm80"
-)  # norm_common.cuh: the helpers shared with the row kernels
+_common = Path(_rows.__file__).parent / "sm80"  # norm_common.cuh: the helpers shared with the row kernels
 D_MOD = 128  # d_hidden = d_cond of the modulation kernel
 
 
@@ -54,17 +52,13 @@ def _rmsnorm_fwd(x: Tensor, weight: Tensor | None, eps: float) -> Tensor:
     return y
 
 
-def _rmsnorm_train_fwd_fake(
-    x: Tensor, weight: Tensor | None, eps: float
-) -> tuple[Tensor, Tensor]:
+def _rmsnorm_train_fwd_fake(x: Tensor, weight: Tensor | None, eps: float) -> tuple[Tensor, Tensor]:
     """(y like x, rstd [M] fp32)."""
     return torch.empty_like(x), x.new_empty((x.shape[0],), dtype=torch.float32)
 
 
 @opaque(fake=_rmsnorm_train_fwd_fake, name="rmsnorm_sm80_train_fwd")
-def _rmsnorm_train_fwd(
-    x: Tensor, weight: Tensor | None, eps: float
-) -> tuple[Tensor, Tensor]:
+def _rmsnorm_train_fwd(x: Tensor, weight: Tensor | None, eps: float) -> tuple[Tensor, Tensor]:
     """Training forward: ``(y, rstd)`` of the rows of x [M, N]; ``rstd`` (fp32) is what the backward reads."""
     y = torch.empty_like(x)
     rstd = x.new_empty((x.shape[0],), dtype=torch.float32)
@@ -72,29 +66,19 @@ def _rmsnorm_train_fwd(
     return y, rstd
 
 
-def _rmsnorm_train_bwd_fake(
-    dy: Tensor, x: Tensor, weight: Tensor | None, rstd: Tensor, need_dw: bool
-) -> tuple[Tensor, Tensor]:
+def _rmsnorm_train_bwd_fake(dy: Tensor, x: Tensor, weight: Tensor | None, rstd: Tensor, need_dw: bool) -> tuple[Tensor, Tensor]:
     """(dx like x, dweight [N] in the weight's dtype -- empty when not asked for)."""
-    dw = (
-        weight.new_empty((x.shape[1],))
-        if need_dw and weight is not None
-        else x.new_empty((0,))
-    )
+    dw = weight.new_empty((x.shape[1],)) if need_dw and weight is not None else x.new_empty((0,))
     return torch.empty_like(x), dw
 
 
 @opaque(fake=_rmsnorm_train_bwd_fake, name="rmsnorm_sm80_train_bwd")
-def _rmsnorm_train_bwd(
-    dy: Tensor, x: Tensor, weight: Tensor | None, rstd: Tensor, need_dw: bool
-) -> tuple[Tensor, Tensor]:
+def _rmsnorm_train_bwd(dy: Tensor, x: Tensor, weight: Tensor | None, rstd: Tensor, need_dw: bool) -> tuple[Tensor, Tensor]:
     """Backward of the rows of x [M, N]: ``(dx, dweight)`` from dy and the saved ``rstd``; ``dweight`` is the fixed-order sum of per-CTA partial rows."""
     dx = torch.empty_like(x)
     want = need_dw and weight is not None
     dw = weight.new_empty((x.shape[1],)) if want else x.new_empty((0,))
-    _rows.ext().norm_bwd(
-        dy, x, weight, None, None, rstd, dx, dw if want else None, None, True
-    )
+    _rows.ext().norm_bwd(dy, x, weight, None, None, rstd, dx, dw if want else None, None, True)
     return dx, dw
 
 
@@ -112,9 +96,7 @@ class _RMSNormTrain(torch.autograd.Function):
     def backward(ctx, dy):
         x, weight, rstd = ctx.saved_tensors
         need_dw = weight is not None and ctx.needs_input_grad[1]
-        dx, dw = _rmsnorm_train_bwd(
-            dy.contiguous().to(x.dtype), x, weight, rstd, need_dw
-        )
+        dx, dw = _rmsnorm_train_bwd(dy.contiguous().to(x.dtype), x, weight, rstd, need_dw)
         return dx, (dw if need_dw else None), None
 
 
@@ -124,16 +106,12 @@ def rmsnorm(x: Tensor, weight: Tensor | None = None, eps: float = 1e-5) -> Tenso
     x2 = x.reshape(-1, shape[-1])
     if not x2.is_contiguous():
         x2 = x2.contiguous()
-    grad = torch.is_grad_enabled() and (
-        x.requires_grad or (weight is not None and weight.requires_grad)
-    )
+    grad = torch.is_grad_enabled() and (x.requires_grad or (weight is not None and weight.requires_grad))
     y = _RMSNormTrain.apply(x2, weight, eps) if grad else _rmsnorm_fwd(x2, weight, eps)
     return y.view(shape)
 
 
-def rmsnorm_backward(
-    dy: Tensor, x: Tensor, weight: Tensor | None, rstd: Tensor
-) -> tuple[Tensor, Tensor | None]:
+def rmsnorm_backward(dy: Tensor, x: Tensor, weight: Tensor | None, rstd: Tensor) -> tuple[Tensor, Tensor | None]:
     """``(dx, dweight)`` from dy, x and the saved ``rstd`` [M] fp32: the kernel the training backward runs, without autograd (the kernel-level bench)."""
     shape = x.shape
     x2, dy2 = (
@@ -182,9 +160,7 @@ def _chunk_ok(t: Tensor) -> bool:
 def _aligned(t: Tensor) -> Tensor:
     """``t`` itself when its base address is 16-byte aligned, else a fresh contiguous copy.  Runs inside the op bodies, on real tensors (the gate cannot look at a storage offset:
     ``torch.compile`` traces it)."""
-    return (
-        t if t.data_ptr() % 16 == 0 else t.clone(memory_format=torch.contiguous_format)
-    )
+    return t if t.data_ptr() % 16 == 0 else t.clone(memory_format=torch.contiguous_format)
 
 
 def supports_adamod(
@@ -206,17 +182,9 @@ def supports_adamod(
     ):
         return False
     for w in (w_scale, w_shift, w_gate):
-        if (
-            not _chunk_ok(w)
-            or tuple(w.shape) != (D_MOD, D_MOD)
-            or w.stride() != (D_MOD, 1)
-        ):
+        if not _chunk_ok(w) or tuple(w.shape) != (D_MOD, D_MOD) or w.stride() != (D_MOD, 1):
             return False
-    if weight is not None and (
-        weight.shape != (D_MOD,)
-        or weight.dtype not in (torch.float32, torch.bfloat16)
-        or not weight.is_cuda
-    ):
+    if weight is not None and (weight.shape != (D_MOD,) or weight.dtype not in (torch.float32, torch.bfloat16) or not weight.is_cuda):
         return False
     return _rows.enabled(q.device) and adamod_loads()
 
@@ -336,11 +304,7 @@ def _adamod_train_bwd(
     """The elementwise half of the backward: ``(dq, [dscale | dy | dgate], dweight)``; ``scale`` is recomputed on the tensor cores, ``dweight`` (fp32) is a few atomic adds."""
     dq = torch.empty_like(q)
     dsd = q.new_empty((q.shape[0], 3 * q.shape[1]))
-    dw = (
-        torch.zeros((D_MOD,), device=q.device, dtype=torch.float32)
-        if weight is not None
-        else q.new_empty((0,), dtype=torch.float32)
-    )
+    dw = torch.zeros((D_MOD,), device=q.device, dtype=torch.float32) if weight is not None else q.new_empty((0,), dtype=torch.float32)
     adamod_ext().adamod_bwd(
         _aligned(dy),
         _aligned(dgate),
@@ -369,9 +333,7 @@ class _RMSNormAdaMod(torch.autograd.Function):
     @once_differentiable
     def backward(ctx, dy, dgate):
         q2, c2, wsc, wsh, wg, weight, rstd = ctx.saved_tensors
-        dq, dsd, dw = _adamod_train_bwd(
-            dy.contiguous(), dgate.contiguous(), q2, c2, wsc, weight, rstd
-        )
+        dq, dsd, dw = _adamod_train_bwd(dy.contiguous(), dgate.contiguous(), q2, c2, wsc, weight, rstd)
         n = q2.shape[1]
         w_stack = torch.cat((wsc, wsh, wg), dim=0)  # [3N, K]
         dw_stack = dsd.mT @ c2  # [3N, K]  one GEMM

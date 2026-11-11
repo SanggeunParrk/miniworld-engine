@@ -51,10 +51,13 @@ def failing_build(monkeypatch, tmp_path):
     return broken
 
 
-@pytest.mark.parametrize(("module", "loader", "cache"), [
-    ("miniworld_engine.kernels.rope.cuda.sm80", "loads", "ext"),
-    ("miniworld_engine.kernels.layernorm_linear.cuda.sm80", "_loads", "_ext"),
-])
+@pytest.mark.parametrize(
+    ("module", "loader", "cache"),
+    [
+        ("miniworld_engine.kernels.rope.cuda.sm80", "loads", "ext"),
+        ("miniworld_engine.kernels.layernorm_linear.cuda.sm80", "_loads", "_ext"),
+    ],
+)
 def test_loader_raises_kernel_build_error(failing_build, module: str, loader: str, cache: str):
     """A real loader (the function a dispatch calls before using an extension), its build forced to fail: KernelBuildError, chained."""
     mod = importlib.import_module(module)
@@ -63,7 +66,7 @@ def test_loader_raises_kernel_build_error(failing_build, module: str, loader: st
         with pytest.raises(_nvcc.KernelBuildError, match="forced build failure") as info:
             getattr(mod, loader)()
         assert isinstance(info.value.__cause__, RuntimeError)
-        with _nvcc.planning():   # the prebuilder's planning: the same loader records instead of building, no error
+        with _nvcc.planning():  # the prebuilder's planning: the same loader records instead of building, no error
             getattr(mod, cache).cache_clear()
             assert getattr(mod, loader)() is True
     finally:

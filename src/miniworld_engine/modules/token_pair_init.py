@@ -24,7 +24,9 @@ def n_rel(r_max: int, s_max: int) -> int:
     return 2 * (2 * r_max + 2) + (2 * s_max + 2) + 1
 
 
-def relative_position_features(asym_id, residue_idx, token_idx, entity_id, sym_id, r_max: int, s_max: int, dtype: torch.dtype) -> torch.Tensor:
+def relative_position_features(
+    asym_id, residue_idx, token_idx, entity_id, sym_id, r_max: int, s_max: int, dtype: torch.dtype
+) -> torch.Tensor:
     """``[B, L, L, n_rel]`` one-hot features of AlphaFold 3 SI 2.8 (same chain / residue / entity, the clamped residue, token and chain offsets)."""
     same_chain = asym_id[:, :, None] == asym_id[:, None, :]
     same_residue = residue_idx[:, :, None] == residue_idx[:, None, :]
@@ -35,8 +37,15 @@ def relative_position_features(asym_id, residue_idx, token_idx, entity_id, sym_i
     d_token = d_token + ~(same_chain * same_residue) * (2 * r_max + 1)
     d_chain = torch.clamp(sym_id[:, :, None] - sym_id[:, None, :] + s_max, 0, 2 * s_max) * same_entity
     d_chain = d_chain + ~same_entity * (2 * s_max + 1)
-    feats = torch.cat([F.one_hot(d_residue.long(), 2 * r_max + 2), F.one_hot(d_token.long(), 2 * r_max + 2), F.one_hot(d_chain.long(), 2 * s_max + 2),
-                       same_entity.unsqueeze(-1)], dim=-1)
+    feats = torch.cat(
+        [
+            F.one_hot(d_residue.long(), 2 * r_max + 2),
+            F.one_hot(d_token.long(), 2 * r_max + 2),
+            F.one_hot(d_chain.long(), 2 * s_max + 2),
+            same_entity.unsqueeze(-1),
+        ],
+        dim=-1,
+    )
     return feats.to(dtype)
 
 
@@ -65,8 +74,9 @@ class TokenPairInit(BackendModule):
         (``kernels/token_pair_init/triton``), any CUDA card. Both read ``left`` / ``right`` / the weights in fp32 or bf16 and pack each relative-position bin
         into 8 bits (``n_rel - 2 <= 255``).
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: the sm_80 build of the H100 kernels
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: the sm_80 build of the H100 kernels
 
     backends = ("pytorch", "cuda", "triton")
 
@@ -80,20 +90,33 @@ class TokenPairInit(BackendModule):
     def _forward_pytorch(self, left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond):
         dt = wide(left, right, self.w_rel, self.w_bond)
         z = left.to(dt)[:, :, None, :] + right.to(dt)[:, None, :, :]
-        z = z + relative_position_features(asym_id, residue_idx, token_idx, entity_id, sym_id, self.r_max, self.s_max, dt) @ self.w_rel.to(dt).t()
+        z = (
+            z
+            + relative_position_features(asym_id, residue_idx, token_idx, entity_id, sym_id, self.r_max, self.s_max, dt)
+            @ self.w_rel.to(dt).t()
+        )
         return z + F.one_hot((bond != 0).long(), 2).to(dt) @ self.w_bond.to(dt).t()
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
         """``samples`` token sets of ``length`` tokens: Gaussian ``left`` / ``right`` in ``dtype``, random chain (3) / residue (90) / token (60) / entity (2) /
         symmetry (6) indices, 5 % of the token pairs bonded."""
+
         def ids(hi, id_dtype=torch.int64):
             return torch.randint(0, hi, (samples, length), device=device, generator=generator).to(id_dtype)
 
         left = random_input((samples, length, D_PAIR), dtype=dtype, device=device, generator=generator)
         right = random_input((samples, length, D_PAIR), dtype=dtype, device=device, generator=generator)
         bond = torch.rand((samples, length, length), device=device, generator=generator) < 0.05
-        return {"left": left, "right": right, "asym_id": ids(3), "residue_idx": ids(90), "token_idx": ids(60), "entity_id": ids(2),
-                "sym_id": ids(6, torch.int32), "bond": bond}
+        return {
+            "left": left,
+            "right": right,
+            "asym_id": ids(3),
+            "residue_idx": ids(90),
+            "token_idx": ids(60),
+            "entity_id": ids(2),
+            "sym_id": ids(6, torch.int32),
+            "bond": bond,
+        }
 
     # ------------------------------------------------------------------------------------------------------------- engine kernels
     def _supports_kernels(self, left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond) -> str | None:
@@ -115,8 +138,10 @@ class TokenPairInit(BackendModule):
         return None
 
     def _supports_cuda(self, left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond) -> str | None:
-        return _first(self._supports_kernels(left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond),
-                      _cuda_arch(left.device) if left.device.type == "cuda" else None)
+        return _first(
+            self._supports_kernels(left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond),
+            _cuda_arch(left.device) if left.device.type == "cuda" else None,
+        )
 
     def _supports_triton(self, left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond) -> str | None:
         return self._supports_kernels(left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond)
@@ -131,9 +156,14 @@ class TokenPairInit(BackendModule):
         weights, they are contiguous fp32 and the ids contiguous int32 / int64); else torch ops, differentiable in the weights."""
         b, length = asym_id.shape
         id5 = [t.reshape(-1) for t in (asym_id, residue_idx, token_idx, entity_id, sym_id)]
-        if one_launch and (self.w_rel.dtype == torch.float32 and self.w_bond.dtype == torch.float32 and self.w_rel.is_contiguous()
-                           and self.w_bond.is_contiguous() and not (torch.is_grad_enabled() and (self.w_rel.requires_grad or self.w_bond.requires_grad))
-                           and all(t.dtype in (torch.int32, torch.int64) and t.is_contiguous() for t in id5)):
+        if one_launch and (
+            self.w_rel.dtype == torch.float32
+            and self.w_bond.dtype == torch.float32
+            and self.w_rel.is_contiguous()
+            and self.w_bond.is_contiguous()
+            and not (torch.is_grad_enabled() and (self.w_rel.requires_grad or self.w_bond.requires_grad))
+            and all(t.dtype in (torch.int32, torch.int64) and t.is_contiguous() for t in id5)
+        ):
             from miniworld_engine.kernels.token_pair_init.cuda.function import token_pair_init_prep
 
             ids, tbl = token_pair_init_prep(*id5, self.w_rel, self.w_bond)  # pyright: ignore[reportCallIssue]  -- a torch.library custom op (CustomOpDef is callable)

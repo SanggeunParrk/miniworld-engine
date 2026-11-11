@@ -30,10 +30,18 @@ def _rows_ext(hopper: bool):
     return load_extension(
         name="bias_only_dit_train_rows_cuda" + ("_sm90a" if hopper else ""),
         sources=[str(_dir / "bias_only_dit_train_rows.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                           "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                           *(gencodes("90a") if hopper else gencodes("80", "90", "100", ptx=("100",)))],
-        extra_cflags=["-std=c++17"], verbose=False)
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            *(gencodes("90a") if hopper else gencodes("80", "90", "100", ptx=("100",))),
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 def partials(M: int, n: int, device) -> torch.Tensor:

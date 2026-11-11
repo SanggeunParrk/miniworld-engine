@@ -38,8 +38,34 @@ def _mm_t(a, b):
 ATOM_D, ATOM_H, ATOM_DH, ATOM_WQ, ATOM_WK = 128, 4, 32, 32, 128
 A_SC_Q, A_SH_Q, A_SC_K, A_SH_K, A_G_A, A_SC_T, A_SH_T, A_G_T = range(8)
 ATOM_SPLITS = 2
-_ANAMES = ("out", "xq", "xk", "xt", "q", "k", "v", "qn", "kn", "stqk", "g", "og", "lse", "ya", "y2", "xp", "st1", "st2", "ab", "h",
-           "w_gq", "w_kv", "w_o", "w_exp", "w_sq", "stk")
+_ANAMES = (
+    "out",
+    "xq",
+    "xk",
+    "xt",
+    "q",
+    "k",
+    "v",
+    "qn",
+    "kn",
+    "stqk",
+    "g",
+    "og",
+    "lse",
+    "ya",
+    "y2",
+    "xp",
+    "st1",
+    "st2",
+    "ab",
+    "h",
+    "w_gq",
+    "w_kv",
+    "w_o",
+    "w_exp",
+    "w_sq",
+    "stk",
+)
 _ASAVED = _ANAMES[1:]
 
 
@@ -77,11 +103,14 @@ class _EdgeBias(torch.autograd.Function):
     @once_differentiable
     def backward(ctx, deb):  # noqa: D102
         z, gamma, wb, widx = ctx.saved_tensors
-        dz_e, part = _edge(z).edge_bias_bwd(z.index_select(0, widx).contiguous(), gamma.float().contiguous(), wb.float().contiguous(), deb.contiguous(), ctx.eps)
+        dz_e, part = _edge(z).edge_bias_bwd(
+            z.index_select(0, widx).contiguous(), gamma.float().contiguous(), wb.float().contiguous(), deb.contiguous(), ctx.eps
+        )
         dz = torch.zeros_like(z)
         dz.index_add_(0, widx, dz_e)
         tot = part.sum(0)
         return dz, tot[:16].to(gamma.dtype), tot[16:].view(4, 16).to(wb.dtype), None, None, None
+
 
 def _afwd_specs(M, N, at, xdt, par, gating, proj, kq, up, chain=False):
     D = ATOM_D
@@ -89,28 +118,97 @@ def _afwd_specs(M, N, at, xdt, par, gating, proj, kq, up, chain=False):
     hid = 2 * D
     nab = 3 if up else 2
     return {
-        "out": ((M, D), xdt), "xq": ((M, D), at), "xk": ((M, D), at), "xt": ((M, D), at), "q": ((M, D), at), "k": ((M, D), at), "v": ((M, D), at),
-        "qn": ((M, D) if kq else (0,), at), "kn": ((M, D) if kq else (0,), at), "stqk": ((M, 4) if kq else (0,), f32),
-        "g": ((M, D) if gating else (0,), at), "og": ((M, D), at), "lse": ((M // N, ATOM_H, N), f32), "ya": ((M, D) if proj else (0,), at),
-        "y2": ((M, D), at), "xp": ((0,) if par else (M, D), f32), "st1": ((M, 2), f32), "st2": ((0,) if par else (M, 2), f32),
-        "ab": ((M, nab * hid), at), "h": ((M, hid), at),
-        "w_gq": (((2 if gating else 1) * D, D), at), "w_kv": ((2 * D, D), at), "w_o": ((D, D) if proj else (0,), at), "w_exp": ((nab * hid, D), at),
-        "w_sq": ((D, hid), at), "stk": ((M, 2) if chain else (0,), f32),
+        "out": ((M, D), xdt),
+        "xq": ((M, D), at),
+        "xk": ((M, D), at),
+        "xt": ((M, D), at),
+        "q": ((M, D), at),
+        "k": ((M, D), at),
+        "v": ((M, D), at),
+        "qn": ((M, D) if kq else (0,), at),
+        "kn": ((M, D) if kq else (0,), at),
+        "stqk": ((M, 4) if kq else (0,), f32),
+        "g": ((M, D) if gating else (0,), at),
+        "og": ((M, D), at),
+        "lse": ((M // N, ATOM_H, N), f32),
+        "ya": ((M, D) if proj else (0,), at),
+        "y2": ((M, D), at),
+        "xp": ((0,) if par else (M, D), f32),
+        "st1": ((M, 2), f32),
+        "st2": ((0,) if par else (M, 2), f32),
+        "ab": ((M, nab * hid), at),
+        "h": ((M, hid), at),
+        "w_gq": (((2 if gating else 1) * D, D), at),
+        "w_kv": ((2 * D, D), at),
+        "w_o": ((D, D) if proj else (0,), at),
+        "w_exp": ((nab * hid, D), at),
+        "w_sq": ((D, hid), at),
+        "stk": ((M, 2) if chain else (0,), f32),
     }
 
 
-def _atom_fwd_fake(x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length, eps, eps_qk,
-                   chain=False):
+def _atom_fwd_fake(
+    x,
+    tab,
+    bias2,
+    widx,
+    keys,
+    ebias,
+    wq,
+    bq,
+    wk,
+    wv,
+    wg,
+    wo,
+    wexp,
+    wsq,
+    qkw,
+    par,
+    sig,
+    gating,
+    proj,
+    kq,
+    up,
+    slide,
+    length,
+    eps,
+    eps_qk,
+    chain=False,
+):
     """The saved tensors of the atom block forward (``_ANAMES``): shapes and dtypes from ``_afwd_specs``."""
     spec = _afwd_specs(x.shape[0], length, tab.dtype, x.dtype, par, gating, proj, kq, up, chain)
     return [x.new_empty(spec[n][0], dtype=spec[n][1]) for n in _ANAMES]
 
 
 @opaque(fake=_atom_fwd_fake, name="dit_variants_atom_train_fwd")
-def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torch.Tensor, keys: torch.Tensor, ebias: torch.Tensor, wq: torch.Tensor,
-             bq: torch.Tensor, wk: torch.Tensor, wv: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, wexp: torch.Tensor, wsq: torch.Tensor,
-             qkw: list[torch.Tensor], par: bool, sig: bool, gating: bool, proj: bool, kq: bool, up: bool, slide: bool, length: int, eps: float,
-             eps_qk: float, chain: bool = False) -> list[torch.Tensor]:
+def atom_fwd(
+    x: torch.Tensor,
+    tab: torch.Tensor,
+    bias2: torch.Tensor,
+    widx: torch.Tensor,
+    keys: torch.Tensor,
+    ebias: torch.Tensor,
+    wq: torch.Tensor,
+    bq: torch.Tensor,
+    wk: torch.Tensor,
+    wv: torch.Tensor,
+    wg: torch.Tensor,
+    wo: torch.Tensor,
+    wexp: torch.Tensor,
+    wsq: torch.Tensor,
+    qkw: list[torch.Tensor],
+    par: bool,
+    sig: bool,
+    gating: bool,
+    proj: bool,
+    kq: bool,
+    up: bool,
+    slide: bool,
+    length: int,
+    eps: float,
+    eps_qk: float,
+    chain: bool = False,
+) -> list[torch.Tensor]:
     """One atom block's forward: [out, saved ...] (``_ANAMES``). x [A N, 128], tab [N, 8 D], bias2 [4, nwin, 32, 128] fp32 (log2, -inf off the
     keys); the slid edge windows (widx [5], keys [5, 128], ebias [5, 4, 32, 128] natural units) when ``slide``."""
     ext = _atom_ext(x)
@@ -118,7 +216,7 @@ def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torc
     M, D = x.shape
     N, A = length, M // length
     at = tab.dtype
-    T = tab.shape[0]   # the table rows: N (one conditioning for every sample) or A N (one per sample)
+    T = tab.shape[0]  # the table rows: N (one conditioning for every sample) or A N (one per sample)
     w_q, w_k, w_v, w_exp, w_sq = (w.to(at, copy=True) for w in (wq, wk, wv, wexp, wsq))
     w_gq = torch.cat([wg, wq]).to(at) if gating else w_q.clone()
     w_kv = torch.cat([wk, wv]).to(at)
@@ -129,8 +227,10 @@ def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torc
     cols = lambda c: c * D  # noqa: E731
     xq, xk, xt, st1, k, v = buf["xq"], buf["xk"], buf["xt"], buf["st1"], buf["k"], buf["v"]
     if par:
-        ext.ln_mod_fwd(x, tab, [cols(A_SC_Q), cols(A_SC_K), cols(A_SC_T)], [cols(A_SH_Q), cols(A_SH_K), cols(A_SH_T)], [xq, xk, xt], st1, T, eps, sig)
-    elif chain:   # the K / V AdaLN of the query AdaLN's output (Protenix): LN-modulate xq again
+        ext.ln_mod_fwd(
+            x, tab, [cols(A_SC_Q), cols(A_SC_K), cols(A_SC_T)], [cols(A_SH_Q), cols(A_SH_K), cols(A_SH_T)], [xq, xk, xt], st1, T, eps, sig
+        )
+    elif chain:  # the K / V AdaLN of the query AdaLN's output (Protenix): LN-modulate xq again
         ext.ln_mod_fwd(x, tab, [cols(A_SC_Q)], [cols(A_SH_Q)], [xq], st1, T, eps, sig)
         ext.ln_mod_fwd(xq, tab, [cols(A_SC_K)], [cols(A_SH_K)], [xk], buf["stk"], T, eps, sig)
     else:
@@ -147,10 +247,13 @@ def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torc
         ext.qkv_prep(q, k, v, qn, kn, v if f32 else None, buf["stqk"], qkw[0], qkw[1], qkw[2], qkw[3], 1.0, eps_qk, True, f32)
     else:
         qn, kn = q, k
-        if f32:       # the TF32 core's operands, rounded to nearest in place
+        if f32:  # the TF32 core's operands, rounded to nearest in place
             ext.qkv_prep(q, k, v, q, k, v, None, None, None, None, None, 1.0, eps_qk, False, True)
-    o, lse = local.attn_fwd_mma(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2) if at == torch.bfloat16 else local.attn_fwd_mma32(
-        qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2)
+    o, lse = (
+        local.attn_fwd_mma(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2)
+        if at == torch.bfloat16
+        else local.attn_fwd_mma32(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2)
+    )
     if slide:
         _edge(x).edge_attn_fwd(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), keys, widx, ebias, o)
     o = o.view(M, D)
@@ -177,22 +280,88 @@ def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torc
     return [res[n] for n in _ANAMES]
 
 
-def _atom_bwd_fake(dout, x, tab, bias2, widx, keys, ebias, saved, wq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length,
-                   eps, eps_qk, chain=False):
+def _atom_bwd_fake(
+    dout,
+    x,
+    tab,
+    bias2,
+    widx,
+    keys,
+    ebias,
+    saved,
+    wq,
+    wk,
+    wv,
+    wg,
+    wo,
+    wexp,
+    wsq,
+    qkw,
+    par,
+    sig,
+    gating,
+    proj,
+    kq,
+    up,
+    slide,
+    length,
+    eps,
+    eps_qk,
+    chain=False,
+):
     """dx, dtab, dbias2, debias, the weight gradients (fp32) and the four qk-norm vectors."""
     D = ATOM_D
     f32 = torch.float32
-    return [torch.empty_like(x), tab.new_empty(tab.shape, dtype=f32), bias2.new_empty(bias2.shape, dtype=f32), ebias.new_empty(ebias.shape, dtype=f32),
-            wq.new_empty(wq.shape, dtype=f32), wq.new_empty((D,), dtype=f32), wk.new_empty(wk.shape, dtype=f32), wv.new_empty(wv.shape, dtype=f32),
-            wg.new_empty(wg.shape, dtype=f32), wo.new_empty(wo.shape, dtype=f32), wexp.new_empty(wexp.shape, dtype=f32), wsq.new_empty(wsq.shape, dtype=f32),
-            wq.new_empty((D,), dtype=f32), wq.new_empty((D,), dtype=f32), wq.new_empty((D,), dtype=f32), wq.new_empty((D,), dtype=f32)]
+    return [
+        torch.empty_like(x),
+        tab.new_empty(tab.shape, dtype=f32),
+        bias2.new_empty(bias2.shape, dtype=f32),
+        ebias.new_empty(ebias.shape, dtype=f32),
+        wq.new_empty(wq.shape, dtype=f32),
+        wq.new_empty((D,), dtype=f32),
+        wk.new_empty(wk.shape, dtype=f32),
+        wv.new_empty(wv.shape, dtype=f32),
+        wg.new_empty(wg.shape, dtype=f32),
+        wo.new_empty(wo.shape, dtype=f32),
+        wexp.new_empty(wexp.shape, dtype=f32),
+        wsq.new_empty(wsq.shape, dtype=f32),
+        wq.new_empty((D,), dtype=f32),
+        wq.new_empty((D,), dtype=f32),
+        wq.new_empty((D,), dtype=f32),
+        wq.new_empty((D,), dtype=f32),
+    ]
 
 
 @opaque(fake=_atom_bwd_fake, name="dit_variants_atom_train_bwd")
-def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torch.Tensor, keys: torch.Tensor, ebias: torch.Tensor,
-             saved: list[torch.Tensor], wq: torch.Tensor, wk: torch.Tensor, wv: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, wexp: torch.Tensor,
-             wsq: torch.Tensor, qkw: list[torch.Tensor], par: bool, sig: bool, gating: bool, proj: bool, kq: bool, up: bool, slide: bool,
-             length: int, eps: float, eps_qk: float, chain: bool = False) -> list[torch.Tensor]:
+def atom_bwd(
+    dout: torch.Tensor,
+    x: torch.Tensor,
+    tab: torch.Tensor,
+    bias2: torch.Tensor,
+    widx: torch.Tensor,
+    keys: torch.Tensor,
+    ebias: torch.Tensor,
+    saved: list[torch.Tensor],
+    wq: torch.Tensor,
+    wk: torch.Tensor,
+    wv: torch.Tensor,
+    wg: torch.Tensor,
+    wo: torch.Tensor,
+    wexp: torch.Tensor,
+    wsq: torch.Tensor,
+    qkw: list[torch.Tensor],
+    par: bool,
+    sig: bool,
+    gating: bool,
+    proj: bool,
+    kq: bool,
+    up: bool,
+    slide: bool,
+    length: int,
+    eps: float,
+    eps_qk: float,
+    chain: bool = False,
+) -> list[torch.Tensor]:
     """The atom block's backward: [dx, dtab, dbias2, debias, dwq, dbq, dwk, dwv, dwg, dwo, dwexp, dwsq, dwq_ln, dbq_ln, dwk_ln, dbk_ln]."""
     ext = _atom_ext(x)
     local = _local(x)
@@ -200,7 +369,7 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
     M, D = x.shape
     N, A = length, M // length
     at = tab.dtype
-    T = tab.shape[0]   # the table rows: N (one conditioning for every sample) or A N (one per sample)
+    T = tab.shape[0]  # the table rows: N (one conditioning for every sample) or A N (one per sample)
     S = min(M // T, ATOM_SPLITS)
     dev = x.device
     f32 = torch.float32
@@ -225,11 +394,29 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
     dwexp = _mm_t(dab, xt)
     if not par:
         dxp = torch.empty(M, D, device=dev, dtype=f32)
-        ext.res_adaln_bwd(dout, dt, s["xp"], s["st2"], tab, cols(A_SC_T), cols(A_G_A), ya, dxp, dya, part, cols(A_SC_T), cols(A_SH_T), cols(A_G_A), T, S, sig)
+        ext.res_adaln_bwd(
+            dout,
+            dt,
+            s["xp"],
+            s["st2"],
+            tab,
+            cols(A_SC_T),
+            cols(A_G_A),
+            ya,
+            dxp,
+            dya,
+            part,
+            cols(A_SC_T),
+            cols(A_SH_T),
+            cols(A_G_A),
+            T,
+            S,
+            sig,
+        )
     dog = torch.mm(dya, w_o) if proj else dya
     dwo = _mm_t(dya, og) if proj else wo.new_empty(wo.shape, dtype=f32)
     dO = torch.empty(M, D, device=dev, dtype=at)
-    dp = torch.empty(M, 4 * D, device=dev, dtype=at)               # [dg | dq | dk | dv]
+    dp = torch.empty(M, 4 * D, device=dev, dtype=at)  # [dg | dq | dk | dv]
     dd = torch.empty(A, ATOM_H, N, device=dev, dtype=f32)
     ext.gate_o_bwd(dog, og, s["g"] if gating else None, dO, dp[:, :D] if gating else None, dd, N, ATOM_DH, at == torch.float32)
     qa, ka = (s["qn"], s["kn"]) if kq else (s["q"], s["k"])
@@ -239,9 +426,12 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
         dke = torch.empty(A, 5, ATOM_WK, D, device=dev, dtype=f32)
         dve = torch.empty(A, 5, ATOM_WK, D, device=dev, dtype=f32)
         dbp = torch.empty(A, 5, ATOM_H, ATOM_WQ, ATOM_WK, device=dev, dtype=f32)
-        _edge(x).edge_bwd_compute(qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), dd, keys, widx, ebias, dqe, dke, dve, dbp)
-    dbias2 = local.attn_bwd_mma(qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), bias2, s["lse"], dd, dp[:, D:],
-                                at == torch.float32)
+        _edge(x).edge_bwd_compute(
+            qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), dd, keys, widx, ebias, dqe, dke, dve, dbp
+        )
+    dbias2 = local.attn_bwd_mma(
+        qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), bias2, s["lse"], dd, dp[:, D:], at == torch.float32
+    )
     if slide:
         _edge(x).edge_bwd_apply(dp[:, D:], keys, widx, dqe, dke, dve, A, N)
         debias = dbp.sum(0)
@@ -250,40 +440,96 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
     if kq:
         nblk = (M + QKV_RPB - 1) // QKV_RPB
         qpart = torch.empty(nblk, 5 * D, device=dev, dtype=f32)
-        ext.qkv_bwd(dp[:, D:2 * D], dp[:, 2 * D:3 * D], dp[:, 3 * D:], s["q"], s["k"], s["stqk"], qkw[0], qkw[2], dp[:, D:2 * D], dp[:, 2 * D:3 * D],
-                    dp[:, 3 * D:], qpart, QKV_RPB, True)
+        ext.qkv_bwd(
+            dp[:, D : 2 * D],
+            dp[:, 2 * D : 3 * D],
+            dp[:, 3 * D :],
+            s["q"],
+            s["k"],
+            s["stqk"],
+            qkw[0],
+            qkw[2],
+            dp[:, D : 2 * D],
+            dp[:, 2 * D : 3 * D],
+            dp[:, 3 * D :],
+            qpart,
+            QKV_RPB,
+            True,
+        )
         qsum = qpart.sum(0)
-        dwq_ln, dbq_ln, dwk_ln, dbk_ln, dbq = (qsum[i * D:(i + 1) * D].clone() for i in range(5))
+        dwq_ln, dbq_ln, dwk_ln, dbk_ln, dbq = (qsum[i * D : (i + 1) * D].clone() for i in range(5))
     else:
         nblk = (M + QKV_RPB - 1) // QKV_RPB
         qpart = torch.empty(nblk, D, device=dev, dtype=f32)
-        ext.qkv_bwd(dp[:, D:2 * D], None, None, None, None, None, None, None, None, None, None, qpart, QKV_RPB, False)
+        ext.qkv_bwd(dp[:, D : 2 * D], None, None, None, None, None, None, None, None, None, None, qpart, QKV_RPB, False)
         dbq = qpart.sum(0)
         dwq_ln, dbq_ln, dwk_ln, dbk_ln = (torch.zeros(D, device=dev, dtype=f32) for _ in range(4))
     if gating:
-        dxq = torch.mm(dp[:, :2 * D], w_gq)
-        dwgq = _mm_t(dp[:, :2 * D], xq)
+        dxq = torch.mm(dp[:, : 2 * D], w_gq)
+        dwgq = _mm_t(dp[:, : 2 * D], xq)
         dwg, dwq = dwgq[:D], dwgq[D:]
     else:
-        dxq = torch.mm(dp[:, D:2 * D], w_gq)
-        dwq = _mm_t(dp[:, D:2 * D], xq)
+        dxq = torch.mm(dp[:, D : 2 * D], w_gq)
+        dwq = _mm_t(dp[:, D : 2 * D], xq)
         dwg = wg.new_empty(wg.shape, dtype=f32)
-    dxk = torch.mm(dp[:, 2 * D:], w_kv)
-    dwkv = _mm_t(dp[:, 2 * D:], xk)
+    dxk = torch.mm(dp[:, 2 * D :], w_kv)
+    dwkv = _mm_t(dp[:, 2 * D :], xk)
     dx = torch.empty_like(x)
     if par:
-        ext.adaln_bwd(x, s["st1"], dout, [dxq, dxk, dt], tab, [cols(A_SC_Q), cols(A_SC_K), cols(A_SC_T)], [cols(A_SC_Q), cols(A_SC_K), cols(A_SC_T)],
-                      [cols(A_SH_Q), cols(A_SH_K), cols(A_SH_T)], dx, part, T, S, sig)
-    elif chain:   # through the K / V AdaLN into xq, then the query AdaLN
+        ext.adaln_bwd(
+            x,
+            s["st1"],
+            dout,
+            [dxq, dxk, dt],
+            tab,
+            [cols(A_SC_Q), cols(A_SC_K), cols(A_SC_T)],
+            [cols(A_SC_Q), cols(A_SC_K), cols(A_SC_T)],
+            [cols(A_SH_Q), cols(A_SH_K), cols(A_SH_T)],
+            dx,
+            part,
+            T,
+            S,
+            sig,
+        )
+    elif chain:  # through the K / V AdaLN into xq, then the query AdaLN
         dxq_t = torch.empty_like(xq)
         ext.adaln_bwd(xq, s["stk"], dxq, [dxk], tab, [cols(A_SC_K)], [cols(A_SC_K)], [cols(A_SH_K)], dxq_t, part, T, S, sig)
         ext.adaln_bwd(x, s["st1"], dxp, [dxq_t], tab, [cols(A_SC_Q)], [cols(A_SC_Q)], [cols(A_SH_Q)], dx, part, T, S, sig)
     else:
-        ext.adaln_bwd(x, s["st1"], dxp, [dxq, dxk], tab, [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SH_Q), cols(A_SH_K)], dx,
-                      part, T, S, sig)
+        ext.adaln_bwd(
+            x,
+            s["st1"],
+            dxp,
+            [dxq, dxk],
+            tab,
+            [cols(A_SC_Q), cols(A_SC_K)],
+            [cols(A_SC_Q), cols(A_SC_K)],
+            [cols(A_SH_Q), cols(A_SH_K)],
+            dx,
+            part,
+            T,
+            S,
+            sig,
+        )
     dtab = part.sum(0)
-    return [dx, dtab, dbias2, debias, dwq.clone(), dbq, dwkv[:D].clone(), dwkv[D:].clone(), dwg.clone(), dwo, dwexp, dwsq,
-            dwq_ln, dbq_ln, dwk_ln, dbk_ln]
+    return [
+        dx,
+        dtab,
+        dbias2,
+        debias,
+        dwq.clone(),
+        dbq,
+        dwkv[:D].clone(),
+        dwkv[D:].clone(),
+        dwg.clone(),
+        dwo,
+        dwexp,
+        dwsq,
+        dwq_ln,
+        dbq_ln,
+        dwk_ln,
+        dbk_ln,
+    ]
 
 
 class _AtomBlock(torch.autograd.Function):
@@ -292,8 +538,34 @@ class _AtomBlock(torch.autograd.Function):
         par, sig, gating, proj, kq, up, slide, length, eps, eps_qk, *chain = cfg
         chain = bool(chain and chain[0])
         qkw = [wql, bql, wkl, bkl] if kq else []
-        out, *saved = atom_fwd(x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length,
-                               eps, eps_qk, chain)
+        out, *saved = atom_fwd(
+            x,
+            tab,
+            bias2,
+            widx,
+            keys,
+            ebias,
+            wq,
+            bq,
+            wk,
+            wv,
+            wg,
+            wo,
+            wexp,
+            wsq,
+            qkw,
+            par,
+            sig,
+            gating,
+            proj,
+            kq,
+            up,
+            slide,
+            length,
+            eps,
+            eps_qk,
+            chain,
+        )
         ctx.save_for_backward(x, tab, bias2, widx, keys, ebias, *saved, wq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl)
         ctx.cfg, ctx.n_saved = cfg, len(saved)
         return out
@@ -304,13 +576,56 @@ class _AtomBlock(torch.autograd.Function):
         par, sig, gating, proj, kq, up, slide, length, eps, eps_qk, *chain = ctx.cfg
         chain = bool(chain and chain[0])
         x, tab, bias2, widx, keys, ebias, *rest = ctx.saved_tensors
-        saved, (wq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl) = rest[:ctx.n_saved], rest[ctx.n_saved:]
+        saved, (wq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl) = rest[: ctx.n_saved], rest[ctx.n_saved :]
         qkw = [wql, bql, wkl, bkl] if kq else []
-        res = atom_bwd(dout, x, tab, bias2, widx, keys, ebias, list(saved), wq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide,
-                       length, eps, eps_qk, chain)
+        res = atom_bwd(
+            dout,
+            x,
+            tab,
+            bias2,
+            widx,
+            keys,
+            ebias,
+            list(saved),
+            wq,
+            wk,
+            wv,
+            wg,
+            wo,
+            wexp,
+            wsq,
+            qkw,
+            par,
+            sig,
+            gating,
+            proj,
+            kq,
+            up,
+            slide,
+            length,
+            eps,
+            eps_qk,
+            chain,
+        )
         dx, dtab, dbias2, debias, dwq, dbq, dwk, dwv, dwg, dwo, dwexp, dwsq, dwql, dbql, dwkl, dbkl = res
-        return (dx, dtab.to(tab.dtype), dbias2, None, None, debias if slide else None, dwq, dbq, dwk, dwv, dwg if gating else None,
-                dwo if proj else None, dwexp, dwsq, *((dwql, dbql, dwkl, dbkl) if kq else (None, None, None, None)), None)
+        return (
+            dx,
+            dtab.to(tab.dtype),
+            dbias2,
+            None,
+            None,
+            debias if slide else None,
+            dwq,
+            dbq,
+            dwk,
+            dwv,
+            dwg if gating else None,
+            dwo if proj else None,
+            dwexp,
+            dwsq,
+            *((dwql, dbql, dwkl, dbkl) if kq else (None, None, None, None)),
+            None,
+        )
 
 
 class _AtomPairBias(torch.autograd.Function):
@@ -338,12 +653,20 @@ def atom_serves(stack, single, cond, pair, mask, uid, *, need_grad: bool = True)
         return False
     if need_grad and not (torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *stack.parameters()))):
         return False
-    if torch.cuda.get_device_capability(single.device) != (8, 0):   # A100 only (H100: the one atom DiT implementation, local_dit_h100)
+    if torch.cuda.get_device_capability(single.device) != (8, 0):  # A100 only (H100: the one atom DiT implementation, local_dit_h100)
         return False
     a, n, d = single.shape
-    return (single.dtype in (torch.bfloat16, torch.float32) and d == ATOM_D and n % 64 == 0 and tuple(cond.shape) in ((n, d), (a, n, d))
-            and tuple(pair.shape) == (n // 32, 32, 128, 16) and (mask is None or tuple(mask.shape) == (n,))
-            and (uid is None or tuple(uid.shape) == (n,)) and stack.blocks[0].expand.weight.shape[0] == 4 * d and a > 0)
+    return (
+        single.dtype in (torch.bfloat16, torch.float32)
+        and d == ATOM_D
+        and n % 64 == 0
+        and tuple(cond.shape) in ((n, d), (a, n, d))
+        and tuple(pair.shape) == (n // 32, 32, 128, 16)
+        and (mask is None or tuple(mask.shape) == (n,))
+        and (uid is None or tuple(uid.shape) == (n,))
+        and stack.blocks[0].expand.weight.shape[0] == 4 * d
+        and a > 0
+    )
 
 
 def _atom_tables(blk, c):
@@ -365,7 +688,7 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
     """The atom stack's forward under autograd on the H100 training kernels: x [A, N, 128] -> [A, N, 128]."""
     blocks = list(stack.blocks)
     a, n, d = single.shape
-    if cond.ndim == 3:   # one conditioning per sample (A100): per-row tables [A N, 8 d], which the row kernels index by row
+    if cond.ndim == 3:  # one conditioning per sample (A100): per-row tables [A N, 8 d], which the row kernels index by row
         cond = cond.reshape(a * n, cond.shape[-1])
     nwin = n // ATOM_WQ
     dev = single.device
@@ -397,7 +720,7 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
     empty = single.new_empty(0, dtype=torch.float32)
     for i, blk in enumerate(blocks):
         norm = blk.pair_norm if stack.per_block_pair_norm else stack.pair_norm
-        wb = blk.to_pair_bias.weight if stack.per_block_pair_norm else stack.to_pair_bias.weight[ATOM_H * i:ATOM_H * (i + 1)]
+        wb = blk.to_pair_bias.weight if stack.per_block_pair_norm else stack.to_pair_bias.weight[ATOM_H * i : ATOM_H * (i + 1)]
         bias2 = _AtomPairBias.apply(z, norm.weight, wb, kmask, n, norm.eps)
         if same is not None:
             bias2 = bias2.masked_fill(~same[None], float("-inf"))
@@ -407,11 +730,38 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
             ebias = empty
         tab = _atom_tables(blk, cond)
         qk = (blk.q_norm.weight, blk.q_norm.bias, blk.k_norm.weight, blk.k_norm.bias) if blk.kq_norm else (empty,) * 4
-        cfg = (stack.parallel, not blk.q_adaln.identity_scale, blk.gating, blk.project_output, blk.kq_norm, blk.up_gate, slide, n, blk.adaln_eps,
-               blk.q_norm.eps if blk.kq_norm else 1e-5, getattr(stack, "chain", False))
+        cfg = (
+            stack.parallel,
+            not blk.q_adaln.identity_scale,
+            blk.gating,
+            blk.project_output,
+            blk.kq_norm,
+            blk.up_gate,
+            slide,
+            n,
+            blk.adaln_eps,
+            blk.q_norm.eps if blk.kq_norm else 1e-5,
+            getattr(stack, "chain", False),
+        )
         wg = blk.to_g.weight if blk.gating else empty
         wo = blk.to_out.weight if blk.project_output else empty
         wexp = torch.cat([blk.expand.weight, *((blk.up.weight,) if blk.up_gate else ())])
-        x = _AtomBlock.apply(x, tab, bias2, widx if slide else empty, keys if slide else empty, ebias, blk.to_q.weight, blk.to_q.bias, blk.to_k.weight,
-                             blk.to_v.weight, wg, wo, wexp, blk.squeeze.weight, *qk, cfg)
+        x = _AtomBlock.apply(
+            x,
+            tab,
+            bias2,
+            widx if slide else empty,
+            keys if slide else empty,
+            ebias,
+            blk.to_q.weight,
+            blk.to_q.bias,
+            blk.to_k.weight,
+            blk.to_v.weight,
+            wg,
+            wo,
+            wexp,
+            blk.squeeze.weight,
+            *qk,
+            cfg,
+        )
     return x.view(a, n, d)

@@ -29,9 +29,7 @@ class ItemBalancedLossStatistics:
         return type(self)(
             item_loss_sum=self.item_loss_sum + other.item_loss_sum,
             active_item_count=self.active_item_count + other.active_item_count,
-            supervised_token_count=(
-                self.supervised_token_count + other.supervised_token_count
-            ),
+            supervised_token_count=(self.supervised_token_count + other.supervised_token_count),
             supervision_weight=self.supervision_weight + other.supervision_weight,
         )
 
@@ -107,23 +105,15 @@ def item_balanced_cross_entropy(
     batch, _, length = logits.shape
     expected = (batch, length)
     if target.shape != expected:
-        raise ValueError(
-            f"target must have shape {expected}, got {tuple(target.shape)}"
-        )
+        raise ValueError(f"target must have shape {expected}, got {tuple(target.shape)}")
     if target.dtype != torch.long:
         raise TypeError("target must have dtype torch.long")
     if loss_mask.shape != expected:
-        raise ValueError(
-            f"loss_mask must have shape {expected}, got {tuple(loss_mask.shape)}"
-        )
+        raise ValueError(f"loss_mask must have shape {expected}, got {tuple(loss_mask.shape)}")
     if residue_mask is not None and residue_mask.shape != expected:
-        raise ValueError(
-            f"residue_mask must have shape {expected}, got {tuple(residue_mask.shape)}"
-        )
+        raise ValueError(f"residue_mask must have shape {expected}, got {tuple(residue_mask.shape)}")
 
-    loss_logits = (
-        logits.float() if logits.dtype in (torch.float16, torch.bfloat16) else logits
-    )
+    loss_logits = logits.float() if logits.dtype in (torch.float16, torch.bfloat16) else logits
     token_loss = F.cross_entropy(
         loss_logits,
         target,
@@ -131,11 +121,7 @@ def item_balanced_cross_entropy(
         ignore_index=ignore_index,
         label_smoothing=label_smoothing,
     )
-    reduction_dtype = (
-        torch.float32
-        if token_loss.dtype in (torch.float16, torch.bfloat16)
-        else token_loss.dtype
-    )
+    reduction_dtype = torch.float32 if token_loss.dtype in (torch.float16, torch.bfloat16) else token_loss.dtype
     token_loss = token_loss.to(reduction_dtype)
     supervision_weight = loss_mask.to(reduction_dtype)
     if residue_mask is not None:

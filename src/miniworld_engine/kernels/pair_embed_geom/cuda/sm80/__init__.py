@@ -21,9 +21,13 @@ def ext():
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
-    return load_extension(name="pair_embed_geom_sm80", sources=[str(_dir / "pair_embed_geom_sm80.cu")],
-                          extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80"), f"-I{_dir}"], extra_cflags=["-std=c++17"],
-                          verbose=False)
+    return load_extension(
+        name="pair_embed_geom_sm80",
+        sources=[str(_dir / "pair_embed_geom_sm80.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80"), f"-I{_dir}"],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 #: the launchers' module globals: the H100 launcher module's, with ``ext`` this build (and this card's choices, set below)
@@ -42,7 +46,7 @@ ln_backward = _on_this_build(_h100.ln_backward)
 #: (impl 1, here mma.sync on its swizzled operands), the decoder's (mode 1, 157 rows) on the mma.sync kernel over KS concurrent pair chunks
 #: (impl 3, pair_embed_geom_sm80.cu: the H100 grid of 132 CTAs left the A100's SMs too few warps)
 BWD_IMPL = {0: 1, 1: 3}
-KS = 2   # pair_embed_geom_sm80.cu
+KS = 2  # pair_embed_geom_sm80.cu
 
 
 def backward(g, codes, mode):

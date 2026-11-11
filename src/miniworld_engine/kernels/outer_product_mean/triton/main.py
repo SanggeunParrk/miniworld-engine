@@ -31,6 +31,7 @@ Two variants ride the same kernels (``kernels.outer_product_mean.reference`` is 
                                     split-K kernel over (dz, y); dA / dB are two batched GEMMs and the (shared) projection backward
                                     kernel closes the chain.
 """
+
 from __future__ import annotations
 
 import torch
@@ -46,25 +47,45 @@ from miniworld_engine.kernels._device import num_sms
 def _divides(**axes):
     """``early_config_prune``: keep the configs whose tile axis ``ax`` divides the kernel argument ``axes[ax]`` names (a tile over
     an unmasked extent must divide it). A correctness exclusion only; performance is the autotuner's to decide."""
+
     def prune(configs, named_args, **kw):
         args = {**named_args, **kw}
         keep = [c for c in configs if all(args[dim] % c.kwargs[ax] == 0 for ax, dim in axes.items())]
         if not keep:
             raise ValueError(f"no config tiles {', '.join(f'{d}={args[d]}' for d in axes.values())}")
         return keep
+
     return prune
 
 
-
-
 # ---------------------------------------------------------------------------------------------------- kernels
-@configured('outer_product_mean_layernorm_gemm_triton',
-            key=["shape_key", "HAS_MASK", "HAS_PBIAS", "K"],
-            default=dict(BT=64, num_warps=4, num_stages=2))
+@configured(
+    "outer_product_mean_layernorm_gemm_triton",
+    key=["shape_key", "HAS_MASK", "HAS_PBIAS", "K"],
+    default=dict(BT=64, num_warps=4, num_stages=2),
+)
 @triton.jit
-def _opm_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, BL, BR, A, B, T_, eps, shape_key,
-                               CM: tl.constexpr, CH: tl.constexpr, K: tl.constexpr, HAS_MASK: tl.constexpr,
-                               HAS_PBIAS: tl.constexpr, BT: tl.constexpr):
+def _opm_layernorm_gemm_kernel(
+    M,
+    MASK,
+    LNW,
+    LNB,
+    WL,
+    WR,
+    BL,
+    BR,
+    A,
+    B,
+    T_,
+    eps,
+    shape_key,
+    CM: tl.constexpr,
+    CH: tl.constexpr,
+    K: tl.constexpr,
+    HAS_MASK: tl.constexpr,
+    HAS_PBIAS: tl.constexpr,
+    BT: tl.constexpr,
+):
     # a[t] = mask[t] * (LN(msa[t]) . W_left^T [+ b_left]), b likewise; one program = BT rows of the flattened [S L] tokens.
     # Stored group-major [G, T, K] (G = CH / K groups of K channels; K = CH is the ungrouped [T, CH] layout, same formula), so each
     # group's [S, L K] operand of the outer product is a plain strided matrix.
@@ -77,7 +98,7 @@ def _opm_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, BL, BR, A, B, T_, eps,
     rs = tl.rsqrt(tl.sum(xc * xc, axis=1) / CM + eps)
     y = (xc * rs[:, None] * tl.load(LNW + cols)[None, :] + tl.load(LNB + cols)[None, :]).to(tl.bfloat16)
     ch = tl.arange(0, CH)
-    wl = tl.load(WL + ch[None, :] * CM + cols[:, None])                                   # [CM, CH] = W_left^T
+    wl = tl.load(WL + ch[None, :] * CM + cols[:, None])  # [CM, CH] = W_left^T
     wr = tl.load(WR + ch[None, :] * CM + cols[:, None])
     a = tl.dot(y, wl)
     b = tl.dot(y, wr)
@@ -86,7 +107,7 @@ def _opm_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, BL, BR, A, B, T_, eps,
         b += tl.load(BR + ch)[None, :]
     a = a.to(tl.bfloat16)
     b = b.to(tl.bfloat16)
-    if HAS_MASK:                                                                          # a masked row loses its bias too
+    if HAS_MASK:  # a masked row loses its bias too
         mk = tl.load(MASK + rows, mask=rm, other=0) != 0
         a = tl.where(mk[:, None], a, 0.0)
         b = tl.where(mk[:, None], b, 0.0)
@@ -95,45 +116,64 @@ def _opm_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, BL, BR, A, B, T_, eps,
     tl.store(B + dst, b, mask=rm[:, None])
 
 
-@configured('outer_product_mean_epilogue_triton',
-            key=["shape_key", "HAS_RES", "NORM_FIRST"],
-            default=[dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=2),
-            dict(TI=2, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=128, BN=64, BKD=4, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=128, BKD=4, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKD=2, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=8, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=3),
-            dict(TI=1, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=32, BN=64, BKD=4, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=32, BKD=4, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKD=1, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=2, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=1),
-            dict(TI=4, BJ=16, BN=64, BKD=4, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=256, BKD=4, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=1, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=4),
-            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=5),
-            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=6),
-            dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=8, num_stages=3),
-            dict(TI=4, BJ=64, BN=64, BKD=2, num_warps=4, num_stages=3),
-            dict(TI=4, BJ=64, BN=64, BKD=2, num_warps=8, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKD=2, num_warps=8, num_stages=3),
-            dict(TI=4, BJ=64, BN=128, BKD=4, num_warps=4, num_stages=3),
-            dict(TI=4, BJ=64, BN=128, BKD=4, num_warps=8, num_stages=2),
-            dict(TI=4, BJ=64, BN=128, BKD=4, num_warps=8, num_stages=3),
-            dict(TI=4, BJ=64, BN=128, BKD=2, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=128, BKD=2, num_warps=4, num_stages=3),
-            dict(TI=4, BJ=64, BN=128, BKD=2, num_warps=8, num_stages=2),
-            dict(TI=4, BJ=64, BN=128, BKD=2, num_warps=8, num_stages=3),
-            dict(TI=4, BJ=128, BN=64, BKD=4, num_warps=4, num_stages=3),
-            dict(TI=4, BJ=128, BN=64, BKD=4, num_warps=8, num_stages=2)],
-            prune=_divides(BN="CZ", BKD="CH"))
+@configured(
+    "outer_product_mean_epilogue_triton",
+    key=["shape_key", "HAS_RES", "NORM_FIRST"],
+    default=[
+        dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=2),
+        dict(TI=2, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=128, BN=64, BKD=4, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=128, BKD=4, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKD=2, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=8, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=3),
+        dict(TI=1, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=32, BN=64, BKD=4, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=32, BKD=4, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKD=1, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=2, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=1),
+        dict(TI=4, BJ=16, BN=64, BKD=4, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=256, BKD=4, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=1, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=4),
+        dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=5),
+        dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=4, num_stages=6),
+        dict(TI=4, BJ=64, BN=64, BKD=4, num_warps=8, num_stages=3),
+        dict(TI=4, BJ=64, BN=64, BKD=2, num_warps=4, num_stages=3),
+        dict(TI=4, BJ=64, BN=64, BKD=2, num_warps=8, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKD=2, num_warps=8, num_stages=3),
+        dict(TI=4, BJ=64, BN=128, BKD=4, num_warps=4, num_stages=3),
+        dict(TI=4, BJ=64, BN=128, BKD=4, num_warps=8, num_stages=2),
+        dict(TI=4, BJ=64, BN=128, BKD=4, num_warps=8, num_stages=3),
+        dict(TI=4, BJ=64, BN=128, BKD=2, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=128, BKD=2, num_warps=4, num_stages=3),
+        dict(TI=4, BJ=64, BN=128, BKD=2, num_warps=8, num_stages=2),
+        dict(TI=4, BJ=64, BN=128, BKD=2, num_warps=8, num_stages=3),
+        dict(TI=4, BJ=128, BN=64, BKD=4, num_warps=4, num_stages=3),
+        dict(TI=4, BJ=128, BN=64, BKD=4, num_warps=8, num_stages=2),
+    ],
+    prune=_divides(BN="CZ", BKD="CH"),
+)
 @triton.jit
-def _opm_epilogue_kernel(O, WOT, BIAS, NORM, RES, OUT, L, shape_key,
-                         CH: tl.constexpr, CZ: tl.constexpr, HAS_RES: tl.constexpr, NORM_FIRST: tl.constexpr,
-                         TI: tl.constexpr, BJ: tl.constexpr, BN: tl.constexpr, BKD: tl.constexpr):
+def _opm_epilogue_kernel(
+    O,
+    WOT,
+    BIAS,
+    NORM,
+    RES,
+    OUT,
+    L,
+    shape_key,
+    CH: tl.constexpr,
+    CZ: tl.constexpr,
+    HAS_RES: tl.constexpr,
+    NORM_FIRST: tl.constexpr,
+    TI: tl.constexpr,
+    BJ: tl.constexpr,
+    BN: tl.constexpr,
+    BKD: tl.constexpr,
+):
     # tile = TI rows i x BJ columns j (M = TI BJ pairs, so W_out is re-read once per TI BJ pairs) x BN outputs; K = CH^2 in steps of
     # BKD values of d (a K chunk of BKD CH): A[(i, j), (d, e)] = O[i CH + d, j CH + e]
     r = tl.arange(0, TI * BJ)
@@ -163,45 +203,62 @@ def _opm_epilogue_kernel(O, WOT, BIAS, NORM, RES, OUT, L, shape_key,
     tl.store(OUT + ptr, z.to(tl.bfloat16), mask=rm[:, None])
 
 
-@configured('outer_product_mean_bwd_epilogue_dx_triton',
-            key=["shape_key"],
-            default=[dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=2),
-            dict(TI=2, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=128, BN=64, BKC=64, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=128, BKC=64, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKC=128, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=8, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=3),
-            dict(TI=1, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=32, BN=64, BKC=64, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=32, BKC=64, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKC=32, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=2, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=1),
-            dict(TI=4, BJ=16, BN=64, BKC=64, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=256, BKC=64, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKC=16, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=1, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=4),
-            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=5),
-            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=6),
-            dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=8, num_stages=3),
-            dict(TI=4, BJ=64, BN=64, BKC=128, num_warps=4, num_stages=3),
-            dict(TI=4, BJ=64, BN=64, BKC=128, num_warps=8, num_stages=2),
-            dict(TI=4, BJ=64, BN=64, BKC=128, num_warps=8, num_stages=3),
-            dict(TI=4, BJ=64, BN=128, BKC=64, num_warps=4, num_stages=3),
-            dict(TI=4, BJ=64, BN=128, BKC=64, num_warps=8, num_stages=2),
-            dict(TI=4, BJ=64, BN=128, BKC=64, num_warps=8, num_stages=3),
-            dict(TI=4, BJ=64, BN=128, BKC=128, num_warps=4, num_stages=2),
-            dict(TI=4, BJ=64, BN=128, BKC=128, num_warps=4, num_stages=3),
-            dict(TI=4, BJ=64, BN=128, BKC=128, num_warps=8, num_stages=2),
-            dict(TI=4, BJ=64, BN=128, BKC=128, num_warps=8, num_stages=3),
-            dict(TI=4, BJ=128, BN=64, BKC=64, num_warps=4, num_stages=3)],
-            prune=_divides(BKC="CZ", BN="CH2"))
+@configured(
+    "outer_product_mean_bwd_epilogue_dx_triton",
+    key=["shape_key"],
+    default=[
+        dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=2),
+        dict(TI=2, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=128, BN=64, BKC=64, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=128, BKC=64, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKC=128, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=8, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=3),
+        dict(TI=1, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=32, BN=64, BKC=64, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=32, BKC=64, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKC=32, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=2, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=1),
+        dict(TI=4, BJ=16, BN=64, BKC=64, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=256, BKC=64, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKC=16, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=1, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=4),
+        dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=5),
+        dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=4, num_stages=6),
+        dict(TI=4, BJ=64, BN=64, BKC=64, num_warps=8, num_stages=3),
+        dict(TI=4, BJ=64, BN=64, BKC=128, num_warps=4, num_stages=3),
+        dict(TI=4, BJ=64, BN=64, BKC=128, num_warps=8, num_stages=2),
+        dict(TI=4, BJ=64, BN=64, BKC=128, num_warps=8, num_stages=3),
+        dict(TI=4, BJ=64, BN=128, BKC=64, num_warps=4, num_stages=3),
+        dict(TI=4, BJ=64, BN=128, BKC=64, num_warps=8, num_stages=2),
+        dict(TI=4, BJ=64, BN=128, BKC=64, num_warps=8, num_stages=3),
+        dict(TI=4, BJ=64, BN=128, BKC=128, num_warps=4, num_stages=2),
+        dict(TI=4, BJ=64, BN=128, BKC=128, num_warps=4, num_stages=3),
+        dict(TI=4, BJ=64, BN=128, BKC=128, num_warps=8, num_stages=2),
+        dict(TI=4, BJ=64, BN=128, BKC=128, num_warps=8, num_stages=3),
+        dict(TI=4, BJ=128, BN=64, BKC=64, num_warps=4, num_stages=3),
+    ],
+    prune=_divides(BKC="CZ", BN="CH2"),
+)
 @triton.jit
-def _opm_bwd_epilogue_dx_kernel(DZ, NORM, WO, DZN, DO, L, CH2, shape_key,
-                                CH: tl.constexpr, CZ: tl.constexpr, TI: tl.constexpr, BJ: tl.constexpr, BN: tl.constexpr,
-                                BKC: tl.constexpr):
+def _opm_bwd_epilogue_dx_kernel(
+    DZ,
+    NORM,
+    WO,
+    DZN,
+    DO,
+    L,
+    CH2,
+    shape_key,
+    CH: tl.constexpr,
+    CZ: tl.constexpr,
+    TI: tl.constexpr,
+    BJ: tl.constexpr,
+    BN: tl.constexpr,
+    BKC: tl.constexpr,
+):
     # dzn = dz / n (either order: the projection is linear), dO[(i, d), (j, e)] = sum_c dzn[i, j, c] W_out[c, d CH + e].
     # tile = TI i x BJ j pairs x BN of the CH^2 (d, e) outputs, K = CZ in BKC steps; the n-block-0 programs also store dzn.
     r = tl.arange(0, TI * BJ)
@@ -221,53 +278,68 @@ def _opm_bwd_epilogue_dx_kernel(DZ, NORM, WO, DZN, DO, L, CH2, shape_key,
         dzn = (dz / nrm[:, None]).to(tl.bfloat16)
         if pn == 0:
             tl.store(DZN + prow[:, None] + c[None, :], dzn, mask=rm[:, None])
-        w = tl.load(WO + c[:, None] * (CH * CH) + n[None, :])                                # [BKC, BN]
+        w = tl.load(WO + c[:, None] * (CH * CH) + n[None, :])  # [BKC, BN]
         acc += tl.dot(dzn, w)
     ldo = L.to(tl.int64) * CH
     orow = i.to(tl.int64) * CH * ldo + j.to(tl.int64) * CH
     tl.store(DO + orow[:, None] + (d.to(tl.int64) * ldo + e)[None, :], acc.to(tl.bfloat16), mask=rm[:, None])
 
 
-@configured('outer_product_mean_bwd_epilogue_dw_triton',
-            key=["shape_key"],
-            default=[dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=128, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=128, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=8, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=3),
-            dict(BM=32, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=32, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=32, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=32, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=2, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=1),
-            dict(BM=16, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=256, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=16, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=16, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=1, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=4),
-            dict(BM=64, BN=64, BK=64, SPLIT=8, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=5),
-            dict(BM=64, BN=64, BK=64, SPLIT=4, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=6),
-            dict(BM=64, BN=64, BK=64, SPLIT=2, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=1, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=8, num_stages=3),
-            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=4, num_stages=3),
-            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=8, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=8, num_stages=3),
-            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=4, num_stages=3),
-            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=8, num_stages=2),
-            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=8, num_stages=3)],
-            prune=_divides(BM="CZ", BN="CH2"),
-            reset_to_zero=["DWO"])
+@configured(
+    "outer_product_mean_bwd_epilogue_dw_triton",
+    key=["shape_key"],
+    default=[
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=128, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=128, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=8, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=3),
+        dict(BM=32, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=32, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=32, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=32, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=2, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=1),
+        dict(BM=16, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=256, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=16, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=16, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=1, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=4),
+        dict(BM=64, BN=64, BK=64, SPLIT=8, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=5),
+        dict(BM=64, BN=64, BK=64, SPLIT=4, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=6),
+        dict(BM=64, BN=64, BK=64, SPLIT=2, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=1, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=8, num_stages=3),
+        dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=4, num_stages=3),
+        dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=8, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=8, num_stages=3),
+        dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=4, num_stages=3),
+        dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=8, num_stages=2),
+        dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=8, num_stages=3),
+    ],
+    prune=_divides(BM="CZ", BN="CH2"),
+    reset_to_zero=["DWO"],
+)
 @triton.jit
-def _opm_bwd_epilogue_dw_kernel(DZN, O, DWO, L, CH2, shape_key,
-                                CH: tl.constexpr, CZ: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
-                                SPLIT: tl.constexpr):
+def _opm_bwd_epilogue_dw_kernel(
+    DZN,
+    O,
+    DWO,
+    L,
+    CH2,
+    shape_key,
+    CH: tl.constexpr,
+    CZ: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+    SPLIT: tl.constexpr,
+):
     # dWo[c, (d, e)] = sum_(i, j) dzn[i, j, c] O[i CH + d, j CH + e]: an M = CZ, N = CH^2, K = L^2 GEMM, tile BM x BN, K split over
     # SPLIT ranges of i (fp32 atomics once per program)
     m = tl.program_id(0) * BM + tl.arange(0, BM)
@@ -285,21 +357,50 @@ def _opm_bwd_epilogue_dw_kernel(DZN, O, DWO, L, CH2, shape_key,
             for j0 in range(0, L, BK):
                 j = j0 + kk
                 jm = j < L
-                a = tl.load(DZN + (i.to(tl.int64) * L + j)[:, None] * CZ + m[None, :], mask=jm[:, None], other=0.0)     # [BK, BM]
-                b = tl.load(O + i.to(tl.int64) * CH * ldo + j[:, None].to(tl.int64) * CH + (d.to(tl.int64) * ldo + e)[None, :],
-                            mask=jm[:, None], other=0.0)                                                             # [BK, BN]
+                a = tl.load(DZN + (i.to(tl.int64) * L + j)[:, None] * CZ + m[None, :], mask=jm[:, None], other=0.0)  # [BK, BM]
+                b = tl.load(
+                    O + i.to(tl.int64) * CH * ldo + j[:, None].to(tl.int64) * CH + (d.to(tl.int64) * ldo + e)[None, :],
+                    mask=jm[:, None],
+                    other=0.0,
+                )  # [BK, BN]
                 acc += tl.dot(tl.trans(a), b)
     tl.atomic_add(DWO + m[:, None] * (CH * CH) + n[None, :], acc)
 
 
-@configured('outer_product_mean_bwd_layernorm_gemm_triton',
-            key=["shape_key", "HAS_MASK", "HAS_PBIAS", "K"],
-            default=dict(BT=64, PPS=16, num_warps=4, num_stages=2),
-            reset_to_zero=["DWL", "DWR", "DG", "DBETA", "DBL", "DBR"])
+@configured(
+    "outer_product_mean_bwd_layernorm_gemm_triton",
+    key=["shape_key", "HAS_MASK", "HAS_PBIAS", "K"],
+    default=dict(BT=64, PPS=16, num_warps=4, num_stages=2),
+    reset_to_zero=["DWL", "DWR", "DG", "DBETA", "DBL", "DBR"],
+)
 @triton.jit
-def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, DWR, DG, DBETA, DBL, DBR, T_, eps, shape_key,
-                                   CM: tl.constexpr, CH: tl.constexpr, K: tl.constexpr, HAS_MASK: tl.constexpr,
-                                   HAS_PBIAS: tl.constexpr, BT: tl.constexpr, PPS: tl.constexpr):
+def _opm_bwd_layernorm_gemm_kernel(
+    M,
+    MASK,
+    LNW,
+    LNB,
+    WL,
+    WR,
+    DA,
+    DB,
+    DM,
+    DWL,
+    DWR,
+    DG,
+    DBETA,
+    DBL,
+    DBR,
+    T_,
+    eps,
+    shape_key,
+    CM: tl.constexpr,
+    CH: tl.constexpr,
+    K: tl.constexpr,
+    HAS_MASK: tl.constexpr,
+    HAS_PBIAS: tl.constexpr,
+    BT: tl.constexpr,
+    PPS: tl.constexpr,
+):
     # persistent (PPS programs per SM): the program walks token blocks pid, pid + nprog, ..., keeping dW_left / dW_right / dgamma /
     # dbeta in registers, and adds them once at the end
     pid = tl.program_id(0)
@@ -308,7 +409,7 @@ def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, D
     ch = tl.arange(0, CH)
     g = tl.load(LNW + cols)
     bta = tl.load(LNB + cols)
-    wl = tl.load(WL + ch[:, None] * CM + cols[None, :])                                   # [CH, CM]
+    wl = tl.load(WL + ch[:, None] * CM + cols[None, :])  # [CH, CM]
     wr = tl.load(WR + ch[:, None] * CM + cols[None, :])
     dwl = tl.zeros((CH, CM), dtype=tl.float32)
     dwr = tl.zeros((CH, CM), dtype=tl.float32)
@@ -316,7 +417,7 @@ def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, D
     dbs = tl.zeros((CM,), dtype=tl.float32)
     dbl = tl.zeros((CH,), dtype=tl.float32)
     dbr = tl.zeros((CH,), dtype=tl.float32)
-    src_ch = ((ch // K).to(tl.int64) * T_)[None, :] * K + (ch % K)[None, :]               # group-major [G, T, K] columns
+    src_ch = ((ch // K).to(tl.int64) * T_)[None, :] * K + (ch % K)[None, :]  # group-major [G, T, K] columns
     nblk = tl.cdiv(T_, BT)
     for blk in range(pid, nblk, nprog):
         rows = blk.to(tl.int64) * BT + tl.arange(0, BT)
@@ -338,7 +439,7 @@ def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, D
             dbr += tl.sum(db.to(tl.float32), axis=0)
         dwl += tl.dot(tl.trans(da), y)
         dwr += tl.dot(tl.trans(db), y)
-        dy = tl.dot(da, wl) + tl.dot(db, wr)                                                 # [BT, CM] fp32
+        dy = tl.dot(da, wl) + tl.dot(db, wr)  # [BT, CM] fp32
         dgs += tl.sum(dy * xh, axis=0)
         dbs += tl.sum(dy, axis=0)
         dxh = dy * g[None, :]
@@ -360,12 +461,9 @@ def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, D
 # for the pair (i, j) the G K^2 products p[g, k, l] = O_g[i K + k, j K + l]. Chai-1 LayerNorms those P = G K^2 products (``product_norm``,
 # its own eps) and projects them; there is no division by the pair counts. The gather + LayerNorm is the only part that is not a GEMM: it
 # is a row-wise pass over the pair map (kernels below), the projection and its gradient dy = dz W_out are cuBLAS, dW_out a split-K kernel.
-@configured('outer_product_mean_epilogue_ln_triton',
-            key=["shape_key", "P"],
-            default=dict(BJ=16, num_warps=4, num_stages=1))
+@configured("outer_product_mean_epilogue_ln_triton", key=["shape_key", "P"], default=dict(BJ=16, num_warps=4, num_stages=1))
 @triton.jit
-def _opm_grouped_epilogue_kernel(O, GAM, BET, Y, L, eps, shape_key,
-                                 K: tl.constexpr, P: tl.constexpr, BJ: tl.constexpr):
+def _opm_grouped_epilogue_kernel(O, GAM, BET, Y, L, eps, shape_key, K: tl.constexpr, P: tl.constexpr, BJ: tl.constexpr):
     # program = (row i, BJ columns j): the (j, l) run of every (g, k) is contiguous in O, so the tile is loaded as [G K, BJ K] (coalesced),
     # LayerNorm'd over (g k, l) per j, turned into BJ rows of P and stored as the rows of y [L L, P]
     GK: tl.constexpr = P // K
@@ -388,13 +486,16 @@ def _opm_grouped_epilogue_kernel(O, GAM, BET, Y, L, eps, shape_key,
     tl.store(Y + (i * L + j)[:, None] * P + tl.arange(0, P)[None, :], y.to(tl.bfloat16), mask=(j < L)[:, None])
 
 
-@configured('outer_product_mean_bwd_epilogue_ln_dx_triton',
-            key=["shape_key", "P"],
-            default=dict(BJ=8, PPS=2, num_warps=4, num_stages=1),
-            reset_to_zero=["DGAM", "DBET"])
+@configured(
+    "outer_product_mean_bwd_epilogue_ln_dx_triton",
+    key=["shape_key", "P"],
+    default=dict(BJ=8, PPS=2, num_warps=4, num_stages=1),
+    reset_to_zero=["DGAM", "DBET"],
+)
 @triton.jit
-def _opm_grouped_bwd_epilogue_dx_kernel(DY, O, GAM, DO, DGAM, DBET, L, eps, shape_key,
-                                        K: tl.constexpr, P: tl.constexpr, BJ: tl.constexpr, PPS: tl.constexpr):
+def _opm_grouped_bwd_epilogue_dx_kernel(
+    DY, O, GAM, DO, DGAM, DBET, L, eps, shape_key, K: tl.constexpr, P: tl.constexpr, BJ: tl.constexpr, PPS: tl.constexpr
+):
     # persistent over (row i, BJ columns j) tiles: the product LayerNorm's backward from dy = dz W_out ([L L, P], cuBLAS) and the recomputed
     # statistics of O -> dO scattered into the grouped layout (coalesced along (j, l)); dgamma / dbeta stay in registers until the end
     GK: tl.constexpr = P // K
@@ -435,46 +536,60 @@ def _opm_grouped_bwd_epilogue_dx_kernel(DY, O, GAM, DO, DGAM, DBET, L, eps, shap
     tl.atomic_add(DBET + pg, dbs)
 
 
-@configured('outer_product_mean_bwd_epilogue_ln_dw_triton',
-            key=["shape_key", "P"],
-            default=[dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=128, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=128, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=8, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=3),
-            dict(BM=32, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=32, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=32, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=32, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=2, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=1),
-            dict(BM=16, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=256, BK=64, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=16, SPLIT=64, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=16, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=1, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=4),
-            dict(BM=64, BN=64, BK=64, SPLIT=8, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=5),
-            dict(BM=64, BN=64, BK=64, SPLIT=4, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=6),
-            dict(BM=64, BN=64, BK=64, SPLIT=2, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=1, num_warps=4, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=8, num_stages=3),
-            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=4, num_stages=3),
-            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=8, num_stages=2),
-            dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=8, num_stages=3),
-            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=4, num_stages=3),
-            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=8, num_stages=2),
-            dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=8, num_stages=3)],
-            prune=_divides(BM="CZ", BN="P"),
-            reset_to_zero=["DWO"])
+@configured(
+    "outer_product_mean_bwd_epilogue_ln_dw_triton",
+    key=["shape_key", "P"],
+    default=[
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=128, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=128, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=8, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=3),
+        dict(BM=32, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=32, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=32, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=32, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=2, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=1),
+        dict(BM=16, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=256, BK=64, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=16, SPLIT=64, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=16, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=1, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=4),
+        dict(BM=64, BN=64, BK=64, SPLIT=8, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=5),
+        dict(BM=64, BN=64, BK=64, SPLIT=4, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=4, num_stages=6),
+        dict(BM=64, BN=64, BK=64, SPLIT=2, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=1, num_warps=4, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=64, num_warps=8, num_stages=3),
+        dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=4, num_stages=3),
+        dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=8, num_stages=2),
+        dict(BM=64, BN=64, BK=64, SPLIT=128, num_warps=8, num_stages=3),
+        dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=4, num_stages=3),
+        dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=8, num_stages=2),
+        dict(BM=64, BN=64, BK=128, SPLIT=64, num_warps=8, num_stages=3),
+    ],
+    prune=_divides(BM="CZ", BN="P"),
+    reset_to_zero=["DWO"],
+)
 @triton.jit
-def _opm_grouped_bwd_epilogue_dw_kernel(DZ, Y, DWO, NPAIR, shape_key,
-                                        P: tl.constexpr, CZ: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
-                                        SPLIT: tl.constexpr):
+def _opm_grouped_bwd_epilogue_dw_kernel(
+    DZ,
+    Y,
+    DWO,
+    NPAIR,
+    shape_key,
+    P: tl.constexpr,
+    CZ: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+    SPLIT: tl.constexpr,
+):
     # dWo[c, p] = sum_pairs dz[pair, c] y[pair, p]: M = CZ, N = P, K = L^2 pairs split over SPLIT ranges (fp32 atomics once per program)
     m = tl.program_id(0) * BM + tl.arange(0, BM)
     n = tl.program_id(1) * BN + tl.arange(0, BN)
@@ -485,8 +600,8 @@ def _opm_grouped_bwd_epilogue_dw_kernel(DZ, Y, DWO, NPAIR, shape_key,
     for qq in range(0, per, BK):
         q = q0 + qq + kk
         qm = (q < NPAIR) & (qq + kk < per)
-        a = tl.load(DZ + q[:, None].to(tl.int64) * CZ + m[None, :], mask=qm[:, None], other=0.0)         # [BK, BM]
-        b = tl.load(Y + q[:, None].to(tl.int64) * P + n[None, :], mask=qm[:, None], other=0.0)           # [BK, BN]
+        a = tl.load(DZ + q[:, None].to(tl.int64) * CZ + m[None, :], mask=qm[:, None], other=0.0)  # [BK, BM]
+        b = tl.load(Y + q[:, None].to(tl.int64) * P + n[None, :], mask=qm[:, None], other=0.0)  # [BK, BN]
         acc += tl.dot(tl.trans(a), b)
     tl.atomic_add(DWO + m[:, None] * P + n[None, :], acc)
 
@@ -496,8 +611,9 @@ def _pow2_16(n: int) -> bool:
     return n >= 16 and n & (n - 1) == 0
 
 
-def refusal(msa: torch.Tensor, d_hidden: int, d_pair: int, *, interchain: bool, residual: torch.Tensor | None = None,
-            groups: int = 1) -> str | None:
+def refusal(
+    msa: torch.Tensor, d_hidden: int, d_pair: int, *, interchain: bool, residual: torch.Tensor | None = None, groups: int = 1
+) -> str | None:
     """None if the Triton path can run this OuterProductMean call, else why it cannot. Never raises."""
     try:
         if interchain:
@@ -506,7 +622,9 @@ def refusal(msa: torch.Tensor, d_hidden: int, d_pair: int, *, interchain: bool, 
             return "the input is not on a CUDA device"
         if msa.dtype != torch.bfloat16:
             return f"the Triton path is bf16, got {msa.dtype}"
-        if residual is not None and (residual.dtype != torch.bfloat16 or residual.shape != (msa.shape[0], msa.shape[2], msa.shape[2], d_pair)):
+        if residual is not None and (
+            residual.dtype != torch.bfloat16 or residual.shape != (msa.shape[0], msa.shape[2], msa.shape[2], d_pair)
+        ):
             return "the pair residual must be bf16 and [B, L, L, d_pair] to be fused"
         d_msa = msa.shape[-1]
         if not (_pow2_16(d_msa) and _pow2_16(d_hidden)):
@@ -518,8 +636,10 @@ def refusal(msa: torch.Tensor, d_hidden: int, d_pair: int, *, interchain: bool, 
                 return f"d_hidden ({d_hidden}) must be divisible by groups ({groups})"
             products = groups * (d_hidden // groups) ** 2
             if not _pow2_16(products) or products > 1024 or groups & (groups - 1):
-                return (f"the grouped products (groups * (d_hidden / groups)^2 = {products}) must be a power of two in 16..1024 (a tile "
-                        f"spans them) and groups a power of two, got groups {groups}")
+                return (
+                    f"the grouped products (groups * (d_hidden / groups)^2 = {products}) must be a power of two in 16..1024 (a tile "
+                    f"spans them) and groups a power of two, got groups {groups}"
+                )
         return None
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
@@ -534,9 +654,21 @@ def _fwd_fake(msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, residual, eps, norm_f
 
 
 @opaque(fake=_fwd_fake, name="outer_product_mean_triton_fwd")
-def _fwd(msa: torch.Tensor, mask: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wl: torch.Tensor, wr: torch.Tensor,
-         bl: torch.Tensor, br: torch.Tensor, wo: torch.Tensor, bo: torch.Tensor, residual: torch.Tensor, eps: float,
-         norm_first: bool) -> list[torch.Tensor]:
+def _fwd(
+    msa: torch.Tensor,
+    mask: torch.Tensor,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wl: torch.Tensor,
+    wr: torch.Tensor,
+    bl: torch.Tensor,
+    br: torch.Tensor,
+    wo: torch.Tensor,
+    bo: torch.Tensor,
+    residual: torch.Tensor,
+    eps: float,
+    norm_first: bool,
+) -> list[torch.Tensor]:
     """One stack: msa [S, L, CM], mask [S, L] bool (or empty: no mask), residual [L, L, CZ] (or empty), bl / br the projections'
     biases [CH] (or empty). Returns [out [L, L, CZ], a, b [S L, CH], O [L CH, L CH], n [L, L]]; the last four are what the backward reads."""
     S, L, CM = msa.shape
@@ -551,9 +683,26 @@ def _fwd(msa: torch.Tensor, mask: torch.Tensor, lnw: torch.Tensor, lnb: torch.Te
     a = msa.new_empty((T_, CH), dtype=bf)
     b = msa.new_empty((T_, CH), dtype=bf)
     _opm_layernorm_gemm_kernel[lambda meta: (triton.cdiv(T_, meta["BT"]),)](
-        x, m8, lnw.float().contiguous(), lnb.float().contiguous(), w_l, w_r, b_l, b_r, a, b, T_, eps,
-        shape_key=token_key(length_of(msa.shape), CM=CM, CH=CH), CM=CM, CH=CH, K=CH, HAS_MASK=has_mask, HAS_PBIAS=has_pbias)
-    o = torch.mm(a.view(S, L * CH).t(), b.view(S, L * CH))                                  # [(i, d), (j, e)]
+        x,
+        m8,
+        lnw.float().contiguous(),
+        lnb.float().contiguous(),
+        w_l,
+        w_r,
+        b_l,
+        b_r,
+        a,
+        b,
+        T_,
+        eps,
+        shape_key=token_key(length_of(msa.shape), CM=CM, CH=CH),
+        CM=CM,
+        CH=CH,
+        K=CH,
+        HAS_MASK=has_mask,
+        HAS_PBIAS=has_pbias,
+    )
+    o = torch.mm(a.view(S, L * CH).t(), b.view(S, L * CH))  # [(i, d), (j, e)]
     if has_mask:
         mf = mask.reshape(S, L).float()
         norm = (mf.t() @ mf).clamp_(min=1)
@@ -562,23 +711,57 @@ def _fwd(msa: torch.Tensor, mask: torch.Tensor, lnw: torch.Tensor, lnb: torch.Te
     out = msa.new_empty((L, L, CZ), dtype=bf)
     res = residual.reshape(L * L, CZ).contiguous() if has_res else out
     _opm_epilogue_kernel[lambda meta: (triton.cdiv(L, meta["TI"]), triton.cdiv(L, meta["BJ"]), triton.cdiv(CZ, meta["BN"]))](
-        o, wo.to(bf).t().contiguous(), bo.float().contiguous(), norm, res, out, L,
-        shape_key=token_key(length_of(msa.shape), CH=CH, CZ=CZ), CH=CH, CZ=CZ, HAS_RES=has_res, NORM_FIRST=norm_first)
+        o,
+        wo.to(bf).t().contiguous(),
+        bo.float().contiguous(),
+        norm,
+        res,
+        out,
+        L,
+        shape_key=token_key(length_of(msa.shape), CH=CH, CZ=CZ),
+        CH=CH,
+        CZ=CZ,
+        HAS_RES=has_res,
+        NORM_FIRST=norm_first,
+    )
     return [out, a, b, o, norm]
 
 
 def _bwd_fake(dz, msa, mask, a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo, eps, norm_first):
     """Shapes of `_bwd`'s outputs: dmsa like msa, every parameter gradient fp32 in its parameter's shape."""
     f32 = torch.float32
-    return [torch.empty_like(msa), lnw.new_empty(lnw.shape, dtype=f32), lnb.new_empty(lnb.shape, dtype=f32),
-            wl.new_empty(wl.shape, dtype=f32), wr.new_empty(wr.shape, dtype=f32), wo.new_empty(wo.shape, dtype=f32),
-            wo.new_empty((wo.shape[0],), dtype=f32), wl.new_empty((wl.shape[0],), dtype=f32), wl.new_empty((wl.shape[0],), dtype=f32)]
+    return [
+        torch.empty_like(msa),
+        lnw.new_empty(lnw.shape, dtype=f32),
+        lnb.new_empty(lnb.shape, dtype=f32),
+        wl.new_empty(wl.shape, dtype=f32),
+        wr.new_empty(wr.shape, dtype=f32),
+        wo.new_empty(wo.shape, dtype=f32),
+        wo.new_empty((wo.shape[0],), dtype=f32),
+        wl.new_empty((wl.shape[0],), dtype=f32),
+        wl.new_empty((wl.shape[0],), dtype=f32),
+    ]
 
 
 @opaque(fake=_bwd_fake, name="outer_product_mean_triton_bwd")
-def _bwd(dz: torch.Tensor, msa: torch.Tensor, mask: torch.Tensor, a: torch.Tensor, b: torch.Tensor, o: torch.Tensor,
-         norm: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wl: torch.Tensor, wr: torch.Tensor, bl: torch.Tensor,
-         br: torch.Tensor, wo: torch.Tensor, eps: float, norm_first: bool) -> list[torch.Tensor]:
+def _bwd(
+    dz: torch.Tensor,
+    msa: torch.Tensor,
+    mask: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    o: torch.Tensor,
+    norm: torch.Tensor,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wl: torch.Tensor,
+    wr: torch.Tensor,
+    bl: torch.Tensor,
+    br: torch.Tensor,
+    wo: torch.Tensor,
+    eps: float,
+    norm_first: bool,
+) -> list[torch.Tensor]:
     """Gradients of one stack: [dmsa, dgamma, dbeta, dW_left, dW_right, dW_out, db_out, db_left, db_right] (fp32 but dmsa; the last
     two are zeros when the projections have no bias)."""
     S, L, CM = msa.shape
@@ -592,18 +775,19 @@ def _bwd(dz: torch.Tensor, msa: torch.Tensor, mask: torch.Tensor, a: torch.Tenso
     dzn = dz.new_empty((L * L, CZ), dtype=bf)
     dO = dz.new_empty((L * CH, L * CH), dtype=bf)
     _opm_bwd_epilogue_dx_kernel[lambda meta: (triton.cdiv(L, meta["TI"]), triton.cdiv(L, meta["BJ"]), triton.cdiv(CH * CH, meta["BN"]))](
-        dzc, norm, wo.to(bf).contiguous(), dzn, dO, L, CH * CH,
-        shape_key=token_key(length_of(msa.shape), CH=CH, CZ=CZ), CH=CH, CZ=CZ)
+        dzc, norm, wo.to(bf).contiguous(), dzn, dO, L, CH * CH, shape_key=token_key(length_of(msa.shape), CH=CH, CZ=CZ), CH=CH, CZ=CZ
+    )
     # the bias gradient is a column sum over the L L pairs: one fp32-accumulated GEMV (ones . dz), not an ATen axis-0 reduction (66 us at L = 256,
     # 140 us with the fp32 division of the ESMFold2 order, where the bias is divided too: it sums dz / n, which dzn already holds)
     src = dzc if norm_first else dzn
     dbo = torch.mm(src.new_ones((1, L * L)), src, out_dtype=torch.float32).reshape(-1)
-    dA = torch.mm(b.view(S, L * CH), dO.t())                                                # [S, (i, d)]
-    dB = torch.mm(a.view(S, L * CH), dO)                                                    # [S, (j, e)]
+    dA = torch.mm(b.view(S, L * CH), dO.t())  # [S, (i, d)]
+    dB = torch.mm(a.view(S, L * CH), dO)  # [S, (j, e)]
     del dO
     dwo = dz.new_zeros((CZ, CH * CH), dtype=torch.float32)
     _opm_bwd_epilogue_dw_kernel[lambda meta: (triton.cdiv(CZ, meta["BM"]), triton.cdiv(CH * CH, meta["BN"]), meta["SPLIT"])](
-        dzn, o, dwo, L, CH * CH, shape_key=token_key(length_of(msa.shape), CH=CH, CZ=CZ), CH=CH, CZ=CZ)
+        dzn, o, dwo, L, CH * CH, shape_key=token_key(length_of(msa.shape), CH=CH, CZ=CZ), CH=CH, CZ=CZ
+    )
     dm, dg, dbeta, dwl, dwr, dbl, dbr = _ln_gemm_bwd(x, m8, lnw, lnb, wl, wr, dA, dB, eps, S, L, CM, CH, CH, has_mask, has_pbias)
     return [dm, dg, dbeta, dwl, dwr, dwo, dbo, dbl, dbr]
 
@@ -615,15 +799,35 @@ def _ln_gemm_bwd(x, m8, lnw, lnb, wl, wr, dA, dB, eps, S, L, CM, CH, K, has_mask
     T_ = S * L
     dm = torch.empty_like(x)
     red = x.new_zeros((2 * CH * CM + 2 * CM + 2 * CH,), dtype=torch.float32)
-    dwl, dwr = red[:CH * CM].view(CH, CM), red[CH * CM:2 * CH * CM].view(CH, CM)
-    dg, dbeta = red[2 * CH * CM:2 * CH * CM + CM], red[2 * CH * CM + CM:2 * CH * CM + 2 * CM]
-    dbl, dbr = red[2 * CH * CM + 2 * CM:2 * CH * CM + 2 * CM + CH], red[2 * CH * CM + 2 * CM + CH:]
+    dwl, dwr = red[: CH * CM].view(CH, CM), red[CH * CM : 2 * CH * CM].view(CH, CM)
+    dg, dbeta = red[2 * CH * CM : 2 * CH * CM + CM], red[2 * CH * CM + CM : 2 * CH * CM + 2 * CM]
+    dbl, dbr = red[2 * CH * CM + 2 * CM : 2 * CH * CM + 2 * CM + CH], red[2 * CH * CM + 2 * CM + CH :]
     nsm = num_sms(x.device)
     _opm_bwd_layernorm_gemm_kernel[lambda meta: (min(triton.cdiv(T_, meta["BT"]), meta["PPS"] * nsm),)](
-        x, m8, lnw.float().contiguous(), lnb.float().contiguous(), wl.to(bf).contiguous(), wr.to(bf).contiguous(),
-        dA, dB, dm, dwl, dwr, dg, dbeta, dbl, dbr, T_, eps,
-        shape_key=token_key(length_of((S, L, CM)), CM=CM, CH=CH, **({} if K == CH else {"G": CH // K})), CM=CM, CH=CH, K=K,
-        HAS_MASK=has_mask, HAS_PBIAS=has_pbias)
+        x,
+        m8,
+        lnw.float().contiguous(),
+        lnb.float().contiguous(),
+        wl.to(bf).contiguous(),
+        wr.to(bf).contiguous(),
+        dA,
+        dB,
+        dm,
+        dwl,
+        dwr,
+        dg,
+        dbeta,
+        dbl,
+        dbr,
+        T_,
+        eps,
+        shape_key=token_key(length_of((S, L, CM)), CM=CM, CH=CH, **({} if K == CH else {"G": CH // K})),
+        CM=CM,
+        CH=CH,
+        K=K,
+        HAS_MASK=has_mask,
+        HAS_PBIAS=has_pbias,
+    )
     return dm.view(S, L, CM), dg.clone(), dbeta.clone(), dwl.clone(), dwr.clone(), dbl.clone(), dbr.clone()
 
 
@@ -638,9 +842,24 @@ def _fwd_grouped_fake(msa, mask, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo, res
 
 
 @opaque(fake=_fwd_grouped_fake, name="outer_product_mean_triton_fwd_grouped")
-def _fwd_grouped(msa: torch.Tensor, mask: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wl: torch.Tensor, wr: torch.Tensor,
-                 bl: torch.Tensor, br: torch.Tensor, gam: torch.Tensor, bet: torch.Tensor, wo: torch.Tensor, bo: torch.Tensor,
-                 residual: torch.Tensor, eps: float, eps_prod: float, groups: int) -> list[torch.Tensor]:
+def _fwd_grouped(
+    msa: torch.Tensor,
+    mask: torch.Tensor,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wl: torch.Tensor,
+    wr: torch.Tensor,
+    bl: torch.Tensor,
+    br: torch.Tensor,
+    gam: torch.Tensor,
+    bet: torch.Tensor,
+    wo: torch.Tensor,
+    bo: torch.Tensor,
+    residual: torch.Tensor,
+    eps: float,
+    eps_prod: float,
+    groups: int,
+) -> list[torch.Tensor]:
     """One stack of the grouped (Chai-1) variant. Returns [out [L, L, CZ], a, b [S L, CH] (stored [G, S L, K]), O [G, L K, L K],
     y [L L, P]: the LayerNorm'd products, which dW_out reads]."""
     S, L, CM = msa.shape
@@ -656,14 +875,39 @@ def _fwd_grouped(msa: torch.Tensor, mask: torch.Tensor, lnw: torch.Tensor, lnb: 
     a = msa.new_empty((T_, CH), dtype=bf)
     b = msa.new_empty((T_, CH), dtype=bf)
     _opm_layernorm_gemm_kernel[lambda meta: (triton.cdiv(T_, meta["BT"]),)](
-        x, m8, lnw.float().contiguous(), lnb.float().contiguous(), wl.to(bf).contiguous(), wr.to(bf).contiguous(), b_l, b_r, a, b, T_, eps,
-        shape_key=token_key(length_of(msa.shape), CM=CM, CH=CH, G=groups), CM=CM, CH=CH, K=K, HAS_MASK=has_mask, HAS_PBIAS=has_pbias)
-    o = torch.bmm(a.view(groups, S, L * K).transpose(1, 2), b.view(groups, S, L * K))      # [G, (i, k), (j, l)]
+        x,
+        m8,
+        lnw.float().contiguous(),
+        lnb.float().contiguous(),
+        wl.to(bf).contiguous(),
+        wr.to(bf).contiguous(),
+        b_l,
+        b_r,
+        a,
+        b,
+        T_,
+        eps,
+        shape_key=token_key(length_of(msa.shape), CM=CM, CH=CH, G=groups),
+        CM=CM,
+        CH=CH,
+        K=K,
+        HAS_MASK=has_mask,
+        HAS_PBIAS=has_pbias,
+    )
+    o = torch.bmm(a.view(groups, S, L * K).transpose(1, 2), b.view(groups, S, L * K))  # [G, (i, k), (j, l)]
     y = msa.new_empty((L * L, P), dtype=bf)
     _opm_grouped_epilogue_kernel[lambda meta: (L, triton.cdiv(L, meta["BJ"]))](
-        o, gam.float().contiguous(), bet.float().contiguous(), y, L, eps_prod,
-        shape_key=token_key(length_of(msa.shape), K=K, G=groups), K=K, P=P)
-    out = torch.nn.functional.linear(y, wo.to(bf), bo.to(bf))                                # cuBLAS, the bias in its epilogue
+        o,
+        gam.float().contiguous(),
+        bet.float().contiguous(),
+        y,
+        L,
+        eps_prod,
+        shape_key=token_key(length_of(msa.shape), K=K, G=groups),
+        K=K,
+        P=P,
+    )
+    out = torch.nn.functional.linear(y, wo.to(bf), bo.to(bf))  # cuBLAS, the bias in its epilogue
     if has_res:
         out.add_(residual.reshape(L * L, CZ))
     return [out.view(L, L, CZ), a, b, o, y]
@@ -672,15 +916,35 @@ def _fwd_grouped(msa: torch.Tensor, mask: torch.Tensor, lnw: torch.Tensor, lnb: 
 def _bwd_grouped_fake(dz, msa, mask, a, b, o, y, lnw, lnb, wl, wr, bl, br, gam, bet, wo, eps, eps_prod, groups):
     """Shapes of `_bwd_grouped`'s outputs: dmsa like msa, every parameter gradient fp32 in its parameter's shape."""
     f32 = torch.float32
-    return [torch.empty_like(msa)] + [t.new_empty(t.shape, dtype=f32) for t in (lnw, lnb, wl, wr, wo, gam, bet)] + \
-        [wo.new_empty((wo.shape[0],), dtype=f32), wl.new_empty((wl.shape[0],), dtype=f32), wl.new_empty((wl.shape[0],), dtype=f32)]
+    return (
+        [torch.empty_like(msa)]
+        + [t.new_empty(t.shape, dtype=f32) for t in (lnw, lnb, wl, wr, wo, gam, bet)]
+        + [wo.new_empty((wo.shape[0],), dtype=f32), wl.new_empty((wl.shape[0],), dtype=f32), wl.new_empty((wl.shape[0],), dtype=f32)]
+    )
 
 
 @opaque(fake=_bwd_grouped_fake, name="outer_product_mean_triton_bwd_grouped")
-def _bwd_grouped(dz: torch.Tensor, msa: torch.Tensor, mask: torch.Tensor, a: torch.Tensor, b: torch.Tensor, o: torch.Tensor,
-                 y: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wl: torch.Tensor, wr: torch.Tensor, bl: torch.Tensor, br: torch.Tensor,
-                 gam: torch.Tensor, bet: torch.Tensor, wo: torch.Tensor, eps: float, eps_prod: float,
-                 groups: int) -> list[torch.Tensor]:
+def _bwd_grouped(
+    dz: torch.Tensor,
+    msa: torch.Tensor,
+    mask: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    o: torch.Tensor,
+    y: torch.Tensor,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wl: torch.Tensor,
+    wr: torch.Tensor,
+    bl: torch.Tensor,
+    br: torch.Tensor,
+    gam: torch.Tensor,
+    bet: torch.Tensor,
+    wo: torch.Tensor,
+    eps: float,
+    eps_prod: float,
+    groups: int,
+) -> list[torch.Tensor]:
     """Gradients of one grouped stack: [dmsa, dgamma, dbeta, dW_left, dW_right, dW_out, dgamma_prod, dbeta_prod, db_out, db_left, db_right]."""
     S, L, CM = msa.shape
     CH, CZ = wl.shape[0], wo.shape[0]
@@ -696,18 +960,19 @@ def _bwd_grouped(dz: torch.Tensor, msa: torch.Tensor, mask: torch.Tensor, a: tor
     dO = dz.new_empty((groups, L * K, L * K), dtype=bf)
     dgam, dbet = dz.new_zeros((P,), dtype=f32), dz.new_zeros((P,), dtype=f32)
     nsm = num_sms(msa.device)
-    dy = torch.mm(dzc, wo.to(bf))                                                           # [L L, P], cuBLAS
+    dy = torch.mm(dzc, wo.to(bf))  # [L L, P], cuBLAS
     _opm_grouped_bwd_epilogue_dx_kernel[lambda meta: (max(1, min(L * triton.cdiv(L, meta["BJ"]), meta["PPS"] * nsm)),)](
-        dy, o, gam.float().contiguous(), dO, dgam, dbet, L, eps_prod,
-        shape_key=token_key(length_of(msa.shape), K=K, G=groups), K=K, P=P)
+        dy, o, gam.float().contiguous(), dO, dgam, dbet, L, eps_prod, shape_key=token_key(length_of(msa.shape), K=K, G=groups), K=K, P=P
+    )
     del dy
     dbo = dzc.sum(0, dtype=torch.float32)
-    dA = torch.bmm(b.view(groups, S, L * K), dO.transpose(1, 2))                            # [G, S, (i, k)]
-    dB = torch.bmm(a.view(groups, S, L * K), dO)                                            # [G, S, (j, l)]
+    dA = torch.bmm(b.view(groups, S, L * K), dO.transpose(1, 2))  # [G, S, (i, k)]
+    dB = torch.bmm(a.view(groups, S, L * K), dO)  # [G, S, (j, l)]
     del dO
     dwo = dz.new_zeros((CZ, P), dtype=f32)
     _opm_grouped_bwd_epilogue_dw_kernel[lambda meta: (triton.cdiv(CZ, meta["BM"]), triton.cdiv(P, meta["BN"]), meta["SPLIT"])](
-        dzc, y, dwo, L * L, shape_key=token_key(length_of(msa.shape), K=K, G=groups, CZ=CZ), P=P, CZ=CZ)
+        dzc, y, dwo, L * L, shape_key=token_key(length_of(msa.shape), K=K, G=groups, CZ=CZ), P=P, CZ=CZ
+    )
     dm, dg, dbeta, dwl, dwr, dbl, dbr = _ln_gemm_bwd(x, m8, lnw, lnb, wl, wr, dA, dB, eps, S, L, CM, CH, K, has_mask, has_pbias)
     return [dm, dg, dbeta, dwl, dwr, dwo, dgam, dbet, dbo, dbl, dbr]
 
@@ -725,11 +990,24 @@ class _OuterProductMeanTriton(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dz):
         msa, mask, a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo, bo = ctx.saved_tensors
-        dm, dg, dbeta, dwl, dwr, dwo, dbo, dbl, dbr = _bwd(dz.contiguous(), msa, mask, a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo,
-                                                           ctx.eps, ctx.norm_first)
-        return (dm, None, dg.to(lnw.dtype), dbeta.to(lnb.dtype), dwl.to(wl.dtype), dwr.to(wr.dtype),
-                dbl.to(bl.dtype) if bl.numel() else None, dbr.to(br.dtype) if br.numel() else None, dwo.to(wo.dtype),
-                dbo.to(bo.dtype), dz if ctx.has_res else None, None, None)
+        dm, dg, dbeta, dwl, dwr, dwo, dbo, dbl, dbr = _bwd(
+            dz.contiguous(), msa, mask, a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo, ctx.eps, ctx.norm_first
+        )
+        return (
+            dm,
+            None,
+            dg.to(lnw.dtype),
+            dbeta.to(lnb.dtype),
+            dwl.to(wl.dtype),
+            dwr.to(wr.dtype),
+            dbl.to(bl.dtype) if bl.numel() else None,
+            dbr.to(br.dtype) if br.numel() else None,
+            dwo.to(wo.dtype),
+            dbo.to(bo.dtype),
+            dz if ctx.has_res else None,
+            None,
+            None,
+        )
 
 
 class _OuterProductMeanGroupedTriton(torch.autograd.Function):
@@ -745,19 +1023,49 @@ class _OuterProductMeanGroupedTriton(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dz):
         msa, mask, a, b, o, y, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo = ctx.saved_tensors
-        dm, dg, dbeta, dwl, dwr, dwo, dgam, dbet, dbo, dbl, dbr = _bwd_grouped(dz.contiguous(), msa, mask, a, b, o, y, lnw, lnb, wl, wr, bl,
-                                                                               br, gam, bet, wo, *ctx.meta)
-        return (dm, None, dg.to(lnw.dtype), dbeta.to(lnb.dtype), dwl.to(wl.dtype), dwr.to(wr.dtype),
-                dbl.to(bl.dtype) if bl.numel() else None, dbr.to(br.dtype) if br.numel() else None, dgam.to(gam.dtype),
-                dbet.to(bet.dtype), dwo.to(wo.dtype), dbo.to(bo.dtype), dz if ctx.has_res else None, None, None, None)
+        dm, dg, dbeta, dwl, dwr, dwo, dgam, dbet, dbo, dbl, dbr = _bwd_grouped(
+            dz.contiguous(), msa, mask, a, b, o, y, lnw, lnb, wl, wr, bl, br, gam, bet, wo, *ctx.meta
+        )
+        return (
+            dm,
+            None,
+            dg.to(lnw.dtype),
+            dbeta.to(lnb.dtype),
+            dwl.to(wl.dtype),
+            dwr.to(wr.dtype),
+            dbl.to(bl.dtype) if bl.numel() else None,
+            dbr.to(br.dtype) if br.numel() else None,
+            dgam.to(gam.dtype),
+            dbet.to(bet.dtype),
+            dwo.to(wo.dtype),
+            dbo.to(bo.dtype),
+            dz if ctx.has_res else None,
+            None,
+            None,
+            None,
+        )
 
 
-def triton_outer_product_mean(msa: torch.Tensor, mask: torch.Tensor | None, ln_weight: torch.Tensor, ln_bias: torch.Tensor,
-                              w_left: torch.Tensor, w_right: torch.Tensor, w_out: torch.Tensor, b_out: torch.Tensor,
-                              residual: torch.Tensor | None = None, *, eps: float = 1e-5, normalize_before_proj: bool = True,
-                              b_left: torch.Tensor | None = None, b_right: torch.Tensor | None = None, groups: int = 1,
-                              product_norm_weight: torch.Tensor | None = None, product_norm_bias: torch.Tensor | None = None,
-                              product_norm_eps: float = 0.1) -> torch.Tensor:
+def triton_outer_product_mean(
+    msa: torch.Tensor,
+    mask: torch.Tensor | None,
+    ln_weight: torch.Tensor,
+    ln_bias: torch.Tensor,
+    w_left: torch.Tensor,
+    w_right: torch.Tensor,
+    w_out: torch.Tensor,
+    b_out: torch.Tensor,
+    residual: torch.Tensor | None = None,
+    *,
+    eps: float = 1e-5,
+    normalize_before_proj: bool = True,
+    b_left: torch.Tensor | None = None,
+    b_right: torch.Tensor | None = None,
+    groups: int = 1,
+    product_norm_weight: torch.Tensor | None = None,
+    product_norm_bias: torch.Tensor | None = None,
+    product_norm_eps: float = 0.1,
+) -> torch.Tensor:
     """``residual + OPM(msa)`` (``OPM(msa)`` without a residual), differentiable. msa [B, S, L, CM] bf16, mask [B, S, L] bool.
 
     ``b_left`` / ``b_right`` (RoseTTAFold3): the projections' biases, masked rows lose them too. ``groups`` > 1 (Chai-1): the hidden
@@ -765,8 +1073,9 @@ def triton_outer_product_mean(msa: torch.Tensor, mask: torch.Tensor | None, ln_w
     (``product_norm_*``, eps ``product_norm_eps``), projected, and NOT divided by the pair counts (``normalize_before_proj`` is moot).
 
     Stacks run one at a time: the mask counts and the grouped outer product are per stack. Check :func:`refusal` first."""
-    def empty():                                           # one tensor per absent input: Dynamo refuses an autograd.Function
-        return msa.new_empty((0,))                         # applied to the same tensor twice
+
+    def empty():  # one tensor per absent input: Dynamo refuses an autograd.Function
+        return msa.new_empty((0,))  # applied to the same tensor twice
 
     bl, br = (empty(), empty()) if b_left is None else (b_left, b_right)
     outs = []
@@ -774,10 +1083,30 @@ def triton_outer_product_mean(msa: torch.Tensor, mask: torch.Tensor | None, ln_w
         m = empty() if mask is None else mask[bi]
         r = empty() if residual is None else residual[bi]
         if groups > 1:
-            outs.append(_OuterProductMeanGroupedTriton.apply(msa[bi], m, ln_weight, ln_bias, w_left, w_right, bl, br, product_norm_weight,
-                                                             product_norm_bias, w_out, b_out, r, float(eps), float(product_norm_eps),
-                                                             int(groups)))
+            outs.append(
+                _OuterProductMeanGroupedTriton.apply(
+                    msa[bi],
+                    m,
+                    ln_weight,
+                    ln_bias,
+                    w_left,
+                    w_right,
+                    bl,
+                    br,
+                    product_norm_weight,
+                    product_norm_bias,
+                    w_out,
+                    b_out,
+                    r,
+                    float(eps),
+                    float(product_norm_eps),
+                    int(groups),
+                )
+            )
         else:
-            outs.append(_OuterProductMeanTriton.apply(msa[bi], m, ln_weight, ln_bias, w_left, w_right, bl, br, w_out, b_out, r,
-                                                      float(eps), bool(normalize_before_proj)))
+            outs.append(
+                _OuterProductMeanTriton.apply(
+                    msa[bi], m, ln_weight, ln_bias, w_left, w_right, bl, br, w_out, b_out, r, float(eps), bool(normalize_before_proj)
+                )
+            )
     return outs[0].unsqueeze(0) if len(outs) == 1 else torch.stack(outs, 0)

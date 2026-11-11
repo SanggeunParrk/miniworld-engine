@@ -15,12 +15,7 @@ def _kernel(d, h, backward, cfg):
     private = cfg[3] if len(cfg) > 3 else 0
     wait = cfg[4] if len(cfg) > 4 else 1
     cache = cfg[5] if len(cfg) > 5 else d // 128
-    smem = (
-        tokens * d * 2
-        + stages * bn * 128
-        + tokens // 64 * (24576 if backward and private else 16384)
-        + 512
-    )
+    smem = tokens * d * 2 + stages * bn * 128 + tokens // 64 * (24576 if backward and private else 16384) + 512
     name = f"mw_b200style_k1ssregtune{'wb' if backward else ''}_n{bn}t{tokens}s{stages}p{private}w{wait}c{cache}"
     flags = [
         "-std=c++17",
@@ -58,7 +53,7 @@ def front(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
 
         return backward_front(x, w1, mask, gi, bi, ab, xs, dpl, dcat, xn)
     n, d, h = x.shape[1], x.shape[-1], ab.shape[0] // 2
-    m = x.numel() // d   # token-flat: B n n tokens for batched samples (b-major; the pair mask is [B n, n])
+    m = x.numel() // d  # token-flat: B n n tokens for batched samples (b-major; the pair mask is [B n, n])
     backward = dcat is not None
     cfg = _config(d, backward)
     tokens, stages, bn = cfg[:3]
@@ -81,11 +76,7 @@ def front(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
         else I._map(dpl, [64, 64], [m, 2 * h], [m * 2])
         if backward
         else am,
-        I._map(
-            dcat, [64, 16 if private else 64], [dcat.shape[1], m], [dcat.shape[1] * 2]
-        )
-        if backward
-        else am,
+        I._map(dcat, [64, 16 if private else 64], [dcat.shape[1], m], [dcat.shape[1] * 2]) if backward else am,
         I._map(xn, [64, tokens], [d, m], [d * 2]) if xn is not None else am,
         mask,
         gi,

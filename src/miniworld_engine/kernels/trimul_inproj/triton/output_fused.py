@@ -5,6 +5,7 @@ CSV config sets; the standard autotuner/cache owns selection and cache misses.
 Each program owns one (M,N) tile, including y, proj and gate saves. No atomics,
 cross-program communication, split-K, or hidden full-width output tile.
 """
+
 from __future__ import annotations
 
 import torch
@@ -24,16 +25,15 @@ def prune_output_configs(configs, named_args, **meta):
     there is no architecture-specific register or shared-memory estimate here.
     """
     args = {**named_args, **meta}
-    n, kp, kg, m = (int(args[k]) for k in ('N', 'KP', 'KG', 'M'))
+    n, kp, kg, m = (int(args[k]) for k in ("N", "KP", "KG", "M"))
     kept = []
     for cfg in configs:
         c = cfg.kwargs
-        if (c['BLOCK_N'] > triton.next_power_of_2(n)
-                or c['BLOCK_K'] > triton.next_power_of_2(max(kp, kg))):
+        if c["BLOCK_N"] > triton.next_power_of_2(n) or c["BLOCK_K"] > triton.next_power_of_2(max(kp, kg)):
             continue
-        if triton.cdiv(n, c['BLOCK_N']) == 1 and c['GROUP_M'] != 1:
+        if triton.cdiv(n, c["BLOCK_N"]) == 1 and c["GROUP_M"] != 1:
             continue
-        if c['GROUP_M'] > triton.cdiv(m, c['BLOCK_M1']):
+        if c["GROUP_M"] > triton.cdiv(m, c["BLOCK_M1"]):
             continue
         kept.append(cfg)
     # An explicit single-config probe can intentionally exceed an extent to
@@ -42,50 +42,70 @@ def prune_output_configs(configs, named_args, **meta):
     return kept or list(configs)
 
 
-@configured('trimul_output_f567_train_triton',
-            key=['shape_key', 'M', 'L', 'wp0', 'wp1', 'wg0', 'wg1'],
-            default=[dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=16, GROUP_M=1, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=1, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=128, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=8, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=3),
-            dict(BLOCK_M1=32, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=32, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=8, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=2, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=4),
-            dict(BLOCK_M1=16, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=256, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=16, GROUP_M=8, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=2, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=1, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=8, num_stages=3),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=3),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=8, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=8, num_stages=3),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=4, num_stages=3),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=8, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=8, num_stages=3),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=4, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=4, num_stages=3),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=2),
-            dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=3)],
-            prune=prune_output_configs)
+@configured(
+    "trimul_output_f567_train_triton",
+    key=["shape_key", "M", "L", "wp0", "wp1", "wg0", "wg1"],
+    default=[
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=16, GROUP_M=1, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=1, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=128, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=8, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=3),
+        dict(BLOCK_M1=32, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=32, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=8, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=2, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=4),
+        dict(BLOCK_M1=16, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=256, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=16, GROUP_M=8, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=2, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=1, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=8, num_stages=3),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=3),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=8, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=8, num_stages=3),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=4, num_stages=3),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=8, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=8, num_warps=8, num_stages=3),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=4, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=4, num_stages=3),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=2),
+        dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=3),
+    ],
+    prune=prune_output_configs,
+)
 @triton.jit
 def _output_f567_kernel(
-    XN, X, WP, WG, PROJ, GATE, Y, RES, DS,
-    M, L: tl.constexpr, KP: tl.constexpr, KG: tl.constexpr, N: tl.constexpr,
-    wp0: tl.constexpr, wp1: tl.constexpr,
-    wg0: tl.constexpr, wg1: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
+    XN,
+    X,
+    WP,
+    WG,
+    PROJ,
+    GATE,
+    Y,
+    RES,
+    DS,
+    M,
+    L: tl.constexpr,
+    KP: tl.constexpr,
+    KG: tl.constexpr,
+    N: tl.constexpr,
+    wp0: tl.constexpr,
+    wp1: tl.constexpr,
+    wg0: tl.constexpr,
+    wg1: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    GROUP_M: tl.constexpr, shape_key,
+    GROUP_M: tl.constexpr,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     nm, nn = tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N)
@@ -100,10 +120,8 @@ def _output_f567_kernel(
     ap = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
     for pk0 in range(tl.cdiv(KP, BLOCK_K)):
         pk = pk0 * BLOCK_K + rkp
-        pa = tl.load(XN + rm[:, None] * KP + pk[None, :],
-                    (rm[:, None] < M) & (pk[None, :] < KP), 0)
-        pw = tl.load(WP + pk[:, None] * wp1 + rn[None, :] * wp0,
-                    (pk[:, None] < KP) & (rn[None, :] < N), 0)
+        pa = tl.load(XN + rm[:, None] * KP + pk[None, :], (rm[:, None] < M) & (pk[None, :] < KP), 0)
+        pw = tl.load(WP + pk[:, None] * wp1 + rn[None, :] * wp0, (pk[:, None] < KP) & (rn[None, :] < N), 0)
         ap = tl.dot(pa, pw, ap)
     off = rm[:, None] * N + rn[None, :]
     mask = (rm[:, None] < M) & (rn[None, :] < N)
@@ -120,10 +138,8 @@ def _output_f567_kernel(
         ag = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
     for gk0 in range(tl.cdiv(KG, BLOCK_K)):
         gk = gk0 * BLOCK_K + rkg
-        ga = tl.load(X + rm[:, None] * KG + gk[None, :],
-                    (rm[:, None] < M) & (gk[None, :] < KG), 0)
-        gw = tl.load(WG + gk[:, None] * wg0 + rn[None, :] * wg1,
-                    (gk[:, None] < KG) & (rn[None, :] < N), 0)
+        ga = tl.load(X + rm[:, None] * KG + gk[None, :], (rm[:, None] < M) & (gk[None, :] < KG), 0)
+        gw = tl.load(WG + gk[:, None] * wg0 + rn[None, :] * wg1, (gk[:, None] < KG) & (rn[None, :] < N), 0)
         if BLOCK_M1 > BLOCK_N:
             ag = tl.dot(tl.trans(gw), tl.trans(ga), ag)
         else:
@@ -147,10 +163,15 @@ def _output_f567_train_fake(norm, x, wp, wg, residual, dropscale, seq_len):
     return tuple((norm.new_empty(shape) for _ in range(3)))
 
 
-@opaque(fake=_output_f567_train_fake, name='trimul_output_f567_train')
+@opaque(fake=_output_f567_train_fake, name="trimul_output_f567_train")
 def output_f567_train(
-    norm: torch.Tensor, x: torch.Tensor, wp: torch.Tensor, wg: torch.Tensor,
-    residual: torch.Tensor, dropscale: torch.Tensor, seq_len: int,
+    norm: torch.Tensor,
+    x: torch.Tensor,
+    wp: torch.Tensor,
+    wg: torch.Tensor,
+    residual: torch.Tensor,
+    dropscale: torch.Tensor,
+    seq_len: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return fresh (y, proj, gate), all contiguous; wp=(N,KP), wg=(KG,N).
 
@@ -160,25 +181,38 @@ def output_f567_train(
     """
     tensors = (norm, x, wp, wg, residual, dropscale)
     if any(t.ndim != 2 for t in tensors):
-        raise ValueError('F567 operands must be matrices')
+        raise ValueError("F567 operands must be matrices")
     if any(t.dtype != torch.bfloat16 for t in tensors):
-        raise TypeError('F567 currently supports BF16 operands')
+        raise TypeError("F567 currently supports BF16 operands")
     if any(t.device != norm.device for t in tensors) or not norm.is_cuda:
-        raise ValueError('F567 operands must share a CUDA device')
+        raise ValueError("F567 operands must share a CUDA device")
     m, kp = norm.shape
     kg, n = wg.shape
     if min(m, kp, kg, n, seq_len) <= 0:
-        raise ValueError('F567 dimensions and seq_len must be positive')
-    if (x.shape != (m, kg) or wp.shape != (n, kp)
-            or residual.shape != (m, n) or dropscale.shape != (seq_len, n)):
-        raise ValueError('F567 input/weight/residual/drop-scale shapes disagree')
+        raise ValueError("F567 dimensions and seq_len must be positive")
+    if x.shape != (m, kg) or wp.shape != (n, kp) or residual.shape != (m, n) or dropscale.shape != (seq_len, n):
+        raise ValueError("F567 input/weight/residual/drop-scale shapes disagree")
     if any(not t.is_contiguous() for t in (norm, x, residual, dropscale)):
-        raise ValueError('F567 activation/residual/drop-scale operands must be contiguous')
+        raise ValueError("F567 activation/residual/drop-scale operands must be contiguous")
     y, proj, gate = _output_f567_train_fake(*tensors, seq_len)
-    grid = lambda meta: tile_grid(m, n, meta['BLOCK_M1'], meta['BLOCK_N'])
+    grid = lambda meta: tile_grid(m, n, meta["BLOCK_M1"], meta["BLOCK_N"])
     _output_f567_kernel[grid](
-        norm, x, wp, wg, proj, gate, y, residual, dropscale,
-        m, seq_len, kp, kg, n, *wp.stride(), *wg.stride(),
+        norm,
+        x,
+        wp,
+        wg,
+        proj,
+        gate,
+        y,
+        residual,
+        dropscale,
+        m,
+        seq_len,
+        kp,
+        kg,
+        n,
+        *wp.stride(),
+        *wg.stride(),
         shape_key=token_key(seq_len, KP=kp, KG=kg, N=n),
     )
     return y, proj, gate

@@ -10,11 +10,11 @@ from types import SimpleNamespace
 def kernel_plan(n, clusters, mode):
     R = T.SOURCES / ("b7_384" if n == 384 else "b7_768")
     cfg_values = SimpleNamespace()
-    cfg_values.hwcluster = int(('2'))
-    cfg_values.multicast = int(('0'))
-    cfg_values.rings = int(('12'))
+    cfg_values.hwcluster = int(("2"))
+    cfg_values.multicast = int(("0"))
+    cfg_values.rings = int(("12"))
     cfg_values.clusters = clusters
-    cfg_values.consumers = int(('10'))
+    cfg_values.consumers = int(("10"))
     cfg_values.reuse_dp = 1
     cfg_values.count = clusters * (16 + cfg_values.consumers)
     inc = T._upstream() / "csrc"
@@ -24,9 +24,8 @@ def kernel_plan(n, clusters, mode):
         "-DB7_RING_DEPTH=" + str(cfg_values.rings),
         "-DB7_TRANSPOSE_PART=" + str(bool(mode & 16) * 1),
         "-DB7_REDUCE_NATIVE=" + str(bool(mode & 32) * 1),
-        "-DB7_PRODUCER_REGS=" + ('32'),
-        "-DB7_RING_CHUNK="
-        + str(8192 if mode & 8 else 16384 if mode & 4 else 32768),
+        "-DB7_PRODUCER_REGS=" + ("32"),
+        "-DB7_RING_CHUNK=" + str(8192 if mode & 8 else 16384 if mode & 4 else 32768),
         "-DB7_GATEFIRST=" + str(bool(mode & 2) * 1),
         "-DB7_RING_TENSOR=" + str(mode & 1),
         "-DB7_ROLLING=" + str(bool(mode & 4) * 1),
@@ -82,7 +81,7 @@ class Plan:
         R = T.SOURCES / ("b7_384" if d["n"] == 384 else "b7_768")
         self.d = d
         self.xn = xn
-        if d["mask"].ndim == 1:   # token mask [n]: B7 forms m[i] & m[j] itself
+        if d["mask"].ndim == 1:  # token mask [n]: B7 forms m[i] & m[j] itself
             mode |= 128
         if front_row_major(d["leaves"]):
             mode |= 64
@@ -94,31 +93,27 @@ class Plan:
         self.clusters, self.consumers = static.clusters, static.consumers
         self.reuse_dp, self.count, self.k = static.reuse_dp, static.count, static.k
         x = d["x"]
-        m = x.numel() // 128   # batched samples: B n n tokens, b-major (a token mask [B n] is indexed per sample in the kernel)
+        m = x.numel() // 128  # batched samples: B n n tokens, b-major (a token mask [B n] is indexed per sample in the kernel)
         self.dx = T.take_input_grad(x).view(m, 128)
         self.dw = torch.empty((4, 128, 256), device=x.device, dtype=torch.float32 if d.get("master_weights") else x.dtype)
         self.dgam = torch.empty(128, device=x.device)
         self.dbeta = torch.empty_like(self.dgam)
         from ._h100_pack import zeros_native
+
         zeros = zeros_native if T.preserve_d128_training() else torch.zeros
         # b7_384 sums `groups` partial blocks and every one is written by its source CTA; the b7_768 source also sums a second,
         # never-written half that must read as zero.
-        self.partw = (torch.empty((self.clusters, 16, 64, 128), device=x.device) if d["n"] == 384
-                      else zeros((self.clusters * 2, 16, 64, 128), device=x.device))
-        self.partln = torch.empty(
-            (self.clusters * self.consumers, 256), device=x.device
+        self.partw = (
+            torch.empty((self.clusters, 16, 64, 128), device=x.device)
+            if d["n"] == 384
+            else zeros((self.clusters * 2, 16, 64, 128), device=x.device)
         )
+        self.partln = torch.empty((self.clusters * self.consumers, 256), device=x.device)
         self.counts = zeros(2, device=x.device, dtype=torch.int32)
         self.mask = d["mask"] if mode & 128 else d["mask"].bfloat16().reshape(-1)
-        self.ring = torch.empty(
-            (self.clusters, self.rings, 131072), device=x.device, dtype=torch.uint8
-        )
-        self.xring = torch.empty(
-            (self.clusters, self.rings, 16384), device=x.device, dtype=torch.uint8
-        )
-        self.flags = zeros(
-            (self.clusters, self.rings, 18), device=x.device, dtype=torch.int32
-        )
+        self.ring = torch.empty((self.clusters, self.rings, 131072), device=x.device, dtype=torch.uint8)
+        self.xring = torch.empty((self.clusters, self.rings, 16384), device=x.device, dtype=torch.uint8)
+        self.flags = zeros((self.clusters, self.rings, 18), device=x.device, dtype=torch.int32)
         self.outputs = (self.dx, *self.dw.unbind(), self.dgam, self.dbeta)
         self.bind(dl, dr, dg, dy, xn)
 
@@ -128,13 +123,12 @@ class Plan:
         d = self.d
         m = d["x"].numel() // 128
         L = T._launch_module()
-        tm = lambda t, box, dims, strides: L.tensor_map(
-            t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="256B"
-        )
+        tm = lambda t, box, dims, strides: L.tensor_map(t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="256B")
         row = lambda t: tm(t, [64, 64], [128, m], [256])
         wg = d["wt"][4]
         lv = d["leaves"]
-        self.params = L.Struct.fixed("h100_b7:1",
+        self.params = L.Struct.fixed(
+            "h100_b7:1",
             [
                 row(self.xn),
                 tm(d["w1"], [64, 64], [128, 1024], [256]),
@@ -147,8 +141,8 @@ class Plan:
                 row(self.dx),
                 *(
                     [tm(w, [64, 64], [128, 256], [256]) for w in (lv[2], lv[1], lv[4], lv[3])]
-                    if self.mode & 64 else
-                    [tm(w, [64, 128], [256, 128], [512]) for w in (d["wt"][1], d["wt"][0], d["wt"][3], d["wt"][2])]
+                    if self.mode & 64
+                    else [tm(w, [64, 128], [256, 128], [512]) for w in (d["wt"][1], d["wt"][0], d["wt"][3], d["wt"][2])]
                 ),
                 L.tensor_map(
                     self.ring.view(torch.bfloat16),
@@ -172,7 +166,7 @@ class Plan:
                 self.ring,
                 self.xring,
                 self.flags,
-            ]
+            ],
         )
         self.inputs = (dl, dr, dg, dy, d["w1"], self.xn, wg)
 

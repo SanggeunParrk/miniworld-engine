@@ -83,27 +83,12 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
     if module.implementation != "miniworld":
         return False
     dt = single.dtype
-    src = (
-        pair if bias is None else bias
-    )  # the pair, or the block's hoisted bias [1, H, L, L]
-    if src is None or not (
-        single.is_cuda
-        and dt in (torch.bfloat16, torch.float32)
-        and cond.dtype is dt
-        and src.dtype is dt
-    ):
+    src = pair if bias is None else bias  # the pair, or the block's hoisted bias [1, H, L, L]
+    if src is None or not (single.is_cuda and dt in (torch.bfloat16, torch.float32) and cond.dtype is dt and src.dtype is dt):
         return False
-    if dt is torch.float32 and (
-        module.attention.to_value.weight.dtype is not torch.float32
-        or torch.is_autocast_enabled("cuda")
-    ):
+    if dt is torch.float32 and (module.attention.to_value.weight.dtype is not torch.float32 or torch.is_autocast_enabled("cuda")):
         return False  # fp32 = an fp32 block; under autocast the call is refused (the kernels do not apply its casts)
-    if (
-        single.ndim != 4
-        or single.shape[1] != 1
-        or single.shape[-1] != D
-        or single.shape[2] % 128
-    ):
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[-1] != D or single.shape[2] % 128:
         return False
     A, _, L, _ = single.shape
     if (
@@ -119,10 +104,7 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         return False
     if bias is None and tuple(pair.shape) != (1, L, L, dp):
         return False
-    if bias is not None and (
-        tuple(bias.shape) != (1, module.attention.n_head, L, L)
-        or bias.device != single.device
-    ):
+    if bias is not None and (tuple(bias.shape) != (1, module.attention.n_head, L, L) or bias.device != single.device):
         return False
     if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) == (1, L)):
         return False
@@ -144,11 +126,7 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         return False
     from miniworld_engine.kernels.bias_only_dit.cuda import core_supported
 
-    idx = (
-        single.device.index
-        if single.device.index is not None
-        else torch.cuda.current_device()
-    )
+    idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
     return core_supported(single.dtype, L, da, at.n_head, idx)
 
 
@@ -247,15 +225,11 @@ _ALL_TRUE: dict = {}
 
 
 def update(module, single, cond, pair, mask, bias=None):
-    if (
-        mask is None
-    ):  # one all-true mask per (L, device), so the P cache key stays stable
+    if mask is None:  # one all-true mask per (L, device), so the P cache key stays stable
         k = (single.shape[2], single.device)
         mask = _ALL_TRUE.get(k)
         if mask is None:
-            mask = _ALL_TRUE[k] = torch.ones(
-                (1, single.shape[2]), device=single.device, dtype=torch.bool
-            )
+            mask = _ALL_TRUE[k] = torch.ones((1, single.shape[2]), device=single.device, dtype=torch.bool)
     weights = [module.get_parameter(name) for name in WEIGHTS]
     if bias is not None:
         return _infer_bias(single.contiguous(), cond, bias.contiguous(), mask, weights)

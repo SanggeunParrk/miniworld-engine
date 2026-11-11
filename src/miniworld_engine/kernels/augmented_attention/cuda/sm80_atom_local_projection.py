@@ -36,9 +36,7 @@ def _cast(parameters: list[torch.Tensor]) -> list[torch.Tensor]:
     """Batched fp32 -> bf16 cast of the eight AF3 local attention projection parameters; every result is a fresh tensor."""
     assert len(parameters) == 8 and all((p.dtype is torch.float32 for p in parameters))
     result = list(ext().result(parameters))
-    assert all(
-        (a.data_ptr() != b.data_ptr() for a, b in zip(parameters, result, strict=True))
-    )
+    assert all((a.data_ptr() != b.data_ptr() for a, b in zip(parameters, result, strict=True)))
     return result
 
 

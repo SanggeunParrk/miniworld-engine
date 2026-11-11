@@ -32,9 +32,7 @@ def _gelu(x):
     return 0.5 * x * (1.0 + tl.erf(x * 0.7071067811865476))
 
 
-@configured('mpnn_edge_mlp_fwd_gemm_b2b_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, num_warps=4, num_stages=2))
+@configured("mpnn_edge_mlp_fwd_gemm_b2b_triton", key=["shape_key"], default=dict(BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _edge_mlp_fwd_kernel(
     preactivation_ptr,
@@ -171,9 +169,8 @@ def _recompute_projected_op(
     # Borrowed from mpnn_message, which tunes it. This launch takes the same key so the two share
     # one cache entry per shape rather than each teaching the tuner the same thing.
     from miniworld_engine.kernels.mpnn_message.triton.main import _shape_key
-    _projection_fwd_kernel[
-        lambda meta: tile_grid(rows, width, meta["BLOCK_M1"], meta["BLOCK_N"])
-    ](
+
+    _projection_fwd_kernel[lambda meta: tile_grid(rows, width, meta["BLOCK_M1"], meta["BLOCK_N"])](
         preactivation,
         hidden_weight,
         hidden_bias,

@@ -30,7 +30,5 @@ def _ext():
     )
 
 
-def run(
-    x, c, ps, wab, xa, y, partial, gate, cfg, eps_x=1e-5, eps_c=1e-5, residual=True
-):
+def run(x, c, ps, wab, xa, y, partial, gate, cfg, eps_x=1e-5, eps_c=1e-5, residual=True):
     _ext().run(x, c, list(ps), wab, xa, y, partial, gate, cfg, eps_x, eps_c, residual)

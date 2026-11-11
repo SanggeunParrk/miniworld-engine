@@ -2,6 +2,7 @@
 
 Older AdaLN-in-GEMM experiments remain in the research archive.
 """
+
 import torch
 import triton
 import triton.language as tl
@@ -13,12 +14,12 @@ from miniworld_engine.kernels._compile import opaque
 
 STAT_W = 128
 
+
 # No measured table yet: the default is the centre of the space this kernel used to search at runtime (BJ, BN 64 / 128,
 # 4 / 8 warps, 2 / 3 stages); the row kernels below likewise (BR 1..8, 4 / 8 warps).
 @configured("token_dit_pair_bias_all_triton", key=["L", "NB"], default=dict(BJ=128, BN=128, num_warps=4, num_stages=3))
 @triton.jit
-def _pair_bias_all_kernel(Z, WT, OUT, L, sz, eps, C: tl.constexpr, NB: tl.constexpr,
-                          BJ: tl.constexpr, BN: tl.constexpr):
+def _pair_bias_all_kernel(Z, WT, OUT, L, sz, eps, C: tl.constexpr, NB: tl.constexpr, BJ: tl.constexpr, BN: tl.constexpr):
     pid = tl.program_id(0)
     nj = tl.cdiv(L, BJ)
     i = pid // nj
@@ -33,10 +34,9 @@ def _pair_bias_all_kernel(Z, WT, OUT, L, sz, eps, C: tl.constexpr, NB: tl.conste
     LL = L.to(tl.int64) * L
     for n0 in tl.static_range(0, NB, BN):
         ns = n0 + tl.arange(0, BN)
-        nm = ns < NB                                   # a short stack (NB < BN) or NB not a multiple of BN
+        nm = ns < NB  # a short stack (NB < BN) or NB not a multiple of BN
         acc = tf32_dot(zh, tl.load(WT + cs[:, None] * NB + ns[None, :], mask=nm[None, :], other=0.0))
-        tl.store(OUT + ns[None, :].to(tl.int64) * LL + i * L + js[:, None], acc.to(OUT.dtype.element_ty),
-                 mask=jm[:, None] & nm[None, :])
+        tl.store(OUT + ns[None, :].to(tl.int64) * LL + i * L + js[:, None], acc.to(OUT.dtype.element_ty), mask=jm[:, None] & nm[None, :])
 
 
 def _pair_bias_all_fake(z2d: torch.Tensor, wt: torch.Tensor, out: torch.Tensor, L: int, eps: float = 1e-5) -> None:
@@ -81,15 +81,17 @@ def _adaln_rows_kernel(X, MS, MB, OUT, M, L, sx, sms, smb, eps, D: tl.constexpr,
 
 def adaln_rows(x, ms, mb, out, L, eps=1e-5):
     M, D = x.shape
-    _adaln_rows_kernel[lambda c: (triton.cdiv(M, c["BR"]),)](x, ms, mb, out, M, L, x.stride(0), ms.stride(0), mb.stride(0),
-                                                             eps, D=D, DP=triton.next_power_of_2(D))
+    _adaln_rows_kernel[lambda c: (triton.cdiv(M, c["BR"]),)](
+        x, ms, mb, out, M, L, x.stride(0), ms.stride(0), mb.stride(0), eps, D=D, DP=triton.next_power_of_2(D)
+    )
 
 
 # restore_value: X is the residual, updated in place; without it every config the autotuner benches would add again.
 @configured("token_dit_resgate_adaln_rows_triton", key=["M", "L", "HAS_ADALN"], restore_value=["X"], default=dict(BR=4, num_warps=4))
 @triton.jit
-def _resgate_adaln_rows_kernel(X, Y, GL, MS, MB, OUT, M, L, sx, sy, sgl, sms, smb, eps,
-                               D: tl.constexpr, DP: tl.constexpr, HAS_ADALN: tl.constexpr, BR: tl.constexpr):
+def _resgate_adaln_rows_kernel(
+    X, Y, GL, MS, MB, OUT, M, L, sx, sy, sgl, sms, smb, eps, D: tl.constexpr, DP: tl.constexpr, HAS_ADALN: tl.constexpr, BR: tl.constexpr
+):
     rows = tl.program_id(0) * BR + tl.arange(0, BR)
     rm = rows < M
     tok = rows % L
@@ -111,22 +113,53 @@ def _resgate_adaln_rows_kernel(X, Y, GL, MS, MB, OUT, M, L, sx, sy, sgl, sms, sm
         tl.store(OUT + r64 * D + cs[None, :], (d * rstd[:, None] * ms + mb).to(OUT.dtype.element_ty), mask=mk)
 
 
-def _resgate_adaln_rows_fake(x: torch.Tensor, y: torch.Tensor, gl: torch.Tensor, ms: torch.Tensor | None,
-                             mb: torch.Tensor | None, out: torch.Tensor | None, L: int, eps: float = 1e-5) -> None:
+def _resgate_adaln_rows_fake(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    gl: torch.Tensor,
+    ms: torch.Tensor | None,
+    mb: torch.Tensor | None,
+    out: torch.Tensor | None,
+    L: int,
+    eps: float = 1e-5,
+) -> None:
     """Nothing: the op writes ``x`` (and ``out`` when ``ms`` is given) in place."""
     return None
 
 
-@opaque(fake=_resgate_adaln_rows_fake, name="conditioned_transition_token_dit_resgate_adaln_rows",
-        mutates_args=("x", "out"))
-def resgate_adaln_rows(x: torch.Tensor, y: torch.Tensor, gl: torch.Tensor, ms: torch.Tensor | None,
-                       mb: torch.Tensor | None, out: torch.Tensor | None, L: int, eps: float = 1e-5) -> None:
+@opaque(fake=_resgate_adaln_rows_fake, name="conditioned_transition_token_dit_resgate_adaln_rows", mutates_args=("x", "out"))
+def resgate_adaln_rows(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    gl: torch.Tensor,
+    ms: torch.Tensor | None,
+    mb: torch.Tensor | None,
+    out: torch.Tensor | None,
+    L: int,
+    eps: float = 1e-5,
+) -> None:
     """x += gl * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block."""
     M, D = x.shape
     has = ms is not None
     _resgate_adaln_rows_kernel[lambda c: (triton.cdiv(M, c["BR"]),)](
-        x, y, gl, ms if has else gl, mb if has else gl, out if has else y, M, L, x.stride(0), y.stride(0), gl.stride(0),
-        (ms if has else gl).stride(0), (mb if has else gl).stride(0), eps, D=D, DP=triton.next_power_of_2(D), HAS_ADALN=has)
+        x,
+        y,
+        gl,
+        ms if has else gl,
+        mb if has else gl,
+        out if has else y,
+        M,
+        L,
+        x.stride(0),
+        y.stride(0),
+        gl.stride(0),
+        (ms if has else gl).stride(0),
+        (mb if has else gl).stride(0),
+        eps,
+        D=D,
+        DP=triton.next_power_of_2(D),
+        HAS_ADALN=has,
+    )
 
 
 @configured("token_dit_gate_rows_triton", key=["M"], default=dict(BR=4, num_warps=4))
@@ -143,8 +176,7 @@ def _gate_rows_kernel(O, G, OUT, M, so, sg, D: tl.constexpr, DP: tl.constexpr, B
 
 def gate_rows(o, g, out):
     M, D = o.shape
-    _gate_rows_kernel[lambda c: (triton.cdiv(M, c["BR"]),)](o, g, out, M, o.stride(0), g.stride(0),
-                                                           D=D, DP=triton.next_power_of_2(D))
+    _gate_rows_kernel[lambda c: (triton.cdiv(M, c["BR"]),)](o, g, out, M, o.stride(0), g.stride(0), D=D, DP=triton.next_power_of_2(D))
 
 
 @configured("token_dit_swiglu_rows_triton", key=["M"], default=dict(BR=4, num_warps=4))

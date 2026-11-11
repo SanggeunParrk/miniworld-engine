@@ -9,9 +9,7 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 @lru_cache(None)
 def headers(base):
     names = ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh")
-    payload = Path(__file__).read_bytes() + b"".join(
-        T.read_header(base / n).encode() for n in names
-    )
+    payload = Path(__file__).read_bytes() + b"".join(T.read_header(base / n).encode() for n in names)
     dest = T.cache_dir() / ("dpl_pipeline_" + hashlib.sha256(payload).hexdigest()[:16])
     for name in names:
         s = T.read_header(base / name)
@@ -46,8 +44,7 @@ def headers(base):
                 "named_bar_sync(bar_id, 128);\n"
                 "// The same 8 KB stage first receives [32 channels][64 tokens] dplanes.\n"
                 "// Every lane reads it before the whole warpgroup transposes into dcat.\n",
-                "    auto prefetch_dpl = [&](int b) {\n"
-                "// Dedicated 4 KB per warpgroup, disjoint from the dcat output stage.\n",
+                "    auto prefetch_dpl = [&](int b) {\n// Dedicated 4 KB per warpgroup, disjoint from the dcat output stage.\n",
             )
             replace(
                 "tma_load_2d(sStage + cw * 8192, &p.tm_dpl, barD_full + cw,",
@@ -63,8 +60,7 @@ def headers(base):
                 "if (b + 1 < NBLK) prefetch_dpl(b + 1);",
             )
             replace(
-                "// WAR: the channel-major input and token-major output share the stage.\n"
-                "named_bar_sync(bar_id, 128);",
+                "// WAR: the channel-major input and token-major output share the stage.\nnamed_bar_sync(bar_id, 128);",
                 "// Reuse dcat only after the preceding store consumed its shared source.\n"
                 "if (st_elect) tma_store_wait_read<0>();\n"
                 "fence_proxy_async();\n"

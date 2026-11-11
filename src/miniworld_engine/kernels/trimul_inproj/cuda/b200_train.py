@@ -41,8 +41,8 @@ from miniworld_engine.kernels._compile import opaque
 WIDTHS = (64, 128, 256, 384, 512)
 EPS = 1e-5
 TOK = 128
-B1_RSF = 4       # b1s / b1g ring slots per front CTA
-B7_RD = 12       # b7g ring slots per source group
+B1_RSF = 4  # b1s / b1g ring slots per front CTA
+B7_RD = 12  # b7g ring slots per source group
 
 
 def _ext():
@@ -93,7 +93,7 @@ def _unpack_w1(d, p):
     g = c[:, 0].reshape(p, -1)
     v = c[:, 1].reshape(p, -1)
     h = p // 2
-    return v[:h], g[:h], v[h:], g[h:]          # dWl, dWlg, dWr, dWrg
+    return v[:h], g[:h], v[h:], g[h:]  # dWl, dWlg, dWr, dWrg
 
 
 from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import _contract, _fold, contracted, hidden_ok, planes_of
@@ -108,7 +108,7 @@ def _contract_bwd(planes, dt, d, direction):
     f = _fold
     h, h2, h3 = d * samples, 2 * d * samples, 3 * d * samples
     if direction == 0:
-        a_o, a_i, b_o, b_i = f(planes[:d]), f(planes[d:2 * d]), f(planes[2 * d:3 * d]), f(planes[3 * d:])
+        a_o, a_i, b_o, b_i = f(planes[:d]), f(planes[d : 2 * d]), f(planes[2 * d : 3 * d]), f(planes[3 * d :])
         dt_o, dt_i = f(dt[:d]), f(dt[d:])
         torch.bmm(dt_o, b_o, out=dpl[:h])
         torch.bmm(dt_o.transpose(1, 2), a_o, out=dpl[h2:h3])
@@ -129,9 +129,18 @@ def _forward_fake(leaves, mask, ds, direction):
     n, d = x.shape[1], x.shape[-1]
     m, p = n * n, (4 if direction == 0 else 2) * d
     f32 = torch.float32
-    return [torch.empty_like(x), x.new_empty((p, n, n)), x.new_empty((p // 2, n, n)), x.new_empty((m,), dtype=f32),
-            x.new_empty((m,), dtype=f32), x.new_empty((m,), dtype=f32), x.new_empty((m,), dtype=f32),
-            x.new_empty((4, d), dtype=f32), x.new_empty((m, d)), x.new_empty((m, d))]
+    return [
+        torch.empty_like(x),
+        x.new_empty((p, n, n)),
+        x.new_empty((p // 2, n, n)),
+        x.new_empty((m,), dtype=f32),
+        x.new_empty((m,), dtype=f32),
+        x.new_empty((m,), dtype=f32),
+        x.new_empty((m,), dtype=f32),
+        x.new_empty((4, d), dtype=f32),
+        x.new_empty((m, d)),
+        x.new_empty((m, d)),
+    ]
 
 
 @opaque(fake=_forward_fake, name="trimul_b200_train_fwd")
@@ -170,8 +179,14 @@ def _backward_fake(leaves, mask, ds, direction, saved, dy):
 
 
 @opaque(fake=_backward_fake, name="trimul_b200_train_bwd")
-def backward(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor | None, direction: int,
-             saved: list[torch.Tensor], dy: torch.Tensor) -> list[torch.Tensor]:
+def backward(
+    leaves: list[torch.Tensor],
+    mask: torch.Tensor | None,
+    ds: torch.Tensor | None,
+    direction: int,
+    saved: list[torch.Tensor],
+    dy: torch.Tensor,
+) -> list[torch.Tensor]:
     """gate_bwd -> do GEMM -> lnout_bwd -> dWp -> contraction gradients -> k1wb -> weight / input GEMMs -> lnin_bwd."""
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     planes, t, mean, rstd, mo, ro, vec, pv, gv = saved
@@ -183,17 +198,17 @@ def backward(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Te
     with torch.cuda.device(x.device):
         x2 = x.reshape(m, d)
         dy2 = dy.contiguous().view(m, d)
-        dpr = torch.empty_like(x2)                                  # dp rs_o (dp itself is never needed)
-        dcat = x.new_empty((m, 2 * p + d))                          # [dpre | dg]
+        dpr = torch.empty_like(x2)  # dp rs_o (dp itself is never needed)
+        dcat = x.new_empty((m, 2 * p + d))  # [dpre | dg]
         s1 = torch.empty_like(mean)
         s2 = torch.empty_like(mean)
-        acc = x.new_empty((4 * d + 2 * h,), dtype=torch.float32)    # r0, r1, dg_i, db_i, dg_o, db_o
-        r0, r1, dgi, dbi = acc[:d], acc[d:2 * d], acc[2 * d:3 * d], acc[3 * d:4 * d]
-        dgo, dbo = acc[4 * d:4 * d + h], acc[4 * d + h:]
-        E.wide_gate_bwd(dy2, pv, gv, ds, vec, mo, ro, dpr, dcat[:, 2 * p:], s1, s2, acc[:2 * d], n)
+        acc = x.new_empty((4 * d + 2 * h,), dtype=torch.float32)  # r0, r1, dg_i, db_i, dg_o, db_o
+        r0, r1, dgi, dbi = acc[:d], acc[d : 2 * d], acc[2 * d : 3 * d], acc[3 * d : 4 * d]
+        dgo, dbo = acc[4 * d : 4 * d + h], acc[4 * d + h :]
+        E.wide_gate_bwd(dy2, pv, gv, ds, vec, mo, ro, dpr, dcat[:, 2 * p :], s1, s2, acc[: 2 * d], n)
         dt = torch.empty_like(t)
         # (dpr Wp)^T = rs_o do^T, channel-major like t and dt, so lnout_bwd transposes nothing
-        E.wide_lnout_bwd(torch.mm(wp.t(), dpr.t()), t, mo, ro, s1, s2, go, dt, acc[4 * d:])
+        E.wide_lnout_bwd(torch.mm(wp.t(), dpr.t()), t, mo, ro, s1, s2, go, dt, acc[4 * d :])
         dwp = go[None, :] * (torch.mm(dpr.t(), t.view(h, m).t(), out_dtype=torch.float32) - r1[:, None]) + r0[:, None] * bo[None, :]
         dpl = _contract_bwd(planes, dt, d, direction)
         del dt
@@ -202,12 +217,12 @@ def backward(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Te
         del dpl
         xn = torch.empty_like(x2)
         E.wide_ln_apply(x2, mean, rstd, gi, bi, xn)
-        dw = torch.mm(dcat.t(), xn, out_dtype=torch.float32)        # [2P + D, D]
-        dwl, dwlg, dwr, dwrg = _unpack_w1(dw[:2 * p], p)
+        dw = torch.mm(dcat.t(), xn, out_dtype=torch.float32)  # [2P + D, D]
+        dwl, dwlg, dwr, dwrg = _unpack_w1(dw[: 2 * p], p)
         dxn = dcat @ torch.cat((_pack_w1(wl, wlg, wr, wrg), wg))
         dx = torch.empty_like(x)
-        E.wide_lnin_bwd(dxn, x2, dy2, mean, rstd, gi, dx.view(m, d), acc[2 * d:4 * d])
-    grads = [dwl, dwlg, dwr, dwrg, dw[2 * p:], dwp, dgi, dbi, dgo, dbo]
+        E.wide_lnin_bwd(dxn, x2, dy2, mean, rstd, gi, dx.view(m, d), acc[2 * d : 4 * d])
+    grads = [dwl, dwlg, dwr, dwrg, dw[2 * p :], dwp, dgi, dbi, dgo, dbo]
     # the small gradients are views of shared buffers; a custom op may not return aliasing outputs. fp32: the parameters may be
     # an fp32 master (the autograd function casts them to bf16 for the kernels and hands these back in the parameters' dtype)
     return [dx, *(g.to(torch.float32, copy=True) for g in grads)]
@@ -219,8 +234,14 @@ def _forward_small_fake(leaves, mask, ds, direction):
     bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
     m, p = bsz * n * n, planes_of(d, leaves[1].shape[0], direction)
     f32 = torch.float32
-    return [torch.empty_like(x), x.new_empty((p, bsz, n, n)), x.new_empty((p // 2, bsz, n, n)), x.new_empty((m, d)),
-            x.new_empty((m,), dtype=f32), x.new_empty((m,), dtype=f32)]
+    return [
+        torch.empty_like(x),
+        x.new_empty((p, bsz, n, n)),
+        x.new_empty((p // 2, bsz, n, n)),
+        x.new_empty((m, d)),
+        x.new_empty((m,), dtype=f32),
+        x.new_empty((m,), dtype=f32),
+    ]
 
 
 @opaque(fake=_forward_small_fake, name="trimul_b200_train_small_fwd")
@@ -239,7 +260,7 @@ def forward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: tor
         hid = wl.shape[0]
         p = planes_of(d, hid, direction)
         planes = x.new_empty((p, bsz, n, n))
-        wpp = x.new_empty((d, p // 2))     # k3g's output projection, columns in its TMEM K order
+        wpp = x.new_empty((d, p // 2))  # k3g's output projection, columns in its TMEM K order
         E.k1w_forward(x2, *_front(E, wl, wlg, wr, wrg, wp, wpp), mask, None, None, gi, bi, planes, 0, EPS)
         t = _contract(planes, contracted(d, hid, direction), direction)
         y = torch.empty_like(x)
@@ -256,8 +277,9 @@ def _backward_small_fake(leaves, mask, ds, direction, saved, dy):
 
 
 @opaque(fake=_backward_small_fake, name="trimul_b200_train_small_bwd")
-def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int,
-               saved: list[torch.Tensor], dy: torch.Tensor) -> list[torch.Tensor]:
+def backward_small(
+    leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int, saved: list[torch.Tensor], dy: torch.Tensor
+) -> list[torch.Tensor]:
     """b1s / b1g -> contraction gradients -> b7m / b7g. Weight gradients accumulate atomically in one fp32 buffer (one memset),
     which also holds the ring flags and the kernels' per-CTA LayerNorm-gradient rows: the fp32 LayerNorm gradients are those
     rows summed in a fixed order by ``lnpart_sum`` (atomics would add ~1e-4 relative run-to-run noise to them)."""
@@ -279,18 +301,19 @@ def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
         acc = torch.zeros(sum(sizes) + nf * B1_RSF + nflag7, device=x.device, dtype=torch.float32)
         views, o = [], 0
         for s, k in zip(shapes, sizes, strict=True):
-            views.append(acc[o:o + k].view(s))
+            views.append(acc[o : o + k].view(s))
             o += k
         dwg, dwp, lnp_o, dw1, lnp_i = views
-        flags = acc[o:o + nf * B1_RSF].view(torch.int32)
-        flags7 = acc[o + nf * B1_RSF:].view(torch.int32)
+        flags = acc[o : o + nf * B1_RSF].view(torch.int32)
+        flags7 = acc[o + nf * B1_RSF :].view(torch.int32)
         x2 = x.reshape(m, d)
         dy2 = dy.contiguous().view(m, d)
         dg = torch.empty_like(x2)
         dt = torch.empty_like(t)
         ring = x.new_empty((nf * B1_RSF * TOK, d))
-        (E.b1g_backward if d == 128 else E.b1s_backward)(dy2, xn, t, ds, mo, ro, wg, wp, go, bo, dg, dt, dwg, dwp, lnp_o, ring, flags,
-                                                         n, nf)
+        (E.b1g_backward if d == 128 else E.b1s_backward)(
+            dy2, xn, t, ds, mo, ro, wg, wp, go, bo, dg, dt, dwg, dwp, lnp_o, ring, flags, n, nf
+        )
         del ring
         dpl = _contract_bwd(planes, dt, contracted(d, wl.shape[0], direction), direction)
         del dt
@@ -303,8 +326,7 @@ def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
         w1 = _pack_w1(wl, wlg, wr, wrg)
         if d == 128:
             ring7 = x.new_empty((sg * B7_RD * nch * TOK, 128))
-            E.b7g_backward(x2, xn, dy2, dpl.view(p, m), dg, pair_mask, w1, wg, gi, dx.view(m, d), dw1, lnp_i, ring7, flags7, EPS,
-                           sg)
+            E.b7g_backward(x2, xn, dy2, dpl.view(p, m), dg, pair_mask, w1, wg, gi, dx.view(m, d), dw1, lnp_i, ring7, flags7, EPS, sg)
         else:
             E.b7m_backward(x2, xn, dy2, dpl.view(p, m), dg, pair_mask, w1, wg, gi, dx.view(m, d), dw1, lnp_i, EPS)
         dwl, dwlg, dwr, dwrg = _unpack_w1(dw1, p)

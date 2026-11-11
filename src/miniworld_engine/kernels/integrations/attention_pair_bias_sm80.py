@@ -139,9 +139,7 @@ def _sm80():
     return sm80
 
 
-def refusal(
-    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool
-) -> str | None:
+def refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool) -> str | None:
     """Why the A100 (sm_80) paths cannot take this call (``grad``: the training Function, else the inference op), or ``None``: the fused C++ step
     (``_step_refusal``), else the composed path (``_generic_refusal``: fp32 on the TF32 core, the wide pairs, ``gate_bias``). The ``cuda`` backend of
     ``AttentionPairBias`` states exactly this on an A100."""
@@ -152,9 +150,7 @@ def refusal(
     return None if generic is None else f"{why}; composed path: {generic}"
 
 
-def _step_refusal(
-    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool
-) -> str | None:
+def _step_refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool) -> str | None:
     """Why the fused C++ step (``step_sm80.cuh``) cannot take this call, or ``None``."""
     if not single.is_cuda or not _is_a100(single.device):
         return "the A100 (sm_80) kernels only"
@@ -187,15 +183,11 @@ def _step_refusal(
     return None
 
 
-def _eligible(
-    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
-) -> bool:
+def _eligible(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
     return _step_refusal(module, single, pair, mask, torch.is_grad_enabled()) is None
 
 
-def serves_inference(
-    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None
-) -> bool:
+def serves_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
     return not torch.is_grad_enabled() and _eligible(module, single, pair, mask)
 
 
@@ -377,9 +369,7 @@ def inference(single, pair, mask, leaves, eps_s, eps_p):
     return _inference_cpp(single, pair, mask, leaves, eps_s, eps_p)
 
 
-def update_inference(
-    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
-) -> torch.Tensor:
+def update_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     if _step_refusal(module, single, pair, mask, False) is not None:
         return update_generic(module, single, pair, mask, False)
     return _launch(
@@ -450,9 +440,7 @@ def _backward_cpp(single, pair, mask, leaves, eps_s, eps_p, saved, dy, parameter
     )
 
 
-def serves_train(
-    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None
-) -> bool:
+def serves_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
     return torch.is_grad_enabled() and _eligible(module, single, pair, mask)
 
 
@@ -481,9 +469,7 @@ def _backward_fake(single, pair, mask, leaves, eps_s, eps_p, saved, dy, paramete
     gradients = (
         [torch.empty(t.shape, dtype=t.dtype, device=t.device) for t in parameter_refs]
         if parameter_refs
-        else [
-            torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves
-        ]
+        else [torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves]
     )
     return [torch.empty_like(single), torch.empty_like(pair), *gradients]
 
@@ -517,9 +503,7 @@ class _Training(torch.autograd.Function):
             and length in (128, 256, 384, 512, 640, 768)
             and not (heads == 8 and width == 384 and length == 768)
         )
-        y, *saved = _launch(
-            forward, single, pair, mask, leaves, eps_s, eps_p, save_natural
-        )
+        y, *saved = _launch(forward, single, pair, mask, leaves, eps_s, eps_p, save_natural)
         ctx.eps = (eps_s, eps_p)
         ctx.save_for_backward(mask, single, pair, *leaves, *parameter_refs, *saved)
         return y
@@ -544,9 +528,7 @@ class _Training(torch.autograd.Function):
         return (None, None, None, dx, dz, *grads)
 
 
-def update_train(
-    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
-) -> torch.Tensor:
+def update_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     if _step_refusal(module, single, pair, mask, True) is not None:
         return update_generic(module, single, pair, mask, True)
     return _Training.apply(
@@ -610,7 +592,9 @@ def _generic_refusal(module, single, pair, mask, grad: bool) -> str | None:
         return "the kernels take the affine LayerNorms"
     idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
     hdp = _hdp(hd)
-    if not (sm80.supported_plain(torch.bfloat16, L, H * hdp, H, idx) if dt is torch.bfloat16 else sm80.supported_tf32(dt, L, H * hdp, H, idx)):
+    if not (
+        sm80.supported_plain(torch.bfloat16, L, H * hdp, H, idx) if dt is torch.bfloat16 else sm80.supported_tf32(dt, L, H * hdp, H, idx)
+    ):
         return f"{H} x {hdp}, L {L}: outside the sm_80 attention core"
     if not _generic_loads(dt):
         return "the sm_80 attention extensions failed to build / load"
@@ -683,8 +667,18 @@ def _bias_gemm_bwd(z: torch.Tensor, wcm: torch.Tensor, db: torch.Tensor, L: int,
 
 
 def _gparams(module) -> list[torch.Tensor]:
-    return [module.ln_single.weight, module.ln_single.bias, module.to_query.weight, module.to_query.bias, module.to_key.weight, module.to_value.weight,
-            module.to_gate.weight, module.to_out.weight, module.ln_pair.weight, module.to_bias.weight]
+    return [
+        module.ln_single.weight,
+        module.ln_single.bias,
+        module.to_query.weight,
+        module.to_query.bias,
+        module.to_key.weight,
+        module.to_value.weight,
+        module.to_gate.weight,
+        module.to_out.weight,
+        module.ln_pair.weight,
+        module.to_bias.weight,
+    ]
 
 
 def _pad_rows(w: torch.Tensor, heads: int, hd: int, hdp: int) -> torch.Tensor:
@@ -712,7 +706,7 @@ def _gpack(params, heads: int, gate_bias: float, dt: torch.dtype, save: bool = T
         n = heads * hdp
         b = torch.zeros(4 * n, device=wq.device, dtype=dt)
         b[:n] = _pad_rows(bq.to(dt), heads, hd, hdp)
-        b[3 * n:] = gate_bias
+        b[3 * n :] = gate_bias
         wop = _pad_rows(wo.to(dt).t(), heads, hd, hdp).t().contiguous()
         wcm = (wb.float() * lnpw.float()[None]).t().contiguous()
         return w, b, wop, wcm
@@ -730,13 +724,30 @@ def _gfwd_fake(single, pair, mask, params, heads, gate_bias, eps_s, eps_p, save)
     e = single.new_empty
     outs = [torch.empty_like(single)]
     if save:
-        outs += [e((L, D)), e((2, L, 1), dtype=torch.float32), e((L, 4 * n)), e((heads, L, L)), e((L, n)), e((heads, L), dtype=torch.float32), e((L, n))]
+        outs += [
+            e((L, D)),
+            e((2, L, 1), dtype=torch.float32),
+            e((L, 4 * n)),
+            e((heads, L, L)),
+            e((L, n)),
+            e((heads, L), dtype=torch.float32),
+            e((L, n)),
+        ]
     return outs
 
 
 @opaque(fake=_gfwd_fake, name="apb_sm80_generic_fwd")
-def _gfwd(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor], heads: int, gate_bias: float, eps_s: float,
-          eps_p: float, save: bool) -> list[torch.Tensor]:
+def _gfwd(
+    single: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    params: list[torch.Tensor],
+    heads: int,
+    gate_bias: float,
+    eps_s: float,
+    eps_p: float,
+    save: bool,
+) -> list[torch.Tensor]:
     """single [1, L, D], pair [1, L, L, dp] -> [single + APB(single, pair)], with ``save`` also s, the LN statistics, qkvg, bias, o, lse, og."""
     from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32
 
@@ -753,11 +764,14 @@ def _gfwd(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, p
         s32, mu, rs = torch.native_layer_norm(x.float(), (D,), params[0].float(), params[1].float(), eps_s)
         s = s32.to(dt)
         qkvg = torch.addmm(b, s, w.t())
-        q, k, v, g = (qkvg[:, i * n:(i + 1) * n] for i in range(4))
+        q, k, v, g = (qkvg[:, i * n : (i + 1) * n] for i in range(4))
         m = None if mask is None else mask.reshape(L)
-        bias = (_bias_split(pair[0], wcm, m, L, eps_p) if f32 and pair.shape[-1] >= 512 and L <= 128 and heads % 8 == 0
-                else sm80.pair_bias_generic(pair[0], wcm, m, L, eps_p, oscale=1.0 if f32 else math.sqrt(hd), rows=_gen_rows(L)))
-        scale = hd ** -0.5
+        bias = (
+            _bias_split(pair[0], wcm, m, L, eps_p)
+            if f32 and pair.shape[-1] >= 512 and L <= 128 and heads % 8 == 0
+            else sm80.pair_bias_generic(pair[0], wcm, m, L, eps_p, oscale=1.0 if f32 else math.sqrt(hd), rows=_gen_rows(L))
+        )
+        scale = hd**-0.5
         if save:
             o = torch.empty(L, n, device=x.device, dtype=dt)
             lse = torch.empty(1, heads, L, device=x.device, dtype=torch.float32)
@@ -784,8 +798,17 @@ def _gbwd_fake(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p)
 
 
 @opaque(fake=_gbwd_fake, name="apb_sm80_generic_bwd")
-def _gbwd(dout: torch.Tensor, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor], saved: list[torch.Tensor],
-          heads: int, gate_bias: float, eps_p: float) -> list[torch.Tensor]:
+def _gbwd(
+    dout: torch.Tensor,
+    single: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    params: list[torch.Tensor],
+    saved: list[torch.Tensor],
+    heads: int,
+    gate_bias: float,
+    eps_p: float,
+) -> list[torch.Tensor]:
     """The backward of ``_gfwd`` (``save=True``): [d single, d pair, *d params] (each in its input's dtype)."""
     from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32, _wgrad
 
@@ -800,32 +823,48 @@ def _gbwd(dout: torch.Tensor, single: torch.Tensor, pair: torch.Tensor, mask: to
     w, _, wop, wcm = _gpack(params, heads, gate_bias, dt)
     dy = dout.reshape(L, D)
     with torch.cuda.device(single.device), _tf32(f32):
-        dog = torch.mm(dy, wop)                                                     # [L, n]
-        dwo = _wgrad(dy, og)                                                        # [D, n]
+        dog = torch.mm(dy, wop)  # [L, n]
+        dwo = _wgrad(dy, og)  # [D, n]
         dqkvg = torch.empty_like(qkvg)
         dob = torch.empty_like(o)
-        sm80.gate_bwd(dog, o, qkvg[:, 3 * n:], dob, dqkvg[:, 3 * n:])
-        q, k, v = (qkvg[:, i * n:(i + 1) * n] for i in range(3))
-        dq, dk, dv = (dqkvg[:, i * n:(i + 1) * n] for i in range(3))
-        scale = hd ** -0.5
+        sm80.gate_bwd(dog, o, qkvg[:, 3 * n :], dob, dqkvg[:, 3 * n :])
+        q, k, v = (qkvg[:, i * n : (i + 1) * n] for i in range(3))
+        dq, dk, dv = (dqkvg[:, i * n : (i + 1) * n] for i in range(3))
+        scale = hd**-0.5
         if f32:
-            _, _, _, db = sm80.tf32_backward(q, k, v, dob, bias, o, lse.view(1, heads, L), 1, L, heads, hdp, sm_scale=scale, dq=dq, dk=dk, dv=dv, rna=True)
+            _, _, _, db = sm80.tf32_backward(
+                q, k, v, dob, bias, o, lse.view(1, heads, L), 1, L, heads, hdp, sm_scale=scale, dq=dq, dk=dk, dv=dv, rna=True
+            )
         else:
-            _, _, _, db = sm80.plain_backward(q, k, v, dob, bias, o, lse.view(1, heads, L), 1, L, heads, hdp, db_natural=True, sm_scale=scale,
-                                              dq=dq, dk=dk, dv=dv)
+            _, _, _, db = sm80.plain_backward(
+                q, k, v, dob, bias, o, lse.view(1, heads, L), 1, L, heads, hdp, db_natural=True, sm_scale=scale, dq=dq, dk=dk, dv=dv
+            )
         m = None if mask is None else mask.reshape(L)
-        dz, dwf = (_bias_gemm_bwd(pair[0], wcm, db, L, eps_p) if _gemm_pair(pair, f32)
-                   else sm80.pair_bias_generic_backward(pair[0], wcm, db, m, L, eps_p))
-        ds = torch.mm(dqkvg, w)                                                     # [L, D]
-        dw = _wgrad(dqkvg, s)                                                       # [4 n, D]
+        dz, dwf = (
+            _bias_gemm_bwd(pair[0], wcm, db, L, eps_p)
+            if _gemm_pair(pair, f32)
+            else sm80.pair_bias_generic_backward(pair[0], wcm, db, m, L, eps_p)
+        )
+        ds = torch.mm(dqkvg, w)  # [L, D]
+        dw = _wgrad(dqkvg, s)  # [4 n, D]
         dbq = torch.sum(dqkvg[:, :n], dim=0, dtype=torch.float32)
-        dx, dlnw, dlnb = torch.ops.aten.native_layer_norm_backward(ds.float(), single.reshape(L, D).float(), (D,), stats[0], stats[1],
-                                                                    params[0].float(), params[1].float(), [True, True, True])
+        dx, dlnw, dlnb = torch.ops.aten.native_layer_norm_backward(
+            ds.float(), single.reshape(L, D).float(), (D,), stats[0], stats[1], params[0].float(), params[1].float(), [True, True, True]
+        )
         dx = dx + dy.float()
     lnpw, wb = params[8], params[9]
-    grads = [dlnw, dlnb, _unpad_rows(dw[:n], heads, hd, hdp), _unpad_rows(dbq, heads, hd, hdp), _unpad_rows(dw[n:2 * n], heads, hd, hdp),
-             _unpad_rows(dw[2 * n:3 * n], heads, hd, hdp), _unpad_rows(dw[3 * n:], heads, hd, hdp), _unpad_rows(dwo.t(), heads, hd, hdp).t(),
-             (dwf * wb.float()).sum(0), dwf * lnpw.float()[None]]
+    grads = [
+        dlnw,
+        dlnb,
+        _unpad_rows(dw[:n], heads, hd, hdp),
+        _unpad_rows(dbq, heads, hd, hdp),
+        _unpad_rows(dw[n : 2 * n], heads, hd, hdp),
+        _unpad_rows(dw[2 * n : 3 * n], heads, hd, hdp),
+        _unpad_rows(dw[3 * n :], heads, hd, hdp),
+        _unpad_rows(dwo.t(), heads, hd, hdp).t(),
+        (dwf * wb.float()).sum(0),
+        dwf * lnpw.float()[None],
+    ]
     outs = [torch.empty(p.shape, device=p.device, dtype=p.dtype) for p in params]
     torch._foreach_copy_(outs, [g_.reshape(p.shape) for g_, p in zip(grads, params, strict=True)])  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
     return [dx.to(dt).view(single.shape), dz.view(pair.shape), *outs]
@@ -844,11 +883,19 @@ class _Generic(torch.autograd.Function):
     def backward(ctx, dout):
         mask, heads, gate_bias, eps_p, npar = ctx.meta
         v = ctx.saved_tensors
-        single, pair, params, saved = v[0], v[1], list(v[2:2 + npar]), list(v[2 + npar:])
+        single, pair, params, saved = v[0], v[1], list(v[2 : 2 + npar]), list(v[2 + npar :])
         ds, dz, *pg = _gbwd(dout.contiguous(), single, pair, mask, params, saved, heads, gate_bias, eps_p)
         need = ctx.needs_input_grad
-        return (ds if need[0] else None, dz if need[1] else None, None, None, None, None, None,
-                *(g if need[7 + i] else None for i, g in enumerate(pg)))
+        return (
+            ds if need[0] else None,
+            dz if need[1] else None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            *(g if need[7 + i] else None for i, g in enumerate(pg)),
+        )
 
 
 def update_generic(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool) -> torch.Tensor:

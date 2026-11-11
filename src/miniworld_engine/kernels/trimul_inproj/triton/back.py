@@ -60,21 +60,29 @@ from miniworld_engine.kernels._shape_key import token_key
 # There is no ADD_RESIDUAL. The pairformer residual is part of what this op IS, not an option
 # it offers, so `residual` is required and the add is unconditional -- see gate_elem.py for the
 # measurement (1.27x at both production lengths, and the more accurate of the two forms).
-@configured('trimul_outproj_layernorm_gemm_gate_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2))
+@configured(
+    "trimul_outproj_layernorm_gemm_gate_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _back_kernel(
     tri_ptr,  # (K, M) channel-major: tri[k, m] at k*M + m
-    xn_ptr,   # (M, KG) row-major
-    wp_ptr,   # (K, N)  = to_out.weight.T
-    wg_ptr,   # (KG, N) = to_gate.weight.T
-    lnw_ptr, lnb_ptr,  # (K,)
-    y_ptr,    # (M, N) row-major
+    xn_ptr,  # (M, KG) row-major
+    wp_ptr,  # (K, N)  = to_out.weight.T
+    wg_ptr,  # (KG, N) = to_gate.weight.T
+    lnw_ptr,
+    lnb_ptr,  # (K,)
+    y_ptr,  # (M, N) row-major
     res_ptr,  # (M, N) row-major residual (== the module input pair); always read
-    M, eps,
-    K: tl.constexpr, N: tl.constexpr, KG: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    M,
+    eps,
+    K: tl.constexpr,
+    N: tl.constexpr,
+    KG: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     shape_key,
 ):
     # K is the axis LN normalises over and the proj GEMM contracts; KG is the axis the GATE
@@ -100,8 +108,7 @@ def _back_kernel(
         rk = tl.arange(0, BLOCK_K)
         kmask1 = rk < K
         kmask = kmask1[None, :]
-        tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None],
-                      mask=mmask & kmask, other=0.0).to(tl.float32)
+        tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None], mask=mmask & kmask, other=0.0).to(tl.float32)
         mean = tl.sum(tri, axis=1) / K
         xc = tl.where(kmask, tri - mean[:, None], 0.0)
         var = tl.sum(xc * xc, axis=1) / K
@@ -109,14 +116,15 @@ def _back_kernel(
         lnw = tl.load(lnw_ptr + rk, mask=kmask1, other=0.0).to(tl.float32)
         lnb = tl.load(lnb_ptr + rk, mask=kmask1, other=0.0).to(tl.float32)
         norm = tl.where(
-            kmask, (xc * rstd[:, None]) * lnw[None, :] + lnb[None, :], 0.0,
+            kmask,
+            (xc * rstd[:, None]) * lnw[None, :] + lnb[None, :],
+            0.0,
         ).to(tl.bfloat16)
         for j in tl.static_range(0, N, BLOCK_N):
             rn = j + tl.arange(0, BLOCK_N)
             nmask = rn[None, :] < N
-            wp = tl.load(wp_ptr + rk[:, None] * N + rn[None, :],
-                         mask=kmask1[:, None] & nmask, other=0.0)
-            proj = tl.dot(norm, wp)                              # (BLOCK_M1, BLOCK_N)
+            wp = tl.load(wp_ptr + rk[:, None] * N + rn[None, :], mask=kmask1[:, None] & nmask, other=0.0)
+            proj = tl.dot(norm, wp)  # (BLOCK_M1, BLOCK_N)
             # The gate contracts over KG, which is x_n's width and Wg's first axis. Its own loop,
             # because KG is not K on the bidirectional shape; at KG == K <= BLOCK_K it is one trip
             # over the same range the LN just used, which is the original single `tl.dot`.
@@ -125,18 +133,14 @@ def _back_kernel(
                 rg = g0 + tl.arange(0, BLOCK_K)
                 gmask1 = rg < KG
                 gmask = gmask1[None, :]
-                xn = tl.load(xn_ptr + rm[:, None] * KG + rg[None, :],
-                             mask=mmask & gmask, other=0.0)
-                wg = tl.load(wg_ptr + rg[:, None] * N + rn[None, :],
-                             mask=gmask1[:, None] & nmask, other=0.0)
+                xn = tl.load(xn_ptr + rm[:, None] * KG + rg[None, :], mask=mmask & gmask, other=0.0)
+                wg = tl.load(wg_ptr + rg[:, None] * N + rn[None, :], mask=gmask1[:, None] & nmask, other=0.0)
                 gacc = tl.dot(xn, wg, gacc)
-            gate = tl.sigmoid(gacc)                              # (BLOCK_M1, BLOCK_N)
+            gate = tl.sigmoid(gacc)  # (BLOCK_M1, BLOCK_N)
             acc = proj * gate
-            res = tl.load(res_ptr + rm[:, None] * N + rn[None, :],
-                          mask=mmask & nmask, other=0.0).to(tl.float32)
+            res = tl.load(res_ptr + rm[:, None] * N + rn[None, :], mask=mmask & nmask, other=0.0).to(tl.float32)
             acc = acc + res
-            tl.store(y_ptr + rm[:, None] * N + rn[None, :],
-                     acc.to(y_ptr.dtype.element_ty), mask=mmask & nmask)
+            tl.store(y_ptr + rm[:, None] * N + rn[None, :], acc.to(y_ptr.dtype.element_ty), mask=mmask & nmask)
     else:
         # --- LN row statistics over K-tiles. Two sweeps (mean, then CENTERED variance) so the fp32
         # algebra at BLOCK_K >= K is exactly the original single-tile one. tri is (D, M) channel-major, so
@@ -145,16 +149,14 @@ def _back_kernel(
         for k0 in range(0, K, BLOCK_K):
             rk = k0 + tl.arange(0, BLOCK_K)
             kmask = rk[None, :] < K
-            tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None],
-                          mask=mmask & kmask, other=0.0).to(tl.float32)
+            tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None], mask=mmask & kmask, other=0.0).to(tl.float32)
             s += tl.sum(tri, axis=1)
         mean = s / K
         s = tl.zeros([BLOCK_M1], dtype=tl.float32)
         for k0 in range(0, K, BLOCK_K):
             rk = k0 + tl.arange(0, BLOCK_K)
             kmask = rk[None, :] < K
-            tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None],
-                          mask=mmask & kmask, other=0.0).to(tl.float32)
+            tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None], mask=mmask & kmask, other=0.0).to(tl.float32)
             xc = tl.where(kmask, tri - mean[:, None], 0.0)
             s += tl.sum(xc * xc, axis=1)
         var = s / K
@@ -174,17 +176,17 @@ def _back_kernel(
                 rk = k0 + tl.arange(0, BLOCK_K)
                 kmask1 = rk < K
                 kmask = kmask1[None, :]
-                tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None],
-                              mask=mmask & kmask, other=0.0).to(tl.float32)
+                tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None], mask=mmask & kmask, other=0.0).to(tl.float32)
                 lnw = tl.load(lnw_ptr + rk, mask=kmask1, other=0.0).to(tl.float32)
                 lnb = tl.load(lnb_ptr + rk, mask=kmask1, other=0.0).to(tl.float32)
                 xc = tl.where(kmask, tri - mean[:, None], 0.0)
                 # LN-normed tile, cast to bf16 once (matches the original operand dtype).
                 norm = tl.where(
-                    kmask, (xc * rstd[:, None]) * lnw[None, :] + lnb[None, :], 0.0,
+                    kmask,
+                    (xc * rstd[:, None]) * lnw[None, :] + lnb[None, :],
+                    0.0,
                 ).to(tl.bfloat16)
-                wp = tl.load(wp_ptr + rk[:, None] * N + rn[None, :],
-                             mask=kmask1[:, None] & nmask, other=0.0)
+                wp = tl.load(wp_ptr + rk[:, None] * N + rn[None, :], mask=kmask1[:, None] & nmask, other=0.0)
                 pacc = tl.dot(norm, wp, pacc)
             # The gate's contraction is KG, not K. Separate loop for the same reason as above; at
             # KG == K it visits the identical k-tiles the proj loop just did, in the same order,
@@ -193,13 +195,11 @@ def _back_kernel(
                 rg = g0 + tl.arange(0, BLOCK_K)
                 gmask1 = rg < KG
                 gmask = gmask1[None, :]
-                xn = tl.load(xn_ptr + rm[:, None] * KG + rg[None, :],
-                             mask=mmask & gmask, other=0.0)
-                wg = tl.load(wg_ptr + rg[:, None] * N + rn[None, :],
-                             mask=gmask1[:, None] & nmask, other=0.0)
+                xn = tl.load(xn_ptr + rm[:, None] * KG + rg[None, :], mask=mmask & gmask, other=0.0)
+                wg = tl.load(wg_ptr + rg[:, None] * N + rn[None, :], mask=gmask1[:, None] & nmask, other=0.0)
                 gacc = tl.dot(xn, wg, gacc)
-            proj = pacc                                              # (BLOCK_M1, BLOCK_N)
-            gate = tl.sigmoid(gacc)                                  # (BLOCK_M1, BLOCK_N)
+            proj = pacc  # (BLOCK_M1, BLOCK_N)
+            gate = tl.sigmoid(gacc)  # (BLOCK_M1, BLOCK_N)
             acc = proj * gate
             # The pairformer residual add y = pair + trimul(pair): the residual is the module's
             # own (pre-LN) input, added in the same coalesced store. No dropout here (inference:
@@ -216,9 +216,16 @@ def _trimul_back_triton_fake(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps, residual):
 
 
 @opaque(fake=_trimul_back_triton_fake, name="trimul_back_fused")
-def trimul_back_triton(tri_bdll: torch.Tensor, x_n: torch.Tensor, Wp: torch.Tensor,
-                       Wg: torch.Tensor, ln_w: torch.Tensor, ln_b: torch.Tensor,
-                       eps: float, residual: torch.Tensor) -> torch.Tensor:
+def trimul_back_triton(
+    tri_bdll: torch.Tensor,
+    x_n: torch.Tensor,
+    Wp: torch.Tensor,
+    Wg: torch.Tensor,
+    ln_w: torch.Tensor,
+    ln_b: torch.Tensor,
+    eps: float,
+    residual: torch.Tensor,
+) -> torch.Tensor:
     """tri_bdll:(B,D,L,L), x_n:(B,L,L,D), Wp/Wg:(D,D)=weight.T -> y:(B,L,L,D). B=1.
 
     ``residual`` ([B,L,L,D] == the module input pair) is REQUIRED: this op is
@@ -249,36 +256,53 @@ def trimul_back_triton(tri_bdll: torch.Tensor, x_n: torch.Tensor, Wp: torch.Tens
     # axis. When they are not, there is no correct thing for it to compute.
     def _dims(t):
         return tuple(t.shape)
+
     # x_n's width is the GATE's contraction axis and it no longer has to equal K. It used to: the
     # kernel gated over the same axis it normalised, so the bidirectional trimul -- tri 2*d_hidden
     # wide, x_n d_pair -- was refused here and used a split back half instead.
     KG = x_n.shape[-1]
     if _dims(Wp) != (K, N):
-        msg = (f"trimul_back_triton: Wp is {_dims(Wp)}, expected (K={K}, N={N}). "
-               f"Pass the TRANSPOSED weight ((in, out)); a mismatch here is an "
-               f"out-of-bounds read inside the kernel, not a shape error it can detect.")
+        msg = (
+            f"trimul_back_triton: Wp is {_dims(Wp)}, expected (K={K}, N={N}). "
+            f"Pass the TRANSPOSED weight ((in, out)); a mismatch here is an "
+            f"out-of-bounds read inside the kernel, not a shape error it can detect."
+        )
         raise ValueError(msg)
     if _dims(Wg) != (KG, N):
-        msg = (f"trimul_back_triton: Wg is {_dims(Wg)}, expected (KG={KG}, N={N}) -- KG is x_n's "
-               f"width, which is what the gate contracts over. Pass the TRANSPOSED weight.")
+        msg = (
+            f"trimul_back_triton: Wg is {_dims(Wg)}, expected (KG={KG}, N={N}) -- KG is x_n's "
+            f"width, which is what the gate contracts over. Pass the TRANSPOSED weight."
+        )
         raise ValueError(msg)
     for name, v in (("ln_w", ln_w), ("ln_b", ln_b)):
         if v.numel() != K:
             msg = f"trimul_back_triton: {name} has {v.numel()} elements, expected K={K}"
             raise ValueError(msg)
     if residual.shape[-1] != N or residual.numel() != M * N:
-        msg = (f"trimul_back_triton: residual is {_dims(residual)}, expected (..., {N}) "
-               f"with {M * N} elements")
+        msg = f"trimul_back_triton: residual is {_dims(residual)}, expected (..., {N}) with {M * N} elements"
         raise ValueError(msg)
 
-    tri_dm = tri_bdll.reshape(K, M)            # (K, M) contiguous, channel-major
+    tri_dm = tri_bdll.reshape(K, M)  # (K, M) contiguous, channel-major
     xn_flat = x_n.reshape(M, KG)
     y = torch.empty(M, N, device=x_n.device, dtype=x_n.dtype)
     res_flat = residual.reshape(M, N).contiguous()
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     # KG is in the key: it is a constexpr the kernel tiles over, so two launches that differ only
     # in the gate's contraction width compile to different code and must not share a tuned config.
-    _back_kernel[grid](tri_dm, xn_flat, Wp.contiguous(), Wg.contiguous(),
-                       ln_w.contiguous(), ln_b.contiguous(), y, res_flat, M, float(eps),
-                       K=K, N=N, KG=KG, shape_key=token_key(L, K=K, KG=KG))
+    _back_kernel[grid](
+        tri_dm,
+        xn_flat,
+        Wp.contiguous(),
+        Wg.contiguous(),
+        ln_w.contiguous(),
+        ln_b.contiguous(),
+        y,
+        res_flat,
+        M,
+        float(eps),
+        K=K,
+        N=N,
+        KG=KG,
+        shape_key=token_key(L, K=K, KG=KG),
+    )
     return y.view(B, L, L, N)

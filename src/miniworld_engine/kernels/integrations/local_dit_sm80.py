@@ -25,51 +25,28 @@ def serves(block, single, cond, pair, mask):
         return False
     if not single.is_cuda or torch.cuda.get_device_capability(single.device) != (8, 0):
         return False
-    if (
-        single.ndim != 4
-        or single.shape[1] != 1
-        or single.shape[-1] != 128
-        or single.shape[2] < 1
-    ):
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[-1] != 128 or single.shape[2] < 1:
         return False
     if (single.dtype, cond.dtype, pair.dtype) != (torch.bfloat16,) * 3:
         return False
     n = single.shape[2]
     if cond.shape != single.shape or pair.shape != (1, (n + 31) // 32, 32, 128, 16):
         return False
-    if (
-        cond.device != single.device
-        or pair.device != single.device
-        or not pair.is_contiguous()
-    ):
+    if cond.device != single.device or pair.device != single.device or not pair.is_contiguous():
         return False
     if att.n_head != 4 or att.to_query.weight.shape != (128, 128):
         return False
     if att.ln_pair.eps != 1e-5:
         return False
-    if any(
-        t.dtype not in (torch.bfloat16, torch.float32) or not t.is_contiguous()
-        for t in (att.ln_pair.weight, att.to_bias.weight)
-    ):
+    if any(t.dtype not in (torch.bfloat16, torch.float32) or not t.is_contiguous() for t in (att.ln_pair.weight, att.to_bias.weight)):
         return False
-    if mask is not None and (
-        mask.shape != (1, n)
-        or mask.dtype != torch.bool
-        or mask.device != single.device
-        or not mask.is_contiguous()
-    ):
+    if mask is not None and (mask.shape != (1, n) or mask.dtype != torch.bool or mask.device != single.device or not mask.is_contiguous()):
         return False
-    return _ready(
-        single.device.index
-        if single.device.index is not None
-        else torch.cuda.current_device()
-    )
+    return _ready(single.device.index if single.device.index is not None else torch.cuda.current_device())
 
 
 def _attn_fwd_fake(q, k, v, bias, mask):
-    return torch.empty_like(q), torch.empty(
-        q.shape[0], 4, q.shape[1], device=q.device, dtype=torch.float32
-    )
+    return torch.empty_like(q), torch.empty(q.shape[0], 4, q.shape[1], device=q.device, dtype=torch.float32)
 
 
 @opaque(fake=_attn_fwd_fake, name="local_attn_sm80_fwd")
@@ -104,17 +81,20 @@ def _attn_bwd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from miniworld_engine.kernels.augmented_attention.cuda import sm80_atom_local
 
-    return cast("tuple[torch.Tensor, torch.Tensor]", sm80_atom_local.attn_bwd(  # packed_output: (dqkv, dbias)
-        q,
-        k,
-        v,
-        dout.contiguous(),
-        bias,
-        out,
-        lse,
-        None if mask.numel() == 0 else mask,
-        packed_output=True,
-    ))
+    return cast(
+        "tuple[torch.Tensor, torch.Tensor]",
+        sm80_atom_local.attn_bwd(  # packed_output: (dqkv, dbias)
+            q,
+            k,
+            v,
+            dout.contiguous(),
+            bias,
+            out,
+            lse,
+            None if mask.numel() == 0 else mask,
+            packed_output=True,
+        ),
+    )
 
 
 class _Attention(torch.autograd.Function):
@@ -129,9 +109,7 @@ class _Attention(torch.autograd.Function):
     def backward(ctx, dout):
         q, k, v, bias, out, lse, mask = ctx.saved_tensors
         packed, dbias = _attn_bwd(q, k, v, dout, bias, out, lse, mask)
-        dq, dk, dv = (
-            packed[:, offset : offset + 128].view_as(q) for offset in (0, 128, 256)
-        )
+        dq, dk, dv = (packed[:, offset : offset + 128].view_as(q) for offset in (0, 128, 256))
         return dq, dk, dv, dbias, None
 
 
@@ -188,9 +166,7 @@ def _gate_bwd_fake(dy, sigmoid, x):
 
 
 @opaque(fake=_gate_bwd_fake, name="local_gate_sm80_bwd")
-def _gate_bwd(
-    dy: torch.Tensor, sigmoid: torch.Tensor, x: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _gate_bwd(dy: torch.Tensor, sigmoid: torch.Tensor, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     from miniworld_engine.kernels.augmented_attention.cuda import sm80_atom_local
 
     return sm80_atom_local.gate_bwd(dy.contiguous(), sigmoid, x)
@@ -220,11 +196,7 @@ def attention_delta(block, single, cond, pair, mask):
         att.to_value(xkv).view(samples, n, 128),
     )
     bias = _PairBias.apply(pair[0], att.ln_pair.weight, att.to_bias.weight)
-    keymask = (
-        torch.empty(0, device=single.device, dtype=torch.bool)
-        if mask is None
-        else mask.view(n)
-    )
+    keymask = torch.empty(0, device=single.device, dtype=torch.bool) if mask is None else mask.view(n)
     out = _Attention.apply(q, k, v, bias, keymask).view_as(single)
     out = att.to_out(_Gate.apply(att.to_gate(x), out))
     return _Gate.apply(att.to_scale(cond), out)
@@ -278,11 +250,7 @@ def inference_attention_current(block, single, cond, pair, mask):
         att.to_value(xkv, wv).view(samples, n, 128),
     )
     bias = _PairBias.apply(pair[0], att.ln_pair.weight, att.to_bias.weight)
-    keymask = (
-        torch.empty(0, device=single.device, dtype=torch.bool)
-        if mask is None
-        else mask.view(n)
-    )
+    keymask = torch.empty(0, device=single.device, dtype=torch.bool) if mask is None else mask.view(n)
     out = _Attention.apply(q, k, v, bias, keymask).view_as(single)
     out = att.to_out(_Gate.apply(att.to_gate(x, wg), out), wo)
     return _GateResidual.apply(single, att.to_scale(cond, ws, bs), out, False, 0)

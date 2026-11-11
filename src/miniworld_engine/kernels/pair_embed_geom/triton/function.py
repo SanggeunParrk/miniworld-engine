@@ -1,6 +1,7 @@
 """The portable (Triton) backend of ``PairEmbedGeom`` / ``PairEmbedCA``: the bins / gather / table-gradient / LayerNorm-backward kernels of ``main.py`` as an
 autograd function. The inputs are the prepared tensors of ``cuda/function.py`` (the same module-side preparation): ``eps`` >= 0 folds the attention-bias
 LayerNorm into the gather, ``eps`` < 0 returns the pair itself; the pair comes out bf16, the table gradient bf16 (fixed-order partial sums, no atomics)."""
+
 from __future__ import annotations
 
 import torch

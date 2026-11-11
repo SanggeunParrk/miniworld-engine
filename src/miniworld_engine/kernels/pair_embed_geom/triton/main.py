@@ -18,6 +18,7 @@ registers (distances, dihedrals and bond angles as torch computes them), up to t
   adds the NBLK slice partials in slice order and rounds to bf16 once. No atomics: bitwise reproducible. ``_geom_ln_bwd`` is the LayerNorm backward with the
   pair recomputed from the codes (``ln_eps``).
 """
+
 from __future__ import annotations
 
 import torch
@@ -29,9 +30,9 @@ from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._shape_key import token_key
 
 C = 256
-NT = 317                      # 127 sep + 4 x 21 dist + 5 x 21 angle + 1 chain
-NT_CA = 157                   # 127 sep + 30 CA distance
-NBLK = 192                    # slices of the pairs in the table-gradient kernel (fixed: the summation order does not depend on the card)
+NT = 317  # 127 sep + 4 x 21 dist + 5 x 21 angle + 1 chain
+NT_CA = 157  # 127 sep + 30 CA distance
+NBLK = 192  # slices of the pairs in the table-gradient kernel (fixed: the summation order does not depend on the card)
 _F_DIST = 1 << 28
 _F_ORI = 1 << 29
 
@@ -75,7 +76,7 @@ def _bond(ax, ay, az, bx, by, bz, cx, cy, cz):
     b1x, b1y, b1z = _unit(cx - ax, cy - ay, cz - az)
     xx, xy, xz = _cross(b0x, b0y, b0z, b1x, b1y, b1z)
     c = b0x * b1x + b0y * b1y + b0z * b1z
-    return libdevice.atan2(tl.sqrt_rn(xx * xx + xy * xy + xz * xz), tl.where(c == 0.0, 0.0, c))   # +0 for an exact zero, as in _dihedral
+    return libdevice.atan2(tl.sqrt_rn(xx * xx + xy * xy + xz * xz), tl.where(c == 0.0, 0.0, c))  # +0 for an exact zero, as in _dihedral
 
 
 @triton.jit
@@ -122,9 +123,7 @@ def _gather_tile(TBL, w0, w1, cvb, live, c, MODE: tl.constexpr):
     return x
 
 
-@configured('pair_embed_geom_bins_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_J=128, num_warps=4, num_stages=1))
+@configured("pair_embed_geom_bins_triton", key=["shape_key"], default=dict(BLOCK_J=128, num_warps=4, num_stages=1))
 @triton.jit
 def _geom_bins(BB, CA, CB, MASK, IDX, CHN, DLIM, ALIM, CODES, n, BLOCK_J: tl.constexpr, shape_key):
     """The 16-byte code of every pair (b, i, j): word 0 = sequence-separation bin | four distance bins << 8, 13, 18, 23 | flags (bit 28 distances, bit 29
@@ -193,9 +192,7 @@ def _geom_bins(BB, CA, CB, MASK, IDX, CHN, DLIM, ALIM, CODES, n, BLOCK_J: tl.con
     tl.store(CODES + cb_ + 3, tl.zeros([BLOCK_J], dtype=tl.int32), mask=jin)
 
 
-@configured('pair_embed_ca_bins_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_J=128, num_warps=4, num_stages=1))
+@configured("pair_embed_ca_bins_triton", key=["shape_key"], default=dict(BLOCK_J=128, num_warps=4, num_stages=1))
 @triton.jit
 def _ca_bins(CAX, MASK, IDX, DLIM, CODES, n, ND: tl.constexpr, BLOCK_J: tl.constexpr, shape_key):
     """The decoder pair's code: word 0 = sequence-separation bin | CA-distance bin << 8 | bit 31 = live pair; words 1 .. 3 = 0."""
@@ -223,9 +220,7 @@ def _ca_bins(CAX, MASK, IDX, DLIM, CODES, n, ND: tl.constexpr, BLOCK_J: tl.const
     tl.store(CODES + cb_ + 3, tl.zeros([BLOCK_J], dtype=tl.int32), mask=jin)
 
 
-@configured('pair_embed_geom_fwd_gather_triton',
-            key=["shape_key", "MODE", "LN"],
-            default=dict(BLOCK_P=8, num_warps=4, num_stages=1))
+@configured("pair_embed_geom_fwd_gather_triton", key=["shape_key", "MODE", "LN"], default=dict(BLOCK_P=8, num_warps=4, num_stages=1))
 @triton.jit
 def _geom_fwd_gather(TBL, CODES, OUT, P, eps, MODE: tl.constexpr, LN: tl.constexpr, BLOCK_P: tl.constexpr, shape_key):
     """pair = the sum of the table rows the codes name, rounded to bf16 (LN: the LayerNorm of the bf16-rounded sum over the 256 channels, no affine)."""
@@ -253,9 +248,7 @@ def _geom_fwd_gather(TBL, CODES, OUT, P, eps, MODE: tl.constexpr, LN: tl.constex
 # ---------------------------------------------------------------------------------------------------------------------------------------
 # backward
 # ---------------------------------------------------------------------------------------------------------------------------------------
-@configured('pair_embed_geom_dw_triton',
-            key=["shape_key", "MODE"],
-            default=dict(CH=128, BLOCK_P=128, num_warps=4, num_stages=2))
+@configured("pair_embed_geom_dw_triton", key=["shape_key", "MODE"], default=dict(CH=128, BLOCK_P=128, num_warps=4, num_stages=2))
 @triton.jit
 def _geom_dw(G, CODES, PART, P, per, MODE: tl.constexpr, CH: tl.constexpr, BLOCK_P: tl.constexpr, shape_key):
     """PART[t, row, channels of slice q] = sum over the pairs of slice t of onehot(row) * G[pair, channels]; the pair tiles are visited in order.
@@ -290,7 +283,11 @@ def _geom_dw(G, CODES, PART, P, per, MODE: tl.constexpr, CH: tl.constexpr, BLOCK
             k4 = 84 + ((w1 >> 20) & 31)
             v1 = hd | ho
             m = (r[:, None] == tl.where(v0, k0, -1)[None, :]) | (r[:, None] == tl.where(v1, k1, -1)[None, :])
-            m |= (r[:, None] == tl.where(v1, k2, -1)[None, :]) | (r[:, None] == tl.where(v1, k3, -1)[None, :]) | (r[:, None] == tl.where(ho, k4, -1)[None, :])
+            m |= (
+                (r[:, None] == tl.where(v1, k2, -1)[None, :])
+                | (r[:, None] == tl.where(v1, k3, -1)[None, :])
+                | (r[:, None] == tl.where(ho, k4, -1)[None, :])
+            )
             cv = tl.load(CODES + p * 4 + 2, mask=pm, other=0).to(tl.float32, bitcast=True)
             acc_h += tl.sum(tl.where(live & (blk == 0), cv, 0.0)[:, None] * g.to(tl.float32), axis=0)
         else:
@@ -306,9 +303,7 @@ def _geom_dw(G, CODES, PART, P, per, MODE: tl.constexpr, CH: tl.constexpr, BLOCK
             tl.store(base + 316 * 256 + cc, acc_h)
 
 
-@configured('pair_embed_geom_bwd_reduce_triton',
-            key=["shape_key"],
-            default=dict(BLOCK=256, num_warps=4, num_stages=1))
+@configured("pair_embed_geom_bwd_reduce_triton", key=["shape_key"], default=dict(BLOCK=256, num_warps=4, num_stages=1))
 @triton.jit
 def _geom_dw_reduce(PART, DTBL, total, NBLK: tl.constexpr, BLOCK: tl.constexpr, shape_key):
     k = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -319,9 +314,7 @@ def _geom_dw_reduce(PART, DTBL, total, NBLK: tl.constexpr, BLOCK: tl.constexpr, 
     tl.store(DTBL + k, acc.to(tl.bfloat16), mask=m)
 
 
-@configured('pair_embed_geom_bwd_ln_triton',
-            key=["shape_key", "MODE"],
-            default=dict(BLOCK_P=8, num_warps=4, num_stages=1))
+@configured("pair_embed_geom_bwd_ln_triton", key=["shape_key", "MODE"], default=dict(BLOCK_P=8, num_warps=4, num_stages=1))
 @triton.jit
 def _geom_ln_bwd(TBL, CODES, DH, DX, P, eps, MODE: tl.constexpr, BLOCK_P: tl.constexpr, shape_key):
     """dx = rstd * (dh - mean(dh) - hat * mean(dh * hat)) with hat = LN(bf16(sum of the table rows of the pair)); zeros for padding."""
@@ -362,7 +355,9 @@ def portable_forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, with_codes=
     _geom_bins[lambda meta: (triton.cdiv(n, meta["BLOCK_J"]), n, B)](bb, ca, cb, mask, idx, chains, dlim, alim, codes, n, shape_key=key)
     out = torch.empty(B, n, n, C, device=dev, dtype=torch.bfloat16)
     P = B * n * n
-    _geom_fwd_gather[lambda meta: (triton.cdiv(P, meta["BLOCK_P"]),)](tbl, codes, out, P, float(ln_eps or 0.0), MODE=0, LN=ln_eps is not None, shape_key=key)
+    _geom_fwd_gather[lambda meta: (triton.cdiv(P, meta["BLOCK_P"]),)](
+        tbl, codes, out, P, float(ln_eps or 0.0), MODE=0, LN=ln_eps is not None, shape_key=key
+    )
     return (out, codes) if with_codes else out
 
 
@@ -374,7 +369,9 @@ def portable_forward_ca(tbl, ca, mask, idx, dlim, with_codes=False, ln_eps=None)
     _ca_bins[lambda meta: (triton.cdiv(n, meta["BLOCK_J"]), n, B)](ca, mask, idx, dlim, codes, n, ND=int(dlim.numel()), shape_key=key)
     out = torch.empty(B, n, n, C, device=dev, dtype=torch.bfloat16)
     P = B * n * n
-    _geom_fwd_gather[lambda meta: (triton.cdiv(P, meta["BLOCK_P"]),)](tbl, codes, out, P, float(ln_eps or 0.0), MODE=1, LN=ln_eps is not None, shape_key=key)
+    _geom_fwd_gather[lambda meta: (triton.cdiv(P, meta["BLOCK_P"]),)](
+        tbl, codes, out, P, float(ln_eps or 0.0), MODE=1, LN=ln_eps is not None, shape_key=key
+    )
     return (out, codes) if with_codes else out
 
 
@@ -397,5 +394,7 @@ def portable_ln_backward(tbl, codes, dh, mode, eps):
     """d pair [B, n, n, 256] bf16 from d LayerNorm(pair) (the pair is recomputed from the codes)."""
     P = dh.shape[0] * dh.shape[1] * dh.shape[2]
     dx = torch.empty_like(dh)
-    _geom_ln_bwd[lambda meta: (triton.cdiv(P, meta["BLOCK_P"]),)](tbl, codes, dh, dx, P, float(eps), MODE=mode, shape_key=token_key(dh.shape[1]))
+    _geom_ln_bwd[lambda meta: (triton.cdiv(P, meta["BLOCK_P"]),)](
+        tbl, codes, dh, dx, P, float(eps), MODE=mode, shape_key=token_key(dh.shape[1])
+    )
     return dx

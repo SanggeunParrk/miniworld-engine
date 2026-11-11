@@ -69,11 +69,7 @@ def _backward_op(
     # partial did -- each program writes its own slot of a (programs, N) buffer and the reduction
     # is a plain sum over it, so the order is fixed and the result is reproducible. Atomics are
     # what determinism rules out, and neither of these uses one.
-    backward_impl = (
-        _bwd_persistent_impl
-        if torch.are_deterministic_algorithms_enabled()
-        else _bwd_atomic_impl
-    )
+    backward_impl = _bwd_persistent_impl if torch.are_deterministic_algorithms_enabled() else _bwd_atomic_impl
     # The ROW BUCKET is computed here and passed down; the callee folds the width in, on both of
     # its paths. An edge activation is genuinely (rows, 128) -- there is no (B, L, D) behind it --
     # and `rows_of` refuses a flat shape on purpose, because a caller holding only (M, D) cannot
@@ -105,8 +101,7 @@ class _MemoryLayerNorm(torch.autograd.Function):
     ) -> torch.Tensor:
         # Calling native_layer_norm under the active autocast context is exactly
         # the operation used by nn.LayerNorm/F.layer_norm in this model.
-        native_norm = (values.dtype == torch.bfloat16 and weight.dtype == torch.float32
-                       and not torch.is_autocast_enabled(values.device.type))
+        native_norm = values.dtype == torch.bfloat16 and weight.dtype == torch.float32 and not torch.is_autocast_enabled(values.device.type)
         output, mean, rstd = torch.native_layer_norm(
             values.float() if native_norm else values,
             (values.shape[-1],),

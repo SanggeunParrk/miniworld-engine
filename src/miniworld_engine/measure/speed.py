@@ -110,7 +110,7 @@ def make_step(module, inputs: dict, *, backend: str, train: bool, autocast: torc
     ``compile_mode`` None: the backend's forward as is; a string: ``torch.compile(forward, dynamic=False, mode=...)``."""
     from miniworld_engine.measure.config import TF32_BACKENDS
 
-    allow = backend in TF32_BACKENDS   # every backend (user decision 2026-11-10, see TF32_RULE); one left out: fp32 without TF32
+    allow = backend in TF32_BACKENDS  # every backend (user decision 2026-11-10, see TF32_RULE); one left out: fp32 without TF32
     torch.backends.cuda.matmul.allow_tf32 = allow
     torch.backends.cudnn.allow_tf32 = allow
     module.set_backend(backend)
@@ -130,9 +130,11 @@ def make_step(module, inputs: dict, *, backend: str, train: bool, autocast: torc
         forward = torch.compile(forward, dynamic=False, mode=None if compile_mode == "default" else compile_mode)
 
     if not train:
+
         def eval_step():
             with _context(False, autocast):
                 return forward(**inputs)
+
         return eval_step
 
     with _context(True, autocast):
@@ -146,11 +148,12 @@ def make_step(module, inputs: dict, *, backend: str, train: bool, autocast: torc
 
     def step():
         for t in targets:
-            t.grad = None            # set_to_none inside the region: the captured backward writes fresh gradients
+            t.grad = None  # set_to_none inside the region: the captured backward writes fresh gradients
         with _context(True, autocast):
             out = [t for t in _floats(forward(**inputs)) if t.requires_grad]
         torch.autograd.backward(out, upstream)
         return out
+
     return step
 
 
@@ -195,6 +198,7 @@ def _stats(ms: list[float]) -> dict:
         x = p * (len(v) - 1)
         lo, hi = math.floor(x), math.ceil(x)
         return v[lo] + (v[hi] - v[lo]) * (x - lo)
+
     return {"median_ms": q(0.5), "p10_ms": q(0.1), "p90_ms": q(0.9), "n": len(v)}
 
 
@@ -210,6 +214,7 @@ def _reason(exc: BaseException | None) -> str:
 
 def _counter(group: str) -> int:
     from torch._dynamo.utils import counters
+
     return int(sum(counters[group].values()))
 
 
@@ -231,7 +236,7 @@ def measure(step, timer: _Timer, *, timing: str, warmup: int, iterations: int) -
         for _ in range(warmup):
             step()
         if timing == "compile+graph":
-            for _ in range(10):               # until a call compiles nothing new
+            for _ in range(10):  # until a call compiles nothing new
                 n = _counter("stats")
                 step()
                 if _counter("stats") == n:
@@ -261,6 +266,7 @@ def measure(step, timer: _Timer, *, timing: str, warmup: int, iterations: int) -
         dynamo_config.error_on_recompile = recompile
     if timing == "compile+graph":
         from torch._dynamo.utils import counters
+
         extra = {"compiled_graphs": int(counters["stats"]["unique_graphs"]), "graph_breaks": _counter("graph_break")}
     for _ in range(warmup):
         graph.replay()
@@ -280,8 +286,14 @@ def measure(step, timer: _Timer, *, timing: str, warmup: int, iterations: int) -
 
 # --------------------------------------------------------------------------------------------------------------------------- the driver
 def _environment(device) -> dict:
-    return {"gpu": torch.cuda.get_device_name(device), "torch": torch.__version__, "cuda": torch.version.cuda,
-            "host": platform.node(), "tf32_matmul": torch.backends.cuda.matmul.allow_tf32, "tf32_cudnn": torch.backends.cudnn.allow_tf32}
+    return {
+        "gpu": torch.cuda.get_device_name(device),
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "host": platform.node(),
+        "tf32_matmul": torch.backends.cuda.matmul.allow_tf32,
+        "tf32_cudnn": torch.backends.cudnn.allow_tf32,
+    }
 
 
 def run(cfg, out_path: str, *, device: str = "cuda") -> list[dict]:
@@ -307,7 +319,7 @@ def run(cfg, out_path: str, *, device: str = "cuda") -> list[dict]:
         print(f"[speed] {env}", flush=True)
         print(f"[speed] records -> {out_path}", flush=True)
         for case in config.cases(cfg):
-            base = config.build(case, device=dev)          # seeded: one set of weights for every backend
+            base = config.build(case, device=dev)  # seeded: one set of weights for every backend
             for timing in timings:
                 ref = None
                 for backend in config.backends_of(cfg, case):
@@ -321,11 +333,21 @@ def run(cfg, out_path: str, *, device: str = "cuda") -> list[dict]:
                         torch._dynamo.reset()
                         torch._dynamo.utils.counters.clear()
                         module = copy.deepcopy(base)
-                        inputs = config.inputs(case, module, device=dev)   # make_inputs with a generator seeded per case
-                        step = make_step(module, inputs, backend=backend, train=case.mode == "train", autocast=config.autocast(case),
-                                         seed=config.seed(case), compile_mode=compile_mode if timing == "compile+graph" else None)
-                        rec.update(status="ok", tf32_matmul=torch.backends.cuda.matmul.allow_tf32,
-                                   **measure(step, timer, timing=timing, warmup=warmup, iterations=iterations))
+                        inputs = config.inputs(case, module, device=dev)  # make_inputs with a generator seeded per case
+                        step = make_step(
+                            module,
+                            inputs,
+                            backend=backend,
+                            train=case.mode == "train",
+                            autocast=config.autocast(case),
+                            seed=config.seed(case),
+                            compile_mode=compile_mode if timing == "compile+graph" else None,
+                        )
+                        rec.update(
+                            status="ok",
+                            tf32_matmul=torch.backends.cuda.matmul.allow_tf32,
+                            **measure(step, timer, timing=timing, warmup=warmup, iterations=iterations),
+                        )
                     except BackendUnsupported as exc:
                         rec.update(status="unsupported", reason=str(exc))
                     except Exception as exc:  # recorded
@@ -343,11 +365,23 @@ def run(cfg, out_path: str, *, device: str = "cuda") -> list[dict]:
                             try:
                                 module = copy.deepcopy(base)
                                 inputs = config.inputs(case, module, device=dev)
-                                step = make_step(module, inputs, backend=backend, train=case.mode == "train",
-                                                 autocast=config.autocast(case), seed=config.seed(case), compile_mode=None)
+                                step = make_step(
+                                    module,
+                                    inputs,
+                                    backend=backend,
+                                    train=case.mode == "train",
+                                    autocast=config.autocast(case),
+                                    seed=config.seed(case),
+                                    compile_mode=None,
+                                )
                                 timed = measure(step, timer, timing="eager", warmup=warmup, iterations=iterations)
-                                rec.update(status="ok", timed_as="eager", capture_error=rec.pop("reason"),
-                                           tf32_matmul=torch.backends.cuda.matmul.allow_tf32, **timed)
+                                rec.update(
+                                    status="ok",
+                                    timed_as="eager",
+                                    capture_error=rec.pop("reason"),
+                                    tf32_matmul=torch.backends.cuda.matmul.allow_tf32,
+                                    **timed,
+                                )
                             except Exception as exc2:  # recorded: not even the eager step runs
                                 rec["reason"] = f"{rec.get('reason', '')} ; eager: {_reason(exc2)}"
                     finally:
@@ -388,8 +422,11 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 1)[0])
     p.add_argument("config", help="an accuracy-format config with the speed keys (see the module docstring)")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005 -- a local-time file name
-    p.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "miniworld-speed", f"speed-{stamp}.jsonl"),
-                   help="JSONL output path (default: under the system temp dir, never the repo)")
+    p.add_argument(
+        "--out",
+        default=os.path.join(tempfile.gettempdir(), "miniworld-speed", f"speed-{stamp}.jsonl"),
+        help="JSONL output path (default: under the system temp dir, never the repo)",
+    )
     p.add_argument("--timing", nargs="+", choices=TIMING_MODES, help="override the config's timing modes")
     args = p.parse_args(argv)
     cfg = config.load(args.config)

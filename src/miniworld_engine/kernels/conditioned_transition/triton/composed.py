@@ -25,11 +25,7 @@ import triton.language as tl
 from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many, tf32_grid_tile
 
 
-
-
 # --- kernel A: expand + SwiGLU -> h:(M, ND) ----------------------------------
-
-
 
 
 # fmt: off
@@ -194,8 +190,7 @@ def _expand_swiglu_fake(x, wa, wb, shape_key=None):
 
 
 @opaque(fake=_expand_swiglu_fake, name="conditioned_transition_composed_expand_swiglu")
-def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
-                   shape_key: int | None = None) -> torch.Tensor:
+def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
     """h = silu(x @ Wa^T) * (x @ Wb^T) -> (M, ND)."""
     M, K = x.shape
     if shape_key is None:
@@ -208,16 +203,24 @@ def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
         )
     ND = wa.shape[0]
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
-    pre = x.dtype is torch.float32     # TF32 operands rounded to nearest here, once, and h at its store (kernels/_tf32.py)
+    pre = x.dtype is torch.float32  # TF32 operands rounded to nearest here, once, and h at its store (kernels/_tf32.py)
     if pre:
         wa, wb = tf32_cached((wa, wb), lambda: tf32_grid_many(wa, wb))
     grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _expand_swiglu_kernel[grid](
-        x, wa, wb, h,
-        M, ND, K,
-        x.stride(0), x.stride(1),
-        wa.stride(0), wa.stride(1),
-        h.stride(0), h.stride(1),
+        x,
+        wa,
+        wb,
+        h,
+        M,
+        ND,
+        K,
+        x.stride(0),
+        x.stride(1),
+        wa.stride(0),
+        wa.stride(1),
+        h.stride(0),
+        h.stride(1),
         shape_key=pack(shape_key, ND=ND, K=K),
         PRE=pre,
     )
@@ -230,9 +233,16 @@ def _squeeze_gate_fake(h, cond, ws, wsc, bsc, shape_key=None, residual=None, h_r
 
 
 @opaque(fake=_squeeze_gate_fake, name="conditioned_transition_composed_squeeze_gate")
-def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor,
-                  bsc: torch.Tensor, shape_key: int | None = None,
-                  residual: torch.Tensor | None = None, h_rounded: bool = False) -> torch.Tensor:
+def _squeeze_gate(
+    h: torch.Tensor,
+    cond: torch.Tensor,
+    ws: torch.Tensor,
+    wsc: torch.Tensor,
+    bsc: torch.Tensor,
+    shape_key: int | None = None,
+    residual: torch.Tensor | None = None,
+    h_rounded: bool = False,
+) -> torch.Tensor:
     """y = sigmoid(cond @ Wsc^T + b_sc) * (h @ Ws^T) -> (M, D); with ``residual`` (M, D): residual + y."""
     M, ND = h.shape
     if shape_key is None:
@@ -247,7 +257,7 @@ def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: to
     DC = cond.shape[1]
     out = torch.empty(M, D, device=h.device, dtype=h.dtype)
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
-    pre = h.dtype is torch.float32     # TF32 operands rounded to nearest here (h by the expand kernel when ``h_rounded``)
+    pre = h.dtype is torch.float32  # TF32 operands rounded to nearest here (h by the expand kernel when ``h_rounded``)
     if pre:
         if h_rounded:
             ws, wsc = tf32_cached((ws, wsc), lambda: tf32_grid_many(ws, wsc))
@@ -256,15 +266,33 @@ def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: to
             ws, wsc = tf32_cached((ws, wsc), lambda: tf32_grid_many(ws, wsc))
     res = out if residual is None else residual
     _squeeze_gate_kernel[grid](
-        h, cond, ws, wsc, bsc, out, res,
-        M, ND, D, DC,
-        h.stride(0), h.stride(1),
-        cond.stride(0), cond.stride(1),
-        ws.stride(0), ws.stride(1),
-        wsc.stride(0), wsc.stride(1),
-        out.stride(0), out.stride(1),
-        res.stride(0), res.stride(1),
-        shape_key=pack(shape_key, ND=ND, DC=DC), HAS_RES=residual is not None, PRE_H=pre, PRE_W=pre,
+        h,
+        cond,
+        ws,
+        wsc,
+        bsc,
+        out,
+        res,
+        M,
+        ND,
+        D,
+        DC,
+        h.stride(0),
+        h.stride(1),
+        cond.stride(0),
+        cond.stride(1),
+        ws.stride(0),
+        ws.stride(1),
+        wsc.stride(0),
+        wsc.stride(1),
+        out.stride(0),
+        out.stride(1),
+        res.stride(0),
+        res.stride(1),
+        shape_key=pack(shape_key, ND=ND, DC=DC),
+        HAS_RES=residual is not None,
+        PRE_H=pre,
+        PRE_W=pre,
     )
     return out
 
@@ -277,13 +305,14 @@ def cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc, length=Non
     ``length`` is L -- the ATOM count A of the un-flattened activation, supplied by
     modules/conditioned_transition/module.py. None raises: M alone cannot say whether it is L or L*L.
     """
-    wa = wa.contiguous(); wb = wb.contiguous(); ws = ws.contiguous()
-    wsc = wsc.contiguous(); bsc = bsc.contiguous()
+    wa = wa.contiguous()
+    wb = wb.contiguous()
+    ws = ws.contiguous()
+    wsc = wsc.contiguous()
+    bsc = bsc.contiguous()
     shape_key = atom_key(length if length is not None else length_of(x.shape))
     h = _expand_swiglu(x, wa, wb, shape_key=shape_key)
     return _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=shape_key, residual=residual, h_rounded=True)
-
-
 
 
 def _cond_transition_inference_cublas_fake(x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
@@ -292,9 +321,17 @@ def _cond_transition_inference_cublas_fake(x, cond, wa, wb, ws, wsc, bsc, length
 
 
 @opaque(fake=_cond_transition_inference_cublas_fake, name="conditioned_transition_inference_cublas")
-def cond_transition_inference_cublas(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor,
-                                     wsc: torch.Tensor, bsc: torch.Tensor, length: int | None = None,
-                                     residual: torch.Tensor | None = None) -> torch.Tensor:
+def cond_transition_inference_cublas(
+    x: torch.Tensor,
+    cond: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    wsc: torch.Tensor,
+    bsc: torch.Tensor,
+    length: int | None = None,
+    residual: torch.Tensor | None = None,
+) -> torch.Tensor:
     """The fp32 token-stream inference tail as the training forward runs it: the expand and squeeze GEMMs on cuBLAS (TF32), the SwiGLU
     and the gate as the Triton row passes (``training._swiglu`` / ``training._gate``, the residual add in the gate pass). The Triton
     TF32 GEMMs of the composed pair measured 1.5x cuBLAS's on an H100 at d768 (expand 87 against 57 us, 5 x 768 tokens, L2 flushed),
@@ -310,7 +347,7 @@ def cond_transition_inference_cublas(x: torch.Tensor, cond: torch.Tensor, wa: to
     x = x.contiguous()
     cond = cond.contiguous()
     with tf32_matmul():
-        ab = torch.mm(x, wcat.t())                    # (M, 2 ND): [a | b]
+        ab = torch.mm(x, wcat.t())  # (M, 2 ND): [a | b]
         h = _swiglu(ab[:, :ND], ab[:, ND:], shape_key=atom_key(L))
         out = torch.mm(h, ws.t())
         scale = torch.addmm(bsc, cond, wsc.t())

@@ -12,11 +12,7 @@ from ...gated_projection.cuda import sm80 as _gp
 def serves(x: torch.Tensor, *weights: torch.Tensor) -> bool:
     """sm_80, bf16 operands and four square weights of a width the 64-column tiles divide."""
     d = x.shape[-1] if x.ndim else 0
-    if (
-        len(weights) != 4
-        or any(w.shape != (d, d) or w.dtype is not x.dtype for w in weights)
-        or not _gp.shape_ok(x.dtype, d, d)
-    ):
+    if len(weights) != 4 or any(w.shape != (d, d) or w.dtype is not x.dtype for w in weights) or not _gp.shape_ok(x.dtype, d, d):
         return False
     return _gp.serves(d, d, x.device, x.dtype)
 
@@ -25,11 +21,7 @@ def _pack(wl, wlg, wr, wrg):
     """The four (K, N) matmul-form weights -> [4 D, D] rows: 16 j + 0..7 the gate rows, 16 j + 8..15 the projection rows of channels 8 j .. 8 j + 7 (left channels first)."""
     d = wl.shape[0]
     gate, proj = torch.cat([wlg.t(), wrg.t()]), torch.cat([wl.t(), wr.t()])
-    return (
-        torch.stack([gate.reshape(-1, 8, d), proj.reshape(-1, 8, d)], 1)
-        .reshape(4 * d, d)
-        .contiguous()
-    )
+    return torch.stack([gate.reshape(-1, 8, d), proj.reshape(-1, 8, d)], 1).reshape(4 * d, d).contiguous()
 
 
 def _fwd_fake(x, w1):
@@ -69,9 +61,7 @@ class TM1Function(torch.autograd.Function):
         x2 = x.reshape(-1, shape[-1]).contiguous()
         w1 = _pack(left_weight, left_gate_weight, right_weight, right_gate_weight)
         left, right = _fwd(x2, w1)
-        ctx.save_for_backward(
-            x2, w1, left_weight, left_gate_weight, right_weight, right_gate_weight
-        )
+        ctx.save_for_backward(x2, w1, left_weight, left_gate_weight, right_weight, right_gate_weight)
         ctx.shape = shape
         return left.reshape(shape), right.reshape(shape)
 

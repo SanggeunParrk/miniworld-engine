@@ -48,7 +48,10 @@ def cast(tensors, dtypes, force: bool = False) -> list[torch.Tensor]:
     """``[t.to(d).contiguous() for t, d in zip(tensors, dtypes)]`` in one launch (an input already of its dtype is returned as it is)."""
     tensors = list(tensors)
     if _fake(tensors):
-        return [t.to(d).contiguous().clone() if force or t.dtype != d or not t.is_contiguous() else t for t, d in zip(tensors, dtypes, strict=True)]
+        return [
+            t.to(d).contiguous().clone() if force or t.dtype != d or not t.is_contiguous() else t
+            for t, d in zip(tensors, dtypes, strict=True)
+        ]
     return list(_ext().cast(tensors, [_TYPES[d] for d in dtypes], force))
 
 

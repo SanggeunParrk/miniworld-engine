@@ -29,9 +29,7 @@ def _ext():
     )
 
 
-def qkvg_weight_gradient(
-    dp: torch.Tensor, x: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+def qkvg_weight_gradient(dp: torch.Tensor, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Unrounded FP32 gradients in separate fresh allocations."""
     partial = torch.empty((16, 512, 128), device=dp.device, dtype=torch.float32)
     qkv = torch.empty((384, 128), device=dp.device, dtype=torch.float32)

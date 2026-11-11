@@ -267,7 +267,7 @@ class NodeMessageUpdate(BackendModule, _MessageUpdate):
         )
 
         pre = preactivation.contiguous()
-        mask = edge_mask.to(torch.float32).contiguous()   # a 0 / 1 mask: exact in fp32, the dtype the kernels read
+        mask = edge_mask.to(torch.float32).contiguous()  # a 0 / 1 mask: exact in fp32, the dtype the kernels read
         w, b = self.hidden_projection.weight, self.hidden_projection.bias
         grad = torch.is_grad_enabled() and any(t.requires_grad for t in (pre, w, b))
         if not grad:
@@ -286,7 +286,8 @@ class NodeMessageUpdate(BackendModule, _MessageUpdate):
         from miniworld_engine.kernels.integrations import mpnn_msg_sm80
 
         return mpnn_sm80_unsupported(preactivation, mpnn_msg_sm80._message_loads) or self._supports_triton(
-            node_states, preactivation, edge_mask, neighbor_scale)
+            node_states, preactivation, edge_mask, neighbor_scale
+        )
 
     def _forward_cuda(
         self, node_states: torch.Tensor, preactivation: torch.Tensor, edge_mask: torch.Tensor, neighbor_scale: int
@@ -519,7 +520,14 @@ class EncoderLayer(BackendModule):
         if any(p is None for p in parameters):
             return "every projection needs a bias and the norm its affine"
         why = bf16_parameter_dtype_unsupported(
-            hidden.weight, hidden.bias, node_projection.weight, edge_projection.weight, edge_hidden.weight, edge_hidden.bias, out.weight, out.bias
+            hidden.weight,
+            hidden.bias,
+            node_projection.weight,
+            edge_projection.weight,
+            edge_hidden.weight,
+            edge_hidden.bias,
+            out.weight,
+            out.bias,
         )
         if why is not None:
             return why
@@ -551,9 +559,7 @@ class EncoderLayer(BackendModule):
         zero_nodes: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.fused:
-            return self._forward_pytorch(
-                node_states, edge_states, neighbor_indices, residue_mask, neighbor_mask, zero_nodes=zero_nodes
-            )
+            return self._forward_pytorch(node_states, edge_states, neighbor_indices, residue_mask, neighbor_mask, zero_nodes=zero_nodes)
         from miniworld_engine.kernels.mpnn_edge_tail.triton import triton_edge_tail_update
         from miniworld_engine.kernels.mpnn_edge_tail.triton.compute import edge_tail_compute
         from miniworld_engine.kernels.mpnn_node_message.triton import (
@@ -565,7 +571,9 @@ class EncoderLayer(BackendModule):
         flat_indices = neighbor_indices if batch == 1 else _flat_neighbor_indices(neighbor_indices, batch, length)
 
         # The node message. A zero node state needs no special case here: its query block reduces to the bias, its neighbour block to zero.
-        query, neighbor, edge_weight = self._node_side_projection(cast(PackedEncoderProjection, self.node_message.input_projection), node_states)
+        query, neighbor, edge_weight = self._node_side_projection(
+            cast(PackedEncoderProjection, self.node_message.input_projection), node_states
+        )
         hidden = self.node_message.hidden_projection
         node_reduce = triton_node_message_reduce if self.replay_in_backward else triton_node_message_reduce_compute
         reduced_hidden = node_reduce(
@@ -577,11 +585,15 @@ class EncoderLayer(BackendModule):
         node_states = residue_mask.unsqueeze(-1).to(node_states.dtype) * node_states
 
         # The edge update: projection, both MLP projections, dropout, residual and LayerNorm in one kernel.
-        query, neighbor, edge_weight = self._node_side_projection(cast(PackedEncoderProjection, self.edge_message.input_projection), node_states)
+        query, neighbor, edge_weight = self._node_side_projection(
+            cast(PackedEncoderProjection, self.edge_message.input_projection), node_states
+        )
         edge_message = self.edge_message
         probability = edge_message.dropout.p if self.training else 0.0
-        seed = torch.randint(0, 2**31 - 1, (1,), device=edge_states.device, dtype=torch.int64) if probability > 0.0 else torch.zeros(
-            1, device=edge_states.device, dtype=torch.int64
+        seed = (
+            torch.randint(0, 2**31 - 1, (1,), device=edge_states.device, dtype=torch.int64)
+            if probability > 0.0
+            else torch.zeros(1, device=edge_states.device, dtype=torch.int64)
         )
         tail_arguments = (
             edge_weight,
@@ -628,9 +640,7 @@ class EncoderLayer(BackendModule):
         if not self.fused:
             return mpnn_sm80_unsupported(edge_states)
         why = mpnn_sm80_unsupported(edge_states, mpnn_msg_sm80._node_loads) or mpnn_sm80_unsupported(edge_states, mpnn_edge_sm80._loads)
-        return why or self._supports_triton(
-            node_states, edge_states, neighbor_indices, residue_mask, neighbor_mask, zero_nodes=zero_nodes
-        )
+        return why or self._supports_triton(node_states, edge_states, neighbor_indices, residue_mask, neighbor_mask, zero_nodes=zero_nodes)
 
     def _forward_cuda(
         self,
@@ -643,15 +653,15 @@ class EncoderLayer(BackendModule):
         zero_nodes: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.fused:
-            return self._forward_pytorch(
-                node_states, edge_states, neighbor_indices, residue_mask, neighbor_mask, zero_nodes=zero_nodes
-            )
+            return self._forward_pytorch(node_states, edge_states, neighbor_indices, residue_mask, neighbor_mask, zero_nodes=zero_nodes)
         from miniworld_engine.kernels.integrations import mpnn_edge_sm80, mpnn_msg_sm80
 
         batch, length = node_states.shape[:2]
         flat_indices = neighbor_indices if batch == 1 else _flat_neighbor_indices(neighbor_indices, batch, length)
 
-        query, neighbor, edge_weight = self._node_side_projection(cast(PackedEncoderProjection, self.node_message.input_projection), node_states)
+        query, neighbor, edge_weight = self._node_side_projection(
+            cast(PackedEncoderProjection, self.node_message.input_projection), node_states
+        )
         hidden = self.node_message.hidden_projection
         reduced_hidden = mpnn_msg_sm80.node_message_reduce(
             edge_states, query, neighbor, flat_indices, edge_weight, hidden.weight, hidden.bias, neighbor_mask, self.neighbor_scale
@@ -661,18 +671,32 @@ class EncoderLayer(BackendModule):
         node_states = self.node_transition(node_states)
         node_states = residue_mask.unsqueeze(-1).to(node_states.dtype) * node_states
 
-        query, neighbor, edge_weight = self._node_side_projection(cast(PackedEncoderProjection, self.edge_message.input_projection), node_states)
+        query, neighbor, edge_weight = self._node_side_projection(
+            cast(PackedEncoderProjection, self.edge_message.input_projection), node_states
+        )
         edge_message = self.edge_message
         probability = edge_message.dropout.p if self.training else 0.0
-        seed = torch.randint(0, 2**31 - 1, (1,), device=edge_states.device, dtype=torch.int64) if probability > 0.0 else torch.zeros(
-            1, device=edge_states.device, dtype=torch.int64
+        seed = (
+            torch.randint(0, 2**31 - 1, (1,), device=edge_states.device, dtype=torch.int64)
+            if probability > 0.0
+            else torch.zeros(1, device=edge_states.device, dtype=torch.int64)
         )
         edge_states = mpnn_edge_sm80.edge_tail_update(
-            edge_states, query, neighbor, flat_indices, edge_weight,
-            edge_message.hidden_projection.weight, edge_message.hidden_projection.bias,
-            edge_message.output_projection.weight, edge_message.output_projection.bias,
-            edge_message.norm.weight, edge_message.norm.bias,
-            seed, edge_message.norm.eps, probability, recompute=self.replay_in_backward,
+            edge_states,
+            query,
+            neighbor,
+            flat_indices,
+            edge_weight,
+            edge_message.hidden_projection.weight,
+            edge_message.hidden_projection.bias,
+            edge_message.output_projection.weight,
+            edge_message.output_projection.bias,
+            edge_message.norm.weight,
+            edge_message.norm.bias,
+            seed,
+            edge_message.norm.eps,
+            probability,
+            recompute=self.replay_in_backward,
         )
         return node_states, edge_states
 

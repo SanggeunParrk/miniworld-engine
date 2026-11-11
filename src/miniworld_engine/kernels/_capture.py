@@ -80,9 +80,7 @@ def static_weights(on: bool = True):
 @functools.lru_cache(maxsize=1)
 def _capture_info():
     lib = ctypes.CDLL("libcuda.so.1")
-    fn = (
-        lib.cuStreamGetCaptureInfo
-    )  # (stream, status *, id *): the driver's original three-argument entry point
+    fn = lib.cuStreamGetCaptureInfo  # (stream, status *, id *): the driver's original three-argument entry point
     fn.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_int),
@@ -94,7 +92,7 @@ def _capture_info():
 
 def _graph_capture_id() -> int | None:
     """None outside a capture; inside one, the id of the capture sequence (0 when it cannot be read) -- whatever is declared static."""
-    if not torch.cuda.is_available() or not torch.cuda.is_current_stream_capturing():   # a CPU-only process captures nothing
+    if not torch.cuda.is_available() or not torch.cuda.is_current_stream_capturing():  # a CPU-only process captures nothing
         return None
     try:
         fn = _capture_info()
@@ -133,11 +131,7 @@ def prune(store: dict, cid: int | bool | None = False) -> None:
     scopes by something other than ``capture_id()``."""
     if cid is False:
         cid = capture_id()
-    stale = [
-        k
-        for k in store
-        if isinstance(k, tuple) and len(k) == 2 and k[0] is not None and k[0] != cid
-    ]
+    stale = [k for k in store if isinstance(k, tuple) and len(k) == 2 and k[0] is not None and k[0] != cid]
     for k in stale:
         del store[k]
 
@@ -205,7 +199,7 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
     if alive is not None:
         for k in [k for k, e in store.items() if not alive(e)]:
             del store[k]
-            pinned.discard(k)   # its tensor is gone, so is every graph that read the entry
+            pinned.discard(k)  # its tensor is gone, so is every graph that read the entry
     if sk not in store:
         _evict(store, pinned, limit, sk)
     out = store[sk] = build()
@@ -253,7 +247,7 @@ def param_forms(tag, params, build, *, inputs_scope: bool = False, capture_reads
     if capture_reads_eager and _graph_capture_id() is not None:
         eager = _FORMS.get((None, key))
         if eager is not None and all(r() is p for r, p in zip(eager[0], params, strict=True)):
-            _HELD_BY_CAPTURES.append(eager[1])   # the graph reads it from now on: never freed under it
+            _HELD_BY_CAPTURES.append(eager[1])  # the graph reads it from now on: never freed under it
             return eager[1]
     sk = (None, key) if inputs_scope and _STATIC_INPUTS[0] else scoped(key)
     if sk is None:
@@ -263,9 +257,11 @@ def param_forms(tag, params, build, *, inputs_scope: bool = False, capture_reads
         return hit[1]
     prune(_FORMS)
     ids = [id(p) for p in params]
-    for k in [k for k, (refs, _) in _FORMS.items()
-              if any(r() is None for r in refs)
-              or (k[0] == sk[0] and k[1][0] == tag and [id(r()) for r in refs] == ids)]:
+    for k in [
+        k
+        for k, (refs, _) in _FORMS.items()
+        if any(r() is None for r in refs) or (k[0] == sk[0] and k[1][0] == tag and [id(r()) for r in refs] == ids)
+    ]:
         del _FORMS[k]
     value = build()
     _FORMS[sk] = (tuple(weakref.ref(p) for p in params), value)

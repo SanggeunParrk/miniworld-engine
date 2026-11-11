@@ -32,9 +32,7 @@ def run(a, b, partial, out, cfg=0, splits=32):
 
 
 def result(a, b):
-    partial = torch.empty(
-        (32, a.shape[1], b.shape[1]), device=a.device, dtype=torch.float32
-    )
+    partial = torch.empty((32, a.shape[1], b.shape[1]), device=a.device, dtype=torch.float32)
     out = torch.empty((a.shape[1], b.shape[1]), device=a.device, dtype=torch.float32)
     run(a, b, partial, out, cfg=3, splits=32)
     return out

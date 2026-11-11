@@ -84,19 +84,11 @@ def forward(
         sin[:b].reshape(-1, 16).contiguous(),
     )
     if qkv_kind == "original":
-        qh, kh, vh, g, *_ = sm80.qkvg_fwd(
-            qf, mod, cos2, sin2, wq, wg, b, s, eps, eps, False
-        )
+        qh, kh, vh, g, *_ = sm80.qkvg_fwd(qf, mod, cos2, sin2, wq, wg, b, s, eps, eps, False)
     elif qkv_kind == "singlehead":
-        qh, kh, vh, g = qkvg_extension().singlehead(
-            qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg
-        )
+        qh, kh, vh, g = qkvg_extension().singlehead(qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg)
     else:
-        qh, kh, vh, g = qkvg_extension().headgroup(
-            qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg
-        )
-    o, _ = sm80.attn_fwd(
-        qh, kh, vh, seqused, save_lse=False
-    )
+        qh, kh, vh, g = qkvg_extension().headgroup(qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg)
+    o, _ = sm80.attn_fwd(qh, kh, vh, seqused, save_lse=False)
     out = ffn(qf, g, o, mod, wo, wu, wd, s, b, eps, _SELECT[a, s])
     return out.view(a, s, 128)

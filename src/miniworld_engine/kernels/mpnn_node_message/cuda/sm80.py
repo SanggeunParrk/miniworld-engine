@@ -75,9 +75,7 @@ def backward(
     nchunks = -(-groups // chunk)
     dh_buf = edge.new_empty((chunk * neighbors, WIDTH))
     act_buf = edge.new_empty((chunk * neighbors, WIDTH))
-    db_part = torch.zeros(
-        (nchunks, num_sms, WIDTH), device=edge.device, dtype=torch.float32
-    )
+    db_part = torch.zeros((nchunks, num_sms, WIDTH), device=edge.device, dtype=torch.float32)
     dw1 = dw2 = None
     for c in range(nchunks):
         g0, g1 = c * chunk, min(groups, (c + 1) * chunk)
@@ -110,9 +108,7 @@ def backward(
     perm = torch.argsort(
         idx.to(torch.int32), stable=True
     )  # int32 keys: half the radix passes of int64 (the table has far fewer than 2^31 rows)
-    counts = torch.zeros(nn, device=idx.device, dtype=torch.int64).scatter_add_(
-        0, idx, torch.ones_like(idx)
-    )
+    counts = torch.zeros(nn, device=idx.device, dtype=torch.int64).scatter_add_(0, idx, torch.ones_like(idx))
     off = torch.nn.functional.pad(torch.cumsum(counts, 0), (1, 0))
     dnb = ext.nb_reduce(dpre, perm, off, nn)
     return [dedge, dquery, dnb, dw1, dw2, db_part.sum(dim=(0, 1))]
@@ -132,6 +128,4 @@ def forward(
 ) -> torch.Tensor:
     """``reduced`` [groups, 128] fp32 from edge [groups * K, 128], query [groups, 128], the neighbour table nbt [NN, 128] (all bf16), idx [groups * K] int64 (rows of the table), the contiguous bf16
     weights w1 (the edge block of W1) / w2 [128, 128], b2 [128] and mask [groups * K] (fp32 or bf16)."""
-    return _ext().node_fwd(
-        edge, query, nbt, idx, w1, w2, b2, mask, neighbors, float(scale)
-    )
+    return _ext().node_fwd(edge, query, nbt, idx, w1, w2, b2, mask, neighbors, float(scale))

@@ -19,8 +19,6 @@ from miniworld_engine.kernels._shape_key import both_key, length_of, rows_of, pa
 # one that grows without bound as the hidden width grows. The R axis now loops in BLOCK_N tiles.
 
 
-
-
 # AUTOTUNE KEY: ['shape_key', 'R'].
 # `n_elements` is a MISNOMER: both launch sites pass the flattened ROW count M into it (it is only
 # ever read as `offset_row < n_elements`), so keying it added the raw M back beside its own bucket
@@ -30,9 +28,7 @@ from miniworld_engine.kernels._shape_key import both_key, length_of, rows_of, pa
 # `R` (the launcher's N = hidden/projection width) IS a real config axis -- it is the extent of the
 # BLOCK_K column loop -- and was absent from the key, so a new width recompiled (it is constexpr
 # here) but silently reused the config tuned for a different width. It is a searched axis now.
-@configured('gated_projection_gate_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
+@configured("gated_projection_gate_triton", key=["shape_key"], default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def sigmoid_gate_fwd_kernel(
     gate_ptr,
@@ -65,14 +61,10 @@ def sigmoid_gate_fwd_kernel(
         tl.store(out_ptr + offset, out_val, mask=mask)
 
 
-
-
 # AUTOTUNE KEY: ['shape_key', 'R'] -- same reasoning as the forward: `n_elements` receives the raw
 # row count M (shape_key is its bucket), and `R` (the column-loop extent, a plain runtime arg here)
 # is the second real axis.
-@configured('gated_projection_bwd_gate_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
+@configured("gated_projection_bwd_gate_triton", key=["shape_key"], default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def sigmoid_gate_bwd_kernel(
     gate_ptr,
@@ -127,7 +119,14 @@ def _sigmoid_gate(gate: torch.Tensor, x: torch.Tensor, shape_key: int) -> torch.
     out = torch.empty_like(x)
     grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
     sigmoid_gate_fwd_kernel[grid](
-        gate, x, gate.stride(0), x.stride(0), out, M, N, shape_key=pack(shape_key, R=N),
+        gate,
+        x,
+        gate.stride(0),
+        x.stride(0),
+        out,
+        M,
+        N,
+        shape_key=pack(shape_key, R=N),
     )
     return out
 
@@ -138,8 +137,7 @@ def _sigmoid_gate_bwd_fake(gate, x, grad_out, shape_key):
 
 
 @opaque(fake=_sigmoid_gate_bwd_fake, name="gated_projection_sigmoid_gate_bwd")
-def _sigmoid_gate_bwd(gate: torch.Tensor, x: torch.Tensor, grad_out: torch.Tensor,
-                      shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _sigmoid_gate_bwd(gate: torch.Tensor, x: torch.Tensor, grad_out: torch.Tensor, shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Gradients of ``sigmoid(gate) * x`` -> ``(dgate, dx)``, both flat. The two GEMMs that
     produce ``grad_out`` and ``dW_out`` stay in the caller."""
     M, N = x.shape
@@ -147,7 +145,16 @@ def _sigmoid_gate_bwd(gate: torch.Tensor, x: torch.Tensor, grad_out: torch.Tenso
     dx = torch.empty_like(x)
     grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
     sigmoid_gate_bwd_kernel[grid](
-        gate, x, grad_out, dgate, dx, gate.stride(0), x.stride(0), M, N, shape_key=pack(shape_key, R=N),
+        gate,
+        x,
+        grad_out,
+        dgate,
+        dx,
+        gate.stride(0),
+        x.stride(0),
+        M,
+        N,
+        shape_key=pack(shape_key, R=N),
     )
     return dgate, dx
 
@@ -216,9 +223,7 @@ triton_gated_projection = TritonGatedProjectionFunction.apply
 # training.py carried a bitwise-equal copy of each (.bench/direct.out); both files import
 # these now. The tiled kernels above take (M, N, strides); these take one element count and
 # assume every operand is contiguous.
-@configured('gated_projection_gate_flat_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
+@configured("gated_projection_gate_flat_triton", key=["shape_key"], default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
 @triton.jit
 def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLOCK_E: tl.constexpr, shape_key, r_ptr=None, HAS_RES: tl.constexpr = False):
     off = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E)
@@ -232,9 +237,7 @@ def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLOCK_E: tl.constexpr, shape_key, r_ptr=
     tl.store(a_ptr + off, a, mask=m)
 
 
-@configured('gated_projection_bwd_gate_flat_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_E=64, num_warps=2, num_stages=2))
+@configured("gated_projection_bwd_gate_flat_triton", key=["shape_key"], default=dict(BLOCK_E=64, num_warps=2, num_stages=2))
 @triton.jit
 def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLOCK_E: tl.constexpr, shape_key, ROUND_DO: tl.constexpr = False):
     off = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E)
@@ -243,7 +246,7 @@ def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLOCK_E: tl.constexpr, 
     s = tl.sigmoid(tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32))
     o = tl.load(o_ptr + off, mask=m, other=0.0).to(tl.float32)
     dov = (da * s).to(do_ptr.dtype.element_ty)
-    if ROUND_DO:   # fp32 dout read as a pre-rounded TF32 operand by the next kernel (conditioned_transition/triton/training.py): the grid value, what a cuBLAS TF32 GEMM would round it to
+    if ROUND_DO:  # fp32 dout read as a pre-rounded TF32 operand by the next kernel (conditioned_transition/triton/training.py): the grid value, what a cuBLAS TF32 GEMM would round it to
         dov = tf32_grid_tile(dov)
     tl.store(do_ptr + off, dov, mask=m)
     tl.store(dg_ptr + off, (da * o * s * (1.0 - s)).to(dg_ptr.dtype.element_ty), mask=m)
@@ -257,6 +260,7 @@ def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLOCK_E: tl.constexpr, 
 # sigmoid_gate_fused"), and every profile attributed the launch to `bias_only_attention_sigmul_*`.
 # `bias_only_attention` still re-exports the name, because its `dispatch.py` is where the choice
 # between this and `fused_gate_out` is made -- that part of the old layout was right.
+
 
 def _sigmul_fake(gate, out, shape_key):
     """Same shape and dtype as gate."""
@@ -279,8 +283,7 @@ def _sigmul_grad_fake(da, gate, out, shape_key):
 
 
 @opaque(fake=_sigmul_grad_fake, name="gated_projection_sigmul_bwd")
-def _sigmul_grad(da: torch.Tensor, gate: torch.Tensor, out: torch.Tensor,
-                 shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _sigmul_grad(da: torch.Tensor, gate: torch.Tensor, out: torch.Tensor, shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Gradients of ``sigmoid(gate) * out`` -> ``(dgate, dout)``."""
     dg = torch.empty_like(gate)
     do = torch.empty_like(out)

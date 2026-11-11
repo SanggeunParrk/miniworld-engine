@@ -27,7 +27,6 @@ def gather(prod, groups, k, weight=None, bias=None, eps=0.1):
     return ext().opm_gather(prod, int(groups), int(k), weight, bias, float(eps))
 
 
-
 @functools.lru_cache(maxsize=None)
 def chai_ext():
     """``chai.cu`` (the Chai-1 OuterProductMean's fused pair pass, TMA + wgmma), sm_90a. Built on first use."""
@@ -74,12 +73,12 @@ def prebuild(target, rows):
     (``groups``) OuterProductMean row launches."""
     from miniworld_engine.kernels._prebuild import _kv
 
-    if target.arch == "sm80":   # A100: the sm_80 OPM builds are planned by kernels/integrations (opm_sm80); the grouped rows' passes here
+    if target.arch == "sm80":  # A100: the sm_80 OPM builds are planned by kernels/integrations (opm_sm80); the grouped rows' passes here
         if any("groups" in _kv(r["options"]) and r["dtype"] in ("bfloat16", "master") for r in rows):
             from . import chai_sm80, ogemm_sm80
 
             yield chai_sm80.ext
-            yield ogemm_sm80.ext   # the masked grouped product
+            yield ogemm_sm80.ext  # the masked grouped product
         return
     names = set().union(*(r["kernels"] for r in rows)) if rows else set()
     if "outer_product_mean_gather_sm90" in names:

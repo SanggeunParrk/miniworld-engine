@@ -83,8 +83,7 @@ def uni_d256_training(x, outgoing):
     """Qualified outgoing L384 default."""
     if x.shape[-1] != 256:
         return False
-    return _preserved_width(256) or (outgoing and x.ndim == 4
-                                     and tuple(x.shape[:3]) == (1, 384, 384))
+    return _preserved_width(256) or (outgoing and x.ndim == 4 and tuple(x.shape[:3]) == (1, 384, 384))
 
 
 @contextmanager
@@ -101,8 +100,7 @@ def preserved_d256_context(enabled):
 def bidi_training(x):
     """Qualified bidirectional native cells."""
     width = x.shape[-1]
-    if (x.ndim != 4 or x.shape[0] != 1 or x.shape[1] != x.shape[2]
-            or x.shape[1] not in (384, 768) or width not in (256, 384, 512)):
+    if x.ndim != 4 or x.shape[0] != 1 or x.shape[1] != x.shape[2] or x.shape[1] not in (384, 768) or width not in (256, 384, 512):
         return False
     return _preserved_width(width) or (width == 256 and x.shape[1] == 768)
 
@@ -167,28 +165,22 @@ def preserve_d256_training():
 def preserve_wide_training(width):
     """Opt-in D384/D512 native glue around the selected Hopper compute kernels."""
     scoped = False if torch.compiler.is_compiling() else getattr(_d256_scope, "enabled", False)
-    return (width in (384, 512)
-            and (scoped or _preserved_width(width)))
+    return width in (384, 512) and (scoped or _preserved_width(width))
 
 
 def uni_training(x, outgoing):
     if uni_d256_training(x, outgoing):
         return True
-    bucket = (x.ndim == 4 and x.shape[0] == 1 and x.shape[1] == x.shape[2]
-              and x.shape[1] in (384, 768))
+    bucket = x.ndim == 4 and x.shape[0] == 1 and x.shape[1] == x.shape[2] and x.shape[1] in (384, 768)
     if preserve_wide_training(x.shape[-1]) and bucket:
         return True
     # Qualified outgoing cells preserve the selected native algorithm per shape.
     # D512 serves both directions (GP_DIR 1/2 in contract_gp); D384 L384 stays outgoing-only.
-    return (bucket
-            and ((x.shape[-1] == 512)
-                 or (outgoing and x.shape[-1] == 384 and x.shape[1] == 384)))
+    return bucket and ((x.shape[-1] == 512) or (outgoing and x.shape[-1] == 384 and x.shape[1] == 384))
 
 
 def preserve_training(width):
-    return ((width == 128 and preserve_d128_training())
-            or (width == 256 and preserve_d256_training())
-            or preserve_wide_training(width))
+    return (width == 128 and preserve_d128_training()) or (width == 256 and preserve_d256_training()) or preserve_wide_training(width)
 
 
 def wide_owned_blas_enabled():
@@ -199,9 +191,12 @@ def wide_owned_blas_enabled():
 @contextmanager
 def preserved_uni_blas_context(x, outgoing):
     """Graph-owned scratch defaults only for four qualified uni training cells."""
-    bucket = (x.ndim == 4 and x.shape[0] == 1 and x.shape[1] == x.shape[2]
-              and ((outgoing and x.shape[-1] in (256, 384) and x.shape[1] == 384)
-                   or (x.shape[-1] == 512 and x.shape[1] in (384, 768))))
+    bucket = (
+        x.ndim == 4
+        and x.shape[0] == 1
+        and x.shape[1] == x.shape[2]
+        and ((outgoing and x.shape[-1] in (256, 384) and x.shape[1] == 384) or (x.shape[-1] == 512 and x.shape[1] in (384, 768)))
+    )
     previous = getattr(_uni_owned_blas_scope, "enabled", False)
     _uni_owned_blas_scope.enabled = previous or (bucket and uni_training(x, outgoing))
     try:
@@ -272,8 +267,15 @@ def compile(source, flags):
     nvcc output is kept as ``<cubin stem>.ptxas.log``."""
     from miniworld_engine.kernels import _nvcc
 
-    return _nvcc.cubin(f"trimul_h100/{_display_name(source)}", list(flags), source=source, family="trimul_h100",
-                       toolchain="path", ptxas_log=True, timeout=None)
+    return _nvcc.cubin(
+        f"trimul_h100/{_display_name(source)}",
+        list(flags),
+        source=source,
+        family="trimul_h100",
+        toolchain="path",
+        ptxas_log=True,
+        timeout=None,
+    )
 
 
 _KERNEL_NAME = re.compile(r"\bvoid\s+(\w+)\s*\(")
@@ -285,8 +287,7 @@ def compile_text(source, flags):
 
     m = _KERNEL_NAME.search(source)
     name = f"trimul_h100/generated/{m.group(1) if m else 'unit'}"
-    return _nvcc.cubin(name, list(flags), text=source, family="trimul_h100", toolchain="path", ptxas_log=True,
-                       timeout=None)
+    return _nvcc.cubin(name, list(flags), text=source, family="trimul_h100", toolchain="path", ptxas_log=True, timeout=None)
 
 
 class CooperativePlan:
@@ -315,26 +316,13 @@ class CooperativePlan:
 def k1_smem(cfg):
     bi, bj, slots, sk, *_ = cfg
     ng = bi * bj // 64
-    return (
-        bi * bj * 256
-        + slots * sk * 8192
-        + ng * 8192
-        + 1024
-        + ((2 + 2 * slots) * 8 + 127) // 128 * 128
-    )
+    return bi * bj * 256 + slots * sk * 8192 + ng * 8192 + 1024 + ((2 + 2 * slots) * 8 + 127) // 128 * 128
 
 
 def k3_smem(cfg):
     bi, bj, slots, *_ = cfg
     bm = bi * bj
-    return (
-        bm * 256 * 2
-        + bm * 128 * 2
-        + slots * 256 * 64
-        + 16384
-        + 3072
-        + ((6 + 2 * slots) * 8 + 127) // 128 * 128
-    )
+    return bm * 256 * 2 + bm * 128 * 2 + slots * 256 * 64 + 16384 + 3072 + ((6 + 2 * slots) * 8 + 127) // 128 * 128
 
 
 def pack_into(dst, wl, wlg, wr, wrg, backward_stack=None, gate=None):
@@ -342,19 +330,22 @@ def pack_into(dst, wl, wlg, wr, wrg, backward_stack=None, gate=None):
     # An optional saved stack retains the backward layout from the same launch.
     if backward_stack is not None:
         from ._h100_pack import pack_training_pair
-        return pack_training_pair(dst, backward_stack, (gate,wl,wlg,wr,wrg))
+
+        return pack_training_pair(dst, backward_stack, (gate, wl, wlg, wr, wrg))
     from ._h100_pack import pack_into as pack
 
     pack(dst, wl, wlg, wr, wrg)
 
 
-_GLUE_CUDA = True   # eager glue (weight pack, input LN, LN-affine fold) on the CUDA aux kernels instead of Triton / Inductor
+_GLUE_CUDA = True  # eager glue (weight pack, input LN, LN-affine fold) on the CUDA aux kernels instead of Triton / Inductor
 
 
 def cuda_aux_enabled():
-    scoped = False if torch.compiler.is_compiling() else (
-        getattr(_d256_scope, "enabled", False) or getattr(_d128_scope, "enabled", False)
-        or getattr(_d64_scope, "enabled", False))
+    scoped = (
+        False
+        if torch.compiler.is_compiling()
+        else (getattr(_d256_scope, "enabled", False) or getattr(_d128_scope, "enabled", False) or getattr(_d64_scope, "enabled", False))
+    )
     return scoped or _CUDA_AUX_UNSCOPED
 
 
@@ -377,6 +368,7 @@ def _normalize_into_compiled(dst, x, g, b):
 def normalize_into(dst, x, g, b, warp=False):
     if cuda_aux_enabled() or (_GLUE_CUDA and not torch.compiler.is_compiling()):
         from ._h100_pack import normalize_into as native
+
         return native(dst, x, g, b, warp=warp)
     return _normalize_into_compiled(dst, x, g, b)
 
@@ -432,8 +424,14 @@ def output_buffers(y=None, dx=None):
 
 def _take(name, like):
     buf = getattr(_out_scope, name, None)
-    if (buf is not None and not torch.compiler.is_compiling() and buf.shape == like.shape and buf.dtype == like.dtype
-            and buf.device == like.device and buf.is_contiguous()):
+    if (
+        buf is not None
+        and not torch.compiler.is_compiling()
+        and buf.shape == like.shape
+        and buf.dtype == like.dtype
+        and buf.device == like.device
+        and buf.is_contiguous()
+    ):
         setattr(_out_scope, name, None)
         return buf
     return torch.empty_like(like, memory_format=torch.contiguous_format)

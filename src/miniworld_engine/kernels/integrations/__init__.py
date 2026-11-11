@@ -42,7 +42,7 @@ def prebuild(target, _rows):
         cm, cz = int(d["d_msa"]), int(d["d_pair"])
         if int(d["d_hidden"]) != opm_train.CH or "groups" in o or ((cm, cz) != base and (cm, cz) not in opm_train.SHAPES):
             continue
-        if r["mode"] == "eval" and (cm, cz) in opm_train.TRAIN_ONLY:   # inference at these widths is composed.inference's
+        if r["mode"] == "eval" and (cm, cz) in opm_train.TRAIN_ONLY:  # inference at these widths is composed.inference's
             continue
         # _OpmMath.forward runs _forward_wide for the other widths, the divide-after-projection order (normalize_before_proj False) and
         # projection biases
@@ -55,15 +55,23 @@ def prebuild(target, _rows):
                     add(native=True, tma=False, cm=cm, cz=cz, fused=opm_train._fused_enabled(s, n, training=training, cm=cm, cz=cz))
                 else:
                     fused = opm_train._fused_enabled(s, n, training=training)
-                    add(native=True, tma=path == "tma", fused=fused,
+                    add(
+                        native=True,
+                        tma=path == "tma",
+                        fused=fused,
                         epi_tma=not fused and opm_train._epilogue_tma_enabled(s, n, training=training),
-                        epi_half=not fused and opm_train._epilogue_half_enabled(s, n, training=training))
+                        epi_half=not fused and opm_train._epilogue_half_enabled(s, n, training=training),
+                    )
                 if training:  # _OpmMath.backward
                     if wide:
                         add(native=True, tma=False, cm=cm, cz=cz)
                     else:
-                        add(native=path != "legacy", tma=path == "tma", epi_tma=opm_train._epilogue_tma_enabled(s, n, training=True),
-                            epi_half=opm_train._epilogue_half_enabled(s, n, training=True))
+                        add(
+                            native=path != "legacy",
+                            tma=path == "tma",
+                            epi_tma=opm_train._epilogue_tma_enabled(s, n, training=True),
+                            epi_half=opm_train._epilogue_half_enabled(s, n, training=True),
+                        )
     for kw in opm.values():
         yield functools.partial(ext, **kw)
 
@@ -72,14 +80,13 @@ def prebuild(target, _rows):
     for r in family_rows("pair_weighted_averaging"):
         d = _kv(r["dims"])
         shape = (int(d["d_msa"]), int(d["d_pair"]), int(d["n_head"]), int(d["d_hidden"]))
-        if shape == base or pwa_train.pair_only_wide(*shape):   # pair_only_wide: these MSA kernels + pwa_wide's pair kernels
+        if shape == base or pwa_train.pair_only_wide(*shape):  # pair_only_wide: these MSA kernels + pwa_wide's pair kernels
             if shape != base:
                 pair.add(shape[1])
             if r["mode"] == "eval":
                 natives.add(True)  # inference runs the native kernels on H100
             else:
-                natives.update(pwa_train._training_default_shape(s, n)
-                               for s in r["depths"] for n in r["lengths"])
+                natives.update(pwa_train._training_default_shape(s, n) for s in r["depths"] for n in r["lengths"])
         elif pwa_wide.supported(*shape):
             pair.add(shape[1])
             value.add((shape[0], shape[3]))
@@ -110,15 +117,20 @@ def _prebuild_sm80():
     from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80 as pwa
 
     def plain(o):
-        return not any(k in o for k in ("groups", "count_offset"))   # projection biases: the sm_80 prologue adds them
+        return not any(k in o for k in ("groups", "count_offset"))  # projection biases: the sm_80 prologue adds them
 
-    opm_rows = [r for r in family_rows("outer_product_mean") if r["dtype"] in ("bfloat16", "master") and plain(_kv(r["options"]))
-                and opm.supported(int(_kv(r["dims"])["d_msa"]), int(_kv(r["dims"])["d_hidden"]), int(_kv(r["dims"])["d_pair"]))]
+    opm_rows = [
+        r
+        for r in family_rows("outer_product_mean")
+        if r["dtype"] in ("bfloat16", "master")
+        and plain(_kv(r["options"]))
+        and opm.supported(int(_kv(r["dims"])["d_msa"]), int(_kv(r["dims"])["d_hidden"]), int(_kv(r["dims"])["d_pair"]))
+    ]
     if opm_rows:
         yield opm.ext
         from miniworld_engine.kernels.outer_product_mean.cuda import ogemm_sm80
 
-        yield ogemm_sm80.ext   # the masked forward product (dead tokens skipped)
+        yield ogemm_sm80.ext  # the masked forward product (dead tokens skipped)
         yield mask_count_ballot_sm80._ext
         yield mask_epilogue_sm80._ext
         if any(r["mode"] == "train" for r in opm_rows):
@@ -126,8 +138,9 @@ def _prebuild_sm80():
     pwa_rows = []
     for r in family_rows("pair_weighted_averaging"):
         d = _kv(r["dims"])
-        if r["dtype"] in ("bfloat16", "master") and pwa.supported(int(d["d_msa"]), int(d["d_pair"]), int(d.get("n_head", 8)),
-                                                                   int(d.get("d_hidden", int(d["d_msa"]) // int(d.get("n_head", 8))))):
+        if r["dtype"] in ("bfloat16", "master") and pwa.supported(
+            int(d["d_msa"]), int(d["d_pair"]), int(d.get("n_head", 8)), int(d.get("d_hidden", int(d["d_msa"]) // int(d.get("n_head", 8))))
+        ):
             pwa_rows.append(r)
     from miniworld_engine.kernels.integrations import pwa_wide_sm80
 
@@ -142,15 +155,21 @@ def _prebuild_sm80():
         yield wide_sm80.ext
         from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90_generic
 
-        yield sm80_bidir.glue   # its row LayerNorm (forward and backward)
-        yield h100_sm90_generic._lt   # the residual out-projection (host-only cublasLt glue)
+        yield sm80_bidir.glue  # its row LayerNorm (forward and backward)
+        yield h100_sm90_generic._lt  # the residual out-projection (host-only cublasLt glue)
     if pwa_rows:
         yield pwa.ext
         yield pwa._bmm_ext
         yield contract_gate_fused_sm80._ext
         if any(r["mode"] == "train" for r in pwa_rows):
-            yield from (broadcast_native_sm80._ext, dw_native_sm80._ext, glue_tuned_sm80._ext, grad_reduce_fused_sm80._ext,
-                        grad_reduce_vector_sm80._ext, pair_partial_sm80._ext)
+            yield from (
+                broadcast_native_sm80._ext,
+                dw_native_sm80._ext,
+                glue_tuned_sm80._ext,
+                grad_reduce_fused_sm80._ext,
+                grad_reduce_vector_sm80._ext,
+                pair_partial_sm80._ext,
+            )
     # ProteinMPNN (its "cuda" backend: mpnn_msg_sm80 / mpnn_edge_sm80): the four shape-independent sm_80 extensions, for a bf16 (master) row
     if any(r["dtype"] in ("bfloat16", "master") for r in family_rows("mpnn_message")):
         from miniworld_engine.kernels.mpnn_edge_tail.cuda import sm80 as edge

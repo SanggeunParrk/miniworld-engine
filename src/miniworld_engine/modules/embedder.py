@@ -56,9 +56,7 @@ def atom_single_features(
 ) -> torch.Tensor:
     """The six per-atom reference features (AF3 Alg. 5 inputs without the atom-pair part), zero on masked atoms."""
     mask = mask.to(pos.dtype)
-    features = torch.cat(
-        [pos, mask[..., None], element.to(pos.dtype)[..., None], torch.arcsinh(charge.to(pos.dtype))[..., None]], dim=-1
-    )
+    features = torch.cat([pos, mask[..., None], element.to(pos.dtype)[..., None], torch.arcsinh(charge.to(pos.dtype))[..., None]], dim=-1)
     return features * mask[..., None]
 
 
@@ -91,7 +89,8 @@ class InputFeatureEmbedder(BackendModule):
     raises :class:`~miniworld_engine.modules.primitives.BackendUnsupported` outside it; this class refuses a backend its atom transformer
     does not have.
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
@@ -181,7 +180,7 @@ class InputFeatureEmbedder(BackendModule):
         return self
 
     def _forward_anthropic(self, *args, **kwargs) -> torch.Tensor:
-        return self._forward_pytorch(*args, **kwargs)   # the atom transformer runs its own backend
+        return self._forward_pytorch(*args, **kwargs)  # the atom transformer runs its own backend
 
     def _supports_engine(self, backend: str, pos: torch.Tensor) -> str | None:
         from miniworld_engine.modules.norm import a100, h100_unsupported, triton_unsupported
@@ -191,7 +190,7 @@ class InputFeatureEmbedder(BackendModule):
         missing = [type(c).__name__ for c in self._engine_children() if backend not in c.backends]
         if missing:
             return f"its {', '.join(missing)} has no {backend!r} backend"
-        if backend == "cuda":   # the H100 or (the children's sm_80 builds) the A100; each child states its own range when it runs
+        if backend == "cuda":  # the H100 or (the children's sm_80 builds) the A100; each child states its own range when it runs
             return None if a100(pos) else h100_unsupported(pos)
         return triton_unsupported(pos)
 
@@ -202,10 +201,10 @@ class InputFeatureEmbedder(BackendModule):
         return self._supports_engine("triton", pos)
 
     def _forward_cuda(self, *args, **kwargs) -> torch.Tensor:
-        return self._forward_pytorch(*args, **kwargs)   # the composition; the transformer and the norms run their "cuda" backends
+        return self._forward_pytorch(*args, **kwargs)  # the composition; the transformer and the norms run their "cuda" backends
 
     def _forward_triton(self, *args, **kwargs) -> torch.Tensor:
-        return self._forward_pytorch(*args, **kwargs)   # the composition; the transformer and the norms run their "triton" backends
+        return self._forward_pytorch(*args, **kwargs)  # the composition; the transformer and the norms run their "triton" backends
 
     def atom_single(
         self,
@@ -225,8 +224,8 @@ class InputFeatureEmbedder(BackendModule):
             single = self.to_atom_single_cond(atom_single_features(pos, ref_mask, element, charge))
         cos, sin = self.atom_transformer.build_rope(pos, space_uid)
         params = build_attention_params(cos, sin, atom_mask, num_aug=1)
-        single = self.atom_transformer(single, single, params)   # the single conditions itself
-        return self.atom_out_norm(single).to(single.dtype)   # the LayerNorm of token_pool="linear" runs in fp32 under autocast
+        single = self.atom_transformer(single, single, params)  # the single conditions itself
+        return self.atom_out_norm(single).to(single.dtype)  # the LayerNorm of token_pool="linear" runs in fp32 under autocast
 
     def to_tokens(
         self,
@@ -262,7 +261,13 @@ class InputFeatureEmbedder(BackendModule):
         """``samples`` systems of ``length`` atoms (real atoms first), 8 atoms per token and per conformer, elements 1..19, charges -1..1."""
         mask = key_mask(samples, length, device=device)
         index = (torch.arange(length, device=device) // 8).expand(samples, length).contiguous()
-        return {"pos": random_input((samples, length, 3), dtype=dtype, device=device, generator=generator, scale=5.0),
-                "ref_mask": mask, "atom_mask": mask, "space_uid": index, "atom_to_token": index, "n_token": (length + 7) // 8,
-                "element": torch.randint(1, 20, (samples, length), device=device, generator=generator),
-                "charge": torch.randint(-1, 2, (samples, length), device=device, generator=generator)}
+        return {
+            "pos": random_input((samples, length, 3), dtype=dtype, device=device, generator=generator, scale=5.0),
+            "ref_mask": mask,
+            "atom_mask": mask,
+            "space_uid": index,
+            "atom_to_token": index,
+            "n_token": (length + 7) // 8,
+            "element": torch.randint(1, 20, (samples, length), device=device, generator=generator),
+            "charge": torch.randint(-1, 2, (samples, length), device=device, generator=generator),
+        }

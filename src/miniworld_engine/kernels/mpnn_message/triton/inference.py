@@ -48,11 +48,15 @@ def _prune(configs, nargs, **meta):
     return keep or valid
 
 
-@configured('mpnn_message_fwd_gemm_gelu_reduce_triton',
-            key=["shape_key"],
-            default=[dict(GROUPS_PER_CTA=1, BLOCK_M=64, BLOCK_K=16, COALESCED_WEIGHT_LOAD=1, num_warps=2, num_stages=3),
-            dict(GROUPS_PER_CTA=2, BLOCK_M=128, BLOCK_K=32, COALESCED_WEIGHT_LOAD=0, num_warps=4, num_stages=3)],
-            prune=_prune)
+@configured(
+    "mpnn_message_fwd_gemm_gelu_reduce_triton",
+    key=["shape_key"],
+    default=[
+        dict(GROUPS_PER_CTA=1, BLOCK_M=64, BLOCK_K=16, COALESCED_WEIGHT_LOAD=1, num_warps=2, num_stages=3),
+        dict(GROUPS_PER_CTA=2, BLOCK_M=128, BLOCK_K=32, COALESCED_WEIGHT_LOAD=0, num_warps=4, num_stages=3),
+    ],
+    prune=_prune,
+)
 @triton.jit
 def _message_inference_kernel(
     preactivation_ptr,
@@ -94,14 +98,10 @@ def _message_inference_kernel(
         if COALESCED_WEIGHT_LOAD:
             # W is nn.Linear's contiguous [output, input] layout.  Loading
             # [output, input] and transposing the tile gives coalesced reads.
-            weight_output_input = tl.load(
-                weight_ptr + output_columns[:, None] * HIDDEN + hidden_columns[None, :]
-            ).to(tl.bfloat16)
+            weight_output_input = tl.load(weight_ptr + output_columns[:, None] * HIDDEN + hidden_columns[None, :]).to(tl.bfloat16)
             weight = tl.trans(weight_output_input)
         else:
-            weight = tl.load(
-                weight_ptr + output_columns[None, :] * HIDDEN + hidden_columns[:, None]
-            ).to(tl.bfloat16)
+            weight = tl.load(weight_ptr + output_columns[None, :] * HIDDEN + hidden_columns[:, None]).to(tl.bfloat16)
         accumulator += tl.dot(activated, weight)
 
     bias = tl.load(bias_ptr + output_columns)

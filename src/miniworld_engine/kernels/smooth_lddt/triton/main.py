@@ -15,6 +15,7 @@ kernel. A tile is a dense block of pairs (not a walk over set bits) and the augm
 
 Layout: x [A, B, N, 3] fp32 or bf16 (loaded and computed in fp32; the gradient is stored in x's dtype), g [B, N, 3] fp32, nuc / mask [B, N] int8; N % 128 == 0 (the caller pads). Flags and counts: [B, N / 32, N / 32].
 """
+
 from __future__ import annotations
 
 import torch
@@ -25,7 +26,7 @@ from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._shape_key import atom_key
 from miniworld_engine.kernels._compile import opaque
 
-BLK = 32   # atoms per flag tile edge, fixed; the kernels' own tiles (BLOCK_I x BLOCK_J, 32 / 64 / 128) are tuned over it
+BLK = 32  # atoms per flag tile edge, fixed; the kernels' own tiles (BLOCK_I x BLOCK_J, 32 / 64 / 128) are tuned over it
 NUC_CUT, OTHER_CUT = 30.0, 15.0
 
 
@@ -58,13 +59,17 @@ def _dscore(w):
     return 0.25 * w * n / (q * q)
 
 
-@configured('smooth_lddt_prep_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_P=64, num_warps=4, num_stages=2))
+@configured("smooth_lddt_prep_triton", key=["shape_key"], default=dict(BLOCK_P=64, num_warps=4, num_stages=2))
 @triton.jit
 def smooth_lddt_prep_kernel(
-    G, NUC, M, TILE, CNT,
-    N, NF, shape_key,
+    G,
+    NUC,
+    M,
+    TILE,
+    CNT,
+    N,
+    NF,
+    shape_key,
     BLOCK_P: tl.constexpr,
 ):
     """One program: a BLOCK_P x BLOCK_P block of the pair matrix, written as (BLOCK_P / 32)^2 flag tiles."""
@@ -108,14 +113,21 @@ def _tile_has(TILE, b, NF, i0, j0, BIT: tl.constexpr, BLOCK_I: tl.constexpr, BLO
     return tl.max(tl.max(((fl >> BIT) & 1).to(tl.int32), axis=1), axis=0) != 0
 
 
-@configured('smooth_lddt_fwd_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_I=64, BLOCK_J=64, num_warps=4, num_stages=2))
+@configured("smooth_lddt_fwd_triton", key=["shape_key"], default=dict(BLOCK_I=64, BLOCK_J=64, num_warps=4, num_stages=2))
 @triton.jit
 def smooth_lddt_fwd_kernel(
-    X, G, NUC, M, TILE, OUT,
-    B, N, NF, shape_key,
-    BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr,
+    X,
+    G,
+    NUC,
+    M,
+    TILE,
+    OUT,
+    B,
+    N,
+    NF,
+    shape_key,
+    BLOCK_I: tl.constexpr,
+    BLOCK_J: tl.constexpr,
 ):
     """OUT[ab, i] = sum over the pairs (i, j) of the loss of the pair score; one program owns BLOCK_I rows."""
     ab = tl.program_id(0)
@@ -158,14 +170,22 @@ def smooth_lddt_fwd_kernel(
     tl.store(OUT + ab * N + ri, acc)
 
 
-@configured('smooth_lddt_bwd_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_I=64, BLOCK_J=64, num_warps=4, num_stages=2))
+@configured("smooth_lddt_bwd_triton", key=["shape_key"], default=dict(BLOCK_I=64, BLOCK_J=64, num_warps=4, num_stages=2))
 @triton.jit
 def smooth_lddt_bwd_kernel(
-    X, G, NUC, M, TILE, GO, GX,
-    B, N, NF, shape_key,
-    BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr,
+    X,
+    G,
+    NUC,
+    M,
+    TILE,
+    GO,
+    GX,
+    B,
+    N,
+    NF,
+    shape_key,
+    BLOCK_I: tl.constexpr,
+    BLOCK_J: tl.constexpr,
 ):
     ab = tl.program_id(0)
     b = ab % B
@@ -258,8 +278,9 @@ def _smooth_lddt_bwd_portable_fake(x, gt, nuc, mask, tile, go):
 
 
 @opaque(fake=_smooth_lddt_bwd_portable_fake, name="smooth_lddt_bwd_portable")
-def smooth_lddt_bwd_portable(x: torch.Tensor, gt: torch.Tensor, nuc: torch.Tensor, mask: torch.Tensor, tile: torch.Tensor,
-                             go: torch.Tensor) -> torch.Tensor:
+def smooth_lddt_bwd_portable(
+    x: torch.Tensor, gt: torch.Tensor, nuc: torch.Tensor, mask: torch.Tensor, tile: torch.Tensor, go: torch.Tensor
+) -> torch.Tensor:
     """d(sum of the pair scores)/dx [A, B, N, 3] fp32 for the upstream gradient ``go`` [A * B] fp32."""
     a, b, n, _ = x.shape
     gx = torch.empty_like(x)

@@ -39,7 +39,7 @@ from miniworld_engine.kernels.integrations.local_dit import (
 BF = torch.bfloat16
 F32 = torch.float32
 EPS = 1e-5
-DS_, DC_, DP_, NH_ = 128, 128, 16, 4   # the atom widths the kernels are built for
+DS_, DC_, DP_, NH_ = 128, 128, 16, 4  # the atom widths the kernels are built for
 _GAMMA, _WBIAS = (
     WEIGHTS.index("attention.ln_pair.weight"),
     WEIGHTS.index("attention.to_bias.weight"),
@@ -67,25 +67,14 @@ def serves(module, single, cond, pair, mask) -> bool:
     a, tr = module.attention, module.transition
     if a.use_qk_norm:
         return False
-    if not (
-        single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0)
-    ):
+    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0)):
         return False
     if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF):
         return False
-    if (
-        single.ndim != 4
-        or single.shape[1] != 1
-        or single.shape[-1] != DS_
-        or single.shape[2] == 0
-    ):
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[-1] != DS_ or single.shape[2] == 0:
         return False
     n = single.shape[2]
-    if mask is not None and (
-        mask.dtype != torch.bool
-        or tuple(mask.shape) != (1, n)
-        or mask.device != single.device
-    ):
+    if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != (1, n) or mask.device != single.device):
         return False
     if tuple(cond.shape) != (*single.shape[:3], DC_) or tuple(pair.shape) != (
         1,
@@ -117,11 +106,7 @@ def serves(module, single, cond, pair, mask) -> bool:
         norms += (a.ada_ln_kv.ln_in, a.ada_ln_kv.ln_cond)
     if any(norm.eps != EPS for norm in norms):
         return False
-    return _ready(
-        single.device.index
-        if single.device.index is not None
-        else torch.cuda.current_device()
-    )
+    return _ready(single.device.index if single.device.index is not None else torch.cuda.current_device())
 
 
 # ------------------------------------------------------------------------------------------------------------ weights
@@ -191,9 +176,7 @@ def _pack(weights, cross):
             w_pre=w_pre,
             bq=fb(A + "to_query.bias").contiguous(),
             wo=bf(A + "to_out.weight").contiguous(),
-            wu=torch.cat(
-                [bf(T + "expand_a.weight"), bf(T + "expand_b.weight")]
-            ).contiguous(),
+            wu=torch.cat([bf(T + "expand_a.weight"), bf(T + "expand_b.weight")]).contiguous(),
             wd=bf(T + "squeeze.weight").contiguous(),
         )
 
@@ -203,9 +186,7 @@ def _weights(weights):
     cross = len(weights) > len(WEIGHTS)
     try:
         versions = tuple(x._version for x in weights)
-    except (
-        RuntimeError
-    ):  # inference tensors carry no version counter: nothing could invalidate an entry
+    except RuntimeError:  # inference tensors carry no version counter: nothing could invalidate an entry
         return _pack(weights, cross)
     key = _capture.scoped(tuple(id(x) for x in weights))
     if key is None:
@@ -213,9 +194,7 @@ def _weights(weights):
     hit = _PACKS.get(key)
     if hit is not None:
         refs, seen, pack = hit
-        if seen == versions and all(
-            r() is x for r, x in zip(refs, weights, strict=True)
-        ):
+        if seen == versions and all(r() is x for r, x in zip(refs, weights, strict=True)):
             return pack
     _capture.prune(_PACKS)
     if len(_PACKS) >= 64:  # a model's worth of blocks; drop the oldest
@@ -242,19 +221,11 @@ def _pack_bwd(weights, cross):
         pk = _weights(weights)
         return SimpleNamespace(
             wst=bt(T + "squeeze.weight").contiguous(),
-            wut=torch.cat(
-                [bt(T + "expand_a.weight"), bt(T + "expand_b.weight")], 1
-            ).contiguous(),
+            wut=torch.cat([bt(T + "expand_a.weight"), bt(T + "expand_b.weight")], 1).contiguous(),
             wot=bt(A + "to_out.weight").contiguous(),
-            wqgt=torch.cat(
-                [bt(A + "to_query.weight"), bt(A + "to_gate.weight")], 1
-            ).contiguous(),
-            wkvt=torch.cat(
-                [bt(A + "to_key.weight"), bt(A + "to_value.weight")], 1
-            ).contiguous(),
-            wt=torch.stack(
-                [pk.w_cond[256 * i : 256 * (i + 1)].t().contiguous() for i in range(4)]
-            ).contiguous(),
+            wqgt=torch.cat([bt(A + "to_query.weight"), bt(A + "to_gate.weight")], 1).contiguous(),
+            wkvt=torch.cat([bt(A + "to_key.weight"), bt(A + "to_value.weight")], 1).contiguous(),
+            wt=torch.stack([pk.w_cond[256 * i : 256 * (i + 1)].t().contiguous() for i in range(4)]).contiguous(),
         )
 
 
@@ -271,9 +242,7 @@ def _weights_bwd(weights):
     hit = _PACKS_BWD.get(key)
     if hit is not None:
         refs, seen, pack = hit
-        if seen == versions and all(
-            r() is x for r, x in zip(refs, weights, strict=True)
-        ):
+        if seen == versions and all(r() is x for r, x in zip(refs, weights, strict=True)):
             return pack
     _capture.prune(_PACKS_BWD)
     if len(_PACKS_BWD) >= 64:
@@ -285,6 +254,7 @@ def _weights_bwd(weights):
 
 _HOIST_COND: dict = {}  # (conditioning tensor, weights) -> mod: the per-item conditioning table of an inference call
 _HOIST_BIAS: dict = {}  # (pair tensor, LN / bias weights) -> the windowed pair bias
+
 
 def _tkey(t):
     """A tensor's identity for a cache key: storage address, in-place version, shape, dtype, device."""
@@ -334,9 +304,7 @@ def _fwd_fake(single, cond, pair, mask, weights, save):
         tile(),  # sg
         tile(),  # x1
         tile() if cross else single.new_empty(0),  # xkv
-        single.new_empty(
-            (NH_, (n + QUERIES - 1) // QUERIES, QUERIES, KEYS), dtype=F32
-        ),  # bias
+        single.new_empty((NH_, (n + QUERIES - 1) // QUERIES, QUERIES, KEYS), dtype=F32),  # bias
         tile(),  # o
         single.new_empty((a, NH_, n), dtype=F32),  # lse
         tile(),  # u
@@ -392,9 +360,7 @@ def _block_fwd(
             bias,
             _keys(mask, n, single.device),
         )
-        post = rows.post_fwd(
-            s2, o.view(m, DS_), sg, mod, pk.wo, pk.wu, pk.wd, EPS, save
-        )
+        post = rows.post_fwd(s2, o.view(m, DS_), sg, mod, pk.wo, pk.wu, pk.wd, EPS, save)
     if not save:
         return [cast(torch.Tensor, post).view(single.shape)]  # (no save: post_fwd returns the output alone)
     out, u, a2, x2, t = post
@@ -457,21 +423,15 @@ def _block_bwd(
         s2 = single.reshape(m, DS_).contiguous()
         c2 = cond.reshape(m, DC_).contiguous()
         dy2 = dy.reshape(m, DS_).to(BF).contiguous()
-        dmod = torch.empty(
-            m, 8 * DS_, device=dev, dtype=BF
-        )  # [dsc1 | dbi1 | dsckv | dbikv | dsc2 | dbi2 | dos | dts]
+        dmod = torch.empty(m, 8 * DS_, device=dev, dtype=BF)  # [dsc1 | dbi1 | dsckv | dbikv | dsc2 | dbi2 | dos | dts]
         if not cross:
             dmod[:, 2 * DS_ : 4 * DS_] = 0
         dp = torch.empty(m, 4 * DS_, device=dev, dtype=BF)  # [dq | dg | dk | dv]
         dbias = torch.zeros(8 * DS_, device=dev, dtype=F32)
         dbq = torch.zeros(DS_, device=dev, dtype=F32)
         dgamma = torch.zeros(3, DS_, device=dev, dtype=F32)
-        dt, hh, dab = rows.tr_bwd(
-            dy2, t, x2, mod, pk.wu, pb.wst, dmod, dbias[7 * DS_ :]
-        )
-        da, du, gated, do, dd = rows.post_bwd(
-            dab, dy2, a2, mod, u, sg, o, pb.wut, pb.wot, dp, dmod, dbias, n, EPS
-        )
+        dt, hh, dab = rows.tr_bwd(dy2, t, x2, mod, pk.wu, pb.wst, dmod, dbias[7 * DS_ :])
+        da, du, gated, do, dd = rows.post_bwd(dab, dy2, a2, mod, u, sg, o, pb.wut, pb.wot, dp, dmod, dbias, n, EPS)
         keymask = _keys(mask, n, dev)
         db = local.attn_bwd(
             q.view(a, n, DS_),
@@ -485,19 +445,12 @@ def _block_bwd(
             delta=dd,
             packed=dp,
         )
-        dz, dgamma_pair, dwb = local.pair_bias_bwd(
-            pair[0], weights[_GAMMA], weights[_WBIAS], db
-        )
-        ds = rows.pre_bwd(
-            dp, s2, x1, da, mod, pb.wqgt, pb.wkvt, dmod, dbias, dbq, EPS, cross
-        )
+        dz, dgamma_pair, dwb = local.pair_bias_bwd(pair[0], weights[_GAMMA], weights[_WBIAS], db)
+        ds = rows.pre_bwd(dp, s2, x1, da, mod, pb.wqgt, pb.wkvt, dmod, dbias, dbq, EPS, cross)
         dc, cn = rows.cond_bwd(dmod, c2, pb.wt, pk.gamma, dgamma, EPS, cross)
         names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
         A, T, K = "attention.", "transition.", "attention.ada_ln_kv."
-        grads = {
-            name: torch.empty(w.shape, device=dev, dtype=w.dtype)
-            for name, w in zip(names, weights, strict=True)
-        }
+        grads = {name: torch.empty(w.shape, device=dev, dtype=w.dtype) for name, w in zip(names, weights, strict=True)}
         # the weight gradients: D = A^T B products of the activations and gradients the kernels wrote (one grouped launch), and the small fp32 sums
         problems = [
             (dt, hh),
@@ -587,12 +540,7 @@ def _infer(single, cond, pair, mask, weights):
 
 def block(module, single, cond, pair, mask=None):
     """The block's output stream (both residuals included), on the sm_80 kernels; ``serves()`` must have accepted the call."""
-    weights = [
-        module.get_parameter(name)
-        for name in (*WEIGHTS, *(CROSS_WEIGHTS if module.cross_attention else ()))
-    ]
-    if torch.is_grad_enabled() and any(
-        t.requires_grad for t in (single, cond, pair, *weights)
-    ):
+    weights = [module.get_parameter(name) for name in (*WEIGHTS, *(CROSS_WEIGHTS if module.cross_attention else ()))]
+    if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *weights)):
         return _RowsBlock.apply(mask, single, cond, pair, *weights)
     return _infer(single, cond, pair, mask, weights)

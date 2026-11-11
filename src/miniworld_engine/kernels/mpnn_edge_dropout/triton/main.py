@@ -15,9 +15,7 @@ _PACK_BLOCK_BYTES = 256
 _BACKWARD_BLOCK_ELEMENTS = 256
 
 
-@configured('mpnn_edge_dropout_fwd_packed_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_BYTES=128, num_warps=4, num_stages=2))
+@configured("mpnn_edge_dropout_fwd_packed_triton", key=["shape_key"], default=dict(BLOCK_BYTES=128, num_warps=4, num_stages=2))
 @triton.jit
 def _pack_bool_kernel(
     mask_ptr,
@@ -44,9 +42,7 @@ def _pack_bool_kernel(
     )
 
 
-@configured('mpnn_edge_dropout_bwd_packed_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_ELEMENTS=256, num_warps=4, num_stages=2))
+@configured("mpnn_edge_dropout_bwd_packed_triton", key=["shape_key"], default=dict(BLOCK_ELEMENTS=256, num_warps=4, num_stages=2))
 @triton.jit
 def _packed_dropout_backward_kernel(
     grad_output_ptr,
@@ -129,9 +125,7 @@ def _backward_op(
     ):
         raise ValueError("edge dropout backward received an invalid packed mask")
     grad_input = torch.empty_like(grad_output)
-    _packed_dropout_backward_kernel[
-        lambda meta: (triton.cdiv(grad_output.numel(), meta["BLOCK_ELEMENTS"]),)
-    ](
+    _packed_dropout_backward_kernel[lambda meta: (triton.cdiv(grad_output.numel(), meta["BLOCK_ELEMENTS"]),)](
         grad_output,
         packed,
         grad_input,

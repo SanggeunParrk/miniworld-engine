@@ -109,8 +109,9 @@ def _bwd_fake(dy, x, w, mean, rstd, wgrad):
 
 
 @opaque(fake=_bwd_fake, name="layernorm_general_bwd")
-def _bwd(dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor,
-         wgrad: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _bwd(
+    dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor, wgrad: bool
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """LayerNorm backward from the saved mean / rstd. (dx, dw, db); the affine gradients only when wgrad."""
     tpr, ch, vec = config(x.shape[1], x.element_size())
     dx, dw, db = _ext().bwd(dy, x, w, mean, rstd, bool(wgrad), False, tpr, ch, vec, 0)
@@ -148,8 +149,13 @@ def rows_serves(x: torch.Tensor) -> bool:
     activations from 4 096 rows the staged kernel (tiles of U rows, a whole number of 16-byte chunks, copied through shared memory),
     otherwise a warp per row; backward: a warp per row, persistent. The general kernels keep every other width."""
     n = x.shape[-1]
-    return (x.is_cuda and x.dtype in DTYPES and (n * x.element_size()) % 16 != 0 and 32 <= n <= ROWS_MAX_N
-            and torch.cuda.get_device_capability(x.device) == (9, 0))
+    return (
+        x.is_cuda
+        and x.dtype in DTYPES
+        and (n * x.element_size()) % 16 != 0
+        and 32 <= n <= ROWS_MAX_N
+        and torch.cuda.get_device_capability(x.device) == (9, 0)
+    )
 
 
 def _rows_fwd_fake(x, w, b, eps, save):
@@ -171,8 +177,9 @@ def _rows_bwd_fake(dy, x, w, mean, rstd, wgrad):
 
 
 @opaque(fake=_rows_bwd_fake, name="layernorm_rows_bwd_sm90")
-def _rows_bwd(dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor,
-              wgrad: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _rows_bwd(
+    dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor, wgrad: bool
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Row-kernel LayerNorm backward from the saved mean / rstd: (dx, dw, db), the affine gradients (fp32) only when ``wgrad``."""
     return tuple(_ext().rows_bwd(dy, x, w, mean, rstd, bool(wgrad), 0, 0))
 

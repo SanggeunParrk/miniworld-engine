@@ -22,6 +22,7 @@ activation tiles in the kernel +17 (launches), the same with the rounded weights
   kernel, read by the squeeze kernel as a pre-rounded A operand); rounding is idempotent, so a cuBLAS GEMM that reads it sees the operand it would
   have rounded itself.
 """
+
 # pyright: reportArgumentType=false
 # (file-wide, for the Triton parts only: constexpr parameters take plain defaults and plain launch values, `tl.dot` takes a constexpr dtype;
 # a line ignore inside a @triton.jit body would change its source text, which keys the Triton cache of every kernel that calls it)
@@ -74,8 +75,15 @@ def tf32_grid_tile(x):
 
 
 @triton.jit
-def tf32_dot(a, b, acc=None, input_precision: tl.constexpr = "tf32", out_dtype: tl.constexpr = tl.float32,
-             pre_a: tl.constexpr = False, pre_b: tl.constexpr = False):
+def tf32_dot(
+    a,
+    b,
+    acc=None,
+    input_precision: tl.constexpr = "tf32",
+    out_dtype: tl.constexpr = tl.float32,
+    pre_a: tl.constexpr = False,
+    pre_b: tl.constexpr = False,
+):
     """``tl.dot(a, b, acc)`` whose fp32 operands are rounded to nearest first when ``input_precision`` is ``"tf32"`` (unless ``pre_a`` /
     ``pre_b``: that operand was rounded by the launcher or the kernel that wrote it)."""
     if input_precision == "tf32":
@@ -130,7 +138,7 @@ def tf32_grid_many(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
     blocks = 0
     device = None
     for i, t in enumerate(tensors):
-        flip = t.ndim == 2 and not t.is_contiguous() and t.t().is_contiguous()      # a transposed weight view: round the dense buffer
+        flip = t.ndim == 2 and not t.is_contiguous() and t.t().is_contiguous()  # a transposed weight view: round the dense buffer
         s = t.t() if flip else t
         if s.dtype is torch.float32 and s.is_contiguous() and s.is_cuda and s.numel() < 2**31:
             o = torch.empty_like(s)
@@ -142,7 +150,7 @@ def tf32_grid_many(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
             out[i] = tf32_grid(t)
     if not args:
         return tuple(cast("list[torch.Tensor]", out))  # every slot is set above
-    pad = args[-3:]                       # unused slots: re-read the last tensor's pointers with n = 0
+    pad = args[-3:]  # unused slots: re-read the last tensor's pointers with n = 0
     pad = [pad[0], pad[1], 0]
     while len(args) < 3 * _MAX_MANY:
         args += pad
@@ -166,7 +174,7 @@ def tf32_cached(sources: tuple[torch.Tensor, ...], build):
     if torch.is_grad_enabled():
         return build()
     bases = [t._base if t._base is not None else t for t in sources]
-    key = tuple(id(b) for b in bases)                       # one entry per set of parameters: a new version replaces the old one
+    key = tuple(id(b) for b in bases)  # one entry per set of parameters: a new version replaces the old one
     stamp = tuple((t._version, tuple(t.shape), t.stride(), t.storage_offset(), t.dtype) for t in sources)
     hit = _CACHE.get(key)
     if hit is not None and hit[1] == stamp and all(r() is b for r, b in zip(hit[0], bases, strict=True)):
@@ -175,5 +183,9 @@ def tf32_cached(sources: tuple[torch.Tensor, ...], build):
     if not torch.cuda.is_current_stream_capturing():
         if len(_CACHE) >= _CACHE_MAX:
             _CACHE.pop(next(iter(_CACHE)))
-        _CACHE[key] = (tuple(weakref.ref(b, lambda _, k=key: _CACHE.pop(k, None)) for b in bases), stamp, value)     # a dead source evicts its entry
+        _CACHE[key] = (
+            tuple(weakref.ref(b, lambda _, k=key: _CACHE.pop(k, None)) for b in bases),
+            stamp,
+            value,
+        )  # a dead source evicts its entry
     return value

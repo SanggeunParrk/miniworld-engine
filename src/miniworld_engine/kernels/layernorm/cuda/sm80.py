@@ -268,15 +268,9 @@ def layernorm(
         x2 = x2.contiguous()
     rs = None if row_scale is None else row_scale.reshape(-1).to(x2.dtype).contiguous()
     grad = torch.is_grad_enabled() and (
-        x.requires_grad
-        or (weight is not None and weight.requires_grad)
-        or (bias is not None and bias.requires_grad)
+        x.requires_grad or (weight is not None and weight.requires_grad) or (bias is not None and bias.requires_grad)
     )
-    y = (
-        _LayerNormTrain.apply(x2, weight, bias, rs, eps)
-        if grad
-        else _layernorm_fwd(x2, weight, bias, rs, eps)
-    )
+    y = _LayerNormTrain.apply(x2, weight, bias, rs, eps) if grad else _layernorm_fwd(x2, weight, bias, rs, eps)
     return y.view(shape)
 
 
@@ -295,7 +289,5 @@ def layernorm_backward(
         x.reshape(-1, shape[-1]).contiguous(),
         dy.reshape(-1, shape[-1]).contiguous(),
     )
-    dx, dw, db = _layernorm_train_bwd(
-        dy2, x2, weight, weight, row_scale, mean, rstd, True, True
-    )
+    dx, dw, db = _layernorm_train_bwd(dy2, x2, weight, weight, row_scale, mean, rstd, True, True)
     return dx.view(shape), dw, db

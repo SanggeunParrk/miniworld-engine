@@ -150,9 +150,7 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()) -> Callable[[
 
     def decorate(fn: _F) -> _F:
         if fake is None:
-            raise ValueError(
-                f"opaque() needs a fake implementation for "
-                f"{getattr(fn, '__qualname__', fn.__name__)}; pass opaque(fake=...)")
+            raise ValueError(f"opaque() needs a fake implementation for {getattr(fn, '__qualname__', fn.__name__)}; pass opaque(fake=...)")
         qualname = f"miniworld_engine::{_op_name(fn, name)}"
         cached = _REGISTERED.get(qualname)
         if cached is not None:

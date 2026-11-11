@@ -19,8 +19,19 @@ from miniworld_engine.measure import config as cfgmod
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 
 #: the major classes first (the issue list), then every other requirements class with an engine backend
-MAJOR = ("TriangleMultiplication", "TriangleAttention", "AttentionPairBias", "Transition", "OuterProductMean", "MSAPairWeightedAveraging",
-         "LayerNorm", "TokenDiTProtenix", "AtomDiTProtenix", "SWAAtomTransformer", "InputFeatureEmbedder")
+MAJOR = (
+    "TriangleMultiplication",
+    "TriangleAttention",
+    "AttentionPairBias",
+    "Transition",
+    "OuterProductMean",
+    "MSAPairWeightedAveraging",
+    "LayerNorm",
+    "TokenDiTProtenix",
+    "AtomDiTProtenix",
+    "SWAAtomTransformer",
+    "InputFeatureEmbedder",
+)
 _EVERY = dict.fromkeys(r["module"] for _, r in cfgmod.rows(cfgmod.from_dict({"modules": "all"})))
 MODULES = (*MAJOR, *(m for m in _EVERY if m not in MAJOR and {"cuda", "triton"} & set(cfgmod.module_class(m).backends)))
 BACKENDS = ("cuda", "triton")
@@ -28,20 +39,37 @@ BACKENDS = ("cuda", "triton")
 #: round-off of the gold and is meaningless (the reference itself is ~1e8 off). The H100 tokens record the same RED (r114 / r115
 #: L1024 float32 train, cuda and triton). An issue of the error measure on a zero gradient, not of the kernels.
 ZERO_GRADIENTS = {
-    ("AtomDiTRoseTTAFold3", "grad:attention.norm_key.bias"):
-        "RF3 FlatQKNorm key-LayerNorm bias: q_h . b_h shifts every logit of a query row equally and softmax is shift-invariant, so the "
-        "gold gradient is fp64 round-off and max|x - gold| / max|gold| explodes (err_pytorch ~6e8); measure-rule degeneracy, see report",
+    (
+        "AtomDiTRoseTTAFold3",
+        "grad:attention.norm_key.bias",
+    ): "RF3 FlatQKNorm key-LayerNorm bias: q_h . b_h shifts every logit of a query row equally and softmax is shift-invariant, so the "
+    "gold gradient is fp64 round-off and max|x - gold| / max|gold| explodes (err_pytorch ~6e8); measure-rule degeneracy, see report",
 }
 
 
 def _config(module: str) -> cfgmod.Config:
     first = next(n for n, r in cfgmod.rows(cfgmod.from_dict({"modules": [module]})))
-    return cfgmod.from_dict({"modules": [module], "backends": list(BACKENDS), "rows": [first], "lengths": "min", "depths": "min",
-                             "samples": "min", "device": "cuda", "seed": 0})
+    return cfgmod.from_dict(
+        {
+            "modules": [module],
+            "backends": list(BACKENDS),
+            "rows": [first],
+            "lengths": "min",
+            "depths": "min",
+            "samples": "min",
+            "device": "cuda",
+            "seed": 0,
+        }
+    )
 
 
-CASES = [(module, case, backend) for module in MODULES for case in cfgmod.cases(_config(module))
-         for backend in BACKENDS if backend in case.cls.backends]
+CASES = [
+    (module, case, backend)
+    for module in MODULES
+    for case in cfgmod.cases(_config(module))
+    for backend in BACKENDS
+    if backend in case.cls.backends
+]
 
 
 def _kw(case: cfgmod.Case) -> str:
@@ -56,8 +84,9 @@ def _records(module: str, label: str) -> dict[str, dict]:
     return {r["backend"]: r for r in accuracy.measure_case(case, cfg, device="cuda")}
 
 
-@pytest.mark.parametrize(("module", "case", "backend"), CASES, ids=[f"{c.module}-r{c.row}-{_kw(c)}-L{c.length}-{c.dtype}-{c.mode}-{b}"
-                                                                     for _, c, b in CASES])
+@pytest.mark.parametrize(
+    ("module", "case", "backend"), CASES, ids=[f"{c.module}-r{c.row}-{_kw(c)}-L{c.length}-{c.dtype}-{c.mode}-{b}" for _, c, b in CASES]
+)
 def test_accuracy(module: str, case: cfgmod.Case, backend: str):
     rec = _records(module, case.label)[backend]
     status = rec["status"]
@@ -66,5 +95,7 @@ def test_accuracy(module: str, case: cfgmod.Case, backend: str):
     assert status == "measured", f"{status}: {rec.get('reason')}"
     if rec["light"] == "RED" and (case.module, rec["tensor"]) in ZERO_GRADIENTS:
         pytest.xfail(ZERO_GRADIENTS[(case.module, rec["tensor"])])
-    assert rec["light"] != "RED", (f"{case.label} {backend}: {rec['light']} on {rec['tensor']}: err {rec['err_backend']:.3e}, "
-                                   f"pytorch {rec['err_pytorch']:.3e}, tol {rec['tol']:.3e}")
+    assert rec["light"] != "RED", (
+        f"{case.label} {backend}: {rec['light']} on {rec['tensor']}: err {rec['err_backend']:.3e}, "
+        f"pytorch {rec['err_pytorch']:.3e}, tol {rec['tol']:.3e}"
+    )

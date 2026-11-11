@@ -42,7 +42,6 @@ import triton.language as tl
 from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many
 
 
-
 # fp32 matmul precision policy (shared idea with layernorm_linear/te_style).
 _FP32_MATMUL_PRECISION = "high"  # "high" → TF32 (fast); "highest" → true fp32
 
@@ -56,7 +55,6 @@ def set_fp32_matmul_precision(mode: str) -> None:
 
 # bf16 operands (fp32 accumulate) for the fp32 GEMM — ~1.6× faster than TF32, cos≈0.9999.
 _GEMM_BF16 = False
-
 
 
 @contextlib.contextmanager
@@ -99,9 +97,9 @@ def _cond_affine_fake(cond, lnw, eps, out_dtype=None, shape_key=None):
 
 
 @opaque(fake=_cond_affine_fake, name="adaln_cond_affine")
-def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
-                 out_dtype: torch.dtype | None = None,
-                 shape_key: int | None = None) -> torch.Tensor:
+def _cond_affine(
+    cond: torch.Tensor, lnw: torch.Tensor, eps: float, out_dtype: torch.dtype | None = None, shape_key: int | None = None
+) -> torch.Tensor:
     """cond_aff = LayerNorm(cond) * lnw (no bias), materialized in ``out_dtype`` if one is given.
     Step 1 of the materialize path; the kernel is fused3's ``_ln_kernel`` with HAS_W=True, and the
     dtype argument lets a caller land cond_aff straight in the GEMM's operand dtype.
@@ -119,10 +117,24 @@ def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     # N is tl.constexpr now (it drives the BLOCK_N >= N fold) -> pass a plain python int.
     _ln_kernel[grid](
-        cond, aff, lnw, M, int(N), eps,
-        cond.stride(0), cond.stride(1), aff.stride(0), aff.stride(1),
-        aff, aff, aff, 0, 0.0, 0,   # no second reduction
-        HAS_W=True, shape_key=pack(shape_key, N=N),
+        cond,
+        aff,
+        lnw,
+        M,
+        int(N),
+        eps,
+        cond.stride(0),
+        cond.stride(1),
+        aff.stride(0),
+        aff.stride(1),
+        aff,
+        aff,
+        aff,
+        0,
+        0.0,
+        0,  # no second reduction
+        HAS_W=True,
+        shape_key=pack(shape_key, N=N),
     )
     return aff
 
@@ -130,14 +142,23 @@ def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
 def _cond_affine_stats_fake(cond, lnw, eps, x, eps_x, out_dtype=None, shape_key=None):
     """(cond_aff (M, NC), rstd (M,), c1 (M,)) -- the two statistics are fp32 whatever x's dtype."""
     m = cond.shape[0]
-    return (cond.new_empty(cond.shape, dtype=out_dtype or cond.dtype),
-            cond.new_empty((m,), dtype=torch.float32), cond.new_empty((m,), dtype=torch.float32))
+    return (
+        cond.new_empty(cond.shape, dtype=out_dtype or cond.dtype),
+        cond.new_empty((m,), dtype=torch.float32),
+        cond.new_empty((m,), dtype=torch.float32),
+    )
 
 
 @opaque(fake=_cond_affine_stats_fake, name="adaln_cond_affine_stats")
-def _cond_affine_stats(cond: torch.Tensor, lnw: torch.Tensor, eps: float, x: torch.Tensor, eps_x: float,
-                       out_dtype: torch.dtype | None = None, shape_key: int | None = None,
-                       ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _cond_affine_stats(
+    cond: torch.Tensor,
+    lnw: torch.Tensor,
+    eps: float,
+    x: torch.Tensor,
+    eps_x: float,
+    out_dtype: torch.dtype | None = None,
+    shape_key: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """``_cond_affine`` and ``layernorm_stats_triton(x)`` in ONE launch: cond_aff = LN(cond) * lnw, and x's (rstd, c1 = mean * rstd).
     The two reductions are independent rows of the same grid, so the step before the GEMM costs one launch instead of two."""
     M, N = cond.shape
@@ -154,10 +175,25 @@ def _cond_affine_stats(cond: torch.Tensor, lnw: torch.Tensor, eps: float, x: tor
     c1 = torch.empty(M, device=cond.device, dtype=torch.float32)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     _ln_kernel[grid](
-        cond, aff, lnw, M, int(N), eps,
-        cond.stride(0), cond.stride(1), aff.stride(0), aff.stride(1),
-        x, rstd, c1, int(N2), eps_x, x.stride(0),
-        HAS_W=True, shape_key=pack(shape_key, N=N, N2=N2), HAS_STATS=True,
+        cond,
+        aff,
+        lnw,
+        M,
+        int(N),
+        eps,
+        cond.stride(0),
+        cond.stride(1),
+        aff.stride(0),
+        aff.stride(1),
+        x,
+        rstd,
+        c1,
+        int(N2),
+        eps_x,
+        x.stride(0),
+        HAS_W=True,
+        shape_key=pack(shape_key, N=N, N2=N2),
+        HAS_STATS=True,
     )
     return aff, rstd, c1
 
@@ -165,14 +201,11 @@ def _cond_affine_stats(cond: torch.Tensor, lnw: torch.Tensor, eps: float, x: tor
 # ───── step 3: y = sigmoid(scale)·LN(x) + bias  (fused LN(x) + gate epilogue) ─────
 
 
-@configured('adaln_epilogue_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=2, num_stages=2))
+@configured("adaln_epilogue_triton", key=["shape_key"], default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=2, num_stages=2))
 @triton.jit
 def _adaln_epilogue_kernel(
-    X, SB, Y, M, N: tl.constexpr, eps,
-    sx0, sx1, ss0, ss1, sy0, sy1,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key):
+    X, SB, Y, M, N: tl.constexpr, eps, sx0, sx1, ss0, ss1, sy0, sy1, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key
+):
     # SB is (M, 2N): cols [0:N] = scale (incl. scale_b), [N:2N] = bias.
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -198,8 +231,7 @@ def _adaln_epilogue_kernel(
         rstd = 1.0 / tl.sqrt(var + eps)
         x_hat = xc * rstd[:, None]
         scale = tl.load(SB + rm[:, None] * ss0 + cols[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
-        bias = tl.load(SB + rm[:, None] * ss0 + (cols[None, :] + N) * ss1,
-                       mask=mask, other=0.0).to(tl.float32)
+        bias = tl.load(SB + rm[:, None] * ss0 + (cols[None, :] + N) * ss1, mask=mask, other=0.0).to(tl.float32)
         y = tl.sigmoid(scale) * x_hat + bias
         tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
     else:
@@ -220,8 +252,7 @@ def _adaln_epilogue_kernel(
             x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
             x_hat = (x - mean[:, None]) * rstd[:, None]
             scale = tl.load(SB + rm[:, None] * ss0 + cols[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
-            bias = tl.load(SB + rm[:, None] * ss0 + (cols[None, :] + N) * ss1,
-                           mask=mask, other=0.0).to(tl.float32)
+            bias = tl.load(SB + rm[:, None] * ss0 + (cols[None, :] + N) * ss1, mask=mask, other=0.0).to(tl.float32)
             y = tl.sigmoid(scale) * x_hat + bias
             tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
 
@@ -232,8 +263,7 @@ def _adaln_epilogue_fake(x, sb, eps, shape_key=None):
 
 
 @opaque(fake=_adaln_epilogue_fake, name="adaln_inference_epilogue")
-def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float,
-                    shape_key: int | None = None) -> torch.Tensor:
+def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float, shape_key: int | None = None) -> torch.Tensor:
     """y = sigmoid(scale)*LayerNorm(x) + bias, taking scale and bias from the packed (M, 2N) sb.
     Step 3 of the materialize inference path: fusing LN(x) into the gate keeps
     x_norm out of HBM, and nothing is saved because inference has no backward.
@@ -251,8 +281,18 @@ def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float,
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     # N is tl.constexpr now (it drives the BLOCK_N >= N fold) -> pass a plain python int.
     _adaln_epilogue_kernel[grid](
-        x, sb, y, M, int(N), eps,
-        x.stride(0), x.stride(1), sb.stride(0), sb.stride(1), y.stride(0), y.stride(1),
+        x,
+        sb,
+        y,
+        M,
+        int(N),
+        eps,
+        x.stride(0),
+        x.stride(1),
+        sb.stride(0),
+        sb.stride(1),
+        y.stride(0),
+        y.stride(1),
         shape_key=pack(shape_key, N=N),
     )
     return y
@@ -277,16 +317,34 @@ def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float,
 _THIN_K_TILE = 32
 
 
-@configured('adaln_gemm_gate_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2))
+@configured(
+    "adaln_gemm_gate_triton", key=["shape_key"], default=dict(BLOCK_M=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2)
+)
 @triton.jit
 def _adaln_gemm_gate_kernel(
-    CondN, SW, SB, BW, X, Rstd, C1, Y,
-    M, NX: tl.constexpr, NC: tl.constexpr,
-    scn0, sw0, sw1, sbw0, sbw1, sx0, sy0,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    GROUP_M: tl.constexpr, shape_key,
+    CondN,
+    SW,
+    SB,
+    BW,
+    X,
+    Rstd,
+    C1,
+    Y,
+    M,
+    NX: tl.constexpr,
+    NC: tl.constexpr,
+    scn0,
+    sw0,
+    sw1,
+    sbw0,
+    sbw1,
+    sx0,
+    sy0,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    shape_key,
     PRE: tl.constexpr = False,
 ):
     """y = sigmoid(CondN @ SW + SB) * (x*rstd - c1) + CondN @ BW, one program per output tile.
@@ -306,8 +364,7 @@ def _adaln_gemm_gate_kernel(
     block looping over all of NX. That was worth 0.776 -> 0.580 ms on its own: a per-row program
     serialises NX/BLOCK_N iterations inside one CTA, which is parallelism left on the floor.
     """
-    pid_m, pid_n = tile_order(tl.program_id(0), tl.cdiv(M, BLOCK_M), tl.cdiv(NX, BLOCK_N),
-                              GROUP_M)
+    pid_m, pid_n = tile_order(tl.program_id(0), tl.cdiv(M, BLOCK_M), tl.cdiv(NX, BLOCK_N), GROUP_M)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     rmask = rows < M
@@ -318,12 +375,9 @@ def _adaln_gemm_gate_kernel(
     for k0 in range(0, NC, BLOCK_K):
         kc = k0 + tl.arange(0, BLOCK_K)
         kmask = kc < NC
-        a = tl.load(CondN + rows[:, None] * scn0 + kc[None, :],
-                    mask=rmask[:, None] & kmask[None, :], other=0.0)
-        w_s = tl.load(SW + kc[:, None] * sw0 + cols[None, :] * sw1,
-                      mask=kmask[:, None] & nmask[None, :], other=0.0)
-        w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :] * sbw1,
-                      mask=kmask[:, None] & nmask[None, :], other=0.0)
+        a = tl.load(CondN + rows[:, None] * scn0 + kc[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0)
+        w_s = tl.load(SW + kc[:, None] * sw0 + cols[None, :] * sw1, mask=kmask[:, None] & nmask[None, :], other=0.0)
+        w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :] * sbw1, mask=kmask[:, None] & nmask[None, :], other=0.0)
         scale += tf32_dot(a, w_s, out_dtype=tl.float32, pre_b=PRE)
         bias += tf32_dot(a, w_b, out_dtype=tl.float32, pre_b=PRE)
 
@@ -334,8 +388,7 @@ def _adaln_gemm_gate_kernel(
     # Break a Triton 3.6 / ptxas 12.8 epilogue codegen pattern on SM90: the
     # 128x256x32, four-warp, one-stage tile otherwise issues a misaligned
     # shared-memory vector store. This FP32 identity preserves every input bit.
-    xv = tl.inline_asm_elementwise("mov.b32 $0, $1;", constraints="=f,f",
-                                   args=[xv], dtype=tl.float32, is_pure=True, pack=1)
+    xv = tl.inline_asm_elementwise("mov.b32 $0, $1;", constraints="=f,f", args=[xv], dtype=tl.float32, is_pure=True, pack=1)
     rstd = tl.load(Rstd + rows, mask=rmask, other=0.0)
     c1 = tl.load(C1 + rows, mask=rmask, other=0.0)
     sb = tl.load(SB + cols, mask=nmask, other=0.0).to(tl.float32)
@@ -349,9 +402,16 @@ def _adaln_gemm_gate_fake(cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, sh
 
 
 @opaque(fake=_adaln_gemm_gate_fake, name="adaln_gemm_gate")
-def _adaln_gemm_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: torch.Tensor,
-                     bias_wt: torch.Tensor, x: torch.Tensor, rstd: torch.Tensor,
-                     c1: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
+def _adaln_gemm_gate(
+    cond_n: torch.Tensor,
+    scale_wt: torch.Tensor,
+    scale_bias: torch.Tensor,
+    bias_wt: torch.Tensor,
+    x: torch.Tensor,
+    rstd: torch.Tensor,
+    c1: torch.Tensor,
+    shape_key: int | None = None,
+) -> torch.Tensor:
     """Launcher for :func:`_adaln_gemm_gate_kernel`. ``scale_wt``/``bias_wt`` are (NC, NX)."""
     M, NX = x.shape
     NC = cond_n.shape[-1]
@@ -361,16 +421,30 @@ def _adaln_gemm_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: t
             "matrix, and M alone cannot say whether it is L or L*L. Compute the key at the "
             "caller that still holds the pre-flatten shape and pass it down."
         )
-    pre = x.dtype is torch.float32     # TF32 operands rounded to nearest here, not per tile in the kernel (kernels/_tf32.py)
+    pre = x.dtype is torch.float32  # TF32 operands rounded to nearest here, not per tile in the kernel (kernels/_tf32.py)
     if pre:
         scale_wt, bias_wt = tf32_cached((scale_wt, bias_wt), lambda: tf32_grid_many(scale_wt, bias_wt))
     y = torch.empty(M, NX, device=x.device, dtype=x.dtype)
     grid = lambda META: tile_grid(M, NX, META["BLOCK_M"], META["BLOCK_N"])  # noqa: E731
     _adaln_gemm_gate_kernel[grid](
-        cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, y,
-        M, int(NX), int(NC),
-        cond_n.stride(0), scale_wt.stride(0), scale_wt.stride(1), bias_wt.stride(0), bias_wt.stride(1),
-        x.stride(0), y.stride(0),
+        cond_n,
+        scale_wt,
+        scale_bias,
+        bias_wt,
+        x,
+        rstd,
+        c1,
+        y,
+        M,
+        int(NX),
+        int(NC),
+        cond_n.stride(0),
+        scale_wt.stride(0),
+        scale_wt.stride(1),
+        bias_wt.stride(0),
+        bias_wt.stride(1),
+        x.stride(0),
+        y.stride(0),
         shape_key=pack(shape_key, NX=NX, NC=NC),
         PRE=pre,
     )
@@ -380,28 +454,52 @@ def _adaln_gemm_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: t
 def _cond_affine_stats_saved_fake(cond, lnw, eps, x, eps_x, out_dtype=None, shape_key=None):
     """(cond_aff (M, NC), rstd_x, c1, mean_c, rstd_c): the four statistics are (M,) fp32 whatever the dtype of x and cond."""
     m = cond.shape[0]
-    f = lambda: cond.new_empty((m,), dtype=torch.float32)   # noqa: E731
+    f = lambda: cond.new_empty((m,), dtype=torch.float32)  # noqa: E731
     return (cond.new_empty(cond.shape, dtype=out_dtype or cond.dtype), f(), f(), f(), f())
 
 
 @opaque(fake=_cond_affine_stats_saved_fake, name="adaln_cond_affine_stats_saved")
-def _cond_affine_stats_saved(cond: torch.Tensor, lnw: torch.Tensor, eps: float, x: torch.Tensor, eps_x: float,
-                             out_dtype: torch.dtype | None = None, shape_key: int | None = None,
-                             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _cond_affine_stats_saved(
+    cond: torch.Tensor,
+    lnw: torch.Tensor,
+    eps: float,
+    x: torch.Tensor,
+    eps_x: float,
+    out_dtype: torch.dtype | None = None,
+    shape_key: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """``_cond_affine_stats`` for the training forward: (cond_aff, rstd_x, c1, mean_c, rstd_c) -- the mean and rstd of LN(cond) are what its backward reads."""
     M, N = cond.shape
     N2 = x.shape[1]
     if shape_key is None:
         raise ValueError("shape_key is required here: compute it at the caller that still holds the pre-flatten shape")
     aff = torch.empty(M, N, device=cond.device, dtype=out_dtype or cond.dtype)
-    f = lambda: torch.empty(M, device=cond.device, dtype=torch.float32)   # noqa: E731
+    f = lambda: torch.empty(M, device=cond.device, dtype=torch.float32)  # noqa: E731
     rstd, c1, mean_c, rstd_c = f(), f(), f(), f()
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     _ln_kernel[grid](
-        cond, aff, lnw, M, int(N), eps,
-        cond.stride(0), cond.stride(1), aff.stride(0), aff.stride(1),
-        x, rstd, c1, int(N2), eps_x, x.stride(0),
-        HAS_W=True, shape_key=pack(shape_key, N=N, N2=N2), HAS_STATS=True, MC=mean_c, RC=rstd_c, SAVE_C=True,
+        cond,
+        aff,
+        lnw,
+        M,
+        int(N),
+        eps,
+        cond.stride(0),
+        cond.stride(1),
+        aff.stride(0),
+        aff.stride(1),
+        x,
+        rstd,
+        c1,
+        int(N2),
+        eps_x,
+        x.stride(0),
+        HAS_W=True,
+        shape_key=pack(shape_key, N=N, N2=N2),
+        HAS_STATS=True,
+        MC=mean_c,
+        RC=rstd_c,
+        SAVE_C=True,
     )
     return aff, rstd, c1, mean_c, rstd_c
 
@@ -409,15 +507,15 @@ def _cond_affine_stats_saved(cond: torch.Tensor, lnw: torch.Tensor, eps: float, 
 def adaln_inference_materialize(
     x: torch.Tensor,
     cond: torch.Tensor,
-    cond_ln_weight: torch.Tensor,   # lnw, (NC,)
-    scale_weight: torch.Tensor,     # to_scale.weight, (NX, NC)
-    scale_bias: torch.Tensor,       # to_scale.bias, (NX,)
-    bias_weight: torch.Tensor,      # to_bias.weight, (NX, NC)
+    cond_ln_weight: torch.Tensor,  # lnw, (NC,)
+    scale_weight: torch.Tensor,  # to_scale.weight, (NX, NC)
+    scale_bias: torch.Tensor,  # to_scale.bias, (NX,)
+    bias_weight: torch.Tensor,  # to_bias.weight, (NX, NC)
     eps_x: float,
     eps_cond: float,
     *,
-    weight_cat: torch.Tensor | None = None,   # optional cached cat([Wscale,Wbias],0) (2NX,NC)
-    bias_cat: torch.Tensor | None = None,      # optional cached cat([scale_b,0])     (2NX,)
+    weight_cat: torch.Tensor | None = None,  # optional cached cat([Wscale,Wbias],0) (2NX,NC)
+    bias_cat: torch.Tensor | None = None,  # optional cached cat([scale_b,0])     (2NX,)
 ) -> torch.Tensor:
     """Inference adaLN via materialize+cuBLAS (best at large d, e.g. token d=768)."""
     orig_x_shape = x.shape
@@ -431,8 +529,7 @@ def adaln_inference_materialize(
 
     # L from the pre-flatten shapes (shape[-2]), read before the reshapes above discarded them.
     key_x = atom_key(length_of(orig_x_shape))
-    cond_aff = _cond_affine(cond2d, cond_ln_weight, eps_cond,
-                            shape_key=atom_key(length_of(cond.shape)))
+    cond_aff = _cond_affine(cond2d, cond_ln_weight, eps_cond, shape_key=atom_key(length_of(cond.shape)))
 
     if weight_cat is None:
         weight_cat = torch.cat([scale_weight, bias_weight], dim=0)  # (2NX, NC)
@@ -456,8 +553,6 @@ def adaln_inference_materialize(
 # training fwd kernel pays — a pure win in the memory-bound small-d regime.
 
 
-
-
 # USE_LOW is deliberately NOT in the key. It picks the tl.dot operand precision (16-bit
 # tensor-core MMA vs the fp32 dot), so it IS a code path -- but it is set at the one launch site
 # below as `x.dtype in (bfloat16, float16)`, a pure function of X's dtype, and X is the first
@@ -465,15 +560,35 @@ def adaln_inference_materialize(
 # autotune/cache.py). The dtype component is strictly finer (it separates bf16 from fp16, which
 # USE_LOW does not), so keying on USE_LOW as well would add no partition. Unlike the training
 # kernels in main.py, nothing here consults autocast, so the two cannot diverge.
-@configured('adaln_fwd_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K_NC=32, BLOCK_K_NX=32, BLOCK_M1=64, num_warps=4, num_stages=2))
+@configured("adaln_fwd_triton", key=["shape_key"], default=dict(BLOCK_K_NC=32, BLOCK_K_NX=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _adaln_fused_kernel(  # noqa: PLR0915
-    X, Cond, LnW, ScaleW, ScaleB, BiasW, Y,
-    sxr, sxc, scr, scc, swr, swc, sbwr, sbwc, syr, syc,
-    M, NX: tl.constexpr, NC: tl.constexpr, eps_x, eps_cond,
-    USE_LOW: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K_NX: tl.constexpr, BLOCK_K_NC: tl.constexpr,
+    X,
+    Cond,
+    LnW,
+    ScaleW,
+    ScaleB,
+    BiasW,
+    Y,
+    sxr,
+    sxc,
+    scr,
+    scc,
+    swr,
+    swc,
+    sbwr,
+    sbwc,
+    syr,
+    syc,
+    M,
+    NX: tl.constexpr,
+    NC: tl.constexpr,
+    eps_x,
+    eps_cond,
+    USE_LOW: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K_NX: tl.constexpr,
+    BLOCK_K_NC: tl.constexpr,
     shape_key,
     PRE: tl.constexpr = False,
 ):
@@ -538,10 +653,12 @@ def _adaln_fused_kernel(  # noqa: PLR0915
             cond_norm = (v - mean_c[:, None]) * rstd_c[:, None]
             lnw = tl.load(LnW + cc, mask=cc < NC, other=0.0).to(tl.float32)
             cond_aff = cond_norm * lnw[None, :]
-            sw = tl.load(ScaleW + (cc[:, None] * swc + xc[None, :] * swr),
-                         mask=(cc[:, None] < NC) & (xc[None, :] < NX), other=0.0).to(tl.float32)
-            bw = tl.load(BiasW + (cc[:, None] * sbwc + xc[None, :] * sbwr),
-                         mask=(cc[:, None] < NC) & (xc[None, :] < NX), other=0.0).to(tl.float32)
+            sw = tl.load(ScaleW + (cc[:, None] * swc + xc[None, :] * swr), mask=(cc[:, None] < NC) & (xc[None, :] < NX), other=0.0).to(
+                tl.float32
+            )
+            bw = tl.load(BiasW + (cc[:, None] * sbwc + xc[None, :] * sbwr), mask=(cc[:, None] < NC) & (xc[None, :] < NX), other=0.0).to(
+                tl.float32
+            )
             if USE_LOW:
                 cond_aff = cond_aff.to(X.dtype.element_ty)
                 sw = sw.to(X.dtype.element_ty)
@@ -554,8 +671,7 @@ def _adaln_fused_kernel(  # noqa: PLR0915
         tl.store(Y + yo, y.to(Y.dtype.element_ty), mask=xm)
 
 
-def _adaln_inference_fused_fake(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-                                eps_x, eps_cond):
+def _adaln_inference_fused_fake(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight, eps_x, eps_cond):
     """Same shape and dtype as x -- cond only supplies the scale/bias."""
     return torch.empty_like(x)
 
@@ -584,16 +700,35 @@ def adaln_inference_fused(
     nc = cond2d.shape[-1]
     y = torch.empty_like(x2d)
     use_low = x.dtype in (torch.bfloat16, torch.float16)
-    pre = x.dtype is torch.float32     # the weights are rounded to nearest here, once (kernels/_tf32.py)
+    pre = x.dtype is torch.float32  # the weights are rounded to nearest here, once (kernels/_tf32.py)
     if pre:
         scale_weight, bias_weight = tf32_cached((scale_weight, bias_weight), lambda: tf32_grid_many(scale_weight, bias_weight))
     grid = lambda META: (triton.cdiv(m, META["BLOCK_M1"]),)  # noqa: E731
     _adaln_fused_kernel[grid](
-        x2d, cond2d, cond_ln_weight, scale_weight, scale_bias, bias_weight, y,
-        x2d.stride(0), x2d.stride(1), cond2d.stride(0), cond2d.stride(1),
-        scale_weight.stride(0), scale_weight.stride(1),
-        bias_weight.stride(0), bias_weight.stride(1), y.stride(0), y.stride(1),
-        m, NX=nx, NC=nc, eps_x=eps_x, eps_cond=eps_cond, USE_LOW=use_low, PRE=pre,
+        x2d,
+        cond2d,
+        cond_ln_weight,
+        scale_weight,
+        scale_bias,
+        bias_weight,
+        y,
+        x2d.stride(0),
+        x2d.stride(1),
+        cond2d.stride(0),
+        cond2d.stride(1),
+        scale_weight.stride(0),
+        scale_weight.stride(1),
+        bias_weight.stride(0),
+        bias_weight.stride(1),
+        y.stride(0),
+        y.stride(1),
+        m,
+        NX=nx,
+        NC=nc,
+        eps_x=eps_x,
+        eps_cond=eps_cond,
+        USE_LOW=use_low,
+        PRE=pre,
         # L is x's pre-flatten shape[-2]; m = B*A is the row count, not the shape.
         shape_key=atom_key(length_of(orig_x_shape), NX=nx, NC=nc),
     )
@@ -622,15 +757,13 @@ def adaln_inference_fused(
 _FUSED_D_MAX = 256
 
 
-def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-                    eps_x, eps_cond, **kw):
+def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight, eps_x, eps_cond, **kw):
     """Dispatch: small d (≤256) → single fused kernel; wide d → LN(cond) + one fused GEMM+gate
     kernel (``adaln_inference_gemm_gate``) for 16-bit and TF32 fp32, else materialize + cuBLAS.
     ``kw`` (weight_cat/bias_cat) is forwarded to the materialize path so a caller with fixed
     weights can concatenate once."""
     if x.shape[-1] <= _FUSED_D_MAX:
-        return adaln_inference_fused(x, cond, cond_ln_weight, scale_weight, scale_bias,
-                                     bias_weight, eps_x, eps_cond)
+        return adaln_inference_fused(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight, eps_x, eps_cond)
     # Wide d: LN(cond) once, then ONE kernel for the projections and the gate.
     #
     # Measured on an A5000, bf16, the token shape the model presents (A=48, L=768, d_hidden=768,
@@ -661,17 +794,12 @@ def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weig
     # `torch.backends.cuda.matmul.allow_tf32`, so sending strict fp32 here would silently take
     # mantissa bits a user explicitly asked to keep. Strict fp32 stays on materialize, whose
     # cuBLAS GEMMs respect the flag.
-    if x.dtype in (torch.float16, torch.bfloat16) or (
-        x.dtype == torch.float32 and torch.backends.cuda.matmul.allow_tf32
-    ):
-        return adaln_inference_gemm_gate(x, cond, cond_ln_weight, scale_weight, scale_bias,
-                                         bias_weight, eps_x, eps_cond)
-    return adaln_inference_materialize(x, cond, cond_ln_weight, scale_weight, scale_bias,
-                                       bias_weight, eps_x, eps_cond, **kw)
+    if x.dtype in (torch.float16, torch.bfloat16) or (x.dtype == torch.float32 and torch.backends.cuda.matmul.allow_tf32):
+        return adaln_inference_gemm_gate(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight, eps_x, eps_cond)
+    return adaln_inference_materialize(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight, eps_x, eps_cond, **kw)
 
 
-def adaln_inference_gemm_gate(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-                             eps_x, eps_cond):
+def adaln_inference_gemm_gate(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight, eps_x, eps_cond):
     """LN(cond) + the statistics of x (one launch) -> one fused GEMM+gate kernel. The wide-d path.
 
     The weights are read in place: ``scale_weight.t()`` is a view of the (NX, NC) storage whose K axis is the contiguous one,

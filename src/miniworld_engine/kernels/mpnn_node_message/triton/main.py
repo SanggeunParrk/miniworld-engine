@@ -90,6 +90,7 @@ def _configs() -> list[triton.Config]:
 # change invalidates the entry via config_space_hash.  See the same block in the edge
 # tail kernel for why the grids are deliberately this wide.
 
+
 def _shape_key(groups: int, **axes: int) -> int:
     """The packed bucket for a node-message launch.
 
@@ -110,9 +111,7 @@ def _shape_key(groups: int, **axes: int) -> int:
     return both_key(groups, **axes)
 
 
-@configured('mpnn_node_message_fwd_gemm_triton',
-            key=["shape_key", "SAVE_PREACT"],
-            default=dict(GROUPS=16, num_warps=4, num_stages=2))
+@configured("mpnn_node_message_fwd_gemm_triton", key=["shape_key", "SAVE_PREACT"], default=dict(GROUPS=16, num_warps=4, num_stages=2))
 @triton.jit
 def _node_message_fwd_kernel(
     edge_ptr,
@@ -139,12 +138,8 @@ def _node_message_fwd_kernel(
     columns = tl.arange(0, WIDTH)
     window = tl.arange(0, BLOCK_M1)
     window_valid = window < NEIGHBORS
-    edge_weight = tl.load(
-        edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE
-    ).to(tl.bfloat16)
-    hidden_weight = tl.load(
-        hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
-    ).to(tl.bfloat16)
+    edge_weight = tl.load(edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE).to(tl.bfloat16)
+    hidden_weight = tl.load(hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH).to(tl.bfloat16)
     hidden_bias = tl.load(hidden_bias_ptr + columns).to(tl.bfloat16)
 
     for slot in range(GROUPS):
@@ -152,12 +147,8 @@ def _node_message_fwd_kernel(
         valid = window_valid & (group < groups_total)
         rows = group * NEIGHBORS + window
         offsets = rows[:, None] * WIDTH + columns[None, :]
-        edge = tl.load(edge_ptr + offsets, mask=valid[:, None], other=0.0).to(
-            tl.bfloat16
-        )
-        query = tl.load(
-            query_ptr + group * WIDTH + columns, mask=group < groups_total, other=0.0
-        ).to(tl.float32)
+        edge = tl.load(edge_ptr + offsets, mask=valid[:, None], other=0.0).to(tl.bfloat16)
+        query = tl.load(query_ptr + group * WIDTH + columns, mask=group < groups_total, other=0.0).to(tl.float32)
         neighbor_rows = tl.load(index_ptr + rows, mask=valid, other=0)
         neighbor = tl.load(
             neighbor_ptr + neighbor_rows[:, None] * WIDTH + columns[None, :],
@@ -170,9 +161,7 @@ def _node_message_fwd_kernel(
         preactivation = (query[None, :] + projected).to(tl.bfloat16).to(tl.float32)
         preactivation = (preactivation + neighbor).to(tl.bfloat16)
         activated = _gelu(preactivation.to(tl.float32)).to(tl.bfloat16)
-        hidden = (tl.dot(activated, hidden_weight) + hidden_bias[None, :]).to(
-            tl.bfloat16
-        )
+        hidden = (tl.dot(activated, hidden_weight) + hidden_bias[None, :]).to(tl.bfloat16)
         if SAVE_PREACT:
             tl.store(preactivation_ptr + offsets, preactivation, mask=valid[:, None])
             tl.store(hidden_ptr + offsets, hidden, mask=valid[:, None])
@@ -180,9 +169,7 @@ def _node_message_fwd_kernel(
         # FP32 accumulation; keep that boundary.
         gated = _gelu(hidden.to(tl.float32)).to(tl.bfloat16).to(tl.float32)
         weights = tl.load(mask_ptr + rows, mask=valid, other=0.0).to(tl.float32)
-        reduced = tl.sum(
-            tl.where(valid[:, None], gated * weights[:, None], 0.0), axis=0
-        )
+        reduced = tl.sum(tl.where(valid[:, None], gated * weights[:, None], 0.0), axis=0)
         tl.store(
             reduced_ptr + group * WIDTH + columns,
             reduced / neighbor_scale,
@@ -190,10 +177,12 @@ def _node_message_fwd_kernel(
         )
 
 
-@configured('mpnn_node_message_bwd_recompute_triton',
-            key=["shape_key"],
-            default=dict(GROUPS=16, num_warps=4, num_stages=2),
-            reset_to_zero=["grad_hidden_bias_ptr"])
+@configured(
+    "mpnn_node_message_bwd_recompute_triton",
+    key=["shape_key"],
+    default=dict(GROUPS=16, num_warps=4, num_stages=2),
+    reset_to_zero=["grad_hidden_bias_ptr"],
+)
 @triton.jit
 def _node_message_replay_kernel(
     grad_reduced_ptr,
@@ -233,12 +222,8 @@ def _node_message_replay_kernel(
     columns = tl.arange(0, WIDTH)
     window = tl.arange(0, BLOCK_M1)
     window_valid = window < NEIGHBORS
-    edge_weight = tl.load(
-        edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE
-    ).to(tl.bfloat16)
-    hidden_weight = tl.load(
-        hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
-    ).to(tl.bfloat16)
+    edge_weight = tl.load(edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE).to(tl.bfloat16)
+    hidden_weight = tl.load(hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH).to(tl.bfloat16)
     hidden_bias = tl.load(hidden_bias_ptr + columns).to(tl.bfloat16)
     grad_hidden_bias = tl.zeros((WIDTH,), tl.float32)
 
@@ -249,16 +234,10 @@ def _node_message_replay_kernel(
         valid = window_valid & alive
         rows = group * NEIGHBORS + window
         offsets = rows[:, None] * WIDTH + columns[None, :]
-        local_offsets = (local_group * NEIGHBORS + window)[:, None] * WIDTH + columns[
-            None, :
-        ]
+        local_offsets = (local_group * NEIGHBORS + window)[:, None] * WIDTH + columns[None, :]
 
-        edge = tl.load(edge_ptr + offsets, mask=valid[:, None], other=0.0).to(
-            tl.bfloat16
-        )
-        query = tl.load(query_ptr + group * WIDTH + columns, mask=alive, other=0.0).to(
-            tl.float32
-        )
+        edge = tl.load(edge_ptr + offsets, mask=valid[:, None], other=0.0).to(tl.bfloat16)
+        query = tl.load(query_ptr + group * WIDTH + columns, mask=alive, other=0.0).to(tl.float32)
         neighbor_rows = tl.load(index_ptr + rows, mask=valid, other=0)
         neighbor = tl.load(
             neighbor_ptr + neighbor_rows[:, None] * WIDTH + columns[None, :],
@@ -269,25 +248,15 @@ def _node_message_replay_kernel(
         preactivation = (query[None, :] + projected).to(tl.bfloat16).to(tl.float32)
         preactivation = (preactivation + neighbor).to(tl.bfloat16)
         activated = _gelu(preactivation.to(tl.float32)).to(tl.bfloat16)
-        hidden = (tl.dot(activated, hidden_weight) + hidden_bias[None, :]).to(
-            tl.bfloat16
-        )
+        hidden = (tl.dot(activated, hidden_weight) + hidden_bias[None, :]).to(tl.bfloat16)
 
         # The separate reduction-backward kernel rounds to BF16 before applying the
         # GELU derivative; keep that boundary.
-        grad_reduced = tl.load(
-            grad_reduced_ptr + group * WIDTH + columns, mask=alive, other=0.0
-        ).to(tl.float32)
+        grad_reduced = tl.load(grad_reduced_ptr + group * WIDTH + columns, mask=alive, other=0.0).to(tl.float32)
         weights = tl.load(mask_ptr + rows, mask=valid, other=0.0).to(tl.float32)
-        grad_gated = (grad_reduced[None, :] * weights[:, None] / neighbor_scale).to(
-            tl.bfloat16
-        )
-        grad_hidden = (
-            grad_gated.to(tl.float32) * _gelu_grad(hidden.to(tl.float32))
-        ).to(tl.bfloat16)
-        grad_hidden_bias += tl.sum(
-            tl.where(valid[:, None], grad_hidden.to(tl.float32), 0.0), axis=0
-        )
+        grad_gated = (grad_reduced[None, :] * weights[:, None] / neighbor_scale).to(tl.bfloat16)
+        grad_hidden = (grad_gated.to(tl.float32) * _gelu_grad(hidden.to(tl.float32))).to(tl.bfloat16)
+        grad_hidden_bias += tl.sum(tl.where(valid[:, None], grad_hidden.to(tl.float32), 0.0), axis=0)
 
         tl.store(preactivation_ptr + local_offsets, preactivation, mask=valid[:, None])
         tl.store(activated_ptr + local_offsets, activated, mask=valid[:, None])
@@ -296,10 +265,12 @@ def _node_message_replay_kernel(
     tl.atomic_add(grad_hidden_bias_ptr + columns, grad_hidden_bias)
 
 
-@configured('mpnn_node_message_bwd_dx_triton',
-            key=["shape_key"],
-            default=dict(GROUPS=16, num_warps=4, num_stages=2),
-            reset_to_zero=["grad_neighbor_ptr"])
+@configured(
+    "mpnn_node_message_bwd_dx_triton",
+    key=["shape_key"],
+    default=dict(GROUPS=16, num_warps=4, num_stages=2),
+    reset_to_zero=["grad_neighbor_ptr"],
+)
 @triton.jit
 def _node_message_dx_kernel(
     preactivation_ptr,
@@ -331,12 +302,8 @@ def _node_message_dx_kernel(
     columns = tl.arange(0, WIDTH)
     window = tl.arange(0, BLOCK_M1)
     window_valid = window < NEIGHBORS
-    edge_weight_rows = tl.load(
-        edge_weight_ptr + columns[:, None] * EDGE_WEIGHT_STRIDE + columns[None, :]
-    ).to(tl.bfloat16)
-    hidden_weight_rows = tl.load(
-        hidden_weight_ptr + columns[:, None] * WIDTH + columns[None, :]
-    ).to(tl.bfloat16)
+    edge_weight_rows = tl.load(edge_weight_ptr + columns[:, None] * EDGE_WEIGHT_STRIDE + columns[None, :]).to(tl.bfloat16)
+    hidden_weight_rows = tl.load(hidden_weight_ptr + columns[:, None] * WIDTH + columns[None, :]).to(tl.bfloat16)
 
     for slot in range(GROUPS):
         local_group = tl.program_id(0) * GROUPS + slot
@@ -345,19 +312,11 @@ def _node_message_dx_kernel(
         valid = window_valid & alive
         rows = group * NEIGHBORS + window
         offsets = rows[:, None] * WIDTH + columns[None, :]
-        local_offsets = (local_group * NEIGHBORS + window)[:, None] * WIDTH + columns[
-            None, :
-        ]
+        local_offsets = (local_group * NEIGHBORS + window)[:, None] * WIDTH + columns[None, :]
 
-        grad_hidden = tl.load(
-            grad_hidden_ptr + local_offsets, mask=valid[:, None], other=0.0
-        ).to(tl.bfloat16)
-        preactivation = tl.load(
-            preactivation_ptr + local_offsets, mask=valid[:, None], other=0.0
-        ).to(tl.float32)
-        grad_preactivation = (
-            tl.dot(grad_hidden, hidden_weight_rows) * _gelu_grad(preactivation)
-        ).to(tl.bfloat16)
+        grad_hidden = tl.load(grad_hidden_ptr + local_offsets, mask=valid[:, None], other=0.0).to(tl.bfloat16)
+        preactivation = tl.load(preactivation_ptr + local_offsets, mask=valid[:, None], other=0.0).to(tl.float32)
+        grad_preactivation = (tl.dot(grad_hidden, hidden_weight_rows) * _gelu_grad(preactivation)).to(tl.bfloat16)
 
         tl.store(
             grad_edge_ptr + offsets,
@@ -366,9 +325,7 @@ def _node_message_dx_kernel(
         )
         tl.store(
             grad_query_ptr + group * WIDTH + columns,
-            tl.sum(
-                tl.where(valid[:, None], grad_preactivation.to(tl.float32), 0.0), axis=0
-            ),
+            tl.sum(tl.where(valid[:, None], grad_preactivation.to(tl.float32), 0.0), axis=0),
             mask=alive & (columns < WIDTH),
         )
         neighbor_rows = tl.load(index_ptr + rows, mask=valid, other=0)
@@ -411,9 +368,7 @@ def _forward_op_fake(
     width = edge_states.shape[-1]
     del edge_states, neighbor_projection, flat_neighbor_indices
     del edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale
-    return query_projection.new_empty(
-        *query_projection.shape[:-1], width, dtype=torch.float32
-    )
+    return query_projection.new_empty(*query_projection.shape[:-1], width, dtype=torch.float32)
 
 
 @opaque(fake=_forward_op_fake, name="mpnn_node_message_fwd_v1")
@@ -432,9 +387,7 @@ def _forward_op(
     width = edge_states.shape[-1]
     neighbors = edge_states.shape[-2]
     groups = edge_states.numel() // (neighbors * width)
-    reduced = query_projection.new_empty(
-        *query_projection.shape[:-1], width, dtype=torch.float32
-    )
+    reduced = query_projection.new_empty(*query_projection.shape[:-1], width, dtype=torch.float32)
     _node_message_fwd_kernel[lambda meta: (triton.cdiv(groups, meta["GROUPS"]),)](
         edge_states,
         query_projection,
@@ -526,9 +479,7 @@ def _backward_op(
 
     chunk_groups = max(1, min(_WEIGHT_CHUNK_ROWS // neighbors, groups))
     buffer_rows = chunk_groups * neighbors
-    preactivation = torch.empty(
-        buffer_rows, width, device=device, dtype=torch.bfloat16
-    )
+    preactivation = torch.empty(buffer_rows, width, device=device, dtype=torch.bfloat16)
     activated = torch.empty_like(preactivation)
     grad_hidden = torch.empty_like(preactivation)
     grad_preactivation = torch.empty_like(preactivation)
@@ -592,9 +543,7 @@ def _backward_op(
             grad_preactivation[:span_rows].t(),
             flat_edge[start * neighbors : start * neighbors + span_rows],
         ).to(float32)
-        grad_hidden_weight += torch.mm(
-            grad_hidden[:span_rows].t(), activated[:span_rows]
-        ).to(float32)
+        grad_hidden_weight += torch.mm(grad_hidden[:span_rows].t(), activated[:span_rows]).to(float32)
 
     return [
         grad_edge,
@@ -734,22 +683,31 @@ __all__ = ["triton_node_message_reduce", "triton_node_message_reduce_compute"]
 
 
 def _compute_forward_op_fake(
-    edge_states: torch.Tensor, query_projection: torch.Tensor,
-    neighbor_projection: torch.Tensor, flat_neighbor_indices: torch.Tensor,
-    edge_weight: torch.Tensor, hidden_weight: torch.Tensor, hidden_bias: torch.Tensor,
-    edge_mask: torch.Tensor, neighbor_scale: int,
+    edge_states: torch.Tensor,
+    query_projection: torch.Tensor,
+    neighbor_projection: torch.Tensor,
+    flat_neighbor_indices: torch.Tensor,
+    edge_weight: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """FP32 reduced nodes and two BF16 edge-shaped saved projection results."""
-    return (torch.empty_like(query_projection, dtype=torch.float32),
-            torch.empty_like(edge_states), torch.empty_like(edge_states))
+    return (torch.empty_like(query_projection, dtype=torch.float32), torch.empty_like(edge_states), torch.empty_like(edge_states))
 
 
 @opaque(fake=_compute_forward_op_fake, name="mpnn_node_message_compute_fwd_v1")
 def _compute_forward_op(
-    edge_states: torch.Tensor, query_projection: torch.Tensor,
-    neighbor_projection: torch.Tensor, flat_neighbor_indices: torch.Tensor,
-    edge_weight: torch.Tensor, hidden_weight: torch.Tensor, hidden_bias: torch.Tensor,
-    edge_mask: torch.Tensor, neighbor_scale: int,
+    edge_states: torch.Tensor,
+    query_projection: torch.Tensor,
+    neighbor_projection: torch.Tensor,
+    flat_neighbor_indices: torch.Tensor,
+    edge_weight: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fuse the forward while saving GEMM results needed by the compute backward."""
     width, neighbors = edge_states.shape[-1], edge_states.shape[-2]
@@ -757,11 +715,25 @@ def _compute_forward_op(
     reduced = torch.empty_like(query_projection, dtype=torch.float32)
     preactivation, hidden = torch.empty_like(edge_states), torch.empty_like(edge_states)
     _node_message_fwd_kernel[lambda meta: (triton.cdiv(groups, meta["GROUPS"]),)](
-        edge_states, query_projection, neighbor_projection, flat_neighbor_indices,
-        edge_weight, hidden_weight, hidden_bias, edge_mask, reduced, preactivation, hidden,
-        groups, _shape_key(groups, NEIGHBORS=neighbors), neighbor_scale,
-        EDGE_WEIGHT_STRIDE=edge_weight.stride(0), NEIGHBORS=neighbors, WIDTH=width,
-        BLOCK_M1=_block_rows(neighbors), SAVE_PREACT=True,
+        edge_states,
+        query_projection,
+        neighbor_projection,
+        flat_neighbor_indices,
+        edge_weight,
+        hidden_weight,
+        hidden_bias,
+        edge_mask,
+        reduced,
+        preactivation,
+        hidden,
+        groups,
+        _shape_key(groups, NEIGHBORS=neighbors),
+        neighbor_scale,
+        EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
+        NEIGHBORS=neighbors,
+        WIDTH=width,
+        BLOCK_M1=_block_rows(neighbors),
+        SAVE_PREACT=True,
     )
     return reduced, preactivation, hidden
 
@@ -772,7 +744,15 @@ class _NodeMessageCompute(torch.autograd.Function):
     @staticmethod
     def forward(ctx, edge, query, neighbor, index, w1, w2, bias, mask, scale):
         reduced, preactivation, hidden = _compute_forward_op(
-            edge, query, neighbor, index, w1, w2, bias, mask, scale,
+            edge,
+            query,
+            neighbor,
+            index,
+            w1,
+            w2,
+            bias,
+            mask,
+            scale,
         )
         ctx.save_for_backward(edge, index, w1, w2, mask, preactivation, hidden)
         ctx.neighbor_shape = neighbor.shape
@@ -786,31 +766,65 @@ class _NodeMessageCompute(torch.autograd.Function):
 
         edge, index, w1, w2, mask, preactivation, hidden = ctx.saved_tensors
         grad_preactivation, grad_w2, grad_bias, _, _ = _backward_from_projected(
-            preactivation, w2, hidden, mask, grad_reduced.contiguous(), ctx.scale, torch.bfloat16,
+            preactivation,
+            w2,
+            hidden,
+            mask,
+            grad_reduced.contiguous(),
+            ctx.scale,
+            torch.bfloat16,
         )
         width = edge.shape[-1]
         flat_grad = grad_preactivation.reshape(-1, width)
         grad_edge = torch.mm(flat_grad, w1.to(flat_grad.dtype)).view_as(edge)
         grad_w1 = torch.mm(flat_grad.t(), edge.reshape(-1, width)).to(w1.dtype)
         grad_query = grad_preactivation.sum(-2, dtype=torch.float32).to(ctx.query_dtype)
-        grad_neighbor = torch.ops.aten.embedding_dense_backward(
-            flat_grad, index.reshape(-1), ctx.neighbor_shape[0] * ctx.neighbor_shape[1], -1, False,
-        ).view(ctx.neighbor_shape).to(ctx.neighbor_dtype)
-        return (grad_edge, grad_query, grad_neighbor, None, grad_w1, grad_w2,
-                grad_bias.to(ctx.bias_dtype), None, None)
+        grad_neighbor = (
+            torch.ops.aten.embedding_dense_backward(
+                flat_grad,
+                index.reshape(-1),
+                ctx.neighbor_shape[0] * ctx.neighbor_shape[1],
+                -1,
+                False,
+            )
+            .view(ctx.neighbor_shape)
+            .to(ctx.neighbor_dtype)
+        )
+        return (grad_edge, grad_query, grad_neighbor, None, grad_w1, grad_w2, grad_bias.to(ctx.bias_dtype), None, None)
 
 
 def triton_node_message_reduce_compute(
-    edge_states: torch.Tensor, query_projection: torch.Tensor,
-    neighbor_projection: torch.Tensor, flat_neighbor_indices: torch.Tensor,
-    edge_weight: torch.Tensor, hidden_weight: torch.Tensor, hidden_bias: torch.Tensor,
-    edge_mask: torch.Tensor, neighbor_scale: int,
+    edge_states: torch.Tensor,
+    query_projection: torch.Tensor,
+    neighbor_projection: torch.Tensor,
+    flat_neighbor_indices: torch.Tensor,
+    edge_weight: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
 ) -> torch.Tensor:
     """Use the saved-projection training policy, sharing no-save inference with memory."""
     if not torch.is_grad_enabled():
-        return _forward_op(edge_states, query_projection, neighbor_projection, flat_neighbor_indices,
-                           edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale)
+        return _forward_op(
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            edge_mask,
+            neighbor_scale,
+        )
     return _NodeMessageCompute.apply(
-        edge_states, query_projection, neighbor_projection, flat_neighbor_indices,
-        edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale,
+        edge_states,
+        query_projection,
+        neighbor_projection,
+        flat_neighbor_indices,
+        edge_weight,
+        hidden_weight,
+        hidden_bias,
+        edge_mask,
+        neighbor_scale,
     )

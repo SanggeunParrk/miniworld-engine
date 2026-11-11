@@ -110,9 +110,18 @@ def _gelu(x):
 # ---- the tile every kernel in this file is built around ------------------------------
 @triton.jit
 def _row_gemm(
-    x_ptr, w_ptr, row_block, valid, columns, col_valid,
-    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, CONTRACT_OUT: tl.constexpr, W_ROW_STRIDE: tl.constexpr,
+    x_ptr,
+    w_ptr,
+    row_block,
+    valid,
+    columns,
+    col_valid,
+    WIDTH: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    CONTRACT_OUT: tl.constexpr,
+    W_ROW_STRIDE: tl.constexpr,
 ):
     """FP32 [BLOCK_M1, BLOCK_N] accumulator for ``x @ w``, contracted in BLOCK_K chunks.
 
@@ -137,7 +146,8 @@ def _row_gemm(
         contract_valid = contraction < WIDTH
         left = tl.load(
             x_ptr + row_block[:, None] * WIDTH + contraction[None, :],
-            mask=valid[:, None] & contract_valid[None, :], other=0.0,
+            mask=valid[:, None] & contract_valid[None, :],
+            other=0.0,
         )
         # The weight load is masked on BOTH axes now. It was unmasked because the column block was
         # the whole width and the contraction divided it exactly; neither holds once BLOCK_N and
@@ -146,12 +156,14 @@ def _row_gemm(
         if CONTRACT_OUT:
             right = tl.load(
                 w_ptr + contraction[:, None] * W_ROW_STRIDE + columns[None, :],
-                mask=w_mask, other=0.0,
+                mask=w_mask,
+                other=0.0,
             )
         else:
             right = tl.load(
                 w_ptr + contraction[:, None] + columns[None, :] * W_ROW_STRIDE,
-                mask=w_mask, other=0.0,
+                mask=w_mask,
+                other=0.0,
             )
         accumulator += tl.dot(left, right.to(tl.bfloat16))
     return accumulator
@@ -169,17 +181,30 @@ def _row_gemm(
 # standalone weight address memory differently, which is exactly the kind of thing a
 # tuned tile choice can depend on.
 
+
 # ---- forward -------------------------------------------------------------------------
-@configured('mpnn_edge_tail_fwd_gemm_gather_saveact_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2))
+@configured(
+    "mpnn_edge_tail_fwd_gemm_gather_saveact_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _project_edge(
-    edge_ptr, query_ptr, table_ptr, index_ptr, w1_ptr,
-    preactivation_ptr, activated_ptr,
-    rows, shape_key,
-    W1_ROW_STRIDE: tl.constexpr, NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    edge_ptr,
+    query_ptr,
+    table_ptr,
+    index_ptr,
+    w1_ptr,
+    preactivation_ptr,
+    activated_ptr,
+    rows,
+    shape_key,
+    W1_ROW_STRIDE: tl.constexpr,
+    NEIGHBORS: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
     """``edge @ W1 + query[group] + table[index]``, then GELU.
@@ -189,16 +214,24 @@ def _project_edge(
     value per COLUMN, so a column tile reads its own slice of each and nothing is shared
     across the n axis -- which is what lets this kernel take BLOCK_N at all.
     """
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
-                              tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
     row_block = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
     columns = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     col_valid = columns < WIDTH
     accumulator = _row_gemm(
-        edge_ptr, w1_ptr, row_block, valid, columns, col_valid,
-        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-        CONTRACT_OUT=False, W_ROW_STRIDE=W1_ROW_STRIDE,
+        edge_ptr,
+        w1_ptr,
+        row_block,
+        valid,
+        columns,
+        col_valid,
+        WIDTH=WIDTH,
+        BLOCK_M1=BLOCK_M1,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        CONTRACT_OUT=False,
+        W_ROW_STRIDE=W1_ROW_STRIDE,
     )
 
     live = valid[:, None] & col_valid[None, :]
@@ -206,12 +239,14 @@ def _project_edge(
     groups = row_block // NEIGHBORS
     query = tl.load(
         query_ptr + groups[:, None] * WIDTH + columns[None, :],
-        mask=live, other=0.0,
+        mask=live,
+        other=0.0,
     ).to(tl.float32)
     neighbor_rows = tl.load(index_ptr + row_block, mask=valid, other=0)
     neighbor = tl.load(
         table_ptr + neighbor_rows[:, None] * WIDTH + columns[None, :],
-        mask=live, other=0.0,
+        mask=live,
+        other=0.0,
     ).to(tl.float32)
     preactivation = (accumulator + query + neighbor).to(tl.bfloat16)
     tl.store(preactivation_ptr + offsets, preactivation, mask=live)
@@ -225,28 +260,46 @@ def _project_edge(
     )
 
 
-@configured('mpnn_edge_tail_fwd_gemm_b2b_saveact_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2))
+@configured(
+    "mpnn_edge_tail_fwd_gemm_b2b_saveact_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _project_hidden(
-    activated_ptr, w2_ptr, b2_ptr, hidden_ptr, activated_hidden_ptr,
-    rows, shape_key,
-    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
+    activated_ptr,
+    w2_ptr,
+    b2_ptr,
+    hidden_ptr,
+    activated_hidden_ptr,
+    rows,
+    shape_key,
+    WIDTH: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
     """``gelu(preactivation) @ W2 + b2``, then GELU."""
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
-                              tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
     row_block = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
     columns = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     col_valid = columns < WIDTH
     live = valid[:, None] & col_valid[None, :]
     accumulator = _row_gemm(
-        activated_ptr, w2_ptr, row_block, valid, columns, col_valid,
-        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-        CONTRACT_OUT=False, W_ROW_STRIDE=WIDTH,
+        activated_ptr,
+        w2_ptr,
+        row_block,
+        valid,
+        columns,
+        col_valid,
+        WIDTH=WIDTH,
+        BLOCK_M1=BLOCK_M1,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        CONTRACT_OUT=False,
+        W_ROW_STRIDE=WIDTH,
     )
 
     offsets = row_block[:, None] * WIDTH + columns[None, :]
@@ -260,15 +313,31 @@ def _project_hidden(
     )
 
 
-@configured('mpnn_edge_tail_fwd_gemm_layernorm_saveact_triton',
-            key=["shape_key", "DROPOUT"],
-            default=dict(BLOCK_M1=64, BLOCK_K=32, num_warps=4, num_stages=2))
+@configured(
+    "mpnn_edge_tail_fwd_gemm_layernorm_saveact_triton",
+    key=["shape_key", "DROPOUT"],
+    default=dict(BLOCK_M1=64, BLOCK_K=32, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _project_output(
-    activated_hidden_ptr, w3_ptr, b3_ptr, edge_ptr, gamma_ptr, beta_ptr, seed_ptr,
-    out_ptr, values_ptr, keep_ptr,
-    rows, shape_key, keep_probability, dropout_scale, eps,
-    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
+    activated_hidden_ptr,
+    w3_ptr,
+    b3_ptr,
+    edge_ptr,
+    gamma_ptr,
+    beta_ptr,
+    seed_ptr,
+    out_ptr,
+    values_ptr,
+    keep_ptr,
+    rows,
+    shape_key,
+    keep_probability,
+    dropout_scale,
+    eps,
+    WIDTH: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     DROPOUT: tl.constexpr,
 ):
     """``gelu(hidden) @ W3 + b3``, then dropout, the residual add, and LayerNorm."""
@@ -280,9 +349,18 @@ def _project_output(
     # them, so a caller that forgets is a compile error and not a silently narrower tile.
     col_valid = columns < WIDTH
     accumulator = _row_gemm(
-        activated_hidden_ptr, w3_ptr, row_block, valid, columns, col_valid,
-        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_N=WIDTH, BLOCK_K=BLOCK_K,
-        CONTRACT_OUT=False, W_ROW_STRIDE=WIDTH,
+        activated_hidden_ptr,
+        w3_ptr,
+        row_block,
+        valid,
+        columns,
+        col_valid,
+        WIDTH=WIDTH,
+        BLOCK_M1=BLOCK_M1,
+        BLOCK_N=WIDTH,
+        BLOCK_K=BLOCK_K,
+        CONTRACT_OUT=False,
+        W_ROW_STRIDE=WIDTH,
     )
 
     offsets = row_block[:, None] * WIDTH + columns[None, :]
@@ -307,26 +385,36 @@ def _project_output(
     normalized = centered * rstd[:, None]
     tl.store(
         out_ptr + offsets,
-        (normalized * tl.load(gamma_ptr + columns)[None, :]
-         + tl.load(beta_ptr + columns)[None, :]).to(tl.bfloat16),
+        (normalized * tl.load(gamma_ptr + columns)[None, :] + tl.load(beta_ptr + columns)[None, :]).to(tl.bfloat16),
         mask=valid[:, None],
     )
 
 
 # ---- backward ------------------------------------------------------------------------
-@configured('mpnn_edge_tail_bwd_layernorm_saveact_triton',
-            key=["shape_key", "DROPOUT"],
-            default=dict(BLOCK_M1=64, num_warps=4, num_stages=2),
-            reset_to_zero=[
-        "grad_norm_weight_ptr", "grad_norm_bias_ptr", "grad_output_bias_ptr"
-    ])
+@configured(
+    "mpnn_edge_tail_bwd_layernorm_saveact_triton",
+    key=["shape_key", "DROPOUT"],
+    default=dict(BLOCK_M1=64, num_warps=4, num_stages=2),
+    reset_to_zero=["grad_norm_weight_ptr", "grad_norm_bias_ptr", "grad_output_bias_ptr"],
+)
 @triton.jit
 def _norm_backward(
-    grad_out_ptr, values_ptr, keep_ptr, gamma_ptr,
-    grad_values_ptr, grad_update_ptr,
-    grad_norm_weight_ptr, grad_norm_bias_ptr, grad_output_bias_ptr,
-    rows, shape_key, dropout_scale, eps,
-    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, DROPOUT: tl.constexpr,
+    grad_out_ptr,
+    values_ptr,
+    keep_ptr,
+    gamma_ptr,
+    grad_values_ptr,
+    grad_update_ptr,
+    grad_norm_weight_ptr,
+    grad_norm_bias_ptr,
+    grad_output_bias_ptr,
+    rows,
+    shape_key,
+    dropout_scale,
+    eps,
+    WIDTH: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    DROPOUT: tl.constexpr,
 ):
     """LayerNorm and dropout backward, statistics recomputed from the saved values.
 
@@ -340,22 +428,16 @@ def _norm_backward(
     columns = tl.arange(0, WIDTH)
     offsets = row_block[:, None] * WIDTH + columns[None, :]
 
-    values = tl.load(values_ptr + offsets, mask=valid[:, None], other=0.0).to(
-        tl.float32
-    )
+    values = tl.load(values_ptr + offsets, mask=valid[:, None], other=0.0).to(tl.float32)
     mean = tl.sum(values, axis=1) / WIDTH
     centered = values - mean[:, None]
     rstd = 1.0 / tl.sqrt(tl.sum(centered * centered, axis=1) / WIDTH + eps)
     normalized = centered * rstd[:, None]
 
-    grad_out = tl.load(grad_out_ptr + offsets, mask=valid[:, None], other=0.0).to(
-        tl.float32
-    )
+    grad_out = tl.load(grad_out_ptr + offsets, mask=valid[:, None], other=0.0).to(tl.float32)
     scaled = grad_out * tl.load(gamma_ptr + columns)[None, :]
     grad_values = rstd[:, None] * (
-        scaled
-        - (tl.sum(scaled, axis=1) / WIDTH)[:, None]
-        - normalized * (tl.sum(scaled * normalized, axis=1) / WIDTH)[:, None]
+        scaled - (tl.sum(scaled, axis=1) / WIDTH)[:, None] - normalized * (tl.sum(scaled * normalized, axis=1) / WIDTH)[:, None]
     )
     if DROPOUT:
         word_offsets = row_block[:, None] * (WIDTH // 32) + columns[None, :] // 32
@@ -365,12 +447,8 @@ def _norm_backward(
     else:
         grad_update = grad_values
 
-    tl.store(
-        grad_values_ptr + offsets, grad_values.to(tl.bfloat16), mask=valid[:, None]
-    )
-    tl.store(
-        grad_update_ptr + offsets, grad_update.to(tl.bfloat16), mask=valid[:, None]
-    )
+    tl.store(grad_values_ptr + offsets, grad_values.to(tl.bfloat16), mask=valid[:, None])
+    tl.store(grad_update_ptr + offsets, grad_update.to(tl.bfloat16), mask=valid[:, None])
     tl.atomic_add(
         grad_norm_weight_ptr + columns,
         tl.sum(tl.where(valid[:, None], grad_out * normalized, 0.0), axis=0),
@@ -385,17 +463,28 @@ def _norm_backward(
     )
 
 
-@configured('mpnn_edge_tail_bwd_dx_saveact_triton',
-            key=["shape_key", "EMIT_BIAS"],
-            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
-            reset_to_zero=["grad_bias_ptr"])
+@configured(
+    "mpnn_edge_tail_bwd_dx_saveact_triton",
+    key=["shape_key", "EMIT_BIAS"],
+    default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
+    reset_to_zero=["grad_bias_ptr"],
+)
 @triton.jit
 def _project_backward(
-    grad_out_ptr, weight_ptr, preactivation_ptr, grad_in_ptr, activated_ptr,
+    grad_out_ptr,
+    weight_ptr,
+    preactivation_ptr,
+    grad_in_ptr,
+    activated_ptr,
     grad_bias_ptr,
-    rows, shape_key,
-    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, EMIT_BIAS: tl.constexpr,
+    rows,
+    shape_key,
+    WIDTH: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    EMIT_BIAS: tl.constexpr,
 ):
     """One dX GEMM with the GELU derivative and the cuBLAS operand in the epilogue.
 
@@ -408,17 +497,25 @@ def _project_backward(
     ``EMIT_BIAS`` belongs to the call that PRODUCES a bias gradient -- the third
     projection's dX, which yields ``grad_b2`` -- not the second's.
     """
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
-                              tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
     row_block = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
     columns = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     col_valid = columns < WIDTH
     live = valid[:, None] & col_valid[None, :]
     accumulator = _row_gemm(
-        grad_out_ptr, weight_ptr, row_block, valid, columns, col_valid,
-        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-        CONTRACT_OUT=True, W_ROW_STRIDE=WIDTH,
+        grad_out_ptr,
+        weight_ptr,
+        row_block,
+        valid,
+        columns,
+        col_valid,
+        WIDTH=WIDTH,
+        BLOCK_M1=BLOCK_M1,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        CONTRACT_OUT=True,
+        W_ROW_STRIDE=WIDTH,
     )
 
     offsets = row_block[:, None] * WIDTH + columns[None, :]
@@ -442,17 +539,28 @@ def _project_backward(
         )
 
 
-@configured('mpnn_edge_tail_bwd_dx_gather_saveact_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
-            reset_to_zero=["grad_query_ptr"])
+@configured(
+    "mpnn_edge_tail_bwd_dx_gather_saveact_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
+    reset_to_zero=["grad_query_ptr"],
+)
 @triton.jit
 def _edge_backward(
-    grad_preactivation_ptr, w1_ptr, grad_values_ptr,
-    grad_edge_ptr, grad_query_ptr,
-    rows, groups_total, shape_key,
-    W1_ROW_STRIDE: tl.constexpr, NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    grad_preactivation_ptr,
+    w1_ptr,
+    grad_values_ptr,
+    grad_edge_ptr,
+    grad_query_ptr,
+    rows,
+    groups_total,
+    shape_key,
+    W1_ROW_STRIDE: tl.constexpr,
+    NEIGHBORS: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
     """The last dX GEMM, the residual add, and the query gradient.
@@ -467,8 +575,7 @@ def _edge_backward(
     neighbour axis, so the tile reduces it to a handful of atomics before touching
     memory.  Same data, seven times cheaper.
     """
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
-                              tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
     row_block = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
     columns = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -476,22 +583,30 @@ def _edge_backward(
     live = valid[:, None] & col_valid[None, :]
     offsets = row_block[:, None] * WIDTH + columns[None, :]
     accumulator = _row_gemm(
-        grad_preactivation_ptr, w1_ptr, row_block, valid, columns, col_valid,
-        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-        CONTRACT_OUT=True, W_ROW_STRIDE=W1_ROW_STRIDE,
+        grad_preactivation_ptr,
+        w1_ptr,
+        row_block,
+        valid,
+        columns,
+        col_valid,
+        WIDTH=WIDTH,
+        BLOCK_M1=BLOCK_M1,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        CONTRACT_OUT=True,
+        W_ROW_STRIDE=W1_ROW_STRIDE,
     )
 
     residual = tl.load(grad_values_ptr + offsets, mask=live, other=0.0).to(tl.float32)
     tl.store(
-        grad_edge_ptr + offsets, (residual + accumulator).to(tl.bfloat16),
+        grad_edge_ptr + offsets,
+        (residual + accumulator).to(tl.bfloat16),
         mask=live,
     )
 
     # Re-read rather than reuse the contraction's operand: the loop slices it into
     # BLOCK_K chunks and the scatter below wants the whole row.
-    grad_preactivation = tl.load(
-        grad_preactivation_ptr + offsets, mask=live, other=0.0
-    ).to(tl.float32)
+    grad_preactivation = tl.load(grad_preactivation_ptr + offsets, mask=live, other=0.0).to(tl.float32)
     groups = row_block // NEIGHBORS
     first_group = (pid_m * BLOCK_M1) // NEIGHBORS
     for span in tl.static_range((BLOCK_M1 + NEIGHBORS - 1) // NEIGHBORS + 1):
@@ -531,10 +646,21 @@ def _tile_grid(rows, width):
 # signature, `(Tensor, Tensor[])` where the second is a tuple is not -- and the autograd boundary
 # below re-packs them into `save_for_backward` in the same breath, which is where they were going.
 def _launch_forward_fake(
-    edge: torch.Tensor, query: torch.Tensor, table: torch.Tensor, index: torch.Tensor,
-    w1: torch.Tensor, w2: torch.Tensor, b2: torch.Tensor, w3: torch.Tensor, b3: torch.Tensor,
-    gamma: torch.Tensor, beta: torch.Tensor, seed: torch.Tensor,
-    eps: float, dropout_probability: float, w1_row_stride: int,
+    edge: torch.Tensor,
+    query: torch.Tensor,
+    table: torch.Tensor,
+    index: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    b2: torch.Tensor,
+    w3: torch.Tensor,
+    b3: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    seed: torch.Tensor,
+    eps: float,
+    dropout_probability: float,
+    w1_row_stride: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """``out`` and three saved activations shaped like ``edge``, then the keep mask.
 
@@ -546,7 +672,10 @@ def _launch_forward_fake(
     empty = lambda: torch.empty_like(edge)
     keep_elements = rows * (width // 32) if dropout_probability > 0.0 else 1
     return (
-        empty(), empty(), empty(), empty(),
+        empty(),
+        empty(),
+        empty(),
+        empty(),
         edge.new_empty((keep_elements,), dtype=torch.int32),
     )
 
@@ -555,10 +684,21 @@ def _launch_forward_fake(
 # caches can outlive this source upgrade, so reusing v1 would reuse byte-mask shapes.
 @opaque(fake=_launch_forward_fake, name="mpnn_edge_tail_compute_fwd_v2")
 def _launch_forward(
-    edge: torch.Tensor, query: torch.Tensor, table: torch.Tensor, index: torch.Tensor,
-    w1: torch.Tensor, w2: torch.Tensor, b2: torch.Tensor, w3: torch.Tensor, b3: torch.Tensor,
-    gamma: torch.Tensor, beta: torch.Tensor, seed: torch.Tensor,
-    eps: float, dropout_probability: float, w1_row_stride: int,
+    edge: torch.Tensor,
+    query: torch.Tensor,
+    table: torch.Tensor,
+    index: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    b2: torch.Tensor,
+    w3: torch.Tensor,
+    b3: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    seed: torch.Tensor,
+    eps: float,
+    dropout_probability: float,
+    w1_row_stride: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Returns ``out`` and the four tensors backward reads back, in that order."""
     rows, width = edge.shape
@@ -568,27 +708,52 @@ def _launch_forward(
     hidden, activated_hidden, values = empty(), empty(), empty()
     # Keep the exact forward Philox decisions, at one bit per element. Backward
     # reads these bits without redrawing RNG. Dropout-off needs only a placeholder.
-    keep = torch.empty(
-        rows * (width // 32) if dropout else 1, device=edge.device, dtype=torch.int32
-    )
+    keep = torch.empty(rows * (width // 32) if dropout else 1, device=edge.device, dtype=torch.int32)
 
     neighbors = _neighbors_of(rows, query.shape[0])
     tiles, whole_rows = _tile_grid(rows, width), _rows_grid(rows)
     _project_edge[tiles](
-        edge, query, table, index, w1, preactivation, activated,
-        rows, _shape_key(rows, NEIGHBORS=neighbors),
-        W1_ROW_STRIDE=w1_row_stride, NEIGHBORS=neighbors, WIDTH=width,
+        edge,
+        query,
+        table,
+        index,
+        w1,
+        preactivation,
+        activated,
+        rows,
+        _shape_key(rows, NEIGHBORS=neighbors),
+        W1_ROW_STRIDE=w1_row_stride,
+        NEIGHBORS=neighbors,
+        WIDTH=width,
     )
     _project_hidden[tiles](
-        activated, w2, b2, hidden, activated_hidden,
-        rows, _shape_key(rows), WIDTH=width,
+        activated,
+        w2,
+        b2,
+        hidden,
+        activated_hidden,
+        rows,
+        _shape_key(rows),
+        WIDTH=width,
     )
     _project_output[whole_rows](
-        activated_hidden, w3, b3, edge, gamma, beta, seed,
-        out, values, keep, rows, _shape_key(rows),
+        activated_hidden,
+        w3,
+        b3,
+        edge,
+        gamma,
+        beta,
+        seed,
+        out,
+        values,
+        keep,
+        rows,
+        _shape_key(rows),
         1.0 - dropout_probability,
-        1.0 / (1.0 - dropout_probability) if dropout else 1.0, eps,
-        WIDTH=width, DROPOUT=dropout,
+        1.0 / (1.0 - dropout_probability) if dropout else 1.0,
+        eps,
+        WIDTH=width,
+        DROPOUT=dropout,
     )
     # activated and activated_hidden are not saved: backward recomputes both GELUs from
     # the GEMM outputs above, which is the cheap direction and drops 1.6 GiB of live
@@ -600,19 +765,46 @@ def _launch_forward(
 #: schema cannot carry one, so the names live here and the caller unpacks against them -- one
 #: place to read, rather than a positional return that has to be counted at both ends.
 _GRADIENTS = (
-    "grad_edge", "grad_query", "grad_neighbor",
-    "grad_w1", "grad_w2", "grad_w3", "grad_b2", "grad_b3", "grad_gamma", "grad_beta",
+    "grad_edge",
+    "grad_query",
+    "grad_neighbor",
+    "grad_w1",
+    "grad_w2",
+    "grad_w3",
+    "grad_b2",
+    "grad_b3",
+    "grad_gamma",
+    "grad_beta",
 )
 
 
 def _launch_backward_fake(
-    grad_out: torch.Tensor, preactivation: torch.Tensor, hidden: torch.Tensor,
-    values: torch.Tensor, keep: torch.Tensor, edge: torch.Tensor, index: torch.Tensor,
-    w1: torch.Tensor, w2: torch.Tensor, w3: torch.Tensor, gamma: torch.Tensor,
-    nodes: int, eps: float, dropout_probability: float, w1_row_stride: int,
+    grad_out: torch.Tensor,
+    preactivation: torch.Tensor,
+    hidden: torch.Tensor,
+    values: torch.Tensor,
+    keep: torch.Tensor,
+    edge: torch.Tensor,
+    index: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    gamma: torch.Tensor,
+    nodes: int,
+    eps: float,
+    dropout_probability: float,
+    w1_row_stride: int,
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
 ]:
     """The ten gradients of :data:`_GRADIENTS`, in that order.
 
@@ -625,21 +817,47 @@ def _launch_backward_fake(
     like = lambda *shape: edge.new_empty(shape)
     fp32 = lambda *shape: edge.new_empty(shape, dtype=torch.float32)
     return (
-        torch.empty_like(edge), fp32(nodes, width), like(nodes, width),
-        like(width, width), like(width, width), like(width, width),
-        fp32(width), fp32(width), fp32(width), fp32(width),
+        torch.empty_like(edge),
+        fp32(nodes, width),
+        like(nodes, width),
+        like(width, width),
+        like(width, width),
+        like(width, width),
+        fp32(width),
+        fp32(width),
+        fp32(width),
+        fp32(width),
     )
 
 
 @opaque(fake=_launch_backward_fake, name="mpnn_edge_tail_compute_bwd_v2")
 def _launch_backward(
-    grad_out: torch.Tensor, preactivation: torch.Tensor, hidden: torch.Tensor,
-    values: torch.Tensor, keep: torch.Tensor, edge: torch.Tensor, index: torch.Tensor,
-    w1: torch.Tensor, w2: torch.Tensor, w3: torch.Tensor, gamma: torch.Tensor,
-    nodes: int, eps: float, dropout_probability: float, w1_row_stride: int,
+    grad_out: torch.Tensor,
+    preactivation: torch.Tensor,
+    hidden: torch.Tensor,
+    values: torch.Tensor,
+    keep: torch.Tensor,
+    edge: torch.Tensor,
+    index: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    gamma: torch.Tensor,
+    nodes: int,
+    eps: float,
+    dropout_probability: float,
+    w1_row_stride: int,
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
 ]:
     """The ten gradients of :data:`_GRADIENTS`, in that order."""
     rows, width = edge.shape
@@ -669,33 +887,64 @@ def _launch_backward(
     neighbors = _neighbors_of(rows, nodes)
     tiles, whole_rows = _tile_grid(rows, width), _rows_grid(rows)
     _norm_backward[whole_rows](
-        grad_out, values, keep, gamma, grad_values, grad_update,
-        grad_norm_weight, grad_norm_bias, grad_output_bias,
-        rows, _shape_key(rows), scale, eps,
-        WIDTH=width, DROPOUT=dropout,
+        grad_out,
+        values,
+        keep,
+        gamma,
+        grad_values,
+        grad_update,
+        grad_norm_weight,
+        grad_norm_bias,
+        grad_output_bias,
+        rows,
+        _shape_key(rows),
+        scale,
+        eps,
+        WIDTH=width,
+        DROPOUT=dropout,
     )
     _project_backward[tiles](
-        grad_update, w3, hidden, grad_hidden, activated_hidden,
-        grad_hidden_bias, rows, _shape_key(rows),
-        WIDTH=width, EMIT_BIAS=True,
+        grad_update,
+        w3,
+        hidden,
+        grad_hidden,
+        activated_hidden,
+        grad_hidden_bias,
+        rows,
+        _shape_key(rows),
+        WIDTH=width,
+        EMIT_BIAS=True,
     )
     _project_backward[tiles](
-        grad_hidden, w2, preactivation, grad_preactivation, activated,
-        grad_bias_scratch, rows, _shape_key(rows),
-        WIDTH=width, EMIT_BIAS=False,
+        grad_hidden,
+        w2,
+        preactivation,
+        grad_preactivation,
+        activated,
+        grad_bias_scratch,
+        rows,
+        _shape_key(rows),
+        WIDTH=width,
+        EMIT_BIAS=False,
     )
     _edge_backward[tiles](
-        grad_preactivation, w1, grad_values, grad_edge, grad_query,
-        rows, nodes, _shape_key(rows, NEIGHBORS=neighbors),
-        W1_ROW_STRIDE=w1_row_stride, NEIGHBORS=neighbors, WIDTH=width,
+        grad_preactivation,
+        w1,
+        grad_values,
+        grad_edge,
+        grad_query,
+        rows,
+        nodes,
+        _shape_key(rows, NEIGHBORS=neighbors),
+        W1_ROW_STRIDE=w1_row_stride,
+        NEIGHBORS=neighbors,
+        WIDTH=width,
     )
     # ATen's sort-and-segment reduction rather than an in-kernel scatter: a row tile
     # holds one query's k nearest and those are distinct by construction, so there is
     # nothing to coalesce and it degenerates to one FP32 atomic per element -- measured
     # at 16 ms against 3.3 for this call.
-    grad_neighbor = torch.ops.aten.embedding_dense_backward(
-        grad_preactivation, index, nodes, -1, False
-    )
+    grad_neighbor = torch.ops.aten.embedding_dense_backward(grad_preactivation, index, nodes, -1, False)
     # Weight gradients on cuBLAS: a direct sweep put the best reachable Triton
     # reduction at 0.230 ms against cuBLAS's 0.197 for the same contraction.
     return (
@@ -723,14 +972,26 @@ class _EdgeTailCompute(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, edge, query, table, index, w1, w2, b2, w3, b3, gamma, beta,
-                seed, eps, dropout_probability):
+    def forward(ctx, edge, query, table, index, w1, w2, b2, w3, b3, gamma, beta, seed, eps, dropout_probability):
         # A slice of a packed projection is a legal weight here; only its LAST stride has
         # to be 1. Read the row stride once and specialise on it.
         w1_row_stride = w1.stride(0)
         out, *saved = _launch_forward(
-            edge, query, table, index, w1, w2, b2, w3, b3, gamma, beta, seed, eps,
-            dropout_probability, w1_row_stride,
+            edge,
+            query,
+            table,
+            index,
+            w1,
+            w2,
+            b2,
+            w3,
+            b3,
+            gamma,
+            beta,
+            seed,
+            eps,
+            dropout_probability,
+            w1_row_stride,
         )
         ctx.save_for_backward(edge, index, w1, w2, w3, gamma, *saved)
         ctx.nodes = query.shape[0]
@@ -745,8 +1006,18 @@ class _EdgeTailCompute(torch.autograd.Function):
         edge, index, w1, w2, w3, gamma, *saved = ctx.saved_tensors
         weight_dtype, bias_dtype, norm_dtype = ctx.dtypes
         grads = _launch_backward(
-            grad_out.contiguous(), *saved, edge, index, w1, w2, w3, gamma,
-            ctx.nodes, ctx.eps, ctx.dropout_probability, ctx.w1_row_stride,
+            grad_out.contiguous(),
+            *saved,
+            edge,
+            index,
+            w1,
+            w2,
+            w3,
+            gamma,
+            ctx.nodes,
+            ctx.eps,
+            ctx.dropout_probability,
+            ctx.w1_row_stride,
         )
         grad = dict(zip(_GRADIENTS, grads, strict=True))
         return (
@@ -761,7 +1032,9 @@ class _EdgeTailCompute(torch.autograd.Function):
             grad["grad_b3"].to(bias_dtype),
             grad["grad_gamma"].to(norm_dtype),
             grad["grad_beta"].to(norm_dtype),
-            None, None, None,
+            None,
+            None,
+            None,
         )
 
 
@@ -785,9 +1058,20 @@ def edge_tail_compute(
     if seed is None:
         seed = torch.zeros(1, device=edge_states.device, dtype=torch.int64)
     return _EdgeTailCompute.apply(
-        edge_states, query_projection, neighbor_projection, flat_neighbor_indices,
-        edge_weight, hidden_weight, hidden_bias, output_weight, output_bias,
-        norm_weight, norm_bias, seed, eps, dropout_probability,
+        edge_states,
+        query_projection,
+        neighbor_projection,
+        flat_neighbor_indices,
+        edge_weight,
+        hidden_weight,
+        hidden_bias,
+        output_weight,
+        output_bias,
+        norm_weight,
+        norm_bias,
+        seed,
+        eps,
+        dropout_probability,
     )
 
 

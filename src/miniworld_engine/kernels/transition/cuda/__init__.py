@@ -15,7 +15,9 @@ def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n):
     from . import fused_generic_sm90a, fused_sm90a, fused_wide_sm90a
 
     training = torch.is_grad_enabled() and any(t.requires_grad for t in (x, ln_weight, wa, wb, ws))
-    if fused_wide_sm90a.f32_available(x, wa, ws, training):   # fp32: the f32io family (fused forwards, fp16 MMA at TF32 rounding; TF32 backward)
+    if fused_wide_sm90a.f32_available(
+        x, wa, ws, training
+    ):  # fp32: the f32io family (fused forwards, fp16 MMA at TF32 rounding; TF32 backward)
         return fused_wide_sm90a.transition_f32_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps)
     if fused_generic_sm90a.prefers_generic(x, training, n) and fused_generic_sm90a.available(x, wa, ws):
         return fused_generic_sm90a.transition_generic_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps)
@@ -37,8 +39,12 @@ def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps):
     bf16 or fp32 masters (cast inside, outside autograd, so a master's gradient is fp32). fp32 activations (TF32 allowed): ``fused_wide_sm80.transition_f32_sm80`` (D in ``F32_WIDTHS``, hidden a multiple of 64)."""
     from . import fused_sm80, fused_wide_sm80
 
-    if x.dtype is torch.float32:   # fp32 (TF32 allowed): the wide fp32 path (fp16 products at TF32's rounding, a TF32 backward)
-        return fused_wide_sm80.transition_f32_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps) if fused_wide_sm80.f32_available(x, wa, ws) else None
+    if x.dtype is torch.float32:  # fp32 (TF32 allowed): the wide fp32 path (fp16 products at TF32's rounding, a TF32 backward)
+        return (
+            fused_wide_sm80.transition_f32_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps)
+            if fused_wide_sm80.f32_available(x, wa, ws)
+            else None
+        )
     route = fused_wide_sm80.route(x, wa, ws)
     if route == "fused":
         return fused_sm80.transition_fused_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps)
@@ -71,7 +77,7 @@ def _shapes(rows):
     for r in rows:
         dims = _kv(r["dims"])
         d = dims.get("d_hidden") or dims.get("d_single") or dims.get("d_pair")
-        if d is None:   # a row of a module that builds no hand-CUDA Transition (atom blocks: d_atom)
+        if d is None:  # a row of a module that builds no hand-CUDA Transition (atom blocks: d_atom)
             continue
         d = int(d)
         n = int(dims.get("n", 4))
@@ -103,12 +109,17 @@ def prebuild(target, rows):
         builds = set()
         for n, modes in fused.items():
             for mode in modes:
-                for backward in ((False, True) if mode == "train" else (False,)):
+                for backward in (False, True) if mode == "train" else (False,):
                     grid = fused_sm90a.transition_candidates(target.sms, backward=backward, n=n)
                     op = "transition_bwd_residual_sm90_cuda" if backward else "transition_fwd_residual_sm90_cuda"
-                    configs = [grid[0], *_table_configs(
-                        target.gpu, op, lambda dims, c, n=n, g=grid: dims.get("SMS") == target.sms
-                        and dims.get("ND") == 128 * n and c in g)]
+                    configs = [
+                        grid[0],
+                        *_table_configs(
+                            target.gpu,
+                            op,
+                            lambda dims, c, n=n, g=grid: dims.get("SMS") == target.sms and dims.get("ND") == 128 * n and c in g,
+                        ),
+                    ]
                     for c in configs:
                         builds.add((c["ctas"], c["dw_repl"], mode == "train", n))
                 builds.add((target.sms, fused_sm90a.DW_REPL, mode == "train", n))  # _ext_for: the fixed DW_REPL schedule
@@ -119,7 +130,7 @@ def prebuild(target, rows):
         for (d, n), modes in wide.items():
             for mode in modes:
                 counts = set().union(*(c for (dt, m), c in shapes[(d, n)].items() if m == mode and dt != "float32"))
-                for save_ab in ((False, True) if mode == "train" else (False,)):
+                for save_ab in (False, True) if mode == "train" else (False,):
                     for m in sorted(counts):
                         if save_ab and not fused_wide_sm90a.save_ab_enabled(d, m):
                             continue  # the saving build is requested only where save_ab_enabled (the training forward / backward)
@@ -127,19 +138,24 @@ def prebuild(target, rows):
                         exts[(args, tuple(sorted(kwargs.items())))] = (args, kwargs)
         for args, kwargs in exts.values():
             yield ft.partial(fused_wide_sm90a._ext, *args, **kwargs)
+
         # the generic build: float32 (TF32) rows, shapes the fused / wide builds do not take, and the row counts
         # ``prefers_generic`` hands it
         def generic(d, n, dtype, mode, counts):
             served = (d == 128 and n in fused_sm90a.NS) or n in fused_wide_sm90a.NS.get(d, ())
             small = fused_generic_sm90a._PREFER_GENERIC_ROWS.get(d, (0, 0))[mode == "train"]
             return dtype == "float32" or not served or any(m <= small for m in counts)
+
         if any(generic(d, n, dt, m, c) for (d, n), v in shapes.items() for (dt, m), c in v.items()):
             yield fused_generic_sm90a._ext
+
         # the fp32 forwards (one build per (D, n): every variant, the inference and the saving forward, the weight forms): the float32 eval
         # rows at F32_SHAPES, the float32 train rows at F32_TRAIN_SHAPES (their backward is the generic build's, planned above)
         def f32(d, n, v):
             return (("float32", "eval") in v and n in fused_wide_sm90a.F32_SHAPES.get(d, ())) or (
-                ("float32", "train") in v and n in fused_wide_sm90a.F32_TRAIN_SHAPES.get(d, ()))
+                ("float32", "train") in v and n in fused_wide_sm90a.F32_TRAIN_SHAPES.get(d, ())
+            )
+
         for d, n in sorted(k for k, v in shapes.items() if f32(*k, v)):
             yield ft.partial(fused_wide_sm90a._f32_ext, d, n)
     elif target.arch == "sm100":
@@ -159,7 +175,7 @@ def prebuild(target, rows):
         served = {k: v for k, v in half.items() if v and k[0] in fused_wide_sm80.WIDTHS}
         # the float32 rows (TF32): the wide extension's fp32 bindings (transition_f32_sm80) at D in F32_WIDTHS
         f32 = any(dt == "float32" for (d, _n), v in shapes.items() if d in fused_wide_sm80.F32_WIDTHS for (dt, _m) in v)
-        if any(dt == "bfloat16" for (dt, _m) in shapes.get((128, 4), {})):   # fused_sm80 takes bf16 weights only (no master row reaches it)
+        if any(dt == "bfloat16" for (dt, _m) in shapes.get((128, 4), {})):  # fused_sm80 takes bf16 weights only (no master row reaches it)
             yield fused_sm80._ext
         if served or f32:
             yield fused_wide_sm80._ext

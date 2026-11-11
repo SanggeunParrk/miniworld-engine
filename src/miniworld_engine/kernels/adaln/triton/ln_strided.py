@@ -10,6 +10,7 @@ and to nothing else, and fused3's only callers were the bench, the driver and th
 with `main.py`, whose Function had the same problem. What survives is the one kernel a production
 forward reaches, and the file is now named for it.
 """
+
 from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
@@ -20,15 +21,12 @@ import triton
 import triton.language as tl
 
 
-
 # ── K1 / K2: row-wise LayerNorm ────────────────────────────────────────────────────────────
 # Both axes are tuned tiles. BLOCK_N used to arrive as next_pow2(d) from the launcher — the whole
 # row, a constant the tuner never saw — which is also why BLOCK_M1 had to stay at 1..16 (a
 # [16, 1024] fp32 tile was already the register budget). The N axis is a REDUCE axis (mean/var),
 # so a CSV row at or above the extent spans a whole d_hidden/d_cond row; with N tiled,
 # BLOCK_M1 can take the canonical (>=16) 2-D tile sizes and the two axes trade off properly.
-
-
 
 
 # shape_key is the SHAPE cache bucket, and shape means L -- the atom count (this family is
@@ -50,14 +48,34 @@ from miniworld_engine.kernels._shape_key import atom_key, both_key, length_of, p
 # this family's own kernels stay on `atom_key`. Same L either way -- different bucket set.
 
 
-@configured('layernorm_fwd_strided_triton',
-            key=['shape_key', 'HAS_W'],
-            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=2, num_stages=2))
+@configured("layernorm_fwd_strided_triton", key=["shape_key", "HAS_W"], default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=2, num_stages=2))
 @triton.jit
-def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
-              X2, R2, C2, N2, eps2, sx20,
-              HAS_W: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-              shape_key, HAS_STATS: tl.constexpr = False, MC=None, RC=None, SAVE_C: tl.constexpr = False):
+def _ln_kernel(
+    X,
+    Y,
+    W,
+    M,
+    N: tl.constexpr,
+    eps,
+    sx0,
+    sx1,
+    sy0,
+    sy1,
+    X2,
+    R2,
+    C2,
+    N2,
+    eps2,
+    sx20,
+    HAS_W: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    shape_key,
+    HAS_STATS: tl.constexpr = False,
+    MC=None,
+    RC=None,
+    SAVE_C: tl.constexpr = False,
+):
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rmask = rm < M
@@ -82,7 +100,7 @@ def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
         xc = tl.where(mask, x - mean[:, None], 0.0)
         var = tl.sum(xc * xc, axis=1) / N
         rstd = 1.0 / tl.sqrt(var + eps)
-        if SAVE_C:   # the backward of LN(cond) needs its mean and rstd
+        if SAVE_C:  # the backward of LN(cond) needs its mean and rstd
             tl.store(MC + rm, mean, mask=rmask)
             tl.store(RC + rm, rstd, mask=rmask)
         xn = xc * rstd[:, None]

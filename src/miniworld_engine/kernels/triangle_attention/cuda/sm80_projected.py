@@ -66,22 +66,11 @@ def serves(
         or tuple(bias.shape) != (b, h, length, length)
     ):
         return False
-    if mask is not None and (
-        mask.dtype is not torch.bool
-        or tuple(mask.shape) != (a, b, length)
-        or mask.device != query.device
-    ):
+    if mask is not None and (mask.dtype is not torch.bool or tuple(mask.shape) != (a, b, length) or mask.device != query.device):
         return False
     if _needs_grad(query, key, value, bias) and not _core2.dbp_fits(length, h, b):
         return False
-    return (
-        _core._is_ampere(
-            query.device.index
-            if query.device.index is not None
-            else torch.cuda.current_device()
-        )
-        and _core2.loads()
-    )
+    return _core._is_ampere(query.device.index if query.device.index is not None else torch.cuda.current_device()) and _core2.loads()
 
 
 def _lays(t: torch.Tensor) -> tuple[int, int, int, int]:
@@ -100,11 +89,7 @@ def _readable(t: torch.Tensor) -> torch.Tensor:
 
 def _aligned(t: torch.Tensor) -> torch.Tensor:
     """``t`` itself when its first element is 16-byte aligned (a storage offset that is a multiple of 8 bf16 elements; an allocation is 512-byte aligned), else a fresh copy."""
-    return (
-        t
-        if t.storage_offset() % 8 == 0
-        else t.clone(memory_format=torch.contiguous_format)
-    )
+    return t if t.storage_offset() % 8 == 0 else t.clone(memory_format=torch.contiguous_format)
 
 
 def _mask_rows(mask: torch.Tensor | None, like: torch.Tensor) -> torch.Tensor:
@@ -120,9 +105,7 @@ def _forward_fake(q, k, v, bias, mask, save):
     a, b, h, length, _ = q.shape
     return [
         torch.empty_like(q),
-        q.new_empty((b, h, a, length), dtype=F32)
-        if save
-        else q.new_empty((0,), dtype=F32),
+        q.new_empty((b, h, a, length), dtype=F32) if save else q.new_empty((0,), dtype=F32),
     ]
 
 
@@ -139,11 +122,7 @@ def _forward(
     log-sum-exp the backward reads, empty unless ``save``)."""
     a, b, h, length, d = q.shape
     out = torch.empty_like(q)
-    lse = (
-        torch.empty((b, h, a, length), dtype=F32, device=q.device)
-        if save
-        else q.new_empty((0,), dtype=F32)
-    )
+    lse = torch.empty((b, h, a, length), dtype=F32, device=q.device) if save else q.new_empty((0,), dtype=F32)
     q, k, v, bias = _aligned(q), _aligned(k), _aligned(v), _aligned(bias)
     _core2.forward(
         q,

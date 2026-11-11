@@ -13,6 +13,7 @@ stacked GEMMs. The forward saves nothing for this (``a`` and ``b`` as bf16 moved
 keep them in fp32; as fp32 they cost two extra ``(M, ND)`` passes each way). Before this the backward ran ``dh`` as a cuBLAS call and
 ``_transition_expand_gatebwd_kernel`` (two expand GEMMs, a gate, three stores) after it.
 """
+
 import torch
 import triton
 import triton.language as tl
@@ -26,16 +27,41 @@ from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._fastmath import sigmoid_fast
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 
-@configured('transition_bwd_squeeze_swiglu_triton',
-            key=["shape_key", "SAVED", "HALF"],
-            default=dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=3))
+
+@configured(
+    "transition_bwd_squeeze_swiglu_triton",
+    key=["shape_key", "SAVED", "HALF"],
+    default=dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=3),
+)
 @triton.jit
 def _squeeze_swiglu_bwd_kernel(
-    X, Wab, G, W, H, DAB, SA, SB, SCALE, M, ND: tl.constexpr, K: tl.constexpr,
-    sxm, swabn, sgm, swk, swn, shm, sdm, ssm,
-    shape_key, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
-    SAVED: tl.constexpr = False, HALF: tl.constexpr = False,
+    X,
+    Wab,
+    G,
+    W,
+    H,
+    DAB,
+    SA,
+    SB,
+    SCALE,
+    M,
+    ND: tl.constexpr,
+    K: tl.constexpr,
+    sxm,
+    swabn,
+    sgm,
+    swk,
+    swn,
+    shm,
+    sdm,
+    ssm,
+    shape_key,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    SAVED: tl.constexpr = False,
+    HALF: tl.constexpr = False,
     PREC: tl.constexpr = "ieee",
     PRE: tl.constexpr = False,
 ):
@@ -55,16 +81,12 @@ def _squeeze_swiglu_bwd_kernel(
     acc_dh = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
     for k0 in range(tl.cdiv(K, BLOCK_K)):
         kk = k0 * BLOCK_K + ks
-        g = tl.load(G + rows[:, None] * sgm + kk[None, :],
-                    mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
-        s = tl.load(W + kk[:, None] * swk + cols[None, :] * swn,
-                    mask=(kk[:, None] < K) & (cols[None, :] < ND), other=0)
+        g = tl.load(G + rows[:, None] * sgm + kk[None, :], mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
+        s = tl.load(W + kk[:, None] * swk + cols[None, :] * swn, mask=(kk[:, None] < K) & (cols[None, :] < ND), other=0)
         acc_dh = tf32_dot(g, s, acc_dh, input_precision=PREC, pre_b=PRE)
         if not SAVED:
-            x = tl.load(X + rows[:, None] * sxm + kk[None, :],
-                        mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
-            w = tl.load(Wab + wrows[None, :] * swabn + kk[:, None],
-                        mask=(wrows[None, :] < 2 * ND) & (kk[:, None] < K), other=0)
+            x = tl.load(X + rows[:, None] * sxm + kk[None, :], mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
+            w = tl.load(Wab + wrows[None, :] * swabn + kk[:, None], mask=(wrows[None, :] < 2 * ND) & (kk[:, None] < K), other=0)
             acc = tf32_dot(x, w, acc, input_precision=PREC, pre_b=PRE)
     if SAVED:
         a = sa.to(tl.float32)
@@ -75,7 +97,7 @@ def _squeeze_swiglu_bwd_kernel(
     else:
         a, b = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
     dh = acc_dh.to(et).to(tl.float32)
-    if G.dtype.element_ty == tl.bfloat16:       # dA, dB are rounded to bf16: one tanh.approx is enough (kernels/_fastmath.py)
+    if G.dtype.element_ty == tl.bfloat16:  # dA, dB are rounded to bf16: one tanh.approx is enough (kernels/_fastmath.py)
         sig = sigmoid_fast(a)
     else:
         sig = tl.sigmoid(a)
@@ -98,7 +120,7 @@ def _launch_bwd(xn, w_ab, dy, ws, shape_key, saved_a, saved_b, scale=None):
         raise ValueError("squeeze_swiglu_bwd shapes must be dy[M,K], ws[K,ND]")
     half = saved and scale is not None
     prec = dot_precision(dy.dtype)
-    pre = prec == "tf32" and dy.dtype is torch.float32     # TF32 operands rounded to nearest here, once (kernels/_tf32.py)
+    pre = prec == "tf32" and dy.dtype is torch.float32  # TF32 operands rounded to nearest here, once (kernels/_tf32.py)
     if pre:
         ws = tf32_cached((ws,), lambda: tf32_grid_many(ws))[0]
         if not saved:
@@ -106,7 +128,7 @@ def _launch_bwd(xn, w_ab, dy, ws, shape_key, saved_a, saved_b, scale=None):
     if saved:
         if saved_a.shape != (m, nd) or saved_b.stride() != saved_a.stride():
             raise ValueError("squeeze_swiglu_bwd: saved a/b must be [M,ND] with one layout")
-        h = xn = w_ab = dy                                   # unused fillers
+        h = xn = w_ab = dy  # unused fillers
     else:
         if w_ab.shape != (2 * nd, k) or xn.shape != (m, k):
             raise ValueError("squeeze_swiglu_bwd shapes must be xn[M,K], w_ab[2*ND,K], dy[M,K], ws[K,ND]")
@@ -118,36 +140,64 @@ def _launch_bwd(xn, w_ab, dy, ws, shape_key, saved_a, saved_b, scale=None):
     grid = lambda c: tile_grid(m, nd, c["BLOCK_M1"], c["BLOCK_N"])  # noqa: E731
 
     _squeeze_swiglu_bwd_kernel[grid](
-        xn, w_ab, dy, ws, h, dab, saved_a, saved_b, scale, m, nd, k,
-        xn.stride(0), w_ab.stride(0), dy.stride(0), ws.stride(0), ws.stride(1), h.stride(0), dab.stride(0),
+        xn,
+        w_ab,
+        dy,
+        ws,
+        h,
+        dab,
+        saved_a,
+        saved_b,
+        scale,
+        m,
+        nd,
+        k,
+        xn.stride(0),
+        w_ab.stride(0),
+        dy.stride(0),
+        ws.stride(0),
+        ws.stride(1),
+        h.stride(0),
+        dab.stride(0),
         saved_a.stride(0),
-        shape_key=pack(shape_key, K=k, ND=nd), SAVED=saved, HALF=half, PREC=prec, PRE=pre,
+        shape_key=pack(shape_key, K=k, ND=nd),
+        SAVED=saved,
+        HALF=half,
+        PREC=prec,
+        PRE=pre,
     )
     return h, dab
+
 
 def _squeeze_swiglu_bwd_fake(xn, w_ab, dy, ws, shape_key):
     """``(h, dAB)``: ``h`` ``(M, ND)`` and the stacked ``[dA | dB]`` ``(M, 2*ND)``, in the activation dtype."""
     return dy.new_empty((xn.shape[0], ws.shape[1])), dy.new_empty((xn.shape[0], 2 * ws.shape[1]))
 
+
 @opaque(fake=_squeeze_swiglu_bwd_fake, name="transition_bwd_squeeze_swiglu")
-def squeeze_swiglu_bwd(xn: torch.Tensor, w_ab: torch.Tensor, dy: torch.Tensor, ws: torch.Tensor,
-                       shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+def squeeze_swiglu_bwd(
+    xn: torch.Tensor, w_ab: torch.Tensor, dy: torch.Tensor, ws: torch.Tensor, shape_key: int
+) -> tuple[torch.Tensor, torch.Tensor]:
     """``(h, dAB)`` for ``squeeze(SwiGLU(xn @ Wa^T, xn @ Wb^T))``: ``xn (M, K)``, ``w_ab (2*ND, K)`` the expand weights
     row-interleaved (``torch.stack((wa, wb), 1).reshape(2*ND, K)``), ``dy (M, K)``, ``ws (K, ND)``; one dtype. a, b are
     recomputed in fp32 inside the kernel."""
     return _launch_bwd(xn, w_ab, dy, ws, shape_key, None, None)
 
+
 def _squeeze_swiglu_bwd_saved_fake(dy, ws, a, b, shape_key, scale=None):
     """``dAB`` ``(M, 2*ND)`` in the activation dtype."""
     return dy.new_empty((dy.shape[0], 2 * ws.shape[1]))
 
+
 @opaque(fake=_squeeze_swiglu_bwd_saved_fake, name="transition_bwd_squeeze_swiglu_saved")
-def squeeze_swiglu_bwd_saved(dy: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: torch.Tensor, shape_key: int,
-                             scale: torch.Tensor | None = None) -> torch.Tensor:
+def squeeze_swiglu_bwd_saved(
+    dy: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: torch.Tensor, shape_key: int, scale: torch.Tensor | None = None
+) -> torch.Tensor:
     """``dAB = [dA | dB]`` from ``dy (M, K)``, ``ws (K, ND)`` and the expand halves ``a``, ``b`` ``(M, ND)`` the forward saved (the
     activation dtype, rounded like the PyTorch statements hold them; under fp32 activations with a ``scale`` they are fp16, the
     TF32 mantissa, stored divided by that fp32 device scalar)."""
     return _launch_bwd(dy, dy, dy, ws, shape_key, a, b, scale)[1]
+
 
 #: Rows up to which dx is two GEMMs over the dAB halves instead of one over a stacked [Wa; Wb] (the stacking copy is most of the cost there).
 _DX_SPLIT_MAX_ROWS = 4096
@@ -167,10 +217,10 @@ def swiglu_squeeze_backward_saved(xn, wa, wb, ws, dy, shape_key, saved=None, hal
     else:
         h, a, b = saved
         dab = squeeze_swiglu_bwd_saved(dy, ws, a, b, shape_key, half_scale)
-    dws = torch.matmul(dy.T, h)                               # (K, ND)
-    dwab = torch.matmul(dab.T, xn)                            # [dWa; dWb]  (2*ND, K)
-    if dy.shape[0] <= _DX_SPLIT_MAX_ROWS:      # few rows: dA Wa + dB Wb, two GEMMs over the halves of dAB, no stacked copy of the weights
+    dws = torch.matmul(dy.T, h)  # (K, ND)
+    dwab = torch.matmul(dab.T, xn)  # [dWa; dWb]  (2*ND, K)
+    if dy.shape[0] <= _DX_SPLIT_MAX_ROWS:  # few rows: dA Wa + dB Wb, two GEMMs over the halves of dAB, no stacked copy of the weights
         dx = torch.addmm(torch.matmul(dab[:, :nd], wa), dab[:, nd:], wb)
     else:
-        dx = torch.matmul(dab, torch.cat((wa, wb), dim=0))    # (M, K)
+        dx = torch.matmul(dab, torch.cat((wa, wb), dim=0))  # (M, K)
     return dx, dwab[:nd], dwab[nd:], dws

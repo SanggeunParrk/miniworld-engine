@@ -55,9 +55,7 @@ def cond_fwd(c, w, bias, gamma, eps=1e-5, cross=True, cfg=None):
     ``gamma`` [3, 128] fp32 (the three cond LayerNorm weights: attention AdaLN, key / value AdaLN, transition AdaLN)."""
     m = c.shape[0]
     mod = torch.empty(m, 1024, device=c.device, dtype=torch.bfloat16)
-    _ext().local_cond_fwd(
-        c, w, bias, gamma, mod, eps, cross, cond_cfg(m) if cfg is None else cfg
-    )
+    _ext().local_cond_fwd(c, w, bias, gamma, mod, eps, cross, cond_cfg(m) if cfg is None else cfg)
     return mod
 
 
@@ -67,9 +65,7 @@ def pre_fwd(x, mod, w, bq, eps=1e-5, save=False, cross=True, cfg=2, prefetch=Fal
     q, k, v, sg = (torch.empty_like(x) for _ in range(4))
     x1 = torch.empty_like(x) if save else x.new_empty(0)
     xkv = torch.empty_like(x) if save and cross else x.new_empty(0)
-    _ext().local_pre_fwd(
-        x, mod, w, bq, q, k, v, sg, x1, xkv, eps, cross, save, prefetch, cfg
-    )
+    _ext().local_pre_fwd(x, mod, w, bq, q, k, v, sg, x1, xkv, eps, cross, save, prefetch, cfg)
     return (q, k, v, sg, x1, xkv if cross else x1) if save else (q, k, v, sg)
 
 
@@ -77,9 +73,7 @@ def post_fwd(x, o, sg, mod, wo, wu, wd, eps=1e-5, save=False, cfg=1, prefetch=Fa
     """-> out [M, 128] and, with ``save``, also (u, a2, x2, t); ``wo`` [128, 128], ``wu`` [512, 128] = Wa | Wb, ``wd`` [128, 256]."""
     out = torch.empty_like(x)
     saved = [torch.empty_like(x) for _ in range(4)] if save else [x.new_empty(0)] * 4
-    _ext().local_post_fwd(
-        x, o, sg, mod, wo, wu, wd, out, *saved, eps, save, prefetch, cfg
-    )
+    _ext().local_post_fwd(x, o, sg, mod, wo, wu, wd, out, *saved, eps, save, prefetch, cfg)
     return (out, *saved) if save else out
 
 
@@ -192,10 +186,7 @@ def wgrad(problems, segments, m, splits=None):
     """The grouped weight gradients. ``problems``: [(A, B)] bf16 [M, Ka] / [M, Kb] views (Ka, Kb multiples of 128; A, B may be column slices of a wider buffer); problem i gives D_i = A_i^T B_i
     [Ka, Kb] fp32. ``segments``: [(problem index or None, src, row0, rows, dst)]: with a problem index, the rows [row0, row0 + rows) of D_i (summed over the splits) rounded into ``dst``
     (contiguous, bf16 or fp32, rows x Kb elements); with None, ``src`` (an fp32 tensor, plain copy) rounded into ``dst``."""
-    ka = [
-        a.shape[1] if a.stride(1) == 1 and a.shape[1] % 128 == 0 else 0
-        for a, _ in problems
-    ]
+    ka = [a.shape[1] if a.stride(1) == 1 and a.shape[1] % 128 == 0 else 0 for a, _ in problems]
     kb = [b.shape[1] for _, b in problems]
     slab = sum(x * y for x, y in zip(ka, kb, strict=True))
     tiles = sum(x // 128 * (y // 128) for x, y in zip(ka, kb, strict=True))
@@ -234,4 +225,3 @@ def wgrad(problems, segments, m, splits=None):
         sns,
         dsts,
     )
-

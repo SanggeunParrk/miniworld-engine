@@ -11,9 +11,7 @@ SP = SimpleNamespace(P7=T.SOURCES / "common", T=T)
 def build(count, length, part, defines=()):
     inc = T._upstream() / "csrc"
     src = R / "b1_fused.cu"
-    defs = dict(
-        UCOUNT=count, TRAIN_L=length, USE_SAVED_XN=1, PART_ONLY=part, **dict(defines)
-    )
+    defs = dict(UCOUNT=count, TRAIN_L=length, USE_SAVED_XN=1, PART_ONLY=part, **dict(defines))
     flags = [
         "-std=c++17",
         "-O3",
@@ -44,15 +42,11 @@ def build(count, length, part, defines=()):
     out = T.compile(src, flags)
     log = out.with_suffix(".ptxas.log").read_text()
     if "C7507" in log:
-        raise RuntimeError(
-            "Rejected: requested register redistribution was ignored by ptxas"
-        )
+        raise RuntimeError("Rejected: requested register redistribution was ignored by ptxas")
     L = T._launch_module()
     drv = L.BlockDriver(device=torch.cuda.current_device())
     mod = drv.load(out.read_bytes())
-    u = L.Unit(
-        "shared_b1", "sm_90a", torch.cuda.current_device(), drv.drv, mod, {}, str(out)
-    )
+    u = L.Unit("shared_b1", "sm_90a", torch.cuda.current_device(), drv.drv, mod, {}, str(out))
     k = u.kernel("b1_fused")
     smem = 227840 + 512 * int(dict(defines).get("B1_SPLIT_DN", 0))
     k.set_max_dynamic_smem(smem)
@@ -62,33 +56,16 @@ def build(count, length, part, defines=()):
 class Plan(T.CooperativePlan):
     def __init__(self, d, dy, xhat, rstd, count=132, part=2, defines=None):
         if (defines or {}).get("B1_SPLIT_DN") and (
-            (
-                (defines or {}).get("B1_PREFETCH_DY")
-                and not (defines or {}).get("B1_DN_REG")
-            )
-            or not (defines or {}).get("B1_DIRECT_DP")
+            ((defines or {}).get("B1_PREFETCH_DY") and not (defines or {}).get("B1_DN_REG")) or not (defines or {}).get("B1_DIRECT_DP")
         ):
-            raise ValueError(
-                "split dNorm requires direct dProj and disables dy prefetch"
-            )
+            raise ValueError("split dNorm requires direct dProj and disables dy prefetch")
         if (defines or {}).get("B1_REG_EARLY_RAW") and not all(
-            (defines or {}).get(k)
-            for k in ("B1_DN_REG", "B1_DN_PAIR", "B1_SPLIT_DN", "B1_EARLY_RAW")
+            (defines or {}).get(k) for k in ("B1_DN_REG", "B1_DN_PAIR", "B1_SPLIT_DN", "B1_EARLY_RAW")
         ):
-            raise ValueError(
-                "early raw requires register dNorm, paired GEMM, split stats, early scheduling"
-            )
-        if (defines or {}).get("B1_PARAM_SHARED") and (
-            not (defines or {}).get("B1_DN_REG")
-            or (defines or {}).get("B1_PREFETCH_DY")
-        ):
-            raise ValueError(
-                "shared param reduction requires register dNorm and no dy prefetch"
-            )
-        if (
-            (defines or {}).get("B1_ASYNC_WP_DN")
-            or (defines or {}).get("B1_DEFER_DG_STORE")
-        ) and not all(
+            raise ValueError("early raw requires register dNorm, paired GEMM, split stats, early scheduling")
+        if (defines or {}).get("B1_PARAM_SHARED") and (not (defines or {}).get("B1_DN_REG") or (defines or {}).get("B1_PREFETCH_DY")):
+            raise ValueError("shared param reduction requires register dNorm and no dy prefetch")
+        if ((defines or {}).get("B1_ASYNC_WP_DN") or (defines or {}).get("B1_DEFER_DG_STORE")) and not all(
             (defines or {}).get(k)
             for k in (
                 "PAIR_WP",
@@ -98,48 +75,33 @@ class Plan(T.CooperativePlan):
                 "GATE_PHASE",
             )
         ):
-            raise ValueError(
-                "overlap requires the verified paired/register/early-raw schedule"
-            )
-        if (defines or {}).get("B1_WG_PARAM_SYNC") and not (defines or {}).get(
-            "B1_PARAM_SHARED"
-        ):
-            raise ValueError(
-                "group-only parameter synchronization requires shared parameter path"
-            )
-        if (defines or {}).get("B1_SKIP_FINAL_GROUP_SYNC") and not (defines or {}).get(
-            "B1_DTRI_ASYNC_EPI"
-        ):
-            raise ValueError(
-                "tail-sync elision requires async epilogue followed by caller CTA barrier"
-            )
+            raise ValueError("overlap requires the verified paired/register/early-raw schedule")
+        if (defines or {}).get("B1_WG_PARAM_SYNC") and not (defines or {}).get("B1_PARAM_SHARED"):
+            raise ValueError("group-only parameter synchronization requires shared parameter path")
+        if (defines or {}).get("B1_SKIP_FINAL_GROUP_SYNC") and not (defines or {}).get("B1_DTRI_ASYNC_EPI"):
+            raise ValueError("tail-sync elision requires async epilogue followed by caller CTA barrier")
         self.dtri_store_c = (defines or {}).get("B1_DTRI_STORE_C", 16)
         if self.dtri_store_c not in (16, 32, 64, 128):
             raise ValueError("invalid dTri store tile")
         self.xhat, self.rstd = xhat, rstd
         if (
-            d["n"] % 128 or d["n"] < 128
+            d["n"] % 128
+            or d["n"] < 128
             or d["x"].dtype != torch.bfloat16
-            or d["x"].numel() % (d["n"] ** 2 * 128)   # B samples (tokens b-major): M = B n n
+            or d["x"].numel() % (d["n"] ** 2 * 128)  # B samples (tokens b-major): M = B n n
         ):
-            raise ValueError(
-                "This candidate requires BF16 C128 and supported multiples of 128"
-            )
+            raise ValueError("This candidate requires BF16 C128 and supported multiples of 128")
         if part != 2 or not 1 <= count <= 132:
-            raise ValueError(
-                "The cooperative two-phase grid requires 1..132 CTAs and part=2"
-            )
+            raise ValueError("The cooperative two-phase grid requires 1..132 CTAs and part=2")
         self.count, self.part, self.d = count, part, d
         self.reduce_size = 49664
         self.threads = 384 if (defines or {}).get("PRODUCER") else 256
         if d["x"].numel() > d["n"] ** 2 * 128:
             # B samples: the build that reads each row's own dropout-scale sample (one sample keeps the original cubin)
             defines = dict(defines or {}, B1_BATCHED=1)
-        self.k, self.reduce, self.smem = build(
-            count, d["n"], part, tuple(sorted((defines or {}).items()))
-        )
+        self.k, self.reduce, self.smem = build(count, d["n"], part, tuple(sorted((defines or {}).items())))
         x = d["x"]
-        m = x.numel() // 128   # B n n tokens (b-major)
+        m = x.numel() // 128  # B n n tokens (b-major)
         bf = lambda shape: torch.empty(shape, device=x.device, dtype=x.dtype)
         self.outputs = (
             bf((m, 128)),
@@ -152,6 +114,7 @@ class Plan(T.CooperativePlan):
         self.partw = torch.empty((count, 49152), device=x.device)
         self.partln = torch.empty((count, 512), device=x.device)
         from ._h100_pack import zeros_native
+
         zeros = zeros_native if T.preserve_d128_training() else torch.zeros
         self.counts = zeros(2 + count, device=x.device, dtype=torch.int32)
         self.bind(dy, xhat, rstd)
@@ -160,15 +123,14 @@ class Plan(T.CooperativePlan):
         self.xhat, self.rstd = xhat, rstd
         d = self.d
         n = d["n"]
-        m = d["x"].numel() // 128   # batched samples: B n n tokens, b-major (the kernel reads row s n + j of ds [B n, 128])
+        m = d["x"].numel() // 128  # batched samples: B n n tokens, b-major (the kernel reads row s n + j of ds [B n, 128])
         L = T._launch_module()
         from ._h100_pack import dense_native
+
         self.wpt = dense_native(d["wp"].t()) if T.preserve_d128_training() else d["wp"].t().contiguous()
         self.wgt = d["wt"][4]
         es = xhat.element_size()
-        tm = lambda t, box, dims, strides: L.tensor_map(
-            t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B"
-        )
+        tm = lambda t, box, dims, strides: L.tensor_map(t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B")
         row = lambda t, c: tm(t, [64, 64], [c, m], [c * 2])
         dg, dwg, dt, dgo, dbo, dwp = self.outputs
         maps = [
@@ -193,7 +155,8 @@ class Plan(T.CooperativePlan):
             else maps[2]
         )
         maps.insert(3, statsmap)
-        self.p = L.Struct.fixed("h100_b1:1",
+        self.p = L.Struct.fixed(
+            "h100_b1:1",
             [
                 *maps,
                 d["ds"],
@@ -213,6 +176,6 @@ class Plan(T.CooperativePlan):
                 m,
                 n,
                 m // 64,
-            ]
+            ],
         )
         self.inputs = (dy, self.wpt, self.wgt, xhat, rstd)

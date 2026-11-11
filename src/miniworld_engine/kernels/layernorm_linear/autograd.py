@@ -36,9 +36,14 @@ def _ln_backward_fake(dx_normed, x, gamma, mean, rstd, shape_key=None):
 
 
 @opaque(fake=_ln_backward_fake, name="layernorm_linear_ln_bwd")
-def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
-                 mean: torch.Tensor, rstd: torch.Tensor, shape_key: int | None = None,
-                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _ln_backward(
+    dx_normed: torch.Tensor,
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    mean: torch.Tensor,
+    rstd: torch.Tensor,
+    shape_key: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """dx, dgamma, dbeta for the LayerNorm part, reusing the repo's fused Triton kernel.
 
     Feeds ``dy = dx_normed`` (grad w.r.t. the LN output) so the kernel's dx/dw/db become the
@@ -53,10 +58,21 @@ def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
     xc = x.to(dx_normed.dtype)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)
     layer_norm_bwd_dx_fused[grid](
-        dx, dx_normed, dgamma, dbeta,
-        xc, gamma, mean, rstd, rstd,
-        dgamma.stride(0), dbeta.stride(0), xc.stride(0), xc.stride(1),
-        M, K,
+        dx,
+        dx_normed,
+        dgamma,
+        dbeta,
+        xc,
+        gamma,
+        mean,
+        rstd,
+        rstd,
+        dgamma.stride(0),
+        dbeta.stride(0),
+        xc.stride(0),
+        xc.stride(1),
+        M,
+        K,
         # BLOCK_N is a tuned tile now (see layernorm/triton/main.py); this is only the cache label.
         shape_key=both_key(0, N=K) if shape_key is None else pack(shape_key, N=K),
         HAS_ROWSCALE=False,
@@ -64,8 +80,7 @@ def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
     return dx, dgamma, dbeta
 
 
-def _compose_backward(dY, x, mean, rstd, gamma, beta, W, has_bias, *,
-                      shape_key: int | None = None):
+def _compose_backward(dY, x, mean, rstd, gamma, beta, W, has_bias, *, shape_key: int | None = None):
     """Shared LayerNormLinear backward: two GEMMs + the Triton LN-backward.
 
     dx_normed = dY @ W and dW = dYᵀ @ x_normed via cuBLAS; x_normed recomputed from saved
@@ -97,8 +112,7 @@ class LayerNormLinearTritonFn(torch.autograd.Function):
         )
 
         x2 = x.reshape(-1, x.shape[-1]).contiguous()
-        Y, mean, rstd = layernorm_linear_triton_fwd_stats(
-            x2, ln_weight, ln_bias, weight, bias, eps)
+        Y, mean, rstd = layernorm_linear_triton_fwd_stats(x2, ln_weight, ln_bias, weight, bias, eps)
         ctx.save_for_backward(x2, mean, rstd, ln_weight, ln_bias, weight)
         ctx.input_shape = x.shape
         ctx.has_bias = bias is not None
@@ -110,7 +124,13 @@ class LayerNormLinearTritonFn(torch.autograd.Function):
     def backward(ctx, dY):
         x, mean, rstd, gamma, beta, W = ctx.saved_tensors
         dx, dg, db_ln, dW, db = _compose_backward(
-            dY.reshape(-1, dY.shape[-1]), x, mean, rstd, gamma, beta, W,
+            dY.reshape(-1, dY.shape[-1]),
+            x,
+            mean,
+            rstd,
+            gamma,
+            beta,
+            W,
             ctx.has_bias,
             shape_key=ctx.shape_key,
         )
@@ -132,16 +152,14 @@ def _layernorm(x, weight, bias, eps):
     return triton_layernorm(x, weight, bias, eps)
 
 
-def layernorm_linear_triton_fn(x, ln_weight, ln_bias, weight, bias=None, eps: float = 1e-5,
-                               length: int | None = None):
+def layernorm_linear_triton_fn(x, ln_weight, ln_bias, weight, bias=None, eps: float = 1e-5, length: int | None = None):
     """Trainable LayerNormLinear (Triton fwd + cuBLAS/Triton bwd).
 
     ``length`` is L -- the TOKEN/ATOM count of the activation before it was flattened (a trimul
     pair view has M = L*L) -- kept for the call signature; the backward's launch-config key is the row count M (``both_key``)."""
     if not x.is_cuda or x.dtype == torch.float64 or x.shape[-1] > 1024 or x.numel() == 0:
         acc = torch.float64 if x.dtype == torch.float64 else torch.float32
-        xn = torch.nn.functional.layer_norm(
-            x.to(acc), (x.shape[-1],), ln_weight.to(acc), ln_bias.to(acc), eps)
+        xn = torch.nn.functional.layer_norm(x.to(acc), (x.shape[-1],), ln_weight.to(acc), ln_bias.to(acc), eps)
         return torch.nn.functional.linear(xn.to(x.dtype), weight, bias)
     if x.dtype == torch.float32:
         # Keep a pre-flatten leading dimension for the norm's cache-key contract.

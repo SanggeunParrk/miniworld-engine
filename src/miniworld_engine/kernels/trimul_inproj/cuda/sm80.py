@@ -66,38 +66,22 @@ def _is_ampere(index: int) -> bool:
     return torch.cuda.get_device_capability(index) == (8, 0)
 
 
-def supports(
-    pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None
-) -> bool:
+def supports(pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None) -> bool:
     """The kernels' own requirements: sm_80, bf16, d_pair = d_hidden = 128 (tile shapes are literals), one square contiguous plane with
     L % 16 == 0 (whole 128-token tiles for the joint backward), and a [B, L] token mask if any.  A batch is run plane by plane by the integration."""
     if not pair.is_cuda or pair.dtype is not torch.bfloat16 or not pair.is_contiguous():
         return False
-    if (
-        pair.ndim != 4
-        or pair.shape[0] < 1
-        or pair.shape[1] != pair.shape[2]
-        or pair.shape[-1] != D
-        or d_hidden != D
-    ):
+    if pair.ndim != 4 or pair.shape[0] < 1 or pair.shape[1] != pair.shape[2] or pair.shape[-1] != D or d_hidden != D:
         return False
     n = pair.shape[1]
     if n <= 0 or n % 16 != 0:
         return False
-    if mask is not None and (
-        mask.shape != (pair.shape[0], n) or mask.dtype is not torch.bool
-    ):
+    if mask is not None and (mask.shape != (pair.shape[0], n) or mask.dtype is not torch.bool):
         return False
-    return _is_ampere(
-        pair.device.index
-        if pair.device.index is not None
-        else torch.cuda.current_device()
-    )
+    return _is_ampere(pair.device.index if pair.device.index is not None else torch.cuda.current_device())
 
 
-def available(
-    pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None
-) -> bool:
+def available(pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None) -> bool:
     """``supports()`` plus a successful (cached) build; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback)."""
     if not supports(pair, d_hidden, mask):
         return False
@@ -122,9 +106,7 @@ def token_mask(mask: torch.Tensor | None, n: int, device) -> torch.Tensor:
     if mask is None:
         return torch.empty(0, dtype=torch.uint8, device=device)
     m = mask.reshape(n)
-    return (
-        m.view(torch.uint8) if m.is_contiguous() else m.contiguous().view(torch.uint8)
-    )
+    return m.view(torch.uint8) if m.is_contiguous() else m.contiguous().view(torch.uint8)
 
 
 # ------------------------------------------------------------------------------------------------------------ weight layouts
@@ -170,9 +152,7 @@ def _pack(wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, *, train: bool) -> dict:
     wg3 = torch.empty((D, D), dtype=torch.bfloat16, device=dev)
     wo3 = torch.empty((D, ch), dtype=torch.bfloat16, device=dev)
     vec = torch.empty((8, D), dtype=torch.float32, device=dev)
-    wdx = torch.empty(
-        (4 * ch + D, D) if train else (0,), dtype=torch.bfloat16, device=dev
-    )
+    wdx = torch.empty((4 * ch + D, D) if train else (0,), dtype=torch.bfloat16, device=dev)
     wob1 = torch.empty((D, ch) if train else (0,), dtype=torch.bfloat16, device=dev)
     _ext().pack(*ws, *ln, w1, wg3, wo3, vec, wdx, wob1)
     so, bo_, sg, bg, so1, bo1, sg1, bg1 = vec.unbind(0)
@@ -189,9 +169,7 @@ def _pack(wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, *, train: bool) -> dict:
         bg=bg,
     )
     if train:
-        pk.update(
-            wdx=wdx, wo_b1=wob1, wg_b1=ws[4].to(bf), so_b1=so1, bo_b1=bo1, sg_b1=sg1, bg_b1=bg1
-        )
+        pk.update(wdx=wdx, wo_b1=wob1, wg_b1=ws[4].to(bf), so_b1=so1, bo_b1=bo1, sg_b1=sg1, bg_b1=bg1)
     return pk
 
 
@@ -203,9 +181,7 @@ def _pack_reference(wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, *, train: bool) ->
     oc, is_gate, _ = _k1_rows(ch, wl.device)
     wg_all = torch.cat([f(wlg), f(wrg)], 0)  # [2 CH, 128]
     wp_all = torch.cat([f(wl), f(wr)], 0)
-    w_rows = torch.where(
-        is_gate[:, None], wg_all[oc], wp_all[oc]
-    )  # [4 CH, 128], K1 row order
+    w_rows = torch.where(is_gate[:, None], wg_all[oc], wp_all[oc])  # [4 CH, 128], K1 row order
     # tests/registry/test_layernorm_is_never_bf16.py allow-lists these statements by their source line, so they stay as written.
     # fmt: off
     w1 = (0.5 * w_rows).to(torch.bfloat16).view(nstep, 64, 16, 8).transpose(1, 2).contiguous()   # [block][16 B k-granule][64 rows][8]
@@ -240,20 +216,14 @@ def _pack_reference(wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, *, train: bool) ->
 # ------------------------------------------------------------------------------------------------------------------ forward
 def _contract(ext, ab, x, ch, n, direction):
     a, b = ab[:ch].view(ch, n, n), ab[ch:].view(ch, n, n)
-    h = (
-        ch // 2 if direction == BIDIR else (ch if direction == OUTGOING else 0)
-    )  # channels [0, h) outgoing (NT), the rest incoming (TN)
+    h = ch // 2 if direction == BIDIR else (ch if direction == OUTGOING else 0)  # channels [0, h) outgoing (NT), the rest incoming (TN)
     if direction == BIDIR and n <= _CUSTOM_CONTRACT_MAX_L and n % 128 == 0:
         ext.contract(a, b, x, h, 0)  # both halves in one launch
         return
     if h:
-        torch.bmm(
-            a[:h], b[:h].transpose(1, 2), out=x[:h]
-        )  # outgoing: sum_k a[i,k] b[j,k]
+        torch.bmm(a[:h], b[:h].transpose(1, 2), out=x[:h])  # outgoing: sum_k a[i,k] b[j,k]
     if h < ch:
-        torch.bmm(
-            a[h:].transpose(1, 2), b[h:], out=x[h:]
-        )  # incoming: sum_k a[k,i] b[k,j]
+        torch.bmm(a[h:].transpose(1, 2), b[h:], out=x[h:])  # incoming: sum_k a[k,i] b[k,j]
 
 
 def _front(ext, zf, mk, pk, n):
@@ -360,9 +330,7 @@ def forward_train(
     eps_out: float,
 ) -> list[torch.Tensor]:
     """[out, a | b planes, X, LayerNorm statistics, x_n]."""
-    out, (planes, x, stats, xn) = _run_forward(
-        leaves, mask, ds, direction, eps_in, eps_out, save=True
-    )
+    out, (planes, x, stats, xn) = _run_forward(leaves, mask, ds, direction, eps_in, eps_out, save=True)
     return [out, planes, x, stats, xn]
 
 
@@ -418,17 +386,13 @@ def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
         S, Cc = ch // 16, _B7J_CONSUMERS[ch]
         groups = ext.b7j_capacity() // (S + Cc)
         joint = groups >= 1
-    if (
-        joint
-    ):  # d_g alone; dg / dp of the planes live only in the joint kernel's L2 ring
+    if joint:  # d_g alone; dg / dp of the planes live only in the joint kernel's L2 ring
         ldd = C
         dgp = z.new_empty((T, C))
         dgv = dgp
     else:
         ldd = 4 * ch + C
-        dgp = z.new_empty(
-            (T, ldd)
-        )  # [dg | dp of the planes (K1 order) | d_g of the output gate]
+        dgp = z.new_empty((T, ldd))  # [dg | dp of the planes (K1 order) | d_g of the output gate]
         dgv = dgp[:, 4 * ch :]
     ao = None
     if ch == 128:  # G = A_o^T X^T on chip
@@ -486,15 +450,10 @@ def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
         G = gpart.sum(0) if gpart is not None else _gemm_tk(ao, x.view(ch, T).t())
         H = G - v_o[:, None]
         Wo = wo.detach().float()
-        d_wo = (
-            H * go.detach().float()[None, :]
-            + S_o[:, None] * bo.detach().float()[None, :]
-        )
+        d_wo = H * go.detach().float()[None, :] + S_o[:, None] * bo.detach().float()[None, :]
         d_go = (Wo * H).sum(0)
         d_bo = (Wo * S_o[:, None]).sum(0)
-        d_wg = _mm32(
-            dgv.t(), xn
-        )  # W_og: the gate ran on the saved x_n (affine included)
+        d_wg = _mm32(dgv.t(), xn)  # W_og: the gate ran on the saved x_n (affine included)
         return d_wo, d_go, d_bo, d_wg
 
     # the weight-gradient GEMMs are DRAM-bound, the contraction backward is tensor-bound: run them side by side
@@ -519,15 +478,9 @@ def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     dz = torch.empty_like(zf)
     if joint:
         # ---- B7 joint: sources (dg / dp + dW per weight block) -> L2 ring -> consumers (dx_n GEMM + LN_in backward + residual)
-        ring = torch.empty(
-            groups * _B7J_RINGS * 128 * 64 * S, device=dev, dtype=torch.bfloat16
-        )
-        flags = torch.zeros(
-            groups * _B7J_RINGS * (S + 1), device=dev, dtype=torch.int32
-        )
-        dwp = torch.empty(
-            groups * ext.b7j_dwseg(), 4 * ch, C, device=dev, dtype=torch.float32
-        )
+        ring = torch.empty(groups * _B7J_RINGS * 128 * 64 * S, device=dev, dtype=torch.bfloat16)
+        flags = torch.zeros(groups * _B7J_RINGS * (S + 1), device=dev, dtype=torch.int32)
+        dwp = torch.empty(groups * ext.b7j_dwseg(), 4 * ch, C, device=dev, dtype=torch.float32)
         part = torch.empty(groups * Cc, 2, C, device=dev, dtype=torch.float32)
         ext.b7j(
             xn,
@@ -554,13 +507,9 @@ def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     else:
         # ---- B7src: dg / dp + input-weight gradient partials; B8: dx_n = [dgp | d_g] . [W_in ; W_og] + LN_in backward + residual
         sms = torch.cuda.get_device_properties(dev).multi_processor_count
-        dwp = torch.empty(
-            max(1, sms // (ch // 32)), 4 * ch, C, device=dev, dtype=torch.float32
-        )
+        dwp = torch.empty(max(1, sms // (ch // 32)), 4 * ch, C, device=dev, dtype=torch.float32)
         ext.b7src(xn, pk["w1"], dab.view(2 * ch, T), mask, dgp, ldd, dwp, n)
-        part = torch.empty(
-            min((T + 127) // 128, 2 * sms), 2, C, device=dev, dtype=torch.float32
-        )
+        part = torch.empty(min((T + 127) // 128, 2 * sms), 2, C, device=dev, dtype=torch.float32)
         ext.b8(dgp, ldd, pk["wdx"], zf, dyf, stats, pk["g_in"], dz, part)
     # one launch: B7's fp32 partials -> the four input-projection gradients (K1 row order undone, in the parameters' strides) and the
     # LayerNorm_in gradients (in the parameters' dtype)
@@ -640,13 +589,9 @@ class _Training(torch.autograd.Function):
         return (*grads, None, None, None, None, None)
 
 
-def trimul(
-    z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, mask, ds, direction, eps_in, eps_out
-):
+def trimul(z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, mask, ds, direction, eps_in, eps_out):
     """z + drop_row(trimul(z)).  ``mask`` [L] uint8 or empty (``token_mask``), ``ds`` [L, 128] bf16 or empty.  Call ``available()`` first."""
     leaves = (z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo)
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in leaves)):
-        return forward_nograd(
-            list(leaves), mask, ds, direction, float(eps_in), float(eps_out)
-        )
+        return forward_nograd(list(leaves), mask, ds, direction, float(eps_in), float(eps_out))
     return _Training.apply(*leaves, mask, ds, direction, float(eps_in), float(eps_out))

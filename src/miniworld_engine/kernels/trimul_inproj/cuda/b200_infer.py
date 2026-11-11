@@ -27,11 +27,26 @@ def _ext():
     ensure_cuda_home()
     return load_extension(
         name="trimul_b200_v6",
-        sources=[str(_SRC / f) for f in ("k1w.cu", "k3g.cu", "k3w.cu", "wide_aux.cu", "k1wb.cu", "wide_bwd.cu", "b1s.cu", "b7m.cu", "b1g.cu", "b7g.cu",
-                                         "bind_b200.cpp")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("100a"), "--expt-relaxed-constexpr",
-                           "-DNDEBUG", f"-I{_SRC}"],
-        extra_cflags=["-std=c++17", f"-I{_SRC}"], verbose=False)
+        sources=[
+            str(_SRC / f)
+            for f in (
+                "k1w.cu",
+                "k3g.cu",
+                "k3w.cu",
+                "wide_aux.cu",
+                "k1wb.cu",
+                "wide_bwd.cu",
+                "b1s.cu",
+                "b7m.cu",
+                "b1g.cu",
+                "b7g.cu",
+                "bind_b200.cpp",
+            )
+        ],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("100a"), "--expt-relaxed-constexpr", "-DNDEBUG", f"-I{_SRC}"],
+        extra_cflags=["-std=c++17", f"-I{_SRC}"],
+        verbose=False,
+    )
 
 
 def supports(width: int, length: int, dropout: bool = False, hidden: int | None = None, direction: int = 0) -> bool:
@@ -91,8 +106,8 @@ def _contract(planes, d, direction):
     t = planes.new_empty((channels * samples, n, n))
     pl = lambda a, b: _fold(planes[a:b])
     if direction == 0:
-        torch.bmm(pl(0, d), pl(2 * d, 3 * d).transpose(1, 2), out=t[:d * samples])
-        torch.bmm(pl(d, 2 * d).transpose(1, 2), pl(3 * d, 4 * d), out=t[d * samples:])
+        torch.bmm(pl(0, d), pl(2 * d, 3 * d).transpose(1, 2), out=t[: d * samples])
+        torch.bmm(pl(d, 2 * d).transpose(1, 2), pl(3 * d, 4 * d), out=t[d * samples :])
     elif direction == 1:
         torch.bmm(pl(0, d), pl(d, 2 * d).transpose(1, 2), out=t)
     else:
@@ -122,17 +137,18 @@ def inference(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.T
         planes = x.new_empty((p, bsz, n, n) if d <= 128 else (p, n, n))
         y = torch.empty_like(x)
         if d <= 128:
-            wpp = x.new_empty((d, p // 2))     # k3g's output projection, columns in its TMEM K order
+            wpp = x.new_empty((d, p // 2))  # k3g's output projection, columns in its TMEM K order
             front = _front(E, wl, wlg, wr, wrg, wp, wpp)
             E.k1w_forward(x2, *front, mask, None, None, gi, bi, planes, 0, EPS)
             t = _contract(planes, contracted(d, hid, direction), direction)
             del planes
             if ds is None:
                 E.k3g_forward(x2, t, wpp, wg, gi, bi, go, bo, y.view(m, d), n, EPS, 0, None, None, None, None, 0)
-            else:   # the inference K3 has no dropout: the saving epilogue into throwaway buffers
+            else:  # the inference K3 has no dropout: the saving epilogue into throwaway buffers
                 mo = x.new_empty((m,), dtype=torch.float32)
-                E.k3g_forward(x2, t, wpp, wg, gi, bi, go, bo, y.view(m, d), n, EPS, 1, ds, torch.empty_like(x2), mo,
-                              torch.empty_like(mo), 0)
+                E.k3g_forward(
+                    x2, t, wpp, wg, gi, bi, go, bo, y.view(m, d), n, EPS, 1, ds, torch.empty_like(x2), mo, torch.empty_like(mo), 0
+                )
             return y
         mean = x.new_empty((m,), dtype=torch.float32)
         rstd = torch.empty_like(mean)

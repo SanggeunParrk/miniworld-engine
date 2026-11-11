@@ -52,8 +52,7 @@ def _k1_smem(D, cfg):
     stream = len(cfg) > 5 and cfg[5] == 2
     if D // 64 % sk or (not stream and slots < D // 64 // sk):
         raise ValueError("K1 slots")
-    size = (bi * bj * D * 2 + slots * sk * 8192 + bi * bj // 64 * 8192 + 8 * D
-            + ((2 + 2 * slots) * 8 + 127) // 128 * 128)
+    size = bi * bj * D * 2 + slots * sk * 8192 + bi * bj // 64 * 8192 + 8 * D + ((2 + 2 * slots) * 8 + 127) // 128 * 128
     if size * mb > 232448:
         raise ValueError("K1 resources")
     return size
@@ -67,12 +66,10 @@ def _headers():
     for name in ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh"):
         content = T.header_path(source, name).read_text()
         if name == "tmn_kernels.cuh":
+            content = content.replace("static constexpr int MINB = NCWG == 1 ? 2 : 1;", "static constexpr int MINB = MW_MINB;")
             content = content.replace(
-                "static constexpr int MINB = NCWG == 1 ? 2 : 1;",
-                "static constexpr int MINB = MW_MINB;")
-            content = content.replace(
-                "W_RESIDENT || NSLOT >= 2 * SPB",
-                "W_RESIDENT || (SCHED == 1 && (MW_K1_STREAM || NSLOT >= SPB)) || NSLOT >= 2 * SPB")
+                "W_RESIDENT || NSLOT >= 2 * SPB", "W_RESIDENT || (SCHED == 1 && (MW_K1_STREAM || NSLOT >= SPB)) || NSLOT >= 2 * SPB"
+            )
         T.publish_header(dest / name, content)
     return dest
 
@@ -90,7 +87,8 @@ def _compile(kind, D, H, cfg, normalize=False):
             f"using C=tmn::K1Cfg<{D},{H},false,{bi},{bj},{slots},{sk},{1 if stream else -1}>;\n"
             'extern "C" __global__ __launch_bounds__(C::NTHR,C::MINB) '
             "void mw_uni_wide_front(__grid_constant__ const tmn::K1Params p){"
-            f"tmn::sm90::{function}<C,true,{int(normalize)},false,{str(normalize).lower()},1>(p);}}")
+            f"tmn::sm90::{function}<C,true,{int(normalize)},false,{str(normalize).lower()},1>(p);}}"
+        )
         smem = _k1_smem(D, cfg)
         name = "mw_uni_wide_front"
         flags = [f"-DMW_MINB={mb}", f"-DMW_K1_STREAM={stream}"]
@@ -99,11 +97,28 @@ def _compile(kind, D, H, cfg, normalize=False):
         body = (R / "output.cu").read_text()
         smem = 2 * H * 128 + slots * 16384 + 1024 + (2 * slots + 6) * 8
         name = "mw_uni_wide_output"
-        flags = ["-DMW_MINB=1", "-DMW_K1_STREAM=0", f"-DWIDTH={D}", f"-DHIDDEN={H}",
-                 f"-DMW_NSLOT={slots}", f"-DWAITN={waitn}", f"-DPREGS={pregs}"]
-    flags += ["-DTMN_SIGMOID_TANH=1", "-DTMN_WSKIP=1", "-DTMN_MASK_TEMPLATE=1", "-std=c++17",
-              "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-I" + str(_headers()), "-I" + str(R),
-              "-I" + str(T.SOURCES / "wide_forward")]
+        flags = [
+            "-DMW_MINB=1",
+            "-DMW_K1_STREAM=0",
+            f"-DWIDTH={D}",
+            f"-DHIDDEN={H}",
+            f"-DMW_NSLOT={slots}",
+            f"-DWAITN={waitn}",
+            f"-DPREGS={pregs}",
+        ]
+    flags += [
+        "-DTMN_SIGMOID_TANH=1",
+        "-DTMN_WSKIP=1",
+        "-DTMN_MASK_TEMPLATE=1",
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-I" + str(_headers()),
+        "-I" + str(R),
+        "-I" + str(T.SOURCES / "wide_forward"),
+    ]
     unit = T.load_unit(str(T.compile_text(body, flags)), name)
     k = unit.kernel(name)
     k.set_max_dynamic_smem(smem)
@@ -111,10 +126,7 @@ def _compile(kind, D, H, cfg, normalize=False):
 
 
 def _map(t, box, dims, strides):
-    return T._launch_module().tensor_map(t, box, dims=dims, strides_bytes=strides,
-                                         swizzle="128B", l2="128B")
-
-
+    return T._launch_module().tensor_map(t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B")
 
 
 def _run(x, weights, mask, outgoing, sel=None):
@@ -138,12 +150,31 @@ def _run(x, weights, mask, outgoing, sel=None):
     a, b, _, _, mb = cfg[:5]
     tj = (N + b - 1) // b
     tiles = ((N + a - 1) // a) * tj
-    p1 = launch.Struct([
-        _map(x if normalize else xn, [64, b, a], [D, N, N], [D * 2, N * D * 2]),
-        _map(w, [64, 64], [D, 4 * H], [D * 2]),
-        _map(ab, [64, 1, 32], [N, N, 2 * H], [N * 2, N * N * 2]),
-        mask, gi, bi, ab, None, xn if normalize else None,
-        N, N, tj, tiles, 1, N, 1, 1e-5, N * D, D, 0, 0])
+    p1 = launch.Struct(
+        [
+            _map(x if normalize else xn, [64, b, a], [D, N, N], [D * 2, N * D * 2]),
+            _map(w, [64, 64], [D, 4 * H], [D * 2]),
+            _map(ab, [64, 1, 32], [N, N, 2 * H], [N * 2, N * N * 2]),
+            mask,
+            gi,
+            bi,
+            ab,
+            None,
+            xn if normalize else None,
+            N,
+            N,
+            tj,
+            tiles,
+            1,
+            N,
+            1,
+            1e-5,
+            N * D,
+            D,
+            0,
+            0,
+        ]
+    )
     k1.launch((min(tiles, sms * mb), 1, 1), (128 * (a * b // 64 + 1), 1, 1), [p1], smem1)
 
     # One contraction: outgoing tri[c] = left[c] @ right[c]^T, incoming left[c]^T @ right[c].
@@ -158,6 +189,7 @@ def _run(x, weights, mask, outgoing, sel=None):
     g = torch.mm(xn.view(N * N, D), wg.t())
     if T.cuda_aux_enabled():
         from ._h100_pack import fold_into
+
         wpp = torch.empty_like(wp)
         uv = torch.empty((2, D), device=x.device, dtype=torch.float32)
         fold_into(wp, go, bo, wpp, wg, gi, bi, wg, uv)
@@ -172,10 +204,7 @@ def _run(x, weights, mask, outgoing, sel=None):
     y = torch.empty_like(x)
     k3, smem3 = _compile("k3", D, H, tuple(sel["k3"]))
     tiles3 = N * N // 128
-    p3 = launch.Struct([
-        _map(tri, [64, 64], [N * N, H], [N * N * 2]),
-        _map(wpp, [64, 128], [H, D], [H * 2]),
-        x, g, y, u, v, tiles3, 0])
+    p3 = launch.Struct([_map(tri, [64, 64], [N * N, H], [N * N * 2]), _map(wpp, [64, 128], [H, D], [H * 2]), x, g, y, u, v, tiles3, 0])
     k3.launch((min(tiles3, sms), 1, 1), (384, 1, 1), [p3], smem3)
     return y
 
@@ -186,9 +215,7 @@ def _uni_wide_inference_fake(x, weights, mask, outgoing):
 
 
 @opaque(fake=_uni_wide_inference_fake, name="trimul_h100_infer_uni_wide")
-def uni_wide_inference(x: torch.Tensor, weights: list[torch.Tensor], mask: torch.Tensor,
-                       outgoing: bool) -> torch.Tensor:
+def uni_wide_inference(x: torch.Tensor, weights: list[torch.Tensor], mask: torch.Tensor, outgoing: bool) -> torch.Tensor:
     """y = x + single-direction TriMul(x); weights as in ``h100_inference.inference``, mask [N, N]."""
     with T.native_context(x.device):
-        return _run(x.contiguous(), [w.contiguous() for w in weights],
-                    mask.to(torch.bfloat16).contiguous(), outgoing)
+        return _run(x.contiguous(), [w.contiguous() for w in weights], mask.to(torch.bfloat16).contiguous(), outgoing)

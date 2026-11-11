@@ -40,15 +40,11 @@ def build_decoding_masks(
     )
     past = (decode_group.unsqueeze(2) > neighbor_group).unsqueeze(-1)
     if isinstance(fixed_decoding_order_length, torch.Tensor):
-        fixed_lengths = fixed_decoding_order_length.to(
-            device=decode_rank.device, dtype=decode_rank.dtype
-        )
+        fixed_lengths = fixed_decoding_order_length.to(device=decode_rank.device, dtype=decode_rank.dtype)
         if fixed_lengths.ndim == 0:
             fixed_lengths = fixed_lengths.expand(batch)
         if fixed_lengths.shape != (batch,):
-            raise ValueError(
-                "fixed_decoding_order_length must be a scalar or have shape [batch]"
-            )
+            raise ValueError("fixed_decoding_order_length must be a scalar or have shape [batch]")
         motif = decode_rank < fixed_lengths.unsqueeze(1)
         has_fixed_positions = True
     else:
@@ -56,13 +52,9 @@ def build_decoding_masks(
         has_fixed_positions = fixed_decoding_order_length != 0
 
     if has_fixed_positions:
-        motif_neighbor = torch.gather(
-            motif.unsqueeze(1).expand(-1, length, -1), 2, neighbor_indices
-        )
+        motif_neighbor = torch.gather(motif.unsqueeze(1).expand(-1, length, -1), 2, neighbor_indices)
         past = past | motif_neighbor.unsqueeze(-1)
-        query_index = torch.arange(length, device=neighbor_indices.device).view(
-            1, length, 1
-        )
+        query_index = torch.arange(length, device=neighbor_indices.device).view(1, length, 1)
         motif_self_edge = (neighbor_indices == query_index) & motif.unsqueeze(-1)
         past = past & ~motif_self_edge.unsqueeze(-1)
 
@@ -169,8 +161,14 @@ class MPNNEncoder(BackendModule):
             zero_nodes = training_messages and index == 0
             if checkpoint_layers:
                 node_states, edge_states = torch.utils.checkpoint.checkpoint(
-                    layer, node_states, edge_states, neighbor_indices, residue_mask, neighbor_mask,
-                    use_reentrant=False, zero_nodes=zero_nodes,
+                    layer,
+                    node_states,
+                    edge_states,
+                    neighbor_indices,
+                    residue_mask,
+                    neighbor_mask,
+                    use_reentrant=False,
+                    zero_nodes=zero_nodes,
                 )
             else:
                 node_states, edge_states = layer(
@@ -224,8 +222,17 @@ class MPNNDecoder(BackendModule):
                 edge_states = edge_states.to(autocast_dtype)
 
         for layer in self.layers:
-            args = (node_states, edge_states, sequence_features, encoder_nodes, neighbor_indices, future_mask, past_mask,
-                    residue_mask, edge_mask)
+            args = (
+                node_states,
+                edge_states,
+                sequence_features,
+                encoder_nodes,
+                neighbor_indices,
+                future_mask,
+                past_mask,
+                residue_mask,
+                edge_mask,
+            )
             node_states = torch.utils.checkpoint.checkpoint(layer, *args, use_reentrant=False) if checkpoint_layers else layer(*args)
         return node_states
 
@@ -250,7 +257,8 @@ class ProteinMPNN(BackendModule):
     (``kernels/integrations/mpnn_msg_sm80.py``: the hidden-message reduction, the fused node message, the relative-position backward;
     ``mpnn_edge_sm80.py``: the fused edge tail, the edge MLP, the edge LayerNorm backward, the packed-mask dropout). Other cards have no
     hand-written CUDA of these families (the H100 runs the Triton kernels), so the backend refuses there."""
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "triton", "cuda")
 
@@ -293,7 +301,7 @@ class ProteinMPNN(BackendModule):
         return None
 
     def _forward_triton(self, *args, **kwargs) -> torch.Tensor:
-        return self._forward_pytorch(*args, **kwargs)   # the composition; the message children run their "triton" backends
+        return self._forward_pytorch(*args, **kwargs)  # the composition; the message children run their "triton" backends
 
     def _supports_cuda(self, backbone: torch.Tensor, *args, **kwargs) -> str | None:
         from miniworld_engine.modules.mpnn._functional import mpnn_sm80_unsupported
@@ -301,7 +309,7 @@ class ProteinMPNN(BackendModule):
         return mpnn_sm80_unsupported(backbone) or self._supports_triton(backbone, *args, **kwargs)
 
     def _forward_cuda(self, *args, **kwargs) -> torch.Tensor:
-        return self._forward_pytorch(*args, **kwargs)   # the composition; the children run their "cuda" backends (A100)
+        return self._forward_pytorch(*args, **kwargs)  # the composition; the children run their "cuda" backends (A100)
 
     def encode_backbone(
         self,
@@ -321,8 +329,13 @@ class ProteinMPNN(BackendModule):
         node_states = edge_states.new_zeros((batch, length, self.config.node_width))
         training_messages = self.training and torch.is_grad_enabled()
         node_states, edge_states = self.encoder(
-            node_states, edge_states, graph.neighbor_indices, residue_mask, graph.edge_mask,
-            training_messages=training_messages, checkpoint_layers=checkpoint_layers,
+            node_states,
+            edge_states,
+            graph.neighbor_indices,
+            residue_mask,
+            graph.edge_mask,
+            training_messages=training_messages,
+            checkpoint_layers=checkpoint_layers,
         )
         return EncodedMPNN(
             node_states=node_states,
@@ -359,8 +372,15 @@ class ProteinMPNN(BackendModule):
             encoded.neighbor_indices, encoded.residue_mask, decoding_order, patch_index, fixed_decoding_order_length, edge_mask
         )
         node_states = self.decoder(
-            encoded.node_states, encoded.edge_states, sequence_features, encoded.neighbor_indices, encoded.residue_mask,
-            future_mask, past_mask, edge_mask, checkpoint_layers=checkpoint_layers,
+            encoded.node_states,
+            encoded.edge_states,
+            sequence_features,
+            encoded.neighbor_indices,
+            encoded.residue_mask,
+            future_mask,
+            past_mask,
+            edge_mask,
+            checkpoint_layers=checkpoint_layers,
         )
         logits = self.output_projection(node_states)
         if return_log_prob:
@@ -387,8 +407,12 @@ class ProteinMPNN(BackendModule):
             backbone, residue_mask, residue_index, chain_index, segment_lengths, checkpoint_layers=checkpoint_layers
         )
         return self.score_sequence(
-            encoded, sequence, decoding_order, patch_index,
-            fixed_decoding_order_length=fixed_decoding_order_length, checkpoint_layers=checkpoint_layers,
+            encoded,
+            sequence,
+            decoding_order,
+            patch_index,
+            fixed_decoding_order_length=fixed_decoding_order_length,
+            checkpoint_layers=checkpoint_layers,
             return_log_prob=return_log_prob,
         )
 
@@ -400,9 +424,12 @@ class ProteinMPNN(BackendModule):
         offsets = random_input((samples, length, 4, 3), dtype=torch.float32, device=device, generator=generator)
         offsets[:, :, 1] = 0.0
         index = torch.arange(length, device=device).expand(samples, length).contiguous()
-        return {"backbone": (ca[:, :, None] + offsets).to(dtype),
-                "sequence": torch.randint(0, self.config.sequence_vocabulary, (samples, length), device=device, generator=generator),
-                "residue_mask": key_mask(samples, length, device=device), "residue_index": index,
-                "chain_index": (index >= length // 2).long(),
-                "decoding_order": torch.argsort(torch.rand((samples, length), device=device, generator=generator), dim=-1),
-                "patch_index": index}
+        return {
+            "backbone": (ca[:, :, None] + offsets).to(dtype),
+            "sequence": torch.randint(0, self.config.sequence_vocabulary, (samples, length), device=device, generator=generator),
+            "residue_mask": key_mask(samples, length, device=device),
+            "residue_index": index,
+            "chain_index": (index >= length // 2).long(),
+            "decoding_order": torch.argsort(torch.rand((samples, length), device=device, generator=generator), dim=-1),
+            "patch_index": index,
+        }

@@ -17,10 +17,10 @@ from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flag
 
 _SRC = Path(__file__).with_name("b200_sources")
 
-C = 128          # d_pair
-H = 4            # heads
-D = C // H       # head dim (the kernels take 32 only)
-TOK = 128        # query / key / token tile of every kernel; L must be a multiple of it
+C = 128  # d_pair
+H = 4  # heads
+D = C // H  # head dim (the kernels take 32 only)
+TOK = 128  # query / key / token tile of every kernel; L must be a multiple of it
 
 
 def _flags():
@@ -37,15 +37,20 @@ def _rows_per_task(length: int) -> int:
 @functools.lru_cache(maxsize=None)
 def _core(rows: int = 4):
     ensure_cuda_home()
-    return load_extension(name=f"triattn_b200_core_r{rows}_v5", sources=[str(_SRC / "triattn_sm100.cu")],
-                          extra_cuda_cflags=[*_flags(), f"-DTA_R={rows}"], verbose=False)
+    return load_extension(
+        name=f"triattn_b200_core_r{rows}_v5",
+        sources=[str(_SRC / "triattn_sm100.cu")],
+        extra_cuda_cflags=[*_flags(), f"-DTA_R={rows}"],
+        verbose=False,
+    )
 
 
 @functools.lru_cache(maxsize=1)
 def _mod():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_mod_v3", sources=[str(_SRC / "triattn_mod_sm100.cu")],
-                          extra_cuda_cflags=_flags(), verbose=False)
+    return load_extension(
+        name="triattn_b200_mod_v3", sources=[str(_SRC / "triattn_mod_sm100.cu")], extra_cuda_cflags=_flags(), verbose=False
+    )
 
 
 def supports(length: int) -> bool:
@@ -68,14 +73,23 @@ class TriAttnFused(torch.autograd.Function):
         B, L, _, _ = pair.shape
         x = pair.contiguous().view(-1, C)
         m = _mod()
-        w4, wo16, prm = m.tri_pack_params(wq.contiguous(), wk.contiguous(), wv.contiguous(), wg.contiguous(), wo.contiguous(),
-                                          lnw.contiguous(), lnb.contiguous(), wb.contiguous())
+        w4, wo16, prm = m.tri_pack_params(
+            wq.contiguous(),
+            wk.contiguous(),
+            wv.contiguous(),
+            wg.contiguous(),
+            wo.contiguous(),
+            lnw.contiguous(),
+            lnb.contiguous(),
+            wb.contiguous(),
+        )
         lw, lb, wbf = prm[0], prm[1], prm[2:]
-        q, k, v, g, bias = m.tri_front(x, lw, lb, eps, w4, wbf,
-                                       mask if mask is not None else torch.empty(0, device=pair.device, dtype=torch.bool), B, L)
+        q, k, v, g, bias = m.tri_front(
+            x, lw, lb, eps, w4, wbf, mask if mask is not None else torch.empty(0, device=pair.device, dtype=torch.bool), B, L
+        )
         shp = (B, L, L, H, D)
         need = any(ctx.needs_input_grad)
-        o, lse, _ = _core(_rows_per_task(L)).triattn_fwd(q.view(shp), k.view(shp), v.view(shp), bias, D ** -0.5, need)
+        o, lse, _ = _core(_rows_per_task(L)).triattn_fwd(q.view(shp), k.view(shp), v.view(shp), bias, D**-0.5, need)
         drop = drop if drop is not None else x.new_empty(0)
         out = m.tri_tail(g, o.view(-1, C), x, wo16, drop, L)
         if need:
@@ -96,13 +110,22 @@ class TriAttnFused(torch.autograd.Function):
         do, dg, delta, dwo, dpair = m.tri_gate_bwd(dy, g, o.view(-1, C), wo16, B, L, ws[_WS_DWO:_WS_MT], drop)
         shp = (B, L, L, H, D)
         E = q.new_empty(0)
-        dq, dk, dv, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, D ** -0.5, ws[_WS_DB:], E, E, E)
+        dq, dk, dv, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, D**-0.5, ws[_WS_DB:], E, E, E)
         dq, dk, dv = dq.view(-1, C), dk.view(-1, C), dv.view(-1, C)
         m.tri_head_bwd(dq, dk, dv, dg, db, x, w4, wbf, lw, lb, eps, dpair, B, L)
         fp32 = dt[2] == torch.float32
         dw, dgb, dwo = m.tri_wgrad(dq, dk, dv, dg, db, x, eps, B, L, w4, wbf, lw, lb, True, dwo, ws[_WS_MT:_WS_DB], fp32)
-        return (dpair.view(B, L, L, C), dgb[0].to(dt[0]), dgb[1].to(dt[1]), *(dw[t].to(dt[2 + t]) for t in range(4)),
-                dgb[2:].to(dt[6]), dwo.to(dt[7]), None, None, None)
+        return (
+            dpair.view(B, L, L, C),
+            dgb[0].to(dt[0]),
+            dgb[1].to(dt[1]),
+            *(dw[t].to(dt[2 + t]) for t in range(4)),
+            dgb[2:].to(dt[6]),
+            dwo.to(dt[7]),
+            None,
+            None,
+            None,
+        )
 
 
 def triangle_attention(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, drop=None):
@@ -119,14 +142,15 @@ def triangle_attention(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e
 # drain, xhat | 1 written) -> the weight gradients from G = D^T [xhat | 1] (one cuBLAS GEMM, K = L^2) by the algebra of the
 # d_pair 128 path, finished by tri_wfinish. All hand kernels in triattn_wide_sm100.cu.
 WIDE_HEAD_DIMS = (16, 32)
-WIDE_MAX_HEADS = 16                   # the packed bias block is 16 rows
+WIDE_MAX_HEADS = 16  # the packed bias block is 16 rows
 
 
 @functools.lru_cache(maxsize=1)
 def _wide():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_wide_v31", sources=[str(_SRC / "triattn_wide_sm100.cu")],
-                          extra_cuda_cflags=_flags(), verbose=False)
+    return load_extension(
+        name="triattn_b200_wide_v31", sources=[str(_SRC / "triattn_wide_sm100.cu")], extra_cuda_cflags=_flags(), verbose=False
+    )
 
 
 def wide_supports(d_pair: int, d_hidden: int, n_head: int, length: int) -> bool:
@@ -181,11 +205,20 @@ def wide_inference(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5
     HDp = n_head * D
     w = _wide()
     x = pair.contiguous().view(-1, C)
-    q, k, v, g, bias = w.tri_wfront(x, lnw, lnb, eps, wcat, n_head,
-                                    mask if mask is not None else torch.empty(0, device=pair.device, dtype=torch.bool), B, L,
-                                    x.new_empty(0, dtype=torch.float32))
+    q, k, v, g, bias = w.tri_wfront(
+        x,
+        lnw,
+        lnb,
+        eps,
+        wcat,
+        n_head,
+        mask if mask is not None else torch.empty(0, device=pair.device, dtype=torch.bool),
+        B,
+        L,
+        x.new_empty(0, dtype=torch.float32),
+    )
     shp = (B, L, L, n_head, D)
-    o, _, _ = _core(_rows_per_task(L)).triattn_fwd(q.view(shp), k.view(shp), v.view(shp), bias, head_dim ** -0.5, False)
+    o, _, _ = _core(_rows_per_task(L)).triattn_fwd(q.view(shp), k.view(shp), v.view(shp), bias, head_dim**-0.5, False)
     return w.tri_wtail(g, o.view(-1, HDp), x, wo_p, x.new_empty(0), L).view(B, L, L, C)
 
 
@@ -193,7 +226,7 @@ def _mm32(a, b):
     """a @ b on cuBLAS with fp32 output (bf16 operands, fp32 accumulation)."""
     try:
         return torch.mm(a, b, out_dtype=torch.float32)
-    except TypeError:                                            # a torch without mm(out_dtype=)
+    except TypeError:  # a torch without mm(out_dtype=)
         return torch.mm(a, b).float()
 
 
@@ -210,10 +243,11 @@ class WideTrain(torch.autograd.Function):
         x = pair.contiguous().view(-1, C)
         need = any(ctx.needs_input_grad)
         stats = torch.empty(x.shape[0], 2, device=x.device, dtype=torch.float32) if need else x.new_empty(0, dtype=torch.float32)
-        q, k, v, g, bias = w.tri_wfront(x, lnw, lnb, eps, wcat, n_head,
-                                        mask if mask is not None else torch.empty(0, device=pair.device, dtype=torch.bool), B, L, stats)
+        q, k, v, g, bias = w.tri_wfront(
+            x, lnw, lnb, eps, wcat, n_head, mask if mask is not None else torch.empty(0, device=pair.device, dtype=torch.bool), B, L, stats
+        )
         shp = (B, L, L, n_head, D)
-        o, lse, _ = _core(_rows_per_task(L)).triattn_fwd(q.view(shp), k.view(shp), v.view(shp), bias, head_dim ** -0.5, need)
+        o, lse, _ = _core(_rows_per_task(L)).triattn_fwd(q.view(shp), k.view(shp), v.view(shp), bias, head_dim**-0.5, need)
         drop = drop if drop is not None else x.new_empty(0)
         out = w.tri_wtail(g, o.view(-1, HDp), x, wo_p, drop, L)
         if need:
@@ -233,12 +267,24 @@ class WideTrain(torch.autograd.Function):
         w, e = _wide(), _core(_rows_per_task(L))
         dy = dy.contiguous().view(-1, C)
         dys = w.tri_scale_rows(dy, drop, L) if drop.numel() else dy
-        Dall = x.new_empty(R, 4 * HDp + 64)                       # [dq | dk | dv | dg | db rows], written in place by their producers
-        cut = lambda i, n=HDp: Dall[:, i * HDp:i * HDp + n]
+        Dall = x.new_empty(R, 4 * HDp + 64)  # [dq | dk | dv | dg | db rows], written in place by their producers
+        cut = lambda i, n=HDp: Dall[:, i * HDp : i * HDp + n]
         do, _, u, delta = w.tri_wgbwd(dys, g, o.view(-1, HDp), wo_t, cut(3), B, L)
         shp = (B, L, L, n_head, D)
-        _, _, _, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim ** -0.5,
-                                    q.new_empty(0, dtype=torch.float32), cut(0), cut(1), cut(2))
+        _, _, _, db = e.triattn_bwd(
+            q.view(shp),
+            k.view(shp),
+            v.view(shp),
+            bias,
+            do.view(shp),
+            lse,
+            delta,
+            head_dim**-0.5,
+            q.new_empty(0, dtype=torch.float32),
+            cut(0),
+            cut(1),
+            cut(2),
+        )
         w.tri_db_rows(db, cut(4, 64), B, L)
         dpair, xh = w.tri_whbwd(Dall, x, dy, lnw, stats, wall_t)
         # parameter gradients: G = D^T [xhat | 1] (one GEMM, K = L^2), then dW / dgamma / dbeta / dWb by the d_pair 128 algebra
@@ -248,11 +294,22 @@ class WideTrain(torch.autograd.Function):
         dt = ctx.dtypes
         fp32 = dt[2] == torch.float32
         dw, dwb, dwo, dgb = w.tri_wfinish(G, wcat, lnw, lnb, dwo, n_head, head_dim, fp32)
-        return (dpair.view(B, L, L, C), dgb[0].to(dt[0]), dgb[1].to(dt[1]), *(dw[i].to(dt[2 + i]) for i in range(4)), dwb.to(dt[6]),
-                dwo.to(dt[7]), None, None, None, None, None, None)
+        return (
+            dpair.view(B, L, L, C),
+            dgb[0].to(dt[0]),
+            dgb[1].to(dt[1]),
+            *(dw[i].to(dt[2 + i]) for i in range(4)),
+            dwb.to(dt[6]),
+            dwo.to(dt[7]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 def wide_train(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, packed, n_head, head_dim, mask=None, eps=1e-5, drop=None):
     """pair + drop o TriangleAttention(pair) for the starting node with a backward (drop: [B, L, C] bf16 or None)."""
     return WideTrain.apply(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, n_head, head_dim, packed)
-

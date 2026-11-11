@@ -18,6 +18,7 @@ dx/dγ/dβ math + fp32 accumulation are IDENTICAL to te_style (bit-exact). For s
 tiles -> persistent grid underfilled + reduce-launch overhead dominates) the wrapper falls
 back to the te_style atomic kernel, which is faster there.
 """
+
 from __future__ import annotations
 from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._device import num_sms
@@ -32,10 +33,12 @@ from miniworld_engine.kernels._shape_key import both_key, pack  # kernels here a
 from ...layernorm.triton.persistent import _ln_bwd_persistent as _ln_bwd_persistent_jit
 from .te_style import _ln_bwd_kernel  # atomic small-M fallback
 
+
 # Escape hatch / A-B control: force one path. "atomic" = the old te_style plain-atomic kernel.
 def _override() -> str | None:
     """Read at call time; see layernorm.compile_native._ln_bwd_override."""
     return None
+
 
 _WAVES = 2
 
@@ -177,9 +180,22 @@ def _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | No
     db = torch.zeros(K, dtype=torch.float32, device=x.device)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     _ln_bwd_kernel[grid](
-        dxn, x, gamma, mean, rstd, dx, dg, db, M, K,
-        dxn.stride(0), dxn.stride(1), x.stride(0), x.stride(1),
-        dx.stride(0), dx.stride(1),
+        dxn,
+        x,
+        gamma,
+        mean,
+        rstd,
+        dx,
+        dg,
+        db,
+        M,
+        K,
+        dxn.stride(0),
+        dxn.stride(1),
+        x.stride(0),
+        x.stride(1),
+        dx.stride(0),
+        dx.stride(1),
         N_PAD=triton.next_power_of_2(K),
         shape_key=both_key(0, N=K) if shape_key is None else pack(shape_key, N=K),
         **({} if dres is None else dict(DXR=dres, sr0=dres.stride(0), sr1=dres.stride(1), HAS_DXR=True)),
@@ -187,8 +203,7 @@ def _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | No
     return dx, dg, db
 
 
-def _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides, *,
-                           shape_key: int | None = None):
+def _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None):
     """Atomic-free persistent m-major path via THIS module's specialized kernel. Fastest at
     narrow N (N=128: the M-contiguous vector hint + compile-time unit row-stride let triton widen
     the load — 1.20x vs te_style atomic at L=1024). VEC_HINT is neutral at wide N.
@@ -202,16 +217,25 @@ def _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides, *,
     # grid axis 1 = feature tiles (see the kernel note); the partial buffer stays [NP, K].
     grid = lambda meta: (NP, triton.cdiv(K, meta["BLOCK_K"]))  # noqa: E731
     _ln_bwd_mmajor_kernel[grid](
-        dx, pdg, pdb, dxn, x, gamma, mean, rstd,
-        pdg.stride(0), x.stride(1),      # feature stride (= M); row stride assumed 1
-        M, N=K, VEC_HINT=(K <= 128),
+        dx,
+        pdg,
+        pdb,
+        dxn,
+        x,
+        gamma,
+        mean,
+        rstd,
+        pdg.stride(0),
+        x.stride(1),  # feature stride (= M); row stride assumed 1
+        M,
+        N=K,
+        VEC_HINT=(K <= 128),
         shape_key=both_key(0, N=K) if shape_key is None else pack(shape_key, N=K),
     )
     return dx, pdg.sum(0), pdb.sum(0)
 
 
-def _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides, *,
-                                 shape_key: int | None = None):
+def _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None):
     """Atomic-free persistent m-major path via the canonical layernorm persistent kernel
     (stride-generic; both operands share m-major strides). Fastest at wide N (N=256: 1.21x vs
     te_style atomic at L=1024).
@@ -231,9 +255,19 @@ def _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides, *,
     pdb = torch.empty((NP, K), dtype=torch.float32, device=x.device)
     grid = lambda meta: (NP, triton.cdiv(K, meta["BLOCK_K"]))  # noqa: E731
     _ln_bwd_persistent_jit[grid](
-        dx, pdw, pdb, dxn, x, gamma, mean, rstd,
-        pdw.stride(0), x.stride(0), x.stride(1),
-        M, N=K,
+        dx,
+        pdw,
+        pdb,
+        dxn,
+        x,
+        gamma,
+        mean,
+        rstd,
+        pdw.stride(0),
+        x.stride(0),
+        x.stride(1),
+        M,
+        N=K,
         shape_key=both_key(0, N=K) if shape_key is None else pack(shape_key, N=K),
     )
     return dx, pdw.sum(0), pdb.sum(0)
@@ -255,15 +289,13 @@ def ln_bwd_mmajor(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | Non
     if _override() == "atomic" or x.stride(0) != 1 or M < _PERSIST_MIN_M:
         return _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key, dres=dres)
     dx, dg, db = _ln_bwd_persistent(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key)
-    return (dx, dg, db) if dres is None else (dx + dres, dg, db)   # the persistent kernels carry no residual input: add it after
+    return (dx, dg, db) if dres is None else (dx + dres, dg, db)  # the persistent kernels carry no residual input: add it after
 
 
 def _ln_bwd_persistent(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None):
     K = x.shape[1]
     if _override() == "canonical":
-        return _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides,
-                                            shape_key=shape_key)
+        return _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key)
     if _override() == "persistent" or K <= 128:
         return _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key)
-    return _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides,
-                                        shape_key=shape_key)
+    return _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key)

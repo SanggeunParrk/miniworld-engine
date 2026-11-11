@@ -9,9 +9,7 @@ from __future__ import annotations
 import torch
 
 
-def fused_gate_out(
-    gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor
-) -> torch.Tensor:
+def fused_gate_out(gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor) -> torch.Tensor:
     """sigmoid(gate) * out_r, then @ wo^T. gate / out_r [..., DH], wo [N, DH] -> [..., N]."""
     from miniworld_engine.kernels.gated_projection.cuda import sm80
 
@@ -44,15 +42,11 @@ def sigmoid_gate_fused(gate: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
     return triton_sigmoid_gate_fused(gate, out)
 
 
-def gated_residual(
-    x: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor
-) -> torch.Tensor:
+def gated_residual(x: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor) -> torch.Tensor:
     """Same-shape, same-dtype residual gate ``x + gate * branch``; no sigmoid, normalization, or projection."""
     from miniworld_engine.kernels.gated_projection.cuda import sm80
 
-    if x.shape == gate.shape == branch.shape and sm80.serves_elementwise(
-        x, gate, branch
-    ):
+    if x.shape == gate.shape == branch.shape and sm80.serves_elementwise(x, gate, branch):
         return sm80.gated_residual(x, gate, branch)
 
     from miniworld_engine.kernels.gated_projection.triton.residual import (

@@ -45,9 +45,7 @@ import triton.language as tl
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _dir = Path(__file__).parent
-_tmn = (
-    _dir.parent.parent / "transition" / "cuda" / "anthropic_v5"
-)  # tmn_kernels.cuh (TMA / mbarrier helpers)
+_tmn = _dir.parent.parent / "transition" / "cuda" / "anthropic_v5"  # tmn_kernels.cuh (TMA / mbarrier helpers)
 
 H, D = 16, 48
 # AttentionPairBias (B = 1): key splits per 64 query rows -- APB_KS warpgroups, each walking every APB_KS-th key block, merged in
@@ -59,10 +57,7 @@ _APB_KS = {"fwd": 1, "inf": 1, "dq": 1, "dkv": 1}
 def _ext(name: str, defs: tuple[str, ...] = ()):
     ensure_cuda_home()
     return load_extension(
-        name=f"augattn_sm90_{name}"
-        + "".join(
-            "_" + d.replace("=", "").replace(".", "p").replace("-", "m") for d in defs
-        ),
+        name=f"augattn_sm90_{name}" + "".join("_" + d.replace("=", "").replace(".", "p").replace("-", "m") for d in defs),
         sources=[str(_dir / f"{name}.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -120,9 +115,7 @@ class ApbInferenceCore:
 
     def __call__(self, qkvg: torch.Tensor, bias: torch.Tensor):
         if bias.shape[0] != self.heads or qkvg.shape[0] != bias.shape[1]:
-            raise ValueError(
-                "Hopper APB inference requires one sample and head-major bias"
-            )
+            raise ValueError("Hopper APB inference requires one sample and head-major bias")
         self.extension.attn_inf(qkvg, bias, 0, 1, 1)
         return qkvg
 
@@ -157,9 +150,7 @@ def apb_forward_gated(qkvg, bias, L, heads: int = 8, d: int = 384):
     O = torch.empty(L, W, device=qkvg.device, dtype=torch.float32)
     og = torch.empty(L, W, device=qkvg.device, dtype=torch.bfloat16)
     LSE = torch.empty(heads, L, device=qkvg.device, dtype=torch.float32)
-    _ext(
-        "attn_fwd", _apb_training_defs(heads, d) + (f"APB_KS={_APB_KS['fwd']}",)
-    ).attn_fwd_o_og(qkvg, bias, O, og, LSE)
+    _ext("attn_fwd", _apb_training_defs(heads, d) + (f"APB_KS={_APB_KS['fwd']}",)).attn_fwd_o_og(qkvg, bias, O, og, LSE)
     return O, og, LSE
 
 
@@ -169,12 +160,8 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
     DQ, DK, DV = (torch.empty_like(q, **opts) for _ in range(3))
     DB = torch.empty(heads, L, L, device=q.device, dtype=torch.float32)
     defs = _apb_training_defs(heads, d)
-    _ext("attn_dq", defs + (f"APB_KS={_APB_KS['dq']}",)).apb_dqb(
-        q, k, v, dob, bias, LSE, Dd, DQ, DB
-    )
-    _ext("attn_dkv", defs + ("DBIAS=0", f"APB_KS={_APB_KS['dkv']}")).attn_dkv(
-        q, k, v, dob, bias, None, LSE, Dd, DK, DV, DB
-    )
+    _ext("attn_dq", defs + (f"APB_KS={_APB_KS['dq']}",)).apb_dqb(q, k, v, dob, bias, LSE, Dd, DQ, DB)
+    _ext("attn_dkv", defs + ("DBIAS=0", f"APB_KS={_APB_KS['dkv']}")).attn_dkv(q, k, v, dob, bias, None, LSE, Dd, DK, DV, DB)
     return DQ, DK, DV, DB
 
 
@@ -222,7 +209,6 @@ def _scale_bf16_kernel(b, out, n, scale, BLOCK: tl.constexpr):
     )
 
 
-
 def forward(qs, kb, vb, bb, km, A, L, qkvg=None, nh=H, dh=D):
     """The forward kernel on prepared operands, no op wrapper (for callers that are themselves one opaque op, as the fused
     token DiT training block): qs = q log2 e / sqrt 48, kb, vb [A L, 768] bf16 contiguous; bb [16, L, L] bf16 in log2
@@ -240,16 +226,9 @@ def forward(qs, kb, vb, bb, km, A, L, qkvg=None, nh=H, dh=D):
     return o, lse
 
 
-def inference_core_supported(
-    dtype: torch.dtype, L: int, d: int, h: int, device_index: int
-) -> bool:
+def inference_core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
     """The fused token DiT step's gated core fits: bf16, 16 heads x 48, L a multiple of 128, H100."""
-    return (
-        dtype is torch.bfloat16
-        and (d, h) == (H * D, H)
-        and L % 128 == 0
-        and _is_hopper(device_index)
-    )
+    return dtype is torch.bfloat16 and (d, h) == (H * D, H) and L % 128 == 0 and _is_hopper(device_index)
 
 
 def fwd_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
@@ -290,18 +269,9 @@ def tf32_fwd_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
     return (*tf32_defs(nh, dh), *extra)
 
 
-def tf32_inference_core_supported(
-    dtype: torch.dtype, L: int, d: int, h: int, device_index: int
-) -> bool:
+def tf32_inference_core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
     """The fp32 step's TF32 core (attn_tf32.cu) fits: fp32, h heads of width d / h (``TF32_LAYOUTS``; ``d`` is the attention width), L a multiple of 128, H100."""
-    return (
-        dtype is torch.float32
-        and h > 0
-        and d % h == 0
-        and (h, d // h) in TF32_LAYOUTS
-        and L % 128 == 0
-        and _is_hopper(device_index)
-    )
+    return dtype is torch.float32 and h > 0 and d % h == 0 and (h, d // h) in TF32_LAYOUTS and L % 128 == 0 and _is_hopper(device_index)
 
 
 def tf32_gated_inference(qkg, vt, bias_all, block, S, goff, nh=H, dh=D):
@@ -325,9 +295,7 @@ def tf32_forward(q, k, vt, bias, km, A, L, qkvg=None, nh=H, dh=D):
     return o, lse
 
 
-def tf32_backward(
-    qs, k, v, dob, qt, kt, dot, bias_p, bias_tp, lse, dd, lse_p, dd_p, km, km_p, A, L, nh=H, dh=D, dpack=None
-):
+def tf32_backward(qs, k, v, dob, qt, kt, dot, bias_p, bias_tp, lse, dd, lse_p, dd_p, km, km_p, A, L, nh=H, dh=D, dpack=None):
     """The TF32 attention backward (attn_tf32.cu dqb + dkv). qs (q in exp2 units), k, v, dob = dO [A L, 768] fp32 and their
     transposes qt, kt, dot [768, A L]; bias_p the forward's key-permuted bias [16, L, L]; bias_tp [16, L(key), L] the bias
     transposed with its query columns permuted; lse, dd [A, 16, L] and lse_p, dd_p their query-permuted copies; km / km_p the
@@ -366,25 +334,18 @@ def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D):
     dq = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
     dk, dv = torch.empty_like(dq), torch.empty_like(dq)
     ld = fwd_defs(nh, dh)
-    if (
-        A % 3 == 0
-    ):  # dbias in the dQ pass, three samples summed on chip before the L2 reds
+    if A % 3 == 0:  # dbias in the dQ pass, three samples summed on chip before the L2 reds
         chunks = dqb_chunks(A)
         dbc = torch.zeros(chunks, nh, L, L, device=qs.device, dtype=torch.float32)
         _ext("attn_dqb", ld).attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, dbc)
         db = dbc.sum(0)  # the chunks in order: bitwise repeatable
-        _ext("attn_dkv", ("DBIAS=0", *ld)).attn_dkv(
-            qs, kb, vb, dob, bb, km, lse, dd, dk, dv, db
-        )
+        _ext("attn_dkv", ("DBIAS=0", *ld)).attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, db)
         return dq, dk, dv, db
     # dbias by per-sample L2 atomics in the dK / dV pass (transposed)
-    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *dq_defs(nh, dh))).attn_dq(
-        qs, kb, vb, dob, bb, km, lse, dd, dq
-    )
+    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *dq_defs(nh, dh))).attn_dq(qs, kb, vb, dob, bb, km, lse, dd, dq)
     dbt = torch.zeros(nh, L, L, device=qs.device, dtype=torch.float32)
     _ext("attn_dkv", ld).attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, dbt)
     return dq, dk, dv, dbt.transpose(1, 2)
-
 
 
 __all__ = [
@@ -408,11 +369,22 @@ _ATTN_TF32_FWD = {"fwd_tf32"}  # float32 activations: attn_tf32 forward
 _ATTN_TF32_BWD = {"bwd_dkv_tf32", "bwd_dqb_tf32"}  # attn_tf32 backward
 #: sm90_atom kind -> the atom kernels it launches (``tf32`` builds: float32 rows; ``pack`` / ``finalize`` have no tf32 build)
 _ATOM_KINDS = {
-    "finalize": "atom_finalize_bwd", "pack": "atom_pack", "cond": "atom_cond_fwd", "cond_split": "atom_cond_fwd_split",
-    "pre": "atom_pre_fwd", "pre_split": "atom_pre_fwd_split", "post": "atom_post_fwd", "tr_bwd": "atom_tr_bwd",
-    "post_bwd": "atom_post_bwd", "post_bwd_s": "atom_post_bwd", "pre_bwd": "atom_pre_bwd", "cond_bwd": "atom_cond_bwd",
-    "cond_bwd_s": "atom_cond_bwd", "cond_bwd_sh": "atom_cond_bwd_shared",
-    "pre_bwd_one": "atom_pre_bwd", "kqln_bwd": "atom_kqln_bwd",
+    "finalize": "atom_finalize_bwd",
+    "pack": "atom_pack",
+    "cond": "atom_cond_fwd",
+    "cond_split": "atom_cond_fwd_split",
+    "pre": "atom_pre_fwd",
+    "pre_split": "atom_pre_fwd_split",
+    "post": "atom_post_fwd",
+    "tr_bwd": "atom_tr_bwd",
+    "post_bwd": "atom_post_bwd",
+    "post_bwd_s": "atom_post_bwd",
+    "pre_bwd": "atom_pre_bwd",
+    "cond_bwd": "atom_cond_bwd",
+    "cond_bwd_s": "atom_cond_bwd",
+    "cond_bwd_sh": "atom_cond_bwd_shared",
+    "pre_bwd_one": "atom_pre_bwd",
+    "kqln_bwd": "atom_kqln_bwd",
 }
 #: the model options of the classes on the sm90_atom family (``integrations/local_dit_h100.options``) as its build defines, and the classes
 #: with one AdaLN for q and k / v (the ``pre_bwd_one`` entry)
@@ -420,16 +392,22 @@ _ATOM_OPTIONS = {"AtomDiTBoltz2": ("UP",), "AtomDiTRoseTTAFold3": ("KQLN", "PARS
 _ATOM_ONE_ADALN = frozenset({"AtomDiTBoltz2", "AtomDiTRoseTTAFold3", "AtomDiTChai1"})
 #: sm100_atom ``_HOPPER_KERNELS`` source stem -> atom kernels built from it
 _ATOM_STEMS = {
-    "cond_fwd": ("atom_cond_fwd", "atom_cond_fwd_split", "atom_pack"), "pre_fwd": ("atom_pre_fwd", "atom_pre_fwd_split"),
-    "post_fwd": ("atom_post_fwd",), "tr_bwd_gate": ("atom_tr_bwd",), "post_bwd": ("atom_post_bwd",),
-    "pre_bwd": ("atom_pre_bwd", "atom_finalize_bwd"), "cond_bwd": ("atom_cond_bwd", "atom_cond_bwd_shared"),
+    "cond_fwd": ("atom_cond_fwd", "atom_cond_fwd_split", "atom_pack"),
+    "pre_fwd": ("atom_pre_fwd", "atom_pre_fwd_split"),
+    "post_fwd": ("atom_post_fwd",),
+    "tr_bwd_gate": ("atom_tr_bwd",),
+    "post_bwd": ("atom_post_bwd",),
+    "pre_bwd": ("atom_pre_bwd", "atom_finalize_bwd"),
+    "cond_bwd": ("atom_cond_bwd", "atom_cond_bwd_shared"),
 }
 #: sm_90a local-attention source stem -> local kernels built from it
 _LOCAL_STEMS = {
     "lattn90": ("local_pair_bias_fwd", "local_attn_fwd", "local_attn_bwd_dq", "local_attn_bwd_dkv", "local_pair_bias_bwd"),
-    "lattn_fwd": ("local_attn_fwd",), "lattn_dq": ("local_attn_bwd_dq",),
+    "lattn_fwd": ("local_attn_fwd",),
+    "lattn_dq": ("local_attn_bwd_dq",),
     "lattn_dkv": ("local_attn_bwd_dkv", "local_bias_bwd_samples"),
-    "lbias": ("local_pair_bias_fwd", "local_pair_bias_bwd", "local_pair_bias_bwd_fin"), "lcross": ("local_attn_fwd",),
+    "lbias": ("local_pair_bias_fwd", "local_pair_bias_bwd", "local_pair_bias_bwd_fin"),
+    "lcross": ("local_attn_fwd",),
     "lattn90_tf32": ("local_attn_fwd_tf32", "local_attn_bwd_dq_tf32", "local_attn_bwd_dkv_tf32"),
 }
 
@@ -451,7 +429,7 @@ def prebuild(target, rows):
 
     from miniworld_engine.kernels._prebuild import _kv
 
-    if target.arch == "sm80":   # the A100 builds: prebuild_sm80.py (token / atom DiT attention) and _sm80_apb (AttentionPairBias rows)
+    if target.arch == "sm80":  # the A100 builds: prebuild_sm80.py (token / atom DiT attention) and _sm80_apb (AttentionPairBias rows)
         from .prebuild_sm80 import prebuild_sm80
 
         yield from prebuild_sm80(rows)
@@ -461,6 +439,7 @@ def prebuild(target, rows):
 
     calls = []
     if target.arch == "sm90":
+
         def act(r):
             return "f32" if r["dtype"] == "float32" else "bf16"  # master computes in bf16 activations
 
@@ -476,7 +455,11 @@ def prebuild(target, rows):
             ``apb.GEOMETRY``; ``token_only``: the TokenDiT rows)."""
             out = set()
             for r in rows:
-                if (r["module"].startswith("TokenDiT") if token_only else r["module"] != "AttentionPairBias") and need_row(r, names) and act(r) == dtype:
+                if (
+                    (r["module"].startswith("TokenDiT") if token_only else r["module"] != "AttentionPairBias")
+                    and need_row(r, names)
+                    and act(r) == dtype
+                ):
                     d = _kv(r["dims"])
                     out.add((int(d["n_head"]), int(d["d_single"]) // int(d["n_head"])))
             return sorted(out)
@@ -525,8 +508,13 @@ def prebuild(target, rows):
                 ext("attn_dkv", (*td, "DBIAS=0", f"APB_KS={_APB_KS['dkv']}"))
         # AttentionPairBias with float32 activations: the TF32 core (attn_tf32.cu) at the padded layout of each head shape (head width 48
         # stays 48, every other width pads to 32), forward / inference and backward builds
-        for heads, d in sorted({(int(_kv(r["dims"])["n_head"]), int(_kv(r["dims"])["d_single"])) for r in rows
-                                if r["module"] == "AttentionPairBias" and r["dtype"] == "float32"}):
+        for heads, d in sorted(
+            {
+                (int(_kv(r["dims"])["n_head"]), int(_kv(r["dims"])["d_single"]))
+                for r in rows
+                if r["module"] == "AttentionPairBias" and r["dtype"] == "float32"
+            }
+        ):
             dhp = 48 if d // heads == 48 else 32
             ext("attn_tf32", tf32_fwd_defs(heads, dhp))
             ext("attn_tf32", tf32_defs(heads, dhp))
@@ -535,17 +523,33 @@ def prebuild(target, rows):
             if any("train" in ms for ms in modes.values()):
                 # the training backward's exact fp32 pair-weight gradient on H100 (integrations/attention_pair_bias_b200._pair_weight_shadow)
                 calls.append(ft.partial(apb._ext, "90a", True))
-        if any(k.startswith((f"{_P}pair_rows", f"{_P}pair_bias_fwd_fp32", f"{_P}prep_fwd_fp32", f"{_P}bwd_pre_fp32",
-                             f"{_P}bias_transpose", f"{_P}gate_mul")) for r in rows for k in r["kernels"]):
+        if any(
+            k.startswith(
+                (
+                    f"{_P}pair_rows",
+                    f"{_P}pair_bias_fwd_fp32",
+                    f"{_P}prep_fwd_fp32",
+                    f"{_P}bwd_pre_fp32",
+                    f"{_P}bias_transpose",
+                    f"{_P}gate_mul",
+                )
+            )
+            for r in rows
+            for k in r["kernels"]
+        ):
             calls.append(_rows_ext)
         # dense atom block (sm90_atom): the kinds of the atom kernels some row needs; tf32 for float32 rows, bf16 otherwise
         for kind, kernel in _ATOM_KINDS.items():
             for tf32 in (False, True):
                 if tf32 and kind in ("pack", "finalize"):
                     continue  # no tf32 build
-                optsets = {_ATOM_OPTIONS.get(r["module"], ()) for r in rows
-                           if need_row(r, [kernel]) and (kind in ("pack", "finalize") or act(r) == ("f32" if tf32 else "bf16"))
-                           and (kind != "pre_bwd_one" or r["module"] in _ATOM_ONE_ADALN)}
+                optsets = {
+                    _ATOM_OPTIONS.get(r["module"], ())
+                    for r in rows
+                    if need_row(r, [kernel])
+                    and (kind in ("pack", "finalize") or act(r) == ("f32" if tf32 else "bf16"))
+                    and (kind != "pre_bwd_one" or r["module"] in _ATOM_ONE_ADALN)
+                }
                 for opts in sorted(optsets):
                     calls.append(ft.partial(sm90_atom.kernel_cubin, kind, tf32, opts))
         # sm_90a halves of the sm100_atom / sm100_atom_local sources
@@ -563,15 +567,27 @@ def prebuild(target, rows):
             calls.append(ft.partial(sm100_atom.cubin_tf32, stem))
         for f32 in (False, True):  # sm100_atom.AtomDw
             bkr, ns = (32, 2) if f32 else (16, 5)
-            calls.append(ft.partial(sm100_atom.cubin_tf32, "dw_atom",
-                                    (f"DW_BKR={bkr}", f"NS={ns}", "DW_F32") if f32 else (f"NS={ns}",)))
+            calls.append(ft.partial(sm100_atom.cubin_tf32, "dw_atom", (f"DW_BKR={bkr}", f"NS={ns}", "DW_F32") if f32 else (f"NS={ns}",)))
         for stem in sorted({s for s, *_ in sm100_atom_local.KERNELS_TF32.values()}):
             calls.append(ft.partial(sm100_atom_local.cubin, stem))
         for stem, _, _, _, *defs in atom:
             calls.append(ft.partial(sm100_atom.cubin, stem, *defs, hopper=False))
-        local = {*sm100_atom_local.KERNELS, *sm100_atom_local._HOPPER_CROSS, *sm100_atom_local._MMA_KERNELS,
-                 *sm100_atom_local._MMA_KERNELS32, "fwd", "dq", "dkv", "db_samples",
-                 "kv_bias_part", "reduce_columns", "zero_kv", "add_cond", "cross_grad_pack", "kv_pack"}
+        local = {
+            *sm100_atom_local.KERNELS,
+            *sm100_atom_local._HOPPER_CROSS,
+            *sm100_atom_local._MMA_KERNELS,
+            *sm100_atom_local._MMA_KERNELS32,
+            "fwd",
+            "dq",
+            "dkv",
+            "db_samples",
+            "kv_bias_part",
+            "reduce_columns",
+            "zero_kv",
+            "add_cond",
+            "cross_grad_pack",
+            "kv_pack",
+        }
         stems = set()
         for name in local:
             try:

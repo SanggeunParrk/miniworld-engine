@@ -102,7 +102,7 @@ def serves(module, single, cond, pair, mask, compute_dtype=None, extra=None) -> 
         and tuple(extra.shape) == (single.shape[2], single.shape[2])
         and extra.dtype in (BF, torch.float32)
     ):
-        return False   # the [L, L] logit term is folded into the H100 block's bias GEMM output; nowhere else
+        return False  # the [L, L] logit term is folded into the H100 block's bias GEMM output; nowhere else
     if not torch.is_grad_enabled():
         return False
     a = module.attention
@@ -119,17 +119,10 @@ def serves(module, single, cond, pair, mask, compute_dtype=None, extra=None) -> 
         torch.float32,
     ):
         return False
-    if not any(t.requires_grad for t in (single, cond, pair)) and not any(
-        p.requires_grad for p in module.parameters()
-    ):
+    if not any(t.requires_grad for t in (single, cond, pair)) and not any(p.requires_grad for p in module.parameters()):
         return False
     # any A and L >= 1: ``block`` pads L to a multiple of 128 and A to an even count (the kernels' tiles / sample pairs)
-    if (
-        single.ndim != 4
-        or single.shape[1] != 1
-        or single.shape[0] < 1
-        or single.shape[2] < 1
-    ):
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[0] < 1 or single.shape[2] < 1:
         return False
     d = single.shape[-1]
     # the pair: 128 channels, or 256 (Protenix-v2's diffusion pair) / 512 (IntelliFold2's) on H100 -- the pair kernels are built per
@@ -147,13 +140,9 @@ def serves(module, single, cond, pair, mask, compute_dtype=None, extra=None) -> 
         dp,
     ):
         return False
-    if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[
-        0
-    ] != 2 * d:
+    if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] != 2 * d:
         return False
-    if mask is not None and not (
-        mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])
-    ):
+    if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])):
         return False
     # the model's options (kernels/integrations/token_dit.options): the defaults everywhere, the others on H100
     from miniworld_engine.kernels.conditioned_transition.cuda import VARIANT_DEFAULT
@@ -194,22 +183,16 @@ def _mm32(a, b):
             s *= 2
     if s == 1:
         return torch.mm(a, b)
-    return torch.bmm(
-        a.t().reshape(s, m // s, n).transpose(1, 2), b.reshape(s, m // s, k)
-    ).sum(0)
+    return torch.bmm(a.t().reshape(s, m // s, n).transpose(1, 2), b.reshape(s, m // s, k)).sum(0)
 
 
 LOG2E = 1.4426950408889634
-QS90 = (
-    LOG2E / DH**0.5
-)  # the sm_90a core's q scale: its logits are in log2 units (16 x 48 only)
+QS90 = LOG2E / DH**0.5  # the sm_90a core's q scale: its logits are in log2 units (16 x 48 only)
 
 
 def _sm90(dev) -> bool:
     """H100: the sm_90a attention cores and their operand conventions; B200 otherwise (``serves`` admits only these two)."""
-    return torch.device(dev).type == "cuda" and torch.cuda.get_device_capability(
-        dev
-    ) == (9, 0)
+    return torch.device(dev).type == "cuda" and torch.cuda.get_device_capability(dev) == (9, 0)
 
 
 def _key_mask(mask, A, L, perm=None):
@@ -238,11 +221,7 @@ def _empty_uniform90(dev, A=None, L=None):
 
 def _owned_gemms90(single):
     """GEMMs whose captured scratch belongs to this graph, never a framework handle."""
-    if not (
-        _native90(single.device)
-        and single.shape[0] == 5
-        and single.shape[2] in (384, 768)
-    ):
+    if not (_native90(single.device) and single.shape[0] == 5 and single.shape[2] in (384, 768)):
         return torch.mm, _mm32, torch.addmm
     from miniworld_engine.kernels.conditioned_transition.cuda.train import (
         owned_gemm_ext,
@@ -273,19 +252,12 @@ def _activate_native_caller(*, force: bool = False):
     task = torch._C._current_graph_task_id()
     if task >= 0 and task not in _NATIVE_CALLER_TASKS:
         _NATIVE_CALLER_TASKS.add(task)
-        torch.autograd.Variable._execution_engine.queue_callback(
-            lambda: _NATIVE_CALLER_TASKS.discard(task)
-        )
+        torch.autograd.Variable._execution_engine.queue_callback(lambda: _NATIVE_CALLER_TASKS.discard(task))
 
 
 def _native_caller_output(output, *tensors, force: bool = False):
     """Bind accumulation after the native output node finishes backward."""
-    if (
-        torch.compiler.is_compiling()
-        or not torch.is_grad_enabled()
-        or not output.requires_grad
-        or output.grad_fn is None
-    ):
+    if torch.compiler.is_compiling() or not torch.is_grad_enabled() or not output.requires_grad or output.grad_fn is None:
         return output
     _native_caller_hooks(*tensors, force=force)
 
@@ -358,19 +330,11 @@ def _native_caller_hooks(*tensors, force: bool = False):
                     # Exact self-add is safe; disjoint allocations are usual
                     # for AccumulateGrad's destination and incoming gradient.
                     overlap = torch._C._overlaps(dst, src)
-                    if not overlap or (
-                        dst.data_ptr() == src.data_ptr()
-                        and dst.stride() == src.stride()
-                    ):
+                    if not overlap or (dst.data_ptr() == src.data_ptr() and dst.stride() == src.stride()):
                         if dst.is_contiguous() and src.is_contiguous():
                             kernels.caller_add90(dst, src)
                             return dst
-                        if (
-                            dst.ndim == 2
-                            and src.ndim == 2
-                            and dst.t().is_contiguous()
-                            and src.t().is_contiguous()
-                        ):
+                        if dst.ndim == 2 and src.ndim == 2 and dst.t().is_contiguous() and src.t().is_contiguous():
                             # Column-major matrix gradients need only metadata
                             # views; both operands retain identical element order.
                             kernels.caller_add90(dst.t(), src.t())
@@ -395,11 +359,7 @@ def _native_caller_hooks(*tensors, force: bool = False):
         state = threading.local()
 
         def pre(grad_outputs):
-            state.mode = (
-                CallerMode()
-                if torch._C._current_graph_task_id() in _NATIVE_CALLER_TASKS
-                else None
-            )
+            state.mode = CallerMode() if torch._C._current_graph_task_id() in _NATIVE_CALLER_TASKS else None
             if state.mode is not None:
                 state.mode.__enter__()
 
@@ -418,10 +378,7 @@ def _native_caller_hooks(*tensors, force: bool = False):
         node = get_gradient_edge(tensor).node
         if node.name().endswith("AccumulateGrad"):
             install(node)
-        elif (
-            node.name() in ("ExpandBackward0", "AsStridedBackward0")
-            and tensor.stride(0) == 0
-        ):
+        elif node.name() in ("ExpandBackward0", "AsStridedBackward0") and tensor.stride(0) == 0:
             install(node)
             for ancestor, _ in node.next_functions:
                 if ancestor is not None and ancestor.name().endswith("AccumulateGrad"):
@@ -481,9 +438,7 @@ def _pack(P, qk, dev, at, opts=None):
             dp=P["attention.ln_pair.weight"].shape[0],
         )
         weights = [P[n] for n in names]
-        W = dict(
-            zip(keys, T.train_pack90(weights, qk, at is torch.float32), strict=True)
-        )
+        W = dict(zip(keys, T.train_pack90(weights, qk, at is torch.float32), strict=True))
         if slot is not None:
             _capture.prune(_PACKS)
             _PACKS[slot] = (key, W, tuple(P.values()))  # keeps the key tensors alive
@@ -509,14 +464,8 @@ def _pack(P, qk, dev, at, opts=None):
         "w1": w1,
         "w2": w2,
         "Wraw": Wraw,
-        "Wn": torch.cat([Wraw[: 2 * D] * w1, Wraw[2 * D :] * w2]).to(
-            at
-        ),  # cond-LN weights folded
-        "Wg": torch.cat(
-            [g("attention.to_scale.weight"), g("transition.to_scale.weight")]
-        )
-        .detach()
-        .to(at),
+        "Wn": torch.cat([Wraw[: 2 * D] * w1, Wraw[2 * D :] * w2]).to(at),  # cond-LN weights folded
+        "Wg": torch.cat([g("attention.to_scale.weight"), g("transition.to_scale.weight")]).detach().to(at),
         "bs1": _f32(g("attention.ada_ln_in.to_scale.bias")),
         "bs2": _f32(g("transition.ada_ln_in.to_scale.bias")),
         "bg1": _f32(g("attention.to_scale.bias")),
@@ -537,31 +486,23 @@ def _pack(P, qk, dev, at, opts=None):
                 torch.zeros(3 * D, device=dev),
             ]
         ).to(at),
-        "nq": _f32(g("attention.norm_query.weight"))
-        if qk
-        else torch.ones(DH, device=dev),
-        "nk": _f32(g("attention.norm_key.weight"))
-        if qk
-        else torch.ones(DH, device=dev),
+        "nq": _f32(g("attention.norm_query.weight")) if qk else torch.ones(DH, device=dev),
+        "nk": _f32(g("attention.norm_key.weight")) if qk else torch.ones(DH, device=dev),
         "wp": wp,
         "Wb": Wb,
         "Wf": Wf,
         "Wf_at": Wf.to(at),
         "Wf_l2": (Wf * LOG2E).to(at),  # natural / log2 units
         "Wo": g("attention.to_out.weight").detach().to(at).contiguous(),
-        "Wab": torch.cat(
-            [g("transition.expand_a.weight"), g("transition.expand_b.weight")]
-        )
-        .detach()
-        .to(at),
+        "Wab": torch.cat([g("transition.expand_a.weight"), g("transition.expand_b.weight")]).detach().to(at),
         "Wsq": g("transition.squeeze.weight").detach().to(at).contiguous(),
     }
     if opts is not None:
-        if not opts[3]:   # no gating query: the gate logits are +1e4 (the gate weight leaf is zero)
-            W["bqkvg"][3 * D:] = 1.0e4
-        if opts[4]:       # the up-gate transition: [W_a; W_b; W_u]
+        if not opts[3]:  # no gating query: the gate logits are +1e4 (the gate weight leaf is zero)
+            W["bqkvg"][3 * D :] = 1.0e4
+        if opts[4]:  # the up-gate transition: [W_a; W_b; W_u]
             W["Wab"] = torch.cat([W["Wab"], P["up"].detach().to(at)]).contiguous()
-        if opts[5]:       # the flat q / k LayerNorm: its [D] affine
+        if opts[5]:  # the flat q / k LayerNorm: its [D] affine
             W["nq"], W["nqb"], W["nk"], W["nkb"] = (_f32(P[k]) for k in ("kq.wq", "kq.bq", "kq.wk", "kq.bk"))
     if slot is not None:
         _capture.prune(_PACKS)
@@ -579,14 +520,10 @@ def _swiglu_gemm(xt, wab):
 
     if not gemm_swiglu.supported(xt, wab):
         return None
-    idx = (
-        xt.device.index if xt.device.index is not None else torch.cuda.current_device()
-    )
+    idx = xt.device.index if xt.device.index is not None else torch.cuda.current_device()
     if idx not in _GSW:
         try:
-            _GSW[idx] = gemm_swiglu.GemmSwiglu(
-                idx, K=wab.shape[1], H=wab.shape[0] // 2, save_ab=True
-            )
+            _GSW[idx] = gemm_swiglu.GemmSwiglu(idx, K=wab.shape[1], H=wab.shape[0] // 2, save_ab=True)
         except Exception as exc:  # a build / load failure is an error, never a fallback
             build_failed("sm100 SwiGLU GEMM", exc)
             _GSW[idx] = None
@@ -596,15 +533,17 @@ def _swiglu_gemm(xt, wab):
 #: The option leaves after the canonical ones (``_names_for`` with a model's options): the up-gate weight (Boltz-2) and the flat q / k
 #: LayerNorm's affine (RoseTTAFold3), and the module parameter each one is.
 UP_LEAF = ("up", "transition.up.weight")
-KQ_LEAVES = (("kq.wq", "attention.norm_query.weight"), ("kq.bq", "attention.norm_query.bias"),
-             ("kq.wk", "attention.norm_key.weight"), ("kq.bk", "attention.norm_key.bias"))
+KQ_LEAVES = (
+    ("kq.wq", "attention.norm_query.weight"),
+    ("kq.bq", "attention.norm_query.bias"),
+    ("kq.wk", "attention.norm_key.weight"),
+    ("kq.bk", "attention.norm_key.bias"),
+)
 
 
 def _names_for(qk, opts=None):
     """The block's leaf names: the canonical ATT (+ QKN) + TRN, then the option leaves of ``opts`` (``token_dit.options``)."""
-    names = ["attention." + n for n in ATT + (QKN if qk else ())] + [
-        "transition." + n for n in TRN
-    ]
+    names = ["attention." + n for n in ATT + (QKN if qk else ())] + ["transition." + n for n in TRN]
     if opts is not None and opts[4]:
         names.append(UP_LEAF[0])
     if opts is not None and opts[5]:
@@ -678,7 +617,7 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP, up=False):
         e((M, D), dtype=f32),
         e((M, 2), dtype=f32),
         e((M, D), dtype=at),
-        e((M, (3 if up else 2) * n * D), dtype=at),   # a | b of the SwiGLU: two [M, n D] halves (a | b | u up-gated)
+        e((M, (3 if up else 2) * n * D), dtype=at),  # a | b of the SwiGLU: two [M, n D] halves (a | b | u up-gated)
         e((M, D), dtype=at),
         e((0 if ((fp32 and not h100) or _pair_fused(h100, fp32, dp)) else R, dp), dtype=at),
         e((R, 2), dtype=f32),
@@ -761,13 +700,9 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
     at = torch.float32 if fp32 else BF
     h100 = _sm90(dev)
     native = _native90(dev)
-    copies = (
-        qk or h100
-    )  # q / k / v copies: QK-norm, or the sm_90a cores' pre-scaled q (see _saved_like)
+    copies = qk or h100  # q / k / v copies: QK-norm, or the sm_90a cores' pre-scaled q (see _saved_like)
     x = torch.empty(M, D, device=dev)  # the fp32 residual, written by adaln_a
-    c2 = (
-        None if native else cond.reshape(M, cond.shape[-1]).contiguous()
-    )  # native: cond_prep90 reads cond as given
+    c2 = None if native else cond.reshape(M, cond.shape[-1]).contiguous()  # native: cond_prep90 reads cond as given
     own_c = _own_cond(cond, fp32)
     chat = torch.empty(M, cond.shape[-1], device=dev, dtype=at)
     cbf = None if own_c else torch.empty_like(chat)
@@ -776,7 +711,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
         T.cond_prep90(cond, chat, cbf, cst, EPS)
     else:
         T.cond_prep(c2, chat, cbf, cst, EPS)
-    if opt & 1:   # the identity AdaLN: its tables read the raw conditioning (cbf), not LN(cond)
+    if opt & 1:  # the identity AdaLN: its tables read the raw conditioning (cbf), not LN(cond)
         chat.copy_(cast(torch.Tensor, cbf))  # (a type cast only)
     W = _pack(P, qk, dev, at, None if plain else v)
     Wn, Wg = W["Wn"], W["Wg"]
@@ -797,12 +732,10 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
         qn = torch.empty(M, D, device=dev, dtype=at)
         kn = torch.empty_like(qn)
         vc = None if (fp32 and not h100) else torch.empty_like(qn)
-        if qkm == 2:   # the flat q / k LayerNorm (affine [D], its eps)
+        if qkm == 2:  # the flat q / k LayerNorm (affine [D], its eps)
             T.qknorm(qkvg, nq, nk, qn, kn, vc, rqk, float(v[6]), float(v[6]), 2, LOG2E / DH**0.5, W["nqb"], W["nkb"])
         else:
-            T.qknorm(
-                qkvg, nq, nk, qn, kn, vc, rqk, eq, ek, qk, (LOG2E / DH**0.5) if h100 else 1.0
-            )  # H100: q scaled for the exp2 core
+            T.qknorm(qkvg, nq, nk, qn, kn, vc, rqk, eq, ek, qk, (LOG2E / DH**0.5) if h100 else 1.0)  # H100: q scaled for the exp2 core
         vsave = vc if vc is not None else qkvg.new_empty(0, D)
         if vc is None:
             vc = qkvg[:, 2 * D : 3 * D]
@@ -815,15 +748,22 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
         ph = pair.new_empty(0, dpw, dtype=at)
         bias = torch.empty(H, L, L, device=dev, dtype=at)
         T.pair_bias(
-            p2, (W["Wf"].float() * LOG2E).contiguous(), None, bias, pst, L, EPS,
-            None if extra is None else extra.reshape(-1).float().contiguous(), LOG2E,
-        )   # log2 units, rounded once to bf16
+            p2,
+            (W["Wf"].float() * LOG2E).contiguous(),
+            None,
+            bias,
+            pst,
+            L,
+            EPS,
+            None if extra is None else extra.reshape(-1).float().contiguous(),
+            LOG2E,
+        )  # log2 units, rounded once to bf16
     elif h100 or not fp32:
         ph = torch.empty(R, dpw, device=dev, dtype=at)
         T.pair_ln(p2, ph, pst, EPS)
         # head-major bias, Wf = Wb diag(wp): natural units for sm_100a, log2 units (and key-permuted for the TF32 core) for sm_90a
         bias = mm(W["Wf_l2"] if h100 else W["Wf_at"], ph.t()).view(H, L, L)
-        if extra is not None:   # an [L, L] logit term for every head, in the bias's log2 units (the H100 block only): one add
+        if extra is not None:  # an [L, L] logit term for every head, in the bias's log2 units (the H100 block only): one add
             bias.add_(extra.view(1, L, L), alpha=LOG2E)
     else:  # B200 fp32: LN(pair) folded straight into the bias, fp32 FMAs, key mask as -inf; LN(pair) not kept
         ph = pair.new_empty(0, dpw, dtype=at)
@@ -861,24 +801,18 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
             )  # sigmoid(g) o, no O
             del vt
         else:
-            og, LSE = sm90.forward(
-                qn, kn, vc, bias, km if native else _key_mask(mask, A, L), A, L, qkvg, H, DH
-            )  # sigmoid(g) o, no O
+            og, LSE = sm90.forward(qn, kn, vc, bias, km if native else _key_mask(mask, A, L), A, L, qkvg, H, DH)  # sigmoid(g) o, no O
     else:
         if not fp32 and mask is not None:
             bias.masked_fill_(~mask.reshape(1, 1, L), float("-inf"))
-        O, LSE = (
-            sm100.forward_tf32(qn, kn, vc, bias, A, L, H, DH)
-            if fp32
-            else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
-        )
+        O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L, H, DH) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
         og = torch.empty(M, D, device=dev, dtype=at)
         T.gate_o(O, qkvg, og)
     Wo = W["Wo"]
     y = mm(og, Wo.t())
     x1 = torch.empty_like(x)
     x1st = torch.empty(M, 2, device=dev)
-    T.res_adaln_b(x, y, Gg, bg1, G, bs2, x1, xt, x1st, ada_eps, opt)   # the parallel block: x1 only (xt is adaln_a's)
+    T.res_adaln_b(x, y, Gg, bg1, G, bs2, x1, xt, x1st, ada_eps, opt)  # the parallel block: x1 only (xt is adaln_a's)
     Wab = W["Wab"]
     h = torch.empty(M, nexp * D, device=dev, dtype=at)
     gsw = None if up else _swiglu_gemm(xt, Wab)
@@ -895,9 +829,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
     # custom-op outputs may not alias each other: without QK-norm q / k / v are views of qkvg -- not outputs, recovered in _bwd
     qkv_out = [qn, kn, vsave] if copies else []
     if cbf is None:
-        assert (
-            c2 is not None
-        )  # cbf is None only when _own_cond (never native), which built c2
+        assert c2 is not None  # cbf is None only when _own_cond (never native), which built c2
         cbf = c2.new_empty(0, cond.shape[-1], dtype=at)
     # the sm_90a cores write og and the backward needs no O: H100 keeps none (not even a placeholder, which AOT mis-strides)
     return [
@@ -945,9 +877,7 @@ def _tf32_attn_bwd(T, qs, k, v, dob, bias_p, mask, lse, dd, A, L):
         T.transpose(t, out)
         return out
 
-    bias_tp = (
-        bias_p[:, perm][..., inv].transpose(1, 2).contiguous()
-    )  # [h, key, q position]
+    bias_tp = bias_p[:, perm][..., inv].transpose(1, 2).contiguous()  # [h, key, q position]
     dq, dk, dv, db_p = sm90.tf32_backward(
         qs,
         k,
@@ -981,11 +911,7 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
     bf_defs = sm90.fwd_defs(H, DH)  # attn_fwd / dq / dkv / dqb build defines of this layout (none at 16 x 48)
 
     dq, dk, dv = (torch.empty_like(qs, dtype=torch.float32) for _ in range(3))
-    db = (
-        None
-        if (not fp32 and A % 3 == 0)
-        else torch.empty((A, H, L, L), device=qs.device, dtype=torch.float32)
-    )
+    db = None if (not fp32 and A % 3 == 0) else torch.empty((A, H, L, L), device=qs.device, dtype=torch.float32)
     km, kmp = T.train_keymask90(mask, qs, A, L, fp32)
     empty_defs = ("TOKEN_EMPTY_UNIFORM=1",) if _empty_uniform90(qs.device, A, L) else ()
     if fp32:
@@ -1008,23 +934,17 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
         dbc = torch.zeros(sm90.dqb_chunks(A), H, L, L, device=qs.device, dtype=torch.float32)
         sm90._ext("attn_dqb", (*bf_defs, *empty_defs)).attn_dqb(qs, k, v, dob, bias, km, lse, dd, dq, dbc)
         dbn = dbc.sum(0)  # the chunk buffers summed in order: bitwise repeatable
-        sm90._ext("attn_dkv", ("DBIAS=0", *bf_defs, *empty_defs)).attn_dkv(
-            qs, k, v, dob, bias, km, lse, dd, dk, dv, dbn
-        )
+        sm90._ext("attn_dkv", ("DBIAS=0", *bf_defs, *empty_defs)).attn_dkv(qs, k, v, dob, bias, km, lse, dd, dk, dv, dbn)
         return dq, dk, dv, dbn.to(torch.bfloat16)
     else:
-        sm90._ext(
-            "attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *sm90.dq_defs(H, DH), *empty_defs)
-        ).attn_dq(qs, k, v, dob, bias, km, lse, dd, dq)
-        sm90._ext("attn_dkv", ("DB_PER_SAMPLE=1", *bf_defs, *empty_defs)).attn_dkv(
-            qs, k, v, dob, bias, km, lse, dd, dk, dv, db
+        sm90._ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *sm90.dq_defs(H, DH), *empty_defs)).attn_dq(
+            qs, k, v, dob, bias, km, lse, dd, dq
         )
+        sm90._ext("attn_dkv", ("DB_PER_SAMPLE=1", *bf_defs, *empty_defs)).attn_dkv(qs, k, v, dob, bias, km, lse, dd, dk, dv, db)
     return dq, dk, dv, T.train_db_reduce90(db, fp32)
 
 
-def _native_final90(
-    T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab, dWsq, qk
-):
+def _native_final90(T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab, dWsq, qk):
     from miniworld_engine.kernels.integrations.token_dit import QK_WEIGHTS, WEIGHTS
 
     canonical = WEIGHTS + (QK_WEIGHTS if qk else ())
@@ -1104,9 +1024,7 @@ def _bwd(
 ) -> list[torch.Tensor]:
     """The block's backward: [d single, d cond, d pair, *d params] in the inputs' dtypes (autocast off, as ``_fwd``)."""
     with _tf32(fp32), torch.autocast("cuda", enabled=False):
-        return _bwd_body(
-            single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads, extra, variant
-        )
+        return _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads, extra, variant)
 
 
 def _xgrad(DB, extra, H, L):
@@ -1142,9 +1060,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     )
     h100 = _sm90(single.device)
     saved = list(saved)
-    if not (
-        qk or h100
-    ):  # the forward's q / k / v: column views of qkvg (see _fwd_body)
+    if not (qk or h100):  # the forward's q / k / v: column views of qkvg (see _fwd_body)
         saved = [
             *saved[:10],
             *(saved[8][:, i * D : (i + 1) * D] for i in range(3)),
@@ -1177,9 +1093,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         ph,
         pst,
     ) = saved
-    if (
-        vc.numel() == 0
-    ):  # B200 fp32 + QK-norm: v as the forward's core read it, a column view of qkvg
+    if vc.numel() == 0:  # B200 fp32 + QK-norm: v as the forward's core read it, a column view of qkvg
         vc = qkvg[:, 2 * D : 3 * D]
     names = _names_for(qk, None if plain else v)
     at = torch.float32 if fp32 else BF
@@ -1194,9 +1108,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         W["Wsq"],
         W["Wf"],
     )
-    nq, nk, bs1, bs2, bg1, bg2, w1, w2, wp, Wb = (
-        W[k] for k in ("nq", "nk", "bs1", "bs2", "bg1", "bg2", "w1", "w2", "wp", "Wb")
-    )
+    nq, nk, bs1, bs2, bg1, bg2, w1, w2, wp, Wb = (W[k] for k in ("nq", "nk", "bs1", "bs2", "bg1", "bg2", "w1", "w2", "wp", "Wb"))
     A, _, L, _ = single.shape
     M, R, dev = A * L, L * L, single.device
     sdt, cdt, pdtype = single.dtype, cond.dtype, pair.dtype
@@ -1229,25 +1141,19 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dy = torch.empty(M, D, device=dev, dtype=at)
     T.res_adaln_b_bwd(
         dout, dxt, x1, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2], opt
-    )   # the parallel block: no AdaLN of x1 (dxt goes to adaln_a_bwd)
+    )  # the parallel block: no AdaLN of x1 (dxt goes to adaln_a_bwd)
     dog = mm(dy, Wo)
     dWo = mm32(dy.t(), og)
     dob = torch.empty(M, D, device=dev, dtype=at)
     dd = torch.empty(A, H, L, device=dev)
     dqkvg = torch.empty(M, 4 * D, device=dev, dtype=at)
-    T.gate_o_bwd(
-        dog, og if h100 else O, qkvg, dob, dd, dqkvg, L, h100
-    )  # H100: D and dg from og (dO o = dog og)
+    T.gate_o_bwd(dog, og if h100 else O, qkvg, dob, dd, dqkvg, L, h100)  # H100: D and dg from og (dO o = dog og)
     if native:
-        DQ, DK, DV, DB = _native_attn_bwd90(
-            T, qn, kn, vc, dob, bias, mask, LSE, dd, A, L, fp32
-        )
+        DQ, DK, DV, DB = _native_attn_bwd90(T, qn, kn, vc, dob, bias, mask, LSE, dd, A, L, fp32)
     elif h100 and fp32:
         DQ, DK, DV, DB = _tf32_attn_bwd(T, qn, kn, vc, dob, bias, mask, LSE, dd, A, L)
     elif h100:  # dq for the unscaled q, dbias natural units
-        DQ, DK, DV, DB = sm90.backward(
-            qn, kn, vc, dob, bias, _key_mask(mask, A, L), LSE, dd, A, L, H, DH
-        )
+        DQ, DK, DV, DB = sm90.backward(qn, kn, vc, dob, bias, _key_mask(mask, A, L), LSE, dd, A, L, H, DH)
     else:
         # B200 fp32: dQ / dK / dV land in their column blocks of dqkvg; qknorm_bwd then rewrites dq / dk in place (QK-norm) or only sums
         DQ, DK, DV, DB = (
@@ -1274,18 +1180,14 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dxa = torch.mm(dqkvg, Wqkvg, out=dG[:, D : 2 * D]) if direct else mm(dqkvg, Wqkvg)
     dWqkvg = mm32(dqkvg.t(), xa)
     dx = torch.empty(M, D, device=dev, dtype=sdt)
-    if par:   # both AdaLNs of the block input: dxa and dxt into one LN backward (bs2's partials into part[1])
+    if par:  # both AdaLNs of the block input: dxa and dxt into one LN backward (bs2's partials into part[1])
         T.adaln_a_bwd(dxa, x, xst, G, bs1, dx1, dx, dG, part[3], opt, dxt, bs2, part[1])
     else:
         T.adaln_a_bwd(dxa, x, xst, G, bs1, dx1, dx, dG, part[3], opt)
     if not (native and plain):
         sums = allp.sum(0) if qkm else allp[:, : 5 * D].sum(0)
         pb = sums[: 5 * D].view(5, D)
-        dwqk = (
-            sums[5 * D :].view(2, H, DH).sum(1).reshape(-1)
-            if qkm == 1
-            else torch.zeros(2 * DH, device=dev)
-        )
+        dwqk = sums[5 * D :].view(2, H, DH).sum(1).reshape(-1) if qkm == 1 else torch.zeros(2 * DH, device=dev)
     dchat = mm(dG, Wn)
     dWn = mm32(dG.t(), chat)
     dcg = mm(dGg, Wg)
@@ -1296,7 +1198,9 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         if _pair_fused(h100, fp32, dpw):
             dpair = torch.empty(R, dpw, device=dev, dtype=pdtype)
             part = torch.empty(T.pair_grid(R), H * dpw, device=dev)
-            T.pair_bias_bwd(DB.reshape(H, R).contiguous(), p2, pst, W["Wf"], dpair, part)   # LN(pair) recomputed; dpair and the dWf partials in one pass
+            T.pair_bias_bwd(
+                DB.reshape(H, R).contiguous(), p2, pst, W["Wf"], dpair, part
+            )  # LN(pair) recomputed; dpair and the dWf partials in one pass
             dWf = part.sum(0).view(H, dpw)
         else:
             dbv = DB.view(H, R)
@@ -1304,9 +1208,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
             dph = mm32(dbv.t(), W["Wf_at"])
             dpair = torch.empty(R, dpw, device=dev, dtype=pdtype)
             T.pair_ln_bwd(dph, p2, pst, dpair)
-        outs = _native_final90(
-            T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab, dWsq, qk
-        )
+        outs = _native_final90(T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab, dWsq, qk)
         return [
             dx.view(A, 1, L, D),
             dc.view(cond.shape),
@@ -1328,9 +1230,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         Ws1, Wb1, Ws2, Wb2 = (Wraw[i * D : (i + 1) * D] for i in range(4))
         T.unfold_lnw(dWn, Ws1, Wb1, Ws2, Wb2, w1, w2, dWu, dw12)
     dpair = torch.empty(R, dpw, device=dev, dtype=pdtype)
-    if (
-        fp32 and not h100
-    ):  # B200 fp32: LN(pair) recomputed: dpair and the dWf partials in one pass
+    if fp32 and not h100:  # B200 fp32: LN(pair) recomputed: dpair and the dWf partials in one pass
         pwf = torch.empty(T.pair_grid(R), H * dpw, device=dev)
         T.pair_bias_bwd(DB.view(H, R), p2, pst, Wf, dpair, pwf)
         dWf = pwf.sum(0).view(H, dpw)
@@ -1339,9 +1239,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         T.pair_bias_bwd(DB.reshape(H, R).contiguous(), p2, pst, Wf, dpair, part)
         dWf = part.sum(0).view(H, dpw)
     else:
-        dbv = DB.reshape(H, R).to(
-            at
-        )  # masked key columns are 0 (P = 0); H100: may be a transposed view
+        dbv = DB.reshape(H, R).to(at)  # masked key columns are 0 (P = 0); H100: may be a transposed view
         dWf = mm32(dbv, ph)  # [H, dp]
         dph = mm32(dbv.t(), Wf.to(at))  # [R, dp]
         T.pair_ln_bwd(dph, p2, pst, dpair)
@@ -1375,7 +1273,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     }
     if up:
         grads[UP_LEAF[0]] = dWab[2 * nexp * D :]
-    if qkm == 2:   # the flat q / k LayerNorm's affine
+    if qkm == 2:  # the flat q / k LayerNorm's affine
         kq = sums[5 * D : 9 * D].view(4, D)
         grads.update({"kq.wq": kq[0], "kq.wk": kq[1], "kq.bq": kq[2], "kq.bk": kq[3]})
     # custom-op outputs may not alias each other: the gradients above are views of a few shared buffers, so each leaves as
@@ -1390,9 +1288,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
 class _Block(torch.autograd.Function):
     @staticmethod
     def forward(ctx, single, cond, pair, mask, qk, eq, ek, fp32, heads, extra, variant, *params):
-        out, *saved = _fwd(
-            single, cond, pair, mask, list(params), qk, eq, ek, fp32, heads, extra, variant
-        )
+        out, *saved = _fwd(single, cond, pair, mask, list(params), qk, eq, ek, fp32, heads, extra, variant)
         ctx.save_for_backward(single, cond, pair, *params, *saved, extra)
         ctx.meta = (mask, qk, eq, ek, fp32, len(params), heads, extra is not None and ctx.needs_input_grad[9], variant)
         return out
@@ -1484,8 +1380,18 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None, extra=None)
     assert opts is not None  # serves() refused a block outside the algorithm
     params = _leaves(module, _names_for(qk, opts))
     out = _Block.apply(
-        single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head),
-        None if extra is None else extra.contiguous(), list(opts), *params
+        single,
+        cond,
+        pair.contiguous(),
+        mask,
+        qk,
+        eq,
+        ek,
+        fp32,
+        int(a.n_head),
+        None if extra is None else extra.contiguous(),
+        list(opts),
+        *params,
     )
     if _native90(caller[0].device):
         # The result's edges now strongly own leaf AccumulateGrad nodes.

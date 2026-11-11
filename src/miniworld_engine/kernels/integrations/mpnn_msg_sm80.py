@@ -31,7 +31,7 @@ _NEIGHBORS = 48
 
 
 def _enabled() -> bool:
-    return True   # no switch: the module's "cuda" backend is the only caller
+    return True  # no switch: the module's "cuda" backend is the only caller
 
 
 def _a100(device: torch.device) -> bool:
@@ -63,9 +63,7 @@ def _node_loads() -> bool:
 
 @torch.compiler.assume_constant_result
 def _relpos_loads() -> bool:
-    return _load(
-        "relative_position", "miniworld_engine.kernels.mpnn_relative_position.cuda.sm80"
-    )
+    return _load("relative_position", "miniworld_engine.kernels.mpnn_relative_position.cuda.sm80")
 
 
 def _node():
@@ -94,19 +92,12 @@ def _aligned(t: torch.Tensor) -> torch.Tensor:
 # ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- hidden message
 def serves_message(preactivation: torch.Tensor, backend: str) -> bool:
     """The gate of ``message_hidden_reduce`` after its own contract check passed (bf16 [..., 48, 128] contiguous, [128, 128] / [128] projection, fp32 mask): an A100 and the extension builds."""
-    return (
-        backend != "pytorch"
-        and _enabled()
-        and _a100(preactivation.device)
-        and _message_loads()
-    )
+    return backend != "pytorch" and _enabled() and _a100(preactivation.device) and _message_loads()
 
 
 def _message_fwd_fake(preactivation, weight, bias, edge_mask, neighbor_scale):
     """reduced: the leading shape with 128 FP32 channels."""
-    return preactivation.new_empty(
-        *preactivation.shape[:-2], _WIDTH, dtype=torch.float32
-    )
+    return preactivation.new_empty(*preactivation.shape[:-2], _WIDTH, dtype=torch.float32)
 
 
 @opaque(fake=_message_fwd_fake, name="mpnn_msg_sm80_message_fwd")
@@ -129,9 +120,7 @@ def _message_fwd(
     return out.reshape(*preactivation.shape[:-2], _WIDTH)
 
 
-def _message_bwd_fake(
-    grad_reduced, preactivation, weight, bias, edge_mask, neighbor_scale
-):
+def _message_bwd_fake(grad_reduced, preactivation, weight, bias, edge_mask, neighbor_scale):
     """dP like P; dW (128, 128) and db (128,) in FP32 (the caller casts them to the parameters' dtype)."""
     return [
         torch.empty_like(preactivation),
@@ -242,9 +231,7 @@ def _node_fwd_fake(
     neighbor_scale,
 ):
     """One FP32 row per node: the query projection's leading shape with 128 channels."""
-    return query_projection.new_empty(
-        *query_projection.shape[:-1], _WIDTH, dtype=torch.float32
-    )
+    return query_projection.new_empty(*query_projection.shape[:-1], _WIDTH, dtype=torch.float32)
 
 
 @opaque(fake=_node_fwd_fake, name="mpnn_msg_sm80_node_fwd")
@@ -457,9 +444,7 @@ def node_message_reduce(
 
 
 # ------------------------------------------------------------------------------------------------------------------------------------------------------------------- relative position
-def serves_relpos(
-    bucket: torch.Tensor, table: torch.Tensor, bias: torch.Tensor
-) -> bool:
+def serves_relpos(bucket: torch.Tensor, table: torch.Tensor, bias: torch.Tensor) -> bool:
     """The gate of ``relative_position_embed`` (backend ``triton``) after its contract check passed: an A100, a 16-channel table of at most 79 buckets, bf16 or fp32."""
     return (
         _enabled()
@@ -481,12 +466,8 @@ def _relpos_reduce_fake(grad_output, bucket, buckets):
 
 
 @opaque(fake=_relpos_reduce_fake, name="mpnn_msg_sm80_relpos_reduce")
-def _relpos_reduce(
-    grad_output: torch.Tensor, bucket: torch.Tensor, buckets: int
-) -> list[torch.Tensor]:
-    table, bias = _rp().bucket_reduce(
-        _aligned(grad_output.contiguous()), bucket, buckets
-    )
+def _relpos_reduce(grad_output: torch.Tensor, bucket: torch.Tensor, buckets: int) -> list[torch.Tensor]:
+    table, bias = _rp().bucket_reduce(_aligned(grad_output.contiguous()), bucket, buckets)
     return [table, bias]
 
 
@@ -509,7 +490,5 @@ class _RelativePosition(torch.autograd.Function):
         return None, grad_table.to(table_dtype), grad_bias.to(bias_dtype)
 
 
-def relative_position_embed(
-    bucket: torch.Tensor, table: torch.Tensor, bias: torch.Tensor
-) -> torch.Tensor:
+def relative_position_embed(bucket: torch.Tensor, table: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     return _RelativePosition.apply(bucket, table, bias)

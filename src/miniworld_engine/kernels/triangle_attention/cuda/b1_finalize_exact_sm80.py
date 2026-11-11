@@ -40,18 +40,14 @@ def run(
     length,
     transposed=False,
 ):
-    _ext().run(
-        dd, db, x, stats, dout, dpair, wt, wbt, gamma, partial, out, length, transposed
-    )
+    _ext().run(dd, db, x, stats, dout, dpair, wt, wbt, gamma, partial, out, length, transposed)
 
 
 def finish(g, weights, grads, gamma, beta, partial, dgamma, dbeta):
     _ext().finish(g, list(weights), list(grads), gamma, beta, partial, dgamma, dbeta)
 
 
-def gradients(
-    dd, db, x, stats, dout, wt, wbt, gamma32, xh, weights, gamma, beta, transposed=False
-):
+def gradients(dd, db, x, stats, dout, wt, wbt, gamma32, xh, weights, gamma, beta, transposed=False):
     partial = torch.empty(
         (torch.cuda.get_device_properties(x.device).multi_processor_count * 8, 128),
         device=x.device,

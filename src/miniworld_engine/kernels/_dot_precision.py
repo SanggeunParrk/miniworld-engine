@@ -5,6 +5,7 @@ bf16 operands ignore it. For fp32 operands the engine follows the switch cuBLAS 
 (``kernels/transition/cuda/fused_generic_sm90a``) obey: TF32 tensor cores when torch allows them, IEEE fp32 otherwise. A launcher passes
 the result to its kernel as a ``tl.constexpr``.
 """
+
 from __future__ import annotations
 
 import torch

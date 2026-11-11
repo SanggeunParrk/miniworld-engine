@@ -23,6 +23,7 @@ the forward SwiGLU + gate, and the backward gate-grad + SwiGLU-grad.
 """
 
 from __future__ import annotations
+
 # _gate_fwd_kernel / _gate_bwd_kernel used to be defined here. They were bitwise equal to
 # bias_only_attention's copies (.bench/direct.out), so both now come from one home.
 from miniworld_engine.kernels.gated_projection.triton.main import _sigmul_bwd, _sigmul_fwd
@@ -39,13 +40,11 @@ from miniworld_engine.kernels._tf32 import tf32_dot, tf32_grid_many
 from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
 
 
-
 # autograd Functions cannot be @typecheck'd cleanly; keep precision policy explicit.
 
 # The flat elementwise stages tile ONE axis (the linear element index), so their config space is
 # the canonical 1-D block sweep. Each used to be launched with a literal BLOCK (2048 / 1024) —
 # a hardcoded tile that no measurement chose and that no card can move.
-
 
 
 # --- forward elementwise: h = silu(a)*b , scale = s@... already done, gate -----------
@@ -72,13 +71,16 @@ from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_ord
 from miniworld_engine.kernels._shape_key import atom_key, both_key, length_of, pack, rows_of
 
 
-@configured('cond_transition_swiglu_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
+@configured("cond_transition_swiglu_triton", key=["shape_key"], default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
 @triton.jit
 def _swiglu_fwd_kernel(
-    a_ptr, b_ptr, h_ptr, M, ND,
-    stride_m, stride_n,      # a, b: (M, ND), possibly strided views (same strides)
+    a_ptr,
+    b_ptr,
+    h_ptr,
+    M,
+    ND,
+    stride_m,
+    stride_n,  # a, b: (M, ND), possibly strided views (same strides)
     BLOCK_E: tl.constexpr,
     shape_key,
 ):
@@ -91,9 +93,7 @@ def _swiglu_fwd_kernel(
     a = tl.load(a_ptr + idx, mask=mask, other=0.0).to(tl.float32)
     b = tl.load(b_ptr + idx, mask=mask, other=0.0).to(tl.float32)
     h = a * tl.sigmoid(a) * b
-    tl.store(h_ptr + offs, h.to(h_ptr.dtype.element_ty), mask=mask)   # h is contiguous (M, ND)
-
-
+    tl.store(h_ptr + offs, h.to(h_ptr.dtype.element_ty), mask=mask)  # h is contiguous (M, ND)
 
 
 def _swiglu_fake(a, b, shape_key=None):
@@ -102,8 +102,7 @@ def _swiglu_fake(a, b, shape_key=None):
 
 
 @opaque(fake=_swiglu_fake, name="conditioned_transition_swiglu_fwd")
-def _swiglu(a: torch.Tensor, b: torch.Tensor,
-            shape_key: int | None = None) -> torch.Tensor:
+def _swiglu(a: torch.Tensor, b: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
     """h = silu(a)*b, reading a and b through their shared strides and writing h contiguous."""
     M, ND = a.shape
     if shape_key is None:
@@ -116,8 +115,7 @@ def _swiglu(a: torch.Tensor, b: torch.Tensor,
         )
     h = torch.empty(M, ND, device=a.device, dtype=a.dtype)  # contiguous output
     grid = lambda meta: (triton.cdiv(M * ND, meta["BLOCK_E"]),)  # noqa: E731
-    _swiglu_fwd_kernel[grid](a, b, h, M, ND, a.stride(0), a.stride(1),
-                             shape_key=pack(shape_key, ND=ND))
+    _swiglu_fwd_kernel[grid](a, b, h, M, ND, a.stride(0), a.stride(1), shape_key=pack(shape_key, ND=ND))
     return h
 
 
@@ -127,8 +125,7 @@ def _gate_fake(out, scale, shape_key=None, residual=None):
 
 
 @opaque(fake=_gate_fake, name="conditioned_transition_gate_fwd")
-def _gate(out: torch.Tensor, scale: torch.Tensor,
-          shape_key: int | None = None, residual: torch.Tensor | None = None) -> torch.Tensor:
+def _gate(out: torch.Tensor, scale: torch.Tensor, shape_key: int | None = None, residual: torch.Tensor | None = None) -> torch.Tensor:
     """y = sigmoid(scale)*out, through the gated_projection ``_sigmul_fwd`` launch; ``residual`` (contiguous, same shape):
     residual + y in the same pass (the stream add that was a launch of its own)."""
     y = torch.empty_like(out)
@@ -151,15 +148,21 @@ def _gate(out: torch.Tensor, scale: torch.Tensor,
 
 # FLAT 1-D — same measurement as _swiglu_fwd_kernel; this one was the larger of the two
 # regressions (822us of GPU time as a 2-D tile).
-@configured('cond_transition_bwd_swiglu_flat_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
+@configured("cond_transition_bwd_swiglu_flat_triton", key=["shape_key"], default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
 @triton.jit
 def _swiglu_bwd_kernel(
-    a_ptr, b_ptr, dh_ptr, dab_ptr, M, ND,
-    stride_m, stride_n,          # a, b: (M, ND) (possibly strided views, same strides)
-    stride_dhm, stride_dhn,      # dh: (M, ND) (own strides — may differ from a/b)
-    stride_pm, stride_pn,        # dab: (M, 2*ND) packed [da | db]
+    a_ptr,
+    b_ptr,
+    dh_ptr,
+    dab_ptr,
+    M,
+    ND,
+    stride_m,
+    stride_n,  # a, b: (M, ND) (possibly strided views, same strides)
+    stride_dhm,
+    stride_dhn,  # dh: (M, ND) (own strides — may differ from a/b)
+    stride_pm,
+    stride_pn,  # dab: (M, 2*ND) packed [da | db]
     BLOCK_E: tl.constexpr,
     shape_key,
 ):
@@ -188,15 +191,14 @@ def _gate_bwd_fake(out, scale, dy, shape_key=None):
 
 
 @opaque(fake=_gate_bwd_fake, name="conditioned_transition_gate_bwd")
-def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
-              shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor, shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """dout = sg*dy and dscale = out*sg*(1-sg)*dy for sg = sigmoid(scale), one pass over (M, D),
     through the gated_projection ``_sigmul_bwd`` launch."""
     dout = torch.empty_like(out)
     dscale = torch.empty_like(out)
     n = out.numel()
     if shape_key is None:
-        shape_key = both_key(rows_of(out.shape))   # `_sigmul_bwd` is gated_projection, level=both
+        shape_key = both_key(rows_of(out.shape))  # `_sigmul_bwd` is gated_projection, level=both
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
     _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, shape_key=shape_key, ROUND_DO=out.dtype is torch.float32)
     return dout, dscale
@@ -207,15 +209,30 @@ def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
 # is a fast cuBLAS-adjacent reduction; keep it separate.
 
 
-@configured('cond_transition_bwd_gemm_swiglu_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2))
+@configured(
+    "cond_transition_bwd_gemm_swiglu_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_M=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _dh_swiglu_bwd_kernel(
-    Dout, Ws, A, B, Dab, M, ND: tl.constexpr, D: tl.constexpr,
-    sdo0, sw0, sa0, sp0,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    GROUP_M: tl.constexpr, shape_key,
+    Dout,
+    Ws,
+    A,
+    B,
+    Dab,
+    M,
+    ND: tl.constexpr,
+    D: tl.constexpr,
+    sdo0,
+    sw0,
+    sa0,
+    sp0,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    shape_key,
     PRE: tl.constexpr = False,
 ):
     """dab = [da | db] from (dout, ws, a, b), with dh = dout @ ws never reaching HBM.
@@ -224,8 +241,7 @@ def _dh_swiglu_bwd_kernel(
     pass reading it back. At the token width dh is 113 MB out and 113 MB back, and the
     elementwise half is pure bandwidth -- so the GEMM's spare bandwidth pays for it.
     """
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M),
-                              tl.cdiv(ND, BLOCK_N), GROUP_M)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M), tl.cdiv(ND, BLOCK_N), GROUP_M)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     rmask = rows < M
@@ -243,17 +259,14 @@ def _dh_swiglu_bwd_kernel(
     for k0 in range(0, D, BLOCK_K):
         kc = k0 + tl.arange(0, BLOCK_K)
         kmask = kc < D
-        do = tl.load(Dout + rows[:, None] * sdo0 + kc[None, :],
-                     mask=rmask[:, None] & kmask[None, :], other=0.0)
+        do = tl.load(Dout + rows[:, None] * sdo0 + kc[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0)
         if PRE:
             # fp32: Ws arrives as its transpose (ND, D), so the B tile is K-major. A TF32 wgmma reads its operands K-major only; the
             # (D, ND) tile would be transposed through shared memory first (H100, fp32: M = 18432, d = 768 420 -> 373 us; M = 196608, d = 128 426 -> 315 us, tile search included).
-            wt = tl.load(Ws + cols[:, None] * sw0 + kc[None, :],
-                         mask=nmask[:, None] & kmask[None, :], other=0.0)
+            wt = tl.load(Ws + cols[:, None] * sw0 + kc[None, :], mask=nmask[:, None] & kmask[None, :], other=0.0)
             dh += tf32_dot(do, tl.trans(wt), out_dtype=tl.float32, pre_a=True, pre_b=True)
         else:
-            w = tl.load(Ws + kc[:, None] * sw0 + cols[None, :],
-                        mask=kmask[:, None] & nmask[None, :], other=0.0)
+            w = tl.load(Ws + kc[:, None] * sw0 + cols[None, :], mask=kmask[:, None] & nmask[None, :], other=0.0)
             dh += tf32_dot(do, w, out_dtype=tl.float32, pre_b=PRE)
 
     if not PRE:
@@ -275,8 +288,7 @@ def _dh_swiglu_bwd_fake(dout, ws, a, b, shape_key=None):
 
 
 @opaque(fake=_dh_swiglu_bwd_fake, name="conditioned_transition_dh_swiglu_bwd")
-def _dh_swiglu_bwd(dout: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
-                   shape_key: int | None = None) -> torch.Tensor:
+def _dh_swiglu_bwd(dout: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
     """dab = [da | db] : (M, 2*ND), with the squeeze-bwd GEMM fused in. ``ws`` is (D, ND)."""
     M, ND = a.shape
     D = dout.shape[-1]
@@ -286,15 +298,26 @@ def _dh_swiglu_bwd(dout: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: tor
             "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
             "at the caller that still holds the pre-flatten shape and pass it down."
         )
-    pre = dout.dtype is torch.float32     # the weight is rounded to nearest here (kernels/_tf32.py); the gradient in the kernel
-    if pre:   # rounded, and transposed to (ND, D): the kernel reads the B tile K-major (see `_dh_swiglu_bwd_kernel`)
+    pre = dout.dtype is torch.float32  # the weight is rounded to nearest here (kernels/_tf32.py); the gradient in the kernel
+    if pre:  # rounded, and transposed to (ND, D): the kernel reads the B tile K-major (see `_dh_swiglu_bwd_kernel`)
         ws = tf32_grid_many(ws.t().contiguous())[0]
     dab = torch.empty(M, 2 * ND, device=a.device, dtype=a.dtype)
     grid = lambda META: tile_grid(M, ND, META["BLOCK_M"], META["BLOCK_N"])  # noqa: E731
     _dh_swiglu_bwd_kernel[grid](
-        dout, ws, a, b, dab, M, int(ND), int(D),
-        dout.stride(0), ws.stride(0), a.stride(0), dab.stride(0),
-        shape_key=pack(shape_key, ND=ND, D=D), PRE=pre,
+        dout,
+        ws,
+        a,
+        b,
+        dab,
+        M,
+        int(ND),
+        int(D),
+        dout.stride(0),
+        ws.stride(0),
+        a.stride(0),
+        dab.stride(0),
+        shape_key=pack(shape_key, ND=ND, D=D),
+        PRE=pre,
     )
     return dab
 
@@ -305,8 +328,7 @@ def _swiglu_bwd_packed_fake(a, b, dh, shape_key=None):
 
 
 @opaque(fake=_swiglu_bwd_packed_fake, name="conditioned_transition_swiglu_bwd_packed")
-def _swiglu_bwd_packed(a: torch.Tensor, b: torch.Tensor, dh: torch.Tensor,
-                       shape_key: int | None = None) -> torch.Tensor:
+def _swiglu_bwd_packed(a: torch.Tensor, b: torch.Tensor, dh: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
     """Return dab = [da | db] : (M, 2*ND), contiguous, for a single concatenated expand-bwd GEMM."""
     M, ND = a.shape
     if shape_key is None:
@@ -320,10 +342,18 @@ def _swiglu_bwd_packed(a: torch.Tensor, b: torch.Tensor, dh: torch.Tensor,
     dab = torch.empty(M, 2 * ND, device=a.device, dtype=a.dtype)
     grid = lambda meta: (triton.cdiv(M * ND, meta["BLOCK_E"]),)  # noqa: E731
     _swiglu_bwd_kernel[grid](
-        a, b, dh, dab, M, ND,
-        a.stride(0), a.stride(1),
-        dh.stride(0), dh.stride(1),
-        dab.stride(0), dab.stride(1),
+        a,
+        b,
+        dh,
+        dab,
+        M,
+        ND,
+        a.stride(0),
+        a.stride(1),
+        dh.stride(0),
+        dh.stride(1),
+        dab.stride(0),
+        dab.stride(1),
         shape_key=pack(shape_key, ND=ND),
     )
     return dab
@@ -465,15 +495,20 @@ def _b2b_fwd_train_fake(x, cond, wa, wb, ws, wsc, bsc, shape_key=None):
     m = x.shape[0]
     nd = wa.shape[0]
     d = ws.shape[0]
-    return (x.new_empty((m, d)), x.new_empty((m, 2 * nd)), x.new_empty((m, nd)),
-            x.new_empty((m, d)), x.new_empty((m, d)))
+    return (x.new_empty((m, d)), x.new_empty((m, 2 * nd)), x.new_empty((m, nd)), x.new_empty((m, d)), x.new_empty((m, d)))
 
 
 @opaque(fake=_b2b_fwd_train_fake, name="conditioned_transition_b2b_fwd_train")
-def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
-                   ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
-                   shape_key: int | None = None) -> tuple[
-                       torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _b2b_fwd_train(
+    x: torch.Tensor,
+    cond: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    wsc: torch.Tensor,
+    bsc: torch.Tensor,
+    shape_key: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """atom fused b2b training forward -> (y, ab=[a|b], h, out, scale)."""
     M, K = x.shape
     if shape_key is None:
@@ -498,13 +533,44 @@ def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: to
     check_tile_axes("cond_transition_fwd_b2b_saveact_triton", D, K, "D (ws rows)", "K (x columns)")
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _b2b_fwd_train_kernel[grid](
-        x, cond, wa, wb, ws, wsc, bsc, y, ab, h, out, scale, M, ND, K, DC,
-        x.stride(0), x.stride(1), cond.stride(0), cond.stride(1),
-        wa.stride(0), wa.stride(1), ws.stride(0), ws.stride(1),
-        wsc.stride(0), wsc.stride(1),
-        y.stride(0), y.stride(1), ab.stride(0), ab.stride(1), h.stride(0), h.stride(1),
-        out.stride(0), out.stride(1), scale.stride(0), scale.stride(1),
-        shape_key=pack(shape_key, ND=ND, K=K, DC=DC), PRE=pre,
+        x,
+        cond,
+        wa,
+        wb,
+        ws,
+        wsc,
+        bsc,
+        y,
+        ab,
+        h,
+        out,
+        scale,
+        M,
+        ND,
+        K,
+        DC,
+        x.stride(0),
+        x.stride(1),
+        cond.stride(0),
+        cond.stride(1),
+        wa.stride(0),
+        wa.stride(1),
+        ws.stride(0),
+        ws.stride(1),
+        wsc.stride(0),
+        wsc.stride(1),
+        y.stride(0),
+        y.stride(1),
+        ab.stride(0),
+        ab.stride(1),
+        h.stride(0),
+        h.stride(1),
+        out.stride(0),
+        out.stride(1),
+        scale.stride(0),
+        scale.stride(1),
+        shape_key=pack(shape_key, ND=ND, K=K, DC=DC),
+        PRE=pre,
     )
     return y, ab, h, out, scale
 
@@ -516,9 +582,16 @@ def _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None, residu
 
     # One key for both kernels: they are two halves of one call at one L, and `h` between them is
     # (M, ND), so kernel B could not re-derive the same L from its own input anyway.
-    h, ab = _fwd_expand_swiglu(x, wa, wb, shape_key=shape_key)   # kernel A: expand+swiglu -> h, ab
-    y, out, scale = _fwd_squeeze_gate(h, cond, ws, wsc, bsc,     # kernel B: squeeze+gate -> out,scale
-                                      shape_key=shape_key, residual=residual)
+    h, ab = _fwd_expand_swiglu(x, wa, wb, shape_key=shape_key)  # kernel A: expand+swiglu -> h, ab
+    y, out, scale = _fwd_squeeze_gate(
+        h,
+        cond,
+        ws,
+        wsc,
+        bsc,  # kernel B: squeeze+gate -> out,scale
+        shape_key=shape_key,
+        residual=residual,
+    )
     return y, ab, h, out, scale
 
 
@@ -553,8 +626,8 @@ def set_forward_mode(name: str):
 def _pick_fwd(d_hidden: int, M: int) -> str:
     """Measured-best forward backend per regime (CUDA-graph fwd+bwd)."""
     if d_hidden <= _ATOM_D_MAX:
-        return "fused" if M >= 8192 else "cublas"   # fused wins only at large atom M
-    return "fused" if M <= 512 else "cublas"        # fused wins only at small token M
+        return "fused" if M >= 8192 else "cublas"  # fused wins only at large atom M
+    return "fused" if M <= 512 else "cublas"  # fused wins only at small token M
 
 
 class ConditionedTransitionTailFunction(torch.autograd.Function):
@@ -573,6 +646,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
         from miniworld_engine.kernels._h100_master import is_h100
+
         raw_weights = (wa, wb, ws, wsc, bsc)
         ctx.master = x.dtype == torch.bfloat16 and wa.dtype == torch.float32 and is_h100(x.device)
         wcat = None
@@ -593,12 +667,15 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         # measured-best e2e under CUDA graph) OR the fused-triton b2b/composed forward.
         # Both emit the SAME saved tensors (ab=[a|b], h, out, scale) + wcat for the backward.
         x = x.contiguous()
-        wa = wa.contiguous(); wb = wb.contiguous()
-        ws = ws.contiguous(); wsc = wsc.contiguous(); bsc = bsc.contiguous()
+        wa = wa.contiguous()
+        wb = wb.contiguous()
+        ws = ws.contiguous()
+        wsc = wsc.contiguous()
+        bsc = bsc.contiguous()
         cond = cond.contiguous()
         ND = wa.shape[0]
         if wcat is None:
-            wcat = torch.cat([wa, wb], dim=0)     # (2*ND, K); backward dx=dab@wcat, dWcat=dab^T@x
+            wcat = torch.cat([wa, wb], dim=0)  # (2*ND, K); backward dx=dab@wcat, dWcat=dab^T@x
         # ONE L for the whole call, computed once here and reused by the backward via ctx: the
         # module hands us the real atom count A; without it all we could see is M = B*A.
         L = int(length) if length is not None else length_of(x.shape)
@@ -643,8 +720,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
             # (1.61x and 1.53x, 1.58x together), which is what lifting the reroute above buys.
             mode = "mixed"
         if mode == "fused":
-            y, ab, h, out, scale = _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc,
-                                                    shape_key=atom_key(L))
+            y, ab, h, out, scale = _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc, shape_key=atom_key(L))
         else:  # "cublas" / "mixed": cuBLAS GEMMs + triton elementwise
             if mode == "mixed":
                 # Kernel A only. It writes ab AND h in one pass, so ab is not read back between
@@ -654,19 +730,20 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
 
                 h, ab = _fwd_expand_swiglu(x, wa, wb, shape_key=atom_key(L))
             else:  # cat-merged expand (one GEMM) + the flat swiglu pass
-                ab = x @ wcat.t()                 # (M, 2*ND)
+                ab = x @ wcat.t()  # (M, 2*ND)
                 h = _swiglu(ab[:, :ND], ab[:, ND:], shape_key=atom_key(L))
             out = h @ ws.t()
             scale = torch.addmm(bsc, cond, wsc.t())
             # `_gate` launches gated_projection's `_sigmul_fwd`, which is level=BOTH in
             # registry.csv, so it keys on the ROW count while the atom-level kernels above key
             # on L. `out` is the flattened (M, D) matrix, and M is what a both-level bucket is.
-            y = _gate(out, scale, shape_key=both_key(out.shape[0]),
-                      residual=None if residual is None else residual.contiguous())   # the residual add rides in the gate pass
+            y = _gate(
+                out, scale, shape_key=both_key(out.shape[0]), residual=None if residual is None else residual.contiguous()
+            )  # the residual add rides in the gate pass
             residual = None
         ctx.save_for_backward(x, cond, ab, h, out, scale, wcat, ws, wsc, *raw_weights)
         ctx.ND = ND
-        if residual is not None:   # the fused forwards (token M <= 512, atom M >= 8192) end in their own gate: one add here
+        if residual is not None:  # the fused forwards (token M <= 512, atom M >= 8192) end in their own gate: one add here
             y = residual + y
         return y
 
@@ -676,7 +753,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         ND = ctx.ND
         a, b = ab[:, :ND], ab[:, ND:]
         dy = dy.contiguous()
-        dy_res = dy if ctx.has_residual else None   # the residual stream's gradient is the incoming one, untouched
+        dy_res = dy if ctx.has_residual else None  # the residual stream's gradient is the incoming one, untouched
         # gate bwd (fused elementwise: dout, dscale in one flat pass — measured-best)
         # The SAME L the forward keyed on, carried on ctx (x is (M, K) here, so it cannot be
         # re-read). `_sigmul_bwd` is a level=both kernel, so its label uses the union bucket set.
@@ -701,10 +778,10 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         _tw = dy.dtype == torch.float32 and not ctx.master
         if _tw:
             wscT, wcatT = wsc.t().contiguous(), wcat.t().contiguous()
-        dcond = dscale @ wscT.t() if _tw else dscale @ wsc   # (M, DC)
+        dcond = dscale @ wscT.t() if _tw else dscale @ wsc  # (M, DC)
         dWsc = torch.mm(dscale.t(), cond, out_dtype=torch.float32) if ctx.master else dscale.t() @ cond
         db_sc = dscale.sum(0, dtype=torch.float32 if ctx.master else dscale.dtype)
-        del dscale                                      # last use; see the `del` note below
+        del dscale  # last use; see the `del` note below
         # squeeze bwd
         dWs = torch.mm(dout.t(), h, out_dtype=torch.float32) if ctx.master else dout.t() @ h
         # dh = dout @ ws, then the SwiGLU backward off it -- in ONE kernel, so dh never reaches
@@ -738,7 +815,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
             dab = _dh_swiglu_bwd(dout, ws, a, b, shape_key=shape_key)
             del dout, dy
         else:
-            dh = dout @ ws.t().contiguous().t() if _tw else dout @ ws   # (M, ND)
+            dh = dout @ ws.t().contiguous().t() if _tw else dout @ ws  # (M, ND)
             del dout, dy
             dab = _swiglu_bwd_packed(a, b, dh, shape_key=shape_key)
             del dh
@@ -753,7 +830,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         # `dh` is no longer one of the three: it is fused into the SwiGLU backward above and
         # never allocated, so its 96 MiB is gone from that tally rather than merely freed early.
         # expand bwd. dx stays one concatenated GEMM (vs 2 + add); the WGRAD does not.
-        dx = dab @ wcatT.t() if _tw else dab @ wcat     # (M, K)
+        dx = dab @ wcatT.t() if _tw else dab @ wcat  # (M, K)
         # The merged wgrad `dab.T @ x` is (2ND, M)x(M, K), and cuBLAS picks a WORSE kernel for it
         # than for the same GEMM at ND. Measured on an A5000, bf16, M=36864, the two halves taken
         # from STRIDED views -- no copy, which is what a real split hands cuBLAS:
@@ -777,7 +854,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         else:
             dWa = torch.mm(dab[:, :ND].t(), x, out_dtype=torch.float32) if ctx.master else dab[:, :ND].t() @ x
             dWb = torch.mm(dab[:, ND:].t(), x, out_dtype=torch.float32) if ctx.master else dab[:, ND:].t() @ x
-        del dab                                         # (M, 2*ND) -- the largest block here
+        del dab  # (M, 2*ND) -- the largest block here
         # 9 returns for 9 forward inputs: the None is `length` (an int shape key, not a
         # differentiable tensor). A missing one is an arity error, which is the point.
         return dx, dcond, dWa.contiguous(), dWb.contiguous(), dWs, dWsc, db_sc, None, dy_res

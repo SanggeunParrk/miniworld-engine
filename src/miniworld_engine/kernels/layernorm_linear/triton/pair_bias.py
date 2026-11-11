@@ -11,7 +11,6 @@ Registered through ``kernels._compile.opaque`` like every other kernel launch, s
 without a graph break -- surviving ``torch.compile`` is the entire point.
 """
 
-
 from miniworld_engine.kernels._launch_config import configured
 import torch
 
@@ -31,17 +30,16 @@ MIN_TL_DOT_DIM = 16
 # keeps the whole-row-in-one-tile schedule. n_head is tiny, so a single NH tile normally wins.
 
 
-
-
-
 # shape_key is keyed: the grid is cdiv(M, BLOCK_M1) and M is the pair row count (B*L^2), so one
 # BLOCK_M1 was being reused from L=128 to L=1024+.
 from miniworld_engine.kernels._shape_key import both_key, length_of, rows_of, pack
 
 
-@configured('layernorm_linear_fwd_fp32_triton',
-            key=['shape_key', 'TC'],
-            default=dict(BLOCK_K_D=32, BLOCK_K_NH=32, BLOCK_M1=64, num_warps=4, num_stages=2))
+@configured(
+    "layernorm_linear_fwd_fp32_triton",
+    key=["shape_key", "TC"],
+    default=dict(BLOCK_K_D=32, BLOCK_K_NH=32, BLOCK_M1=64, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _layer_norm_linear_fwd(
     x_ptr,
@@ -77,8 +75,7 @@ def _layer_norm_linear_fwd(
         cols = tl.arange(0, BLOCK_K_D)
         col_mask = cols < N
         mask = row_mask[:, None] & col_mask[None, :]
-        x = tl.load(x_ptr + rows[:, None] * stride_m + cols[None, :],
-                    mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(x_ptr + rows[:, None] * stride_m + cols[None, :], mask=mask, other=0.0).to(tl.float32)
         mean = tl.sum(x, axis=1) / N
         centered = tl.where(col_mask[None, :], x - mean[:, None], 0.0)
         var = tl.sum(centered * centered, axis=1) / N
@@ -89,14 +86,12 @@ def _layer_norm_linear_fwd(
             hcols = h0 + tl.arange(0, BLOCK_K_NH)
             h_mask = hcols < NH
             oacc = tl.zeros([BLOCK_M1, BLOCK_K_NH], dtype=tl.float32)
-            pw = tl.load(pw_ptr + hcols[None, :] * N + cols[:, None],
-                         mask=h_mask[None, :] & col_mask[:, None], other=0.0).to(tl.float32)
-            if TC:   # 16-bit input: the LayerNorm output is rounded to the input dtype and projected on tensor cores, as LayerNorm -> Linear does
+            pw = tl.load(pw_ptr + hcols[None, :] * N + cols[:, None], mask=h_mask[None, :] & col_mask[:, None], other=0.0).to(tl.float32)
+            if TC:  # 16-bit input: the LayerNorm output is rounded to the input dtype and projected on tensor cores, as LayerNorm -> Linear does
                 oacc = tl.dot(y.to(x_ptr.dtype.element_ty), pw.to(x_ptr.dtype.element_ty), oacc)
             else:
                 oacc = tl.dot(y, pw, oacc, allow_tf32=False)
-            tl.store(out_ptr + rows[:, None] * NH + hcols[None, :], oacc,
-                     mask=row_mask[:, None] & h_mask[None, :])
+            tl.store(out_ptr + rows[:, None] * NH + hcols[None, :], oacc, mask=row_mask[:, None] & h_mask[None, :])
         tl.store(mean_ptr + rows, mean, mask=row_mask)
         tl.store(rstd_ptr + rows, rstd, mask=row_mask)
     else:
@@ -107,16 +102,18 @@ def _layer_norm_linear_fwd(
         for n0 in range(0, N, BLOCK_K_D):
             cols = n0 + tl.arange(0, BLOCK_K_D)
             col_mask = cols < N
-            x = tl.load(x_ptr + rows[:, None] * stride_m + cols[None, :],
-                        mask=row_mask[:, None] & col_mask[None, :], other=0.0).to(tl.float32)
+            x = tl.load(x_ptr + rows[:, None] * stride_m + cols[None, :], mask=row_mask[:, None] & col_mask[None, :], other=0.0).to(
+                tl.float32
+            )
             acc += tl.sum(x, axis=1)
         mean = acc / N
         acc = tl.zeros([BLOCK_M1], dtype=tl.float32)
         for n0 in range(0, N, BLOCK_K_D):
             cols = n0 + tl.arange(0, BLOCK_K_D)
             col_mask = cols < N
-            x = tl.load(x_ptr + rows[:, None] * stride_m + cols[None, :],
-                        mask=row_mask[:, None] & col_mask[None, :], other=0.0).to(tl.float32)
+            x = tl.load(x_ptr + rows[:, None] * stride_m + cols[None, :], mask=row_mask[:, None] & col_mask[None, :], other=0.0).to(
+                tl.float32
+            )
             centered = tl.where(col_mask[None, :], x - mean[:, None], 0.0)
             acc += tl.sum(centered * centered, axis=1)
         var = acc / N
@@ -133,32 +130,31 @@ def _layer_norm_linear_fwd(
                 cols = n0 + tl.arange(0, BLOCK_K_D)
                 col_mask = cols < N
                 mask = row_mask[:, None] & col_mask[None, :]
-                x = tl.load(x_ptr + rows[:, None] * stride_m + cols[None, :],
-                            mask=mask, other=0.0).to(tl.float32)
+                x = tl.load(x_ptr + rows[:, None] * stride_m + cols[None, :], mask=mask, other=0.0).to(tl.float32)
                 centered = tl.where(col_mask[None, :], x - mean[:, None], 0.0)
                 lnw = tl.load(lnw_ptr + cols, mask=col_mask, other=0.0).to(tl.float32)
                 y = centered * rstd[:, None] * lnw[None, :]
-                pw = tl.load(pw_ptr + hcols[None, :] * N + cols[:, None],
-                             mask=h_mask[None, :] & col_mask[:, None], other=0.0).to(tl.float32)
-                if TC:   # 16-bit input: the LayerNorm output is rounded to the input dtype and projected on tensor cores, as LayerNorm -> Linear does
+                pw = tl.load(pw_ptr + hcols[None, :] * N + cols[:, None], mask=h_mask[None, :] & col_mask[:, None], other=0.0).to(
+                    tl.float32
+                )
+                if TC:  # 16-bit input: the LayerNorm output is rounded to the input dtype and projected on tensor cores, as LayerNorm -> Linear does
                     oacc = tl.dot(y.to(x_ptr.dtype.element_ty), pw.to(x_ptr.dtype.element_ty), oacc)
                 else:
                     oacc = tl.dot(y, pw, oacc, allow_tf32=False)
-            tl.store(out_ptr + rows[:, None] * NH + hcols[None, :], oacc,
-                     mask=row_mask[:, None] & h_mask[None, :])
+            tl.store(out_ptr + rows[:, None] * NH + hcols[None, :], oacc, mask=row_mask[:, None] & h_mask[None, :])
         tl.store(mean_ptr + rows, mean, mask=row_mask)
         tl.store(rstd_ptr + rows, rstd, mask=row_mask)
-
-
 
 
 # USE_DOT is deliberately NOT keyed even though it selects a code path (tl.dot tensor-core
 # projection vs the scalar `tl.static_range(NH)` loop): the sole launcher passes `NH=nh` and
 # `USE_DOT=nh >= MIN_TL_DOT_DIM`, so it is a pure function of NH -- which is folded into shape_key.
-@configured('layernorm_linear_bwd_fp32_triton',
-            key=['shape_key', 'TC'],
-            default=dict(BLOCK_K_D=32, BLOCK_K_NH=32, BLOCK_M1=64, num_warps=4, num_stages=2),
-            reset_to_zero=['dlnw_ptr', 'dpw_ptr'])
+@configured(
+    "layernorm_linear_bwd_fp32_triton",
+    key=["shape_key", "TC"],
+    default=dict(BLOCK_K_D=32, BLOCK_K_NH=32, BLOCK_M1=64, num_warps=4, num_stages=2),
+    reset_to_zero=["dlnw_ptr", "dpw_ptr"],
+)
 @triton.jit
 def _layer_norm_linear_bwd(
     dout_ptr,
@@ -187,7 +183,9 @@ def _layer_norm_linear_bwd(
     # schedule, with the second pass reading an L2-hot row.
     # Parameter sums are initialized before this launch and consumed after it.
     # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
-    COVER: tl.constexpr = (BLOCK_K_D >= N) & (BLOCK_K_NH >= NH) & USE_DOT   # one tile: the programs are persistent and add their parameter sums once
+    COVER: tl.constexpr = (
+        (BLOCK_K_D >= N) & (BLOCK_K_NH >= NH) & USE_DOT
+    )  # one tile: the programs are persistent and add their parameter sums once
     if COVER:
         acc_dpw = tl.zeros((BLOCK_K_NH, BLOCK_K_D), dtype=tl.float32)
         acc_dlnw = tl.zeros((BLOCK_K_D,), dtype=tl.float32)
@@ -197,7 +195,7 @@ def _layer_norm_linear_bwd(
         row_mask = rows < M
         mean = tl.load(mean_ptr + rows, mask=row_mask, other=0.0)
         rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
-    
+
         c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
         c2 = tl.zeros([BLOCK_M1], dtype=tl.float32)
         for n0 in range(0, N, BLOCK_K_D):
@@ -236,7 +234,10 @@ def _layer_norm_linear_bwd(
                         acc_dpw += gp
                     else:
                         tl.atomic_add(
-                            dpw_ptr + hcols[:, None] * N + cols[None, :], gp, mask=h_mask[:, None] & col_mask[None, :], sem="relaxed",
+                            dpw_ptr + hcols[:, None] * N + cols[None, :],
+                            gp,
+                            mask=h_mask[:, None] & col_mask[None, :],
+                            sem="relaxed",
                         )
             else:
                 for j in tl.static_range(NH):
@@ -259,7 +260,7 @@ def _layer_norm_linear_bwd(
                 tl.atomic_add(dlnw_ptr + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
         c1 = c1 / N
         c2 = c2 / N
-    
+
         for n0 in range(0, N, BLOCK_K_D):
             cols = n0 + tl.arange(0, BLOCK_K_D)
             col_mask = cols < N
@@ -300,8 +301,11 @@ def _layer_norm_linear_bwd(
     if COVER:
         cols = tl.arange(0, BLOCK_K_D)
         hcols = tl.arange(0, BLOCK_K_NH)
-        tl.atomic_add(dpw_ptr + hcols[:, None] * N + cols[None, :], acc_dpw, mask=(hcols < NH)[:, None] & (cols < N)[None, :], sem="relaxed")
+        tl.atomic_add(
+            dpw_ptr + hcols[:, None] * N + cols[None, :], acc_dpw, mask=(hcols < NH)[:, None] & (cols < N)[None, :], sem="relaxed"
+        )
         tl.atomic_add(dlnw_ptr + cols, acc_dlnw, mask=cols < N, sem="relaxed")
+
 
 _PERSIST_WAVES = 8
 
@@ -336,7 +340,7 @@ def _fwd_op(
     x2 = x.reshape(-1, x.shape[-1]).contiguous()
     M, N = x2.shape
     nh = proj_weight.shape[0]
-    out = torch.empty(M, nh, dtype=x.dtype, device=x.device)   # the kernel accumulates in fp32 and stores in the input dtype
+    out = torch.empty(M, nh, dtype=x.dtype, device=x.device)  # the kernel accumulates in fp32 and stores in the input dtype
     mean = torch.empty(M, dtype=torch.float32, device=x.device)
     rstd = torch.empty(M, dtype=torch.float32, device=x.device)
 
@@ -394,12 +398,14 @@ def _bwd_op(
     tc = x2.dtype != torch.float32 and nh >= MIN_TL_DOT_DIM
     dout2 = dout.reshape(M, nh).contiguous()
     if not tc:
-        dout2 = dout2.to(torch.float32)   # the tensor-core path rounds dout to the input dtype in the kernel: it reads the 16-bit gradient as is
+        dout2 = dout2.to(
+            torch.float32
+        )  # the tensor-core path rounds dout to the input dtype in the kernel: it reads the 16-bit gradient as is
     dx = torch.empty_like(x2)
     dlnw = torch.zeros(N, dtype=torch.float32, device=x2.device)
     dpw = torch.zeros(nh, N, dtype=torch.float32, device=x2.device)
 
-    def grid(meta):   # one-tile configs run persistent programs (the kernel loops over row blocks and adds its parameter sums once)
+    def grid(meta):  # one-tile configs run persistent programs (the kernel loops over row blocks and adds its parameter sums once)
         blocks = triton.cdiv(M, meta["BLOCK_M1"])
         one_tile = nh >= MIN_TL_DOT_DIM and meta["BLOCK_K_D"] >= N and meta["BLOCK_K_NH"] >= nh
         return (min(blocks, _persistent_programs(x2.device)) if one_tile else blocks,)
@@ -439,17 +445,15 @@ class _LayerNormLinearPairBias(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, ln_weight, proj_weight, eps):
         out, mean, rstd = _fwd_op(x, ln_weight, proj_weight, eps)
-        ctx.save_for_backward(
-            x.reshape(-1, x.shape[-1]).contiguous(), ln_weight, proj_weight, mean, rstd)
+        ctx.save_for_backward(x.reshape(-1, x.shape[-1]).contiguous(), ln_weight, proj_weight, mean, rstd)
         ctx.xshape = x.shape
         return out
 
     @staticmethod
     def backward(ctx, grad_out):
         x2, ln_weight, proj_weight, mean, rstd = ctx.saved_tensors
-        dx, dlnw, dpw = _bwd_op(grad_out, x2, ln_weight, proj_weight, mean, rstd,
-                                shape_key=both_key(rows_of(ctx.xshape)))
-        return dx.reshape(ctx.xshape), dlnw, dpw, None   # eps takes no gradient
+        dx, dlnw, dpw = _bwd_op(grad_out, x2, ln_weight, proj_weight, mean, rstd, shape_key=both_key(rows_of(ctx.xshape)))
+        return dx.reshape(ctx.xshape), dlnw, dpw, None  # eps takes no gradient
 
 
 def triton_layer_norm_linear(

@@ -212,8 +212,10 @@ def stream_shape(stream: str | None, *, samples: int, length: int, depth: int | 
 
 def pair_inputs(d_pair: int, *, length: int, samples: int, dtype, device, generator) -> dict:
     """``pair`` ``[S, L, L, d_pair]`` and its key ``mask`` ``[S, L]``: the inputs of every pair-track update."""
-    return {"pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
-            "mask": key_mask(samples, length, device=device)}
+    return {
+        "pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+        "mask": key_mask(samples, length, device=device),
+    }
 
 
 class MasterWeights(nn.Module):

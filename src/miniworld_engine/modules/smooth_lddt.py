@@ -40,8 +40,9 @@ class SmoothLddtLoss(BackendModule):
         in its dtype). ``"triton"``: the portable Triton kernels (``kernels/smooth_lddt/triton``), any CUDA card, ``x_pred`` fp32 or bf16. Both
         pad ``N`` to a multiple of 128 themselves (padded atoms are unresolved).
     """
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: A100 split tile launches (KS column parts)
+
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: A100 split tile launches (KS column parts)
 
     backends = ("pytorch", "cuda", "triton")
 

@@ -9,9 +9,7 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 @lru_cache(None)
 def headers(base):
     names = ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh")
-    payload = Path(__file__).read_bytes() + b"".join(
-        T.read_header(base / n).encode() for n in names
-    )
+    payload = Path(__file__).read_bytes() + b"".join(T.read_header(base / n).encode() for n in names)
     dest = T.cache_dir() / ("emitxn_tma_" + hashlib.sha256(payload).hexdigest()[:16])
     for name in names:
         s = T.read_header(base / name)

@@ -33,9 +33,11 @@ def _gelu(x):
     return 0.5 * x * (1.0 + tl.erf(x * 0.7071067811865476))
 
 
-@configured('mpnn_edge_mlp_fwd_gemm_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2))
+@configured(
+    "mpnn_edge_mlp_fwd_gemm_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _compute_stage_fwd_kernel(
     input_ptr,
@@ -52,8 +54,7 @@ def _compute_stage_fwd_kernel(
 ):
     # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so the
     # two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
-    row_block, output_block = tile_order(tl.program_id(0).to(tl.int64),
-                                         tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
+    row_block, output_block = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
     row_indices = row_block * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     output_columns = output_block * BLOCK_N + tl.arange(0, BLOCK_N)
     row_valid = row_indices < rows
@@ -102,9 +103,7 @@ def _launch_compute_stage(
     values = inputs.reshape(-1, width)
     rows = values.shape[0]
     output = torch.empty_like(values)
-    _compute_stage_fwd_kernel[
-        lambda meta: tile_grid(rows, width, meta["BLOCK_M1"], meta["BLOCK_N"])
-    ](
+    _compute_stage_fwd_kernel[lambda meta: tile_grid(rows, width, meta["BLOCK_M1"], meta["BLOCK_N"])](
         values,
         weight,
         bias,
@@ -206,9 +205,7 @@ class _EdgeMLPUpdateCompute(torch.autograd.Function):
             projected,
         )
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            grad_output_weight = grad_update.reshape(-1, _WIDTH).T @ hidden_2.reshape(
-                -1, _WIDTH
-            )
+            grad_output_weight = grad_update.reshape(-1, _WIDTH).T @ hidden_2.reshape(-1, _WIDTH)
         del projected, hidden_2
 
         grad_preactivation, hidden_1 = _projection_dx_op(
@@ -217,9 +214,7 @@ class _EdgeMLPUpdateCompute(torch.autograd.Function):
             preactivation,
         )
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            grad_hidden_weight = grad_projected.reshape(-1, _WIDTH).T @ hidden_1.reshape(
-                -1, _WIDTH
-            )
+            grad_hidden_weight = grad_projected.reshape(-1, _WIDTH).T @ hidden_1.reshape(-1, _WIDTH)
 
         # Preserve CUDA-autocast Linear's BF16 bias-backward rounding boundary
         # before converting the result to the original FP32 parameter dtype.

@@ -12,6 +12,7 @@ strides), so BOTH directions run through the same kernels:
 The Function takes the DOUBLED projections ``[B,L,L,2*d_hidden]`` and returns the concat output
 and doubled grads directly, so there is no ``split``/``cat``/``transpose`` in the autograd graph
 (those materializations were ~21% of the naive bidir self-attention step)."""
+
 from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
@@ -38,9 +39,22 @@ def _fwd_dir(q, k, v, bias, out, m, sm_scale):
     bias = bias.contiguous()
     grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * H, L]
     _attn_fwd[grid](
-        q, k, v, bias, sm_scale, m, out,
-        *q.stride(), *out.stride(), *bias.stride(), *m.stride(),
-        B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D),
+        q,
+        k,
+        v,
+        bias,
+        sm_scale,
+        m,
+        out,
+        *q.stride(),
+        *out.stride(),
+        *bias.stride(),
+        *m.stride(),
+        B,
+        H,
+        L,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
         shape_key=token_key(L, H=H, HEAD_DIM=D),
     )
     return bias
@@ -61,21 +75,63 @@ def _bwd_dir(q, k, v, bias, m, out, dout, dq, dk, dv, sm_scale):
     delta = torch.empty_like(m_m)
     grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
     _attn_bwd_preprocess[grid](
-        out, dout, delta, *out.stride(), *dout.stride(), HL, B, L, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L, HEAD_DIM=D),
+        out,
+        dout,
+        delta,
+        *out.stride(),
+        *dout.stride(),
+        HL,
+        B,
+        L,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=token_key(L, HEAD_DIM=D),
     )
     dbias = torch.empty(B, HL, L, L, device=q.device, dtype=bias.dtype)
     grid_kv = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
     _attn_bwd_dkdv[grid_kv](
-        q, k, v, bias, sm_scale, dout, dk, dv, dbias, m_m, delta,
-        *q.stride(), *dk.stride(), *dout.stride(), *bias.stride(), L * L, L, HL, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L, HEAD_DIM=D),
+        q,
+        k,
+        v,
+        bias,
+        sm_scale,
+        dout,
+        dk,
+        dv,
+        dbias,
+        m_m,
+        delta,
+        *q.stride(),
+        *dk.stride(),
+        *dout.stride(),
+        *bias.stride(),
+        L * L,
+        L,
+        HL,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=token_key(L, HEAD_DIM=D),
     )
     grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), 1, B * HL]
     _attn_bwd_dq[grid_q](
-        q, k, v, bias, sm_scale, dout, dq, m_m, delta,
-        *q.stride(), *dq.stride(), *dout.stride(), *bias.stride(), L, HL, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L, HEAD_DIM=D),
+        q,
+        k,
+        v,
+        bias,
+        sm_scale,
+        dout,
+        dq,
+        m_m,
+        delta,
+        *q.stride(),
+        *dq.stride(),
+        *dout.stride(),
+        *bias.stride(),
+        L,
+        HL,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=token_key(L, HEAD_DIM=D),
     )
     return reduce(dbias, "B (H L3) L L2 -> B H L L2", "sum", L3=L)
 
@@ -101,9 +157,14 @@ def _bidir_fwd_fake(q, k, v, bs, be, n_head):
 
 
 @opaque(fake=_bidir_fwd_fake, name="triangle_attention_bidir_fwd")
-def _bidir_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bs: torch.Tensor,
-               be: torch.Tensor, n_head: int,
-               ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _bidir_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bs: torch.Tensor,
+    be: torch.Tensor,
+    n_head: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Both directions' forward launches -> ``(out, m_s, m_e)``.
 
     ``bs``/``be`` arrive already sliced out of the packed bias AND contiguous: they are saved for
@@ -149,10 +210,18 @@ def _bidir_bwd_fake(q, k, v, bs, be, m_s, m_e, out, dout, n_head):
 
 
 @opaque(fake=_bidir_bwd_fake, name="triangle_attention_bidir_bwd")
-def _bidir_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bs: torch.Tensor,
-               be: torch.Tensor, m_s: torch.Tensor, m_e: torch.Tensor, out: torch.Tensor,
-               dout: torch.Tensor, n_head: int) -> tuple[
-                   torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _bidir_bwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bs: torch.Tensor,
+    be: torch.Tensor,
+    m_s: torch.Tensor,
+    m_e: torch.Tensor,
+    out: torch.Tensor,
+    dout: torch.Tensor,
+    n_head: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Both directions' backward launches -> ``(dq, dk, dv, dbias_s, dbias_e)``.
 
     ``dbias_e`` is still in the ending (row=j) frame; the transpose back, the concat and the
@@ -207,7 +276,16 @@ class BidirTriangleAttentionFn(torch.autograd.Function):
             dout = dout.to(q.dtype)
 
         dq, dk, dv, dbias_s, dbias_e = _bidir_bwd(
-            q, k, v, bs, be, m_s, m_e, out, dout, ctx.H,
+            q,
+            k,
+            v,
+            bs,
+            be,
+            m_s,
+            m_e,
+            out,
+            dout,
+            ctx.H,
         )
         # dbias_e is in the ending (row=j) frame -> transpose back to native [B,H,i,j]
         dbias = torch.cat([dbias_s, dbias_e.transpose(2, 3)], dim=1)  # [B,2H,i,j]

@@ -23,8 +23,14 @@ ENTRY = re.compile(r"^\[prebuild\]\s+(have|todo) (\S+)\s+(\S+)\s+\[([0-9a-f]{8})
 
 def _run(*args: str) -> subprocess.CompletedProcess:
     env = {**os.environ, "PYTHONPATH": f"{SRC}{os.pathsep}{os.environ.get('PYTHONPATH', '')}", "CUDA_VISIBLE_DEVICES": ""}
-    return subprocess.run([sys.executable, "-m", "miniworld_engine.kernels._prebuild", "--arch", "sm90a", *args], capture_output=True,
-                          text=True, env=env, timeout=300, check=False)
+    return subprocess.run(
+        [sys.executable, "-m", "miniworld_engine.kernels._prebuild", "--arch", "sm90a", *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=300,
+        check=False,
+    )
 
 
 def _plan(out: str) -> list[tuple]:

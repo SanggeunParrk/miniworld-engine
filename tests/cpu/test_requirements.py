@@ -14,8 +14,20 @@ from miniworld_engine.modules.primitives import BackendModule
 
 REQ = Path(cfgmod.REQUIREMENTS).parent
 KERNELS_DIR = REQ.parent / "kernels"
-MODULE_HEADER = ["module", "model", "stream", "lengths", "depths", "dims", "options", "dtypes", "modes", "eval_samples", "train_samples",
-                 "source"]
+MODULE_HEADER = [
+    "module",
+    "model",
+    "stream",
+    "lengths",
+    "depths",
+    "dims",
+    "options",
+    "dtypes",
+    "modes",
+    "eval_samples",
+    "train_samples",
+    "source",
+]
 KERNEL_HEADER = ["name", "family", "modules", "role", "version"]
 #: requirements/README.md: no row says bfloat16 (master is the only bf16 case)
 DTYPES = {"float32", "master"}
@@ -25,9 +37,20 @@ HUMAN = re.compile(r"^[1-9][0-9]*$")
 INTS = re.compile(r"^[1-9][0-9]*(\|[1-9][0-9]*)*$")
 #: requirements/README.md: the trunk-side classes are master only
 KNOWN_BACKENDS = ("pytorch", "triton", "cuda", *cfgmod.EXTERNAL)
-TRUNK = ("TriangleMultiplication", "TriangleMultiplicationRF3", "TriangleAttention", "TriangleAttentionAF3", "TriangleAttentionRF3",
-         "TriangleAttentionChai1", "TriangleAttentionChai1Confidence", "OuterProductMean", "MSAPairWeightedAveraging",
-         "BidirectionalTriangleAttention", "BidirectionalTriangleMultiplication", "PairformerBlock")
+TRUNK = (
+    "TriangleMultiplication",
+    "TriangleMultiplicationRF3",
+    "TriangleAttention",
+    "TriangleAttentionAF3",
+    "TriangleAttentionRF3",
+    "TriangleAttentionChai1",
+    "TriangleAttentionChai1Confidence",
+    "OuterProductMean",
+    "MSAPairWeightedAveraging",
+    "BidirectionalTriangleAttention",
+    "BidirectionalTriangleMultiplication",
+    "PairformerBlock",
+)
 
 
 def _read(name: str) -> tuple[list[str], list[dict]]:
@@ -62,13 +85,13 @@ def test_module_row(row: dict):
     dtypes, modes = row["dtypes"].split("|"), row["modes"].split("|")
     assert set(dtypes) <= DTYPES and len(set(dtypes)) == len(dtypes), row["dtypes"]
     assert set(modes) <= MODES and len(set(modes)) == len(modes), row["modes"]
-    for mode in modes:   # every mode the row serves states its sample counts
+    for mode in modes:  # every mode the row serves states its sample counts
         assert INTS.match(row[f"{mode}_samples"]), f"{mode}_samples = {row[f'{mode}_samples']!r}"
     assert row["stream"], "every row names its stream"
     assert row["source"].strip(), "every row says who builds it"
     variants = cfgmod._variants(row["dims"], row["options"])
     assert variants
-    for kw in variants:   # identifiers (that they are constructor arguments: tests/cpu/test_modules_cpu.py builds every row)
+    for kw in variants:  # identifiers (that they are constructor arguments: tests/cpu/test_modules_cpu.py builds every row)
         assert all(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k) for k in kw), kw
 
 
@@ -105,11 +128,11 @@ def test_kernel_row(row: dict):
     assert None not in row, "a data row with more cells than the header"
     assert HUMAN.match(row["version"]), f"version {row['version']!r} is not a plain human integer"
     assert row["role"] in cfgmod.ROLE_MODES, row["role"]
-    family = row["family"]   # a family directory, or a top-level kernels/_<family>*.py (cast, tf32)
+    family = row["family"]  # a family directory, or a top-level kernels/_<family>*.py (cast, tf32)
     assert (KERNELS_DIR / family).is_dir() or any(KERNELS_DIR.glob(f"_{family}*.py")), f"no kernel family {family} under kernels/"
     modules = row["modules"].split("|")
     for m in modules:
-        cfgmod.module_class(m)   # raises if no such class
+        cfgmod.module_class(m)  # raises if no such class
     # the derive rule: a kernel resolves to at least one module row in a mode its role serves
     serves = set(cfgmod.ROLE_MODES[row["role"]])
     hits = [r for r in MODULE_ROWS if r["module"] in modules and serves & set(r["modes"].split("|"))]

@@ -146,15 +146,20 @@ def bmm(a, b, out):
 #: cluster shape id) as cublasLtMatmulAlgoConfigGetAttribute reports them for the heuristic candidate. Anything else: ``bmm``.
 LT_CONFIGS: dict = {
     # D256 one direction, one sample (256 planes per launch); ratios vs the default pick, two processes each
-    (256, False, 256): (20, 1, 3), (256, True, 256): (20, 1, 3),        # 0.94 / 0.94
-    (512, False, 256): (20, 1, 3), (512, True, 256): (20, 1, 3),        # 0.91 / 0.92
-    (640, False, 256): (29, 3, 5), (640, True, 256): (29, 3, 5),        # 0.84 / 0.86
-    (768, False, 256): (20, 1, 3), (768, True, 256): (20, 1, 3),        # 0.88 / 0.82
-    (896, True, 256): (29, 3, 5),                                       # 0.88
-    (1024, False, 256): (20, 1, 3), (1024, True, 256): (20, 1, 3),      # 0.87 / 0.87
-    (1280, False, 256): (29, 1, 3),                                     # 0.89
-    (1536, False, 256): (201, 2, 5),                                    # 0.94
-    (2560, False, 256): (29, 1, 3),                                     # 0.94
+    (256, False, 256): (20, 1, 3),
+    (256, True, 256): (20, 1, 3),  # 0.94 / 0.94
+    (512, False, 256): (20, 1, 3),
+    (512, True, 256): (20, 1, 3),  # 0.91 / 0.92
+    (640, False, 256): (29, 3, 5),
+    (640, True, 256): (29, 3, 5),  # 0.84 / 0.86
+    (768, False, 256): (20, 1, 3),
+    (768, True, 256): (20, 1, 3),  # 0.88 / 0.82
+    (896, True, 256): (29, 3, 5),  # 0.88
+    (1024, False, 256): (20, 1, 3),
+    (1024, True, 256): (20, 1, 3),  # 0.87 / 0.87
+    (1280, False, 256): (29, 1, 3),  # 0.89
+    (1536, False, 256): (201, 2, 5),  # 0.94
+    (2560, False, 256): (29, 1, 3),  # 0.94
 }
 
 _LT_ALGO = 66
@@ -162,8 +167,13 @@ _lt_state = None
 
 
 class _HeurResult(ctypes.Structure):
-    _fields_ = [("algo", ctypes.c_uint64 * 8), ("ws", ctypes.c_size_t), ("state", ctypes.c_int), ("waves", ctypes.c_float),
-                ("reserved", ctypes.c_int * 4)]
+    _fields_ = [
+        ("algo", ctypes.c_uint64 * 8),
+        ("ws", ctypes.c_size_t),
+        ("state", ctypes.c_int),
+        ("waves", ctypes.c_float),
+        ("reserved", ctypes.c_int * 4),
+    ]
 
 
 def _lt():
@@ -257,9 +267,24 @@ def contract(a, b, out):
         return bmm(a, b, out)
     desc, lay, algo = plan
     one, zero = ctypes.c_float(1.0), ctypes.c_float(0.0)
-    status = lib.cublasLtMatmul(handle, desc, ctypes.byref(one), ctypes.c_void_p(b.data_ptr()), lay, ctypes.c_void_p(a.data_ptr()), lay,
-                                ctypes.byref(zero), ctypes.c_void_p(out.data_ptr()), lay, ctypes.c_void_p(out.data_ptr()), lay, algo,
-                                None, ctypes.c_size_t(0), ctypes.c_void_p(torch.cuda.current_stream(a.device).cuda_stream))
+    status = lib.cublasLtMatmul(
+        handle,
+        desc,
+        ctypes.byref(one),
+        ctypes.c_void_p(b.data_ptr()),
+        lay,
+        ctypes.c_void_p(a.data_ptr()),
+        lay,
+        ctypes.byref(zero),
+        ctypes.c_void_p(out.data_ptr()),
+        lay,
+        ctypes.c_void_p(out.data_ptr()),
+        lay,
+        algo,
+        None,
+        ctypes.c_size_t(0),
+        ctypes.c_void_p(torch.cuda.current_stream(a.device).cuda_stream),
+    )
     if status:
         raise RuntimeError("cublasLtMatmul failed: %d" % status)
     return out

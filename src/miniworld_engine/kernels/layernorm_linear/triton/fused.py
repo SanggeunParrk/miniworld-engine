@@ -23,9 +23,6 @@ import triton
 import triton.language as tl
 
 
-
-
-
 # BLOCK_K used to arrive as ``BLOCK_K=next_power_of_2(K)`` from the launcher -- a whole-row
 # constant the tuner never saw. It is a CSV tile, reaching
 # 1024 == the wrapper's K ceiling, so "one tile holds the whole row" (the schedule this
@@ -59,67 +56,100 @@ def _prefer_covering_lnl(configs, nargs, **_):
     kmin = min(c.kwargs["BLOCK_K"] for c in cov)
     selected = [c for c in cov if c.kwargs["BLOCK_K"] == kmin]
     x = nargs.get("x_ptr")
-    if (k == 128 and nargs.get("N") == 520 and x is not None
-            and x.dtype == torch.bfloat16 and x.device.type == "cuda"
-            and torch.cuda.get_device_capability(x.device) == (8, 6)
-            and torch.cuda.get_device_name(x.device) in {"NVIDIA RTX A5000", "NVIDIA RTX A6000"}):
+    if (
+        k == 128
+        and nargs.get("N") == 520
+        and x is not None
+        and x.dtype == torch.bfloat16
+        and x.device.type == "cuda"
+        and torch.cuda.get_device_capability(x.device) == (8, 6)
+        and torch.cuda.get_device_name(x.device) in {"NVIDIA RTX A5000", "NVIDIA RTX A6000"}
+    ):
         # Reproduced on A5000 and A6000: this exact schedule makes
         # tl.dot write outside shared memory (compute-sanitizer). Adjacent N=512,
         # stages=2, warps>=2 and BLOCK_N=256 schedules pass. Keep that evidence's
         # scope; changing the JIT body or grid would invalidate valid measurements.
-        selected = [c for c in selected if not (
-            c.kwargs["BLOCK_K"] == 128 and c.kwargs["BLOCK_M1"] == 64
-            and c.kwargs["BLOCK_N"] == 128 and c.num_warps == 1 and c.num_stages == 1)]
+        selected = [
+            c
+            for c in selected
+            if not (
+                c.kwargs["BLOCK_K"] == 128
+                and c.kwargs["BLOCK_M1"] == 64
+                and c.kwargs["BLOCK_N"] == 128
+                and c.num_warps == 1
+                and c.num_stages == 1
+            )
+        ]
     return selected
 
 
-@configured('layernorm_linear_fwd_triton',
-            key=['shape_key', 'HAS_BIAS', 'SAVE_STATS'],
-            default=[dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
-            dict(BLOCK_K=16, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
-            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
-            dict(BLOCK_K=128, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
-            dict(BLOCK_K=256, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
-            dict(BLOCK_K=512, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, num_warps=4, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, num_warps=4, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=8, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=3),
-            dict(BLOCK_K=32, BLOCK_M1=32, BLOCK_N=64, num_warps=4, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=32, num_warps=4, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=2, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=1),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=256, num_warps=4, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=1, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=4),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=5),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=8, num_stages=3),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, num_warps=4, num_stages=3),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, num_warps=8, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, num_warps=8, num_stages=3),
-            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, num_warps=4, num_stages=3),
-            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, num_warps=8, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, num_warps=8, num_stages=3),
-            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, num_warps=4, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, num_warps=4, num_stages=3),
-            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, num_warps=8, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, num_warps=8, num_stages=3),
-            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=3),
-            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, num_warps=8, num_stages=2),
-            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, num_warps=8, num_stages=3)],
-            prune=_prefer_covering_lnl)
+@configured(
+    "layernorm_linear_fwd_triton",
+    key=["shape_key", "HAS_BIAS", "SAVE_STATS"],
+    default=[
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+        dict(BLOCK_K=16, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+        dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+        dict(BLOCK_K=128, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+        dict(BLOCK_K=256, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+        dict(BLOCK_K=512, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, num_warps=4, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, num_warps=4, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=8, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=3),
+        dict(BLOCK_K=32, BLOCK_M1=32, BLOCK_N=64, num_warps=4, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=32, num_warps=4, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=2, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=1),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=256, num_warps=4, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=1, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=4),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=5),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, num_warps=8, num_stages=3),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, num_warps=4, num_stages=3),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, num_warps=8, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, num_warps=8, num_stages=3),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, num_warps=4, num_stages=3),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, num_warps=8, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, num_warps=8, num_stages=3),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, num_warps=4, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, num_warps=4, num_stages=3),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, num_warps=8, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, num_warps=8, num_stages=3),
+        dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, num_warps=4, num_stages=3),
+        dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, num_warps=8, num_stages=2),
+        dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, num_warps=8, num_stages=3),
+    ],
+    prune=_prefer_covering_lnl,
+)
 @triton.jit
 def _lnl_fwd_kernel(
-    x_ptr, w_ptr, b_ptr, g_ptr, beta_ptr, y_ptr,
+    x_ptr,
+    w_ptr,
+    b_ptr,
+    g_ptr,
+    beta_ptr,
+    y_ptr,
     # K is tl.constexpr (d_in, fixed per module, and already in this kernel's autotune key) so the
     # `BLOCK_K >= K` guard below resolves at COMPILE time and only one branch is emitted.
-    M, N, K: tl.constexpr, eps,
-    stride_xm, stride_xk,
-    stride_wn, stride_wk,  # W is (N, K) row-major: stride_wn=K, stride_wk=1
-    stride_ym, stride_yn,
+    M,
+    N,
+    K: tl.constexpr,
+    eps,
+    stride_xm,
+    stride_xk,
+    stride_wn,
+    stride_wk,  # W is (N, K) row-major: stride_wn=K, stride_wk=1
+    stride_ym,
+    stride_yn,
     HAS_BIAS: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, shape_key,
-    Mean=None, Rstd=None, SAVE_STATS: tl.constexpr = False,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    shape_key,
+    Mean=None,
+    Rstd=None,
+    SAVE_STATS: tl.constexpr = False,
 ):
     # One program owns BLOCK_M1 rows and ALL of N: the LayerNorm STATISTICS are computed once
     # per row and reused across the N-loop (vs recomputing them per (M,N) tile). Grid is 1-D
@@ -141,7 +171,8 @@ def _lnl_fwd_kernel(
         k_mask = k < K
         x = tl.load(
             x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
-            mask=row_mask[:, None] & k_mask[None, :], other=0.0,
+            mask=row_mask[:, None] & k_mask[None, :],
+            other=0.0,
         ).to(tl.float32)
         mean = tl.sum(x, axis=1) * inv_k
         xc = tl.where(k_mask[None, :], x - mean[:, None], 0.0)
@@ -159,7 +190,8 @@ def _lnl_fwd_kernel(
             acc = tl.zeros([BLOCK_M1, BLOCK_N], dtype=tl.float32)
             w = tl.load(  # (BLOCK_K, BLOCK_N): w[k, n] = W[cols[n], k]
                 w_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
-                mask=k_mask[:, None] & col_mask[None, :], other=0.0,
+                mask=k_mask[:, None] & col_mask[None, :],
+                other=0.0,
             )
             acc = tl.dot(xn, w, acc, out_dtype=tl.float32, input_precision="ieee")
             if HAS_BIAS:
@@ -178,7 +210,8 @@ def _lnl_fwd_kernel(
             k_mask = k < K
             x = tl.load(
                 x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
-                mask=row_mask[:, None] & k_mask[None, :], other=0.0,
+                mask=row_mask[:, None] & k_mask[None, :],
+                other=0.0,
             ).to(tl.float32)
             s += tl.sum(x, axis=1)
         mean = s * inv_k
@@ -188,7 +221,8 @@ def _lnl_fwd_kernel(
             k_mask = k < K
             x = tl.load(
                 x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
-                mask=row_mask[:, None] & k_mask[None, :], other=0.0,
+                mask=row_mask[:, None] & k_mask[None, :],
+                other=0.0,
             ).to(tl.float32)
             xc = tl.where(k_mask[None, :], x - mean[:, None], 0.0)
             s += tl.sum(xc * xc, axis=1)
@@ -209,7 +243,8 @@ def _lnl_fwd_kernel(
                 k_mask = k < K
                 x = tl.load(
                     x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
-                    mask=row_mask[:, None] & k_mask[None, :], other=0.0,
+                    mask=row_mask[:, None] & k_mask[None, :],
+                    other=0.0,
                 ).to(tl.float32)
                 g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
                 beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
@@ -217,7 +252,8 @@ def _lnl_fwd_kernel(
                 xn = (xc * rstd[:, None] * g[None, :] + beta[None, :]).to(x_ptr.dtype.element_ty)
                 w = tl.load(  # (BLOCK_K, BLOCK_N): w[k, n] = W[cols[n], k]
                     w_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
-                    mask=k_mask[:, None] & col_mask[None, :], other=0.0,
+                    mask=k_mask[:, None] & col_mask[None, :],
+                    other=0.0,
                 )
                 acc = tl.dot(xn, w, acc, out_dtype=tl.float32, input_precision="ieee")
             if HAS_BIAS:
@@ -236,10 +272,10 @@ def _layernorm_linear_triton_fwd_fake(x, ln_weight, ln_bias, weight, bias, eps=1
 
 @opaque(fake=_layernorm_linear_triton_fwd_fake, name="layernorm_linear_fwd")
 def layernorm_linear_triton_fwd(
-    x: torch.Tensor,          # (..., K) = (..., d_in)
+    x: torch.Tensor,  # (..., K) = (..., d_in)
     ln_weight: torch.Tensor,  # (K,)
-    ln_bias: torch.Tensor,    # (K,)
-    weight: torch.Tensor,     # (N, K) = (d_out, d_in)
+    ln_bias: torch.Tensor,  # (K,)
+    weight: torch.Tensor,  # (N, K) = (d_out, d_in)
     bias: torch.Tensor | None,  # (N,)
     eps: float = 1e-5,
 ) -> torch.Tensor:
@@ -250,15 +286,17 @@ def layernorm_linear_triton_fwd(
 def _layernorm_linear_triton_fwd_stats_fake(x, ln_weight, ln_bias, weight, bias, eps=1e-5):
     """y [..., N] like x; the LayerNorm mean and rstd as fp32 [rows]."""
     m = x.numel() // x.shape[-1]
-    return (x.new_empty((*x.shape[:-1], weight.shape[0])),
-            x.new_empty((m,), dtype=torch.float32),
-            x.new_empty((m,), dtype=torch.float32))
+    return (x.new_empty((*x.shape[:-1], weight.shape[0])), x.new_empty((m,), dtype=torch.float32), x.new_empty((m,), dtype=torch.float32))
 
 
 @opaque(fake=_layernorm_linear_triton_fwd_stats_fake, name="layernorm_linear_fwd_stats")
 def layernorm_linear_triton_fwd_stats(
-    x: torch.Tensor, ln_weight: torch.Tensor, ln_bias: torch.Tensor,
-    weight: torch.Tensor, bias: torch.Tensor | None, eps: float = 1e-5,
+    x: torch.Tensor,
+    ln_weight: torch.Tensor,
+    ln_bias: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    eps: float = 1e-5,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Training forward: save the same FP32 statistics used by the projection."""
     return _lnl_triton_launch(x, ln_weight, ln_bias, weight, bias, eps, save_stats=True)
@@ -272,28 +310,28 @@ def _lnl_triton_launch(x, ln_weight, ln_bias, weight, bias, eps, *, save_stats):
     x2 = x.reshape(-1, K)
     M = x2.shape[0]
     if M == 0:
-        return (x.new_empty((*x.shape[:-1], N)),
-                x.new_empty((0,), dtype=torch.float32),
-                x.new_empty((0,), dtype=torch.float32))
+        return (x.new_empty((*x.shape[:-1], N)), x.new_empty((0,), dtype=torch.float32), x.new_empty((0,), dtype=torch.float32))
 
     # This family uses low-precision Tensor Core tiles. For FP32, use the
     # existing LN kernel and cuBLAS instead of compiling a large scalar-dot tile.
     if x.dtype == torch.float32 and K <= 1024:
         from miniworld_engine.kernels.layernorm.compile_native import _fwd_impl
+
         xn, mean, rstd = _fwd_impl(x2.unsqueeze(0), ln_weight, ln_bias, eps)
         y = torch.nn.functional.linear(xn, weight, bias)
         return y.reshape(*x.shape[:-1], N), mean, rstd
 
     if K > 1024:  # one-block-K assumption broken; correctness-first eager fallback
         import torch.nn.functional as F
-        y = F.linear(F.layer_norm(x2.float(), (K,), ln_weight.float(), ln_bias.float(), eps),
-                     weight.float(), None if bias is None else bias.float())
+
+        y = F.linear(
+            F.layer_norm(x2.float(), (K,), ln_weight.float(), ln_bias.float(), eps), weight.float(), None if bias is None else bias.float()
+        )
         if not save_stats:
             empty = x.new_empty((0,), dtype=torch.float32)
             return y.to(x.dtype).reshape(*x.shape[:-1], N), empty, empty
         xf = x2.float()
-        return (y.to(x.dtype).reshape(*x.shape[:-1], N), xf.mean(-1),
-                torch.rsqrt(xf.var(-1, unbiased=False) + eps))
+        return (y.to(x.dtype).reshape(*x.shape[:-1], N), xf.mean(-1), torch.rsqrt(xf.var(-1, unbiased=False) + eps))
 
     x2 = x2.contiguous()
     w = weight.contiguous()
@@ -302,14 +340,28 @@ def _lnl_triton_launch(x, ln_weight, ln_bias, weight, bias, eps, *, save_stats):
     rstd = torch.empty_like(mean)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731  (1-D: N looped in-kernel)
     _lnl_fwd_kernel[grid](
-        x2, w, bias if bias is not None else x2, ln_weight.contiguous(), ln_bias.contiguous(), y,
-        M, N, K, eps,
-        x2.stride(0), x2.stride(1),
-        w.stride(0), w.stride(1),
-        y.stride(0), y.stride(1),
+        x2,
+        w,
+        bias if bias is not None else x2,
+        ln_weight.contiguous(),
+        ln_bias.contiguous(),
+        y,
+        M,
+        N,
+        K,
+        eps,
+        x2.stride(0),
+        x2.stride(1),
+        w.stride(0),
+        w.stride(1),
+        y.stride(0),
+        y.stride(1),
         # This wrapper owns the entire launch, including when x is already 2-D.
-        HAS_BIAS=bias is not None, shape_key=both_key(M, N=N, K=K),
-        Mean=mean, Rstd=rstd, SAVE_STATS=save_stats,
+        HAS_BIAS=bias is not None,
+        shape_key=both_key(M, N=N, K=K),
+        Mean=mean,
+        Rstd=rstd,
+        SAVE_STATS=save_stats,
     )
     return y.reshape(*x.shape[:-1], N), mean, rstd
 
@@ -321,10 +373,10 @@ def _layernorm_linear_triton_fwd_t_fake(x, ln_weight, ln_bias, weight, eps=1e-5)
 
 @opaque(fake=_layernorm_linear_triton_fwd_t_fake, name="layernorm_linear_fwd_t")
 def layernorm_linear_triton_fwd_t(
-    x: torch.Tensor,          # (..., K) = (..., d_in)
+    x: torch.Tensor,  # (..., K) = (..., d_in)
     ln_weight: torch.Tensor,  # (K,)
-    ln_bias: torch.Tensor,    # (K,)
-    weight: torch.Tensor,     # (N, K) = (d_out, d_in)
+    ln_bias: torch.Tensor,  # (K,)
+    weight: torch.Tensor,  # (N, K) = (d_out, d_in)
     eps: float = 1e-5,
 ) -> torch.Tensor:
     """``(LayerNorm(x) @ W^T)^T`` as a contiguous ``(N, rows)`` matrix: the same kernel as :func:`layernorm_linear_triton_fwd`, storing its
@@ -345,12 +397,26 @@ def layernorm_linear_triton_fwd_t(
     dummy = torch.empty(0, device=x.device, dtype=torch.float32)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731  (1-D: N looped in-kernel)
     _lnl_fwd_kernel[grid](
-        x2, w, x2, ln_weight.contiguous(), ln_bias.contiguous(), y,
-        M, N, K, eps,
-        x2.stride(0), x2.stride(1),
-        w.stride(0), w.stride(1),
-        1, M,
-        HAS_BIAS=False, shape_key=both_key(M, N=N, K=K),
-        Mean=dummy, Rstd=dummy, SAVE_STATS=False,
+        x2,
+        w,
+        x2,
+        ln_weight.contiguous(),
+        ln_bias.contiguous(),
+        y,
+        M,
+        N,
+        K,
+        eps,
+        x2.stride(0),
+        x2.stride(1),
+        w.stride(0),
+        w.stride(1),
+        1,
+        M,
+        HAS_BIAS=False,
+        shape_key=both_key(M, N=N, K=K),
+        Mean=dummy,
+        Rstd=dummy,
+        SAVE_STATS=False,
     )
     return y

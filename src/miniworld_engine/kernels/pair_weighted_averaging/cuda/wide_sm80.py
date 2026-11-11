@@ -19,6 +19,6 @@ def ext():
         sources=[str(_dir / "wide_ops.cu")],
         extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80")],
         extra_cflags=["-std=c++17", "-O3"],
-        extra_ldflags=["-lcublas"],   # head_bmm: the per-head contraction on the natural layout
+        extra_ldflags=["-lcublas"],  # head_bmm: the per-head contraction on the natural layout
         verbose=False,
     )

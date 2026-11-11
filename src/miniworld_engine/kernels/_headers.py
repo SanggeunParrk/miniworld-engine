@@ -59,7 +59,7 @@ CUTLASS = HeaderPackage(
     dist="nvidia-cutlass",
     version="4.2.0.0",
     url="https://files.pythonhosted.org/packages/21/6b/e86fc2fd536dd4b8bd2209aa31d7002610c501b0802337787eac9c9b328c/"
-        "nvidia_cutlass-4.2.0.0-py3-none-any.whl",
+    "nvidia_cutlass-4.2.0.0-py3-none-any.whl",
     sha256="f9599ada45c7bcb6bf53f7d3f0a7d154183e53451c01bfa59eecd37dd4a693f6",
     member="cutlass_library/source/include/",
     sentinel="cute/tensor.hpp",
@@ -73,7 +73,7 @@ MATHDX = HeaderPackage(
     dist="nvidia-mathdx",
     version="25.6.0",
     url="https://files.pythonhosted.org/packages/20/1a/a418b8c1adc58abd87fd69414c19883af5c1b10514e3dbfcc27cde831b13/"
-        "nvidia_mathdx-25.6.0-py3-none-any.whl",
+    "nvidia_mathdx-25.6.0-py3-none-any.whl",
     sha256="22e6ad5d0d005f836be5cbd14e836cf2e9ea42c82deb602707246ce8198eaa96",
     member="nvidia/mathdx/",
     sentinel="include/cublasdx.hpp",
@@ -145,7 +145,7 @@ def _unpack(pkg: HeaderPackage, wheel: Path, out: Path) -> None:
             name = info.filename
             if info.is_dir() or not name.startswith(pkg.member):
                 continue
-            rel = Path(name[len(pkg.member):])
+            rel = Path(name[len(pkg.member) :])
             if rel.is_absolute() or ".." in rel.parts:
                 raise HeadersUnavailable(f"unsafe path in {wheel}: {name}")
             target = out / rel
@@ -188,8 +188,10 @@ def fetch(pkg: HeaderPackage, wheel: str | os.PathLike | None = None) -> Path:
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
-    ap = argparse.ArgumentParser(prog="python -m miniworld_engine.kernels._headers",
-                                 description="Show or fetch the pinned CUTLASS / MathDx headers JIT builds compile against.")
+    ap = argparse.ArgumentParser(
+        prog="python -m miniworld_engine.kernels._headers",
+        description="Show or fetch the pinned CUTLASS / MathDx headers JIT builds compile against.",
+    )
     ap.add_argument("action", choices=("show", "fetch"))
     ap.add_argument("packages", nargs="*", metavar="PACKAGE", help=f"any of {', '.join(PACKAGES)} (default: all)")
     ap.add_argument("--wheel", default=None, help="unpack this already-downloaded wheel instead of downloading (one package)")

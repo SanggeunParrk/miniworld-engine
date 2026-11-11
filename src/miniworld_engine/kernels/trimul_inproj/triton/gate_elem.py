@@ -35,8 +35,6 @@ import triton.language as tl
 from miniworld_engine.kernels._shape_key import length_of, pack, token_key
 
 
-
-
 # TWO KERNELS, NOT ONE WITH FLAGS. This used to be a single `_gate_mul_kernel` keyed on
 # `SAVE_GATE` and `USE_DROPOUT`, and both flags said the same thing twice: SAVE_GATE=1 means
 # "the backward needs the gate", i.e. training; USE_DROPOUT=1 means "p_drop > 0", which only a
@@ -69,13 +67,11 @@ from miniworld_engine.kernels._shape_key import length_of, pack, token_key
 #   further 1.35x on top of it in training. The fused form is also the more ACCURATE one --
 #   it accumulates in fp32 and rounds to bf16 once, where the split path rounds twice:
 #   rel_err vs an fp32 reference 1.4e-03 (A) against 1.7e-03 (B/C).
-@configured('gated_projection_gate_dropres_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
+@configured("gated_projection_gate_dropres_triton", key=["shape_key"], default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
-def _gate_mul_train_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, L,
-                           N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-                           shape_key):
+def _gate_mul_train_kernel(
+    glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, L, N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key
+):
     """TRAINING: y = residual + dropscale ⊙ (proj ⊙ sigmoid(glogit)), and the gate is stored
     for the backward.
 
@@ -111,15 +107,25 @@ def _gate_mul_train_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_pt
 # 0, so the flag had exactly one live value. Leaving it in the key would have been worse than
 # useless: the committed A100 cache holds `USE_DROPOUT=0` only, so every backward would have
 # missed its bucket and fallen back to the heuristic subset.
-@configured('gated_projection_bwd_gate_dropres_triton',
-            key=['shape_key', 'FROM_PREACT'],
-            default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
+@configured(
+    "gated_projection_bwd_gate_dropres_triton",
+    key=["shape_key", "FROM_PREACT"],
+    default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _gate_elem_bwd_ew_kernel(
-    dy_ptr, proj_ptr, gate_ptr,    # (M, N)
-    dproj_ptr, dglogit_ptr,        # (M, N) out
-    ds_ptr, L,                     # row-broadcast drop scale [L, N], always present
-    M, N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key,
+    dy_ptr,
+    proj_ptr,
+    gate_ptr,  # (M, N)
+    dproj_ptr,
+    dglogit_ptr,  # (M, N) out
+    ds_ptr,
+    L,  # row-broadcast drop scale [L, N], always present
+    M,
+    N: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    shape_key,
     FROM_PREACT: tl.constexpr = False,
 ):
     """Fused elementwise: d_proj = dy⊙gate ; d_glogit = dy⊙proj⊙gate⊙(1-gate).
@@ -197,13 +203,22 @@ def gate_elem_train(
     xn_flat = x_n.reshape(-1, x_n.shape[-1])
     M, N = xn_flat.shape[0], proj.shape[-1]
     L = int(seq_len) if seq_len is not None else (x_n.shape[1] if x_n.dim() == 4 else 0)
-    glogit = xn_flat @ Wg                                          # (M, N) cuBLAS
+    glogit = xn_flat @ Wg  # (M, N) cuBLAS
     y = torch.empty(M, N, device=xn_flat.device, dtype=xn_flat.dtype)
     gate = torch.empty(M, N, device=xn_flat.device, dtype=xn_flat.dtype)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
-    _gate_mul_train_kernel[grid](glogit, proj.reshape(M, N), y, gate, residual.reshape(M, N),
-                                 dropscale.reshape(L, N), M, L, N=N,
-                                 shape_key=pack(_shape_key(seq_len, x_n), N=N))
+    _gate_mul_train_kernel[grid](
+        glogit,
+        proj.reshape(M, N),
+        y,
+        gate,
+        residual.reshape(M, N),
+        dropscale.reshape(L, N),
+        M,
+        L,
+        N=N,
+        shape_key=pack(_shape_key(seq_len, x_n), N=N),
+    )
     return y, gate
 
 
@@ -223,9 +238,9 @@ def _gate_elem_bwd_ew_fake(dy, proj, gate, dropscale, seq_len, from_preact=False
 
 
 @opaque(fake=_gate_elem_bwd_ew_fake, name="trimul_gate_elem_bwd_ew")
-def gate_elem_bwd_ew(dy: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor,
-                     dropscale: torch.Tensor, seq_len: int,
-                     from_preact: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+def gate_elem_bwd_ew(
+    dy: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor, dropscale: torch.Tensor, seq_len: int, from_preact: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Just the GateElem bwd ELEMENTWISE (no GEMMs): returns (d_proj, d_glogit), both (M,N).
     For the merged BidirBackHalf, which fuses dx_gate (=d_glogit@Wgᵀ) into the dxn GEMM and
     does dWg itself — so it wants d_glogit raw, not gate_elem_bwd's dx_gate/dWg.
@@ -246,23 +261,25 @@ def gate_elem_bwd_ew(dy: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor,
     L = int(seq_len)
     ds_flat = dropscale.reshape(L, N).contiguous()
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
-    _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, ds_flat, L, M, N=N,
-                                   shape_key=pack(_shape_key(seq_len), N=N),
-                                   FROM_PREACT=from_preact)
+    _gate_elem_bwd_ew_kernel[grid](
+        dy, proj, gate, d_proj, d_glogit, ds_flat, L, M, N=N, shape_key=pack(_shape_key(seq_len), N=N), FROM_PREACT=from_preact
+    )
     return d_proj, d_glogit
 
 
 def _gate_elem_bwd_fake(dy, x_n, proj, gate, Wg, dropscale, seq_len):
     """(d_proj (M, N), dx_gate (M, K), dWg (K, N)); M is dy flattened over its last dim."""
-    return (dy.new_empty((dy.numel() // dy.shape[-1], dy.shape[-1])),
-            x_n.new_empty((dy.numel() // dy.shape[-1], x_n.shape[-1])),
-            Wg.new_empty(Wg.shape))
+    return (
+        dy.new_empty((dy.numel() // dy.shape[-1], dy.shape[-1])),
+        x_n.new_empty((dy.numel() // dy.shape[-1], x_n.shape[-1])),
+        Wg.new_empty(Wg.shape),
+    )
 
 
 @opaque(fake=_gate_elem_bwd_fake, name="trimul_gate_elem_bwd")
-def gate_elem_bwd(dy: torch.Tensor, x_n: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor,
-                  Wg: torch.Tensor, dropscale: torch.Tensor,
-                  seq_len: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def gate_elem_bwd(
+    dy: torch.Tensor, x_n: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor, Wg: torch.Tensor, dropscale: torch.Tensor, seq_len: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward of GateElem. Returns (d_proj, dx_gate, dWg).
     dy/proj/gate:(M,N); x_n:(M,K); Wg:(K,N). d_proj feeds ①; dx_gate is the gate-path
     grad into x_n (sum it with the front/LN contributions upstream); dWg:(K,N).
@@ -277,9 +294,18 @@ def gate_elem_bwd(dy: torch.Tensor, x_n: torch.Tensor, proj: torch.Tensor, gate:
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     # gate_elem_bwd is the 2-D-only form: x_n arrives already flattened
     # to (M, K), so L has to come from ``seq_len``.
-    _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit,
-                                   dropscale.reshape(int(seq_len), N).contiguous(), int(seq_len), M, N=N,
-                                   shape_key=pack(_shape_key(seq_len), N=N))
-    dx_gate = d_glogit @ Wg.t()            # (M, K)  cuBLAS
-    dWg = xn_flat.t() @ d_glogit           # (K, N)  cuBLAS
+    _gate_elem_bwd_ew_kernel[grid](
+        dy,
+        proj,
+        gate,
+        d_proj,
+        d_glogit,
+        dropscale.reshape(int(seq_len), N).contiguous(),
+        int(seq_len),
+        M,
+        N=N,
+        shape_key=pack(_shape_key(seq_len), N=N),
+    )
+    dx_gate = d_glogit @ Wg.t()  # (M, K)  cuBLAS
+    dWg = xn_flat.t() @ d_glogit  # (K, N)  cuBLAS
     return d_proj, dx_gate, dWg

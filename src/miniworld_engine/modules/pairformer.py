@@ -53,10 +53,13 @@ class PairformerConfig:
 class PairformerBlock(BackendModule, MasterWeights):
     """One Pairformer block: triangle multiplication outgoing / incoming (or one bidirectional update), triangle attention starting /
     ending, the pair transition; with ``config.d_single`` the single track after it."""
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-11: the A100 sub-modules' inference weight forms read by captures
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:a100_sm80": 2
+    }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures
 
     def __init__(self, config: PairformerConfig, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()
@@ -64,26 +67,39 @@ class PairformerBlock(BackendModule, MasterWeights):
 
         if config.bidirectional_trimul:
             self.tri_multi = BidirectionalTriangleMultiplication(
-                d_pair=config.d_pair, d_hidden=config.d_hidden_tri_multi, p_drop=config.p_drop,
+                d_pair=config.d_pair,
+                d_hidden=config.d_hidden_tri_multi,
+                p_drop=config.p_drop,
             )
             self.tri_multi_outgoing = None
             self.tri_multi_incoming = None
         else:
             self.tri_multi = None
             self.tri_multi_outgoing = TriangleMultiplication(
-                d_pair=config.d_pair, d_hidden=config.d_hidden_tri_multi, outgoing=True, p_drop=config.p_drop, model=config.model,
+                d_pair=config.d_pair,
+                d_hidden=config.d_hidden_tri_multi,
+                outgoing=True,
+                p_drop=config.p_drop,
+                model=config.model,
             )
             self.tri_multi_incoming = TriangleMultiplication(
-                d_pair=config.d_pair, d_hidden=config.d_hidden_tri_multi, outgoing=False, p_drop=config.p_drop, model=config.model,
+                d_pair=config.d_pair,
+                d_hidden=config.d_hidden_tri_multi,
+                outgoing=False,
+                p_drop=config.p_drop,
+                model=config.model,
             )
         if config.use_triangle_attention:
             # ``d_hidden_tri_attention`` is the PER-HEAD width; TriangleAttention takes the TOTAL hidden width.
             d_hidden_attn_total = config.d_hidden_tri_attention * config.n_head_tri_attention
             attention = {
-                "d_pair": config.d_pair, "n_head": config.n_head_tri_attention, "d_hidden": d_hidden_attn_total, "p_drop": config.p_drop,
+                "d_pair": config.d_pair,
+                "n_head": config.n_head_tri_attention,
+                "d_hidden": d_hidden_attn_total,
+                "p_drop": config.p_drop,
                 "model": config.model,
             }
-            if not config.use_self_attention:   # bias-only: only TriangleAttention has it (a model variant refuses the argument)
+            if not config.use_self_attention:  # bias-only: only TriangleAttention has it (a model variant refuses the argument)
                 attention["use_self_attention"] = False
             self.tri_atten_starting = TriangleAttention(starting=True, **attention)
             self.tri_atten_ending = TriangleAttention(starting=False, **attention)
@@ -98,7 +114,10 @@ class PairformerBlock(BackendModule, MasterWeights):
             from miniworld_engine.modules.attention import AttentionPairBias
 
             self.single_attention = AttentionPairBias(
-                config.d_single, config.d_pair, config.n_head_single, gate_bias=config.single_gate_bias,
+                config.d_single,
+                config.d_pair,
+                config.n_head_single,
+                gate_bias=config.single_gate_bias,
             )
             self.single_transition = Transition(config.d_single, config.single_transition_n)
         if master_weights:
@@ -128,11 +147,14 @@ class PairformerBlock(BackendModule, MasterWeights):
         # A parallel block's single reads the pair ENTERING it; a sequential one the pair its own track just produced.
         logits_pair = pair_in if self.config.parallel else pair
         if self.config.parallel:
-            single = (single + (self.single_attention(single, logits_pair, mask, extra_pair_bias) - single)
-                      + (self.single_transition(single) - single))
+            single = (
+                single
+                + (self.single_attention(single, logits_pair, mask, extra_pair_bias) - single)
+                + (self.single_transition(single) - single)
+            )
         else:
             single = self.single_transition(self.single_attention(single, logits_pair, mask, extra_pair_bias))
-        return pair, cast(torch.Tensor, single)   # the single track: given with config.d_single
+        return pair, cast(torch.Tensor, single)  # the single track: given with config.d_single
 
     # ------------------------------------------------------------------------------------------------------------- "cuda" / "triton"
     # The block owns no kernel of its own: ``set_backend`` hands the name to every sub-module (the triangle multiplications, the triangle
@@ -146,8 +168,16 @@ class PairformerBlock(BackendModule, MasterWeights):
     # anthropic backends (TriangleMultiplication: core TriMul fast; TriangleAttention: tri_attn_block with core tier:fast; Transition: the
     # core provider), the residuals added by each update instead of folded into the kernels' epilogues.
     def _backend_children(self) -> list[tuple[str, BackendModule]]:
-        names = ["tri_multi", "tri_multi_outgoing", "tri_multi_incoming", "tri_atten_starting", "tri_atten_ending", "transition_pair",
-                 "single_attention", "single_transition"]
+        names = [
+            "tri_multi",
+            "tri_multi_outgoing",
+            "tri_multi_incoming",
+            "tri_atten_starting",
+            "tri_atten_ending",
+            "transition_pair",
+            "single_attention",
+            "single_transition",
+        ]
         return [(n, getattr(self, n)) for n in names if getattr(self, n, None) is not None]
 
     def set_backend(self, backend: str = "pytorch"):
@@ -203,7 +233,7 @@ class PairformerBlock(BackendModule, MasterWeights):
         for module in modules:
             delta = (module(pair_in, mask) if module is not self.transition_pair else module(pair_in)) - pair_in
             total = delta if total is None else total + delta
-        assert total is not None   # modules always holds transition_pair
+        assert total is not None  # modules always holds transition_pair
         return total
 
 
@@ -247,6 +277,10 @@ class Pairformer(BackendModule, MasterWeights):
         return self
 
     def unsupported(self, pair, mask=None, single=None, extra_pair_bias=None) -> str | None:
-        return cast(PairformerBlock, self.pairformer_blocks[0]).unsupported(pair, mask, single, extra_pair_bias) if len(self.pairformer_blocks) else None
+        return (
+            cast(PairformerBlock, self.pairformer_blocks[0]).unsupported(pair, mask, single, extra_pair_bias)
+            if len(self.pairformer_blocks)
+            else None
+        )
 
     _forward_anthropic = _forward_cuda = _forward_triton = _forward_pytorch

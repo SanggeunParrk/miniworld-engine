@@ -24,9 +24,7 @@ def _ext():
     )
 
 
-def result(
-    m, w, v, gamma, beta, wg, wo, keep=None, eps=1e-5, dscale=1.0, save_o=False, mode=0
-):
+def result(m, w, v, gamma, beta, wg, wo, keep=None, eps=1e-5, dscale=1.0, save_o=False, mode=0):
     out = torch.empty_like(m)
     saved = torch.empty_like(v) if save_o else None
     _ext().run(m, w, v, gamma, beta, wg, wo, keep, out, saved, eps, dscale, mode)

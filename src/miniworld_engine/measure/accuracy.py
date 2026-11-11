@@ -158,8 +158,15 @@ def _verdict(be: dict, pt: dict, gold: dict, fixed: float) -> dict:
     if worst is None:
         return {"status": "error", "reason": "the forward returned no floating tensor"}
     _, name, e_be, e_pt, tol = worst
-    return {"status": "measured", "err_backend": e_be, "err_pytorch": e_pt, "tol": tol, "light": _light(e_be, tol), "tensor": name,
-            "tensors": len(gold)}
+    return {
+        "status": "measured",
+        "err_backend": e_be,
+        "err_pytorch": e_pt,
+        "tol": tol,
+        "light": _light(e_be, tol),
+        "tensor": name,
+        "tensors": len(gold),
+    }
 
 
 def measure_case(case, cfg, *, device) -> list[dict]:
@@ -198,8 +205,10 @@ def measure_case(case, cfg, *, device) -> list[dict]:
         module = None
         try:
             module = cfgmod.clone(base).set_backend(backend)
-            probe = {k: v.detach().requires_grad_(train) if isinstance(v, torch.Tensor) and v.is_floating_point() else v
-                     for k, v in inputs.items()}
+            probe = {
+                k: v.detach().requires_grad_(train) if isinstance(v, torch.Tensor) and v.is_floating_point() else v
+                for k, v in inputs.items()
+            }
             ctx = torch.autocast("cuda", dtype=autocast) if autocast is not None else contextlib.nullcontext()
             with torch.set_grad_enabled(train), ctx:
                 why = module.unsupported(**probe) if backend != "pytorch" else None
@@ -225,8 +234,10 @@ def measure_case(case, cfg, *, device) -> list[dict]:
 # ------------------------------------------------------------------------------------------------------------------------------ CLI
 def _line(rec: dict) -> str:
     depth = f"D{rec['depth']}" if rec.get("depth") else "-"
-    head = (f"r{rec['row']:<4} {rec['module']:<34} L{rec['length']:<5} {depth:<6} S{rec['samples']:<3} {rec['dtype']:<8} "
-            f"{rec['mode']:<5} {rec['backend']:<9}")
+    head = (
+        f"r{rec['row']:<4} {rec['module']:<34} L{rec['length']:<5} {depth:<6} S{rec['samples']:<3} {rec['dtype']:<8} "
+        f"{rec['mode']:<5} {rec['backend']:<9}"
+    )
     if rec["status"] != "measured":
         return f"{head} {rec['status']}: {rec.get('reason', '')[:200]}"
     light = rec["light"] + (" (info)" if rec["external"] else "")
@@ -249,8 +260,10 @@ def run(cfg, out_path: str) -> list[dict]:
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     records: list[dict] = []
     print(f"[accuracy] records -> {out_path}", flush=True)
-    print(f"[accuracy] fixed standard {cfg.fixed}; light: tol = max(err_pytorch, fixed), GREEN <= tol < YELLOW <= {YELLOW_FACTOR:g} tol < RED",
-          flush=True)
+    print(
+        f"[accuracy] fixed standard {cfg.fixed}; light: tol = max(err_pytorch, fixed), GREEN <= tol < YELLOW <= {YELLOW_FACTOR:g} tol < RED",
+        flush=True,
+    )
     with open(out_path, "a") as sink:
         for case in cfgmod.cases(cfg):
             for rec in measure_case(case, cfg, device=cfg.device):
@@ -266,8 +279,11 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 1)[0])
     p.add_argument("config", help="a measurement config (.yaml / .toml, see miniworld_engine.measure.config)")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005 -- a local-time file name
-    p.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "miniworld-accuracy"),
-                   help="a .jsonl file, or a directory for accuracy-<time>.jsonl (default: under the system temp dir, never the repo)")
+    p.add_argument(
+        "--out",
+        default=os.path.join(tempfile.gettempdir(), "miniworld-accuracy"),
+        help="a .jsonl file, or a directory for accuracy-<time>.jsonl (default: under the system temp dir, never the repo)",
+    )
     p.add_argument("--module", nargs="+", help="override the config's modules")
     p.add_argument("--backend", nargs="+", help="override the config's backends")
     p.add_argument("--rows", nargs="+", type=int, help="override the config's rows")

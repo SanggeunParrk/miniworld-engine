@@ -44,7 +44,7 @@ def unavailable(device=None) -> str | None:
         return "the cuEquivariance kernels run on CUDA tensors only"
     if not torch.cuda.is_available():
         return "no CUDA device"
-    return None   # which cards cuEquivariance serves is the library's decision: a card it does not support raises from the op itself
+    return None  # which cards cuEquivariance serves is the library's decision: a card it does not support raises from the op itself
 
 
 def torch_api():

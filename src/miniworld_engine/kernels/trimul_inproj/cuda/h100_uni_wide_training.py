@@ -24,8 +24,8 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 from miniworld_engine.kernels.trimul_inproj.cuda import h100_wide_training as W
 
 WIDTHS = (256, 384, 512)
-_PRELN = True      # C_Z = 512: LN_in in its own kernel (ln_in_d512.cu), the front reads the normalised operand
-_SSA_D512 = True   # front for C_Z = 512: LN in place in shared memory, wgmma A from shared memory (front_pre_ss.cu)
+_PRELN = True  # C_Z = 512: LN_in in its own kernel (ln_in_d512.cu), the front reads the normalised operand
+_SSA_D512 = True  # front for C_Z = 512: LN in place in shared memory, wgmma A from shared memory (front_pre_ss.cu)
 # front K1 tiles: (BI, BJ, ring slots, K chunks per slot, min blocks per SM)
 _K1 = {256: (2, 64, 4, 4, 1), 384: (2, 64, 2, 6, 1), 512: (1, 64, 4, 4, 1)}
 
@@ -42,8 +42,20 @@ def _front(x, w1, ab, mask, gi, bi, xn, pre, hidden=None):
     preln = D == 512 and _SSA_D512 and _PRELN
     a, b, slots, sk, minb = cfg[:5]
     sched = cfg[5] if len(cfg) > 5 else -1
-    defines = W._defines(MW_MINB=minb, FRONT_SCHED=sched, MW_PROF_MODE=1 if preln else 0, MW_K1_STREAM=0, TMN_SIGMOID_TANH=1, TMN_WSKIP=1,
-                         TMN_MASK_TEMPLATE=1, FRONT_CZ=D, FRONT_CH=hidden, FRONT_BI=a, FRONT_SLOTS=slots, FRONT_SK=sk)
+    defines = W._defines(
+        MW_MINB=minb,
+        FRONT_SCHED=sched,
+        MW_PROF_MODE=1 if preln else 0,
+        MW_K1_STREAM=0,
+        TMN_SIGMOID_TANH=1,
+        TMN_WSKIP=1,
+        TMN_MASK_TEMPLATE=1,
+        FRONT_CZ=D,
+        FRONT_CH=hidden,
+        FRONT_BI=a,
+        FRONT_SLOTS=slots,
+        FRONT_SK=sk,
+    )
     smem = W._k1_smem(D, cfg, a * b // 64 * 4096)
     threads = 128 * (a * b // 64 + 1)
     source = "front_pre_ss.cu" if (D == 512 and _SSA_D512) else "front_pre_d384.cu"
@@ -54,15 +66,30 @@ def _front(x, w1, ab, mask, gi, bi, xn, pre, hidden=None):
         W._map(xn if preln else x, [64, b, a], [D, n, n], [D * 2, n * D * 2]),
         W._map(w1, [64, 64], [D, 4 * hidden], [D * 2]),
         W._map(ab, [64, 1, 32], [n, n, 2 * hidden], [n * 2, n * n * 2]),
-        mask, gi, bi, ab, None, xn,
+        mask,
+        gi,
+        bi,
+        ab,
+        None,
+        xn,
         W._map(pre, [64, 64], [pre.shape[1], pre.shape[0]], [pre.shape[1] * 2]),
-        n, n, tj, tiles, 1, n, 1, 1e-5, n * D, D, 0, 0,
+        n,
+        n,
+        tj,
+        tiles,
+        1,
+        n,
+        1,
+        1e-5,
+        n * D,
+        D,
+        0,
+        0,
     ]
     if preln:
         _ln_in_512(x, gi, bi, xn)
     grid = min(tiles, num_sms() * minb)
-    W._launch(k, grid, threads, smem,
-              W._params(f"uni_front{D}", fields))
+    W._launch(k, grid, threads, smem, W._params(f"uni_front{D}", fields))
 
 
 def _ln_in_512(x, gi, bi, xn):
@@ -97,13 +124,22 @@ def saved_like(x, selected=False):
     n, D = x.shape[1], x.shape[-1]
     M = n * n
     f32 = dict(dtype=torch.float32)
-    saved = [x.new_empty((2 * D, n, n)), x.new_empty((D, n, n)), torch.empty_like(x),
-            x.new_empty((M, D)), x.new_empty((M, D)), x.new_empty((M, D)),
-            x.new_empty((M,), **f32), x.new_empty((M,), **f32), x.new_empty((4 * D, M)),
-            x.new_empty((n, n))]
+    saved = [
+        x.new_empty((2 * D, n, n)),
+        x.new_empty((D, n, n)),
+        torch.empty_like(x),
+        x.new_empty((M, D)),
+        x.new_empty((M, D)),
+        x.new_empty((M, D)),
+        x.new_empty((M,), **f32),
+        x.new_empty((M,), **f32),
+        x.new_empty((4 * D, M)),
+        x.new_empty((n, n)),
+    ]
     from ._h100_pack import fused_d256_glue
-    if fused_d256_glue(D,n,selected):
-        saved.append(x.new_empty((5*D,D)))
+
+    if fused_d256_glue(D, n, selected):
+        saved.append(x.new_empty((5 * D, D)))
     return saved
 
 
@@ -117,13 +153,15 @@ def _run_forward(leaves, mask, ds, outgoing, save):
     ab, tri, xn, norm, proj, gate, mu, rs, pre, pmask = saved[:10]
     if T.preserve_training(D):
         from ._h100_pack import dense_copy_into
-        dense_copy_into(pmask,mask.reshape(n,n))
+
+        dense_copy_into(pmask, mask.reshape(n, n))
     else:
         pmask.copy_(mask.reshape(n, n))
     w1 = x.new_empty((4 * D, D))
-    if len(saved)>10:
+    if len(saved) > 10:
         from ._h100_pack import pack_training_pair
-        pack_training_pair(w1,saved[10],(wg,wl,wlg,wr,wrg))
+
+        pack_training_pair(w1, saved[10], (wg, wl, wlg, wr, wrg))
     else:
         W.pack_into(w1, wl, wlg, wr, wrg)
     _front(x, w1, ab, pmask, gi, bi, xn, pre)
@@ -147,7 +185,11 @@ def _forward_fake(leaves, mask, ds, outgoing):
 @opaque(fake=_forward_fake, name="trimul_h100_uni_wide_train_fwd")
 def forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool) -> list[torch.Tensor]:
     """Training forward; returns ``[y, *saved]`` (all freshly allocated)."""
-    with T.native_context(leaves[0].device), T.preserved_d256_context(T.uni_training(leaves[0], outgoing)), T.preserved_uni_blas_context(leaves[0], outgoing):
+    with (
+        T.native_context(leaves[0].device),
+        T.preserved_d256_context(T.uni_training(leaves[0], outgoing)),
+        T.preserved_uni_blas_context(leaves[0], outgoing),
+    ):
         return _run_forward(leaves, mask, ds, outgoing, True)
 
 
@@ -159,7 +201,11 @@ def _forward_nograd_fake(leaves, mask, ds, outgoing):
 @opaque(fake=_forward_nograd_fake, name="trimul_h100_uni_wide_dropout_nograd")
 def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool) -> torch.Tensor:
     """Training-mode (dropout) forward without autograd."""
-    with T.native_context(leaves[0].device), T.preserved_d256_context(T.uni_training(leaves[0], outgoing)), T.preserved_uni_blas_context(leaves[0], outgoing):
+    with (
+        T.native_context(leaves[0].device),
+        T.preserved_d256_context(T.uni_training(leaves[0], outgoing)),
+        T.preserved_uni_blas_context(leaves[0], outgoing),
+    ):
         return _run_forward(leaves, mask, ds, outgoing, False)
 
 
@@ -171,8 +217,16 @@ def _gate(proj, gate, dy, ds, dp, prefix):
     defines = W._defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D, TMN_SIGMOID_TANH=1)
     smem = 49152 + 128
     k = W._kernel("gate.cu", "mw_prefix_gate_epi", "forward", defines, smem)
-    fields = [W._rows(proj, D, M), W._rows(gate, D, M), W._rows(dy, D, M), W._rows(ds, D, n),
-              W._rows(dp, D, M), W._map(prefix, [64, 64], [M, D], [M * 2]), M, n]
+    fields = [
+        W._rows(proj, D, M),
+        W._rows(gate, D, M),
+        W._rows(dy, D, M),
+        W._rows(ds, D, n),
+        W._rows(dp, D, M),
+        W._map(prefix, [64, 64], [M, D], [M * 2]),
+        M,
+        n,
+    ]
     W._launch(k, num_sms() * 4, 128, smem, W._params(f"uni_gate{D}", fields))
 
 
@@ -188,8 +242,7 @@ def _output_ln(tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
     native = T.preserve_training(H)
     family, rows, minblocks = OUT_LN[H]
     buffers = 2 if family in ("d256", "d512") else 4
-    defines_ = dict(MW_MINB=1, MW_K1_STREAM=0, WIDTH=H // 2, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0,
-                    LN_MINBLOCKS=minblocks)
+    defines_ = dict(MW_MINB=1, MW_K1_STREAM=0, WIDTH=H // 2, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0, LN_MINBLOCKS=minblocks)
     sb = rows * H * 2
     stats = buffers * sb + 128 + 4 * H
     defines = W._defines(**defines_, LN_STATS_OFFSET=stats)
@@ -203,15 +256,16 @@ def _output_ln(tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
     k = W._kernel(source, "mw_independent_output_ln", "upstream", defines, smem)
     grid = W._resident_grid(source, "mw_independent_output_ln", "upstream", defines, 128, smem)
     if native:
-        pg,pb=[torch.empty((grid,H),device=tri.device,dtype=torch.float32) for _ in range(2)]
+        pg, pb = [torch.empty((grid, H), device=tri.device, dtype=torch.float32) for _ in range(2)]
     else:
-        pg,pb=dgo,dbo
+        pg, pb = dgo, dbo
     W._launch(k, grid, 128, smem, W._params(f"uni_{source}", [*maps, dn, mu, rs, go, pg, pb, M]))
     if native:
         if defer:
-            return pg,pb,dgo,dbo
+            return pg, pb, dgo, dbo
         from ._h100_pack import finish_affine_partials
-        finish_affine_partials(pg,pb,dgo,dbo)
+
+        finish_affine_partials(pg, pb, dgo, dbo)
 
 
 def _contract_gp(dt, ab, pre, mask, gp, outgoing):
@@ -220,13 +274,15 @@ def _contract_gp(dt, ab, pre, mask, gp, outgoing):
     defines = W._defines(WIDTH=D, GP_DIR=1 if outgoing else 2)
     smem = 98304 + 128
     # L768: the fixed-length (fully unrolled K loop) kernel; L384: the staged-epilogue one (run-time N).
-    source, entry = (("contract_gp_l768.cu", "mw_wide_fixed_length_gp") if n == 768
-                     else ("contract_gp_d384_l384.cu", "mw_wide_staged_epilogue_gp"))
+    source, entry = (
+        ("contract_gp_l768.cu", "mw_wide_fixed_length_gp") if n == 768 else ("contract_gp_d384_l384.cu", "mw_wide_staged_epilogue_gp")
+    )
     k = W._kernel(source, entry, "upstream", defines, smem)
     left, right = ab[:D], ab[D:]
 
     def plane(t, channels):
         return W._map(t, [64, 64], [n, channels * n], [n * 2])
+
     # MODE 0/1 (outgoing): A = dt, B = right / left; MODE 2/3 (incoming): A = right / left, B = dt.
     a = (dt, dt, right, left)
     b = (right, left, dt, dt)
@@ -250,16 +306,17 @@ def _input_ln(x, dxn, dy, dx, gi, dgi, dbi, defer=False):
     maps = [W._map(t, [64, 16], [D, M], [D * 2]) for t in (x, dxn, dy, dx)]
     grid = num_sms() * {256: 6, 384: 5, 512: 4}[D]
     if native:
-        pg,pb=[torch.empty((grid,D),device=x.device,dtype=torch.float32) for _ in range(2)]
+        pg, pb = [torch.empty((grid, D), device=x.device, dtype=torch.float32) for _ in range(2)]
     else:
-        pg,pb=dgi,dbi
+        pg, pb = dgi, dbi
     fields = [*maps, gi, pg, pb, None, None, None, None, None, *([None] if D == 384 else []), M]
     W._launch(k, grid, 128, smem, W._params(f"uni_{source}", fields))
     if native:
         if defer:
-            return pg,pb,dgi,dbi
+            return pg, pb, dgi, dbi
         from ._h100_pack import finish_affine_partials
-        finish_affine_partials(pg,pb,dgi,dbi)
+
+        finish_affine_partials(pg, pb, dgi, dbi)
 
 
 def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
@@ -267,12 +324,12 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     n, D = x.shape[1], x.shape[-1]
     M = n * n
     ab, tri, xn, norm, proj, gate, mu, rs, pre, pmask = saved[:10]
-    fused_glue = len(saved)>10
+    fused_glue = len(saved) > 10
     xn2 = xn.reshape(M, D)
     dy = dy.contiguous()
     f32 = dict(device=x.device, dtype=torch.float32)
     dp = x.new_empty((M, D))
-    dxin = x.new_empty((5 * D, M))   # [gate-logit gradient; W_l, W_lg, W_r, W_rg preactivation gradients]
+    dxin = x.new_empty((5 * D, M))  # [gate-logit gradient; W_l, W_lg, W_r, W_rg preactivation gradients]
     gp = list(dxin[D:].view(4, D, M).unbind())
     _gate(proj, gate, dy, ds.reshape(n, D), dp, dxin[:D])
     dn = W._mm(dp, wp)
@@ -289,7 +346,8 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
         wcat = saved[10]
     elif T.preserve_training(D):
         from ._h100_pack import stack_backward_weights
-        wcat = stack_backward_weights((wg,wl,wlg,wr,wrg))
+
+        wcat = stack_backward_weights((wg, wl, wlg, wr, wrg))
     else:
         wcat = torch.cat((wg, wl, wlg, wr, wrg))
     dxn = W._mm(dxin.t(), wcat)
@@ -298,21 +356,33 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     in_affine = _input_ln(x, dxn, dy, dx, gi, dgi, dbi, defer=fused_glue)
     if fused_glue:
         from ._h100_pack import finish_affine_pair
-        finish_affine_pair(out_affine,in_affine)
+
+        finish_affine_pair(out_affine, in_affine)
     return [dx, dws, dwp, dgi, dbi, dgo, dbo]
 
 
 def _backward_fake(leaves, mask, ds, saved, dy, outgoing, master=False, native=False):
     """dx, the stacked [5D, D] weight gradients (g, l, lg, r, rg), dW_p and the four LN affine gradients."""
     x, D = leaves[0], leaves[0].shape[-1]
-    return [torch.empty_like(x), x.new_empty((5 * D, D), dtype=torch.float32 if master else x.dtype), torch.empty_like(leaves[6], dtype=torch.float32 if master else leaves[6].dtype),
-            *(torch.empty_like(t) for t in leaves[7:])]
+    return [
+        torch.empty_like(x),
+        x.new_empty((5 * D, D), dtype=torch.float32 if master else x.dtype),
+        torch.empty_like(leaves[6], dtype=torch.float32 if master else leaves[6].dtype),
+        *(torch.empty_like(t) for t in leaves[7:]),
+    ]
 
 
 @opaque(fake=_backward_fake, name="trimul_h100_uni_wide_train_bwd")
-def backward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor,
-             saved: list[torch.Tensor], dy: torch.Tensor, outgoing: bool, master: bool = False,
-             native: bool = False) -> list[torch.Tensor]:
+def backward(
+    leaves: list[torch.Tensor],
+    mask: torch.Tensor,
+    ds: torch.Tensor,
+    saved: list[torch.Tensor],
+    dy: torch.Tensor,
+    outgoing: bool,
+    master: bool = False,
+    native: bool = False,
+) -> list[torch.Tensor]:
     """Return the eleven leaf gradients (dx, dW*, dLN affine) in ``leaves`` order."""
     with T.native_context(leaves[0].device), T.preserved_d256_context(native), T.preserved_uni_blas_context(leaves[0], outgoing):
         return _run_backward(leaves, mask, ds, saved, dy, outgoing, master)
@@ -327,6 +397,7 @@ class _Training(torch.autograd.Function):
         ctx.native = native
         if native:
             from ._h100_pack import cast_training_weights
+
             weights = cast_training_weights(leaves[1:7])
         else:
             weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]] if ctx.master else leaves[1:7]
@@ -345,14 +416,17 @@ class _Training(torch.autograd.Function):
     def backward(ctx, dy):
         vals = ctx.saved_tensors
         leaves = [vals[0], *vals[-6:], *vals[7:11]]
-        dx, dws, dwp, *affine = backward(leaves, vals[11], vals[12], list(vals[13:13+ctx.saved_count]), dy, ctx.outgoing, ctx.master, ctx.native)
+        dx, dws, dwp, *affine = backward(
+            leaves, vals[11], vals[12], list(vals[13 : 13 + ctx.saved_count]), dy, ctx.outgoing, ctx.master, ctx.native
+        )
         dwg, dwl, dwlg, dwr, dwrg = dws.chunk(5)
         grads = [dx, dwl, dwlg, dwr, dwrg, dwg, dwp, *affine]
         if ctx.native:
             from ._h100_pack import native_training_grads
-            grads = native_training_grads(grads,list(vals[:11]))
+
+            grads = native_training_grads(grads, list(vals[:11]))
         else:
-            grads = [g.to(t.dtype) for g,t in zip(grads, vals[:11],strict=True)]
+            grads = [g.to(t.dtype) for g, t in zip(grads, vals[:11], strict=True)]
         return (None, *grads, None, None)
 
 
@@ -363,7 +437,8 @@ def single_trimul(outgoing, *args):
         leaves = list(args[:11])
         if native:
             from ._h100_pack import cast_training_weights
-            leaves = [leaves[0],*cast_training_weights(leaves[1:7]),*leaves[7:]]
+
+            leaves = [leaves[0], *cast_training_weights(leaves[1:7]), *leaves[7:]]
         elif any(w.dtype != leaves[0].dtype for w in leaves[1:7]):
             weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]]
             torch._foreach_copy_(weights, leaves[1:7])
@@ -377,9 +452,20 @@ def _front_defines(D, hidden):
     cfg = _K1[D]
     a, b, slots, sk, minb = cfg[:5]
     preln = D == 512 and _SSA_D512 and _PRELN
-    defines = W._defines(MW_MINB=minb, FRONT_SCHED=cfg[5] if len(cfg) > 5 else -1, MW_PROF_MODE=1 if preln else 0, MW_K1_STREAM=0,
-                         TMN_SIGMOID_TANH=1, TMN_WSKIP=1, TMN_MASK_TEMPLATE=1, FRONT_CZ=D, FRONT_CH=hidden, FRONT_BI=a,
-                         FRONT_SLOTS=slots, FRONT_SK=sk)
+    defines = W._defines(
+        MW_MINB=minb,
+        FRONT_SCHED=cfg[5] if len(cfg) > 5 else -1,
+        MW_PROF_MODE=1 if preln else 0,
+        MW_K1_STREAM=0,
+        TMN_SIGMOID_TANH=1,
+        TMN_WSKIP=1,
+        TMN_MASK_TEMPLATE=1,
+        FRONT_CZ=D,
+        FRONT_CH=hidden,
+        FRONT_BI=a,
+        FRONT_SLOTS=slots,
+        FRONT_SK=sk,
+    )
     return "front_pre_ss.cu" if (D == 512 and _SSA_D512) else "front_pre_d384.cu", defines
 
 
@@ -395,10 +481,10 @@ def prebuild_units(D, n, bidirectional):
         units.append((src, fw, defs, None))
         if d == 512 and _SSA_D512 and _PRELN:
             units.append(("ln_in_d512.cu", up, (), None))
-        units.append(("forward_norm_d384.cu", fw, W._defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=hidden // 2, OUTPUT_ROWS=32,
-                                                            OUTPUT_THREADS=128), None))
-        units.append(("output_dense.cu", fw, W._defines(MW_MINB=1, MW_K1_STREAM=0, TMN_SIGMOID_TANH=1, WIDTH=d, GROUPS=1,
-                                                        KCHUNK=1), None))
+        units.append(
+            ("forward_norm_d384.cu", fw, W._defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=hidden // 2, OUTPUT_ROWS=32, OUTPUT_THREADS=128), None)
+        )
+        units.append(("output_dense.cu", fw, W._defines(MW_MINB=1, MW_K1_STREAM=0, TMN_SIGMOID_TANH=1, WIDTH=d, GROUPS=1, KCHUNK=1), None))
         units.append(("gate.cu", fw, W._defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=d, TMN_SIGMOID_TANH=1), None))
 
     if not bidirectional and supports(D, n):  # the single-direction wide training proper
@@ -406,14 +492,21 @@ def prebuild_units(D, n, bidirectional):
         family, rows, minblocks = OUT_LN[D]
         buffers = 2 if family in ("d256", "d512") else 4
         stats = buffers * rows * D * 2 + 128 + 4 * D
-        out_ln = W._defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D // 2, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0,
-                            LN_MINBLOCKS=minblocks, LN_STATS_OFFSET=stats)
+        out_ln = W._defines(
+            MW_MINB=1, MW_K1_STREAM=0, WIDTH=D // 2, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0, LN_MINBLOCKS=minblocks, LN_STATS_OFFSET=stats
+        )
         in_ln = W._defines(WIDTH=D, INPUT_ROWS=16, INPUT_THREADS=128, INPUT_MINBLOCKS=4, INPUT_NO_REDUCE=1)
         for native in (False, True):
             extra = W._defines(MW_LN_PARTIALS=1) if native else ()
             units.append((f"output_ln_{family}_l384.cu", up, out_ln + extra, None))
             units.append(("input_ln_d384_l384.cu" if D == 384 else "input_ln_l384.cu", up, in_ln + extra, None))
         for outgoing in (True, False):
-            units.append(("contract_gp_l768.cu" if n == 768 else "contract_gp_d384_l384.cu", up,
-                          W._defines(WIDTH=D, GP_DIR=1 if outgoing else 2), None))
+            units.append(
+                (
+                    "contract_gp_l768.cu" if n == 768 else "contract_gp_d384_l384.cu",
+                    up,
+                    W._defines(WIDTH=D, GP_DIR=1 if outgoing else 2),
+                    None,
+                )
+            )
     return list(dict.fromkeys(units))

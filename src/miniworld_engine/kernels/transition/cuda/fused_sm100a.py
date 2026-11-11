@@ -67,9 +67,7 @@ _PROBE = "__global__ void k(float* p) { p[0] = 1.0f; }\n#include <cuda_bf16.h>\n
 
 def _release(nvcc: str) -> tuple[int, int] | None:
     try:
-        out = subprocess.run(
-            [nvcc, "--version"], capture_output=True, text=True, timeout=20, check=False
-        ).stdout
+        out = subprocess.run([nvcc, "--version"], capture_output=True, text=True, timeout=20, check=False).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     m = re.search(r"release (\d+)\.(\d+)", out)
@@ -110,12 +108,7 @@ def _host_for(nvcc: str) -> list[str] | None:
                 str(Path(tmp) / "probe.cubin"),
             ]
             try:
-                if (
-                    subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=300, check=False
-                    ).returncode
-                    == 0
-                ):
+                if subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False).returncode == 0:
                     return flags
             except (OSError, subprocess.SubprocessError):
                 continue
@@ -139,12 +132,7 @@ def kernel_toolchain() -> tuple[str, tuple[int, int], tuple[str, ...]]:
     driver_major = _driver_major()
     found = {}
     for c in cands:
-        if (
-            c
-            and Path(c).is_file()
-            and os.path.realpath(c) not in found
-            and _knows_sm100(c)
-        ):
+        if c and Path(c).is_file() and os.path.realpath(c) not in found and _knows_sm100(c):
             rel = _release(c)
             # a cubin from a newer major toolkit than the driver supports does not load (a 575 driver stops at CUDA 12.9)
             if rel and (driver_major is None or rel[0] <= driver_major):
@@ -153,14 +141,10 @@ def kernel_toolchain() -> tuple[str, tuple[int, int], tuple[str, ...]]:
         flags = _host_for(nvcc)
         if flags is not None:
             return nvcc, rel, tuple(flags)
-    raise RuntimeError(
-        f"no nvcc here can build sm_100a cubins (tried {sorted(found) or cands})"
-    )
+    raise RuntimeError(f"no nvcc here can build sm_100a cubins (tried {sorted(found) or cands})")
 
 
-def build_cubins(
-    group: str, specs: tuple[tuple[str, str, tuple[str, ...]], ...]
-) -> dict[str, str]:
+def build_cubins(group: str, specs: tuple[tuple[str, str, tuple[str, ...]], ...]) -> dict[str, str]:
     """Build (or reuse, or load from the prebuilt bundle) cubins: ``specs`` = (name, source relative to ``sm100/``, extra
     nvcc flags), compiled by :func:`kernel_toolchain`. Each is keyed by its own code graph and flags (``_nvcc.cubin``)."""
     from miniworld_engine.kernels import _nvcc
@@ -168,8 +152,7 @@ def build_cubins(
     paths = {}
     for name, src, extra in specs:
         flags = ["-std=c++17", "-O3", "-arch=sm_100a", "-cubin", f"-I{_dir}", *extra]
-        paths[name] = str(_nvcc.cubin(f"transition_sm100a/{group}/{name}", flags, source=_dir / src,
-                                      toolchain="sm100"))
+        paths[name] = str(_nvcc.cubin(f"transition_sm100a/{group}/{name}", flags, source=_dir / src, toolchain="sm100"))
     return paths
 
 
@@ -210,9 +193,7 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     The weights may be bf16 or fp32 (an fp32 master): the entry casts them to bf16 outside autograd."""
     if not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
-    if not _is_b200(
-        x.device.index if x.device.index is not None else torch.cuda.current_device()
-    ):
+    if not _is_b200(x.device.index if x.device.index is not None else torch.cuda.current_device()):
         return False
     if x.shape[-1] != D or wa.shape != (H, D) or ws.shape != (D, H):
         return False
@@ -302,15 +283,11 @@ def _bwd_launch(
     wa: torch.Tensor,
     wb: torch.Tensor,
     ws: torch.Tensor,
-) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch."""
     if _is_fake(dy, x):
         return _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws)
-    return tuple(
-        _ext().transition_fused_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws, _repl())
-    )
+    return tuple(_ext().transition_fused_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws, _repl()))
 
 
 class _FusedTransitionSM100A(torch.autograd.Function):
@@ -360,10 +337,7 @@ class _FusedTransitionSM100A(torch.autograd.Function):
 def transition_fused_sm100a(x, gamma, beta, wa, wb, ws, eps):
     """Module-facing entry, same signature as the Triton ``transition_residual``. Call ``available(x, wa, ws)`` first.
     Inference (no grad needed) runs the forward without writing ``xn`` / statistics."""
-    if not (
-        torch.is_grad_enabled()
-        and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
-    ):
+    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
         from miniworld_engine.kernels import _capture
 
@@ -376,8 +350,6 @@ def transition_fused_sm100a(x, gamma, beta, wa, wb, ws, eps):
                 tuple(w.to(x.dtype).contiguous() for w in (wa, wb, ws)),
             ),
         )
-        out, _, _, _ = _fwd_launch(
-            x.reshape(-1, shape[-1]).contiguous(), g, b, *ww, float(eps), False
-        )
+        out, _, _, _ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), g, b, *ww, float(eps), False)
         return out.reshape(shape)
     return _FusedTransitionSM100A.apply(x, gamma, beta, wa, wb, ws, eps)

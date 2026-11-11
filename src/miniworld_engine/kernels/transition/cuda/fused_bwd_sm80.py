@@ -83,9 +83,7 @@ def _tables(dev, d, h):
     n = h * d
     code = lambda src: torch.arange(n, device=dev, dtype=torch.int64) | (src << 26)  # noqa: E731
     wa, wb, ws = code(0).view(h, d), code(1).view(h, d), code(2).view(d, h)
-    wdw, wx = _layout_bwd(
-        wa | (1 << 28), wb, ws, dev, d, h
-    )  # Wa carries the 1/2 in both roles (PW's dA tile holds 2 dA)
+    wdw, wx = _layout_bwd(wa | (1 << 28), wb, ws, dev, d, h)  # Wa carries the 1/2 in both roles (PW's dA tile holds 2 dA)
     return torch.cat([wdw, wx]).to(torch.int32).contiguous(), wdw.numel()
 
 
@@ -109,7 +107,7 @@ def backward(
     packed = torch.empty(idx16.numel(), dtype=torch.bfloat16, device=wa.device)
     ext = _ext()
     ext.pack(wa, wb, ws, idx16, packed)
-    nrep = 0   # the kernel default replication
+    nrep = 0  # the kernel default replication
     return tuple(
         ext.bwd(
             d,

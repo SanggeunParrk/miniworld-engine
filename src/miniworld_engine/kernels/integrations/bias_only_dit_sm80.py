@@ -96,7 +96,9 @@ def refusal(module, single, cond, pair, mask, bias, grad: bool) -> str | None:
         return f"A100: cond must be [A or 1, 1, L, d_cond], got {tuple(cond.shape)}"
     heads, da = at.n_head, at.to_value.weight.shape[0]
     if da % heads or (heads, da // heads) not in LAYOUTS:
-        return f"A100: {heads} heads x {da // heads if da % heads == 0 else da / heads} (the sm_80 core: 16 x 48, 24 x 32, 12 x 64, 16 x 64)"
+        return (
+            f"A100: {heads} heads x {da // heads if da % heads == 0 else da / heads} (the sm_80 core: 16 x 48, 24 x 32, 12 x 64, 16 x 64)"
+        )
     dp = at.ln_pair.weight.shape[0]
     if tuple(pair.shape) != (1, length, length, dp):
         return f"A100: pair must be [1, L, L, d_pair], got {tuple(pair.shape)}"
@@ -110,8 +112,10 @@ def refusal(module, single, cond, pair, mask, bias, grad: bool) -> str | None:
     if not adaln_sm80.serves(at.ada_ln_in, single, cond, dt, grad):
         return "A100: outside the sm_80 AdaLN kernels' range (widths 128 / 384 / 768, sigmoid AdaLN without a shift bias)"
     if not ct_sm80.serves(module.transition, single, cond, dt, grad):
-        return ("A100: outside the sm_80 ConditionedTransition kernels' range (bf16 / fp32, widths of their table, sigmoid AdaLN without a shift "
-                "bias, bias-free SwiGLU)")
+        return (
+            "A100: outside the sm_80 ConditionedTransition kernels' range (bf16 / fp32, widths of their table, sigmoid AdaLN without a shift "
+            "bias, bias-free SwiGLU)"
+        )
     return None
 
 
@@ -120,8 +124,13 @@ def _pack(params, dt):
     wv, wg, wo, ws, bs, lnw, wb = params
 
     def build():
-        return (torch.cat([wv.to(dt), wg.to(dt)]).contiguous(), wo.to(dt).contiguous(), ws.to(dt).contiguous(), bs.to(dt).contiguous(),
-                (wb.float() * lnw.float()[None]).t().contiguous())
+        return (
+            torch.cat([wv.to(dt), wg.to(dt)]).contiguous(),
+            wo.to(dt).contiguous(),
+            ws.to(dt).contiguous(),
+            bs.to(dt).contiguous(),
+            (wb.float() * lnw.float()[None]).t().contiguous(),
+        )
 
     return cached(f"bias_only_dit_sm80_{dt}", tuple(params), build)
 
@@ -157,8 +166,16 @@ def _fwd_fake(x, cond, pair, res, mask, params, heads, save):
 
 
 @opaque(fake=_fwd_fake, name="bias_only_dit_sm80_attention_fwd")
-def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
-         heads: int, save: bool) -> list[torch.Tensor]:
+def _fwd(
+    x: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    res: torch.Tensor,
+    mask: torch.Tensor | None,
+    params: list[torch.Tensor],
+    heads: int,
+    save: bool,
+) -> list[torch.Tensor]:
     """The attention after the AdaLN: x [A L, d] (the AdaLN's output), cond [A L, dc], pair [1, L, L, dp], res [A L, d] (the residual), mask a bool [1, L] or None, params =
     (Wv, Wg, Wo, Ws, bs, ln_pair.weight, to_bias.weight). Returns [res + update], with ``save`` also vg, a, y, g2, P, P^T."""
     dt = x.dtype
@@ -168,8 +185,8 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
     wvg, wo, ws, bs, wcm = _pack(params, dt)
     da = wvg.shape[0] // 2
     with torch.cuda.device(x.device), _tf32(f32):
-        vg = torch.mm(x, wvg.t())                                                       # [M, 2 da]
-        bias = _sm80().pair_bias_generic(pair[0], wcm, None, length, EPS, oscale=1.0)    # [H, L, L], natural units
+        vg = torch.mm(x, wvg.t())  # [M, 2 da]
+        bias = _sm80().pair_bias_generic(pair[0], wcm, None, length, EPS, oscale=1.0)  # [H, L, L], natural units
         P, Pt = _softmax(bias, mask, save)
         del bias
         a = torch.empty(x.shape[0], da, device=x.device, dtype=dt)
@@ -187,8 +204,15 @@ def _bwd_fake(dout, x, cond, pair, params, saved, heads):
 
 
 @opaque(fake=_bwd_fake, name="bias_only_dit_sm80_attention_bwd")
-def _bwd(dout: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, params: list[torch.Tensor], saved: list[torch.Tensor],
-         heads: int) -> list[torch.Tensor]:
+def _bwd(
+    dout: torch.Tensor,
+    x: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    params: list[torch.Tensor],
+    saved: list[torch.Tensor],
+    heads: int,
+) -> list[torch.Tensor]:
     """The backward of ``_fwd`` (``save=True``): [dx, dcond, dpair, *d params] (the residual's gradient is dout itself: the caller returns it)."""
     vg, a, y, g2, P, Pt = saved
     dt = x.dtype
@@ -204,8 +228,8 @@ def _bwd(dout: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, pair: torch.Te
     with torch.cuda.device(dev), _tf32(f32):
         dy, dg2 = torch.empty_like(y), torch.empty_like(g2)
         _sm80().res_gate_bwd(dout, y, g2, dy, dg2)
-        dA = torch.mm(dy, wo)                                                          # [M, da]
-        dwo = _wgrad(dy, a)                                                            # [d, da] fp32
+        dA = torch.mm(dy, wo)  # [M, da]
+        dwo = _wgrad(dy, a)  # [d, da] fp32
         dvg = torch.empty_like(vg)
         do = torch.empty_like(a)
         dd = torch.empty(samples, heads, length, device=dev, dtype=F32)
@@ -213,12 +237,14 @@ def _bwd(dout: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, pair: torch.Te
             _rows32().gate_bwd_cuda(dA, a, vg[:, da:], do, dvg[:, da:], dd, length)
         else:
             _rows().gate_bwd_rows(dA, a, vg[:, da:], do, dvg[:, da:], dd, length)
-        (core.PvGateTF32 if f32 else core.PvGate)(heads, hd)(do, Pt.view(heads * length, length), dvg[:, :da], samples)   # dv = P^T do
+        (core.PvGateTF32 if f32 else core.PvGate)(heads, hd)(do, Pt.view(heads * length, length), dvg[:, :da], samples)  # dv = P^T do
         db = torch.empty_like(P)
-        (core.Dpb32 if f32 else core.Dpb)(heads, hd)(do, vg[:, :da], P.view(heads * length, length), dd, db.view(heads * length, length), samples)
+        (core.Dpb32 if f32 else core.Dpb)(heads, hd)(
+            do, vg[:, :da], P.view(heads * length, length), dd, db.view(heads * length, length), samples
+        )
         dz, dwf = _sm80().pair_bias_generic_backward(pair[0], wcm, db if f32 else db.float(), None, length, EPS)
         dx = torch.mm(dvg, wvg)
-        dwvg = _wgrad(dvg, x)                                                          # [2 da, d] fp32
+        dwvg = _wgrad(dvg, x)  # [2 da, d] fp32
         dcond = torch.mm(dg2, ws)
         dws = _wgrad(dg2, cond)
         dbs = torch.sum(dg2, dim=0, dtype=F32)
@@ -244,15 +270,30 @@ class _Attention(torch.autograd.Function):
         heads, npar = ctx.meta
         vals = ctx.saved_tensors
         x, cond, pair = vals[:3]
-        params, saved = list(vals[3:3 + npar]), list(vals[3 + npar:])
+        params, saved = list(vals[3 : 3 + npar]), list(vals[3 + npar :])
         dx, dc, dz, *pg = _bwd(dout.contiguous(), x, cond, pair, params, saved, heads)
         need = ctx.needs_input_grad
-        return (dx if need[0] else None, dc if need[1] else None, dz if need[2] else None, dout if need[3] else None, None, None,
-                *(g if need[6 + i] else None for i, g in enumerate(pg)))
+        return (
+            dx if need[0] else None,
+            dc if need[1] else None,
+            dz if need[2] else None,
+            dout if need[3] else None,
+            None,
+            None,
+            *(g if need[6 + i] else None for i, g in enumerate(pg)),
+        )
 
 
 def _params(at) -> list[torch.Tensor]:
-    return [at.to_value.weight, at.to_gate.weight, at.to_out.weight, at.to_scale.weight, at.to_scale.bias, at.ln_pair.weight, at.to_bias.weight]
+    return [
+        at.to_value.weight,
+        at.to_gate.weight,
+        at.to_out.weight,
+        at.to_scale.weight,
+        at.to_scale.bias,
+        at.ln_pair.weight,
+        at.to_bias.weight,
+    ]
 
 
 def block(module, single, cond, pair, mask, grad: bool) -> torch.Tensor:

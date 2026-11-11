@@ -156,12 +156,7 @@ def supports(
     ``sm80_core2.MAX_DBP_BYTES`` (they are cubic in L)."""
     if cfg is None:
         return False
-    if (
-        not pair.is_cuda
-        or pair.dtype is not BF
-        or pair.ndim != 4
-        or not pair.is_contiguous()
-    ):
+    if not pair.is_cuda or pair.dtype is not BF or pair.ndim != 4 or not pair.is_contiguous():
         return False
     b, length, length2, d = pair.shape
     if d != cfg.d or length != length2 or length % 128 or b * length * length >= 2**31:
@@ -169,33 +164,18 @@ def supports(
     dh = cfg.h * cfg.hd
     shapes = [(dh, d)] * 4 + [(cfg.h, d)]
     if len(weights) != 5 or any(
-        w.dtype is not BF or w.device != pair.device or tuple(w.shape) != s
-        for w, s in zip(weights, shapes, strict=True)
+        w.dtype is not BF or w.device != pair.device or tuple(w.shape) != s for w, s in zip(weights, shapes, strict=True)
     ):
         return False
     if wo.dtype is not BF or wo.device != pair.device or tuple(wo.shape) != (d, dh):
         return False
-    if (
-        any(
-            t.shape != (d,) or t.device != pair.device or t.dtype not in (F32, BF)
-            for t in (ln_w, ln_b)
-        )
-        or ln_w.dtype != ln_b.dtype
-    ):
+    if any(t.shape != (d,) or t.device != pair.device or t.dtype not in (F32, BF) for t in (ln_w, ln_b)) or ln_w.dtype != ln_b.dtype:
         return False
-    if mask is not None and (
-        mask.dtype is not torch.bool
-        or mask.shape != (b, length)
-        or mask.device != pair.device
-    ):
+    if mask is not None and (mask.dtype is not torch.bool or mask.shape != (b, length) or mask.device != pair.device):
         return False
     if train and not _core2.dbp_fits(length, cfg.h, b):
         return False
-    return _core._is_ampere(
-        pair.device.index
-        if pair.device.index is not None
-        else torch.cuda.current_device()
-    )
+    return _core._is_ampere(pair.device.index if pair.device.index is not None else torch.cuda.current_device())
 
 
 def _mask_u8(mask: torch.Tensor | None, device) -> torch.Tensor:
@@ -238,9 +218,7 @@ def _pack_folded(
     return wp
 
 
-def _pack_fused(
-    weights, ln_w: torch.Tensor, ln_b: torch.Tensor, cfg: Cfg
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _pack_fused(weights, ln_w: torch.Tensor, ln_b: torch.Tensor, cfg: Cfg) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused engine: ``(wp [4 DH + 8, D], bvec [4 DH + 8] fp32)``: W' = bf16(W diag(gamma)) in the kernel's row order and the shift b = W beta (``fused_sm80.cuh``)."""
     rows = 4 * cfg.dhp + 8
     wp = torch.empty((rows, cfg.d), dtype=BF, device=ln_w.device)
@@ -299,9 +277,7 @@ def _pack_bwd_fused(weights, wo: torch.Tensor, ln_w: torch.Tensor, cfg: Cfg):
 
 
 # ----------------------------------------------------------------------------------------------------------------------------------- forward
-def _original_forward_ops_fake(
-    x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save, flip=False
-):
+def _original_forward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save, flip=False):
     """[out] and, when ``save``, [xh, stats, y, bias, o, lse]: fresh tensors."""
     cfg = Cfg(x.shape[-1], n_head, hd, fused)
     b, length = x.shape[0], x.shape[1]
@@ -346,17 +322,13 @@ def _original_forward_ops(
     x2 = x.view(t, d)
     dev = x.device
     bias = torch.empty((b, cfg.h, length, length), dtype=BF, device=dev)
-    stats = (
-        torch.empty((t, 2), dtype=F32, device=dev)
-        if save
-        else x.new_empty((0,), dtype=F32)
-    )
+    stats = torch.empty((t, 2), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     if fused:
-        wp, bvec = _core.eval_form(("triattn_sm80w_fused", cfg), (*weights, ln_w, ln_b), lambda: _pack_fused(weights, ln_w, ln_b, cfg), save)
-        y = torch.empty((t, n), dtype=BF, device=dev)
-        xh = (
-            torch.empty((t, d + 8), dtype=BF, device=dev) if save else x.new_empty((0,))
+        wp, bvec = _core.eval_form(
+            ("triattn_sm80w_fused", cfg), (*weights, ln_w, ln_b), lambda: _pack_fused(weights, ln_w, ln_b, cfg), save
         )
+        y = torch.empty((t, n), dtype=BF, device=dev)
+        xh = torch.empty((t, d + 8), dtype=BF, device=dev) if save else x.new_empty((0,))
         rows.fused_front(
             x2,
             wp,
@@ -391,16 +363,17 @@ def _original_forward_ops(
             # Align each Q/K/V row to 64 bytes as well as the GEMM reduction
             # dimension. The eight bias columns otherwise leave a 16-byte offset.
             n = -(-n // 32) * 32
-        wp = _core.eval_form(("triattn_sm80w_folded", cfg, padding, n), (*weights, ln_w, ln_b), lambda: _pack_folded(weights, ln_w, ln_b, cfg, padding, n), save)
+        wp = _core.eval_form(
+            ("triattn_sm80w_folded", cfg, padding, n),
+            (*weights, ln_w, ln_b),
+            lambda: _pack_folded(weights, ln_w, ln_b, cfg, padding, n),
+            save,
+        )
         xh = torch.empty((t, d + padding), dtype=BF, device=dev)
         rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
         y = torch.mm(xh, wp.t())  # q | k | v | g | bias heads
         rows.bias_planes(y, mask, bias, 4 * dhp, cfg.h, length, int(flip))
-    lse = (
-        torch.empty((b, cfg.h, length, length), dtype=F32, device=dev)
-        if save
-        else x.new_empty((0,), dtype=F32)
-    )
+    lse = torch.empty((b, cfg.h, length, length), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     scl = _core._L2E / math.sqrt(hd)
     wo_p = _core.eval_form(("triattn_sm80w_wo", cfg), (wo,), lambda: _wo_padded(wo, cfg), save)
     q, k, v, g = (
@@ -471,12 +444,7 @@ def _original_forward_ops(
         # the gate is fused into the core's epilogue: a = bf16(sigmoid(g) o) is the output projection's operand, the plain output only when the backward needs it
         o = torch.empty((t, dhp), dtype=BF, device=dev) if save else x.new_empty((0,))
         a = torch.empty((t, dhp), dtype=BF, device=dev)
-        if (
-            not save
-            and mask.numel()
-            and length >= 384
-            and length % 384 == 0
-        ):
+        if not save and mask.numel() and length >= 384 and length % 384 == 0:
             indices = torch.empty((b, length), dtype=torch.int32, device=dev)
             counts = torch.empty((b,), dtype=torch.int32, device=dev)
             compact_bias = torch.empty_like(bias)
@@ -496,15 +464,9 @@ def _original_forward_ops(
             )
         else:
             fwd = _core._forward_entry(core, save, gate=True)
-            fwd(
-                q, k, v, bias, o, lse, g, a, length, cfg.h, b, n, n, n, dhp, n, dhp, scl
-            )
+            fwd(q, k, v, bias, o, lse, g, a, length, cfg.h, b, n, n, n, dhp, n, dhp, scl)
         out = torch.empty_like(x)
-        if (
-            not save
-            and (d, cfg.h, hd) == (256, 8, 32)
-            and length == 128
-        ):
+        if not save and (d, cfg.h, hd) == (256, 8, 32) and length == 128:
             from . import native_out_fused_sm80
 
             out_cfg = 4 if transposed else 14
@@ -518,13 +480,7 @@ def _original_forward_ops(
                 transposed,
                 out_cfg,
             )
-        elif (
-            not save
-            and not ds.numel()
-            and rows.out_gemm_residual(
-                a, wo_p, x2, out.view(t, d), length, int(transposed)
-            )
-        ):
+        elif not save and not ds.numel() and rows.out_gemm_residual(a, wo_p, x2, out.view(t, d), length, int(transposed)):
             pass  # out = bf16(x + a Wo^T) written by the GEMM's epilogue
         else:
             yo = torch.mm(a, wo_p.t())  # [T, D]
@@ -535,13 +491,9 @@ def _original_forward_ops(
 from . import affine_training_sm80 as _accurate_front
 
 
-def _accurate_training_forward_ops_fake(
-    x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save
-):
+def _accurate_training_forward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save):
     """Same outputs as the original forward: [out] and, when ``save``, [xh, stats, y, bias, o, lse]."""
-    return _original_forward_ops_fake(
-        x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save
-    )
+    return _original_forward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save)
 
 
 @opaque(
@@ -573,16 +525,10 @@ def _accurate_training_forward_ops(
     x2 = x.view(t, d)
     dev = x.device
     bias = torch.empty((b, cfg.h, length, length), dtype=BF, device=dev)
-    stats = (
-        torch.empty((t, 2), dtype=F32, device=dev)
-        if save
-        else x.new_empty((0,), dtype=F32)
-    )
+    stats = torch.empty((t, 2), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     if fused:
         y = torch.empty((t, n), dtype=BF, device=dev)
-        xh = (
-            torch.empty((t, d + 8), dtype=BF, device=dev) if save else x.new_empty((0,))
-        )
+        xh = torch.empty((t, d + 8), dtype=BF, device=dev) if save else x.new_empty((0,))
         y = _accurate_front.front(
             x2,
             weights,
@@ -609,11 +555,7 @@ def _accurate_training_forward_ops(
         rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
         y = torch.mm(xh, wp.t())
         rows.bias_planes(y, mask, bias, 4 * dhp, cfg.h, length, 0)
-    lse = (
-        torch.empty((b, cfg.h, length, length), dtype=F32, device=dev)
-        if save
-        else x.new_empty((0,), dtype=F32)
-    )
+    lse = torch.empty((b, cfg.h, length, length), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     scl = _core._L2E / math.sqrt(hd)
     q, k, v, g = (
         y[:, :dhp],
@@ -682,12 +624,7 @@ def _accurate_training_forward_ops(
     else:
         o = torch.empty((t, dhp), dtype=BF, device=dev) if save else x.new_empty((0,))
         a = torch.empty((t, dhp), dtype=BF, device=dev)
-        if (
-            not save
-            and mask.numel()
-            and (length >= 384)
-            and (length % 384 == 0)
-        ):
+        if not save and mask.numel() and (length >= 384) and (length % 384 == 0):
             indices = torch.empty((b, length), dtype=torch.int32, device=dev)
             counts = torch.empty((b,), dtype=torch.int32, device=dev)
             compact_bias = torch.empty_like(bias)
@@ -707,15 +644,9 @@ def _accurate_training_forward_ops(
             )
         else:
             fwd = _core._forward_entry(core, save, gate=True)
-            fwd(
-                q, k, v, bias, o, lse, g, a, length, cfg.h, b, n, n, n, dhp, n, dhp, scl
-            )
+            fwd(q, k, v, bias, o, lse, g, a, length, cfg.h, b, n, n, n, dhp, n, dhp, scl)
         out = torch.empty_like(x)
-        if (
-            not save
-            and (d, cfg.h, hd) == (256, 8, 32)
-            and length == 128
-        ):
+        if not save and (d, cfg.h, hd) == (256, 8, 32) and length == 128:
             from . import native_out_fused_sm80
 
             out_cfg = 4 if transposed else 14
@@ -735,14 +666,10 @@ def _accurate_training_forward_ops(
     return [out, xh, stats, y, bias, o, lse] if save else [out]
 
 
-def forward_ops(
-    x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save, flip=False
-):
+def forward_ops(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save, flip=False):
     if save and fused:
         cfg = Cfg(x.shape[-1], n_head, hd, fused)
-        if _accurate_front.eligible(
-            x, weights, ln_w, ln_b, cfg.d, cfg.dhp, cfg.lhd, x.shape[1]
-        ):
+        if _accurate_front.eligible(x, weights, ln_w, ln_b, cfg.d, cfg.dhp, cfg.lhd, x.shape[1]):
             return _accurate_training_forward_ops(
                 x,
                 weights,
@@ -758,9 +685,7 @@ def forward_ops(
                 fused,
                 save,
             )
-    return _original_forward_ops(
-        x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save, flip
-    )
+    return _original_forward_ops(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save, flip)
 
 
 def _dropout_scale(ds: torch.Tensor | None, like: torch.Tensor) -> torch.Tensor:
@@ -802,9 +727,7 @@ def forward(
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------- backward
-def _attention_backward(
-    y, bias, lse, delta, dov, dqkvg, cfg: Cfg, b: int, length: int
-) -> torch.Tensor:
+def _attention_backward(y, bias, lse, delta, dov, dqkvg, cfg: Cfg, b: int, length: int) -> torch.Tensor:
     """The core's backward on the front's output ``y`` (q | k | v columns): dq | dk | dv go into the first 3 H 32 columns of ``dqkvg`` ``[T, 4 H 32]``; returns the bias gradient
     ``[B, H, L, L]`` bf16 (the sum over the pair rows of dS, from bf16 partials over groups of ``DQ_ROWS`` rows and a fixed-order reduction)."""
     dhp, n = cfg.dhp, cfg.n
@@ -898,9 +821,7 @@ def _attention_backward(
     return db
 
 
-def _backward_ops_fake(
-    x, weights, wo, ln_w, ln_b, mask, ds, saved, dout, transposed, n_head, hd, fused
-):
+def _backward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, saved, dout, transposed, n_head, hd, fused):
     """[dpair, dwq, dwk, dwv, dwg, dwb, dwo, dln_w, dln_b] in the leaves' shapes and dtypes."""
     return [
         x.new_empty(x.shape),
@@ -1137,9 +1058,7 @@ def trainable(
             cfg.fused,
             False,
         )[0]
-    return _Training.apply(
-        *leaves, mk, d, float(eps), bool(transposed), cfg.h, cfg.hd, cfg.fused
-    )
+    return _Training.apply(*leaves, mk, d, float(eps), bool(transposed), cfg.h, cfg.hd, cfg.fused)
 
 
 # ------------------------------------------------------------------------------------------------------------------------------ the variants
@@ -1178,12 +1097,16 @@ def variant_cfg(d_pair: int, d_hidden: int, n_head: int) -> VCfg | None:
     return VCfg(d_pair, n_head, hd)
 
 
-def variant_supports(pair, vc: VCfg | None, weights, wo, ln_w, ln_b, mask=None, *, gate_bias=None, out_bias=None, wo_t=None, train=False) -> bool:
+def variant_supports(
+    pair, vc: VCfg | None, weights, wo, ln_w, ln_b, mask=None, *, gate_bias=None, out_bias=None, wo_t=None, train=False
+) -> bool:
     """``supports()`` for the variant path: the same pair / weight / LayerNorm / mask contract, the variants' parameters bf16 (gate bias ``[H hd]``, out bias and ``wo_t`` as
     ``to_out``'s), and for ``train`` the bias-gradient partials within ``sm80_core2.MAX_DBP_BYTES``."""
     if vc is None:
         return False
-    if not supports(pair, Cfg(vc.d, vc.h, vc.hd), weights, wo, ln_w, ln_b, mask):  # (the train budget below, at the core's rows per partial)
+    if not supports(
+        pair, Cfg(vc.d, vc.h, vc.hd), weights, wo, ln_w, ln_b, mask
+    ):  # (the train budget below, at the core's rows per partial)
         return False
     dh = vc.h * vc.hd
     for t, shape in ((gate_bias, (dh,)), (out_bias, (vc.d,)), (wo_t, (vc.d, dh))):
@@ -1259,7 +1182,9 @@ def variant_forward_ops(
     t, d, dhp, n = b * length * length, vc.d, pc.dhp, pc.n
     x2 = x.view(t, d)
     dev = x.device
-    wp = _core.eval_form(("triattn_sm80w_variant", vc), (*weights, ln_w, ln_b), lambda: _pack_folded(_v_weights(weights, vc), ln_w, ln_b, pc, 8, n), save)
+    wp = _core.eval_form(
+        ("triattn_sm80w_variant", vc), (*weights, ln_w, ln_b), lambda: _pack_folded(_v_weights(weights, vc), ln_w, ln_b, pc, 8, n), save
+    )
     xh = torch.empty((t, d + 8), dtype=BF, device=dev)
     stats = torch.empty((t, 2), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
@@ -1277,7 +1202,9 @@ def variant_forward_ops(
     o = torch.empty((t, dhp), dtype=BF, device=dev)
     lse = torch.empty((b, h, length, length), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     q, k, v, g = (y[:, i * dhp : (i + 1) * dhp] for i in range(4))
-    _core2.forward(q, k, v, bias, x.new_empty((0,), dtype=torch.uint8), o, lse, (lay_y, lay_y, lay_y, lay_o), length, h, b, ch, 1.0 / math.sqrt(hd))
+    _core2.forward(
+        q, k, v, bias, x.new_empty((0,), dtype=torch.uint8), o, lse, (lay_y, lay_y, lay_y, lay_o), length, h, b, ch, 1.0 / math.sqrt(hd)
+    )
     a = torch.empty((t, dhp), dtype=BF, device=dev)
     rows.gate_rows(o, g, a)
     wo_p = _core.eval_form(("triattn_sm80w_variant_wo", pc), (wo,), lambda: _wo_padded(wo, pc), save)
@@ -1306,8 +1233,16 @@ def variant_forward_ops(
 
 
 def _variant_backward_fake(x, weights, wo, ln_w, ln_b, mask, ds, gb, bo, wt, saved, dout, transposed, n_head, hd, flip, out_mode):
-    return [x.new_empty(x.shape), *(w.new_empty(w.shape) for w in weights), wo.new_empty(wo.shape), ln_w.new_empty(ln_w.shape), ln_b.new_empty(ln_b.shape),
-            gb.new_empty(gb.shape), bo.new_empty(bo.shape), wt.new_empty(wt.shape)]
+    return [
+        x.new_empty(x.shape),
+        *(w.new_empty(w.shape) for w in weights),
+        wo.new_empty(wo.shape),
+        ln_w.new_empty(ln_w.shape),
+        ln_b.new_empty(ln_b.shape),
+        gb.new_empty(gb.shape),
+        bo.new_empty(bo.shape),
+        wt.new_empty(wt.shape),
+    ]
 
 
 @opaque(fake=_variant_backward_fake, name="triangle_attention_sm80w_variant_backward")
@@ -1376,8 +1311,25 @@ def variant_backward_ops(
     lay_y, lay_o, lay_d = _v_lays(vc, length, n)
     q, k, v = (y[:, i * dhp : (i + 1) * dhp] for i in range(3))
     dq, dk, dv = (dqkvg[:, i * dhp : (i + 1) * dhp] for i in range(3))
-    db = _core2.backward(q, k, v, dov, bias, x.new_empty((0,), dtype=torch.uint8), lse, delta, dq, dk, dv,
-                         (lay_y, lay_y, lay_y, lay_o, lay_d, lay_d, lay_d), length, h, b, ch, 1.0 / math.sqrt(hd))
+    db = _core2.backward(
+        q,
+        k,
+        v,
+        dov,
+        bias,
+        x.new_empty((0,), dtype=torch.uint8),
+        lse,
+        delta,
+        dq,
+        dk,
+        dv,
+        (lay_y, lay_y, lay_y, lay_o, lay_d, lay_d, lay_d),
+        length,
+        h,
+        b,
+        ch,
+        1.0 / math.sqrt(hd),
+    )
     del dov, delta
     if flip:  # the core's bias was the transpose of the projected planes
         db = db.transpose(-1, -2).contiguous()
@@ -1387,7 +1339,19 @@ def variant_backward_ops(
     ws = _v_weights(weights, vc)
     dpair = torch.empty_like(x)
     dxn = torch.mm(dqkvg, _pack_plain(ws, pc))
-    rows.ln_bwd(dxn, db, weights[4].contiguous(), x.view(t, d), stats, dout2, ln_w.detach().float().contiguous(), dpair.view(t, d), length, h, int(transposed))
+    rows.ln_bwd(
+        dxn,
+        db,
+        weights[4].contiguous(),
+        x.view(t, d),
+        stats,
+        dout2,
+        ln_w.detach().float().contiguous(),
+        dpair.view(t, d),
+        length,
+        h,
+        int(transposed),
+    )
     del dxn
     parts = [torch.mm(dqkvg.t(), xh, out_dtype=F32), torch.mm(db.permute(1, 0, 2, 3).reshape(h, t), xh, out_dtype=F32)]
     if pc.h != h:
@@ -1405,7 +1369,9 @@ class _VariantTraining(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, wq, wk, wv, wg, wb, wo, ln_w, ln_b, gb, bo, wt, mask, ds, eps, transposed, n_head, hd, flip, out_mode):
         weights = [wq, wk, wv, wg, wb]
-        out, *saved = variant_forward_ops(x, weights, wo, ln_w, ln_b, mask, ds, gb, bo, wt, eps, transposed, n_head, hd, flip, out_mode, True)
+        out, *saved = variant_forward_ops(
+            x, weights, wo, ln_w, ln_b, mask, ds, gb, bo, wt, eps, transposed, n_head, hd, flip, out_mode, True
+        )
         ctx.save_for_backward(x, wq, wk, wv, wg, wb, wo, ln_w, ln_b, gb, bo, wt, mask, ds, *saved)
         ctx.cfg = (transposed, n_head, hd, flip, out_mode)
         return out

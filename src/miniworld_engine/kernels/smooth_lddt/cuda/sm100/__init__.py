@@ -4,6 +4,7 @@ The cubin is built on first use by the newest nvcc here that knows sm_100a (``tr
 under ``settings.engine_jit_root()``; launches go through the CUDA driver on torch's current stream (CUDA-graph capturable), the way the
 ``token_pair_init`` and ``swa_dit`` sm_100a stages do. Plain CUDA-core kernels: the op is bound by the exponentials of the pair scores.
 """
+
 from __future__ import annotations
 
 import functools
@@ -15,9 +16,9 @@ from miniworld_engine.kernels._device import num_sms
 
 
 _dir = Path(__file__).parent
-BLK = 128   # atoms per tile / threads per CTA (slddt_*: one thread per atom row)
+BLK = 128  # atoms per tile / threads per CTA (slddt_*: one thread per atom row)
 FBLK = 512  # threads per CTA of the whole-structure kernels (slddt_*_full) on B200; H100 picks 128 / 256 / 512 (:func:`_fblk`)
-FULL_SMEM = 110 * 1024   # whole-structure kernels need N * 32 B of shared memory; two CTAs per SM (N <= 3520 atoms) beat the tile kernels
+FULL_SMEM = 110 * 1024  # whole-structure kernels need N * 32 B of shared memory; two CTAs per SM (N <= 3520 atoms) beat the tile kernels
 FORCE_TILE = False  # tests set it to compare the tile kernel with the whole-structure one
 
 
@@ -25,12 +26,14 @@ def _full(n: int) -> bool:
     return not FORCE_TILE and FORCE_SPLIT <= 0 and n * 32 <= FULL_SMEM
 
 
-FORCE_FWD = ""   # tests / probes: a fixed forward variant "<threads>s<threads per row>" of FWD_VARIANTS (the whole-structure kernel)
-FORCE_FB = 0     # ... and a fixed backward CTA size (128 / 256 / 512)
+FORCE_FWD = ""  # tests / probes: a fixed forward variant "<threads>s<threads per row>" of FWD_VARIANTS (the whole-structure kernel)
+FORCE_FB = 0  # ... and a fixed backward CTA size (128 / 256 / 512)
 FWD_VARIANTS = ("128s1", "256s1", "512s1", "256s2", "512s2", "512s4")
-FBLK_FILL = 2   # H100 backward: the largest CTA (512 / 256 / 128 threads) whose grid keeps FBLK_FILL CTAs per SM (else the smallest)
+FBLK_FILL = 2  # H100 backward: the largest CTA (512 / 256 / 128 threads) whose grid keeps FBLK_FILL CTAs per SM (else the smallest)
 SPLIT_FILL = 8  # H100 tile kernels: the column tiles are split into KS parts until the grid has SPLIT_FILL CTAs per SM (at most NB parts)
-SPLIT_FILL_SM80 = 32  # A100: the same split, filled further (A1 x N1024 - N8192 measured: KS = NB best or within 3 %, 2.2-6.5x the unsplit launches)
+SPLIT_FILL_SM80 = (
+    32  # A100: the same split, filled further (A1 x N1024 - N8192 measured: KS = NB best or within 3 %, 2.2-6.5x the unsplit launches)
+)
 FORCE_SPLIT = 0  # tests / probes: > 0 a fixed KS of the split tile kernels (and the tile path), < 0 never split
 
 
@@ -68,7 +71,10 @@ def _fwd_variant(x: torch.Tensor, n_augment_batch: int, n: int) -> str:
     if _arch(_dev(x)) != "sm_90a":
         return "512s1"
     sms = num_sms(_dev(x))
-    for v, rows in (("512s2", 256), ("256s2", 128)):   # the largest CTA whose grid still has 1.5 CTAs per SM (measured A16 / A48, N512 - N2048)
+    for v, rows in (
+        ("512s2", 256),
+        ("256s2", 128),
+    ):  # the largest CTA whose grid still has 1.5 CTAs per SM (measured A16 / A48, N512 - N2048)
         if n_augment_batch * -(-n // rows) >= 1.5 * sms:
             return v
     return "256s2"
@@ -95,8 +101,15 @@ def _kernels(index: int):
 
     with torch.cuda.device(index):
         # the whole-structure kernels take N * 32 B of dynamic shared memory: the attribute is raised once, the launch size is set per call
-        names = ("slddt_prep", "slddt_fwd", "slddt_bwd", "slddt_fwd_split", "slddt_bwd_split", *(f"slddt_fwd_full_{v}" for v in FWD_VARIANTS),
-                 *(f"slddt_bwd_full_{fb}" for fb in (128, 256, 512)))
+        names = (
+            "slddt_prep",
+            "slddt_fwd",
+            "slddt_bwd",
+            "slddt_fwd_split",
+            "slddt_bwd_split",
+            *(f"slddt_fwd_full_{v}" for v in FWD_VARIANTS),
+            *(f"slddt_bwd_full_{fb}" for fb in (128, 256, 512)),
+        )
         return {name: driver.Kernel(cubin(_arch(index)), name, FULL_SMEM if "_full" in name else 0) for name in names}
 
 
@@ -111,8 +124,8 @@ def prep(gt, nuc, mask):
     nb = N // BLK
     prep_k = _kernels(_dev(gt))["slddt_prep"]
     tile = torch.empty(B, nb, nb, device=gt.device, dtype=torch.int8)
-    cnt = torch.zeros(B, N, device=gt.device, dtype=torch.int32)   # the kernel adds the per-tile counts with integer atomics
-    fm = torch.empty(B, N, N // 32, device=gt.device, dtype=torch.int32)   # every word is written
+    cnt = torch.zeros(B, N, device=gt.device, dtype=torch.int32)  # the kernel adds the per-tile counts with integer atomics
+    fm = torch.empty(B, N, N // 32, device=gt.device, dtype=torch.int32)  # every word is written
     um = torch.empty_like(fm)
     with torch.cuda.device(gt.device):
         prep_k((B, nb, nb), (BLK, 1, 1), gt, nuc, mask, tile, cnt, fm, um, int(B), int(N), int(nb))
@@ -125,7 +138,7 @@ def forward(x, gt, tile, fm):
     nb = N // BLK
     ks = _kernels(_dev(x))
     out = torch.empty(A * B, nb, device=x.device, dtype=torch.float32)
-    parts = _split(x, A * B, nb)   # H100: a split launch beats the whole-structure kernels too (A1: 0.051 / 0.079 ms at N 1024)
+    parts = _split(x, A * B, nb)  # H100: a split launch beats the whole-structure kernels too (A1: 0.051 / 0.079 ms at N 1024)
     with torch.cuda.device(x.device):
         if _full(N) and parts == 1:
             v = _fwd_variant(x, A * B, N)

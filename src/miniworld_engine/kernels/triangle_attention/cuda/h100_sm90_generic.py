@@ -217,9 +217,7 @@ def _lt():
         cpp_sources=_LT_CPP,
         functions=["lt_mm"],
         with_cuda=True,
-        extra_include_paths=[
-            str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")
-        ],
+        extra_include_paths=[str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")],
         extra_cflags=["-O3"],
         extra_ldflags=["-lcublasLt"],
         verbose=False,
@@ -274,9 +272,7 @@ def _wall(wcat, hd):
         w = torch.cat(
             [
                 wcat[: 4 * hd],
-                torch.nn.functional.pad(
-                    wcat[4 * hd :], (0, 0, 0, 64 - (wcat.shape[0] - 4 * hd))
-                ),
+                torch.nn.functional.pad(wcat[4 * hd :], (0, 0, 0, 64 - (wcat.shape[0] - 4 * hd))),
             ]
         ).contiguous()
         wcat._triattn_wall = w
@@ -322,13 +318,7 @@ def _half(wcat):
 def supports(d_pair: int, d_hidden: int, n_head: int, length: int, train: bool = False) -> bool:
     """Shapes the generic path takes: d_pair a multiple of 8 up to 512, heads of 16 or 32 channels (training: also 64) and at most 16
     heads, L a multiple of 16 (padded to a multiple of 128 by the caller)."""
-    if (
-        d_pair % 8
-        or not 8 <= d_pair <= MAX_C
-        or n_head < 1
-        or n_head > MAX_HEADS
-        or d_hidden % n_head
-    ):
+    if d_pair % 8 or not 8 <= d_pair <= MAX_C or n_head < 1 or n_head > MAX_HEADS or d_hidden % n_head:
         return False
     widths = TRAIN_HEAD_DIMS if train else HEAD_DIMS
     return d_hidden // n_head in widths and length >= 16 and length % 16 == 0
@@ -346,9 +336,7 @@ def pack_weights(wq, wk, wv, wg, wb, wo):
     bf = torch.bfloat16
     ws = (wq, wk, wv, wg, wb, wo)
     if (
-        hd <= D
-        and wq.dtype in (torch.float32, bf)
-        and all(w.dtype == wq.dtype and w.is_cuda and w.is_contiguous() for w in ws)
+        hd <= D and wq.dtype in (torch.float32, bf) and all(w.dtype == wq.dtype and w.is_cuda and w.is_contiguous() for w in ws)
     ):  # one launch (the packing kernels are replayed with every CUDA-graph call, so their count is latency)
         wall, wo_p = _glue().pack(*ws)
         wcat = wall[: 4 * n_head * D + _hp(n_head)]
@@ -387,9 +375,7 @@ def pack_weights_torch(wq, wk, wv, wg, wb, wo, dc=D):
 
     wbp = wb.new_zeros(_hp(n_head), C, dtype=bf)
     wbp[:n_head] = wb.to(bf)
-    wcat = torch.cat(
-        [pad_rows(wq), pad_rows(wk), pad_rows(wv), pad_rows(wg), wbp]
-    ).contiguous()
+    wcat = torch.cat([pad_rows(wq), pad_rows(wk), pad_rows(wv), pad_rows(wg), wbp]).contiguous()
     wo = wo.to(bf)
     if hd != dc:
         wop = wo.new_zeros(C, n_head, dc)
@@ -452,11 +438,7 @@ def _forward(
     # ``flip`` (the ending node on AF3's bias orientation): the bias is made unmasked and masked after the transpose
     front_mask = mask if mask is not None and not flip else empty.bool()
     fused = (
-        (not need)
-        and (C, HD) in _FRONT_L
-        and L <= _FRONT_L[(C, HD)]
-        and _front() is not None
-        and tuple(wcat.shape) == (4 * HD + _hp(H), C)
+        (not need) and (C, HD) in _FRONT_L and L <= _FRONT_L[(C, HD)] and _front() is not None and tuple(wcat.shape) == (4 * HD + _hp(H), C)
     )
     # inference on the fp16 core (h100_sm90.INFERENCE_FP16): q / k / v and the bias in fp16, from the fused front or (L > 256) fp16 GEMMs
     h16 = (not need) and _core_mod.INFERENCE_FP16 and (fused or L > 256)
@@ -484,12 +466,16 @@ def _forward(
         )
         flip = False
         qkvg = None
-        q, k, v, gt = (
-            (proj[i].view(torch.float16) if h16 and i < 3 else proj[i]).view(B, L, L, H, dq) for i in range(4)
-        )
+        q, k, v, gt = ((proj[i].view(torch.float16) if h16 and i < 3 else proj[i]).view(B, L, L, H, dq) for i in range(4))
     else:
         y, mean, rstd = g.ln_fwd(
-            x, lnw.float().contiguous(), lnb.float().contiguous(), eps, L, trans, h16  # h16: y in fp16 for fp16 GEMMs
+            x,
+            lnw.float().contiguous(),
+            lnb.float().contiguous(),
+            eps,
+            L,
+            trans,
+            h16,  # h16: y in fp16 for fp16 GEMMs
         )
     if fused:
         pass
@@ -504,15 +490,11 @@ def _forward(
             qkvg = torch.matmul(y, ww[: 4 * HD].t())  # [M, 4 HD]: q | k | v | g (fp16 with h16, the gate too)
         bias = torch.matmul(y, ww[4 * HD :].t())  # [M, Hp]
         # the dh core takes the bias in natural units, the wgmma core pre-divided by the scale
-        sbias = g.front_bias(
-            bias, front_mask, B, L, H, 0, 1.0 if dh else scale
-        )
+        sbias = g.front_bias(bias, front_mask, B, L, H, 0, 1.0 if dh else scale)
     else:
         # short inference calls: one GEMM for q | k | v | g | bias (a launch less); beyond L 256 the extra tile column costs more
         qkvg = _lt().lt_mm(y, wcat, None, 0, False, None, None)  # [M, 4 HD + Hp]
-        sbias = g.front_bias(
-            qkvg, front_mask, B, L, H, 4 * HD, scale
-        )
+        sbias = g.front_bias(qkvg, front_mask, B, L, H, 4 * HD, scale)
     if not fused:
         q, k, v, gt = _views(qkvg, B, L, HD, H, dc)
     if flip:
@@ -550,9 +532,7 @@ def _forward(
                 t = lt.lt_mm(u2, second, t, L, True, None, None)
             out = torch.addcmul(x.view(B, L, L, C), t.view(B, L, L, C), _drop_view(drop, B, L, C, trans))
     elif drop is None:
-        out = lt.lt_mm(
-            u2, wo_use, x, L, trans, out, bo
-        )  # x + u Wo^T [+ bo]: the residual in the GEMM epilogue (D != C, no staging copy)
+        out = lt.lt_mm(u2, wo_use, x, L, trans, out, bo)  # x + u Wo^T [+ bo]: the residual in the GEMM epilogue (D != C, no staging copy)
     else:
         if bo is None:
             t = torch.matmul(u2, wo_p.t())
@@ -563,7 +543,9 @@ def _forward(
     return out, (y, mean, rstd, qkvg, sbias, o, lse, u)
 
 
-@torch.autocast("cuda", enabled=False)  # the fp16 core takes the fp16 projections as made: an enclosing bf16 autocast would turn the GEMMs bf16
+@torch.autocast(
+    "cuda", enabled=False
+)  # the fp16 core takes the fp16 projections as made: an enclosing bf16 autocast would turn the GEMMs bf16
 def inference(
     pair,
     lnw,
@@ -582,9 +564,7 @@ def inference(
 ):
     """pair + TriangleAttention(pair), starting node, no grad; wcat, wo_p = pack_weights(...); L a multiple of 128; `out`: a contiguous
     tensor like pair to write into."""
-    return _forward(
-        pair, lnw, lnb, wcat, wo_p, mask, eps, None, n_head, head_dim, False, trans, out, flip, gate_bias, out_bias
-    )[0]
+    return _forward(pair, lnw, lnb, wcat, wo_p, mask, eps, None, n_head, head_dim, False, trans, out, flip, gate_bias, out_bias)[0]
 
 
 def _mm_f32(a, b):
@@ -676,7 +656,7 @@ def train_backward(
             ddrop = dt
             du = torch.matmul(ddrop, wo_p)
         else:
-            ddrop, dtt = (_t(dt, B, L), dt) if trans else (dt, _t(dt, B, L))   # (for Wo, for Wo_t)
+            ddrop, dtt = (_t(dt, B, L), dt) if trans else (dt, _t(dt, B, L))  # (for Wo, for Wo_t)
             wt_p = pack_out(wo_t, H, dc)
             du = torch.addmm(torch.matmul(ddrop, wo_p), dtt, wt_p)
             dwt = _mm_f32(dtt.t(), u)
@@ -697,9 +677,7 @@ def train_backward(
         e = _core_mod._bwd()
         q, k, v, _ = _views(qkvg, B, L, HD, H)
         do5 = do.view(shp)
-        dall5 = dall.view(-1).as_strided(
-            shp, (L * L * dall.shape[1], L * dall.shape[1], dall.shape[1], D, 1), 0
-        )
+        dall5 = dall.view(-1).as_strided(shp, (L * L * dall.shape[1], L * dall.shape[1], dall.shape[1], D, 1), 0)
 
         def slot(i):  # columns [i HD, (i + 1) HD) of dall
             return dall5.as_strided(shp, dall5.stride(), i * HD)
@@ -725,9 +703,7 @@ def train_backward(
         return w if hd == dc else w.view(C, H, dc)[:, :, :hd].reshape(C, H * hd)
 
     # (clones: the outputs of a custom op may not alias each other, and these are slices of one buffer)
-    dwq, dwk, dwv, dwg = (
-        unpad(dw[i * HD : (i + 1) * HD]).to(wq.dtype).clone() for i in range(4)
-    )
+    dwq, dwk, dwv, dwg = (unpad(dw[i * HD : (i + 1) * HD]).to(wq.dtype).clone() for i in range(4))
     dwb = dw[4 * HD : 4 * HD + H].to(wb.dtype).clone()
     dgb = None
     if gate_bias is not None:
@@ -754,14 +730,10 @@ class TriAttnGeneric(torch.autograd.Function):
     (The module path goes through the custom ops of ``kernels.integrations.triattn_h100_sm90``, which call `train_forward` / `train_backward`.)"""
 
     @staticmethod
-    def forward(
-        ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, n_head, head_dim
-    ):
+    def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, n_head, head_dim):
         need = any(ctx.needs_input_grad)
         wcat, wo_p = pack_weights(wq, wk, wv, wg, wb, wo)
-        out, saved = _forward(
-            pair, lnw, lnb, wcat, wo_p, mask, eps, drop, n_head, head_dim, need
-        )
+        out, saved = _forward(pair, lnw, lnb, wcat, wo_p, mask, eps, drop, n_head, head_dim, need)
         if need:
             ctx.save_for_backward(
                 pair,
@@ -820,6 +792,4 @@ def triangle_attention(
     drop=None,
 ):
     """pair + drop o TriangleAttention(pair) for the starting node; the caller transposes for the ending node."""
-    return TriAttnGeneric.apply(
-        pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, n_head, head_dim
-    )
+    return TriAttnGeneric.apply(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, n_head, head_dim)

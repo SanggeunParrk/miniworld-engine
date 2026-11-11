@@ -38,7 +38,9 @@ BLOCK = (NTHREADS, 1, 1)
 # every entry is an instantiation compiled into the width's unit (csrc/tmn_sm90_unit.cuh); `k1_variants` / `k3_variants` = the alternatives built.
 # 'f' entries: k3_mode 'f' (default) = K3 reads the fp32 z tile; 'p' = the fp32 K1 also writes bf16(LN_in(z)) rows and K3 reads those; 'c' = z is cast
 # to bf16 once, the bf16 K1 runs on the cast, K3 mode c normalises the cast tile and adds the fp32 residual from global (fp32 out).
-INCOMING_MODE = "kt"  # incoming direction: "kt" = K1 reads z transposed and writes transposed planes so both directions run the NT contraction;
+INCOMING_MODE = (
+    "kt"  # incoming direction: "kt" = K1 reads z transposed and writes transposed planes so both directions run the NT contraction;
+)
 # "tn" = plain planes + TN contraction.  The single source for ops.py and the package face.
 
 TILE_TABLE = {
@@ -199,44 +201,25 @@ def k1_smem(cz, ch, zf32, bi, bj, nslot, skch):
     esz = 4 if zf32 else 2
     nkca = cz // (128 // esz)
     nbar = 2 + 2 * nslot
-    return (
-        nkca * bi * bj * 128
-        + nslot * skch * 8192
-        + ncwg * 8192
-        + 2 * cz * 4
-        + ((nbar * 8 + 127) // 128) * 128
-    )
+    return nkca * bi * bj * 128 + nslot * skch * 8192 + ncwg * 8192 + 2 * cz * 4 + ((nbar * 8 + 127) // 128) * 128
 
 
 def k3_smem(cz, ch, mode, bi, bj, nslot, nacc=1, packed=False):
     """== K3Cfg::SMEM (mode 'b' | 'f' | 'p'; bool accepted: True = 'f')."""
     if isinstance(mode, bool):
         mode = "f" if mode else "b"
-    esz = (
-        4 if mode in ("f", "g") else 2
-    )  # g: fp32 tile (staging is sized in the tile dtype), bf16 update out
+    esz = 4 if mode in ("f", "g") else 2  # g: fp32 tile (staging is sized in the tile dtype), bf16 update out
     bmt = bi * bj
     nkcz = cz // (128 // esz)
     # == K3Cfg::SMEM_W.  `packed` is TMN_K3_PACKED_RING *of the unit being launched*, which the caller reads from its build flags:
     # a slot is then sized by its kind (even = projection c_h x 64, odd = gate c_z x 64) instead of both taking the larger extent.
     # Identical where c_z == c_h.  Guessing this wrong sizes the dynamic shared memory wrong and the launch fails, so it is never
     # a constant here -- Kernels.packed_ring() answers it per unit.
-    smem_w = (
-        (nslot // 2) * (cz + ch) * 64
-        if packed and cz != ch and nslot % 2 == 0
-        else nslot * max(cz, ch) * 64
-    )
+    smem_w = (nslot // 2) * (cz + ch) * 64 if packed and cz != ch and nslot % 2 == 0 else nslot * max(cz, ch) * 64
     ob = 16 * 64 * esz
     nbar = 2 * nkcz + 2 + 2 * nslot
     ncwg = 2 if bmt == 64 else bmt // 64  # consumer warpgroups (== K3Cfg::NCWG)
-    return (
-        (bmt // 64) * ch * 128
-        + nkcz * bmt * 128
-        + smem_w
-        + 4 * ncwg * ob
-        + (2 * cz + 2 * ch) * 4
-        + ((nbar * 8 + 127) // 128) * 128
-    )
+    return (bmt // 64) * ch * 128 + nkcz * bmt * 128 + smem_w + 4 * ncwg * ob + (2 * cz + 2 * ch) * 4 + ((nbar * 8 + 127) // 128) * 128
 
 
 def k3w_smem(cz, ch, mode, bi, bj, nslot, nacc=1):
@@ -244,23 +227,14 @@ def k3w_smem(cz, ch, mode, bi, bj, nslot, nacc=1):
     if isinstance(mode, bool):
         mode = "f" if mode else "b"
     assert mode in ("b", "f"), "the wide K3 member serves modes b and f"
-    esz = (
-        4 if mode in ("f", "g") else 2
-    )  # g: fp32 tile (staging is sized in the tile dtype), bf16 update out
+    esz = 4 if mode in ("f", "g") else 2  # g: fp32 tile (staging is sized in the tile dtype), bf16 update out
     bmt = bi * bj
     nkcz = cz // (128 // esz)
     nb = cz // 32
     nslot_eff = 2 * nb if nslot >= 2 * nb else nslot
     w = (nslot_eff // 2) * (ch * 64 + cz * 64)
     nbar = 2 * nkcz + 2 + 2 * nslot_eff
-    return (
-        (bmt // 64) * ch * 128
-        + nkcz * bmt * 128
-        + w
-        + 8 * (16 * 64 * esz)
-        + (2 * cz + 2 * ch) * 4
-        + ((nbar * 8 + 127) // 128) * 128
-    )
+    return (bmt // 64) * ch * 128 + nkcz * bmt * 128 + w + 8 * (16 * 64 * esz) + (2 * cz + 2 * ch) * 4 + ((nbar * 8 + 127) // 128) * 128
 
 
 def k3_is_wide(cfg):
@@ -288,9 +262,7 @@ def k3_name(cz, ch, mode, bi, bj, nslot, nacc, *rest):
     """k3_name(cz, ch, mode, *cfg, lnm) for both K3 config shapes: (BI, BJ, NSLOT, NACC) -> tmn_k3_..., (BI, BJ, NSLOT, NACC, "w") -> tmn_k3w_..."""
     if isinstance(mode, bool):
         mode = "f" if mode else "b"
-    assert len(rest) in (1, 2) and (len(rest) == 1 or rest[0] == "w"), (
-        "k3_name(cz, ch, mode, BI, BJ, NSLOT, NACC[, 'w'], lnm)"
-    )
+    assert len(rest) in (1, 2) and (len(rest) == 1 or rest[0] == "w"), "k3_name(cz, ch, mode, BI, BJ, NSLOT, NACC[, 'w'], lnm)"
     return "tmn_k3%s_z%d_h%d_%s_t%dx%d_s%da%d_l%d" % (
         "w" if len(rest) == 2 else "",
         cz,
@@ -372,9 +344,7 @@ def serve_names(arch, cz, ch, form, exact=False):
         for k3c in _cfgs(tb, "k3"):
             names.append(k3_name(cz, ch, "b", *_k3cfg(k3c), 1))
             if not k3_is_wide(_k3cfg(k3c)):
-                names.append(
-                    k3_name(cz, ch, "b", *_k3cfg(k3c), 1) + "_u"
-                )  # + its update-only specialisation (TMN_K3_SET_BF16 emits both)
+                names.append(k3_name(cz, ch, "b", *_k3cfg(k3c), 1) + "_u")  # + its update-only specialisation (TMN_K3_SET_BF16 emits both)
         if exact:  # the exact word runs the entry defaults (reference-order K3 l2 / l3)
             names += [k3_name(cz, ch, "b", *_k3cfg(tb["k3"]), l) for l in (2, 3)]
         return list(dict.fromkeys(names))
@@ -393,22 +363,16 @@ def serve_names(arch, cz, ch, form, exact=False):
             names.append(k3_name(cz, ch, "b", *_k3cfg(k3c), 1))
     elif mode == "p":
         for k1c in _cfgs(tf, "k1"):
-            names += [
-                k1_name(cz, ch, True, *k1c, m, 1, False, True) for m in (False, True)
-            ]
+            names += [k1_name(cz, ch, True, *k1c, m, 1, False, True) for m in (False, True)]
         for k3c in _cfgs(tf, "k3"):
             names.append(k3_name(cz, ch, "p", *_k3cfg(k3c), 1))
     else:
         for k1c in _cfgs(tf, "k1"):
             names += [k1_name(cz, ch, True, *k1c, m, 1, False) for m in (False, True)]
         for k3c in _cfgs(tf, "k3"):
-            names.append(
-                k3_name(cz, ch, "f", *_k3cfg(k3c), 1)
-            )  # residual=True: z + update in fp32
+            names.append(k3_name(cz, ch, "f", *_k3cfg(k3c), 1))  # residual=True: z + update in fp32
             if not k3_is_wide(k3c):
-                names.append(
-                    k3_name(cz, ch, "g", *_k3cfg(k3c), 1)
-                )  # residual=False: the update in bf16 (the compute dtype)
+                names.append(k3_name(cz, ch, "g", *_k3cfg(k3c), 1))  # residual=False: the update in bf16 (the compute dtype)
     return list(dict.fromkeys(names))
 
 
@@ -450,36 +414,24 @@ class Kernels:
 
     def __init__(self, device=None, build_dir=None, verify=True):
         self.device_index = (
-            torch.cuda.current_device()
-            if device is None
-            else (device.index if isinstance(device, torch.device) else int(device))
+            torch.cuda.current_device() if device is None else (device.index if isinstance(device, torch.device) else int(device))
         )
         if self.device_index is None:
             self.device_index = torch.cuda.current_device()
         self.arch, self.cc = L.arch_of_device(self.device_index)
-        self.build_dir = (
-            build_dir
-            or os.environ.get("TRIMUL_NATIVE_BUILD_DIR")
-            or L.DEFAULT_BUILD_DIR
-        )
+        self.build_dir = build_dir or os.environ.get("TRIMUL_NATIVE_BUILD_DIR") or L.DEFAULT_BUILD_DIR
         self._hasname = {}  # (cz, ch, kernel name) -> the loaded unit carries it (the update-only K3 specialisations)
         self.verify = verify
         self._units = {}
         self._kern = {}
-        self.sms = num_sms(
-            self.device_index
-        )
+        self.sms = num_sms(self.device_index)
         self._has = {}
 
     # ---------------------------------------------------------------- loading
     def has_unit(self, cz, ch):
         r = self._has.get((cz, ch))
         if r is None:
-            r = bool(self.arch) and os.path.isfile(
-                os.path.join(
-                    self.build_dir, self.arch, unit_name(self.arch, cz, ch) + ".cubin"
-                )
-            )
+            r = bool(self.arch) and os.path.isfile(os.path.join(self.build_dir, self.arch, unit_name(self.arch, cz, ch) + ".cubin"))
             self._has[(cz, ch)] = r
         return r
 
@@ -519,11 +471,7 @@ class Kernels:
         r = self._has.get(key)
         if r is None:
             flags = (getattr(self.unit(cz, ch), "entry", None) or {}).get("flags") or []
-            r = any(
-                f.startswith("-DTMN_K3_PACKED_RING=")
-                and f.rsplit("=", 1)[1] not in ("0", "")
-                for f in flags
-            )
+            r = any(f.startswith("-DTMN_K3_PACKED_RING=") and f.rsplit("=", 1)[1] not in ("0", "") for f in flags)
             self._has[key] = r
         return r
 
@@ -580,8 +528,7 @@ class Kernels:
         if self._k1_weight_mode(w, cz, ch) == 0:
             tm_w = self.tmap(cache, ("w1", cz, ch), w["w1"], [64, 64], [cz, 4 * ch], [cz * 2], "128B", "256B")
             return tm_w, [zero_tm] * 4
-        maps = [self.tmap(cache, ("wq", q, cz, ch), t, [64, 32], [cz, ch], [cz * 2], "128B", "256B")
-                for q, t in enumerate(w["wq"])]
+        maps = [self.tmap(cache, ("wq", q, cz, ch), t, [64, 32], [cz, ch], [cz * 2], "128B", "256B") for q, t in enumerate(w["wq"])]
         return zero_tm, maps
 
     @staticmethod
@@ -624,9 +571,7 @@ class Kernels:
             raise ValueError("batched K1 needs unpadded planes (Np == N), no transpose and rows = B N")
         zf32 = z.dtype == torch.float32
         esz = 4 if zf32 else 2
-        bi, bj, nslot, skch = (
-            cfg or TILE_TABLE[(self.arch, cz, ch, "f" if zf32 else "b")]["k1"]
-        )
+        bi, bj, nslot, skch = cfg or TILE_TABLE[(self.arch, cz, ch, "f" if zf32 else "b")]["k1"]
         if token_mask:
             if mask is None or mask.ndim != 1 or mask.dtype not in (torch.bool, torch.uint8) or not mask.is_contiguous():
                 raise ValueError("token_mask needs a contiguous bool / uint8 [N] mask")
@@ -663,7 +608,7 @@ class Kernels:
         )
         # w["wq"] = (W_l, W_lg, W_r, W_rg), row-major bf16 [ch, cz]: K1 reads them in place (K1ParamsQ.tm_wq, pad0 = 1) and no
         # packed w1 exists; otherwise w["w1"] is the host-packed [4 ch, cz] block-interleaved matrix.
-        wmode = self._k1_weight_mode(w, cz, ch)   # 0 packed w1 | 1 in place (row-major)
+        wmode = self._k1_weight_mode(w, cz, ch)  # 0 packed w1 | 1 in place (row-major)
         plan_key = ("tmn.k1", name, N, Np, transpose, float(eps), wmode, bool(token_mask), rows)
         ent = cache.get(
             plan_key
@@ -700,7 +645,7 @@ class Kernels:
                     int(ms_j * cz),
                     int(wmode),
                     int(bool(token_mask)),
-                    int(0 if rows == N else rows),   # K1Params.rows (batched samples; 0 = one sample)
+                    int(0 if rows == N else rows),  # K1Params.rows (batched samples; 0 = one sample)
                     *tm_wq,
                 ]
             )
@@ -709,9 +654,7 @@ class Kernels:
             ncwg, nthr, minb = k1_shape(bi, bj)
             ctas = self.sms * minb  # persistent CTAs: MINB per SM
             grid = (
-                min(num_tiles, ctas)
-                if not grid_limit
-                else min(num_tiles, ctas, grid_limit),
+                min(num_tiles, ctas) if not grid_limit else min(num_tiles, ctas, grid_limit),
                 1,
                 1,
             )
@@ -732,9 +675,7 @@ class Kernels:
             cache[plan_key] = ent
         pack, k, grid, smem, block = ent[0], ent[1], ent[2], ent[3], ent[10]
         wsig = self._k1_weight_sig(w)
-        if (
-            ent[9] != wsig
-        ):  # another weight set through the same cache (one cache serving every layer): re-point the weight
+        if ent[9] != wsig:  # another weight set through the same cache (one cache serving every layer): re-point the weight
             # stream(s) and the LN_in affine
             tm_w, tm_wq = self._k1_weight_maps(cache, w, cz, ch, L.TensorMap(b"\0" * 128))
             pack.set_tensor_map(0, tm_w, field=1)
@@ -840,9 +781,7 @@ class Kernels:
         if mode in ("p", "c"):
             assert zres.dtype == torch.float32 and out.dtype == torch.float32
         if mode == "g":
-            assert not residual, (
-                "mode g (fp32 z tile, bf16 update) never adds a residual: the fp32 sum is mode f"
-            )
+            assert not residual, "mode g (fp32 z tile, bf16 update) never adds a residual: the fp32 sum is mode f"
         zf32 = mode in ("f", "g")
         esz = 4 if zf32 else 2
         ent_tt = TILE_TABLE[(self.arch, cz, ch, "b" if mode == "b" else "f")]
@@ -850,8 +789,8 @@ class Kernels:
         bi, bj, nslot, nacc = cfg[:4]
         name = k3_name(cz, ch, mode, *cfg, lnm)
         upd = False
-        if (
-            not residual and not k3_is_wide(cfg)
+        if not residual and not k3_is_wide(
+            cfg
         ):  # the update-only specialisation (name + "_u": residual add compiled out) when the unit carries it
             nu = name + "_u"
             hk = self._hasname.get((cz, ch, nu))
@@ -867,16 +806,12 @@ class Kernels:
             smem = (
                 k3w_smem(cz, ch, mode, bi, bj, nslot, nacc)
                 if k3_is_wide(cfg)
-                else k3_smem(
-                    cz, ch, mode, bi, bj, nslot, nacc, packed=self.packed_ring(cz, ch)
-                )
+                else k3_smem(cz, ch, mode, bi, bj, nslot, nacc, packed=self.packed_ring(cz, ch))
             )
             k = self.kernel(cz, ch, name, smem)
             tiles_i, tiles_j = -(-rows // bi), -(-N // bj)
             num_tiles = tiles_i * tiles_j
-            tm_wg = self.tmap(
-                cache, ("wg", cz), w["wg"], [64, 32], [cz, cz], [cz * 2], "128B", "256B"
-            )
+            tm_wg = self.tmap(cache, ("wg", cz), w["wg"], [64, 32], [cz, cz], [cz * 2], "128B", "256B")
             tm_wo = self.tmap(
                 cache,
                 ("wo", cz, ch),
@@ -911,22 +846,17 @@ class Kernels:
                     0,
                     float(eps),
                     0,
-                    int(0 if rows == N else rows),   # K3Params.rows (batched samples; 0 = one sample)
+                    int(0 if rows == N else rows),  # K3Params.rows (batched samples; 0 = one sample)
                 ]
             )  # field 12: K1-saved LN_in statistics (experiment)
             pack = L.ArgPack([st])
             assert pack.sizes[0] == K3_PARAMS_SIZE, pack.sizes[0]
             grid = (
-                min(num_tiles, self.sms)
-                if not grid_limit
-                else min(num_tiles, self.sms, grid_limit),
+                min(num_tiles, self.sms) if not grid_limit else min(num_tiles, self.sms, grid_limit),
                 1,
                 1,
             )
-            wsig = tuple(
-                w[n].data_ptr()
-                for n in ("wg", "wo", "ln_in_w", "ln_in_b", "ln_out_w", "ln_out_b")
-            )
+            wsig = tuple(w[n].data_ptr() for n in ("wg", "wo", "ln_in_w", "ln_in_b", "ln_out_w", "ln_out_b"))
             ent = [
                 pack,
                 k,
@@ -941,16 +871,9 @@ class Kernels:
             ]  # + last-patched (z map, x map, residual flag, prof ptr, weight signature, out map)
             cache[("tmn.k3", name, N, Np, float(eps), rows)] = ent
         pack, k, grid, smem = ent[0], ent[1], ent[2], ent[3]
-        wsig = tuple(
-            w[n].data_ptr()
-            for n in ("wg", "wo", "ln_in_w", "ln_in_b", "ln_out_w", "ln_out_b")
-        )
-        if (
-            ent[8] != wsig
-        ):  # another weight set through the same cache: re-point W_og / W_o streams and the four LN affines
-            tm_wg = self.tmap(
-                cache, ("wg", cz), w["wg"], [64, 32], [cz, cz], [cz * 2], "128B", "256B"
-            )
+        wsig = tuple(w[n].data_ptr() for n in ("wg", "wo", "ln_in_w", "ln_in_b", "ln_out_w", "ln_out_b"))
+        if ent[8] != wsig:  # another weight set through the same cache: re-point W_og / W_o streams and the four LN affines
+            tm_wg = self.tmap(cache, ("wg", cz), w["wg"], [64, 32], [cz, cz], [cz * 2], "128B", "256B")
             tm_wo = self.tmap(
                 cache,
                 ("wo", cz, ch),
@@ -997,8 +920,8 @@ class Kernels:
             ent[5] = tm_x
         pack.set_ptr(0, out, field=10)
         pack.set_ptr(0, (stats.data_ptr() if stats is not None else 0), field=12)
-        if (
-            mode == "b" and not k3_is_wide(cfg)
+        if mode == "b" and not k3_is_wide(
+            cfg
         ):  # bf16 output store descriptor: dims [cz (c)][N (j)][N (i)], box [64][16][1] = one warp's 16-token x 64-channel slice
             tm_o = self.tmap(
                 cache,

@@ -107,6 +107,7 @@ _WGRAD_F32_WG_MAX_ROWS = 65536
 #: ``pack`` keys an axis only below 4096; an augment count at or above it shares the top key.
 _A_KEY_MAX = 4095
 
+
 def _native_b200_default(q, training=None):
     """Cells that passed native gates and both paired and archived speed bars."""
     if q.ndim != 3 or q.shape[2] != 128:
@@ -114,16 +115,17 @@ def _native_b200_default(q, training=None):
     a, n = q.shape[:2]
     training = torch.is_grad_enabled() if training is None else training
     if training:
-        return ((q.dtype == torch.bfloat16 and (a, n) in ((1, 8192), (5, 4096), (5, 8192)))
-                or (q.dtype == torch.float32 and (a, n) == (5, 8192)))
-    return q.dtype == torch.bfloat16 and ((a == 1 and n in (4096, 8192))
-                                        or (a == 5 and n in (1024, 2048, 4096, 8192)))
+        return (q.dtype == torch.bfloat16 and (a, n) in ((1, 8192), (5, 4096), (5, 8192))) or (
+            q.dtype == torch.float32 and (a, n) == (5, 8192)
+        )
+    return q.dtype == torch.bfloat16 and ((a == 1 and n in (4096, 8192)) or (a == 5 and n in (1024, 2048, 4096, 8192)))
 
 
 def native_h100_enabled(q, training=None):
     """Whether H100 serves this fused-block call (every sm_90 call); which
     stages run it is :func:`native_h100_stages`."""
     from miniworld_engine.kernels.swa_dit.cuda.loader import is_sm90
+
     return is_sm90(q.device)
 
 
@@ -142,8 +144,7 @@ def native_h100_stages(q) -> bool:
         return False
     if q.dtype == torch.float32:
         # _fp32_cuda's test, with the precision read as a constant under torch.compile (this runs in the autograd.Function's forward)
-        composed = (_matmul_precision() != "highest"
-                    and _composed_cuda(q.device, "fp32"))
+        composed = _matmul_precision() != "highest" and _composed_cuda(q.device, "fp32")
     else:
         composed = q.dtype == torch.bfloat16 and _composed_cuda(q.device)
     return not composed
@@ -190,6 +191,7 @@ def _tiled_serves(qh, d_out=None):
 
 def _native_h100_extension(which="qkvg"):
     from miniworld_engine.kernels.swa_dit.cuda.loader import ERRORS, extension
+
     ext = extension(which)
     if ext is None:
         raise RuntimeError(f"native H100 SWA {which} extension unavailable: {ERRORS.get(which)}")
@@ -205,24 +207,34 @@ def _native_mm(a, b, tf32=None):
 
 
 def _native_contract(q, mod, cs, sn, seqused, weights, B, half_window, training):
-    if (q.dtype not in (torch.bfloat16, torch.float32) or q.ndim != 3 or q.shape[-1] != 128
-            or not q.is_cuda or not q.is_contiguous() or q.numel() == 0
-            or (half_window != 64 and not is_global(half_window)) or B <= 0 or q.shape[0] % B
-            or mod.dtype != torch.float32 or not mod.is_contiguous()
-            or seqused.dtype != torch.int32 or not seqused.is_contiguous()
-            or tuple(mod.shape) != (B * q.shape[1], 768)
-            or tuple(seqused.shape) != (q.shape[0],)):
-        raise ValueError("native H100 SWA requires contiguous BF16/FP32 [A*B,S,128], FP32 modulation and window64; got "
-                         f"q {tuple(q.shape)} {q.dtype} contiguous={q.is_contiguous()}, mod {tuple(mod.shape)} {mod.dtype}, "
-                         f"seqused {tuple(seqused.shape)} {seqused.dtype}, B={B}, half_window={half_window}")
+    if (
+        q.dtype not in (torch.bfloat16, torch.float32)
+        or q.ndim != 3
+        or q.shape[-1] != 128
+        or not q.is_cuda
+        or not q.is_contiguous()
+        or q.numel() == 0
+        or (half_window != 64 and not is_global(half_window))
+        or B <= 0
+        or q.shape[0] % B
+        or mod.dtype != torch.float32
+        or not mod.is_contiguous()
+        or seqused.dtype != torch.int32
+        or not seqused.is_contiguous()
+        or tuple(mod.shape) != (B * q.shape[1], 768)
+        or tuple(seqused.shape) != (q.shape[0],)
+    ):
+        raise ValueError(
+            "native H100 SWA requires contiguous BF16/FP32 [A*B,S,128], FP32 modulation and window64; got "
+            f"q {tuple(q.shape)} {q.dtype} contiguous={q.is_contiguous()}, mod {tuple(mod.shape)} {mod.dtype}, "
+            f"seqused {tuple(seqused.shape)} {seqused.dtype}, B={B}, half_window={half_window}"
+        )
     if any(t.device != q.device for t in (mod, cs, sn, seqused, *weights)):
         raise ValueError("native H100 SWA tensors must be on the same CUDA device")
-    if any(t.dtype != torch.float32 or not t.is_contiguous()
-           or tuple(t.shape) != (B * q.shape[1], 16) for t in (cs, sn)):
+    if any(t.dtype != torch.float32 or not t.is_contiguous() or tuple(t.shape) != (B * q.shape[1], 16) for t in (cs, sn)):
         raise ValueError("native H100 SWA requires contiguous FP32 RoPE [B*S,16]")
     shapes = ((384, 128), (128, 128), (128, 128), (512, 128), (128, 256))
-    if any(t.dtype != q.dtype or not t.is_contiguous() or tuple(t.shape) != shape
-           for t, shape in zip(weights, shapes, strict=True)):
+    if any(t.dtype != q.dtype or not t.is_contiguous() or tuple(t.shape) != shape for t, shape in zip(weights, shapes, strict=True)):
         raise ValueError("native H100 SWA requires canonical packed projection weights")
 
 
@@ -234,8 +246,10 @@ def _native_h100_fwd(q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, B, hw, eps, sav
     bf = q.dtype == torch.bfloat16
     fusion = _native_b200_fusion(q, save, B)
     small = fusion and bf and A == 1 and M >= 4096
+
     def empty(*shape, dtype=None):
         return torch.empty(shape, device=q.device, dtype=q.dtype if dtype is None else dtype)
+
     def rows(stage, ins, outs):
         ext.native_rows(ins, outs, stage, A, B, S, bf, eps)
 
@@ -243,6 +257,7 @@ def _native_h100_fwd(q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, B, hw, eps, sav
         w = empty(512, 128)
         ext.native_copy([wqkv, wg], [w[:384], w[384:]], 0)
         return w
+
     wstack = eval_form("swa_native_wstack", (wqkv, wg), stack, save)
     if bf:
         qkvg_ext = _native_h100_extension("qkvg_small") if small else ext
@@ -272,6 +287,7 @@ def _native_h100_fwd(q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, B, hw, eps, sav
             w = torch.empty_like(wu)
             ext.native_copy([wu], [w], 2)
             return w
+
         packed_wu = eval_form("swa_native_wu", (wu,), pack, save)
         out, q1, att, y, ffn = ffn_ext.ffn_fwd(q.reshape(M, 128), g, o, mod, wo, packed_wu, wd, A, B, S, eps, save)
     else:
@@ -292,26 +308,28 @@ def _native_h100_fwd(q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, B, hw, eps, sav
     return outputs
 
 
-def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
-                     qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, hw, eps):
+def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, hw, eps):
     _native_contract(q, mod, cs, sn, sequ, (wqkv, wg, wo, wu, wd), B, hw, True)
     dy = dy.contiguous()  # e.g. the expanded gradient of a sum
     ext = _native_h100_extension()
     N, S, _ = q.shape
     A, M, bf = N // B, N * S, q.dtype == torch.bfloat16
     fusion = _native_b200_fusion(q, True, B)
+
     def empty(*shape, dtype=None):
         return torch.empty(shape, device=q.device, dtype=q.dtype if dtype is None else dtype)
+
     def rows(stage, ins, outs):
         ext.native_rows(ins, outs, stage, A, B, S, bf, eps)
+
     dmod = torch.empty_like(mod)
     if bf and fusion:
         overwrite = fusion and A == 1
         ffn_ext = _native_h100_extension("bwd_overwrite" if overwrite else "bwd")
         wab, wdt, wabt = ext.native_ffn_pack(wu, wd, dmod, not overwrite)
         dq1, dffn, hh, dab = ffn_ext.ffn_bwd(
-            dy.reshape(M, 128), q1, y, ffn, mod, dmod, wab, wdt, wabt,
-            A, B, S, eps, 8 if A % 8 == 0 else 0)
+            dy.reshape(M, 128), q1, y, ffn, mod, dmod, wab, wdt, wabt, A, B, S, eps, 8 if A % 8 == 0 else 0
+        )
     else:
         dffn = empty(M, 128)
         rows(6, [dy, mod, ffn], [dffn, dmod])
@@ -332,7 +350,7 @@ def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
     if is_global(hw):
         from miniworld_engine.kernels.swa_dit.cuda.sm100 import attn_global_bwd
 
-        dqh, dkh, dvh = [torch.zeros_like(qh) for _ in range(3)]   # FA4 leaves the rows past seqused alone
+        dqh, dkh, dvh = [torch.zeros_like(qh) for _ in range(3)]  # FA4 leaves the rows past seqused alone
         attn_global_bwd(qh, kh, vh, o, dO, lse, sequ, dqh, dkh, dvh)
     else:
         dqh, dkh, dvh = [torch.empty_like(qh) for _ in range(3)]
@@ -345,16 +363,16 @@ def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
     ext.native_copy([wqkv, wg], [wstack[:384], wstack[384:]], 0)
     dq = empty(M, 128)
     if fusion and bf and A == 1:
-        ext.fused_qkvg_bwd([q, mod, cs, sn, pq, pk, dqh, dkh, dvh, dG, dq1, wstack],
-                           [dq, dp, dmod], S, eps)
+        ext.fused_qkvg_bwd([q, mod, cs, sn, pq, pk, dqh, dkh, dvh, dG, dq1, wstack], [dq, dp, dmod], S, eps)
     else:
         rows(11, [pq, pk, dqh, dkh, dvh, dG, cs, sn], [dp])
         dX = _native_mm(dp, wstack)
         rows(12, [dq1, dX, q, mod], [dq, dmod])
+
     def wgrad(gradient, activation):
         return _native_mm(gradient.t(), activation)
-    return [dq.view_as(q), dmod, wgrad(dp[:, :384], x), wgrad(dp[:, 384:], x),
-            wgrad(datt, gated), wgrad(dab, y), wgrad(dffn, hh)]
+
+    return [dq.view_as(q), dmod, wgrad(dp[:, :384], x), wgrad(dp[:, 384:], x), wgrad(datt, gated), wgrad(dab, y), wgrad(dffn, hh)]
 
 
 def _native_h100_cast_fake(values: list[torch.Tensor], templates: list[torch.Tensor]) -> list[torch.Tensor]:
@@ -372,8 +390,11 @@ def native_h100_cast(values: list[torch.Tensor], templates: list[torch.Tensor]) 
 
 def _native_h100_mod_fwd_fake(c: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """[R, 768] fp32 modulation, c as fp32, w as fp32."""
-    return (c.new_empty((c.shape[0], 768), dtype=torch.float32),
-            c.new_empty(c.shape, dtype=torch.float32), w.new_empty(w.shape, dtype=torch.float32))
+    return (
+        c.new_empty((c.shape[0], 768), dtype=torch.float32),
+        c.new_empty(c.shape, dtype=torch.float32),
+        w.new_empty(w.shape, dtype=torch.float32),
+    )
 
 
 @opaque(fake=_native_h100_mod_fwd_fake, name="swa_dit_h100_native_mod_fwd")
@@ -461,20 +482,23 @@ def _swa_dit_fwd_fp32_global(ext, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, w
     N, S, C = q.shape
     wpre = eval_form("swa_fp32_prep", (wqkv, wg, wo, wu, wd), lambda: ext.prep(wqkv, wg, wo, wu, wd, True))
     qh, kh, vh, g = ext.fwd_qkvg(q, mod, cos, sin, B, eps, FP32_EPS, wpre)
-    o = torch.zeros(N * S, C, device=q.device, dtype=torch.bfloat16)   # FA4 skips the rows past seqused: they must read zero
+    o = torch.zeros(N * S, C, device=q.device, dtype=torch.bfloat16)  # FA4 skips the rows past seqused: they must read zero
     lse = torch.empty(N, N_HEAD, S, device=q.device, dtype=torch.float32)
     attn_global_fwd(qh, kh, vh, seqused, o, lse)
     return [ext.fwd_ffn(q, mod, cos, sin, g, o, B, eps, wpre)[0].view(N, S, C)]
 
 
-def _native_h100_mod_bwd_fake(dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor, w32: torch.Tensor,
-                              w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _native_h100_mod_bwd_fake(
+    dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor, w32: torch.Tensor, w: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     """dc like c, dweight like w."""
     return torch.empty_like(c), torch.empty_like(w)
 
 
 @opaque(fake=_native_h100_mod_bwd_fake, name="swa_dit_h100_native_mod_bwd")
-def native_h100_mod_bwd(dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor, w32: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def native_h100_mod_bwd(
+    dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor, w32: torch.Tensor, w: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     """(dc, dweight) of :func:`native_h100_mod_fwd`; dc and dweight are cast back to c's and w's dtype."""
     ext = _native_h100_extension()
     # A bf16 block's forward multiplies bf16 operands on the tensor cores (native_h100_mod_fwd); its backward takes them in TF32, at
@@ -487,7 +511,6 @@ def native_h100_mod_bwd(dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor, w32:
     ext.native_rows([c, da], [dc], 14, 1, 1, c.shape[0], c.dtype == torch.bfloat16, FP32_EPS)
     ext.native_copy([dw], [dweight], 0)
     return dc, dweight
-
 
 
 def _augments(N: int, B: int) -> int:
@@ -513,11 +536,7 @@ def _sm100(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
     if not sm100.supported(q, nhid, half_window, eps):
         return None
     try:
-        sm100.kernels(
-            q.device.index
-            if q.device.index is not None
-            else torch.cuda.current_device()
-        )
+        sm100.kernels(q.device.index if q.device.index is not None else torch.cuda.current_device())
     except Exception as exc:  # a build / load failure is an error, never a fallback
         build_failed("sm_100a SWA atom DiT", exc)
         return None  # reached only while planning (build_failed returns there)
@@ -548,11 +567,7 @@ def _tf32_ready(device: torch.device, save: bool) -> bool:
     -- with ``save`` (a training forward, whose fp32 saves only the TF32 backward reads) the backward's too. Build and load happen
     here, once per device; a failure raises ``_nvcc.KernelBuildError``. A constant to the compiled graph
     (``device_constant``): Dynamo bakes the answer in and never traces the build."""
-    if (
-        device.type != "cuda"
-        or _tf32_off()
-        or not tf32_fwd.is_b200(device)
-    ):
+    if device.type != "cuda" or _tf32_off() or not tf32_fwd.is_b200(device):
         return False
     try:
         tf32_fwd.kernels_tf32(_device_index(device))
@@ -566,15 +581,11 @@ def _tf32(q: torch.Tensor, nhid: int, half_window: int, eps: float, save: bool) 
     """The sm_100a TF32 forward module (``cuda/sm100/tf32_fwd``) when it serves this fp32 call, else None -> the Triton fp32 path.
     Traceable: tensor metadata (``tf32_fwd.supported_tf32``) and the per-device constant ``_tf32_ready``. A deterministic function
     of the call (shapes, dtype, device, earlier failures), so the op's fake reaches the same answer as the launch."""
-    if q.dtype != torch.float32 or not tf32_fwd.supported_tf32(
-        q, nhid, half_window, eps
-    ):
+    if q.dtype != torch.float32 or not tf32_fwd.supported_tf32(q, nhid, half_window, eps):
         return None
     if not _tf32_ready(q.device, save):
         return None
     return tf32_fwd
-
-
 
 
 #: ``_rows_cuda``: the team-gm wgmma kernels serve a stage from this many rows (N*S) on, and only when the
@@ -606,26 +617,18 @@ def _attn_served(C: int, H: int, half_window: int) -> bool:
     return C == D_ATOM and H == N_HEAD and half_window == HALF_WINDOW
 
 
-
-
 def _pack_ffn64(wu: torch.Tensor) -> torch.Tensor:
     """rows per 64-wide hidden chunk j: [Wu[64j..64j+63] ; Wu[NHID + 64j..]] (the forward kernel's a|b tile)."""
     NH = wu.shape[0] // 2
     C = wu.shape[1]
-    return (
-        wu.view(2, NH // 64, 64, C).permute(1, 0, 2, 3).reshape(2 * NH, C).contiguous()
-    )
+    return wu.view(2, NH // 64, 64, C).permute(1, 0, 2, 3).reshape(2 * NH, C).contiguous()
 
 
-def _pack_ffn(
-    wu: torch.Tensor, wd: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _pack_ffn(wu: torch.Tensor, wd: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """wab: per 32-wide hidden chunk j rows [Wu[32j..] ; Wu[NHID + 32j..]]; wdt = Wd^T; wabt = wab^T."""
     NH = wd.shape[1]
     C = wd.shape[0]
-    wab = (
-        wu.view(2, NH // 32, 32, C).permute(1, 0, 2, 3).reshape(2 * NH, C).contiguous()
-    )
+    wab = wu.view(2, NH // 32, 32, C).permute(1, 0, 2, 3).reshape(2 * NH, C).contiguous()
     return wab, wd.t().contiguous(), wab.t().contiguous()
 
 
@@ -645,11 +648,7 @@ def _swa_dit_block_fwd_fake(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, 
     M = N * S
     outputs = [q.new_empty((N, S, C))]
     if save:
-        tf32 = (
-            q.dtype == torch.float32
-            and not is_global(half_window)
-            and _tf32(q, wd.shape[1], half_window, eps, save) is not None
-        )
+        tf32 = q.dtype == torch.float32 and not is_global(half_window) and _tf32(q, wd.shape[1], half_window, eps, save) is not None
         hd = torch.float32 if tf32 else torch.bfloat16
         heads = [q.new_empty((N, H, S, C // H), dtype=hd) for _ in range(3)]
         saved = [q.new_empty((M, C)) for _ in range(7)]
@@ -694,26 +693,17 @@ def swa_dit_block_fwd(
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
             raise RuntimeError(
-                "swa_dit_block: global attention runs on the sm_100a stages (bf16, B200) only -- check "
-                "interface.refusal first"
+                "swa_dit_block: global attention runs on the sm_100a stages (bf16, B200) only -- check interface.refusal first"
             )
-        return sm100.block_fwd(
-            q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window
-        )
+        return sm100.block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window)
     if q.dtype == torch.float32:
         tf32 = _tf32(q, wd.shape[1], half_window, eps, save)
         if tf32 is not None:  # B200: every stage on the TF32 tensor-core kernels
-            return tf32.block_fwd_tf32(
-                q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window
-            )
-        return _swa_dit_fwd_fp32_launch(
-            q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save
-        )
+            return tf32.block_fwd_tf32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window)
+        return _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save)
     sm100 = _sm100(q, wd.shape[1], half_window, eps)
     if sm100 is not None:
-        return sm100.block_fwd(
-            q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window
-        )
+        return sm100.block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window)
     N, S, C = q.shape
     H = N_HEAD
     D = C // H
@@ -727,8 +717,7 @@ def swa_dit_block_fwd(
     if impl_q[0] == "slab":
         Qh, Kh, Vh, G, Xs, PQs, PKs = impl_q[1].qkvg_fwd(qf, mod, cos, sin, wqkv, wg, N, B, S, eps, FP32_EPS, save)
     elif impl_q[0] == "wgmma":
-        Qh, Kh, Vh, G, Xs, PQs, PKs = impl_q[1].qkvg_fwd(qf, mod, cos, sin, torch.cat([wqkv, wg]), N // B, B, S, eps, FP32_EPS,
-                                                         save)
+        Qh, Kh, Vh, G, Xs, PQs, PKs = impl_q[1].qkvg_fwd(qf, mod, cos, sin, torch.cat([wqkv, wg]), N // B, B, S, eps, FP32_EPS, save)
     else:
         Qh = torch.empty(N, H, S, D, device=q.device, dtype=q.dtype)
         Kh = torch.empty_like(Qh)
@@ -742,16 +731,41 @@ def swa_dit_block_fwd(
         else:
             Xs = PQs = PKs = G
         _swa_qkvg_fwd_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
-            qf, mod, cos, sin, wqkv, wg, Qh, Kh, Vh, G, r1, Xs, PQs, PKs, M, S, B, eps, FP32_EPS,
-            shape_key=atom_key(S, A=A, C=C), C=C, H=H, D=D, MODW=6 * C, SAVE=save)
+            qf,
+            mod,
+            cos,
+            sin,
+            wqkv,
+            wg,
+            Qh,
+            Kh,
+            Vh,
+            G,
+            r1,
+            Xs,
+            PQs,
+            PKs,
+            M,
+            S,
+            B,
+            eps,
+            FP32_EPS,
+            shape_key=atom_key(S, A=A, C=C),
+            C=C,
+            H=H,
+            D=D,
+            MODW=6 * C,
+            SAVE=save,
+        )
     ext = _cuda("attn", _attn_served(C, H, half_window), q.device)
     if ext is not None:
-        O, lse = ext.attn_fwd(Qh, Kh, Vh, seqused, D ** -0.5)
+        O, lse = ext.attn_fwd(Qh, Kh, Vh, seqused, D**-0.5)
     else:
         O = torch.empty_like(qf)
         lse = torch.empty(N, H, S, device=q.device, dtype=torch.float32)
         _swa_attn_fwd_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
-            Qh, Kh, Vh, seqused, O, lse, S, D ** -0.5, shape_key=atom_key(S, A=A, C=C), C=C, H=H, D=D, HW=half_window)
+            Qh, Kh, Vh, seqused, O, lse, S, D**-0.5, shape_key=atom_key(S, A=A, C=C), C=C, H=H, D=D, HW=half_window
+        )
     if impl_f[0] == "slab":
         q1, Att = impl_f[1].oproj_fwd(qf, G, O, mod, wo, N, B, S, save)
         q2, Ys, FFs = impl_f[1].ffn_fwd(q1, mod, wu, wd, N, B, S, eps, save)
@@ -768,9 +782,7 @@ def swa_dit_block_fwd(
             FFs = torch.empty_like(qf)
         else:
             Att = Ys = ABs = FFs = q2
-        _swa_oproj_ffn_fwd_kernel[
-            lambda m: (triton.cdiv(M, m["BR"]),)
-        ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        _swa_oproj_ffn_fwd_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
             qf,
             O,
             G,
@@ -810,8 +822,7 @@ def _fp32_cuda(C: int, NHID: int, half_window: int, device: torch.device) -> Any
     fp32. There the Triton kernels' tf32x3 FFN serves instead, off H100 / B200 (there "highest" never reaches this: the callers run the
     PyTorch statements, interface.highest_fp32_on_hopper_blackwell). The precision is read on every call.
     """
-    wanted = (torch.get_float32_matmul_precision() != "highest"
-              and C == D_ATOM and NHID == N_HIDDEN and half_window == HALF_WINDOW)
+    wanted = torch.get_float32_matmul_precision() != "highest" and C == D_ATOM and NHID == N_HIDDEN and half_window == HALF_WINDOW
     return _cuda("fp32", wanted, device)
 
 
@@ -847,9 +858,7 @@ def _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B,
         PKs = torch.empty_like(qf)
     else:
         Xs = PQs = PKs = G
-    _swa_qkvg_fwd_fp32_kernel[
-        lambda m: (triton.cdiv(M, m["BR"]),)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_qkvg_fwd_fp32_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qf,
         mod,
         cos,
@@ -878,9 +887,7 @@ def _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B,
     )
     O = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
     lse = torch.empty(N, H, S, device=dev, dtype=torch.float32)
-    _swa_attn_fwd_kernel[
-        lambda m: (triton.cdiv(S, m["BM"]), N * H)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_attn_fwd_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         Qh,
         Kh,
         Vh,
@@ -904,9 +911,7 @@ def _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B,
         FFs = torch.empty_like(qf)
     else:
         Att = Ys = FFs = q2
-    _swa_oproj_ffn_fwd_fp32_kernel[
-        lambda m: (triton.cdiv(M, m["BR"]),)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_oproj_ffn_fwd_fp32_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qf,
         O,
         G,
@@ -938,9 +943,7 @@ def _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B,
 
 def _mm32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """a @ b with an fp32 result: a weight gradient off bf16 operands keeps cuBLAS's fp32 accumulator instead of rounding it."""
-    return (
-        torch.mm(a, b, out_dtype=torch.float32) if a.dtype == torch.bfloat16 else a @ b
-    )
+    return torch.mm(a, b, out_dtype=torch.float32) if a.dtype == torch.bfloat16 else a @ b
 
 
 def _swa_dit_block_bwd_fake(
@@ -977,10 +980,7 @@ def _swa_dit_block_bwd_fake(
     return [
         torch.empty_like(q),
         torch.empty_like(mod),
-        *(
-            torch.empty(w.shape, dtype=torch.float32, device=w.device)
-            for w in (wqkv, wg, wo, wu, wd)
-        ),
+        *(torch.empty(w.shape, dtype=torch.float32, device=w.device) for w in (wqkv, wg, wo, wu, wd)),
     ]
 
 
@@ -1018,16 +1018,42 @@ def swa_dit_block_bwd(
     dtype, dmod [B*S, 6C] fp32, dWqkv, dWg, dWo, dWu, dWd fp32]: the weight gradients leave their fp32 accumulators unrounded
     (the parameters may be an fp32 master; ``autograd.SWADiTBlockFunction`` hands them back in the parameters' dtype)."""
     if native_h100_stages(q) or _h100_global(q, half_window):
-        grads = _native_h100_bwd(dy, q, mod.float(), cos, sin, seqused, wqkv, wg, wo, wu, wd,
-                                 qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps)
-        grads[1] = grads[1].to(mod.dtype)   # dmod like mod (the contract), whatever the native stages computed it in
+        grads = _native_h100_bwd(
+            dy,
+            q,
+            mod.float(),
+            cos,
+            sin,
+            seqused,
+            wqkv,
+            wg,
+            wo,
+            wu,
+            wd,
+            qh,
+            kh,
+            vh,
+            g,
+            o,
+            lse,
+            q1,
+            x,
+            pq,
+            pk,
+            att,
+            y,
+            ffn,
+            B,
+            half_window,
+            eps,
+        )
+        grads[1] = grads[1].to(mod.dtype)  # dmod like mod (the contract), whatever the native stages computed it in
         return grads
     if is_global(half_window):
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
             raise RuntimeError(
-                "swa_dit_block: global attention runs on the sm_100a stages (bf16, B200) only -- check "
-                "interface.refusal first"
+                "swa_dit_block: global attention runs on the sm_100a stages (bf16, B200) only -- check interface.refusal first"
             )
         return sm100.block_bwd(
             dy,
@@ -1058,12 +1084,8 @@ def swa_dit_block_bwd(
             half_window,
         )
     if q.dtype == torch.float32:
-        if (
-            qh.dtype == torch.float32
-        ):  # fp32 heads: saves of a TF32 training forward, which no backward serves
-            raise RuntimeError(
-                "swa_dit_block: fp32 saves of the TF32 forward have no backward (_tf32_bwd_ready is False)"
-            )
+        if qh.dtype == torch.float32:  # fp32 heads: saves of a TF32 training forward, which no backward serves
+            raise RuntimeError("swa_dit_block: fp32 saves of the TF32 forward have no backward (_tf32_bwd_ready is False)")
         return _swa_dit_bwd_fp32_launch(
             dy,
             q,
@@ -1145,9 +1167,7 @@ def swa_dit_block_bwd(
         dffn = torch.empty_like(dO)
     datt = torch.empty_like(dO)
     gated = torch.empty_like(dO)
-    grid_t = (
-        lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)
-    )  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    grid_t = lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     dy2 = dy.reshape(M, C)
     dwu: torch.Tensor | None = None
     dwd: torch.Tensor | None = None
@@ -1165,8 +1185,7 @@ def swa_dit_block_bwd(
     if impl_f[0] == "slab":
         dq1, dffn, hh, dab = impl_f[1].ffn_bwd(dy2, q1, y, ffn, mod, dmod, wu, wd, A, B, S, eps)
     elif impl_f[0] == "wgmma":
-        dq1, dffn, hh, dab = impl_f[1].ffn_bwd(dy2, q1, y, ffn, mod, dmod, *_ffn_packs(wu, wd)[1:], A, B, S, eps,
-                                               8 if A % 8 == 0 else 0)
+        dq1, dffn, hh, dab = impl_f[1].ffn_bwd(dy2, q1, y, ffn, mod, dmod, *_ffn_packs(wu, wd)[1:], A, B, S, eps, 8 if A % 8 == 0 else 0)
     else:
         _swa_ffn_bwd_kernel[grid_t](
             dy2,
@@ -1194,33 +1213,70 @@ def swa_dit_block_bwd(
         if fused_dw:
             dwu32 = torch.zeros(2 * NHID, C, device=dev, dtype=torch.float32)
             dwd32 = torch.zeros(C, NHID, device=dev, dtype=torch.float32)
-            sms = num_sms(
-                dev.index if dev.index is not None else torch.cuda.current_device()
-            )
-            ns = (
-                lambda m: max(
-                    1, min(triton.cdiv(M, m["BR"]), 2 * sms // (NHID // m["HS"]))
-                )
-            )  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+            sms = num_sms(dev.index if dev.index is not None else torch.cuda.current_device())
+            ns = lambda m: max(1, min(triton.cdiv(M, m["BR"]), 2 * sms // (NHID // m["HS"])))  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
             _swa_ffn_dw_kernel[lambda m: (ns(m), NHID // m["HS"])](
-                dy2, mod, wu, wd, y, dwu32, dwd32, M, S, B,
-                shape_key=atom_key(S, A=Ak, C=C, NHID=NHID), NSPLIT=0, C=C, NHID=NHID, MODW=6 * C)
+                dy2,
+                mod,
+                wu,
+                wd,
+                y,
+                dwu32,
+                dwd32,
+                M,
+                S,
+                B,
+                shape_key=atom_key(S, A=Ak, C=C, NHID=NHID),
+                NSPLIT=0,
+                C=C,
+                NHID=NHID,
+                MODW=6 * C,
+            )
             dwu, dwd = dwu32, dwd32
     if ext_o is not None or ext_a is not None or ext_q is not None:
-        served_w = (ext_q is not None and dwu is None and C == D_ATOM and NHID == N_HIDDEN
-                    and q.dtype == torch.bfloat16)
+        served_w = ext_q is not None and dwu is None and C == D_ATOM and NHID == N_HIDDEN and q.dtype == torch.bfloat16
         # TMA + wgmma kernel at every row count (bit-identical to the mma.sync one, faster than cuBLAS up to 196k rows); the
         # mma.sync kernel serves where it does not build, cuBLAS above its row limit
         ext_ww = _cuda("wgwg", served_w, dev)
         ext_w = ext_ww or _cuda("wgrad", served_w and M <= _WGRAD_MAX_ROWS, dev)
-        side = _bwd_attention_side(ext_o, ext_a, ext_q, dq1, q, mod, cos, sin, seqused, wqkv, wg, wo, qh, kh, vh,
-                                   g, o, lse, x, pq, pk, att, dmod, B, half_window, eps, Ak, raw=ext_w is not None)
+        side = _bwd_attention_side(
+            ext_o,
+            ext_a,
+            ext_q,
+            dq1,
+            q,
+            mod,
+            cos,
+            sin,
+            seqused,
+            wqkv,
+            wg,
+            wo,
+            qh,
+            kh,
+            vh,
+            g,
+            o,
+            lse,
+            x,
+            pq,
+            pk,
+            att,
+            dmod,
+            B,
+            half_window,
+            eps,
+            Ak,
+            raw=ext_w is not None,
+        )
         if ext_w is not None:
             dq, dP, datt, gated = side
             args = (dP, x.reshape(M, C), datt, gated, dab, y.reshape(M, C), dffn, hh)
             # the weight gradients leave as fp32, unrounded, as the contract (and the fake) says -- an fp32 master keeps them; the
             # autograd node casts them. The TMA + wgmma kernel stores its fp32 sums; the mma.sync fallback stores bf16.
-            dwqkv, dwg, dwo, dwu, dwd = cast("tuple[torch.Tensor, ...]", ext_ww.wgrad(*args, f32_out=True) if ext_ww is not None else ext_w.wgrad(*args))
+            dwqkv, dwg, dwo, dwu, dwd = cast(
+                "tuple[torch.Tensor, ...]", ext_ww.wgrad(*args, f32_out=True) if ext_ww is not None else ext_w.wgrad(*args)
+            )
             return [dq.view(N, S, C), dmod, *(w.float() for w in (dwqkv, dwg, dwo, dwu, dwd))]
         dq, dwqkv, dwg, dwo = side
         if dwu is None or dwd is None:
@@ -1252,9 +1308,7 @@ def swa_dit_block_bwd(
     dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
     dKh = torch.empty_like(dQh)
     dVh = torch.empty_like(dQh)
-    _swa_attn_bwd_dq_kernel[
-        lambda m: (triton.cdiv(S, m["BM"]), N * H)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_attn_bwd_dq_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qh,
         kh,
         vh,
@@ -1271,9 +1325,7 @@ def swa_dit_block_bwd(
         D=D,
         HW=half_window,
     )
-    _swa_attn_bwd_dkv_kernel[
-        lambda m: (triton.cdiv(S, m["BN"]), N * H)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_attn_bwd_dkv_kernel[lambda m: (triton.cdiv(S, m["BN"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qh,
         kh,
         vh,
@@ -1330,8 +1382,36 @@ def swa_dit_block_bwd(
     return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
 
 
-def _bwd_attention_side(ext_o, ext_a, ext_q, dq1, q, mod, cos, sin, seqused, wqkv, wg, wo, qh, kh, vh, g, o, lse, x, pq, pk,
-                        att, dmod, B, half_window, eps, Ak, raw=False):
+def _bwd_attention_side(
+    ext_o,
+    ext_a,
+    ext_q,
+    dq1,
+    q,
+    mod,
+    cos,
+    sin,
+    seqused,
+    wqkv,
+    wg,
+    wo,
+    qh,
+    kh,
+    vh,
+    g,
+    o,
+    lse,
+    x,
+    pq,
+    pk,
+    att,
+    dmod,
+    B,
+    half_window,
+    eps,
+    Ak,
+    raw=False,
+):
     """The bf16 backward from dq1 down to dq when at least one of its three stages is hand-CUDA: out-projection
     (``ext_o``), window attention dq / dk / dv (``ext_a``), qkvg (``ext_q``); a None extension runs that stage's Triton
     kernel(s). Returns (dq [M, C], dWqkv, dWg, dWo); with ``raw`` (and a CUDA qkvg stage) the three weight gradients are not
@@ -1349,12 +1429,12 @@ def _bwd_attention_side(ext_o, ext_a, ext_q, dq1, q, mod, cos, sin, seqused, wqk
     A = N // B
     dev = q.device
     bf = torch.bfloat16
-    scale = D ** -0.5
+    scale = D**-0.5
     dP = torch.empty(M, 4 * C, device=dev, dtype=bf)
     grid_t = lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     if ext_o is not None:
         dO, datt, gated, Dv = ext_o.oproj_bwd(dq1, g, o, att, mod, dmod, wo, dP, A, B, S)
-        dG = dP[:, 3 * C:]
+        dG = dP[:, 3 * C :]
     else:
         dO = torch.empty(M, C, device=dev, dtype=bf)
         dG = torch.empty_like(dO)
@@ -1362,10 +1442,10 @@ def _bwd_attention_side(ext_o, ext_a, ext_q, dq1, q, mod, cos, sin, seqused, wqk
         gated = torch.empty_like(dO)
         Dv = torch.empty(N, H, S, device=dev, dtype=torch.float32)
         _swa_oproj_bwd_kernel[grid_t](
-            dq1, o, g, mod, wo, att, dO, dG, Dv, datt, gated, dmod, S, A, B,
-            shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C)
+            dq1, o, g, mod, wo, att, dO, dG, Dv, datt, gated, dmod, S, A, B, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C
+        )
         if ext_q is not None:
-            dP[:, 3 * C:] = dG
+            dP[:, 3 * C :] = dG
     heads: list[torch.Tensor] | None = None
     if ext_a is not None:
         if ext_q is not None:
@@ -1377,37 +1457,63 @@ def _bwd_attention_side(ext_o, ext_a, ext_q, dq1, q, mod, cos, sin, seqused, wqk
         dKh = torch.empty_like(dQh)
         dVh = torch.empty_like(dQh)
         _swa_attn_bwd_dq_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
-            qh, kh, vh, dO, lse, Dv, seqused, dQh, S, scale, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D,
-            HW=half_window)
+            qh, kh, vh, dO, lse, Dv, seqused, dQh, S, scale, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, HW=half_window
+        )
         _swa_attn_bwd_dkv_kernel[lambda m: (triton.cdiv(S, m["BN"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
-            qh, kh, vh, dO, lse, Dv, seqused, dKh, dVh, S, scale, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D,
-            HW=half_window)
+            qh, kh, vh, dO, lse, Dv, seqused, dKh, dVh, S, scale, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, HW=half_window
+        )
         heads = [dQh, dKh, dVh]
         if ext_q is not None:
-            for i, t in enumerate(heads):                          # head-major [N, H, S, D] -> row-major column block i
-                dP[:, i * C:(i + 1) * C].view(N, S, H, D).copy_(t.transpose(1, 2))
+            for i, t in enumerate(heads):  # head-major [N, H, S, D] -> row-major column block i
+                dP[:, i * C : (i + 1) * C].view(N, S, H, D).copy_(t.transpose(1, 2))
     if ext_q is not None:
         dq = ext_q.qkvg_bwd(q.reshape(M, C), pq, pk, dq1, mod, dmod, cos, sin, wqkv, wg, dP, A, B, S, eps, FP32_EPS)
         if raw:
             return dq, dP, datt, gated
-        dwqkv = _mm32(dP[:, :3 * C].t(), x)
-        dwg = _mm32(dP[:, 3 * C:].t(), x)
+        dwqkv = _mm32(dP[:, : 3 * C].t(), x)
+        dwg = _mm32(dP[:, 3 * C :].t(), x)
     else:
         assert heads is not None
         dQh, dKh, dVh = heads
         dq = torch.empty(M, C, device=dev, dtype=bf)
         dPt = torch.empty(M, 4 * C, device=dev, dtype=bf)
         _swa_qkvg_bwd_kernel[grid_t](
-            q.reshape(M, C), mod, cos, sin, wqkv, wg, pq, pk, dQh, dKh, dVh, dG.contiguous(), dq1, dq, dPt, dmod, S, A, B,
-            eps, FP32_EPS, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C)
-        dwqkv = _mm32(dPt[:, :3 * C].t(), x)
-        dwg = _mm32(dPt[:, 3 * C:].t(), x)
+            q.reshape(M, C),
+            mod,
+            cos,
+            sin,
+            wqkv,
+            wg,
+            pq,
+            pk,
+            dQh,
+            dKh,
+            dVh,
+            dG.contiguous(),
+            dq1,
+            dq,
+            dPt,
+            dmod,
+            S,
+            A,
+            B,
+            eps,
+            FP32_EPS,
+            shape_key=atom_key(S, A=Ak, C=C),
+            C=C,
+            H=H,
+            D=D,
+            MODW=6 * C,
+        )
+        dwqkv = _mm32(dPt[:, : 3 * C].t(), x)
+        dwg = _mm32(dPt[:, 3 * C :].t(), x)
     dwo = _mm32(datt.t(), gated)
     return dq, dwqkv, dwg, dwo
 
 
-def _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk,
-                             att, y, ffn, B, half_window, eps):
+def _swa_dit_bwd_fp32_launch(
+    dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps
+):
     """The fp32 backward: FFN -> out-projection -> the attention backward on bf16 operands (dO, and dQ / dK / dV, in
     bf16 as FlashAttention-4 has them) -> qkvg, as the CUDA extension (sm_90) or
     ``backward_fp32``'s Triton kernels around the shared attention kernels; fp32 weight gradients from torch GEMMs over
@@ -1416,31 +1522,60 @@ def _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd
     NHID = wd.shape[1]
     ext = _fp32_cuda(C, NHID, half_window, q.device)
     if ext is not None:
-        dq, dmod, dP, datt, gated, dab, hh, dffn = ext.bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh,
-                                                           g, o, lse, q1, pq, pk, att, y, ffn, B, half_window, eps, FP32_EPS)
+        dq, dmod, dP, datt, gated, dab, hh, dffn = ext.bwd(
+            dy,
+            q,
+            mod,
+            cos,
+            sin,
+            seqused,
+            wqkv,
+            wg,
+            wo,
+            wu,
+            wd,
+            qh,
+            kh,
+            vh,
+            g,
+            o,
+            lse,
+            q1,
+            pq,
+            pk,
+            att,
+            y,
+            ffn,
+            B,
+            half_window,
+            eps,
+            FP32_EPS,
+        )
     else:
-        dq, dmod, dP, datt, gated, dab, hh, dffn = _swa_dit_bwd_fp32_triton(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu,
-                                                                            wd, qh, kh, vh, g, o, lse, q1, pq, pk, att, y,
-                                                                            ffn, B, half_window, eps)
+        dq, dmod, dP, datt, gated, dab, hh, dffn = _swa_dit_bwd_fp32_triton(
+            dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, pq, pk, att, y, ffn, B, half_window, eps
+        )
     served_w = C == D_ATOM and NHID == N_HIDDEN
     # TMA + wgmma on bf16 hi / lo planes up to _WGRAD_F32_WG_MAX_ROWS (ties cuBLAS's TF32 at 49k rows, ahead below, 60x closer to
     # fp32); the mma.sync kernel where it does not build; above, cuBLAS's TF32 GEMMs are faster
     ext_w = _cuda("wgwg32", served_w and N * S <= _WGRAD_F32_WG_MAX_ROWS, q.device) or _cuda(
-        "wgrad", served_w and N * S <= _WGRAD_F32_MAX_ROWS, q.device)
+        "wgrad", served_w and N * S <= _WGRAD_F32_MAX_ROWS, q.device
+    )
     if ext_w is not None:
         M = N * S
         dwqkv, dwg, dwo, dwu, dwd = ext_w.wgrad_f32(dP, x.reshape(M, C), datt, gated, dab, y.reshape(M, C), dffn, hh)
         return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
-    dwqkv = dP[:, :3 * C].t() @ x
-    dwg = dP[:, 3 * C:].t() @ x
+    dwqkv = dP[:, : 3 * C].t() @ x
+    dwg = dP[:, 3 * C :].t() @ x
     dwo = datt.t() @ gated
     dwu = dab.t() @ y
     dwd = dffn.t() @ hh
     return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
 
 
-def _swa_dit_bwd_fp32_triton(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, pq, pk, att,
-                             y, ffn, B, half_window, eps):
+def _swa_dit_bwd_fp32_triton(
+    dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, pq, pk, att, y, ffn, B, half_window, eps
+):
     """The fp32 backward's Triton kernels: [dq, dmod, dP, datt, gated, dab, hh, dffn] (the weight-gradient operands)."""
     N, S, C = q.shape
     H = N_HEAD
@@ -1461,9 +1596,7 @@ def _swa_dit_bwd_fp32_triton(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd
     dffn = torch.empty(M, C, device=dev, dtype=f32)
     datt = torch.empty(M, C, device=dev, dtype=f32)
     gated = torch.empty(M, C, device=dev, dtype=f32)
-    grid_t = (
-        lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)
-    )  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    grid_t = lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     _swa_ffn_bwd_fp32_kernel[grid_t](
         dy.reshape(M, C),
         q1,
@@ -1511,9 +1644,7 @@ def _swa_dit_bwd_fp32_triton(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd
     dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
     dKh = torch.empty_like(dQh)
     dVh = torch.empty_like(dQh)
-    _swa_attn_bwd_dq_kernel[
-        lambda m: (triton.cdiv(S, m["BM"]), N * H)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_attn_bwd_dq_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qh,
         kh,
         vh,
@@ -1530,9 +1661,7 @@ def _swa_dit_bwd_fp32_triton(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd
         D=D,
         HW=half_window,
     )
-    _swa_attn_bwd_dkv_kernel[
-        lambda m: (triton.cdiv(S, m["BN"]), N * H)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_attn_bwd_dkv_kernel[lambda m: (triton.cdiv(S, m["BN"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qh,
         kh,
         vh,
@@ -1553,6 +1682,31 @@ def _swa_dit_bwd_fp32_triton(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd
     dq = torch.empty(M, C, device=dev, dtype=f32)
     dP = torch.empty(M, 4 * C, device=dev, dtype=f32)
     _swa_qkvg_bwd_fp32_kernel[grid_t](
-        q.reshape(M, C), mod, cos, sin, wqkv, wg, pq, pk, dQh, dKh, dVh, dG, dq1, dq, dP, dmod, S, A, B, eps, FP32_EPS,
-        shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C)
+        q.reshape(M, C),
+        mod,
+        cos,
+        sin,
+        wqkv,
+        wg,
+        pq,
+        pk,
+        dQh,
+        dKh,
+        dVh,
+        dG,
+        dq1,
+        dq,
+        dP,
+        dmod,
+        S,
+        A,
+        B,
+        eps,
+        FP32_EPS,
+        shape_key=atom_key(S, A=Ak, C=C),
+        C=C,
+        H=H,
+        D=D,
+        MODW=6 * C,
+    )
     return [dq, dmod, dP, datt, gated, dab, hh, dffn]

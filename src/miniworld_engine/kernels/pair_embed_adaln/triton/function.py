@@ -1,5 +1,6 @@
 """The portable (Triton) backend of ``PairEmbedAdaLN``: the forward / backward kernels of ``main.py`` as an autograd function. The inputs are the
 prepared tensors of ``cuda/function.py`` (the same module-side preparation); the pair comes out bf16, the backward is bitwise deterministic."""
+
 from __future__ import annotations
 
 import torch

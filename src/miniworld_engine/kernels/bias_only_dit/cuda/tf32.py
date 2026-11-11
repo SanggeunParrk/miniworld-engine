@@ -47,7 +47,7 @@ _dir = Path(__file__).parent
 _SMEM_MAX = 232448
 
 
-tf32_gemms = tf32_matmul   # cuBLAS on TF32 tensor cores for the fp32 path's GEMMs (restored after)
+tf32_gemms = tf32_matmul  # cuBLAS on TF32 tensor cores for the fp32 path's GEMMs (restored after)
 
 
 @functools.lru_cache(maxsize=None)
@@ -75,12 +75,7 @@ def rows32():
 
 def _f32_rows(t: torch.Tensor) -> int:
     """Row stride in bytes of an fp32 [rows, cols] view TMA reads (unit column stride, 16-byte aligned rows)."""
-    assert (
-        t.dtype is torch.float32
-        and t.stride(1) == 1
-        and t.stride(0) % 4 == 0
-        and t.data_ptr() % 16 == 0
-    ), (t.dtype, t.stride())
+    assert t.dtype is torch.float32 and t.stride(1) == 1 and t.stride(0) % 4 == 0 and t.data_ptr() % 16 == 0, (t.dtype, t.stride())
     return t.stride(0) * 4
 
 
@@ -133,9 +128,7 @@ class PvGateCoreTF32:
     ``pdl``: the three-kernel inference step's build (``-DPDL_INF``: programmatic dependent launch, the gated output rounded to TF32
     for the tail's MMA), launched with the PDL attribute; default off (the training step and the default inference step)."""
 
-    def __init__(
-        self, device_index: int, nh: int = 16, dh: int | None = None, pdl: bool = False
-    ):
+    def __init__(self, device_index: int, nh: int = 16, dh: int | None = None, pdl: bool = False):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
         self._sm100, self._tm = sm100, sm100._tm
@@ -186,13 +179,7 @@ class PvGateCoreTF32:
         channels, SW128 for 32, none for dh 32)."""
         tm, DA, wb, rs = self._tm, self.nh * self.dh, self.dh - 32, _f32_rows(t)
         a = tm(t, [DA, M], rs, [32, 128], dtype="f32")
-        b = (
-            a
-            if wb == 0
-            else tm(
-                t, [DA, M], rs, [wb, 128], swizzle=64 if wb == 16 else 128, dtype="f32"
-            )
-        )
+        b = a if wb == 0 else tm(t, [DA, M], rs, [wb, 128], swizzle=64 if wb == 16 else 128, dtype="f32")
         return a, b
 
     def _bind(self, v, P, out, S, L, g):
@@ -211,12 +198,7 @@ class PvGateCoreTF32:
     def __call__(self, v, P, out, S, g=None):
         """v [S L, nh dh] view, P [nh L, L] contiguous, out [S L, nh dh] view, g [S L, nh dh] view or None; all fp32."""
         L = v.shape[0] // S
-        assert (
-            P.dtype is torch.float32
-            and P.is_contiguous()
-            and tuple(P.shape) == (self.nh * L, L)
-            and L % 128 == 0
-        )
+        assert P.dtype is torch.float32 and P.is_contiguous() and tuple(P.shape) == (self.nh * L, L) and L % 128 == 0
         key = (
             v.data_ptr(),
             v.stride(0),
@@ -298,13 +280,8 @@ class GemmGluTF32:
     def __call__(self, x, w, ab, out):
         M, D, H = x.shape[0], self.D, self.H
         assert x.shape == (M, D) and ab.shape == (M, 2 * H), (x.shape, ab.shape)
-        assert w.shape == ((H, D) if self.bwd else (2 * H, D)) and out.shape == (
-            (M, 2 * H) if self.bwd else (M, H)
-        ), (w.shape, out.shape)
-        assert all(
-            t.dtype is torch.float32 and t.is_contiguous() and t.data_ptr() % 16 == 0
-            for t in (x, w, ab, out)
-        )
+        assert w.shape == ((H, D) if self.bwd else (2 * H, D)) and out.shape == ((M, 2 * H) if self.bwd else (M, H)), (w.shape, out.shape)
+        assert all(t.dtype is torch.float32 and t.is_contiguous() and t.data_ptr() % 16 == 0 for t in (x, w, ab, out))
         self.runs.bind(
             (x.data_ptr(), w.data_ptr(), ab.data_ptr(), out.data_ptr(), M),
             lambda: self._bind(x, w, ab, out),
@@ -396,9 +373,7 @@ class Dpb32:
         box = lambda t, w, rows: tm(t, [DA, M], _f32_rows(t), [w, rows], **f)  # noqa: E731
         if self.last == "pair":
             mdo, mv = box(do, 32, 128), box(v, 32, 128)
-            mdo2, mv2 = (
-                (box(do, 16, 128), box(v, 16, 128)) if dh == 48 else (mdo, mv)
-            )  # 48-wide heads: 32 + 16 channels
+            mdo2, mv2 = (box(do, 16, 128), box(v, 16, 128)) if dh == 48 else (mdo, mv)  # 48-wide heads: 32 + 16 channels
             maps = _descriptors(
                 mdo,
                 mdo2,
@@ -418,9 +393,7 @@ class Dpb32:
                 A,
             )
         mdo, mv = box(do, 32, 128), box(v, 32, DPB32_NJ)
-        mdo2, mv2 = (
-            (box(do, 16, 128), box(v, 16, DPB32_NJ)) if dh == 48 else (mdo, mv)
-        )  # 48-wide heads: 32 + 16 channels
+        mdo2, mv2 = (box(do, 16, 128), box(v, 16, DPB32_NJ)) if dh == 48 else (mdo, mv)  # 48-wide heads: 32 + 16 channels
         maps = _descriptors(
             mdo,
             mdo2,
@@ -434,17 +407,9 @@ class Dpb32:
 
     def __call__(self, do, v, P, dd, out, A):
         L = do.shape[0] // A
-        assert (
-            all(t.dtype is torch.float32 for t in (do, v, P, dd, out))
-            and dd.is_contiguous()
-            and P.is_contiguous()
-        )
-        assert (
-            out.is_contiguous() and tuple(P.shape) == (self.nh * L, L) and L % 128 == 0
-        )
-        pair = (
-            dpb32_pair(L, self.nh)
-        )
+        assert all(t.dtype is torch.float32 for t in (do, v, P, dd, out)) and dd.is_contiguous() and P.is_contiguous()
+        assert out.is_contiguous() and tuple(P.shape) == (self.nh * L, L) and L % 128 == 0
+        pair = dpb32_pair(L, self.nh)
         if pair and self._pair_k is None:
             try:
                 self._pair_k = self.pair_kernel()
@@ -522,12 +487,7 @@ def pack_pairs(w: torch.Tensor, cl: int = 8) -> torch.Tensor:
     p the k-block pair). Device ops only (capture-safe)."""
     n, k = w.shape
     assert n == 768 and k % 64 == 0 and cl in TAIL_CLUSTERS, (w.shape, cl)
-    return (
-        w.reshape(cl, 768 // cl, k // 64, 2, 32)
-        .permute(0, 2, 3, 1, 4)
-        .reshape(-1, 32)
-        .contiguous()
-    )
+    return w.reshape(cl, 768 // cl, k // 64, 2, 32).permute(0, 2, 3, 1, 4).reshape(-1, 32).contiguous()
 
 
 _MAXC: dict = {}
@@ -672,12 +632,7 @@ class _LaunchPDL:
 
 
 def _check_rows(t: torch.Tensor, cols: int, name: str) -> None:
-    assert (
-        t.dtype is torch.float32
-        and t.dim() == 2
-        and t.shape[1] == cols
-        and t.stride(1) == 1
-    ), (name, t.dtype, t.shape, t.stride())
+    assert t.dtype is torch.float32 and t.dim() == 2 and t.shape[1] == cols and t.stride(1) == 1, (name, t.dtype, t.shape, t.stride())
     assert t.data_ptr() % 16 == 0 and t.stride(0) % 4 == 0, (name, t.stride())
 
 
@@ -715,9 +670,7 @@ class FrontTF32:
         )
 
     def clusters(self) -> tuple[int, ...]:
-        return (
-            (8, 6, 4) if self.da == 768 else (8, 4)
-        )  # CL 6 splits 2 DA = 1536 columns only
+        return (8, 6, 4) if self.da == 768 else (8, 4)  # CL 6 splits 2 DA = 1536 columns only
 
     def cluster(self, n_tiles: int) -> int:
         """CTAs per row tile: the least modelled time over the sizes built (rounds of resident clusters x per-CTA time ~ 1 / CL).
@@ -752,30 +705,10 @@ class FrontTF32:
     def __call__(self, x, tab, w, vg, T, xa):
         M, da = x.shape[0], self.da
         _check_rows(xa, 768, "xa")
-        assert (
-            x.is_contiguous()
-            and x.shape == (M, 768)
-            and x.dtype is torch.float32
-            and M % 128 == 0
-            and T % 128 == 0
-        )
-        assert (
-            tab.dtype is torch.float32
-            and tab.shape[0] == T
-            and tab[0].numel() == 6 * 768
-            and tab.stride(-1) == 1
-        )
-        assert (
-            tab.stride(0) % 4 == 0
-            and tab.data_ptr() % 16 == 0
-            and (tab.dim() == 2 or tab.stride(1) == 768)
-        )
-        assert (
-            w.is_contiguous()
-            and w.shape == (2 * da, 768)
-            and vg.is_contiguous()
-            and vg.shape == (M, 2 * da)
-        )
+        assert x.is_contiguous() and x.shape == (M, 768) and x.dtype is torch.float32 and M % 128 == 0 and T % 128 == 0
+        assert tab.dtype is torch.float32 and tab.shape[0] == T and tab[0].numel() == 6 * 768 and tab.stride(-1) == 1
+        assert tab.stride(0) % 4 == 0 and tab.data_ptr() % 16 == 0 and (tab.dim() == 2 or tab.stride(1) == 768)
+        assert w.is_contiguous() and w.shape == (2 * da, 768) and vg.is_contiguous() and vg.shape == (M, 2 * da)
         cl = self.cluster(M // 128)
         key = (
             tab.data_ptr(),
@@ -847,10 +780,7 @@ class TailTF32:
         n8, n6 = max_clusters(self.kernel(8), 8), max_clusters(self.kernel(6), 6)
         if tail_pair_on():
             rounds = min(-(-n_tiles // max(n8, 1)), -(-n_tiles // max(n6, 1)))
-            if (
-                -(-n_tiles // max(2 * max_clusters(self.kernel(TAIL_PAIR), 8), 1))
-                < rounds
-            ):
+            if -(-n_tiles // max(2 * max_clusters(self.kernel(TAIL_PAIR), 8), 1)) < rounds:
                 return TAIL_PAIR
         return pick_cluster(n_tiles, {8: (n8, 1.0), 6: (n6, 1.4)})
 
@@ -924,42 +854,14 @@ class TailTF32:
         Mp = tail_rows(M, cl)
         _check_rows(xt, 768, "xt")
         assert xt.shape[0] == Mp, (xt.shape, Mp)
-        assert (
-            h.is_contiguous() and h.shape == (Mp * 48, 32) and h.dtype is torch.float32
-        ), h.shape  # blocked k-block-major
+        assert h.is_contiguous() and h.shape == (Mp * 48, 32) and h.dtype is torch.float32, h.shape  # blocked k-block-major
         assert a.is_contiguous() and a.shape == (M, da) and a.dtype is torch.float32
-        assert (
-            x.is_contiguous()
-            and x.shape == (M, 768)
-            and x.dtype is torch.float32
-            and M % 128 == 0
-            and T % 128 == 0
-        )
-        assert (
-            out.is_contiguous()
-            and out.shape == (M, 768)
-            and out.dtype is torch.float32
-            and out.data_ptr() != x.data_ptr()
-        )
-        assert (
-            tab.dtype is torch.float32
-            and tab.shape[0] == T
-            and tab[0].numel() == 6 * 768
-            and tab.stride(-1) == 1
-        )
-        assert (
-            tab.stride(0) % 4 == 0
-            and tab.data_ptr() % 16 == 0
-            and (tab.dim() == 2 or tab.stride(1) == 768)
-        )
-        assert (
-            wo.shape == (768 * da // 32, 32)
-            and wab.shape == (3072, 768)
-            and wsq.shape == (768 * 48, 32)
-        ), (wo.shape, wsq.shape)
-        assert all(
-            w.is_contiguous() and w.dtype is torch.float32 for w in (wo, wab, wsq)
-        )
+        assert x.is_contiguous() and x.shape == (M, 768) and x.dtype is torch.float32 and M % 128 == 0 and T % 128 == 0
+        assert out.is_contiguous() and out.shape == (M, 768) and out.dtype is torch.float32 and out.data_ptr() != x.data_ptr()
+        assert tab.dtype is torch.float32 and tab.shape[0] == T and tab[0].numel() == 6 * 768 and tab.stride(-1) == 1
+        assert tab.stride(0) % 4 == 0 and tab.data_ptr() % 16 == 0 and (tab.dim() == 2 or tab.stride(1) == 768)
+        assert wo.shape == (768 * da // 32, 32) and wab.shape == (3072, 768) and wsq.shape == (768 * 48, 32), (wo.shape, wsq.shape)
+        assert all(w.is_contiguous() and w.dtype is torch.float32 for w in (wo, wab, wsq))
         key = (
             a.data_ptr(),
             x.data_ptr(),
@@ -975,9 +877,7 @@ class TailTF32:
             T,
             cl,
         )
-        self.runs.bind(
-            key, lambda: self._bind(a, x, tab, wo, wab, wsq, xt, h, M, T, cl)
-        )(out)
+        self.runs.bind(key, lambda: self._bind(a, x, tab, wo, wab, wsq, xt, h, M, T, cl))(out)
         return out
 
 

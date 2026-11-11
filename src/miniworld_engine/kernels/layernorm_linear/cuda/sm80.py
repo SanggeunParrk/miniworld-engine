@@ -75,23 +75,11 @@ def serves(x: torch.Tensor, ln_weight: torch.Tensor, proj_weight: torch.Tensor) 
         or proj_weight.dtype is not BF
     ):
         return False
-    if (
-        ln_weight.shape != (d,)
-        or ln_weight.dtype not in (F32, BF)
-        or ln_weight.device != x.device
-        or proj_weight.device != x.device
-    ):
+    if ln_weight.shape != (d,) or ln_weight.dtype not in (F32, BF) or ln_weight.device != x.device or proj_weight.device != x.device:
         return False
     if x.numel() // d >= 2**31:
         return False
-    return (
-        _is_ampere(
-            x.device.index
-            if x.device.index is not None
-            else torch.cuda.current_device()
-        )
-        and _loads()
-    )
+    return _is_ampere(x.device.index if x.device.index is not None else torch.cuda.current_device()) and _loads()
 
 
 def _forward_fake(x, ln_w, w, eps, save):
@@ -105,22 +93,12 @@ def _forward_fake(x, ln_w, w, eps, save):
 
 
 @opaque(fake=_forward_fake, name="layernorm_linear_sm80_forward")
-def _forward(
-    x: torch.Tensor, ln_w: torch.Tensor, w: torch.Tensor, eps: float, save: bool
-) -> list[torch.Tensor]:
+def _forward(x: torch.Tensor, ln_w: torch.Tensor, w: torch.Tensor, eps: float, save: bool) -> list[torch.Tensor]:
     """The kernel launch: ``x`` ``[M, d]`` bf16 contiguous, ``ln_w`` ``[d]`` fp32, ``w`` ``[n_head, d]`` bf16; returns [out, stats, u] (the last two empty unless ``save``)."""
     m, nh = x.shape[0], w.shape[0]
     out = torch.empty((m, nh), dtype=BF, device=x.device)
-    stats = (
-        torch.empty((m, 2), dtype=F32, device=x.device)
-        if save
-        else x.new_empty((0,), dtype=F32)
-    )
-    u = (
-        torch.empty((m, nh), dtype=F32, device=x.device)
-        if save
-        else x.new_empty((0,), dtype=F32)
-    )
+    stats = torch.empty((m, 2), dtype=F32, device=x.device) if save else x.new_empty((0,), dtype=F32)
+    u = torch.empty((m, nh), dtype=F32, device=x.device) if save else x.new_empty((0,), dtype=F32)
     _ext().lnl_forward(x, w, ln_w, out, stats, u, float(eps))
     return [out, stats, u]
 
@@ -159,9 +137,7 @@ def _scale32(ln_weight: torch.Tensor) -> torch.Tensor:
 class _LayerNormLinear(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x2, ln_weight, proj_weight, eps):
-        out, stats, u = _forward(
-            x2, _scale32(ln_weight), proj_weight.contiguous(), eps, True
-        )
+        out, stats, u = _forward(x2, _scale32(ln_weight), proj_weight.contiguous(), eps, True)
         ctx.save_for_backward(x2, ln_weight, proj_weight, stats, u)
         return out
 
@@ -191,14 +167,10 @@ def layer_norm_linear(
     ``[..., n_head]`` bf16.  Autograd-aware (``dx``, the scale's and the projection's gradients).  Call ``serves()`` first."""
     shape = x.shape
     x2 = x.reshape(-1, shape[-1]).contiguous()
-    grad = torch.is_grad_enabled() and (
-        x.requires_grad or ln_weight.requires_grad or proj_weight.requires_grad
-    )
+    grad = torch.is_grad_enabled() and (x.requires_grad or ln_weight.requires_grad or proj_weight.requires_grad)
     out = (
         _LayerNormLinear.apply(x2, ln_weight, proj_weight, float(eps))
         if grad
-        else _forward(
-            x2, _scale32(ln_weight), proj_weight.contiguous(), float(eps), False
-        )[0]
+        else _forward(x2, _scale32(ln_weight), proj_weight.contiguous(), float(eps), False)[0]
     )
     return out.reshape(*shape[:-1], proj_weight.shape[0])

@@ -50,9 +50,7 @@ def ext():
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
         ],
         extra_cflags=["-std=c++17", "-O3"],
-        extra_ldflags=[
-            "-lcublasLt"
-        ],  # the searched explicit batched-GEMM algorithms (pwa_lt_gemm.cuh)
+        extra_ldflags=["-lcublasLt"],  # the searched explicit batched-GEMM algorithms (pwa_lt_gemm.cuh)
         verbose=False,
     )
 
@@ -69,9 +67,7 @@ def _bmm_ext():
     )
 
 
-def lt_bcast(
-    w: torch.Tensor, v: torch.Tensor, transpose: bool = False
-) -> torch.Tensor | None:
+def lt_bcast(w: torch.Tensor, v: torch.Tensor, transpose: bool = False) -> torch.Tensor | None:
     """o = w v (``transpose``: dv = w^T dO) for the head-major [8 ns, L, kp C] tensors with the weights w [8, L, L] shared by the chunks of a head, through cuBLASLt's pointer-array batch
     mode with the searched algorithm of the shape (no expanded copy of w); None when the shape is not in ``sm80/pwa_lt_table.inc`` (the caller keeps its path)."""
     out = torch.empty_like(v)
@@ -80,9 +76,7 @@ def lt_bcast(
 
 def lt_dw(d: torch.Tensor, v: torch.Tensor) -> torch.Tensor | None:
     """The weight-gradient product d v^T of [B, L, kp C] bf16 -> fp32 [B, L, L] (one batch per chunk) through the searched cuBLASLt algorithm; None when the shape is not in the table."""
-    out = torch.empty(
-        (d.shape[0], d.shape[1], d.shape[1]), dtype=torch.float32, device=d.device
-    )
+    out = torch.empty((d.shape[0], d.shape[1], d.shape[1]), dtype=torch.float32, device=d.device)
     return out if ext().lt_dw(d, v, out) else None
 
 
@@ -118,9 +112,7 @@ def pair_fwd(
     """z [L, L, DZ] bf16, key_mask [L] uint8 (or None), lnw / lnb fp32 [DZ], wb [8, DZ] bf16 -> w [8, L, L] bf16 (softmax over the last axis)."""
     length = z.shape[0]
     w = z.new_empty((HEADS, length, length))
-    ext().pair_fwd(
-        z, _none(z, torch.uint8) if key_mask is None else key_mask, lnw, lnb, wb, w, eps
-    )
+    ext().pair_fwd(z, _none(z, torch.uint8) if key_mask is None else key_mask, lnw, lnb, wb, w, eps)
     return w
 
 
@@ -151,11 +143,7 @@ def ln_v(
     depth, length, _ = m.shape
     c = wv.shape[0] // HEADS
     v = m.new_empty((HEADS * ns, length, depth // ns * c))
-    stats = (
-        m.new_empty((depth, length, 2), dtype=torch.float32)
-        if save_stats
-        else _none(m, torch.float32)
-    )
+    stats = m.new_empty((depth, length, 2), dtype=torch.float32) if save_stats else _none(m, torch.float32)
     ext().ln_v(m, lnw, lnb, wv, v, stats, eps)
     return v, stats
 
@@ -289,9 +277,7 @@ def pair_bwd(
     pm = z.new_empty((length, HEADS * dz_), dtype=torch.float32)
     ps = z.new_empty((length, HEADS), dtype=torch.float32)
     if variant is None:
-        variant = (
-            0
-        )  # schedule experiments (CTAs per SM); 0 is the shipped one
+        variant = 0  # schedule experiments (CTAs per SM); 0 is the shipped one
     ext().pair_bwd(
         z,
         w,

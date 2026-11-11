@@ -81,17 +81,13 @@ def _rows():
 
 class FusedBiasOnlyDiT:
     def __init__(self, blocks, dtype=torch.bfloat16):
-        assert dtype in (torch.bfloat16, torch.float32), (
-            "bf16, or fp32 on TF32 tensor cores"
-        )
+        assert dtype in (torch.bfloat16, torch.float32), "bf16, or fp32 on TF32 tensor cores"
         blocks = list(blocks)
         a0 = blocks[0].attention
         self.nb = len(blocks)
         self.h = a0.n_head
         self.d = a0.to_out.weight.shape[0]  # the single width
-        self.da = a0.to_value.weight.shape[
-            0
-        ]  # the attention's: n_head x head width (768 or 1024)
+        self.da = a0.to_value.weight.shape[0]  # the attention's: n_head x head width (768 or 1024)
         self.dc = a0.ada_ln_in.ln_cond.weight.shape[0]
         self.dp = a0.ln_pair.weight.shape[0]
         self.fp32 = dtype is torch.float32
@@ -119,20 +115,12 @@ class FusedBiasOnlyDiT:
             # the two output gates read the raw conditioning
             w2 += [f32(at.to_scale.weight), f32(tr.to_scale.weight)]
             b2 += [f32(at.to_scale.bias), f32(tr.to_scale.bias)]
-            pw.append(
-                f32(at.to_bias.weight) * f32(at.ln_pair.weight)
-            )  # [H, dp], ln_pair weight folded
+            pw.append(f32(at.to_bias.weight) * f32(at.ln_pair.weight))  # [H, dp], ln_pair weight folded
             self.per.append(
                 dict(
-                    wvg=torch.cat([at.to_value.weight, at.to_gate.weight], 0)
-                    .detach()
-                    .to(dtype)
-                    .contiguous(),
+                    wvg=torch.cat([at.to_value.weight, at.to_gate.weight], 0).detach().to(dtype).contiguous(),
                     wo=at.to_out.weight.detach().to(dtype).contiguous(),
-                    wab=torch.cat([tr.expand_a.weight, tr.expand_b.weight], 0)
-                    .detach()
-                    .to(dtype)
-                    .contiguous(),
+                    wab=torch.cat([tr.expand_a.weight, tr.expand_b.weight], 0).detach().to(dtype).contiguous(),
                     ws=tr.squeeze.weight.detach().to(dtype).contiguous(),
                 )
             )
@@ -146,9 +134,7 @@ class FusedBiasOnlyDiT:
         self.n_g1 = self.w1.shape[0]
         self.wc = torch.cat([self.w1, self.w2], 0).contiguous()
         self.bc = torch.cat([self.b1, self.b2], 0).float().contiguous()
-        self.csc = torch.cat(
-            [self.w1.float().sum(1), torch.zeros(self.w2.shape[0], device=dev)], 0
-        ).contiguous()
+        self.csc = torch.cat([self.w1.float().sum(1), torch.zeros(self.w2.shape[0], device=dev)], 0).contiguous()
         self.dtype = dtype
         self._buf: dict = {}
         self._ops: dict = {}
@@ -166,9 +152,7 @@ class FusedBiasOnlyDiT:
         if self.fp32:
             # one pass of the pair per block: its LayerNorm and the H biases on the FMA pipe, exact fp32 (no LN(pair) in memory)
             R32 = _tf32().rows32()
-            P = torch.empty(
-                self.nb * self.h, L, L, device=pair.device, dtype=torch.float32
-            )
+            P = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=torch.float32)
             z32 = z2d.float().contiguous()
             # the 256-wide pair: the same LayerNorm + projection with the products on TF32 tensor cores, split fp32 (3 terms, ~exact)
             # -- on the FMA pipe its 2 x 256 x H FMAs per pair row were the whole step (~1 ms of 1.85 at L768, the block no faster
@@ -177,7 +161,11 @@ class FusedBiasOnlyDiT:
             for b in range(self.nb):
                 if pst is not None:
                     R32.pair_bias_tc_cuda(
-                        z32, self.pw[b * self.h : (b + 1) * self.h].contiguous(), P[b * self.h : (b + 1) * self.h], pst, EPS,
+                        z32,
+                        self.pw[b * self.h : (b + 1) * self.h].contiguous(),
+                        P[b * self.h : (b + 1) * self.h],
+                        pst,
+                        EPS,
                         _HOIST_TC_TERMS,
                     )
                     continue
@@ -271,21 +259,13 @@ class FusedBiasOnlyDiT:
                 tiles = (xa.shape[0] // 128) * (wab.shape[0] // 256)
                 nsm = num_sms(idx)
                 small = _H100_EXPAND_ROWS and (tiles <= nsm // 2 or nsm < tiles <= nsm * 11 // 10)
-                self._ops[key] = (
-                    gemm_swiglu.GemmSwigluSm90(idx)
-                    if gemm_swiglu.supported_sm90(xa, wab) and not small
-                    else None
-                )
+                self._ops[key] = gemm_swiglu.GemmSwigluSm90(idx) if gemm_swiglu.supported_sm90(xa, wab) and not small else None
             return self._ops[key]
         if key not in self._ops:
             from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
 
             wab = self.per[0]["wab"]
-            self._ops[key] = (
-                gemm_swiglu.GemmSwiglu(idx, K=wab.shape[1], H=wab.shape[0] // 2)
-                if gemm_swiglu.supported(xa, wab)
-                else None
-            )
+            self._ops[key] = gemm_swiglu.GemmSwiglu(idx, K=wab.shape[1], H=wab.shape[0] // 2) if gemm_swiglu.supported(xa, wab) else None
         return self._ops[key]
 
     # ------------------------------------------------------------------ once per solver step
@@ -320,16 +300,8 @@ class FusedBiasOnlyDiT:
             # (s1, sh1, s2, sh2) -> (s1, s2, sh1, sh2) by slices + cat: device ops only (a Python index list would make a host index
             # tensor, which a CUDA-graph capture refuses to copy -- the pack runs inside a capture whenever the weights are not static)
             w4, b4 = self.w1.view(nb, 4, D, dc), self.b1.view(nb, 4, D)
-            w1 = (
-                torch.cat([w4[:, 0:1], w4[:, 2:3], w4[:, 1:2], w4[:, 3:4]], 1)
-                .reshape(nb * 4 * D, dc)
-                .contiguous()
-            )
-            b1 = (
-                torch.cat([b4[:, 0:1], b4[:, 2:3], b4[:, 1:2], b4[:, 3:4]], 1)
-                .reshape(nb * 4 * D)
-                .contiguous()
-            )
+            w1 = torch.cat([w4[:, 0:1], w4[:, 2:3], w4[:, 1:2], w4[:, 3:4]], 1).reshape(nb * 4 * D, dc).contiguous()
+            b1 = torch.cat([b4[:, 0:1], b4[:, 2:3], b4[:, 1:2], b4[:, 3:4]], 1).reshape(nb * 4 * D).contiguous()
             # Wo / Wsq pair-packed per tail cluster size (8 / 6): the tail loads two k-blocks of a CTA's output rows as one TMA box
             tcl = _tf32().TAIL_CLUSTERS
             blocks = []
@@ -413,9 +385,7 @@ class FusedBiasOnlyDiT:
             e = lambda n: torch.empty(M, n, device=dev, dtype=f)  # noqa: E731
             # the scratch rows padded by 128 B: their natural strides (3 / 6 KB) are multiples of 2 KB, so a TMA box's 128 rows
             # would fall on the same address bits above the line (round-4 experiment against L2 slice camping; harmless otherwise)
-            pad = lambda n, rows=M: torch.empty(rows, n + 32, device=dev, dtype=f)[
-                :, :n
-            ]  # noqa: E731
+            pad = lambda n, rows=M: torch.empty(rows, n + 32, device=dev, dtype=f)[:, :n]  # noqa: E731
             Mp = _tf32().tail_rows(M, _tf32().TAIL_PAIR)
             self._buf[key] = dict(
                 vg=e(2 * self.da),
@@ -436,9 +406,7 @@ class FusedBiasOnlyDiT:
         T = tab.shape[0]
         _, _, packs = self._pack3()
         front_op, core, tail = self._ops3(dev)
-        tcl = tail.cluster(
-            M // 128
-        )  # 8, or 6 / the pair tail where it takes fewer rounds
+        tcl = tail.cluster(M // 128)  # 8, or 6 / the pair tail where it takes fewer rounds
         pair = tcl == _tf32().TAIL_PAIR
         wk, Mt = (
             (8 if pair else tcl),
@@ -452,9 +420,7 @@ class FusedBiasOnlyDiT:
             y = out if b + 1 == self.nb else buf["x"][b % 2]
             tb = tab[:, b]
             front_op(x, tb, p["wvg"], vg, T, xa=buf["xa"])
-            core(
-                vg[:, :DA], P[b * H : (b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:]
-            )  # sigmoid(g) * (P v), TF32-rounded
+            core(vg[:, :DA], P[b * H : (b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:])  # sigmoid(g) * (P v), TF32-rounded
             tail(
                 a,
                 x,
@@ -496,27 +462,14 @@ class FusedBiasOnlyDiT:
 
             nb, D, dc = self.nb, self.d, self.dc
             w4, b4 = self.w1.view(nb, 4, D, dc), self.b1.view(nb, 4, D)
-            w1 = (
-                torch.cat([w4[:, 0:1], w4[:, 2:3], w4[:, 1:2], w4[:, 3:4]], 1)
-                .reshape(nb * 4 * D, dc)
-                .contiguous()
-            )
-            b1 = (
-                torch.cat([b4[:, 0:1], b4[:, 2:3], b4[:, 1:2], b4[:, 3:4]], 1)
-                .reshape(nb * 4 * D)
-                .contiguous()
-            )
+            w1 = torch.cat([w4[:, 0:1], w4[:, 2:3], w4[:, 1:2], w4[:, 3:4]], 1).reshape(nb * 4 * D, dc).contiguous()
+            b1 = torch.cat([b4[:, 0:1], b4[:, 2:3], b4[:, 1:2], b4[:, 3:4]], 1).reshape(nb * 4 * D).contiguous()
             blocks = [
                 dict(
                     wvg=p["wvg"],
                     wab=p["wab"],
-                    wo={
-                        cl: B16.pack_pairs_bf16(p["wo"], cl) for cl in B16.TAIL_CLUSTERS
-                    },
-                    wsq={
-                        cl: B16.pack_pairs_bf16(p["ws"], cl, z_order=True)
-                        for cl in B16.TAIL_CLUSTERS
-                    },
+                    wo={cl: B16.pack_pairs_bf16(p["wo"], cl) for cl in B16.TAIL_CLUSTERS},
+                    wsq={cl: B16.pack_pairs_bf16(p["ws"], cl, z_order=True) for cl in B16.TAIL_CLUSTERS},
                     wsqn=B16.pack_pairs_bf16(p["ws"], 8),
                 )
                 for p in self.per
@@ -581,9 +534,7 @@ class FusedBiasOnlyDiT:
             # in one captured graph). Never for a P made inside a PDL chain (the training backward's P^T: PvGateCore's default).
             self._ops[key] = (
                 B16.FrontBF16(idx, self.da),
-                C.PvGateCore(
-                    idx, nh=self.h, dh=self.da // self.h, pdl=True, p_early=True
-                ),
+                C.PvGateCore(idx, nh=self.h, dh=self.da // self.h, pdl=True, p_early=True),
                 B16.TailBF16(idx, self.da),
             )
         return self._ops[key]
@@ -601,10 +552,7 @@ class FusedBiasOnlyDiT:
                 xa=torch.empty(M, self.d + 64, device=dev, dtype=bf)[:, : self.d],
                 vg=torch.empty(M, 2 * self.da, device=dev, dtype=bf),
                 a=torch.empty(M, self.da, device=dev, dtype=bf),
-                xn=[
-                    torch.empty(M, self.d, device=dev, dtype=f32)
-                    for _ in range(2 if self.nb > 1 else 0)
-                ],
+                xn=[torch.empty(M, self.d, device=dev, dtype=f32) for _ in range(2 if self.nb > 1 else 0)],
                 xt=torch.empty(Mp, self.d + 64, device=dev, dtype=bf)[:, : self.d],
                 h=torch.empty(Mp * 2 * self.d // 64, 64, device=dev, dtype=bf),
             )
@@ -622,25 +570,19 @@ class FusedBiasOnlyDiT:
         T = tab.shape[0]
         _, _, packs = self._pack3b()
         front_op, core, tail = self._ops3b(dev)
-        tcl = tail.cluster(
-            M // 128
-        )  # 8, 6, or the pair tail where it takes fewer rounds
+        tcl = tail.cluster(M // 128)  # 8, 6, or the pair tail where it takes fewer rounds
         pair, Mt = tcl == B16.TAIL_PAIR, B16.tail_rows(M, tcl)
         buf = self._buffers3b(S, L, dev)
         xin = single.reshape(M, D)
         out = torch.empty(M, D, device=dev, dtype=out_dtype or single.dtype)
         xa, vg, a = buf["xa"], buf["vg"], buf["a"]
         early = core.early()  # the core reads P before its PDL wait: see _ops3b
-        assert not early or P.shape == (self.nb * H, L, L), (
-            P.shape
-        )  # the whole hoisted P (hoist's layout), not a chain's own
+        assert not early or P.shape == (self.nb * H, L, L), P.shape  # the whole hoisted P (hoist's layout), not a chain's own
         for b, p in enumerate(packs):
             y = out if b + 1 == self.nb else buf["xn"][b % 2]
             tb = tab[:, b]
             front_op(xin, tb, p["wvg"], vg, T, xa=xa, serial=early and b == 0)
-            core(
-                vg[:, :DA], P[b * H : (b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:]
-            )  # sigmoid(g) * (P v)
+            core(vg[:, :DA], P[b * H : (b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:])  # sigmoid(g) * (P v)
             wo, wsq = (p["wo"][8], p["wsqn"]) if pair else (p["wo"][tcl], p["wsq"][tcl])
             tail(
                 a,
@@ -687,9 +629,7 @@ class FusedBiasOnlyDiT:
                 g1 = torch.addmm(self.b1, cn, self.w1.t()).view(T, nb, 4, D)
                 g2 = torch.addmm(self.b2, c, self.w2.t()).view(T, nb, 2, D)
         out = torch.empty(M, D, device=dev, dtype=out_dtype or single.dtype)
-        self._run(
-            single.reshape(M, D), g1, g2, P, out, S, L, presig=cond_op is not None
-        )
+        self._run(single.reshape(M, D), g1, g2, P, out, S, L, presig=cond_op is not None)
         return out.view(S, 1, L, D)
 
     def _run(self, single, g1, g2, P, out, S, L, presig=False):
@@ -698,9 +638,7 @@ class FusedBiasOnlyDiT:
         H, T, DA = self.h, g1.shape[0], self.da
         dev = single.device
         buf = self._buffers(S, L, dev)
-        x, xa, vg, a, y, ab, h = (
-            buf[k] for k in ("x", "xa", "vg", "a", "y", "ab", "h")
-        )
+        x, xa, vg, a, y, ab, h = (buf[k] for k in ("x", "xa", "vg", "a", "y", "ab", "h"))
         core, gsw = self._core(dev), self._gemm_swiglu(dev, xa)
         resln, resln_final = (
             self._resln(dev, False, presig),
@@ -733,13 +671,9 @@ class FusedBiasOnlyDiT:
             else:
                 torch.mm(a, p["wo"].t(), out=y)
                 if nocopy and b == 0:
-                    C.resgate_adaln_rows_in(
-                        single, x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, T, EPS, ps
-                    )
+                    C.resgate_adaln_rows_in(single, x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, T, EPS, ps)
                 else:
-                    C.resgate_adaln_rows(
-                        x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, T, EPS, ps
-                    )
+                    C.resgate_adaln_rows(x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, T, EPS, ps)
             if gsw is not None:
                 gsw(xa, p["wab"], h)  # expand + SwiGLU, one sm_100a kernel
             else:

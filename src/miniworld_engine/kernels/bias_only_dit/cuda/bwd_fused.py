@@ -86,9 +86,7 @@ def pb_bar(dev) -> torch.Tensor:
     hit = _BUFS.tab.get(("pbbar", idx))
     if hit is None:
         if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                "pair_bias_bwd_fin: the barrier counters must be made by an eager call first"
-            )
+            raise RuntimeError("pair_bias_bwd_fin: the barrier counters must be made by an eager call first")
         hit = _BUFS.tab[("pbbar", idx)] = torch.zeros(2, dtype=torch.int32, device=dev)
     return hit
 
@@ -166,9 +164,7 @@ class _Bufs:
         hit = self.tab.get(key)
         if hit is None:
             if torch.cuda.is_current_stream_capturing():
-                raise RuntimeError(
-                    "bo_bwd: the item table / counters must be built by an eager call first"
-                )
+                raise RuntimeError("bo_bwd: the item table / counters must be built by an eager call first")
             hit = self.tab[key] = (
                 torch.tensor(items, dtype=torch.int32, device=dev),
                 torch.zeros(ncnt, dtype=torch.int32, device=dev),
@@ -180,9 +176,7 @@ class _Bufs:
         hit = self.tab.get(key)
         if hit is None:
             if torch.cuda.is_current_stream_capturing():
-                raise RuntimeError(
-                    "bo_bwd: the item tables / counters must be built by an eager call first"
-                )
+                raise RuntimeError("bo_bwd: the item tables / counters must be built by an eager call first")
             hit = self.tab[key] = (
                 *(torch.tensor(t, dtype=torch.int32, device=dev) for t in tables),
                 torch.zeros(ncnt, dtype=torch.int32, device=dev),
@@ -285,57 +279,27 @@ class TailBwd:
         assert M % 128 == 0 and T < (1 << 23)
         for t in (dout, z, x, y, dz, dy):
             assert t.dtype is bf and t.is_contiguous() and t.shape == (M, D), t.shape
-        assert (
-            Gg.shape == (M, 2 * D)
-            and G.shape == (M, 4 * D)
-            and ab.shape == (M, 4 * D)
-            and og.shape == (M, da)
-        )
-        assert (
-            vg.shape == (M, 2 * da)
-            and dGg.shape == (M, 2 * D)
-            and dab.shape == (M, 4 * D)
-            and dG.shape == (M, 4 * D)
-        )
-        assert all(
-            t.is_contiguous() and t.dtype is bf
-            for t in (Gg, G, ab, og, vg, dGg, dab, dG, do, dvg, WsqT, WaT, WbT, WoT)
-        )
-        assert (
-            dx1.dtype is torch.float32
-            and dx1.is_contiguous()
-            and x1st.is_contiguous()
-            and dd.is_contiguous()
-        )
-        assert (
-            part.dim() == 3
-            and part.shape[2] == D
-            and part.shape[1] >= 4 * T
-            and part.is_contiguous()
-        )
+        assert Gg.shape == (M, 2 * D) and G.shape == (M, 4 * D) and ab.shape == (M, 4 * D) and og.shape == (M, da)
+        assert vg.shape == (M, 2 * da) and dGg.shape == (M, 2 * D) and dab.shape == (M, 4 * D) and dG.shape == (M, 4 * D)
+        assert all(t.is_contiguous() and t.dtype is bf for t in (Gg, G, ab, og, vg, dGg, dab, dG, do, dvg, WsqT, WaT, WbT, WoT))
+        assert dx1.dtype is torch.float32 and dx1.is_contiguous() and x1st.is_contiguous() and dd.is_contiguous()
+        assert part.dim() == 3 and part.shape[2] == D and part.shape[1] >= 4 * T and part.is_contiguous()
         key = ("tail3", self.idx, T, da)
         launches = _BUFS.tab.get(key)
         if launches is None:
             if torch.cuda.is_current_stream_capturing():
-                raise RuntimeError(
-                    "bo_bwd_tail: the item tables / counters must be built by an eager call first"
-                )
+                raise RuntimeError("bo_bwd_tail: the item tables / counters must be built by an eager call first")
             dev = dout.device
             launches = _BUFS.tab[key] = [
-                (torch.tensor(t, dtype=torch.int32, device=dev), len(t), dm, grid)
-                for t, dm, grid in tail_launches(T, da, self.nsm)
+                (torch.tensor(t, dtype=torch.int32, device=dev), len(t), dm, grid) for t, dm, grid in tail_launches(T, da, self.nsm)
             ]
         cnt = _BUFS.tab.get(("tailcnt", self.idx, T))
         if cnt is None:
-            cnt = _BUFS.tab[("tailcnt", self.idx, T)] = torch.zeros(
-                T + 1, dtype=torch.int32, device=dout.device
-            )
+            cnt = _BUFS.tab[("tailcnt", self.idx, T)] = torch.zeros(T + 1, dtype=torch.int32, device=dout.device)
         tm, n4 = _sm100()._tm, ng4(da)
 
         def build():
-            row = lambda t: tm(
-                t, [256, 3, M], [512, t.stride(0) * 2], [256, 3, 4], swizzle=0
-            )  # noqa: E731 [4 rows][768] boxes
+            row = lambda t: tm(t, [256, 3, M], [512, t.stride(0) * 2], [256, 3, 4], swizzle=0)  # noqa: E731 [4 rows][768] boxes
             box = lambda t, w: tm(t, [w, M], t.stride(0) * 2, [32, 128], swizzle=64)  # noqa: E731
             sbox = lambda t, w: tm(t, [w, M], t.stride(0) * 2, [32, 32], swizzle=64)  # noqa: E731 per-warp-pair stores
             opa = lambda t, w: tm(t, [w, M], t.stride(0) * 2, [64, 128])  # noqa: E731
@@ -459,50 +423,17 @@ class MidBwd:
             0,
         )  # -DTRACE: qauto -- each call's items at the next trace indices (graph copies)
 
-    def __call__(
-        self, dvg, dGg, dG, G, x, xst, dx1, c, cst, W, bs1, dcg, dx, dc, part3
-    ):
+    def __call__(self, dvg, dGg, dG, G, x, xst, dx1, c, cst, W, bs1, dcg, dx, dc, part3):
         M, da, bf, f32 = dvg.shape[0], self.da, torch.bfloat16, torch.float32
         T = M // 128
         st = f32 if self.sf32 else bf
         assert M % 128 == 0 and T < (1 << 23)
-        assert (
-            dvg.shape == (M, 2 * da)
-            and dGg.shape == (M, 2 * D)
-            and dG.shape == (M, 4 * D)
-            and G.shape == (M, 4 * D)
-        )
-        assert (
-            all(t.is_contiguous() and t.dtype is bf for t in (dvg, dGg, dG, G, c, dcg))
-            and c.shape == (M, DC)
-            and dcg.shape == (M, DC)
-        )
-        assert (
-            x.shape == (M, D)
-            and x.is_contiguous()
-            and x.dtype is st
-            and dx.shape == (M, D)
-            and dx.is_contiguous()
-            and dx.dtype is st
-        )
-        assert (
-            dc.shape == (M, DC)
-            and dc.is_contiguous()
-            and dc.dtype is (f32 if self.cf32 else bf)
-        )
-        assert (
-            dx1.dtype is f32
-            and dx1.is_contiguous()
-            and xst.is_contiguous()
-            and cst.is_contiguous()
-            and bs1.is_contiguous()
-        )
-        assert (
-            part3.dim() == 2
-            and part3.shape[1] == D
-            and part3.shape[0] >= 4 * T
-            and part3.is_contiguous()
-        )
+        assert dvg.shape == (M, 2 * da) and dGg.shape == (M, 2 * D) and dG.shape == (M, 4 * D) and G.shape == (M, 4 * D)
+        assert all(t.is_contiguous() and t.dtype is bf for t in (dvg, dGg, dG, G, c, dcg)) and c.shape == (M, DC) and dcg.shape == (M, DC)
+        assert x.shape == (M, D) and x.is_contiguous() and x.dtype is st and dx.shape == (M, D) and dx.is_contiguous() and dx.dtype is st
+        assert dc.shape == (M, DC) and dc.is_contiguous() and dc.dtype is (f32 if self.cf32 else bf)
+        assert dx1.dtype is f32 and dx1.is_contiguous() and xst.is_contiguous() and cst.is_contiguous() and bs1.is_contiguous()
+        assert part3.dim() == 2 and part3.shape[1] == D and part3.shape[0] >= 4 * T and part3.is_contiguous()
         tm = _sm100()._tm
         ws = (
             W["WvT"],
@@ -516,9 +447,7 @@ class MidBwd:
         )
 
         def build():
-            row = lambda t: tm(
-                t, [256, 3, M], [512, t.stride(0) * 2], [256, 3, 4], swizzle=0
-            )  # noqa: E731 [4][768]
+            row = lambda t: tm(t, [256, 3, M], [512, t.stride(0) * 2], [256, 3, 4], swizzle=0)  # noqa: E731 [4][768]
             rowf = lambda t: tm(
                 t,
                 [128, 6, M],
@@ -528,9 +457,7 @@ class MidBwd:
                 dtype="f32",
             )  # noqa: E731 [4][384]
             opa = lambda t, w: tm(t, [w, M], t.stride(0) * 2, [64, 128])  # noqa: E731
-            opb = lambda t, nb: tm(
-                t, [t.shape[1], t.shape[0]], t.stride(0) * 2, [64, nb]
-            )  # noqa: E731 B halves
+            opb = lambda t, nb: tm(t, [t.shape[1], t.shape[0]], t.stride(0) * 2, [64, nb])  # noqa: E731 B halves
             return _descriptors(
                 opa(dvg, 2 * da),
                 opa(dGg, 2 * D),
@@ -609,30 +536,17 @@ class Wgrad:
         dWgg) in their parameters' dtypes (bf16 / fp32, contiguous); dwu [3072, 384] the unfolded projections' gradient, pw [192, 384]
         fp32 the cond-LN weight partials; wraw [3072, 384], w1 / w2 [384] fp32."""
         M = grads[0].shape[0]
-        assert M % 128 == 0 and all(
-            t.shape[0] == M and t.stride(1) == 1 and t.dtype is torch.bfloat16
-            for t in (*grads, *acts)
-        )
+        assert M % 128 == 0 and all(t.shape[0] == M and t.stride(1) == 1 and t.dtype is torch.bfloat16 for t in (*grads, *acts))
         key = ("wgrad", self.idx, self.da)
         tiles = _BUFS.tab.get(key)
         if tiles is None:
             if torch.cuda.is_current_stream_capturing():
-                raise RuntimeError(
-                    "bo_wgrad: the tile table must be built by an eager call first"
-                )
-            tiles = _BUFS.tab[key] = torch.tensor(
-                self.plan, dtype=torch.int32, device=grads[0].device
-            )
+                raise RuntimeError("bo_wgrad: the tile table must be built by an eager call first")
+            tiles = _BUFS.tab[key] = torch.tensor(self.plan, dtype=torch.int32, device=grads[0].device)
         tm = _sm100()._tm
         mn = lambda t: tm(t, [t.shape[1], M], t.stride(0) * 2, [64, 64])  # noqa: E731 MN-major [64 cols][64 rows]
-        maps = self.maps.make(
-            _key(*grads, *acts), lambda: _descriptors(*(mn(t) for t in (*grads, *acts)))
-        )
-        odt = sum(
-            1 << i
-            for i, t in enumerate((*outs[:4], dwu, outs[4]))
-            if t.dtype is torch.float32
-        )
+        maps = self.maps.make(_key(*grads, *acts), lambda: _descriptors(*(mn(t) for t in (*grads, *acts))))
+        odt = sum(1 << i for i, t in enumerate((*outs[:4], dwu, outs[4])) if t.dtype is torch.float32)
         assert all(t.is_contiguous() for t in (*outs, dwu, pw, wraw, w1, w2))
         self.k(
             (tiles.numel(), 1, 1),
@@ -664,14 +578,10 @@ def read_events(kernel, n_items: int):
     for name, n in ((b"g_ev", n_items * 16), (b"g_cta0", 1024)):
         err, dptr, size = cu.cuModuleGetGlobal(kernel.module, name)
         t = torch.zeros(n, dtype=torch.int64, device="cuda")
-        if (
-            err != cu.CUresult.CUDA_SUCCESS
-        ):  # bo_wgrad.cu has no g_cta0 (its events are per CTA)
+        if err != cu.CUresult.CUDA_SUCCESS:  # bo_wgrad.cu has no g_cta0 (its events are per CTA)
             out.append(t)
             continue
-        (err,) = cu.cuMemcpyDtoD(
-            cu.CUdeviceptr(t.data_ptr()), dptr, min(int(size), n * 8)
-        )
+        (err,) = cu.cuMemcpyDtoD(cu.CUdeviceptr(t.data_ptr()), dptr, min(int(size), n * 8))
         assert err == cu.CUresult.CUDA_SUCCESS, err
         out.append(t)
     torch.cuda.synchronize()

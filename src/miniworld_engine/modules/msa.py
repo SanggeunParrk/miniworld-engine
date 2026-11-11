@@ -16,8 +16,8 @@ from miniworld_engine.modules.norm import LayerNorm
 from miniworld_engine.modules.primitives import BackendModule, Dropout, Linear, MasterWeights, key_mask, master_autocast, random_input, wide
 
 #: Release directories of the model kits' own MSA kernels (the ``"anthropic"`` backends; ``modules/_anthropic.load(..., path=...)``).
-_AF3T_KERNELS = "af3_torch/opt/forward/af3t/kernels/third_party"   # af3t_opm.py: torch + triton only
-_EF2_DRIVER = "esmfold2/opt/forward/fast_inference/driver"         # ef2_msa_v2.py: torch + triton only
+_AF3T_KERNELS = "af3_torch/opt/forward/af3t/kernels/third_party"  # af3t_opm.py: torch + triton only
+_EF2_DRIVER = "esmfold2/opt/forward/fast_inference/driver"  # ef2_msa_v2.py: torch + triton only
 
 
 class OuterProduct(BackendModule):
@@ -89,7 +89,8 @@ class OuterProductMean(BackendModule, MasterWeights):
         Dimension of hidden layer.
 
     """
-    version = 4   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 4  # human-managed: bump when a change alters this class's accuracy or speed results
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -186,7 +187,7 @@ class OuterProductMean(BackendModule, MasterWeights):
     #:   divide after the projection, d_msa 128, d_hidden 32, d_pair % 256, no projection bias (ESMFold2, Protenix-v2)  the esmfold2 kit's
     #:       ``ef2_msa_v2.opm_fused`` (LN + W x row mask producer, cuBLAS, projection + bias / clamp(n, 1) + pair residual epilogue)
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: sm_80 paths
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: sm_80 paths
 
     # ------------------------------------------------------------------------------------------------------------------ anthropic
     def _anthropic_route(self, msa, mask, residual) -> tuple[str | None, str | None]:
@@ -206,8 +207,10 @@ class OuterProductMean(BackendModule, MasterWeights):
         if residual is not None and residual.dtype != msa.dtype:
             return None, "the pair residual must be in the msa's dtype"
         if self.groups > 1:
-            return None, ("grouped OPM (Chai-1: 8 groups, product LayerNorm, no count division): the chai1 kit has no OPM kernel (its eager "
-                          "trunk restates the TorchScript graph in torch) and no other kit computes the grouped form")
+            return None, (
+                "grouped OPM (Chai-1: 8 groups, product LayerNorm, no count division): the chai1 kit has no OPM kernel (its eager "
+                "trunk restates the TorchScript graph in torch) and no other kit computes the grouped form"
+            )
         d_msa, d_hidden, d_pair = self.to_left.weight.shape[1], self.to_left.weight.shape[0], self.to_out.weight.shape[0]
         biased = self.to_left.bias is not None
         if self.normalize_before_proj:
@@ -219,8 +222,10 @@ class OuterProductMean(BackendModule, MasterWeights):
                 return None, f"d_msa {d_msa}: the fused prologue takes a power-of-two width"
             return ("boltz2", None) if (why := _anthropic.missing("fpf_msa.boltz2", path="boltz2/opt/forward")) is None else (None, why)
         if biased:
-            return None, ("projection biases with the division after the projection: the af3_torch / esmfold2 kernels have no projection bias, "
-                          "and RoseTTAFold3's kit divides by the MSA depth (a scalar) instead of the pair counts")
+            return None, (
+                "projection biases with the division after the projection: the af3_torch / esmfold2 kernels have no projection bias, "
+                "and RoseTTAFold3's kit divides by the MSA depth (a scalar) instead of the pair counts"
+            )
         if (d_msa, d_hidden, d_pair) == (64, 32, 128):
             return ("af3", None) if (why := _anthropic.missing("af3t_opm", path=_AF3T_KERNELS)) is None else (None, why)
         if d_msa == 128 and d_hidden == 32 and d_pair % 256 == 0:
@@ -231,8 +236,10 @@ class OuterProductMean(BackendModule, MasterWeights):
             # the other widths of this form (IntelliFold2 256 / 32 / 512: no kit of its own): the esmfold2 kit's T12 lever
             # (ef2_msa.opm_core_t12: the module's LN and a | b GEMM, the cuBLAS outer GEMM, the Triton projection + bias / clamp(n, 1) epilogue)
             return ("ef2_t12", None) if (why := _anthropic.missing("ef2_msa", path=_EF2_DRIVER)) is None else (None, why)
-        return None, (f"(d_msa, d_hidden, d_pair) = ({d_msa}, {d_hidden}, {d_pair}) dividing after the projection: the kits' kernels take "
-                      "(64, 32, 128) (af3_torch) or d_pair a multiple of 256 (esmfold2); OpenDDE's 384 has no kit")
+        return None, (
+            f"(d_msa, d_hidden, d_pair) = ({d_msa}, {d_hidden}, {d_pair}) dividing after the projection: the kits' kernels take "
+            "(64, 32, 128) (af3_torch) or d_pair a multiple of 256 (esmfold2); OpenDDE's 384 has no kit"
+        )
 
     def _supports_anthropic(self, msa, mask=None, token_asym_id=None, residual=None) -> str | None:
         return self._anthropic_route(msa, mask, residual)[1]
@@ -241,7 +248,7 @@ class OuterProductMean(BackendModule, MasterWeights):
         return tuple((p.data_ptr(), p._version, p.dtype) for p in self.parameters())
 
     def _forward_anthropic(self, msa, mask=None, token_asym_id=None, residual=None) -> torch.Tensor:
-        if self.dead and residual is not None:   # inference only: a dead instance returns the residual input (as the reference does)
+        if self.dead and residual is not None:  # inference only: a dead instance returns the residual input (as the reference does)
             return residual
         route, _ = self._anthropic_route(msa, mask, residual)
         if mask is None:
@@ -258,7 +265,9 @@ class OuterProductMean(BackendModule, MasterWeights):
             if not interchain and residual is not None:
                 return pair
         if interchain:
-            pair = pair * (cast(torch.Tensor, token_asym_id)[:, :, None] == cast(torch.Tensor, token_asym_id)[:, None, :])[..., None].to(pair.dtype)
+            pair = pair * (cast(torch.Tensor, token_asym_id)[:, :, None] == cast(torch.Tensor, token_asym_id)[:, None, :])[..., None].to(
+                pair.dtype
+            )
         return residual + pair if residual is not None else pair
 
     def _anthropic_boltz2(self, msa, mask):
@@ -271,8 +280,9 @@ class OuterProductMean(BackendModule, MasterWeights):
         kit = _anthropic.load("fpf_msa.boltz2", path="boltz2/opt/forward")
         key = self._anthropic_key()
         if getattr(self, "_anthropic_ns_key", None) != key:
-            self._anthropic_ns = SimpleNamespace(norm=self.ln_msa, proj_a=self.to_left, proj_b=self.to_right, proj_o=self.to_out,
-                                                 c_hidden=self.group_width)
+            self._anthropic_ns = SimpleNamespace(
+                norm=self.ln_msa, proj_a=self.to_left, proj_b=self.to_right, proj_o=self.to_out, c_hidden=self.group_width
+            )
             self._anthropic_ns_key = key
         with master_autocast(msa, self):
             return kit.outer_product_mean(self._anthropic_ns, msa.contiguous(), mask.to(msa.dtype).contiguous(), None)
@@ -287,10 +297,12 @@ class OuterProductMean(BackendModule, MasterWeights):
         if getattr(self, "_anthropic_w_key", None) != key:
             with torch.no_grad():
                 self._anthropic_w = {
-                    "WT": torch.cat([self.to_left.weight, self.to_right.weight], 0).to(torch.bfloat16).t().contiguous(),   # [c_m, 2c]
-                    "W16": self.to_out.weight.to(torch.bfloat16).t().contiguous(),                                       # [c*c, c_z], rows (c, e)
-                    "bias": self.to_out.bias.float().contiguous(), "lnw": self.ln_msa.weight.float().contiguous(),
-                    "lnb": self.ln_msa.bias.float().contiguous()}
+                    "WT": torch.cat([self.to_left.weight, self.to_right.weight], 0).to(torch.bfloat16).t().contiguous(),  # [c_m, 2c]
+                    "W16": self.to_out.weight.to(torch.bfloat16).t().contiguous(),  # [c*c, c_z], rows (c, e)
+                    "bias": self.to_out.bias.float().contiguous(),
+                    "lnw": self.ln_msa.weight.float().contiguous(),
+                    "lnb": self.ln_msa.bias.float().contiguous(),
+                }
             self._anthropic_w_key = key
         W = self._anthropic_w
         B, S, N, _ = msa.shape
@@ -302,14 +314,14 @@ class OuterProductMean(BackendModule, MasterWeights):
             for b in range(B):
                 m_b = mask[b].to(torch.bfloat16).contiguous()
                 LT, R = ko.ln_proj2(msa[b].contiguous(), W["lnw"], W["lnb"], W["WT"], m_b, float(self.ln_msa.eps), BA=64, num_warps=4)
-                norm = torch.mm(m_b.t(), m_b)                     # exact integer counts in bf16 (the kit's _mask_norm)
+                norm = torch.mm(m_b.t(), m_b)  # exact integer counts in bf16 (the kit's _mask_norm)
                 norm16 = (norm.clamp(min=1) if self.count_offset is None else norm).contiguous()
                 A, Bm = LT.view(N * CO, S), R.view(S, N * CO)
                 T = torch.empty((rows * CO, N * CO), device=msa.device, dtype=torch.bfloat16)
                 dst = torch.empty((N, N, F), device=msa.device, dtype=torch.float32)
                 for b0 in range(0, N, rows):
                     nb = min(rows, N - b0)
-                    torch.mm(A[b0 * CO:(b0 + nb) * CO], Bm, out=T[: nb * CO])
+                    torch.mm(A[b0 * CO : (b0 + nb) * CO], Bm, out=T[: nb * CO])
                     ko.opm_out(T[: nb * CO], W["W16"], W["bias"], norm16, eps, b0, nb, N, dst, False, BD=64, num_warps=4)
                 outs.append(dst.to(msa.dtype))
         return torch.stack(outs, 0)
@@ -325,15 +337,16 @@ class OuterProductMean(BackendModule, MasterWeights):
         key = self._anthropic_key()
         if getattr(self, "_anthropic_t12_key", None) != key:
             with torch.no_grad():
-                w = torch.cat([self.to_left.weight, self.to_right.weight], 0)        # ESMFold2's W: [a | b] rows
-            self._anthropic_t12 = SimpleNamespace(W=lambda x, _w=w: F.linear(x, _w.to(x.dtype)), Wout=self.to_out, norm=self.ln_msa,
-                                                  d_hidden=self.group_width)
+                w = torch.cat([self.to_left.weight, self.to_right.weight], 0)  # ESMFold2's W: [a | b] rows
+            self._anthropic_t12 = SimpleNamespace(
+                W=lambda x, _w=w: F.linear(x, _w.to(x.dtype)), Wout=self.to_out, norm=self.ln_msa, d_hidden=self.group_width
+            )
             self._anthropic_t12_key = key
         outs = []
         with master_autocast(msa, self):
             for b in range(msa.shape[0]):
-                m_t = msa[b].transpose(0, 1).contiguous()[None]                          # [1, L, M, c_m]
-                mk = mask[b].transpose(0, 1).float().contiguous()[None]                  # [1, L, M]
+                m_t = msa[b].transpose(0, 1).contiguous()[None]  # [1, L, M, c_m]
+                mk = mask[b].transpose(0, 1).float().contiguous()[None]  # [1, L, M]
                 outs.append(kit.opm_core_t12(self._anthropic_t12, m_t, mk))
         return torch.cat(outs, 0)
 
@@ -347,16 +360,22 @@ class OuterProductMean(BackendModule, MasterWeights):
         key = self._anthropic_key()
         if getattr(self, "_anthropic_ns_key", None) != key:
             with torch.no_grad():
-                w = torch.cat([self.to_left.weight, self.to_right.weight], 0)        # ESMFold2's W: [a | b] rows
-            self._anthropic_ns = SimpleNamespace(W=SimpleNamespace(weight=w, bias=None), Wout=self.to_out, norm=self.ln_msa,
-                                                 d_hidden=self.group_width, _chunk_size=None, divide_outer_before_proj=False)
+                w = torch.cat([self.to_left.weight, self.to_right.weight], 0)  # ESMFold2's W: [a | b] rows
+            self._anthropic_ns = SimpleNamespace(
+                W=SimpleNamespace(weight=w, bias=None),
+                Wout=self.to_out,
+                norm=self.ln_msa,
+                d_hidden=self.group_width,
+                _chunk_size=None,
+                divide_outer_before_proj=False,
+            )
             self._anthropic_ns_key = key
         outs = []
         with master_autocast(msa, self):
             for b in range(msa.shape[0]):
-                m_t = msa[b].transpose(0, 1).contiguous()[None]                          # [1, L, M, c_m]
-                mk = mask[b].transpose(0, 1).float().contiguous()[None]                  # [1, L, M]
-                pair = None if residual is None else residual[b:b + 1].contiguous()
+                m_t = msa[b].transpose(0, 1).contiguous()[None]  # [1, L, M, c_m]
+                mk = mask[b].transpose(0, 1).float().contiguous()[None]  # [1, L, M]
+                pair = None if residual is None else residual[b : b + 1].contiguous()
                 outs.append(kit.opm_fused(self._anthropic_ns, m_t, mk, pair))
         return torch.cat(outs, 0)
 
@@ -381,14 +400,16 @@ class OuterProductMean(BackendModule, MasterWeights):
         why = self._common_refusal(msa, mask, residual)
         if why is not None:
             return None, why
-        if torch.cuda.get_device_capability(msa.device) == (8, 0):   # A100: kernels.integrations.opm_sm80 (forward + backward)
-            if self.groups > 1:   # Chai-1: kernels.outer_product_mean.chai on its sm_80 passes (cuda/chai_sm80)
+        if torch.cuda.get_device_capability(msa.device) == (8, 0):  # A100: kernels.integrations.opm_sm80 (forward + backward)
+            if self.groups > 1:  # Chai-1: kernels.outer_product_mean.chai on its sm_80 passes (cuda/chai_sm80)
                 from miniworld_engine.kernels.outer_product_mean import chai
 
                 if chai.serves(self, msa, mask, training=torch.is_grad_enabled(), interchain=self._interchain(token_asym_id)):
                     return "chai", None
-                return None, (f"grouped OPM (groups {self.groups} x {self.group_width}, d_msa {msa.shape[-1]}, d_pair {self.to_out.weight.shape[0]}, N "
-                              f"{msa.shape[2]}, batch {msa.shape[0]}): the A100 Chai-1 passes take 8 x 8 groups, d_msa 64, d_pair a multiple of 256, N % 64, batch 1")
+                return None, (
+                    f"grouped OPM (groups {self.groups} x {self.group_width}, d_msa {msa.shape[-1]}, d_pair {self.to_out.weight.shape[0]}, N "
+                    f"{msa.shape[2]}, batch {msa.shape[0]}): the A100 Chai-1 passes take 8 x 8 groups, d_msa 64, d_pair a multiple of 256, N % 64, batch 1"
+                )
             from miniworld_engine.kernels.integrations import opm_sm80
 
             why = opm_sm80.refusal(self, msa, mask, token_asym_id, residual)
@@ -407,10 +428,17 @@ class OuterProductMean(BackendModule, MasterWeights):
         if self.groups > 1:
             if chai.serves(self, msa, mask, training=grad, interchain=interchain):
                 return "chai", None
-            return None, (f"grouped OPM (groups {self.groups} x {self.group_width}, d_msa {msa.shape[-1]}, N {msa.shape[2]}, batch {msa.shape[0]}"
-                          f", grad {grad}): the Chai-1 kernels take 8 x 8 groups, d_msa 64, N % 64, batch 1 (training without interchain)")
-        why = opm_train.refusal(msa, *dims, interchain=interchain if grad or self.to_left.bias is None else False,
-                                normalize_before_proj=self.normalize_before_proj, custom_divisor=custom)
+            return None, (
+                f"grouped OPM (groups {self.groups} x {self.group_width}, d_msa {msa.shape[-1]}, N {msa.shape[2]}, batch {msa.shape[0]}"
+                f", grad {grad}): the Chai-1 kernels take 8 x 8 groups, d_msa 64, N % 64, batch 1 (training without interchain)"
+            )
+        why = opm_train.refusal(
+            msa,
+            *dims,
+            interchain=interchain if grad or self.to_left.bias is None else False,
+            normalize_before_proj=self.normalize_before_proj,
+            custom_divisor=custom,
+        )
         if self.to_left.bias is None:
             if why is None:
                 return "opm_train", None
@@ -459,8 +487,14 @@ class OuterProductMean(BackendModule, MasterWeights):
             return "count_offset: the Triton kernel divides by the clamped pair count only"
         from miniworld_engine.kernels.outer_product_mean.triton.main import refusal
 
-        return refusal(msa, self.to_left.weight.shape[0], self.to_out.weight.shape[0], interchain=self._interchain(token_asym_id),
-                       residual=residual, groups=self.groups)
+        return refusal(
+            msa,
+            self.to_left.weight.shape[0],
+            self.to_out.weight.shape[0],
+            interchain=self._interchain(token_asym_id),
+            residual=residual,
+            groups=self.groups,
+        )
 
     def _forward_triton(self, msa, mask=None, token_asym_id=None, residual=None) -> torch.Tensor:
         if self.dead and residual is not None and not (self.training or torch.is_grad_enabled()):
@@ -469,18 +503,35 @@ class OuterProductMean(BackendModule, MasterWeights):
 
         options = {}
         if self.groups > 1:
-            options = {"groups": self.groups, "product_norm_weight": self.product_norm.weight, "product_norm_bias": self.product_norm.bias,
-                       "product_norm_eps": float(self.product_norm.eps)}
+            options = {
+                "groups": self.groups,
+                "product_norm_weight": self.product_norm.weight,
+                "product_norm_bias": self.product_norm.bias,
+                "product_norm_eps": float(self.product_norm.eps),
+            }
         return triton_outer_product_mean(
-            msa, mask, self.ln_msa.weight, self.ln_msa.bias, self.to_left.weight, self.to_right.weight, self.to_out.weight, self.to_out.bias,
-            residual, eps=float(self.ln_msa.eps), normalize_before_proj=self.normalize_before_proj, b_left=self.to_left.bias,
-            b_right=self.to_right.bias, **options,
+            msa,
+            mask,
+            self.ln_msa.weight,
+            self.ln_msa.bias,
+            self.to_left.weight,
+            self.to_right.weight,
+            self.to_out.weight,
+            self.to_out.bias,
+            residual,
+            eps=float(self.ln_msa.eps),
+            normalize_before_proj=self.normalize_before_proj,
+            b_left=self.to_left.bias,
+            b_right=self.to_right.bias,
+            **options,
         )
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
         depth, d_msa = depth or 1, self.ln_msa.normalized_shape[0]
-        return {"msa": random_input((samples, depth, length, d_msa), dtype=dtype, device=device, generator=generator),
-                "mask": key_mask(samples * depth, length, device=device).view(samples, depth, length)}
+        return {
+            "msa": random_input((samples, depth, length, d_msa), dtype=dtype, device=device, generator=generator),
+            "mask": key_mask(samples * depth, length, device=device).view(samples, depth, length),
+        }
 
 
 class MSAPairWeightedAveraging(BackendModule, MasterWeights):
@@ -508,8 +559,11 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         Row dropout of the update (training only).
 
     """
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: the BIG width (d_msa 256 / d_pair 512) on sm_80 (pwa_wide_sm80)
+
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:a100_sm80": 2
+    }  # 2026-11-10: the BIG width (d_msa 256 / d_pair 512) on sm_80 (pwa_wide_sm80)
 
     #: "cuda": the H100 kernels (kernels.integrations.pwa_train / pwa_wide); "triton": kernels.pair_weighted_averaging.triton (see the
     #: _supports_ docstrings for the ranges). "anthropic" (inference only): the model kits' own masked PWA kernels (see _supports_anthropic).
@@ -559,9 +613,11 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
             # (ef2_msa.pwa_core_t13: the module's LN / bias projection / masked fp32 softmax / v / gate, the Triton weighted-sum x gate kernel,
             # the module's out-projection)
             return ("ef2_t13", None) if (why := _anthropic.missing("ef2_msa", path=_EF2_DRIVER)) is None else (None, why)
-        return None, (f"d_msa {d_msa}, d_pair {d_pair}, {H} heads x {D}: the kits' masked PWA kernels take d_msa 64 with 8 x 32 (boltz2), "
-                      "d_msa 64 / d_pair 128 (af3_torch's fused prologues), d_msa 128 / d_pair 256 (esmfold2 v2) or power-of-two heads <= 64 "
-                      "(esmfold2 T13)")
+        return None, (
+            f"d_msa {d_msa}, d_pair {d_pair}, {H} heads x {D}: the kits' masked PWA kernels take d_msa 64 with 8 x 32 (boltz2), "
+            "d_msa 64 / d_pair 128 (af3_torch's fused prologues), d_msa 128 / d_pair 256 (esmfold2 v2) or power-of-two heads <= 64 "
+            "(esmfold2 T13)"
+        )
 
     def _supports_anthropic(self, msa, pair, mask=None) -> str | None:
         return self._anthropic_route(msa, pair, mask)[1]
@@ -577,12 +633,16 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         if getattr(self, "_anthropic_af3_key", None) != key:
             with torch.no_grad():
                 C = self.to_bias.weight.shape[1]
-                wb = torch.zeros(max(16, 1 << (H - 1).bit_length()), C, device=msa.device, dtype=torch.bfloat16)   # zero-padded logit planes
+                wb = torch.zeros(max(16, 1 << (H - 1).bit_length()), C, device=msa.device, dtype=torch.bfloat16)  # zero-padded logit planes
                 wb[:H] = self.to_bias.weight.to(torch.bfloat16)
                 self._anthropic_af3_w = {
-                    "Wb": wb, "lnw_z": self.ln_pair.weight.float().contiguous(), "lnb_z": torch.zeros_like(self.ln_pair.weight, dtype=torch.float32),
+                    "Wb": wb,
+                    "lnw_z": self.ln_pair.weight.float().contiguous(),
+                    "lnb_z": torch.zeros_like(self.ln_pair.weight, dtype=torch.float32),
                     "Wvg": torch.cat([self.to_value.weight, self.to_gate.weight], 0).to(torch.bfloat16).contiguous(),
-                    "lnw_m": self.ln_msa.weight.float().contiguous(), "lnb_m": self.ln_msa.bias.float().contiguous()}
+                    "lnw_m": self.ln_msa.weight.float().contiguous(),
+                    "lnb_m": self.ln_msa.bias.float().contiguous(),
+                }
             self._anthropic_af3_key = key
         W = self._anthropic_af3_w
         HD = H * D
@@ -593,8 +653,8 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
                 logits = planes[:H].float()
                 if mask is not None:
                     logits = logits + 1e9 * (mask[b].float() - 1.0)
-                weights = torch.softmax(logits, dim=-1)                                       # [H, i, j] over the keys j
-                _, vg = kit.ln_linear(msa[b].contiguous(), W["lnw_m"], W["lnb_m"], W["Wvg"], eps=self.ln_msa.eps)   # [M, L, 2 H D] bf16
+                weights = torch.softmax(logits, dim=-1)  # [H, i, j] over the keys j
+                _, vg = kit.ln_linear(msa[b].contiguous(), W["lnw_m"], W["lnb_m"], W["Wvg"], eps=self.ln_msa.eps)  # [M, L, 2 H D] bf16
                 v, gate = vg[..., :HD].unflatten(-1, (H, D)), vg[..., HD:]
                 v_avg = torch.einsum("hqk,bkhc->bqhc", weights, v).reshape(*v.shape[:2], HD)
                 outs.append(msa[b] + self.to_out(v_avg * torch.sigmoid(gate)))
@@ -613,17 +673,24 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
 
         kit = _anthropic.load("ef2_msa", path=_EF2_DRIVER)
         if getattr(self, "_anthropic_t13", None) is None:
-            self._anthropic_t13 = SimpleNamespace(n_heads=self.n_head, head_width=self._widths()[3], Wv=self.to_value, Wgate=self.to_gate,
-                                                  Wout=self.to_out, norm_single=self.ln_msa, compute_bias=lambda z: self.to_bias(self.ln_pair(z)))
+            self._anthropic_t13 = SimpleNamespace(
+                n_heads=self.n_head,
+                head_width=self._widths()[3],
+                Wv=self.to_value,
+                Wgate=self.to_gate,
+                Wout=self.to_out,
+                norm_single=self.ln_msa,
+                compute_bias=lambda z: self.to_bias(self.ln_pair(z)),
+            )
         B, _, L, _ = msa.shape
         if mask is None:
             mask = torch.ones((B, L), dtype=torch.bool, device=msa.device)
         outs = []
         with master_autocast(msa, self):
             for b in range(B):
-                m_t = msa[b].transpose(0, 1).contiguous()[None]                                   # [1, L, M, c_m]
-                pm = mask[b][None, None, :].expand(1, L, L)                                       # row i's keys j
-                upd = kit.pwa_core_t13(self._anthropic_t13, m_t, pair[b:b + 1].contiguous(), pm)   # [1, L, M, c_m]
+                m_t = msa[b].transpose(0, 1).contiguous()[None]  # [1, L, M, c_m]
+                pm = mask[b][None, None, :].expand(1, L, L)  # row i's keys j
+                upd = kit.pwa_core_t13(self._anthropic_t13, m_t, pair[b : b + 1].contiguous(), pm)  # [1, L, M, c_m]
                 outs.append(msa[b] + upd[0].transpose(0, 1))
         return torch.stack(outs, 0)
 
@@ -640,28 +707,51 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         outs = []
         with master_autocast(msa, self):
             for b in range(msa.shape[0]):
-                upd = P.pwa_forward(ns, msa[b:b + 1].contiguous(), pair[b:b + 1].contiguous(), pair_mask[b:b + 1].to(torch.float32), False,
-                                    kmode=kmode, R=R)
-                outs.append(msa[b:b + 1] + upd)
+                upd = P.pwa_forward(
+                    ns,
+                    msa[b : b + 1].contiguous(),
+                    pair[b : b + 1].contiguous(),
+                    pair_mask[b : b + 1].to(torch.float32),
+                    False,
+                    kmode=kmode,
+                    R=R,
+                )
+                outs.append(msa[b : b + 1] + upd)
         return torch.cat(outs, 0)
 
     def _anthropic_ns(self, kind: str):
         from types import SimpleNamespace
 
         key = (kind, *((p.data_ptr(), p._version, p.dtype) for p in self.parameters()))
-        if getattr(self, "_anthropic_ns_key", None) != key:   # the kits cache their weight packs on this object: a new one per parameter set
+        if getattr(self, "_anthropic_ns_key", None) != key:  # the kits cache their weight packs on this object: a new one per parameter set
             H, D = self.n_head, self._widths()[3]
             if kind == "boltz2":
-                ns = SimpleNamespace(norm_m=self.ln_msa, proj_m=self.to_value, proj_g=self.to_gate, norm_z=self.ln_pair, proj_z=self.to_bias,
-                                     proj_o=self.to_out, inf=1e6, num_heads=H, c_h=D)
+                ns = SimpleNamespace(
+                    norm_m=self.ln_msa,
+                    proj_m=self.to_value,
+                    proj_g=self.to_gate,
+                    norm_z=self.ln_pair,
+                    proj_z=self.to_bias,
+                    proj_o=self.to_out,
+                    inf=1e6,
+                    num_heads=H,
+                    c_h=D,
+                )
             else:
-                ns = SimpleNamespace(n_heads=H, head_width=D, Wv=self.to_value, Wgate=self.to_gate, Wout=self.to_out,
-                                     compute_bias=(self.ln_pair, self.to_bias), norm_single=self.ln_msa)
+                ns = SimpleNamespace(
+                    n_heads=H,
+                    head_width=D,
+                    Wv=self.to_value,
+                    Wgate=self.to_gate,
+                    Wout=self.to_out,
+                    compute_bias=(self.ln_pair, self.to_bias),
+                    norm_single=self.ln_msa,
+                )
             self._anthropic_ns_obj, self._anthropic_ns_key = ns, key
         return self._anthropic_ns_obj
 
     def _forward_anthropic(self, msa, pair, mask=None) -> torch.Tensor:
-        if self.dead:   # inference only: a dead instance returns the residual input (as the reference does)
+        if self.dead:  # inference only: a dead instance returns the residual input (as the reference does)
             return msa
         from miniworld_engine.modules import _anthropic
 
@@ -669,23 +759,23 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         B, _, L, _ = msa.shape
         if mask is None:
             mask = torch.ones((B, L), dtype=torch.bool, device=msa.device)
-        pair_mask = mask[:, None, :].expand(B, L, L)          # row i's keys j: the module's key mask
+        pair_mask = mask[:, None, :].expand(B, L, L)  # row i's keys j: the module's key mask
         if route == "af3":
             return self._anthropic_af3(msa, pair, mask)
         if route == "ef2_t13":
             return self._anthropic_ef2_t13(msa, pair, mask)
         if route == "pwa2":
             return self._anthropic_pwa2(msa, pair, pair_mask)
-        ns = self._anthropic_ns(cast(str, route))   # a supported call has a route
+        ns = self._anthropic_ns(cast(str, route))  # a supported call has a route
         with master_autocast(msa, self):
             if route == "boltz2":
                 kit = _anthropic.load("fpf_msa.boltz2", path="boltz2/opt/forward")
                 return msa + kit.msa_pair_weighted_avg(ns, msa.contiguous(), pair.contiguous(), pair_mask.to(torch.float32), False)
             kit = _anthropic.load("ef2_msa_v2", path=_EF2_DRIVER)
             outs = []
-            for b in range(B):   # the kit's token-major layout [1, L, M, c_m], batch 1; it returns m + pwa
+            for b in range(B):  # the kit's token-major layout [1, L, M, c_m], batch 1; it returns m + pwa
                 m_t = msa[b].transpose(0, 1).contiguous()[None]
-                outs.append(kit.pwa_fused(ns, m_t, pair[b:b + 1].contiguous(), pair_mask[b:b + 1].contiguous())[0].transpose(0, 1))
+                outs.append(kit.pwa_fused(ns, m_t, pair[b : b + 1].contiguous(), pair_mask[b : b + 1].contiguous())[0].transpose(0, 1))
             return torch.stack(outs, 0)
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
@@ -784,7 +874,7 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         why = self._common_refusal(msa, pair, mask)
         if why is not None:
             return why
-        if torch.cuda.get_device_capability(msa.device) == (8, 0):   # A100: kernels.integrations.pwa_sm80 (forward + backward)
+        if torch.cuda.get_device_capability(msa.device) == (8, 0):  # A100: kernels.integrations.pwa_sm80 (forward + backward)
             from miniworld_engine.kernels.integrations import pwa_sm80
 
             why = pwa_sm80.refusal(self, msa, pair, mask)
@@ -827,15 +917,29 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
 
         p_drop = float(self.drop_msa.p_drop) if self.training else 0.0
         keep = None
-        if p_drop > 0:   # the keep-mask Dropout(broadcast_dim=1) draws, broadcast over the MSA rows
+        if p_drop > 0:  # the keep-mask Dropout(broadcast_dim=1) draws, broadcast over the MSA rows
             keep = torch.rand((msa.shape[0], msa.shape[2], msa.shape[3]), device=msa.device, dtype=msa.dtype) > p_drop
         return triton_pair_weighted_averaging(
-            msa, pair, mask, self.ln_msa.weight, self.ln_msa.bias, self.to_value.weight, self.to_gate.weight, self.ln_pair.weight,
-            self.to_bias.weight, self.to_out.weight, eps_msa=float(self.ln_msa.eps), eps_pair=float(self.ln_pair.eps), keep=keep, p_drop=p_drop,
+            msa,
+            pair,
+            mask,
+            self.ln_msa.weight,
+            self.ln_msa.bias,
+            self.to_value.weight,
+            self.to_gate.weight,
+            self.ln_pair.weight,
+            self.to_bias.weight,
+            self.to_out.weight,
+            eps_msa=float(self.ln_msa.eps),
+            eps_pair=float(self.ln_pair.eps),
+            keep=keep,
+            p_drop=p_drop,
         )
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
         d_msa, d_pair = self.ln_msa.normalized_shape[0], self.ln_pair.normalized_shape[0]
-        return {"msa": random_input((samples, depth or 1, length, d_msa), dtype=dtype, device=device, generator=generator),
-                "pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
-                "mask": key_mask(samples, length, device=device)}
+        return {
+            "msa": random_input((samples, depth or 1, length, d_msa), dtype=dtype, device=device, generator=generator),
+            "pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+            "mask": key_mask(samples, length, device=device),
+        }

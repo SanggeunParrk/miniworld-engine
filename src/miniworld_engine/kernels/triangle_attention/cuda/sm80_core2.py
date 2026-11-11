@@ -28,8 +28,8 @@ SCHED = 0
 FIXMODE = 2
 
 #: schedules of the unmasked 16-channel backward kernels (0 = the base schedule; the defaults measured -2.4..-3 % of a D64 training step; see attn2_ops.cu), module-level knobs for sweeps
-DQ_SCHED = 3   # 3 stages x 32 keys x 2 CTAs / SM
-DKV_SCHED = 5   # 2 stages x 3 CTAs / SM
+DQ_SCHED = 3  # 3 stages x 32 keys x 2 CTAs / SM
+DKV_SCHED = 5  # 2 stages x 3 CTAs / SM
 
 Layout = tuple[int, int, int, int]
 
@@ -170,9 +170,7 @@ def backward(
     scl = sm_scale * _L2E
     e.attn2_set_sched(DQ_SCHED, DKV_SCHED)
     groups = length // dq_rows(head_dim)
-    dbp = torch.empty(
-        (groups, batch * heads, length, length), dtype=BF, device=q.device
-    )
+    dbp = torch.empty((groups, batch * heads, length, length), dtype=BF, device=q.device)
     e.attn2_bwd_dq(
         q,
         k,

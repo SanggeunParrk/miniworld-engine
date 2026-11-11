@@ -81,10 +81,8 @@ def build_3d_rope(
     half_dim = head_dim // 2
     n_spatial_total = 3 * n_spatial_per_axis
 
-    w = wide(ref_pos)   # the angles in at least fp32 (fp64 for an fp64 call)
-    spatial_inv_freq = 1.0 / (
-        spatial_base_freq ** (torch.arange(0, n_spatial_per_axis, dtype=w, device=device) / n_spatial_per_axis)
-    )
+    w = wide(ref_pos)  # the angles in at least fp32 (fp64 for an fp64 call)
+    spatial_inv_freq = 1.0 / (spatial_base_freq ** (torch.arange(0, n_spatial_per_axis, dtype=w, device=device) / n_spatial_per_axis))
     uid_inv_freq = 1.0 / (uid_base_freq ** (torch.arange(0, n_uid_pairs, dtype=w, device=device) / n_uid_pairs))
 
     # Broadcast multiplies, not einsums: these are outer products, and under an autocast region ``einsum`` runs them as bf16 matmuls
@@ -142,8 +140,11 @@ def to_windows(pair: torch.Tensor, keys: int = ATOM_KEYS) -> torch.Tensor:
     n = pair.shape[1]
     nwin = (n + ATOM_QUERIES - 1) // ATOM_QUERIES
     query = torch.arange(nwin * ATOM_QUERIES, device=pair.device).view(nwin, ATOM_QUERIES)
-    key = (torch.arange(nwin, device=pair.device)[:, None] * ATOM_QUERIES - (keys - ATOM_QUERIES) // 2
-           + torch.arange(keys, device=pair.device)[None])
+    key = (
+        torch.arange(nwin, device=pair.device)[:, None] * ATOM_QUERIES
+        - (keys - ATOM_QUERIES) // 2
+        + torch.arange(keys, device=pair.device)[None]
+    )
     valid = (query < n)[:, :, None] & ((key >= 0) & (key < n))[:, None, :]
     out = pair[:, query.clamp(max=n - 1)[:, :, None], key.clamp(0, n - 1)[:, None, :]]
     return out * valid[None, :, :, :, None].to(pair.dtype)
@@ -348,12 +349,12 @@ LDDT_NUC_CUTOFF, LDDT_OTHER_CUTOFF = 30.0, 15.0
 def smooth_lddt_loss(x_pred: torch.Tensor, gt: torch.Tensor, is_nuc: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """AlphaFold 3 Algorithm 27 written out densely (an [N, N] tensor per augment): x_pred [A, B, N, 3], gt [B, N, 3] (the same rigid
     structure for every augment), is_nuc / mask [B, N] bool -> scalar ``mean_{a, b} (1 - smooth_lddt)``."""
-    exact = "donot_use_mm_for_euclid_dist"   # the matmul form cancels |a|^2 + |b|^2 - 2ab: errors ~1e-4 A at structure scale
-    d_pred = torch.cdist(x_pred, x_pred, compute_mode=exact)               # [A, B, N, N]
-    d_gt = torch.cdist(gt, gt, compute_mode=exact)                         # [B, N, N]
+    exact = "donot_use_mm_for_euclid_dist"  # the matmul form cancels |a|^2 + |b|^2 - 2ab: errors ~1e-4 A at structure scale
+    d_pred = torch.cdist(x_pred, x_pred, compute_mode=exact)  # [A, B, N, N]
+    d_gt = torch.cdist(gt, gt, compute_mode=exact)  # [B, N, N]
     diff = (d_pred - d_gt).abs()
     score = sum(torch.sigmoid(t - diff) for t in LDDT_BINS) / len(LDDT_BINS)
-    cutoff = torch.where(is_nuc, LDDT_NUC_CUTOFF, LDDT_OTHER_CUTOFF).unsqueeze(-1)   # radius of atom i (the row)
+    cutoff = torch.where(is_nuc, LDDT_NUC_CUTOFF, LDDT_OTHER_CUTOFF).unsqueeze(-1)  # radius of atom i (the row)
     n = gt.shape[-2]
     keep = (d_gt < cutoff) & mask.unsqueeze(-1) & mask.unsqueeze(-2) & ~torch.eye(n, dtype=torch.bool, device=gt.device)
     lddt = (score * keep).sum(dim=(-1, -2)) / keep.sum(dim=(-1, -2)).clamp(min=1)

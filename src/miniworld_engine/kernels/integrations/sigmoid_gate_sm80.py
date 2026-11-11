@@ -94,9 +94,7 @@ class _SigmoidGate(torch.autograd.Function):
     def backward(ctx, dout):
         gate, x = ctx.saved_tensors
         dg, dx = _bwd(dout.contiguous(), gate, x)
-        return dg if ctx.needs_input_grad[0] else None, dx if ctx.needs_input_grad[
-            1
-        ] else None
+        return dg if ctx.needs_input_grad[0] else None, dx if ctx.needs_input_grad[1] else None
 
 
 def sigmoid_gate(gate: torch.Tensor, x: torch.Tensor) -> torch.Tensor:

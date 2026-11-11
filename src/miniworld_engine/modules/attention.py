@@ -75,10 +75,16 @@ class AttentionPairBias(BackendModule, MasterWeights):
         See :class:`BackendModule`.
 
     """
-    version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 3, "triton:a100_sm80": 2, "triton:h100_sm90": 2}   # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100
+    backend_versions: ClassVar[dict[str, int]] = {
+        "anthropic": 2,
+        "cuda:a100_sm80": 3,
+        "triton:a100_sm80": 2,
+        "triton:h100_sm90": 2,
+    }  # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -175,9 +181,11 @@ class AttentionPairBias(BackendModule, MasterWeights):
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
         d_single, d_pair = self.ln_single.normalized_shape[0], self.ln_pair.normalized_shape[0]
-        return {"single": random_input((samples, length, d_single), dtype=dtype, device=device, generator=generator),
-                "pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
-                "mask": key_mask(samples, length, device=device)}
+        return {
+            "single": random_input((samples, length, d_single), dtype=dtype, device=device, generator=generator),
+            "pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+            "mask": key_mask(samples, length, device=device),
+        }
 
     # ------------------------------------------------------------------------------------------------------------- "triton"
     # The reference's statements with the attention core (q k^T / sqrt(D) + pair bias [+ extra], key mask, softmax, P v) on the Triton
@@ -196,7 +204,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
             q, k, v = (t.view(b, n, h, d) for t in (self.to_query(s), self.to_key(s), self.to_value(s)))
             if self.use_qk_norm:
                 q, k = self.norm_query(q), self.norm_key(k)
-            bias = self.to_bias(self.ln_pair(pair))                                     # [B, L, L, H]
+            bias = self.to_bias(self.ln_pair(pair))  # [B, L, L, H]
             if extra_pair_bias is not None:
                 bias = bias + extra_pair_bias.to(bias.dtype).permute(0, 2, 3, 1)
             out = _triton_core(q[None], k[None], v[None], bias, None if mask is None else mask[None])[0]
@@ -282,8 +290,21 @@ class AttentionPairBias(BackendModule, MasterWeights):
         h, d = self.n_head, self._head_dim()
         cell = prov.cell_word("pf", h, d)
         dt = torch.bfloat16 if (single.dtype == torch.bfloat16 or torch.is_autocast_enabled("cuda")) else single.dtype
-        return prov, cell, _anthropic.kernel_selection(prov, tuple(torch.cuda.get_device_capability(single.device)), dt, cell,
-                                                       int(single.shape[1]), word="fast", samples=int(single.shape[0]), head_dim=d, heads=h)
+        return (
+            prov,
+            cell,
+            _anthropic.kernel_selection(
+                prov,
+                tuple(torch.cuda.get_device_capability(single.device)),
+                dt,
+                cell,
+                int(single.shape[1]),
+                word="fast",
+                samples=int(single.shape[0]),
+                head_dim=d,
+                heads=h,
+            ),
+        )
 
     def _anthropic_producer_select(self, pair):
         from miniworld_engine.modules import _anthropic
@@ -293,8 +314,9 @@ class AttentionPairBias(BackendModule, MasterWeights):
         cell = prov.cell_word("bias", heads=h, c_z=c)
         # no producer cell for this geometry: the producer boundary's stock row by name (a cell-less tier word would name the CORE's stock row)
         word = "fast" if cell is not None else prov.STOCK_OF_BOUNDARY["producer"]
-        return _anthropic.kernel_selection(prov, tuple(torch.cuda.get_device_capability(pair.device)), pair.dtype, cell, int(pair.shape[1]),
-                                           word=word, c_z=c, heads=h)
+        return _anthropic.kernel_selection(
+            prov, tuple(torch.cuda.get_device_capability(pair.device)), pair.dtype, cell, int(pair.shape[1]), word=word, c_z=c, heads=h
+        )
 
     def _anthropic_producer_params(self):
         """fp32 contiguous LayerNorm weight / zero offset / projection the producer rows pack or cast from (the kits hand fp32 copies too),
@@ -315,8 +337,10 @@ class AttentionPairBias(BackendModule, MasterWeights):
         if why is not None:
             return why
         if torch.is_grad_enabled():
-            return ("inference only: no kit carries a backward for the pair-bias attention (the provider's carried rows are all forward only): "
-                    "call under torch.no_grad() / inference_mode")
+            return (
+                "inference only: no kit carries a backward for the pair-bias attention (the provider's carried rows are all forward only): "
+                "call under torch.no_grad() / inference_mode"
+            )
         why = self._anthropic_producer_select(pair)[1]
         if why is not None:
             return f"pair-bias producer: {why}"
@@ -338,16 +362,27 @@ class AttentionPairBias(BackendModule, MasterWeights):
             if self.gate_bias:
                 gate = gate + self.gate_bias
             (lnw, lnb, w_b), cache = self._anthropic_producer_params()
-            bias, _served = prov.pair_bias_planes(pair.contiguous(), lnw, lnb, w_b, selection=psel, eps=self.ln_pair.eps, out_layout="hij",
-                                                  out_dtype=q.dtype, cache=cache)
-            bias = bias[..., :h, :, :n]                                               # rows writing [B, H, L, ld] planes (ld = L rounded to 8)
+            bias, _served = prov.pair_bias_planes(
+                pair.contiguous(), lnw, lnb, w_b, selection=psel, eps=self.ln_pair.eps, out_layout="hij", out_dtype=q.dtype, cache=cache
+            )
+            bias = bias[..., :h, :, :n]  # rows writing [B, H, L, ld] planes (ld = L rounded to 8)
             if extra_pair_bias is not None:
                 bias = bias + extra_pair_bias.to(bias.dtype)
             if mask is not None:
                 bias = bias.masked_fill(~mask[:, None, None, :], -1e9)
             bias = bias.to(q.dtype).expand(b, h, n, n).contiguous()
-            o, _served = prov.pair_bias_attention(q.contiguous(), k.contiguous(), v.contiguous(), bias, None, gate=gate.view(b, n, h, d).contiguous(),
-                                                  selection=sel, scale=d ** -0.5, layout="snhd", cell=cell)
+            o, _served = prov.pair_bias_attention(
+                q.contiguous(),
+                k.contiguous(),
+                v.contiguous(),
+                bias,
+                None,
+                gate=gate.view(b, n, h, d).contiguous(),
+                selection=sel,
+                scale=d**-0.5,
+                layout="snhd",
+                cell=cell,
+            )
             return single + self.to_out(o.reshape(b, n, h * d))
 
     # "cueq": cuequivariance_torch.attention_pair_bias -- the whole op (LayerNorm of single and pair, q / k / v / gate / pair-bias projections,
@@ -375,12 +410,27 @@ class AttentionPairBias(BackendModule, MasterWeights):
         with master_autocast(single, self):
             gate_bias = None
             if self.gate_bias:
-                gate_bias = torch.full((self.to_gate.weight.shape[0],), self.gate_bias, dtype=self.to_gate.weight.dtype, device=single.device)
+                gate_bias = torch.full(
+                    (self.to_gate.weight.shape[0],), self.gate_bias, dtype=self.to_gate.weight.dtype, device=single.device
+                )
             out = _cueq.torch_api().attention_pair_bias(
-                single, pair, None if mask is None else mask.to(single.dtype), self.n_head,
-                self.ln_single.weight, self.ln_single.bias, self.to_query.weight, self.to_query.bias, self.to_key.weight, self.to_value.weight,
-                self.to_gate.weight, self.to_out.weight, w_proj_z=self.to_bias.weight, w_ln_z=self.ln_pair.weight, b_ln_z=None,
-                eps=self.ln_single.eps, b_proj_g=gate_bias,
+                single,
+                pair,
+                None if mask is None else mask.to(single.dtype),
+                self.n_head,
+                self.ln_single.weight,
+                self.ln_single.bias,
+                self.to_query.weight,
+                self.to_query.bias,
+                self.to_key.weight,
+                self.to_value.weight,
+                self.to_gate.weight,
+                self.to_out.weight,
+                w_proj_z=self.to_bias.weight,
+                w_ln_z=self.ln_pair.weight,
+                b_ln_z=None,
+                eps=self.ln_single.eps,
+                b_proj_g=gate_bias,
             )
             out = out[0] if isinstance(out, tuple) else out
             return single + out.to(single.dtype)
@@ -453,7 +503,7 @@ class AugmentedAttentionPairBias(BackendModule):
         self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
         self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
 
-        self.to_scale = Linear(d_cond, d_single, bias=True, init="default", bias_init=-2.0)   # sigmoid(-2) ~ 0.1: the update starts small
+        self.to_scale = Linear(d_cond, d_single, bias=True, init="default", bias_init=-2.0)  # sigmoid(-2) ~ 0.1: the update starts small
         self.set_backend(backend)
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs) -> None:
@@ -537,11 +587,12 @@ class AugmentedAttentionPairBias(BackendModule):
             parts = []
             grad = torch.is_grad_enabled() and (single.requires_grad or any(p.requires_grad for p in self.parameters()))
             for i in range(0, single.shape[0], chunk):
-                m = mask[i:i + chunk] if mask is not None and mask.dim() == 3 else mask
+                m = mask[i : i + chunk] if mask is not None and mask.dim() == 3 else mask
 
                 def piece(s, c, _m=m):
                     return self.delta(s, c, pair, _m, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)
-                s, c = single[i:i + chunk], cond[i:i + chunk]
+
+                s, c = single[i : i + chunk], cond[i : i + chunk]
                 parts.append(checkpoint(piece, s, c, use_reentrant=False) if grad else piece(s, c))
             return torch.cat(parts)
         in_dtype = single.dtype
@@ -563,7 +614,7 @@ class AugmentedAttentionPairBias(BackendModule):
         if extra_pair_bias is not None:
             if extra_pair_bias.ndim != 2 or tuple(extra_pair_bias.shape) != tuple(bias.shape[1:3]):
                 raise ValueError(f"extra_pair_bias must be [L, L] = {tuple(bias.shape[1:3])}, got {tuple(extra_pair_bias.shape)}")
-            bias = bias + extra_pair_bias.to(bias.dtype)[None, :, :, None]   # [B, L, L, H]: the same term for every head
+            bias = bias + extra_pair_bias.to(bias.dtype)[None, :, :, None]  # [B, L, L, H]: the same term for every head
         if mask is not None and mask.ndim == 2:
             mask = repeat(mask, "B L -> A B L", A=single.shape[0])
         core = self._attention_core_triton if self.backend == "triton" else self._attention_core
@@ -659,7 +710,7 @@ class BiasOnlyAttention(BackendModule):
     ) -> None:
         super().__init__()
         self.n_head = n_head
-        d_hidden = d_head or d_single // n_head          # the head width; n_head x d_head may differ from d_single
+        d_hidden = d_head or d_single // n_head  # the head width; n_head x d_head may differ from d_single
         self.ada_ln_in = AdaptiveLayerNorm(d_single, d_cond)
         self.to_value = Linear(d_single, d_hidden * n_head, bias=False)
         self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
@@ -667,7 +718,7 @@ class BiasOnlyAttention(BackendModule):
         self.ln_pair = LayerNorm(d_pair, bias=False)
         self.to_bias = Linear(d_pair, n_head, bias=False, init="zero")
         self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
-        self.to_scale = Linear(d_cond, d_single, bias=True, init="default", bias_init=-2.0)   # sigmoid(-2) ~ 0.1: the update starts small
+        self.to_scale = Linear(d_cond, d_single, bias=True, init="default", bias_init=-2.0)  # sigmoid(-2) ~ 0.1: the update starts small
         self.set_backend(backend)
 
     def _attention_weights(self, pair, mask, bias, dtype):

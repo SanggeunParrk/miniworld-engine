@@ -52,19 +52,21 @@ def pair_only_wide(d_msa: int, d_pair: int, n_head: int, d_hidden: int) -> bool:
 
 def _wide_pair_fwd(z, pm, lnz_w, eps_z, wb):
     """w [H, N, N] bf16 from pwa_wide's pair kernel at z's d_pair; ``pm`` is the [N, N] bf16 key mask of this path (every row the same)."""
-    return _wide._pair(z.shape[-1]).pair_fwd3(z, pm[0].contiguous(), lnz_w.detach().float().contiguous(),
-                                              torch.zeros_like(lnz_w, dtype=torch.float32), eps_z, wb.detach())
+    return _wide._pair(z.shape[-1]).pair_fwd3(
+        z, pm[0].contiguous(), lnz_w.detach().float().contiguous(), torch.zeros_like(lnz_w, dtype=torch.float32), eps_z, wb.detach()
+    )
 
 
 def _wide_pair_bwd(z, w16, dw16, lnz_w, eps_z, wb):
     """(dz, dWb, dgamma_z) from pwa_wide's pair backward (dw in bf16, as cuBLAS returns it)."""
-    dz, dwb, dzw, _ = _wide._pair(z.shape[-1]).pair_bwd3(z, w16, dw16, lnz_w.detach().float().contiguous(),
-                                                         torch.zeros_like(lnz_w, dtype=torch.float32), eps_z, wb.detach())
+    dz, dwb, dzw, _ = _wide._pair(z.shape[-1]).pair_bwd3(
+        z, w16, dw16, lnz_w.detach().float().contiguous(), torch.zeros_like(lnz_w, dtype=torch.float32), eps_z, wb.detach()
+    )
     return dz, dwb, dzw
+
+
 _EXT: dict[str, Any] = {}
-_NATIVE_TRAINING_SCOPE: ContextVar[bool] = ContextVar(
-    "pwa_native_training", default=False
-)
+_NATIVE_TRAINING_SCOPE: ContextVar[bool] = ContextVar("pwa_native_training", default=False)
 
 
 _SPLIT_MIN_N = 512
@@ -99,9 +101,7 @@ def _h100_training_default(msa: torch.Tensor) -> bool:
 
 def native_aux_enabled(msa: torch.Tensor | None = None) -> bool:
     """Qualified training defaults (the six required H100 shapes, or the active native training scope)."""
-    return (
-        _h100_training_default(msa) if msa is not None else _NATIVE_TRAINING_SCOPE.get()
-    )
+    return _h100_training_default(msa) if msa is not None else _NATIVE_TRAINING_SCOPE.get()
 
 
 def native_inference_enabled(device: torch.device) -> bool:
@@ -147,9 +147,7 @@ def refusal(
         if msa.shape[0] != 1:
             return f"one MSA stack per call, got batch {msa.shape[0]}"
         n, s = msa.shape[2], msa.shape[1]
-        native = native_aux_enabled(msa) or (
-            not torch.is_grad_enabled() and native_inference_enabled(msa.device)
-        )
+        native = native_aux_enabled(msa) or (not torch.is_grad_enabled() and native_inference_enabled(msa.device))
         # the forward pair kernel holds H rows of N logits in shared memory (N <= 2048); the backward one is built for N <= 1024
         n_max = 1024 if torch.is_grad_enabled() else NMAX_INFER
         if cap == (9, 0) and native and (n == 0 or s == 0 or n > n_max):
@@ -164,9 +162,7 @@ def refusal(
             return f"d_pair {d_pair}: the pair side is pwa_wide's sm_90a kernels (N <= {_wide.NMAX}), got N={n} on sm_{cap[0]}{cap[1]}"
         if n % 128 or s % 2:
             return f"N must be a multiple of 128 and S even, got N={n}, S={s}"
-        if cap == (10, 0) and (
-            s % 128 or n > 1024
-        ):  # ln_vg / dv_bwd tiles are 128 MSA rows; pair_fwd holds a row of N
+        if cap == (10, 0) and (s % 128 or n > 1024):  # ln_vg / dv_bwd tiles are 128 MSA rows; pair_fwd holds a row of N
             return f"the sm_100a kernels need S a multiple of 128 and N <= 1024, got N={n}, S={s}"
         return None
     except Exception as exc:
@@ -191,9 +187,7 @@ def serves(*a, **kw) -> bool:
     return False
 
 
-def _build(
-    name: str, src_name: str, native: bool | None = None, fp32_logits: bool = True
-):
+def _build(name: str, src_name: str, native: bool | None = None, fp32_logits: bool = True):
     native = (native_aux_enabled() if native is None else native) and src_name in (
         "pair3.cu",
         "dgv_bwd.cu",
@@ -201,9 +195,7 @@ def _build(
     )
     if native:
         name += "_native_v1"
-    if (
-        src_name == "pair3.cu" and not fp32_logits
-    ):  # the opt-in BF16 logit rounding (-DMW_PWA_ROUND_LOGITS), either build
+    if src_name == "pair3.cu" and not fp32_logits:  # the opt-in BF16 logit rounding (-DMW_PWA_ROUND_LOGITS), either build
         name += "_rounded_logits"
     if name in _EXT:
         return _EXT[name]
@@ -222,11 +214,7 @@ def _build(
             # without its shared-memory attribute ("invalid argument" in pwa_glue3 after a plain-scope training call)
             "-Xcompiler=-fvisibility=hidden",
             *(["-DMW_PWA_CUDA_AUX=1"] if native else []),
-            *(
-                ["-DMW_PWA_ROUND_LOGITS=1"]
-                if src_name == "pair3.cu" and not fp32_logits
-                else []
-            ),
+            *(["-DMW_PWA_ROUND_LOGITS=1"] if src_name == "pair3.cu" and not fp32_logits else []),
         ],
         extra_cflags=["-O3", "-fvisibility=hidden"],
     )
@@ -273,20 +261,12 @@ def _k(native: bool | None = None, fp32_logits: bool = True):
             "dgv": build("miniworld_pwa_dgv_bwd", "dgv_bwd.cu"),
             "lnvg": build("miniworld_pwa_ln_vg", "ln_vg.cu"),
         }
-        k["glue3"] = (
-            build("miniworld_pwa_glue3", "pwa_glue3.cu")
-            if (Path(__file__).with_name("csrc") / "pwa_glue3.cu").is_file()
-            else None
-        )
+        k["glue3"] = build("miniworld_pwa_glue3", "pwa_glue3.cu") if (Path(__file__).with_name("csrc") / "pwa_glue3.cu").is_file() else None
         k["pair3"] = (
-            build("miniworld_pwa_pair3", "pair3.cu")
-            if (Path(__file__).with_name("csrc") / "pair3.cu").is_file()
-            else None
+            build("miniworld_pwa_pair3", "pair3.cu") if (Path(__file__).with_name("csrc") / "pair3.cu").is_file() else None
         )  # tensor-core pair forward
         k["gateout"] = (
-            build("miniworld_pwa_gateout", "pwa_gateout.cu")
-            if (Path(__file__).with_name("csrc") / "pwa_gateout.cu").is_file()
-            else None
+            build("miniworld_pwa_gateout", "pwa_gateout.cu") if (Path(__file__).with_name("csrc") / "pwa_gateout.cu").is_file() else None
         )  # gate / out pass over a cuBLAS contraction
         # the row-broadcast dropout keep-mask (training) is applied inside the residual epilogue of the forward
         f3 = build("miniworld_pwa_fwd3", "pwa_fwd3.cu")
@@ -302,9 +282,7 @@ def colsum(x):
     """deterministic column sums of a 2-D fp32 tensor as a cuBLAS GEMV: torch's dim-0 reduce of a tall
     thin buffer ran at a tenth of bandwidth (20 us for 3 MB)"""
     R = x.shape[0]
-    return torch.matmul(
-        torch.ones(R, dtype=x.dtype, device=x.device), x.reshape(R, -1)
-    ).reshape(x.shape[1:])
+    return torch.matmul(torch.ones(R, dtype=x.dtype, device=x.device), x.reshape(R, -1)).reshape(x.shape[1:])
 
 
 # ---------------------------------------------------------------------------------------------
@@ -333,24 +311,18 @@ def _pair_fwd_kernel(
     d = tl.arange(0, DZ)
     hh = tl.arange(0, HP)
     lw = tl.load(LNW + d).to(tl.float32)
-    wbt = tl.load(
-        WBT + d[:, None] * HP + hh[None, :]
-    )  # [DZ, HP] bf16, columns >= H are zero
+    wbt = tl.load(WBT + d[:, None] * HP + hh[None, :])  # [DZ, HP] bf16, columns >= H are zero
     # pass 1: online max / rescaled sum per head
     mx = tl.full((HP,), -1e30, dtype=tl.float32)
     den = tl.zeros((HP,), dtype=tl.float32)
     for j0 in range(0, N, BJ):
         j = j0 + tl.arange(0, BJ)
-        x = tl.load(Z + (i * N + j)[:, None] * DZ + d[None, :]).to(
-            tl.float32
-        )  # [BJ, DZ]
+        x = tl.load(Z + (i * N + j)[:, None] * DZ + d[None, :]).to(tl.float32)  # [BJ, DZ]
         mean = tl.sum(x, 1) / DZ
         xc = x - mean[:, None]
         rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)
         zn = (xc * rstd[:, None] * lw[None, :]).to(tl.bfloat16)
-        b = (
-            tl.dot(zn, wbt).to(tl.bfloat16).to(tl.float32)
-        )  # [BJ, HP]: the stock proj_z output is bf16
+        b = tl.dot(zn, wbt).to(tl.bfloat16).to(tl.float32)  # [BJ, HP]: the stock proj_z output is bf16
         m = tl.load(MASK + i * N + j).to(tl.float32)
         b = tl.where(m[:, None] > 0.5, b, -1e30)
         mn = tl.maximum(mx, tl.max(b, 0))
@@ -401,9 +373,7 @@ def _pair_bwd_kernel(
     hh = tl.arange(0, HP)
     hmask = hh < H
     lw = tl.load(LNW + d).to(tl.float32)
-    wb = tl.load(
-        WB + hh[:, None] * DZ + d[None, :], mask=hmask[:, None], other=0.0
-    )  # [HP, DZ] bf16 (Wb rows, zero-padded)
+    wb = tl.load(WB + hh[:, None] * DZ + d[None, :], mask=hmask[:, None], other=0.0)  # [HP, DZ] bf16 (Wb rows, zero-padded)
     # sum_j w dw per head: precomputed (a tiny GEMV-like pass) when the row is split over programs
     if HAS_SDOT:
         sdot = tl.load(SDOT + hh * N + i, mask=hmask, other=0.0)
@@ -423,27 +393,21 @@ def _pair_bwd_kernel(
         w = tl.load(W + off, mask=hmask[None, :], other=0.0).to(tl.float32)
         dw = tl.load(DW + off, mask=hmask[None, :], other=0.0)
         db = w * (dw - sdot[None, :])  # [BJ, HP] softmax backward
-        x = tl.load(Z + (i * N + j)[:, None] * DZ + d[None, :]).to(
-            tl.float32
-        )  # [BJ, DZ]
+        x = tl.load(Z + (i * N + j)[:, None] * DZ + d[None, :]).to(tl.float32)  # [BJ, DZ]
         mean = tl.sum(x, 1) / DZ
         xc = x - mean[:, None]
         rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)
         xh = xc * rstd[:, None]
         zn = (xh * lw[None, :]).to(tl.bfloat16)
         db16 = db.to(tl.bfloat16)
-        dzn = tl.dot(db16, wb).to(
-            tl.float32
-        )  # [BJ, DZ] = db Wb  (the stock proj_z is a bf16 GEMM)
+        dzn = tl.dot(db16, wb).to(tl.float32)  # [BJ, DZ] = db Wb  (the stock proj_z is a bf16 GEMM)
         pwb += tl.dot(tl.trans(db16), zn)  # [HP, DZ] += db^T zn
         pg += tl.sum(dzn * xh, 0)
         g = dzn * lw[None, :]
         gs = tl.sum(g, 1) / DZ
         gx = tl.sum(g * xh, 1) / DZ
         dz = rstd[:, None] * (g - gs[:, None] - xh * gx[:, None])
-        tl.store(
-            DZO + (i * N + j)[:, None] * DZ + d[None, :], dz.to(DZO.dtype.element_ty)
-        )
+        tl.store(DZO + (i * N + j)[:, None] * DZ + d[None, :], dz.to(DZO.dtype.element_ty))
     tl.store(PWB + pid * HP * DZ + hh[:, None] * DZ + d[None, :], pwb)
     tl.store(PLN + pid * DZ + d, pg)
 
@@ -490,9 +454,7 @@ def pair_bwd(z, w16, dw, ln_w, eps, wb, BJ=32, num_warps=4, BJO=None):
     pwb = torch.empty((nprog, HP, DZ), dtype=torch.float32, device=z.device)
     pln = torch.empty((nprog, DZ), dtype=torch.float32, device=z.device)
     dwc = dw.contiguous()
-    sdot = (
-        (w16.float() * dwc).sum(-1).contiguous() if BJO < N else dwc
-    )  # [H, N]; only needed when the row is split
+    sdot = (w16.float() * dwc).sum(-1).contiguous() if BJO < N else dwc  # [H, N]; only needed when the row is split
     cast(Any, _pair_bwd_kernel)[(N, N // BJO)](
         z,
         w16,
@@ -523,9 +485,7 @@ def _cast_h100_matrices(*weights):
         0,
     ):
         return tuple(_cast_cuda.cast(weights, [torch.bfloat16] * len(weights)))
-    if torch.cuda.get_device_capability(weights[0].device) == (9, 0) and any(
-        w.dtype != torch.bfloat16 for w in weights
-    ):
+    if torch.cuda.get_device_capability(weights[0].device) == (9, 0) and any(w.dtype != torch.bfloat16 for w in weights):
         from miniworld_engine.kernels._h100_master import pack
 
         return tuple(pack(weights))
@@ -543,9 +503,7 @@ class _PwaMath(torch.autograd.Function):
 
     @staticmethod
     @torch.autocast("cuda", enabled=False)
-    def forward(
-        ctx, msa, pair, pm, lnm_w, lnm_b, wv, wg, lnz_w, wb, wo, eps_m, eps_z, p_drop
-    ):
+    def forward(ctx, msa, pair, pm, lnm_w, lnm_b, wv, wg, lnz_w, wb, wo, eps_m, eps_z, p_drop):
         m = msa[0].contiguous()
         z = pair[0].contiguous()
         N = m.shape[1]
@@ -557,27 +515,17 @@ class _PwaMath(torch.autograd.Function):
             ctx.key_mask = pm
             pm = k["pair3"].mask(m, None if pm.numel() == 0 else pm, N)
         if sm100:  # pm: the [N] bool key mask (pair_weighted_averaging)
-            w16 = k["pwa"].pair_fwd(
-                z, pm, lnz_w.detach().contiguous(), eps_z, wb.detach().contiguous()
-            )
+            w16 = k["pwa"].pair_fwd(z, pm, lnz_w.detach().contiguous(), eps_z, wb.detach().contiguous())
         elif z.shape[-1] != DZ:  # pair_only_wide: the pair side at this d_pair is pwa_wide's
             w16 = _wide_pair_fwd(z, pm, lnz_w, eps_z, wb)
         elif k["pair3"] is not None and N % 16 == 0 and N <= 1024:
             (zw,) = _h100_float(lnz_w.detach())
-            wb16 = (
-                _cast_h100_matrices(wb.detach())[0]
-                if native_aux_enabled()
-                else wb.detach()
-            )
+            wb16 = _cast_h100_matrices(wb.detach())[0] if native_aux_enabled() else wb.detach()
             w16 = k["pair3"].pair_fwd3(z, pm, zw, eps_z, wb16)
         else:
-            w16 = pair_fwd(
-                z, pm, lnz_w.detach().float().contiguous(), eps_z, wb.detach(), H, BJ=64
-            )
+            w16 = pair_fwd(z, pm, lnz_w.detach().float().contiguous(), eps_z, wb.detach(), H, BJ=64)
         if sm100:
-            v, y = k["pwa"].ln_vg(
-                m, lnm_w.detach().contiguous(), lnm_b.detach().contiguous(), wv16, eps_m
-            )
+            v, y = k["pwa"].ln_vg(m, lnm_w.detach().contiguous(), lnm_b.detach().contiguous(), wv16, eps_m)
         else:
             mw, mb = _h100_float(lnm_w.detach(), lnm_b.detach())
             v, y = k["lnvg"].ln_vg(m, mw, mb, wv16, eps_m, 2, 3, 1)
@@ -595,12 +543,8 @@ class _PwaMath(torch.autograd.Function):
                 dmask = (torch.rand(N, D, device=m.device, dtype=bf) > p_drop).to(bf)
             dscale = 1.0 / (1.0 - p_drop)
         if sm100:
-            o = torch.bmm(
-                w16, v
-            )  # the contraction on cuBLAS: 5-15 % faster than pwa_ctr at L 256-1024, bit-identical
-            out = k[
-                "pwa"
-            ].pwa_gate_out(
+            o = torch.bmm(w16, v)  # the contraction on cuBLAS: 5-15 % faster than pwa_ctr at L 256-1024, bit-identical
+            out = k["pwa"].pwa_gate_out(
                 o,
                 m,
                 lnm_w.detach().contiguous(),
@@ -612,20 +556,11 @@ class _PwaMath(torch.autograd.Function):
                 dscale,
             )  # split: contraction, then gate / out (y recomputed; ln_vg's y kept for the backward)
         else:
-            if (
-                native_aux_enabled()
-                and k.get("gateout") is not None
-                and k["glue3"] is not None
-                and _split_contraction(N)
-            ):
-                o = torch.bmm(
-                    w16, v
-                )  # head-major o, kept for the backward (glue3 reads it as such)
+            if native_aux_enabled() and k.get("gateout") is not None and k["glue3"] is not None and _split_contraction(N):
+                o = torch.bmm(w16, v)  # head-major o, kept for the backward (glue3 reads it as such)
                 out = k["gateout"].pwa_gateout(o, y, wg16, wo16, m, 1, 4, dmask, dscale)
             else:
-                out, o = k["forward"](
-                    w16, v, y, wg16, wo16, m, dmask, dscale
-                )  # residual fused; o kept for the backward
+                out, o = k["forward"](w16, v, y, wg16, wo16, m, dmask, dscale)  # residual fused; o kept for the backward
         ctx.save_for_backward(
             m,
             z,
@@ -664,15 +599,9 @@ class _PwaMath(torch.autograd.Function):
             # the parameter gradients come out of the kernels in the parameters' dtype (.to below is then a no-op): no cast launches
             wot, wgvT = k.pwa_wprep(wg16, wv16, wo16)  # Wo^T, [Wg; Wv]^T: one launch
             # glue2: dgp never leaves the chip -- its consumers (dWg = dgp^T y, dyg = dgp Wg) run inside; dv_bwd adds dv Wv to dyg
-            d_o, dyg, dWo, dWg = k.pwa_glue2(
-                o, y, dres0, wg16, wot, dmask, ctx.dscale, int(wo.dtype == bf)
-            )
-            dv = torch.bmm(
-                w16.transpose(1, 2), d_o
-            )  # head-major [H, N, S*C], cuBLAS (as the forward)
-            dw = torch.bmm(
-                d_o, v.transpose(1, 2)
-            )  # [H][N][N] bf16 (PyTorch's dw is bf16 too), K = S*C
+            d_o, dyg, dWo, dWg = k.pwa_glue2(o, y, dres0, wg16, wot, dmask, ctx.dscale, int(wo.dtype == bf))
+            dv = torch.bmm(w16.transpose(1, 2), d_o)  # head-major [H, N, S*C], cuBLAS (as the forward)
+            dw = torch.bmm(d_o, v.transpose(1, 2))  # [H][N][N] bf16 (PyTorch's dw is bf16 too), K = S*C
             dm, dWv, dlw, dlb = k.dv_bwd(
                 dv,
                 dyg,
@@ -710,14 +639,10 @@ class _PwaMath(torch.autograd.Function):
                 None,
                 None,
             )
-        assert (
-            k is not None
-        )  # the sm_100 branch above returned; dres and m share a device, so _k() ran
+        assert k is not None  # the sm_100 branch above returned; dres and m share a device, so _k() ran
         native = native_aux_enabled()
         wot = k["pair3"].transpose(wo16) if native else wo16.t().contiguous()
-        dgv = torch.empty(
-            (S, N, 2 * HC), dtype=bf, device=m.device
-        )  # dgp | dv: one [S,N,512] buffer
+        dgv = torch.empty((S, N, 2 * HC), dtype=bf, device=m.device)  # dgp | dv: one [S,N,512] buffer
         if k["glue3"] is not None:  # dWo partials fused: go never touches memory
             d_o, _, dWo = k["glue3"].pwa_glue3(
                 o,
@@ -733,33 +658,19 @@ class _PwaMath(torch.autograd.Function):
                 bool(native and k.get("gateout") is not None and _split_contraction(N)),
             )
         else:
-            dout = (
-                dres0
-                if dmask is None
-                else (dres0 * dmask[None] * ctx.dscale).contiguous()
-            )
-            d_o, _, go = k["ctr"].pwa_glue_o(
-                o, y, dout, wg16, wo16.t().contiguous(), 1, dgv
-            )
+            dout = dres0 if dmask is None else (dres0 * dmask[None] * ctx.dscale).contiguous()
+            d_o, _, go = k["ctr"].pwa_glue_o(o, y, dout, wg16, wo16.t().contiguous(), 1, dgv)
             dWo = dout.view(S * N, D).t() @ go.view(S * N, HC)  # [D][HC]
         # dv = w^T . d_o. On the native path cuBLAS runs it (~2x faster than pwa_plain2 for the same FLOPs) and dgv_bwd reads its head-major
         # result tile by tile; otherwise pwa_plain2 writes dv into dgv[..., HC:].
         dv_hm = torch.bmm(w16.transpose(1, 2), d_o) if native and N % 64 == 0 else None
         if dv_hm is None:
-            wt = (
-                k["pair3"].transpose(w16)
-                if native
-                else w16.transpose(1, 2).contiguous()
-            )
+            wt = k["pair3"].transpose(w16) if native else w16.transpose(1, 2).contiguous()
             k["fwd"].pwa_plain2(wt, d_o, 4, dgv)  # dv -> dgv[..., HC:]
         dw = torch.bmm(d_o, v.transpose(1, 2))  # [H][N][N], K = S*C
         dw16 = dw  # pwa_wide's pair backward (pair_only_wide) takes it in bf16
         dw, mw, zw = _h100_float(dw, lnm_w, lnz_w)
-        wgvT = (
-            k["pair3"].wgv(wg16, wv16)
-            if native
-            else torch.cat([wg16, wv16], 0).t().contiguous()
-        )
+        wgvT = k["pair3"].wgv(wg16, wv16) if native else torch.cat([wg16, wv16], 0).t().contiguous()
         dm, dWgv, dlw, dlb = k["dgv"].dgv_bwd(
             dgv.view(S * N, 2 * HC),
             y.view(S * N, D),
@@ -785,10 +696,7 @@ class _PwaMath(torch.autograd.Function):
                 dz, dWb, dzw = k["pair3"].pair_bwd3(z, w16, dw, zw, eps_z, wb16, key)
             leaves = _cast_cuda.cast(
                 [dlw, dlb, dWv, dWg, dzw, dWb, dWo],
-                [
-                    torch.float32 if w.dtype == torch.float32 else torch.bfloat16
-                    for w in (lnm_w, lnm_b, wv, wg, lnz_w, wb, wo)
-                ],
+                [torch.float32 if w.dtype == torch.float32 else torch.bfloat16 for w in (lnm_w, lnm_b, wv, wg, lnz_w, wb, wo)],
                 True,
             )
             return (dm.view(S, N, D)[None], dz[None], None, *leaves, None, None, None)
@@ -816,9 +724,7 @@ class _PwaMath(torch.autograd.Function):
 
 @torch.no_grad()
 @torch.autocast("cuda", enabled=False)
-def _inference_math(
-    module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
-) -> torch.Tensor:
+def _inference_math(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """msa + PWA(msa, pair, key mask) for a grad-free call: the same three forward kernels, o not kept, no dropout."""
     bf = torch.bfloat16
     m = msa[0].contiguous()
@@ -828,11 +734,7 @@ def _inference_math(
     eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
     if torch.cuda.get_device_capability(m.device) == (10, 0):
         k = _k100()
-        km = (
-            torch.ones(n, dtype=torch.bool, device=m.device)
-            if mask is None
-            else mask[0].to(torch.bool).contiguous()
-        )
+        km = torch.ones(n, dtype=torch.bool, device=m.device) if mask is None else mask[0].to(torch.bool).contiguous()
         w16 = k["pwa"].pair_fwd(
             z,
             km,
@@ -870,11 +772,7 @@ def _inference_math(
     pm = (
         k["pair3"].mask(m, mask, n)
         if native
-        else (
-            torch.ones(n, n, dtype=bf, device=m.device)
-            if mask is None
-            else mask[0].to(bf)[None, :].expand(n, n).contiguous()
-        )
+        else (torch.ones(n, n, dtype=bf, device=m.device) if mask is None else mask[0].to(bf)[None, :].expand(n, n).contiguous())
     )
     if native:
         lnz_w, lnm_w, lnm_b = _cast_cuda.cast(
@@ -921,13 +819,9 @@ def _inference_math(
     if native and k.get("gateout") is not None and _split_contraction(n):
         # contraction on cuBLAS (it runs the same FLOPs ~2x faster than the fused kernel's n=64 wgmma tiles), gate / out pass in its own kernel;
         # at small N the fused kernel wins (the o round trip and the extra launch cost more than the faster contraction saves)
-        out = k["gateout"].pwa_gateout(
-            torch.bmm(w16, v), y, wg16, wo16, m, 1, 4, None, 1.0
-        )
+        out = k["gateout"].pwa_gateout(torch.bmm(w16, v), y, wg16, wo16, m, 1, 4, None, 1.0)
     elif "fwd3" in k:
-        out, _ = k["fwd3"].pwa_fwd3(
-            w16, v, y, wg16, wo16, m, False, 1, 3, 1, 0, None, 1.0
-        )
+        out, _ = k["fwd3"].pwa_fwd3(w16, v, y, wg16, wo16, m, False, 1, 3, 1, 0, None, 1.0)
     else:
         out, _ = k["fwd"].pwa_fwd2(w16, v, y, wg16, wo16, m, False, 1, 4, None, 1.0)
     return out[None]
@@ -945,9 +839,7 @@ def _is_wide(module) -> bool:
     return shape != (D, DZ, H, C) and not pair_only_wide(*shape)
 
 
-def pair_weighted_averaging(
-    module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
-) -> torch.Tensor:
+def pair_weighted_averaging(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """msa + MSAPairWeightedAveraging(msa, pair, mask): the residual is INCLUDED (the forward kernel adds it)."""
     if _is_wide(module):
         return _wide.pair_weighted_averaging(module, msa, pair, mask)
@@ -956,30 +848,18 @@ def pair_weighted_averaging(
         10,
         0,
     ):  # sm_100a: the [N] key mask itself
-        pm = (
-            torch.ones(n, dtype=torch.bool, device=msa.device)
-            if mask is None
-            else mask[0].to(torch.bool).contiguous()
-        )
+        pm = torch.ones(n, dtype=torch.bool, device=msa.device) if mask is None else mask[0].to(torch.bool).contiguous()
     elif native_aux_enabled(msa):
         # Keep the CUDA launch inside the opaque forward so torch.compile can
         # trace the module without following a pybind extension call.
-        pm = (
-            mask
-            if mask is not None
-            else torch.empty((0,), device=msa.device, dtype=torch.bool)
-        )
+        pm = mask if mask is not None else torch.empty((0,), device=msa.device, dtype=torch.bool)
     elif mask is None:
         pm = torch.ones(n, n, dtype=torch.bfloat16, device=msa.device)
     else:
-        pm = (
-            mask[0].to(torch.bfloat16)[None, :].expand(n, n).contiguous()
-        )  # the module masks the key axis j
+        pm = mask[0].to(torch.bfloat16)[None, :].expand(n, n).contiguous()  # the module masks the key axis j
     eps_m = float(getattr(module.ln_msa, "eps", 1e-5))
     eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
-    p_drop = (
-        float(module.drop_msa.p_drop) if module.training else 0.0
-    )  # the module's drop_msa, fused into the kernel
+    p_drop = float(module.drop_msa.p_drop) if module.training else 0.0  # the module's drop_msa, fused into the kernel
     out = PwaTrainFn.apply(
         msa.contiguous(),
         pair.contiguous(),
@@ -1002,9 +882,7 @@ def pair_weighted_averaging(
         from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_hooks
 
         # Keep the result's autograd edges alive before hooking leaf nodes.
-        _native_caller_hooks(
-            msa, pair, *module.parameters(), force=_h100_training_default(msa)
-        )
+        _native_caller_hooks(msa, pair, *module.parameters(), force=_h100_training_default(msa))
     return out
 
 
@@ -1023,10 +901,7 @@ def _forward_fake(args, eps_m, eps_z, p_drop):
     # o is head-major [H, N, S*C] on sm_100a (cuBLAS bmm(w, v)), natural [S, N, HC] on sm_90a
     o_shape = (
         (H, n, s * C)
-        if (
-            torch.cuda.get_device_capability(m.device) == (10, 0)
-            or (native_aux_enabled(m) and _split_contraction(n))
-        )
+        if (torch.cuda.get_device_capability(m.device) == (10, 0) or (native_aux_enabled(m) and _split_contraction(n)))
         else (s, n, HC)
     )
     return [
@@ -1043,9 +918,7 @@ from miniworld_engine.kernels._compile import opaque
 
 
 @opaque(fake=_forward_fake, name="pwa_h100_fwd")
-def _forward_op(
-    args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float
-) -> list[torch.Tensor]:
+def _forward_op(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float) -> list[torch.Tensor]:
     scope = _NATIVE_TRAINING_SCOPE.set(_h100_training_default(args[0]))
     try:
         ctx = _SavedContext()
@@ -1104,12 +977,8 @@ class PwaTrainFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         vals = ctx.saved_tensors
-        grads = _backward_op(
-            list(vals[:10]), list(vals[10:]), dy, ctx.eps_m, ctx.eps_z, ctx.p_drop
-        )
-        if native_aux_enabled(vals[0]) and torch.cuda.get_device_capability(
-            dy.device
-        ) == (9, 0):
+        grads = _backward_op(list(vals[:10]), list(vals[10:]), dy, ctx.eps_m, ctx.eps_z, ctx.p_drop)
+        if native_aux_enabled(vals[0]) and torch.cuda.get_device_capability(dy.device) == (9, 0):
             from miniworld_engine.kernels.integrations.token_dit_train import (
                 _activate_native_caller,
             )

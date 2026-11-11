@@ -44,6 +44,7 @@ on that kernel. A fixed tile makes it look like 1.33x: the warp/stage pair that 
 walk is not the one that suits column-first, so holding them fixed hands the old order a bad
 config. Judge a new conversion the same way -- against a tuned baseline, not a fixed one.
 """
+
 from __future__ import annotations
 
 import triton
@@ -93,8 +94,10 @@ def check_tile_axes(kernel: str, grid_n: int, kernel_n: int, grid_name: str, ker
     Cheap: two ints on the host, once per launch, next to the shape reads the launcher already does.
     """
     if grid_n != kernel_n:
-        msg = (f"{kernel}: the grid counts column tiles over {grid_name}={grid_n} but the kernel "
-               f"divides by {kernel_name}={kernel_n}. tile_order would map every program to the "
-               f"wrong tile. These are the input and output widths and this kernel requires them "
-               f"equal.")
+        msg = (
+            f"{kernel}: the grid counts column tiles over {grid_name}={grid_n} but the kernel "
+            f"divides by {kernel_name}={kernel_n}. tile_order would map every program to the "
+            f"wrong tile. These are the input and output widths and this kernel requires them "
+            f"equal."
+        )
         raise ValueError(msg)

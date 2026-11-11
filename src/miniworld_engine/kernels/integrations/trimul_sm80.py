@@ -40,10 +40,7 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None
     if module.ln_pair.eps != module.ln_out.eps:
         return "LN_in and LN_out must share one epsilon"
     # the input LayerNorm's gradients are written by the kernel, in the parameters' dtype (bf16 or fp32, both alike)
-    if (
-        module.ln_pair.weight.dtype != module.ln_pair.bias.dtype
-        or module.ln_pair.weight.dtype not in (torch.bfloat16, torch.float32)
-    ):
+    if module.ln_pair.weight.dtype != module.ln_pair.bias.dtype or module.ln_pair.weight.dtype not in (torch.bfloat16, torch.float32):
         return "the input LayerNorm's weight and bias must share one dtype, bf16 or fp32"
     # the six weight matrices share one dtype (bf16, or fp32 masters over bf16 activations); the kernels cast them inside the op and write the
     # weight gradients in that dtype
@@ -69,8 +66,10 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None
         return None
     if _wide_kernels(plane).available(plane, module.d_hidden, plane_mask, hs=_wide_hs(module)):
         return None
-    return (f"d_pair {pair.shape[-1]}, d_hidden {module.d_hidden}, L {pair.shape[1]}, grad {torch.is_grad_enabled()}: outside the A100 TriMul "
-            "kernels (sm80: D128 fused; sm80_wide / sm80_wide512: D 64 .. 512) or their extensions failed to build")
+    return (
+        f"d_pair {pair.shape[-1]}, d_hidden {module.d_hidden}, L {pair.shape[1]}, grad {torch.is_grad_enabled()}: outside the A100 TriMul "
+        "kernels (sm80: D128 fused; sm80_wide / sm80_wide512: D 64 .. 512) or their extensions failed to build"
+    )
 
 
 def update(
@@ -83,20 +82,14 @@ def update(
 ) -> torch.Tensor:
     """``pair + drop_row(trimul(pair))``.  The parameters go to the op as leaves; it casts the weights to the kernels' dtype outside autograd and returns
     each gradient in its parameter's own dtype (fp32 masters get the kernels' fp32 accumulators unrounded)."""
-    if (
-        pair.shape[0] > 1
-    ):  # the kernels take one square plane: a batch runs plane by plane (autograd sums the weight gradients)
+    if pair.shape[0] > 1:  # the kernels take one square plane: a batch runs plane by plane (autograd sums the weight gradients)
         return torch.cat(
             [
                 update(
                     module,
                     pair[i : i + 1],
                     None if mask is None else mask[i : i + 1],
-                    None
-                    if dropscale is None
-                    else (
-                        dropscale if dropscale.shape[0] == 1 else dropscale[i : i + 1]
-                    ),
+                    None if dropscale is None else (dropscale if dropscale.shape[0] == 1 else dropscale[i : i + 1]),
                     bidirectional=bidirectional,
                 )
                 for i in range(pair.shape[0])
@@ -106,21 +99,9 @@ def update(
     from miniworld_engine.kernels.trimul_inproj.cuda import sm80
 
     n = pair.shape[1]
-    direction = (
-        sm80.BIDIR
-        if bidirectional
-        else sm80.OUTGOING
-        if module.outgoing
-        else sm80.INCOMING
-    )
-    ds = (
-        pair.new_empty((0,))
-        if dropscale is None
-        else dropscale.reshape(n, pair.shape[-1]).to(pair.dtype).contiguous()
-    )
-    kernels = (
-        sm80 if sm80.supports(pair, module.d_hidden, mask) else _wide_kernels(pair)
-    )
+    direction = sm80.BIDIR if bidirectional else sm80.OUTGOING if module.outgoing else sm80.INCOMING
+    ds = pair.new_empty((0,)) if dropscale is None else dropscale.reshape(n, pair.shape[-1]).to(pair.dtype).contiguous()
+    kernels = sm80 if sm80.supports(pair, module.d_hidden, mask) else _wide_kernels(pair)
     return kernels.trimul(
         pair,
         module.to_left.weight,

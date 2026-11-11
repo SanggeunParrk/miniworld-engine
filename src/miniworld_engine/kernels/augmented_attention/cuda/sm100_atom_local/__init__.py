@@ -54,8 +54,7 @@ def cubin(stem: str, hopper: bool = False) -> str:
         f"-I{_dir}",
     )
     family = "atom_local_sm90" if hopper else "atom_local_sm100"
-    return str(_nvcc.cubin(f"{family}/{stem}", flags, source=_dir / f"{stem}.cu",
-                           toolchain="torch" if hopper else "sm100"))
+    return str(_nvcc.cubin(f"{family}/{stem}", flags, source=_dir / f"{stem}.cu", toolchain="torch" if hopper else "sm100"))
 
 
 #: (stem, function, dynamic smem bytes) of every kernel
@@ -157,9 +156,7 @@ def _resolve(name: str, hopper: bool) -> tuple[str, str, int]:
         "kv_pack",
     ):
         stem, func, smem = "lcross", f"local_{name}_sm90", 0
-    elif (
-        hopper and name in _HOPPER_CROSS
-    ):  # the K / V AdaLN row kernels (sm_100a has them inside sm100_atom's pre_fwd_kv / pre_bwd_kv)
+    elif hopper and name in _HOPPER_CROSS:  # the K / V AdaLN row kernels (sm_100a has them inside sm100_atom's pre_fwd_kv / pre_bwd_kv)
         stem, func, smem = "lcross", _HOPPER_CROSS[name], 0
     elif name not in KERNELS:
         raise NotImplementedError(f"local atom kernel {name!r} exists on sm_90a only")
@@ -176,18 +173,13 @@ def _load(name: str, device_index: int):
 
     hopper = _hopper(device_index)
     stem, func, smem = _resolve(name, hopper)
-    pdl = (
-        hopper
-        and (name in _MMA_KERNELS or name in _MMA_KERNELS32)
-    )
+    pdl = hopper and (name in _MMA_KERNELS or name in _MMA_KERNELS32)
     with torch.cuda.device(device_index):
         return driver.Kernel(cubin(stem, hopper), func, smem, pdl=pdl)
 
 
 def _dev(t: torch.Tensor) -> int:
     return t.device.index if t.device.index is not None else torch.cuda.current_device()
-
-
 
 
 def nwindows(n: int) -> int:
@@ -245,9 +237,7 @@ def attn_fwd(q, k, v, bias, kmask=None):
     km = _u8(kmask)
     from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
 
-    if _hopper(
-        d
-    ):  # sm_90a: a CTA (4 warps of mma + a TMA warp) per (64 queries, head, sample); register softmax, wgmma P V
+    if _hopper(d):  # sm_90a: a CTA (4 warps of mma + a TMA warp) per (64 queries, head, sample); register softmax, wgmma P V
         if N % 64:
             raise ValueError("Local Hopper attention requires padded N divisible by 64")
         if HOPPER_MMA_ATTN:
@@ -268,13 +258,8 @@ def attn_fwd(q, k, v, bias, kmask=None):
                 1,
             )
             return o, lse
-        maps = tuple(
-            _tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (64, 64, 1), 128)
-            for t in (q, k, v)
-        )
-        _load("fwd", d)(
-            (N // 64, A * NH, 1), (160, 1, 1), *maps, bias, km, o, lse, int(N), int(A)
-        )
+        maps = tuple(_tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (64, 64, 1), 128) for t in (q, k, v))
+        _load("fwd", d)((N // 64, A * NH, 1), (160, 1, 1), *maps, bias, km, o, lse, int(N), int(A))
         return o, lse
     nq = (N + 127) // 128
     sp = max(1, min(A, num_sms(d) // (nq * NH)))
@@ -310,23 +295,15 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
     km = _u8(kmask)
     from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
 
-    if _hopper(
-        d
-    ):  # sm_90a: dQ, dK / dV (+ per-sample dbias partials) as two wgmma kernels, then the fixed-order sample sum
-        if N % 64 or any(
-            t.dtype != torch.bfloat16 or not t.is_contiguous() for t in (q, k, v, do)
-        ):
-            raise ValueError(
-                "Local Hopper backward requires contiguous bf16 operands and padded N divisible by 64"
-            )
+    if _hopper(d):  # sm_90a: dQ, dK / dV (+ per-sample dbias partials) as two wgmma kernels, then the fixed-order sample sum
+        if N % 64 or any(t.dtype != torch.bfloat16 or not t.is_contiguous() for t in (q, k, v, do)):
+            raise ValueError("Local Hopper backward requires contiguous bf16 operands and padded N divisible by 64")
         dbias = torch.empty(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
         if HOPPER_MMA_ATTN:
             b2 = _mma_bias(bias, km, N, d)
             spc = _chunk(A, (N // 64) * NH)
             sp = (A + spc - 1) // spc
-            partial = torch.empty(
-                sp, NH, nwin, WQ, WK, device=q.device, dtype=torch.float32
-            )
+            partial = torch.empty(sp, NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
             grid = (N // 64, NH, sp)
             _load("h_dq", d)(
                 grid,
@@ -371,10 +348,7 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
             )
             return dbias
         partial = torch.empty(A, NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
-        maps = tuple(
-            _tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (64, 64, 1), 128)
-            for t in (q, k, v, do)
-        )
+        maps = tuple(_tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (64, 64, 1), 128) for t in (q, k, v, do))
         _load("dq", d)(
             (N // 64, A * NH, 1),
             (160, 1, 1),
@@ -414,9 +388,7 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
     dbias = torch.zeros(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
     out = _tmap(dkv, (dkv.shape[1], N, A), (ldd * 2, N * ldd * 2), (16, 32, 1), 0)
     nq = (N + 127) // 128
-    sp = max(
-        1, min(A, num_sms(d) // (nq * NH))
-    )  # split the samples when there are few chunks
+    sp = max(1, min(A, num_sms(d) // (nq * NH)))  # split the samples when there are few chunks
     _load("dq", d)(
         (nq * NH * sp, 1, 1),
         (544, 1, 1),
@@ -435,9 +407,7 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
         int(sp),
     )
     nk = (N + 112 + 127) // 128
-    sp = (
-        2 if 2 * nk * NH <= num_sms(d) and A > 1 else 1
-    )  # two sample halves add into dbias exactly (0 + a + b)
+    sp = 2 if 2 * nk * NH <= num_sms(d) and A > 1 else 1  # two sample halves add into dbias exactly (0 + a + b)
     _load("dkv", d)(
         (nk * NH * sp, 1, 1),
         (512, 1, 1),
@@ -506,9 +476,7 @@ def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
     """dbias [4, nwin, 32, 128] fp32 -> dz (z's shape and dtype, contiguous), dgamma [16], dWb [4, 16] (fp32)."""
     rows = z.numel() // DP
     wb, gamma, bf = _params(wb, gamma)
-    dz = torch.empty(
-        z.shape, device=z.device, dtype=z.dtype
-    )  # contiguous, like the z.contiguous() the kernel reads (a view-able dpair)
+    dz = torch.empty(z.shape, device=z.device, dtype=z.dtype)  # contiguous, like the z.contiguous() the kernel reads (a view-able dpair)
     d = _dev(z)
     nb = min(num_sms(d), (rows + 255) // 256)
     part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
@@ -678,17 +646,11 @@ def add_cond_hopper(dc, extra):
 
 def cross_grad_pack_hopper(grads, weights):
     """sm_90a. The four cross-mode parameter gradients (fp32, contiguous) -> tensors of the weights' shapes and dtypes."""
-    if len(grads) != 4 or any(
-        g.dtype != torch.float32 or not g.is_contiguous() for g in grads
-    ):
-        raise ValueError(
-            "Local Hopper cross gradient pack requires four contiguous FP32 gradients"
-        )
+    if len(grads) != 4 or any(g.dtype != torch.float32 or not g.is_contiguous() for g in grads):
+        raise ValueError("Local Hopper cross gradient pack requires four contiguous FP32 gradients")
     out = [torch.empty_like(w) for w in weights]
     bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
-    _load("cross_grad_pack", _dev(weights[0]))(
-        (128, 1, 1), (256, 1, 1), *grads, *out, int(bfmask)
-    )
+    _load("cross_grad_pack", _dev(weights[0]))((128, 1, 1), (256, 1, 1), *grads, *out, int(bfmask))
     return out
 
 
@@ -699,17 +661,10 @@ def kv_pack_hopper(weights, packed_pre):
     dev = gamma.device
     wm = torch.empty(256, 128, device=dev, dtype=torch.bfloat16)
     bs, gg = (torch.empty(128, device=dev, dtype=torch.float32) for _ in range(2))
-    if any(
-        w.dtype not in (torch.bfloat16, torch.float32) or not w.is_contiguous()
-        for w in weights
-    ):
-        raise ValueError(
-            "Local Hopper KV pack requires contiguous BF16/FP32 parameters"
-        )
+    if any(w.dtype not in (torch.bfloat16, torch.float32) or not w.is_contiguous() for w in weights):
+        raise ValueError("Local Hopper KV pack requires contiguous BF16/FP32 parameters")
     bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
-    _load("kv_pack", _dev(gamma))(
-        (128, 1, 1), (256, 1, 1), *weights, wm, bs, gg, int(bfmask)
-    )
+    _load("kv_pack", _dev(gamma))((128, 1, 1), (256, 1, 1), *weights, wm, bs, gg, int(bfmask))
     return wm, bs, gg, packed_pre[0][128:256], packed_pre[0][256:384]
 
 
@@ -745,9 +700,7 @@ def _rows32(t, n, swizzle=128):
     head (32 fp32 = 128 B). swizzle 128: the K-major operand layout; "128a32": the 128-B swizzle with 32-B atoms, the MN-major one."""
     A, N, _ = t.shape
     assert t.stride(2) == 1 and t.dtype == torch.float32
-    return _tmap(
-        t, (DM, N, A), (t.stride(1) * 4, t.stride(0) * 4), (DH, n, 1), swizzle, "f32"
-    )
+    return _tmap(t, (DM, N, A), (t.stride(1) * 4, t.stride(0) * 4), (DH, n, 1), swizzle, "f32")
 
 
 def _out32(t):
@@ -797,9 +750,7 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None):
     out = _out32(dp.view(A, N, dp.shape[1]))
     qcol, kcol, vcol = cols
     nq = (N + 127) // 128
-    sp = max(
-        1, min(A, num_sms(d) // (nq * NH))
-    )  # split the samples when there are few chunks
+    sp = max(1, min(A, num_sms(d) // (nq * NH)))  # split the samples when there are few chunks
     _load32("dq32", d)(
         (nq * NH * sp, 1, 1),
         (544, 1, 1),
@@ -820,9 +771,7 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None):
         int(sp),
     )
     nk = (N + 112 + 127) // 128
-    sp = (
-        2 if 2 * nk * NH <= num_sms(d) and A > 1 else 1
-    )  # two sample halves add into dbias exactly (0 + a + b)
+    sp = 2 if 2 * nk * NH <= num_sms(d) and A > 1 else 1  # two sample halves add into dbias exactly (0 + a + b)
     _load32("dkv32", d)(
         (nk * NH * sp, 1, 1),
         (544, 1, 1),
@@ -896,9 +845,7 @@ def pair_bias_bwd32(z, gamma, wb, dbias, eps=1e-5):
         float(eps),
         bf,
     )
-    _load32("pb_fin32", d)(
-        (1, 1, 1), (64, 1, 1), part, int(nb), wb, gamma, dgamma, dwb, bf
-    )
+    _load32("pb_fin32", d)((1, 1, 1), (64, 1, 1), part, int(nb), wb, gamma, dgamma, dwb, bf)
     return dz, dgamma, dwb
 
 

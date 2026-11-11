@@ -71,9 +71,7 @@ WARP_BLOCKS_PER_SM = 4
 def warp_blocks_for(rows: int, device: torch.device) -> int:
     """Blocks of a warp-per-row column-sum kernel over ``rows`` rows."""
     index = device.index if device.index is not None else torch.cuda.current_device()
-    return max(
-        1, min(-(-rows // WARPS_PER_BLOCK), WARP_BLOCKS_PER_SM * _sm_count(index))
-    )
+    return max(1, min(-(-rows // WARPS_PER_BLOCK), WARP_BLOCKS_PER_SM * _sm_count(index)))
 
 
 def cond_ln(
@@ -121,9 +119,7 @@ def bwd_x(
     m, d = x.shape
     dm = torch.empty(m, 2 * d, device=x.device, dtype=operand_dtype)
     dx = torch.empty(m, d, device=x.device, dtype=x.dtype)
-    psb = torch.empty(
-        warp_blocks_for(m, x.device), d, device=x.device, dtype=torch.float32
-    )
+    psb = torch.empty(warp_blocks_for(m, x.device), d, device=x.device, dtype=torch.float32)
     _ext().adaln_bwd_x(dy, x, xst, sbt, sb, dres, dm, dx, psb, sbt.shape[0])
     return dm, dx, psb
 
@@ -139,9 +135,7 @@ def cond_bwd(
     fp32 = the column sums of dca cond_hat (add the rows for d lnw)."""
     m, dc = cond.shape
     dcond = torch.empty(m, dc, device=cond.device, dtype=cond.dtype)
-    pw = torch.empty(
-        warp_blocks_for(m, cond.device), dc, device=cond.device, dtype=torch.float32
-    )
+    pw = torch.empty(warp_blocks_for(m, cond.device), dc, device=cond.device, dtype=torch.float32)
     _ext().cond_ln_bwd(dca, cond, cst, lnw, dextra, dcond, pw)
     return dcond, pw
 
@@ -157,12 +151,7 @@ ATOM_FWD_PREFETCH_CFG, ATOM_FWD_PREFETCH_ROWS, ATOM_FWD_SMALL_ROWS = (
 
 def atom_supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
     """The fused atom kernels' contract: bf16 rows, d_hidden = d_cond = 128."""
-    return (
-        x.dtype is torch.bfloat16
-        and cond.dtype is torch.bfloat16
-        and x.shape[-1] == ATOM_WIDTH
-        and cond.shape[-1] == ATOM_WIDTH
-    )
+    return x.dtype is torch.bfloat16 and cond.dtype is torch.bfloat16 and x.shape[-1] == ATOM_WIDTH and cond.shape[-1] == ATOM_WIDTH
 
 
 def atom_fwd(
@@ -182,31 +171,18 @@ def atom_fwd(
     m = x.shape[0]
     y = torch.empty_like(x)
     xst = torch.empty(m, 2, device=x.device, dtype=torch.float32) if stats else None
-    cst = (
-        torch.empty(cond.shape[0], 2, device=x.device, dtype=torch.float32)
-        if stats
-        else None
-    )
+    cst = torch.empty(cond.shape[0], 2, device=x.device, dtype=torch.float32) if stats else None
     if cfg is None or cfg < 0:
         cfg = (
-            ATOM_FWD_PREFETCH_CFG
-            if (m >= ATOM_FWD_PREFETCH_ROWS or m < ATOM_FWD_SMALL_ROWS)
-            else 0
+            ATOM_FWD_PREFETCH_CFG if (m >= ATOM_FWD_PREFETCH_ROWS or m < ATOM_FWD_SMALL_ROWS) else 0
         )  # a warp with a second tile in sight prefetches it; at 8192 .. 24575 rows one tile a warp: two CTAs of 8 warps hide the latency better; at 5120 rows (the registry's N = 1024, A = 5) the prefetch kernel is 12.9 against 13.7 us, level with Triton's 12.9
-    _ext().adaln_atom_fwd(
-        x, cond, lnw, ws, wb, sb, y, xst, cst, float(eps_x), float(eps_c), cfg
-    )
+    _ext().adaln_atom_fwd(x, cond, lnw, ws, wb, sb, y, xst, cst, float(eps_x), float(eps_c), cfg)
     return y, xst, cst
 
 
 def atom_tf32_supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
     """The fp32 (TF32) fused forward's contract: fp32 rows, d_hidden = d_cond = 128 (inference only: nothing is saved for a backward)."""
-    return (
-        x.dtype is torch.float32
-        and cond.dtype is torch.float32
-        and x.shape[-1] == ATOM_WIDTH
-        and cond.shape[-1] == ATOM_WIDTH
-    )
+    return x.dtype is torch.float32 and cond.dtype is torch.float32 and x.shape[-1] == ATOM_WIDTH and cond.shape[-1] == ATOM_WIDTH
 
 
 def atom_fwd_tf32(

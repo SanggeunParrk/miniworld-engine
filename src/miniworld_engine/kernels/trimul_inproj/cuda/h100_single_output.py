@@ -37,7 +37,7 @@ class Plan:
         self.ks, self.path = build(debug, master)
         self.count = count
         n = x.shape[1]
-        m = x.numel() // 128   # batched samples: B n n tokens, b-major (the kernels read row s n + j of ds [B n, 128])
+        m = x.numel() // 128  # batched samples: B n n tokens, b-major (the kernels read row s n + j of ds [B n, 128])
         self.y = torch.empty_like(x)
         self.dg = x.new_empty((m, 128))
         self.dt = torch.empty_like(tri)
@@ -49,9 +49,7 @@ class Plan:
         U = T._launch_module()
 
         def tm(t, box, dims, stride):
-            return U.tensor_map(
-                t, box, dims=dims, strides_bytes=[stride], swizzle="128B", l2="128B"
-            )
+            return U.tensor_map(t, box, dims=dims, strides_bytes=[stride], swizzle="128B", l2="128B")
 
         row = lambda t: tm(t, [64, 64], [128, m], 256)
         maps = [
@@ -125,13 +123,7 @@ def k3_build(cfg=(2, 64, 4, 1)):
     ] + ["-D%s=%s" % v for v in defs.items()]
     path = T.compile(T.SOURCES / "output/save_k3.cu", flags)
     k = T.load_unit(str(path), "single_k3").kernel("save_k3")
-    smem = (
-        bi * bj * 128 * 4
-        + slots * 128 * 64
-        + 16384
-        + 8 * 256
-        + ((6 + 2 * slots) * 8 + 127) // 128 * 128
-    )
+    smem = bi * bj * 128 * 4 + slots * 128 * 64 + 16384 + 8 * 256 + ((6 + 2 * slots) * 8 + 127) // 128 * 128
     k.set_max_dynamic_smem(smem)
     return k, smem
 
@@ -140,13 +132,11 @@ class Output:
     def __init__(self, x, tri, wp, wg, gi, bi, go, bo, ds, cfg=(2, 64, 4, 1)):
         U = T._launch_module()
         n = x.shape[1]
-        rows = x.shape[0] * n   # batched samples: the B samples stacked along the slow token axis (B = 1: rows = n)
+        rows = x.shape[0] * n  # batched samples: the B samples stacked along the slow token axis (B = 1: rows = n)
         m = rows * n
         self.k, self.smem = k3_build(cfg)
         self.y = T.take_output(x)
-        tm = lambda t, box, dims, strides: U.tensor_map(
-            t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B"
-        )
+        tm = lambda t, box, dims, strides: U.tensor_map(t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B")
         bi0, bj, _, _ = cfg
         maps = [
             tm(x, [64, bj, bi0], [128, n, rows], [256, n * 256]),
@@ -157,9 +147,7 @@ class Output:
         ]
         tj = (n + bj - 1) // bj
         tiles = ((rows + bi0 - 1) // bi0) * tj
-        base = U.Struct(
-            [*maps, gi, bi, go, bo, x, self.y, None, n, n, tj, tiles, 1, 0, 1e-5, 0]
-        )
+        base = U.Struct([*maps, gi, bi, go, bo, x, self.y, None, n, n, tj, tiles, 1, 0, 1e-5, 0])
         self.params = U.Struct(
             [
                 base,
@@ -176,12 +164,10 @@ class Output:
                 maps[-1],
                 None,
                 None,
-                0 if rows == n else rows,   # RecomputeParams.rows (batched samples; 0 = one sample)
+                0 if rows == n else rows,  # RecomputeParams.rows (batched samples; 0 = one sample)
             ]
         )
-        self.grid = min(
-            tiles, num_sms(x.device)
-        )
+        self.grid = min(tiles, num_sms(x.device))
         self.inputs = (x, tri, wp, wg, gi, bi, go, bo, ds)
 
     def __call__(self):

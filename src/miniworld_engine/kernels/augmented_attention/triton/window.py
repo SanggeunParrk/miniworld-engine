@@ -45,7 +45,7 @@ def plan(starts_rule: str, n: int, nwin: int, keys: int, keep: torch.Tensor | No
     if starts_rule == "pad":
         b = 1 if keep is None else keep.shape[0]
         return first[None].expand(b, -1).to(torch.int32).contiguous()
-    n_real = (torch.full((1,), n, device=device, dtype=torch.long) if keep is None else keep.long().sum(-1))
+    n_real = torch.full((1,), n, device=device, dtype=torch.long) if keep is None else keep.long().sum(-1)
     if keys == 128:  # AlphaFold 3: clamped inside the real atoms, from 0 below 128 of them
         starts = torch.minimum(first.clamp(min=0)[None], (n_real - 128)[:, None]).clamp(min=0)
     else:  # a wider subset: the rule as written (may begin before atom 0 below `keys` real atoms)
@@ -59,9 +59,9 @@ def fold_range(starts: torch.Tensor, n: int, keys: int) -> tuple[torch.Tensor, t
     s = starts.long()
     ntile = (n + QUERIES - 1) // QUERIES
     tile = QUERIES * torch.arange(ntile, device=s.device)[None].expand(s.shape[0], -1).contiguous()
-    ends = torch.cummax(s + keys, dim=1).values                              # non-decreasing: max end over windows <= w
+    ends = torch.cummax(s + keys, dim=1).values  # non-decreasing: max end over windows <= w
     suffix_min = torch.flip(torch.cummin(torch.flip(s, [1]), dim=1).values, [1])  # non-decreasing: min start over windows >= w
-    lo = torch.searchsorted(ends.contiguous(), tile, right=True)             # first window whose (running) end passes the tile
+    lo = torch.searchsorted(ends.contiguous(), tile, right=True)  # first window whose (running) end passes the tile
     hi = torch.searchsorted(suffix_min.contiguous(), tile + (QUERIES - 1), right=True) - 1
     return lo.to(torch.int32).contiguous(), hi.to(torch.int32).contiguous()
 
@@ -86,17 +86,52 @@ def _live(w, start, N, keep_ptr, uid_ptr, b, iq, ik, KEYS: tl.constexpr, WINDOW_
     return live, kpos, kin
 
 
-@configured('augmented_attention_fwd_window_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_N=128, num_warps=4, num_stages=2))
+@configured("augmented_attention_fwd_window_triton", key=["shape_key"], default=dict(BLOCK_N=128, num_warps=4, num_stages=2))
 @triton.jit
 def _window_fwd(
-    Q, K, V, Bias, Starts, Keep, Uid, Out, Lse, sm_scale,
-    sqa, sqb, sqn, sqh, ska, skb, skn, skh, sva, svb, svn, svh, soa, sob, son, soh,
-    sbb, sbh, sbw, sbq, sbk,
-    N, NW, B,
-    H: tl.constexpr, HEAD_DIM: tl.constexpr, HD_PAD: tl.constexpr, KEYS: tl.constexpr, BLOCK_N: tl.constexpr,
-    WINDOW_HALF: tl.constexpr, HAS_UID: tl.constexpr, PRECISION: tl.constexpr, shape_key,
+    Q,
+    K,
+    V,
+    Bias,
+    Starts,
+    Keep,
+    Uid,
+    Out,
+    Lse,
+    sm_scale,
+    sqa,
+    sqb,
+    sqn,
+    sqh,
+    ska,
+    skb,
+    skn,
+    skh,
+    sva,
+    svb,
+    svn,
+    svh,
+    soa,
+    sob,
+    son,
+    soh,
+    sbb,
+    sbh,
+    sbw,
+    sbq,
+    sbk,
+    N,
+    NW,
+    B,
+    H: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    HD_PAD: tl.constexpr,
+    KEYS: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    WINDOW_HALF: tl.constexpr,
+    HAS_UID: tl.constexpr,
+    PRECISION: tl.constexpr,
+    shape_key,
 ):
     w = tl.program_id(0).to(tl.int64)
     bh = tl.program_id(1).to(tl.int64)
@@ -116,8 +151,9 @@ def _window_fwd(
         ik = n0 + tl.arange(0, BLOCK_N)
         live, kpos, kin = _live(w, start, N, Keep, Uid, b, iq, ik, KEYS, WINDOW_HALF, HAS_UID)
         k = tl.load(K + a * ska + b * skb + h * skh + kpos[None, :] * skn + d[:, None], mask=kin[None, :] & dm[:, None], other=0.0)
-        bias = tl.load(Bias + b * sbb + h * sbh + w * sbw + iq[:, None] * sbq + ik[None, :] * sbk,
-                       mask=(ik < KEYS)[None, :], other=0.0).to(tl.float32)
+        bias = tl.load(Bias + b * sbb + h * sbh + w * sbw + iq[:, None] * sbq + ik[None, :] * sbk, mask=(ik < KEYS)[None, :], other=0.0).to(
+            tl.float32
+        )
         s = tf32_dot(q, k, input_precision=PRECISION) * sm_scale + bias
         s = tl.where(live, s, float("-inf"))
         m_new = tl.maximum(m_i, tl.max(s, 1))
@@ -132,21 +168,67 @@ def _window_fwd(
     m_fin = tl.where(m_i == float("-inf"), 0.0, m_i)
     lse = tl.where(l_i > 0.0, m_fin + tl.log(tl.maximum(l_i, 1e-30)), float("inf"))
     tl.store(Lse + ((a * B + b) * H + h) * (NW * 32) + qpos, lse)
-    tl.store(Out + a * soa + b * sob + h * soh + qpos[:, None] * son + d[None, :], o.to(Out.type.element_ty),
-             mask=(qpos < N)[:, None] & dm[None, :])
+    tl.store(
+        Out + a * soa + b * sob + h * soh + qpos[:, None] * son + d[None, :],
+        o.to(Out.type.element_ty),
+        mask=(qpos < N)[:, None] & dm[None, :],
+    )
 
 
-@configured('augmented_attention_bwd_window_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_N=128, num_warps=4, num_stages=2))
+@configured("augmented_attention_bwd_window_triton", key=["shape_key"], default=dict(BLOCK_N=128, num_warps=4, num_stages=2))
 @triton.jit
 def _window_bwd(
-    Q, K, V, Bias, Starts, Keep, Uid, Out, Lse, DO, DQ, DKP, DVP, DB, sm_scale,
-    sqa, sqb, sqn, sqh, ska, skb, skn, skh, sva, svb, svn, svh, soa, sob, son, soh,
-    sbb, sbh, sbw, sbq, sbk,
-    N, NW, B, A, G,
-    H: tl.constexpr, HEAD_DIM: tl.constexpr, HD_PAD: tl.constexpr, KEYS: tl.constexpr, BLOCK_N: tl.constexpr,
-    WINDOW_HALF: tl.constexpr, HAS_UID: tl.constexpr, NEED_DB: tl.constexpr, NEED_DKV: tl.constexpr, PRECISION: tl.constexpr,
+    Q,
+    K,
+    V,
+    Bias,
+    Starts,
+    Keep,
+    Uid,
+    Out,
+    Lse,
+    DO,
+    DQ,
+    DKP,
+    DVP,
+    DB,
+    sm_scale,
+    sqa,
+    sqb,
+    sqn,
+    sqh,
+    ska,
+    skb,
+    skn,
+    skh,
+    sva,
+    svb,
+    svn,
+    svh,
+    soa,
+    sob,
+    son,
+    soh,
+    sbb,
+    sbh,
+    sbw,
+    sbq,
+    sbk,
+    N,
+    NW,
+    B,
+    A,
+    G,
+    H: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    HD_PAD: tl.constexpr,
+    KEYS: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    WINDOW_HALF: tl.constexpr,
+    HAS_UID: tl.constexpr,
+    NEED_DB: tl.constexpr,
+    NEED_DKV: tl.constexpr,
+    PRECISION: tl.constexpr,
     shape_key,
 ):
     w = tl.program_id(0).to(tl.int64)
@@ -173,8 +255,9 @@ def _window_bwd(
             live, kpos, kin = _live(w, start, N, Keep, Uid, b, iq, ik, KEYS, WINDOW_HALF, HAS_UID)
             k = tl.load(K + a * ska + b * skb + h * skh + kpos[:, None] * skn + d[None, :], mask=kin[:, None] & dm[None, :], other=0.0)
             v = tl.load(V + a * sva + b * svb + h * svh + kpos[:, None] * svn + d[None, :], mask=kin[:, None] & dm[None, :], other=0.0)
-            bias = tl.load(Bias + b * sbb + h * sbh + w * sbw + iq[:, None] * sbq + ik[None, :] * sbk,
-                           mask=(ik < KEYS)[None, :], other=0.0).to(tl.float32)
+            bias = tl.load(
+                Bias + b * sbb + h * sbh + w * sbw + iq[:, None] * sbq + ik[None, :] * sbk, mask=(ik < KEYS)[None, :], other=0.0
+            ).to(tl.float32)
             s = tf32_dot(q, tl.trans(k), input_precision=PRECISION) * sm_scale + bias
             p = tl.where(live, tl.math.exp2((s - lse[:, None]) * _LOG2E), 0.0)
             dp = tf32_dot(do, tl.trans(v), input_precision=PRECISION)
@@ -197,19 +280,36 @@ def _window_bwd(
                 pm = (ik < KEYS)[:, None] & dm[None, :]
                 tl.store(DKP + part, dk, mask=pm)
                 tl.store(DVP + part, dv, mask=pm)
-        tl.store(DQ + a * sqa + b * sqb + h * sqh + qpos[:, None] * sqn + d[None, :], (dq * sm_scale).to(DQ.type.element_ty),
-                 mask=qin[:, None] & dm[None, :])
+        tl.store(
+            DQ + a * sqa + b * sqb + h * sqh + qpos[:, None] * sqn + d[None, :],
+            (dq * sm_scale).to(DQ.type.element_ty),
+            mask=qin[:, None] & dm[None, :],
+        )
 
 
-@configured('augmented_attention_bwd_reduce_window_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_D=32, num_warps=4, num_stages=2))
+@configured("augmented_attention_bwd_reduce_window_triton", key=["shape_key"], default=dict(BLOCK_D=32, num_warps=4, num_stages=2))
 @triton.jit
 def _window_fold(
-    DKP, DVP, DK, DV, Starts, Lo, Hi,
-    sda, sdb, sdn, sdh,
-    N, NW, NT, B,
-    H: tl.constexpr, HEAD_DIM: tl.constexpr, KEYS: tl.constexpr, BLOCK_D: tl.constexpr, shape_key,
+    DKP,
+    DVP,
+    DK,
+    DV,
+    Starts,
+    Lo,
+    Hi,
+    sda,
+    sdb,
+    sdn,
+    sdh,
+    N,
+    NW,
+    NT,
+    B,
+    H: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    KEYS: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    shape_key,
 ):
     t = tl.program_id(0).to(tl.int64)
     ab = tl.program_id(1).to(tl.int64)
@@ -261,19 +361,50 @@ def _launch_fwd_fake(q, k, v, bias, starts, keep, uid, keys, window_half, shape_
 
 
 @opaque(fake=_launch_fwd_fake, name="augmented_attention_fwd_window")
-def _launch_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor, starts: torch.Tensor, keep: torch.Tensor,
-                uid: torch.Tensor | None, keys: int, window_half: int, shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _launch_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: torch.Tensor,
+    starts: torch.Tensor,
+    keep: torch.Tensor,
+    uid: torch.Tensor | None,
+    keys: int,
+    window_half: int,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """The window attention forward launch -> ``(out, lse)``; ``lse`` is what the backward recomputes the probabilities from."""
     a, b, n, h, d, nwin, hd_pad = _geometry(q, keys)
     out = torch.empty_like(q)
     lse = torch.empty(a, b, h, nwin * QUERIES, device=q.device, dtype=torch.float32)
     uid_t, has_uid = _uid_or_dummy(uid, keep)
     _window_fwd[(nwin, b * h, a)](
-        q, k, v, bias, starts, keep, uid_t, out, lse, d**-0.5,
-        *q.stride()[:4], *k.stride()[:4], *v.stride()[:4], *out.stride()[:4], *bias.stride(),
-        n, nwin, b,
-        H=h, HEAD_DIM=d, HD_PAD=hd_pad, KEYS=keys, WINDOW_HALF=window_half, HAS_UID=has_uid,
-        PRECISION=_precision(q.dtype), shape_key=pack(shape_key, H=h, HEAD_DIM=d),
+        q,
+        k,
+        v,
+        bias,
+        starts,
+        keep,
+        uid_t,
+        out,
+        lse,
+        d**-0.5,
+        *q.stride()[:4],
+        *k.stride()[:4],
+        *v.stride()[:4],
+        *out.stride()[:4],
+        *bias.stride(),
+        n,
+        nwin,
+        b,
+        H=h,
+        HEAD_DIM=d,
+        HD_PAD=hd_pad,
+        KEYS=keys,
+        WINDOW_HALF=window_half,
+        HAS_UID=has_uid,
+        PRECISION=_precision(q.dtype),
+        shape_key=pack(shape_key, H=h, HEAD_DIM=d),
     )
     return out, lse
 
@@ -282,8 +413,12 @@ def _launch_bwd_fake(do, q, k, v, bias, starts, keep, uid, out, lse, lo, hi, key
     """``(dq, dk, dv, dbias_partials)``: ``dk`` / ``dv`` are empty when no key or value needs a gradient, the partials ``[G, B, H, nwin, 32, keys]`` fp32."""
     a, b, n, h, d = q.shape
     nwin = (n + 31) // 32
-    return (torch.empty_like(q), torch.empty_like(k) if need_dkv else k.new_empty(0), torch.empty_like(v) if need_dkv else v.new_empty(0),
-            q.new_empty((_groups(a, nwin * b * h), b, h, nwin, 32, keys) if need_db else (0,), dtype=torch.float32))
+    return (
+        torch.empty_like(q),
+        torch.empty_like(k) if need_dkv else k.new_empty(0),
+        torch.empty_like(v) if need_dkv else v.new_empty(0),
+        q.new_empty((_groups(a, nwin * b * h), b, h, nwin, 32, keys) if need_db else (0,), dtype=torch.float32),
+    )
 
 
 def _groups(a: int, programs: int) -> int:
@@ -292,10 +427,25 @@ def _groups(a: int, programs: int) -> int:
 
 
 @opaque(fake=_launch_bwd_fake, name="augmented_attention_bwd_window")
-def _launch_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor, starts: torch.Tensor,
-                keep: torch.Tensor, uid: torch.Tensor | None, out: torch.Tensor, lse: torch.Tensor, lo: torch.Tensor,
-                hi: torch.Tensor, keys: int, window_half: int, need_db: bool, need_dkv: bool,
-                shape_key: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _launch_bwd(
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: torch.Tensor,
+    starts: torch.Tensor,
+    keep: torch.Tensor,
+    uid: torch.Tensor | None,
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    lo: torch.Tensor,
+    hi: torch.Tensor,
+    keys: int,
+    window_half: int,
+    need_db: bool,
+    need_dkv: bool,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """The window attention backward launches -> ``(dq, dk, dv, dbias_partials)``: the per-window kernel (``dq``, the bias gradient
     summed over strided groups of the A samples, the windows' partial ``dk`` / ``dv``), then the fold adding each key's partials."""
     a, b, n, h, d, nwin, hd_pad = _geometry(q, keys)
@@ -306,18 +456,65 @@ def _launch_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Ten
     dvp = torch.empty_like(dkp)
     db = torch.empty(groups, b, h, nwin, 32, keys, device=q.device, dtype=torch.float32) if need_db else q.new_empty(1)
     _window_bwd[(nwin, b * h, groups)](
-        q, k, v, bias, starts, keep, uid_t, out, lse, do, dq, dkp, dvp, db, d**-0.5,
-        *q.stride()[:4], *k.stride()[:4], *v.stride()[:4], *out.stride()[:4], *bias.stride(),
-        n, nwin, b, a, groups,
-        H=h, HEAD_DIM=d, HD_PAD=hd_pad, KEYS=keys, WINDOW_HALF=window_half, HAS_UID=has_uid,
-        NEED_DB=need_db, NEED_DKV=need_dkv, PRECISION=_precision(q.dtype), shape_key=pack(shape_key, H=h, HEAD_DIM=d),
+        q,
+        k,
+        v,
+        bias,
+        starts,
+        keep,
+        uid_t,
+        out,
+        lse,
+        do,
+        dq,
+        dkp,
+        dvp,
+        db,
+        d**-0.5,
+        *q.stride()[:4],
+        *k.stride()[:4],
+        *v.stride()[:4],
+        *out.stride()[:4],
+        *bias.stride(),
+        n,
+        nwin,
+        b,
+        a,
+        groups,
+        H=h,
+        HEAD_DIM=d,
+        HD_PAD=hd_pad,
+        KEYS=keys,
+        WINDOW_HALF=window_half,
+        HAS_UID=has_uid,
+        NEED_DB=need_db,
+        NEED_DKV=need_dkv,
+        PRECISION=_precision(q.dtype),
+        shape_key=pack(shape_key, H=h, HEAD_DIM=d),
     )
     if need_dkv:
         dk, dv = torch.empty_like(k), torch.empty_like(v)
         ntile = (n + QUERIES - 1) // QUERIES
-        _window_fold[lambda meta: (ntile, a * b, h * triton.cdiv(d, meta['BLOCK_D']))](
-            dkp, dvp, dk, dv, starts, lo, hi, dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
-            n, nwin, ntile, b, H=h, HEAD_DIM=d, KEYS=keys, shape_key=pack(shape_key, H=h, HEAD_DIM=d),
+        _window_fold[lambda meta: (ntile, a * b, h * triton.cdiv(d, meta["BLOCK_D"]))](
+            dkp,
+            dvp,
+            dk,
+            dv,
+            starts,
+            lo,
+            hi,
+            dk.stride(0),
+            dk.stride(1),
+            dk.stride(2),
+            dk.stride(3),
+            n,
+            nwin,
+            ntile,
+            b,
+            H=h,
+            HEAD_DIM=d,
+            KEYS=keys,
+            shape_key=pack(shape_key, H=h, HEAD_DIM=d),
         )
     else:
         dk, dv = k.new_empty(0), v.new_empty(0)
@@ -340,9 +537,26 @@ class WindowAttentionFunction(torch.autograd.Function):
     def backward(ctx, do):
         q, k, v, bias, starts, keep, uid, out, lse, lo, hi = ctx.saved_tensors
         keys, window_half, n, need_db, need_dkv = ctx.cfg
-        dq, dk, dv, db = _launch_bwd(do.contiguous().to(q.dtype), q, k, v, bias, starts, keep, uid, out, lse, lo, hi, keys,
-                                     window_half, need_db, need_dkv, atom_key(n))
-        dbias = db.sum(0).to(bias.dtype) if need_db else None   # [B, H, nwin, 32, keys]
+        dq, dk, dv, db = _launch_bwd(
+            do.contiguous().to(q.dtype),
+            q,
+            k,
+            v,
+            bias,
+            starts,
+            keep,
+            uid,
+            out,
+            lse,
+            lo,
+            hi,
+            keys,
+            window_half,
+            need_db,
+            need_dkv,
+            atom_key(n),
+        )
+        dbias = db.sum(0).to(bias.dtype) if need_db else None  # [B, H, nwin, 32, keys]
         return dq, (dk if need_dkv else None), (dv if need_dkv else None), dbias, None, None, None, None, None
 
 

@@ -9,21 +9,13 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 @lru_cache(None)
 def headers(base):
     names = ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh")
-    payload = Path(__file__).read_bytes() + b"".join(
-        T.read_header(base / name).encode() for name in names
-    )
+    payload = Path(__file__).read_bytes() + b"".join(T.read_header(base / name).encode() for name in names)
     payload += (T.SOURCES / "b200style/k1wb_epilogue.inc").read_bytes()
-    dest = T.cache_dir() / (
-        "k1_dpl_prefetch_" + hashlib.sha256(payload).hexdigest()[:16]
-    )
+    dest = T.cache_dir() / ("k1_dpl_prefetch_" + hashlib.sha256(payload).hexdigest()[:16])
     for name in ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh"):
         source = T.read_header(base / name)
         if name == "tmn_kernels.cuh":
-            lead = (
-                (T.SOURCES / "b200style/k1wb_epilogue.inc")
-                .read_text()
-                .split("mbar_wait(barD_full")[0]
-            )
+            lead = (T.SOURCES / "b200style/k1wb_epilogue.inc").read_text().split("mbar_wait(barD_full")[0]
             assert source.count(lead) == 1
             source = source.replace(lead, "")
             anchor = "    auto epilogue = [&](float (&ac)[32], int b, uint32_t wi, bool release) {"
@@ -49,8 +41,6 @@ def headers(base):
             source = source.replace(anchor, anchor + "\n      prefetch_dpl(b + 1);")
             anchor = "      epilogue(acc1, b + 1, w_iter + SPB, true);"
             assert source.count(anchor) == 1
-            source = source.replace(
-                anchor, anchor + "\n      if (b + 2 < NBLK) prefetch_dpl(b + 2);"
-            )
+            source = source.replace(anchor, anchor + "\n      if (b + 2 < NBLK) prefetch_dpl(b + 2);")
         T.publish_header(dest / name, source)
     return dest

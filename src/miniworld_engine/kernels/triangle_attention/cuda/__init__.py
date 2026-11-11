@@ -1,5 +1,6 @@
 """H100 / B200 / A100 TriangleAttention CUDA: the loaders live in ``h100_sm90`` / ``h100_sm90_generic`` / ``h100_dh`` / ``h100_triattn`` / ``h100_bidir``
 (sm90), ``b200_triattn`` (sm100) and ``sm80`` / ``sm80_wide`` / ``sm80_core2`` (sm80); this module holds the prebuild recipe."""
+
 from __future__ import annotations
 
 
@@ -27,10 +28,18 @@ def prebuild(target, rows):
             yield h100_sm90._core
         if needs("triangle_attention_fwd_fp16_sm90"):
             yield h100_sm90._core_h16
-        if needs("triangle_attention_front_sm90", "triangle_attention_tail_sm90", "triangle_attention_pack_sm90",
-                 "triangle_attention_front_wide_sm90", "triangle_attention_pack_wide_sm90", "triangle_attention_gate_bwd_sm90",
-                 "triangle_attention_head_bwd_sm90", "triangle_attention_wgrad_sm90", "triangle_attention_wgrad_reduce_sm90",
-                 "triangle_attention_param_finish_sm90"):
+        if needs(
+            "triangle_attention_front_sm90",
+            "triangle_attention_tail_sm90",
+            "triangle_attention_pack_sm90",
+            "triangle_attention_front_wide_sm90",
+            "triangle_attention_pack_wide_sm90",
+            "triangle_attention_gate_bwd_sm90",
+            "triangle_attention_head_bwd_sm90",
+            "triangle_attention_wgrad_sm90",
+            "triangle_attention_wgrad_reduce_sm90",
+            "triangle_attention_param_finish_sm90",
+        ):
             yield h100_sm90._mod
         if needs("triangle_attention_bwd_kv_sm90", "triangle_attention_bwd_q_sm90", "triangle_attention_generic_assemble_bwd_sm90"):
             yield h100_sm90._bwd
@@ -46,8 +55,12 @@ def prebuild(target, rows):
         # the MSA row dropout's Philox keep-mask (pwa_train: ``extension("pack").drop_keep``)
         if needs("triangle_attention_drop_scale_sm90", "triangle_attention_graph_rng_write_sm90"):
             yield ft.partial(h100_triattn.extension, "pack")
-        if needs("triangle_attention_dh_fwd_sm90", "triangle_attention_dh_fwd_train_sm90", "triangle_attention_dh_bwd_kv_sm90",
-                 "triangle_attention_dh_bwd_q_sm90"):
+        if needs(
+            "triangle_attention_dh_fwd_sm90",
+            "triangle_attention_dh_fwd_train_sm90",
+            "triangle_attention_dh_bwd_kv_sm90",
+            "triangle_attention_dh_bwd_q_sm90",
+        ):
             yield h100_dh.ext
     elif target.arch == "sm100":
         from . import b200_triattn
@@ -86,7 +99,7 @@ def _sm80(rows):
 
     calls = {}
     for r in rows:
-        if r["module"] == "BidirectionalTriangleAttention" and r["dtype"] != "float32":   # its glue and gate backward, built for sm_80
+        if r["module"] == "BidirectionalTriangleAttention" and r["dtype"] != "float32":  # its glue and gate backward, built for sm_80
             from . import sm80_bidir
 
             calls[sm80_bidir.glue] = None

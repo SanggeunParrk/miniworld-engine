@@ -17,12 +17,20 @@ _FLAGS = ("-std=c++17", "-O3", "--use_fast_math", "-DNDEBUG")
 @functools.lru_cache(maxsize=None)
 def glue():
     ensure_cuda_home()
-    return load_extension(name="triattn_generic_sm80", sources=[str(_SRC / "triattn_generic_sm90.cu")],
-                          extra_cuda_cflags=[*host_flags(), *_FLAGS, *gencodes("80")], verbose=False)
+    return load_extension(
+        name="triattn_generic_sm80",
+        sources=[str(_SRC / "triattn_generic_sm90.cu")],
+        extra_cuda_cflags=[*host_flags(), *_FLAGS, *gencodes("80")],
+        verbose=False,
+    )
 
 
 @functools.lru_cache(maxsize=None)
 def ext():
     ensure_cuda_home()
-    return load_extension(name="triattn_bidir_sm80", sources=[str(_SRC / "triattn_bidir_sm90.cu")],
-                          extra_cuda_cflags=[*host_flags(), *_FLAGS, *gencodes("80")], verbose=False)
+    return load_extension(
+        name="triattn_bidir_sm80",
+        sources=[str(_SRC / "triattn_bidir_sm90.cu")],
+        extra_cuda_cflags=[*host_flags(), *_FLAGS, *gencodes("80")],
+        verbose=False,
+    )

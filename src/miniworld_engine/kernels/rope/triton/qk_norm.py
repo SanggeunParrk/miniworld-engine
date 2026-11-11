@@ -74,33 +74,17 @@ def _body(
     partner = tl.where(col < HALF, col + HALF, tl.where(rotary, col - HALF, col))
     index = tl.broadcast_to(partner[None, :], (BLOCK_M1, BD))
     cmask = (row[:, None] < N * SEQ * H) & rotary[None, :]
-    c = tl.load(
-        C + (n * C0 + pos * C1)[:, None] + (col % HALF)[None, :] * C2, cmask, other=1
-    ).to(tl.float32)
-    s = tl.load(
-        S + (n * S0 + pos * S1)[:, None] + (col % HALF)[None, :] * S2, cmask, other=0
-    ).to(tl.float32)
+    c = tl.load(C + (n * C0 + pos * C1)[:, None] + (col % HALF)[None, :] * C2, cmask, other=1).to(tl.float32)
+    s = tl.load(S + (n * S0 + pos * S1)[:, None] + (col % HALF)[None, :] * S2, cmask, other=0).to(tl.float32)
     if BACKWARD:
         gqb = n * GQ0 + pos * GQ1 + head * GQ2
         gkb = n * GK0 + pos * GK1 + head * GK2
-        gq = tl.load(GQ + gqb[:, None] + col[None, :] * GQ3, mask, other=0).to(
-            tl.float32
-        )
-        gk = tl.load(GK + gkb[:, None] + col[None, :] * GK3, mask, other=0).to(
-            tl.float32
-        )
+        gq = tl.load(GQ + gqb[:, None] + col[None, :] * GQ3, mask, other=0).to(tl.float32)
+        gk = tl.load(GK + gkb[:, None] + col[None, :] * GK3, mask, other=0).to(tl.float32)
         sign = tl.where(col < HALF, 1.0, -1.0)
         # Match the cast boundary between the rotation and fp32 RMSNorm autograd.
-        gnq = (
-            (gq * c + tl.gather(gq, index, 1) * s * sign[None, :])
-            .to(Q.dtype.element_ty)
-            .to(tl.float32)
-        )
-        gnk = (
-            (gk * c + tl.gather(gk, index, 1) * s * sign[None, :])
-            .to(K.dtype.element_ty)
-            .to(tl.float32)
-        )
+        gnq = (gq * c + tl.gather(gq, index, 1) * s * sign[None, :]).to(Q.dtype.element_ty).to(tl.float32)
+        gnk = (gk * c + tl.gather(gk, index, 1) * s * sign[None, :]).to(K.dtype.element_ty).to(tl.float32)
         oq = rq[:, None] * (gnq - nq * (tl.sum(gnq * nq, 1) / D)[:, None])
         ok = rk[:, None] * (gnk - nk * (tl.sum(gnk * nk, 1) / D)[:, None])
     else:
@@ -113,9 +97,7 @@ def _body(
     tl.store(OK + row[:, None] * D + col[None, :], ok, mask)
 
 
-@configured('qk_norm_rope_fwd_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, num_warps=4, num_stages=1))
+@configured("qk_norm_rope_fwd_triton", key=["shape_key"], default=dict(BLOCK_M1=64, num_warps=4, num_stages=1))
 @triton.jit
 def qk_norm_rope_fwd_kernel(
     Q,
@@ -199,9 +181,7 @@ def qk_norm_rope_fwd_kernel(
     )
 
 
-@configured('qk_norm_rope_bwd_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, num_warps=4, num_stages=1))
+@configured("qk_norm_rope_bwd_triton", key=["shape_key"], default=dict(BLOCK_M1=64, num_warps=4, num_stages=1))
 @triton.jit
 def qk_norm_rope_bwd_kernel(
     Q,
@@ -382,28 +362,16 @@ def qk_norm_rope_3d(q, k, cos, sin, eps=torch.finfo(torch.float32).eps):
     matching the existing RoPE kernel's contract.
     """
     if q.shape != k.shape or q.ndim != 4 or not q.is_cuda or k.device != q.device:
-        raise ValueError(
-            "Q/K must be CUDA tensors of the same [N,S,H,D] shape and device"
-        )
+        raise ValueError("Q/K must be CUDA tensors of the same [N,S,H,D] shape and device")
     if q.dtype != k.dtype or q.dtype not in (
         torch.float32,
         torch.bfloat16,
         torch.float16,
     ):
         raise ValueError("Q/K must have the same supported floating dtype")
-    if (
-        cos.shape != sin.shape
-        or cos.ndim != 3
-        or cos.shape[0] not in (1, q.shape[0])
-        or cos.shape[1] != q.shape[1]
-    ):
+    if cos.shape != sin.shape or cos.ndim != 3 or cos.shape[0] not in (1, q.shape[0]) or cos.shape[1] != q.shape[1]:
         raise ValueError("cos/sin must have shape [1 or N,S,HALF]")
-    if (
-        cos.device != q.device
-        or sin.device != q.device
-        or cos.shape[-1] < 1
-        or 2 * cos.shape[-1] > q.shape[-1]
-    ):
+    if cos.device != q.device or sin.device != q.device or cos.shape[-1] < 1 or 2 * cos.shape[-1] > q.shape[-1]:
         raise ValueError("invalid rotary prefix or positional-table device")
     if cos.requires_grad or sin.requires_grad:
         raise ValueError("positional cos/sin tables must be constants")

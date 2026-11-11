@@ -58,19 +58,10 @@ def serves(implementation, attns, pair) -> bool:
     if not pair.is_cuda or torch.cuda.get_device_capability(pair.device) != (10, 0):
         return False
     dp = pair.shape[-1]
-    if (
-        pair.ndim != 4
-        or pair.shape[0] != 1
-        or pair.shape[1] != pair.shape[2]
-        or dp != DP
-        or pair.shape[1] == 0
-    ):
+    if pair.ndim != 4 or pair.shape[0] != 1 or pair.shape[1] != pair.shape[2] or dp != DP or pair.shape[1] == 0:
         return False
     ws = [p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)]
-    if any(
-        p is None or not p.is_cuda or p.device != pair.device or p.shape[-1] != dp
-        for p in ws
-    ):
+    if any(p is None or not p.is_cuda or p.device != pair.device or p.shape[-1] != dp for p in ws):
         return False
     if pair.dtype is F32:
         return not torch.is_autocast_enabled("cuda") and all(p.dtype is F32 for p in ws)
@@ -115,9 +106,7 @@ def _bwd_fake(pair2d, wf, dball, eps, split):
 
 
 @opaque(fake=_bwd_fake, name="bias_only_dit_hoist_bwd")
-def _hoist_bwd(
-    pair2d: torch.Tensor, wf: torch.Tensor, dball: torch.Tensor, eps: float, split: int
-) -> list[torch.Tensor]:
+def _hoist_bwd(pair2d: torch.Tensor, wf: torch.Tensor, dball: torch.Tensor, eps: float, split: int) -> list[torch.Tensor]:
     """[d pair [R, 128] in the pair's dtype, dW'_all [N, 128] fp32] from dbias_all [N, R]: d LN0 = dbias_all^T W'_all (fp32); the LN0
     backward rows, which also write Y = LN0 as the dW' operand (bf16: [hi | lo], 256 columns); dW'_all = dbias_all Y over ``split``
     row chunks (strided views of dbias_all and Y: no copies), the two halves of the bf16 split added in fp32."""
@@ -128,9 +117,7 @@ def _hoist_bwd(
     dp = pair2d.shape[-1]
     K = HK.operand_cols(pair2d.dtype, dp)
     with _gemms(pair2d.dtype):
-        dln = (
-            torch.mm(dball.t(), wf) if f32 else torch.mm(dball.t(), wf, out_dtype=F32)
-        )  # [R, dp] fp32
+        dln = torch.mm(dball.t(), wf) if f32 else torch.mm(dball.t(), wf, out_dtype=F32)  # [R, dp] fp32
         dpair = torch.empty_like(pair2d)
         y = torch.empty(R, K, device=pair2d.device, dtype=pair2d.dtype)
         HK.ln0_bwd_rows(pair2d, dln, dpair, y, eps)
@@ -141,9 +128,7 @@ def _hoist_bwd(
                 dball.view(N, split, c).transpose(0, 1),
                 y.view(split, c, K),
             )  # [S, N, c], [S, c, K]
-            p = (torch.bmm(a, b) if f32 else torch.bmm(a, b, out_dtype=F32)).sum(
-                0
-            )  # [N, K] fp32
+            p = (torch.bmm(a, b) if f32 else torch.bmm(a, b, out_dtype=F32)).sum(0)  # [N, K] fp32
         else:
             p = torch.mm(dball, y) if f32 else torch.mm(dball, y, out_dtype=F32)
         dwf = p if dp == K else p[:, :dp] + p[:, dp:]  # hi + lo
@@ -165,16 +150,10 @@ class _Sink:
 
     def slot(self, i, dtype, device):
         """Block i's [H, R] slice of the buffer, or None (another dtype / device, or the slot already handed out)."""
-        if (
-            dtype is not self.dtype
-            or torch.device(device) != torch.device(self.device)
-            or i in self.given
-        ):
+        if dtype is not self.dtype or torch.device(device) != torch.device(self.device) or i in self.given:
             return None
         if self.buf is None:
-            self.buf = torch.empty(
-                self.nb * self.h, self.r, device=self.device, dtype=self.dtype
-            )
+            self.buf = torch.empty(self.nb * self.h, self.r, device=self.device, dtype=self.dtype)
         self.given.add(i)
         return self.buf[i * self.h : (i + 1) * self.h]
 
@@ -182,20 +161,13 @@ class _Sink:
         """dbias_all [N, R] holding ``grads`` (one per block, None = zero); the buffer leaves the sink."""
         buf, self.buf, self.given = self.buf, None, set()
         if buf is None:
-            buf = torch.empty(
-                self.nb * self.h, self.r, device=self.device, dtype=self.dtype
-            )
+            buf = torch.empty(self.nb * self.h, self.r, device=self.device, dtype=self.dtype)
         for i, g in enumerate(grads):
             s = buf[i * self.h : (i + 1) * self.h]
             if g is None:
                 s.zero_()
                 continue
-            if not (
-                g.data_ptr() == s.data_ptr()
-                and g.dtype == s.dtype
-                and g.is_contiguous()
-                and g.numel() == s.numel()
-            ):
+            if not (g.data_ptr() == s.data_ptr() and g.dtype == s.dtype and g.is_contiguous() and g.numel() == s.numel()):
                 s.copy_(g.reshape(self.h, self.r))
         return buf
 
@@ -215,9 +187,7 @@ class _Hoist(torch.autograd.Function):
         L, dp = pair.shape[1], pair.shape[-1]
         H = params[1].shape[0]
         gam, wts, wf = _fold(params, pair.dtype)
-        ctx.set_materialize_grads(
-            False
-        )  # an unused block's bias: None, not a zero tensor
+        ctx.set_materialize_grads(False)  # an unused block's bias: None, not a zero tensor
         ball = _hoist_fwd(pair.reshape(L * L, dp), wf, eps)
         ctx.save_for_backward(pair, wf, gam, wts)
         ctx.meta = (eps, nb, H, sink, [p.dtype for p in params])
@@ -237,12 +207,8 @@ class _Hoist(torch.autograd.Function):
         dg = (dwf * wts).sum(1)  # dg_b = sum_h dW'_b o W_b
         out = []
         for i in range(nb):
-            out.append(
-                dg[i].to(pdts[2 * i]) if ctx.needs_input_grad[4 + 2 * i] else None
-            )
-            out.append(
-                dW[i].to(pdts[2 * i + 1]) if ctx.needs_input_grad[5 + 2 * i] else None
-            )
+            out.append(dg[i].to(pdts[2 * i]) if ctx.needs_input_grad[4 + 2 * i] else None)
+            out.append(dW[i].to(pdts[2 * i + 1]) if ctx.needs_input_grad[5 + 2 * i] else None)
         return (
             dpair.view_as(pair) if ctx.needs_input_grad[0] else None,
             None,
@@ -258,9 +224,7 @@ def pair_bias_all(attns, pair) -> tuple[torch.Tensor, ...]:
     nb, H, L = len(attns), attns[0].to_bias.weight.shape[0], pair.shape[1]
     sink = _Sink(nb, H, L * L, pair.dtype, pair.device)
     params = [p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)]
-    outs = _Hoist.apply(
-        pair.contiguous(), float(attns[0].ln_pair.eps), nb, sink, *params
-    )
+    outs = _Hoist.apply(pair.contiguous(), float(attns[0].ln_pair.eps), nb, sink, *params)
     for i, o in enumerate(outs):
         setattr(o, SINK_ATTR, (sink, i))
     return tuple(outs)

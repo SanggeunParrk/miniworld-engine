@@ -12,6 +12,7 @@ CUDA kernel's order (left + right, class rows, entity row, bond row), so the for
   three bf16 terms (hi + mid + lo = the fp32 value, so the product is fp32-accurate) on the tensor cores; a program owns one 32-channel slice of a FIXED
   contiguous slice of the pairs and visits the tiles in order; ``_tpi_dw_reduce`` adds the slice partials in slice order.
 """
+
 from __future__ import annotations
 
 import torch
@@ -22,7 +23,7 @@ from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._shape_key import token_key
 
 P = 128
-NBLK = 192                   # pair slices of the table-gradient kernel (fixed)
+NBLK = 192  # pair slices of the table-gradient kernel (fixed)
 
 
 def n_rel(r_max: int, s_max: int) -> int:
@@ -31,8 +32,13 @@ def n_rel(r_max: int, s_max: int) -> int:
 
 @triton.jit
 def _ids(IDS, BL, idx, ok):
-    return (tl.load(IDS + idx, mask=ok, other=0), tl.load(IDS + BL + idx, mask=ok, other=0), tl.load(IDS + 2 * BL + idx, mask=ok, other=0),
-            tl.load(IDS + 3 * BL + idx, mask=ok, other=0), tl.load(IDS + 4 * BL + idx, mask=ok, other=0))
+    return (
+        tl.load(IDS + idx, mask=ok, other=0),
+        tl.load(IDS + BL + idx, mask=ok, other=0),
+        tl.load(IDS + 2 * BL + idx, mask=ok, other=0),
+        tl.load(IDS + 3 * BL + idx, mask=ok, other=0),
+        tl.load(IDS + 4 * BL + idx, mask=ok, other=0),
+    )
 
 
 @triton.jit
@@ -57,9 +63,7 @@ def _row(T, r, m, c):
     return tl.load(T + r[:, None] * 128 + c[None, :], mask=m[:, None], other=0.0)
 
 
-@configured('token_pair_init_fwd_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_J=16, num_warps=4, num_stages=1))
+@configured("token_pair_init_fwd_triton", key=["shape_key"], default=dict(BLOCK_J=16, num_warps=4, num_stages=1))
 @triton.jit
 def _tpi_fwd(LEFT, RIGHT, TBL, IDS, BOND, OUT, L, BL, rmax: tl.constexpr, smax: tl.constexpr, BLOCK_J: tl.constexpr, shape_key):
     jb = tl.program_id(0)
@@ -84,11 +88,24 @@ def _tpi_fwd(LEFT, RIGHT, TBL, IDS, BOND, OUT, L, BL, rmax: tl.constexpr, smax: 
     tl.store(OUT + (ri * L + j)[:, None] * 128 + c[None, :], o, mask=jin[:, None])
 
 
-@configured('token_pair_init_dw_triton',
-            key=["shape_key"],
-            default=dict(CH=64, BLOCK_P=128, num_warps=8, num_stages=2))
+@configured("token_pair_init_dw_triton", key=["shape_key"], default=dict(CH=64, BLOCK_P=128, num_warps=8, num_stages=2))
 @triton.jit
-def _tpi_dw(G, IDS, BOND, PART, L, BL, P_total, per, rmax: tl.constexpr, smax: tl.constexpr, RBB: tl.constexpr, CH: tl.constexpr, BLOCK_P: tl.constexpr, shape_key):
+def _tpi_dw(
+    G,
+    IDS,
+    BOND,
+    PART,
+    L,
+    BL,
+    P_total,
+    per,
+    rmax: tl.constexpr,
+    smax: tl.constexpr,
+    RBB: tl.constexpr,
+    CH: tl.constexpr,
+    BLOCK_P: tl.constexpr,
+    shape_key,
+):
     """PART[t, row, channels of slice q] = sum over the pairs of slice t of onehot(row) * dz[pair, channels]; pair tiles in order, dz split into 3 bf16 terms.
 
     The table has n_rel + 2 rows: rows 0 .. 127 (accumulators ``a*``) and the rest (``b*``, RBB rows); each bf16 term of dz has its own accumulator so that the
@@ -121,10 +138,26 @@ def _tpi_dw(G, IDS, BOND, PART, L, BL, P_total, per, rmax: tl.constexpr, smax: t
         r4 = tl.where(se, nrel - 1, -1)
         r5 = nrel + bond
         pmr = pm[None, :]
-        oha = (((ra[:, None] == c1[None, :]) | (ra[:, None] == c2[None, :]) | (ra[:, None] == c3[None, :]) | (ra[:, None] == r4[None, :])
-                | (ra[:, None] == r5[None, :])) & pmr).to(tl.bfloat16)
-        ohb = (((rb[:, None] == c1[None, :]) | (rb[:, None] == c2[None, :]) | (rb[:, None] == c3[None, :]) | (rb[:, None] == r4[None, :])
-                | (rb[:, None] == r5[None, :])) & pmr).to(tl.bfloat16)
+        oha = (
+            (
+                (ra[:, None] == c1[None, :])
+                | (ra[:, None] == c2[None, :])
+                | (ra[:, None] == c3[None, :])
+                | (ra[:, None] == r4[None, :])
+                | (ra[:, None] == r5[None, :])
+            )
+            & pmr
+        ).to(tl.bfloat16)
+        ohb = (
+            (
+                (rb[:, None] == c1[None, :])
+                | (rb[:, None] == c2[None, :])
+                | (rb[:, None] == c3[None, :])
+                | (rb[:, None] == r4[None, :])
+                | (rb[:, None] == r5[None, :])
+            )
+            & pmr
+        ).to(tl.bfloat16)
         g = tl.load(G + p[:, None] * 128 + q * CH + cc[None, :], mask=pm[:, None], other=0.0)
         g1 = g.to(tl.bfloat16)
         r1 = g - g1.to(tl.float32)
@@ -136,7 +169,7 @@ def _tpi_dw(G, IDS, BOND, PART, L, BL, P_total, per, rmax: tl.constexpr, smax: t
         b2_ = tl.dot(ohb, g2, b2_)
         a3 = tl.dot(oha, g3, a3)
         b3_ = tl.dot(ohb, g3, b3_)
-    acc_a = a1 + (a2 + a3)           # three bf16 terms of dz, the small ones first
+    acc_a = a1 + (a2 + a3)  # three bf16 terms of dz, the small ones first
     acc_b = b1_ + (b2_ + b3_)
     nbin: tl.constexpr = nrel + 2
     base = PART + t * nbin * 128 + q * CH
@@ -144,9 +177,7 @@ def _tpi_dw(G, IDS, BOND, PART, L, BL, P_total, per, rmax: tl.constexpr, smax: t
     tl.store(base + rb[:, None] * 128 + cc[None, :], acc_b, mask=(rb < nbin)[:, None])
 
 
-@configured('token_pair_init_dw_reduce_triton',
-            key=["shape_key"],
-            default=dict(BLOCK=256, num_warps=4, num_stages=1))
+@configured("token_pair_init_dw_reduce_triton", key=["shape_key"], default=dict(BLOCK=256, num_warps=4, num_stages=1))
 @triton.jit
 def _tpi_dw_reduce(PART, OUT, total, NBLK: tl.constexpr, BLOCK: tl.constexpr, shape_key):
     k = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -157,9 +188,7 @@ def _tpi_dw_reduce(PART, OUT, total, NBLK: tl.constexpr, BLOCK: tl.constexpr, sh
     tl.store(OUT + k, acc, mask=m)
 
 
-@configured('token_pair_init_bwd_dx_triton',
-            key=["shape_key", "OVER_I"],
-            default=dict(BLOCK_J=16, num_warps=4, num_stages=1))
+@configured("token_pair_init_bwd_dx_triton", key=["shape_key", "OVER_I"], default=dict(BLOCK_J=16, num_warps=4, num_stages=1))
 @triton.jit
 def _tpi_dx(G, OUT, L, OVER_I: tl.constexpr, BLOCK_J: tl.constexpr, shape_key):
     """OVER_I = 0: OUT[b, i, :] = sum over j of G[b, i, j, :]; OVER_I = 1: OUT[b, j, :] = sum over i of G[b, i, j, :]. Fixed order (j blocks / i rows in turn)."""
@@ -206,8 +235,9 @@ def portable_backward(g, ids, bond, r_max: int, s_max: int):
     total_pairs = B * L * L
     part = torch.empty(NBLK, nbin, P, device=dev, dtype=torch.float32)
     rbb = max(16, triton.next_power_of_2(max(nbin - 128, 1)))
-    _tpi_dw[lambda meta: (P // meta["CH"], NBLK)](g, ids, bond, part, L, B * L, total_pairs, triton.cdiv(total_pairs, NBLK), rmax=int(r_max), smax=int(s_max),
-                                                  RBB=rbb, shape_key=key)
+    _tpi_dw[lambda meta: (P // meta["CH"], NBLK)](
+        g, ids, bond, part, L, B * L, total_pairs, triton.cdiv(total_pairs, NBLK), rmax=int(r_max), smax=int(s_max), RBB=rbb, shape_key=key
+    )
     dtbl = torch.empty(nbin, P, device=dev, dtype=torch.float32)
     total = nbin * P
     _tpi_dw_reduce[lambda meta: (triton.cdiv(total, meta["BLOCK"]),)](part, dtbl, total, NBLK=NBLK, shape_key=key)

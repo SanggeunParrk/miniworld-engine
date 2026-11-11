@@ -46,8 +46,14 @@ MARKER = {"pytorch": "o", "triton": "s", "cuda": "D", "anthropic": "^", "cueq": 
 FIGURE_BACKENDS = ("pytorch", "cuda", "anthropic", "cueq")
 #: constructor kwargs that are channel widths: a D sweep runs over one of them
 WIDTHS = ("d_pair", "d_single", "d_hidden", "d_msa", "d_cond", "d_atom", "d_token", "normalized_shape", "n_head")
-PANEL_ORDER = {("float32", "eval"): 0, ("master", "eval"): 1, ("bfloat16", "eval"): 2, ("float32", "train"): 3,
-               ("master", "train"): 4, ("bfloat16", "train"): 5}
+PANEL_ORDER = {
+    ("float32", "eval"): 0,
+    ("master", "eval"): 1,
+    ("bfloat16", "eval"): 2,
+    ("float32", "train"): 3,
+    ("master", "train"): 4,
+    ("bfloat16", "train"): 5,
+}
 
 
 # ------------------------------------------------------------------------------------------------------------------------- input
@@ -68,23 +74,45 @@ def load(source: list[str], gpu: str) -> tuple[list[dict], str]:
         paths, what = [Path(s) for s in source], "speed records " + ", ".join(f"`{s}`" for s in source)
     out = []
     wanted = None
-    if source == ["tokens"]:                                 # only the cases the requirements ask for now (not the unused tokens)
+    if source == ["tokens"]:  # only the cases the requirements ask for now (not the unused tokens)
         from miniworld_engine import judge
 
         wanted = {judge.case_key("speed", r) for r in judge.required("speed")}
     for rec in _lines(paths):
-        if "case" in rec:                                    # a token
+        if "case" in rec:  # a token
             if rec.get("kind") != "speed" or (wanted is not None and rec.get("case_key") not in wanted):
                 continue
             case, res = rec["case"], rec["result"]
-        else:                                                # a speed record (measure/speed.py)
+        else:  # a speed record (measure/speed.py)
             if "backend" not in rec or "module" not in rec or rec.get("gpu", gpu) != gpu:
                 continue
             case, res = rec, rec
-        out.append({**{k: case.get(k) for k in ("row", "module", "model", "stream", "kwargs", "length", "depth", "samples", "dtype",
-                                                    "mode", "backend", "timing")},
-                    "median": res.get("median_ms"), "p10": res.get("p10_ms"), "p90": res.get("p90_ms"),
-                    "status": res.get("status"), "eager": res.get("timed_as") == "eager"})
+        out.append(
+            {
+                **{
+                    k: case.get(k)
+                    for k in (
+                        "row",
+                        "module",
+                        "model",
+                        "stream",
+                        "kwargs",
+                        "length",
+                        "depth",
+                        "samples",
+                        "dtype",
+                        "mode",
+                        "backend",
+                        "timing",
+                    )
+                },
+                "median": res.get("median_ms"),
+                "p10": res.get("p10_ms"),
+                "p90": res.get("p90_ms"),
+                "status": res.get("status"),
+                "eager": res.get("timed_as") == "eager",
+            }
+        )
     return out, what
 
 
@@ -126,17 +154,17 @@ def d_sweeps(points: list[dict]) -> dict[tuple, tuple[str, int, list[dict]]]:
         groups = collections.defaultdict(list)
         for p in points:
             if key in (p["kwargs"] or {}):
-                groups[("", *_fixed(p, WIDTHS)[1:])].append(p)   # the model set differs per width; the case does not
+                groups[("", *_fixed(p, WIDTHS)[1:])].append(p)  # the model set differs per width; the case does not
         for fixed, pts in groups.items():
             per_len = collections.defaultdict(lambda: collections.defaultdict(collections.Counter))
             for p in pts:
                 per_len[p["length"]][p["kwargs"][key]][_widths(p)] += 1
             length, by_value = max(per_len.items(), key=lambda kv: (len(kv[1]), kv[0]))
-            if len(by_value) >= 3:          # one set of widths per value: the most measured one (e.g. d_pair=64 without d_hidden)
+            if len(by_value) >= 3:  # one set of widths per value: the most measured one (e.g. d_pair=64 without d_hidden)
                 keep = {(v, c.most_common(1)[0][0]) for v, c in by_value.items()}
                 sel = [p for p in pts if p["length"] == length and (p["kwargs"][key], _widths(p)) in keep]
                 ids = frozenset(map(id, sel))
-                if ids not in seen:          # n_head moving with d_pair is the d_pair sweep again
+                if ids not in seen:  # n_head moving with d_pair is the d_pair sweep again
                     seen.add(ids)
                     out[(key, fixed)] = (key, length, sel)
     return out
@@ -191,8 +219,18 @@ def figure(pts: list[dict], x_of, x_label: str, title: str, out: Path, card: str
     import matplotlib.pyplot as plt
     from matplotlib import ticker
 
-    mpl.rcParams.update({"svg.fonttype": "none", "font.size": 9, "axes.spines.top": False, "axes.spines.right": False,
-                         "axes.grid": True, "grid.color": "#E3E6EB", "grid.linewidth": 0.6, "axes.edgecolor": "#5A6473"})
+    mpl.rcParams.update(
+        {
+            "svg.fonttype": "none",
+            "font.size": 9,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.grid": True,
+            "grid.color": "#E3E6EB",
+            "grid.linewidth": 0.6,
+            "axes.edgecolor": "#5A6473",
+        }
+    )
     panels, series = _panels(pts), _series(pts, x_of)
     xs = sorted({x_of(p) for p in pts})
     fig, axes = plt.subplots(2, len(panels), figsize=(max(4.2 * len(panels), 6.0), 6.4), squeeze=False, sharex=True)
@@ -204,8 +242,13 @@ def figure(pts: list[dict], x_of, x_label: str, title: str, out: Path, card: str
             ys = [_ok(series[dm][b].get(x)) for x in xs]
             if not any(ys):
                 continue
-            kw = {"color": COLOR.get(b, "#444444"), "marker": MARKER.get(b, "x"), "markersize": 4, "linewidth": 1.6,
-                  "label": LABEL.get(b, b)}
+            kw = {
+                "color": COLOR.get(b, "#444444"),
+                "marker": MARKER.get(b, "x"),
+                "markersize": 4,
+                "linewidth": 1.6,
+                "label": LABEL.get(b, b),
+            }
             (h,) = lat.plot([i for i, y in enumerate(ys) if y], [y for y in ys if y], **kw)
             handles.setdefault(b, h)
             sp = [(i, b0 / y) for i, (x, y) in enumerate(zip(xs, ys, strict=True)) if y and (b0 := _ok(base.get(x)))]
@@ -218,14 +261,26 @@ def figure(pts: list[dict], x_of, x_label: str, title: str, out: Path, card: str
         lat.set_ylabel("median latency (ms, log)" if j == 0 else "")
         spd.axhline(1.0, color="#5A6473", linewidth=1.0, linestyle=(0, (4, 2)))
         spd.set_ylabel("speedup vs PyTorch (x)" if j == 0 else "")
-        spd.set_xticks(range(len(xs)), [_xs(x) for x in xs], rotation=45 if len(xs) > 6 else 0,
-                       fontsize=8 if all(not isinstance(x, tuple) or not x[1] for x in xs) else 6.5)
+        spd.set_xticks(
+            range(len(xs)),
+            [_xs(x) for x in xs],
+            rotation=45 if len(xs) > 6 else 0,
+            fontsize=8 if all(not isinstance(x, tuple) or not x[1] for x in xs) else 6.5,
+        )
         spd.set_xlabel(x_label)
     order = [b for b in BACKENDS if b in handles] + sorted(set(handles) - set(BACKENDS))
-    fig.legend([handles[b] for b in order], [LABEL.get(b, b) for b in order], loc="upper center", ncol=len(order),
-               frameon=False, bbox_to_anchor=(0.5, 0.995))
+    fig.legend(
+        [handles[b] for b in order],
+        [LABEL.get(b, b) for b in order],
+        loc="upper center",
+        ncol=len(order),
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.995),
+    )
     fig.suptitle(title, y=0.945, fontsize=10)
-    fig.text(0.01, 0.005, f"{card} | CUDA graph, L2 flushed, median | gaps: unsupported, skipped or eager-only", fontsize=7, color="#5A6473")
+    fig.text(
+        0.01, 0.005, f"{card} | CUDA graph, L2 flushed, median | gaps: unsupported, skipped or eager-only", fontsize=7, color="#5A6473"
+    )
     fig.tight_layout(rect=(0, 0.02, 1, 0.93))
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, format=out.suffix.lstrip(".") or "svg", dpi=110)
@@ -261,8 +316,15 @@ def table(pts: list[dict], x_of, x_name: str) -> str:
 
 
 # -------------------------------------------------------------------------------------------------------------------------- main
-def render(points: list[dict], out_dir: Path, card: str, what: str, modules: list[str] | None,
-           backends: tuple[str, ...] = FIGURE_BACKENDS, model_summaries: tuple[str, ...] = ("af3",)) -> None:
+def render(
+    points: list[dict],
+    out_dir: Path,
+    card: str,
+    what: str,
+    modules: list[str] | None,
+    backends: tuple[str, ...] = FIGURE_BACKENDS,
+    model_summaries: tuple[str, ...] = ("af3",),
+) -> None:
     by_mod = collections.defaultdict(list)
     for p in points:
         if not modules or p["module"] in modules:
@@ -272,7 +334,7 @@ def render(points: list[dict], out_dir: Path, card: str, what: str, modules: lis
         pts, mdir, sections = by_mod[mod], out_dir / mod, []
         names: set[str] = set()
         for old in mdir.glob("*.svg") if mdir.exists() else ():
-            old.unlink()                                     # a figure whose slice is gone must not linger
+            old.unlink()  # a figure whose slice is gone must not linger
 
         def name(stem: str, names: set[str] = names) -> str:
             n, i = _slug(stem), 2
@@ -291,20 +353,26 @@ def render(points: list[dict], out_dir: Path, card: str, what: str, modules: lis
         for (key, fixed), (_, length, sl) in sorted(d_sweeps(pts).items(), key=lambda kv: str(kv[0])):
             f = name(f"D-{key}__L{length}__" + _title(("", *fixed[1:])))
             figure(sl, _d_label(key, sl), key, f"{mod}: {key} sweep at L{length} | {_title(fixed)}", mdir / f, card, backends)
-            sections.append(f"### {key} sweep at L{length}: {_title(fixed)}\n\n![]({f})\n\n"
-                            f"{table(sl, _d_label(key, sl), key)}")
+            sections.append(f"### {key} sweep at L{length}: {_title(fixed)}\n\n![]({f})\n\n{table(sl, _d_label(key, sl), key)}")
             n_d += 1
         single = [p for p in pts if _fixed(p) not in swept]
         if single:
-            sections.append("### Single-length cases (no sweep)\n\n" + "\n".join(
-                f"- {_title(_fixed(p))} L{p['length']} {p['dtype']} {p['mode']} {p['backend']}: "
-                + (f"{p['median']:.4g} ms" if p["status"] == "ok" else str(p["status"]))
-                for p in sorted(single, key=lambda p: (str(_fixed(p)), p["length"], p["dtype"], p["mode"], p["backend"]))))
+            sections.append(
+                "### Single-length cases (no sweep)\n\n"
+                + "\n".join(
+                    f"- {_title(_fixed(p))} L{p['length']} {p['dtype']} {p['mode']} {p['backend']}: "
+                    + (f"{p['median']:.4g} ms" if p["status"] == "ok" else str(p["status"]))
+                    for p in sorted(single, key=lambda p: (str(_fixed(p)), p["length"], p["dtype"], p["mode"], p["backend"]))
+                )
+            )
         mdir.mkdir(parents=True, exist_ok=True)
-        (mdir / "README.md").write_text(f"# {mod} on {card}\n\nGenerated by `python -m miniworld_engine.measure.plot` from {what}; "
-                                        "do not edit.\n\n" + "\n\n".join(sections) + "\n")
-        index.append(f"| [{mod}]({mod}/README.md) | {len({(p['dtype'], p['mode'], _fixed(p), p['length']) for p in pts})} "
-                     f"| {n_l} | {n_d} |")
+        (mdir / "README.md").write_text(
+            f"# {mod} on {card}\n\nGenerated by `python -m miniworld_engine.measure.plot` from {what}; "
+            "do not edit.\n\n" + "\n\n".join(sections) + "\n"
+        )
+        index.append(
+            f"| [{mod}]({mod}/README.md) | {len({(p['dtype'], p['mode'], _fixed(p), p['length']) for p in pts})} | {n_l} | {n_d} |"
+        )
         print(f"[plot] {mod}: {n_l} L sweeps, {n_d} D sweeps", flush=True)
     if not modules:
         stats = summary_stats(points, backends)
@@ -316,15 +384,21 @@ def render(points: list[dict], out_dir: Path, card: str, what: str, modules: lis
             if not mstats:
                 continue
             summary_figure(mstats, backends, out_dir / f"summary_{model}.png", card, scope=f"{model} only")
-            per_model.append(f"\n## Summary: {model} only\n\nThe same over the requirement rows whose `source` names {model} "
-                             f"({len(rows)} rows).\n\n![](summary_{model}.png)\n\n" + summary_table(mstats, backends))
+            per_model.append(
+                f"\n## Summary: {model} only\n\nThe same over the requirement rows whose `source` names {model} "
+                f"({len(rows)} rows).\n\n![](summary_{model}.png)\n\n" + summary_table(mstats, backends)
+            )
         (out_dir / "README.md").write_text(
             f"# Benchmarks on {card}\n\nGenerated by `python -m miniworld_engine.measure.plot --gpu {card}` from {what} "
             f"(speed measurer v{_speed_version()}); nothing here is measured by the plotter. Timing: CUDA graph, L2 flushed before "
             "every call (docs/measure.md).\n\n## Summary\n\nPer class and mode: the geometric mean over its cases of the speedup vs "
             "PyTorch (PyTorch time / backend time), over the cases both ran (n = cases).\n\n![](summary.svg)\n\n"
-            + summary_table(stats, backends) + "".join(per_model)
-            + "\n## Classes\n\n| class | cases | L sweeps | D sweeps |\n|---|---|---|---|\n" + "\n".join(index) + "\n")
+            + summary_table(stats, backends)
+            + "".join(per_model)
+            + "\n## Classes\n\n| class | cases | L sweeps | D sweeps |\n|---|---|---|---|\n"
+            + "\n".join(index)
+            + "\n"
+        )
 
 
 def model_rows(model: str) -> set[int]:
@@ -333,6 +407,7 @@ def model_rows(model: str) -> set[int]:
 
     with open(cfgmod.REQUIREMENTS, newline="") as fh:
         return {n for n, r in enumerate(csv.DictReader(fh), 1) if model in re.split(r"[\s;,]+", r.get("source") or "")}
+
 
 # ------------------------------------------------------------------------------------------------------------------------ summary
 def summary_stats(points: list[dict], backends) -> dict[tuple[str, str], dict[str, tuple[float, int]]]:
@@ -383,11 +458,17 @@ def summary_figure(stats: dict, backends, out: Path, card: str, scope: str = "ev
         ax.set_title(f"{mode}: speedup vs PyTorch (geomean over cases)", fontsize=10)
         ax.grid(axis="x", color="#E3E6EB", linewidth=0.6)
         ax.set_yticks(range(len(mods)), mods)
-    axes[0][0].invert_yaxis()                  # once: the y axis is shared (A at the top, the engine bar first in a group)
+    axes[0][0].invert_yaxis()  # once: the y axis is shared (A at the top, the engine bar first in a group)
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=len(bs), frameon=False, bbox_to_anchor=(0.5, 1.0))
-    fig.text(0.01, 0.002, f"{card} | {scope} | CUDA graph, L2 flushed, median per case | a missing bar: the backend serves none of the class's "
-             "cases in that mode", fontsize=7, color="#5A6473")
+    fig.text(
+        0.01,
+        0.002,
+        f"{card} | {scope} | CUDA graph, L2 flushed, median per case | a missing bar: the backend serves none of the class's "
+        "cases in that mode",
+        fontsize=7,
+        color="#5A6473",
+    )
     fig.tight_layout(rect=(0, 0.01, 1, 0.985))
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, format=out.suffix.lstrip(".") or "svg", dpi=110)
@@ -420,10 +501,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--gpu", default=cfgmod.DEFAULT_GPU, help="the card (default %(default)s)")
     ap.add_argument("--module", nargs="*", default=None, help="only these classes (default: all)")
     ap.add_argument("--source", nargs="+", default=["tokens"], help="'tokens' (default) or speed record files / directories")
-    ap.add_argument("--backends", nargs="+", default=list(FIGURE_BACKENDS),
-                    help="backends drawn in the figures (default: %(default)s; the tables list all)")
-    ap.add_argument("--model-summaries", nargs="*", default=["af3"],
-                    help="extra summaries over the rows one model uses (requirements source column; default: %(default)s)")
+    ap.add_argument(
+        "--backends",
+        nargs="+",
+        default=list(FIGURE_BACKENDS),
+        help="backends drawn in the figures (default: %(default)s; the tables list all)",
+    )
+    ap.add_argument(
+        "--model-summaries",
+        nargs="*",
+        default=["af3"],
+        help="extra summaries over the rows one model uses (requirements source column; default: %(default)s)",
+    )
     ap.add_argument("--out", default=str(REPO / "benchmarks"), help="output root (default <repo>/benchmarks); figures go to <out>/<gpu>/")
     a = ap.parse_args(argv)
     points, what = load(a.source, a.gpu)

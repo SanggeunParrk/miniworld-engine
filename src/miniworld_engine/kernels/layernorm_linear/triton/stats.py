@@ -21,9 +21,6 @@ import triton
 import triton.language as tl
 
 
-
-
-
 # Both axes are tuned tiles. The K axis used to arrive as BLOCK_K=next_power_of_2(K) — a
 # whole-row constant the tuner never saw — which is also why BLOCK_M1 had to stay at 1-8: a
 # [4, 512] tile was already the register budget. With K tiled, the M tile can take the
@@ -35,14 +32,20 @@ import triton.language as tl
 from miniworld_engine.kernels._shape_key import both_key, rows_of, pack
 
 
-@configured('layernorm_stats_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
+@configured("layernorm_stats_triton", key=["shape_key"], default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _stats_kernel(
-    x_ptr, rstd_ptr, c1_ptr, M, K, eps,
-    stride_xm, stride_xk,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key,
+    x_ptr,
+    rstd_ptr,
+    c1_ptr,
+    M,
+    K,
+    eps,
+    stride_xm,
+    stride_xk,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -56,7 +59,8 @@ def _stats_kernel(
         col_mask = cols < K
         x = tl.load(
             x_ptr + rows[:, None] * stride_xm + cols[None, :] * stride_xk,
-            mask=row_mask[:, None] & col_mask[None, :], other=0.0,
+            mask=row_mask[:, None] & col_mask[None, :],
+            other=0.0,
         ).to(tl.float32)
         s += tl.sum(x, axis=1)
         ss += tl.sum(x * x, axis=1)
@@ -76,8 +80,11 @@ def _stats_triton_fake(x, eps, shape_key=None):
 
 
 @opaque(fake=_stats_triton_fake, name="layernorm_stats")
-def stats_triton(x: torch.Tensor, eps: float, shape_key: int | None = None,
-                 ) -> tuple[torch.Tensor, torch.Tensor]:
+def stats_triton(
+    x: torch.Tensor,
+    eps: float,
+    shape_key: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """rstd[m], c1[m]=mean*rstd over the last dim of X (M, K). Both fp32 [M].
 
     ``@opaque()`` because Dynamo cannot trace the autotuner: it tries to hopify
@@ -92,8 +99,14 @@ def stats_triton(x: torch.Tensor, eps: float, shape_key: int | None = None,
     c1 = torch.empty(M, device=x.device, dtype=torch.float32)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _stats_kernel[grid](
-        x, rstd, c1, M, K, eps,
-        x.stride(0), x.stride(1),
+        x,
+        rstd,
+        c1,
+        M,
+        K,
+        eps,
+        x.stride(0),
+        x.stride(1),
         # shape_key = both_key(rows_of(<pre-flatten shape>)) from the caller that still has
         # it (transition/triton/fused.py). None = a caller not yet
         # threaded (transition/cuda/__init__.py, drivers/checks --

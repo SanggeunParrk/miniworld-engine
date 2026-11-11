@@ -31,12 +31,14 @@ from typing import Any, NamedTuple
 def nvcc_path() -> str | None:
     """An nvcc whose release matches ``torch.version.cuda``, preferring this environment's own."""
     import torch
+
     want = (torch.version.cuda or "").split(".")[:2]
     candidates = [Path(sys.prefix) / "bin" / "nvcc"]
     cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if cuda_home:
         candidates.append(Path(cuda_home) / "bin" / "nvcc")
     from shutil import which
+
     found = which("nvcc")
     if found:
         candidates.append(Path(found))
@@ -47,8 +49,7 @@ def nvcc_path() -> str | None:
         if not c.is_file():
             continue
         try:
-            out = subprocess.run([str(c), "--version"], capture_output=True, text=True,
-                                 timeout=20, check=False).stdout
+            out = subprocess.run([str(c), "--version"], capture_output=True, text=True, timeout=20, check=False).stdout
         except (OSError, subprocess.SubprocessError):
             continue
         fallback = fallback or str(c)
@@ -87,8 +88,7 @@ def supported_arches() -> frozenset[str]:
     if not nvcc:
         return frozenset()
     try:
-        out = subprocess.run([nvcc, "--list-gpu-arch"], capture_output=True, text=True,
-                             timeout=20, check=False).stdout
+        out = subprocess.run([nvcc, "--list-gpu-arch"], capture_output=True, text=True, timeout=20, check=False).stdout
     except (OSError, subprocess.SubprocessError):
         return frozenset()
     return frozenset(line.strip() for line in out.split("\n") if line.strip())
@@ -110,17 +110,19 @@ def real_gencodes(*arches: str, ptx: tuple[str, ...] = ()) -> list[str]:
     """``-gencode`` flags for the requested arches, dropping any this nvcc does not know."""
     ensure_cuda_home()
     have = supported_arches()
+
     def supported(a):
         # nvcc 12.8's listing omits architecture-specific variants even though
         # it accepts compute_90a/sm_90a. Dropping that flag silently enabled
         # torch's GPU autodetection, which fails on a CPU-only compiler worker.
-        return (not have or f"compute_{a}" in have
-                or (a.endswith("a") and a[:-1].isdigit() and int(a[:-1]) >= 90
-                    and f"compute_{a[:-1]}" in have))
-    out = [f"-gencode=arch=compute_{a},code=sm_{a}"
-           for a in arches if supported(a)]
-    out += [f"-gencode=arch=compute_{a},code=compute_{a}"
-            for a in ptx if supported(a)]
+        return (
+            not have
+            or f"compute_{a}" in have
+            or (a.endswith("a") and a[:-1].isdigit() and int(a[:-1]) >= 90 and f"compute_{a[:-1]}" in have)
+        )
+
+    out = [f"-gencode=arch=compute_{a},code=sm_{a}" for a in arches if supported(a)]
+    out += [f"-gencode=arch=compute_{a},code=compute_{a}" for a in ptx if supported(a)]
     return out
 
 
@@ -169,6 +171,7 @@ def host_compiler() -> tuple[str | None, bool]:
     """
     import tempfile
     from shutil import which
+
     nvcc = nvcc_path()
     if not nvcc:
         return None, False
@@ -312,7 +315,8 @@ def mathdx_includes() -> list[str]:
             f"Set one of {tried} to a mathdx root -- the directory containing "
             f"`{_MATHDX_SENTINEL.as_posix()}` -- or `pip install --no-deps nvidia-mathdx==25.6.0`, or run "
             "`python -m miniworld_engine.kernels._headers fetch mathdx` where the network is reachable. "
-            f"Looked in: {', '.join(str(c) for c in _mathdx_candidates())}")
+            f"Looked in: {', '.join(str(c) for c in _mathdx_candidates())}"
+        )
     includes = [root / "include", root / "external" / "cutlass" / "include"]
     return [f"-I{p}" for p in includes if p.is_dir()]
 
@@ -342,8 +346,6 @@ def cutlass_include() -> Path:
     if root and (inc / "cute" / "tensor.hpp").is_file():
         return inc
     return _headers.local(_headers.CUTLASS) or CUTLASS_STANDIN
-
-
 
 
 # ---------------------------------------------------------------------------------------------
@@ -616,6 +618,7 @@ def _safe(stem: str) -> str:
 
 # -------------------------------------------------------------------------------- toolchains (only on a build)
 
+
 # -------------------------------------------------------------------------------- toolchains (only on a build)
 def _toolchain_torch() -> tuple[str, list[str]]:
     ensure_cuda_home()
@@ -667,9 +670,17 @@ TOOLCHAINS: dict[str, Callable[[], tuple[str, list[str]]]] = {
 }
 
 
-def cubin(name: str, flags: list[str] | tuple[str, ...], *, source: str | Path | None = None, text: str | None = None,
-          family: str | None = None, toolchain: str = "torch", ptxas_log: bool = False,
-          timeout: float | None = 900) -> Path:
+def cubin(
+    name: str,
+    flags: list[str] | tuple[str, ...],
+    *,
+    source: str | Path | None = None,
+    text: str | None = None,
+    family: str | None = None,
+    toolchain: str = "torch",
+    ptxas_log: bool = False,
+    timeout: float | None = 900,
+) -> Path:
     """The cubin of ``source`` (or of the generated ``text``) compiled with ``flags``: from the packaged prebuilt kernels,
     else from the local cache (``engine_jit_root/<family>/<name>-<key>.cubin``), else built with ``toolchain``.
 
@@ -691,9 +702,23 @@ def cubin(name: str, flags: list[str] | tuple[str, ...], *, source: str | Path |
     key = cg.key_of(material)
     rel = Path(family) / f"{_safe(name.split('/', 1)[-1])}-{key[:16]}.cubin"
     if _PLAN is not None:
-        _plan("cubin", name, key, rel, graph, {"name": name, "flags": flags, "source": None if source is None else str(source),
-                                               "text": text, "family": family, "toolchain": toolchain,
-                                               "ptxas_log": ptxas_log, "timeout": timeout})
+        _plan(
+            "cubin",
+            name,
+            key,
+            rel,
+            graph,
+            {
+                "name": name,
+                "flags": flags,
+                "source": None if source is None else str(source),
+                "text": text,
+                "family": family,
+                "toolchain": toolchain,
+                "ptxas_log": ptxas_log,
+                "timeout": timeout,
+            },
+        )
         out = engine_jit_root() / rel
         _KEY_OF[str(out)] = key
         return out
@@ -715,8 +740,13 @@ def cubin(name: str, flags: list[str] | tuple[str, ...], *, source: str | Path |
                     tmp_src.write_text(text)
                     tmp_src.replace(src)
                 tmp = _tmp_name(out)
-                res = subprocess.run([nvcc, *host, *expand_flags(flags), str(src), "-o", str(tmp)],
-                                     capture_output=True, text=True, timeout=timeout, check=False)
+                res = subprocess.run(
+                    [nvcc, *host, *expand_flags(flags), str(src), "-o", str(tmp)],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
                 if res.returncode != 0:
                     tmp.unlink(missing_ok=True)
                     raise RuntimeError(f"nvcc failed on {name}:\n{res.stderr[-4000:]}")
@@ -734,8 +764,14 @@ def _replace_text(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def derived_cubin(name: str, base: str | Path, params: Any, produce: Callable[[Path], bool],
-                  family: str | None = None, replay: tuple[str, list] | None = None) -> Path | None:
+def derived_cubin(
+    name: str,
+    base: str | Path,
+    params: Any,
+    produce: Callable[[Path], bool],
+    family: str | None = None,
+    replay: tuple[str, list] | None = None,
+) -> Path | None:
     """A cubin made from another one by ``produce(tmp_path) -> bool`` (a post-link patch, no compiler): keyed by the
     base's key and ``params`` (which should carry a digest of the patch code). None when ``produce`` declines (the
     caller keeps the base). ``replay`` = ("module:function", args): ``function(base_cubin, *args)`` redoes it (a prebuild
@@ -745,8 +781,7 @@ def derived_cubin(name: str, base: str | Path, params: Any, produce: Callable[[P
     base_key = key_of_artifact(base)
     if base_key is None:
         raise RuntimeError(f"derived_cubin: {base} was not resolved through _nvcc.cubin in this process")
-    material = {"scheme": cg.KEY_SCHEME, "kind": "cubin", "name": name, "derived_from": base_key,
-                "params": repr(params)}
+    material = {"scheme": cg.KEY_SCHEME, "kind": "cubin", "name": name, "derived_from": base_key, "params": repr(params)}
     key = cg.key_of(material)
     family = family or name.split("/", 1)[0]
     rel = Path(family) / f"{_safe(name.split('/', 1)[-1])}-{key[:16]}.cubin"
@@ -802,8 +837,7 @@ def _ext_key(name: str, kwargs: dict, sources: list[str] | None, inline: bool) -
         "with_cuda": kwargs.get("with_cuda"),
         "python_module": kwargs.get("is_python_module", True),
         "standalone": kwargs.get("is_standalone", False),
-        "functions": list(kwargs["functions"]) if isinstance(kwargs.get("functions"), (list, tuple))
-        else kwargs.get("functions"),
+        "functions": list(kwargs["functions"]) if isinstance(kwargs.get("functions"), (list, tuple)) else kwargs.get("functions"),
     }
     material = cg.key_material("ext", name, graph, flags, python=True, ctx=ctx)
     return material, cg.key_of(material), graph
@@ -856,8 +890,9 @@ def _load(kind_label: str, name: str, kwargs: dict, sources: list[str] | None = 
     material, key, graph = _ext_key(name, kwargs, sources, inline)
     rel = _ext_rel(name, key)
     if _PLAN is not None:
-        _plan("ext", name, key, rel, graph, {"kind_label": kind_label, "name": name, "kwargs": kwargs, "sources": sources,
-                                             "inline": inline})
+        _plan(
+            "ext", name, key, rel, graph, {"kind_label": kind_label, "name": name, "kwargs": kwargs, "sources": sources, "inline": inline}
+        )
         return _Stub(name)
     if key in _LOADED:
         return _LOADED[key]
@@ -895,12 +930,14 @@ def _real_cutlass(name: str, kwargs: dict) -> dict:
             f"{name} compiles CUTLASS {cg.CUTLASS_PINNED} / CuTe headers and is not prebuilt, and the pinned headers could not be "
             f"fetched ({e}). Set CUTLASS_PATH to a CUTLASS v{cg.CUTLASS_PINNED} checkout, `pip install --no-deps "
             f"nvidia-cutlass=={_headers.CUTLASS.version}`, or run `python -m miniworld_engine.kernels._headers fetch cutlass` "
-            "where the network is reachable (see docs/install.md)") from e
+            "where the network is reachable (see docs/install.md)"
+        ) from e
     return {**kwargs, "extra_include_paths": [real if os.path.abspath(p) == str(CUTLASS_STANDIN) else p for p in incs]}
 
 
-def _build_ext(kind_label: str, name: str, kwargs: dict, sources: list[str] | None, inline: bool, key: str,
-               material: dict, graph: Any) -> Path:
+def _build_ext(
+    kind_label: str, name: str, kwargs: dict, sources: list[str] | None, inline: bool, key: str, material: dict, graph: Any
+) -> Path:
     """Build the extension into a private temporary directory and rename it to its key's directory; returns that directory.
     A flock (dropped by the kernel when its holder dies) keeps two processes from building the same key at once."""
     import shutil
@@ -949,8 +986,17 @@ def _build_ext(kind_label: str, name: str, kwargs: dict, sources: list[str] | No
             so = built()[0]
             for junk in tmp.glob("*.o"):  # objects are only build intermediates
                 junk.unlink()
-            _write_json(tmp / "artifact.json", {"name": name, "key": key, "file": so.name, "module": so.name[: -len(".so")],
-                                                "python_module": python_module, "material": material})
+            _write_json(
+                tmp / "artifact.json",
+                {
+                    "name": name,
+                    "key": key,
+                    "file": so.name,
+                    "module": so.name[: -len(".so")],
+                    "python_module": python_module,
+                    "material": material,
+                },
+            )
             os.rename(tmp, final)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)

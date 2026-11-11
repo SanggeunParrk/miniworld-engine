@@ -13,6 +13,7 @@
 5. Written over q, with q, k, v, g all strided views of one [M, 4D] buffer: each program reads its own q tile
    before it writes that tile, and no other program reads it. No logsumexp is stored -- nothing runs a backward.
 """
+
 import triton
 import triton.language as tl
 
@@ -22,19 +23,44 @@ from miniworld_engine.kernels._launch_config import configured
 
 # restore_value: the output overwrites q, and tune mode runs the kernel once per config. No measured table yet: the default is
 # the centre of the space this kernel used to search at runtime (BLOCK_M1, BLOCK_M2 in 32..128, 4 / 8 warps, 2-4 stages).
-@configured("token_dit_attn_fwd_gated_triton", key=["N_CTX", "H", "HEAD_DIM", "PREC"], restore_value=["Q"],
-            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=3))
+@configured(
+    "token_dit_attn_fwd_gated_triton",
+    key=["N_CTX", "H", "HEAD_DIM", "PREC"],
+    restore_value=["Q"],
+    default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=3),
+)
 @triton.jit
-def _attn_fwd_gated(Q, K, V, G, Bias, Mask, sm_scale,
-                    stride_qz, stride_qm, stride_qh, stride_qk,
-                    stride_bh, stride_bm, stride_bn, stride_mz,
-                    H: tl.constexpr, N_CTX, HEAD_DIM: tl.constexpr, HEAD_DIM_PAD: tl.constexpr,
-                    D1: tl.constexpr, D2: tl.constexpr, PRESCALED: tl.constexpr, PREC: tl.constexpr,
-                    BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr):
-    off_z = tl.program_id(0).to(tl.int64)          # sample: fastest, so the S readers of one bias tile are adjacent
+def _attn_fwd_gated(
+    Q,
+    K,
+    V,
+    G,
+    Bias,
+    Mask,
+    sm_scale,
+    stride_qz,
+    stride_qm,
+    stride_qh,
+    stride_qk,
+    stride_bh,
+    stride_bm,
+    stride_bn,
+    stride_mz,
+    H: tl.constexpr,
+    N_CTX,
+    HEAD_DIM: tl.constexpr,
+    HEAD_DIM_PAD: tl.constexpr,
+    D1: tl.constexpr,
+    D2: tl.constexpr,
+    PRESCALED: tl.constexpr,
+    PREC: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_M2: tl.constexpr,
+):
+    off_z = tl.program_id(0).to(tl.int64)  # sample: fastest, so the S readers of one bias tile are adjacent
     start_m = tl.program_id(1).to(tl.int64)
     off_h = tl.program_id(2).to(tl.int64)
-    base = off_z * stride_qz + off_h * stride_qh     # q, k, v, g and the output share one layout
+    base = off_z * stride_qz + off_h * stride_qh  # q, k, v, g and the output share one layout
     offset_m = start_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     offset_n = tl.arange(0, BLOCK_M2)
     # head dim as D1 + D2 (48 = 32 + 16): the engine pads it to 64 and spends a third of every MMA on zeros
@@ -100,14 +126,31 @@ def attention_gated_in_place(q, k, v, g, bias, mask, prescaled=False, precision=
     "ieee"); bf16 operands ignore it."""
     S, L, H, D = q.shape
     assert k.stride() == q.stride() and v.stride() == q.stride() and g.stride() == q.stride()
-    d1 = 1 << (D.bit_length() - 1)                    # largest power of two <= D
+    d1 = 1 << (D.bit_length() - 1)  # largest power of two <= D
     d2 = D - d1
     assert d2 == 0 or (d2 >= 16 and d2 & (d2 - 1) == 0), f"head dim {D} is not a sum of two powers of two >= 16"
     assert d2 > 0, "power-of-two head dims: use the engine kernel"
     grid = lambda c: (S, triton.cdiv(L, c["BLOCK_M1"]), H)
-    _attn_fwd_gated[grid](q, k, v, g, bias, mask, D ** -0.5, *q.stride(), *bias.stride(), mask.stride(0),
-                          H=H, N_CTX=L, HEAD_DIM=D, HEAD_DIM_PAD=max(16, triton.next_power_of_2(D)), D1=d1, D2=d2,
-                          PRESCALED=prescaled, PREC=precision)
+    _attn_fwd_gated[grid](
+        q,
+        k,
+        v,
+        g,
+        bias,
+        mask,
+        D**-0.5,
+        *q.stride(),
+        *bias.stride(),
+        mask.stride(0),
+        H=H,
+        N_CTX=L,
+        HEAD_DIM=D,
+        HEAD_DIM_PAD=max(16, triton.next_power_of_2(D)),
+        D1=d1,
+        D2=d2,
+        PRESCALED=prescaled,
+        PREC=precision,
+    )
     return q
 
 
@@ -117,16 +160,38 @@ def attention_gated_in_place(q, k, v, g, bias, mask, prescaled=False, precision=
 # is a multiple of the key tile; no key mask is applied in the loop (it is folded into the hoisted bias as -inf, which
 # is free because it is sample-invariant); K and V are loaded [BLOCK_N, D] and transposed, the canonical wgmma layout.
 
+
 # restore_value: the output overwrites q, and tune mode runs the kernel once per config. No measured table yet: the default is
 # the centre of the space this kernel used to search at runtime (BLOCK_M1 64 / 128, BLOCK_M2 32..128, 4 / 8 warps, 2-4 stages).
-@configured("token_dit_attn_fwd_gated2_triton", key=["N_CTX", "H", "HEAD_DIM", "PREC"], restore_value=["Q"],
-            default=dict(BLOCK_M1=128, BLOCK_M2=64, num_warps=4, num_stages=3))
+@configured(
+    "token_dit_attn_fwd_gated2_triton",
+    key=["N_CTX", "H", "HEAD_DIM", "PREC"],
+    restore_value=["Q"],
+    default=dict(BLOCK_M1=128, BLOCK_M2=64, num_warps=4, num_stages=3),
+)
 @triton.jit
-def _attn_fwd_gated2(Q, K, V, G, Bias, brow0,
-                     stride_qz, stride_qm, stride_qh, stride_qk,
-                     H: tl.constexpr, N_CTX, HEAD_DIM: tl.constexpr, D1: tl.constexpr, D2: tl.constexpr,
-                     EVEN: tl.constexpr, PREC: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr,
-                     HAS_BIAS: tl.constexpr = True):
+def _attn_fwd_gated2(
+    Q,
+    K,
+    V,
+    G,
+    Bias,
+    brow0,
+    stride_qz,
+    stride_qm,
+    stride_qh,
+    stride_qk,
+    H: tl.constexpr,
+    N_CTX,
+    HEAD_DIM: tl.constexpr,
+    D1: tl.constexpr,
+    D2: tl.constexpr,
+    EVEN: tl.constexpr,
+    PREC: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_M2: tl.constexpr,
+    HAS_BIAS: tl.constexpr = True,
+):
     off_z = tl.program_id(0).to(tl.int64)
     start_m = tl.program_id(1)
     off_h = tl.program_id(2)
@@ -168,7 +233,7 @@ def _attn_fwd_gated2(Q, K, V, G, Bias, brow0,
             else:
                 bt = tl.load(bptr, mask=mrow & ((start_n + offset_n) < N_CTX)[None, :], other=0.0)
             sc = qk + bt.to(tl.float32)
-        else:                                      # ablation only: what the bias costs this kernel
+        else:  # ablation only: what the bias costs this kernel
             sc = qk
         if not EVEN:
             sc = tl.where(((start_n + offset_n) < N_CTX)[None, :], sc, -float("inf"))
@@ -216,6 +281,21 @@ def attention_gated_in_place2(q, k, v, g, bdesc, block, precision="tf32", _has_b
     d2 = D - d1
     assert d2 >= 16 and d2 & (d2 - 1) == 0, f"head dim {D} is not a power of two plus a power of two >= 16"
     grid = lambda c: (S, triton.cdiv(L, c["BLOCK_M1"]), H)
-    _attn_fwd_gated2[grid](q, k, v, g, bdesc, block * H * L, *q.stride(), H=H, N_CTX=L, HEAD_DIM=D, D1=d1, D2=d2,
-                           EVEN=(L % 128 == 0), PREC=precision, HAS_BIAS=_has_bias)
+    _attn_fwd_gated2[grid](
+        q,
+        k,
+        v,
+        g,
+        bdesc,
+        block * H * L,
+        *q.stride(),
+        H=H,
+        N_CTX=L,
+        HEAD_DIM=D,
+        D1=d1,
+        D2=d2,
+        EVEN=(L % 128 == 0),
+        PREC=precision,
+        HAS_BIAS=_has_bias,
+    )
     return q

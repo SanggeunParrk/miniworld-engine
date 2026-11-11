@@ -26,8 +26,6 @@ def _ext():
 
 def result(a, b, replicas=1, cfg=0):
     assert replicas == 1
-    out = torch.empty(
-        (a.shape[0], a.shape[1], a.shape[1]), device=a.device, dtype=torch.float32
-    )
+    out = torch.empty((a.shape[0], a.shape[1], a.shape[1]), device=a.device, dtype=torch.float32)
     _ext().run(a, b, out, cfg)
     return out

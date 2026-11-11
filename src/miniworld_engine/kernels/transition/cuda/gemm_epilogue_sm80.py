@@ -18,21 +18,9 @@ from .fused_sm80 import _is_fake
 
 def supported(x: torch.Tensor, d_out: int) -> bool:
     """bf16 on an A100, width 128 / 256 / 512 in (the row kernels) and a multiple of 128 out (the tile GEMM's N), the extension builds."""
-    if (
-        not x.is_cuda
-        or x.dtype is not torch.bfloat16
-        or x.shape[-1] not in (128, 256, 512)
-        or d_out % 128
-    ):
+    if not x.is_cuda or x.dtype is not torch.bfloat16 or x.shape[-1] not in (128, 256, 512) or d_out % 128:
         return False
-    return (
-        _wide._is_ampere(
-            x.device.index
-            if x.device.index is not None
-            else torch.cuda.current_device()
-        )
-        and _wide._loads()
-    )
+    return _wide._is_ampere(x.device.index if x.device.index is not None else torch.cuda.current_device()) and _wide._loads()
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------- LayerNorm + Linear
@@ -42,9 +30,7 @@ def _lnl_fwd_fake(x, gamma, beta, w, eps, save):
     return (
         x.new_empty((x.shape[0], w.shape[0])),
         x.new_empty(x.shape) if keep else x.new_empty((0,)),
-        torch.empty(
-            (x.shape[0] if keep else 0, 2), dtype=torch.float32, device=x.device
-        ),
+        torch.empty((x.shape[0] if keep else 0, 2), dtype=torch.float32, device=x.device),
     )
 
 
@@ -61,9 +47,7 @@ def _lnl_fwd(
     if _is_fake(x, w):
         return _lnl_fwd_fake(x, gamma, beta, w, eps, save)
     ext = _wide._ext()
-    xn, stats = ext.ln_fwd(
-        x, _wide._f32(gamma, not save), _wide._f32(beta, not save), eps, save
-    )
+    xn, stats = ext.ln_fwd(x, _wide._f32(gamma, not save), _wide._f32(beta, not save), eps, save)
     y = ext.gemm_res(xn, w, x.new_empty((0,)), 0)
     return y, xn if save else x.new_empty((0,)), stats
 
@@ -93,9 +77,7 @@ def _lnl_bwd(
         return _lnl_bwd_fake(dy, x, xn, stats, gamma, w, gdt)
     ext = _wide._ext()
     dxn = _wide._mm_f32(dy, w)
-    dx, dgam, dbeta = ext.ln_bwd(
-        dxn, x, stats, _wide._f32(gamma, False), x.new_empty((0,)), gdt
-    )
+    dx, dgam, dbeta = ext.ln_bwd(dxn, x, stats, _wide._f32(gamma, False), x.new_empty((0,)), gdt)
     return dx, dgam, dbeta, torch.mm(dy.t(), xn)
 
 
@@ -126,9 +108,7 @@ class _LayerNormLinearSM80(torch.autograd.Function):
 
 def layernorm_linear_sm80(x, gamma, beta, w, eps=1e-5):
     """``F.linear(F.layer_norm(x, (D,), gamma, beta, eps), w)`` for bf16 x [..., D] and w [N, D].  Call ``supported(x, N)`` first."""
-    if not (
-        torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, w))
-    ):
+    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, w))):
         shape = x.shape
         y, _, _ = _lnl_fwd(
             x.reshape(-1, shape[-1]).contiguous(),
@@ -145,9 +125,7 @@ def layernorm_linear_sm80(x, gamma, beta, w, eps=1e-5):
 # ----------------------------------------------------------------------------------------------------------------------------- the gated dual-GEMM front
 def _front_fwd_fake(x, wl, wlg, wr, wrg):
     """(left, right), each [M, H] like x (H = the weights' second dimension)."""
-    return x.new_empty((x.shape[0], wl.shape[1])), x.new_empty(
-        (x.shape[0], wl.shape[1])
-    )
+    return x.new_empty((x.shape[0], wl.shape[1])), x.new_empty((x.shape[0], wl.shape[1]))
 
 
 @opaque(fake=_front_fwd_fake, name="transition_dual_gemm_gate_fwd_sm80")
@@ -173,9 +151,7 @@ def dual_gemm_gate_sm80(x, wl, wlg, wr, wrg):
     """The triangle-multiplication front on an activation x [..., D]: (left, right) of shape [..., H].  bf16, D % 32 == 0, H % 64 == 0; call ``_wide._loads()`` first."""
     shape = x.shape
     left, right = _front_fwd(x.reshape(-1, shape[-1]).contiguous(), wl, wlg, wr, wrg)
-    return left.reshape(*shape[:-1], wl.shape[1]), right.reshape(
-        *shape[:-1], wl.shape[1]
-    )
+    return left.reshape(*shape[:-1], wl.shape[1]), right.reshape(*shape[:-1], wl.shape[1])
 
 
 def _front_bwd_fake(dl, dr, x, wl, wlg, wr, wrg):
@@ -202,13 +178,9 @@ def _front_bwd(
         return _front_bwd_fake(dl, dr, x, wl, wlg, wr, wrg)
     ext = _wide._ext()
     cfg = _wide._tiles(x.shape[0], x.shape[1], wl.shape[1])[0]
-    dab_l, _ = ext.gate_bwd(
-        x, wl.t().contiguous(), wlg.t().contiguous(), dl, cfg, 1
-    )  # [d_p | d_g] of the left side [M, 2 H]
+    dab_l, _ = ext.gate_bwd(x, wl.t().contiguous(), wlg.t().contiguous(), dl, cfg, 1)  # [d_p | d_g] of the left side [M, 2 H]
     dab_r, _ = ext.gate_bwd(x, wr.t().contiguous(), wrg.t().contiguous(), dr, cfg, 1)
-    dx = torch.mm(
-        dab_l, torch.cat((wl, wlg), 1).t()
-    )  # d_p WL^T + d_g WLg^T + (the right side)
+    dx = torch.mm(dab_l, torch.cat((wl, wlg), 1).t())  # d_p WL^T + d_g WLg^T + (the right side)
     dx.addmm_(dab_r, torch.cat((wr, wrg), 1).t())
     return dx, torch.mm(x.t(), dab_l), torch.mm(x.t(), dab_r)
 

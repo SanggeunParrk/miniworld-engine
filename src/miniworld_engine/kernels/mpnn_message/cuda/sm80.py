@@ -83,9 +83,7 @@ def _backward_fused(p, weight, bias, mask, grad_reduced, scale):
     dp = torch.empty_like(p)
     dw_part = torch.empty((ctas, WIDTH * WIDTH), device=p.device, dtype=torch.float32)
     db_part = torch.empty((ctas, WIDTH), device=p.device, dtype=torch.float32)
-    ext.msg_bwd_fused(
-        p, weight, bias, mask, grad_reduced, dp, dw_part, db_part, float(scale)
-    )
+    ext.msg_bwd_fused(p, weight, bias, mask, grad_reduced, dp, dw_part, db_part, float(scale))
     return dp, ext.dw_reduce(dw_part, ctas), db_part.sum(dim=0)
 
 
@@ -98,9 +96,7 @@ def _backward_split(p, weight, bias, mask, grad_reduced, scale):
     nchunks = -(-groups // chunk)
     a_buf = p.new_empty((chunk * NEIGHBORS, WIDTH))
     d_buf = p.new_empty((chunk * NEIGHBORS, WIDTH))
-    db_part = torch.zeros(
-        (nchunks, num_sms, WIDTH), device=p.device, dtype=torch.float32
-    )
+    db_part = torch.zeros((nchunks, num_sms, WIDTH), device=p.device, dtype=torch.float32)
     dw = None
     for c in range(nchunks):
         g0, g1 = c * chunk, min(groups, (c + 1) * chunk)

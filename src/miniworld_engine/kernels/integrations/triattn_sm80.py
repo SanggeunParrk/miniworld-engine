@@ -43,9 +43,7 @@ def _inference_forms(module) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
     unmodified (``_capture.param_forms``: an inference graph under ``static_weights`` replays no cast kernel); bf16 parameters are used as they are."""
     leaves = (*_weights(module), module.to_out.weight)
     bf = torch.bfloat16
-    if all(t.dtype == bf for t in leaves) or any(
-        t.dtype not in (bf, torch.float32) for t in leaves
-    ):
+    if all(t.dtype == bf for t in leaves) or any(t.dtype not in (bf, torch.float32) for t in leaves):
         return leaves[:5], leaves[5]
     # grad off (inference): a CUDA-graph capture is served the casts its eager warm-up made, so a replay runs no cast kernel (six per call)
     forms = _capture.param_forms(
@@ -74,9 +72,7 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None):
         return None
     if not pair.is_cuda or pair.dtype != torch.bfloat16 or pair.ndim != 4:
         return None
-    if mask is not None and not (
-        mask.dtype == torch.bool and mask.shape == pair.shape[:2]
-    ):
+    if mask is not None and not (mask.dtype == torch.bool and mask.shape == pair.shape[:2]):
         return None
     d_hidden, d_pair = module.to_query.weight.shape
     if pair.shape[-1] != d_pair:
@@ -89,9 +85,7 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None):
     return None if cfg is None else ("wide", cfg)
 
 
-def _serves_kind(
-    module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: bool
-) -> bool:
+def _serves_kind(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: bool) -> bool:
     kind = _kind(module, pair, mask)
     if kind is None:
         return False
@@ -101,13 +95,9 @@ def _serves_kind(
     weights, wo = _inference_forms(module)  # the dtypes the call will run with; training casts differentiably in forward_train
     if kind[0] == "fused":
         if train:
-            return sm80.supports_train(
-                pair, weights, ln.weight, ln.bias, wo, mask
-            ) and sm80._built(pair)
+            return sm80.supports_train(pair, weights, ln.weight, ln.bias, wo, mask) and sm80._built(pair)
         return sm80.available_module(pair, weights, ln.weight, ln.bias, wo, mask)
-    return sm80_wide.supports(
-        pair, kind[1], weights, wo, ln.weight, ln.bias, mask, train=train
-    ) and sm80_wide.loads(kind[1])
+    return sm80_wide.supports(pair, kind[1], weights, wo, ln.weight, ln.bias, mask, train=train) and sm80_wide.loads(kind[1])
 
 
 def _features(module, *, train: bool = True) -> bool:
@@ -154,8 +144,11 @@ def _variant_params(module, train: bool):
     else:
         present = [t for t in extra if t is not None]
         if any(t.dtype != bf for t in present):
-            forms = iter(_capture.param_forms("triattn_sm80_variant", present, lambda: _detached_casts(present),
-                                              capture_reads_eager=not torch.is_grad_enabled()))
+            forms = iter(
+                _capture.param_forms(
+                    "triattn_sm80_variant", present, lambda: _detached_casts(present), capture_reads_eager=not torch.is_grad_enabled()
+                )
+            )
             extra = [None if t is None else next(forms) for t in extra]
     return weights, wo, *extra
 
@@ -166,15 +159,19 @@ def _variant_refusal(module, pair: torch.Tensor, mask: torch.Tensor | None, *, t
     d_hidden, d_pair = module.to_query.weight.shape
     vc = sm80_wide.variant_cfg(d_pair, d_hidden, module.n_head)
     if vc is None:
-        return (f"d_pair {d_pair}, {module.n_head} heads x {d_hidden // module.n_head}: outside the A100 kernels (d_pair 64 .. 512 a multiple of 64, "
-                "heads of 16 / 32 channels up to 16 or of 64 channels up to 8)")
+        return (
+            f"d_pair {d_pair}, {module.n_head} heads x {d_hidden // module.n_head}: outside the A100 kernels (d_pair 64 .. 512 a multiple of 64, "
+            "heads of 16 / 32 channels up to 16 or of 64 channels up to 8)"
+        )
     if module.dual_output and (module.to_out_t.bias is not None or module.to_out.bias is not None):
         return "a biased second out-projection: no model has one, not part of the A100 kernels"
     weights, wo, gb, bo, wt = _variant_params(module, train=False)
     ln = module.ln_pair
     if not sm80_wide.variant_supports(pair, vc, weights, wo, ln.weight, ln.bias, mask, gate_bias=gb, out_bias=bo, wo_t=wt, train=train):
-        return (f"L {pair.shape[1]}, d_pair {d_pair}, {module.n_head} heads, {'training' if train else 'inference'}: refused by the A100 variant path's gates "
-                "(L % 128 == 0, contiguous [B, L, L, d_pair], a bool [B, L] mask, the training bias-gradient budget) or its extensions failed to build")
+        return (
+            f"L {pair.shape[1]}, d_pair {d_pair}, {module.n_head} heads, {'training' if train else 'inference'}: refused by the A100 variant path's gates "
+            "(L % 128 == 0, contiguous [B, L, L, d_pair], a bool [B, L] mask, the training bias-gradient budget) or its extensions failed to build"
+        )
     return None
 
 
@@ -191,8 +188,21 @@ def _variant_forward(module, pair: torch.Tensor, mask: torch.Tensor | None, *, t
         b, length = pair.shape[:2]
         ds = module._make_drop_scale(pair, module.p_drop).reshape(b, length, pair.shape[-1])
     return sm80_wide.variant(
-        pair, vc, weights, wo, ln.weight, ln.bias, ln.eps, mask, transposed=not module.starting, flip=module._bias_untransposed,
-        out_mode=_out_mode(module), gate_bias=gb, out_bias=bo, wo_t=wt, ds=ds,
+        pair,
+        vc,
+        weights,
+        wo,
+        ln.weight,
+        ln.bias,
+        ln.eps,
+        mask,
+        transposed=not module.starting,
+        flip=module._bias_untransposed,
+        out_mode=_out_mode(module),
+        gate_bias=gb,
+        out_bias=bo,
+        wo_t=wt,
+        ds=ds,
     )
 
 
@@ -211,11 +221,15 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: boo
         return _variant_refusal(module, pair, mask, train=train)
     kind = _kind(module, pair, mask)
     if kind is None:
-        return (f"d_pair {d_pair}, {module.n_head} heads x {d_hidden // module.n_head}: outside the A100 kernels (d_pair 128 / 4 x 32 fused; "
-                "d_pair 64 .. 512 a multiple of 64 with 1 .. 16 heads of 16 / 32 channels)")
+        return (
+            f"d_pair {d_pair}, {module.n_head} heads x {d_hidden // module.n_head}: outside the A100 kernels (d_pair 128 / 4 x 32 fused; "
+            "d_pair 64 .. 512 a multiple of 64 with 1 .. 16 heads of 16 / 32 channels)"
+        )
     if not _serves_kind(module, pair, mask, train=train):
-        return (f"L {pair.shape[1]}, d_pair {d_pair}, {module.n_head} heads, {'training' if train else 'inference'}: refused by the A100 kernels' "
-                "gates (L % 128 == 0, contiguous [B, L, L, d_pair], the training bias-gradient budget) or their extensions failed to build")
+        return (
+            f"L {pair.shape[1]}, d_pair {d_pair}, {module.n_head} heads, {'training' if train else 'inference'}: refused by the A100 kernels' "
+            "gates (L % 128 == 0, contiguous [B, L, L, d_pair], the training bias-gradient budget) or their extensions failed to build"
+        )
     return None
 
 
@@ -253,15 +267,11 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
         )
     from miniworld_engine.kernels.triangle_attention.cuda import sm80
 
-    qkvg, bias, _ = sm80.front(
-        pair, weights, ln.weight, ln.bias, ln.eps, mask, transposed=ending, flip=module._bias_untransposed
-    )
+    qkvg, bias, _ = sm80.front(pair, weights, ln.weight, ln.bias, ln.eps, mask, transposed=ending, flip=module._bias_untransposed)
     q, k, v, _ = sm80.qkv_views(qkvg)
     out, _ = sm80.attention(q, k, v, bias, compact_key_mask=mask)
     b, length = pair.shape[:2]
-    o = out.permute(0, 2, 3, 1, 4).reshape(
-        b, length, length, 128
-    )  # "B H L L2 D -> B L L2 (H D)": a view of the core's token-major result
+    o = out.permute(0, 2, 3, 1, 4).reshape(b, length, length, 128)  # "B H L L2 D -> B L L2 (H D)": a view of the core's token-major result
     return sm80.back(o, qkvg, wo, pair, transposed=ending)
 
 
@@ -271,18 +281,12 @@ def serves_train(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -
     if not torch.is_grad_enabled():
         return False
     wo = module.to_out.weight
-    if not (
-        pair.requires_grad
-        or wo.requires_grad
-        or any(w.requires_grad for w in _weights(module))
-    ):
+    if not (pair.requires_grad or wo.requires_grad or any(w.requires_grad for w in _weights(module))):
         return False
     return refusal(module, pair, mask, train=True) is None
 
 
-def forward_train(
-    module, pair: torch.Tensor, mask: torch.Tensor | None
-) -> torch.Tensor:
+def forward_train(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """``pair + drop(TriangleAttention(pair))`` with autograd.  The dropout scale is the module's own draw on the original layout (``[B, 1, L, C]`` starting /
     ``[B, L, 1, C]`` ending); in the kernels' starting frame both index the token's second index, so either is ``[B, L, C]`` as it is."""
     if _is_variant(module, pair):

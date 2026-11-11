@@ -43,11 +43,15 @@ def max_batch(width: int) -> int:
 #: saved tensors (held after the forward) fit next to one chunk's backward workspace, the chunks run as plain calls; otherwise each
 #: chunk is checkpointed (its forward recomputed in its backward, so only the chunk being differentiated holds saved tensors).
 CHUNK_MEMORY_FRACTION = 0.85
-_WORKING_SET_PER_CHANNEL = {        # (training, bidirectional, D <= 128) -> bytes per pair token per channel, one launch's peak
-    (False, True, True): 18.1, (False, True, False): 18.1,
-    (False, False, True): 12.1, (False, False, False): 12.1,
-    (True, True, True): 40.3, (True, True, False): 62.2,
-    (True, False, True): 32.0, (True, False, False): 42.2,
+_WORKING_SET_PER_CHANNEL = {  # (training, bidirectional, D <= 128) -> bytes per pair token per channel, one launch's peak
+    (False, True, True): 18.1,
+    (False, True, False): 18.1,
+    (False, False, True): 12.1,
+    (False, False, False): 12.1,
+    (True, True, True): 40.3,
+    (True, True, False): 62.2,
+    (True, False, True): 32.0,
+    (True, False, False): 42.2,
 }
 #: Training: bytes per pair token per channel one launch holds from its forward to its backward (saved tensors and y; measured,
 #: x / dy excluded), (bidirectional, D <= 128).
@@ -59,16 +63,37 @@ _CALLER_PER_CHANNEL = 8.0
 #: (``_legacy_native_faster``), writing into the batch's y / dx, measured faster than the port (one launch or its chunks): CUDA
 #: graph, B 4 / 16 / 48, H100 80GB, 2026-10-19 (docs/gpus/h100/trimul "Batched samples"). Above it, or at a cell not listed, the port.
 PER_SAMPLE_LEGACY_TRAINING = {
-    (256, 384, True): 48, (256, 384, False): 0, (256, 768, True): 4, (256, 768, False): 4,
-    (384, 384, True): 4, (384, 384, False): 4, (384, 768, True): 16, (384, 768, False): 4,
-    (512, 384, True): 16, (512, 384, False): 16, (512, 768, True): 16, (512, 768, False): 16,
+    (256, 384, True): 48,
+    (256, 384, False): 0,
+    (256, 768, True): 4,
+    (256, 768, False): 4,
+    (384, 384, True): 4,
+    (384, 384, False): 4,
+    (384, 768, True): 16,
+    (384, 768, False): 4,
+    (512, 384, True): 16,
+    (512, 384, False): 16,
+    (512, 768, True): 16,
+    (512, 768, False): 16,
 }
 #: The preserved kernels at B = 1, bytes per pair token per channel (measured, x / dy excluded): held from forward to backward and
 #: the forward + backward peak, (D, bidirectional).
-_LEGACY_HELD_PER_CHANNEL = {(256, True): 24.1, (384, True): 40.1, (512, True): 40.1,
-                            (256, False): 24.1, (384, False): 24.1, (512, False): 24.1}
-_LEGACY_PEAK_PER_CHANNEL = {(256, True): 70.2, (384, True): 77.1, (512, True): 78.2,
-                            (256, False): 44.2, (384, False): 44.2, (512, False): 44.2}
+_LEGACY_HELD_PER_CHANNEL = {
+    (256, True): 24.1,
+    (384, True): 40.1,
+    (512, True): 40.1,
+    (256, False): 24.1,
+    (384, False): 24.1,
+    (512, False): 24.1,
+}
+_LEGACY_PEAK_PER_CHANNEL = {
+    (256, True): 70.2,
+    (384, True): 77.1,
+    (512, True): 78.2,
+    (256, False): 44.2,
+    (384, False): 44.2,
+    (512, False): 44.2,
+}
 
 
 @functools.lru_cache(None)
@@ -98,15 +123,19 @@ def _plan(module, pair, inference):
         return max(bsz, 1), False
     n, d = pair.shape[1], pair.shape[-1]
     granule = TRAINING_GRANULE if d >= 256 and inference else 16
-    n = -(-n // granule) * granule                    # the padded length one launch runs (``_padded_inference``)
+    n = -(-n // granule) * granule  # the padded length one launch runs (``_padded_inference``)
     bidirectional = not hasattr(module, "outgoing")
     planes4 = bidirectional or _hidden_twice(module, pair)  # hidden 2 D in one direction: the bidirectional working set
-    tokens = d * n * n                                 # bytes per sample = coefficient x tokens
+    tokens = d * n * n  # bytes per sample = coefficient x tokens
     peak = _WORKING_SET_PER_CHANNEL[(not inference, planes4, d <= 128)] * 1.05
     budget = CHUNK_MEMORY_FRACTION * _total_memory(pair.device.index if pair.device.index is not None else 0)
-    limit = max(1, min(max_batch(d), (2 ** 31 - 1) // (n * n)))
-    if (not inference and d >= 256 and bsz <= PER_SAMPLE_LEGACY_TRAINING.get((d, pair.shape[1], bidirectional), 0)
-            and _legacy_native_faster(module, pair, False)):
+    limit = max(1, min(max_batch(d), (2**31 - 1) // (n * n)))
+    if (
+        not inference
+        and d >= 256
+        and bsz <= PER_SAMPLE_LEGACY_TRAINING.get((d, pair.shape[1], bidirectional), 0)
+        and _legacy_native_faster(module, pair, False)
+    ):
         # one sample per launch on the preserved kernels: plain when every sample's saved state fits next to one sample's
         # backward workspace and the caller's x / y / dy / dx, checkpointed otherwise
         held = _LEGACY_HELD_PER_CHANNEL[(d, bidirectional)] * 1.05
@@ -120,10 +149,10 @@ def _plan(module, pair, inference):
         free = budget - bsz * 4.0 * tokens
         return max(1, min(limit, int(free // (peak * tokens)))), False
     caller = bsz * _CALLER_PER_CHANNEL * tokens
-    saved = (_HELD_PER_CHANNEL[(planes4, d <= 128)] * 1.05 - 2.0) * tokens      # y is the caller's
-    work = (peak - _CALLER_PER_CHANNEL) * tokens - saved                              # one chunk's backward workspace
+    saved = (_HELD_PER_CHANNEL[(planes4, d <= 128)] * 1.05 - 2.0) * tokens  # y is the caller's
+    work = (peak - _CALLER_PER_CHANNEL) * tokens - saved  # one chunk's backward workspace
     free = budget - caller - bsz * saved
-    if free >= work:                                   # every chunk's saved state fits next to one chunk's backward workspace
+    if free >= work:  # every chunk's saved state fits next to one chunk's backward workspace
         return max(1, min(limit, int(free // work))), False
     free = budget - caller
     return max(1, min(limit, int(free // ((peak - _CALLER_PER_CHANNEL) * tokens)))), True
@@ -141,7 +170,6 @@ def _one_chunk(module, pair, inference):
     return pair if chunk >= pair.shape[0] else pair[:chunk]
 
 
-
 #: Training lengths: multiples of TRAINING_GRANULE (the B1 / B2 / B7 tiles of 64 tokens must not straddle a pair row and the
 #: B200-style output tiles 128 tokens) from 128 up to MAX_TRAINING_LENGTH, B200's bound (80 x 128). The kernels index planes
 #: through TMA coordinates or 64-bit offsets; their only index bound is the int32 token index (``_index_ok``). Memory binds
@@ -157,7 +185,7 @@ MIN_INFERENCE_LENGTH = 16
 def _index_ok(pair) -> bool:
     """The int32 token index of K1 / K3 / B1 / B2 (B L^2 < 2^31, with L rounded up to the 16-token pad)."""
     n = -(-pair.shape[1] // 16) * 16
-    return pair.shape[0] * n * n < 2 ** 31
+    return pair.shape[0] * n * n < 2**31
 
 
 def _training_length(n) -> bool:
@@ -213,20 +241,36 @@ def _b200style_serves(module, pair, inference=False, padded=False):
     # one-sample, one-direction D256 / D384 inference at L % 128 != 0: the port's any-L form (K1 planes padded to 16, k3.cu ROWPAD),
     # 0.81-0.84x Anthropic's time at L200-1500 where the packaged K1 / K3 ran 0.99-1.01x (2026-10-30, record
     # trimul_h100_vs_anthropic_15pct_20261030.md); D256 likewise since its port path runs ahead (record trimul_h100_d256_20261031.md).
-    rowpad = (inference and not padded and pair.ndim == 4 and pair.shape[0] == 1 and hasattr(module, "outgoing")
-              and pair.shape[-1] in (256, 384) and 16 <= pair.shape[1] <= MAX_TRAINING_LENGTH and pair.shape[1] % TRAINING_GRANULE != 0)
-    if (not pair.is_cuda or pair.dtype != torch.bfloat16 or pair.ndim != 4
-            or not 1 <= pair.shape[0] <= max_batch(pair.shape[-1]) or pair.shape[0] * length * length >= 2 ** 31
-            or pair.shape[1] != pair.shape[2]
-            or pair.shape[-1] not in (256, 384, 512)
-            or not (_training_length(length) or rowpad)
-            or not pair.is_contiguous() or module.d_hidden != pair.shape[-1]
-            or module.ln_pair.eps != 1e-5 or module.ln_out.eps != 1e-5
-            or torch.cuda.get_device_capability(pair.device) != (9, 0)):
+    rowpad = (
+        inference
+        and not padded
+        and pair.ndim == 4
+        and pair.shape[0] == 1
+        and hasattr(module, "outgoing")
+        and pair.shape[-1] in (256, 384)
+        and 16 <= pair.shape[1] <= MAX_TRAINING_LENGTH
+        and pair.shape[1] % TRAINING_GRANULE != 0
+    )
+    if (
+        not pair.is_cuda
+        or pair.dtype != torch.bfloat16
+        or pair.ndim != 4
+        or not 1 <= pair.shape[0] <= max_batch(pair.shape[-1])
+        or pair.shape[0] * length * length >= 2**31
+        or pair.shape[1] != pair.shape[2]
+        or pair.shape[-1] not in (256, 384, 512)
+        or not (_training_length(length) or rowpad)
+        or not pair.is_contiguous()
+        or module.d_hidden != pair.shape[-1]
+        or module.ln_pair.eps != 1e-5
+        or module.ln_out.eps != 1e-5
+        or torch.cuda.get_device_capability(pair.device) != (9, 0)
+    ):
         return False
-    return all(p.dtype == torch.float32 and p.is_contiguous() and p.device == pair.device
-               for p in (module.ln_pair.weight, module.ln_pair.bias,
-                         module.ln_out.weight, module.ln_out.bias))
+    return all(
+        p.dtype == torch.float32 and p.is_contiguous() and p.device == pair.device
+        for p in (module.ln_pair.weight, module.ln_pair.bias, module.ln_out.weight, module.ln_out.bias)
+    )
 
 
 def _b200style_update(module, pair, mask, dropscale, bidirectional, out=None):
@@ -234,14 +278,27 @@ def _b200style_update(module, pair, mask, dropscale, bidirectional, out=None):
         training_unit_scale,
     )
     from miniworld_engine.kernels.trimul_inproj.cuda.h100_b200style import trimul
+
     n, d = pair.shape[1], pair.shape[-1]
-    scale = ((training_unit_scale(pair) if torch.is_grad_enabled() else None)
-             if dropscale is None else dropscale.reshape(pair.shape[0] * n, d).contiguous())
+    scale = (
+        (training_unit_scale(pair) if torch.is_grad_enabled() else None)
+        if dropscale is None
+        else dropscale.reshape(pair.shape[0] * n, d).contiguous()
+    )
     token = torch.empty(0, device=pair.device, dtype=torch.bool) if mask is None else mask.contiguous()
-    leaves = [pair, module.to_left.weight, module.to_left_gate.weight,
-              module.to_right.weight, module.to_right_gate.weight,
-              module.to_gate.weight, module.to_out.weight,
-              module.ln_pair.weight, module.ln_pair.bias, module.ln_out.weight, module.ln_out.bias]
+    leaves = [
+        pair,
+        module.to_left.weight,
+        module.to_left_gate.weight,
+        module.to_right.weight,
+        module.to_right_gate.weight,
+        module.to_gate.weight,
+        module.to_out.weight,
+        module.ln_pair.weight,
+        module.ln_pair.bias,
+        module.ln_out.weight,
+        module.ln_out.bias,
+    ]
     direction = 0 if bidirectional else 1 if module.outgoing else 2
     if out is None:
         return trimul(leaves, token, scale, direction)
@@ -258,13 +315,14 @@ def _native_buckets_enabled(pair=None):
 def _selected_uni_d256(module, pair):
     """Qualified outgoing D256/D384 L384 and D512 L384,768 native defaults."""
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import uni_training
-    return (hasattr(module, "outgoing") and uni_training(pair, bool(module.outgoing)))
+
+    return hasattr(module, "outgoing") and uni_training(pair, bool(module.outgoing))
 
 
 def _selected_d64_training(module, pair):
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import d64_training
-    return d64_training(pair, getattr(module, "outgoing", False),
-                        not hasattr(module, "outgoing"))
+
+    return d64_training(pair, getattr(module, "outgoing", False), not hasattr(module, "outgoing"))
 
 
 def _selected_native_training(module, pair):
@@ -272,10 +330,13 @@ def _selected_native_training(module, pair):
         bidi_training,
         d128_training,
     )
-    return (_selected_uni_d256(module, pair)
-            or (not hasattr(module, "outgoing") and bidi_training(pair))
-            or d128_training(pair, getattr(module, "outgoing", False),
-                             not hasattr(module, "outgoing")))
+
+    return (
+        _selected_uni_d256(module, pair)
+        or (not hasattr(module, "outgoing") and bidi_training(pair))
+        or d128_training(pair, getattr(module, "outgoing", False), not hasattr(module, "outgoing"))
+    )
+
 
 def serves(module, pair: torch.Tensor) -> bool:
     """Check the mathematical and resource contract before touching CUDA builders. B samples: the contract of one launch's chunk
@@ -287,10 +348,7 @@ def _serves_one(module, pair: torch.Tensor) -> bool:
     # the caller (the module's "cuda" backend) chose this path; the old settings default of the training widths is inlined
     if _b200style_serves(module, pair):
         return pair.shape[-1] in _POLICY_TRAINING_WIDTHS
-    if (
-        pair.shape[-1] not in _POLICY_TRAINING_WIDTHS
-        or pair.shape[-1] not in TRAINING_WIDTHS
-    ):
+    if pair.shape[-1] not in _POLICY_TRAINING_WIDTHS or pair.shape[-1] not in TRAINING_WIDTHS:
         return False
     if not pair.is_cuda or pair.dtype != torch.bfloat16 or not pair.is_contiguous():
         return False
@@ -298,25 +356,20 @@ def _serves_one(module, pair: torch.Tensor) -> bool:
         pair.ndim != 4
         or not _batch_ok(pair)
         or pair.shape[1] != pair.shape[2]
-        or not (_training_length(pair.shape[1])
-                if _native_buckets_enabled(pair) or (pair.shape[-1] == 64 and _native_training_enabled())
-                else pair.shape[1] in (384, 768))
-        or (pair.shape[-1] > 128 and pair.shape[1] > 1024)   # D256+ beyond L1024: the B200-style port only (above)
+        or not (
+            _training_length(pair.shape[1])
+            if _native_buckets_enabled(pair) or (pair.shape[-1] == 64 and _native_training_enabled())
+            else pair.shape[1] in (384, 768)
+        )
+        or (pair.shape[-1] > 128 and pair.shape[1] > 1024)  # D256+ beyond L1024: the B200-style port only (above)
     ):
         return False
-    if (
-        not _hidden_ok(module, pair)
-        or module.ln_pair.eps != 1e-5
-        or module.ln_out.eps != 1e-5
-    ):
+    if not _hidden_ok(module, pair) or module.ln_pair.eps != 1e-5 or module.ln_out.eps != 1e-5:
         return False
     if torch.cuda.get_device_capability(pair.device) != (9, 0):
         return False
     # Cooperative B1/B7 grids were qualified on full 132-SM H100s, not MIG slices.
-    if (
-        pair.shape[-1] == 128
-        and num_sms(pair.device) != 132
-    ):
+    if pair.shape[-1] == 128 and num_sms(pair.device) != 132:
         return False
     return all(
         p.dtype == torch.float32
@@ -334,7 +387,8 @@ def update(
     pair: torch.Tensor,
     mask: torch.Tensor | None,
     dropscale: torch.Tensor | None,
-    *, bidirectional: bool = True,
+    *,
+    bidirectional: bool = True,
 ) -> torch.Tensor:
     chunk, checkpoint = _plan(module, pair, False)
     if chunk >= pair.shape[0]:
@@ -353,6 +407,7 @@ def _chunk_one(module, x, mask, dropscale, bidirectional):
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
         preserved_d64_context,
     )
+
     with preserved_d64_context(_selected_d64_training(module, x)):
         return _update(module, x, mask, dropscale, bidirectional=bidirectional)
 
@@ -369,10 +424,11 @@ class _Chunked(torch.autograd.Function):
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
             output_buffers,
         )
+
         module, chunk, checkpoint, bidirectional = setup
         ctx.setup, ctx.n_params = setup, len(params)
         sizes = _split(pair.shape[0], chunk)
-        ctx.bounds = [(sum(sizes[:i]), sum(sizes[:i + 1])) for i in range(len(sizes))]
+        ctx.bounds = [(sum(sizes[:i]), sum(sizes[: i + 1])) for i in range(len(sizes))]
         y = torch.empty_like(pair)
         ctx.graphs = []
         for start, stop in ctx.bounds:
@@ -390,7 +446,7 @@ class _Chunked(torch.autograd.Function):
                     out = _chunk_one(module, x, m, d, bidirectional)
                 ctx.graphs.append((x, out))
             if out.data_ptr() != rows.data_ptr():
-                rows.copy_(out)       # a path that allocated its own y (traced, or not wired to the scope)
+                rows.copy_(out)  # a path that allocated its own y (traced, or not wired to the scope)
         ctx.save_for_backward(pair, mask, dropscale)
         return y
 
@@ -399,6 +455,7 @@ class _Chunked(torch.autograd.Function):
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
             output_buffers,
         )
+
         module, _, checkpoint, bidirectional = ctx.setup
         pair, mask, dropscale = ctx.saved_tensors
         params = list(module.parameters())
@@ -431,10 +488,18 @@ def _update_one(module, pair, mask, dropscale, *, bidirectional=True):
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
         preserved_d64_context,
     )
+
     with preserved_d64_context(_selected_d64_training(module, pair)):
         out = _update(module, pair, mask, dropscale, bidirectional=bidirectional)
-    if _b200style_serves(module, pair) or _native_buckets_enabled(pair) or _selected_native_training(module, pair) or _selected_d64_training(module, pair) or (pair.shape[-1] == 64 and _native_training_enabled()):
+    if (
+        _b200style_serves(module, pair)
+        or _native_buckets_enabled(pair)
+        or _selected_native_training(module, pair)
+        or _selected_d64_training(module, pair)
+        or (pair.shape[-1] == 64 and _native_training_enabled())
+    ):
         from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_output
+
         out = _native_caller_output(out, pair, *module.parameters(), force=True)
     return out
 
@@ -451,6 +516,7 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
         preserve_training,
     )
+
     # hidden 2 D in one direction: the bidirectional D64 / D128 kernels (``_hidden_twice``), whatever the bucket policy
     planes4 = bidirectional or _hidden_twice(module, pair)
     preserve = preserve_training(d) or _selected_native_training(module, pair)
@@ -461,34 +527,35 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import (
             owned_training_mask,
         )
+
         with torch.no_grad():
-            pair_mask = owned_training_mask(pair,mask)
+            pair_mask = owned_training_mask(pair, mask)
     elif d == 64 and _native_training_enabled():
         # Keep token masks compact until the saved forward boundary constructs
         # its owned FP32 pair mask. No intermediate BF16 square allocation.
-        pair_mask = (torch.empty(0, device=pair.device, dtype=torch.bool)
-                     if mask is None else mask)
+        pair_mask = torch.empty(0, device=pair.device, dtype=torch.bool) if mask is None else mask
     elif mask is None:
-        rows = pair.shape[0] * n   # batched samples: a token mask [B n] / a pair mask [B n, n]
-        pair_mask = (torch.ones(rows, device=pair.device, dtype=torch.bool) if token_path
-                     else torch.ones((rows, n), device=pair.device, dtype=torch.bfloat16))
+        rows = pair.shape[0] * n  # batched samples: a token mask [B n] / a pair mask [B n, n]
+        pair_mask = (
+            torch.ones(rows, device=pair.device, dtype=torch.bool)
+            if token_path
+            else torch.ones((rows, n), device=pair.device, dtype=torch.bfloat16)
+        )
     elif token_path:
-        pair_mask = mask.reshape(-1)   # [B n], b-major
+        pair_mask = mask.reshape(-1)  # [B n], b-major
         if pair_mask.dtype != torch.bool:
             pair_mask = pair_mask != 0
     else:
-        pair_mask = (
-            (mask.unsqueeze(-1) & mask.unsqueeze(-2)) if mask.ndim == 2 else mask
-        )
+        pair_mask = (mask.unsqueeze(-1) & mask.unsqueeze(-2)) if mask.ndim == 2 else mask
         pair_mask = pair_mask.to(torch.bfloat16).contiguous()
     if dropscale is None and (preserve or (d == 64 and _native_training_enabled())):
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import (
             training_unit_scale,
         )
+
         scale = training_unit_scale(pair)
     else:
-        scale = (pair.new_ones((pair.shape[0] * n, d)) if dropscale is None
-                 else dropscale.reshape(pair.shape[0] * n, d).contiguous())
+        scale = pair.new_ones((pair.shape[0] * n, d)) if dropscale is None else dropscale.reshape(pair.shape[0] * n, d).contiguous()
     weights = (
         module.to_left.weight,
         module.to_left_gate.weight,
@@ -504,7 +571,7 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
             )
         else:
             apply = bidirectional_trimul
-        if not bidirectional:   # hidden 2 D in one direction: the contraction pairs all 2 D channels in it
+        if not bidirectional:  # hidden 2 D in one direction: the contraction pairs all 2 D channels in it
             apply = functools.partial(apply, direction=1 if module.outgoing else 2)
     elif d in (64, 256, 384, 512):
         if d == 64:
@@ -520,11 +587,11 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         from miniworld_engine.kernels.trimul_inproj.cuda.h100_single import (
             single_trimul,
         )
+
         apply = functools.partial(single_trimul, module.outgoing)
     return apply(
         pair,
-        *(w if w.dtype in (torch.bfloat16, torch.float32) else w.to(pair.dtype).contiguous()
-          for w in weights),
+        *(w if w.dtype in (torch.bfloat16, torch.float32) else w.to(pair.dtype).contiguous() for w in weights),
         module.ln_pair.weight,
         module.ln_pair.bias,
         module.ln_out.weight,
@@ -538,18 +605,18 @@ def _native_training_enabled():
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
         cuda_training_aux_enabled,
     )
+
     return cuda_training_aux_enabled()
 
 
 def _native_residual_bucket(module, pair):
     """Measured outgoing D384/L512 inference bucket (contract checked by serves)."""
-    return (pair.ndim == 4 and pair.shape[1] == 512 and pair.shape[-1] == 384
-            and module.d_hidden == 384 and getattr(module, "outgoing", False))
+    return (
+        pair.ndim == 4 and pair.shape[1] == 512 and pair.shape[-1] == 384 and module.d_hidden == 384 and getattr(module, "outgoing", False)
+    )
 
 
-def serves_inference(
-    module, pair: torch.Tensor, *, bidirectional: bool, dropscale=None
-) -> bool:
+def serves_inference(module, pair: torch.Tensor, *, bidirectional: bool, dropscale=None) -> bool:
     """The inference contract of one launch's chunk (``_plan``); any B is served by chunks."""
     return _serves_inference_one(module, _one_chunk(module, pair, True), bidirectional=bidirectional, dropscale=dropscale)
 
@@ -562,23 +629,18 @@ def _serves_inference_one(module, pair, *, bidirectional, dropscale=None):
         return True
     if not pair.is_cuda or pair.dtype != torch.bfloat16 or not pair.is_contiguous():
         return False
-    if (
-        pair.ndim != 4
-        or not _batch_ok(pair, inference=True)
-        or pair.shape[1] != pair.shape[2]
-        or pair.shape[1] <= 0
-    ):
+    if pair.ndim != 4 or not _batch_ok(pair, inference=True) or pair.shape[1] != pair.shape[2] or pair.shape[1] <= 0:
         return False
     if module.ln_pair.eps != module.ln_out.eps:
         return False
     if torch.cuda.get_device_capability(pair.device) != (9, 0):
         return False
-    if ((pair.shape[-1] in (64, 128) or (not bidirectional and _native_residual_bucket(module, pair)))
-            and (pair.shape[1] < MIN_INFERENCE_LENGTH
-                 or not _hidden_ok(module, pair) or module.ln_pair.eps != 1e-5
-                 or any(p.dtype != torch.float32 for p in (
-                     module.ln_pair.weight, module.ln_pair.bias,
-                     module.ln_out.weight, module.ln_out.bias)))):
+    if (pair.shape[-1] in (64, 128) or (not bidirectional and _native_residual_bucket(module, pair))) and (
+        pair.shape[1] < MIN_INFERENCE_LENGTH
+        or not _hidden_ok(module, pair)
+        or module.ln_pair.eps != 1e-5
+        or any(p.dtype != torch.float32 for p in (module.ln_pair.weight, module.ln_pair.bias, module.ln_out.weight, module.ln_out.bias))
+    ):
         return False
     if bidirectional and _wide_inference_ok(module, pair):
         return True
@@ -600,8 +662,9 @@ def update_inference(module, pair, mask, *, bidirectional):
     start = 0
     for size in _split(pair.shape[0], chunk):
         stop = start + size
-        _update_inference_one(module, pair[start:stop], None if mask is None else mask[start:stop], bidirectional=bidirectional,
-                              out=out[start:stop])
+        _update_inference_one(
+            module, pair[start:stop], None if mask is None else mask[start:stop], bidirectional=bidirectional, out=out[start:stop]
+        )
         start = stop
     return out
 
@@ -623,21 +686,35 @@ ROWPAD_FROM = {64: 1000, 128: 768}
 
 
 def _rowpad_small(module, pair, mask, bidirectional):
-    return (pair.ndim == 4 and (mask is None or (mask.numel() == pair.shape[0] * pair.shape[1] and mask.dtype == torch.bool))
-            and not bidirectional and (pair.shape[0] == 1 or pair.shape[1] % 16 == 0) and pair.shape[-1] in ROWPAD_FROM
-            and module.d_hidden == pair.shape[-1] and pair.shape[1] == pair.shape[2]
-            and ROWPAD_FROM[pair.shape[-1]] <= pair.shape[1] <= MAX_TRAINING_LENGTH
-            and pair.dtype == torch.bfloat16 and pair.is_contiguous() and module.ln_pair.eps == 1e-5 and module.ln_out.eps == 1e-5
-            and all(p.dtype == torch.float32 and p.is_contiguous() for p in (module.ln_pair.weight, module.ln_pair.bias,
-                                                                             module.ln_out.weight, module.ln_out.bias)))
+    return (
+        pair.ndim == 4
+        and (mask is None or (mask.numel() == pair.shape[0] * pair.shape[1] and mask.dtype == torch.bool))
+        and not bidirectional
+        and (pair.shape[0] == 1 or pair.shape[1] % 16 == 0)
+        and pair.shape[-1] in ROWPAD_FROM
+        and module.d_hidden == pair.shape[-1]
+        and pair.shape[1] == pair.shape[2]
+        and ROWPAD_FROM[pair.shape[-1]] <= pair.shape[1] <= MAX_TRAINING_LENGTH
+        and pair.dtype == torch.bfloat16
+        and pair.is_contiguous()
+        and module.ln_pair.eps == 1e-5
+        and module.ln_out.eps == 1e-5
+        and all(
+            p.dtype == torch.float32 and p.is_contiguous()
+            for p in (module.ln_pair.weight, module.ln_pair.bias, module.ln_out.weight, module.ln_out.bias)
+        )
+    )
 
 
 def _update_inference_body(module, pair, mask, bidirectional, out):
     if _rowpad_small(module, pair, mask, bidirectional):
-        return _b200style_update(module, pair, mask, None, False, out=out) if out is not None else _b200style_update(
-            module, pair, mask, None, False)
+        return (
+            _b200style_update(module, pair, mask, None, False, out=out)
+            if out is not None
+            else _b200style_update(module, pair, mask, None, False)
+        )
     if _b200style_serves(module, pair, inference=True):
-        if out is None:   # (the one-launch call keeps the five-argument form tests patch)
+        if out is None:  # (the one-launch call keeps the five-argument form tests patch)
             return _b200style_update(module, pair, mask, None, bidirectional)
         return _b200style_update(module, pair, mask, None, bidirectional, out=out)
     if _b200style_serves(module, pair, inference=True, padded=True):
@@ -649,10 +726,12 @@ def _update_inference_body(module, pair, mask, bidirectional, out):
         return _padded_inference(module, pair, mask, bidirectional)
     native_residual = not bidirectional and _native_residual_bucket(module, pair)
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as runtime
+
     native_aux = runtime.cuda_aux_enabled()
-    if (native_residual or native_aux) and mask is not None and (
-        mask.device != pair.device or mask.dtype != torch.bool
-        or tuple(mask.shape) != (bsz, n) or not mask.is_contiguous()
+    if (
+        (native_residual or native_aux)
+        and mask is not None
+        and (mask.device != pair.device or mask.dtype != torch.bool or tuple(mask.shape) != (bsz, n) or not mask.is_contiguous())
     ):
         raise ValueError("H100 native TriMul inference requires a contiguous boolean [B,L] mask")
     # K1 forms the pair mask m[i] & m[j] from the token mask itself: no [n, n] tensor per call (B samples: [B n], b-major).
@@ -671,10 +750,10 @@ def _update_inference_body(module, pair, mask, bidirectional, out):
     # Preserve native column-major parameters instead of copying them first.
     if pair.shape[-1] in (64, 128) or native_residual or native_aux:
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_weights
+
         matrices = cast_weights(weights)
     else:
-        matrices = [w.to(pair.dtype) if i < 4 else w.to(pair.dtype).contiguous()
-                    for i, w in enumerate(weights)]
+        matrices = [w.to(pair.dtype) if i < 4 else w.to(pair.dtype).contiguous() for i, w in enumerate(weights)]
     weights = [
         *matrices,
         module.ln_pair.weight.float().contiguous(),
@@ -686,6 +765,7 @@ def _update_inference_body(module, pair, mask, bidirectional, out):
         from miniworld_engine.kernels.trimul_inproj.cuda.h100_wide_inference import (
             wide_inference,
         )
+
         return wide_inference(pair, weights, token)
     if not bidirectional and _uni_wide_inference_ok(module, pair):
         from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_inference import (
@@ -694,16 +774,17 @@ def _update_inference_body(module, pair, mask, bidirectional, out):
 
         if native_aux:
             from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import pair_mask
+
             pm = pair_mask(token, n, pair.device)
         else:
-            pm = (pair.new_ones((n, n)) if mask is None
-                  else (mask.unsqueeze(-1) & mask.unsqueeze(-2)).float().contiguous())
+            pm = pair.new_ones((n, n)) if mask is None else (mask.unsqueeze(-1) & mask.unsqueeze(-2)).float().contiguous()
         return uni_wide_inference(pair, weights, pm, module.outgoing)
     direction = 0 if bidirectional else 1 if module.outgoing else 2
     if out is not None:
         from miniworld_engine.kernels.trimul_inproj.cuda.h100_inference import (
             inference_into,
         )
+
         inference_into(pair, weights, token, direction, module.ln_pair.eps, out)
         return out
     return inference(pair, weights, token, direction, module.ln_pair.eps)
@@ -742,9 +823,13 @@ def _wide_inference_ok(module, pair: torch.Tensor) -> bool:
 def serves_single(module, pair: torch.Tensor) -> bool:
     """Qualified single-direction native training contract; inference is separate. B samples: one launch's chunk (``_plan``)."""
     one = _one_chunk(module, pair, False)
-    return (one.shape[-1] in SINGLE_TRAINING_WIDTHS
-            and (one.shape[-1] != 512 or _native_buckets_enabled(one)
-                 or _selected_native_training(module, one) or _b200style_serves(module, one)) and _serves_one(module, one))
+    return (
+        one.shape[-1] in SINGLE_TRAINING_WIDTHS
+        and (
+            one.shape[-1] != 512 or _native_buckets_enabled(one) or _selected_native_training(module, one) or _b200style_serves(module, one)
+        )
+        and _serves_one(module, one)
+    )
 
 
 def _uni_wide_inference_ok(module, pair: torch.Tensor) -> bool:

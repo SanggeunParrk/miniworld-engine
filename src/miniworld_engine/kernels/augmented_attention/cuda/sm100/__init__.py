@@ -84,9 +84,7 @@ def _sm100_kernel(
     from . import driver
 
     with torch.cuda.device(device_index):
-        return driver.Kernel(
-            cubin(stem, defs, src_dir=src_dir), func, smem, cluster=cluster, pdl=pdl
-        )
+        return driver.Kernel(cubin(stem, defs, src_dir=src_dir), func, smem, cluster=cluster, pdl=pdl)
 
 
 # --------------------------------------------------------------------------------------------------- gate
@@ -130,11 +128,7 @@ def available(
         return False
     from torch._subclasses.fake_tensor import FakeTensor
 
-    if (
-        torch.compiler.is_compiling()
-        or isinstance(q, FakeTensor)
-        or isinstance(bias, FakeTensor)
-    ):
+    if torch.compiler.is_compiling() or isinstance(q, FakeTensor) or isinstance(bias, FakeTensor):
         return False
     try:
         for stem, func in (
@@ -158,9 +152,7 @@ def _tm(t, dims, stride_bytes, box, **kw):
 
 def _grid(items: int, device_index: int) -> tuple[int, int, int]:
     return (
-        min(
-            num_sms(device_index), items
-        ),
+        min(num_sms(device_index), items),
         1,
         1,
     )
@@ -168,11 +160,7 @@ def _grid(items: int, device_index: int) -> tuple[int, int, int]:
 
 def _rs(t: torch.Tensor) -> int:
     """Row stride in bytes: q / k / v may be column views of a wider projection output (rows 16-byte aligned)."""
-    assert (
-        t.stride(1) == 1
-        and (t.stride(0) * t.element_size()) % 16 == 0
-        and t.data_ptr() % 16 == 0
-    )
+    assert t.stride(1) == 1 and (t.stride(0) * t.element_size()) % 16 == 0 and t.data_ptr() % 16 == 0
     return t.stride(0) * t.element_size()
 
 
@@ -236,9 +224,7 @@ def forward_tf32(q, k, v, bias_hll, A, L, heads: int = H, dh: int = D):
         _tm(O, dims, rs, [32, 128], swizzle=128, **f32),
         _tm(O, dims, rs, [16, 128], swizzle=64, **f32),
     )
-    _sm100_kernel(
-        "attn_fwd_tf32", "augattn_fwd_tf32_sm100", dev, defs=_tdit_defs(heads, dh)
-    )(
+    _sm100_kernel("attn_fwd_tf32", "augattn_fwd_tf32_sm100", dev, defs=_tdit_defs(heads, dh))(
         _grid((A // 2) * heads * (L // 128), dev),
         (384, 1, 1),
         *maps,
@@ -253,13 +239,7 @@ def _dqb_split(items: int, A: int, dev: int) -> int:
     """attn_dqb_tf32's sample groups: the largest NS dividing A with items x NS <= the SM count (1 when the items alone fill
     the GPU). L = 128 at 16 heads: 32 items -> NS = 4 at A = 48."""
     nsm = num_sms(dev)
-    return max(
-        [
-            s
-            for s in (1, 2, 3, 4, 6, 8, 12, 16)
-            if A % s == 0 and (s == 1 or items * s <= nsm)
-        ]
-    )
+    return max([s for s in (1, 2, 3, 4, 6, 8, 12, 16) if A % s == 0 and (s == 1 or items * s <= nsm)])
 
 
 def backward_tf32(
@@ -285,11 +265,7 @@ def backward_tf32(
     gradient), else fresh buffers."""
     dev = _index(q)
     W = heads * dh
-    out = (
-        lambda t: torch.empty(A * L, W, device=q.device, dtype=torch.float32)
-        if t is None
-        else t
-    )  # noqa: E731
+    out = lambda t: torch.empty(A * L, W, device=q.device, dtype=torch.float32) if t is None else t  # noqa: E731
     DQ, DK, DV = out(dq), out(dk), out(dv)
     for t in (DQ, DK, DV):
         assert t.dtype == torch.float32 and tuple(t.shape) == (A * L, W)
@@ -297,9 +273,7 @@ def backward_tf32(
     items = heads * (L // 128) * (L // 64)
     ns = _dqb_split(items, A, dev)
     # sample groups add their dbias into it (attn_dqb_tf32 -DNS > 1): zeroed then, else written once
-    DB = (torch.zeros if ns > 1 else torch.empty)(
-        heads, L, L, device=q.device, dtype=torch.float32
-    )
+    DB = (torch.zeros if ns > 1 else torch.empty)(heads, L, L, device=q.device, dtype=torch.float32)
     f32 = dict(dtype="f32")
     dims = [W, A * L]
     a = lambda t, rows: _tm(t, dims, _rs(t), [32, rows], swizzle=128, **f32)  # noqa: E731  K-major, columns 0-31
@@ -443,9 +417,7 @@ def bias_transpose(bias):
     """[H, L, L] bf16 -> [H, L(key), L(query)] (attn_dkv reads its key rows contiguously; ``glue.cu``)."""
     Hh, L, _ = bias.shape
     out = torch.empty_like(bias)
-    _sm100_kernel("glue", "bias_transpose_bf16", _index(bias), smem=0)(
-        (L // 32, L // 32, Hh), (32, 8, 1), bias, out, int(L)
-    )
+    _sm100_kernel("glue", "bias_transpose_bf16", _index(bias), smem=0)((L // 32, L // 32, Hh), (32, 8, 1), bias, out, int(L))
     return out
 
 
@@ -454,14 +426,8 @@ class _AttentionBf16Sm100(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, bias, bias_head_major):  # noqa: D102
         A, _, L, _, _ = q.shape
-        q2, k2, v2 = (
-            t.reshape(A * L, H * D).to(torch.bfloat16).contiguous() for t in (q, k, v)
-        )
-        bb = (
-            (bias.reshape(H, L, L) if bias_head_major else bias[0].permute(2, 0, 1))
-            .to(torch.bfloat16)
-            .contiguous()
-        )
+        q2, k2, v2 = (t.reshape(A * L, H * D).to(torch.bfloat16).contiguous() for t in (q, k, v))
+        bb = (bias.reshape(H, L, L) if bias_head_major else bias[0].permute(2, 0, 1)).to(torch.bfloat16).contiguous()
         O, LSE = forward(q2, k2, v2, bb, A, L)
         if torch.is_grad_enabled() or any(ctx.needs_input_grad):
             ctx.save_for_backward(q2, k2, v2, bb, O, LSE)
@@ -536,27 +502,19 @@ class GatedInferenceCore:
         Hh = self.heads
         bv = bias[block * Hh : (block + 1) * Hh]
         grid = (min(self.nsm, ((S + 1) // 2) * Hh * -(-L // 128)), 1, 1)
-        bias_map = lambda box, **kw: _tm(
-            bv, [L, L, Hh], [L * es, L * L * es], [*box, 1], **kw
-        )  # noqa: E731
+        bias_map = lambda box, **kw: _tm(bv, [L, L, Hh], [L * es, L * L * es], [*box, 1], **kw)  # noqa: E731
         if self.fp32:
             Dm = W // 3
             q, k, g = (qkvg[:, i * Dm : (i + 1) * Dm] for i in range(3))
             f32 = dict(dtype="f32")
-            a = lambda t, rows: _tm(
-                t, [Dm, L, S], [rs, L * rs], [32, rows, 1], swizzle=128, **f32
-            )  # noqa: E731
-            b = lambda t, rows: _tm(
-                t, [Dm, L, S], [rs, L * rs], [16, rows, 1], swizzle=64, **f32
-            )  # noqa: E731
+            a = lambda t, rows: _tm(t, [Dm, L, S], [rs, L * rs], [32, rows, 1], swizzle=128, **f32)  # noqa: E731
+            b = lambda t, rows: _tm(t, [Dm, L, S], [rs, L * rs], [16, rows, 1], swizzle=64, **f32)  # noqa: E731
             maps = (
                 a(q, 128),
                 b(q, 128),
                 a(k, 32),
                 b(k, 32),
-                _tm(
-                    vt, [L, S, Dm], [L * 4, M * 4], [32, 1, self.dh], swizzle=128, **f32
-                ),  # v^T: key, sample, channel
+                _tm(vt, [L, S, Dm], [L * 4, M * 4], [32, 1, self.dh], swizzle=128, **f32),  # v^T: key, sample, channel
                 bias_map([32, 128], swizzle=128, **f32),
                 a(g, 128),
                 b(g, 128),
@@ -579,9 +537,7 @@ class GatedInferenceCore:
 
     def __call__(self, qkvg, bias, block, S, vt=None):
         """``vt`` (fp32 only): v^T [D, S L]; ``qkvg`` is then q | k | g."""
-        assert self.fp32 == (vt is not None), (
-            "the TF32 core takes q | k | g and v^T; the bf16 core q | k | v | g"
-        )
+        assert self.fp32 == (vt is not None), "the TF32 core takes q | k | g and v^T; the bf16 core q | k | v | g"
         L = qkvg.shape[0] // S
         key = (
             qkvg.data_ptr(),
@@ -673,10 +629,7 @@ class ApbInferenceCore:
 
     def __call__(self, qkvg, bias):
         L = qkvg.shape[0]
-        assert (
-            qkvg.shape[1] == 4 * apb_width(self.heads, self.d)
-            and bias.shape[0] == self.heads
-        )
+        assert qkvg.shape[1] == 4 * apb_width(self.heads, self.d) and bias.shape[0] == self.heads
         _apb_bound(
             (
                 "inf",
@@ -710,9 +663,9 @@ def apb_forward(q, k, v, bias, L, heads: int = 8, d: int = 384):
             _tmn(O, [W, L], W * 4, [16, 128], swizzle=64, dtype="f32"),
         )
         grid = _grid(((L // 128 + 1) // 2) * heads, dev)
-        return _sm100_kernel(
-            "attn_fwd2", "augattn_fwd2_sm100", dev, defs=_apb_defs(heads, True, d)
-        ).bind(grid, (384, 1, 1), *maps, O, LSE, int(L), 1)
+        return _sm100_kernel("attn_fwd2", "augattn_fwd2_sm100", dev, defs=_apb_defs(heads, True, d)).bind(
+            grid, (384, 1, 1), *maps, O, LSE, int(L), 1
+        )
 
     key = (
         "fwd",
@@ -764,9 +717,7 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
             _tmn(DQ, dq_dims, W * 4, [16, 128], swizzle=64, **f32),
         )
         defs = _apb_defs(heads, False, d)
-        tr = _sm100_kernel("glue", "bias_transpose_bf16", dev, smem=0).bind(
-            (L // 32, L // 32, heads), (32, 8, 1), bias, bias_t, int(L)
-        )
+        tr = _sm100_kernel("glue", "bias_transpose_bf16", dev, smem=0).bind((L // 32, L // 32, heads), (32, 8, 1), bias, bias_t, int(L))
         dkv = _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev, defs=defs).bind(
             _grid(heads * (L // 128), dev),
             (384, 1, 1),
@@ -779,9 +730,7 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
             int(L),
             1,
         )  # no dQ zero fill
-        dqb = _sm100_kernel(
-            "attn_dqb", "augattn_dqb_sm100", dev, defs=defs + ("DQPART=1",)
-        ).bind(
+        dqb = _sm100_kernel("attn_dqb", "augattn_dqb_sm100", dev, defs=defs + ("DQPART=1",)).bind(
             _grid(heads * (L // 128) * (L // 128), dev),
             (384, 1, 1),
             *dqb_maps,
@@ -817,9 +766,7 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
     return DQ, DK, DV, DB
 
 
-def inference_core_supported(
-    dtype: torch.dtype, L: int, d: int, h: int, device_index: int
-) -> bool:
+def inference_core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
     """bf16, or fp32 (TF32 MMA), at a head layout of TDIT_HEADS (d = heads x head dim); L a multiple of 8 (the fused step pads
     other lengths to one), sm_100."""
     if d % h:

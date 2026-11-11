@@ -12,6 +12,7 @@ the bins are computed in registers, both LayerNorms and the per-sample adaptive 
   ``_adaln_dw`` forms the table gradient as ``onehot^T @ dx`` on the tensor cores (bf16 one-hot, fp32 accumulation, a program owns one channel slice of a FIXED
   contiguous slice of the pairs, tiles in order); ``_adaln_bwd_reduce`` adds the partials in fixed order.
 """
+
 from __future__ import annotations
 
 import torch
@@ -22,9 +23,9 @@ from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._shape_key import token_key
 
 C = 256
-NBLK = 192                   # pair slices of the table-gradient kernel (fixed)
-RB = 8                       # rows of pairs per program of the backward row kernel (one partial per program)
-DX_CHUNK_BYTES = 1 << 29     # scratch for d(table sum): at most this many bytes of pairs at a time
+NBLK = 192  # pair slices of the table-gradient kernel (fixed)
+RB = 8  # rows of pairs per program of the backward row kernel (one partial per program)
+DX_CHUNK_BYTES = 1 << 29  # scratch for d(table sum): at most this many bytes of pairs at a time
 _HAS_SC = 1 << 24
 
 
@@ -69,12 +70,33 @@ def _forward_tile(TBL, w, live, lw, lb, c, nS: tl.constexpr, nX: tl.constexpr, e
     return yh1, r1, yc * r2[:, None], r2
 
 
-@configured('pair_embed_adaln_fwd_triton',
-            key=["shape_key", "HAS_SC"],
-            default=dict(BLOCK_J=16, num_warps=4, num_stages=1))
+@configured("pair_embed_adaln_fwd_triton", key=["shape_key", "HAS_SC"], default=dict(BLOCK_J=16, num_warps=4, num_stages=1))
 @triton.jit
-def _adaln_fwd(TBL, LNW, LNB, GAMMA, BETA, XT, SC, IDX, MASK, XLIM, CLIM, OUT, BINS, n, e1, e2,
-               HAS_SC: tl.constexpr, nS: tl.constexpr, nX: tl.constexpr, NXL: tl.constexpr, NCL: tl.constexpr, BLOCK_J: tl.constexpr, shape_key):
+def _adaln_fwd(
+    TBL,
+    LNW,
+    LNB,
+    GAMMA,
+    BETA,
+    XT,
+    SC,
+    IDX,
+    MASK,
+    XLIM,
+    CLIM,
+    OUT,
+    BINS,
+    n,
+    e1,
+    e2,
+    HAS_SC: tl.constexpr,
+    nS: tl.constexpr,
+    nX: tl.constexpr,
+    NXL: tl.constexpr,
+    NCL: tl.constexpr,
+    BLOCK_J: tl.constexpr,
+    shape_key,
+):
     jb = tl.program_id(0)
     i = tl.program_id(1).to(tl.int64)
     b = tl.program_id(2).to(tl.int64)
@@ -97,12 +119,28 @@ def _adaln_fwd(TBL, LNW, LNB, GAMMA, BETA, XT, SC, IDX, MASK, XLIM, CLIM, OUT, B
     tl.store(OUT + (ri * n + j)[:, None] * 256 + c[None, :], tl.where(live[:, None], o, 0.0).to(tl.bfloat16), mask=jin[:, None])
 
 
-@configured('pair_embed_adaln_bwd_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_J=16, num_warps=4, num_stages=1))
+@configured("pair_embed_adaln_bwd_triton", key=["shape_key"], default=dict(BLOCK_J=16, num_warps=4, num_stages=1))
 @triton.jit
-def _adaln_bwd(TBL, LNW, LNB, GAMMA, BINS, DOUT, DX, PART, b0, n, nrb, e1, e2,
-               nS: tl.constexpr, nX: tl.constexpr, RB: tl.constexpr, BLOCK_J: tl.constexpr, shape_key):
+def _adaln_bwd(
+    TBL,
+    LNW,
+    LNB,
+    GAMMA,
+    BINS,
+    DOUT,
+    DX,
+    PART,
+    b0,
+    n,
+    nrb,
+    e1,
+    e2,
+    nS: tl.constexpr,
+    nX: tl.constexpr,
+    RB: tl.constexpr,
+    BLOCK_J: tl.constexpr,
+    shape_key,
+):
     """d(table sum) per pair (bf16) and the partial [dgamma | dbeta | dln_w | dln_b] of the RB rows (rb*RB ..) of sample b0 + program_id(1)."""
     rb = tl.program_id(0)
     bl = tl.program_id(1).to(tl.int64)
@@ -137,7 +175,11 @@ def _adaln_bwd(TBL, LNW, LNB, GAMMA, BINS, DOUT, DX, PART, b0, n, nrb, e1, e2,
             p1 = tl.sum(d1, axis=1) / 256
             a1 = tl.sum(d1 * yh1, axis=1) / 256
             dxv = r1[:, None] * (d1 - p1[:, None] - yh1 * a1[:, None])
-            tl.store(DX + ((bl * n + i) * n + j)[:, None] * 256 + c[None, :], tl.where(live[:, None], dxv, 0.0).to(tl.bfloat16), mask=jin[:, None])
+            tl.store(
+                DX + ((bl * n + i) * n + j)[:, None] * 256 + c[None, :],
+                tl.where(live[:, None], dxv, 0.0).to(tl.bfloat16),
+                mask=jin[:, None],
+            )
     base = PART + (b * nrb + rb) * 1024
     tl.store(base + c, dg)
     tl.store(base + 256 + c, dbt)
@@ -145,12 +187,23 @@ def _adaln_bwd(TBL, LNW, LNB, GAMMA, BINS, DOUT, DX, PART, b0, n, nrb, e1, e2,
     tl.store(base + 768 + c, dl)
 
 
-@configured('pair_embed_adaln_dw_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_P=64, num_warps=4, num_stages=2))
+@configured("pair_embed_adaln_dw_triton", key=["shape_key"], default=dict(BLOCK_P=64, num_warps=4, num_stages=2))
 @triton.jit
-def _adaln_dw(DX, BINS, PART, P, per, nS: tl.constexpr, nX: tl.constexpr, nC: tl.constexpr, RS: tl.constexpr, RX: tl.constexpr, RC: tl.constexpr,
-              BLOCK_P: tl.constexpr, shape_key):
+def _adaln_dw(
+    DX,
+    BINS,
+    PART,
+    P,
+    per,
+    nS: tl.constexpr,
+    nX: tl.constexpr,
+    nC: tl.constexpr,
+    RS: tl.constexpr,
+    RX: tl.constexpr,
+    RC: tl.constexpr,
+    BLOCK_P: tl.constexpr,
+    shape_key,
+):
     """PART[t, row, channels of slice q] = sum over the pairs of slice t of onehot(row) * dx[pair, channels]; pair tiles in order."""
     q = tl.program_id(0)
     t = tl.program_id(1).to(tl.int64)
@@ -179,9 +232,7 @@ def _adaln_dw(DX, BINS, PART, P, per, nS: tl.constexpr, nX: tl.constexpr, nC: tl
     tl.store(base + (nS + nX + rc)[:, None] * 256 + cc[None, :], acc_c, mask=(rc < nC)[:, None])
 
 
-@configured('pair_embed_adaln_bwd_reduce_triton',
-            key=["shape_key"],
-            default=dict(BLOCK=256, num_warps=4, num_stages=1))
+@configured("pair_embed_adaln_bwd_reduce_triton", key=["shape_key"], default=dict(BLOCK=256, num_warps=4, num_stages=1))
 @triton.jit
 def _adaln_bwd_reduce(PART, OUT, total, count, stride, off, BLOCK: tl.constexpr, shape_key):
     """OUT[g, k] = sum over r < count of PART[(g * count + r) * stride + off + k], in the order r = 0, 1, ..."""
@@ -206,8 +257,30 @@ def portable_forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim
     out = torch.empty(B, n, n, C, device=tbl.device, dtype=torch.bfloat16)
     bins = torch.empty(B, n, n, device=tbl.device, dtype=torch.int32)
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_J"]), n, B)
-    _adaln_fwd[grid](tbl, lnw, lnb, gamma, beta, xt, sc, idx, mask, xlim, clim, out, bins, n, float(eps1), float(eps2),
-                     HAS_SC=bool(has_sc), nS=int(nS), nX=int(nX), NXL=int(xlim.numel()), NCL=int(clim.numel()), shape_key=token_key(n))
+    _adaln_fwd[grid](
+        tbl,
+        lnw,
+        lnb,
+        gamma,
+        beta,
+        xt,
+        sc,
+        idx,
+        mask,
+        xlim,
+        clim,
+        out,
+        bins,
+        n,
+        float(eps1),
+        float(eps2),
+        HAS_SC=bool(has_sc),
+        nS=int(nS),
+        nX=int(nX),
+        NXL=int(xlim.numel()),
+        NCL=int(clim.numel()),
+        shape_key=token_key(n),
+    )
     return out, bins
 
 
@@ -229,11 +302,24 @@ def portable_backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2):
     for ch in range(nchunk):
         b0 = ch * chunk_b
         Bc = min(chunk_b, B - b0)
-        _adaln_bwd[(nrb, Bc)](tbl, lnw, lnb, gamma, bins, dout, dx, part, b0, n, nrb, float(eps1), float(eps2),
-                              nS=nS, nX=nX, RB=RB, shape_key=key)
+        _adaln_bwd[(nrb, Bc)](
+            tbl, lnw, lnb, gamma, bins, dout, dx, part, b0, n, nrb, float(eps1), float(eps2), nS=nS, nX=nX, RB=RB, shape_key=key
+        )
         P = Bc * n * n
-        _adaln_dw[(C // 32, NBLK)](dx, bins[b0:b0 + Bc], tpart[ch * NBLK:(ch + 1) * NBLK], P, triton.cdiv(P, NBLK), nS=nS, nX=nX, nC=nC,
-                                   RS=max(16, pow2(nS)), RX=max(16, pow2(nX)), RC=max(16, pow2(nC)), shape_key=key)
+        _adaln_dw[(C // 32, NBLK)](
+            dx,
+            bins[b0 : b0 + Bc],
+            tpart[ch * NBLK : (ch + 1) * NBLK],
+            P,
+            triton.cdiv(P, NBLK),
+            nS=nS,
+            nX=nX,
+            nC=nC,
+            RS=max(16, pow2(nS)),
+            RX=max(16, pow2(nX)),
+            RC=max(16, pow2(nC)),
+            shape_key=key,
+        )
     dtbl = _reduce(tpart, 1, nchunk * NBLK, NT * C, NT * C, 0, key).view(NT, C)
     dgb = _reduce(part, B, nrb, 512, 1024, 0, key)
     dl = _reduce(part, 1, B * nrb, 512, 1024, 512, key)

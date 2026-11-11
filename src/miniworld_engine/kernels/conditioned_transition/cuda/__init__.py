@@ -16,9 +16,7 @@ import torch
 from torch.multiprocessing.reductions import StorageWeakRef
 
 _dir = Path(__file__).parent
-STAT_W = (
-    128  # kept for the runner's buffer layout (the Triton module's statistics width)
-)
+STAT_W = 128  # kept for the runner's buffer layout (the Triton module's statistics width)
 
 
 def _ext():
@@ -55,12 +53,8 @@ def available() -> bool:
 
 
 def token_pack(weights, heads, qk, qs, dtype=torch.bfloat16):
-    if dtype is torch.float32 or torch.cuda.get_device_capability(
-        weights[0].device
-    ) == (9, 0):
-        return _ext().token_pack_vector(
-            weights, int(heads), bool(qk), float(qs), dtype is torch.float32
-        )
+    if dtype is torch.float32 or torch.cuda.get_device_capability(weights[0].device) == (9, 0):
+        return _ext().token_pack_vector(weights, int(heads), bool(qk), float(qs), dtype is torch.float32)
     return _ext().token_pack(weights, int(heads), bool(qk), float(qs))
 
 
@@ -97,9 +91,11 @@ def _swiglu_gemm_ok(xa, wab) -> bool:
 def _swiglu_ht(M: int, H: int, nsm: int) -> int:
     """Hidden units per tile of the fp32 fused expand: 128 (128 x 256 tiles) or 64 (twice the tiles): the one whose last wave of the
     persistent grid is fuller (ties: 128, the larger tile)."""
+
     def eff(ht):
         tiles = (M // 128) * (H // ht)
         return tiles / (-(-tiles // nsm) * nsm)
+
     # Measured: HT = 64 raises the last wave's fill (M = 1920: 68 -> 91 %; M = 3200: 76 -> 91 %) but loses at both (24 x 32 L384
     # 1.07 -> 1.04, L640 1.00 -> 0.96 of Anthropic's block): the narrower tile's MMA / TMA ratio costs more than the wave. Kept, not chosen.
     return 128
@@ -150,8 +146,8 @@ def _pair_bias_wide(z2d, wf, mask, L):
 #: A bias-free query (RoseTTAFold3) is a zero to_query.bias leaf, the identity AdaLN a ones ln_cond / to_scale.bias leaf, no gating
 #: query a zero to_gate leaf: the caller's leaf list (``kernels/integrations/token_dit.leaves``).
 VARIANT_DEFAULT = (0.0, 1.0, 1e-5, 1.0, 0.0, 0.0, 1e-5, 0.0)
-_STATIC_PACKS: dict = {}   # the weight packs of the blocks with model options (``token_inference``)
-_NO_GATE = 1.0e4   # gate logits of a block without a gating query: sigmoid(1e4) == 1.0 in fp32
+_STATIC_PACKS: dict = {}  # the weight packs of the blocks with model options (``token_inference``)
+_NO_GATE = 1.0e4  # gate logits of a block without a gating query: sigmoid(1e4) == 1.0 in fp32
 
 
 def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=None, variant=None):
@@ -175,17 +171,17 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     from ...augmented_attention.cuda import apb
 
     A, B, L, D = single.shape
-    DC = cond.shape[-1]   # the conditioning width: 384, or 768 (the pack's cond tables are built for the weights' width)
+    DC = cond.shape[-1]  # the conditioning width: 384, or 768 (the pack's cond tables are built for the weights' width)
     if (
         torch.is_grad_enabled()
         or single.dtype not in (torch.bfloat16, torch.float32)
         or pair.dtype != single.dtype
-        or (B != 1 and single.dtype is not torch.bfloat16)   # B trunk_seeds: bf16 only (the TF32 core keeps one shared bias)
+        or (B != 1 and single.dtype is not torch.bfloat16)  # B trunk_seeds: bf16 only (the TF32 core keeps one shared bias)
         or (heads, D) not in ((16, 768), (24, 768), (12, 768), (16, 1024))
         or L % 128
-        or cond.shape[-1] not in (384, 768)   # 768: ESMFold2's token DiT, conditioned at its own width
+        or cond.shape[-1] not in (384, 768)  # 768: ESMFold2's token DiT, conditioned at its own width
         or tuple(pair.shape[:3]) != (B, L, L)
-        or pair.shape[3] not in (128, 256, 512)   # 256: Protenix-v2's diffusion pair; 512: IntelliFold2's
+        or pair.shape[3] not in (128, 256, 512)  # 256: Protenix-v2's diffusion pair; 512: IntelliFold2's
         or not pair.is_contiguous()
         or torch.cuda.get_device_capability(single.device) != (9, 0)
     ):
@@ -200,7 +196,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     parallel, sig, ada_eps, gated, up, kq_ln, kq_eps = bool(v[0]), bool(v[1]), float(v[2]), bool(v[3]), bool(v[4]), bool(v[5]), float(v[6])
     qk_rna = fp32 and bool(v[7])
     plain = v == VARIANT_DEFAULT
-    pack_qk = qk or kq_ln            # the pack leaves q unscaled when a norm of q follows (the norm's weight carries the scale)
+    pack_qk = qk or kq_ln  # the pack leaves q unscaled when a norm of q follows (the norm's weight carries the scale)
     nbase = 25 if pack_qk else 23
     base, tail = weights[:nbase], weights[nbase:]
     asynchronous = _CANDIDATE_INFER_ASYNC if plain else 0
@@ -234,11 +230,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
                 None,
                 None,
             )
-        idx = (
-            single.device.index
-            if single.device.index is not None
-            else torch.cuda.current_device()
-        )
+        idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
         if idx not in _TOKEN_STREAMS:
             _TOKEN_STREAMS[idx] = torch.cuda.Stream(device=single.device)
         stream = _TOKEN_STREAMS[idx]
@@ -280,12 +272,13 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
             if not gated and not fp32:
                 # bf16, no gating query: the gate rows of the q|k|v|g pack are zero, their bias +1e4 (sigmoid = 1): the one GEMM writes
                 # the gate columns (no fill per call)
-                hit[0][6][3 * D:] = _NO_GATE
+                hit[0][6][3 * D :] = _NO_GATE
             _STATIC_PACKS[key] = hit
         packed, (_, vpack), cond_ready, matrix_ready, late_pack = hit
     w1, b1, w2, b2, wf, wqkvg, bqkvg, wo, wab_fp32, ws, nq, nk, wab = packed
     # B trunk_seeds of one input share the key mask (the caller passes it expanded over B, stride 0): its first row serves them all
     mask = None if mask is None else mask.reshape(-1, L)[0]
+
     # The augmented-attention module fills fully masked rows with a finite
     # negative value, so its reference softmax is uniform on that edge.
     # AttentionPairBias has a separate zero-probability reference contract.
@@ -312,7 +305,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
                 zh = single.new_empty((L * L, dp))
                 _ext().layernorm128_rows(pair.view(L * L, dp), zh, 1e-5, True)
                 bias = torch.mm(wf, zh.t()).view(heads, L, L)
-                if mask is not None:   # the masked keys in key_perm order
+                if mask is not None:  # the masked keys in key_perm order
                     bias.masked_fill_(~mask[key_perm(L, single.device)], -1e30)
             if extra is not None:
                 # the TF32 core reads the keys in key_perm order: the extra term is laid out the same way (masked keys stay at -1e30)
@@ -358,7 +351,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         alive=lambda e: not e[1].expired(),
     )[0]
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
-    c = cond[0].reshape(-1, DC) if shared else cond.reshape(-1, DC)   # shared: the [B L] table of the trunk_seeds (rows are [A][B][L]: row % (B L))
+    c = (
+        cond[0].reshape(-1, DC) if shared else cond.reshape(-1, DC)
+    )  # shared: the [B L] table of the trunk_seeds (rows are [A][B][L]: row % (B L))
     P = c.shape[0]
     cn = single.new_empty((P, DC))
     cc = torch.empty_like(cn)
@@ -383,34 +378,29 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     if parallel:
         # both parts read the block input: the transition's AdaLN comes out of the same LN pass (TF32-rounded for the fused expand)
         xt = torch.empty_like(xa)
-        adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, ada_eps, sig, second=(g1[:, 2], g1[:, 3], xt),
-                      rnd2=fused_expand)
+        adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, ada_eps, sig, second=(g1[:, 2], g1[:, 3], xt), rnd2=fused_expand)
     else:
         xt = xa
         adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, ada_eps, sig)
     if matrix_ready is not None:
         torch.cuda.current_stream(single.device).wait_event(matrix_ready)
-    if gated or not fp32:   # bf16 without a gating query: the pack's gate bias is +1e4 (above)
-        qkvg = (
-            torch.addmm(bqkvg[: 3 * D], xa, wqkvg[: 3 * D].t())
-            if fp32
-            else torch.addmm(bqkvg, xa, wqkvg.t())
-        )
+    if gated or not fp32:  # bf16 without a gating query: the pack's gate bias is +1e4 (above)
+        qkvg = torch.addmm(bqkvg[: 3 * D], xa, wqkvg[: 3 * D].t()) if fp32 else torch.addmm(bqkvg, xa, wqkvg.t())
     else:
         # fp32, no gating query: the core's gate columns hold +1e4 (sigmoid = 1); the TF32 GEMM writes the q | k columns only
         qkvg = single.new_empty((M, 3 * D))
-        qkvg[:, 2 * D:].fill_(_NO_GATE)
+        qkvg[:, 2 * D :].fill_(_NO_GATE)
         torch.addmm(bqkvg[: 2 * D], xa, wqkvg[: 2 * D].t(), out=qkvg[:, : 2 * D])
     if qk:
         qknorm_rows(qkvg, nq, nk, eq, ek, D)
     elif kq_ln:
-        qk_ln_rows(qkvg, *vpack["kq"], kq_eps, D, rnd=qk_rna)   # q / k rounded on the way (qk_rna)
+        qk_ln_rows(qkvg, *vpack["kq"], kq_eps, D, rnd=qk_rna)  # q / k rounded on the way (qk_rna)
     elif qk_rna:
         rna_rows(qkvg, 2 * D)
     if fp32:
         vt = torch.mm(wqkvg[3 * D :], xa.t())
         if qk_rna:
-            rna_rows(vt, M)   # v^T rounded as q / k (the core truncates)
+            rna_rows(vt, M)  # v^T rounded as q / k (the core truncates)
         attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D, heads, D // heads)
     else:
         attention.gated_inference(qkvg, bias, 0, A * B, heads, D // heads, B)
@@ -419,7 +409,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         resgate_adaln_rows(x, ya, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, ada_eps, tf32_round=fused_expand, sig=sig)
     h = single.new_empty((M, ws.shape[1]))
     if up:
-        ab = torch.mm(xt, vpack["wab3"].t())   # [M, 3 n D] a | b | u
+        ab = torch.mm(xt, vpack["wab3"].t())  # [M, 3 n D] a | b | u
         swiglu_rows(ab, h, up=True)
     elif fused_expand:
         # expand + SwiGLU as one TF32 wgmma GEMM: xt is TF32-rounded by its row kernel and the weights once per pack, so the
@@ -549,7 +539,9 @@ def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None, perm=False):
         m0 = None if mask is None else mask.reshape(-1).to(torch.bool).contiguous()
         o2 = out.view(nb, -1)
         for b in range(nb // 16):
-            rows32.pair_bias_tok_cuda(z2d, wf[16 * b : 16 * b + 16], o2[16 * b : 16 * b + 16], m0, int(L), float(eps), bool(perm), float("-inf"))
+            rows32.pair_bias_tok_cuda(
+                z2d, wf[16 * b : 16 * b + 16], o2[16 * b : 16 * b + 16], m0, int(L), float(eps), bool(perm), float("-inf")
+            )
         return
     m = None if mask is None else mask.reshape(-1).to(torch.bool)
     if m is not None and perm:
@@ -592,7 +584,7 @@ def prebuild(target, rows):
     (``integrations.token_dit_train._native_rpb``) for the layout (d_single, n_head, d_cond, d_pair, n) of every token-DiT row
     that trains, when the kernels support it; rpb 8 is the default the pair-bias callers take. The 5-sample uniform-mask
     variant (``empty_uniform``) follows the sample count of a row, which ``rows`` does not carry: both are planned."""
-    if target.arch == "sm80":   # A100: the token DiT transition of integrations/conditioned_transition_sm80 (its AdaLN rows + tail)
+    if target.arch == "sm80":  # A100: the token DiT transition of integrations/conditioned_transition_sm80 (its AdaLN rows + tail)
         yield from _prebuild_sm80(rows)
         return
     if target.arch != "sm90":
@@ -620,13 +612,20 @@ def prebuild(target, rows):
     layouts = set()
     for r in rows:
         dims = _kv(r["dims"])
-        if r["mode"] != "train" or not any(k.startswith(_TOKEN_ROWS_KERNELS) for k in r["kernels"]) \
-                or not {"d_single", "n_head", "d_cond", "d_pair"} <= dims.keys():
+        if (
+            r["mode"] != "train"
+            or not any(k.startswith(_TOKEN_ROWS_KERNELS) for k in r["kernels"])
+            or not {"d_single", "n_head", "d_cond", "d_pair"} <= dims.keys()
+        ):
             continue
         d, h = int(dims["d_single"]), int(dims["n_head"])
         dc, dp, n = int(dims["d_cond"]), int(dims["d_pair"]), int(dims.get("n", 2))
-        if (d, d // h) in ((768, 48), (768, 32), (768, 64), (1024, 64)) and dc in (128, 256, 384, 768) and n in (2, 4) \
-                and dp in (128, 256, 512):
+        if (
+            (d, d // h) in ((768, 48), (768, 32), (768, 64), (1024, 64))
+            and dc in (128, 256, 384, 768)
+            and n in (2, 4)
+            and dp in (128, 256, 512)
+        ):
             layouts.add((d, d // h, dc, n, dp))
     for (d, hd, dc, n, dp), empty in itertools.product(sorted(layouts), (False, True)):
         yield functools.partial(train.rows_ext, d, hd, 2, empty_uniform=empty, dc=dc, n=n, dp=dp, hopper=True)
@@ -647,7 +646,7 @@ def _prebuild_sm80(rows):
 
     yield sm80._ext
     yield adaln_sm80._ext
-    if any(r["module"] in _SM80_TOKEN and r["mode"] == "train" for r in rows):   # the training path's parameter casts (transition family)
+    if any(r["module"] in _SM80_TOKEN and r["mode"] == "train" for r in rows):  # the training path's parameter casts (transition family)
         from miniworld_engine.kernels.transition.cuda import parameter_cast_pack_sm80, parameter_cast_sm80
 
         yield parameter_cast_sm80._ext

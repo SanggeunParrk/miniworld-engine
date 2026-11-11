@@ -14,6 +14,7 @@ gone; what survives is the half production runs.
 """
 
 from __future__ import annotations
+
 # The gate backward here was gated_projection's `_sigmul_bwd` minus the `.to(tl.float32)`
 # on its loads. That is not a low-precision variant, it is a missing upcast: tl.sigmoid goes
 # through tl.exp, which is @_check_dtype(fp32, fp64), so the kernel did not compile at all in
@@ -31,7 +32,6 @@ import triton.language as tl
 from miniworld_engine.kernels._tf32 import tf32_dot, tf32_grid_many
 
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
-
 
 
 # Flat elementwise stages tile ONE axis (the linear element index) — canonical 1-D sweep,
@@ -54,7 +54,6 @@ from miniworld_engine.kernels._shape_key import atom_key, both_key, length_of, p
 # ============================================================================
 # FORWARD (training): reuse the fused inference structure, emit saved tensors.
 # ============================================================================
-
 
 
 # fmt: off
@@ -104,12 +103,10 @@ def _fwd_expand_swiglu_kernel(
     tl.store(ab_ptr + rows[:, None] * stride_abm + cols[None, :] * stride_abn, a, mask=m)
     tl.store(ab_ptr + rows[:, None] * stride_abm + (cols + ND)[None, :] * stride_abn, b, mask=m)
 # fmt: on
+# fmt: off
 
 
 # BLOCK_K_DC tiles the (looped) DC contraction and comes from the CSV like every other tile here.
-
-
-# fmt: off
 
 
 @configured('cond_transition_squeeze_gate_saveact_triton',
@@ -175,13 +172,13 @@ def _fwd_squeeze_gate_kernel(
 
 def _fwd_expand_swiglu_fake(x, wa, wb, shape_key=None):
     """(M, ND) h and (M, 2*ND) ab -- ab packs the saved pre-activations [a | b]."""
-    return (x.new_empty((x.shape[0], wa.shape[0])),
-            x.new_empty((x.shape[0], 2 * wa.shape[0])))
+    return (x.new_empty((x.shape[0], wa.shape[0])), x.new_empty((x.shape[0], 2 * wa.shape[0])))
 
 
 @opaque(fake=_fwd_expand_swiglu_fake, name="conditioned_transition_train_fused_expand_swiglu")
-def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
-                       shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+def _fwd_expand_swiglu(
+    x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, shape_key: int | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
     """a = x@Waᵀ, b = x@Wbᵀ, h = silu(a)*b -- the expand half, both GEMMs in one launch.
     Training forward: the SwiGLU is the GEMM epilogue, and the pre-activations are packed into ab
     because the backward's silu'(a) needs a and b, which h alone cannot give back.
@@ -195,7 +192,7 @@ def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
             "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
             "not a working fallback: length_of refuses a rank-2 shape."
         )
-    pre = x.dtype is torch.float32     # the weights are rounded to nearest here (kernels/_tf32.py); the activation in the kernel
+    pre = x.dtype is torch.float32  # the weights are rounded to nearest here (kernels/_tf32.py); the activation in the kernel
     if pre:
         wa, wb = tf32_grid_many(wa, wb)
     ND = wa.shape[0]
@@ -203,25 +200,44 @@ def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
     ab = torch.empty(M, 2 * ND, device=x.device, dtype=x.dtype)
     grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _fwd_expand_swiglu_kernel[grid](
-        x, wa, wb, h, ab, M, ND, K, 2 * ND,
-        x.stride(0), x.stride(1), wa.stride(0), wa.stride(1),
-        h.stride(0), h.stride(1), ab.stride(0), ab.stride(1),
-        shape_key=pack(shape_key, ND=ND, K=K), PRE=pre,
+        x,
+        wa,
+        wb,
+        h,
+        ab,
+        M,
+        ND,
+        K,
+        2 * ND,
+        x.stride(0),
+        x.stride(1),
+        wa.stride(0),
+        wa.stride(1),
+        h.stride(0),
+        h.stride(1),
+        ab.stride(0),
+        ab.stride(1),
+        shape_key=pack(shape_key, ND=ND, K=K),
+        PRE=pre,
     )
     return h, ab
 
 
 def _fwd_squeeze_gate_fake(h, cond, ws, wsc, bsc, shape_key=None, residual=None):
     """y, out and scale, all (M, D) -- D = ws.shape[0], the squeeze output width, not h's ND."""
-    return (h.new_empty((h.shape[0], ws.shape[0])),
-            h.new_empty((h.shape[0], ws.shape[0])),
-            h.new_empty((h.shape[0], ws.shape[0])))
+    return (h.new_empty((h.shape[0], ws.shape[0])), h.new_empty((h.shape[0], ws.shape[0])), h.new_empty((h.shape[0], ws.shape[0])))
 
 
 @opaque(fake=_fwd_squeeze_gate_fake, name="conditioned_transition_train_fused_squeeze_gate")
-def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
-                      shape_key: int | None = None,
-                      residual: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _fwd_squeeze_gate(
+    h: torch.Tensor,
+    cond: torch.Tensor,
+    ws: torch.Tensor,
+    wsc: torch.Tensor,
+    bsc: torch.Tensor,
+    shape_key: int | None = None,
+    residual: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """out = h@Wsᵀ, scale = cond@Wscᵀ + bsc, y = sigmoid(scale)*out -- the squeeze half, one launch.
     Training forward: out and scale are materialized next to y because the gate backward and the
     dWs/dWsc wgrads both read them.
@@ -246,12 +262,35 @@ def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     extra = {} if residual is None else dict(res_ptr=residual, stride_rm=residual.stride(0), HAS_RES=True)
     _fwd_squeeze_gate_kernel[grid](
-        h, cond, ws, wsc, bsc, y, out, scale, M, ND, D, DC,
-        h.stride(0), h.stride(1), cond.stride(0), cond.stride(1),
-        ws.stride(0), ws.stride(1), wsc.stride(0), wsc.stride(1),
-        y.stride(0), y.stride(1), out.stride(0), out.stride(1),
-        scale.stride(0), scale.stride(1),
-        shape_key=pack(shape_key, ND=ND, D=D, DC=DC), PRE=pre, **extra,
+        h,
+        cond,
+        ws,
+        wsc,
+        bsc,
+        y,
+        out,
+        scale,
+        M,
+        ND,
+        D,
+        DC,
+        h.stride(0),
+        h.stride(1),
+        cond.stride(0),
+        cond.stride(1),
+        ws.stride(0),
+        ws.stride(1),
+        wsc.stride(0),
+        wsc.stride(1),
+        y.stride(0),
+        y.stride(1),
+        out.stride(0),
+        out.stride(1),
+        scale.stride(0),
+        scale.stride(1),
+        shape_key=pack(shape_key, ND=ND, D=D, DC=DC),
+        PRE=pre,
+        **extra,
     )
     return y, out, scale
 
@@ -261,5 +300,3 @@ def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc
 # ============================================================================
 
 # --- gate-bwd: dout = sg*dy ; dscale = out*sg*(1-sg)*dy  (one HBM pass over (M,D)) ---
-
-

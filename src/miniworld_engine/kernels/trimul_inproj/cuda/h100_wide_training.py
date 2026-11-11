@@ -45,6 +45,7 @@ def _mm(a, b, *, out=None, out_dtype=None):
     """Opt-in graph-owned cuBLAS scratch; keep the retained GEMM call unchanged."""
     if T.wide_owned_blas_enabled():
         from ._h100_pack import owned_mm
+
         return owned_mm(a, b, out=out, out_dtype=out_dtype)
     kwargs = {} if out_dtype is None else {"out_dtype": out_dtype}
     if out is not None:
@@ -55,6 +56,7 @@ def _mm(a, b, *, out=None, out_dtype=None):
 def _bmm(a, b, *, out):
     if T.wide_owned_blas_enabled():
         from ._h100_pack import owned_bmm
+
         return owned_bmm(a, b, out=out)
     return _H100_BMM.bmm(a, b, out=out)
 
@@ -74,10 +76,8 @@ def forward_headers():
         text = T.header_path(source, name).read_text()
         if name == "tmn_kernels.cuh":
             for old, new in (
-                ("static constexpr int MINB = NCWG == 1 ? 2 : 1;",
-                 "static constexpr int MINB = MW_MINB;"),
-                ("W_RESIDENT || NSLOT >= 2 * SPB",
-                 "W_RESIDENT || (SCHED == 1 && (MW_K1_STREAM || NSLOT >= SPB)) || NSLOT >= 2 * SPB"),
+                ("static constexpr int MINB = NCWG == 1 ? 2 : 1;", "static constexpr int MINB = MW_MINB;"),
+                ("W_RESIDENT || NSLOT >= 2 * SPB", "W_RESIDENT || (SCHED == 1 && (MW_K1_STREAM || NSLOT >= SPB)) || NSLOT >= 2 * SPB"),
             ):
                 if text.count(old) != 1:
                     raise RuntimeError("wide training header anchor changed: " + old)
@@ -96,9 +96,17 @@ def _defines(**values):
 
 @T.device_cache
 def _unit(source, include, defines, pool=None):
-    flags = ["-std=c++17", "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-Xptxas=-v",
-             "-I" + _include(include),
-             *(("-I" + str(T.ANTHROPIC_V5),) if include == "upstream" else ()), *defines]
+    flags = [
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I" + _include(include),
+        *(("-I" + str(T.ANTHROPIC_V5),) if include == "upstream" else ()),
+        *defines,
+    ]
     cubin = T.compile(R / source, flags)
     if pool is not None:
         cubin = _register_pool(cubin, *pool)
@@ -111,17 +119,18 @@ def _kernel(source, entry, include, defines, smem=0, pool=None):
     if smem:
         k.set_max_dynamic_smem(smem)
     if pool is not None and _occupancy(k, 256, smem) < 2:
-        warnings.warn(f"{entry}: {_occupancy(k, 256, smem)} resident CTA(s); the lowered "
-                      "register pool did not take effect", RuntimeWarning)
+        warnings.warn(f"{entry}: {_occupancy(k, 256, smem)} resident CTA(s); the lowered register pool did not take effect", RuntimeWarning)
     return k
 
 
 def _occupancy(k, threads, smem):
     drv = k.unit.drv
-    return int(drv._unwrap(
-        "cuOccupancyMaxActiveBlocksPerMultiprocessor",
-        drv.d.cuOccupancyMaxActiveBlocksPerMultiprocessor(
-            drv.d.CUfunction(int(k.handle)), threads, smem)))
+    return int(
+        drv._unwrap(
+            "cuOccupancyMaxActiveBlocksPerMultiprocessor",
+            drv.d.cuOccupancyMaxActiveBlocksPerMultiprocessor(drv.d.CUfunction(int(k.handle)), threads, smem),
+        )
+    )
 
 
 @T.device_cache
@@ -168,18 +177,21 @@ def _register_pool(cubin, kernel, initial, consumer):
             data = bytearray(Path(cubin).read_bytes())
             _patch_register_count(data, consumer, initial)
         except Exception as error:  # noqa: BLE001 - any failure keeps the verified original
-            warnings.warn(f"{kernel}: initial register pool not lowered ({error}); "
-                          "running with one resident CTA per SM", RuntimeWarning)
+            warnings.warn(f"{kernel}: initial register pool not lowered ({error}); running with one resident CTA per SM", RuntimeWarning)
             return False
         tmp.write_bytes(bytes(data))
         return True
 
     # keyed by the base cubin's key, the pool parameters and the patch code itself
-    patch_code = hashlib.sha256("".join(inspect.getsource(f) for f in (
-        _check_register_pool, _patch_register_count)).encode()).hexdigest()
-    out = _nvcc.derived_cubin(f"trimul_h100/{kernel}.pool{initial}", cubin, (kernel, initial, consumer, patch_code),
-                              produce, family="trimul_h100",
-                              replay=(f"{__name__}:_register_pool", [kernel, initial, consumer]))
+    patch_code = hashlib.sha256("".join(inspect.getsource(f) for f in (_check_register_pool, _patch_register_count)).encode()).hexdigest()
+    out = _nvcc.derived_cubin(
+        f"trimul_h100/{kernel}.pool{initial}",
+        cubin,
+        (kernel, initial, consumer, patch_code),
+        produce,
+        family="trimul_h100",
+        replay=(f"{__name__}:_register_pool", [kernel, initial, consumer]),
+    )
     return cubin if out is None else out
 
 
@@ -191,8 +203,7 @@ def _check_register_pool(sass, kernel, initial, consumer):
         m = re.search(r"/\*([0-9a-f]+)\*/\s+(.*?)\s*;", line)
         if m:
             inst[int(m[1], 16)] = m[2]
-    if sum("TRY_ALLOC.CTAPOOL" in x for x in inst.values()) != 1 or \
-            sum("DEALLOC.CTAPOOL" in x for x in inst.values()) != 1:
+    if sum("TRY_ALLOC.CTAPOOL" in x for x in inst.values()) != 1 or sum("DEALLOC.CTAPOOL" in x for x in inst.values()) != 1:
         raise RuntimeError("expected one CTA-pool allocation and release")
     queue, seen, caps = [(0, initial)], set(), set()
     while queue:
@@ -225,12 +236,11 @@ def _patch_register_count(data, old, new):
     header = struct.unpack_from("<16sHHIQQQIHHHHHH", data)
     if header[0][:6] != b"\x7fELF\x02\x01":
         raise RuntimeError("not a 64-bit ELF cubin")
-    sections = [struct.unpack_from("<IIQQQQIIQQ", data, header[6] + i * header[11])
-                for i in range(header[12])]
+    sections = [struct.unpack_from("<IIQQQQIIQQ", data, header[6] + i * header[11]) for i in range(header[12])]
     names = sections[header[13]]
     changed = 0
     for s in sections:
-        name = bytes(data[names[4] + s[0]:]).split(b"\0", 1)[0]
+        name = bytes(data[names[4] + s[0] :]).split(b"\0", 1)[0]
         if name != b".nv.info":
             continue
         pos, end = s[4], s[4] + s[5]
@@ -251,8 +261,7 @@ def _patch_register_count(data, old, new):
 
 # --------------------------------------------------------------------------- launch
 def _map(t, box, dims, strides, swizzle="128B", l2="128B"):
-    return T._launch_module().tensor_map(t, box, dims=dims, strides_bytes=strides,
-                                         swizzle=swizzle, l2=l2)
+    return T._launch_module().tensor_map(t, box, dims=dims, strides_bytes=strides, swizzle=swizzle, l2=l2)
 
 
 def _rows(t, cols, rows, box_rows=64):
@@ -272,10 +281,21 @@ def _launch_cooperative(k, grid, threads, smem, params):
     L = T._launch_module()
     drv = k.unit.drv
     args = L._Packed([params])
-    drv._unwrap("cuLaunchCooperativeKernel", drv.d.cuLaunchCooperativeKernel(
-        drv.d.CUfunction(int(k.handle)), grid, 1, 1, threads, 1, 1, smem,
-        drv.d.CUstream(int(torch.cuda.current_stream().cuda_stream)),
-        ctypes.addressof(args.array)))
+    drv._unwrap(
+        "cuLaunchCooperativeKernel",
+        drv.d.cuLaunchCooperativeKernel(
+            drv.d.CUfunction(int(k.handle)),
+            grid,
+            1,
+            1,
+            threads,
+            1,
+            1,
+            smem,
+            drv.d.CUstream(int(torch.cuda.current_stream().cuda_stream)),
+            ctypes.addressof(args.array),
+        ),
+    )
 
 
 @T.device_cache
@@ -289,9 +309,13 @@ class _Algorithm(ctypes.Structure):
 
 
 class _Heuristic(ctypes.Structure):
-    _fields_ = [("algo", _Algorithm), ("workspaceSize", ctypes.c_size_t),
-                ("state", ctypes.c_int), ("wavesCount", ctypes.c_float),
-                ("reserved", ctypes.c_int * 4)]
+    _fields_ = [
+        ("algo", _Algorithm),
+        ("workspaceSize", ctypes.c_size_t),
+        ("state", ctypes.c_int),
+        ("wavesCount", ctypes.c_float),
+        ("reserved", ctypes.c_int * 4),
+    ]
 
 
 @lru_cache(None)
@@ -349,26 +373,40 @@ class _LtProblem:
             if not row and t.stride(1) != 1:
                 raise ValueError("cuBLASLt operand needs one unit-stride matrix dimension")
             layout = P()
-            _lt_check(lib.cublasLtMatrixLayoutCreate(
-                ctypes.byref(layout), 14 if t.dtype == torch.bfloat16 else 0,
-                t.shape[1], t.shape[2], t.stride(1) if row else t.stride(2)), "MatrixLayoutCreate")
-            for attr, value in ((1, ctypes.c_int(1 if row else 0)),  # ORDER
-                                (5, ctypes.c_int(t.shape[0])),  # BATCH_COUNT
-                                (6, ctypes.c_int64(t.stride(0)))):  # STRIDED_BATCH_OFFSET
-                _lt_check(lib.cublasLtMatrixLayoutSetAttribute(
-                    layout, attr, ctypes.byref(value), ctypes.sizeof(value)), "LayoutSetAttribute")
+            _lt_check(
+                lib.cublasLtMatrixLayoutCreate(
+                    ctypes.byref(layout),
+                    14 if t.dtype == torch.bfloat16 else 0,
+                    t.shape[1],
+                    t.shape[2],
+                    t.stride(1) if row else t.stride(2),
+                ),
+                "MatrixLayoutCreate",
+            )
+            for attr, value in (
+                (1, ctypes.c_int(1 if row else 0)),  # ORDER
+                (5, ctypes.c_int(t.shape[0])),  # BATCH_COUNT
+                (6, ctypes.c_int64(t.stride(0))),
+            ):  # STRIDED_BATCH_OFFSET
+                _lt_check(
+                    lib.cublasLtMatrixLayoutSetAttribute(layout, attr, ctypes.byref(value), ctypes.sizeof(value)), "LayoutSetAttribute"
+                )
             self.layouts.append(layout)
         preference = P()
         _lt_check(lib.cublasLtMatmulPreferenceCreate(ctypes.byref(preference)), "PreferenceCreate")
         size = ctypes.c_uint64(WORKSPACE)
-        _lt_check(lib.cublasLtMatmulPreferenceSetAttribute(
-            preference, 1, ctypes.byref(size), ctypes.sizeof(size)), "PreferenceSetAttribute")
+        _lt_check(
+            lib.cublasLtMatmulPreferenceSetAttribute(preference, 1, ctypes.byref(size), ctypes.sizeof(size)), "PreferenceSetAttribute"
+        )
         self.heuristics = (_Heuristic * 16)()
         count = ctypes.c_int()
         ad, bd, dd = self.layouts
-        _lt_check(lib.cublasLtMatmulAlgoGetHeuristic(
-            _lt_handle(), self.desc, ad, bd, dd, dd, preference, 16, self.heuristics,
-            ctypes.byref(count)), "AlgoGetHeuristic")
+        _lt_check(
+            lib.cublasLtMatmulAlgoGetHeuristic(
+                _lt_handle(), self.desc, ad, bd, dd, dd, preference, 16, self.heuristics, ctypes.byref(count)
+            ),
+            "AlgoGetHeuristic",
+        )
         self.indices = [i for i in range(count.value) if self.heuristics[i].state == 0]
         if not self.indices:
             raise RuntimeError("no supported cuBLASLt algorithm")
@@ -376,8 +414,7 @@ class _LtProblem:
 
     def algorithm(self, name, frozen, donor=None):
         """Selected algorithm: frozen configuration, validated for this runtime."""
-        key = (LT_SELECTION, name, None if frozen is None else tuple(frozen[1]),
-               None if donor is None else tuple(donor.data))
+        key = (LT_SELECTION, name, None if frozen is None else tuple(frozen[1]), None if donor is None else tuple(donor.data))
         if key not in self.chosen:
             self.chosen[key] = self._select(name, frozen, donor)
         return self.chosen[key]
@@ -407,9 +444,10 @@ class _LtProblem:
     def _supported(self, algo):
         result = _Heuristic()
         ad, bd, dd = self.layouts
-        return _lt_library().cublasLtMatmulAlgoCheck(
-            _lt_handle(), self.desc, ad, bd, dd, dd, ctypes.byref(algo), ctypes.byref(result)) == 0 \
+        return (
+            _lt_library().cublasLtMatmulAlgoCheck(_lt_handle(), self.desc, ad, bd, dd, dd, ctypes.byref(algo), ctypes.byref(result)) == 0
             and result.workspaceSize <= WORKSPACE
+        )
 
 
 class _Shape:
@@ -450,11 +488,27 @@ def _lt(cell, name, a, b, out, workspace, donor=None):
     algo = problem.algorithm(f"{cell[0]}-{cell[1]} {name}", frozen, donor)
     one, zero = ctypes.c_float(1), ctypes.c_float(0)
     ad, bd, dd = problem.layouts
-    _lt_check(_lt_library().cublasLtMatmul(
-        _lt_handle(), problem.desc, ctypes.byref(one), a.data_ptr(), ad, b.data_ptr(), bd,
-        ctypes.byref(zero), out.data_ptr(), dd, out.data_ptr(), dd, ctypes.byref(algo),
-        workspace.data_ptr(), workspace.numel(), torch.cuda.current_stream().cuda_stream),
-        "cublasLtMatmul " + name)
+    _lt_check(
+        _lt_library().cublasLtMatmul(
+            _lt_handle(),
+            problem.desc,
+            ctypes.byref(one),
+            a.data_ptr(),
+            ad,
+            b.data_ptr(),
+            bd,
+            ctypes.byref(zero),
+            out.data_ptr(),
+            dd,
+            out.data_ptr(),
+            dd,
+            ctypes.byref(algo),
+            workspace.data_ptr(),
+            workspace.numel(),
+            torch.cuda.current_stream().cuda_stream,
+        ),
+        "cublasLtMatmul " + name,
+    )
     return algo
 
 
@@ -473,20 +527,33 @@ def saved_like(x, selected=False):
     n, D = x.shape[1], x.shape[-1]
     M, H = n * n, 2 * D
     f32 = dict(dtype=torch.float32)
-    saved = [x.new_empty((2 * H, n, n)), x.new_empty((H, n, n)), torch.empty_like(x),
-             x.new_empty((M, H)), x.new_empty((M, D)), x.new_empty((M, D)),
-             x.new_empty((M,), **f32), x.new_empty((M,), **f32)]
+    saved = [
+        x.new_empty((2 * H, n, n)),
+        x.new_empty((H, n, n)),
+        torch.empty_like(x),
+        x.new_empty((M, H)),
+        x.new_empty((M, D)),
+        x.new_empty((M, D)),
+        x.new_empty((M,), **f32),
+        x.new_empty((M,), **f32),
+    ]
     if D == 256:
         from ._h100_pack import fused_d256_glue
-        return saved + [x.new_empty((8 * D, D))] + (
-            [x.new_empty((9*D,D))] if fused_d256_glue(D,n,selected,bidirectional=True) else [])
+
+        return (
+            saved + [x.new_empty((8 * D, D))] + ([x.new_empty((9 * D, D))] if fused_d256_glue(D, n, selected, bidirectional=True) else [])
+        )
     saved.append(x.new_empty((8 * D, M)))
     if D == 512:
-        saved += [x.new_empty((max(1, M * H // 4096),), dtype=torch.int64),
-                  x.new_empty((1,), dtype=torch.int32), x.new_empty((M // 64,), dtype=torch.int32)]
+        saved += [
+            x.new_empty((max(1, M * H // 4096),), dtype=torch.int64),
+            x.new_empty((1,), dtype=torch.int32),
+            x.new_empty((M // 64,), dtype=torch.int32),
+        ]
     from ._h100_pack import fused_wide_glue
-    if fused_wide_glue(D,n,bidirectional=True,selected=selected):
-        saved.append(x.new_empty((9*D,D)))
+
+    if fused_wide_glue(D, n, bidirectional=True, selected=selected):
+        saved.append(x.new_empty((9 * D, D)))
     return saved
 
 
@@ -500,8 +567,24 @@ def _front_params(x, operand, w1, ab, mask, gi, bi, stats, xn, cfg, pre=None):
         _map(operand, [64, b, a], [D, n, n], [D * 2, n * D * 2]),
         _map(w1, [64, 64], [D, 8 * D], [D * 2]),
         _map(ab, [64, 1, 32], [n, n, 4 * D], [n * 2, n * n * 2]),
-        mask, gi, bi, ab, stats, xn,
-        n, n, tj, tiles, 1, n, 1, 1e-5, n * D, D, 0, 0,
+        mask,
+        gi,
+        bi,
+        ab,
+        stats,
+        xn,
+        n,
+        n,
+        tj,
+        tiles,
+        1,
+        n,
+        1,
+        1e-5,
+        n * D,
+        D,
+        0,
+        0,
     ]
     if pre is not None:
         fields.insert(9, _map(pre, [64, 64], [pre.shape[1], pre.shape[0]], [pre.shape[1] * 2]))
@@ -510,8 +593,7 @@ def _front_params(x, operand, w1, ab, mask, gi, bi, stats, xn, cfg, pre=None):
 
 def _k1_smem(D, cfg, stage_extra=0):
     a, b, slots, sk = cfg[:4]
-    return (a * b * D * 2 + slots * sk * 8192 + (a * b // 64) * 8192 + 8 * D
-            + ((2 + 2 * slots) * 8 + 127) // 128 * 128 + stage_extra)
+    return a * b * D * 2 + slots * sk * 8192 + (a * b // 64) * 8192 + 8 * D + ((2 + 2 * slots) * 8 + 127) // 128 * 128 + stage_extra
 
 
 # K1 tiles (BI, BJ, slots, K steps, min blocks[, shared/stream]) of the qualified plans.
@@ -522,8 +604,7 @@ def _front(x, w1, ab, mask, gi, bi, xn, stats, pre):
     D = x.shape[-1]
     cfg = _K1[D]
     fw = "forward"
-    common = _defines(MW_MINB=cfg[4], MW_K1_STREAM=int(len(cfg) > 5 and cfg[5] == 2),
-                      TMN_SIGMOID_TANH=1, TMN_WSKIP=1, TMN_MASK_TEMPLATE=1)
+    common = _defines(MW_MINB=cfg[4], MW_K1_STREAM=int(len(cfg) > 5 and cfg[5] == 2), TMN_SIGMOID_TANH=1, TMN_WSKIP=1, TMN_MASK_TEMPLATE=1)
     if D == 256:
         smem = _k1_smem(D, cfg)
         k = _kernel("front_d256.cu", "mw_d256_front_save_stats", fw, common, smem)
@@ -536,13 +617,12 @@ def _front(x, w1, ab, mask, gi, bi, xn, stats, pre):
         normalize = D != 512
         if not normalize:
             from ._h100_pack import fused_wide_glue
-            if fused_wide_glue(D,x.shape[1],bidirectional=True):
-                normalize_into(xn,x,gi,bi,True)
+
+            if fused_wide_glue(D, x.shape[1], bidirectional=True):
+                normalize_into(xn, x, gi, bi, True)
             else:
                 normalize_into(xn, x, gi, bi)
-        fields, tiles, threads = _front_params(
-            x, x if normalize else xn, w1, ab, mask, gi, bi, None, xn if normalize else None,
-            cfg, pre)
+        fields, tiles, threads = _front_params(x, x if normalize else xn, w1, ab, mask, gi, bi, None, xn if normalize else None, cfg, pre)
     _launch(k, min(tiles, num_sms() * cfg[4]), threads, smem, _params(f"front{D}", fields))
 
 
@@ -551,8 +631,7 @@ def _triangle(cell, ab, tri, workspace):
     D = cell[0]
     H = 2 * D
     frozen = _frozen()[f"{D}-{cell[1]}"]
-    ops = (("fw0", ab[:D], ab[H:H + D].transpose(-1, -2), tri[:D]),
-           ("fw1", ab[D:H].transpose(-1, -2), ab[H + D:], tri[D:]))
+    ops = (("fw0", ab[:D], ab[H : H + D].transpose(-1, -2), tri[:D]), ("fw1", ab[D:H].transpose(-1, -2), ab[H + D :], tri[D:]))
     for name, a, b, out in ops:
         if name in frozen:
             _lt(cell, name, a, b, out, workspace)
@@ -585,6 +664,7 @@ def _output_norm(cell, tri, norm, go, bo, mu, rs, delta):
     patches, count, changed = delta
     if T.preserve_wide_training(D):
         from ._h100_pack import zero_native_
+
         zero_native_(count)
         zero_native_(changed)
     else:
@@ -592,8 +672,7 @@ def _output_norm(cell, tri, norm, go, bo, mu, rs, delta):
         changed.zero_()
     k = _kernel("delta_norm_d512.cu", "mw_wide_lowreg_delta_norm", fw, defines, smem)
     grid = _resident_grid("delta_norm_d512.cu", "mw_wide_lowreg_delta_norm", fw, defines, 128, smem)
-    _launch(k, grid, 128, smem, _params("delta_norm", [
-        *maps, patches, count, patches.numel(), changed, go, bo, mu, rs, M]))
+    _launch(k, grid, 128, smem, _params("delta_norm", [*maps, patches, count, patches.numel(), changed, go, bo, mu, rs, M]))
 
 
 def _pair_mask(mask, n):
@@ -613,8 +692,8 @@ def forward(leaves, mask, ds):
     saved = saved_like(x)
     ab, tri, xn, norm, proj, gate, mu, rs = saved[:8]
     w1 = saved[8] if D == 256 else x.new_empty((8 * D, D))
-    if len(saved) > {256:9,384:9,512:12}[D]:
-        pack_into(w1,wl,wlg,wr,wrg,saved[-1],wg)
+    if len(saved) > {256: 9, 384: 9, 512: 12}[D]:
+        pack_into(w1, wl, wlg, wr, wrg, saved[-1], wg)
     else:
         pack_into(w1, wl, wlg, wr, wrg)
     stats = x.new_empty((M, 2), dtype=torch.float32) if D == 256 else None
@@ -640,8 +719,16 @@ def _gate(cell, proj, gate, dy, ds, dp, prefix, affine):
     if D != 512:
         defines += _defines(TMN_SIGMOID_TANH=1)
     smem = 49152 + 128
-    fields = [_rows(proj, D, M), _rows(gate, D, M), _rows(dy, D, M), _rows(ds, D, n),
-              _rows(dp, D, M), _map(prefix, [64, 64], [M, D], [M * 2]), M, n]
+    fields = [
+        _rows(proj, D, M),
+        _rows(gate, D, M),
+        _rows(dy, D, M),
+        _rows(ds, D, n),
+        _rows(dp, D, M),
+        _map(prefix, [64, 64], [M, D], [M * 2]),
+        M,
+        n,
+    ]
     if affine is None:
         k = _kernel("gate.cu", "mw_prefix_gate_epi", "forward", defines, smem)
         key = "gate"
@@ -659,8 +746,7 @@ def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
     native = T.preserve_training(D)
     rows = 32 if D == 256 or (D, n) == (384, 768) else 16
     minblocks = 3 if D == 256 else 2
-    defines = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0,
-                       LN_MINBLOCKS=minblocks)
+    defines = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0, LN_MINBLOCKS=minblocks)
     if native:
         defines += _defines(MW_LN_PARTIALS=1)
     source = f"output_ln_d{D}_l{n}.cu" if n == 384 or D == 512 else "output_ln_l768.cu"
@@ -668,22 +754,22 @@ def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
     if n == 384:
         # One 3D map per tensor: [M, 64 channels, H/64 groups] for tri/dt, rows for dn.
         swizzle = "64B" if rows == 32 else "32B"
-        maps = [_map(t, [rows, 64, H // 64], [M, 64, H // 64], [M * 2, M * 128], swizzle)
-                for t in (tri, dt)]
+        maps = [_map(t, [rows, 64, H // 64], [M, 64, H // 64], [M * 2, M * 128], swizzle) for t in (tri, dt)]
         maps.append(_map(dn, [64, rows, H // 64], [64, M, H // 64], [H * 2, 128]))
         smem = {256: 67968, 384: 101760, 512: 70528}[D]
         k = _kernel(source, "mw_independent_output_ln", "upstream", defines, smem)
         # Qualified grids (SMs x the replaced cooperative kernel's residency, D256 doubled).
         grid = num_sms() * {256: 6, 384: 2, 512: 3}[D]
         if native:
-            pg, pb = [torch.empty((grid,H),device=tri.device,dtype=torch.float32) for _ in range(2)]
-            tail[-3:-1] = [pg,pb]
+            pg, pb = [torch.empty((grid, H), device=tri.device, dtype=torch.float32) for _ in range(2)]
+            tail[-3:-1] = [pg, pb]
         _launch(k, grid, 128, smem, _params(source, [*maps, *tail]))
         if native:
             if defer:
-                return pg,pb,dgo,dbo
+                return pg, pb, dgo, dbo
             from ._h100_pack import finish_affine_partials
-            finish_affine_partials(pg,pb,dgo,dbo)
+
+            finish_affine_partials(pg, pb, dgo, dbo)
         return
     swizzle = "64B" if rows == 32 else "32B"
     maps = [_map(t, [rows, 64], [M, H], [M * 2], swizzle) for t in (tri, dt)]
@@ -694,14 +780,15 @@ def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
     k = _kernel(source, "mw_wide_stats_ln", "upstream", defines, smem)
     grid = _resident_grid(source, "mw_wide_stats_ln", "upstream", defines, threads, smem)
     if native:
-        pg, pb = [torch.empty((grid,H),device=tri.device,dtype=torch.float32) for _ in range(2)]
-        tail[-3:-1] = [pg,pb]
+        pg, pb = [torch.empty((grid, H), device=tri.device, dtype=torch.float32) for _ in range(2)]
+        tail[-3:-1] = [pg, pb]
     (_launch if native else _launch_cooperative)(k, grid, threads, smem, _params(source, [*maps, *tail]))
     if native:
         if defer:
-            return pg,pb,dgo,dbo
+            return pg, pb, dgo, dbo
         from ._h100_pack import finish_affine_partials
-        finish_affine_partials(pg,pb,dgo,dbo)
+
+        finish_affine_partials(pg, pb, dgo, dbo)
 
 
 def _contract_gp(cell, dt, ab, pre, mask, gp):
@@ -722,18 +809,18 @@ def _contract_gp(cell, dt, ab, pre, mask, gp):
         # Whole 4D maps: [64 cols, 64 rows, n/64, channels*n/64] for every operand.
         def whole(t, channels, box):
             return _map(t, box, [64, 64, n // 64, channels * n // 64], [n * 2, 128, n * 128])
+
         # A operands: only A1 (transposed dt) takes 2x1 boxes; B operands: all but B2.
-        maps = [whole(t, D, (64, 64, 2, 1) if i == 1 else (64, 64, 1, 2)) for i, t in enumerate(
-            (dt[:D], dt[:D], ab[H + D:], ab[D:H]))] + [
-            whole(t, D, (64, 64, 2, 1) if i != 2 else (64, 64, 1, 2)) for i, t in enumerate(
-                (ab[H:H + D], ab[:D], dt[D:], dt[D:]))]
-        tail = [whole(pre, 8 * D, (64, 64, 2, 2)), whole(mask, 1, (64, 64, 2, 2)),
-                *[whole(g, H, (64, 64, 2, 2)) for g in gp]]
+        maps = [whole(t, D, (64, 64, 2, 1) if i == 1 else (64, 64, 1, 2)) for i, t in enumerate((dt[:D], dt[:D], ab[H + D :], ab[D:H]))] + [
+            whole(t, D, (64, 64, 2, 1) if i != 2 else (64, 64, 1, 2)) for i, t in enumerate((ab[H : H + D], ab[:D], dt[D:], dt[D:]))
+        ]
+        tail = [whole(pre, 8 * D, (64, 64, 2, 2)), whole(mask, 1, (64, 64, 2, 2)), *[whole(g, H, (64, 64, 2, 2)) for g in gp]]
     else:
+
         def plane(t, channels):
             return _map(t, [64, 64], [n, channels * n], [n * 2])
-        maps = [plane(t, D) for t in (dt[:D], dt[:D], ab[H + D:], ab[D:H],
-                                      ab[H:H + D], ab[:D], dt[D:], dt[D:])]
+
+        maps = [plane(t, D) for t in (dt[:D], dt[:D], ab[H + D :], ab[D:H], ab[H : H + D], ab[:D], dt[D:], dt[D:])]
         tail = [plane(pre, 8 * D), plane(mask, 1), *[plane(g, H) for g in gp]]
     # Pointer fields of this parameter block are not read by these kernels.
     fields = [*maps, pre, mask, *gp, None, None, *tail, n]
@@ -752,11 +839,11 @@ def _contract_d256(cell, dt, ab, dl, dr):
         if transposed:
             return _map(t, [64, 64, count], [64, n * D, n // 64], [n * 2, 128], l2="256B")
         return _map(t, [64, 64, count], [n, 64, n * D // 64], [n * 2, n * 128], l2="256B")
-    a = (dt[:D], dt[:D], ab[H + D:], ab[D:H])
-    b = (ab[H:H + D], ab[:D], dt[D:], dt[D:])
+
+    a = (dt[:D], dt[:D], ab[H + D :], ab[D:H])
+    b = (ab[H : H + D], ab[:D], dt[D:], dt[D:])
     out = lambda t: _map(t, [64, 64, 6], [64, n * H, n // 64], [n * 2, 128])
-    fields = [*[operand(t, i == 1, 2) for i, t in enumerate(a)],
-              *[operand(t, i != 2, 6) for i, t in enumerate(b)], out(dl), out(dr)]
+    fields = [*[operand(t, i == 1, 2) for i, t in enumerate(a)], *[operand(t, i != 2, 6) for i, t in enumerate(b)], out(dl), out(dr)]
     _launch(k, 4 * 256 * (n // 128), 256, smem, _params("contract_d256", fields))
 
 
@@ -769,13 +856,18 @@ def _source_d256(cell, xn, w1, dl, dr, gp, mask, partial):
     smem = 114816 + 256
     if n == 384 or (n == 768 and T.d256_register_source_enabled()):
         # 208-register workers, 32-register producer: pool of 120 admits two CTAs.
-        k = _kernel("source_d256_l384.cu", "mw_d256_register_budget_source", "upstream", defines,
-                    smem, pool=("mw_d256_register_budget_source", 120, 208))
+        k = _kernel(
+            "source_d256_l384.cu",
+            "mw_d256_register_budget_source",
+            "upstream",
+            defines,
+            smem,
+            pool=("mw_d256_register_budget_source", 120, 208),
+        )
     else:
         k = _kernel("source_d256_l768.cu", "mw_d256_mask_source", "upstream", defines, smem)
     rows = lambda t: _map(t, [64, 32], [M, H], [M * 2])
-    fields = [_rows(xn.reshape(M, D), D, M), _rows(w1, D, 8 * D), rows(dl), rows(dr),
-              *[rows(g) for g in gp], mask, *gp, partial, M]
+    fields = [_rows(xn.reshape(M, D), D, M), _rows(w1, D, 8 * D), rows(dl), rows(dr), *[rows(g) for g in gp], mask, *gp, partial, M]
     _launch(k, 32 * splits, 256, smem, _params(f"source_d256_{n}", fields))
 
 
@@ -801,15 +893,15 @@ def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative,
         source, entry = "input_reduce_l768.cu", "mw_wide_cached_input"
     k = _kernel(source, entry, "upstream", defines, smem)
     if native:
-        grid = (_resident_grid(source, entry, "upstream", defines, 128, smem)
-                if cooperative else num_sms()*{256: 6, 384: 5, 512: 4}[D])
-        pg, pb = [torch.empty((grid,D),device=x.device,dtype=torch.float32) for _ in range(2)]
-        fields[5:7] = [pg,pb]
-        _launch(k,grid,128,smem,_params(source,fields))
+        grid = _resident_grid(source, entry, "upstream", defines, 128, smem) if cooperative else num_sms() * {256: 6, 384: 5, 512: 4}[D]
+        pg, pb = [torch.empty((grid, D), device=x.device, dtype=torch.float32) for _ in range(2)]
+        fields[5:7] = [pg, pb]
+        _launch(k, grid, 128, smem, _params(source, fields))
         if defer:
-            return pg,pb,dgi,dbi
+            return pg, pb, dgi, dbi
         from ._h100_pack import finish_affine_partials
-        finish_affine_partials(pg,pb,dgi,dbi)
+
+        finish_affine_partials(pg, pb, dgi, dbi)
         return
     if cooperative:
         grid = _resident_grid(source, entry, "upstream", defines, 128, smem)
@@ -829,8 +921,7 @@ def _split_input_dw(cell, dxin, xn, partial, workspace, joint):
     first = 0 if joint else D
     a = dxin[first:].as_strided((splits, rows, step), (step, M, 1))
     b = xn.as_strided((splits, step, D), (step * D, D, 1))
-    out = partial.reshape(-1)[(2 if joint else 3) * D * D:].as_strided(
-        (splits, rows, D), (11 * D * D, D, 1))
+    out = partial.reshape(-1)[(2 if joint else 3) * D * D :].as_strided((splits, rows, D), (11 * D * D, D, 1))
     _lt(cell, "input_dw", a, b, out, workspace)
 
 
@@ -848,14 +939,13 @@ def _delta_projection(cell, saved, wp, proj, go, bo, workspace, donor):
     apply = _kernel("delta_norm_d512.cu", "mw_wide_apply_delta_norm", fw, defines)
     _launch(apply, grid, 256, 0, _params("delta_apply", [patches, count, capacity, norm]))
     smem = 32 * H * 2 + 128
-    fallback = _kernel("delta_norm_fallback_d512.cu", "mw_wide_lowreg_delta_norm_fallback", fw,
-                       defines, smem)
+    fallback = _kernel("delta_norm_fallback_d512.cu", "mw_wide_lowreg_delta_norm_fallback", fw, defines, smem)
     maps = [_map(tri, [32, 64], [M, H], [M * 2], "64B"), _map(norm, [64, 32], [H, M], [H * 2])]
-    _launch(fallback, grid, 128, smem, _params("delta_fallback", [
-        *maps, go, bo, mu, rs, M, count, capacity]))
+    _launch(fallback, grid, 128, smem, _params("delta_fallback", [*maps, go, bo, mu, rs, M, count, capacity]))
     rows_capacity = M // 64
     if T.preserve_wide_training(D):
         from ._h100_pack import zeros_native
+
         seen = zeros_native(M + 1, device=norm.device, dtype=torch.int32)
     else:
         seen = torch.zeros(M + 1, device=norm.device, dtype=torch.int32)
@@ -863,18 +953,14 @@ def _delta_projection(cell, saved, wp, proj, go, bo, workspace, donor):
     compact = norm.new_empty((rows_capacity, H))
     projected = norm.new_empty((rows_capacity, D))
     defines = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D)
-    params = _params("compact", [patches, count, capacity, seen, seen[M:], rows, rows_capacity,
-                                 norm, compact, projected, proj])
+    params = _params("compact", [patches, count, capacity, seen, seen[M:], rows, rows_capacity, norm, compact, projected, proj])
     for entry in ("mw_wide_compact_changed_rows", "mw_wide_gather_changed_norm"):
         _launch(_kernel("compact_projection_d512.cu", entry, fw, defines), num_sms() * 4, 256, 0, params)
     _lt(cell, "compact", compact, wp.t(), projected, workspace, donor=donor)
-    _launch(_kernel("compact_projection_d512.cu", "mw_wide_scatter_changed_proj", fw, defines),
-            num_sms() * 4, 256, 0, params)
+    _launch(_kernel("compact_projection_d512.cu", "mw_wide_scatter_changed_proj", fw, defines), num_sms() * 4, 256, 0, params)
     smem = 49152 + 128
-    k = _kernel("compact_projection_fallback_d512.cu", "mw_wide_compact_projection_fallback", fw,
-                defines, smem)
-    fields = [_rows(norm, H, M), _rows(wp, H, D), _rows(proj, D, M), changed, M, count, capacity,
-              seen[M:], rows_capacity]
+    k = _kernel("compact_projection_fallback_d512.cu", "mw_wide_compact_projection_fallback", fw, defines, smem)
+    fields = [_rows(norm, H, M), _rows(wp, H, D), _rows(proj, D, M), changed, M, count, capacity, seen[M:], rows_capacity]
     _launch(k, (M // 64, D // 128, 1), 128, smem, _params("compact_fallback", fields))
 
 
@@ -887,10 +973,13 @@ def _weight_reduce_d512(cell, partial, dwp):
     tensors[21] = dwp
     floats = [None] * 13
     floats[7] = partial
-    k = _kernel("weight_reduce_d512_l768.cu", "mw_wide512_dwp_reduce", "upstream",
-                _defines(MASTER_FP32=int(dwp.dtype == torch.float32), WIDTH=D, WEIGHT_SPLITS=32))
-    _launch(k, num_sms() * 2, 256, 0, _params("weight_reduce", [
-        *([empty] * 16), *tensors, *floats, n * n, n]))
+    k = _kernel(
+        "weight_reduce_d512_l768.cu",
+        "mw_wide512_dwp_reduce",
+        "upstream",
+        _defines(MASTER_FP32=int(dwp.dtype == torch.float32), WIDTH=D, WEIGHT_SPLITS=32),
+    )
+    _launch(k, num_sms() * 2, 256, 0, _params("weight_reduce", [*([empty] * 16), *tensors, *floats, n * n, n]))
 
 
 def backward(leaves, mask, ds, saved, dy, master=False):
@@ -903,7 +992,7 @@ def backward(leaves, mask, ds, saved, dy, master=False):
     ds = ds.reshape(n, D)
     dy = dy.contiguous()
     ab, tri, xn, norm, proj, gate, mu, rs = saved[:8]
-    fused_glue = len(saved) > {256:9,384:9,512:12}[D]
+    fused_glue = len(saved) > {256: 9, 384: 9, 512: 12}[D]
     f32 = dict(device=x.device, dtype=torch.float32)
     dx = T.take_input_grad(x)
     dp = x.new_empty((M, D))
@@ -916,7 +1005,7 @@ def backward(leaves, mask, ds, saved, dy, master=False):
     dgi, dbi = torch.empty(D, **f32), torch.empty(D, **f32)
     dgo, dbo = torch.empty(H, **f32), torch.empty(H, **f32)
     dw = [torch.empty_like(w, dtype=torch.float32 if master else w.dtype) for w in (wl, wlg, wr, wrg)]
-    dwg, dwp = (torch.empty_like(w, dtype=torch.float32 if master else w.dtype) for w in (wg,wp))
+    dwg, dwp = (torch.empty_like(w, dtype=torch.float32 if master else w.dtype) for w in (wg, wp))
     wcat = x.new_empty((9 * D, D))
     workspace = _workspace(x)
     main = torch.cuda.current_stream()
@@ -924,7 +1013,8 @@ def backward(leaves, mask, ds, saved, dy, master=False):
 
     if D == 512:
         donor = _lt_problem(*(_layout_key(t.unsqueeze(0)) for t in (norm, wp.t(), proj))).algorithm(
-            f"{D}-{n} proj", _frozen()[f"{D}-{n}"].get("proj"))
+            f"{D}-{n} proj", _frozen()[f"{D}-{n}"].get("proj")
+        )
         _delta_projection(cell, saved, wp, proj, go, bo, workspace, donor)
     affine = [dgo, dbo, dgi, dbi] if n == 384 else None
     _gate(cell, proj, gate, dy, ds, dp, dxin[:D], affine)
@@ -946,9 +1036,9 @@ def backward(leaves, mask, ds, saved, dy, master=False):
         _lt(cell, "dwg", dxin[:D], xn.reshape(M, D), dwg, workspace)
         out_affine = _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=fused_glue)
         dl, dr = torch.empty_like(tri), torch.empty_like(tri)
-        _lt(cell, "bc0", dt[:D], ab[H:H + D], dl[:D], workspace)
+        _lt(cell, "bc0", dt[:D], ab[H : H + D], dl[:D], workspace)
         _lt(cell, "bc1", dt[:D].transpose(-1, -2), ab[:D], dr[:D], workspace)
-        _lt(cell, "bc2", ab[H + D:], dt[D:].transpose(-1, -2), dl[D:], workspace)
+        _lt(cell, "bc2", ab[H + D :], dt[D:].transpose(-1, -2), dl[D:], workspace)
         _lt(cell, "bc3", ab[D:H], dt[D:], dr[D:], workspace)
         _source_d256(cell, xn, saved[8], dl, dr, gp, mask, partial)
     else:
@@ -956,9 +1046,14 @@ def backward(leaves, mask, ds, saved, dy, master=False):
         if cell == (512, 768):
             # 32 FP32 split intervals of dWproj, reduced in order by a native kernel.
             step = M // 32
-            _lt(cell, "dwp", dp.as_strided((32, D, step), (step * D, 1, D)),
+            _lt(
+                cell,
+                "dwp",
+                dp.as_strided((32, D, step), (step * D, 1, D)),
                 norm.as_strided((32, step, H), (step * H, H, 1)),
-                partial.as_strided((32, D, H), (11 * D * D, H, 1)), workspace)
+                partial.as_strided((32, D, H), (11 * D * D, H, 1)),
+                workspace,
+            )
             _weight_reduce_d512(cell, partial, dwp)
         else:
             _mm(dp.t(), norm, out=dwp, **({"out_dtype": torch.float32} if master else {}))
@@ -973,7 +1068,8 @@ def backward(leaves, mask, ds, saved, dy, master=False):
         wcat = saved[-1]
     elif T.preserve_training(D):
         from ._h100_pack import stack_backward_weights
-        wcat = stack_backward_weights((wg,wl,wlg,wr,wrg))
+
+        wcat = stack_backward_weights((wg, wl, wlg, wr, wrg))
     else:
         torch.cat((wg, wl, wlg, wr, wrg), out=wcat)
     if cell == (512, 768):
@@ -987,11 +1083,13 @@ def backward(leaves, mask, ds, saved, dy, master=False):
     if cell == (512, 768):
         main.wait_stream(side)  # the input reduction reads the side stream's partials
     joint = cell in ((384, 384), (512, 768))
-    in_affine = _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg if joint else None,
-              cooperative=n == 768, master=master, defer=fused_glue)
+    in_affine = _input_ln(
+        cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg if joint else None, cooperative=n == 768, master=master, defer=fused_glue
+    )
     if fused_glue:
         from ._h100_pack import finish_affine_pair
-        finish_affine_pair(out_affine,in_affine)
+
+        finish_affine_pair(out_affine, in_affine)
     if cell == (256, 384):
         main.wait_stream(side)  # dWproj/dWgate join at the end, as qualified
     del side_workspace
@@ -1005,8 +1103,7 @@ def prebuild_units(D, n, masters):
     the preserved-native ``MW_LN_PARTIALS`` builds both ways, as the scopes decide at run time)."""
     fw, up = "forward", "upstream"
     cfg = _K1[D]
-    common = _defines(MW_MINB=cfg[4], MW_K1_STREAM=int(len(cfg) > 5 and cfg[5] == 2),
-                      TMN_SIGMOID_TANH=1, TMN_WSKIP=1, TMN_MASK_TEMPLATE=1)
+    common = _defines(MW_MINB=cfg[4], MW_K1_STREAM=int(len(cfg) > 5 and cfg[5] == 2), TMN_SIGMOID_TANH=1, TMN_WSKIP=1, TMN_MASK_TEMPLATE=1)
     units = [("front_d256.cu" if D == 256 else "front_pre_d384.cu" if D == 384 else "front_pre_d512.cu", fw, common, None)]
     dense = _defines(MW_MINB=1, MW_K1_STREAM=0, TMN_SIGMOID_TANH=1, WIDTH=D, GROUPS=1, KCHUNK=1)
     norm = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D, OUTPUT_ROWS=32, OUTPUT_THREADS=128)
@@ -1015,13 +1112,16 @@ def prebuild_units(D, n, masters):
         units.append(("forward_norm_d384.cu", fw, norm, None))
     if D == 512:
         compact = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D)
-        units += [("delta_norm_d512.cu", fw, norm, None), ("delta_norm_fallback_d512.cu", fw, norm, None),
-                  ("compact_projection_d512.cu", fw, compact, None), ("compact_projection_fallback_d512.cu", fw, compact, None)]
+        units += [
+            ("delta_norm_d512.cu", fw, norm, None),
+            ("delta_norm_fallback_d512.cu", fw, norm, None),
+            ("compact_projection_d512.cu", fw, compact, None),
+            ("compact_projection_fallback_d512.cu", fw, compact, None),
+        ]
     gate = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D) + (_defines(TMN_SIGMOID_TANH=1) if D != 512 else ())
     units.append(("gate_affine.cu" if n == 384 else "gate.cu", fw, gate, None))
     rows = 32 if D == 256 or (D, n) == (384, 768) else 16
-    out_ln = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0,
-                      LN_MINBLOCKS=3 if D == 256 else 2)
+    out_ln = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0, LN_MINBLOCKS=3 if D == 256 else 2)
     out_src = f"output_ln_d{D}_l{n}.cu" if n == 384 or D == 512 else "output_ln_l768.cu"
     for native in (False, True):
         units.append((out_src, up, out_ln + (_defines(MW_LN_PARTIALS=1) if native else ()), None))
@@ -1033,7 +1133,7 @@ def prebuild_units(D, n, masters):
         if n == 768:
             units.append(("source_d256_l768.cu", up, splits, None))
     else:
-        src = ("contract_gp_l768.cu" if n == 768 else "contract_gp_d384_l384.cu" if D == 384 else "contract_gp_d512_l384.cu")
+        src = "contract_gp_l768.cu" if n == 768 else "contract_gp_d384_l384.cu" if D == 384 else "contract_gp_d512_l384.cu"
         units.append((src, up, _defines(WIDTH=D), None))
     if (D, n) == (512, 768):
         for master in masters:

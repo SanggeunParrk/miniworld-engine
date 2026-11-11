@@ -18,6 +18,7 @@ Per row r of the flattened [N = A*B, S] atom sequence (the adaLN modulation depe
 Three kernels: qkvg (norm + modulate + 4 projections + qk-norm + RoPE), window attention, out-proj + gated residual + FFN.
 Launched from ``kernels/swa_dit/dispatch.py``, which also picks the hand-CUDA twins of the first and last on sm_90.
 """
+
 import triton
 import triton.language as tl
 
@@ -29,8 +30,9 @@ def _rope(x, cs, sn, BR: tl.constexpr, H: tl.constexpr, D: tl.constexpr):
     """x [BR, H*D] fp32 (per head: halves x1 | x2) -> x*cos + rotate_half(x)*sin, cos / sin [BR, D/2] shared by the heads."""
     HALF: tl.constexpr = D // 2
     x4 = tl.reshape(x, (BR, H, 2, HALF))
-    x1, x2 = tl.split(tl.permute(x4, (0, 1, 3, 2)))                                  # [BR, H, HALF] each
-    c = cs[:, None, :]; s = sn[:, None, :]
+    x1, x2 = tl.split(tl.permute(x4, (0, 1, 3, 2)))  # [BR, H, HALF] each
+    c = cs[:, None, :]
+    s = sn[:, None, :]
     y1 = x1 * c - x2 * s
     y2 = x2 * c + x1 * s
     return tl.reshape(tl.permute(tl.join(y1, y2), (0, 1, 3, 2)), (BR, H * D))
@@ -44,16 +46,43 @@ def _head_rms(x, eps, BR: tl.constexpr, H: tl.constexpr, D: tl.constexpr):
 
 
 # ================================================================ ① qkvg ===============================================================
-@configured('swa_dit_inproj_fwd_triton',
-            key=["shape_key", "SAVE"],
-            default=dict(BR=32, num_warps=4, num_stages=1))
+@configured("swa_dit_inproj_fwd_triton", key=["shape_key", "SAVE"], default=dict(BR=32, num_warps=4, num_stages=1))
 @triton.jit(do_not_specialize=["NROWS", "S", "B"])
-def _swa_qkvg_fwd_kernel(Q, MOD, COS, SIN, WQKV, WG, QO, KO, VO, GO, RSTD, XS, PQS, PKS, NROWS, S, B, eps, qk_eps, shape_key,
-                         C: tl.constexpr, H: tl.constexpr, D: tl.constexpr, MODW: tl.constexpr, SAVE: tl.constexpr, BR: tl.constexpr):
+def _swa_qkvg_fwd_kernel(
+    Q,
+    MOD,
+    COS,
+    SIN,
+    WQKV,
+    WG,
+    QO,
+    KO,
+    VO,
+    GO,
+    RSTD,
+    XS,
+    PQS,
+    PKS,
+    NROWS,
+    S,
+    B,
+    eps,
+    qk_eps,
+    shape_key,
+    C: tl.constexpr,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    MODW: tl.constexpr,
+    SAVE: tl.constexpr,
+    BR: tl.constexpr,
+):
     pid = tl.program_id(0).to(tl.int64)
-    rows = pid * BR + tl.arange(0, BR).to(tl.int64); ok = rows < NROWS
+    rows = pid * BR + tl.arange(0, BR).to(tl.int64)
+    ok = rows < NROWS
     cc = tl.arange(0, C).to(tl.int64)
-    n = rows // S; s = rows - n * S; mrow = (n % B) * S + s                          # (b, atom) row of the hoisted modulation
+    n = rows // S
+    s = rows - n * S
+    mrow = (n % B) * S + s  # (b, atom) row of the hoisted modulation
     m2 = ok[:, None]
     q = tl.load(Q + rows[:, None] * C + cc[None, :], mask=m2, other=0.0).to(tl.float32)
     rstd = 1.0 / tl.sqrt(tl.sum(q * q, axis=1) / C + eps)
@@ -67,7 +96,7 @@ def _swa_qkvg_fwd_kernel(Q, MOD, COS, SIN, WQKV, WG, QO, KO, VO, GO, RSTD, XS, P
     hc = tl.arange(0, HALF).to(tl.int64)
     cs = tl.load(COS + mrow[:, None] * HALF + hc[None, :], mask=m2, other=1.0)
     sn = tl.load(SIN + mrow[:, None] * HALF + hc[None, :], mask=m2, other=0.0)
-    wofs = cc[None, :] * C + cc[:, None]                                              # W^T tile [in][out]
+    wofs = cc[None, :] * C + cc[:, None]  # W^T tile [in][out]
     # q, k: projection -> bf16 -> per-head RMSNorm (fp32 eps) -> bf16 -> RoPE -> bf16
     # head-major destinations [N, H, S, D]: element (row, h*D + d) -> ((n*H + h)*S + s)*D + d
     hm = ((n[:, None] * H + (cc[None, :] // D)) * S + s[:, None]) * D + (cc[None, :] % D)
@@ -88,27 +117,46 @@ def _swa_qkvg_fwd_kernel(Q, MOD, COS, SIN, WQKV, WG, QO, KO, VO, GO, RSTD, XS, P
 
 
 # ================================================================ ② window attention (one head per program) ==========================
-@configured('swa_dit_softmax_fwd_triton',
-            key=["shape_key", "HW"],
-            default=dict(BM=64, BN=64, num_warps=4, num_stages=1))
+@configured("swa_dit_softmax_fwd_triton", key=["shape_key", "HW"], default=dict(BM=64, BN=64, num_warps=4, num_stages=1))
 @triton.jit(do_not_specialize=["S"])
-def _swa_attn_fwd_kernel(QH, KH, VH, SEQU, O, LSE, S, scale, shape_key,
-                         C: tl.constexpr, H: tl.constexpr, D: tl.constexpr, HW: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr):
+def _swa_attn_fwd_kernel(
+    QH,
+    KH,
+    VH,
+    SEQU,
+    O,
+    LSE,
+    S,
+    scale,
+    shape_key,
+    C: tl.constexpr,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    HW: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+):
     """Program = (query tile, n*H + h).  Q / K / V head-major [N, H, S, D]; keys j with |i - j| <= HW and j < seqused[n].
     O [N, S, C] (bf16, head h in columns h*D..), padding query rows 0; LSE [N, H, S]."""
-    t = tl.program_id(0); nh = tl.program_id(1).to(tl.int64)
-    n = nh // H; h = nh - n * H
+    t = tl.program_id(0)
+    nh = tl.program_id(1).to(tl.int64)
+    n = nh // H
+    h = nh - n * H
     su = tl.load(SEQU + n)
     i0 = t * BM
-    qi = i0 + tl.arange(0, BM); qok = qi < su
+    qi = i0 + tl.arange(0, BM)
+    qok = qi < su
     dc = tl.arange(0, D).to(tl.int64)
     hb = nh * S * D
     qh = tl.load(QH + hb + qi[:, None] * D + dc[None, :], mask=qok[:, None], other=0.0)
-    m = tl.full((BM,), -float("inf"), tl.float32); l = tl.zeros((BM,), tl.float32); acc = tl.zeros((BM, D), tl.float32)
+    m = tl.full((BM,), -float("inf"), tl.float32)
+    l = tl.zeros((BM,), tl.float32)
+    acc = tl.zeros((BM, D), tl.float32)
     lo = tl.maximum(i0 - HW, 0) // BN * BN
     hi = tl.minimum(i0 + BM + HW, su)
     for j0 in range(lo, hi, BN):
-        kj = j0 + tl.arange(0, BN); kok = kj < su
+        kj = j0 + tl.arange(0, BN)
+        kok = kj < su
         kh = tl.load(KH + hb + kj[:, None] * D + dc[None, :], mask=kok[:, None], other=0.0)
         vh = tl.load(VH + hb + kj[:, None] * D + dc[None, :], mask=kok[:, None], other=0.0)
         sc = tl.dot(qh, tl.trans(kh)) * scale
@@ -129,23 +177,49 @@ def _swa_attn_fwd_kernel(QH, KH, VH, SEQU, O, LSE, S, scale, shape_key,
 
 
 # ================================================================ ③ out-proj + gated residual + FFN ===================================
-@configured('swa_dit_output_swiglu_fwd_triton',
-            key=["shape_key", "SAVE"],
-            default=dict(BR=32, NH=64, num_warps=4, num_stages=1))
+@configured("swa_dit_output_swiglu_fwd_triton", key=["shape_key", "SAVE"], default=dict(BR=32, NH=64, num_warps=4, num_stages=1))
 @triton.jit(do_not_specialize=["NROWS", "S", "B"])
-def _swa_oproj_ffn_fwd_kernel(QI, O, G, MOD, WO, WU, WD, Q1, OUT, RSTD, ATS, YS, ABS, FFS, NROWS, S, B, eps, shape_key,
-                              C: tl.constexpr, NHID: tl.constexpr, MODW: tl.constexpr, SAVE: tl.constexpr, BR: tl.constexpr, NH: tl.constexpr):
+def _swa_oproj_ffn_fwd_kernel(
+    QI,
+    O,
+    G,
+    MOD,
+    WO,
+    WU,
+    WD,
+    Q1,
+    OUT,
+    RSTD,
+    ATS,
+    YS,
+    ABS,
+    FFS,
+    NROWS,
+    S,
+    B,
+    eps,
+    shape_key,
+    C: tl.constexpr,
+    NHID: tl.constexpr,
+    MODW: tl.constexpr,
+    SAVE: tl.constexpr,
+    BR: tl.constexpr,
+    NH: tl.constexpr,
+):
     pid = tl.program_id(0).to(tl.int64)
-    rows = pid * BR + tl.arange(0, BR).to(tl.int64); ok = rows < NROWS
+    rows = pid * BR + tl.arange(0, BR).to(tl.int64)
+    ok = rows < NROWS
     cc = tl.arange(0, C).to(tl.int64)
-    n = rows // S; s = rows - n * S; mrow = (n % B) * S + s
+    n = rows // S
+    s = rows - n * S
+    mrow = (n % B) * S + s
     m2 = ok[:, None]
     ofs = rows[:, None] * C + cc[None, :]
     g = tl.load(G + ofs, mask=m2, other=0.0).to(tl.float32)
     gated = (tl.sigmoid(g) * tl.load(O + ofs, mask=m2, other=0.0).to(tl.float32)).to(tl.bfloat16)
     att = tl.dot(gated, tl.load(WO + cc[None, :] * C + cc[:, None])).to(tl.bfloat16)
     ga = tl.load(MOD + mrow[:, None] * MODW + 2 * C + cc[None, :], mask=m2, other=0.0).to(tl.bfloat16)
-    q1 = tl.load(QI + ofs, mask=m2, other=0.0) + ga * att                             # bf16
+    q1 = tl.load(QI + ofs, mask=m2, other=0.0) + ga * att  # bf16
     if SAVE:
         tl.store(Q1 + ofs, q1, mask=m2)
         tl.store(ATS + ofs, att, mask=m2)

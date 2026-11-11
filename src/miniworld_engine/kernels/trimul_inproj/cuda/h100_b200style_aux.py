@@ -15,16 +15,10 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
 def _device_source(name, namespace):
     source = (Path(__file__).with_name("b200_sources") / name).read_text()
-    end = source.index("}  // namespace " + namespace) + len(
-        "}  // namespace " + namespace
-    )
+    end = source.index("}  // namespace " + namespace) + len("}  // namespace " + namespace)
     source = source[:end]
-    source = re.sub(
-        r"^#include <(?:torch|ATen|c10)/.*\n", "", source, flags=re.MULTILINE
-    )
-    source = source.replace(
-        "__global__ void __launch_bounds__(256)", "__device__ __forceinline__ void"
-    )
+    source = re.sub(r"^#include <(?:torch|ATen|c10)/.*\n", "", source, flags=re.MULTILINE)
+    source = source.replace("__global__ void __launch_bounds__(256)", "__device__ __forceinline__ void")
     return source
 
 
@@ -54,13 +48,7 @@ extern "C" __global__ void mw_b200style_colsum(const Sum p) {
 
 @T.device_cache
 def _unit():
-    body = (
-        "#include <stdint.h>\n"
-        + _device_source("wide_aux.cu", "wide")
-        + "\n"
-        + _device_source("wide_bwd.cu", "wbwd")
-        + _STRUCTS
-    )
+    body = "#include <stdint.h>\n" + _device_source("wide_aux.cu", "wide") + "\n" + _device_source("wide_bwd.cu", "wbwd") + _STRUCTS
     for d in (256, 384, 512):
         body += f"""
 extern "C" __global__ void mw_b200style_gate_{d}(const Gate p) {{
@@ -133,20 +121,14 @@ class DriverAux:
             (gx, h // 64, 1),
             [dor, tri, mu, rs, s1, s2, go, dt, part, m, h],
         )
-        _launch(
-            "mw_b200style_colsum", ((2 * h + 31) // 32, 1, 1), [part, dgb, gx, 2 * h]
-        )
+        _launch("mw_b200style_colsum", ((2 * h + 31) // 32, 1, 1), [part, dgb, gx, 2 * h])
 
     def lnin_bwd(self, dxn, x, dy, mu, rs, gi, dx, dgb):
         m, d = x.shape
         nb = min((m + 63) // 64, 148 * 4)
         part = torch.empty((nb * 2 * d,), device=x.device, dtype=torch.float32)
-        _launch(
-            f"mw_b200style_lnin_{d}", (nb, 1, 1), [dxn, x, dy, mu, rs, gi, dx, part, m]
-        )
-        _launch(
-            "mw_b200style_colsum", ((2 * d + 31) // 32, 1, 1), [part, dgb, nb, 2 * d]
-        )
+        _launch(f"mw_b200style_lnin_{d}", (nb, 1, 1), [dxn, x, dy, mu, rs, gi, dx, part, m])
+        _launch("mw_b200style_colsum", ((2 * d + 31) // 32, 1, 1), [part, dgb, nb, 2 * d])
 
     def ln_apply(self, x, mu, rs, gi, bi, xn):
         m, d = x.shape

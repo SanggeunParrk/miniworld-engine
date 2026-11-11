@@ -25,7 +25,5 @@ def _ext():
     )
 
 
-def run(
-    x, wp, mask, y, bias, length, transposed=False, eps=1e-5, cfg=0, grid=0, cache=0
-):
+def run(x, wp, mask, y, bias, length, transposed=False, eps=1e-5, cfg=0, grid=0, cache=0):
     _ext().run(x, wp, mask, y, bias, length, transposed, eps, cfg, grid, cache)

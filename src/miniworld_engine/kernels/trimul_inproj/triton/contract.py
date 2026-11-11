@@ -15,7 +15,7 @@ def _packed_forward_fake(left, right, h):
     return left.new_empty(left.shape)
 
 
-@opaque(fake=_packed_forward_fake, name='trimul_triton_contract_fwd')
+@opaque(fake=_packed_forward_fake, name="trimul_triton_contract_fwd")
 def packed_forward(left: torch.Tensor, right: torch.Tensor, h: int) -> torch.Tensor:
     """Execute packed forward behind an opaque compiler boundary."""
     tri = left.new_empty(left.shape)
@@ -29,7 +29,7 @@ def _packed_backward_fake(grad, left, right, h):
     return (left.new_empty(left.shape), right.new_empty(right.shape))
 
 
-@opaque(fake=_packed_backward_fake, name='trimul_triton_contract_bwd')
+@opaque(fake=_packed_backward_fake, name="trimul_triton_contract_bwd")
 def packed_backward(grad: torch.Tensor, left: torch.Tensor, right: torch.Tensor, h: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Execute packed backward behind an opaque compiler boundary."""
     (dl, dr) = (left.new_empty(left.shape), right.new_empty(right.shape))
@@ -54,6 +54,8 @@ def hidden_refusal(d_pair: int, d_hidden: int) -> str | None:
     if d_pair % 16 or d_hidden % 16:
         return f"d_hidden ({d_hidden}) and d_pair ({d_pair}) must both be multiples of 16 when they differ"
     if d_pair > HIDDEN_NE_PAIR_MAX_PAIR or d_hidden > HIDDEN_NE_PAIR_MAX_HIDDEN:
-        return (f"d_hidden ({d_hidden}) != d_pair ({d_pair}) is served up to d_pair {HIDDEN_NE_PAIR_MAX_PAIR} / "
-                f"d_hidden {HIDDEN_NE_PAIR_MAX_HIDDEN}")
+        return (
+            f"d_hidden ({d_hidden}) != d_pair ({d_pair}) is served up to d_pair {HIDDEN_NE_PAIR_MAX_PAIR} / "
+            f"d_hidden {HIDDEN_NE_PAIR_MAX_HIDDEN}"
+        )
     return None

@@ -47,7 +47,7 @@ def chai_products(a, b, mask, s, n):
     (``ogemm_sm80``; their blocks are exactly 0), one launch per group, from L 384; else the cuBLAS batched GEMM."""
     import torch
 
-    if mask is None or n < 384:   # short lengths: the eight launches cost more than the skipped blocks save (measured L128 1.4x)
+    if mask is None or n < 384:  # short lengths: the eight launches cost more than the skipped blocks save (measured L128 1.4x)
         return torch.bmm(a.view(8, s, n * 8).transpose(1, 2), b.view(8, s, n * 8))
     from . import ogemm_sm80
 

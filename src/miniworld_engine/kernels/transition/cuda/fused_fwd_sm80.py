@@ -68,9 +68,7 @@ def _k_perm(dev, d):
     """Physical GEMM1 k index 16 s + kk -> input column (thread q of a quad holds the 16 B vectors at 32 i + 8 q)."""
     s = torch.arange(d // 16, device=dev).view(-1, 1)
     kk = torch.arange(16, device=dev).view(1, -1)
-    return (
-        32 * (s // 2) + 8 * ((kk % 8) // 2) + 4 * (s % 2) + 2 * (kk // 8) + kk % 2
-    ).reshape(-1)
+    return (32 * (s // 2) + 8 * ((kk % 8) // 2) + 4 * (s % 2) + 2 * (kk // 8) + kk % 2).reshape(-1)
 
 
 def _o_perm(dev, d):
@@ -86,9 +84,7 @@ def _layout_fwd(wa, wb, ws, dev, d, h):
     wa_p, wb_p = wa[:, kp], wb[:, kp]
     ws_p = ws[_o_perm(dev, d)]
     nstep, nchunk = CH // 16, h // CH
-    w1 = torch.stack(
-        [wa_p.view(nchunk, nstep, 16, d), wb_p.view(nchunk, nstep, 16, d)], 2
-    ).reshape(nchunk, 2 * CH, d)
+    w1 = torch.stack([wa_p.view(nchunk, nstep, 16, d), wb_p.view(nchunk, nstep, 16, d)], 2).reshape(nchunk, 2 * CH, d)
     w1 = w1.view(nchunk, 2 * CH, d // 8, 8).transpose(1, 2).reshape(nchunk, -1)
     w2 = ws_p.view(d, nchunk, CH // 8, 8).permute(1, 2, 0, 3).reshape(nchunk, -1)
     return w1, w2
@@ -102,22 +98,14 @@ def _tables(dev, d, h):
     code = lambda src: torch.arange(n, device=dev, dtype=torch.int64) | (src << 26)  # noqa: E731
     wa, wb = code(0).view(h, d), code(1).view(h, d)
     ws = code(2).view(d, h)
-    w1, w2 = _layout_fwd(
-        wa | (1 << 28), wb, ws | (1 << 29), dev, d, h
-    )  # W1 carries 0.5 Wa; W2 runs in f16
+    w1, w2 = _layout_fwd(wa | (1 << 28), wb, ws | (1 << 29), dev, d, h)  # W1 carries 0.5 Wa; W2 runs in f16
     idx16 = torch.cat([w1, w2], 1).reshape(-1).to(torch.int32).contiguous()
     s_, q_ = (
         torch.arange(d // 16, device=dev).view(-1, 1),
         torch.arange(4, device=dev).view(1, -1),
     )
-    c0 = (32 * (s_ // 2) + 8 * q_ + 4 * (s_ % 2)).reshape(-1, 1) + torch.arange(
-        4, device=dev
-    ).view(1, -1)
-    idx32 = (
-        torch.cat([c0.reshape(-1), c0.reshape(-1) | (1 << 26)])
-        .to(torch.int32)
-        .contiguous()
-    )
+    c0 = (32 * (s_ // 2) + 8 * q_ + 4 * (s_ % 2)).reshape(-1, 1) + torch.arange(4, device=dev).view(1, -1)
+    idx32 = torch.cat([c0.reshape(-1), c0.reshape(-1) | (1 << 26)]).to(torch.int32).contiguous()
     return idx16, idx32
 
 
@@ -154,16 +142,11 @@ def pack(gamma, beta, wa, wb, ws, cache: bool):
         # grad off: a CUDA-graph capture reads the pack its eager warm-up made (``capture_reads_eager``): no cast / pack kernel per replay
         params = [gamma, beta, wa, wb, ws] if ln else [wa, wb, ws]
         return _capture.param_forms(("transition_sm80_pack", d, h, ln), params, lambda: build()[:2], capture_reads_eager=True)
-    key = tuple(
-        (t.data_ptr(), t._version, t.dtype)
-        for t in ((gamma, beta, wa, wb, ws) if ln else (wa, wb, ws))
-    ) + (d, h, ln)
+    key = tuple((t.data_ptr(), t._version, t.dtype) for t in ((gamma, beta, wa, wb, ws) if ln else (wa, wb, ws))) + (d, h, ln)
     return _capture.lookup(_packs, key, build, limit=8)[:2]
 
 
-def forward(
-    x, gamma, beta, wa, wb, ws, eps: float, save: bool, cache: bool, ln: bool = True
-):
+def forward(x, gamma, beta, wa, wb, ws, eps: float, save: bool, cache: bool, ln: bool = True):
     """(out, xn, stats) of the fused forward: x [M, D] bf16, gamma / beta f32 [D], weights bf16 or fp32 (cast in ``pack``); xn / stats are empty unless ``save`` (and ``ln``).
     Not ``ln``: the bare SwiGLU FFN (no LayerNorm, no residual); gamma / beta are ignored."""
     d, h = x.shape[1], wa.shape[0]

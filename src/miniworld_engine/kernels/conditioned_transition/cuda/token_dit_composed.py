@@ -23,10 +23,7 @@ from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner imp
 def _row_kernels(device):
     """The row passes between the GEMMs: CUDA on H100 and B200 (``kernels/conditioned_transition/cuda``), Triton elsewhere
     or when the extension does not build."""
-    if (
-        device.type == "cuda"
-        and torch.cuda.get_device_capability(device) in ((9, 0), (10, 0))
-    ):
+    if device.type == "cuda" and torch.cuda.get_device_capability(device) in ((9, 0), (10, 0)):
         try:
             from miniworld_engine.kernels.conditioned_transition import (
                 cuda as cuda_rows,
@@ -48,25 +45,16 @@ class FusedTokenDiTComposed(FusedTokenDiT):
 
     @staticmethod
     def _blackwell_bf16(device, dtype):
-        return (
-            dtype is torch.bfloat16
-            and device.type == "cuda"
-            and torch.cuda.get_device_capability(device) == (10, 0)
-        )
+        return dtype is torch.bfloat16 and device.type == "cuda" and torch.cuda.get_device_capability(device) == (10, 0)
 
     def _gemm_swiglu(self, device, xa):
         """The expand GEMM with the SwiGLU epilogue (``kernels/conditioned_transition/cuda/gemm_swiglu.py``: sm_100a, or
         sm_90a) where it fits and builds; cuBLAS + the SwiGLU row pass otherwise."""
-        cap = (
-            torch.cuda.get_device_capability(device) if device.type == "cuda" else None
-        )
+        cap = torch.cuda.get_device_capability(device) if device.type == "cuda" else None
         if (
             torch.compiler.is_compiling()
             or cap not in ((9, 0), (10, 0))
-            or not (
-                self.dtype is torch.bfloat16
-                or (self.dtype is torch.float32 and cap == (9, 0))
-            )
+            or not (self.dtype is torch.bfloat16 or (self.dtype is torch.float32 and cap == (9, 0)))
         ):  # fp32: sm_90 (TF32)
             return None
         idx = device.index if device.index is not None else torch.cuda.current_device()

@@ -78,8 +78,9 @@ def _core_bwd_fake(dgsigt, vgt, outt, p, shape_key=0):
 
 
 @opaque(fake=_core_bwd_fake, name="bias_only_attention_core_t_bwd")
-def _core_bwd(dgsigt: torch.Tensor, vgt: torch.Tensor, outt: torch.Tensor, p: torch.Tensor,
-              shape_key: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
+def _core_bwd(
+    dgsigt: torch.Tensor, vgt: torch.Tensor, outt: torch.Tensor, p: torch.Tensor, shape_key: int = 0
+) -> tuple[torch.Tensor, torch.Tensor]:
     """-> (``dvg^T`` [2C, M]: value gradient rows then gate gradient rows, ``dP`` like ``p``)."""
     c, m = outt.shape
     dvgt = torch.empty_like(vgt)
@@ -93,14 +94,14 @@ def _core_bwd(dgsigt: torch.Tensor, vgt: torch.Tensor, outt: torch.Tensor, p: to
         dp = torch.empty(p.shape, device=p.device, dtype=p.dtype)
         for b in range(nb):
             sl = slice(b * length, (b + 1) * length)
-            torch.bmm(d3[:, :, sl], p[b], out=dv3[:, :, sl])                           # dVt_h = dOut^T_h @ P_h
-            torch.bmm(d3[:, :, sl].transpose(1, 2), v3[:, :, sl], out=dp[b])           # dP_h = dOut_h @ V_h^T
+            torch.bmm(d3[:, :, sl], p[b], out=dv3[:, :, sl])  # dVt_h = dOut^T_h @ P_h
+            torch.bmm(d3[:, :, sl].transpose(1, 2), v3[:, :, sl], out=dp[b])  # dP_h = dOut_h @ V_h^T
         return dvgt, dp
     h, length = p.shape[0], p.shape[1]
     rows = c // h * (m // length)
     d3 = doutt.view(h, rows, length)
-    torch.bmm(d3, p, out=dvgt[:c].view(h, rows, length))                  # dVt_h = dOut^T_h @ P_h
-    dp = torch.bmm(d3.transpose(1, 2), vgt[:c].view(h, rows, length))     # dP_h = dOut_h @ V_h^T, contraction over (d, a)
+    torch.bmm(d3, p, out=dvgt[:c].view(h, rows, length))  # dVt_h = dOut^T_h @ P_h
+    dp = torch.bmm(d3.transpose(1, 2), vgt[:c].view(h, rows, length))  # dP_h = dOut_h @ V_h^T, contraction over (d, a)
     return dvgt, dp
 
 
@@ -116,16 +117,16 @@ class BiasOnlyCoreT(torch.autograd.Function):
         ctx.master = x.dtype == torch.bfloat16 and wv.dtype == torch.float32
         if ctx.master:
             if wv.is_contiguous() and wg.is_contiguous() and wo.is_contiguous():
-                w_cat, w_out = cast_pack([wv, wg, wo], 2)   # one launch, the halves of the concatenation written in place
+                w_cat, w_out = cast_pack([wv, wg, wo], 2)  # one launch, the halves of the concatenation written in place
             else:
                 w_cat, w_out = torch.cat([wv, wg], 0).to(torch.bfloat16), wo.to(torch.bfloat16)
         else:
             w_cat, w_out = torch.cat([wv, wg], 0), wo
         key = both_key(x.shape[0])  # M tokens: A * L (one pair), or B * L (``p`` [B, H, L, L], a pair per sample)
         ctx.key = key
-        vgt = torch.mm(w_cat, x.t())                 # [2C, M]
+        vgt = torch.mm(w_cat, x.t())  # [2C, M]
         outt, gsigt = _core_fwd(vgt, p, shape_key=key)
-        o = torch.mm(gsigt.t(), w_out.t())           # [M, d]
+        o = torch.mm(gsigt.t(), w_out.t())  # [M, d]
         ctx.save_for_backward(x, w_cat, w_out, p, vgt, outt, gsigt)
         ctx.c = wv.shape[0]
         return o
@@ -135,12 +136,12 @@ class BiasOnlyCoreT(torch.autograd.Function):
         x, w_cat, w_out, p, vgt, outt, gsigt = ctx.saved_tensors
         do = do.contiguous()
         f32 = torch.float32 if ctx.master else None
-        dgsigt = torch.mm(w_out.t(), do.t())         # [C, M]
+        dgsigt = torch.mm(w_out.t(), do.t())  # [C, M]
         dwo = torch.mm(do.t(), gsigt.t(), out_dtype=f32) if f32 else torch.mm(do.t(), gsigt.t())
         dvgt, dp = _core_bwd(dgsigt, vgt, outt, p, shape_key=ctx.key)
-        dx = torch.mm(dvgt.t(), w_cat)               # [M, d]
-        dw = torch.mm(dvgt, x, out_dtype=f32) if f32 else torch.mm(dvgt, x)   # [2C, d]
-        return dx, dw[:ctx.c], dw[ctx.c:], dwo, dp
+        dx = torch.mm(dvgt.t(), w_cat)  # [M, d]
+        dw = torch.mm(dvgt, x, out_dtype=f32) if f32 else torch.mm(dvgt, x)  # [2C, d]
+        return dx, dw[: ctx.c], dw[ctx.c :], dwo, dp
 
 
 def bias_only_core_t(x, wv, wg, wo, p):

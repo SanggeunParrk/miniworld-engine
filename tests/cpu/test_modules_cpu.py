@@ -35,8 +35,19 @@ def _case(n: int, row: dict, *, mode: str = "eval", dtype: str = "float32") -> c
     lengths = cfgmod._ints(row["lengths"])
     depths = cfgmod._ints(row["depths"])
     length = min(min(lengths), SMALL.get(row["stream"], min(lengths)))
-    return cfgmod.Case(row=n, module=row["module"], model=row["model"], stream=row["stream"], kwargs=kwargs, length=length,
-                       depth=min(min(depths), 4) if depths else None, samples=1, dtype=dtype, mode=mode, seed=0)
+    return cfgmod.Case(
+        row=n,
+        module=row["module"],
+        model=row["model"],
+        stream=row["stream"],
+        kwargs=kwargs,
+        length=length,
+        depth=min(min(depths), 4) if depths else None,
+        samples=1,
+        dtype=dtype,
+        mode=mode,
+        seed=0,
+    )
 
 
 def _build(case: cfgmod.Case, backend: str = "pytorch") -> tuple[BackendModule, dict]:
@@ -102,11 +113,12 @@ def test_unknown_backend_is_a_value_error(module: str):
     m = cfgmod.construct(cls, cfgmod._variants(FIRST[module][1]["dims"], FIRST[module][1]["options"])[0])
     with pytest.raises(ValueError, match="no backend 'no-such-backend'"):
         m.set_backend("no-such-backend")
-    assert m.backend == "pytorch"   # unchanged by the refused switch
+    assert m.backend == "pytorch"  # unchanged by the refused switch
     if "backend" in inspect.signature(cls.__init__).parameters:
         with pytest.raises(ValueError, match="no backend"):
-            cfgmod.construct(cls, {**cfgmod._variants(FIRST[module][1]["dims"], FIRST[module][1]["options"])[0],
-                                   "backend": "no-such-backend"})
+            cfgmod.construct(
+                cls, {**cfgmod._variants(FIRST[module][1]["dims"], FIRST[module][1]["options"])[0], "backend": "no-such-backend"}
+            )
 
 
 ENGINE_BACKENDS = [(m, b) for m in CLASSES for b in cfgmod.module_class(m).backends if b not in ("pytorch", *cfgmod.EXTERNAL)]
@@ -140,5 +152,5 @@ def test_state_dict_is_backend_independent(module: str):
             got = {k: (tuple(v.shape), v.dtype) for k, v in built.state_dict().items()}
             assert got.keys() == want.keys(), f"{backend}: keys differ: {sorted(got.keys() ^ want.keys())[:10]}"
             assert got == want, f"{backend}: shapes / dtypes differ"
-            built.load_state_dict(ref.state_dict())   # a checkpoint of one backend loads into another
+            built.load_state_dict(ref.state_dict())  # a checkpoint of one backend loads into another
     ref.set_backend("pytorch")

@@ -23,7 +23,7 @@ from miniworld_engine.kernels._tf32 import tf32_matmul
 from miniworld_engine.kernels.integrations import local_dit as _ld
 
 DS, DC, DP, NH = 128, 128, 16, 4
-_NW = 27   # the canonical leaves (local_dit.WEIGHTS + CROSS_WEIGHTS); a model's option leaves follow them (KQLN: wq bq wk bk)
+_NW = 27  # the canonical leaves (local_dit.WEIGHTS + CROSS_WEIGHTS); a model's option leaves follow them (KQLN: wq bq wk bk)
 F32 = torch.float32
 BF = torch.bfloat16
 _HOIST_COND: dict = {}
@@ -52,11 +52,7 @@ def _edge_tables(z, gamma, wb, n, kmask, n0, qblock=False, uid=None):
 def _edge_index(z, n, kmask, n0, qblock=False):
     """The five slid edge windows of ``_edge_tables``: their indices [5], key positions [5, 128] and key validity [5, 128]."""
     nwin = n // 32
-    n_real = (
-        kmask.sum()
-        if kmask is not None
-        else torch.full((), n0, device=z.device, dtype=torch.int64)
-    )
+    n_real = kmask.sum() if kmask is not None else torch.full((), n0, device=z.device, dtype=torch.int64)
     # IntelliFold2's "slide_qblock": the slid rule against the real count rounded up to a whole query window
     # (``atom_dit._window_positions``); the keys past the real atoms stay masked (``valid``)
     n_rule = (n_real + 31) // 32 * 32 if qblock else n_real
@@ -72,7 +68,7 @@ def _edge_valid(valid, idx, keys, kmask, uid):
     sees only its conformer's keys, a padding query every valid key)."""
     if uid is None:
         return valid[:, None, :]
-    rows = 32 * idx[:, None] + torch.arange(32, device=idx.device)                     # [5, 32]
+    rows = 32 * idx[:, None] + torch.arange(32, device=idx.device)  # [5, 32]
     same = uid[rows][:, :, None] == uid[keys][:, None, :]
     if kmask is not None:
         same = same | ~kmask[rows][:, :, None]
@@ -112,8 +108,9 @@ def _slid_edges_bwd(do, dd, q, k, v, tables, a, n):
     dke = torch.empty(a, 5, DS, DS, device=dev, dtype=F32)
     dve = torch.empty(a, 5, DS, DS, device=dev, dtype=F32)
     dbp = torch.empty(a, 5, NH, 32, DS, device=dev, dtype=F32)
-    _edge_ext().edge_bwd_compute(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), do.view(a, n, DS), dd, keys, idx, ebias, dqe, dke,
-                                 dve, dbp)
+    _edge_ext().edge_bwd_compute(
+        q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), do.view(a, n, DS), dd, keys, idx, ebias, dqe, dke, dve, dbp
+    )
     return dqe, dke, dve, dbp
 
 
@@ -135,12 +132,7 @@ def _slid_edges_add(edges, tables, dp, dz, z, gamma, wb, a, n):
 def _shared(cond) -> bool:
     """One conditioning for every sample: an expanded view (stride 0 over the samples) of [1, 1, N, 128]. The modulation tables are made
     once per atom instead of once per atom and sample, and read modulo N."""
-    return (
-        cond.shape[0] > 1
-        and cond.stride(0) == 0
-        and cond.stride(2) == DC
-        and cond.stride(3) == 1
-    )
+    return cond.shape[0] > 1 and cond.stride(0) == 0 and cond.stride(2) == DC and cond.stride(3) == 1
 
 
 def _dims(single):
@@ -151,9 +143,25 @@ def _dims(single):
     return a * g, n0, n, a * g * n
 
 
-def _fwd_fake(single, cond, pair, kmask, weights, save, parallel_kv=0, slide=False, qblock=False, ident=False, pars=False, noout=False, up=False,
-              kqln=False, kq_eps=1e-5, eps=1e-5,
-              uid=None):
+def _fwd_fake(
+    single,
+    cond,
+    pair,
+    kmask,
+    weights,
+    save,
+    parallel_kv=0,
+    slide=False,
+    qblock=False,
+    ident=False,
+    pars=False,
+    noout=False,
+    up=False,
+    kqln=False,
+    kq_eps=1e-5,
+    eps=1e-5,
+    uid=None,
+):
     out = torch.empty_like(single)
     if not save:
         return [out]
@@ -170,14 +178,14 @@ def _fwd_fake(single, cond, pair, kmask, weights, save, parallel_kv=0, slide=Fal
         t(m, DS),
         t(m, DS),
         t(m, DS),
-        t(0 if parallel_kv == 2 else m, DS),   # xkv (one AdaLN: x1, an empty slot)
+        t(0 if parallel_kv == 2 else m, DS),  # xkv (one AdaLN: x1, an empty slot)
         t(m, DS),
         t(a, NH, n, d=F32),
         t(m, DS),
         t(m, DS),
         t(m, DS),
         t(m, DS),
-        t(m if kqln else 0, 2 * DS),   # qkr: the raw q | k (KQLN)
+        t(m if kqln else 0, 2 * DS),  # qkr: the raw q | k (KQLN)
     ]
 
 
@@ -217,43 +225,38 @@ def _fwd(
     if groups > 1 and (tf32 or save):
         raise ValueError("G distinct pairs: bf16 inference only (the TF32 twin and the backward keep one bias)")
     attn = local.attn_fwd_mma32 if tf32 else local.attn_fwd_mma
-    opts = ((("IDENT",) if ident else ()) + (("PARS",) if pars else ()) + (("NOOUT",) if noout else ()) + (("KQLN",) if kqln else ())
-            + (("UP",) if up else ()))
-    wup = weights[_NW + (4 if kqln else 0)] if up else None   # the up-gate weight, after the flat q / k LN leaves
-    kq = torch.stack([w.float() for w in weights[_NW:_NW + 4]]).contiguous() if kqln else None   # [wq | bq | wk | bk] of the flat q / k LN
+    opts = (
+        (("IDENT",) if ident else ())
+        + (("PARS",) if pars else ())
+        + (("NOOUT",) if noout else ())
+        + (("KQLN",) if kqln else ())
+        + (("UP",) if up else ())
+    )
+    wup = weights[_NW + (4 if kqln else 0)] if up else None  # the up-gate weight, after the flat q / k LN leaves
+    kq = torch.stack([w.float() for w in weights[_NW : _NW + 4]]).contiguous() if kqln else None  # [wq | bq | wk | bk] of the flat q / k LN
     weights = weights[:_NW]
     with torch.cuda.device(single.device):
-        p = k90.pack([*weights, wup] if up else weights, tf32)   # UP: + W_u chunks beside [Wa_j; Wb_j]
+        p = k90.pack([*weights, wup] if up else weights, tf32)  # UP: + W_u chunks beside [Wa_j; Wb_j]
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
-        c2 = (
-            _ld._padded(cond[:1], n).reshape(groups * n, DC)
-            if shared
-            else _ld._padded(cond, n).reshape(m, DC)
-        ).contiguous()
-        nmod = groups * n if shared else m   # shared: one conditioning per (group, atom), read modulo G N (rows are [A][G][N])
-        hoist = (not save)
-        wkey = (
-            (tuple((w.data_ptr(), w._version) for w in weights), parallel_kv, ident, pars, eps)
-            if hoist
-            else None
-        )
+        c2 = (_ld._padded(cond[:1], n).reshape(groups * n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
+        nmod = groups * n if shared else m  # shared: one conditioning per (group, atom), read modulo G N (rows are [A][G][N])
+        hoist = not save
+        wkey = (tuple((w.data_ptr(), w._version) for w in weights), parallel_kv, ident, pars, eps) if hoist else None
 
         def tables():
             return k90.cond_fwd(c2, p, tf32, options=opts)
 
-        mod, mkv = (
-            _ld._hoisted(_HOIST_COND, cond, (wkey, n), tables) if hoist else tables()
-        )
+        mod, mkv = _ld._hoisted(_HOIST_COND, cond, (wkey, n), tables) if hoist else tables()
         zs = [_ld._trunk(pair[g : g + 1], n).contiguous() for g in range(groups)]
 
         def pair_bias():
             biases = [local.pair_bias_mma(zg, p["gamma"], p["wbias"], kmask, n) for zg in zs]
-            if uid is not None:   # Chai-1: a real query sees only the keys of its own conformer
+            if uid is not None:  # Chai-1: a real query sees only the keys of its own conformer
                 same = _same_conformer(uid, kmask, n)
                 for b in biases:
                     b.masked_fill_(~same[None], float("-inf"))
-            return biases[0] if groups == 1 else torch.stack(biases).contiguous()   # [G, 4, nwin, 32, 128]
+            return biases[0] if groups == 1 else torch.stack(biases).contiguous()  # [G, 4, nwin, 32, 128]
 
         if hoist:
             mk = None if kmask is None else _ld._tkey(kmask)
@@ -261,56 +264,89 @@ def _fwd(
         else:
             bias2 = pair_bias()
         if save:
-            q, sg, k, v, x1, xkv, *rest = cast("tuple[torch.Tensor, ...]", k90.pre_fwd(
-                s2, mod, mkv, p, tf32, save=True, eps=eps, nmod=nmod, parallel_kv=parallel_kv, options=opts, kq=kq, kq_eps=kq_eps
-            ))
+            q, sg, k, v, x1, xkv, *rest = cast(
+                "tuple[torch.Tensor, ...]",
+                k90.pre_fwd(
+                    s2, mod, mkv, p, tf32, save=True, eps=eps, nmod=nmod, parallel_kv=parallel_kv, options=opts, kq=kq, kq_eps=kq_eps
+                ),
+            )
             qkr = rest[0] if kqln else s2.new_empty(0, 2 * DS)
         else:
-            q, sg, k, v = cast("tuple[torch.Tensor, ...]", k90.pre_fwd(
-                s2, mod, mkv, p, tf32, eps=eps, nmod=nmod, parallel_kv=parallel_kv, options=opts, kq=kq, kq_eps=kq_eps
-            ))
+            q, sg, k, v = cast(
+                "tuple[torch.Tensor, ...]",
+                k90.pre_fwd(s2, mod, mkv, p, tf32, eps=eps, nmod=nmod, parallel_kv=parallel_kv, options=opts, kq=kq, kq_eps=kq_eps),
+            )
         o, lse = attn(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2, **({"groups": groups} if groups > 1 else {}))
         if slide:
+
             def edges():
                 return [_edge_tables(zg, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0, qblock, uid) for zg in zs]
 
-            edge_tables = _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk, qblock, None if uid is None else _ld._tkey(uid)), edges) if hoist else edges()
+            edge_tables = (
+                _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk, qblock, None if uid is None else _ld._tkey(uid)), edges)
+                if hoist
+                else edges()
+            )
             _slid_edges(o, q, k, v, edge_tables, a, groups, n)
         o = o.view(m, DS)
         if not save:
             return [
                 _ld._unpadded(
-                    cast(torch.Tensor, k90.post_fwd(s2, o, sg, mod, p, tf32, eps=eps, nmod=nmod, options=opts)).view(a // groups, groups, n, DS),
+                    cast(torch.Tensor, k90.post_fwd(s2, o, sg, mod, p, tf32, eps=eps, nmod=nmod, options=opts)).view(
+                        a // groups, groups, n, DS
+                    ),
                     single.shape,
                 )
             ]
-        out, u, a2, x2, t = cast("tuple[torch.Tensor, ...]", k90.post_fwd(s2, o, sg, mod, p, tf32, save=True, eps=eps, nmod=nmod, options=opts))
-        if parallel_kv == 2:   # one AdaLN: xkv is x1 (custom-op outputs may not alias: an empty slot, the backward reads x1)
+        out, u, a2, x2, t = cast(
+            "tuple[torch.Tensor, ...]", k90.post_fwd(s2, o, sg, mod, p, tf32, save=True, eps=eps, nmod=nmod, options=opts)
+        )
+        if parallel_kv == 2:  # one AdaLN: xkv is x1 (custom-op outputs may not alias: an empty slot, the backward reads x1)
             xkv = x1.new_empty(0, DS)
-    return cast("list[torch.Tensor]", [  # save: every slot was set above
-        _ld._unpadded(out.view(a // groups, groups, n, DS), single.shape),
-        bias2,
-        mod,
-        mkv,
-        q,
-        k,
-        v,
-        sg,
-        x1,
-        xkv,
-        o,
-        lse,
-        u,
-        a2,
-        x2,
-        t,
-        qkr,
-    ])
+    return cast(
+        "list[torch.Tensor]",
+        [  # save: every slot was set above
+            _ld._unpadded(out.view(a // groups, groups, n, DS), single.shape),
+            bias2,
+            mod,
+            mkv,
+            q,
+            k,
+            v,
+            sg,
+            x1,
+            xkv,
+            o,
+            lse,
+            u,
+            a2,
+            x2,
+            t,
+            qkr,
+        ],
+    )
 
 
-def _bwd_fake(dy, single, cond, pair, kmask, weights, saved, parallel_kv=0, slide=False, qblock=False, ident=False, pars=False, noout=False, up=False,
-              kqln=False, kq_eps=1e-5, eps=1e-5,
-              uid=None):
+def _bwd_fake(
+    dy,
+    single,
+    cond,
+    pair,
+    kmask,
+    weights,
+    saved,
+    parallel_kv=0,
+    slide=False,
+    qblock=False,
+    ident=False,
+    pars=False,
+    noout=False,
+    up=False,
+    kqln=False,
+    kq_eps=1e-5,
+    eps=1e-5,
+    uid=None,
+):
     return [
         torch.empty_like(single),
         torch.empty_like(cond),
@@ -347,13 +383,18 @@ def _bwd(
     )
 
     bias2, mod, mkv, q, k, v, sg, x1, xkv, o, lse, u, a2, x2, t, qkr = saved
-    if parallel_kv == 2:   # one AdaLN for q and k / v: xkv is x1
+    if parallel_kv == 2:  # one AdaLN for q and k / v: xkv is x1
         xkv = x1
-    opts = ((("IDENT",) if ident else ()) + (("PARS",) if pars else ()) + (("NOOUT",) if noout else ()) + (("KQLN",) if kqln else ())
-            + (("UP",) if up else ()))
-    wup = weights[_NW + (4 if kqln else 0)] if up else None   # the up-gate weight, after the flat q / k LN leaves
-    kq = torch.stack([w.float() for w in weights[_NW:_NW + 4]]).contiguous() if kqln else None   # [wq | bq | wk | bk] of the flat q / k LN
-    kq_leaves = weights[_NW:_NW + 4] if kqln else []
+    opts = (
+        (("IDENT",) if ident else ())
+        + (("PARS",) if pars else ())
+        + (("NOOUT",) if noout else ())
+        + (("KQLN",) if kqln else ())
+        + (("UP",) if up else ())
+    )
+    wup = weights[_NW + (4 if kqln else 0)] if up else None  # the up-gate weight, after the flat q / k LN leaves
+    kq = torch.stack([w.float() for w in weights[_NW : _NW + 4]]).contiguous() if kqln else None  # [wq | bq | wk | bk] of the flat q / k LN
+    kq_leaves = weights[_NW : _NW + 4] if kqln else []
     weights = weights[:_NW]
     tf32 = single.dtype == F32
     a, _n0, n, m = _dims(single)
@@ -361,22 +402,14 @@ def _bwd(
     with torch.cuda.device(dev):
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
-        c2 = (
-            _ld._padded(cond[:1], n).reshape(n, DC)
-            if shared
-            else _ld._padded(cond, n).reshape(m, DC)
-        ).contiguous()
+        c2 = (_ld._padded(cond[:1], n).reshape(n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
         nmod = n if shared else m
         z = _ld._trunk(pair, n).contiguous()
-        pw = [*weights, wup] if up else weights   # UP: + W_u chunks (tr_bwd90) and the [Wa; Wb; Wu]^T blocks 4, 5 (post_bwd90)
+        pw = [*weights, wup] if up else weights  # UP: + W_u chunks (tr_bwd90) and the [Wa; Wb; Wu]^T blocks 4, 5 (post_bwd90)
         p, pb = k90.pack(pw, tf32), k90.pack_bwd(pw, tf32)
         dyp = _ld._padded(dy.to(s2.dtype).contiguous(), n).reshape(m, DS).contiguous()
-        sh = (
-            (4, n, 1) if (shared and a % 4 == 0 and n % 32 == 0) else None
-        )  # grouped-sample reduction (4 samples per CTA group)
-        dt, hh, dab, dmod, cs_st = k90.tr_bwd(
-            dyp, t, mod, x2, p, pb, tf32, nmod=nmod, shared=sh, options=opts
-        )
+        sh = (4, n, 1) if (shared and a % 4 == 0 and n % 32 == 0) else None  # grouped-sample reduction (4 samples per CTA group)
+        dt, hh, dab, dmod, cs_st = k90.tr_bwd(dyp, t, mod, x2, p, pb, tf32, nmod=nmod, shared=sh, options=opts)
         dp = torch.empty(m, 512, device=dev, dtype=s2.dtype)  # [dg | dq | dk | dv]
         da2, du, gated, do, dd, cs_so, cs_sc2 = k90.post_bwd(
             dab, dyp, s2 if pars else a2, mod, u, sg, o, pb, dmod, dp, n, tf32, eps=eps, nmod=nmod, shared=sh, options=opts
@@ -401,23 +434,17 @@ def _bwd(
             dgamma_pair, dwb = dgamma_pair + dg_e, dwb + dwb_e
         else:
             dz = dzk
-        if kqln:   # the flat q / k LayerNorm backward on dp's dq / dk (after the attention backward and the edge windows)
+        if kqln:  # the flat q / k LayerNorm backward on dp's dq / dk (after the attention backward and the edge windows)
             cs_kq = k90.kqln_bwd(dp, qkr, kq, tf32, kq_eps)
         dx, dmkv, cs_sc1, cs_bs, cs_bq = k90.pre_bwd(
             dp, x1, s2, mod, mkv, da2, pb, p, dmod, tf32, eps=eps, nmod=nmod, shared=sh, parallel_kv=parallel_kv, options=opts
         )
         if shared:
-            if (
-                n % k90.ROWS == 0
-            ):  # one kernel: partial sums, the six products, LN backward
-                dc, nc, dmod, dmkv = k90.cond_bwd_shared(
-                    dmod.view(-1, n, 768), dmkv.view(-1, n, 256), c2, pb, tf32, a, options=opts
-                )
+            if n % k90.ROWS == 0:  # one kernel: partial sums, the six products, LN backward
+                dc, nc, dmod, dmkv = k90.cond_bwd_shared(dmod.view(-1, n, 768), dmkv.view(-1, n, 256), c2, pb, tf32, a, options=opts)
                 c2g = c2.float()
-            else:   # (unreached: n is a multiple of 128; the default block's conditioning only)
-                dc, nc, dmod, dmkv, c2g = _cond_bwd_shared(
-                    dmod, dmkv, c2, weights, a, n
-                )
+            else:  # (unreached: n is a multiple of 128; the default block's conditioning only)
+                dc, nc, dmod, dmkv, c2g = _cond_bwd_shared(dmod, dmkv, c2, weights, a, n)
         else:
             dc, nc = k90.cond_bwd(dmod, dmkv, c2, pb, tf32, options=opts)
             c2g = c2
@@ -426,7 +453,7 @@ def _bwd(
         dwkv = mm(dp[:, 256:512], xkv)  # [dk | dv]^T xkv -> Wk, Wv
         dwo = mm(du, gated)
         dwab = mm(dab[:, :512], x2)  # [Wa; Wb]
-        dwu = mm(dab[:, 512:], x2) if up else None   # W_u (the up-gate)
+        dwu = mm(dab[:, 512:], x2) if up else None  # W_u (the up-gate)
         dwd = mm(dt, hh)
         dc1 = mm(dmod[:, 0:256], nc)  # d W' of (Ws1', Wb1')
         dc2 = mm(dmod[:, 384:640], nc)  # (Ws2', Wb2')
@@ -468,8 +495,8 @@ def _bwd(
     else:
         dcond = _ld._unpadded(dc.view(a, 1, n, DC), cond.shape)
     dpair = dz[: pair.shape[1]].reshape(pair.shape).to(pair.dtype)
-    kq_grads = [cs_kq[128 * i:128 * (i + 1)].to(w.dtype).clone() for i, w in enumerate(kq_leaves)] if kqln else []
-    up_grads = [cast(torch.Tensor, dwu).to(cast(torch.Tensor, wup).dtype)] if up else []   # (both set when up)
+    kq_grads = [cs_kq[128 * i : 128 * (i + 1)].to(w.dtype).clone() for i, w in enumerate(kq_leaves)] if kqln else []
+    up_grads = [cast(torch.Tensor, dwu).to(cast(torch.Tensor, wup).dtype)] if up else []  # (both set when up)
     return [dsingle, dcond, dpair, *outs, *kq_grads, *up_grads]
 
 
@@ -492,11 +519,7 @@ def _cond_bwd_shared(dmod, dmkv, c2, weights, a, n):
         dkv = dk[:, 0:128] @ w["kv_sc_w"] + dk[:, 128:256] @ w["kv_bi_w"]
         raw = ds[:, 256:384] @ w["so_w"] + ds[:, 640:768] @ w["st_w"]
     dn = d1 * w["g1"] + d2 * w["g2"] + dkv * w["gkv"]
-    dc = (
-        rstd
-        * (dn - dn.mean(-1, keepdim=True) - nrm * (dn * nrm).mean(-1, keepdim=True))
-        + raw
-    )
+    dc = rstd * (dn - dn.mean(-1, keepdim=True) - nrm * (dn * nrm).mean(-1, keepdim=True)) + raw
     return dc / a, nrm, ds, dk, c
 
 
@@ -512,9 +535,7 @@ def _fp32_exact():
 
 def _mmT(a, b, tf32):
     """a^T b -> fp32 (a, b [M, *] views; TF32 tensor cores for the fp32 path, bf16 products with fp32 accumulation otherwise)."""
-    if (
-        a.dtype == F32 and not tf32
-    ):  # the shared-conditioning path's fp32 operands under a bf16 block: exact fp32
+    if a.dtype == F32 and not tf32:  # the shared-conditioning path's fp32 operands under a bf16 block: exact fp32
         with _fp32_exact():
             return torch.mm(a.t(), b)
     if tf32:
@@ -603,7 +624,7 @@ def _const(kind: str, shape, device) -> torch.Tensor:
 
 
 def _identity_adaln(ada) -> bool:
-    return not hasattr(ada, "ln_cond")   # IdentityAdaptiveLayerNorm
+    return not hasattr(ada, "ln_cond")  # IdentityAdaptiveLayerNorm
 
 
 def options(module) -> tuple | None:
@@ -617,19 +638,18 @@ def options(module) -> tuple | None:
     if not ident and any(x.ln_cond.eps != _ld.EPS for x in adalns):
         return None
     if a.use_qk_norm:
-        return None   # the per-head q / k RMSNorm (no atom model)
-    up = hasattr(t, "up")   # Boltz-2's up-gate transition silu(x Wa^T) (x Wb^T) (x Wu^T)
+        return None  # the per-head q / k RMSNorm (no atom model)
+    up = hasattr(t, "up")  # Boltz-2's up-gate transition silu(x Wa^T) (x Wb^T) (x Wu^T)
     if up and (t.up.bias is not None or tuple(t.up.weight.shape) != (256, DS)):
         return None
-    kqln = hasattr(a, "norm_query")   # RoseTTAFold3's affine LayerNorm of the flat q / k
+    kqln = hasattr(a, "norm_query")  # RoseTTAFold3's affine LayerNorm of the flat q / k
     if kqln and (a.norm_query.eps != a.norm_key.eps or a.norm_query.bias is None or a.norm_key.bias is None):
         return None
     if hasattr(a, "to_gate") and isinstance(a.to_out, torch.nn.Identity):
         return None
     kvm = {"chained": 0, "parallel": 1, "shared": 2}[module.kv_norm]
     noout = not hasattr(a, "to_gate") and isinstance(a.to_out, torch.nn.Identity)
-    return (kvm, ident, bool(module.parallel), noout, up, kqln, float(a.norm_query.eps) if kqln else 1e-5,
-            float(a.ada_ln_in.ln_in.eps))
+    return (kvm, ident, bool(module.parallel), noout, up, kqln, float(a.norm_query.eps) if kqln else 1e-5, float(a.ada_ln_in.ln_in.eps))
 
 
 def _leaf(module, name):
@@ -639,9 +659,12 @@ def _leaf(module, name):
     part, _, rest = name.partition(".")
     owner = getattr(module, part)
     if rest.startswith("ada_ln_kv."):
-        if not hasattr(a, "ada_ln_kv"):   # one AdaLN for q and k / v: zero K / V AdaLN leaves (never read by the kernels)
-            return _const("one" if rest == "ada_ln_kv.ln_cond.weight" else "zero",
-                          (DC,) if rest.endswith("ln_cond.weight") else (DS,) if rest.endswith(".bias") else (DS, DC), dev)
+        if not hasattr(a, "ada_ln_kv"):  # one AdaLN for q and k / v: zero K / V AdaLN leaves (never read by the kernels)
+            return _const(
+                "one" if rest == "ada_ln_kv.ln_cond.weight" else "zero",
+                (DC,) if rest.endswith("ln_cond.weight") else (DS,) if rest.endswith(".bias") else (DS, DC),
+                dev,
+            )
         return module.get_parameter(name)
     if rest.startswith("ada_ln_in.") and _identity_adaln(owner.ada_ln_in):
         if rest == "ada_ln_in.ln_cond.weight":
@@ -694,10 +717,18 @@ def run_block(module, single, cond, pair, mask=None, uid=None):
     if uid is not None:
         u = uid[0] if n == n0 else torch.nn.functional.pad(uid[0], (0, n - n0), value=-1)
         u = u.contiguous()
-    flags = (kvm, module.key_window in ("slide", "slide_qblock"), module.key_window == "slide_qblock", ident, pars, noout, up, kqln,
-             kq_eps, eps)
-    if torch.is_grad_enabled() and any(
-        t.requires_grad for t in (single, cond, pair, *weights)
-    ):
+    flags = (
+        kvm,
+        module.key_window in ("slide", "slide_qblock"),
+        module.key_window == "slide_qblock",
+        ident,
+        pars,
+        noout,
+        up,
+        kqln,
+        kq_eps,
+        eps,
+    )
+    if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *weights)):
         return _H100Block.apply(kmask, u, flags, single, cond, pair, *weights)
     return _fwd(single, cond, pair, kmask, weights, False, *flags, uid=u)[0]

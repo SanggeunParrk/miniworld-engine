@@ -20,6 +20,7 @@ hypothesis, not a shipped path.
 from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
+
 # The kernel that used to live here was bitwise identical to main.py's forward -- same Y,
 # Mean and Rstd, verified by replaying one launch's arguments into both (.bench/eq_*.out).
 # Its "low register" claim was not in the code: the body matched main.py's statement for

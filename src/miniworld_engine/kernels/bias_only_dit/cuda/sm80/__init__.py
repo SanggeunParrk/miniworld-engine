@@ -56,9 +56,7 @@ class PvGate:
     def __init__(self, nh: int, dh: int):
         assert dh in HEAD_WIDTHS, dh
         self.nh, self.dh = nh, dh
-        self.nsm = torch.cuda.get_device_properties(
-            torch.cuda.current_device()
-        ).multi_processor_count
+        self.nsm = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
 
     def __call__(
         self,
@@ -97,9 +95,7 @@ class PvGateTF32:
     def __init__(self, nh: int, dh: int):
         assert dh in HEAD_WIDTHS, dh
         self.nh, self.dh = nh, dh
-        self.nsm = torch.cuda.get_device_properties(
-            torch.cuda.current_device()
-        ).multi_processor_count
+        self.nsm = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
 
     def __call__(
         self,
@@ -230,7 +226,5 @@ def dpb_planes(
     cfg: int | None = None,
 ) -> torch.Tensor:
     """``out [planes L, L] = P (sum_a do v^T - D)`` per head plane, ``D[h, i] = sum_a dd[a, h, i]``: ``do`` / ``v`` bf16 ``[planes samples L, dh]``, ``P`` / ``out`` bf16 ``[planes L, L]``."""
-    _ext().dpb_planes(
-        do, v, P, dd, out, samples, planes, dh, DPB_CFG if cfg is None else cfg
-    )
+    _ext().dpb_planes(do, v, P, dd, out, samples, planes, dh, DPB_CFG if cfg is None else cfg)
     return out

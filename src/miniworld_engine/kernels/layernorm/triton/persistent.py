@@ -164,8 +164,8 @@ def _persist_fwd_fake(x_2d, weight, bias, eps, shape_key):
     m = x_2d.shape[0]
     return (
         torch.empty_like(x_2d),
-        x_2d.new_empty((m,), dtype=torch.float32),   # mean
-        x_2d.new_empty((m,), dtype=torch.float32),   # rstd
+        x_2d.new_empty((m,), dtype=torch.float32),  # mean
+        x_2d.new_empty((m,), dtype=torch.float32),  # rstd
     )
 
 
@@ -188,10 +188,20 @@ def _persist_fwd(
     rstd = torch.empty(m, dtype=torch.float32, device=x_2d.device)
     grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
     layer_norm_fwd_fused[grid](
-        x_2d, y_2d, weight, bias, mean, rstd, rstd,
-        x_2d.stride(0), x_2d.stride(1),
-        m, n, eps,
-        shape_key=pack(shape_key, N=n), HAS_ROWSCALE=False,
+        x_2d,
+        y_2d,
+        weight,
+        bias,
+        mean,
+        rstd,
+        rstd,
+        x_2d.stride(0),
+        x_2d.stride(1),
+        m,
+        n,
+        eps,
+        shape_key=pack(shape_key, N=n),
+        HAS_ROWSCALE=False,
     )
     return y_2d, mean, rstd
 
@@ -232,9 +242,20 @@ def _persist_bwd(
     # grid axis 1 = column tiles (see the kernel note); the partial buffer stays [g, N].
     grid_bwd = lambda meta: (g, triton.cdiv(n, meta["BLOCK_K"]))  # noqa: E731
     _ln_bwd_persistent[grid_bwd](
-        dx_2d, partial_dw, partial_db, dy_2d, x, weight, mean, rstd,
-        partial_dw.stride(0), x.stride(0), x.stride(1),
-        m, N=n, shape_key=pack(shape_key, N=n),
+        dx_2d,
+        partial_dw,
+        partial_db,
+        dy_2d,
+        x,
+        weight,
+        mean,
+        rstd,
+        partial_dw.stride(0),
+        x.stride(0),
+        x.stride(1),
+        m,
+        N=n,
+        shape_key=pack(shape_key, N=n),
     )
 
     dw = partial_dw.sum(dim=0).to(weight.dtype)
@@ -244,11 +265,13 @@ def _persist_bwd(
 
 class TritonLayerNormPersistentFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor,
-                eps: float) -> torch.Tensor:
+    def forward(ctx, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float) -> torch.Tensor:
         x_2d = x.reshape(-1, x.shape[-1]).contiguous()
         y_2d, mean, rstd = _persist_fwd(
-            x_2d, weight, bias, eps,
+            x_2d,
+            weight,
+            bias,
+            eps,
             # L = x.shape[-2] BEFORE the reshape (pair (B,L,L,D) / token (B,L,D)), not m.
             both_key(rows_of(x.shape)),
         )
@@ -260,10 +283,15 @@ class TritonLayerNormPersistentFunction(torch.autograd.Function):
     def backward(ctx, dy: torch.Tensor):
         x, weight, mean, rstd = ctx.saved_tensors
         dx, dw, db = _persist_bwd(
-            dy.reshape(-1, dy.shape[-1]).contiguous(), x, weight, mean, rstd,
-            list(ctx.input_shape), both_key(rows_of(ctx.input_shape)),
+            dy.reshape(-1, dy.shape[-1]).contiguous(),
+            x,
+            weight,
+            mean,
+            rstd,
+            list(ctx.input_shape),
+            both_key(rows_of(ctx.input_shape)),
         )
-        return dx, dw, db, None   # eps takes no gradient
+        return dx, dw, db, None  # eps takes no gradient
 
 
 triton_layernorm_persistent = TritonLayerNormPersistentFunction.apply

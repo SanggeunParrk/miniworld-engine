@@ -1,6 +1,7 @@
 """The portable (Triton) backend of ``TokenPairInit``: the forward / backward kernels of ``main.py`` as an autograd function. The inputs are the prepared
 tensors of ``cuda/function.py`` (the same module-side preparation); z comes out fp32, every gradient goes back in its input's dtype (the table gradient is
 fp32-accurate and bitwise deterministic)."""
+
 from __future__ import annotations
 
 import torch

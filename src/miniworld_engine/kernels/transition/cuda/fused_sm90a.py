@@ -88,20 +88,14 @@ def _cuda_prepare_launch_fake(wa, wb, ws, transpose=True):
 
 
 @opaque(fake=_cuda_prepare_launch_fake, name="transition_native_prepare_sm90a")
-def _cuda_prepare_launch(
-    wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, transpose: bool = True
-) -> list[torch.Tensor]:
+def _cuda_prepare_launch(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, transpose: bool = True) -> list[torch.Tensor]:
     """Pack the weights for the sm90a kernels (bf16, contiguous) and return only the freshly allocated tensors."""
     if _is_fake(wa, wb, ws):
         return _cuda_prepare_launch_fake(wa, wb, ws, transpose)
     packed = _native_ext().prepare(wa, wb, ws, transpose)
     # A custom operator may only return fresh tensors. Keep the no-copy BF16
     # aliases outside the opaque launch, where Dynamo can see their identity.
-    return [
-        p
-        for w, p in zip((wa, wb, ws), packed[:3])
-        if w.dtype != torch.bfloat16 or not w.is_contiguous()
-    ] + [packed[3]]
+    return [p for w, p in zip((wa, wb, ws), packed[:3]) if w.dtype != torch.bfloat16 or not w.is_contiguous()] + [packed[3]]
 
 
 def _cuda_prepare(wa, wb, ws, transpose=True):
@@ -116,13 +110,13 @@ def _cuda_prepare(wa, wb, ws, transpose=True):
     return (*packed, fresh[-1])
 
 
-
-
 # D128 forward build constants (the measured configuration; every one is a compile-time macro of transition_fused_fwd_sm90a_kernel.cu).
 # LNFRAG: LayerNorm in the wgmma A-fragment layout, x_n kept in registers as the RS operand (forward without saves; the saving build keeps
 # the shared-memory LayerNorm).  XFIRST: the x tile's TMA before the weight chunks'.  DECOUPLE: the weight-slot refill is issued by whichever
 # warpgroup retires the slot last.  SKEW: the two consumer warpgroups start half a chunk apart.  RSMASK: rows-per-slice mask.
-_FWD_TUNING = dict(LNFRAG=1, RSMASK=256, PDL=0, ABL=0, SKEW=1, TRACE=0, XFIRST=1, DECOUPLE=1, STAGGER=0, CPX=0, SUBCH=0, NEWTON=0, WSLOTS=2, GBSMEM=0)
+_FWD_TUNING = dict(
+    LNFRAG=1, RSMASK=256, PDL=0, ABL=0, SKEW=1, TRACE=0, XFIRST=1, DECOUPLE=1, STAGGER=0, CPX=0, SUBCH=0, NEWTON=0, WSLOTS=2, GBSMEM=0
+)
 
 
 def _fwd_tuning_flags(save: bool) -> list[str]:
@@ -134,7 +128,7 @@ def _fwd_tuning_flags(save: bool) -> list[str]:
 
 
 def _ext(ctas: int, dw_repl: int, save: bool, n: int = 4):
-    return _build_ext(ctas, dw_repl, save, n)   # one cache key per build, however the caller spells n
+    return _build_ext(ctas, dw_repl, save, n)  # one cache key per build, however the caller spells n
 
 
 @functools.lru_cache(maxsize=32)
@@ -153,11 +147,7 @@ def _build_ext(ctas: int, dw_repl: int, save: bool, n: int):
     # The input-slot release now waits for all epilogue readers. Keep a distinct
     # identity so an older prebuilt kernel cannot satisfy the corrected build.
     return load_extension(
-        name=(
-            f"transition_fused_sm90a_c{ctas}_r{dw_repl}_s{int(save)}_input_barrier_v1"
-            + (f"_n{n}" if n != 4 else "")
-            + "_fwdtune1"
-        ),
+        name=(f"transition_fused_sm90a_c{ctas}_r{dw_repl}_s{int(save)}_input_barrier_v1" + (f"_n{n}" if n != 4 else "") + "_fwdtune1"),
         sources=[
             str(_dir / "transition_fused_sm90a.cu"),
             str(_dir / "transition_fused_fwd_sm90a_kernel.cu"),
@@ -204,16 +194,9 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """
     if not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
-    if not _is_hopper(
-        x.device.index if x.device.index is not None else torch.cuda.current_device()
-    ):
+    if not _is_hopper(x.device.index if x.device.index is not None else torch.cuda.current_device()):
         return False
-    if (
-        x.shape[-1] != 128
-        or wa.shape[0] // 128 not in NS
-        or wa.shape != (wa.shape[0], 128)
-        or ws.shape != (128, wa.shape[0])
-    ):
+    if x.shape[-1] != 128 or wa.shape[0] // 128 not in NS or wa.shape != (wa.shape[0], 128) or ws.shape != (128, wa.shape[0]):
         return False
     rows = 1
     for s in x.shape[:-1]:
@@ -289,11 +272,7 @@ def _fwd_launch(
     config = _select_schedule(args, backward=False, save=save)
     if _is_fake(x, wa):
         return _fwd_launch_fake(*args)
-    return tuple(
-        _ext(
-            config["ctas"], config["dw_repl"], save, wa.shape[0] // 128
-        ).transition_fused_fwd(*args)
-    )
+    return tuple(_ext(config["ctas"], config["dw_repl"], save, wa.shape[0] // 128).transition_fused_fwd(*args))
 
 
 def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, fp32_dw=False):
@@ -302,12 +281,7 @@ def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, fp32_dw=False):
         torch.empty_like(x),
         torch.empty_like(gamma),
         torch.empty_like(gamma),
-        *(
-            torch.empty(
-                w.shape, device=w.device, dtype=torch.float32 if fp32_dw else w.dtype
-            )
-            for w in (wa, wb, ws)
-        ),
+        *(torch.empty(w.shape, device=w.device, dtype=torch.float32 if fp32_dw else w.dtype) for w in (wa, wb, ws)),
     )
 
 
@@ -323,19 +297,13 @@ def _bwd_launch(
     wb: torch.Tensor,
     ws: torch.Tensor,
     fp32_dw: bool = False,
-) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Returns (dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch."""
     args = (dy, x, xn, rstd, c1, gamma, wa, wb, ws, fp32_dw)
     config = _select_schedule(args, backward=True, save=True)
     if _is_fake(dy, x):
         return _bwd_launch_fake(*args)
-    return tuple(
-        _ext(
-            config["ctas"], config["dw_repl"], True, wa.shape[0] // 128
-        ).transition_fused_bwd_native(*args)
-    )
+    return tuple(_ext(config["ctas"], config["dw_repl"], True, wa.shape[0] // 128).transition_fused_bwd_native(*args))
 
 
 def transition_candidates(sms, *, backward=False, n=4):
@@ -364,8 +332,13 @@ def _select_schedule(args, *, backward, save):
         return tuple(getattr(_ext(c["ctas"], c["dw_repl"], save, n), symbol)(*args))
 
     wa = args[6] if backward else args[3]
-    dims = {"M": x.numel() // x.shape[-1], "K": x.shape[-1], "ND": wa.shape[0], "SMS": sms,
-            **({"FP32_DW": int(args[-1])} if backward else {"SAVE": int(save)})}
+    dims = {
+        "M": x.numel() // x.shape[-1],
+        "K": x.shape[-1],
+        "ND": wa.shape[0],
+        "SMS": sms,
+        **({"FP32_DW": int(args[-1])} if backward else {"SAVE": int(save)}),
+    }
     op = "transition_bwd_residual_sm90_cuda" if backward else "transition_fwd_residual_sm90_cuda"
     return choose("transition", op, dims, x.dtype, grid, device=x.device, run=run)
 
@@ -387,9 +360,7 @@ class _FusedTransitionSM90A(torch.autograd.Function):
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
         save = any(ctx.needs_input_grad)
-        out, xn, rstd, c1 = _fwd_launch(
-            flat, gf, bf, wa.contiguous(), wb.contiguous(), wst, float(eps), save
-        )
+        out, xn, rstd, c1 = _fwd_launch(flat, gf, bf, wa.contiguous(), wb.contiguous(), wst, float(eps), save)
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa, wb, ws, *raw)
         ctx.shape = shape
         ctx.param_dtypes = param_dtypes
@@ -433,10 +404,7 @@ def transition_fused_sm90a(x, gamma, beta, wa, wb, ws, eps):
     parameters keep under ``torch.no_grad()`` -- so deciding there sent every no_grad call through
     the training build, writing an M x 128 ``xn`` nobody reads (38 MB at L384, 151 MB at L768).
     """
-    if not (
-        torch.is_grad_enabled()
-        and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
-    ):
+    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
         if all(w.dtype == torch.bfloat16 for w in (wa, wb, ws)):
             # an inference loop calls with the same weights: reuse the cached Ws^T instead of a prepare launch per call

@@ -75,9 +75,7 @@ def supports(length: int) -> bool:
 
 def attention(q, k, v, bias, scale=D**-0.5, want_lse=False, rows=2, defs=()):
     """softmax(scale q.k + bias) v on [B, N, S, H, 32] tensors, bias [B, H, S, S] -> (out, lse, flags)."""
-    return _core(rows, tuple(defs)).triattn_fwd(
-        q, k, v, scaled_bias(bias, scale), scale, want_lse
-    )
+    return _core(rows, tuple(defs)).triattn_fwd(q, k, v, scaled_bias(bias, scale), scale, want_lse)
 
 
 def scaled_bias(bias, scale=D**-0.5):
@@ -162,9 +160,7 @@ def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, 
     # the biases in fp32 inside the tail, before its one rounding: added to the bf16 gate / sum afterwards they were a second
     # rounding each, the out bias at the residual's scale (RoseTTAFold3's trunk drifted from its reference by it)
     fp32 = lambda t: None if t is None else t.float().contiguous()  # noqa: E731
-    return m.tri_tail(
-        g, o.view(-1, C), x, wo16, empty.bfloat16(), L, trans, out, bo=fp32(out_bias), gb=fp32(gate_bias)
-    ).view(B, L, L, C)
+    return m.tri_tail(g, o.view(-1, C), x, wo16, empty.bfloat16(), L, trans, out, bo=fp32(out_bias), gb=fp32(gate_bias)).view(B, L, L, C)
 
 
 @torch.autocast("cuda", enabled=False)
@@ -242,9 +238,7 @@ def _pack_params_torch(wq, wk, wv, wg, wb, wo):
     return w4, wb16, wo.to(torch.bfloat16).contiguous()
 
 
-def train_forward(
-    pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, need=True, trans=False
-):
+def train_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, need=True, trans=False):
     """The module forward with the tensors its backward reads: -> (out [B, L, L, 128], (q, k, v, g, sbias, o, lse)); o / lse are empty
     unless `need`.  Every returned tensor is a fresh allocation (none aliases an argument), so it can be an output of a custom op."""
     B, L, _, _ = pair.shape
@@ -267,17 +261,13 @@ def train_forward(
         trans,
     )
     shp = (B, L, L, H, D)
-    o, lse, _, _ = _core().triattn_fwd(
-        q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, need
-    )
+    o, lse, _, _ = _core().triattn_fwd(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, need)
     drop = drop if drop is not None else empty.bfloat16()
     out = m.tri_tail(g, o.view(-1, C), x, wo16, drop, L, trans)
     return out.view(B, L, L, C), (q, k, v, g, sbias, o, lse)
 
 
-def train_backward(
-    dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, eps, drop, saved, trans=False
-):
+def train_backward(dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, eps, drop, saved, trans=False):
     """Gradients (pair, lnw, lnb, wq, wk, wv, wg, wb, wo) of `train_forward`, each in its input's dtype."""
     q, k, v, g, sbias, o, lse = saved
     B, L, _, _ = pair.shape
@@ -287,13 +277,9 @@ def train_backward(
     lw, lb = lnw.float().contiguous(), lnb.float().contiguous()
     empty = torch.empty(0, device=pair.device)
     drop = drop if drop is not None else empty.bfloat16()
-    dbias = torch.zeros(
-        B, H, L, L, device=x.device, dtype=torch.float32
-    )  # the query-side kernel adds its partials in
+    dbias = torch.zeros(B, H, L, L, device=x.device, dtype=torch.float32)  # the query-side kernel adds its partials in
     dy = dy.contiguous().view(-1, C)
-    do, dg, delta, dpair, dwo_part = m.tri_gate_bwd(
-        dy, g, o.view(-1, C), wo16, drop, B, L, trans
-    )
+    do, dg, delta, dpair, dwo_part = m.tri_gate_bwd(dy, g, o.view(-1, C), wo16, drop, B, L, trans)
     shp = (B, L, L, H, D)
     q5, k5, v5, do5 = q.view(shp), k.view(shp), v.view(shp), do.view(shp)
     dk, dv = bw.triattn_bwd_kv(q5, k5, v5, sbias, do5, lse, delta, D**-0.5)
@@ -303,9 +289,7 @@ def train_backward(
     # fp32 outputs whenever any parameter is fp32 (master weights, or the bf16 model's fp32 LayerNorm affine): the wrapper's `.to` then
     # rounds the bf16 ones exactly as the kernel's own bf16 store would, and gamma / beta keep their fp32 value
     fp32 = wq.dtype == torch.float32 or lnw.dtype == torch.float32
-    dwq, dwk, dwv, dwg, dgamma, dbeta, dwb, dwo = m.tri_wgrad(
-        dq, dk, dv, dg, dbias, x, eps, B, L, w4, wb, lw, lb, dwo_part, fp32, trans
-    )
+    dwq, dwk, dwv, dwg, dgamma, dbeta, dwb, dwo = m.tri_wgrad(dq, dk, dv, dg, dbias, x, eps, B, L, w4, wb, lw, lb, dwo_part, fp32, trans)
     # separate buffers from the kernel (no slices: the outputs of a custom op may not alias each other); .to is a no-op in the common case
     return (
         dpair.view(B, L, L, C),
@@ -329,9 +313,7 @@ class TriAttnFused(torch.autograd.Function):
     @staticmethod
     def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop):
         need = any(ctx.needs_input_grad)
-        out, saved = train_forward(
-            pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, need
-        )
+        out, saved = train_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, need)
         if need:
             ctx.save_for_backward(
                 pair,
@@ -370,9 +352,7 @@ class TriAttnFused(torch.autograd.Function):
         return (*grads, None, None, None)
 
 
-def triangle_attention(
-    pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, drop=None
-):
+def triangle_attention(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, drop=None):
     """pair + drop o TriangleAttention(pair) for the starting node; the caller transposes for the ending node."""
     return TriAttnFused.apply(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop)
 
@@ -395,7 +375,5 @@ def bwd_q(bw, q, k, v, sbias, do, lse, delta, scale, dbias, dq=None):
         dq = torch.empty(q.shape, device=q.device, dtype=q.dtype)
     for i in range(0, B, g):
         s = slice(i, min(B, i + g))
-        bw.triattn_bwd_q(
-            q[s], k[s], v[s], sbias[s], do[s], lse[s], delta[s], scale, dbias[s], dq[s]
-        )
+        bw.triattn_bwd_q(q[s], k[s], v[s], sbias[s], do[s], lse[s], delta[s], scale, dbias[s], dq[s])
     return dq

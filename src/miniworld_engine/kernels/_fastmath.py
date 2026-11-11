@@ -8,6 +8,7 @@ than ``libdevice.tanh``: the libdevice routine is the accurate software version 
 2.5e-4 absolute, below the half-ulp of a bf16 result (2e-3 relative to values near 0.5), so it is used only where the
 gate output is rounded to bf16; the fp32 (and fp16) paths keep ``tl.sigmoid``.
 """
+
 import triton
 import triton.language as tl
 

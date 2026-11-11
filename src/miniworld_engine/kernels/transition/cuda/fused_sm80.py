@@ -68,9 +68,7 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     D = 128 / hidden 512 (tile shapes are literals), whole 256-row tiles."""
     if not x.is_cuda or x.dtype is not torch.bfloat16 or wa.dtype is not torch.bfloat16 or ws.dtype is not torch.bfloat16:
         return False
-    if not _is_ampere(
-        x.device.index if x.device.index is not None else torch.cuda.current_device()
-    ):
+    if not _is_ampere(x.device.index if x.device.index is not None else torch.cuda.current_device()):
         return False
     if x.shape[-1] != D or wa.shape != (H, D) or ws.shape != (D, H):
         return False
@@ -105,9 +103,7 @@ def _k_perm(dev):
     """Physical GEMM1 k index 16 s + kk -> input column (thread q of a quad holds the 16 B vectors at 32 i + 8 q)."""
     s = torch.arange(8, device=dev).view(-1, 1)
     kk = torch.arange(16, device=dev).view(1, -1)
-    return (
-        32 * (s // 2) + 8 * ((kk % 8) // 2) + 4 * (s % 2) + 2 * (kk // 8) + kk % 2
-    ).reshape(-1)
+    return (32 * (s // 2) + 8 * ((kk % 8) // 2) + 4 * (s % 2) + 2 * (kk // 8) + kk % 2).reshape(-1)
 
 
 def _o_perm(dev):
@@ -123,9 +119,7 @@ def _layout_fwd(wa, wb, ws, dev):
     wa_p, wb_p = wa[:, kp], wb[:, kp]
     ws_p = ws[_o_perm(dev)]
     nstep, nchunk = CH // 16, H // CH
-    w1 = torch.stack(
-        [wa_p.view(nchunk, nstep, 16, D), wb_p.view(nchunk, nstep, 16, D)], 2
-    ).reshape(nchunk, 2 * CH, D)
+    w1 = torch.stack([wa_p.view(nchunk, nstep, 16, D), wb_p.view(nchunk, nstep, 16, D)], 2).reshape(nchunk, 2 * CH, D)
     w1 = w1.view(nchunk, 2 * CH, 16, 8).transpose(1, 2).reshape(nchunk, -1)
     w2 = ws_p.view(D, nchunk, CH // 8, 8).permute(1, 2, 0, 3).reshape(nchunk, -1)
     return w1, w2
@@ -135,12 +129,7 @@ def _layout_bwd(wa, wb, ws, dev):
     """PW: per 64-unit slice [W1s 16 k-granules x 128 rows (0.5 Wa | Wb) | W3s = Ws^T slice 16 x 64]; X: [Wa | Wb] per chunk."""
     op = _o_perm(dev)
     nchunk = H // CH
-    w1s = (
-        torch.stack([wa.view(8, 4, 16, D), wb.view(8, 4, 16, D)], 2)
-        .reshape(8, 128, D)
-        .view(8, 128, 16, 8)
-        .transpose(1, 2)
-    )
+    w1s = torch.stack([wa.view(8, 4, 16, D), wb.view(8, 4, 16, D)], 2).reshape(8, 128, D).view(8, 128, 16, 8).transpose(1, 2)
     w3s = ws.t().reshape(8, 64, 16, 8).transpose(1, 2)
     wdw = torch.cat([w1s.reshape(8, -1), w3s.reshape(8, -1)], 1).reshape(-1)
     xa = wa[:, op].reshape(nchunk, CH, 16, 8).transpose(1, 2).reshape(nchunk, -1)
@@ -164,28 +153,18 @@ def _pack_tables(dev):
     half = 1 << 28
     wa, wb = code(0).view(H, D), code(1).view(H, D)
     ws = code(2).view(D, H)
-    w1, w2 = _layout_fwd(
-        wa | half, wb, ws | (1 << 29), dev
-    )  # W1 carries 0.5 Wa; W2 runs in f16
+    w1, w2 = _layout_fwd(wa | half, wb, ws | (1 << 29), dev)  # W1 carries 0.5 Wa; W2 runs in f16
     w = torch.cat([w1, w2], 1).reshape(-1)
     wdw, wx = _layout_bwd(wa | half, wb, ws, dev)  # W1s carries 0.5 Wa
-    _, wx = _layout_bwd(
-        wa | half, wb, ws, dev
-    )  # X: 0.5 Wa (PW's dA tile holds 2 dA, build flag PW_2DA)
+    _, wx = _layout_bwd(wa | half, wb, ws, dev)  # X: 0.5 Wa (PW's dA tile holds 2 dA, build flag PW_2DA)
     idx16 = torch.cat([w, wdw, wx]).to(torch.int32).contiguous()
     assert idx16.numel() == N_W + N_WDW + N_WX
     s_, q_ = (
         torch.arange(8, device=dev).view(-1, 1),
         torch.arange(4, device=dev).view(1, -1),
     )
-    c0 = (32 * (s_ // 2) + 8 * q_ + 4 * (s_ % 2)).reshape(-1, 1) + torch.arange(
-        4, device=dev
-    ).view(1, -1)
-    idx32 = (
-        torch.cat([c0.reshape(-1), c0.reshape(-1) | (1 << 26)])
-        .to(torch.int32)
-        .contiguous()
-    )
+    c0 = (32 * (s_ // 2) + 8 * q_ + 4 * (s_ % 2)).reshape(-1, 1) + torch.arange(4, device=dev).view(1, -1)
+    idx32 = torch.cat([c0.reshape(-1), c0.reshape(-1) | (1 << 26)]).to(torch.int32).contiguous()
     return idx16, idx32
 
 
@@ -297,9 +276,7 @@ def _bwd_launch(
     eps: float,
     adt: torch.dtype,
     wdt: torch.dtype,
-) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(dx, dgamma, dbeta in ``adt``, dWa, dWb, dWs in ``wdt``); dx carries the residual branch.  The partial sums are reduced in the
     kernel's fixed order and written in the parameters' dtypes (one launch for the sum, the 0.5, the dWs transpose and the casts)."""
     if _is_fake(dy, x):
@@ -326,16 +303,8 @@ class _FusedTransitionSM80(torch.autograd.Function):
     def backward(ctx, dy):
         flat, xn, stats, wdw, wx, gf, bf = ctx.saved_tensors
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
-        wd = (
-            adt
-            if adt in (torch.float32, torch.bfloat16) and adt == bwdt == sdt
-            else torch.float32
-        )
-        ad = (
-            gdt
-            if gdt in (torch.float32, torch.bfloat16) and gdt == bdt
-            else torch.float32
-        )
+        wd = adt if adt in (torch.float32, torch.bfloat16) and adt == bwdt == sdt else torch.float32
+        ad = gdt if gdt in (torch.float32, torch.bfloat16) and gdt == bdt else torch.float32
         dx, dgam, dbeta, dwa, dwb, dws = _bwd_launch(
             dy.reshape(-1, dy.shape[-1]).contiguous(),
             flat,
@@ -363,20 +332,19 @@ class _FusedTransitionSM80(torch.autograd.Function):
 def transition_fused_sm80(x, gamma, beta, wa, wb, ws, eps):
     """Module-facing entry, same signature as the Triton ``transition_residual``.  Call ``available(x, wa, ws)`` first.
     Inference (no grad needed) runs the forward without writing xn / stats."""
-    if not (
-        torch.is_grad_enabled()
-        and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
-    ):
+    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
         if torch.is_grad_enabled():
             w, gb, _, _, _, _ = _pack(gamma, beta, wa, wb, ws)
-        else:   # grad off: the pack once per weight version; a CUDA-graph capture reads the eager pack (no pack kernel per replay)
+        else:  # grad off: the pack once per weight version; a CUDA-graph capture reads the eager pack (no pack kernel per replay)
             from ... import _capture
 
-            w, gb = _capture.param_forms("transition_fused_sm80_pack", [gamma, beta, wa, wb, ws], lambda: _pack(gamma, beta, wa, wb, ws)[:2],
-                                         capture_reads_eager=True)
-        out, _, _ = _fwd_launch(
-            x.reshape(-1, shape[-1]).contiguous(), w, gb, float(eps), False
-        )
+            w, gb = _capture.param_forms(
+                "transition_fused_sm80_pack",
+                [gamma, beta, wa, wb, ws],
+                lambda: _pack(gamma, beta, wa, wb, ws)[:2],
+                capture_reads_eager=True,
+            )
+        out, _, _ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), w, gb, float(eps), False)
         return out.reshape(shape)
     return _FusedTransitionSM80.apply(x, gamma, beta, wa, wb, ws, eps)

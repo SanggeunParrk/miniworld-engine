@@ -74,8 +74,7 @@ def cubin(stem: str, defs: tuple = (), hopper: bool = False) -> str:
         *("-D" + d for d in defs),
     )
     family = "local_dit_sm90" if hopper else "local_dit_sm100"
-    return str(_nvcc.cubin(f"{family}/{stem}", flags, source=_dir / f"{stem}.cu",
-                           toolchain="torch" if hopper else "sm100"))
+    return str(_nvcc.cubin(f"{family}/{stem}", flags, source=_dir / f"{stem}.cu", toolchain="torch" if hopper else "sm100"))
 
 
 @functools.lru_cache(maxsize=None)
@@ -90,9 +89,7 @@ def _load_atom_kernel(
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     with torch.cuda.device(device_index):
-        return driver.Kernel(
-            cubin(stem, defs, _hopper(device_index)), func, smem, pdl=pdl
-        )
+        return driver.Kernel(cubin(stem, defs, _hopper(device_index)), func, smem, pdl=pdl)
 
 
 #: (stem, function, dynamic smem, PDL[, -D defs]) of every kernel the block launches
@@ -138,9 +135,7 @@ _HOPPER_KERNELS = {
 def atom_kernel(name: str, device_index: int):
     if _hopper(device_index) and name not in _HOPPER_KERNELS:
         raise NotImplementedError(f"Atom Hopper kernel {name} is not implemented")
-    stem, func, smem, pdl, *defs = (
-        _HOPPER_KERNELS if _hopper(device_index) else KERNELS
-    )[name]
+    stem, func, smem, pdl, *defs = (_HOPPER_KERNELS if _hopper(device_index) else KERNELS)[name]
     return _load_atom_kernel(stem, func, device_index, smem, pdl, *defs)
 
 
@@ -152,9 +147,7 @@ def _dev(t: torch.Tensor) -> int:
 def _tm(t, rows, box_rows, cols=DM, box_cols=DH, swizzle=128):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
-    return driver.TensorMap(
-        t, [cols, rows], cols * 2, [box_cols, box_rows], swizzle=swizzle
-    )
+    return driver.TensorMap(t, [cols, rows], cols * 2, [box_cols, box_rows], swizzle=swizzle)
 
 
 def _map(t, dims, stride, box, swizzle=128, dtype="bf16"):
@@ -286,9 +279,7 @@ def pre_fwd(a, mod, W, bq, save=False, eps=1e-5, cross=False):
     """a [M, 128], mod [M, 768] -> Q, K, V, G [M, 128] bf16 (+ x1 = AdaLN 1 output when ``save``). ``cross`` (sm_90a only): the cross-attention
     mode's variant of the Hopper kernel."""
     M = a.shape[0]
-    Q, K, V, G = (
-        torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4)
-    )
+    Q, K, V, G = (torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4))
     X = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
     if _hopper(_dev(a)):
         d = _dev(a)
@@ -344,9 +335,7 @@ def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5):
     """The cross-attention mode's ``pre_fwd``: K and V from xkv = LN(x1) sigmoid(mkv[:, :128] + bs) + mkv[:, 128:] (a second AdaLN of x1)
     instead of from x1. -> Q, K, V, G [M, 128] bf16 and, when ``save``, x1 and xkv (else X = G, XK = None)."""
     M = a.shape[0]
-    Q, K, V, G = (
-        torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4)
-    )
+    Q, K, V, G = (torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4))
     X = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
     XK = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
     maps = (
@@ -476,9 +465,7 @@ def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts):
     )
     ntile = M // 16
     d = _dev(dy)
-    atom_kernel("trg", d)(
-        (min(num_sms(d), ntile), 1, 1), (384, 1, 1), *maps, dbts, int(ntile)
-    )
+    atom_kernel("trg", d)((min(num_sms(d), ntile), 1, 1), (384, 1, 1), *maps, dbts, int(ntile))
     return DT, HH, DAB
 
 
@@ -774,12 +761,7 @@ def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None):
     pack ([q; g; k; v] with mks, else [q; k; v; g]), bq [128] -> P [M, 512] fp32 (the blocks in rndmask tf32-rounded). ``nfull`` (default
     ``_nfull``): the 128-row tiles run whole; the others as two 128 x 256 column halves."""
     M = s.shape[0]
-    assert (
-        M % 128 == 0
-        and s.is_contiguous()
-        and s.shape[1] == DM
-        and tuple(wp.shape) == (4 * DM, DM)
-    ), (s.shape, wp.shape)
+    assert M % 128 == 0 and s.is_contiguous() and s.shape[1] == DM and tuple(wp.shape) == (4 * DM, DM), (s.shape, wp.shape)
     assert s1.stride(1) == b1.stride(1) == 1 and s1.stride(0) == b1.stride(0)
     cross = mks is not None
     if cross:
@@ -816,12 +798,8 @@ def post32(o, g, s, so, s2, b2, st, wo, wu, ws, eps=1e-5, nfull=None):
     contiguous, g a [M, 128] view, so / s2 / b2 / st [M, 128] views with one row stride, wo / wu / ws the tf32-rounded packs -> out [M, 128].
     ``nfull`` (default ``_nfull``): the 128-row tiles run whole; the others as two 64-row halves."""
     M = s.shape[0]
-    assert (
-        M % 128 == 0 and s.is_contiguous() and o.is_contiguous() and o.shape == s.shape
-    ), (o.shape, s.shape)
-    assert g.stride(1) == 1 and all(
-        t.stride(1) == 1 and t.stride(0) == so.stride(0) for t in (s2, b2, st)
-    )
+    assert M % 128 == 0 and s.is_contiguous() and o.is_contiguous() and o.shape == s.shape, (o.shape, s.shape)
+    assert g.stride(1) == 1 and all(t.stride(1) == 1 and t.stride(0) == so.stride(0) for t in (s2, b2, st))
     out = torch.empty(M, DM, device=s.device, dtype=F32)
     d = _dev(s)
     tiles = M // 128
@@ -875,9 +853,7 @@ def _tm32(t, box, swizzle=128):
     if m is None:
         if len(_TMAPS32) >= 512:
             _TMAPS32.clear()
-        m = driver.TensorMap(
-            t, [cols, rows], t.stride(0) * 4, list(box), swizzle=swizzle, dtype="f32"
-        )
+        m = driver.TensorMap(t, [cols, rows], t.stride(0) * 4, list(box), swizzle=swizzle, dtype="f32")
         m.keep = None
         _TMAPS32[key] = m
     return m
@@ -930,22 +906,12 @@ def gemm32(
     assert mode != SWIGLU or n == 512
     assert a_grp == 0 or (a_grp % nt == 0 and n % a_grp == 0), (a_grp, nt, n)
     if out is None:
-        out = torch.empty(
-            M, n // 2 if mode == SWIGLU else n, device=a.device, dtype=F32
-        )
+        out = torch.empty(M, n // 2 if mode == SWIGLU else n, device=a.device, dtype=F32)
     ma, mb = _tm32(a, (32, 128)), _tm32(w, (32, nt))
     mo = _tm32(out, (32, 32))
     mo2 = mo if out2 is None else _tm32(out2, (32, 32))
     tiles = (M // 128) * (n // nt)
-    if (
-        mode == RESID_GATE
-        and n == DM
-        and a_col0 == 0
-        and b_row0 == 0
-        and b_col0 == 0
-        and ocol0 == 0
-        and bias is None
-    ):
+    if mode == RESID_GATE and n == DM and a_col0 == 0 and b_row0 == 0 and b_col0 == 0 and ocol0 == 0 and bias is None:
         # the gated residual with res and gate by TMA (gemm_rg_tf32.cu): 144 -> ~60 us at 196608 rows
         atom_kernel32("gemm_rg", d)(
             (min(num_sms(d), tiles), 1, 1),
@@ -1014,11 +980,7 @@ def ln32(c, g1, g2, g3=None, eps=1e-5, out=None):
         o3 = _new(c) if g3 is not None else None
         oc, ld = None, DM
     else:
-        assert (
-            out.dtype == F32
-            and out.stride(1) == 1
-            and out.shape == (M, (4 if g3 is not None else 3) * DM)
-        ), (out.shape, out.stride())
+        assert out.dtype == F32 and out.stride(1) == 1 and out.shape == (M, (4 if g3 is not None else 3) * DM), (out.shape, out.stride())
         o1, o2, oc = out[:, :DM], out[:, DM : 2 * DM], out[:, 2 * DM : 3 * DM]
         o3 = out[:, 3 * DM :] if g3 is not None else None
         ld = out.stride(0)
@@ -1061,9 +1023,7 @@ def adaln32(a, scale, shift, eps=1e-5):
 def gate32(g, o):
     """sigmoid(g) * o: g a fp32 [M, 128] view, o [M, 128]."""
     out = _new(o)
-    atom_kernel32("gate", _dev(o))(
-        _rowgrid(o.shape[0]), (256, 1, 1), g, int(g.stride(0)), o, out, int(o.shape[0])
-    )
+    atom_kernel32("gate", _dev(o))(_rowgrid(o.shape[0]), (256, 1, 1), g, int(g.stride(0)), o, out, int(o.shape[0]))
     return out
 
 
@@ -1088,15 +1048,11 @@ def tail_bwd32(dy, t, st, dst):
 def swiglu_bwd32(dh, u):
     """dh [M, 256], u [M, 512] (interleaved [a_0 | b_0 | a_1 | b_1]) -> d[a | b] [M, 512] (same layout), h = silu(a) b [M, 256]."""
     dab, hh = _new(u, 4 * DM), _new(u, 2 * DM)
-    atom_kernel32("swiglu_b", _dev(u))(
-        _rowgrid(u.shape[0]), (256, 1, 1), dh, u, dab, hh, int(u.shape[0])
-    )
+    atom_kernel32("swiglu_b", _dev(u))(_rowgrid(u.shape[0]), (256, 1, 1), dh, u, dab, hh, int(u.shape[0]))
     return dab, hh
 
 
-def adaln_bwd32(
-    a, scale, dx, dres, dscale, dshift, y=None, so=None, dso=None, eps=1e-5
-):
+def adaln_bwd32(a, scale, dx, dres, dscale, dshift, y=None, so=None, dso=None, eps=1e-5):
     """AdaLN backward: -> da = dres + LN backward of dx * scale; dscale (view) = dx LN(a) scale (1 - scale), dshift (view) = dx. With y:
     also d so (view) = da y so (1 - so) and the returned dyo = da so (the attention output gate upstream of a1 = a + so y)."""
     M = a.shape[0]
@@ -1161,9 +1117,7 @@ def colsum32(x):
     d = _dev(x)
     g = max(1, min(2 * num_sms(d), (M + 7) // 8))
     part = torch.empty(g, cols, device=x.device, dtype=F32)
-    atom_kernel32("colsum", d)(
-        (g, cols // DM, 1), (256, 1, 1), x, int(x.stride(0)), part, int(cols), int(M)
-    )
+    atom_kernel32("colsum", d)((g, cols // DM, 1), (256, 1, 1), x, int(x.stride(0)), part, int(cols), int(M))
     return part.sum(0)
 
 
@@ -1254,23 +1208,10 @@ class AtomDw:
         nouts = 0
         tab.np = len(problems)
         for p, (A, B, dests) in enumerate(problems):
-            assert (
-                A.dtype == dt
-                and B.dtype == dt
-                and A.shape[0] == R
-                and B.shape[0] == R
-                and A.shape[1] % 128 == 0
-            )
-            assert (
-                A.stride(1) == 1
-                and B.stride(1) == 1
-                and B.shape[1] in (128, 256)
-                and len(dests) == A.shape[1] // 128
-            )
+            assert A.dtype == dt and B.dtype == dt and A.shape[0] == R and B.shape[0] == R and A.shape[1] % 128 == 0
+            assert A.stride(1) == 1 and B.stride(1) == 1 and B.shape[1] in (128, 256) and len(dests) == A.shape[1] // 128
             for t, slot in ((A, p), (B, _DW_MAXP + p)):
-                m = driver.TensorMap(
-                    t, [t.shape[1], R], t.stride(0) * esz, box, swizzle=sw, dtype=dname
-                )
+                m = driver.TensorMap(t, [t.shape[1], R], t.stride(0) * esz, box, swizzle=sw, dtype=dname)
                 keep.append(m)
                 raw[slot * 128 : (slot + 1) * 128] = ctypes.string_at(m.addr, 128)
             mb, nn = A.shape[1] // 128, B.shape[1]
@@ -1280,11 +1221,7 @@ class AtomDw:
             wsoff += tab.ns[p] * mb * 128 * nn
             e4 += mb * 128 * nn // 4
             for d in dests:
-                assert (
-                    d.is_contiguous()
-                    and d.shape == (128, nn)
-                    and d.dtype in (F32, torch.bfloat16)
-                ), (d.shape, d.dtype)
+                assert d.is_contiguous() and d.shape == (128, nn) and d.dtype in (F32, torch.bfloat16), (d.shape, d.dtype)
                 out.ptr[nouts], out.bf16[nouts] = (
                     d.data_ptr(),
                     int(d.dtype == torch.bfloat16),
@@ -1316,26 +1253,16 @@ def pack_hopper(weights, backward=False):
         raise ValueError("Atom weight pack requires the 23 canonical weights")
     d, dev = _dev(weights[0]), weights[0].device
     shapes = ((768, 128), (512, 128), (128, 128), (512, 128), (128, 256))
-    wc, wp, wo, wu, wd = (
-        torch.empty(s, device=dev, dtype=torch.bfloat16) for s in shapes
-    )
+    wc, wp, wo, wu, wd = (torch.empty(s, device=dev, dtype=torch.bfloat16) for s in shapes)
     b = torch.empty(768, device=dev, dtype=torch.float32)
     g1, g2, bq = (torch.empty(128, device=dev, dtype=torch.float32) for _ in range(3))
-    if any(
-        w.dtype not in (torch.bfloat16, torch.float32) or not w.is_contiguous()
-        for w in weights
-    ):
+    if any(w.dtype not in (torch.bfloat16, torch.float32) or not w.is_contiguous() for w in weights):
         raise ValueError("Atom Hopper pack requires contiguous BF16/FP32 parameters")
     bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
-    atom_kernel("pack", d)(
-        (384, 1, 1), (256, 1, 1), *weights, wc, wp, wo, wu, wd, b, g1, g2, bq, bfmask
-    )
+    atom_kernel("pack", d)((384, 1, 1), (256, 1, 1), *weights, wc, wp, wo, wu, wd, b, g1, g2, bq, bfmask)
     wb = {}
     if backward:
-        wt = [
-            torch.empty(tuple(reversed(s)), device=dev, dtype=torch.bfloat16)
-            for s in shapes
-        ]
+        wt = [torch.empty(tuple(reversed(s)), device=dev, dtype=torch.bfloat16) for s in shapes]
         atom_kernel("pack_t", d)((272, 1, 1), (32, 8, 1), wc, wp, wo, wu, wd, *wt)
         wb = dict(zip(("WmodT", "WpT", "WoT", "WuT", "WsT"), wt, strict=True))
     return (wc, b, g1, g2), (wp, bq), (wo, wu, wd), wb
@@ -1345,9 +1272,7 @@ def finish_columns_hopper(dmod, dp, dgparts, dbias, dbq, dg):
     part = torch.empty(4, 896, device=dmod.device, dtype=torch.float32)
     d, m = _dev(dmod), dmod.shape[0]
     atom_kernel("col_part", d)((56, 4, 1), (256, 1, 1), dmod, dp, part, int(m))
-    atom_kernel("col_fin", d)(
-        (4, 1, 1), (256, 1, 1), part, dgparts, dbias, dbq, dg, int((m + 63) // 64)
-    )
+    atom_kernel("col_fin", d)((4, 1, 1), (256, 1, 1), part, dgparts, dbias, dbq, dg, int((m + 63) // 64))
 
 
 def grad_pack_hopper(grads, weights):
@@ -1355,7 +1280,5 @@ def grad_pack_hopper(grads, weights):
         raise ValueError("Hopper gradient pack requires contiguous FP32 gradient views")
     out = [torch.empty_like(w) for w in weights]
     bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
-    atom_kernel("grad_pack", _dev(weights[0]))(
-        (128, 1, 1), (256, 1, 1), *grads, *out, bfmask
-    )
+    atom_kernel("grad_pack", _dev(weights[0]))((128, 1, 1), (256, 1, 1), *grads, *out, bfmask)
     return out

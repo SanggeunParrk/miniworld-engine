@@ -150,23 +150,14 @@ def elf_facts(cubin_bytes):
             nm = strtab[name : strtab.find(b"\x00", name)].decode("ascii", "replace")
             if nm in (".note.nv.cuinfo", ".note.nv.tkinfo") and size >= 12:
                 namesz, descsz, ntype = struct.unpack_from("<III", b, off)
-                desc = b[
-                    off + 12 + ((namesz + 3) & ~3) : off
-                    + 12
-                    + ((namesz + 3) & ~3)
-                    + descsz
-                ]
+                desc = b[off + 12 + ((namesz + 3) & ~3) : off + 12 + ((namesz + 3) & ~3) + descsz]
                 if nm == ".note.nv.cuinfo":
                     out["cuinfo"] = desc.hex()
                     if len(desc) >= 8:
                         out["cuinfo_sm"] = struct.unpack_from("<H", desc, 2)[0]
                         out["toolkit_version"] = struct.unpack_from("<I", desc, 4)[0]
                 else:
-                    txt = [
-                        t.decode("ascii", "replace")
-                        for t in desc[24:].split(b"\x00")
-                        if t
-                    ]
+                    txt = [t.decode("ascii", "replace") for t in desc[24:].split(b"\x00") if t]
                     out["tkinfo"] = txt[:4]
     except Exception:
         pass

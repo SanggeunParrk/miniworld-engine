@@ -53,10 +53,12 @@ def _token_dit_inputs(block, *, length, samples, dtype, device, generator) -> di
     """A token DiT block's measurement inputs: ``single`` / ``cond`` [S, 1, L, d] (S samples on the augmentation axis), ``pair`` [1, L, L, d_pair],
     the key ``mask`` [1, L]."""
     d_single, d_cond, d_pair = block.transition.d_hidden, block.transition.d_cond, block.attention.ln_pair.normalized_shape[0]
-    return {"single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
-            "cond": random_input((samples, 1, length, d_cond), dtype=dtype, device=device, generator=generator),
-            "pair": random_input((1, length, length, d_pair), dtype=dtype, device=device, generator=generator),
-            "mask": key_mask(1, length, device=device)}
+    return {
+        "single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
+        "cond": random_input((samples, 1, length, d_cond), dtype=dtype, device=device, generator=generator),
+        "pair": random_input((1, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+        "mask": key_mask(1, length, device=device),
+    }
 
 
 # ================================================================================================= the "anthropic" backend (the release)
@@ -71,8 +73,9 @@ def _token_dit_inputs(block, *, length, samples, dtype, device, generator) -> di
 
 
 def _grad_reason(module: torch.nn.Module, *tensors) -> str | None:
-    if torch.is_grad_enabled() and (any(p.requires_grad for p in module.parameters())
-                                    or any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)):
+    if torch.is_grad_enabled() and (
+        any(p.requires_grad for p in module.parameters()) or any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
+    ):
         return "the release op has no backward: call it under torch.no_grad() / inference_mode() (eval only)"
     return None
 
@@ -103,7 +106,7 @@ def _packed_linear(att, names: tuple[str, ...], x: torch.Tensor) -> torch.Tensor
     ``bz_sampler_dit._State``, openfold3 ``dit_glue._weights``)."""
     mods = [getattr(att, n) for n in names]
     params = [p for m in mods for p in (m.weight, m.bias) if p is not None]
-    if torch.is_grad_enabled() and any(p.requires_grad for p in params):   # a gradient: the pack is part of the graph, never cached
+    if torch.is_grad_enabled() and any(p.requires_grad for p in params):  # a gradient: the pack is part of the graph, never cached
         w = torch.cat([m.weight for m in mods], 0)
         b = None
         if any(m.bias is not None for m in mods):
@@ -111,7 +114,7 @@ def _packed_linear(att, names: tuple[str, ...], x: torch.Tensor) -> torch.Tensor
         if not torch.is_autocast_enabled(x.device.type) and w.dtype != x.dtype:
             w, b = w.to(x.dtype), None if b is None else b.to(x.dtype)
         return F.linear(x, w, b)
-    key =(names, tuple((p.data_ptr(), p._version, p.dtype) for p in params))
+    key = (names, tuple((p.data_ptr(), p._version, p.dtype) for p in params))
     hit = att.__dict__.get("_anthropic_pack")
     if hit is None or hit[0] != key:
         with torch.no_grad():
@@ -135,7 +138,7 @@ def _bias_planes(att, pair: torch.Tensor, extra_pair_bias: torch.Tensor | None) 
     w = att.to_bias.weight
     if not torch.is_autocast_enabled(z.device.type) and w.dtype != z.dtype:
         w = w.to(z.dtype)
-    planes = torch.matmul(w, z.reshape(bsz, n * n, z.shape[-1]).transpose(1, 2)).view(bsz, -1, n, n)   # [B, H, L, L]
+    planes = torch.matmul(w, z.reshape(bsz, n * n, z.shape[-1]).transpose(1, 2)).view(bsz, -1, n, n)  # [B, H, L, L]
     if att.to_bias.bias is not None:
         planes = planes + att.to_bias.bias.to(planes.dtype)[None, :, None, None]
     if extra_pair_bias is not None:
@@ -166,7 +169,7 @@ def _core_torch(q, k, v, bias, mask, gate):
     a, b, n, h, d = q.shape
     w = wide(q)
     with torch.autocast(q.device.type, enabled=False):
-        s = torch.einsum("abqhd,abkhd->abhqk", q.to(w), k.to(w)) * d ** -0.5 + bias.to(w)[None]
+        s = torch.einsum("abqhd,abkhd->abhqk", q.to(w), k.to(w)) * d**-0.5 + bias.to(w)[None]
         if mask is not None:
             s = s.masked_fill(~mask.bool()[:, :, None, None, :], float("-inf"))
         o = torch.einsum("abhqk,abkhd->abqhd", torch.softmax(s, -1), v.to(w)).reshape(a, b, n, h * d)
@@ -183,10 +186,10 @@ def _release_delta(att, single, cond, pair, mask, extra_pair_bias, core, *, fuse
     in_dtype = single.dtype
     x = att.ada_ln_in(single, cond)
     names = ("to_query", "to_key", "to_value") + (("to_gate",) if fused_gate else ())
-    rows = _packed_linear(att, names, x)                                               # [A, B, L, (3 | 4) C]
+    rows = _packed_linear(att, names, x)  # [A, B, L, (3 | 4) C]
     c = att.to_query.weight.shape[0]
-    query, key = att.flat_qk_norm(rows[..., :c], rows[..., c:2 * c])
-    value = rows[..., 2 * c:3 * c]
+    query, key = att.flat_qk_norm(rows[..., :c], rows[..., c : 2 * c])
+    value = rows[..., 2 * c : 3 * c]
     a = query.shape[0]
     h = att.n_head
     d = c // h
@@ -194,7 +197,7 @@ def _release_delta(att, single, cond, pair, mask, extra_pair_bias, core, *, fuse
     bias = (bias_fn or _bias_planes)(att, pair, extra_pair_bias)
     if mask is not None and mask.ndim == 2:
         mask = mask[None].expand(a, -1, -1)
-    gate = rows[..., 3 * c:] if fused_gate else None
+    gate = rows[..., 3 * c :] if fused_gate else None
     out = core(query, key, value, bias, mask, gate).to(in_dtype)
     out = att.to_out(out) if fused_gate else att.gate_project(x, out)
     return sigmoid_gate(att.to_scale(cond), out)
@@ -222,8 +225,17 @@ def _core_af3_apb(q, k, v, bias, mask, gate):
     outs = []
     for j in range(q.shape[1]):
         km = None if mask is None else mask[:, j]
-        outs.append(apb.pair_bias_attention(q[:, j].transpose(1, 2), k[:, j].transpose(1, 2), v[:, j].transpose(1, 2),
-                                            bias[j], km, gate=None if gate is None else gate[:, j], layout="shnd"))   # [A, L, H * D]
+        outs.append(
+            apb.pair_bias_attention(
+                q[:, j].transpose(1, 2),
+                k[:, j].transpose(1, 2),
+                v[:, j].transpose(1, 2),
+                bias[j],
+                km,
+                gate=None if gate is None else gate[:, j],
+                layout="shnd",
+            )
+        )  # [A, L, H * D]
     return torch.stack(outs, 1)
 
 
@@ -237,12 +249,21 @@ def _core_dtk_flash(q, k, v, bias, mask, gate, *, dtype=None):
     prec = "tf32" if dt == torch.float32 and _tf32() else "ieee"
     out = torch.empty(a, b, n, h * d, dtype=dt, device=q.device)
     for j in range(b):
-        bh = bias[j].to(dt)                                                        # [H, L, L], head-major already
+        bh = bias[j].to(dt)  # [H, L, L], head-major already
         for i in range(a):
             km = None if mask is None else mask[i, j].to(torch.int32)
-            dk.flash_bias_attn(q[i, j].to(dt).transpose(0, 1), k[i, j].to(dt).transpose(0, 1), v[i, j].to(dt).transpose(0, 1),
-                               bias=bh, key_mask=km, gate=None if gate is None else gate[i, j], out=out[i, j], out_dtype=dt,
-                               scale=d ** -0.5, in_prec=prec)
+            dk.flash_bias_attn(
+                q[i, j].to(dt).transpose(0, 1),
+                k[i, j].to(dt).transpose(0, 1),
+                v[i, j].to(dt).transpose(0, 1),
+                bias=bh,
+                key_mask=km,
+                gate=None if gate is None else gate[i, j],
+                out=out[i, j],
+                out_dtype=dt,
+                scale=d**-0.5,
+                in_prec=prec,
+            )
     return out
 
 
@@ -255,8 +276,19 @@ def _provider_selection(n: int, samples: int, d: int, h: int, dtype: torch.dtype
     """``(Selection, None)`` or ``(None, reason)``: the row opt_core's pair-bias provider (``opt_core.kernels.apb``) selects for the call."""
     provider = _anthropic.load("opt_core.kernels.apb")
     cc = tuple(torch.cuda.get_device_capability(device))
-    return _anthropic.kernel_selection(provider, cc, dtype, cell, int(n), word=_PROVIDER_WORD, samples=int(samples), timing="graphed",
-                                       capture=True, head_dim=int(d), heads=int(h))
+    return _anthropic.kernel_selection(
+        provider,
+        cc,
+        dtype,
+        cell,
+        int(n),
+        word=_PROVIDER_WORD,
+        samples=int(samples),
+        timing="graphed",
+        capture=True,
+        head_dim=int(d),
+        heads=int(h),
+    )
 
 
 def _core_provider(q, k, v, bias, mask_rows, gate, sel, *, cell: str = "dit_h16d48"):
@@ -269,8 +301,9 @@ def _core_provider(q, k, v, bias, mask_rows, gate, sel, *, cell: str = "dit_h16d
     out = torch.empty(a, b, n, h * d, dtype=q.dtype, device=q.device)
     for j in range(b):
         g = None if gate is None else gate[:, j].unflatten(-1, (h, d))
-        o, _ = provider.pair_bias_attention(q[:, j], k[:, j], v[:, j], bias[j][None], None, g, selection=sel, layout="snhd", cell=cell,
-                                            capture=True)
+        o, _ = provider.pair_bias_attention(
+            q[:, j], k[:, j], v[:, j], bias[j][None], None, g, selection=sel, layout="snhd", cell=cell, capture=True
+        )
         out[:, j] = o.reshape(a, n, h * d)
     return out
 
@@ -311,7 +344,9 @@ def _a100(single: torch.Tensor) -> bool:
     return single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0)
 
 
-def _a100_dtype(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor | None, compute_dtype) -> tuple[torch.dtype | None, str | None]:
+def _a100_dtype(
+    single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor | None, compute_dtype
+) -> tuple[torch.dtype | None, str | None]:
     """(the dtype the A100 kernels run the block in, None) or (None, why not): bf16 activations (bf16 or fp32 master parameters, with or
     without bf16 autocast) or fp32 activations without autocast (TF32 tensor cores)."""
     dt = single.dtype
@@ -325,8 +360,9 @@ def _a100_dtype(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor | N
 
 
 def _wants_grad(module: torch.nn.Module, *tensors) -> bool:
-    return torch.is_grad_enabled() and (any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
-                                        or any(p.requires_grad for p in module.parameters()))
+    return torch.is_grad_enabled() and (
+        any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors) or any(p.requires_grad for p in module.parameters())
+    )
 
 
 def _shared_key_mask(mask: torch.Tensor | None) -> tuple[torch.Tensor | None, bool]:
@@ -355,10 +391,16 @@ class TokenDiTProtenix(BackendModule):
     ``opt_core.kernels.apb`` by the tier word "fast", else ``dtk_kernels.flash_bias_attn`` per sample),
     the rest of the block as ``"pytorch"``; eval only, CUDA H100, head dim <= 64 (:meth:`_supports_anthropic`).
     """
-    version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 3, "triton:a100_sm80": 2, "triton:h100_sm90": 2}   # 2026-11-10: kits; sm_80 paths; 3: transition weight casts read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton attention core returns its bias gradient head-major on the A100 / H100 (every subclass)
+    backend_versions: ClassVar[dict[str, int]] = {
+        "anthropic": 2,
+        "cuda:a100_sm80": 3,
+        "triton:a100_sm80": 2,
+        "triton:h100_sm90": 2,
+    }  # 2026-11-10: kits; sm_80 paths; 3: transition weight casts read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton attention core returns its bias gradient head-major on the A100 / H100 (every subclass)
 
     #: The q / k RMSNorm of the attention (:class:`TokenDiTMiniWorld`).
     qk_norm: bool = False
@@ -447,16 +489,20 @@ class TokenDiTProtenix(BackendModule):
 
             if token_dit_train.serves(view, single, cond, pair, km, compute_dtype, extra_pair_bias):
                 return "train", km
-            return None, ("training: outside the fused H100 training block's range (bf16 / fp32, [A, 1, L, d] with heads x head width "
-                          "16 x 48 / 24 x 32 / 12 x 64 (d 768) or 16 x 64 (d 1024), cond 384 or 768, pair 128 / 256 / 512, n = 2, key mask [1, L], eps 1e-5)")
+            return None, (
+                "training: outside the fused H100 training block's range (bf16 / fp32, [A, 1, L, d] with heads x head width "
+                "16 x 48 / 24 x 32 / 12 x 64 (d 768) or 16 x 64 (d 1024), cond 384 or 768, pair 128 / 256 / 512, n = 2, key mask [1, L], eps 1e-5)"
+            )
         if single.shape[1] > 1 and km is not None and km.stride(0) != 0:
             return None, "B > 1 trunk_seeds take one key mask expanded over B (stride 0)"
         from miniworld_engine.kernels.integrations import token_dit
 
         if token_dit.serves(view, single, cond, pair, compute_dtype, extra_pair_bias):
             return "infer", km
-        return None, ("inference: outside the fused H100 inference block's range (bf16 / fp32, [A, 1, L, d] with L a multiple of 128 and "
-                      "heads x head width 16 x 48 / 24 x 32 / 12 x 64 (d 768) or 16 x 64 (d 1024), cond 384 or 768, pair 128 / 256 / 512, n = 2, eps 1e-5)")
+        return None, (
+            "inference: outside the fused H100 inference block's range (bf16 / fp32, [A, 1, L, d] with L a multiple of 128 and "
+            "heads x head width 16 x 48 / 24 x 32 / 12 x 64 (d 768) or 16 x 64 (d 1024), cond 384 or 768, pair 128 / 256 / 512, n = 2, eps 1e-5)"
+        )
 
     def _supports_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> str | None:
         route, why = self._cuda_route(single, cond, pair, mask, compute_dtype, extra_pair_bias)
@@ -493,11 +539,15 @@ class TokenDiTProtenix(BackendModule):
         if single.ndim != 4 or cond.ndim != 4:
             return None, f"A100: single / cond must be [A, B, L, d], got {tuple(single.shape)} / {tuple(cond.shape)}"
         if not ct_sm80.serves(self.transition, single, cond, cast(torch.dtype, dt), _wants_grad(self, single, cond, pair)):
-            return None, ("A100: outside the sm_80 ConditionedTransition kernels' range (bf16 / fp32, widths of their table, sigmoid AdaLN "
-                          "without a shift bias, bias-free SwiGLU)")
+            return None, (
+                "A100: outside the sm_80 ConditionedTransition kernels' range (bf16 / fp32, widths of their table, sigmoid AdaLN "
+                "without a shift bias, bias-free SwiGLU)"
+            )
         if not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond=cond):
-            return None, ("A100: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or "
-                          "fp32, head dim 32, 48 or 64, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)")
+            return None, (
+                "A100: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or "
+                "fp32, head dim 32, 48 or 64, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)"
+            )
         return "a100", None
 
     def _forward_a100(self, single, cond, pair, mask):
@@ -548,13 +598,17 @@ class TokenDiTProtenix(BackendModule):
             return "compute_dtype (the release core runs in the activations' dtype)"
         if getattr(self.attention, "use_qk_norm", False):
             return "per-head q / k RMSNorm (no release op)"
-        return (_grad_reason(self, single, cond, pair, extra_pair_bias) or _token_mask_reason(mask, single)
-                or self._release_range(single, cond, pair, mask))
+        return (
+            _grad_reason(self, single, cond, pair, extra_pair_bias)
+            or _token_mask_reason(mask, single)
+            or self._release_range(single, cond, pair, mask)
+        )
 
     def _forward_anthropic(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> torch.Tensor:
         """``_forward_pytorch`` with the attention core on the release op (``_release_core``)."""
-        delta = _release_delta(self.attention, single, cond, pair, mask, extra_pair_bias, self._release_core,
-                               fused_gate=self._release_fused_gate)
+        delta = _release_delta(
+            self.attention, single, cond, pair, mask, extra_pair_bias, self._release_core, fused_gate=self._release_fused_gate
+        )
         if self.parallel:
             return single + delta + self.transition.delta(single, cond)
         return self.transition(single + delta, cond)
@@ -580,15 +634,18 @@ class TokenDiTProtenix(BackendModule):
             return f"mask must be [B, L] or [A, B, L], got {tuple(mask.shape)}"
         if pair.dtype not in (torch.bfloat16, torch.float16, torch.float32) or pair.ndim != 4:
             return f"pair {pair.dtype} {tuple(pair.shape)} (a [B, L, L, d_pair] bf16 / fp16 / fp32 pair)"
-        threshold = int(importlib.import_module("cuequivariance_ops_torch.pair_repr_to_attention_bias").CUEQ_ATTENTION_PAIR_BIAS_FALLBACK_THRESHOLD)
-        if pair.shape[1] * pair.shape[2] <= threshold ** 2:
+        threshold = int(
+            importlib.import_module("cuequivariance_ops_torch.pair_repr_to_attention_bias").CUEQ_ATTENTION_PAIR_BIAS_FALLBACK_THRESHOLD
+        )
+        if pair.shape[1] * pair.shape[2] <= threshold**2:
             return f"L <= {threshold} (the op runs its own PyTorch formula there)"
         return None
 
     def _forward_cueq(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> torch.Tensor:
         gated = hasattr(self.attention, "to_gate") and self._release_fused_gate
-        delta = _release_delta(self.attention, single, cond, pair, mask, extra_pair_bias, _core_torch, fused_gate=gated,
-                               bias_fn=_cueq_bias_planes)
+        delta = _release_delta(
+            self.attention, single, cond, pair, mask, extra_pair_bias, _core_torch, fused_gate=gated, bias_fn=_cueq_bias_planes
+        )
         if self.parallel:
             return single + delta + self.transition.delta(single, cond)
         return self.transition(single + delta, cond)
@@ -597,7 +654,8 @@ class TokenDiTProtenix(BackendModule):
 class TokenDiTMiniWorld(TokenDiTProtenix):
     """MiniWorld's token DiT block: :class:`TokenDiTProtenix` with the per-head q / k RMSNorm (``attention.norm_query`` /
     ``attention.norm_key``). No ``"anthropic"`` backend: no release folder has the QK-RMSNorm token DiT."""
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 4 (2026-11-11): A100 on the token DiT's sm_80 attention (augattn_sm80, the per-head q / k RMSNorm inside it) and the sm_80 transition;
     #: was the general composition with a materialised-score attention (a100_families.token)
     backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:a100_sm80": 4}
@@ -609,18 +667,26 @@ class TokenDiTMiniWorld(TokenDiTProtenix):
 class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
     """Boltz-2's token DiT block: :class:`TokenDiTProtenix` with the up-gate transition ``silu(W_a h) (W_b h) (W_u h)``
     (``transition.up``); the conditioning is 768 wide."""
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
     #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
     #: 4 (2026-11-10): H100 on the one token DiT algorithm (TokenDiTProtenix's cuda route with this block's options), eval and train
     backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 4}
 
-    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": H100 the one token DiT algorithm (its options), A100 VariantTokenCuda
+    backends = (
+        "pytorch",
+        "anthropic",
+        "cueq",
+        "cuda",
+        "triton",
+    )  # "cuda": H100 the one token DiT algorithm (its options), A100 VariantTokenCuda
 
     transition_part = UpGatedConditionedTransition
 
-    def __init__(self, d_single: int = 768, d_cond: int = 768, d_pair: int = 128, n_head: int = 16, n: int = 2, *,
-                 backend: str = "pytorch") -> None:
+    def __init__(
+        self, d_single: int = 768, d_cond: int = 768, d_pair: int = 128, n_head: int = 16, n: int = 2, *, backend: str = "pytorch"
+    ) -> None:
         super().__init__(d_single, d_cond, d_pair, n_head, n, backend=backend)
 
     # "anthropic": Boltz-2's own flash pair-bias kernel (boltz2/opt/forward/sampler/src/bz_sampler_dit.py ``_flash_bias_kernel``, the core of
@@ -639,26 +705,47 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
         c, dt = h * d, q.dtype
         prec = "bf16" if dt == torch.bfloat16 else ("tf32" if _tf32() else "ieee")
         bq, bkv, warps, stages = bz._flash_cfg(n, prec)
-        qb = torch.zeros(c, dtype=dt, device=q.device)              # the q bias is in q already (to_query's bias)
+        qb = torch.zeros(c, dtype=dt, device=q.device)  # the q bias is in q already (to_query's bias)
         out = torch.empty(a, b, n, c, dtype=dt, device=q.device)
-        packed = q.flatten(-2)                                      # [A, B, L, C] column view of the [A, B, L, 4 C] q / k / v / g rows
+        packed = q.flatten(-2)  # [A, B, L, C] column view of the [A, B, L, 4 C] q / k / v / g rows
         for j in range(b):
             t = packed[:, j]
-            if t.stride(1) == 4 * c and gate is not None and gate.data_ptr() == q.data_ptr() + 3 * c * q.element_size() \
-                    and t.stride(0) == n * t.stride(1):
-                rows = torch.as_strided(t, (a * n, 4 * c), (4 * c, 1))                                     # [A * L, 4 C] in place
+            if (
+                t.stride(1) == 4 * c
+                and gate is not None
+                and gate.data_ptr() == q.data_ptr() + 3 * c * q.element_size()
+                and t.stride(0) == n * t.stride(1)
+            ):
+                rows = torch.as_strided(t, (a * n, 4 * c), (4 * c, 1))  # [A * L, 4 C] in place
             else:
                 rows = torch.cat([u[:, j].reshape(a * n, c) for u in (q, k, v, cast(torch.Tensor, gate))], -1).contiguous()
-            pb = bias[j]                                                                                   # [H, L, L] head-major
+            pb = bias[j]  # [H, L, L] head-major
             if mask is not None:
                 pb = pb.float().add_((1 - mask[0, j].float())[None, None, :] * -1e6)
             pb = pb.to(dt).contiguous()
             o = out[:, j]
             ctx = o.view(a * n, c) if o.is_contiguous() else torch.empty(a * n, c, dtype=dt, device=q.device)
             bz._flash_bias_kernel[(triton.cdiv(n, bq), h, a)](
-                rows, qb, pb, ctx, n, rows.stride(0), pb.stride(0), pb.stride(1), ctx.stride(0), float(d ** -0.5),
-                H=h, HD=d, D=c, PREC={"bf16": 3, "tf32": 1, "ieee": 0}[prec], OUT_BF16=dt == torch.bfloat16, BQ=bq, BKV=bkv,
-                num_warps=warps, num_stages=stages)
+                rows,
+                qb,
+                pb,
+                ctx,
+                n,
+                rows.stride(0),
+                pb.stride(0),
+                pb.stride(1),
+                ctx.stride(0),
+                float(d**-0.5),
+                H=h,
+                HD=d,
+                D=c,
+                PREC={"bf16": 3, "tf32": 1, "ieee": 0}[prec],
+                OUT_BF16=dt == torch.bfloat16,
+                BQ=bq,
+                BKV=bkv,
+                num_warps=warps,
+                num_stages=stages,
+            )
             if not o.is_contiguous():
                 o.copy_(ctx.view(a, n, c))
         return out
@@ -677,19 +764,26 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
     """RoseTTAFold3's token DiT block (``af3_diffusion_transformer.py``): the parallel schedule ``a + dA(a) + dT(a)``
     (``no_residual_connection_between_attention_and_transition: true``), a bias-free query (``to_q``: ``bias=False``) and an affine LayerNorm
     of the flat q / k (``kq_norm``: ``attention.norm_query`` / ``attention.norm_key``, over all heads)."""
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
     #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
     #: 4 (2026-11-10): H100 on the one token DiT algorithm (TokenDiTProtenix's cuda route with this block's options), eval and train
     backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 4}
 
-    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": H100 the one token DiT algorithm (its options), A100 VariantTokenCuda
+    backends = (
+        "pytorch",
+        "anthropic",
+        "cueq",
+        "cuda",
+        "triton",
+    )  # "cuda": H100 the one token DiT algorithm (its options), A100 VariantTokenCuda
 
     parallel = True
     attention_part = FlatQKNormAugmentedAttention
 
     def make_inputs(self, **kwargs) -> dict:
-        return {**super().make_inputs(**kwargs), "mask": None}   # the model calls the block without a key mask
+        return {**super().make_inputs(**kwargs), "mask": None}  # the model calls the block without a key mask
 
     # "anthropic": the core RoseTTAFold3's kit runs (rosettafold3/opt/rosettafold3_opt/dtk.py ``attn``: opt_core's
     # ``dtk_kernels.flash_bias_attn`` per sample, the bias in the activation dtype, no key mask; the gate stays outside, as the kit applies
@@ -714,22 +808,38 @@ class TokenDiTChai1(VariantTokenCuda, TokenDiTProtenix):
     """Chai-1's token DiT block: the parallel schedule, the identity AdaLN ``(1 + W_s s) LN(a) + W_b s`` in both parts
     (``attention.ada_ln_in``, ``transition.ada_ln_in``), no gating query; the pair is 256 wide. ``adaln_eps``: the epsilon of both AdaLNs'
     LayerNorm of ``a`` (Chai-1's release, its traced ``layer_norm(x, None, None, 0.1)``: 0.1, the default)."""
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
     #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
     #: 4 (2026-11-10): H100 on the one token DiT algorithm (TokenDiTProtenix's cuda route with this block's options), eval and train
     backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 4}
 
-    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")   # "cuda": H100 the one token DiT algorithm (its options), A100 VariantTokenCuda
+    backends = (
+        "pytorch",
+        "anthropic",
+        "cueq",
+        "cuda",
+        "triton",
+    )  # "cuda": H100 the one token DiT algorithm (its options), A100 VariantTokenCuda
 
     parallel = True
     attention_part = UngatedAugmentedAttention
 
     def make_inputs(self, **kwargs) -> dict:
-        return {**super().make_inputs(**kwargs), "mask": None}   # the model calls the block without a key mask
+        return {**super().make_inputs(**kwargs), "mask": None}  # the model calls the block without a key mask
 
-    def __init__(self, d_single: int = 768, d_cond: int = 384, d_pair: int = 256, n_head: int = 16, n: int = 2, *,
-                 adaln_eps: float = 0.1, backend: str = "pytorch") -> None:
+    def __init__(
+        self,
+        d_single: int = 768,
+        d_cond: int = 384,
+        d_pair: int = 256,
+        n_head: int = 16,
+        n: int = 2,
+        *,
+        adaln_eps: float = 0.1,
+        backend: str = "pytorch",
+    ) -> None:
         super().__init__(d_single, d_cond, d_pair, n_head, n, backend=backend)
         self.attention.ada_ln_in = IdentityAdaptiveLayerNorm(d_single, d_cond, eps=adaln_eps)
         self.transition.ada_ln_in = IdentityAdaptiveLayerNorm(d_single, d_cond, eps=adaln_eps)
@@ -740,7 +850,7 @@ class TokenDiTChai1(VariantTokenCuda, TokenDiTProtenix):
     # release serves it. Chai-1's denoiser runs this core in fp32 only (its Router takes fp32 q / k / v): under the master layout (bf16
     # activations) the core's operands are widened to fp32 as Chai-1's fp32 DiT has them, the rest of the block stays in autocast.
     _release_module = "opt_core.kernels.apb"
-    _release_fused_gate = False   # no gating query
+    _release_fused_gate = False  # no gating query
     _CELL = "dit_h16d48"
 
     def _chai_selection(self, n: int, samples: int, d: int, h: int, device):
@@ -775,10 +885,11 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     :func:`pair_bias_all`); ``pair`` may be None. A pair of its own per sample is ``single`` [1, B, L, d] with ``pair`` [B, L, L, d_pair].
     No ``"anthropic"`` backend: no release folder has the bias-only attention.
     """
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "cuda")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: sm_80 paths
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: sm_80 paths
 
     def __init__(
         self,
@@ -838,17 +949,21 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
 
             if bias_only_dit_train.serves(view, single, cond, pair, mask, bias=bias):
                 return "train", None
-            return None, ("training: outside the fused H100 bias-only training block's range (bf16 / fp32 weights, [A, 1, L, 768] with L "
-                          "a multiple of 128 <= 768, heads x head width 16 x 48 / 24 x 32 / 12 x 64 / 16 x 64, "
-                          f"cond {' / '.join(map(str, bias_only_dit_train.KERNEL_D_CONDS))}, pair {' / '.join(map(str, bias_only_dit_train.KERNEL_D_PAIRS))}, "
-                          "n = 2, key mask [1, L], eps 1e-5)")
+            return None, (
+                "training: outside the fused H100 bias-only training block's range (bf16 / fp32 weights, [A, 1, L, 768] with L "
+                "a multiple of 128 <= 768, heads x head width 16 x 48 / 24 x 32 / 12 x 64 / 16 x 64, "
+                f"cond {' / '.join(map(str, bias_only_dit_train.KERNEL_D_CONDS))}, pair {' / '.join(map(str, bias_only_dit_train.KERNEL_D_PAIRS))}, "
+                "n = 2, key mask [1, L], eps 1e-5)"
+            )
         from miniworld_engine.kernels.integrations import bias_only_dit
 
         if bias_only_dit.serves(view, single, cond, pair, mask, bias=bias):
             return "infer", None
-        return None, ("inference: outside the fused H100 bias-only inference block's range (bf16 / fp32 weights without autocast, "
-                      "[A, 1, L, 768] with L a multiple of 128, heads x head width 16 x 48 / 24 x 32 / 12 x 64 / 16 x 64, cond 384 or 768, "
-                      "pair 128 / 256, n = 2, key mask [1, L], eps 1e-5)")
+        return None, (
+            "inference: outside the fused H100 bias-only inference block's range (bf16 / fp32 weights without autocast, "
+            "[A, 1, L, 768] with L a multiple of 128, heads x head width 16 x 48 / 24 x 32 / 12 x 64 / 16 x 64, cond 384 or 768, "
+            "pair 128 / 256, n = 2, key mask [1, L], eps 1e-5)"
+        )
 
     def _supports_cuda(self, single, cond, pair=None, mask=None, *, bias=None) -> str | None:
         route, why = self._cuda_route(single, cond, pair, mask, bias)
@@ -888,10 +1003,16 @@ def pair_bias_all(blocks, pair: torch.Tensor) -> tuple[torch.Tensor, ...]:
     attns = [m.attention if hasattr(m, "attention") else m for m in mods]
     eps, H = attns[0].ln_pair.eps, attns[0].to_bias.weight.shape[0]
     for a in attns:
-        if (a.ln_pair.eps != eps or a.to_bias.weight.shape[0] != H or getattr(a.ln_pair, "bias", None) is not None
-                or getattr(a.to_bias, "bias", None) is not None or a.ln_pair.weight is None):
-            raise ValueError("pair_bias_all: the blocks must share eps and head count, ln_pair must have a weight and no offset, "
-                             "to_bias no bias")
+        if (
+            a.ln_pair.eps != eps
+            or a.to_bias.weight.shape[0] != H
+            or getattr(a.ln_pair, "bias", None) is not None
+            or getattr(a.to_bias, "bias", None) is not None
+            or a.ln_pair.weight is None
+        ):
+            raise ValueError(
+                "pair_bias_all: the blocks must share eps and head count, ln_pair must have a weight and no offset, to_bias no bias"
+            )
     # the "cuda" backend on a B200: the fused hoist (one LayerNorm and one GEMM for every block, the blocks' bias gradients written into
     # one buffer); pair [1, L, L, 128] bf16 or fp32 -- any other pair (and every H100 call) takes the PyTorch fold below
     if getattr(mods[0], "backend", "pytorch") == "cuda":
@@ -903,9 +1024,9 @@ def pair_bias_all(blocks, pair: torch.Tensor) -> tuple[torch.Tensor, ...]:
     # [B, L, L, N] product
     dp = pair.shape[-1]
     ln0 = F.layer_norm(pair.to(wide(pair)), (dp,), None, None, eps).to(pair.dtype)
-    wf = torch.cat([a.to_bias.weight * a.ln_pair.weight.to(a.to_bias.weight.dtype)[None, :] for a in attns], 0)   # [N, dp]
-    b = torch.matmul(ln0, wf.t().to(ln0.dtype))                                                                   # [B, L, L, N]
-    return tuple(b[..., i * H:(i + 1) * H].permute(0, 3, 1, 2) for i in range(len(attns)))
+    wf = torch.cat([a.to_bias.weight * a.ln_pair.weight.to(a.to_bias.weight.dtype)[None, :] for a in attns], 0)  # [N, dp]
+    b = torch.matmul(ln0, wf.t().to(ln0.dtype))  # [B, L, L, N]
+    return tuple(b[..., i * H : (i + 1) * H].permute(0, 3, 1, 2) for i in range(len(attns)))
 
 
 # ======================================================================================================================== selector

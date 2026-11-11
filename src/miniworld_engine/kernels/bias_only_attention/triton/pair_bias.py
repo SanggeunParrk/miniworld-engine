@@ -37,8 +37,6 @@ from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels._tf32 import tf32_dot
 
 
-
-
 def _bwd_warps(c: int) -> int:
     """Warps of the backward program: 4, or 8 from 256 channels on -- its [64, C] row block, d xhat and the [16, C] dW' accumulator spill
     at 4 warps there (H100, R = 4 x 512^2, 16 outputs, 2026-10-29: C 256 bf16 1611 -> 582 us, fp32 2588 -> 1040 us; C 128 stays at 4: 249
@@ -51,7 +49,7 @@ def _bwd_prune(configs, nargs, **meta):
     they were tuned). Measured table entries (other Config objects) are left as they are."""
     if not _from(configs, _ln_bias_bwd_kernel.default):
         return configs
-    want = _bwd_warps(int(nargs["C"] if "C" in nargs else meta["C"]))   # C reaches the prune as a launch keyword
+    want = _bwd_warps(int(nargs["C"] if "C" in nargs else meta["C"]))  # C reaches the prune as a launch keyword
     keep = [c for c in configs if c.num_warps == want]
     return keep or configs
 
@@ -61,9 +59,7 @@ def _from(configs, live) -> bool:
     return all(any(c is d for d in live) for c in configs)
 
 
-@configured('bias_only_attention_layernorm_gemm_triton',
-            key=["shape_key"],
-            default=dict(BR=64, num_warps=4, num_stages=2))
+@configured("bias_only_attention_layernorm_gemm_triton", key=["shape_key"], default=dict(BR=64, num_warps=4, num_stages=2))
 @triton.jit
 def _ln_bias_fwd_kernel(X, W, OUT, MEAN, RSTD, R, eps, shape_key, C: tl.constexpr, N: tl.constexpr, NP: tl.constexpr, BR: tl.constexpr):
     pid = tl.program_id(0).to(tl.int64)
@@ -77,18 +73,19 @@ def _ln_bias_fwd_kernel(X, W, OUT, MEAN, RSTD, R, eps, shape_key, C: tl.constexp
     xh = (xc * rstd[:, None]).to(X.dtype.element_ty)
     hh = tl.arange(0, NP)
     w = tl.load(W + hh[:, None] * C + cols[None, :], mask=(hh < N)[:, None], other=0.0)
-    acc = tf32_dot(w, tl.trans(xh))                                            # [NP, BR]; fp32: TF32 rounded to nearest
+    acc = tf32_dot(w, tl.trans(xh))  # [NP, BR]; fp32: TF32 rounded to nearest
     tl.store(OUT + hh[:, None] * R + rows[None, :], acc.to(OUT.dtype.element_ty), mask=(hh < N)[:, None] & rm[None, :])
     tl.store(MEAN + rows, mean, mask=rm)
     tl.store(RSTD + rows, rstd, mask=rm)
 
 
-@configured('bias_only_attention_bwd_layernorm_gemm_triton',
-            key=["shape_key"],
-            default=[dict(BR=64, num_warps=4, num_stages=2),
-            dict(BR=64, num_warps=8, num_stages=2)],
-            prune=_bwd_prune,
-            reset_to_zero=["DW"])
+@configured(
+    "bias_only_attention_bwd_layernorm_gemm_triton",
+    key=["shape_key"],
+    default=[dict(BR=64, num_warps=4, num_stages=2), dict(BR=64, num_warps=8, num_stages=2)],
+    prune=_bwd_prune,
+    reset_to_zero=["DW"],
+)
 @triton.jit
 def _ln_bias_bwd_kernel(X, W, DL, MEAN, RSTD, DX, DW, R, shape_key, C: tl.constexpr, N: tl.constexpr, NP: tl.constexpr, BR: tl.constexpr):
     pid = tl.program_id(0).to(tl.int64)
@@ -104,8 +101,8 @@ def _ln_bias_bwd_kernel(X, W, DL, MEAN, RSTD, DX, DW, R, shape_key, C: tl.conste
         mean = tl.load(MEAN + rows, mask=rm, other=0.0)
         rstd = tl.load(RSTD + rows, mask=rm, other=0.0)
         xh = (x - mean[:, None]) * rstd[:, None]
-        dl = tl.load(DL + hh[:, None] * R + rows[None, :], mask=hm[:, None] & rm[None, :], other=0.0)   # [NP, BR]
-        dxh = tf32_dot(tl.trans(dl), w)                                                                  # [BR, C]
+        dl = tl.load(DL + hh[:, None] * R + rows[None, :], mask=hm[:, None] & rm[None, :], other=0.0)  # [NP, BR]
+        dxh = tf32_dot(tl.trans(dl), w)  # [BR, C]
         dw = tf32_dot(dl, xh.to(X.dtype.element_ty), dw)
         c1 = tl.sum(dxh, axis=1) / C
         c2 = tl.sum(dxh * xh, axis=1) / C
@@ -121,8 +118,14 @@ def _np(n: int) -> int:
 def supported(pair: torch.Tensor, n_out: int) -> bool:
     """A power-of-two channel count (the row block holds a whole row) and at most 64 outputs, bf16 or fp32, contiguous."""
     c = pair.shape[-1]
-    return (pair.is_cuda and pair.dtype in (torch.bfloat16, torch.float32) and c == triton.next_power_of_2(c) and 16 <= c <= 512
-            and 1 <= n_out <= 64 and pair.is_contiguous())
+    return (
+        pair.is_cuda
+        and pair.dtype in (torch.bfloat16, torch.float32)
+        and c == triton.next_power_of_2(c)
+        and 16 <= c <= 512
+        and 1 <= n_out <= 64
+        and pair.is_contiguous()
+    )
 
 
 def _fwd_fake(x, w, eps=1e-5):
@@ -138,8 +141,9 @@ def _fwd(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-5) -> tuple[torch.Ten
     out = torch.empty((n, r), device=x.device, dtype=x.dtype)
     mean = torch.empty(r, device=x.device, dtype=torch.float32)
     rstd = torch.empty_like(mean)
-    _ln_bias_fwd_kernel[lambda meta: (triton.cdiv(r, meta["BR"]),)](x, w, out, mean, rstd, r, eps, shape_key=both_key(r, C=c, N=n), C=c,
-                                                                    N=n, NP=_np(n))
+    _ln_bias_fwd_kernel[lambda meta: (triton.cdiv(r, meta["BR"]),)](
+        x, w, out, mean, rstd, r, eps, shape_key=both_key(r, C=c, N=n), C=c, N=n, NP=_np(n)
+    )
     return out, mean, rstd
 
 
@@ -158,7 +162,8 @@ def _bwd(x: torch.Tensor, w: torch.Tensor, dl: torch.Tensor, mean: torch.Tensor,
     sms = num_sms(x.device.index or 0)
     # persistent: at most two programs per SM, each looping over row blocks of the config's BR
     _ln_bias_bwd_kernel[lambda meta: (max(1, min(sms * 2, triton.cdiv(r, meta["BR"]))),)](
-        x, w, dl, mean, rstd, dx, dw, r, shape_key=both_key(r, C=c, N=n), C=c, N=n, NP=_np(n))
+        x, w, dl, mean, rstd, dx, dw, r, shape_key=both_key(r, C=c, N=n), C=c, N=n, NP=_np(n)
+    )
     return dx, dw
 
 
@@ -169,7 +174,7 @@ class PairBiasFn(torch.autograd.Function):
     def forward(ctx, pair, gamma, weight, eps):
         c = pair.shape[-1]
         x = pair.reshape(-1, c)
-        wf = (weight.float() * gamma.float()[None, :]).to(x.dtype)       # the fold; fp32 parameters, rounded once to the activation dtype
+        wf = (weight.float() * gamma.float()[None, :]).to(x.dtype)  # the fold; fp32 parameters, rounded once to the activation dtype
         out, mean, rstd = _fwd(x, wf, eps)
         ctx.save_for_backward(x, wf, mean, rstd, gamma, weight)
         ctx.shape = pair.shape

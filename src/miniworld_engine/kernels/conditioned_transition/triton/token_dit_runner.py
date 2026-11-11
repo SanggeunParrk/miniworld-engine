@@ -112,9 +112,7 @@ class FusedTokenDiT:
         # QK-norm (RMSNorm of every q / k head after the projection) runs as one in-place CUDA row pass; the
         # sm_scale log2 e fold then moves from Wq / bq, which the norm would cancel, into the q norm's weight
         self.qk = bool(a0.use_qk_norm)
-        assert all(bool(b.attention.use_qk_norm) == self.qk for b in blocks), (
-            "QK-norm must be on for every block or none"
-        )
+        assert all(bool(b.attention.use_qk_norm) == self.qk for b in blocks), "QK-norm must be on for every block or none"
         if self.qk:
             if not hasattr(self.K, "qknorm_rows"):
                 raise NotImplementedError(
@@ -153,9 +151,7 @@ class FusedTokenDiT:
             # the two output gates read the raw conditioning
             w2 += [f32(at.to_scale.weight), f32(tr.to_scale.weight)]
             b2 += [f32(at.to_scale.bias), f32(tr.to_scale.bias)]
-            pw.append(
-                f32(at.to_bias.weight) * f32(at.ln_pair.weight)
-            )  # [H, dp], ln_pair weight folded
+            pw.append(f32(at.to_bias.weight) * f32(at.ln_pair.weight))  # [H, dp], ln_pair weight folded
             proj = dict(
                 q=at.to_query.weight,
                 k=at.to_key.weight,
@@ -169,11 +165,7 @@ class FusedTokenDiT:
                     torch.zeros(3 * self.d, device=dev, dtype=at.to_query.bias.dtype),
                 ]
             )  # q first
-            qs = (
-                (self.d // self.h) ** -0.5 * 1.4426950408889634
-                if prescale and core in ("gated", "gated2")
-                else 1.0
-            )
+            qs = (self.d // self.h) ** -0.5 * 1.4426950408889634 if prescale and core in ("gated", "gated2") else 1.0
             if qs != 1.0 and not self.qk:  # sm_scale * log2(e) into Wq, bq
                 wqkvg = wqkvg.detach().float().clone()
                 bqkvg = bqkvg.float().clone()
@@ -187,10 +179,7 @@ class FusedTokenDiT:
                     # v2 operands, nn.Linear layout [out, in] for torch.addmm(b, x, W.t())
                     wqkvg=wqkvg.detach().to(dtype).contiguous(),
                     wo=at.to_out.weight.detach().to(dtype).contiguous(),
-                    wab=torch.cat([tr.expand_a.weight, tr.expand_b.weight], 0)
-                    .detach()
-                    .to(dtype)
-                    .contiguous(),
+                    wab=torch.cat([tr.expand_a.weight, tr.expand_b.weight], 0).detach().to(dtype).contiguous(),
                     ws=tr.squeeze.weight.detach().to(dtype).contiguous(),
                 )
             )
@@ -224,9 +213,7 @@ class FusedTokenDiT:
         out = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
         # the TF32 core reads its bias with the key columns permuted (``key_perm``); the LayerNorm lays them out so
         self._bias_perm = self._tf32_core(pair.device, L) is not None
-        if getattr(
-            self.K, "PAIR_BIAS_MASK", False
-        ):  # the CUDA rows fold the mask into the same pass
+        if getattr(self.K, "PAIR_BIAS_MASK", False):  # the CUDA rows fold the mask into the same pass
             self.K.pair_bias_all(
                 pair.reshape(L * L, self.dp),
                 self.pw_t,
@@ -252,9 +239,7 @@ class FusedTokenDiT:
                 mean=torch.empty(M, T, device=dev),
                 m2=torch.empty(M, T, device=dev),
                 qkvg=torch.empty(4, M, self.d, device=dev, dtype=self.dtype),
-                h=torch.empty(
-                    M, self.per[0]["wab"].shape[0] // 2, device=dev, dtype=self.dtype
-                ),
+                h=torch.empty(M, self.per[0]["wab"].shape[0] // 2, device=dev, dtype=self.dtype),
                 # the attention core allocates and fills an all-true mask per call when handed None
                 keep=torch.ones(S, 1, L, device=dev, dtype=torch.bool),
                 lse=torch.empty(S, 1, self.h, L, device=dev, dtype=torch.float32),
@@ -263,9 +248,7 @@ class FusedTokenDiT:
                 qkvg2=torch.empty(M, 4 * self.d, device=dev, dtype=self.dtype),
                 a=torch.empty(M, self.d, device=dev, dtype=self.dtype),
                 y=torch.empty(M, self.d, device=dev, dtype=self.dtype),
-                ab=torch.empty(
-                    M, self.per[0]["wab"].shape[0], device=dev, dtype=self.dtype
-                ),
+                ab=torch.empty(M, self.per[0]["wab"].shape[0], device=dev, dtype=self.dtype),
             )
         return self._buf[key]
 
@@ -312,16 +295,10 @@ class FusedTokenDiT:
             out, fresh = self._run(single, g1, g2, bias, 0, want)
             # copy=True otherwise: the fp32 residual is this runner's buffer; returning it uncopied (fp32 out) let the next
             # step on a reused runner overwrite an earlier result
-            return (
-                out.view(S, 1, L, D)
-                if fresh
-                else out.view(S, 1, L, D).to(want, copy=True)
-            )
+            return out.view(S, 1, L, D) if fresh else out.view(S, 1, L, D).to(want, copy=True)
         main = torch.cuda.current_stream()
         if len(self._streams) < streams:
-            self._streams += [
-                torch.cuda.Stream() for _ in range(streams - len(self._streams))
-            ]
+            self._streams += [torch.cuda.Stream() for _ in range(streams - len(self._streams))]
         ready = torch.cuda.Event()
         ready.record(main)
         cuts = [round(i * S / streams) for i in range(streams + 1)]
@@ -330,11 +307,7 @@ class FusedTokenDiT:
             st = self._streams[i]
             st.wait_event(ready)
             with torch.cuda.stream(st):
-                outs.append(
-                    self._run(single[cuts[i] : cuts[i + 1]], g1, g2, bias, i + 1, want)[
-                        0
-                    ]
-                )
+                outs.append(self._run(single[cuts[i] : cuts[i + 1]], g1, g2, bias, i + 1, want)[0])
             done = torch.cuda.Event()
             done.record(st)
             main.wait_event(done)
@@ -347,42 +320,22 @@ class FusedTokenDiT:
 
         S, B, L, D = single.shape
         M, H = S * L, self.h
-        P = g1.shape[
-            0
-        ]  # AdaLN / gate table period: L (shared cond) or S L (per sample)
+        P = g1.shape[0]  # AdaLN / gate table period: L (shared cond) or S L (per sample)
         buf = self._buffers(S, L, single.device, tag)
-        x, xa, qkvg, a, y, ab, h = (
-            buf[k] for k in ("x", "xa", "qkvg2", "a", "y", "ab", "h")
-        )
+        x, xa, qkvg, a, y, ab, h = (buf[k] for k in ("x", "xa", "qkvg2", "a", "y", "ab", "h"))
         fused_io = hasattr(self.K, "adaln_in_rows")
         if fused_io:  # x = single (into fp32) and the first AdaLN, one pass
-            self.K.adaln_in_rows(
-                single.reshape(M, D), x, g1[:, 0, 0], g1[:, 0, 1], xa, P, self.eps
-            )
+            self.K.adaln_in_rows(single.reshape(M, D), x, g1[:, 0, 0], g1[:, 0, 1], xa, P, self.eps)
         else:
             x.copy_(single.reshape(M, D))
             self.K.adaln_rows(x, g1[:, 0, 0], g1[:, 0, 1], xa, P, self.eps)
         # q, k, v, g as strided views of ONE [M, 4D] GEMM output (column blocks in self.col order); the core launcher
         # honours strides
         c = self.col
-        q, k, v = (
-            qkvg.view(S, 1, L, 4 * D)[..., c[n] * D : (c[n] + 1) * D].unflatten(
-                -1, (H, D // H)
-            )
-            for n in "qkv"
-        )
+        q, k, v = (qkvg.view(S, 1, L, 4 * D)[..., c[n] * D : (c[n] + 1) * D].unflatten(-1, (H, D // H)) for n in "qkv")
         key = atom_key(L)
-        q4, k4, v4, g4 = (
-            qkvg.view(S, L, 4 * D)[..., c[n] * D : (c[n] + 1) * D].unflatten(
-                -1, (H, D // H)
-            )
-            for n in "qkvg"
-        )
-        cuda_core = (
-            self._cuda_core(single.device, L, D, H)
-            if self.core == "gated2" and self.prescale
-            else None
-        )
+        q4, k4, v4, g4 = (qkvg.view(S, L, 4 * D)[..., c[n] * D : (c[n] + 1) * D].unflatten(-1, (H, D // H)) for n in "qkvg")
+        cuda_core = self._cuda_core(single.device, L, D, H) if self.core == "gated2" and self.prescale else None
         tf32 = self._tf32_core(single.device, L)
         tf32_core = (cuda_core or tf32) and self.dtype is torch.float32
         if tf32_core:
@@ -412,22 +365,16 @@ class FusedTokenDiT:
                     self.K.qknorm_rows(qkg, p["nq"], p["nk"], self.eq, self.ek, D)
                 torch.mm(p["wqkvg"][3 * D :], xa.t(), out=vt)  # v^T (v has no bias)
                 if tf32:
-                    tf32(
-                        qkg, vt, bias, b, S, 2 * D
-                    )  # H100: key-permuted bias, gate at column 2D
+                    tf32(qkg, vt, bias, b, S, 2 * D)  # H100: key-permuted bias, gate at column 2D
                 else:
                     assert cuda_core is not None
-                    cuda_core(
-                        qkg, bias, b, S, vt
-                    )  # B200: upstream TF32 core and layouts
+                    cuda_core(qkg, bias, b, S, vt)  # B200: upstream TF32 core and layouts
                 self._mm(qkg[:, :D], p["wo"], y)
             elif cuda_core:
                 cuda_core(qkvg, bias, b, S)  # sigmoid(g)*o over q, native bf16 core
                 self._mm(qkvg[:, :D], p["wo"], y)
             elif self.core == "gated2":
-                attention_gated_in_place2(
-                    q4, k4, v4, g4, bdesc, b, self.core_precision
-                )  # sigmoid(g)*o over q
+                attention_gated_in_place2(q4, k4, v4, g4, bdesc, b, self.core_precision)  # sigmoid(g)*o over q
                 self._mm(qkvg[:, :D], p["wo"], y)
             elif self.core == "gated":
                 attention_gated_in_place(
@@ -451,13 +398,9 @@ class FusedTokenDiT:
                     buf["lse"],
                     key,
                 )
-                self.K.gate_rows(
-                    qkvg[:, :D], qkvg[:, c["g"] * D : (c["g"] + 1) * D], a
-                )  # o sits where q was
+                self.K.gate_rows(qkvg[:, :D], qkvg[:, c["g"] * D : (c["g"] + 1) * D], a)  # o sits where q was
                 torch.mm(a, p["wo"].t(), out=y)
-            self.K.resgate_adaln_rows(
-                x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, P, self.eps
-            )
+            self.K.resgate_adaln_rows(x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, P, self.eps)
             if gsw is not None:
                 gsw(xa, p["wab"], h)  # expand + SwiGLU, one CUDA kernel
             else:

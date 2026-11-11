@@ -219,15 +219,11 @@ class _CtypesDriver(object):
         try:
             lib = ctypes.CDLL("libcuda.so.1")
         except OSError as e:
-            raise Unresolvable(
-                "libcuda.so.1 not loadable (%s)" % str(e).split("\n")[0][:120]
-            )
+            raise Unresolvable("libcuda.so.1 not loadable (%s)" % str(e).split("\n")[0][:120])
         self._missing = set()
         for name, argtypes in list(_SIGS.items()) + list(_OPTIONAL_SIGS.items()):
             fn = None
-            for cand in (
-                (name + "_v2", name) if name in ("cuCtxGetCurrent",) else (name,)
-            ):
+            for cand in (name + "_v2", name) if name in ("cuCtxGetCurrent",) else (name,):
                 fn = getattr(lib, cand, None)
                 if fn is not None:
                     break
@@ -311,9 +307,7 @@ class _CtypesDriver(object):
     def module_load_data(self, image):
         if isinstance(image, (bytearray, memoryview)):
             image = bytes(image)
-        buf = ctypes.create_string_buffer(
-            image, len(image)
-        )  # keeps a NUL-safe copy alive for the call
+        buf = ctypes.create_string_buffer(image, len(image))  # keeps a NUL-safe copy alive for the call
         m = ctypes.c_void_p(0)
         self._check("cuModuleLoadData", self._cuModuleLoadData(ctypes.byref(m), buf))
         return int(m.value)
@@ -323,25 +317,19 @@ class _CtypesDriver(object):
         nm = name if isinstance(name, bytes) else str(name).encode()
         self._check(
             "cuModuleGetFunction",
-            self._cuModuleGetFunction(
-                ctypes.byref(f), ctypes.c_void_p(int(module)), nm
-            ),
+            self._cuModuleGetFunction(ctypes.byref(f), ctypes.c_void_p(int(module)), nm),
             nm.decode(),
         )
         return int(f.value)
 
     def module_unload(self, module):
-        self._check(
-            "cuModuleUnload", self._cuModuleUnload(ctypes.c_void_p(int(module)))
-        )
+        self._check("cuModuleUnload", self._cuModuleUnload(ctypes.c_void_p(int(module))))
 
     def func_get_attribute(self, attr, func):
         v = ctypes.c_int(0)
         self._check(
             "cuFuncGetAttribute",
-            self._cuFuncGetAttribute(
-                ctypes.byref(v), int(attr), ctypes.c_void_p(int(func))
-            ),
+            self._cuFuncGetAttribute(ctypes.byref(v), int(attr), ctypes.c_void_p(int(func))),
         )
         return int(v.value)
 
@@ -351,9 +339,7 @@ class _CtypesDriver(object):
             self._cuFuncSetAttribute(ctypes.c_void_p(int(func)), int(attr), int(value)),
         )
 
-    def launch_kernel_ex(
-        self, func, grid, block, smem_bytes, stream, kernel_params, pdl=False
-    ):
+    def launch_kernel_ex(self, func, grid, block, smem_bytes, stream, kernel_params, pdl=False):
         """cuLaunchKernelEx with the programmatic-stream-serialisation attribute (CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION = 6)."""
         cfg = _CUlaunchConfig(
             int(grid[0]),
@@ -373,25 +359,15 @@ class _CtypesDriver(object):
             ctypes.memmove(attrs[0].value, ctypes.byref(ctypes.c_int(1)), 4)
             cfg.attrs = ctypes.cast(attrs, ctypes.POINTER(_CUlaunchAttribute))
             cfg.numAttrs = 1
-        kp = (
-            ctypes.cast(kernel_params, ctypes.c_void_p)
-            if kernel_params is not None
-            else ctypes.c_void_p(0)
-        )
+        kp = ctypes.cast(kernel_params, ctypes.c_void_p) if kernel_params is not None else ctypes.c_void_p(0)
         self._check(
             "cuLaunchKernelEx",
-            self._cuLaunchKernelEx(
-                ctypes.byref(cfg), ctypes.c_void_p(int(func)), kp, ctypes.c_void_p(0)
-            ),
+            self._cuLaunchKernelEx(ctypes.byref(cfg), ctypes.c_void_p(int(func)), kp, ctypes.c_void_p(0)),
         )
 
     def launch_kernel(self, func, grid, block, smem_bytes, stream, kernel_params):
         """``kernel_params``: a ctypes array of c_void_p (one pointer per kernel argument, each at host memory holding that argument's bytes)."""
-        kp = (
-            ctypes.cast(kernel_params, ctypes.c_void_p)
-            if kernel_params is not None
-            else ctypes.c_void_p(0)
-        )
+        kp = ctypes.cast(kernel_params, ctypes.c_void_p) if kernel_params is not None else ctypes.c_void_p(0)
         rc = self._cuLaunchKernel(
             ctypes.c_void_p(int(func)),
             int(grid[0]),
@@ -444,9 +420,7 @@ class _CtypesDriver(object):
             )
         rank = int(rank)
         gd = (ctypes.c_uint64 * rank)(*[int(v) for v in global_dim])
-        gs = (ctypes.c_uint64 * max(rank - 1, 1))(
-            *([int(v) for v in global_strides][: rank - 1] or [0])
-        )
+        gs = (ctypes.c_uint64 * max(rank - 1, 1))(*([int(v) for v in global_strides][: rank - 1] or [0]))
         bd = (ctypes.c_uint32 * rank)(*[int(v) for v in box_dim])
         es = (ctypes.c_uint32 * rank)(*[int(v) for v in element_strides])
         raw = (ctypes.c_uint8 * (TENSOR_MAP_BYTES + TENSOR_MAP_ALIGN))()
@@ -468,8 +442,7 @@ class _CtypesDriver(object):
         self._check(
             "cuTensorMapEncodeTiled",
             rc,
-            "dtype=%d rank=%d dim=%s strides=%s box=%s"
-            % (int(dtype), rank, list(global_dim), list(global_strides), list(box_dim)),
+            "dtype=%d rank=%d dim=%s strides=%s box=%s" % (int(dtype), rank, list(global_dim), list(global_strides), list(box_dim)),
         )
         return ctypes.string_at(addr, TENSOR_MAP_BYTES)
 
@@ -483,9 +456,7 @@ class _WheelDriver(object):
         try:
             from cuda.bindings import driver as d
         except ImportError as e:
-            raise Unresolvable(
-                "cuda.bindings not importable (%s)" % str(e).split("\n")[0][:120]
-            )
+            raise Unresolvable("cuda.bindings not importable (%s)" % str(e).split("\n")[0][:120])
         for need in (
             "cuTensorMapEncodeTiled",
             "cuLaunchKernel",
@@ -536,18 +507,14 @@ class _WheelDriver(object):
         return int(self._unwrap("cuDeviceGet", self.d.cuDeviceGet(int(ordinal))))
 
     def device_name(self, dev):
-        r = self._unwrap(
-            "cuDeviceGetName", self.d.cuDeviceGetName(256, self.d.CUdevice(int(dev)))
-        )
+        r = self._unwrap("cuDeviceGetName", self.d.cuDeviceGetName(256, self.d.CUdevice(int(dev))))
         return (r.decode() if isinstance(r, bytes) else str(r)).split("\x00")[0]
 
     def device_attribute(self, attr, dev):
         return int(
             self._unwrap(
                 "cuDeviceGetAttribute",
-                self.d.cuDeviceGetAttribute(
-                    self.d.CUdevice_attribute(int(attr)), self.d.CUdevice(int(dev))
-                ),
+                self.d.cuDeviceGetAttribute(self.d.CUdevice_attribute(int(attr)), self.d.CUdevice(int(dev))),
             )
         )
 
@@ -567,9 +534,7 @@ class _WheelDriver(object):
         )
 
     def ctx_set_current(self, ctx):
-        self._unwrap(
-            "cuCtxSetCurrent", self.d.cuCtxSetCurrent(self.d.CUcontext(int(ctx)))
-        )
+        self._unwrap("cuCtxSetCurrent", self.d.cuCtxSetCurrent(self.d.CUcontext(int(ctx))))
 
     def module_load_data(self, image):
         if isinstance(image, (bytearray, memoryview)):
@@ -587,17 +552,13 @@ class _WheelDriver(object):
         )
 
     def module_unload(self, module):
-        self._unwrap(
-            "cuModuleUnload", self.d.cuModuleUnload(self.d.CUmodule(int(module)))
-        )
+        self._unwrap("cuModuleUnload", self.d.cuModuleUnload(self.d.CUmodule(int(module))))
 
     def func_get_attribute(self, attr, func):
         return int(
             self._unwrap(
                 "cuFuncGetAttribute",
-                self.d.cuFuncGetAttribute(
-                    self.d.CUfunction_attribute(int(attr)), self.d.CUfunction(int(func))
-                ),
+                self.d.cuFuncGetAttribute(self.d.CUfunction_attribute(int(attr)), self.d.CUfunction(int(func))),
             )
         )
 
@@ -611,9 +572,7 @@ class _WheelDriver(object):
             ),
         )
 
-    def launch_kernel_ex(
-        self, func, grid, block, smem_bytes, stream, kernel_params, pdl=False
-    ):
+    def launch_kernel_ex(self, func, grid, block, smem_bytes, stream, kernel_params, pdl=False):
         d = self.d
         cfg = d.CUlaunchConfig()
         cfg.gridDimX, cfg.gridDimY, cfg.gridDimZ = (
@@ -637,9 +596,7 @@ class _WheelDriver(object):
         cfg.attrs = attrs
         cfg.numAttrs = len(attrs)
         kp = ctypes.addressof(kernel_params) if kernel_params is not None else 0
-        self._unwrap(
-            "cuLaunchKernelEx", d.cuLaunchKernelEx(cfg, d.CUfunction(int(func)), kp, 0)
-        )
+        self._unwrap("cuLaunchKernelEx", d.cuLaunchKernelEx(cfg, d.CUfunction(int(func)), kp, 0))
 
     def launch_kernel(self, func, grid, block, smem_bytes, stream, kernel_params):
         kp = ctypes.addressof(kernel_params) if kernel_params is not None else 0
@@ -701,8 +658,7 @@ class _WheelDriver(object):
                 d.CUtensorMapL2promotion(int(l2_promotion)),
                 d.CUtensorMapFloatOOBfill(int(oob_fill)),
             ),
-            "dtype=%d rank=%d dim=%s strides=%s box=%s"
-            % (int(dtype), rank, list(global_dim), list(global_strides), list(box_dim)),
+            "dtype=%d rank=%d dim=%s strides=%s box=%s" % (int(dtype), rank, list(global_dim), list(global_strides), list(box_dim)),
         )
         words = [int(w) for w in tm.opaque]
         if len(words) != 16:
@@ -710,8 +666,7 @@ class _WheelDriver(object):
                 "cuTensorMapEncodeTiled",
                 999,
                 "CUDA_ERROR_UNKNOWN",
-                "unexpected CUtensorMap layout in cuda.bindings (%d words)"
-                % len(words),
+                "unexpected CUtensorMap layout in cuda.bindings (%d words)" % len(words),
             )
         buf = (ctypes.c_uint64 * 16)(*words)
         return ctypes.string_at(ctypes.addressof(buf), TENSOR_MAP_BYTES)
@@ -727,30 +682,17 @@ def get(binding=None):
     ``cuda_bindings``; ``auto`` = the wheel when importable with the tensor-map API, else ctypes).  A later call naming
     the other form after one is resolved raises ``Unresolvable`` (one binding per process).  Raises ``Unresolvable`` with the reason when
     nothing resolves."""
-    want = (
-        (binding or "auto")
-        .strip()
-        .lower()
-        .replace(".", "_")
-        .replace("-", "_")
-    )
+    want = (binding or "auto").strip().lower().replace(".", "_").replace("-", "_")
     if want not in ("auto", "ctypes", "cuda_bindings", "wheel"):
-        raise ValueError(
-            "binding must be auto | ctypes | cuda_bindings (got %r)" % (binding,)
-        )
+        raise ValueError("binding must be auto | ctypes | cuda_bindings (got %r)" % (binding,))
     if want == "wheel":
         want = "cuda_bindings"
     with _LOCK:
         drv = _STATE["drv"]
         if drv is not None:
-            if want == "auto" or drv.word.startswith(
-                "ctypes" if want == "ctypes" else "cuda.bindings"
-            ):
+            if want == "auto" or drv.word.startswith("ctypes" if want == "ctypes" else "cuda.bindings"):
                 return drv
-            raise Unresolvable(
-                "binding %s already resolved in this process (asked for %s)"
-                % (drv.word, want)
-            )
+            raise Unresolvable("binding %s already resolved in this process (asked for %s)" % (drv.word, want))
         errs = []
         if want in ("auto", "cuda_bindings"):
             try:

@@ -1,4 +1,3 @@
-
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/transition.py
 
@@ -24,6 +23,7 @@ from miniworld_engine.kernels._shape_key import both_key, length_of, pack, rows_
 # the autotune key (shape_key, ND, K); dtype from x (defaults bf16). Separate op ids for fwd/bwd
 # since their best tiles differ. Miss/stale -> warn once + full grid.
 
+
 def _whole_k_tiles(configs, named_args, **meta):
     """With ``ROUND_X`` the kernel rounds the activation tile it loads, which is only exact when no K tile is ragged: keep the configs whose
     ``BLOCK_K`` divides ``K``."""
@@ -32,33 +32,38 @@ def _whole_k_tiles(configs, named_args, **meta):
         return list(configs)
     return [c for c in configs if int(a["K"]) % c.kwargs["BLOCK_K"] == 0] or list(configs)
 
-@configured('transition_expand_swiglu_triton',
-            key=["shape_key", "STORE_AB", "HALF"],
-            default=[dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=3),
-            dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=3),
-            dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=4, num_warps=8, num_stages=3),
-            dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=4, num_warps=8, num_stages=4),
-            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=3),
-            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=4),
-            dict(BLOCK_K=64, BLOCK_M1=256, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=3),
-            dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=64, GROUP_M=16, num_warps=8, num_stages=3),
-            dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=16, num_warps=8, num_stages=3),
-            dict(BLOCK_K=64, BLOCK_M1=256, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=4),
-            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=3),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=3),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=4),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, GROUP_M=4, num_warps=4, num_stages=4),
-            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, GROUP_M=4, num_warps=8, num_stages=3),
-            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=3),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, GROUP_M=4, num_warps=4, num_stages=3),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=2, num_stages=2),
-            dict(BLOCK_K=16, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
-            dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
-            dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, GROUP_M=16, num_warps=4, num_stages=3),
-            dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=16, num_warps=8, num_stages=4)],
-            prune=_whole_k_tiles)
+
+@configured(
+    "transition_expand_swiglu_triton",
+    key=["shape_key", "STORE_AB", "HALF"],
+    default=[
+        dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=3),
+        dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=3),
+        dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=4, num_warps=8, num_stages=3),
+        dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=4, num_warps=8, num_stages=4),
+        dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=3),
+        dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=4),
+        dict(BLOCK_K=64, BLOCK_M1=256, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=3),
+        dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=64, GROUP_M=16, num_warps=8, num_stages=3),
+        dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=16, num_warps=8, num_stages=3),
+        dict(BLOCK_K=64, BLOCK_M1=256, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=4),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=3),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=3),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=4),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, GROUP_M=4, num_warps=4, num_stages=4),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, GROUP_M=4, num_warps=8, num_stages=3),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=8, num_stages=3),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, GROUP_M=4, num_warps=4, num_stages=3),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=2, num_stages=2),
+        dict(BLOCK_K=16, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+        dict(BLOCK_K=64, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+        dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=128, GROUP_M=16, num_warps=4, num_stages=3),
+        dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=16, num_warps=8, num_stages=4),
+    ],
+    prune=_whole_k_tiles,
+)
 @triton.jit
 def transition_fwd_kernel(
     x_ptr,
@@ -70,7 +75,8 @@ def transition_fwd_kernel(
     M,
     K: tl.constexpr,
     ND: tl.constexpr,
-    stride_wn, stride_wk,
+    stride_wn,
+    stride_wk,
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -99,7 +105,7 @@ def transition_fwd_kernel(
 
     offs_m = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_w = pid_n * (2 * BLOCK_N) + tl.arange(0, 2 * BLOCK_N)    # rows of Wab
+    offs_w = pid_n * (2 * BLOCK_N) + tl.arange(0, 2 * BLOCK_N)  # rows of Wab
 
     acc = tl.zeros((BLOCK_M1, 2 * BLOCK_N), dtype=tl.float32)
     for k in range(0, K, BLOCK_K):
@@ -117,7 +123,7 @@ def transition_fwd_kernel(
         acc = tf32_dot(x_tile, w_tile, acc, input_precision=PREC, pre_a=PRE and not ROUND_X, pre_b=PRE)
 
     A_tile, B_tile = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
-    if x_ptr.dtype.element_ty == tl.bfloat16:      # the gate is rounded to bf16: one tanh.approx is enough (kernels/_fastmath.py)
+    if x_ptr.dtype.element_ty == tl.bfloat16:  # the gate is rounded to bf16: one tanh.approx is enough (kernels/_fastmath.py)
         swish_AB = (A_tile * sigmoid_fast(A_tile)) * B_tile
     else:
         swish_AB = (A_tile * tl.sigmoid(A_tile)) * B_tile
@@ -140,8 +146,10 @@ def _expand_swiglu_fake(x, expand_a_weight, expand_b_weight, shape_key):
     multiplied together in the epilogue, so the width is ``ND`` and not ``2*ND``."""
     return x.new_empty((x.shape[0], expand_a_weight.shape[0]))
 
+
 #: A/B switch for the tests and records: True keeps the saved halves in fp32 under fp32 activations (the pre-fp16 behaviour).
 _SAVED_HALVES_FP32 = False
+
 
 def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab, half_scale=None):
     M, N = x.shape
@@ -162,10 +170,12 @@ def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab, hal
     scale = half_scale if half else expand
     # both weights as one operand, row-interleaved (2*ND, K): ~10 MB at the widest, a few microseconds
     prec = dot_precision(x.dtype)
-    pre = prec == "tf32" and x.dtype is torch.float32     # operands rounded to nearest here, once, and h at its store (kernels/_tf32.py)
-    stack = lambda: torch.stack((expand_a_weight, expand_b_weight), dim=1).reshape(2 * nd, N)    # noqa: E731
+    pre = prec == "tf32" and x.dtype is torch.float32  # operands rounded to nearest here, once, and h at its store (kernels/_tf32.py)
+    stack = lambda: torch.stack((expand_a_weight, expand_b_weight), dim=1).reshape(2 * nd, N)  # noqa: E731
     w_ab = tf32_cached((expand_a_weight, expand_b_weight), lambda: tf32_grid_many(stack()))[0] if pre else stack()
-    round_x = pre and N % 64 == 0      # the activation tile is rounded inside the kernel (no extra pass over x); a ragged K tile is why the other shapes round it here, in a launcher pass
+    round_x = (
+        pre and N % 64 == 0
+    )  # the activation tile is rounded inside the kernel (no extra pass over x); a ragged K tile is why the other shapes round it here, in a launcher pass
     x_op = x if round_x or not pre else tf32_grid_many(x)[0]
     grid = lambda META: tile_grid(M, nd, META["BLOCK_M1"], META["BLOCK_N"])  # noqa: E731
     transition_fwd_kernel[grid](
@@ -176,17 +186,19 @@ def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab, hal
         b,
         scale,
         M,
-        N,          # K -- the input width
-        nd,         # ND -- the expanded width
-        w_ab.stride(0), w_ab.stride(1),
+        N,  # K -- the input width
+        nd,  # ND -- the expanded width
+        w_ab.stride(0),
+        w_ab.stride(1),
         shape_key=pack(shape_key, K=N, ND=nd),
         STORE_AB=store_ab,
         HALF=half,
-        PREC=prec,   # fp32: TF32 when torch allows it (kernels/_dot_precision.py), else IEEE
+        PREC=prec,  # fp32: TF32 when torch allows it (kernels/_dot_precision.py), else IEEE
         PRE=pre,
         ROUND_X=round_x,
     )
     return expand, a, b
+
 
 @opaque(fake=_expand_swiglu_fake, name="transition_expand_swiglu")
 def _expand_swiglu(
@@ -204,12 +216,14 @@ def _expand_swiglu(
     """
     return _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, False)[0]
 
+
 def _expand_swiglu_saveact_fake(x, expand_a_weight, expand_b_weight, shape_key, half_scale=None):
     """``(h, a, b)``: each ``(M, ND)``, ``h`` in ``x``'s dtype, ``a`` / ``b`` fp16 when ``half_scale`` is given (fp32 ``x``)."""
     out = x.new_empty((x.shape[0], expand_a_weight.shape[0]))
     half = x.dtype == torch.float32 and half_scale is not None and _SAVED_HALVES_FP32 is False
     halves = torch.empty(out.shape, dtype=torch.float16 if half else out.dtype, device=out.device)
     return out, halves, torch.empty_like(halves)
+
 
 @opaque(fake=_expand_swiglu_saveact_fake, name="transition_expand_swiglu_saveact")
 def _expand_swiglu_saveact(
@@ -223,10 +237,15 @@ def _expand_swiglu_saveact(
     (``x``'s dtype; under fp32 ``x`` with a ``half_scale`` (one fp32 on the device): fp16, stored divided by it). The backward consumes them."""
     return _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, True, half_scale)
 
+
 def swiglu_squeeze_backward(
-    x: torch.Tensor, expand_a_weight: torch.Tensor, expand_b_weight: torch.Tensor,
-    squeeze_weight: torch.Tensor, grad_output: torch.Tensor,
-    orig_shape: torch.Size, nd: int,
+    x: torch.Tensor,
+    expand_a_weight: torch.Tensor,
+    expand_b_weight: torch.Tensor,
+    squeeze_weight: torch.Tensor,
+    grad_output: torch.Tensor,
+    orig_shape: torch.Size,
+    nd: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """``(dx, dWa, dWb, dWs)`` for ``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))``. ``x`` is 2-D.
 
@@ -247,16 +266,20 @@ def swiglu_squeeze_backward(
         _transition_expand_gatebwd_savedxn_stacked,
     )
 
-    grad_expand = torch.matmul(grad_output, squeeze_weight)        # dh  [M, ND]
+    grad_expand = torch.matmul(grad_output, squeeze_weight)  # dh  [M, ND]
     h, dAB = _transition_expand_gatebwd_savedxn_stacked(
-        x, expand_a_weight, expand_b_weight, grad_expand,
-        shape_key=both_key(rows_of(orig_shape)),   # grad_output's pre-flatten shape
+        x,
+        expand_a_weight,
+        expand_b_weight,
+        grad_expand,
+        shape_key=both_key(rows_of(orig_shape)),  # grad_output's pre-flatten shape
     )
-    grad_squeeze_weight = torch.matmul(grad_output.T, h)           # dWs  [D, ND]
-    grad_ab = torch.matmul(dAB.T, x)                               # [2*ND, K] = [dWa; dWb]
-    w_ab = torch.cat((expand_a_weight, expand_b_weight), dim=0)     # [2*ND, K]
-    dx = torch.matmul(dAB, w_ab).reshape(orig_shape)               # [M, K] single GEMM
+    grad_squeeze_weight = torch.matmul(grad_output.T, h)  # dWs  [D, ND]
+    grad_ab = torch.matmul(dAB.T, x)  # [2*ND, K] = [dWa; dWb]
+    w_ab = torch.cat((expand_a_weight, expand_b_weight), dim=0)  # [2*ND, K]
+    dx = torch.matmul(dAB, w_ab).reshape(orig_shape)  # [M, K] single GEMM
     return dx, grad_ab[:nd], grad_ab[nd:], grad_squeeze_weight
+
 
 class TritonTransitionFunction(torch.autograd.Function):
     @staticmethod
@@ -288,9 +311,11 @@ class TritonTransitionFunction(torch.autograd.Function):
 
         nd = expand_a_weight.shape[0]
         if n is not None and n * orig_shape[-1] != nd:
-            msg = (f"expansion ratio n={n} says the expand width is {n * orig_shape[-1]}, but "
-                   f"expand_a_weight is {tuple(expand_a_weight.shape)} -- width {nd}. The "
-                   f"weight decides; drop n or make it agree.")
+            msg = (
+                f"expansion ratio n={n} says the expand width is {n * orig_shape[-1]}, but "
+                f"expand_a_weight is {tuple(expand_a_weight.shape)} -- width {nd}. The "
+                f"weight decides; drop n or make it agree."
+            )
             raise ValueError(msg)
         # L = shape[-2] of x BEFORE the view(-1, d) above -- one rule for pair
         # (B, L, L, D) and token/atom (B, L, D). Never the row count M.
@@ -320,10 +345,17 @@ class TritonTransitionFunction(torch.autograd.Function):
         from miniworld_engine.kernels.transition.triton.training import swiglu_squeeze_backward_saved
 
         dx, grad_a_weight, grad_b_weight, grad_squeeze_weight = swiglu_squeeze_backward_saved(
-            x, expand_a_weight, expand_b_weight, squeeze_weight, grad_output, ctx.key, saved=(h, a, b),
+            x,
+            expand_a_weight,
+            expand_b_weight,
+            squeeze_weight,
+            grad_output,
+            ctx.key,
+            saved=(h, a, b),
         )
         dx = dx.reshape(orig_shape)
         return dx, grad_a_weight, grad_b_weight, grad_squeeze_weight, None, None
+
 
 def triton_transition(x, expand_a_weight, expand_b_weight, squeeze_weight, n=None):
     """``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))`` (:class:`TritonTransitionFunction`). The forward keeps the expand halves only when a

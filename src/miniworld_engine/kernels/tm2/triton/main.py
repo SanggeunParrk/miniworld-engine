@@ -1,4 +1,3 @@
-
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/tm2.py
 
@@ -20,15 +19,11 @@ from miniworld_engine.kernels._shape_key import length_of, token_key, pack
 # below drops configs whose pipelined tiles overflow device shared memory before compile.
 
 
-
-
-
-
-
-
-@configured('trimul_outproj_gemm_gate_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
+@configured(
+    "trimul_outproj_gemm_gate_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+)
 @triton.jit
 def fused_sigmoid_gate2_fwd_kernel(
     x_gate_ptr,
@@ -47,8 +42,7 @@ def fused_sigmoid_gate2_fwd_kernel(
     # Visit order, tuned: see kernels/_tiles.py. This walked the COLUMNS first, which is
     # GROUP_M = 1 on that axis -- the opposite end from the kernels that launch a 2-D grid,
     # and just as fixed. Which end suits the shape is what the tuner now decides.
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
-                              tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
 
     row_start = pid_m * BLOCK_M1
     col_start = pid_n * BLOCK_N
@@ -94,11 +88,11 @@ def fused_sigmoid_gate2_fwd_kernel(
     )
 
 
-
-
-@configured('trimul_outproj_bwd_gate_recompute_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
+@configured(
+    "trimul_outproj_bwd_gate_recompute_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+)
 @triton.jit
 def fused_sigmoid_gate2_bwd_kernel(
     x_gate_ptr,
@@ -119,8 +113,7 @@ def fused_sigmoid_gate2_bwd_kernel(
     # Visit order, tuned: see kernels/_tiles.py. This walked the COLUMNS first, which is
     # GROUP_M = 1 on that axis -- the opposite end from the kernels that launch a 2-D grid,
     # and just as fixed. Which end suits the shape is what the tuner now decides.
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
-                              tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
 
     row_start = pid_m * BLOCK_M1
     col_start = pid_n * BLOCK_N
@@ -284,8 +277,7 @@ class TritonTM2Function(torch.autograd.Function):
             grad_out = grad_out.to(x.dtype)
 
         grad_out = rearrange(grad_out, "... d -> (...) d").contiguous()
-        dA, dB = _tm2_bwd(x, y, gate_weight, out_weight, grad_out,
-                          token_key(length_of(original_shape)))
+        dA, dB = _tm2_bwd(x, y, gate_weight, out_weight, grad_out, token_key(length_of(original_shape)))
 
         dx = dA @ gate_weight.T
         dy = dB @ out_weight.T

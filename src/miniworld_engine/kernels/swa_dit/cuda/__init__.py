@@ -3,16 +3,24 @@
 ``gen/gen_wgmma_bf16.py`` generates ``gen/wgmma_bf16.inc`` (the wgmma wrappers the three ``.cu`` files include); it is
 kept beside its output and is not imported or shipped (``gen/`` is not a package and ``*.py`` is not package data)."""
 
-
 #: stage of ``loader.SOURCES`` -> (activation dtypes it serves, modes it runs in); ``None`` = any. The ``bwd`` / weight-gradient
 #: builds only run on the grad path, ``fp32`` / ``wgwg32`` only for float32 activations (a ``master`` row computes in bfloat16
 #: activations). Which stage serves which dtype / mode is the dispatch's knowledge (``swa_dit/dispatch.py``); which dtypes and
 #: modes are required comes from the requirements rows.
 _STAGES = {
-    "qkvg": (None, None), "qkvg_small": (None, None), "fwd": (None, None), "fwd_small": (None, None), "attn": (None, None),
-    "slab": (None, None), "mod": (None, None), "wgrad": (None, None),
-    "bwd": (None, {"train"}), "bwd_overwrite": (None, {"train"}), "wgwg": ({"bfloat16"}, {"train"}),
-    "fp32": ({"float32"}, None), "wgwg32": ({"float32"}, {"train"}),
+    "qkvg": (None, None),
+    "qkvg_small": (None, None),
+    "fwd": (None, None),
+    "fwd_small": (None, None),
+    "attn": (None, None),
+    "slab": (None, None),
+    "mod": (None, None),
+    "wgrad": (None, None),
+    "bwd": (None, {"train"}),
+    "bwd_overwrite": (None, {"train"}),
+    "wgwg": ({"bfloat16"}, {"train"}),
+    "fp32": ({"float32"}, None),
+    "wgwg32": ({"float32"}, {"train"}),
 }
 
 

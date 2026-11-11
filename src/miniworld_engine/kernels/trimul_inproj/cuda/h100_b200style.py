@@ -33,11 +33,7 @@ def _aux():
 @lru_cache(None)
 def _headers(backward=False):
     base = I._headers()
-    dest = T.cache_dir() / (
-        "b200style_headers_"
-        + T._source_digest().hex()[:16]
-        + ("_bwd" if backward else "_fwd")
-    )
+    dest = T.cache_dir() / ("b200style_headers_" + T._source_digest().hex()[:16] + ("_bwd" if backward else "_fwd"))
     for name in ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh"):
         source = T.read_header(base / name)
         if name == "tmn_kernels.cuh" and backward:
@@ -52,36 +48,25 @@ def _headers(backward=False):
             anchor = "  const float* mask;"
             pos = source.index(anchor, source.index("struct K1Params {"))
             source = source[:pos] + "  CUtensorMap tm_dcat, tm_dpl;\n" + source[pos:]
-            anchor = (
-                '  static_assert((G::NBAR + 1) * 8 <= G::SMEM_BAR, "barrier area");'
-            )
+            anchor = '  static_assert((G::NBAR + 1) * 8 <= G::SMEM_BAR, "barrier area");'
             assert source.count(anchor) == 1
             source = source.replace(
                 anchor,
-                "  uint64_t* barD_full = barGo + 1;\n"
-                '  static_assert((G::NBAR + 1 + G::NCWG) * 8 <= G::SMEM_BAR, "dpl barrier area");',
+                '  uint64_t* barD_full = barGo + 1;\n  static_assert((G::NBAR + 1 + G::NCWG) * 8 <= G::SMEM_BAR, "dpl barrier area");',
             )
             anchor = "    if (K1OFF > 0) mbar_init(barGo, 1);"
             assert source.count(anchor) == 1
             source = source.replace(
                 anchor,
-                anchor
-                + "\n    for (int i = 0; i < G::NCWG; ++i) mbar_init(barD_full + i, 1);\n"
+                anchor + "\n    for (int i = 0; i < G::NCWG; ++i) mbar_init(barD_full + i, 1);\n"
                 "    tma_prefetch_desc(&p.tm_dcat); tma_prefetch_desc(&p.tm_dpl);",
             )
             anchor = "if (TMAST && st_elect) tma_store_wait_all();"
             assert source.count(anchor) == 1
             source = source.replace(anchor, "if (st_elect) tma_store_wait_all();")
-            start = source.index(
-                "      uint32_t pk[4][2];", source.index("auto epilogue =")
-            )
+            start = source.index("      uint32_t pk[4][2];", source.index("auto epilogue ="))
             end = source.index("    };", start)
-            source = (
-                source[:start]
-                + (R / "k1wb_epilogue.inc").read_text()
-                + "\n"
-                + source[end:]
-            )
+            source = source[:start] + (R / "k1wb_epilogue.inc").read_text() + "\n" + source[end:]
         T.publish_header(dest / name, source)
     return dest
 
@@ -90,8 +75,8 @@ def _config(d, backward=False, n=None):
     if d == 256 and not backward:
         return (2, 64, 4, 4, 1, 0)
     if d == 128 and not backward:
-        return (6, 32, 8, 2, 1)   # the packaged D128 K1 tile (192-token CTA, three consumer warpgroups), inference only
-    if d == 64 and not backward:   # inference only: 192-token CTAs (6, 32) up to L1536, (3, 64) beyond (as the packaged D64 K1)
+        return (6, 32, 8, 2, 1)  # the packaged D128 K1 tile (192-token CTA, three consumer warpgroups), inference only
+    if d == 64 and not backward:  # inference only: 192-token CTAs (6, 32) up to L1536, (3, 64) beyond (as the packaged D64 K1)
         return K1_TILE_64 if n is None or n <= 1536 else K1_TILE_64_LONG
     return {256: (2, 64, 4, 4, 1), 384: (2, 64, 2, 6, 1), 512: (2, 64, 4, 2, 1)}[d]
 
@@ -128,14 +113,18 @@ def _front_kernel(d, h, backward, cfg):
         name = "mw_b200style_k1wb_emitxn_tma"
         headers = prefetch_headers(headers)
         from .h100_b200style_emitxn_tma import headers as emit_headers
+
         headers = emit_headers(headers)
     if backward and d == 256:
         name = "mw_b200style_k1wb_d256_dplpipe"
         from .h100_b200style_k1_prefetch import headers as prefetch256_headers
+
         headers = prefetch256_headers(headers)
         from .h100_b200style_dpl_pipeline import headers as pipe_headers
+
         headers = pipe_headers(headers)
         from .h100_b200style_emitxn_tma import headers as emit256_headers
+
         headers = emit256_headers(headers)
     body = (
         f'#include "tmn_kernels.cuh"\n'
@@ -215,14 +204,12 @@ def _front_rs(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
         0,
     ]
     if dcat is not None:
-        fields.insert(
-            3, I._map(dcat, [64, 64], [dcat.shape[1], m], [dcat.shape[1] * 2])
-        )
+        fields.insert(3, I._map(dcat, [64, 64], [dcat.shape[1], m], [dcat.shape[1] * 2]))
         fields.insert(4, I._map(dpl, [64, 32], [m, 2 * h], [m * 2]))
         if d in (256, 384):
             fields.insert(5, I._map(xn, [64, 64], [d, m], [d * 2]))
         fields += [dpl, dcat, dcat.shape[1]]
-    fields.append(0 if rows == n else rows)   # K1Params.rows (batched samples; 0 = one sample)
+    fields.append(0 if rows == n else rows)  # K1Params.rows (batched samples; 0 = one sample)
     kernel.launch(
         (min(tiles, mb * num_sms(x.device.index)), 1, 1),
         (128 * (a * b // 64 + 1), 1, 1),
@@ -253,9 +240,7 @@ def _output_kernel_standard(d, h, cfg):
         "-DMW_MINB=1",
         "-DMW_K1_STREAM=1",
     ]
-    kernel = T.load_unit(str(T.compile(R / "k3.cu", flags)), "b200style_k3").kernel(
-        "mw_b200style_k3"
-    )
+    kernel = T.load_unit(str(T.compile(R / "k3.cu", flags)), "b200style_k3").kernel("mw_b200style_k3")
     smem = BI._k3_smem(d, bn, stages)
     kernel.set_max_dynamic_smem(smem)
     return kernel, smem
@@ -270,9 +255,11 @@ def _output_kernel(d, h, cfg, save=False):
         return output_kernel(d, h, cfg)
     if d == 384 and save:
         from .h100_b200style_d384_tmasave import output_kernel
+
         return output_kernel(d, h, cfg)
     if d == 256 and save:
         from .h100_b200style_scalar_tmasave import output_kernel
+
         return output_kernel(d, h, cfg)
     return _output_kernel_standard(d, h, cfg)
 
@@ -289,7 +276,7 @@ def _contract(ab, d, direction):
     n = ab.shape[-1]
     samples = ab.numel() // (ab.shape[0] * n * n)
     t = ab.new_empty((d * samples, n, n))
-    left, right = _fold(ab[:d]), _fold(ab[d:2 * d])
+    left, right = _fold(ab[:d]), _fold(ab[d : 2 * d])
     if direction == 1:
         lt_contract(left, right.transpose(1, 2), t)
     else:
@@ -298,7 +285,7 @@ def _contract(ab, d, direction):
 
 
 def _saved(x, direction):
-    rows, n, d = x.shape[0] * x.shape[1], x.shape[1], x.shape[-1]   # batched samples: planes [c, B n, n], token saves [B n n, .]
+    rows, n, d = x.shape[0] * x.shape[1], x.shape[1], x.shape[-1]  # batched samples: planes [c, B n, n], token saves [B n n, .]
     m, h = rows * n, d * (2 if direction == 0 else 1)
     return [
         x.new_empty((2 * h, rows, n)),
@@ -320,9 +307,14 @@ def _forward_fake(leaves, mask, ds, direction):
 def rowpad_serves(x, direction):
     """One direction, inference: D256 / D384 at an L the token-flat path does not take (L % 128 != 0), D128 at every L (the
     token-flat port has no D128 build). One sample at any L >= 16; B samples (stacked b-major, as K1 takes them) at L % 16 == 0."""
-    return (x.ndim == 4 and direction in (1, 2) and x.shape[1] == x.shape[2] and x.shape[1] >= 16
-            and (x.shape[0] == 1 or (x.shape[1] % 16 == 0 and x.shape[-1] in (64, 128)))
-            and (x.shape[-1] in (64, 128) or (x.shape[-1] in (256, 384) and x.shape[1] % 128 != 0)))
+    return (
+        x.ndim == 4
+        and direction in (1, 2)
+        and x.shape[1] == x.shape[2]
+        and x.shape[1] >= 16
+        and (x.shape[0] == 1 or (x.shape[1] % 16 == 0 and x.shape[-1] in (64, 128)))
+        and (x.shape[-1] in (64, 128) or (x.shape[-1] in (256, 384) and x.shape[1] % 128 != 0))
+    )
 
 
 def _run_rowpad(leaves, mask, direction, out=None):
@@ -340,14 +332,17 @@ def _run_rowpad(leaves, mask, direction, out=None):
         ab = x.new_empty((2 * h, rows if bsz > 1 else npad, npad))
         xs = x.new_empty((rows * n, 2), dtype=torch.float32)
         vec = x.new_empty((4, d), dtype=torch.float32)
-        weights = [w.contiguous() for w in (wl, wlg, wr, wrg)]   # bf16 already (trimul casts the matrices: cast_training_weights)
-        token = (torch.ones(rows, device=x.device, dtype=torch.bool) if mask is None or mask.numel() == 0
-                 else mask.reshape(rows).to(torch.bool).contiguous())
+        weights = [w.contiguous() for w in (wl, wlg, wr, wrg)]  # bf16 already (trimul casts the matrices: cast_training_weights)
+        token = (
+            torch.ones(rows, device=x.device, dtype=torch.bool)
+            if mask is None or mask.numel() == 0
+            else mask.reshape(rows).to(torch.bool).contiguous()
+        )
         from .h100_b200style_direct import front
 
         front(x, weights, token, gi, bi, ab, xs)
-        tri = _contract(ab, d, direction)            # [h, (B,) np, np]
-        prow = rows if bsz > 1 else npad             # pair rows of the planes / tri
+        tri = _contract(ab, d, direction)  # [h, (B,) np, np]
+        prow = rows if bsz > 1 else npad  # pair rows of the planes / tri
         wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
         _aux().fold(wp, go, bo, wg, gi, bi, wpf, wgf, vec)
         y = T.take_output(x) if out is None else out
@@ -365,7 +360,18 @@ def _run_rowpad(leaves, mask, direction, out=None):
             I._map(wgf, [64, bn], [d, d], [d * 2]),
             I._map(x, [64, 64, 1], [d, n, rows], [d * 2, n * d * 2]),
             I._map(y, [64, 64, 1], [d, n, rows], [d * 2, n * d * 2]),
-            vec, xs, rows, tiles, None, None, None, None, None, n, npad, cj,
+            vec,
+            xs,
+            rows,
+            tiles,
+            None,
+            None,
+            None,
+            None,
+            None,
+            n,
+            npad,
+            cj,
         ]
         kernel.launch((min(tiles, num_sms(x.device.index)), 1, 1), (384, 1, 1), [T._launch_module().Struct(fields)], smem)
         return [y]
@@ -414,7 +420,7 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
         tri = _contract(ab, d, direction)
         wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
         _aux().fold(wp, go, bo, wg, gi, bi, wpf, wgf, vec)
-        y = T.take_output(x) if out is None else out   # out: a caller-owned [B, n, n, d] buffer (chunked batches)
+        y = T.take_output(x) if out is None else out  # out: a caller-owned [B, n, n, d] buffer (chunked batches)
         cfg = _output_config(d)
         if not save and ds is None:
             from .h100_b200style_static import output_kernel
@@ -455,17 +461,11 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
             [T._launch_module().Struct(fields)],
             smem,
         )
-        return (
-            ([y, ab, tri, xs, mu, rs, vec, pv, gv] + ([saved_xn] if d == 512 else []))
-            if save
-            else [y]
-        )
+        return ([y, ab, tri, xs, mu, rs, vec, pv, gv] + ([saved_xn] if d == 512 else [])) if save else [y]
 
 
 @opaque(fake=_forward_fake, name="trimul_h100_schedule256_forward")
-def forward(
-    leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, direction: int
-) -> list[torch.Tensor]:
+def forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, direction: int) -> list[torch.Tensor]:
     """B200-style TriMul training forward on sm_90a: [y, *saved activations for the backward]."""
     return _run_forward(leaves, mask, ds, direction, True)
 
@@ -507,12 +507,7 @@ def _backward_fake(leaves, mask, ds, direction, saved, dy, master_mask):
     """[dx, one gradient per leaf after x]: fp32 where the master_mask bit is set, bf16 otherwise."""
     return [
         torch.empty_like(leaves[0]),
-        *(
-            torch.empty_like(
-                w, dtype=torch.float32 if master_mask & (1 << i) else torch.bfloat16
-            )
-            for i, w in enumerate(leaves[1:])
-        ),
+        *(torch.empty_like(w, dtype=torch.float32 if master_mask & (1 << i) else torch.bfloat16) for i, w in enumerate(leaves[1:])),
     ]
 
 
@@ -533,15 +528,12 @@ def backward(
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     ab, tri, xs, mu, rs, vec, pv, gv = saved[:8]
     n, d, h = x.shape[1], x.shape[-1], wp.shape[1]
-    m, p = x.shape[0] * n * n, 2 * h   # batched samples: B n n tokens, b-major; the weight-gradient GEMMs sum every sample
+    m, p = x.shape[0] * n * n, 2 * h  # batched samples: B n n tokens, b-major; the weight-gradient GEMMs sum every sample
     with T.native_context(x.device):
         E = _aux()
         workspace = (
             x.new_empty(G.WORKSPACE, dtype=torch.uint8)
-            if any(
-                G._selection(d, h, n, role) is not None
-                for role in ("dt", "dwp", "dw", "dxn")
-            )
+            if any(G._selection(d, h, n, role) is not None for role in ("dt", "dwp", "dw", "dxn"))
             else None
         )
         dy2 = dy.contiguous().view(m, d)
@@ -549,9 +541,7 @@ def backward(
         dcat = x.new_empty((m, 2 * p + d))
         s1, s2 = torch.empty_like(mu), torch.empty_like(mu)
         acc = x.new_empty((4 * d + 2 * h,), dtype=torch.float32)
-        E.gate_bwd(
-            dy2, pv, gv, ds, vec, mu, rs, dpr, dcat[:, 2 * p :], s1, s2, acc[: 2 * d], n
-        )
+        E.gate_bwd(dy2, pv, gv, ds, vec, mu, rs, dpr, dcat[:, 2 * p :], s1, s2, acc[: 2 * d], n)
         dt = torch.empty_like(tri)
         E.lnout_bwd(
             G.mm(wp.t(), dpr.t(), workspace, d, h, n, "dt"),
@@ -565,11 +555,7 @@ def backward(
             acc[4 * d :],
         )
         dwp = (
-            go[None, :]
-            * (
-                G.mm(dpr.t(), tri.view(h, m).t(), workspace, d, h, n, "dwp", fp32=True)
-                - acc[d : 2 * d, None]
-            )
+            go[None, :] * (G.mm(dpr.t(), tri.view(h, m).t(), workspace, d, h, n, "dwp", fp32=True) - acc[d : 2 * d, None])
             + acc[:d, None] * bo[None, :]
         )
         dpl = _contract_bwd(ab, dt, d, direction)
@@ -589,9 +575,7 @@ def backward(
         dw = G.mm(dcat.t(), xn, workspace, d, h, n, "dw", fp32=True)
         dxn = G.mm(dcat, torch.cat((w1, wg)), workspace, d, h, n, "dxn")
         dx = T.take_input_grad(x)
-        E.lnin_bwd(
-            dxn, x.view(m, d), dy2, mean, rstd, gi, dx.view(m, d), acc[2 * d : 4 * d]
-        )
+        E.lnin_bwd(dxn, x.view(m, d), dy2, mean, rstd, gi, dx.view(m, d), acc[2 * d : 4 * d])
         packed = dw[: 2 * p].reshape(p // 32, 2, 32, d)
         dg = packed[:, 0].reshape(p, d)
         dv = packed[:, 1].reshape(p, d)
@@ -623,9 +607,7 @@ class _Training(torch.autograd.Function):
     @staticmethod
     def forward(ctx, direction, mask, ds, *leaves):
         ctx.direction = direction
-        ctx.master_mask = sum(
-            1 << i for i, w in enumerate(leaves[1:]) if w.dtype == torch.float32
-        )
+        ctx.master_mask = sum(1 << i for i, w in enumerate(leaves[1:]) if w.dtype == torch.float32)
         kernel_leaves = [
             leaves[0],
             *cast_training_weights(leaves[1:7]),
@@ -662,8 +644,13 @@ def trimul(leaves, mask, ds, direction=0, out=None):
     launches (tokens b-major; mask a token mask [B n] / pair mask [B n n] or empty, ds [B n, d])."""
     x = leaves[0]
     bsz = x.shape[0] if x.ndim == 4 else 0
-    rowpad = (x.ndim == 4 and not torch.is_grad_enabled() and ds is None and mask.numel() in (0, x.shape[0] * x.shape[1])
-              and rowpad_serves(x, direction))
+    rowpad = (
+        x.ndim == 4
+        and not torch.is_grad_enabled()
+        and ds is None
+        and mask.numel() in (0, x.shape[0] * x.shape[1])
+        and rowpad_serves(x, direction)
+    )
     if (
         x.dtype != torch.bfloat16
         or x.ndim != 4
@@ -685,27 +672,17 @@ def trimul(leaves, mask, ds, direction=0, out=None):
     if (
         len(leaves) != 11
         or any(
-            w.device != x.device
-            or w.dtype not in (torch.bfloat16, torch.float32)
-            or tuple(w.shape) != shape
+            w.device != x.device or w.dtype not in (torch.bfloat16, torch.float32) or tuple(w.shape) != shape
             for w, shape in zip(leaves[1:7], expected, strict=True)
         )
         or any(
-            w.device != x.device
-            or w.dtype != torch.float32
-            or not w.is_contiguous()
-            or w.shape != (width,)
-            for w, width in zip(
-                leaves[7:], (x.shape[-1], x.shape[-1], h, h), strict=True
-            )
+            w.device != x.device or w.dtype != torch.float32 or not w.is_contiguous() or w.shape != (width,)
+            for w, width in zip(leaves[7:], (x.shape[-1], x.shape[-1], h, h), strict=True)
         )
         or (
             ds is not None
             and (
-                ds.device != x.device
-                or ds.dtype != torch.bfloat16
-                or not ds.is_contiguous()
-                or ds.shape != (bsz * x.shape[1], x.shape[-1])
+                ds.device != x.device or ds.dtype != torch.bfloat16 or not ds.is_contiguous() or ds.shape != (bsz * x.shape[1], x.shape[-1])
             )
         )
         or mask.device != x.device
@@ -713,9 +690,7 @@ def trimul(leaves, mask, ds, direction=0, out=None):
         or mask.dtype not in (torch.bool, torch.bfloat16, torch.float32)
         or mask.numel() not in (0, bsz * x.shape[1], bsz * x.shape[1] ** 2)
     ):
-        raise ValueError(
-            "invalid B200-style Hopper weights, norm affines, mask or dropout scale"
-        )
+        raise ValueError("invalid B200-style Hopper weights, norm affines, mask or dropout scale")
     if not torch.is_grad_enabled():
         kernel_leaves = [
             x,

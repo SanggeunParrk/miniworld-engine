@@ -77,13 +77,17 @@ def transition_sm90(t: Target) -> Iterable[Want]:
             if dtype == "float32":
                 continue
             save = mode == "train"
-            for backward in ((False, True) if save else (False,)):
+            for backward in (False, True) if save else (False,):
                 grid = F.transition_candidates(t.sms, backward=backward, n=n)
                 op = "transition_bwd_residual_sm90_cuda" if backward else "transition_fwd_residual_sm90_cuda"
                 flag = f"FP32_DW={int(dtype == 'master')}" if backward else f"SAVE={int(save)}"
                 for m in sorted(c for c in counts if c % F.ROWS == 0):
-                    yield Want(op, f"bfloat16|{flag},K=128,M={m},ND={128 * n},SMS={t.sms} ({dtype} {mode})", grid,
-                               [(_uncached(F._build_ext), (c["ctas"], c["dw_repl"], save, n)) for c in grid])
+                    yield Want(
+                        op,
+                        f"bfloat16|{flag},K=128,M={m},ND={128 * n},SMS={t.sms} ({dtype} {mode})",
+                        grid,
+                        [(_uncached(F._build_ext), (c["ctas"], c["dw_repl"], save, n)) for c in grid],
+                    )
 
 
 def trimul_sm90(t: Target) -> Iterable[Want]:
@@ -103,11 +107,15 @@ def trimul_sm90(t: Target) -> Iterable[Want]:
         if mode is None or ("sm_90a", c.d, c.ch, "b") not in K.TILE_TABLE:
             continue
         for length in sorted(mode.lengths):
-            for direction in ((0,) if c.bidir else (1, 2)):
+            for direction in (0,) if c.bidir else (1, 2):
                 grid = HI.trimul_candidates(c.d, c.ch, length, direction)
                 native = c.d == c.ch == 384 and length == 512 and direction == 1
-                yield Want("trimul_fwd_sm90_cuda", f"bfloat16|CH={c.ch},CZ={c.d},DIR={direction},L={length}", grid,
-                           [(_trimul_unit, (native, c.d, c.ch))] * len(grid))
+                yield Want(
+                    "trimul_fwd_sm90_cuda",
+                    f"bfloat16|CH={c.ch},CZ={c.d},DIR={direction},L={length}",
+                    grid,
+                    [(_trimul_unit, (native, c.d, c.ch))] * len(grid),
+                )
 
 
 #: ``kernels/``-relative ``file::function`` of each ``choose`` call -> (family, the function enumerating what it is reached with).
@@ -209,22 +217,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.list:
             for w, keys in rows:
                 keys = [k for k in keys if k in names]
-                log(f"  {w.op} {w.label}: {len(w.candidates)} candidates -> {len(keys)} artifacts, "
-                    f"{sum(k in absent for k in keys)} not built")
-    log(f"plan for {t.arch}: {len(specs)} artifacts in {time.monotonic() - started:.1f} s; {len(absent)} not built yet; "
-        f"cache {_nvcc.engine_jit_root()}")
+                log(
+                    f"  {w.op} {w.label}: {len(w.candidates)} candidates -> {len(keys)} artifacts, "
+                    f"{sum(k in absent for k in keys)} not built"
+                )
+    log(
+        f"plan for {t.arch}: {len(specs)} artifacts in {time.monotonic() - started:.1f} s; {len(absent)} not built yet; "
+        f"cache {_nvcc.engine_jit_root()}"
+    )
     for p in problems:
         log(f"problem: {p}")
     if args.list:
         for s in specs:
             log(f"  {'have' if s.key not in absent else 'todo'} {s.kind:7s} {s.name}  [{s.key[:8]}]  {s.site}")
         return 0
-    results = _prebuild.build(specs, args.jobs or _prebuild.default_jobs(), args.stop_after,
-                              {"sm80": "8.0", "sm90": "9.0a", "sm100": "10.0a"}[t.arch])
+    results = _prebuild.build(
+        specs, args.jobs or _prebuild.default_jobs(), args.stop_after, {"sm80": "8.0", "sm90": "9.0a", "sm100": "10.0a"}[t.arch]
+    )
     failed = {k: v for k, v in results.items() if v[1] is not None}
     left = sum(_prebuild.present(s) is None for s in specs)
-    log(f"done: {len(results) - len(failed)} built, {len(failed)} failed, {left} of {len(specs)} still absent; "
-        f"{sum(v[0] for v in results.values()):.0f} s of builds in {time.monotonic() - started:.0f} s")
+    log(
+        f"done: {len(results) - len(failed)} built, {len(failed)} failed, {left} of {len(specs)} still absent; "
+        f"{sum(v[0] for v in results.values()):.0f} s of builds in {time.monotonic() - started:.0f} s"
+    )
     return 1 if failed or problems or left else 0
 
 

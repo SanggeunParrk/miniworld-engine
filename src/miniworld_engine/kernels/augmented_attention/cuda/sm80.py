@@ -96,9 +96,7 @@ def gate_bwd(
     _glue_ext().gate_bwd_cuda(dog, o, g, dob, dg)
 
 
-def res_gate(
-    y: torch.Tensor, g2: torch.Tensor, res: torch.Tensor | None, out: torch.Tensor
-) -> None:
+def res_gate(y: torch.Tensor, g2: torch.Tensor, res: torch.Tensor | None, out: torch.Tensor) -> None:
     """``out = res + sigmoid(g2) y`` (``res`` None: ``out = sigmoid(g2) y``)."""
     _glue_ext().res_gate_cuda(y, g2, _NOPEN if res is None else res, out)
 
@@ -126,9 +124,7 @@ def bias_pack(
     """The attention core's bias from a natural-unit bias ``[B, H, L, L]`` (bf16 / fp32, contiguous; L a multiple of 8): bf16 ``[B, H, Lp, Lp]`` = bias x ``scale`` (the raw units:
     sqrt(head dim)), ``fill`` on the keys a bool ``[B, L]`` ``kmask`` masks and on the keys past L, 0 on the query rows past L, in one pass."""
     batch = bias.shape[0]
-    out = torch.empty(
-        batch, heads, padded, padded, device=bias.device, dtype=torch.bfloat16
-    )
+    out = torch.empty(batch, heads, padded, padded, device=bias.device, dtype=torch.bfloat16)
     _glue_ext().bias_pack_cuda(
         bias.view(batch * heads, length, length),
         _NOPEN if kmask is None else kmask,
@@ -156,18 +152,8 @@ def _is_ampere(index: int) -> bool:
 def supported(dtype: torch.dtype, length: int, d: int, heads: int, index: int) -> bool:
     """The gated inference core's requirements: sm_80, bf16 (the mma.sync core) or fp32 (the TF32 core), head dim 48 (bf16) or 32 / 48 (fp32), L a multiple of 128."""
     if dtype is torch.float32:
-        return (
-            d % heads == 0
-            and d // heads in TF32_HEAD_DIMS
-            and length % 128 == 0
-            and _is_ampere(index)
-        )
-    return (
-        dtype is torch.bfloat16
-        and d // heads == HD
-        and length % 128 == 0
-        and _is_ampere(index)
-    )
+        return d % heads == 0 and d // heads in TF32_HEAD_DIMS and length % 128 == 0 and _is_ampere(index)
+    return dtype is torch.bfloat16 and d // heads == HD and length % 128 == 0 and _is_ampere(index)
 
 
 def _views(qkvg: torch.Tensor):
@@ -269,17 +255,9 @@ class GatedInferenceCore:
 GATE_HEAD_DIMS = (16, 32, 48)
 
 
-def supported_gate(
-    dtype: torch.dtype, length: int, d: int, heads: int, index: int
-) -> bool:
+def supported_gate(dtype: torch.dtype, length: int, d: int, heads: int, index: int) -> bool:
     """The gated core's requirements: sm_80, bf16, head dim 16, 32 or 48 (``d`` = ``heads`` x head dim), L a multiple of 128."""
-    return (
-        dtype is torch.bfloat16
-        and d % heads == 0
-        and d // heads in GATE_HEAD_DIMS
-        and length % 128 == 0
-        and _is_ampere(index)
-    )
+    return dtype is torch.bfloat16 and d % heads == 0 and d // heads in GATE_HEAD_DIMS and length % 128 == 0 and _is_ampere(index)
 
 
 def forward(
@@ -339,9 +317,7 @@ def _dkv_schedule(head_dim: int) -> tuple[int, int]:
 def _dq_schedule(samples: int) -> tuple[int, int, int]:
     """(samples per CTA, K | V ring stages, CTAs per SM) of the query side.  Four samples per CTA halve the bias-gradient partials that two write and
     read back (A = 48: dq + reduction 12-20 % faster), at one CTA per SM; two samples when A is not a multiple of four, one when it is odd."""
-    return (
-        (4, 3, 1) if samples % 4 == 0 else (2, 4, 1) if samples % 2 == 0 else (1, 3, 2)
-    )
+    return (4, 3, 1) if samples % 4 == 0 else (2, 4, 1) if samples % 2 == 0 else (1, 3, 2)
 
 
 def backward(
@@ -443,29 +419,17 @@ _MODE_PLAIN, _MODE_PGATE = 2, 3
 PAIR_C, PAIR_H, PAIR_HD, MASKED_BIAS = 16, 4, 32, -1e4
 
 
-def supported_plain(
-    dtype: torch.dtype, length: int, d: int, heads: int, index: int
-) -> bool:
+def supported_plain(dtype: torch.dtype, length: int, d: int, heads: int, index: int) -> bool:
     """The module-level core's requirements: sm_80, bf16, head dim 32 or 48, L a multiple of 128."""
-    return (
-        dtype is torch.bfloat16
-        and d // heads in HEAD_DIMS
-        and d % heads == 0
-        and length % 128 == 0
-        and _is_ampere(index)
-    )
+    return dtype is torch.bfloat16 and d // heads in HEAD_DIMS and d % heads == 0 and length % 128 == 0 and _is_ampere(index)
 
 
 def key_penalty(mask: torch.Tensor) -> torch.Tensor:
     """The per-sample key penalties of the kernels (``kpen``): fp32 with the shape of the bool key ``mask`` -- 0 where a key is valid, -inf where it is masked."""
-    return torch.zeros(
-        mask.shape, device=mask.device, dtype=torch.float32
-    ).masked_fill_(~mask, float("-inf"))
+    return torch.zeros(mask.shape, device=mask.device, dtype=torch.float32).masked_fill_(~mask, float("-inf"))
 
 
-def _penalty(
-    kpen: torch.Tensor | None, kps: int, length: int
-) -> tuple[torch.Tensor, int]:
+def _penalty(kpen: torch.Tensor | None, kps: int, length: int) -> tuple[torch.Tensor, int]:
     return (_NOPEN, 0) if kpen is None else (kpen, kps or length)
 
 
@@ -494,18 +458,10 @@ def plain_forward(
     ``kpen`` (``key_penalty`` of a bool ``[A, L]`` mask, sample stride ``kps`` floats, default L) is a key mask that differs per sample; ``out``: write ``o`` into this
     bf16 ``[A L, >= H hd]`` view instead of a new tensor, ``lse`` the fp32 ``[A, H, L]`` tensor the log-sum-exp goes into (with ``save_lse``).  ``warps`` 2 or 4 (one
     sample, no ``kpen``): CTAs of that many warps, 16 queries each, instead of 8 (a latency-bound grid of a few dozen CTAs gets more, shorter ones)."""
-    assert head_dim in HEAD_DIMS or (
-        head_dim == 16 and samples == 1 and kpen is None
-    ), head_dim
+    assert head_dim in HEAD_DIMS or (head_dim == 16 and samples == 1 and kpen is None), head_dim
     dev = q.device
     sm_scale = 1.0 / math.sqrt(head_dim) if sm_scale is None else sm_scale
-    o = (
-        torch.empty(
-            samples * length, heads * head_dim, device=dev, dtype=torch.bfloat16
-        )
-        if out is None
-        else out
-    )
+    o = torch.empty(samples * length, heads * head_dim, device=dev, dtype=torch.bfloat16) if out is None else out
     if not save_lse:
         lse = torch.empty(0, device=dev, dtype=torch.float32)
     elif lse is None:
@@ -564,13 +520,7 @@ def pgate_forward(
     :func:`plain_forward`; ``g`` token-major like q).  ``out`` may be ``q`` itself (the result is written over it: q is dead once its tile is loaded)."""
     assert head_dim in HEAD_DIMS, head_dim
     sm_scale = 1.0 / math.sqrt(head_dim) if sm_scale is None else sm_scale
-    o = (
-        torch.empty(
-            samples * length, heads * head_dim, device=q.device, dtype=torch.bfloat16
-        )
-        if out is None
-        else out
-    )
+    o = torch.empty(samples * length, heads * head_dim, device=q.device, dtype=torch.bfloat16) if out is None else out
     pen, kps = _penalty(kpen, kps, length)
     _ext().attn_fwd(
         q,
@@ -631,23 +581,16 @@ def plain_backward(
     column blocks of the projection's gradient) instead of new tensors.  ``warps`` 2 or 4 (one sample, no ``kpen``): CTAs of that many warps in both kernels.  ``on_db(db)``: called as soon as the bias gradient is
     launched, before the key side's kernels (the caller starts whatever needs only ``db`` on another stream).  ``db_bf16`` (one sample, ``db_natural``): ``db`` is
     the kernel's bf16 partial as it is (it IS the gradient, rounded once) -- no reduction pass, no fp32 copy."""
-    assert head_dim in HEAD_DIMS or (
-        head_dim == 16 and samples == 1 and kpen is None
-    ), head_dim
+    assert head_dim in HEAD_DIMS or (head_dim == 16 and samples == 1 and kpen is None), head_dim
     ext = _ext()
     dev, m, d = q.device, samples * length, heads * head_dim
     sm_scale = 1.0 / math.sqrt(head_dim) if sm_scale is None else sm_scale
     scl = sm_scale * _L2E
     delta = torch.empty(samples, heads, length, device=dev, dtype=torch.float32)
     ext.attn_delta(dob, o, delta, samples, length, heads, head_dim)
-    dq, dk, dv = (
-        torch.empty(m, d, device=dev, dtype=torch.bfloat16) if t is None else t
-        for t in (dq, dk, dv)
-    )
+    dq, dk, dv = (torch.empty(m, d, device=dev, dtype=torch.bfloat16) if t is None else t for t in (dq, dk, dv))
     pen, kps = _penalty(kpen, kps, length)
-    rows, nkv, minb = (
-        (1, 3, 4 if warps == 2 else 2) if warps < 8 else _dq_schedule(samples)
-    )
+    rows, nkv, minb = (1, 3, 4 if warps == 2 else 2) if warps < 8 else _dq_schedule(samples)
     assert warps == 8 or (samples == 1 and kpen is None and warps in (2, 4)), (
         samples,
         warps,
@@ -726,11 +669,7 @@ def plain_backward(
 
 
 def _kv(mask: torch.Tensor | None, device) -> torch.Tensor:
-    return (
-        torch.empty(0, device=device, dtype=torch.bool)
-        if mask is None
-        else mask.reshape(-1).contiguous()
-    )
+    return torch.empty(0, device=device, dtype=torch.bool) if mask is None else mask.reshape(-1).contiguous()
 
 
 def pair_bias_forward(
@@ -750,11 +689,7 @@ def pair_bias_forward(
     contiguous ``[4, n, n]`` tensor (the one returned) instead of a new one."""
     nz = z.shape[-2]
     w = (bias_weight.float() * ln_weight.float()[None]).contiguous()
-    bo = (
-        out
-        if out is not None
-        else torch.empty(PAIR_H, n, n, device=z.device, dtype=z.dtype)
-    )
+    bo = out if out is not None else torch.empty(PAIR_H, n, n, device=z.device, dtype=z.dtype)
     _ext().pair_bias_fwd(
         z.reshape(nz, nz, PAIR_C),
         w,
@@ -800,11 +735,7 @@ def pair_bias_generic(
     ``bias_weight x ln_weight`` fp32 channel-major ``[C, H]``, ``mask`` a bool ``[NZ]`` key mask or None, ``n`` the attention's length (a multiple of 128 >= NZ), ``oscale`` the scale
     of the output (sqrt(head dim) for the bf16 core's raw units, 1 for the TF32 core's natural units).  A masked or padded key carries ``oscale * MASKED_BIAS``, a padded query row 0."""
     nz, c, heads = z.shape[0], z.shape[-1], wcm.shape[1]
-    bo = (
-        out
-        if out is not None
-        else torch.empty(heads, n, n, device=z.device, dtype=z.dtype)
-    )
+    bo = out if out is not None else torch.empty(heads, n, n, device=z.device, dtype=z.dtype)
     _ext().pair_bias_gen(
         z.reshape(nz, nz, c),
         wcm,
@@ -850,9 +781,7 @@ def pair_bias_generic_backward(
     te = _GEN_BWD_TE[c]
     tiles = -(-nz // te)
     rows = max(1, min(8, nz * tiles // 864))  # about four waves of two blocks per SM
-    pw = torch.empty(
-        tiles * -(-nz // rows), heads, c, device=z.device, dtype=torch.float32
-    )
+    pw = torch.empty(tiles * -(-nz // rows), heads, c, device=z.device, dtype=torch.float32)
     dz = torch.empty_like(z)
     _ext().pair_bias_gen_bwd(
         z.reshape(nz, nz, c),
@@ -976,17 +905,9 @@ def _tf32_rna_ext():
     )
 
 
-def supported_tf32(
-    dtype: torch.dtype, length: int, d: int, heads: int, index: int
-) -> bool:
+def supported_tf32(dtype: torch.dtype, length: int, d: int, heads: int, index: int) -> bool:
     """The TF32 kernels' requirements: sm_80, fp32 operands, head dim 32 or 48, L a multiple of 128."""
-    return (
-        dtype is torch.float32
-        and d % heads == 0
-        and d // heads in TF32_MODULE_HEAD_DIMS
-        and length % 128 == 0
-        and _is_ampere(index)
-    )
+    return dtype is torch.float32 and d % heads == 0 and d // heads in TF32_MODULE_HEAD_DIMS and length % 128 == 0 and _is_ampere(index)
 
 
 def _fwd32_schedule(head_dim: int) -> tuple[int, int]:
@@ -1027,11 +948,7 @@ def tf32_forward(
         else (q if out is None else out)
     )
     if gate is None:
-        lse = (
-            torch.empty(samples, heads, length, device=dev, dtype=torch.float32)
-            if lse is None
-            else lse
-        )
+        lse = torch.empty(samples, heads, length, device=dev, dtype=torch.float32) if lse is None else lse
     pen, kps = _penalty(kpen, kps, length)
     scl, bscl = (1.0, 1.0) if prescaled else (_L2E * sm_scale, _L2E)
     (_tf32_rna_ext() if rna else _tf32_ext()).attn_fwd_tf32(
@@ -1097,29 +1014,18 @@ def tf32_backward(
     scl = sm_scale * _L2E
     delta = torch.empty(samples, heads, length, device=dev, dtype=torch.float32)
     ext.attn_delta32(dob, o, delta, samples, length, heads, head_dim)
-    dq, dk, dv = (
-        torch.empty(m, d, device=dev, dtype=torch.float32) if t is None else t
-        for t in (dq, dk, dv)
-    )
+    dq, dk, dv = (torch.empty(m, d, device=dev, dtype=torch.float32) if t is None else t for t in (dq, dk, dv))
     pen, kps = _penalty(kpen, kps, length)
     rows, nkv, minb = _dq32_schedule(samples, head_dim)
     groups = samples // rows
     tiles = length // 128
     per_tile = groups * heads * 128 * length * 4
     chunk = max(1, min(tiles, _DBP_BUDGET // per_tile))
-    dbp = torch.empty(
-        groups, heads, chunk * 128, length, device=dev, dtype=torch.float32
-    )
+    dbp = torch.empty(groups, heads, chunk * 128, length, device=dev, dtype=torch.float32)
     db = torch.empty(heads, length, length, device=dev, dtype=torch.float32)
     for qt0 in range(0, tiles, chunk):
         nqt = min(chunk, tiles - qt0)
-        buf = (
-            dbp
-            if nqt == chunk
-            else torch.empty(
-                groups, heads, nqt * 128, length, device=dev, dtype=torch.float32
-            )
-        )
+        buf = dbp if nqt == chunk else torch.empty(groups, heads, nqt * 128, length, device=dev, dtype=torch.float32)
         ext.attn_bwd_dq_tf32(
             q,
             k,

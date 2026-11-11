@@ -17,9 +17,9 @@ from miniworld_engine.kernels.bias_only_attention.triton import gate_out
 _forward_body = gate_out._gate_out_fwd.fn
 
 
-@configured('swa_gate_out_fwd_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=2))
+@configured(
+    "swa_gate_out_fwd_triton", key=["shape_key"], default=dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=2)
+)
 @triton.jit
 def swa_gate_out_fwd_kernel(
     gate_ptr,
@@ -73,17 +73,13 @@ def _forward_fake(gate, out, weight, key):
 
 
 @opaque(fake=_forward_fake, name="swa_gate_out_fwd")
-def _forward(
-    gate: torch.Tensor, out: torch.Tensor, weight: torch.Tensor, key: int
-) -> torch.Tensor:
+def _forward(gate: torch.Tensor, out: torch.Tensor, weight: torch.Tensor, key: int) -> torch.Tensor:
     """Run sigmoid-gated output projection using the shared GEMM body."""
     m, dh = gate.shape
     n = weight.shape[0]
     result = _forward_fake(gate, out, weight, key)
     if m:
-        swa_gate_out_fwd_kernel[
-            lambda cfg: tile_grid(m, n, cfg["BLOCK_M1"], cfg["BLOCK_N"])
-        ](
+        swa_gate_out_fwd_kernel[lambda cfg: tile_grid(m, n, cfg["BLOCK_M1"], cfg["BLOCK_N"])](
             gate,
             out,
             weight,
@@ -116,6 +112,4 @@ def swa_gate_out_inference(gate, out, weight):
     g = gate.reshape(-1, shape[-1]).contiguous()
     a = out.reshape_as(g).contiguous()
     key = both_key(g.shape[0], N=weight.shape[0], DH=weight.shape[1])
-    return _forward(g, a, weight.contiguous(), key).reshape(
-        *shape[:-1], weight.shape[0]
-    )
+    return _forward(g, a, weight.contiguous(), key).reshape(*shape[:-1], weight.shape[0])

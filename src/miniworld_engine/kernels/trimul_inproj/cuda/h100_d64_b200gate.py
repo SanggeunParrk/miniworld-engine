@@ -31,15 +31,22 @@ K3_TILE = (2, 64, 4, 1)  # BI, BJ, ring slots, accumulator sets (K3Cfg: 128-toke
 
 def supports(width, length) -> bool:
     """Qualified cells (tuple membership works for symbolic sizes under Dynamo)."""
-    return width == WIDTH and ((length % 128 == 0 and length >= 128)
-                                         if T.cuda_training_aux_enabled() else length in (384, 768))
+    return width == WIDTH and ((length % 128 == 0 and length >= 128) if T.cuda_training_aux_enabled() else length in (384, 768))
 
 
 # --------------------------------------------------------------------------- build
 def _flags(include, defines=()):
-    return ["-std=c++17", "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-Xptxas=-v",
-            "-I" + str(include), "-I" + str(T.ANTHROPIC_V5),
-            *("-D%s=%s" % kv for kv in defines)]
+    return [
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I" + str(include),
+        "-I" + str(T.ANTHROPIC_V5),
+        *("-D%s=%s" % kv for kv in defines),
+    ]
 
 
 def _k3_smem(tile):
@@ -47,17 +54,38 @@ def _k3_smem(tile):
     bmt = bi * bj
     nkcz = WIDTH // 64
     nbar = 2 * nkcz + 2 + 2 * slots
-    return (bmt // 64 * HIDDEN * 128 + nkcz * bmt * 128 + slots * max(WIDTH, HIDDEN) * 64
-            + 8 * 16 * 64 * 2 + (2 * WIDTH + 2 * HIDDEN) * 4 + (nbar * 8 + 127) // 128 * 128)
+    return (
+        bmt // 64 * HIDDEN * 128
+        + nkcz * bmt * 128
+        + slots * max(WIDTH, HIDDEN) * 64
+        + 8 * 16 * 64 * 2
+        + (2 * WIDTH + 2 * HIDDEN) * 4
+        + (nbar * 8 + 127) // 128 * 128
+    )
 
 
 @T.device_cache
 def _k3(tile):
     bi, bj, slots, acc = tile
-    defines = dict(MW_CZ=WIDTH, MW_HIDDEN=HIDDEN, MW_SAVE_PG=0, MW_PG_METHOD=-1, XHAT_FP32=-1,
-                   MW_SAVE_IN=0, MW_SAVE_OUT=0, MW_STORE_METHOD=0, MW_SAVE_STATS_IN=1,
-                   MW_SAVE_STATS_OUT=1, MW_BI=bi, MW_BJ=bj, MW_SLOT=slots, MW_ACC=acc,
-                   TMN_K3_REGS_24_240=1, MW_SERIAL=1, MW_FUSED=1)
+    defines = dict(
+        MW_CZ=WIDTH,
+        MW_HIDDEN=HIDDEN,
+        MW_SAVE_PG=0,
+        MW_PG_METHOD=-1,
+        XHAT_FP32=-1,
+        MW_SAVE_IN=0,
+        MW_SAVE_OUT=0,
+        MW_STORE_METHOD=0,
+        MW_SAVE_STATS_IN=1,
+        MW_SAVE_STATS_OUT=1,
+        MW_BI=bi,
+        MW_BJ=bj,
+        MW_SLOT=slots,
+        MW_ACC=acc,
+        TMN_K3_REGS_24_240=1,
+        MW_SERIAL=1,
+        MW_FUSED=1,
+    )
     cubin = T.compile(R / "save_k3_d64.cu", _flags(T._upstream() / "csrc", defines.items()))
     k = T.load_unit(str(cubin), "d64_save_k3").kernel("save_k3")
     smem = _k3_smem(tile)
@@ -76,7 +104,7 @@ def _bwd_wg(prof=False, master=False, gatepipe=True):
     if prof:
         defines.append(("D64_PROF", 1))
     # The short bidirectional cell has no consistent F+B gain.
-    defines.append(("GATEPIPE", int(gatepipe)))   # one source (h100_sources/d64_train/d64_bwd_wg.cu) for both gate placements
+    defines.append(("GATEPIPE", int(gatepipe)))  # one source (h100_sources/d64_train/d64_bwd_wg.cu) for both gate placements
     cubin = T.compile(R / "d64_bwd_wg.cu", _flags(R, defines))
     unit = T.load_unit(str(cubin), "d64_bwd_wg")
     b1, b2, fin = (unit.kernel(n) for n in ("d64_b1w_b7gate", ("d64_b2w_gatepipe" if gatepipe else "d64_b2w_b7gate"), "d64_finw_b7gate"))
@@ -104,16 +132,28 @@ def _k1_cache():
 # token axis (rows = B n) in one launch each, the planes are [c, B n, n] so the contraction batches over c x B, the pair mask is [B n, n] and
 # the row-dropout scale [B n, 64] (K3 / B1 read row s n + j for a token of sample s). B = 1 is the single-sample path unchanged.
 def _map(t, box, dims, strides):
-    return T._launch_module().tensor_map(t, box, dims=dims, strides_bytes=strides,
-                                         swizzle="128B", l2="128B")
+    return T._launch_module().tensor_map(t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B")
 
 
 def _front(x, w1, maskf, gi, bi, ab):
     kk, K = _k1()
     bsz, n = x.shape[0], x.shape[1]
     cfg = K.lookup("sm_90a", WIDTH, HIDDEN, "b", N=n)["k1"]
-    kk.k1(x[0] if bsz == 1 else x.view(bsz * n, n, WIDTH), maskf, {"w1": w1, "ln_in_w": gi, "ln_in_b": bi}, ab, N=n, Np=n,
-          cz=WIDTH, ch=HIDDEN, cfg=cfg, lnm=2, eps=1e-5, cache=_k1_cache(), rows=bsz * n)
+    kk.k1(
+        x[0] if bsz == 1 else x.view(bsz * n, n, WIDTH),
+        maskf,
+        {"w1": w1, "ln_in_w": gi, "ln_in_b": bi},
+        ab,
+        N=n,
+        Np=n,
+        cz=WIDTH,
+        ch=HIDDEN,
+        cfg=cfg,
+        lnm=2,
+        eps=1e-5,
+        cache=_k1_cache(),
+        rows=bsz * n,
+    )
 
 
 def _bmm(a, b, *, out):
@@ -130,8 +170,8 @@ def _triangle(ab, tri, direction=0):
     1 / 2: [a | b] (2 D each), every channel outgoing (a b^T) / incoming (a^T b)."""
     h = WIDTH
     if direction == 0:
-        _bmm(fold(ab[:h]), fold(ab[2 * h:3 * h]).transpose(-1, -2), out=fold(tri[:h]))
-        _bmm(fold(ab[h:2 * h]).transpose(-1, -2), fold(ab[3 * h:]), out=fold(tri[h:]))
+        _bmm(fold(ab[:h]), fold(ab[2 * h : 3 * h]).transpose(-1, -2), out=fold(tri[:h]))
+        _bmm(fold(ab[h : 2 * h]).transpose(-1, -2), fold(ab[3 * h :]), out=fold(tri[h:]))
     elif direction == 1:
         _bmm(fold(ab[:HIDDEN]), fold(ab[HIDDEN:]).transpose(-1, -2), out=fold(tri))
     else:
@@ -142,10 +182,10 @@ def _contraction_grads(ab, dt, dl, dr, direction=0):
     """dl / dr (the gradients of the a / b planes) from dt, pairing the planes as ``_triangle``."""
     h = WIDTH
     if direction == 0:
-        _bmm(fold(dt[:h]), fold(ab[2 * h:3 * h]), out=fold(dl[:h]))
+        _bmm(fold(dt[:h]), fold(ab[2 * h : 3 * h]), out=fold(dl[:h]))
         _bmm(fold(dt[:h]).transpose(-1, -2), fold(ab[:h]), out=fold(dr[:h]))
-        _bmm(fold(ab[3 * h:]), fold(dt[h:]).transpose(-1, -2), out=fold(dl[h:]))
-        _bmm(fold(ab[h:2 * h]), fold(dt[h:]), out=fold(dr[h:]))
+        _bmm(fold(ab[3 * h :]), fold(dt[h:]).transpose(-1, -2), out=fold(dl[h:]))
+        _bmm(fold(ab[h : 2 * h]), fold(dt[h:]), out=fold(dr[h:]))
     elif direction == 1:
         _bmm(fold(dt), fold(ab[HIDDEN:]), out=fold(dl))
         _bmm(fold(dt).transpose(-1, -2), fold(ab[:HIDDEN]), out=fold(dr))
@@ -165,15 +205,35 @@ def _output(x, tri, wg, wp, gi, bi, go, bo, ds, y, stats):
     tj = (n + bj - 1) // bj
     tiles = ((rows + bi_ - 1) // bi_) * tj
     ymap = _map(y, [64, 16, 1], [WIDTH, n, rows], [WIDTH * 2, n * WIDTH * 2])
-    base = L.Struct.fixed("h100_d64_gatepipe_selected_v2:k3base", [
-        _map(x, [64, bj, bi_], [WIDTH, n, rows], [WIDTH * 2, n * WIDTH * 2]),
-        _map(tri, [64, 1, 64], [n, rows, HIDDEN], [n * 2, m * 2]),
-        _map(wg, [64, 32], [WIDTH, WIDTH], [WIDTH * 2]),
-        _map(wp, [64, 32], [HIDDEN, WIDTH], [HIDDEN * 2]),
-        ymap, gi, bi, go, bo, x, y, None, n, n, tj, tiles, 1, 0, 1e-5, 0])
-    params = L.Struct.fixed("h100_d64_gatepipe_selected_v3:k3", [
-        base, ds, ymap, ymap, None, None, stats[0], stats[1], stats[2], stats[3], ymap, ymap,
-        None, None, 0 if bsz == 1 else rows])
+    base = L.Struct.fixed(
+        "h100_d64_gatepipe_selected_v2:k3base",
+        [
+            _map(x, [64, bj, bi_], [WIDTH, n, rows], [WIDTH * 2, n * WIDTH * 2]),
+            _map(tri, [64, 1, 64], [n, rows, HIDDEN], [n * 2, m * 2]),
+            _map(wg, [64, 32], [WIDTH, WIDTH], [WIDTH * 2]),
+            _map(wp, [64, 32], [HIDDEN, WIDTH], [HIDDEN * 2]),
+            ymap,
+            gi,
+            bi,
+            go,
+            bo,
+            x,
+            y,
+            None,
+            n,
+            n,
+            tj,
+            tiles,
+            1,
+            0,
+            1e-5,
+            0,
+        ],
+    )
+    params = L.Struct.fixed(
+        "h100_d64_gatepipe_selected_v3:k3",
+        [base, ds, ymap, ymap, None, None, stats[0], stats[1], stats[2], stats[3], ymap, ymap, None, None, 0 if bsz == 1 else rows],
+    )
     k.launch((min(tiles, num_sms()), 1, 1), (384, 1, 1), [params], smem)
 
 
@@ -211,11 +271,20 @@ def _forward_fake(leaves, mask, ds, direction=0):
     bsz, n = x.shape[0], x.shape[1]
     r = bsz * n
     if len(leaves) == 12:
-        return [torch.empty_like(x), x.new_empty((2*HIDDEN,r,n)), x.new_empty((HIDDEN,r,n)),
-                x.new_empty((4,r*n),dtype=torch.float32)]
-    return [torch.empty_like(x), x.new_empty((2 * HIDDEN, r, n)), x.new_empty((HIDDEN, r, n)),
-            x.new_empty((4, r * n), dtype=torch.float32), x.new_empty((4 * HIDDEN, WIDTH)),
-            x.new_empty((r, n), dtype=torch.float32)]
+        return [
+            torch.empty_like(x),
+            x.new_empty((2 * HIDDEN, r, n)),
+            x.new_empty((HIDDEN, r, n)),
+            x.new_empty((4, r * n), dtype=torch.float32),
+        ]
+    return [
+        torch.empty_like(x),
+        x.new_empty((2 * HIDDEN, r, n)),
+        x.new_empty((HIDDEN, r, n)),
+        x.new_empty((4, r * n), dtype=torch.float32),
+        x.new_empty((4 * HIDDEN, WIDTH)),
+        x.new_empty((r, n), dtype=torch.float32),
+    ]
 
 
 @opaque(fake=_forward_fake, name="trimul_h100_gatepipe_selected_v2_d64_train_fwd")
@@ -242,8 +311,7 @@ PROF = None  # development: a [2, 16] int64 CUDA tensor enables the -DD64_PROF b
 
 
 def _map2(t, box, dims, strides, swizzle="128B"):
-    return T._launch_module().tensor_map(t, box, dims=dims, strides_bytes=strides,
-                                         swizzle=swizzle, l2="128B")
+    return T._launch_module().tensor_map(t, box, dims=dims, strides_bytes=strides, swizzle=swizzle, l2="128B")
 
 
 def _run_backward(leaves, mask, ds, saved, dy, master=False, direction=0):
@@ -251,7 +319,7 @@ def _run_backward(leaves, mask, ds, saved, dy, master=False, direction=0):
     ab, tri, stats, w1, maskf = saved
     L = T._launch_module()
     bsz, n = x.shape[0], x.shape[1]
-    m = bsz * n * n                     # tokens b-major: B1 / B2 run over every sample's rows, the weight partials sum them
+    m = bsz * n * n  # tokens b-major: B1 / B2 run over every sample's rows, the weight partials sum them
     h = WIDTH
     dy = dy.contiguous()
     b1, b2, fin = _bwd_wg(PROF is not None, master, gatepipe=n >= 256)
@@ -265,10 +333,28 @@ def _run_backward(leaves, mask, ds, saved, dy, master=False, direction=0):
     dgate = torch.empty_like(x)
     # one folded partial slot per B1 CTA (dWp | dgo | dbo | dWg)
     p1 = torch.empty((g1, B1W_SLOT), device=x.device, dtype=torch.float32)
-    params = L.Struct.fixed("h100_d64_gatepipe_selected_v2:b1w", [
-        planes(tri), rows(x), rows(dy), _map2(ds.reshape(bsz * n, h).contiguous(), [64, 64], [h, bsz * n], [h * 2]),
-        _map2(stats, [64, 4], [m, 4], [m * 4], "none"), planes(dt), rows(dgate),
-        wp, wg, go, bo, gi, bi, p1, ntiles, n, None if PROF is None else PROF[0]])
+    params = L.Struct.fixed(
+        "h100_d64_gatepipe_selected_v2:b1w",
+        [
+            planes(tri),
+            rows(x),
+            rows(dy),
+            _map2(ds.reshape(bsz * n, h).contiguous(), [64, 64], [h, bsz * n], [h * 2]),
+            _map2(stats, [64, 4], [m, 4], [m * 4], "none"),
+            planes(dt),
+            rows(dgate),
+            wp,
+            wg,
+            go,
+            bo,
+            gi,
+            bi,
+            p1,
+            ntiles,
+            n,
+            None if PROF is None else PROF[0],
+        ],
+    )
     b1.launch((g1, 1, 1), (256, 1, 1), [params], B1W_SMEM)
     dl = torch.empty_like(tri)
     dr = torch.empty_like(tri)
@@ -276,18 +362,32 @@ def _run_backward(leaves, mask, ds, saved, dy, master=False, direction=0):
     dx = T.take_input_grad(x)
     p2 = torch.empty((g2, B2W_SLOT), device=x.device, dtype=torch.float32)
     maskf = maskf.reshape(m)
-    params = L.Struct.fixed("h100_d64_gatepipe_selected_v2:b2w", [
-        planes(dl), planes(dr), rows(x), rows(dgate), rows(dy),
-        _map2(stats, [64, 2], [m, 4], [m * 4], "none"),
-        _map2(maskf, [64, 1], [m, 1], [m * 4], "none"), rows(dx),
-        w1, wg, gi, bi, p2, ntiles, None if PROF is None else PROF[1]])
+    params = L.Struct.fixed(
+        "h100_d64_gatepipe_selected_v2:b2w",
+        [
+            planes(dl),
+            planes(dr),
+            rows(x),
+            rows(dgate),
+            rows(dy),
+            _map2(stats, [64, 2], [m, 4], [m * 4], "none"),
+            _map2(maskf, [64, 1], [m, 1], [m * 4], "none"),
+            rows(dx),
+            w1,
+            wg,
+            gi,
+            bi,
+            p2,
+            ntiles,
+            None if PROF is None else PROF[1],
+        ],
+    )
     b2.launch((g2, 1, 1), (256, 1, 1), [params], B2W_SMEM)
     grads = [torch.empty_like(w, dtype=torch.float32 if master else w.dtype) for w in (wl, wlg, wr, wrg, wg, wp)]
     f32 = dict(device=x.device, dtype=torch.float32)
     dgi, dbi = torch.empty(h, **f32), torch.empty(h, **f32)
     dgo, dbo = torch.empty(2 * h, **f32), torch.empty(2 * h, **f32)
-    fin.launch(((FINW_OUT + 255) // 256, 1, 1), (256, 1, 1),
-               [p1, g1, p2, g2, *grads, dgi, dbi, dgo, dbo])
+    fin.launch(((FINW_OUT + 255) // 256, 1, 1), (256, 1, 1), [p1, g1, p2, g2, *grads, dgi, dbi, dgo, dbo])
     return [dx, *grads, dgi, dbi, dgo, dbo]
 
 
@@ -297,8 +397,15 @@ def _backward_fake(leaves, mask, ds, saved, dy, master=False, direction=0):
 
 
 @opaque(fake=_backward_fake, name="trimul_h100_gatepipe_selected_v2_d64_train_bwd")
-def backward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor,
-             saved: list[torch.Tensor], dy: torch.Tensor, master: bool = False, direction: int = 0) -> list[torch.Tensor]:
+def backward(
+    leaves: list[torch.Tensor],
+    mask: torch.Tensor,
+    ds: torch.Tensor,
+    saved: list[torch.Tensor],
+    dy: torch.Tensor,
+    master: bool = False,
+    direction: int = 0,
+) -> list[torch.Tensor]:
     """Return the eleven leaf gradients (dx, dW*, dLN affine) in ``leaves`` order."""
     with T.native_context(leaves[0].device):
         return _run_backward(leaves, mask, ds, saved, dy, master, direction)
@@ -312,6 +419,7 @@ class _Training(torch.autograd.Function):
         ctx.master = any(w.dtype == torch.float32 for w in leaves[1:7])
         if T.cuda_training_fused_prepare_enabled():
             from ._h100_pack import fused_training_prepare
+
             packed, maskf, gate, output = fused_training_prepare(leaves, args[11])
             weights = [*leaves[1:5], gate, output]
             prepared = [leaves[0], *weights, *leaves[7:], packed]
@@ -323,6 +431,7 @@ class _Training(torch.autograd.Function):
             return y
         if T.cuda_training_aux_enabled():
             from ._h100_pack import cast_weights
+
             weights = cast_weights(leaves[1:7])
         else:
             weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]] if ctx.master else leaves[1:7]
@@ -340,7 +449,7 @@ class _Training(torch.autograd.Function):
     def backward(ctx, dy):
         vals = ctx.saved_tensors
         leaves = [vals[0], *vals[-6:], *vals[7:11]]
-        saved = list(vals[13:13+ctx.saved_count])
+        saved = list(vals[13 : 13 + ctx.saved_count])
         grads = backward(leaves, vals[11], vals[12], saved, dy, ctx.master, ctx.direction)
         grads = [g.to(t.dtype) for g, t in zip(grads, vals[:11], strict=True)]
         return (None, *grads, None, None)
@@ -354,11 +463,13 @@ def bidirectional_trimul(*args, direction=0):
         leaves = list(args[:11])
         if T.cuda_training_fused_prepare_enabled():
             from ._h100_pack import fused_training_prepare
+
             packed, maskf, gate, output = fused_training_prepare(leaves, args[11])
             prepared = [leaves[0], *leaves[1:5], gate, output, *leaves[7:], packed]
             return forward_nograd(prepared, maskf, args[12], direction)
         if T.cuda_training_aux_enabled():
             from ._h100_pack import cast_weights
+
             leaves = [leaves[0], *cast_weights(leaves[1:7]), *leaves[7:]]
         elif any(w.dtype != leaves[0].dtype for w in leaves[1:7]):
             weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]]

@@ -1,4 +1,3 @@
-
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/bias_only_attention.py
 
@@ -63,11 +62,7 @@ def _attn_fwd_inner(
     return acc, l_i, m_i
 
 
-
-
-@configured('bias_only_attention_fwd_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
+@configured("bias_only_attention_fwd_triton", key=["shape_key"], default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_fwd(
     v_ptr,
@@ -115,24 +110,9 @@ def _attn_fwd(
     offset_n = tl.arange(0, BLOCK_M2)
     offset_k = tl.arange(0, HEAD_DIM_PAD)
 
-    v_ptr = (
-        v_ptr
-        + value_offset
-        + offset_n[:, None] * stride_vn
-        + offset_k[None, :] * stride_vk
-    )
-    o_ptr = (
-        out_ptr
-        + output_offset
-        + offset_m[:, None] * stride_om
-        + offset_k[None, :] * stride_on
-    )
-    bias_ptr = (
-        bias_ptr
-        + bias_offset
-        + offset_m[:, None] * stride_bm
-        + offset_n[None, :] * stride_bn
-    )
+    v_ptr = v_ptr + value_offset + offset_n[:, None] * stride_vn + offset_k[None, :] * stride_vk
+    o_ptr = out_ptr + output_offset + offset_m[:, None] * stride_om + offset_k[None, :] * stride_on
+    bias_ptr = bias_ptr + bias_offset + offset_m[:, None] * stride_bm + offset_n[None, :] * stride_bn
 
     m_i = tl.zeros([BLOCK_M1], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M1], dtype=tl.float32) + 1.0
@@ -155,28 +135,17 @@ def _attn_fwd(
     )
     m_i += tl.math.log2(l_i)
     acc = acc / l_i[:, None]
-    m_ptr = (
-        m_ptr
-        + off_z * stride_mz
-        + off_h * stride_mh
-        + off_t * stride_mt
-        + start_m * BLOCK_M1
-        + tl.arange(0, BLOCK_M1)
-    )
+    m_ptr = m_ptr + off_z * stride_mz + off_h * stride_mh + off_t * stride_mt + start_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
 
     tl.store(m_ptr, m_i, mask=offset_m < N_CTX)
     out_mask = (offset_m[:, None] < N_CTX) & (offset_k[None, :] < HEAD_DIM)
     tl.store(o_ptr, acc.to(out_ptr.type.element_ty), mask=out_mask)
 
 
-
-
 # The launcher hands the backward H*L, not H: v is the "B (H L) L2 D" rearrangement. Naming it H and
 # keying on it partitioned the cache per sequence length -- defeating the shape_key bucket next to it --
 # for a value this kernel never reads. Dropped.
-@configured('bias_only_attention_bwd_pre_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_M1=64, num_warps=4, num_stages=2))
+@configured("bias_only_attention_bwd_pre_triton", key=["shape_key"], default=dict(BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_bwd_preprocess(
     o,
@@ -269,13 +238,9 @@ def _attn_bwd_dvdbias(
     return dv
 
 
-
-
 # HL, not H: `bhid` runs over B*HL, so the decode below divides by H*L. Keyed on shape_key only --
 # keying the raw product would partition the cache per sequence length.
-@configured('bias_only_attention_bwd_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
+@configured("bias_only_attention_bwd_triton", key=["shape_key"], default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_bwd(
     v_ptr,
@@ -369,8 +334,7 @@ def _bias_only_fwd_fake(v, bias, shape_key):
 
 
 @opaque(fake=_bias_only_fwd_fake, name="bias_only_attention_fwd")
-def _bias_only_fwd(v: torch.Tensor, bias: torch.Tensor,
-                   shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _bias_only_fwd(v: torch.Tensor, bias: torch.Tensor, shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
     """The attention launch -> ``(out, m)``; both tensors arrive contiguous.
 
     Split out of ``TritonBiasOnlyAttentionFunction.forward`` so the contiguous() calls and
@@ -410,9 +374,9 @@ def _bias_only_bwd_fake(v, bias, grad_output, out, m, shape_key):
 
 
 @opaque(fake=_bias_only_bwd_fake, name="bias_only_attention_bwd")
-def _bias_only_bwd(v: torch.Tensor, bias: torch.Tensor, grad_output: torch.Tensor,
-                   out: torch.Tensor, m: torch.Tensor,
-                   shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _bias_only_bwd(
+    v: torch.Tensor, bias: torch.Tensor, grad_output: torch.Tensor, out: torch.Tensor, m: torch.Tensor, shape_key: int
+) -> tuple[torch.Tensor, torch.Tensor]:
     """The two backward launches -> ``(dv, dbias)``, both still in the kernels' merged-head layout.
 
     Every argument arrives ALREADY rearranged: the einops reshape in and the reduce back out are
@@ -485,10 +449,7 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
         # invalid global reads there before the same one-line fix.
         grad_output = grad_output.contiguous()
 
-        v_r, out_r, go_r = (
-            rearrange(x, "B H L L2 D -> B (H L) L2 D")
-            for x in (v, out, grad_output)
-        )
+        v_r, out_r, go_r = (rearrange(x, "B H L L2 D -> B (H L) L2 D") for x in (v, out, grad_output))
         bias_r = repeat(bias, "B H L L2 -> B (H L3) L L2", L3=bias.shape[2])
         m_r = rearrange(m, "B H L L2 -> B (H L) L2")
         L = v_r.shape[2]

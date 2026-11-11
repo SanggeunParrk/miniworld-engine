@@ -35,14 +35,19 @@ import torch
 _DIR = Path(__file__).resolve().parent
 
 #: stage -> source file stem (and the python-visible entry point it defines).
-SOURCES = {"qkvg": "swa_qkvg_fwd", "fwd": "swa_ffn_fwd", "bwd": "swa_ffn_bwd",
-           # bf16 window attention fwd + bwd, and the out-projection / qkvg backwards (mma.sync; see the files' headers)
-           "attn": "swa_attn", "slab": "swa_slab",
-           "fp32": "swa_fp32",                     # every fp32 stage (tf32 wgmma + bf16 attention), see swa_fp32.cu
-           "mod": "swa_mod",
-           "wgrad": "swa_wgrad",
-           "wgwg": "swa_wgrad_wg",
-           "wgwg32": "swa_wgrad_wg_f32"}
+SOURCES = {
+    "qkvg": "swa_qkvg_fwd",
+    "fwd": "swa_ffn_fwd",
+    "bwd": "swa_ffn_bwd",
+    # bf16 window attention fwd + bwd, and the out-projection / qkvg backwards (mma.sync; see the files' headers)
+    "attn": "swa_attn",
+    "slab": "swa_slab",
+    "fp32": "swa_fp32",  # every fp32 stage (tf32 wgmma + bf16 attention), see swa_fp32.cu
+    "mod": "swa_mod",
+    "wgrad": "swa_wgrad",
+    "wgwg": "swa_wgrad_wg",
+    "wgwg32": "swa_wgrad_wg_f32",
+}
 SOURCES.update(qkvg_small="swa_qkvg_fwd", fwd_small="swa_ffn_fwd", bwd_overwrite="swa_ffn_bwd")
 
 # Separate build identities preserve the legacy kernels and their schedules.
@@ -68,11 +73,7 @@ def is_sm90(device: torch.device | None = None) -> bool:
         return False
     if device is not None and device.type != "cuda":
         return False
-    index = (
-        device.index
-        if device is not None and device.index is not None
-        else torch.cuda.current_device()
-    )
+    index = device.index if device is not None and device.index is not None else torch.cuda.current_device()
     return _capability(index) == (9, 0)
 
 

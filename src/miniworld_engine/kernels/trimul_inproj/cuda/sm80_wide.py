@@ -53,17 +53,10 @@ def _ext():
     )
 
 
-def shape_ok(
-    shape, dtype, d_hidden: int, hs: int | None = None, mask_shape=None, mask_dtype=None
-) -> bool:
+def shape_ok(shape, dtype, d_hidden: int, hs: int | None = None, mask_shape=None, mask_dtype=None) -> bool:
     """The kernels' shape / dtype requirements, device-free (the CPU tests of the gate call this): bf16 or fp32 (TF32), width in WIDTHS with hidden channels ``hs`` = D
     (one direction) or 2 D (bidirectional), a square plane with L % 16 == 0, and a [B, L] bool token mask if any."""
-    if (
-        dtype not in (torch.bfloat16, torch.float32)
-        or len(shape) != 4
-        or shape[0] < 1
-        or shape[1] != shape[2]
-    ):
+    if dtype not in (torch.bfloat16, torch.float32) or len(shape) != 4 or shape[0] < 1 or shape[1] != shape[2]:
         return False
     d, n = shape[-1], shape[1]
     hs = d_hidden if hs is None else hs
@@ -71,9 +64,7 @@ def shape_ok(
         return False
     if d == 512 and dtype is not torch.bfloat16:
         return False
-    return mask_shape is None or (
-        tuple(mask_shape) == (shape[0], n) and mask_dtype is torch.bool
-    )
+    return mask_shape is None or (tuple(mask_shape) == (shape[0], n) and mask_dtype is torch.bool)
 
 
 def supports(
@@ -98,11 +89,7 @@ def supports(
         None if mask is None else mask.dtype,
     ):
         return False
-    return _d128._is_ampere(
-        pair.device.index
-        if pair.device.index is not None
-        else torch.cuda.current_device()
-    )
+    return _d128._is_ampere(pair.device.index if pair.device.index is not None else torch.cuda.current_device())
 
 
 @torch.compiler.assume_constant_result
@@ -130,9 +117,7 @@ def available(
 
 
 # ------------------------------------------------------------------------------------------------------------------------------- packs
-def _pack(
-    wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, *, train: bool = False, adt=None
-) -> dict:
+def _pack(wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, *, train: bool = False, adt=None) -> dict:
     """The folded weight layouts of the forward (and, in training, the backward's unscaled packed weights and the exact LayerNorm_out row-sum vector), one launch
     per call (never cached: a captured CUDA graph must repack after an optimizer step).  The four front matrices are read through their strides."""
     hs, d = wl.shape
@@ -150,11 +135,7 @@ def _pack(
     vs, vb = vec[: 4 * hs], vec[4 * hs : 8 * hs]
     so, eo, sg, eg = vec[8 * hs : 8 * hs + 4 * d].view(4, d).unbind(0)
     spx = vec[8 * hs + 4 * d :] if train else vec.new_empty((0,))
-    wdx = (
-        torch.empty((4 * hs + d, d), dtype=wd, device=dev)
-        if train
-        else w1.new_empty((0,))
-    )
+    wdx = torch.empty((4 * hs + d, d), dtype=wd, device=dev) if train else w1.new_empty((0,))
     _ext().wpack(*ws, *ln, w1, vs, vb, wo3, so, eo, wg3, sg, eg, wdx, spx)
     pk = dict(
         hs=hs,
@@ -197,9 +178,9 @@ def _pack_reference(wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo) -> dict:
     hs, d = wl.shape
     wg_all = torch.cat([f(wlg), f(wrg)], 0)  # [2 Hs, D]
     wp_all = torch.cat([f(wl), f(wr)], 0)
-    rows = torch.stack(
-        [wg_all.view(2 * hs // 8, 8, d), wp_all.view(2 * hs // 8, 8, d)], 1
-    ).reshape(4 * hs, d)  # 16 j + i: gate (i < 8) | projection
+    rows = torch.stack([wg_all.view(2 * hs // 8, 8, d), wp_all.view(2 * hs // 8, 8, d)], 1).reshape(
+        4 * hs, d
+    )  # 16 j + i: gate (i < 8) | projection
     wd = wl.dtype
     rnd = _tf32_round if wd is torch.float32 else (lambda t: t.to(wd))  # noqa: E731
     w1 = rnd(0.5 * rows * f(gi)[None, :])
@@ -252,7 +233,9 @@ def _contract(planes, x, hs, n, direction):
 
 #: bf16 with a hidden width <= 128 (D64 both modules, D128 one direction): the statistics kernels are replaced by in-kernel two-pass statistics of k1w / k3w (see ``_run_forward``); False keeps the kernels (probe switch for A / B timings).
 _FUSE_STATS = True
-_FUSE_STATS_WIDE = False  # in-loop input statistics in k1w at D = 256 / 384: measured 4-8 % SLOWER than ln_stats_rows (A100, 2026-10-30), kept off
+_FUSE_STATS_WIDE = (
+    False  # in-loop input statistics in k1w at D = 256 / 384: measured 4-8 % SLOWER than ln_stats_rows (A100, 2026-10-30), kept off
+)
 
 
 def _aligned(t: torch.Tensor) -> torch.Tensor:
@@ -269,20 +252,20 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     ds = _aligned(ds) if ds.numel() else ds
     # inference (no saves, grad off): the folded weights once per weight version, read by a CUDA-graph capture as its eager warm-up made them
     # (``capture_reads_eager``: no pack kernel per replay); training packs every call (a captured step must repack after an optimizer step)
-    pk = (_capture.param_forms(("trimul_sm80_wide_pack", leaves[0].dtype), list(leaves[1:]), lambda: _pack_leaves(leaves), capture_reads_eager=True)
-          if not save and not torch.is_grad_enabled() else _pack_leaves(leaves))
+    pk = (
+        _capture.param_forms(
+            ("trimul_sm80_wide_pack", leaves[0].dtype), list(leaves[1:]), lambda: _pack_leaves(leaves), capture_reads_eager=True
+        )
+        if not save and not torch.is_grad_enabled()
+        else _pack_leaves(leaves)
+    )
     hs = pk["hs"]
     # bf16, hidden width <= 128: k1w computes the input rows' statistics from its own tile and k3w the output stage's LayerNorm_out statistics -- the two statistics kernels and
     # their reads of z / X are gone (every k-tile of both operands is still in its ring slot when its GEMM ends)
     fuse_x = _FUSE_STATS and z.dtype is torch.bfloat16 and hs <= 128
     # input rows: <= 4 CTAs share a token tile at hs <= 128 (the redundant per-CTA statistics are cheaper than the kernels); at D = 256 / 384 k1w accumulates them
     # while its stages go by (``K1StatHook``), so ``ln_stats_rows`` and its read of z are gone there too
-    fuse_z = fuse_x or (
-        _FUSE_STATS
-        and _FUSE_STATS_WIDE
-        and z.dtype is torch.bfloat16
-        and 128 < d <= 384
-    )
+    fuse_z = fuse_x or (_FUSE_STATS and _FUSE_STATS_WIDE and z.dtype is torch.bfloat16 and 128 < d <= 384)
     st_in = torch.empty((T, 2), dtype=torch.float32, device=z.device)
     if not fuse_z:
         E.stats_rows(zf, st_in, eps_in)
@@ -368,20 +351,14 @@ def forward_train(
     eps_out: float,
 ) -> list[torch.Tensor]:
     """[out, planes, X, LN_in statistics, LN_out statistics, p', g']."""
-    out, (planes, x, st_in, st_out, ps, gs) = _run_forward(
-        leaves, mask, ds, direction, eps_in, eps_out, save=True
-    )
+    out, (planes, x, st_in, st_out, ps, gs) = _run_forward(leaves, mask, ds, direction, eps_in, eps_out, save=True)
     return [out, planes, x, st_in, st_out, ps, gs]
 
 
-def trimul_inference(
-    z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, mask, ds, direction, eps_in, eps_out
-):
+def trimul_inference(z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, mask, ds, direction, eps_in, eps_out):
     """z + drop_row(trimul(z)), no gradients (probe entry)."""
     leaves = (z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo)
-    return forward_nograd(
-        list(leaves), mask, ds, direction, float(eps_in), float(eps_out)
-    )
+    return forward_nograd(list(leaves), mask, ds, direction, float(eps_in), float(eps_out))
 
 
 # ----------------------------------------------------------------------------------------------------------------------------- backward
@@ -394,9 +371,7 @@ def _gemm_tk(a, b):
     s = next((c for c in (32, 16, 8, 4, 2) if t % c == 0 and t // c >= 256), 1)
     if s == 1:
         return a.t() @ b
-    return torch.bmm(
-        a.unflatten(0, (s, t // s)).transpose(1, 2), b.unflatten(0, (s, t // s))
-    ).sum(0)
+    return torch.bmm(a.unflatten(0, (s, t // s)).transpose(1, 2), b.unflatten(0, (s, t // s))).sum(0)
 
 
 def _contract_bwd(planes, dx, dplanes, hs, n, direction):
@@ -414,9 +389,7 @@ def _contract_bwd(planes, dx, dplanes, hs, n, direction):
 
 def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     with _tf32(leaves[0]):
-        return _run_backward_body(
-            leaves, mask, ds, saved, dy, direction, eps_in, eps_out
-        )
+        return _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out)
 
 
 def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
@@ -438,9 +411,7 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     xcm = x.view(hs, T)
     # ---- output side: gate gradients, LayerNorm_out backward
     nb = E.gate_bwd_blocks(T, d, is32)
-    dcat = zf.new_empty(
-        (T, 4 * hs + d)
-    )  # [dpre (k1w packed order) | dg of the output gate]
+    dcat = zf.new_empty((T, 4 * hs + d))  # [dpre (k1w packed order) | dg of the output gate]
     dpr = torch.empty_like(zf)
     s12 = torch.empty((T, 2), **f32)
     part = torch.empty((nb, 2 * d), **f32)
@@ -475,9 +446,7 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     _contract_bwd(planes, dt.view(hs, n, n), dplanes, hs, n, direction)
     del dt
     # ---- input side: pre-activation gradients (k1wb), weight and input gradients
-    E.k1wb(
-        zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, dplanes.view(2 * hs, T), dcat, n
-    )
+    E.k1wb(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, dplanes.view(2 * hs, T), dcat, n)
     del dplanes
     xn = torch.empty_like(zf)
     E.ln_apply(zf, st_in, gi32, bi32, xn)
@@ -547,13 +516,9 @@ class _Training(torch.autograd.Function):
         return (*grads, None, None, None, None, None)
 
 
-def trimul(
-    z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, mask, ds, direction, eps_in, eps_out
-):
+def trimul(z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, mask, ds, direction, eps_in, eps_out):
     """z + drop_row(trimul(z)).  ``mask`` [L] uint8 or empty (``sm80.token_mask``), ``ds`` [L, D] bf16 or empty.  Call ``available()`` first."""
     leaves = (z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo)
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in leaves)):
-        return forward_nograd(
-            list(leaves), mask, ds, direction, float(eps_in), float(eps_out)
-        )
+        return forward_nograd(list(leaves), mask, ds, direction, float(eps_in), float(eps_out))
     return _Training.apply(*leaves, mask, ds, direction, float(eps_in), float(eps_out))

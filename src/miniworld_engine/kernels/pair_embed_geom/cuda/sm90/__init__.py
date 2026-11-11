@@ -12,8 +12,10 @@ import torch
 _dir = Path(__file__).parent
 NBLK = 33
 N_ROWS = {0: 317, 1: 157}
-GT = 1         # forwards: 1 reads the table through the L1 (8-warp CTAs, high occupancy; the faster), 0 keeps a copy in shared memory (A/B)
-BWD_IMPL = 1   # table gradient on the tensor cores (wgmma); the .cu keeps 2 (mma.sync) and 0 (shared-memory read-modify-write) as its A/B variants
+GT = 1  # forwards: 1 reads the table through the L1 (8-warp CTAs, high occupancy; the faster), 0 keeps a copy in shared memory (A/B)
+BWD_IMPL = (
+    1  # table gradient on the tensor cores (wgmma); the .cu keeps 2 (mma.sync) and 0 (shared-memory read-modify-write) as its A/B variants
+)
 
 
 @functools.lru_cache(maxsize=None)
@@ -21,9 +23,13 @@ def ext():
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
-    return load_extension(name="pair_embed_geom_sm90", sources=[str(_dir / "pair_embed_geom.cu")],
-                          extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a")], extra_cflags=["-std=c++17"],
-                          verbose=False)
+    return load_extension(
+        name="pair_embed_geom_sm90",
+        sources=[str(_dir / "pair_embed_geom.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a")],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 def forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, with_codes=False, ln_eps=None, jp=0, gt=GT):
@@ -31,8 +37,14 @@ def forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, with_codes=False, ln
     LayerNorm(pair) (no affine, that eps) instead of the pair."""
     B, n = idx.shape
     out = torch.empty(B, n, n, 256, device=tbl.device, dtype=torch.bfloat16)
-    codes = torch.empty(B, n, n, 4, device=tbl.device, dtype=torch.int32) if with_codes else torch.empty(0, device=tbl.device, dtype=torch.int32)
-    ext().forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, out, codes, int(ln_eps is not None), float(ln_eps or 0.0), int(jp), int(gt))
+    codes = (
+        torch.empty(B, n, n, 4, device=tbl.device, dtype=torch.int32)
+        if with_codes
+        else torch.empty(0, device=tbl.device, dtype=torch.int32)
+    )
+    ext().forward(
+        tbl, bb, ca, cb, mask, idx, chains, dlim, alim, out, codes, int(ln_eps is not None), float(ln_eps or 0.0), int(jp), int(gt)
+    )
     return (out, codes) if with_codes else out
 
 
@@ -40,7 +52,11 @@ def forward_ca(tbl, ca, mask, idx, dlim, with_codes=False, ln_eps=None, jp=0, gt
     """Decoder pair [B, n, n, 256] bf16 from the table [157, 256] (sequence separation | CA distance bins)."""
     B, n = idx.shape
     out = torch.empty(B, n, n, 256, device=tbl.device, dtype=torch.bfloat16)
-    codes = torch.empty(B, n, n, 4, device=tbl.device, dtype=torch.int32) if with_codes else torch.empty(0, device=tbl.device, dtype=torch.int32)
+    codes = (
+        torch.empty(B, n, n, 4, device=tbl.device, dtype=torch.int32)
+        if with_codes
+        else torch.empty(0, device=tbl.device, dtype=torch.int32)
+    )
     ext().forward_ca(tbl, ca, mask, idx, dlim, out, codes, int(ln_eps is not None), float(ln_eps or 0.0), int(jp), int(gt))
     return (out, codes) if with_codes else out
 

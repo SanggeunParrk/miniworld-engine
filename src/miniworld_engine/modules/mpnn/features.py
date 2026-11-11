@@ -171,7 +171,7 @@ class BackboneFeatures(BackendModule):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Exact k nearest CA neighbours (masked and cross-segment pairs ranked last)."""
         length = alpha_carbon.shape[1]
-        pair_mask = (residue_mask[:, None] * residue_mask[:, :, None]).to(alpha_carbon.dtype)   # a bool key mask is as good as a float one
+        pair_mask = (residue_mask[:, None] * residue_mask[:, :, None]).to(alpha_carbon.dtype)  # a bool key mask is as good as a float one
         segment = self._segment_ids(alpha_carbon, segment_lengths)
         if segment is not None:
             pair_mask = pair_mask * (segment[:, None] == segment[None, :])

@@ -69,16 +69,38 @@ class AugmentNoise(BackendModule):
         See :class:`BackendModule`. ``"cuda"``: the sm_90a kernels (``kernels/sampler_ops/cuda``, H100), as opaque ops. ``"triton"``: the portable Triton
         kernels (``kernels/sampler_ops/triton``), any CUDA card, bitwise reproducible. Both need fp32 CUDA tensors.
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3}   # 2026-11-10: sm_80 paths; 3 (2026-11-11): small launches (B * C * N <= 2^18 atom reads) as one kernel
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:a100_sm80": 3
+    }  # 2026-11-10: sm_80 paths; 3 (2026-11-11): small launches (B * C * N <= 2^18 atom reads) as one kernel
 
-    def __init__(self, *, window: bool = False, gamma: float = 0.8, gamma_min: float = 1.0, sigma_min: float = 0.0, sigma_max: float = float("inf"),
-                 noise_scale: float = 1.003, variance_floor: float = 0.0, clamp: bool = False, backend: str = "pytorch") -> None:
+    def __init__(
+        self,
+        *,
+        window: bool = False,
+        gamma: float = 0.8,
+        gamma_min: float = 1.0,
+        sigma_min: float = 0.0,
+        sigma_max: float = float("inf"),
+        noise_scale: float = 1.003,
+        variance_floor: float = 0.0,
+        clamp: bool = False,
+        backend: str = "pytorch",
+    ) -> None:
         super().__init__()
-        self.churn = {"window": bool(window), "gamma": float(gamma), "gamma_min": float(gamma_min), "sigma_min": float(sigma_min),
-                      "sigma_max": float(sigma_max), "noise_scale": float(noise_scale), "variance_floor": float(variance_floor), "clamp": bool(clamp)}
+        self.churn = {
+            "window": bool(window),
+            "gamma": float(gamma),
+            "gamma_min": float(gamma_min),
+            "sigma_min": float(sigma_min),
+            "sigma_max": float(sigma_max),
+            "noise_scale": float(noise_scale),
+            "variance_floor": float(variance_floor),
+            "clamp": bool(clamp),
+        }
         self.set_backend(backend)
 
     def _forward_pytorch(self, coords, mask, rv, tr, noise, sigma, sigma_next):
@@ -88,11 +110,15 @@ class AugmentNoise(BackendModule):
         """``samples`` samples of one structure of ``length`` atoms (a Gaussian cloud around an offset origin, the last quarter padding), random frame vectors,
         translations and noise, ``sigma = 2``, ``sigma_next = 1.5`` (inside the EDM window and above ``gamma_min``)."""
         coords, mask = _coords_scene(length, samples, device, generator, dtype)
-        return {"coords": coords, "mask": mask,
-                "rv": random_input((samples, 2, 3), dtype=dtype, device=device, generator=generator),
-                "tr": random_input((samples, 3), dtype=dtype, device=device, generator=generator),
-                "noise": random_input((samples, length, 3), dtype=dtype, device=device, generator=generator),
-                "sigma": torch.tensor(2.0, dtype=dtype, device=device), "sigma_next": torch.tensor(1.5, dtype=dtype, device=device)}
+        return {
+            "coords": coords,
+            "mask": mask,
+            "rv": random_input((samples, 2, 3), dtype=dtype, device=device, generator=generator),
+            "tr": random_input((samples, 3), dtype=dtype, device=device, generator=generator),
+            "noise": random_input((samples, length, 3), dtype=dtype, device=device, generator=generator),
+            "sigma": torch.tensor(2.0, dtype=dtype, device=device),
+            "sigma_next": torch.tensor(1.5, dtype=dtype, device=device),
+        }
 
     # ------------------------------------------------------------------------------------------------------------- engine kernels
     def _supports_kernels(self, coords, mask, rv, tr, noise, sigma, sigma_next) -> str | None:
@@ -100,11 +126,16 @@ class AugmentNoise(BackendModule):
             return f"coords must be [B, N, 3], got {tuple(coords.shape)}"
         b, n, _ = coords.shape
         return _first(
-            _fp32_cuda("coords", coords, 3), _fp32_cuda("mask", mask, 1, (n,)), _fp32_cuda("rv", rv, 3, (b, 2, 3)), _fp32_cuda("tr", tr, 2, (b, 3)),
+            _fp32_cuda("coords", coords, 3),
+            _fp32_cuda("mask", mask, 1, (n,)),
+            _fp32_cuda("rv", rv, 3, (b, 2, 3)),
+            _fp32_cuda("tr", tr, 2, (b, 3)),
             _fp32_cuda("noise", noise, 3, (b, n, 3)),
             None if sigma.numel() == 1 and sigma_next.numel() == 1 else "sigma / sigma_next must be scalars",
-            _fp32_cuda("sigma", sigma, sigma.dim()), _fp32_cuda("sigma_next", sigma_next, sigma_next.dim()),
-            "empty input" if coords.numel() == 0 else None)
+            _fp32_cuda("sigma", sigma, sigma.dim()),
+            _fp32_cuda("sigma_next", sigma_next, sigma_next.dim()),
+            "empty input" if coords.numel() == 0 else None,
+        )
 
     def _supports_cuda(self, coords, mask, rv, tr, noise, sigma, sigma_next) -> str | None:
         return _first(self._supports_kernels(coords, mask, rv, tr, noise, sigma, sigma_next), _cuda_h100(coords.device))
@@ -139,10 +170,11 @@ class AlignEuler(BackendModule):
     backend : str
         See :class:`BackendModule`. ``"cuda"``: the sm_90a kernels (H100); ``"triton"``: the portable kernels (any CUDA card). Both need fp32 CUDA tensors.
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: sm_80 paths
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: sm_80 paths
 
     def __init__(self, *, step_scale: float = 1.5, backend: str = "pytorch") -> None:
         super().__init__()
@@ -161,9 +193,16 @@ class AlignEuler(BackendModule):
         rot[:, 0, 0], rot[:, 0, 1], rot[:, 1, 0], rot[:, 1, 1], rot[:, 2, 2] = angle.cos(), -angle.sin(), angle.sin(), angle.cos(), 1.0
         noise = random_input((samples, length, 3), dtype=dtype, device=device, generator=generator)
         noisy = (coords.float() @ rot + 5 + 0.5 * noise.float()).to(dtype)
-        denoised = (coords.float() + 0.1 * random_input((samples, length, 3), dtype=torch.float32, device=device, generator=generator)).to(dtype)
-        return {"noisy": noisy, "denoised": denoised, "mask": mask, "sc": torch.tensor([4.0, 0.3], dtype=dtype, device=device),
-                "sigma_next": torch.tensor(2.5, dtype=dtype, device=device)}
+        denoised = (coords.float() + 0.1 * random_input((samples, length, 3), dtype=torch.float32, device=device, generator=generator)).to(
+            dtype
+        )
+        return {
+            "noisy": noisy,
+            "denoised": denoised,
+            "mask": mask,
+            "sc": torch.tensor([4.0, 0.3], dtype=dtype, device=device),
+            "sigma_next": torch.tensor(2.5, dtype=dtype, device=device),
+        }
 
     # ------------------------------------------------------------------------------------------------------------- engine kernels
     def _supports_kernels(self, noisy, denoised, mask, sc, sigma_next) -> str | None:
@@ -171,10 +210,15 @@ class AlignEuler(BackendModule):
             return f"noisy must be [B, N, 3], got {tuple(noisy.shape)}"
         n = noisy.shape[1]
         return _first(
-            _fp32_cuda("noisy", noisy, 3), _fp32_cuda("denoised", denoised, 3, tuple(noisy.shape)), _fp32_cuda("mask", mask, 1, (n,)),
-            _fp32_cuda("sc", sc, 1), None if sc.numel() >= 2 else "sc must hold (sigma_hat, magnitude)",
-            None if sigma_next.numel() == 1 else "sigma_next must be a scalar", _fp32_cuda("sigma_next", sigma_next, sigma_next.dim()),
-            "empty input" if noisy.numel() == 0 else None)
+            _fp32_cuda("noisy", noisy, 3),
+            _fp32_cuda("denoised", denoised, 3, tuple(noisy.shape)),
+            _fp32_cuda("mask", mask, 1, (n,)),
+            _fp32_cuda("sc", sc, 1),
+            None if sc.numel() >= 2 else "sc must hold (sigma_hat, magnitude)",
+            None if sigma_next.numel() == 1 else "sigma_next must be a scalar",
+            _fp32_cuda("sigma_next", sigma_next, sigma_next.dim()),
+            "empty input" if noisy.numel() == 0 else None,
+        )
 
     def _supports_cuda(self, noisy, denoised, mask, sc, sigma_next) -> str | None:
         return _first(self._supports_kernels(noisy, denoised, mask, sc, sigma_next), _cuda_h100(noisy.device))
@@ -201,8 +245,10 @@ class AlignEuler(BackendModule):
     _release = ("bz_sampler", "boltz2/opt/forward/sampler/src")
 
     def _supports_anthropic(self, noisy, denoised, mask, sc, sigma_next) -> str | None:
-        return _first(_anthropic.unavailable(self._release[0], noisy.device, path=self._release[1]),
-                      self._supports_kernels(noisy, denoised, mask, sc, sigma_next))
+        return _first(
+            _anthropic.unavailable(self._release[0], noisy.device, path=self._release[1]),
+            self._supports_kernels(noisy, denoised, mask, sc, sigma_next),
+        )
 
     def _forward_anthropic(self, noisy, denoised, mask, sc, sigma_next):
         bz = _anthropic.load(self._release[0], path=self._release[1])
@@ -236,10 +282,11 @@ class PoolAtoms(BackendModule):
         See :class:`BackendModule`. ``"cuda"``: the sm_90a kernel (H100), ``C % 4 == 0`` and ``C <= 4096``; ``"triton"``: the portable kernel (any CUDA card).
         Both need bf16 ``x`` on CUDA and int32 / int64 ``idx``.
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: sm_80 paths
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: sm_80 paths
 
     #: Channels of ``make_inputs``' atom features (the atom encoder's ``d_single``) and atoms per token (the token-atoms layout's width).
     _C, _A = 128, 24
@@ -309,7 +356,10 @@ class PoolAtoms(BackendModule):
     _release = ("af3t_token_agg", "af3_torch/opt/forward/dtk")
 
     def _supports_anthropic(self, x, idx, gather_mask, atom_mask) -> str | None:
-        why = _first(_anthropic.unavailable(self._release[0], x.device, path=self._release[1]), self._supports_kernels(x, idx, gather_mask, atom_mask))
+        why = _first(
+            _anthropic.unavailable(self._release[0], x.device, path=self._release[1]),
+            self._supports_kernels(x, idx, gather_mask, atom_mask),
+        )
         if why is None and gather_mask.dtype != torch.bool and bool((gather_mask < 0).any()):
             return "a negative gather mask weight (the kernel applies the weight after the relu)"
         return why

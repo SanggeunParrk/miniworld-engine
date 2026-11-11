@@ -50,8 +50,7 @@ def is_big(d_msa: int, d_hidden: int) -> bool:
 
 
 def describe() -> str:
-    return (f"d_msa in {DMSA}, d_pair in {DPAIR}, {H} heads x d_hidden in {DHID}, or (d_msa, d_pair, d_hidden) in {BIG} with "
-            f"{H} heads")
+    return f"d_msa in {DMSA}, d_pair in {DPAIR}, {H} heads x d_hidden in {DHID}, or (d_msa, d_pair, d_hidden) in {BIG} with {H} heads"
 
 
 def _load(name: str, src: str, flags: list[str]):
@@ -76,7 +75,7 @@ def _load(name: str, src: str, flags: list[str]):
 
 
 # d_pair -> (warps per CTA, CTAs per SM) of the pair kernels
-PAIR_CFG: dict[int, tuple[int, int]] = {128: (8, 2), 256: (4, 3), 384: (6, 1), 512: (4, 1)}   # 512: two 16 KiB tiles per warp
+PAIR_CFG: dict[int, tuple[int, int]] = {128: (8, 2), 256: (4, 3), 384: (6, 1), 512: (4, 1)}  # 512: two 16 KiB tiles per warp
 
 
 def _pair(d_pair: int):
@@ -100,9 +99,7 @@ def _value(d_msa: int, d_hidden: int):
 BIG_INFER_Y = True
 
 
-def _forward_math(
-    args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float, save: bool
-):
+def _forward_math(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float, save: bool):
     msa, pair, pm, lnm_w, lnm_b, wv, wg, lnz_w, wb, wo = args
     bf = torch.bfloat16
     m = msa[0]
@@ -125,12 +122,8 @@ def _forward_math(
     )  # inference keeps no y: gate_out_w normalises m again (the BIG build: BIG_INFER_Y)
     o = torch.bmm(w16, v)  # [H, N, N] x [H, N, S*C]: the contraction on cuBLAS
     dmask, dscale = None, 1.0
-    if (
-        p_drop > 0
-    ):  # the module's drop_msa: one keep-mask per (token, channel) shared over the MSA rows
-        dmask = (torch.rand(m.shape[1], d_msa, device=m.device, dtype=bf) > p_drop).to(
-            bf
-        )
+    if p_drop > 0:  # the module's drop_msa: one keep-mask per (token, channel) shared over the MSA rows
+        dmask = (torch.rand(m.shape[1], d_msa, device=m.device, dtype=bf) > p_drop).to(bf)
         dscale = 1.0 / (1.0 - p_drop)
     wg16, wo16 = wg.detach().to(bf).contiguous(), wo.detach().to(bf).contiguous()
     if is_big(d_msa, hc // H):  # gate_out_w split at the gated product; training keeps the sigmoid gate g for the backward
@@ -163,9 +156,7 @@ def _forward_fake(args, eps_m, eps_z, p_drop):
 
 
 @opaque(fake=_forward_fake, name="pwa_h100w_fwd")
-def _forward_op(
-    args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float
-) -> list[torch.Tensor]:
+def _forward_op(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float) -> list[torch.Tensor]:
     out, w16, v, y, stats, o, dmask, g = _forward_math(args, eps_m, eps_z, p_drop, True)
     return [
         out,
@@ -175,7 +166,7 @@ def _forward_op(
         stats,
         o,
         dmask if dmask is not None else args[0].new_empty((0,)),
-        g if g is not None else args[0].new_empty((0,)),   # the BIG build's sigmoid gate [S, N, HC]
+        g if g is not None else args[0].new_empty((0,)),  # the BIG build's sigmoid gate [S, N, HC]
     ]
 
 
@@ -219,14 +210,8 @@ def _backward_op(
     )
     dres = dres.contiguous()
     # the residual's gradient is dres itself; the update's is dres * mask / (1 - p) (what autograd of x * mask / (1-p) gives)
-    dout = (
-        dres
-        if not p_drop
-        else (dres * dmask[None] * (1.0 / (1.0 - p_drop))).contiguous()
-    )
-    dgv = torch.empty(
-        (s, n, 2 * hc), device=m.device, dtype=bf
-    )  # [dgp | dv], natural layout
+    dout = dres if not p_drop else (dres * dmask[None] * (1.0 / (1.0 - p_drop))).contiguous()
+    dgv = torch.empty((s, n, 2 * hc), device=m.device, dtype=bf)  # [dgp | dv], natural layout
     big = is_big(d_msa, hc // H)
     if big:  # the gate is the forward's g (no Wg on chip)
         do, go = kv.gate_bwd_big_w(o, g, dout, wo16.t().contiguous(), dgv)
@@ -252,9 +237,7 @@ def _backward_op(
             torch.cat([wg16, wv16], 0).t().contiguous(),
             lnm_w.detach().float().contiguous(),
         )
-    dwgv = torch.mm(
-        dgv.view(s * n, 2 * hc).t(), y.view(s * n, d_msa)
-    )  # [2 HC, D]: dWg over dWv
+    dwgv = torch.mm(dgv.view(s * n, 2 * hc).t(), y.view(s * n, d_msa))  # [2 HC, D]: dWg over dWv
     dz, dwb, dzw, _ = kp.pair_bwd3(
         z,
         w16,
@@ -264,9 +247,7 @@ def _backward_op(
         eps_z,
         wb.detach(),
     )
-    cp = (
-        lambda t, ref: t.to(ref.dtype, copy=True)
-    )  # a custom op's returns may not alias each other (dlw / dlb, dWg / dWv are slices)
+    cp = lambda t, ref: t.to(ref.dtype, copy=True)  # a custom op's returns may not alias each other (dlw / dlb, dWg / dWv are slices)
     return [
         dm,
         dz,
@@ -292,9 +273,7 @@ class PwaWideFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         vals = ctx.saved_tensors
-        g = _backward_op(
-            list(vals[:10]), list(vals[10:]), dy[0], ctx.eps_m, ctx.eps_z, ctx.p_drop
-        )
+        g = _backward_op(list(vals[:10]), list(vals[10:]), dy[0], ctx.eps_m, ctx.eps_z, ctx.p_drop)
         return (g[0][None], g[1][None], None, *g[2:], None, None, None)
 
 
@@ -314,9 +293,7 @@ def _prepare(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor |
     return msa.contiguous(), pair.contiguous(), km.contiguous(), n
 
 
-def pair_weighted_averaging(
-    module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
-) -> torch.Tensor:
+def pair_weighted_averaging(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """msa + MSAPairWeightedAveraging(msa, pair, mask) with grad: the residual and the row dropout are inside the kernel."""
     eps_m = float(getattr(module.ln_msa, "eps", 1e-5))
     eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
@@ -340,9 +317,7 @@ def pair_weighted_averaging(
     return out[:, :, :n] if out.shape[2] != n else out
 
 
-def pair_weighted_averaging_inference(
-    module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
-) -> torch.Tensor:
+def pair_weighted_averaging_inference(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     eps_m = float(getattr(module.ln_msa, "eps", 1e-5))
     eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
     m, z, km, n = _prepare(module, msa, pair, mask)

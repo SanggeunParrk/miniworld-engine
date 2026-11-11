@@ -186,8 +186,9 @@ def _call_reason(module, single, cond, pair, mask, *, a100: bool = False) -> str
 
 
 def _wants_grad(module, *tensors) -> bool:
-    return torch.is_grad_enabled() and (any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
-                                        or any(p.requires_grad for p in module.parameters()))
+    return torch.is_grad_enabled() and (
+        any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors) or any(p.requires_grad for p in module.parameters())
+    )
 
 
 def _shared_cond(cond: torch.Tensor) -> bool:
@@ -208,7 +209,7 @@ def _run(fn, stack, single, cond, call, *, wants_grad: bool, keep_autocast: bool
         elif per_sample:
             out = fn(stack, s, cond[:, 0], *call)
         else:
-            out = torch.cat([fn(stack, s[i:i + 1], cond[i, 0], *call) for i in range(s.shape[0])])
+            out = torch.cat([fn(stack, s[i : i + 1], cond[i, 0], *call) for i in range(s.shape[0])])
     return out.unsqueeze(1)
 
 
@@ -243,8 +244,10 @@ class VariantTokenCuda:
         if compute_dtype not in (None, dt):
             return f"A100: compute_dtype {compute_dtype} (the sm_80 kernels run in the activations' dtype)"
         if not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond=cond):
-            return ("A100: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or fp32, "
-                    "head dim 32, 48 or 64, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)")
+            return (
+                "A100: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or fp32, "
+                "head dim 32, 48 or 64, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)"
+            )
         return None
 
     def _a100_transition_delta(self, single, cond):
@@ -253,8 +256,11 @@ class VariantTokenCuda:
         from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
 
         grad = _wants_grad(self, single, cond)
-        if (type(self.transition) is ConditionedTransition and not isinstance(self.transition.ada_ln_in, IdentityAdaptiveLayerNorm)
-                and ct_sm80.serves(self.transition, single, cond, single.dtype, grad)):
+        if (
+            type(self.transition) is ConditionedTransition
+            and not isinstance(self.transition.ada_ln_in, IdentityAdaptiveLayerNorm)
+            and ct_sm80.serves(self.transition, single, cond, single.dtype, grad)
+        ):
             with torch.autocast("cuda", enabled=False):
                 return ct_sm80.update(self.transition, single, cond, False, single.dtype, grad)
         return self.transition.delta(single, cond)
@@ -298,8 +304,10 @@ class VariantAtomCuda:
             return None, "kernels/dit_variants serve A100 only (H100: the one atom DiT implementation)"
         n = single.shape[2]
         if (single.shape[-1], self.attention.n_head, pair.shape[-1]) != (128, 4, 16) or self.transition.expand_a.weight.shape[0] != 2 * 128:
-            return None, ("geometry: the atom DiT kernels are built for 128 wide x 4 heads of 32, transition n = 2, pair 16 wide, got "
-                          f"{single.shape[-1]} wide x {self.attention.n_head} heads, pair {pair.shape[-1]}")
+            return None, (
+                "geometry: the atom DiT kernels are built for 128 wide x 4 heads of 32, transition n = 2, pair 16 wide, got "
+                f"{single.shape[-1]} wide x {self.attention.n_head} heads, pair {pair.shape[-1]}"
+            )
         if tuple(pair.shape) != (1, n // 32, 32, 128, 16):
             return None, f"pair must be the trunked atom pair [1, N / 32, 32, 128, 16] (N a multiple of 32), got {tuple(pair.shape)}"
         if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != (1, n)):
@@ -311,10 +319,13 @@ class VariantAtomCuda:
         m, u = (None if mask is None else mask[0]), (None if uid is None else uid[0])
         # A100 (sm_80): every call -- inference included -- on the training path (train.py: the row kernels, the mma.sync window attention
         # and the edge kernels, built for sm_80 by cuda/sm80.py), bf16 or fp32 (TF32), the caller's autocast kept
-        if not train.atom_serves(_stack(self, atom=True), single[:, 0], cond[0, 0] if _shared_cond(cond) else cond[:, 0], pair[0], m, u,
-                                 need_grad=False):
-            return None, ("A100: outside the sm_80 atom training path's range (bfloat16 / float32, [A, 1, N, 128] with N a multiple of 64, "
-                          "pair 16 wide, a conditioning shared by the samples or one per sample)")
+        if not train.atom_serves(
+            _stack(self, atom=True), single[:, 0], cond[0, 0] if _shared_cond(cond) else cond[:, 0], pair[0], m, u, need_grad=False
+        ):
+            return None, (
+                "A100: outside the sm_80 atom training path's range (bfloat16 / float32, [A, 1, N, 128] with N a multiple of 64, "
+                "pair 16 wide, a conditioning shared by the samples or one per sample)"
+            )
         return train.atom_stack_train, (pair[0], m, u)
 
     @staticmethod
@@ -335,5 +346,13 @@ class VariantAtomCuda:
 
             return _LocalAtomDiT._forward_cuda(cast(_LocalAtomDiT, self), single, cond, pair, mask, uid)
         fn, call = self._atom_serving(single, cond, pair, mask, uid)
-        return _run(fn, _stack(self, atom=True), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair), keep_autocast=True,
-                    per_sample=True)
+        return _run(
+            fn,
+            _stack(self, atom=True),
+            single,
+            cond,
+            call,
+            wants_grad=_wants_grad(self, single, cond, pair),
+            keep_autocast=True,
+            per_sample=True,
+        )

@@ -1,4 +1,5 @@
 """Split Transition with residual in the squeeze and input-LN gradient epilogues."""
+
 import functools
 
 import torch
@@ -31,24 +32,48 @@ def _fits_shared_memory(configs, named_args, **meta):
     needs 288 KB with fp32 operands, beyond an A100 (163 KB) and an H100 (227 KB); a stored table entry always fits the card it was measured on."""
     h = named_args["H"]
     limit = _smem_optin(h.device.index if h.device.index is not None else torch.cuda.current_device())
-    fit = [c for c in configs if (c.num_stages - 1) * (c.kwargs["BLOCK_M1"] + c.kwargs["BLOCK_N"]) * c.kwargs["BLOCK_K"] * h.element_size() <= limit]
+    fit = [
+        c
+        for c in configs
+        if (c.num_stages - 1) * (c.kwargs["BLOCK_M1"] + c.kwargs["BLOCK_N"]) * c.kwargs["BLOCK_K"] * h.element_size() <= limit
+    ]
     return fit or list(configs)
 
 
-@configured('transition_squeeze_residual_triton',
-            key=["shape_key"],
-            default=[dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=256, GROUP_M=4, num_warps=8, num_stages=4),
-                     dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, GROUP_M=4, num_warps=8, num_stages=4)],
-            prune=_fits_shared_memory)
+@configured(
+    "transition_squeeze_residual_triton",
+    key=["shape_key"],
+    default=[
+        dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=256, GROUP_M=4, num_warps=8, num_stages=4),
+        dict(BLOCK_K=32, BLOCK_M1=128, BLOCK_N=128, GROUP_M=4, num_warps=8, num_stages=4),
+    ],
+    prune=_fits_shared_memory,
+)
 @triton.jit
 def _squeeze_residual_kernel(
-    H, W, R, Y, M, N: tl.constexpr, K: tl.constexpr,
-    shm, shk, swn, swk, srm, srn,
-    shape_key, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
+    H,
+    W,
+    R,
+    Y,
+    M,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    shm,
+    shk,
+    swn,
+    swk,
+    srm,
+    srn,
+    shape_key,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
     PREC: tl.constexpr = "ieee",
-    PRE_H: tl.constexpr = False, PRE_W: tl.constexpr = False,
-    SPLIT_K: tl.constexpr = 1, P=None,
+    PRE_H: tl.constexpr = False,
+    PRE_W: tl.constexpr = False,
+    SPLIT_K: tl.constexpr = 1,
+    P=None,
 ):
     n_m = tl.cdiv(M, BLOCK_M1)
     n_n = tl.cdiv(N, BLOCK_N)
@@ -60,21 +85,17 @@ def _squeeze_residual_kernel(
     if SPLIT_K == 1:
         for k0 in range(tl.cdiv(K, BLOCK_K)):
             kk = k0 * BLOCK_K + k
-            h = tl.load(H + m[:, None] * shm + kk[None, :] * shk,
-                        mask=(m[:, None] < M) & (kk[None, :] < K), other=0)
-            w = tl.load(W + n[None, :] * swn + kk[:, None] * swk,
-                        mask=(n[None, :] < N) & (kk[:, None] < K), other=0)
+            h = tl.load(H + m[:, None] * shm + kk[None, :] * shk, mask=(m[:, None] < M) & (kk[None, :] < K), other=0)
+            w = tl.load(W + n[None, :] * swn + kk[:, None] * swk, mask=(n[None, :] < N) & (kk[:, None] < K), other=0)
             acc = tf32_dot(h, w, acc, input_precision=PREC, pre_a=PRE_H, pre_b=PRE_W)
     else:
         n_k = tl.cdiv(K, BLOCK_K)
-        per = tl.cdiv(n_k, SPLIT_K)                 # K tiles per split
+        per = tl.cdiv(n_k, SPLIT_K)  # K tiles per split
         k_lo = tl.program_id(1) * per
         for k0 in range(k_lo, tl.minimum(k_lo + per, n_k)):
             kk = k0 * BLOCK_K + k
-            h = tl.load(H + m[:, None] * shm + kk[None, :] * shk,
-                        mask=(m[:, None] < M) & (kk[None, :] < K), other=0)
-            w = tl.load(W + n[None, :] * swn + kk[:, None] * swk,
-                        mask=(n[None, :] < N) & (kk[:, None] < K), other=0)
+            h = tl.load(H + m[:, None] * shm + kk[None, :] * shk, mask=(m[:, None] < M) & (kk[None, :] < K), other=0)
+            w = tl.load(W + n[None, :] * swn + kk[:, None] * swk, mask=(n[None, :] < N) & (kk[:, None] < K), other=0)
             acc = tf32_dot(h, w, acc, input_precision=PREC, pre_a=PRE_H, pre_b=PRE_W)
     mask = (m[:, None] < M) & (n[None, :] < N)
     if SPLIT_K > 1:
@@ -118,8 +139,9 @@ def _squeeze_residual_fake(h, weight, residual, shape_key, h_rounded=False):
 
 
 @opaque(fake=_squeeze_residual_fake, name="transition_squeeze_residual")
-def squeeze_residual(h: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor,
-                     shape_key: int, h_rounded: bool = False) -> torch.Tensor:
+def squeeze_residual(
+    h: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, shape_key: int, h_rounded: bool = False
+) -> torch.Tensor:
     """Project the hidden state and add the residual in one Triton launch. ``h_rounded``: fp32 ``h`` is already on the TF32 grid (the
     expand kernel stores it so); otherwise it is rounded here."""
     m, k = h.shape
@@ -139,15 +161,34 @@ def squeeze_residual(h: torch.Tensor, weight: torch.Tensor, residual: torch.Tens
     part = h.new_empty((split, m, n), dtype=torch.float32) if split > 1 else out
     grid = lambda c: (tile_grid(m, n, c["BLOCK_M1"], c["BLOCK_N"])[0], split)  # noqa: E731
     _squeeze_residual_kernel[grid](
-        h, weight, residual, out, m, n, k,
-        *h.stride(), *weight.stride(), *residual.stride(),
-        shape_key=pack(shape_key, K=k, N=n), PREC=prec,
-        PRE_H=pre, PRE_W=pre, SPLIT_K=split, P=part,
+        h,
+        weight,
+        residual,
+        out,
+        m,
+        n,
+        k,
+        *h.stride(),
+        *weight.stride(),
+        *residual.stride(),
+        shape_key=pack(shape_key, K=k, N=n),
+        PREC=prec,
+        PRE_H=pre,
+        PRE_W=pre,
+        SPLIT_K=split,
+        P=part,
     )
     if split > 1:
         block = 1024
         _split_k_residual_kernel[(triton.cdiv(m * n, block),)](
-            part, residual, out, m, n, *residual.stride(), SPLIT_K=split, BLOCK=block,
+            part,
+            residual,
+            out,
+            m,
+            n,
+            *residual.stride(),
+            SPLIT_K=split,
+            BLOCK=block,
         )
     return out
 
@@ -159,7 +200,7 @@ class ResidualTransitionFunction(torch.autograd.Function):
         xn = xn.reshape(-1, shape[-1]).contiguous()
         key = both_key(rows_of(shape))
         if save_act:
-            h, a, b = _expand_swiglu_saveact(xn, wa, wb, key, half_scale)     # training: the halves, see main.TritonTransitionFunction
+            h, a, b = _expand_swiglu_saveact(xn, wa, wb, key, half_scale)  # training: the halves, see main.TritonTransitionFunction
             ctx.save_for_backward(xn, wa, wb, ws, h, a, b, *(() if half_scale is None else (half_scale,)))
         else:
             h = _expand_swiglu(xn, wa, wb, key)
@@ -174,7 +215,9 @@ class ResidualTransitionFunction(torch.autograd.Function):
         flat = dy.reshape(-1, dy.shape[-1]).contiguous()
         if flat.dtype != xn.dtype:
             flat = flat.to(xn.dtype)
-        dx, dwa, dwb, dws = swiglu_squeeze_backward_saved(xn, wa, wb, ws, flat, ctx.key, saved=(h, a, b), half_scale=scale[0] if scale else None)
+        dx, dwa, dwb, dws = swiglu_squeeze_backward_saved(
+            xn, wa, wb, ws, flat, ctx.key, saved=(h, a, b), half_scale=scale[0] if scale else None
+        )
         return dx.reshape(ctx.shape), dwa, dwb, dws, dy, None, None
 
 
@@ -185,7 +228,7 @@ def half_scale(gamma, beta, wa, wb):
     halves are divided by it: they can never overflow, whatever the weights are, and the scale is 1 for any ordinary magnitude. Device
     arithmetic only (a few reductions over the weights): graph-capturable, no host sync."""
     d = wa.shape[1]
-    xn_max = (d ** 0.5) * gamma.abs().max().float() + beta.abs().max().float()
+    xn_max = (d**0.5) * gamma.abs().max().float() + beta.abs().max().float()
     w1 = torch.maximum(wa.abs().sum(dim=1).max(), wb.abs().sum(dim=1).max()).float()
     return (xn_max * w1 * (1.0 / 60000.0)).clamp_min(1.0).reshape(1)
 

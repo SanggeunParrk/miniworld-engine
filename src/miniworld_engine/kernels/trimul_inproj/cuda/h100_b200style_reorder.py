@@ -23,9 +23,7 @@ def output_kernel(d, h, cfg):
         "-DMW_MINB=1",
         "-DMW_K1_STREAM=1",
     ]
-    kernel = T.load_unit(
-        str(T.compile(K.R / "k3reorder.cu", flags)), "b200style_k3reorder"
-    ).kernel("mw_b200style_k3reorder")
+    kernel = T.load_unit(str(T.compile(K.R / "k3reorder.cu", flags)), "b200style_k3reorder").kernel("mw_b200style_k3reorder")
     smem = BI._k3_smem(d, bn, stages)
     kernel.set_max_dynamic_smem(smem)
     return kernel, smem

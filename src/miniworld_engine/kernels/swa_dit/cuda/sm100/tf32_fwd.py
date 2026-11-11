@@ -199,11 +199,7 @@ class ModFwdTf32:
 
     def bind(self, c, wmod, out=None):
         R = c.shape[0]
-        out = (
-            torch.empty(R, 6 * C, device=c.device, dtype=torch.float32)
-            if out is None
-            else out
-        )
+        out = torch.empty(R, 6 * C, device=c.device, dtype=torch.float32) if out is None else out
         maps = (
             _f32map(c, [C, R], C * 4, [32, 128]),
             _f32map(wmod, [C, 6 * C], C * 4, [32, 128]),
@@ -234,11 +230,7 @@ class QkvgFwdTf32:
         f32 = torch.float32
         Qh, Kh, Vh = (torch.empty(N, H, S, D, device=dev, dtype=f32) for _ in range(3))
         G = torch.empty(N * S, C, device=dev, dtype=f32)
-        X, PQ, PK = (
-            (torch.empty(N * S, C, device=dev, dtype=f32) for _ in range(3))
-            if save
-            else (G, G, G)
-        )
+        X, PQ, PK = (torch.empty(N * S, C, device=dev, dtype=f32) for _ in range(3)) if save else (G, G, G)
         assert mod.is_contiguous() and cos.is_contiguous() and sin.is_contiguous()
         maps = (
             _rows_map(q, A, B, S, SP, AT),
@@ -293,16 +285,8 @@ class AttnFwdTf32:
     def bind(self, Qh, Kh, Vh, seqused, O=None, LSE=None):
         N, _, S, _ = Qh.shape
         assert S % 128 == 0
-        O = (
-            torch.empty(N * S, C, device=Qh.device, dtype=torch.float32)
-            if O is None
-            else O
-        )
-        LSE = (
-            torch.empty(N, H, S, device=Qh.device, dtype=torch.float32)
-            if LSE is None
-            else LSE
-        )
+        O = torch.empty(N * S, C, device=Qh.device, dtype=torch.float32) if O is None else O
+        LSE = torch.empty(N, H, S, device=Qh.device, dtype=torch.float32) if LSE is None else LSE
         rows = N * H * S
         maps = (
             _f32map(Qh.view(rows, D), [D, rows], D * 4, [D, 128]),
@@ -342,11 +326,7 @@ class FfnFwdTf32:
         SP, AT = tiling(A)
         dev = q.device
         out = torch.empty(M, C, device=dev, dtype=torch.float32)
-        Q1, Att, Y, Ff = (
-            (torch.empty(M, C, device=dev, dtype=torch.float32) for _ in range(4))
-            if save
-            else (out, out, out, out)
-        )
+        Q1, Att, Y, Ff = (torch.empty(M, C, device=dev, dtype=torch.float32) for _ in range(4)) if save else (out, out, out, out)
         maps = (
             _rows_map(g, A, B, S, SP, AT),
             _rows_map(o, A, B, S, SP, AT),
@@ -467,9 +447,7 @@ def _tf32_wmod(wmod):
 
 
 # --------------------------------------------------------------------------------------------------- the block
-def block_fwd_tf32(
-    q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window=HW
-):
+def block_fwd_tf32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window=HW):
     """The fp32 forward on TF32 tensor cores: [out] or, with ``save``, [out, Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, Att, Y, FF] (all
     fp32) -- the layout of ``dispatch.swa_dit_block_fwd``. q [N, S, C] fp32 contiguous, mod [B S, 6C] fp32, cos / sin [B S, D/2] fp32,
     seqused [N] int32, the five weights fp32."""
@@ -482,17 +460,13 @@ def block_fwd_tf32(
         # the weight forms: one wprep launch on a cache miss (every replay inside a capture, unless the weights are static), the
         # head of the PDL chain -- qkvg / ffn read them after their griddepcontrol.wait
         W, WO, WAB, WD = _sm._cached(_tf32_block_forms, wqkv, wg, wo, wu, wd)
-        run, (Qh, Kh, Vh, G, X, PQ, PK) = K.qkvg.bind(
-            q, mod, cos, sin, W, A, B, save=save
-        )
+        run, (Qh, Kh, Vh, G, X, PQ, PK) = K.qkvg.bind(q, mod, cos, sin, W, A, B, save=save)
         run()
         O = torch.empty(N * S, C, device=q.device, dtype=torch.float32)
         lse = torch.empty(N, H, S, device=q.device, dtype=torch.float32)
         run, _, _ = K.attn.bind(Qh, Kh, Vh, seqused, O=O, LSE=lse)
         run()
-        run, (out, q1, att, y, ffn) = K.ffn.bind(
-            q.reshape(N * S, C), G, O, mod, WO, WAB, WD, A, B, save=save
-        )
+        run, (out, q1, att, y, ffn) = K.ffn.bind(q.reshape(N * S, C), G, O, mod, WO, WAB, WD, A, B, save=save)
         run()
     if not save:
         return [out.view(N, S, C)]

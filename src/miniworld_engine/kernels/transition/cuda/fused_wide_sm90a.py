@@ -62,7 +62,6 @@ _SOURCES = {
 _SAVE_H_D384 = True
 
 
-
 _D512_SAVED_SIDES = (768, 384)
 
 
@@ -79,7 +78,7 @@ def save_h_enabled(d: int) -> bool:
     old switch that kept it for every D >= 384 is gone)."""
     if d < 384:
         return False
-    return (d == 384 and _SAVE_H_D384)
+    return d == 384 and _SAVE_H_D384
 
 
 def save_ab_enabled(d: int, rows: int = 0) -> bool:
@@ -94,8 +93,6 @@ def split_fwd_enabled(d: int, rows: int = 0) -> bool:
     if d == 768:
         return True
     return d == 512 and save_ab_enabled(d, rows) and _d512_saved_rows(rows)
-
-
 
 
 @functools.lru_cache(maxsize=8)
@@ -143,7 +140,7 @@ def _ext(
     if gate_saved_no_h_stage:
         revision += "_no_unused_h_stage_v1"
     if width == 512 and (gate_saved_tma or split_fwd):
-        revision += "_k64_v1"   # 64-wide K slabs of the saved gate (2 stages) and of the split expand GEMM (3 stages)
+        revision += "_k64_v1"  # 64-wide K slabs of the saved gate (2 stages) and of the split expand GEMM (3 stages)
     return load_extension(
         name=f"transition_wide_sm90a_d{width}_c{ctas}{revision}",
         sources=[str(_dir / "bind.cu"), *(str(_dir / s) for s in _SOURCES[width])],
@@ -194,7 +191,10 @@ def _ext_args(d: int, rows: int, save_ab: bool, n: int, sms: int) -> tuple[tuple
     # The selected L768/D512 training path retains a/b; inference passes save_ab=False.
     saved_tma = d == 512 and _d512_saved_rows(rows) and save_ab
     return (d, sms, 16, save_ab, save_ab and split_fwd_enabled(d, rows)), {
-        "affine_parallel": d == 64, "gate_saved_tma": saved_tma, "gate_saved_no_h_stage": saved_tma}
+        "affine_parallel": d == 64,
+        "gate_saved_tma": saved_tma,
+        "gate_saved_no_h_stage": saved_tma,
+    }
 
 
 @functools.lru_cache(maxsize=8)
@@ -207,9 +207,7 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     The requirements are the kernels' own (literal tile shapes, persistent grids without a ragged tail), not a policy."""
     if not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
-    if not _is_hopper(
-        x.device.index if x.device.index is not None else torch.cuda.current_device()
-    ):
+    if not _is_hopper(x.device.index if x.device.index is not None else torch.cuda.current_device()):
         return False
     d = x.shape[-1]
     if d not in WIDTHS or wa.shape[1] != d or wa.shape[0] // d not in NS[d]:
@@ -313,9 +311,7 @@ def _fwd_launch(
         return _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, wst)
     n = wa.shape[0] // x.shape[-1]
     if x.shape[-1] == 768:
-        out, xn, rstd, c1, h, _a, _b = _saved_fwd_launch(
-            x, gamma, beta, wa, wb, ws, eps
-        )
+        out, xn, rstd, c1, h, _a, _b = _saved_fwd_launch(x, gamma, beta, wa, wb, ws, eps)
         if save:
             return out, xn, rstd, c1, h
         return out, x.new_empty((1, 768)), rstd.new_empty((1,)), c1.new_empty((1,)), h
@@ -368,13 +364,9 @@ def _saved_fwd_launch(
         return _saved_fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps)
     if split_fwd_enabled(x.shape[-1], x.shape[0]):
         xn, rstd, c1 = _native_ext().ln_fwd(x, gamma, beta, float(eps))
-        out, h, a, b = _ext_for(x, True, wa.shape[0] // x.shape[-1]).fwd_split(
-            xn, x, _pack(wa, wb, 128), ws
-        )
+        out, h, a, b = _ext_for(x, True, wa.shape[0] // x.shape[-1]).fwd_split(xn, x, _pack(wa, wb, 128), ws)
         return out, xn, rstd, c1, h, a, b
-    return tuple(
-        _ext_for(x, True).fwd(x, gamma, beta, _pack(wa, wb, 64), ws, float(eps), True)
-    )
+    return tuple(_ext_for(x, True).fwd(x, gamma, beta, _pack(wa, wb, 64), ws, float(eps), True))
 
 
 def _bwd_launch_fake(
@@ -419,9 +411,7 @@ def _bwd_launch(
     fp32_dw: bool = False,
     asaved: torch.Tensor | None = None,
     bsaved: torch.Tensor | None = None,
-) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Returns (dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch. ``hsaved`` is the forward's
     h [M, 4D] when it was kept (save_h) and a placeholder otherwise."""
     if _is_fake(dy, x):
@@ -464,9 +454,7 @@ def _bwd_launch(
         )  # D768: 3 resident CTAs per SM (170 registers)
     # The opaque op forbids even disjoint output views of one storage. Copy/cast
     # all three leaves together, producing the final parameter-gradient dtype.
-    dwa, dwb, dws = _cast_cuda.cast(
-        [dwab[:h], dwab[h:], dws], [torch.float32 if fp32_dw else torch.bfloat16] * 3, force=True
-    )
+    dwa, dwb, dws = _cast_cuda.cast([dwab[:h], dwab[h:], dws], [torch.float32 if fp32_dw else torch.bfloat16] * 3, force=True)
     return dx, dgam, dbeta, dwa, dwb, dws
 
 
@@ -482,8 +470,9 @@ def _inference_forms(wa, wb, ws, transpose):
 
     if all(w.dtype == torch.bfloat16 for w in (wa, wb, ws)):
         return _cuda_prepare(wa, wb, ws, transpose)
-    return _capture.param_forms(("transition_wide_bf16_forms", transpose), (wa, wb, ws), lambda: _cuda_prepare(wa, wb, ws, transpose),
-                                capture_reads_eager=True)
+    return _capture.param_forms(
+        ("transition_wide_bf16_forms", transpose), (wa, wb, ws), lambda: _cuda_prepare(wa, wb, ws, transpose), capture_reads_eager=True
+    )
 
 
 class _WideTransitionSM90A(torch.autograd.Function):
@@ -498,22 +487,14 @@ class _WideTransitionSM90A(torch.autograd.Function):
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
         wa, wb, ws = wa.contiguous(), wb.contiguous(), ws.contiguous()
-        keep_ab = (
-            wa.shape[0] == 4 * shape[-1] or shape[-1] == 768
-        ) and save_ab_enabled(flat.shape[-1], flat.shape[0])
+        keep_ab = (wa.shape[0] == 4 * shape[-1] or shape[-1] == 768) and save_ab_enabled(flat.shape[-1], flat.shape[0])
         if keep_ab:
-            out, xn, rstd, c1, h, a, b = _saved_fwd_launch(
-                flat, gf, bf, wa, wb, ws, float(eps)
-            )
+            out, xn, rstd, c1, h, a, b = _saved_fwd_launch(flat, gf, bf, wa, wb, ws, float(eps))
         else:
-            out, xn, rstd, c1, h = _fwd_launch(
-                flat, gf, bf, wa, wb, ws, float(eps), True, wst
-            )
+            out, xn, rstd, c1, h = _fwd_launch(flat, gf, bf, wa, wb, ws, float(eps), True, wst)
             a, b = None, None
         if not (save_h_enabled(flat.shape[-1]) or keep_ab):
-            h = h.new_empty(
-                (1, 1)
-            )  # not kept: the gate kernel recomputes and stores it
+            h = h.new_empty((1, 1))  # not kept: the gate kernel recomputes and stores it
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa, wb, ws, h, a, b, *raw)
         ctx.shape = shape
         ctx.param_dtypes = param_dtypes
@@ -557,10 +538,7 @@ def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
     """Module-facing entry, same signature as ``fused_sm90a.transition_fused_sm90a``. Call ``supported()`` first: this
     raises rather than falling back. Inference (grad mode off, or nothing requiring grad) runs the forward without the
     saves, decided here and not inside the autograd Function, for the reason ``fused_sm90a`` documents."""
-    if not (
-        torch.is_grad_enabled()
-        and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
-    ):
+    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
         if shape[-1] == 64:
             # The forward consumes Ws transposed. bf16 weights reuse a cached transpose (an inference loop calls with the same
@@ -665,7 +643,7 @@ def f32_available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor, training:
         if training or key[0] == 512:
             from . import fused_generic_sm90a
 
-            fused_generic_sm90a._ext()   # the TF32 backward / the D 512 squeeze
+            fused_generic_sm90a._ext()  # the TF32 backward / the D 512 squeeze
     except Exception as exc:  # a build / load failure is an error, never a fallback
         build_failed(f"fp32 sm90a Transition (D={key[0]}, n={key[1]})", exc)
         return False  # reached only while planning (build_failed returns there)
@@ -679,12 +657,18 @@ _F16_BOUND = 30000.0
 def _f32_forms_fake(gamma, beta, wa, wb, ws):
     h, d = wa.shape
     f16 = dict(dtype=torch.float16, device=wa.device)
-    return (torch.empty((h, d), **f16), torch.empty((h, d), **f16), torch.empty((h, d), **f16), torch.empty((4,), dtype=torch.float32, device=wa.device))
+    return (
+        torch.empty((h, d), **f16),
+        torch.empty((h, d), **f16),
+        torch.empty((h, d), **f16),
+        torch.empty((4,), dtype=torch.float32, device=wa.device),
+    )
 
 
 @opaque(fake=_f32_forms_fake, name="transition_f32io_forms_sm90a")
-def _f32_forms(gamma: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
-               ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _f32_forms(
+    gamma: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(Wa16, Wb16, (Ws / s_ws)^T fp16, sc fp32 [4]) -- see the kernels' header for ``sc``. Bounds: |xn| <= sqrt(D) max|gamma| + max|beta|,
     |a|, |b| <= |xn|max * the largest row L1 norm of Wa, Wb, |h| <= |a|max |b|max. Each scale is 1 unless its bound passes ``_F16_BOUND``.
     Two launches of device arithmetic (no host sync): made once per parameter version at inference, once per step in training."""
@@ -709,8 +693,18 @@ def _f32_launch_fake(x, gamma, beta, wa16, wb16, wst16, sc, eps, variant, save=F
 
 
 @opaque(fake=_f32_launch_fake, name="transition_f32io_fwd_sm90a")
-def _f32_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa16: torch.Tensor, wb16: torch.Tensor, wst16: torch.Tensor,
-                sc: torch.Tensor, eps: float, variant: int, save: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _f32_launch(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    wa16: torch.Tensor,
+    wb16: torch.Tensor,
+    wst16: torch.Tensor,
+    sc: torch.Tensor,
+    eps: float,
+    variant: int,
+    save: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """x fp32 [M, D] -> (x + transition(x) fp32, xn, rstd, c1); the last three are 1-element placeholders unless ``save``."""
     if _is_fake(x, wa16):
         return _f32_launch_fake(x, gamma, beta, wa16, wb16, wst16, sc, eps, variant, save)
@@ -743,8 +737,9 @@ def _f32_inputs(x, gamma, beta, wa, wb, ws, cache: bool):
     flat = x.reshape(-1, x.shape[-1]).contiguous()
     gf, bf = gamma.float().contiguous(), beta.float().contiguous()
     if cache:
-        forms = _capture.param_forms("transition_f32io_forms", (gamma, beta, wa, wb, ws), lambda: _f32_forms(gamma, beta, wa, wb, ws),
-                                     capture_reads_eager=True)
+        forms = _capture.param_forms(
+            "transition_f32io_forms", (gamma, beta, wa, wb, ws), lambda: _f32_forms(gamma, beta, wa, wb, ws), capture_reads_eager=True
+        )
     else:
         forms = _f32_forms(gamma, beta, wa, wb, ws)
     return (flat, gf, bf, *forms)
@@ -770,14 +765,29 @@ def _dw_replicas(hid: int, sms: int) -> int:
 
 
 def _f32_bwd_fake(dy, xn, x, rstd, c1, gamma, wst, wa, wb, wabt):
-    return (torch.empty_like(x), torch.empty_like(gamma), torch.empty_like(gamma), torch.empty_like(wa), torch.empty_like(wb),
-            wa.new_empty((wa.shape[1], wa.shape[0])))
+    return (
+        torch.empty_like(x),
+        torch.empty_like(gamma),
+        torch.empty_like(gamma),
+        torch.empty_like(wa),
+        torch.empty_like(wb),
+        wa.new_empty((wa.shape[1], wa.shape[0])),
+    )
 
 
 @opaque(fake=_f32_bwd_fake, name="transition_f32_bwd_sm90a")
-def _f32_bwd(dy: torch.Tensor, xn: torch.Tensor, x: torch.Tensor, rstd: torch.Tensor, c1: torch.Tensor, gamma: torch.Tensor,
-             wst: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
-             wabt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _f32_bwd(
+    dy: torch.Tensor,
+    xn: torch.Tensor,
+    x: torch.Tensor,
+    rstd: torch.Tensor,
+    c1: torch.Tensor,
+    gamma: torch.Tensor,
+    wst: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    wabt: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """D 128 backward, the bf16 D 128 backward's two roles as two kernels (TF32): the fused dgrad (dh, a, b, SwiGLU backward, d_xn, LayerNorm
     backward, residual) and the weight gradients (dh, a, b recomputed per hidden slice, dWa / dWb / dWs accumulated on chip); h and [dA | dB]
     never reach memory. Returns (dx, dgamma, dbeta, dWa, dWb, dWs) from the forward's saves and the step's TF32-rounded weight copies."""
@@ -806,8 +816,9 @@ class _F32TransitionSM90A(torch.autograd.Function):
         ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         masters = (wa, wb, ws)
         flat, gf, bf, wa16, wb16, wst16, sc = _f32_inputs(x, gamma, beta, wa, wb, ws, cache=False)
-        out, xn, rstd, c1 = _f32_launch(flat, gf, bf, wa16, wb16, wst16, sc, float(eps), _f32_variant(shape[-1], wa.shape[0] // shape[-1],
-                                                                                                         flat.shape[0]), True)
+        out, xn, rstd, c1 = _f32_launch(
+            flat, gf, bf, wa16, wb16, wst16, sc, float(eps), _f32_variant(shape[-1], wa.shape[0] // shape[-1], flat.shape[0]), True
+        )
         # the backward's TF32-rounded weight copies (Ws^T, [Wa;Wb]^T, Wa, Wb, Ws) in one launch
         wst, wabt, wa_r, wb_r, ws_r = G._prep_step(*G._kernel_weights(flat, wa, wb, ws))
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa_r, wb_r, ws_r, wst, wabt, *masters)
@@ -822,11 +833,14 @@ class _F32TransitionSM90A(torch.autograd.Function):
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
         hid = wa_r.shape[0]
         if flat.shape[1] == 128 and flat.shape[0] >= _F32_FUSED_BWD_MIN_ROWS:
-            dx, dgam, dbeta, dwa, dwb, dws = _f32_bwd(dy.reshape(-1, dy.shape[-1]).contiguous(), xn, flat, rstd, c1, gf, wst, wa_r, wb_r, wabt)
+            dx, dgam, dbeta, dwa, dwb, dws = _f32_bwd(
+                dy.reshape(-1, dy.shape[-1]).contiguous(), xn, flat, rstd, c1, gf, wst, wa_r, wb_r, wabt
+            )
             return dx.reshape(ctx.shape), dgam.to(gdt), dbeta.to(bdt), dwa.to(adt), dwb.to(bwdt), dws.to(sdt), None
         ph = flat.new_empty((1, 1))
-        dx, dgam, dbeta, dwab, dws = G._bwd_launch(dy.reshape(-1, dy.shape[-1]).contiguous(), flat, xn, rstd, c1, ph, ph, ph, gf, wa_r, wb_r,
-                                                   ws_r, False, wst, wabt)
+        dx, dgam, dbeta, dwab, dws = G._bwd_launch(
+            dy.reshape(-1, dy.shape[-1]).contiguous(), flat, xn, rstd, c1, ph, ph, ph, gf, wa_r, wb_r, ws_r, False, wst, wabt
+        )
         hid = wa_r.shape[0]
         return dx.reshape(ctx.shape), dgam.to(gdt), dbeta.to(bdt), dwab[:hid].to(adt), dwab[hid:].to(bwdt), dws.to(sdt), None
 

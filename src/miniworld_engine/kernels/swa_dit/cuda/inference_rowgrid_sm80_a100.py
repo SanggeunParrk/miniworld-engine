@@ -50,12 +50,8 @@ def block(
     )
     qkv_kind, qkv_cfg, ffn_kind = baseline._GEOMETRY_KERNELS[(a, s)]
     assert qkv_kind == "singlehead" and qkv_cfg == 0 and ffn_kind == "tuned"
-    qh, kh, vh, g = baseline.qkvg_extension().singlehead(
-        qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg
-    )
-    o, _ = sm80.attn_fwd(
-        qh, kh, vh, seqused, save_lse=False
-    )
+    qh, kh, vh, g = baseline.qkvg_extension().singlehead(qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg)
+    o, _ = sm80.attn_fwd(qh, kh, vh, seqused, save_lse=False)
     out = rowgrid.ffn(qf, g, o, mod, wo, wu, wd, s, b, eps, _ROWGRID[(a, s)])
     return out.view(a, s, 128)
 

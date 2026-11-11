@@ -30,9 +30,7 @@ def run(a, b, part, out, replicas=16, cfg=0):
 
 
 def result(a, b, replicas=16, cfg=0, dtype=torch.bfloat16):
-    part = torch.empty(
-        (replicas, a.shape[1], b.shape[1]), device=a.device, dtype=torch.float32
-    )
+    part = torch.empty((replicas, a.shape[1], b.shape[1]), device=a.device, dtype=torch.float32)
     out = torch.empty((a.shape[1], b.shape[1]), device=a.device, dtype=dtype)
     run(a, b, part, out, replicas, cfg)
     return out

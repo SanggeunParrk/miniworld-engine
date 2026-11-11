@@ -89,8 +89,10 @@ def rows_of(shape) -> int:
     """M from the PRE-flatten shape: (B, L, L, D) -> B*L*L, (B, L, D) -> B*L. Refuses an already flattened 2-D shape."""
     dims = tuple(shape)
     if len(dims) < 3:
-        raise ValueError(f"shape {dims} is already flattened; pass the activation's shape before it is flattened, "
-                         f"or compute the key at the caller that still has it and pass `shape_key=` down")
+        raise ValueError(
+            f"shape {dims} is already flattened; pass the activation's shape before it is flattened, "
+            f"or compute the key at the caller that still has it and pass `shape_key=` down"
+        )
     out = 1
     for d in dims[:-1]:
         out *= int(d)
@@ -101,6 +103,8 @@ def length_of(shape) -> int:
     """L = shape[-2] of the PRE-flatten activation (pair, token and atom layouts alike). Refuses a 2-D (M, D) shape."""
     dims = tuple(shape)
     if len(dims) < 3:
-        raise ValueError(f"shape {dims} is already flattened, so shape[-2] is M and not L; pass the shape before it is "
-                         f"flattened, or compute the key at the caller that still has it and pass `shape_key=` down")
+        raise ValueError(
+            f"shape {dims} is already flattened, so shape[-2] is M and not L; pass the shape before it is "
+            f"flattened, or compute the key at the caller that still has it and pass `shape_key=` down"
+        )
     return int(dims[-2])

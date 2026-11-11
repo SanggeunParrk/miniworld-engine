@@ -135,8 +135,19 @@ def pair_bias_mma(z, gamma, wb, kmask, n, eps=1e-5):
     d = _dev(z)
     rows = z.numel() // DP
     out = torch.empty(NH, z.shape[0], WQ, WK, device=z.device, dtype=torch.float32)
-    _load("h_pb", d)((min(8 * _sms(d), (rows + 255) // 256), 1, 1), (256, 1, 1), z.contiguous(), gamma.float().contiguous(),
-                     wb.float().contiguous(), _u8(kmask), out, int(n), int(rows), float(eps), int(z.dtype == torch.bfloat16))
+    _load("h_pb", d)(
+        (min(8 * _sms(d), (rows + 255) // 256), 1, 1),
+        (256, 1, 1),
+        z.contiguous(),
+        gamma.float().contiguous(),
+        wb.float().contiguous(),
+        _u8(kmask),
+        out,
+        int(n),
+        int(rows),
+        float(eps),
+        int(z.dtype == torch.bfloat16),
+    )
     return out
 
 
@@ -200,11 +211,18 @@ def pair_bias_bwd_mma(z, gamma, wb, dbias, eps=1e-5):
     dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
     dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
     wbf, gf = wb.float().contiguous(), gamma.float().contiguous()
-    _load("h_pbb", d)((nb, 1, 1), (256, 1, 1), z, wbf, gf, dbias.contiguous(), dz, part, int(rows), float(eps), int(z.dtype == torch.bfloat16))
+    _load("h_pbb", d)(
+        (nb, 1, 1), (256, 1, 1), z, wbf, gf, dbias.contiguous(), dz, part, int(rows), float(eps), int(z.dtype == torch.bfloat16)
+    )
     sm80_atom_local._load("pb_fin", d)((1, 1, 1), (64, 1, 1), part, int(nb), wbf, gf, dgamma, dwb, 0)
     return dz, dgamma, dwb
 
 
 #: what ``train.py``'s atom path calls on ``sm100_atom_local``
-LOCAL = SimpleNamespace(pair_bias_mma=pair_bias_mma, attn_fwd_mma=attn_fwd_mma, attn_fwd_mma32=attn_fwd_mma32, attn_bwd_mma=attn_bwd_mma,
-                        pair_bias_bwd_mma=pair_bias_bwd_mma)
+LOCAL = SimpleNamespace(
+    pair_bias_mma=pair_bias_mma,
+    attn_fwd_mma=attn_fwd_mma,
+    attn_fwd_mma32=attn_fwd_mma32,
+    attn_bwd_mma=attn_bwd_mma,
+    pair_bias_bwd_mma=pair_bias_bwd_mma,
+)

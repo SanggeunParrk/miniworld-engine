@@ -194,15 +194,15 @@ def _transition_expand_gate_kernel(
 
 
 def transition_expand_gate(
-    x2: torch.Tensor,         # (M, K) contiguous
+    x2: torch.Tensor,  # (M, K) contiguous
     ln_weight: torch.Tensor,  # (K,)
-    ln_bias: torch.Tensor,    # (K,)
-    wa: torch.Tensor,         # (ND, K) = expand_a.weight
-    wb: torch.Tensor,         # (ND, K) = expand_b.weight
+    ln_bias: torch.Tensor,  # (K,)
+    wa: torch.Tensor,  # (ND, K) = expand_a.weight
+    wb: torch.Tensor,  # (ND, K) = expand_b.weight
     eps: float,
     stats: tuple[torch.Tensor, torch.Tensor] | None = None,  # (rstd, c1) precomputed
     save_xn: bool = False,
-    shape_key: int | None = None,   # both_key(rows_of(pre-flatten shape)) from the caller
+    shape_key: int | None = None,  # both_key(rows_of(pre-flatten shape)) from the caller
 ):
     """LayerNorm(x) then SwiGLU(expand_a, expand_b) -> expand (M, ND). Stats fused-out.
 
@@ -225,13 +225,27 @@ def transition_expand_gate(
     xn = torch.empty(M, K, device=x2.device, dtype=x2.dtype) if save_xn else expand
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731 (N looped in-kernel)
     _transition_expand_gate_kernel[grid](
-        x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
-        wa.contiguous(), wb.contiguous(), expand, xn,
-        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
-        x2.stride(0), x2.stride(1),
-        wa.stride(0), wa.stride(1),
-        expand.stride(0), expand.stride(1),
-        xn.stride(0), xn.stride(1),
+        x2,
+        rstd,
+        c1,
+        ln_weight.contiguous(),
+        ln_bias.contiguous(),
+        wa.contiguous(),
+        wb.contiguous(),
+        expand,
+        xn,
+        M,
+        ND,
+        K,
+        _shape_key(shape_key, M, ND=ND, K=K),
+        x2.stride(0),
+        x2.stride(1),
+        wa.stride(0),
+        wa.stride(1),
+        expand.stride(0),
+        expand.stride(1),
+        xn.stride(0),
+        xn.stride(1),
         SAVE_XN=save_xn,
     )
     return (expand, xn) if save_xn else expand
@@ -284,8 +298,7 @@ def _prefer_covering_b2b(configs, nargs, **_):
     list is returned -- the k-tiled ``else`` is exactly the fallback for that case.
     """
     k = nargs["K"]
-    cov = [c for c in configs
-           if c.kwargs["BLOCK_K_D"] >= k and c.kwargs["BLOCK_K_ND"] >= k]
+    cov = [c for c in configs if c.kwargs["BLOCK_K_D"] >= k and c.kwargs["BLOCK_K_ND"] >= k]
     if not cov:
         return list(configs)
     dmin = min(c.kwargs["BLOCK_K_D"] for c in cov)
@@ -295,9 +308,7 @@ def _prefer_covering_b2b(configs, nargs, **_):
     # compiles the identical kernel. Pin it to the smallest so the tuner does not bench each config
     # twice for a knob that cannot matter here.
     gmin = min(c.kwargs["GROUP_M"] for c in cov)
-    return [c for c in cov
-            if c.kwargs["BLOCK_K_D"] == dmin and c.kwargs["BLOCK_K_ND"] == ndmin
-            and c.kwargs["GROUP_M"] == gmin]
+    return [c for c in cov if c.kwargs["BLOCK_K_D"] == dmin and c.kwargs["BLOCK_K_ND"] == ndmin and c.kwargs["GROUP_M"] == gmin]
 
 
 # fmt: off
@@ -568,12 +579,12 @@ def _transition_b2b_kernel(
 
 
 def transition_b2b(
-    x2: torch.Tensor,         # (M, K) contiguous
+    x2: torch.Tensor,  # (M, K) contiguous
     ln_weight: torch.Tensor,  # (K,)
-    ln_bias: torch.Tensor,    # (K,)
-    wa: torch.Tensor,         # (ND, K)
-    wb: torch.Tensor,         # (ND, K)
-    ws: torch.Tensor,         # (D, ND) = squeeze.weight
+    ln_bias: torch.Tensor,  # (K,)
+    wa: torch.Tensor,  # (ND, K)
+    wb: torch.Tensor,  # (ND, K)
+    ws: torch.Tensor,  # (D, ND) = squeeze.weight
     eps: float,
     stats: tuple[torch.Tensor, torch.Tensor] | None = None,  # (rstd, c1) precomputed
     save_xn: bool = False,
@@ -603,8 +614,7 @@ def transition_b2b(
     M, K = x2.shape
     ND = wa.shape[0]
     D = ws.shape[0]
-    fuse_stats = (False if not has_ln
-                  else _transition_fuse_stats_enabled() if fuse_stats is None else fuse_stats)
+    fuse_stats = False if not has_ln else _transition_fuse_stats_enabled() if fuse_stats is None else fuse_stats
     if not has_ln:
         if stats is not None:
             raise ValueError("transition_b2b(has_ln=False) normalizes nothing; do not pass stats")
@@ -623,14 +633,33 @@ def transition_b2b(
     check_tile_axes("transition_fwd_b2b_triton", D, K, "D (ws rows)", "K (x columns)")
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_K_ND"])  # noqa: E731
     _transition_b2b_kernel[grid](
-        x2, rstd, c1, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
-        wa.contiguous(), wb.contiguous(), ws.contiguous(), out, xn,
-        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K), eps,
-        x2.stride(0), x2.stride(1),
-        wa.stride(0), wa.stride(1),
-        ws.stride(0), ws.stride(1),
-        out.stride(0), out.stride(1),
-        xn.stride(0), xn.stride(1),
+        x2,
+        rstd,
+        c1,
+        rstd,
+        c1,
+        ln_weight.contiguous(),
+        ln_bias.contiguous(),
+        wa.contiguous(),
+        wb.contiguous(),
+        ws.contiguous(),
+        out,
+        xn,
+        M,
+        ND,
+        K,
+        _shape_key(shape_key, M, ND=ND, K=K),
+        eps,
+        x2.stride(0),
+        x2.stride(1),
+        wa.stride(0),
+        wa.stride(1),
+        ws.stride(0),
+        ws.stride(1),
+        out.stride(0),
+        out.stride(1),
+        xn.stride(0),
+        xn.stride(1),
         SAVE_XN=save_xn,
         FUSE_STATS=fuse_stats,
         HAS_LN=has_ln,
@@ -766,12 +795,12 @@ def _transition_b2b_ktiled_kernel(
 
 
 def transition_b2b_ktiled(
-    x2: torch.Tensor,         # (M, K) contiguous
+    x2: torch.Tensor,  # (M, K) contiguous
     ln_weight: torch.Tensor,  # (K,)
-    ln_bias: torch.Tensor,    # (K,)
-    wa: torch.Tensor,         # (ND, K)
-    wb: torch.Tensor,         # (ND, K)
-    ws: torch.Tensor,         # (D, ND)
+    ln_bias: torch.Tensor,  # (K,)
+    wa: torch.Tensor,  # (ND, K)
+    wb: torch.Tensor,  # (ND, K)
+    ws: torch.Tensor,  # (D, ND)
     eps: float,
     shape_key: int | None = None,
 ) -> torch.Tensor:
@@ -788,13 +817,27 @@ def transition_b2b_ktiled(
     check_tile_axes("transition_fwd_b2b_ktiled_triton", D, K, "D (ws rows)", "K (x columns)")
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_K_ND"])  # noqa: E731
     _transition_b2b_ktiled_kernel[grid](
-        x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
-        wa.contiguous(), wb.contiguous(), ws.contiguous(), out,
-        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
-        x2.stride(0), x2.stride(1),
-        wa.stride(0), wa.stride(1),
-        ws.stride(0), ws.stride(1),
-        out.stride(0), out.stride(1),
+        x2,
+        rstd,
+        c1,
+        ln_weight.contiguous(),
+        ln_bias.contiguous(),
+        wa.contiguous(),
+        wb.contiguous(),
+        ws.contiguous(),
+        out,
+        M,
+        ND,
+        K,
+        _shape_key(shape_key, M, ND=ND, K=K),
+        x2.stride(0),
+        x2.stride(1),
+        wa.stride(0),
+        wa.stride(1),
+        ws.stride(0),
+        ws.stride(1),
+        out.stride(0),
+        out.stride(1),
     )
     return out
 
@@ -946,8 +989,7 @@ def _transition_expand_gatebwd_kernel(
 # fmt: on
 
 
-def _transition_expand_gatebwd_fake(x2, rstd, c1, gamma, beta, wa, wb, grad_expand,
-                                    shape_key=None):
+def _transition_expand_gatebwd_fake(x2, rstd, c1, gamma, beta, wa, wb, grad_expand, shape_key=None):
     """(h, dA, dB) each shaped like grad_expand (M, ND), plus the recomputed xn shaped like x2."""
     return (
         torch.empty_like(grad_expand),
@@ -958,11 +1000,17 @@ def _transition_expand_gatebwd_fake(x2, rstd, c1, gamma, beta, wa, wb, grad_expa
 
 
 @opaque(fake=_transition_expand_gatebwd_fake, name="transition_expand_gatebwd_recompute")
-def _transition_expand_gatebwd(x2: torch.Tensor, rstd: torch.Tensor, c1: torch.Tensor,
-                               gamma: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor,
-                               wb: torch.Tensor, grad_expand: torch.Tensor,
-                               shape_key: int | None = None) -> tuple[
-                                   torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _transition_expand_gatebwd(
+    x2: torch.Tensor,
+    rstd: torch.Tensor,
+    c1: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    grad_expand: torch.Tensor,
+    shape_key: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Version A: normalize x inline + recompute a,b once -> (h, dA, dB, xn)."""
     M, K = x2.shape
     ND = wa.shape[0]
@@ -972,16 +1020,37 @@ def _transition_expand_gatebwd(x2: torch.Tensor, rstd: torch.Tensor, c1: torch.T
     xn = torch.empty_like(x2)
     grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
-        x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
-        wa, wb, grad_expand,
-        h, dA, dB, dA, xn,
-        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
-        x2.stride(0), x2.stride(1),
-        wa.stride(0), wa.stride(1), wb.stride(0), wb.stride(1),
-        grad_expand.stride(0), grad_expand.stride(1),
-        dA.stride(0), dA.stride(1),
-        dA.stride(0), dA.stride(1),
-        xn.stride(0), xn.stride(1),
+        x2,
+        rstd,
+        c1,
+        gamma.contiguous(),
+        beta.contiguous(),
+        wa,
+        wb,
+        grad_expand,
+        h,
+        dA,
+        dB,
+        dA,
+        xn,
+        M,
+        ND,
+        K,
+        _shape_key(shape_key, M, ND=ND, K=K),
+        x2.stride(0),
+        x2.stride(1),
+        wa.stride(0),
+        wa.stride(1),
+        wb.stride(0),
+        wb.stride(1),
+        grad_expand.stride(0),
+        grad_expand.stride(1),
+        dA.stride(0),
+        dA.stride(1),
+        dA.stride(0),
+        dA.stride(1),
+        xn.stride(0),
+        xn.stride(1),
         NORMALIZE=True,
         STORE_H=True,
         STACK_DAB=False,
@@ -990,8 +1059,7 @@ def _transition_expand_gatebwd(x2: torch.Tensor, rstd: torch.Tensor, c1: torch.T
     return h, dA, dB, xn
 
 
-def _transition_expand_gatebwd_stacked(x2, rstd, c1, gamma, beta, wa, wb, grad_expand,
-                                       *, shape_key: int | None = None):
+def _transition_expand_gatebwd_stacked(x2, rstd, c1, gamma, beta, wa, wb, grad_expand, *, shape_key: int | None = None):
     """Version A stacked: normalize x inline + recompute a,b once -> (h, dAB=[dA|dB], xn).
 
     Same kernel as the split Version A but with STACK_DAB=True, so the downstream weight/input
@@ -1005,16 +1073,37 @@ def _transition_expand_gatebwd_stacked(x2, rstd, c1, gamma, beta, wa, wb, grad_e
     xn = torch.empty_like(x2)
     grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
-        x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
-        wa, wb, grad_expand,
-        h, dAB, dAB, dAB, xn,
-        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
-        x2.stride(0), x2.stride(1),
-        wa.stride(0), wa.stride(1), wb.stride(0), wb.stride(1),
-        grad_expand.stride(0), grad_expand.stride(1),
-        h.stride(0), h.stride(1),
-        dAB.stride(0), dAB.stride(1),
-        xn.stride(0), xn.stride(1),
+        x2,
+        rstd,
+        c1,
+        gamma.contiguous(),
+        beta.contiguous(),
+        wa,
+        wb,
+        grad_expand,
+        h,
+        dAB,
+        dAB,
+        dAB,
+        xn,
+        M,
+        ND,
+        K,
+        _shape_key(shape_key, M, ND=ND, K=K),
+        x2.stride(0),
+        x2.stride(1),
+        wa.stride(0),
+        wa.stride(1),
+        wb.stride(0),
+        wb.stride(1),
+        grad_expand.stride(0),
+        grad_expand.stride(1),
+        h.stride(0),
+        h.stride(1),
+        dAB.stride(0),
+        dAB.stride(1),
+        xn.stride(0),
+        xn.stride(1),
         NORMALIZE=True,
         STORE_H=True,
         STACK_DAB=True,
@@ -1047,16 +1136,37 @@ def _transition_expand_gatebwd_savedxn_stacked(
     dAB = torch.empty(M, ND * 2, device=xn.device, dtype=grad_expand.dtype)
     grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
-        xn, xn, xn, xn, xn,
-        wa, wb, grad_expand,
-        h, dAB, dAB, dAB, xn,
-        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
-        xn.stride(0), xn.stride(1),
-        wa.stride(0), wa.stride(1), wb.stride(0), wb.stride(1),
-        grad_expand.stride(0), grad_expand.stride(1),
-        h.stride(0), h.stride(1),
-        dAB.stride(0), dAB.stride(1),
-        xn.stride(0), xn.stride(1),
+        xn,
+        xn,
+        xn,
+        xn,
+        xn,
+        wa,
+        wb,
+        grad_expand,
+        h,
+        dAB,
+        dAB,
+        dAB,
+        xn,
+        M,
+        ND,
+        K,
+        _shape_key(shape_key, M, ND=ND, K=K),
+        xn.stride(0),
+        xn.stride(1),
+        wa.stride(0),
+        wa.stride(1),
+        wb.stride(0),
+        wb.stride(1),
+        grad_expand.stride(0),
+        grad_expand.stride(1),
+        h.stride(0),
+        h.stride(1),
+        dAB.stride(0),
+        dAB.stride(1),
+        xn.stride(0),
+        xn.stride(1),
         NORMALIZE=False,
         STORE_H=True,
         STACK_DAB=True,
@@ -1215,11 +1325,25 @@ def _transition_ln_bwd(dxn, x2, rstd, c1, gamma, *, shape_key: int | None = None
         dbeta_acc = torch.zeros(K, device=x2.device, dtype=torch.float32)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _transition_ln_bwd_kernel[grid](
-        dxn, x2, rstd, c1, gamma.contiguous(), dx, dgamma_acc, dbeta_acc,
-        M, K, _shape_key(shape_key, M, K=K), x2.stride(0), x2.stride(1),
-        dgamma_acc.stride(0), dgamma_acc.stride(-1),
-        dbeta_acc.stride(0), dbeta_acc.stride(-1),
-        NUM_REPLICAS=num_replicas, PRIVATIZE_DGDB=privatize_dgdb,
+        dxn,
+        x2,
+        rstd,
+        c1,
+        gamma.contiguous(),
+        dx,
+        dgamma_acc,
+        dbeta_acc,
+        M,
+        K,
+        _shape_key(shape_key, M, K=K),
+        x2.stride(0),
+        x2.stride(1),
+        dgamma_acc.stride(0),
+        dgamma_acc.stride(-1),
+        dbeta_acc.stride(0),
+        dbeta_acc.stride(-1),
+        NUM_REPLICAS=num_replicas,
+        PRIVATIZE_DGDB=privatize_dgdb,
     )
     if privatize_dgdb:
         dgamma = dgamma_acc.sum(dim=0)
@@ -1230,16 +1354,15 @@ def _transition_ln_bwd(dxn, x2, rstd, c1, gamma, *, shape_key: int | None = None
     return dx, dgamma, dbeta
 
 
-def _fused_fwd_fake(x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight,
-                    squeeze_weight, n, eps, save_xn, shape_key):
+def _fused_fwd_fake(x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight, n, eps, save_xn, shape_key):
     """Shapes only. Branches on ``save_xn`` (an argument) and never on the device, because a
     fake has to give the same STRUCTURE the compiled graph was traced with -- which of the
     b2b / split paths below actually runs must not be visible from here."""
     m = x2.shape[0]
     return (
         x2.new_empty((m, squeeze_weight.shape[0])),
-        x2.new_empty((m,), dtype=torch.float32),   # rstd
-        x2.new_empty((m,), dtype=torch.float32),   # c1
+        x2.new_empty((m,), dtype=torch.float32),  # rstd
+        x2.new_empty((m,), dtype=torch.float32),  # c1
         x2.new_empty(x2.shape) if save_xn else x2.new_empty((0, 0)),
     )
 
@@ -1282,9 +1405,16 @@ def _fused_fwd(
         # Back-to-back fused (triton): squeeze folded in, h never materialized in HBM.
         if _transition_fuse_stats_enabled():
             res = transition_b2b(
-                x2, ln_weight, ln_bias,
-                expand_a_weight, expand_b_weight, squeeze_weight, eps,
-                save_xn=save_xn, fuse_stats=True, shape_key=shape_key,
+                x2,
+                ln_weight,
+                ln_bias,
+                expand_a_weight,
+                expand_b_weight,
+                squeeze_weight,
+                eps,
+                save_xn=save_xn,
+                fuse_stats=True,
+                shape_key=shape_key,
             )
             residual_pending = False  # has_ln=True -> folded into the squeeze epilogue
             if save_xn:
@@ -1296,9 +1426,16 @@ def _fused_fwd(
             # separate backward (so backward never recomputes mean/rstd).
             rstd, c1 = stats_triton(x2, eps, shape_key=shape_key)
             res = transition_b2b(
-                x2, ln_weight, ln_bias,
-                expand_a_weight, expand_b_weight, squeeze_weight, eps,
-                stats=(rstd, c1), save_xn=save_xn, fuse_stats=False,
+                x2,
+                ln_weight,
+                ln_bias,
+                expand_a_weight,
+                expand_b_weight,
+                squeeze_weight,
+                eps,
+                stats=(rstd, c1),
+                save_xn=save_xn,
+                fuse_stats=False,
                 shape_key=shape_key,
             )
             residual_pending = False  # has_ln=True -> folded into the squeeze epilogue
@@ -1313,15 +1450,27 @@ def _fused_fwd(
         rstd, c1 = stats_triton(x2, eps, shape_key=shape_key)
         if not save_xn:
             out = transition_b2b_ktiled(
-                x2, ln_weight, ln_bias,
-                expand_a_weight, expand_b_weight, squeeze_weight, eps,
+                x2,
+                ln_weight,
+                ln_bias,
+                expand_a_weight,
+                expand_b_weight,
+                squeeze_weight,
+                eps,
                 shape_key=shape_key,
             )
             xn = None
         else:
             expand, xn = transition_expand_gate(
-                x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, eps,
-                stats=(rstd, c1), save_xn=True, shape_key=shape_key,
+                x2,
+                ln_weight,
+                ln_bias,
+                expand_a_weight,
+                expand_b_weight,
+                eps,
+                stats=(rstd, c1),
+                save_xn=True,
+                shape_key=shape_key,
             )
             out = torch.matmul(expand, squeeze_weight.T)
 
@@ -1333,9 +1482,22 @@ def _fused_fwd(
     return out, rstd, c1, (xn if xn is not None else x2.new_empty((0, 0)))
 
 
-def _fused_bwd_fake(grad_output, x2, rstd, c1, ln_weight, ln_bias, expand_a_weight,
-                    expand_b_weight, squeeze_weight, xn_saved, eps, has_xn,
-                    orig_shape, shape_key):
+def _fused_bwd_fake(
+    grad_output,
+    x2,
+    rstd,
+    c1,
+    ln_weight,
+    ln_bias,
+    expand_a_weight,
+    expand_b_weight,
+    squeeze_weight,
+    xn_saved,
+    eps,
+    has_xn,
+    orig_shape,
+    shape_key,
+):
     """Shapes only -- the six real gradients, in ``forward``'s argument order."""
     return (
         grad_output.new_empty(tuple(orig_shape), dtype=x2.dtype),
@@ -1365,7 +1527,12 @@ def _fused_bwd_impl(
     ln_bwd_hook=None,
     gatebwd_hook=None,
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
 ]:
     """The fused backward -> ``(dx, dgamma, dbeta, dWa, dWb, dWs)``.
 
@@ -1384,18 +1551,17 @@ def _fused_bwd_impl(
         # In-place: reuse dx's freshly-computed storage (never saved/aliased) instead of
         # allocating a new M×D buffer. Matches the unfused AddBackward, which passes
         # grad_output through without a new buffer -> fusion stays memory-neutral.
-        return dx_flat.reshape(orig_shape).add_(
-            grad_output.reshape(orig_shape).to(dx_flat.dtype))
+        return dx_flat.reshape(orig_shape).add_(grad_output.reshape(orig_shape).to(dx_flat.dtype))
 
     dt = x2.dtype
-    K = x2.shape[-1]              # input dim
-    D = squeeze_weight.shape[0]   # output dim (= K for Transition)
+    K = x2.shape[-1]  # input dim
+    D = squeeze_weight.shape[0]  # output dim (= K for Transition)
 
     go = grad_output.reshape(-1, D)
     if go.dtype != dt:
         go = go.to(dt)
 
-    grad_expand = go @ squeeze_weight         # (1) dh  [M, ND]
+    grad_expand = go @ squeeze_weight  # (1) dh  [M, ND]
 
     # (2) gate backward is the ONLY stage that differs between Version A/B:
     #   B (has_xn):   reuse the saved xn (no re-normalize).
@@ -1403,23 +1569,36 @@ def _fused_bwd_impl(
     # Both emit stacked dAB=[dA|dB] so stages (3)(4)(5)(6) below are version-INDEPENDENT.
     if has_xn:
         h, dAB = _transition_expand_gatebwd_savedxn_stacked(
-            xn_saved, expand_a_weight, expand_b_weight, grad_expand, shape_key=shape_key,
+            xn_saved,
+            expand_a_weight,
+            expand_b_weight,
+            grad_expand,
+            shape_key=shape_key,
         )
         xn = xn_saved
-    elif gatebwd_hook is not None and (taken := gatebwd_hook(
-            x2, rstd, c1, ln_weight, ln_bias, expand_a_weight, expand_b_weight, grad_expand)) is not None:
+    elif (
+        gatebwd_hook is not None
+        and (taken := gatebwd_hook(x2, rstd, c1, ln_weight, ln_bias, expand_a_weight, expand_b_weight, grad_expand)) is not None
+    ):
         # The caller's fused expand + gate-backward (the sm90 hand-CUDA WGMMA one, see ``transition/cuda/train_route.py``); None = not taken.
         h, dAB, xn = taken
     else:
         h, dAB, xn = _transition_expand_gatebwd_stacked(
-            x2, rstd, c1, ln_weight, ln_bias,
-            expand_a_weight, expand_b_weight, grad_expand, shape_key=shape_key,
+            x2,
+            rstd,
+            c1,
+            ln_weight,
+            ln_bias,
+            expand_a_weight,
+            expand_b_weight,
+            grad_expand,
+            shape_key=shape_key,
         )
 
     # (3)(4)(5)(6) SHARED across versions (stacked): two larger GEMMs + LN bwd.
-    dWs = go.t() @ h                          # (3) [D, ND]
+    dWs = go.t() @ h  # (3) [D, ND]
     w_ab = torch.cat((expand_a_weight, expand_b_weight), dim=0)
-    dWab = dAB.t() @ xn                        # (4) fuses dWa,dWb -> [2*ND, K]
+    dWab = dAB.t() @ xn  # (4) fuses dWa,dWb -> [2*ND, K]
     # Both halves are returned, and a torch.library custom operator may not have one output alias
     # another ("may not alias any inputs to this custom operator OR OTHER RETURNS"). As slices of
     # one dWab they shared a storage, so every training backward raised RuntimeError under
@@ -1429,16 +1608,17 @@ def _fused_bwd_impl(
     # would not do it -- a dim-0 slice of a 2-D tensor already is contiguous and returns self.
     dWa = dWab[: expand_a_weight.shape[0]].clone()
     dWb = dWab[expand_a_weight.shape[0] :]
-    d_xn = dAB @ w_ab                          # (5) fuses dA@Wa + dB@Wb -> [M, K]
+    d_xn = dAB @ w_ab  # (5) fuses dA@Wa + dB@Wb -> [M, K]
 
     # (6) LayerNorm backward from saved stats -> dx, dgamma, dbeta (hand-CUDA at d<=512 bf16).
-    dx, dgamma, dbeta = _transition_ln_bwd(d_xn, x2, rstd, c1, ln_weight,
-                                           shape_key=shape_key, ln_bwd_hook=ln_bwd_hook)
+    dx, dgamma, dbeta = _transition_ln_bwd(d_xn, x2, rstd, c1, ln_weight, shape_key=shape_key, ln_bwd_hook=ln_bwd_hook)
     return (
         _finalize_dx(dx),
         dgamma.to(ln_weight.dtype),
         dbeta.to(ln_bias.dtype),
-        dWa, dWb, dWs,
+        dWa,
+        dWb,
+        dWs,
     )
 
 
@@ -1459,12 +1639,29 @@ def _fused_bwd(
     orig_shape: list[int],
     shape_key: int,
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
 ]:
     """The Triton backward (see :func:`_fused_bwd_impl`)."""
     return _fused_bwd_impl(
-        grad_output, x2, rstd, c1, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight,
-        xn_saved, eps, has_xn, orig_shape, shape_key,
+        grad_output,
+        x2,
+        rstd,
+        c1,
+        ln_weight,
+        ln_bias,
+        expand_a_weight,
+        expand_b_weight,
+        squeeze_weight,
+        xn_saved,
+        eps,
+        has_xn,
+        orig_shape,
+        shape_key,
     )
 
 
@@ -1525,20 +1722,41 @@ def make_fused_function(fwd, bwd):
                 squeeze_weight = squeeze_weight.to(dtype)
             x2 = x2.contiguous()
             out, rstd, c1, xn = fwd(
-                x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight,
-                n, eps, save_xn, shape_key,
+                x2,
+                ln_weight,
+                ln_bias,
+                expand_a_weight,
+                expand_b_weight,
+                squeeze_weight,
+                n,
+                eps,
+                save_xn,
+                shape_key,
             )
             if not save_xn:
-                xn = None   # the op returns an empty placeholder; only save_xn makes it real
+                xn = None  # the op returns an empty placeholder; only save_xn makes it real
             if save_xn:
                 ctx.save_for_backward(
-                    x2, rstd, c1, ln_weight, ln_bias,
-                    expand_a_weight, expand_b_weight, squeeze_weight, xn,
+                    x2,
+                    rstd,
+                    c1,
+                    ln_weight,
+                    ln_bias,
+                    expand_a_weight,
+                    expand_b_weight,
+                    squeeze_weight,
+                    xn,
                 )
             else:
                 ctx.save_for_backward(
-                    x2, rstd, c1, ln_weight, ln_bias,
-                    expand_a_weight, expand_b_weight, squeeze_weight,
+                    x2,
+                    rstd,
+                    c1,
+                    ln_weight,
+                    ln_bias,
+                    expand_a_weight,
+                    expand_b_weight,
+                    squeeze_weight,
                 )
             ctx.has_xn = save_xn
             ctx.n = n
@@ -1551,19 +1769,43 @@ def make_fused_function(fwd, bwd):
         def backward(ctx, grad_output: torch.Tensor):
             if ctx.has_xn:
                 (
-                    x2, rstd, c1, ln_weight, ln_bias,
-                    expand_a_weight, expand_b_weight, squeeze_weight, xn_saved,
+                    x2,
+                    rstd,
+                    c1,
+                    ln_weight,
+                    ln_bias,
+                    expand_a_weight,
+                    expand_b_weight,
+                    squeeze_weight,
+                    xn_saved,
                 ) = ctx.saved_tensors
             else:
                 (
-                    x2, rstd, c1, ln_weight, ln_bias,
-                    expand_a_weight, expand_b_weight, squeeze_weight,
+                    x2,
+                    rstd,
+                    c1,
+                    ln_weight,
+                    ln_bias,
+                    expand_a_weight,
+                    expand_b_weight,
+                    squeeze_weight,
                 ) = ctx.saved_tensors
                 xn_saved = None
             dx, dgamma, dbeta, dWa, dWb, dWs = bwd(
-                grad_output, x2, rstd, c1, ln_weight, ln_bias,
-                expand_a_weight, expand_b_weight, squeeze_weight, xn_saved,
-                ctx.eps, ctx.has_xn, list(ctx.orig_shape), ctx.shape_key,
+                grad_output,
+                x2,
+                rstd,
+                c1,
+                ln_weight,
+                ln_bias,
+                expand_a_weight,
+                expand_b_weight,
+                squeeze_weight,
+                xn_saved,
+                ctx.eps,
+                ctx.has_xn,
+                list(ctx.orig_shape),
+                ctx.shape_key,
             )
             # n, eps and save_xn take no gradient.
             return dx, dgamma, dbeta, dWa, dWb, dWs, None, None, None
@@ -1598,6 +1840,13 @@ def triton_transition_fused(
     op -- ``triton_swiglu_ffn``.
     """
     return TritonTransitionFusedFunction.apply(
-        x, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight, n, eps,
+        x,
+        ln_weight,
+        ln_bias,
+        expand_a_weight,
+        expand_b_weight,
+        squeeze_weight,
+        n,
+        eps,
         save_xn,
     )

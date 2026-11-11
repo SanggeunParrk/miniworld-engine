@@ -56,11 +56,7 @@ class Plan:
         # Batched samples (x [B, n, n, 128], B > 1): tokens b-major, rows = B n of the slow token axis; the pair mask [B n, n], the
         # dropout scale [B n, 128] and the planes [c, B n, n] carry one block per sample, the contractions batch over c x B.
         self.rows = rows = x.shape[0] * n
-        if (
-            x.shape[1:] != (n, n, 128)
-            or n % 128 or n < 128
-            or x.dtype != torch.bfloat16
-        ):
+        if x.shape[1:] != (n, n, 128) or n % 128 or n < 128 or x.dtype != torch.bfloat16:
             raise ValueError("single H100 training requires BF16 D128 and a supported multiple of 128")
         self.config = selection(n)
         self.weights = (wl, wlg, wr, wrg)
@@ -108,7 +104,8 @@ class Plan:
     def _front_mask(self):
         if T.preserve_d128_training():
             from ._h100_pack import dense_native
-            return dense_native(self.mask,torch.float32)
+
+            return dense_native(self.mask, torch.float32)
         return self.mask.float()
 
     def forward(self):
@@ -141,7 +138,7 @@ class Plan:
         dg, dwg, dt, dgo, dbo, dwp = self.back.backward()
         dl = torch.empty_like(dt)
         dr = torch.empty_like(dt)
-        f = self._fold   # batched samples: every sample in the same two cuBLAS calls
+        f = self._fold  # batched samples: every sample in the same two cuBLAS calls
         left, right = f(self.ab[:128]), f(self.ab[128:])
         if self.outgoing:
             _H100_BMM.bmm(f(dt), right, out=f(dl))
@@ -150,6 +147,7 @@ class Plan:
             _H100_BMM.bmm(right, f(dt).transpose(-1, -2), out=f(dl))
             _H100_BMM.bmm(left, f(dt), out=f(dr))
         from ._h100_pack import dense_native_many
+
         d = dict(
             n=self.n,
             master_weights=self.master,
@@ -157,14 +155,17 @@ class Plan:
             mask=self.mask,
             ds=self.ds,
             w1=self.w1,
-            wt=(dense_native_many([w.t() for w in (*self.weights, self.wg)], [w.dtype for w in (*self.weights, self.wg)])   # one launch for the five transposes
-                if T.preserve_d128_training() else [w.t().contiguous() for w in (*self.weights, self.wg)]),
+            wt=(
+                dense_native_many(
+                    [w.t() for w in (*self.weights, self.wg)], [w.dtype for w in (*self.weights, self.wg)]
+                )  # one launch for the five transposes
+                if T.preserve_d128_training()
+                else [w.t().contiguous() for w in (*self.weights, self.wg)]
+            ),
             gi=self.gi,
             bi=self.bi,
         )
-        self.front_back = FrontBack(
-            d, self.dy, dl, dr, dg, xn=self.xn, **self.config["b7"]
-        )
+        self.front_back = FrontBack(d, self.dy, dl, dr, dg, xn=self.xn, **self.config["b7"])
         dx, *_, dgi, dbi = self.front_back()
         self.outputs = (
             dx.reshape_as(self.x),
@@ -183,7 +184,7 @@ def _forward_fake(leaves, mask, ds, outgoing):
     """y like x; saved planes [2D, L, L], contraction [D, L, L], x_n like x, packed W1 [4D, D]."""
     x = leaves[0]
     n, d = x.shape[1], x.shape[-1]
-    rows = x.shape[0] * n   # batched samples: planes [c, B n, n]
+    rows = x.shape[0] * n  # batched samples: planes [c, B n, n]
     return [
         torch.empty_like(x),
         x.new_empty((2 * d, rows, n)),
@@ -194,9 +195,7 @@ def _forward_fake(leaves, mask, ds, outgoing):
 
 
 @opaque(fake=_forward_fake, name="trimul_h100_single_stream_train_fwd")
-def forward(
-    leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool
-) -> list[torch.Tensor]:
+def forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, outgoing: bool) -> list[torch.Tensor]:
     """One-direction D128 training forward on one stream: [y, planes, contraction, x_n, packed W1]."""
     x = leaves[0]
     with torch.cuda.device(x.device), T.preserved_d128_context(T.d128_training(x, outgoing)):
@@ -211,7 +210,7 @@ def _backward_fake(leaves, mask, ds, saved, dy, outgoing, master=False, native=F
     return [
         torch.empty_like(leaves[0]),
         leaves[0].new_empty((4, 128, 128), dtype=torch.float32 if master else leaves[0].dtype),
-        *[torch.empty_like(v, dtype=torch.float32 if master and i < 2 else v.dtype) for i,v in enumerate(leaves[5:])],
+        *[torch.empty_like(v, dtype=torch.float32 if master and i < 2 else v.dtype) for i, v in enumerate(leaves[5:])],
     ]
 
 
@@ -242,6 +241,7 @@ class _Training(torch.autograd.Function):
         ctx.native = T.d128_training(leaves[0], outgoing)
         if ctx.native:
             from ._h100_pack import cast_training_weights
+
             weights = cast_training_weights(leaves[1:7])
         else:
             weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]] if ctx.master else leaves[1:7]
@@ -259,13 +259,14 @@ class _Training(torch.autograd.Function):
     def backward(ctx, dy):
         v = ctx.saved_tensors
         leaves = [v[0], *v[-6:], *v[7:11]]
-        grads = backward(leaves, v[11], v[12], list(v[13:13+ctx.saved_count]), dy, ctx.outgoing, ctx.master, ctx.native)
+        grads = backward(leaves, v[11], v[12], list(v[13 : 13 + ctx.saved_count]), dy, ctx.outgoing, ctx.master, ctx.native)
         grads = [grads[0], *(w.t() for w in grads[1].unbind()), *grads[2:]]
         if ctx.native:
             from ._h100_pack import native_training_grads
-            grads = native_training_grads(grads,list(v[:11]))
+
+            grads = native_training_grads(grads, list(v[:11]))
         else:
-            grads = [g.to(t.dtype) for g,t in zip(grads,v[:11],strict=True)]
+            grads = [g.to(t.dtype) for g, t in zip(grads, v[:11], strict=True)]
         return (None, *grads, None, None)
 
 

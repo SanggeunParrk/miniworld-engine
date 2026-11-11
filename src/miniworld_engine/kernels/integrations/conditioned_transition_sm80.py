@@ -66,9 +66,7 @@ def _tail():
     return sm80
 
 
-def serves(
-    module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool
-) -> bool:
+def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool) -> bool:
     """Whether ``module`` (a ``ConditionedTransition`` whose backend resolved to the engine's kernels) runs this call on the sm_80 path: ``compute_dtype`` is the dtype the module
     casts x / cond / the weights to, ``grad`` its ``needs_backward``."""
     if not x.is_cuda or not cond.is_cuda or compute_dtype not in (BF, torch.float32):
@@ -76,16 +74,9 @@ def serves(
     if x.shape[-1] not in WIDTHS or cond.shape[-1] not in WIDTHS or x.numel() == 0:
         return False
     ada = module.ada_ln_in
-    if (
-        ada.ln_cond.weight is None
-        or ada.to_scale.bias is None
-        or ada.to_bias.bias is not None
-        or module.to_scale.bias is None
-    ):
+    if ada.ln_cond.weight is None or ada.to_scale.bias is None or ada.to_bias.bias is not None or module.to_scale.bias is None:
         return False
-    if any(
-        w.bias is not None for w in (module.expand_a, module.expand_b, module.squeeze)
-    ):
+    if any(w.bias is not None for w in (module.expand_a, module.expand_b, module.squeeze)):
         return False
     if torch.cuda.get_device_capability(x.device) != (8, 0):
         return False
@@ -131,9 +122,7 @@ def _pack_tf32(wa, wb, ws):
 
 
 # ------------------------------------------------------------------------------------------------------------ inference
-def _inference_fake(
-    x, cond, lnw, ws1, sb1, wb1, wa, wb, ws, wsc, bsc, eps_x, eps_c, residual
-):
+def _inference_fake(x, cond, lnw, ws1, sb1, wb1, wa, wb, ws, wsc, bsc, eps_x, eps_c, residual):
     return torch.empty_like(x)
 
 
@@ -157,24 +146,16 @@ def inference(
     """x [M, d], cond [P, dc] (P divides M: row r of x takes conditioning row r % P) -> x + tail(AdaLN(x, cond)) (residual) or the update alone."""
     ka, kt = _adaln(), _tail()
     with torch.cuda.device(x.device):
-        ws1, sb1, wb1, wa, wb, ws, wsc, bsc = cast_params(
-            (ws1, sb1, wb1, wa, wb, ws, wsc, bsc), x.dtype, True
-        )
+        ws1, sb1, wb1, wa, wb, ws, wsc, bsc = cast_params((ws1, sb1, wb1, wa, wb, ws, wsc, bsc), x.dtype, True)
         # E095 optin: split hidden256 into128-wide FP32 partial products.
-        if (
-            x.shape[0] in (1024, 2048)
-            and kt.atom_supported(x, cond, wa)
-            and ka.atom_supported(x, cond)
-        ):
+        if x.shape[0] in (1024, 2048) and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond):
             from miniworld_engine.kernels.conditioned_transition.cuda import (
                 ct_atom_split_sm80,
             )
 
             wab = cached("atom_wab", (wa, wb), lambda: torch.cat([wa, wb]))
             xa, y = torch.empty_like(x), torch.empty_like(x)
-            partial = torch.empty(
-                (2, x.shape[0], 128), device=x.device, dtype=torch.float32
-            )
+            partial = torch.empty((2, x.shape[0], 128), device=x.device, dtype=torch.float32)
             gate = torch.empty_like(x, dtype=torch.float32)
             cfg = 1 if x.shape[0] == 1024 else 5
             ct_atom_split_sm80.run(
@@ -194,11 +175,7 @@ def inference(
             return y
         # Seven alternating A100 pairs qualify these four physical row counts.
         # The 1024/2048-row candidates lose to the existing cuBLAS path.
-        if (
-            x.shape[0] in (4096, 5120, 10240, 20480)
-            and kt.atom_supported(x, cond, wa)
-            and ka.atom_supported(x, cond)
-        ):
+        if x.shape[0] in (4096, 5120, 10240, 20480) and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond):
             from miniworld_engine.kernels.conditioned_transition.cuda import (
                 ct_atom_small_sm80,
             )
@@ -221,22 +198,16 @@ def inference(
             return y
         # The original row passes plus cuBLAS remain fastest at 1024/2048
         # rows; explicit disabling also preserves the previous dispatch.
-        if (
-            x.shape[0] > 4096
-            and kt.atom_supported(x, cond, wa)
-            and ka.atom_supported(x, cond)
-        ):
+        if x.shape[0] > 4096 and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond):
             wab = cached("atom_wab", (wa, wb), lambda: torch.cat([wa, wb]))
             xa = ka.atom_fwd(x, cond, lnw, ws1, wb1, sb1, eps_x, eps_c)[0]
             return kt.atom_fwd(xa, x if residual else None, cond, wab, ws, wsc, bsc)[0]
-        if (
-            kt.atom_tf32_supported(x, cond, wa) and ka.atom_tf32_supported(x, cond)
+        if kt.atom_tf32_supported(x, cond, wa) and ka.atom_tf32_supported(
+            x, cond
         ):  # d = dc = 128, fp32: the AdaLN in one kernel, the tail in two, all on TF32 tensor cores
             xa = ka.atom_fwd_tf32(x, cond, lnw, ws1, wb1, sb1, eps_x, eps_c)
             wab32, wsp = _pack_tf32(wa, wb, ws)
-            return kt.atom_fwd_tf32(
-                xa, x if residual else None, cond, wab32, wsp, wsc, bsc
-            )
+            return kt.atom_fwd_tf32(xa, x if residual else None, cond, wab32, wsp, wsc, bsc)
         wcat, wab = _pack(ws1, wb1, wa, wb, True)
         br = Branch(x.device)
         g = br.run(
@@ -254,9 +225,7 @@ def _gate_logits(cond, wsc, bsc):
     """g = cond Wsc^T + bsc in the operand dtype (bf16: the bias joins the GEMM's accumulator: one rounding; fp32: TF32)."""
     if cond.dtype is BF:
         return torch.addmm(bsc, cond, wsc.t())
-    with _tf32(
-        True
-    ):  # the bias joins the GEMM here too (one cuBLAS epilogue, no extra pass over g)
+    with _tf32(True):  # the bias joins the GEMM here too (one cuBLAS epilogue, no extra pass over g)
         return torch.addmm(bsc, cond, wsc.t())
 
 
@@ -281,9 +250,7 @@ def _train_fwd_fake(
     dc, nd = cond.shape[1], wa.shape[0]
     e = x.new_empty
     if (
-        x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD
-        and _tail().atom_supported(x, cond, wa)
-        and _adaln().atom_supported(x, cond)
+        x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD and _tail().atom_supported(x, cond, wa) and _adaln().atom_supported(x, cond)
     ):  # the fused atom kernels keep xa, rn(z) and the statistics only
         return [
             torch.empty_like(x),
@@ -335,17 +302,11 @@ def train_fwd(
     ka, kt = _adaln(), _tail()
     with torch.cuda.device(x.device):
         if (
-            x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD
-            and kt.atom_supported(x, cond, wa)
-            and ka.atom_supported(x, cond)
+            x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond)
         ):  # large d = dc = 128 bf16 inputs: fused rows; small inputs use cuBLAS below
-            xa, xst, cst = ka.atom_fwd(
-                x, cond, lnw, ws1, wb1, sb1, eps_x, eps_c, stats=True
-            )
+            xa, xst, cst = ka.atom_fwd(x, cond, lnw, ws1, wb1, sb1, eps_x, eps_c, stats=True)
             wab = torch.cat([wa, wb])
-            y, z = kt.atom_fwd(
-                xa, x if residual else None, cond, wab, ws, wsc, bsc, save_z=True
-            )
+            y, z = kt.atom_fwd(xa, x if residual else None, cond, wab, ws, wsc, bsc, save_z=True)
             e = x.new_empty
             return [
                 y,
@@ -362,9 +323,7 @@ def train_fwd(
             ]
         wcat, wab = _pack(ws1, wb1, wa, wb, False)
         br = Branch(x.device)
-        g = br.run(
-            lambda: _gate_logits(cond, wsc, bsc), cond, wsc, bsc
-        )  # the gate GEMM beside the chain below
+        g = br.run(lambda: _gate_logits(cond, wsc, bsc), cond, wsc, bsc)  # the gate GEMM beside the chain below
         aff, cst = ka.cond_ln(cond, lnw, x.dtype, eps_c, stats=True)
         sbt = _mm_op(aff, wcat.t())
         xa, xst = ka.epilogue(x, sbt, sb1, eps_x, stats=True)
@@ -444,13 +403,9 @@ def train_bwd(
     d, nd = x.shape[1], wa.shape[0]
     with torch.cuda.device(x.device):
         if (
-            x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD
-            and kt.atom_supported(x, cond, wa)
-            and ka.atom_supported(x, cond)
+            x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond)
         ):  # same decomposition as train_fwd and its fake
-            dz, dg, dcond2, hh, dab, pbsc = kt.atom_bwd_gate(
-                dy, z, cond, xa, wab, ws, wsc, bsc
-            )
+            dz, dg, dcond2, hh, dab, pbsc = kt.atom_bwd_gate(dy, z, cond, xa, wab, ws, wsc, bsc)
             dxa = kt.atom_bwd_dxa(dab, wab)
             dws = _wgrad(dz, hh)
             dwab = _wgrad(dab, xa)
@@ -477,28 +432,22 @@ def train_bwd(
             dwsc = br.run(lambda: _wgrad(dg, cond), dg, cond)
             dcond2 = br.run(lambda: _mm_op(dg, wsc), dg, wsc)
             dcond2_ready = br.mark()
-            dab, h = kt.swiglu_bwd(
-                _mm_op(dz, ws), ab
-            )  # dh = dz Ws [M, n d] stays in the operand dtype
+            dab, h = kt.swiglu_bwd(_mm_op(dz, ws), ab)  # dh = dz Ws [M, n d] stays in the operand dtype
             dws = br.run(lambda: _wgrad(dz, h), dz, h)
             dwab = br.run(lambda: _wgrad(dab, xa), dab, xa)
             dxa = _mm_op(dab, wab)  # the AdaLN's dy [M, d]
-            dm, dx, psb1 = ka.bwd_x(
-                dxa, x, xst, sbt, sb1, dy if residual else None, x.dtype
-            )
+            dm, dx, psb1 = ka.bwd_x(dxa, x, xst, sbt, sb1, dy if residual else None, x.dtype)
             dw1 = br.run(lambda: _wgrad(dm, aff), dm, aff)
             dca = _mm(dm, wcat)
             br.wait(dcond2_ready, dcond2)
             dcond, plw = ka.cond_bwd(dca, cond, cst, lnw, dcond2)
             br.join()
             dws1, dwb1 = dw1[:d], dw1[d:]
-        dbsc, dsb1, dlnw, dws1, dwb1, dwa, dwb, dws, dwsc = (
-            ka.finish(  # the column sums and the casts of the weight gradients: one launch
-                [pbsc, psb1, plw],
-                [like(bsc, fp32_grads), like(sb1, fp32_grads), lnw],
-                [dws1, dwb1, dwab[:nd], dwab[nd:], dws, dwsc],
-                [like(t, fp32_grads) for t in (ws1, wb1, wa, wb, ws, wsc)],
-            )
+        dbsc, dsb1, dlnw, dws1, dwb1, dwa, dwb, dws, dwsc = ka.finish(  # the column sums and the casts of the weight gradients: one launch
+            [pbsc, psb1, plw],
+            [like(bsc, fp32_grads), like(sb1, fp32_grads), lnw],
+            [dws1, dwb1, dwab[:nd], dwab[nd:], dws, dwsc],
+            [like(t, fp32_grads) for t in (ws1, wb1, wa, wb, ws, wsc)],
         )
     return [dx, dcond, dlnw, dws1, dsb1, dwb1, dwa, dwb, dws, dwsc, dbsc]
 
@@ -536,16 +485,9 @@ def update(
     d, dc = x.shape[-1], cond.shape[-1]
     xs = x.to(compute_dtype).reshape(-1, d).contiguous()
     if grad:  # one conditioning per row (a shared one is expanded: autograd sums the per-row gradients)
-        cs = (
-            cond.to(compute_dtype)
-            .expand(*x.shape[:-1], dc)
-            .reshape(-1, dc)
-            .contiguous()
-        )
+        cs = cond.to(compute_dtype).expand(*x.shape[:-1], dc).reshape(-1, dc).contiguous()
     else:
-        cs = (
-            cond if _period(x, cond, False) == xs.shape[0] else cond[0]
-        )  # shared: the first sample's rows are the table
+        cs = cond if _period(x, cond, False) == xs.shape[0] else cond[0]  # shared: the first sample's rows are the table
         cs = cs.to(compute_dtype).reshape(-1, dc).contiguous()
     eps = (float(module.ada_ln_in.ln_in.eps), float(module.ada_ln_in.ln_cond.eps))
     y = _Training.apply(residual, *eps, xs, cs, *_params(module)) if grad else inference(xs, cs, *_params(module), *eps, residual)  # pyright: ignore[reportCallIssue]  -- *_params(module): the parameters, in inference's order

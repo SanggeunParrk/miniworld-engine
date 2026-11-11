@@ -26,8 +26,6 @@ import triton.language as tl
 from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 
 
-
-
 # The channel axis was `tl.arange(0, D)` — the shape used directly as the tile extent, which also
 # forced D to be a power of two and left no column mask. It is the REDUCE axis (mean/var over D),
 # so it is a CSV tile; a row at or above the extent keeps the whole-row schedule
@@ -35,16 +33,18 @@ from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 from miniworld_engine.kernels._shape_key import both_key, pack
 
 
-@configured('layernorm_fwd_mmajor_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
+@configured("layernorm_fwd_mmajor_triton", key=["shape_key"], default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _ln_transpose_dbn_kernel(
-    x_ptr,   # (D, M) channel-major: x[k, m] at k*M + m
-    y_ptr,   # (M, D) row-major:     y[m, k] at m*D + k
-    w_ptr, b_ptr,  # (D,)
-    M, eps,
-    D: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
+    x_ptr,  # (D, M) channel-major: x[k, m] at k*M + m
+    y_ptr,  # (M, D) row-major:     y[m, k] at m*D + k
+    w_ptr,
+    b_ptr,  # (D,)
+    M,
+    eps,
+    D: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
@@ -108,8 +108,7 @@ def _ln_transpose_dbn_bnd_fake(x, weight, bias, eps):
 
 
 @opaque(fake=_ln_transpose_dbn_bnd_fake, name="layernorm_transpose_dbn_bnd")
-def _ln_transpose_dbn_bnd(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor,
-                          eps: float) -> torch.Tensor:
+def _ln_transpose_dbn_bnd(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float) -> torch.Tensor:
     """x: (D, B, N) -> LN over D -> (B, N, D), fused (no materialised transpose)."""
     d, b, n = x.shape
     M = b * n
@@ -119,7 +118,13 @@ def _ln_transpose_dbn_bnd(x: torch.Tensor, weight: torch.Tensor, bias: torch.Ten
     y = torch.empty(M, d, device=x.device, dtype=x.dtype)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _ln_transpose_dbn_kernel[grid](
-        x_dm, y, weight.contiguous(), bias.contiguous(), M, float(eps), D=d,
+        x_dm,
+        y,
+        weight.contiguous(),
+        bias.contiguous(),
+        M,
+        float(eps),
+        D=d,
         # M, the row count this launch iterates. It used to pass the token axis `n` instead,
         # because a length was what the key was made of; rows are, and M is right here.
         shape_key=both_key(M, D=d),

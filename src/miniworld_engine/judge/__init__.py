@@ -44,23 +44,49 @@ import yaml
 from miniworld_engine.measure import config as cfgmod
 
 HERE = Path(__file__).resolve().parent
-TOKENS = HERE / "tokens"                  # per card, one file per module class: tokens/<gpu>/<module>.jsonl, sorted by case
+TOKENS = HERE / "tokens"  # per card, one file per module class: tokens/<gpu>/<module>.jsonl, sorted by case
 #: The cards results are kept for (``kernels._launch_config.gpu_key``) and their compute capability.
 GPUS = {"h100_sm90": [9, 0], "a100_sm80": [8, 0]}
-ANSWERS = HERE / "answers.jsonl"          # a person's answers: {"part", "old", "new", "verdict": keep | remeasure, "reason", "date"}
+ANSWERS = HERE / "answers.jsonl"  # a person's answers: {"part", "old", "new", "verdict": keep | remeasure, "reason", "date"}
 PACKAGE = Path(__file__).resolve().parents[1]
 CONFIGS = {"accuracy": PACKAGE / "measure" / "configs" / "accuracy.yaml", "speed": PACKAGE / "measure" / "configs" / "speed.yaml"}
-ENV_KEYS = ("capability", "torch", "cuda", "triton")      # the environment that can change a result
-RESULT_KEYS = ("status", "reason", "light", "err_backend", "err_pytorch", "tol", "tensor", "fixed", "timed_as", "capture_error",
-               "median_ms", "p10_ms", "p90_ms", "n", "speedup_vs_pytorch")
+ENV_KEYS = ("capability", "torch", "cuda", "triton")  # the environment that can change a result
+RESULT_KEYS = (
+    "status",
+    "reason",
+    "light",
+    "err_backend",
+    "err_pytorch",
+    "tol",
+    "tensor",
+    "fixed",
+    "timed_as",
+    "capture_error",
+    "median_ms",
+    "p10_ms",
+    "p90_ms",
+    "n",
+    "speedup_vs_pytorch",
+)
 
 
 # ------------------------------------------------------------------------------------------------------------------------ the case
 def case_key(kind: str, rec: dict) -> str:
     """The case, readable: what is measured, independent of how and with which versions."""
     kw = ";".join(f"{k}={v}" for k, v in sorted(rec["kwargs"].items()))
-    parts = [kind, rec["module"], rec.get("model") or "-", rec.get("stream") or "-", kw or "-", f"L{rec['length']}",
-             f"D{rec['depth']}", f"S{rec['samples']}", rec["dtype"], rec["mode"], rec["backend"]]
+    parts = [
+        kind,
+        rec["module"],
+        rec.get("model") or "-",
+        rec.get("stream") or "-",
+        kw or "-",
+        f"L{rec['length']}",
+        f"D{rec['depth']}",
+        f"S{rec['samples']}",
+        rec["dtype"],
+        rec["mode"],
+        rec["backend"],
+    ]
     if rec.get("timing"):
         parts.append(rec["timing"])
     return " | ".join(parts)
@@ -95,8 +121,10 @@ class Now:
     def env(self) -> dict:
         if self._env is None:
             import torch
+
             try:
                 import triton
+
                 tv = triton.__version__
             except Exception:  # absent
                 tv = None
@@ -118,19 +146,21 @@ def differences(kind: str, tok: dict, now: Now) -> list[tuple[str, str, object, 
         out.append(("owed", f"module:{case['module']}", old_v["module"], cur_v["module"]))
     b = case["backend"]
 
-    def adapter(v: dict) -> str:   # "<backend>:<card>" (one card's adapter, e.g. "cuda:a100_sm80") before "<backend>"; tokens made before: "1"
+    def adapter(
+        v: dict,
+    ) -> str:  # "<backend>:<card>" (one card's adapter, e.g. "cuda:a100_sm80") before "<backend>"; tokens made before: "1"
         a = v.get("backends") or {}
         return str(a.get(f"{b}:{now.gpu}", a.get(b, "1")))
 
     o, n = adapter(old_v), adapter(cur_v)
     if str(o) != str(n):
         out.append(("owed", f"adapter:{b}", o, n))
-    if case["dtype"] == "float32":                    # the TF32 rule only touches float32 matmuls
+    if case["dtype"] == "float32":  # the TF32 rule only touches float32 matmuls
         o, n = (old_v.get("tf32") or {}).get(b, "1"), (cur_v.get("tf32") or {}).get(b, "1")
         if str(o) != str(n):
             out.append(("owed", f"tf32:{b}", o, n))
     if case["backend"] == "pytorch" or case["backend"] in cfgmod.EXTERNAL:
-        old_v = {**old_v, "kernels": {}, "tables": {}}       # these backends run none of the engine's kernels
+        old_v = {**old_v, "kernels": {}, "tables": {}}  # these backends run none of the engine's kernels
         cur_v = {**cur_v, "kernels": {}, "tables": {}}
     # only a kernel listed both then and now: a kernel entering or leaving the list is a correction of requirements_kernel.csv (which
     # kernels a class launches), not a change of any result; a class that starts launching another kernel bumps its own version
@@ -138,8 +168,8 @@ def differences(kind: str, tok: dict, now: Now) -> list[tuple[str, str, object, 
         o, n = old_v["kernels"][name], cur_v["kernels"][name]
         if o != n:
             out.append(("owed", f"kernel:{name}", o, n))
-    old_t = old_v.get("tables") or dict.fromkeys(cur_v.get("tables", {}), "1")   # tokens made before table versions: all "1"
-    for fam in sorted(set(old_t) & set(cur_v.get("tables", {}))):   # the same rule for the families
+    old_t = old_v.get("tables") or dict.fromkeys(cur_v.get("tables", {}), "1")  # tokens made before table versions: all "1"
+    for fam in sorted(set(old_t) & set(cur_v.get("tables", {}))):  # the same rule for the families
         o, n = old_t[fam], cur_v["tables"][fam]
         if o != n:
             out.append(("owed", f"table:{fam}", o, n))
@@ -161,7 +191,7 @@ def answers() -> dict[tuple, str]:
         for line in ANSWERS.read_text().splitlines():
             if line.strip():
                 a = json.loads(line)
-                out[(a["part"], str(a["old"]), str(a["new"]))] = a["verdict"]     # the latest answer wins
+                out[(a["part"], str(a["old"]), str(a["new"]))] = a["verdict"]  # the latest answer wins
     return out
 
 
@@ -210,8 +240,9 @@ def issue(paths: list[str], now: Now) -> int:
     """Records -> tokens. A record becomes a token only if its module / kernel versions, measurer and config versions and settings
     equal the current ones (it was made by what is current); the token replaces any older token of the same case."""
     tokens, counts, stale = load_tokens(now.gpu), collections.Counter(), collections.Counter()
-    files = sorted({f for p in paths for f in (glob.glob(os.path.join(p, "*.jsonl")) if os.path.isdir(p) else [p])
-                    if not f.endswith(".plans.jsonl")})
+    files = sorted(
+        {f for p in paths for f in (glob.glob(os.path.join(p, "*.jsonl")) if os.path.isdir(p) else [p]) if not f.endswith(".plans.jsonl")}
+    )
     for path in files:
         with open(path) as fh:
             for line in fh:
@@ -225,16 +256,40 @@ def issue(paths: list[str], now: Now) -> int:
                     counts[f"record of another card (not {now.gpu})"] += 1
                     continue
                 key = case_key(kind, rec)
-                tok = {"case_key": key, "kind": kind,
-                       "case": {k: rec.get(k) for k in ("module", "model", "stream", "kwargs", "length", "depth", "samples", "dtype", "mode",
-                                                       "backend", "timing", "row")},
-                       "versions": rec["versions"], "measurer": meta["measurer_version"], "config_version": meta["config_version"],
-                       "prebuild_version": meta.get("prebuild_version", "1"),
-                       "settings": meta["settings"], "env": {k: (meta.get("env") or {}).get(k) for k in ENV_KEYS},
-                       "result": {k: rec[k] for k in RESULT_KEYS if k in rec},
-                       "evidence": {"host": (meta.get("env") or {}).get("host"), "gpu": (meta.get("env") or {}).get("gpu"),
-                                    "record": os.path.relpath(path)},
-                       "issued": datetime.datetime.now().isoformat(timespec="seconds")}  # noqa: DTZ005 -- local wall-clock time, as every token so far
+                tok = {
+                    "case_key": key,
+                    "kind": kind,
+                    "case": {
+                        k: rec.get(k)
+                        for k in (
+                            "module",
+                            "model",
+                            "stream",
+                            "kwargs",
+                            "length",
+                            "depth",
+                            "samples",
+                            "dtype",
+                            "mode",
+                            "backend",
+                            "timing",
+                            "row",
+                        )
+                    },
+                    "versions": rec["versions"],
+                    "measurer": meta["measurer_version"],
+                    "config_version": meta["config_version"],
+                    "prebuild_version": meta.get("prebuild_version", "1"),
+                    "settings": meta["settings"],
+                    "env": {k: (meta.get("env") or {}).get(k) for k in ENV_KEYS},
+                    "result": {k: rec[k] for k in RESULT_KEYS if k in rec},
+                    "evidence": {
+                        "host": (meta.get("env") or {}).get("host"),
+                        "gpu": (meta.get("env") or {}).get("gpu"),
+                        "record": os.path.relpath(path),
+                    },
+                    "issued": datetime.datetime.now().isoformat(timespec="seconds"),  # noqa: DTZ005 -- local wall-clock time, as every token so far
+                }
                 if kind == "accuracy" and rec["backend"] not in ("pytorch", *cfgmod.EXTERNAL):
                     tok["result"]["pass"] = rec.get("light") == "GREEN"
                 diffs = [d for d in differences(kind, tok, now) if not d[1].startswith("env:")]
@@ -257,17 +312,34 @@ def issue(paths: list[str], now: Now) -> int:
 def required(kind: str):
     """Every (case, backend[, timing]) the canonical config of ``kind`` asks for, record-shaped."""
     cfg = cfgmod.load(CONFIGS[kind])
-    timings = list(cfgmod.speed_settings(cfg).get("timing", ["graph"])) if kind == "speed" else [None]   # the rule of measure/speed.py
+    timings = list(cfgmod.speed_settings(cfg).get("timing", ["graph"])) if kind == "speed" else [None]  # the rule of measure/speed.py
     for case in cfgmod.cases(cfg):
-        head = {"row": case.row, "module": case.module, "model": case.model, "stream": case.stream, "kwargs": case.kwargs,
-                "length": case.length, "depth": case.depth, "samples": case.samples, "dtype": case.dtype, "mode": case.mode}
+        head = {
+            "row": case.row,
+            "module": case.module,
+            "model": case.model,
+            "stream": case.stream,
+            "kwargs": case.kwargs,
+            "length": case.length,
+            "depth": case.depth,
+            "samples": case.samples,
+            "dtype": case.dtype,
+            "mode": case.mode,
+        }
         for backend in cfgmod.backends_of(cfg, case):
             for timing in timings:
                 yield {**head, "backend": backend, "timing": timing}
 
 
-def owed(now: Now, plan_dir: str | None, redo: tuple[str, ...] = (), again: tuple[str, ...] = (), again_modules: tuple[str, ...] = (),
-         again_kinds: tuple[str, ...] = (), n_groups: int = 4) -> int:
+def owed(
+    now: Now,
+    plan_dir: str | None,
+    redo: tuple[str, ...] = (),
+    again: tuple[str, ...] = (),
+    again_modules: tuple[str, ...] = (),
+    again_kinds: tuple[str, ...] = (),
+    n_groups: int = 4,
+) -> int:
     """``redo``: result statuses (e.g. ``failed``) measured again although current (after a measurer fix that changes no other result,
     so its version stays). ``again``: backends measured again although current (a person asked for it). ``again_modules`` (optionally of ``again_kinds`` only):
     module classes measured again although current (a measurer fix that changes only their results)."""
@@ -295,18 +367,26 @@ def owed(now: Now, plan_dir: str | None, redo: tuple[str, ...] = (), again: tupl
                 for part, old, new in why:
                     reasons[(kind, part if old is None else f"{part} {old}->{new}")] += 1
                 t = todo[(kind, rec["module"])]
-                t["rows"].add(rec["row"]); t["lengths"].add(rec["length"]); t["backends"].add(rec["backend"])
-                t["dtypes"].add(rec["dtype"]); t["modes"].add(rec["mode"]); t["n"] += 1
+                t["rows"].add(rec["row"])
+                t["lengths"].add(rec["length"])
+                t["backends"].add(rec["backend"])
+                t["dtypes"].add(rec["dtype"])
+                t["modes"].add(rec["mode"])
+                t["n"] += 1
             elif state == "pending":
                 for part, old, new in why:
                     questions[(part, str(old), str(new))] += 1
     for kind in CONFIGS:
-        print(f"[judge] {kind:8s} carried {tally[(kind, 'carried')]:6d}  owed {tally[(kind, 'owed')]:6d}  pending {tally[(kind, 'pending')]:6d}")
+        print(
+            f"[judge] {kind:8s} carried {tally[(kind, 'carried')]:6d}  owed {tally[(kind, 'owed')]:6d}  pending {tally[(kind, 'pending')]:6d}"
+        )
     for (kind, why), n in sorted(reasons.items()):
         print(f"[judge]   owed {kind:8s} because of {why}: {n}")
     for (part, old, new), n in sorted(questions.items()):
-        print(f"[judge]   QUESTION {part}: {old} -> {new} ({n} cases). Do the old results still stand?  "
-              f"judge sign {part} {old} {new} keep|remeasure --reason ...")
+        print(
+            f"[judge]   QUESTION {part}: {old} -> {new} ({n} cases). Do the old results still stand?  "
+            f"judge sign {part} {old} {new} keep|remeasure --reason ..."
+        )
     unused = sum(1 for k in tokens if k not in seen)
     if unused:
         print(f"[judge]   {unused} tokens belong to cases no longer required (kept, unused)")
@@ -324,8 +404,14 @@ def write_plan(plan_dir: str, todo: dict, n_groups: int = 4) -> None:
     jobs = []
     for (kind, module), t in sorted(todo.items()):
         base = yaml.safe_load(CONFIGS[kind].read_text())
-        base.update(modules=[module], rows=sorted(t["rows"]), lengths=sorted(t["lengths"]), backends=sorted(t["backends"] | {"pytorch"}),
-                    dtypes=sorted(t["dtypes"]), modes=sorted(t["modes"]))
+        base.update(
+            modules=[module],
+            rows=sorted(t["rows"]),
+            lengths=sorted(t["lengths"]),
+            backends=sorted(t["backends"] | {"pytorch"}),
+            dtypes=sorted(t["dtypes"]),
+            modes=sorted(t["modes"]),
+        )
         path = d / "cfg" / f"{kind}.{module}.yaml"
         path.write_text(yaml.safe_dump(base, sort_keys=False))
         jobs.append((t["n"], kind, module, str(path)))
@@ -341,8 +427,14 @@ def write_plan(plan_dir: str, todo: dict, n_groups: int = 4) -> None:
 
 # ------------------------------------------------------------------------------------------------------------------- sign, status
 def sign(part: str, old: str, new: str, answer: str, reason: str) -> int:
-    entry = {"part": part, "old": old, "new": new, "verdict": answer, "reason": reason,
-             "date": datetime.datetime.now().isoformat(timespec="seconds")}  # noqa: DTZ005 -- local wall-clock time, as every answer so far
+    entry = {
+        "part": part,
+        "old": old,
+        "new": new,
+        "verdict": answer,
+        "reason": reason,
+        "date": datetime.datetime.now().isoformat(timespec="seconds"),  # noqa: DTZ005 -- local wall-clock time, as every answer so far
+    }
     with open(ANSWERS, "a") as fh:
         fh.write(json.dumps(entry, sort_keys=True) + "\n")
     print(f"[judge] answered {part}: {old} -> {new} = {answer}")

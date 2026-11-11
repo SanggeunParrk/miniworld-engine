@@ -19,9 +19,7 @@ from ..._compile import opaque
 from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent / "sm80"
-_tile_dir = (
-    Path(__file__).resolve().parents[2] / "trimul_inproj" / "cuda" / "sm80"
-)  # wide_gemm.cuh, sm80_common.cuh
+_tile_dir = Path(__file__).resolve().parents[2] / "trimul_inproj" / "cuda" / "sm80"  # wide_gemm.cuh, sm80_common.cuh
 
 
 @functools.lru_cache(maxsize=1)
@@ -62,25 +60,14 @@ def _is_ampere(index: int) -> bool:
 
 def shape_ok(dtype, d_hidden: int, d_out: int) -> bool:
     """Device-free part of the gate: bf16 with widths the 64-column tiles divide."""
-    return (
-        dtype is torch.bfloat16
-        and d_hidden > 0
-        and d_out > 0
-        and d_hidden % 64 == 0
-        and d_out % 64 == 0
-    )
+    return dtype is torch.bfloat16 and d_hidden > 0 and d_out > 0 and d_hidden % 64 == 0 and d_out % 64 == 0
 
 
 def serves(d_hidden: int, d_out: int, device: torch.device, dtype) -> bool:
     """The gate of ``fused_gate_out`` (a pure function of the shape, the dtype and the card, so the dispatch can fold it at trace time)."""
     if not shape_ok(dtype, d_hidden, d_out) or device.type != "cuda":
         return False
-    return (
-        _is_ampere(
-            device.index if device.index is not None else torch.cuda.current_device()
-        )
-        and _loads()
-    )
+    return _is_ampere(device.index if device.index is not None else torch.cuda.current_device()) and _loads()
 
 
 def serves_elementwise(*tensors: torch.Tensor) -> bool:
@@ -88,19 +75,9 @@ def serves_elementwise(*tensors: torch.Tensor) -> bool:
     t0 = tensors[0]
     if not t0.is_cuda or t0.dtype is not torch.bfloat16:
         return False
-    if any(
-        t.shape != t0.shape or t.dtype is not t0.dtype or t.device != t0.device
-        for t in tensors
-    ):
+    if any(t.shape != t0.shape or t.dtype is not t0.dtype or t.device != t0.device for t in tensors):
         return False
-    return (
-        _is_ampere(
-            t0.device.index
-            if t0.device.index is not None
-            else torch.cuda.current_device()
-        )
-        and _loads()
-    )
+    return _is_ampere(t0.device.index if t0.device.index is not None else torch.cuda.current_device()) and _loads()
 
 
 # --------------------------------------------------------------------------------------------------------------------- the gated output projection
@@ -162,18 +139,14 @@ class _GateOut(torch.autograd.Function):
 SPLIT_MIN_N = 384
 
 
-def fused_gate_out(
-    gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor
-) -> torch.Tensor:
+def fused_gate_out(gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor) -> torch.Tensor:
     """``(sigmoid(gate) * out_r) @ wo^T``; gate / out_r [..., DH], wo [N, DH] -> [..., N].  Call ``serves()`` first."""
     if wo.shape[0] >= SPLIT_MIN_N:
         return torch.nn.functional.linear(sigmoid_gate_fused(gate, out_r), wo)
     return _GateOut.apply(gate, out_r, wo)
 
 
-def gated_projection(
-    gate: torch.Tensor, x: torch.Tensor, out_weight: torch.Tensor
-) -> torch.Tensor:
+def gated_projection(gate: torch.Tensor, x: torch.Tensor, out_weight: torch.Tensor) -> torch.Tensor:
     """``(sigmoid(gate) * x) @ out_weight`` with ``out_weight`` [hd, d] (a right-multiplied matrix: ``triton_gated_projection``'s contract)."""
     return _GateOut.apply(gate, x, out_weight.t())
 
@@ -199,9 +172,7 @@ def _sigmul_grad_fake(da, gate, out):
 
 
 @opaque(fake=_sigmul_grad_fake, name="gated_projection_sm80_sigmul_bwd")
-def _sigmul_grad(
-    da: torch.Tensor, gate: torch.Tensor, out: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _sigmul_grad(da: torch.Tensor, gate: torch.Tensor, out: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Gradients of ``sigmoid(gate) * out`` -> ``(dgate, dout)``."""
     dg, do = torch.empty_like(gate), torch.empty_like(out)
     with torch.cuda.device(gate.device):
@@ -247,9 +218,7 @@ def _gres_grad_fake(dy, gate, branch):
 
 
 @opaque(fake=_gres_grad_fake, name="gated_projection_sm80_gated_residual_bwd")
-def _gres_grad(
-    dy: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _gres_grad(dy: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Gate and branch gradients of the residual product."""
     dg, db = torch.empty_like(gate), torch.empty_like(branch)
     with torch.cuda.device(gate.device):
@@ -271,8 +240,6 @@ class _GatedResidual(torch.autograd.Function):
         return dy, dg, db
 
 
-def gated_residual(
-    x: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor
-) -> torch.Tensor:
+def gated_residual(x: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor) -> torch.Tensor:
     """``x + gate * branch`` (bf16, identical shapes).  Call ``serves_elementwise()`` first."""
     return _GatedResidual.apply(x, gate, branch)

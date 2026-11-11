@@ -56,9 +56,7 @@ def tail_order(cl: int, c: int, nkb: int = 24) -> list[int]:
     if cl != 8:
         return list(range(nkb))
     ho = 1536 // cl // 64
-    return [ho * c + t for t in range(ho)] + [
-        k for k in range(nkb) if not ho * c <= k < ho * c + ho
-    ]
+    return [ho * c + t for t in range(ho)] + [k for k in range(nkb) if not ho * c <= k < ho * c + ho]
 
 
 def pack_pairs_bf16(w: torch.Tensor, cl: int, z_order: bool = False) -> torch.Tensor:
@@ -85,12 +83,7 @@ def pack_pairs_bf16(w: torch.Tensor, cl: int, z_order: bool = False) -> torch.Te
             ],
             0,
         )
-    return (
-        wr.reshape(cl, nc, nkb // 2, 2, 64)
-        .permute(0, 2, 3, 1, 4)
-        .reshape(-1, 64)
-        .contiguous()
-    )
+    return wr.reshape(cl, nc, nkb // 2, 2, 64).permute(0, 2, 3, 1, 4).reshape(-1, 64).contiguous()
 
 
 def _max_clusters(kernel, cl: int) -> int:
@@ -138,9 +131,7 @@ class FrontBF16:
         )  # bo_front_tf32.cu's layout and bytes
 
     def clusters(self) -> tuple[int, ...]:
-        return (
-            (8, 6, 4) if self.da == 768 else (8, 4)
-        )  # CL 6 splits 2 DA = 1536 columns only
+        return (8, 6, 4) if self.da == 768 else (8, 4)  # CL 6 splits 2 DA = 1536 columns only
 
     def cluster(self, n_tiles: int) -> int:
         """CTAs per row tile: the least modelled time over the sizes built (rounds of resident clusters x per-CTA time ~ 1 / CL; the
@@ -149,10 +140,7 @@ class FrontBF16:
 
         return pick_cluster(
             n_tiles,
-            {
-                cl: (_max_clusters(self.kernel(cl), cl), 8 / cl)
-                for cl in self.clusters()
-            },
+            {cl: (_max_clusters(self.kernel(cl), cl), 8 / cl) for cl in self.clusters()},
         )
 
     def _bind(self, tab, w, vg, xa, M, T, cl, xbf, serial):
@@ -184,32 +172,11 @@ class FrontBF16:
         before its PDL wait: every kernel of the chain then starts after the stream's earlier work, P's writer included, is done)."""
         M, da, bf = x.shape[0], self.da, torch.bfloat16
         xbf = x.dtype is bf
-        assert (
-            x.dtype in (bf, torch.float32)
-            and x.is_contiguous()
-            and x.shape == (M, 768)
-            and M % 128 == 0
-            and T % 128 == 0
-        )
-        assert (
-            xa.dtype is bf
-            and xa.dim() == 2
-            and xa.shape == (M, 768)
-            and xa.stride(1) == 1
-            and xa.stride(0) % 8 == 0
-        )
+        assert x.dtype in (bf, torch.float32) and x.is_contiguous() and x.shape == (M, 768) and M % 128 == 0 and T % 128 == 0
+        assert xa.dtype is bf and xa.dim() == 2 and xa.shape == (M, 768) and xa.stride(1) == 1 and xa.stride(0) % 8 == 0
         assert xa.data_ptr() % 16 == 0
-        assert (
-            tab.dtype is bf
-            and tab.shape[0] == T
-            and tab[0].numel() == 6 * 768
-            and tab.stride(-1) == 1
-        )
-        assert (
-            tab.stride(0) % 8 == 0
-            and tab.data_ptr() % 16 == 0
-            and (tab.dim() == 2 or tab.stride(1) == 768)
-        )
+        assert tab.dtype is bf and tab.shape[0] == T and tab[0].numel() == 6 * 768 and tab.stride(-1) == 1
+        assert tab.stride(0) % 8 == 0 and tab.data_ptr() % 16 == 0 and (tab.dim() == 2 or tab.stride(1) == 768)
         assert w.dtype is bf and w.is_contiguous() and w.shape == (2 * da, 768)
         assert vg.dtype is bf and vg.is_contiguous() and vg.shape == (M, 2 * da)
         cl = cl or self.cluster(M // 128)
@@ -226,9 +193,7 @@ class FrontBF16:
             xbf,
             serial,
         )
-        self.runs.bind(key, lambda: self._bind(tab, w, vg, xa, M, T, cl, xbf, serial))(
-            x
-        )
+        self.runs.bind(key, lambda: self._bind(tab, w, vg, xa, M, T, cl, xbf, serial))(x)
         return vg
 
 
@@ -305,35 +270,62 @@ class TailBF16:
         if cl == TAIL_PAIR:
             return self._bind_pair(a, x, tab, wo, wab, wsq, xt, h, M, T, xbf, obf)
         tma_desc, da, nc, nhp = self._tm, self.da, 768 // cl, 1536 // cl // (2 if cl == 6 else 1)
-        xmap = (tma_desc(x, [768, M], 768 * 2, [32, 128], swizzle=64) if xbf else
-                tma_desc(x, [768, M], 768 * 4, [32, 128], dtype="f32"))
-        maps = [tma_desc(a, [da, M], da * 2, [64, 128]), xmap,
-                tma_desc(tab, [6 * 768, T], tab.stride(0) * 2, [32, 128], swizzle=64),
-                tma_desc(wo, [64, wo.shape[0]], 128, [64, 2 * nc]),
-                tma_desc(wab, [768, 3072], 768 * 2, [64, nhp]),
-                tma_desc(wsq, [64, wsq.shape[0]], 128, [64, 2 * nc]),
-                tma_desc(xt, [768, M], xt.stride(0) * 2, [64, 128]),
-                tma_desc(h, [64, h.shape[0]], 128, [64, 128]), tma_desc(h, [64, h.shape[0]], 128, [64, 256])]   # h: one / two k-blocks a box
-        return _LaunchPDL(self.kernel(cl, xbf, obf), ((M // 128) * cl, 1, 1), (384, 1, 1), *_descriptors(*maps), PTR, xt, h,
-                          int(xt.stride(0)), int(T), 1e-5)
+        xmap = tma_desc(x, [768, M], 768 * 2, [32, 128], swizzle=64) if xbf else tma_desc(x, [768, M], 768 * 4, [32, 128], dtype="f32")
+        maps = [
+            tma_desc(a, [da, M], da * 2, [64, 128]),
+            xmap,
+            tma_desc(tab, [6 * 768, T], tab.stride(0) * 2, [32, 128], swizzle=64),
+            tma_desc(wo, [64, wo.shape[0]], 128, [64, 2 * nc]),
+            tma_desc(wab, [768, 3072], 768 * 2, [64, nhp]),
+            tma_desc(wsq, [64, wsq.shape[0]], 128, [64, 2 * nc]),
+            tma_desc(xt, [768, M], xt.stride(0) * 2, [64, 128]),
+            tma_desc(h, [64, h.shape[0]], 128, [64, 128]),
+            tma_desc(h, [64, h.shape[0]], 128, [64, 256]),
+        ]  # h: one / two k-blocks a box
+        return _LaunchPDL(
+            self.kernel(cl, xbf, obf),
+            ((M // 128) * cl, 1, 1),
+            (384, 1, 1),
+            *_descriptors(*maps),
+            PTR,
+            xt,
+            h,
+            int(xt.stride(0)),
+            int(T),
+            1e-5,
+        )
 
     def _bind_pair(self, a, x, tab, wo, wab, wsq, xt, h, M, T, xbf, obf):
         """bo_tail2_bf16.cu: clusters of 8 = two row tiles x 4 column groups; each CTA's W boxes its half (96 rows of the CL 8 packs,
         natural k order; 128 rows of Wa or Wb); the scratch covers whole tile pairs."""
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import _LaunchPDL
+
         tma_desc, da = self._tm, self.da
         Mp = tail_rows(M, TAIL_PAIR)
-        xmap = (tma_desc(x, [768, M], 768 * 2, [32, 128], swizzle=64) if xbf else
-                tma_desc(x, [768, M], 768 * 4, [32, 128], dtype="f32"))
-        maps = [tma_desc(a, [da, M], da * 2, [64, 128]), xmap,
-                tma_desc(tab, [6 * 768, T], tab.stride(0) * 2, [32, 128], swizzle=64),
-                tma_desc(wo, [64, wo.shape[0]], 128, [64, 192]),
-                tma_desc(wab, [768, 3072], 768 * 2, [64, 128]),
-                tma_desc(wsq, [64, wsq.shape[0]], 128, [64, 192]),
-                tma_desc(xt, [768, Mp], xt.stride(0) * 2, [64, 128]),
-                tma_desc(h, [64, Mp * 24], 128, [64, 256])]                 # two h k-blocks per box
-        return _LaunchPDL(self.kernel(TAIL_PAIR, xbf, obf), ((Mp // 256) * 8, 1, 1), (384, 1, 1), *_descriptors(*maps), PTR, xt, h,
-                          int(xt.stride(0)), int(T), int(M // 128), 1e-5)
+        xmap = tma_desc(x, [768, M], 768 * 2, [32, 128], swizzle=64) if xbf else tma_desc(x, [768, M], 768 * 4, [32, 128], dtype="f32")
+        maps = [
+            tma_desc(a, [da, M], da * 2, [64, 128]),
+            xmap,
+            tma_desc(tab, [6 * 768, T], tab.stride(0) * 2, [32, 128], swizzle=64),
+            tma_desc(wo, [64, wo.shape[0]], 128, [64, 192]),
+            tma_desc(wab, [768, 3072], 768 * 2, [64, 128]),
+            tma_desc(wsq, [64, wsq.shape[0]], 128, [64, 192]),
+            tma_desc(xt, [768, Mp], xt.stride(0) * 2, [64, 128]),
+            tma_desc(h, [64, Mp * 24], 128, [64, 256]),
+        ]  # two h k-blocks per box
+        return _LaunchPDL(
+            self.kernel(TAIL_PAIR, xbf, obf),
+            ((Mp // 256) * 8, 1, 1),
+            (384, 1, 1),
+            *_descriptors(*maps),
+            PTR,
+            xt,
+            h,
+            int(xt.stride(0)),
+            int(T),
+            int(M // 128),
+            1e-5,
+        )
 
     def __call__(self, a, x, tab, wo, wab, wsq, out, T, xt, h, cl=None):
         """wo / wsq: ``pack_pairs_bf16(wo, cl)`` / ``pack_pairs_bf16(wsq, cl, z_order=True)`` for ``cl`` (default:
@@ -347,42 +339,18 @@ class TailBF16:
             x.dtype,
             out.dtype,
         )
-        assert (
-            xt.dtype is bf
-            and xt.dim() == 2
-            and xt.shape == (Mp, 768)
-            and xt.stride(1) == 1
-            and xt.stride(0) % 8 == 0
-        ), (xt.shape, xt.stride())
+        assert xt.dtype is bf and xt.dim() == 2 and xt.shape == (Mp, 768) and xt.stride(1) == 1 and xt.stride(0) % 8 == 0, (
+            xt.shape,
+            xt.stride(),
+        )
         assert xt.data_ptr() % 16 == 0
-        assert h.is_contiguous() and h.shape == (Mp * 24, 64) and h.dtype is bf, (
-            h.shape
-        )  # blocked k-block-major
+        assert h.is_contiguous() and h.shape == (Mp * 24, 64) and h.dtype is bf, h.shape  # blocked k-block-major
         assert a.is_contiguous() and a.shape == (M, da) and a.dtype is bf
-        assert (
-            x.is_contiguous() and x.shape == (M, 768) and M % 128 == 0 and T % 128 == 0
-        )
-        assert (
-            out.is_contiguous()
-            and out.shape == (M, 768)
-            and out.data_ptr() != x.data_ptr()
-        )
-        assert (
-            tab.dtype is bf
-            and tab.shape[0] == T
-            and tab[0].numel() == 6 * 768
-            and tab.stride(-1) == 1
-        )
-        assert (
-            tab.stride(0) % 8 == 0
-            and tab.data_ptr() % 16 == 0
-            and (tab.dim() == 2 or tab.stride(1) == 768)
-        )
-        assert (
-            wo.shape == (768 * da // 64, 64)
-            and wab.shape == (3072, 768)
-            and wsq.shape == (768 * 24, 64)
-        ), (wo.shape, wsq.shape)
+        assert x.is_contiguous() and x.shape == (M, 768) and M % 128 == 0 and T % 128 == 0
+        assert out.is_contiguous() and out.shape == (M, 768) and out.data_ptr() != x.data_ptr()
+        assert tab.dtype is bf and tab.shape[0] == T and tab[0].numel() == 6 * 768 and tab.stride(-1) == 1
+        assert tab.stride(0) % 8 == 0 and tab.data_ptr() % 16 == 0 and (tab.dim() == 2 or tab.stride(1) == 768)
+        assert wo.shape == (768 * da // 64, 64) and wab.shape == (3072, 768) and wsq.shape == (768 * 24, 64), (wo.shape, wsq.shape)
         assert all(w.is_contiguous() and w.dtype is bf for w in (wo, wab, wsq))
         key = (
             a.data_ptr(),
@@ -401,9 +369,7 @@ class TailBF16:
             xbf,
             obf,
         )
-        self.runs.bind(
-            key, lambda: self._bind(a, x, tab, wo, wab, wsq, xt, h, M, T, cl, xbf, obf)
-        )(out)
+        self.runs.bind(key, lambda: self._bind(a, x, tab, wo, wab, wsq, xt, h, M, T, cl, xbf, obf))(out)
         return out
 
 
@@ -433,9 +399,7 @@ def inf3_bf16_ready(index: int, nh: int, dh: int) -> bool:
         for cl in front.clusters():
             for xbf in (True, False):
                 front.kernel(cl, xbf)
-        C.PvGateCore(index, nh=nh, dh=dh, pdl=True, p_early=True).kernel(
-            1, True
-        )  # the step's core (P_EARLY unless switched off)
+        C.PvGateCore(index, nh=nh, dh=dh, pdl=True, p_early=True).kernel(1, True)  # the step's core (P_EARLY unless switched off)
     except Exception as exc:  # a build / load failure is an error, never a fallback
         build_failed("bias-only DiT bf16 three-kernel inference step", exc)
         return False  # reached only while planning (build_failed returns there)

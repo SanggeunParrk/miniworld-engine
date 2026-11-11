@@ -42,18 +42,14 @@ class GemmSwiglu:
     ([2H, K], gate rows first) -- the leader CTA streams the Wa half, its peer the Wb half. Bound launches are cached per
     (buffer, weight, output): the TMA descriptors carry the pointers."""
 
-    def __init__(
-        self, device_index: int, K: int = 768, H: int = 1536, save_ab: bool = False
-    ):
+    def __init__(self, device_index: int, K: int = 768, H: int = 1536, save_ab: bool = False):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
         assert K % 64 == 0 and H % K == 0 and H % 128 == 0
         self._tm = sm100._tm
         self.K, self.H, self.save_ab = K, H, save_ab
         # ring stages x 32 KB, the h staging (32 KB), with save_ab the a | b staging (64 KB, one ring stage fewer), barriers
-        self.SMEM = (
-            (4 * 32768 + 32768 + 65536 + 512) if save_ab else (5 * 32768 + 32768 + 512)
-        )
+        self.SMEM = (4 * 32768 + 32768 + 65536 + 512) if save_ab else (5 * 32768 + 32768 + 512)
         defs = (
             f"DIM={K}",
             f"HMUL={H // K}",
@@ -127,11 +123,7 @@ def supported_sm90(x: torch.Tensor, w_ab: torch.Tensor) -> bool:
     """bf16 or fp32 (TF32) on sm_90, M a multiple of 128 (>= MIN_ROWS_SM90), K a multiple of 64 / 32, H of 128."""
     if x.shape[0] < MIN_ROWS_SM90:
         return False
-    if not (
-        x.is_cuda
-        and x.dtype in (torch.bfloat16, torch.float32)
-        and w_ab.dtype is x.dtype
-    ):
+    if not (x.is_cuda and x.dtype in (torch.bfloat16, torch.float32) and w_ab.dtype is x.dtype):
         return False
     # fp32 (TF32) is refused: its TMA-fed operands are truncated to TF32 where cuBLAS rounds them -- 1.6e-3 against 4.2e-4 for
     # cuBLAS + the row pass -- and it wins only at M = 3840 (70.9 vs 85.5 us; 47.6 vs 45.9 at 1920, 759 vs 725 at 36864)

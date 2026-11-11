@@ -33,27 +33,33 @@ from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
 )
 
 
-
-
-
-
 # SAVE_PREACT IS in the key: training keeps it on and the kernel emits two extra
 # (H2 x BLOCK_M1) transposed stores per channel chunk per side -- the whole (4*H2, M) preact
 # tensor, four of this kernel's six stores -- while inference writes only left/right. The tiles
 # are already in registers, so the BODY reads as a pure store, but the swing in store traffic is
 # what picks the tile here. See gate_elem.py for the same distinction, and adaln/triton/ln_strided.py
 # for the GEMM where the opposite reading was the measured one.
-@configured('trimul_gemm_gate_mmajor_triton',
-            key=['shape_key', 'SAVE_PREACT'],
-            default=dict(BLOCK_K_D=32, BLOCK_K_H2=32, BLOCK_M1=64, num_warps=4, num_stages=2))
+@configured(
+    "trimul_gemm_gate_mmajor_triton",
+    key=["shape_key", "SAVE_PREACT"],
+    default=dict(BLOCK_K_D=32, BLOCK_K_H2=32, BLOCK_M1=64, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _bidir_front_kernel(
-    x_ptr, w_ptr,
-    left_ptr, right_ptr,
-    preact_ptr, pair_mask_ptr,
-    M, LL,
-    K: tl.constexpr, H2: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_K_D: tl.constexpr, BLOCK_K_H2: tl.constexpr, shape_key,
+    x_ptr,
+    w_ptr,
+    left_ptr,
+    right_ptr,
+    preact_ptr,
+    pair_mask_ptr,
+    M,
+    LL,
+    K: tl.constexpr,
+    H2: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K_D: tl.constexpr,
+    BLOCK_K_H2: tl.constexpr,
+    shape_key,
     SAVE_PREACT: tl.constexpr = True,
 ):
     # int64 program id -> rm and all rm-derived store offsets are int64. Combined with the
@@ -63,7 +69,7 @@ def _bidir_front_kernel(
     pid = tl.program_id(0).to(tl.int64)
     rm = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rk = tl.arange(0, BLOCK_K_D)
-    c2 = tl.arange(0, 2 * BLOCK_K_H2)                # contiguous interleaved (g,p) cols within a chunk
+    c2 = tl.arange(0, 2 * BLOCK_K_H2)  # contiguous interleaved (g,p) cols within a chunk
     mmask = rm < M
     smask = rm[None, :] < M
     W4 = 4 * H2
@@ -81,9 +87,9 @@ def _bidir_front_kernel(
 
     # ---- LEFT half: weight cols [0 : 2*H2), out -> left_ptr, preact rows [0 : 2*H2) ----
     for c0 in range(0, H2, BLOCK_K_H2):
-        ch = c0 + tl.arange(0, BLOCK_K_H2)                       # channel indices this chunk
+        ch = c0 + tl.arange(0, BLOCK_K_H2)  # channel indices this chunk
         chmask = ch < H2
-        cols = 2 * c0 + c2                               # contiguous cols [2c0 : 2c0+2BN)
+        cols = 2 * c0 + c2  # contiguous cols [2c0 : 2c0+2BN)
         colmask = cols < 2 * H2
         x_ptrs = x_ptr + rm[:, None] * K + rk[None, :]
         w_ptrs = w_ptr + rk[:, None] * W4 + cols[None, :]
@@ -99,7 +105,7 @@ def _bidir_front_kernel(
             acc = tl.dot(a, w, acc)
             x_ptrs += BLOCK_K_D
             w_ptrs += BLOCK_K_D * W4
-        g, p = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_K_H2, 2)))    # (BLOCK_M1, BLOCK_K_H2) each: gate-logit, proj
+        g, p = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_K_H2, 2)))  # (BLOCK_M1, BLOCK_K_H2) each: gate-logit, proj
         smsk = chmask[:, None] & smask
         if SAVE_PREACT:
             tl.store(preact_ptr + (2 * ch).to(tl.int64)[:, None] * M + rm[None, :], tl.trans(g).to(et), mask=smsk)
@@ -152,17 +158,16 @@ def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True, pair_mask=Non
     # B at the caller if needed. See notes/trimul_batch_generalization.
     B, L, L2, K = x_n.shape
     assert B == 1 and L == L2
-    H2 = WL.shape[1]                       # per-side hidden = 2*d_hidden
+    H2 = WL.shape[1]  # per-side hidden = 2*d_hidden
     M = L * L
     x_flat = x_n.reshape(M, K)
     # interleave (gate-logit, proj) columns per side: col 2c=Wg[:,c], 2c+1=W[:,c]
     left_w = torch.stack([WLg, WL], dim=2).reshape(K, 2 * H2)
     right_w = torch.stack([WRg, WR], dim=2).reshape(K, 2 * H2)
-    Wlr = torch.cat([left_w, right_w], dim=1).contiguous()      # (K, 4*H2)
+    Wlr = torch.cat([left_w, right_w], dim=1).contiguous()  # (K, 4*H2)
     # Cast outside the opaque launch so the compiler can absorb mask construction.
     pair_mask = None if pair_mask is None else pair_mask.to(x_n.dtype).reshape(M).contiguous()
-    left, right, preact = _bidir_front_launch(
-        x_flat, Wlr, H2, L, save_preact, token_key(L), pair_mask)
+    left, right, preact = _bidir_front_launch(x_flat, Wlr, H2, L, save_preact, token_key(L), pair_mask)
     return left, right, (preact if save_preact else None)
 
 
@@ -200,13 +205,23 @@ def _bidir_front_launch(
     m = L * L
     left = torch.empty(1, H2, L, L, device=x_flat.device, dtype=x_flat.dtype)
     right = torch.empty(1, H2, L, L, device=x_flat.device, dtype=x_flat.dtype)
-    preact = (torch.empty(4 * H2, m, device=x_flat.device, dtype=x_flat.dtype)
-              if save_preact else left)   # dummy ptr when not saving (stores guarded)
-    grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]),)          # noqa: E731
+    preact = (
+        torch.empty(4 * H2, m, device=x_flat.device, dtype=x_flat.dtype) if save_preact else left
+    )  # dummy ptr when not saving (stores guarded)
+    grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]),)  # noqa: E731
     _bidir_front_kernel[grid](
-        x_flat, Wlr, left, right, preact, pair_mask, m, m,
-        K=x_flat.shape[1], H2=H2,
-        shape_key=pack(shape_key, H2=H2, K=x_flat.shape[1]), SAVE_PREACT=save_preact,
+        x_flat,
+        Wlr,
+        left,
+        right,
+        preact,
+        pair_mask,
+        m,
+        m,
+        K=x_flat.shape[1],
+        H2=H2,
+        shape_key=pack(shape_key, H2=H2, K=x_flat.shape[1]),
+        SAVE_PREACT=save_preact,
     )
     if not save_preact:
         preact = x_flat.new_empty((0, 0))
@@ -220,11 +235,10 @@ class _BidirBackHalfTriton(torch.autograd.Function):
     folded into the front dxn GEMM). Weights x@W form; Wp is nn.Linear (N,K) form."""
 
     @staticmethod
-    def forward(ctx, x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, ln_out_b, eps, h, mask,
-                residual, dropscale=None):
+    def forward(ctx, x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, ln_out_b, eps, h, mask, residual, dropscale=None):
         B, L, _, D = x_n.shape
         M = B * L * L
-        H = 2 * h                                                 # = WL.shape[1]
+        H = 2 * h  # = WL.shape[1]
         left, right, preact = bidir_front_triton(x_n, WL, WLg, WR, WRg, pair_mask=mask)
         lf = left.reshape(H, L, L)
         rf = right.reshape(H, L, L)
@@ -232,27 +246,22 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         # output gate sigmoid(x_n@Wg) stays unmasked (matches the pytorch reference).
         mm = mask  # Applied inside the front stores; x_n/output gate stay unmasked.
         tri = packed_forward(lf, rf, h)
-        view = tri.reshape(H, M).t()                              # (M, H) m-major
+        view = tri.reshape(H, M).t()  # (M, H) m-major
         if x_n.dtype == torch.bfloat16:
-            te_xn, mean_out, rstd_out = _ln_materialize(
-                view, ln_out_w, ln_out_b, eps, shape_key=both_key(M))
-            y, proj, gate = output_f567_train(
-                te_xn, x_n.reshape(M, D), Wp, Wg, residual, dropscale, L)
+            te_xn, mean_out, rstd_out = _ln_materialize(view, ln_out_w, ln_out_b, eps, shape_key=both_key(M))
+            y, proj, gate = output_f567_train(te_xn, x_n.reshape(M, D), Wp, Wg, residual, dropscale, L)
         else:
             # The registered F567 kernel is BF16; retain the existing dtype coverage.
-            proj, te_xn, mean_out, rstd_out = _te_forward(
-                view, ln_out_w, ln_out_b, Wp, None, eps, shape_key=both_key(M))
+            proj, te_xn, mean_out, rstd_out = _te_forward(view, ln_out_w, ln_out_b, Wp, None, eps, shape_key=both_key(M))
             y, gate = gate_elem_train(x_n.reshape(M, D), proj, Wg, residual, dropscale, seq_len=L)
-        ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
-                              preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
+        ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
         ctx.eps, ctx.h, ctx.mm = eps, h, mm
         ctx.dropscale, ctx.seq_len = dropscale, L
         return y.reshape(B, L, L, D)
 
     @staticmethod
     def backward(ctx, gy):
-        (x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
-         preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj) = ctx.saved_tensors
+        (x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj) = ctx.saved_tensors
         B, L, _, D = x_n.shape
         M = B * L * L
         h = ctx.h
@@ -263,13 +272,13 @@ class _BidirBackHalfTriton(torch.autograd.Function):
 
         # ② gate bwd (elementwise; dx_gate folded into the dxn GEMM below); dropout-scale dy
         d_proj, d_glogit = gate_elem_bwd_ew(gy, proj, gate, ctx.dropscale, ctx.seq_len)
-        dWg = torch.mm(x_n.reshape(M, D).t(), d_glogit)           # (D, D) cuBLAS
+        dWg = torch.mm(x_n.reshape(M, D).t(), d_glogit)  # (D, D) cuBLAS
 
         # ① LN_out + @Wp bwd (te_style)
         view = tri.reshape(H, M).t()
         d_view, dLNo_w, dLNo_b, dWp, _ = _te_backward(
-            d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False,
-            shape_key=both_key(M))
+            d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False, shape_key=both_key(M)
+        )
         # `_te_backward` writes dx at x's strides and x here is `view` ((1, M)), so d_view is
         # m-major, `.t()` is contiguous and this reshape is a FREE VIEW -- d_tri ALIASES
         # d_view. Deleting the name frees nothing on its own; the storage goes at the `del`
@@ -284,8 +293,7 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         d_right = d_right.reshape(B, H, L, L)
         del d_tri
         # front bwd: d_concat (triton) + dW (cuBLAS) + W_stack; dxn fuses the gate add
-        dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
-            d_left, d_right, preact, x_n, WL, WLg, WR, WRg, pair_mask=ctx.mm)
+        dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, pair_mask=ctx.mm)
         if x_n.dtype == torch.bfloat16:
             dx = input_dual_bwd(d_glogit, dconc.t(), Wg.t(), W_stack, L)
         else:
@@ -293,35 +301,30 @@ class _BidirBackHalfTriton(torch.autograd.Function):
             dx.addmm_(dconc.t(), W_stack)
         dx_n = dx.reshape(B, L, L, D)
         # trailing Nones: eps, h, mask; then d_residual (fused residual input), dropscale
-        return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None,
-                d_residual, None)
+        return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None, d_residual, None)
 
 
 @torch.no_grad()
-def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h, mask,
-                 residual):
+def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h, mask, residual):
     """Forward-only bidir back-half (front → 2 bmm → LN_out+@Wp → gate), with NO
     autograd.Function / saved tensors and NO preact side output, so the inference path
     cudagraphs cheaply; the merged Function (with its saves) is used only under grad."""
     B, L, _, D = x_n.shape
     M = B * L * L
     H = 2 * h
-    left, right, _ = bidir_front_triton(
-        x_n, WLt, WLgt, WRt, WRgt, save_preact=False, pair_mask=mask)
+    left, right, _ = bidir_front_triton(x_n, WLt, WLgt, WRt, WRgt, save_preact=False, pair_mask=mask)
     lf = left.reshape(H, L, L)
     rf = right.reshape(H, L, L)
     # Reuse the training contraction launcher: both cuBLAS calls write directly
     # into disjoint slices of the final buffer, with no intermediate cat copy.
-    tri = packed_forward(lf, rf, h)                            # (H, L, L)
+    tri = packed_forward(lf, rf, h)  # (H, L, L)
     if x_n.dtype != torch.bfloat16:
         # `_back_kernel` is registered BF16 only: it rounds the LN'd tile to bf16 for the proj
         # dot, which does not compile against an fp32 Wp. Other dtypes take the same split
         # LN+GEMM / gate pair `_BidirBackHalfTriton` uses for them; the identity drop scale
         # keeps its output that of the inference path.
-        proj, _, _, _ = _te_forward(tri.reshape(H, M).t(), ln_out_w, ln_out_b, Wp, None, eps,
-                                    shape_key=both_key(M))
-        y, _ = gate_elem_train(x_n.reshape(M, D), proj, Wgt, residual,
-                               ones_dropscale(L, D, x_n), seq_len=L)
+        proj, _, _, _ = _te_forward(tri.reshape(H, M).t(), ln_out_w, ln_out_b, Wp, None, eps, shape_key=both_key(M))
+        y, _ = gate_elem_train(x_n.reshape(M, D), proj, Wgt, residual, ones_dropscale(L, D, x_n), seq_len=L)
         return y.view(B, L, L, D)
     # ONE pass: LN_out(H) + proj GEMM (H -> D) + gate GEMM (D -> D) + residual. This used to be
     # `_te_forward` (LN+GEMM) followed by a separate gate pass (since removed), because
@@ -330,21 +333,34 @@ def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h,
     # cost 5.06 ms (2.79 + 2.27) and materialised an (M, D) proj between the two, while this
     # module sat 1.2 ms behind cuequivariance for the whole forward.
     return trimul_back_triton(
-        tri.reshape(1, H, L, L), x_n, Wp.t().contiguous(), Wgt,
-        ln_out_w, ln_out_b, eps, residual.view(B, L, L, D),
+        tri.reshape(1, H, L, L),
+        x_n,
+        Wp.t().contiguous(),
+        Wgt,
+        ln_out_w,
+        ln_out_b,
+        eps,
+        residual.view(B, L, L, D),
     )
 
 
 def bidirectional_trimul_triton(
-    pair,                        # (B, L, L, d_pair)
-    WL, WLg, WR, WRg,            # to_{left,left_gate,right,right_gate}.weight  (2h, d_pair)
-    Wg,                          # to_gate.weight   (d_pair, d_pair)
-    Wout,                        # to_out.weight    (d_pair, 2h)  (nn.Linear form)
-    ln_in_w, ln_in_b,            # (d_pair,)
-    ln_out_w, ln_out_b,          # (2h,)
-    eps_in, eps_out, d_hidden,
-    mask=None,                   # (B, L) residue mask, optional (folded into LN_in)
-    dropscale=None,              # drop_row scale [B,1,L,D] (== mask/(1-p)); training only
+    pair,  # (B, L, L, d_pair)
+    WL,
+    WLg,
+    WR,
+    WRg,  # to_{left,left_gate,right,right_gate}.weight  (2h, d_pair)
+    Wg,  # to_gate.weight   (d_pair, d_pair)
+    Wout,  # to_out.weight    (d_pair, 2h)  (nn.Linear form)
+    ln_in_w,
+    ln_in_b,  # (d_pair,)
+    ln_out_w,
+    ln_out_b,  # (2h,)
+    eps_in,
+    eps_out,
+    d_hidden,
+    mask=None,  # (B, L) residue mask, optional (folded into LN_in)
+    dropscale=None,  # drop_row scale [B,1,L,D] (== mask/(1-p)); training only
 ):
     """Bidirectional Triton trimul. Returns (B, L, L, d_pair): LN_in (triton, row_scale
     mask), then a forward-only path for inference (``_bidir_infer``) and the merged
@@ -360,9 +376,9 @@ def bidirectional_trimul_triton(
     # the output gate sigmoid(x_n@Wg) stays unmasked (matches the pytorch reference).
     m2d = None
     if mask is not None:
-        if mask.dim() == 2:                                     # (B, L) residue mask
-            m = mask.unsqueeze(-1) & mask.unsqueeze(-2)         # (B, L, L)
-        else:                                                   # (B, L, L) pair mask
+        if mask.dim() == 2:  # (B, L) residue mask
+            m = mask.unsqueeze(-1) & mask.unsqueeze(-2)  # (B, L, L)
+        else:  # (B, L, L) pair mask
             m = mask
         m2d = m.to(pair.dtype)
     B, L = pair.shape[0], pair.shape[1]
@@ -380,8 +396,7 @@ def bidirectional_trimul_triton(
         # ds_2d is None: a live dropout scale (train() under no_grad, p_drop>0) must take the
         # TRAINING apply below (which folds dropout into the gate epilogue) — the inference path
         # has no dropscale and would silently skip dropout.
-        return _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout,
-                            ln_out_w, ln_out_b, eps_out, d_hidden, mask=m2d, residual=residual_flat)
+        return _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout, ln_out_w, ln_out_b, eps_out, d_hidden, mask=m2d, residual=residual_flat)
     # The training path ALWAYS carries a drop scale, ones when the model's p_drop is 0. That is
     # what lets the training kernel be flagless: `gate_elem_train` and `gate_elem_bwd_ew` apply it
     # unconditionally instead of branching on a keyed constexpr, at a measured 0.2% (the scale is
@@ -391,6 +406,18 @@ def bidirectional_trimul_triton(
         ds_2d = ones_dropscale(L, d, pair)
     # TRAINING: merged autograd Function (weights x@W; autograd flows the transpose).
     return _BidirBackHalfTriton.apply(
-        x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout, ln_out_w, ln_out_b, eps_out, d_hidden, m2d,
-        residual_flat, ds_2d,
+        x_n,
+        WLt,
+        WLgt,
+        WRt,
+        WRgt,
+        Wgt,
+        Wout,
+        ln_out_w,
+        ln_out_b,
+        eps_out,
+        d_hidden,
+        m2d,
+        residual_flat,
+        ds_2d,
     )

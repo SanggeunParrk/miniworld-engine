@@ -47,7 +47,8 @@ class Transition(BackendModule, MasterWeights):
         allows TF32), the parameters cast to the activation dtype.
 
     """
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:h100_sm90": 4, "cuda:a100_sm80": 4, "triton:a100_sm80": 2}
@@ -116,8 +117,16 @@ class Transition(BackendModule, MasterWeights):
 
         prov = _anthropic.load("opt_core.kernels.transition")
         return prov, _anthropic.kernel_selection(
-            prov, "fast", c=self.d_hidden, hidden=self.d_hidden * self.n, n_tokens=int(x.shape[-2]), dtype={torch.bfloat16: "bf16", torch.float32: "fp32"}[x.dtype],
-            family=self._anthropic_family(x), residual=False, cc="{}.{}".format(*torch.cuda.get_device_capability(x.device)), rows_count=x.numel() // self.d_hidden,
+            prov,
+            "fast",
+            c=self.d_hidden,
+            hidden=self.d_hidden * self.n,
+            n_tokens=int(x.shape[-2]),
+            dtype={torch.bfloat16: "bf16", torch.float32: "fp32"}[x.dtype],
+            family=self._anthropic_family(x),
+            residual=False,
+            cc="{}.{}".format(*torch.cuda.get_device_capability(x.device)),
+            rows_count=x.numel() // self.d_hidden,
         )
 
     def _anthropic_core_refusal(self, x: torch.Tensor) -> str | None:
@@ -135,8 +144,12 @@ class Transition(BackendModule, MasterWeights):
     def _anthropic_route(self, x: torch.Tensor) -> tuple[str | None, str | None]:
         from miniworld_engine.modules import _anthropic
 
-        if (self._anthropic_family(x) == "pair" and (self.d_hidden, self.d_hidden * self.n) == (384, 1536)
-                and x.dtype == torch.bfloat16 and not self.training):
+        if (
+            self._anthropic_family(x) == "pair"
+            and (self.d_hidden, self.d_hidden * self.n) == (384, 1536)
+            and x.dtype == torch.bfloat16
+            and not self.training
+        ):
             # the pair transition of OpenDDE (c_z 384 x 4; the row is OpenDDE's alone): its kit's own composition (fpf_transition_odde sep16:
             # the module's LN -> bf16, two cuBLAS GEMMs, the Triton silu(a) * b kernel, the out GEMM)
             why = _anthropic.missing("fpf_transition_odde", path=_ODDE_ARMT)
@@ -145,15 +158,21 @@ class Transition(BackendModule, MasterWeights):
         why_core = self._anthropic_core_refusal(x)
         if why_core is None:
             return "core", None
-        if x.dtype == torch.bfloat16 and self._anthropic_family(x) == "rows" and self.d_hidden == 128 and (self.d_hidden * self.n) % 64 == 0:
+        if (
+            x.dtype == torch.bfloat16
+            and self._anthropic_family(x) == "rows"
+            and self.d_hidden == 128
+            and (self.d_hidden * self.n) % 64 == 0
+        ):
             why = _anthropic.missing("ef2_msa_v2", path="esmfold2/opt/forward/fast_inference/driver")
             if why is None:
                 return "ef2", None
             why_core += f"; esmfold2 mtr_fused: {why}"
         why = _anthropic.missing("opt_core.attn.pair_fused")
         if why is None:
-            ok, why = _anthropic.load("opt_core.attn.pair_fused").supported_transition(x, self._anthropic_pf_weights(x), impl="fpf", ln="fused",
-                                                                                        residual=False)
+            ok, why = _anthropic.load("opt_core.attn.pair_fused").supported_transition(
+                x, self._anthropic_pf_weights(x), impl="fpf", ln="fused", residual=False
+            )
             if ok:
                 return "pf", None
         return None, f"{why_core}; pair_fused.transition: {why}"
@@ -165,7 +184,8 @@ class Transition(BackendModule, MasterWeights):
         key = (x.device, *((p.data_ptr(), p._version, p.dtype) for p in params))
         if getattr(self, "_anthropic_pf_key", None) != key:
             self._anthropic_pf = _anthropic.load("opt_core.attn.pair_fused").pack_transition_weights(
-                w_out=params[2], ln_w=params[3], ln_b=params[4], w_a=params[0], w_b=params[1], eps=self.ln_in.eps, device=x.device)
+                w_out=params[2], ln_w=params[3], ln_b=params[4], w_a=params[0], w_b=params[1], eps=self.ln_in.eps, device=x.device
+            )
             self._anthropic_pf_key = key
         return self._anthropic_pf
 
@@ -181,8 +201,10 @@ class Transition(BackendModule, MasterWeights):
             return "x must be [..., L, d_hidden]"
         if torch.is_grad_enabled():
             if any(p.requires_grad for p in self.parameters()):
-                return ("training with parameter gradients: the kits' differentiable transitions (opt_core transition_autograd rows esm_kd3*, "
-                        "ef2inv LNLinearSwiGLUFrozen) are dX-only with frozen weights; freeze the parameters or call under torch.no_grad()")
+                return (
+                    "training with parameter gradients: the kits' differentiable transitions (opt_core transition_autograd rows esm_kd3*, "
+                    "ef2inv LNLinearSwiGLUFrozen) are dX-only with frozen weights; freeze the parameters or call under torch.no_grad()"
+                )
             return self._anthropic_autograd_select(x)[1][1]
         return self._anthropic_route(x)[1]
 
@@ -193,18 +215,33 @@ class Transition(BackendModule, MasterWeights):
 
         prov = _anthropic.load("opt_core.kernels.transition")
         return prov, _anthropic.kernel_selection(
-            prov, "fast", c=self.d_hidden, hidden=self.d_hidden * self.n, n_tokens=int(x.shape[-2]),
-            dtype={torch.bfloat16: "bf16", torch.float32: "fp32"}[x.dtype], direction="fwdbwd", family="esmpair", residual=True,
-            cc="{}.{}".format(*torch.cuda.get_device_capability(x.device)), rows_count=x.numel() // self.d_hidden)
+            prov,
+            "fast",
+            c=self.d_hidden,
+            hidden=self.d_hidden * self.n,
+            n_tokens=int(x.shape[-2]),
+            dtype={torch.bfloat16: "bf16", torch.float32: "fp32"}[x.dtype],
+            direction="fwdbwd",
+            family="esmpair",
+            residual=True,
+            cc="{}.{}".format(*torch.cuda.get_device_capability(x.device)),
+            rows_count=x.numel() // self.d_hidden,
+        )
 
     def _forward_anthropic(self, x: torch.Tensor) -> torch.Tensor:
-        if self.dead:   # inference only: a dead instance returns the residual input (as the reference does)
+        if self.dead:  # inference only: a dead instance returns the residual input (as the reference does)
             return x
-        if torch.is_grad_enabled():   # a frozen module, the input takes a gradient: the provider's differentiable row (dX backward)
+        if torch.is_grad_enabled():  # a frozen module, the input takes a gradient: the provider's differentiable row (dX backward)
             prov, (sel, _why) = self._anthropic_autograd_select(x)
             with torch.no_grad():
-                pack = prov.pack(w_a=self.expand_a.weight.to(x.dtype), w_b=self.expand_b.weight.to(x.dtype), w_o=self.squeeze.weight.to(x.dtype),
-                                 ln_w=self.ln_in.weight.to(x.dtype), ln_b=self.ln_in.bias.to(x.dtype), eps=self.ln_in.eps)
+                pack = prov.pack(
+                    w_a=self.expand_a.weight.to(x.dtype),
+                    w_b=self.expand_b.weight.to(x.dtype),
+                    w_o=self.squeeze.weight.to(x.dtype),
+                    ln_w=self.ln_in.weight.to(x.dtype),
+                    ln_b=self.ln_in.bias.to(x.dtype),
+                    eps=self.ln_in.eps,
+                )
             return prov.transition_autograd(x.contiguous(), pack, word="fast", n_tokens=int(x.shape[-2]), _sel=sel)[0]
         route, _ = self._anthropic_route(x)
         if route == "odde":
@@ -213,9 +250,15 @@ class Transition(BackendModule, MasterWeights):
             from miniworld_engine.modules import _anthropic
 
             kit = _anthropic.load("fpf_transition_odde", path=_ODDE_ARMT)
-            if getattr(self, "_anthropic_odde", None) is None:   # OpenDDE's attribute schema; the kit caches its bf16 weights by version
-                self._anthropic_odde = SimpleNamespace(c_in=self.d_hidden, linear_no_bias_a=self.expand_a, linear_no_bias_b=self.expand_b,
-                                                       linear_no_bias=self.squeeze, layernorm1=self.ln_in, training=False)
+            if getattr(self, "_anthropic_odde", None) is None:  # OpenDDE's attribute schema; the kit caches its bf16 weights by version
+                self._anthropic_odde = SimpleNamespace(
+                    c_in=self.d_hidden,
+                    linear_no_bias_a=self.expand_a,
+                    linear_no_bias_b=self.expand_b,
+                    linear_no_bias=self.squeeze,
+                    layernorm1=self.ln_in,
+                    training=False,
+                )
             return kit.forward_sep16(self._anthropic_odde, x.contiguous()).to(x.dtype) + x
         if route == "ef2":
             from types import SimpleNamespace
@@ -224,12 +267,14 @@ class Transition(BackendModule, MasterWeights):
 
             kit = _anthropic.load("ef2_msa_v2", path="esmfold2/opt/forward/fast_inference/driver")
             key = tuple((p.data_ptr(), p._version) for p in self.parameters())
-            if getattr(self, "_anthropic_ef2_key", None) != key:   # the kit caches W12^T / W3^T on this object by the weights' identity
+            if getattr(self, "_anthropic_ef2_key", None) != key:  # the kit caches W12^T / W3^T on this object by the weights' identity
                 with torch.no_grad():
-                    w12 = torch.cat([self.expand_a.weight, self.expand_b.weight], 0)        # [x1 | x2] rows: x1 the silu branch
-                self._anthropic_ef2 = SimpleNamespace(norm=self.ln_in, ffn=SimpleNamespace(w12=SimpleNamespace(weight=w12), w3=self.squeeze))
+                    w12 = torch.cat([self.expand_a.weight, self.expand_b.weight], 0)  # [x1 | x2] rows: x1 the silu branch
+                self._anthropic_ef2 = SimpleNamespace(
+                    norm=self.ln_in, ffn=SimpleNamespace(w12=SimpleNamespace(weight=w12), w3=self.squeeze)
+                )
                 self._anthropic_ef2_key = key
-            return kit.mtr_fused(self._anthropic_ef2, x.contiguous())                        # x + transition(x), bf16
+            return kit.mtr_fused(self._anthropic_ef2, x.contiguous())  # x + transition(x), bf16
         if route == "pf":
             from miniworld_engine.modules import _anthropic
 
@@ -237,23 +282,35 @@ class Transition(BackendModule, MasterWeights):
             x = x.contiguous()
             return PF.transition(x, self._anthropic_pf_weights(x), residual=False, ln="fused", impl="fpf").to(x.dtype) + x
         prov, (sel, _why) = self._anthropic_select(x)
-        if sel.row in ("engine_module", "compile"):   # the provider measured the caller's own module fastest for this cell: the release runs it
+        if sel.row in (
+            "engine_module",
+            "compile",
+        ):  # the provider measured the caller's own module fastest for this cell: the release runs it
             return self._forward_pytorch(x)
         params = (self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.ln_in.weight, self.ln_in.bias)
         key = (x.dtype, *((p.data_ptr(), p._version, p.dtype) for p in params))
         if getattr(self, "_anthropic_pack_key", None) != key:
             # the reference casts every parameter to the activation dtype (fp32 masters, the fp32-pinned LayerNorm affine): the same values here
-            self._anthropic_pack = prov.pack(w_a=params[0].to(x.dtype), w_b=params[1].to(x.dtype), w_o=params[2].to(x.dtype),
-                                             ln_w=params[3].to(x.dtype), ln_b=params[4].to(x.dtype), eps=self.ln_in.eps)
+            self._anthropic_pack = prov.pack(
+                w_a=params[0].to(x.dtype),
+                w_b=params[1].to(x.dtype),
+                w_o=params[2].to(x.dtype),
+                ln_w=params[3].to(x.dtype),
+                ln_b=params[4].to(x.dtype),
+                eps=self.ln_in.eps,
+            )
             self._anthropic_pack_key = key
         x = x.contiguous()
-        y, served = prov.transition(x, self._anthropic_pack, word="fast", residual=False, n_tokens=int(x.shape[-2]),
-                                    family=self._anthropic_family(x))
+        y, served = prov.transition(
+            x, self._anthropic_pack, word="fast", residual=False, n_tokens=int(x.shape[-2]), family=self._anthropic_family(x)
+        )
         if served.row != sel.row:
             from miniworld_engine.modules.primitives import BackendUnsupported
 
-            raise BackendUnsupported(f"Transition backend 'anthropic': the provider served row {served.row!r}, its selection was {sel.row!r}")
-        return y + x   # the update in the activation dtype, then the residual: the reference's two roundings
+            raise BackendUnsupported(
+                f"Transition backend 'anthropic': the provider served row {served.row!r}, its selection was {sel.row!r}"
+            )
+        return y + x  # the update in the activation dtype, then the residual: the reference's two roundings
 
     # ------------------------------------------------------------------------------------------------------------- engine kernels
     def _supports_engine(self, x: torch.Tensor) -> str | None:
@@ -284,8 +341,10 @@ class Transition(BackendModule, MasterWeights):
             return None
         if x.dtype is torch.float32 and not fused_generic_sm90a._tf32_allowed():
             return "float32 activations run on TF32 tensor cores only (torch does not allow TF32 here)"
-        return (f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}, {x.numel() // self.d_hidden} rows: no sm_90a build takes it (generic: d a "
-                "multiple of 64 up to 1024, hidden a multiple of 128)")
+        return (
+            f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}, {x.numel() // self.d_hidden} rows: no sm_90a build takes it (generic: d a "
+            "multiple of 64 up to 1024, hidden a multiple of 128)"
+        )
 
     def _forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         if self.dead and not (self.training or torch.is_grad_enabled()):
@@ -293,8 +352,9 @@ class Transition(BackendModule, MasterWeights):
         if a100(x):
             from miniworld_engine.kernels.transition.cuda import transition_sm80
 
-            out = transition_sm80(x, self.ln_in.weight, self.ln_in.bias, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight,
-                                  self.ln_in.eps)
+            out = transition_sm80(
+                x, self.ln_in.weight, self.ln_in.bias, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.ln_in.eps
+            )
             if out is None:
                 from miniworld_engine.modules.primitives import BackendUnsupported
 
@@ -302,9 +362,10 @@ class Transition(BackendModule, MasterWeights):
             return out
         from miniworld_engine.kernels.transition.cuda import transition_sm90a
 
-        out = transition_sm90a(x, self.ln_in.weight, self.ln_in.bias, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight,
-                               self.ln_in.eps, self.n)
-        if out is None:   # no build takes the call (a build failure raises _nvcc.KernelBuildError before this); never another backend
+        out = transition_sm90a(
+            x, self.ln_in.weight, self.ln_in.bias, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.ln_in.eps, self.n
+        )
+        if out is None:  # no build takes the call (a build failure raises _nvcc.KernelBuildError before this); never another backend
             from miniworld_engine.modules.primitives import BackendUnsupported
 
             raise BackendUnsupported("Transition backend 'cuda': no sm_90a Transition build takes this call")
@@ -332,14 +393,18 @@ class Transition(BackendModule, MasterWeights):
             if not _tf32_allowed():
                 return "float32 activations run on TF32 tensor cores only (torch does not allow TF32 here)"
             if not fused_wide_sm80.f32_supported(x, wa, ws):
-                return (f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no sm_80 fp32 build takes it (D in {fused_wide_sm80.F32_WIDTHS}, hidden a "
-                        "multiple of 64)")
+                return (
+                    f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no sm_80 fp32 build takes it (D in {fused_wide_sm80.F32_WIDTHS}, hidden a "
+                    "multiple of 64)"
+                )
             if not fused_wide_sm80.f32_available(x, wa, ws):
                 return "the sm_80 Transition extension failed to build"
             return None
         if not fused_wide_sm80.supported(x, wa, ws):
-            return (f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no sm_80 build takes it (D in {fused_wide_sm80.WIDTHS}, hidden a "
-                    "multiple of 64)")
+            return (
+                f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no sm_80 build takes it (D in {fused_wide_sm80.WIDTHS}, hidden a "
+                "multiple of 64)"
+            )
         if fused_wide_sm80.route(x, wa, ws) is None:
             return "the sm_80 Transition extension failed to build"
         return None
@@ -360,8 +425,15 @@ class Transition(BackendModule, MasterWeights):
         rows = _as_rows3(x)
         # the reference casts every projection to the activation dtype (fp32 masters, bf16 weights under fp32 activations): the casts stay
         # in autograd, so a master's gradient lands on it in fp32
-        y = transition_residual(rows, self.ln_in.weight, self.ln_in.bias, self.expand_a.weight.to(x.dtype),
-                                self.expand_b.weight.to(x.dtype), self.squeeze.weight.to(x.dtype), self.ln_in.eps)
+        y = transition_residual(
+            rows,
+            self.ln_in.weight,
+            self.ln_in.bias,
+            self.expand_a.weight.to(x.dtype),
+            self.expand_b.weight.to(x.dtype),
+            self.squeeze.weight.to(x.dtype),
+            self.ln_in.eps,
+        )
         return y.reshape(x.shape)
 
 

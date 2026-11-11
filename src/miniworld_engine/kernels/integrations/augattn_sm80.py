@@ -118,16 +118,9 @@ def serves(module, single, pair, mask, compute_dtype=None, cond=None) -> bool:
     if flat and any(n.eps != flat[0].eps or n.weight is None or n.bias is None for n in flat):
         return False
     dt = single.dtype
-    if (
-        not single.is_cuda
-        or dt not in (BF, F32)
-        or pair.dtype is not dt
-        or compute_dtype not in (None, dt)
-    ):
+    if not single.is_cuda or dt not in (BF, F32) or pair.dtype is not dt or compute_dtype not in (None, dt):
         return False
-    if module.to_query.weight.dtype not in _weight_dtypes(
-        dt
-    ) or module.to_key.weight.dtype not in _weight_dtypes(dt):
+    if module.to_query.weight.dtype not in _weight_dtypes(dt) or module.to_key.weight.dtype not in _weight_dtypes(dt):
         return False
     if any(n.weight.dtype not in _weight_dtypes(dt) for n in _head_rms(module)):
         return False
@@ -142,41 +135,19 @@ def serves(module, single, pair, mask, compute_dtype=None, cond=None) -> bool:
     if _mask_kind(mask, a, b, length) is None:
         return False
     heads = module.n_head
-    if (
-        d % heads
-        or d // heads not in (32, 48, 64)
-        or d % 8
-        or module.to_bias.weight.shape != (heads, pair.shape[-1])
-    ):
+    if d % heads or d // heads not in (32, 48, 64) or d % 8 or module.to_bias.weight.shape != (heads, pair.shape[-1]):
         return False
     if module.ln_pair.eps != EPS:
         return False
     if (_flat_ln(module) or _head_rms(module) or not _gated(module)) and (heads, d // heads) == (4, 32):
         return False  # the atom width's extra passes (shared-mask uniform rows, per-sample uniform rows) assume the gated attention
-    if (
-        not _fused_params_ok(module, dt)
-        or (
-            cond is not None
-            and (
-                cond.dtype is not dt
-                or cond.ndim != 4
-                or tuple(cond.shape[:3]) != (a, b, length)
-                or cond.shape[-1] % 8
-            )
-        )
+    if not _fused_params_ok(module, dt) or (
+        cond is not None and (cond.dtype is not dt or cond.ndim != 4 or tuple(cond.shape[:3]) != (a, b, length) or cond.shape[-1] % 8)
     ):
         return False
     sm80 = _sm80()
-    idx = (
-        single.device.index
-        if single.device.index is not None
-        else torch.cuda.current_device()
-    )
-    if not (
-        sm80.supported_plain(BF, _pad(length), d, heads, idx)
-        if dt is BF
-        else sm80.supported_tf32(F32, _pad(length), d, heads, idx)
-    ):
+    idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
+    if not (sm80.supported_plain(BF, _pad(length), d, heads, idx) if dt is BF else sm80.supported_tf32(F32, _pad(length), d, heads, idx)):
         return False
     return _loads() if dt is BF else _loads_tf32()
 
@@ -235,10 +206,7 @@ def _fused_params_ok(module, dt: torch.dtype = BF) -> bool:
         module.to_scale,
         module.to_bias,
     )
-    if (
-        any(lin.weight.dtype not in ok for lin in linears)
-        or module.to_scale.bias is None
-    ):
+    if any(lin.weight.dtype not in ok for lin in linears) or module.to_scale.bias is None:
         return False
     if (
         module.to_key.bias is not None
@@ -268,21 +236,15 @@ def _stage(t: torch.Tensor, batch: int, padded: int) -> torch.Tensor:
     return t.reshape(batch * a * padded, c)
 
 
-def _unstage(
-    t: torch.Tensor, a: int, batch: int, length: int, padded: int, c: int
-) -> torch.Tensor:
+def _unstage(t: torch.Tensor, a: int, batch: int, length: int, padded: int, c: int) -> torch.Tensor:
     if batch == 1 and length == padded:
         return t.view(a, 1, length, c)
     return t.view(batch, a, padded, c)[:, :, :length].permute(1, 0, 2, 3).contiguous()
 
 
-def _penalties(
-    kmask: torch.Tensor, a: int, batch: int, length: int, padded: int
-) -> torch.Tensor:
+def _penalties(kmask: torch.Tensor, a: int, batch: int, length: int, padded: int) -> torch.Tensor:
     """The per-sample key penalties of the kernels: fp32 [B, A, Lp], 0 where a key is valid, -inf where it is masked (and past L)."""
-    pen = torch.full(
-        (batch, a, padded), _NEG_INF, device=kmask.device, dtype=torch.float32
-    )
+    pen = torch.full((batch, a, padded), _NEG_INF, device=kmask.device, dtype=torch.float32)
     pen[:, :, :length].masked_fill_(kmask.permute(1, 0, 2), 0.0)
     return pen
 
@@ -371,8 +333,7 @@ def _bias_into(
             MASKED * math.sqrt(hd),
         )
     elif (
-        sm80.pair_bias_generic_supported(dp, heads, pair_b.dtype)
-        and pair_b.dtype is out.dtype
+        sm80.pair_bias_generic_supported(dp, heads, pair_b.dtype) and pair_b.dtype is out.dtype
     ):  # any width: LayerNorm + projection streamed in one pass
         sm80.pair_bias_generic(
             pair_b,
@@ -384,9 +345,7 @@ def _bias_into(
             out=out,
         )
     else:
-        z, _, _ = torch.native_layer_norm(
-            pair_b.reshape(length * length, dp), (dp,), None, None, EPS
-        )
+        z, _, _ = torch.native_layer_norm(pair_b.reshape(length * length, dp), (dp,), None, None, EPS)
         raw = torch.mm(pack[2] if f32 else pack[3], z.t()).view(heads, length, length)
         fill = MASKED if f32 else MASKED * math.sqrt(hd)
         out.fill_(fill)
@@ -397,9 +356,7 @@ def _bias_into(
             out[:, length:, :].zero_()
 
 
-def _fwd_fake(
-    x, cond, pair, res, kmask, bias_in, params, a, batch, length, heads, mask_kind, save, flat_eps=1e-5
-):
+def _fwd_fake(x, cond, pair, res, kmask, bias_in, params, a, batch, length, heads, mask_kind, save, flat_eps=1e-5):
     padded = _pad(length)
     d = x.shape[-1]
     m = a * batch * padded
@@ -460,7 +417,9 @@ def _fwd(
     xs, cs = _stage(x, batch, padded), _stage(cond, batch, padded)
     rs = None if res is None else _stage(res, batch, padded)
     gated = params[4].shape[0] > 0  # an ungated attention packs [Wq; Wk; Wv] (params[4] is an empty stand-in)
-    flat = params[10:]  # the flat q / k LayerNorm's (weight, bias) x 2 (4 tensors), the per-head RMSNorm's weights q, k (2 tensors), or none
+    flat = params[
+        10:
+    ]  # the flat q / k LayerNorm's (weight, bias) x 2 (4 tensors), the per-head RMSNorm's weights q, k (2 tensors), or none
     qkvg_native = gated and not flat and not save and batch == 1 and a == 5 and length in (2048, 4096)
     tiled_qkvg = (
         gated
@@ -635,19 +594,12 @@ def _fwd(
         # Dense inference follows the original finite-min softmax: a fully
         # masked sample has uniform attention over its actual V rows. Read
         # validity on the GPU so replay observes updated masks and weights.
-        if (
-            not save
-            and mask_kind == 2
-            and dt is BF
-            and (d, heads, hd, pair.shape[-1]) == (128, 4, 32, 16)
-        ):
+        if not save and mask_kind == 2 and dt is BF and (d, heads, hd, pair.shape[-1]) == (128, 4, 32, 16):
             from miniworld_engine.kernels.augmented_attention.cuda import (
                 atom_sample_uniform_sm80,
             )
 
-            atom_sample_uniform_sm80.forward(
-                cast(torch.Tensor, kmask)[:, b], v[rows], g[rows], q[rows], None, length, padded, a, heads
-            )
+            atom_sample_uniform_sm80.forward(cast(torch.Tensor, kmask)[:, b], v[rows], g[rows], q[rows], None, length, padded, a, heads)
     if save and not gated:
         og = o  # no gating query: the core's output feeds to_out (saved once: the og slot is empty)
     elif save:
@@ -655,20 +607,10 @@ def _fwd(
         sm80.gate_rows(o, g, og)
     else:
         og = q  # sigmoid(g) o (or o), written over q's columns
-    output_fused = (
-        not save
-        and batch == 1
-        and rs is not None
-        and (a, length) in ((1, 4096), (5, 1024), (5, 2048), (5, 4096))
-    )
+    output_fused = not save and batch == 1 and rs is not None and (a, length) in ((1, 4096), (5, 1024), (5, 2048), (5, 4096))
     # The small A1 inference rows qualify own 32-channel output tiles;
     # larger rows retain the existing faster full-output fusion.
-    output_tiled = (
-        not save
-        and batch == 1
-        and hd == 32
-        and (a, length) in ((1, 1024), (1, 2048))
-    )
+    output_tiled = not save and batch == 1 and hd == 32 and (a, length) in ((1, 1024), (1, 2048))
     if dt is BF and d == 128 and cs.shape[1] == 128 and output_tiled:
         from miniworld_engine.kernels.augmented_attention.cuda import (
             atom_output_tiled_sm80,
@@ -701,9 +643,7 @@ def _mm32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return torch.mm(a, b, out_dtype=F32) if a.dtype is BF else torch.mm(a, b)
 
 
-def _bwd_fake(
-    dout, x, cond, pair, kmask, params, saved, a, batch, length, heads, mask_kind
-):
+def _bwd_fake(dout, x, cond, pair, kmask, params, saved, a, batch, length, heads, mask_kind):
     return [
         torch.empty_like(x),
         torch.empty_like(cond),
@@ -766,11 +706,7 @@ def _bwd(
     dzs, dw_sum = [], None
     for b in range(batch):
         rows = slice(b * n, (b + 1) * n)
-        core_bwd = (
-            sm80.tf32_backward
-            if dt is F32
-            else functools.partial(sm80.plain_backward, db_natural=True)
-        )
+        core_bwd = sm80.tf32_backward if dt is F32 else functools.partial(sm80.plain_backward, db_natural=True)
         _, _, _, db = core_bwd(
             qkvg[rows, :d],
             qkvg[rows, d : 2 * d],
@@ -818,38 +754,32 @@ def _bwd(
             dzs.append(dz.view(length, length, dp))
             dw_sum = dw if dw_sum is None else dw_sum + dw
         elif kind == "apb":
-            dz, _, _ = _apb().pair_bias_bwd(
-                pair_b.reshape(length * length, dp), db, wf, length, EPS, acc, 384
-            )
+            dz, _, _ = _apb().pair_bias_bwd(pair_b.reshape(length * length, dp), db, wf, length, EPS, acc, 384)
             dzs.append(dz.view(length, length, dp))
         elif sm80.pair_bias_generic_bwd_supported(dp, heads, pair_b.dtype):  # any supported width: dz and dW' in one pass over the pair
-            dz, dw = sm80.pair_bias_generic_backward(
-                pair_b, cast(torch.Tensor, pack[5]), db, mask_b, padded, EPS
-            )
+            dz, dw = sm80.pair_bias_generic_backward(pair_b, cast(torch.Tensor, pack[5]), db, mask_b, padded, EPS)
             dzs.append(dz.view(length, length, dp))
             dw_sum = dw if dw_sum is None else dw_sum + dw
         else:
             db_c = db[:, :length, :length]
             if mask_b is not None:
-                db_c = db_c.masked_fill(
-                    ~mask_b.reshape(1, 1, length), 0.0
-                )  # a masked key has no gradient
+                db_c = db_c.masked_fill(~mask_b.reshape(1, 1, length), 0.0)  # a masked key has no gradient
             dbb = db_c.reshape(heads, length * length).to(dt)
             p2 = pair_b.reshape(length * length, dp)
             zz, mean, rstd = torch.native_layer_norm(p2, (dp,), None, None, EPS)
-            dwf_b = _mm32(
-                dbb, zz
-            )  # [H, dp]: the gradient of the natural-unit folded weight
+            dwf_b = _mm32(dbb, zz)  # [H, dp]: the gradient of the natural-unit folded weight
             dzh = torch.mm(dbb.t(), wf)  # [L L, dp]
             dzs.append(
-                torch.ops.aten.native_layer_norm_backward(
-                    dzh, p2, (dp,), mean, rstd, None, None, [True, False, False]
-                )[0].view(length, length, dp)
+                torch.ops.aten.native_layer_norm_backward(dzh, p2, (dp,), mean, rstd, None, None, [True, False, False])[0].view(
+                    length, length, dp
+                )
             )
             dw_sum = dwf_b if dw_sum is None else dw_sum + dwf_b
     dpair = dzs[0].view(pair.shape) if batch == 1 else torch.stack(dzs)
     flat_grads = []
-    if len(flat) == 2:  # the per-head RMSNorm's backward (fp32): dx = rstd (g - xhat mean(g xhat)), g = w dy; dw = sum over rows and heads of dy xhat
+    if (
+        len(flat) == 2
+    ):  # the per-head RMSNorm's backward (fp32): dx = rstd (g - xhat mean(g xhat)), g = w dy; dw = sum over rows and heads of dy xhat
         qk_pre, rstd = saved[7], saved[8].view(m, 2, heads, 1)
         cols = dqkvg[:, : 2 * d].view(m, 2, heads, hd)
         dyf = cols.float()
@@ -864,8 +794,15 @@ def _bwd(
         for i in range(2):
             cols = dqkvg[:, i * d : (i + 1) * d]
             dxn, dwn, dbn = torch.ops.aten.native_layer_norm_backward(
-                cols.float(), qk_pre[:, i * d : (i + 1) * d].float(), (d,), stats[2 * i], stats[2 * i + 1],
-                flat[2 * i].float(), flat[2 * i + 1].float(), [True, True, True])
+                cols.float(),
+                qk_pre[:, i * d : (i + 1) * d].float(),
+                (d,),
+                stats[2 * i],
+                stats[2 * i + 1],
+                flat[2 * i].float(),
+                flat[2 * i + 1].float(),
+                [True, True, True],
+            )
             cols.copy_(dxn)
             flat_grads += [dwn, dbn]
     dx = torch.mm(dqkvg, wqkvg)  # [M, d]
@@ -910,9 +847,7 @@ class _Fused(torch.autograd.Function):
     """x (the AdaLN's output), cond, pair, res (the residual or None), a key mask and the ten parameters -> the module's update (+ the residual)."""
 
     @staticmethod
-    def forward(
-        ctx, x, cond, pair, res, kmask, a, batch, length, heads, mask_kind, flat_eps, *params
-    ):
+    def forward(ctx, x, cond, pair, res, kmask, a, batch, length, heads, mask_kind, flat_eps, *params):
         out, *saved = _fwd(
             x,
             cond,
@@ -1024,19 +959,10 @@ def _fused_update(module, x, cond, pair, mask, res):
         cond.contiguous(),
         pair.contiguous(),
     )  # the AdaLN of fp32 masters may hand back fp32
-    if torch.is_grad_enabled() and any(
-        t.requires_grad
-        for t in (x, cond, pair, *([] if res is None else [res]), *params)
-    ):
-        return _Fused.apply(
-            x, cond, pair, res, kmask, a, batch, length, module.n_head, kind, _flat_eps(module), *params
-        )
+    if torch.is_grad_enabled() and any(t.requires_grad for t in (x, cond, pair, *([] if res is None else [res]), *params)):
+        return _Fused.apply(x, cond, pair, res, kmask, a, batch, length, module.n_head, kind, _flat_eps(module), *params)
     bias_in = None
-    if (
-        batch == 1
-        and kind in (0, 1)
-        and (module.n_head, x.shape[-1] // module.n_head, pair.shape[-1]) == _ATOM
-    ):
+    if batch == 1 and kind in (0, 1) and (module.n_head, x.shape[-1] // module.n_head, pair.shape[-1]) == _ATOM:
         cached = _cached_bias(module, pair, mask)
         bias_in = None if cached is None else cached.unsqueeze(0)
     return _fwd(
@@ -1073,10 +999,7 @@ _OPS_MIN_WORK = 2_000_000
 
 
 def _ops_wanted(query, key, value, bias, work: int, dim: int) -> bool:
-    if not (
-        torch.is_grad_enabled()
-        and any(t.requires_grad for t in (query, key, value, bias))
-    ):
+    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (query, key, value, bias))):
         return False
     return dim == 24 or work >= _OPS_MIN_WORK
 
@@ -1086,37 +1009,20 @@ def serves_ops(query, key, value, bias, mask, kernel_type="compute_efficient") -
     or none, the compute-efficient kernel type, and a call that needs gradients and is large enough for the core to win (see ``_OPS_MIN_WORK``)."""
     if kernel_type != "compute_efficient":
         return False
-    if (
-        not query.is_cuda
-        or query.ndim != 5
-        or any(t.dtype is not BF for t in (query, key, value, bias))
-    ):
+    if not query.is_cuda or query.ndim != 5 or any(t.dtype is not BF for t in (query, key, value, bias)):
         return False
     a, b, h, length, dim = query.shape
-    if (
-        key.shape != query.shape
-        or value.shape != query.shape
-        or tuple(bias.shape) != (b, h, length, length)
-        or dim not in (24, 32, 48)
-    ):
+    if key.shape != query.shape or value.shape != query.shape or tuple(bias.shape) != (b, h, length, length) or dim not in (24, 32, 48):
         return False
     if _mask_kind(mask, a, b, length) is None:
         return False
     if not _ops_wanted(query, key, value, bias, a * b * h * length * length, dim):
         return False
-    idx = (
-        query.device.index
-        if query.device.index is not None
-        else torch.cuda.current_device()
-    )
-    return (
-        _sm80().supported_plain(BF, _pad(length), h * _dpad(dim), h, idx) and _loads()
-    )
+    idx = query.device.index if query.device.index is not None else torch.cuda.current_device()
+    return _sm80().supported_plain(BF, _pad(length), h * _dpad(dim), h, idx) and _loads()
 
 
-def _stage_heads(
-    t: torch.Tensor, a: int, batch: int, length: int, padded: int, heads: int, dim: int
-) -> torch.Tensor:
+def _stage_heads(t: torch.Tensor, a: int, batch: int, length: int, padded: int, heads: int, dim: int) -> torch.Tensor:
     """[A, B, H, L, D] -> b-major token rows [B A Lp, H Dp] (zero past L and past D)."""
     dpad = _dpad(dim)
     t = t.permute(1, 0, 3, 2, 4)
@@ -1125,19 +1031,11 @@ def _stage_heads(
     return t.reshape(batch * a * padded, heads * dpad)
 
 
-def _unstage_heads(
-    t: torch.Tensor, a: int, batch: int, length: int, padded: int, heads: int, dim: int
-) -> torch.Tensor:
-    return (
-        t.view(batch, a, padded, heads, _dpad(dim))[:, :, :length, :, :dim]
-        .permute(1, 0, 3, 2, 4)
-        .contiguous()
-    )
+def _unstage_heads(t: torch.Tensor, a: int, batch: int, length: int, padded: int, heads: int, dim: int) -> torch.Tensor:
+    return t.view(batch, a, padded, heads, _dpad(dim))[:, :, :length, :, :dim].permute(1, 0, 3, 2, 4).contiguous()
 
 
-def _pack_bias(
-    bias: torch.Tensor, kmask, length: int, padded: int, heads: int, dim: int
-) -> torch.Tensor:
+def _pack_bias(bias: torch.Tensor, kmask, length: int, padded: int, heads: int, dim: int) -> torch.Tensor:
     """bf16 [B, H, Lp, Lp] in the core's raw units from the natural-unit bias (masked / padded keys at the masked fill, padded query rows 0)."""
     scale, fill = math.sqrt(dim), MASKED * math.sqrt(dim)
     bias = bias.contiguous()
@@ -1191,19 +1089,11 @@ def _ops_fwd(
     m = a * batch * padded
     n = a * padded
     dev = q.device
-    qs, ks, vs = (
-        _stage_heads(t, a, batch, length, padded, heads, dim) for t in (q, k, v)
-    )
-    braw = _pack_bias(
-        bias, kmask if mask_kind == 1 else None, length, padded, heads, dim
-    )
+    qs, ks, vs = (_stage_heads(t, a, batch, length, padded, heads, dim) for t in (q, k, v))
+    braw = _pack_bias(bias, kmask if mask_kind == 1 else None, length, padded, heads, dim)
     kpen = _penalties(cast(torch.Tensor, kmask), a, batch, length, padded) if mask_kind == 2 else None
     o = torch.empty(m, heads * dpad, device=dev, dtype=BF)
-    lse = (
-        torch.empty(batch * a, heads, padded, device=dev, dtype=torch.float32)
-        if save
-        else None
-    )
+    lse = torch.empty(batch * a, heads, padded, device=dev, dtype=torch.float32) if save else None
     for b in range(batch):
         rows = slice(b * n, (b + 1) * n)
         sm80.plain_forward(
@@ -1302,17 +1192,13 @@ def _ops_bwd(
             dv=dv[rows],
         )
         dbias[b].copy_(db[:, :length, :length])
-    return [
-        _unstage_heads(t, a, batch, length, padded, heads, dim) for t in (dq, dk, dv)
-    ] + [dbias]
+    return [_unstage_heads(t, a, batch, length, padded, heads, dim) for t in (dq, dk, dv)] + [dbias]
 
 
 class _OpsAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, bias, kmask, a, batch, length, heads, dim, mask_kind):
-        out, *saved = _ops_fwd(
-            q, k, v, bias, kmask, a, batch, length, heads, dim, mask_kind, True
-        )
+        out, *saved = _ops_fwd(q, k, v, bias, kmask, a, batch, length, heads, dim, mask_kind, True)
         ctx.save_for_backward(*saved)
         ctx.meta = (kmask, a, batch, length, heads, dim, mask_kind, bias.dtype)
         return out
@@ -1359,15 +1245,9 @@ def attention_ops(query, key, value, bias, mask):
     a, batch, heads, length, dim = query.shape
     kind = cast(int, _mask_kind(mask, a, batch, length))  # not None: serves() / serves_ops() refused such a mask
     kmask = None if kind == 0 else (mask[0] if mask.ndim == 3 and kind == 1 else mask)
-    if torch.is_grad_enabled() and any(
-        t.requires_grad for t in (query, key, value, bias)
-    ):
-        return _OpsAttention.apply(
-            query, key, value, bias, kmask, a, batch, length, heads, dim, kind
-        )
-    return _ops_fwd(
-        query, key, value, bias, kmask, a, batch, length, heads, dim, kind, False
-    )[0]
+    if torch.is_grad_enabled() and any(t.requires_grad for t in (query, key, value, bias)):
+        return _OpsAttention.apply(query, key, value, bias, kmask, a, batch, length, heads, dim, kind)
+    return _ops_fwd(query, key, value, bias, kmask, a, batch, length, heads, dim, kind, False)[0]
 
 
 # ================================================================================================================================== the opt-in pair-bias cache
@@ -1405,11 +1285,7 @@ def _atom_pair(module, pair) -> bool:
         and pair.shape[1] == pair.shape[2]
     ):
         return False
-    idx = (
-        pair.device.index
-        if pair.device.index is not None
-        else torch.cuda.current_device()
-    )
+    idx = pair.device.index if pair.device.index is not None else torch.cuda.current_device()
     sm80 = _sm80()
     return (
         sm80.supported_plain(BF, _pad(pair.shape[1]), heads * width, heads, idx)
@@ -1428,10 +1304,7 @@ def cache_pair_bias(module, pair, mask=None) -> bool:
     entry = getattr(module, _CACHE, None)
     buf = (
         entry[1]
-        if entry is not None
-        and entry[1].shape[-1] == padded
-        and entry[1].device == pair.device
-        and entry[1].dtype is pair.dtype
+        if entry is not None and entry[1].shape[-1] == padded and entry[1].device == pair.device and entry[1].dtype is pair.dtype
         else None
     )
     with torch.no_grad():
@@ -1456,12 +1329,7 @@ def clear_pair_bias(module) -> None:
 def _cached_bias(module, pair, mask):
     """The cached bias when this no-grad, eager call is the one that was cached, else None."""
     entry = getattr(module, _CACHE, None)
-    if (
-        entry is None
-        or torch.is_grad_enabled()
-        or torch.compiler.is_compiling()
-        or entry[0] != _cache_key(module, pair, mask)
-    ):
+    if entry is None or torch.is_grad_enabled() or torch.compiler.is_compiling() or entry[0] != _cache_key(module, pair, mask):
         return None
     return entry[1]
 
@@ -1474,9 +1342,7 @@ def delta(module, single, cond, pair, mask):
 
 def forward(module, single, cond, pair, mask):
     """``AugmentedAttentionPairBias.forward`` on the sm_80 path: ``single + delta`` with the residual inside the last pass; call ``serves`` first."""
-    return _fused_update(
-        module, module.ada_ln_in(single, cond), cond, pair, mask, single.contiguous()
-    )
+    return _fused_update(module, module.ada_ln_in(single, cond), cond, pair, mask, single.contiguous())
 
 
 __all__ = [

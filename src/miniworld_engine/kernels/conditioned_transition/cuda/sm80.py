@@ -65,24 +65,18 @@ def swiglu_bwd(dh: torch.Tensor, ab: torch.Tensor) -> tuple[torch.Tensor, torch.
     return dab, h
 
 
-def gate_res_fwd(
-    x: torch.Tensor | None, z: torch.Tensor, g: torch.Tensor
-) -> torch.Tensor:
+def gate_res_fwd(x: torch.Tensor | None, z: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
     """``y [M, d] = x + sigmoid(g[r % P]) z`` (x None: the update alone), z [M, d], g [P, d] (the gate logits), contiguous."""
     y = torch.empty_like(z)
     _ext().gate_res_fwd(x, z, g, y)
     return y
 
 
-def gate_res_bwd(
-    dy: torch.Tensor, z: torch.Tensor, g: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def gate_res_bwd(dy: torch.Tensor, z: torch.Tensor, g: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """``(dz, dg, pb)``: dz = sigmoid(g) dy, dg = dy z s (1 - s) [M, d] and pb [blocks, d] fp32 = the column sums of dg (add the rows for d bsc); one gate row per row."""
     m, d = z.shape
     dz, dg = torch.empty_like(z), torch.empty_like(z)
-    pb = torch.empty(
-        blocks_for(m, d, z.device), d, device=z.device, dtype=torch.float32
-    )
+    pb = torch.empty(blocks_for(m, d, z.device), d, device=z.device, dtype=torch.float32)
     _ext().gate_res_bwd(dy, z, g, dz, dg, pb)
     return dz, dg, pb
 
@@ -134,9 +128,7 @@ def atom_bwd_gate(
     dz, dg, dcond2 = (torch.empty_like(xa) for _ in range(3))
     hh = torch.empty(m, 256, device=xa.device, dtype=xa.dtype)
     dab = torch.empty(m, 512, device=xa.device, dtype=xa.dtype)
-    pbsc = torch.empty(
-        _ext().ct_bwd_grid(m), 128, device=xa.device, dtype=torch.float32
-    )
+    pbsc = torch.empty(_ext().ct_bwd_grid(m), 128, device=xa.device, dtype=torch.float32)
     _ext().ct_atom_bwd_gate(
         dy,
         z,
@@ -177,33 +169,19 @@ def _pack_indices(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     """(out_perm [128], unit_perm [256]): row s of the packed squeeze weight is output channel ``qf_channel(s)`` (the f1 row order), and column 32 c + 8 q + idx of a row is hidden unit
     32 c + 8 (2 (idx >> 2) + ((idx >> 1) & 1)) + 2 q + (idx & 1) (``ct_atom_fwd_tf32.cuh``: the units a lane's B fragments of chunk c need, contiguous)."""
     s = torch.arange(128, device=device)
-    out_perm = (
-        (s & ~63)
-        + 32 * ((s >> 5) & 1)
-        + 8 * ((s >> 1) & 3)
-        + 2 * ((s >> 3) & 3)
-        + (s & 1)
-    )
+    out_perm = (s & ~63) + 32 * ((s >> 5) & 1) + 8 * ((s >> 1) & 3) + 2 * ((s >> 3) & 3) + (s & 1)
     pos = torch.arange(256, device=device)
     c, q, idx = pos >> 5, (pos >> 3) & 3, pos & 7
     unit_perm = 32 * c + 8 * (2 * (idx >> 2) + ((idx >> 1) & 1)) + 2 * q + (idx & 1)
     return out_perm, unit_perm
 
 
-def pack_tf32(
-    wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+def pack_tf32(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """``(wab [512, 128], wsp [128, 256])`` for ``atom_fwd_tf32``: [Wa; Wb] and the squeeze weight Ws [128, 256], TF32-rounded, the squeeze weight permuted for the kernel."""
     out_perm, unit_perm = _pack_indices(ws.device)
     # the 8 inputs a lane reads of a row for 32 channels are stored as the pairs (e0, e4) (e1, e5) | (e2, e6) (e3, e7), as the AdaLN kernel's weights are (``adaln_tf32.cuh: load_weight128_tf32``)
-    col_perm = (
-        torch.arange(128, device=wa.device)
-        .view(16, 8)[:, [0, 4, 1, 5, 2, 6, 3, 7]]
-        .reshape(-1)
-    )
-    return tf32_round(torch.cat([wa, wb])[:, col_perm]), tf32_round(
-        ws[out_perm][:, unit_perm]
-    )
+    col_perm = torch.arange(128, device=wa.device).view(16, 8)[:, [0, 4, 1, 5, 2, 6, 3, 7]].reshape(-1)
+    return tf32_round(torch.cat([wa, wb])[:, col_perm]), tf32_round(ws[out_perm][:, unit_perm])
 
 
 def atom_fwd_tf32(

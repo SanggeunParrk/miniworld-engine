@@ -21,9 +21,13 @@ def ext():
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
-    return load_extension(name="token_pair_init_sm80", sources=[str(_dir / "token_pair_init_sm80.cu")],
-                          extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80"), f"-I{_dir}"], extra_cflags=["-std=c++17"],
-                          verbose=False)
+    return load_extension(
+        name="token_pair_init_sm80",
+        sources=[str(_dir / "token_pair_init_sm80.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80"), f"-I{_dir}"],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 #: the launchers' module globals: the H100 launcher module's, with ``ext`` this build (and this card's choices, set below)

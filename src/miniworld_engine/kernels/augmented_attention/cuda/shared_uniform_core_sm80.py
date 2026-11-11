@@ -44,9 +44,7 @@ def forward(
 ):
     mode = 2 if save else 3
     if out is None:
-        out = torch.empty(
-            samples * padded, heads * head_dim, device=q.device, dtype=torch.bfloat16
-        )
+        out = torch.empty(samples * padded, heads * head_dim, device=q.device, dtype=torch.bfloat16)
     if lse is None:
         lse = torch.empty(
             (samples, heads, padded) if save else (0,),

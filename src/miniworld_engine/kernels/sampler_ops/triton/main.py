@@ -13,6 +13,7 @@ fp32 coordinates ``[B, N, 3]``, one rigid motion per sample, ``mask`` ``[N]`` fp
 
 Division and square root are the IEEE ones (``div_rn`` / ``sqrt_rn``), the sums are fixed-order (partials of ``CHUNK`` atoms, then a tree): bitwise reproducible.
 """
+
 from __future__ import annotations
 
 import torch
@@ -23,10 +24,11 @@ from triton.language.extra import libdevice
 from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._shape_key import atom_key
 
-CHUNK = 1024                 # atoms per program of the partial-sum passes at most (a launch smaller than ~2 waves of programs halves it, see ``chunk_for``)
-_MIN_PROGRAMS = 264          # two waves of an H100
-PART = 16                    # floats per partial record
-
+CHUNK = (
+    1024  # atoms per program of the partial-sum passes at most (a launch smaller than ~2 waves of programs halves it, see ``chunk_for``)
+)
+_MIN_PROGRAMS = 264  # two waves of an H100
+PART = 16  # floats per partial record
 
 
 @triton.jit
@@ -36,9 +38,7 @@ def _psum(PART_PTR, b, C, k, CP: tl.constexpr):
     return tl.sum(tl.load(PART_PTR + (b * C + c) * 16 + k, mask=c < C, other=0.0), axis=0)
 
 
-@configured('sampler_ops_stats_triton',
-            key=["shape_key", "TWO"],
-            default=dict(BLOCK=512, num_warps=4, num_stages=1))
+@configured("sampler_ops_stats_triton", key=["shape_key", "TWO"], default=dict(BLOCK=512, num_warps=4, num_stages=1))
 @triton.jit
 def _stats(M, R, W, PARTS, n, TWO: tl.constexpr, CHUNK: tl.constexpr, BLOCK: tl.constexpr, shape_key):
     """PARTS[b, chunk] = (sum w, sum w m_xyz, [sum w r_xyz]) over the atoms of the chunk (sub-tiles of BLOCK atoms in order, then a tree sum)."""
@@ -71,12 +71,34 @@ def _stats(M, R, W, PARTS, n, TWO: tl.constexpr, CHUNK: tl.constexpr, BLOCK: tl.
         tl.store(base + 6, tl.sum(s6, axis=0))
 
 
-@configured('sampler_ops_augment_triton',
-            key=["shape_key"],
-            default=dict(BLOCK=512, num_warps=4, num_stages=1))
+@configured("sampler_ops_augment_triton", key=["shape_key"], default=dict(BLOCK=512, num_warps=4, num_stages=1))
 @triton.jit
-def _augment(P, W, PARTS, RV, TR, NOISE, SIGMA, SIGMA_NEXT, OUT, SC, n, C, gamma, gamma_min, sigma_min, sigma_max, noise_scale, variance_floor,
-             WINDOW: tl.constexpr, CLAMP: tl.constexpr, CHUNK: tl.constexpr, CP: tl.constexpr, BLOCK: tl.constexpr, shape_key):
+def _augment(
+    P,
+    W,
+    PARTS,
+    RV,
+    TR,
+    NOISE,
+    SIGMA,
+    SIGMA_NEXT,
+    OUT,
+    SC,
+    n,
+    C,
+    gamma,
+    gamma_min,
+    sigma_min,
+    sigma_max,
+    noise_scale,
+    variance_floor,
+    WINDOW: tl.constexpr,
+    CLAMP: tl.constexpr,
+    CHUNK: tl.constexpr,
+    CP: tl.constexpr,
+    BLOCK: tl.constexpr,
+    shape_key,
+):
     chunk = tl.program_id(0)
     b = tl.program_id(1).to(tl.int64)
     tot = tl.maximum(_psum(PARTS, b, C, 0, CP), 1e-6)
@@ -124,22 +146,44 @@ def _augment(P, W, PARTS, RV, TR, NOISE, SIGMA, SIGMA_NEXT, OUT, SC, n, C, gamma
         a0 = x * e0x + y * e1x + z * e2x
         a1 = x * e0y + y * e1y + z * e2y
         a2 = x * e0z + y * e1z + z * e2z
-        tl.store(OUT + o, libdevice.add_rn(libdevice.mul_rn(libdevice.add_rn(a0, tx), w), libdevice.mul_rn(mag, tl.load(NOISE + o, mask=ok, other=0.0))), mask=ok)
-        tl.store(OUT + o + 1, libdevice.add_rn(libdevice.mul_rn(libdevice.add_rn(a1, ty), w), libdevice.mul_rn(mag, tl.load(NOISE + o + 1, mask=ok, other=0.0))), mask=ok)
-        tl.store(OUT + o + 2, libdevice.add_rn(libdevice.mul_rn(libdevice.add_rn(a2, tz), w), libdevice.mul_rn(mag, tl.load(NOISE + o + 2, mask=ok, other=0.0))), mask=ok)
+        tl.store(
+            OUT + o,
+            libdevice.add_rn(libdevice.mul_rn(libdevice.add_rn(a0, tx), w), libdevice.mul_rn(mag, tl.load(NOISE + o, mask=ok, other=0.0))),
+            mask=ok,
+        )
+        tl.store(
+            OUT + o + 1,
+            libdevice.add_rn(
+                libdevice.mul_rn(libdevice.add_rn(a1, ty), w), libdevice.mul_rn(mag, tl.load(NOISE + o + 1, mask=ok, other=0.0))
+            ),
+            mask=ok,
+        )
+        tl.store(
+            OUT + o + 2,
+            libdevice.add_rn(
+                libdevice.mul_rn(libdevice.add_rn(a2, tz), w), libdevice.mul_rn(mag, tl.load(NOISE + o + 2, mask=ok, other=0.0))
+            ),
+            mask=ok,
+        )
 
 
-@configured('sampler_ops_cov_triton',
-            key=["shape_key"],
-            default=dict(BLOCK=512, num_warps=4, num_stages=1))
+@configured("sampler_ops_cov_triton", key=["shape_key"], default=dict(BLOCK=512, num_warps=4, num_stages=1))
 @triton.jit
 def _cov(M, R, W, PARTS, COV, n, C, CHUNK: tl.constexpr, CP: tl.constexpr, BLOCK: tl.constexpr, shape_key):
     """COV[b, chunk, 3p + q] = sum over the chunk of w (m_p - cm_p) (r_q - cr_q)."""
     chunk = tl.program_id(0)
     b = tl.program_id(1).to(tl.int64)
     tot = _psum(PARTS, b, C, 0, CP)
-    cm0, cm1, cm2 = tl.math.div_rn(_psum(PARTS, b, C, 1, CP), tot), tl.math.div_rn(_psum(PARTS, b, C, 2, CP), tot), tl.math.div_rn(_psum(PARTS, b, C, 3, CP), tot)
-    cr0, cr1, cr2 = tl.math.div_rn(_psum(PARTS, b, C, 4, CP), tot), tl.math.div_rn(_psum(PARTS, b, C, 5, CP), tot), tl.math.div_rn(_psum(PARTS, b, C, 6, CP), tot)
+    cm0, cm1, cm2 = (
+        tl.math.div_rn(_psum(PARTS, b, C, 1, CP), tot),
+        tl.math.div_rn(_psum(PARTS, b, C, 2, CP), tot),
+        tl.math.div_rn(_psum(PARTS, b, C, 3, CP), tot),
+    )
+    cr0, cr1, cr2 = (
+        tl.math.div_rn(_psum(PARTS, b, C, 4, CP), tot),
+        tl.math.div_rn(_psum(PARTS, b, C, 5, CP), tot),
+        tl.math.div_rn(_psum(PARTS, b, C, 6, CP), tot),
+    )
     z = tl.zeros([BLOCK], dtype=tl.float32)
     h00, h01, h02, h10, h11, h12, h20, h21, h22 = z, z, z, z, z, z, z, z, z
     for t in tl.static_range(0, CHUNK, BLOCK):
@@ -194,8 +238,66 @@ def _sq4(a00, a01, a02, a03, a10, a11, a12, a13, a20, a21, a22, a23, a30, a31, a
     s32 = a30 * a02 + a31 * a12 + a32 * a22 + a33 * a32
     s33 = a30 * a03 + a31 * a13 + a32 * a23 + a33 * a33
     tiny = tl.full([], 1.1754943508222875e-38, tl.float32)
-    am = tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.maximum(tl.abs(s00), tl.abs(s01)), tl.abs(s02)), tl.abs(s03)), tl.abs(s10)), tl.abs(s11)), tl.abs(s12)), tl.abs(s13)), tl.abs(s20)), tl.abs(s21)), tl.abs(s22)), tl.abs(s23)), tl.abs(s30)), tl.abs(s31)), tl.abs(s32)), tl.abs(s33)), tiny)
-    return tl.math.div_rn(s00, am), tl.math.div_rn(s01, am), tl.math.div_rn(s02, am), tl.math.div_rn(s03, am), tl.math.div_rn(s10, am), tl.math.div_rn(s11, am), tl.math.div_rn(s12, am), tl.math.div_rn(s13, am), tl.math.div_rn(s20, am), tl.math.div_rn(s21, am), tl.math.div_rn(s22, am), tl.math.div_rn(s23, am), tl.math.div_rn(s30, am), tl.math.div_rn(s31, am), tl.math.div_rn(s32, am), tl.math.div_rn(s33, am)
+    am = tl.maximum(
+        tl.maximum(
+            tl.maximum(
+                tl.maximum(
+                    tl.maximum(
+                        tl.maximum(
+                            tl.maximum(
+                                tl.maximum(
+                                    tl.maximum(
+                                        tl.maximum(
+                                            tl.maximum(
+                                                tl.maximum(
+                                                    tl.maximum(
+                                                        tl.maximum(
+                                                            tl.maximum(tl.maximum(tl.abs(s00), tl.abs(s01)), tl.abs(s02)), tl.abs(s03)
+                                                        ),
+                                                        tl.abs(s10),
+                                                    ),
+                                                    tl.abs(s11),
+                                                ),
+                                                tl.abs(s12),
+                                            ),
+                                            tl.abs(s13),
+                                        ),
+                                        tl.abs(s20),
+                                    ),
+                                    tl.abs(s21),
+                                ),
+                                tl.abs(s22),
+                            ),
+                            tl.abs(s23),
+                        ),
+                        tl.abs(s30),
+                    ),
+                    tl.abs(s31),
+                ),
+                tl.abs(s32),
+            ),
+            tl.abs(s33),
+        ),
+        tiny,
+    )
+    return (
+        tl.math.div_rn(s00, am),
+        tl.math.div_rn(s01, am),
+        tl.math.div_rn(s02, am),
+        tl.math.div_rn(s03, am),
+        tl.math.div_rn(s10, am),
+        tl.math.div_rn(s11, am),
+        tl.math.div_rn(s12, am),
+        tl.math.div_rn(s13, am),
+        tl.math.div_rn(s20, am),
+        tl.math.div_rn(s21, am),
+        tl.math.div_rn(s22, am),
+        tl.math.div_rn(s23, am),
+        tl.math.div_rn(s30, am),
+        tl.math.div_rn(s31, am),
+        tl.math.div_rn(s32, am),
+        tl.math.div_rn(s33, am),
+    )
 
 
 @triton.jit
@@ -218,7 +320,8 @@ def _horn(sxx, sxy, sxz, syx, syy, syz, szx, szy, szz):
     m10, m20, m30, m21, m31, m32 = n01, n02, n03, n12, n13, n23
     for _ in tl.static_range(12):
         m00, m01, m02, m03, m10, m11, m12, m13, m20, m21, m22, m23, m30, m31, m32, m33 = _sq4(
-            m00, m01, m02, m03, m10, m11, m12, m13, m20, m21, m22, m23, m30, m31, m32, m33)
+            m00, m01, m02, m03, m10, m11, m12, m13, m20, m21, m22, m23, m30, m31, m32, m33
+        )
     # the column of largest norm (the first one on a tie) is the quaternion up to scale and sign
     k0 = m00 * m00 + m10 * m10 + m20 * m20 + m30 * m30
     k1 = m01 * m01 + m11 * m11 + m21 * m21 + m31 * m31
@@ -243,22 +346,36 @@ def _horn(sxx, sxy, sxz, syx, syy, syz, szx, szy, szz):
     r20 = 2 * (z * x - w * y)
     r21 = 2 * (z * y + w * x)
     r22 = w * w - x * x - y * y + z * z
-    return r00, r10, r20, r01, r11, r21, r02, r12, r22     # row-major rot, transposed: rot[a, c] = Q[c, a]
+    return r00, r10, r20, r01, r11, r21, r02, r12, r22  # row-major rot, transposed: rot[a, c] = Q[c, a]
 
 
-@configured('sampler_ops_align_triton',
-            key=["shape_key"],
-            default=dict(BLOCK=512, num_warps=4, num_stages=1))
+@configured("sampler_ops_align_triton", key=["shape_key"], default=dict(BLOCK=512, num_warps=4, num_stages=1))
 @triton.jit
 def _align(M, R, PARTS, COV, SC, SIGMA_NEXT, OUT, step_scale, n, C, CHUNK: tl.constexpr, CP: tl.constexpr, BLOCK: tl.constexpr, shape_key):
     chunk = tl.program_id(0)
     b = tl.program_id(1).to(tl.int64)
     tot = _psum(PARTS, b, C, 0, CP)
-    cm0, cm1, cm2 = tl.math.div_rn(_psum(PARTS, b, C, 1, CP), tot), tl.math.div_rn(_psum(PARTS, b, C, 2, CP), tot), tl.math.div_rn(_psum(PARTS, b, C, 3, CP), tot)
-    cr0, cr1, cr2 = tl.math.div_rn(_psum(PARTS, b, C, 4, CP), tot), tl.math.div_rn(_psum(PARTS, b, C, 5, CP), tot), tl.math.div_rn(_psum(PARTS, b, C, 6, CP), tot)
+    cm0, cm1, cm2 = (
+        tl.math.div_rn(_psum(PARTS, b, C, 1, CP), tot),
+        tl.math.div_rn(_psum(PARTS, b, C, 2, CP), tot),
+        tl.math.div_rn(_psum(PARTS, b, C, 3, CP), tot),
+    )
+    cr0, cr1, cr2 = (
+        tl.math.div_rn(_psum(PARTS, b, C, 4, CP), tot),
+        tl.math.div_rn(_psum(PARTS, b, C, 5, CP), tot),
+        tl.math.div_rn(_psum(PARTS, b, C, 6, CP), tot),
+    )
     t00, t01, t02, t10, t11, t12, t20, t21, t22 = _horn(
-        _psum(COV, b, C, 0, CP), _psum(COV, b, C, 1, CP), _psum(COV, b, C, 2, CP), _psum(COV, b, C, 3, CP), _psum(COV, b, C, 4, CP),
-        _psum(COV, b, C, 5, CP), _psum(COV, b, C, 6, CP), _psum(COV, b, C, 7, CP), _psum(COV, b, C, 8, CP))
+        _psum(COV, b, C, 0, CP),
+        _psum(COV, b, C, 1, CP),
+        _psum(COV, b, C, 2, CP),
+        _psum(COV, b, C, 3, CP),
+        _psum(COV, b, C, 4, CP),
+        _psum(COV, b, C, 5, CP),
+        _psum(COV, b, C, 6, CP),
+        _psum(COV, b, C, 7, CP),
+        _psum(COV, b, C, 8, CP),
+    )
     sigma_hat = tl.load(SC)
     k = libdevice.mul_rn(step_scale, libdevice.sub_rn(tl.load(SIGMA_NEXT), sigma_hat))
     for t in tl.static_range(0, CHUNK, BLOCK):
@@ -280,9 +397,7 @@ def _align(M, R, PARTS, COV, SC, SIGMA_NEXT, OUT, step_scale, n, C, CHUNK: tl.co
         tl.store(OUT + o + 2, libdevice.add_rn(al2, libdevice.mul_rn(k, d2)), mask=ok)
 
 
-@configured('sampler_ops_pool_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_C=256, num_warps=2, num_stages=1))
+@configured("sampler_ops_pool_triton", key=["shape_key"], default=dict(BLOCK_C=256, num_warps=2, num_stages=1))
 @triton.jit
 def _pool(X, IDX, GM, AM, OUT, A, T, R, C, BLOCK_C: tl.constexpr, shape_key):
     """OUT[s, t, c] = sum_a m[t, a] relu(g[t, a] x[s, idx[t, a], c]) / max(sum_a m[t, a], 1e-10), bf16; the atoms in order, as the CUDA kernel."""
@@ -328,7 +443,9 @@ def _cp(c: int) -> int:
     return max(2, triton.next_power_of_2(c))
 
 
-def portable_augment_noise(coords, mask, rv, tr, noise, sigma, sigma_next, *, window, gamma, gamma_min, sigma_min, sigma_max, noise_scale, variance_floor, clamp):
+def portable_augment_noise(
+    coords, mask, rv, tr, noise, sigma, sigma_next, *, window, gamma, gamma_min, sigma_min, sigma_max, noise_scale, variance_floor, clamp
+):
     """``(noisy [B, N, 3], sc [4])`` as ``cuda.augment_noise``: ``sc[0] = sigma_hat``, ``sc[1]`` the noise magnitude."""
     _check(coords, "coords", 3)
     _check(mask, "mask", 1)
@@ -341,8 +458,31 @@ def portable_augment_noise(coords, mask, rv, tr, noise, sigma, sigma_next, *, wi
     sc = torch.empty(4, device=coords.device, dtype=torch.float32)
     key = _key(N, B)
     _stats[(C, B)](coords, coords, mask, parts, N, TWO=0, CHUNK=chunk, shape_key=key)
-    _augment[(C, B)](coords, mask, parts, rv, tr, noise, sigma, sigma_next, noisy, sc, N, C, float(1.0 + gamma), float(gamma_min), float(sigma_min),
-                     float(sigma_max), float(noise_scale), float(variance_floor), WINDOW=int(window), CLAMP=int(bool(clamp)), CHUNK=chunk, CP=_cp(C), shape_key=key)
+    _augment[(C, B)](
+        coords,
+        mask,
+        parts,
+        rv,
+        tr,
+        noise,
+        sigma,
+        sigma_next,
+        noisy,
+        sc,
+        N,
+        C,
+        float(1.0 + gamma),
+        float(gamma_min),
+        float(sigma_min),
+        float(sigma_max),
+        float(noise_scale),
+        float(variance_floor),
+        WINDOW=int(window),
+        CLAMP=int(bool(clamp)),
+        CHUNK=chunk,
+        CP=_cp(C),
+        shape_key=key,
+    )
     return noisy, sc
 
 
@@ -375,7 +515,9 @@ def portable_align_euler(noisy, denoised, mask, sc, sigma_next, step_scale):
     C = parts.shape[1]
     cov = portable_cov(noisy, denoised, mask, parts)
     out = torch.empty_like(noisy)
-    _align[(C, B)](noisy, denoised, parts, cov, sc, sigma_next, out, float(step_scale), N, C, CHUNK=chunk_for(N, B), CP=_cp(C), shape_key=_key(N, B))
+    _align[(C, B)](
+        noisy, denoised, parts, cov, sc, sigma_next, out, float(step_scale), N, C, CHUNK=chunk_for(N, B), CP=_cp(C), shape_key=_key(N, B)
+    )
     return out
 
 

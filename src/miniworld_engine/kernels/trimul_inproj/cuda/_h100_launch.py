@@ -64,9 +64,7 @@ __all__ = [
 ]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(
-    os.path.join(HERE, "..", "..")
-)  # <tree>/python/trimul_native/ -> <tree>/ (source tree and sealed package alike)
+ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))  # <tree>/python/trimul_native/ -> <tree>/ (source tree and sealed package alike)
 DEFAULT_BUILD_DIR = os.environ.get("TRIMUL_NATIVE_BUILD_DIR") or os.path.join(
     ROOT, "build"
 )  # env override: load cubins built elsewhere (same manifest layout)
@@ -240,6 +238,7 @@ def _layout_format(schema):
 @lru_cache(None)
 def _tensor_type():
     import torch
+
     return torch.Tensor
 
 
@@ -301,6 +300,7 @@ class _Packed(object):
     Only raw host buffers are pooled, per thread; live packs never share storage.
     No tensor/activation or CUDA stream is retained in the pool.
     """
+
     __slots__ = ("bufs", "array", "_pool", "_key", "_storage")
 
     def __init__(self, args):
@@ -372,23 +372,15 @@ class ArgPack(object):
             self.offsets.append(total)
             self.sizes.append(len(b))
             self.aligns.append(al)
-            self.field_offsets.append(
-                _struct_field_offsets(a) if isinstance(a, Struct) else None
-            )
+            self.field_offsets.append(_struct_field_offsets(a) if isinstance(a, Struct) else None)
             total += len(b)
         self.raw = (ctypes.c_uint8 * (total + 64))()
         self.base = (ctypes.addressof(self.raw) + 63) & ~63
         for (b, _), off in zip(blobs, self.offsets):
             ctypes.memmove(self.base + off, b, len(b))
-        self.array = (ctypes.c_void_p * max(len(blobs), 1))(
-            *[self.base + off for off in self.offsets]
-        )
+        self.array = (ctypes.c_void_p * max(len(blobs), 1))(*[self.base + off for off in self.offsets])
         self.keep = [a for a in args if isinstance(a, TensorMap)] + [
-            f
-            for a in args
-            if isinstance(a, Struct)
-            for f in a.fields
-            if isinstance(f, TensorMap)
+            f for a in args if isinstance(a, Struct) for f in a.fields if isinstance(f, TensorMap)
         ]
 
     def _addr(self, slot, field=None):
@@ -404,11 +396,7 @@ class ArgPack(object):
         return list(self.field_offsets[slot] or [])
 
     def set_ptr(self, slot, tensor_or_int, field=None):
-        v = (
-            tensor_or_int
-            if isinstance(tensor_or_int, int)
-            else tensor_or_int.data_ptr()
-        )
+        v = tensor_or_int if isinstance(tensor_or_int, int) else tensor_or_int.data_ptr()
         ctypes.c_uint64.from_address(self._addr(slot, field)).value = v
 
     def set_i32(self, slot, v, field=None):
@@ -446,9 +434,7 @@ def _torch():
     try:
         import torch
     except ImportError as e:
-        raise LoadError(
-            "driver_unavailable:torch_not_importable", str(e).split("\n")[0][:120]
-        )
+        raise LoadError("driver_unavailable:torch_not_importable", str(e).split("\n")[0][:120])
     if not torch.cuda.is_available():
         raise LoadError("driver_unavailable:no_cuda_device")
     return torch
@@ -526,9 +512,7 @@ class Kernel(object):
         }
 
     def set_max_dynamic_smem(self, nbytes):
-        self.unit.drv.func_set_attribute(
-            self.handle, _driver.FUNC_ATTR["MAX_DYNAMIC_SHARED_SIZE_BYTES"], int(nbytes)
-        )
+        self.unit.drv.func_set_attribute(self.handle, _driver.FUNC_ATTR["MAX_DYNAMIC_SHARED_SIZE_BYTES"], int(nbytes))
         self.max_dynamic_smem = int(nbytes)
 
     def launch(self, grid, block, args, smem=0, stream=None):
@@ -537,16 +521,9 @@ class Kernel(object):
         g = tuple(int(x) for x in grid) + (1,) * (3 - len(grid))
         b = tuple(int(x) for x in block) + (1,) * (3 - len(block))
         if self.max_dynamic_smem is not None and smem > self.max_dynamic_smem:
-            raise ValueError(
-                "%s: dynamic smem %d B > the opted-in maximum %d B"
-                % (self.name, smem, self.max_dynamic_smem)
-            )
+            raise ValueError("%s: dynamic smem %d B > the opted-in maximum %d B" % (self.name, smem, self.max_dynamic_smem))
         packed = _Packed(args)
-        st = (
-            current_stream_handle(self.unit.device_index)
-            if stream is None
-            else int(stream)
-        )
+        st = current_stream_handle(self.unit.device_index) if stream is None else int(stream)
         self.unit.drv.launch_kernel(self.handle, g, b, int(smem), st, packed.array)
         return None
 
@@ -561,9 +538,7 @@ class Kernel(object):
         serialisation attribute (cuLaunchKernelEx) -- only for kernels compiled with griddepcontrol.wait before their dependent accesses."""
         st = current_stream_handle(self.unit.device_index) if stream is None else stream
         if pdl:
-            self.unit.drv.launch_kernel_ex(
-                self.handle, grid, block, smem, st, pack.array, pdl=True
-            )
+            self.unit.drv.launch_kernel_ex(self.handle, grid, block, smem, st, pack.array, pdl=True)
         else:
             self.unit.drv.launch_kernel(self.handle, grid, block, smem, st, pack.array)
 
@@ -591,9 +566,7 @@ class Unit(object):
                 try:
                     h = self.drv.module_get_function(self.module, fname)
                 except _driver.DriverError as e:
-                    raise LoadError(
-                        "no_kernel:%s" % fname, "%s in %s" % (e.name, self.cubin_path)
-                    )
+                    raise LoadError("no_kernel:%s" % fname, "%s in %s" % (e.name, self.cubin_path))
                 k = Kernel(self, fname, h)
                 want = (self.entry.get("kernels") or {}).get(fname, {})
                 if want.get("max_dynamic_smem"):
@@ -610,8 +583,7 @@ class Unit(object):
         for fname, want in sorted((self.entry.get("kernels") or {}).items()):
             k = self.kernel(fname)
             ok = want.get("regs") in (None, k.regs) and (k.local_bytes == 0) == (
-                int(want.get("spill_stores", 0) or 0) == 0
-                and int(want.get("stack", 0) or 0) == 0
+                int(want.get("spill_stores", 0) or 0) == 0 and int(want.get("stack", 0) or 0) == 0
             )
             out[fname] = {
                 "regs": k.regs,
@@ -642,9 +614,7 @@ def load_unit(unit, arch=None, device=None, build_dir=None, verify=True):
         raise LoadError("no_cubin:%s" % arch, "%s absent" % cubin_path)
     try:
         entry = (
-            _manifest.verify_unit(
-                build_dir, unit, arch, check_sources=True, source_root=ROOT
-            )
+            _manifest.verify_unit(build_dir, unit, arch, check_sources=True, source_root=ROOT)
             if verify  # sources resolve against THIS tree's csrc/
             else _manifest.entry(build_dir, unit, arch)
         )
@@ -683,12 +653,10 @@ _TMAP_DTYPE_OF_TORCH = {
 
 
 @lru_cache(maxsize=8192)
-def _encoded_tensor_map(drv, context, dtype, rank, address, dims, strides,
-                        box, elem_strides, interleave, swizzle, l2, oob):
+def _encoded_tensor_map(drv, context, dtype, rank, address, dims, strides, box, elem_strides, interleave, swizzle, l2, oob):
     # Cache descriptor bytes only, never tensors or their allocations. Address,
     # full layout, options and CUDA context identify the encoding, not contents.
-    return drv.tensor_map_encode_tiled(dtype, rank, address, dims, strides,
-                                       box, elem_strides, interleave, swizzle, l2, oob)
+    return drv.tensor_map_encode_tiled(dtype, rank, address, dims, strides, box, elem_strides, interleave, swizzle, l2, oob)
 
 
 _map_scope = threading.local()
@@ -720,13 +688,23 @@ def _map_spec(tdt, esz, dims, strides, box, elements, swizzle, interleave, l2, o
     if box[0] * esz % 16:
         raise ValueError("tensor_map: innermost box must be a multiple of 16 bytes")
     es = tuple(int(e) for e in elements) if elements else (1,) * rank
-    return (_driver.TMAP_DTYPE[tdt], rank, dims, strides, box, es,
-            _driver.TMAP_INTERLEAVE[interleave], _driver.TMAP_SWIZZLE[swizzle],
-            _driver.TMAP_L2[l2], _driver.TMAP_OOB[oob])
+    return (
+        _driver.TMAP_DTYPE[tdt],
+        rank,
+        dims,
+        strides,
+        box,
+        es,
+        _driver.TMAP_INTERLEAVE[interleave],
+        _driver.TMAP_SWIZZLE[swizzle],
+        _driver.TMAP_L2[l2],
+        _driver.TMAP_OOB[oob],
+    )
 
 
-def tensor_map(tensor, box, dims=None, strides_bytes=None, swizzle="none",
-               interleave="none", l2="128B", oob="none", elem_strides=None, dtype=None):
+def tensor_map(
+    tensor, box, dims=None, strides_bytes=None, swizzle="none", interleave="none", l2="128B", oob="none", elem_strides=None, dtype=None
+):
     """Encode a TMA descriptor; validate fixed metadata once, read the live address.
 
     Returns a TensorMap retaining the input tensor. Descriptor caches retain only
@@ -750,14 +728,21 @@ def tensor_map(tensor, box, dims=None, strides_bytes=None, swizzle="none",
     address = tensor.data_ptr()
     if address % 16:
         raise ValueError("tensor_map: base address not 16-byte aligned")
-    spec = _map_spec(tdt, esz, tuple(dims),
-                     None if strides_bytes is None else tuple(strides_bytes), tuple(box),
-                     tuple(elem_strides) if elem_strides else (), swizzle, interleave, l2, oob)
+    spec = _map_spec(
+        tdt,
+        esz,
+        tuple(dims),
+        None if strides_bytes is None else tuple(strides_bytes),
+        tuple(box),
+        tuple(elem_strides) if elem_strides else (),
+        swizzle,
+        interleave,
+        l2,
+        oob,
+    )
     code, rank, dims, strides, box, es, interleave_code, swizzle_code, l2_code, oob_code = spec
-    raw = _encoded_tensor_map(drv, context, code, rank, address, dims, strides, box, es,
-                              interleave_code, swizzle_code, l2_code, oob_code)
-    return TensorMap(raw, keep=tensor, spec={"dtype":tdt, "dims":dims,
-                     "strides_bytes":strides, "box":box, "swizzle":swizzle})
+    raw = _encoded_tensor_map(drv, context, code, rank, address, dims, strides, box, es, interleave_code, swizzle_code, l2_code, oob_code)
+    return TensorMap(raw, keep=tensor, spec={"dtype": tdt, "dims": dims, "strides_bytes": strides, "box": box, "swizzle": swizzle})
 
 
 def tensor_map_cached(cache, tensor, box, **kw):
@@ -776,9 +761,7 @@ def tensor_map_cached(cache, tensor, box, **kw):
     tm = cache.get(key)
     if tm is None:
         tm = tensor_map(tensor, box, **kw)
-        tm = TensorMap(
-            tm.raw, keep=None, spec=tm.spec
-        )  # the cache must not pin the tensor: the key already names its address
+        tm = TensorMap(tm.raw, keep=None, spec=tm.spec)  # the cache must not pin the tensor: the key already names its address
         cache[key] = tm
     return tm
 
@@ -812,9 +795,7 @@ class BlockDriver(object):
             raise LoadError("load:%s" % e.name, str(e))
 
     def load_unit(self, name, build_dir=None, verify=True):
-        return load_unit(
-            name, device=self.device_index, build_dir=build_dir, verify=verify
-        ).module
+        return load_unit(name, device=self.device_index, build_dir=build_dir, verify=verify).module
 
     def function(self, module, name, smem_bytes=0):
         try:
@@ -822,9 +803,7 @@ class BlockDriver(object):
         except _driver.DriverError as e:
             raise LoadError("no_kernel:%s" % name, str(e))
         if int(smem_bytes) > 48 * 1024:
-            self.drv.func_set_attribute(
-                fn, _driver.FUNC_ATTR["MAX_DYNAMIC_SHARED_SIZE_BYTES"], int(smem_bytes)
-            )
+            self.drv.func_set_attribute(fn, _driver.FUNC_ATTR["MAX_DYNAMIC_SHARED_SIZE_BYTES"], int(smem_bytes))
         return fn
 
     def attrs(self, fn):

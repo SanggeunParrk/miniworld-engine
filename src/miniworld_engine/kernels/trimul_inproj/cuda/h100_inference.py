@@ -27,7 +27,8 @@ class _Kernels(K.Kernels):
         dict per call re-encoded every descriptor and argument pack on the host (~0.2 ms of the ~0.5 ms a call took, 2026-10-30);
         pointers that move between calls (z, planes, output) are re-patched by K1 / K3 themselves, so only the host work is saved."""
         key = tuple(t.data_ptr() for t in w.get("wq", ())) + tuple(
-            w[k].data_ptr() for k in ("w1", "ln_in_w", "ln_in_b", "ln_out_w", "ln_out_b", "wo", "wg") if k in w)
+            w[k].data_ptr() for k in ("w1", "ln_in_w", "ln_in_b", "ln_out_w", "ln_out_b", "wo", "wg") if k in w
+        )
         cache = self._plans.get(key)
         if cache is None:
             cache = self._plans[key] = {}
@@ -46,10 +47,7 @@ class _Kernels(K.Kernels):
             defs = json.loads((inc / "defines.json").read_text())
             if self.native_residual:
                 defs["TMN_K3W_NATIVE_RESIDUAL"] = 1
-            source = (
-                '#include "tmn_kernels.cuh"\n#define TMN_CZ %d\n#define TMN_CH %d\n#include "tmn_sm90_unit.cuh"\n'
-                % (cz, ch)
-            )
+            source = '#include "tmn_kernels.cuh"\n#define TMN_CZ %d\n#define TMN_CH %d\n#include "tmn_sm90_unit.cuh"\n' % (cz, ch)
             flags = [
                 "-std=c++17",
                 "--expt-relaxed-constexpr",
@@ -137,16 +135,21 @@ def unpack_trimul(config):
 
 def _select_config(x, weights, mask, direction, eps):
     grid = trimul_candidates(x.shape[-1], weights[0].shape[0], x.shape[1], direction)
-    if (x.shape[-1] == 128 and weights[0].shape[0] == 256
-            and x.shape[1] == 128 and direction == 0):
+    if x.shape[-1] == 128 and weights[0].shape[0] == 256 and x.shape[1] == 128 and direction == 0:
         # L128: 128-token CTAs cover 128 of the 132 SMs, versus 86 CTAs
         # with the wide default. The bounded paired Graph search selected
         # four weight slots; retain the existing output tile and live packing.
         short = dict(grid[0], k1_0=2, k1_1=64, k1_2=4, k1_3=2)
         grid = [short, *[c for c in grid if c != short]]
     run = lambda c: _run_inference(x, weights, mask, direction, eps, c)
-    dims = {"B": x.shape[0], "L": x.shape[1], "CZ": x.shape[-1], "CH": weights[0].shape[0], "DIR": direction,
-            "MASK": 0 if mask is None else mask.ndim}
+    dims = {
+        "B": x.shape[0],
+        "L": x.shape[1],
+        "CZ": x.shape[-1],
+        "CH": weights[0].shape[0],
+        "DIR": direction,
+        "MASK": 0 if mask is None else mask.ndim,
+    }
     return choose("trimul_inproj", "trimul_fwd_sm90_cuda", dims, x.dtype, grid, device=x.device, near=("B", "L"), run=run)
 
 
@@ -179,17 +182,22 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
             wmap = {"wq": quad}
         elif cz in (64, 128) or native_residual or T.cuda_aux_enabled():
             from ._h100_pack import pack_into_cuda
+
             packed = x.new_empty((4 * ch, cz))
             pack_into_cuda(packed, *quad)
             wmap = {"w1": packed}
         else:
-            wmap = {"w1": torch.stack(
-                (
-                    torch.cat((wlg, wrg)).reshape(-1, 32, cz),
-                    torch.cat((wl, wr)).reshape(-1, 32, cz),
-                ),
-                1,
-            ).reshape(4 * ch, cz).contiguous()}
+            wmap = {
+                "w1": torch.stack(
+                    (
+                        torch.cat((wlg, wrg)).reshape(-1, 32, cz),
+                        torch.cat((wl, wr)).reshape(-1, 32, cz),
+                    ),
+                    1,
+                )
+                .reshape(4 * ch, cz)
+                .contiguous()
+            }
         w = {
             **wmap,
             "ln_in_w": gi,
@@ -201,7 +209,7 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
         }
         ab = x.new_empty((2 * ch, rows, npad))
         tri = x.new_empty((ch, rows, npad))
-        out = torch.empty_like(z) if dest is None else dest.view(z.shape)   # dest: a caller-owned buffer like x (chunked batches)
+        out = torch.empty_like(z) if dest is None else dest.view(z.shape)  # dest: a caller-owned buffer like x (chunked batches)
         cache = kk.plans(w)
         kk.k1(
             z,
@@ -217,7 +225,7 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
             eps=eps,
             cache=cache,
             token_mask=mask is not None and mask.ndim == 1,
-            rows=None if bsz == 1 else rows,   # one sample: N rows, planes padded to Np
+            rows=None if bsz == 1 else rows,  # one sample: N rows, planes padded to Np
         )
         # [c, B N, N] -> [c B, N, N]: the samples join the channel planes in cuBLAS's batch dim (a view; B = 1 is the same shape as before)
         fold = lambda t: t.view(-1, npad, npad)

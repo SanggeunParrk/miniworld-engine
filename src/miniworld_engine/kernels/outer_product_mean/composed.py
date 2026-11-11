@@ -33,7 +33,7 @@ def inference(module, msa, mask, token_asym_id=None, residual=None):
     G, K = module.groups, module.group_width
     m = module.ln_msa(msa).reshape(B * S * N, -1)
     keep = None if mask is None else mask.reshape(B * S * N, 1).to(m.dtype)
-    if keep is not None and module.to_left.bias is None:   # mask (W m) = W (mask m)
+    if keep is not None and module.to_left.bias is None:  # mask (W m) = W (mask m)
         m = m * keep
 
     def project(linear):
@@ -44,7 +44,7 @@ def inference(module, msa, mask, token_asym_id=None, residual=None):
         return out.view(B, S, N * K)
 
     left, right = project(module.to_left), project(module.to_right)
-    prod = torch.bmm(left.transpose(1, 2), right)    # [b, (i k), (j l)]
+    prod = torch.bmm(left.transpose(1, 2), right)  # [b, (i k), (j l)]
     rows = cuda.gather(prod, G, K).view(B, N, N, K * K)
     mf = (mask if mask is not None else torch.ones(B, S, N, dtype=torch.bool, device=msa.device)).float()
     dmin, doff = opm_train.divisor_params(module, S)
@@ -54,7 +54,6 @@ def inference(module, msa, mask, token_asym_id=None, residual=None):
     if module.mask_interchain and token_asym_id is not None:
         pair = pair * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(pair.dtype)
     return residual + pair if residual is not None else pair
-
 
 
 def biased_wide_serves(module, msa, mask) -> bool:
@@ -85,30 +84,48 @@ def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
         mk = mk != 0
     from miniworld_engine.kernels import _capture
 
-    params = [module.ln_msa.weight, module.ln_msa.bias, module.to_left.weight, module.to_right.weight,
-              module.to_out.weight, module.to_out.bias, module.to_left.bias, module.to_right.bias]
+    params = [
+        module.ln_msa.weight,
+        module.ln_msa.bias,
+        module.to_left.weight,
+        module.to_right.weight,
+        module.to_out.weight,
+        module.to_out.bias,
+        module.to_left.bias,
+        module.to_right.bias,
+    ]
     if cm == 64 and cz == 128 and all(t.is_contiguous() and t.dtype in (torch.float32, bf) for t in params):
         # one packing launch for the LayerNorm affine, the bf16 weights, the rounded bias and the projection biases (was six casts and a cat),
         # made once while the weights are unchanged
         def packed():
             gam, bet, wa16, wb16, wo16, ob, _, _, pbias = ext.opm_native_pack(params[:6], True, params[6], params[7])
             return gam, bet, wa16, wb16, wo16, ob, pbias
+
         forms = packed
     else:
+
         def converted():
-            return (module.ln_msa.weight.float().contiguous(), module.ln_msa.bias.float().contiguous(),
-                    module.to_left.weight.to(bf).contiguous(), module.to_right.weight.to(bf).contiguous(),
-                    module.to_out.weight.to(bf).contiguous(), module.to_out.bias.to(bf).float().contiguous(),
-                    torch.cat([module.to_left.bias, module.to_right.bias]).float().contiguous())
+            return (
+                module.ln_msa.weight.float().contiguous(),
+                module.ln_msa.bias.float().contiguous(),
+                module.to_left.weight.to(bf).contiguous(),
+                module.to_right.weight.to(bf).contiguous(),
+                module.to_out.weight.to(bf).contiguous(),
+                module.to_out.bias.to(bf).float().contiguous(),
+                torch.cat([module.to_left.bias, module.to_right.bias]).float().contiguous(),
+            )
+
         forms = converted
     gam, bet, wa16, wb16, wo_epi, bo_epi, pbias = _capture.param_forms("opm_biased_wide", params, forms)
     # the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table): no count kernel
-    dkw = {} if (dmin, doff) == (1.0, 0.0) else {"dmin": dmin, "doff": doff}   # the pair divisor max(count, dmin) + doff
+    dkw = {} if (dmin, doff) == (1.0, 0.0) else {"dmin": dmin, "doff": doff}  # the pair divisor max(count, dmin) + doff
     a2, bt, _, _, norm = ext.opm_prologue_wide(m, mk, gam, bet, wa16, wb16, float(getattr(module.ln_msa, "eps", 1e-5)), False, pbias, False)
     interchain = module.mask_interchain and token_asym_id is not None
     res = None if interchain else residual
-    if fused:   # the products stay in shared memory (norm is the mask bit table here)
-        z = ext.opm_fused_infer(a2, bt, norm, opm_train._fused_weight(module.to_out.weight), bo_epi, res, int(not module.normalize_before_proj), **dkw)
+    if fused:  # the products stay in shared memory (norm is the mask bit table here)
+        z = ext.opm_fused_infer(
+            a2, bt, norm, opm_train._fused_weight(module.to_out.weight), bo_epi, res, int(not module.normalize_before_proj), **dkw
+        )
     else:
         z = ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo_epi, bo_epi, n, n, res, int(not module.normalize_before_proj), **dkw)
     z = z.view(1, n, n, cz)

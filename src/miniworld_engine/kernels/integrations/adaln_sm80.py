@@ -63,31 +63,19 @@ def _period(x: torch.Tensor, cond: torch.Tensor, grad: bool) -> int | None:
     if clead == lead:
         shared = len(lead) > 1 and lead[0] > 1 and cond.stride(0) == 0
         return m if (grad or not shared) else m // lead[0]  # pyright: ignore[reportGeneralTypeIssues]  -- `shared` (len(lead) > 1 and ...) is narrowed as an aliased condition and misnarrows lead to tuple[()]
-    if (
-        not grad
-        and len(lead) > 1
-        and lead[0] > 1
-        and clead[0] == 1
-        and clead[1:] == lead[1:]
-    ):
+    if not grad and len(lead) > 1 and lead[0] > 1 and clead[0] == 1 and clead[1:] == lead[1:]:
         return m // lead[0]
     return None
 
 
-def serves(
-    module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool
-) -> bool:
+def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool) -> bool:
     """Whether ``module`` (an ``AdaptiveLayerNorm`` whose backend resolved to the engine's kernels) runs this call on the sm_80 path: ``compute_dtype`` is the dtype the module
     casts x / cond / the weights to, ``grad`` its ``needs_backward``."""
     if not x.is_cuda or not cond.is_cuda or compute_dtype not in (BF, torch.float32):
         return False
     if x.shape[-1] not in WIDTHS or cond.shape[-1] not in WIDTHS or x.numel() == 0:
         return False
-    if (
-        module.ln_cond.weight is None
-        or module.to_scale.bias is None
-        or module.to_bias.bias is not None
-    ):
+    if module.ln_cond.weight is None or module.to_scale.bias is None or module.to_bias.bias is not None:
         return False
     if torch.cuda.get_device_capability(x.device) != (8, 0):
         return False
@@ -199,13 +187,9 @@ def cached(tag: str, tensors: tuple, build):
     hit = _packs.get(key)
     if hit is not None and all(r() is t for r, t in zip(hit[0], tensors, strict=True)):
         return hit[1]
-    _capture.prune(
-        _packs
-    )  # an eager entry serves eager calls only; a capture packs once, recorded; finished captures' entries go
+    _capture.prune(_packs)  # an eager entry serves eager calls only; a capture packs once, recorded; finished captures' entries go
     if len(_packs) >= 256:
-        for k in [
-            k for k, (refs, _) in _packs.items() if any(r() is None for r in refs)
-        ]:
+        for k in [k for k, (refs, _) in _packs.items() if any(r() is None for r in refs)]:
             del _packs[k]
         if len(_packs) >= 256:
             _packs.clear()
@@ -233,11 +217,7 @@ def cast_params(params: tuple, dt: torch.dtype, cache: bool) -> tuple:
 
 def _wcat(ws: torch.Tensor, wb: torch.Tensor, cache: bool) -> torch.Tensor:
     """[Ws; Wb] [2 d, dc]; with ``cache`` kept per parameter version."""
-    return (
-        cached("wcat", (ws, wb), lambda: torch.cat([ws, wb]))
-        if cache
-        else torch.cat([ws, wb])
-    )
+    return cached("wcat", (ws, wb), lambda: torch.cat([ws, wb])) if cache else torch.cat([ws, wb])
 
 
 def _inference_fake(x, cond, lnw, ws, sb, wb, eps_x, eps_c):
@@ -259,13 +239,9 @@ def inference(
     k = _kernels()
     with torch.cuda.device(x.device):
         ws, sb, wb = cast_params((ws, sb, wb), x.dtype, True)
-        if k.atom_supported(
-            x, cond
-        ):  # d = dc = 128, bf16: the whole forward in one kernel
+        if k.atom_supported(x, cond):  # d = dc = 128, bf16: the whole forward in one kernel
             return k.atom_fwd(x, cond, lnw, ws, wb, sb, eps_x, eps_c)[0]
-        if k.atom_tf32_supported(
-            x, cond
-        ):  # d = dc = 128, fp32: the same on TF32 tensor cores
+        if k.atom_tf32_supported(x, cond):  # d = dc = 128, fp32: the same on TF32 tensor cores
             return k.atom_fwd_tf32(x, cond, lnw, ws, wb, sb, eps_x, eps_c)
         aff, _ = k.cond_ln(cond, lnw, x.dtype, eps_c)
         sbt = _mm_op(aff, _wcat(ws, wb, True).t())
@@ -278,9 +254,7 @@ def _train_fwd_fake(x, cond, lnw, ws, sb, wb, eps_x, eps_c):
     m, d = x.shape
     p, dc = cond.shape
     e = x.new_empty
-    if _kernels().atom_supported(
-        x, cond
-    ):  # the fused atom kernels keep only the statistics
+    if _kernels().atom_supported(x, cond):  # the fused atom kernels keep only the statistics
         return [
             torch.empty_like(x),
             e((0,)),
@@ -387,12 +361,8 @@ def train_bwd(
     k = _kernels()
     d = x.shape[1]
     with torch.cuda.device(x.device):
-        if k.atom_supported(
-            x, cond
-        ):  # d = dc = 128, bf16: the backward in one kernel, the two weight gradients on cuBLAS
-            dx, dcond, dsc, aff, psb, plw = k.atom_bwd(
-                dy, x, cond, xst, cst, lnw, ws, wb, sb
-            )
+        if k.atom_supported(x, cond):  # d = dc = 128, bf16: the backward in one kernel, the two weight gradients on cuBLAS
+            dx, dcond, dsc, aff, psb, plw = k.atom_bwd(dy, x, cond, xst, cst, lnw, ws, wb, sb)
             dws, dwb = _wgrad(dsc, aff), _wgrad(dy, aff)
             dsb, dlnw, dws, dwb = k.finish(
                 [psb, plw],
@@ -403,9 +373,7 @@ def train_bwd(
             return [dx, dcond, dlnw, dws, dsb, dwb]
         dm, dx, psb = k.bwd_x(dy, x, xst, sbt, sb, None, x.dtype)
         br = Branch(x.device)
-        dw = br.run(
-            lambda: _wgrad(dm, aff), dm, aff
-        )  # [2 d, dc] fp32: [dWs; dWb], beside the data gradient's GEMM and the cond row pass
+        dw = br.run(lambda: _wgrad(dm, aff), dm, aff)  # [2 d, dc] fp32: [dWs; dWb], beside the data gradient's GEMM and the cond row pass
         dca = _mm(dm, wcat)  # [M, dc] fp32: dcond_aff
         dcond, pw = k.cond_bwd(dca, cond, cst, lnw, None)
         br.join()
@@ -448,23 +416,14 @@ class _Training(torch.autograd.Function):
 
 
 # ------------------------------------------------------------------------------------------------------------ module entry
-def update(
-    module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool
-) -> torch.Tensor:
+def update(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool) -> torch.Tensor:
     """``AdaptiveLayerNorm`` forward on the sm_80 path (``serves`` must have accepted the call); ``grad`` = ``needs_backward``."""
     d, dc = x.shape[-1], cond.shape[-1]
     xs = x.to(compute_dtype).reshape(-1, d).contiguous()
     if grad:  # one conditioning per row (a shared one is expanded: autograd sums the per-row gradients)
-        cs = (
-            cond.to(compute_dtype)
-            .expand(*x.shape[:-1], dc)
-            .reshape(-1, dc)
-            .contiguous()
-        )
+        cs = cond.to(compute_dtype).expand(*x.shape[:-1], dc).reshape(-1, dc).contiguous()
     else:
-        cs = (
-            cond if _period(x, cond, False) == xs.shape[0] else cond[0]
-        )  # shared: the first sample's rows are the table
+        cs = cond if _period(x, cond, False) == xs.shape[0] else cond[0]  # shared: the first sample's rows are the table
         cs = cs.to(compute_dtype).reshape(-1, dc).contiguous()
     ps = (module.to_scale.weight, module.to_scale.bias, module.to_bias.weight)
     eps = (float(module.ln_in.eps), float(module.ln_cond.eps))

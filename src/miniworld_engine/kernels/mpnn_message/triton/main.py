@@ -36,9 +36,11 @@ def _gelu_grad(x):
     return cdf + pdf_term
 
 
-@configured('mpnn_message_fwd_gemm_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2))
+@configured(
+    "mpnn_message_fwd_gemm_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _projection_fwd_kernel(
     preactivation_ptr,
@@ -55,8 +57,7 @@ def _projection_fwd_kernel(
 ):
     # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so
     # the two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
-    row_block, output_block = tile_order(tl.program_id(0).to(tl.int64),
-                          tl.cdiv(rows, BLOCK_M1), tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
+    row_block, output_block = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(rows, BLOCK_M1), tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
     row_indices = row_block * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     output_columns = output_block * BLOCK_N + tl.arange(0, BLOCK_N)
     row_valid = row_indices < rows
@@ -88,9 +89,7 @@ def _projection_fwd_kernel(
     )
 
 
-@configured('mpnn_message_fwd_gelu_reduce_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
+@configured("mpnn_message_fwd_gelu_reduce_triton", key=["shape_key"], default=dict(BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
 @triton.jit
 def _gelu_reduce_fwd_kernel(
     projected_ptr,
@@ -110,8 +109,7 @@ def _gelu_reduce_fwd_kernel(
         pid = pid.to(tl.int64)
     # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so
     # the two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
-    group, output_block = tile_order(pid,
-                          groups, tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
+    group, output_block = tile_order(pid, groups, tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
     if USE_I64:
         group = group.to(tl.int64)
         output_block = output_block.to(tl.int64)
@@ -122,11 +120,7 @@ def _gelu_reduce_fwd_kernel(
     # 64xBLOCK_N tile live for the entire epilogue.
     for neighbor_start in tl.static_range(0, NEIGHBORS, 16):
         neighbors = neighbor_start + tl.arange(0, 16)
-        offsets = (
-            group * NEIGHBORS * HIDDEN
-            + neighbors[:, None] * HIDDEN
-            + output_columns[None, :]
-        )
+        offsets = group * NEIGHBORS * HIDDEN + neighbors[:, None] * HIDDEN + output_columns[None, :]
         projected = tl.load(
             projected_ptr + offsets,
             mask=output_valid[None, :],
@@ -152,10 +146,12 @@ def _gelu_reduce_fwd_kernel(
 # bias reduction. It is not reachable from the library's own dispatch.
 
 
-@configured('mpnn_message_bwd_reduce_dbias_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
-            reset_to_zero=["grad_bias_output_ptr"])
+@configured(
+    "mpnn_message_bwd_reduce_dbias_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+    reset_to_zero=["grad_bias_output_ptr"],
+)
 @triton.jit
 def _gelu_reduce_db_bwd_kernel(
     grad_ptr,
@@ -178,8 +174,7 @@ def _gelu_reduce_db_bwd_kernel(
         pid = pid.to(tl.int64)
     # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so
     # the two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
-    group, output_block = tile_order(pid,
-                          groups, tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
+    group, output_block = tile_order(pid, groups, tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
     if USE_I64:
         group = group.to(tl.int64)
         output_block = output_block.to(tl.int64)
@@ -206,17 +201,13 @@ def _gelu_reduce_db_bwd_kernel(
             mask=neighbor_valid,
             other=0.0,
         ).to(tl.float32)
-        grad_hidden = (grad[None, :] * edge_weight[:, None] / neighbor_scale).to(
-            tl.bfloat16
-        )
+        grad_hidden = (grad[None, :] * edge_weight[:, None] / neighbor_scale).to(tl.bfloat16)
         projected = tl.load(
             projected_ptr + offsets,
             mask=neighbor_valid[:, None] & output_valid[None, :],
             other=0.0,
         ).to(tl.float32)
-        grad_projected = (grad_hidden.to(tl.float32) * _gelu_grad(projected)).to(
-            tl.bfloat16
-        )
+        grad_projected = (grad_hidden.to(tl.float32) * _gelu_grad(projected)).to(tl.bfloat16)
         tl.store(
             grad_projected_ptr + offsets,
             grad_projected,
@@ -248,9 +239,9 @@ def _zero_bias_grad_kernel(
     tl.store(grad_bias_ptr + columns, 0.0, mask=columns < HIDDEN)
 
 
-@configured('mpnn_message_bwd_dx_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2))
+@configured(
+    "mpnn_message_bwd_dx_triton", key=["shape_key"], default=dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4, num_stages=2)
+)
 @triton.jit
 def _projection_dx_kernel(
     grad_projected_ptr,
@@ -272,8 +263,7 @@ def _projection_dx_kernel(
         pid = pid.to(tl.int64)
     # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so
     # the two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
-    row_block, input_block = tile_order(pid,
-                          tl.cdiv(rows, BLOCK_M1), tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
+    row_block, input_block = tile_order(pid, tl.cdiv(rows, BLOCK_M1), tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
     if USE_I64:
         row_block = row_block.to(tl.int64)
         input_block = input_block.to(tl.int64)
@@ -287,9 +277,7 @@ def _projection_dx_kernel(
         output_columns = output_start + tl.arange(0, BLOCK_K)
         output_valid = output_columns < HIDDEN
         grad_projected = tl.load(
-            grad_projected_ptr
-            + row_indices[:, None] * HIDDEN
-            + output_columns[None, :],
+            grad_projected_ptr + row_indices[:, None] * HIDDEN + output_columns[None, :],
             mask=row_valid[:, None] & output_valid[None, :],
             other=0.0,
         )
@@ -308,11 +296,7 @@ def _projection_dx_kernel(
     ).to(tl.float32)
     one_plus_erf = 1.0 + tl.erf(preactivation * 0.7071067811865476)
     cdf = 0.5 * one_plus_erf
-    pdf_term = (
-        preactivation
-        * 0.3989422804014327
-        * tl.exp(-0.5 * preactivation * preactivation)
-    )
+    pdf_term = preactivation * 0.3989422804014327 * tl.exp(-0.5 * preactivation * preactivation)
     grad_preactivation = grad_activated * (cdf + pdf_term)
     offsets = row_indices[:, None] * HIDDEN + input_columns[None, :]
     valid = row_valid[:, None] & input_valid[None, :]
@@ -454,9 +438,7 @@ def _reduce_backward_op(
         device=projected.device,
         dtype=torch.float32,
     )
-    _gelu_reduce_db_bwd_kernel[
-        lambda meta: tile_grid(groups, hidden, 1, meta["BLOCK_N"])
-    ](
+    _gelu_reduce_db_bwd_kernel[lambda meta: tile_grid(groups, hidden, 1, meta["BLOCK_N"])](
         grad_reduced,
         projected,
         edge_mask,
@@ -517,9 +499,7 @@ def _reduce_backward_atomic_op(
         num_warps=1,
         num_stages=1,
     )
-    _gelu_reduce_db_bwd_kernel[
-        lambda meta: tile_grid(groups, hidden, 1, meta["BLOCK_N"])
-    ](
+    _gelu_reduce_db_bwd_kernel[lambda meta: tile_grid(groups, hidden, 1, meta["BLOCK_N"])](
         grad_reduced,
         projected,
         edge_mask,
@@ -560,9 +540,7 @@ def _projection_dx_op(
     rows = preactivation.numel() // hidden
     grad_preactivation = torch.empty_like(preactivation)
     activated = torch.empty_like(preactivation)
-    _projection_dx_kernel[
-        lambda meta: tile_grid(rows, hidden, meta["BLOCK_M1"], meta["BLOCK_N"])
-    ](
+    _projection_dx_kernel[lambda meta: tile_grid(rows, hidden, meta["BLOCK_M1"], meta["BLOCK_N"])](
         grad_projected,
         weight,
         preactivation,
@@ -630,15 +608,11 @@ def _projection_dx_weight_op(
     flat_preactivation = preactivation.reshape(rows, hidden)
     flat_grad_preactivation = grad_preactivation.reshape(rows, hidden)
     block_rows = min(_DX_CHUNK_ROWS, rows)
-    activated = torch.empty(
-        block_rows, hidden, device=preactivation.device, dtype=preactivation.dtype
-    )
+    activated = torch.empty(block_rows, hidden, device=preactivation.device, dtype=preactivation.dtype)
     for start in range(0, rows, block_rows):
         stop = min(start + block_rows, rows)
         span = stop - start
-        _projection_dx_kernel[
-            lambda meta: tile_grid(span, hidden, meta["BLOCK_M1"], meta["BLOCK_N"])
-        ](
+        _projection_dx_kernel[lambda meta: tile_grid(span, hidden, meta["BLOCK_M1"], meta["BLOCK_N"])](
             flat_grad_projected[start:stop],
             weight,
             flat_preactivation[start:stop],
@@ -653,9 +627,7 @@ def _projection_dx_weight_op(
         # matmul produced -- and accumulate the small [128, 128] partials in FP32.
         # Casting the operands would allocate a block-sized FP32 pair and undo the
         # saving this function exists for.
-        partial_weight = torch.mm(
-            flat_grad_projected[start:stop].t(), activated[:span]
-        ).to(torch.float32)
+        partial_weight = torch.mm(flat_grad_projected[start:stop].t(), activated[:span]).to(torch.float32)
         if grad_weight is None:
             grad_weight = partial_weight
         else:

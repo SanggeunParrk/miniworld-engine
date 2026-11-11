@@ -48,9 +48,7 @@ _GAMMA, _WBIAS = (
 
 def _padded(t, n):
     """[A, 1, N, d] -> [A, 1, n, d], zero rows appended (the tensor itself when n == N)."""
-    return (
-        t if t.shape[2] == n else torch.nn.functional.pad(t, (0, 0, 0, n - t.shape[2]))
-    )
+    return t if t.shape[2] == n else torch.nn.functional.pad(t, (0, 0, 0, n - t.shape[2]))
 
 
 def _unpadded(t, shape):
@@ -60,6 +58,7 @@ def _unpadded(t, shape):
 
 def _padded_length(n0: int) -> int:
     return (n0 + 127) // 128 * 128
+
 
 QUERIES, KEYS = 32, 128
 
@@ -98,9 +97,4 @@ def _tkey(t):
 def _trunk(pair, n):
     """[1, nwin, 32, 128, 16] -> [n / 32, 32, 128, 16]: zero windows appended for the padded atoms."""
     z = pair[0]
-    return (
-        z
-        if z.shape[0] == n // QUERIES
-        else F.pad(z, (0, 0, 0, 0, 0, 0, 0, n // QUERIES - z.shape[0])).contiguous()
-    )
-
+    return z if z.shape[0] == n // QUERIES else F.pad(z, (0, 0, 0, 0, 0, 0, 0, n // QUERIES - z.shape[0])).contiguous()

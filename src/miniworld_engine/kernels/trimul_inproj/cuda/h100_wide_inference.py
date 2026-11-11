@@ -41,8 +41,7 @@ def _k1_smem(D, cfg):
     stream = len(cfg) > 5 and cfg[5] == 2
     if D // 64 % sk or (not stream and slots < D // 64 // sk):
         raise ValueError("K1 slots")
-    size = (bi * bj * D * 2 + slots * sk * 8192 + bi * bj // 64 * 8192 + 8 * D
-            + ((2 + 2 * slots) * 8 + 127) // 128 * 128)
+    size = bi * bj * D * 2 + slots * sk * 8192 + bi * bj // 64 * 8192 + 8 * D + ((2 + 2 * slots) * 8 + 127) // 128 * 128
     if size * mb > 232448:
         raise ValueError("K1 resources")
     return size
@@ -63,12 +62,10 @@ def _headers():
     for name in ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh"):
         content = T.header_path(source, name).read_text()
         if name == "tmn_kernels.cuh":
+            content = content.replace("static constexpr int MINB = NCWG == 1 ? 2 : 1;", "static constexpr int MINB = MW_MINB;")
             content = content.replace(
-                "static constexpr int MINB = NCWG == 1 ? 2 : 1;",
-                "static constexpr int MINB = MW_MINB;")
-            content = content.replace(
-                "W_RESIDENT || NSLOT >= 2 * SPB",
-                "W_RESIDENT || (SCHED == 1 && (MW_K1_STREAM || NSLOT >= SPB)) || NSLOT >= 2 * SPB")
+                "W_RESIDENT || NSLOT >= 2 * SPB", "W_RESIDENT || (SCHED == 1 && (MW_K1_STREAM || NSLOT >= SPB)) || NSLOT >= 2 * SPB"
+            )
         path = dest / name
         T.publish_header(path, content)
     return dest
@@ -90,7 +87,8 @@ def _compile(kind, D, cfg, normalize=True, stats=False, has_mask=True):
             'extern "C" __global__ __launch_bounds__(C::NTHR,C::MINB) '
             "void mw_wide_front(__grid_constant__ const tmn::K1ParamsQ p){"
             f"tmn::sm90::{function}<C,{str(has_mask).lower()},{int(normalize)},{str(stats).lower()},"
-            f"{str(normalize and not stats).lower()},1,tmn::K1ParamsQ>(p);}}")
+            f"{str(normalize and not stats).lower()},1,tmn::K1ParamsQ>(p);}}"
+        )
         smem = _k1_smem(D, cfg)
         name = "mw_wide_front"
         flags = [f"-DMW_MINB={mb}", f"-DMW_K1_STREAM={stream}"]
@@ -99,10 +97,19 @@ def _compile(kind, D, cfg, normalize=True, stats=False, has_mask=True):
         body = (R / "output_stream.cu").read_text()
         smem = _k3_smem(D, bn, stages)
         name = "mw_wide_output_stream"
-        flags = ["-DMW_MINB=1", "-DMW_K1_STREAM=0", f"-DWIDTH={D}", f"-DBLOCKN={bn}",
-                 f"-DSTAGES={stages}", f"-DGFOLD={int(gfold)}"]
-    flags += ["-DTMN_SIGMOID_TANH=1", "-DTMN_WSKIP=1", "-DTMN_MASK_TEMPLATE=1", "-std=c++17",
-              "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-I" + str(_headers()), "-I" + str(R)]
+        flags = ["-DMW_MINB=1", "-DMW_K1_STREAM=0", f"-DWIDTH={D}", f"-DBLOCKN={bn}", f"-DSTAGES={stages}", f"-DGFOLD={int(gfold)}"]
+    flags += [
+        "-DTMN_SIGMOID_TANH=1",
+        "-DTMN_WSKIP=1",
+        "-DTMN_MASK_TEMPLATE=1",
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-I" + str(_headers()),
+        "-I" + str(R),
+    ]
     unit = T.load_unit(str(T.compile_text(body, flags)), name)
     k = unit.kernel(name)
     k.set_max_dynamic_smem(smem)
@@ -152,10 +159,7 @@ def _selection(D, N):
 
 
 def _map(t, box, dims, strides):
-    return T._launch_module().tensor_map(t, box, dims=dims, strides_bytes=strides,
-                                         swizzle="128B", l2="128B")
-
-
+    return T._launch_module().tensor_map(t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B")
 
 
 def _run(x, weights, mask):
@@ -180,6 +184,7 @@ def _run(x, weights, mask):
         w = x.new_empty((8 * D, D))
         if native_aux:
             from ._h100_pack import pack_into_cuda
+
             pack_into_cuda(w, wl, wlg, wr, wrg)
         else:
             T.pack_into(w, wl, wlg, wr, wrg)
@@ -192,12 +197,14 @@ def _run(x, weights, mask):
         if gfold:
             if native_aux:
                 from ._h100_pack import normalize_into
+
                 normalize_into(xn, x, gi, bi, xs)
             else:
                 _normalize_stats_into(xn, xs, x, gi, bi)
         else:
             if native_aux:
                 from ._h100_pack import normalize_into
+
                 normalize_into(xn, x, gi, bi)
             else:
                 T.normalize_into(xn, x, gi, bi)
@@ -205,19 +212,38 @@ def _run(x, weights, mask):
     a, b, _, _, mb = cfg[:5]
     tj = (N + b - 1) // b
     tiles = ((N + a - 1) // a) * tj
-    p1 = launch.Struct([
-        _map(x if normalize else xn, [64, b, a], [D, N, N], [D * 2, N * D * 2]),
-        w_map,
-        _map(ab, [64, 1, 32], [N, N, 4 * D], [N * 2, N * N * 2]),
-        mask, gi, bi, ab, xs if normalize else None, xn if normalize else None,
-        N, N, tj, tiles, 1, N, 1, 1e-5, N * D, D, int(in_place), int(mask is not None),
-        *wq_maps])
+    p1 = launch.Struct(
+        [
+            _map(x if normalize else xn, [64, b, a], [D, N, N], [D * 2, N * D * 2]),
+            w_map,
+            _map(ab, [64, 1, 32], [N, N, 4 * D], [N * 2, N * N * 2]),
+            mask,
+            gi,
+            bi,
+            ab,
+            xs if normalize else None,
+            xn if normalize else None,
+            N,
+            N,
+            tj,
+            tiles,
+            1,
+            N,
+            1,
+            1e-5,
+            N * D,
+            D,
+            int(in_place),
+            int(mask is not None),
+            *wq_maps,
+        ]
+    )
     k1.launch((min(tiles, num_sms(x.device) * mb), 1, 1), (128 * (a * b // 64 + 1), 1, 1), [p1], smem1)
 
     # Outgoing and incoming contractions into tri = [out | in].
     tri = x.new_empty((H, N, N))
-    _H100_BMM.bmm(ab[:D], ab[H:H + D].transpose(-1, -2), out=tri[:D])
-    _H100_BMM.bmm(ab[D:H].transpose(-1, -2), ab[H + D:], out=tri[D:])
+    _H100_BMM.bmm(ab[:D], ab[H : H + D].transpose(-1, -2), out=tri[:D])
+    _H100_BMM.bmm(ab[D:H].transpose(-1, -2), ab[H + D :], out=tri[D:])
 
     # K3: folded output LN + projection, gate, residual.
     y = torch.empty_like(x)
@@ -226,19 +252,25 @@ def _run(x, weights, mask):
     wgf = x.new_empty((D, D)) if gfold else wg
     if native_aux:
         from ._h100_pack import fold_into
+
         fold_into(wp, go, bo, wpf, wg, gi, bi, wgf, uv, gfold)
     else:
-        _fold[(D, 2 if gfold else 1)](wp, go, bo, wpf, wg, gi, bi, wgf, uv, D,
-                                      BLOCK=triton.next_power_of_2(H), GATE=gfold, num_warps=4)  # ty: ignore[unknown-argument]
+        _fold[(D, 2 if gfold else 1)](wp, go, bo, wpf, wg, gi, bi, wgf, uv, D, BLOCK=triton.next_power_of_2(H), GATE=gfold, num_warps=4)  # ty: ignore[unknown-argument]
     k3, smem3 = _compile("k3", D, (bn, stages, gfold))
-    p3 = launch.Struct([
-        _map(tri, [64, 64], [M, H], [M * 2]),
-        _map(x if gfold else xn, [64, 128], [D, M], [D * 2]),
-        _map(wpf, [64, bn], [H, D], [H * 2]),
-        _map(wgf, [64, bn], [D, D], [D * 2]),
-        _map(x, [64, 64], [D, M], [D * 2]),
-        _map(y, [64, 64], [D, M], [D * 2]),
-        uv, xs, M, M // 128])
+    p3 = launch.Struct(
+        [
+            _map(tri, [64, 64], [M, H], [M * 2]),
+            _map(x if gfold else xn, [64, 128], [D, M], [D * 2]),
+            _map(wpf, [64, bn], [H, D], [H * 2]),
+            _map(wgf, [64, bn], [D, D], [D * 2]),
+            _map(x, [64, 64], [D, M], [D * 2]),
+            _map(y, [64, 64], [D, M], [D * 2]),
+            uv,
+            xs,
+            M,
+            M // 128,
+        ]
+    )
     k3.launch((min(M // 128, num_sms(x.device)), 1, 1), (384, 1, 1), [p3], smem3)
     return y
 
@@ -252,5 +284,4 @@ def _wide_inference_fake(x, weights, mask):
 def wide_inference(x: torch.Tensor, weights: list[torch.Tensor], mask: torch.Tensor | None) -> torch.Tensor:
     """y = x + bidirectional TriMul(x); weights as in ``h100_inference.inference``; mask None or a bool token mask [N]."""
     with T.native_context(x.device):
-        return _run(x.contiguous(), [w.contiguous() for w in weights],
-                    None if mask is None else mask.to(torch.bool).contiguous())
+        return _run(x.contiguous(), [w.contiguous() for w in weights], None if mask is None else mask.to(torch.bool).contiguous())

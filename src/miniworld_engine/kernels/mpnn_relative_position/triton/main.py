@@ -72,7 +72,6 @@ from miniworld_engine.kernels._launch_config import configured
 import triton.language as tl
 
 
-
 def _configs() -> list[triton.Config]:
     """Full grid over every tuning knob; nothing is pinned.
 
@@ -118,9 +117,12 @@ def _shape_key(rows: int, buckets: int, width: int) -> int:
     return both_key(rows, BUCKETS=buckets, WIDTH=width)
 
 
-@configured('mpnn_relative_position_bwd_reduce_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, PROGRAMS=64, num_warps=4, num_stages=2), scratch=("partial_table_ptr", "partial_bias_ptr"))
+@configured(
+    "mpnn_relative_position_bwd_reduce_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_M1=64, PROGRAMS=64, num_warps=4, num_stages=2),
+    scratch=("partial_table_ptr", "partial_bias_ptr"),
+)
 @triton.jit
 def _bucket_reduce_kernel(
     grad_ptr,
@@ -188,10 +190,7 @@ def _bucket_reduce_kernel(
     # against 2.789e-06 and irreproducible for the atomic combine, and 2.157e-05 and
     # irreproducible for ``index_add_``.
     tl.store(
-        partial_table_ptr
-        + tl.program_id(0) * BUCKET_BLOCK * WIDTH
-        + bucket_ids[:, None] * WIDTH
-        + columns[None, :],
+        partial_table_ptr + tl.program_id(0) * BUCKET_BLOCK * WIDTH + bucket_ids[:, None] * WIDTH + columns[None, :],
         table_accumulator,
     )
     tl.store(partial_bias_ptr + tl.program_id(0) * WIDTH + columns, bias_accumulator)
@@ -234,11 +233,9 @@ def triton_bucket_reduce(
     grad_output = grad_output.contiguous()
     # Sized for the largest program count the grid offers, because the buffer has to
     # exist before the tuner has chosen one.
-    partial_table = grad_output.new_empty(
-        (_MAX_PROGRAMS, padded, width), dtype=torch.float32
-    )
+    partial_table = grad_output.new_empty((_MAX_PROGRAMS, padded, width), dtype=torch.float32)
     partial_bias = grad_output.new_empty((_MAX_PROGRAMS, width), dtype=torch.float32)
-    launched: list[int] = []   # the program count of each launch the config layer makes (timing runs, then the chosen one last)
+    launched: list[int] = []  # the program count of each launch the config layer makes (timing runs, then the chosen one last)
 
     def grid(meta):
         launched.append(meta["PROGRAMS"])
@@ -287,9 +284,7 @@ def _index_add_bucket_reduce(
     # ``contiguous`` first: an incoming gradient need not be, and both this reduction
     # and the kernel below address the rows as a plain row-major block.
     flat = grad_output.contiguous().reshape(-1, width).float()
-    grad_table = torch.zeros(
-        buckets, width, device=grad_output.device, dtype=torch.float32
-    )
+    grad_table = torch.zeros(buckets, width, device=grad_output.device, dtype=torch.float32)
     grad_table.index_add_(0, bucket.reshape(-1), flat)
     return grad_table, flat.sum(dim=0)
 

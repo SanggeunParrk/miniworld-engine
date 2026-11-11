@@ -18,6 +18,7 @@ The rotation is the standard interleaved-half convention, matching `_rotate_half
 ``cos``/``sin`` are (N, S, half): one angle set per (batch-row, position), shared across heads
 and across the two halves. ``half`` is a constexpr so the split is resolved at compile time.
 """
+
 from __future__ import annotations
 
 import torch
@@ -29,14 +30,20 @@ from miniworld_engine.kernels._shape_key import atom_key
 from miniworld_engine.kernels._compile import opaque
 
 
-@configured('rope_fwd_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, num_warps=2, num_stages=2))
+@configured("rope_fwd_triton", key=["shape_key"], default=dict(BLOCK_M1=64, num_warps=2, num_stages=2))
 @triton.jit
 def rope_3d_kernel(
-    X, COS, SIN, Y,
-    stride_xr, stride_xh, stride_cr,
-    M, H: tl.constexpr, D: tl.constexpr, HALF: tl.constexpr,
+    X,
+    COS,
+    SIN,
+    Y,
+    stride_xr,
+    stride_xh,
+    stride_cr,
+    M,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    HALF: tl.constexpr,
     BLOCK_M1: tl.constexpr,
     shape_key,
 ):
@@ -73,16 +80,24 @@ def _rope_fake(x_2d, cos_2d, sin_2d, h, d, half, shape_key):
 
 
 @opaque(fake=_rope_fake, name="rope_3d")
-def _rope(x_2d: torch.Tensor, cos_2d: torch.Tensor, sin_2d: torch.Tensor,
-          h: int, d: int, half: int, shape_key: int) -> torch.Tensor:
+def _rope(x_2d: torch.Tensor, cos_2d: torch.Tensor, sin_2d: torch.Tensor, h: int, d: int, half: int, shape_key: int) -> torch.Tensor:
     """``(M, H*D)`` in, rotated ``(M, H*D)`` out. cos/sin are ``(M, half)``."""
     m = x_2d.shape[0]
     y = torch.empty_like(x_2d)
     grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]),)
     rope_3d_kernel[grid](
-        x_2d, cos_2d, sin_2d, y,
-        x_2d.stride(0), d, cos_2d.stride(0),
-        m, h, d, half, shape_key=shape_key,
+        x_2d,
+        cos_2d,
+        sin_2d,
+        y,
+        x_2d.stride(0),
+        d,
+        cos_2d.stride(0),
+        m,
+        h,
+        d,
+        half,
+        shape_key=shape_key,
     )
     return y
 

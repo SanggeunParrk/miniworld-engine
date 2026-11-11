@@ -89,7 +89,8 @@ def _cfg(c: dict) -> triton.Config:
 
 def _bench(fn) -> float:
     from triton.testing import do_bench
-    return typing.cast(float, do_bench(fn, return_mode="median"))   # one value for return_mode="median"
+
+    return typing.cast(float, do_bench(fn, return_mode="median"))  # one value for return_mode="median"
 
 
 def _best(exact, cands, time_one, after=None):
@@ -102,6 +103,7 @@ def _best(exact, cands, time_one, after=None):
             return cands[0]
         from triton.compiler.errors import CompileTimeAssertionFailure
         from triton.runtime.errors import OutOfResources, PTXASError
+
         ms = []
         for c in cands:
             try:
@@ -169,6 +171,7 @@ class Configured:
                 launch(c)
                 for n, t in saved.items():
                     every[n].copy_(t)
+
             return _bench(call)
 
         if PRETUNE[0] is not None:
@@ -186,9 +189,18 @@ class Configured:
             cands = (list(self.prune(self.default, named, **kwargs)) if self.prune else self.default)[:1]
 
         zero = lambda: [every[n].zero_() for n in self.reset_to_zero]  # outputs as an untimed launch finds them
-        exact = (self.op, gpu, *((tuple(v.shape), v.stride(), v.dtype) if isinstance(v, torch.Tensor) else
-                                 v if isinstance(v, (int, float, bool, str, type(None))) else type(v).__name__
-                                 for v in every.values()))
+        exact = (
+            self.op,
+            gpu,
+            *(
+                (tuple(v.shape), v.stride(), v.dtype)
+                if isinstance(v, torch.Tensor)
+                else v
+                if isinstance(v, (int, float, bool, str, type(None)))
+                else type(v).__name__
+                for v in every.values()
+            ),
+        )
         return launch(_best(exact, cands, time_one, zero))
 
 
@@ -217,6 +229,7 @@ def _ranked(family, gpu, op, dtype, dims, near):
         if kd != dtype or shape.keys() != want.keys() or any(shape[k] != want[k] for k in want if k not in near):
             return math.inf
         return sum(abs(math.log(max(1, shape[k]) / max(1, want[k]))) for k in near)
+
     best = min(entries, key=distance, default=None)
     return entries[best] if best is not None and distance(best) < math.inf else None
 

@@ -58,7 +58,7 @@ def _a100() -> bool:
 
 
 def _glue():
-    if _a100():   # the same sources built for sm_80
+    if _a100():  # the same sources built for sm_80
         from miniworld_engine.kernels.triangle_attention.cuda import sm80_bidir
 
         return sm80_bidir.glue()
@@ -84,7 +84,7 @@ def _mm_f32(a, b):
 def _probs(bias: torch.Tensor, keep: torch.Tensor | None, H: int, L: int) -> tuple[torch.Tensor, torch.Tensor]:
     """The bias planes [2 H, L L] of one sample -> (P_s [H, L, L], P_e [H, L, L]), each a softmax over its last axis k (masked keys -inf)."""
     b = bias.view(2 * H, L, L).float()
-    logits = torch.cat([b[:H], b[H:].transpose(1, 2)])          # starting [h, j, k]; ending [h, i, k] = bias_e[h, k, i]
+    logits = torch.cat([b[:H], b[H:].transpose(1, 2)])  # starting [h, j, k]; ending [h, i, k] = bias_e[h, k, i]
     if keep is not None:
         logits = logits.masked_fill(~keep[None, None, :], float("-inf"))
     p = torch.softmax(logits, -1).to(torch.bfloat16)
@@ -102,14 +102,14 @@ def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):
     planes, probs, os_, us = [], [], [], []
     for b in range(B):
         rows = slice(b * LL, (b + 1) * LL)
-        c = torch.mm(w, y[rows].t())                                 # [4 Dh + 2 H, L L]
-        ps, pe = _probs(c[4 * Dh:], None if mask is None else mask[b], H, L)
+        c = torch.mm(w, y[rows].t())  # [4 Dh + 2 H, L L]
+        ps, pe = _probs(c[4 * Dh :], None if mask is None else mask[b], H, L)
         o = torch.empty(2 * Dh, LL, device=x.device, dtype=torch.bfloat16)
         torch.bmm(c[:Dh].view(H, dh * L, L), ps.transpose(1, 2), out=o[:Dh].view(H, dh * L, L))
         for h in range(H):
             ch = slice(Dh + h * dh, Dh + (h + 1) * dh)
             torch.bmm(pe[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
-        u = g.gate_u(c[2 * Dh:4 * Dh], o, 0)
+        u = g.gate_u(c[2 * Dh : 4 * Dh], o, 0)
         torch.addmm(x[rows], u.t(), wo.t(), out=out[rows])
         if save:
             planes.append(c)
@@ -135,29 +135,29 @@ def _backward(dy, pair, lnw, w, wo, saved, H, Dh):
         rows = slice(b * LL, (b + 1) * LL)
         c, (ps, pe), o, u = planes[b], probs[b], os_[b], us[b]
         dWo += _mm_f32(dy[rows].t(), u.t())
-        du = torch.mm(wo.t(), dy[rows].t())                          # [2 Dh, L L]
-        do = e.gate_bwd(du, c[2 * Dh:4 * Dh], o, dc[2 * Dh:4 * Dh])     # dO; dG into dc
+        du = torch.mm(wo.t(), dy[rows].t())  # [2 Dh, L L]
+        do = e.gate_bwd(du, c[2 * Dh : 4 * Dh], o, dc[2 * Dh : 4 * Dh])  # dO; dG into dc
         del du
         # starting: O_s[h] = V_s[h] P_s[h]^T
         dos = do[:Dh].view(H, dh * L, L)
         torch.bmm(dos, ps, out=dc[:Dh].view(H, dh * L, L))
-        dps = torch.bmm(dos.transpose(1, 2), c[:Dh].view(H, dh * L, L), out_dtype=torch.float32)   # [H, j, k]
+        dps = torch.bmm(dos.transpose(1, 2), c[:Dh].view(H, dh * L, L), out_dtype=torch.float32)  # [H, j, k]
         # ending: O_e[c] = P_e[h] V_e[c]
         dpe = []
         for h in range(H):
             ch = slice(Dh + h * dh, Dh + (h + 1) * dh)
             doe = do[ch].view(dh, L, L)
             torch.bmm(pe[h].t().expand(dh, L, L), doe, out=dc[ch].view(dh, L, L))
-            dpe.append(torch.bmm(doe, c[ch].view(dh, L, L).transpose(1, 2), out_dtype=torch.float32).sum(0))   # [i, k]
+            dpe.append(torch.bmm(doe, c[ch].view(dh, L, L).transpose(1, 2), out_dtype=torch.float32).sum(0))  # [i, k]
         dp = torch.cat([dps, torch.stack(dpe)])
         p = torch.cat([ps, pe]).float()
-        dl = p * (dp - (p * dp).sum(-1, keepdim=True))               # d logits [2 H, ., k]
-        db = dc[4 * Dh:].view(2 * H, L, L)
+        dl = p * (dp - (p * dp).sum(-1, keepdim=True))  # d logits [2 H, ., k]
+        db = dc[4 * Dh :].view(2 * H, L, L)
         db[:H] = dl[:H]
-        db[H:] = dl[H:].transpose(1, 2)                              # back to the bias plane's [k, i]
+        db[H:] = dl[H:].transpose(1, 2)  # back to the bias plane's [k, i]
         dW += _mm_f32(dc, y[rows])
         dyln[rows] = _mm_f32(dc.t(), w)
-    dx, part = g.ln_bwd(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False)   # + the residual's dy
+    dx, part = g.ln_bwd(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False)  # + the residual's dy
     dgb = part.sum(0)
     return dx.view(B, L, L, C), dgb[0], dgb[1], dW, dWo
 
@@ -183,7 +183,7 @@ class _BidirFn(torch.autograd.Function):
         H, Dh = ctx.H, ctx.Dh
         dx, dlw, dlb, dW, dWo = _backward(dy, pair, lnw, w, wo16, ctx.saved, H, Dh)
         ctx.saved = None
-        dWv, dWg, dWb = dW[:2 * Dh], dW[2 * Dh:4 * Dh], dW[4 * Dh:]
+        dWv, dWg, dWb = dW[: 2 * Dh], dW[2 * Dh : 4 * Dh], dW[4 * Dh :]
         grads = [t.to(d) for t, d in zip((dlw, dlb, dWv, dWb, dWg, dWo), ctx.dtypes, strict=True)]
         return (dx, None, *grads, None, None, None)
 
@@ -191,8 +191,14 @@ class _BidirFn(torch.autograd.Function):
 def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """``pair + bidirectional bias-only attention(pair)`` (the module's ``_forward_pytorch``), forward and, with grad, backward."""
     H, Dh = module.n_head, module.d_hidden
-    params = (module.ln_pair.weight, module.ln_pair.bias, module.to_value.weight, module.to_bias.weight, module.to_gate.weight,
-              module.to_out.weight)
+    params = (
+        module.ln_pair.weight,
+        module.ln_pair.bias,
+        module.to_value.weight,
+        module.to_bias.weight,
+        module.to_gate.weight,
+        module.to_out.weight,
+    )
     mask = None if mask is None else mask.contiguous()
     grad = torch.is_grad_enabled() and (pair.requires_grad or any(p.requires_grad for p in params))
     if not grad:

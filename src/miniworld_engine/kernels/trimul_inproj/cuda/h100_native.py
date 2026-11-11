@@ -26,13 +26,7 @@ def k1_smem(D, cfg):
     bi, bj, slots, sk, minb = cfg
     ng = bi * bj // 64
     spb = D // 64 // sk
-    size = (
-        bi * bj * D * 2
-        + slots * sk * 8192
-        + ng * 8192
-        + 8 * D
-        + ((2 + 2 * slots) * 8 + 127) // 128 * 128
-    )
+    size = bi * bj * D * 2 + slots * sk * 8192 + ng * 8192 + 8 * D + ((2 + 2 * slots) * 8 + 127) // 128 * 128
     if D // 64 % sk or slots < 2 * spb or size * minb > 232448:
         raise ValueError("K1 resources")
     return size
@@ -61,14 +55,7 @@ def k3_smem(D, cfg):
     bm = bi * bj
     if (bm == 64 and (acc != 1 or D // 64 % 2)) or slots < 4:
         raise ValueError("K3 scheduling")
-    size = (
-        bm * h * 2
-        + bm * D * 2
-        + slots * h * 64
-        + 16384
-        + 8 * (D + h)
-        + ((2 * (D // 64) + 2 + 2 * slots) * 8 + 127) // 128 * 128
-    )
+    size = bm * h * 2 + bm * D * 2 + slots * h * 64 + 16384 + 8 * (D + h) + ((2 * (D // 64) + 2 + 2 * slots) * 8 + 127) // 128 * 128
     if size > 232448:
         raise ValueError("K3 resources")
     return size
@@ -105,9 +92,7 @@ def kernel(kind, D, cfg, emit_xn=True, normalize=True, hidden=None):
     launcher = T._launch_module()
     drv = launcher.BlockDriver(device=torch.cuda.current_device())
     mod = drv.load(out.read_bytes())
-    u = launcher.Unit(
-        kind, "sm_90a", torch.cuda.current_device(), drv.drv, mod, {}, str(out)
-    )
+    u = launcher.Unit(kind, "sm_90a", torch.cuda.current_device(), drv.drv, mod, {}, str(out))
     k = u.kernel("width_" + kind)
     k.set_max_dynamic_smem(smem)
     return k, smem, str(out)
@@ -120,27 +105,20 @@ class Front:
         rows, n = x.shape[0], x.shape[1]
         D = x.shape[-1]
         hidden = 2 * D if hidden is None else hidden
-        self.ab = (
-            saved[0]
-            if saved
-            else torch.empty((2 * hidden, rows, n), device=x.device, dtype=x.dtype)
-        )
-        self.xn = (
-            saved[2] if saved else torch.empty_like(x) if emit_xn else x.new_empty((0,))
-        )
+        self.ab = saved[0] if saved else torch.empty((2 * hidden, rows, n), device=x.device, dtype=x.dtype)
+        self.xn = saved[2] if saved else torch.empty_like(x) if emit_xn else x.new_empty((0,))
         bi, bj, slots, sk, mb = cfg
         self.k, self.smem, self.path = kernel("k1", D, tuple(cfg), emit_xn, normalize, hidden)
         self.cfg = cfg
         U = T._launch_module()
-        tm = lambda t, box, dims, strides: U.tensor_map(
-            t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B"
-        )
+        tm = lambda t, box, dims, strides: U.tensor_map(t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B")
         mz = tm(x, [64, bj, bi], [D, n, rows], [D * 2, n * D * 2])
         mw = tm(w, [64, 64], [D, 4 * hidden], [D * 2])
         ma = tm(self.ab, [64, 1, 32], [n, rows, 2 * hidden], [n * 2, rows * n * 2])
         tj = (n + bj - 1) // bj
         tiles = ((rows + bi - 1) // bi) * tj
-        self.params = U.Struct.fixed("h100_native:1b",
+        self.params = U.Struct.fixed(
+            "h100_native:1b",
             [
                 mz,
                 mw,
@@ -163,15 +141,12 @@ class Front:
                 D,
                 0,
                 0,
-                0 if rows == n else rows,   # K1Params.rows (batched samples; 0 = one sample)
-            ]
+                0 if rows == n else rows,  # K1Params.rows (batched samples; 0 = one sample)
+            ],
         )
         self.grid = min(
             tiles,
-            num_sms(
-                torch.cuda.current_device()
-            )
-            * mb,
+            num_sms(torch.cuda.current_device()) * mb,
         )
         self.threads = 128 * (bi * bj // 64 + 1)
 
@@ -188,9 +163,7 @@ class Output:
         bi0, bj, slots, acc = cfg
         self.k, self.smem, self.path = kernel("k3", D, tuple(cfg))
         U = T._launch_module()
-        tm = lambda t, box, dims, strides: U.tensor_map(
-            t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B"
-        )
+        tm = lambda t, box, dims, strides: U.tensor_map(t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B")
         maps = [
             tm(x, [64, bj, bi0], [D, n, n], [D * 2, n * D * 2]),
             tm(tri, [64, 1, 64], [n, n, 2 * D], [n * 2, n * n * 2]),
@@ -200,14 +173,10 @@ class Output:
         ]
         tj = (n + bj - 1) // bj
         tiles = ((n + bi0 - 1) // bi0) * tj
-        self.params = U.Struct.fixed("h100_native:2",
-            [*maps, gi, bi, go, bo, x, self.y, None, n, n, tj, tiles, 1, 0, 1e-5, 0]
-        )
+        self.params = U.Struct.fixed("h100_native:2", [*maps, gi, bi, go, bo, x, self.y, None, n, n, tj, tiles, 1, 0, 1e-5, 0])
         self.grid = min(
             tiles,
-            num_sms(
-                torch.cuda.current_device()
-            ),
+            num_sms(torch.cuda.current_device()),
         )
 
     def __call__(self):

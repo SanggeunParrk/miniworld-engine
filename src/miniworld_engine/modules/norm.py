@@ -109,8 +109,11 @@ def _fastln():
 
     home = ensure_cuda_home()
     # the binding is a .cpp (host compiler): it needs the toolkit's headers, which a conda toolkit keeps under targets/<arch>/include
-    cuda_inc = [str(p) for p in ((Path(home) / "include", Path(home) / "targets" / "x86_64-linux" / "include") if home else ())
-                if (p / "cuda_runtime.h").is_file()]
+    cuda_inc = [
+        str(p)
+        for p in ((Path(home) / "include", Path(home) / "targets" / "x86_64-linux" / "include") if home else ())
+        if (p / "cuda_runtime.h").is_file()
+    ]
     ext = load_extension(
         name="anthropic_protenix_fast_layer_norm_v1",
         sources=[str(base / "layer_norm_cuda.cpp"), str(base / "layer_norm_cuda_kernel.cu")],
@@ -131,7 +134,7 @@ def _fastln_reason() -> str | None:
         try:
             _fastln()
             _FASTLN_STATE["why"] = None
-        except Exception as e:   # the reason the backend cannot serve the training call
+        except Exception as e:  # the reason the backend cannot serve the training call
             _FASTLN_STATE["why"] = f"Protenix fast_layernorm unavailable: {type(e).__name__}: {str(e)[:200]}"
     return _FASTLN_STATE["why"]
 
@@ -192,10 +195,15 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
     (dx and the affine gradients, no atomics). ``"triton"``: the Triton LayerNorm (``kernels/layernorm/triton/main.triton_layernorm``:
     the fused forward that saves the row statistics, the persistent dx / dgamma / dbeta backward). Both: one normalised dimension,
     bf16 / fp16 / fp32 activations, the result in the input dtype."""
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:h100_sm90": 2, "cuda:a100_sm80": 2}   # 2026-11-10: kits; H100 odd-width rows kernels; 2026-11-11: A100 staged odd-width forward
+    backend_versions: ClassVar[dict[str, int]] = {
+        "anthropic": 2,
+        "cuda:h100_sm90": 2,
+        "cuda:a100_sm80": 2,
+    }  # 2026-11-10: kits; H100 odd-width rows kernels; 2026-11-11: A100 staged odd-width forward
 
     def __init__(
         self,
@@ -241,7 +249,7 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
             return "the kernel normalises the last dimension only"
         if self.weight is not None and self.weight.dtype != torch.float32:
             return "the affine must be fp32 (the module's pinned layout)"
-        if self._wants_grad(input):   # training: Protenix's fast_layernorm (forward + backward), built for this environment
+        if self._wants_grad(input):  # training: Protenix's fast_layernorm (forward + backward), built for this environment
             if getattr(input.device, "type", None) != "cuda":
                 return "the release's kernels run on CUDA tensors only"
             return _fastln_reason()
@@ -258,8 +266,10 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
             return _FastLayerNormFunction.apply(input, self.weight, self.bias, tuple(self.normalized_shape), self.eps)
         (rows, rows_path), (stock, stock_path) = self._KIT_LN
         y = _anthropic.load(rows, path=rows_path).layer_norm_rows(input, self.normalized_shape, self.weight, self.bias, self.eps)
-        if y is None:   # a row wider than the kit's 512-byte blocking: xfold's own one-row-per-program launch of the same kernel body
-            y = _anthropic.load(stock, path=stock_path).LayerNormTritonFunc.apply(input, self.normalized_shape, self.weight, self.bias, self.eps)
+        if y is None:  # a row wider than the kit's 512-byte blocking: xfold's own one-row-per-program launch of the same kernel body
+            y = _anthropic.load(stock, path=stock_path).LayerNormTritonFunc.apply(
+                input, self.normalized_shape, self.weight, self.bias, self.eps
+            )
         return y
 
     # ------------------------------------------------------------------------------------------------------------- "cueq"
@@ -306,7 +316,7 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         return None
 
     def _supports_cuda(self, input: torch.Tensor) -> str | None:
-        if a100(input):   # A100: the sm_80 row kernels (kernels/layernorm/cuda/sm80.py)
+        if a100(input):  # A100: the sm_80 row kernels (kernels/layernorm/cuda/sm80.py)
             from miniworld_engine.kernels.layernorm.cuda import sm80
 
             return self._supports_engine(input) or sm80.refusal(input, self.weight, self.bias)
@@ -383,7 +393,7 @@ class RMSNorm(BackendModule, nn.RMSNorm):
         return None
 
     def _supports_cuda(self, x: torch.Tensor) -> str | None:
-        if a100(x):   # A100: the RMS mode of the sm_80 row kernels (kernels/rmsnorm/cuda/sm80.py)
+        if a100(x):  # A100: the RMS mode of the sm_80 row kernels (kernels/rmsnorm/cuda/sm80.py)
             from miniworld_engine.kernels.rmsnorm.cuda import sm80
 
             return self._supports_engine(x) or sm80.refusal(x, self.weight)
@@ -470,8 +480,9 @@ class IdentityAdaptiveLayerNorm(BackendModule):
 
     backends = ("pytorch",)
 
-    def __init__(self, d_hidden: int, d_cond: int, *, eps: float = 1e-5, dtype: torch.dtype = torch.float32,
-                 backend: str = "pytorch") -> None:
+    def __init__(
+        self, d_hidden: int, d_cond: int, *, eps: float = 1e-5, dtype: torch.dtype = torch.float32, backend: str = "pytorch"
+    ) -> None:
         super().__init__()
         self.dtype = dtype
         self.ln_in = nn.LayerNorm(d_hidden, eps=eps, elementwise_affine=False, dtype=dtype)

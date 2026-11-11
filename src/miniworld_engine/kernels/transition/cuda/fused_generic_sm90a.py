@@ -63,10 +63,7 @@ def _is_hopper(index: int) -> bool:
 
 
 def _tf32_allowed() -> bool:
-    return (
-        bool(torch.backends.cuda.matmul.allow_tf32)
-        or torch.get_float32_matmul_precision() != "highest"
-    )
+    return bool(torch.backends.cuda.matmul.allow_tf32) or torch.get_float32_matmul_precision() != "highest"
 
 
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
@@ -76,20 +73,16 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         return False
     for w in (wa, ws):
         if w.dtype not in (torch.bfloat16, torch.float32):
-            return False   # the module's bf16 pinned weights under fp32 activations and fp32 masters under bf16 ones: cast inside
+            return False  # the module's bf16 pinned weights under fp32 activations and fp32 masters under bf16 ones: cast inside
     if x.dtype is torch.float32 and not _tf32_allowed():
         return False
-    if not _is_hopper(
-        x.device.index if x.device.index is not None else torch.cuda.current_device()
-    ):
+    if not _is_hopper(x.device.index if x.device.index is not None else torch.cuda.current_device()):
         return False
     d = x.shape[-1]
     if d % 64 != 0 or d > MAX_D or x.numel() == 0:
         return False
     hid = wa.shape[0]
-    return (
-        hid % 128 == 0 and tuple(wa.shape) == (hid, d) and tuple(ws.shape) == (d, hid)
-    )
+    return hid % 128 == 0 and tuple(wa.shape) == (hid, d) and tuple(ws.shape) == (d, hid)
 
 
 # Rows up to which the generic kernels (tiles over the output columns too) beat the row-tile-per-CTA fused / wide builds, which leave SMs
@@ -115,15 +108,11 @@ def prefers_generic(x: torch.Tensor, training: bool, n: int = 4) -> bool:
     if limits is None:
         return False
     rows = x.numel() // x.shape[-1]
-    if (
-        x.shape[-1] == 64 and not training
-    ):  # the 64-row-tile wide forward (one launch) is the fastest D = 64 inference path
+    if x.shape[-1] == 64 and not training:  # the 64-row-tile wide forward (one launch) is the fastest D = 64 inference path
         return False
-    if (
-        x.shape[-1] == 128 and not training
-    ):  # D128 inference: the fused build (x first, fragment LayerNorm) vs three generic launches
-        return (
-            rows <= (512 if n == 2 else 4096)
+    if x.shape[-1] == 128 and not training:  # D128 inference: the fused build (x first, fragment LayerNorm) vs three generic launches
+        return rows <= (
+            512 if n == 2 else 4096
         )  # measured (ping-pong fused build): n = 2 fused 7.56 / generic 7.55 us at 768 rows and fused
         # ahead of generic by 0.3 us per call in the single-call graph; n = 4 generic 10.9 / fused 11.8
         # at 3 072, fused 11.8 / generic 12.2 at 4 608
@@ -162,7 +151,7 @@ def _h16_scales_torch(x, gamma, beta, wa, wb, ws):
     |z| <= sqrt(D)); the scale is 1 for any ordinary magnitude. Device arithmetic only: graph-capturable, no host sync."""
     with torch.no_grad():
         d = x.shape[1]
-        xn_max = (d ** 0.5) * gamma.abs().max() + beta.abs().max()
+        xn_max = (d**0.5) * gamma.abs().max() + beta.abs().max()
         a_max = xn_max * torch.maximum(wa.abs().sum(dim=1).max(), wb.abs().sum(dim=1).max())
         s_h = (a_max * a_max * (1.0 / 60000.0)).clamp_min(1.0)
         s_w = (ws.abs().max() * (1.0 / 60000.0)).clamp_min(1.0)
@@ -181,8 +170,9 @@ def _fwd_h16(ext, x, xn, gamma, beta, wa, wb, ws, cache=False):
     if cache:
         from miniworld_engine.kernels import _capture
 
-        inv_sh, s, ws16 = _capture.param_forms("transition_h16_scales", (gamma, beta, wa, wb, ws),
-                                               lambda: _h16_scales(x, gamma, beta, wa, wb, ws), capture_reads_eager=True)
+        inv_sh, s, ws16 = _capture.param_forms(
+            "transition_h16_scales", (gamma, beta, wa, wb, ws), lambda: _h16_scales(x, gamma, beta, wa, wb, ws), capture_reads_eager=True
+        )
     else:
         inv_sh, s, ws16 = _h16_scales(x, gamma, beta, wa, wb, ws)
     h = ext.swiglu_h16(xn, wa, wb, inv_sh)
@@ -242,7 +232,7 @@ def _side_stream(device: torch.device) -> torch.cuda.Stream:
 
 # Rows up to which the weight gradients overlap the dxn -> ln_bwd chain profitably (measured, n = 4, training step):
 # 1.25 - 1.28x at D64 / 128 for 768 - 3072 rows, 1.03 - 1.13x at D256 / 384, nothing at 12 288 rows and 1-3 % LOSS at 49 152+ (the SMs are full)
-_DW_ASIDE_ROWS = {64: 12288, 128: 3072, 256: 3072, 384: 3072, 512: 768, 768: 3072}   # 768: the fp32 cuBLAS plan of the token stream
+_DW_ASIDE_ROWS = {64: 12288, 128: 3072, 256: 3072, 384: 3072, 512: 768, 768: 3072}  # 768: the fp32 cuBLAS plan of the token stream
 
 
 def _dw_aside_enabled(rows: int | None = None, d: int | None = None) -> bool:
@@ -257,9 +247,7 @@ class _weight_grads_aside:
     graph this is a parallel branch.  The tensors the branch reads are ``record_stream``-ed so the allocator does not reuse them under it.
     Above the row limits of ``_DW_ASIDE_ROWS`` (or at a width it does not list) they run in line; there is no switch."""
 
-    def __init__(
-        self, *reads: torch.Tensor, rows: int | None = None, d: int | None = None
-    ):
+    def __init__(self, *reads: torch.Tensor, rows: int | None = None, d: int | None = None):
         self.reads = reads
         self.on = _dw_aside_enabled(rows, d)
         self.keep: list = []
@@ -296,16 +284,8 @@ def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, pre_rounded, wcat=No
     """Shapes of the generic forward's outputs (y, the saved tensors); no kernel runs."""
     rows = x.shape[0] if save else 1
     f32 = dict(dtype=torch.float32, device=x.device)
-    ab = (
-        torch.empty((x.shape[0], 2 * wa.shape[0]), dtype=x.dtype, device=x.device)
-        if _saves_ab(x, save)
-        else x.new_empty((1, 1))
-    )
-    hs = (
-        torch.empty((x.shape[0], wa.shape[0]), dtype=x.dtype, device=x.device)
-        if _saves_ab(x, save)
-        else x.new_empty((1, 1))
-    )
+    ab = torch.empty((x.shape[0], 2 * wa.shape[0]), dtype=x.dtype, device=x.device) if _saves_ab(x, save) else x.new_empty((1, 1))
+    hs = torch.empty((x.shape[0], wa.shape[0]), dtype=x.dtype, device=x.device) if _saves_ab(x, save) else x.new_empty((1, 1))
     return (
         torch.empty_like(x),
         torch.empty_like(x),
@@ -328,9 +308,7 @@ def _fwd_launch(
     save: bool,
     pre_rounded: bool,
     wcat: torch.Tensor | None = None,
-) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """x [M, D]; returns (out, xn, rstd, c1, ab, h), out = transition(x) + x; rstd / c1 are 1-element placeholders unless ``save``; ``ab``
     [M, 2 HID] = [a | b] and ``h`` [M, HID] (from the fp32 accumulators) when the bf16 training forward keeps them for the backward,
     else 1-element placeholders."""
@@ -365,10 +343,9 @@ def _fwd_launch(
         h, ab = ext.swiglu_save(xn, wa, wb)
     else:
         h, ab = ext.swiglu(xn, wa, wb), x.new_empty((1, 1))
-    if (
-        x.dtype is torch.bfloat16
-        and _cublas_plan(x.shape[0], x.shape[1], wa.shape[0])[0]
-    ) or (x.dtype is torch.float32 and x.shape[0] <= _F32_SQUEEZE_CUBLAS_ROWS):
+    if (x.dtype is torch.bfloat16 and _cublas_plan(x.shape[0], x.shape[1], wa.shape[0])[0]) or (
+        x.dtype is torch.float32 and x.shape[0] <= _F32_SQUEEZE_CUBLAS_ROWS
+    ):
         out = torch.addmm(x, h, ws.t())  # y = h Ws^T + x, residual as beta * C
     else:
         out = ext.squeeze_res(h, ws, x)
@@ -382,7 +359,9 @@ def _prep_step_fake(wa, wb, ws):
 
 
 @opaque(fake=_prep_step_fake, name="transition_generic_prep_step_sm90a")
-def _prep_step(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _prep_step(
+    wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """fp32 training: every TF32-rounded weight copy of the step in one launch -- the forward reads the rounded Wa / Wb / Ws, the backward
     Ws^T, [Wa;Wb]^T and the rounded Wa / Wb -- instead of a prep in the forward and another in the backward."""
     if _is_fake(wa):
@@ -431,9 +410,7 @@ def _bwd_launch(
     ):  # bf16 training, or the small-row fp32 cuBLAS plan: a | b saved by the forward; bf16 reads the weights as stored (MN-major wgmma operand)
         _, gate_cublas, _ = _cublas_plan(x.shape[0], x.shape[1], wa.shape[0])
         if gate_cublas or tf32:
-            dab = ext.swiglu_bwd(
-                torch.mm(dy, ws), ab
-            )  # dh by cuBLAS, SwiGLU backward in one elementwise pass
+            dab = ext.swiglu_bwd(torch.mm(dy, ws), ab)  # dh by cuBLAS, SwiGLU backward in one elementwise pass
         else:
             dab = ext.gate_ab(dy, ws, ab)
         with _weight_grads_aside(
@@ -443,9 +420,9 @@ def _bwd_launch(
             dwab = _mm(dab.t(), xn, dw_fp32)  # [2 HID, D]: dWa then dWb (dab holds dA | dB)
             grads.append((dwab, dws))
         del h
-        dxn = torch.mm(dab, wcat) if wcat.numel() > 1 else ext.dxn_gemm_t(dab, wa, wb)   # fp32 plan: wcat always
+        dxn = torch.mm(dab, wcat) if wcat.numel() > 1 else ext.dxn_gemm_t(dab, wa, wb)  # fp32 plan: wcat always
     else:
-        if wst is not None and wabt is not None:   # the forward's prep: wa / wb are its rounded copies
+        if wst is not None and wabt is not None:  # the forward's prep: wa / wb are its rounded copies
             wa_r, wb_r = wa, wb
         else:
             wst, wabt, wa_r, wb_r, _ = ext.prep(
@@ -455,15 +432,13 @@ def _bwd_launch(
         dws = torch.mm(dy.t(), h)
         dwab = torch.mm(dab.t(), xn)
         if dw_fp32:
-            dws, dwab = dws.float(), dwab.float()   # fp32 activations never carry bf16 masters; kept for the contract
+            dws, dwab = dws.float(), dwab.float()  # fp32 activations never carry bf16 masters; kept for the contract
         del h
         dxn = ext.dxn_gemm(dab, wabt)
     del dab
     dx, dgam, dbeta = ext.ln_bwd(dxn, x, dy, rstd, c1, gamma)
     if ab.numel() > 1 and _dw_aside_enabled(x.shape[0], x.shape[1]):
-        torch.cuda.current_stream().wait_stream(
-            _side_stream(x.device)
-        )  # join: the weight gradients are ready
+        torch.cuda.current_stream().wait_stream(_side_stream(x.device))  # join: the weight gradients are ready
     return dx, dgam, dbeta, dwab, dws
 
 
@@ -474,7 +449,7 @@ class _GenericTransitionSM90A(torch.autograd.Function):
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
         ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
-        masters = (wa, wb, ws)   # saved too: an in-place update of a parameter before backward must raise, as for any autograd op
+        masters = (wa, wb, ws)  # saved too: an in-place update of a parameter before backward must raise, as for any autograd op
         wa, wb, ws = _kernel_weights(x, wa, wb, ws)
         if flat.dtype is torch.float32 and not _f32_cublas(flat):
             # one prep for the step: the forward reads the rounded copies, the backward Ws^T / [Wa;Wb]^T and the rounded Wa / Wb
@@ -484,16 +459,12 @@ class _GenericTransitionSM90A(torch.autograd.Function):
             wst = wabt = None
             ctx.prepped = False
         f32_cublas = _f32_cublas(flat)
-        wcat = torch.cat([wa, wb], 0) if f32_cublas else None   # the step's one stacked copy: a | b in the forward, dxn in the backward
-        out, xn, rstd, c1, ab, h = _fwd_launch(
-            flat, gf, bf, wa, wb, ws, float(eps), True, ctx.prepped, wcat
-        )
+        wcat = torch.cat([wa, wb], 0) if f32_cublas else None  # the step's one stacked copy: a | b in the forward, dxn in the backward
+        out, xn, rstd, c1, ab, h = _fwd_launch(flat, gf, bf, wa, wb, ws, float(eps), True, ctx.prepped, wcat)
         if not f32_cublas:
             wcat = (
                 torch.cat([wa, wb], 0)
-                if ab.numel() > 1
-                and flat.dtype is torch.bfloat16
-                and _cublas_plan(flat.shape[0], flat.shape[1], wa.shape[0])[2]
+                if ab.numel() > 1 and flat.dtype is torch.bfloat16 and _cublas_plan(flat.shape[0], flat.shape[1], wa.shape[0])[2]
                 else flat.new_empty((1, 1))
             )
         ctx.save_for_backward(flat, xn, rstd, c1, ab, h, wcat, gf, wa, wb, ws, *((wst, wabt) if ctx.prepped else ()), *masters)
@@ -536,12 +507,9 @@ class _GenericTransitionSM90A(torch.autograd.Function):
 def transition_generic_sm90a(x, gamma, beta, wa, wb, ws, eps):
     """Module-facing entry (same signature as ``fused_sm90a.transition_fused_sm90a``).  Call ``supported()`` first.  Inference (grad
     off, or nothing requiring grad) runs the forward without the saves."""
-    if not (
-        torch.is_grad_enabled()
-        and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
-    ):
+    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
-        kw = _kernel_weights(x, wa, wb, ws)   # fp32: the launch rounds them once per parameter version (_weights.tf32_rounded_triple)
+        kw = _kernel_weights(x, wa, wb, ws)  # fp32: the launch rounds them once per parameter version (_weights.tf32_rounded_triple)
         out, *_ = _fwd_launch(
             x.reshape(-1, shape[-1]).contiguous(),
             gamma.float().contiguous(),

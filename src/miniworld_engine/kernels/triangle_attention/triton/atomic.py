@@ -13,8 +13,6 @@ from einops import rearrange, repeat, reduce
 from miniworld_engine.kernels._shape_key import pack, token_key
 
 
-
-
 @triton.jit
 def _attn_fwd_inner(
     acc,
@@ -210,8 +208,6 @@ def _attn_fwd(
         out_mask = (offset_m[:, None] < N_CTX) & (offset_k[None, :] < HEAD_DIM)
         tl.store(o_ptr, acc.to(Out.type.element_ty), mask=out_mask)
 # fmt: on
-
-
 # fmt: off
 
 
@@ -495,8 +491,7 @@ def _atomic_fwd_fake(q, k, v, bias, shape_key):
 
 
 @opaque(fake=_atomic_fwd_fake, name="triangle_attention_atomic_fwd")
-def _atomic_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor,
-                shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _atomic_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor, shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
     """The attention launch -> ``(o, M)``. Every tensor arrives contiguous and shape-checked.
 
     Split out of the Function so the validation, the contiguous() calls and
@@ -548,10 +543,16 @@ def _atomic_bwd_fake(q, k, v, bias, o, M, grad_output, shape_key):
 
 
 @opaque(fake=_atomic_bwd_fake, name="triangle_attention_atomic_bwd")
-def _atomic_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor,
-                o: torch.Tensor, M: torch.Tensor, grad_output: torch.Tensor,
-                shape_key: int) -> tuple[
-                    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _atomic_bwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: torch.Tensor,
+    o: torch.Tensor,
+    M: torch.Tensor,
+    grad_output: torch.Tensor,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """The two backward launches -> ``(dq, dk, dv, dbias)``; ``dq`` comes back fp32."""
     B, HL, L, D = q.shape
     sm_scale = D**-0.5
@@ -606,15 +607,9 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
     ):
         op_dtype = q.dtype
         if not q.dtype == k.dtype == v.dtype == bias.dtype == op_dtype:
-            raise ValueError(
-                f"q, k, v, and bias must have the same dtype, "
-                f"but got {q.dtype=}, {k.dtype=}, {v.dtype=}, {bias.dtype=}"
-            )
+            raise ValueError(f"q, k, v, and bias must have the same dtype, but got {q.dtype=}, {k.dtype=}, {v.dtype=}, {bias.dtype=}")
         if not q.shape == k.shape == v.shape:
-            raise ValueError(
-                f"q, k, v must have the same shape, "
-                f"but got {q.shape=}, {k.shape=}, {v.shape=}"
-            )
+            raise ValueError(f"q, k, v must have the same shape, but got {q.shape=}, {k.shape=}, {v.shape=}")
         if q.ndim != 5:
             raise ValueError(f"q, k, v must have 5D, but got {q.ndim=}D")
 
@@ -654,16 +649,14 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         # preprocess takes explicit 5D strides.
         grad_output = grad_output.contiguous()
         q, k, v, bias, o = [x.to(op_dtype) for x in ctx.saved_tensors[:-1]]
-        M = ctx.saved_tensors[-1]                       # stays fp32, so delta does too
+        M = ctx.saved_tensors[-1]  # stays fp32, so delta does too
         # BEFORE the rearrange: the saved tensors are [B, H, L, L2, D] and the cache bucket keys on
         # the sequence length, the same value forward passed. After the rearrange the row axis is
         # H*L, so reading it there would key on a different number for every head count. `L`
         # appeared only inside the einops pattern STRINGS below, so `token_key(L)` was a
         # NameError -- it raised on every backward of this kernel.
         L = q.shape[2]
-        q, k, v, o, grad_output = [
-            rearrange(x, "B H L L2 D -> B (H L) L2 D") for x in (q, k, v, o, grad_output)
-        ]
+        q, k, v, o, grad_output = [rearrange(x, "B H L L2 D -> B (H L) L2 D") for x in (q, k, v, o, grad_output)]
         bias = repeat(bias, "B H L L2 -> B (H L3) L L2", L3=bias.shape[2])
         M = rearrange(M, "B H L L2 -> B (H L) L2")
 

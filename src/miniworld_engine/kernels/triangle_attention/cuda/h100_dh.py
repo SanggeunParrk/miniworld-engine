@@ -66,8 +66,9 @@ def backward(proj, bias, do, lse, delta, dall, n_head, d, scale):
     """The core backward: dq / dk / dv into columns 0 / H d / 2 H d of ``dall``; -> dbias fp32 [B, H, S, S] (natural units), the slabs (``ROWS``:
     the per-row bf16 planes) summed in fp32 in order."""
     B, _, S, _ = bias.shape
-    slabs_ = ext().triattn_dh_backward(proj, bias, do, lse, delta, dall, 0, n_head * d, 2 * n_head * d, n_head, d, scale,
-                                       S if ROWS else slabs(B, S, n_head), ROWS)
+    slabs_ = ext().triattn_dh_backward(
+        proj, bias, do, lse, delta, dall, 0, n_head * d, 2 * n_head * d, n_head, d, scale, S if ROWS else slabs(B, S, n_head), ROWS
+    )
     return slabs_.sum(0, dtype=torch.float32) if slabs_.shape[0] > 1 else slabs_[0].float()
 
 
@@ -126,15 +127,16 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> tor
     trans = not module.starting
     x = pair_p.contiguous().view(-1, C)
     lnw, lnb = module.ln_pair.weight.float().contiguous(), module.ln_pair.bias.float().contiguous()
-    y = _glue().ln_fwd(x, lnw, lnb, module.ln_pair.eps, L, trans)[0]     # the attention's row layout
+    y = _glue().ln_fwd(x, lnw, lnb, module.ln_pair.eps, L, trans)[0]  # the attention's row layout
     proj = torch.mm(y, pack["wcat"].t())
     # the pair bias [B, H, L, L]: from the rows the attention reads, or (an ending node on ``transposed_bias=False``) the pair as it is
     yb = _glue().ln_fwd(x, lnw, lnb, module.ln_pair.eps, L, False)[0] if trans and not module.transposed_bias else y
     bias = torch.mm(yb, pack["wb"].t()).view(B, L, L, H).permute(0, 3, 1, 2)
     if mask is not None:
         bias = bias.masked_fill(~mask[:, None, None, :], float("-inf"))
-    u = ext().triattn_dh_forward(proj, bias.contiguous(), pack["gb"] if pack["gb"] is not None else proj.new_empty(0, dtype=torch.float32),
-                                 H, D, D**-0.5)
+    u = ext().triattn_dh_forward(
+        proj, bias.contiguous(), pack["gb"] if pack["gb"] is not None else proj.new_empty(0, dtype=torch.float32), H, D, D**-0.5
+    )
 
     def project(w):
         t = torch.mm(u, w.t())

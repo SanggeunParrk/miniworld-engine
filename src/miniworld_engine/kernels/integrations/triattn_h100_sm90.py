@@ -28,29 +28,19 @@ FLIP, UNTRANSPOSED, DUAL = 1, 2, 4
 def _fused_shape(module, pair) -> bool:
     """d_pair = d_hidden = 128, 4 heads x 32: the fused kernels (front / tail / backward on wgmma).  d_pair = d_hidden = 256, 8 heads
     x 32 (``h100_sm90.WIDE``): the wide fused front, inference only (with grad or training dropout: the width-generic kernels)."""
-    if (
-        module.n_head == 4
-        and pair.shape[-1] == 128
-        and tuple(module.to_query.weight.shape) == (128, 128)
-    ):
+    if module.n_head == 4 and pair.shape[-1] == 128 and tuple(module.to_query.weight.shape) == (128, 128):
         return True
     from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as fused
 
     d_hidden, d_pair = module.to_query.weight.shape
-    return (
-        pair.shape[-1] == d_pair
-        and fused.wide(d_pair, d_hidden, module.n_head)
-        and not _trains(module, pair)
-    )
+    return pair.shape[-1] == d_pair and fused.wide(d_pair, d_hidden, module.n_head) and not _trains(module, pair)
 
 
 def _trains(module, pair) -> bool:
     """The call takes the autograd function (``forward``'s ``needs_grad``) or applies the module's training dropout."""
     if module.training and module.p_drop > 0.0:
         return True
-    return torch.is_grad_enabled() and (
-        pair.requires_grad or any(p.requires_grad for p in module.parameters())
-    )
+    return torch.is_grad_enabled() and (pair.requires_grad or any(p.requires_grad for p in module.parameters()))
 
 
 def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None) -> int | None:
@@ -182,24 +172,18 @@ def _infer(kind, args, eps, n_head, head_dim, trans, out=None, flip=False):
     blocks = _rows_blocks(kind, pair, n_head)
     if blocks > 1:
         wcat, wo_p = _packed(GENERIC, tuple(weights))
-        return _generic_rows(
-            pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, out, flip, gate_bias, out_bias, blocks
-        )
+        return _generic_rows(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, out, flip, gate_bias, out_bias, blocks)
     if kind == FUSED:
         from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import inference
 
         w4, wb16, wo16 = _packed(kind, tuple(weights))
-        return inference(
-            pair, lnw.float(), lnb.float(), w4, wb16, wo16, mask, eps, trans, out, flip, gate_bias, out_bias
-        )
+        return inference(pair, lnw.float(), lnb.float(), w4, wb16, wo16, mask, eps, trans, out, flip, gate_bias, out_bias)
     from miniworld_engine.kernels.triangle_attention.cuda import (
         h100_sm90_generic as gen,
     )
 
     wcat, wo_p = _packed(kind, tuple(weights))
-    return gen.inference(
-        pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, out, flip, gate_bias, out_bias
-    )
+    return gen.inference(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, out, flip, gate_bias, out_bias)
 
 
 def _rows_blocks(kind: int, pair: torch.Tensor, n_head: int) -> int:
@@ -275,9 +259,7 @@ def _generic_rows(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans
             qkvg = torch.matmul(y, w4.t())  # [R L, 4 HD]
             del y
             ld = qkvg.shape[1]
-            q, k, v, gt = (
-                qkvg.view(-1).as_strided((1, R, L, H, D), (R * L * ld, L * ld, ld, D, 1), i * HD) for i in range(4)
-            )
+            q, k, v, gt = (qkvg.view(-1).as_strided((1, R, L, H, D), (R * L * ld, L * ld, ld, D, 1), i * HD) for i in range(4))
             if gb is not None:
                 gt.add_(gb.to(gt.dtype))
             u = core(q, k, v, sbias, scale, False, gt, False)[3]
@@ -342,17 +324,33 @@ def _fwd_op(
     if kind == FUSED:
         from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as fused
 
-        out, saved = fused.train_forward(
-            pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, True, trans
-        )
+        out, saved = fused.train_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, True, trans)
         return [out, *saved]
     from miniworld_engine.kernels.triangle_attention.cuda import (
         h100_sm90_generic as gen,
     )
 
     out, saved = gen.train_forward(
-        pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, n_head, head_dim, trans,
-        bool(variant & FLIP), _opt(gb), _opt(bo), _opt(wt), _out_mode(variant),
+        pair,
+        lnw,
+        lnb,
+        wq,
+        wk,
+        wv,
+        wg,
+        wb,
+        wo,
+        mask,
+        eps,
+        drop,
+        n_head,
+        head_dim,
+        trans,
+        bool(variant & FLIP),
+        _opt(gb),
+        _opt(bo),
+        _opt(wt),
+        _out_mode(variant),
     )
     return [out, *saved]
 
@@ -378,19 +376,38 @@ def _bwd_op(
     if kind == FUSED:
         from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as fused
 
-        grads = fused.train_backward(
-            dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, eps, drop, tuple(saved), trans
-        )
+        grads = fused.train_backward(dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, eps, drop, tuple(saved), trans)
         return [*grads, *(t.new_empty(0) for t in (gb, bo, wt))]
     from miniworld_engine.kernels.triangle_attention.cuda import (
         h100_sm90_generic as gen,
     )
 
     grads = gen.train_backward(
-        dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, eps, drop, n_head, head_dim, tuple(saved), trans,
-        bool(variant & FLIP), _opt(gb), _opt(bo), _opt(wt), _out_mode(variant),
+        dy,
+        pair,
+        lnw,
+        lnb,
+        wq,
+        wk,
+        wv,
+        wg,
+        wb,
+        wo,
+        eps,
+        drop,
+        n_head,
+        head_dim,
+        tuple(saved),
+        trans,
+        bool(variant & FLIP),
+        _opt(gb),
+        _opt(bo),
+        _opt(wt),
+        _out_mode(variant),
     )
-    return [g if g is not None else t.new_empty(0) for g, t in zip(grads, (pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, bo, wt), strict=True)]
+    return [
+        g if g is not None else t.new_empty(0) for g, t in zip(grads, (pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, bo, wt), strict=True)
+    ]
 
 
 #: parameters of the training ops, in their argument order (``_train_params``)
@@ -470,9 +487,7 @@ _SLACK = 1 << 30
 INFERENCE_WORKSET_FRACTION = 0.25
 
 
-def _bytes_per_token(
-    kind: int, d_pair: int, n_head: int, padded: bool, dc: int = 32
-) -> tuple[int, int, int]:
+def _bytes_per_token(kind: int, d_pair: int, n_head: int, padded: bool, dc: int = 32) -> tuple[int, int, int]:
     """(inference working set, training saved tensors, training backward working set) in bytes per pair token of one sample, on top
     of the caller's tensors (pair and output; in training also dy and dx).  ``dc``: channels per head of the core (64: the h100_dh
     core of 64-channel heads, training; its query-side backward also holds up to ``h100_dh.MAX_SLABS`` fp32 dbias slabs)."""
@@ -562,19 +577,9 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
     if module.training and module.p_drop > 0.0:
         # the module's own draw on the original layout ([B, 1, L, C] starting / [B, L, 1, C] ending): in the kernels' starting
         # layout both index the row's last position, so either is [B, L, C] as it is
-        drop = (
-            module._make_drop_scale(pair, module.p_drop)
-            .reshape(B, L, C)
-            .to(torch.bfloat16)
-        )
-    needs_grad = torch.is_grad_enabled() and (
-        pair.requires_grad or any(p.requires_grad for p in module.parameters())
-    )
-    index = (
-        pair.device.index
-        if pair.device.index is not None
-        else torch.cuda.current_device()
-    )
+        drop = module._make_drop_scale(pair, module.p_drop).reshape(B, L, C).to(torch.bfloat16)
+    needs_grad = torch.is_grad_enabled() and (pair.requires_grad or any(p.requires_grad for p in module.parameters()))
+    index = pair.device.index if pair.device.index is not None else torch.cuda.current_device()
     head_dim = module.to_query.weight.shape[0] // module.n_head
     chunk, checkpoint = plan(
         kind,
@@ -671,9 +676,7 @@ class _Chunked(torch.autograd.Function):
     fp32, add up in fp32 and are rounded to the parameters' dtype once, as inside one launch."""
 
     @staticmethod
-    def forward(
-        ctx, kind, eps, n_head, head_dim, trans, variant, sizes, checkpoint, pair, *rest
-    ):
+    def forward(ctx, kind, eps, n_head, head_dim, trans, variant, sizes, checkpoint, pair, *rest):
         *params, mask, drop = rest
         p32 = [p.float() for p in params]
         L = pair.shape[1]
@@ -704,9 +707,7 @@ class _Chunked(torch.autograd.Function):
         Lp = _padded(L)
         per = len(saved) // len(sizes)
         dx = torch.empty(pair.shape, dtype=pair.dtype, device=pair.device)
-        acc = [
-            torch.zeros(p.shape, dtype=torch.float32, device=p.device) for p in params
-        ]
+        acc = [torch.zeros(p.shape, dtype=torch.float32, device=p.device) for p in params]
         start = 0
         for c, n in enumerate(sizes):
             x, m, d = _chunk_inputs(pair, mask, drop, start, n)
@@ -717,9 +718,7 @@ class _Chunked(torch.autograd.Function):
             g = dy[start : start + n]
             if Lp != L:
                 g = F.pad(g, (0, 0, 0, Lp - L, 0, Lp - L))
-            grads = _bwd_op(
-                kind, [g.contiguous(), x, *p32[:8], d, *p32[8:]], s, eps, n_head, head_dim, trans, variant
-            )
+            grads = _bwd_op(kind, [g.contiguous(), x, *p32[:8], d, *p32[8:]], s, eps, n_head, head_dim, trans, variant)
             del s, g
             dx[start : start + n] = grads[0][:, :L, :L]
             for a, gp in zip(acc, grads[1:], strict=True):

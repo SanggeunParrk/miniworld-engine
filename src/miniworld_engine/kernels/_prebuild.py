@@ -138,12 +138,22 @@ def family_rows(family: str) -> list[dict]:
                     continue
                 for dtype in r["dtypes"].split("|"):
                     key = (r["module"], r["stream"], r["dims"], r["options"], r["lengths"], r["depths"], dtype, mode)
-                    row = out.setdefault(key, {
-                        "module": r["module"], "model": r["model"], "stream": r["stream"],
-                        "lengths": [int(x) for x in r["lengths"].split("|") if x],
-                        "depths": [int(x) for x in r["depths"].split("|") if x],
-                        "samples": [int(x) for x in r["eval_samples" if mode == "eval" else "train_samples"].split("|") if x] or [1],
-                        "dims": r["dims"], "options": r["options"], "dtype": dtype, "mode": mode, "kernels": set()})
+                    row = out.setdefault(
+                        key,
+                        {
+                            "module": r["module"],
+                            "model": r["model"],
+                            "stream": r["stream"],
+                            "lengths": [int(x) for x in r["lengths"].split("|") if x],
+                            "depths": [int(x) for x in r["depths"].split("|") if x],
+                            "samples": [int(x) for x in r["eval_samples" if mode == "eval" else "train_samples"].split("|") if x] or [1],
+                            "dims": r["dims"],
+                            "options": r["options"],
+                            "dtype": dtype,
+                            "mode": mode,
+                            "kernels": set(),
+                        },
+                    )
                     row["kernels"].add(k["name"])
     return list(out.values())
 
@@ -155,7 +165,6 @@ def requirement_dims(*modules: str) -> list[dict[str, str]]:
 
     rows = csv.DictReader((KERNELS.parent / "requirements" / "requirements_module.csv").open())
     return [dict(kv.split("=", 1) for kv in r["dims"].split(";") if kv) for r in rows if r["module"] in modules]
-
 
 
 # --------------------------------------------------------------------------------------------------- planning
@@ -270,7 +279,9 @@ def default_jobs() -> int:
     return max(1, min(cpus, int(mem_mb / 1024 / PEAK_GB)))
 
 
-def build(specs: list[_nvcc.Spec], jobs: int, stop_after: float | None = None, arch_list: str = "9.0") -> dict[str, tuple[float, str | None]]:
+def build(
+    specs: list[_nvcc.Spec], jobs: int, stop_after: float | None = None, arch_list: str = "9.0"
+) -> dict[str, tuple[float, str | None]]:
     """Build the absent ones; one log line per finished artifact. Returns key -> (seconds, error)."""
     _sweep_tmp()
     todo = [s for s in specs if s.kind != "derived" and present(s) is None]
@@ -295,9 +306,10 @@ def build(specs: list[_nvcc.Spec], jobs: int, stop_after: float | None = None, a
                     key, seconds, err, rss = f.result()
                     results[key] = (seconds, err)
                     status = "ok" if err is None else "FAIL"
-                    log(f"{status} {seconds:7.1f} s  {s.name}  [{key[:8]}]  ({len(results)}/{len(todo)}, "
-                        f"worker peak child RSS {rss} MB, {time.monotonic() - t0:.0f} s)"
-                        + ("" if err is None else "\n    " + _head(err)))
+                    log(
+                        f"{status} {seconds:7.1f} s  {s.name}  [{key[:8]}]  ({len(results)}/{len(todo)}, "
+                        f"worker peak child RSS {rss} MB, {time.monotonic() - t0:.0f} s)" + ("" if err is None else "\n    " + _head(err))
+                    )
     by_key = {s.key: s for s in specs}
     for s in specs:
         if s.kind == "derived" and present(s) is None:
@@ -307,8 +319,10 @@ def build(specs: list[_nvcc.Spec], jobs: int, stop_after: float | None = None, a
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"
             results[s.key] = (time.perf_counter() - started, err)
-            log(f"{'ok' if err is None else 'FAIL'} {results[s.key][0]:7.1f} s  {s.name}  [{s.key[:8]}]  (derived)"
-                + ("" if err is None else "\n    " + _head(err)))
+            log(
+                f"{'ok' if err is None else 'FAIL'} {results[s.key][0]:7.1f} s  {s.name}  [{s.key[:8]}]  (derived)"
+                + ("" if err is None else "\n    " + _head(err))
+            )
     return results
 
 
@@ -367,14 +381,26 @@ def prebuild_meta(t: Target, specs: list[_nvcc.Spec]) -> dict:
 
     env: dict = {"host": platform.node(), "python": platform.python_version(), "torch": torch.__version__, "cuda": torch.version.cuda}
     try:
-        env["nvcc"] = subprocess.run([_nvcc.nvcc_path() or "nvcc", "--version"], capture_output=True, text=True,
-                                     timeout=20).stdout.strip().splitlines()[-1]
+        env["nvcc"] = (
+            subprocess.run([_nvcc.nvcc_path() or "nvcc", "--version"], capture_output=True, text=True, timeout=20)
+            .stdout.strip()
+            .splitlines()[-1]
+        )
     except Exception:  # recorded as absent
         env["nvcc"] = None
     req = KERNELS.parent / "requirements"
-    return {"prebuild_version": PREBUILD_VERSION, "arch": t.arch, "sms": t.sms, "env": env,
-            "requirements": {"module_sha": _file_sha(req / "requirements_module.csv"), "kernel_sha": _file_sha(req / "requirements_kernel.csv")},
-            "plan_sha": hashlib.sha256("\n".join(sorted(s.key for s in specs)).encode()).hexdigest()[:16], "artifacts": len(specs)}
+    return {
+        "prebuild_version": PREBUILD_VERSION,
+        "arch": t.arch,
+        "sms": t.sms,
+        "env": env,
+        "requirements": {
+            "module_sha": _file_sha(req / "requirements_module.csv"),
+            "kernel_sha": _file_sha(req / "requirements_kernel.csv"),
+        },
+        "plan_sha": hashlib.sha256("\n".join(sorted(s.key for s in specs)).encode()).hexdigest()[:16],
+        "artifacts": len(specs),
+    }
 
 
 def write_index(t: Target, specs: list[_nvcc.Spec]) -> Path:
@@ -385,8 +411,17 @@ def write_index(t: Target, specs: list[_nvcc.Spec]) -> Path:
     for s in specs:
         p = present(s)
         if p is not None:
-            rows.append({"kind": s.kind, "name": s.name, "key": s.key, "sha": _artifact_sha(p), "path": s.rel, "site": s.site,
-                         "family": s.call.get("_family")})
+            rows.append(
+                {
+                    "kind": s.kind,
+                    "name": s.name,
+                    "key": s.key,
+                    "sha": _artifact_sha(p),
+                    "path": s.rel,
+                    "site": s.site,
+                    "family": s.call.get("_family"),
+                }
+            )
     _nvcc._write_json(out, {"arch": t.arch, "meta": prebuild_meta(t, specs), "artifacts": rows})
     return out
 
@@ -405,8 +440,13 @@ def call_sites() -> set[str]:
         if path in skip or path.name == "setup.py":
             continue
         tree = ast.parse(path.read_text())
-        alias = {a.asname or a.name: a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
-                 for a in n.names if a.name in ("load_extension", "load_inline_extension")}
+        alias = {
+            a.asname or a.name: a.name
+            for n in ast.walk(tree)
+            if isinstance(n, ast.ImportFrom)
+            for a in n.names
+            if a.name in ("load_extension", "load_inline_extension")
+        }
 
         def visit(node: ast.AST, fn: str) -> None:
             for child in ast.iter_child_nodes(node):
@@ -416,9 +456,13 @@ def call_sites() -> set[str]:
                 if isinstance(child, ast.Call):
                     f = child.func
                     hit = (isinstance(f, ast.Name) and f.id in alias) or (  # noqa: B023 -- visit runs inside this iteration
-                        isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and (
+                        isinstance(f, ast.Attribute)
+                        and isinstance(f.value, ast.Name)
+                        and (
                             (f.value.id == "_nvcc" and f.attr in ("cubin", "derived_cubin", "load_extension"))
-                            or (f.value.id == "T" and f.attr in ("compile", "compile_text"))))
+                            or (f.value.id == "T" and f.attr in ("compile", "compile_text"))
+                        )
+                    )
                     if hit:
                         sites.add(f"{path.relative_to(KERNELS).as_posix()}::{fn}")  # noqa: B023 -- visit runs inside this iteration
                 visit(child, name)
@@ -427,8 +471,10 @@ def call_sites() -> set[str]:
     return sites
 
 
-_GLOBAL = re.compile(r"__global__\s+(?:__launch_bounds__\s*\([^)]*\)\s*)?(?:static\s+|inline\s+)*void\s+"
-                     r"(?:__launch_bounds__\s*\([^)]*\)\s*)?(\w+)")
+_GLOBAL = re.compile(
+    r"__global__\s+(?:__launch_bounds__\s*\([^)]*\)\s*)?(?:static\s+|inline\s+)*void\s+"
+    r"(?:__launch_bounds__\s*\([^)]*\)\s*)?(\w+)"
+)
 
 
 def check(t: Target, specs: list[_nvcc.Spec], problems: list[str]) -> int:
@@ -477,8 +523,11 @@ def _requirements(specs: list[_nvcc.Spec]) -> int:
 
     files = {Path(p) for s in specs for p in s.files}
     cuda = candidates((p, g) for p in sorted(files) for g in _GLOBAL.findall(p.read_text(errors="replace")))
-    triton = candidates((p, fn) for p in sorted(KERNELS.rglob("*.py"))
-                        for fn in re.findall(r"@triton\.jit[^\n]*\n(?:[^\n]*\n){0,3}?def\s+(\w+)", p.read_text(errors="replace")))
+    triton = candidates(
+        (p, fn)
+        for p in sorted(KERNELS.rglob("*.py"))
+        for fn in re.findall(r"@triton\.jit[^\n]*\n(?:[^\n]*\n){0,3}?def\s+(\w+)", p.read_text(errors="replace"))
+    )
 
     def hit(want: set[str], fam: str, table: dict) -> str | None:
         def ok(w: str, have: set[str]) -> bool:
@@ -498,7 +547,7 @@ def _requirements(specs: list[_nvcc.Spec]) -> int:
         stem = name
         for pre in (*prefixes.get(fam, ()), fam):
             if stem.startswith(pre + "_"):
-                stem = stem[len(pre) + 1:]
+                stem = stem[len(pre) + 1 :]
                 break
         h100 = stem.endswith("_sm90")
         want = _tokens(stem.removesuffix("_sm90")) or _tokens(fam)
@@ -510,9 +559,11 @@ def _requirements(specs: list[_nvcc.Spec]) -> int:
             counts["none"] += 1
             if h100:
                 findings.append(f"{name} ({fam}, {r['role']})")
-    log(f"requirements_kernel.csv: {len(rows)} rows; {counts['cuda']} match a compiled __global__ function, "
+    log(
+        f"requirements_kernel.csv: {len(rows)} rows; {counts['cuda']} match a compiled __global__ function, "
         f"{counts['triton']} a Triton kernel (out of scope), {counts['none']} neither "
-        f"({len(findings)} of them named *_sm90, i.e. H100 hand CUDA)")
+        f"({len(findings)} of them named *_sm90, i.e. H100 hand CUDA)"
+    )
     per_family: dict[str, int] = {}
     for s in specs:
         for p in s.files:
@@ -520,11 +571,15 @@ def _requirements(specs: list[_nvcc.Spec]) -> int:
             per_family[fam] = per_family.get(fam, 0) + 1
     #: requirements families whose files live under another kernels/ directory (the training glue of PWA / OPM: kernels/integrations/csrc)
     lives_in = {"pair_weighted_averaging": "integrations", "outer_product_mean": "integrations"}
-    findings.extend(f"family {fam}: has *_sm90 rows but no planned artifact compiles a file of kernels/{fam}/"
-                    for fam in sorted({r["family"] for r in rows if r["name"].endswith("_sm90")})
-                    if not per_family.get(fam) and not per_family.get(lives_in.get(fam, fam)))
-    log("H100 families with *_sm90 rows and the planned artifacts compiling their files: " + ", ".join(
-        f"{fam} {per_family.get(fam, 0)}" for fam in sorted({r["family"] for r in rows if r["name"].endswith("_sm90")})))
+    findings.extend(
+        f"family {fam}: has *_sm90 rows but no planned artifact compiles a file of kernels/{fam}/"
+        for fam in sorted({r["family"] for r in rows if r["name"].endswith("_sm90")})
+        if not per_family.get(fam) and not per_family.get(lives_in.get(fam, fam))
+    )
+    log(
+        "H100 families with *_sm90 rows and the planned artifacts compiling their files: "
+        + ", ".join(f"{fam} {per_family.get(fam, 0)}" for fam in sorted({r["family"] for r in rows if r["name"].endswith("_sm90")}))
+    )
     for f in findings:
         log(f"  no compiled kernel matches: {f}")
     planned = {s.call.get("_family") for s in specs}
@@ -545,10 +600,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--jobs", type=int, default=0, help=f"parallel builds (default: min(CPUs, memory / {PEAK_GB} GB))")
     ap.add_argument("--only", nargs="*", default=(), help="families to plan (default: all)")
     ap.add_argument("--match", default=None, help="keep only artifacts whose name matches this regular expression")
-    ap.add_argument("--reverse", action="store_true", help="build in reverse plan order (a second job then meets the first one in the middle)")
+    ap.add_argument(
+        "--reverse", action="store_true", help="build in reverse plan order (a second job then meets the first one in the middle)"
+    )
     ap.add_argument("--rows", action="store_true", help="print, per family, the requirements rows its kernels must serve; build nothing")
-    ap.add_argument("--compare", default=None, metavar="INDEX.json",
-                    help="diff the plan against a prebuilt-<arch>.json index (artifacts only in one of them, by family); build nothing")
+    ap.add_argument(
+        "--compare",
+        default=None,
+        metavar="INDEX.json",
+        help="diff the plan against a prebuilt-<arch>.json index (artifacts only in one of them, by family); build nothing",
+    )
     ap.add_argument("--list", action="store_true", help="print the plan and what is missing; build nothing")
     ap.add_argument("--check", action="store_true", help="cross-check the plan against the code and requirements")
     ap.add_argument("--stop-after", type=float, default=None, help="start no build after this many seconds")
@@ -562,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.mathdx:
         os.environ["MATHDX_HOME"] = args.mathdx
     if args.rows:
-        for family in (args.only or RECIPES):
+        for family in args.only or RECIPES:
             rows = family_rows(family)
             combos = sorted({(r["module"], r["dtype"], r["mode"]) for r in rows})
             log(f"{family}: {len(rows)} rows; " + ", ".join(f"{m} {d}/{mo}" for m, d, mo in combos))
@@ -578,9 +639,11 @@ def main(argv: list[str] | None = None) -> int:
     for s in specs:
         by_kind[s.kind] = by_kind.get(s.kind, 0) + 1
     absent = [s for s in specs if present(s) is None]
-    log(f"plan for {t.arch}: {len(specs)} artifacts ({', '.join(f'{v} {k}' for k, v in sorted(by_kind.items()))}) from "
+    log(
+        f"plan for {t.arch}: {len(specs)} artifacts ({', '.join(f'{v} {k}' for k, v in sorted(by_kind.items()))}) from "
         f"{len(RECIPES) if not args.only else len(args.only)} families in {time.monotonic() - started:.1f} s; "
-        f"{len(absent)} not built yet; cache {_nvcc.engine_jit_root()}")
+        f"{len(absent)} not built yet; cache {_nvcc.engine_jit_root()}"
+    )
     for p in problems:
         log(f"problem: {p}")
     if args.compare:
@@ -607,8 +670,10 @@ def main(argv: list[str] | None = None) -> int:
     index = write_index(t, specs)
     left = sum(present(s) is None for s in specs)
     total = sum(v[0] for v in results.values())
-    log(f"done: {len(results) - len(failed)} built, {len(failed)} failed, {left} of {len(specs)} still absent; "
-        f"{total:.0f} s of builds in {time.monotonic() - started:.0f} s; index {index}")
+    log(
+        f"done: {len(results) - len(failed)} built, {len(failed)} failed, {left} of {len(specs)} still absent; "
+        f"{total:.0f} s of builds in {time.monotonic() - started:.0f} s; index {index}"
+    )
     if failed or problems or left:
         # repeated at the end, where a long log is read: a planned artifact that does not build is an error (a served call would raise
         # _nvcc.KernelBuildError on it), never something to fall back from
@@ -617,8 +682,10 @@ def main(argv: list[str] | None = None) -> int:
             log(f"FAILED {names.get(key, key[:8])}  [{key[:8]}]\n    {_head(err or '')}")
         for p in problems:
             log(f"FAILED (plan) {p}")
-        log(f"PREBUILD FAILED for {t.arch}: {len(failed)} artifacts failed to build, {len(problems)} plan problems, "
-            f"{left} of {len(specs)} planned artifacts absent; exit 1")
+        log(
+            f"PREBUILD FAILED for {t.arch}: {len(failed)} artifacts failed to build, {len(problems)} plan problems, "
+            f"{left} of {len(specs)} planned artifacts absent; exit 1"
+        )
         return 1
     return 0
 

@@ -68,7 +68,6 @@ def _affine_args(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tenso
     return (empty if weight is None else prep(weight)), (empty if bias is None else prep(bias)), _WCODE[dt]
 
 
-
 def _fwd_fake(x, w, b, eps, rms, train, with_ws):
     """y like x; the workspace and the statistics are empty unless asked for."""
     n, m = x.shape[1], x.shape[0]
@@ -77,8 +76,9 @@ def _fwd_fake(x, w, b, eps, rms, train, with_ws):
 
 
 @opaque(fake=_fwd_fake, name="layernorm_pipe_fwd")
-def _fwd(x: torch.Tensor, w: torch.Tensor, b: torch.Tensor, eps: float, rms: bool, train: bool,
-         with_ws: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _fwd(
+    x: torch.Tensor, w: torch.Tensor, b: torch.Tensor, eps: float, rms: bool, train: bool, with_ws: bool
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Forward of contiguous x [M, N]; (y, ws, stats). ``train``: stats = fp32 [M, 2] (mean, rstd) for the backward; ``with_ws``: ws = the
     a flag (one element) that the backward wants affine gradients."""
     f32 = dict(dtype=torch.float32, device=x.device)
@@ -92,13 +92,13 @@ def _bwd_fake(dy, x, w, stats, ws, rms, wcode):
     """dx like x; dw / db [N] in the weight dtype when there is a workspace, else empty."""
     wdt = {v: k for k, v in _WCODE.items()}[wcode]
     n = x.shape[1] if ws.numel() else 0
-    return (torch.empty_like(x), torch.empty((n,), dtype=wdt, device=x.device),
-            torch.empty((0 if rms else n,), dtype=wdt, device=x.device))
+    return (torch.empty_like(x), torch.empty((n,), dtype=wdt, device=x.device), torch.empty((0 if rms else n,), dtype=wdt, device=x.device))
 
 
 @opaque(fake=_bwd_fake, name="layernorm_pipe_bwd")
-def _bwd(dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, stats: torch.Tensor, ws: torch.Tensor, rms: bool,
-         wcode: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _bwd(
+    dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, stats: torch.Tensor, ws: torch.Tensor, rms: bool, wcode: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward: (dx, dw, db); dw / db (``wcode`` dtype) only when ``ws`` is non-empty, db not for RMSNorm. Clears ``ws``."""
     dx, dw, db = _ext().bwd(dy, x, w, stats, ws, bool(rms), int(wcode), PER_SM)
     return dx, dw, db

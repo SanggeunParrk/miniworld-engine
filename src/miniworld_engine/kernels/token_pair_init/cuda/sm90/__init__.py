@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 
 _dir = Path(__file__).parent
-P = 128   # d_pair
+P = 128  # d_pair
 RB = 8
 
 
@@ -24,9 +24,13 @@ def ext():
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
-    return load_extension(name="token_pair_init_sm90", sources=[str(_dir / "token_pair_init.cu")],
-                          extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a")], extra_cflags=["-std=c++17"],
-                          verbose=False)
+    return load_extension(
+        name="token_pair_init_sm90",
+        sources=[str(_dir / "token_pair_init.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a")],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 def forward(left, right, tbl, ids, bond, r_max: int, s_max: int) -> torch.Tensor:

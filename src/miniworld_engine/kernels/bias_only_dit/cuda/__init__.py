@@ -52,11 +52,7 @@ def _h100_group(samples, length, heads, width, sms):
     residents = 2 if length * 128 + 3 * 8192 + 1024 <= 232448 // 2 else 1
     return min(
         (g for g in _GROUPS if g <= samples),
-        key=lambda g: (
-            -(-heads * (length // 64) * -(-samples // g) // (sms * residents))
-            * length
-            * (64 + width * g)
-        ),
+        key=lambda g: -(-heads * (length // 64) * -(-samples // g) // (sms * residents)) * length * (64 + width * g),
     )
 
 
@@ -163,17 +159,13 @@ def adaln_in_rows(single, x, ms, mb, out, T, eps=1e-5, presig=False):
 
 def resgate_adaln_rows(x, y, gl, ms, mb, out, T, eps=1e-5, presig=False):
     """x += sigmoid(gl[row % T]) * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block."""
-    _ext().resgate_adaln_rows_cuda(
-        x, y, gl, ms, mb, out, int(T), float(eps), bool(presig)
-    )
+    _ext().resgate_adaln_rows_cuda(x, y, gl, ms, mb, out, int(T), float(eps), bool(presig))
 
 
 def resgate_adaln_rows_in(xin, x, y, gl, ms, mb, out, T, eps=1e-5, presig=False):
     """x = xin + sigmoid(gl[row % T]) * y (fp32; xin bf16 or fp32: the step input when ``adaln_in_rows`` made no fp32 copy), out =
     AdaLN(x)."""
-    _ext().resgate_adaln_rows_in_cuda(
-        xin, x, y, gl, ms, mb, out, int(T), float(eps), bool(presig)
-    )
+    _ext().resgate_adaln_rows_in_cuda(xin, x, y, gl, ms, mb, out, int(T), float(eps), bool(presig))
 
 
 def swiglu_rows(ab, out):
@@ -243,22 +235,14 @@ def pick_group(S: int, L: int, nsm: int, nh: int = H, dh: int = DH) -> int:
     return best[1]
 
 
-def core_supported(
-    dtype: torch.dtype, L: int, d: int, h: int, device_index: int
-) -> bool:
+def core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
     """bf16, d attention channels as h heads in LAYOUTS (768 = 16 x 48, 24 x 32, 12 x 64; 1024 = 16 x 64), L a multiple of 128
     up to 768 on sm_100 (the P tile and two accumulators in 512 TMEM columns), up to ``H100_MAX_L`` on Hopper (``pvx`` / ``pvx32``
     stream P through a TMA ring: no length bound of their own; the sampler's token rungs reach 2560).
     settings.bias_only_dit_core=0 turns it off.
     fp32: the TF32 core (``tf32.py``; same layouts and lengths), once the fp32 path's kernels load (``tf32_ready``)."""
     if h100_enabled(device_index):  # Hopper: ``pvx`` (bf16) / the TF32 wgmma core ``pvx32`` (fp32), head widths 32 / 48 / 64
-        return (
-            dtype in (torch.bfloat16, torch.float32)
-            and d % h == 0
-            and (h, d // h) in LAYOUTS
-            and L % 128 == 0
-            and 0 < L <= H100_MAX_L
-        )
+        return dtype in (torch.bfloat16, torch.float32) and d % h == 0 and (h, d // h) in LAYOUTS and L % 128 == 0 and 0 < L <= H100_MAX_L
     if dtype is torch.float32:
         if not (
             d % h == 0
@@ -412,9 +396,7 @@ class PvGateCore:
         pdl: bool = False,
         p_early: bool = False,
     ):
-        assert pdl or not p_early, (
-            "P_EARLY moves P before the PDL wait: a PDL build only"
-        )
+        assert pdl or not p_early, "P_EARLY moves P before the PDL wait: a PDL build only"
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
         self._sm100 = sm100
@@ -433,9 +415,7 @@ class PvGateCore:
         """This call takes the P_EARLY build: ``p_early`` and not settings.bias_only_dit_inf3_p_early=0."""
         return self.p_early
 
-    def kernel(
-        self, sg: int, gate: bool = True, vb: int = 128, early: bool | None = None
-    ):
+    def kernel(self, sg: int, gate: bool = True, vb: int = 128, early: bool | None = None):
         """The cubin for SG samples per item, with or without the gate, VB keys per v tile, the P_EARLY build where ``early``
         (default: ``self.early()``) (built on first use)."""
         vdef = () if vb == 128 else (f"VB={vb}",)
@@ -494,9 +474,7 @@ class PvGateCore:
         """v [S L, 768] view, P [nh L, L] contiguous, out [S L, 768] view, g [S L, 768] view or None; all bf16."""
         if h100_enabled(self.device_index):
             if _H100_PVX:
-                h100_ext().pv_cta(
-                    v, P, out, S, g, self.nh, self.dh, self.nsm, *_H100_PVX_FORCE
-                )
+                h100_ext().pv_cta(v, P, out, S, g, self.nh, self.dh, self.nsm, *_H100_PVX_FORCE)
                 return out
             sg = _h100_group(S, v.shape[0] // S, self.nh, self.dh, self.nsm)
             h100_ext().grouped_pv_pipeline(v, P, out, S, g, self.nh, self.dh, sg)
@@ -588,9 +566,7 @@ class DpbKernel:
 
     def _bind(self, do, v, P, dd, out, A, L):
         nh, dh = self.nh, self.dh
-        hp = (
-            2 if dh == 32 else 1
-        )  # heads per work item (dpb_sm100.cu HP): two 32-wide heads per 128-byte row
+        hp = 2 if dh == 32 else 1  # heads per work item (dpb_sm100.cu HP): two 32-wide heads per 128-byte row
         nj = _dpb_nj(L, self.nsm, nh // hp, hp)
         k = self._sm100._sm100_kernel(
             "dpb_sm100",
@@ -637,15 +613,11 @@ class DpbKernel:
             mdo,
             mv,
             mv,
-            tm(
-                P, [L, nh * L], L * 2, [32, 128], swizzle=64
-            ),  # (the TF32 build's narrow-box maps unused)
+            tm(P, [L, nh * L], L * 2, [32, 128], swizzle=64),  # (the TF32 build's narrow-box maps unused)
             tm(out, [L, nh * L], L * 2, [32, 32], swizzle=64),
         )
         items = nh // hp * (L // 256) * (L // 256)
-        return _Launch(
-            k, (min(self.nsm & ~1, 2 * items), 1, 1), (256, 1, 1), *maps, PTR, L, A
-        )
+        return _Launch(k, (min(self.nsm & ~1, 2 * items), 1, 1), (256, 1, 1), *maps, PTR, L, A)
 
     def __call__(self, do, v, P, dd, out, A):
         if h100_enabled(self.device_index):
@@ -656,9 +628,7 @@ class DpbKernel:
             return out
         L = do.shape[0] // A
         hp = 2 if self.dh == 32 else 1
-        pair = (
-            dpb_pair_on(L, self.nh, hp, self.nsm)
-        )
+        pair = dpb_pair_on(L, self.nh, hp, self.nsm)
         if pair and self._pair_k is None:
             try:
                 self._pair_k = self.pair_kernel()
@@ -709,9 +679,7 @@ class PvDpb:
         self.nh, self.dh = nh, dh or 768 // nh
         self.nsm = num_sms(device_index)
         self.runs = _Runs()
-        h = (
-            hashlib.sha256()
-        )  # the cubin cache hashes bo_pvdpb.cu only: the included bodies by this define
+        h = hashlib.sha256()  # the cubin cache hashes bo_pvdpb.cu only: the included bodies by this define
         for f in ("pv_gate_inf.cu", "dpb_sm100.cu"):
             h.update((_dir / f).read_bytes())
         self._src = f"SRC_HASH={h.hexdigest()[:16]}"
@@ -839,15 +807,8 @@ class GemmSwigluAB:
             h100_ext().swiglu_pipeline(x, w, ab, h)
             return h
         M, K, H = x.shape[0], self.K, self.H
-        assert (
-            x.shape == (M, K)
-            and w.shape == (2 * H, K)
-            and ab.shape == (M, 2 * H)
-            and h.shape == (M, H)
-        )
-        assert all(
-            t.is_contiguous() and t.dtype is torch.bfloat16 for t in (x, w, ab, h)
-        )
+        assert x.shape == (M, K) and w.shape == (2 * H, K) and ab.shape == (M, 2 * H) and h.shape == (M, H)
+        assert all(t.is_contiguous() and t.dtype is torch.bfloat16 for t in (x, w, ab, h))
         self.runs.bind(
             (x.data_ptr(), w.data_ptr(), ab.data_ptr(), h.data_ptr(), M),
             lambda: self._bind(x, w, ab, h),
@@ -951,14 +912,7 @@ class CondTables:
     on the first ``n_g1`` columns (AdaLN scale / shift, LN(c) folded in algebraically), sig(c W^T + b) on the rest (the output
     gates); sig = sigmoid on the scale and gate columns. c [T, 384] bf16, W [N, 384] bf16, b and colsum [N] fp32."""
 
-    SMEM = (
-        6 * 16384
-        + 2 * _COND_NT * 128
-        + 8 * 3 * 2048
-        + 2 * 2 * _COND_NT * 4
-        + 2 * 2 * 128 * 4
-        + 256
-    )
+    SMEM = 6 * 16384 + 2 * _COND_NT * 128 + 8 * 3 * 2048 + 2 * 2 * _COND_NT * 4 + 2 * 2 * 128 * 4 + 256
 
     def __init__(self, device_index: int):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
@@ -1058,7 +1012,8 @@ def prebuild(target, rows):
     builds = (
         (h100_ext, None, None),  # pv_gate_inf.cu: the attention core (bf16 pv_cta / fp32 pv_cta_tf32), dpb, swiglu pipeline
         (h100_gemm_ext, bf16, eval_),  # one-launch conditioning tables, squeeze + out-projection (the bf16 inference step)
-        (functools.partial(_rows_ext, True), bf16, None), (functools.partial(train._rows_ext, True), bf16, train_),
+        (functools.partial(_rows_ext, True), bf16, None),
+        (functools.partial(train._rows_ext, True), bf16, train_),
         (tf32.rows32, fp32, None),  # the fp32 row kernels
     )
     served = {("bfloat16" if r["dtype"] == "master" else r["dtype"], r["mode"]) for r in rows}

@@ -83,16 +83,16 @@ class Config:
 
 @dataclasses.dataclass(frozen=True)
 class Case:
-    row: int                 # requirements data-row number
-    module: str              # class name
+    row: int  # requirements data-row number
+    module: str  # class name
     model: str
     stream: str
-    kwargs: dict             # constructor kwargs (one variant)
+    kwargs: dict  # constructor kwargs (one variant)
     length: int
     depth: int | None
     samples: int
-    dtype: str               # bfloat16 | float32 | master
-    mode: str                # eval | train
+    dtype: str  # bfloat16 | float32 | master
+    mode: str  # eval | train
     seed: int
 
     @property
@@ -222,8 +222,7 @@ def rows(cfg: Config) -> list[tuple[int, dict]]:
     with open(cfg.requirements, newline="") as fh:
         table = list(csv.DictReader(fh))
     every = "all" in cfg.modules
-    return [(n, r) for n, r in enumerate(table, 1)
-            if (every or r["module"] in cfg.modules) and (not cfg.rows or n in cfg.rows)]
+    return [(n, r) for n, r in enumerate(table, 1) if (every or r["module"] in cfg.modules) and (not cfg.rows or n in cfg.rows)]
 
 
 def cases(cfg: Config):
@@ -239,8 +238,19 @@ def cases(cfg: Config):
                             if cfg.modes and mode not in cfg.modes:
                                 continue
                             for samples in _pick(_ints(r[f"{mode}_samples"]) or [1], "min" if cfg.samples == "min" else "all"):
-                                yield Case(row=n, module=r["module"], model=r["model"], stream=r["stream"], kwargs=kwargs,
-                                           length=length, depth=depth, samples=samples, dtype=dtype, mode=mode, seed=cfg.seed)
+                                yield Case(
+                                    row=n,
+                                    module=r["module"],
+                                    model=r["model"],
+                                    stream=r["stream"],
+                                    kwargs=kwargs,
+                                    length=length,
+                                    depth=depth,
+                                    samples=samples,
+                                    dtype=dtype,
+                                    mode=mode,
+                                    seed=cfg.seed,
+                                )
 
 
 def backends_of(cfg: Config, case: Case) -> list[str]:
@@ -253,9 +263,21 @@ def describe(case: Case, cfg: Config | None = None) -> dict:
     """The case in a record: what was measured (row number, class, variant, length, ...) and the versions of what measured it: the
     module class's ``version``, the ``version`` of every kernel requirements_kernel.csv lists for the class in this mode and the
     ``version`` of those kernels' families' launch-config tables."""
-    return {"label": case.label, "row": case.row, "module": case.module, "model": case.model, "stream": case.stream,
-            "kwargs": case.kwargs, "length": case.length, "depth": case.depth, "samples": case.samples, "dtype": case.dtype,
-            "mode": case.mode, "gpu": result_gpu(), "versions": versions(case.module, case.mode)}
+    return {
+        "label": case.label,
+        "row": case.row,
+        "module": case.module,
+        "model": case.model,
+        "stream": case.stream,
+        "kwargs": case.kwargs,
+        "length": case.length,
+        "depth": case.depth,
+        "samples": case.samples,
+        "dtype": case.dtype,
+        "mode": case.mode,
+        "gpu": result_gpu(),
+        "versions": versions(case.module, case.mode),
+    }
 
 
 # ------------------------------------------------------------------------------------------------------------------- record identity
@@ -279,8 +301,9 @@ def versions(module: str, mode: str, gpu: str | None = None) -> dict:
     every kernel listed for the class whose role serves ``mode`` and, for a card-specific kernel (name suffix ``_smNN``), only on that card: bump a kernel's when its algorithm changes a result). ``tables``: the launch-config table versions of
     those kernels' families for ``gpu`` (default: the card this process measures on, :func:`result_gpu`)."""
     cls = module_class(module)
-    rows = [r for r in _table(str(KERNELS))
-            if module in (r.get("modules") or "").split("|") and mode in ROLE_MODES.get(r.get("role", ""), ())]
+    rows = [
+        r for r in _table(str(KERNELS)) if module in (r.get("modules") or "").split("|") and mode in ROLE_MODES.get(r.get("role", ""), ())
+    ]
     gpu = gpu or result_gpu()
     # a kernel built for one card (name ending "_sm80", "_sm90", "_sm90a", ...) counts only for that card's results
     card_sm = re.search(r"sm(\d+)", gpu)
@@ -288,8 +311,13 @@ def versions(module: str, mode: str, gpu: str | None = None) -> dict:
     kernels = {r["name"]: r.get("version") or "1" for r in rows}
     tables = {f: table_version(f, gpu) for f in sorted({r["family"] for r in rows})}
     adapters = {b: str(v) for b, v in sorted(getattr(cls, "backend_versions", {}).items())}
-    return {"module": str(getattr(cls, "version", "1")), "kernels": dict(sorted(kernels.items())), "tables": tables,
-            "backends": adapters, "tf32": dict(TF32_RULE)}
+    return {
+        "module": str(getattr(cls, "version", "1")),
+        "kernels": dict(sorted(kernels.items())),
+        "tables": tables,
+        "backends": adapters,
+        "tf32": dict(TF32_RULE),
+    }
 
 
 #: The card assumed when no CUDA device is visible (a CPU-side judge run without --gpu).
@@ -330,8 +358,13 @@ def environment() -> dict:
         props = torch.cuda.get_device_properties(0)
         env.update(gpu=props.name, capability=list(torch.cuda.get_device_capability(0)), sms=props.multi_processor_count)
         try:
-            env["driver"] = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"], capture_output=True,
-                                           text=True, timeout=10).stdout.splitlines()[0].strip()
+            env["driver"] = (
+                subprocess.run(
+                    ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"], capture_output=True, text=True, timeout=10
+                )
+                .stdout.splitlines()[0]
+                .strip()
+            )
         except Exception:  # recorded as absent
             env["driver"] = None
     return env
@@ -348,8 +381,14 @@ def run_meta(cfg: Config, kind: str, measurer_version: str) -> dict:
     speed) and of the prebuilder (how the kernels were built), the measurement settings and the environment."""
     from miniworld_engine.kernels._prebuild import PREBUILD_VERSION
 
-    return {"kind": kind, "config_version": CONFIG_VERSION, "measurer_version": measurer_version, "prebuild_version": PREBUILD_VERSION,
-            "settings": settings(cfg), "env": environment()}
+    return {
+        "kind": kind,
+        "config_version": CONFIG_VERSION,
+        "measurer_version": measurer_version,
+        "prebuild_version": PREBUILD_VERSION,
+        "settings": settings(cfg),
+        "env": environment(),
+    }
 
 
 def seed(case: Case) -> int:
@@ -424,8 +463,15 @@ def build(case: Case, *, device) -> BackendModule:
 
 def inputs(case: Case, module: BackendModule, *, device) -> dict:
     """``module.make_inputs`` for the case (a generator seeded per case: the same values for every backend and dtype)."""
-    return module.make_inputs(length=case.length, samples=case.samples, depth=case.depth, dtype=DTYPES[case.dtype],
-                              device=torch.device(device), generator=generator(case, device), stream=case.stream)
+    return module.make_inputs(
+        length=case.length,
+        samples=case.samples,
+        depth=case.depth,
+        dtype=DTYPES[case.dtype],
+        device=torch.device(device),
+        generator=generator(case, device),
+        stream=case.stream,
+    )
 
 
 def clone(module: _M) -> _M:

@@ -139,9 +139,7 @@ def attn_bwd(
         split_dq = _split(samples, windows, 2 * nsm)
     if split_kv is None:
         split_kv = _split_samples(samples, ctas_kv * NH, 2 * nsm)
-    dbp = torch.empty(
-        split_dq, NH, windows, WQ, WK, device=q.device, dtype=torch.float32
-    )
+    dbp = torch.empty(split_dq, NH, windows, WQ, WK, device=q.device, dtype=torch.float32)
     device = _dev(q)
     if delta is None:
         delta = torch.empty_like(lse)
@@ -196,9 +194,7 @@ def attn_bwd(
     else:
         dbias = torch.empty_like(bias)
         total = dbias.numel()
-        _load("dbsum", device)(
-            ((total // 4 + 255) // 256, 1, 1), (256, 1, 1), dbp, dbias, split_dq, total
-        )
+        _load("dbsum", device)(((total // 4 + 255) // 256, 1, 1), (256, 1, 1), dbp, dbias, split_dq, total)
     if external:
         return dbias
     if packed_output:
@@ -214,9 +210,7 @@ def attn_bwd(
 def gate_fwd(gate, x):
     out = torch.empty_like(x)
     sigmoid = torch.empty_like(x)
-    _load("gate_f", _dev(x))(
-        ((x.numel() + 255) // 256, 1, 1), (256, 1, 1), gate, x, out, sigmoid, x.numel()
-    )
+    _load("gate_f", _dev(x))(((x.numel() + 255) // 256, 1, 1), (256, 1, 1), gate, x, out, sigmoid, x.numel())
     return out, sigmoid
 
 
@@ -286,7 +280,5 @@ def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
         float(eps),
         flags,
     )
-    _load("pb_fin", device)(
-        (1, 1, 1), (64, 1, 1), part, blocks, wb, gamma, dgamma, dwb, flags
-    )
+    _load("pb_fin", device)((1, 1, 1), (64, 1, 1), part, blocks, wb, gamma, dgamma, dwb, flags)
     return dz, dgamma, dwb

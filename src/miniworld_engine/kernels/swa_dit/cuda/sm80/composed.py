@@ -76,7 +76,8 @@ def attention_fwd(qh, kh, vh, seqused, half_window: int, out_dtype: torch.dtype 
     cu, used_k = _varlen(seqused, s)
     q, k, v = (_token_major(t) for t in (qh, kh, vh))
     o, lse, _rng, _unused, _dbg = torch.ops.aten._flash_attention_forward(
-        q, k, v, cu, cu, s, s, 0.0, False, False, scale=D ** -0.5, seqused_k=used_k)
+        q, k, v, cu, cu, s, s, 0.0, False, False, scale=D**-0.5, seqused_k=used_k
+    )
     return o.reshape(n * s, C), lse
 
 
@@ -90,7 +91,8 @@ def attention_bwd(qh, kh, vh, o, d_o, lse, delta, seqused, half_window: int):
     q, k, v = (_token_major(t) for t in (qh, kh, vh))
     empty = torch.empty(0, device=qh.device)
     dq, dk, dv = torch.ops.aten._flash_attention_backward(
-        d_o.view(n * s, H, D), q, k, v, o.view(n * s, H, D), lse, cu, cu, s, s, 0.0, False, empty, empty, scale=D ** -0.5)
+        d_o.view(n * s, H, D), q, k, v, o.view(n * s, H, D), lse, cu, cu, s, s, 0.0, False, empty, empty, scale=D**-0.5
+    )
     return tuple(_head_major(t, n, s) for t in (dq, dk, dv))
 
 
@@ -109,8 +111,9 @@ def _fwd_bf16(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
     return outputs
 
 
-def _bwd_bf16(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn,
-              half_window: int) -> list[torch.Tensor]:
+def _bwd_bf16(
+    dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, half_window: int
+) -> list[torch.Tensor]:
     """``[dq, dmod, dWqkv, dWg, dWo, dWu, dWd]`` (dq bf16, the rest fp32) of :func:`_fwd_bf16` on the sm_80 backward stages."""
     n, s, _ = q.shape
     m = n * s
@@ -119,10 +122,16 @@ def _bwd_bf16(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g
     dq1, dffn, hh, dab = sm80.ffn_bwd(dy.reshape(m, C), q1, y, ffn, mod, wu, wd, dmod, n, s, FP32_EPS, mode)
     d_o, dg, datt, gated, delta = sm80.oproj_bwd(dq1, o, g, att, mod, wo, dmod, n, s, mode)
     dqh, dkh, dvh = attention_bwd(qh, kh, vh, o, d_o, lse, delta, seqused, half_window)
-    dq, dp = sm80.qkvg_bwd(q.reshape(m, C), pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, wqkv, wg, dmod, n, s, FP32_EPS, FP32_EPS,
-                           mode)
-    return [dq.view(n, s, C), dmod, _mm(dp[:, : 3 * C].t(), x), _mm(dp[:, 3 * C:].t(), x), _mm(datt.t(), gated), _mm(dab.t(), y),
-            _mm(dffn.t(), hh)]
+    dq, dp = sm80.qkvg_bwd(q.reshape(m, C), pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, wqkv, wg, dmod, n, s, FP32_EPS, FP32_EPS, mode)
+    return [
+        dq.view(n, s, C),
+        dmod,
+        _mm(dp[:, : 3 * C].t(), x),
+        _mm(dp[:, 3 * C :].t(), x),
+        _mm(datt.t(), gated),
+        _mm(dab.t(), y),
+        _mm(dffn.t(), hh),
+    ]
 
 
 # ------------------------------------------------------------------------------------------------------------------- fp32 stages
@@ -140,12 +149,12 @@ def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
     _rows(0, [q, mod], [x], n, s, False)
     from miniworld_engine.kernels.swa_dit.dispatch import eval_form
 
-    wstack = eval_form("swa_a100_fp32_wstack", (wqkv, wg), lambda: torch.cat([wqkv, wg]), save)   # per weight version in inference
+    wstack = eval_form("swa_a100_fp32_wstack", (wqkv, wg), lambda: torch.cat([wqkv, wg]), save)  # per weight version in inference
     p = _mm(x, wstack.t())
     qh, kh, vh = (empty(n, H, s, D, dtype=_BF) for _ in range(3))
     g, pq, pk = (empty(m, C) for _ in range(3))
     _rows(1, [p, cos, sin], [qh, kh, vh, g, pq, pk], n, s, False)
-    o, lse = attention_fwd(qh, kh, vh, seqused, half_window, _F32)   # fp32 O from the window kernel (global: bf16)
+    o, lse = attention_fwd(qh, kh, vh, seqused, half_window, _F32)  # fp32 O from the window kernel (global: bf16)
     gated = empty(m, C)
     _rows(2, [o, g], [gated], n, s, False)
     att = _mm(gated, wo.t())
@@ -163,8 +172,9 @@ def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
     return outputs
 
 
-def _bwd_fp32(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn,
-              half_window: int) -> list[torch.Tensor]:
+def _bwd_fp32(
+    dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, half_window: int
+) -> list[torch.Tensor]:
     """``[dq, dmod, dWqkv, dWg, dWo, dWu, dWd]`` fp32 of :func:`_fwd_fp32` (``dispatch._native_h100_bwd``'s fp32 branch)."""
     n, s, _ = q.shape
     m = n * s
@@ -194,8 +204,15 @@ def _bwd_fp32(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g
     dx = _mm(dp, wstack)
     dq = empty(m, C)
     _rows(12, [dq1, dx, q, mod], [dq, dmod], n, s, False)
-    return [dq.view(n, s, C), dmod, _mm(dp[:, : 3 * C].t(), x), _mm(dp[:, 3 * C:].t(), x), _mm(datt.t(), gated), _mm(dab.t(), y),
-            _mm(dffn.t(), hh)]
+    return [
+        dq.view(n, s, C),
+        dmod,
+        _mm(dp[:, : 3 * C].t(), x),
+        _mm(dp[:, 3 * C :].t(), x),
+        _mm(datt.t(), gated),
+        _mm(dab.t(), y),
+        _mm(dffn.t(), hh),
+    ]
 
 
 # ------------------------------------------------------------------------------------------------------------------- inference
@@ -203,6 +220,7 @@ def _bwd_fp32(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g
 # fp32 under TF32 (torch's matmul flag, as the composed stages' cuBLAS projections follow it) runs the two fused TF32 row kernels of
 # ``fp32_fwd_sm80.cuh`` around the attention -- 3 launches in place of 12; exact fp32 products (TF32 off) keep the composed stages.
 # Global attention takes Q / K / V token-major straight from the qkvg kernel (FlashAttention-2's varlen layout, no transposes).
+
 
 def _tf32_rna(w: torch.Tensor) -> torch.Tensor:
     """w rounded to tf32 (cvt.rna: to nearest, ties away from zero -- the kernels round their activations so), fp32."""
@@ -259,11 +277,12 @@ def _attention_infer(qkv: tuple, seqused, n: int, s: int, half_window: int, o32:
     qh, kh, vh = qkv
     if not is_global(half_window):
         o = torch.empty(n * s, C, device=qh.device, dtype=_F32 if o32 else _BF)
-        sm80._ext().swa_attn_fwd(qh.transpose(1, 2), kh.transpose(1, 2), vh.transpose(1, 2), seqused, o,
-                                 torch.empty(0, device=qh.device, dtype=_F32))
+        sm80._ext().swa_attn_fwd(
+            qh.transpose(1, 2), kh.transpose(1, 2), vh.transpose(1, 2), seqused, o, torch.empty(0, device=qh.device, dtype=_F32)
+        )
         return o
     cu, used_k = _varlen(seqused, s)
-    o = torch.ops.aten._flash_attention_forward(qh, kh, vh, cu, cu, s, s, 0.0, False, False, scale=D ** -0.5, seqused_k=used_k)[0]
+    o = torch.ops.aten._flash_attention_forward(qh, kh, vh, cu, cu, s, s, 0.0, False, False, scale=D**-0.5, seqused_k=used_k)[0]
     return o.reshape(n * s, C)
 
 

@@ -5,6 +5,7 @@ both are memory-bound 1-D passes whose one free axis is the block of elements pe
 launch they used before they were registered (256 elements, 4 warps, 3 stages: Triton's defaults), so a card with no tuned cache runs
 exactly what it ran; the grid set is what a build searches.
 """
+
 import torch
 import triton
 import triton.language as tl
@@ -14,9 +15,7 @@ from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
 
 
-@configured('gated_projection_fwd_residual_triton',
-            key=["shape_key"],
-            default=dict(BLOCK=256, num_warps=4, num_stages=3))
+@configured("gated_projection_fwd_residual_triton", key=["shape_key"], default=dict(BLOCK=256, num_warps=4, num_stages=3))
 @triton.jit
 def _forward(X, G, B, Y, N, shape_key, BLOCK: tl.constexpr):
     i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
@@ -29,9 +28,7 @@ def _forward(X, G, B, Y, N, shape_key, BLOCK: tl.constexpr):
     tl.store(Y + i, x + product, mask)
 
 
-@configured('gated_projection_bwd_residual_triton',
-            key=["shape_key"],
-            default=dict(BLOCK=256, num_warps=4, num_stages=3))
+@configured("gated_projection_bwd_residual_triton", key=["shape_key"], default=dict(BLOCK=256, num_warps=4, num_stages=3))
 @triton.jit
 def _backward(DY, G, B, DG, DB, N, shape_key, BLOCK: tl.constexpr):
     i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
@@ -64,7 +61,13 @@ def _fwd(x: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor, shape_key: i
     if n:
         # no FMA: the product is rounded to the activation dtype before the add, as eager does
         _forward[lambda meta: (triton.cdiv(n, meta["BLOCK"]),)](
-            x, gate, branch, out, n, shape_key=shape_key, enable_fp_fusion=False,
+            x,
+            gate,
+            branch,
+            out,
+            n,
+            shape_key=shape_key,
+            enable_fp_fusion=False,
         )
     return out
 

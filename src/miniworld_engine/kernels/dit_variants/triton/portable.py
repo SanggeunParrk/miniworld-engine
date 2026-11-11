@@ -112,7 +112,7 @@ _BLOCKS_PER_PASS = 8
 def token_pair_biases(stack, pair, first: int = 0, count: int | None = None):
     """The biases [H, L, L] (natural units, the pair's dtype) of blocks ``first .. first + count``. A call that needs no gradient makes
     them in one fused pass over the pair per ``_BLOCKS_PER_PASS`` blocks; one that does normalises the pair once (torch) and projects."""
-    blocks = list(stack.blocks)[first:first + (count or len(stack.blocks))]
+    blocks = list(stack.blocks)[first : first + (count or len(stack.blocks))]
     length, c = pair.shape[0], pair.shape[-1]
     h = blocks[0].n_head
     eps = blocks[0].pair_norm.eps
@@ -120,12 +120,12 @@ def token_pair_biases(stack, pair, first: int = 0, count: int | None = None):
     weights = [b.to_pair_bias.weight for b in blocks] + [p for b in blocks for p in (b.pair_norm.weight, b.pair_norm.bias) if p is not None]
     if _needs_grad(pair, *weights):
         zhat = _normalised(pair, eps).reshape(length * length, c)
-        out = torch.mm(w.to(zhat.dtype), zhat.t())                                # [nb H, L L], block i at rows [H i, H (i + 1))
+        out = torch.mm(w.to(zhat.dtype), zhat.t())  # [nb H, L L], block i at rows [H i, H (i + 1))
         if const is not None:
             out = (out.float() + const[:, None]).to(pair.dtype)
     else:
         out = _fused_biases(pair, w, const, eps)
-    return [out[h * i:h * (i + 1)].view(h, length, length) for i in range(len(blocks))]
+    return [out[h * i : h * (i + 1)].view(h, length, length) for i in range(len(blocks))]
 
 
 def atom_pair_biases(stack, z):
@@ -135,19 +135,21 @@ def atom_pair_biases(stack, z):
     norm = blocks[0].pair_norm if stack.per_block_pair_norm else stack.pair_norm
     if stack.per_block_pair_norm:
         w, const = _fold([b.pair_norm for b in blocks], [b.to_pair_bias.weight for b in blocks], z.dtype)
-        weights = [b.to_pair_bias.weight for b in blocks] + [p for b in blocks for p in (b.pair_norm.weight, b.pair_norm.bias) if p is not None]
+        weights = [b.to_pair_bias.weight for b in blocks] + [
+            p for b in blocks for p in (b.pair_norm.weight, b.pair_norm.bias) if p is not None
+        ]
     else:
-        w, const = _fold([stack.pair_norm] * nb, [stack.to_pair_bias.weight[heads * i:heads * (i + 1)] for i in range(nb)], z.dtype)
+        w, const = _fold([stack.pair_norm] * nb, [stack.to_pair_bias.weight[heads * i : heads * (i + 1)] for i in range(nb)], z.dtype)
         weights = [p for p in (stack.to_pair_bias.weight, stack.pair_norm.weight, stack.pair_norm.bias) if p is not None]
     nwin = z.shape[0]
     if _needs_grad(z, *weights):
         zhat = _normalised(z, norm.eps)
-        out = torch.mm(w, zhat.reshape(-1, z.shape[-1]).t())                      # [4 nb, nwin 32 128]
+        out = torch.mm(w, zhat.reshape(-1, z.shape[-1]).t())  # [4 nb, nwin 32 128]
         if const is not None:
             out = (out.float() + const[:, None]).to(z.dtype)
     else:
         out = _fused_biases(z, w, const, norm.eps)
-    return [out[heads * i:heads * (i + 1)].view(heads, nwin, _ref.ATOM_QUERIES, _ref.ATOM_KEYS) for i in range(nb)]
+    return [out[heads * i : heads * (i + 1)].view(heads, nwin, _ref.ATOM_QUERIES, _ref.ATOM_KEYS) for i in range(nb)]
 
 
 # ---------------------------------------------------------------------------------------------------------------------- token stack
@@ -159,13 +161,15 @@ def attention_delta(block, x, s, bias, mask):
     a = _ref.adaln(block.attn_adaln, x, s, block.adaln_eps)
     q, k, v = block.to_q(a), block.to_k(a), block.to_v(a)
     if block.kq_norm:
-        q, k = (F.layer_norm(t.float(), t.shape[-1:], n.weight.float(), n.bias.float(), n.eps).to(t.dtype)
-                for t, n in ((q, block.q_norm), (k, block.k_norm)))
+        q, k = (
+            F.layer_norm(t.float(), t.shape[-1:], n.weight.float(), n.bias.float(), n.eps).to(t.dtype)
+            for t, n in ((q, block.q_norm), (k, block.k_norm))
+        )
     n_aug, length, d_model = x.shape
     heads = block.n_head
     q, k, v = (t.reshape(n_aug, 1, length, heads, d_model // heads) for t in (q, k, v))
     key_mask = None if mask is None else mask.bool()[None, None].expand(n_aug, 1, length)
-    bias = bias.to(q.dtype).permute(1, 2, 0)[None]                                # [1, L, L, H] (a view of the contiguous [H, L, L])
+    bias = bias.to(q.dtype).permute(1, 2, 0)[None]  # [1, L, L, H] (a view of the contiguous [H, L, L])
     o = TritonAugmentedAttentionFunction.apply(q, k, v, bias, key_mask).reshape(n_aug, length, d_model)
     if block.gating:
         o = torch.sigmoid(block.to_g(a)) * o
@@ -175,7 +179,7 @@ def attention_delta(block, x, s, bias, mask):
 def stack_forward(stack, x, s, pair, mask):
     blocks = list(stack.blocks)
     for first in range(0, len(blocks), _BLOCKS_PER_PASS):
-        chunk = blocks[first:first + _BLOCKS_PER_PASS]
+        chunk = blocks[first : first + _BLOCKS_PER_PASS]
         for block, bias in zip(chunk, token_pair_biases(stack, pair, first, len(chunk)), strict=True):
             da = attention_delta(block, x, s, bias, mask)
             if stack.parallel:
@@ -198,8 +202,10 @@ def atom_block_forward(stack, i, x, c, bias, mask, uid, starts, keep):
     xq, xk = _ref.adaln(blk.q_adaln, x, c, blk.adaln_eps), _ref.adaln(blk.k_adaln, x, c, blk.adaln_eps)
     q, k, v = blk.to_q(xq), blk.to_k(xk), blk.to_v(xk)
     if blk.kq_norm:
-        q, k = (F.layer_norm(t.float(), t.shape[-1:], m.weight.float(), m.bias.float(), m.eps).to(t.dtype)
-                for t, m in ((q, blk.q_norm), (k, blk.k_norm)))
+        q, k = (
+            F.layer_norm(t.float(), t.shape[-1:], m.weight.float(), m.bias.float(), m.eps).to(t.dtype)
+            for t, m in ((q, blk.q_norm), (k, blk.k_norm))
+        )
     q, k, v = (t.reshape(a, 1, n, heads, d_model // heads) for t in (q, k, v))
     o = window_attention(q, k, v, bias[None], starts, keep, uid=uid, keys=_ref.ATOM_KEYS).reshape(a, n, d_model)
     if blk.gating:

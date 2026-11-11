@@ -35,4 +35,6 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             continue
         for m in needs_card:
             if cap != CARDS[m]:
-                item.add_marker(pytest.mark.skip(reason=f"needs an {m.upper()} (sm_{CARDS[m][0]}{CARDS[m][1]}), this is sm_{cap[0]}{cap[1]}"))
+                item.add_marker(
+                    pytest.mark.skip(reason=f"needs an {m.upper()} (sm_{CARDS[m][0]}{CARDS[m][1]}), this is sm_{cap[0]}{cap[1]}")
+                )

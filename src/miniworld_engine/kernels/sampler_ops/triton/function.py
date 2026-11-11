@@ -1,6 +1,7 @@
 """The portable (Triton) backend of ``AugmentNoise`` / ``AlignEuler`` / ``PoolAtoms``: the kernels of ``main.py`` as opaque ops (a compiled sampler launches
 them instead of breaking the graph), the same contract as ``cuda/function.py``: fp32 coordinates ``[B, N, 3]``, an fp32 ``mask`` ``[N]``, bf16 atom features
 ``[S, Q, C]``. Eval only: no autograd."""
+
 from __future__ import annotations
 
 import torch
@@ -8,29 +9,75 @@ import torch
 from miniworld_engine.kernels._compile import opaque
 
 
-def _augment_noise_fake(coords, mask, rv, tr, noise, sigma, sigma_next, window, gamma, gamma_min, sigma_min, sigma_max, noise_scale, variance_floor, clamp):
+def _augment_noise_fake(
+    coords, mask, rv, tr, noise, sigma, sigma_next, window, gamma, gamma_min, sigma_min, sigma_max, noise_scale, variance_floor, clamp
+):
     """[noisy (the shape of ``coords``), sc [4]], both fp32."""
     return [torch.empty_like(coords), torch.empty(4, dtype=coords.dtype, device=coords.device)]
 
 
 @opaque(fake=_augment_noise_fake, name="sampler_ops_augment_noise")
-def _augment_noise_op(coords: torch.Tensor, mask: torch.Tensor, rv: torch.Tensor, tr: torch.Tensor, noise: torch.Tensor, sigma: torch.Tensor,
-                      sigma_next: torch.Tensor, window: int, gamma: float, gamma_min: float, sigma_min: float, sigma_max: float, noise_scale: float,
-                      variance_floor: float, clamp: bool) -> list[torch.Tensor]:
+def _augment_noise_op(
+    coords: torch.Tensor,
+    mask: torch.Tensor,
+    rv: torch.Tensor,
+    tr: torch.Tensor,
+    noise: torch.Tensor,
+    sigma: torch.Tensor,
+    sigma_next: torch.Tensor,
+    window: int,
+    gamma: float,
+    gamma_min: float,
+    sigma_min: float,
+    sigma_max: float,
+    noise_scale: float,
+    variance_floor: float,
+    clamp: bool,
+) -> list[torch.Tensor]:
     """``[noisy, sc]`` of the portable kernels (``triton/main.py``)."""
     from miniworld_engine.kernels.sampler_ops.triton.main import portable_augment_noise
 
-    noisy, sc = portable_augment_noise(coords, mask, rv, tr, noise, sigma, sigma_next, window=window, gamma=gamma, gamma_min=gamma_min,
-                                       sigma_min=sigma_min, sigma_max=sigma_max, noise_scale=noise_scale, variance_floor=variance_floor, clamp=clamp)
+    noisy, sc = portable_augment_noise(
+        coords,
+        mask,
+        rv,
+        tr,
+        noise,
+        sigma,
+        sigma_next,
+        window=window,
+        gamma=gamma,
+        gamma_min=gamma_min,
+        sigma_min=sigma_min,
+        sigma_max=sigma_max,
+        noise_scale=noise_scale,
+        variance_floor=variance_floor,
+        clamp=clamp,
+    )
     return [noisy, sc]
 
 
-def augment_noise_triton(coords, mask, rv, tr, noise, sigma, sigma_next, *, window, gamma, gamma_min, sigma_min, sigma_max, noise_scale, variance_floor,
-                         clamp):
+def augment_noise_triton(
+    coords, mask, rv, tr, noise, sigma, sigma_next, *, window, gamma, gamma_min, sigma_min, sigma_max, noise_scale, variance_floor, clamp
+):
     """``(noisy [B, N, 3], sc [2])``: ``sc = (sigma_hat, noise magnitude)``, a view of the kernel's scratch (no host read)."""
     noisy, sc = _augment_noise_op(
-        coords.contiguous(), mask.contiguous(), rv.contiguous(), tr.contiguous(), noise.contiguous(), sigma, sigma_next, int(window), float(gamma),
-        float(gamma_min), float(sigma_min), float(sigma_max), float(noise_scale), float(variance_floor), bool(clamp))
+        coords.contiguous(),
+        mask.contiguous(),
+        rv.contiguous(),
+        tr.contiguous(),
+        noise.contiguous(),
+        sigma,
+        sigma_next,
+        int(window),
+        float(gamma),
+        float(gamma_min),
+        float(sigma_min),
+        float(sigma_max),
+        float(noise_scale),
+        float(variance_floor),
+        bool(clamp),
+    )
     return noisy, sc[:2]
 
 
@@ -40,8 +87,9 @@ def _align_euler_fake(noisy, denoised, mask, sc, sigma_next, step_scale):
 
 
 @opaque(fake=_align_euler_fake, name="sampler_ops_align_euler")
-def _align_euler_op(noisy: torch.Tensor, denoised: torch.Tensor, mask: torch.Tensor, sc: torch.Tensor, sigma_next: torch.Tensor,
-                    step_scale: float) -> torch.Tensor:
+def _align_euler_op(
+    noisy: torch.Tensor, denoised: torch.Tensor, mask: torch.Tensor, sc: torch.Tensor, sigma_next: torch.Tensor, step_scale: float
+) -> torch.Tensor:
     """The Euler update of the portable kernels (``triton/main.py``)."""
     from miniworld_engine.kernels.sampler_ops.triton.main import portable_align_euler
 

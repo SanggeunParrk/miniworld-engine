@@ -54,12 +54,8 @@ def attn_fwd(
     """The window attention forward on head-major Q / K / V [N, 4, S, 32] bf16: returns ``(O [N S, 128] bf16, lse [N, 4, S] fp32)``."""
     n, _, s, _ = qh.shape
     o = torch.empty(n * s, C, device=qh.device, dtype=torch.bfloat16)
-    lse = torch.empty(
-        (n, H, s) if save_lse else (0,), device=qh.device, dtype=torch.float32
-    )
-    _ext().swa_attn_fwd(
-        qh.transpose(1, 2), kh.transpose(1, 2), vh.transpose(1, 2), seqused, o, lse
-    )
+    lse = torch.empty((n, H, s) if save_lse else (0,), device=qh.device, dtype=torch.float32)
+    _ext().swa_attn_fwd(qh.transpose(1, 2), kh.transpose(1, 2), vh.transpose(1, 2), seqused, o, lse)
     return o, lse
 
 
@@ -102,14 +98,10 @@ def window_supported(q: torch.Tensor, n_heads: int, half_window: int) -> bool:
         or not q.dtype.is_floating_point
     ):
         return False
-    return _is_a100(
-        q.device.index if q.device.index is not None else torch.cuda.current_device()
-    )
+    return _is_a100(q.device.index if q.device.index is not None else torch.cuda.current_device())
 
 
-def window_fwd(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor
-):
+def window_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor):
     """The window attention forward on q, k, v [N, S, 4, 32] bf16 views with any strides (unit channel stride, 16-byte aligned rows: the module's slices of the fused qkv projection are):
     returns ``(out [N, S, 4, 32] bf16, lse [N, 4, S] fp32)``; rows >= ``seqused`` are 0."""
     n, s = q.shape[:2]
@@ -133,9 +125,7 @@ def window_bwd(
     n, s = q.shape[:2]
     dvv = torch.empty(n, H, s, device=q.device, dtype=torch.float32)
     _ext().swa_attn_delta(d_out, out, dvv, s)
-    dq, dk, dv = (
-        torch.empty(n, s, H, D, device=q.device, dtype=torch.bfloat16) for _ in range(3)
-    )
+    dq, dk, dv = (torch.empty(n, s, H, D, device=q.device, dtype=torch.bfloat16) for _ in range(3))
     _ext().swa_attn_bwd(q, k, v, d_out, lse, dvv, seqused, dq, dk, dv)
     return dq, dk, dv
 
@@ -163,15 +153,9 @@ def qkvg_fwd(
     m = x.shape[0]
     n = m // s
     dev = x.device
-    qh, kh, vh = (
-        torch.empty(*((m, H, D) if tm else (n, H, s, D)), device=dev, dtype=torch.bfloat16) for _ in range(3)
-    )
+    qh, kh, vh = (torch.empty(*((m, H, D) if tm else (n, H, s, D)), device=dev, dtype=torch.bfloat16) for _ in range(3))
     g = torch.empty(m, C, device=dev, dtype=torch.bfloat16)
-    xs, pqs, pks = (
-        (torch.empty(m, C, device=dev, dtype=torch.bfloat16) for _ in range(3))
-        if save
-        else (g, g, g)
-    )
+    xs, pqs, pks = (torch.empty(m, C, device=dev, dtype=torch.bfloat16) for _ in range(3)) if save else (g, g, g)
     _ext().swa_qkvg_fwd(
         x,
         mod,
@@ -217,23 +201,12 @@ def ffn_fwd(
     """The last stage: ``qi`` / ``g`` / ``o`` [M, 128] bf16 (the stage's residual input, the gate projection, the attention output), ``mod`` [b S, 768] fp32.  Returns
     ``(out, q1, Att, Y, FF)``: ``out`` [M, 128] bf16 and the saves of the backward (``out`` itself four times when ``save`` is False)."""
     m = qi.shape[0]
-    if (
-        save
-        and prof is None
-        and cfg == 0
-        and m == 48 * s
-        and b == 48
-        and s in (4096, 8192)
-    ):
+    if save and prof is None and cfg == 0 and m == 48 * s and b == 48 and s in (4096, 8192):
         from ..ffn_fwd_tuned_sm80 import ffn_forward
 
-        return ffn_forward(
-            qi, g, o, mod, wo.contiguous(), wu.contiguous(), wd.contiguous(), s, b, eps
-        )
+        return ffn_forward(qi, g, o, mod, wo.contiguous(), wu.contiguous(), wd.contiguous(), s, b, eps)
     out = torch.empty_like(qi)
-    q1s, atts, ys, ffs = (
-        (torch.empty_like(qi) for _ in range(4)) if save else (out, out, out, out)
-    )
+    q1s, atts, ys, ffs = (torch.empty_like(qi) for _ in range(4)) if save else (out, out, out, out)
     _ext().swa_ffn_fwd(
         qi,
         g,
@@ -263,9 +236,7 @@ MOD_DW_PARTS = 36
 _MOD_WIDE_ROWS = 40960
 
 
-def mod_fwd(
-    c: torch.Tensor, wmod: torch.Tensor, save: bool = False, cfg: int | None = None
-) -> list[torch.Tensor]:
+def mod_fwd(c: torch.Tensor, wmod: torch.Tensor, save: bool = False, cfg: int | None = None) -> list[torch.Tensor]:
     """The adaLN modulation ``rn(silu(c)) @ Wmod.T`` [R, 768] fp32: ``c`` [R, 128] bf16 contiguous, ``wmod`` [768, 128] bf16 (one hand kernel; the products of bf16 numbers are exact
     in fp32).  Returns ``[mod]``, or with ``save`` ``[mod, a]`` with ``a = rn(silu(c))`` [R, 128] bf16, the operand of :func:`mod_bwd`.  ``cfg`` (None: by the row count) 0 / 1: the
     row-stationary kernel with tiles of 128 / 64 rows, 2: the weight-stationary one."""
@@ -273,9 +244,7 @@ def mod_fwd(
     out = torch.empty(rows, MOD_N, device=c.device, dtype=torch.float32)
     a = torch.empty(rows, C, device=c.device, dtype=torch.bfloat16) if save else c
     if cfg is None:
-        cfg = (
-            0 if rows >= _MOD_WIDE_ROWS else 2
-        )  # row-stationary 128-row tiles from ~40 K rows, else the weight-stationary kernel
+        cfg = 0 if rows >= _MOD_WIDE_ROWS else 2  # row-stationary 128-row tiles from ~40 K rows, else the weight-stationary kernel
     _ext().swa_mod_fwd(c, wmod, out, a, save, cfg)
     return [out, a] if save else [out]
 
@@ -314,9 +283,7 @@ def bwd_mode(n: int, b: int) -> int | None:
     return MODE_HOIST if a % 16 == 0 else None
 
 
-def dmod_buffer(
-    mode: int, n: int, b: int, s: int, device: torch.device
-) -> torch.Tensor:
+def dmod_buffer(mode: int, n: int, b: int, s: int, device: torch.device) -> torch.Tensor:
     """The (uninitialised: every element is written once) modulation-gradient buffer of the backward stages: [b S, 768], or [A / 16, b S, 768] fp32 in MODE_HOIST."""
     shape = (b * s, MOD_N) if mode == MODE_SINGLE else (n // b // 16, b * s, MOD_N)
     return torch.empty(*shape, device=device, dtype=torch.float32)
@@ -339,9 +306,7 @@ def oproj_bwd(
     ``wo`` [128, 128].  Returns ``(dO, dG, datt, gated, dv)``: [M, 128] bf16 and the attention backward's D, [N, 4, S] fp32; d gate_a goes into columns 256 .. 383 of ``dmod`` (see :func:`dmod_buffer`)."""
     m = dq1.shape[0]
     dev = dq1.device
-    d_o, d_g, datt, gated = (
-        torch.empty(m, C, device=dev, dtype=torch.bfloat16) for _ in range(4)
-    )
+    d_o, d_g, datt, gated = (torch.empty(m, C, device=dev, dtype=torch.bfloat16) for _ in range(4))
     dv = torch.empty(m // s, H, s, device=dev, dtype=torch.float32)
     _ext().swa_oproj_bwd(
         dq1,
@@ -478,18 +443,9 @@ def _capability(index: int) -> tuple[int, int]:
 def supported(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> bool:
     """Whether these kernels serve a forward / backward call: an A100 (cc 8.0), a bf16 ``q`` [N, S, 128], SwiGLU hidden 256, half window 64 (the fp32 eps is the contract of the
     block)."""
-    if (
-        not q.is_cuda
-        or q.dtype != torch.bfloat16
-        or q.dim() != 3
-        or q.shape[-1] != C
-        or nhid != NHID
-        or half_window != HW
-    ):
+    if not q.is_cuda or q.dtype != torch.bfloat16 or q.dim() != 3 or q.shape[-1] != C or nhid != NHID or half_window != HW:
         return False
-    return _is_a100(
-        q.device.index if q.device.index is not None else torch.cuda.current_device()
-    )
+    return _is_a100(q.device.index if q.device.index is not None else torch.cuda.current_device())
 
 
 def block_fwd(
@@ -517,12 +473,8 @@ def block_fwd(
         sin.reshape(-1, D // 2).contiguous(),
     )
     qcfg, fcfg = ({}, 0) if save else infer_cfg(n * s)
-    qh, kh, vh, g, xs, pqs, pks = qkvg_fwd(
-        qf, mod, cos2, sin2, wqkv, wg, b, s, eps, qk_eps, save, **qcfg
-    )
-    o, lse = attn_fwd(
-        qh, kh, vh, seqused, save_lse=save
-    )
+    qh, kh, vh, g, xs, pqs, pks = qkvg_fwd(qf, mod, cos2, sin2, wqkv, wg, b, s, eps, qk_eps, save, **qcfg)
+    o, lse = attn_fwd(qh, kh, vh, seqused, save_lse=save)
     out, q1s, atts, ys, ffs = ffn_fwd(qf, g, o, mod, wo, wu, wd, b, s, eps, save, cfg=fcfg)
     outputs = [out.view(n, s, C)]
     if save:

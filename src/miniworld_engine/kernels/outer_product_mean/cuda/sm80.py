@@ -51,16 +51,12 @@ def ext():
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
         ],
         extra_cflags=["-std=c++17", "-O3"],
-        extra_ldflags=[
-            "-lcublasLt"
-        ],  # the searched explicit GEMM algorithms (opm_lt_gemm.cuh)
+        extra_ldflags=["-lcublasLt"],  # the searched explicit GEMM algorithms (opm_lt_gemm.cuh)
         verbose=False,
     )
 
 
-def lt_mm(
-    a: torch.Tensor, b: torch.Tensor, trans_a: bool, trans_b: bool
-) -> torch.Tensor:
+def lt_mm(a: torch.Tensor, b: torch.Tensor, trans_a: bool, trans_b: bool) -> torch.Tensor:
     """op(a) @ op(b) for the grouped outer-product GEMMs (row-major bf16): cuBLASLt with the searched explicit algorithm of the shape (``sm80/opm_lt_table.inc``), at::mm elsewhere."""
     return ext().lt_mm(a, b, trans_a, trans_b)
 
@@ -90,15 +86,9 @@ def prologue(
     S, L, _ = m.shape
     a = m.new_empty((S, L * CH))
     b = m.new_empty((S, L * CH))
-    stats = (
-        m.new_empty((S, L, 2), dtype=torch.float32)
-        if save_stats
-        else _none(m, torch.float32)
-    )
+    stats = m.new_empty((S, L, 2), dtype=torch.float32) if save_stats else _none(m, torch.float32)
     if variant is None:
-        variant = (
-            0
-        )  # schedule experiments (tile buffers); 0 is the shipped one
+        variant = 0  # schedule experiments (tile buffers); 0 is the shipped one
     ext().prologue(
         m,
         _none(m, torch.uint8) if mask is None else mask,
@@ -131,9 +121,7 @@ def epilogue(
     length = o.shape[0] // CH
     out = o.new_empty((length, length, wo.shape[0]))
     if variant is None:
-        variant = (
-            0
-        )  # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
+        variant = 0  # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
     ext().epilogue(
         o,
         _none(o, torch.float32) if norm is None else norm,
@@ -161,9 +149,7 @@ def dgrad(
     dO = dz.new_empty((length * CH, length * CH))
     dzn = torch.empty_like(dz)
     if variant is None:
-        variant = (
-            0
-        )  # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
+        variant = 0  # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
     bi = (
         2 if (variant == 3 and cz != 128) or cz == 512 else 4
     )  # variant 3: the 64-pair CTA (two per SM) at d_pair 256 / 384; d_pair 512 always
@@ -182,9 +168,7 @@ def dgrad(
     return dO, dzn, reduce_rows(parts, torch.float32)
 
 
-def dwo(
-    dzn: torch.Tensor, o: torch.Tensor, out_dtype: torch.dtype, variant: int = 0
-) -> torch.Tensor:
+def dwo(dzn: torch.Tensor, o: torch.Tensor, out_dtype: torch.dtype, variant: int = 0) -> torch.Tensor:
     """dWo [CZ, 1024] (``out_dtype``) = sum over the pairs of dzn[i, j, z] O[(i, c), (j, e)]."""
     length, _, cz = dzn.shape
     i_per = -(-length // SPLITS[cz])
@@ -209,14 +193,11 @@ def prologue_bwd(
     """dA, dB [S, 32 L] bf16 (the cuBLAS products dA = B dO^T, dB = A dO), m [S, L, CM], stats [S, L, 2], ... -> (dm bf16, dWl, dWr [32, CM], dgamma, dbeta [CM]) all fp32 but dm."""
     S, L, cm = m.shape
     if variant is None:
-        variant = (
-            0
-        )  # schedule experiments (buffers / CTAs per SM); 0 is the shipped one
-    ntile = -(-S // (32 if cm == 256 else 64)) * -(-L // 2)   # d_msa 256: the wide kernel's tiles of 32 rows x 2 tokens
+        variant = 0  # schedule experiments (buffers / CTAs per SM); 0 is the shipped one
+    ntile = -(-S // (32 if cm == 256 else 64)) * -(-L // 2)  # d_msa 256: the wide kernel's tiles of 32 rows x 2 tokens
     nblk = min(
         ntile,
-        torch.cuda.get_device_properties(m.device).multi_processor_count
-        * (1 if variant == 1 or cm != 64 else 2),
+        torch.cuda.get_device_properties(m.device).multi_processor_count * (1 if variant == 1 or cm != 64 else 2),
     )
     dm = torch.empty_like(m)
     part = m.new_empty((nblk, 66 * cm), dtype=torch.float32)

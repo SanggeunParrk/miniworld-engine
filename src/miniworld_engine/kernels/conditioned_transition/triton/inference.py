@@ -34,8 +34,6 @@ from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many
 from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
 
 
-
-
 # Every tile comes from the CSV. BLOCK_K_D tiles the d_hidden contraction; a row that sets it >= K
 # pins the whole row on-chip, which is the schedule this kernel was designed around, and the k-loop
 # makes the smaller rows correct. Nothing filters rows the running card cannot fit.
@@ -164,23 +162,25 @@ def _cond_transition_inference_fake(x, cond, wa, wb, ws, wsc, bsc, length=None):
 
 @opaque(fake=_cond_transition_inference_fake, name="conditioned_transition_inference")
 def cond_transition_inference(
-    x: torch.Tensor,     # (M, K)  AdaLN output, K = d_hidden
+    x: torch.Tensor,  # (M, K)  AdaLN output, K = d_hidden
     cond: torch.Tensor,  # (M, DC) conditioning, DC = d_cond
-    wa: torch.Tensor,    # (ND, K) expand_a.weight
-    wb: torch.Tensor,    # (ND, K) expand_b.weight
-    ws: torch.Tensor,    # (D, ND) squeeze.weight, D = d_hidden
-    wsc: torch.Tensor,   # (D, DC) to_scale.weight
-    bsc: torch.Tensor,   # (D,)    to_scale.bias
-    length: int | None = None,   # L (atom count A) for the shape key; None -> M, see the CAVEAT
+    wa: torch.Tensor,  # (ND, K) expand_a.weight
+    wb: torch.Tensor,  # (ND, K) expand_b.weight
+    ws: torch.Tensor,  # (D, ND) squeeze.weight, D = d_hidden
+    wsc: torch.Tensor,  # (D, DC) to_scale.weight
+    bsc: torch.Tensor,  # (D,)    to_scale.bias
+    length: int | None = None,  # L (atom count A) for the shape key; None -> M, see the CAVEAT
 ) -> torch.Tensor:
     """Fused inference: SwiGLU expand+squeeze + sigmoid(cond-gate). y never round-trips h.
 
     ``length`` is L -- the ATOM count A of the un-flattened activation, supplied by
     modules/conditioned_transition/module.py. None falls back to this matrix's row count M.
     """
-    pre = x.dtype is torch.float32     # TF32 operands rounded to nearest here, not per tile in the kernel (kernels/_tf32.py)
+    pre = x.dtype is torch.float32  # TF32 operands rounded to nearest here, not per tile in the kernel (kernels/_tf32.py)
     if pre:
-        wa, wb, ws, wsc = tf32_cached((wa, wb, ws, wsc), lambda: tf32_grid_many(wa.contiguous(), wb.contiguous(), ws.contiguous(), wsc.contiguous()))
+        wa, wb, ws, wsc = tf32_cached(
+            (wa, wb, ws, wsc), lambda: tf32_grid_many(wa.contiguous(), wb.contiguous(), ws.contiguous(), wsc.contiguous())
+        )
     M, K = x.shape
     ND = wa.shape[0]
     D = ws.shape[0]
@@ -189,17 +189,31 @@ def cond_transition_inference(
     check_tile_axes("cond_transition_fwd_b2b_triton", D, K, "D (ws rows)", "K (x columns)")
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_K_ND"])  # noqa: E731
     _cond_transition_inference_kernel[grid](
-        x, cond, wa.contiguous(), wb.contiguous(), ws.contiguous(),
-        wsc.contiguous(), bsc.contiguous(), out,
-        M, ND, K, DC,
-        x.stride(0), x.stride(1),
-        cond.stride(0), cond.stride(1),
-        wa.stride(0), wa.stride(1),
-        ws.stride(0), ws.stride(1),
-        wsc.stride(0), wsc.stride(1),
-        out.stride(0), out.stride(1),
-        shape_key=atom_key(length if length is not None else length_of(x.shape),
-                           ND=ND, K=K, DC=DC),
+        x,
+        cond,
+        wa.contiguous(),
+        wb.contiguous(),
+        ws.contiguous(),
+        wsc.contiguous(),
+        bsc.contiguous(),
+        out,
+        M,
+        ND,
+        K,
+        DC,
+        x.stride(0),
+        x.stride(1),
+        cond.stride(0),
+        cond.stride(1),
+        wa.stride(0),
+        wa.stride(1),
+        ws.stride(0),
+        ws.stride(1),
+        wsc.stride(0),
+        wsc.stride(1),
+        out.stride(0),
+        out.stride(1),
+        shape_key=atom_key(length if length is not None else length_of(x.shape), ND=ND, K=K, DC=DC),
         PRE=pre,
     )
     return out

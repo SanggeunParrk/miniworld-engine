@@ -46,8 +46,9 @@ def _fwd_impl(x: Tensor, weight: Tensor, bias: Tensor, eps: float) -> tuple[Tens
     return y_2d.view_as(x), mean, rstd
 
 
-def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor,
-                     row_bucket: int | None = None) -> tuple[Tensor, Tensor, Tensor]:
+def _bwd_atomic_impl(
+    dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor, row_bucket: int | None = None
+) -> tuple[Tensor, Tensor, Tensor]:
     """Atomic-reduction LayerNorm backward.
 
     `row_bucket` is the ROW BUCKET, not a finished key, and it is for a caller whose activation is
@@ -85,9 +86,9 @@ def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: 
     return dx_2d.view_as(x), dw.to(weight.dtype), db.to(weight.dtype)
 
 
-
-def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor,
-                         row_bucket: int | None = None) -> tuple[Tensor, Tensor, Tensor]:
+def _bwd_persistent_impl(
+    dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor, row_bucket: int | None = None
+) -> tuple[Tensor, Tensor, Tensor]:
     """Persistent grid-stride backward: ~NUM_SM*waves partial rows, vectorized 2D
     tiles (see triton/persistent.py). Wins at d >= 384, matches quack cute at d=768.
 
@@ -126,5 +127,3 @@ def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
     dw = partial_dw.sum(dim=0).to(weight.dtype)
     db = partial_db.sum(dim=0).to(weight.dtype)
     return dx_2d.view_as(x), dw, db
-
-

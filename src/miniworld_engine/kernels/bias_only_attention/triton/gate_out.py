@@ -35,11 +35,6 @@ from miniworld_engine.kernels._tiles import tile_grid, tile_order
 from miniworld_engine.kernels._shape_key import both_key, length_of, pack, rows_of, token_key
 
 
-
-
-
-
-
 def _key_of(shape) -> int:
     """token_key(L) from an activation's PRE-flatten shape ``[..., DH]``.
 
@@ -52,21 +47,28 @@ def _key_of(shape) -> int:
     return token_key(length_of(shape))
 
 
-@configured('gated_projection_gate_gemm_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
+@configured(
+    "gated_projection_gate_gemm_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _gate_out_fwd(
-    gate_ptr,   # [M, DH]
-    outr_ptr,   # [M, DH]
-    wo_ptr,     # [N, DH]   (to_out.weight: out_features=N, in_features=DH)
-    o_ptr,      # [M, N]
-    M, N,
+    gate_ptr,  # [M, DH]
+    outr_ptr,  # [M, DH]
+    wo_ptr,  # [N, DH]   (to_out.weight: out_features=N, in_features=DH)
+    o_ptr,  # [M, N]
+    M,
+    N,
     DH: tl.constexpr,
-    stride_gm, stride_gd,
-    stride_om, stride_od,
-    stride_wn, stride_wd,
-    stride_cm, stride_cn,
+    stride_gm,
+    stride_gd,
+    stride_om,
+    stride_od,
+    stride_wn,
+    stride_wd,
+    stride_cm,
+    stride_cn,
     BLOCK_M1: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -74,9 +76,7 @@ def _gate_out_fwd(
     GROUP_M: tl.constexpr,
 ):
     # Visit order, tuned: see kernels/_tiles.py. The gated output projection: N wide.
-    pid_m, pid_n = tile_order(
-        tl.program_id(0).to(tl.int64),
-        tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
     offs_m = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_K)
@@ -90,17 +90,20 @@ def _gate_out_fwd(
         # A-tile = sigmoid(gate) * out_r  -> [BLOCK_M1, BLOCK_K]
         g = tl.load(
             gate_ptr + offs_m[:, None] * stride_gm + kk[None, :] * stride_gd,
-            mask=m_ok[:, None] & k_ok[None, :], other=0.0,
+            mask=m_ok[:, None] & k_ok[None, :],
+            other=0.0,
         ).to(tl.float32)
         r = tl.load(
             outr_ptr + offs_m[:, None] * stride_om + kk[None, :] * stride_od,
-            mask=m_ok[:, None] & k_ok[None, :], other=0.0,
+            mask=m_ok[:, None] & k_ok[None, :],
+            other=0.0,
         ).to(tl.float32)
         a = (tl.sigmoid(g) * r).to(gate_ptr.dtype.element_ty)
         # Wo-tile [BLOCK_K, BLOCK_N]: wo[n, k] -> transpose for the dot
         wo = tl.load(
             wo_ptr + offs_n[None, :] * stride_wn + kk[:, None] * stride_wd,
-            mask=n_ok[None, :] & k_ok[:, None], other=0.0,
+            mask=n_ok[None, :] & k_ok[:, None],
+            other=0.0,
         )
         acc = tf32_dot(a, wo.to(a.dtype), acc)
 
@@ -116,21 +119,36 @@ def _gate_out_fwd(
 # free (non-reduced) axis here -- the contraction is N -- so it moves onto the grid. ``BLOCK_N`` is not
 # constrained, so its candidate values live in the CSV like every other axis; they are the
 # canonical 2-D set.
-@configured('gated_projection_bwd_dx_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
+@configured(
+    "gated_projection_bwd_dx_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _dgrad_epi(
-    do_ptr,     # [M, N]   = grad_out
-    wo_ptr,     # [N, DH]
-    g_ptr,      # [M, DH]  = gate (pre-sigmoid)
-    r_ptr,      # [M, DH]  = out_r
-    dr_ptr,     # out: d_out_r  [M, DH]
-    dg_ptr,     # out: d_gate   [M, DH]
-    a_ptr,      # out: gated = sigmoid(gate)*r  [M, DH]  (for the d_wo GEMM)
-    M, N: tl.constexpr, DH: tl.constexpr,
-    s_dom, s_don, s_won, s_woh, s_gm, s_gh, s_rm, s_rh, s_om, s_oh,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_N: tl.constexpr,
+    do_ptr,  # [M, N]   = grad_out
+    wo_ptr,  # [N, DH]
+    g_ptr,  # [M, DH]  = gate (pre-sigmoid)
+    r_ptr,  # [M, DH]  = out_r
+    dr_ptr,  # out: d_out_r  [M, DH]
+    dg_ptr,  # out: d_gate   [M, DH]
+    a_ptr,  # out: gated = sigmoid(gate)*r  [M, DH]  (for the d_wo GEMM)
+    M,
+    N: tl.constexpr,
+    DH: tl.constexpr,
+    s_dom,
+    s_don,
+    s_won,
+    s_woh,
+    s_gm,
+    s_gh,
+    s_rm,
+    s_rh,
+    s_om,
+    s_oh,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_N: tl.constexpr,
     shape_key,
     GROUP_M: tl.constexpr,
 ):
@@ -144,25 +162,20 @@ def _dgrad_epi(
     A100/H100 but exceeds the ~100 KB/SM of sm_86 (RTX A5000/A6000); tiling makes it
     launchable on any GPU. Math is unchanged (same GEMM + epilogue)."""
     # Visit order, tuned: see kernels/_tiles.py. Fused dgrad + gate epilogue; DH is the output width and N the contraction, tiled inside.
-    pid, pid_h = tile_order(
-        tl.program_id(0).to(tl.int64),
-        tl.cdiv(M, BLOCK_M1), tl.cdiv(DH, BLOCK_N), GROUP_M)
+    pid, pid_h = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M1), tl.cdiv(DH, BLOCK_N), GROUP_M)
     rm = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rh = pid_h * BLOCK_N + tl.arange(0, BLOCK_N)
     mm = rm[:, None] < M
     hm = rh[None, :] < DH
     em = mm & hm
-    da = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)                              # [BLOCK_M1, BLOCK_N] acc
+    da = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)  # [BLOCK_M1, BLOCK_N] acc
     for n0 in range(0, N, BLOCK_K):
         rn = n0 + tl.arange(0, BLOCK_K)
         nmask = rn < N
-        do = tl.load(do_ptr + rm[:, None] * s_dom + rn[None, :] * s_don,
-                     mask=mm & nmask[None, :], other=0.0)                  # [BLOCK_M1, BLOCK_K]
-        wo = tl.load(wo_ptr + rn[:, None] * s_won + rh[None, :] * s_woh,
-                     mask=nmask[:, None] & hm, other=0.0)                  # [BLOCK_K, BLOCK_N]
-        da = tf32_dot(do, wo.to(do.dtype), da)                              # BF16 compute, including FP32 master Wo
-    s = tl.sigmoid(tl.load(g_ptr + rm[:, None] * s_gm + rh[None, :] * s_gh,
-                           mask=em, other=0.0).to(tl.float32))
+        do = tl.load(do_ptr + rm[:, None] * s_dom + rn[None, :] * s_don, mask=mm & nmask[None, :], other=0.0)  # [BLOCK_M1, BLOCK_K]
+        wo = tl.load(wo_ptr + rn[:, None] * s_won + rh[None, :] * s_woh, mask=nmask[:, None] & hm, other=0.0)  # [BLOCK_K, BLOCK_N]
+        da = tf32_dot(do, wo.to(do.dtype), da)  # BF16 compute, including FP32 master Wo
+    s = tl.sigmoid(tl.load(g_ptr + rm[:, None] * s_gm + rh[None, :] * s_gh, mask=em, other=0.0).to(tl.float32))
     r = tl.load(r_ptr + rm[:, None] * s_rm + rh[None, :] * s_rh, mask=em, other=0.0).to(tl.float32)
     off = rm[:, None] * s_om + rh[None, :] * s_oh
     tl.store(dr_ptr + off, (s * da).to(dr_ptr.dtype.element_ty), mask=em)
@@ -176,9 +189,13 @@ def _dgrad_epilogue_fake(do2, wo, g2, r2, shape_key=None):
 
 
 @opaque(fake=_dgrad_epilogue_fake, name="bias_only_attention_gate_out_dgrad_epilogue")
-def _dgrad_epilogue(do2: torch.Tensor, wo: torch.Tensor, g2: torch.Tensor, r2: torch.Tensor,
-                    shape_key: int | None = None,
-                    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _dgrad_epilogue(
+    do2: torch.Tensor,
+    wo: torch.Tensor,
+    g2: torch.Tensor,
+    r2: torch.Tensor,
+    shape_key: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """One kernel: d_a=do2@wo (GEMM) + gate-bwd epilogue -> (d_out_r, d_gate, gated).
 
     ``shape_key`` is ``token_key(L)``, computed by the caller: everything here is already the
@@ -192,10 +209,26 @@ def _dgrad_epilogue(do2: torch.Tensor, wo: torch.Tensor, g2: torch.Tensor, r2: t
     a = torch.empty_like(g2)
     grid = lambda META: tile_grid(M, DH, META["BLOCK_M1"], META["BLOCK_N"])
     _dgrad_epi[grid](
-        do2, wo, g2, r2, dr, dg, a, M, N, DH,
-        do2.stride(0), do2.stride(1), wo.stride(0), wo.stride(1),
-        g2.stride(0), g2.stride(1), r2.stride(0), r2.stride(1),
-        dr.stride(0), dr.stride(1),
+        do2,
+        wo,
+        g2,
+        r2,
+        dr,
+        dg,
+        a,
+        M,
+        N,
+        DH,
+        do2.stride(0),
+        do2.stride(1),
+        wo.stride(0),
+        wo.stride(1),
+        g2.stride(0),
+        g2.stride(1),
+        r2.stride(0),
+        r2.stride(1),
+        dr.stride(0),
+        dr.stride(1),
         shape_key=token_key(0, N=N, DH=DH) if shape_key is None else pack(shape_key, N=N, DH=DH),
     )
     return dr, dg, a
@@ -207,20 +240,28 @@ def _fwd_fake(gate2d, outr2d, wo, shape_key=None):
 
 
 @opaque(fake=_fwd_fake, name="bias_only_attention_gate_out_fwd")
-def _fwd(gate2d: torch.Tensor, outr2d: torch.Tensor, wo: torch.Tensor,
-         shape_key: int | None = None) -> torch.Tensor:
+def _fwd(gate2d: torch.Tensor, outr2d: torch.Tensor, wo: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
     """``shape_key`` is ``token_key(L)`` from the caller (see ``_dgrad_epilogue``)."""
     M, DH = gate2d.shape
     N = wo.shape[0]
     out = torch.empty((M, N), device=gate2d.device, dtype=gate2d.dtype)
     grid = lambda META: tile_grid(M, N, META["BLOCK_M1"], META["BLOCK_N"])
     _gate_out_fwd[grid](
-        gate2d, outr2d, wo, out,
-        M, N, DH,
-        gate2d.stride(0), gate2d.stride(1),
-        outr2d.stride(0), outr2d.stride(1),
-        wo.stride(0), wo.stride(1),
-        out.stride(0), out.stride(1),
+        gate2d,
+        outr2d,
+        wo,
+        out,
+        M,
+        N,
+        DH,
+        gate2d.stride(0),
+        gate2d.stride(1),
+        outr2d.stride(0),
+        outr2d.stride(1),
+        wo.stride(0),
+        wo.stride(1),
+        out.stride(0),
+        out.stride(1),
         shape_key=token_key(0, N=N, DH=DH) if shape_key is None else pack(shape_key, N=N, DH=DH),
     )
     return out
@@ -256,7 +297,7 @@ class _FusedGateOut(torch.autograd.Function):
         if wo.dtype == torch.float32 and do2.dtype == torch.bfloat16:
             d_wo = torch.mm(do2.transpose(0, 1), a, out_dtype=torch.float32)
         else:
-            d_wo = do2.transpose(0, 1) @ a          # GEMM  [N, DH]
+            d_wo = do2.transpose(0, 1) @ a  # GEMM  [N, DH]
         return (
             d_g.reshape(ctx.shape),
             d_r.reshape(ctx.shape),
@@ -276,4 +317,3 @@ def fused_gate_out(gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor) ->
 
 
 # ─────────────── split path: one-pass sigmoid*mul (for DH>=256, gate-out via cuBLAS) ──────────
-

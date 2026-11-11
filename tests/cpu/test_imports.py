@@ -17,8 +17,19 @@ FILES = sorted(PACKAGE.rglob("*.py"))
 NOT_MODULES = ("miniworld_engine.kernels.swa_dit.cuda.gen",)
 #: Optional dependencies (pyproject extras ``flash`` / ``baselines``) a module may import at module level: an ImportError naming one of
 #: these is a missing extra, not a defect.
-OPTIONAL = ("flash_attn", "flash_attn_4", "cuequivariance", "cuequivariance_torch", "cuequivariance_ops_torch", "transformers",
-            "transformer_engine", "cutlass", "cuda.bindings", "nvidia_cutlass_dsl", "quack")
+OPTIONAL = (
+    "flash_attn",
+    "flash_attn_4",
+    "cuequivariance",
+    "cuequivariance_torch",
+    "cuequivariance_ops_torch",
+    "transformers",
+    "transformer_engine",
+    "cutlass",
+    "cuda.bindings",
+    "nvidia_cutlass_dsl",
+    "quack",
+)
 
 
 def _module_name(path: Path) -> str:

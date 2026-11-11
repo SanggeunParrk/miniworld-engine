@@ -7,6 +7,7 @@ opaque ops (``kernels._compile``); Dynamo traces through this Function and stops
 Differentiable inputs: ``q``, ``mod`` (the hoisted modulation -- its gradient flows on to the conditioning and the adaLN
 weight through ``swa_dit_hoist_modulation``) and the five block weights. cos / sin / seqused get no gradient.
 """
+
 from __future__ import annotations
 
 import torch
@@ -64,6 +65,7 @@ class SWADiTBlockFunction(torch.autograd.Function):
 
 class SWADiTModulationH100(torch.autograd.Function):
     """Native SiLU and dtype boundaries around the FP32 cuBLAS modulation."""
+
     @staticmethod
     def forward(ctx, c, w):
         out, a, w32 = native_h100_mod_fwd(c, w)

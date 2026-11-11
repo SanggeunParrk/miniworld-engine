@@ -40,9 +40,7 @@ def run(
     length,
     transposed=False,
 ):
-    _ext().run(
-        dd, db, x, stats, dout, dpair, wt, wbt, gamma, partial, out, length, transposed
-    )
+    _ext().run(dd, db, x, stats, dout, dpair, wt, wbt, gamma, partial, out, length, transposed)
 
 
 def gradients(dd, db, x, stats, dout, wt, wbt, gamma, like, transposed=False):

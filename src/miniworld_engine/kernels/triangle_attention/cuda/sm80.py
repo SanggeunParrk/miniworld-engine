@@ -100,22 +100,12 @@ def _token_major(t: torch.Tensor) -> torch.Tensor | None:
     8 elements; an allocation itself is 512-byte aligned, and ``data_ptr`` is not readable on a fake tensor)."""
     b, h, length, length2, d = t.shape
     sb, sh, sl, sj, sd = t.stride()
-    if (
-        sd != 1
-        or sh != d
-        or sj < h * d
-        or sj % 8
-        or sl != sj * length2
-        or (b > 1 and sb != sl * length)
-        or t.storage_offset() % 8
-    ):
+    if sd != 1 or sh != d or sj < h * d or sj % 8 or sl != sj * length2 or (b > 1 and sb != sl * length) or t.storage_offset() % 8:
         return None
     return t.permute(0, 2, 3, 1, 4).reshape(b, length, length2, h * d)
 
 
-def supports(
-    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias: torch.Tensor
-) -> bool:
+def supports(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias: torch.Tensor) -> bool:
     """The kernel's own requirements: sm_80, bf16, head dim 32, a square pair stack with L a multiple of 128, q / k / v token-major
     (the layout ``to_query`` / ``to_key`` / ``to_value`` give), bias ``[B, H, L, L]``."""
     for t in (query, key, value, bias):
@@ -124,20 +114,11 @@ def supports(
     if query.ndim != 5 or query.shape != key.shape or query.shape != value.shape:
         return False
     b, h, length, length2, d = query.shape
-    if (
-        d != D
-        or length != length2
-        or length % 128 != 0
-        or bias.shape != (b, h, length, length)
-    ):
+    if d != D or length != length2 or length % 128 != 0 or bias.shape != (b, h, length, length):
         return False
     if any(_token_major(t) is None for t in (query, key, value)):
         return False
-    return _is_ampere(
-        query.device.index
-        if query.device.index is not None
-        else torch.cuda.current_device()
-    )
+    return _is_ampere(query.device.index if query.device.index is not None else torch.cuda.current_device())
 
 
 def _built(*tensors: torch.Tensor) -> bool:
@@ -153,9 +134,7 @@ def _built(*tensors: torch.Tensor) -> bool:
     return True
 
 
-def available(
-    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias: torch.Tensor
-) -> bool:
+def available(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias: torch.Tensor) -> bool:
     """``supports()`` plus a successful (cached) build."""
     return supports(query, key, value, bias) and _built(query)
 
@@ -169,11 +148,7 @@ def _is_fake(*tensors) -> bool:
 def _attention_fake(q, k, v, bias, sm_scale, save_lse):
     """[out token-major [B, L, L2, H * D] (contiguous), lse [B, H, L, L2] fp32 when ``save_lse`` else empty]."""
     b, length, length2, c = q.shape
-    lse = (
-        q.new_empty((b, c // D, length, length2), dtype=torch.float32)
-        if save_lse
-        else q.new_empty((0,), dtype=torch.float32)
-    )
+    lse = q.new_empty((b, c // D, length, length2), dtype=torch.float32) if save_lse else q.new_empty((0,), dtype=torch.float32)
     return [q.new_empty((b, length, length2, c)), lse]
 
 
@@ -191,11 +166,7 @@ def _attention(
     b, length, _, c = q.shape
     h = c // D
     out = torch.empty((b, length, length, c), dtype=q.dtype, device=q.device)
-    lse = (
-        torch.empty((b, h, length, length), dtype=torch.float32, device=q.device)
-        if save_lse
-        else q.new_empty((0,), dtype=torch.float32)
-    )
+    lse = torch.empty((b, h, length, length), dtype=torch.float32, device=q.device) if save_lse else q.new_empty((0,), dtype=torch.float32)
     ext = _ext()
     fwd = _forward_entry(ext, save_lse)
     fwd(
@@ -241,9 +212,7 @@ def _compact_attention(
     indices = torch.empty((b, length), dtype=torch.int32, device=q.device)
     counts = torch.empty((b,), dtype=torch.int32, device=q.device)
     compact_bias = torch.empty_like(bias)
-    _ext().compact_attention_fast(
-        q, k, v, bias, mask, out, indices, counts, compact_bias, sm_scale * _L2E
-    )
+    _ext().compact_attention_fast(q, k, v, bias, mask, out, indices, counts, compact_bias, sm_scale * _L2E)
     return [out, q.new_empty((0,), dtype=torch.float32)]
 
 
@@ -264,16 +233,8 @@ def attention(
     # The availability gate (or the module's front contract) has established the
     # layout. Keep this view conversion traceable: storage_offset() is a Python
     # integer query that Dynamo cannot trace for slices of an opaque-op result.
-    q, k, v = (
-        t.permute(0, 2, 3, 1, 4).reshape(b, length, length2, h * d)
-        for t in (query, key, value)
-    )
-    if (
-        compact_key_mask is not None
-        and not save_lse
-        and length >= 768
-        and length % 384 == 0
-    ):
+    q, k, v = (t.permute(0, 2, 3, 1, 4).reshape(b, length, length2, h * d) for t in (query, key, value))
+    if compact_key_mask is not None and not save_lse and length >= 768 and length % 384 == 0:
         out, lse = _compact_attention(
             q,
             k,
@@ -284,9 +245,7 @@ def attention(
         )
     else:
         out, lse = _attention(q, k, v, bias.contiguous(), 1.0 / math.sqrt(d), save_lse)
-    return out.view(b, length, length2, h, d).permute(0, 3, 1, 2, 4), (
-        lse if save_lse else None
-    )
+    return out.view(b, length, length2, h, d).permute(0, 3, 1, 2, 4), (lse if save_lse else None)
 
 
 # ------------------------------------------------------------------------------------------------------------------- the front
@@ -305,40 +264,20 @@ def supports_front(
 ) -> bool:
     """The front's requirements: sm_80, a bf16 ``[B, L, L, 128]`` pair stack with L a multiple of 128, ``weights`` = (q, k, v, g) bf16
     ``[128, 128]`` and the bias weight bf16 ``[4, 128]``, 128-channel LayerNorm parameters, a ``[B, L]`` bool key mask if any."""
-    if (
-        not pair.is_cuda
-        or pair.dtype is not torch.bfloat16
-        or pair.ndim != 4
-        or not pair.is_contiguous()
-    ):
+    if not pair.is_cuda or pair.dtype is not torch.bfloat16 or pair.ndim != 4 or not pair.is_contiguous():
         return False
     b, length, length2, c = pair.shape
-    if (
-        c != 128
-        or length != length2
-        or length % 128 != 0
-        or b * length * length >= 2**31
-    ):
+    if c != 128 or length != length2 or length % 128 != 0 or b * length * length >= 2**31:
         return False
-    if len(weights) != 5 or any(
-        w.dtype is not torch.bfloat16 or w.device != pair.device for w in weights
-    ):
+    if len(weights) != 5 or any(w.dtype is not torch.bfloat16 or w.device != pair.device for w in weights):
         return False
     if any(w.shape != (128, 128) for w in weights[:4]) or weights[4].shape != (4, 128):
         return False
     if any(t.shape != (128,) or t.device != pair.device for t in (ln_w, ln_b)):
         return False
-    if mask is not None and (
-        mask.dtype is not torch.bool
-        or mask.shape != (b, length)
-        or mask.device != pair.device
-    ):
+    if mask is not None and (mask.dtype is not torch.bool or mask.shape != (b, length) or mask.device != pair.device):
         return False
-    return _is_ampere(
-        pair.device.index
-        if pair.device.index is not None
-        else torch.cuda.current_device()
-    )
+    return _is_ampere(pair.device.index if pair.device.index is not None else torch.cuda.current_device())
 
 
 def _mask_u8(mask: torch.Tensor | None, device) -> torch.Tensor:
@@ -385,11 +324,7 @@ def _pack_front_now(ext, weights, ln_w, ln_b):
 def _front_fake(x, weights, ln_w, ln_b, mask, eps, transposed, save_stats, save_xh, flip=False):
     """[qkvg [B, L, L, 512], bias [B, 4, L, L], stats [B * L * L, 2] fp32 when ``save_stats`` else empty, xh [B, L, L, 136] when ``save_xh`` else empty]."""
     b, length = x.shape[0], x.shape[1]
-    stats = (
-        x.new_empty((b * length * length, 2), dtype=torch.float32)
-        if save_stats
-        else x.new_empty((0,), dtype=torch.float32)
-    )
+    stats = x.new_empty((b * length * length, 2), dtype=torch.float32) if save_stats else x.new_empty((0,), dtype=torch.float32)
     xh = x.new_empty((b, length, length, 136)) if save_xh else x.new_empty((0,))
     return [
         x.new_empty((b, length, length, QKVG)),
@@ -427,11 +362,7 @@ def _front(
         if save_stats
         else x.new_empty((0,), dtype=torch.float32)
     )
-    xh = (
-        torch.empty((b, length, length, 136), dtype=torch.bfloat16, device=x.device)
-        if save_xh
-        else x.new_empty((0,))
-    )
+    xh = torch.empty((b, length, length, 136), dtype=torch.bfloat16, device=x.device) if save_xh else x.new_empty((0,))
     ext.front(
         x,
         wp,
@@ -509,18 +440,11 @@ def front_train(
     )
 
 
-def qkv_views(
-    qkvg: torch.Tensor, n_head: int = 4
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def qkv_views(qkvg: torch.Tensor, n_head: int = 4) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """q, k, v, g of the front's ``[B, L, L2, 512]`` output as ``[B, H, L, L2, D]`` views (no copies) -- the layout the module's attention takes."""
     b, length, length2, _ = qkvg.shape
     c = n_head * D
-    return tuple(
-        qkvg[..., i * c : (i + 1) * c]
-        .view(b, length, length2, n_head, D)
-        .permute(0, 3, 1, 2, 4)
-        for i in range(4)
-    )  # ty: ignore[invalid-return-type]
+    return tuple(qkvg[..., i * c : (i + 1) * c].view(b, length, length2, n_head, D).permute(0, 3, 1, 2, 4) for i in range(4))  # ty: ignore[invalid-return-type]
 
 
 # -------------------------------------------------------------------------------------------------------------------- the back
@@ -531,28 +455,13 @@ BACK_WARPS = 8
 def supports_back(res: torch.Tensor, wo: torch.Tensor) -> bool:
     """The back's requirements: sm_80, the residual ``res`` bf16 contiguous ``[B, L, L, 128]`` with L a multiple of 128 (the attention output and
     the front's gate columns are shaped like it), ``wo`` bf16 ``[128, 128]``."""
-    if (
-        not res.is_cuda
-        or res.dtype is not torch.bfloat16
-        or wo.dtype is not torch.bfloat16
-        or wo.device != res.device
-    ):
+    if not res.is_cuda or res.dtype is not torch.bfloat16 or wo.dtype is not torch.bfloat16 or wo.device != res.device:
         return False
-    if (
-        res.ndim != 4
-        or res.shape[1] != res.shape[2]
-        or res.shape[-1] != 128
-        or res.shape[1] % 128 != 0
-        or wo.shape != (128, 128)
-    ):
+    if res.ndim != 4 or res.shape[1] != res.shape[2] or res.shape[-1] != 128 or res.shape[1] % 128 != 0 or wo.shape != (128, 128):
         return False
     if not res.is_contiguous() or res.numel() // 128 >= 2**31:
         return False
-    return _is_ampere(
-        res.device.index
-        if res.device.index is not None
-        else torch.cuda.current_device()
-    )
+    return _is_ampere(res.device.index if res.device.index is not None else torch.cuda.current_device())
 
 
 def available_module(
@@ -565,11 +474,7 @@ def available_module(
 ) -> bool:
     """The whole module (front, core, back): the gates of the front and the back, and a successful (cached) build.  The core takes what the
     front writes, so its own gate holds when the front's does."""
-    return (
-        supports_front(pair, weights, ln_w, ln_b, mask)
-        and supports_back(pair, wo)
-        and _built(pair)
-    )
+    return supports_front(pair, weights, ln_w, ln_b, mask) and supports_back(pair, wo) and _built(pair)
 
 
 def _back_fake(o, qkvg, wo, res, ds, transposed):
@@ -592,9 +497,7 @@ def _back(
     b, length = res.shape[0], res.shape[1]
     out = torch.empty_like(res)
     g = qkvg.view(b * length * length, QKVG)[:, 3 * 128 :]
-    _ext().back(
-        o, g, wo.contiguous(), res, out, ds, length, int(transposed), BACK_WARPS
-    )
+    _ext().back(o, g, wo.contiguous(), res, out, ds, length, int(transposed), BACK_WARPS)
     return out
 
 
@@ -612,9 +515,7 @@ def back(
     ``attention()``'s result is such a view), ``qkvg``: the front's output, ``wo``: ``to_out.weight``, ``res``: the pair tensor, ``ds``: the dropout
     scale ``[B, L, 128]`` indexed by the token's second index (training; the module multiplies the projection by it before the residual add).
     Call ``supports_back()`` first."""
-    return _back(
-        o, qkvg, wo, res, ds if ds is not None else o.new_empty((0,)), bool(transposed)
-    )
+    return _back(o, qkvg, wo, res, ds if ds is not None else o.new_empty((0,)), bool(transposed))
 
 
 # ------------------------------------------------------------------------------------------------------------------ the backward's weights
@@ -633,9 +534,7 @@ def _bwd_pack_fake(weights, wo, ln_w):
 
 
 @opaque(fake=_bwd_pack_fake, name="triangle_attention_sm80_bwd_pack")
-def _bwd_pack(
-    weights: list[torch.Tensor], wo: torch.Tensor, ln_w: torch.Tensor
-) -> list[torch.Tensor]:
+def _bwd_pack(weights: list[torch.Tensor], wo: torch.Tensor, ln_w: torch.Tensor) -> list[torch.Tensor]:
     """The weights in the backward kernels' layouts, one launch (``wgrad_sm80.cuh``): ``wt[p][c][o] = W_p[o][c]`` for q, k, v, g (the front's input
     gradient is D W: the B operand is W^T), ``wbt[c][h] = Wb[h][c]``, ``wot[c][o] = Wo[o][c]`` (the back's backward ``da = dy Wo``) and the LayerNorm scale
     as fp32."""
@@ -790,9 +689,7 @@ def _attention_bwd(
     native_dq = length in (640, 768)
     dq_cfg = 2
     groups = length // (8 if native_dq else DQ_ROWS)
-    dbp = torch.empty(
-        (groups, b * h, length, length), dtype=torch.bfloat16, device=q.device
-    )
+    dbp = torch.empty((groups, b * h, length, length), dtype=torch.bfloat16, device=q.device)
     buf = dqkvg.view(t, QKVG)
     sm_scale = 1.0 / math.sqrt(D)
     scl = sm_scale * _L2E
@@ -943,9 +840,7 @@ def front_bwd(
     """The pair tensor's gradient: ``dout`` (the residual) plus the gradient through the LayerNorm and the five projections, in one pass.  The
     parameters' gradients are ``front_weight_grads``'.  ``packed`` = ``(wt, wbt, gamma32)`` of ``bwd_pack`` when the caller packed them."""
     if packed is None:
-        wt, wbt, _, gamma32 = bwd_pack(
-            weights, weights[0], ln_w
-        )  # the output weight is not read here: any [128, 128] bf16 tensor will do
+        wt, wbt, _, gamma32 = bwd_pack(weights, weights[0], ln_w)  # the output weight is not read here: any [128, 128] bf16 tensor will do
         packed = (wt, wbt, gamma32)
     return _front_bwd(dqkvg, db, x, stats, dout.contiguous(), *packed, bool(transposed))
 
@@ -959,9 +854,7 @@ def _wgrad_fake(dqkvg, db, xh, weights, ln_w, ln_b):
     ]
 
 
-def _front_weight_products(
-    dqkvg: torch.Tensor, db: torch.Tensor, xh2: torch.Tensor
-) -> torch.Tensor:
+def _front_weight_products(dqkvg: torch.Tensor, db: torch.Tensor, xh2: torch.Tensor) -> torch.Tensor:
     t = xh2.shape[0]
     front = torch.mm(dqkvg.view(t, QKVG).T, xh2, out_dtype=torch.float32)
     db2 = db.permute(1, 0, 2, 3).reshape(4, t)
@@ -1110,9 +1003,7 @@ def forward_train(
         True,
         direct=launch_direct,
     )
-    res = _training_launch(
-        _back, out, qkvg, wo, pair, ds, transposed, direct=launch_direct
-    )
+    res = _training_launch(_back, out, qkvg, wo, pair, ds, transposed, direct=launch_direct)
     return [res, qkvg, bias, stats, xh, out, lse]
 
 
@@ -1138,12 +1029,8 @@ def backward_train(
     t = b * length * length
     launch_direct = _capture_aware_training_launch(length)
     weights = [wq, wk, wv, wg, wb]
-    wt, wbt, wot, gamma32 = _training_launch(
-        _bwd_pack, weights, wo, ln_w, direct=launch_direct
-    )
-    dqkvg = torch.empty(
-        (b, length, length, QKVG), dtype=torch.bfloat16, device=pair.device
-    )
+    wt, wbt, wot, gamma32 = _training_launch(_bwd_pack, weights, wo, ln_w, direct=launch_direct)
+    dqkvg = torch.empty((b, length, length, QKVG), dtype=torch.bfloat16, device=pair.device)
     dov, dy, a, delta = _training_launch(
         _back_bwd,
         dout.contiguous(),
@@ -1161,9 +1048,7 @@ def backward_train(
         cfg, chunk = 6, 8192
         d_wo = native_wo_tn_sm80.matmul(dy.view(t, 128), a.view(t, 128), cfg, chunk)
     else:
-        d_wo = torch.mm(dy.view(t, 128).T, a.view(t, 128), out_dtype=torch.float32).to(
-            wo.dtype
-        )
+        d_wo = torch.mm(dy.view(t, 128).T, a.view(t, 128), out_dtype=torch.float32).to(wo.dtype)
     q, k, v, _ = qkv_views(qkvg)
     db = _training_launch(
         _attention_bwd,
@@ -1209,9 +1094,7 @@ def backward_train(
         bool(transposed),
         direct=launch_direct,
     )
-    *grads, d_gamma, d_beta = _training_launch(
-        _wgrad, dqkvg, db, xh, weights, ln_w, ln_b, direct=launch_direct
-    )
+    *grads, d_gamma, d_beta = _training_launch(_wgrad, dqkvg, db, xh, weights, ln_w, ln_b, direct=launch_direct)
     return [dpair, *grads, d_wo, d_gamma, d_beta]
 
 

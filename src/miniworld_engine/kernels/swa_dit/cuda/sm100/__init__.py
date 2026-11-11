@@ -80,9 +80,7 @@ def cubin(name: str) -> str:
     return str(_nvcc.cubin(f"swa_dit_sm100/{name}", flags, source=_dir / f"{stem}.cu", toolchain="sm100"))
 
 
-def _load_swa_sm100_kernel(
-    name: str, func: str, smem: int, cluster: int | None = None, pdl: bool = False
-):
+def _load_swa_sm100_kernel(name: str, func: str, smem: int, cluster: int | None = None, pdl: bool = False):
     """The kernel ``func`` of cubin ``name``, loaded in the current device's context."""
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
@@ -119,15 +117,9 @@ class QkvgFwd:
         SP, AT = tiling(A)
         dev = q.device
         W = torch.cat([wqkv, wg]).contiguous() if W is None else W
-        Qh, Kh, Vh = (
-            torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16) for _ in range(3)
-        )
+        Qh, Kh, Vh = (torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16) for _ in range(3))
         G = torch.empty(N * S, C, device=dev, dtype=torch.bfloat16)
-        X, PQ, PK = (
-            (torch.empty(N * S, C, device=dev, dtype=torch.bfloat16) for _ in range(3))
-            if save
-            else (G, G, G)
-        )
+        X, PQ, PK = (torch.empty(N * S, C, device=dev, dtype=torch.bfloat16) for _ in range(3)) if save else (G, G, G)
         maps = (
             map_rows(q, A, B, S, SP, AT),
             _map(W, [C, 4 * C], C * 2, [64, 128]),
@@ -139,12 +131,8 @@ class QkvgFwd:
                 swizzle=128,
                 dtype="f32",
             ),  # (32 ch, rows, 24 blocks)
-            _map(
-                cos, [D // 2, B * S], [D // 2 * 4], [D // 2, AT], swizzle=0, dtype="f32"
-            ),
-            _map(
-                sin, [D // 2, B * S], [D // 2 * 4], [D // 2, AT], swizzle=0, dtype="f32"
-            ),
+            _map(cos, [D // 2, B * S], [D // 2 * 4], [D // 2, AT], swizzle=0, dtype="f32"),
+            _map(sin, [D // 2, B * S], [D // 2 * 4], [D // 2, AT], swizzle=0, dtype="f32"),
         )
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
@@ -233,11 +221,7 @@ class QkvgBwd:
         AT = 64 // SP  # 64-row tiles
         dev = q.device
         dq = torch.empty(M, C, device=dev, dtype=torch.bfloat16) if dq is None else dq
-        dP = (
-            torch.empty(M, 4 * C, device=dev, dtype=torch.bfloat16)
-            if dP is None
-            else dP
-        )
+        dP = torch.empty(M, 4 * C, device=dev, dtype=torch.bfloat16) if dP is None else dP
         own = dmod is None
         if own:
             dmod = torch.zeros(B * S, 6 * C, device=dev)
@@ -259,15 +243,9 @@ class QkvgBwd:
                 swizzle=128,
                 dtype="f32",
             ),
-            _map(
-                cos, [D // 2, B * S], [D // 2 * 4], [D // 2, AT], swizzle=0, dtype="f32"
-            ),
-            _map(
-                sin, [D // 2, B * S], [D // 2 * 4], [D // 2, AT], swizzle=0, dtype="f32"
-            ),
-            _map(
-                dP, [4 * C, S, B, A], [8 * C, S * 8 * C, B * S * 8 * C], [64, AT, 1, SP]
-            ),
+            _map(cos, [D // 2, B * S], [D // 2 * 4], [D // 2, AT], swizzle=0, dtype="f32"),
+            _map(sin, [D // 2, B * S], [D // 2 * 4], [D // 2, AT], swizzle=0, dtype="f32"),
+            _map(dP, [4 * C, S, B, A], [8 * C, S * 8 * C, B * S * 8 * C], [64, AT, 1, SP]),
             _map(
                 dP,
                 [4 * C, S, B, A],
@@ -413,9 +391,7 @@ class AttnDkvq(AttnDkv):
         grid = (min(num_sms(), N * (S // 128) * 2), 1, 1)
         if grid[0] not in self.bufs:  # kept: the kernel resets the counters it uses
             self.bufs[grid[0]] = (
-                torch.empty(
-                    grid[0] * 8 * 64 * D, device=Qh.device
-                ),  # run-boundary partials [CTA][side][head][slot][64][32]
+                torch.empty(grid[0] * 8 * 64 * D, device=Qh.device),  # run-boundary partials [CTA][side][head][slot][64][32]
                 torch.zeros((grid[0] + 1) * 4, device=Qh.device, dtype=torch.int32),
             )  # pair counters
         bnd, cnt = self.bufs[grid[0]]
@@ -452,9 +428,7 @@ class OprojBwd:
         AT = 64 // SP
         dev = dq1.device
         if outs is None:
-            dO, dG, datt, gated = (
-                torch.empty(M, C, device=dev, dtype=torch.bfloat16) for _ in range(4)
-            )
+            dO, dG, datt, gated = (torch.empty(M, C, device=dev, dtype=torch.bfloat16) for _ in range(4))
             Dv = torch.empty(A * B, H, S, device=dev)
         else:
             dO, dG, Dv, datt, gated = outs
@@ -532,9 +506,7 @@ class FfnBwdGate:
         else:
             dffn, hh, dab = outs
         WDT = wd.t().contiguous() if WDT is None else WDT
-        st = lambda t, w: _map(
-            t, [w, S, B, A], [w * 2, S * w * 2, B * S * w * 2], [64, AT, 1, SP]
-        )
+        st = lambda t, w: _map(t, [w, S, B, A], [w * 2, S * w * 2, B * S * w * 2], [64, AT, 1, SP])
         maps = (
             map_rows(y, A, B, S, SP, AT),
             map_rows(dq2, A, B, S, SP, AT),
@@ -592,9 +564,7 @@ class FfnBwdDy:
         SP = min(A, 8)
         AT = 64 // SP
         dev = dq2.device
-        dq1 = (
-            torch.empty(M, C, device=dev, dtype=torch.bfloat16) if dq1 is None else dq1
-        )
+        dq1 = torch.empty(M, C, device=dev, dtype=torch.bfloat16) if dq1 is None else dq1
         own = dmod is None
         if own:
             dmod = torch.zeros(B * S, 6 * C, device=dev)
@@ -671,11 +641,7 @@ class FfnFwd2:
         assert AT <= self.atm, f"AT = {AT} needs a build with ATM >= {AT}"
         dev = q.device
         out = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
-        Q1, Att, Y, Ff = (
-            (torch.empty(M, C, device=dev, dtype=torch.bfloat16) for _ in range(4))
-            if save
-            else (out, out, out, out)
-        )
+        Q1, Att, Y, Ff = (torch.empty(M, C, device=dev, dtype=torch.bfloat16) for _ in range(4)) if save else (out, out, out, out)
         mr = lambda t: map_rows(t, A, B, S, SP, AT)
         maps = (
             mr(q),
@@ -744,11 +710,7 @@ class AttnFwd2:
     def bind(self, Qh, Kh, Vh, seqused, O=None, LSE=None):
         N, _, S, _ = Qh.shape
         assert S % 128 == 0
-        O = (
-            torch.empty(N * S, C, device=Qh.device, dtype=torch.bfloat16)
-            if O is None
-            else O
-        )
+        O = torch.empty(N * S, C, device=Qh.device, dtype=torch.bfloat16) if O is None else O
         LSE = torch.empty(N, H, S, device=Qh.device) if LSE is None else LSE
         rows = N * H * S
         maps = (
@@ -810,15 +772,9 @@ class QkvgFwd2:
         assert AT <= self.atm, f"AT = {AT} needs a build with ATM >= {AT}"
         dev = q.device
         W = torch.cat([wqkv, wg]).contiguous() if W is None else W
-        Qh, Kh, Vh = (
-            torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16) for _ in range(3)
-        )
+        Qh, Kh, Vh = (torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16) for _ in range(3))
         G = torch.empty(N * S, C, device=dev, dtype=torch.bfloat16)
-        X, PQ, PK = (
-            (torch.empty(N * S, C, device=dev, dtype=torch.bfloat16) for _ in range(3))
-            if save
-            else (G, G, G)
-        )
+        X, PQ, PK = (torch.empty(N * S, C, device=dev, dtype=torch.bfloat16) for _ in range(3)) if save else (G, G, G)
         mr = lambda t: map_rows(t, A, B, S, SP, AT)
         mh = lambda t: map_heads(t, A, B, S, SP, AT)
         maps = (
@@ -832,12 +788,8 @@ class QkvgFwd2:
                 swizzle=128,
                 dtype="f32",
             ),
-            _map(
-                cos, [D // 2, B * S], [D // 2 * 4], [D // 2, AT], swizzle=0, dtype="f32"
-            ),
-            _map(
-                sin, [D // 2, B * S], [D // 2 * 4], [D // 2, AT], swizzle=0, dtype="f32"
-            ),
+            _map(cos, [D // 2, B * S], [D // 2 * 4], [D // 2, AT], swizzle=0, dtype="f32"),
+            _map(sin, [D // 2, B * S], [D // 2 * 4], [D // 2, AT], swizzle=0, dtype="f32"),
             mh(Qh),
             mh(Kh),
             mh(Vh),
@@ -876,9 +828,7 @@ class ModFwd:
     """adaLN modulation in one kernel (mod_fwd.cu): c [R, C] bf16, Wmod [6C, C] bf16 -> silu(c) Wmod^T [R, 6C] fp32."""
 
     def __init__(self, cubin="mod_fwd"):
-        self.k = _load_swa_sm100_kernel(
-            cubin, "swa_mod_fwd_sm100", 4 * 32768 + 64, pdl=PDL
-        )
+        self.k = _load_swa_sm100_kernel(cubin, "swa_mod_fwd_sm100", 4 * 32768 + 64, pdl=PDL)
 
     def bind(self, c, wmod, out=None):
         R = c.shape[0]
@@ -901,33 +851,20 @@ class ModBwd:
 
     def __init__(self, cubin="mod_bwd"):
         self.cubin = cubin
-        self.kc = _load_swa_sm100_kernel(
-            self.cubin, "swa_mod_bwd_dc_sm100", 4 * 49152 + 128, cluster=4
-        )
+        self.kc = _load_swa_sm100_kernel(self.cubin, "swa_mod_bwd_dc_sm100", 4 * 49152 + 128, cluster=4)
         self.kw = {}  # per cluster size G
         self.trace = None  # (TRACE builds) int64 [16]
 
     def bind(self, g, c, wmod, dc=None, dw=None):
         R = c.shape[0]
-        assert (
-            R % 128 == 0
-            and g.shape == (R, 6 * C)
-            and g.is_contiguous()
-            and c.is_contiguous()
-        )
+        assert R % 128 == 0 and g.shape == (R, 6 * C) and g.is_contiguous() and c.is_contiguous()
         dev = c.device
         dc = torch.empty(R, C, device=dev, dtype=torch.bfloat16) if dc is None else dc
-        dw = (
-            torch.empty(6 * C, C, device=dev, dtype=torch.float32) if dw is None else dw
-        )
-        G = max(
-            x for x in (1, 2, 4, 8, 16) if (R // 64) % x == 0
-        )  # row groups (one cluster) of NS x 64 rows
+        dw = torch.empty(6 * C, C, device=dev, dtype=torch.float32) if dw is None else dw
+        G = max(x for x in (1, 2, 4, 8, 16) if (R // 64) % x == 0)  # row groups (one cluster) of NS x 64 rows
         NS = R // 64 // G
         if G not in self.kw:
-            self.kw[G] = _load_swa_sm100_kernel(
-                self.cubin, "swa_mod_bwd_dw_sm100", 4 * 49152 + 128, cluster=G
-            )
+            self.kw[G] = _load_swa_sm100_kernel(self.cubin, "swa_mod_bwd_dw_sm100", 4 * 49152 + 128, cluster=G)
         kw = self.kw[G]
         mc_ = (
             _map(g, [6 * C, R], 6 * C * 4, [32, 128], dtype="f32"),
@@ -1003,10 +940,7 @@ def _has_fa4() -> bool:
     return bool(
         spec is not None
         and spec.submodule_search_locations
-        and any(
-            (Path(r) / "cute" / "__init__.py").exists()
-            for r in spec.submodule_search_locations
-        )
+        and any((Path(r) / "cute" / "__init__.py").exists() for r in spec.submodule_search_locations)
     )
 
 
@@ -1017,8 +951,7 @@ FA4_AVAILABLE = _has_fa4()
 def need_s128(S: int) -> None:
     if S % 128:
         raise ValueError(
-            f"SWA atom DiT block (sm_100a): the atom count S = {S} must be a multiple of 128; pad the atoms "
-            "(seqused masks them)"
+            f"SWA atom DiT block (sm_100a): the atom count S = {S} must be a multiple of 128; pad the atoms (seqused masks them)"
         )
 
 
@@ -1100,20 +1033,10 @@ def block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_win
     need_s128(S)
     A = N // B
     with torch.cuda.device(q.device):
-        K = kernels(
-            q.device.index
-            if q.device.index is not None
-            else torch.cuda.current_device()
-        )
+        K = kernels(q.device.index if q.device.index is not None else torch.cuda.current_device())
         W = _cached(_w_qkvg, wqkv, wg)
-        qk = (
-            (K.qkvg2a if A < 4 else K.qkvg2)
-            if A < 5 or A * B * S <= 2 * 148 * 32
-            else K.qkvg
-        )
-        run, (Qh, Kh, Vh, G, X, PQ, PK) = qk.bind(
-            q, mod, cos, sin, None, None, A, B, save=save, W=W
-        )
+        qk = (K.qkvg2a if A < 4 else K.qkvg2) if A < 5 or A * B * S <= 2 * 148 * 32 else K.qkvg
+        run, (Qh, Kh, Vh, G, X, PQ, PK) = qk.bind(q, mod, cos, sin, None, None, A, B, save=save, W=W)
         run()
         lse = torch.empty(N, H, S, device=q.device, dtype=torch.float32)
         if is_global(half_window):
@@ -1124,9 +1047,7 @@ def block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_win
             at = K.attn1h if Qh.shape[0] * (S // 128) * 4 <= num_sms() else K.attn
             run, _, _ = at.bind(Qh, Kh, Vh, seqused, O=O, LSE=lse)
             run()
-        run, (out, q1, att, y, ffn) = (K.ffn if A >= 4 else K.ffna).bind(
-            q.reshape(N * S, C), G, O, mod, wo, wu, wd, A, B, save=save
-        )
+        run, (out, q1, att, y, ffn) = (K.ffn if A >= 4 else K.ffna).bind(q.reshape(N * S, C), G, O, mod, wo, wu, wd, A, B, save=save)
         run()
     if not save:
         return [out.view(N, S, C)]
@@ -1173,17 +1094,11 @@ def block_bwd(
         K = kernels(dev.index if dev.index is not None else torch.cuda.current_device())
         dmod = torch.zeros(B * S, 6 * C, device=dev, dtype=torch.float32)
         dy2 = dy.reshape(M, C)
-        run, (dffn, hh, dab) = K.gate.bind(
-            dy2, y, mod, wu, None, A, B, WDT=_cached(_t, wd)
-        )
+        run, (dffn, hh, dab) = K.gate.bind(dy2, y, mod, wu, None, A, B, WDT=_cached(_t, wd))
         run()
-        run, (dq1, _) = K.dy.bind(
-            dab, dy2, q1, ffn, mod, wu, A, B, dmod=dmod, WUT=_cached(_t, wu)
-        )
+        run, (dq1, _) = K.dy.bind(dab, dy2, q1, ffn, mod, wu, A, B, dmod=dmod, WUT=_cached(_t, wu))
         run()
-        dO, dG, datt, gated = (
-            torch.empty(M, C, device=dev, dtype=torch.bfloat16) for _ in range(4)
-        )
+        dO, dG, datt, gated = (torch.empty(M, C, device=dev, dtype=torch.bfloat16) for _ in range(4))
         Dv = torch.empty(N, H, S, device=dev, dtype=torch.float32)
         run, _ = K.oproj.bind(
             dq1,
@@ -1199,21 +1114,14 @@ def block_bwd(
             outs=(dO, dG, Dv, datt, gated),
         )
         run()
-        if is_global(
-            half_window
-        ):  # FA4: dQ / dK / dV in one call; skipped (padding) rows stay zero
-            dQh, dKh, dVh = (
-                torch.zeros(N, H, S, D, device=dev, dtype=torch.bfloat16)
-                for _ in range(3)
-            )
+        if is_global(half_window):  # FA4: dQ / dK / dV in one call; skipped (padding) rows stay zero
+            dQh, dKh, dVh = (torch.zeros(N, H, S, D, device=dev, dtype=torch.bfloat16) for _ in range(3))
             attn_global_bwd(qh, kh, vh, o, dO, lse, seqused, dQh, dKh, dVh)
         else:
             dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
             dKh, dVh = torch.empty_like(dQh), torch.empty_like(dQh)
             if N * (S // 128) * 2 >= 2 * num_sms():
-                run, _ = K.dkvq.bind(
-                    qh, kh, vh, dO, lse, Dv, seqused, dKh=dKh, dVh=dVh, dQh=dQh
-                )
+                run, _ = K.dkvq.bind(qh, kh, vh, dO, lse, Dv, seqused, dKh=dKh, dVh=dVh, dQh=dQh)
                 run()
             else:
                 run, _ = K.dq.bind(qh, kh, vh, dO, lse, Dv, seqused, dQh=dQh)
@@ -1244,12 +1152,8 @@ def block_bwd(
             dP=dP,
         )
         run()
-    f32 = (
-        torch.float32
-    )  # the weight gradients keep cuBLAS's fp32 accumulators (an fp32 master)
-    dwqkvg = torch.mm(
-        dP.t(), x, out_dtype=f32
-    )  # dWqkv | dWg as one GEMM over dP (x read once)
+    f32 = torch.float32  # the weight gradients keep cuBLAS's fp32 accumulators (an fp32 master)
+    dwqkvg = torch.mm(dP.t(), x, out_dtype=f32)  # dWqkv | dWg as one GEMM over dP (x read once)
     # the op's outputs may not alias each other: dWg (128 x 128) leaves as its own tensor
     return [
         dq.view(N, S, C),
@@ -1265,27 +1169,17 @@ def block_bwd(
 def mod_fwd(c: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
     """silu(c) Wmod^T [R, 6C] fp32 in one kernel; c [R, C] bf16 contiguous, Wmod [6C, C] bf16."""
     with torch.cuda.device(c.device):
-        K = kernels(
-            c.device.index
-            if c.device.index is not None
-            else torch.cuda.current_device()
-        )
+        K = kernels(c.device.index if c.device.index is not None else torch.cuda.current_device())
         run, out = K.modf.bind(c, wmod)
         run()
     return out
 
 
-def mod_bwd(
-    g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+def mod_bwd(g: torch.Tensor, c: torch.Tensor, wmod: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """(dc [R, C] bf16, dWmod [6C, C] fp32) from g = d mod [R, 6C] fp32; R a multiple of 128."""
     need_s128(c.shape[0])
     with torch.cuda.device(c.device):
-        K = kernels(
-            c.device.index
-            if c.device.index is not None
-            else torch.cuda.current_device()
-        )
+        K = kernels(c.device.index if c.device.index is not None else torch.cuda.current_device())
         run, (dc, dw) = K.modb.bind(g.contiguous(), c, wmod)
         run()
     return dc, dw

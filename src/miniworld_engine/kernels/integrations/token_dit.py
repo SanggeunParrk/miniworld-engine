@@ -89,7 +89,7 @@ def _const(value: float, shape, device) -> torch.Tensor:
 
 
 def _identity_adaln(ada) -> bool:
-    return not hasattr(ada, "ln_cond")   # IdentityAdaptiveLayerNorm: no cond LayerNorm, no biases
+    return not hasattr(ada, "ln_cond")  # IdentityAdaptiveLayerNorm: no cond LayerNorm, no biases
 
 
 def options(module) -> tuple[float, ...] | None:
@@ -102,15 +102,23 @@ def options(module) -> tuple[float, ...] | None:
         return None
     if not ident and (a.ada_ln_in.ln_cond.eps != 1e-5 or t.ada_ln_in.ln_cond.eps != 1e-5):
         return None
-    kq_ln = hasattr(a, "norm_query") and not a.use_qk_norm   # FlatQKNormAugmentedAttention: a LayerNorm of the flat q / k
+    kq_ln = hasattr(a, "norm_query") and not a.use_qk_norm  # FlatQKNormAugmentedAttention: a LayerNorm of the flat q / k
     if kq_ln and (a.norm_query.eps != a.norm_key.eps or a.norm_query.bias is None or a.norm_key.bias is None):
         return None
     parallel, gated, up = bool(getattr(module, "parallel", False)), hasattr(a, "to_gate"), hasattr(t, "up")
     # qk_rna (fp32 q / k rounded to nearest before the TF32 core) for the blocks with any of the options: the models whose fp32
     # accuracy depends on it (Chai-1's identity AdaLN scale is unbounded); the default block keeps its tuned path
     rna = parallel or ident or not gated or up or kq_ln
-    return (float(parallel), float(not ident), float(a.ada_ln_in.ln_in.eps), float(gated), float(up), float(kq_ln),
-            float(a.norm_query.eps) if kq_ln else 1e-5, float(rna))
+    return (
+        float(parallel),
+        float(not ident),
+        float(a.ada_ln_in.ln_in.eps),
+        float(gated),
+        float(up),
+        float(kq_ln),
+        float(a.norm_query.eps) if kq_ln else 1e-5,
+        float(rna),
+    )
 
 
 def _leaf(module, name):
@@ -167,9 +175,8 @@ def _native_fp32_inference(module, single) -> bool:
     return (
         not torch.is_grad_enabled()
         and module.attention._backend == "portable"
-        and getattr(getattr(module.attention, "to_bias", None), "weight", None)
-        is not None
-        and module.attention.to_bias.weight.shape[1] in PAIR_WIDTHS_H100   # 128; 256: Protenix-v2's diffusion pair; 512: IntelliFold2's
+        and getattr(getattr(module.attention, "to_bias", None), "weight", None) is not None
+        and module.attention.to_bias.weight.shape[1] in PAIR_WIDTHS_H100  # 128; 256: Protenix-v2's diffusion pair; 512: IntelliFold2's
         and (module.attention.n_head, single.shape[-1]) in LAYOUTS  # 16 x 48, 24 x 32, 12 x 64 (d 768), 16 x 64 (d 1024)
         and single.is_cuda
         and single.dtype is torch.float32
@@ -189,9 +196,7 @@ def _check_native_fp32(module, single, cond, pair, compute_dtype):
         or single.shape[2] % 128
         or single.shape[3] not in (768, 1024)
     ):
-        raise ValueError(
-            "Hopper FP32 token inference requires [A,1,L,768 or 1024] with L a multiple of 128"
-        )
+        raise ValueError("Hopper FP32 token inference requires [A,1,L,768 or 1024] with L a multiple of 128")
     A, _, L, _ = single.shape
     if (
         cond.ndim != 4
@@ -205,9 +210,7 @@ def _check_native_fp32(module, single, cond, pair, compute_dtype):
         or cond.device != single.device
         or pair.device != single.device
     ):
-        raise ValueError(
-            "Hopper FP32 token inference requires matching FP32 conditioning/pair operands"
-        )
+        raise ValueError("Hopper FP32 token inference requires matching FP32 conditioning/pair operands")
     a = module.attention
     d = single.shape[3]
     if (a.n_head, d) not in LAYOUTS or tuple(module.transition.expand_a.weight.shape) != (2 * d, d):
@@ -216,13 +219,8 @@ def _check_native_fp32(module, single, cond, pair, compute_dtype):
         )
     if not _norms_ok(module, h100=True):
         raise ValueError("Hopper FP32 token inference requires the token DiT's options (LayerNorm eps=1e-5, the AdaLN's any)")
-    if any(
-        p.dtype is not torch.float32 or p.device != single.device
-        for p in module.parameters()
-    ):
-        raise ValueError(
-            "Hopper FP32 token inference requires FP32 parameters on the input device"
-        )
+    if any(p.dtype is not torch.float32 or p.device != single.device for p in module.parameters()):
+        raise ValueError("Hopper FP32 token inference requires FP32 parameters on the input device")
 
 
 def serves(module, single, cond, pair, compute_dtype=None, extra=None):
@@ -262,8 +260,7 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         return False
     # cond 384; 768 (ESMFold2's token DiT) on H100, where the weight pack and the conditioning rows are built per cond width
     if cond.shape[-1] != _cond_width(module) or not (
-        cond.shape[-1] == 384
-        or (cond.shape[-1] in COND_WIDTHS_H100 and torch.cuda.get_device_capability(single.device) == (9, 0))
+        cond.shape[-1] == 384 or (cond.shape[-1] in COND_WIDTHS_H100 and torch.cuda.get_device_capability(single.device) == (9, 0))
     ):
         return False
     # the pair enters once per sample, through the bias hoist: 128 everywhere; 256 (Protenix-v2's diffusion pair) and 512
@@ -275,10 +272,7 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         return False
     # One conditioning shared by the samples (a sampling step: L table rows) or one per sample (S L rows); the runner
     # takes either (FusedTokenDiT._cond). Anything else does not describe these samples.
-    if (
-        cond.shape[0] not in (1, single.shape[0])
-        or cond.shape[1:3] != single.shape[1:3]
-    ):
+    if cond.shape[0] not in (1, single.shape[0]) or cond.shape[1:3] != single.shape[1:3]:
         return False
     if not _norms_ok(module, h100=torch.cuda.get_device_capability(single.device) == (9, 0)):
         return False
@@ -293,14 +287,8 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
             return True
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
-        idx = (
-            single.device.index
-            if single.device.index is not None
-            else torch.cuda.current_device()
-        )
-        return sm100.inference_core_supported(
-            single.dtype, _pad8(single.shape[2]), d, a.n_head, idx
-        )
+        idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
+        return sm100.inference_core_supported(single.dtype, _pad8(single.shape[2]), d, a.n_head, idx)
     return cap == (9, 0) and single.shape[2] % 128 == 0 and (a.n_head, d) in LAYOUTS
 
 
@@ -364,9 +352,7 @@ def _infer(
         from miniworld_engine.kernels.integrations.token_dit_train import _tf32
 
         with _tf32(single.dtype is torch.float32):
-            return cuda.token_inference(
-                single, cond, pair.contiguous(), mask, weights, qk, eq, ek, heads, extra, variant
-            )
+            return cuda.token_inference(single, cond, pair.contiguous(), mask, weights, qk, eq, ek, heads, extra, variant)
     # Off H100 the runner with the hand-CUDA rows / SwiGLU GEMM / attention cores of the card (it degrades to the Triton hooks where
     # the card has none).
     else:
@@ -376,9 +362,7 @@ def _infer(
 
     def build():
         block = SimpleNamespace()
-        for path, weight in zip(
-            WEIGHTS + (QK_WEIGHTS if qk else ()), weights, strict=True
-        ):
+        for path, weight in zip(WEIGHTS + (QK_WEIGHTS if qk else ()), weights, strict=True):
             node = block
             names = path.split(".")
             for name in names[:-1]:
@@ -413,9 +397,7 @@ def _infer(
         # LayerNorm over L^2 pair rows + a projection, ~40 % of a call at L = 768) is computed once per sample. Keyed by
         # the caller's pair / mask tensors (pointer, version, layout): a new pair, or an in-place change of it, misses.
         # Scoped as the pack: a capture computes the bias once (recorded), so each replay recomputes it from the pair it has.
-        assert (
-            mask is not None
-        )  # off sm_90 ``update`` fills a missing mask with all-True
+        assert mask is not None  # off sm_90 ``update`` fills a missing mask with all-True
         pinned = (pair, mask)  # the cache entry below keeps the caller's tensors alive
         bkey = _capture.scoped(
             (
@@ -432,13 +414,9 @@ def _infer(
         if bkey is not None and hit is not None and hit[0] == bkey:
             bias = hit[1]
         else:
-            if (
-                L8 != L
-            ):  # padded keys: zero pair rows / columns, masked out of every softmax
+            if L8 != L:  # padded keys: zero pair rows / columns, masked out of every softmax
                 pair = torch.nn.functional.pad(pair, (0, 0, 0, L8 - L, 0, L8 - L))
-                mask = torch.nn.functional.pad(
-                    mask.to(torch.bool), (0, L8 - L), value=False
-                )
+                mask = torch.nn.functional.pad(mask.to(torch.bool), (0, L8 - L), value=False)
             bias = runner.hoist(pair.contiguous(), mask)
             if bkey is not None:
                 runner.__dict__["_bias_cache"] = (bkey, bias, pinned)  # (an attribute of this cache, not of the runner class)
@@ -461,23 +439,15 @@ def update(module, single, cond, pair, mask, extra=None):
     if (
         _native_fp32_inference(module, single)
         and mask is not None
-        and (
-            mask.dtype is not torch.bool
-            or mask.device != single.device
-            or tuple(mask.shape) != (1, single.shape[2])
-        )
+        and (mask.dtype is not torch.bool or mask.device != single.device or tuple(mask.shape) != (1, single.shape[2]))
     ):
-        raise ValueError(
-            "Hopper FP32 token inference requires a boolean [1,L] key mask"
-        )
+        raise ValueError("Hopper FP32 token inference requires a boolean [1,L] key mask")
     if mask is None and torch.cuda.get_device_capability(single.device) != (9, 0):
         # The native Hopper path accepts None without an ATen mask fill.
         k = (single.shape[2], single.device)
         mask = _ALL_TRUE.get(k)
         if mask is None:
-            mask = _ALL_TRUE[k] = torch.ones(
-                (1, single.shape[2]), device=single.device, dtype=torch.bool
-            )
+            mask = _ALL_TRUE[k] = torch.ones((1, single.shape[2]), device=single.device, dtype=torch.bool)
     # the pair as the caller holds it: _infer keys its pair-bias cache on this tensor and makes it contiguous on a miss
     a = module.attention
     qk = bool(a.use_qk_norm)

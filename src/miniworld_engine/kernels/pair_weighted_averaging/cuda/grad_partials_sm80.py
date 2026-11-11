@@ -37,9 +37,7 @@ def glue(m, dres, o, lnw, lnb, wg, wo, keep, eps, dscale, tuned):
             2 if False else 1,
         )
     else:
-        sm80.ext().glue(
-            m, dres, o, lnw, lnb, wg, wo, keep_tensor, do, dgp, partial, eps, dscale
-        )
+        sm80.ext().glue(m, dres, o, lnw, lnb, wg, wo, keep_tensor, do, dgp, partial, eps, dscale)
     return do, dgp, partial.view(rows, -1)
 
 

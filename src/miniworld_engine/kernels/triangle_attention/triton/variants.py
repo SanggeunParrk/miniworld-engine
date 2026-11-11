@@ -15,6 +15,7 @@ PyTorch statements, ``TriangleAttention._biased_reference``, build it in fp32). 
 Every projection is a cuBLAS GEMM with its bias in the epilogue; gradients flow through autograd (the core and the gated product carry
 their own backward kernels). bf16 activations (the core's contract), bf16 or fp32 master parameters (cast inside); the caller checks :func:`refusal` first.
 """
+
 from __future__ import annotations
 
 import torch
@@ -50,10 +51,26 @@ def refusal(pair: torch.Tensor, weights: tuple[torch.Tensor, ...], n_head: int, 
 
 
 def triton_triangle_attention_variant(
-    pair: torch.Tensor, mask: torch.Tensor | None, ln_weight: torch.Tensor, ln_bias: torch.Tensor, w_query: torch.Tensor,
-    w_key: torch.Tensor, w_value: torch.Tensor, w_bias: torch.Tensor, w_gate: torch.Tensor, b_gate: torch.Tensor | None,
-    w_out: torch.Tensor, b_out: torch.Tensor | None, w_out_t: torch.Tensor | None = None, b_out_t: torch.Tensor | None = None, *,
-    n_head: int, starting: bool = True, transposed_bias: bool = True, untransposed_output: bool = False, dual_output: bool = False,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    ln_weight: torch.Tensor,
+    ln_bias: torch.Tensor,
+    w_query: torch.Tensor,
+    w_key: torch.Tensor,
+    w_value: torch.Tensor,
+    w_bias: torch.Tensor,
+    w_gate: torch.Tensor,
+    b_gate: torch.Tensor | None,
+    w_out: torch.Tensor,
+    b_out: torch.Tensor | None,
+    w_out_t: torch.Tensor | None = None,
+    b_out_t: torch.Tensor | None = None,
+    *,
+    n_head: int,
+    starting: bool = True,
+    transposed_bias: bool = True,
+    untransposed_output: bool = False,
+    dual_output: bool = False,
     eps: float = 1e-5,
 ) -> torch.Tensor:
     """The triangle-attention update (no residual, no dropout), differentiable. pair [B, L, L, C] bf16, mask [B, L] bool over keys."""
@@ -63,12 +80,18 @@ def triton_triangle_attention_variant(
 
     # fp32 master parameters under bf16 activations (the mixed-precision layout): the products run in the activation dtype, the casts are
     # autograd ops, so every gradient comes back in the master dtype (bf16 parameters pass through unchanged). The norm affine stays fp32.
-    cast = lambda w: None if w is None else w.to(pair.dtype)   # noqa: E731
+    cast = lambda w: None if w is None else w.to(pair.dtype)  # noqa: E731
     w_query, w_key, w_value, w_bias, w_gate, b_gate, w_out, b_out, w_out_t, b_out_t = (
-        cast(w) for w in (w_query, w_key, w_value, w_bias, w_gate, b_gate, w_out, b_out, w_out_t, b_out_t))
+        cast(w) for w in (w_query, w_key, w_value, w_bias, w_gate, b_gate, w_out, b_out, w_out_t, b_out_t)
+    )
 
-    x = triton_layernorm(pair, ln_weight, ln_bias, eps) if L >= 384 else F.layer_norm(  # 384: launch-overhead crossover (old bias_only_attention KERNEL_MIN_L)
-        pair.float(), (pair.shape[-1],), ln_weight, ln_bias, eps).to(pair.dtype)     # the affine is fp32; short sequences: torch's
+    x = (
+        triton_layernorm(pair, ln_weight, ln_bias, eps)
+        if L >= 384
+        else F.layer_norm(  # 384: launch-overhead crossover (old bias_only_attention KERNEL_MIN_L)
+            pair.float(), (pair.shape[-1],), ln_weight, ln_bias, eps
+        ).to(pair.dtype)
+    )  # the affine is fp32; short sequences: torch's
     xt = x if starting else x.transpose(1, 2).contiguous()
     bias = rearrange(F.linear(x if (starting or not transposed_bias) else xt, w_bias), "B L L2 H -> B H L L2")
     if mask is not None:

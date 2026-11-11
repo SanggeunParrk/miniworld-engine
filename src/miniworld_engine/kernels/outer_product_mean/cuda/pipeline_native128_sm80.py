@@ -27,9 +27,7 @@ def _ext():
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
         ],
         extra_cflags=["-O3", "-std=c++17"],
-        extra_ldflags=[
-            "-lcublasLt"
-        ],  # the searched explicit GEMM algorithms (opm_lt_gemm.cuh)
+        extra_ldflags=["-lcublasLt"],  # the searched explicit GEMM algorithms (opm_lt_gemm.cuh)
         verbose=False,
     )
 

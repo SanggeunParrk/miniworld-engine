@@ -20,8 +20,8 @@ import torch.nn.functional as F
 from miniworld_engine.modules.primitives import BackendModule, key_mask, random_input, wide
 
 D_PAIR = 256
-N_ROWS_GEOM = 317   # 127 sequence separations | 4 x 21 distances | 5 x 21 angles | 1 chain product
-N_ROWS_CA = 157     # 127 sequence separations | 30 CA distances
+N_ROWS_GEOM = 317  # 127 sequence separations | 4 x 21 distances | 5 x 21 angles | 1 chain product
+N_ROWS_CA = 157  # 127 sequence separations | 30 CA distances
 
 
 def _cuda_arch(device: torch.device) -> str | None:
@@ -94,13 +94,24 @@ class PairEmbedAdaLN(BackendModule):
         LayerNorms and the adaptive scale in one kernel; a bitwise deterministic backward), at most 220 table rows (``n_sep + n_xt + n_sc``).
         ``"triton"``: the portable Triton kernels (``kernels/pair_embed_adaln/triton``), any CUDA card. Both pack each bin into 8 bits (every ``n_*`` <= 255).
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: the sm_80 build of the H100 kernels
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: the sm_80 build of the H100 kernels
 
     backends = ("pytorch", "cuda", "triton")
 
-    def __init__(self, *, n_sep: int = 127, n_xt: int = 30, n_sc: int = 30, xt_range: tuple[float, float] = (0.1, 3.0),
-                 sc_range: tuple[float, float] = (0.1, 3.0), eps1: float = 1e-5, eps2: float = 1e-5, backend: str = "pytorch") -> None:
+    def __init__(
+        self,
+        *,
+        n_sep: int = 127,
+        n_xt: int = 30,
+        n_sc: int = 30,
+        xt_range: tuple[float, float] = (0.1, 3.0),
+        sc_range: tuple[float, float] = (0.1, 3.0),
+        eps1: float = 1e-5,
+        eps2: float = 1e-5,
+        backend: str = "pytorch",
+    ) -> None:
         super().__init__()
         self.n_sep, self.n_xt, self.n_sc = n_sep, n_xt, n_sc
         self.xt_range, self.sc_range = cast("tuple[float, float]", tuple(xt_range)), cast("tuple[float, float]", tuple(sc_range))
@@ -124,8 +135,11 @@ class PairEmbedAdaLN(BackendModule):
             return torch.norm(x[:, :, None, :] - x[:, None, :, :], dim=-1)
 
         feats.append(_one_hot(dist(xt), torch.linspace(*self.xt_range, self.n_xt - 1, device=dev, dtype=dt)))
-        feats.append(_one_hot(dist(sc), torch.linspace(*self.sc_range, self.n_sc - 1, device=dev, dtype=dt)) if sc is not None
-                     else torch.zeros_like(feats[1][..., : self.n_sc]))
+        feats.append(
+            _one_hot(dist(sc), torch.linspace(*self.sc_range, self.n_sc - 1, device=dev, dtype=dt))
+            if sc is not None
+            else torch.zeros_like(feats[1][..., : self.n_sc])
+        )
         h = F.linear(torch.cat(feats, -1) * pm, self.weight.to(dt))
         h = F.layer_norm(h, (D_PAIR,), self.ln_weight.to(dt), self.ln_bias.to(dt), self.eps1) * pm
         y = F.layer_norm(h, (D_PAIR,), None, None, self.eps2)
@@ -160,7 +174,9 @@ class PairEmbedAdaLN(BackendModule):
         return None
 
     def _supports_cuda(self, xt, sc, residue_idx, mask, gamma, beta) -> str | None:
-        why = _first(self._supports_kernels(xt, sc, residue_idx, mask, gamma, beta), _cuda_arch(xt.device) if xt.device.type == "cuda" else None)
+        why = _first(
+            self._supports_kernels(xt, sc, residue_idx, mask, gamma, beta), _cuda_arch(xt.device) if xt.device.type == "cuda" else None
+        )
         if why is not None:
             return why
         if self.n_sep + self.n_xt + self.n_sc > 220:
@@ -174,10 +190,24 @@ class PairEmbedAdaLN(BackendModule):
         """The kernels' inputs: the table W^T fp32, the affine, gamma / beta, fp32 coordinates, int32 indices, uint8 mask, the bin limits and the sizes."""
         dev = xt.device
         xt32 = xt.float().contiguous()
-        return (self.weight.t().contiguous(), self.ln_weight, self.ln_bias, gamma, beta, xt32, (sc if sc is not None else xt).float().contiguous(),
-                residue_idx.to(torch.int32).contiguous(), mask.to(torch.uint8).contiguous(),
-                torch.linspace(*self.xt_range, self.n_xt - 1, device=dev), torch.linspace(*self.sc_range, self.n_sc - 1, device=dev),
-                int(sc is not None), self.n_sep, self.n_xt, self.eps1, self.eps2)
+        return (
+            self.weight.t().contiguous(),
+            self.ln_weight,
+            self.ln_bias,
+            gamma,
+            beta,
+            xt32,
+            (sc if sc is not None else xt).float().contiguous(),
+            residue_idx.to(torch.int32).contiguous(),
+            mask.to(torch.uint8).contiguous(),
+            torch.linspace(*self.xt_range, self.n_xt - 1, device=dev),
+            torch.linspace(*self.sc_range, self.n_sc - 1, device=dev),
+            int(sc is not None),
+            self.n_sep,
+            self.n_xt,
+            self.eps1,
+            self.eps2,
+        )
 
     def _forward_cuda(self, xt, sc, residue_idx, mask, gamma, beta):
         from miniworld_engine.kernels.pair_embed_adaln.cuda.function import pair_embed_adaln_cuda
@@ -226,8 +256,16 @@ def _geom_features(bb, ca_mask, has_cb, mask, residue_idx, chains) -> torch.Tens
     def p2(v):
         return v[:, None, :]
 
-    ang = torch.stack([_dihedral(p1(n_), p1(ca), p1(cb), p2(cb)), _dihedral(p2(n_), p2(ca), p2(cb), p1(cb)), _bond(p1(ca), p1(cb), p2(cb)),
-                       _bond(p2(ca), p2(cb), p1(cb)), _dihedral(p1(ca), p1(cb), p2(cb), p2(ca))], -1)
+    ang = torch.stack(
+        [
+            _dihedral(p1(n_), p1(ca), p1(cb), p2(cb)),
+            _dihedral(p2(n_), p2(ca), p2(cb), p1(cb)),
+            _bond(p1(ca), p1(cb), p2(cb)),
+            _bond(p2(ca), p2(cb), p1(cb)),
+            _dihedral(p1(ca), p1(cb), p2(cb), p2(ca)),
+        ],
+        -1,
+    )
     feats_ang = _one_hot(ang, torch.linspace(-math.pi, math.pi, 20, device=dev, dtype=dt)).flatten(-2)
     feats_dist = torch.cat(feats[1:], -1) * pm[..., None]
     feats_ang = feats_ang * (pm * has_cb[:, :, None].to(dt))[..., None]
@@ -262,8 +300,9 @@ class PairEmbedGeom(BackendModule):
         table rows, the LayerNorm folded in, a tensor-core table gradient). ``"triton"``: the portable Triton kernels, any CUDA card. Both read ``bb`` in
         fp32 or bf16 (computed in fp32).
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: the sm_80 build of the H100 kernels
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: the sm_80 build of the H100 kernels
 
     backends = ("pytorch", "cuda", "triton")
     rows = N_ROWS_GEOM
@@ -276,7 +315,9 @@ class PairEmbedGeom(BackendModule):
 
     def _forward_pytorch(self, bb, ca_mask, has_cb, mask, residue_idx, chains):
         dt = wide(self.weight, bb)
-        with torch.autocast("cuda", enabled=False):   # the geometry (cross products, angles) is computed in fp32 whatever the caller's autocast
+        with torch.autocast(
+            "cuda", enabled=False
+        ):  # the geometry (cross products, angles) is computed in fp32 whatever the caller's autocast
             f = _geom_features(bb.to(dt), ca_mask, has_cb, mask, residue_idx, chains)
             pair = F.linear(f, self.weight.to(torch.bfloat16).to(dt)) * _pair_mask(mask, dt)[..., None]
         return _layer_norm(_out(pair), self.ln_eps)
@@ -308,7 +349,10 @@ class PairEmbedGeom(BackendModule):
         return None
 
     def _supports_cuda(self, bb, ca_mask, has_cb, mask, residue_idx, chains) -> str | None:
-        return _first(self._supports_kernels(bb, ca_mask, has_cb, mask, residue_idx, chains), _cuda_arch(bb.device) if bb.device.type == "cuda" else None)
+        return _first(
+            self._supports_kernels(bb, ca_mask, has_cb, mask, residue_idx, chains),
+            _cuda_arch(bb.device) if bb.device.type == "cuda" else None,
+        )
 
     def _supports_triton(self, bb, ca_mask, has_cb, mask, residue_idx, chains) -> str | None:
         return self._supports_kernels(bb, ca_mask, has_cb, mask, residue_idx, chains)
@@ -317,10 +361,19 @@ class PairEmbedGeom(BackendModule):
         """The kernels' inputs: the bf16 table W^T, fp32 coordinates, uint8 masks, int32 indices, the bin limits, the LayerNorm eps (-1: none), train."""
         dev = bb.device
         train = torch.is_grad_enabled() and self.weight.requires_grad
-        return (_table(self.weight, train), bb.float().contiguous(), ca_mask.to(torch.uint8).contiguous(), has_cb.to(torch.uint8).contiguous(),
-                mask.to(torch.uint8).contiguous(), residue_idx.to(torch.int32).contiguous(), chains.to(torch.int32).contiguous(),
-                torch.linspace(0.1, 2, 20, device=dev), torch.linspace(-torch.pi, torch.pi, 20, device=dev),
-                -1.0 if self.ln_eps is None else float(self.ln_eps), train)
+        return (
+            _table(self.weight, train),
+            bb.float().contiguous(),
+            ca_mask.to(torch.uint8).contiguous(),
+            has_cb.to(torch.uint8).contiguous(),
+            mask.to(torch.uint8).contiguous(),
+            residue_idx.to(torch.int32).contiguous(),
+            chains.to(torch.int32).contiguous(),
+            torch.linspace(0.1, 2, 20, device=dev),
+            torch.linspace(-torch.pi, torch.pi, 20, device=dev),
+            -1.0 if self.ln_eps is None else float(self.ln_eps),
+            train,
+        )
 
     def _forward_cuda(self, bb, ca_mask, has_cb, mask, residue_idx, chains):
         from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_geom_cuda
@@ -357,8 +410,9 @@ class PairEmbedCA(BackendModule):
         See :class:`BackendModule`. ``"cuda"`` (H100 sm_90a; A100 sm_80: the same source's sm_80 build): the decoder-pair entry points of the same CUDA extension as :class:`PairEmbedGeom`.
         ``"triton"``: the portable Triton kernels, any CUDA card.
     """
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}   # 2026-11-10: the sm_80 build of the H100 kernels
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: the sm_80 build of the H100 kernels
 
     backends = ("pytorch", "cuda", "triton")
     rows = N_ROWS_CA
@@ -377,8 +431,16 @@ class PairEmbedCA(BackendModule):
         sep = (idx[:, :, None] - idx[:, None, :]).to(dt)
         ca = ca.to(dt)
         d = torch.norm(ca[:, :, None, :] - ca[:, None, :, :], dim=-1)
-        f = torch.cat([_one_hot(sep, torch.linspace(-62.5, 62.5, 126, device=dev, dtype=dt)),
-                       _one_hot(d, torch.linspace(0.1, 3.0, 29, device=dev, dtype=dt))], -1) * _pair_mask(mask, dt)[..., None]
+        f = (
+            torch.cat(
+                [
+                    _one_hot(sep, torch.linspace(-62.5, 62.5, 126, device=dev, dtype=dt)),
+                    _one_hot(d, torch.linspace(0.1, 3.0, 29, device=dev, dtype=dt)),
+                ],
+                -1,
+            )
+            * _pair_mask(mask, dt)[..., None]
+        )
         pair = F.linear(f, self.weight.to(torch.bfloat16).to(dt)) * _pair_mask(mask, dt)[..., None]
         return _layer_norm(_out(pair), self.ln_eps)
 
@@ -396,7 +458,12 @@ class PairEmbedCA(BackendModule):
             return "the kernels run on CUDA tensors only"
         if self.weight.dtype not in (torch.float32, torch.bfloat16) or ca.dtype not in (torch.float32, torch.bfloat16):
             return "weight and ca must be fp32 or bf16 (the kernels compute in fp32)"
-        if ca.dim() != 3 or ca.shape[-1] != 3 or mask.shape != ca.shape[:2] or (residue_idx is not None and residue_idx.shape != mask.shape):
+        if (
+            ca.dim() != 3
+            or ca.shape[-1] != 3
+            or mask.shape != ca.shape[:2]
+            or (residue_idx is not None and residue_idx.shape != mask.shape)
+        ):
             return "ca must be [B, n, 3] and mask / residue_idx [B, n]"
         if ca.numel() == 0:
             return "empty input"
@@ -413,11 +480,21 @@ class PairEmbedCA(BackendModule):
         dev = ca.device
         b, n = mask.shape
         train = torch.is_grad_enabled() and self.weight.requires_grad
-        idx = (residue_idx.to(torch.int32).contiguous() if residue_idx is not None
-               else torch.arange(1, n + 1, device=dev, dtype=torch.int32).expand(b, n).contiguous())
+        idx = (
+            residue_idx.to(torch.int32).contiguous()
+            if residue_idx is not None
+            else torch.arange(1, n + 1, device=dev, dtype=torch.int32).expand(b, n).contiguous()
+        )
         m8 = mask.contiguous().view(torch.uint8) if mask.dtype is torch.bool else mask.to(torch.uint8).contiguous()
-        return (_table(self.weight, train), ca.float().contiguous(), m8, idx, torch.linspace(0.1, 3.0, 29, device=dev),
-                -1.0 if self.ln_eps is None else float(self.ln_eps), train)
+        return (
+            _table(self.weight, train),
+            ca.float().contiguous(),
+            m8,
+            idx,
+            torch.linspace(0.1, 3.0, 29, device=dev),
+            -1.0 if self.ln_eps is None else float(self.ln_eps),
+            train,
+        )
 
     def _forward_cuda(self, ca, mask, residue_idx=None):
         from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_ca_cuda

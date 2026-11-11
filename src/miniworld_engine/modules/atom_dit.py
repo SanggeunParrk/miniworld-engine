@@ -105,8 +105,9 @@ class _A100View:
 
 
 def _needs_grad(module: nn.Module, *tensors) -> bool:
-    return torch.is_grad_enabled() and (any(p.requires_grad for p in module.parameters())
-                                        or any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors))
+    return torch.is_grad_enabled() and (
+        any(p.requires_grad for p in module.parameters()) or any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
+    )
 
 
 def windows(n: int) -> int:
@@ -179,7 +180,7 @@ class _LocalAtomDiT(BackendModule):
     """
 
     backends = ("pytorch", "anthropic", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2}   # 2026-11-10: kits; sm_80 paths
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 2}  # 2026-11-10: kits; sm_80 paths
 
     #: The default of the constructor's ``key_window``: one of :data:`KEY_WINDOWS` (see the module docstring).
     key_window: str = "slide"
@@ -191,8 +192,17 @@ class _LocalAtomDiT(BackendModule):
     attention_part: type[AugmentedAttentionPairBias] = AugmentedAttentionPairBias
     transition_part: type[ConditionedTransition] = ConditionedTransition
 
-    def __init__(self, d_single: int = 128, d_cond: int = 128, d_pair: int = 16, n_head: int = 4, n: int = 2, *,
-                 key_window: str | None = None, backend: str = "pytorch") -> None:
+    def __init__(
+        self,
+        d_single: int = 128,
+        d_cond: int = 128,
+        d_pair: int = 16,
+        n_head: int = 4,
+        n: int = 2,
+        *,
+        key_window: str | None = None,
+        backend: str = "pytorch",
+    ) -> None:
         super().__init__()
         if key_window is not None:
             if key_window not in KEY_WINDOWS:
@@ -238,7 +248,7 @@ class _LocalAtomDiT(BackendModule):
         keep = torch.ones(b, n, device=x.device) if mask is None else mask.float()
         gathered = self.key_window != "pad"
         if gathered:
-            key_pos = _window_positions(self.key_window, keep, nwin, keys)                           # [B, nwin, keys]
+            key_pos = _window_positions(self.key_window, keep, nwin, keys)  # [B, nwin, keys]
             kw = _gather_windows(k, key_pos).reshape(a, b, nwin, keys, h, d)
             vw = _gather_windows(v, key_pos).reshape(a, b, nwin, keys, h, d)
         else:
@@ -251,16 +261,17 @@ class _LocalAtomDiT(BackendModule):
             # reach into padding: the key mask turns those keys off
             valid = _gather_windows(keep[None, ..., None], key_pos)[0, ..., 0] > 0
         else:
-            valid = _key_windows(keep[..., None], n, keys=keys)[..., 0] > 0                # [B, nwin, keys]
-            key_pos = (torch.arange(nwin, device=x.device)[:, None] * QUERIES - (keys - QUERIES) // 2
-                       + torch.arange(keys, device=x.device))[None].expand(b, -1, -1)
-        valid = valid[:, :, None, :]                                                               # [B, nwin, 1, keys]
-        if uid is not None:   # a real query sees only the keys of its own conformer (a padding query: every valid key)
+            valid = _key_windows(keep[..., None], n, keys=keys)[..., 0] > 0  # [B, nwin, keys]
+            key_pos = (
+                torch.arange(nwin, device=x.device)[:, None] * QUERIES - (keys - QUERIES) // 2 + torch.arange(keys, device=x.device)
+            )[None].expand(b, -1, -1)
+        valid = valid[:, :, None, :]  # [B, nwin, 1, keys]
+        if uid is not None:  # a real query sees only the keys of its own conformer (a padding query: every valid key)
             pad = nwin * QUERIES - n
             uid_k = torch.gather(uid, 1, key_pos.clamp(0, n - 1).reshape(b, -1)).view(b, nwin, 1, keys)
             uid_q = F.pad(uid, (0, pad)).view(b, nwin, QUERIES, 1)
             real_q = F.pad(keep, (0, pad)).view(b, nwin, QUERIES, 1) > 0
-            valid = valid & ((uid_q == uid_k) | ~real_q)                                           # [B, nwin, 32, keys]
+            valid = valid & ((uid_q == uid_k) | ~real_q)  # [B, nwin, 32, keys]
         scores = scores.masked_fill(~valid[None, :, None], float("-inf"))
         probs = torch.nan_to_num(torch.softmax(scores, dim=-1))
         with torch.autocast(device_type=x.device.type, enabled=False):
@@ -349,8 +360,10 @@ class _LocalAtomDiT(BackendModule):
         from miniworld_engine.kernels.integrations import local_dit_h100
 
         if local_dit_h100.options(self) is None:
-            return ("outside the H100 atom block's options (local_dit_h100.options: mixed AdaLN forms or epsilons, a per-head q / k norm, "
-                    "an up-gate weight other than [256, 128] without bias, ...)")
+            return (
+                "outside the H100 atom block's options (local_dit_h100.options: mixed AdaLN forms or epsilons, a per-head q / k norm, "
+                "an up-gate weight other than [256, 128] without bias, ...)"
+            )
         if uid is not None and (uid.ndim != 2 or tuple(uid.shape) != (1, single.shape[2])):
             return f"uid must be [1, N], got {tuple(uid.shape)}"
         att, tr = self.attention, self.transition
@@ -375,8 +388,14 @@ class _LocalAtomDiT(BackendModule):
             return f"pair must be [1, {windows(n)}, {QUERIES}, {KEYS}, 16], got {tuple(pair.shape)}"
         if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != (1, n)):
             return "mask must be a bool [1, N] key mask"
-        geometry = (att.n_head, att.to_query.weight.shape[0], att.to_query.weight.shape[1], att.to_bias.weight.shape[1],
-                    tr.expand_a.weight.shape[0], tr.d_cond)
+        geometry = (
+            att.n_head,
+            att.to_query.weight.shape[0],
+            att.to_query.weight.shape[1],
+            att.to_bias.weight.shape[1],
+            tr.expand_a.weight.shape[0],
+            tr.d_cond,
+        )
         if geometry != (4, 128, 128, 16, 256, 128):
             return "geometry: the kernels are built for 128 / cond 128 / pair 16, 4 heads x 32, transition n = 2"
         if att.ln_pair.eps != 1e-5:
@@ -395,26 +414,39 @@ class _LocalAtomDiT(BackendModule):
     def _a100_rows(self, single, cond, pair, mask) -> bool:
         from miniworld_engine.kernels.integrations import local_dit_sm80_block
 
-        return (self.kv_norm == "chained" and self.key_window == "pad" and (single.dtype, cond.dtype, pair.dtype) == (_BF, _BF, _BF)
-                and not (torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") != _BF)
-                and local_dit_sm80_block.serves(_A100View(self), single, cond, pair, mask))
+        return (
+            self.kv_norm == "chained"
+            and self.key_window == "pad"
+            and (single.dtype, cond.dtype, pair.dtype) == (_BF, _BF, _BF)
+            and not (torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") != _BF)
+            and local_dit_sm80_block.serves(_A100View(self), single, cond, pair, mask)
+        )
 
     def _a100_reason(self, single, cond, pair, mask) -> str | None:
         if self._a100_rows(single, cond, pair, mask):
             return None
         fn, why = VariantAtomCuda._atom_serving(cast(VariantAtomCuda, self), single, cond, pair, mask, None)
         return None if fn is not None else why
+
     def _forward_cuda(self, single, cond, pair, mask=None, uid=None):
         if _a100(single):
             if not self._a100_rows(single, cond, pair, mask):
                 from miniworld_engine.modules import dit_variant_cuda as dv
 
                 fn, call = VariantAtomCuda._atom_serving(cast(VariantAtomCuda, self), single, cond, pair, mask, None)
-                return dv._run(fn, dv._stack(self, atom=True), single, cond, call, wants_grad=dv._wants_grad(self, single, cond, pair),
-                               keep_autocast=True, per_sample=True)
+                return dv._run(
+                    fn,
+                    dv._stack(self, atom=True),
+                    single,
+                    cond,
+                    call,
+                    wants_grad=dv._wants_grad(self, single, cond, pair),
+                    keep_autocast=True,
+                    per_sample=True,
+                )
             from miniworld_engine.kernels.integrations import local_dit_sm80_block
 
-            with torch.autocast("cuda", enabled=False):   # the kernels run on bf16 packs of their own
+            with torch.autocast("cuda", enabled=False):  # the kernels run on bf16 packs of their own
                 return local_dit_sm80_block.block(_A100View(self), single, cond, pair, mask)
         from miniworld_engine.kernels.integrations import local_dit_h100
 
@@ -422,8 +454,9 @@ class _LocalAtomDiT(BackendModule):
             cond = cond.contiguous()
         # the kernels' precision is their own (bf16 operands, or TF32 for fp32): an enclosing autocast must not recast their torch glue
         with torch.autocast("cuda", enabled=False):
-            return local_dit_h100.run_block(self, single.contiguous(), cond, pair.contiguous(),
-                                            None if mask is None else mask.contiguous(), uid)
+            return local_dit_h100.run_block(
+                self, single.contiguous(), cond, pair.contiguous(), None if mask is None else mask.contiguous(), uid
+            )
 
     def _forward_pytorch(self, single, cond, pair, mask=None):
         """``single`` [A, B, N, d_single], ``cond`` [A, B, N, d_cond], trunked ``pair`` [B, nwin, 32, keys, d_pair], key ``mask`` [B, N]
@@ -434,10 +467,12 @@ class _LocalAtomDiT(BackendModule):
         """``single`` / ``cond`` [S, 1, N, d] (S samples on the augmentation axis), the trunked ``pair`` [1, nwin, 32, 128, d_pair], the key
         ``mask`` [1, N] (real atoms first)."""
         d_single, d_cond, d_pair = self.transition.d_hidden, self.transition.d_cond, self.attention.ln_pair.normalized_shape[0]
-        return {"single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
-                "cond": random_input((samples, 1, length, d_cond), dtype=dtype, device=device, generator=generator),
-                "pair": random_input((1, windows(length), QUERIES, KEYS, d_pair), dtype=dtype, device=device, generator=generator),
-                "mask": key_mask(1, length, device=device, pad=QUERIES - 8)}   # padding inside the last query window
+        return {
+            "single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
+            "cond": random_input((samples, 1, length, d_cond), dtype=dtype, device=device, generator=generator),
+            "pair": random_input((1, windows(length), QUERIES, KEYS, d_pair), dtype=dtype, device=device, generator=generator),
+            "mask": key_mask(1, length, device=device, pad=QUERIES - 8),
+        }  # padding inside the last query window
 
     # ------------------------------------------------------------------------------------------------------------ "anthropic"
     # Each class on its own model kit's atom attention (the ops start at the model's q / k / v, computed here, except the OF3 island):
@@ -467,8 +502,19 @@ class _LocalAtomDiT(BackendModule):
         h, c = self.attention.n_head, single.shape[-1]
         cc = tuple(torch.cuda.get_device_capability(single.device))
         dt = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else single.dtype
-        return _anthropic.kernel_selection(provider, cc, dt, self._PROVIDER_CELL, max(1, single.shape[2] // 8), word="fast",
-                                           samples=int(single.shape[0]), timing="graphed", capture=True, head_dim=c // h, heads=h)
+        return _anthropic.kernel_selection(
+            provider,
+            cc,
+            dt,
+            self._PROVIDER_CELL,
+            max(1, single.shape[2] // 8),
+            word="fast",
+            samples=int(single.shape[0]),
+            timing="graphed",
+            capture=True,
+            head_dim=c // h,
+            heads=h,
+        )
 
     def _release_range(self, single, cond, pair, mask) -> str | None:
         """The class's own limits (the dtypes and windows its release ops serve)."""
@@ -489,8 +535,9 @@ class _LocalAtomDiT(BackendModule):
             return f"{', '.join(kw)} (not an input of the release op)"
         if torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") != torch.bfloat16:
             return "autocast to a dtype other than bfloat16"
-        if torch.is_grad_enabled() and (any(p.requires_grad for p in self.parameters())
-                                        or any(t is not None and t.requires_grad for t in (single, cond, pair))):
+        if torch.is_grad_enabled() and (
+            any(p.requires_grad for p in self.parameters()) or any(t is not None and t.requires_grad for t in (single, cond, pair))
+        ):
             return "the release op has no backward: call it under torch.no_grad() / inference_mode() (eval only)"
         h, c = self.attention.n_head, single.shape[-1]
         if c > 128 or c // h not in (16, 32, 64):
@@ -511,7 +558,7 @@ class _LocalAtomDiT(BackendModule):
             if self.key_window != "pad" and int(n_real.min()) < KEYS:
                 return f"fewer than {KEYS} real atoms (the release's window start goes negative there, the engine's clamps at 0)"
         if self.key_window == "pad":
-            seen = _key_windows(keep[..., None].float(), n)[..., 0].amax(-1)                  # [B, nwin]: a valid key in the window
+            seen = _key_windows(keep[..., None].float(), n)[..., 0].amax(-1)  # [B, nwin]: a valid key in the window
             if not bool((seen > 0).all()):
                 return "a query window with no valid key (the release ops average such a window, the reference gives 0)"
         return None
@@ -538,14 +585,25 @@ class _LocalAtomDiT(BackendModule):
         h = att.n_head
         d = c // h
         keep = torch.ones(b, n, device=x.device) if mask is None else mask.float()
-        valid = _key_windows(keep[..., None], n)[..., 0] > 0                                         # [B, nwin, 128]
+        valid = _key_windows(keep[..., None], n)[..., 0] > 0  # [B, nwin, 128]
         o = torch.empty(a, b, n, c, dtype=q.dtype, device=x.device)
         for j in range(b):
-            bj = _dense_f32(bias[j])                                                                       # [H, nwin, 32, 128] fp32
+            bj = _dense_f32(bias[j])  # [H, nwin, 32, 128] fp32
             bj.masked_fill_(~valid[j][None, :, None, :], float("-inf"))
-            oj, _ = provider.atom_attention(q[:, j].unflatten(-1, (h, d)), k[:, j].unflatten(-1, (h, d)), v[:, j].unflatten(-1, (h, d)), bj,
-                                            g[:, j].unflatten(-1, (h, d)), word="fast", selection=sel, n_queries=QUERIES, n_keys=KEYS,
-                                            scale=d ** -0.5, capture=True, out_dtype=q.dtype)
+            oj, _ = provider.atom_attention(
+                q[:, j].unflatten(-1, (h, d)),
+                k[:, j].unflatten(-1, (h, d)),
+                v[:, j].unflatten(-1, (h, d)),
+                bj,
+                g[:, j].unflatten(-1, (h, d)),
+                word="fast",
+                selection=sel,
+                n_queries=QUERIES,
+                n_keys=KEYS,
+                scale=d**-0.5,
+                capture=True,
+                out_dtype=q.dtype,
+            )
             o[:, j] = oj.reshape(a, n, c)
         return single + self._out_gate(cond, att.to_out(o))
 
@@ -556,40 +614,67 @@ class _LocalAtomDiT(BackendModule):
         precision = "tf32rn" if torch.backends.cuda.matmul.allow_tf32 else "ieee"
         in_dtype = single.dtype
         with torch.autocast("cuda", enabled=False):
-            s32, c32 = single.float(), cond.float()   # the pair stays in its dtype: its bias is formed as the reference forms it
+            s32, c32 = single.float(), cond.float()  # the pair stays in its dtype: its bias is formed as the reference forms it
             a, b, n, c = s32.shape
             h = att.n_head
             d = c // h
             fused = self.kv_norm == "parallel" and att.ada_ln_in.ln_in.eps == att.ada_ln_kv.ln_in.eps
-            if fused:   # OpenFold3: the conditioning of both AdaLNs per atom, ln_qkvg does the rest
+            if fused:  # OpenFold3: the conditioning of both AdaLNs per atom, ln_qkvg does the rest
                 cq, ck = att.ada_ln_in.ln_cond(c32), att.ada_ln_kv.ln_cond(c32)
-                cond_rows = (torch.sigmoid(att.ada_ln_in.to_scale(cq)), att.ada_ln_in.to_bias(cq),
-                             torch.sigmoid(att.ada_ln_kv.to_scale(ck)), att.ada_ln_kv.to_bias(ck))
+                cond_rows = (
+                    torch.sigmoid(att.ada_ln_in.to_scale(cq)),
+                    att.ada_ln_in.to_bias(cq),
+                    torch.sigmoid(att.ada_ln_kv.to_scale(ck)),
+                    att.ada_ln_kv.to_bias(ck),
+                )
                 z = F.layer_norm(pair, (pair.shape[-1],), att.ln_pair.weight.to(pair.dtype), None, att.ln_pair.eps)
-                bias = F.linear(z, att.to_bias.weight.to(z.dtype)).permute(0, 4, 1, 2, 3)              # [B, H, nwin, 32, 128] view
-            else:       # Protenix (chained K / V AdaLN): the module's own q / k / v / gate statements
+                bias = F.linear(z, att.to_bias.weight.to(z.dtype)).permute(0, 4, 1, 2, 3)  # [B, H, nwin, 32, 128] view
+            else:  # Protenix (chained K / V AdaLN): the module's own q / k / v / gate statements
                 x, q, k, v, bias = self.attention_operands(s32, c32, pair)
-                qkvg_all = torch.cat([q * d ** -0.5, k, v, torch.sigmoid(att.to_gate(x))], -1)       # [A, B, N, 4 C]
-            planes = _dense_f32(bias.transpose(1, 2))                                                       # [B, nwin, H, 32, 128] fp32
-            zgate = torch.sigmoid(att.to_scale(c32))                                                  # the AdaLN-Zero gate [A, B, N, C]
+                qkvg_all = torch.cat([q * d**-0.5, k, v, torch.sigmoid(att.to_gate(x))], -1)  # [A, B, N, 4 C]
+            planes = _dense_f32(bias.transpose(1, 2))  # [B, nwin, H, 32, 128] fp32
+            zgate = torch.sigmoid(att.to_scale(c32))  # the AdaLN-Zero gate [A, B, N, C]
             ones = torch.ones(1, n, dtype=torch.float32, device=s32.device)
-            counts = (torch.full((b,), n, dtype=torch.int32, device=s32.device) if mask is None else mask.sum(-1, dtype=torch.int32))
+            counts = torch.full((b,), n, dtype=torch.int32, device=s32.device) if mask is None else mask.sum(-1, dtype=torch.int32)
             shared = a == 1 or (cond.stride(0) == 0)
             out = torch.empty(a, b, n, c, dtype=torch.float32, device=s32.device)
             for j in range(b):
-                n_real = counts[j:j + 1]
+                n_real = counts[j : j + 1]
                 ks = self._release_window_starts(n, n_real, s32.device)
                 groups = [slice(0, a)] if shared else [slice(i, i + 1) for i in range(a)]
                 for sl in groups:
                     i0 = sl.start
                     if fused:
                         rows = [t[i0, j].contiguous() for t in cond_rows]
-                        qkvg = aw.ln_qkvg(s32[sl, j], *rows, att.to_query, att.to_key, att.to_value, att.to_gate, att.ada_ln_in.ln_in.eps,
-                                          d ** -0.5, precision=precision)
+                        qkvg = aw.ln_qkvg(
+                            s32[sl, j],
+                            *rows,
+                            att.to_query,
+                            att.to_key,
+                            att.to_value,
+                            att.to_gate,
+                            att.ada_ln_in.ln_in.eps,
+                            d**-0.5,
+                            precision=precision,
+                        )
                     else:
                         qkvg = qkvg_all[sl, j]
-                    aw.window_attn(qkvg, s32[sl, j], planes[j], ks, n_real, ones, zgate[i0, j].contiguous(), att.to_out.weight,
-                                   att.to_out.bias, h, QUERIES, KEYS, out=out[sl, j], precision=precision)
+                    aw.window_attn(
+                        qkvg,
+                        s32[sl, j],
+                        planes[j],
+                        ks,
+                        n_real,
+                        ones,
+                        zgate[i0, j].contiguous(),
+                        att.to_out.weight,
+                        att.to_out.bias,
+                        h,
+                        QUERIES,
+                        KEYS,
+                        out=out[sl, j],
+                        precision=precision,
+                    )
         return out.to(in_dtype)
 
     def _release_attention(self, single, cond, pair, mask):
@@ -601,7 +686,7 @@ class _LocalAtomDiT(BackendModule):
     def _forward_anthropic(self, single, cond, pair, mask=None):
         """``_forward_pytorch`` with the attention on the release op."""
         if self.parallel:
-            raise NotImplementedError   # no parallel class has this backend
+            raise NotImplementedError  # no parallel class has this backend
         return self.transition(self._release_attention(single, cond, pair, mask), cond)
 
 
@@ -615,7 +700,8 @@ class AtomDiTProtenix(_LocalAtomDiT):
     either way. ``"slide"`` takes the real atom count ``N`` from the key mask, whose real atoms must come first; under 128 real atoms there is
     no valid window and the keys past ``N`` are masked.
     """
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     key_window = "pad"
@@ -629,7 +715,8 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     ``"intellifold2"``): the K / V AdaLN of the raw atoms next to the query one (parallel: AF3 ``cross_attention``'s 'q' / 'k' adaptive
     layernorms, OF3 ``CrossAttentionPairBias.layer_norm_a_q`` / ``_k``), the slid 128-key window (AF3 ``features.py``; IntelliFold2's JAX
     release runs this code). ``key_window="slide_qblock"``: IntelliFold2's torch release; ``"pad"``: the clipped window."""
-    version = 3   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     #: 2026-11-10: H100 "slide" / "slide_qblock": the five edge windows on the edge kernels (dit_variants edge.cu; were torch)
@@ -646,9 +733,15 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
     ``(1 - mask) * -1e6``, the bias read in place from the trunked [B, nwin, 32, 128, 4]; bf16 operands (bf16, and the master layout's
     autocast operands) or fp32 dots (Boltz-2's ``tf32`` word under the engine's TF32 rule, else ``ieee``); the [q | k | v] rows from one
     packed GEMM; 128 = 4 x 32 wide, N a multiple of 32."""
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "anthropic", "cuda", "triton")   # "cuda": H100 local_dit_h100, A100 kernels/dit_variants (modules/dit_variant_cuda.py)
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+
+    backends = (
+        "pytorch",
+        "anthropic",
+        "cuda",
+        "triton",
+    )  # "cuda": H100 local_dit_h100, A100 kernels/dit_variants (modules/dit_variant_cuda.py)
     key_window = "pad"
     kv_norm = "shared"
     transition_part = UpGatedConditionedTransition
@@ -680,18 +773,32 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
             raise ValueError(f"pair must be the trunked atom pair [B, {windows(n)}, {QUERIES}, {KEYS}, d_pair], got {tuple(pair.shape)}")
         with torch.autocast(device_type=x.device.type, enabled=False):
             z = F.layer_norm(pair, (pair.shape[-1],), att.ln_pair.weight.to(pair.dtype), None, att.ln_pair.eps)
-        zb = F.linear(z, att.to_bias.weight.to(z.dtype))                                    # [B, nwin, 32, 128, H]: Boltz-2's own layout
+        zb = F.linear(z, att.to_bias.weight.to(z.dtype))  # [B, nwin, 32, 128, H]: Boltz-2's own layout
 
-        def rows(t):                                                                        # [A, B, N, C'] -> [B * A * N, C'] (a view for B = 1)
+        def rows(t):  # [A, B, N, C'] -> [B * A * N, C'] (a view for B = 1)
             return t.transpose(0, 1).reshape(b * a * n, t.shape[-1])
-        qkv = rows(_packed_linear(att, ("to_query", "to_key", "to_value"), x))             # ONE GEMM -> the [q | k | v] rows Boltz-2 reads
+
+        qkv = rows(_packed_linear(att, ("to_query", "to_key", "to_value"), x))  # ONE GEMM -> the [q | k | v] rows Boltz-2 reads
         dt = qkv.dtype
         g = rows(torch.sigmoid(att.to_gate(x))).to(dt).contiguous()
         pad = (torch.ones(b, n, device=x.device) if mask is None else mask.float()).reshape(-1).contiguous()
         ob = torch.empty(b * a * n, c, dtype=dt, device=x.device)
         prec = "bf16" if dt == torch.bfloat16 else ("tf32" if torch.backends.cuda.matmul.allow_tf32 else "ieee")
-        bk.launch_win_attn(qkv=qkv.contiguous(), g=g, bias=zb.contiguous(), ld=att.n_head, loff=0, bmult=a, pad=pad, ob=ob, R=b * a * n,
-                           M=n, K=windows(n), cmult=a, prec=prec)
+        bk.launch_win_attn(
+            qkv=qkv.contiguous(),
+            g=g,
+            bias=zb.contiguous(),
+            ld=att.n_head,
+            loff=0,
+            bmult=a,
+            pad=pad,
+            ob=ob,
+            R=b * a * n,
+            M=n,
+            K=windows(n),
+            cmult=a,
+            prec=prec,
+        )
         o = ob.view(b, a, n, c).transpose(0, 1)
         return single + self._out_gate(cond, att.to_out(o))
 
@@ -702,9 +809,10 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     ``attention.norm_query`` / ``attention.norm_key``, over all heads; ``FlatQKNormAugmentedAttention``), the parallel schedule
     (``no_residual_connection_between_attention_and_transition: true``) and the clipped window (``indicesK``/``maskK``;
     ``key_window="pad"``, the default). No ``"anthropic"`` backend: RoseTTAFold3's release keeps its stock atom attention (no kernel)."""
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "cuda", "triton")   # "cuda": H100 local_dit_h100, A100 kernels/dit_variants (modules/dit_variant_cuda.py)
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+
+    backends = ("pytorch", "cuda", "triton")  # "cuda": H100 local_dit_h100, A100 kernels/dit_variants (modules/dit_variant_cuda.py)
     key_window = "pad"
     kv_norm = "shared"
     parallel = True
@@ -721,9 +829,10 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
     keys are masked; ``key_window="pad"``, the default) and ``forward(..., uid=uid)`` [B, N]: a real query sees only the keys of its own
     conformer (``get_blocked_atom_pair_dists`` ANDs the same-``ref_space_uid`` mask into the block mask in place). No ``"anthropic"`` backend:
     Chai-1's release keeps its stock atom attention (no kernel)."""
-    version = 2   # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "cuda", "triton")   # "cuda": H100 local_dit_h100, A100 kernels/dit_variants (modules/dit_variant_cuda.py)
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+
+    backends = ("pytorch", "cuda", "triton")  # "cuda": H100 local_dit_h100, A100 kernels/dit_variants (modules/dit_variant_cuda.py)
     key_window = "pad"
     kv_norm = "shared"
     parallel = True
@@ -731,8 +840,18 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
     backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
 
-    def __init__(self, d_single: int = 128, d_cond: int = 128, d_pair: int = 16, n_head: int = 4, n: int = 2, *,
-                 key_window: str | None = None, adaln_eps: float = 0.1, backend: str = "pytorch") -> None:
+    def __init__(
+        self,
+        d_single: int = 128,
+        d_cond: int = 128,
+        d_pair: int = 16,
+        n_head: int = 4,
+        n: int = 2,
+        *,
+        key_window: str | None = None,
+        adaln_eps: float = 0.1,
+        backend: str = "pytorch",
+    ) -> None:
         super().__init__(d_single, d_cond, d_pair, n_head, n, key_window=key_window, backend=backend)
         att = self.attention
         att.ada_ln_in = IdentityAdaptiveLayerNorm(d_single, d_cond, eps=adaln_eps)  # pyright: ignore[reportAttributeAccessIssue]  -- Chai-1 swaps in the identity AdaLN (same call signature)
@@ -748,7 +867,10 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
 
     def make_inputs(self, **kwargs) -> dict:
         inputs = super().make_inputs(**kwargs)
-        return {**inputs, "uid": (torch.arange(inputs["mask"].shape[-1], device=inputs["mask"].device) // 24)[None]}   # conformers of 24 atoms
+        return {
+            **inputs,
+            "uid": (torch.arange(inputs["mask"].shape[-1], device=inputs["mask"].device) // 24)[None],
+        }  # conformers of 24 atoms
 
 
 # ======================================================================================== MiniWorld's sliding-window (SWA) atom block
@@ -809,7 +931,7 @@ class SWA3DRoPEAttention(BackendModule):
 
         qkv = self.Wqkv(x).view(n, s, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)  # each [N, S, H, D]
-        eps = torch.finfo(torch.float32).eps   # float32's epsilon whatever the dtype; the norm in fp32 (fp64 for an fp64 call)
+        eps = torch.finfo(torch.float32).eps  # float32's epsilon whatever the dtype; the norm in fp32 (fp64 for an fp64 call)
         w = wide(q)
         q = F.rms_norm(q.to(w), (self.head_dim,), eps=eps).to(q.dtype)
         k = F.rms_norm(k.to(w), (self.head_dim,), eps=eps).to(k.dtype)
@@ -872,8 +994,11 @@ def _swa_inputs(width: int, d_cond: int, rope, *, length, samples, dtype, device
     pos = random_input((1, length, 3), dtype=torch.float32, device=device, generator=generator, scale=5.0)
     cos, sin = rope(pos, (torch.arange(length, device=device) // 8)[None])
     params = build_attention_params(cos, sin, key_mask(samples, length, device=device), samples)
-    return (random_input((samples, length, width), dtype=dtype, device=device, generator=generator),
-            random_input((samples, length, d_cond), dtype=dtype, device=device, generator=generator), params)
+    return (
+        random_input((samples, length, width), dtype=dtype, device=device, generator=generator),
+        random_input((samples, length, d_cond), dtype=dtype, device=device, generator=generator),
+        params,
+    )
 
 
 class SwiGLUFFN(nn.Module):
@@ -956,8 +1081,12 @@ class AtomDiTMiniWorld(BackendModule):
         if torch.is_grad_enabled() and (x.requires_grad or cond.requires_grad or any(p.requires_grad for p in self.parameters())):
             return "a gradient (the fused block is forward only)"
         at = self.attn
-        if (at.n_heads, at.head_dim, x.shape[-1]) != (4, 32, 128) or tuple(self.ffn.w_up.weight.shape) != (512, 128) \
-                or tuple(self.ffn.w_down.weight.shape) != (128, 256) or at.half_window < 0:
+        if (
+            (at.n_heads, at.head_dim, x.shape[-1]) != (4, 32, 128)
+            or tuple(self.ffn.w_up.weight.shape) != (512, 128)
+            or tuple(self.ffn.w_down.weight.shape) != (128, 256)
+            or at.half_window < 0
+        ):
             return "geometry (the fused block: 128 = 4 heads x 32, SwiGLU hidden 256, half_window >= 0)"
         eps = torch.finfo(torch.float32).eps
         if any(nm.eps not in (None, eps) for nm in (self.attn_norm, self.ffn_norm)):
@@ -976,7 +1105,7 @@ class AtomDiTMiniWorld(BackendModule):
 
     def _forward_anthropic(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> torch.Tensor:
         if self._fused_reason(x, cond, attention_params) is not None:
-            return self._forward_pytorch(x, cond, attention_params)   # the attention runs its own backend (atom_swa)
+            return self._forward_pytorch(x, cond, attention_params)  # the attention runs its own backend (atom_swa)
         ef = _anthropic.load(*self._EF2_ATOM[:1], path=self._EF2_ATOM[1])
         n, s, d = x.shape
         m = n * s
@@ -988,12 +1117,18 @@ class AtomDiTMiniWorld(BackendModule):
             ef._sm_count()
             ef._engine_sms = True  # pyright: ignore[reportAttributeAccessIssue]  -- a flag on the kit module, set once per process
         key = tuple((p.data_ptr(), p._version) for p in self.parameters())
-        if self.__dict__.get("_katom_key") != key:          # the kit packs once per model load; a changed weight is a new pack
+        if self.__dict__.get("_katom_key") != key:  # the kit packs once per model load; a changed weight is a new pack
             self.__dict__.pop("_katom_packs", None)
             self.__dict__["_katom_key"] = key
         cos, sin, seqused = attention_params[0], attention_params[1], attention_params[2]
-        fs = {"M": m, "N": s, "Bp": n, "seqlen": seqused.to(torch.int32).contiguous(),
-              "cos": cos.float().expand(n, s, -1).reshape(m, -1).contiguous(), "sin": sin.float().expand(n, s, -1).reshape(m, -1).contiguous()}
+        fs = {
+            "M": m,
+            "N": s,
+            "Bp": n,
+            "seqlen": seqused.to(torch.int32).contiguous(),
+            "cos": cos.float().expand(n, s, -1).reshape(m, -1).contiguous(),
+            "sin": sin.float().expand(n, s, -1).reshape(m, -1).contiguous(),
+        }
         with torch.autocast("cuda", enabled=False):
             xin = x.float().reshape(m, d).contiguous()
             out, _ = ef._fused_block(self, xin, mod.float().reshape(m, -1).contiguous(), fs)
@@ -1082,8 +1217,12 @@ class AtomDiTMiniWorld(BackendModule):
             return "weights must be in the activation dtype or fp32"
         cos, sin, seqused = attention_params[:3]
         for t in (cos, sin):
-            if (t.dtype != _F32 or t.shape[-1] != D_ATOM // N_HEAD // 2 or t.numel() != x.shape[0] * x.shape[1] * t.shape[-1]
-                    or (t.requires_grad and torch.is_grad_enabled())):
+            if (
+                t.dtype != _F32
+                or t.shape[-1] != D_ATOM // N_HEAD // 2
+                or t.numel() != x.shape[0] * x.shape[1] * t.shape[-1]
+                or (t.requires_grad and torch.is_grad_enabled())
+            ):
                 return "cos / sin must be fp32 [N, S, head_dim / 2] without gradient"
         if seqused.dtype != torch.int32 or tuple(seqused.shape) != (x.shape[0],):
             return "seqused must be int32 [N]"
@@ -1123,8 +1262,16 @@ class AtomDiTMiniWorld(BackendModule):
         cos, sin = cos.reshape(-1, cos.shape[-1]).contiguous(), sin.reshape(-1, sin.shape[-1]).contiguous()
         c = cond.reshape(-1, cond.shape[-1]).contiguous()
         wmod = self.adaln_modulation[1].weight.contiguous()  # pyright: ignore[reportCallIssue]  -- adaln_modulation[1] is the Linear (nn.Sequential indexing is untyped)
-        weights = [w.contiguous() for w in (self.attn.Wqkv.weight, self.attn.gate_proj.weight, self.attn.out_proj.weight,
-                                            self.ffn.w_up.weight, self.ffn.w_down.weight)]
+        weights = [
+            w.contiguous()
+            for w in (
+                self.attn.Wqkv.weight,
+                self.attn.gate_proj.weight,
+                self.attn.out_proj.weight,
+                self.ffn.w_up.weight,
+                self.ffn.w_down.weight,
+            )
+        ]
         q = x.contiguous()
         if torch.is_grad_enabled() and any(t.requires_grad for t in (q, c, wmod, *weights)):
             from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_output
@@ -1142,8 +1289,10 @@ class AtomDiTMiniWorld(BackendModule):
         from miniworld_engine.kernels.swa_dit.dispatch import native_h100_eval_weights, native_h100_mod_eval, swa_dit_block_fwd
 
         mod = native_h100_mod_eval(a, self.adaln_modulation[1].weight)  # pyright: ignore[reportArgumentType]  -- adaln_modulation[1] is the Linear (nn.Sequential indexing is untyped)
-        weights = native_h100_eval_weights((self.attn.Wqkv.weight, self.attn.gate_proj.weight, self.attn.out_proj.weight,
-                                            self.ffn.w_up.weight, self.ffn.w_down.weight), q.dtype)
+        weights = native_h100_eval_weights(
+            (self.attn.Wqkv.weight, self.attn.gate_proj.weight, self.attn.out_proj.weight, self.ffn.w_up.weight, self.ffn.w_down.weight),
+            q.dtype,
+        )
         return swa_dit_block_fwd(q, mod, cos, sin, seqused, *weights, q.shape[0], self.attn.half_window, FP32_EPS, False)[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
 
     def forward_hoisted(self, x: torch.Tensor, c_base: torch.Tensor, attention_params: tuple) -> torch.Tensor:
@@ -1162,9 +1311,16 @@ class AtomDiTMiniWorld(BackendModule):
         return out.to(x.dtype)
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
-        x, cond, params = _swa_inputs(self.attn_norm.normalized_shape[0], self.adaln_modulation[1].in_features,  # pyright: ignore[reportArgumentType]  -- adaln_modulation[1] is the Linear (nn.Sequential indexing is untyped)
-                                      lambda pos, uid: build_3d_rope(pos, uid, self.attn.head_dim),
-                                      length=length, samples=samples, dtype=dtype, device=device, generator=generator)
+        x, cond, params = _swa_inputs(
+            self.attn_norm.normalized_shape[0],
+            self.adaln_modulation[1].in_features,  # pyright: ignore[reportArgumentType]  -- adaln_modulation[1] is the Linear (nn.Sequential indexing is untyped)
+            lambda pos, uid: build_3d_rope(pos, uid, self.attn.head_dim),
+            length=length,
+            samples=samples,
+            dtype=dtype,
+            device=device,
+            generator=generator,
+        )
         return {"x": x, "cond": cond, "attention_params": params}
 
 
@@ -1176,7 +1332,8 @@ class AtomDiTESMFold2(AtomDiTMiniWorld):
     the normalised input, ``out_proj``) and ``SwiGLUFFN``. It is :class:`AtomDiTMiniWorld` (MiniWorld adopted this block), under
     ESMFold2's constructor: ``forward(x [A * B, S, d_single], cond [A * B, S, d_cond], attention_params)``
     (:func:`~miniworld_engine.modules.functional.build_attention_params`). ``backend="anthropic"``: ESMFold2's own band core."""
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
     def __init__(self, d_single: int = 128, d_cond: int = 128, n_head: int = 4, n: int = 2, *, backend: str = "pytorch") -> None:
         super().__init__(d_single, d_cond, n_head, n, half_window=64, backend=backend)
@@ -1196,7 +1353,8 @@ class SWAAtomTransformer(BackendModule):
     holds). Each block is a canonical DiT adaLN-Zero block (Peebles & Xie, arXiv:2212.09748), not the AF3 conditioning (``sigmoid``-scale
     AdaLN + ``bias=-2`` output gate): ESMFold2 reverts the atom transformer to the original DiT block while keeping AF3's attention with pair
     bias only at the token level. ``backend="anthropic"`` sets every block's (their attention on ESMFold2's release band core)."""
-    version = 1   # human-managed: bump when a change alters this class's accuracy or speed results
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda")
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
@@ -1239,8 +1397,9 @@ class SWAAtomTransformer(BackendModule):
 
     def __init__(self, config: Config, *, backend: str = "pytorch") -> None:
         super().__init__()
-        _legacy_options_removed("SWAAtomTransformer", magnitude_preserving=config.magnitude_preserving, mp_full=config.mp_full,
-                                mp_residual=config.mp_residual)
+        _legacy_options_removed(
+            "SWAAtomTransformer", magnitude_preserving=config.magnitude_preserving, mp_full=config.mp_full, mp_residual=config.mp_residual
+        )
         self.config = config
         self.head_dim = config.d_atom // config.n_head
         self.blocks = nn.ModuleList(
@@ -1269,8 +1428,12 @@ class SWAAtomTransformer(BackendModule):
 
     def _forward_cuda(self, q, c, attention_params, c_base=None):
         blocks = cast("list[AtomDiTMiniWorld]", list(self.blocks))
-        if (len(blocks) > 1 and _h100(q) and self.config.n_checkpoint_segments is None
-                and not (torch.is_grad_enabled() and (q.requires_grad or c.requires_grad or any(p.requires_grad for p in self.parameters())))):
+        if (
+            len(blocks) > 1
+            and _h100(q)
+            and self.config.n_checkpoint_segments is None
+            and not (torch.is_grad_enabled() and (q.requires_grad or c.requires_grad or any(p.requires_grad for p in self.parameters())))
+        ):
             # H100 inference: every block is conditioned on the same c, so silu(c) -- the modulation GEMM's operand -- is made once
             from miniworld_engine.kernels.swa_dit.dispatch import native_h100_silu
 
@@ -1281,10 +1444,10 @@ class SWAAtomTransformer(BackendModule):
             for block in blocks:
                 q = block._h100_eval(q, a, cos, sin, seqused)
             return q
-        return self._forward_pytorch(q, c, attention_params, c_base)   # the blocks run their own backend
+        return self._forward_pytorch(q, c, attention_params, c_base)  # the blocks run their own backend
 
     def _forward_anthropic(self, q, c, attention_params, c_base=None):
-        return self._forward_pytorch(q, c, attention_params, c_base)   # the blocks run their own backend
+        return self._forward_pytorch(q, c, attention_params, c_base)  # the blocks run their own backend
 
     def build_rope(self, ref_pos: torch.Tensor, ref_space_uid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """The (cos, sin) [B, N, head_dim // 2] 3D RoPE tensors for one batch (no augment axis): ``ref_pos`` [B, N, 3], ``ref_space_uid``
@@ -1330,8 +1493,16 @@ class SWAAtomTransformer(BackendModule):
         )
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
-        q, c, params = _swa_inputs(self.config.d_atom, self.config.d_cond, self.build_rope,
-                                   length=length, samples=samples, dtype=dtype, device=device, generator=generator)
+        q, c, params = _swa_inputs(
+            self.config.d_atom,
+            self.config.d_cond,
+            self.build_rope,
+            length=length,
+            samples=samples,
+            dtype=dtype,
+            device=device,
+            generator=generator,
+        )
         return {"q": q, "c": c, "attention_params": params}
 
 

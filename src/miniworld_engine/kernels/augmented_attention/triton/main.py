@@ -1,4 +1,3 @@
-
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm origin/exp/miniworld@32e3897 : src/team_gm/modules/kernels/augmented_attention_pair_bias_compute_efficient.py
 
@@ -21,6 +20,7 @@ from miniworld_engine.kernels._shape_key import atom_key, pack
 # The split-count arithmetic reads the backward kernel's own configs (its default plus this GPU's table entries), so it
 # agrees with every BLOCK_M2 the backward can launch with.
 
+
 def _bwd_min_block_n() -> int:
     """Smallest BLOCK_N the backward can be launched with, read from its own config set.
 
@@ -33,8 +33,7 @@ def _bwd_min_block_n() -> int:
     """
     blocks = [c.kwargs["BLOCK_M2"] for c in _attn_bwd.configs if "BLOCK_M2" in c.kwargs]
     if not blocks:
-        raise RuntimeError(
-            "augmented_attention_bwd has no configs: dq_expand's split count is undefined.")
+        raise RuntimeError("augmented_attention_bwd has no configs: dq_expand's split count is undefined.")
     return min(blocks)
 
 
@@ -96,8 +95,6 @@ def _attn_fwd_inner(
     return acc, l_i, m_i
 
 
-
-
 # AUTOTUNE KEY: `A` and `B` are constexpr but stay OUT of the key. `A` (the augmentation count) is
 # never read by this body -- the grid extent A*B*H is built at the launcher from python ints -- so
 # the generated code is the same for every A and a key entry could only split the cache. `B` appears
@@ -106,9 +103,7 @@ def _attn_fwd_inner(
 # for two integer ops. What does set the work shape is folded into shape_key -- HEAD_DIM (and with it
 # HEAD_DIM_PAD = next_power_of_2(HEAD_DIM)), H (also the q/k/v row-stride multiplier H*D), and
 # shape_key (the L bucket).
-@configured('augmented_attention_fwd_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
+@configured("augmented_attention_fwd_triton", key=["shape_key"], default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_fwd(
     Q,
@@ -167,24 +162,11 @@ def _attn_fwd(
     offset_n = tl.arange(0, BLOCK_M2)
     offset_k = start_d * HEAD_DIM_PAD + tl.arange(0, HEAD_DIM_PAD)
 
-    q_ptr = (
-        Q + qvk_offset + offset_m[:, None] * stride_qm + offset_k[None, :] * stride_qk
-    )
-    k_ptr = (
-        K + qvk_offset + offset_n[None, :] * stride_kn + offset_k[:, None] * stride_kk
-    )
-    v_ptr = (
-        V + qvk_offset + offset_n[:, None] * stride_vn + offset_k[None, :] * stride_vk
-    )
-    o_ptr = (
-        Out + qvk_offset + offset_m[:, None] * stride_om + offset_k[None, :] * stride_on
-    )
-    bias_ptr = (
-        Bias
-        + bias_offset
-        + offset_m[:, None] * stride_bm
-        + offset_n[None, :] * stride_bn
-    )
+    q_ptr = Q + qvk_offset + offset_m[:, None] * stride_qm + offset_k[None, :] * stride_qk
+    k_ptr = K + qvk_offset + offset_n[None, :] * stride_kn + offset_k[:, None] * stride_kk
+    v_ptr = V + qvk_offset + offset_n[:, None] * stride_vn + offset_k[None, :] * stride_vk
+    o_ptr = Out + qvk_offset + offset_m[:, None] * stride_om + offset_k[None, :] * stride_on
+    bias_ptr = Bias + bias_offset + offset_m[:, None] * stride_bm + offset_n[None, :] * stride_bn
 
     m_i = tl.zeros([BLOCK_M1], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M1], dtype=tl.float32) + 1.0
@@ -231,17 +213,13 @@ def _attn_fwd(
     tl.store(o_ptr, acc.to(Out.type.element_ty), mask=out_mask)
 
 
-
-
 # AUTOTUNE KEY: `A`/`B` are not read by this body at all (see _attn_fwd above), and the four
 # constexpr strides stay out too. Both launchers pass the strides of a contiguous (A, B, L, H, D)
 # q, so stride_k == 1 always; stride_h == HEAD_DIM and stride_m == H*HEAD_DIM are products of two
 # entries already in the key; and stride_z == L*H*HEAD_DIM would key on the exact L instead of its
 # bucket -- one cache entry per sequence length, which is what shape_key exists to prevent. None of
 # them changes the tile or the loop trip count: they only shift each program's base pointer.
-@configured('augmented_attention_bwd_pre_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_M1=64, num_warps=4, num_stages=2))
+@configured("augmented_attention_bwd_pre_triton", key=["shape_key"], default=dict(BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_bwd_preprocess(
     O,
@@ -385,10 +363,13 @@ def _fits_dq_slots(configs, named_args, **kw):
 
 # AUTOTUNE KEY: `A`/`B` out for the same reason as the forward -- `A` is unread here, and `B` only
 # folds into the constant M_offset stride (B*H*N_CTX).
-@configured('augmented_attention_bwd_split_triton',
-            key=['shape_key', 'CHUNKED'],
-            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2),
-            prune=_fits_dq_slots, scratch=("DQ",))
+@configured(
+    "augmented_attention_bwd_split_triton",
+    key=["shape_key", "CHUNKED"],
+    default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2),
+    prune=_fits_dq_slots,
+    scratch=("DQ",),
+)
 @triton.jit
 def _attn_bwd(
     Q,
@@ -432,8 +413,8 @@ def _attn_bwd(
     DQ_STRIDE_B: tl.constexpr = 0,
     BIAS_STRIDE_B: tl.constexpr = 0,
     BIAS_STRIDE_H: tl.constexpr = 0,
-    DK_ACC = None,
-    DV_ACC = None,
+    DK_ACC=None,
+    DV_ACC=None,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     pid = tl.program_id(0).to(tl.int64)
@@ -554,14 +535,11 @@ def _attn_bwd(
 # reappear, reproduce the failure before trusting any explanation.
 
 
-
 # AUTOTUNE KEY: ['shape_key'] -- was ['N_ELEM'], the raw element count A*B*L*H*D, so this
 # backward-path kernel re-swept its whole config space at every new sequence length seen in a
 # training run. `N_ELEM` is still the body's bound; `shape_key` is its bucket and is never read
 # by the kernel, so the generated code -- and the gradient -- are unchanged.
-@configured('augmented_attention_bwd_reduce_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
+@configured("augmented_attention_bwd_reduce_triton", key=["shape_key"], default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
 @triton.jit
 def _dq_reduce(
     DQ_Expand,  # (num_splits, A, B, L, H, D)
@@ -712,20 +690,20 @@ def _aa_bwd(
 
     # dq_expand is (num_splits, A, B, L, H, D): one slot per BLOCK_M2 block.
     num_splits = triton.cdiv(L, _bwd_min_block_n())
-    dq_expand = torch.empty(
-        int(num_splits), A, B, L, H, D, device=q.device, dtype=torch.float32
-    )
+    dq_expand = torch.empty(int(num_splits), A, B, L, H, D, device=q.device, dtype=torch.float32)
 
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
     dbias = torch.empty(A, B, H, L, L, device=q.device, dtype=torch.float32)
 
     active = {}
+
     def grid(meta):
         # Record the actual launched tile, including when autotuning selects it.
         # This call-local value also works with concurrent callers/capture.
-        active['splits'] = triton.cdiv(L, meta['BLOCK_M2'])
-        return active['splits'], A, B * H
+        active["splits"] = triton.cdiv(L, meta["BLOCK_M2"])
+        return active["splits"], A, B * H
+
     _attn_bwd[grid](
         q,
         k,
@@ -758,7 +736,8 @@ def _aa_bwd(
         L,
         D,
         HEAD_DIM_PAD=max(16, triton.next_power_of_2(D)),
-        shape_key=atom_key(L, H=H, HEAD_DIM=D), CHUNKED=False,
+        shape_key=atom_key(L, H=H, HEAD_DIM=D),
+        CHUNKED=False,
     )
 
     # sum the splits into the final dq
@@ -771,7 +750,7 @@ def _aa_bwd(
     _dq_reduce[grid_reduce](
         dq_expand,
         dq,
-        active['splits'],
+        active["splits"],
         dq_expand.stride(0),
         1,  # element stride (contiguous)
         n_elem,
@@ -791,7 +770,7 @@ def _query_chunk_rows(a, b, length, heads, head_dim):
     splits = triton.cdiv(length, _bwd_min_block_n())
     per_row = a * b * heads * (splits * head_dim + length) * 4
     # Chunk boundaries must preserve every candidate's query-tile boundaries.
-    alignment = max(c.kwargs['BLOCK_M1'] for c in _attn_bwd.configs)
+    alignment = max(c.kwargs["BLOCK_M1"] for c in _attn_bwd.configs)
     rows = max(alignment, (_CHUNK_WORKSPACE_BYTES // per_row // alignment) * alignment)
     return min(length, rows)
 
@@ -799,13 +778,26 @@ def _query_chunk_rows(a, b, length, heads, head_dim):
 def _aa_bwd_chunked_fake(dy, q, k, v, bias, mask, o, m, shape_key):
     """Allocate outputs with the same shape, dtype and strides as _aa_bwd_chunked."""
     (a, b, length, heads, _) = q.shape
-    return (torch.empty_like(q, dtype=torch.float32), torch.empty_like(k), torch.empty_like(v), q.new_empty((b, heads, length, length), dtype=torch.float32))
+    return (
+        torch.empty_like(q, dtype=torch.float32),
+        torch.empty_like(k),
+        torch.empty_like(v),
+        q.new_empty((b, heads, length, length), dtype=torch.float32),
+    )
 
 
 @opaque(fake=_aa_bwd_chunked_fake, name="augmented_attention_bwd_chunked")
-def _aa_bwd_chunked(dy: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    bias: torch.Tensor, mask: torch.Tensor, o: torch.Tensor, m: torch.Tensor,
-                    shape_key: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _aa_bwd_chunked(
+    dy: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: torch.Tensor,
+    mask: torch.Tensor,
+    o: torch.Tensor,
+    m: torch.Tensor,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run the same joint dQ/dK/dV/dBias GEMM in bounded query windows.
 
     dQ partials keep separate key-split slots and are reduced in the original
@@ -817,10 +809,20 @@ def _aa_bwd_chunked(dy: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch
     rows = _query_chunk_rows(a, b, length, heads, dim)
     splits = triton.cdiv(length, _bwd_min_block_n())
     delta = torch.empty_like(m)
-    _attn_bwd_preprocess[lambda meta: (triton.cdiv(length, meta['BLOCK_M1']), a * b, heads)](
-        o, dy, delta, length, q.stride(1), q.stride(2), q.stride(3), q.stride(4), heads, dim,
+    _attn_bwd_preprocess[lambda meta: (triton.cdiv(length, meta["BLOCK_M1"]), a * b, heads)](
+        o,
+        dy,
+        delta,
+        length,
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        q.stride(4),
+        heads,
+        dim,
         shape_key=atom_key(length, H=heads, HEAD_DIM=dim),
-        HEAD_DIM_PAD=max(16, triton.next_power_of_2(dim)))
+        HEAD_DIM_PAD=max(16, triton.next_power_of_2(dim)),
+    )
 
     dq = torch.empty_like(q, dtype=torch.float32)
     dbias = torch.empty((b, heads, length, length), device=q.device, dtype=torch.float32)
@@ -840,30 +842,63 @@ def _aa_bwd_chunked(dy: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch
         # Only reduce slots the launched candidate writes. Unused capacity is
         # never read, so neither these scratch buffers nor dBias need clearing.
         active = {}
+
         def grid(meta):
-            active['splits'] = triton.cdiv(length, meta['BLOCK_M2'])
-            return active['splits'], a, b * heads
+            active["splits"] = triton.cdiv(length, meta["BLOCK_M2"])
+            return active["splits"], a, b * heads
+
         q_window, dy_window = q[:, :, start:stop], dy[:, :, start:stop]
         bias_window = bias[:, :, start:stop]
         _attn_bwd[grid](
-            q_window, k, v, bias_window, mask, dim ** -0.5, dy_window,
-            dq_slots, dk_next, dv_next, dbias_slots,
-            m[:, :, :, start:stop], delta[:, :, :, start:stop],
-            *q.stride(), dq_slots.stride(0), *dbias_slots.stride(), *mask.stride()[:2],
-            a, b, heads, length, dim, HEAD_DIM_PAD=max(16, triton.next_power_of_2(dim)),
-            shape_key=atom_key(length, H=heads, HEAD_DIM=dim), CHUNKED=True, N_QUERY=count,
-            DQ_STRIDE_A=dq_slots.stride(1), DQ_STRIDE_B=dq_slots.stride(2),
-            BIAS_STRIDE_B=bias.stride(0), BIAS_STRIDE_H=bias.stride(1),
-            DK_ACC=dk_prev, DV_ACC=dv_prev)
+            q_window,
+            k,
+            v,
+            bias_window,
+            mask,
+            dim**-0.5,
+            dy_window,
+            dq_slots,
+            dk_next,
+            dv_next,
+            dbias_slots,
+            m[:, :, :, start:stop],
+            delta[:, :, :, start:stop],
+            *q.stride(),
+            dq_slots.stride(0),
+            *dbias_slots.stride(),
+            *mask.stride()[:2],
+            a,
+            b,
+            heads,
+            length,
+            dim,
+            HEAD_DIM_PAD=max(16, triton.next_power_of_2(dim)),
+            shape_key=atom_key(length, H=heads, HEAD_DIM=dim),
+            CHUNKED=True,
+            N_QUERY=count,
+            DQ_STRIDE_A=dq_slots.stride(1),
+            DQ_STRIDE_B=dq_slots.stride(2),
+            BIAS_STRIDE_B=bias.stride(0),
+            BIAS_STRIDE_H=bias.stride(1),
+            DK_ACC=dk_prev,
+            DV_ACC=dv_prev,
+        )
         n_elem = a * b * count * heads * dim
-        _dq_reduce[lambda meta: (triton.cdiv(n_elem, meta['BLOCK_E']),)](
-            dq_slots, dq[:, :, start:stop], active['splits'], dq_slots.stride(0), 1, n_elem,
-            shape_key=atom_key(length), INNER_SPAN=count * heads * dim,
-            OUTPUT_SPAN=length * heads * dim)
+        _dq_reduce[lambda meta: (triton.cdiv(n_elem, meta["BLOCK_E"]),)](
+            dq_slots,
+            dq[:, :, start:stop],
+            active["splits"],
+            dq_slots.stride(0),
+            1,
+            n_elem,
+            shape_key=atom_key(length),
+            INNER_SPAN=count * heads * dim,
+            OUTPUT_SPAN=length * heads * dim,
+        )
         torch.sum(dbias_slots, dim=0, out=dbias[:, :, start:stop])
         dk_prev, dk_next = dk_next, dk_prev
         dv_prev, dv_next = dv_next, dv_prev
-    return dq, (dk_prev * (dim ** -0.5)).to(k.dtype), dv_prev.to(v.dtype), dbias
+    return dq, (dk_prev * (dim**-0.5)).to(k.dtype), dv_prev.to(v.dtype), dbias
 
 
 #: Largest head dim this kernel accepts. NOT a routing threshold -- past it the call
@@ -911,11 +946,9 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
         A, B, L, H, _ = q.shape
         head_major = _head_major_dbias(q.device)
         if A * B * H * L * L * 4 > _SPLIT_BIAS_BUDGET_BYTES:
-            dq, dk, dv, dbias = _aa_bwd_chunked(
-                dy.contiguous(), q, k, v, bias, mask, o, m, atom_key(L))
+            dq, dk, dv, dbias = _aa_bwd_chunked(dy.contiguous(), q, k, v, bias, mask, o, m, atom_key(L))
         else:
-            dq, dk, dv, dbias = _aa_bwd(
-                dy.contiguous(), q, k, v, bias, mask, o, m, atom_key(L))
+            dq, dk, dv, dbias = _aa_bwd(dy.contiguous(), q, k, v, bias, mask, o, m, atom_key(L))
             dbias = dbias[0] if A == 1 and head_major else dbias.sum(dim=0)
         if head_major:
             # A100 / H100: the (B, H, L, L) accumulator rounded to the bias dtype and handed back as its (B, L, L, H) view (no
@@ -924,7 +957,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             # (B, L, L, H) copy, where it picks an align-1 kernel); the values are the same.
             return dq, dk, dv, dbias.to(bias.dtype).permute(0, 2, 3, 1), None
         dbias = dbias.permute(0, 2, 3, 1).contiguous()
-        return dq, dk, dv, dbias, None   # mask takes no gradient
+        return dq, dk, dv, dbias, None  # mask takes no gradient
 
 
 @functools.lru_cache(maxsize=None)

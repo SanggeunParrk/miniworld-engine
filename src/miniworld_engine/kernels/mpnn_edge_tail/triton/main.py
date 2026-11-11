@@ -123,6 +123,7 @@ def _gelu_grad(x):
 # Buckets deliberately exclude ``rows``: the row count is what BLOCK_M1/TILES exist to
 # absorb, and bucketing on it would mean a separate cache entry per batch size.
 
+
 def _shape_key(rows: int, **axes: int) -> int:
     """The packed bucket for a launch of `rows` rows.
 
@@ -138,9 +139,7 @@ def _shape_key(rows: int, **axes: int) -> int:
     return both_key(rows, **axes)
 
 
-@configured('mpnn_edge_tail_fwd_gemm_recompute_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, TILES=4, num_warps=4, num_stages=2))
+@configured("mpnn_edge_tail_fwd_gemm_recompute_triton", key=["shape_key"], default=dict(BLOCK_M1=64, TILES=4, num_warps=4, num_stages=2))
 @triton.jit
 def _edge_tail_project_kernel(
     edge_ptr,
@@ -168,12 +167,8 @@ def _edge_tail_project_kernel(
     columns = tl.arange(0, WIDTH)
     # nn.Linear stores [output, input] and tl.dot contracts [input, output], so each
     # weight is loaded once in the contraction orientation.
-    edge_weight = tl.load(
-        edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE
-    ).to(tl.bfloat16)
-    hidden_weight = tl.load(
-        hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
-    ).to(tl.bfloat16)
+    edge_weight = tl.load(edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE).to(tl.bfloat16)
+    hidden_weight = tl.load(hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH).to(tl.bfloat16)
     hidden_bias = tl.load(hidden_bias_ptr + columns).to(tl.bfloat16)
 
     first_tile = tl.program_id(0) * TILES
@@ -181,9 +176,7 @@ def _edge_tail_project_kernel(
         row_indices = (first_tile + tile) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
         row_valid = row_indices < rows
         offsets = row_indices[:, None] * WIDTH + columns[None, :]
-        edge = tl.load(edge_ptr + offsets, mask=row_valid[:, None], other=0.0).to(
-            tl.bfloat16
-        )
+        edge = tl.load(edge_ptr + offsets, mask=row_valid[:, None], other=0.0).to(tl.bfloat16)
         groups = row_indices // NEIGHBORS
         query = tl.load(
             query_ptr + groups[:, None] * WIDTH + columns[None, :],
@@ -203,15 +196,15 @@ def _edge_tail_project_kernel(
         preactivation = (query + projected).to(tl.bfloat16).to(tl.float32)
         preactivation = (preactivation + neighbor).to(tl.bfloat16)
         activated = _gelu(preactivation.to(tl.float32)).to(tl.bfloat16)
-        hidden = (tl.dot(activated, hidden_weight) + hidden_bias[None, :]).to(
-            tl.bfloat16
-        )
+        hidden = (tl.dot(activated, hidden_weight) + hidden_bias[None, :]).to(tl.bfloat16)
         tl.store(hidden_ptr + offsets, hidden, mask=row_valid[:, None])
 
 
-@configured('mpnn_edge_tail_fwd_gemm_layernorm_recompute_triton',
-            key=["shape_key", "DROPOUT"],
-            default=dict(BLOCK_M1=64, BLOCK_K=32, TILES=4, num_warps=4, num_stages=2))
+@configured(
+    "mpnn_edge_tail_fwd_gemm_layernorm_recompute_triton",
+    key=["shape_key", "DROPOUT"],
+    default=dict(BLOCK_M1=64, BLOCK_K=32, TILES=4, num_warps=4, num_stages=2),
+)
 @triton.jit
 def _edge_tail_norm_kernel(
     hidden_ptr,
@@ -250,9 +243,7 @@ def _edge_tail_norm_kernel(
         row_indices = (first_tile + tile) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
         row_valid = row_indices < rows
         offsets = row_indices[:, None] * WIDTH + columns[None, :]
-        edge = tl.load(edge_ptr + offsets, mask=row_valid[:, None], other=0.0).to(
-            tl.bfloat16
-        )
+        edge = tl.load(edge_ptr + offsets, mask=row_valid[:, None], other=0.0).to(tl.bfloat16)
         # Contract in BLOCK_K slices, applying the second GELU per slice as it is
         # loaded.  At BLOCK_K == WIDTH this is one full-width dot and reproduces the
         # unlooped kernel exactly; below that it stages a smaller operand and buys
@@ -268,18 +259,12 @@ def _edge_tail_norm_kernel(
             ).to(tl.float32)
             accumulator += tl.dot(
                 _gelu(hidden_slice).to(tl.bfloat16),
-                tl.load(
-                    output_weight_ptr
-                    + slice_columns[:, None]
-                    + columns[None, :] * WIDTH
-                ).to(tl.bfloat16),
+                tl.load(output_weight_ptr + slice_columns[:, None] + columns[None, :] * WIDTH).to(tl.bfloat16),
             )
         update = (accumulator + output_bias[None, :]).to(tl.bfloat16)
         if DROPOUT:
             keep = tl.rand(seed, offsets, n_rounds=_PHILOX_ROUNDS) < keep_probability
-            dropped = tl.where(keep, update.to(tl.float32) * dropout_scale, 0.0).to(
-                tl.bfloat16
-            )
+            dropped = tl.where(keep, update.to(tl.float32) * dropout_scale, 0.0).to(tl.bfloat16)
         else:
             dropped = update
         values = (edge.to(tl.float32) + dropped.to(tl.float32)).to(tl.bfloat16)
@@ -305,14 +290,16 @@ def _edge_tail_norm_kernel(
 # shapes together, and the direct measurement overturned it.
 
 
-@configured('mpnn_edge_tail_bwd_recompute_triton',
-            key=["shape_key", "DROPOUT"],
-            default=dict(BLOCK_M1=64, TILES=4, num_warps=4, num_stages=2),
-            reset_to_zero=[
+@configured(
+    "mpnn_edge_tail_bwd_recompute_triton",
+    key=["shape_key", "DROPOUT"],
+    default=dict(BLOCK_M1=64, TILES=4, num_warps=4, num_stages=2),
+    reset_to_zero=[
         "grad_output_bias_ptr",
         "grad_norm_weight_ptr",
         "grad_norm_bias_ptr",
-    ])
+    ],
+)
 @triton.jit
 def _edge_tail_replay_kernel(
     grad_out_ptr,
@@ -360,15 +347,9 @@ def _edge_tail_replay_kernel(
     # use inside the loop and prevent LICM from extending those lifetimes.
     NATIVE_BF16: tl.constexpr = edge_weight_ptr.dtype.element_ty == tl.bfloat16
     if not NATIVE_BF16:
-        edge_weight = tl.load(
-            edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE
-        ).to(tl.bfloat16)
-        hidden_weight = tl.load(
-            hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
-        ).to(tl.bfloat16)
-        output_weight = tl.load(
-            output_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
-        ).to(tl.bfloat16)
+        edge_weight = tl.load(edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE).to(tl.bfloat16)
+        hidden_weight = tl.load(hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH).to(tl.bfloat16)
+        output_weight = tl.load(output_weight_ptr + columns[:, None] + columns[None, :] * WIDTH).to(tl.bfloat16)
     hidden_bias = tl.load(hidden_bias_ptr + columns).to(tl.bfloat16)
     output_bias = tl.load(output_bias_ptr + columns).to(tl.bfloat16)
     norm_weight = tl.load(norm_weight_ptr + columns).to(tl.float32)
@@ -387,9 +368,7 @@ def _edge_tail_replay_kernel(
         local_offsets = local_rows[:, None] * WIDTH + columns[None, :]
 
         # --- replay forward from the saved inputs -----------------------------
-        edge = tl.load(edge_ptr + offsets, mask=row_valid[:, None], other=0.0).to(
-            tl.bfloat16
-        )
+        edge = tl.load(edge_ptr + offsets, mask=row_valid[:, None], other=0.0).to(tl.bfloat16)
         groups = row_indices // NEIGHBORS
         query = tl.load(
             query_ptr + groups[:, None] * WIDTH + columns[None, :],
@@ -403,33 +382,21 @@ def _edge_tail_replay_kernel(
             other=0.0,
         ).to(tl.float32)
         if NATIVE_BF16:
-            edge_weight = tl.load(
-                edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE
-            ).to(tl.bfloat16)
+            edge_weight = tl.load(edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE).to(tl.bfloat16)
         projected = tl.dot(edge, edge_weight).to(tl.bfloat16).to(tl.float32)
         preactivation = (query + projected).to(tl.bfloat16).to(tl.float32)
         preactivation = (preactivation + neighbor).to(tl.bfloat16)
         activated = _gelu(preactivation.to(tl.float32)).to(tl.bfloat16)
         if NATIVE_BF16:
-            hidden_weight = tl.load(
-                hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
-            ).to(tl.bfloat16)
-        hidden = (tl.dot(activated, hidden_weight) + hidden_bias[None, :]).to(
-            tl.bfloat16
-        )
+            hidden_weight = tl.load(hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH).to(tl.bfloat16)
+        hidden = (tl.dot(activated, hidden_weight) + hidden_bias[None, :]).to(tl.bfloat16)
         activated_hidden = _gelu(hidden.to(tl.float32)).to(tl.bfloat16)
         if NATIVE_BF16:
-            output_weight = tl.load(
-                output_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
-            ).to(tl.bfloat16)
-        update = (tl.dot(activated_hidden, output_weight) + output_bias[None, :]).to(
-            tl.bfloat16
-        )
+            output_weight = tl.load(output_weight_ptr + columns[:, None] + columns[None, :] * WIDTH).to(tl.bfloat16)
+        update = (tl.dot(activated_hidden, output_weight) + output_bias[None, :]).to(tl.bfloat16)
         if DROPOUT:
             keep = tl.rand(seed, offsets, n_rounds=_PHILOX_ROUNDS) < keep_probability
-            dropped = tl.where(keep, update.to(tl.float32) * dropout_scale, 0.0).to(
-                tl.bfloat16
-            )
+            dropped = tl.where(keep, update.to(tl.float32) * dropout_scale, 0.0).to(tl.bfloat16)
         else:
             dropped = update
         values = (edge.to(tl.float32) + dropped.to(tl.float32)).to(tl.bfloat16)
@@ -441,16 +408,12 @@ def _edge_tail_replay_kernel(
         normalized = centered * rstd[:, None]
 
         # --- LayerNorm, dropout, residual ------------------------------------
-        grad_out = tl.load(
-            grad_out_ptr + offsets, mask=row_valid[:, None], other=0.0
-        ).to(tl.float32)
+        grad_out = tl.load(grad_out_ptr + offsets, mask=row_valid[:, None], other=0.0).to(tl.float32)
         grad_norm_weight += tl.sum(grad_out * normalized, axis=0)
         grad_norm_bias += tl.sum(grad_out, axis=0)
         scaled = grad_out * norm_weight[None, :]
         grad_values = rstd[:, None] * (
-            scaled
-            - (tl.sum(scaled, axis=1) / WIDTH)[:, None]
-            - normalized * (tl.sum(scaled * normalized, axis=1) / WIDTH)[:, None]
+            scaled - (tl.sum(scaled, axis=1) / WIDTH)[:, None] - normalized * (tl.sum(scaled * normalized, axis=1) / WIDTH)[:, None]
         )
         if DROPOUT:
             grad_update = tl.where(keep, grad_values * dropout_scale, 0.0)
@@ -464,9 +427,7 @@ def _edge_tail_replay_kernel(
         # autotuner's repeated benchmark runs would accumulate into it.  A measured run
         # with that bug reported a relative error of 57 on this gradient alone.
         tl.store(grad_values_ptr + local_offsets, grad_values, mask=row_valid[:, None])
-        tl.store(
-            preactivation_ptr + local_offsets, preactivation, mask=row_valid[:, None]
-        )
+        tl.store(preactivation_ptr + local_offsets, preactivation, mask=row_valid[:, None])
         tl.store(hidden_ptr + local_offsets, hidden, mask=row_valid[:, None])
         tl.store(
             grad_update_ptr + local_offsets,
@@ -479,10 +440,12 @@ def _edge_tail_replay_kernel(
     tl.atomic_add(grad_norm_bias_ptr + columns, grad_norm_bias)
 
 
-@configured('mpnn_edge_tail_bwd_dx_recompute_triton',
-            key=["shape_key"],
-            default=dict(BLOCK_M1=64, TILES=4, num_warps=4, num_stages=2),
-            reset_to_zero=["grad_query_ptr", "grad_neighbor_ptr", "grad_hidden_bias_ptr"])
+@configured(
+    "mpnn_edge_tail_bwd_dx_recompute_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_M1=64, TILES=4, num_warps=4, num_stages=2),
+    reset_to_zero=["grad_query_ptr", "grad_neighbor_ptr", "grad_hidden_bias_ptr"],
+)
 @triton.jit
 def _edge_tail_dx_kernel(
     preactivation_ptr,
@@ -525,15 +488,9 @@ def _edge_tail_dx_kernel(
     # use inside the loop and prevent LICM from extending those lifetimes.
     NATIVE_BF16: tl.constexpr = edge_weight_ptr.dtype.element_ty == tl.bfloat16
     if not NATIVE_BF16:
-        edge_weight = tl.load(
-            edge_weight_ptr + columns[:, None] * EDGE_WEIGHT_STRIDE + columns[None, :]
-        ).to(tl.bfloat16)
-        hidden_weight = tl.load(
-            hidden_weight_ptr + columns[:, None] * WIDTH + columns[None, :]
-        ).to(tl.bfloat16)
-        output_weight = tl.load(
-            output_weight_ptr + columns[:, None] * WIDTH + columns[None, :]
-        ).to(tl.bfloat16)
+        edge_weight = tl.load(edge_weight_ptr + columns[:, None] * EDGE_WEIGHT_STRIDE + columns[None, :]).to(tl.bfloat16)
+        hidden_weight = tl.load(hidden_weight_ptr + columns[:, None] * WIDTH + columns[None, :]).to(tl.bfloat16)
+        output_weight = tl.load(output_weight_ptr + columns[:, None] * WIDTH + columns[None, :]).to(tl.bfloat16)
     grad_hidden_bias = tl.zeros((WIDTH,), tl.float32)
 
     first_tile = tl.program_id(0) * TILES
@@ -544,24 +501,16 @@ def _edge_tail_dx_kernel(
         offsets = row_indices[:, None] * WIDTH + columns[None, :]
         local_offsets = local_rows[:, None] * WIDTH + columns[None, :]
 
-        grad_update = tl.load(
-            grad_update_ptr + local_offsets, mask=row_valid[:, None], other=0.0
-        ).to(tl.bfloat16)
-        hidden = tl.load(
-            hidden_ptr + local_offsets, mask=row_valid[:, None], other=0.0
-        ).to(tl.float32)
+        grad_update = tl.load(grad_update_ptr + local_offsets, mask=row_valid[:, None], other=0.0).to(tl.bfloat16)
+        hidden = tl.load(hidden_ptr + local_offsets, mask=row_valid[:, None], other=0.0).to(tl.float32)
         # This pass wants both GELU and its derivative at ``hidden``, and again at
         # ``preactivation`` below -- four calls over two distinct arguments, so half the
         # erf evaluations were recomputation.  Hoisting the shared term is bit for bit
         # identical; see the note on the helpers.
         hidden_erf = _gelu_erf(hidden)
         if NATIVE_BF16:
-            output_weight = tl.load(
-                output_weight_ptr + columns[:, None] * WIDTH + columns[None, :]
-            ).to(tl.bfloat16)
-        grad_hidden = tl.dot(grad_update, output_weight) * _gelu_grad_from_erf(
-            hidden, hidden_erf
-        )
+            output_weight = tl.load(output_weight_ptr + columns[:, None] * WIDTH + columns[None, :]).to(tl.bfloat16)
+        grad_hidden = tl.dot(grad_update, output_weight) * _gelu_grad_from_erf(hidden, hidden_erf)
         grad_hidden_bias += tl.sum(grad_hidden, axis=0)
         grad_hidden_bf16 = grad_hidden.to(tl.bfloat16)
         # Both MLP weight gradients contract against GELU of a preactivation this pass
@@ -577,18 +526,13 @@ def _edge_tail_dx_kernel(
             mask=row_valid[:, None],
         )
 
-        preactivation = tl.load(
-            preactivation_ptr + local_offsets, mask=row_valid[:, None], other=0.0
-        ).to(tl.float32)
+        preactivation = tl.load(preactivation_ptr + local_offsets, mask=row_valid[:, None], other=0.0).to(tl.float32)
         preactivation_erf = _gelu_erf(preactivation)
         if NATIVE_BF16:
-            hidden_weight = tl.load(
-                hidden_weight_ptr + columns[:, None] * WIDTH + columns[None, :]
-            ).to(tl.bfloat16)
-        grad_preactivation = (
-            tl.dot(grad_hidden_bf16, hidden_weight)
-            * _gelu_grad_from_erf(preactivation, preactivation_erf)
-        ).to(tl.bfloat16)
+            hidden_weight = tl.load(hidden_weight_ptr + columns[:, None] * WIDTH + columns[None, :]).to(tl.bfloat16)
+        grad_preactivation = (tl.dot(grad_hidden_bf16, hidden_weight) * _gelu_grad_from_erf(preactivation, preactivation_erf)).to(
+            tl.bfloat16
+        )
         tl.store(
             activated_ptr + local_offsets,
             _gelu_from_erf(preactivation, preactivation_erf).to(tl.bfloat16),
@@ -596,15 +540,11 @@ def _edge_tail_dx_kernel(
         )
 
         if NATIVE_BF16:
-            edge_weight = tl.load(
-                edge_weight_ptr + columns[:, None] * EDGE_WEIGHT_STRIDE + columns[None, :]
-            ).to(tl.bfloat16)
+            edge_weight = tl.load(edge_weight_ptr + columns[:, None] * EDGE_WEIGHT_STRIDE + columns[None, :]).to(tl.bfloat16)
         # The residual branch's gradient arrives through an FP32 chunk buffer, so this
         # is a plain overwrite: the pass stays idempotent and the two contributions
         # round to BF16 exactly once, here.
-        residual = tl.load(
-            grad_values_ptr + local_offsets, mask=row_valid[:, None], other=0.0
-        ).to(tl.float32)
+        residual = tl.load(grad_values_ptr + local_offsets, mask=row_valid[:, None], other=0.0).to(tl.float32)
         tl.store(
             grad_edge_ptr + offsets,
             residual + tl.dot(grad_preactivation, edge_weight),
@@ -841,9 +781,7 @@ def _backward_op(
     scale = 1.0 / keep_probability if dropout else 1.0
 
     def chunk_grid(span):
-        return lambda meta: (
-            triton.cdiv(triton.cdiv(span, meta["BLOCK_M1"]), meta["TILES"]),
-        )
+        return lambda meta: (triton.cdiv(triton.cdiv(span, meta["BLOCK_M1"]), meta["TILES"]),)
 
     for start in range(0, rows, chunk_rows):
         span = min(chunk_rows, rows - start)
@@ -909,15 +847,9 @@ def _backward_op(
         # above the dX pass for the sweep that put a Triton replacement at 0.230 ms
         # against 0.197 ms here.  The FP32 running sum across chunks is better
         # conditioned than one BF16 GEMM output over all rows.
-        grad_edge_weight += torch.mm(
-            chunk_grad_preactivation[:span].t(), flat_edge[start : start + span]
-        ).to(float32)
-        grad_hidden_weight += torch.mm(
-            chunk_grad_hidden[:span].t(), chunk_activated[:span]
-        ).to(float32)
-        grad_output_weight += torch.mm(
-            chunk_grad_update[:span].t(), chunk_activated_hidden[:span]
-        ).to(float32)
+        grad_edge_weight += torch.mm(chunk_grad_preactivation[:span].t(), flat_edge[start : start + span]).to(float32)
+        grad_hidden_weight += torch.mm(chunk_grad_hidden[:span].t(), chunk_activated[:span]).to(float32)
+        grad_output_weight += torch.mm(chunk_grad_update[:span].t(), chunk_activated_hidden[:span]).to(float32)
 
     return [
         grad_edge,

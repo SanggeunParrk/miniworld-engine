@@ -15,14 +15,17 @@ MODULES = ("TriangleMultiplication", "TriangleAttention", "Transition", "Attenti
 
 
 def _case(module: str, mode: str) -> cfgmod.Case:
-    cfg = cfgmod.from_dict({"modules": [module], "lengths": "min", "depths": "min", "samples": "min", "dtypes": ["master"],
-                            "modes": [mode], "device": "cuda"})
+    cfg = cfgmod.from_dict(
+        {"modules": [module], "lengths": "min", "depths": "min", "samples": "min", "dtypes": ["master"], "modes": [mode], "device": "cuda"}
+    )
     return next(iter(cfgmod.cases(cfg)))
 
 
 def _call(module: torch.nn.Module, inputs: dict, upstream: list[torch.Tensor] | None, train: bool) -> list[torch.Tensor]:
-    inputs = {k: v.detach().clone().requires_grad_(train) if isinstance(v, torch.Tensor) and v.is_floating_point() else v
-              for k, v in inputs.items()}
+    inputs = {
+        k: v.detach().clone().requires_grad_(train) if isinstance(v, torch.Tensor) and v.is_floating_point() else v
+        for k, v in inputs.items()
+    }
     for p in module.parameters():
         p.grad = None
     with torch.set_grad_enabled(train), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -31,8 +34,9 @@ def _call(module: torch.nn.Module, inputs: dict, upstream: list[torch.Tensor] | 
     values = [t.detach().clone() for t in outs]
     if train:
         assert upstream is not None
-        torch.autograd.backward([t for t in outs if t.requires_grad], [g.to(t.dtype) for t, g in zip(outs, upstream, strict=True)
-                                                                         if t.requires_grad])
+        torch.autograd.backward(
+            [t for t in outs if t.requires_grad], [g.to(t.dtype) for t, g in zip(outs, upstream, strict=True) if t.requires_grad]
+        )
         values += [v.grad.clone() for v in inputs.values() if isinstance(v, torch.Tensor) and v.grad is not None]
         values += [p.grad.clone() for p in module.parameters() if p.grad is not None]
     return values
@@ -45,7 +49,7 @@ def test_cuda_is_bitwise_deterministic(module: str, mode: str):
     if "cuda" not in case.cls.backends:
         pytest.skip(f"{module} has no cuda backend")
     m = cfgmod.build(case, device="cuda").set_backend("cuda")
-    accuracy._quiet(m)   # dropout off: its masks are random draws, not numerics (as in the measurer)
+    accuracy._quiet(m)  # dropout off: its masks are random draws, not numerics (as in the measurer)
     inputs = cfgmod.inputs(case, m, device="cuda")
     train = mode == "train"
     with torch.set_grad_enabled(train), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -61,4 +65,6 @@ def test_cuda_is_bitwise_deterministic(module: str, mode: str):
     second = _call(m, inputs, upstream, train)
     assert len(first) == len(second) and first
     for i, (a, b) in enumerate(zip(first, second, strict=True)):
-        assert torch.equal(a, b), f"{case.label}: tensor {i} differs between two identical calls (max |diff| {(a - b).abs().max().item():.3e})"
+        assert torch.equal(a, b), (
+            f"{case.label}: tensor {i} differs between two identical calls (max |diff| {(a - b).abs().max().item():.3e})"
+        )

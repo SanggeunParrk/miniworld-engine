@@ -32,7 +32,7 @@ def prebuild_sm80(rows):
         yield sm80._glue_ext
         if any(r["module"] in TOKEN and r["dtype"] == "float32" for r in rows):
             yield sm80._tf32_ext
-    if "AttentionPairBias" in modules:   # integrations/attention_pair_bias_sm80's composed path (fp32, the wide pairs, gate_bias)
+    if "AttentionPairBias" in modules:  # integrations/attention_pair_bias_sm80's composed path (fp32, the wide pairs, gate_bias)
         from . import sm80
 
         yield sm80._ext

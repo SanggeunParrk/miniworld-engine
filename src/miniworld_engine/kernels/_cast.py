@@ -50,8 +50,10 @@ def _cast_kernel(s0, d0, n0, s1, d1, n1, s2, d2, n2, s3, d3, n3, s4, d4, n4, s5,
 def _cast_pack_fake(srcs, n_cat):
     """``[cat of the first n_cat, *the others]`` as bf16 -- the shapes of the launch, no work."""
     rows = sum(s.shape[0] for s in srcs[:n_cat])
-    return [srcs[0].new_empty((rows, *srcs[0].shape[1:]), dtype=torch.bfloat16),
-            *(s.new_empty(s.shape, dtype=torch.bfloat16) for s in srcs[n_cat:])]
+    return [
+        srcs[0].new_empty((rows, *srcs[0].shape[1:]), dtype=torch.bfloat16),
+        *(s.new_empty(s.shape, dtype=torch.bfloat16) for s in srcs[n_cat:]),
+    ]
 
 
 @opaque(fake=_cast_pack_fake, name="weights_cast_pack")
@@ -66,14 +68,14 @@ def cast_pack(srcs: list[torch.Tensor], n_cat: int) -> list[torch.Tensor]:
     rest = [s.new_empty(s.shape, dtype=torch.bfloat16) for s in srcs[n_cat:]]
     dsts, r = [], 0
     for s in srcs[:n_cat]:
-        dsts.append(cat[r:r + s.shape[0]])
+        dsts.append(cat[r : r + s.shape[0]])
         r += s.shape[0]
     args = []
     total = 0
     for s, d in zip(srcs, dsts + rest, strict=True):
         args += [s, d, s.numel()]
         total += triton.cdiv(s.numel(), _BLOCK)
-    while len(args) < 3 * MAX_TENSORS:           # unused slots: size 0
+    while len(args) < 3 * MAX_TENSORS:  # unused slots: size 0
         args += [srcs[0], dsts[0], 0]
     _cast_kernel[(total,)](*args, BLOCK=_BLOCK, num_warps=4)  # pyright: ignore[reportCallIssue]  -- triton launch options (num_warps) are not in the JIT function's typed signature
     return [cat, *rest]

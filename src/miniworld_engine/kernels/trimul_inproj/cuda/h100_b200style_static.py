@@ -41,11 +41,9 @@ def output_kernel(d, h, cfg, rowpad=False, xbuf=1, extra=()):
         "-DMW_K1_STREAM=1",
         *(["-DROWPAD=1"] if rowpad else []),
         *([f"-DXBUF={xbuf}"] if xbuf != 1 else []),
-        *extra,   # measurement builds only (e.g. -DK3_DIAG=1)
+        *extra,  # measurement builds only (e.g. -DK3_DIAG=1)
     ]
-    kernel = T.load_unit(
-        str(T.compile_text(body, flags)), "b200style_k3_static"
-    ).kernel(name)
+    kernel = T.load_unit(str(T.compile_text(body, flags)), "b200style_k3_static").kernel(name)
     smem = BI._k3_smem(d, bn, stages) + (xbuf - 1) * (2 * 64 * bn * 2 + 16)
     if smem > 232448:
         raise ValueError("K3 resources")

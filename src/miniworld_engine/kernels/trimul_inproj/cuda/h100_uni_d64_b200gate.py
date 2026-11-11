@@ -24,8 +24,7 @@ K3_TILE = (2, 64, 4, 1)
 
 
 def supports(width, length) -> bool:
-    return width == WIDTH and ((length % 128 == 0 and length >= 128)
-                                         if T.cuda_training_aux_enabled() else length in (384, 768))
+    return width == WIDTH and ((length % 128 == 0 and length >= 128) if T.cuda_training_aux_enabled() else length in (384, 768))
 
 
 def _k3_smem(tile):
@@ -33,17 +32,38 @@ def _k3_smem(tile):
     bmt = bi * bj
     nkcz = WIDTH // 64
     nbar = 2 * nkcz + 2 + 2 * slots
-    return (bmt // 64 * HIDDEN * 128 + nkcz * bmt * 128 + slots * max(WIDTH, HIDDEN) * 64
-            + 8 * 16 * 64 * 2 + (2 * WIDTH + 2 * HIDDEN) * 4 + (nbar * 8 + 127) // 128 * 128)
+    return (
+        bmt // 64 * HIDDEN * 128
+        + nkcz * bmt * 128
+        + slots * max(WIDTH, HIDDEN) * 64
+        + 8 * 16 * 64 * 2
+        + (2 * WIDTH + 2 * HIDDEN) * 4
+        + (nbar * 8 + 127) // 128 * 128
+    )
 
 
 @T.device_cache
 def _k3(tile):
     bi, bj, slots, acc = tile
-    defines = dict(MW_CZ=WIDTH, MW_HIDDEN=HIDDEN, MW_SAVE_PG=0, MW_PG_METHOD=-1, XHAT_FP32=-1,
-                   MW_SAVE_IN=0, MW_SAVE_OUT=0, MW_STORE_METHOD=0, MW_SAVE_STATS_IN=1,
-                   MW_SAVE_STATS_OUT=1, MW_BI=bi, MW_BJ=bj, MW_SLOT=slots, MW_ACC=acc,
-                   TMN_K3_REGS_24_240=1, MW_SERIAL=1, MW_FUSED=1)
+    defines = dict(
+        MW_CZ=WIDTH,
+        MW_HIDDEN=HIDDEN,
+        MW_SAVE_PG=0,
+        MW_PG_METHOD=-1,
+        XHAT_FP32=-1,
+        MW_SAVE_IN=0,
+        MW_SAVE_OUT=0,
+        MW_STORE_METHOD=0,
+        MW_SAVE_STATS_IN=1,
+        MW_SAVE_STATS_OUT=1,
+        MW_BI=bi,
+        MW_BJ=bj,
+        MW_SLOT=slots,
+        MW_ACC=acc,
+        TMN_K3_REGS_24_240=1,
+        MW_SERIAL=1,
+        MW_FUSED=1,
+    )
     cubin = T.compile(R / "save_k3_d64.cu", D64._flags(T._upstream() / "csrc", defines.items()))
     k = T.load_unit(str(cubin), "d64_save_k3").kernel("save_k3")
     smem = _k3_smem(tile)
@@ -68,7 +88,14 @@ def _bwd_wg(master=False, affine_split=False, gatepipe=True):
     defines += [("GATEPIPE", int(gatepipe)), ("AFFINE_REG", int(gatepipe and not affine_split))]
     cubin = T.compile(R / "uni_bwd_wg.cu", D64._flags(R, defines))
     unit = T.load_unit(str(cubin), "uni64_bwd_wg")
-    b1, b2, fin = (unit.kernel(n) for n in ("uni64_b1w_b7gate", (("uni64_b2w_affinereg" if not affine_split else "uni64_b2w_gatepipe") if gatepipe else "uni64_b2w_b7gate"), "uni64_finw_b7gate"))
+    b1, b2, fin = (
+        unit.kernel(n)
+        for n in (
+            "uni64_b1w_b7gate",
+            (("uni64_b2w_affinereg" if not affine_split else "uni64_b2w_gatepipe") if gatepipe else "uni64_b2w_b7gate"),
+            "uni64_finw_b7gate",
+        )
+    )
     b1.set_max_dynamic_smem(B1W_SMEM)
     b2.set_max_dynamic_smem(B2W_SMEM)
     return b1, b2, fin
@@ -81,8 +108,21 @@ def _front(x, w1, maskf, gi, bi, ab):
     kk, K = D64._k1()
     bsz, n = x.shape[0], x.shape[1]
     cfg = K.lookup("sm_90a", WIDTH, HIDDEN, "b", N=n)["k1"]
-    kk.k1(x[0] if bsz == 1 else x.view(bsz * n, n, WIDTH), maskf, {"w1": w1, "ln_in_w": gi, "ln_in_b": bi}, ab, N=n, Np=n,
-          cz=WIDTH, ch=HIDDEN, cfg=cfg, lnm=2, eps=1e-5, cache=_k1_cache(), rows=bsz * n)
+    kk.k1(
+        x[0] if bsz == 1 else x.view(bsz * n, n, WIDTH),
+        maskf,
+        {"w1": w1, "ln_in_w": gi, "ln_in_b": bi},
+        ab,
+        N=n,
+        Np=n,
+        cz=WIDTH,
+        ch=HIDDEN,
+        cfg=cfg,
+        lnm=2,
+        eps=1e-5,
+        cache=_k1_cache(),
+        rows=bsz * n,
+    )
 
 
 @T.device_cache
@@ -93,6 +133,7 @@ def _k1_cache():
 def _bmm(a, b, *, out):
     if T.d64_uni_owned_bmm_enabled(a.shape[-1]):
         from ._h100_pack import owned_bmm
+
         return owned_bmm(a, b, out=out)
     return _H100_BMM.bmm(a, b, out=out)
 
@@ -118,15 +159,35 @@ def _output(x, tri, wg, wp, gi, bi, go, bo, ds, y, stats):
     tj = (n + bj - 1) // bj
     tiles = ((rows + bi_ - 1) // bi_) * tj
     ymap = D64._map(y, [64, 16, 1], [WIDTH, n, rows], [WIDTH * 2, n * WIDTH * 2])
-    base = L.Struct.fixed("h100_uni64_affinereg:k3base", [
-        D64._map(x, [64, bj, bi_], [WIDTH, n, rows], [WIDTH * 2, n * WIDTH * 2]),
-        D64._map(tri, [64, 1, 64], [n, rows, HIDDEN], [n * 2, m * 2]),
-        D64._map(wg, [64, 32], [WIDTH, WIDTH], [WIDTH * 2]),
-        D64._map(wp, [64, 32], [HIDDEN, WIDTH], [HIDDEN * 2]),
-        ymap, gi, bi, go, bo, x, y, None, n, n, tj, tiles, 1, 0, 1e-5, 0])
-    params = L.Struct.fixed("h100_uni64_affinereg_v2:k3", [
-        base, ds, ymap, ymap, None, None, stats[0], stats[1], stats[2], stats[3], ymap, ymap,
-        None, None, 0 if bsz == 1 else rows])
+    base = L.Struct.fixed(
+        "h100_uni64_affinereg:k3base",
+        [
+            D64._map(x, [64, bj, bi_], [WIDTH, n, rows], [WIDTH * 2, n * WIDTH * 2]),
+            D64._map(tri, [64, 1, 64], [n, rows, HIDDEN], [n * 2, m * 2]),
+            D64._map(wg, [64, 32], [WIDTH, WIDTH], [WIDTH * 2]),
+            D64._map(wp, [64, 32], [HIDDEN, WIDTH], [HIDDEN * 2]),
+            ymap,
+            gi,
+            bi,
+            go,
+            bo,
+            x,
+            y,
+            None,
+            n,
+            n,
+            tj,
+            tiles,
+            1,
+            0,
+            1e-5,
+            0,
+        ],
+    )
+    params = L.Struct.fixed(
+        "h100_uni64_affinereg_v2:k3",
+        [base, ds, ymap, ymap, None, None, stats[0], stats[1], stats[2], stats[3], ymap, ymap, None, None, 0 if bsz == 1 else rows],
+    )
     k.launch((min(tiles, num_sms()), 1, 1), (384, 1, 1), [params], smem)
 
 
@@ -161,11 +222,20 @@ def _forward_fake(leaves, mask, ds, outgoing):
     bsz, n = x.shape[0], x.shape[1]
     r = bsz * n
     if len(leaves) == 12:
-        return [torch.empty_like(x), x.new_empty((2*HIDDEN,r,n)), x.new_empty((HIDDEN,r,n)),
-                x.new_empty((4,r*n),dtype=torch.float32)]
-    return [torch.empty_like(x), x.new_empty((2 * HIDDEN, r, n)), x.new_empty((HIDDEN, r, n)),
-            x.new_empty((4, r * n), dtype=torch.float32), x.new_empty((4 * HIDDEN, WIDTH)),
-            x.new_empty((r, n), dtype=torch.float32)]
+        return [
+            torch.empty_like(x),
+            x.new_empty((2 * HIDDEN, r, n)),
+            x.new_empty((HIDDEN, r, n)),
+            x.new_empty((4, r * n), dtype=torch.float32),
+        ]
+    return [
+        torch.empty_like(x),
+        x.new_empty((2 * HIDDEN, r, n)),
+        x.new_empty((HIDDEN, r, n)),
+        x.new_empty((4, r * n), dtype=torch.float32),
+        x.new_empty((4 * HIDDEN, WIDTH)),
+        x.new_empty((r, n), dtype=torch.float32),
+    ]
 
 
 @opaque(fake=_forward_fake, name="trimul_h100_affinereg_uni64_train_fwd")
@@ -193,7 +263,7 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     ab, tri, stats, w1, maskf = saved
     L = T._launch_module()
     bsz, n = x.shape[0], x.shape[1]
-    m = bsz * n * n                     # tokens b-major: B1 / B2 run over every sample's rows, the weight partials sum them
+    m = bsz * n * n  # tokens b-major: B1 / B2 run over every sample's rows, the weight partials sum them
     h = WIDTH
     dy = dy.contiguous()
     b1, b2, fin = _bwd_wg(master, T.d64_uni_affine_enabled(x, outgoing), gatepipe=not (outgoing and n == 256))
@@ -206,34 +276,66 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     dt = torch.empty_like(tri)
     dgate = torch.empty_like(x)
     p1 = torch.empty((g1, B1W_SLOT), device=x.device, dtype=torch.float32)
-    params = L.Struct.fixed("h100_uni64_affinereg:b1w", [
-        planes(tri), rows(x), rows(dy), D64._map2(ds.reshape(bsz * n, h).contiguous(), [64, 64], [h, bsz * n], [h * 2]),
-        D64._map2(stats, [64, 4], [m, 4], [m * 4], "none"), planes(dt), rows(dgate),
-        wp, wg, go, bo, gi, bi, p1, ntiles, n, None])
+    params = L.Struct.fixed(
+        "h100_uni64_affinereg:b1w",
+        [
+            planes(tri),
+            rows(x),
+            rows(dy),
+            D64._map2(ds.reshape(bsz * n, h).contiguous(), [64, 64], [h, bsz * n], [h * 2]),
+            D64._map2(stats, [64, 4], [m, 4], [m * 4], "none"),
+            planes(dt),
+            rows(dgate),
+            wp,
+            wg,
+            go,
+            bo,
+            gi,
+            bi,
+            p1,
+            ntiles,
+            n,
+            None,
+        ],
+    )
     b1.launch((g1, 1, 1), (256, 1, 1), [params], B1W_SMEM)
     left, right, dtf = fold(ab[:HIDDEN]), fold(ab[HIDDEN:]), fold(dt)
     dl = torch.empty_like(tri)
     dr = torch.empty_like(tri)
-    if outgoing:        # tri = l r^T
+    if outgoing:  # tri = l r^T
         _bmm(dtf, right, out=fold(dl))
         _bmm(dtf.transpose(-1, -2), left, out=fold(dr))
-    else:               # tri = l^T r
+    else:  # tri = l^T r
         _bmm(right, dtf.transpose(-1, -2), out=fold(dl))
         _bmm(left, dtf, out=fold(dr))
     dx = T.take_input_grad(x)
     p2 = torch.empty((g2, B2W_SLOT), device=x.device, dtype=torch.float32)
-    params = L.Struct.fixed("h100_uni64_affinereg:b2w", [
-        planes(dl), planes(dr), rows(x), rows(dgate), rows(dy),
-        D64._map2(stats, [64, 2], [m, 4], [m * 4], "none"),
-        D64._map2(maskf.reshape(m), [64, 1], [m, 1], [m * 4], "none"), rows(dx),
-        w1, wg, gi, bi, p2, ntiles, None])
+    params = L.Struct.fixed(
+        "h100_uni64_affinereg:b2w",
+        [
+            planes(dl),
+            planes(dr),
+            rows(x),
+            rows(dgate),
+            rows(dy),
+            D64._map2(stats, [64, 2], [m, 4], [m * 4], "none"),
+            D64._map2(maskf.reshape(m), [64, 1], [m, 1], [m * 4], "none"),
+            rows(dx),
+            w1,
+            wg,
+            gi,
+            bi,
+            p2,
+            ntiles,
+            None,
+        ],
+    )
     b2.launch((g2, 1, 1), (256, 1, 1), [params], B2W_SMEM)
     grads = [torch.empty_like(w, dtype=torch.float32 if master else w.dtype) for w in (wl, wlg, wr, wrg, wg, wp)]
     f32 = dict(device=x.device, dtype=torch.float32)
     dgi, dbi = torch.empty(h, **f32), torch.empty(h, **f32)
     dgo, dbo = torch.empty(HIDDEN, **f32), torch.empty(HIDDEN, **f32)
-    fin.launch(((FINW_OUT + 255) // 256, 1, 1), (256, 1, 1),
-               [p1, g1, p2, g2, *grads, dgi, dbi, dgo, dbo])
+    fin.launch(((FINW_OUT + 255) // 256, 1, 1), (256, 1, 1), [p1, g1, p2, g2, *grads, dgi, dbi, dgo, dbo])
     return [dx, *grads, dgi, dbi, dgo, dbo]
 
 
@@ -243,8 +345,15 @@ def _backward_fake(leaves, mask, ds, saved, dy, outgoing, master=False):
 
 
 @opaque(fake=_backward_fake, name="trimul_h100_affinereg_uni64_train_bwd")
-def backward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor,
-             saved: list[torch.Tensor], dy: torch.Tensor, outgoing: bool, master: bool = False) -> list[torch.Tensor]:
+def backward(
+    leaves: list[torch.Tensor],
+    mask: torch.Tensor,
+    ds: torch.Tensor,
+    saved: list[torch.Tensor],
+    dy: torch.Tensor,
+    outgoing: bool,
+    master: bool = False,
+) -> list[torch.Tensor]:
     """Return the eleven leaf gradients (dx, dW*, dLN affine) in ``leaves`` order."""
     # Autograd invokes this boundary after the caller's forward scope has ended.
     with T.preserved_d64_context(T.d64_training(leaves[0], outgoing=outgoing)), T.native_context(leaves[0].device):
@@ -258,6 +367,7 @@ class _Training(torch.autograd.Function):
         ctx.master = any(w.dtype == torch.float32 for w in leaves[1:7])
         if T.cuda_training_fused_prepare_enabled():
             from ._h100_pack import fused_training_prepare
+
             packed, maskf, gate, output = fused_training_prepare(leaves, args[11])
             weights = [*leaves[1:5], gate, output]
             prepared = [leaves[0], *weights, *leaves[7:], packed]
@@ -269,6 +379,7 @@ class _Training(torch.autograd.Function):
             return y
         if T.cuda_training_aux_enabled():
             from ._h100_pack import cast_weights
+
             weights = cast_weights(leaves[1:7])
         else:
             weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]] if ctx.master else leaves[1:7]
@@ -287,7 +398,7 @@ class _Training(torch.autograd.Function):
     def backward(ctx, dy):
         vals = ctx.saved_tensors
         leaves = [vals[0], *vals[-6:], *vals[7:11]]
-        saved = list(vals[13:13+ctx.saved_count])
+        saved = list(vals[13 : 13 + ctx.saved_count])
         grads = backward(leaves, vals[11], vals[12], saved, dy, ctx.outgoing, ctx.master)
         grads = [g.to(t.dtype) for g, t in zip(grads, vals[:11], strict=True)]
         return (None, *grads, None, None)
@@ -300,11 +411,13 @@ def single_trimul(outgoing, *args):
         leaves = list(args[:11])
         if T.cuda_training_fused_prepare_enabled():
             from ._h100_pack import fused_training_prepare
+
             packed, maskf, gate, output = fused_training_prepare(leaves, args[11])
             prepared = [leaves[0], *leaves[1:5], gate, output, *leaves[7:], packed]
             return forward_nograd(prepared, maskf, args[12], outgoing)
         if T.cuda_training_aux_enabled():
             from ._h100_pack import cast_weights
+
             leaves = [leaves[0], *cast_weights(leaves[1:7]), *leaves[7:]]
         elif any(w.dtype != leaves[0].dtype for w in leaves[1:7]):
             weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]]

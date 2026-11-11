@@ -39,9 +39,15 @@ class FakeNow:
 
 
 def _token(backend: str = "cuda", dtype: str = "master", versions: dict | None = None, **over) -> dict:
-    tok = {"case": {"module": "Transition", "mode": "train", "dtype": dtype, "backend": backend},
-           "versions": versions or _versions(), "settings": SETTINGS, "measurer": "3", "config_version": "1",
-           "prebuild_version": "1", "env": dict(ENV)}
+    tok = {
+        "case": {"module": "Transition", "mode": "train", "dtype": dtype, "backend": backend},
+        "versions": versions or _versions(),
+        "settings": SETTINGS,
+        "measurer": "3",
+        "config_version": "1",
+        "prebuild_version": "1",
+        "env": dict(ENV),
+    }
     tok.update(over)
     return tok
 
@@ -99,7 +105,7 @@ def test_tf32_rule_only_touches_float32(dtype: str, owes: bool):
 def test_kernel_version_change_owes_engine_backends_only():
     now = FakeNow(_versions(kernels={"k_a": "2"}))
     assert _parts(_diff("accuracy", _token(backend="cuda"), now)) == [("owed", "kernel:k_a")]
-    for backend in ("pytorch", *cfgmod.EXTERNAL):   # they run none of the engine's kernels
+    for backend in ("pytorch", *cfgmod.EXTERNAL):  # they run none of the engine's kernels
         assert _diff("accuracy", _token(backend=backend), now) == []
 
 
@@ -136,7 +142,7 @@ def test_settings_owe_and_measurer_config_prebuild_env_ask():
     tok = _token(env={**ENV, "torch": "2.12.0"})
     assert _parts(_diff("accuracy", tok, FakeNow())) == [("ask", "env:torch")]
     tok = _token()
-    del tok["prebuild_version"]   # tokens made before the prebuild version: "1"
+    del tok["prebuild_version"]  # tokens made before the prebuild version: "1"
     assert _diff("accuracy", tok, FakeNow()) == []
 
 
@@ -145,7 +151,7 @@ def test_verdict_answers():
     assert judge.verdict(ask, {}) == ("pending", [("measurer:accuracy", "2", "3")])
     assert judge.verdict(ask, {("measurer:accuracy", "2", "3"): "keep"}) == ("carried", [])
     assert judge.verdict(ask, {("measurer:accuracy", "2", "3"): "remeasure"})[0] == "owed"
-    assert judge.verdict(ask, {("measurer:accuracy", "1", "3"): "keep"})[0] == "pending"   # an answer to another change
+    assert judge.verdict(ask, {("measurer:accuracy", "1", "3"): "keep"})[0] == "pending"  # an answer to another change
     both = [*ask, ("owed", "kernel:k_a", "1", "2")]
     assert judge.verdict(both, {("measurer:accuracy", "2", "3"): "keep"}) == ("owed", [("kernel:k_a", "1", "2")])
 
@@ -157,10 +163,22 @@ def test_card_of():
 
 
 def test_case_key_is_readable_and_ordered():
-    rec = {"module": "LayerNorm", "model": "", "stream": "token_pair", "kwargs": {"normalized_shape": 128, "bias": True}, "length": 128,
-           "depth": None, "samples": 1, "dtype": "master", "mode": "eval", "backend": "cuda", "timing": "graph"}
-    assert judge.case_key("speed", rec) == ("speed | LayerNorm | - | token_pair | bias=True;normalized_shape=128 | L128 | DNone | S1 | "
-                                            "master | eval | cuda | graph")
+    rec = {
+        "module": "LayerNorm",
+        "model": "",
+        "stream": "token_pair",
+        "kwargs": {"normalized_shape": 128, "bias": True},
+        "length": 128,
+        "depth": None,
+        "samples": 1,
+        "dtype": "master",
+        "mode": "eval",
+        "backend": "cuda",
+        "timing": "graph",
+    }
+    assert judge.case_key("speed", rec) == (
+        "speed | LayerNorm | - | token_pair | bias=True;normalized_shape=128 | L128 | DNone | S1 | master | eval | cuda | graph"
+    )
     assert judge.case_key("accuracy", {**rec, "timing": None}).endswith("| cuda")
 
 
@@ -169,13 +187,15 @@ def test_case_key_is_readable_and_ordered():
 def kernel_table(tmp_path, monkeypatch):
     """A synthetic requirements_kernel.csv for LayerNorm: generic, sm80-only and sm90a-only kernels of each role."""
     path = tmp_path / "requirements_kernel.csv"
-    path.write_text("name,family,modules,role,version\n"
-                    "ln_fwd,layernorm,LayerNorm,forward,1\n"
-                    "ln_fwd_infer_sm80,layernorm,LayerNorm,forward_infer,2\n"
-                    "ln_fwd_infer_sm90a,layernorm,LayerNorm,forward_infer,3\n"
-                    "ln_bwd_sm90,layernorm,LayerNorm|RMSNorm,backward,4\n"
-                    "ln_fwd_train,layernorm,LayerNorm,forward_train,5\n"
-                    "other_fwd,transition,Transition,forward,6\n")
+    path.write_text(
+        "name,family,modules,role,version\n"
+        "ln_fwd,layernorm,LayerNorm,forward,1\n"
+        "ln_fwd_infer_sm80,layernorm,LayerNorm,forward_infer,2\n"
+        "ln_fwd_infer_sm90a,layernorm,LayerNorm,forward_infer,3\n"
+        "ln_bwd_sm90,layernorm,LayerNorm|RMSNorm,backward,4\n"
+        "ln_fwd_train,layernorm,LayerNorm,forward_train,5\n"
+        "other_fwd,transition,Transition,forward,6\n"
+    )
     monkeypatch.setattr(cfgmod, "KERNELS", path)
     cfgmod._table.cache_clear()
     yield path
@@ -198,7 +218,7 @@ def test_versions_shape(kernel_table):
     assert v["module"] == str(cfgmod.module_class("LayerNorm").version)
     assert v["tables"] == {"layernorm": cfgmod.table_version("layernorm", "h100_sm90")}
     assert v["tf32"] == cfgmod.TF32_RULE
-    assert v["tf32"] is not cfgmod.TF32_RULE   # a copy: a record can never alias the rule
+    assert v["tf32"] is not cfgmod.TF32_RULE  # a copy: a record can never alias the rule
 
 
 def test_differences_does_not_mutate_its_inputs():

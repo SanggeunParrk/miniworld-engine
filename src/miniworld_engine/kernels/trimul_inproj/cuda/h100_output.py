@@ -61,9 +61,7 @@ def kernel(kind, ln=0, stats=0, pg=False, method=0):
 
 
 def tm(t, box, dims, strides):
-    return T._launch_module().tensor_map(
-        t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B"
-    )
+    return T._launch_module().tensor_map(t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B")
 
 
 def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
@@ -87,11 +85,7 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
             else torch.empty(
                 (256, m),
                 device=x.device,
-                dtype=torch.float32
-                if method == 1
-                else torch.float16
-                if method >= 2
-                else x.dtype,
+                dtype=torch.float32 if method == 1 else torch.float16 if method >= 2 else x.dtype,
             )
             if ln & 2
             else None,
@@ -124,7 +118,8 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
     ]
     tj = (n + bj - 1) // bj
     tiles = ((rows + bi - 1) // bi) * tj
-    base = L.Struct.fixed("h100_output:2",
+    base = L.Struct.fixed(
+        "h100_output:2",
         [
             *maps,
             d["gi"],
@@ -142,13 +137,9 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
             0,
             1e-5,
             0,
-        ]
+        ],
     )
-    om = lambda key, c: (
-        tm(saves[key], [64, 16, 1], [c, n, rows], [c * 2, n * c * 2])
-        if saves[key] is not None
-        else maps[-1]
-    )
+    om = lambda key, c: tm(saves[key], [64, 16, 1], [c, n, rows], [c * 2, n * c * 2]) if saves[key] is not None else maps[-1]
     outmap = (
         L.tensor_map(
             saves["xnout"],
@@ -161,7 +152,8 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
         if method == 1
         else maps[-1]
     )
-    p = L.Struct.fixed("h100_output:4",
+    p = L.Struct.fixed(
+        "h100_output:4",
         [
             base,
             d["ds"],
@@ -177,16 +169,14 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
             om("gate", 128),
             saves["proj"],
             saves["gate"],
-            0 if bsz == 1 else rows,   # RecomputeParams.rows (batched samples; 0 = one sample)
-        ]
+            0 if bsz == 1 else rows,  # RecomputeParams.rows (batched samples; 0 = one sample)
+        ],
     )
     k.launch(
         (
             min(
                 tiles,
-                num_sms(
-                    torch.cuda.current_device()
-                ),
+                num_sms(torch.cuda.current_device()),
             ),
             1,
             1,

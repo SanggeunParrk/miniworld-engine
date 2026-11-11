@@ -144,8 +144,11 @@ def _generated(defaults: list[dict]) -> list[dict]:
         out.extend(_cfg_dict(d["kwargs"], w, s2, d.get("maxnreg")) for s2 in (s - 1, s + 1) if s2 >= 1)
         choices = [[d["kwargs"][k], *_pow2_neighbours(d["kwargs"][k])] for k in tiles]
         for combo in itertools.product(*choices):
-            out.extend(_cfg_dict({**d["kwargs"], **dict(zip(tiles, combo, strict=True))}, w2, s, d.get("maxnreg"))
-                       for w2 in (w, *_pow2_neighbours(w)) if w2 <= 16)
+            out.extend(
+                _cfg_dict({**d["kwargs"], **dict(zip(tiles, combo, strict=True))}, w2, s, d.get("maxnreg"))
+                for w2 in (w, *_pow2_neighbours(w))
+                if w2 <= 16
+            )
     return out
 
 
@@ -167,8 +170,10 @@ def _grid_slice(base: list[dict], grid_rows: list[dict] | None) -> list[dict]:
     warps, stages = axes.get("num_warps", []), axes.get("num_stages", [])
     out = []
     for c in base:
-        combos = sorted(itertools.product(warps or [c["num_warps"]], stages or [c["num_stages"]]),
-                        key=lambda ws: (abs(math.log2(ws[0] / c["num_warps"])) + abs(ws[1] - c["num_stages"]), ws))
+        combos = sorted(
+            itertools.product(warps or [c["num_warps"]], stages or [c["num_stages"]]),
+            key=lambda ws: (abs(math.log2(ws[0] / c["num_warps"])) + abs(ws[1] - c["num_stages"]), ws),
+        )
         out += [_cfg_dict(c["kwargs"], w, s, c.get("maxnreg")) for w, s in combos]
     return out
 
@@ -257,8 +262,8 @@ def candidates_of(k) -> list[dict]:
 
 
 # ======================================================================================================== shape-key labels
-_AXES: dict[int, tuple[int, dict]] = {}      # packed shape_key -> (bucket, width axes)
-_BASE_NAME: dict[int, str] = {}              # bucket -> "L" (token_key / atom_key) or "M" (both_key)
+_AXES: dict[int, tuple[int, dict]] = {}  # packed shape_key -> (bucket, width axes)
+_BASE_NAME: dict[int, str] = {}  # bucket -> "L" (token_key / atom_key) or "M" (both_key)
 
 
 def install_shape_recorder() -> None:
@@ -284,6 +289,7 @@ def install_shape_recorder() -> None:
             v = f(n, **axes)
             _BASE_NAME[_AXES[v][0] if axes else v] = letter
             return v
+
         g.__name__ = name
         return g
 
@@ -369,6 +375,7 @@ class _Deadline(BaseException):
 
 def _healthy() -> bool:
     import torch
+
     try:
         torch.cuda.synchronize()
         return True
@@ -443,12 +450,12 @@ class Pretuner:
         self.shard_path = run / "shards" / f"{_JOB}_{_HOST}_{_PID}.jsonl"
         self.shard = open(self.shard_path, "a")  # noqa: SIM115 -- kept open for the run, closed by close()
         self.device = torch.cuda.get_device_name(0)
-        self.results: dict[tuple, dict] = {}     # (gpu, op, key) -> key record
+        self.results: dict[tuple, dict] = {}  # (gpu, op, key) -> key record
         self.crash_lines: dict[tuple, set] = {}  # (gpu, op, key) -> candidate idents recorded as crashed
-        self.last: dict[str, dict | None] = {}   # shard file -> its last "try" record if nothing followed it
+        self.last: dict[str, dict | None] = {}  # shard file -> its last "try" record if nothing followed it
         self.ended: dict[str, bool] = {}
         self.offsets: dict[str, int] = {}
-        self.drops: dict[tuple, float] = {}       # (gpu, op, key) -> time of its latest drop (records before it are superseded)
+        self.drops: dict[tuple, float] = {}  # (gpu, op, key) -> time of its latest drop (records before it are superseded)
         self.unit: str | None = None
         self.new_keys = 0
         self.reload()
@@ -506,6 +513,7 @@ class Pretuner:
     # ------------------------------------------------------------------------------------------------------------- common
     def _skip(self) -> bool:
         import torch
+
         return torch.cuda.is_current_stream_capturing() or torch.compiler.is_compiling()
 
     def _check_deadline(self) -> None:
@@ -515,17 +523,36 @@ class Pretuner:
     def _record(self, ident, family, ranked, failed, n, started, note=None) -> dict:
         first_ms = next((c["ms"] for c in ranked if c.get("_first")), math.nan)
         ranked = sorted(({k: v for k, v in c.items() if k != "_first"} for c in ranked), key=lambda c: c["ms"])
-        rec = {"t": "key", "gpu": ident[0], "device": self.device, "family": family, "op": ident[1], "key": ident[2],
-               "ranked": ranked, "failed": failed, "candidates": n, "unit": self.unit, "secs": round(time.time() - started, 2),
-               "pretune_version": PRETUNE_VERSION, "time": time.time(), **({"note": note} if note else {})}
+        rec = {
+            "t": "key",
+            "gpu": ident[0],
+            "device": self.device,
+            "family": family,
+            "op": ident[1],
+            "key": ident[2],
+            "ranked": ranked,
+            "failed": failed,
+            "candidates": n,
+            "unit": self.unit,
+            "secs": round(time.time() - started, 2),
+            "pretune_version": PRETUNE_VERSION,
+            "time": time.time(),
+            **({"note": note} if note else {}),
+        }
         self.write(rec)
         self.results[ident] = rec
         self.new_keys += 1
         best = ranked[0] if ranked else None
         reasons = sorted({f["reason"].split(":")[0] for f in failed})
-        log(f"  + {ident[1]} {ident[2]}: {n} candidates, {len(failed)} failed{' ' + str(reasons) if reasons else ''}; "
-            + (f"best {best['ms']:.4f} ms {json.dumps({k: v for k, v in best.items() if k != 'ms'})} (first {first_ms:.4f} ms)"
-               if best else "NONE RAN") + f" [{rec['secs']:.1f} s]")
+        log(
+            f"  + {ident[1]} {ident[2]}: {n} candidates, {len(failed)} failed{' ' + str(reasons) if reasons else ''}; "
+            + (
+                f"best {best['ms']:.4f} ms {json.dumps({k: v for k, v in best.items() if k != 'ms'})} (first {first_ms:.4f} ms)"
+                if best
+                else "NONE RAN"
+            )
+            + f" [{rec['secs']:.1f} s]"
+        )
         return rec
 
     def _try(self, ident, cand_id: str) -> None:
@@ -606,6 +633,7 @@ class Pretuner:
             def warm(c):
                 with contextlib.suppress(Exception):  # the checked launch below records it
                     launch(c, compile_only=True)
+
             self._check_deadline()
             with cf.ThreadPoolExecutor(PRECOMPILE_THREADS) as ex:
                 list(ex.map(warm, todo))
@@ -649,8 +677,15 @@ class Pretuner:
         restore()
         snap = saved = None
         torch.cuda.empty_cache()
-        rec = self._record(ident, k.family, ranked, failed, len(cands), started,
-                           note=None if verify else "outputs not compared (tensor arguments above VERIFY_MAX_BYTES)")
+        rec = self._record(
+            ident,
+            k.family,
+            ranked,
+            failed,
+            len(cands),
+            started,
+            note=None if verify else "outputs not compared (tensor arguments above VERIFY_MAX_BYTES)",
+        )
         return _cfg(rec["ranked"][0]) if rec["ranked"] else None
 
     # ---------------------------------------------------------------------------------------------------------- choose (native)
@@ -778,8 +813,15 @@ def run_unit(hook: Pretuner, cfg, case, *, device) -> dict:
             try:
                 module = copy.deepcopy(base)
                 inputs = config.inputs(case, module, device=device)
-                step = make_step(module, inputs, backend=backend, train=case.mode == "train", autocast=config.autocast(case),
-                                 seed=config.seed(case), compile_mode=None)
+                step = make_step(
+                    module,
+                    inputs,
+                    backend=backend,
+                    train=case.mode == "train",
+                    autocast=config.autocast(case),
+                    seed=config.seed(case),
+                    compile_mode=None,
+                )
                 step()
                 torch.cuda.synchronize()
                 status[backend] = "ok"
@@ -814,7 +856,7 @@ def run_unit(hook: Pretuner, cfg, case, *, device) -> dict:
 
 
 def tune(args) -> int:
-    install_shape_recorder()   # before any kernel module binds _shape_key's functions
+    install_shape_recorder()  # before any kernel module binds _shape_key's functions
     import torch
 
     from miniworld_engine.kernels import _launch_config
@@ -824,8 +866,14 @@ def tune(args) -> int:
     for d in ("claims", "done", "shards"):
         (run / d).mkdir(parents=True, exist_ok=True)
     cfg = config.load(args.config)
-    cfg = config.replace(cfg, backends=list(ENGINE_BACKENDS), modules=args.modules or None, rows=args.rows or None,
-                         dtypes=args.dtypes or None, modes=args.modes or None)
+    cfg = config.replace(
+        cfg,
+        backends=list(ENGINE_BACKENDS),
+        modules=args.modules or None,
+        rows=args.rows or None,
+        dtypes=args.dtypes or None,
+        modes=args.modes or None,
+    )
     work = units(cfg)
     if args.list:
         for uid, case in work:
@@ -838,10 +886,13 @@ def tune(args) -> int:
     def on_term(signum, frame):
         hook.write({"t": "killed", "signal": signum})
         raise _Deadline("SIGTERM")
+
     signal.signal(signal.SIGTERM, on_term)
     _launch_config.PRETUNE[0] = hook
-    log(f"run {run}; {len(work)} units; device {hook.device}; job {_JOB} pid {_PID}; shard {hook.shard_path.name}; "
-        f"{len(hook.results)} keys already tuned")
+    log(
+        f"run {run}; {len(work)} units; device {hook.device}; job {_JOB} pid {_PID}; shard {hook.shard_path.name}; "
+        f"{len(hook.results)} keys already tuned"
+    )
     started, ran = time.time(), 0
     code = 0
     try:
@@ -869,11 +920,21 @@ def tune(args) -> int:
                 log(f"{uid} {case.label}: abandoned ({exc}); {hook.new_keys - before} keys kept")
                 code = 4
                 break
-            _excl_write(run / "done" / f"{uid}.json", {"label": case.label, "status": status, "secs": round(time.time() - t0, 1),
-                                                       "new_keys": hook.new_keys - before, "job": _JOB})
+            _excl_write(
+                run / "done" / f"{uid}.json",
+                {
+                    "label": case.label,
+                    "status": status,
+                    "secs": round(time.time() - t0, 1),
+                    "new_keys": hook.new_keys - before,
+                    "job": _JOB,
+                },
+            )
             ran += 1
-            log(f"{uid} {case.label}: {hook.new_keys - before} new keys in {time.time() - t0:.1f} s | "
-                + "; ".join(f"{b}: {s}" for b, s in status.items()))
+            log(
+                f"{uid} {case.label}: {hook.new_keys - before} new keys in {time.time() - t0:.1f} s | "
+                + "; ".join(f"{b}: {s}" for b, s in status.items())
+            )
     finally:
         _launch_config.PRETUNE[0] = None
         hook.write({"t": "end"})
@@ -909,8 +970,11 @@ def drop(args) -> int:
     run = Path(args.run)
     recs = _records([run])
     want = {tuple(x) for x in args.drop_key or ()}
-    hit = [r for r in recs if (args.drop_mismatch and any(f["reason"].startswith("mismatch") for f in r["failed"]))
-           or (r["op"], r["key"]) in want]
+    hit = [
+        r
+        for r in recs
+        if (args.drop_mismatch and any(f["reason"].startswith("mismatch") for f in r["failed"])) or (r["op"], r["key"]) in want
+    ]
     now = time.time()
     with open(run / "shards" / f"drop_cpu_{_PID}.jsonl", "a") as fh:
         fh.writelines(json.dumps({"t": "drop", "gpu": r["gpu"], "op": r["op"], "key": r["key"], "time": now}) + "\n" for r in hit)
@@ -921,8 +985,10 @@ def drop(args) -> int:
             (run / "done" / f"{uid}.json").unlink()
             (run / "claims" / f"{uid}.json").unlink(missing_ok=True)
             reopened.add(uid)
-        log(f"drop {r['op']} {r['key']} (unit {uid}): "
-            + "; ".join(sorted({f["reason"][:80] for f in r["failed"] if f["reason"].startswith(("mismatch", "OutOfMemory"))}))[:300])
+        log(
+            f"drop {r['op']} {r['key']} (unit {uid}): "
+            + "; ".join(sorted({f["reason"][:80] for f in r["failed"] if f["reason"].startswith(("mismatch", "OutOfMemory"))}))[:300]
+        )
     missing = want - {(r["op"], r["key"]) for r in hit}
     for m in sorted(missing):
         log(f"no record for {m}")
@@ -937,9 +1003,11 @@ def status(args) -> int:
     failed = [d for d in done if any(str(s).startswith("failed") for s in d["status"].values())]
     recs = _records([run])
     keys = {(r["gpu"], r["op"], r["key"]) for r in recs}
-    log(f"{run}: {len(done)} units done ({len(failed)} with a failure), {len(claims - {p.stem for p in (run / 'done').glob('*.json')})} "
+    log(
+        f"{run}: {len(done)} units done ({len(failed)} with a failure), {len(claims - {p.stem for p in (run / 'done').glob('*.json')})} "
         f"claimed and open; {len(keys)} keys tuned ({len(recs)} records), "
-        f"{sum(not r['ranked'] for r in recs)} with no candidate that ran")
+        f"{sum(not r['ranked'] for r in recs)} with no candidate that ran"
+    )
     for d in failed:
         log(f"  failed: {d['label']}: {d['status']}")
     return 0
@@ -982,10 +1050,12 @@ def _dump_table(data: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-SOURCE = ("Pretuned by kernels/_pretune.py (PRETUNE_VERSION {v}): every candidate timed at the launches the requirements reach "
-          "(triton.testing.do_bench, L2 flushed, median), top {k} kept, fastest first. Keys not re-tuned: converted from the old "
-          "autotune/data/<op>/*sm90*.json (git HEAD). Keys: '<dtypes>|<shape bucket>[|<flags>]'. Shape: M = row bucket, L = length "
-          "bucket, other names = exact width axes.")
+SOURCE = (
+    "Pretuned by kernels/_pretune.py (PRETUNE_VERSION {v}): every candidate timed at the launches the requirements reach "
+    "(triton.testing.do_bench, L2 flushed, median), top {k} kept, fastest first. Keys not re-tuned: converted from the old "
+    "autotune/data/<op>/*sm90*.json (git HEAD). Keys: '<dtypes>|<shape bucket>[|<flags>]'. Shape: M = row bucket, L = length "
+    "bucket, other names = exact width axes."
+)
 
 
 def merge(args) -> int:
@@ -1030,11 +1100,16 @@ def merge(args) -> int:
         kept = sum(len(v) for v in ops.values()) - len(touched)
         changed_file = old is None or ops != old.get("ops")
         new_version = version + 1 if changed_file else max(version, 1)
-        data = {"gpu": (old or {}).get("gpu") or f"{rs[0]['device']} (sm{gpu.rsplit('_sm', 1)[1]})",
-                "source": SOURCE.format(v=PRETUNE_VERSION, k=TOP_K) if changed_file else (old or {}).get("source", ""),
-                "version": new_version, "ops": ops}
-        log(f"{family:24s} {gpu}: {added:4d} added, {changed:4d} changed, {same:3d} re-tuned unchanged, {kept:4d} kept; "
-            f"version {version if old is not None else '-'} -> {new_version}" + ("" if changed_file else " (content unchanged)"))
+        data = {
+            "gpu": (old or {}).get("gpu") or f"{rs[0]['device']} (sm{gpu.rsplit('_sm', 1)[1]})",
+            "source": SOURCE.format(v=PRETUNE_VERSION, k=TOP_K) if changed_file else (old or {}).get("source", ""),
+            "version": new_version,
+            "ops": ops,
+        }
+        log(
+            f"{family:24s} {gpu}: {added:4d} added, {changed:4d} changed, {same:3d} re-tuned unchanged, {kept:4d} kept; "
+            f"version {version if old is not None else '-'} -> {new_version}" + ("" if changed_file else " (content unchanged)")
+        )
         for k, v in (("added", added), ("changed", changed), ("same", same), ("kept", kept)):
             total[k] += v
         if not args.dry_run and (changed_file or (old or {}).get("version") != new_version):
@@ -1056,8 +1131,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--drop-key", nargs=2, action="append", metavar=("OP", "KEY"), help="supersede this key; reopen its unit")
     ap.add_argument("--list", action="store_true", help="print the units; tune nothing")
     ap.add_argument("--dry-run", action="store_true", help="--merge: print, write nothing")
-    ap.add_argument("--run", dest="run_list", action="append", default=None,
-                    help=f"run directory (default {DEFAULT_RUN}); --merge takes several")
+    ap.add_argument(
+        "--run", dest="run_list", action="append", default=None, help=f"run directory (default {DEFAULT_RUN}); --merge takes several"
+    )
     ap.add_argument("--config", default=str(DEFAULT_CONFIG), help="measurement config whose cases are the work list")
     ap.add_argument("--modules", nargs="*", default=None)
     ap.add_argument("--rows", nargs="*", type=int, default=None)

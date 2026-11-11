@@ -92,20 +92,12 @@ def block(
         sin[:b].reshape(-1, 16).contiguous(),
     )
     if qkv_kind == "original":
-        qh, kh, vh, g, *_ = sm80.qkvg_fwd(
-            qf, mod, cos2, sin2, wq, wg, b, s, eps, eps, False
-        )
+        qh, kh, vh, g, *_ = sm80.qkvg_fwd(qf, mod, cos2, sin2, wq, wg, b, s, eps, eps, False)
     elif qkv_kind == "singlehead":
-        qh, kh, vh, g = qkvg_extension().singlehead(
-            qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg
-        )
+        qh, kh, vh, g = qkvg_extension().singlehead(qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg)
     else:
-        qh, kh, vh, g = qkvg_extension().headgroup(
-            qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg
-        )
-    o, _ = sm80.attn_fwd(
-        qh, kh, vh, seqused, save_lse=False
-    )
+        qh, kh, vh, g = qkvg_extension().headgroup(qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg)
+    o, _ = sm80.attn_fwd(qh, kh, vh, seqused, save_lse=False)
     if ffn_kind == "original":
         out, *_ = sm80.ffn_fwd(qf, g, o, mod, wo, wu, wd, b, s, eps, False)
     else:
@@ -128,24 +120,13 @@ def eligible(x, c, ap, weights, n_head, half_window):
         or len(ap) != 6
     ):
         return False
-    if any(
-        t.device != x.device or t.dtype != torch.bfloat16 or not t.is_contiguous()
-        for t in (x, c, *weights)
-    ):
+    if any(t.device != x.device or t.dtype != torch.bfloat16 or not t.is_contiguous() for t in (x, c, *weights)):
         return False
     expected = ((768, 128), (384, 128), (128, 128), (128, 128), (512, 128), (128, 256))
-    if len(weights) != 6 or any(
-        tuple(w.shape) != shape for w, shape in zip(weights, expected)
-    ):
+    if len(weights) != 6 or any(tuple(w.shape) != shape for w, shape in zip(weights, expected)):
         return False
     a, n = x.shape[:2]
-    if any(
-        t.device != x.device
-        or t.dtype != torch.float32
-        or not t.is_contiguous()
-        or tuple(t.shape) != (a, n, 16)
-        for t in ap[:2]
-    ):
+    if any(t.device != x.device or t.dtype != torch.float32 or not t.is_contiguous() or tuple(t.shape) != (a, n, 16) for t in ap[:2]):
         return False
     if (
         ap[2].dtype != torch.int32

@@ -1,5 +1,6 @@
 """Minimal CUDA driver surface (cuda.bindings): load a cubin, encode 2-D TMA descriptors, launch with by-value CUtensorMap / pointer / scalar arguments
 on torch's current stream (capture-safe).  Mirrors the argument conventions of the Anthropic esm_t16 loader (ef2_t16_nvjit)."""
+
 import ctypes
 import struct
 import torch
@@ -27,26 +28,45 @@ class TensorMap:
     """Tiled map of rank len(dims) (2 or 3): dims innermost-first, the outer strides in bytes (an int for rank 2), box innermost-first, 128-B swizzle by default (bf16; u8 = any
     one-byte element type such as e4m3). ``swizzle="128a32"``: 128-B swizzle with 32-B atomicity, the layout a kind::tf32 MMA
     reads an MN-major operand from (UMMA layout type 1)."""
+
     def __init__(self, tensor, dims, stride_bytes, box, swizzle=128, dtype="bf16"):
         init()
         self.keep = tensor
         S = cu.CUtensorMapSwizzle
-        sw = {0: S.CU_TENSOR_MAP_SWIZZLE_NONE, 32: S.CU_TENSOR_MAP_SWIZZLE_32B, 64: S.CU_TENSOR_MAP_SWIZZLE_64B,
-              128: S.CU_TENSOR_MAP_SWIZZLE_128B, "128a32": S.CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B}[swizzle]
-        dt = {"bf16": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, "u8": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_UINT8,
-              "f32": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_FLOAT32}[dtype]
+        sw = {
+            0: S.CU_TENSOR_MAP_SWIZZLE_NONE,
+            32: S.CU_TENSOR_MAP_SWIZZLE_32B,
+            64: S.CU_TENSOR_MAP_SWIZZLE_64B,
+            128: S.CU_TENSOR_MAP_SWIZZLE_128B,
+            "128a32": S.CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B,
+        }[swizzle]
+        dt = {
+            "bf16": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+            "u8": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_UINT8,
+            "f32": cu.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
+        }[dtype]
         strides = list(stride_bytes) if isinstance(stride_bytes, (list, tuple)) else [stride_bytes]
         assert len(strides) == len(dims) - 1 == len(box) - 1, (dims, strides, box)
-        self.tm = _chk(cu.cuTensorMapEncodeTiled(dt, len(dims), tensor.data_ptr(),
-                                                 [cu.cuuint64_t(d) for d in dims], [cu.cuuint64_t(s) for s in strides],
-                                                 [cu.cuuint32_t(b) for b in box], [cu.cuuint32_t(1)] * len(dims),
-                                                 cu.CUtensorMapInterleave.CU_TENSOR_MAP_INTERLEAVE_NONE, sw,
-                                                 cu.CUtensorMapL2promotion.CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
-                                                 cu.CUtensorMapFloatOOBfill.CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE), "cuTensorMapEncodeTiled")
+        self.tm = _chk(
+            cu.cuTensorMapEncodeTiled(
+                dt,
+                len(dims),
+                tensor.data_ptr(),
+                [cu.cuuint64_t(d) for d in dims],
+                [cu.cuuint64_t(s) for s in strides],
+                [cu.cuuint32_t(b) for b in box],
+                [cu.cuuint32_t(1)] * len(dims),
+                cu.CUtensorMapInterleave.CU_TENSOR_MAP_INTERLEAVE_NONE,
+                sw,
+                cu.CUtensorMapL2promotion.CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                cu.CUtensorMapFloatOOBfill.CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
+            ),
+            "cuTensorMapEncodeTiled",
+        )
         words = [int(w) for w in self.tm.opaque]
         raw = struct.pack(f"<{len(words)}Q", *words)
         assert len(raw) == 128, len(raw)
-        self.buf = (ctypes.c_ubyte * 192)()          # 64-B aligned copy of the 128-B descriptor
+        self.buf = (ctypes.c_ubyte * 192)()  # 64-B aligned copy of the 128-B descriptor
         base = ctypes.addressof(self.buf)
         self.addr = (base + 63) & ~63
         ctypes.memmove(self.addr, raw, 128)
@@ -55,14 +75,20 @@ class TensorMap:
 class Kernel:
     def __init__(self, cubin_path, func_name, smem_bytes, cluster=None, pdl=False):
         init()
-        self.pdl = pdl                                 # programmatic dependent launch: may start before the previous kernel ends
+        self.pdl = pdl  # programmatic dependent launch: may start before the previous kernel ends
         data = open(cubin_path, "rb").read()
         self.module = _chk(cu.cuModuleLoadData(data), "cuModuleLoadData")
         self.func = _chk(cu.cuModuleGetFunction(self.module, func_name.encode()), "cuModuleGetFunction")
         if smem_bytes > 48 * 1024:
-            _chk(cu.cuFuncSetAttribute(self.func, cu.CUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem_bytes), "smem attr")
+            _chk(
+                cu.cuFuncSetAttribute(self.func, cu.CUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem_bytes),
+                "smem attr",
+            )
         if cluster:
-            _chk(cu.cuFuncSetAttribute(self.func, cu.CUfunction_attribute.CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED, 1), "cluster attr")
+            _chk(
+                cu.cuFuncSetAttribute(self.func, cu.CUfunction_attribute.CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED, 1),
+                "cluster attr",
+            )
         self.smem = smem_bytes
         self.cluster = cluster
         self.regs = _chk(cu.cuFuncGetAttribute(cu.CUfunction_attribute.CU_FUNC_ATTRIBUTE_NUM_REGS, self.func), "regs")
@@ -74,17 +100,28 @@ class Kernel:
             if isinstance(a, TensorMap):
                 ptrs.append(a.addr)
             elif isinstance(a, torch.Tensor):
-                h = ctypes.c_uint64(a.data_ptr()); holders.append(h); ptrs.append(ctypes.addressof(h))
+                h = ctypes.c_uint64(a.data_ptr())
+                holders.append(h)
+                ptrs.append(ctypes.addressof(h))
             elif isinstance(a, ctypes.Structure):
-                holders.append(a); ptrs.append(ctypes.addressof(a))
+                holders.append(a)
+                ptrs.append(ctypes.addressof(a))
             elif isinstance(a, bool):
-                h = ctypes.c_int32(int(a)); holders.append(h); ptrs.append(ctypes.addressof(h))
+                h = ctypes.c_int32(int(a))
+                holders.append(h)
+                ptrs.append(ctypes.addressof(h))
             elif isinstance(a, int):
-                h = ctypes.c_int32(a); holders.append(h); ptrs.append(ctypes.addressof(h))
+                h = ctypes.c_int32(a)
+                holders.append(h)
+                ptrs.append(ctypes.addressof(h))
             elif isinstance(a, float):
-                h = ctypes.c_float(a); holders.append(h); ptrs.append(ctypes.addressof(h))
+                h = ctypes.c_float(a)
+                holders.append(h)
+                ptrs.append(ctypes.addressof(h))
             elif a is None:
-                h = ctypes.c_uint64(0); holders.append(h); ptrs.append(ctypes.addressof(h))
+                h = ctypes.c_uint64(0)
+                holders.append(h)
+                ptrs.append(ctypes.addressof(h))
             else:
                 raise TypeError(type(a))
         arr = (ctypes.c_void_p * len(ptrs))(*ptrs)
@@ -106,11 +143,16 @@ class Kernel:
                 ap.id = cu.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
                 ap.value.programmaticStreamSerializationAllowed = 1
                 attrs.append(ap)
-            cfg.attrs = attrs; cfg.numAttrs = len(attrs)
+            cfg.attrs = attrs
+            cfg.numAttrs = len(attrs)
             _chk(cu.cuLaunchKernelEx(cfg, self.func, ctypes.addressof(arr), 0), "cuLaunchKernelEx")
         else:
-            _chk(cu.cuLaunchKernel(self.func, grid[0], grid[1], grid[2], block[0], block[1], block[2], self.smem, cu.CUstream(st),
-                                   ctypes.addressof(arr), 0), "cuLaunchKernel")
+            _chk(
+                cu.cuLaunchKernel(
+                    self.func, grid[0], grid[1], grid[2], block[0], block[1], block[2], self.smem, cu.CUstream(st), ctypes.addressof(arr), 0
+                ),
+                "cuLaunchKernel",
+            )
         self._keep = (holders, arr)
 
     def bind(self, grid, block, *args):
@@ -119,11 +161,20 @@ class Kernel:
         holders, ptrs = [], []
         for a in args:
             if isinstance(a, TensorMap):
-                holders.append(a); ptrs.append(a.addr)
+                holders.append(a)
+                ptrs.append(a.addr)
             else:
-                h = (ctypes.c_uint64(a.data_ptr()) if isinstance(a, torch.Tensor) else ctypes.c_uint64(0) if a is None
-                     else ctypes.c_float(a) if isinstance(a, float) else ctypes.c_int32(int(a)))
-                holders.append(h); ptrs.append(ctypes.addressof(h))
+                h = (
+                    ctypes.c_uint64(a.data_ptr())
+                    if isinstance(a, torch.Tensor)
+                    else ctypes.c_uint64(0)
+                    if a is None
+                    else ctypes.c_float(a)
+                    if isinstance(a, float)
+                    else ctypes.c_int32(int(a))
+                )
+                holders.append(h)
+                ptrs.append(ctypes.addressof(h))
         arr = (ctypes.c_void_p * len(ptrs))(*ptrs)
         assert not (self.cluster or self.pdl), "bind: plain launches only"
         func, smem, g, b, addr = self.func, self.smem, grid, block, ctypes.addressof(arr)
@@ -131,5 +182,6 @@ class Kernel:
         def run():
             st = torch.cuda.current_stream().cuda_stream
             _chk(cu.cuLaunchKernel(func, g[0], g[1], g[2], b[0], b[1], b[2], smem, cu.CUstream(st), addr, 0), "cuLaunchKernel")
+
         run.keep = (holders, arr)
         return run

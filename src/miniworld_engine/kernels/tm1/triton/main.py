@@ -1,4 +1,3 @@
-
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/tm1.py
 
@@ -21,14 +20,9 @@ from miniworld_engine.kernels._shape_key import length_of, token_key, pack
 # below drops configs whose pipelined tiles overflow device shared memory before compile.
 
 
-
-
-
-
-
-@configured('trimul_gemm_gate_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
+@configured(
+    "trimul_gemm_gate_triton", key=["shape_key"], default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2)
+)
 @triton.jit
 def fused_sigmoid_gate_fwd_kernel(
     x_ptr,
@@ -49,8 +43,7 @@ def fused_sigmoid_gate_fwd_kernel(
     # Visit order, tuned: see kernels/_tiles.py. This walked the COLUMNS first, which is
     # GROUP_M = 1 on that axis -- the opposite end from the kernels that launch a 2-D grid,
     # and just as fixed. Which end suits the shape is what the tuner now decides.
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
-                              tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
 
     row_start = pid_m * BLOCK_M1
     col_start = pid_n * BLOCK_N
@@ -119,11 +112,11 @@ def fused_sigmoid_gate_fwd_kernel(
     )
 
 
-
-
-@configured('trimul_bwd_gate_recompute_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2))
+@configured(
+    "trimul_bwd_gate_recompute_triton",
+    key=["shape_key"],
+    default=dict(BLOCK_K=32, BLOCK_M1=64, BLOCK_N=64, GROUP_M=4, num_warps=4, num_stages=2),
+)
 @triton.jit
 def fused_sigmoid_gate_bwd_kernel(
     x_ptr,
@@ -148,8 +141,7 @@ def fused_sigmoid_gate_bwd_kernel(
     # Visit order, tuned: see kernels/_tiles.py. This walked the COLUMNS first, which is
     # GROUP_M = 1 on that axis -- the opposite end from the kernels that launch a 2-D grid,
     # and just as fixed. Which end suits the shape is what the tuner now decides.
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
-                              tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
 
     row_start = pid_m * BLOCK_M1
     col_start = pid_n * BLOCK_N
@@ -273,11 +265,9 @@ def _tm1_fwd(
     return left, right
 
 
-def _tm1_bwd_fake(x, left_gate_weight, left_weight, right_gate_weight, right_weight,
-                  grad_out_left, grad_out_right, shape_key):
+def _tm1_bwd_fake(x, left_gate_weight, left_weight, right_gate_weight, right_weight, grad_out_left, grad_out_right, shape_key):
     """(dLA, dLB, dRA, dRB), all shaped and typed like the flat (M, N) `x`."""
-    return (torch.empty_like(x), torch.empty_like(x),
-            torch.empty_like(x), torch.empty_like(x))
+    return (torch.empty_like(x), torch.empty_like(x), torch.empty_like(x), torch.empty_like(x))
 
 
 @opaque(fake=_tm1_bwd_fake, name="tm1_bwd")
@@ -351,7 +341,11 @@ class TritonTM1Function(torch.autograd.Function):
         right_gate_weight = right_gate_weight.contiguous()
 
         left, right = _tm1_fwd(
-            x, left_gate_weight, left_weight, right_gate_weight, right_weight,
+            x,
+            left_gate_weight,
+            left_weight,
+            right_gate_weight,
+            right_weight,
             token_key(length_of(original_shape)),
         )
 
@@ -372,9 +366,7 @@ class TritonTM1Function(torch.autograd.Function):
         grad_out_left: torch.Tensor,
         grad_out_right: torch.Tensor,
     ):
-        x, left_weight, left_gate_weight, right_weight, right_gate_weight = (
-            ctx.saved_tensors
-        )
+        x, left_weight, left_gate_weight, right_weight, right_gate_weight = ctx.saved_tensors
         original_shape = ctx.original_shape
 
         if grad_out_left.dtype != x.dtype:
@@ -386,8 +378,14 @@ class TritonTM1Function(torch.autograd.Function):
         grad_out_right = rearrange(grad_out_right, "... d -> (...) d").contiguous()
 
         dLA, dLB, dRA, dRB = _tm1_bwd(
-            x, left_gate_weight, left_weight, right_gate_weight, right_weight,
-            grad_out_left, grad_out_right, token_key(length_of(original_shape)),
+            x,
+            left_gate_weight,
+            left_weight,
+            right_gate_weight,
+            right_weight,
+            grad_out_left,
+            grad_out_right,
+            token_key(length_of(original_shape)),
         )
 
         dx = dLA @ left_gate_weight.T + dLB @ left_weight.T

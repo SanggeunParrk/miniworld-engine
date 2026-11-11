@@ -35,9 +35,7 @@ def _kernel(d, h, cfg, lnm=1, extra=()):
         *extra,
     ]
     smem = I._k1_smem(d, (*cfg[:5], 2))
-    kernel = T.load_unit(
-        str(T.compile_text(body, flags)), "b200style_k1_direct"
-    ).kernel(name)
+    kernel = T.load_unit(str(T.compile_text(body, flags)), "b200style_k1_direct").kernel(name)
     kernel.set_max_dynamic_smem(smem)
     return kernel, smem
 
@@ -77,7 +75,7 @@ def front(x, weights, token_mask, gi, bi, ab, xs, diag=()):
         d,
         1,
         1,
-        0 if rows == n else rows,   # K1Params.rows (batched samples; 0 = one sample), before K1ParamsQ.tm_wq
+        0 if rows == n else rows,  # K1Params.rows (batched samples; 0 = one sample), before K1ParamsQ.tm_wq
         *(I._map(w, [64, 32], [d, h], [d * 2]) for w in weights),
     ]
     param = T._launch_module().Struct(fields)

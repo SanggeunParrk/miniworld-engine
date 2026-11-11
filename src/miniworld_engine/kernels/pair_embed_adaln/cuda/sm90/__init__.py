@@ -12,8 +12,8 @@ import torch
 _dir = Path(__file__).parent
 C = 256
 NBLK = 33
-DX_CHUNK_BYTES = 1 << 29     # the backward's dx scratch (bf16 grad of the table sum) is built for at most this many bytes of pairs at a time
-BWD_IMPL = 1                 # table gradient on the tensor cores (wgmma); the .cu keeps 0 (shared-memory read-modify-write) as its A/B variant
+DX_CHUNK_BYTES = 1 << 29  # the backward's dx scratch (bf16 grad of the table sum) is built for at most this many bytes of pairs at a time
+BWD_IMPL = 1  # table gradient on the tensor cores (wgmma); the .cu keeps 0 (shared-memory read-modify-write) as its A/B variant
 
 
 @functools.lru_cache(maxsize=None)
@@ -21,9 +21,13 @@ def ext():
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
-    return load_extension(name="pair_embed_adaln_sm90", sources=[str(_dir / "pair_embed_adaln.cu")],
-                          extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a")], extra_cflags=["-std=c++17"],
-                          verbose=False)
+    return load_extension(
+        name="pair_embed_adaln_sm90",
+        sources=[str(_dir / "pair_embed_adaln.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a")],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 def forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim, clim, nS, nX, eps1, eps2, jp=0):
@@ -31,7 +35,27 @@ def forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim, clim, n
     B, n = idx.shape
     out = torch.empty(B, n, n, C, device=tbl.device, dtype=torch.bfloat16)
     bins = torch.empty(B, n, n, device=tbl.device, dtype=torch.int32)
-    ext().forward(tbl, lnw, lnb, gamma, beta, xt, sc, int(has_sc), idx, mask, xlim, clim, out, bins, int(nS), int(nX), float(eps1), float(eps2), int(jp))
+    ext().forward(
+        tbl,
+        lnw,
+        lnb,
+        gamma,
+        beta,
+        xt,
+        sc,
+        int(has_sc),
+        idx,
+        mask,
+        xlim,
+        clim,
+        out,
+        bins,
+        int(nS),
+        int(nX),
+        float(eps1),
+        float(eps2),
+        int(jp),
+    )
     return out, bins
 
 
@@ -51,6 +75,26 @@ def backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2):
     dbeta = torch.empty(B, C, device=dev, dtype=torch.float32)
     dlw = torch.empty(C, device=dev, dtype=torch.float32)
     dlb = torch.empty(C, device=dev, dtype=torch.float32)
-    ext().backward(tbl, lnw, lnb, gamma, bins, dout, dx, part, tpart, dtbl, dgamma, dbeta, dlw, dlb, BWD_IMPL, int(chunk_b), int(nS), int(nX),
-                   float(eps1), float(eps2))
+    ext().backward(
+        tbl,
+        lnw,
+        lnb,
+        gamma,
+        bins,
+        dout,
+        dx,
+        part,
+        tpart,
+        dtbl,
+        dgamma,
+        dbeta,
+        dlw,
+        dlb,
+        BWD_IMPL,
+        int(chunk_b),
+        int(nS),
+        int(nX),
+        float(eps1),
+        float(eps2),
+    )
     return dtbl, dlw, dlb, dgamma, dbeta

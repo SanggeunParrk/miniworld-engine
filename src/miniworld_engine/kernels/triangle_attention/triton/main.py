@@ -1,4 +1,3 @@
-
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/triangle_attention_pair_bias.py
 
@@ -17,21 +16,42 @@ from miniworld_engine.kernels._shape_key import pack, token_key
 # reduction over d, so it tiles with an accumulating loop and HEAD_DIM_PAD joins the sweep.
 
 
-
-
-
-@configured('triangle_attention_fwd_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
+@configured("triangle_attention_fwd_triton", key=["shape_key"], default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_fwd(
-    q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, m_ptr, out_ptr,
-    qs_z, qs_h, qs_lrow, qs_tok, qs_d,
-    os_z, os_h, os_lrow, os_tok, os_d,
-    bs_z, bs_h, bs_m, bs_n,
-    ms_z, ms_h, ms_lrow, ms_tok,
-    Z, H: tl.constexpr, N_CTX, HEAD_DIM: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr, HEAD_DIM_PAD: tl.constexpr, shape_key,
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    bias_ptr,
+    sm_scale,
+    m_ptr,
+    out_ptr,
+    qs_z,
+    qs_h,
+    qs_lrow,
+    qs_tok,
+    qs_d,
+    os_z,
+    os_h,
+    os_lrow,
+    os_tok,
+    os_d,
+    bs_z,
+    bs_h,
+    bs_m,
+    bs_n,
+    ms_z,
+    ms_h,
+    ms_lrow,
+    ms_tok,
+    Z,
+    H: tl.constexpr,
+    N_CTX,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_M2: tl.constexpr,
+    HEAD_DIM_PAD: tl.constexpr,
+    shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     start_m = tl.program_id(0)
@@ -45,16 +65,36 @@ def _attn_fwd(
     o_base = out_ptr + off_z * os_z + off_h * os_h + off_t * os_lrow
     b_base = bias_ptr + off_z * bs_z + off_h * bs_h
 
-    Q_bp = tl.make_block_ptr(base=q_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
-                             offsets=(start_m * BLOCK_M1, 0), block_shape=(BLOCK_M1, HEAD_DIM_PAD), order=(1, 0))
-    K_bp = tl.make_block_ptr(base=k_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
-                             offsets=(0, 0), block_shape=(BLOCK_M2, HEAD_DIM_PAD), order=(1, 0))
-    V_bp = tl.make_block_ptr(base=v_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
-                             offsets=(0, 0), block_shape=(BLOCK_M2, HEAD_DIM_PAD), order=(1, 0))
-    B_bp = tl.make_block_ptr(base=b_base, shape=(N_CTX, N_CTX), strides=(bs_m, bs_n),
-                             offsets=(start_m * BLOCK_M1, 0), block_shape=(BLOCK_M1, BLOCK_M2), order=(1, 0))
-    O_bp = tl.make_block_ptr(base=o_base, shape=(N_CTX, HEAD_DIM), strides=(os_tok, os_d),
-                             offsets=(start_m * BLOCK_M1, 0), block_shape=(BLOCK_M1, HEAD_DIM_PAD), order=(1, 0))
+    Q_bp = tl.make_block_ptr(
+        base=q_base,
+        shape=(N_CTX, HEAD_DIM),
+        strides=(qs_tok, qs_d),
+        offsets=(start_m * BLOCK_M1, 0),
+        block_shape=(BLOCK_M1, HEAD_DIM_PAD),
+        order=(1, 0),
+    )
+    K_bp = tl.make_block_ptr(
+        base=k_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d), offsets=(0, 0), block_shape=(BLOCK_M2, HEAD_DIM_PAD), order=(1, 0)
+    )
+    V_bp = tl.make_block_ptr(
+        base=v_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d), offsets=(0, 0), block_shape=(BLOCK_M2, HEAD_DIM_PAD), order=(1, 0)
+    )
+    B_bp = tl.make_block_ptr(
+        base=b_base,
+        shape=(N_CTX, N_CTX),
+        strides=(bs_m, bs_n),
+        offsets=(start_m * BLOCK_M1, 0),
+        block_shape=(BLOCK_M1, BLOCK_M2),
+        order=(1, 0),
+    )
+    O_bp = tl.make_block_ptr(
+        base=o_base,
+        shape=(N_CTX, HEAD_DIM),
+        strides=(os_tok, os_d),
+        offsets=(start_m * BLOCK_M1, 0),
+        block_shape=(BLOCK_M1, HEAD_DIM_PAD),
+        order=(1, 0),
+    )
 
     offs_m = start_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     m_i = tl.zeros([BLOCK_M1], tl.float32) - float("inf")
@@ -95,22 +135,33 @@ def _attn_fwd(
     tl.store(O_bp, acc.to(out_ptr.type.element_ty), boundary_check=(0, 1))
 
 
-
-
 # These three take H*L already, in the `HL` parameter the body uses. A second parameter named `H`
 # was receiving the SAME H*L value and being keyed on it: token-derived, so it partitioned the cache
 # per sequence length and made the shape_key bucket beside it redundant -- for a duplicate the body
 # never read. Both the parameter and the key entry are gone.
-@configured('triangle_attention_bwd_pre_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_M1=64, num_warps=2, num_stages=2))
+@configured("triangle_attention_bwd_pre_triton", key=["shape_key"], default=dict(BLOCK_M1=64, num_warps=2, num_stages=2))
 @triton.jit
 def _attn_bwd_preprocess(
-    o, DO, Delta,
-    os_z, os_h, os_lrow, os_tok, os_d,
-    ds_z, ds_h, ds_lrow, ds_tok, ds_d,
-    HL, Z, N_CTX, HEAD_DIM: tl.constexpr,
-    BLOCK_M1: tl.constexpr, HEAD_DIM_PAD: tl.constexpr, shape_key,
+    o,
+    DO,
+    Delta,
+    os_z,
+    os_h,
+    os_lrow,
+    os_tok,
+    os_d,
+    ds_z,
+    ds_h,
+    ds_lrow,
+    ds_tok,
+    ds_d,
+    HL,
+    Z,
+    N_CTX,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    HEAD_DIM_PAD: tl.constexpr,
+    shape_key,
 ):
     # B+C: both `o` (fwd out) and `DO` (grad_output) are STRIDED 5D (B,H,Lrow,tok,D) views
     # over projection-layout [B,L,L2,H*D] -> read via explicit strides, no .contiguous().
@@ -148,19 +199,47 @@ def _attn_bwd_preprocess(
 _SMEM_FUDGE = 2.8
 
 
-@configured('triangle_attention_bwd_dkdv_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
+@configured("triangle_attention_bwd_dkdv_triton", key=["shape_key"], default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_bwd_dkdv(
-    q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dk_ptr, dv_ptr, dbias_ptr, m_ptr, d_ptr,
-    qs_z, qs_h, qs_lrow, qs_tok, qs_d,
-    gs_z, gs_h, gs_lrow, gs_tok, gs_d,
-    ds_z, ds_h, ds_lrow, ds_tok, ds_d,
-    bs_z, bs_h, bs_m, bs_n,
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    bias_ptr,
+    sm_scale,
+    do_ptr,
+    dk_ptr,
+    dv_ptr,
+    dbias_ptr,
+    m_ptr,
+    d_ptr,
+    qs_z,
+    qs_h,
+    qs_lrow,
+    qs_tok,
+    qs_d,
+    gs_z,
+    gs_h,
+    gs_lrow,
+    gs_tok,
+    gs_d,
+    ds_z,
+    ds_h,
+    ds_lrow,
+    ds_tok,
+    ds_d,
+    bs_z,
+    bs_h,
+    bs_m,
+    bs_n,
     dbias_hl,
-    N_CTX, HL, HEAD_DIM: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr, HEAD_DIM_PAD: tl.constexpr, shape_key,
+    N_CTX,
+    HL,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_M2: tl.constexpr,
+    HEAD_DIM_PAD: tl.constexpr,
+    shape_key,
 ):
     # v4b: minimize tl.trans (was 4/iter -> 2/iter) by working in [key, query] space like the
     # raw-ptr v2 kernel, but with make_block_ptr strided loads. qT & biasT loaded transposed.
@@ -172,14 +251,14 @@ def _attn_bwd_dkdv(
     h = hl // N_CTX
     i_row = hl % N_CTX
     adj_q = b * qs_z + h * qs_h + i_row * qs_lrow
-    adj_g = b * gs_z + h * gs_h + i_row * gs_lrow   # grad-group layout (may differ from q)
+    adj_g = b * gs_z + h * gs_h + i_row * gs_lrow  # grad-group layout (may differ from q)
     adj_do = b * ds_z + h * ds_h + i_row * ds_lrow
     pid = tl.program_id(0)
     q_base = q_ptr + adj_q
     k_base = k_ptr + adj_q
     v_base = v_ptr + adj_q
     do_base = do_ptr + adj_do
-    dk_base = dk_ptr + adj_g   # dq/dk/dv written in grad-group layout (decoupled from q strides)
+    dk_base = dk_ptr + adj_g  # dq/dk/dv written in grad-group layout (decoupled from q strides)
     dv_base = dv_ptr + adj_g
     b_base = bias_ptr + b * bs_z + h * bs_h
     dbias_base = dbias_ptr + bhid * dbias_hl
@@ -187,52 +266,80 @@ def _attn_bwd_dkdv(
     d_ptr += off_chz
     start_n = pid * BLOCK_M2
 
-    K_bp = tl.make_block_ptr(base=k_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
-                             offsets=(start_n, 0), block_shape=(BLOCK_M2, HEAD_DIM_PAD), order=(1, 0))
-    V_bp = tl.make_block_ptr(base=v_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
-                             offsets=(start_n, 0), block_shape=(BLOCK_M2, HEAD_DIM_PAD), order=(1, 0))
+    K_bp = tl.make_block_ptr(
+        base=k_base,
+        shape=(N_CTX, HEAD_DIM),
+        strides=(qs_tok, qs_d),
+        offsets=(start_n, 0),
+        block_shape=(BLOCK_M2, HEAD_DIM_PAD),
+        order=(1, 0),
+    )
+    V_bp = tl.make_block_ptr(
+        base=v_base,
+        shape=(N_CTX, HEAD_DIM),
+        strides=(qs_tok, qs_d),
+        offsets=(start_n, 0),
+        block_shape=(BLOCK_M2, HEAD_DIM_PAD),
+        order=(1, 0),
+    )
     # qT transposed [D, BLOCK_M1]
-    QT_bp = tl.make_block_ptr(base=q_base, shape=(HEAD_DIM, N_CTX), strides=(qs_d, qs_tok),
-                              offsets=(0, 0), block_shape=(HEAD_DIM_PAD, BLOCK_M1), order=(0, 1))
-    DO_bp = tl.make_block_ptr(base=do_base, shape=(N_CTX, HEAD_DIM), strides=(ds_tok, ds_d),
-                              offsets=(0, 0), block_shape=(BLOCK_M1, HEAD_DIM_PAD), order=(1, 0))
+    QT_bp = tl.make_block_ptr(
+        base=q_base, shape=(HEAD_DIM, N_CTX), strides=(qs_d, qs_tok), offsets=(0, 0), block_shape=(HEAD_DIM_PAD, BLOCK_M1), order=(0, 1)
+    )
+    DO_bp = tl.make_block_ptr(
+        base=do_base, shape=(N_CTX, HEAD_DIM), strides=(ds_tok, ds_d), offsets=(0, 0), block_shape=(BLOCK_M1, HEAD_DIM_PAD), order=(1, 0)
+    )
     # biasT transposed [BLOCK_M2 key, BLOCK_M1 query]: bias mem is [query, key] (bs_m, bs_n)
-    BT_bp = tl.make_block_ptr(base=b_base, shape=(N_CTX, N_CTX), strides=(bs_n, bs_m),
-                              offsets=(start_n, 0), block_shape=(BLOCK_M2, BLOCK_M1), order=(0, 1))
+    BT_bp = tl.make_block_ptr(
+        base=b_base, shape=(N_CTX, N_CTX), strides=(bs_n, bs_m), offsets=(start_n, 0), block_shape=(BLOCK_M2, BLOCK_M1), order=(0, 1)
+    )
     # dbiasT [BLOCK_M2 key, BLOCK_M1 query] view into dbias[query,key] (strides swapped)
-    DBT_bp = tl.make_block_ptr(base=dbias_base, shape=(N_CTX, N_CTX), strides=(bs_n, bs_m),
-                               offsets=(start_n, 0), block_shape=(BLOCK_M2, BLOCK_M1), order=(0, 1))
-    DK_bp = tl.make_block_ptr(base=dk_base, shape=(N_CTX, HEAD_DIM), strides=(gs_tok, gs_d),
-                              offsets=(start_n, 0), block_shape=(BLOCK_M2, HEAD_DIM_PAD), order=(1, 0))
-    DV_bp = tl.make_block_ptr(base=dv_base, shape=(N_CTX, HEAD_DIM), strides=(gs_tok, gs_d),
-                              offsets=(start_n, 0), block_shape=(BLOCK_M2, HEAD_DIM_PAD), order=(1, 0))
+    DBT_bp = tl.make_block_ptr(
+        base=dbias_base, shape=(N_CTX, N_CTX), strides=(bs_n, bs_m), offsets=(start_n, 0), block_shape=(BLOCK_M2, BLOCK_M1), order=(0, 1)
+    )
+    DK_bp = tl.make_block_ptr(
+        base=dk_base,
+        shape=(N_CTX, HEAD_DIM),
+        strides=(gs_tok, gs_d),
+        offsets=(start_n, 0),
+        block_shape=(BLOCK_M2, HEAD_DIM_PAD),
+        order=(1, 0),
+    )
+    DV_bp = tl.make_block_ptr(
+        base=dv_base,
+        shape=(N_CTX, HEAD_DIM),
+        strides=(gs_tok, gs_d),
+        offsets=(start_n, 0),
+        block_shape=(BLOCK_M2, HEAD_DIM_PAD),
+        order=(1, 0),
+    )
 
     offs_n = start_n + tl.arange(0, BLOCK_M2)
     dv = tl.zeros([BLOCK_M2, HEAD_DIM_PAD], tl.float32)
     dk = tl.zeros([BLOCK_M2, HEAD_DIM_PAD], tl.float32)
-    k = tl.load(K_bp, boundary_check=(0, 1), padding_option="zero")   # [BN, D]
-    v = tl.load(V_bp, boundary_check=(0, 1), padding_option="zero")   # [BN, D]
+    k = tl.load(K_bp, boundary_check=(0, 1), padding_option="zero")  # [BN, D]
+    v = tl.load(V_bp, boundary_check=(0, 1), padding_option="zero")  # [BN, D]
     qk_scale = sm_scale * 1.44269504
 
     m_ptrs = m_ptr + tl.arange(0, BLOCK_M1)
     d_ptrs = d_ptr + tl.arange(0, BLOCK_M1)
     for start_m in range(0, N_CTX, BLOCK_M1):
         offs_m = start_m + tl.arange(0, BLOCK_M1)
-        qT = tl.load(QT_bp, boundary_check=(0, 1), padding_option="zero")   # [D, BM]
-        do = tl.load(DO_bp, boundary_check=(0, 1), padding_option="zero")   # [BM, D]
+        qT = tl.load(QT_bp, boundary_check=(0, 1), padding_option="zero")  # [D, BM]
+        do = tl.load(DO_bp, boundary_check=(0, 1), padding_option="zero")  # [BM, D]
         biasT = tl.load(BT_bp, boundary_check=(0, 1), padding_option="zero")  # [BN, BM]
         mq = tl.load(m_ptrs, mask=offs_m < N_CTX, other=0.0)
         Di = tl.load(d_ptrs, mask=offs_m < N_CTX, other=0.0)
 
-        qkT = tl.dot(k, qT)                          # [BN key, BM query]
+        qkT = tl.dot(k, qT)  # [BN key, BM query]
         qkT = qkT + biasT / (qk_scale / 1.44269504)
         m_safe = tl.maximum(mq, -1e38)
         qkT = qkT * qk_scale - m_safe[None, :]
         pT = tl.math.exp2(qkT)
         pT = tl.where((offs_n[:, None] < N_CTX) & (offs_m[None, :] < N_CTX), pT, 0.0)
-        dpT = tl.dot(v, tl.trans(do))                # [BN, BM]  (1 trans)
-        dsT = pT * (dpT - Di[None, :])               # [BN, BM]
-        dv = tl.dot(pT.to(do.dtype), do, dv)         # [BN, D]
+        dpT = tl.dot(v, tl.trans(do))  # [BN, BM]  (1 trans)
+        dsT = pT * (dpT - Di[None, :])  # [BN, BM]
+        dv = tl.dot(pT.to(do.dtype), do, dv)  # [BN, D]
         dk = tl.dot(dsT.to(do.dtype), tl.trans(qT), dk)  # [BN, D] = dsT[BN,BM] @ q[BM,D] (1 trans)
         tl.store(DBT_bp, dsT.to(dbias_ptr.dtype.element_ty), boundary_check=(0, 1))
 
@@ -248,20 +355,44 @@ def _attn_bwd_dkdv(
     tl.store(DK_bp, dk.to(dk_ptr.dtype.element_ty), boundary_check=(0, 1))
 
 
-
-
-@configured('triangle_attention_bwd_dq_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
+@configured("triangle_attention_bwd_dq_triton", key=["shape_key"], default=dict(BLOCK_M1=64, BLOCK_M2=64, num_warps=4, num_stages=2))
 @triton.jit
 def _attn_bwd_dq(
-    q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dq_ptr, m_ptr, d_ptr,
-    qs_z, qs_h, qs_lrow, qs_tok, qs_d,
-    gs_z, gs_h, gs_lrow, gs_tok, gs_d,
-    ds_z, ds_h, ds_lrow, ds_tok, ds_d,
-    bs_z, bs_h, bs_m, bs_n,
-    N_CTX, HL, HEAD_DIM: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr, HEAD_DIM_PAD: tl.constexpr, shape_key,
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    bias_ptr,
+    sm_scale,
+    do_ptr,
+    dq_ptr,
+    m_ptr,
+    d_ptr,
+    qs_z,
+    qs_h,
+    qs_lrow,
+    qs_tok,
+    qs_d,
+    gs_z,
+    gs_h,
+    gs_lrow,
+    gs_tok,
+    gs_d,
+    ds_z,
+    ds_h,
+    ds_lrow,
+    ds_tok,
+    ds_d,
+    bs_z,
+    bs_h,
+    bs_m,
+    bs_n,
+    N_CTX,
+    HL,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_M2: tl.constexpr,
+    HEAD_DIM_PAD: tl.constexpr,
+    shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     bhid = tl.program_id(2).to(tl.int64)
@@ -271,31 +402,52 @@ def _attn_bwd_dq(
     h = hl // N_CTX
     i_row = hl % N_CTX
     adj_q = b * qs_z + h * qs_h + i_row * qs_lrow
-    adj_g = b * gs_z + h * gs_h + i_row * gs_lrow   # grad-group layout (may differ from q)
+    adj_g = b * gs_z + h * gs_h + i_row * gs_lrow  # grad-group layout (may differ from q)
     adj_do = b * ds_z + h * ds_h + i_row * ds_lrow
     pid = tl.program_id(0)
     q_base = q_ptr + adj_q
     k_base = k_ptr + adj_q
     v_base = v_ptr + adj_q
     do_base = do_ptr + adj_do
-    dq_base = dq_ptr + adj_g   # dq written in grad-group layout (decoupled from q strides)
+    dq_base = dq_ptr + adj_g  # dq written in grad-group layout (decoupled from q strides)
     b_base = bias_ptr + b * bs_z + h * bs_h
     m_ptr += off_chz
     d_ptr += off_chz
     start_m = pid * BLOCK_M1
 
-    Q_bp = tl.make_block_ptr(base=q_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
-                             offsets=(start_m, 0), block_shape=(BLOCK_M1, HEAD_DIM_PAD), order=(1, 0))
-    DO_bp = tl.make_block_ptr(base=do_base, shape=(N_CTX, HEAD_DIM), strides=(ds_tok, ds_d),
-                              offsets=(start_m, 0), block_shape=(BLOCK_M1, HEAD_DIM_PAD), order=(1, 0))
-    DQ_bp = tl.make_block_ptr(base=dq_base, shape=(N_CTX, HEAD_DIM), strides=(gs_tok, gs_d),
-                              offsets=(start_m, 0), block_shape=(BLOCK_M1, HEAD_DIM_PAD), order=(1, 0))
-    K_bp = tl.make_block_ptr(base=k_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
-                             offsets=(0, 0), block_shape=(BLOCK_M2, HEAD_DIM_PAD), order=(1, 0))
-    V_bp = tl.make_block_ptr(base=v_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
-                             offsets=(0, 0), block_shape=(BLOCK_M2, HEAD_DIM_PAD), order=(1, 0))
-    B_bp = tl.make_block_ptr(base=b_base, shape=(N_CTX, N_CTX), strides=(bs_m, bs_n),
-                             offsets=(start_m, 0), block_shape=(BLOCK_M1, BLOCK_M2), order=(1, 0))
+    Q_bp = tl.make_block_ptr(
+        base=q_base,
+        shape=(N_CTX, HEAD_DIM),
+        strides=(qs_tok, qs_d),
+        offsets=(start_m, 0),
+        block_shape=(BLOCK_M1, HEAD_DIM_PAD),
+        order=(1, 0),
+    )
+    DO_bp = tl.make_block_ptr(
+        base=do_base,
+        shape=(N_CTX, HEAD_DIM),
+        strides=(ds_tok, ds_d),
+        offsets=(start_m, 0),
+        block_shape=(BLOCK_M1, HEAD_DIM_PAD),
+        order=(1, 0),
+    )
+    DQ_bp = tl.make_block_ptr(
+        base=dq_base,
+        shape=(N_CTX, HEAD_DIM),
+        strides=(gs_tok, gs_d),
+        offsets=(start_m, 0),
+        block_shape=(BLOCK_M1, HEAD_DIM_PAD),
+        order=(1, 0),
+    )
+    K_bp = tl.make_block_ptr(
+        base=k_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d), offsets=(0, 0), block_shape=(BLOCK_M2, HEAD_DIM_PAD), order=(1, 0)
+    )
+    V_bp = tl.make_block_ptr(
+        base=v_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d), offsets=(0, 0), block_shape=(BLOCK_M2, HEAD_DIM_PAD), order=(1, 0)
+    )
+    B_bp = tl.make_block_ptr(
+        base=b_base, shape=(N_CTX, N_CTX), strides=(bs_m, bs_n), offsets=(start_m, 0), block_shape=(BLOCK_M1, BLOCK_M2), order=(1, 0)
+    )
 
     offs_m = start_m + tl.arange(0, BLOCK_M1)
     q = tl.load(Q_bp, boundary_check=(0, 1), padding_option="zero")
@@ -342,8 +494,9 @@ def _tri_attn_fwd_fake(q, k, v, bias, shape_key):
 
 
 @opaque(fake=_tri_attn_fwd_fake, name="triangle_attention_fwd")
-def _tri_attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor,
-                  shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _tri_attn_fwd(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor, shape_key: int
+) -> tuple[torch.Tensor, torch.Tensor]:
     """The attention launch -> ``(out, m)``, ``out`` in projection layout.
 
     Split out of ``TritonTriangleAttentionPairBiasFunction.forward`` so ``bias.contiguous()`` and
@@ -360,12 +513,22 @@ def _tri_attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch
 
     grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * H, L]
     _attn_fwd[grid](
-        q, k, v, bias, sm_scale, m, out,
-        *q.stride(),      # q strided 5D (B,H,Lrow,tok,D)  [k,v share pattern]
-        *out.stride(),    # o-group STRIDED 5D (projection layout, head_dim stride-1)
-        *bias.stride(),   # bias contiguous (B,H,m,n)
+        q,
+        k,
+        v,
+        bias,
+        sm_scale,
+        m,
+        out,
+        *q.stride(),  # q strided 5D (B,H,Lrow,tok,D)  [k,v share pattern]
+        *out.stride(),  # o-group STRIDED 5D (projection layout, head_dim stride-1)
+        *bias.stride(),  # bias contiguous (B,H,m,n)
         *m.stride(),
-        B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D),
+        B,
+        H,
+        L,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
         shape_key=pack(shape_key, H=H, HEAD_DIM=D),
     )
     return out, m
@@ -379,16 +542,24 @@ def _tri_attn_bwd_fake(q, k, v, bias, m, out, grad_output, shape_key):
     UNREDUCED per-row ``(B, H*L, L, L)`` accumulator; the caller reduces it.
     """
     B, H, L, _, D = q.shape
-    def _proj():   # same projection-layout strided view the real backward allocates
+
+    def _proj():  # same projection-layout strided view the real backward allocates
         return rearrange(v.new_empty((B, L, L, H * D)), "B L L2 (H D) -> B H L L2 D", H=H)
+
     return _proj(), _proj(), _proj(), bias.new_empty((B, H * L, L, L))
 
 
 @opaque(fake=_tri_attn_bwd_fake, name="triangle_attention_bwd")
-def _tri_attn_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor,
-                  m: torch.Tensor, out: torch.Tensor, grad_output: torch.Tensor,
-                  shape_key: int,
-                  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _tri_attn_bwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: torch.Tensor,
+    m: torch.Tensor,
+    out: torch.Tensor,
+    grad_output: torch.Tensor,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """The three backward launches -> ``(dq, dk, dv, dbias_raw)``.
 
     ``dbias_raw`` is the per-row ``(B, H*L, L, L)`` accumulator; the reduce over the row axis is
@@ -404,9 +575,15 @@ def _tri_attn_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch
 
     grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
     _attn_bwd_preprocess[grid](
-        out, grad_output, delta,
-        *out.stride(),           # out STRIDED 5D (projection layout)
-        *grad_output.stride(), HL, B, L, D,
+        out,
+        grad_output,
+        delta,
+        *out.stride(),  # out STRIDED 5D (projection layout)
+        *grad_output.stride(),
+        HL,
+        B,
+        L,
+        D,
         shape_key=pack(shape_key, HEAD_DIM=D),
         HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
@@ -429,24 +606,48 @@ def _tri_attn_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch
 
     grid_kv = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
     _attn_bwd_dkdv[grid_kv](
-        q, k, v, bias, sm_scale, grad_output, dk, dv, dbias, m_m, delta,
-        *q.stride(),        # q strided 5D  [k,v share] — READ layout
-        *dk.stride(),       # grad-group WRITE layout (may differ from q, e.g. concat split-view)
+        q,
+        k,
+        v,
+        bias,
+        sm_scale,
+        grad_output,
+        dk,
+        dv,
+        dbias,
+        m_m,
+        delta,
+        *q.stride(),  # q strided 5D  [k,v share] — READ layout
+        *dk.stride(),  # grad-group WRITE layout (may differ from q, e.g. concat split-view)
         *grad_output.stride(),  # do STRIDED 5D (B,H,Lrow,tok,D)
-        *bias.stride(),     # bias contiguous (B,H,m,n)  broadcast over row
-        L * L,              # dbias HL-dim stride
-        L, HL, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=pack(shape_key, HEAD_DIM=D),
+        *bias.stride(),  # bias contiguous (B,H,m,n)  broadcast over row
+        L * L,  # dbias HL-dim stride
+        L,
+        HL,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=pack(shape_key, HEAD_DIM=D),
     )
     grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), 1, B * HL]
     _attn_bwd_dq[grid_q](
-        q, k, v, bias, sm_scale, grad_output, dq, m_m, delta,
+        q,
+        k,
+        v,
+        bias,
+        sm_scale,
+        grad_output,
+        dq,
+        m_m,
+        delta,
         *q.stride(),
-        *dq.stride(),       # grad-group WRITE layout
+        *dq.stride(),  # grad-group WRITE layout
         *grad_output.stride(),
         *bias.stride(),
-        L, HL, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=pack(shape_key, HEAD_DIM=D),
+        L,
+        HL,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=pack(shape_key, HEAD_DIM=D),
     )
 
     # dq/dk/dv are already (B,H,L,L2,D) strided views over [B,L,L2,H*D] -> returned as-is;
@@ -473,7 +674,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        q, k, v, bias, m, out = ctx.saved_tensors   # q/k/v strided; bias/m/out contiguous
+        q, k, v, bias, m, out = ctx.saved_tensors  # q/k/v strided; bias/m/out contiguous
         if grad_output.dtype != q.dtype:
             grad_output = grad_output.to(q.dtype)
 

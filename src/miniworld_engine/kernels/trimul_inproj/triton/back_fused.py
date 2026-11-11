@@ -32,13 +32,9 @@ from miniworld_engine.kernels._shape_key import pack, token_key
 # and the maintenance surface at once.
 
 
-
-@configured('trimul_bwd_gate_packed_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
+@configured("trimul_bwd_gate_packed_triton", key=["shape_key"], default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
 @triton.jit
-def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, pair_mask_ptr, M, DM, D: tl.constexpr, BLOCK_E: tl.constexpr,
-                    shape_key):
+def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, pair_mask_ptr, M, DM, D: tl.constexpr, BLOCK_E: tl.constexpr, shape_key):
     """1D channel-major elementwise: out (4D,M) = [d_gLlog; d_pL; d_gRlog; d_pR].
     Iterate over DM=D*M positions (d,m); dL=dL_ptr[idx], dR=dR_ptr[idx] (separate left/right
     buffers — no d_lr cat in the caller); preact is interleaved so needs (2d)*M+m indexing.
@@ -66,12 +62,10 @@ def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, pair_mask_ptr, M, DM, D: tl.con
     pR = tl.load(preact + (D2 + 2 * d + 1) * Mi + m, mask=mask, other=0.0).to(tl.float32)
     gL, gR = tl.sigmoid(gLlog), tl.sigmoid(gRlog)
     et = out.dtype.element_ty
-    tl.store(out + idx, (dL * pL * gL * (1 - gL)).to(et), mask=mask)            # d_gLlog
-    tl.store(out + DMi + idx, (dL * gL).to(et), mask=mask)                      # d_pL
+    tl.store(out + idx, (dL * pL * gL * (1 - gL)).to(et), mask=mask)  # d_gLlog
+    tl.store(out + DMi + idx, (dL * gL).to(et), mask=mask)  # d_pL
     tl.store(out + 2 * DMi + idx, (dR * pR * gR * (1 - gR)).to(et), mask=mask)  # d_gRlog
-    tl.store(out + 3 * DMi + idx, (dR * gR).to(et), mask=mask)                  # d_pR
-
-
+    tl.store(out + 3 * DMi + idx, (dR * gR).to(et), mask=mask)  # d_pR
 
 
 def front_bwd_fused(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
@@ -87,11 +81,10 @@ def front_bwd_fused(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
     Kernel-optimized path: a light channel-major elementwise (d_concat) feeds TWO cuBLAS
     GEMMs (dW = d_concatᵀ-stacked; dxn). cuBLAS hits far higher efficiency on these
     (esp. the huge-K wgrad reduction) than the hand-written split-K _dw_kernel (~30 TFLOPS)."""
-    dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
-        d_left, d_right, preact, x_n, WL, WLg, WR, WRg)
+    dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg)
     B, _, L, _ = d_left.shape
     Din = WL.shape[0]
-    dxn = (dconc.t() @ W_stack).reshape(B, L, L, Din)   # cuBLAS (non-merged path)
+    dxn = (dconc.t() @ W_stack).reshape(B, L, L, Din)  # cuBLAS (non-merged path)
     return dxn, dWL, dWLg, dWR, dWRg
 
 
@@ -101,8 +94,9 @@ def _dconcat_fake(dL2, dR2, preact2, M, D, shape_key, pair_mask=None):
 
 
 @opaque(fake=_dconcat_fake, name="trimul_front_bwd_dconcat")
-def _dconcat(dL2: torch.Tensor, dR2: torch.Tensor, preact2: torch.Tensor, M: int, D: int,
-             shape_key: int, pair_mask: torch.Tensor | None = None) -> torch.Tensor:
+def _dconcat(
+    dL2: torch.Tensor, dR2: torch.Tensor, preact2: torch.Tensor, M: int, D: int, shape_key: int, pair_mask: torch.Tensor | None = None
+) -> torch.Tensor:
     """The elementwise GLU backward -> dconc (4D, M) = [d_gLlog; d_pL; d_gRlog; d_pR].
 
     Only the launch: the four wgrad GEMMs and the W_stack ``cat`` around it are cuBLAS/torch and
@@ -111,7 +105,8 @@ def _dconcat(dL2: torch.Tensor, dR2: torch.Tensor, preact2: torch.Tensor, M: int
     dm = D * M
     dconc = torch.empty(4 * D, M, device=dL2.device, dtype=dL2.dtype)
     _dconcat_kernel[lambda meta: (triton.cdiv(dm, meta["BLOCK_E"]),)](
-        dL2, dR2, preact2, dconc, pair_mask, M, dm, D=D, shape_key=pack(shape_key, D=D))
+        dL2, dR2, preact2, dconc, pair_mask, M, dm, D=D, shape_key=pack(shape_key, D=D)
+    )
     return dconc
 
 
@@ -120,8 +115,8 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, *, pair_mask=No
     grads (cuBLAS huge-K, STAYS cuBLAS), and the stacked W operand. Returns
     (dconc (4H,M), dWL, dWLg, dWR, dWRg, W_stack (4H,Din)). The caller forms dxn = dconcᵀ@W_stack
     (the bidirectional back half fuses the gate's dx_gate add into that GEMM)."""
-    B, H, L, _ = d_left.shape   # per-side hidden width
-    Din = WL.shape[0]           # input width (= d_pair); may differ from H (bidirectional)
+    B, H, L, _ = d_left.shape  # per-side hidden width
+    Din = WL.shape[0]  # input width (= d_pair); may differ from H (bidirectional)
     M = B * L * L
     dL2 = d_left.reshape(H * M)
     dR2 = d_right.reshape(H * M)
@@ -134,22 +129,19 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, *, pair_mask=No
     # dW: (4H,M)@(M,Din) — cuBLAS (the huge-K reduction; the measured winner over quack 2.6-5x).
     dWs = dconc @ xf
     dWLg = dWs[:H].t().contiguous()
-    dWL = dWs[H:2 * H].t().contiguous()
-    dWRg = dWs[2 * H:3 * H].t().contiguous()
-    dWR = dWs[3 * H:].t().contiguous()
-    W_stack = torch.cat([WLg.t(), WL.t(), WRg.t(), WR.t()], dim=0)   # (4H, Din)
+    dWL = dWs[H : 2 * H].t().contiguous()
+    dWRg = dWs[2 * H : 3 * H].t().contiguous()
+    dWR = dWs[3 * H :].t().contiguous()
+    W_stack = torch.cat([WLg.t(), WL.t(), WRg.t(), WR.t()], dim=0)  # (4H, Din)
     return dconc, dWL, dWLg, dWR, dWRg, W_stack
 
 
 # ── σ(gate) backward: reconstruct GLU grads from lr + sg (no preact) ──────────────────────────
 
 
-@configured('trimul_bwd_gate_packed_recompute_triton',
-            key=['shape_key'],
-            default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
+@configured("trimul_bwd_gate_packed_recompute_triton", key=["shape_key"], default=dict(BLOCK_E=64, num_warps=4, num_stages=2))
 @triton.jit
-def _dconcat_sig_kernel(dL_ptr, dR_ptr, lrL_ptr, lrR_ptr, sg_ptr, out, M, DM,
-                        D: tl.constexpr, BLOCK_E: tl.constexpr, shape_key):
+def _dconcat_sig_kernel(dL_ptr, dR_ptr, lrL_ptr, lrR_ptr, sg_ptr, out, M, DM, D: tl.constexpr, BLOCK_E: tl.constexpr, shape_key):
     """out (4D,M) = [d_gLlog; d_pL; d_gRlog; d_pR], built from the forward outputs lr (=left,
     right) and sg (=σ(gate), [2D,M]) instead of raw preact logits:
         d_glog = d_out·lr·(1-sg) ;  d_proj = d_out·sg    (proj = lr/sg is never needed).
@@ -163,12 +155,12 @@ def _dconcat_sig_kernel(dL_ptr, dR_ptr, lrL_ptr, lrR_ptr, sg_ptr, out, M, DM,
     lrL = tl.load(lrL_ptr + idx, mask=mask, other=0.0).to(tl.float32)
     lrR = tl.load(lrR_ptr + idx, mask=mask, other=0.0).to(tl.float32)
     sgL = tl.load(sg_ptr + idx, mask=mask, other=0.0).to(tl.float32)
-    sgR = tl.load(sg_ptr + DMi + idx, mask=mask, other=0.0).to(tl.float32)   # sg[D:2D] rows
+    sgR = tl.load(sg_ptr + DMi + idx, mask=mask, other=0.0).to(tl.float32)  # sg[D:2D] rows
     et = out.dtype.element_ty
-    tl.store(out + idx, (dL * lrL * (1.0 - sgL)).to(et), mask=mask)            # d_gLlog
-    tl.store(out + DMi + idx, (dL * sgL).to(et), mask=mask)                    # d_pL
+    tl.store(out + idx, (dL * lrL * (1.0 - sgL)).to(et), mask=mask)  # d_gLlog
+    tl.store(out + DMi + idx, (dL * sgL).to(et), mask=mask)  # d_pL
     tl.store(out + 2 * DMi + idx, (dR * lrR * (1.0 - sgR)).to(et), mask=mask)  # d_gRlog
-    tl.store(out + 3 * DMi + idx, (dR * sgR).to(et), mask=mask)                # d_pR
+    tl.store(out + 3 * DMi + idx, (dR * sgR).to(et), mask=mask)  # d_pR
 
 
 def _dconcat_sig_fake(dL2, dR2, lrL, lrR, sg2, M, D, shape_key):
@@ -177,14 +169,16 @@ def _dconcat_sig_fake(dL2, dR2, lrL, lrR, sg2, M, D, shape_key):
 
 
 @opaque(fake=_dconcat_sig_fake, name="trimul_front_bwd_dconcat_sig")
-def _dconcat_sig(dL2: torch.Tensor, dR2: torch.Tensor, lrL: torch.Tensor, lrR: torch.Tensor,
-                 sg2: torch.Tensor, M: int, D: int, shape_key: int) -> torch.Tensor:
+def _dconcat_sig(
+    dL2: torch.Tensor, dR2: torch.Tensor, lrL: torch.Tensor, lrR: torch.Tensor, sg2: torch.Tensor, M: int, D: int, shape_key: int
+) -> torch.Tensor:
     """The sigma(gate) variant of :func:`_dconcat` -- same output, rebuilt from the forward's
     ``left``/``right``/``sigma(gate)`` instead of the raw preact logits."""
     dm = D * M
     dconc = torch.empty(4 * D, M, device=dL2.device, dtype=dL2.dtype)
     _dconcat_sig_kernel[lambda meta: (triton.cdiv(dm, meta["BLOCK_E"]),)](
-        dL2, dR2, lrL, lrR, sg2, dconc, M, dm, D=D, shape_key=pack(shape_key, D=D))
+        dL2, dR2, lrL, lrR, sg2, dconc, M, dm, D=D, shape_key=pack(shape_key, D=D)
+    )
     return dconc
 
 
@@ -206,8 +200,8 @@ def front_bwd_dW_sig(d_left, d_right, left, right, sg, x_n, WL, WLg, WR, WRg):
 
     dWs = dconc @ xf
     dWLg = dWs[:H].t().contiguous()
-    dWL = dWs[H:2 * H].t().contiguous()
-    dWRg = dWs[2 * H:3 * H].t().contiguous()
-    dWR = dWs[3 * H:].t().contiguous()
+    dWL = dWs[H : 2 * H].t().contiguous()
+    dWRg = dWs[2 * H : 3 * H].t().contiguous()
+    dWR = dWs[3 * H :].t().contiguous()
     W_stack = torch.cat([WLg.t(), WL.t(), WRg.t(), WR.t()], dim=0)
     return dconc, dWL, dWLg, dWR, dWRg, W_stack

@@ -27,7 +27,7 @@ _WIDTH = 128
 
 def wanted() -> bool:
     """The switch and the engine backend; everything else about a call is `serves_*`."""
-    return True   # no switch: the module's "cuda" backend is the only caller
+    return True  # no switch: the module's "cuda" backend is the only caller
 
 
 def _ext():
@@ -61,13 +61,7 @@ def _aligned(t: torch.Tensor) -> torch.Tensor:
 def _rows16(weight: torch.Tensor) -> torch.Tensor:
     """The weight with 16-byte aligned rows (the pack kernel loads 16 bytes at a time): a slice of the packed projection starts 256 B in with a 768 B row stride and is returned as is,
     anything else is copied.  Called inside the opaque ops only (`storage_offset` is not traceable)."""
-    return (
-        weight
-        if weight.storage_offset() % 8 == 0
-        and weight.stride(0) % 8 == 0
-        and weight.stride(1) == 1
-        else weight.clone()
-    )
+    return weight if weight.storage_offset() % 8 == 0 and weight.stride(0) % 8 == 0 and weight.stride(1) == 1 else weight.clone()
 
 
 # =================================================================================================================================== edge tail
@@ -141,12 +135,8 @@ def _fwd(
     """The fused edge tail on flat ``[rows, 128]`` operands (weights packed per call: the pack is one 24-block launch); ``row_base`` is the index of the first row in the whole tensor (a chunk of a replayed
     forward draws the dropout decisions of its rows)."""
     ext = _ext()
-    img, tab = ext.pack(
-        False, False, False, _rows16(w1), _rows16(w2), _rows16(w3), b2, b3, gamma, beta
-    )
-    return list(
-        ext.tail_fwd(edge, query, nbr, idx, img, tab, seed, k, eps, p, save, row_base)
-    )
+    img, tab = ext.pack(False, False, False, _rows16(w1), _rows16(w2), _rows16(w3), b2, b3, gamma, beta)
+    return list(ext.tail_fwd(edge, query, nbr, idx, img, tab, seed, k, eps, p, save, row_base))
 
 
 def _bwd_fake(
@@ -213,9 +203,7 @@ def _bwd(
 ) -> list[torch.Tensor]:
     """LayerNorm / dropout backward + dX x 3 (one kernel), the weight gradients, the two reductions of the first product's gradient, the fixed-order sums."""
     ext = _ext()
-    img, tab = ext.pack(
-        True, True, True, _rows16(w3), _rows16(w2), _rows16(w1), b2, b3, gamma, beta
-    )  # backward image order: dX3, dX2, dX1
+    img, tab = ext.pack(True, True, True, _rows16(w3), _rows16(w2), _rows16(w1), b2, b3, gamma, beta)  # backward image order: dX3, dX2, dX1
     return list(
         ext.tail_bwd(
             go,
@@ -244,9 +232,7 @@ def _bwd(
 _RECOMPUTE_CHUNK_ROWS = 1 << 19
 
 
-def _replay_bwd_fake(
-    go, edge, query, nbr, idx, w1, w2, w3, b2, b3, gamma, beta, seed, nodes, k, eps, p
-):
+def _replay_bwd_fake(go, edge, query, nbr, idx, w1, w2, w3, b2, b3, gamma, beta, seed, nodes, k, eps, p):
     """The outputs of ``_bwd_fake``: the replay is a backward whose saved operands are rebuilt inside it."""
     return _bwd_fake(
         go,
@@ -341,9 +327,7 @@ def _replay_bwd(
         )
     gedge, gquery = torch.empty_like(edge), torch.empty_like(query)
     gnbr = torch.zeros((nodes, _WIDTH), dtype=torch.float32, device=edge.device)
-    summed: list[torch.Tensor | None] = [
-        None
-    ] * 7  # dW1e, dW2, dW3, db2, db3, dgamma, dbeta
+    summed: list[torch.Tensor | None] = [None] * 7  # dW1e, dW2, dW3, db2, db3, dgamma, dbeta
     for r0 in range(0, rows, step):
         r1 = min(rows, r0 + step)
         n0, n1 = r0 // k, r1 // k
@@ -392,10 +376,7 @@ def _replay_bwd(
         gedge[r0:r1] = ge
         gquery[n0:n1] = gq
         gnbr.add_(gn)  # fp32 += bf16 in one pass
-        summed = [
-            g.float() if s is None else s + g.float()
-            for s, g in zip(summed, pg, strict=True)
-        ]
+        summed = [g.float() if s is None else s + g.float() for s, g in zip(summed, pg, strict=True)]
     dtypes = (w1.dtype, w2.dtype, w3.dtype, b2.dtype, b3.dtype, gamma.dtype, beta.dtype)
     return [
         gedge,
@@ -453,9 +434,7 @@ class _TailUpdate(torch.autograd.Function):
         )
         if save:
             if recompute:
-                ctx.save_for_backward(
-                    edge, query, nbr, idx, w1, w2, w3, b2, b3, gamma, beta, seed
-                )
+                ctx.save_for_backward(edge, query, nbr, idx, w1, w2, w3, b2, b3, gamma, beta, seed)
             else:
                 ctx.save_for_backward(
                     edge,
@@ -488,9 +467,7 @@ class _TailUpdate(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out):
         if ctx.recompute:
-            edge, query, nbr, idx, w1, w2, w3, b2, b3, gamma, beta, seed = (
-                ctx.saved_tensors
-            )
+            edge, query, nbr, idx, w1, w2, w3, b2, b3, gamma, beta, seed = ctx.saved_tensors
             gedge, gquery, gnbr, dw1, dw2, dw3, db2, db3, dgamma, dbeta = _replay_bwd(
                 grad_out.contiguous(),
                 edge,
@@ -636,12 +613,7 @@ def mlp_serves(
     output_weight: torch.Tensor,
 ) -> bool:
     """Whether the CUDA edge MLP runs this call (the caller has checked the family's Triton contract: bf16 ``[..., 128]``, contiguous 128 x 128 parameters)."""
-    return (
-        wanted()
-        and on_a100(preactivation.device)
-        and preactivation.ndim >= 1
-        and _loads()
-    )
+    return wanted() and on_a100(preactivation.device) and preactivation.ndim >= 1 and _loads()
 
 
 def _mlp_fwd_fake(x, wh, bh, wo, bo, save):
@@ -720,9 +692,7 @@ class _MlpUpdate(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out):
         x, hid, wh, bh, wo, bo = ctx.saved_tensors
-        gx, dwh, dwo, dbh, dbo = _mlp_bwd(
-            grad_out.contiguous(), x, hid, wh, bh, wo, bo, ctx.recompute
-        )
+        gx, dwh, dwo, dbh, dbo = _mlp_bwd(grad_out.contiguous(), x, hid, wh, bh, wo, bo, ctx.recompute)
         return gx, dwh, dbh, dwo, dbo, None
 
 
@@ -776,11 +746,7 @@ class _MemoryLayerNorm(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, values, weight, bias, eps):
-        native_norm = (
-            values.dtype == torch.bfloat16
-            and weight.dtype == torch.float32
-            and not torch.is_autocast_enabled(values.device.type)
-        )
+        native_norm = values.dtype == torch.bfloat16 and weight.dtype == torch.float32 and not torch.is_autocast_enabled(values.device.type)
         output, mean, rstd = torch.native_layer_norm(
             values.float() if native_norm else values,
             (values.shape[-1],),
@@ -795,15 +761,11 @@ class _MemoryLayerNorm(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         saved, weight, mean, rstd = ctx.saved_tensors
-        dx, dw, db = _norm_bwd(
-            grad_output.contiguous(), saved, mean.reshape(-1), rstd.reshape(-1), weight
-        )
+        dx, dw, db = _norm_bwd(grad_output.contiguous(), saved, mean.reshape(-1), rstd.reshape(-1), weight)
         return dx.to(ctx.input_dtype), dw, db, None
 
 
-def edge_layer_norm_memory(
-    values: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float
-) -> torch.Tensor:
+def edge_layer_norm_memory(values: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float) -> torch.Tensor:
     return _MemoryLayerNorm.apply(values, weight, bias, eps)
 
 
@@ -814,9 +776,7 @@ def dropout_serves(values: torch.Tensor) -> bool:
 
 
 def _pack_fake(mask):
-    return torch.empty(
-        ((mask.numel() + 7) // 8,), device=mask.device, dtype=torch.uint8
-    )
+    return torch.empty(((mask.numel() + 7) // 8,), device=mask.device, dtype=torch.uint8)
 
 
 @opaque(fake=_pack_fake, name="mpnn_edge_dropout_sm80_pack")
@@ -830,9 +790,7 @@ def _dropout_bwd_fake(grad, packed, scale):
 
 
 @opaque(fake=_dropout_bwd_fake, name="mpnn_edge_dropout_sm80_bwd")
-def _dropout_bwd(
-    grad: torch.Tensor, packed: torch.Tensor, scale: float
-) -> torch.Tensor:
+def _dropout_bwd(grad: torch.Tensor, packed: torch.Tensor, scale: float) -> torch.Tensor:
     """grad * scale where the bit is set, 0 elsewhere (``scale`` is a runtime scalar: the bf16 rounding boundary of ``native_dropout_backward``)."""
     return _ext().dropout_bwd(_aligned(grad), packed, scale)
 

@@ -56,9 +56,7 @@ def supported(grad_output: torch.Tensor, bucket: torch.Tensor, buckets: int) -> 
     )
 
 
-def bucket_reduce(
-    grad_output: torch.Tensor, bucket: torch.Tensor, buckets: int
-) -> tuple[torch.Tensor, torch.Tensor]:
+def bucket_reduce(grad_output: torch.Tensor, bucket: torch.Tensor, buckets: int) -> tuple[torch.Tensor, torch.Tensor]:
     """``(grad_table [buckets, 16], grad_bias [16])``, both fp32, of the gradient rows ``grad_output`` [..., 16] (bf16 or fp32) and their bucket index ``bucket`` [...] (int64)."""
     g = grad_output.contiguous().reshape(-1, WIDTH)
     b = bucket.contiguous().reshape(-1)
