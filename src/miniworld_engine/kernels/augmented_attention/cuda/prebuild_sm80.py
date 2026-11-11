@@ -18,7 +18,7 @@ ATOM = frozenset({"AtomDiTProtenix"})
 #: the window attention / pair-bias / glue sources of sm80_atom_local (one cubin each)
 ATOM_LOCAL_STEMS = ("glue", "lattn_dkv", "lattn_dq", "lattn_fwd", "lbias")
 #: (augattn_sm80's helper extensions -- atom_qkvg_*, atom_output_*, shared_*_sm80, atom_sample_uniform -- serve the dense atom width d = 128
-#: only, which no wired class reaches: not built. The tf32_*_rne / token_grad / token_shared_scale extensions are token_padded_augattn_sm80's.)
+#: only, which no wired class reaches: not built. The tf32_*_rne / token_grad / token_shared_scale extensions served the removed, never-wired token_padded_augattn_sm80.)
 
 
 def prebuild_sm80(rows):
