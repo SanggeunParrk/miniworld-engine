@@ -26,9 +26,9 @@ def _card() -> bool:
 def _built(d_pair: int, gate_bias: float, dtype: str) -> typing.Any:
     m = AttentionPairBias(d_single=384, d_pair=d_pair, n_head=16, gate_bias=gate_bias).cuda().float()
     C.randomize(m, torch.Generator(device="cuda").manual_seed(0))
-    m = C.cast(m, dtype)
-    m.set_backend("cuda")
-    return m
+    built: typing.Any = C.cast(m, dtype)
+    built.set_backend("cuda")
+    return built
 
 
 def _inputs(m, samples: int, length: int, dtype: str, grad: bool = False):
