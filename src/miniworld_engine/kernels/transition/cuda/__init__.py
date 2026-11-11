@@ -32,9 +32,9 @@ def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n):
 def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps):
     """The sm_80 (A100) Transition dispatch of ``modules.Transition``'s ``cuda`` backend: ``x + transition(x)`` from ``fused_sm80`` (D = 128 /
     hidden 512, whole 256-row tiles, at least ``fused_wide_sm80.FUSED_MIN_ROWS`` rows: one forward kernel, a two-kernel backward) or else
-    ``fused_wide_sm80`` (D in ``fused_wide_sm80.WIDTHS``, hidden a multiple of 64, any row count), or ``None`` when neither takes the call or
-    builds (the caller refuses: there is no fallback). bf16 activations; the parameters bf16 or fp32 masters (cast inside, outside autograd, so
-    a master's gradient is fp32). fp32 activations (TF32 allowed): ``fused_wide_sm80.transition_f32_sm80`` (D in ``F32_WIDTHS``, hidden a multiple of 64)."""
+    ``fused_wide_sm80`` (D in ``fused_wide_sm80.WIDTHS``, hidden a multiple of 64, any row count), or ``None`` when neither takes the call
+    (the caller refuses: there is no fallback; a build failure raises ``_nvcc.KernelBuildError``). bf16 activations; the parameters
+    bf16 or fp32 masters (cast inside, outside autograd, so a master's gradient is fp32). fp32 activations (TF32 allowed): ``fused_wide_sm80.transition_f32_sm80`` (D in ``F32_WIDTHS``, hidden a multiple of 64)."""
     from . import fused_sm80, fused_wide_sm80
 
     if x.dtype is torch.float32:   # fp32 (TF32 allowed): the wide fp32 path (fp16 products at TF32's rounding, a TF32 backward)

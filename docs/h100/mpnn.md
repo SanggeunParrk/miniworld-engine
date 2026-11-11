@@ -3,15 +3,15 @@
 ## Scope
 
 `ProteinMPNN` (`modules/mpnn/`): backbone KNN features, a node / edge message-passing encoder, a teacher-forced decoder and the
-output projection. Backends: `pytorch` and `triton`; there is no `"cuda"` backend (the `kernels/mpnn_*` families hold Triton only) and
-no `"anthropic"` backend (the release kit binds no kernel for the model's math). `"triton"` sets every child that has a `"triton"`
+output projection. Backends: `pytorch`, `triton` and `cuda`. `"cuda"` is the A100 (sm_80) kernels only (`kernels/mpnn_*/cuda/sm80`,
+`kernels/integrations/mpnn_msg_sm80.py`, `mpnn_edge_sm80.py`): on H100 `_supports_cuda` refuses (`mpnn_sm80_unsupported`) and the
+Triton kernels below serve the model. There is no `"anthropic"` backend (the release kit binds no kernel for the model's math). `"triton"` (or `"cuda"`) sets every child that has that
 backend; projections, transitions, the other norms and the output projection stay PyTorch statements.
 
 Requirements row: `ProteinMPNN`, protein_node stream, lengths 1024-8192, node / edge / hidden width 128, `k_neighbors=48`, encoder
 and decoder depth 3, `dropout=0.1`, dtype `master` only (fp32 parameters, bf16 activations under autocast), `eval | train`.
 
-The HEAD docs hold no MPNN design page (only a family list in `docs/kernels/naming.md` and routing notes of the deleted dispatch);
-this note is written from the code. Judging: [../measure.md](../measure.md); backends: [../modules.md](../modules.md); kernels:
+This note is written from the code. Judging: [../measure.md](../measure.md); backends: [../modules.md](../modules.md); kernels:
 [../kernels.md](../kernels.md).
 
 ## Which child runs which family
@@ -25,7 +25,7 @@ this note is written from the code. Judging: [../measure.md](../measure.md); bac
 | `EdgeLayerNorm` (encoder when not fused) | `mpnn_edge_layernorm` (backward on the `layernorm` family's kernel) | reference statement | native forward, a bf16 copy of the input saved for the backward |
 | `RelativePositionEmbedding` | `mpnn_relative_position` | table lookup | backward: bucket reduction of the table / bias gradient instead of ATen's sorted `embedding_dense_backward` |
 
-## Kernels (`requirements_kernel.csv`, family = directory)
+## Kernels (family = directory)
 
 | family | kernels | what they do |
 |---|---|---|
@@ -36,7 +36,11 @@ this note is written from the code. Judging: [../measure.md](../measure.md); bac
 | `mpnn_edge_dropout` | `fwd_packed`, `bwd_packed` | 1-bit dropout mask packing and the masked backward |
 | `mpnn_relative_position` | `bwd_reduce` | bucket reduction (a whole table privatised per program; at most 512 rows x 128 channels) |
 
-All names carry the `mpnn_<family>_` prefix in the CSV (e.g. `mpnn_edge_tail_fwd_gemm_gather_saveact`).
+All names carry the `mpnn_<family>_` prefix (e.g. `mpnn_edge_tail_fwd_gemm_gather_saveact`). `requirements_kernel.csv` lists only
+the Triton kernels the requirements row reaches (fused encoder, saved activations): `mpnn_node_message_fwd_gemm`, the six
+`mpnn_edge_tail_*_saveact`, the six `mpnn_message_*` and `mpnn_relative_position_bwd_reduce`; the recompute variants, the node-message
+backward kernels, `mpnn_edge_mlp_*` and `mpnn_edge_dropout_*` are in the code but in no row. The CSV's `*_sm80` rows are the A100
+kernels.
 
 ## Numerics
 
@@ -50,8 +54,9 @@ All names carry the `mpnn_<family>_` prefix in the CSV (e.g. `mpnn_edge_tail_fwd
 
 ## Launch configs
 
-`kernels/mpnn_message/configs/h100_sm90.json` holds an H100 table for `mpnn_message_fwd_gemm_gelu_reduce_triton` only (top 4 per
-dtype / row bucket, rank 1 by default). Every other `@configured` MPNN kernel has no H100 entry and launches its default.
+H100 tables (`configs/h100_sm90.json`, top 4 per dtype / row bucket, rank 1 by default) exist for the CSV's Triton kernels:
+`mpnn_message` (its five forward / backward kernels), `mpnn_edge_tail` (the six `*_saveact`), `mpnn_node_message_fwd_gemm`,
+`mpnn_relative_position_bwd_reduce`. Every other `@configured` MPNN kernel has no H100 entry and launches its default.
 
 ## Limits
 
@@ -68,4 +73,4 @@ dtype / row bucket, rank 1 by default). Every other `@configured` MPNN kernel ha
 
 ## History
 
-No dedicated HEAD page. Family list: `git show HEAD:docs/kernels/naming.md`.
+No dedicated design page existed before this note; the old family list was deleted (see git history).

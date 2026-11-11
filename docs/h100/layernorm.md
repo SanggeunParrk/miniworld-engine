@@ -4,7 +4,7 @@ Scope.
 
 - `modules.LayerNorm` (`modules/norm.py`): `nn.LayerNorm` with the affine pinned to fp32 (`_Fp32ParamsMixin`, so a bf16 gamma at 1.0
   can still move by one Adam step), computed in at least fp32 and returned in the input dtype. Backends: `pytorch`, `cuda`, `triton`,
-  `anthropic` (external baseline, inference only; not described here). Requirements rows: last-dimension widths 64 .. 833 on the pair,
+  `anthropic` and `cueq` (external baselines; not described here). Requirements rows: last-dimension widths 64 .. 833 on the pair,
   single, atom and noise streams (including 267, 451, 651, 831, 833, which are not multiples of 8) and 2560 (single, `master` only),
   with and without bias, dtypes `float32` and `master`, eval and train.
 - `modules.RMSNorm` (`nn.RMSNorm`, epsilon `effective_eps`: float32's machine epsilon for bf16 / fp16 when `eps=None`). Backends
@@ -25,6 +25,9 @@ Judging: [measure](../measure.md), [modules](../modules.md), [kernels](../kernel
 | `layernorm_pipe_direct2_fwd` | layernorm, forward | `direct2_fwd`: the same for exact-fit rows whose affine has the activation dtype; no per-element dtype branches (40 registers) |
 | `layernorm_pipe_bulk_fwd` | layernorm, forward_infer | `bulk_fwd`: inference of exact-fit single-chunk rows, 16 KB tiles moved by one `cp.async.bulk` load and one bulk store each |
 | `layernorm_pipe_fwd` | layernorm, forward | `pipe_fwd`: persistent warp-per-row-group forward with a cp.async ring per warp (multi-chunk rows) |
+| `layernorm_pipe_directch_fwd_sm90` | layernorm, forward_infer | `directch_fwd`: inference of multi-chunk rows (TPR 32) from `MWP_DCH_MIN` = 48 MB of activation, non-persistent, no ring |
+| `layernorm_rows_fwd_sm90` | layernorm, forward | `cuda/general/ln_rows.cu` (`rows_fwd`): rows that are not a 16-byte multiple (267, 451, 651, 831, 833), 32 .. 1024 elements: a CTA per row up to 1024 rows, the staged kernel (`ln_stage_fwd_kernel`) for 2-byte activations from 4096 rows, else a warp per row |
+| `layernorm_rows_bwd_sm90`, `layernorm_rows_bwd_reduce_sm90` | layernorm, backward | `ln_rw_bwd_kernel` (warp per row, persistent, one partial row per CTA) + `ln_rw_bwd_col_reduce` (fixed-order sum) |
 | `layernorm_pipe_bwd`, `layernorm_pipe_reduce_bwd` | layernorm, backward | `pipe_bwd` (dx + one partial row per CTA, plain stores) and `pipe_reduce` (PDL dependent, fixed-order sum, converts to the weight dtype) |
 | `layernorm_fwd_saveact` | layernorm, forward | Triton `layer_norm_fwd_fused` (`triton/main.py`); mean / rstd stored only when x, weight or bias requires grad (`ctx.needs_input_grad`) |
 | `layernorm_bwd_atomic` | layernorm, backward | Triton `layer_norm_bwd_dx_fused`: persistent (8 programs per SM), dw / db in registers, one `atomic_add` per program |
@@ -38,8 +41,9 @@ the pipe kernels with `rms=True`, and Triton `rmsnorm_fwd_kernel` / `rmsnorm_bwd
 ## Design: CUDA LayerNorm / RMSNorm
 
 Entry `layernorm_cuda` (`cuda/general/__init__.py`) and `rmsnorm_cuda` (`kernels/rmsnorm/cuda`): on sm_90, rows the pipe kernels take
-(`pipe.serves`: row bytes a multiple of 16 in 144 .. 2048, bf16 / fp16 / fp32) go to `cuda/pipe`; every other width goes to the general
-kernels. A no-grad call runs the forward without statistics.
+(`pipe.serves`: row bytes a multiple of 16 in 144 .. 2048, bf16 / fp16 / fp32) go to `cuda/pipe`; LayerNorm rows that are not a 16-byte
+multiple, 32 .. 1024 elements (`rows_serves`), go to the row kernels of `ln_rows.cu`; every other width goes to the general kernels.
+A100 (sm_80): `kernels/layernorm/cuda/sm80.py`, `kernels/rmsnorm/cuda/sm80.py`. A no-grad call runs the forward without statistics.
 
 General kernels (`ln_common.cuh`): a row of N elements is held by TPR threads (4 .. 1024; TPR <= 32 is a sub-warp group), each thread
 keeping CHUNKS vectors of VEC elements in registers (VEC = 16 bytes when N is a multiple of it, else 1: any width). `config(n, bytes)`
@@ -56,6 +60,7 @@ warp pass covers 32 / TPR rows. The forward picks, by row shape and activation s
   Under `master` the affine is fp32 and the activation bf16, so `direct_fwd` serves those rows.
 - inference of exact-fit single-chunk rows whose affine has the activation dtype, 8 .. 48 MB of activation: `bulk_fwd` (4 tiles in
   flight per CTA).
+- inference of multi-chunk rows (TPR 32) from 48 MB of activation (`MWP_DCH_MIN`): `directch_fwd` (non-persistent, no ring).
 
 Training stores (mean, rstd) as one float2 per row. Backward: `pipe_bwd` computes dx from x, dy and the statistics, keeps the affine
 gradients in registers per lane, sums them over the CTA's warps and writes one partial row per CTA; `pipe_reduce` (launched with
@@ -101,7 +106,7 @@ with dw / db accumulated in registers and flushed with one atomic per program.
 
 ## Limits
 
-- LayerNorm `cuda` (`_supports_cuda`): CUDA on sm_90; one normalised dimension matching the input width; bf16 / fp16 / fp32; non-empty;
+- LayerNorm `cuda` (`_supports_cuda`): CUDA on sm_90 (sm_80: `sm80.refusal`); one normalised dimension matching the input width; bf16 / fp16 / fp32; non-empty;
   width within the general builds (<= 65536, fp32 <= 32768).
 - LayerNorm `triton`: CUDA; the same shape / dtype checks.
 - RMSNorm `cuda` / `triton`: the same checks (the CUDA range check is the general LayerNorm extension's `supported`).
@@ -109,6 +114,5 @@ with dw / db accumulated in registers and flushed with one atomic per program.
 
 ## History
 
-Old notes: `git show HEAD:docs/kernels/layernorm.md` (backward dispatch heuristics and the per-GPU calibration cache, both removed),
-`HEAD:docs/kernels/layernorm-linear.md` (the quack / CuTe fused LN+GEMM milestones; the `cute/` path is no longer in the tree),
-`HEAD:docs/kernels/rmsnorm-adamod.md` (the adaLN modulate ladder L0 / L2 / L3; `triton_rmsnorm_adamod` still exists but nothing calls it).
+The previous notes (LayerNorm backward dispatch heuristics, the quack / CuTe fused LN+GEMM milestones, the adaLN modulate ladder)
+were deleted; see git history. `triton_rmsnorm_adamod` (`kernels/rmsnorm/triton/main.py`) still exists but nothing calls it.

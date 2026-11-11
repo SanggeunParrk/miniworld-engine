@@ -1,8 +1,9 @@
 # Triangle multiplicative update on H100 (sm90)
 
 Scope: `TriangleMultiplication` (backends `pytorch`, `cuda`, `triton`, `cueq`, `anthropic`), `BidirectionalTriangleMultiplication`
-(`pytorch`, `cuda`, `triton`) and `TriangleMultiplicationRF3` (`pytorch` only: the contraction divided by the sequence length is
-in no kernel) of `modules/triangle.py`. The requirement rows (`requirements/requirements_module.csv`) ask for L 128-768
+(`pytorch`, `cuda`, `triton`) and `TriangleMultiplicationRF3` (`pytorch`, `cuda`, `triton`, `anthropic`: the contraction divided by the unmasked length is
+folded into the left projection `W_a / n` for `cuda` / `triton` (one launch per sample when the masks differ), into `W_b / n` per
+sample for `anthropic`) of `modules/triangle.py`. The requirement rows (`requirements/requirements_module.csv`) ask for L 128-768
 (multiples of 128), dtype `master` (bf16 activations, fp32 master parameters), modes `eval` and `train`, `p_drop=0.25`:
 single direction (outgoing and incoming) at d_pair 64, 64 with d_hidden 128, 128, 256, 384, 512; bidirectional at d_pair 64, 128,
 256, 384, 512; RF3 at 64 and 128. Backend selection, `_supports_<backend>` and the measurer: [../modules.md](../modules.md),
@@ -20,14 +21,14 @@ y = pair + drop_row(sigmoid(x W_g) o (LN_out(t) W_o))
 | backend | what runs | range (`_supports_*`) |
 |---|---|---|
 | `pytorch` | the module's statements | reference |
-| `cuda` | `integrations/trimul_h100.py` over `kernels/trimul_inproj/cuda/`: `update_inference` without grad or live dropout, else `update` (bidirectional: `serves`; single direction: `serves_single`) | bf16 pair on capability (9, 0), square, bool `[B, L]` mask, plus the integration's contract (below) |
+| `cuda` | `integrations/trimul_h100.py` over `kernels/trimul_inproj/cuda/`: `update_inference` (`serves_inference`) without grad or live dropout, else `update` (bidirectional: `serves`; single direction: `serves_single`) | bf16 pair on capability (9, 0) (A100 (8, 0): `integrations/trimul_sm80.py`, `trimul_inproj/cuda/sm80*.py`), square, bool `[B, L]` mask, plus the integration's contract (below) |
 | `triton` | `trimul_inproj/triton/unidirectional.trimul_triton` / `bidirectional.bidirectional_trimul_triton`: the whole update incl. residual and row dropout, one launch sequence per sample | CUDA, bf16 pair, square, bool mask; d_hidden != d_pair only with both multiples of 16, d_pair <= 256, d_hidden <= 512 (`contract.hidden_refusal`) |
-| `cueq` | `cuequivariance_torch.triangle_multiplicative_update` (single direction), residual and dropout by the module | projections in the pair's dtype (the `master` rows are unsupported), one LN epsilon, widths % 32, bf16 / fp32, the library's kernel band |
-| `anthropic` | `opt_core.kernels.trimul` (tier `fast`), single direction, residual in its epilogue | inference only, no live dropout, projections in the pair's dtype, rows listed in `_ANTHROPIC_EXCLUDED_ROWS` excluded |
+| `cueq` | `cuequivariance_torch.triangle_multiplicative_update` (single direction), residual and dropout by the module | fp32 masters cast to the pair's dtype in autograd, one LN epsilon, widths % 32, bf16 / fp32, the library's kernel band |
+| `anthropic` | `opt_core.kernels.trimul` (tier `fast`), single direction, residual in its epilogue | inference only, no live dropout, the face casts fp32 masters to the pair's dtype, rows listed in `_ANTHROPIC_EXCLUDED_ROWS` excluded |
 
 ## Kernels
 
-Names from `requirements/requirements_kernel.csv` (family `trimul_inproj`, 98 names); sources under
+Names from `requirements/requirements_kernel.csv` (family `trimul_inproj`, 97 names, 6 of them the A100 `*_sm80` kernels); sources under
 `kernels/trimul_inproj/cuda/h100_sources/` unless noted.
 
 | kernels | role | what they do |
@@ -160,20 +161,20 @@ any L >= 16; B > 1 at L % 16 != 0 is padded on the host to 16 (D256+: 128) with 
   `bfloat16|B=1,CH,CZ,DIR,L,MASK=1` for (CZ, CH) = (64, 64), (64, 128), (128, 128), (128, 256), (256, 256), (384, 384), DIR 0 / 1 / 2,
   L 128-768; a missing key takes the nearest entry over (B, L).
 - Triton: `trimul_outproj_layernorm_gemm_gate_triton`, `trimul_output_f567_train_triton`, `trimul_bwd_gate_packed_triton`,
-  `trimul_input_ln_residual_bwd_triton`, `gated_projection_gate_dropres_triton`, `gated_projection_bwd_gate_dropres_triton`
-  (exact key lookup). `trimul_gemm_gate_mmajor_triton`, `trimul_input_dual_bwd_triton` and
-  `trimul_bwd_gate_packed_recompute_triton` have no entries and run their default config.
+  `trimul_input_ln_residual_bwd_triton`, `gated_projection_gate_dropres_triton`, `gated_projection_bwd_gate_dropres_triton`,
+  `trimul_gemm_gate_mmajor_triton`, `trimul_input_dual_bwd_triton` (exact key lookup). `trimul_bwd_gate_packed_recompute_triton`
+  has no entry and runs its default config.
 - `kernels/tm1/configs`, `kernels/tm2/configs` hold tables for the unused tm1 / tm2 kernels.
 - The other CUDA paths use family JSONs under `h100_sources/` (`b1/configs.json`, `single_output/selection.json`,
   `wide_forward/selection.json`, `uni_wide/selection.json`, `wide_train/lt_selection.json`) and hard-wired per-width tiles.
 
 ## Limits / unsupported calls
 
-`cuda`: bf16 pair only; capability (9, 0); square pair and bool `[B, L]` mask; LN eps 1e-5 and fp32 LN affine; d_hidden = d_pair,
+`cuda`: bf16 pair only; capability (9, 0) (capability (8, 0) goes to `_trimul_cuda_route_sm80`); square pair and bool `[B, L]` mask; LN eps 1e-5 and fp32 LN affine; d_hidden = d_pair,
 or 2 d_pair in one direction at D64 / D128 (other hidden widths, and every width outside 64 / 128 / 256 / 384 / 512, are refused);
 training lengths L % 128 == 0 up to 10240; D128 training only on a 132-SM device. `triton`: bf16 pair, `contract.hidden_refusal`.
-`cueq` / `anthropic`: single direction only, projections in the pair's dtype. `TriangleMultiplicationRF3` has no backend but
-`pytorch`. Any refusal is a reason string (`BackendUnsupported`), never a fallback.
+`cueq` / `anthropic`: single direction only. `TriangleMultiplicationRF3` has no `cueq` backend
+(the library op has no 1 / L); its `cuda` takes one sample's contract (`pair[:1]`) when the samples' masks may differ. Any refusal is a reason string (`BackendUnsupported`), never a fallback.
 
 ## Historical numbers
 
@@ -185,6 +186,5 @@ B 1 / 4, L 128-768.
 
 ## History
 
-The previous notes are in git HEAD: `docs/gpus/h100/trimul/trimul.md`, `docs/kernels/trimul-inproj.md`, `docs/kernels/tm1.md`,
-`docs/kernels/tm2.md`, `docs/kernels/triangle-multiplication-module.md`, `docs/kernels/anthropic-trimul-payload.md`
-(`git show HEAD:<path>`).
+The previous, longer notes (H100 TriMul, trimul_inproj, tm1 / tm2, the module, the Anthropic payload) were deleted; see git
+history.

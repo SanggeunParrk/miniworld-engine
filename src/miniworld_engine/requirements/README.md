@@ -12,8 +12,8 @@ What every engine module must serve, and how a backend of it is judged.
   `eval|train`.
   The trunk-side classes (pairformer / evoformer: TriangleMultiplication*, TriangleAttention*, OuterProductMean,
   MSAPairWeightedAveraging, the Bidirectional* classes, PairformerBlock, the trunk Transitions) are `master` only: FoldForge builds the
-  trunk as master (`modules/engine/modules.py`); its `--precision fp32` runs the trunk in fp32 with TF32 off, which the `pytorch`
-  reference serves. Exception: the diffusion head's conditioning Transitions (`engine/graph.py make_conditioning_transition`, n = 2:
+  trunk as master (FoldForge's `modules/engine/modules.py`); its `--precision fp32` runs the trunk in fp32 with TF32 off, which the `pytorch`
+  reference serves. Exception: the diffusion head's conditioning Transitions (FoldForge's `engine/graph.py make_conditioning_transition`, n = 2:
   pair 128 / 256 / 512, single 384 / 768) run fp32 + TF32 under `af3_default` / `model_default`, so those five Transition rows keep
   `float32|master` (user decisions 2026-11-10).
   `dims` / `options` are constructor arguments: `options` holds only arguments that change the class's math (not ones the class
@@ -28,11 +28,12 @@ What every engine module must serve, and how a backend of it is judged.
   and runs only on the grad path; `forward_infer` runs only on no-grad paths; `forward` runs on both. A kernel that no module launches
   (only kernel checks / drivers call it) is not listed. The diffusion sampler's glue (`kernels/sampler_ops`) and the smooth lDDT loss
   are module classes with their own rows: `AugmentNoise`, `AlignEuler`, `PoolAtoms` (eval only, fp32 coordinates / bf16 pooling) and
-  `SmoothLddtLoss`; each family is one shape-independent build per arch (the extension `sampler_ops_sm90a`, the smooth lDDT cubin; the
+  `SmoothLddtLoss`; each family is one shape-independent build per arch (the extensions `sampler_ops_sm90a` / `sampler_ops_sm80`, the smooth lDDT cubin; the
   shapes are runtime launch parameters), prebuilt when some row of its classes is. The La-Proteina pair embeddings and the token-pair
   initialisation (`kernels/pair_embed_adaln`, `kernels/pair_embed_geom`, `kernels/token_pair_init`) are module classes with their own
   rows too (`PairEmbedAdaLN`, `PairEmbedGeom`, `PairEmbedCA`, `TokenPairInit`; parameters inside the class, eval and train, bf16 pair /
-  fp32 z out); each family is one shape-independent H100 extension (`pair_embed_adaln_sm90`, `pair_embed_geom_sm90`, `token_pair_init_sm90`).
+  fp32 z out); each family is one shape-independent extension per card (`pair_embed_adaln_sm90` / `_sm80`, `pair_embed_geom_sm90` / `_sm80`,
+  `token_pair_init_sm90` / `_sm80`).
   `version` is human-managed: bump a kernel's when its algorithm changes a result (not for a refactor, a comment or a rebuild); the
   judge (`miniworld_engine.judge`) then owes a new measurement of every case of its modules in the modes its role serves.
 
@@ -67,8 +68,8 @@ A backend is accurate when, for every tensor, either criterion holds: (1) it is 
     YELLOW  tol < err_backend <= 5 * tol
     RED     err_backend > 5 * tol            (inaccurate; a NaN / inf error is RED)
 
-A call's light is its worst tensor's. The `pytorch` reference runs with TF32 products allowed in float32 (the engine's fp32 kernels
-compute in TF32 as well); the gold is float64. The fixed standard is a setting of the measurement config (`fixed:`), by default
+A call's light is its worst tensor's. Every backend, the `pytorch` reference included, runs with TF32 products allowed in float32
+(the engine's fp32 kernels compute in TF32 as well; `measure/config.py` `TF32_BACKENDS`); the gold is float64. The fixed standard is a setting of the measurement config (`fixed:`), by default
 bfloat16 `8e-3` (about one bf16 ulp at 1.0), master `8e-3`, float32 `1e-5`. `master` = fp32 parameters, bf16 activations, the forward under
 `torch.autocast("cuda", bfloat16)`. Training noise (dropout, coordinate noise) is off in every run: its masks are random draws, not
 numerics. The weights are random (seeded), so no zero-initialised projection hides the math.

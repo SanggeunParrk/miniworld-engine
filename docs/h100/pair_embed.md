@@ -12,8 +12,8 @@ rows (`one_hot @ W == W^T[bin]`) without building the one-hots:
 | `PairEmbedCA` | `modules/pair_embed.py` | `M W [sep 127 | CA distance 30]`, optional LayerNorm; bf16 `[B, n, n, 256]` | `weight [256, 157]` (bf16-rounded) | weight |
 | `TokenPairInit` | `modules/token_pair_init.py` | `left_i + right_j + W_rel onehot_rel(i, j) + W_bond onehot(bond_ij)`; fp32 `[B, L, L, 128]` | `w_rel [128, 139]`, `w_bond [128, 2]` | `left`, `right`, both weights |
 
-Backends of all four: `pytorch` (dense reference), `cuda` (H100 sm_90a only), `triton` (any CUDA card). Coordinates, residue indices
-and ids are data (no gradient).
+Backends of all four: `pytorch` (dense reference), `cuda` (H100 sm_90a; A100: the `cuda/sm80` builds of each family), `triton`
+(any CUDA card). Coordinates, residue indices and ids are data (no gradient).
 
 Requirements rows: token_pair stream, lengths 128 / 256 / 384, `float32 | master`, `eval | train`, 1 / 5 samples; `PairEmbedGeom` and
 `PairEmbedCA` with and without `ln_eps=1e-05`.
@@ -27,13 +27,13 @@ Each family is one shape-independent torch extension built on first use (`pair_e
 
 | requirements name | role | kernels (source) | what it does |
 |---|---|---|---|
-| `pair_embed_adaln_fwd_sm90` | forward | `pe_fwd` (`pair_embed_adaln.cu`) | one warp per (b, i) row, 32 pairs at a time: lane `l` bins pair (i, j0 + l) (separation, CA distances of `xt` / `sc`), packs the bins into a 32-bit word (saved for the backward); per pair the warp gathers 8 channels per lane of the three fp32 table rows, runs both LayerNorms with shuffles, applies `gamma` / `beta`, stores 16 B of bf16 |
+| `pair_embed_adaln_fwd_sm90` | forward | `pe_fwd` (`cuda/sm90/pair_embed_adaln.cu`) | one warp per (b, i) row, 32 pairs at a time: lane `l` bins pair (i, j0 + l) (separation, CA distances of `xt` / `sc`), packs the bins into a 32-bit word (saved for the backward); per pair the warp gathers 8 channels per lane of the three fp32 table rows, runs both LayerNorms with shuffles, applies `gamma` / `beta`, stores 16 B of bf16 |
 | `pair_embed_adaln_bwd_sm90` | backward | `pe_bwd_rows`, `pe_bwd_tbl4` (or `pe_bwd_tbl`), `pe_reduce_rows`, `pe_reduce_tbl` | rows kernel recomputes the pair, writes `dx` (gradient of the table sum, bf16) and per-CTA partials of `dgamma` / `dbeta` / `dln_w` / `dln_b`; table kernel; fixed-order reduces. The batch runs in chunks so `dx` stays under 512 MB |
-| `pair_embed_geom_fwd_sm90` / `_fwd_train_sm90` | forward / forward_train | `pg_fwd` (`pair_embed_geom.cu`) | encoder pair: persistent CTAs of 16 warps, one warp per (b, i) row, 32 pairs at a time; bins (binary search over the limits in shared memory, distances / dihedrals / bond angles as torch computes them), sums up to ten bf16 table rows (table resident in shared memory) in fp32, optional LayerNorm, 16-byte stores; the train variant also writes a 16-byte code per pair |
-| `pair_embed_ca_fwd_sm90` / `_ca_fwd_train_sm90` | forward / forward_train | `pg_fwd_ca` | decoder pair, 32 warps per CTA, items of (row, 32-column chunk) |
+| `pair_embed_geom_fwd_sm90` / `_fwd_train_sm90` | forward_infer / forward_train | `pg_fwd` (`cuda/sm90/pair_embed_geom.cu`) | encoder pair: persistent CTAs of 16 warps, one warp per (b, i) row, 32 pairs at a time; bins (binary search over the limits in shared memory, distances / dihedrals / bond angles as torch computes them), sums up to ten bf16 table rows (table resident in shared memory) in fp32, optional LayerNorm, 16-byte stores; the train variant also writes a 16-byte code per pair |
+| `pair_embed_ca_fwd_sm90` / `_ca_fwd_train_sm90` | forward_infer / forward_train | `pg_fwd_ca` | decoder pair, 32 warps per CTA, items of (row, 32-column chunk) |
 | `pair_embed_geom_ln_bwd_sm90` | backward | `pg_ln_bwd<MODE, UL>` | LayerNorm backward with the pair recomputed from the codes and the table (never stored); UL pairs per warp step, loads pipelined two steps deep; zeros for dead pairs |
 | `pair_embed_geom_bwd_sm90` | backward | `pg_bwd_mma4<MODE>`, `pg_reduce_tbl` | table gradient `dT = onehot^T dpair` on the tensor cores, then a fixed-order reduce to bf16 |
-| `token_pair_init_prep_sm90` | forward_infer | `tpi_prep` (`token_pair_init.cu`) | forward-only glue in one launch: `ids [5, B L]` int32 from the five id tensors and `tbl = [W_rel^T ; W_bond^T]` fp32 |
+| `token_pair_init_prep_sm90` | forward_infer | `tpi_prep` (`cuda/sm90/token_pair_init.cu`) | forward-only glue in one launch: `ids [5, B L]` int32 from the five id tensors and `tbl = [W_rel^T ; W_bond^T]` fp32 |
 | `token_pair_init_fwd_sm90` | forward | `tpi_fwd` | a CTA (8 warps) writes R rows of z for one batch element (R = 4 up to L 256, else 2); the class-row table arrives by one bulk (TMA) copy overlapping the packing of the R rows' bins; each warp loads `right[j]` once for the R rows |
 | `token_pair_init_bwd_sm90` | backward | `tpi_bwd`, `tpi_reduce` | a CTA takes a quarter of the channels (32, one per lane) of 8 rows over every column; its 4 warps split the columns; per position a warp adds `dz` to its private shared-memory bin gradient (all lanes hit the same bin), the row sums and a per-row-block column partial; `tpi_reduce` adds the partials in fixed order |
 
@@ -44,7 +44,7 @@ selectable by the `impl` argument; the loader passes `BWD_IMPL = 1` (`pg_bwd_mma
 Triton (`kernels/<family>/triton/main.py`): `pair_embed_geom_{bins,fwd_gather,dw,bwd_reduce,bwd_ln}_triton`,
 `pair_embed_ca_bins_triton`, `pair_embed_adaln_{fwd,bwd,dw,bwd_reduce}_triton`, `token_pair_init_{fwd,bwd_dx,dw,dw_reduce}_triton`:
 the same codes / gathers as the CUDA kernels, table gradients as one-hot products with fixed slices and fixed-order reduces. They are
-launched by the `"triton"` backends but are not listed in `requirements_kernel.csv`.
+launched by the `"triton"` backends; `requirements_kernel.csv` lists them without the `_triton` suffix.
 
 ## Design
 
@@ -77,20 +77,20 @@ build the bf16 table with one transpose-and-cast copy when untracked.
 
 ## Launch configs
 
-CUDA: fixed geometry (warps per CTA and grid from the sizes and the SM count); no `configs/h100_sm90.json` exists for these families.
+CUDA: fixed geometry (warps per CTA and grid from the sizes and the SM count); the CUDA kernels read no launch-config table.
 Triton: `@configured` with defaults (e.g. `BLOCK_J = 16`, 4 warps for the row kernels; `BLOCK_P = 128` for the table-gradient
-kernels); without an H100 table they launch their defaults and warn once.
+kernels); every Triton kernel has an entry in its family's `configs/h100_sm90.json`.
 
 ## Limits
 
 - `PairEmbedAdaLN`: CUDA tensors; weight, LN affine, `gamma`, `beta`, `xt` fp32 or bf16; `xt [B, n, 3]`, `residue_idx` / `mask [B, n]`,
-  `sc` like `xt` or None, `gamma` / `beta [B, 256]`; every `n_*` <= 255 (8-bit bins); non-empty. `"cuda"`: sm_90 and
+  `sc` like `xt` or None, `gamma` / `beta [B, 256]`; every `n_*` <= 255 (8-bit bins); non-empty. `"cuda"`: sm_90 (or sm_80) and
   `n_sep + n_xt + n_sc <= 220`.
-- `PairEmbedGeom`: weight and `bb` fp32 or bf16, `bb [B, n, 4, 3]` (N, CA, C, CB), five `[B, n]` tensors; `"cuda"`: sm_90.
-- `PairEmbedCA`: weight and `ca` fp32 or bf16, `ca [B, n, 3]`, `mask` / `residue_idx [B, n]`; `"cuda"`: sm_90.
+- `PairEmbedGeom`: weight and `bb` fp32 or bf16, `bb [B, n, 4, 3]` (N, CA, C, CB), five `[B, n]` tensors; `"cuda"`: sm_90 (or sm_80).
+- `PairEmbedCA`: weight and `ca` fp32 or bf16, `ca [B, n, 3]`, `mask` / `residue_idx [B, n]`; `"cuda"`: sm_90 (or sm_80).
 - `TokenPairInit`: `left` / `right` / weights fp32 or bf16, `left` / `right [B, L, 128]`, five integer `[B, L]` ids, `bond [B, L, L]`,
-  `n_rel - 2 <= 255`; `"cuda"`: sm_90.
+  `n_rel - 2 <= 255`; `"cuda"`: sm_90 (or sm_80).
 
 ## History
 
-Old page: `git show HEAD:docs/gpus/h100/pair_ops/pair_ops.md`.
+Old page: `git show 65f37dc3c^:docs/gpus/h100/pair_ops/pair_ops.md`.

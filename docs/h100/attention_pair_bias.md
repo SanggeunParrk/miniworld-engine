@@ -10,8 +10,8 @@ release's pair-bias provider, inference only) and `"cueq"` (`cuequivariance_torc
 [../kernels.md](../kernels.md).
 
 The `"cuda"` backend is `kernels/integrations/attention_pair_bias_b200.py` (its H100 branches; the file also holds the B200 path). It
-serves bf16 activations only, so of the requirement dtypes it takes `master` (bf16 activations, fp32 master parameters) and refuses
-`float32`.
+serves bf16 activations (bf16 parameters or fp32 masters: the `master` rows) and fp32 activations with fp32 parameters outside
+autocast (the TF32 path below: the `float32` rows). A100 (sm_80): `kernels/integrations/attention_pair_bias_sm80.py`.
 
 ## Kernels
 
@@ -28,6 +28,10 @@ serves bf16 activations only, so of the requirement dtypes it takes `master` (bf
 | `augmented_attention_apb_ln_bwd_sm90` | backward | `ln_bwd`: LayerNorm backward plus the residual gradient |
 | `augmented_attention_apb_pair_bias_bwd_sm90` | backward | `pair_bias_bwd`: dpair and the dWf partials, recomputing LN(pair) |
 | `augmented_attention_apb_acc_reduce_sm90`, `augmented_attention_apb_finalize_sm90` | backward | fixed-order tree reduce of the per-block partial rows; every parameter gradient into its own fp32 tensor |
+| `augmented_attention_apb_pair_bias_bwd_wide_sm90` | backward | `pair_bias_bwd_wide`: the pair backward at d_pair 256 / 384 / 512, per 128-column chunk, reading the forward's row statistics and unmasked fp32 bias |
+| `augmented_attention_apb_pair_bias32_fwd_sm90`, `augmented_attention_apb_pair_bias32_bwd_sm90` | forward / backward | TF32 path: the fp32 pair-bias kernels of `apb_rows.cu` |
+| `augmented_attention_fwd_tf32_sm90`, `augmented_attention_bwd_dkv_tf32_sm90`, `augmented_attention_bwd_dqb_tf32_sm90` | forward / backward | TF32 path: the TF32 attention core (`attn_tf32.cu`, the token DiT's fp32 core): `tf32_gated_inference` / `tf32_forward`, `tf32_backward` (dQ, dK, dV, dbias) |
+| `augmented_attention_apb_exact_*_sm90` (9) | backward | the opt-in fp32 pair-weight gradient (`EXACT_DWB`, see Training) |
 | `augmented_attention_fwd`, `_bwd_pre`, `_bwd_split`, `_bwd_reduce` | forward / backward | the Triton core of the `"triton"` backend |
 
 `requirements_kernel.csv` also attributes the shared `layernorm*` and `cond_transition_caller_grad_*` kernels to
@@ -39,8 +43,9 @@ this module; they are documented with their own families.
 log2 units, masked keys -inf) -> gated `attn_inf` (one sample, `NWG=1`, `ROW_WIDTH` = the padded width) -> `to_out` accumulated in
 place onto the residual seed `ln_rows` wrote (cuBLAS beta = 1; no copy of x into the output). The packs are cached per parameter
 (pointer, version) and capture-scoped. `gate_bias` is not a kernel term: the constant is added to the gate rows of the packed bias
-vector once per pack, so the core's `sigmoid(g)` reads `g + c`. At d_pair 256 (16 x 24 heads only) `pair_bias_fwd` is instantiated for
-the 256-wide ring and Wf is made from the full 256 columns in torch per parameter version.
+vector once per pack, so the core's `sigmoid(g)` reads `g + c`. At d_pair 256 / 384 / 512 (`apb.PAIR_WIDTHS`: 8 or 16 heads at
+256 / 384, 16 at 512) `prep` packs everything but Wf, which is made from the full d_pair columns in torch per parameter version, and
+the pair kernel runs at that width.
 
 ## Training (autograd Function, opaque forward / backward)
 
@@ -50,10 +55,18 @@ backward's D, og bf16, LSE) -> `to_out` onto the residual seed. Backward: dO GEM
 reduces them in block order (no atomics, no zero fill), so the step is bitwise repeatable. Parameter gradients are fp32 and cast once
 to each parameter's dtype.
 
-Pair-weight gradient repair: at L 384 and 768 (the qualified lengths) and the five supported layouts, `to_bias.weight`'s gradient is
-recomputed by `_pair_weight_shadow` (native CUDA + cuBLAS, the `apb_rows` extension built with `-DAPB_H100_FP32_SHADOW=1`, which needs
-CUTLASS 4.2 headers through `CUTLASS_PATH`) to reproduce the fp32 reference's rounding; it materialises extra fp32 workspaces. Other
-lengths keep the fused dWb from `pair_bias_bwd`.
+Pair-weight gradient repair (opt-in: `EXACT_DWB = False` by default, the fused dWb is kept): with `EXACT_DWB = True`, at L 384
+and 768, the five supported layouts, d_pair 128 and no gate constant, `to_bias.weight`'s gradient is recomputed by
+`_pair_weight_shadow` (native CUDA + cuBLAS, the `apb_rows` extension built with `-DAPB_H100_FP32_SHADOW=1`, which needs
+CUTLASS 4.2 headers through `CUTLASS_PATH`) to reproduce the fp32 reference's rounding; it materialises extra fp32 workspaces (about 2.4x the step).
+
+## TF32 path (fp32 activations, fp32 parameters)
+
+The same op on the TF32 attention core (`attn_tf32.cu`, head widths 32 or 48; 16 x 24 and 24 x 16 padded to 32) and the fp32 row /
+pair kernels of `apb_rows.cu`; the projections are fp32 cuBLAS GEMMs (TF32 when the session allows it). The core's bias is
+key-permuted and in log2 units, masked keys -inf. Inference: `ln_rows` -> `addmm` q | k | g and v^T -> `pair_bias32_fwd` -> gated
+core -> `to_out` onto the residual seed. Training: `tf32_forward` (O, LSE), `og = sigmoid(g) O`; backward `tf32_backward`, the dxa / dW
+GEMMs, fp32 `ln_bwd`, `pair_bias32_bwd`; parameter gradients by plain autograd accumulation.
 
 ## Design notes
 
@@ -74,19 +87,20 @@ update for an all-false key mask.
 ## Launch configs
 
 The CUDA path has no launch-config table (fixed builds per geometry). The `"triton"` backend's core reads
-`kernels/augmented_attention/configs/h100_sm90.json`; it has rows for `H=16, HEAD_DIM=24` (and 16 x 48, 4 x 32), rank 1 by default.
+`kernels/augmented_attention/configs/h100_sm90.json`; it has rows for (H, HEAD_DIM) = (4, 32), (8, 48), (12, 32 / 64), (16, 24 / 32 / 48 / 64), (24, 16 / 32) among others, rank 1
+by default.
 
 ## Limits (`_supports_cuda` = `refusal`)
 
 | call | result |
 |---|---|
-| not CUDA / not sm_90 | refused |
+| not CUDA / not sm_90 (sm_80: `attention_pair_bias_sm80.refusal`) | refused |
 | `use_qk_norm` | refused (no norm between the packed GEMM and the core) |
-| activations not bf16 (incl. every `float32` requirement row) | refused |
+| activations neither bf16 nor fp32; fp32 under autocast or with non-fp32 parameters | refused |
 | `single` not one contiguous `[1, L, d]` row (B > 1) | refused |
 | (heads, d_single) not in 8 x 384, 12 x 384, 16 x 384, 24 x 384, 16 x 512, or `n_head * d_hidden != d_single` | refused |
-| d_pair 256 except 16 heads x 384; d_pair 256 with a gradient; d_pair 384 / 512 | refused |
-| `gate_bias` with a gradient | refused |
+| d_pair not in 128 / 256 / 384 / 512; heads other than 8 / 16 at d_pair 256 / 384, other than 16 at 512 (`PAIR_WIDTHS`) | refused |
+| affine-free single or pair LayerNorm | refused |
 | L not a multiple of 128; pair not contiguous `[1, L, L, d_pair]`; mask not bool `[1, L]` | refused |
 | `extra_pair_bias` | refused (the bias is made inside the pass) |
 | `"anthropic"`: a gradient; `"cueq"`: QK-norm, `extra_pair_bias`, different single / pair LayerNorm eps | refused |
@@ -94,7 +108,6 @@ The CUDA path has no launch-config table (fixed builds per geometry). The `"trit
 
 ## History
 
-Old note (git HEAD): `docs/gpus/h100/attention_pair_bias/attention_pair_bias.md`. Historical (from the 2026-10-13 note, not re-measured
+The previous, longer note was deleted; see git history. Historical (from the 2026-10-13 note, not re-measured
 under the current measurer; 8 x 48, d_pair 128, bf16-mixed, CUDA graph, ms): inference L384 / L768 0.042 / 0.090 against Triton
-0.089 / 0.224 and PyTorch 0.106 / 0.259; training 0.123 / 0.272 against Triton 0.255 / 0.643. That note's d_pair 256 pair-fused core
-(`fused_pair.py`) no longer exists.
+0.089 / 0.224 and PyTorch 0.106 / 0.259; training 0.123 / 0.272 against Triton 0.255 / 0.643.

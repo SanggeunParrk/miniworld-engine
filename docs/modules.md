@@ -37,12 +37,16 @@ class Transition(BackendModule, MasterWeights):
 | backend | what | judged by the accuracy rule |
 |---|---|---|
 | `pytorch` | the reference: the single source of truth of the op's math | it is the reference |
-| `cuda` | the engine's hand-written H100 kernels (sm_90a), through `kernels/<family>/cuda` and `kernels/integrations` | yes |
-| `triton` | the engine's Triton kernels (no TMA), launch configs from the tables | yes |
-| `anthropic` | Anthropic's uplifting-biomolecular-modeling release in `third_party/anthropic/upstream`, loaded by `modules/_anthropic.py` (revision and file checksums checked against `UPSTREAM.json`; `MINIWORLD_ANTHROPIC_ROOT` overrides the root) | no: informational |
+| `cuda` | the engine's hand-written kernels for the card of the input tensor: H100 (sm_90a) or A100 (sm_80), through `kernels/<family>/cuda` and `kernels/integrations`; any other card is refused by `_supports_cuda` | yes |
+| `triton` | the engine's Triton kernels (no TMA, any CUDA card), launch configs from `kernels/<family>/configs/<card>.json` | yes |
+| `anthropic` | Anthropic's uplifting-biomolecular-modeling release in `third_party/anthropic/upstream`, loaded by `modules/_anthropic.py` (revision and file checksums checked against `third_party/anthropic/UPSTREAM.json`; the release itself is not in git; `MINIWORLD_ANTHROPIC_ROOT` overrides the root) | no: informational |
 | `cueq` | NVIDIA cuEquivariance 0.12 (`cuequivariance_torch`), loaded by `modules/_cueq.py`; `_supports_cueq` refuses exactly the calls the library would run in its own PyTorch formula | no: informational |
 
 External backends are connected as they are: they state in `_supports_<name>` what they run and are not changed to pass anything.
+
+A `cuda` backend picks the card's path from the input tensor's device capability inside `_supports_cuda` / `_forward_cuda`
+(see [architecture.md](architecture.md#how-a-call-reaches-the-cards-kernels)). A kernel that fails to build or load raises
+`kernels._nvcc.KernelBuildError`; it is an error, never a reason to run another kernel or backend.
 
 Which classes have which backends is the `backends` tuple of each class; the per-family H100 notes in [h100/](README.md#h100-kernel-notes)
 describe the `cuda` / `triton` ranges.
@@ -64,7 +68,12 @@ The requirements' `model` column lists the selector keys of each row; the measur
 
 `BackendModule.version` (default 1, set explicitly on every requirement class) is human-managed: bump it when a change to the class's
 math, its reference or a backend adapter can change an accuracy or speed result; not for a refactor or a comment. The judge owes a
-new measurement of every case of a class whose version changed. See [judge.md](judge.md).
+new measurement of every case of a class whose version changed.
+
+`BackendModule.backend_versions` (class attribute, backend -> int, missing = 1) versions one backend's adapter: bump an entry when a
+change alters only that backend's results (e.g. an external library rewired). A key `"<backend>:<card>"` (e.g. `"cuda:a100_sm80"`)
+versions that backend on one card only and wins over the plain `"<backend>"` key on that card. Example, `Transition`:
+`{"anthropic": 2, "cuda:h100_sm90": 4, "cuda:a100_sm80": 4, "triton:a100_sm80": 2}`. See [judge.md](judge.md).
 
 ## Precision helpers
 

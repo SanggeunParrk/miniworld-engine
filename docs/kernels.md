@@ -7,8 +7,10 @@ its module rows, [requirements.md](requirements.md)).
 ## Families
 
 A family directory holds `cuda/` (hand-written CUDA: torch extensions or driver-API cubins), `triton/` (Triton kernels, no TMA) or
-both, and `configs/` (launch-config tables). `kernels/integrations/` holds the H100 glue that composes several families into one
-module path (TriMul, triangle attention, token / bias-only / local DiT, OPM and PWA training, APB).
+both, and `configs/` (launch-config tables per card, the pretuner's `candidates.json`). Inside `cuda/`, the card is in the file or folder
+name: `*sm90*` / `h100*` (H100, sm_90a), `*sm80*` / `sm80/` (A100), `*sm100*` / `sm100/` (B200, not supported: no module row reaches it).
+`kernels/integrations/` holds the glue that composes several families into one module path, per card (H100: TriMul, triangle
+attention, token / bias-only / local DiT, OPM and PWA training, APB; A100: the `*_sm80.py` files).
 
 | family | serves (module classes) | note |
 |---|---|---|
@@ -20,22 +22,22 @@ module path (TriMul, triangle attention, token / bias-only / local DiT, OPM and 
 | `layernorm`, `layernorm_linear`, `rmsnorm` | LayerNorm and the norms inside other modules | [h100/layernorm.md](h100/layernorm.md) |
 | `augmented_attention`, `adaln`, `rope`, `gated_projection` | AttentionPairBias, token / atom DiT attention and conditioning | [h100/attention_pair_bias.md](h100/attention_pair_bias.md), [h100/token_dit.md](h100/token_dit.md), [h100/local_atom_dit.md](h100/local_atom_dit.md) |
 | `bias_only_dit` | TokenDiTMiniWorldBiasOnly | [h100/bias_only_dit.md](h100/bias_only_dit.md) |
-| `dit_variants` | Boltz-2 / RoseTTAFold3 / Chai-1 token and atom DiT | [h100/dit_variants.md](h100/dit_variants.md) |
+| `dit_variants` | H100: the slid-window edge kernels (`cuda/edge.cu`) of every atom DiT class; A100: the atom DiT blocks `integrations/local_dit_sm80_block` does not take (Boltz-2 / RoseTTAFold3 / Chai-1, the parallel K / V AdaLN, the slid windows, fp32; `cuda/train.py`, `sm80.py`) | [h100/dit_variants.md](h100/dit_variants.md) |
 | `swa_dit` | AtomDiTMiniWorld, AtomDiTESMFold2, SWAAtomTransformer | [h100/swa_atom_dit.md](h100/swa_atom_dit.md) |
 | `sampler_ops` | AugmentNoise, AlignEuler, PoolAtoms | [h100/sampler_ops.md](h100/sampler_ops.md) |
 | `smooth_lddt` | SmoothLddtLoss | [h100/smooth_lddt.md](h100/smooth_lddt.md) |
 | `pair_embed_adaln`, `pair_embed_geom`, `token_pair_init` | PairEmbedAdaLN / Geom / CA, TokenPairInit | [h100/pair_embed.md](h100/pair_embed.md) |
 | `mpnn_*` (7 families) | ProteinMPNN | [h100/mpnn.md](h100/mpnn.md) |
-| `bias_only_attention`, `tm1`, `tm2` | no module reaches them (no requirements_kernel.csv rows) | — |
+| `bias_only_attention`, `tm1`, `tm2` | no requirements_kernel.csv rows name their kernels (helpers of other families at most) | — |
 
 Shared helpers: `_cast_cuda` (one-launch fp32/bf16 casts for the H100 paths), `_cast` (the Triton counterpart), `_h100_master`
 (bf16 casts of live fp32 masters), `_capture` (weight-pack caches that are correct under CUDA-graph capture), `_compile` (how an entry
-point is exposed to `torch.compile`), `_device` (H100 checks, SM count), `_tf32` (round-to-nearest TF32 operands for Triton fp32 dots),
+point is exposed to `torch.compile`), `_device` (card checks, SM count), `_tf32` (round-to-nearest TF32 operands for Triton fp32 dots),
 `_dot_precision` (TF32 or IEEE from torch's own switch), `_fastmath` (one-instruction sigmoid), `_tiles` (tile visit order).
 
 ## Launch configs (`_launch_config.py`)
 
-Tables: `kernels/<family>/configs/<gpu_key>.json`, for H100 `h100_sm90.json`:
+Tables: `kernels/<family>/configs/<gpu_key>.json`: `h100_sm90.json` (25 families) and `a100_sm80.json` (17 families); no B200 table:
 
 ```json
 {"gpu": "...", "source": "...", "version": 3,
@@ -45,7 +47,7 @@ Tables: `kernels/<family>/configs/<gpu_key>.json`, for H100 `h100_sm90.json`:
 - Per (op, key) at most the top 4 configs, fastest first; `ms` is what they were ranked by (reference only).
 - Key: the sorted `+`-joined floating dtypes of the tensor arguments; the shape (`M=640,N=128`: `M` a row bucket or `L` a length bucket,
   other names exact widths) or a native kernel's dims; the kernel's other int / bool key arguments.
-- `gpu_key` = `<model>_sm<major><minor>` from the device name (`NVIDIA H100 80GB HBM3` -> `h100_sm90`); SKUs of one model and arch share a
+- `gpu_key` = `<model>_sm<major><minor>` from the device name (`NVIDIA H100 80GB HBM3` -> `h100_sm90`, `NVIDIA A100 80GB PCIe` -> `a100_sm80`); SKUs of one model and arch share a
   table. A new GPU is new files and nothing else.
 - `version`: an integer the pretuner's merge increments when the table's content changes. The lookup does not read it; the judge
   does (it is one of the versions a result depends on, [judge.md](judge.md)).
@@ -74,8 +76,8 @@ out) for kernels launched from several levels, so a pair `L=1024` and an atom `A
 clamping at both ends. Width axes are exact and packed by sorted name into one int64, with a digit derived from the axis names so a
 launcher that names a different axis set misses rather than collides.
 
-Families with `@configured` ops but no `h100_sm90.json` (OPM, PWA, some Triton ops of other families) run their decorator defaults
-until a table entry exists.
+Families with Triton kernels but no `h100_sm90.json` (2026-11-11: `bias_only_dit`, `dit_variants`, `swa_dit`, `mpnn_edge_dropout`,
+`mpnn_edge_layernorm`, `mpnn_edge_mlp`) and ops without an entry in their family's table run their decorator defaults (warned once).
 
 ## Prebuilder (`_prebuild.py`)
 
@@ -92,8 +94,8 @@ python -m miniworld_engine.kernels._prebuild [--arch sm90a] [--jobs N] [--only F
   module rows of the classes that launch the family's kernels, by the derive rule. A kernel no row needs is not built. The calls run
   under `_nvcc.planning()`: each `load_extension` / `load_inline_extension` / `cubin` records what it would build and returns a stand-in.
   Nothing is recorded from a model run.
-- **Explicit arch.** `--arch` (default `sm90a`) picks the variants and the SM count (132) some builds specialise for; no device is
-  queried. Builds run with `TORCH_CUDA_ARCH_LIST` set to the target.
+- **Explicit arch.** `--arch` (default `sm90a` = H100; `sm80` = A100; `sm100` = B200, not supported) picks the variants and the SM
+  count (132 / 108 / 148) some builds specialise for; no device is queried. Builds run with `TORCH_CUDA_ARCH_LIST` set to the target.
 - **Build cache.** Artifacts go to `~/.cache/miniworld_engine_jit` (`$XDG_CACHE_HOME` respected): `torch_extensions/<name>-<key>/` and
   `<family>/<stem>-<key>.cubin`. The key (`_codegraph.py`) is computed from the content each artifact compiles: the entry sources and the
   `#include` closure actually reached (normalised: comments and whitespace do not count), the flags, torch / CUDA / Python versions,
@@ -105,6 +107,9 @@ python -m miniworld_engine.kernels._prebuild [--arch sm90a] [--jobs N] [--only F
 - **Checks.** `--list` prints the plan and what is missing; `--check` cross-checks the plan against the code (every build call site
   reached, every `.cu` / `.cpp` compiled by some artifact) and `requirements_kernel.csv`; `--rows` prints each family's rows;
   `--compare` diffs the plan against an earlier `prebuilt-<arch>.json`.
+- **Exit status.** 1 when any planned artifact failed to build, a recipe failed to plan or a planned artifact is still absent (the
+  failures are listed again at the end, then `PREBUILD FAILED`); 0 only when every planned artifact is present. At run time a kernel
+  that fails to build or load raises `_nvcc.KernelBuildError` (never a fallback to another kernel).
 - After a build, `prebuilt-<arch>.json` in the cache root lists the plan's artifacts by relative path (the content of a bundle).
 - External headers: CUTLASS 4.2 (`--cutlass` / `CUTLASS_PATH`) and mathdx / cuBLASDx (`--mathdx` / `MATHDX_HOME`).
 - Triton kernels are out of scope (they JIT in seconds).
@@ -135,10 +140,9 @@ python -m miniworld_engine.kernels._prebuild_cuda [--arch sm90a] [--list] [--che
 `PREBUILD_VERSION` (human-managed) is bumped when a change to how the prebuilder builds can make the kernels compute or run differently.
 Every measurement record carries it; the judge asks once whether results made with the previous builds still stand.
 
-## Pretuner (`_pretune.py`) — in progress
+## Pretuner (`_pretune.py`)
 
-Being written while this page was written; described from its current docstring and code. It fills the launch-config tables on the
-GPU from the launches the requirements reach.
+Fills the launch-config tables on the GPU from the launches the requirements reach (one table per card).
 
 ```sh
 python -m miniworld_engine.kernels._pretune --candidates                      # CPU: write kernels/<family>/configs/candidates.json
@@ -146,6 +150,7 @@ python -m miniworld_engine.kernels._pretune [--run DIR] [--config YAML] [--modul
        [--deadline EPOCH] [--hard-deadline EPOCH]                             # GPU: tune, one process per GPU
 python -m miniworld_engine.kernels._pretune --status [--run DIR]
 python -m miniworld_engine.kernels._pretune --merge [--run DIR ...] [--dry-run] # CPU: shards -> <gpu>.json tables
+python -m miniworld_engine.kernels._pretune --list | --drop-mismatch | --drop-key OP KEY [--run DIR]   # units; reopen keys
 ```
 
 - **Candidates** (once, then a reviewed file `candidates.json`): per configured Triton op, its decorator default(s), the old engine's

@@ -11,7 +11,9 @@ classes in `modules/sampler_ops.py` (eval only, no autograd; `_forward_pytorch` 
 | `AlignEuler` | `(noisy, denoised, mask, sc, sigma_next)` -> `[B, N, 3]` | weighted Kabsch alignment of `noisy` onto `denoised` (Horn's quaternion method), then `aligned + step_scale (sigma_next - sigma_hat) (aligned - denoised) / sigma_hat` |
 | `PoolAtoms` | `(x [S, Q, C], idx [T, A], gather_mask, atom_mask)` -> `[S, T, C]` | `sum_a m relu(g x[s, idx]) / max(sum_a m, 1e-10)`, bf16 out, fp32 sums |
 
-Backends: `pytorch`, `cuda` (H100 sm_90a), `triton` (any CUDA card). The random draws (`rv`, `tr`, `noise`) are made by the caller;
+Backends: `pytorch`, `cuda` (H100 sm_90a; A100: the same source built for sm_80, `kernels/sampler_ops/cuda/sm80.py` +
+`sampler_ops_sm80.cu`), `triton` (any CUDA card); `AlignEuler` and `PoolAtoms` also `anthropic` (baselines: Boltz-2's
+`kabsch_rotation_device`; the AF3 kit's `af3t_token_agg.token_mean_relu`). The random draws (`rv`, `tr`, `noise`) are made by the caller;
 the churn arithmetic runs on device scalars, so nothing reads the host and every call can be captured.
 
 Requirements rows: `AugmentNoise` (AF3 churn; and EDM churn `window=1, gamma=0.4, sigma_min=0.05, sigma_max=50, variance_floor=1e-6,
@@ -38,7 +40,7 @@ in `requirements_kernel.csv`, role `forward_infer`):
 | `pool_atoms_k` | pool_atoms | generic fallback for index / mask dtype combinations the templated kernels do not instantiate |
 
 Triton (`kernels/sampler_ops/triton/main.py`): `_stats` (chunk partials), `_augment`, `_cov`, `_align` (with an in-kernel Horn
-rotation), `_pool`. They are launched by the `"triton"` backend but are not listed in `requirements_kernel.csv`.
+rotation), `_pool`, launched by the `"triton"` backend; `requirements_kernel.csv` rows `sampler_ops_{stats,augment,cov,align,pool}` (forward_infer).
 
 ## Design
 
@@ -61,19 +63,19 @@ rotation), `_pool`. They are launched by the `"triton"` backend but are not list
 ## Launch configs
 
 CUDA: fixed (256 threads, chunk by `chunk_for`, pool grid by channel width). Triton: `@configured` as
-`sampler_ops_{stats,augment,cov,align,pool}_triton`; there is no `kernels/sampler_ops/configs/h100_sm90.json`, so they launch their
-defaults (`BLOCK = 512`, 4 warps; pool `BLOCK_C = 256`, 2 warps).
+`sampler_ops_{stats,augment,cov,align,pool}_triton`, with H100 entries in `kernels/sampler_ops/configs/h100_sm90.json` (the kernel
+defaults, `BLOCK = 512`, 4 warps; pool `BLOCK_C = 256`, 2 warps, serve shapes without an entry).
 
 ## Limits
 
 - `AugmentNoise` / `AlignEuler` (`_supports_kernels` + `_cuda_h100`): fp32 CUDA tensors of the documented shapes, scalar `sigma` /
-  `sigma_next`, `sc` with at least two entries, non-empty; `"cuda"` needs sm_90.
+  `sigma_next`, `sc` with at least two entries, non-empty; `"cuda"` needs sm_90 (or sm_80).
 - `PoolAtoms`: bf16 `x [S, Q, C]` on CUDA, `idx` int32 / int64 `[T, A]`, masks of `idx`'s shape in bool / fp32 / bf16 / int32 / int64,
-  non-empty; `"cuda"` additionally `C % 4 == 0`, `C <= 4096`, sm_90.
+  non-empty; `"cuda"` additionally `C % 4 == 0`, `C <= 4096`, sm_90 (or sm_80).
 
 Historical (from the 2026-10-25 note, not re-measured under the current measurer): CUDA graph, A = 48, 32768 atoms: augment_noise
 27.0 us, align_euler 64.6 us, pool_atoms 96.4 us.
 
 ## History
 
-Old page: `git show HEAD:docs/gpus/h100/sampler_ops/sampler_ops.md`.
+Old page: `git show 65f37dc3c^:docs/gpus/h100/sampler_ops/sampler_ops.md`.

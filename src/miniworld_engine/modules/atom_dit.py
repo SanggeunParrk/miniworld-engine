@@ -170,11 +170,12 @@ class _LocalAtomDiT(BackendModule):
     (``kernels/augmented_attention/triton/window.py``, forward and backward), the block's other statements (AdaLN, projections, gates, the
     transition) as ``"pytorch"``'s (:meth:`_supports_triton`).
 
-    ``backend="cuda"`` (:class:`AtomDiTProtenix`, :class:`AtomDiTOpenFold3`): the whole block on the H100 kernels
-    (``kernels/integrations/local_dit_h100.py``: conditioning tables, pre / post row kernels on wgmma, the mma.sync window attention; bf16 or TF32),
-    forward and backward; training for the chained K / V AdaLN and the clipped window only (:meth:`_supports_cuda`).
-    :class:`AtomDiTBoltz2`, :class:`AtomDiTRoseTTAFold3` and :class:`AtomDiTChai1` have their own ``"cuda"``
-    (``modules/dit_variant_cuda.py`` on ``kernels/dit_variants``: bf16 / fp32 inference, a gradient on the training path).
+    ``backend="cuda"`` (every atom DiT class): on H100 the whole block on the one atom DiT implementation
+    (``kernels/integrations/local_dit_h100.py``: conditioning tables, pre / post row kernels on wgmma, the mma.sync window attention;
+    bf16 or TF32; a model's differences are its options, ``local_dit_h100.options``), forward and backward, every key window (the slid
+    windows' edges on ``kernels/dit_variants/cuda/edge.cu``); the range is :meth:`_supports_cuda`. On A100 (sm_80):
+    ``kernels/integrations/local_dit_sm80_block`` or the sm_80 builds of ``kernels/dit_variants/cuda`` (``modules/dit_variant_cuda.py``),
+    see the comment above ``_a100_rows``.
     """
 
     backends = ("pytorch", "anthropic", "triton")
@@ -348,8 +349,8 @@ class _LocalAtomDiT(BackendModule):
         from miniworld_engine.kernels.integrations import local_dit_h100
 
         if local_dit_h100.options(self) is None:
-            return ("outside the H100 atom block's options (mixed AdaLN forms or epsilons, a q / k norm, the up-gate transition: those "
-                    "blocks are still on kernels/dit_variants)")
+            return ("outside the H100 atom block's options (local_dit_h100.options: mixed AdaLN forms or epsilons, a per-head q / k norm, "
+                    "an up-gate weight other than [256, 128] without bias, ...)")
         if uid is not None and (uid.ndim != 2 or tuple(uid.shape) != (1, single.shape[2])):
             return f"uid must be [1, N], got {tuple(uid.shape)}"
         att, tr = self.attention, self.transition

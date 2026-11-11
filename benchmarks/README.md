@@ -4,6 +4,7 @@ Speed figures and tables of the engine's requirement cases, one folder per card 
 **generated from results that already exist**; nothing in this folder measures:
 
     python -m miniworld_engine.measure.plot --gpu h100_sm90                 # from the card's speed tokens (judge/tokens/<gpu>/)
+    python -m miniworld_engine.measure.plot --gpu a100_sm80
     python -m miniworld_engine.measure.plot --gpu h100_sm90 --module Transition
     python -m miniworld_engine.measure.plot --gpu h100_sm90 --source RUN_DIR --out /scratch/plots   # from speed records not issued yet
 
@@ -22,6 +23,11 @@ Layout of `<gpu>/`:
 - `<Module>/D-<key>__L<length>__<slice>.svg`: **D sweep**, the same over one channel width of the constructor (`d_pair`,
   `d_hidden`, `normalized_shape`, ...) at one length, the other constructor arguments fixed;
 - `<Module>/README.md`: every figure with its table (median ms per backend and speedup vs PyTorch).
+
+What the speedups mean: the baseline is the engine's own `pytorch` backend (the reference implementation of each class, eager PyTorch
+kernels captured in the same CUDA graph, TF32 allowed, not `torch.compile`d), timed on the same card, case and inputs. They are
+per-module numbers, not end-to-end model numbers. `anthropic` / `cueq` are the external baselines as they ship; an empty cell means the
+baseline does not serve that class or mode.
 
 A slice is one (model, stream, constructor kwargs, depth, samples, timing). Only `status: ok` CUDA-graph timings are drawn;
 capture fallbacks (`eager`) are marked in the tables and left out of the figures; unsupported / skipped / failed cases are gaps.

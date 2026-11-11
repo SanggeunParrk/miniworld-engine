@@ -8,8 +8,9 @@ Scope. `modules.MSAPairWeightedAveraging` (`modules/msa.py`):
     return msa + drop_msa(W_o o)                          # row-broadcast dropout (training, p_drop)
 
 `ln_pair` has no bias (a per-head constant on the logits cancels in the softmax; a checkpoint's `ln_pair.bias` is dropped on load).
-Backends: `pytorch` (reference), `cuda` (H100 kernels in `kernels/integrations/pwa_train.py` and `pwa_wide.py`), `triton`
-(`kernels/pair_weighted_averaging/triton/main.py`). Requirements rows: MSA stream, L 128 .. 768, depth 1024 (one row also 384 / 512 /
+Backends: `pytorch` (reference), `cuda` (H100 kernels in `kernels/integrations/pwa_train.py` and `pwa_wide.py`; A100 (sm_80):
+`integrations/pwa_sm80.py`, `pwa_wide_sm80.py`), `triton` (`kernels/pair_weighted_averaging/triton/main.py`), `anthropic` (external
+baseline, inference only, not described here). Requirements rows: MSA stream, L 128 .. 768, depth 1024 (one row also 384 / 512 /
 2048), 8 heads; (d_msa, d_pair, C) = (64, 128, 8), (64, 128, 32), (64, 256, 32), (128, 256, 8), (128, 256, 16), (128, 384, 8),
 (256, 512, 32); dtype `master` only; eval and train (p_drop 0.15 / 0.25). Every path below applies the residual and the row dropout
 itself.
@@ -40,6 +41,8 @@ Judging: [measure](../measure.md), [modules](../modules.md), [kernels](../kernel
 | `pair_weighted_averaging_gate_out_wide_sm90` | forward | `gate_out_w`: gate, o * sigmoid(gate) from registers into the out projection, dropout, residual |
 | `pair_weighted_averaging_bwd_gate_wide_sm90` | backward | `gate_bwd_w`: do' = dout Wo, gate recomputed: go, do (head-major), dgp |
 | `pair_weighted_averaging_bwd_dm_wide_sm90` | backward | `dm_bwd_w`: dy = [dgp \| dv][Wg; Wv], LN backward + residual -> dm, dgamma / dbeta partials; dv copied into the natural-layout buffer |
+| `pair_weighted_averaging_gate_big_sm90`, `pair_weighted_averaging_out_big_sm90` | forward | BIG build (d_msa 256, 8 x 32): `gate_w` (gate + gated product, sigmoid gate saved in training) and `out_w` (out projection, dropout, residual), `gate_out_w` split in two |
+| `pair_weighted_averaging_bwd_gate_big_sm90`, `pair_weighted_averaging_bwd_layernorm_big_sm90` | backward | BIG build: `gate_bwd_big_w` (from the saved gate) and `ln_bwd_w` (LN backward of an fp32 dy + residual; dy = [dgp \| dv][Wg; Wv] on cuBLAS) |
 | `pair_weighted_averaging_layernorm_gemm_softmax`, `_layernorm_gemm`, `_gate_gemm`, `_bwd_gate_gemm`, `_bwd_layernorm_gemm_dw`, `_bwd_layernorm_gemm_dx_dlnw`, `_bwd_layernorm_gemm_softmax` | forward / backward | the Triton backend |
 
 The contractions (o = w v where split, dv = w^T do on the native path, dw = do v^T) and the wide path's weight gradients are cuBLAS.
@@ -47,7 +50,8 @@ The contractions (o = w v where split, dv = w^T do on the native path, dw = do v
 ## Design: the `cuda` backend
 
 `_supports_cuda` -> `pwa_train.refusal`; `_forward_cuda` runs `pair_weighted_averaging` (grad, or training mode with p_drop > 0) or
-`pair_weighted_averaging_inference`. Widths other than (64, 128, 8 x 32) go to `pwa_wide`.
+`pair_weighted_averaging_inference`. Widths other than d_msa 64, 8 x 32 go to `pwa_wide`; d_msa 64, 8 x 32 at d_pair 256 / 384 / 512 (`pair_only_wide`,
+`PAIR_WIDE`) stays on `pwa_train` with `pwa_wide`'s pair kernels (N <= 1024).
 
 ### MiniWorld width (d_msa 64, d_pair 128, 8 heads x 32): `pwa_train.py`
 
@@ -81,9 +85,10 @@ training, N > 2048 in inference), which the refusal already excludes on H100.
 
 ### Other widths (`pwa_wide.py`)
 
-d_msa 64 / 128, d_pair 128 / 256 / 384, 8 heads x C 8 / 16, any depth, N <= 1024 (padded to a multiple of 16 with masked tokens),
+d_msa 64 / 128, d_pair 128 / 256 / 384, 8 heads x C 8 / 16, and the BIG build (d_msa 256, d_pair 512, 8 x 32), any depth, N <= 1024 (padded to a multiple of 16 with masked tokens),
 inference and training. Kernels are built per (d_msa, C) and per d_pair; pair-kernel warps / CTAs per SM: `PAIR_CFG` (128: 8 x 2,
-256: 4 x 3, 384: 6 x 1).
+256: 4 x 3, 384: 6 x 1, 512: 4 x 1). BIG: `gate_out_w` is split into `gate_w` + `out_w` (one 128 KiB weight resident each),
+the backward uses `gate_bwd_big_w` with the saved gate and `ln_bwd_w` after a cuBLAS dy.
 
 - Forward: `pair_fwd3` (wide) -> `ln_vg_w` -> cuBLAS `o = w v` -> `gate_out_w`. Inference keeps no y: `gate_out_w` normalises m again.
 - Backward: `gate_bwd_w` -> cuBLAS dWo, `dv = w^T do`, `dw = do v^T` -> `dm_bwd_w` -> cuBLAS `[dWg; dWv] = dgv^T y` -> `pair_bwd3`
@@ -110,17 +115,17 @@ keep-mask `[B, L, D]` is drawn by the module and applied as `x * keep / (1 - p)`
 
 ## Launch configs
 
-No `kernels/pair_weighted_averaging/configs/h100_sm90.json` exists (only the pretuner's `candidates.json`): the Triton ops launch their
-decorator defaults. The CUDA kernels have fixed schedules and the shape rules above (`_split_contraction`, `PAIR_CFG`).
+`kernels/pair_weighted_averaging/configs/h100_sm90.json` holds the seven Triton ops (`pair_weighted_averaging_*_triton`); a key
+without an entry runs the decorator default (warned once). The CUDA kernels have fixed schedules and the shape rules above (`_split_contraction`, `PAIR_CFG`).
 
 ## Limits
 
 - `cuda`: CUDA, sm_90, bf16 msa and pair, 4-D shapes, bool `[B, L]` mask, batch 1. MiniWorld width: N % 128, S even, N <= 1024
-  (training) / 2048 (inference). Wide: d_msa in {64, 128}, d_pair in {128, 256, 384}, 8 heads, C in {8, 16}, 0 < N <= 1024. The
-  requirements rows (64, 256, 8 x 32) and (256, 512, 8 x 32) fit neither: no CUDA path.
+  (training) / 2048 (inference); with d_pair 256 / 384 / 512 (wide pair kernels) N <= 1024. Wide: d_msa in {64, 128}, d_pair in
+  {128, 256, 384}, 8 heads, C in {8, 16}, or (256, 512, 8 x 32) (BIG); 0 < N <= 1024. Every requirements row has a CUDA path.
 - `triton`: bf16, d_msa a power of two >= 16, 1 <= C <= 128, n_head * C % 16 == 0, d_pair >= 16.
 - A `dead` instance returns msa in inference.
 
 ## History
 
-Old note: `git show HEAD:docs/gpus/h100/pwa/pwa.md` (speed-of-light and comparison tables for the wide widths, the open items list).
+The previous, longer note was deleted; see git history (speed-of-light and comparison tables for the wide widths, the open items list).
