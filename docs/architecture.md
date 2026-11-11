@@ -42,7 +42,7 @@ downstream model constructor builds (FoldForge's AF3-family models and MiniWorld
 See [requirements.md](requirements.md).
 
 Kernel names carry the card they are built for: a suffix `_sm90` / `_sm90a` is H100, `_sm80` is A100, and no suffix means a Triton or
-card-independent kernel. 2026-11-11: 690 kernel rows (374 sm_90, 191 sm_80, 125 without a suffix). No row names an sm_100 kernel.
+card-independent kernel. 2026-11-12: 697 kernel rows (377 sm_90, 192 sm_80, 128 without a suffix). No row names an sm_100 kernel.
 
 ## 2. Modules and backends
 
