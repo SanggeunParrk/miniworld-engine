@@ -2,8 +2,8 @@
 padding), on the reference backend.
 
 - Below 128 real atoms a real query reads the padding keys of its window [0, 128): its rows equal a call in which every one of the 128 atoms
-  is a real key (the key mask None at 128 atoms, a separate path), and they move when a padding atom moves; the padding rows are the default
-  form's.
+  is a real key (the key mask None at 128 atoms, a separate path), and they move when a padding atom moves (the padding rows are not
+  AlphaFold 3's, which never reads them: not compared).
 - From 128 real atoms on the two forms agree exactly.
 - The form is defined on the slid window only.
 """
@@ -41,7 +41,6 @@ def test_af3_form_under_128_real_atoms() -> None:
     y_keys = keys(**inp)
     y_all = keys(**{**inp, "mask": None})  # every atom a key: the window [0, 128) with no key off
     torch.testing.assert_close(y[:, :, real], y_all[:, :, real], rtol=0, atol=0)
-    torch.testing.assert_close(y[:, :, ~real], y_keys[:, :, ~real], rtol=0, atol=0)
     assert not torch.allclose(y[:, :, real], y_keys[:, :, real])  # the forms differ here
     moved = dict(inp)
     moved["single"] = inp["single"].clone()

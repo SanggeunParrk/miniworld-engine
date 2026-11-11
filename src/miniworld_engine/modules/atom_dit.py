@@ -717,13 +717,16 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     release runs this code). ``key_window="slide_qblock"``: IntelliFold2's torch release; ``"pad"``: the clipped window.
 
     ``mask_form`` (FoldForge R13): ``"keys"`` (the default, as every atom DiT block) switches every masked key off for every query; ``"af3"``
-    is AlphaFold 3's own form, whose mask term is ``-1e9`` only where BOTH the query and the key are padding, so a real query also reads the
-    padding keys of its window. The two differ only below 128 real atoms: the slid window (``key_window="slide"``, the only window this form
-    is defined for) lies inside the real atoms from 128 on, and below it is ``[0, 128)``, where the real queries read the padding keys too.
-    Served on every backend from two passes of the block, exact row by row (the block's rows are independent given the keys): the real rows
-    from a pass whose key mask also holds the first 128 atoms (the same window, no key of it off), the padding rows from the pass under the
-    caller's mask. The second pass doubles the block's cost, so set ``"af3"`` for the systems under 128 real atoms (at or above 128 the two
-    passes are the same and the forms agree)."""
+    is AlphaFold 3's own form, whose mask term touches only the pairs where BOTH the query and the key are padding (``+1e9`` there), so a
+    real query reads every key of its window, padding included. The forms differ only below 128 real atoms: from 128 on the slid window
+    (``key_window="slide"``, the only window this form is defined for) lies inside the real atoms; below it every window holds the N real
+    atoms and 128 - N padding keys (AlphaFold 3 ``features.py`` AtomCrossAtt: its windows shifted to start at N - 128 < 0 index padding by
+    wrapping; which padding slots does not matter, as below). One pass, the key mask widened to the first 128 atoms (still a prefix: the
+    window stays [0, 128); the padded atom count must be >= 128), on every backend. Exact for the real rows when the caller's padding atoms
+    are what AlphaFold 3's gathers make them: zero ``single`` / ``cond`` rows (``atom_layout.convert`` fills a padding slot with 0, so every
+    padding key is the same key) and the pair of a padding key the one AlphaFold 3 computes there. The padding rows are not AlphaFold 3's
+    (its padding queries read only padding keys); AlphaFold 3 never reads them -- its keys come from the masked gather -- so zero them
+    before the next block."""
 
     version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
 
@@ -752,15 +755,35 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
             raise ValueError(f"mask_form='af3' is AlphaFold 3's form on its slid window (key_window='slide'), got {self.key_window!r}")
         self.mask_form = mask_form
 
-    def forward(self, single, cond, pair, mask=None):
+    def _mask(self, mask):
+        """The key mask every backend runs under: the caller's (``"keys"``), or (``"af3"``) widened to the first 128 atoms, the window below 128
+        real atoms -- a prefix still, so the slid window stays [0, 128); from 128 real atoms on it is the caller's mask."""
         if self.mask_form == "keys" or mask is None:
-            return super().forward(single, cond, pair, mask)
+            return mask
         keep = mask.bool()
-        # the first 128 atoms (the window below 128 real atoms) as keys: a prefix still, so the slid window is the same [0, 128)
-        wider = keep | (torch.arange(keep.shape[-1], device=keep.device) < KEYS)
-        real_rows = super().forward(single, cond, pair, wider)
-        padding_rows = super().forward(single, cond, pair, mask)
-        return torch.where(keep[None, ..., None], real_rows, padding_rows)
+        return keep | (torch.arange(keep.shape[-1], device=keep.device) < KEYS)
+
+    # each backend's entry (the measurers call them directly) takes the form's mask
+    def _forward_pytorch(self, single, cond, pair, mask=None):
+        return super()._forward_pytorch(single, cond, pair, self._mask(mask))
+
+    def _supports_triton(self, single, cond, pair, mask=None, **kw) -> str | None:
+        return super()._supports_triton(single, cond, pair, self._mask(mask), **kw)
+
+    def _forward_triton(self, single, cond, pair, mask=None):
+        return super()._forward_triton(single, cond, pair, self._mask(mask))
+
+    def _supports_cuda(self, single, cond, pair, mask=None, **kw) -> str | None:
+        return super()._supports_cuda(single, cond, pair, self._mask(mask), **kw)
+
+    def _forward_cuda(self, single, cond, pair, mask=None, uid=None):
+        return super()._forward_cuda(single, cond, pair, self._mask(mask), uid)
+
+    def _supports_anthropic(self, single, cond, pair, mask=None, **kw) -> str | None:
+        return super()._supports_anthropic(single, cond, pair, self._mask(mask), **kw)
+
+    def _forward_anthropic(self, single, cond, pair, mask=None):
+        return super()._forward_anthropic(single, cond, pair, self._mask(mask))
 
 
 class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
