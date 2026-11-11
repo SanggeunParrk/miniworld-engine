@@ -585,6 +585,11 @@ class _H100Block(torch.autograd.Function):
         ctx.flags = flags
         ctx.save_for_backward(kmask, uid, single, cond, pair, *saved, *weights)
         ctx.n_saved = len(saved)
+        if out._is_view():  # the kernels' rows reshaped: hand back a tensor of its own (same storage, no copy), so a caller may write
+            # into the block output in place while autograd records (a Function output that is a view refuses in-place writes)
+            out = torch.empty(0, dtype=out.dtype, device=out.device).set_(
+                out.untyped_storage(), out.storage_offset(), out.size(), out.stride()
+            )
         return out
 
     @staticmethod
