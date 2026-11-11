@@ -376,7 +376,7 @@ class Transition(BackendModule, MasterWeights):
         ``fused_wide_sm80`` at D 64 / 128 / 256 / 384 / 512 / 768 with a hidden width a multiple of 64, any row count): bf16 activations,
         bf16 or fp32-master parameters, forward and backward; fp32 activations where torch allows TF32 (``fused_wide_sm80.transition_f32_sm80``:
         fp16 products at TF32's rounding, a TF32 backward)."""
-        from miniworld_engine.kernels.transition.cuda import fused_wide_sm80
+        from miniworld_engine.kernels.transition.cuda import fused_fwd_sm80, fused_wide_sm80
 
         why = self._supports_engine(x)
         if why is not None:
@@ -387,6 +387,12 @@ class Transition(BackendModule, MasterWeights):
         if any(p.dtype not in (torch.bfloat16, torch.float32) for p in matrices) or len({p.dtype for p in matrices}) != 1:
             return "the projections must share one dtype, bfloat16 or float32"
         wa, ws = self.expand_a.weight, self.squeeze.weight
+        rows, limit = x.numel() // x.shape[-1], fused_fwd_sm80.max_rows(x.device, x.dtype)
+        if rows > limit and torch.is_grad_enabled() and (x.requires_grad or any(p.requires_grad for p in self.parameters())):
+            return (
+                f"{rows} rows with a gradient: the sm_80 Transition kernels take at most {limit} rows per call (one launch's work lists / row "
+                "grid); inference splits the rows, training does not"
+            )
         if x.dtype is torch.float32:
             from miniworld_engine.kernels.transition.cuda.fused_generic_sm90a import _tf32_allowed
 

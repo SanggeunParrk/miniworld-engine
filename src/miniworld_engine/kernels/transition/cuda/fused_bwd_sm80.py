@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 
 from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
-from .fused_fwd_sm80 import SHAPES, _o_perm
+from .fused_fwd_sm80 import SHAPES, _o_perm, max_rows
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -52,10 +52,11 @@ def loads() -> bool:
 
 
 def supports(d: int, h: int, rows: int) -> bool:
-    """A build exists for (d, h), whole 256-row tiles, enough rows to fill the card, the switch is not off."""
+    """A build exists for (d, h), whole 256-row tiles, enough rows to fill the card and no more than one launch's work lists hold
+    (``fused_fwd_sm80.max_rows``), the switch is not off."""
     if (d, h) not in SHAPES or rows % 256 or rows < MIN_ROWS[(d, h)]:
         return False
-    return True
+    return rows <= max_rows(torch.device("cuda"))
 
 
 def _layout_bwd(wa, wb, ws, dev, d, h):

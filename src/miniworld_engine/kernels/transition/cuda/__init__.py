@@ -37,8 +37,19 @@ def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps):
     ``fused_wide_sm80`` (D in ``fused_wide_sm80.WIDTHS``, hidden a multiple of 64, any row count), or ``None`` when neither takes the call
     (the caller refuses: there is no fallback; a build failure raises ``_nvcc.KernelBuildError``). bf16 activations; the parameters
     bf16 or fp32 masters (cast inside, outside autograd, so a master's gradient is fp32). fp32 activations (TF32 allowed): ``fused_wide_sm80.transition_f32_sm80`` (D in ``F32_WIDTHS``, hidden a multiple of 64)."""
-    from . import fused_sm80, fused_wide_sm80
+    from . import fused_fwd_sm80, fused_sm80, fused_wide_sm80
 
+    rows = x.numel() // x.shape[-1] if x.dim() else 0
+    limit = fused_fwd_sm80.max_rows(x.device, x.dtype)
+    grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, ln_weight, ln_bias, wa, wb, ws))
+    if rows > limit and not grad:
+        # inference past one call's rows (the kernels' work lists / row grid): one call per contiguous row block (rows are independent), joined.
+        # Training past it is refused by modules.Transition (the backward would need the same split of its weight-gradient sums).
+        flat = x.reshape(-1, x.shape[-1]).contiguous()
+        parts = [transition_sm80(flat[r : r + limit], ln_weight, ln_bias, wa, wb, ws, eps) for r in range(0, rows, limit)]
+        if any(p is None for p in parts):
+            return None
+        return torch.cat(parts).reshape(x.shape)
     if x.dtype is torch.float32:  # fp32 (TF32 allowed): the wide fp32 path (fp16 products at TF32's rounding, a TF32 backward)
         return (
             fused_wide_sm80.transition_f32_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps)
