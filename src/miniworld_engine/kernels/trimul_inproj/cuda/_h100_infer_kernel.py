@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Modified by MiniWorld Engine from Anthropic's uplifting-biomolecular-modeling@f4f62fa6, common/opt_core/opt_core/kernels/trimul/native/pkg/v5/python/trimul_native/kernel.py (Apache-2.0; see licenses/THIRD_PARTY_NOTICES.md).
 """Launch wrappers of the trimul_native kernels (csrc/tmn_kernels.cuh): kernel selection by name from the tile table, tensor-map encoding, the
 by-value parameter blocks (K1Params / K3Params) as pointer-patched ArgPacks, persistent-grid launches through launch.py (CUDA driver).
 

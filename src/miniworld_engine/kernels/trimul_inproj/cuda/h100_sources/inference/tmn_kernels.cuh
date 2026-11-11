@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Modified by MiniWorld Engine from Anthropic's uplifting-biomolecular-modeling@f4f62fa6, common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh (Apache-2.0; see licenses/THIRD_PARTY_NOTICES.md).
 // tmn_kernels.cuh — triangle-multiplication prologue (K1) and epilogue (K3) kernels, one family parameterised over
 //   C_Z (pair channels) x C_H (hidden channels) in {64,128,256,384}^2, z dtype (bf16 | fp32-resident z under bf16 compute), tile shape,
 //   weight-ring depth, LayerNorm summation mode, mask on/off, dormant save-intermediates.

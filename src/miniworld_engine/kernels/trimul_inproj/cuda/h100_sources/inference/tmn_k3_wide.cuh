@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Modified by MiniWorld Engine from Anthropic's uplifting-biomolecular-modeling@f4f62fa6, common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_k3_wide.cuh (Apache-2.0; see licenses/THIRD_PARTY_NOTICES.md).
 // tmn_k3_wide.cuh — the wide-K epilogue member of the trimul_native kernel family (sm_90a): K3 for (c_z, c_hidden) pairs whose two MMA
 // operands cannot both live in registers (c_z/16 + c_hidden/16 > 24 k-steps: every pair containing 384, and (256,256) without spills).
 //

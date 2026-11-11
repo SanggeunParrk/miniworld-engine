@@ -160,9 +160,12 @@ Start with [docs/architecture.md](docs/architecture.md) for how a module call re
 
 ## License
 
-MIT (copyright 2026 Sanggeun Park) for the engine. Third-party code and its licenses (Anthropic's release under Apache-2.0, CUTLASS,
-FlashAttention) are listed in [licenses/THIRD_PARTY_NOTICES.md](licenses/THIRD_PARTY_NOTICES.md); the texts are in `LICENSE` and
-`licenses/`.
+`MIT AND Apache-2.0 AND BSD-3-Clause`. MiniWorld Engine's own code is MIT (copyright 2026 Sanggeun Park, `LICENSE`); the code derived
+from Anthropic's uplifting-biomolecular-modeling release, and any file whose header says `SPDX-License-Identifier: Apache-2.0`, is
+Apache-2.0 (with Anthropic's `NOTICE`), and the FlashAttention-3 portions and the
+CUTLASS-instantiated object code in the prebuilt kernels are BSD-3-Clause. Details, per-file attributions and the licence texts are in
+[`licenses/THIRD_PARTY_NOTICES.md`](licenses/THIRD_PARTY_NOTICES.md). The external release used by the `anthropic` backends is cloned
+locally under `third_party/anthropic/upstream/` (git-ignored, not redistributed).
 
 ## Citation
 

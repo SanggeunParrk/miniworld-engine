@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Modified by MiniWorld Engine from Anthropic's uplifting-biomolecular-modeling@f4f62fa6, common/opt_core/opt_core/kernels/trimul/native/pkg/v5/python/trimul_native/manifest.py (Apache-2.0; see licenses/THIRD_PARTY_NOTICES.md).
 """trimul_native.manifest -- the build record of the arch-keyed cubins (``build/manifest.json``) and its verification.
 
 Schema (one JSON object; ``units`` keyed "<unit>/<arch>")::

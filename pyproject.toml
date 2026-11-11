@@ -6,6 +6,7 @@ readme = "README.md"
 description = "H100 + A100 CUDA / Triton kernels for AlphaFold3-style modules, with a PyTorch reference backend per module, accuracy and speed measurers, and a version-based judge."
 license = "MIT AND Apache-2.0 AND BSD-3-Clause"
 license-files = ["LICENSE", "licenses/THIRD_PARTY_NOTICES.md", "licenses/Anthropic-Apache-2.0.txt", "licenses/Anthropic-NOTICE",
+                 "licenses/anthropic-trimul-native-v5-UPSTREAM.json",
                  "licenses/CUTLASS-LICENSE.txt", "licenses/FlashAttention-LICENSE.txt"]
 # The runtime: what `miniworld_engine.modules` and `miniworld_engine.kernels` import. Measurement (measure/, judge/) adds pyyaml only.
 dependencies = [
