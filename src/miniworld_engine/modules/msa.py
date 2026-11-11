@@ -174,7 +174,7 @@ class OuterProductMean(BackendModule, MasterWeights):
     #:       (S % 256, N % 64, d_msa 64 / 128, d_pair 128 / 256 / 384), else ``composed.inference``
     #:   groups (Chai-1, 8 x 8)  ``kernels.outer_product_mean.chai`` (fused CUDA passes, forward + backward; d_msa 64, N % 64)
     #: ``"triton"``: ``kernels.outer_product_mean.triton.main.triton_outer_product_mean`` (forward + backward, bf16 activations; d_msa /
-    #: d_hidden powers of two >= 16, d_pair % 32; divides by the clamped count only: no ``count_offset``; no ``mask_interchain``).
+    #: d_hidden powers of two >= 16, d_pair % 32; the pair divisor clamp(n, 1) or, with ``count_offset``, n + count_offset; no ``mask_interchain``).
     #: ``"anthropic"`` (inference only; the residual and the interchain mask are the module's): the model kit's own OPM kernel by the
     #: module's form (the module is model-agnostic: the kit of the models its rows serve):
     #:   normalize_before_proj, groups 1, d_pair 128 (Boltz-2, MiniWorld; RoseTTAFold3's biased projections in the same form)  the boltz2
@@ -483,8 +483,6 @@ class OuterProductMean(BackendModule, MasterWeights):
         why = self._common_refusal(msa, mask, residual)
         if why is not None:
             return why
-        if self.count_offset is not None:
-            return "count_offset: the Triton kernel divides by the clamped pair count only"
         from miniworld_engine.kernels.outer_product_mean.triton.main import refusal
 
         return refusal(
@@ -523,6 +521,7 @@ class OuterProductMean(BackendModule, MasterWeights):
             normalize_before_proj=self.normalize_before_proj,
             b_left=self.to_left.bias,
             b_right=self.to_right.bias,
+            count_offset=self.count_offset,
             **options,
         )
 

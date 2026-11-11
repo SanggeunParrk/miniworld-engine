@@ -29,7 +29,7 @@ void check_pipeline_input(Tensor m,Tensor mask,std::vector<Tensor> leaves){
   TORCH_CHECK(leaves.size()==6&&leaves[4].sizes()==at::IntArrayRef({128,1024}),"pipeline d_pair128");
   TORCH_CHECK(mask.numel()==0||(mask.is_cuda()&&mask.device()==m.device()&&mask.scalar_type()==at::kByte&&mask.is_contiguous()&&mask.sizes()==at::IntArrayRef({m.size(0),m.size(1)})),"mask byte [S,L] or empty");
 }
-std::vector<Tensor> forward_pipeline(Tensor m,Tensor mask,Tensor residual,std::vector<Tensor> leaves,double eps,bool norm_first,bool training,bool save_o,int64_t pl_variant,int64_t epi_variant){
+std::vector<Tensor> forward_pipeline(Tensor m,Tensor mask,Tensor residual,std::vector<Tensor> leaves,double eps,bool norm_first,bool training,bool save_o,int64_t pl_variant,int64_t epi_variant,double norm_min,double norm_add){
   check_pipeline_input(m,mask,leaves);at::cuda::CUDAGuard guard(m.device());at::NoGradGuard no_grad;
   auto p=kernel_leaves(leaves);const int64_t S=m.size(0),L=m.size(1);auto f32=m.options().dtype(at::kFloat);
   auto a=torch::empty({S,L*32},m.options()),b=torch::empty({S,L*32},m.options());
@@ -38,20 +38,20 @@ std::vector<Tensor> forward_pipeline(Tensor m,Tensor mask,Tensor residual,std::v
   auto o=opm_lt::mm(a,b,true,false);Tensor z,norm;
   if(mask.numel()){
     const int cfg=(S<=1024||L==768)?2:1;
-    auto pair=pipeline_mask_result(o,mask,p[4],p[5],residual,norm_first,training,cfg);z=pair[0];norm=pair[1];
+    auto pair=pipeline_mask_result(o,mask,p[4],p[5],residual,norm_first,training,cfg,norm_min,norm_add);z=pair[0];norm=pair[1];
   }else{
     norm=torch::empty({0},f32);z=torch::empty({L,L,128},m.options());
-    epilogue(o,norm,double(S),p[4],p[5],residual,z,norm_first,epi_variant);
+    epilogue(o,norm,double(S),p[4],p[5],residual,z,norm_first,epi_variant,norm_min,norm_add);
   }
   return {z,a,b,stats,training&&save_o?o:torch::empty({0},m.options()),norm};
 }
-std::vector<Tensor> backward_pipeline(Tensor m,Tensor mask,std::vector<Tensor> leaves,Tensor a,Tensor b,Tensor stats,Tensor saved_o,Tensor norm,Tensor dz,bool norm_first,int64_t dg_variant,int64_t pb_variant){
+std::vector<Tensor> backward_pipeline(Tensor m,Tensor mask,std::vector<Tensor> leaves,Tensor a,Tensor b,Tensor stats,Tensor saved_o,Tensor norm,Tensor dz,bool norm_first,int64_t dg_variant,int64_t pb_variant,double norm_min,double norm_add){
   check_pipeline_input(m,mask,leaves);at::cuda::CUDAGuard guard(m.device());at::NoGradGuard no_grad;
   auto p=kernel_leaves(leaves);const int64_t S=m.size(0),L=m.size(1),CM=64,CZ=128;auto f32=m.options().dtype(at::kFloat);
   auto dO=torch::empty({L*32,L*32},m.options()),dzn=torch::empty({L,L,CZ},m.options());
   const int64_t parts_rows=((L+31)/32)*((L+3)/4);
   auto dbo_parts=torch::empty({parts_rows,CZ},f32),dbo=torch::empty({CZ},f32);
-  dgrad(dz,norm,norm.numel()?1.0:double(S),p[4],dO,dzn,dbo_parts,norm_first,dg_variant);
+  dgrad(dz,norm,norm.numel()?1.0:double(S),p[4],dO,dzn,dbo_parts,norm_first,dg_variant,norm_min,norm_add);
   reduce_rows(dbo_parts,dbo);
   auto da=torch::empty({S,L*32},m.options()),db=torch::empty_like(da);
   TORCH_CHECK(S==1024 && L==128,"E055 validated candidate S1024L128 only");

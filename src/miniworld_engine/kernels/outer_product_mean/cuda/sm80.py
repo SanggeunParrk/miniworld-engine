@@ -116,8 +116,11 @@ def epilogue(
     residual: torch.Tensor | None,
     norm_first: bool,
     variant: int | None = None,
+    dmin: float = 1.0,
+    doff: float = 0.0,
 ) -> torch.Tensor:
-    """O [32 L, 32 L] bf16, norm fp32 [L, L] (None: the constant ``norm_const``), wo bf16 [CZ, 1024], bias fp32 [CZ], residual bf16 [L, L, CZ] (or None) -> [L, L, CZ] bf16."""
+    """O [32 L, 32 L] bf16, norm fp32 [L, L] (None: the constant ``norm_const``), wo bf16 [CZ, 1024], bias fp32 [CZ], residual bf16 [L, L, CZ] (or None) -> [L, L, CZ] bf16.
+    The pair divisor is ``max(n, dmin) + doff`` (``opm_train.divisor_params``)."""
     length = o.shape[0] // CH
     out = o.new_empty((length, length, wo.shape[0]))
     if variant is None:
@@ -132,6 +135,8 @@ def epilogue(
         out,
         int(norm_first),
         variant,
+        float(dmin),
+        float(doff),
     )
     return out
 
@@ -143,8 +148,10 @@ def dgrad(
     wo: torch.Tensor,
     norm_first: bool,
     variant: int | None = None,
+    dmin: float = 1.0,
+    doff: float = 0.0,
 ):
-    """dz [L, L, CZ] bf16 -> (dO [32 L, 32 L] bf16, dzn [L, L, CZ] bf16, dbo fp32 [CZ])."""
+    """dz [L, L, CZ] bf16 -> (dO [32 L, 32 L] bf16, dzn [L, L, CZ] bf16, dbo fp32 [CZ]); the pair divisor ``max(n, dmin) + doff``."""
     length, _, cz = dz.shape
     dO = dz.new_empty((length * CH, length * CH))
     dzn = torch.empty_like(dz)
@@ -164,6 +171,8 @@ def dgrad(
         parts,
         int(norm_first),
         variant,
+        float(dmin),
+        float(doff),
     )
     return dO, dzn, reduce_rows(parts, torch.float32)
 
