@@ -130,6 +130,25 @@ rows (graph timing, L2 flushed; L 768, ms):
 
 `PairformerBlock(parallel=True)` keeps its own statements for its parallel schedule.
 
+## FoldForge 5I28 sizes (1024-2048 tokens, 12-16 k atoms)
+
+FoldForge's 5I28 benchmark folds n copies of a 128-residue chain (n = 1 .. 16) with an MSA (depth 1024 after the crop) and 4 templates,
+so its trunk runs at 1024 / 1536 / 2048 tokens (n = 8 / 12 / 16) and its atom stacks at about 11.7 k / 15.6 k atoms. The token / pair rows
+of every class the nine 5I28 models build carry 1024 | 1536 | 2048, their atom rows 12288 | 16384 (source "FoldForge 5I28"; the
+`MSAPairWeightedAveraging` rows are extended on their own branch). Every `cuda` / `triton` backend serves them at inference on both cards
+(probed at the rows' eval samples and at 4 samples for the 64-wide template stack). Notes:
+
+- **A100 `Transition`**: the one-kernel kernels hold a per-CTA work list of 253 tiles per SM (`fused_fwd_sm80.max_rows`: 6 994 944 bf16
+  rows on 108 SMs) and the wide chain a row grid of 65 535 x 128 rows; past that an inference call runs as one call per contiguous row
+  block (`kernels.transition.cuda.transition_sm80`; 4 x 2048^2 template rows, 5 x 1536^2 confidence-block rows), a training call is
+  refused with its reason (it raised `fwd: too many work items per CTA` / `invalid configuration argument` before).
+- **A100 triangle attention, training**: refused with a reason by the sm_80 kernels' training bias-gradient budget at L 1536 (OpenDDE
+  d_pair 384) and L 2048 (d_pair 256 / 384, Chai-1 d_pair 256, RoseTTAFold3 d_pair 64 with d_hidden 256); inference is served at every
+  5I28 length.
+- **Accuracy at these lengths**: the float64 gold of a triangle attention does not fit past ~1024 tokens (N^3 x heads x 8 B), so the
+  measurer skips those cases by design; checked against a float32 gold instead at 1024 (every width: cuda / triton within the pytorch
+  backend's error), not a judge measurement.
+
 ## Dead residual modules (the `dead` flag; the loader is not part of the engine)
 
 `Transition`, `AttentionPairBias`, `TriangleAttention`, `TriangleMultiplication`, `OuterProductMean` and `MSAPairWeightedAveraging` keep a
