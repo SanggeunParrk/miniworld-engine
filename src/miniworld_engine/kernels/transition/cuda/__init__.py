@@ -41,7 +41,8 @@ def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps):
 
     rows = x.numel() // x.shape[-1] if x.dim() else 0
     limit = fused_fwd_sm80.max_rows(x.device, x.dtype)
-    if rows > limit and not (torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, ln_weight, ln_bias, wa, wb, ws))):
+    grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, ln_weight, ln_bias, wa, wb, ws))
+    if rows > limit and not grad:
         # inference past one call's rows (the kernels' work lists / row grid): one call per contiguous row block (rows are independent), joined.
         # Training past it is refused by modules.Transition (the backward would need the same split of its weight-gradient sums).
         flat = x.reshape(-1, x.shape[-1]).contiguous()
