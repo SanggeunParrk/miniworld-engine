@@ -26,6 +26,7 @@ or the kernel has a performance bug. A violation is never resolved by dropping a
 |---|---|
 | `LayerNorm`, `RMSNorm` | user decision (2026-11-10): a single normalisation is memory-bound and runs at a few microseconds, where the rungs differ by launch and scheduling effects rather than by kernel quality; they are measured and reported, not held to the ladder. |
 | small L | user decision (2026-11-10): a miss that occurs only at L <= 256 (the shortest lengths, where a step is tens of microseconds and launch / scheduling effects dominate) is accepted; every miss at L >= 384 must be fixed. |
+| `ParallelResidual` (`cuda` vs `triton`) | user decision (2026-11-11): one elementwise pass at the HBM bandwidth wall (triton ~3.1 TB/s of 3.35 on H100); the hand-CUDA backend exists for the H100-in-CUDA rule and may be slower than `triton` (eval, L >= 384: 1-5 %). It must still beat `pytorch`; train (its backward kernel) is faster than `triton`. |
 
 Classes with only a `pytorch` backend have no ladder; `BidirectionalTriangleAttention` has `cuda` and `pytorch` only (cuda < pytorch).
 

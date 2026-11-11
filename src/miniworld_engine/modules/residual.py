@@ -12,7 +12,9 @@ the sum in at least fp32 (``wide``) and one rounding to ``x``'s dtype; ``"triton
 1 to 4 branches; its backward is torch statements. ``"cuda"`` is the same arithmetic in a hand-written kernel
 (``kernels/parallel_residual/cuda``: one source, the H100 sm_90a and A100 sm_80 builds; 16-byte vector accesses, several vectors in
 flight per thread, streaming cache hints) over the same range, with its backward's ``(1 - n) g`` in one small kernel too. The backward
-is ``d out / d y_i = g`` (no kernel), ``d out / d x = (1 - n) g`` (fp32 product, one rounding).
+is ``d out / d y_i = g`` (no kernel), ``d out / d x = (1 - n) g`` (fp32 product, one rounding). Ladder exception (user decision
+2026-11-11, docs/ladder.md): at the bandwidth wall ``"cuda"`` may be slower than ``"triton"`` in eval (1-5 % at L >= 384); it beats
+``"pytorch"`` everywhere and ``"triton"`` in training.
 
 ``PairformerBlock(parallel=True)`` keeps its own statements for its parallel schedule (its records are unchanged); a caller composing a
 parallel stage from engine parts uses this op.
