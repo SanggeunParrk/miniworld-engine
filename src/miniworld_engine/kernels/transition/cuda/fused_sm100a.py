@@ -146,7 +146,7 @@ def kernel_toolchain() -> tuple[str, tuple[int, int], tuple[str, ...]]:
             and _knows_sm100(c)
         ):
             rel = _release(c)
-            # a cubin from a newer major toolkit than the driver supports does not load (cssb's 575 driver stops at CUDA 12.9)
+            # a cubin from a newer major toolkit than the driver supports does not load (a 575 driver stops at CUDA 12.9)
             if rel and (driver_major is None or rel[0] <= driver_major):
                 found[os.path.realpath(c)] = rel
     for nvcc, rel in sorted(found.items(), key=lambda kv: kv[1], reverse=True):

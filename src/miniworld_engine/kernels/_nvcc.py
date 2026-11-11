@@ -276,6 +276,10 @@ def _mathdx_candidates() -> list[Path]:
         pass
     else:
         roots += [Path(p) / "mathdx" for p in getattr(nvidia, "__path__", [])]
+    # The header cache (kernels/_headers.py: the pinned nvidia-mathdx wheel, unpacked on first need).
+    from miniworld_engine.kernels import _headers
+
+    roots.append(_headers.MATHDX.cache_dir())
     # A conda/pixi package installs the headers into the environment prefix directly.
     roots.append(Path(sys.prefix))
     return roots
@@ -295,13 +299,19 @@ def mathdx_includes() -> list[str]:
     Raises rather than returning empty: an empty list would hand nvcc a missing-header error
     naming a file the user has never heard of, which is how this was diagnosed the slow way.
     """
+    from miniworld_engine.kernels import _headers
+
     root = mathdx_home()
+    if root is None:
+        with contextlib.suppress(_headers.HeadersUnavailable):
+            root = _headers.fetch(_headers.MATHDX)
     if root is None:
         tried = ", ".join(MATHDX_ENV_VARS)
         raise RuntimeError(
             "cuBLASDx headers not found, so the CUDA transition extensions cannot build. "
             f"Set one of {tried} to a mathdx root -- the directory containing "
-            f"`{_MATHDX_SENTINEL.as_posix()}` -- or `pip install nvidia-mathdx`. "
+            f"`{_MATHDX_SENTINEL.as_posix()}` -- or `pip install --no-deps nvidia-mathdx==25.6.0`, or run "
+            "`python -m miniworld_engine.kernels._headers fetch mathdx` where the network is reachable. "
             f"Looked in: {', '.join(str(c) for c in _mathdx_candidates())}")
     includes = [root / "include", root / "external" / "cutlass" / "include"]
     return [f"-I{p}" for p in includes if p.is_dir()]
@@ -309,8 +319,9 @@ def mathdx_includes() -> list[str]:
 
 # ---------------------------------------------------------------------------------------------
 # CUTLASS / CuTe headers. Only a BUILD needs them: an artifact found prebuilt or cached loads without, so a call site
-# takes the include directory from here (a stand-in path when CUTLASS_PATH is unset or incomplete, keyed as the pinned
-# CUTLASS release) and the requirement is checked when a build is about to run (CutlassMissing).
+# takes the include directory from here (CUTLASS_PATH, else the pinned release installed or in the header cache -- see
+# kernels/_headers.py --, else a stand-in path keyed as the pinned release); a build that meets the stand-in fetches the pinned
+# headers into the header cache then, and raises CutlassMissing only when that is impossible.
 # ---------------------------------------------------------------------------------------------
 
 #: Stand-in for an absent CUTLASS checkout: never exists, classified as CUTLASS (``_codegraph.CUTLASS_PINNED``).
@@ -322,10 +333,15 @@ class CutlassMissing(RuntimeError):
 
 
 def cutlass_include() -> Path:
-    """``$CUTLASS_PATH/include`` when it holds the CuTe headers, else :data:`CUTLASS_STANDIN`."""
+    """``$CUTLASS_PATH/include`` when it holds the CuTe headers, else the pinned CUTLASS when it is on this machine
+    (``_headers.local``: never downloads), else :data:`CUTLASS_STANDIN`."""
+    from miniworld_engine.kernels import _headers
+
     root = os.environ.get("CUTLASS_PATH", "")
     inc = Path(root) / "include"
-    return inc if root and (inc / "cute" / "tensor.hpp").is_file() else CUTLASS_STANDIN
+    if root and (inc / "cute" / "tensor.hpp").is_file():
+        return inc
+    return _headers.local(_headers.CUTLASS) or CUTLASS_STANDIN
 
 
 
@@ -831,6 +847,26 @@ def _load(kind_label: str, name: str, kwargs: dict, sources: list[str] | None = 
     return ext
 
 
+def _real_cutlass(name: str, kwargs: dict) -> dict:
+    """``kwargs`` with :data:`CUTLASS_STANDIN` replaced by the pinned CUTLASS headers, fetched into the header cache if need be
+    (the key stays: both are keyed ``cutlass@<pinned>``); CutlassMissing when they cannot be had."""
+    from miniworld_engine.kernels import _codegraph as cg
+    from miniworld_engine.kernels import _headers
+
+    incs = [str(p) for p in kwargs.get("extra_include_paths") or []]
+    if str(CUTLASS_STANDIN) not in [os.path.abspath(p) for p in incs]:
+        return kwargs
+    try:
+        real = str(_headers.fetch(_headers.CUTLASS))
+    except _headers.HeadersUnavailable as e:
+        raise CutlassMissing(
+            f"{name} compiles CUTLASS {cg.CUTLASS_PINNED} / CuTe headers and is not prebuilt, and the pinned headers could not be "
+            f"fetched ({e}). Set CUTLASS_PATH to a CUTLASS v{cg.CUTLASS_PINNED} checkout, `pip install --no-deps "
+            f"nvidia-cutlass=={_headers.CUTLASS.version}`, or run `python -m miniworld_engine.kernels._headers fetch cutlass` "
+            "where the network is reachable (see docs/install.md)") from e
+    return {**kwargs, "extra_include_paths": [real if os.path.abspath(p) == str(CUTLASS_STANDIN) else p for p in incs]}
+
+
 def _build_ext(kind_label: str, name: str, kwargs: dict, sources: list[str] | None, inline: bool, key: str,
                material: dict, graph: Any) -> Path:
     """Build the extension into a private temporary directory and rename it to its key's directory; returns that directory.
@@ -839,9 +875,7 @@ def _build_ext(kind_label: str, name: str, kwargs: dict, sources: list[str] | No
 
     from miniworld_engine.kernels import _codegraph as cg
 
-    if str(CUTLASS_STANDIN) in [os.path.abspath(p) for p in kwargs.get("extra_include_paths") or []]:
-        raise CutlassMissing(f"{name} compiles CUTLASS {cg.CUTLASS_PINNED} / CuTe headers and is not prebuilt: set "
-                             f"CUTLASS_PATH to a CUTLASS {cg.CUTLASS_PINNED} checkout to build it")
+    kwargs = _real_cutlass(name, kwargs)
     final = engine_jit_root() / _ext_rel(name, key)
     final.parent.mkdir(parents=True, exist_ok=True)
     with final.with_name(f".{final.name}.lock").open("w") as lock:
