@@ -249,6 +249,9 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         return False
     if single.ndim != 4 or single.shape[2] < 8:
         return False
+    # token_inference's pair: [B, L, L, w], one pair per trunk_seed (the 5I28 run of FoldForge: a call the gate claimed raised there)
+    if pair.ndim != 4 or tuple(pair.shape[:3]) != (single.shape[1], single.shape[2], single.shape[2]):
+        return False
     if single.shape[1] != 1 and not (
         # B trunk_seeds, each its own pair (the grouped-bias attention): bf16 on H100 only, a pair per trunk_seed
         single.dtype is torch.bfloat16
