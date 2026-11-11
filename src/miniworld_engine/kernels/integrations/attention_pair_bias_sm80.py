@@ -714,7 +714,7 @@ def _bias_gemm_bwd(z: torch.Tensor, wcm: torch.Tensor, db: torch.Tensor, L: int,
     """(dz [B, L, L, dp], dWf [H, dp] fp32) of the pair bias for the whole batch at once, from db [B, H, L, L] fp32 (zero on the masked
     keys), without materialising LN(z):
       mean, rstd   one statistics pass over the B L L pair rows (read only)
-      dz-hat_b     = db_b^T Wf                                   (one TF32 GEMM batched over B)
+      dz-hat_b     = db_b^T Wf                                   (a TF32 GEMM per row into one [B L L, dp] tensor)
       dz           the LayerNorm backward of all B L L rows at once, written as the batch's gradient (no per-row copy)
       dWf          = sum_b a_b z_b - (a_b mean_b) 1^T, a_b = db_b rstd_b   (LN(z) = (z - mean) rstd; a GEMM per row, summed in row order)"""
     B, dp, heads = z.shape[0], wcm.shape[0], wcm.shape[1]
@@ -724,8 +724,10 @@ def _bias_gemm_bwd(z: torch.Tensor, wcm: torch.Tensor, db: torch.Tensor, L: int,
     rstd = torch.rsqrt(var + eps)
     del var
     d3 = db.reshape(B, heads, n)
-    dzn = torch.bmm(d3.transpose(1, 2), wcm.t().expand(B, heads, dp))  # [B, L L, dp]
-    dz = torch.ops.aten.native_layer_norm_backward(dzn.view(B * n, dp), z2, (dp,), mean, rstd, None, None, [True, False, False])[0]
+    dzn = z2.new_empty((B * n, dp))
+    for b in range(B):  # one GEMM per row into its rows of dz-hat (M = L L each: the same call as a one-row batch's, so B rows == B calls)
+        torch.mm(d3[b].t(), wcm.t(), out=dzn[b * n : (b + 1) * n])
+    dz = torch.ops.aten.native_layer_norm_backward(dzn, z2, (dp,), mean, rstd, None, None, [True, False, False])[0]
     del dzn
     dwf = torch.zeros(heads, dp, device=z.device, dtype=torch.float32)
     for b in range(B):
