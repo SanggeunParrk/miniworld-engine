@@ -63,9 +63,13 @@ def test_backward_under_autocast_equals_backward_outside(backend: str, key_windo
         grads.update({k: p.grad for k, p in m.named_parameters()})
         results.append(grads)
     outside, inside = results
+    # H100: the same kernels in the same order, bitwise. A100 (the sm_80 block): its backward is not bitwise run to run (two backwards
+    # outside autocast ~5e-5 apart on the fp32 weight gradients, the same inside), so there the two agree to that level
+    exact = torch.cuda.get_device_capability() != (8, 0) or backend != "cuda"
+    rtol, atol = (0.0, 0.0) if exact else (1e-3, 2e-4)
     for k, a in outside.items():
         b = inside[k]
         assert (a is None) == (b is None), k
         if a is not None:
             assert torch.isfinite(b).all(), k
-            torch.testing.assert_close(b, a, rtol=0, atol=0, msg=lambda s, k=k: f"{k}: {s}")
+            torch.testing.assert_close(b, a, rtol=rtol, atol=atol, msg=lambda s, k=k: f"{k}: {s}")
