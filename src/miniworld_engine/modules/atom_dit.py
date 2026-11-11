@@ -714,13 +714,53 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     """AlphaFold 3's atom transformer block in the engine layout (registered as ``"af3"``, ``"openfold3"``, ``"openfold3_preview2"``,
     ``"intellifold2"``): the K / V AdaLN of the raw atoms next to the query one (parallel: AF3 ``cross_attention``'s 'q' / 'k' adaptive
     layernorms, OF3 ``CrossAttentionPairBias.layer_norm_a_q`` / ``_k``), the slid 128-key window (AF3 ``features.py``; IntelliFold2's JAX
-    release runs this code). ``key_window="slide_qblock"``: IntelliFold2's torch release; ``"pad"``: the clipped window."""
+    release runs this code). ``key_window="slide_qblock"``: IntelliFold2's torch release; ``"pad"``: the clipped window.
+
+    ``mask_form`` (FoldForge R13): ``"keys"`` (the default, as every atom DiT block) switches every masked key off for every query; ``"af3"``
+    is AlphaFold 3's own form, whose mask term is ``-1e9`` only where BOTH the query and the key are padding, so a real query also reads the
+    padding keys of its window. The two differ only below 128 real atoms: the slid window (``key_window="slide"``, the only window this form
+    is defined for) lies inside the real atoms from 128 on, and below it is ``[0, 128)``, where the real queries read the padding keys too.
+    Served on every backend from two passes of the block, exact row by row (the block's rows are independent given the keys): the real rows
+    from a pass whose key mask also holds the first 128 atoms (the same window, no key of it off), the padding rows from the pass under the
+    caller's mask. The second pass doubles the block's cost, so set ``"af3"`` for the systems under 128 real atoms (at or above 128 the two
+    passes are the same and the forms agree)."""
 
     version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     #: 2026-11-10: H100 "slide" / "slide_qblock": the five edge windows on the edge kernels (dit_variants edge.cu; were torch)
     backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 2}
+    #: ``"keys"`` or ``"af3"`` (see the class docstring)
+    mask_form: str = "keys"
+
+    def __init__(
+        self,
+        d_single: int = 128,
+        d_cond: int = 128,
+        d_pair: int = 16,
+        n_head: int = 4,
+        n: int = 2,
+        *,
+        key_window: str | None = None,
+        mask_form: str = "keys",
+        backend: str = "pytorch",
+    ) -> None:
+        super().__init__(d_single, d_cond, d_pair, n_head, n, key_window=key_window, backend=backend)
+        if mask_form not in ("keys", "af3"):
+            raise ValueError(f"mask_form must be 'keys' or 'af3', got {mask_form!r}")
+        if mask_form == "af3" and self.key_window != "slide":
+            raise ValueError(f"mask_form='af3' is AlphaFold 3's form on its slid window (key_window='slide'), got {self.key_window!r}")
+        self.mask_form = mask_form
+
+    def forward(self, single, cond, pair, mask=None):
+        if self.mask_form == "keys" or mask is None:
+            return super().forward(single, cond, pair, mask)
+        keep = mask.bool()
+        # the first 128 atoms (the window below 128 real atoms) as keys: a prefix still, so the slid window is the same [0, 128)
+        wider = keep | (torch.arange(keep.shape[-1], device=keep.device) < KEYS)
+        real_rows = super().forward(single, cond, pair, wider)
+        padding_rows = super().forward(single, cond, pair, mask)
+        return torch.where(keep[None, ..., None], real_rows, padding_rows)
 
 
 class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
@@ -828,7 +868,12 @@ class AtomDiTChai1(MasterEntryCast, VariantAtomCuda, _LocalAtomDiT):
     projection (``attention.to_out`` is the identity), the parallel schedule, the clipped window (``get_qkv_indices_for_blocks``: the wrapped
     keys are masked; ``key_window="pad"``, the default) and ``forward(..., uid=uid)`` [B, N]: a real query sees only the keys of its own
     conformer (``get_blocked_atom_pair_dists`` ANDs the same-``ref_space_uid`` mask into the block mask in place). No ``"anthropic"`` backend:
-    Chai-1's release keeps its stock atom attention (no kernel)."""
+    Chai-1's release keeps its stock atom attention (no kernel).
+
+    There is no circular window (FoldForge R9): chai_lab 0.6.1 ``get_qkv_indices_for_blocks`` returns ``kv_mask = (kv_indices < N) &
+    (kv_indices >= 0)`` before ``kv_indices % N`` (the ``%`` only indexes) and ``get_block_atom_pair_mask`` ANDs it in, so a wrapped key is never
+    attended: ``"pad"`` + ``uid`` is the release for every system, also one whose conformer covers both ends of the atom list and one under
+    128 atoms (tests/cpu/test_chai1_key_window.py compares the attended keys with a transcription of the release's mask)."""
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
