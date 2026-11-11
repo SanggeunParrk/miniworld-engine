@@ -1,6 +1,6 @@
 """E3 (FoldForge 5I28): ``MSAPairWeightedAveraging``'s cuda backend serves inference past 1024 tokens at the 8 x 8 / 8 x 16 widths (AF3 / OpenFold3 /
-Protenix-v1, Protenix-v2, ESMFold2, OpenDDE) -- H100 ``pwa_wide`` up to 2048, A100 ``pwa_sm80`` up to its pair forward's shared memory -- and matches the
-float64 reference as closely as the ``pytorch`` backend does; training past 1024 and the A100 d_pair 384 at 2048 are refused with a reason."""
+Protenix-v1, Protenix-v2, ESMFold2, OpenDDE) -- H100 ``pwa_wide`` up to 2048, A100 ``pwa_sm80`` up to 2048 (the pair forward's row of
+logits in bf16 past what fp32 holds) -- and matches the float64 reference as closely as the ``pytorch`` backend does; training past 1024 is refused with a reason."""
 
 import copy
 
@@ -34,9 +34,6 @@ def test_long_inference_on_cuda(d_msa: int, d_pair: int, d_hidden: int, length: 
     kern = copy.deepcopy(base).set_backend("cuda")
     with torch.no_grad():
         why = kern.unsupported(**inp)
-    if _card() == (8, 0) and d_pair == 384 and length == 2048:
-        assert why is not None and "inference" in why, why  # past the sm_80 pair forward's shared-memory row of logits (1840)
-        return
     assert why is None, why
     with torch.no_grad():
         gold = copy.deepcopy(base).double()(inp["msa"].double(), inp["pair"].double(), inp["mask"]).double()

@@ -76,8 +76,8 @@ def refusal(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
     longest = sm.max_len(d_pair, training)
     if length % 16 or length > longest or tuple(pair.shape) != (1, length, length, d_pair):
         return (
-            f"L {length}: the sm_80 kernels take L a multiple of 16 up to {longest} at d_pair {d_pair} in {'training' if training else 'inference'} "
-            f"(training {sm.MAX_LEN}; inference: the pair forward's shared-memory row of logits) and a [1, L, L, d_pair] pair"
+            f"L {length}: the sm_80 kernels take L a multiple of 16 up to {longest} in {'training' if training else 'inference'} "
+            f"(training {sm.MAX_LEN}: the pair backward's shared-memory row; inference {sm.MAX_LEN_INFER}) and a [1, L, L, d_pair] pair"
         )
     if mask is not None and (tuple(mask.shape) != (1, length) or mask.dtype != torch.bool):
         return "mask must be a bool [1, L] key mask"

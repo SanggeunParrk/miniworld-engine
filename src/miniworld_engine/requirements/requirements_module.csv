@@ -55,7 +55,7 @@ MSAPairWeightedAveraging,,msa_token,128|256|384|512|640|768,1024,d_msa=256;d_pai
 MSAPairWeightedAveraging,,msa_token,1536|2048,1024,d_msa=64;d_pair=128;n_head=8;d_hidden=8,p_drop=0.25,master,eval,1,,"FoldForge 5I28 E3 af3 openfold3 protenix1 (inference of 1536 / 2048 tokens: the 5I28 benchmark at n = 12 / 16)"
 MSAPairWeightedAveraging,,msa_token,1536|2048,1024,d_msa=128;d_pair=256;n_head=8;d_hidden=8,p_drop=0.25,master,eval,1,,"FoldForge 5I28 E3 protenix2 (inference of 1536 / 2048 tokens)"
 MSAPairWeightedAveraging,,msa_token,1536|2048,1024,d_msa=128;d_pair=256;n_head=8;d_hidden=16,p_drop=0.25,master,eval,1,,"FoldForge 5I28 E3 esmfold2 (inference of 1536 / 2048 tokens)"
-MSAPairWeightedAveraging,,msa_token,1536|2048,1024,d_msa=128;d_pair=384;n_head=8;d_hidden=8,p_drop=0.25,master,eval,1,,"FoldForge 5I28 E3 opendde (inference of 1536 / 2048 tokens; A100: 2048 is past the sm_80 pair forward's shared memory at d_pair 384, refused)"
+MSAPairWeightedAveraging,,msa_token,1536|2048,1024,d_msa=128;d_pair=384;n_head=8;d_hidden=8,p_drop=0.25,master,eval,1,,"FoldForge 5I28 E3 opendde (inference of 1536 / 2048 tokens)"
 OuterProductMean,,msa_token,128|256|384|512|640|768,1024,d_msa=64;d_pair=128;d_hidden=32,normalize_before_proj=False,master,eval|train,1,1,FoldForge af3 boltz2 openfold3 openfold3-preview2 protenix1
 OuterProductMean,,msa_token,128|256|384|512|640|768,1024,d_msa=64;d_pair=128;d_hidden=32,normalize_before_proj=False;projection_bias=True,master,eval|train,1,1,FoldForge rosettafold3
 OuterProductMean,,msa_token,128|256|384|512|640|768,384|512|1024|2048,d_msa=64;d_pair=128;d_hidden=32,normalize_before_proj=True,master,eval|train,1,1,FoldForge boltz2; MiniWorld confidencex4 diffusionx18 distogramx35
