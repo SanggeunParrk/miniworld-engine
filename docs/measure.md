@@ -74,8 +74,8 @@ The call's light is its worst tensor's (largest `err_backend / tol`), named in t
 is informational. If the gold or the reference runs out of memory the case is `skipped` for every backend (it cannot be judged), not
 a failure; any other exception is `error` with the text.
 
-Record fields: the case (`row`, `module`, `model`, `stream`, `kwargs`, `length`, `depth`, `samples`, `dtype`, `mode`, `backend`), `versions`
-(see [judge.md](judge.md)), `meta` (kind, measurer / config / prebuild versions, settings, environment), and the result (`status`,
+Record fields: the case (`row`, `module`, `model`, `stream`, `kwargs`, `length`, `depth`, `samples`, `dtype`, `mode`, `backend`), `gpu` (the
+card key of the device measured on, `h100_sm90` / `a100_sm80`), `versions` (for that card; see [judge.md](judge.md)), `meta` (kind, measurer / config / prebuild versions, settings, environment), and the result (`status`,
 `light`, `err_backend`, `err_pytorch`, `tol`, `tensor`, `fixed`, or `reason`). `ACCURACY_TRACEBACK=1` prints tracebacks.
 
 ## Speed (`measure/speed.py`)
@@ -115,3 +115,5 @@ Policies:
 
 `ACCURACY_VERSION`, `SPEED_VERSION` (the measurer files) and `CONFIG_VERSION` (`config.py`: what a case means, how modules and inputs
 are built) are human-managed: bump one when a change can alter a record, not for a refactor. They are recorded in every record's `meta`.
+2026-11-11: `ACCURACY_VERSION` 3, `SPEED_VERSION` 3, `CONFIG_VERSION` 1 (v2 and v3 of the measurers: TF32 allowed for the Triton rung,
+then for every backend).

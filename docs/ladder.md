@@ -4,12 +4,13 @@ For every requirement case that more than one engine backend serves, the engine'
 
     cuda  <  triton  <  pytorch          (median time of the same case, lower is faster)
 
-`cuda` is the hand-written path for the card (H100: sm90), `triton` is the portable rung, `pytorch` is the reference. A rung that
+`cuda` is the hand-written path for the card (H100: sm_90a, A100: sm_80), `triton` is the portable rung, `pytorch` is the reference. A rung that
 is slower than the rung below it on some case is a ladder violation: either the faster-looking rung is mis-routed for that case
 or the kernel has a performance bug. A violation is never resolved by dropping a rung or a case from the requirements.
 
 ## How it is checked
 
+- Per card: the check runs on one card's tokens; the cards are not compared with each other.
 - Data: the speed tokens of the card (`src/miniworld_engine/judge/tokens/<gpu>/*.jsonl`, `kind: speed`, `timing: graph`,
   `status: ok`), i.e. the measurer's CUDA-graph timing with the L2 cache flushed before every call (docs/measure.md).
 - Pairs: for one case (`case_key` without the backend), compare the medians of `cuda` vs `triton`, `triton` vs `pytorch` and
@@ -30,7 +31,10 @@ Classes with only a `pytorch` backend have no ladder; `BidirectionalTriangleAtte
 
 ## Status
 
-The status is recomputed from the tokens after every measurement cycle (only the cases the requirements ask for). H100, tokens at main
-5383def09 (2026-11-10): no violation outside the exceptions above (the remaining misses: APB / OuterProductMean / PairEmbedCA cuda vs
-triton at L <= 256, at most 3.7 %). The same check against the external baselines (cuda vs `anthropic` / `cueq`, not a ladder rule but
-the engine's target): only LayerNorm misses (exception).
+The status is recomputed from the tokens after every measurement cycle (only the cases the requirements ask for: 2992 speed cases per
+card with graph timings). Tokens at b1ffb4a16 (2026-11-11), both cards with 0 owed cases:
+
+| card | ladder | cuda vs the external baselines (target, not a ladder rule) |
+|---|---|---|
+| H100 | no violation outside the exceptions; the small-L misses are cuda vs triton of AttentionPairBias (1 case), OuterProductMean (3), PairEmbedCA (2), at most 3.7 % | only LayerNorm misses (exception): 8 cases vs `anthropic` |
+| A100 | no violation outside the exceptions; the small-L misses are cuda vs triton of OuterProductMean (1 case) and PairEmbedCA (3), at most 6.1 % | LayerNorm misses (exception): 30 cases vs `anthropic`, 8 vs `cueq`; one Transition case at L <= 256 vs `anthropic` (17.5 %) |
