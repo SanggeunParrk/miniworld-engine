@@ -136,7 +136,7 @@ class TokenPairInit(BackendModule):
                            and all(t.dtype in (torch.int32, torch.int64) and t.is_contiguous() for t in id5)):
             from miniworld_engine.kernels.token_pair_init.cuda.function import token_pair_init_prep
 
-            ids, tbl = token_pair_init_prep(*id5, self.w_rel, self.w_bond)
+            ids, tbl = token_pair_init_prep(*id5, self.w_rel, self.w_bond)  # pyright: ignore[reportCallIssue]  -- a torch.library custom op (CustomOpDef is callable)
             return ids, tbl
         ids = torch.stack([asym_id, residue_idx, token_idx, entity_id, sym_id]).to(torch.int32).reshape(5, b * length)
         return ids, torch.cat([self.w_rel.t(), self.w_bond.t()], 0).contiguous()

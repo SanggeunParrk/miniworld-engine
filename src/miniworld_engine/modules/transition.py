@@ -4,7 +4,7 @@ AdaLN + SwiGLU + sigmoid conditioning gate + residual) and Boltz-2's ``UpGatedCo
 Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forward_pytorch`` is the reference.
 """
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -111,7 +111,7 @@ class Transition(BackendModule, MasterWeights):
             return "pair"
         return "single" if x.dim() == 3 else "rows"
 
-    def _anthropic_select(self, x: torch.Tensor):
+    def _anthropic_select(self, x: torch.Tensor) -> tuple[Any, tuple[Any, str | None]]:
         from miniworld_engine.modules import _anthropic
 
         prov = _anthropic.load("opt_core.kernels.transition")

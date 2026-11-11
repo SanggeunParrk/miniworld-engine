@@ -4,7 +4,7 @@
 Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forward_pytorch`` is the reference.
 """
 
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -258,7 +258,7 @@ class OuterProductMean(BackendModule, MasterWeights):
             if not interchain and residual is not None:
                 return pair
         if interchain:
-            pair = pair * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(pair.dtype)
+            pair = pair * (cast(torch.Tensor, token_asym_id)[:, :, None] == cast(torch.Tensor, token_asym_id)[:, None, :])[..., None].to(pair.dtype)
         return residual + pair if residual is not None else pair
 
     def _anthropic_boltz2(self, msa, mask):
@@ -676,7 +676,7 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
             return self._anthropic_ef2_t13(msa, pair, mask)
         if route == "pwa2":
             return self._anthropic_pwa2(msa, pair, pair_mask)
-        ns = self._anthropic_ns(route)
+        ns = self._anthropic_ns(cast(str, route))   # a supported call has a route
         with master_autocast(msa, self):
             if route == "boltz2":
                 kit = _anthropic.load("fpf_msa.boltz2", path="boltz2/opt/forward")

@@ -28,7 +28,7 @@ BidirectionalTriangleMultiplication    MiniWorld: outgoing + incoming in one blo
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar, cast
 
 import torch
 import torch.nn.functional as F
@@ -242,14 +242,14 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     #: (``cells/pairfused.tri_att_start_end``; v0.5 / ob0 with ``bias_frame="z"``) install on their models' triangle attention.
     _anthropic_block: bool = False
 
-    def _anthropic_select(self, pair: torch.Tensor):
+    def _anthropic_select(self, pair: torch.Tensor) -> tuple[Any, tuple[Any, str | None]]:
         from miniworld_engine.modules import _anthropic
 
         prov = _anthropic.load("opt_core.kernels.triattn")
         return prov, _anthropic.kernel_selection(prov, "{}.{}".format(*torch.cuda.get_device_capability(pair.device)), {torch.bfloat16: "bf16", torch.float32: "fp32"}[pair.dtype], self._head_dim(), self.n_head, int(pair.shape[1]), "fwd", word="fast",
                                                  form="keypad")
 
-    def _anthropic_block_call(self, pair: torch.Tensor, mask: torch.Tensor | None):
+    def _anthropic_block_call(self, pair: torch.Tensor, mask: torch.Tensor | None) -> tuple[Any, Any, Any, str | None]:
         """``(PF, W, kwargs, None)`` for ``pair_fused.tri_attn_block`` on this call, or ``(None, None, None, reason)``."""
         from miniworld_engine.modules import _anthropic
 
@@ -1208,7 +1208,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
 
         return _per_sample(self, pair, mask, dropout_p, one)
 
-    def _anthropic_select(self, pair: torch.Tensor):
+    def _anthropic_select(self, pair: torch.Tensor) -> tuple[Any, tuple[Any, str | None]]:
         from miniworld_engine.modules import _anthropic
 
         prov = _anthropic.load("opt_core.kernels.trimul")
@@ -1324,11 +1324,11 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     _library_refusal = TriangleMultiplication._library_refusal
     _pair_mask = TriangleMultiplication._pair_mask
 
-    def _anthropic_select(self, pair: torch.Tensor):
-        return TriangleMultiplication._anthropic_select(self, pair[:1])   # one sample per call
+    def _anthropic_select(self, pair: torch.Tensor) -> tuple[Any, tuple[Any, str | None]]:
+        return TriangleMultiplication._anthropic_select(cast(TriangleMultiplication, self), pair[:1])   # one sample per call
 
     def _supports_anthropic(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
-        return TriangleMultiplication._supports_anthropic(self, pair, mask, dropout_p)
+        return TriangleMultiplication._supports_anthropic(cast(TriangleMultiplication, self), pair, mask, dropout_p)
 
     def _forward_anthropic(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> torch.Tensor:
         if self.dead:   # inference only: a dead instance returns the residual input (as the reference does)

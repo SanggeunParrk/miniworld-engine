@@ -11,7 +11,7 @@ The output is bf16 (what the attention-bias projection consumes) for fp32 / bf16
 """
 
 import math
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -103,7 +103,8 @@ class PairEmbedAdaLN(BackendModule):
                  sc_range: tuple[float, float] = (0.1, 3.0), eps1: float = 1e-5, eps2: float = 1e-5, backend: str = "pytorch") -> None:
         super().__init__()
         self.n_sep, self.n_xt, self.n_sc = n_sep, n_xt, n_sc
-        self.xt_range, self.sc_range, self.eps1, self.eps2 = tuple(xt_range), tuple(sc_range), eps1, eps2
+        self.xt_range, self.sc_range = cast("tuple[float, float]", tuple(xt_range)), cast("tuple[float, float]", tuple(sc_range))
+        self.eps1, self.eps2 = eps1, eps2
         rows = n_sep + n_xt + n_sc
         self.weight = nn.Parameter(torch.randn(D_PAIR, rows) / math.sqrt(rows))
         self.ln_weight = nn.Parameter(torch.ones(D_PAIR))

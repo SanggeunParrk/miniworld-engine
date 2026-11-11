@@ -167,7 +167,7 @@ def choose_sites() -> set[str]:
 
 # --------------------------------------------------------------------------------------------------------------- entry point
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m miniworld_engine.kernels._prebuild_cuda", description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="python -m miniworld_engine.kernels._prebuild_cuda", description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--arch", default="sm90a", help="target arch (default sm90a = H100)")
     ap.add_argument("--jobs", type=int, default=0, help=f"parallel builds (default: min(CPUs, memory / {_prebuild.PEAK_GB} GB))")
     ap.add_argument("--match", default=None, help="keep only artifacts whose name matches this regular expression")

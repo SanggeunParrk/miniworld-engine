@@ -539,7 +539,7 @@ def _requirements(specs: list[_nvcc.Spec]) -> int:
 
 # --------------------------------------------------------------------------------------------------- entry point
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m miniworld_engine.kernels._prebuild", description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="python -m miniworld_engine.kernels._prebuild", description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--arch", default="sm90a", help="target arch (default sm90a = H100)")
     ap.add_argument("--jobs", type=int, default=0, help=f"parallel builds (default: min(CPUs, memory / {PEAK_GB} GB))")
     ap.add_argument("--only", nargs="*", default=(), help="families to plan (default: all)")

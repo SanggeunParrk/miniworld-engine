@@ -23,6 +23,7 @@ import functools
 import json
 import math
 import re
+import typing
 import warnings
 from pathlib import Path
 
@@ -88,7 +89,7 @@ def _cfg(c: dict) -> triton.Config:
 
 def _bench(fn) -> float:
     from triton.testing import do_bench
-    return do_bench(fn, return_mode="median")
+    return typing.cast(float, do_bench(fn, return_mode="median"))   # one value for return_mode="median"
 
 
 def _best(exact, cands, time_one, after=None):

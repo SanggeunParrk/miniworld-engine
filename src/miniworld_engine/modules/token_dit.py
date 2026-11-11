@@ -30,7 +30,7 @@ Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forwar
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar, cast
 
 import torch
 import torch.nn.functional as F
@@ -379,7 +379,7 @@ class TokenDiTProtenix(BackendModule):
         backend: str = "pytorch",
     ) -> None:
         super().__init__()
-        qk = {"use_qk_norm": True} if self.qk_norm else {}
+        qk: dict[str, Any] = {"use_qk_norm": True} if self.qk_norm else {}
         self.attention = self.attention_part(d_single=d_single, d_cond=d_cond, d_pair=d_pair, n_head=n_head, **qk)
         self.transition = self.transition_part(d_hidden=d_single, d_cond=d_cond, n=n)
         self.set_backend(backend)
@@ -399,7 +399,7 @@ class TokenDiTProtenix(BackendModule):
         ``mask`` is a key mask, ``[B, L]`` or ``[A, B, L]``. ``extra_pair_bias`` ``[L, L]`` is added to every head's attention logits, on
         top of the pair's own bias (``AugmentedAttentionPairBias``'s ``extra_pair_bias``). ``compute_dtype``: the precision of the attention
         core."""
-        kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
+        kw: dict[str, Any] = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
         if extra_pair_bias is not None:
             kw["extra_pair_bias"] = extra_pair_bias
         if self.parallel:
@@ -431,7 +431,7 @@ class TokenDiTProtenix(BackendModule):
     # pair per trunk_seed, the key mask expanded over B), 16 heads x 48, cond 384 or 768, pair 128 / 256 / 512 (the fused blocks' row
     # kernels and weight packs are built per cond / pair width), transition n = 2, LayerNorm eps 1e-5,
     # a key mask shared by the samples; inference L a multiple of 128, training any L (padded to 128).
-    def _cuda_route(self, single, cond, pair, mask, compute_dtype, extra_pair_bias):
+    def _cuda_route(self, single, cond, pair, mask, compute_dtype, extra_pair_bias) -> tuple[str | None, Any]:
         """("infer" | "train", the [B, L] key mask), ("a100", None) or (None, why not)."""
         if _a100(single):
             return self._a100_route(single, cond, pair, mask, compute_dtype, extra_pair_bias)
@@ -492,7 +492,7 @@ class TokenDiTProtenix(BackendModule):
             return None, why
         if single.ndim != 4 or cond.ndim != 4:
             return None, f"A100: single / cond must be [A, B, L, d], got {tuple(single.shape)} / {tuple(cond.shape)}"
-        if not ct_sm80.serves(self.transition, single, cond, dt, _wants_grad(self, single, cond, pair)):
+        if not ct_sm80.serves(self.transition, single, cond, cast(torch.dtype, dt), _wants_grad(self, single, cond, pair)):
             return None, ("A100: outside the sm_80 ConditionedTransition kernels' range (bf16 / fp32, widths of their table, sigmoid AdaLN "
                           "without a shift bias, bias-free SwiGLU)")
         if not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond=cond):
@@ -648,7 +648,7 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
                     and t.stride(0) == n * t.stride(1):
                 rows = torch.as_strided(t, (a * n, 4 * c), (4 * c, 1))                                     # [A * L, 4 C] in place
             else:
-                rows = torch.cat([u[:, j].reshape(a * n, c) for u in (q, k, v, gate)], -1).contiguous()
+                rows = torch.cat([u[:, j].reshape(a * n, c) for u in (q, k, v, cast(torch.Tensor, gate))], -1).contiguous()
             pb = bias[j]                                                                                   # [H, L, L] head-major
             if mask is not None:
                 pb = pb.float().add_((1 - mask[0, j].float())[None, None, :] * -1e6)

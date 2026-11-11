@@ -130,10 +130,10 @@ def make_step(module, inputs: dict, *, backend: str, train: bool, autocast: torc
         forward = torch.compile(forward, dynamic=False, mode=None if compile_mode == "default" else compile_mode)
 
     if not train:
-        def step():
+        def eval_step():
             with _context(False, autocast):
                 return forward(**inputs)
-        return step
+        return eval_step
 
     with _context(True, autocast):
         outs = [t for t in _floats(forward(**inputs)) if t.requires_grad]
@@ -198,7 +198,7 @@ def _stats(ms: list[float]) -> dict:
     return {"median_ms": q(0.5), "p10_ms": q(0.1), "p90_ms": q(0.9), "n": len(v)}
 
 
-def _reason(exc: BaseException) -> str:
+def _reason(exc: BaseException | None) -> str:
     """The exception and the ones it replaced (a failed capture's end masks the error raised inside the capture)."""
     parts, seen = [], set()
     while exc is not None and id(exc) not in seen and len(parts) < 4:
@@ -385,7 +385,7 @@ def _line(rec: dict) -> str:
 def main(argv=None) -> int:
     from miniworld_engine.measure import config
 
-    p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    p = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 1)[0])
     p.add_argument("config", help="an accuracy-format config with the speed keys (see the module docstring)")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005 -- a local-time file name
     p.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "miniworld-speed", f"speed-{stamp}.jsonl"),

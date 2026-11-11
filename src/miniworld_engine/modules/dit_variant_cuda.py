@@ -23,6 +23,7 @@ no other backend behind it.
 from __future__ import annotations
 
 import contextlib
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -216,6 +217,11 @@ class VariantTokenCuda:
     DiT algorithm, TokenDiTProtenix's ``"cuda"`` route (kernels/integrations/token_dit, token_dit_train) with its options
     (``token_dit.options``: parallel block, identity AdaLN, no gating query, up-gate transition, flat q / k LayerNorm, bias-free query)."""
 
+    # the block's own submodules (the token DiT class this is mixed into): declared for the type checker only
+    attention: Any
+    transition: Any
+    parallel: bool
+
     # A100 (sm_80): the attention runs on kernels/integrations/augattn_sm80 (the module's AdaLN, then cuBLAS projections, the pair bias
     # kernels, the mma.sync core and the gates, forward and backward; bf16 or the TF32 core), including its variants: the flat q / k
     # LayerNorm and the bias-free query (RoseTTAFold3), no gating query (Chai-1). The transition: the sm_80 ConditionedTransition
@@ -257,7 +263,7 @@ class VariantTokenCuda:
         if _a100(single):
             return self._a100_token_reason(single, cond, pair, mask, compute_dtype, extra_pair_bias)
         # H100: the one token DiT algorithm (TokenDiTProtenix's "cuda" route with this block's options)
-        return super()._supports_cuda(single, cond, pair, mask, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)
+        return super()._supports_cuda(single, cond, pair, mask, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)  # pyright: ignore[reportAttributeAccessIssue]  -- cooperative mixin: the token DiT class after it in the MRO defines it
 
     def _forward_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> torch.Tensor:
         if _a100(single):
@@ -268,7 +274,7 @@ class VariantTokenCuda:
                 return self.transition(single_a, cond)
             return single_a + self._a100_transition_delta(single, cond)
         # H100: the one token DiT algorithm (TokenDiTProtenix's "cuda" route with this block's options), inference and training
-        return super()._forward_cuda(single, cond, pair, mask, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)
+        return super()._forward_cuda(single, cond, pair, mask, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)  # pyright: ignore[reportAttributeAccessIssue]  -- cooperative mixin: the token DiT class after it in the MRO defines it
 
 
 class VariantAtomCuda:
@@ -276,7 +282,12 @@ class VariantAtomCuda:
     kernels/integrations/local_dit_h100 with the model's options, every key window), on A100 ``kernels/dit_variants`` (``cuda/train.py``
     on the sm_80 builds)."""
 
-    def _atom_serving(self, single, cond, pair, mask, uid):
+    # the block's own submodules and options (the atom DiT class this is mixed into): declared for the type checker only
+    attention: Any
+    transition: Any
+    key_window: str
+
+    def _atom_serving(self, single, cond, pair, mask, uid) -> tuple[Any, Any]:
         """A100: (the kernel function that serves the call, its trailing arguments) or (None, why not)."""
         if self.key_window not in ("pad", "slide", "slide_qblock"):
             return None, f"key_window {self.key_window!r} (the kernels know the clipped 'pad' window and the slid one)"
@@ -314,7 +325,7 @@ class VariantAtomCuda:
         if self._h100(single):
             from miniworld_engine.modules.atom_dit import _LocalAtomDiT
 
-            return _LocalAtomDiT._supports_cuda(self, single, cond, pair, mask, uid=uid)
+            return _LocalAtomDiT._supports_cuda(cast(_LocalAtomDiT, self), single, cond, pair, mask, uid=uid)
         fn, why = self._atom_serving(single, cond, pair, mask, uid)
         return why if fn is None else None
 
@@ -322,7 +333,7 @@ class VariantAtomCuda:
         if self._h100(single):
             from miniworld_engine.modules.atom_dit import _LocalAtomDiT
 
-            return _LocalAtomDiT._forward_cuda(self, single, cond, pair, mask, uid)
+            return _LocalAtomDiT._forward_cuda(cast(_LocalAtomDiT, self), single, cond, pair, mask, uid)
         fn, call = self._atom_serving(single, cond, pair, mask, uid)
         return _run(fn, _stack(self, atom=True), single, cond, call, wants_grad=_wants_grad(self, single, cond, pair), keep_autocast=True,
                     per_sample=True)

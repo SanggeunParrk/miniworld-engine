@@ -51,7 +51,7 @@ Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forwar
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -401,14 +401,14 @@ class _LocalAtomDiT(BackendModule):
     def _a100_reason(self, single, cond, pair, mask) -> str | None:
         if self._a100_rows(single, cond, pair, mask):
             return None
-        fn, why = VariantAtomCuda._atom_serving(self, single, cond, pair, mask, None)
+        fn, why = VariantAtomCuda._atom_serving(cast(VariantAtomCuda, self), single, cond, pair, mask, None)
         return None if fn is not None else why
     def _forward_cuda(self, single, cond, pair, mask=None, uid=None):
         if _a100(single):
             if not self._a100_rows(single, cond, pair, mask):
                 from miniworld_engine.modules import dit_variant_cuda as dv
 
-                fn, call = VariantAtomCuda._atom_serving(self, single, cond, pair, mask, None)
+                fn, call = VariantAtomCuda._atom_serving(cast(VariantAtomCuda, self), single, cond, pair, mask, None)
                 return dv._run(fn, dv._stack(self, atom=True), single, cond, call, wants_grad=dv._wants_grad(self, single, cond, pair),
                                keep_autocast=True, per_sample=True)
             from miniworld_engine.kernels.integrations import local_dit_sm80_block
@@ -734,9 +734,9 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
                  key_window: str | None = None, adaln_eps: float = 0.1, backend: str = "pytorch") -> None:
         super().__init__(d_single, d_cond, d_pair, n_head, n, key_window=key_window, backend=backend)
         att = self.attention
-        att.ada_ln_in = IdentityAdaptiveLayerNorm(d_single, d_cond, eps=adaln_eps)
-        att.to_out = nn.Identity()
-        self.transition.ada_ln_in = IdentityAdaptiveLayerNorm(d_single, d_cond, eps=adaln_eps)
+        att.ada_ln_in = IdentityAdaptiveLayerNorm(d_single, d_cond, eps=adaln_eps)  # pyright: ignore[reportAttributeAccessIssue]  -- Chai-1 swaps in the identity AdaLN (same call signature)
+        att.to_out = nn.Identity()  # pyright: ignore[reportAttributeAccessIssue]  -- Chai-1: no output projection (same call signature)
+        self.transition.ada_ln_in = IdentityAdaptiveLayerNorm(d_single, d_cond, eps=adaln_eps)  # pyright: ignore[reportAttributeAccessIssue]  -- Chai-1 swaps in the identity AdaLN (same call signature)
 
     def _forward_pytorch(self, single, cond, pair, mask=None, uid=None):
         """As :class:`AtomDiTOpenFold3`'s, with the conformer ids ``uid`` [B, N] (None: no conformer mask)."""
@@ -985,7 +985,7 @@ class AtomDiTMiniWorld(BackendModule):
         ef._CFG["gemm"] = "bf16" if lowp else ("tf32" if torch.backends.cuda.matmul.allow_tf32 else "tf32x3")
         if not ef.__dict__.get("_engine_sms"):
             ef._sm_count()
-            ef._engine_sms = True
+            ef._engine_sms = True  # pyright: ignore[reportAttributeAccessIssue]  -- a flag on the kit module, set once per process
         key = tuple((p.data_ptr(), p._version) for p in self.parameters())
         if self.__dict__.get("_katom_key") != key:          # the kit packs once per model load; a changed weight is a new pack
             self.__dict__.pop("_katom_packs", None)
@@ -1105,11 +1105,11 @@ class AtomDiTMiniWorld(BackendModule):
 
         cos, sin = cos.reshape(-1, cos.shape[-1]).contiguous(), sin.reshape(-1, sin.shape[-1]).contiguous()
         # the bf16 forms of the (fp32 master) weights once per weight version; a capture reads the eager forms (no six casts per replay)
-        wmod, *weights = eval_form("swa_a100_bf16", weights, lambda: [w.to(_BF).contiguous() for w in weights])
+        wmod, *weights = eval_form("swa_a100_bf16", weights, lambda: [w.to(_BF).contiguous() for w in weights])  # pyright: ignore[reportCallIssue]  -- tensors of the weight list (untyped Module attributes)
         with torch.autocast("cuda", enabled=False):
             mod = sm80.mod_fwd(cond.reshape(-1, cond.shape[-1]).contiguous(), wmod, False)[0]
             # one modulation row per sequence row: b = N
-            return sm80.block_fwd(x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, FP32_EPS, FP32_EPS, False)[0]
+            return sm80.block_fwd(x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, FP32_EPS, FP32_EPS, False)[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
 
     def _forward_cuda(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> torch.Tensor:
         if _a100(x):
@@ -1121,7 +1121,7 @@ class AtomDiTMiniWorld(BackendModule):
         cos, sin, seqused = attention_params[:3]
         cos, sin = cos.reshape(-1, cos.shape[-1]).contiguous(), sin.reshape(-1, sin.shape[-1]).contiguous()
         c = cond.reshape(-1, cond.shape[-1]).contiguous()
-        wmod = self.adaln_modulation[1].weight.contiguous()
+        wmod = self.adaln_modulation[1].weight.contiguous()  # pyright: ignore[reportCallIssue]  -- adaln_modulation[1] is the Linear (nn.Sequential indexing is untyped)
         weights = [w.contiguous() for w in (self.attn.Wqkv.weight, self.attn.gate_proj.weight, self.attn.out_proj.weight,
                                             self.ffn.w_up.weight, self.ffn.w_down.weight)]
         q = x.contiguous()
@@ -1140,10 +1140,10 @@ class AtomDiTMiniWorld(BackendModule):
         from miniworld_engine.kernels.swa_dit._common import FP32_EPS
         from miniworld_engine.kernels.swa_dit.dispatch import native_h100_eval_weights, native_h100_mod_eval, swa_dit_block_fwd
 
-        mod = native_h100_mod_eval(a, self.adaln_modulation[1].weight)
+        mod = native_h100_mod_eval(a, self.adaln_modulation[1].weight)  # pyright: ignore[reportArgumentType]  -- adaln_modulation[1] is the Linear (nn.Sequential indexing is untyped)
         weights = native_h100_eval_weights((self.attn.Wqkv.weight, self.attn.gate_proj.weight, self.attn.out_proj.weight,
                                             self.ffn.w_up.weight, self.ffn.w_down.weight), q.dtype)
-        return swa_dit_block_fwd(q, mod, cos, sin, seqused, *weights, q.shape[0], self.attn.half_window, FP32_EPS, False)[0]
+        return swa_dit_block_fwd(q, mod, cos, sin, seqused, *weights, q.shape[0], self.attn.half_window, FP32_EPS, False)[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
 
     def forward_hoisted(self, x: torch.Tensor, c_base: torch.Tensor, attention_params: tuple) -> torch.Tensor:
         """The block over ``N = A * B`` rows whose conditioning repeats over the augments: ``cond[a*B + b] == c_base[b]``, with
@@ -1161,7 +1161,7 @@ class AtomDiTMiniWorld(BackendModule):
         return out.to(x.dtype)
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
-        x, cond, params = _swa_inputs(self.attn_norm.normalized_shape[0], self.adaln_modulation[1].in_features,
+        x, cond, params = _swa_inputs(self.attn_norm.normalized_shape[0], self.adaln_modulation[1].in_features,  # pyright: ignore[reportArgumentType]  -- adaln_modulation[1] is the Linear (nn.Sequential indexing is untyped)
                                       lambda pos, uid: build_3d_rope(pos, uid, self.attn.head_dim),
                                       length=length, samples=samples, dtype=dtype, device=device, generator=generator)
         return {"x": x, "cond": cond, "attention_params": params}
@@ -1258,16 +1258,16 @@ class SWAAtomTransformer(BackendModule):
 
     def set_backend(self, backend: str = "pytorch"):
         super().set_backend(backend)
-        for block in self.blocks:
+        for block in cast("list[AtomDiTMiniWorld]", self.blocks):
             block.set_backend(backend)
         return self
 
     # "cuda": every block on the fused SWA kernels (:meth:`AtomDiTMiniWorld._forward_cuda`); the range is the blocks' (all alike).
     def _supports_cuda(self, q, c, attention_params, c_base=None) -> str | None:
-        return self.blocks[0]._supports_cuda(q, c, attention_params) if len(self.blocks) else None
+        return cast(AtomDiTMiniWorld, self.blocks[0])._supports_cuda(q, c, attention_params) if len(self.blocks) else None
 
     def _forward_cuda(self, q, c, attention_params, c_base=None):
-        blocks = list(self.blocks)
+        blocks = cast("list[AtomDiTMiniWorld]", list(self.blocks))
         if (len(blocks) > 1 and _h100(q) and self.config.n_checkpoint_segments is None
                 and not (torch.is_grad_enabled() and (q.requires_grad or c.requires_grad or any(p.requires_grad for p in self.parameters())))):
             # H100 inference: every block is conditioned on the same c, so silu(c) -- the modulation GEMM's operand -- is made once

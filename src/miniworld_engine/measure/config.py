@@ -41,6 +41,11 @@ from pathlib import Path
 
 import torch
 
+if typing.TYPE_CHECKING:
+    from miniworld_engine.modules.primitives import BackendModule
+
+_M = typing.TypeVar("_M", bound=torch.nn.Module)
+
 REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements" / "requirements_module.csv"
 # Input activation dtype per case dtype. master (bf16-mixed training): fp32 parameters, bf16 activations (what a module inside a
 # bf16-autocast model receives from the previous module), the forward under bf16 autocast.
@@ -409,19 +414,19 @@ def generator(case: Case, device) -> torch.Generator:
     return torch.Generator(device=torch.device(device)).manual_seed(case.seed)
 
 
-def build(case: Case, *, device) -> torch.nn.Module:
+def build(case: Case, *, device) -> BackendModule:
     """The case's module: constructed, moved to ``device``, random weights (seeded), cast to the case dtype, in the case mode."""
     torch.manual_seed(case.seed)
     module = construct(case.cls, case.kwargs).to(device).float()
     randomize(module, generator(case, device))
-    return cast(module, case.dtype).train(case.mode == "train")
+    return typing.cast("BackendModule", cast(module, case.dtype).train(case.mode == "train"))
 
 
-def inputs(case: Case, module: torch.nn.Module, *, device) -> dict:
+def inputs(case: Case, module: BackendModule, *, device) -> dict:
     """``module.make_inputs`` for the case (a generator seeded per case: the same values for every backend and dtype)."""
     return module.make_inputs(length=case.length, samples=case.samples, depth=case.depth, dtype=DTYPES[case.dtype],
                               device=torch.device(device), generator=generator(case, device), stream=case.stream)
 
 
-def clone(module: torch.nn.Module) -> torch.nn.Module:
+def clone(module: _M) -> _M:
     return copy.deepcopy(module)

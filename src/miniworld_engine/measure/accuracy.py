@@ -91,6 +91,7 @@ def _rel(x: torch.Tensor | None, gold: torch.Tensor | None) -> float:
     if gold is None and x is None:
         return 0.0
     if gold is None:
+        assert x is not None  # both None returned above
         gold = torch.zeros_like(x, dtype=torch.float64)
     x = torch.zeros_like(gold) if x is None else x
     diff = (x.double() - gold.double()).abs().max().item()
@@ -110,7 +111,7 @@ def _run(module, inputs: dict, *, train: bool, autocast: torch.dtype | None, ups
     ctx = torch.autocast("cuda", dtype=autocast) if autocast is not None else contextlib.nullcontext()
     with torch.set_grad_enabled(train), ctx:
         outs = _outputs(module(**inputs))
-    values = {name: t.detach() for name, t in outs}
+    values: dict[str, torch.Tensor | None] = {name: t.detach() for name, t in outs}
     if not train:
         return values, upstream
     if upstream is None:
@@ -262,7 +263,7 @@ def run(cfg, out_path: str) -> list[dict]:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    p = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 1)[0])
     p.add_argument("config", help="a measurement config (.yaml / .toml, see miniworld_engine.measure.config)")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005 -- a local-time file name
     p.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "miniworld-accuracy"),

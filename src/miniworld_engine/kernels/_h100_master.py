@@ -18,7 +18,7 @@ def _pack_fake(weights):
 def _pack(weights: list[torch.Tensor]) -> list[torch.Tensor]:
     # One multi-tensor PyTorch copy (a cast): not worth a kernel of its own.
     outputs = _pack_fake(weights)
-    torch._foreach_copy_(outputs, weights)
+    torch._foreach_copy_(outputs, weights)  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
     return outputs
 
 

@@ -565,7 +565,7 @@ class EncoderLayer(BackendModule):
         flat_indices = neighbor_indices if batch == 1 else _flat_neighbor_indices(neighbor_indices, batch, length)
 
         # The node message. A zero node state needs no special case here: its query block reduces to the bias, its neighbour block to zero.
-        query, neighbor, edge_weight = self._node_side_projection(self.node_message.input_projection, node_states)
+        query, neighbor, edge_weight = self._node_side_projection(cast(PackedEncoderProjection, self.node_message.input_projection), node_states)
         hidden = self.node_message.hidden_projection
         node_reduce = triton_node_message_reduce if self.replay_in_backward else triton_node_message_reduce_compute
         reduced_hidden = node_reduce(
@@ -577,7 +577,7 @@ class EncoderLayer(BackendModule):
         node_states = residue_mask.unsqueeze(-1).to(node_states.dtype) * node_states
 
         # The edge update: projection, both MLP projections, dropout, residual and LayerNorm in one kernel.
-        query, neighbor, edge_weight = self._node_side_projection(self.edge_message.input_projection, node_states)
+        query, neighbor, edge_weight = self._node_side_projection(cast(PackedEncoderProjection, self.edge_message.input_projection), node_states)
         edge_message = self.edge_message
         probability = edge_message.dropout.p if self.training else 0.0
         seed = torch.randint(0, 2**31 - 1, (1,), device=edge_states.device, dtype=torch.int64) if probability > 0.0 else torch.zeros(
@@ -651,7 +651,7 @@ class EncoderLayer(BackendModule):
         batch, length = node_states.shape[:2]
         flat_indices = neighbor_indices if batch == 1 else _flat_neighbor_indices(neighbor_indices, batch, length)
 
-        query, neighbor, edge_weight = self._node_side_projection(self.node_message.input_projection, node_states)
+        query, neighbor, edge_weight = self._node_side_projection(cast(PackedEncoderProjection, self.node_message.input_projection), node_states)
         hidden = self.node_message.hidden_projection
         reduced_hidden = mpnn_msg_sm80.node_message_reduce(
             edge_states, query, neighbor, flat_indices, edge_weight, hidden.weight, hidden.bias, neighbor_mask, self.neighbor_scale
@@ -661,7 +661,7 @@ class EncoderLayer(BackendModule):
         node_states = self.node_transition(node_states)
         node_states = residue_mask.unsqueeze(-1).to(node_states.dtype) * node_states
 
-        query, neighbor, edge_weight = self._node_side_projection(self.edge_message.input_projection, node_states)
+        query, neighbor, edge_weight = self._node_side_projection(cast(PackedEncoderProjection, self.edge_message.input_projection), node_states)
         edge_message = self.edge_message
         probability = edge_message.dropout.p if self.training else 0.0
         seed = torch.randint(0, 2**31 - 1, (1,), device=edge_states.device, dtype=torch.int64) if probability > 0.0 else torch.zeros(
