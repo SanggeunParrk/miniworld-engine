@@ -613,7 +613,7 @@ __global__ void pool_atoms_prep_k(const void* idx, int idx_code, const void* gm,
 }
 
 constexpr int BWD_ROWS = 8;     // rows (warps) per block
-constexpr int BWD_SAMPLES = 8;  // samples per block (the row's slot range is searched once)
+constexpr int BWD_SAMPLES = 8;  // at most this many samples per block (the row's slot range is searched once per block); fewer when the rows alone do not fill the GPU
 
 __device__ __forceinline__ int lower_bound(const int* __restrict__ v, int n, int x) {
   int lo = 0, hi = n;
@@ -624,15 +624,15 @@ __device__ __forceinline__ int lower_bound(const int* __restrict__ v, int n, int
   return lo;
 }
 
-// grid (ceil(R / BWD_ROWS), ceil(S / BWD_SAMPLES)), block (32, BWD_ROWS): a lane owns 4 consecutive channels (C % 4 == 0), stepping 128 channels.
+// grid (ceil(R / BWD_ROWS), ceil(S / spb)), spb <= BWD_SAMPLES samples per block (pool_atoms_bwd), block (32, BWD_ROWS): a lane owns 4 consecutive channels (C % 4 == 0), stepping 128 channels.
 __global__ void __launch_bounds__(32 * BWD_ROWS) pool_atoms_bwd_k(const __nv_bfloat16* __restrict__ gout, const __nv_bfloat16* __restrict__ x,
                                                                   const int* __restrict__ skey, const long long* __restrict__ perm,
                                                                   const float* __restrict__ w, __nv_bfloat16* __restrict__ gx, int atoms, int tokens,
-                                                                  int rows, int channels, int samples, int slots) {
+                                                                  int rows, int channels, int samples, int slots, int spb) {
   const int r = blockIdx.x * BWD_ROWS + threadIdx.y;
   if (r >= rows) return;
   const int beg = lower_bound(skey, slots, r), end = lower_bound(skey, slots, r + 1);
-  const int s0 = blockIdx.y * BWD_SAMPLES, s1 = min(samples, s0 + BWD_SAMPLES);
+  const int s0 = blockIdx.y * spb, s1 = min(samples, s0 + spb);
   for (int s = s0; s < s1; ++s) {
     const __nv_bfloat16* gs = gout + (size_t)s * tokens * channels;
     for (int c = threadIdx.x * 4; c < channels; c += 128) {
@@ -687,11 +687,16 @@ at::Tensor pool_atoms_bwd(at::Tensor gout, at::Tensor x, at::Tensor skey, at::Te
   const at::cuda::OptionalCUDAGuard guard(x.device());
   auto gx = at::empty_like(x);
   if (gx.numel() == 0) return gx;
-  const dim3 grid((unsigned)((R + BWD_ROWS - 1) / BWD_ROWS), (unsigned)((S + BWD_SAMPLES - 1) / BWD_SAMPLES)), block(32, BWD_ROWS);
+  // samples per block: up to BWD_SAMPLES (one slot search per row and block), fewer while the grid holds less than ~32 blocks (256 warps) per SM: a short
+  // structure with many samples (1024 atoms x 48 samples) is otherwise latency bound on the serial sample loop. The sums do not depend on it.
+  const int64_t row_blocks = (R + BWD_ROWS - 1) / BWD_ROWS, target = 32LL * at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int64_t want = std::max<int64_t>(1, (target + row_blocks - 1) / row_blocks);
+  const int spb = (int)std::min<int64_t>(BWD_SAMPLES, std::max<int64_t>(1, (S + want - 1) / want));
+  const dim3 grid((unsigned)row_blocks, (unsigned)((S + spb - 1) / spb)), block(32, BWD_ROWS);
   pool_atoms_bwd_k<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(gout.data_ptr()), reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), skey.data_ptr<int>(),
       reinterpret_cast<const long long*>(perm.data_ptr<int64_t>()), w.data_ptr<float>(), reinterpret_cast<__nv_bfloat16*>(gx.data_ptr()), (int)atoms, (int)T, (int)R, (int)C, (int)S,
-      (int)skey.numel());
+      (int)skey.numel(), spb);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return gx;
 }
