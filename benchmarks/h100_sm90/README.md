@@ -11,13 +11,13 @@ Per class and mode: the geometric mean over its cases of the speedup vs PyTorch 
 | class | eval Engine (CUDA) | eval Anthropic | eval cuEquivariance | train Engine (CUDA) | train Anthropic | train cuEquivariance |
 |---|---|---|---|---|---|---|
 | AlignEuler | 26.77x (n=8) | 4.52x (n=8) |  |  |  |  |
-| AtomDiTBoltz2 | 6.13x (n=32) | 1.16x (n=16) |  | 2.72x (n=32) |  |  |
-| AtomDiTChai1 | 5.68x (n=32) |  |  | 3.01x (n=32) |  |  |
+| AtomDiTBoltz2 | 9.33x (n=32) | 1.16x (n=16) |  | 4.36x (n=32) |  |  |
+| AtomDiTChai1 | 7.13x (n=32) |  |  | 3.92x (n=32) |  |  |
 | AtomDiTESMFold2 | 18.17x (n=16) | 14.06x (n=16) |  | 11.56x (n=16) |  |  |
-| AtomDiTOpenFold3 | 5.29x (n=32) | 1.19x (n=32) |  | 2.78x (n=32) |  |  |
-| AtomDiTProtenix | 7.99x (n=32) | 1.14x (n=32) |  | 3.95x (n=32) |  |  |
-| AtomDiTRoseTTAFold3 | 6.29x (n=32) |  |  | 2.67x (n=32) |  |  |
-| AttentionPairBias | 4.54x (n=108) | 1.55x (n=108) | 0.93x (n=108) | 3.41x (n=108) |  | 0.99x (n=108) |
+| AtomDiTOpenFold3 | 7.83x (n=32) | 1.19x (n=32) |  | 3.99x (n=32) |  |  |
+| AtomDiTProtenix | 9.73x (n=32) | 1.14x (n=32) |  | 4.72x (n=32) |  |  |
+| AtomDiTRoseTTAFold3 | 9.56x (n=32) |  |  | 4.31x (n=32) |  |  |
+| AttentionPairBias | 4.53x (n=108) | 1.55x (n=108) | 0.93x (n=108) | 3.41x (n=108) |  | 0.99x (n=108) |
 | AugmentNoise | 8.24x (n=16) |  |  |  |  |  |
 | BidirectionalTriangleAttention | 2.98x (n=6) |  |  | 2.47x (n=6) |  |  |
 | BidirectionalTriangleMultiplication | 8.98x (n=30) |  |  | 6.53x (n=30) |  |  |
@@ -32,12 +32,12 @@ Per class and mode: the geometric mean over its cases of the speedup vs PyTorch 
 | PoolAtoms | 5.31x (n=8) | 1.67x (n=8) |  |  |  |  |
 | SWAAtomTransformer | 17.99x (n=48) | 11.80x (n=48) |  | 10.39x (n=44) |  |  |
 | SmoothLddtLoss | 476.79x (n=16) |  |  | 455.83x (n=16) |  |  |
-| TokenDiTBoltz2 | 3.04x (n=12) | 1.30x (n=12) | 1.27x (n=12) | 1.78x (n=12) |  | 1.42x (n=12) |
-| TokenDiTChai1 | 2.74x (n=24) | 1.19x (n=24) | 1.15x (n=24) | 1.81x (n=24) |  | 1.35x (n=24) |
-| TokenDiTMiniWorld | 4.14x (n=12) |  |  | 2.63x (n=12) |  |  |
+| TokenDiTBoltz2 | 4.06x (n=12) | 1.30x (n=12) | 1.27x (n=12) | 2.25x (n=12) |  | 1.42x (n=12) |
+| TokenDiTChai1 | 3.12x (n=24) | 1.19x (n=24) | 1.15x (n=24) | 2.19x (n=24) |  | 1.35x (n=24) |
+| TokenDiTMiniWorld | 4.15x (n=12) |  |  | 2.63x (n=12) |  |  |
 | TokenDiTMiniWorldBiasOnly | 2.19x (n=48) |  |  | 2.27x (n=48) |  |  |
-| TokenDiTProtenix | 3.56x (n=84) | 1.22x (n=84) | 1.02x (n=84) | 2.50x (n=84) |  | 1.05x (n=84) |
-| TokenDiTRoseTTAFold3 | 3.12x (n=12) | 1.14x (n=12) | 1.32x (n=12) | 1.77x (n=12) |  | 1.45x (n=12) |
+| TokenDiTProtenix | 3.57x (n=84) | 1.22x (n=84) | 1.02x (n=84) | 2.50x (n=84) |  | 1.05x (n=84) |
+| TokenDiTRoseTTAFold3 | 4.11x (n=12) | 1.14x (n=12) | 1.31x (n=12) | 2.31x (n=12) |  | 1.44x (n=12) |
 | TokenPairInit | 12.65x (n=6) |  |  | 3.82x (n=6) |  |  |
 | Transition | 4.37x (n=126) | 2.62x (n=90) |  | 3.14x (n=126) |  |  |
 | TriangleAttention | 12.57x (n=72) | 6.53x (n=71) | 3.11x (n=70) | 6.59x (n=70) |  | 2.08x (n=68) |
@@ -56,8 +56,8 @@ The same over the requirement rows whose `source` names af3 (25 rows).
 
 | class | eval Engine (CUDA) | eval Anthropic | eval cuEquivariance | train Engine (CUDA) | train Anthropic | train cuEquivariance |
 |---|---|---|---|---|---|---|
-| AtomDiTOpenFold3 | 5.34x (n=16) | 1.19x (n=16) |  | 2.79x (n=16) |  |  |
-| AttentionPairBias | 4.88x (n=12) | 2.75x (n=12) | 0.92x (n=12) | 3.60x (n=12) |  | 0.99x (n=12) |
+| AtomDiTOpenFold3 | 7.93x (n=16) | 1.20x (n=16) |  | 4.02x (n=16) |  |  |
+| AttentionPairBias | 4.87x (n=12) | 2.74x (n=12) | 0.92x (n=12) | 3.61x (n=12) |  | 0.99x (n=12) |
 | LayerNorm | 3.71x (n=114) | 2.80x (n=114) | 3.01x (n=114) | 2.91x (n=114) | 1.72x (n=114) | 1.37x (n=114) |
 | MSAPairWeightedAveraging | 8.14x (n=6) | 2.73x (n=6) |  | 3.98x (n=6) |  |  |
 | OuterProductMean | 3.50x (n=6) | 2.70x (n=6) |  | 2.34x (n=6) |  |  |
