@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Modified by MiniWorld Engine from Anthropic's uplifting-biomolecular-modeling@f4f62fa6, common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/common/tmn_math.cuh (Apache-2.0; see licenses/THIRD_PARTY_NOTICES.md).
 // tmn_math.cuh — the NUMERICS STATEMENT of the triangle-multiplication kernels, shared by every architecture member (sm_90a: tmn_kernels.cuh;
 // sm_80: csrc/sm80).  Per-element and per-row-statistic helpers only: nothing here depends on a fragment layout, an instruction set beyond
 // sm_80, or a tile shape.  Every floating-point operation that is part of the statement is an explicit round-to-nearest fp32 instruction

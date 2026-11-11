@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Modified by MiniWorld Engine from Anthropic's uplifting-biomolecular-modeling@f4f62fa6, common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_sm90_unit.cuh (Apache-2.0; see licenses/THIRD_PARTY_NOTICES.md).
 // tmn_sm90_unit.cuh — the sm_90a instantiation list of the trimul_native kernel family (tmn_kernels.cuh).  One compilation unit per
 // (C_Z, C_H) pair includes this file with TMN_CZ / TMN_CH defined (csrc/tmn90_z<C_Z>_h<C_H>.cu -> build/sm_90a/tmn90_z<C_Z>_h<C_H>.cubin);
 // every kernel is an extern "C" symbol whose name encodes its configuration (kernel.py selects by name = the tile table's compiled support):

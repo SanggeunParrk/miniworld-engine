@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Modified by MiniWorld Engine from Anthropic's uplifting-biomolecular-modeling@f4f62fa6, common/opt_core/opt_core/kernels/trimul/native/pkg/v5/python/trimul_native/_driver.py (Apache-2.0; see licenses/THIRD_PARTY_NOTICES.md).
 """trimul_native._driver -- the CUDA driver entry points this package calls, bound over ``libcuda.so.1`` with the standard library
 (ctypes), or over the ``cuda.bindings`` wheel when that is importable and asked for.  Both forms call the same driver functions and
 produce identical results; the ctypes form has no dependency beyond the driver library every CUDA image mounts.

@@ -11,5 +11,5 @@
     "python/trimul_native/_driver.py": "3d614468751e376abec32efa8c7caa977cc2ee575525726e9b4303bd9b7461c6",
     "python/trimul_native/manifest.py": "f27789378ec49aac030b1ac9fed842e5179a304abcef64425d22f53f43e4da50"
   },
-  "local_changes": "Only a minimal Python package initializer is added; listed source files are byte-identical."
+  "local_changes": "The hashes are those of the upstream files. csrc/tmn_kernels.cuh, csrc/tmn_ptx.cuh and csrc/common/tmn_math.cuh are carried byte-identical in kernels/transition/cuda/anthropic_v5/; modified copies of csrc files are in kernels/trimul_inproj/cuda/h100_sources/upstream/csrc/ and h100_sources/inference/, and launch.py, _driver.py, manifest.py and kernel.py are adapted as kernels/trimul_inproj/cuda/_h100_launch.py, _h100_driver.py, _h100_manifest.py and _h100_infer_kernel.py (each modified file says so in its header; see THIRD_PARTY_NOTICES.md)."
 }
