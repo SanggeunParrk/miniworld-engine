@@ -25,10 +25,10 @@ dependencies = [
 
 [project.optional-dependencies]
 # External baselines (backends "cueq" / "anthropic" connect to them; never required by the engine's own backends).
-#   transformers: the fork Anthropic's esmfold2 kit pins (its ef2_msa / ef2_w4 levers import transformers.models.esmfold2).
+#   (the transformers fork Anthropic's esmfold2 kit needs -- its ef2_msa / ef2_w4 levers import transformers.models.esmfold2 -- is a git
+#   dependency, which PyPI metadata may not carry: the pixi env pins it below; pip users see docs/install.md)
 baselines = [
   "cuequivariance-torch>=0.12,<0.13",
-  "transformers @ git+https://github.com/huggingface/transformers.git@ef32577f55da19a4989cd7b22e004dc43a4998cb",
 ]
 # FlashAttention-4 (CuTe DSL, sm90+): the global-attention path of the SWA atom transformer's cuda backend. Prerelease wheel:
 #   uv pip install --prerelease=allow "flash-attn-4[cu13]"
@@ -138,6 +138,7 @@ no-build-isolation = ["transformer-engine-torch"]
 
 [tool.pixi.pypi-dependencies]
 miniworld-engine = { path = ".", editable = true, extras = ["baselines", "dev"] }
+transformers = { git = "https://github.com/huggingface/transformers.git", rev = "ef32577f55da19a4989cd7b22e004dc43a4998cb" }   # Anthropic esmfold2 kit (baselines)
 torch = { version = "==2.13.0", index = "https://download.pytorch.org/whl/cu129" }
 transformer-engine = { version = "==2.19.*", extras = ["pytorch", "core-cu12"] }
 transformer-engine-cu12 = "==2.19.*"
