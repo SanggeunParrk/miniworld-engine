@@ -399,7 +399,10 @@ def _bwd(
     tf32 = single.dtype == F32
     a, _n0, n, m = _dims(single)
     dev = single.device
-    with torch.cuda.device(dev):
+    # autocast off: a ``.backward()`` called inside an autocast region runs this under the caller's autocast state (autograd carries it to
+    # the backward), and autocast would make the weight-gradient GEMMs below (``_mmT``, ``_cond_bwd_shared``) bf16 -- finalize90 reads
+    # them as fp32 [rows, 128]: out of bounds (FoldForge R20: CUDA_ERROR_ILLEGAL_ADDRESS in finalize, Protenix v1 training step)
+    with torch.cuda.device(dev), torch.autocast("cuda", enabled=False):
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
         c2 = (_ld._padded(cond[:1], n).reshape(n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
