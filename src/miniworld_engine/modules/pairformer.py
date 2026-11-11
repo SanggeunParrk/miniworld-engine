@@ -38,6 +38,10 @@ class PairformerConfig:
     #: ``TriangleMultiplication(model=...)``): e.g. ``"af3"`` (AF3 ending-bias orientation), ``"rf3"`` (gate / out biases, the trimul
     #: divided by the sequence length), ``"chai1"`` / ``"chai1_confidence"`` (Chai-1's output forms).
     model: str = "miniworld"
+    #: Separate keys for the two kinds of triangle update (None: ``model``). RoseTTAFold3's fast mode, for example, is
+    #: ``model="rf3", trimul_model="miniworld"``: the RF3 triangle attention with the plain multiplication (no division by the length).
+    triattn_model: str | None = None
+    trimul_model: str | None = None
     # Single track (AF3 Alg. 17 lines 9-10): ``d_single > 0`` adds ``AttentionPairBias`` over the pair logits and a single
     # ``Transition``; ``forward(pair, mask, single)`` then returns ``(pair, single)``. Its mask is ``mask``.
     d_single: int = 0
@@ -64,6 +68,8 @@ class PairformerBlock(BackendModule, MasterWeights):
     def __init__(self, config: PairformerConfig, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()
         self.config = config
+        trimul_model = config.model if config.trimul_model is None else config.trimul_model
+        triattn_model = config.model if config.triattn_model is None else config.triattn_model
 
         if config.bidirectional_trimul:
             self.tri_multi = BidirectionalTriangleMultiplication(
@@ -80,14 +86,14 @@ class PairformerBlock(BackendModule, MasterWeights):
                 d_hidden=config.d_hidden_tri_multi,
                 outgoing=True,
                 p_drop=config.p_drop,
-                model=config.model,
+                model=trimul_model,
             )
             self.tri_multi_incoming = TriangleMultiplication(
                 d_pair=config.d_pair,
                 d_hidden=config.d_hidden_tri_multi,
                 outgoing=False,
                 p_drop=config.p_drop,
-                model=config.model,
+                model=trimul_model,
             )
         if config.use_triangle_attention:
             # ``d_hidden_tri_attention`` is the PER-HEAD width; TriangleAttention takes the TOTAL hidden width.
@@ -97,7 +103,7 @@ class PairformerBlock(BackendModule, MasterWeights):
                 "n_head": config.n_head_tri_attention,
                 "d_hidden": d_hidden_attn_total,
                 "p_drop": config.p_drop,
-                "model": config.model,
+                "model": triattn_model,
             }
             if not config.use_self_attention:  # bias-only: only TriangleAttention has it (a model variant refuses the argument)
                 attention["use_self_attention"] = False

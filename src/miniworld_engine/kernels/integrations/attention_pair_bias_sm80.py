@@ -30,7 +30,7 @@ DP = 128
 _ATTN_BN = 32
 SHAPES = ((8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
 LOG2E = math.log2(math.e)
-_packs: dict = {}
+_packs: dict = _capture.weight_cache("attention_pair_bias_sm80.packs")
 _lib = torch.library.Library("miniworld_apb", "FRAGMENT")
 
 

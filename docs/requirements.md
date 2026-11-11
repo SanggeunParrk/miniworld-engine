@@ -11,8 +11,8 @@ One row per distinct (module class, stream, dims, options):
 |---|---|
 | `module` | a `BackendModule` class of `miniworld_engine.modules` (found by name, subpackages included) |
 | `model` | the selector keys that build this class (`TokenDiT(model=...)`, `AtomDiT(model=...)`, `TriangleAttention(model=...)`, ...) |
-| `stream` | the activation layout of a row-wise op: `token_pair` `[S, L, L, w]`, `msa_token` / a depth `[S, D, L, w]`, else `[S, L, w]` |
-| `lengths`, `depths` | `|`-separated token / atom lengths and MSA depths |
+| `stream` | the activation layout of a row-wise op: `token_pair` `[S, L, L, w]`, `msa_token` / a depth `[S, D, L, w]`, else `[S, L, w]`; the DiT blocks' multi-fold layout `token_folds` / `atom_folds` `[S, F, L, w]` with F = the `depths` value (docs/modules.md, multi-fold contract) |
+| `lengths`, `depths` | `|`-separated token / atom lengths and MSA depths (the fold count F on a `token_folds` / `atom_folds` row) |
 | `dims`, `options` | constructor kwargs `a=1;b=x`; `options` only where they change the math (for `TokenDiT*` / `AtomDiT*` only values differing from the class default); `a=False|True` means one variant per value |
 | `dtypes` | `float32` and/or `master` (fp32 parameters, bf16 activations, forward under bf16 autocast). No row says `bfloat16`. The trunk-side classes (TriangleMultiplication*, TriangleAttention*, OuterProductMean, MSAPairWeightedAveraging, the Bidirectional* classes, PairformerBlock, the trunk Transitions) are `master` only; the five diffusion-head conditioning Transition rows (n = 2: pair 128 / 256 / 512, single 384 / 768) are `float32|master` |
 | `modes` | `eval` and/or `train` |

@@ -116,7 +116,7 @@ def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 # ------------------------------------------------------------------------------------------------------------------------ launches
-_affine: dict = {}
+_affine: dict = _capture.weight_cache("transition_fused_wide_sm80.affine")
 
 
 def _f32(t: torch.Tensor, cache: bool) -> torch.Tensor:
@@ -154,7 +154,7 @@ def _squeeze(ext, hid: torch.Tensor, ws: torch.Tensor, x: torch.Tensor, ln: bool
     return out
 
 
-_kernel_forms: dict = {}
+_kernel_forms: dict = _capture.weight_cache("transition_fused_wide_sm80.kernel_forms")
 
 
 def _kernel_weights(wa, wb, ws, dtype, cache: bool):

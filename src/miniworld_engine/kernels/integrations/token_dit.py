@@ -64,7 +64,7 @@ COND_WIDTHS_H100 = (384, 768)
 #: the QK-norm weights, appended to WEIGHTS when the block has use_qk_norm
 QK_WEIGHTS = ("attention.norm_query.weight", "attention.norm_key.weight")
 #: Packed runners keyed by the weights' (pointer, version): see ``_infer``.
-_RUNNERS: dict = {}
+_RUNNERS: dict = _capture.weight_cache("token_dit.runners")
 
 
 # ------------------------------------------------------------------------------------------------ the models' options

@@ -13,14 +13,15 @@ themselves the variant most models run::
 =====================================  ====================================================================================================
 class                                  models (``model=``)
 =====================================  ====================================================================================================
-TriangleAttention                      miniworld, boltz2, protenix, opendde, esmfold2, openfold3_preview2: the ending node's bias from the
-                                       transposed pair
+TriangleAttention                      miniworld, boltz2, protenix, protenix_v2, opendde, esmfold2, openfold3_preview2: the ending node's
+                                       bias from the transposed pair (``protenix_v2`` is an alias of ``protenix``: Protenix-v2 runs
+                                       Protenix's triangle attention and multiplication unchanged; TriangleMultiplication takes it too)
 TriangleAttentionAF3                   af3, openfold3 (v0.5), intellifold2: the ending node's bias from the pair as it is (AF3's code)
 TriangleAttentionRF3                   rf3: gate / out-projection biases, AF3's bias orientation, fp32 softmax
 TriangleAttentionChai1                 chai1: AF3's bias orientation, the ending node's update in the transposed orientation, fp32 softmax
 TriangleAttentionChai1Confidence       chai1_confidence: a second, transposed out-projection (Chai-1's confidence head), fp32 softmax
 BidirectionalTriangleAttention         MiniWorld: starting + ending node in one block
-TriangleMultiplication                 every model but rf3 (FoldForge's RoseTTAFold3 fast mode builds it explicitly)
+TriangleMultiplication                 every model but rf3 (RoseTTAFold3's fast mode: ``PairformerConfig(model="rf3", trimul_model="miniworld")``)
 TriangleMultiplicationRF3              rf3: the contraction divided by the real sequence length
 BidirectionalTriangleMultiplication    MiniWorld: outgoing + incoming in one block
 =====================================  ====================================================================================================
@@ -818,7 +819,9 @@ class TriangleAttentionChai1Confidence(_TriangleAttentionFp32Softmax):
 
 #: ``TriangleAttention(model=name)`` -> the class it builds.
 TRIANGLE_ATTENTION_MODELS: dict[str, type[_TriangleAttentionBase]] = {
-    **dict.fromkeys(("miniworld", "boltz2", "protenix", "opendde", "esmfold2", "openfold3_preview2"), TriangleAttention),
+    **dict.fromkeys(
+        ("miniworld", "boltz2", "protenix", "protenix_v2", "opendde", "esmfold2", "openfold3_preview2"), TriangleAttention
+    ),
     **dict.fromkeys(("af3", "openfold3", "intellifold2"), TriangleAttentionAF3),
     "rf3": TriangleAttentionRF3,
     "chai1": TriangleAttentionChai1,

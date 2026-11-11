@@ -22,7 +22,8 @@ Each class hard-codes its model's math (no option flags); :data:`ATOM_DIT_MODELS
 
   Atom ``i`` belongs to query window ``w = i // 32`` and attends to the 128 atoms of its key window, with a per-window pair bias. The
   pair is the *trunked* atom pair ``[B, nwin, 32, 128, d_pair]`` (:func:`~miniworld_engine.modules.functional.to_windows` makes it from a
-  dense pair). ``single`` and ``cond`` carry the augmentation axis ``[A, B, N, d]``, the pair does not. Scores and softmax run in fp32
+  dense pair). ``single`` and ``cond`` carry the augmentation axis ``[A, B, N, d]``, the pair does not. ``B`` is the multi-fold axis (B folds of one
+  input, each its own pair and conditioning, one key mask expanded over B: docs/modules.md, multi-fold contract). Scores and softmax run in fp32
   (fp64 for an fp64 call). ``key_window`` (the real atoms ``R`` come first; a masked key is off for every query):
 
       "slide"          ``[32 w - 48, 32 w + 80)`` shifted back inside the real atoms (AF3 ``features.py`` AtomCrossAtt.compute_features;
@@ -59,6 +60,7 @@ import torch.nn.functional as F
 from pydantic import BaseModel
 from torch.utils.checkpoint import checkpoint_sequential
 
+from miniworld_engine.kernels import _capture
 from miniworld_engine.modules import _anthropic
 from miniworld_engine.modules.attention import (
     AugmentedAttentionPairBias,
@@ -77,6 +79,9 @@ from miniworld_engine.modules.functional import (
 from miniworld_engine.modules.norm import AdaptiveLayerNorm, IdentityAdaptiveLayerNorm, RMSNorm
 from miniworld_engine.modules.primitives import BackendModule, Linear, MPLinear, key_mask, master_autocast, random_input, wide
 from miniworld_engine.modules.transition import ConditionedTransition, UpGatedConditionedTransition
+
+for _attr in ("_katom_key", "_katom_packs"):  # the ESMFold2 kit's atom packs (clear_weight_caches)
+    _capture.instance_cache_attr(_attr)
 
 QUERIES, KEYS, KEY_OFFSET = ATOM_QUERIES, ATOM_KEYS, 48
 _BF, _F32 = torch.bfloat16, torch.float32
@@ -108,6 +113,11 @@ def _needs_grad(module: nn.Module, *tensors) -> bool:
     return torch.is_grad_enabled() and (
         any(p.requires_grad for p in module.parameters()) or any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
     )
+
+
+def _one_row(t: torch.Tensor, folds: int) -> bool:
+    """``t`` [1, N], or [B, N] that is one row expanded over the B folds (stride 0: metadata only, no device read)."""
+    return t.shape[0] == 1 or (t.shape[0] == folds and t.stride(0) == 0)
 
 
 def windows(n: int) -> int:
@@ -364,8 +374,9 @@ class _LocalAtomDiT(BackendModule):
                 "outside the H100 atom block's options (local_dit_h100.options: mixed AdaLN forms or epsilons, a per-head q / k norm, "
                 "an up-gate weight other than [256, 128] without bias, ...)"
             )
-        if uid is not None and (uid.ndim != 2 or tuple(uid.shape) != (1, single.shape[2])):
-            return f"uid must be [1, N], got {tuple(uid.shape)}"
+        folds = single.shape[1] if single.ndim == 4 else 1
+        if uid is not None and (uid.ndim != 2 or uid.shape[1] != single.shape[2] or not _one_row(uid, folds)):
+            return f"uid must be [1, N] (or one [1, N] row expanded over the B folds), got {tuple(uid.shape)}"
         att, tr = self.attention, self.transition
         params = list(self.parameters())
         dts = (single.dtype, cond.dtype, pair.dtype)
@@ -379,15 +390,22 @@ class _LocalAtomDiT(BackendModule):
                 return "bfloat16 activations take bfloat16 or float32 parameters"
         else:
             return f"dtypes {tuple(str(t) for t in dts)} (single / cond / pair all bfloat16 or all float32)"
-        if single.ndim != 4 or single.shape[1] != 1 or single.shape[3] != 128 or single.shape[2] == 0:
-            return f"single must be [A, 1, N, 128] (one pair), got {tuple(single.shape)}"
+        if single.ndim != 4 or single.shape[3] != 128 or single.shape[2] == 0:
+            return f"single must be [A, B, N, 128], got {tuple(single.shape)}"
         n = single.shape[2]
+        if folds > 1:  # the multi-fold contract (B trunk_seeds of one input, each its own pair): the kernels' grouped-bias path
+            if dts != (_BF, _BF, _BF):
+                return "B > 1 folds: bfloat16 activations only (the TF32 kernels keep one pair bias)"
+            if _needs_grad(self, single, cond, pair):
+                return "B > 1 folds: inference only (the backward keeps one pair bias)"
         if tuple(cond.shape) != (*single.shape[:3], 128):
-            return f"cond must be [A, 1, N, 128], got {tuple(cond.shape)}"
-        if tuple(pair.shape) != (1, windows(n), QUERIES, KEYS, 16):
-            return f"pair must be [1, {windows(n)}, {QUERIES}, {KEYS}, 16], got {tuple(pair.shape)}"
-        if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != (1, n)):
-            return "mask must be a bool [1, N] key mask"
+            return f"cond must be [A, B, N, 128], got {tuple(cond.shape)}"
+        if tuple(pair.shape) != (folds, windows(n), QUERIES, KEYS, 16):
+            return f"pair must be [B, {windows(n)}, {QUERIES}, {KEYS}, 16] with B = {folds}, got {tuple(pair.shape)}"
+        if mask is not None and (
+            mask.dtype != torch.bool or mask.ndim != 2 or mask.shape[1] != n or mask.shape[0] not in (1, folds) or not _one_row(mask, folds)
+        ):
+            return "mask must be a bool [1, N] key mask (B > 1 folds: the folds' one mask, [1, N] or expanded to [B, N])"
         geometry = (
             att.n_head,
             att.to_query.weight.shape[0],
@@ -465,8 +483,18 @@ class _LocalAtomDiT(BackendModule):
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
         """``single`` / ``cond`` [S, 1, N, d] (S samples on the augmentation axis), the trunked ``pair`` [1, nwin, 32, 128, d_pair], the key
-        ``mask`` [1, N] (real atoms first)."""
+        ``mask`` [1, N] (real atoms first). Stream ``atom_folds`` (the multi-fold contract, docs/modules.md): ``depth`` = F folds (trunk_seeds of
+        one input), ``single`` [S, F, N, d], ``cond`` one per fold [1, F, N, d] expanded over the S samples, ``pair`` [F, nwin, 32, 128, d_pair],
+        one key mask [1, N] expanded over the folds (FoldForge's grouped sampler step)."""
         d_single, d_cond, d_pair = self.transition.d_hidden, self.transition.d_cond, self.attention.ln_pair.normalized_shape[0]
+        if stream == "atom_folds":
+            f = depth or 1
+            return {
+                "single": random_input((samples, f, length, d_single), dtype=dtype, device=device, generator=generator),
+                "cond": random_input((1, f, length, d_cond), dtype=dtype, device=device, generator=generator).expand(samples, -1, -1, -1),
+                "pair": random_input((f, windows(length), QUERIES, KEYS, d_pair), dtype=dtype, device=device, generator=generator),
+                "mask": key_mask(1, length, device=device, pad=QUERIES - 8).expand(f, length),
+            }
         return {
             "single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
             "cond": random_input((samples, 1, length, d_cond), dtype=dtype, device=device, generator=generator),
@@ -732,7 +760,13 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
     ``BOLTZ_ATOM=fused`` lever): rows [q | k | v] 384 wide and sigmoid(g) 128 wide, the clipped "pad" window, the key mask Boltz's
     ``(1 - mask) * -1e6``, the bias read in place from the trunked [B, nwin, 32, 128, 4]; bf16 operands (bf16, and the master layout's
     autocast operands) or fp32 dots (Boltz-2's ``tf32`` word under the engine's TF32 rule, else ``ieee``); the [q | k | v] rows from one
-    packed GEMM; 128 = 4 x 32 wide, N a multiple of 32."""
+    packed GEMM; 128 = 4 x 32 wide, N a multiple of 32.
+
+    Invariant (shared K / V AdaLN, ``kv_norm = "shared"``): the release computes the queries AND the keys / values from ONE AdaLN output
+    (``b = adaln(a, s)``; ``to_queries(b)``, ``to_keys(b)``, ``to_values(b)``), so the block has no ``attention.ada_ln_kv``. A checkpoint
+    layout that stores a K / V AdaLN beside the query one (e.g. an AF3-style ``q_adaptive_layernorm`` / ``k_adaptive_layernorm`` pair) holds
+    two equal copies of it for this model: load the query copy, and treat a K / V copy that differs as a conversion error, not as a second
+    AdaLN to keep (tests/cpu/test_requests_api.py asserts the layout)."""
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
@@ -808,7 +842,13 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     values (``ada_ln_1``; no ``attention.ada_ln_kv``), a bias-free query and an affine LayerNorm of the flat q / k (``kq_norm``:
     ``attention.norm_query`` / ``attention.norm_key``, over all heads; ``FlatQKNormAugmentedAttention``), the parallel schedule
     (``no_residual_connection_between_attention_and_transition: true``) and the clipped window (``indicesK``/``maskK``;
-    ``key_window="pad"``, the default). No ``"anthropic"`` backend: RoseTTAFold3's release keeps its stock atom attention (no kernel)."""
+    ``key_window="pad"``, the default). No ``"anthropic"`` backend: RoseTTAFold3's release keeps its stock atom attention (no kernel).
+
+    Invariants: (1) shared K / V AdaLN as :class:`AtomDiTBoltz2` (the release's ``ada_ln_1`` output feeds q, k and v; no
+    ``attention.ada_ln_kv``; a separate K / V AdaLN in a checkpoint layout must equal the query one). (2) No query bias: the release's
+    ``to_q`` is ``MultiDimLinear(..., bias=False)`` (:class:`~miniworld_engine.modules.attention.FlatQKNormAugmentedAttention`, so
+    ``attention.to_query.bias is None``); a checkpoint that carries a query bias for it must hold zeros, which are dropped (a non-zero
+    one is a conversion error). tests/cpu/test_requests_api.py asserts both."""
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
@@ -828,7 +868,10 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
     projection (``attention.to_out`` is the identity), the parallel schedule, the clipped window (``get_qkv_indices_for_blocks``: the wrapped
     keys are masked; ``key_window="pad"``, the default) and ``forward(..., uid=uid)`` [B, N]: a real query sees only the keys of its own
     conformer (``get_blocked_atom_pair_dists`` ANDs the same-``ref_space_uid`` mask into the block mask in place). No ``"anthropic"`` backend:
-    Chai-1's release keeps its stock atom attention (no kernel)."""
+    Chai-1's release keeps its stock atom attention (no kernel).
+
+    Invariant (shared K / V AdaLN): the release's ``single_layer_norm`` output feeds the queries and the keys / values (no
+    ``attention.ada_ln_kv``); as for :class:`AtomDiTBoltz2`, a separate K / V AdaLN in a checkpoint layout must equal the query one."""
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 

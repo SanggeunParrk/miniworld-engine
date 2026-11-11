@@ -109,7 +109,7 @@ def _tables(dev, d, h):
     return idx16, idx32
 
 
-_packs: dict = {}
+_packs: dict = _capture.weight_cache("transition_fused_fwd_sm80.packs")
 
 
 def pack(gamma, beta, wa, wb, ws, cache: bool):

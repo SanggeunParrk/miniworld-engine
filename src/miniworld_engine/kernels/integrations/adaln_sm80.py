@@ -28,7 +28,7 @@ from miniworld_engine.kernels._nvcc import build_failed
 
 WIDTHS = (128, 384, 768, 1024)
 BF = torch.bfloat16
-_packs: dict = {}
+_packs: dict = _capture.weight_cache("adaln_sm80.packs")
 #: fewest rows of fp32 inference at the atom width (d = dc = 128) the sm_80 path serves (the A100 port's verified default)
 FP32_ATOM_MIN_ROWS = 8192
 
