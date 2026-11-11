@@ -8,7 +8,8 @@ Scope. `modules.Transition` (`modules/transition.py`):
 Backends: `pytorch` (reference), `cuda` (the sm_90a kernels below), `triton` (the split Triton Transition), `anthropic` (external
 baseline, inference only; not described here). `PairformerBlock` hands its backend to its pair / single `Transition`. Requirements rows
 (`requirements/requirements_module.csv`): pair stream d 64 / 128 / 256 / 384 / 512 with n 2 and 4, single stream d 384 (n 2, 4) and
-d 768 (n 2), MSA stream d 64 / 128 / 256 (n 4); dtypes `float32` and `master` (fp32 parameters, bf16 activations under autocast);
+d 768 (n 2), MSA stream d 64 / 128 / 256 (n 4); dtype `master` (fp32 parameters, bf16 activations under autocast) on every row, plus `float32`
+on the diffusion-head conditioning rows (pair d 128 / 256 / 512, n 2; single d 384 / 768, n 2);
 modes eval and train. Row counts are L^2 (pair, L = 128 .. 768) or L (single), so every pair row count is a whole number of 128-row
 tiles.
 
@@ -29,7 +30,7 @@ Names are the `requirements/requirements_kernel.csv` rows of family `transition`
 | `transition_bwd_residual_reduce_sm90` | backward | `reduce_partials`: sums the per-CTA dW / dgamma / dbeta partials in a fixed order |
 | `transition_prepare_weights_sm90` | forward | `prepare_k` (`transition_fused_sm90a.cu`): bf16 copies of non-bf16 / non-contiguous weights and Ws^T, one launch |
 | `transition_pair_layout_sm90` | forward | `pair_layout_k`: [Wa; Wb] interleaved in row blocks (one GEMM tile holds a and b of the same hidden units), optionally transposed |
-| `transition_fwd_d64_sm90` | forward | D64 fused forward (`wide/kernels/transition_fwd_d64.cu`); inference also has 64-row-tile builds (`d64_fwd_small_f2/f3.cu`) |
+| `transition_fwd_d64_sm90` | forward | D64 fused forward (`wide/kernels/transition_fwd_d64.cu`); inference also has 64-row-tile builds (`wide/d64_fwd_small_f2.cu`, `wide/d64_fwd_small_f3.cu`) |
 | `transition_bwd_d64_sm90`, `transition_bwd_d64_reduce_sm90` | backward | D64 two-role fused backward and its partial reduction (`transition_bwd_d64.cu`) |
 | `transition_fwd_d256_sm90` | forward | D256 fused forward (`transition_fwd_d256.cu`) |
 | `transition_bwd_dxn_layernorm_d256_sm90` | backward | D256 `dxn_lnbwd`: d_xn = [dA\|dB][Wa;Wb] + LayerNorm backward + residual, per-CTA affine partials |
@@ -71,13 +72,14 @@ cuBLAS (`torch.mm` / `addmm`), not engine kernels.
 0. fp32 with TF32 allowed at the f32io shapes (`F32_SHAPES` inference, `F32_TRAIN_SHAPES` training): `fused_wide_sm90a.transition_f32_sm90a`
    (below).
 1. `fused_generic_sm90a`, if `prefers_generic` (bf16 only; at few rows the row-tile-per-CTA builds leave SMs idle). Row limits per D,
-   (inference, training): D64 (3072, 3072), D128 (6144, 3072), D256 (6144, 12288), D384 (16384, 16384), D512 (16384, 12288). D64
+   (inference, training): D64 (3072, 3072), D128 (6144, 3072), D256 (6144, 12288), D384 (16384, 16384), D512 (16384, 12288), D768 (768, 768). D64
    inference never prefers it; D128 inference prefers it up to 512 rows (n 2) / 4096 rows (n 4).
 2. `fused_sm90a`: D128, hidden 256 or 512, bf16, rows a multiple of 128.
 3. `fused_wide_sm90a`: D 64 / 256 / 384 / 512 (n 2, 4) and D768 (n 2), bf16, rows a multiple of 128.
 4. `fused_generic_sm90a`: D a multiple of 64 up to 1024, hidden a multiple of 128, any row count, bf16, or fp32 when TF32 is allowed.
 
-`None` (no build compiled) becomes `BackendUnsupported` in the module. Inference vs training is decided at the entry (grad mode and an
+`None` (no build takes the call) becomes `BackendUnsupported` in the module; a build / load failure of the chosen build raises
+`_nvcc.KernelBuildError` (no fallback to the next build). Inference vs training is decided at the entry (grad mode and an
 operand that requires grad), not inside the autograd Function, so a no-grad call never runs the saving build.
 
 ### D128 fused (`fused_sm90a`)
@@ -169,7 +171,7 @@ and stored by TMA; fp32 outputs are stored directly. Launches are chained with p
   accumulators). LayerNorm inside the expand GEMM was built and measured 5-25 % slower at 768 .. 12288 rows; it stays a separate kernel.
 - Backward, bf16 (a|b saved): `MODE_GATE` (dh = dy Ws, Ws read as stored, MN-major) -> d_xn (cuBLAS over a concatenated [Wa; Wb] at
   <= 12288 rows, else `gemm<OUT>` reading Wa / Wb as stored) -> `ln_bwd` + `reduce_cols`. The dW GEMMs (dWs = dy^T h, [dWa; dWb] =
-  [dA|dB]^T xn) run on a side stream at small rows (`_DW_ASIDE_ROWS`; `MINIWORLD_TRANSITION_GENERIC_DW_ASIDE=0` runs them in line).
+  [dA|dB]^T xn) run on a side stream at small rows (`_DW_ASIDE_ROWS`; above it, in line; there is no switch).
 - Backward, fp32 (recompute): `prep_bwd` (Ws^T, [Wa;Wb]^T, rounded copies; fp32 training makes all copies once per step in the forward)
   -> `gate_kernel` -> `gemm<OUT>` -> `ln_bwd` + `reduce_cols`; dW by cuBLAS. TF32 wgmma cannot read an M-major operand, which is why dW
   stays cuBLAS.
@@ -217,7 +219,8 @@ their schedules are compile-time constants and the shape rules above.
 
 ## Limits (`_supports_cuda`, `_supports_triton`)
 
-- `cuda`: H100 (sm_90) CUDA tensors; `x [..., d_hidden]`, non-empty; affine LayerNorm; bf16 or fp32 activations; the three projections
+- `cuda`: H100 (sm_90) CUDA tensors (A100 (sm_80): `_supports_cuda_sm80`, `kernels/transition/cuda/fused_sm80.py`,
+  `fused_wide_sm80.py`); `x [..., d_hidden]`, non-empty; affine LayerNorm; bf16 or fp32 activations; the three projections
   share one dtype (bf16 or fp32). Otherwise some build must take the shape: generic needs d a multiple of 64 up to 1024 and hidden a
   multiple of 128, and fp32 needs TF32 allowed.
 - `triton`: CUDA tensors, bf16 / fp16 / fp32, same affine / shape checks; any width.
@@ -232,11 +235,11 @@ packing) and `token_dit_train_rows.cu` (training forward / backward row passes a
 producer + two consumer warpgroups, `m64n256`, [Wa|Wb] packed per 256-row tile). Products not listed are cuBLAS. These are part of the
 token DiT design ([token_dit.md](token_dit.md)). Two rows of the family serve other modules: `cond_transition_caller_grad_sum_sm90` /
 `..._add_sm90` (`caller_sum90_k` / `caller_add90_k`) replace autograd's gradient accumulation on the leaves of the H100 fused Transition,
-OPM, PWA and TriMul outputs (`integrations/token_dit_train._native_caller_output` / `_native_caller_hooks`).
+OPM, PWA, TriMul, AttentionPairBias and atom-DiT outputs (`integrations/token_dit_train._native_caller_output` / `_native_caller_hooks`).
 `kernels/conditioned_transition/configs/h100_sm90.json` holds the Triton ops of that family.
 
 ## History
 
-Old note: `git show HEAD:docs/gpus/h100/transition/transition.md` (per-shape timings against anthropic / PyTorch, the D128 forward
+The previous, longer note was deleted; see git history (per-shape timings against anthropic / PyTorch, the D128 forward
 tuning log, the n = 2 replica sweeps, rejected experiments: 2 CTAs / SM, 2-CTA clusters with multicast, `addmm` for the residual,
 cuBLAS dh + elementwise SwiGLU backward, all-chunks-resident weights, `SPLIT2`, `NEWTON`, `SUBCH`, `STAGGER`, `CPX`).

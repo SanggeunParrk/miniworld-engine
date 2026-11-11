@@ -2,7 +2,7 @@
 
 Scope: the triangular gated self-attention classes of `modules/triangle.py` — `TriangleAttention`, `TriangleAttentionAF3`,
 `TriangleAttentionRF3`, `TriangleAttentionChai1`, `TriangleAttentionChai1Confidence` (backends `pytorch`, `cuda`, `triton`, `cueq`,
-`anthropic`) and `BidirectionalTriangleAttention` (`pytorch` only). The requirement rows (`requirements/requirements_module.csv`)
+`anthropic`) and `BidirectionalTriangleAttention` (`pytorch`, `cuda`). The requirement rows (`requirements/requirements_module.csv`)
 ask for L 128-768 (multiples of 128), starting and ending node, `p_drop=0.25`, dtype `master` (bf16 activations, fp32 master
 parameters), modes `eval` and `train`, at (d_pair, heads[, d_hidden]) = (64, 2), (64, 4), (64, 4, 128), (128, 4), (256, 8),
 (384, 12) for `TriangleAttention`; (64, 4), (128, 4), (256, 8), (512, 8) for AF3; (64, 4, 256), (128, 4) for RF3; (64, 4, 128),
@@ -17,8 +17,8 @@ parameters), modes `eval` and `train`, at (d_pair, heads[, d_hidden]) = (64, 2),
 | `pytorch` | the module's statements (`_attention` / `_attention_fp32_softmax`) | reference, every class |
 | `cuda` | the whole update (LN, projections, core, gate, out-projection, residual, dropout) on hand-written sm_90a kernels: `integrations/triattn_h100_sm90.py` ("sm90" route) or, inference only, `triangle_attention/cuda/h100_dh.py` ("dh" route) | see [Limits](#limits--unsupported-calls) |
 | `triton` | the attention core only (`triangle_attention/triton/main.py`, forward + backward); LN, projections, gate, out-projection, residual and dropout are the module's statements | CUDA tensor, bf16 pair, self-attention, square pair, bool `[B, L]` mask |
-| `cueq` | the core on `cuequivariance_torch.triangle_attention` | projections in the pair's dtype (so the `master` rows are unsupported); bf16 head width <= 128 and % 8; fp32 head width <= 32 and % 4, inference only; L above the library's PyTorch-fallback threshold |
-| `anthropic` | the core on `opt_core.kernels.triattn` (tier word `fast`) | inference only; bf16 / fp32; projections in the pair's dtype; the provider's own cell selection |
+| `cueq` | the core on `cuequivariance_torch.triangle_attention` | fp32 masters run the projections under autocast (`master_autocast`); bf16 head width <= 128 and % 8; fp32 head width <= 32 and % 4, inference only; L above the library's PyTorch-fallback threshold |
+| `anthropic` | `TriangleAttention` / `...AF3`: first the fused block `opt_core.attn.pair_fused.tri_attn_block` (LN + projections, core `tier:fast`, gate + W_o); else, and for the other classes, the core on `opt_core.kernels.triattn` (tier word `fast`) | inference only; bf16 / fp32; fp32 masters under `master_autocast`; the provider's own cell selection |
 
 Coverage of the requirement rows by the `cuda` backend (head width = d_hidden / heads):
 
@@ -32,7 +32,10 @@ Coverage of the requirement rows by the `cuda` backend (head width = d_hidden / 
 | `TriangleAttentionRF3` | 128, 4, 32 | fused d128 path (gate / out biases in the tail) | width-generic path (gate bias in the projection GEMM epilogue, out bias in the out-projection epilogue) |
 | `TriangleAttentionRF3` | 64, 4, 64 | dh | width-generic path, dh training core |
 | `TriangleAttentionChai1`, `...Confidence` | all rows | dh (untransposed / dual output) | width-generic path (untransposed / dual output in the glue; 64-channel heads on the dh training core) |
-| `BidirectionalTriangleAttention` | 128 | — (`pytorch` only) | — |
+| `BidirectionalTriangleAttention` | 128 (bias-only) | bidirectional path (`integrations/bidir_triattn_h100.py`) | bidirectional path |
+
+A100 (sm_80): `_cuda_route_sm80` -> `kernels/integrations/triattn_sm80.py` (`triangle_attention/cuda/sm80*.py`, `cuda/sm80/`); the
+bidirectional path builds its kernels for sm_80 in `cuda/sm80_bidir.py`.
 
 ## Kernels
 
@@ -63,6 +66,8 @@ Names from `requirements/requirements_kernel.csv` (family `triangle_attention`);
 | `triangle_attention_dh_fwd_train_sm90` | forward_train | the same kernel with `TRAIN`: also writes O (bf16) and the base-2 LSE for the backward (64-channel heads in training) |
 | `triangle_attention_dh_bwd_kv_sm90`, `triangle_attention_dh_bwd_q_sm90` | backward | `triattn_dh_sm90.cu`: mma.sync FlashAttention-2 backward, P recomputed from the LSE; key side dK / dV, query side dQ and dbias into per-slab fp32 partials (deterministic) |
 | `triangle_attention_fwd`, `..._bwd_pre`, `..._bwd_dkdv`, `..._bwd_dq` | forward / backward | Triton core (`triton/main.py`): flash-style forward with fp32 LSE, FA2-split backward (delta, key-side dK / dV / per-row dbias, query-side dQ) |
+| `triangle_attention_generic_gate_u_sm90` | forward | glue `gate_u` (`triattn_generic_sm90.cu`): `u = sigmoid(g) o O`; used by the bidirectional path |
+| `triangle_attention_bidir_gate_bwd_sm90` | backward | `triattn_bidir_sm90.cu` `gate_bwd` (`cuda/h100_bidir.py`): do, dg of the bidirectional gate on channel planes |
 | `triangle_attention_drop_scale_sm90`, `triangle_attention_graph_rng_write_sm90` | forward_train | `pack.cu` (`h100_triattn.extension("pack")`): Philox keep-mask; used by `integrations/pwa_train.py` (MSA row dropout), not by the triangle modules |
 
 ## Fused path: d_pair = d_hidden = 128, 4 heads x 32
@@ -78,12 +83,16 @@ dropout scale; backward gate_bwd -> bwd_kv -> bwd_q -> head_bwd -> wgrad.
   accumulators to global memory with 16-byte stores per lane. HBM-bound (writes four times what it reads).
 - **Core forward** (`triattn_sm90.cu`). q / k / v in the projection layout `[B, N, S, H, 32]`; sbias `[B, H, S, S]` arrives
   pre-divided by the scale and shared by the N pair rows. A CTA task = (b, h, 128-query tile) x 2 pair rows on a persistent grid
-  that walks the query tile fastest, then the head (CTAs running together share K / V rows in L2); the task order is a dynamic
+  that walks the query tile fastest, then the head (CTAs running together share K / V rows in L2; `TA_ORDER 2`: from S >=
+  `TA_ORDER1_MINS` = 2048 the row group comes before the head); the task order is a dynamic
   global counter (`TA_DYN=1`). 384 threads: one TMA producer warpgroup, two consumer warpgroups (64 queries each). The bias
   fragment initialises the score accumulator (no per-logit bias add), `S += Q K^T` is an RS wgmma with Q in registers for the task,
   and `[O | l] += P [V | 1]` is one m64n40 RS wgmma per 16 keys (row sums on the tensor core from the same bf16 P). The softmax
   offset is the row's running maximum, raised lazily (only when a tile exceeds it by more than `TA_TAU = 8` log2 units; o and l are
-  then rescaled), so `p <= 2^8` for any logit spread. Sub-steps run in FlashAttention-3 order (QK^T of sub-step y + 1 issued before
+  then rescaled), so `p <= 2^8` for any logit spread. From L >= `TA_SPEC_MINS` = 512 (`TA_SPEC 1`) the offset is speculative: no
+  maximum after a row's first finite tile, the tile's row-sum increment (from the tensor core) decides a raise (`TA_TS`), and a tile
+  past `TA_TOVF` goes on a fix list that a second, exact launch recomputes. Descriptors are built once per CTA and moved by one add
+  (`TA_DOFF`, `desc_off`). Sub-steps run in FlashAttention-3 order (QK^T of sub-step y + 1 issued before
   the exponentials of y), nothing in flight at a loop back edge.
 - **Core forward, fp16 inference** (`triattn_h16_sm90.cu`). Same schedule; the score GEMM accumulates in fp16 pairs, the bias
   fragment is the accumulator's initial value, `x = s scale log2e - m` (HFMA2) and `p = 2^x` (`ex2.f16x2`) run on pairs, p is
@@ -146,6 +155,15 @@ queries, 64-key tiles through a two-stage cp.async ring, P rounded to bf16 in re
 cuBLAS, laid back as the class requires (standard: ending node transposed back; Chai-1: untransposed; confidence head: `W_o u +
 (W_t u)^T` / `(W_o u)^T + W_t u`). L is padded to a multiple of 64 with masked keys, so any L is taken.
 
+## Bidirectional path: `BidirectionalTriangleAttention`, bias-only
+
+`kernels/integrations/bidir_triattn_h100.py` (forward, inference and training, and backward). Bias-only weights do not depend on
+the row, so the softmax is formed once per (sample, head) and each direction is a plain GEMM over channel planes `[R, L L]`: the
+width-generic glue `ln_fwd` -> `[Wv; Wg; Wb] y^T` (one GEMM) -> fp32 softmax (starting: bias plane as it is; ending: transposed),
+bf16 P -> per-head GEMMs -> glue `gate_u` -> `pair + U^T Wo^T` (residual in the GEMM's C). Backward: `gate_bwd`
+(`cuda/h100_bidir.py`, `triattn_bidir_sm90.cu`) -> softmax gradients -> `dW`, `dy_ln` (fp32) -> glue `ln_bwd`. Refusals
+(`refusal`): bf16 pair, `use_self_attention=False`, d_pair % 8 == 0 and <= 512, L % 8 == 0, head width % 8 == 0, fp32 LN affine.
+
 ## Batching and chunking
 
 Every sm90 kernel takes B samples in one launch (rows (b, i, j), tasks (sample, head, tile); mask `[B, L]` and dropout scale
@@ -184,31 +202,30 @@ layout. The per-row dbias buffer is `[B, H*L, L, L]` in the bias dtype, reduced 
 ## Launch configs
 
 `kernels/triangle_attention/configs/h100_sm90.json` has entries only for the Triton core: `triangle_attention_fwd_triton` (keys
-`bfloat16+float32|H,HEAD_DIM,L=384`: H 2/4/8/12, HEAD_DIM 16/32/64), `..._bwd_pre_triton`, `..._bwd_dkdv_triton`,
-`..._bwd_dq_triton` (`HEAD_DIM` 16/32/64, `L=384`). The lookup is exact, so other length buckets run the kernel's default config
-(warned once). The CUDA kernels take no table: their schedules are compile-time constants (`TA_R`, `TA_TAU`, `TA_DYN`, tile 128).
+`bfloat16+float32|H,HEAD_DIM,L`: (H, HEAD_DIM) = (2, 32), (4, 16), (4, 32), (4, 64), (8, 32), (8, 64), (12, 32)), `..._bwd_pre_triton`,
+`..._bwd_dkdv_triton`, `..._bwd_dq_triton` (`HEAD_DIM` 16/32/64); every key at L 128, 256, 384, 512, 640, 768. A key without an entry
+runs the kernel's default config (warned once). The CUDA kernels take no table: their schedules are compile-time constants (`TA_TAU`, `TA_SPEC`, `TA_ORDER`, `TA_DYN`, tile 128, 2 rows per task).
 
 ## Limits / unsupported calls
 
-`cuda` (`_cuda_route`): CUDA tensor on capability (9, 0); bf16 pair (no fp32 kernel); self-attention, no q / k RMSNorm; square
+`cuda` (`_cuda_route`): CUDA tensor on capability (9, 0) (capability (8, 0) goes to `_cuda_route_sm80`, the A100 path); bf16 pair (no fp32 kernel); self-attention, no q / k RMSNorm; square
 pair, bool `[B, L]` mask. sm90 route: d_pair = to_query in-features, multiple of 8, <= 512; head width 16 / 32; <= 16 heads; L % 16
 == 0 (training: head width 16 / 32 / 64). Training (grad or live dropout) runs on the sm90 route for every class and variant (fused for
 the standard module at d128 x 4 heads, else width-generic). dh route (inference only): head width 32 / 64, d_pair % 8 == 0 and <=
 512. Everything else returns a reason (`BackendUnsupported`). `triton`: bf16 pair only; the bias-only form
-(`use_self_attention=False`) is refused by every library / engine backend. Heads of 96 / 128 channels and
-`BidirectionalTriangleAttention` have no engine kernel.
+(`use_self_attention=False`) is refused by every library / engine backend of the single-direction classes. Heads of 96 / 128 channels have no engine kernel.
 
 ## Rejected approaches (forward / backward core)
 
 From the 2026-10 H100 notes: fp32 bias via LDS.128 (shared-memory bandwidth), bias fragments held across rows (spills), 3-4 pair
 rows per task (register pressure), exponentials split onto the FMA pipe, head-slowest task order (K / V re-read from DRAM 2.5x),
-wgmma descriptors built once and moved by offsets, bf16 packing on the integer pipes, a single-pass backward with dQ in shared
+bf16 packing on the integer pipes, a single-pass backward with dQ in shared
 memory (dbias partials too large). A wgmma left in flight across a loop back edge makes ptxas serialize every wgmma (C7514);
 stages read with ldmatrix and released to TMA need `fence.proxy.async` before the release.
 
 ## Historical numbers
 
-Historical (from the 2026-10-15 note, `bench.py`, H100 80GB, CUDA graph, B = 1, starting node, no mask, fp32 masters; not
+Historical (from the 2026-10-15 note and its bench script, since removed; H100 80GB, CUDA graph, B = 1, starting node, no mask, fp32 masters; not
 re-measured under the current measurer). ms of this path, and in parentheses the faster of PyTorch-compiled / cuEquivariance
 divided by it:
 
@@ -228,5 +245,4 @@ no other width.
 
 ## History
 
-The previous notes are in git HEAD: `docs/gpus/h100/triattn/triattn.md` and `docs/kernels/triangle-attention.md`
-(`git show HEAD:<path>`).
+The previous, longer notes were deleted; see git history.

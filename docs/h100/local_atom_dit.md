@@ -22,21 +22,26 @@ Inputs: `single` / `cond` `[A, B, N, 128]` (A = samples on the augmentation axis
 `[32 w - 48, 32 w + 80)` clipped to `[0, N)`; `slide` = the same window shifted back inside the real atoms (AF3); `slide_qblock` =
 `slide` against the real count rounded up to 32 (IntelliFold2 torch release).
 
-This page covers the H100 kernels behind the two `"cuda"` paths and the `"triton"` window core. How accuracy and speed are judged:
-[../measure.md](../measure.md); backend selection: [../modules.md](../modules.md); kernels and launch configs: [../kernels.md](../kernels.md).
+This page covers the H100 kernels behind the `"cuda"` backend of all five classes and the `"triton"` window core. How accuracy and
+speed are judged: [../measure.md](../measure.md); backend selection: [../modules.md](../modules.md); kernels and launch configs:
+[../kernels.md](../kernels.md).
 
 ## Which code serves which backend
 
-- `"cuda"`, `AtomDiTProtenix` / `AtomDiTOpenFold3`: the whole block on hand-written sm_90a kernels,
+- `"cuda"`, every class (ONE atom DiT implementation): the whole block on hand-written sm_90a kernels,
   `kernels/integrations/local_dit_h100.py` (`run_block`). Row kernels `kernels/augmented_attention/cuda/sm90_atom/`, window attention
   `kernels/augmented_attention/cuda/sm100_atom_local/lattn90.cu` / `lattn90_tf32.cu` (the directory name is historical; these are the
-  sm_90a mma.sync kernels), cuBLAS for the weight-gradient GEMMs.
-- `"cuda"`, `AtomDiTBoltz2` / `AtomDiTRoseTTAFold3` / `AtomDiTChai1`: `modules/dit_variant_cuda.py` on `kernels/dit_variants`
-  (row kernels + cuBLAS), with the same `lattn90` window attention (`attn_fwd_mma`, `attn_fwd_mma32`, `attn_bwd_mma`,
-  `pair_bias_mma`). The row kernels of that family are documented in [dit_variants.md](dit_variants.md), not here.
+  sm_90a mma.sync kernels: `attn_fwd_mma`, `attn_fwd_mma32`, `attn_bwd_mma`, `pair_bias_mma`), the slid key window's edge windows on
+  `kernels/dit_variants/cuda/edge.cu`, cuBLAS for the weight-gradient GEMMs. `AtomDiTBoltz2` / `AtomDiTRoseTTAFold3` / `AtomDiTChai1`
+  reach it through `VariantAtomCuda` (`modules/dit_variant_cuda.py`), which calls `_LocalAtomDiT._supports_cuda` / `_forward_cuda`
+  on H100; their differences are options of the same kernels ([dit_variants.md](dit_variants.md)).
 - `"triton"` (every class): only the window softmax core runs on `kernels/augmented_attention/triton/window.py`; AdaLN, projections,
   gates and the transition are the PyTorch statements.
-- `"anthropic"`: release ops (af3_torch `atom_window` / `dtk_kernels`, Boltz-2 `launch_win_attn`), a comparison baseline, eval only.
+- `"anthropic"` (Protenix, OpenFold3, Boltz-2): release ops -- Protenix's clipped window on opt_core's pair-bias provider
+  (`opt_core.kernels.apb.atom_attention`), OpenFold3 and Protenix `slide` on the fp32 atom island (`opt_core.kernels.atom_window`),
+  Boltz-2 `launch_win_attn` -- a comparison baseline, eval only.
+- A100 (sm_80): `kernels/integrations/local_dit_sm80_block.py` (Protenix, `pad`, bf16), else the sm_80 builds of
+  `kernels/dit_variants/cuda/train.py` (`modules/dit_variant_cuda.VariantAtomCuda._atom_serving`).
 
 ## Kernels (H100 block, `augmented_attention` family)
 
@@ -56,10 +61,13 @@ Names are the `requirements_kernel.csv` names without the `augmented_attention_`
 | `local_attn_bwd_dkv(_tf32)` | `lattn90*.cu` (`h_attn_dkv*`) | backward | dK, dV and per-sample-chunk dbias partials, key-centric |
 | `local_bias_bwd_samples` | `lattn_dkv.cu` (`local_bias_samples_sm90`) | backward | sums the dbias partials over the sample chunks in fixed order |
 | `local_pair_bias_bwd`, `local_pair_bias_bwd_fin` | `lattn90.cu` (`h_pair_bias_bwd`), `lbias.cu` (`local_bias_fin`) | backward | dz of the trunked pair; per-block partials of dgamma / dWb finished in fixed order |
-| `atom_pre_bwd` | `pre_bwd90.cu` | backward | q / gate / k / v projection and both AdaLN backwards |
+| `atom_pre_bwd` | `pre_bwd90.cu` (`pre_bwd90`; `pre_bwd90_par` parallel K / V AdaLN, `pre_bwd90_sh` one AdaLN for q and k / v) | backward | q / gate / k / v projection and both AdaLN backwards |
+| `atom_kqln_bwd` | `kqln_bwd90.cu` | backward | RoseTTAFold3 only: the flat q / k LayerNorm backward, in place on dp |
 | `atom_cond_bwd`, `atom_cond_bwd_shared` | `cond_bwd90.cu` (plain and split-K), `cond_bwd_sh90.cu` | backward | conditioning-table backward: per-sample rows, or the grouped partials of a shared conditioning summed in fp32 |
 | `atom_finalize_bwd` | `finalize90.cu` | backward | every parameter gradient from the GEMM outputs and column sums, one launch, written in each parameter's dtype |
 
+The model options (`IDENT`, `PARS`, `NOOUT`, `KQLN`, `UP`) are build defines of these kernels; see [dit_variants.md](dit_variants.md).
+The slid windows' edge kernels are the `dit_variants_edge_*_sm90` rows (`edge.cu`, documented in [dit_variants.md](dit_variants.md)).
 `requirements_kernel.csv` also lists the Triton window kernels `augmented_attention_fwd_window`, `_bwd_window`,
 `_bwd_reduce_window` (the `"triton"` backend of all five classes).
 
@@ -101,10 +109,14 @@ folded in as `-inf`) is staged in shared memory once per CTA and reused by every
 cp.async; dbias accumulates in registers over the chunk (one fp32 partial per chunk, summed in fixed order). Chunk size `_chunk`:
 16 samples, halved until the grid has about one CTA per SM.
 
-**AF3 slid window (`AtomDiTOpenFold3`, inference only).** `pre90` takes a `parallel_kv` flag (K / V AdaLN of the raw atoms). The slid
-window equals the clipped one except for windows 0, 1 and the last three real windows; `_slid_edges` recomputes those five windows in
-torch (fp32) from the kernels' q / k / v and overwrites the attention output. The five window indices come from the real atom count
-on the device, so there is no host read and the call can be captured.
+**K / V source.** `pre90` takes a `parallel_kv` mode: 0 chained (Protenix), 1 the K / V AdaLN of the raw atoms (AF3 / OpenFold3), 2
+one AdaLN for q and k / v (Boltz-2, RF3, Chai-1); the backward entries are `pre_bwd90`, `pre_bwd90_par`, `pre_bwd90_sh`.
+
+**Slid windows (`key_window="slide"` / `"slide_qblock"`, any class, inference and training).** The slid window equals the clipped one
+except for windows 0, 1 and the last three real windows; `_slid_edges` recomputes those five windows with the `edge.cu` kernels
+(`edge_attn_fwd`, fp32 inside) from the kernels' q / k / v and overwrites the attention output; in training `edge_bwd_compute` takes
+their gradients before the window backward and `edge_bwd_apply` / `edge_bias_bwd` add them after it. The five window indices come from
+the real atom count on the device, so there is no host read and the call can be captured.
 
 **Inference hoist.** Without `save`, the conditioning tables, the pair bias and the slid-edge tables are made once per input tensor
 (storage address, in-place version, shape) and weight version, via `kernels/_capture.hoisted_table` (scoped to CUDA-graph capture);
@@ -125,25 +137,22 @@ training recomputes them every call. Weight packs are cached per weight version 
 
 The CUDA kernels have fixed geometry (64-row tiles, split factors from `_split_for`, sample chunks from `_chunk`); they take no entry in
 `kernels/augmented_attention/configs/h100_sm90.json`. The Triton window kernels are `@configured` as
-`augmented_attention_{fwd,bwd,bwd_reduce}_window_triton`; the H100 table has no entry for them, so they launch their defaults
-(`BLOCK_N = 128`, 4 warps, 2 stages; fold `BLOCK_D = 32`) and warn once.
+`augmented_attention_{fwd,bwd,bwd_reduce}_window_triton` and have H100 entries in that table (keyed by dtype, `H = 4`, `HEAD_DIM = 32`
+and the length bucket).
 
-## Limits (`_LocalAtomDiT._supports_cuda`, Protenix / OpenFold3)
+## Limits (`_LocalAtomDiT._supports_cuda`)
+
+All five classes (Boltz-2 / RF3 / Chai-1 through `VariantAtomCuda`), every key window, eval and train:
 
 - H100 (sm_90) CUDA tensors; `single` / `cond` / `pair` all bf16 or all fp32. fp32 needs fp32 parameters and no autocast; bf16 takes
   bf16 or fp32 parameters.
-- Not the shared-AdaLN classes (`kv_norm == "shared"`), not `key_window="slide_qblock"`.
-- `single` `[A, 1, N, 128]` (one pair per call), `cond` `[A, 1, N, 128]`, pair `[1, nwin, 32, 128, 16]`, mask bool `[1, N]` or none.
-- Geometry 128 / cond 128 / pair 16, 4 heads x 32, transition hidden 256, a query bias; no q / k norm; every LayerNorm eps `1e-5`;
-  contiguous parameters.
-- Training: chained K / V AdaLN and the clipped `pad` window only (so `AtomDiTProtenix` with the default window). `AtomDiTOpenFold3`
-  and `AtomDiTProtenix(key_window="slide")` are eval only on `"cuda"`.
+- The block inside `local_dit_h100.options` (one AdaLN form and epsilon for the block, sigmoid-form conditioning LayerNorm eps
+  `1e-5`, no per-head q / k norm; see [dit_variants.md](dit_variants.md)).
+- `single` `[A, 1, N, 128]` (one pair per call), `cond` `[A, 1, N, 128]`, pair `[1, nwin, 32, 128, 16]`, mask bool `[1, N]` or none,
+  `uid` `[1, N]` or none.
+- Geometry 128 / cond 128 / pair 16, 4 heads x 32, transition hidden 256; pair LayerNorm eps `1e-5`; contiguous parameters.
 
 `"triton"` (`_supports_triton`): CUDA, bf16 / fp32, `[A, B, N, d]` inputs, head dim <= 64, trunked pair, `mask` / `uid` `[B, N]`.
-
-Variant classes (`VariantAtomCuda._atom_serving`): H100, `key_window` `pad` or `slide`, no autocast, all-bf16 or all-fp32,
-`[A, 1, N, 128]`, 4 heads, pair 16, transition `n = 2`, pair `[1, N / 32, 32, 128, 16]` (N a multiple of 32; fp32 and training: of 64),
-one AdaLN epsilon for the block and conditioning LayerNorm eps `1e-5`.
 
 ## Rejected approaches (brief)
 
@@ -160,4 +169,4 @@ bf16 3.50 ms, fp32 5.81 ms.
 
 ## History
 
-Old page: `git show HEAD:docs/gpus/h100/local_dit/local_dit.md`.
+Old page: `git show 65f37dc3c^:docs/gpus/h100/local_dit/local_dit.md`.

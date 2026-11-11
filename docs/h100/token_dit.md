@@ -4,10 +4,12 @@ Scope: `TokenDiTProtenix` (AF3 Alg. 23: AdaLN + `AugmentedAttentionPairBias` + c
 `TokenDiT(model=...)` for `af3`, `openfold3`, `openfold3_preview2`, `protenix`, `protenix_v2`, `opendde`, `intellifold2`, `esmfold2`) and
 `TokenDiTMiniWorld` (the same block with the per-head q / k RMSNorm, `miniworld`). Backends: `"pytorch"` (the reference), `"triton"`
 (the block's own statements with only the attention core on the Triton pair-bias kernel), `"cuda"` (the fused H100 blocks below) and,
-for `TokenDiTProtenix` only, `"anthropic"` (the release's attention core, eval only). `TokenDiTBoltz2`, `TokenDiTRoseTTAFold3` and
-`TokenDiTChai1` run the SAME `"cuda"` blocks with their model options ([Model options](#model-options-one-algorithm) below). The
-bias-only block (a different algorithm: no query / key) is in [bias_only_dit.md](bias_only_dit.md); the atom variants in
-[dit_variants.md](dit_variants.md). Requirement rows
+for every class but `TokenDiTMiniWorld`, the baselines `"anthropic"` (each model's release attention core, eval only) and `"cueq"`
+(the pair-bias producer on cuEquivariance's `pair_repr_to_attention_bias`, the rest the module's statements). `TokenDiTBoltz2`,
+`TokenDiTRoseTTAFold3` and `TokenDiTChai1` run the SAME `"cuda"` blocks with their model options
+([Model options](#model-options-one-algorithm) below; [dit_variants.md](dit_variants.md)). The bias-only block (a different algorithm:
+no query / key) is in [bias_only_dit.md](bias_only_dit.md); the atom DiT blocks in [local_atom_dit.md](local_atom_dit.md). A100
+(sm_80): `kernels/integrations/augattn_sm80.py` + `conditioned_transition_sm80.py` (variants: `VariantTokenCuda`). Requirement rows
 (`requirements_module.csv`): `token_single`, L 128-768, d_single 768 (1024 engine-own), 16 heads (12 / 24 engine-own), d_cond 384
 (ESMFold2: 768), d_pair 128 / 256 (Protenix-v2) / 512 (IntelliFold2), n = 2; dtypes `float32` and `master` (bf16 activations, fp32
 parameters, bf16 autocast); modes `eval` and `train`. How accuracy and speed are judged: [../measure.md](../measure.md); module and
@@ -54,11 +56,11 @@ Names from `requirements_kernel.csv`; the `cond_transition_*` rows belong to the
 | `cond_transition_token_resgate_adaln_rows_sm90` | forward_infer | `x += sigmoid(gate) y` (fp32) then the transition's AdaLN; optional RNA rounding to TF32 |
 | `cond_transition_token_swiglu_rows_sm90` | forward | `silu(a) b` where the fused expand GEMM is not used |
 | `cond_transition_token_resgate_out_rows_sm90` | forward_infer | the last residual, written in the output dtype |
-| `cond_transition_token_layernorm_rows_sm90` | forward | pair LayerNorm rows (no affine; optional key permutation) |
+| `cond_transition_token_layernorm_rows_sm90` | forward_infer | pair LayerNorm rows (no affine; optional key permutation) |
 | `cond_transition_gemm_swiglu_sm90` | forward_infer | `gemm_swiglu_sm90.cu`: expand GEMM with SwiGLU in the epilogue, `[a \| b]` never stored |
 | `augmented_attention_apb_pair_bias_fwd_sm90` | forward | bf16 pair bias: LN(pair) . Wf on mma.sync, head-major, masked keys -inf (shared with AttentionPairBias) |
 | `bias_only_dit_f32_pair_bias_tc` | forward | fp32 pair bias at d_pair 128 (`pair_bias_tok`): LN + projection + key permutation + mask in one pass |
-| `augmented_attention_pair_bias_fwd_fp32_sm90` | forward | `pair_rows.cu` `bias32_k`: the same for the 256-wide fp32 pair at 16 heads |
+| `augmented_attention_pair_bias_fwd_fp32_sm90` | forward_infer | `pair_rows.cu` `bias32_k`: the same for the 256-wide fp32 pair at 16 heads |
 | `augmented_attention_fwd_sm90` | forward | `attn_fwd.cu`: bf16 wgmma core (gated inference `attn_inf`; training `attn_fwd_og`) |
 | `augmented_attention_fwd_tf32_sm90` | forward | `attn_tf32.cu`: the fp32 core on TF32 wgmma (gated inference and training forward) |
 | `augmented_attention_bwd_dqb_sm90`, `augmented_attention_bwd_dq_sm90`, `augmented_attention_bwd_dkv_sm90` | backward | bf16 backward: dQ + dbias (`attn_dqb`), dQ alone (`attn_dq`), dK / dV (`attn_dkv`) |
@@ -134,23 +136,25 @@ L is padded to a multiple of 128 inside (zero rows, padded keys masked) and the 
 
 The CUDA paths take no launch-config table: tiles, stages and warpgroups are build defines fixed per head layout. The `"triton"`
 backend's core reads `kernels/augmented_attention/configs/h100_sm90.json` (`augmented_attention_fwd_triton`, `_bwd_pre_triton`,
-`_bwd_split_triton`, `_bwd_reduce_triton`; keys by dtype, `H`, `HEAD_DIM` and the L bucket; rows exist for 16 x 48 and 16 x 24), rank 1
-by default; other layouts take the kernel's default.
+`_bwd_split_triton`, `_bwd_reduce_triton`; keys by dtype, `H`, `HEAD_DIM` and the L bucket; the forward has rows for 16 x 48 / 24 /
+32 / 64, 12 x 32 / 64, 24 x 16 / 32, 8 x 48 and 4 x 32), rank 1 by default; other layouts take the kernel's default.
 
 ## Limits (`_supports_cuda`)
 
 | call | result |
 |---|---|
-| not CUDA / not sm_90 | refused |
+| not CUDA / not sm_90 (A100: the sm_80 route above) | refused |
 | key mask that differs across samples (`[A, B, L]` not stride-0) | refused |
-| training: outside bf16 / fp32, `[A, 1, L, d]`, `(heads, d)` in 16 x 768, 24 x 768, 12 x 768, 16 x 1024, cond 384 / 768, pair 128 / 256 / 512, n = 2, key mask `[1, L]`, all LayerNorm eps 1e-5 | refused |
+| block outside `token_dit.options` (mixed AdaLN forms / epsilons, sigmoid-form conditioning LayerNorm eps != 1e-5, flat q / k LayerNorms of different eps or without bias) or pair LayerNorm eps != 1e-5 | refused |
+| training: outside bf16 / fp32, `[A, 1, L, d]`, `(heads, d)` in 16 x 768, 24 x 768, 12 x 768, 16 x 1024, cond 384 / 768, pair 128 / 256 / 512, n = 2, key mask `[1, L]` | refused |
 | inference: the same, plus L a multiple of 128; B > 1 only bf16 with one pair per trunk_seed and a stride-0 mask; fp32 needs fp32 parameters and a bool `[1, L]` mask | refused |
-| `"anthropic"`: grad, `compute_dtype`, QK-norm, head dim > 64, a fully masked row | refused |
+| `"anthropic"`: grad, `compute_dtype`, QK-norm, head dim > 64, a fully masked row (plus each model's own: Boltz-2 head dim 48 only and one mask for the samples; RF3 / Chai-1 no key mask) | refused |
+| `"cueq"`: `compute_dtype`, QK-norm, L at or below cuEquivariance's fallback threshold | refused |
 | `"triton"`: head dim > 64, dtype other than bf16 / fp32 | refused |
 
 ## History
 
-Old notes (git HEAD): `docs/gpus/h100/token_dit/token_dit.md`. Historical (from the 2026-10-15 note, not re-measured under the current
+Old notes: `git show 65f37dc3c^:docs/gpus/h100/token_dit/token_dit.md`. Historical (from the 2026-10-15 note, not re-measured under the current
 measurer; H100 80GB HBM3, CUDA graph, ms per block, 16 x 48): inference bf16 A = 5 shared cond L384 / L768 0.102 / 0.179 against
 PyTorch compiled 0.282 / 0.666; training bf16 A = 48 3.32 / 7.66 against 5.63 / 16.97; training fp32 7.25 / 16.41 against 9.12 / 24.10.
 Rejected there: an FA2-layout mma.sync TF32 core (re-read K / V per 64-row CTA), a one-pass warp-per-row pair-bias kernel for

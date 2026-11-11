@@ -35,13 +35,17 @@ sequence row), so the augment count the kernels see is 1. Inference calls `swa_d
 
 | call | stages |
 |---|---|
-| bf16, every composed extension builds | **composed**: qkvg (slab or wgmma) -> `swa_attn.cu` -> out-projection + FFN (slab or wgmma) |
-| fp32, matmul precision `high` / `medium` (TF32 allowed) | **composed fp32**: `swa_fp32.cu` (`fwd` / `bwd`) |
-| fp32 under `highest`, a composed extension missing, or global attention | **native**: `native_rows` / `native_copy` row kernels, cuBLAS projections (`native_owned_mm`), `tiled_attention` (or `native_attention`); global attention on FlashAttention-4 |
+| bf16, windowed | **composed**: qkvg (slab or wgmma) -> `swa_attn.cu` -> out-projection + FFN (slab or wgmma) |
+| fp32, windowed, matmul precision `high` / `medium` (TF32 allowed) | **composed fp32**: `swa_fp32.cu` (`fwd` / `bwd`) |
+| fp32 under `highest`, or global attention | **native**: `native_rows` / `native_copy` row kernels, cuBLAS projections (`native_owned_mm`), `tiled_attention` (or `native_attention`); global attention on FlashAttention-4 |
+
+The rule is fixed (`dispatch.native_h100_stages`); a composed extension that fails to build or load raises `_nvcc.KernelBuildError`
+(`cuda/loader.extension`), it does not send the call to the native stages.
 
 Global attention (`InputFeatureEmbedder` rows with `swa_window_size = 1000000`) runs on the external library FlashAttention-4
 (`flash_attn.cute` `_flash_attn_fwd` / `_flash_attn_bwd`, `swa_dit/cuda/sm100.attn_global_fwd` / `_bwd`) between the native row
-stages; without FlashAttention-4 installed `_supports_cuda` refuses the call.
+stages, except an fp32 inference call under TF32, which runs it between the fp32 block's own `swa_fp32.cu` qkvg and FFN stages
+(`dispatch._fp32_global_cuda`); without FlashAttention-4 installed `_supports_cuda` refuses the call.
 
 ## Kernels (`swa_dit` family, `kernels/swa_dit/cuda`, sm_90a)
 
@@ -54,11 +58,11 @@ stages; without FlashAttention-4 installed `_supports_cuda` refuses the call.
 | `swa_ffn_bwd.cu` (`bwd`, `bwd_overwrite`) | `ffn_bwd` | FFN-half backward on wgmma; writes the bf16 operands of the FFN weight gradients |
 | `swa_attn.cu` (`attn`) | `attn_fwd`, `attn_bwd` | the window attention, bf16 mma.sync; backward dq + dk + dv in one kernel |
 | `swa_fp32.cu` (`fp32`) | `fwd`, `bwd`, `prep` | the whole fp32 block on tf32 wgmma (weight gradients excluded) |
-| `swa_wgrad_wg.cu` (`wgwg`), `swa_wgrad.cu` (`wgrad`) | `wgrad`, `wgrad_f32` | the five weight gradients of the backward in one launch (TMA + wgmma; mma.sync fallback) |
+| `swa_wgrad_wg.cu` (`wgwg`), `swa_wgrad.cu` (`wgrad`) | `wgrad`, `wgrad_f32` | the five weight gradients of the backward in one launch (TMA + wgmma; the mma.sync `wgrad` build is the dispatch's alternative when `wgwg` is absent, which on H100 now raises instead) |
 | `swa_wgrad_wg_f32.cu` (`wgwg32`) | `wgrad_f32` | the same on fp32 operands as bf16 hi / lo planes |
 | `swa_mod.cu` (`mod`) | `mod_fwd`, `mod_bwd` | built (the composed path requires it) but not launched by any current code path |
 
-`requirements_kernel.csv` lists 43 `swa_dit` kernels: `swa_dit_*_sm90` names for the composed and fp32 stages (`inproj`, `softmax`,
+`requirements_kernel.csv` lists 43 H100 / Triton `swa_dit` kernels (plus 13 A100 `_sm80` rows): `swa_dit_*_sm90` names for the composed and fp32 stages (`inproj`, `softmax`,
 `output_swiglu`, `swiglu`, `output`, `dw`, `transpose`, plus `_rows` and `_fp32` variants), `swa_dit_native_{rows,copy,mod_bwd}_sm90`,
 `swa_dit_tiled_attn_{fwd,bwd_dq,bwd_dkdv}_sm90`, `swa_dit_fused_{oproj,qkvg}_bwd_sm90`, and the Triton kernel names without suffix
 (`swa_dit_inproj_fwd`, `swa_dit_softmax_fwd`, ...; `kernels/swa_dit/triton/`).
@@ -106,8 +110,8 @@ writes. Also under CUDA-graph capture.
 - fp32 composed (`swa_fp32.cu`): residual stream, norms, modulation, gates, RoPE, SwiGLU and every saved tensor fp32; projection
   GEMMs one tf32 pass (round to nearest, ties away); the SwiGLU FFN GEMMs split the weights into tf32 hi + lo (two passes); the window
   attention on bf16 q / k / v / P / dO / dS with fp32 softmax. Served only while TF32 is allowed.
-- fp32 weight gradients: bf16 hi / lo planes, `hi*hi + hi*lo + lo*hi` (~2^-16 relative) up to 65536 rows (`swa_wgrad_wg_f32.cu`; the
-  mma.sync kernel up to 8192 where it does not build); above, torch GEMMs at the process's matmul precision.
+- fp32 weight gradients: bf16 hi / lo planes, `hi*hi + hi*lo + lo*hi` (~2^-16 relative) up to 65536 rows (`swa_wgrad_wg_f32.cu`);
+  above, torch GEMMs at the process's matmul precision.
 - Native under `highest`: exact fp32 cuBLAS projections, bf16 attention operands.
 - Determinism: output, dq and the block-weight gradients are bitwise repeatable; `dmod` accumulated with `red.add` (A not in
   1, 2, 4, 8, 16) is not.
@@ -115,12 +119,13 @@ writes. Also under CUDA-graph capture.
 ## Launch configs
 
 The CUDA kernels have fixed tiles and launch shapes; `kernels/swa_dit` has no `configs/h100_sm90.json`. The Triton kernels are
-`@configured` (`swa_dit_*_triton`) and would launch their defaults on H100; with every composed extension built, the H100 dispatch does
-not reach them.
+`@configured` (`swa_dit_*_triton`; `kernels/swa_dit/configs` holds only `candidates.json`) and would launch their defaults on H100;
+the H100 dispatch does not reach them (every H100 stage is hand CUDA or native).
 
 ## Limits (`AtomDiTMiniWorld._supports_cuda`; `SWAAtomTransformer` uses its first block's)
 
-- H100 (sm_90) only; `attention_params` the 6-tuple of `build_attention_params`.
+- H100 (sm_90); `attention_params` the 6-tuple of `build_attention_params`. A100 (sm_80) is a separate route
+  (`_a100_reason` / `_forward_a100`, `kernels/swa_dit/cuda/sm80`).
 - `x` / `cond` bf16 or fp32, the same dtype; `x` `[N, S, 128]` with 4 heads; `cond` `[N, S, 128]`.
 - `half_window` 64, or global (FlashAttention-4 installed).
 - Bias-free plain `Linear` weights (no magnitude-preserving layers), SwiGLU hidden 256, weights in the activation dtype or fp32.
@@ -136,4 +141,4 @@ not reach them.
 
 ## History
 
-Old page: `git show HEAD:docs/gpus/h100/swa_atom_dit/swa_atom_dit.md`.
+Old page: `git show 65f37dc3c^:docs/gpus/h100/swa_atom_dit/swa_atom_dit.md`.

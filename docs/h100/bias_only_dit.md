@@ -4,7 +4,7 @@ Scope: `TokenDiTMiniWorldBiasOnly` (`TokenDiT(model="miniworld_bias_only")`): AF
 `BiasOnlyAttention` computes `a + sigmoid(to_scale(s)) * to_out(sigmoid(g) * softmax(bias) v)` with `bias = to_bias(LN(pair))` -- then
 the conditioned SwiGLU transition. Backends: `"pytorch"` (the reference) and `"cuda"` (below); there is no `"triton"` and no
 `"anthropic"` backend (no release has this block). `pair_bias_all(blocks, pair)` hoists every block's bias from one LayerNorm and
-one GEMM over the pair (PyTorch on H100; the fused hoist kernels are B200-only). Requirement rows: `token_single`, L 128-768, d_single 768,
+one GEMM over the pair (PyTorch on H100; the fused hoist kernels are B200-only). A100 (sm_80): `kernels/integrations/bias_only_dit_sm80.py`. Requirement rows: `token_single`, L 128-768, d_single 768,
 16 heads x 48, n = 2, d_cond 384 (MiniWorld) and the engine-own d_cond 768 / d_pair 256 rows; dtypes `float32` and `master`; modes
 `eval` (5 samples) and `train` (1 and 48 samples). Measurement and judging: [../measure.md](../measure.md); conventions:
 [../modules.md](../modules.md), [../kernels.md](../kernels.md).
@@ -21,12 +21,12 @@ therefore a different algorithm from the token DiT's: P is made once per pair, a
 | `bias_only_dit_pv_gate_tf32_sm90` | forward | `pvx32`: the same on TF32 wgmma for fp32 (v passed as v^T) |
 | `bias_only_dit_dpb_sm90` | backward | `dpb2`: `dbias = P o (sum_a dO_a v_a^T - D)`, 128 x TN output tile per CTA (bf16, L >= 384) |
 | `bias_only_dit_dpb_pipe_sm90` | backward | `dpb_pipe`: the 64 x 64-tile form of the same (L < 384) |
-| `bias_only_dit_ln_rows_sm90`, `_adaln_in_rows_sm90`, `_resgate_adaln_rows_sm90`, `_resgate_out_rows_sm90`, `_swiglu_rows_sm90` | forward | `bias_only_dit_rows.cu`: conditioning LN, input AdaLN into the fp32 residual, residual + gate + AdaLN, last residual in the output dtype, SwiGLU |
-| `bias_only_dit_softmax_rows_sm90`, `bias_only_dit_softmax_t_sm90` | forward | row softmax of the bias with the key mask folded in (inference); the same writing P and P^T (training) |
+| `bias_only_dit_ln_rows_sm90`, `_adaln_in_rows_sm90`, `_resgate_adaln_rows_sm90`, `_resgate_out_rows_sm90`, `_swiglu_rows_sm90` | forward_infer (`_swiglu_rows_sm90`: forward) | `bias_only_dit_rows.cu`: conditioning LN, input AdaLN into the fp32 residual, residual + gate + AdaLN, last residual in the output dtype, SwiGLU |
+| `bias_only_dit_softmax_rows_sm90`, `bias_only_dit_softmax_t_sm90` | forward_infer; forward_train | row softmax of the bias with the key mask folded in (inference); the same writing P and P^T (training) |
 | `bias_only_dit_gate_bwd_rows_sm90` | backward | `do = da sigmoid(g)`, `dg`, `D = sum da a` per row and head from the gated output alone |
 | `bias_only_dit_cond_tables_gemm_sm90` | forward_infer | `bo_gemm_sm90.cu cond_tables`: both conditioning-table GEMMs as one wgmma launch (up to 384 table rows) |
 | `bias_only_dit_train_*_sm90` | forward_train / backward | `bias_only_dit_train_rows.cu`: weight pack, cond LN, AdaLN, pair bias (mma.sync), residual passes and their backwards, unfold, finalize |
-| `bias_only_dit_f32_*` | forward / backward | `bias_only_dit_f32_rows.cu`: the fp32 rows, the fp32 pair bias (exact FMA or TF32 mma.sync) and its backward, the fp32 softmax |
+| `bias_only_dit_f32_*` | forward_infer / forward_train / forward / backward | `bias_only_dit_f32_rows.cu`: the fp32 rows, the fp32 pair bias (exact FMA or TF32 mma.sync) and its backward, the fp32 softmax |
 | `cond_transition_gemm_swiglu_sm90` | forward_infer | the token DiT's expand GEMM with the SwiGLU epilogue (bf16 inference) |
 
 ## Inference (`kernels/integrations/bias_only_dit.py` -> `bias_only_dit/cuda/runner.py`, `FusedBiasOnlyDiT`)
@@ -102,7 +102,7 @@ No CUDA kernel here reads a launch-config table: tiles and groups are build defi
 
 ## History
 
-Old notes (git HEAD): `docs/gpus/h100/bias_only_dit/bias_only_dit.md`, `docs/kernels/bias-only-attention.md` (the latter is about the
+Old notes: `git show 65f37dc3c^:docs/gpus/h100/bias_only_dit/bias_only_dit.md` and `git show 65f37dc3c^:docs/kernels/bias-only-attention.md` (the latter is about the
 Triton bias-only TriangleAttention benchmark and does not apply to this block). Historical (from the 2026-10-15 note, not re-measured
 under the current measurer; ms per block, 16 x 48, CUDA graph): inference bf16 A = 5 shared cond L384 / L768 0.089 / 0.146 against
 PyTorch compiled 0.207 / 0.424; fp32 0.163 / 0.296 against 0.365 / 0.772. Rejected on H100: the B200 three-kernel step (cluster-split

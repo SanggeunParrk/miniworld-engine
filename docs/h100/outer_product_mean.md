@@ -11,7 +11,8 @@ Scope. `modules.OuterProductMean` (`modules/msa.py`):
 Variants: `projection_bias` (RoseTTAFold3), `groups` (Chai-1: 8 groups of 8-wide halves, the 512 products LayerNorm'd by `product_norm`,
 no count division), `mask_interchain`, an optional cross-tensor `residual` (returns `residual + OPM`).
 
-Backends: `pytorch` (reference), `cuda` (H100 kernels below), `triton` (portable Triton path). Requirements rows: MSA stream, L 128 ..
+Backends: `pytorch` (reference), `cuda` (H100 kernels below), `triton` (portable Triton path), `anthropic` (external baseline, not
+described here). Requirements rows: MSA stream, L 128 ..
 768, depth 1024 (one row also 384 / 512 / 2048); (d_msa, d_pair, d_hidden) = (64, 128, 32) with and without projection bias and in both
 normalisation orders, (64, 256, 64) with groups 8, (128, 256, 32), (128, 384, 32), (256, 512, 32); dtype `master` only (bf16
 activations, fp32 parameters); eval and train.
@@ -28,7 +29,7 @@ once per (d_msa, d_pair) and variant flags), `kernels/outer_product_mean/cuda/ch
 | `outer_product_mean_pack_weights_sm90` | forward | `opm_pack_native`: LN affine to fp32, the projection / out weights to bf16 (and Wo^T, the gamma-folded backward weight in training); inference caches the packed forms per parameter version |
 | `outer_product_mean_prologue_sm90` | forward | `opm_prologue_wgmma_native`: one 64-MSA-row tile per token, LN + both projections + mask on wgmma, written in the grouped layouts A2 `[(i,c), s]`, BT `[(j,e), s]` |
 | `outer_product_mean_prologue_tma_sm90` | forward | `opm_prologue_tma_hopper` (d_msa 64): the persistent TMA version of the prologue (one warp loads, eight warps LayerNorm 128 MSA rows in place, one warpgroup projects on wgmma, TMA stores) |
-| `outer_product_mean_prologue_wide_sm90` | forward | `opm_prologue_tma_wide<CM>`: the same persistent TMA prologue for d_msa 64 / 128, with the optional projection biases (RF3) in its epilogue |
+| `outer_product_mean_prologue_wide_sm90` | forward | `opm_prologue_tma_wide<CM>`: the same persistent TMA prologue for d_msa 64 / 128 / 256, with the optional projection biases (RF3) in its epilogue |
 | `outer_product_mean_mask_bits_sm90` | forward | `opm_mask_bits_native`: the [N, S/32] bit mask |
 | `outer_product_mean_count_sm90` | forward_train | `opm_count_tiled`: n[i, j] = popcount of the AND of two bit rows, exact, 16 x 16 pair tiles (inference takes the count inside the epilogue instead) |
 | `outer_product_mean_epilogue_sm90` | forward | `opm_epilogue_kernel`: reads the cuBLAS product in its grouped layout, [i,j,c,e] -> [(i,j),(c,e)] permute, / n in the fp32 accumulator, projection to d_pair on wgmma, bias, residual; d_pair cut into 128-wide CTA slices |
@@ -56,9 +57,11 @@ The outer product itself (O = A2 BT^T), dA / dB and the composed paths' projecti
 | projection bias | no grad | `composed.biased_wide` (S % 256, N % 64, d_msa 64 / 128, d_pair 128 / 256 / 384), else `composed.inference` |
 | groups > 1 (Chai-1) | any | `chai.forward` (8 x 8, d_msa 64, N % 64, batch 1, d_pair % 128; training without interchain) |
 
+A100 (capability (8, 0)): `integrations/opm_sm80.py` (`outer_product_mean/cuda/*_sm80.py`); Chai-1 on `chai.py` with `cuda/chai_sm80.py`.
+
 ### `opm_train` (groups 1)
 
-Range (`refusal`): d_hidden 32, (d_msa, d_pair) in {(64, 128), (128, 256), (128, 384)}, bf16, batch 1, no interchain mask. A length that
+Range (`refusal`): d_hidden 32, (d_msa, d_pair) in `SHAPES` = {(64, 128), (128, 256), (128, 384), (256, 512)}, bf16, batch 1, no interchain mask. A length that
 is not a multiple of 64 or a depth that is not a multiple of 256 is padded with masked rows and the output cut back; the residual is fused
 in the epilogue only for an unpadded length. `count_offset` is taken as the divisor `max(count, dmin) + doff` (`divisor_params`).
 
@@ -125,24 +128,22 @@ kernels; groups use the `*_epilogue_ln_*` kernels with one batched GEMM.
 
 ## Launch configs
 
-No `kernels/outer_product_mean/configs/h100_sm90.json` exists (only `candidates.json`, the pretuner's candidate list): the Triton ops
-launch their decorator defaults (with a one-time warning). The CUDA kernels have fixed schedules; the per-shape choices are the
+`kernels/outer_product_mean/configs/h100_sm90.json` holds the eight Triton ops (`outer_product_mean_*_triton`); a key without an
+entry runs the decorator default (warned once). The CUDA kernels have fixed schedules; the per-shape choices are the
 `_h100_path` / `_fused_enabled` / `_epilogue_*_enabled` / `_owned_blas_for` rules above.
 
 ## Limits
 
 - `cuda` (`_common_refusal` + `_cuda_route`): CUDA, sm_90, bf16 msa, `msa [B, M, L, d_msa]`, bool mask `[B, M, L]`, residual in msa's
-  dtype. Training needs `opm_train` (batch 1, the three widths, no interchain mask) or, for groups, `chai` (training without interchain).
-  The requirements row (d_msa 256, d_pair 512) is not in `opm_train.SHAPES`: no CUDA training there; its inference runs
-  `composed.inference`.
+  dtype. Training needs `opm_train` (batch 1, the four `SHAPES` widths, no interchain mask) or, for groups, `chai` (training without interchain).
 - `triton`: bf16 msa; no `count_offset`; no `mask_interchain`; d_msa and d_hidden powers of two >= 16; d_pair % 32; grouped products a
   power of two in 16 .. 1024 with groups a power of two; a fused residual must be bf16 `[B, L, L, d_pair]`.
 - A `dead` instance returns the residual in inference.
 
-Historical (from the HEAD OPM note, record `opm_fused_ladder_20261026`, not re-measured under the current measurer): at L256 S1024 the
+Historical (from the deleted OPM note, record `opm_fused_ladder_20261026`, not re-measured under the current measurer): at L256 S1024 the
 fused inference kernel took 212 us against 190 us (cuBLAS product) + 59 us (epilogue).
 
 ## History
 
-Old note: `git show HEAD:docs/gpus/h100/opm/opm.md` (per-cell timings, speed-of-light tables, comparisons with anthropic and PyTorch,
+The previous, longer note was deleted; see git history (per-cell timings, speed-of-light tables, comparisons with anthropic and PyTorch,
 the B200 comparison).
