@@ -98,7 +98,9 @@ def test_tiny_forward_on_cpu(module: str):
 COUNT_OFFSET = [(n, r) for n, r in ROWS if r["module"] == "OuterProductMean" and "count_offset" in r["options"]]
 
 
-@pytest.mark.parametrize("module", ["LayerNorm", "Transition", "TriangleMultiplication", "AttentionPairBias", "OuterProductMean", "PoolAtoms"])
+@pytest.mark.parametrize(
+    "module", ["LayerNorm", "Transition", "TriangleMultiplication", "AttentionPairBias", "OuterProductMean", "PoolAtoms"]
+)
 def test_tiny_backward_on_cpu(module: str):
     _tiny_backward(*FIRST[module])
 

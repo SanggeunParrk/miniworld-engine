@@ -187,7 +187,10 @@ class OuterProductMean(BackendModule, MasterWeights):
     #:   divide after the projection, d_msa 128, d_hidden 32, d_pair % 256, no projection bias (ESMFold2, Protenix-v2)  the esmfold2 kit's
     #:       ``ef2_msa_v2.opm_fused`` (LN + W x row mask producer, cuBLAS, projection + bias / clamp(n, 1) + pair residual epilogue)
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "triton": 2}  # 2026-11-10: sm_80 paths; 2026-11-11: count_offset in the triton / sm_80 kernels (FoldForge R2)
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:a100_sm80": 3,
+        "triton": 2,
+    }  # 2026-11-10: sm_80 paths; 2026-11-11: count_offset in the triton / sm_80 kernels (FoldForge R2)
 
     # ------------------------------------------------------------------------------------------------------------------ anthropic
     def _anthropic_route(self, msa, mask, residual) -> tuple[str | None, str | None]:

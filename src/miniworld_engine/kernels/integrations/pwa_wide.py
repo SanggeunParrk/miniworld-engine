@@ -37,7 +37,7 @@ DHID = (8, 16)
 # LayerNorm backward (`ln_bwd_w`); the pair side is `pair_wide.cu` at d_pair 512
 BIG = ((256, 512, 32),)
 NMAX = 1024  # training: the pair backward stages a row of w / dw logits [H][N] fp32 on its tile ring (pair_wide.cu pair_bwd3)
-NMAX_INFER = 2048  # inference: the pair forward holds a row of bf16 logits [H][N] next to its tiles (pair_wide.cu NMAX_FWD; FoldForge 5I28 E3)
+NMAX_INFER = 2048  # inference: a row of bf16 logits [H][N] next to the tiles (pair_wide.cu NMAX_FWD; FoldForge 5I28 E3)
 _EXT: dict[str, Any] = {}
 
 

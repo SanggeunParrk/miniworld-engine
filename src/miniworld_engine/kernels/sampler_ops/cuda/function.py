@@ -101,14 +101,15 @@ def _pool_atoms_op(x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor
     return ext().pool_atoms(x, idx, gather_mask, atom_mask)
 
 
-
 def _pool_atoms_bwd_fake(gout, x, idx, gather_mask, atom_mask):
     """The gradient of ``x``: its shape and dtype (bf16)."""
     return torch.empty_like(x)
 
 
 @opaque(fake=_pool_atoms_bwd_fake, name="sampler_ops_pool_atoms_bwd_sm90")
-def _pool_atoms_bwd_op(gout: torch.Tensor, x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor, atom_mask: torch.Tensor) -> torch.Tensor:
+def _pool_atoms_bwd_op(
+    gout: torch.Tensor, x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor, atom_mask: torch.Tensor
+) -> torch.Tensor:
     """d out / d x of the pooling (``cuda/sampler_ops.cu``): the slots' rows and weights (``pool_atoms_prep``), a stable sort of the slots by row,
     then one warp per (row, sample) adds its slots in slot order (fp32, no atomics)."""
     from miniworld_engine.kernels.sampler_ops.cuda.sm80 import device_ext as ext

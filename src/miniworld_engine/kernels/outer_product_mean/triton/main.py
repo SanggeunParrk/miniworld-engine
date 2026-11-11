@@ -1116,7 +1116,21 @@ def triton_outer_product_mean(
         else:
             outs.append(
                 _OuterProductMeanTriton.apply(
-                    msa[bi], m, ln_weight, ln_bias, w_left, w_right, bl, br, w_out, b_out, r, float(eps), bool(normalize_before_proj), dmin, doff
+                    msa[bi],
+                    m,
+                    ln_weight,
+                    ln_bias,
+                    w_left,
+                    w_right,
+                    bl,
+                    br,
+                    w_out,
+                    b_out,
+                    r,
+                    float(eps),
+                    bool(normalize_before_proj),
+                    dmin,
+                    doff,
                 )
             )
     return outs[0].unsqueeze(0) if len(outs) == 1 else torch.stack(outs, 0)

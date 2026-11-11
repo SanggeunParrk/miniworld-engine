@@ -114,14 +114,15 @@ def _pool_atoms_op(x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor
     return portable_pool_atoms(x, idx, gather_mask, atom_mask)
 
 
-
 def _pool_atoms_bwd_fake(gout, x, idx, gather_mask, atom_mask):
     """The gradient of ``x``: its shape and dtype (bf16)."""
     return torch.empty_like(x)
 
 
 @opaque(fake=_pool_atoms_bwd_fake, name="sampler_ops_pool_atoms_bwd")
-def _pool_atoms_bwd_op(gout: torch.Tensor, x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor, atom_mask: torch.Tensor) -> torch.Tensor:
+def _pool_atoms_bwd_op(
+    gout: torch.Tensor, x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor, atom_mask: torch.Tensor
+) -> torch.Tensor:
     """d out / d x of the pooling (``triton/main.py``: ``_pool_prep``, a stable sort of the slots by row, ``_pool_bwd``)."""
     from miniworld_engine.kernels.sampler_ops.triton.main import portable_pool_atoms_bwd
 
