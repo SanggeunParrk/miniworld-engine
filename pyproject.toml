@@ -18,8 +18,9 @@ dependencies = [
   "pydantic",       # modules/atom_dit.py: SWA atom block configs
   "pyyaml",         # measure/config.py: measurement configs
   "cuda-bindings",  # kernels/trimul_inproj/cuda: the H100 TriMul driver API
+  "ninja",          # torch.utils.cpp_extension: every JIT build of a CUDA kernel (A100, or a Python / torch without prebuilt kernels)
   # The prebuilt H100 kernels (CUDA 12.9 / torch 2.13 / CPython 3.12), installed into miniworld_engine/_prebuilt/; elsewhere a kernel
-  # JIT-builds on first use (needs nvcc and, for the CUTLASS kernels, CUTLASS_PATH).
+  # JIT-builds on first use (needs a CUDA toolkit; the CUTLASS / MathDx headers are fetched by kernels/_headers.py, see docs/install.md).
   'miniworld-engine-kernels-sm90-cu129==2.5.0; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
 ]
 
@@ -113,7 +114,7 @@ typeCheckingMode = "standard"
 
 # ----------------------------------------------------------------------------------------------------------------------------- pixi
 # One environment for the repo (torch 2.13 cu129 + triton 3.7, cuequivariance baseline, TE). The materialized `.pixi/` is ignored.
-# Cluster (CSSB H100, driver 575 = CUDA 12.9 max): cu12 only; resolve / download on the login node (compute nodes are offline);
+# Pinned to CUDA 12.9 (driver >= 575): cu12 only; on a cluster whose compute nodes are offline, resolve / download on the login node;
 # at runtime export LD_LIBRARY_PATH=$CONDA_PREFIX/lib.
 [tool.pixi.workspace]
 channels = ["conda-forge", "nvidia"]
