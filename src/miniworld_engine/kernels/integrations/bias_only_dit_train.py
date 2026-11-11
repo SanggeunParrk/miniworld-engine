@@ -182,7 +182,7 @@ def _f32(t):
     return t.detach().float().contiguous()
 
 
-_PACKS: dict = {}
+_PACKS: dict = _capture.weight_cache("bias_only_dit_train.packs")
 
 
 def _pack1() -> bool:
@@ -1216,7 +1216,7 @@ class _Block(torch.autograd.Function):
 
 
 # ------------------------------------------------------------------------------------------------ fp32 (TF32) path
-_PACKS32: dict = {}
+_PACKS32: dict = _capture.weight_cache("bias_only_dit_train.packs32")
 
 
 def _pack32(P, dev):

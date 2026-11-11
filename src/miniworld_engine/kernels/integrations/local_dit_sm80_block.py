@@ -110,7 +110,7 @@ def serves(module, single, cond, pair, mask) -> bool:
 
 
 # ------------------------------------------------------------------------------------------------------------ weights
-_PACKS: dict = {}
+_PACKS: dict = _capture.weight_cache("local_dit_sm80_block.packs")
 
 
 def _pack(weights, cross):
@@ -204,7 +204,7 @@ def _weights(weights):
     return pack
 
 
-_PACKS_BWD: dict = {}
+_PACKS_BWD: dict = _capture.weight_cache("local_dit_sm80_block.packs_bwd")
 
 
 def _pack_bwd(weights, cross):
@@ -252,8 +252,8 @@ def _weights_bwd(weights):
     return pack
 
 
-_HOIST_COND: dict = {}  # (conditioning tensor, weights) -> mod: the per-item conditioning table of an inference call
-_HOIST_BIAS: dict = {}  # (pair tensor, LN / bias weights) -> the windowed pair bias
+_HOIST_COND: dict = _capture.weight_cache("local_dit_sm80_block.hoist_cond")  # (conditioning tensor, weights) -> mod: the per-item conditioning table of an inference call
+_HOIST_BIAS: dict = _capture.weight_cache("local_dit_sm80_block.hoist_bias")  # (pair tensor, LN / bias weights) -> the windowed pair bias
 
 
 def _tkey(t):

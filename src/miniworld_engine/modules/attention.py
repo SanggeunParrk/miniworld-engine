@@ -14,9 +14,12 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from miniworld_engine.kernels import _capture
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.norm import AdaptiveLayerNorm, LayerNorm, RMSNorm
 from miniworld_engine.modules.primitives import BackendModule, Linear, MasterWeights, key_mask, master_autocast, random_input
+
+_capture.instance_cache_attr("_anthropic_params")  # the anthropic producer's fp32 parameter copies (clear_weight_caches)
 
 # ------------------------------------------------------------------------------------------------------------------- "triton" core
 #: the head widths the Triton pair-bias attention core (kernels/augmented_attention/triton/main.py) is built for
@@ -659,7 +662,11 @@ class AugmentedAttentionPairBias(BackendModule):
 class FlatQKNormAugmentedAttention(AugmentedAttentionPairBias):
     """RoseTTAFold3's DiT attention: :class:`AugmentedAttentionPairBias` with an affine LayerNorm of the flat q / k, over all heads at once
     (``norm_query`` / ``norm_key``, each ``LayerNorm(n_head * d)``, computed in fp32) in place of the per-head RMSNorm, and a bias-free query
-    projection (RF3 ``AttentionPairBiasDiffusion.to_q``: ``MultiDimLinear(..., bias=False)``)."""
+    projection (RF3 ``AttentionPairBiasDiffusion.to_q``: ``MultiDimLinear(..., bias=False)``).
+
+    Invariant: ``to_query.bias is None`` (the release has no query bias). A checkpoint layout that stores one for RoseTTAFold3 (an all-zero
+    tensor) is the bias-free query: drop it after checking it is zero; a non-zero value is a conversion error. Used by
+    :class:`~miniworld_engine.modules.token_dit.TokenDiTRoseTTAFold3` and :class:`~miniworld_engine.modules.atom_dit.AtomDiTRoseTTAFold3`."""
 
     def __init__(self, d_single: int, d_cond: int, d_pair: int, n_head: int, *, backend: str = "pytorch") -> None:
         super().__init__(d_single, d_cond, d_pair, n_head, query_bias=False, backend=backend)

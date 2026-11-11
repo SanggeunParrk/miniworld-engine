@@ -28,7 +28,7 @@ from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flag
 
 _SRC = Path(__file__).parent / "h100_sources"
 HEAD_DIMS = (32, 64)
-_PACKS: dict = {}
+_PACKS: dict = _capture.weight_cache("triangle_attention_h100_dh.packs")
 
 
 @functools.lru_cache(maxsize=None)

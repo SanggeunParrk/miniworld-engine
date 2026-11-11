@@ -337,6 +337,13 @@ class VariantAtomCuda:
             from miniworld_engine.modules.atom_dit import _LocalAtomDiT
 
             return _LocalAtomDiT._supports_cuda(cast(_LocalAtomDiT, self), single, cond, pair, mask, uid=uid)
+        from miniworld_engine.modules.atom_dit import _fold, _folds, _multi_fold_reason
+
+        if _a100(single) and _folds(single) > 1:  # B > 1 folds: one sm_80 call per fold (the sm_80 atom paths take one pair)
+            why = _multi_fold_reason(cast(nn.Module, self), single, cond, pair, mask, uid)
+            if why is not None:
+                return f"A100: {why}"
+            single, cond, pair, mask, uid = _fold(single, cond, pair, mask, uid, 0)
         fn, why = self._atom_serving(single, cond, pair, mask, uid)
         return why if fn is None else None
 
@@ -345,6 +352,10 @@ class VariantAtomCuda:
             from miniworld_engine.modules.atom_dit import _LocalAtomDiT
 
             return _LocalAtomDiT._forward_cuda(cast(_LocalAtomDiT, self), single, cond, pair, mask, uid)
+        from miniworld_engine.modules.atom_dit import _fold, _folds
+
+        if _folds(single) > 1:  # B > 1 folds (``_supports_cuda``): one sm_80 call per fold, in fold order
+            return torch.cat([self._forward_cuda(*_fold(single, cond, pair, mask, uid, b)) for b in range(_folds(single))], 1)
         fn, call = self._atom_serving(single, cond, pair, mask, uid)
         return _run(
             fn,

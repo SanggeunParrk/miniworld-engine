@@ -204,7 +204,7 @@ def _key_mask(mask, A, L, perm=None):
     return torch.where(m, 0.0, -1e30).to(torch.float32).expand(A, L).contiguous()
 
 
-_PACKS: dict = {}
+_PACKS: dict = _capture.weight_cache("token_dit_train.packs")
 
 
 def _native_rpb():

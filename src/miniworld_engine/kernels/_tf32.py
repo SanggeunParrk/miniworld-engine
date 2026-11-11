@@ -35,6 +35,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels import _capture
+
 
 @contextlib.contextmanager
 def tf32_matmul(on: bool = True):
@@ -159,7 +161,7 @@ def tf32_grid_many(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
     return tuple(cast("list[torch.Tensor]", out))
 
 
-_CACHE: dict[tuple, tuple] = {}
+_CACHE: dict[tuple, tuple] = _capture.weight_cache("tf32.operands")
 _CACHE_MAX = 256
 
 

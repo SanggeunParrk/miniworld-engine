@@ -54,7 +54,7 @@ SHAPES = (
 )  # (heads, d_single): 8 x 48, 12 x 32, 16 x 24 (padded to 32), 24 x 16, 16 x 32
 LOG2E = math.log2(math.e)
 NEG = -1e30  # masked keys of the B200 bf16 path: finite, so a fully masked sample stays NaN-free (H100: -inf, see the docstring)
-_packs: dict = {}
+_packs: dict = _capture.weight_cache("attention_pair_bias_b200.packs")
 _cores: dict = {}
 #: Opt-in fp32 pair-weight gradient ("shadow") of H100 training at L 384 / 768 for the SHAPES head layouts (2.4.x
 #: ``settings.apb_h100_exact_dwb``). False (default): the fused kernel's dWb (bf16 operands, fp32 accumulation; the same error

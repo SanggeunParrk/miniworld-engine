@@ -689,3 +689,4 @@ swa_dit_qkvg_bwd_sm80,swa_dit,AtomDiTESMFold2|SWAAtomTransformer|InputFeatureEmb
 swa_dit_qkvg_fwd_fp32_sm80,swa_dit,AtomDiTESMFold2|SWAAtomTransformer|InputFeatureEmbedder,forward,1
 swa_dit_ffn_fwd_fp32_sm80,swa_dit,AtomDiTESMFold2|SWAAtomTransformer|InputFeatureEmbedder,forward,1
 swa_dit_varlen_sm80,swa_dit,SWAAtomTransformer|InputFeatureEmbedder,forward,1
+parallel_residual_fwd,parallel_residual,ParallelResidual,forward,1

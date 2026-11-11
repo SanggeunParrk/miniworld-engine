@@ -6,6 +6,8 @@ What every engine module must serve, and how a backend of it is judged.
 
 - `requirements_module.csv` — the single source of shapes, dtypes and modes. One row per distinct
   (class, stream, dims, options): `module,model,stream,lengths,depths,dims,options,dtypes,modes,eval_samples,train_samples,source`.
+  Streams `token_folds` / `atom_folds` (TokenDiT* / AtomDiT* rows): the multi-fold layout `[S samples, F folds, L, d]`, one pair per fold, F = the
+  row's `depths` (docs/modules.md, multi-fold contract).
   `module` is a class of `miniworld_engine.modules`; `model` the selector keys that build it; `dtypes` among
   `float32|master` (master = fp32 parameters, bf16 activations, forward under bf16 autocast: this is the only bf16 case, the engine has no
   bf16-parameter requirement, so no row says `bfloat16`; a class without parameters runs its bf16 activations as `master`); `modes` among

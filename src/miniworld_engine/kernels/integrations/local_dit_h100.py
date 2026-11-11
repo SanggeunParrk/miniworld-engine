@@ -18,6 +18,7 @@ from typing import cast
 import torch
 from torch.autograd.function import once_differentiable
 
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._tf32 import tf32_matmul
 from miniworld_engine.kernels.integrations import local_dit as _ld
@@ -26,9 +27,9 @@ DS, DC, DP, NH = 128, 128, 16, 4
 _NW = 27  # the canonical leaves (local_dit.WEIGHTS + CROSS_WEIGHTS); a model's option leaves follow them (KQLN: wq bq wk bk)
 F32 = torch.float32
 BF = torch.bfloat16
-_HOIST_COND: dict = {}
-_HOIST_BIAS: dict = {}
-_HOIST_EDGES: dict = {}  # (pair tensor, LN / bias weights) -> the slid edge windows' indices, key mask and pair bias
+_HOIST_COND: dict = _capture.weight_cache("local_dit_h100.hoist_cond")
+_HOIST_BIAS: dict = _capture.weight_cache("local_dit_h100.hoist_bias")
+_HOIST_EDGES: dict = _capture.weight_cache("local_dit_h100.hoist_edges")  # (pair tensor, LN / bias weights) -> the slid edge windows' indices, key mask and pair bias
 
 
 def _edge_ext():
