@@ -75,24 +75,21 @@ def test_per_sample_workspace_is_one_samples() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA device")
-def test_cuda_serves_samples_one_at_a_time_without_autograd() -> None:
-    """``cuda``: the single attention takes one sample (``B == 1``); without autograd the block runs the B samples one at a time on the
-    kernels (the same calls as B separate ones: bitwise), with autograd the batched call stays refused."""
-    from miniworld_engine.modules.primitives import BackendUnsupported
-
+def test_cuda_serves_the_batched_block() -> None:
+    """``cuda``: every sub-module takes ``B > 1`` (the single attention too: FoldForge 5I28 confidence head), so the block runs the batched
+    composition with and without autograd (no per-sample path: that is ``"pytorch"``'s workspace path), equal to B one-sample calls up to
+    GEMM rounding (the batched triangle updates' GEMMs span B samples' rows)."""
     m = _block(True)  # fp32 masters, bf16 activations under autocast (the "master" case)
     m.set_backend("cuda")
     pair, mask, s = _inputs(3, 128, torch.bfloat16, True)
     assert s is not None
-    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-        why = m.unsupported(pair, mask, s)
-        if why is not None:
-            pytest.skip(f"cuda: {why}")
-        p, si = m(pair, mask, s)
-        ones = [m(pair[b : b + 1], mask[b : b + 1], s[b : b + 1]) for b in range(3)]
-    torch.testing.assert_close(p, torch.cat([o[0] for o in ones]), rtol=0, atol=0)
-    torch.testing.assert_close(si, torch.cat([o[1] for o in ones]), rtol=0, atol=0)
-    with torch.enable_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-        assert m.unsupported(pair, mask, s) is not None
-        with pytest.raises(BackendUnsupported):
-            m(pair, mask, s)
+    for grad in (False, True):
+        with torch.set_grad_enabled(grad), torch.autocast("cuda", dtype=torch.bfloat16):
+            why = m.unsupported(pair, mask, s)
+            if why is not None and "single_attention" not in why:
+                pytest.skip(f"cuda: {why}")
+            assert why is None
+            p, si = m(pair, mask, s)
+            ones = [m(pair[b : b + 1], mask[b : b + 1], s[b : b + 1]) for b in range(3)]
+        torch.testing.assert_close(p.detach(), torch.cat([o[0] for o in ones]).detach(), rtol=2e-2, atol=2e-2)
+        torch.testing.assert_close(si.detach(), torch.cat([o[1] for o in ones]).detach(), rtol=2e-2, atol=2e-2)
