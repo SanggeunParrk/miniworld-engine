@@ -1,0 +1,132 @@
+# MiniWorld's trained models, pinned: the init every projection of MiniWorld's trained path has TODAY (engine 2.5.2 code defaults, and
+# MiniWorld's own layers at MiniWorld f8a51e9f0), written out explicitly. `preset: miniworld` keeps reproducing those models' init even if
+# the engine's code defaults change later (`engine` = whatever the code says now). On every engine class this preset equals the code
+# defaults (tested bit for bit). Path audited: configs phase1a_distogram_medium_v240 -> MiniSWAModel, phase2 DiffusionModel
+# (token_dit_kind bias_only), phase3 ConfidenceModel.
+#
+# MiniWorld's own layers are named module-qualified (`<python module>:<Class>`) so that a MiniWorld class sharing a name with an engine
+# class (BiasOnlyAttention, InputFeatureEmbedder) never reaches the engine's. MiniWorld's Linear subclasses the engine's
+# (miniworld/layers/primitives.py:21), so apply_init reaches them. Entries for classes a model does not have are skipped (and listed as
+# "not present" by describe_init). Bias specs are given wherever the layer may carry a bias.
+description: MiniWorld's trained-model init (today's engine code defaults + MiniWorld's layers), pinned explicitly
+rng: legacy
+entries:
+  # ================================================================================== engine classes (src/miniworld_engine/modules)
+  LayerNorm: {init: one, bias: zero}                       # norm.py LayerNorm (and MiniWorld's subclass): weight 1, bias 0
+  RMSNorm: {init: one}                                     # norm.py RMSNorm (with an affine)
+
+  # norm.py:439-441
+  AdaptiveLayerNorm.to_scale: {init: gating, bias: one}
+  AdaptiveLayerNorm.to_bias: {init: zero}
+
+  # transition.py:72-74
+  Transition.expand_a: {init: relu}
+  Transition.expand_b: {init: relu}
+  Transition.squeeze: {init: zero}
+
+  # transition.py:409-412 (UpGatedConditionedTransition: the same, its `up` transition.py:451)
+  ConditionedTransition.expand_a: {init: relu}
+  ConditionedTransition.expand_b: {init: relu}
+  ConditionedTransition.squeeze: {init: zero}
+  ConditionedTransition.to_scale: {init: default, bias: default}
+
+  # triangle.py:1431-1440
+  BidirectionalTriangleMultiplication.to_left: {init: default}
+  BidirectionalTriangleMultiplication.to_left_gate: {init: zero}
+  BidirectionalTriangleMultiplication.to_right: {init: default}
+  BidirectionalTriangleMultiplication.to_right_gate: {init: zero}
+  BidirectionalTriangleMultiplication.to_gate: {init: zero}
+  BidirectionalTriangleMultiplication.to_out: {init: zero}
+
+  # msa.py:118-125 (to_left / to_right carry a bias when projection_bias)
+  OuterProductMean.to_left: {init: default, bias: default}
+  OuterProductMean.to_right: {init: default, bias: default}
+  OuterProductMean.to_out: {init: zero, bias: zero}
+
+  # msa.py:713-717
+  MSAPairWeightedAveraging.to_value: {init: glorot}
+  MSAPairWeightedAveraging.to_bias: {init: default}
+  MSAPairWeightedAveraging.to_gate: {init: gating}
+  MSAPairWeightedAveraging.to_out: {init: zero}
+
+  # attention.py:109-120
+  AttentionPairBias.to_query: {init: glorot, bias: default}
+  AttentionPairBias.to_key: {init: glorot}
+  AttentionPairBias.to_value: {init: glorot}
+  AttentionPairBias.to_bias: {init: default}
+  AttentionPairBias.to_gate: {init: gating}
+  AttentionPairBias.to_out: {init: zero}
+
+  # attention.py:443-456 (MiniWorld blocks/diffusion_transformer.py, rope_swa_af3_transformer.py)
+  AugmentedAttentionPairBias.to_query: {init: default, bias: default}
+  AugmentedAttentionPairBias.to_key: {init: default}
+  AugmentedAttentionPairBias.to_value: {init: default}
+  AugmentedAttentionPairBias.to_bias: {init: zero}
+  AugmentedAttentionPairBias.to_gate: {init: gating}
+  AugmentedAttentionPairBias.to_out: {init: zero}
+  AugmentedAttentionPairBias.to_scale: {init: default, bias: -2.0}
+
+  # embedder.py:130-159
+  InputFeatureEmbedder.to_atom_single_cond: {init: default}
+  InputFeatureEmbedder.atom_single_rep_to_token_single.0: {init: default}
+
+  # atom_dit.py:799-802, :886-887, :929-931 (SWAAtomTransformer's blocks)
+  SWA3DRoPEAttention.Wqkv: {init: normal}
+  SWA3DRoPEAttention.out_proj: {init: normal}
+  SWA3DRoPEAttention.gate_proj: {init: normal}
+  SwiGLUFFN.w_up: {init: normal}
+  SwiGLUFFN.w_down: {init: normal}
+  AtomDiTMiniWorld.adaln_modulation.1: {init: zero}
+
+  # ================================================================================== MiniWorld's own layers (src/miniworld, f8a51e9f0)
+  # models/distogram_only/model_mini_swa.py:146 (bias on: zero implies 0)
+  miniworld.models.distogram_only.model_mini_swa:MiniSWAModel.add_pair_recycle.1: {init: zero, bias: zero}
+  # models/diffusion/model.py:151
+  miniworld.models.diffusion.model:DiffusionModel.to_token_single_trunk: {init: default}
+  # modules/mini_msa_module.py:181-182
+  miniworld.modules.mini_msa_module:MiniMSAModule.embed_msa: {init: default}
+  miniworld.modules.mini_msa_module:MiniMSAModule.single_to_msa: {init: default}
+  # modules/distogram_diffusion.py:120-121
+  miniworld.modules.distogram_diffusion:DistogramDiffusion.encoder: {init: default}
+  miniworld.modules.distogram_diffusion:DistogramDiffusion.decoder: {init: zero}
+  # modules/heads.py:14, :38
+  miniworld.modules.heads:ContactMapHead.linear: {init: zero}
+  miniworld.modules.heads:DistogramHead.linear: {init: zero}
+  # modules/template_embedder_af3.py:124-134; :163 proj_out = TemplateEmbedderConfig.out_init, `default` in every trained config
+  # (configs/miniworld/model/large_swa_pf48*.yaml, small_swa_pf4.yaml: out_init: default)
+  miniworld.modules.template_embedder_af3:AF3TemplateEmbedder.proj_query: {init: default}
+  miniworld.modules.template_embedder_af3:AF3TemplateEmbedder.proj_dgram: {init: default}
+  miniworld.modules.template_embedder_af3:AF3TemplateEmbedder.proj_pb_mask: {init: default}
+  miniworld.modules.template_embedder_af3:AF3TemplateEmbedder.proj_aatype_i: {init: default}
+  miniworld.modules.template_embedder_af3:AF3TemplateEmbedder.proj_aatype_j: {init: default}
+  miniworld.modules.template_embedder_af3:AF3TemplateEmbedder.proj_unit_vec: {init: default}
+  miniworld.modules.template_embedder_af3:AF3TemplateEmbedder.proj_bb_mask: {init: default}
+  miniworld.modules.template_embedder_af3:AF3TemplateEmbedder.proj_out: {init: default}
+  # modules/bias_only_token_dit.py:91-96 (to_scale: init default, then bias.fill_(-2.0) at :96)
+  miniworld.modules.bias_only_token_dit:BiasOnlyAttention.to_bias: {init: zero}
+  miniworld.modules.bias_only_token_dit:BiasOnlyAttention.to_value: {init: default}
+  miniworld.modules.bias_only_token_dit:BiasOnlyAttention.to_gate: {init: gating}
+  miniworld.modules.bias_only_token_dit:BiasOnlyAttention.to_out: {init: zero}
+  miniworld.modules.bias_only_token_dit:BiasOnlyAttention.to_scale: {init: default, bias: -2.0}
+  # modules/diffusion_module.py:564-593
+  miniworld.modules.diffusion_module:SWAAtomAttentionEncoder.to_atom_single_cond: {init: default}
+  miniworld.modules.diffusion_module:SWAAtomAttentionEncoder.token_single_to_atom_single_cond.1: {init: zero}
+  miniworld.modules.diffusion_module:SWAAtomAttentionEncoder.noisy_to_atom_single_rep: {init: default, bias: default}
+  miniworld.modules.diffusion_module:SWAAtomAttentionEncoder.atom_single_rep_to_token_single.0: {init: default}
+  # modules/diffusion_module.py:690-705
+  miniworld.modules.diffusion_module:SWAAtomAttentionDecoder.add_token_info: {init: default}
+  miniworld.modules.diffusion_module:SWAAtomAttentionDecoder.final_denoising.1: {init: zero}
+  # modules/diffusion_module.py:771-798
+  miniworld.modules.diffusion_module:DiffusionConditioning.linear_token_pair.1: {init: default}
+  miniworld.modules.diffusion_module:DiffusionConditioning.linear_token_single.1: {init: default}
+  miniworld.modules.diffusion_module:DiffusionConditioning.add_time_embedding.1: {init: default}
+  # modules/diffusion_module.py:921
+  miniworld.modules.diffusion_module:DiffusionModule.add_single_token_cond.1: {init: zero}
+  # modules/confidence_head.py:75-109
+  miniworld.modules.confidence_head:ConfidenceHead.to_pair_single_i: {init: normal}
+  miniworld.modules.confidence_head:ConfidenceHead.to_pair_single_j: {init: normal}
+  miniworld.modules.confidence_head:ConfidenceHead.to_pair_dist: {init: normal}
+  miniworld.modules.confidence_head:ConfidenceHead.to_single_init: {init: normal}
+  miniworld.modules.confidence_head:ConfidenceHead.to_pae: {init: zero}
+  miniworld.modules.confidence_head:ConfidenceHead.to_pde: {init: zero}
+  miniworld.modules.confidence_head:ConfidenceHead.to_plddt: {init: zero}

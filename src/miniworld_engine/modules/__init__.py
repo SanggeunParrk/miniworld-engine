@@ -21,6 +21,7 @@ One file per op family; a folder only where a family needs several files:
     sampler_ops.py AugmentNoise, AlignEuler, PoolAtoms (the diffusion sampler's glue and the atom encoder's pooling)
     pair_embed.py  PairEmbedAdaLN, PairEmbedGeom, PairEmbedCA (La-Proteina's pair embeddings: the denoiser's pair builder, the autoencoder's encoder / decoder pair)
     token_pair_init.py  TokenPairInit (the input feature embedder's token-pair initialisation: left + right + relative-position and bond Linears)
+    init.py        apply_init / describe_init: parameter initialisation from presets (init_presets/*.yaml) and config (docs/init.md)
 """
 
 from miniworld_engine.modules.atom_dit import (
@@ -43,6 +44,7 @@ from miniworld_engine.modules.attention import (
     UngatedAugmentedAttention,
 )
 from miniworld_engine.modules.embedder import InputFeatureEmbedder
+from miniworld_engine.modules.init import apply_init, describe_init
 from miniworld_engine.modules.msa import MSAPairWeightedAveraging, OuterProduct, OuterProductMean
 from miniworld_engine.modules.norm import AdaptiveLayerNorm, AdaptiveRMSNorm, IdentityAdaptiveLayerNorm, LayerNorm, RMSNorm
 from miniworld_engine.modules.pair_embed import PairEmbedAdaLN, PairEmbedCA, PairEmbedGeom
@@ -133,4 +135,6 @@ __all__ = [
     "TriangleMultiplicationRF3",
     "UngatedAugmentedAttention",
     "UpGatedConditionedTransition",
+    "apply_init",
+    "describe_init",
 ]

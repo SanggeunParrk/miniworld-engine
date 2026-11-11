@@ -1,0 +1,6 @@
+# The engine preset: no entries, so every parameter keeps the init its module declares in code
+# (Linear(..., init=..., bias_init=...); LayerNorm / RMSNorm weight one, bias zero).
+# With rng legacy, apply_init(model, {"preset": "engine"}) leaves a model exactly as construction drew it.
+description: the code defaults of the engine modules (no entries)
+rng: legacy
+entries: {}

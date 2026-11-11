@@ -1,0 +1,59 @@
+# AlphaFold 3's own initialisation (JAX release, alphafold3/src/alphafold3/model) for the engine module classes.
+# Citations are file:line in that tree.
+#
+# AF3 hm.Linear (components/haiku_modules.py:199-206): initializer 'linear' by default (:203) = LeCun fan-in truncated normal
+# (:318-335, std / TRUNCATED_NORMAL_STDDEV_FACTOR, truncation +-2 sigma) = our `default`; 'relu' = He (x2 scale) = our `relu`;
+# 'zeros' = our `zero`. use_bias=False by default (:205); bias_init (:206) only reaches a parameter when use_bias=True (:306-312).
+# A gate with bias_init=1.0 and no use_bias is weight 0 with no bias, which our `gating` Linears with bias=False already are.
+# global_config.final_init is 'zeros' (model_config.py:26).
+#
+# Already equal, so they have no entry: TriangleMultiplication (modules.py:276-327: projection LeCun, gate / output / gating_linear
+# final_init zeros, no bias), OuterProductMean (modules.py:358-389: left/right LeCun, output_w zeros, output_b 0), MSA pair-weighted
+# averaging pair_logits LeCun / gate zeros / output zeros (modules.py:103-128), Transition (modules.py:60-84: relu, final zeros),
+# triangle attention pair_bias_projection LeCun / gate zeros / output zeros (modules.py:184-217), the AdaLN bias projection
+# (diffusion_transformer.py:47-49: zeros, no bias), the conditioned transition's expand (diffusion_transformer.py:93-98: relu).
+description: AlphaFold 3 (JAX release) initialisation of the engine module classes
+extends: engine
+rng: legacy
+entries:
+  # ---- adaptive LayerNorm (diffusion_transformer.py:41-46 single_cond_scale: initializer='zeros', use_bias=True, bias_init 0.0)
+  # ours: gating (weight 0, bias 1)
+  AdaptiveLayerNorm.to_scale: {init: zero, bias: zero}
+
+  # ---- conditioned attention of the token / atom DiT (diffusion_transformer.py self_attention / cross_attention with single_cond)
+  # q_projection use_bias=True, LeCun, bias_init 0.0 (:147, :293-295); ours: LeCun, bias PyTorch-uniform
+  AugmentedAttentionPairBias.to_query: {bias: zero}
+  # pair_logits_projection LeCun, no bias (:243-246 token Transformer, :393-396 CrossAttTransformer); ours: zero
+  AugmentedAttentionPairBias.to_bias: {init: default}
+  # adaptive_zero_init with single_cond: transition2 LeCun, no bias (:65); ours: zero
+  AugmentedAttentionPairBias.to_out: {init: default}
+  # adaptive_zero_cond: initializer='zeros', use_bias=True, bias_init=-2.0 (:67-73); ours: LeCun weight, bias -2.0
+  AugmentedAttentionPairBias.to_scale: {init: zero, bias: -2.0}
+  # the bias-only token DiT attention: the same AF3 statements minus q / k (:243-246, :65, :67-73)
+  BiasOnlyAttention.to_bias: {init: default}
+  BiasOnlyAttention.to_out: {init: default}
+  BiasOnlyAttention.to_scale: {init: zero, bias: -2.0}
+
+  # ---- conditioned transition (diffusion_transformer.py transition_block with single_cond -> adaptive_zero_init)
+  # transition2 LeCun, no bias (:65); ours: zero
+  ConditionedTransition.squeeze: {init: default}
+  # adaptive_zero_cond zeros weight, bias -2.0 (:67-73); ours: LeCun weight, bias PyTorch-uniform
+  ConditionedTransition.to_scale: {init: zero, bias: -2.0}
+
+  # ---- trunk single attention (modules.py:515 PairFormerIteration -> diffusion_transformer.self_attention without single_cond)
+  # q_projection LeCun with bias 0.0 (:147), k / v LeCun no bias (:148, :162); ours: glorot, q bias PyTorch-uniform
+  AttentionPairBias.to_query: {init: default, bias: zero}
+  AttentionPairBias.to_key: {init: default}
+  AttentionPairBias.to_value: {init: default}
+
+  # ---- MSA pair-weighted averaging (modules.py:111-112 MSAAttention v_projection: LeCun, no bias); ours: glorot
+  MSAPairWeightedAveraging.to_value: {init: default}
+
+  # ---- triangle attention (modules.py:163-169 GridSelfAttention q / k / v_projection: LeCun, no bias); ours: glorot
+  _TriangleAttentionBase.to_query: {init: default}
+  _TriangleAttentionBase.to_key: {init: default}
+  _TriangleAttentionBase.to_value: {init: default}
+  # the engine's fused starting + ending pair: two GridSelfAttentions side by side (same fan-in, d_pair)
+  BidirectionalTriangleAttention.to_query: {init: default}
+  BidirectionalTriangleAttention.to_key: {init: default}
+  BidirectionalTriangleAttention.to_value: {init: default}

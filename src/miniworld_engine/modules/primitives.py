@@ -29,6 +29,7 @@ Every class keeps the public name and the parameter / buffer names of the engine
 """
 
 import contextlib
+import itertools
 import math
 from enum import Enum
 from functools import partial
@@ -40,14 +41,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _trunc_normal_init(
+def trunc_normal_std(
     weights: torch.Tensor,
     scale: float = 1.0,
     a: float = -2,
     b: float = 2,
     fan: Literal["in", "out", "avg"] = "in",
-) -> None:
-    """Initialize weights ``[fan_out, fan_in]`` with a truncated normal distribution."""
+) -> float:
+    """The scale (``std`` of the untruncated normal) :func:`_trunc_normal_init` draws ``weights`` ``[fan_out, fan_in]`` with: the truncated
+    distribution on ``[a, b]`` standard deviations has variance ``scale / fan``."""
     fan_out, fan_in = weights.shape
     if fan == "in":
         f = fan_in
@@ -63,8 +65,23 @@ def _trunc_normal_init(
     from scipy.stats import truncnorm
 
     scale = scale / max(1, f)
-    std = math.sqrt(scale) / truncnorm.std(a=a, b=b, loc=0, scale=1)
-    samples = truncnorm.rvs(a=a, b=b, loc=0, scale=std, size=weights.numel())
+    return math.sqrt(scale) / float(truncnorm.std(a=a, b=b, loc=0, scale=1))
+
+
+def _trunc_normal_init(
+    weights: torch.Tensor,
+    scale: float = 1.0,
+    a: float = -2,
+    b: float = 2,
+    fan: Literal["in", "out", "avg"] = "in",
+    random_state: np.random.RandomState | None = None,
+) -> None:
+    """Initialize weights ``[fan_out, fan_in]`` with a truncated normal distribution, drawn by scipy from numpy's global random state
+    (``random_state``: another ``RandomState`` to draw from; :mod:`miniworld_engine.modules.init` passes a seeded one)."""
+    from scipy.stats import truncnorm
+
+    std = trunc_normal_std(weights, scale=scale, a=a, b=b, fan=fan)
+    samples = truncnorm.rvs(a=a, b=b, loc=0, scale=std, size=weights.numel(), random_state=random_state)
     samples = np.reshape(samples, weights.shape)
     with torch.no_grad():
         weights.copy_(torch.tensor(samples, device=weights.device, dtype=weights.dtype))
@@ -283,6 +300,35 @@ def master_linear(module: nn.Linear, x: torch.Tensor) -> torch.Tensor:
     return module(x)
 
 
+#: The init names of :class:`Linear` (the team-gm vocabulary): the weight initialiser, and the bias it implies.
+InitName = Literal["default", "relu", "normal", "glorot", "gating", "zero", "one"]
+#: A bias spec: ``"zero"`` / ``"one"``, ``"default"`` (PyTorch ``nn.Linear``'s uniform ``U(-1/sqrt(fan_in), 1/sqrt(fan_in))``), or a value.
+BiasSpec = Literal["zero", "one", "default"] | float
+INIT_NAMES: tuple[str, ...] = ("default", "relu", "normal", "glorot", "gating", "zero", "one")
+#: Construction order of every :class:`Linear` (``Linear._init_order``): the order their random draws were taken in, which
+#: :func:`miniworld_engine.modules.init.apply_init` replays (a module replaced after construction keeps its slot in ``_modules``).
+_LINEAR_ORDER = itertools.count()
+
+
+def implied_bias(init: str) -> str:
+    """The bias spec an init name implies (what ``Linear(..., init=init)`` gives its bias): ``gating`` 1, ``zero`` / ``one`` 0, every
+    random init PyTorch's uniform (``"default"``)."""
+    return "one" if init == "gating" else "zero" if init in ("zero", "one") else "default"
+
+
+def fill_bias(bias: torch.Tensor, spec: str | float) -> None:
+    """Set ``bias`` to a constant spec (``"zero"`` / ``"one"`` / a value); ``"default"`` (a random draw) is not a constant."""
+    with torch.no_grad():
+        if spec == "zero":
+            bias.zero_()
+        elif spec == "one":
+            bias.fill_(1.0)
+        elif isinstance(spec, (int, float)) and not isinstance(spec, bool):
+            bias.fill_(float(spec))
+        else:
+            raise ValueError(f"not a constant bias spec: {spec!r}")
+
+
 class Linear(nn.Linear):
     """A Linear layer with built-in nonstandard initializations.
 
@@ -305,7 +351,12 @@ class Linear(nn.Linear):
         - "gating": Weights=0, Bias=1.
         - "zero": Weights=0, Bias=0.
         - "one": Weights=1, Bias=0.
+    bias_init : str or float, optional
+        The bias where the init's implied one is not wanted: "zero" | "one" | "default" (PyTorch's uniform) | a value (e.g. -2.0, a
+        conditioning gate's sigmoid(-2) ~ 0.1). ``None``: the init's (:func:`implied_bias`).
 
+    ``init`` / ``bias_init`` are the module's code default; :func:`miniworld_engine.modules.init.apply_init` re-initialises from a preset
+    or a config after construction (docs/init.md).
     """
 
     def __init__(
@@ -315,24 +366,30 @@ class Linear(nn.Linear):
         *,
         bias: bool = True,
         dtype: torch.dtype | None = None,
-        init: Literal[
-            "default",
-            "relu",
-            "normal",
-            "glorot",
-            "gating",
-            "zero",
-            "one",
-        ] = "default",
+        init: InitName = "default",
+        bias_init: BiasSpec | None = None,
     ) -> None:
         super().__init__(in_features, out_features, bias=bias, dtype=dtype)
         self.init = init
+        self.bias_init = bias_init
+        self._init_order = next(_LINEAR_ORDER)
         InitType[init.upper()].apply(self.weight)
         if self.bias is not None:
             if init == "gating":
                 InitType["ONE"].apply(self.bias)
             if init in {"zero", "one"}:
                 InitType["ZERO"].apply(self.bias)
+            if bias_init is not None and bias_init != "default":
+                fill_bias(self.bias, bias_init)
+
+    def code_init(self) -> tuple[str, str | float | None]:
+        """The code default ``(init, bias spec)`` (bias ``None`` without a bias)."""
+        if self.bias is None:
+            return self.init, None
+        return self.init, implied_bias(self.init) if self.bias_init is None else self.bias_init
+
+    def _after_weight_init(self) -> None:
+        """What the constructor does to a freshly drawn weight after its init (nothing here; :class:`MPLinear` normalises it)."""
 
 
 class Dropout(nn.Module):
@@ -415,6 +472,9 @@ class MPLinear(Linear):
             msg = f"MPLinear is incompatible with init={init!r} (cannot normalize a zero/gating weight)."
             raise ValueError(msg)
         super().__init__(in_features, out_features, bias=bias, dtype=dtype, init=init)
+        self._after_weight_init()
+
+    def _after_weight_init(self) -> None:
         with torch.no_grad():
             self.weight.copy_(magnitude_normalize(self.weight))
 

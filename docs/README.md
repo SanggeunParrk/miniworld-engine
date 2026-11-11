@@ -9,6 +9,7 @@ Cards: H100 (sm_90a) and A100 (sm_80) are served, measured and judged. sm_100 (B
 | [architecture.md](architecture.md) | the pipeline end to end, how a module reaches the card's kernels, the directory map |
 | [requirements.md](requirements.md) | the two requirement tables, the derive rule (kernel range = its module rows), the accuracy rule |
 | [modules.md](modules.md) | the `BackendModule` contract, the backends, selectors, class versions, master weights, `make_inputs` |
+| [init.md](init.md) | parameter initialisation: the init vocabulary, presets (`engine`, `miniworld`, `af3`), the `init:` config block, `apply_init` / `describe_init` |
 | [kernels.md](kernels.md) | kernel families, launch-config tables and shape keys, the prebuilder, the pretuner |
 | [measure.md](measure.md) | the accuracy measurer (fp64 gold, lights) and the speed measurer (CUDA-graph timing) |
 | [judge.md](judge.md) | versions, tokens, verdicts (carried / owed / pending), the Slurm measurement cycle |

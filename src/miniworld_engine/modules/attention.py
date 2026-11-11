@@ -453,8 +453,7 @@ class AugmentedAttentionPairBias(BackendModule):
         self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
         self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
 
-        self.to_scale = Linear(d_cond, d_single, bias=True, init="default")
-        self.to_scale.bias.data.fill_(-2.0)
+        self.to_scale = Linear(d_cond, d_single, bias=True, init="default", bias_init=-2.0)   # sigmoid(-2) ~ 0.1: the update starts small
         self.set_backend(backend)
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs) -> None:
@@ -668,8 +667,7 @@ class BiasOnlyAttention(BackendModule):
         self.ln_pair = LayerNorm(d_pair, bias=False)
         self.to_bias = Linear(d_pair, n_head, bias=False, init="zero")
         self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
-        self.to_scale = Linear(d_cond, d_single, bias=True, init="default")
-        self.to_scale.bias.data.fill_(-2.0)
+        self.to_scale = Linear(d_cond, d_single, bias=True, init="default", bias_init=-2.0)   # sigmoid(-2) ~ 0.1: the update starts small
         self.set_backend(backend)
 
     def _attention_weights(self, pair, mask, bias, dtype):
