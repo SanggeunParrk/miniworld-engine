@@ -1,6 +1,6 @@
 """The portable (Triton) backend of ``AugmentNoise`` / ``AlignEuler`` / ``PoolAtoms``: the kernels of ``main.py`` as opaque ops (a compiled sampler launches
 them instead of breaking the graph), the same contract as ``cuda/function.py``: fp32 coordinates ``[B, N, 3]``, an fp32 ``mask`` ``[N]``, bf16 atom features
-``[S, Q, C]``. Eval only: no autograd."""
+``[S, Q, C]``. Eval only (no autograd) but for the pooling, which has a backward in ``x`` (``_PoolAtomsTriton``)."""
 
 from __future__ import annotations
 
@@ -114,6 +114,39 @@ def _pool_atoms_op(x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor
     return portable_pool_atoms(x, idx, gather_mask, atom_mask)
 
 
+
+def _pool_atoms_bwd_fake(gout, x, idx, gather_mask, atom_mask):
+    """The gradient of ``x``: its shape and dtype (bf16)."""
+    return torch.empty_like(x)
+
+
+@opaque(fake=_pool_atoms_bwd_fake, name="sampler_ops_pool_atoms_bwd")
+def _pool_atoms_bwd_op(gout: torch.Tensor, x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor, atom_mask: torch.Tensor) -> torch.Tensor:
+    """d out / d x of the pooling (``triton/main.py``: ``_pool_prep``, a stable sort of the slots by row, ``_pool_bwd``)."""
+    from miniworld_engine.kernels.sampler_ops.triton.main import portable_pool_atoms_bwd
+
+    return portable_pool_atoms_bwd(gout, x, idx, gather_mask, atom_mask)
+
+
+class _PoolAtomsTriton(torch.autograd.Function):
+    """The pooling with its backward (``x`` only: the index and the masks carry no gradient)."""
+
+    @staticmethod
+    def forward(ctx, x, idx, gather_mask, atom_mask):
+        ctx.save_for_backward(x, idx, gather_mask, atom_mask)
+        return _pool_atoms_op(x, idx, gather_mask, atom_mask)
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx, gout):
+        x, idx, gather_mask, atom_mask = ctx.saved_tensors
+        return _pool_atoms_bwd_op(gout.contiguous(), x, idx, gather_mask, atom_mask), None, None, None
+
+
 def pool_atoms_triton(x, idx, gather_mask, atom_mask):
-    """``out[s, t] = sum_a m[t, a] relu(g[t, a] x[s, idx[t, a]]) / max(sum_a m[t, a], 1e-10)`` in bf16 (``x`` ``[S, Q, C]``, the rest ``[T, A]``)."""
-    return _pool_atoms_op(x.contiguous(), idx.contiguous(), gather_mask.contiguous(), atom_mask.contiguous())
+    """``out[s, t] = sum_a m[t, a] relu(g[t, a] x[s, idx[t, a]]) / max(sum_a m[t, a], 1e-10)`` in bf16 (``x`` ``[S, Q, C]``, the rest ``[T, A]``);
+    differentiable in ``x`` when a gradient is recorded."""
+    args = (x.contiguous(), idx.contiguous(), gather_mask.contiguous(), atom_mask.contiguous())
+    if torch.is_grad_enabled() and x.requires_grad:
+        return _PoolAtomsTriton.apply(*args)
+    return _pool_atoms_op(*args)
