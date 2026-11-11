@@ -1,6 +1,7 @@
 """E3 (FoldForge 5I28): ``MSAPairWeightedAveraging``'s cuda backend serves inference past 1024 tokens at the 8 x 8 / 8 x 16 widths (AF3 / OpenFold3 /
 Protenix-v1, Protenix-v2, ESMFold2, OpenDDE) -- H100 ``pwa_wide`` up to 2048, A100 ``pwa_sm80`` up to 2048 (the pair forward's row of
-logits in bf16 past what fp32 holds) -- and matches the float64 reference as closely as the ``pytorch`` backend does; training past 1024 is refused with a reason."""
+logits in bf16 past what fp32 holds) -- and at the 8 x 32 widths (Boltz-2 / RF3, Chai-1, IntelliFold2: H100 ``pwa_train`` / ``pwa_wide``'s
+BIG build, A100 ``pwa_sm80`` / ``pwa_wide_sm80``), and matches the float64 reference as closely as the ``pytorch`` backend does; training past 1024 is refused with a reason."""
 
 import copy
 
@@ -25,7 +26,19 @@ def _module(d_msa: int, d_pair: int, d_hidden: int, gen: torch.Generator) -> MSA
 
 @pytest.mark.skipif(_card() not in ((9, 0), (8, 0)), reason="H100 / A100")
 @pytest.mark.parametrize(
-    ("d_msa", "d_pair", "d_hidden", "length"), [(64, 128, 8, 2048), (128, 256, 16, 1536), (128, 384, 8, 1536), (128, 384, 8, 2048)]
+    ("d_msa", "d_pair", "d_hidden", "length"),
+    [
+        (64, 128, 8, 2048),
+        (128, 256, 16, 1536),
+        (128, 384, 8, 1536),
+        (128, 384, 8, 2048),
+        # the 8 x 32 widths (FoldForge 5I28): boltz2 / rosettafold3, chai1, intellifold2 (the BIG build; at 2048 a float32 reference: float64 does not fit)
+        (64, 128, 32, 2048),
+        (64, 256, 32, 1536),
+        (64, 256, 32, 2048),
+        (256, 512, 32, 1536),
+        (256, 512, 32, 2048),
+    ],
 )
 def test_long_inference_on_cuda(d_msa: int, d_pair: int, d_hidden: int, length: int) -> None:
     gen = torch.Generator(device="cuda").manual_seed(0)
@@ -36,7 +49,8 @@ def test_long_inference_on_cuda(d_msa: int, d_pair: int, d_hidden: int, length: 
         why = kern.unsupported(**inp)
     assert why is None, why
     with torch.no_grad():
-        gold = copy.deepcopy(base).double()(inp["msa"].double(), inp["pair"].double(), inp["mask"]).double()
+        hi = torch.float32 if d_pair * length * length >= 2**31 else torch.float64  # the reference precision that fits the card
+        gold = copy.deepcopy(base).to(hi)(inp["msa"].to(hi), inp["pair"].to(hi), inp["mask"]).double()
         with torch.autocast("cuda", dtype=torch.bfloat16):
             ref = base(**inp).double()
             got = kern(**inp).double()
@@ -47,9 +61,10 @@ def test_long_inference_on_cuda(d_msa: int, d_pair: int, d_hidden: int, length: 
 
 
 @pytest.mark.skipif(_card() not in ((9, 0), (8, 0)), reason="H100 / A100")
-def test_long_training_is_refused() -> None:
+@pytest.mark.parametrize(("d_msa", "d_pair", "d_hidden"), [(64, 128, 8), (64, 128, 32), (64, 256, 32)])
+def test_long_training_is_refused(d_msa: int, d_pair: int, d_hidden: int) -> None:
     gen = torch.Generator(device="cuda").manual_seed(0)
-    kern = _module(64, 128, 8, gen).set_backend("cuda")
+    kern = _module(d_msa, d_pair, d_hidden, gen).set_backend("cuda")
     inp = kern.make_inputs(length=1536, samples=1, depth=32, dtype=torch.bfloat16, device="cuda", generator=gen)
     with torch.enable_grad():
         why = kern.unsupported(**inp)

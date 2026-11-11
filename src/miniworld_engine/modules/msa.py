@@ -870,7 +870,7 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
 
     def _supports_cuda(self, msa, pair, mask=None) -> str | None:
         """``kernels.integrations.pwa_train`` (d_msa 64, d_pair 128, 8 heads x 32: N % 128, S even, N <= 2048 inference / 1024 training;
-        d_pair 256 / 384 / 512 with pwa_wide's pair kernels: N <= 1024) and ``pwa_wide`` (d_msa 64 / 128, d_pair 128 / 256 / 384, 8 heads x
+        d_pair 256 / 384 / 512 with pwa_wide's pair kernels: N <= 1024 training / 2048 inference) and ``pwa_wide`` (d_msa 64 / 128, d_pair 128 / 256 / 384, 8 heads x
         8 / 16, or d_msa 256, d_pair 512, 8 heads x 32 (the BIG build); N <= 1024 training / 2048 inference): bf16 activations, batch 1, sm_90a, forward + backward
         (the residual and the row dropout in the kernels)."""
         why = self._common_refusal(msa, pair, mask)

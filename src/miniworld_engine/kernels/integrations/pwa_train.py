@@ -152,20 +152,29 @@ def refusal(
         n_max = 1024 if torch.is_grad_enabled() else NMAX_INFER
         if cap == (9, 0) and native and (n == 0 or s == 0 or n > n_max):
             return f"the CUDA-only H100 path needs positive S and N <= {n_max}, got N={n}, S={s}"
+        if cap == (9, 0) and torch.is_grad_enabled() and n > 1024:
+            # past 1024 the training step would run the Triton pair kernels (pair3.cu's backward holds N <= 1024): slower than the triton
+            # backend (H100, boltz2 widths, L 1536: 5.80 vs 5.50 ms) -- refused, as at the other widths (FoldForge 5I28: inference only)
+            return f"training past 1024 tokens: the H100 pair backward (pair3.cu pair_bwd3) holds N <= 1024, got N={n} (inference serves N <= {NMAX_INFER})"
         if wide:  # the wide path pads the length to a multiple of 16 itself; any depth
             if cap != (9, 0):
                 return "the wide kernels are built for sm_90a"
-            # inference past 1024: the 5I28 widths (FoldForge E3); the BIG build (d_msa 256 x 8 x 32) keeps 1024 (no requirement row past it)
-            longer = not torch.is_grad_enabled() and (d_msa, d_pair, d_hidden) not in _wide.BIG
-            wide_max = _wide.NMAX_INFER if longer else _wide.NMAX
+            # inference past 1024 (FoldForge 5I28, E3): every wide width, the BIG build (d_msa 256 x 8 x 32, d_pair 512) included -- pair_fwd3's
+            # bf16 row of 2048 logits fits next to its d_pair 512 tiles (pair_wide.cu NMAX_FWD); the MSA-side kernels take any N
+            wide_max = _wide.NMAX if torch.is_grad_enabled() else _wide.NMAX_INFER
             if not 0 < n <= wide_max or s == 0:
                 return (
-                    f"the wide pair kernels hold one row of logits: 0 < N <= {_wide.NMAX} in training (the backward stages fp32 rows) and for the BIG "
-                    f"build, <= {_wide.NMAX_INFER} in inference; got N={n}, S={s}, grad {torch.is_grad_enabled()}"
+                    f"the wide pair kernels hold one row of logits: 0 < N <= {_wide.NMAX} in training (the backward stages fp32 rows), "
+                    f"<= {_wide.NMAX_INFER} in inference; got N={n}, S={s}, grad {torch.is_grad_enabled()}"
                 )
             return None
-        if pair_only and (cap != (9, 0) or n > _wide.NMAX):  # the pair side is pwa_wide's (sm_90a, one row of N <= 1024 logits)
-            return f"d_pair {d_pair}: the pair side is pwa_wide's sm_90a kernels (N <= {_wide.NMAX}), got N={n} on sm_{cap[0]}{cap[1]}"
+        # the pair side is pwa_wide's (sm_90a, one row of logits: N <= 1024 in training, 2048 in inference -- FoldForge 5I28)
+        pair_max = _wide.NMAX if torch.is_grad_enabled() else _wide.NMAX_INFER
+        if pair_only and (cap != (9, 0) or n > pair_max):
+            return (
+                f"d_pair {d_pair}: the pair side is pwa_wide's sm_90a kernels (N <= {_wide.NMAX} in training, {_wide.NMAX_INFER} in inference), "
+                f"got N={n} on sm_{cap[0]}{cap[1]}, grad {torch.is_grad_enabled()}"
+            )
         if n % 128 or s % 2:
             return f"N must be a multiple of 128 and S even, got N={n}, S={s}"
         if cap == (10, 0) and (s % 128 or n > 1024):  # ln_vg / dv_bwd tiles are 128 MSA rows; pair_fwd holds a row of N
