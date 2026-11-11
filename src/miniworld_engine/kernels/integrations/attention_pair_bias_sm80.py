@@ -938,7 +938,7 @@ def _gbwd_row(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p, 
         m = None if mask is None else mask.reshape(L)
         dz, dwf = (
             _bias_gemm_bwd(pair[0], wcm, db, L, eps_p, out=None if dz_out is None else dz_out[0])
-            if _gemm_pair(pair, f32) and dz_out is None  # B > 1: the one-pass kernel writes the batch row itself (no pair-sized copy)
+            if _gemm_pair(pair, f32)
             else sm80.pair_bias_generic_backward(pair[0], wcm, db, m, L, eps_p, out=None if dz_out is None else dz_out[0])
         )
         ds = torch.mm(dqkvg, w)  # [L, D]
