@@ -39,3 +39,8 @@ card with graph timings). Tokens at b1ffb4a16 (2026-11-11), both cards with 0 ow
 |---|---|---|
 | H100 | no violation outside the exceptions; the small-L misses are cuda vs triton of AttentionPairBias (1 case), OuterProductMean (3), PairEmbedCA (2), at most 3.7 % | only LayerNorm misses (exception): 8 cases vs `anthropic` |
 | A100 | no violation outside the exceptions; the small-L misses are cuda vs triton of OuterProductMean (1 case) and PairEmbedCA (3), at most 6.1 % | LayerNorm misses (exception): 30 cases vs `anthropic`, 8 vs `cueq`; one Transition case at L <= 256 vs `anthropic` (17.5 %) |
+
+Open (2026-11-11, not an exception: to be fixed): A100 `AttentionPairBias` `cuda`, float32 training with a wide pair (d_pair 256 / 384 /
+512), L 384-640: the composed sm_80 path runs one row per launch, so cuda is 0.98-1.12x triton at S = 5 (r42 / r45 / r47 L384 1.10-1.12;
+r42 L512 0.98; r47 L512 / L640 ~1.0, already ~1.0 at S = 1 before the B > 1 change). The fix is a real batch dimension in the sm_80
+composed path (an attempt on branch `req-apb-batch`, commits 230577e36..685705a3e, was stopped before it was measured and is not merged).
