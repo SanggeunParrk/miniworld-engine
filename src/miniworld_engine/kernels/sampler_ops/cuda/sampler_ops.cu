@@ -615,13 +615,28 @@ __global__ void pool_atoms_prep_k(const void* idx, int idx_code, const void* gm,
 constexpr int BWD_ROWS = 8;     // rows (warps) per block
 constexpr int BWD_SAMPLES = 8;  // at most this many samples per block (the row's slot range is searched once per block); fewer when the rows alone do not fill the GPU
 
-__device__ __forceinline__ int lower_bound(const int* __restrict__ v, int n, int x) {
+// The first k in [0, n) with v[k] >= x (n if none), v sorted ascending; the whole warp calls it and gets the same answer. A 32-ary search: each round
+// the 32 lanes probe 32 evenly spaced keys (one load each, in parallel), so 3 072 slots take three rounds instead of twelve dependent loads.
+__device__ __forceinline__ int warp_lower_bound(const int* __restrict__ v, int n, int x, int lane) {
   int lo = 0, hi = n;
-  while (lo < hi) {
-    const int mid = (lo + hi) >> 1;
-    if (__ldg(v + mid) < x) lo = mid + 1; else hi = mid;
+  while (hi - lo > 32) {
+    const int step = (hi - lo + 31) / 32, pos = lo + lane * step;
+    const int cnt = __popc(__ballot_sync(0xffffffffu, pos < hi && __ldg(v + pos) < x));  // probes lo, lo + step, ... below x (a prefix: v is sorted)
+    if (cnt == 0) return lo;
+    const int nlo = lo + (cnt - 1) * step + 1;
+    hi = min(hi, lo + cnt * step);
+    lo = nlo;
   }
-  return lo;
+  const int pos = lo + lane;
+  return lo + __popc(__ballot_sync(0xffffffffu, pos < hi && __ldg(v + pos) < x));
+}
+
+// The end of row x's run that starts at beg (the first k >= beg with v[k] != x): a run is usually a few slots, scanned 32 at a time.
+__device__ __forceinline__ int warp_run_end(const int* __restrict__ v, int n, int beg, int x, int lane) {
+  for (int k = beg;; k += 32) {
+    const unsigned eq = __ballot_sync(0xffffffffu, k + lane < n && __ldg(v + k + lane) == x);
+    if (eq != 0xffffffffu) return k + __popc(eq);  // the run's slots are a prefix of the 32 (v sorted)
+  }
 }
 
 // grid (ceil(R / BWD_ROWS), ceil(S / spb)), spb <= BWD_SAMPLES samples per block (pool_atoms_bwd), block (32, BWD_ROWS): a lane owns 4 consecutive channels (C % 4 == 0), stepping 128 channels.
@@ -631,7 +646,7 @@ __global__ void __launch_bounds__(32 * BWD_ROWS) pool_atoms_bwd_k(const __nv_bfl
                                                                   int rows, int channels, int samples, int slots, int spb) {
   const int r = blockIdx.x * BWD_ROWS + threadIdx.y;
   if (r >= rows) return;
-  const int beg = lower_bound(skey, slots, r), end = lower_bound(skey, slots, r + 1);
+  const int beg = warp_lower_bound(skey, slots, r, threadIdx.x), end = warp_run_end(skey, slots, beg, r, threadIdx.x);
   const int s0 = blockIdx.y * spb, s1 = min(samples, s0 + spb);
   for (int s = s0; s < s1; ++s) {
     const __nv_bfloat16* gs = gout + (size_t)s * tokens * channels;
