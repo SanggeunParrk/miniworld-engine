@@ -63,6 +63,35 @@ def supports(d: int, h: int, rows: int | None = None) -> bool:
     return rows is None or rows >= MIN_ROWS[(d, h)]
 
 
+# --------------------------------------------------------------------------------------------------------------- rows per launch
+#: Entries of a CTA's work list in the one-kernel forward / backward kernels (``sm80/tr_fwd_sm80.cuh`` / ``tr_bwd_sm80.cuh`` ``MAX_ITEMS``); the
+#: schedule keeps two for the remainder's half tile and the terminator, so one launch (one CTA per SM) takes at most 253 tiles per SM.
+MAX_ITEMS = 255
+
+
+_SMS: dict[int, int] = {}
+
+
+def _num_sms(index: int) -> int:
+    n = _SMS.get(index)
+    if n is None:
+        n = _SMS[index] = torch.cuda.get_device_properties(index).multi_processor_count
+    return n
+
+
+def max_rows(device: torch.device, rows_per_tile: int = 256) -> int:
+    """Most rows one launch of the one-kernel forward (256-row tiles; the fp32 build: 128) or of ``fused_sm80`` / ``fused_bwd_sm80``'s backward
+    (256-row tiles) takes on ``device``: (MAX_ITEMS - 2) tiles per SM.  A larger forward runs as consecutive launches on contiguous row blocks
+    (``forward`` / ``forward_f32``; FoldForge 5I28: the template pair stack at 4 x 2048 x 2048 rows, the confidence block at 5 x 1536 x 1536)."""
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    return (MAX_ITEMS - 2) * _num_sms(index) * rows_per_tile
+
+
+def _row_blocks(m: int, limit: int) -> list[tuple[int, int]]:
+    """[start, end) row blocks of at most ``limit`` rows covering ``m`` rows (one block when it fits)."""
+    return [(r, min(r + limit, m)) for r in range(0, m, limit)] or [(0, 0)]
+
+
 # ------------------------------------------------------------------------------------------------------------------ weight layouts
 def _k_perm(dev, d):
     """Physical GEMM1 k index 16 s + kk -> input column (thread q of a quad holds the 16 B vectors at 32 i + 8 q)."""
@@ -151,8 +180,15 @@ def forward(x, gamma, beta, wa, wb, ws, eps: float, save: bool, cache: bool, ln:
     Not ``ln``: the bare SwiGLU FFN (no LayerNorm, no residual); gamma / beta are ignored."""
     d, h = x.shape[1], wa.shape[0]
     w, gb = pack(gamma if ln else None, beta if ln else None, wa, wb, ws, cache)
-    out, xn, stats = _ext().fwd(d, h, ln, x, w, gb, eps, save and ln)
-    return out, xn, stats
+    blocks = _row_blocks(x.shape[0], max_rows(x.device))
+    if len(blocks) == 1:
+        return tuple(_ext().fwd(d, h, ln, x, w, gb, eps, save and ln))
+    # more rows than one launch's work lists hold: one launch per contiguous row block (rows are independent), the results joined
+    parts = [_ext().fwd(d, h, ln, x[r0:r1], w, gb, eps, save and ln) for r0, r1 in blocks]
+    out = torch.cat([p[0] for p in parts])
+    if not (save and ln):
+        return out, parts[0][1], parts[0][2]
+    return out, torch.cat([p[1] for p in parts]), torch.cat([p[2] for p in parts])
 
 
 # ------------------------------------------------------------------------------------------------------------------ fp32 (inference)
@@ -192,4 +228,7 @@ def pack_f32(gamma, beta, wab16, ws16):
 def forward_f32(x, w, gb, sc, eps: float):
     """x + transition(x) of fp32 rows x [M, D] (inference) from ``pack_f32``'s layout and the forms' scales ``sc``."""
     d, h = x.shape[1], w.numel() // (3 * x.shape[1])
-    return _ext().fwd_f32(d, h, x, w, gb, sc, eps)
+    blocks = _row_blocks(x.shape[0], max_rows(x.device, 128))  # the fp32 build: 128-row tiles (16 rows per warp)
+    if len(blocks) == 1:
+        return _ext().fwd_f32(d, h, x, w, gb, sc, eps)
+    return torch.cat([_ext().fwd_f32(d, h, x[r0:r1], w, gb, sc, eps) for r0, r1 in blocks])

@@ -87,7 +87,9 @@ def route(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> str | None:
     """The A100 path that serves a call: ``"fused"`` (``fused_sm80``), ``"wide"`` (this module) or ``None`` (the Triton path)."""
     from . import fused_sm80
 
-    if fused_sm80.available(x, wa, ws) and x.numel() // x.shape[-1] >= FUSED_MIN_ROWS:
+    rows = x.numel() // x.shape[-1]
+    # fused_sm80's forward / backward take one launch: past fused_fwd_sm80.max_rows its work lists overflow, the one-kernel forward here splits the rows
+    if fused_sm80.available(x, wa, ws) and FUSED_MIN_ROWS <= rows <= fused_fwd_sm80.max_rows(x.device):
         return "fused"
     return "wide" if available(x, wa, ws) else None
 

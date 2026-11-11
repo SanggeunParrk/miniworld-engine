@@ -376,7 +376,7 @@ class Transition(BackendModule, MasterWeights):
         ``fused_wide_sm80`` at D 64 / 128 / 256 / 384 / 512 / 768 with a hidden width a multiple of 64, any row count): bf16 activations,
         bf16 or fp32-master parameters, forward and backward; fp32 activations where torch allows TF32 (``fused_wide_sm80.transition_f32_sm80``:
         fp16 products at TF32's rounding, a TF32 backward)."""
-        from miniworld_engine.kernels.transition.cuda import fused_wide_sm80
+        from miniworld_engine.kernels.transition.cuda import fused_fwd_sm80, fused_wide_sm80
 
         why = self._supports_engine(x)
         if why is not None:
@@ -404,6 +404,12 @@ class Transition(BackendModule, MasterWeights):
             return (
                 f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no sm_80 build takes it (D in {fused_wide_sm80.WIDTHS}, hidden a "
                 "multiple of 64)"
+            )
+        rows, limit = x.numel() // x.shape[-1], fused_fwd_sm80.max_rows(x.device)
+        if rows > limit and torch.is_grad_enabled() and (x.requires_grad or any(p.requires_grad for p in self.parameters())):
+            return (
+                f"{rows} rows with a gradient: the sm_80 training kernels take at most {limit} rows per call (one launch's work lists); "
+                "inference splits the rows"
             )
         if fused_wide_sm80.route(x, wa, ws) is None:
             return "the sm_80 Transition extension failed to build"
