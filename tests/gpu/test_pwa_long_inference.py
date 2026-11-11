@@ -32,11 +32,12 @@ def _module(d_msa: int, d_pair: int, d_hidden: int, gen: torch.Generator) -> MSA
         (128, 256, 16, 1536),
         (128, 384, 8, 1536),
         (128, 384, 8, 2048),
-        # the 8 x 32 widths (FoldForge 5I28): boltz2 / rosettafold3, chai1, intellifold2 (the BIG build; 1536 keeps the float64 reference in memory)
+        # the 8 x 32 widths (FoldForge 5I28): boltz2 / rosettafold3, chai1, intellifold2 (the BIG build; at 2048 a float32 reference: float64 does not fit)
         (64, 128, 32, 2048),
         (64, 256, 32, 1536),
         (64, 256, 32, 2048),
         (256, 512, 32, 1536),
+        (256, 512, 32, 2048),
     ],
 )
 def test_long_inference_on_cuda(d_msa: int, d_pair: int, d_hidden: int, length: int) -> None:
@@ -48,7 +49,8 @@ def test_long_inference_on_cuda(d_msa: int, d_pair: int, d_hidden: int, length: 
         why = kern.unsupported(**inp)
     assert why is None, why
     with torch.no_grad():
-        gold = copy.deepcopy(base).double()(inp["msa"].double(), inp["pair"].double(), inp["mask"]).double()
+        hi = torch.float32 if d_pair * length * length >= 2**31 else torch.float64  # the reference precision that fits the card
+        gold = copy.deepcopy(base).to(hi)(inp["msa"].to(hi), inp["pair"].to(hi), inp["mask"]).double()
         with torch.autocast("cuda", dtype=torch.bfloat16):
             ref = base(**inp).double()
             got = kern(**inp).double()
