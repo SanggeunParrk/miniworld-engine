@@ -713,14 +713,21 @@ def _gemm_pair(pair: torch.Tensor, f32: bool) -> bool:
     return f32 and pair.shape[-1] >= 256 and pair.shape[1] <= GEMM_BWD_MAX_L
 
 
-def _bias_gemm_bwd(z: torch.Tensor, wcm: torch.Tensor, db: torch.Tensor, L: int, eps: float):
-    """(dz [L, L, dp], dWf [H, dp] fp32) of ``_bias_gemm`` from db [H, L, L] fp32 (zero on the masked keys)."""
+def _bias_gemm_bwd(z: torch.Tensor, wcm: torch.Tensor, db: torch.Tensor, L: int, eps: float, out: torch.Tensor | None = None):
+    """(dz [L, L, dp], dWf [H, dp] fp32) of ``_bias_gemm`` from db [H, L, L] fp32 (zero on the masked keys). ``out``: a contiguous
+    [L, L, dp] buffer dz is written into (a batch row of the caller's gradient)."""
     dp, heads = wcm.shape
     z2 = z.reshape(L * L, dp)
     zn, mean, rstd = torch.native_layer_norm(z2, (dp,), None, None, eps)
     d2 = db.reshape(heads, L * L)
     dzn = torch.mm(d2.t(), wcm.t())
-    dz = torch.ops.aten.native_layer_norm_backward(dzn, z2, (dp,), mean, rstd, None, None, [True, False, False])[0]
+    if out is None:
+        dz = torch.ops.aten.native_layer_norm_backward(dzn, z2, (dp,), mean, rstd, None, None, [True, False, False])[0]
+    else:
+        none = z2.new_empty(0)
+        dz = torch.ops.aten.native_layer_norm_backward.out(
+            dzn, z2, (dp,), mean, rstd, None, None, [True, False, False], out0=out.view(L * L, dp), out1=none, out2=none
+        )[0]
     return dz.view(L, L, dp), torch.mm(d2, zn)
 
 
@@ -900,8 +907,9 @@ def _gbwd_fake(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p)
     return [torch.empty_like(single), torch.empty_like(pair), *(torch.empty_like(p) for p in params)]
 
 
-def _gbwd_row(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p, packs) -> list[torch.Tensor]:
-    """One batch row of ``_gbwd``: [d single (its dtype), d pair, *d params (fp32)]."""
+def _gbwd_row(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p, packs, dz_out=None) -> list[torch.Tensor]:
+    """One batch row of ``_gbwd``: [d single (its dtype), d pair, *d params (fp32)]; ``dz_out`` (B > 1): the row of the batch's pair
+    gradient that d pair is written into (no copy of the pair-sized gradient)."""
     from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32, _wgrad
 
     sm80 = _sm80()
@@ -933,9 +941,9 @@ def _gbwd_row(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p, 
             )
         m = None if mask is None else mask.reshape(L)
         dz, dwf = (
-            _bias_gemm_bwd(pair[0], wcm, db, L, eps_p)
+            _bias_gemm_bwd(pair[0], wcm, db, L, eps_p, out=None if dz_out is None else dz_out[0])
             if _gemm_pair(pair, f32)
-            else sm80.pair_bias_generic_backward(pair[0], wcm, db, m, L, eps_p)
+            else sm80.pair_bias_generic_backward(pair[0], wcm, db, m, L, eps_p, out=None if dz_out is None else dz_out[0])
         )
         ds = torch.mm(dqkvg, w)  # [L, D]
         dw = _wgrad(dqkvg, s)  # [4 n, D]
@@ -973,8 +981,8 @@ def _gbwd(
     eps_p: float,
 ) -> list[torch.Tensor]:
     """The backward of ``_gfwd`` (``save=True``): [d single, d pair, *d params] (each in its input's dtype). B > 1: the one-row
-    backward per batch row, d single / d pair copied into their rows, the parameter gradients summed in fp32 over the rows in row
-    order before the cast to the parameters' dtypes."""
+    backward per batch row, d single copied into its row, d pair written into its row, the parameter gradients summed in fp32
+    over the rows in row order before the cast to the parameters' dtypes."""
     packs = _gpack(params, heads, gate_bias, single.dtype)
     B = single.shape[0]
     dout = dout.contiguous()
@@ -992,13 +1000,13 @@ def _gbwd(
             gate_bias,
             eps_p,
             packs,
+            None if dz is None else dz[b : b + 1],
         )
         if B == 1:
             dx, dz = dxb, dzb
-        else:
-            assert dx is not None and dz is not None
+        else:  # d pair is already in its row (``dz_out``)
+            assert dx is not None
             dx[b : b + 1].copy_(dxb)
-            dz[b : b + 1].copy_(dzb)
         if b == 0:
             total = [g.to(torch.float32, copy=True) for g in grads] if B > 1 else grads
         else:

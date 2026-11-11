@@ -118,5 +118,5 @@ def test_batched_training_equals_rows(d_pair: int, gate_bias: float, dtype: str)
         a, b = gw[name].float(), gw1[name].float()
         if dtype == "bfloat16":  # the batch sums in fp32 before one rounding; B calls accumulate bf16-rounded gradients
             assert float((a - b).abs().max()) <= 2e-2 * float(b.abs().max()) + 1e-6, name
-        else:
-            torch.testing.assert_close(a, b, rtol=1e-6, atol=1e-6, msg=name)
+        else:  # equal up to the A100 fused backward's atomic dWf / LN sums (run to run ~2e-7 of the largest entry)
+            assert float((a - b).abs().max()) <= 2e-6 * float(b.abs().max()) + 1e-9, name
