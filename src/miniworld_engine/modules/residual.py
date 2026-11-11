@@ -9,9 +9,10 @@ MSA transition on the MSA, the two triangle multiplications and the pair transit
 :func:`parallel_residual` / :class:`ParallelResidual` compute it. ``"pytorch"`` (the reference) runs the statement with the differences and
 the sum in at least fp32 (``wide``) and one rounding to ``x``'s dtype; ``"triton"`` is the same in one pass over the tensors
 (``kernels/parallel_residual/triton``: reads ``x`` and the branches once, writes once) for CUDA tensors of one dtype (bf16 / fp16 / fp32),
-1 to 4 branches. No ``"cuda"`` backend: the op is a pure streaming pass that the Triton kernel already runs at the memory bandwidth, so a
-hand-written kernel has nothing left to gain (docs/modules.md, measured on H100 / A100). The backward is ``d out / d y_i = g``,
-``d out / d x = (1 - n) g`` (torch statements: there is nothing to fuse).
+1 to 4 branches; its backward is torch statements. ``"cuda"`` is the same arithmetic in a hand-written kernel
+(``kernels/parallel_residual/cuda``: one source, the H100 sm_90a and A100 sm_80 builds; 16-byte vector accesses, several vectors in
+flight per thread, streaming cache hints) over the same range, with its backward's ``(1 - n) g`` in one small kernel too. The backward
+is ``d out / d y_i = g`` (no kernel), ``d out / d x = (1 - n) g`` (fp32 product, one rounding).
 
 ``PairformerBlock(parallel=True)`` keeps its own statements for its parallel schedule (its records are unchanged); a caller composing a
 parallel stage from engine parts uses this op.
@@ -51,6 +52,29 @@ class _ParallelResidualFn(torch.autograd.Function):
         return (gx, *([g] * ctx.n))
 
 
+class _ParallelResidualCudaFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, *branches):
+        from miniworld_engine.kernels.parallel_residual import cuda as K
+
+        ctx.n = len(branches)
+        return K.forward(x.contiguous(), [y.contiguous() for y in branches])
+
+    @staticmethod
+    def backward(ctx, g):
+        from miniworld_engine.kernels.parallel_residual import cuda as K
+
+        return (K.backward(g, ctx.n), *([g] * ctx.n))
+
+
+def _cuda_reason(x: torch.Tensor, branches: list[torch.Tensor]) -> str | None:
+    """The Triton range (the kernels read the same tensors) on the cards the CUDA kernel is built for (H100 sm_90a, A100 sm_80)."""
+    from miniworld_engine.modules.pair_embed import _cuda_arch
+
+    why = _triton_reason(x, branches) or _cuda_arch(x.device)
+    return None if why is None else why.replace("the Triton kernel", "the CUDA kernel")
+
+
 def _triton_reason(x: torch.Tensor, branches: list[torch.Tensor]) -> str | None:
     if not 1 <= len(branches) <= MAX_BRANCHES:
         return f"{len(branches)} branches (the Triton kernel reads 1 to {MAX_BRANCHES})"
@@ -66,19 +90,20 @@ def _triton_reason(x: torch.Tensor, branches: list[torch.Tensor]) -> str | None:
 
 def parallel_residual(x: torch.Tensor, *branches: torch.Tensor, backend: str = "pytorch") -> torch.Tensor:
     """``x + sum_i (y_i - x)``: the sum of the parallel parts' deltas added to ``x`` (each ``y_i`` a part's residual output). ``backend``:
-    ``"pytorch"`` (any branch count, any device) or ``"triton"`` (:class:`ParallelResidual`'s range; outside it ``BackendUnsupported``)."""
+    ``"pytorch"`` (any branch count, any device), ``"cuda"`` or ``"triton"`` (:class:`ParallelResidual`'s range; outside it
+    ``BackendUnsupported``)."""
     if not branches:
         raise ValueError("parallel_residual needs at least one branch")
     if backend == "pytorch":
         return _reference(x, list(branches))
-    if backend != "triton":
-        raise ValueError(f"parallel_residual has no backend {backend!r}; available: pytorch, triton")
-    why = _triton_reason(x, list(branches))
+    if backend not in ("cuda", "triton"):
+        raise ValueError(f"parallel_residual has no backend {backend!r}; available: pytorch, cuda, triton")
+    why = (_cuda_reason if backend == "cuda" else _triton_reason)(x, list(branches))
     if why is not None:
         from miniworld_engine.modules.primitives import BackendUnsupported
 
-        raise BackendUnsupported(f"parallel_residual backend 'triton': {why}")
-    return _ParallelResidualFn.apply(x, *branches)
+        raise BackendUnsupported(f"parallel_residual backend {backend!r}: {why}")
+    return (_ParallelResidualCudaFn if backend == "cuda" else _ParallelResidualFn).apply(x, *branches)
 
 
 class ParallelResidual(BackendModule):
@@ -86,7 +111,7 @@ class ParallelResidual(BackendModule):
     the given branches. ``d`` (the channel width) and ``branches`` (the branch count) shape the measurement inputs only."""
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
-    backends = ("pytorch", "triton")
+    backends = ("pytorch", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {}
 
     def __init__(self, d: int = 256, branches: int = 2, *, backend: str = "pytorch") -> None:
@@ -102,6 +127,12 @@ class ParallelResidual(BackendModule):
 
     def _forward_pytorch(self, x, y0, y1=None, y2=None, y3=None) -> torch.Tensor:
         return _reference(x, self._branches(y0, y1, y2, y3))
+
+    def _supports_cuda(self, x, y0, y1=None, y2=None, y3=None) -> str | None:
+        return _cuda_reason(x, self._branches(y0, y1, y2, y3))
+
+    def _forward_cuda(self, x, y0, y1=None, y2=None, y3=None) -> torch.Tensor:
+        return _ParallelResidualCudaFn.apply(x, *self._branches(y0, y1, y2, y3))
 
     def _supports_triton(self, x, y0, y1=None, y2=None, y3=None) -> str | None:
         return _triton_reason(x, self._branches(y0, y1, y2, y3))
