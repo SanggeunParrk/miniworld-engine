@@ -703,29 +703,35 @@ def _bias_split(z: torch.Tensor, wcm: torch.Tensor, mask, L: int, eps: float) ->
 _SIDE: dict = {}
 
 
-#: the longest L whose fp32 wide-pair backward runs as LayerNorm + TF32 GEMMs (``_bias_gemm_bwd``); beyond it the one-pass backward kernel is faster
-GEMM_BWD_MAX_L = 384
-
-
 def _gemm_pair(pair: torch.Tensor, f32: bool) -> bool:
-    """The backward of an fp32 pair of 256 channels or more at L <= ``GEMM_BWD_MAX_L``: a LayerNorm recompute + TF32 cuBLAS GEMMs + the LayerNorm backward,
-    faster there than the one-pass kernel (A100, 16 heads, L128 train: d_pair 512 0.58 -> 0.49 ms, 384 0.48 -> 0.44); at L768 the one-pass kernel is faster."""
-    return f32 and pair.shape[-1] >= 256 and pair.shape[1] <= GEMM_BWD_MAX_L
+    """The backward of an fp32 pair of 256 channels or more: statistics + TF32 cuBLAS GEMMs + the LayerNorm backward, batched over B
+    (``_bias_gemm_bwd``), faster at every L than the one-pass kernel run per row (A100, 16 heads, fp32 train, graph timing; d_pair 512,
+    one sample: L512 4.17 -> 3.74 ms, L768 8.92 -> 7.99 ms with the LN(z) recompute it replaced)."""
+    return f32 and pair.shape[-1] >= 256
 
 
 def _bias_gemm_bwd(z: torch.Tensor, wcm: torch.Tensor, db: torch.Tensor, L: int, eps: float):
     """(dz [B, L, L, dp], dWf [H, dp] fp32) of the pair bias for the whole batch at once, from db [B, H, L, L] fp32 (zero on the masked
-    keys): one LayerNorm recompute over the B L L pair rows, the TF32 GEMMs batched over B (``bmm``: each row's dz-hat = db_b^T Wf and
-    dWf_b = db_b LN(z_b), the dWf_b summed over B), one LayerNorm backward writing the batch's gradient (no per-row copy)."""
+    keys), without materialising LN(z):
+      mean, rstd   one statistics pass over the B L L pair rows (read only)
+      dz-hat_b     = db_b^T Wf                                   (one TF32 GEMM batched over B)
+      dz           the LayerNorm backward of all B L L rows at once, written as the batch's gradient (no per-row copy)
+      dWf          = sum_b a_b z_b - (a_b mean_b) 1^T, a_b = db_b rstd_b   (LN(z) = (z - mean) rstd; a GEMM per row, summed in row order)"""
     B, dp, heads = z.shape[0], wcm.shape[0], wcm.shape[1]
-    z2 = z.reshape(B * L * L, dp)
-    zn, mean, rstd = torch.native_layer_norm(z2, (dp,), None, None, eps)
-    d3 = db.reshape(B, heads, L * L)
+    n = L * L
+    z2 = z.reshape(B * n, dp)
+    var, mean = torch.var_mean(z2, dim=1, correction=0, keepdim=True)
+    rstd = torch.rsqrt(var + eps)
+    del var
+    d3 = db.reshape(B, heads, n)
     dzn = torch.bmm(d3.transpose(1, 2), wcm.t().expand(B, heads, dp))  # [B, L L, dp]
-    dz = torch.ops.aten.native_layer_norm_backward(dzn.view(B * L * L, dp), z2, (dp,), mean, rstd, None, None, [True, False, False])[0]
+    dz = torch.ops.aten.native_layer_norm_backward(dzn.view(B * n, dp), z2, (dp,), mean, rstd, None, None, [True, False, False])[0]
     del dzn
-    dwf = torch.bmm(d3, zn.view(B, L * L, dp))  # [B, H, dp]
-    return dz.view(z.shape), dwf[0] if B == 1 else dwf.sum(0)
+    dwf = torch.zeros(heads, dp, device=z.device, dtype=torch.float32)
+    for b in range(B):
+        a = d3[b] * rstd[b * n : (b + 1) * n].view(1, n)  # [H, L L]
+        dwf.addmm_(a, z2[b * n : (b + 1) * n]).sub_(a @ mean[b * n : (b + 1) * n])
+    return dz.view(z.shape), dwf
 
 
 def _gparams(module) -> list[torch.Tensor]:
