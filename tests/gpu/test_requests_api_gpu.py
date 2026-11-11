@@ -70,7 +70,7 @@ def test_multi_fold_equals_one_call_per_fold(name, make, stream, length, backend
         pytest.skip("cuda multi-fold: H100 only")
     block = _block(make).set_backend(backend)
     folds, samples = 5, 5
-    inp = block.make_inputs(length=length, samples=samples, depth=folds, dtype=torch.bfloat16, device="cuda", generator=_gen())
+    inp = block.make_inputs(length=length, samples=samples, depth=folds, dtype=torch.bfloat16, device="cuda", generator=_gen(), stream=stream)
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         assert block.unsupported(**inp) is None, block.unsupported(**inp)
         out = block(**inp)
@@ -79,14 +79,18 @@ def test_multi_fold_equals_one_call_per_fold(name, make, stream, length, backend
             err = (out[:, b : b + 1].float() - one.float()).abs().max() / one.float().abs().max()
             assert err < 1e-2, f"{name}: fold {b} differs from its own call (rel err {err:.3g})"
         ref = block.set_backend("pytorch")(**inp)
-    err = (out.float() - ref.float()).abs().max() / ref.float().abs().max()
+    # the real query rows only: a padding query's row is not an output (N = 1000: the cuda block keeps the clipped window for the
+    # all-padding last window where the reference slides it)
+    real = inp["mask"][0]
+    out, ref = out[:, :, real].float(), ref[:, :, real].float()
+    err = (out - ref).abs().max() / ref.abs().max()
     assert err < 3e-2, f"{name}: the multi-fold {backend} call is off the reference (rel err {err:.3g})"
 
 
 @pytest.mark.h100
 def test_multi_fold_cuda_refuses_training_and_fp32():
     block = _block(lambda: AtomDiT("protenix"), "float32").set_backend("cuda")
-    inp = block.make_inputs(length=256, samples=2, depth=3, dtype=torch.float32, device="cuda", generator=_gen())
+    inp = block.make_inputs(length=256, samples=2, depth=3, dtype=torch.float32, device="cuda", generator=_gen(), stream="atom_folds")
     assert "bfloat16" in (block.unsupported(**inp) or "")
     with pytest.raises(BackendUnsupported):
         block(**inp)
@@ -118,7 +122,7 @@ def test_multi_fold_cuda_a100_refuses_with_a_reason(name, make, stream, length):
     """A100: the sm_80 atom paths take one pair; a B > 1 call is refused with a reason (never a silent fallback)."""
     del name
     block = _block(make).set_backend("cuda")
-    inp = block.make_inputs(length=length, samples=2, depth=3, dtype=torch.bfloat16, device="cuda", generator=_gen())
+    inp = block.make_inputs(length=length, samples=2, depth=3, dtype=torch.bfloat16, device="cuda", generator=_gen(), stream=stream)
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         why = block.unsupported(**inp)
         if why is None:  # served: then it must equal the reference
@@ -136,7 +140,7 @@ def test_multi_fold_atom_pair_bias_is_hoisted_once():
     from miniworld_engine.kernels.integrations import local_dit_h100
 
     block = _block(lambda: AtomDiT("protenix")).set_backend("cuda")
-    inp = block.make_inputs(length=512, samples=2, depth=3, dtype=torch.bfloat16, device="cuda", generator=_gen())
+    inp = block.make_inputs(length=512, samples=2, depth=3, dtype=torch.bfloat16, device="cuda", generator=_gen(), stream="atom_folds")
     capture.clear_weight_caches(block)
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         first = block(**inp)
