@@ -58,7 +58,8 @@ def _native(schema: str, fake):
 
 @functools.cache
 def _capability(index: int) -> tuple[int, int]:
-    return tuple(torch.cuda.get_device_capability(index))
+    major, minor = torch.cuda.get_device_capability(index)
+    return major, minor
 
 
 @torch.compiler.assume_constant_result
@@ -826,7 +827,7 @@ def _gbwd(dout: torch.Tensor, single: torch.Tensor, pair: torch.Tensor, mask: to
              _unpad_rows(dw[2 * n:3 * n], heads, hd, hdp), _unpad_rows(dw[3 * n:], heads, hd, hdp), _unpad_rows(dwo.t(), heads, hd, hdp).t(),
              (dwf * wb.float()).sum(0), dwf * lnpw.float()[None]]
     outs = [torch.empty(p.shape, device=p.device, dtype=p.dtype) for p in params]
-    torch._foreach_copy_(outs, [g_.reshape(p.shape) for g_, p in zip(grads, params, strict=True)])
+    torch._foreach_copy_(outs, [g_.reshape(p.shape) for g_, p in zip(grads, params, strict=True)])  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
     return [dx.to(dt).view(single.shape), dz.view(pair.shape), *outs]
 
 

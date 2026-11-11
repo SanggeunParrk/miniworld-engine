@@ -819,7 +819,7 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # H100: no gradient -> kernels/integrations/bias_only_dit (the fused inference block: P = softmax(pair bias) once per pair, the
     # pv_gate core, CUDA rows, cuBLAS); a gradient -> kernels/integrations/bias_only_dit_train (one autograd Function on the CUDA rows,
     # cuBLAS and the bias-only cores). Range = the two gates: bf16 / fp32 (fp32 = fp32 weights, no autocast), [A, 1, L, 768] with L a
-    # multiple of 128 (training L <= 768), 16 heads x 48, cond 384 or 768 (training also 128 / 256), pair 128 / 256, n = 2, eps 1e-5,
+    # multiple of 128 (training L <= 768), 16 heads x 48, cond 384 or 768, pair 128 / 256, n = 2, eps 1e-5,
     # key mask [1, L] or none, the pair or the block's hoisted bias [1, H, L, L].
     # A100 (sm_80): kernels/integrations/bias_only_dit_sm80 (the AdaLN and ConditionedTransition sm_80 paths around one autograd Function
     # for the attention: cuBLAS, the generic sm_80 pair bias, the row softmax, the sm_80 bias-only cores PvGate / Dpb; bf16 / master / fp32).
@@ -839,8 +839,9 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
             if bias_only_dit_train.serves(view, single, cond, pair, mask, bias=bias):
                 return "train", None
             return None, ("training: outside the fused H100 bias-only training block's range (bf16 / fp32 weights, [A, 1, L, 768] with L "
-                          "a multiple of 128 <= 768, heads x head width 16 x 48 / 24 x 32 / 12 x 64 / 16 x 64, cond 128 / 256 / 384 / 768, "
-                          "pair 128 / 256, n = 2, key mask [1, L], eps 1e-5)")
+                          "a multiple of 128 <= 768, heads x head width 16 x 48 / 24 x 32 / 12 x 64 / 16 x 64, "
+                          f"cond {' / '.join(map(str, bias_only_dit_train.KERNEL_D_CONDS))}, pair {' / '.join(map(str, bias_only_dit_train.KERNEL_D_PAIRS))}, "
+                          "n = 2, key mask [1, L], eps 1e-5)")
         from miniworld_engine.kernels.integrations import bias_only_dit
 
         if bias_only_dit.serves(view, single, cond, pair, mask, bias=bias):

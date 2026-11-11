@@ -53,7 +53,7 @@ class SWADiTBlockFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         B, half_window = ctx.meta
-        grads = swa_dit_block_bwd(dy.contiguous(), *ctx.saved_tensors[:-5], B, half_window, FP32_EPS)
+        grads = swa_dit_block_bwd(dy.contiguous(), *ctx.saved_tensors[:-5], B, half_window, FP32_EPS)  # pyright: ignore[reportCallIssue]  -- the saved tensors (save_for_backward above, without the 5 raw weights) are exactly the leading parameters
         dq, dmod, *dw = grads
         if ctx.native_h100:
             dwqkv, dwg, dwo, dwu, dwd = native_h100_cast(dw, list(ctx.saved_tensors[-5:]))

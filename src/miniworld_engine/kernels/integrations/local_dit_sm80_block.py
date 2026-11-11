@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import weakref
 from types import SimpleNamespace
+from typing import cast
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -395,10 +396,11 @@ def _block_fwd(
             s2, o.view(m, DS_), sg, mod, pk.wo, pk.wu, pk.wd, EPS, save
         )
     if not save:
-        return [post.view(single.shape)]
+        return [cast(torch.Tensor, post).view(single.shape)]  # (no save: post_fwd returns the output alone)
     out, u, a2, x2, t = post
-    x1 = pre[4]
-    xkv = pre[5] if cross else single.new_empty(0)
+    saved_pre = cast("tuple[torch.Tensor, ...]", pre)  # (save: pre_fwd returns six tensors)
+    x1 = saved_pre[4]
+    xkv = saved_pre[5] if cross else single.new_empty(0)
     return [
         out.view(single.shape),
         mod,

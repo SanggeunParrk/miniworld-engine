@@ -29,6 +29,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable
 from types import SimpleNamespace
+from typing import cast
 
 from miniworld_engine.kernels import _nvcc, _prebuild
 from miniworld_engine.kernels._prebuild import KERNELS, Target, family_rows, log
@@ -54,7 +55,8 @@ def _trimul_unit(native_residual: bool, cz: int, ch: int):
     """The packaged K1 / K3 unit of ``(cz, ch)``, as the TriMul recipe plans it."""
     from miniworld_engine.kernels.trimul_inproj.cuda import h100_inference as HI
 
-    return HI._Kernels.unit(SimpleNamespace(_units={}, native_residual=native_residual), cz, ch)
+    # the method on a bare namespace: only `unit` runs, without the device setup of `_Kernels()`
+    return HI._Kernels.unit(cast("HI._Kernels", SimpleNamespace(_units={}, native_residual=native_residual)), cz, ch)
 
 
 # --------------------------------------------------------------------------------------------------------------- sites

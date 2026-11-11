@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import weakref
+from typing import cast
 
 import torch
 
@@ -54,13 +55,14 @@ def _kernels():
 def _period(x: torch.Tensor, cond: torch.Tensor, grad: bool) -> int | None:
     """Rows of x per distinct conditioning row: ``M`` (one conditioning per row), ``M / A`` (one conditioning shared by the A samples, a no-grad call), or None when
     ``cond`` does not describe the rows of ``x``."""
-    lead, clead = tuple(x.shape[:-1]), tuple(cond.shape[:-1])
+    lead = cast("tuple[int, ...]", tuple(x.shape[:-1]))
+    clead = cast("tuple[int, ...]", tuple(cond.shape[:-1]))
     m = 1
     for s in lead:
         m *= s
     if clead == lead:
         shared = len(lead) > 1 and lead[0] > 1 and cond.stride(0) == 0
-        return m if (grad or not shared) else m // lead[0]
+        return m if (grad or not shared) else m // lead[0]  # pyright: ignore[reportGeneralTypeIssues]  -- `shared` (len(lead) > 1 and ...) is narrowed as an aliased condition and misnarrows lead to tuple[()]
     if (
         not grad
         and len(lead) > 1
@@ -314,6 +316,7 @@ def train_fwd(
     with torch.cuda.device(x.device):
         if k.atom_supported(x, cond):
             y, xst, cst = k.atom_fwd(x, cond, lnw, ws, wb, sb, eps_x, eps_c, stats=True)
+            assert xst is not None and cst is not None  # stats=True
             return [
                 y,
                 x.new_empty((0,)),
@@ -326,6 +329,7 @@ def train_fwd(
         wcat = torch.cat([ws, wb])  # saved for the backward
         sbt = _mm_op(aff, wcat.t())
         y, xst = k.epilogue(x, sbt, sb, eps_x, stats=True)
+        assert cst is not None and xst is not None  # stats=True
     return [y, aff, cst, sbt, xst, wcat]
 
 
@@ -438,7 +442,7 @@ class _Training(torch.autograd.Function):
             sb,
             wb,
             *saved,
-            ctx.fp32_grads,
+            ctx.fp32_grads,  # pyright: ignore[reportCallIssue]  -- after *saved: the five tensors train_fwd saved
         )
         return dx, dcond, dlnw, dws, dsb, dwb, None, None
 

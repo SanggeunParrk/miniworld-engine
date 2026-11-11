@@ -36,7 +36,7 @@ _ROOT, _META = Path(__file__).parent, ("num_warps", "num_stages", "maxnreg")
 _TUNE, _WON, _WARNED = [False], {}, set()
 #: The pretuner (``kernels/_pretune.py``) while it drives the modules, else None: asked first at every configured launch / ``choose``
 #: with a ``run``; it returns the config to launch, or None for the normal table lookup.
-PRETUNE = [None]
+PRETUNE: list[typing.Any] = [None]
 
 
 def tune(on: bool = True) -> bool:

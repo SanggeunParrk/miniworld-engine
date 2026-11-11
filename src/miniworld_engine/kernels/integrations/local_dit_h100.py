@@ -13,6 +13,7 @@ run the TF32 kernels; operands are rounded to nearest tf32, the residual stream,
 from __future__ import annotations
 
 import contextlib
+from typing import cast
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -260,33 +261,33 @@ def _fwd(
         else:
             bias2 = pair_bias()
         if save:
-            q, sg, k, v, x1, xkv, *rest = k90.pre_fwd(
+            q, sg, k, v, x1, xkv, *rest = cast("tuple[torch.Tensor, ...]", k90.pre_fwd(
                 s2, mod, mkv, p, tf32, save=True, eps=eps, nmod=nmod, parallel_kv=parallel_kv, options=opts, kq=kq, kq_eps=kq_eps
-            )
+            ))
             qkr = rest[0] if kqln else s2.new_empty(0, 2 * DS)
         else:
-            q, sg, k, v = k90.pre_fwd(
+            q, sg, k, v = cast("tuple[torch.Tensor, ...]", k90.pre_fwd(
                 s2, mod, mkv, p, tf32, eps=eps, nmod=nmod, parallel_kv=parallel_kv, options=opts, kq=kq, kq_eps=kq_eps
-            )
+            ))
         o, lse = attn(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2, **({"groups": groups} if groups > 1 else {}))
         if slide:
             def edges():
                 return [_edge_tables(zg, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0, qblock, uid) for zg in zs]
 
-            tables = _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk, qblock, None if uid is None else _ld._tkey(uid)), edges) if hoist else edges()
-            _slid_edges(o, q, k, v, tables, a, groups, n)
+            edge_tables = _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk, qblock, None if uid is None else _ld._tkey(uid)), edges) if hoist else edges()
+            _slid_edges(o, q, k, v, edge_tables, a, groups, n)
         o = o.view(m, DS)
         if not save:
             return [
                 _ld._unpadded(
-                    k90.post_fwd(s2, o, sg, mod, p, tf32, eps=eps, nmod=nmod, options=opts).view(a // groups, groups, n, DS),
+                    cast(torch.Tensor, k90.post_fwd(s2, o, sg, mod, p, tf32, eps=eps, nmod=nmod, options=opts)).view(a // groups, groups, n, DS),
                     single.shape,
                 )
             ]
-        out, u, a2, x2, t = k90.post_fwd(s2, o, sg, mod, p, tf32, save=True, eps=eps, nmod=nmod, options=opts)
+        out, u, a2, x2, t = cast("tuple[torch.Tensor, ...]", k90.post_fwd(s2, o, sg, mod, p, tf32, save=True, eps=eps, nmod=nmod, options=opts))
         if parallel_kv == 2:   # one AdaLN: xkv is x1 (custom-op outputs may not alias: an empty slot, the backward reads x1)
             xkv = x1.new_empty(0, DS)
-    return [
+    return cast("list[torch.Tensor]", [  # save: every slot was set above
         _ld._unpadded(out.view(a // groups, groups, n, DS), single.shape),
         bias2,
         mod,
@@ -304,7 +305,7 @@ def _fwd(
         x2,
         t,
         qkr,
-    ]
+    ])
 
 
 def _bwd_fake(dy, single, cond, pair, kmask, weights, saved, parallel_kv=0, slide=False, qblock=False, ident=False, pars=False, noout=False, up=False,
@@ -468,7 +469,7 @@ def _bwd(
         dcond = _ld._unpadded(dc.view(a, 1, n, DC), cond.shape)
     dpair = dz[: pair.shape[1]].reshape(pair.shape).to(pair.dtype)
     kq_grads = [cs_kq[128 * i:128 * (i + 1)].to(w.dtype).clone() for i, w in enumerate(kq_leaves)] if kqln else []
-    up_grads = [dwu.to(wup.dtype)] if up else []
+    up_grads = [cast(torch.Tensor, dwu).to(cast(torch.Tensor, wup).dtype)] if up else []   # (both set when up)
     return [dsingle, dcond, dpair, *outs, *kq_grads, *up_grads]
 
 
@@ -686,7 +687,9 @@ def run_block(module, single, cond, pair, mask=None, uid=None):
     n0 = single.shape[2]
     n = _ld._padded_length(n0)
     kmask = _ld._keys(mask, n0, n)
-    kvm, ident, pars, noout, up, kqln, kq_eps, eps = options(module)
+    opts = options(module)
+    assert opts is not None  # AtomDiT._supports_cuda accepted the block
+    kvm, ident, pars, noout, up, kqln, kq_eps, eps = opts
     u = None
     if uid is not None:
         u = uid[0] if n == n0 else torch.nn.functional.pad(uid[0], (0, n - n0), value=-1)

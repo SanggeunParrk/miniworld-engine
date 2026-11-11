@@ -13,6 +13,8 @@ Two whole-module paths, picked by the module's geometry:
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 
 from miniworld_engine.kernels import _capture
@@ -181,7 +183,7 @@ def _variant_forward(module, pair: torch.Tensor, mask: torch.Tensor | None, *, t
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
 
     d_hidden, d_pair = module.to_query.weight.shape
-    vc = sm80_wide.variant_cfg(d_pair, d_hidden, module.n_head)
+    vc = cast("sm80_wide.VCfg", sm80_wide.variant_cfg(d_pair, d_hidden, module.n_head))  # (not None: serves() accepted this layout)
     weights, wo, gb, bo, wt = _variant_params(module, train=train)
     ln = module.ln_pair
     ds = None

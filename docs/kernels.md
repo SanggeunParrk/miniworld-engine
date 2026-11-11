@@ -111,7 +111,8 @@ python -m miniworld_engine.kernels._prebuild [--arch sm90a] [--jobs N] [--only F
   failures are listed again at the end, then `PREBUILD FAILED`); 0 only when every planned artifact is present. At run time a kernel
   that fails to build or load raises `_nvcc.KernelBuildError` (never a fallback to another kernel).
 - After a build, `prebuilt-<arch>.json` in the cache root lists the plan's artifacts by relative path (the content of a bundle).
-- External headers: CUTLASS 4.2 (`--cutlass` / `CUTLASS_PATH`) and mathdx / cuBLASDx (`--mathdx` / `MATHDX_HOME`).
+- External headers: CUTLASS 4.2 and MathDx / cuBLASDx, resolved as docs/install.md ("CUTLASS and MathDx headers") describes (a checkout
+  given by `--cutlass` / `CUTLASS_PATH` and `--mathdx` / `MATHDX_HOME` wins; else an installed wheel, the header cache or a download).
 - Triton kernels are out of scope (they JIT in seconds).
 - Native `choose` sites: only each site's default and the configs the tables hold are planned (what the runtime can launch). The other
   tuning candidates are built by `_prebuild_cuda` (below).

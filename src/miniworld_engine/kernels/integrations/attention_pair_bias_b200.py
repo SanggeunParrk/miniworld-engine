@@ -20,7 +20,7 @@ of 32 (-DDHP=32) and the softmax scale of 24. ``finalize`` gathers the real rows
 
 Inference (one opaque op):
   ln_rows (LN(single), bf16) -> addmm q | k | v | g (q pre-scaled by log2(e) / sqrt(head dim): logits in exp2 units)
-  -> pair_bias (LN(pair) . Wf, Wf = to_bias.weight * ln_pair.weight * log2(e), masked keys -1e30)
+  -> pair_bias (LN(pair) . Wf, Wf = to_bias.weight * ln_pair.weight * log2(e); masked keys -inf on H100, NEG = -1e30 on B200)
   -> attn_inf -DQPAIR (sigmoid(g) o over the q columns) -> to_out accumulated in place (cuBLAS beta = 1) onto the residual
   seed ln_rows wrote (out-of-place addmm would add a copy of x into the output first).
 ln_pair has no bias: an offset would add Wb . b to every (i, j) of a head, which the softmax cancels.
@@ -36,6 +36,7 @@ masked_fill's zero derivative at every masked key."""
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -52,7 +53,7 @@ SHAPES = (
     (16, 512),
 )  # (heads, d_single): 8 x 48, 12 x 32, 16 x 24 (padded to 32), 24 x 16, 16 x 32
 LOG2E = math.log2(math.e)
-NEG = -1e30  # masked keys: finite, so a fully masked sample stays NaN-free
+NEG = -1e30  # masked keys of the B200 bf16 path: finite, so a fully masked sample stays NaN-free (H100: -inf, see the docstring)
 _packs: dict = {}
 _cores: dict = {}
 #: Opt-in fp32 pair-weight gradient ("shadow") of H100 training at L 384 / 768 for the SHAPES head layouts (2.4.x
@@ -155,7 +156,7 @@ def _sm100():
     return sm100
 
 
-def _training_core(device):
+def _training_core(device) -> Any:  # the sm_90 or the sm_100 kernel module (the same entry points, duck-typed)
     if torch.cuda.get_device_capability(device) == (9, 0):
         from miniworld_engine.kernels.augmented_attention import cuda as sm90
 
@@ -410,7 +411,7 @@ def backward(
     H, _, W, D = _geometry(leaves)
     xa, st, qkvg, bias, O, LSE, og, wf, wpack = saved[:9]
     dp = wf.shape[1]
-    wide = tuple(saved[-2:]) if dp != DP else None  # a wide pair: its forward's row stats and unmasked bias
+    wide = (saved[-2], saved[-1]) if dp != DP else None  # a wide pair: its forward's row stats and unmasked bias
     # [D, W] bf16 and Wb bf16: packed by ``prep`` on Hopper (its leaves may be an fp32 master), the leaf itself otherwise
     wo = saved[9] if len(saved) > 9 else leaves[7]
     wb = saved[10] if len(saved) > 10 else leaves[9]
@@ -629,10 +630,11 @@ class _Training(torch.autograd.Function):
             list(v[3:13]),
             list(v[13 : 13 + ctx.saved_count]),
         )
-        dx, dz, *grads = backward(single, pair, mask, leaves, *ctx.eps, saved, dy)
+        eps_s, eps_p = ctx.eps
+        dx, dz, *grads = backward(single, pair, mask, leaves, eps_s, eps_p, saved, dy)
         if ctx.exact_dwb:
             params = list(v[13 + ctx.saved_count :])
-            grads[9] = _pair_weight_shadow(single, pair, mask, params, *ctx.eps, dy)
+            grads[9] = _pair_weight_shadow(single, pair, mask, params, eps_s, eps_p, dy)
         if torch.cuda.get_device_capability(single.device) == (9, 0):
             if torch.compiler.is_compiling():
                 grads = [
@@ -925,5 +927,6 @@ class _Training32(torch.autograd.Function):
         v = ctx.saved_tensors
         mask, single, pair = v[0], v[1], v[2]
         leaves, saved = list(v[3:3 + ctx.n]), list(v[3 + ctx.n:])
-        dx, dz, *grads = backward32(single, pair, mask, leaves, *ctx.eps, saved, dy, ctx.gate_bias)
+        eps_s, eps_p = ctx.eps
+        dx, dz, *grads = backward32(single, pair, mask, leaves, eps_s, eps_p, saved, dy, ctx.gate_bias)
         return (None, None, None, None, dx, dz, *grads)

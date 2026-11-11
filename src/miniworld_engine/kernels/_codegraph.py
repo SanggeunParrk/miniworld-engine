@@ -23,7 +23,7 @@ Per-file parses are cached by (path, mtime, size), so a key costs a few stat cal
 Generated headers (TriMul's transformed upstream headers) live in an in-memory overlay (:func:`publish`) and are only
 written to disk when a build needs them, so loading prebuilt artifacts writes nothing.
 
-See docs/kernels/prebuilt-kernels.md.
+See docs/install.md ("Prebuilt kernels vs JIT") and docs/kernels.md ("Prebuilder").
 """
 
 from __future__ import annotations

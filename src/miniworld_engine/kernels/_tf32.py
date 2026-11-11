@@ -22,9 +22,13 @@ activation tiles in the kernel +17 (launches), the same with the rounded weights
   kernel, read by the squeeze kernel as a pre-rounded A operand); rounding is idempotent, so a cuBLAS GEMM that reads it sees the operand it would
   have rounded itself.
 """
+# pyright: reportArgumentType=false
+# (file-wide, for the Triton parts only: constexpr parameters take plain defaults and plain launch values, `tl.dot` takes a constexpr dtype;
+# a line ignore inside a @triton.jit body would change its source text, which keys the Triton cache of every kernel that calls it)
 from __future__ import annotations
 
 import contextlib
+from typing import cast
 
 import torch
 import triton
@@ -137,14 +141,14 @@ def tf32_grid_many(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
         else:
             out[i] = tf32_grid(t)
     if not args:
-        return tuple(out)
+        return tuple(cast("list[torch.Tensor]", out))  # every slot is set above
     pad = args[-3:]                       # unused slots: re-read the last tensor's pointers with n = 0
     pad = [pad[0], pad[1], 0]
     while len(args) < 3 * _MAX_MANY:
         args += pad
     with torch.cuda.device(device):
         _grid_many_kernel[(blocks,)](*args, BLOCK=_BLOCK)
-    return tuple(out)
+    return tuple(cast("list[torch.Tensor]", out))
 
 
 _CACHE: dict[tuple, tuple] = {}

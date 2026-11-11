@@ -1049,7 +1049,7 @@ def _forward_op(
     scope = _NATIVE_TRAINING_SCOPE.set(_h100_training_default(args[0]))
     try:
         ctx = _SavedContext()
-        out = _PwaMath.forward(ctx, *args, eps_m, eps_z, p_drop)
+        out = _PwaMath.forward(ctx, *args, eps_m, eps_z, p_drop)  # pyright: ignore[reportCallIssue]  -- args: the ten inputs in forward's order
         sv = ctx.saved_tensors
         return [out, *sv[2:6], sv[13] if p_drop else args[0].new_empty((0,))]
     finally:
@@ -1089,7 +1089,7 @@ def _backward_math(args, kept, dy, eps_m, eps_z, p_drop):
         *((kept[4],) if p_drop else ()),
     )
     gradients = _PwaMath.backward(ctx, dy)
-    return [gradients[i] for i in (0, 1, 3, 4, 5, 6, 7, 8, 9)]
+    return cast("list[torch.Tensor]", [gradients[i] for i in (0, 1, 3, 4, 5, 6, 7, 8, 9)])  # (the None slots are skipped)
 
 
 class PwaTrainFn(torch.autograd.Function):

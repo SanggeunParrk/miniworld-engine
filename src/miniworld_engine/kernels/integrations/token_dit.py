@@ -63,7 +63,6 @@ PAIR_WIDTHS_H100 = (128, 256, 512)
 COND_WIDTHS_H100 = (384, 768)
 #: the QK-norm weights, appended to WEIGHTS when the block has use_qk_norm
 QK_WEIGHTS = ("attention.norm_query.weight", "attention.norm_key.weight")
-_TUNING: dict = {}
 #: Packed runners keyed by the weights' (pointer, version): see ``_infer``.
 _RUNNERS: dict = {}
 
@@ -410,9 +409,6 @@ def _infer(
             *((w.data_ptr(), w._version) for w in weights),
         )
         runner = _capture.lookup(_RUNNERS, wkey, build)
-        key = (single.device, single.dtype)
-        caches = _TUNING.setdefault(key, ({}, {}))
-        runner._mm_cfg, runner._gated_cfg = caches
         # The pair is the trunk's output: the same at every diffusion step of a sample, so the block's pair bias (a
         # LayerNorm over L^2 pair rows + a projection, ~40 % of a call at L = 768) is computed once per sample. Keyed by
         # the caller's pair / mask tensors (pointer, version, layout): a new pair, or an in-place change of it, misses.
@@ -445,7 +441,7 @@ def _infer(
                 )
             bias = runner.hoist(pair.contiguous(), mask)
             if bkey is not None:
-                runner._bias_cache = (bkey, bias, pinned)
+                runner.__dict__["_bias_cache"] = (bkey, bias, pinned)  # (an attribute of this cache, not of the runner class)
         if L8 == L:
             return runner.step(single, cond, bias)
         # padded query rows: zero single / cond rows, computed and dropped (a shared cond stays one table)
@@ -488,6 +484,7 @@ def update(module, single, cond, pair, mask, extra=None):
     eq = float(a.norm_query.effective_eps(single.dtype)) if qk else 0.0
     ek = float(a.norm_key.effective_eps(single.dtype)) if qk else 0.0
     opts = options(module)
+    assert opts is not None  # serves() refused a block outside the algorithm
     return _infer(
         single.contiguous(),
         cond,

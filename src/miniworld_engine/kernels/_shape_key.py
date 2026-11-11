@@ -33,6 +33,8 @@ BOTH_ROWS = tuple(sorted(set(ATOM_SHAPES) | set(TOKEN_SHAPES) | {n * n for n in 
 #: the bucket names the tables use: M for a row bucket, L for a length bucket (descriptive; the lookup uses the value).
 BASE_NAMES = ("M", "L")
 _RADIX = 4096
+#: set by kernels/_pretune.py once it has wrapped the key functions for recording (they are wrapped once per process)
+_pretune_recording = False
 
 
 class ShapeKeyTooWide(ValueError):

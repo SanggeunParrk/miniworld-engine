@@ -50,7 +50,7 @@ same dW operands. The fp32 backward materialises the dW operands as the bf16 one
 from __future__ import annotations
 
 import functools
-from typing import Any
+from typing import Any, cast
 
 import torch
 import triton
@@ -1220,7 +1220,7 @@ def swa_dit_block_bwd(
             args = (dP, x.reshape(M, C), datt, gated, dab, y.reshape(M, C), dffn, hh)
             # the weight gradients leave as fp32, unrounded, as the contract (and the fake) says -- an fp32 master keeps them; the
             # autograd node casts them. The TMA + wgmma kernel stores its fp32 sums; the mma.sync fallback stores bf16.
-            dwqkv, dwg, dwo, dwu, dwd = ext_ww.wgrad(*args, f32_out=True) if ext_ww is not None else ext_w.wgrad(*args)
+            dwqkv, dwg, dwo, dwu, dwd = cast("tuple[torch.Tensor, ...]", ext_ww.wgrad(*args, f32_out=True) if ext_ww is not None else ext_w.wgrad(*args))
             return [dq.view(N, S, C), dmod, *(w.float() for w in (dwqkv, dwg, dwo, dwu, dwd))]
         dq, dwqkv, dwg, dwo = side
         if dwu is None or dwd is None:

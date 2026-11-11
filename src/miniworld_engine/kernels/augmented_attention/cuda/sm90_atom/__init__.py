@@ -428,7 +428,7 @@ def pre_fwd(
     save: bool = False,
     eps: float = 1e-5,
     nmod: int = 0,
-    parallel_kv: bool = False,
+    parallel_kv: int = False,  # 0 (False) / 1 (True) / 2, see the docstring
     options: tuple = (),
     kq=None,
     kq_eps: float = 1e-5,
@@ -719,7 +719,7 @@ def pre_bwd(
     eps: float = 1e-5,
     nmod: int = 0,
     shared=None,
-    parallel_kv: bool = False,
+    parallel_kv: int = False,  # 0 (False) / 1 (True) / 2, see the docstring
     options: tuple = (),
 ):
     """-> dx [M, 128], dmkv [M, 256] (``shared``: group sums [M / 4N, N, 256]); writes dmod blocks 0, 1 (group sums when shared).

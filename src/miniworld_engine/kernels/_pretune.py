@@ -67,6 +67,10 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from miniworld_engine.measure.config import Case
 
 KERNELS = Path(__file__).resolve().parent
 REPO = KERNELS.parents[2]
@@ -445,7 +449,7 @@ class Pretuner:
         self.ended: dict[str, bool] = {}
         self.offsets: dict[str, int] = {}
         self.drops: dict[tuple, float] = {}       # (gpu, op, key) -> time of its latest drop (records before it are superseded)
-        self.unit = None
+        self.unit: str | None = None
         self.new_keys = 0
         self.reload()
 
@@ -584,13 +588,14 @@ class Pretuner:
         saved = {n: every[n].clone() for n in k.restore_value} if snap is None else {}
 
         def restore():
-            if snap is not None:
-                for n, t in snap.items():
+            s, r = snap, saved  # (locals: closure variables are not narrowed; both are dropped below)
+            if s is not None:
+                for n, t in s.items():
                     tensors[n].copy_(t)
-            else:
+            elif r is not None:
                 for n in k.reset_to_zero:
                     every[n].zero_()
-                for n, t in saved.items():
+                for n, t in r.items():
                     every[n].copy_(t)
 
         # compile every candidate first, in parallel threads (ptxas runs as a subprocess); errors surface again at the launch
@@ -707,7 +712,7 @@ class Pretuner:
 
 
 # ===================================================================================================================== units
-def units(cfg) -> list[tuple[str, object]]:
+def units(cfg) -> list[tuple[str, Case]]:
     from miniworld_engine.measure import config
 
     out, per_row = [], {}
@@ -1026,13 +1031,13 @@ def merge(args) -> int:
         changed_file = old is None or ops != old.get("ops")
         new_version = version + 1 if changed_file else max(version, 1)
         data = {"gpu": (old or {}).get("gpu") or f"{rs[0]['device']} (sm{gpu.rsplit('_sm', 1)[1]})",
-                "source": SOURCE.format(v=PRETUNE_VERSION, k=TOP_K) if changed_file else old.get("source", ""),
+                "source": SOURCE.format(v=PRETUNE_VERSION, k=TOP_K) if changed_file else (old or {}).get("source", ""),
                 "version": new_version, "ops": ops}
         log(f"{family:24s} {gpu}: {added:4d} added, {changed:4d} changed, {same:3d} re-tuned unchanged, {kept:4d} kept; "
             f"version {version if old is not None else '-'} -> {new_version}" + ("" if changed_file else " (content unchanged)"))
         for k, v in (("added", added), ("changed", changed), ("same", same), ("kept", kept)):
             total[k] += v
-        if not args.dry_run and (changed_file or old.get("version") != new_version):
+        if not args.dry_run and (changed_file or (old or {}).get("version") != new_version):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(_dump_table(data))
     log(f"total: {total}" + (" (dry run: nothing written)" if args.dry_run else ""))

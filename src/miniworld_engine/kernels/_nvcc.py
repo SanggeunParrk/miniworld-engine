@@ -628,7 +628,7 @@ TOOLCHAINS: dict[str, Callable[[], tuple[str, list[str]]]] = {
     "torch": _toolchain_torch,
     "torch-nohost": _toolchain_torch_nohost,
     # the old name of "torch" for the Hopper atom families, kept so recorded recipes still replay: their "CUDA <= 12.9"
-    # requirement had no reason behind it (the sources build under CUDA 13.0, with the same SASS; docs/kernels/prebuilt-kernels.md)
+    # requirement had no reason behind it (the sources build under CUDA 13.0, with the same SASS)
     "torch-cuda<=12.9": _toolchain_torch,
     "sm100": _toolchain_sm100,
     "path": _toolchain_path,
@@ -887,7 +887,7 @@ def _build_ext(kind_label: str, name: str, kwargs: dict, sources: list[str] | No
         tmp = _tmp_name(final)
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir()
-        call_kwargs = {k: list(v) if isinstance(v, list) else v for k, v in kwargs.items()}
+        call_kwargs: dict[str, Any] = {k: list(v) if isinstance(v, list) else v for k, v in kwargs.items()}
         call_kwargs["build_directory"] = str(tmp)
         for f in ("extra_cflags", "extra_cuda_cflags"):
             if call_kwargs.get(f):
@@ -908,7 +908,7 @@ def _build_ext(kind_label: str, name: str, kwargs: dict, sources: list[str] | No
                     else:
                         from torch.utils.cpp_extension import load
 
-                        load(name=name, sources=sources, **call_kwargs)
+                        load(name=name, sources=sources or [], **call_kwargs)
                 except (ImportError, OSError):
                     if not (_BUILD_ONLY and built()):
                         raise  # a prebuild worker may not be able to import a CUDA extension; the build itself succeeded

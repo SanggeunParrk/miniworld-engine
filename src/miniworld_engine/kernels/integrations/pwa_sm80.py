@@ -16,6 +16,8 @@ Numerics and timings: ``docs/gpus/a100/msa_pair_weighted_averaging/``.
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 
 from miniworld_engine.kernels import _capture
@@ -450,7 +452,7 @@ def forward(
                 eps_m,
                 dscale,
             )
-    return [out.unsqueeze(0), w, v, o, msa.new_empty((0,)) if keep is None else keep]
+    return [out.unsqueeze(0), w, v, cast(torch.Tensor, o), msa.new_empty((0,)) if keep is None else keep]  # (save_o: o is returned)
 
 
 def _backward_fake(
@@ -679,8 +681,8 @@ def backward(
                 outputs,
             )
             return [dm.unsqueeze(0), dz.unsqueeze(0), *outputs]
-        dwo, dwg = glued[2:]
-        dwb, dgz, dbz = paired[1:]
+        dwo, dwg = cast("tuple[torch.Tensor, ...]", glued)[2:]  # (not typed: the glue returns four)
+        dwb, dgz, dbz = cast("tuple[torch.Tensor, ...]", paired)[1:]  # (not typed: four)
     # custom-op outputs may not alias each other: the small gradients are views of reduction buffers, so each leaves as its own copy in its leaf's dtype
     return [
         dm.unsqueeze(0),
@@ -710,7 +712,7 @@ class _Training(torch.autograd.Function):
         v = ctx.saved_tensors
         msa, pair, mask, leaves, saved = v[0], v[1], v[2], list(v[3:11]), list(v[11:])
         grads = backward(
-            msa, pair, mask, leaves, *ctx.eps, ctx.p_drop, saved, dy.contiguous()
+            msa, pair, mask, leaves, *ctx.eps, ctx.p_drop, saved, dy.contiguous()  # pyright: ignore[reportCallIssue]  -- *ctx.eps: (eps_m, eps_z)
         )
         return (None, None, None, grads[0], grads[1], None, *grads[2:])
 

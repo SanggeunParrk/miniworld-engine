@@ -29,6 +29,8 @@ ConditionedTransition sm_80 paths serving their parts.
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 
 from miniworld_engine.kernels._compile import opaque
@@ -133,11 +135,11 @@ def _softmax(bias, mask, transpose: bool):
     flat = (bias.view(h * length, length), P.view(h * length, length))
     if bias.dtype is F32:
         if transpose:
-            _rows32().softmax_t_cuda(*flat, Pt.view(h * length, length), m, 1, 1.0)
+            _rows32().softmax_t_cuda(*flat, cast(torch.Tensor, Pt).view(h * length, length), m, 1, 1.0)
         else:
             _rows32().softmax_rows_cuda(*flat, m)
     elif transpose:
-        _rows().softmax_t(*flat, Pt.view(h * length, length), m)
+        _rows().softmax_t(*flat, cast(torch.Tensor, Pt).view(h * length, length), m)
     else:
         _rows().softmax_rows(*flat, m)
     return P, Pt
@@ -177,7 +179,7 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
         g2 = torch.addmm(bs, cond, ws.t())
         out = torch.empty_like(res)
         _sm80().res_gate(y, g2, res, out)
-    return [out, vg, a, y, g2, P, Pt] if save else [out]
+    return [out, vg, a, y, g2, P, cast(torch.Tensor, Pt)] if save else [out]  # (save: P^T was made)
 
 
 def _bwd_fake(dout, x, cond, pair, params, saved, heads):
@@ -224,7 +226,7 @@ def _bwd(dout: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, pair: torch.Te
         dwb = dwf * lnw.float()[None]
     grads = [dwvg[:da], dwvg[da:], dwo, dws, dbs, dlnw, dwb]
     outs = [torch.empty(p.shape, device=dev, dtype=p.dtype) for p in params]
-    torch._foreach_copy_(outs, [g.reshape(p.shape) for g, p in zip(grads, params, strict=True)])
+    torch._foreach_copy_(outs, [g.reshape(p.shape) for g, p in zip(grads, params, strict=True)])  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
     return [dx, dcond, dz.view(pair.shape), *outs]
 
 

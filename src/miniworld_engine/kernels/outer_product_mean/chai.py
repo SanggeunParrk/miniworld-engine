@@ -80,10 +80,8 @@ def _front(msa, mask, forms, eps, save):
             mk = mk != 0
     lnw32, lnb32, w, _, _ = forms
     a, b, st1 = cuda.chai_proj(x, mk, lnw32, lnb32, w, eps, save)
-    if hasattr(cuda, "chai_products"):   # A100: the masked product skips the dead tokens
-        o = cuda.chai_products(a, b, mk, s, n)
-    else:
-        o = torch.bmm(a.view(G, s, n * K).transpose(1, 2), b.view(G, s, n * K))     # [8, N K, N K]
+    products = getattr(cuda, "chai_products", None)   # A100: the masked product skips the dead tokens
+    o = products(a, b, mk, s, n) if products is not None else torch.bmm(a.view(G, s, n * K).transpose(1, 2), b.view(G, s, n * K))  # [8, N K, N K]
     return a, b, st1, o
 
 
@@ -179,10 +177,10 @@ def forward(module, msa, mask, token_asym_id=None, residual=None):
     fuse = residual is not None and not interchain and residual.dtype == msa.dtype
     args = [msa.contiguous(), empty if mask is None else mask, module.ln_msa.weight, module.ln_msa.bias, module.to_left.weight,
             module.to_right.weight, module.product_norm.weight, module.product_norm.bias, module.to_out.weight, module.to_out.bias,
-            residual.contiguous() if fuse else empty]
+            residual.contiguous() if fuse and residual is not None else empty]
     eps, eps_prod = float(module.ln_msa.eps), float(module.product_norm.eps)
     z = _ChaiFn.apply(eps, eps_prod, *args) if torch.is_grad_enabled() else _fwd_op(args, eps, eps_prod, False)[0]
     z = z.view(1, n, n, -1)
-    if interchain:
+    if interchain and token_asym_id is not None:
         z = z * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(z.dtype)
     return residual + z if residual is not None and not fuse else z
