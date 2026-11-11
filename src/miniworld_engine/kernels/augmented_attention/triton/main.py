@@ -918,10 +918,10 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
                 dy.contiguous(), q, k, v, bias, mask, o, m, atom_key(L))
             dbias = dbias[0] if A == 1 and head_major else dbias.sum(dim=0)
         if head_major:
-            # A100: the (B, H, L, L) accumulator rounded to the bias dtype and handed back as its (B, L, L, H) view (no
+            # A100 / H100: the (B, H, L, L) accumulator rounded to the bias dtype and handed back as its (B, L, L, H) view (no
             # transposing copy). The bias producer's backward (to_bias: dW = dbias^T x, dx = dbias W) then reads the
-            # head-major operand, which cuBLAS on sm_80 serves with its aligned bf16 kernels (2.2x faster than on the
-            # contiguous (B, L, L, H) copy, where it picks an align-1 kernel); the values are the same.
+            # head-major operand, which cuBLAS serves with its aligned kernels (on sm_80 2.2x faster than on the contiguous
+            # (B, L, L, H) copy, where it picks an align-1 kernel); the values are the same.
             return dq, dk, dv, dbias.to(bias.dtype).permute(0, 2, 3, 1), None
         dbias = dbias.permute(0, 2, 3, 1).contiguous()
         return dq, dk, dv, dbias, None   # mask takes no gradient
@@ -929,11 +929,11 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
 
 @functools.lru_cache(maxsize=None)
 def _head_major_capability(index: int) -> bool:
-    return torch.cuda.get_device_capability(index) == (8, 0)
+    return torch.cuda.get_device_capability(index) in ((8, 0), (9, 0))
 
 
 def _head_major_dbias(device: torch.device) -> bool:
-    """Whether the backward returns dbias as the head-major view (A100, sm_80); other cards keep the contiguous copy."""
+    """Whether the backward returns dbias as the head-major view (A100 sm_80, H100 sm_90); other cards keep the contiguous copy."""
     return device.type == "cuda" and _head_major_capability(device.index if device.index is not None else torch.cuda.current_device())
 
 
