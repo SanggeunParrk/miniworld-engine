@@ -245,7 +245,7 @@ def _prep(leaves, qs: float, ws: float, gate_bias: float = 0.0):
     return wpack, bvec, wf, wop, wbo
 
 
-def _inference_fake(single, pair, mask, leaves, eps_s, eps_p, gate_bias=0.0):
+def _inference_fake(single, pair, mask, leaves, eps_s, eps_p, gate_bias=0.0, extra=None):
     return torch.empty_like(single)
 
 
@@ -258,8 +258,10 @@ def inference(
     eps_s: float,
     eps_p: float,
     gate_bias: float = 0.0,
+    extra: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """single [1, L, 384], pair [1, L, L, 128] bf16, mask [L] bool or None, leaves as ``_leaves`` -> single + APB(single)."""
+    """single [1, L, 384], pair [1, L, L, 128] bf16, mask [L] bool or None, leaves as ``_leaves`` -> single + APB(single). ``extra``
+    [1, H, L, L] (any strides): an additive logit term (``extra_pair_bias``), added to the bias planes in their exp2 units."""
     L = single.shape[1]
     rows, dev = _rows(), single.device
     params = leaves
@@ -276,6 +278,8 @@ def inference(
         qkvg = torch.addmm(bvec, xa, wpack.t())
         neg = -math.inf if torch.cuda.get_device_capability(dev) == (9, 0) else NEG
         bias = rows.pair_bias(pair.view(L * L, wf.shape[1]), wf, mask, L, eps_p, neg)
+        if extra is not None:  # a masked key stays at -inf (H100) / NEG + extra (B200: finite, still far below every real logit)
+            bias.add_(extra[0].to(bias.dtype), alpha=LOG2E)
         core = _cores.get((dev.index, H, D))
         if core is None:
             core = _cores[(dev.index, H, D)] = _inference_core(dev, H, D)
@@ -283,7 +287,10 @@ def inference(
         return y.addmm_(qkvg[:, :W], wo.t()).view(1, L, D)
 
 
-def update_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+def update_inference(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, extra: torch.Tensor | None = None
+) -> torch.Tensor:
+    """``extra``: [1, H, L, L] logit planes (``extra_pair_bias``, natural units) or None."""
     op = inference32 if single.dtype == torch.float32 else inference
     return op(
         single,
@@ -293,6 +300,7 @@ def update_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: tor
         module.ln_single.eps,
         module.ln_pair.eps,
         float(module.gate_bias),
+        extra,
     )
 
 
@@ -740,8 +748,10 @@ def inference32(
     eps_s: float,
     eps_p: float,
     gate_bias: float = 0.0,
+    extra: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """single [1, L, D], pair [1, L, L, dp] fp32, mask [L] bool or None, leaves fp32 as ``_leaves`` -> single + APB(single)."""
+    """single [1, L, D], pair [1, L, L, dp] fp32, mask [L] bool or None, leaves fp32 as ``_leaves`` -> single + APB(single). ``extra``
+    [1, H, L, L]: an additive logit term, added to the core's bias in its log2 units and key order (``key_perm``)."""
     L = single.shape[1]
     H, _, dhp, W, D, dp = _geometry32(leaves)
     E = _rows().ext()
@@ -754,6 +764,8 @@ def inference32(
         vt = torch.mm(wv, xa.t())
         bias = x.new_empty((H, L, L))
         E.pair_bias32_fwd(pair.view(L * L, dp), wf, mask, bias, None, None, L, eps_p, -math.inf)
+        if extra is not None:
+            bias.add_(extra[0].to(bias.dtype)[:, :, _key_perm32(L, single.device)[0]], alpha=LOG2E)
         _sm90().tf32_gated_inference(qkg, vt, bias, 0, 1, 2 * W, nh=H, dh=dhp)
         return y.addmm_(qkg[:, :W], wo.t()).view(1, L, D)
 

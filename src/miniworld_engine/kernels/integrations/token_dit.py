@@ -243,6 +243,8 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         return False
     if not single.is_cuda or single.dtype not in (torch.bfloat16, torch.float32):
         return False
+    if pair.dtype is not single.dtype:  # token_inference's own condition (the pair LayerNorm rows read the single's dtype)
+        return False
     if compute_dtype is not None and compute_dtype != single.dtype:
         return False
     if single.ndim != 4 or single.shape[2] < 8:

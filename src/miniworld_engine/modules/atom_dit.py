@@ -65,7 +65,7 @@ from miniworld_engine.modules.attention import (
     FlatQKNormAugmentedAttention,
     UngatedAugmentedAttention,
 )
-from miniworld_engine.modules.dit_variant_cuda import VariantAtomCuda
+from miniworld_engine.modules.dit_variant_cuda import MasterEntryCast, VariantAtomCuda, fp32_conditioning
 from miniworld_engine.modules.functional import (
     ATOM_KEYS,
     ATOM_QUERIES,
@@ -821,7 +821,7 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
 
 
-class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
+class AtomDiTChai1(MasterEntryCast, VariantAtomCuda, _LocalAtomDiT):
     """Chai-1's atom transformer block (its TorchScript ``diffusion_module.pt``): ONE identity AdaLN ``(1 + W_s c) LN(a) + W_b c`` for the
     queries and the keys / values (``single_layer_norm``; no ``attention.ada_ln_kv``) and another for the transition
     (``transition.ada_ln_in``), both LayerNorms of the atoms at ``adaln_eps`` (the release: 0.1, the default), no gating query and no output
@@ -866,7 +866,7 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
         return self._step(single, cond, pair, mask, uid=uid, delta=self._attention_delta_triton)
 
     def make_inputs(self, **kwargs) -> dict:
-        inputs = super().make_inputs(**kwargs)
+        inputs = fp32_conditioning(super().make_inputs(**kwargs), kwargs.get("stream"), kwargs["generator"])
         return {
             **inputs,
             "uid": (torch.arange(inputs["mask"].shape[-1], device=inputs["mask"].device) // 24)[None],

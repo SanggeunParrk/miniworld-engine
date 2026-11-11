@@ -718,7 +718,7 @@ def _gpack(params, heads: int, gate_bias: float, dt: torch.dtype, save: bool = T
     return cached(f"apb_sm80_generic_{dt}_{gate_bias}", tuple(params), build)
 
 
-def _gfwd_fake(single, pair, mask, params, heads, gate_bias, eps_s, eps_p, save):
+def _gfwd_fake(single, pair, mask, params, heads, gate_bias, eps_s, eps_p, save, extra=None):
     L, D = single.shape[1], single.shape[2]
     n = heads * _hdp(params[2].shape[0] // heads)
     e = single.new_empty
@@ -747,8 +747,10 @@ def _gfwd(
     eps_s: float,
     eps_p: float,
     save: bool,
+    extra: torch.Tensor | None = None,
 ) -> list[torch.Tensor]:
-    """single [1, L, D], pair [1, L, L, dp] -> [single + APB(single, pair)], with ``save`` also s, the LN statistics, qkvg, bias, o, lse, og."""
+    """single [1, L, D], pair [1, L, L, dp] -> [single + APB(single, pair)], with ``save`` also s, the LN statistics, qkvg, bias, o, lse, og.
+    ``extra`` [1, H, L, L] (inference, ``save`` False): an additive logit term (``extra_pair_bias``) added to the bias in the core's units."""
     from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32
 
     sm80 = _sm80()
@@ -771,6 +773,8 @@ def _gfwd(
             if f32 and pair.shape[-1] >= 512 and L <= 128 and heads % 8 == 0
             else sm80.pair_bias_generic(pair[0], wcm, m, L, eps_p, oscale=1.0 if f32 else math.sqrt(hd), rows=_gen_rows(L))
         )
+        if extra is not None:  # the bias in the core's units (bf16: x sqrt(head dim)); a masked key stays far below every real logit
+            bias.add_(extra[0].to(bias.dtype), alpha=1.0 if f32 else math.sqrt(hd))
         scale = hd**-0.5
         if save:
             o = torch.empty(L, n, device=x.device, dtype=dt)
@@ -898,12 +902,17 @@ class _Generic(torch.autograd.Function):
         )
 
 
-def update_generic(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool) -> torch.Tensor:
-    """The composed path (``_generic_refusal`` must have returned None): single + APB(single, pair)."""
+def update_generic(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool, extra: torch.Tensor | None = None
+) -> torch.Tensor:
+    """The composed path (``_generic_refusal`` must have returned None): single + APB(single, pair). ``extra``: [1, H, L, L] logit planes
+    (``extra_pair_bias``), inference only."""
+    if extra is not None and grad:
+        raise ValueError("extra_pair_bias: the composed path takes it at inference only")
     args = (module.n_head, float(module.gate_bias), float(module.ln_single.eps), float(module.ln_pair.eps))
     m = None if mask is None else mask.contiguous()
     with torch.autocast("cuda", enabled=False):
         single, pair = single.contiguous(), pair.contiguous()
         if grad:
             return _Generic.apply(single, pair, m, *args, *_gparams(module))
-        return _gfwd(single, pair, m, _gparams(module), *args, False)[0]
+        return _gfwd(single, pair, m, _gparams(module), *args, False, extra)[0]

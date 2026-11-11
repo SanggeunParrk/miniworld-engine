@@ -44,6 +44,29 @@ def _triton_core(q, k, v, bias, mask):
     return triton_augmented_attention_pair_bias(q, k.to(dt), v.to(dt), bias.to(dt), mask)
 
 
+#: the requirements stream whose ``make_inputs`` adds an ``extra_pair_bias`` (OpenDDE's structural-token refiner: an [L, L] logit bias on every
+#: head, FoldForge R3)
+EXTRA_BIAS_STREAM = "token_single_extra_bias"
+
+
+def _extra_planes_reason(extra: torch.Tensor, b: int, h: int, n: int) -> str | None:
+    """Why ``extra_pair_bias`` cannot be read as ``[B, H, L, L]`` head-major logit planes, or None: ``[L, L]``, ``[H | 1, L, L]`` or
+    ``[B | 1, H | 1, L, L]`` (a size-1 axis is shared; stride-0 expanded views are fine), a floating dtype."""
+    if not extra.is_floating_point():
+        return f"extra_pair_bias dtype {extra.dtype} (a floating dtype)"
+    if extra.ndim not in (2, 3, 4) or tuple(extra.shape[-2:]) != (n, n):
+        return f"extra_pair_bias must be [L, L], [H, L, L] or [B, H, L, L] with L = {n}, got {tuple(extra.shape)}"
+    lead = (1,) * (4 - extra.ndim) + tuple(extra.shape[:-2])
+    if lead[0] not in (1, b) or lead[1] not in (1, h):
+        return f"extra_pair_bias {tuple(extra.shape)} does not broadcast to [B, H, L, L] = [{b}, {h}, {n}, {n}]"
+    return None
+
+
+def _extra_planes(extra: torch.Tensor, b: int, h: int, n: int) -> torch.Tensor:
+    """``extra_pair_bias`` as an (expanded, possibly stride-0) ``[B, H, L, L]`` view (:func:`_extra_planes_reason` must be None)."""
+    return extra.reshape((1,) * (4 - extra.ndim) + tuple(extra.shape)).expand(b, h, n, n)
+
+
 class AttentionPairBias(BackendModule, MasterWeights):
     """Attention with pair bias::
 
@@ -185,14 +208,29 @@ class AttentionPairBias(BackendModule, MasterWeights):
             "single": random_input((samples, length, d_single), dtype=dtype, device=device, generator=generator),
             "pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
             "mask": key_mask(samples, length, device=device),
+            # OpenDDE's refiner (FoldForge R3): one [L, L] bias expanded over the samples and the heads, as FoldForge hands it
+            **(
+                {
+                    "extra_pair_bias": random_input((length, length), dtype=dtype, device=device, generator=generator)[None, None].expand(
+                        samples, self.n_head, length, length
+                    )
+                }
+                if stream == EXTRA_BIAS_STREAM
+                else {}
+            ),
         }
+
+    def _extra_reason(self, single, extra_pair_bias) -> str | None:
+        if extra_pair_bias is None or single.dim() != 3:
+            return None
+        return _extra_planes_reason(extra_pair_bias, single.shape[0], self.n_head, single.shape[1])
 
     # ------------------------------------------------------------------------------------------------------------- "triton"
     # The reference's statements with the attention core (q k^T / sqrt(D) + pair bias [+ extra], key mask, softmax, P v) on the Triton
     # pair-bias attention kernel (forward and backward); the LayerNorms / projections are the module's. bf16 / fp32 / master, head dim <= 64.
     def _supports_triton(self, single, pair, mask=None, extra_pair_bias=None) -> str | None:
         why = self._call_refusal(single, pair, mask) if single.dim() == 3 else "single must be [B, L, d]"
-        return why or _triton_core_reason(single, self._head_dim())
+        return why or self._extra_reason(single, extra_pair_bias) or _triton_core_reason(single, self._head_dim())
 
     def _forward_triton(self, single, pair, mask=None, extra_pair_bias=None):
         if self.dead and not (self.training or torch.is_grad_enabled()):
@@ -206,7 +244,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
                 q, k = self.norm_query(q), self.norm_key(k)
             bias = self.to_bias(self.ln_pair(pair))  # [B, L, L, H]
             if extra_pair_bias is not None:
-                bias = bias + extra_pair_bias.to(bias.dtype).permute(0, 2, 3, 1)
+                bias = bias + _extra_planes(extra_pair_bias, b, h, n).to(bias.dtype).permute(0, 2, 3, 1)
             out = _triton_core(q[None], k[None], v[None], bias, None if mask is None else mask[None])[0]
             gate = self.to_gate(s)
             if self.gate_bias:
@@ -221,42 +259,58 @@ class AttentionPairBias(BackendModule, MasterWeights):
     # rows / cores, fp32 weight gradients onto the parameters). Range = ``refusal``: bf16 activations (parameters bf16 or fp32 masters) or
     # float32 activations with float32 parameters (the TF32 path: attn_tf32 core, fp32 row / pair kernels, fp32 GEMMs), one batch row,
     # 8 x 48 / 12 x 32 / 16 x 24 / 24 x 16 heads at d_single 384 or 16 x 32 at 512, d_pair 128, 256 / 384 (8 or 16 heads) or 512 (16 heads),
-    # gate_bias, no QK-norm, no extra_pair_bias, L a multiple of 128; everything else is refused, never run elsewhere.
+    # gate_bias, no QK-norm, L a multiple of 128; everything else is refused, never run elsewhere. extra_pair_bias (eval only, FoldForge R3:
+    # OpenDDE's refiner): added to the bias planes the pair pass writes, before the core, in the core's units (exp2; the fp32 core's key order).
     # A100 (sm_80): kernels/integrations/attention_pair_bias_sm80.py -- the fused C++ step (bf16 activations, B = 1, the same head layouts,
     # d_pair 128, any L, no gate_bias) and, for fp32 (TF32 core), the wider pairs (256 / 384 / 512) and gate_bias, the path composed from
-    # the sm_80 attention kernels (B = 1, L a multiple of 128, head dims 16-64); no QK-norm, no extra_pair_bias; inference and training.
+    # the sm_80 attention kernels (B = 1, L a multiple of 128, head dims 16-64); no QK-norm; inference and training. extra_pair_bias (eval
+    # only): the composed path, its planes added to the bias tensor it makes.
     # Its ``refusal`` is the range there.
     def _supports_cuda(self, single, pair, mask=None, extra_pair_bias=None) -> str | None:
         from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as native
 
-        why = self._call_refusal(single, pair, mask)
+        why = self._call_refusal(single, pair, mask) or self._extra_reason(single, extra_pair_bias)
         if why is not None:
             return why
-        if extra_pair_bias is not None:
-            return "extra_pair_bias: the kernels compute the bias from pair inside the pass and take no additive logit input"
+        grad = self._cuda_grad(single, pair, extra_pair_bias)
+        if extra_pair_bias is not None and grad:
+            # the training Functions keep the bias inside their passes and return no gradient for an additive logit term ("triton" does)
+            return "extra_pair_bias with a gradient: the cuda backend folds it into the inference ops' bias planes only (eval)"
         if single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0):
             from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
 
-            return sm80.refusal(self, single, pair, mask, self._cuda_grad(single, pair))
-        return native.refusal(self, single, pair, mask, self._cuda_grad(single, pair))
+            if extra_pair_bias is not None:  # the fused C++ step makes its bias inside the step: the composed path, whose bias is a tensor
+                generic = sm80._generic_refusal(self, single, pair, mask, False)
+                return None if generic is None else f"extra_pair_bias (A100: the composed path only): {generic}"
+            return sm80.refusal(self, single, pair, mask, grad)
+        return native.refusal(self, single, pair, mask, grad)
 
-    def _cuda_grad(self, single, pair) -> bool:
-        return torch.is_grad_enabled() and (single.requires_grad or pair.requires_grad or any(p.requires_grad for p in self.parameters()))
+    def _cuda_grad(self, single, pair, extra_pair_bias=None) -> bool:
+        return torch.is_grad_enabled() and (
+            single.requires_grad
+            or pair.requires_grad
+            or (extra_pair_bias is not None and extra_pair_bias.requires_grad)
+            or any(p.requires_grad for p in self.parameters())
+        )
 
     def _forward_cuda(self, single, pair, mask=None, extra_pair_bias=None):
         from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as native
 
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return single
+        # extra_pair_bias (eval only, ``_supports_cuda``): [B, H, L, L] planes added to the kernels' hoisted bias before the core (FoldForge R3)
+        extra = None if extra_pair_bias is None else _extra_planes(extra_pair_bias, single.shape[0], self.n_head, single.shape[1])
         if torch.cuda.get_device_capability(single.device) == (8, 0):
             from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
 
+            if extra is not None:
+                return sm80.update_generic(self, single, pair, mask, False, extra=extra)
             if self._cuda_grad(single, pair):
                 return sm80.update_train(self, single, pair, mask)
             return sm80.update_inference(self, single, pair, mask)
         if self._cuda_grad(single, pair):
             return native.update_train(self, single, pair, mask)
-        return native.update_inference(self, single, pair, mask)
+        return native.update_inference(self, single, pair, mask, extra=extra)
 
     # ------------------------------------------------------------------------------------------------------------- library backends
     def _head_dim(self) -> int:
