@@ -715,19 +715,15 @@ def _gemm_pair(pair: torch.Tensor, f32: bool) -> bool:
 
 def _bias_gemm_bwd(z: torch.Tensor, wcm: torch.Tensor, db: torch.Tensor, L: int, eps: float, out: torch.Tensor | None = None):
     """(dz [L, L, dp], dWf [H, dp] fp32) of ``_bias_gemm`` from db [H, L, L] fp32 (zero on the masked keys). ``out``: a contiguous
-    [L, L, dp] buffer dz is written into (a batch row of the caller's gradient)."""
+    [L, L, dp] buffer dz is copied into (a batch row of the caller's gradient)."""
     dp, heads = wcm.shape
     z2 = z.reshape(L * L, dp)
     zn, mean, rstd = torch.native_layer_norm(z2, (dp,), None, None, eps)
     d2 = db.reshape(heads, L * L)
     dzn = torch.mm(d2.t(), wcm.t())
-    if out is None:
-        dz = torch.ops.aten.native_layer_norm_backward(dzn, z2, (dp,), mean, rstd, None, None, [True, False, False])[0]
-    else:
-        none = z2.new_empty(0)
-        dz = torch.ops.aten.native_layer_norm_backward.out(
-            dzn, z2, (dp,), mean, rstd, None, None, [True, False, False], out0=out.view(L * L, dp), out1=none, out2=none
-        )[0]
+    dz = torch.ops.aten.native_layer_norm_backward(dzn, z2, (dp,), mean, rstd, None, None, [True, False, False])[0]
+    if out is not None:  # ATen's LayerNorm backward has no output argument: one copy (L <= GEMM_BWD_MAX_L only)
+        dz = out.view(L * L, dp).copy_(dz)
     return dz.view(L, L, dp), torch.mm(d2, zn)
 
 
