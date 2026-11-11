@@ -1,5 +1,6 @@
 """FoldForge 5I28 confidence head (APB B > 1): ``AttentionPairBias`` on ``cuda`` serves a batch of B rows (the confidence PairformerBlock's
-single attention batched over the diffusion samples) on H100 and A100, inference and training, as one step per batch row inside each op.
+single attention batched over the diffusion samples) on H100 and A100, inference and training, as one step per batch row inside each op (the A100
+fp32 composed path: its pair backward is one tensor-core launch for the batch, which computes each row as the one-row launch does).
 
 The batched call equals the B one-row calls: outputs and the input gradients bitwise (each row runs the one-row launches), the weight
 gradients as their sum over the rows (fp32 masters: summed in fp32 in row order, as autograd accumulates B calls -- bitwise; bf16 parameters:
@@ -47,7 +48,14 @@ def _autocast(dtype: str):
     return torch.autocast("cuda", dtype=torch.bfloat16, enabled=dtype == "master")
 
 
-CASES = [(128, 0.0, "master"), (128, 0.0, "bfloat16"), (256, 1.0, "master"), (384, 0.0, "master"), (512, 0.0, "float32")]
+CASES = [
+    (128, 0.0, "master"),
+    (128, 0.0, "bfloat16"),
+    (256, 1.0, "master"),
+    (384, 0.0, "master"),
+    (512, 0.0, "float32"),
+    (256, 1.0, "float32"),
+]
 
 
 @pytest.mark.skipif(not _card(), reason="H100 (sm_90) or A100 (sm_80)")
@@ -120,3 +128,39 @@ def test_batched_training_equals_rows(d_pair: int, gate_bias: float, dtype: str)
             assert float((a - b).abs().max()) <= 2e-2 * float(b.abs().max()) + 1e-6, name
         else:  # equal up to the A100 fused backward's atomic dWf / LN sums (run to run ~2e-7 of the largest entry)
             assert float((a - b).abs().max()) <= 2e-6 * float(b.abs().max()) + 1e-9, name
+
+
+def _pair_bias_backward_fp64(z, wcm, db, mask, eps):
+    """The pair-bias backward (``sm80.pair_bias_generic_backward``'s math) in float64: (dz, dW' per batch row [B, H, C])."""
+    z64 = z.double()
+    mean = z64.mean(-1, keepdim=True)
+    rstd = (z64.var(-1, unbiased=False, keepdim=True) + eps).rsqrt()
+    xh = (z64 - mean) * rstd
+    g = db.double().permute(0, 2, 3, 1) * mask[:, None, :, None].double()  # [B, L, L, H]; a masked key passes no gradient
+    dxh = g @ wcm.double().t()
+    dz = rstd * (dxh - dxh.mean(-1, keepdim=True) - xh * (dxh * xh).mean(-1, keepdim=True))
+    return dz, torch.einsum("bijh,bijc->bhc", g, xh)
+
+
+@pytest.mark.skipif(not (torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)), reason="A100 (sm_80)")
+@pytest.mark.parametrize(("channels", "heads"), [(512, 16), (384, 8), (256, 16), (128, 24)])
+def test_tc_pair_backward(channels: int, heads: int) -> None:
+    """The A100 composed fp32 path's pair backward (``pair_bias_generic_backward_tc``, one launch for the batch): dz at ~fp32 accuracy (3xTF32),
+    dW' at TF32-GEMM accuracy; each batch row's result equals the one-row launch's bitwise, and a replay is bit-identical."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm80
+
+    g = torch.Generator(device="cuda").manual_seed(4)
+    batch, length = 3, 128
+    z = torch.randn(batch, length, length, channels, device="cuda", generator=g) * 1.3 + 0.7
+    wcm = torch.randn(channels, heads, device="cuda", generator=g) * 0.1
+    db = torch.randn(batch, heads, length, length, device="cuda", generator=g) * 1e-2
+    mask = torch.arange(length, device="cuda")[None] < (length - 3 - 5 * torch.arange(batch, device="cuda"))[:, None]
+    dz, dw = sm80.pair_bias_generic_backward_tc(z, wcm, db, mask, length)
+    rz, rw = _pair_bias_backward_fp64(z, wcm, db, mask, 1e-5)
+    assert float((dz.double() - rz).abs().max()) <= 2e-6 * float(rz.abs().max())
+    assert float((dw.double() - rw).abs().max()) <= 2e-3 * float(rw.abs().max())
+    for b in range(batch):
+        rows = sm80.pair_bias_generic_backward_tc(z[b : b + 1], wcm, db[b : b + 1], mask[b : b + 1], length)
+        assert torch.equal(rows[0][0], dz[b]) and torch.equal(rows[1][0], dw[b])
+    again = sm80.pair_bias_generic_backward_tc(z, wcm, db, mask, length)
+    assert torch.equal(again[0], dz) and torch.equal(again[1], dw)

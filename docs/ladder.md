@@ -40,7 +40,12 @@ card with graph timings). Tokens at b1ffb4a16 (2026-11-11), both cards with 0 ow
 | H100 | no violation outside the exceptions; the small-L misses are cuda vs triton of AttentionPairBias (1 case), OuterProductMean (3), PairEmbedCA (2), at most 3.7 % | only LayerNorm misses (exception): 8 cases vs `anthropic` |
 | A100 | no violation outside the exceptions; the small-L misses are cuda vs triton of OuterProductMean (1 case) and PairEmbedCA (3), at most 6.1 % | LayerNorm misses (exception): 30 cases vs `anthropic`, 8 vs `cueq`; one Transition case at L <= 256 vs `anthropic` (17.5 %) |
 
-Open (2026-11-11, not an exception: to be fixed): A100 `AttentionPairBias` `cuda`, float32 training with a wide pair (d_pair 256 / 384 /
-512), L 384-640: the composed sm_80 path runs one row per launch, so cuda is 0.98-1.12x triton at S = 5 (r42 / r45 / r47 L384 1.10-1.12;
-r42 L512 0.98; r47 L512 / L640 ~1.0, already ~1.0 at S = 1 before the B > 1 change). The fix is a real batch dimension in the sm_80
-composed path (an attempt on branch `req-apb-batch`, commits 230577e36..685705a3e, was stopped before it was measured and is not merged).
+Fixed (2026-11-12; was open 2026-11-11): A100 `AttentionPairBias` `cuda`, float32 training with a wide pair (d_pair 256 / 384 / 512) was
+0.98-1.12x triton at L 384-640 (S = 5; ~1.0 at S = 1 for d_pair 512). Profile: the pair side of the backward was 70-80 % of the step (per row: the
+one-pass CUDA-core kernel at 0.35 TB/s, or at L <= 384 a LayerNorm recompute + cuBLAS GEMMs + the LayerNorm backward + a copy of the pair-sized
+gradient). It is now one TF32 tensor-core launch for the batch (`pair_bias_gen_bwd_tc`: one read of the pair, one write of its gradient, ~1.45 TB/s;
+the pair gradient in 3xTF32); graph timing, A100 80GB PCIe: cuda / triton 0.43-0.51 at S = 1 and 0.40-0.51 at S = 5 for L 384-768 (r42 / r45 / r47;
+before: 0.86-1.01 and 0.86-1.12), 0.29-0.38 at L 1024-2048 (r42 / r45; at L 2048 and S = 5 pytorch and triton do not fit 80 GB). The rest of the step stays per batch row (a row's
+results equal the one-row call's bitwise); at L 128 and S = 5 cuda is 1.09-1.24x triton (before 1.69-1.83; the per-row launches; L <= 256 is the small-L
+exception), at L 256 and S = 5 0.61-0.67 (before 1.21-1.28). The earlier batched GEMM attempt (`req-apb-batch`, never measured) was not used: it kept 3-4 passes over the pair and
+recovered dWf from a z - a mean (cancellation for a pair with a large mean).
