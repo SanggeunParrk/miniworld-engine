@@ -50,6 +50,7 @@ NOT_WEIGHT_DERIVED = {
     "kernels/integrations/pwa_wide_sm80.py:_SIDE": "side streams",
     "kernels/trimul_inproj/cuda/sm80.py:_SIDE": "side streams",
     "kernels/transition/cuda/fused_generic_sm90a.py:_SIDE_STREAMS": "side streams",
+    "kernels/transition/cuda/fused_fwd_sm80.py:_SMS": "SM count per device",
     "kernels/conditioned_transition/cuda/__init__.py:_TOKEN_STREAMS": "side streams",
     "kernels/integrations/local_dit_h100.py:_CONST": "constant tensors per shape / device",
     "kernels/integrations/token_dit.py:_CONST": "constant tensors per shape / device",
