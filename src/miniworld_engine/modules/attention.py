@@ -418,6 +418,9 @@ class AugmentedAttentionPairBias(BackendModule):
     """
 
     backends = ("pytorch", "triton")
+    #: The K / V AdaLN of the atom DiT blocks whose keys and values have their own conditioning (set by modules/atom_dit.py; absent
+    #: otherwise). Declared for the type checker only.
+    ada_ln_kv: AdaptiveLayerNorm
 
     def __init__(
         self,

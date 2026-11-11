@@ -107,8 +107,12 @@ save intermediates, and keeps the eager path byte-identical to what shipped.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
+from typing import Any, TypeVar, cast
 
 import torch
+
+_F = TypeVar("_F", bound=Callable[..., Any])
 
 #: Ops already registered in this process, by qualified name. ``torch.library.custom_op`` raises on
 #: a duplicate name, and a module can legitimately be imported twice (a test that reconfigures
@@ -132,7 +136,7 @@ def _op_name(fn, name: str | None) -> str:
     return qual.replace(".", "__").replace("<", "").replace(">", "")
 
 
-def opaque(fake=None, *, name: str | None = None, mutates_args=()):
+def opaque(fake=None, *, name: str | None = None, mutates_args=()) -> Callable[[_F], _F]:
     """Mark a kernel launch as untraceable by Dynamo, as an opaque ``torch.library`` custom op.
 
     ``fake(*args, **kwargs)`` returns output tensors of the right shape/dtype/device without doing
@@ -144,7 +148,7 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()):
     output buffer instead of allocating one.
     """
 
-    def decorate(fn):
+    def decorate(fn: _F) -> _F:
         if fake is None:
             raise ValueError(
                 f"opaque() needs a fake implementation for "
@@ -152,7 +156,7 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()):
         qualname = f"miniworld_engine::{_op_name(fn, name)}"
         cached = _REGISTERED.get(qualname)
         if cached is not None:
-            return cached
+            return cast(_F, cached)
         op = torch.library.custom_op(qualname, fn, mutates_args=mutates_args)
         op.register_fake(fake)
         # Keep the wrapped function reachable. `custom_op` returns a `CustomOpDef` whose
@@ -165,9 +169,10 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()):
         # `__wrapped__` is what `inspect.signature` follows, so setting it restores the real
         # signature to every reader without changing how the op is called or registered.
         with contextlib.suppress(AttributeError, TypeError):
-            op.__wrapped__ = fn
+            op.__wrapped__ = fn  # pyright: ignore[reportAttributeAccessIssue]  -- set where the op allows it (suppressed above where not)
         _REGISTERED[qualname] = op
-        return op
+        # typed as the launcher it wraps (the call signature a type checker should check against); at run time the CustomOpDef
+        return cast(_F, op)
 
     return decorate
 

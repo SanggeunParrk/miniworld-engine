@@ -75,5 +75,5 @@ def cast_pack(srcs: list[torch.Tensor], n_cat: int) -> list[torch.Tensor]:
         total += triton.cdiv(s.numel(), _BLOCK)
     while len(args) < 3 * MAX_TENSORS:           # unused slots: size 0
         args += [srcs[0], dsts[0], 0]
-    _cast_kernel[(total,)](*args, BLOCK=_BLOCK, num_warps=4)
+    _cast_kernel[(total,)](*args, BLOCK=_BLOCK, num_warps=4)  # pyright: ignore[reportCallIssue]  -- triton launch options (num_warps) are not in the JIT function's typed signature
     return [cat, *rest]

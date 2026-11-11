@@ -99,9 +99,24 @@ ban-relative-imports = "all"
 [tool.ruff.format]
 docstring-code-format = false
 
+# ---------------------------------------------------------------------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+# tests/cpu run anywhere (no GPU); tests/gpu need a CUDA device and skip cleanly without one (or without the card a marker names).
+#   CPU:  pytest -m "not gpu"        GPU (one H100 job):  pytest tests/gpu -m gpu
+testpaths = ["tests"]
+pythonpath = ["src"]             # the checkout under test, ahead of any installed miniworld-engine
+addopts = "-ra --strict-markers --import-mode=importlib -p no:cacheprovider"
+markers = [
+  "gpu: needs a CUDA device (skipped without one)",
+  "h100: needs an H100 (sm_90); skipped on other cards",
+  "a100: needs an A100 (sm_80); skipped on other cards",
+  "slow: takes more than a few seconds (deselect with -m \"not slow\")",
+]
+
 # --------------------------------------------------------------------------------------------------------------------------- pyright
 [tool.pyright]
-include = ["src"]
+# The type gate (tools/check.sh): basic mode over the package and the tests; the vendored kernel bodies ruff leaves alone are out.
+include = ["src", "tests"]
 exclude = [
   ".pixi", "**/.pixi", "**/__pycache__",
   # the same vendored kernel bodies ruff leaves alone
@@ -109,7 +124,7 @@ exclude = [
   "src/miniworld_engine/kernels/**/cuda/**",
 ]
 pythonVersion = "3.10"
-typeCheckingMode = "standard"
+typeCheckingMode = "basic"
 
 # ----------------------------------------------------------------------------------------------------------------------------- pixi
 # One environment for the repo (torch 2.13 cu129 + triton 3.7, cuequivariance baseline, TE). The materialized `.pixi/` is ignored.
@@ -150,9 +165,13 @@ CUDA_HOME = "$CONDA_PREFIX"
 [tool.pixi.tasks]
 # transformer-engine-torch's sdist declares the cu13 core; reinstall the cu12 one last. Run after every `pixi install`.
 fix-te-cu12 = "pip install --no-deps --force-reinstall transformer_engine_cu12==2.19.0"
-lint = "ruff check src"
+lint = "ruff check src tools tests"
 format = "ruff format src"
 types = "pyright"
+# the gate (tools/check.sh: ruff, pyright, CPU tests) and the GPU tests; on the cluster inside a Slurm job, never on the login node
+check = "tools/check.sh"
+test = "pytest tests/cpu -m 'not gpu'"
+test-gpu = "pytest tests/gpu -m gpu"
 # Everything below needs Slurm (never the login node): prebuild on a CPU node, pretune / measure on an H100.
 prebuild = "python -m miniworld_engine.kernels._prebuild"
 pretune = "python -m miniworld_engine.kernels._pretune"

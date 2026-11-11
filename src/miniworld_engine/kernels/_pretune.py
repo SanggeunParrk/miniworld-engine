@@ -1043,7 +1043,7 @@ def merge(args) -> int:
 
 # ===================================================================================================================== main
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m miniworld_engine.kernels._pretune", description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="python -m miniworld_engine.kernels._pretune", description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--candidates", action="store_true", help="write kernels/<family>/configs/candidates.json (CPU)")
     ap.add_argument("--merge", action="store_true", help="merge the shards into the tables (CPU)")
     ap.add_argument("--status", action="store_true", help="units and keys of a run")

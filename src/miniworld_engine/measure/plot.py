@@ -171,7 +171,7 @@ def _panels(pts: list[dict]) -> list[tuple[str, str]]:
 
 def _series(pts: list[dict], x_of) -> dict[tuple, dict[str, dict]]:
     """(dtype, mode) -> backend -> x -> point (one per x; a duplicate keeps the faster, never averaged silently)."""
-    s = collections.defaultdict(lambda: collections.defaultdict(dict))
+    s: dict[tuple, dict[str, dict]] = collections.defaultdict(lambda: collections.defaultdict(dict))
     for p in pts:
         x, cur = x_of(p), s[(p["dtype"], p["mode"])][p["backend"]]
         if x not in cur or (p["median"] or math.inf) < (cur[x]["median"] or math.inf):
@@ -189,6 +189,7 @@ def figure(pts: list[dict], x_of, x_label: str, title: str, out: Path, card: str
 
     mpl.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib import ticker
 
     mpl.rcParams.update({"svg.fonttype": "none", "font.size": 9, "axes.spines.top": False, "axes.spines.right": False,
                          "axes.grid": True, "grid.color": "#E3E6EB", "grid.linewidth": 0.6, "axes.edgecolor": "#5A6473"})
@@ -207,12 +208,12 @@ def figure(pts: list[dict], x_of, x_label: str, title: str, out: Path, card: str
                   "label": LABEL.get(b, b)}
             (h,) = lat.plot([i for i, y in enumerate(ys) if y], [y for y in ys if y], **kw)
             handles.setdefault(b, h)
-            sp = [(i, _ok(base.get(x)) / y) for i, (x, y) in enumerate(zip(xs, ys, strict=True)) if y and _ok(base.get(x))]
+            sp = [(i, b0 / y) for i, (x, y) in enumerate(zip(xs, ys, strict=True)) if y and (b0 := _ok(base.get(x)))]
             if sp and b != "pytorch":
                 spd.plot([i for i, _ in sp], [v for _, v in sp], **kw)
         lat.set_yscale("log")
-        lat.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda v, _: f"{v:g}"))
-        lat.yaxis.set_minor_formatter(mpl.ticker.NullFormatter())
+        lat.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:g}"))
+        lat.yaxis.set_minor_formatter(ticker.NullFormatter())
         lat.set_title(f"{dm[0]} {dm[1]}", fontsize=10)
         lat.set_ylabel("median latency (ms, log)" if j == 0 else "")
         spd.axhline(1.0, color="#5A6473", linewidth=1.0, linestyle=(0, (4, 2)))
@@ -354,6 +355,7 @@ def summary_figure(stats: dict, backends, out: Path, card: str, scope: str = "ev
 
     mpl.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib import ticker
 
     mpl.rcParams.update({"svg.fonttype": "none", "font.size": 9, "axes.spines.top": False, "axes.spines.right": False})
     bs = [b for b in backends if b != "pytorch"]
@@ -377,7 +379,7 @@ def summary_figure(stats: dict, backends, out: Path, card: str, scope: str = "ev
         ax.set_xscale("log")
         ax.axvline(1.0, color="#5A6473", linewidth=1.0, linestyle=(0, (4, 2)))
         ax.set_xlim(min(0.1, ax.get_xlim()[0]), hi * 3)
-        ax.xaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda v, _: f"{v:g}x"))
+        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:g}x"))
         ax.set_title(f"{mode}: speedup vs PyTorch (geomean over cases)", fontsize=10)
         ax.grid(axis="x", color="#E3E6EB", linewidth=0.6)
         ax.set_yticks(range(len(mods)), mods)
@@ -414,7 +416,7 @@ def _speed_version() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--gpu", default=cfgmod.DEFAULT_GPU, help="the card (default %(default)s)")
     ap.add_argument("--module", nargs="*", default=None, help="only these classes (default: all)")
     ap.add_argument("--source", nargs="+", default=["tokens"], help="'tokens' (default) or speed record files / directories")

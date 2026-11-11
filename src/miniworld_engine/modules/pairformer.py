@@ -7,7 +7,7 @@ Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forwar
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -132,7 +132,7 @@ class PairformerBlock(BackendModule, MasterWeights):
                       + (self.single_transition(single) - single))
         else:
             single = self.single_transition(self.single_attention(single, logits_pair, mask, extra_pair_bias))
-        return pair, single
+        return pair, cast(torch.Tensor, single)   # the single track: given with config.d_single
 
     # ------------------------------------------------------------------------------------------------------------- "cuda" / "triton"
     # The block owns no kernel of its own: ``set_backend`` hands the name to every sub-module (the triangle multiplications, the triangle
@@ -195,7 +195,7 @@ class PairformerBlock(BackendModule, MasterWeights):
     def _pair_updates(self, pair_in: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
         """The sum of every update's DELTA on ``pair_in`` (the ``parallel`` schedule). The modules own their residual, so a delta is
         ``module(x) - x`` (exact in fp32; in bf16 it carries one extra rounding of ``x + delta``)."""
-        modules = [self.tri_multi] if self.tri_multi is not None else [self.tri_multi_outgoing, self.tri_multi_incoming]
+        modules: list[Any] = [self.tri_multi] if self.tri_multi is not None else [self.tri_multi_outgoing, self.tri_multi_incoming]
         if self.tri_atten_starting is not None:
             modules += [self.tri_atten_starting, self.tri_atten_ending]
         modules.append(self.transition_pair)
@@ -203,6 +203,7 @@ class PairformerBlock(BackendModule, MasterWeights):
         for module in modules:
             delta = (module(pair_in, mask) if module is not self.transition_pair else module(pair_in)) - pair_in
             total = delta if total is None else total + delta
+        assert total is not None   # modules always holds transition_pair
         return total
 
 
@@ -236,16 +237,16 @@ class Pairformer(BackendModule, MasterWeights):
             return pair
         for block in self.pairformer_blocks:
             pair, single = block(pair, mask, single, extra_pair_bias)
-        return pair, single
+        return pair, cast(torch.Tensor, single)
 
     # "cuda" / "triton": every block takes the backend (see :class:`PairformerBlock`); the blocks are alike, so the first one states the range.
     def set_backend(self, backend: str = "pytorch"):
         super().set_backend(backend)
-        for block in self.pairformer_blocks:
+        for block in cast("list[PairformerBlock]", self.pairformer_blocks):
             block.set_backend(backend)
         return self
 
     def unsupported(self, pair, mask=None, single=None, extra_pair_bias=None) -> str | None:
-        return self.pairformer_blocks[0].unsupported(pair, mask, single, extra_pair_bias) if len(self.pairformer_blocks) else None
+        return cast(PairformerBlock, self.pairformer_blocks[0]).unsupported(pair, mask, single, extra_pair_bias) if len(self.pairformer_blocks) else None
 
     _forward_anthropic = _forward_cuda = _forward_triton = _forward_pytorch

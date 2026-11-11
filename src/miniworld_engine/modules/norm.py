@@ -109,8 +109,8 @@ def _fastln():
 
     home = ensure_cuda_home()
     # the binding is a .cpp (host compiler): it needs the toolkit's headers, which a conda toolkit keeps under targets/<arch>/include
-    cuda_inc = [str(p) for p in (Path(home) / "include", Path(home) / "targets" / "x86_64-linux" / "include")
-                if home and (p / "cuda_runtime.h").is_file()]
+    cuda_inc = [str(p) for p in ((Path(home) / "include", Path(home) / "targets" / "x86_64-linux" / "include") if home else ())
+                if (p / "cuda_runtime.h").is_file()]
     ext = load_extension(
         name="anthropic_protenix_fast_layer_norm_v1",
         sources=[str(base / "layer_norm_cuda.cpp"), str(base / "layer_norm_cuda_kernel.cu")],

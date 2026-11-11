@@ -358,7 +358,7 @@ def status(gpu: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m miniworld_engine.judge", description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="python -m miniworld_engine.judge", description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--gpu", default=cfgmod.DEFAULT_GPU, choices=tuple(GPUS), help="the card whose tokens to use (default %(default)s)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("issue", help="turn records made with the current versions into tokens")

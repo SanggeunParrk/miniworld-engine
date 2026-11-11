@@ -24,7 +24,7 @@ def _sms(index: int) -> int:
 @device_constant
 def num_sms(device: torch.device | int | str | None = None) -> int:
     """SM count of ``device`` (``None``: the current device)."""
-    return _sms(torch.cuda._get_device_index(device, optional=True))
+    return _sms(torch.cuda._get_device_index(device, optional=True))  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
 
 
 def on_h100(*tensors: torch.Tensor) -> bool:
