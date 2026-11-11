@@ -155,8 +155,14 @@ def refusal(
         if wide:  # the wide path pads the length to a multiple of 16 itself; any depth
             if cap != (9, 0):
                 return "the wide kernels are built for sm_90a"
-            if not 0 < n <= _wide.NMAX or s == 0:
-                return f"the wide pair kernels hold one row of logits: 0 < N <= {_wide.NMAX}, got N={n}, S={s}"
+            # inference past 1024: the 5I28 widths (FoldForge E3); the BIG build (d_msa 256 x 8 x 32) keeps 1024 (no requirement row past it)
+            longer = not torch.is_grad_enabled() and (d_msa, d_pair, d_hidden) not in _wide.BIG
+            wide_max = _wide.NMAX_INFER if longer else _wide.NMAX
+            if not 0 < n <= wide_max or s == 0:
+                return (
+                    f"the wide pair kernels hold one row of logits: 0 < N <= {_wide.NMAX} in training (the backward stages fp32 rows) and for the BIG "
+                    f"build, <= {_wide.NMAX_INFER} in inference; got N={n}, S={s}, grad {torch.is_grad_enabled()}"
+                )
             return None
         if pair_only and (cap != (9, 0) or n > _wide.NMAX):  # the pair side is pwa_wide's (sm_90a, one row of N <= 1024 logits)
             return f"d_pair {d_pair}: the pair side is pwa_wide's sm_90a kernels (N <= {_wide.NMAX}), got N={n} on sm_{cap[0]}{cap[1]}"

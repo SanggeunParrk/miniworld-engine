@@ -28,7 +28,19 @@ HEADS = 8
 D_MSA = (64, 128)
 D_PAIR = (128, 256, 384)
 D_HIDDEN = (8, 16, 32)
-MAX_LEN = 1024  # the pair kernel keeps a row of logits per head in shared memory
+MAX_LEN = 1024  # training: the pair backward keeps a row of logits per head in shared memory
+#: the A100 shared memory a block may opt into (pair_fwd raises its attribute to it: sm80/ops.cu launch_pair_fwd)
+_SMEM_OPTIN = 166912
+
+
+def max_len(d_pair: int, training: bool) -> int:
+    """The longest L the kernels take: MAX_LEN in training; in inference what pair_fwd's shared memory holds -- its tiles, LayerNorm
+    parameters and Wb fragments (``PairFwdCfg::FIXED``) next to the fp32 logits [8][L + 4] of a row (FoldForge 5I28 E3: 1536 / 2048 tokens),
+    a multiple of 16: 4080 at d_pair 128, 2960 at 256, 1840 at 384."""
+    if training:
+        return MAX_LEN
+    fixed = 8 * 16 * d_pair * 2 + 2 * d_pair * 4 + d_pair * 16
+    return ((_SMEM_OPTIN - fixed) // 32 - 4) // 16 * 16
 
 
 @functools.lru_cache(maxsize=1)

@@ -72,8 +72,13 @@ def refusal(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
     if msa.shape[0] != 1 or msa.shape[1] < 1:
         return f"batch {msa.shape[0]}: the sm_80 kernels take one sample (batch 1) with at least one MSA row"
     length = msa.shape[2]
-    if length % 16 or length > sm.MAX_LEN or tuple(pair.shape) != (1, length, length, d_pair):
-        return f"L {length}: the sm_80 kernels take L a multiple of 16 up to {sm.MAX_LEN} and a [1, L, L, d_pair] pair"
+    training = torch.is_grad_enabled() or (module.training and module.drop_msa.p_drop > 0)  # the training step (serves_train)
+    longest = sm.max_len(d_pair, training)
+    if length % 16 or length > longest or tuple(pair.shape) != (1, length, length, d_pair):
+        return (
+            f"L {length}: the sm_80 kernels take L a multiple of 16 up to {longest} at d_pair {d_pair} in {'training' if training else 'inference'} "
+            f"(training {sm.MAX_LEN}; inference: the pair forward's shared-memory row of logits) and a [1, L, L, d_pair] pair"
+        )
     if mask is not None and (tuple(mask.shape) != (1, length) or mask.dtype != torch.bool):
         return "mask must be a bool [1, L] key mask"
     if not _loads():

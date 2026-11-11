@@ -25,6 +25,9 @@ constexpr int DZ = PW_DZ, H = 8, NWARP = PW_NWARP, THREADS = NWARP * 32, GJ = 16
 constexpr int KS_ = DZ / 16, CPR = DZ / 8;                // k steps / 16-byte chunks per row
 static_assert(DZ % 64 == 0, "d_pair must be a multiple of 64");
 constexpr int TILEB = GJ * DZ * 2;                        // one [16][DZ] bf16 tile
+// the forward holds H rows of N bf16 logits next to its tile ring: N <= 2048 fits every width (d_pair 384: 144 KiB of tiles + 32 KiB of logits; FoldForge
+// 5I28 E3: 1536 / 2048 tokens in inference). The backward stages the w / dw rows [H][N] fp32 on the tile area: N <= 1024 (pair_bwd3).
+constexpr int NMAX_FWD = 2048;
 
 __device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
 __device__ __forceinline__ float bf16r(float x) { return __bfloat162float(__float2bfloat16(x)); }
@@ -379,7 +382,7 @@ __global__ void __launch_bounds__(THREADS, PW_MINB) pair_bwd_kernel(const __nv_b
 torch::Tensor pair_fwd3(torch::Tensor z, torch::Tensor mask, torch::Tensor ln_w, torch::Tensor ln_b, double eps, torch::Tensor wb) {
   TORCH_CHECK(z.is_cuda() && z.scalar_type() == torch::kBFloat16 && z.is_contiguous() && z.dim() == 3 && z.size(2) == DZ && z.size(0) == z.size(1), "z: [N, N, DZ] bf16");
   const int N = (int)z.size(0);
-  TORCH_CHECK(N % GJ == 0 && N <= 1024, "N must be a multiple of 16 (and <= 1024)");
+  TORCH_CHECK(N % GJ == 0 && N <= NMAX_FWD, "N must be a multiple of 16 (and <= ", NMAX_FWD, ")");
   TORCH_CHECK(mask.scalar_type() == torch::kBFloat16 && mask.is_contiguous() && mask.numel() == (long)N, "mask: the [N] key mask, bf16 0/1");
   TORCH_CHECK(ln_w.scalar_type() == torch::kFloat && ln_w.is_contiguous() && ln_w.numel() == DZ && ln_b.scalar_type() == torch::kFloat && ln_b.is_contiguous() && ln_b.numel() == DZ, "LN params fp32[DZ]");
   auto wb16 = wb.to(torch::kBFloat16).contiguous();
@@ -388,7 +391,7 @@ torch::Tensor pair_fwd3(torch::Tensor z, torch::Tensor mask, torch::Tensor ln_w,
   const int NP = N + 4;
   const int smem = NWARP * 2 * TILEB + H * NP * 2 + 2 * DZ * 4;
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_fwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 2 * TILEB + H * 1028 * 2 + 2 * DZ * 4)); attr = true; }
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_fwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 2 * TILEB + H * (NMAX_FWD + 4) * 2 + 2 * DZ * 4)); attr = true; }
   pair_fwd_kernel<<<N, THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(z.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(mask.data_ptr<at::BFloat16>()),
       ln_w.data_ptr<float>(), ln_b.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wb16.data_ptr<at::BFloat16>()),
