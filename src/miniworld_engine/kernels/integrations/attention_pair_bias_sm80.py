@@ -713,18 +713,19 @@ def _gemm_pair(pair: torch.Tensor, f32: bool) -> bool:
     return f32 and pair.shape[-1] >= 256 and pair.shape[1] <= GEMM_BWD_MAX_L
 
 
-def _bias_gemm_bwd(z: torch.Tensor, wcm: torch.Tensor, db: torch.Tensor, L: int, eps: float, out: torch.Tensor | None = None):
-    """(dz [L, L, dp], dWf [H, dp] fp32) of ``_bias_gemm`` from db [H, L, L] fp32 (zero on the masked keys). ``out``: a contiguous
-    [L, L, dp] buffer dz is copied into (a batch row of the caller's gradient)."""
-    dp, heads = wcm.shape
-    z2 = z.reshape(L * L, dp)
+def _bias_gemm_bwd(z: torch.Tensor, wcm: torch.Tensor, db: torch.Tensor, L: int, eps: float):
+    """(dz [B, L, L, dp], dWf [H, dp] fp32) of the pair bias for the whole batch at once, from db [B, H, L, L] fp32 (zero on the masked
+    keys): one LayerNorm recompute over the B L L pair rows, the TF32 GEMMs batched over B (``bmm``: each row's dz-hat = db_b^T Wf and
+    dWf_b = db_b LN(z_b), the dWf_b summed over B), one LayerNorm backward writing the batch's gradient (no per-row copy)."""
+    B, dp, heads = z.shape[0], wcm.shape[0], wcm.shape[1]
+    z2 = z.reshape(B * L * L, dp)
     zn, mean, rstd = torch.native_layer_norm(z2, (dp,), None, None, eps)
-    d2 = db.reshape(heads, L * L)
-    dzn = torch.mm(d2.t(), wcm.t())
-    dz = torch.ops.aten.native_layer_norm_backward(dzn, z2, (dp,), mean, rstd, None, None, [True, False, False])[0]
-    if out is not None:  # ATen's LayerNorm backward has no output argument: one copy (L <= GEMM_BWD_MAX_L only)
-        dz = out.view(L * L, dp).copy_(dz)
-    return dz.view(L, L, dp), torch.mm(d2, zn)
+    d3 = db.reshape(B, heads, L * L)
+    dzn = torch.bmm(d3.transpose(1, 2), wcm.t().expand(B, heads, dp))  # [B, L L, dp]
+    dz = torch.ops.aten.native_layer_norm_backward(dzn.view(B * L * L, dp), z2, (dp,), mean, rstd, None, None, [True, False, False])[0]
+    del dzn
+    dwf = torch.bmm(d3, zn.view(B, L * L, dp))  # [B, H, dp]
+    return dz.view(z.shape), dwf[0] if B == 1 else dwf.sum(0)
 
 
 def _gparams(module) -> list[torch.Tensor]:
@@ -903,9 +904,11 @@ def _gbwd_fake(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p)
     return [torch.empty_like(single), torch.empty_like(pair), *(torch.empty_like(p) for p in params)]
 
 
-def _gbwd_row(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p, packs, dz_out=None) -> list[torch.Tensor]:
+def _gbwd_row(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p, packs, dz_out=None, db_out=None) -> list:
     """One batch row of ``_gbwd``: [d single (its dtype), d pair, *d params (fp32)]; ``dz_out`` (B > 1): the row of the batch's pair
-    gradient that d pair is written into (no copy of the pair-sized gradient)."""
+    gradient that d pair is written into (no copy of the pair-sized gradient). ``db_out`` (the GEMM pair backward, ``_gemm_pair``):
+    the row of the batch's fp32 bias gradient the core writes; the pair side is then the caller's (batched, ``_bias_gemm_bwd``) and
+    d pair and the two pair-weight gradients come back None."""
     from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32, _wgrad
 
     sm80 = _sm80()
@@ -929,7 +932,7 @@ def _gbwd_row(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p, 
         scale = hd**-0.5
         if f32:
             _, _, _, db = sm80.tf32_backward(
-                q, k, v, dob, bias, o, lse.view(1, heads, L), 1, L, heads, hdp, sm_scale=scale, dq=dq, dk=dk, dv=dv, rna=True
+                q, k, v, dob, bias, o, lse.view(1, heads, L), 1, L, heads, hdp, sm_scale=scale, dq=dq, dk=dk, dv=dv, rna=True, db=db_out
             )
         else:
             _, _, _, db = sm80.plain_backward(
@@ -937,8 +940,8 @@ def _gbwd_row(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p, 
             )
         m = None if mask is None else mask.reshape(L)
         dz, dwf = (
-            _bias_gemm_bwd(pair[0], wcm, db, L, eps_p, out=None if dz_out is None else dz_out[0])
-            if _gemm_pair(pair, f32)
+            (None, None)
+            if db_out is not None
             else sm80.pair_bias_generic_backward(pair[0], wcm, db, m, L, eps_p, out=None if dz_out is None else dz_out[0])
         )
         ds = torch.mm(dqkvg, w)  # [L, D]
@@ -958,10 +961,18 @@ def _gbwd_row(dout, single, pair, mask, params, saved, heads, gate_bias, eps_p, 
         _unpad_rows(dw[2 * n : 3 * n], heads, hd, hdp),
         _unpad_rows(dw[3 * n :], heads, hd, hdp),
         _unpad_rows(dwo.t(), heads, hd, hdp).t(),
-        (dwf * wb.float()).sum(0),
-        dwf * lnpw.float()[None],
+        *(_pair_weight_grads(dwf, lnpw, wb) if dwf is not None else (None, None)),
     ]
-    return [dx.to(dt).view(single.shape), dz.view(pair.shape), *(g_.reshape(p.shape) for g_, p in zip(grads, params, strict=True))]
+    return [
+        dx.to(dt).view(single.shape),
+        None if dz is None else dz.view(pair.shape),
+        *(None if g_ is None else g_.reshape(p.shape) for g_, p in zip(grads, params, strict=True)),
+    ]
+
+
+def _pair_weight_grads(dwf: torch.Tensor, lnpw: torch.Tensor, wb: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(d ln_pair.weight, d to_bias.weight) from the folded weight's gradient dWf [H, dp] fp32 (Wf = to_bias.weight x ln_pair.weight)."""
+    return (dwf * wb.float()).sum(0), dwf * lnpw.float()[None]
 
 
 @opaque(fake=_gbwd_fake, name="apb_sm80_generic_bwd")
@@ -976,16 +987,24 @@ def _gbwd(
     gate_bias: float,
     eps_p: float,
 ) -> list[torch.Tensor]:
-    """The backward of ``_gfwd`` (``save=True``): [d single, d pair, *d params] (each in its input's dtype). B > 1: the one-row
-    backward per batch row, d single copied into its row, d pair written into its row, the parameter gradients summed in fp32
-    over the rows in row order before the cast to the parameters' dtypes."""
+    """The backward of ``_gfwd`` (``save=True``): [d single, d pair, *d params] (each in its input's dtype). The single side and the
+    attention core run per batch row (d single copied into its row); the pair side either per row on the one-pass kernel (d pair
+    written into its row) or, for the GEMM pair backward (``_gemm_pair``), once for the batch (``_bias_gemm_bwd``: the rows' bias
+    gradients gathered into one [B, H, L, L] tensor by the core). The parameter gradients are summed in fp32 over the rows in row order
+    (the pair weights': from the batch's dWf) before the cast to the parameters' dtypes."""
+    from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32
+
     packs = _gpack(params, heads, gate_bias, single.dtype)
-    B = single.shape[0]
+    B, L = single.shape[0], single.shape[1]
+    f32 = single.dtype is torch.float32
+    gemm = _gemm_pair(pair, f32)
     dout = dout.contiguous()
-    dx, dz = (None, None) if B == 1 else (torch.empty_like(single), torch.empty_like(pair))
-    total: list[torch.Tensor] = []
+    dx = torch.empty_like(single)
+    dz = None if gemm else torch.empty_like(pair)
+    db = torch.empty(B, heads, L, L, device=single.device, dtype=torch.float32) if gemm else None
+    total: list = []
     for b in range(B):
-        dxb, dzb, *grads = _gbwd_row(
+        dxb, _, *grads = _gbwd_row(
             dout[b : b + 1],
             single[b : b + 1],
             pair[b : b + 1],
@@ -997,19 +1016,21 @@ def _gbwd(
             eps_p,
             packs,
             None if dz is None else dz[b : b + 1],
+            None if db is None else db[b],
         )
-        if B == 1:
-            dx, dz = dxb, dzb
-        else:  # d pair is already in its row (``dz_out``)
-            assert dx is not None
-            dx[b : b + 1].copy_(dxb)
+        dx[b : b + 1].copy_(dxb)
         if b == 0:
-            total = [g.to(torch.float32, copy=True) for g in grads] if B > 1 else grads
+            total = [None if g is None else g.to(torch.float32, copy=True) for g in grads]
         else:
-            torch._foreach_add_(total, grads)  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
-    assert dx is not None and dz is not None
+            torch._foreach_add_([t for t in total if t is not None], [g for g in grads if g is not None])  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
+    if db is not None:
+        with torch.cuda.device(single.device), _tf32(f32):
+            dz, dwf = _bias_gemm_bwd(pair, packs[3], db, L, eps_p)
+        del db
+        total[8], total[9] = _pair_weight_grads(dwf, params[8], params[9])
+    assert dz is not None
     outs = [torch.empty(p.shape, device=p.device, dtype=p.dtype) for p in params]
-    torch._foreach_copy_(outs, total)  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
+    torch._foreach_copy_(outs, [g.reshape(p.shape) for g, p in zip(total, params, strict=True)])  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
     return [dx, dz, *outs]
 
 

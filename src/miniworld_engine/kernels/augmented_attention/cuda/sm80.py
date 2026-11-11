@@ -1005,10 +1005,12 @@ def tf32_backward(
     dk: torch.Tensor | None = None,
     dv: torch.Tensor | None = None,
     rna: bool = False,
+    db: torch.Tensor | None = None,
 ):
     """The backward of :func:`tf32_forward` (without the gate): ``dob`` the output's gradient fp32 ``[A L, H hd]``, ``o`` / ``lse`` the forward's, ``bias`` fp32 natural units.
     Returns ``(dq, dk, dv, db)``: fp32 ``[A L, H hd]`` each (or the views passed) and the bias gradient fp32 ``[H, L, L]`` (the sum over the samples; masked keys 0), summed from fp32
-    partials of 1-2 samples in a fixed order: a replay is bit-identical."""
+    partials of 1-2 samples in a fixed order: a replay is bit-identical.
+    ``db``: a contiguous fp32 [H, L, L] buffer the bias gradient is written into (e.g. a row of a batch's) instead of a new tensor."""
     assert head_dim in TF32_MODULE_HEAD_DIMS, head_dim
     ext = _tf32_rna_ext() if rna else _tf32_ext()  # rna: operands rounded to the nearest TF32
     dev, m, d = q.device, samples * length, heads * head_dim
@@ -1024,7 +1026,7 @@ def tf32_backward(
     per_tile = groups * heads * 128 * length * 4
     chunk = max(1, min(tiles, _DBP_BUDGET // per_tile))
     dbp = torch.empty(groups, heads, chunk * 128, length, device=dev, dtype=torch.float32)
-    db = torch.empty(heads, length, length, device=dev, dtype=torch.float32)
+    db = torch.empty(heads, length, length, device=dev, dtype=torch.float32) if db is None else db
     for qt0 in range(0, tiles, chunk):
         nqt = min(chunk, tiles - qt0)
         buf = dbp if nqt == chunk else torch.empty(groups, heads, nqt * 128, length, device=dev, dtype=torch.float32)
