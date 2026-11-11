@@ -43,14 +43,22 @@ template <int DZ> DEVI void pf_load_tile(uint32_t dst, const __nv_bfloat16* src_
   }
 }
 
-template <int DZ>
+// The row of logits in shared memory: fp32 (LT = float), or bf16 (LT = __nv_bfloat16) when an fp32 row would not fit (long L in inference, FoldForge 5I28 E3) --
+// the same values: each logit is a bf16-rounded number already, and a masked key's -1e30 only has to vanish under exp.
+DEVI float lt_f(float v) { return v; }
+DEVI float lt_f(__nv_bfloat16 v) { return __bfloat162float(v); }
+template <typename LT> DEVI LT f_lt(float v);
+template <> DEVI float f_lt<float>(float v) { return v; }
+template <> DEVI __nv_bfloat16 f_lt<__nv_bfloat16>(float v) { return __float2bfloat16_rn(v); }
+
+template <int DZ, typename LT = float>
 __global__ void __launch_bounds__(256, 1) pwa_pair_fwd_kernel(const PairFwdParams p) {
   using C = PairFwdCfg<DZ>;
   extern __shared__ __align__(128) unsigned char smem[];
   const uint32_t sbase = smem_u32(smem);
   float* sg = reinterpret_cast<float*>(smem + C::NWARP * C::TILE);           // gamma [DZ], beta [DZ]
   uint2* sbw = reinterpret_cast<uint2*>(sg + 2 * DZ);                       // B fragments of Wb^T: [ks][lane] = (n = head lane / 4, k = 16 ks + 2 (lane % 4) (+8)) pairs
-  float* sb = reinterpret_cast<float*>(sbw + C::NK * 32);                   // logits [8][NP]
+  LT* sb = reinterpret_cast<LT*>(sbw + C::NK * 32);                         // logits [8][NP]
   const int NP = p.L + 4;
   const int i = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, q = lane & 3;
   for (int k = tid; k < DZ; k += C::NTHR) { sg[k] = p.lnw[k]; sg[DZ + k] = p.lnb[k]; }
@@ -108,24 +116,24 @@ __global__ void __launch_bounds__(256, 1) pwa_pair_fwd_kernel(const PairFwdParam
     // c0, c1: (key g, heads 2q, 2q + 1); c2, c3: (key g + 8)
     const int j0 = gi * C::GJ;
     const bool k0 = p.mask == nullptr || p.mask[j0 + g] != 0, k1 = p.mask == nullptr || p.mask[j0 + g + 8] != 0;
-    sb[(2 * q) * NP + j0 + g] = k0 ? round_bf16f(c[0]) : -1e30f;
-    sb[(2 * q + 1) * NP + j0 + g] = k0 ? round_bf16f(c[1]) : -1e30f;
-    sb[(2 * q) * NP + j0 + g + 8] = k1 ? round_bf16f(c[2]) : -1e30f;
-    sb[(2 * q + 1) * NP + j0 + g + 8] = k1 ? round_bf16f(c[3]) : -1e30f;
+    sb[(2 * q) * NP + j0 + g] = f_lt<LT>(k0 ? round_bf16f(c[0]) : -1e30f);
+    sb[(2 * q + 1) * NP + j0 + g] = f_lt<LT>(k0 ? round_bf16f(c[1]) : -1e30f);
+    sb[(2 * q) * NP + j0 + g + 8] = f_lt<LT>(k1 ? round_bf16f(c[2]) : -1e30f);
+    sb[(2 * q + 1) * NP + j0 + g + 8] = f_lt<LT>(k1 ? round_bf16f(c[3]) : -1e30f);
   }
   cp_async_wait<0>();
   __syncthreads();
   {                                                                         // softmax over the keys of head `warp`
     const int h = warp;
     float mx = -3.0e38f;
-    for (int j = lane; j < p.L; j += 32) mx = fmaxf(mx, sb[h * NP + j]);
+    for (int j = lane; j < p.L; j += 32) mx = fmaxf(mx, lt_f(sb[h * NP + j]));
     mx = warp_max(mx);
     float den = 0.f;
-    for (int j = lane; j < p.L; j += 32) den += __expf(sb[h * NP + j] - mx);
+    for (int j = lane; j < p.L; j += 32) den += __expf(lt_f(sb[h * NP + j]) - mx);
     den = warp_sum(den);
     const float inv = 1.f / den;
     __nv_bfloat16* wr = p.w + ((long)h * p.L + i) * p.L;
-    for (int j = lane; j < p.L; j += 32) wr[j] = __float2bfloat16_rn(__expf(sb[h * NP + j] - mx) * inv);
+    for (int j = lane; j < p.L; j += 32) wr[j] = __float2bfloat16_rn(__expf(lt_f(sb[h * NP + j]) - mx) * inv);
   }
 }
 

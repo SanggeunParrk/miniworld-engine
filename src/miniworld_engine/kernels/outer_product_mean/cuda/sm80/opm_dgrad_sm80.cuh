@@ -25,6 +25,8 @@ struct DgradParams {
   int L;
   float norm_const;
   int norm_first;
+  float norm_min = 1.f;          // the pair divisor max(n, norm_min) + norm_add (the epilogue's)
+  float norm_add = 0.f;
 };
 
 // BI_ = 4: the shipped CTA (128 pairs, warp tile 64 x 32); BI_ = 2: 64 pairs (warp tile 32 x 32), the dz tile and the output tile halve, so two CTAs fit one SM at d_pair 256 / 384 (the
@@ -82,7 +84,7 @@ __global__ void __launch_bounds__(256, NMINB) opm_dgrad_kernel(const DgradParams
           uint4 raw = make_uint4(0, 0, 0, 0), pk = make_uint4(0, 0, 0, 0);
           if (valid) {
             raw = ldg128(p.dz + ((long)i * p.L + j) * CZ + piece * 8);
-            const float n = p.norm != nullptr ? p.norm[(long)i * p.L + j] : p.norm_const;
+            const float n = fmaxf(p.norm != nullptr ? p.norm[(long)i * p.L + j] : p.norm_const, p.norm_min) + p.norm_add;
             const float d[8] = {bf16lo(raw.x), bf16hi(raw.x), bf16lo(raw.y), bf16hi(raw.y), bf16lo(raw.z), bf16hi(raw.z), bf16lo(raw.w), bf16hi(raw.w)};
             float q[8];
 #pragma unroll

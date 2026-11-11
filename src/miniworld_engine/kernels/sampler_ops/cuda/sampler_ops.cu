@@ -594,6 +594,128 @@ at::Tensor pool_atoms(at::Tensor x, at::Tensor idx, at::Tensor gather_mask, at::
   return out;
 }
 
+// ---- the pooling's backward (training). d out[s, t] / d x[s, r] = sum over the slots (t, a) with idx[t, a] = r of w[t, a] [x[s, r] > 0], w = m / max(sum_a m, 1e-10)
+// on a gathered slot (m != 0 and g != 0, as the forward kernels: relu(g x) = relu(x) for a 0 / 1 gather mask), 0 elsewhere. An atom row may be read by several slots
+// (any idx), so the gradient is a gather, not a scatter: the slots are sorted by row (a stable sort of ``key``, done by the caller), and one warp per
+// (row, sample) adds its rows' slots in slot order (fp32, fixed order: no atomics, bitwise reproducible).
+//   prep: key[k] = idx[k] for a gathered slot k = t A + a, else R (sorted past every row), w[k] as above (the forward's fp32 sum of the token's atom mask).
+__global__ void pool_atoms_prep_k(const void* idx, int idx_code, const void* gm, int gm_code, const void* am, int am_code, int* key, float* w,
+                                  int atoms, int tokens, int rows) {
+  const long k = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (k >= (long)tokens * atoms) return;
+  const long t0 = (k / atoms) * atoms;
+  float den = 0.f;
+  for (int a = 0; a < atoms; ++a) den += ldf(am, am_code, t0 + a);
+  const float m = ldf(am, am_code, k);
+  const bool use = m != 0.f && ldf(gm, gm_code, k) != 0.f;
+  key[k] = use ? (int)(long)ldf(idx, idx_code, k) : rows;
+  w[k] = use ? __fdiv_rn(m, fmaxf(den, 1e-10f)) : 0.f;
+}
+
+constexpr int BWD_ROWS = 8;     // rows (warps) per block
+constexpr int BWD_SAMPLES = 8;  // at most this many samples per block (the row's slot range is searched once per block); fewer when the rows alone do not fill the GPU
+
+// The first k in [0, n) with v[k] >= x (n if none), v sorted ascending; the whole warp calls it and gets the same answer. A 32-ary search: each round
+// the 32 lanes probe 32 evenly spaced keys (one load each, in parallel), so 3 072 slots take three rounds instead of twelve dependent loads.
+__device__ __forceinline__ int warp_lower_bound(const int* __restrict__ v, int n, int x, int lane) {
+  int lo = 0, hi = n;
+  while (hi - lo > 32) {
+    const int step = (hi - lo + 31) / 32, pos = lo + lane * step;
+    const int cnt = __popc(__ballot_sync(0xffffffffu, pos < hi && __ldg(v + pos) < x));  // probes lo, lo + step, ... below x (a prefix: v is sorted)
+    if (cnt == 0) return lo;
+    const int nlo = lo + (cnt - 1) * step + 1;
+    hi = min(hi, lo + cnt * step);
+    lo = nlo;
+  }
+  const int pos = lo + lane;
+  return lo + __popc(__ballot_sync(0xffffffffu, pos < hi && __ldg(v + pos) < x));
+}
+
+// The end of row x's run that starts at beg (the first k >= beg with v[k] != x): a run is usually a few slots, scanned 32 at a time.
+__device__ __forceinline__ int warp_run_end(const int* __restrict__ v, int n, int beg, int x, int lane) {
+  for (int k = beg;; k += 32) {
+    const unsigned eq = __ballot_sync(0xffffffffu, k + lane < n && __ldg(v + k + lane) == x);
+    if (eq != 0xffffffffu) return k + __popc(eq);  // the run's slots are a prefix of the 32 (v sorted)
+  }
+}
+
+// grid (ceil(R / BWD_ROWS), ceil(S / spb)), spb <= BWD_SAMPLES samples per block (pool_atoms_bwd), block (32, BWD_ROWS): a lane owns 4 consecutive channels (C % 4 == 0), stepping 128 channels.
+__global__ void __launch_bounds__(32 * BWD_ROWS) pool_atoms_bwd_k(const __nv_bfloat16* __restrict__ gout, const __nv_bfloat16* __restrict__ x,
+                                                                  const int* __restrict__ skey, const long long* __restrict__ perm,
+                                                                  const float* __restrict__ w, __nv_bfloat16* __restrict__ gx, int atoms, int tokens,
+                                                                  int rows, int channels, int samples, int slots, int spb) {
+  const int r = blockIdx.x * BWD_ROWS + threadIdx.y;
+  if (r >= rows) return;
+  const int beg = warp_lower_bound(skey, slots, r, threadIdx.x), end = warp_run_end(skey, slots, beg, r, threadIdx.x);
+  const int s0 = blockIdx.y * spb, s1 = min(samples, s0 + spb);
+  for (int s = s0; s < s1; ++s) {
+    const __nv_bfloat16* gs = gout + (size_t)s * tokens * channels;
+    for (int c = threadIdx.x * 4; c < channels; c += 128) {
+      float acc[4] = {0.f, 0.f, 0.f, 0.f};
+      for (int k = beg; k < end; ++k) {
+        const long long slot = __ldg(perm + k);
+        const float wk = __ldg(w + slot);
+        const uint2 raw = *reinterpret_cast<const uint2*>(gs + (size_t)(slot / atoms) * channels + c);
+        const __nv_bfloat162 v0 = *reinterpret_cast<const __nv_bfloat162*>(&raw.x), v1 = *reinterpret_cast<const __nv_bfloat162*>(&raw.y);
+        acc[0] += wk * __bfloat162float(v0.x); acc[1] += wk * __bfloat162float(v0.y);
+        acc[2] += wk * __bfloat162float(v1.x); acc[3] += wk * __bfloat162float(v1.y);
+      }
+      const size_t o = ((size_t)s * rows + r) * channels + c;
+      const uint2 xr = *reinterpret_cast<const uint2*>(x + o);
+      const __nv_bfloat162 x0 = *reinterpret_cast<const __nv_bfloat162*>(&xr.x), x1 = *reinterpret_cast<const __nv_bfloat162*>(&xr.y);
+      const __nv_bfloat162 g0 = __floats2bfloat162_rn(__bfloat162float(x0.x) > 0.f ? acc[0] : 0.f, __bfloat162float(x0.y) > 0.f ? acc[1] : 0.f);
+      const __nv_bfloat162 g1 = __floats2bfloat162_rn(__bfloat162float(x1.x) > 0.f ? acc[2] : 0.f, __bfloat162float(x1.y) > 0.f ? acc[3] : 0.f);
+      uint2 packed;
+      packed.x = *reinterpret_cast<const unsigned*>(&g0); packed.y = *reinterpret_cast<const unsigned*>(&g1);
+      *reinterpret_cast<uint2*>(gx + o) = packed;
+    }
+  }
+}
+
+// (key int32 [T A], w fp32 [T A]) of the backward (see pool_atoms_prep_k); ``rows`` = R, the key of a slot that is not gathered.
+std::vector<at::Tensor> pool_atoms_prep(at::Tensor idx, at::Tensor gather_mask, at::Tensor atom_mask, int64_t rows) {
+  TORCH_CHECK(idx.is_cuda() && idx.is_contiguous() && gather_mask.is_contiguous() && atom_mask.is_contiguous() && idx.dim() == 2 &&
+              gather_mask.sizes() == idx.sizes() && atom_mask.sizes() == idx.sizes(), "idx / masks: contiguous [T, A]");
+  const int64_t T = idx.size(0), A = idx.size(1), n = T * A;
+  TORCH_CHECK(n < INT_MAX && rows < INT_MAX, "pool_atoms_prep: too many slots / rows");
+  const at::cuda::OptionalCUDAGuard guard(idx.device());
+  auto key = at::empty({n}, idx.options().dtype(at::kInt));
+  auto w = at::empty({n}, idx.options().dtype(at::kFloat));
+  if (n > 0)
+    pool_atoms_prep_k<<<(unsigned)((n + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        idx.data_ptr(), code_of(idx), gather_mask.data_ptr(), code_of(gather_mask), atom_mask.data_ptr(), code_of(atom_mask), key.data_ptr<int>(),
+        w.data_ptr<float>(), (int)A, (int)T, (int)rows);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {key, w};
+}
+
+// d x [S, R, C] bf16 of the upstream gradient ``gout`` [S, T, C] bf16: ``skey`` / ``perm`` the stable sort of ``key`` (int32 / int64 [T A]), ``w`` of pool_atoms_prep.
+at::Tensor pool_atoms_bwd(at::Tensor gout, at::Tensor x, at::Tensor skey, at::Tensor perm, at::Tensor w, int64_t atoms) {
+  TORCH_CHECK(x.is_cuda() && x.is_contiguous() && x.scalar_type() == at::kBFloat16 && x.dim() == 3, "x: contiguous bf16 cuda [S, Q, C]");
+  TORCH_CHECK(gout.is_contiguous() && gout.scalar_type() == at::kBFloat16 && gout.dim() == 3 && gout.size(0) == x.size(0) && gout.size(2) == x.size(2),
+              "gout: contiguous bf16 [S, T, C]");
+  TORCH_CHECK(skey.is_contiguous() && skey.scalar_type() == at::kInt && perm.is_contiguous() && perm.scalar_type() == at::kLong &&
+              w.is_contiguous() && w.scalar_type() == at::kFloat && perm.numel() == skey.numel() && w.numel() == skey.numel() &&
+              skey.numel() == gout.size(1) * atoms, "skey int32 / perm int64 / w fp32 [T A]");
+  const int64_t S = x.size(0), R = x.size(1), C = x.size(2), T = gout.size(1);
+  TORCH_CHECK(C % 4 == 0, "channels % 4 == 0");
+  const at::cuda::OptionalCUDAGuard guard(x.device());
+  auto gx = at::empty_like(x);
+  if (gx.numel() == 0) return gx;
+  // samples per block: up to BWD_SAMPLES (one slot search per row and block), fewer while the grid holds less than ~32 blocks (256 warps) per SM: a short
+  // structure with many samples (1024 atoms x 48 samples) is otherwise latency bound on the serial sample loop. The sums do not depend on it.
+  const int64_t row_blocks = (R + BWD_ROWS - 1) / BWD_ROWS, target = 32LL * at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int64_t want = std::max<int64_t>(1, (target + row_blocks - 1) / row_blocks);
+  const int spb = (int)std::min<int64_t>(BWD_SAMPLES, std::max<int64_t>(1, (S + want - 1) / want));
+  const dim3 grid((unsigned)row_blocks, (unsigned)((S + spb - 1) / spb)), block(32, BWD_ROWS);
+  pool_atoms_bwd_k<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+      reinterpret_cast<const __nv_bfloat16*>(gout.data_ptr()), reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), skey.data_ptr<int>(),
+      reinterpret_cast<const long long*>(perm.data_ptr<int64_t>()), w.data_ptr<float>(), reinterpret_cast<__nv_bfloat16*>(gx.data_ptr()), (int)atoms, (int)T, (int)R, (int)C, (int)S,
+      (int)skey.numel(), spb);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return gx;
+}
+
 void check(const at::Tensor& t, const char* name, int ndim) {
   TORCH_CHECK(t.is_cuda() && t.is_contiguous() && t.scalar_type() == at::kFloat && t.dim() == ndim, name, ": contiguous fp32 cuda ", ndim, "-d");
 }
@@ -662,4 +784,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("augment_noise", &augment_noise);
   m.def("align_euler", &align_euler);
   m.def("pool_atoms", &pool_atoms);
+  m.def("pool_atoms_prep", &pool_atoms_prep);
+  m.def("pool_atoms_bwd", &pool_atoms_bwd);
 }

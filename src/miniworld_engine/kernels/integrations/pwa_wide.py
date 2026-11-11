@@ -1,6 +1,6 @@
 """MSAPairWeightedAveraging on sm_90a for the shapes the MiniWorld kernels (`pwa_train.py`) do not cover: d_msa 64 / 128,
 d_pair 128 / 256 / 384, 8 heads x 8 / 16 value channels (Protenix-v2, ESMFold2, OpenDDE), any MSA depth, any length up to
-1024 (a length that is not a multiple of 16 is padded with masked tokens), inference and training, bf16.
+1024 in training, 2048 in inference (a length that is not a multiple of 16 is padded with masked tokens), inference and training, bf16.
 
 The structure is the B200 one (`csrc/sm100/pwa_sm100.cu`), written for wgmma instead of tcgen05:
 
@@ -36,7 +36,8 @@ DHID = (8, 16)
 # backward with the forward's sigmoid gate saved (`gate_bwd_big_w`), and dy = [dgp | dv] [Wg; Wv] on cuBLAS ahead of the
 # LayerNorm backward (`ln_bwd_w`); the pair side is `pair_wide.cu` at d_pair 512
 BIG = ((256, 512, 32),)
-NMAX = 1024  # the pair kernels hold one row of logits in shared memory
+NMAX = 1024  # training: the pair backward stages a row of w / dw logits [H][N] fp32 on its tile ring (pair_wide.cu pair_bwd3)
+NMAX_INFER = 2048  # inference: a row of bf16 logits [H][N] next to the tiles (pair_wide.cu NMAX_FWD; FoldForge 5I28 E3)
 _EXT: dict[str, Any] = {}
 
 

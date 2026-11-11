@@ -1,6 +1,6 @@
 """The diffusion sampler's glue ops: ``AugmentNoise`` (the pre-denoiser part of a step), ``AlignEuler`` (the post-denoiser part) and ``PoolAtoms`` (the atom encoder's pooling).
 
-Each is a :class:`~miniworld_engine.modules.primitives.BackendModule` without parameters, eval only (no autograd); ``_forward_pytorch`` (the dense references of
+Each is a :class:`~miniworld_engine.modules.primitives.BackendModule` without parameters, eval only (no autograd) except ``PoolAtoms``, whose kernels have a backward in ``x``; ``_forward_pytorch`` (the dense references of
 ``modules.functional``: ``augment_noise`` / ``align_euler`` / ``pool_atoms``) is the source of truth. The kernels (``kernels/sampler_ops``) replace ~100 small torch ops of
 a step by a few launches; the churn arithmetic stays on device scalars (no host read), the random numbers are drawn by the caller.
 """
@@ -274,7 +274,9 @@ class PoolAtoms(BackendModule):
 
     ``forward(x, idx, gather_mask, atom_mask)``: ``x`` ``[S, Q, C]`` -- atom features of ``S`` samples (the queries layout, flattened); ``idx`` ``[T, A]`` int --
     the atoms of each of ``T`` tokens (the token-atoms layout), ``gather_mask`` / ``atom_mask`` ``[T, A]`` -- the gather's and the atoms' masks (bool). Returns
-    ``[S, T, C]`` in ``x``'s dtype (bf16; the sums run in fp32, fp64 for the gold run).
+    ``[S, T, C]`` in ``x``'s dtype (bf16; the sums run in fp32, fp64 for the gold run). Differentiable in ``x`` on every backend (FoldForge R17: training through
+    the encoder pooling): the kernels' backward is a gather over the slots sorted by atom row (fp32, fixed order, no atomics) and differentiates ``x`` only (a mask
+    that requires grad is refused).
 
     Parameters
     ----------
@@ -324,6 +326,8 @@ class PoolAtoms(BackendModule):
                 return f"{name} must be bool / fp32 / bf16 / int32 / int64, got {m.dtype}"
         if x.numel() == 0 or idx.numel() == 0:
             return "empty input"
+        if torch.is_grad_enabled() and (gather_mask.requires_grad or atom_mask.requires_grad):
+            return "a mask that requires grad: the kernels' backward differentiates x only"
         return None
 
     def _supports_cuda(self, x, idx, gather_mask, atom_mask) -> str | None:
@@ -360,6 +364,8 @@ class PoolAtoms(BackendModule):
             _anthropic.unavailable(self._release[0], x.device, path=self._release[1]),
             self._supports_kernels(x, idx, gather_mask, atom_mask),
         )
+        if why is None and torch.is_grad_enabled() and x.requires_grad:
+            return "inference only: the kit's token_mean_relu has no backward"
         if why is None and gather_mask.dtype != torch.bool and bool((gather_mask < 0).any()):
             return "a negative gather mask weight (the kernel applies the weight after the relu)"
         return why

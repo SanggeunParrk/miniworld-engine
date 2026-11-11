@@ -28,7 +28,14 @@ HEADS = 8
 D_MSA = (64, 128)
 D_PAIR = (128, 256, 384)
 D_HIDDEN = (8, 16, 32)
-MAX_LEN = 1024  # the pair kernel keeps a row of logits per head in shared memory
+MAX_LEN = 1024  # training: the pair backward keeps a row of logits per head in shared memory
+MAX_LEN_INFER = 2048  # inference (FoldForge 5I28 E3): pair_fwd keeps the row in fp32 while it fits, else as bf16 (the same bf16-valued logits; sm80/ops.cu)
+
+
+def max_len(d_pair: int, training: bool) -> int:
+    """The longest L the kernels take: MAX_LEN in training, MAX_LEN_INFER in inference (every d_pair: a bf16 row of 2048 logits fits next to the
+    d_pair 384 tiles)."""
+    return MAX_LEN if training else MAX_LEN_INFER
 
 
 @functools.lru_cache(maxsize=1)

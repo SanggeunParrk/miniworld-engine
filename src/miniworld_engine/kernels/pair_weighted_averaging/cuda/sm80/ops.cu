@@ -53,9 +53,15 @@ int num_sms() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCou
 template <int DZ> void launch_pair_fwd(const pwa80::PairFwdParams& p, cudaStream_t st) {
   using C = pwa80::PairFwdCfg<DZ>;
   const int smem = C::FIXED + 8 * (p.L + 4) * 4;
-  TORCH_CHECK(smem <= 166912, "pair_fwd: L too long for the shared-memory logits");
-  raise_smem(pwa80::pwa_pair_fwd_kernel<DZ>, 166912);                 // the attribute is set once: the largest dynamic size any L may ask for
-  pwa80::pwa_pair_fwd_kernel<DZ><<<p.L, C::NTHR, smem, st>>>(p);
+  if (smem <= 166912) {                                                  // the row of logits in fp32
+    raise_smem(pwa80::pwa_pair_fwd_kernel<DZ>, 166912);               // the attribute is set once: the largest dynamic size any L may ask for
+    pwa80::pwa_pair_fwd_kernel<DZ><<<p.L, C::NTHR, smem, st>>>(p);
+  } else {                                                               // a long row (inference, FoldForge 5I28 E3): the same bf16-valued logits stored as bf16
+    const int smem16 = C::FIXED + 8 * (p.L + 4) * 2;
+    TORCH_CHECK(smem16 <= 166912, "pair_fwd: L too long for the shared-memory logits");
+    raise_smem(pwa80::pwa_pair_fwd_kernel<DZ, __nv_bfloat16>, 166912);
+    pwa80::pwa_pair_fwd_kernel<DZ, __nv_bfloat16><<<p.L, C::NTHR, smem16, st>>>(p);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

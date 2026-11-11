@@ -29,7 +29,7 @@ What every engine module must serve, and how a backend of it is judged.
   `backward` computes gradients (a recompute launched inside a backward included); `forward_train` writes what only a backward reads
   and runs only on the grad path; `forward_infer` runs only on no-grad paths; `forward` runs on both. A kernel that no module launches
   (only kernel checks / drivers call it) is not listed. The diffusion sampler's glue (`kernels/sampler_ops`) and the smooth lDDT loss
-  are module classes with their own rows: `AugmentNoise`, `AlignEuler`, `PoolAtoms` (eval only, fp32 coordinates / bf16 pooling) and
+  are module classes with their own rows: `AugmentNoise`, `AlignEuler` (eval only, fp32 coordinates), `PoolAtoms` (bf16 pooling, eval and train: FoldForge R17) and
   `SmoothLddtLoss`; each family is one shape-independent build per arch (the extensions `sampler_ops_sm90a` / `sampler_ops_sm80`, the smooth lDDT cubin; the
   shapes are runtime launch parameters), prebuilt when some row of its classes is. The La-Proteina pair embeddings and the token-pair
   initialisation (`kernels/pair_embed_adaln`, `kernels/pair_embed_geom`, `kernels/token_pair_init`) are module classes with their own

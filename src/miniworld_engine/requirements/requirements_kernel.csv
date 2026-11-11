@@ -484,12 +484,15 @@ smooth_lddt_fwd,smooth_lddt,SmoothLddtLoss,forward,1
 smooth_lddt_bwd,smooth_lddt,SmoothLddtLoss,backward,1
 sampler_ops_augment_noise_sm90,sampler_ops,AugmentNoise,forward_infer,1
 sampler_ops_align_euler_sm90,sampler_ops,AlignEuler,forward_infer,1
-sampler_ops_pool_atoms_sm90,sampler_ops,PoolAtoms,forward_infer,2
+sampler_ops_pool_atoms_sm90,sampler_ops,PoolAtoms,forward,2
+sampler_ops_pool_atoms_bwd_sm90,sampler_ops,PoolAtoms,backward,1
 sampler_ops_stats,sampler_ops,AugmentNoise|AlignEuler,forward_infer,1
 sampler_ops_augment,sampler_ops,AugmentNoise,forward_infer,1
 sampler_ops_cov,sampler_ops,AlignEuler,forward_infer,1
 sampler_ops_align,sampler_ops,AlignEuler,forward_infer,1
-sampler_ops_pool,sampler_ops,PoolAtoms,forward_infer,1
+sampler_ops_pool,sampler_ops,PoolAtoms,forward,1
+sampler_ops_pool_prep,sampler_ops,PoolAtoms,backward,1
+sampler_ops_pool_bwd,sampler_ops,PoolAtoms,backward,1
 pair_embed_adaln_fwd_sm90,pair_embed_adaln,PairEmbedAdaLN,forward,2
 pair_embed_adaln_bwd_sm90,pair_embed_adaln,PairEmbedAdaLN,backward,1
 pair_embed_adaln_fwd,pair_embed_adaln,PairEmbedAdaLN,forward,1

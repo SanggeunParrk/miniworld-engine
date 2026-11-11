@@ -94,9 +94,36 @@ def test_tiny_forward_on_cpu(module: str):
         assert torch.isfinite(t).all(), f"non-finite values in an output of {module}"
 
 
-@pytest.mark.parametrize("module", ["LayerNorm", "Transition", "TriangleMultiplication", "AttentionPairBias", "OuterProductMean"])
+#: the OuterProductMean rows with AlphaFold 3's divisor n + count_offset (FoldForge R2: served by the kernels, eval and train)
+COUNT_OFFSET = [(n, r) for n, r in ROWS if r["module"] == "OuterProductMean" and "count_offset" in r["options"]]
+
+
+@pytest.mark.parametrize(
+    "module", ["LayerNorm", "Transition", "TriangleMultiplication", "AttentionPairBias", "OuterProductMean", "PoolAtoms"]
+)
 def test_tiny_backward_on_cpu(module: str):
-    n, row = FIRST[module]
+    _tiny_backward(*FIRST[module])
+
+
+@pytest.mark.parametrize(("n", "row"), COUNT_OFFSET, ids=[f"r{n}" for n, _ in COUNT_OFFSET])
+def test_count_offset_rows_train_on_cpu(n: int, row: dict):
+    """FoldForge R2: the count_offset rows exist for train, build with the offset, and the reference trains through them."""
+    assert "train" in row["modes"].split("|")
+    m, _ = _build(_case(n, row, mode="train"))
+    assert getattr(m, "count_offset", None) == pytest.approx(1e-3)
+    _tiny_backward(n, row)
+
+
+def test_count_offset_rows_exist():
+    assert COUNT_OFFSET, "FoldForge R2: no OuterProductMean requirement row with count_offset"
+
+
+def test_pool_atoms_rows_train():
+    """FoldForge R17: PoolAtoms is served in training (the gradient of the atom features)."""
+    assert any("train" in r["modes"].split("|") for _, r in ROWS if r["module"] == "PoolAtoms")
+
+
+def _tiny_backward(n: int, row: dict):
     case = _case(n, row, mode="train")
     m, inputs = _build(case)
     floats = {k: v.requires_grad_(True) for k, v in inputs.items() if isinstance(v, torch.Tensor) and v.is_floating_point()}
