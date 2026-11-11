@@ -124,24 +124,25 @@ def plan(t: Target) -> tuple[list[_nvcc.Spec], dict[str, list[tuple[Want, list[s
     specs: dict[str, _nvcc.Spec] = {}
     per_site: dict[str, list[tuple[Want, list[str]]]] = {}
     problems: list[str] = []
-    for site, (family, enumerate_) in SITES.items():
-        try:
-            wants = list(enumerate_(t))
-        except Exception as exc:  # reported, the other sites still plan
-            problems.append(f"{site}: enumeration failed: {type(exc).__name__}: {exc}")
-            continue
-        by_build: dict[tuple, list[str]] = {}
-        rows = per_site.setdefault(site, [])
-        for w in wants:
-            keys: list[str] = []
-            for fn, args in w.builds:
-                if (fn, args) not in by_build:
-                    got = _prebuild.record(family, [ft.partial(fn, *args)], problems)
-                    by_build[fn, args] = [s.key for s in got]
-                    for s in got:
-                        specs.setdefault(s.key, s)
-                keys += [k for k in by_build[fn, args] if k not in keys]
-            rows.append((w, keys))
+    with _nvcc.plan_session():  # the loaders' caches forget the stand-ins when the plan ends
+        for site, (family, enumerate_) in SITES.items():
+            try:
+                wants = list(enumerate_(t))
+            except Exception as exc:  # reported, the other sites still plan
+                problems.append(f"{site}: enumeration failed: {type(exc).__name__}: {exc}")
+                continue
+            by_build: dict[tuple, list[str]] = {}
+            rows = per_site.setdefault(site, [])
+            for w in wants:
+                keys: list[str] = []
+                for fn, args in w.builds:
+                    if (fn, args) not in by_build:
+                        got = _prebuild.record(family, [ft.partial(fn, *args)], problems)
+                        by_build[fn, args] = [s.key for s in got]
+                        for s in got:
+                            specs.setdefault(s.key, s)
+                    keys += [k for k in by_build[fn, args] if k not in keys]
+                rows.append((w, keys))
     return list(specs.values()), per_site, problems
 
 

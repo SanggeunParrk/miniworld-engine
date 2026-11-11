@@ -164,20 +164,21 @@ def plan(t: Target, only: Iterable[str] = ()) -> tuple[list[_nvcc.Spec], list[st
     specs: dict[str, _nvcc.Spec] = {}
     problems: list[str] = []
     only = set(only)
-    for family, where in RECIPES.items():
-        if only and family not in only:
-            continue
-        mod, fn = where.split(":")
-        try:
-            recipe = getattr(importlib.import_module(mod), fn)
-            # a recipe taking ``rows`` expands its variants from the requirements (family_rows); one taking only the target is
-            # a hand-written list (being replaced)
-            calls = list(recipe(t, family_rows(family)) if len(inspect.signature(recipe).parameters) > 1 else recipe(t))
-        except Exception as exc:  # reported, the other families still plan
-            problems.append(f"{family}: recipe {where} failed: {type(exc).__name__}: {exc}")
-            continue
-        for s in record(family, calls, problems):
-            specs.setdefault(s.key, s)
+    with _nvcc.plan_session():  # the loaders' caches forget the stand-ins when the plan ends (a plan is re-entrant)
+        for family, where in RECIPES.items():
+            if only and family not in only:
+                continue
+            mod, fn = where.split(":")
+            try:
+                recipe = getattr(importlib.import_module(mod), fn)
+                # a recipe taking ``rows`` expands its variants from the requirements (family_rows); one taking only the target is
+                # a hand-written list (being replaced)
+                calls = list(recipe(t, family_rows(family)) if len(inspect.signature(recipe).parameters) > 1 else recipe(t))
+            except Exception as exc:  # reported, the other families still plan
+                problems.append(f"{family}: recipe {where} failed: {type(exc).__name__}: {exc}")
+                continue
+            for s in record(family, calls, problems):
+                specs.setdefault(s.key, s)
     return list(specs.values()), problems
 
 
