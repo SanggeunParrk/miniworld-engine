@@ -451,10 +451,11 @@ def prebuild(target, rows):
 
     from miniworld_engine.kernels._prebuild import _kv
 
-    if target.arch == "sm80":   # the A100 builds: prebuild_sm80.py
+    if target.arch == "sm80":   # the A100 builds: prebuild_sm80.py (token / atom DiT attention) and _sm80_apb (AttentionPairBias rows)
         from .prebuild_sm80 import prebuild_sm80
 
         yield from prebuild_sm80(rows)
+        yield from _sm80_apb(rows)
         return
     from . import apb, sm90_atom, sm100_atom, sm100_atom_local
 
@@ -554,8 +555,6 @@ def prebuild(target, rows):
         for stem, names in _LOCAL_STEMS.items():
             if need(names, "f32" if stem.endswith("tf32") else None):
                 calls.append(ft.partial(sm100_atom_local.cubin, stem, True))
-    elif target.arch == "sm80":
-        calls.extend(_sm80_apb(rows))
     else:
         calls.append(ft.partial(apb._ext, "100", False))
         atom = sm100_atom.KERNELS.values()

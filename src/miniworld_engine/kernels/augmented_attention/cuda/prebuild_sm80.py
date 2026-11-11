@@ -7,7 +7,7 @@
   window-attention / pair-bias cubins of ``sm80_atom_local``.
 
 The extensions take no model dims (one build serves every width), so a family's build is planned when some row of its classes exists.
-The sm_80 AttentionPairBias builds (``apb`` with ``-DAPB_SM80``, ``integrations/attention_pair_bias_sm80.py``) are not here."""
+The sm_80 AttentionPairBias builds (``apb`` with ``-DAPB_SM80``, ``integrations/attention_pair_bias_sm80.py``) are ``__init__._sm80_apb``."""
 
 from __future__ import annotations
 

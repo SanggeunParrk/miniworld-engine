@@ -19,9 +19,13 @@ dependencies = [
   "pyyaml",         # measure/config.py: measurement configs
   "cuda-bindings",  # kernels/trimul_inproj/cuda: the H100 TriMul driver API
   "ninja",          # torch.utils.cpp_extension: every JIT build of a CUDA kernel (A100, or a Python / torch without prebuilt kernels)
-  # The prebuilt H100 kernels (CUDA 12.9 / torch 2.13 / CPython 3.12), installed into miniworld_engine/_prebuilt/; elsewhere a kernel
+  # The prebuilt H100 (sm90) and A100 (sm80) kernels (CUDA 12.9 / torch 2.13 / CPython 3.12), both installed into
+  # miniworld_engine/_prebuilt/ (content-keyed paths; the few arch-independent artifacts, multi-arch fatbins / host-only glue, share a
+  # key and are shipped by both, either copy serves both GPUs); elsewhere a kernel
   # JIT-builds on first use (needs a CUDA toolkit; the CUTLASS / MathDx headers are fetched by kernels/_headers.py, see docs/install.md).
   'miniworld-engine-kernels-sm90-cu129==2.5.1; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
+  # A100: miniworld-engine-kernels-sm80-cu129 (built + verified, not yet on PyPI) joins here at the next release, pinned like the sm90 line;
+  # until then an A100 JIT-builds (a pin to an unpublished wheel would break every install of this tree).
 ]
 
 [project.optional-dependencies]

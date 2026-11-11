@@ -27,8 +27,8 @@ The corresponding Apache-2.0 license applies to these inherited portions.
 
 ## Compiled kernels in binary wheels
 
-A binary (platform) wheel of miniworld-engine carries prebuilt kernels under `miniworld_engine/_prebuilt/<arch>/`
-(docs/install.md, "Prebuilt kernels vs JIT"): torch extensions and cubins compiled from this repository's CUDA sources. Besides
+A binary (platform) wheel of miniworld-engine carries prebuilt kernels under `miniworld_engine/_prebuilt/` (one kernels wheel per arch,
+content-keyed paths; docs/install.md, "Prebuilt kernels vs JIT"): torch extensions and cubins compiled from this repository's CUDA sources. Besides
 the MIT and Anthropic Apache-2.0 code above, they contain object code compiled from:
 
 - **NVIDIA CUTLASS / CuTe 4.2** headers (BSD-3-Clause, Copyright (c) 2017 - 2025 NVIDIA CORPORATION & AFFILIATES):
