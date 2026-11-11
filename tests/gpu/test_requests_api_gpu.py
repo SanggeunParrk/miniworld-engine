@@ -1,5 +1,5 @@
 """FoldForge API requests on the GPU: R1 (a weight replaced after ``clear_weight_caches`` is picked up by a cached H100 kernel path),
-R18 (the multi-fold call of the DiT blocks on ``cuda`` (H100) and ``triton`` equals one call per fold; on A100 one sm_80 call per fold), R12 (``parallel_residual`` on ``triton``)."""
+R18 (the multi-fold call of the DiT blocks on ``cuda`` (H100) and ``triton`` equals one call per fold; on A100 one sm_80 call per fold), R12 (``parallel_residual`` on ``triton`` and ``cuda``)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import torch
 
 from miniworld_engine import capture
 from miniworld_engine.measure import config as C
-from miniworld_engine.modules import AtomDiT, TokenDiT, parallel_residual
+from miniworld_engine.modules import AtomDiT, ParallelResidual, TokenDiT, parallel_residual
 from miniworld_engine.modules.primitives import BackendUnsupported
 
 pytestmark = pytest.mark.gpu
@@ -134,6 +134,45 @@ def test_parallel_residual_triton(dtype, branches):
     parallel_residual(xs, *yg, backend="triton").backward(up)
     assert all(torch.equal(y.grad, up) for y in yg)  # pyright: ignore[reportArgumentType]
     torch.testing.assert_close(xs.grad, (up.float() * (1 - branches)).to(dtype))
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("branches", [1, 2, 3, 4])
+@pytest.mark.parametrize("shape", [(1, 129, 130, 64), (3, 5, 7)])  # whole 16-byte vectors / an odd size (the tail elements)
+def test_parallel_residual_cuda(dtype, branches, shape):
+    """The hand-written kernel (H100 sm_90a / A100 sm_80) is the reference's arithmetic in the same order: bitwise equal to ``pytorch``
+    (and the Triton kernel); the gradients: ``d/dy_i = g`` (the same tensor), ``d/dx = (1 - n) g`` bitwise equal to the reference's."""
+    g = _gen()
+    x = torch.randn(shape, device="cuda", generator=g).to(dtype)
+    ys = [(x.float() + 0.1 * torch.randn(x.shape, device="cuda", generator=g)).to(dtype) for _ in range(branches)]
+    ref = parallel_residual(x, *ys, backend="pytorch")
+    assert torch.equal(parallel_residual(x, *ys, backend="cuda"), ref)
+    assert torch.equal(parallel_residual(x, *ys, backend="triton"), ref)
+    # not 16-byte aligned (an offset view): the scalar kernel, same values
+    xo = torch.empty(x.numel() + 1, device="cuda", dtype=dtype)[1:].view(shape).copy_(x)
+    assert torch.equal(parallel_residual(xo, *ys, backend="cuda"), ref)
+    # train: the module path and the reference's gradients
+    m = ParallelResidual(d=shape[-1], branches=branches, backend="cuda")
+    up = torch.randn(x.shape, device="cuda", generator=g).to(dtype)
+    grads = []
+    for backend in ("cuda", "pytorch"):
+        xs = x.detach().requires_grad_(True)
+        yg = [y.detach().requires_grad_(True) for y in ys]
+        out = m(xs, *yg) if backend == "cuda" else parallel_residual(xs, *yg, backend="pytorch")
+        out.backward(up)
+        grads.append([xs.grad, *(y.grad for y in yg)])
+    for a, b in zip(*grads, strict=True):
+        assert torch.equal(a, b)
+
+
+def test_parallel_residual_cuda_refuses_outside_its_range():
+    x = torch.randn(4, 8, device="cuda")
+    with pytest.raises(BackendUnsupported, match="branches"):
+        parallel_residual(x, *[x] * 5, backend="cuda")
+    with pytest.raises(BackendUnsupported, match="dtype"):
+        parallel_residual(x.double(), x.double(), backend="cuda")
+    with pytest.raises(BackendUnsupported, match="CUDA tensors"):
+        parallel_residual(x.cpu(), x.cpu(), backend="cuda")
 
 
 @pytest.mark.h100

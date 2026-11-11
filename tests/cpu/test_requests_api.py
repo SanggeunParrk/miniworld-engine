@@ -139,6 +139,8 @@ def test_parallel_residual_reference():
     torch.testing.assert_close(m(x, *ys), want)
     with pytest.raises(BackendUnsupported, match="CUDA"):
         parallel_residual(x, *ys, backend="triton")
+    with pytest.raises(BackendUnsupported, match="CUDA"):
+        parallel_residual(x, *ys, backend="cuda")
     with pytest.raises(ValueError, match="at least one"):
         parallel_residual(x)
 

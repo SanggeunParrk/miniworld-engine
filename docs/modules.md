@@ -109,17 +109,24 @@ them in. The LayerNorm offset is dropped: it adds `W_proj beta`, one constant pe
 ## Parallel residual (`parallel_residual`, `ParallelResidual`)
 
 A parallel stage whose parts own their residuals (`y_i = x + delta_i`; Chai-1's MSA block) updates `x` by the sum of the deltas:
-`parallel_residual(x, *ys, backend="pytorch" | "triton")` = `x + sum_i (y_i - x)`, the differences and the sum in fp32, one rounding.
-`"triton"` (`kernels/parallel_residual/triton`) is one pass over the tensors (1 to 4 branches, CUDA, one dtype); the backward is torch
-(`d/dy_i = g`, `d/dx = (1 - n) g`). There is no `"cuda"` backend: the Triton pass already streams at the memory bandwidth (H100, bf16, pair
-768 x 768 x 256 with three branches: 1.2 GB read + written in 0.49 ms, about 3.1 TB/s against the card's 3.35), so a hand-written kernel
-has nothing left to gain. Measured on the requirement rows (graph timing, L2 flushed; eval, ms):
+`parallel_residual(x, *ys, backend="pytorch" | "cuda" | "triton")` = `x + sum_i (y_i - x)`, the differences and the sum in fp32, one
+rounding. `"triton"` (`kernels/parallel_residual/triton`) is one pass over the tensors (1 to 4 branches, CUDA, one dtype); its backward
+is torch (`d/dy_i = g`, `d/dx = (1 - n) g`). `"cuda"` (`kernels/parallel_residual/cuda/parallel_residual.cu`: one source, built as
+`parallel_residual_sm90` for H100 sm_90a and `parallel_residual_sm80` for A100 sm_80) is the same arithmetic in the same order (bitwise
+equal to `"pytorch"` and `"triton"`) with 16-byte vector accesses and streaming cache hints, and its backward's `(1 - n) g` in one small
+kernel (the Triton path's torch statements take three passes for bf16). Both forward passes stream near the memory bandwidth (H100, bf16,
+pair 768 x 768 x 256 with three branches: 1.5 GB read + written in 0.49 ms, about 3.1 TB/s against the card's 3.35): in eval `"cuda"` is
+within 0.94-1.05x of `"triton"` (2-5 % slower at L >= 384), in train 1.5-1.9x faster (the backward kernel). Measured on the requirement
+rows (graph timing, L2 flushed; L 768, ms):
 
-| row | H100 pytorch | H100 triton | A100 pytorch | A100 triton |
-|---|---|---|---|---|
-| MSA [1, 1024, 768, 64], 2 branches | 1.356 | 0.138 | 2.381 | 0.250 |
-| pair [1, 768, 768, 256], 3 branches | 5.640 | 0.490 | 9.965 | 0.887 |
-| pair [1, 768, 768, 256], 2 branches | 4.012 | 0.393 | 7.078 | 0.721 |
+| row | mode | H100 pytorch | H100 cuda | H100 triton | A100 pytorch | A100 cuda | A100 triton |
+|---|---|---|---|---|---|---|---|
+| MSA [1, 1024, 768, 64], 2 branches | eval | 1.357 | 0.142 | 0.137 | 2.381 | 0.256 | 0.250 |
+| | train | 2.472 | 0.350 | 0.661 | 4.367 | 0.633 | 1.157 |
+| pair [1, 768, 768, 256], 3 branches | eval | 5.645 | 0.505 | 0.490 | 9.960 | 0.929 | 0.887 |
+| | train | 10.227 | 1.313 | 2.238 | 18.169 | 2.390 | 4.020 |
+| pair [1, 768, 768, 256], 2 branches | eval | 4.015 | 0.407 | 0.393 | 7.074 | 0.750 | 0.722 |
+| | train | 7.321 | 1.016 | 1.942 | 12.980 | 1.851 | 3.494 |
 
 `PairformerBlock(parallel=True)` keeps its own statements for its parallel schedule.
 
