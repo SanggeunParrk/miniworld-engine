@@ -23,16 +23,17 @@ def _card() -> tuple[int, int] | None:
 
 
 def _run(module, inp: dict, dtype: torch.dtype, dy: torch.Tensor, autocast: bool) -> list[torch.Tensor]:
-    """The forward output and the gradients of msa, pair and every parameter (fp64 copies, on the device)."""
+    """The forward output and the gradients of msa, pair and every parameter (fp32 copies on the host: at 2048 x d_pair 512 three sets of
+    pair gradients do not fit next to the reference runs on the card)."""
     msa = inp["msa"].detach().to(dtype).requires_grad_(True)
     pair = inp["pair"].detach().to(dtype).requires_grad_(True)
     module.zero_grad(set_to_none=True)
     with torch.enable_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
         out = module(msa, pair, inp["mask"])
     out.backward(dy.to(out.dtype))
-    res = [out.detach().double(), msa.grad.double(), pair.grad.double()]
+    res = [out.detach().float().cpu(), msa.grad.float().cpu(), pair.grad.float().cpu()]
     del out, msa, pair
-    res += [p.grad.double() for p in module.parameters()]
+    res += [p.grad.float().cpu() for p in module.parameters()]
     module.zero_grad(set_to_none=True)
     return res
 
