@@ -169,7 +169,7 @@ def _training_core(device) -> Any:  # the sm_90 or the sm_100 kernel module (the
     return _sm100()
 
 
-def _inference_core(device, heads: int, d: int):
+def _inference_core(device, heads: int, d: int) -> Any:  # the sm_90 or the sm_100 core (duck-typed; ``batch``: sm_90 only)
     if torch.cuda.get_device_capability(device) == (9, 0):
         from miniworld_engine.kernels.augmented_attention import cuda as sm90
 
