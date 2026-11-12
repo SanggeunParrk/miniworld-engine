@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import torch
 
+from miniworld_engine.kernels import _sm120
 from miniworld_engine.kernels.swa_dit._common import FP32_EPS, is_global
 from miniworld_engine.kernels.swa_dit.cuda import sm80
 
@@ -137,35 +138,42 @@ def _bwd_bf16(
 # ------------------------------------------------------------------------------------------------------------------- fp32 stages
 def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int, save: bool) -> list[torch.Tensor]:
     """The fp32 block (``dispatch._native_h100_fwd``'s fp32 branch on the sm_80 row stages): the same outputs as :func:`_fwd_bf16`, every
-    tensor fp32 but Q / K / V (bf16), O (fp32 with the window; bf16 from FlashAttention) and lse."""
+    tensor fp32 but Q / K / V (bf16), O (fp32 with the window; bf16 from FlashAttention) and lse.
+
+    bf16 ``q`` (the RTX 5090, whose 99 KB of shared memory per block do not hold the fused bf16 stages' 128 KB weight tiles): the same stages
+    in bf16 -- every activation bf16, the projections bf16 cuBLAS products (fp32 accumulation, one rounding, as the module's bf16 Linear),
+    the row stages with their bf16 rounding points (``rows_sm80.cuh``), O bf16."""
     n, s, _ = q.shape
     m = n * s
     dev = q.device
+    bf = q.dtype == _BF
+    act = q.dtype
+    mm = torch.mm if bf else _mm
 
-    def empty(*shape, dtype=_F32):
+    def empty(*shape, dtype=act):
         return torch.empty(shape, device=dev, dtype=dtype)
 
     x = empty(m, C)
-    _rows(0, [q, mod], [x], n, s, False)
+    _rows(0, [q, mod], [x], n, s, bf)
     from miniworld_engine.kernels.swa_dit.dispatch import eval_form
 
     wstack = eval_form("swa_a100_fp32_wstack", (wqkv, wg), lambda: torch.cat([wqkv, wg]), save)  # per weight version in inference
-    p = _mm(x, wstack.t())
+    p = mm(x, wstack.t())
     qh, kh, vh = (empty(n, H, s, D, dtype=_BF) for _ in range(3))
     g, pq, pk = (empty(m, C) for _ in range(3))
-    _rows(1, [p, cos, sin], [qh, kh, vh, g, pq, pk], n, s, False)
-    o, lse = attention_fwd(qh, kh, vh, seqused, half_window, _F32)  # fp32 O from the window kernel (global: bf16)
+    _rows(1, [p, cos, sin], [qh, kh, vh, g, pq, pk], n, s, bf)
+    o, lse = attention_fwd(qh, kh, vh, seqused, half_window, act)  # fp32 O from the window kernel (global: bf16); bf16 O for bf16
     gated = empty(m, C)
-    _rows(2, [o, g], [gated], n, s, False)
-    att = _mm(gated, wo.t())
+    _rows(2, [o, g], [gated], n, s, bf)
+    att = mm(gated, wo.t())
     q1, y = empty(m, C), empty(m, C)
-    _rows(3, [q, att, mod], [q1, y], n, s, False)
-    ab = _mm(y, wu.t())
+    _rows(3, [q, att, mod], [q1, y], n, s, bf)
+    ab = mm(y, wu.t())
     hh = empty(m, 2 * C)
-    _rows(4, [ab], [hh], n, s, False)
-    ffn = _mm(hh, wd.t())
+    _rows(4, [ab], [hh], n, s, bf)
+    ffn = mm(hh, wd.t())
     out = empty(m, C)
-    _rows(5, [q1, ffn, mod], [out], n, s, False)
+    _rows(5, [q1, ffn, mod], [out], n, s, bf)
     outputs = [out.view(n, s, C)]
     if save:
         outputs += [qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn]
@@ -175,35 +183,39 @@ def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
 def _bwd_fp32(
     dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, half_window: int
 ) -> list[torch.Tensor]:
-    """``[dq, dmod, dWqkv, dWg, dWo, dWu, dWd]`` fp32 of :func:`_fwd_fp32` (``dispatch._native_h100_bwd``'s fp32 branch)."""
+    """``[dq, dmod, dWqkv, dWg, dWo, dWu, dWd]`` fp32 of :func:`_fwd_fp32` (``dispatch._native_h100_bwd``'s fp32 branch); for bf16 (the
+    RTX 5090) the activation gradients bf16 as the forward's, dmod and the weight gradients fp32."""
     n, s, _ = q.shape
     m = n * s
     dev = q.device
+    bf = q.dtype == _BF
+    act = q.dtype
+    mm = torch.mm if bf else _mm
 
-    def empty(*shape, dtype=_F32):
+    def empty(*shape, dtype=act):
         return torch.empty(shape, device=dev, dtype=dtype)
 
-    dmod = torch.empty_like(mod)
+    dmod = torch.empty(mod.shape, device=dev, dtype=_F32)
     dffn = empty(m, C)
-    _rows(6, [dy, mod, ffn], [dffn, dmod], n, s, False)
-    ab, dh = _mm(y, wu.t()), _mm(dffn, wd)
+    _rows(6, [dy, mod, ffn], [dffn, dmod], n, s, bf)
+    ab, dh = mm(y, wu.t()), mm(dffn, wd)
     dab, hh = empty(m, 4 * C), empty(m, 2 * C)
-    _rows(7, [ab, dh], [dab, hh], n, s, False)
-    d_y = _mm(dab, wu)
+    _rows(7, [ab, dh], [dab, hh], n, s, bf)
+    d_y = mm(dab, wu)
     dq1 = empty(m, C)
-    _rows(8, [dy, d_y, q1, mod], [dq1, dmod], n, s, False)
+    _rows(8, [dy, d_y, q1, mod], [dq1, dmod], n, s, bf)
     datt, gated = empty(m, C), empty(m, C)
-    _rows(9, [dq1, mod, att, o, g], [datt, gated, dmod], n, s, False)
-    dgated = _mm(datt, wo)
-    d_o, dg, delta = empty(m, C, dtype=_BF), empty(m, C), empty(n, H, s)
-    _rows(10, [dgated, o, g], [d_o, dg, delta], n, s, False)
+    _rows(9, [dq1, mod, att, o, g], [datt, gated, dmod], n, s, bf)
+    dgated = mm(datt, wo)
+    d_o, dg, delta = empty(m, C, dtype=_BF), empty(m, C), empty(n, H, s, dtype=_F32)
+    _rows(10, [dgated, o, g], [d_o, dg, delta], n, s, bf)
     dqh, dkh, dvh = attention_bwd(qh, kh, vh, o, d_o, lse, delta, seqused, half_window)
     dp = empty(m, 4 * C)
-    _rows(11, [pq, pk, dqh, dkh, dvh, dg, cos, sin], [dp], n, s, False)
+    _rows(11, [pq, pk, dqh, dkh, dvh, dg, cos, sin], [dp], n, s, bf)
     wstack = torch.cat([wqkv, wg])
-    dx = _mm(dp, wstack)
+    dx = mm(dp, wstack)
     dq = empty(m, C)
-    _rows(12, [dq1, dx, q, mod], [dq, dmod], n, s, False)
+    _rows(12, [dq1, dx, q, mod], [dq, dmod], n, s, bf)
     return [
         dq.view(n, s, C),
         dmod,
@@ -355,6 +367,8 @@ def block(x, cond, cos, sin, seqused, half_window: int, weights) -> torch.Tensor
     x, c, cos, sin, ws = _prepare(x, cond, cos, sin, weights, save=False)
     with torch.autocast("cuda", enabled=False):
         mod = _mod_fwd(c, ws[0], False)[0]
+        if _sm120.is_sm120(x.device):  # the RTX 5090: the row stages around cuBLAS (the fused stages' weight tiles exceed its 99 KB)
+            return _fwd_fp32(x, mod, cos, sin, seqused, *ws[1:], half_window, False)[0]
         if x.dtype == _BF:
             if is_global(half_window):
                 return _infer_bf16(x, mod, cos, sin, seqused, *ws[1:], half_window)
@@ -375,7 +389,7 @@ class SWABlockA100(torch.autograd.Function):
         x, c, cos, sin, ws = _prepare(x, cond, cos, sin, raw)
         with torch.autocast("cuda", enabled=False):
             mod, a = _mod_fwd(c, ws[0], True)
-            fwd = _fwd_bf16 if x.dtype == _BF else _fwd_fp32
+            fwd = _fwd_bf16 if x.dtype == _BF and not _sm120.is_sm120(x.device) else _fwd_fp32
             outputs = fwd(x, mod, cos, sin, seqused, *ws[1:], half_window, True)
         ctx.save_for_backward(x, c, a, mod, cos, sin, seqused, *ws, *outputs[1:])
         return outputs[0]
@@ -386,7 +400,7 @@ class SWABlockA100(torch.autograd.Function):
         x, c, a, mod, cos, sin, seqused, wmod, *rest = ctx.saved_tensors
         weights, saves = rest[:5], rest[5:]
         with torch.autocast("cuda", enabled=False):
-            bwd = _bwd_bf16 if x.dtype == _BF else _bwd_fp32
+            bwd = _bwd_bf16 if x.dtype == _BF and not _sm120.is_sm120(x.device) else _bwd_fp32
             dx, dmod, *dw = bwd(dy.to(x.dtype).contiguous(), x, mod, cos, sin, seqused, *weights, *saves, half_window)
             dc, dwmod = _mod_bwd(dmod, c, a, wmod)
         grads = [g.to(dt) for g, dt in zip((dwmod, *dw), dtypes, strict=True)]

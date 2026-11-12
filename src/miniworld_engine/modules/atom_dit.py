@@ -93,6 +93,11 @@ def _a100(t: torch.Tensor) -> bool:
     return t.is_cuda and torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0))
 
 
+def _sm120(t: torch.Tensor) -> bool:
+    """A CUDA tensor on an RTX 5090 (sm_120a): where an sm_80 path cannot take its fused kernels (99 KB of shared memory per block)."""
+    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (12, 0)
+
+
 class _A100View:
     """The block as the sm_80 atom block integration reads it (``local_dit_sm80_block``, written against the earlier ``LocalDiTBlock``):
     ``cross_attention`` = a K / V AdaLN of its own; everything else (parameters, submodules, ``get_parameter``) is the module's."""
@@ -1240,7 +1245,7 @@ class AtomDiTMiniWorld(BackendModule):
         weights = [m.weight for m in self._a100_linears()]
         if _needs_grad(self, x, cond):
             return composed.SWABlockA100.apply(x, cond, cos, sin, seqused.contiguous(), hw, *weights)
-        if x.dtype != _BF or hw != HALF_WINDOW:
+        if x.dtype != _BF or hw != HALF_WINDOW or _sm120(x):  # the RTX 5090: the composed row stages (composed.block)
             return composed.block(x, cond, cos, sin, seqused.contiguous(), hw, weights)
         from miniworld_engine.kernels.swa_dit.dispatch import eval_form
 
