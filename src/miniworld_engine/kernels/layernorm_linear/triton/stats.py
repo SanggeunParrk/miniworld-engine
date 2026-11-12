@@ -30,6 +30,7 @@ import triton.language as tl
 # would mint a fresh autotune (a full-grid sweep on a cache miss) for every distinct M the model
 # runs, which is a per-shape stall, not a better config.
 from miniworld_engine.kernels._shape_key import both_key, rows_of, pack
+from miniworld_engine.kernels._wide import needs_wide, wide
 
 
 @configured("layernorm_stats_triton", key=["shape_key"], default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
@@ -46,7 +47,10 @@ def _stats_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     shape_key,
+    WIDE: tl.constexpr = False,
 ):
+    # 64-bit offsets: rows is int64; `cols * stride_xk` is int32 and wraps on a channel-major x (stride_xk = M) once K * M >= 2**31 --
+    # WIDE (the launcher, from x's extents) casts the column index first.
     pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
@@ -58,7 +62,7 @@ def _stats_kernel(
         cols = k0 + tl.arange(0, BLOCK_K)
         col_mask = cols < K
         x = tl.load(
-            x_ptr + rows[:, None] * stride_xm + cols[None, :] * stride_xk,
+            x_ptr + rows[:, None] * stride_xm + wide(cols, WIDE)[None, :] * stride_xk,
             mask=row_mask[:, None] & col_mask[None, :],
             other=0.0,
         ).to(tl.float32)
@@ -113,5 +117,6 @@ def stats_triton(
         # all outside this change's file set); it buckets the flattened ROW count, the L-vs-L*L
         # ambiguity autotune.shape_key removes.
         shape_key=both_key(M, K=K) if shape_key is None else pack(shape_key, K=K),
+        WIDE=needs_wide(x),
     )
     return rstd, c1

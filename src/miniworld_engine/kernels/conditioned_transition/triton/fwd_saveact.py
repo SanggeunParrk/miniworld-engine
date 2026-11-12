@@ -22,6 +22,7 @@ from __future__ import annotations
 # driver launched it directly. Use the one that upcasts.
 from miniworld_engine.kernels.gated_projection.triton.main import _sigmul_bwd
 from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._wide import needs_wide, wide
 
 import torch
 
@@ -74,6 +75,7 @@ def _fwd_expand_swiglu_kernel(
     GROUP_M: tl.constexpr,
     shape_key,
     PRE: tl.constexpr = False,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     # Visit order, tuned: see kernels/_tiles.py. Same GEMM as composed.py's, saving [a|b] as well.
     pid_m, pid_n = tile_order(
@@ -88,7 +90,7 @@ def _fwd_expand_swiglu_kernel(
     for k0 in range(0, K, BLOCK_K):
         k = k0 + tl.arange(0, BLOCK_K)
         k_mask = k < K
-        x = tl.load(x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+        x = tl.load(x_ptr + rows[:, None] * stride_xm + wide(k, WIDE)[None, :] * stride_xk,
                     mask=row_mask[:, None] & k_mask[None, :], other=0.0)
         wa = tl.load(wa_ptr + cols[None, :] * stride_wn + k[:, None] * stride_wk,
                      mask=k_mask[:, None] & col_mask[None, :], other=0.0)
@@ -98,10 +100,10 @@ def _fwd_expand_swiglu_kernel(
         b += tf32_dot(x, wb, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
     h = a * tl.sigmoid(a) * b
     m = row_mask[:, None] & col_mask[None, :]
-    tl.store(h_ptr + rows[:, None] * stride_hm + cols[None, :] * stride_hn, h, mask=m)
+    tl.store(h_ptr + rows[:, None] * stride_hm + wide(cols, WIDE)[None, :] * stride_hn, h, mask=m)
     # save pre-activations a, b (packed) for the backward swiglu-grad.
-    tl.store(ab_ptr + rows[:, None] * stride_abm + cols[None, :] * stride_abn, a, mask=m)
-    tl.store(ab_ptr + rows[:, None] * stride_abm + (cols + ND)[None, :] * stride_abn, b, mask=m)
+    tl.store(ab_ptr + rows[:, None] * stride_abm + wide(cols, WIDE)[None, :] * stride_abn, a, mask=m)
+    tl.store(ab_ptr + rows[:, None] * stride_abm + (wide(cols, WIDE) + ND)[None, :] * stride_abn, b, mask=m)
 # fmt: on
 # fmt: off
 
@@ -130,6 +132,7 @@ def _fwd_squeeze_gate_kernel(
     shape_key,
     PRE: tl.constexpr = False,
     res_ptr=None, stride_rm=0, HAS_RES: tl.constexpr = False,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     # Visit order, tuned: see kernels/_tiles.py. Squeeze: the (M, ND) h is the big operand, Ws (D, ND) the small one.
     pid_m, pid_d = tile_order(
@@ -143,7 +146,7 @@ def _fwd_squeeze_gate_kernel(
     for n0 in range(0, ND, BLOCK_K_ND):
         n = n0 + tl.arange(0, BLOCK_K_ND)
         n_mask = n < ND
-        h = tl.load(h_ptr + rows[:, None] * stride_hm + n[None, :] * stride_hn,
+        h = tl.load(h_ptr + rows[:, None] * stride_hm + wide(n, WIDE)[None, :] * stride_hn,
                     mask=row_mask[:, None] & n_mask[None, :], other=0.0)
         ws_t = tl.load(ws_ptr + n[:, None] * stride_sn + dcols[None, :] * stride_sd,
                        mask=n_mask[:, None] & d_mask[None, :], other=0.0)
@@ -152,7 +155,7 @@ def _fwd_squeeze_gate_kernel(
     for c0 in range(0, DC, BLOCK_K_DC):
         dc = c0 + tl.arange(0, BLOCK_K_DC)
         dc_mask = dc < DC
-        cond = tl.load(cond_ptr + rows[:, None] * stride_cm + dc[None, :] * stride_cc,
+        cond = tl.load(cond_ptr + rows[:, None] * stride_cm + wide(dc, WIDE)[None, :] * stride_cc,
                        mask=row_mask[:, None] & dc_mask[None, :], other=0.0)
         wsc_t = tl.load(wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
                         mask=dc_mask[:, None] & d_mask[None, :], other=0.0)
@@ -164,9 +167,9 @@ def _fwd_squeeze_gate_kernel(
         y = y.to(y_ptr.dtype.element_ty).to(tl.float32) + tl.load(
             res_ptr + rows[:, None] * stride_rm + dcols[None, :], mask=row_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
     m = row_mask[:, None] & d_mask[None, :]
-    tl.store(y_ptr + rows[:, None] * stride_ym + dcols[None, :] * stride_yd, y, mask=m)
-    tl.store(out_ptr + rows[:, None] * stride_om + dcols[None, :] * stride_od, out_acc, mask=m)
-    tl.store(scale_ptr + rows[:, None] * stride_sm + dcols[None, :] * stride_sc, scale, mask=m)
+    tl.store(y_ptr + rows[:, None] * stride_ym + wide(dcols, WIDE)[None, :] * stride_yd, y, mask=m)
+    tl.store(out_ptr + rows[:, None] * stride_om + wide(dcols, WIDE)[None, :] * stride_od, out_acc, mask=m)
+    tl.store(scale_ptr + rows[:, None] * stride_sm + wide(dcols, WIDE)[None, :] * stride_sc, scale, mask=m)
 # fmt: on
 
 
@@ -219,6 +222,7 @@ def _fwd_expand_swiglu(
         ab.stride(1),
         shape_key=pack(shape_key, ND=ND, K=K),
         PRE=pre,
+        WIDE=needs_wide(x, h, ab),
     )
     return h, ab
 
@@ -291,6 +295,7 @@ def _fwd_squeeze_gate(
         shape_key=pack(shape_key, ND=ND, D=D, DC=DC),
         PRE=pre,
         **extra,
+        WIDE=needs_wide(h, cond, y, out, scale, residual),
     )
     return y, out, scale
 

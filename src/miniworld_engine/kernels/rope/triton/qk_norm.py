@@ -10,6 +10,7 @@ import torch
 import triton
 import triton.language as tl
 from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._wide import needs_wide, wide
 from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
 
@@ -54,14 +55,16 @@ def _body(
     EPS: tl.constexpr,
     BLOCK_M1: tl.constexpr,
     BACKWARD: tl.constexpr,
+    WIDE: tl.constexpr = False,
 ):
     BD: tl.constexpr = triton.next_power_of_2(D)
-    row = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    # WIDE (launcher: needs_wide): the row index and every n / pos / head stride product built on it in 64 bits
+    row = wide(tl.program_id(0), WIDE) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     col = tl.arange(0, BD)
     n = row // (SEQ * H)
     pos = (row // H) % SEQ
     head = row % H
-    mask = (row[:, None] < N * SEQ * H) & (col[None, :] < D)
+    mask = (row[:, None] < (tl.cast(N, tl.int64) if WIDE else N) * SEQ * H) & (col[None, :] < D)
     qb = n * Q0 + pos * Q1 + head * Q2
     kb = n * K0 + pos * K1 + head * K2
     q = tl.load(Q + qb[:, None] + col[None, :] * Q3, mask, other=0).to(tl.float32)
@@ -73,7 +76,7 @@ def _body(
     rotary = col < 2 * HALF
     partner = tl.where(col < HALF, col + HALF, tl.where(rotary, col - HALF, col))
     index = tl.broadcast_to(partner[None, :], (BLOCK_M1, BD))
-    cmask = (row[:, None] < N * SEQ * H) & rotary[None, :]
+    cmask = (row[:, None] < (tl.cast(N, tl.int64) if WIDE else N) * SEQ * H) & rotary[None, :]
     c = tl.load(C + (n * C0 + pos * C1)[:, None] + (col % HALF)[None, :] * C2, cmask, other=1).to(tl.float32)
     s = tl.load(S + (n * S0 + pos * S1)[:, None] + (col % HALF)[None, :] * S2, cmask, other=0).to(tl.float32)
     if BACKWARD:
@@ -138,6 +141,7 @@ def qk_norm_rope_fwd_kernel(
     EPS: tl.constexpr,
     BLOCK_M1: tl.constexpr,
     shape_key,
+    WIDE: tl.constexpr = False,
 ):
     _body(
         Q,
@@ -178,6 +182,7 @@ def qk_norm_rope_fwd_kernel(
         EPS,
         BLOCK_M1,
         False,
+        WIDE,
     )
 
 
@@ -222,6 +227,7 @@ def qk_norm_rope_bwd_kernel(
     EPS: tl.constexpr,
     BLOCK_M1: tl.constexpr,
     shape_key,
+    WIDE: tl.constexpr = False,
 ):
     _body(
         Q,
@@ -262,6 +268,7 @@ def qk_norm_rope_bwd_kernel(
         EPS,
         BLOCK_M1,
         True,
+        WIDE,
     )
 
 
@@ -302,6 +309,7 @@ def _qk_norm_rope_launch(launch_kernel, q, k, cos, sin, gq, gk, eps, key):
         *gk.stride(),
         eps,
         shape_key=key,
+        WIDE=needs_wide(q, k, gq, gk, oq, ok),
     )
     return oq, ok
 

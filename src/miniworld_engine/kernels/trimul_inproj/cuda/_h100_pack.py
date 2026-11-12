@@ -158,7 +158,7 @@ def _pack(
     RGS1: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)  # int64: the flat index and the strided source offsets
     row, col = i // D, i % D
     source_row = (row // 64) * 32 + row % 32
     right = source_row >= R

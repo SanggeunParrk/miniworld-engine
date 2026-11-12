@@ -185,7 +185,7 @@ def _prep_do_kernel(
     ROWS: tl.constexpr,
     WRITE_DOB: tl.constexpr,
 ):
-    r = tl.program_id(0) * ROWS + tl.arange(0, ROWS)  # token rows (a * L + l)
+    r = tl.program_id(0).to(tl.int64) * ROWS + tl.arange(0, ROWS)  # token rows (a * L + l), int64: r * (NH * DH) is an element offset
     hh = tl.arange(0, NH)
     dcol = tl.arange(0, DP)
     ptr = r[:, None, None] * (NH * DH) + (hh[:, None] * DH + dcol[None, :])[None, :, :]
@@ -200,7 +200,7 @@ def _prep_do_kernel(
 
 @triton.jit
 def _scale_bf16_kernel(b, out, n, scale, BLOCK: tl.constexpr):
-    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    offs = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     m = offs < n
     tl.store(
         out + offs,

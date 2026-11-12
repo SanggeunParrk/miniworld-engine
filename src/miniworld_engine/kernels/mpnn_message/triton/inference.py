@@ -75,16 +75,19 @@ def _message_inference_kernel(
     BLOCK_K: tl.constexpr,
     COALESCED_WEIGHT_LOAD: tl.constexpr,
 ):
-    # All offsets stay int32 on this inference-only fast path.  The Python
-    # dispatch checks the tensor size before selecting it.
-    group_block = tl.program_id(0)
+    # 64-bit addressing: the CTA's first group is an int64 base folded into the pointers once; the in-tile row / group offsets stay
+    # int32 (they span GROUPS_PER_CTA groups).
+    group_start = tl.program_id(0).to(tl.int64) * GROUPS_PER_CTA
+    preactivation_ptr += group_start * NEIGHBORS * HIDDEN
+    mask_ptr += group_start * NEIGHBORS
+    reduced_ptr += group_start * HIDDEN
+    groups_left = groups - group_start
     local_rows = tl.arange(0, BLOCK_M)
     local_group = local_rows // NEIGHBORS
     neighbor = local_rows - local_group * NEIGHBORS
-    group = group_block * GROUPS_PER_CTA + local_group
-    row = group * NEIGHBORS + neighbor
+    row = local_group * NEIGHBORS + neighbor
     output_columns = tl.arange(0, BLOCK_N)
-    row_valid = (local_group < GROUPS_PER_CTA) & (group < groups)
+    row_valid = (local_group < GROUPS_PER_CTA) & (local_group < groups_left)
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
 
     for hidden_start in range(0, HIDDEN, BLOCK_K):
@@ -115,11 +118,10 @@ def _message_inference_kernel(
     for segment in range(GROUPS_PER_CTA):
         selected = tl.where(local_group[:, None] == segment, contribution, 0.0)
         reduced = tl.sum(selected, axis=0) / neighbor_scale
-        output_group = group_block * GROUPS_PER_CTA + segment
         tl.store(
-            reduced_ptr + output_group * HIDDEN + output_columns,
+            reduced_ptr + segment * HIDDEN + output_columns,
             reduced,
-            mask=output_group < groups,
+            mask=segment < groups_left,
         )
 
 

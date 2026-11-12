@@ -16,6 +16,7 @@ fp32 io with TF32 tensor cores (``input_precision="tf32"``).
 """
 
 from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._wide import needs_wide, wide
 import torch
 
 from miniworld_engine.kernels._compile import opaque
@@ -60,6 +61,7 @@ def _expand_swiglu_kernel(
     GROUP_M: tl.constexpr,
     shape_key,
     PRE: tl.constexpr = False,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     # Visit order, tuned: see kernels/_tiles.py. This kernel is where it was measured -- the
     # 2-D grid it used to launch with is the GROUP_M >= n_m end of the same axis, 4.675 ms against
@@ -76,7 +78,7 @@ def _expand_swiglu_kernel(
         k = k0 + tl.arange(0, BLOCK_K)
         k_mask = k < K
         x = tl.load(
-            x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+            x_ptr + rows[:, None] * stride_xm + wide(k, WIDE)[None, :] * stride_xk,
             mask=row_mask[:, None] & k_mask[None, :], other=0.0,
         )
         wa = tl.load(
@@ -93,7 +95,7 @@ def _expand_swiglu_kernel(
     if PRE:         # h feeds the TF32 squeeze GEMM next: stored on the TF32 grid (kernels/_tf32.py)
         h = tf32_grid_tile(h)
     tl.store(
-        h_ptr + rows[:, None] * stride_hm + cols[None, :] * stride_hn,
+        h_ptr + rows[:, None] * stride_hm + wide(cols, WIDE)[None, :] * stride_hn,
         h, mask=row_mask[:, None] & col_mask[None, :],
     )
 # fmt: on
@@ -128,6 +130,7 @@ def _squeeze_gate_kernel(
     HAS_RES: tl.constexpr = False,
     PRE_H: tl.constexpr = False,
     PRE_W: tl.constexpr = False,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     # Visit order, tuned: see kernels/_tiles.py. Squeeze half of the composed pair.
     pid_m, pid_d = tile_order(
@@ -144,7 +147,7 @@ def _squeeze_gate_kernel(
         n = n0 + tl.arange(0, BLOCK_K_ND)
         n_mask = n < ND
         h = tl.load(
-            h_ptr + rows[:, None] * stride_hm + n[None, :] * stride_hn,
+            h_ptr + rows[:, None] * stride_hm + wide(n, WIDE)[None, :] * stride_hn,
             mask=row_mask[:, None] & n_mask[None, :], other=0.0,
         )
         ws_t = tl.load(  # (BLOCK_K_ND, BLOCK_N): Ws[d_tile, n]^T
@@ -159,7 +162,7 @@ def _squeeze_gate_kernel(
         dc = c0 + tl.arange(0, BLOCK_K_DC)
         dc_mask = dc < DC
         cond = tl.load(
-            cond_ptr + rows[:, None] * stride_cm + dc[None, :] * stride_cc,
+            cond_ptr + rows[:, None] * stride_cm + wide(dc, WIDE)[None, :] * stride_cc,
             mask=row_mask[:, None] & dc_mask[None, :], other=0.0,
         )
         wsc_t = tl.load(  # (BLOCK_K_DC, BLOCK_N): Wsc[d_tile, dc]^T
@@ -173,12 +176,12 @@ def _squeeze_gate_kernel(
     if HAS_RES:
         # the unfused order: the gated update rounds to the stream dtype, then the add rounds again
         res = tl.load(
-            res_ptr + rows[:, None] * stride_rm + dcols[None, :] * stride_rd,
+            res_ptr + rows[:, None] * stride_rm + wide(dcols, WIDE)[None, :] * stride_rd,
             mask=row_mask[:, None] & d_mask[None, :], other=0.0,
         )
         y = y.to(out_ptr.dtype.element_ty).to(tl.float32) + res.to(tl.float32)
     tl.store(
-        out_ptr + rows[:, None] * stride_om + dcols[None, :] * stride_od,
+        out_ptr + rows[:, None] * stride_om + wide(dcols, WIDE)[None, :] * stride_od,
         y, mask=row_mask[:, None] & d_mask[None, :],
     )
 # fmt: on
@@ -223,6 +226,7 @@ def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, shape_ke
         h.stride(1),
         shape_key=pack(shape_key, ND=ND, K=K),
         PRE=pre,
+        WIDE=needs_wide(x, h),
     )
     return h
 
@@ -293,6 +297,7 @@ def _squeeze_gate(
         HAS_RES=residual is not None,
         PRE_H=pre,
         PRE_W=pre,
+        WIDE=needs_wide(h, cond, out, res),
     )
     return out
 
