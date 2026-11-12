@@ -588,8 +588,14 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
     drop = None
     if module.training and module.p_drop > 0.0:
         # the module's own draw on the original layout ([B, 1, L, C] starting / [B, L, 1, C] ending): in the kernels' starting
-        # layout both index the row's last position, so either is [B, L, C] as it is
-        drop = module._make_drop_scale(pair, module.p_drop).reshape(B, L, C).to(torch.bfloat16)
+        # layout both index the row's last position, so either is [B, L, C] as it is. One H100 Philox launch (h100_triattn.drop_scale:
+        # the same tensor, bit for bit, as the module's torch draw for the same generator state)
+        from miniworld_engine.kernels.triangle_attention.cuda import h100_triattn
+
+        if h100_triattn.drop_scale_serves(pair, module.p_drop):
+            drop = h100_triattn.drop_scale(pair, module.p_drop, module._drop_dim).reshape(B, L, C)
+        else:
+            drop = module._make_drop_scale(pair, module.p_drop).reshape(B, L, C).to(torch.bfloat16)
     needs_grad = torch.is_grad_enabled() and (pair.requires_grad or any(p.requires_grad for p in module.parameters()))
     index = pair.device.index if pair.device.index is not None else torch.cuda.current_device()
     head_dim = module.to_query.weight.shape[0] // module.n_head
