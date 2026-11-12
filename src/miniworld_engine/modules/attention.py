@@ -865,7 +865,11 @@ class BiasOnlyAttention(BackendModule):
         wv, wg, wo = (m.weight.to(dt) for m in (self.to_value, self.to_gate, self.to_out))
         with torch.autocast("cuda", enabled=False):
             # [B, H, L, L], head-major: the one-pass pair LayerNorm + projection, or the hoisted bias
-            logits = pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps) if bias is None else bias.to(dt)
+            if bias is None:
+                assert pair is not None, "the pair or its hoisted bias"
+                logits = pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
+            else:
+                logits = bias.to(dt)
             if mask is not None:
                 logits = logits.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min)
             attention = torch.softmax(logits.float(), dim=-1).to(dt)  # [B, H, L, L], one softmax for every sample

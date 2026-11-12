@@ -8,6 +8,7 @@ forward and every gradient, bf16 and fp32 (TF32 allowed, as the measurers run). 
 from __future__ import annotations
 
 import copy
+from typing import TypeGuard, TypeVar
 
 import pytest
 import torch
@@ -15,6 +16,7 @@ import torch
 from miniworld_engine.modules.atom_dit import AtomDiTMiniWorld
 from miniworld_engine.modules.attention import BiasOnlyAttention
 from miniworld_engine.modules.norm import AdaptiveLayerNorm, AdaptiveRMSNorm
+from miniworld_engine.modules.primitives import BackendModule
 from miniworld_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly
 from miniworld_engine.modules.transition import ConditionedTransition
 from miniworld_engine.modules.triangle import TriangleAttention
@@ -25,7 +27,10 @@ pytestmark = [pytest.mark.gpu]
 TOL = {torch.bfloat16: 4e-2, torch.float32: 5e-3}
 
 
-def _randomize(module: torch.nn.Module, seed: int = 0) -> torch.nn.Module:
+M = TypeVar("M", bound=BackendModule)
+
+
+def _randomize(module: M, seed: int = 0) -> M:
     g = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for p in module.parameters():
@@ -35,7 +40,7 @@ def _randomize(module: torch.nn.Module, seed: int = 0) -> torch.nn.Module:
     return module
 
 
-def _float_input(v):
+def _float_input(v) -> TypeGuard[torch.Tensor]:
     return isinstance(v, torch.Tensor) and v.is_floating_point()
 
 
@@ -43,7 +48,7 @@ def _rel(x: torch.Tensor, gold: torch.Tensor) -> float:
     return float((x.double() - gold).abs().max() / gold.abs().max().clamp_min(1e-30))
 
 
-def _check(module: torch.nn.Module, inputs: dict, dtype: torch.dtype, *, grad: bool = True, tol: float | None = None) -> None:
+def _check(module: BackendModule, inputs: dict, dtype: torch.dtype, *, grad: bool = True, tol: float | None = None) -> None:
     """``module`` on its "triton" backend in ``dtype`` (fp32 parameters, bf16 activations under bf16 autocast for bf16) vs its
     "pytorch" statements in float64: the output and, with ``grad``, every floating input's and parameter's gradient."""
     tol = TOL[dtype] if tol is None else tol
@@ -67,8 +72,10 @@ def _check(module: torch.nn.Module, inputs: dict, dtype: torch.dtype, *, grad: b
     out_ref.backward(g)
     out.backward(g.to(out.dtype))
     for k, v in tri_in.items():
-        if _float_input(v):
-            assert _rel(v.grad, ref_in[k].grad) < tol, f"d{k} {_rel(v.grad, ref_in[k].grad):.3g}"
+        r = ref_in[k]
+        if _float_input(v) and _float_input(r):
+            assert v.grad is not None and r.grad is not None, k
+            assert _rel(v.grad, r.grad) < tol, f"d{k} {_rel(v.grad, r.grad):.3g}"
     for (name, p), (_, pr) in zip(tri.named_parameters(), ref.named_parameters(), strict=True):
         if pr.grad is not None and pr.grad.abs().max() > 0:
             assert p.grad is not None, name

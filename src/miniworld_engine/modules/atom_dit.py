@@ -1523,7 +1523,7 @@ class AtomDiTMiniWorld(BackendModule):
         n = x.shape[0]
         cos, sin, seqused = attention_params[:3]
         cos, sin = cos.reshape(-1, cos.shape[-1]).contiguous(), sin.reshape(-1, sin.shape[-1]).contiguous()
-        wmod, *weights = (m.weight for m in self._a100_linears())
+        wmod, *weights = (cast(torch.Tensor, m.weight) for m in self._a100_linears())
         with torch.autocast("cuda", enabled=False):
             # the modulation in fp32 (the kernels' operand), one row per sequence row (B = N); differentiable in cond and its weight
             mod = F.linear(F.silu(cond.reshape(-1, cond.shape[-1]).float()), wmod.float())
@@ -1532,9 +1532,8 @@ class AtomDiTMiniWorld(BackendModule):
                     x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, self.attn.half_window, True
                 )
             weights = [w.to(x.dtype).contiguous() for w in weights]
-            return swa_dit_block_fwd(
-                x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, self.attn.half_window, FP32_EPS, False, True
-            )[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
+            args = (x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, self.attn.half_window, FP32_EPS, False, True)
+            return swa_dit_block_fwd(*args)[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into fixed parameters
 
     def forward_hoisted(self, x: torch.Tensor, c_base: torch.Tensor, attention_params: tuple) -> torch.Tensor:
         """The block over ``N = A * B`` rows whose conditioning repeats over the augments: ``cond[a*B + b] == c_base[b]``, with
