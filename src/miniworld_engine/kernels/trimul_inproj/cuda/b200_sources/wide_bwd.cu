@@ -56,7 +56,7 @@ __device__ __forceinline__ void seg_sum_atomic(float v, int row, float* dst) {
   if (row >= 0 && (lane == 0 || prev != row)) atomicAdd(dst + row, v);   // row -1: lanes past the end (last pass)
 }
 constexpr int GB_BLOCKS = 148 * 15;          // x 256 threads = a multiple of 192 (= lcm of D / 8 for D = 256 / 384 / 512)
-template <int D>
+template <int D, bool CTA_PARTIALS = false>
 __global__ void __launch_bounds__(256) gate_bwd_kernel(const __nv_bfloat16* __restrict__ dy, const __nv_bfloat16* __restrict__ p,
                                                         const __nv_bfloat16* __restrict__ g, const __nv_bfloat16* __restrict__ ds,
                                                         const float* __restrict__ vec, const float* __restrict__ mu_o,
@@ -109,13 +109,32 @@ __global__ void __launch_bounds__(256) gate_bwd_kernel(const __nv_bfloat16* __re
     seg_sum_atomic(s1, row, S1);
     seg_sum_atomic(s2, row, S2);
   }
-  __shared__ float cs[2][D];
-  for (int k = threadIdx.x; k < 2 * D; k += blockDim.x) (&cs[0][0])[k] = 0.f;
-  __syncthreads();
+  if constexpr (CTA_PARTIALS) {
+    // Fixed-order column sums: part is [gridDim.x][2 D] per-block partials (reduced in block order by colsum_kernel), each the sum of
+    // its threads' registers in thread order, so r0 / r1 do not depend on scheduling. (S1 / S2 above stay atomic: a row is at most
+    // two warp segments, and two adds onto a zeroed float commute exactly.)
+    __shared__ float tp[256][17];   // 17: conflict-free stores (one row per thread)
 #pragma unroll
-  for (int j = 0; j < 8; ++j) { atomicAdd(&cs[0][c8 + j], c0[j]); atomicAdd(&cs[1][c8 + j], c1[j]); }
-  __syncthreads();
-  for (int c = threadIdx.x; c < 2 * D; c += blockDim.x) atomicAdd(part + c, (&cs[0][0])[c]);
+    for (int j = 0; j < 8; ++j) { tp[threadIdx.x][j] = c0[j]; tp[threadIdx.x][8 + j] = c1[j]; }
+    __syncthreads();
+    const int q0 = (int)(((size_t)blockIdx.x * blockDim.x) % G8);   // the column group of thread 0
+    for (int c = threadIdx.x; c < 2 * D; c += blockDim.x) {
+      const int col = c % D, slot = (c / D) * 8 + col % 8;
+      int t = col / 8 - q0;
+      if (t < 0) t += G8;
+      float s = 0.f;
+      for (; t < (int)blockDim.x; t += G8) s += tp[t][slot];
+      part[(size_t)blockIdx.x * 2 * D + c] = s;
+    }
+  } else {
+    __shared__ float cs[2][D];
+    for (int k = threadIdx.x; k < 2 * D; k += blockDim.x) (&cs[0][0])[k] = 0.f;
+    __syncthreads();
+#pragma unroll
+    for (int j = 0; j < 8; ++j) { atomicAdd(&cs[0][c8 + j], c0[j]); atomicAdd(&cs[1][c8 + j], c1[j]); }
+    __syncthreads();
+    for (int c = threadIdx.x; c < 2 * D; c += blockDim.x) atomicAdd(part + c, (&cs[0][0])[c]);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------- lnout_bwd

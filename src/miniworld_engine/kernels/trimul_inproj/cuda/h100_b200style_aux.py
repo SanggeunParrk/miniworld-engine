@@ -52,7 +52,7 @@ def _unit():
     for d in (256, 384, 512):
         body += f"""
 extern "C" __global__ void mw_b200style_gate_{d}(const Gate p) {{
-  wbwd::gate_bwd_kernel<{d}>(p.dy,p.pv,p.gv,p.ds,p.vec,p.mu,p.rs,p.dpr,p.dg,p.ldg,p.s1,p.s2,p.part,p.M,p.L);
+  wbwd::gate_bwd_kernel<{d}, true>(p.dy,p.pv,p.gv,p.ds,p.vec,p.mu,p.rs,p.dpr,p.dg,p.ldg,p.s1,p.s2,p.part,p.M,p.L);
 }}
 extern "C" __global__ void mw_b200style_lnin_{d}(const In p) {{
   wbwd::lnin_bwd_kernel<{d}>(p.dxn,p.x,p.dy,p.mu,p.rs,p.gi,p.dx,p.part,p.M);
@@ -66,8 +66,8 @@ extern "C" __global__ void mw_b200style_apply_{d}(const Apply p) {{
     return T.load_unit(str(T.compile_text(body, flags)), "b200style_aux_driver")
 
 
-# gate_bwd grid: one pass of 8 resident CTAs per SM is best from L384 up; below that the fixed 512-atomics-per-CTA epilogue
-# dominates, so two CTAs per SM (measured on H100, D256-512, L128-768: L128 93 -> 34 us at D256).
+# gate_bwd grid: one pass of 8 resident CTAs per SM is best from L384 up; below that the fixed per-CTA epilogue (then 512
+# atomics, now one row of 2 D partials) dominates, so two CTAs per SM (measured on H100, D256-512, L128-768: L128 93 -> 34 us at D256).
 GATE_BLOCKS = 132 * 8
 GATE_BLOCKS_SMALL = 132 * 2
 
@@ -85,14 +85,16 @@ class DriverAux:
             [wp, go, bo, wg, gi, bi, wpf, wgf, vec, d, h],
         )
 
-    def gate_bwd(self, dy, pv, gv, ds, vec, mu, rs, dpr, dg, s1, s2, part, length):
+    def gate_bwd(self, dy, pv, gv, ds, vec, mu, rs, dpr, dg, s1, s2, dgb, length):
+        """dgb [2 D] = (r0 ; r1), the column sums of dWp: per-block partials reduced in block order (deterministic, no atomics)."""
         m, d = dy.shape
         s1.zero_()
         s2.zero_()
-        part.zero_()
+        blocks = GATE_BLOCKS_SMALL if m < 384 * 384 else GATE_BLOCKS
+        part = torch.empty((blocks * 2 * d,), device=dy.device, dtype=torch.float32)
         _launch(
             f"mw_b200style_gate_{d}",
-            (GATE_BLOCKS_SMALL if m < 384 * 384 else GATE_BLOCKS, 1, 1),
+            (blocks, 1, 1),
             [
                 dy,
                 pv,
@@ -111,6 +113,7 @@ class DriverAux:
                 length,
             ],
         )
+        _launch("mw_b200style_colsum", ((2 * d + 31) // 32, 1, 1), [part, dgb, blocks, 2 * d])
 
     def lnout_bwd(self, dor, tri, mu, rs, s1, s2, go, dt, dgb):
         h, m = tri.shape[0], tri.numel() // tri.shape[0]

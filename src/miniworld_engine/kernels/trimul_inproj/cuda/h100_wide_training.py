@@ -740,17 +740,15 @@ def _gate(cell, proj, gate, dy, ds, dp, prefix, affine):
 
 
 def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
-    """Output-LN backward: dt from dn; dgamma/dbeta sums. L384 kernels do not zero them."""
+    """Output-LN backward: dt from dn; dgamma / dbeta from per-block partials reduced in block order (``MW_LN_PARTIALS``:
+    deterministic at every cell; the atomic / cooperative build ran run-to-run different sums outside the preserved scopes)."""
     D, n = cell
     M, H = n * n, 2 * D
-    native = T.preserve_training(D)
     rows = 32 if D == 256 or (D, n) == (384, 768) else 16
     minblocks = 3 if D == 256 else 2
     defines = _defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0, LN_MINBLOCKS=minblocks)
-    if native:
-        defines += _defines(MW_LN_PARTIALS=1)
+    defines += _defines(MW_LN_PARTIALS=1)
     source = f"output_ln_d{D}_l{n}.cu" if n == 384 or D == 512 else "output_ln_l768.cu"
-    tail = [dn, mu, rs, go, dgo, dbo, M]
     if n == 384:
         # One 3D map per tensor: [M, 64 channels, H/64 groups] for tri/dt, rows for dn.
         swizzle = "64B" if rows == 32 else "32B"
@@ -760,35 +758,23 @@ def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
         k = _kernel(source, "mw_independent_output_ln", "upstream", defines, smem)
         # Qualified grids (SMs x the replaced cooperative kernel's residency, D256 doubled).
         grid = num_sms() * {256: 6, 384: 2, 512: 3}[D]
-        if native:
-            pg, pb = [torch.empty((grid, H), device=tri.device, dtype=torch.float32) for _ in range(2)]
-            tail[-3:-1] = [pg, pb]
-        _launch(k, grid, 128, smem, _params(source, [*maps, *tail]))
-        if native:
-            if defer:
-                return pg, pb, dgo, dbo
-            from ._h100_pack import finish_affine_partials
+        threads = 128
+    else:
+        swizzle = "64B" if rows == 32 else "32B"
+        maps = [_map(t, [rows, 64], [M, H], [M * 2], swizzle) for t in (tri, dt)]
+        maps.append(_map(dn, [64, rows], [H, M], [H * 2]))
+        threads = 256 if D == 512 else 128
+        buffers = 3 if D == 512 else 2
+        smem = buffers * rows * H * 2 + 128 + H * 4 + rows * 8
+        k = _kernel(source, "mw_wide_stats_ln", "upstream", defines, smem)
+        grid = _resident_grid(source, "mw_wide_stats_ln", "upstream", defines, threads, smem)
+    pg, pb = [torch.empty((grid, H), device=tri.device, dtype=torch.float32) for _ in range(2)]
+    _launch(k, grid, threads, smem, _params(source, [*maps, dn, mu, rs, go, pg, pb, M]))
+    if defer:
+        return pg, pb, dgo, dbo
+    from ._h100_pack import finish_affine_partials
 
-            finish_affine_partials(pg, pb, dgo, dbo)
-        return
-    swizzle = "64B" if rows == 32 else "32B"
-    maps = [_map(t, [rows, 64], [M, H], [M * 2], swizzle) for t in (tri, dt)]
-    maps.append(_map(dn, [64, rows], [H, M], [H * 2]))
-    threads = 256 if D == 512 else 128
-    buffers = 3 if D == 512 else 2
-    smem = buffers * rows * H * 2 + 128 + H * 4 + rows * 8
-    k = _kernel(source, "mw_wide_stats_ln", "upstream", defines, smem)
-    grid = _resident_grid(source, "mw_wide_stats_ln", "upstream", defines, threads, smem)
-    if native:
-        pg, pb = [torch.empty((grid, H), device=tri.device, dtype=torch.float32) for _ in range(2)]
-        tail[-3:-1] = [pg, pb]
-    (_launch if native else _launch_cooperative)(k, grid, threads, smem, _params(source, [*maps, *tail]))
-    if native:
-        if defer:
-            return pg, pb, dgo, dbo
-        from ._h100_pack import finish_affine_partials
-
-        finish_affine_partials(pg, pb, dgo, dbo)
+    finish_affine_partials(pg, pb, dgo, dbo)
 
 
 def _contract_gp(cell, dt, ab, pre, mask, gp):
@@ -872,19 +858,14 @@ def _source_d256(cell, xn, w1, dl, dr, gp, mask, partial):
 
 
 def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative, master=False, defer=False):
-    """Input-LN backward and residual into dx; reduce input (and gate) weight partials."""
+    """Input-LN backward and residual into dx; reduce input (and gate) weight partials. dgamma / dbeta from per-block partials
+    reduced in block order (deterministic, as ``_output_ln``)."""
     D, n = cell
     M = n * n
-    native = T.preserve_training(D)
     defines = _defines(WIDTH=D, INPUT_ROWS=16, INPUT_THREADS=128, INPUT_MINBLOCKS=4, MASTER_FP32=int(master))
-    if native:
-        defines += _defines(MW_LN_PARTIALS=1)
+    defines += _defines(MW_LN_PARTIALS=1)
     smem = max(3 * 16 * D * 2 + 128, 2 * 4 * D * 4) + D * 4
     maps = [_map(t, [64, 16], [D, M], [D * 2]) for t in (x, dxn, dy, dx)]
-    fields = [*maps, gi, dgi, dbi, partial, *dw]
-    if dwg is not None:
-        fields.append(dwg)
-    fields.append(M)
     if n == 384:
         source, entry = ("input_ln_d384_l384.cu" if D == 384 else "input_ln_l384.cu"), "mw_independent_input_ln"
     elif D == 512:
@@ -892,23 +873,17 @@ def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative,
     else:
         source, entry = "input_reduce_l768.cu", "mw_wide_cached_input"
     k = _kernel(source, entry, "upstream", defines, smem)
-    if native:
-        grid = _resident_grid(source, entry, "upstream", defines, 128, smem) if cooperative else num_sms() * {256: 6, 384: 5, 512: 4}[D]
-        pg, pb = [torch.empty((grid, D), device=x.device, dtype=torch.float32) for _ in range(2)]
-        fields[5:7] = [pg, pb]
-        _launch(k, grid, 128, smem, _params(source, fields))
-        if defer:
-            return pg, pb, dgi, dbi
-        from ._h100_pack import finish_affine_partials
+    # the L768 reduction kernels: one resident wave (they were cooperative launches); L384: the qualified grid of the cooperative
+    # reduction the independent kernel replaced
+    grid = _resident_grid(source, entry, "upstream", defines, 128, smem) if cooperative else num_sms() * {256: 6, 384: 5, 512: 4}[D]
+    pg, pb = [torch.empty((grid, D), device=x.device, dtype=torch.float32) for _ in range(2)]
+    fields = [*maps, gi, pg, pb, partial, *dw, *([] if dwg is None else [dwg]), M]
+    _launch(k, grid, 128, smem, _params(source, fields))
+    if defer:
+        return pg, pb, dgi, dbi
+    from ._h100_pack import finish_affine_partials
 
-        finish_affine_partials(pg, pb, dgi, dbi)
-        return
-    if cooperative:
-        grid = _resident_grid(source, entry, "upstream", defines, 128, smem)
-        _launch_cooperative(k, grid, 128, smem, _params(source, fields))
-    else:
-        # Qualified grid of the cooperative reduction this independent kernel replaced.
-        _launch(k, num_sms() * {256: 6, 384: 5, 512: 4}[D], 128, smem, _params(source, fields))
+    finish_affine_partials(pg, pb, dgi, dbi)
 
 
 def _split_input_dw(cell, dxin, xn, partial, workspace, joint):
@@ -1100,7 +1075,8 @@ def backward(leaves, mask, ds, saved, dy, master=False):
 def prebuild_units(D, n, masters):
     """``(source, include, defines, pool)`` of every ``_unit`` the cell (D, n) can build: the same define tuples as the launchers
     above (forward, backward; one ``master`` build per entry of ``masters`` -- the parameter dtypes the requirements ask for -- and
-    the preserved-native ``MW_LN_PARTIALS`` builds both ways, as the scopes decide at run time)."""
+    the LayerNorm backward units with and without ``MW_LN_PARTIALS``: the launchers run the partials build, the atomic one stays in
+    the bundle)."""
     fw, up = "forward", "upstream"
     cfg = _K1[D]
     common = _defines(MW_MINB=cfg[4], MW_K1_STREAM=int(len(cfg) > 5 and cfg[5] == 2), TMN_SIGMOID_TANH=1, TMN_WSKIP=1, TMN_MASK_TEMPLATE=1)
