@@ -8,6 +8,7 @@ import functools
 import pathlib
 from pathlib import Path
 import torch
+from . import sm80_arch as _arch
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 from . import sm80_wide as wide
 
@@ -54,7 +55,7 @@ def eligible(x, weights, gamma, beta, d, dh, hd, length):
 def _ext():
     ensure_cuda_home()
     return load_extension(
-        name="triattn_affine_training_a100_sm80",
+        name=_arch.name("triattn_affine_training_a100_sm80"),
         sources=[str(P / "affine263.cu")],
         extra_include_paths=[str(pathlib.Path(wide.__file__).parent / "sm80")],
         extra_cuda_cflags=[
@@ -62,7 +63,7 @@ def _ext():
             "-O3",
             "-std=c++17",
             "-lineinfo",
-            "-gencode=arch=compute_80,code=sm_80",
+            *_arch.gencode(),
         ],
         extra_cflags=["-O3", "-std=c++17"],
         verbose=False,
