@@ -1490,10 +1490,10 @@ class AtomDiTMiniWorld(BackendModule):
     # ``portable=True``): qkvg + q / k RMSNorm + 3D RoPE, the window attention, out-projection + gated residual + SwiGLU FFN, and their
     # backwards (bf16; fp32 on the fp32 row kernels around the bf16-operand window attention); the weight gradients and the modulation
     # ``silu(cond) W^T`` (fp32, one row per sequence row) are cuBLAS. Engine 2.4's SWADiTBlock ran these off H100 / B200. Range: bf16 or
-    # fp32 activations (weights in that dtype or fp32 masters), d_atom 128 = 4 heads x 32, SwiGLU hidden 256, half_window 64 (no global
-    # attention: its kernels are the cards' own), the 6-tuple of build_attention_params.
+    # fp32 activations (weights in that dtype or fp32 masters), d_atom 128 = 4 heads x 32, SwiGLU hidden 256, half_window 64 or global
+    # (2026-11-12: the same window kernels with every key in reach, dispatch.TRITON_GLOBAL_HW), the 6-tuple of build_attention_params.
     def _supports_triton(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> str | None:
-        from miniworld_engine.kernels.swa_dit._common import D_ATOM, HALF_WINDOW, N_HEAD, N_HIDDEN
+        from miniworld_engine.kernels.swa_dit._common import D_ATOM, HALF_WINDOW, N_HEAD, N_HIDDEN, is_global
 
         if not x.is_cuda:
             return "the Triton kernels run on CUDA tensors only"
@@ -1506,8 +1506,8 @@ class AtomDiTMiniWorld(BackendModule):
         linears = self._a100_linears()
         if x.ndim != 3 or x.shape[-1] != D_ATOM or self.attn.n_heads != N_HEAD or tuple(cond.shape[:2]) != tuple(x.shape[:2]):
             return f"x / cond must be [N, S, {D_ATOM}] / [N, S, d_cond] with {N_HEAD} heads"
-        if self.attn.half_window != HALF_WINDOW:
-            return f"half_window {self.attn.half_window} (the Triton window attention: {HALF_WINDOW}; global attention is not served)"
+        if self.attn.half_window != HALF_WINDOW and not is_global(self.attn.half_window):
+            return f"half_window {self.attn.half_window} (the Triton window attention: {HALF_WINDOW} or global)"
         if any(type(m) is not Linear or m.bias is not None for m in linears):
             return "the kernels read bias-free (non magnitude-preserving) Linear weights"
         if tuple(self.ffn.w_up.weight.shape) != (2 * N_HIDDEN, D_ATOM):
@@ -1615,7 +1615,8 @@ class SWAAtomTransformer(BackendModule):
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
     # cuda:a100_sm80 6 (2026-11-12): bf16 training: the weight forms in one launch (train_forms), row-count launch shapes and K splits, the
     # few-row modulation backward on cuBLAS (sm80.train_cfg)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 6, "cuda:h100_sm90": 2}
+    # triton 2 (2026-11-12): global attention (half_window >= 65536 or negative) served, on the window kernels with every key in reach
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 6, "cuda:h100_sm90": 2, "triton": 2}
 
     class Config(BaseModel):
         """Configuration for the SWA atom transformer."""

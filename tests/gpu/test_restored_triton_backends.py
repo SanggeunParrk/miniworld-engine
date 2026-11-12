@@ -15,6 +15,7 @@ import torch
 
 from miniworld_engine.modules.atom_dit import AtomDiTMiniWorld
 from miniworld_engine.modules.attention import BiasOnlyAttention
+from miniworld_engine.modules.embedder import InputFeatureEmbedder
 from miniworld_engine.modules.norm import AdaptiveLayerNorm, AdaptiveRMSNorm
 from miniworld_engine.modules.primitives import BackendModule
 from miniworld_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly
@@ -140,10 +141,11 @@ def test_bias_only_token_dit_block(dtype):
 
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("grad", [False, True])
-def test_swa_atom_block(dtype, grad):
-    m = _randomize(AtomDiTMiniWorld().cuda())
+@pytest.mark.parametrize("half_window", [64, 500000, -1])  # the window, and global attention (the window kernels, every key in reach)
+def test_swa_atom_block(dtype, grad, half_window):
+    m = _randomize(AtomDiTMiniWorld(half_window=half_window).cuda())
     inputs = m.make_inputs(
-        length=256, samples=2, depth=None, dtype=torch.float32, device="cuda", generator=torch.Generator("cuda").manual_seed(0)
+        length=320 if half_window != 64 else 256, samples=2, depth=None, dtype=torch.float32, device="cuda", generator=torch.Generator("cuda").manual_seed(0)
     )
     _check(m, inputs, dtype, grad=grad, tol=6e-2 if dtype == torch.bfloat16 else 2e-2)  # the window attention runs on bf16 operands
 
@@ -190,8 +192,45 @@ def test_refusals():
     assert t.unsupported(
         torch.zeros(1, 4, 128, device="cuda", dtype=torch.float16), torch.zeros(1, 4, 128, device="cuda", dtype=torch.float16)
     )
-    swa = AtomDiTMiniWorld(half_window=1 << 20).cuda().set_backend("triton")
+    swa = AtomDiTMiniWorld(half_window=32).cuda().set_backend("triton")
     inputs = swa.make_inputs(
         length=128, samples=1, depth=None, dtype=torch.float32, device="cuda", generator=torch.Generator("cuda").manual_seed(0)
     )
-    assert "global" in (swa.unsupported(**inputs) or "")
+    assert "half_window 32" in (swa.unsupported(**inputs) or "")
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("grad", [False, True])
+@pytest.mark.parametrize(
+    ("features", "window", "token_pool"), [("esmfold2", 1000000, "linear"), ("esmfold2", 128, "relu"), ("legacy", 1000000, "relu")]
+)
+def test_input_feature_embedder(dtype, grad, features, window, token_pool):
+    """The composition on "triton" (its SWAAtomTransformer's Triton block stages, window or global; its norms' Triton kernels) vs its
+    PyTorch statements in float64. The atom positions stay fp32 (the RoPE tables); bf16 runs under bf16 autocast (the "master" dtype)."""
+    m = _randomize(InputFeatureEmbedder(128, 384, 4, 3, swa_window_size=window, features=features, token_pool=token_pool).cuda(), seed=3)
+    with torch.no_grad():  # adaLN-Zero scale: keep the residual stream bounded through three blocks
+        for name, p in m.named_parameters():
+            if "adaln_modulation" in name:
+                p.mul_(0.1)
+    inputs = m.make_inputs(
+        length=320, samples=2, depth=None, dtype=torch.float32, device="cuda", generator=torch.Generator("cuda").manual_seed(0)
+    )
+    ref = copy.deepcopy(m).double().set_backend("pytorch")
+    pos_ref = inputs["pos"].double()
+    out_ref = ref(**{**inputs, "pos": pos_ref})
+    tri = m.set_backend("triton")
+    assert tri.unsupported(**inputs) is None, tri.unsupported(**inputs)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=dtype == torch.bfloat16):
+        out = tri(**inputs)
+    tol = 8e-2 if dtype == torch.bfloat16 else 2e-2  # three blocks of window attention on bf16 operands
+    assert _rel(out, out_ref.detach()) < tol, f"output {_rel(out, out_ref.detach()):.3g}"
+    if not grad:
+        return
+    g = torch.randn(out.shape, generator=torch.Generator().manual_seed(1), dtype=torch.float64).cuda()
+    out_ref.backward(g)
+    out.backward(g.to(out.dtype))
+    for (name, p), (_, pr) in zip(tri.named_parameters(), ref.named_parameters(), strict=True):
+        if pr.grad is not None and pr.grad.abs().max() > 0:
+            assert p.grad is not None, name
+            assert _rel(p.grad, pr.grad) < 2 * tol, f"d{name} {_rel(p.grad, pr.grad):.3g}"

@@ -111,6 +111,11 @@ _WGRAD_F32_WG_MAX_ROWS = 65536
 #: (bf16: ``triton/forward.py`` / ``backward.py``; fp32: ``forward_fp32.py`` / ``backward_fp32.py``) and the weight gradients cuBLAS.
 _PORTABLE = [False]
 
+#: The half window the Triton window kernels take for global attention under ``_PORTABLE`` (any is_global half window: negative or
+#: at least GLOBAL_HALF_WINDOW): every key of the row is then in reach, so the window kernels are dense attention over the row's valid keys
+#: (``j < seqused``) -- the same kernels, one constexpr specialisation. 2^30 keeps the kernels' int32 bounds (i0 +/- HW) in range.
+TRITON_GLOBAL_HW = 1 << 30
+
 
 @contextlib.contextmanager
 def _portable(on: bool):
@@ -709,6 +714,8 @@ def swa_dit_block_fwd(
 
 def _swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save):
     """:func:`swa_dit_block_fwd`'s launches: the card's stages, or the Triton ones under ``_PORTABLE``."""
+    if _PORTABLE[0] and is_global(half_window):
+        half_window = TRITON_GLOBAL_HW  # global attention on the Triton window kernels (dense over the valid keys)
     ext32 = _fp32_global_cuda(q, half_window, save)
     if ext32 is not None:
         return _swa_dit_fwd_fp32_global(ext32, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, eps)
@@ -716,7 +723,7 @@ def _swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_
         # The native stages take an fp32 modulation; a bf16 one comes from the composed bf16 hoist (global attention, which only the
         # native stages serve on H100, under a bf16 call that the composed stages otherwise take).
         return _native_h100_fwd(q, mod.float(), cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save)
-    if is_global(half_window):
+    if is_global(half_window) and not _PORTABLE[0]:
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
             raise RuntimeError(
@@ -1057,6 +1064,8 @@ def _swa_dit_block_bwd(
     dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps
 ):
     """:func:`swa_dit_block_bwd`'s launches: the card's stages, or the Triton ones under ``_PORTABLE``."""
+    if _PORTABLE[0] and is_global(half_window):
+        half_window = TRITON_GLOBAL_HW  # as the forward
     if native_h100_stages(q) or _h100_global(q, half_window):
         grads = _native_h100_bwd(
             dy,
@@ -1089,7 +1098,7 @@ def _swa_dit_block_bwd(
         )
         grads[1] = grads[1].to(mod.dtype)  # dmod like mod (the contract), whatever the native stages computed it in
         return grads
-    if is_global(half_window):
+    if is_global(half_window) and not _PORTABLE[0]:
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
             raise RuntimeError(
