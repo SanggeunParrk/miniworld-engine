@@ -193,7 +193,7 @@ def test_transition_refiner_sizes_rows(backend: str, S: int) -> None:
     base.set_master_weights()
     kern = copy.deepcopy(base).set_backend(backend)
     gen = torch.Generator(device="cuda").manual_seed(1)
-    x = base.make_inputs(length=S, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=gen)["x"]
+    x = base.make_inputs(length=S, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=gen, stream="token_pair")["x"]
     rows = S * S
     with torch.no_grad():
         with torch.autocast("cuda", dtype=torch.bfloat16):
