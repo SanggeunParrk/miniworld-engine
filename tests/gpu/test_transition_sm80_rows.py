@@ -6,6 +6,7 @@ reason (the backward's work lists would drop rows)."""
 
 from __future__ import annotations
 
+import copy
 import typing
 
 import pytest
@@ -103,7 +104,10 @@ def test_transition_sm80_train_overlap_backward_bits(d_hidden: int, n: int) -> N
     for k in ("ln_in.weight", "ln_in.bias", "expand_a.weight", "expand_b.weight", "squeeze.weight"):
         assert torch.equal(got[k], ref[k].to(got[k].dtype)), k
 
-    # captured: the side stream forks / joins inside the graph
+    # captured: the side stream forks / joins inside the graph (a fresh copy: no autograd node of the eager steps on the default stream)
+    m = copy.deepcopy(m)
+    for p in m.parameters():
+        p.grad = None
     xs = x.detach().clone().requires_grad_(True)
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
