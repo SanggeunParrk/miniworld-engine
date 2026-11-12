@@ -1,7 +1,7 @@
 {
  "gpu": "NVIDIA GeForce RTX 5090 (sm120)",
  "source": "Pretuned by kernels/_pretune.py (PRETUNE_VERSION 1): every candidate timed at the launches the requirements reach (triton.testing.do_bench, L2 flushed, median), top 4 kept, fastest first. Keys not re-tuned: converted from the old autotune/data/<op>/*sm90*.json (git HEAD). Keys: '<dtypes>|<shape bucket>[|<flags>]'. Shape: M = row bucket, L = length bucket, other names = exact width axes.",
- "version": 1,
+ "version": 2,
  "ops": {
   "sampler_ops_align_triton": {
    "float32|B=1,L=1024": [
@@ -79,6 +79,31 @@
     {"kwargs": {"BLOCK": 512}, "num_warps": 2, "num_stages": 1, "ms": 0.006144},
     {"kwargs": {"BLOCK": 512}, "num_warps": 8, "num_stages": 1, "ms": 0.006144},
     {"kwargs": {"BLOCK": 512}, "num_warps": 1, "num_stages": 1, "ms": 0.006144}
+   ]
+  },
+  "sampler_ops_pool_bwd_triton": {
+   "bfloat16+float32|L=1024": [
+    {"kwargs": {"BLOCK_C": 128}, "num_warps": 1, "num_stages": 1, "ms": 0.008096}
+   ],
+   "bfloat16+float32|L=2048": [
+    {"kwargs": {"BLOCK_C": 128}, "num_warps": 1, "num_stages": 1, "ms": 0.008192}
+   ],
+   "bfloat16+float32|L=4096": [
+    {"kwargs": {"BLOCK_C": 128}, "num_warps": 1, "num_stages": 1, "ms": 0.008192}
+   ],
+   "bfloat16+float32|L=8192": [
+    {"kwargs": {"BLOCK_C": 128}, "num_warps": 1, "num_stages": 1, "ms": 0.01216}
+   ]
+  },
+  "sampler_ops_pool_prep_triton": {
+   "float32|L=2048": [
+    {"kwargs": {"BLOCK": 256}, "num_warps": 4, "num_stages": 1, "ms": 0.006144}
+   ],
+   "float32|L=4096": [
+    {"kwargs": {"BLOCK": 256}, "num_warps": 4, "num_stages": 1, "ms": 0.006144}
+   ],
+   "float32|L=8192": [
+    {"kwargs": {"BLOCK": 256}, "num_warps": 4, "num_stages": 1, "ms": 0.006144}
    ]
   },
   "sampler_ops_pool_triton": {
