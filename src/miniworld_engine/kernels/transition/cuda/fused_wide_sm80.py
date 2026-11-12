@@ -385,7 +385,7 @@ def _weight_stream(device: torch.device) -> torch.cuda.Stream:
 def _bwd_saved_overlap(ext, dy, x, xn, stats, gamma, wa, wb, ws, hid, ab, gdt, wdt, mm_w):
     """The saved-activation (``_save_ab``) Transition backward with its weight-gradient GEMMs on a high-priority side stream:
     dWs = dy^T h runs alongside ``gate_dh`` (half memory-bound), [dWa; dWb] = dAB^T xn alongside the d_xn GEMM and ``ln_bwd`` (memory-bound).
-    The same kernels on the same operands as the one-stream order: the same bits (measured A100 d384 n2: 2-4 % off the train step)."""
+    The same kernels on the same operands as the one-stream order: the same bits (A100 master train step, with the two-rows-in-flight ``ln_bwd``: d384 n2 4-6 %, d256 2-3 %, d512 n2 0-2 % faster)."""
     m, d, h = x.shape[0], x.shape[1], wa.shape[0]
     main = torch.cuda.current_stream(x.device)
     side = _weight_stream(x.device)

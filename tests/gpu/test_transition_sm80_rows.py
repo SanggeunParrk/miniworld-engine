@@ -55,3 +55,69 @@ def test_transition_sm80_training_past_one_call_refused() -> None:
         assert isinstance(why, str) and "rows with a gradient" in why
         with pytest.raises(BackendUnsupported):
             m(x)
+
+
+def _train_grads(m: Transition, x: torch.Tensor, dy: torch.Tensor) -> list[torch.Tensor]:
+    for p in m.parameters():
+        p.grad = None
+    xi = x.detach().clone().requires_grad_(True)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        y = m(xi)
+    y.backward(dy)
+    return [y.detach(), typing.cast("torch.Tensor", xi.grad)] + [typing.cast("torch.Tensor", p.grad) for p in m.parameters()]
+
+
+@pytest.mark.skipif(not _a100(), reason="A100 (sm_80) Transition")
+@pytest.mark.parametrize(("d_hidden", "n"), [(256, 2), (384, 2), (512, 4)])
+def test_transition_sm80_train_overlap_backward_bits(d_hidden: int, n: int) -> None:
+    """The saved-activation backward runs its weight-gradient GEMMs on a side stream (``fused_wide_sm80._bwd_saved_overlap``) and ``ln_bwd``
+    keeps two rows in flight: the gradients equal the one-stream order of the same kernels bit for bit, run to run and under a graph."""
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+
+    m = _master(Transition(d_hidden=d_hidden, n=n)).train()
+    m.set_backend("cuda")
+    g = torch.Generator(device="cuda").manual_seed(2)
+    x = torch.randn(1, 96, 96, d_hidden, device="cuda", generator=g).bfloat16()
+    dy = torch.randn(1, 96, 96, d_hidden, device="cuda", generator=g).bfloat16()
+    assert fw._save_ab(96 * 96, d_hidden, d_hidden * n, True)
+    first = _train_grads(m, x, dy)
+    again = _train_grads(m, x, dy)
+    assert all(torch.equal(a, b) for a, b in zip(first, again, strict=True))
+
+    # the one-stream order of the same launches (the pre-overlap backward), on the forward's saved tensors
+    flat = x.reshape(-1, d_hidden).contiguous()
+    wab16, ws16 = fw._master_cast_wab(m.expand_a.weight, m.expand_b.weight, m.squeeze.weight)
+    h = d_hidden * n
+    wa16, wb16 = wab16[:h], wab16[h:]
+    _, xn, stats, hid, ab = fw._fwd_launch(flat, m.ln_in.weight, m.ln_in.bias, wa16, wb16, ws16, m.ln_in.eps, True, True)
+    ext = fw._ext()
+    dyf = dy.reshape(-1, d_hidden).contiguous()
+    dab = ext.gate_dh(dyf, ws16.t().contiguous(), ab, fw._dh_cfg(flat.shape[0], d_hidden, h))
+    dws = fw._mm_f32(dyf.t(), hid)
+    dwab = fw._mm_f32(dab.t(), xn)
+    dx, dgam, dbeta = ext.ln_bwd(fw._mm_f32(dab, fw._wab(wa16, wb16)), flat, stats, m.ln_in.weight.float(), dyf, torch.float32)
+    ref = {"dx": dx, "ln_in.weight": dgam, "ln_in.bias": dbeta, "expand_a.weight": dwab[:h], "expand_b.weight": dwab[h:], "squeeze.weight": dws}
+    names = ["y", "dx"] + [k for k, _ in m.named_parameters()]
+    got = dict(zip(names, first, strict=True))
+    assert torch.equal(got["dx"].reshape(-1, d_hidden), ref["dx"])
+    for k in ("ln_in.weight", "ln_in.bias", "expand_a.weight", "expand_b.weight", "squeeze.weight"):
+        assert torch.equal(got[k], ref[k].to(got[k].dtype)), k
+
+    # captured: the side stream forks / joins inside the graph
+    xs = x.detach().clone().requires_grad_(True)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        _train_grads(m, x, dy)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        for p in m.parameters():
+            p.grad = None
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            ys = m(xs)
+        ys.backward(dy)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(typing.cast("torch.Tensor", xs.grad), first[1])
+    assert all(torch.equal(typing.cast("torch.Tensor", p.grad), r) for p, r in zip(m.parameters(), first[2:], strict=True))
