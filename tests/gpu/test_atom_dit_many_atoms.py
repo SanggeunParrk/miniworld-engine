@@ -30,7 +30,12 @@ def test_cuda_matches_pytorch_past_8192_atoms(cls: str, length: int) -> None:
     C.randomize(m, torch.Generator(device="cuda").manual_seed(0))
     m = typing.cast("ad._LocalAtomDiT", m.train(True))
     inputs = m.make_inputs(
-        length=length, samples=1, depth=None, dtype=torch.float32, device=torch.device("cuda"), generator=torch.Generator("cuda").manual_seed(0)
+        length=length,
+        samples=1,
+        depth=None,
+        dtype=torch.float32,
+        device=torch.device("cuda"),
+        generator=torch.Generator("cuda").manual_seed(0),
     )
     m.set_backend("cuda")
     why = m.unsupported(**inputs)
