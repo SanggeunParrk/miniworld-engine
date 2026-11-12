@@ -201,6 +201,7 @@ def test_first_shape_replays_after_lru_eviction(stack):
     _run(stack, (128, 256, 384, 512, 640))
 
 
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) path: the conditioning chunks are the H100 token-DiT route")
 def test_holds_go_with_the_handle():
     """The holds live exactly as long as the handle: the capture's reads (the conditioning chunks among them) are held by it, nothing is
     held process-wide, and ``release()`` lets them go -- the chunks another shape's capture evicted are then freed."""
