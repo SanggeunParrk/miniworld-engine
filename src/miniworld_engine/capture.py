@@ -17,7 +17,8 @@ the package root; this module is the public home of what a caller that captures 
 ``static_inputs()``
     Stronger: the conditioning / pair inputs of the hoisted per-item tables (a block's conditioning table, a pair's bias) also keep their
     contents for the life of the graph, so a replay re-runs none of their producing kernels -- unless the caller refreshes the tables
-    (below) after refilling those inputs in place. Yields a :class:`StaticTables` handle (the tables its captures read).
+    (below) after refilling those inputs in place. Yields a :class:`StaticTables` handle (the tables its captures read, and every engine
+    cache entry they read, held for the graphs: keep it as long as they are replayed).
 ``clear_weight_caches(*modules)``
     Drop every weight- or input-derived cache of the engine (each store registered with ``kernels._capture.weight_cache``: the
     parameter forms, weight packs, hoisted tables, the TF32 operand cache, the refresh records) and, for the given modules and their
@@ -59,6 +60,23 @@ serve the next item with the SAME graph::
 Only the tables the graph reads from the eager cache need the refresh: a table the capture made itself (its input was made inside the
 captured step, or did not exist at the warm-up) is recorded in the graph and every replay remakes it. Everything else a captured step
 computes from its inputs is recomputed by the replay.
+
+**Graphs of several shapes at once: keep the handle with the graph.** A graph reads engine cache entries at every replay (weight packs,
+the token DiT's grouped conditioning weights, the hoisted tables), and capturing another shape evicts and replaces entries of the same
+caches. Every entry a capture reads is held by the ``static_inputs()`` handle open at the capture (``StaticTables.held()`` lists them):
+nothing a graph reads is freed while its handle lives, whatever is captured, evicted or ``torch.cuda.empty_cache()``-d meanwhile. The holds
+go with the handle -- ``tables.release()`` or the handle dropped -- so keep it exactly as long as the graph (a per-shape cache entry keeps
+both; a graph per item keeps both for the item). A capture with no ``static_inputs()`` handle open (``static_weights()`` alone) holds the
+eager entries it reads process-wide until ``clear_weight_caches()``. A caller needs no hold of its own (FoldForge's ``hold_new`` snapshot
+of ``weight_caches()``)::
+
+    with static_weights(), static_inputs() as tables:      # shape 1
+        ...capture g1...
+    with static_weights(), static_inputs() as tables2:     # shape 2: evicts some of shape 1's cache entries
+        ...capture g2...
+    torch.cuda.empty_cache()
+    tables.refresh(model); g1.replay()                     # safe: tables holds what g1 reads
+    del g1; tables.release()                               # the graph and its handle go together
 
 Semantics are those of ``miniworld_engine.kernels._capture`` (its module docstring: capture scopes, the fused-optimizer
 ``increment_version`` rule); this module is the stable name for them.

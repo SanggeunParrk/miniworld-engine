@@ -218,7 +218,9 @@ def _cond_fold_pack(w1, b1, w2, b2):
 #: between replays (FoldForge makes it inside the captured denoiser step), so nothing made from it outlives a capture or a replay -- only
 #: the ORDER and the grouping of the GEMMs change, never what a block computes (a chunk's columns are the block's own [W1; W2] rows, a
 #: block's key is checked before it is served). The chunk weights ([W1; W2] of n blocks, ``_COND_CHUNKS``) are made outside captures
-#: only (a capture would record the concatenation into every replay). Off for big tables (P rows over ``_COND_PIPE_ROWS``).
+#: only (a capture would record the concatenation into every replay).
+#: A capture that reads a chunk holds it (``_capture.hold``: the LRU of 4 below evicts the chunks of other shapes, and a graph kept per
+#: shape still reads its own). Off for big tables (P rows over ``_COND_PIPE_ROWS``).
 _COND_PIPE: dict = {}
 _COND_PIPE_ROWS = 1024
 _COND_CHUNK_BYTES = 32 << 20
@@ -283,6 +285,7 @@ def _cond_gemm(c, wc, fkey):
                 _COND_CHUNKS.pop(next(iter(_COND_CHUNKS)))
             W = _COND_CHUNKS[keys] = torch.cat([w for _, w in group[nxt : nxt + n]])
         if W is not None:
+            _capture.hold(W)  # a capture reads the chunk: another shape's chunks (an LRU of 4) must not free it under the graph
             fork = torch.cuda.Event()
             fork.record(cur)
             side.wait_event(fork)
@@ -420,6 +423,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         # variants' inference packs always did: the blocks are inference only here, so their weights do not change under a graph; a
         # first call inside a capture records the pack, an in-place weight change after a capture needs a new capture)
         hit = _STATIC_PACKS.get(key)
+        made = hit is None
         if hit is None:
             if len(_STATIC_PACKS) >= _capture.BLOCK_CACHE_LIMIT:
                 _STATIC_PACKS.pop(next(iter(_STATIC_PACKS)))
@@ -429,6 +433,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
                 # the gate columns (no fill per call)
                 hit[0][6][3 * D :] = _NO_GATE
             _STATIC_PACKS[key] = hit
+        _capture.hold(hit, not made)  # a capture reads the pack: the count limit above must not free it under the graph
         packed, (_, vpack), cond_ready, matrix_ready, late_pack = hit
     w1, b1, w2, b2, wf, wqkvg, bqkvg, wo, wab_fp32, ws, nq, nk, wab = packed
     # B trunk_seeds of one input share the key mask (the caller passes it expanded over B, stride 0): its first row serves them all
