@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 import ast
+import gc
 import importlib
+import weakref
 from pathlib import Path
 
 import torch
@@ -31,6 +33,8 @@ NOT_WEIGHT_DERIVED = {
     "kernels/_pretune.py:_SQUEUE": "tuning queue",
     "kernels/_capture.py:_PINNED": "pinned keys of the registered stores (cleared with them)",
     "kernels/_capture.py:_INPUT_STORES": "the per-input stores lookup_inputs filled (registered ones) and their alive tests",
+    "kernels/_capture.py:_HELD_BY_CAPTURES": "the forms capture_reads_eager captures read (held for the process: what live graphs read)",
+    "kernels/_capture.py:_HELD_UNOWNED": "cache entries captures read with no static_inputs() handle open (cleared with the stores)",
     "kernels/_capture.py:_WEIGHT_CACHES": "the registry itself",
     "kernels/_capture.py:_FORMS": 'registered below its definition: weight_cache("capture.forms", _FORMS)',
     "kernels/_capture.py:_LINEAGES": 'registered below its definition: weight_cache("capture.input_lineages", _LINEAGES)',
@@ -346,3 +350,59 @@ def test_lineage_replaces_the_entry_of_an_earlier_version(monkeypatch):
         del tables
     finally:
         _capture._WEIGHT_CACHES.pop("test_capture_api.lineage", None)
+
+
+def test_capture_reads_are_held_by_the_handle(monkeypatch):
+    """What a capture reads stays allocated while the graph can be replayed (``_capture.hold``): an entry served to a capture under a
+    ``static_inputs()`` handle is held by the handle -- the store evicting it (another shape's entries: a count limit) frees nothing the
+    graph reads -- and goes with the handle's release; with no handle open (``static_weights()`` alone) an eager entry is held
+    process-wide until ``clear_weight_caches``; outside a capture nothing is held."""
+    store = _capture.weight_cache("test_capture_api.holds")
+    try:
+        w = torch.ones(4)
+        build = lambda: w * 2
+        with capture.static_weights(), capture.static_inputs() as tables:
+            pack = _capture.lookup(store, ("a",), build, limit=1)  # the eager warm-up
+            assert not tables.held()
+            monkeypatch.setattr(_capture, "_graph_capture_id", lambda: 1)  # "inside a capture"
+            assert _capture.lookup(store, ("a",), build, limit=1) is pack
+            monkeypatch.undo()
+        assert any(h is pack for h in tables.held())
+        ref = weakref.ref(pack)
+        del pack
+        _capture._PINNED.clear()  # (the store's own pin: evictable from here on)
+        _capture.lookup(store, ("b",), build, limit=1)  # another shape's entry evicts it
+        assert ("a",) not in {k[1] for k in store}
+        assert ref() is not None, "the handle must keep what its capture read"
+        tables.release()
+        assert ref() is None and not tables.held()
+
+        # the handle dropped: its holds go with it
+        with capture.static_weights(), capture.static_inputs():
+            monkeypatch.setattr(_capture, "_graph_capture_id", lambda: 1)
+            ref = weakref.ref(_capture.lookup(store, ("c",), build, limit=8))
+            monkeypatch.undo()
+        store.clear()
+        gc.collect()
+        assert ref() is None
+
+        # no static_inputs() handle: held process-wide until clear_weight_caches
+        with capture.static_weights():
+            entry = _capture.lookup(store, ("d",), build, limit=8)
+            monkeypatch.setattr(_capture, "_graph_capture_id", lambda: 1)
+            assert _capture.lookup(store, ("d",), build, limit=8) is entry
+            monkeypatch.undo()
+        assert any(h is entry for h in _capture._HELD_UNOWNED.values())
+        ref = weakref.ref(entry)
+        del entry
+        store.clear()
+        assert ref() is not None
+        capture.clear_weight_caches()
+        assert ref() is None and not _capture._HELD_UNOWNED
+
+        # outside a capture: nothing held
+        _capture.lookup(store, ("e",), build)
+        assert not _capture._HELD_UNOWNED
+    finally:
+        _capture._WEIGHT_CACHES.pop("test_capture_api.holds", None)
+        _capture._HELD_UNOWNED.clear()

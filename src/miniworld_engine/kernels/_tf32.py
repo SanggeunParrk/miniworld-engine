@@ -180,7 +180,7 @@ def tf32_cached(sources: tuple[torch.Tensor, ...], build):
     stamp = tuple((t._version, tuple(t.shape), t.stride(), t.storage_offset(), t.dtype) for t in sources)
     hit = _CACHE.get(key)
     if hit is not None and hit[1] == stamp and all(r() is b for r, b in zip(hit[0], bases, strict=True)):
-        return hit[2]
+        return _capture.hold(hit[2])  # a capture reads it: a newer version or the count limit must not free it under the graph
     value = build()
     if not torch.cuda.is_current_stream_capturing():
         if len(_CACHE) >= _CACHE_MAX:

@@ -30,6 +30,14 @@ the refresh writes a new ``build()`` into the recorded tensors. A ``build`` ther
 only. Entries made inside a capture are recorded into the graph (every replay remakes them) and are not refreshed. The records are held by
 the ``static_inputs()`` handle (``StaticTables``) that was open at the capture: they go with it, so a caller that refreshes keeps the
 handle, and one that captures a new graph per item (no refresh) leaves nothing behind that holds an item's inputs or tables.
+
+**What a graph reads stays allocated (``hold``).** A captured graph reads the cache entries it was served (weight packs, the token DiT's
+grouped conditioning weights, hoisted tables) at every replay, but the stores keep evicting and replacing entries on later calls -- another
+shape's warm-up and capture fill the same stores (an LRU of 4 conditioning chunks, count limits, scope prunes, a newer version). Every
+entry a capture is served is therefore held (``hold``) by each ``static_inputs()`` handle open at the capture, and goes with the handle
+(``release()`` or dropped); with no handle open, an eager-scope entry is held by the process until ``clear_weight_caches``. So: keep the
+handle for as long as the graph is replayed (FoldForge's per-shape sampler graph keeps it with the graph). A cache that serves a capture
+from outside these helpers (``lookup`` / ``lookup_inputs`` / ``param_forms`` / ``hoisted_table``) calls ``hold`` itself.
 """
 
 from __future__ import annotations
@@ -73,7 +81,8 @@ def static_inputs(on: bool = True):
     :func:`refresh_static_inputs` (or the yielded handle's ``refresh``) after each refill and before the next replay (the module docstring,
     "Refreshing hoisted tables").
 
-    Yields a :class:`StaticTables` handle: the hoisted tables that the captures inside the block read from the eager cache."""
+    Yields a :class:`StaticTables` handle: the hoisted tables that the captures inside the block read from the eager cache, and every engine
+    cache entry those captures read (``hold``), kept allocated while the handle lives: keep it as long as the graphs are replayed."""
     prev = set_static_inputs(on)
     handle = StaticTables()
     _HANDLES.append(handle)
@@ -184,11 +193,11 @@ def lookup(store: dict, key, build, limit: int = 64):
     pinned = _pin_if_static_capture(store, sk)
     hit = store.get(sk)
     if hit is not None:
-        return hit
+        return hold(hit, sk[0] is None)
     prune(store)
     _evict(store, pinned, limit, sk)
     out = store[sk] = build()
-    return out
+    return hold(out, False)  # made now: inside a capture its memory is the graph's pool (held by a handle only)
 
 
 def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=None, inputs=(), lineage=None):
@@ -231,7 +240,7 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
     if hit is not None and (valid is None or valid(hit)):
         if eager_in_capture and (id(store), sk) not in _CAPTURE_BUILT:
             note_static_read((id(store), sk), hit, build, inputs)
-        return hit
+        return hold(hit, cid is None)
     if not _STATIC_INPUTS[0]:
         prune(store, cid)
     if alive is not None:
@@ -256,7 +265,7 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
         _CAPTURE_BUILT.add((id(store), sk))
     elif _CAPTURE_BUILT:
         _CAPTURE_BUILT.discard((id(store), sk))
-    return out
+    return hold(out, False)  # made now: inside a capture its memory is the graph's pool (held by a handle only)
 
 
 #: id(store) -> {(scope, lineage): the key of its newest entry} (``lookup_inputs``'s ``lineage``).
@@ -291,9 +300,43 @@ def release_dead_inputs() -> int:
 _FORMS: dict = {}
 
 
-#: Forms a capture read from the eager scope (``capture_reads_eager``): held for the life of the process, so a newer version of the
-#: parameters replacing the entry never frees memory a captured graph still reads.
-_HELD_BY_CAPTURES: list = []
+#: id -> form: the forms a capture read from the eager scope (``capture_reads_eager``): held for the life of the process, so a newer version
+#: of the parameters replacing the entry never frees memory a captured graph still reads. (A dict: a form read by many captures is held once.)
+_HELD_BY_CAPTURES: dict[int, object] = {}
+
+
+# ------------------------------------------------------------------------------------------- what a captured graph reads stays allocated
+#: id -> entry: the cache entries captures read while no ``static_inputs()`` handle was open (plain ``static_weights()``,
+#: ``set_static_weights``): held until ``clear_weight_caches``.
+_HELD_UNOWNED: dict[int, object] = {}
+
+
+def hold(entry, eager: bool = True):
+    """The capture running now reads ``entry`` (an engine cache entry: a tensor, or a tuple / object holding tensors): keep it allocated for
+    as long as the graph can be replayed. Returns ``entry``; a no-op outside a capture.
+
+    The rule (the memory side of the R26 contract "capture once per shape, refresh + replay per item"): a cache may evict, prune or replace
+    an entry at any later call -- another shape's capture fills the same stores (an LRU of conditioning chunks, a per-scope pack store, a
+    lineage replacement) -- and an entry's memory then went back to the allocator, and after ``torch.cuda.empty_cache()`` to the driver, while
+    a graph that read it was still replayed (an illegal address, NaN, or another tensor's values). So every entry a capture is served is
+    held by:
+
+    - each ``static_inputs()`` handle open at the capture (:class:`StaticTables`): released with the handle (``release()`` or dropped) --
+      keep the handle for as long as its graph is replayed, as for its refresh;
+    - with no handle open, the process (``eager``: an entry of the eager scope, which a later eager call or capture may evict), until
+      ``clear_weight_caches``. An entry made inside a capture without a handle (its own scope) is not held: it lives in the graph's
+      private memory pool, which the graph keeps.
+
+    A hold never extends an entry past its handle: a store that drops the entry while the handle lives frees nothing the graph reads, and
+    once the handle goes the entry lives exactly as long as the store keeps it."""
+    if _graph_capture_id() is None:
+        return entry
+    if _HANDLES:
+        for handle in _HANDLES:
+            handle._held[id(entry)] = entry
+    elif eager:
+        _HELD_UNOWNED[id(entry)] = entry
+    return entry
 
 
 # ------------------------------------------------------------------------------------------------------------- the weight-cache registry
@@ -330,12 +373,16 @@ def clear_weight_caches(*modules: torch.nn.Module) -> None:
     """Drop every weight- or input-derived cache of the engine: each registered store (``weight_cache``: packs, hoisted tables, the parameter
     forms, the TF32 operand cache) and, for the given modules and their submodules, the per-instance cache attributes. Call it before weights
     are replaced by new tensors (a second model, a test that builds many): a new tensor at the address of a freed one must not be served the
-    old one's form. Graphs captured before the call may read the dropped entries: drop them first (replaying one afterwards is undefined).
-    Forms already held for live captures (``capture_reads_eager``) stay held."""
+    old one's form. Graphs captured before the call may read the dropped entries: drop them first (replaying one afterwards is undefined):
+    the entries captures read (``hold``: in the ``static_inputs()`` handles and process-wide) are let go too. Forms held for live captures
+    by ``capture_reads_eager`` stay held."""
     for store in _WEIGHT_CACHES.values():
         store.clear()
     _PINNED.clear()
     _CAPTURE_BUILT.clear()
+    _HELD_UNOWNED.clear()
+    for handle in list(_LIVE_HANDLES):
+        handle._held.clear()
     for module in modules:
         for sub in module.modules():
             for attr in _INSTANCE_CACHE_ATTRS:
@@ -377,14 +424,14 @@ def param_forms(tag, params, build, *, inputs_scope: bool = False, capture_reads
     if capture_reads_eager and _graph_capture_id() is not None:
         eager = _FORMS.get((None, key))
         if eager is not None and all(r() is p for r, p in zip(eager[0], params, strict=True)):
-            _HELD_BY_CAPTURES.append(eager[1])  # the graph reads it from now on: never freed under it
-            return eager[1]
+            _HELD_BY_CAPTURES[id(eager[1])] = eager[1]  # the graph reads it from now on: never freed under it
+            return hold(eager[1])
     sk = (None, key) if inputs_scope and _STATIC_INPUTS[0] else scoped(key)
     if sk is None:
         return build()
     hit = _FORMS.get(sk)
     if hit is not None and all(r() is p for r, p in zip(hit[0], params, strict=True)):
-        return hit[1]
+        return hold(hit[1], sk[0] is None)
     prune(_FORMS)
     ids = [id(p) for p in params]
     for k in [
@@ -395,7 +442,7 @@ def param_forms(tag, params, build, *, inputs_scope: bool = False, capture_reads
         del _FORMS[k]
     value = build()
     _FORMS[sk] = (tuple(weakref.ref(p) for p in params), value)
-    return value
+    return hold(value, False)  # made now: inside a capture its memory is the graph's pool (held by a handle only)
 
 
 def hoisted_table(store: dict, tensor: torch.Tensor, key, build, limit: int = 64, also=()):
@@ -640,27 +687,41 @@ def release_static_inputs(root: torch.nn.Module | None = None, *, tables: Static
         for handle in list(_LIVE_HANDLES):
             if handle._records.get(k) is r:
                 del handle._records[k]
+    # the entries the captures read (``hold``) go with the handle's release -- or, for a release of everything, with every handle's
+    if tables is not None:
+        tables._held.clear()
+    elif root is None:
+        _HELD_UNOWNED.clear()
+        for handle in list(_LIVE_HANDLES):
+            handle._held.clear()
     return len(keys)
 
 
 class StaticTables:
     """The hoisted tables the captures inside one ``static_inputs()`` block read from the eager cache (yielded by ``static_inputs()``). It
-    holds their refresh records: they live as long as the handle (or until released), so keep it for as long as the graph is refreshed."""
+    holds their refresh records, and every engine cache entry those captures read (``hold``: weight packs, conditioning chunks, hoisted
+    tables), so no later eviction frees memory the graphs read: both live as long as the handle (or until released) -- keep it for as
+    long as the graphs captured inside the block are replayed or refreshed."""
 
     def __init__(self) -> None:
         self._records: dict = {}
+        self._held: dict[int, object] = {}
         _LIVE_HANDLES.add(self)
         weakref.finalize(self, _handle_dropped, self._records)
 
     def __len__(self) -> int:
         return sum(1 for k, r in self._records.items() if _record(k) is r)
 
+    def held(self) -> tuple:
+        """The engine cache entries the captures inside the block read and this handle keeps allocated (``hold``): for accounting."""
+        return tuple(self._held.values())
+
     def refresh(self, root: torch.nn.Module | None = None) -> int:
         """``refresh_static_inputs(root, tables=self)``."""
         return refresh_static_inputs(root, tables=self)
 
     def release(self) -> int:
-        """``release_static_inputs(tables=self)``."""
+        """``release_static_inputs(tables=self)``: the refresh records and the held entries (drop the graphs first)."""
         return release_static_inputs(tables=self)
 
 

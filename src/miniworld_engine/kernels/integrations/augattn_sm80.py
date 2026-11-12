@@ -1331,7 +1331,7 @@ def _cached_bias(module, pair, mask):
     entry = getattr(module, _CACHE, None)
     if entry is None or torch.is_grad_enabled() or torch.compiler.is_compiling() or entry[0] != _cache_key(module, pair, mask):
         return None
-    return entry[1]
+    return _capture.hold(entry[1])  # a capture reads it: a later cache_pair_bias of another length must not free it under the graph
 
 
 # ================================================================================================================================ entry points

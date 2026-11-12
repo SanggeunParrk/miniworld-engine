@@ -184,6 +184,7 @@ def _infer(
         hit = runner.__dict__.get("_p_cache")
         if pkey is not None and hit is not None and hit[0] == pkey:
             P = hit[1]
+            _capture.hold(hit, pkey[0] is None)  # a capture reads it: the next pair replacing the entry must not free it under the graph
             if pkey[0] is None and not hit[3] and torch.cuda.is_current_stream_capturing():
                 # a capture (static_weights) reads the eager P: kernels._capture.refresh_static_inputs remakes it in place
                 _capture.note_static_read((id(runner), "p", P.data_ptr()), P, lambda: runner.hoist(pair.contiguous(), mask), (pair, mask))
@@ -194,6 +195,7 @@ def _infer(
                 # the entry keeps its key tensors alive: a freed address cannot alias another tensor; [3]: made inside a capture (its
                 # kernels are recorded: a replay remakes it)
                 runner.__dict__["_p_cache"] = (pkey, P, (pair, mask), capturing)  # (an attribute of this cache, not of the runner class)
+                _capture.hold(runner.__dict__["_p_cache"], False)
         return runner.step(single, cond, P)
 
 

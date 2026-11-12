@@ -186,7 +186,7 @@ def cached(tag: str, tensors: tuple, build):
         return build()
     hit = _packs.get(key)
     if hit is not None and all(r() is t for r, t in zip(hit[0], tensors, strict=True)):
-        return hit[1]
+        return _capture.hold(hit[1], key[0] is None)  # a capture reads it: the eviction below must not free it under the graph
     _capture.prune(_packs)  # an eager entry serves eager calls only; a capture packs once, recorded; finished captures' entries go
     if len(_packs) >= 256:
         for k in [k for k, (refs, _) in _packs.items() if any(r() is None for r in refs)]:
@@ -195,7 +195,7 @@ def cached(tag: str, tensors: tuple, build):
             _packs.clear()
     value = build()
     _packs[key] = (tuple(weakref.ref(t) for t in tensors), value)
-    return value
+    return _capture.hold(value, False)
 
 
 def master(params: tuple, dt: torch.dtype) -> bool:
