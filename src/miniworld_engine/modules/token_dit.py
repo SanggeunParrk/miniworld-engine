@@ -918,7 +918,8 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     backends = ("pytorch", "cuda", "triton")
     # 2026-11-10: sm_80 paths; cuda:h100_sm90 2 (2026-11-12): the inference pair-bias hoist (runner.hoist) in one pass for a 256-wide
     # bf16 pair, and on the TF32 tensor-core kernel (3 terms) for a 128-wide fp32 pair
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:h100_sm90": 2}
+    # cuda:a100_sm80 3 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd: padded W' pitch, next row prefetched; same values) 2.1x faster
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 2}
 
     def __init__(
         self,
