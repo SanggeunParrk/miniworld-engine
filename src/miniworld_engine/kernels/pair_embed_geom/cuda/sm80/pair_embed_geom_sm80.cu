@@ -23,18 +23,11 @@ void backward(torch::Tensor g, torch::Tensor codes, torch::Tensor tpart, torch::
 // (162 KB) in shared memory; `ln_backward` below reads it through the L1 there (mode 1, 80 KB, keeps the H100 kernel).
 void ln_backward(torch::Tensor tbl, torch::Tensor codes, torch::Tensor dh, torch::Tensor dx, int64_t mode, double eps);
 #define ln_backward(...) ln_backward_h100(__VA_ARGS__)
-void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tensor cb, torch::Tensor mask, torch::Tensor idx, torch::Tensor chains,
-             torch::Tensor dlim, torch::Tensor alim, torch::Tensor out, torch::Tensor codes, int64_t ln, double eps, int64_t jp, int64_t gt);
-void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::Tensor idx, torch::Tensor dlim, torch::Tensor out, torch::Tensor codes, int64_t ln, double eps, int64_t jp, int64_t gt);
-#define forward(...) forward_h100(__VA_ARGS__)
-#define forward_ca(...) forward_ca_h100(__VA_ARGS__)
 #endif
 #include "../sm90/pair_embed_geom.cu"
 #undef backward
 #ifdef MWE_SM120
 #undef ln_backward
-#undef forward
-#undef forward_ca
 #endif
 
 namespace {
@@ -143,29 +136,5 @@ void ln_backward(torch::Tensor tbl, torch::Tensor codes, torch::Tensor dh, torch
       reinterpret_cast<const __nv_bfloat16*>(tbl.data_ptr<at::BFloat16>()), reinterpret_cast<const uint4*>(codes.data_ptr<int>()),
       reinterpret_cast<const __nv_bfloat16*>(dh.data_ptr<at::BFloat16>()), reinterpret_cast<__nv_bfloat16*>(dx.data_ptr<at::BFloat16>()), P, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-#endif
-
-#ifndef PE120_CARVEOUT
-#define PE120_CARVEOUT 0
-#endif
-#ifdef MWE_SM120
-// the forwards read the table through the L1 (GT): all of the SM's 128 KB unified L1 / shared memory as L1 (carveout 0) on the RTX 5090
-static void pg120_l1_carveout() {
-  static bool done = [] {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(pg_fwd<true, true>, cudaFuncAttributePreferredSharedMemoryCarveout, PE120_CARVEOUT));
-    C10_CUDA_CHECK(cudaFuncSetAttribute(pg_fwd_ca<true, true, true>, cudaFuncAttributePreferredSharedMemoryCarveout, PE120_CARVEOUT));
-    return true;
-  }();
-  (void)done;
-}
-void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tensor cb, torch::Tensor mask, torch::Tensor idx, torch::Tensor chains,
-             torch::Tensor dlim, torch::Tensor alim, torch::Tensor out, torch::Tensor codes, int64_t ln, double eps, int64_t jp, int64_t gt) {
-  pg120_l1_carveout();
-  forward_h100(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, out, codes, ln, eps, jp, gt);
-}
-void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::Tensor idx, torch::Tensor dlim, torch::Tensor out, torch::Tensor codes, int64_t ln, double eps, int64_t jp, int64_t gt) {
-  pg120_l1_carveout();
-  forward_ca_h100(tbl, ca, mask, idx, dlim, out, codes, ln, eps, jp, gt);
 }
 #endif
