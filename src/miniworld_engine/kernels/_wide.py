@@ -40,17 +40,33 @@ def needs_wide(*items: torch.Tensor | int | None) -> bool:
 
 
 @triton.jit
-def row_tile(N_CTX, BLOCK: tl.constexpr):
-    """``(row, tile)`` of a 1-D grid laid out row-major over ``rows x cdiv(N_CTX, BLOCK)`` tiles (see ``row_tile_grid``); ``row`` is int64.
+def row_tile(N_CTX, BLOCK: tl.constexpr, FLAT: tl.constexpr):
+    """``(row, tile)`` of the grid ``row_tile_grid`` launches over ``rows x cdiv(N_CTX, BLOCK)`` tiles; ``row`` is int64.
 
     CUDA caps grid axes y and z at 65535, so a per-row axis there (attention over B * H * L rows: H 16 at L 4096 already passes it) fails
-    to launch; axis x takes 2**31 - 1. The tile index stays the fastest-varying one, as it was on axis x, so every row's tiles still run
-    back to back."""
-    n_tiles = tl.cdiv(N_CTX, BLOCK)
-    pid = tl.program_id(0)
-    return (pid // n_tiles).to(tl.int64), pid % n_tiles
+    to launch; axis x takes 2**31 - 1. Up to 65535 rows the grid is (tiles, 1, rows) as it always was; past it (``FLAT``, set by the
+    launcher) it is one axis x of rows * tiles programs, row-major, so the tile index stays the fastest-varying one and every row's tiles
+    still run back to back. The flat decode (an integer division per program) cost ~1 % on the H100 attention backward, hence the switch."""
+    if FLAT:
+        n_tiles = tl.cdiv(N_CTX, BLOCK)
+        pid = tl.program_id(0)
+        row = (pid // n_tiles).to(tl.int64)
+        tile = pid % n_tiles
+    else:
+        row = tl.program_id(2).to(tl.int64)
+        tile = tl.program_id(0)
+    return row, tile
+
+
+GRID_YZ_MAX = 65535
+
+
+def rows_flat(rows: int) -> bool:
+    """The ``FLAT`` constexpr of ``row_tile``: True when the rows do not fit grid axis z."""
+    return rows > GRID_YZ_MAX
 
 
 def row_tile_grid(rows: int, n_ctx: int, block: int) -> list[int]:
-    """The 1-D grid ``row_tile`` decodes: ``rows * cdiv(n_ctx, block)`` programs on axis x."""
-    return [rows * ((n_ctx + block - 1) // block)]
+    """The grid ``row_tile`` decodes: ``(tiles, 1, rows)``, or ``rows * tiles`` programs on axis x past 65535 rows."""
+    tiles = (n_ctx + block - 1) // block
+    return [rows * tiles] if rows_flat(rows) else [tiles, 1, rows]

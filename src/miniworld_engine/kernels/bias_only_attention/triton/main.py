@@ -12,7 +12,7 @@ from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
 from miniworld_engine.kernels._shape_key import pack, token_key
-from miniworld_engine.kernels._wide import row_tile, row_tile_grid
+from miniworld_engine.kernels._wide import row_tile, row_tile_grid, rows_flat
 
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
 # reduction over d, so it tiles with an accumulating loop and HEAD_DIM_PAD joins the sweep.
@@ -158,8 +158,9 @@ def _attn_bwd_preprocess(
     BLOCK_M1: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
     shape_key,
+    ROWS_FLAT: tl.constexpr = False,
 ):
-    off_hz, tile = row_tile(N_CTX, BLOCK_M1)  # 1-D grid: B * H * L rows pass the 65535 cap of axes y / z
+    off_hz, tile = row_tile(N_CTX, BLOCK_M1, ROWS_FLAT)  # 1-D grid past 65535 rows (the cap of axes y / z)
     off_m = tile.to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     mask_delta = off_m < N_CTX
 
@@ -266,10 +267,11 @@ def _attn_bwd(
     BLOCK_M2: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
     shape_key,
+    ROWS_FLAT: tl.constexpr = False,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
 
-    bhid, pid = row_tile(N_CTX, BLOCK_M2)  # 1-D grid: B * H * L rows pass the 65535 cap of axes y / z
+    bhid, pid = row_tile(N_CTX, BLOCK_M2, ROWS_FLAT)  # 1-D grid past 65535 rows (the cap of axes y / z)
     pid = pid.to(tl.int64)
     off_chz = bhid * N_CTX
     adj = stride_h * (bhid % HL) + stride_z * (bhid // HL)
@@ -399,6 +401,7 @@ def _bias_only_bwd(
         D,
         shape_key=pack(shape_key, HEAD_DIM=D),
         HEAD_DIM_PAD=triton.next_power_of_2(D),
+        ROWS_FLAT=rows_flat(B * HL),
     )
 
     dv = torch.empty_like(v)
@@ -420,6 +423,7 @@ def _bias_only_bwd(
         D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
         shape_key=pack(shape_key, HEAD_DIM=D),
+        ROWS_FLAT=rows_flat(B * HL),
     )
 
     return dv, dbias

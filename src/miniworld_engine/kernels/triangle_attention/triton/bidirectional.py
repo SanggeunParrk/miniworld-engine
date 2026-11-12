@@ -22,7 +22,7 @@ import triton
 from einops import rearrange, reduce
 
 from miniworld_engine.kernels._shape_key import token_key
-from miniworld_engine.kernels._wide import row_tile_grid
+from miniworld_engine.kernels._wide import row_tile_grid, rows_flat
 
 from .main import (
     _attn_bwd_dkdv,
@@ -87,6 +87,7 @@ def _bwd_dir(q, k, v, bias, m, out, dout, dq, dk, dv, sm_scale):
         D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
         shape_key=token_key(L, HEAD_DIM=D),
+        ROWS_FLAT=rows_flat(B * HL),
     )
     dbias = torch.empty(B, HL, L, L, device=q.device, dtype=bias.dtype)
     grid_kv = lambda META: row_tile_grid(B * HL, L, META["BLOCK_M2"])
@@ -112,6 +113,7 @@ def _bwd_dir(q, k, v, bias, m, out, dout, dq, dk, dv, sm_scale):
         D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
         shape_key=token_key(L, HEAD_DIM=D),
+        ROWS_FLAT=rows_flat(B * HL),
     )
     grid_q = lambda META: row_tile_grid(B * HL, L, META["BLOCK_M1"])
     _attn_bwd_dq[grid_q](
@@ -133,6 +135,7 @@ def _bwd_dir(q, k, v, bias, m, out, dout, dq, dk, dv, sm_scale):
         D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
         shape_key=token_key(L, HEAD_DIM=D),
+        ROWS_FLAT=rows_flat(B * HL),
     )
     return reduce(dbias, "B (H L3) L L2 -> B H L L2", "sum", L3=L)
 

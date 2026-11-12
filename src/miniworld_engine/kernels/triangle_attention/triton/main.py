@@ -10,7 +10,7 @@ from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
 from miniworld_engine.kernels._shape_key import pack, token_key
-from miniworld_engine.kernels._wide import row_tile, row_tile_grid
+from miniworld_engine.kernels._wide import row_tile, row_tile_grid, rows_flat
 
 
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
@@ -163,10 +163,11 @@ def _attn_bwd_preprocess(
     BLOCK_M1: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
     shape_key,
+    ROWS_FLAT: tl.constexpr = False,
 ):
     # B+C: both `o` (fwd out) and `DO` (grad_output) are STRIDED 5D (B,H,Lrow,tok,D) views
     # over projection-layout [B,L,L2,H*D] -> read via explicit strides, no .contiguous().
-    off_hz, tile = row_tile(N_CTX, BLOCK_M1)  # 1-D grid: B * H * L rows pass the 65535 cap of axes y / z
+    off_hz, tile = row_tile(N_CTX, BLOCK_M1, ROWS_FLAT)  # 1-D grid past 65535 rows (the cap of axes y / z)
     off_m = tile * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     b = off_hz // HL
     hl = off_hz % HL
@@ -241,11 +242,12 @@ def _attn_bwd_dkdv(
     BLOCK_M2: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
     shape_key,
+    ROWS_FLAT: tl.constexpr = False,
 ):
     # v4b: minimize tl.trans (was 4/iter -> 2/iter) by working in [key, query] space like the
     # raw-ptr v2 kernel, but with make_block_ptr strided loads. qT & biasT loaded transposed.
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
-    bhid, pid = row_tile(N_CTX, BLOCK_M2)  # 1-D grid: B * H * L rows pass the 65535 cap of axes y / z
+    bhid, pid = row_tile(N_CTX, BLOCK_M2, ROWS_FLAT)  # 1-D grid past 65535 rows (the cap of axes y / z)
     off_chz = bhid * N_CTX
     b = bhid // HL
     hl = bhid % HL
@@ -393,9 +395,10 @@ def _attn_bwd_dq(
     BLOCK_M2: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
     shape_key,
+    ROWS_FLAT: tl.constexpr = False,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
-    bhid, pid = row_tile(N_CTX, BLOCK_M1)  # 1-D grid: B * H * L rows pass the 65535 cap of axes y / z
+    bhid, pid = row_tile(N_CTX, BLOCK_M1, ROWS_FLAT)  # 1-D grid past 65535 rows (the cap of axes y / z)
     off_chz = bhid * N_CTX
     b = bhid // HL
     hl = bhid % HL
@@ -585,6 +588,7 @@ def _tri_attn_bwd(
         D,
         shape_key=pack(shape_key, HEAD_DIM=D),
         HEAD_DIM_PAD=triton.next_power_of_2(D),
+        ROWS_FLAT=rows_flat(B * HL),
     )
 
     # A: allocate dq/dk/dv in the PROJECTION layout [B,L,L2,H*D] and hand the kernels
@@ -626,6 +630,7 @@ def _tri_attn_bwd(
         D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
         shape_key=pack(shape_key, HEAD_DIM=D),
+        ROWS_FLAT=rows_flat(B * HL),
     )
     grid_q = lambda META: row_tile_grid(B * HL, L, META["BLOCK_M1"])
     _attn_bwd_dq[grid_q](
@@ -647,6 +652,7 @@ def _tri_attn_bwd(
         D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
         shape_key=pack(shape_key, HEAD_DIM=D),
+        ROWS_FLAT=rows_flat(B * HL),
     )
 
     # dq/dk/dv are already (B,H,L,L2,D) strided views over [B,L,L2,H*D] -> returned as-is;
