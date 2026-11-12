@@ -12,6 +12,7 @@ from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
 from miniworld_engine.kernels._shape_key import pack, token_key
+from miniworld_engine.kernels._wide import row_tile, row_tile_grid
 
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
 # reduction over d, so it tiles with an accumulating loop and HEAD_DIM_PAD joins the sweep.
@@ -158,8 +159,8 @@ def _attn_bwd_preprocess(
     HEAD_DIM_PAD: tl.constexpr,
     shape_key,
 ):
-    off_m = tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
-    off_hz = tl.program_id(1).to(tl.int64)
+    off_hz, tile = row_tile(N_CTX, BLOCK_M1)  # 1-D grid: B * H * L rows pass the 65535 cap of axes y / z
+    off_m = tile.to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     mask_delta = off_m < N_CTX
 
     # delta[m] = sum_d o[m,d]*do[m,d]: a reduction over d, so HEAD_DIM_PAD tiles it and the fp32
@@ -268,10 +269,10 @@ def _attn_bwd(
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
 
-    bhid = tl.program_id(2).to(tl.int64)
+    bhid, pid = row_tile(N_CTX, BLOCK_M2)  # 1-D grid: B * H * L rows pass the 65535 cap of axes y / z
+    pid = pid.to(tl.int64)
     off_chz = bhid * N_CTX
     adj = stride_h * (bhid % HL) + stride_z * (bhid // HL)
-    pid = tl.program_id(0).to(tl.int64)
 
     v_ptr += adj
     do_ptr += adj
@@ -388,7 +389,7 @@ def _bias_only_bwd(
     B, HL, L, D = v.shape
     delta = torch.empty_like(m)
 
-    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
+    grid = lambda META: row_tile_grid(B * HL, L, META["BLOCK_M1"])
     _attn_bwd_preprocess[grid](
         out,
         grad_output,
@@ -403,7 +404,7 @@ def _bias_only_bwd(
     dv = torch.empty_like(v)
     dbias = torch.empty_like(bias)
 
-    grid = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
+    grid = lambda META: row_tile_grid(B * HL, L, META["BLOCK_M2"])
     _attn_bwd[grid](
         v,
         bias,

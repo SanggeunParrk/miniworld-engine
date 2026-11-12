@@ -10,6 +10,7 @@ from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
 from miniworld_engine.kernels._shape_key import pack, token_key
+from miniworld_engine.kernels._wide import row_tile, row_tile_grid
 
 
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
@@ -165,8 +166,8 @@ def _attn_bwd_preprocess(
 ):
     # B+C: both `o` (fwd out) and `DO` (grad_output) are STRIDED 5D (B,H,Lrow,tok,D) views
     # over projection-layout [B,L,L2,H*D] -> read via explicit strides, no .contiguous().
-    off_m = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
-    off_hz = tl.program_id(1).to(tl.int64)
+    off_hz, tile = row_tile(N_CTX, BLOCK_M1)  # 1-D grid: B * H * L rows pass the 65535 cap of axes y / z
+    off_m = tile * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     b = off_hz // HL
     hl = off_hz % HL
     h = hl // N_CTX
@@ -244,7 +245,7 @@ def _attn_bwd_dkdv(
     # v4b: minimize tl.trans (was 4/iter -> 2/iter) by working in [key, query] space like the
     # raw-ptr v2 kernel, but with make_block_ptr strided loads. qT & biasT loaded transposed.
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
-    bhid = tl.program_id(2).to(tl.int64)
+    bhid, pid = row_tile(N_CTX, BLOCK_M2)  # 1-D grid: B * H * L rows pass the 65535 cap of axes y / z
     off_chz = bhid * N_CTX
     b = bhid // HL
     hl = bhid % HL
@@ -253,7 +254,6 @@ def _attn_bwd_dkdv(
     adj_q = b * qs_z + h * qs_h + i_row * qs_lrow
     adj_g = b * gs_z + h * gs_h + i_row * gs_lrow  # grad-group layout (may differ from q)
     adj_do = b * ds_z + h * ds_h + i_row * ds_lrow
-    pid = tl.program_id(0)
     q_base = q_ptr + adj_q
     k_base = k_ptr + adj_q
     v_base = v_ptr + adj_q
@@ -395,7 +395,7 @@ def _attn_bwd_dq(
     shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
-    bhid = tl.program_id(2).to(tl.int64)
+    bhid, pid = row_tile(N_CTX, BLOCK_M1)  # 1-D grid: B * H * L rows pass the 65535 cap of axes y / z
     off_chz = bhid * N_CTX
     b = bhid // HL
     hl = bhid % HL
@@ -404,7 +404,6 @@ def _attn_bwd_dq(
     adj_q = b * qs_z + h * qs_h + i_row * qs_lrow
     adj_g = b * gs_z + h * gs_h + i_row * gs_lrow  # grad-group layout (may differ from q)
     adj_do = b * ds_z + h * ds_h + i_row * ds_lrow
-    pid = tl.program_id(0)
     q_base = q_ptr + adj_q
     k_base = k_ptr + adj_q
     v_base = v_ptr + adj_q
@@ -573,7 +572,7 @@ def _tri_attn_bwd(
     m_m = rearrange(m, "B H L L2 -> B (H L) L2")
     delta = torch.empty_like(m_m)
 
-    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
+    grid = lambda META: row_tile_grid(B * HL, L, META["BLOCK_M1"])
     _attn_bwd_preprocess[grid](
         out,
         grad_output,
@@ -604,7 +603,7 @@ def _tri_attn_bwd(
     dv = rearrange(dv_proj, "B L L2 (H D) -> B H L L2 D", H=H)
     dbias = torch.empty(B, HL, L, L, device=q.device, dtype=bias.dtype)  # per-row, reduced below
 
-    grid_kv = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
+    grid_kv = lambda META: row_tile_grid(B * HL, L, META["BLOCK_M2"])
     _attn_bwd_dkdv[grid_kv](
         q,
         k,
@@ -628,7 +627,7 @@ def _tri_attn_bwd(
         HEAD_DIM_PAD=triton.next_power_of_2(D),
         shape_key=pack(shape_key, HEAD_DIM=D),
     )
-    grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), 1, B * HL]
+    grid_q = lambda META: row_tile_grid(B * HL, L, META["BLOCK_M1"])
     _attn_bwd_dq[grid_q](
         q,
         k,

@@ -978,14 +978,15 @@ def _trimul_triton_refusal(
         return f"pair must be [B, L, L, d_pair], got {tuple(pair.shape)}"
     if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != tuple(pair.shape[:2])):
         return "mask must be a bool [B, L] residue mask"
-    # The inference pipeline indexes in 64 bits (any plane that fits in memory). The training one keeps 32-bit strided offsets in its
-    # LN_out kernels (layernorm_linear te_style, the m-major (L * L, width) view of the contraction), so it takes planes below 2**31
-    # elements of the widest (L * L, width) tensor: width = max(d_pair, d_hidden), 2 * d_hidden for the bidirectional packed contraction.
-    width = 2 * d_hidden if bidirectional else max(pair.shape[-1], d_hidden)
-    if (torch.is_grad_enabled() or module.training) and pair.shape[1] * pair.shape[2] * width >= 2**31:
+    # Both pipelines index in 64 bits above 2**31 elements: the training one's LN_out kernels over the m-major (L * L, width) contraction
+    # view (layernorm_linear te_style / mmajor_bwd / layernorm persistent) take a WIDE constexpr there. Unidirectional training past the
+    # bound is tested (tests/gpu/test_trimul_big_plane.py, L 4200 d_hidden 128); the bidirectional one cannot be (the smallest plane past
+    # it, width 2 * 128 at L 3000, needs more than 80 GB in training), so it keeps the refusal there.
+    width = 2 * d_hidden
+    if bidirectional and (torch.is_grad_enabled() or module.training) and pair.shape[1] * pair.shape[2] * width >= 2**31:
         return (
-            f"training (grad enabled or train mode) at L {pair.shape[1]}, width {width}: the Triton TriMul training kernels take L * L * width < 2**31 "
-            "elements (inference: no bound)"
+            f"training (grad enabled or train mode) at L {pair.shape[1]}, width {width}: the bidirectional Triton TriMul training is "
+            "untested past L * L * width = 2**31 elements (no plane that large fits an 80 GB card in training; inference: no bound)"
         )
     from miniworld_engine.kernels.trimul_inproj.triton.contract import hidden_refusal
 

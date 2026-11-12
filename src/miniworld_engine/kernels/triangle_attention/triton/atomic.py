@@ -11,6 +11,7 @@ import os
 from einops import rearrange, repeat, reduce
 
 from miniworld_engine.kernels._shape_key import pack, token_key
+from miniworld_engine.kernels._wide import row_tile, row_tile_grid
 
 
 @triton.jit
@@ -224,8 +225,8 @@ def _attn_bwd_preprocess(
     BLOCK_M1: tl.constexpr, HEAD_DIM_PAD: tl.constexpr,
     shape_key,
 ):
-    off_m = tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
-    off_hz = tl.program_id(1).to(tl.int64)
+    off_hz, tile = row_tile(N_CTX, BLOCK_M1)  # 1-D grid: B * H * L rows pass the 65535 cap of axes y / z
+    off_m = tile.to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     mask_delta = off_m < N_CTX
 
     # delta[m] = sum_d o[m,d]*do[m,d]: a reduction over d, so HEAD_DIM_PAD tiles it and the partials
@@ -365,10 +366,10 @@ def _attn_bwd(
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
 
-    bhid = tl.program_id(2).to(tl.int64)
+    bhid, pid = row_tile(N_CTX, BLOCK_M2)  # 1-D grid: B * H * L rows pass the 65535 cap of axes y / z
+    pid = pid.to(tl.int64)
     off_chz = (bhid * N_CTX).to(tl.int64)
     adj = (stride_h * (bhid % HL) + stride_z * (bhid // HL)).to(tl.int64)
-    pid = tl.program_id(0).to(tl.int64)
 
     # offset pointers for batch/head
     Q += adj
@@ -559,7 +560,7 @@ def _atomic_bwd(
     delta = torch.empty_like(M)
 
     # fmt: off
-    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
+    grid = lambda META: row_tile_grid(B * HL, L, META["BLOCK_M1"])
     _attn_bwd_preprocess[grid](
         o, grad_output, delta,
         B, L, D,
@@ -574,7 +575,7 @@ def _atomic_bwd(
     dbias = torch.empty_like(bias)
 
     # fmt: off
-    grid = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
+    grid = lambda META: row_tile_grid(B * HL, L, META["BLOCK_M2"])
     _attn_bwd[grid](
         q, k, v, bias, sm_scale,
         grad_output, dq, dk, dv, dbias,
