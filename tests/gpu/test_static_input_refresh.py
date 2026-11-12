@@ -276,7 +276,7 @@ def test_padded_n_replay_builds_no_tables(atom_key, n_atoms):
         graph, out, tables = _capture(step)
         built = {k for k in cap._CAPTURE_BUILT if k[0] in {id(s) for s in stores}}
         assert not built, f"{len(built)} atom tables were made inside the capture (every replay remakes them)"
-        atom_tables = sum(1 for k in tables._keys if k[0] in {id(s) for s in stores})
+        atom_tables = sum(1 for k in tables._records if k[0] in {id(s) for s in stores})
         assert atom_tables == 2 * per_block, f"the capture read {atom_tables} atom tables from the eager cache, expected {2 * per_block}"
         with profile(activities=[ProfilerActivity.CUDA]) as prof:
             graph.replay()
