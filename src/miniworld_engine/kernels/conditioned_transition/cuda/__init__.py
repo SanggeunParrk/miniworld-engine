@@ -22,8 +22,19 @@ STAT_W = 128  # kept for the runner's buffer layout (the Triton module's statist
 
 
 def _ext():
-    arch = "90a" if torch.cuda.get_device_capability() == (9, 0) else "100"
-    return _arch_ext(arch)
+    return _device_ext(torch.cuda.current_device())
+
+
+@functools.lru_cache(maxsize=None)
+def _device_ext(index: int):
+    """The current device's build, resolved once per device (a token step asks several times per call: the capability query is not free)."""
+    return _arch_ext("90a" if torch.cuda.get_device_capability(index) == (9, 0) else "100")
+
+
+@functools.lru_cache(maxsize=None)
+def _capability(device: torch.device) -> tuple[int, int]:
+    """``torch.cuda.get_device_capability`` of a tensor's device (always indexed), once per device."""
+    return torch.cuda.get_device_capability(device)
 
 
 @functools.lru_cache(maxsize=None)
@@ -327,7 +338,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         or tuple(pair.shape[:3]) != (B, L, L)
         or pair.shape[3] not in (128, 256, 512)  # 256: Protenix-v2's diffusion pair; 512: IntelliFold2's
         or not pair.is_contiguous()
-        or torch.cuda.get_device_capability(single.device) != (9, 0)
+        or _capability(single.device) != (9, 0)
     ):
         raise ValueError(
             "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768 (12 / 16 / 24 heads) or 1024 (16 heads) / cond 384 or 768 / pair 128, 256 or 512"

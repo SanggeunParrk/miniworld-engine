@@ -341,17 +341,58 @@ def _core_provider(q, k, v, bias, mask_rows, gate, sel, *, cell: str = "dit_h16d
 class _View:
     """``module`` with some attributes overridden (read-only forwarding of everything else, parameters included)."""
 
+    # The overrides are the view's own attributes, so only the other names reach ``__getattr__``; no ``object.__getattribute__`` (Dynamo
+    # cannot trace it: a graph break per block call inside FoldForge's compiled sampler step).
     def __init__(self, module, **over):
-        object.__setattr__(self, "_module", module)
-        object.__setattr__(self, "_over", over)
+        self._module = module
+        for name, value in over.items():
+            setattr(self, name, value)
 
     def __getattr__(self, name):
-        over = object.__getattribute__(self, "_over")
-        return over[name] if name in over else getattr(object.__getattribute__(self, "_module"), name)
+        if name == "_module":
+            raise AttributeError(name)
+        return getattr(self._module, name)
 
 
 def _kernel_view(block):
     return _View(block, implementation="miniworld", attention=_View(block.attention, _backend="portable"))
+
+
+# ------------------------------------------------------------------------------------------------------------ per-block call cache
+# A sampler calls every block with the same shapes tens of times (FoldForge: 2 eager warm-up steps + a capture per forward), and the
+# block's "cuda" decision (``_cuda_route``) and the fused step's per-call constants (``token_dit.infer_args``: the leaves, the options)
+# are the same at every such call. They were re-derived at each one -- ~25 parameter lookups and two range checks through the kernel
+# view, about as much host time as the step's own launches. Kept per block (``block.__dict__``), keyed by the call's metadata (shapes,
+# strides, dtypes, devices: no device read), for grad-free calls only (a training call's route reads ``requires_grad``). Stale when:
+#   * any module registers a parameter or a submodule (a replaced weight / part: the global registration hooks below bump _STRUCTURE);
+#   * the block is converted (``.to`` / ``.float`` / ``set_master_weights``: ``TokenDiTProtenix._apply`` drops it);
+#   * ``kernels._capture.clear_weight_caches(block)`` (a registered instance cache attribute).
+# A plain attribute edit after the first call (a LayerNorm's eps, ``use_qk_norm``) is not seen: call ``clear_weight_caches(block)``.
+# Under Dynamo nothing is cached: the trace itself is the cache (its guards are the key).
+_CALL_CACHE = _capture.instance_cache_attr("_cuda_call_cache")
+_STRUCTURE = [0]
+
+
+def _structure_changed(*_args) -> None:
+    _STRUCTURE[0] += 1
+
+
+torch.nn.modules.module.register_module_parameter_registration_hook(_structure_changed)
+torch.nn.modules.module.register_module_module_registration_hook(_structure_changed)
+
+
+def _call_cache(block) -> dict | None:
+    """The block's call cache (see above), or None when this call must not use one (grad mode, Dynamo tracing)."""
+    if torch.is_grad_enabled() or torch.compiler.is_compiling():
+        return None
+    entry = block.__dict__.get(_CALL_CACHE)
+    if entry is None or entry[0] != _STRUCTURE[0]:
+        entry = block.__dict__[_CALL_CACHE] = (_STRUCTURE[0], {})
+    return entry[1]
+
+
+def _meta(t: torch.Tensor | None):
+    return None if t is None else (t.shape, t.stride(), t.dtype, t.device)
 
 
 def _h100_reason(single: torch.Tensor) -> str | None:
@@ -500,8 +541,29 @@ class TokenDiTProtenix(BackendModule):
     # pair per trunk_seed, the key mask expanded over B), 16 heads x 48, cond 384 or 768, pair 128 / 256 / 512 (the fused blocks' row
     # kernels and weight packs are built per cond / pair width), transition n = 2, LayerNorm eps 1e-5,
     # a key mask shared by the samples; inference L a multiple of 128, training any L (padded to 128).
+    def _apply(self, fn, *args, **kwargs):
+        self.__dict__.pop(_CALL_CACHE, None)  # a conversion can change the parameters' dtype / device (the call cache's constants)
+        return super()._apply(fn, *args, **kwargs)
+
     def _cuda_route(self, single, cond, pair, mask, compute_dtype, extra_pair_bias) -> tuple[str | None, Any]:
-        """("infer" | "train", the [B, L] key mask), ("a100", None) or (None, why not)."""
+        """("infer" | "train", the [B, L] key mask), ("a100", None) or (None, why not). A grad-free H100 decision is kept in the block's
+        call cache (``_call_cache``), keyed by the call's metadata."""
+        cache = _call_cache(self)
+        if cache is None:
+            return self._cuda_route_of(single, cond, pair, mask, compute_dtype, extra_pair_bias)
+        key = ("route", _meta(single), _meta(cond), _meta(pair), _meta(mask), compute_dtype, _meta(extra_pair_bias))
+        hit = cache.get(key)
+        if hit is not None:
+            return ("infer", _shared_key_mask(mask)[0]) if hit == "infer" else (None, hit[1])
+        route, out = self._cuda_route_of(single, cond, pair, mask, compute_dtype, extra_pair_bias)
+        if _h100_reason(single) is None:  # the H100 route only (the A100 route also reads the autocast state)
+            if route == "infer":
+                cache[key] = "infer"
+            elif route is None:
+                cache[key] = (None, out)
+        return route, out
+
+    def _cuda_route_of(self, single, cond, pair, mask, compute_dtype, extra_pair_bias) -> tuple[str | None, Any]:
         if _a100(single):
             return self._a100_route(single, cond, pair, mask, compute_dtype, extra_pair_bias)
         why = _h100_reason(single)
@@ -546,7 +608,13 @@ class TokenDiTProtenix(BackendModule):
             return token_dit_train.block(view, single, cond, pair, km, compute_dtype, extra_pair_bias)
         from miniworld_engine.kernels.integrations import token_dit
 
-        return token_dit.update(view, single, cond, pair, km, extra_pair_bias)
+        cache = _call_cache(self)
+        if cache is None:
+            return token_dit.update(view, single, cond, pair, km, extra_pair_bias)
+        args = cache.get(("args", single.dtype))
+        if args is None:
+            args = cache["args", single.dtype] = token_dit.infer_args(view, single.dtype)
+        return token_dit.update(view, single, cond, pair, km, extra_pair_bias, args)
 
     # A100 (sm_80): the block's two parts on their sm_80 paths, forward and backward. The attention: kernels/integrations/augattn_sm80 (the
     # module's AdaLN, then one autograd Function from the AdaLN output to the residual: cuBLAS projections, the pair bias kernels, the
