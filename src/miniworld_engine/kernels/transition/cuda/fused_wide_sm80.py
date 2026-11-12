@@ -12,7 +12,6 @@ wgmma / tcgen05.  What is hand CUDA and what cuBLAS was decided by measurement (
 fixed order (no atomics), so a replay is bit-identical.
 """
 
-import functools
 from pathlib import Path
 
 import torch
@@ -21,7 +20,8 @@ from ... import _capture
 from ..._compile import opaque
 from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 from . import fused_bwd_sm80, fused_fwd_sm80
-from .fused_sm80 import _is_ampere, _is_fake
+from ._arch import is_sm120, per_arch, served
+from .fused_sm80 import _is_fake
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -29,22 +29,25 @@ _dir = Path(__file__).parent / "sm80"
 WIDTHS = (64, 128, 256, 384, 512, 768)
 
 
-@functools.lru_cache(maxsize=1)
-def _ext():
+def _build(suffix: str, gencode: str):
     ensure_cuda_home()
     return load_extension(
-        name="transition_wide_sm80",
+        name=f"transition_wide_{suffix}",
         sources=[str(_dir / "transition_wide_sm80.cu")],
         extra_cuda_cflags=[
             *host_flags(),
             "-std=c++17",
             "-O3",
-            "-gencode=arch=compute_80,code=sm_80",
+            gencode,
             f"-I{_dir}",
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
     )
+
+
+#: the A100 build (``transition_wide_sm80``) and the GeForce RTX 5090 one (``transition_wide_sm120``, the same source for sm_120a); ``_ext`` loads the current card's
+_ext, _ext_sm80, _ext_sm120 = per_arch(_build)
 
 
 @torch.compiler.assume_constant_result
@@ -65,7 +68,7 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """The kernels' own requirements: sm_80, bf16, D in WIDTHS, H % 64 == 0, any row count; the weights bf16 or fp32 (an fp32 master: the entries cast them to bf16 outside autograd)."""
     if not x.is_cuda or x.dtype is not torch.bfloat16 or wa.dtype not in _WEIGHT_DTYPES or ws.dtype not in _WEIGHT_DTYPES:
         return False
-    if not _is_ampere(x.device.index if x.device.index is not None else torch.cuda.current_device()):
+    if not served(x.device):
         return False
     d, h = x.shape[-1], wa.shape[0]
     if d not in WIDTHS or wa.shape != (h, d) or ws.shape != (d, h) or h % 64:
@@ -180,9 +183,14 @@ def _kernel_weights(wa, wb, ws, dtype, cache: bool):
     )[:3]
 
 
-def _save_ab(m: int, d: int, h: int, save: bool) -> bool:
+def _one_kernel_bwd(m: int, d: int, h: int, device: torch.device) -> bool:
+    """The one-kernel backward (``fused_bwd_sm80``) serves: an A100 (its tiles need more than the RTX 5090's 99 KB of shared memory) and a build for (d, h) at m rows."""
+    return not is_sm120(device) and fused_bwd_sm80.supports(d, h, m) and fused_bwd_sm80.loads()
+
+
+def _save_ab(m: int, d: int, h: int, save: bool, device: torch.device) -> bool:
     """True: the training forward also writes h and a | b, and the backward is the one-kernel ``gate_dh`` (B200's saved-activation scheme at D >= 256)."""
-    return save and d >= SAVE_AB_MIN_D and m >= SAVE_AB_MIN_ROWS and not (fused_bwd_sm80.supports(d, h, m) and fused_bwd_sm80.loads())
+    return save and d >= SAVE_AB_MIN_D and m >= SAVE_AB_MIN_ROWS and not _one_kernel_bwd(m, d, h, device)
 
 
 #: widths / rows from which the saved a | b scheme is used (measured: docs page)
@@ -199,7 +207,7 @@ def _dh_cfg(m: int, d: int, h: int) -> int:
 def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, ln):
     """(out like x, xn [M, D] and stats [M, 2] f32 when ``save`` and ``ln`` else empty, h [M, H] and a | b [M, 2H] when the saved-activation scheme applies else empty)."""
     keep = save and ln
-    sab = _save_ab(x.shape[0], x.shape[1], wa.shape[0], save)
+    sab = _save_ab(x.shape[0], x.shape[1], wa.shape[0], save, x.device)
     h = wa.shape[0]
     return (
         torch.empty_like(x),
@@ -230,7 +238,7 @@ def _fwd_launch(
     if ln:
         gamma, beta = _f32(gamma, not save), _f32(beta, not save)
     # the weights are bf16 or fp32 (a master); the fused forward casts (and packs, cached by the parameters' version) itself, the other path casts here
-    if fused_fwd_sm80.supports(d, wa.shape[0], m) and fused_fwd_sm80.loads():
+    if not is_sm120(x.device) and fused_fwd_sm80.supports(d, wa.shape[0], m) and fused_fwd_sm80.loads():
         # D = 64 / 128: the whole forward in one kernel (a warp owns 32 rows for the whole hidden dimension)
         out, xn, stats = fused_fwd_sm80.forward(x, gamma, beta, wa, wb, ws, eps, save, cache=not save, ln=ln)
         return (
@@ -247,7 +255,7 @@ def _fwd_launch(
         xn, stats = ext.ln_fwd(x, gamma, beta, eps, save)
     else:
         xn, stats = x, torch.empty((0, 2), dtype=torch.float32, device=x.device)
-    if _save_ab(m, d, wa.shape[0], save):
+    if _save_ab(m, d, wa.shape[0], save, x.device):
         hid, ab = ext.dual_swiglu_save(xn, wa, wb, dual)
     else:
         hid, ab = ext.dual_swiglu(xn, wa, wb, dual), x.new_empty((0,))
@@ -296,7 +304,7 @@ def _bwd_launch(
     h = wa.shape[0]
     if ln:
         gamma = _f32(gamma, False)
-    if fused_bwd_sm80.supports(d, h, m) and fused_bwd_sm80.loads():
+    if _one_kernel_bwd(m, d, h, x.device):
         # D = 64 / 128, whole 256-row tiles: PW (a, b, dh, SwiGLU backward, dW partials, dA | dB blocks) + X (d_xn, LayerNorm backward) + the partial sums
         return fused_bwd_sm80.backward(dy, x, xn, stats, gamma, wa, wb, ws, ln, gdt, wdt)
     ext = _ext()
@@ -550,7 +558,7 @@ def f32_supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         return False
     if wa.dtype not in _WEIGHT_DTYPES or ws.dtype not in _WEIGHT_DTYPES:
         return False
-    if not _is_ampere(x.device.index if x.device.index is not None else torch.cuda.current_device()):
+    if not served(x.device):
         return False
     d, h = x.shape[-1], wa.shape[0]
     return d in F32_WIDTHS and tuple(wa.shape) == (h, d) and tuple(ws.shape) == (d, h) and h % 64 == 0
@@ -741,7 +749,7 @@ def transition_f32_sm80(x, gamma, beta, wa, wb, ws, eps):
     shape = x.shape
     flat = x.reshape(-1, shape[-1]).contiguous()
     gf, bf = _f32(gamma, True), _f32(beta, True)
-    if fused_fwd_sm80.f32_supports(flat.shape[1], wa.shape[0], flat.shape[0]) and fused_fwd_sm80.loads():
+    if not is_sm120(x.device) and fused_fwd_sm80.f32_supports(flat.shape[1], wa.shape[0], flat.shape[0]) and fused_fwd_sm80.loads():
         # enough rows at a fused fp32 shape: the one-kernel forward (the same forms and scales, packed once per parameter version)
         wpk, gbk, sc = _capture.param_forms(
             "transition_fused_fwd_f32_pack_sm80",

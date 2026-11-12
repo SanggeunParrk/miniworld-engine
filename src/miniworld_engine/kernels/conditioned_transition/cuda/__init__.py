@@ -649,5 +649,5 @@ def _prebuild_sm80(rows):
     if any(r["module"] in _SM80_TOKEN and r["mode"] == "train" for r in rows):  # the training path's parameter casts (transition family)
         from miniworld_engine.kernels.transition.cuda import parameter_cast_pack_sm80, parameter_cast_sm80
 
-        yield parameter_cast_sm80._ext
+        yield parameter_cast_sm80._ext_sm80
         yield parameter_cast_pack_sm80._ext

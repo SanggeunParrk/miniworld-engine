@@ -13,14 +13,14 @@ import torch
 
 from ..._compile import opaque
 from . import fused_wide_sm80 as _wide
-from .fused_sm80 import _is_fake
+from .fused_sm80 import _is_ampere, _is_fake
 
 
 def supported(x: torch.Tensor, d_out: int) -> bool:
     """bf16 on an A100, width 128 / 256 / 512 in (the row kernels) and a multiple of 128 out (the tile GEMM's N), the extension builds."""
     if not x.is_cuda or x.dtype is not torch.bfloat16 or x.shape[-1] not in (128, 256, 512) or d_out % 128:
         return False
-    return _wide._is_ampere(x.device.index if x.device.index is not None else torch.cuda.current_device()) and _wide._loads()
+    return _is_ampere(x.device.index if x.device.index is not None else torch.cuda.current_device()) and _wide._loads()
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------- LayerNorm + Linear
