@@ -371,6 +371,7 @@ def _bwd_launch(
 
 _weight_streams: dict = {}
 WGRAD_AFTER_DXN = False
+DWS_LAST = False
 
 
 def _weight_stream(device: torch.device) -> torch.cuda.Stream:
@@ -391,8 +392,9 @@ def _bwd_saved_overlap(ext, dy, x, xn, stats, gamma, wa, wb, ws, hid, ab, gdt, w
     main = torch.cuda.current_stream(x.device)
     side = _weight_stream(x.device)
     side.wait_stream(main)
-    with torch.cuda.stream(side):
-        dws = mm_w(dy.t(), hid)  # [D, H]
+    if not DWS_LAST:
+        with torch.cuda.stream(side):
+            dws = mm_w(dy.t(), hid)  # [D, H]
     dab = ext.gate_dh(dy, ws.t().contiguous(), ab, _dh_cfg(m, d, h))  # dA | dB [M, 2H]
     if WGRAD_AFTER_DXN:
         dxn = _mm_f32(dab, _wab(wa, wb))  # [M, D] f32
@@ -401,6 +403,8 @@ def _bwd_saved_overlap(ext, dy, x, xn, stats, gamma, wa, wb, ws, hid, ab, gdt, w
     with torch.cuda.stream(side):
         side.wait_event(ready)
         dwab = mm_w(dab.t(), xn)  # [2H, D] = [dWa; dWb]
+        if DWS_LAST:
+            dws = mm_w(dy.t(), hid)
     if not WGRAD_AFTER_DXN:
         dxn = _mm_f32(dab, _wab(wa, wb))  # [M, D] f32
     dx, dgam, dbeta = ext.ln_bwd(dxn, x, stats, gamma, dy, gdt)
