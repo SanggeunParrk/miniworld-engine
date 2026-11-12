@@ -330,12 +330,21 @@ def _mod_fwd(c: torch.Tensor, wmod: torch.Tensor, save: bool) -> list[torch.Tens
 
 
 def _mod_bwd(dmod: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """(dc in c's dtype, dWmod fp32)."""
-    if c.dtype == _BF:
-        return sm80.mod_bwd(dmod, c, a, wmod, dw_dtype=_F32, **sm80.train_cfg(c.shape[0]).get("mod_bwd", {}))
+    """(dc in c's dtype, dWmod fp32). bf16: the fused sm_80 kernels (``sm80.mod_bwd``: g as two bf16 terms), or for a call of few rows
+    (``sm80.train_cfg``: ``mod_bwd_gemm``) the fp32 path's form -- cuBLAS products on fp32 copies of the bf16 operands (TF32 as torch's matmul flag
+    says) and the silu backward on the bf16-rounded gradient (row stage 14, the fused kernel's rounding point): the fused kernels' dc tiles and
+    dWmod partial sums run on a few CTAs there (L 1024: 40 us of a 270 us step)."""
+    tc = sm80.train_cfg(c.shape[0])
+    bf = c.dtype == _BF
+    if bf and not tc.get("mod_bwd_gemm"):
+        return sm80.mod_bwd(dmod, c, a, wmod, dw_dtype=_F32, **tc.get("mod_bwd", {}))
+    if bf:
+        w32, a32 = torch.empty(wmod.shape, device=c.device, dtype=_F32), torch.empty(a.shape, device=c.device, dtype=_F32)
+        sm80._ext().native_copy([wmod, a], [w32, a32], 0)  # exact: bf16 values in fp32
+        wmod, a = w32, a32
     da, dw = _mm(dmod, wmod), _mm(dmod.t(), a)
     dc = torch.empty_like(c)
-    sm80._ext().native_rows([c, da], [dc], 14, 1, 1, c.shape[0], False, FP32_EPS)
+    sm80._ext().native_rows([c, da], [dc], 14, 1, 1, c.shape[0], bf, FP32_EPS)
     return dc, dw
 
 
