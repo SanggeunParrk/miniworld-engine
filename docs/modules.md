@@ -145,6 +145,18 @@ of every class the nine 5I28 models build carry 1024 | 1536 | 2048, their atom r
 - **A100 triangle attention, training**: refused with a reason by the sm_80 kernels' training bias-gradient budget at L 1536 (OpenDDE
   d_pair 384) and L 2048 (d_pair 256 / 384, Chai-1 d_pair 256, RoseTTAFold3 d_pair 64 with d_hidden 256); inference is served at every
   5I28 length.
+- **OpenDDE's structural-token refiner pair, > 2**31 elements**: OpenDDE runs a pairformer-like refiner on a [S, S, 384] pair with S
+  well above the token count (S = 1963 / 2944 / ~3900 at n = 8 / 12 / 16; 1.5e9 / 3.3e9 / 5.8e9 elements). No requirement row covers
+  it (the rows stop at L 2048; a 10-minute job cannot measure every backend there, and the float64 / float32 reference does not fit next
+  to a kernel's at S 2944). The Triton TriMul's fused back half indexed its channel-major contraction in int32 (`channel * L * L`): an
+  illegal address on A100 and a silently wrong result on H100 past 2**31 elements. It now takes a 64-bit channel offset above that
+  bound (`back.py` `WIDE`; the 32-bit kernel below it, unchanged speed). Probed at S 2944, d_pair 384 (bf16 / master inference, both
+  cards, against the float32 reference at S / 8 tiled 8 x 8 -- TriMul, triangle attention and the row-wise ops are invariant under
+  that tiling): `TriangleMultiplication` (triton; cuda), `TriangleAttention` (n_head 12, triton; cuda), `LayerNorm` 384, `Transition`
+  384 n = 2 / 4 and `OuterProductMean` -> 384 (triton; cuda) all match the reference at S / 8; compute-sanitizer memcheck clean
+  (Triton TriMul at L 2400). The A100 TriMul `cuda` kernels refuse L 3900 (n = 16) with their reason; the Triton one serves it
+  (66 GB peak). The Triton TriMul's *training* pipeline keeps 32-bit strided offsets in its output LayerNorm (layernorm_linear
+  `te_style`): it refuses L * L * max(d_pair, d_hidden) >= 2**31 (bidirectional: 2 * d_hidden) with a reason.
 - **Accuracy at these lengths**: the float64 gold of a triangle attention does not fit past ~1024 tokens (N^3 x heads x 8 B), so the
   measurer skips those cases by design; checked against a float32 gold instead at 1024 (every width: cuda / triton within the pytorch
   backend's error), not a judge measurement.

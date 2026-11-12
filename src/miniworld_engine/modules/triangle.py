@@ -819,9 +819,7 @@ class TriangleAttentionChai1Confidence(_TriangleAttentionFp32Softmax):
 
 #: ``TriangleAttention(model=name)`` -> the class it builds.
 TRIANGLE_ATTENTION_MODELS: dict[str, type[_TriangleAttentionBase]] = {
-    **dict.fromkeys(
-        ("miniworld", "boltz2", "protenix", "protenix_v2", "opendde", "esmfold2", "openfold3_preview2"), TriangleAttention
-    ),
+    **dict.fromkeys(("miniworld", "boltz2", "protenix", "protenix_v2", "opendde", "esmfold2", "openfold3_preview2"), TriangleAttention),
     **dict.fromkeys(("af3", "openfold3", "intellifold2"), TriangleAttentionAF3),
     "rf3": TriangleAttentionRF3,
     "chai1": TriangleAttentionChai1,
@@ -967,7 +965,9 @@ class BidirectionalTriangleAttention(BackendModule, MasterWeights):
 
 
 # ======================================================================================================= triangle multiplicative update
-def _trimul_triton_refusal(module, pair: torch.Tensor, mask: torch.Tensor | None, d_hidden: int) -> str | None:
+def _trimul_triton_refusal(
+    module, pair: torch.Tensor, mask: torch.Tensor | None, d_hidden: int, *, bidirectional: bool = False
+) -> str | None:
     """The range of the portable Triton TriMul (unidirectional and bidirectional): CUDA, bf16 activations (the matrices are cast to the pair's dtype at the call: fp32 masters take their gradient in fp32),
     a square pair, a bool [B, L] mask, d_hidden != d_pair only within ``contract.hidden_refusal``."""
     if not pair.is_cuda:
@@ -978,6 +978,15 @@ def _trimul_triton_refusal(module, pair: torch.Tensor, mask: torch.Tensor | None
         return f"pair must be [B, L, L, d_pair], got {tuple(pair.shape)}"
     if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != tuple(pair.shape[:2])):
         return "mask must be a bool [B, L] residue mask"
+    # The inference pipeline indexes in 64 bits (any plane that fits in memory). The training one keeps 32-bit strided offsets in its
+    # LN_out kernels (layernorm_linear te_style, the m-major (L * L, width) view of the contraction), so it takes planes below 2**31
+    # elements of the widest (L * L, width) tensor: width = max(d_pair, d_hidden), 2 * d_hidden for the bidirectional packed contraction.
+    width = 2 * d_hidden if bidirectional else max(pair.shape[-1], d_hidden)
+    if (torch.is_grad_enabled() or module.training) and pair.shape[1] * pair.shape[2] * width >= 2**31:
+        return (
+            f"training (grad enabled or train mode) at L {pair.shape[1]}, width {width}: the Triton TriMul training kernels take L * L * width < 2**31 "
+            "elements (inference: no bound)"
+        )
     from miniworld_engine.kernels.trimul_inproj.triton.contract import hidden_refusal
 
     return hidden_refusal(pair.shape[-1], d_hidden)
@@ -1584,7 +1593,7 @@ class BidirectionalTriangleMultiplication(BackendModule, MasterWeights):
         return _trimul_cuda_forward(self, pair, mask, dropout_p, bidirectional=True)
 
     def _supports_triton(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
-        return _trimul_triton_refusal(self, pair, mask, self.d_hidden)
+        return _trimul_triton_refusal(self, pair, mask, self.d_hidden, bidirectional=True)
 
     def _forward_triton(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> torch.Tensor:
         from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import bidirectional_trimul_triton
