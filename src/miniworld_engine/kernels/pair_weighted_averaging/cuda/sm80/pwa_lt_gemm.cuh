@@ -63,7 +63,9 @@ inline Plan make_plan(const Entry& e, int64_t arows, int64_t acols, int64_t brow
   if (cublasLtMatrixLayoutCreate(&p.lc, ct, N, M, N) != CUBLAS_STATUS_SUCCESS) return p;
   auto batch = [&](cublasLtMatrixLayout_t l, long stride) {
     int32_t bc = e.B; int64_t st = stride;
+#ifndef MWE_SM120   // (never reached there: no table; the toolkit of that build may predate the pointer-array batch mode)
     if (ptrmode) { uint32_t mode = CUBLASLT_BATCH_MODE_POINTER_ARRAY; cublasLtMatrixLayoutSetAttribute(l, CUBLASLT_MATRIX_LAYOUT_BATCH_MODE, &mode, sizeof(mode)); }
+#endif
     cublasLtMatrixLayoutSetAttribute(l, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc));
     if (!ptrmode) cublasLtMatrixLayoutSetAttribute(l, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &st, sizeof(st));
   };

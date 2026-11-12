@@ -64,3 +64,40 @@ def cflags(flags: list[str]) -> list[str]:
 def device_ok(t: torch.Tensor) -> bool:
     """A CUDA tensor on an A100 (8.0) or an RTX 5090 (12.0): the cards these builds serve."""
     return t.is_cuda and torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0))
+
+
+def prebuild_sm120(rows_opm: bool = True, rows_pwa: bool = True, rows_chai: bool = True, rows_wide: bool = True):
+    """The RTX 5090 builds the OuterProductMean / MSAPairWeightedAveraging ``cuda`` paths reach (for ``kernels/_prebuild.py``'s sm120 target;
+    ``kernels/integrations.prebuild`` yields these for the sm120 arch): each loader called under ``planning_for("sm120")``."""
+    import functools
+
+    def under(fn):
+        def call():
+            with planning_for("sm120"):
+                return fn()
+
+        functools.update_wrapper(call, fn)
+        return call
+
+    from miniworld_engine.kernels.outer_product_mean.cuda import chai_sm80, mask_count_ballot_sm80, mask_epilogue_sm80, ogemm_sm80
+    from miniworld_engine.kernels.outer_product_mean.cuda import sm80 as opm
+    from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80 as pwa
+    from miniworld_engine.kernels.pair_weighted_averaging.cuda import wide_sm80
+
+    loaders = []
+    if rows_opm:
+        loaders += [opm.ext, ogemm_sm80.ext, mask_count_ballot_sm80._ext, mask_epilogue_sm80._ext]
+    if rows_chai:
+        loaders += [chai_sm80.ext, ogemm_sm80.ext]
+    if rows_pwa:
+        loaders += [pwa.ext, pwa._bmm_ext]
+    if rows_wide:
+        from miniworld_engine.kernels.integrations import pwa_wide_sm80
+        from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _lt
+
+        loaders += [wide_sm80.ext, pwa_wide_sm80._glue_sm120, _lt]
+    seen = set()
+    for fn in loaders:
+        if fn not in seen:
+            seen.add(fn)
+            yield under(fn)

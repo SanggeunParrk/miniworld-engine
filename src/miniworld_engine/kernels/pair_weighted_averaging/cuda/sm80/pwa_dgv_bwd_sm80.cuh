@@ -33,13 +33,15 @@ struct DgvParams {
   float eps;
 };
 
+#ifdef MWE_SM120
+constexpr int dgv_smem_of(int wb, int d, int ntok, int nring) { return 2 * wb + ntok * d * 2 + nring * ntok * 128 + 2 * d * 4; }   // without the dgamma | dbeta rows
+#endif
 template <int D, int C> struct DgvCfg {
   static constexpr int HC = 8 * C, NG = HC / 64, NTHR = 256, NCH = D / 8;
   static constexpr int WB = HC * D * 2;
 #ifdef MWE_SM120   // 99 KiB: dgamma | dbeta in registers; tiles of 64 MSA rows (warps 0-3 own the rows, all eight take the dWv block) and the deepest ring that fits
-  static constexpr int smem_of(int ntok, int nring) { return 2 * WB + ntok * D * 2 + nring * ntok * 128 + 2 * D * 4; }
-  static constexpr int NTOK = smem_of(128, 4) <= MWE_SMEM_MAX ? 128 : 64;
-  static constexpr int NRING = smem_of(NTOK, 4) <= MWE_SMEM_MAX ? 4 : (smem_of(NTOK, 3) <= MWE_SMEM_MAX ? 3 : 2);
+  static constexpr int NTOK = dgv_smem_of(WB, D, 128, 4) <= MWE_SMEM_MAX ? 128 : 64;
+  static constexpr int NRING = dgv_smem_of(WB, D, NTOK, 4) <= MWE_SMEM_MAX ? 4 : (dgv_smem_of(WB, D, NTOK, 3) <= MWE_SMEM_MAX ? 3 : 2);
   static constexpr int RED = 0;
 #else
   static constexpr int NTOK = 128;

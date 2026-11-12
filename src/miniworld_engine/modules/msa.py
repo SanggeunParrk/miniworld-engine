@@ -187,7 +187,7 @@ class OuterProductMean(BackendModule, MasterWeights):
     #:   divide after the projection, d_msa 128, d_hidden 32, d_pair % 256, no projection bias (ESMFold2, Protenix-v2)  the esmfold2 kit's
     #:       ``ef2_msa_v2.opm_fused`` (LN + W x row mask producer, cuBLAS, projection + bias / clamp(n, 1) + pair residual epilogue)
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: sm_80 paths
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: sm_80 paths; 2026-11-12: their sm_120a build (RTX 5090)
 
     # ------------------------------------------------------------------------------------------------------------------ anthropic
     def _anthropic_route(self, msa, mask, residual) -> tuple[str | None, str | None]:
@@ -562,8 +562,9 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
     backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:a100_sm80": 2
-    }  # 2026-11-10: the BIG width (d_msa 256 / d_pair 512) on sm_80 (pwa_wide_sm80)
+        "cuda:a100_sm80": 2,
+        "cuda:5090_sm120": 1,
+    }  # 2026-11-10: the BIG width (d_msa 256 / d_pair 512) on sm_80 (pwa_wide_sm80); 2026-11-12: the sm_120a build of the sm_80 paths (RTX 5090)
 
     #: "cuda": the H100 kernels (kernels.integrations.pwa_train / pwa_wide); "triton": kernels.pair_weighted_averaging.triton (see the
     #: _supports_ docstrings for the ranges). "anthropic" (inference only): the model kits' own masked PWA kernels (see _supports_anthropic).
