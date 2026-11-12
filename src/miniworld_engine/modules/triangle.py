@@ -819,9 +819,7 @@ class TriangleAttentionChai1Confidence(_TriangleAttentionFp32Softmax):
 
 #: ``TriangleAttention(model=name)`` -> the class it builds.
 TRIANGLE_ATTENTION_MODELS: dict[str, type[_TriangleAttentionBase]] = {
-    **dict.fromkeys(
-        ("miniworld", "boltz2", "protenix", "protenix_v2", "opendde", "esmfold2", "openfold3_preview2"), TriangleAttention
-    ),
+    **dict.fromkeys(("miniworld", "boltz2", "protenix", "protenix_v2", "opendde", "esmfold2", "openfold3_preview2"), TriangleAttention),
     **dict.fromkeys(("af3", "openfold3", "intellifold2"), TriangleAttentionAF3),
     "rf3": TriangleAttentionRF3,
     "chai1": TriangleAttentionChai1,

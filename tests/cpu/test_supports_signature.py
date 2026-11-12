@@ -37,7 +37,8 @@ def _call_signature(m: BackendModule, backend: str) -> inspect.Signature:
     ``*args`` pass-through (a cooperative mixin)."""
     sig = inspect.signature(getattr(m, f"_forward_{backend}"))
     if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values()):
-        sig = inspect.signature(m._forward_pytorch)  # pyright: ignore[reportAttributeAccessIssue]  -- every BackendModule has the reference
+        # every BackendModule defines the reference forward (nn.Module's __getattr__ types it Tensor | Module)
+        sig = inspect.signature(m._forward_pytorch)  # pyright: ignore[reportArgumentType]
     return sig
 
 
@@ -46,6 +47,15 @@ def _full_call(sig: inspect.Signature) -> tuple[list[object], dict[str, object]]
     args = [object() for p in sig.parameters.values() if p.kind in _POS]
     kwargs = {p.name: object() for p in sig.parameters.values() if p.kind is inspect.Parameter.KEYWORD_ONLY}
     return args, kwargs
+
+
+def _binds(check, args: list[object], kwargs: dict[str, object]) -> str | None:
+    """None if ``check`` binds the call, else the binding error."""
+    try:
+        inspect.signature(check).bind(*args, **kwargs)
+    except TypeError as e:
+        return str(e)
+    return None
 
 
 def _checks(m: BackendModule, backend: str) -> list[tuple[str, object]]:
@@ -60,15 +70,13 @@ def _checks(m: BackendModule, backend: str) -> list[tuple[str, object]]:
 
 @pytest.mark.parametrize(("module", "backend"), PAIRS, ids=[f"{m}-{b}" for m, b in PAIRS])
 def test_supports_binds_the_forward_arguments(module: str, backend: str):
-    n, row = FIRST[module]
+    _, row = FIRST[module]
     m = cfgmod.construct(cfgmod.module_class(module), cfgmod._variants(row["dims"], row["options"])[0]).set_backend(backend)
     sig = _call_signature(m, backend)
     args, kwargs = _full_call(sig)
     for name, check in _checks(m, backend):
-        try:
-            inspect.signature(check).bind(*args, **kwargs)  # pyright: ignore[reportArgumentType]
-        except TypeError as e:
-            pytest.fail(f"{module}.{name} does not take the arguments of _forward_{backend}{sig}: {e}")
+        why = _binds(check, args, kwargs)
+        assert why is None, f"{module}.{name} does not take the arguments of _forward_{backend}{sig}: {why}"
 
 
 @pytest.mark.parametrize(("module", "backend"), PAIRS, ids=[f"{m}-{b}" for m, b in PAIRS])
@@ -78,7 +86,9 @@ def test_unsupported_takes_make_inputs_positionally(module: str, backend: str):
     m, inputs = _build(n, row, backend)
     sig = _call_signature(m, backend)
     names = [p.name for p in sig.parameters.values() if p.kind in _POS]
-    assert set(inputs) <= set(sig.parameters), f"make_inputs keys {sorted(set(inputs) - set(sig.parameters))} not in _forward_{backend}{sig}"
+    assert set(inputs) <= set(sig.parameters), (
+        f"make_inputs keys {sorted(set(inputs) - set(sig.parameters))} not in _forward_{backend}{sig}"
+    )
     last = max((names.index(k) for k in inputs if k in names), default=-1)
     args = [inputs[k] if k in inputs else sig.parameters[k].default for k in names[: last + 1]]
     kwargs = {k: v for k, v in inputs.items() if k not in names}
