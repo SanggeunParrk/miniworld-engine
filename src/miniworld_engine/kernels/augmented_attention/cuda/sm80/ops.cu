@@ -15,6 +15,7 @@
 // the opt-in dynamic shared memory the generic pair-bias kernels may take: 160 KB on the A100, 99 KB on the RTX 5090 (MWE_SM120: the sm_120a build)
 #ifdef MWE_SM120
 #define AA80_SMEM_CAP 101376
+#include "pair_gen_sm120.cuh"
 #else
 #define AA80_SMEM_CAP (160 * 1024)
 #endif
@@ -392,6 +393,23 @@ void pair_bias_fwd(torch::Tensor z, torch::Tensor w, torch::Tensor bo, torch::Te
 namespace {
 template <int H, int R, bool PAD, typename T>
 void launch_gen(const torch::Tensor& z, const torch::Tensor& wcm, torch::Tensor& bo, const unsigned char* kvp, int64_t N, int64_t NZ, int64_t C, double eps, double oscale, float fill) {
+#ifdef MWE_SM120
+  // RTX 5090: the pair staged through shared memory in whole 128-B lines (pair_gen_sm120.cuh; bitwise the same result), where W' and the two-stage ring fit
+  // (d_pair up to 512 at 16 heads); the direct kernel below otherwise
+  if (aa80::pg_smem<H>((int)C) <= AA80_SMEM_CAP && C % (aa80::PG_LINE / (int)sizeof(T)) == 0) {
+    static bool set_s[64] = {};
+    const int dev_s = at::cuda::current_device() & 63;
+    if (!set_s[dev_s]) {
+      C10_CUDA_CHECK(cudaFuncSetAttribute(aa80::pair_bias_gen_staged_kernel<H, PAD, T, T>, cudaFuncAttributeMaxDynamicSharedMemorySize, AA80_SMEM_CAP));
+      set_s[dev_s] = true;
+    }
+    dim3 grid_s((unsigned)(N / aa80::PG_TJ), (unsigned)(N / aa80::PG_ROWS));
+    aa80::pair_bias_gen_staged_kernel<H, PAD, T, T><<<grid_s, aa80::PG_NT, aa80::pg_smem<H>((int)C), at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const T*>(z.data_ptr()), wcm.data_ptr<float>(), reinterpret_cast<T*>(bo.data_ptr()), (int)N, (int)NZ, (int)C, kvp, (float)eps, (float)oscale, fill);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
+#endif
   const size_t smem = ((size_t)C * H + H) * sizeof(float);
   TORCH_CHECK(smem <= AA80_SMEM_CAP, "pair_bias_gen: C x H too large for shared memory");
   static bool set[64] = {};                                   // the attribute is per device (and per instantiation: a static of the template)
