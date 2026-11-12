@@ -1,0 +1,211 @@
+{
+ "gpu": "NVIDIA GeForce RTX 5090 (sm120)",
+ "source": "Pretuned by kernels/_pretune.py (PRETUNE_VERSION 1): every candidate timed at the launches the requirements reach (triton.testing.do_bench, L2 flushed, median), top 4 kept, fastest first. Keys not re-tuned: converted from the old autotune/data/<op>/*sm90*.json (git HEAD). Keys: '<dtypes>|<shape bucket>[|<flags>]'. Shape: M = row bucket, L = length bucket, other names = exact width axes.",
+ "version": 1,
+ "ops": {
+  "mpnn_edge_tail_bwd_dx_gather_saveact_triton": {
+   "bfloat16+float32|M=147456,NEIGHBORS=48": [
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.114464},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 16}, "num_warps": 4, "num_stages": 2, "ms": 0.114576},
+    {"kwargs": {"BLOCK_M1": 64, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.114688},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 3, "ms": 0.114688}
+   ],
+   "bfloat16+float32|M=16384,NEIGHBORS=48": [
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 2, "num_stages": 2, "ms": 0.036864},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 16}, "num_warps": 4, "num_stages": 2, "ms": 0.038912},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.038944},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 128, "GROUP_M": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.038944}
+   ],
+   "bfloat16+float32|M=262144,NEIGHBORS=48": [
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 2, "num_stages": 2, "ms": 0.21488},
+    {"kwargs": {"BLOCK_M1": 64, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.21504},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.21504},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 16}, "num_warps": 4, "num_stages": 2, "ms": 0.21504}
+   ],
+   "bfloat16+float32|M=65536,NEIGHBORS=48": [
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 1, "num_stages": 2, "ms": 0.065472},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 2, "num_stages": 2, "ms": 0.065536},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 128, "GROUP_M": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.065824},
+    {"kwargs": {"BLOCK_M1": 64, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.067584}
+   ]
+  },
+  "mpnn_edge_tail_bwd_dx_saveact_triton": {
+   "bfloat16+float32|M=147456|EMIT_BIAS=0": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 2, "ms": 0.135552},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 2, "ms": 0.135552},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 3, "ms": 0.136128},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 3, "ms": 0.136832}
+   ],
+   "bfloat16+float32|M=147456|EMIT_BIAS=1": [
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 3, "ms": 0.145408},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 3, "ms": 0.145408},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.145472},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 3, "ms": 0.1456}
+   ],
+   "bfloat16+float32|M=16384|EMIT_BIAS=0": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 2, "ms": 0.038944},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 2, "ms": 0.040432},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 3, "ms": 0.040928},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.04096}
+   ],
+   "bfloat16+float32|M=16384|EMIT_BIAS=1": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.045056},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 2, "ms": 0.045056},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 16}, "num_warps": 4, "num_stages": 2, "ms": 0.045184},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 3, "ms": 0.045408}
+   ],
+   "bfloat16+float32|M=262144|EMIT_BIAS=0": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 2, "ms": 0.268096},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 2, "ms": 0.268224},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.268288},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 3, "ms": 0.268288}
+   ],
+   "bfloat16+float32|M=262144|EMIT_BIAS=1": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 2, "ms": 0.270256},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.270336},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.270336},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 3, "ms": 0.270368}
+   ],
+   "bfloat16+float32|M=65536|EMIT_BIAS=0": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 2, "ms": 0.069696},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 2, "ms": 0.070832},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.07168},
+    {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.07168}
+   ],
+   "bfloat16+float32|M=65536|EMIT_BIAS=1": [
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.07376},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 3, "ms": 0.07376},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 3, "ms": 0.074016},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 3, "ms": 0.0744}
+   ]
+  },
+  "mpnn_edge_tail_bwd_layernorm_saveact_triton": {
+   "bfloat16+float32|M=147456|DROPOUT=1": [
+    {"kwargs": {"BLOCK_M1": 128}, "num_warps": 8, "num_stages": 2, "ms": 0.143744},
+    {"kwargs": {"BLOCK_M1": 128}, "num_warps": 8, "num_stages": 3, "ms": 0.14376},
+    {"kwargs": {"BLOCK_M1": 64}, "num_warps": 8, "num_stages": 3, "ms": 0.151504},
+    {"kwargs": {"BLOCK_M1": 64}, "num_warps": 8, "num_stages": 2, "ms": 0.151552}
+   ],
+   "bfloat16+float32|M=16384|DROPOUT=1": [
+    {"kwargs": {"BLOCK_M1": 64}, "num_warps": 8, "num_stages": 3, "ms": 0.04704},
+    {"kwargs": {"BLOCK_M1": 128}, "num_warps": 8, "num_stages": 2, "ms": 0.049056},
+    {"kwargs": {"BLOCK_M1": 128}, "num_warps": 8, "num_stages": 3, "ms": 0.049104},
+    {"kwargs": {"BLOCK_M1": 64}, "num_warps": 8, "num_stages": 2, "ms": 0.051104}
+   ],
+   "bfloat16+float32|M=262144|DROPOUT=1": [
+    {"kwargs": {"BLOCK_M1": 128}, "num_warps": 8, "num_stages": 2, "ms": 0.277792},
+    {"kwargs": {"BLOCK_M1": 128}, "num_warps": 8, "num_stages": 3, "ms": 0.278448},
+    {"kwargs": {"BLOCK_M1": 64}, "num_warps": 8, "num_stages": 3, "ms": 0.286704},
+    {"kwargs": {"BLOCK_M1": 64}, "num_warps": 8, "num_stages": 2, "ms": 0.28672}
+   ],
+   "bfloat16+float32|M=65536|DROPOUT=1": [
+    {"kwargs": {"BLOCK_M1": 128}, "num_warps": 8, "num_stages": 2, "ms": 0.076064},
+    {"kwargs": {"BLOCK_M1": 128}, "num_warps": 8, "num_stages": 3, "ms": 0.076128},
+    {"kwargs": {"BLOCK_M1": 64}, "num_warps": 8, "num_stages": 3, "ms": 0.082272},
+    {"kwargs": {"BLOCK_M1": 64}, "num_warps": 8, "num_stages": 2, "ms": 0.082368}
+   ]
+  },
+  "mpnn_edge_tail_fwd_gemm_b2b_saveact_triton": {
+   "bfloat16+float32|M=147456": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 3, "ms": 0.104416},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 3, "ms": 0.104448},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 2, "ms": 0.104448},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 3, "ms": 0.104448}
+   ],
+   "bfloat16+float32|M=16384": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 3, "ms": 0.026624},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 2, "ms": 0.026624},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 3, "ms": 0.026624},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.026624}
+   ],
+   "bfloat16+float32|M=262144": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 3, "ms": 0.204864},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 3, "ms": 0.204864},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.204896},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 3, "ms": 0.204928}
+   ],
+   "bfloat16+float32|M=65536": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 3, "ms": 0.051328},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 3, "ms": 0.051376},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 3, "ms": 0.051392},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 3, "ms": 0.051488}
+   ]
+  },
+  "mpnn_edge_tail_fwd_gemm_gather_saveact_triton": {
+   "bfloat16+float32|M=147456,NEIGHBORS=48": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.106528},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.106528},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 2, "ms": 0.106528},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 2, "ms": 0.106528}
+   ],
+   "bfloat16+float32|M=16384,NEIGHBORS=48": [
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 3, "ms": 0.03072},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 3, "ms": 0.03072},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 2, "ms": 0.03072},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 2, "ms": 0.03072}
+   ],
+   "bfloat16+float32|M=262144,NEIGHBORS=48": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.213024},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.213024},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 2, "ms": 0.213024},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 8, "num_stages": 2, "ms": 0.213024}
+   ],
+   "bfloat16+float32|M=65536,NEIGHBORS=48": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.05344},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 1}, "num_warps": 4, "num_stages": 2, "ms": 0.054112},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 4, "num_stages": 3, "ms": 0.055296},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64, "BLOCK_N": 64, "GROUP_M": 4}, "num_warps": 8, "num_stages": 3, "ms": 0.055296}
+   ]
+  },
+  "mpnn_edge_tail_fwd_gemm_layernorm_saveact_triton": {
+   "bfloat16+float32|M=147456|DROPOUT=0": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64}, "num_warps": 4, "num_stages": 2, "ms": 0.135168},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 2, "ms": 0.135168},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 128}, "num_warps": 4, "num_stages": 3, "ms": 0.135168},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 2, "ms": 0.135168}
+   ],
+   "bfloat16+float32|M=147456|DROPOUT=1": [
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 3, "ms": 0.147456},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 3, "ms": 0.147456},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 2, "ms": 0.148528},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 3, "ms": 0.151712}
+   ],
+   "bfloat16+float32|M=16384|DROPOUT=0": [
+    {"kwargs": {"BLOCK_M1": 64, "BLOCK_K": 32}, "num_warps": 4, "num_stages": 2, "ms": 0.036864},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64}, "num_warps": 4, "num_stages": 2, "ms": 0.036864},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 2, "ms": 0.036864},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64}, "num_warps": 4, "num_stages": 1, "ms": 0.036864}
+   ],
+   "bfloat16+float32|M=16384|DROPOUT=1": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 3, "ms": 0.043008},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 3, "ms": 0.045056},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 2, "ms": 0.045056},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 2, "ms": 0.047072}
+   ],
+   "bfloat16+float32|M=262144|DROPOUT=0": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64}, "num_warps": 4, "num_stages": 2, "ms": 0.267328},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 128}, "num_warps": 4, "num_stages": 3, "ms": 0.268256},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 2, "ms": 0.268256},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64}, "num_warps": 4, "num_stages": 3, "ms": 0.268288}
+   ],
+   "bfloat16+float32|M=262144|DROPOUT=1": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 2, "ms": 0.278528},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 3, "ms": 0.280576},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 3, "ms": 0.283648},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 3, "ms": 0.288768}
+   ],
+   "bfloat16+float32|M=65536|DROPOUT=0": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 3, "ms": 0.067744},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64}, "num_warps": 4, "num_stages": 2, "ms": 0.069632},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64}, "num_warps": 4, "num_stages": 3, "ms": 0.069632},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 64}, "num_warps": 16, "num_stages": 2, "ms": 0.069632}
+   ],
+   "bfloat16+float32|M=65536|DROPOUT=1": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 3, "ms": 0.076128},
+    {"kwargs": {"BLOCK_K": 32, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 3, "ms": 0.07984},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 128}, "num_warps": 8, "num_stages": 2, "ms": 0.07984},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 3, "ms": 0.079984}
+   ]
+  }
+ }
+}
