@@ -93,6 +93,9 @@ def _back_kernel(
     # Measured on an A6000 at L=1024, d_pair=128: split 5.06 ms (2.79 + 2.27) against 1.68 ms for
     # this kernel at K = N = 128, while the whole module sat 1.2 ms behind cuequivariance.
     # KG == K reproduces the old kernel exactly: every loop below is single-trip in that case.
+    # 64-bit offsets: rm is int64 (the program id), and every channel-major `tri` read casts its channel index before `* M` -- an int32
+    # `rk * M` wrapped once K * M > 2**31 (OpenDDE's refiner pair, d 384 at L 2944: 3.3e9 elements; FoldForge 5I28 A100 n = 12: an
+    # illegal address on A100, a silently wrong result on H100).
     pid = tl.program_id(0).to(tl.int64)
     rm = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     mmask = rm[:, None] < M
@@ -108,7 +111,7 @@ def _back_kernel(
         rk = tl.arange(0, BLOCK_K)
         kmask1 = rk < K
         kmask = kmask1[None, :]
-        tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None], mask=mmask & kmask, other=0.0).to(tl.float32)
+        tri = tl.load(tri_ptr + rk[None, :].to(tl.int64) * M + rm[:, None], mask=mmask & kmask, other=0.0).to(tl.float32)
         mean = tl.sum(tri, axis=1) / K
         xc = tl.where(kmask, tri - mean[:, None], 0.0)
         var = tl.sum(xc * xc, axis=1) / K
@@ -149,14 +152,14 @@ def _back_kernel(
         for k0 in range(0, K, BLOCK_K):
             rk = k0 + tl.arange(0, BLOCK_K)
             kmask = rk[None, :] < K
-            tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None], mask=mmask & kmask, other=0.0).to(tl.float32)
+            tri = tl.load(tri_ptr + rk[None, :].to(tl.int64) * M + rm[:, None], mask=mmask & kmask, other=0.0).to(tl.float32)
             s += tl.sum(tri, axis=1)
         mean = s / K
         s = tl.zeros([BLOCK_M1], dtype=tl.float32)
         for k0 in range(0, K, BLOCK_K):
             rk = k0 + tl.arange(0, BLOCK_K)
             kmask = rk[None, :] < K
-            tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None], mask=mmask & kmask, other=0.0).to(tl.float32)
+            tri = tl.load(tri_ptr + rk[None, :].to(tl.int64) * M + rm[:, None], mask=mmask & kmask, other=0.0).to(tl.float32)
             xc = tl.where(kmask, tri - mean[:, None], 0.0)
             s += tl.sum(xc * xc, axis=1)
         var = s / K
@@ -176,7 +179,7 @@ def _back_kernel(
                 rk = k0 + tl.arange(0, BLOCK_K)
                 kmask1 = rk < K
                 kmask = kmask1[None, :]
-                tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None], mask=mmask & kmask, other=0.0).to(tl.float32)
+                tri = tl.load(tri_ptr + rk[None, :].to(tl.int64) * M + rm[:, None], mask=mmask & kmask, other=0.0).to(tl.float32)
                 lnw = tl.load(lnw_ptr + rk, mask=kmask1, other=0.0).to(tl.float32)
                 lnb = tl.load(lnb_ptr + rk, mask=kmask1, other=0.0).to(tl.float32)
                 xc = tl.where(kmask, tri - mean[:, None], 0.0)
