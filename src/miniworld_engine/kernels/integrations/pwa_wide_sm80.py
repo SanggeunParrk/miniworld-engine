@@ -24,6 +24,8 @@ Contract: bf16 msa [1, S, L, 256] and pair [1, L, L, 512], an optional bool key 
 
 from __future__ import annotations
 
+import functools
+
 import torch
 
 D_MSA, D_PAIR, HEADS, D_HIDDEN = 256, 512, 8, 32
@@ -35,9 +37,29 @@ def supported(d_msa: int, d_pair: int, n_head: int, d_hidden: int) -> bool:
 
 
 def _glue():
+    from miniworld_engine.kernels import _msa_card
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_bidir
 
+    if _msa_card.sm120():
+        return _glue_sm120()
     return sm80_bidir.glue()
+
+
+@functools.lru_cache(maxsize=None)
+def _glue_sm120():
+    """The same TriangleAttention glue source (``sm80_bidir.glue``: LayerNorm forward / backward, plain CUDA-core kernels) compiled for the
+    RTX 5090 (sm_120a): the sm_80 cubin does not run there."""
+    from miniworld_engine.kernels import _msa_card
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from miniworld_engine.kernels.triangle_attention.cuda import sm80_bidir
+
+    ensure_cuda_home()
+    return load_extension(
+        name="triattn_generic_sm80_sm120",
+        sources=[str(sm80_bidir._SRC / "triattn_generic_sm90.cu")],
+        extra_cuda_cflags=_msa_card.cflags([*host_flags(), *sm80_bidir._FLAGS, *gencodes("80")]),
+        verbose=False,
+    )
 
 
 def _lt():

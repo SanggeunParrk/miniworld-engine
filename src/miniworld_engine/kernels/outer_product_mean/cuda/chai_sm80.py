@@ -14,13 +14,14 @@ _dir = Path(__file__).parent / "sm80"
 def ext():
     """``chai_sm80.cu``, sm_80. Built on first use (or prebuilt: ``kernels/integrations`` plans it for the grouped OPM rows)."""
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from miniworld_engine.kernels import _msa_card as _card
 
     ensure_cuda_home()
     return load_extension(
-        name="opm_chai_sm80",
+        name=_card.name("opm_chai_sm80"),
         sources=[str(_dir / "chai_sm80.cu")],
         extra_include_paths=[str(_dir)],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80")],
+        extra_cuda_cflags=_card.cflags([*host_flags(), "-O3", "-std=c++17", *gencodes("80")]),
         extra_cflags=["-std=c++17"],
         verbose=False,
     )

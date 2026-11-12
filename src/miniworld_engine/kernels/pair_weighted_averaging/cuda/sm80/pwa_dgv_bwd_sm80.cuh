@@ -33,12 +33,24 @@ struct DgvParams {
   float eps;
 };
 
+#ifdef MWE_SM120
+constexpr int dgv_smem_of(int wb, int d, int ntok, int nring) { return 2 * wb + ntok * d * 2 + nring * ntok * 128 + 2 * d * 4; }   // without the dgamma | dbeta rows
+#endif
 template <int D, int C> struct DgvCfg {
-  static constexpr int HC = 8 * C, NG = HC / 64, NTHR = 256, NTOK = 128, NCH = D / 8;
+  static constexpr int HC = 8 * C, NG = HC / 64, NTHR = 256, NCH = D / 8;
+  static constexpr int WB = HC * D * 2;
+#ifdef MWE_SM120   // 99 KiB: dgamma | dbeta in registers; tiles of 64 MSA rows (warps 0-3 own the rows, all eight take the dWv block) and the deepest ring that fits
+  static constexpr int NTOK = dgv_smem_of(WB, D, 128, 4) <= MWE_SMEM_MAX ? 128 : 64;
+  static constexpr int NRING = dgv_smem_of(WB, D, NTOK, 4) <= MWE_SMEM_MAX ? 4 : (dgv_smem_of(WB, D, NTOK, 3) <= MWE_SMEM_MAX ? 3 : 2);
+  static constexpr int RED = 0;
+#else
+  static constexpr int NTOK = 128;
   static constexpr int NRING = (D == 128 && C == 16) ? 3 : 4;                 // slots of the item ring (3: the weights leave no room for a fourth)
+  static constexpr int RED = 8 * 2 * D * 4;
+#endif
   static constexpr int NDRES = D / 64, NITEM = 2 * NG + NDRES;                 // items per tile: (dgp, dv) of every group, then the dres columns
-  static constexpr int WB = HC * D * 2, YB = NTOK * D * 2, CB = NTOK * 128;    // weights, the m / y tile, one item
-  static constexpr int SMEM = 2 * WB + YB + NRING * CB + 2 * D * 4 + 8 * 2 * D * 4;
+  static constexpr int YB = NTOK * D * 2, CB = NTOK * 128;    // weights, the m / y tile, one item
+  static constexpr int SMEM = 2 * WB + YB + NRING * CB + 2 * D * 4 + RED;
   static constexpr int RN = D / 16;                      // n8 tiles per warp of the dWv group block: m = 4 x 16 (hc), n = 2 warps x D / 2
   static_assert((D == 64 || D == 128) && HC % 64 == 0, "layout");
   static_assert(NDRES <= NRING, "ring");
@@ -90,7 +102,15 @@ __global__ void __launch_bounds__(256, 1) pwa_dgv_bwd_kernel(const DgvParams p) 
   extern __shared__ __align__(128) unsigned char smem[];
   const uint32_t swg = smem_u32(smem), swv = swg + G::WB, sym = swv + G::WB, sring = sym + G::YB;
   float* sgb = reinterpret_cast<float*>(smem + 2 * G::WB + G::YB + G::NRING * G::CB);        // gamma [D], beta [D]
+#ifdef MWE_SM120
+  float* sred = reinterpret_cast<float*>(smem + 2 * G::WB + G::YB);                            // [8 warps][dgamma D | dbeta D]: the ring, after the last tile
+  static_assert(G::NRING * G::CB >= 8 * 2 * D * 4, "the final dgamma | dbeta rows fit the ring");
+  float rg[D / 64][4];                                                                         // this warp's dgamma | dbeta partials of columns nt * 8 + 2 q (+1), nt % 8 == gq
+#pragma unroll
+  for (int u = 0; u < D / 64; ++u) rg[u][0] = rg[u][1] = rg[u][2] = rg[u][3] = 0.f;
+#else
   float* sred = sgb + 2 * D;                                                                   // [8 warps][dgamma D | dbeta D]
+#endif
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, gq = lane >> 2, q = lane & 3;
   const uint32_t kpm = hm_magic(p.kp), tsm = hm_magic(p.ntile_s);
 
@@ -100,7 +120,9 @@ __global__ void __launch_bounds__(256, 1) pwa_dgv_bwd_kernel(const DgvParams p) 
     cp_async16(swv + swzn<G::NCH>(row, ch), p.wv + (long)row * D + ch * 8);
   }
   for (int k = tid; k < D; k += G::NTHR) { sgb[k] = p.lnw[k]; sgb[D + k] = p.lnb[k]; }
+#ifndef MWE_SM120
   for (int k = tid; k < 8 * 2 * D; k += G::NTHR) sred[k] = 0.f;
+#endif
   if ((int)blockIdx.x < p.ntile) dg_load_m<D, C>(p, sym, blockIdx.x, tid, tsm);
   cp_async_commit();                                                                          // group: weights + the first tile's m
   auto issue = [&](int n) {                                                                    // stream item n into slot n % NRING (always one group)
@@ -116,7 +138,13 @@ __global__ void __launch_bounds__(256, 1) pwa_dgv_bwd_kernel(const DgvParams p) 
 #pragma unroll
     for (int b = 0; b < G::RN; ++b) awv[a][b][0] = awv[a][b][1] = awv[a][b][2] = awv[a][b][3] = 0.f;
 
-  const int r0 = warp * 16 + gq, r1 = r0 + 8;
+#ifdef MWE_SM120
+  const bool rows = warp * 16 < G::NTOK;                                                       // the warp owns 16 rows of the tile (all of them unless NTOK = 64)
+#else
+  constexpr bool rows = true;
+#endif
+  const int wrow = rows ? warp * 16 : 0;                                                       // (a warp without rows reads warp 0's and writes nothing)
+  const int r0 = wrow + gq, r1 = r0 + 8;
   int n = 0;                                                                                   // the next stream item to consume
 #pragma unroll 1
   for (int tl = blockIdx.x, kt = 0; tl < p.ntile; tl += gridDim.x, ++kt) {
@@ -128,7 +156,7 @@ __global__ void __launch_bounds__(256, 1) pwa_dgv_bwd_kernel(const DgvParams p) 
     // ---- LayerNorm statistics; y over the m tile (the dWv operand); xa stays in registers for xhat
     uint32_t xa[D / 16][4];
 #pragma unroll
-    for (int ks = 0; ks < D / 16; ++ks) ldsm_x4(xa[ks], sym + swzn<G::NCH>(warp * 16 + (lane & 15), 2 * ks + (lane >> 4)));
+    for (int ks = 0; ks < D / 16; ++ks) ldsm_x4(xa[ks], sym + swzn<G::NCH>(wrow + (lane & 15), 2 * ks + (lane >> 4)));
     float s0v = 0.f, s1v = 0.f;
 #pragma unroll
     for (int ks = 0; ks < D / 16; ++ks) {
@@ -147,7 +175,7 @@ __global__ void __launch_bounds__(256, 1) pwa_dgv_bwd_kernel(const DgvParams p) 
     }
     const float rs0 = rsqrtf(quad_sum(v0) * (1.f / D) + p.eps), rs1 = rsqrtf(quad_sum(v1) * (1.f / D) + p.eps);
 #pragma unroll
-    for (int ks = 0; ks < D / 16; ++ks) {
+    for (int ks = 0; rows && ks < D / 16; ++ks) {
       const int col = 16 * ks + 2 * q;
       const float2 g0 = *reinterpret_cast<const float2*>(sgb + col), g1 = *reinterpret_cast<const float2*>(sgb + col + 8);
       const float2 b0 = *reinterpret_cast<const float2*>(sgb + D + col), b1 = *reinterpret_cast<const float2*>(sgb + D + col + 8);
@@ -167,9 +195,9 @@ __global__ void __launch_bounds__(256, 1) pwa_dgv_bwd_kernel(const DgvParams p) 
       __syncthreads();                                                  // items n (dgp) and n + 1 (dv) have landed; on the first group y is complete too
       const uint32_t sdgp = sring + (n % G::NRING) * G::CB, sdv = sring + ((n + 1) % G::NRING) * G::CB;
 #pragma unroll
-      for (int u = 0; u < 4; ++u) {
+      for (int u = 0; rows && u < 4; ++u) {
         uint32_t ag[4];                                                 // the unit's dgp: the A fragments of the K = 16 step (rows r0 / r1, channels 2 q, 2 q + 8)
-        ldsm_x4(ag, sdgp + swz128(warp * 16 + (lane & 15), 2 * u + (lane >> 4)));
+        ldsm_x4(ag, sdgp + swz128(wrow + (lane & 15), 2 * u + (lane >> 4)));
 #pragma unroll
         for (int np = 0; np < D / 16; ++np) {
           uint32_t bf[4];
@@ -183,9 +211,9 @@ __global__ void __launch_bounds__(256, 1) pwa_dgv_bwd_kernel(const DgvParams p) 
         issue(n + G::NRING);
       }
 #pragma unroll
-      for (int u = 0; u < 4; ++u) {
+      for (int u = 0; rows && u < 4; ++u) {
         uint32_t av[4];
-        ldsm_x4(av, sdv + swz128(warp * 16 + (lane & 15), 2 * u + (lane >> 4)));
+        ldsm_x4(av, sdv + swz128(wrow + (lane & 15), 2 * u + (lane >> 4)));
 #pragma unroll
         for (int np = 0; np < D / 16; ++np) {
           uint32_t bf[4];
@@ -210,7 +238,7 @@ __global__ void __launch_bounds__(256, 1) pwa_dgv_bwd_kernel(const DgvParams p) 
         }
       }
       __syncthreads();                                                  // every warp is done with both chunks: refill the slots
-      if (G::NRING == 4) { issue(n + G::NRING); issue(n + 1 + G::NRING); }
+      if (G::NRING != 3) { issue(n + G::NRING); issue(n + 1 + G::NRING); }
       else issue(n + 1 + G::NRING);
       n += 2;
     }
@@ -222,7 +250,7 @@ __global__ void __launch_bounds__(256, 1) pwa_dgv_bwd_kernel(const DgvParams p) 
     cp_async_commit();
 
     // ---- LayerNorm backward on dy's accumulator layout; dm = dx + dres in place over the dres columns
-    {
+    if (rows) {
       float s1A = 0.f, s2A = 0.f, s1B = 0.f, s2B = 0.f;
       // xhat at the accumulator positions (n8 tile nt = 2 ks + b: the A fragments a0 / a1 (b = 0) and a2 / a3 (b = 1) of ks hold the same (row, column) pairs)
       auto xh = [&](int nt, int e) {
@@ -256,10 +284,14 @@ __global__ void __launch_bounds__(256, 1) pwa_dgv_bwd_kernel(const DgvParams p) 
         gB += __shfl_xor_sync(0xffffffffu, gB, 4); gB += __shfl_xor_sync(0xffffffffu, gB, 8); gB += __shfl_xor_sync(0xffffffffu, gB, 16);
         bA += __shfl_xor_sync(0xffffffffu, bA, 4); bA += __shfl_xor_sync(0xffffffffu, bA, 8); bA += __shfl_xor_sync(0xffffffffu, bA, 16);
         bB += __shfl_xor_sync(0xffffffffu, bB, 4); bB += __shfl_xor_sync(0xffffffffu, bB, 8); bB += __shfl_xor_sync(0xffffffffu, bB, 16);
+#ifdef MWE_SM120
+        if (gq == (nt & 7)) { rg[nt >> 3][0] += gA; rg[nt >> 3][1] += gB; rg[nt >> 3][2] += bA; rg[nt >> 3][3] += bB; }   // the same adds, in registers
+#else
         if (gq == 0) {
           float* wr = sred + warp * 2 * D;
           wr[col] += gA; wr[col + 1] += gB; wr[D + col] += bA; wr[D + col + 1] += bB;
         }
+#endif
       }
     }
     __syncthreads();                                                    // dm complete in the dres slots
@@ -289,6 +321,17 @@ __global__ void __launch_bounds__(256, 1) pwa_dgv_bwd_kernel(const DgvParams p) 
       }
   }
   __syncthreads();
+#ifdef MWE_SM120
+  {                                                                      // the warps' rows into the (idle) ring, then the fixed-order sum below
+    float* wr = sred + warp * 2 * D;
+#pragma unroll
+    for (int nt = 0; nt < D / 8; ++nt) {
+      const int col = nt * 8 + 2 * q;
+      if (gq == (nt & 7)) { wr[col] = rg[nt >> 3][0]; wr[col + 1] = rg[nt >> 3][1]; wr[D + col] = rg[nt >> 3][2]; wr[D + col + 1] = rg[nt >> 3][3]; }
+    }
+  }
+  __syncthreads();
+#endif
   for (int col = tid; col < 2 * D; col += G::NTHR) {
     float s = 0.f;
 #pragma unroll

@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.norm import LayerNorm
+from miniworld_engine.modules.norm import LayerNorm, a100, sm120
 from miniworld_engine.modules.primitives import BackendModule, Dropout, Linear, MasterWeights, key_mask, master_autocast, random_input, wide
 
 #: Release directories of the model kits' own MSA kernels (the ``"anthropic"`` backends; ``modules/_anthropic.load(..., path=...)``).
@@ -187,7 +187,7 @@ class OuterProductMean(BackendModule, MasterWeights):
     #:   divide after the projection, d_msa 128, d_hidden 32, d_pair % 256, no projection bias (ESMFold2, Protenix-v2)  the esmfold2 kit's
     #:       ``ef2_msa_v2.opm_fused`` (LN + W x row mask producer, cuBLAS, projection + bias / clamp(n, 1) + pair residual epilogue)
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: sm_80 paths
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: sm_80 paths; 2026-11-12: their sm_120a build (RTX 5090)
 
     # ------------------------------------------------------------------------------------------------------------------ anthropic
     def _anthropic_route(self, msa, mask, residual) -> tuple[str | None, str | None]:
@@ -400,7 +400,7 @@ class OuterProductMean(BackendModule, MasterWeights):
         why = self._common_refusal(msa, mask, residual)
         if why is not None:
             return None, why
-        if torch.cuda.get_device_capability(msa.device) == (8, 0):  # A100: kernels.integrations.opm_sm80 (forward + backward)
+        if a100(msa) or sm120(msa):  # A100 / RTX 5090 (the sm_120a build of the sm_80 sources): kernels.integrations.opm_sm80 (forward + backward)
             if self.groups > 1:  # Chai-1: kernels.outer_product_mean.chai on its sm_80 passes (cuda/chai_sm80)
                 from miniworld_engine.kernels.outer_product_mean import chai
 
@@ -408,7 +408,7 @@ class OuterProductMean(BackendModule, MasterWeights):
                     return "chai", None
                 return None, (
                     f"grouped OPM (groups {self.groups} x {self.group_width}, d_msa {msa.shape[-1]}, d_pair {self.to_out.weight.shape[0]}, N "
-                    f"{msa.shape[2]}, batch {msa.shape[0]}): the A100 Chai-1 passes take 8 x 8 groups, d_msa 64, d_pair a multiple of 256, N % 64, batch 1"
+                    f"{msa.shape[2]}, batch {msa.shape[0]}): the A100 / RTX 5090 Chai-1 passes take 8 x 8 groups, d_msa 64, d_pair a multiple of 256, N % 64, batch 1"
                 )
             from miniworld_engine.kernels.integrations import opm_sm80
 
@@ -562,8 +562,9 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
     backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:a100_sm80": 2
-    }  # 2026-11-10: the BIG width (d_msa 256 / d_pair 512) on sm_80 (pwa_wide_sm80)
+        "cuda:a100_sm80": 2,
+        "cuda:5090_sm120": 1,
+    }  # 2026-11-10: the BIG width (d_msa 256 / d_pair 512) on sm_80 (pwa_wide_sm80); 2026-11-12: the sm_120a build of the sm_80 paths (RTX 5090)
 
     #: "cuda": the H100 kernels (kernels.integrations.pwa_train / pwa_wide); "triton": kernels.pair_weighted_averaging.triton (see the
     #: _supports_ docstrings for the ranges). "anthropic" (inference only): the model kits' own masked PWA kernels (see _supports_anthropic).
@@ -874,7 +875,7 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         why = self._common_refusal(msa, pair, mask)
         if why is not None:
             return why
-        if torch.cuda.get_device_capability(msa.device) == (8, 0):  # A100: kernels.integrations.pwa_sm80 (forward + backward)
+        if a100(msa) or sm120(msa):  # A100 / RTX 5090 (the sm_120a build of the sm_80 sources): kernels.integrations.pwa_sm80 (forward + backward)
             from miniworld_engine.kernels.integrations import pwa_sm80
 
             why = pwa_sm80.refusal(self, msa, pair, mask)
@@ -888,7 +889,7 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
     def _forward_cuda(self, msa, pair, mask=None) -> torch.Tensor:
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return msa
-        if torch.cuda.get_device_capability(msa.device) == (8, 0):
+        if a100(msa) or sm120(msa):
             from miniworld_engine.kernels.integrations import pwa_sm80
 
             if self._trains():

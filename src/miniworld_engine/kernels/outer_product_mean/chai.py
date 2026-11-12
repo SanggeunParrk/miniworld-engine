@@ -25,7 +25,7 @@ def serves_dims(
     if not msa.is_cuda or msa.dtype != torch.bfloat16 or msa.ndim != 4 or msa.shape[0] != 1:
         return False
     cap = torch.cuda.get_device_capability(msa.device)
-    if cap not in ((9, 0), (8, 0)) or (cap == (8, 0) and d_pair % 256):  # A100 (cuda/chai_sm80): d_pair a multiple of 256
+    if cap not in ((9, 0), (8, 0), (12, 0)) or (cap != (9, 0) and d_pair % 256):  # A100 / RTX 5090 (cuda/chai_sm80): d_pair a multiple of 256
         return False
     _, s, n, cm = msa.shape
     return (
@@ -50,7 +50,7 @@ def serves(module, msa: torch.Tensor, mask: torch.Tensor | None, *, training: bo
 
 def _kernels(t: torch.Tensor):
     """The pass kernels of the card: ``cuda`` (``chai.cu``, sm_90a) or ``cuda.chai_sm80`` (A100), the same entry points."""
-    if torch.cuda.get_device_capability(t.device) == (8, 0):
+    if torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0)):  # A100, RTX 5090 (the sm_120a build of the same sources)
         from miniworld_engine.kernels.outer_product_mean.cuda import chai_sm80
 
         return chai_sm80

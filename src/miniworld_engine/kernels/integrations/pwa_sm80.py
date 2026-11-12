@@ -21,6 +21,7 @@ from typing import cast
 import torch
 
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels import _msa_card as _card
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import build_failed
 from miniworld_engine.kernels.integrations import pwa_wide_sm80
@@ -51,8 +52,8 @@ def _sm80():
 
 def refusal(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None:
     """Why the sm_80 kernels cannot run this call, or ``None`` (the contract above). Shapes, dtypes and the device only, plus the build."""
-    if not msa.is_cuda or torch.cuda.get_device_capability(msa.device) != (8, 0):
-        return "the sm_80 MSAPairWeightedAveraging kernels are the A100 (capability 8.0) builds"
+    if not _card.device_ok(msa):
+        return "the sm_80 MSAPairWeightedAveraging kernels are the A100 (capability 8.0) and RTX 5090 (12.0, sm_120a) builds"
     if msa.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
         return "the sm_80 kernels take bfloat16 msa / pair"
     if msa.ndim != 4 or pair.ndim != 4:
@@ -167,6 +168,7 @@ def _fused_contract_enabled(m: torch.Tensor, wg: torch.Tensor, training: bool) -
         fused = not training
     return (
         fused
+        and not _card.sm120()  # the A100-tuned shape-specific kernels below are not built for the RTX 5090 (99 KiB): the general path there
         and m.shape[1] == 128
         and m.shape[2] == 64
         and wg.shape[0] == 256
@@ -265,7 +267,7 @@ def _expand(w: torch.Tensor, ns: int) -> torch.Tensor:
 def _broadcast_contract(w: torch.Tensor, v: torch.Tensor, transpose: bool = False) -> torch.Tensor:
     """Native contractions for qualified L128 training rows; preserve the faster path elsewhere."""
     if (
-        True
+        not _card.sm120()
         and w.shape[1] == 128
         and v.shape[2] % 128 == 0
         and w.is_contiguous()
@@ -317,6 +319,7 @@ def _weight_contract(do: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     native = override if override is not None else do.shape[1] in (384, 640)
     if (
         native
+        and not _card.sm120()
         and do.shape[0] == 32
         and do.shape[1] in (256, 384, 512, 640, 768)
         and do.shape[2] == 8192
@@ -451,7 +454,7 @@ def backward(
         typed = typed_override if typed_override is not None else m.shape[1] in (128, 256, 384)
         glue = sm.glue
         glue_override = None
-        tuned_glue = glue_override if glue_override is not None else m.shape[1] in (256, 384, 512, 640, 768)
+        tuned_glue = glue_override if glue_override is not None else m.shape[1] in (256, 384, 512, 640, 768) and not _card.sm120()
         if tuned_glue and m.shape[0] == 1024 and m.shape[2] == 64 and wg.shape[0] == 256 and m.shape[1] in (128, 256, 384, 512, 640, 768):
             from miniworld_engine.kernels.pair_weighted_averaging.cuda import (
                 glue_tuned_sm80,
@@ -464,6 +467,7 @@ def backward(
             grad_reduce_forced = m.shape == (1024, 128, 64) and wg.shape == (256, 64) and z.shape == (128, 128, 128)
         grad_reduce = (
             grad_reduce_forced
+            and not _card.sm120()
             and m.shape[0] == 1024
             and m.shape[2] == 64
             and wg.shape == (256, 64)
@@ -506,7 +510,7 @@ def backward(
         do, dgp = glued[:2]
         dv = _broadcast_contract(w, do, transpose=True)  # [8 ns, L(j), S C / ns]
         partial_pair = (
-            True
+            not _card.sm120()
             and do.shape == v.shape == (32, 128, 8192)
             and do.dtype == v.dtype == torch.bfloat16
             and do.is_contiguous()

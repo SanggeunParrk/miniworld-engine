@@ -23,6 +23,7 @@ import torch
 
 
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from miniworld_engine.kernels import _msa_card as _card
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -37,10 +38,10 @@ def ext():
     """The extension (built on first use into ``TORCH_EXTENSIONS_DIR``)."""
     ensure_cuda_home()
     return load_extension(
-        name="opm_sm80",
+        name=_card.name("opm_sm80"),
         sources=[str(_dir / "ops.cu")],
         extra_include_paths=[str(_dir)],
-        extra_cuda_cflags=[
+        extra_cuda_cflags=_card.cflags([
             *host_flags(),
             "-O3",
             "-std=c++17",
@@ -49,7 +50,7 @@ def ext():
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        ],
+        ]),
         extra_cflags=["-std=c++17", "-O3"],
         extra_ldflags=["-lcublasLt"],  # the searched explicit GEMM algorithms (opm_lt_gemm.cuh)
         verbose=False,
@@ -149,7 +150,7 @@ def dgrad(
     dO = dz.new_empty((length * CH, length * CH))
     dzn = torch.empty_like(dz)
     if variant is None:
-        variant = 0  # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
+        variant = 3 if _card.sm120() and cz in (256, 384) else 0  # RTX 5090 (99 KiB): the 64-pair CTA; else the shipped schedule
     bi = (
         2 if (variant == 3 and cz != 128) or cz == 512 else 4
     )  # variant 3: the 64-pair CTA (two per SM) at d_pair 256 / 384; d_pair 512 always
