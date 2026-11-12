@@ -92,7 +92,9 @@ def _capture_info():
 
 def _graph_capture_id() -> int | None:
     """None outside a capture; inside one, the id of the capture sequence (0 when it cannot be read) -- whatever is declared static."""
-    if not torch.cuda.is_available() or not torch.cuda.is_current_stream_capturing():  # a CPU-only process captures nothing
+    # a process that never initialised CUDA (CPU-only, or not yet) captures nothing; ``is_initialized`` is a flag read, ``is_available``
+    # asks the driver / the environment at every call (four times per token DiT block call)
+    if not torch.cuda.is_initialized() or not torch.cuda.is_current_stream_capturing():
         return None
     try:
         fn = _capture_info()

@@ -172,14 +172,15 @@ def _norms_ok(module, *, h100: bool) -> bool:
 def _native_fp32_inference(module, single) -> bool:
     """The qualified Hopper FP32 inference family, independent of BF16 experiments."""
 
+    # the activation's own tests first: a bf16 call (the common one) is answered without reading the block
     return (
-        not torch.is_grad_enabled()
+        single.dtype is torch.float32
+        and single.is_cuda
+        and not torch.is_grad_enabled()
         and module.attention._backend == "portable"
         and getattr(getattr(module.attention, "to_bias", None), "weight", None) is not None
         and module.attention.to_bias.weight.shape[1] in PAIR_WIDTHS_H100  # 128; 256: Protenix-v2's diffusion pair; 512: IntelliFold2's
         and (module.attention.n_head, single.shape[-1]) in LAYOUTS  # 16 x 48, 24 x 32, 12 x 64 (d 768), 16 x 64 (d 1024)
-        and single.is_cuda
-        and single.dtype is torch.float32
         and torch.cuda.get_device_capability(single.device) == (9, 0)
     )
 
@@ -334,8 +335,7 @@ def _fake(single, cond, pair, mask, weights, qk, eq, ek, heads, extra, variant):
     return torch.empty_like(single)
 
 
-@opaque(fake=_fake, name="token_dit_h100_infer")
-def _infer(
+def _infer_launch(
     single: torch.Tensor,
     cond: torch.Tensor,
     pair: torch.Tensor,
@@ -434,10 +434,38 @@ def _infer(
         return runner.step(single, cond, bias)[:, :, :L].contiguous()
 
 
+_infer = opaque(fake=_fake, name="token_dit_h100_infer")(_infer_launch)
+
+
+def _plain_eager(single: torch.Tensor) -> bool:
+    """A plain eager call: no Dynamo trace, no dispatch / function mode (FakeTensorMode, make_fx, a profiler's mode), a plain tensor.
+    The opaque op's dispatch (dispatcher, Dynamo-disabled wrapper, alias check over the ~25 leaves: ~50 us of host time a call) then buys
+    nothing, so ``update`` runs the launcher itself; anything else goes through the op."""
+    return (
+        not torch.compiler.is_compiling()
+        and type(single) is torch.Tensor
+        and torch._C._len_torch_dispatch_stack() == 0
+        and torch._C._len_torch_function_stack() == 0
+    )
+
+
 _ALL_TRUE: dict = {}
 
 
-def update(module, single, cond, pair, mask, extra=None):
+def infer_args(module, dtype: torch.dtype) -> tuple:
+    """The block's per-call constants of ``_infer`` for activations of ``dtype``: (leaves, qk, eq, ek, heads, options). They depend on the
+    block's structure and parameter objects only, so a caller may keep them while neither changes (``TokenDiTProtenix`` does, per block)."""
+    a = module.attention
+    qk = bool(a.use_qk_norm)
+    eq = float(a.norm_query.effective_eps(dtype)) if qk else 0.0
+    ek = float(a.norm_key.effective_eps(dtype)) if qk else 0.0
+    opts = options(module)
+    assert opts is not None  # serves() refused a block outside the algorithm
+    return leaves(module, opts), qk, eq, ek, int(a.n_head), list(opts)
+
+
+def update(module, single, cond, pair, mask, extra=None, args=None):
+    """The block on ``single``. ``args``: :func:`infer_args` of the block for ``single.dtype`` (made here when not given)."""
     if single.shape[1] > 1 and mask is not None and (mask.shape[0] != single.shape[1] or mask.stride(0) != 0):
         # B trunk_seeds of one input: the key mask is [B, L], one mask expanded over B (the grouped core reads one)
         raise ValueError("B > 1 token DiT takes one key mask expanded over B (stride 0)")
@@ -454,22 +482,6 @@ def update(module, single, cond, pair, mask, extra=None):
         if mask is None:
             mask = _ALL_TRUE[k] = torch.ones((1, single.shape[2]), device=single.device, dtype=torch.bool)
     # the pair as the caller holds it: _infer keys its pair-bias cache on this tensor and makes it contiguous on a miss
-    a = module.attention
-    qk = bool(a.use_qk_norm)
-    eq = float(a.norm_query.effective_eps(single.dtype)) if qk else 0.0
-    ek = float(a.norm_key.effective_eps(single.dtype)) if qk else 0.0
-    opts = options(module)
-    assert opts is not None  # serves() refused a block outside the algorithm
-    return _infer(
-        single.contiguous(),
-        cond,
-        pair,
-        mask,
-        leaves(module, opts),
-        qk,
-        eq,
-        ek,
-        int(a.n_head),
-        extra,
-        list(opts),
-    )
+    weights, qk, eq, ek, heads, opts = infer_args(module, single.dtype) if args is None else args
+    run = _infer_launch if _plain_eager(single) else _infer
+    return run(single.contiguous(), cond, pair, mask, weights, qk, eq, ek, heads, extra, opts)
