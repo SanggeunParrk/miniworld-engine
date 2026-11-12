@@ -30,7 +30,16 @@ struct K1wParams {
   int T, L, D, ncol;           // ncol = 4 Hs packed rows
 };
 
-using K1wTile = WTile<128, 128, 2, 2, 4, false, true>;
+// ring depth: 4 stages (64 KB, two CTAs per SM in the A100's 164 KB); the RTX 5090 build (MWE_SM120: 100 KB per SM) takes 3 (48 KB) to keep two CTAs
+// resident -- the whole K of a D128 tile then no longer fits the ring, so D > 32 ST takes the in-loop statistics (wide_ops.cu)
+#ifndef K1W_ST
+#ifdef MWE_SM120
+#define K1W_ST 3
+#else
+#define K1W_ST 4
+#endif
+#endif
+using K1wTile = WTile<128, 128, 2, 2, K1W_ST, false, true>;
 constexpr int K1W_STG = 272;   // bytes per staged channel row: 256 + 16
 constexpr int K1W_STATS_SMEM = K1wTile::SMEM + 128 * 8;     // + (mean, rstd) of the tile's 128 tokens
 

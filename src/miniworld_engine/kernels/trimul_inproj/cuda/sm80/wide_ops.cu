@@ -173,7 +173,7 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
   }
   static bool set = false;
   static bool set1 = false;
-  if (fuse && D > 128) {                         // statistics accumulated while the stages go by (D <= 384: eight or twelve k-tiles)
+  if (fuse && D > 32 * a100::K1wTile::ST) {     // statistics accumulated while the stages go by (the ring does not hold the whole K: D <= 384)
     static bool set_in = false;
     if (!set_in) { set_smem(a100::k1w_kernel<true, false, true>, a100::K1W_STATS_SMEM); set_in = true; }
     a100::k1w_kernel<true, false, true><<<(T / 128) * (ncol / 128), 128, a100::K1W_STATS_SMEM, stream()>>>(p);
