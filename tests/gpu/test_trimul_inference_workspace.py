@@ -21,17 +21,18 @@ def _card() -> tuple[int, int] | None:
 
 
 @pytest.mark.skipif(_card() not in ((9, 0), (8, 0)), reason="H100 / A100")
+@pytest.mark.parametrize(("backend", "limit"), [("cuda", 3.2), ("triton", 4.2)])
 @pytest.mark.parametrize("outgoing", [True, False])
 @pytest.mark.parametrize(
     ("d", "length"),
     # token-flat path (L % 128 == 0) and, on H100, the row-padded path (L % 128 != 0) at d_pair 384 / 256
     [(384, 1024), (384, 1000), (256, 1024)],
 )
-def test_trimul_inference_peak_is_planes_plus_contraction(d: int, length: int, outgoing: bool) -> None:
+def test_trimul_inference_peak_is_planes_plus_contraction(backend: str, limit: float, d: int, length: int, outgoing: bool) -> None:
     m = TriangleMultiplication(d, outgoing=outgoing).cuda().float().eval()
     C.randomize(m, torch.Generator(device="cuda").manual_seed(0))
     m.set_master_weights()
-    kern = copy.deepcopy(m).set_backend("cuda")
+    kern = copy.deepcopy(m).set_backend(backend)
     gen = torch.Generator(device="cuda").manual_seed(1)
     inputs = m.make_inputs(length=length, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=gen)
     pair, mask = inputs["pair"], inputs["mask"]
@@ -49,7 +50,8 @@ def test_trimul_inference_peak_is_planes_plus_contraction(d: int, length: int, o
         peak = torch.cuda.max_memory_allocated() - before
     plane = pair.numel() * pair.element_size()  # one pair size (bf16): hidden == d_pair, so one plane set of the contraction too
     # planes (2) + contraction (1) + the LN statistics and folded weights; the output is allocated after the planes are freed
-    assert peak <= 3.2 * plane, f"peak {peak / plane:.2f} pair sizes above the input (expected <= 3.2; the planes alive with y: 4)"
+    # (triton: the LN'd input x_n is a pair size more; its left / right projections were alive with y: 5)
+    assert peak <= limit * plane, f"{backend}: peak {peak / plane:.2f} pair sizes above the input (expected <= {limit})"
     with torch.no_grad():
         gold = copy.deepcopy(m).float()(pair.float(), mask).float()
     err = float((out.float() - gold).abs().max() / gold.abs().max())
