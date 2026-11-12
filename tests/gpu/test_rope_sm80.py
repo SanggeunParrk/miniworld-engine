@@ -46,7 +46,7 @@ def test_rope_and_qk_norm_rope(dtype, n, s, h, d, half) -> None:
         q, k, cos, sin = _inputs(n, s, h, d, half, dtype, shared)
         assert sm80.supports_rope(q, cos, sin) and sm80.supports_qk(q, k, cos, sin)
 
-        x = q.detach().clone().requires_grad_()
+        x = q.detach().requires_grad_()  # the strided view itself
         y = sm80.rope_3d(x, cos, sin)
         g = torch.randn_like(y)
         y.backward(g)
@@ -54,14 +54,16 @@ def test_rope_and_qk_norm_rope(dtype, n, s, h, d, half) -> None:
         yr = _rotate(xr, cos, sin)
         yr.backward(g.float())
         torch.testing.assert_close(y.float(), yr, atol=tol, rtol=tol)
+        assert x.grad is not None and xr.grad is not None
         torch.testing.assert_close(x.grad.float(), xr.grad, atol=tol, rtol=tol)
 
-        qa, ka = q.detach().clone().requires_grad_(), k.detach().clone().requires_grad_()
+        qa, ka = q.detach().requires_grad_(), k.detach().requires_grad_()
         oq, ok = sm80.qk_norm_rope_3d(qa, ka, cos, sin, eps)
         gq, gk = torch.randn_like(oq), torch.randn_like(ok)
         torch.autograd.backward([oq, ok], [gq, gk])
         qr, kr = q.detach().float().requires_grad_(), k.detach().float().requires_grad_()
         oqr, okr = _rotate(_norm(qr, eps), cos, sin), _rotate(_norm(kr, eps), cos, sin)
         torch.autograd.backward([oqr, okr], [gq.float(), gk.float()])
+        assert qa.grad is not None and ka.grad is not None and qr.grad is not None and kr.grad is not None
         for got, ref in ((oq, oqr), (ok, okr), (qa.grad, qr.grad), (ka.grad, kr.grad)):
             torch.testing.assert_close(got.float(), ref, atol=4 * tol, rtol=4 * tol)
