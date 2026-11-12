@@ -150,6 +150,11 @@ def _same(out, ref) -> bool:
         ("chai1", "chai1", 128),
         ("rosettafold3", "intellifold2", 256),
         ("esmfold2", "protenix", 96),
+        # N not a multiple of 128 (the kernels pad to 128): the hoisted tables are keyed on the caller's mask / uid, padded in the builds
+        ("chai1", "chai1", 160),
+        ("rosettafold3", "intellifold2", 224),
+        ("esmfold2", "esmfold2_pair", 160),
+        ("boltz2", "boltz2", 1000),
     ],
 )
 def test_refresh_then_replay_is_eager_on_the_new_fold(token_key, atom_key, n_atoms):
@@ -228,6 +233,59 @@ def test_refresh_refuses_changed_weights_and_reports_timing():
             block.attention.to_bias.weight.mul_(1.5)  # an in-place weight update after the capture
         with pytest.raises(StaleStaticInputs):
             refresh_static_inputs(step)
+        del graph, out
+    finally:
+        clear_weight_caches(step)
+
+
+#: The kernels that make the hoisted atom tables (the windowed pair bias, the slid edge windows' bias): none may run in a replay that is
+#: served the tables from the eager cache.
+_TABLE_KERNELS = ("pair_bias", "edge_bias_fwd")
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) path")
+@pytest.mark.parametrize("atom_key", ATOM_KEYS)
+@pytest.mark.parametrize("n_atoms", [160, 1000])
+def test_padded_n_replay_builds_no_tables(atom_key, n_atoms):
+    """N not a multiple of 128: a second eager call hits the hoisted tables, and a step captured under ``static_inputs()`` reads every one
+    from the eager cache (none made inside the capture) and runs none of their kernels at a replay -- bitwise equal to eager.
+
+    The tables were keyed on a padded copy of the key mask / conformer ids made per call: every call missed, and every replay remade them."""
+    from torch.profiler import ProfilerActivity, profile
+
+    from miniworld_engine.capture import clear_weight_caches
+    from miniworld_engine.kernels import _capture as cap
+    from miniworld_engine.kernels.integrations import local_dit_esm, local_dit_h100
+
+    step = Step("protenix", atom_key, n_atoms)
+    stores = (
+        [local_dit_esm._HOIST_COND, local_dit_esm._HOIST_BIAS]
+        if atom_key == "esmfold2_pair"
+        else [local_dit_h100._HOIST_COND, local_dit_h100._HOIST_BIAS, local_dit_h100._HOIST_EDGES]
+    )
+    slid = atom_key in ("af3", "intellifold2")  # af3: AtomDiTOpenFold3's default slid window
+    per_block = 3 if slid else 2
+    try:
+        step.write_fold(1)
+        with torch.no_grad():
+            ref = step()[1].clone()
+            sizes = [len(s) for s in stores]
+            again = step()[1]
+        assert [len(s) for s in stores] == sizes, "a second eager call made new hoisted tables"
+        assert torch.equal(again, ref)
+        graph, out, tables = _capture(step)
+        built = {k for k in cap._CAPTURE_BUILT if k[0] in {id(s) for s in stores}}
+        assert not built, f"{len(built)} atom tables were made inside the capture (every replay remakes them)"
+        atom_tables = sum(1 for k in tables._keys if k[0] in {id(s) for s in stores})
+        assert atom_tables == 2 * per_block, f"the capture read {atom_tables} atom tables from the eager cache, expected {2 * per_block}"
+        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+            graph.replay()
+            torch.cuda.synchronize()
+        names = [e.name for e in (prof.events() or []) if str(e.device_type).endswith("CUDA")]
+        assert names, "the profiler saw no kernel of the replay"
+        made = [n for n in names if any(t in n for t in _TABLE_KERNELS)]
+        assert not made, f"a replay ran table kernels: {sorted(set(made))}"
+        assert torch.equal(out[1], ref), "replay != eager"
         del graph, out
     finally:
         clear_weight_caches(step)

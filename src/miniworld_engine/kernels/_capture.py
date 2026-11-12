@@ -374,9 +374,10 @@ def param_forms(tag, params, build, *, inputs_scope: bool = False, capture_reads
     return value
 
 
-def hoisted_table(store: dict, tensor: torch.Tensor, key, build, limit: int = 64):
+def hoisted_table(store: dict, tensor: torch.Tensor, key, build, limit: int = 64, also=()):
     """The table ``build()`` makes from the per-item input ``tensor``, once per (tensor, version, ``key``) (``lookup_inputs``): the entry keeps a weak
     reference to the tensor, so a new tensor that reuses a freed address is not served the old one's table, and entries of freed tensors are dropped.
+    ``also``: the other caller tensors ``build`` reads (a key mask, conformer ids; ``key`` names them): a refresh checks their layout too.
 
     A sample-expanded conditioning (stride 0 over the samples: a sampler step's view of the fold's one conditioning) is a NEW tensor object at
     every call over the same small storage, so no weak reference to it outlives the call and the table would be remade at every call -- in a
@@ -392,7 +393,7 @@ def hoisted_table(store: dict, tensor: torch.Tensor, key, build, limit: int = 64
         limit=limit,
         valid=lambda e: e[1] or e[0]() is root,
         alive=lambda e: e[1] or e[0]() is not None,
-        inputs=(tensor,),
+        inputs=(tensor, *also),
     )
     return entry[2]
 

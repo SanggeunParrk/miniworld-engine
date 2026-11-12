@@ -84,9 +84,10 @@ def _device_of(mask):
     return torch.cuda.current_device() if mask is None else mask.device
 
 
-def _hoisted(store, tensor, key, build):
-    """The table ``build()`` makes from ``tensor``, once per tensor (pointer, version, ``key``): ``_capture.hoisted_table``."""
-    return _capture.hoisted_table(store, tensor, key, build, limit=64)
+def _hoisted(store, tensor, key, build, also=()):
+    """The table ``build()`` makes from ``tensor``, once per tensor (pointer, version, ``key``): ``_capture.hoisted_table``. ``also``: the
+    other caller tensors ``build`` reads (``key`` names them by ``_tkey``)."""
+    return _capture.hoisted_table(store, tensor, key, build, limit=64, also=also)
 
 
 def _tkey(t):
