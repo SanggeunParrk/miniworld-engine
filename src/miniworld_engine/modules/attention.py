@@ -16,7 +16,7 @@ from einops import rearrange, repeat
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.norm import AdaptiveLayerNorm, LayerNorm, RMSNorm
+from miniworld_engine.modules.norm import AdaptiveLayerNorm, LayerNorm, RMSNorm, _activation_dtype_reason, _wants_grad, triton_unsupported
 from miniworld_engine.modules.primitives import BackendModule, Linear, MasterWeights, key_mask, master_autocast, random_input
 
 _capture.instance_cache_attr("_anthropic_params")  # the anthropic producer's fp32 parameter copies (clear_weight_caches)
@@ -758,9 +758,16 @@ class BiasOnlyAttention(BackendModule):
     Everything around the core is :class:`AugmentedAttentionPairBias`'s (AdaLN, the value and gate projections, both sigmoid gates, the
     conditioning scale), minus ``to_query``, ``to_key`` and the QK-norm. With no query and no key the attention weights depend on neither the
     sample nor the single representation, only on the pair: ONE softmax serves every augmented sample.
+
+    ``backend="triton"`` (engine 2.4's portable path, ``kernels/bias_only_attention/triton``): the AdaLN on its ``"triton"`` backend, the pair
+    LayerNorm + bias projection in one pass (``pair_bias.pair_bias_logits``, head-major logits, forward and backward), the value and gate
+    projections as ONE GEMM over the concatenated weights; with a gradient the feature-major training core (``core_t.bias_only_core_t``: the
+    value / gate GEMM, ``softmax(bias) v`` as a batched GEMM over the heads, the sigmoid gate in Triton, ``to_out``; no permute copies), one pair
+    for every sample or a pair per sample; inference: the batched einsum (one softmax for every sample, a cuBLAS GEMM per head -- the flash
+    bias-only kernel of ``triton/main.py`` does not beat it, as engine 2.4 measured). bf16 or fp32 activations, CUDA.
     """
 
-    backends = ("pytorch",)
+    backends = ("pytorch", "triton")
 
     def __init__(
         self,
@@ -812,3 +819,63 @@ class BiasOnlyAttention(BackendModule):
         out = torch.einsum("bhij,abjhd->abihd", attention, value).flatten(-2)
         out = self.to_out(sigmoid_gate(gate, out))
         return single_res + sigmoid_gate(self.to_scale(cond), out)
+
+    # ------------------------------------------------------------------------------------------------------------- "triton"
+    def set_backend(self, backend: str = "pytorch"):
+        super().set_backend(backend)
+        ada = getattr(self, "ada_ln_in", None)  # absent while nn.Module.__init__ runs the first set_backend
+        if isinstance(ada, BackendModule):
+            ada.set_backend(backend if backend in ada.backends else "pytorch")
+        return self
+
+    def _triton_core_t(self, single: torch.Tensor, src: torch.Tensor | None) -> bool:
+        """The feature-major training core takes the call: a gradient, ``single`` [A, B, L, d] with ONE pair (B = 1) or a pair per sample
+        (A = 1, the logits' batch = B)."""
+        if single.ndim != 4 or not _wants_grad(self, single):
+            return False
+        return single.shape[1] == 1 or (single.shape[0] == 1 and src is not None and src.shape[0] == single.shape[1])
+
+    def _supports_triton(self, single, cond, pair=None, mask=None, *, bias=None) -> str | None:
+        from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import supported as pair_bias_supported
+
+        why = triton_unsupported(single) or _activation_dtype_reason(single, cond)
+        if why is not None:
+            return why
+        if single.ndim != 4 or tuple(single.shape[:-1]) != tuple(cond.shape[:-1]):
+            return f"single / cond must be [A, B, L, d] with the same leading shape, got {tuple(single.shape)} / {tuple(cond.shape)}"
+        if bias is None:
+            if pair is None:
+                return "the pair or the block's precomputed bias"
+            if pair.dtype != single.dtype:
+                return f"pair dtype {pair.dtype} (the activations': {single.dtype})"
+            if self.ln_pair.bias is not None or self.to_bias.bias is not None or self.ln_pair.weight is None:
+                return "ln_pair with a weight and no offset, to_bias without a bias (the one-pass pair-bias kernel)"
+            if not pair_bias_supported(pair, self.n_head):
+                return "pair must be contiguous with a power-of-two width 16 .. 512 and at most 64 heads (the one-pass pair-bias kernel)"
+        if mask is not None and (mask.dtype != torch.bool or mask.ndim != 2):
+            return "mask must be a bool [B, L] key mask"
+        return self.ada_ln_in._supports_triton(single, cond)
+
+    def _forward_triton(self, single, cond, pair=None, mask=None, *, bias=None) -> torch.Tensor:
+        from miniworld_engine.kernels.bias_only_attention.triton.core_t import bias_only_core_t
+        from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits
+
+        x, single_res = self.ada_ln_in.forward_with_stream(single, cond)  # the AdaLN's "triton" backend (set_backend)
+        dt = single.dtype
+        wv, wg, wo = (m.weight.to(dt) for m in (self.to_value, self.to_gate, self.to_out))
+        with torch.autocast("cuda", enabled=False):
+            # [B, H, L, L], head-major: the one-pass pair LayerNorm + projection, or the hoisted bias
+            logits = pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps) if bias is None else bias.to(dt)
+            if mask is not None:
+                logits = logits.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min)
+            attention = torch.softmax(logits.float(), dim=-1).to(dt)  # [B, H, L, L], one softmax for every sample
+            if self._triton_core_t(single, pair if bias is None else bias):
+                p = attention[0] if single.shape[1] == 1 else attention
+                out = bias_only_core_t(x.reshape(-1, x.shape[-1]), wv, wg, wo, p).reshape(single.shape)
+            else:
+                value, gate = F.linear(x, torch.cat([wv, wg], 0)).split(wv.shape[0], dim=-1)
+                value = rearrange(value, "A B L (H D) -> A B L H D", H=self.n_head)
+                out = torch.einsum("bhij,abjhd->abihd", attention, value).flatten(-2)
+                out = F.linear(sigmoid_gate(gate, out), wo)
+            scale = F.linear(cond, self.to_scale.weight.to(dt), self.to_scale.bias.to(dt))
+            return single_res + sigmoid_gate(scale, out)

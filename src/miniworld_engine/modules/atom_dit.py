@@ -1199,7 +1199,8 @@ class AtomDiTMiniWorld(BackendModule):
     ``backend="anthropic"`` sets its attention's (:class:`SWA3DRoPEAttention`); the block's own statements stay ``"pytorch"``'s.
     """
 
-    backends = ("pytorch", "anthropic", "cuda", "triton")  # "triton": 2026-11-12, the fused block's Triton stages (engine 2.4's SWADiTBlock)
+    # "triton": 2026-11-12, the fused block's Triton stages (engine 2.4's SWADiTBlock)
+    backends = ("pytorch", "anthropic", "cuda", "triton")
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
     backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 4, "cuda:h100_sm90": 2}
 
@@ -1515,9 +1516,13 @@ class AtomDiTMiniWorld(BackendModule):
             # the modulation in fp32 (the kernels' operand), one row per sequence row (B = N); differentiable in cond and its weight
             mod = F.linear(F.silu(cond.reshape(-1, cond.shape[-1]).float()), wmod.float())
             if _needs_grad(self, x, cond):
-                return SWADiTBlockFunction.apply(x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, self.attn.half_window, True)
+                return SWADiTBlockFunction.apply(
+                    x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, self.attn.half_window, True
+                )
             weights = [w.to(x.dtype).contiguous() for w in weights]
-            return swa_dit_block_fwd(x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, self.attn.half_window, FP32_EPS, False, True)[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
+            return swa_dit_block_fwd(
+                x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, self.attn.half_window, FP32_EPS, False, True
+            )[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
 
     def forward_hoisted(self, x: torch.Tensor, c_base: torch.Tensor, attention_params: tuple) -> torch.Tensor:
         """The block over ``N = A * B`` rows whose conditioning repeats over the augments: ``cond[a*B + b] == c_base[b]``, with

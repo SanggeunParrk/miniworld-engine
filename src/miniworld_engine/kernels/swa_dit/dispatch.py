@@ -709,7 +709,7 @@ def swa_dit_block_fwd(
 
 def _swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save):
     """:func:`swa_dit_block_fwd`'s launches: the card's stages, or the Triton ones under ``_PORTABLE``."""
-    ext32 =_fp32_global_cuda(q, half_window, save)
+    ext32 = _fp32_global_cuda(q, half_window, save)
     if ext32 is not None:
         return _swa_dit_fwd_fp32_global(ext32, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, eps)
     if native_h100_stages(q) or _h100_global(q, half_window):
@@ -1053,7 +1053,9 @@ def swa_dit_block_bwd(
         )
 
 
-def _swa_dit_block_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps):
+def _swa_dit_block_bwd(
+    dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps
+):
     """:func:`swa_dit_block_bwd`'s launches: the card's stages, or the Triton ones under ``_PORTABLE``."""
     if native_h100_stages(q) or _h100_global(q, half_window):
         grads = _native_h100_bwd(

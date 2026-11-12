@@ -10,7 +10,16 @@ import torch
 import torch.nn.functional as F
 
 from miniworld_engine.modules.functional import swish_gate
-from miniworld_engine.modules.norm import AdaptiveLayerNorm, LayerNorm, _as_rows3, a100, h100_unsupported, triton_unsupported
+from miniworld_engine.modules.norm import (
+    AdaptiveLayerNorm,
+    LayerNorm,
+    _activation_dtype_reason,
+    _as_rows3,
+    _wants_grad,
+    a100,
+    h100_unsupported,
+    triton_unsupported,
+)
 from miniworld_engine.modules.primitives import BackendModule, Linear, MasterWeights, master_linear, random_input, stream_shape
 
 #: The OpenDDE kit's transition composition (``fpf_transition_odde``), a release directory for ``modules/_anthropic.load``.
@@ -464,9 +473,16 @@ class ConditionedTransition(BackendModule):
         Dtype of the projections and of the AdaLN (fp32 by default).
     backend : str
         See :class:`BackendModule`.
+
+    ``backend="triton"`` (engine 2.4's portable path): the AdaLN on its own ``"triton"`` backend, then the tail on
+    ``kernels/conditioned_transition/triton`` -- a gradient: ``training.cond_transition_train`` (cuBLAS GEMMs around the Triton SwiGLU /
+    gate passes, the residual add in the gate pass; the backward's gate-grad and SwiGLU-grad in Triton); inference:
+    ``inference.cond_transition_inference`` (the fully fused b2b kernel, d_hidden <= 128) or ``composed.cond_transition_inference_composed``
+    (expand + SwiGLU, then squeeze + gate + residual; wider d). bf16 or fp32 activations (fp32 master weights under bf16 autocast cast
+    per call), CUDA. A part of the bias-only token DiT's Triton path, not a requirements module of its own.
     """
 
-    backends = ("pytorch",)
+    backends = ("pytorch", "triton")
 
     def __init__(
         self,
@@ -507,6 +523,51 @@ class ConditionedTransition(BackendModule):
         a = master_linear(self.expand_a, h)
         b = master_linear(self.expand_b, h)
         return F.silu(a) * b
+
+    # ------------------------------------------------------------------------------------------------------------ "triton"
+    def set_backend(self, backend: str = "pytorch"):
+        super().set_backend(backend)
+        ada = getattr(self, "ada_ln_in", None)  # absent while nn.Module.__init__ runs the first set_backend
+        if isinstance(ada, BackendModule):
+            ada.set_backend(backend if backend in ada.backends else "pytorch")
+        return self
+
+    def _supports_triton(self, x: torch.Tensor, cond: torch.Tensor) -> str | None:
+        why = triton_unsupported(x) or _activation_dtype_reason(x, cond)
+        if why is not None:
+            return why
+        if type(self) is not ConditionedTransition:
+            return f"{type(self).__name__}: the Triton tail kernels compute the plain SwiGLU (no up-gate projection)"
+        if not isinstance(self.ada_ln_in, AdaptiveLayerNorm):
+            return f"the AdaLN is a {type(self.ada_ln_in).__name__} (the Triton path runs AdaptiveLayerNorm)"
+        if any(m.bias is not None for m in (self.expand_a, self.expand_b, self.squeeze)) or self.to_scale.bias is None:
+            return "bias-free expand / squeeze and a to_scale with a bias (the tail kernels' operands)"
+        if tuple(x.shape[:-1]) != tuple(cond.shape[:-1]) or x.dim() < 2:
+            return f"x [..., d_hidden] and cond [..., d_cond] with the same leading shape, got {tuple(x.shape)} / {tuple(cond.shape)}"
+        return self.ada_ln_in._supports_triton(x, cond)
+
+    def _forward_triton(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        from miniworld_engine.kernels.conditioned_transition.triton import (
+            cond_transition_inference,
+            cond_transition_inference_composed,
+            cond_transition_train,
+        )
+
+        h = self.ada_ln_in(x, cond)  # the AdaLN's "triton" backend (set_backend)
+        dt, d = x.dtype, x.shape[-1]
+        length = x.shape[-2]  # the kernels' shape key: the token / atom count of the un-flattened activation
+        wa, wb, ws, wsc, bsc = (
+            t.to(dt) for t in (self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.to_scale.weight, self.to_scale.bias)
+        )
+        h2, c2, res = h.reshape(-1, d), cond.reshape(-1, cond.shape[-1]), x.reshape(-1, d)
+        with torch.autocast("cuda", enabled=False):
+            if _wants_grad(self, x, cond):
+                y = cond_transition_train(h2, c2, wa, wb, ws, wsc, bsc, length, res)
+            elif d <= 128:
+                y = res + cond_transition_inference(h2.contiguous(), c2.contiguous(), wa, wb, ws, wsc, bsc, length)
+            else:
+                y = cond_transition_inference_composed(h2.contiguous(), c2.contiguous(), wa, wb, ws, wsc, bsc, length, res.contiguous())
+        return y.reshape(x.shape)
 
 
 class UpGatedConditionedTransition(ConditionedTransition):

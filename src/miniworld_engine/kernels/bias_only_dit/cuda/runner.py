@@ -156,8 +156,9 @@ class FusedBiasOnlyDiT:
             z32 = z2d.float().contiguous()
             # the 256-wide pair: the same LayerNorm + projection with the products on TF32 tensor cores, split fp32 (3 terms, ~exact)
             # -- on the FMA pipe its 2 x 256 x H FMAs per pair row were the whole step (~1 ms of 1.85 at L768, the block no faster
-            # than PyTorch); 128 keeps the FMA kernel
-            pst = torch.empty(L * L, 2, device=pair.device) if self.dp == 256 else None
+            # than PyTorch); 128 keeps the FMA kernel off H100 -- on H100 the FMA kernel was 0.16 of a 0.46 ms step at L 512 (behind the
+            # Triton block), so both widths take the tensor-core kernel there
+            pst = torch.empty(L * L, 2, device=pair.device) if self.dp == 256 or C.h100_enabled(pair.device) else None
             for b in range(self.nb):
                 if pst is not None:
                     R32.pair_bias_tc_cuda(
@@ -177,6 +178,25 @@ class FusedBiasOnlyDiT:
                     EPS,
                 )
             R32.softmax_rows_cuda(P.view(-1, L), P.view(-1, L), m)
+            return P
+        if (
+            self.dp == 256
+            and self.dtype == torch.bfloat16
+            and (L * L) % 128 == 0
+            and self.h in (12, 16, 24)
+            and C.h100_enabled(pair.device)
+        ):
+            # the 256-wide bf16 pair in ONE pass (the training block's pair_bias kernel, bias_only_dit_train_rows.cu: LayerNorm on chip,
+            # the H biases on mma.sync, head-major): the LayerNorm rows below write LN(pair) (as large as the pair) and the GEMM reads it
+            # back -- three passes over a 256-wide pair, 0.31 of a 0.59 ms step at L 768 (H100), slower than the Triton block's one pass
+            from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as train_ext
+
+            P = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
+            pst = torch.empty(L * L, 2, device=pair.device, dtype=torch.float32)  # the row statistics the kernel writes (unused here)
+            z = z2d.contiguous()
+            for b in range(self.nb):
+                train_ext().pair_bias_cuda(z, self.pw[b * self.h : (b + 1) * self.h].contiguous(), P[b * self.h : (b + 1) * self.h], pst, EPS)
+            C.softmax_rows(P.view(-1, L), P.view(-1, L), m)
             return P
         zh = torch.empty(L * L, self.dp, device=pair.device, dtype=self.dtype)
         if self.dp == 128:
