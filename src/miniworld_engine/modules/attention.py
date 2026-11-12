@@ -21,6 +21,8 @@ from miniworld_engine.modules.primitives import BackendModule, Linear, MasterWei
 # ------------------------------------------------------------------------------------------------------------------- "triton" core
 #: the head widths the Triton pair-bias attention core (kernels/augmented_attention/triton/main.py) is built for
 TRITON_MAX_HEAD_DIM = 64
+#: the cards whose ``cuda`` backend runs the sm_80 sources: the A100 and the RTX 5090 (sm_120a builds of them, kernels/_sm120.py)
+_SM80_BUILDS = ((8, 0), (12, 0))
 
 
 def _triton_core_reason(x: torch.Tensor, head_dim: int) -> str | None:
@@ -82,6 +84,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
         "cuda:a100_sm80": 3,
+        "cuda:5090_sm120": 1,
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100
@@ -234,7 +237,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
             return why
         if extra_pair_bias is not None:
             return "extra_pair_bias: the kernels compute the bias from pair inside the pass and take no additive logit input"
-        if single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0):
+        if single.is_cuda and torch.cuda.get_device_capability(single.device) in _SM80_BUILDS:
             from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
 
             return sm80.refusal(self, single, pair, mask, self._cuda_grad(single, pair))
@@ -248,7 +251,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
 
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return single
-        if torch.cuda.get_device_capability(single.device) == (8, 0):
+        if torch.cuda.get_device_capability(single.device) in _SM80_BUILDS:
             from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
 
             if self._cuda_grad(single, pair):

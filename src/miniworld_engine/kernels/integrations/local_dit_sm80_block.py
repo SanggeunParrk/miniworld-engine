@@ -67,7 +67,7 @@ def serves(module, single, cond, pair, mask) -> bool:
     a, tr = module.attention, module.transition
     if a.use_qk_norm:
         return False
-    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0)):
+    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) in ((8, 0), (12, 0))):  # 12.0: RTX 5090, sm_120a build (kernels/_sm120.py)
         return False
     if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF):
         return False

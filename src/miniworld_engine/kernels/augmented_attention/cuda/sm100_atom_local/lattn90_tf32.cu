@@ -229,7 +229,14 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_dq_tf32(const float* __
 // ----------------------------------------------------------------------------------------------------------------- dK, dV, dbias
 constexpr int BSK = 193;
 constexpr int BSW = 132;   // per-warp band: 16 keys x 128 queries (row stride 132: float2 reads)
-constexpr int K_SMEM = 4 * 16 * BSW * 4 + (192 * 2 + 64 * 2) * ST * 4 + 2 * 192 * 4;
+#ifdef MWE_SM120
+// RTX 5090 (sm_120a build, 99 KB of shared memory per block): no bias band in shared memory -- each lane reads its bias values from global memory
+// (the band is the CTA's 33 KB, L2-resident), the rest of the layout as below
+constexpr int BAND = 0;
+#else
+constexpr int BAND = 4 * 16 * BSW;
+#endif
+constexpr int K_SMEM = BAND * 4 + (192 * 2 + 64 * 2) * ST * 4 + 2 * 192 * 4;
 
 extern "C" __global__ __launch_bounds__(128) void h_attn_dkv_tf32(const float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v,
                                                                    const float* __restrict__ dout, const float* __restrict__ bias,
@@ -238,7 +245,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_dkv_tf32(const float* _
   pdl_wait();
   extern __shared__ __align__(16) uint8_t sm[];
   float* sb = reinterpret_cast<float*>(sm);
-  float* sQ = sb + 4 * 16 * BSW;
+  float* sQ = sb + BAND;
   float* sD = sQ + 192 * ST;
   float* sK = sD + 192 * ST;
   float* sV = sK + 64 * ST;
@@ -247,6 +254,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_dkv_tf32(const float* _
   const int m = blockIdx.x, k0 = 64 * m, qs = k0 - 64, h = blockIdx.y, a0 = blockIdx.z * spc, a1 = min(A, a0 + spc), nwin = N / 32;
   const int kr = 16 * warp, qoff = 32 * (((warp - 3) >> 1) + 2);
   // band of the bias, per warp: sb[warp][key row 0..15][query column 0..127], query = qs + qoff(warp) + column
+#ifndef MWE_SM120
   for (int i = tid; i < 4 * 16 * BSW; i += 128) sb[i] = -INFINITY;
   __syncthreads();
   for (int i = tid; i < 64 * 128; i += 128) {          // every (key kk of the CTA, query column qc of its warp's band)
@@ -256,6 +264,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_dkv_tf32(const float* _
     const int win = qq >> 5, j = k0 + kk - (32 * win - 48);
     if (j >= 0 && j < 128) sb[(w * 16 + (kk & 15)) * BSW + qc] = bias[((size_t)(h * nwin + win) * 32 + (qq & 31)) * 128 + j];
   }
+#endif
   float dba[16][4];
 #pragma unroll
   for (int i = 0; i < 16; ++i) dba[i][0] = dba[i][1] = dba[i][2] = dba[i][3] = 0.f;
@@ -294,8 +303,20 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_dkv_tf32(const float* _
       }
       const int c0 = qr + 2 * t;
       const float2 lq = *reinterpret_cast<const float2*>(sl + c0), dq2 = *reinterpret_cast<const float2*>(sl + 192 + c0);
+#ifdef MWE_SM120
+      // the band entry (key row kr + g [+ 8], query column 8 i + 2 t [+ 1]) straight from the bias (-inf outside the window), as the band fill below would
+      auto bias_at = [&](int row, int col) -> float {
+        const int qq = qs + qoff + col;
+        if (qq < 0 || qq >= N) return -INFINITY;
+        const int win = qq >> 5, j = k0 + row - (32 * win - 48);
+        return (j >= 0 && j < 128) ? __ldg(bias + ((size_t)(h * nwin + win) * 32 + (qq & 31)) * 128 + j) : -INFINITY;
+      };
+      const float2 b0 = make_float2(bias_at(kr + g, 8 * i + 2 * t), bias_at(kr + g, 8 * i + 2 * t + 1));
+      const float2 b1 = make_float2(bias_at(kr + g + 8, 8 * i + 2 * t), bias_at(kr + g + 8, 8 * i + 2 * t + 1));
+#else
       const float* bk0 = sb + (warp * 16 + g) * BSW + 8 * i + 2 * t;
       const float2 b0 = *reinterpret_cast<const float2*>(bk0), b1 = *reinterpret_cast<const float2*>(bk0 + 8 * BSW);
+#endif
       const float p0 = ex2(fmaf(sc[0], C1, b0.x) - lq.x), p1 = ex2(fmaf(sc[1], C1, b0.y) - lq.y);
       const float p2 = ex2(fmaf(sc[2], C1, b1.x) - lq.x), p3 = ex2(fmaf(sc[3], C1, b1.y) - lq.y);
       const float s0 = p0 * (dp[0] - dq2.x), s1 = p1 * (dp[1] - dq2.y), s2 = p2 * (dp[2] - dq2.x), s3 = p3 * (dp[3] - dq2.y);

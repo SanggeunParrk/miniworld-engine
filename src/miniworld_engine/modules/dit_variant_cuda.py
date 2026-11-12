@@ -161,7 +161,13 @@ def _eps_reason(module) -> str | None:
 
 
 def _a100(single) -> bool:
-    return single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0)
+    """An A100 (sm_80) or an RTX 5090 (sm_120a builds of the same sm_80 sources, ``kernels/_sm120.py``)."""
+    return single.is_cuda and torch.cuda.get_device_capability(single.device) in ((8, 0), (12, 0))
+
+
+def _card(single) -> str:
+    """The card the sm_80 paths run on, for refusal reasons."""
+    return "RTX 5090 (sm_120a build of the sm_80 path)" if torch.cuda.get_device_capability(single.device) == (12, 0) else "A100"
 
 
 def _call_reason(module, single, cond, pair, mask, *, a100: bool = False) -> str | None:
@@ -169,7 +175,7 @@ def _call_reason(module, single, cond, pair, mask, *, a100: bool = False) -> str
         return "CUDA tensors only"
     if _a100(single):
         if not a100:
-            return "A100: this call has no sm_80 path"
+            return f"{_card(single)}: this call has no sm_80 path"
     elif torch.cuda.get_device_capability(single.device) != (9, 0):
         return "the H100 (sm_90) kernels only"
     if torch.is_autocast_enabled("cuda") and (torch.get_autocast_dtype("cuda") != _BF or single.dtype != _BF):
@@ -233,19 +239,19 @@ class VariantTokenCuda:
         from miniworld_engine.modules.attention import AugmentedAttentionPairBias
 
         if not isinstance(self.attention, AugmentedAttentionPairBias):
-            return f"A100: attention {type(self.attention).__name__} (no sm_80 path)"
+            return f"{_card(single)}: attention {type(self.attention).__name__} (no sm_80 path)"
         if extra_pair_bias is not None:
-            return "A100: extra_pair_bias (not an input of the sm_80 attention kernels)"
+            return f"{_card(single)}: extra_pair_bias (not an input of the sm_80 attention kernels)"
         dt = single.dtype
         if dt not in (_BF, _F32) or cond.dtype != dt or pair.dtype != dt:
-            return f"A100: dtypes {single.dtype} / {cond.dtype} / {pair.dtype} (all bfloat16 or all float32)"
+            return f"{_card(single)}: dtypes {single.dtype} / {cond.dtype} / {pair.dtype} (all bfloat16 or all float32)"
         if torch.is_autocast_enabled("cuda") and (torch.get_autocast_dtype("cuda") != _BF or dt != _BF):
-            return "A100: autocast: bfloat16 activations under bfloat16 autocast only (float32 activations run without autocast, on TF32)"
+            return f"{_card(single)}: autocast: bfloat16 activations under bfloat16 autocast only (float32 activations run without autocast, on TF32)"
         if compute_dtype not in (None, dt):
-            return f"A100: compute_dtype {compute_dtype} (the sm_80 kernels run in the activations' dtype)"
+            return f"{_card(single)}: compute_dtype {compute_dtype} (the sm_80 kernels run in the activations' dtype)"
         if not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond=cond):
             return (
-                "A100: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or fp32, "
+                f"{_card(single)}: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or fp32, "
                 "head dim 32, 48 or 64, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)"
             )
         return None
@@ -301,7 +307,7 @@ class VariantAtomCuda:
         if why is not None:
             return None, why
         if not _a100(single):
-            return None, "kernels/dit_variants serve A100 only (H100: the one atom DiT implementation)"
+            return None, "kernels/dit_variants serve the A100 and the RTX 5090 only (H100: the one atom DiT implementation)"
         n = single.shape[2]
         if (single.shape[-1], self.attention.n_head, pair.shape[-1]) != (128, 4, 16) or self.transition.expand_a.weight.shape[0] != 2 * 128:
             return None, (
@@ -323,7 +329,7 @@ class VariantAtomCuda:
             _stack(self, atom=True), single[:, 0], cond[0, 0] if _shared_cond(cond) else cond[:, 0], pair[0], m, u, need_grad=False
         ):
             return None, (
-                "A100: outside the sm_80 atom training path's range (bfloat16 / float32, [A, 1, N, 128] with N a multiple of 64, "
+                f"{_card(single)}: outside the sm_80 atom training path's range (bfloat16 / float32, [A, 1, N, 128] with N a multiple of 64, "
                 "pair 16 wide, a conditioning shared by the samples or one per sample)"
             )
         return train.atom_stack_train, (pair[0], m, u)

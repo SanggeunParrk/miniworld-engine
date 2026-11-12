@@ -7,7 +7,8 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
+from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags
+from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension  # sm_120a: same sources (kernels/_sm120.py)
 
 
 @functools.lru_cache(maxsize=1)

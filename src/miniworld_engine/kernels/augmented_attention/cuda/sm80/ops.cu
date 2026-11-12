@@ -12,6 +12,13 @@
 #include "attn_bwd_dkv_sm80.cuh"
 #include "aux_sm80.cuh"
 
+// the opt-in dynamic shared memory the generic pair-bias kernels may take: 160 KB on the A100, 99 KB on the RTX 5090 (MWE_SM120: the sm_120a build)
+#ifdef MWE_SM120
+#define AA80_SMEM_CAP 101376
+#else
+#define AA80_SMEM_CAP (160 * 1024)
+#endif
+
 namespace {
 
 void check_bf16(const torch::Tensor& t, const char* name) {
@@ -386,11 +393,11 @@ namespace {
 template <int H, int R, bool PAD, typename T>
 void launch_gen(const torch::Tensor& z, const torch::Tensor& wcm, torch::Tensor& bo, const unsigned char* kvp, int64_t N, int64_t NZ, int64_t C, double eps, double oscale, float fill) {
   const size_t smem = ((size_t)C * H + H) * sizeof(float);
-  TORCH_CHECK(smem <= 160 * 1024, "pair_bias_gen: C x H too large for shared memory");
+  TORCH_CHECK(smem <= AA80_SMEM_CAP, "pair_bias_gen: C x H too large for shared memory");
   static bool set[64] = {};                                   // the attribute is per device (and per instantiation: a static of the template)
   const int dev = at::cuda::current_device() & 63;
   if (!set[dev]) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(aa80::pair_bias_gen_kernel<H, R, PAD, T, T>, cudaFuncAttributeMaxDynamicSharedMemorySize, 160 * 1024));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(aa80::pair_bias_gen_kernel<H, R, PAD, T, T>, cudaFuncAttributeMaxDynamicSharedMemorySize, AA80_SMEM_CAP));
     set[dev] = true;
   }
   dim3 grid((unsigned)(N / aa80::PB_TJ), (unsigned)(N / (4 * R)));
@@ -442,11 +449,11 @@ void launch_gen_bwd(const torch::Tensor& z, const torch::Tensor& wcm, const torc
                     double eps) {
   using G = aa80::PbBwdCfg<C>;
   const size_t smem = (size_t)G::smem(H);
-  TORCH_CHECK(smem <= 160 * 1024, "pair_bias_gen_bwd: C x H too large for shared memory");
+  TORCH_CHECK(smem <= AA80_SMEM_CAP, "pair_bias_gen_bwd: C x H too large for shared memory");
   static bool set[64] = {};
   const int dev = at::cuda::current_device() & 63;
   if (!set[dev]) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(aa80::pair_bias_gen_bwd_kernel<H, C, T>, cudaFuncAttributeMaxDynamicSharedMemorySize, 160 * 1024));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(aa80::pair_bias_gen_bwd_kernel<H, C, T>, cudaFuncAttributeMaxDynamicSharedMemorySize, AA80_SMEM_CAP));
     set[dev] = true;
   }
   dim3 grid((unsigned)((NZ + G::TE - 1) / G::TE), (unsigned)((NZ + rows - 1) / rows));

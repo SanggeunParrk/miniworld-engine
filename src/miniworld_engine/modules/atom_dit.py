@@ -88,8 +88,9 @@ def _h100(t: torch.Tensor) -> bool:
 
 
 def _a100(t: torch.Tensor) -> bool:
-    """A CUDA tensor on an A100 (sm_80): the card of the ``"cuda"`` backends' sm_80 paths (``kernels/integrations/*_sm80.py``)."""
-    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (8, 0)
+    """A CUDA tensor on an A100 (sm_80) or an RTX 5090 (sm_120a builds of the same sources, ``kernels/_sm120.py``): the cards of the
+    ``"cuda"`` backends' sm_80 paths (``kernels/integrations/*_sm80.py``)."""
+    return t.is_cuda and torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0))
 
 
 class _A100View:

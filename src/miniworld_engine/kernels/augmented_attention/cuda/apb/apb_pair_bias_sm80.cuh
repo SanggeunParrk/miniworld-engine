@@ -221,7 +221,12 @@ void pair_bias_fwd_raw(at::Tensor z, at::Tensor wb, at::Tensor lpw, double ws, c
 #endif
 constexpr int BTP80 = 128 * DP * 2;
 template <int NH> constexpr int bwd80_bps() { return NH == 8 ? 2 : 1; }
+#ifdef MWE_SM120
+// RTX 5090 (99 KB of shared memory per block): 16 / 24 heads take a two-stage ring (three stages of 40-44 KB tiles do not fit)
+template <int NH> constexpr int bwd80_stages() { return NH == 8 ? BWD80_STAGES : 2; }
+#else
 template <int NH> constexpr int bwd80_stages() { return NH == 8 ? BWD80_STAGES : 3; }
+#endif
 // DBT: the dtype of dbias, fp32 or bf16 (the attention backward's partial, already the bias gradient when one sample: no reduction pass between)
 template <int NH, class DBT = float> constexpr int bwd80_tile() { return BTP80 + NH * 128 * (int)sizeof(DBT); }   // pair, then dbias
 template <int NH, class DBT = float> constexpr int bwd80_smem() {

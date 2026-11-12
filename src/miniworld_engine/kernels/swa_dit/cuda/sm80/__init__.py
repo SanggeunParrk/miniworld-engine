@@ -18,7 +18,8 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
+from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags
+from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension  # sm_120a: same sources (kernels/_sm120.py)
 
 _dir = Path(__file__).parent
 
@@ -432,7 +433,7 @@ def qkvg_bwd(
 
 
 def _is_a100(index: int) -> bool:
-    return _capability(index) == (8, 0)
+    return _capability(index) in ((8, 0), (12, 0))  # 12.0: RTX 5090, sm_120a build (kernels/_sm120.py)
 
 
 @functools.lru_cache(maxsize=8)

@@ -65,7 +65,7 @@ def _capability(index: int) -> tuple[int, int]:
 @torch.compiler.assume_constant_result
 def _is_a100_index(index: int) -> bool:
     """Compute capability 8.0 (a per-device constant: cached, and a constant to ``torch.compile``)."""
-    return _capability(index) == (8, 0)
+    return _capability(index) in ((8, 0), (12, 0))  # 12.0: the RTX 5090 runs the sm_120a build of these sources (kernels/_sm120.py)
 
 
 def _is_a100(device: torch.device) -> bool:

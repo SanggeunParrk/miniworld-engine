@@ -44,7 +44,7 @@ LAYOUTS = ((16, 48), (24, 32), (12, 64), (16, 64))
 
 
 def _a100(t: torch.Tensor) -> bool:
-    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (8, 0)
+    return t.is_cuda and torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0))  # 12.0: RTX 5090, sm_120a build (kernels/_sm120.py)
 
 
 def _core():
@@ -109,6 +109,11 @@ def refusal(module, single, cond, pair, mask, bias, grad: bool) -> str | None:
         return "A100: mask must be a bool [1, L] key mask"
     if any(n.eps != EPS for n in (at.ln_pair, at.ada_ln_in.ln_in, at.ada_ln_in.ln_cond)):
         return "A100: LayerNorm eps != 1e-5"
+    sm120 = torch.cuda.get_device_capability(single.device) == (12, 0)
+    if sm120 and not adaln_sm80.serves(at.ada_ln_in, single, cond, dt, grad):
+        return "the AdaLN: kernels/integrations/adaln_sm80 has no sm_120a build yet (the AdaLN / ConditionedTransition port), or the call is outside its range"
+    if sm120 and not ct_sm80.serves(module.transition, single, cond, dt, grad):
+        return "the transition: kernels/integrations/conditioned_transition_sm80 has no sm_120a build yet (the ConditionedTransition port), or the call is outside its range"
     if not adaln_sm80.serves(at.ada_ln_in, single, cond, dt, grad):
         return "A100: outside the sm_80 AdaLN kernels' range (widths 128 / 384 / 768, sigmoid AdaLN without a shift bias)"
     if not ct_sm80.serves(module.transition, single, cond, dt, grad):
