@@ -70,6 +70,23 @@ def _extra_planes(extra: torch.Tensor, b: int, h: int, n: int) -> torch.Tensor:
     return extra.reshape((1,) * (4 - extra.ndim) + tuple(extra.shape)).expand(b, h, n, n)
 
 
+def _pad_tokens(single, pair, mask, extra, n):
+    """``single`` [B, L, d], ``pair`` [B, L, L, d_pair], the key mask and ``extra_pair_bias`` at ``n`` >= L tokens: zero rows / entries,
+    the pad keys masked."""
+    import torch.nn.functional as F
+
+    b, L = single.shape[:2]
+    p = n - L
+    keys = torch.zeros((b, n), dtype=torch.bool, device=single.device)
+    keys[:, :L] = True if mask is None else mask
+    return (
+        F.pad(single, (0, 0, 0, p)).contiguous(),
+        F.pad(pair, (0, 0, 0, p, 0, p)).contiguous(),
+        keys,
+        None if extra is None else F.pad(extra, (0, p, 0, p)),
+    )
+
+
 class AttentionPairBias(BackendModule, MasterWeights):
     """Attention with pair bias::
 
@@ -282,14 +299,24 @@ class AttentionPairBias(BackendModule, MasterWeights):
         if extra_pair_bias is not None and grad:
             # the training Functions keep the bias inside their passes and return no gradient for an additive logit term ("triton" does)
             return "extra_pair_bias with a gradient: the cuda backend folds it into the inference ops' bias planes only (eval)"
+        padded = not grad and single.shape[1] % 128 != 0  # inference pads L to a multiple of 128 (``_forward_cuda``)
         if single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0):
             from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
 
             if extra_pair_bias is not None:  # the fused C++ step makes its bias inside the step: the composed path, whose bias is a tensor
-                generic = sm80._generic_refusal(self, single, pair, mask, False)
+                generic = sm80._generic_refusal(self, single, pair, mask, False, padded)
                 return None if generic is None else f"extra_pair_bias (A100: the composed path only): {generic}"
-            return sm80.refusal(self, single, pair, mask, grad)
-        return native.refusal(self, single, pair, mask, grad)
+            return sm80.refusal(self, single, pair, mask, grad, padded)
+        return native.refusal(self, single, pair, mask, grad, padded)
+
+    def _pads(self, single, pair, mask, extra_pair_bias) -> bool:
+        """Whether a ``cuda`` inference call at L % 128 != 0 runs padded: H100 always (its kernels take whole 128-token tiles); A100 on the
+        composed path (extra_pair_bias, or what the fused C++ step refuses; the step itself takes any L)."""
+        if torch.cuda.get_device_capability(single.device) != (8, 0):
+            return True
+        from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
+
+        return extra_pair_bias is not None or sm80._step_refusal(self, single, pair, mask, False) is not None
 
     def _cuda_grad(self, single, pair, extra_pair_bias=None) -> bool:
         return torch.is_grad_enabled() and (
@@ -304,6 +331,13 @@ class AttentionPairBias(BackendModule, MasterWeights):
 
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return single
+        L = single.shape[1]
+        if L % 128 and not self._cuda_grad(single, pair, extra_pair_bias) and self._pads(single, pair, mask, extra_pair_bias):
+            # inference at L % 128 != 0 (FoldForge OpenDDE n = 12: 2976 structural tokens): the kernels take whole 128-token tiles, so the
+            # call runs at the next multiple of 128 -- zero single rows and pair entries, the pad keys masked (-inf: no weight), the pad
+            # query rows dropped. Every real row attends over the same keys with the same logits as unpadded.
+            single_p, pair_p, mask_p, extra_p = _pad_tokens(single, pair, mask, extra_pair_bias, -(-L // 128) * 128)
+            return self._forward_cuda(single_p, pair_p, mask_p, extra_p)[:, :L].contiguous()
         # extra_pair_bias (eval only, ``_supports_cuda``): [B, H, L, L] planes added to the kernels' hoisted bias before the core (FoldForge R3)
         extra = None if extra_pair_bias is None else _extra_planes(extra_pair_bias, single.shape[0], self.n_head, single.shape[1])
         if torch.cuda.get_device_capability(single.device) == (8, 0):

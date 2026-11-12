@@ -159,7 +159,9 @@ def supports(
     if not pair.is_cuda or pair.dtype is not BF or pair.ndim != 4 or not pair.is_contiguous():
         return False
     b, length, length2, d = pair.shape
-    if d != cfg.d or length != length2 or length % 128 or b * length * length >= 2**31:
+    if d != cfg.d or length != length2 or b * length * length >= 2**31:
+        return False
+    if length % 128 and (train or cfg.fused or length < 128):  # inference of the rows engine pads L (``forward_rows``)
         return False
     dh = cfg.h * cfg.hd
     shapes = [(dh, d)] * 4 + [(cfg.h, d)]
@@ -724,6 +726,155 @@ def forward(
         False,
         bool(flip),
     )[0]
+
+
+# ---------------------------------------------------------------------------------------------------------------------- row-blocked inference
+#: An inference call of the rows engine runs ``forward_rows`` when L is not a multiple of 128 or the whole-pair front output ``[T, 4 H 32 + Hpad]``
+#: would exceed this (FoldForge OpenDDE's structural-token refiner: d_pair 384 x 12 heads at 3968 tokens, 46 GiB); requirement sizes up to L2048
+#: (12 GiB at d_pair 384) keep the whole-pair call.
+ROWS_BLOCKED_BYTES = 16 << 30
+#: The pair rows of one block of ``forward_rows``: about this many bytes of front output per block.
+ROWS_BLOCK_BYTES = 4 << 30
+
+
+def _padded_length(length: int) -> int:
+    return -(-length // 128) * 128
+
+
+def _front_padding(cfg: Cfg) -> tuple[int, int]:
+    """The normalised input's constant columns and the packed weights' rows of the row-blocked front (the whole-pair front's at large L)."""
+    if cfg.d in (256, 384, 512):
+        return 32, -(-cfg.n // 32) * 32
+    return 8, cfg.n
+
+
+def rows_blocked(pair: torch.Tensor, cfg: Cfg, *, save: bool = False) -> bool:
+    """Whether an inference call runs ``forward_rows`` (``ROWS_BLOCKED_BYTES``; any L that is not a multiple of 128)."""
+    if save or cfg.fused:
+        return False
+    b, length = pair.shape[:2]
+    lp = _padded_length(length)
+    return length % 128 != 0 or b * lp * lp * _front_padding(cfg)[1] * 2 > ROWS_BLOCKED_BYTES
+
+
+def _rows_forward_fake(x, weights, wo, ln_w, ln_b, mask, eps, transposed, n_head, hd, flip, block):
+    return x.new_empty(x.shape)
+
+
+@opaque(fake=_rows_forward_fake, name="triangle_attention_sm80w_forward_rows")
+def _rows_forward(
+    x: torch.Tensor,
+    weights: list[torch.Tensor],
+    wo: torch.Tensor,
+    ln_w: torch.Tensor,
+    ln_b: torch.Tensor,
+    mask: torch.Tensor,
+    eps: float,
+    transposed: bool,
+    n_head: int,
+    hd: int,
+    flip: bool,
+    block: int,
+) -> torch.Tensor:
+    """``pair + TriangleAttention(pair)`` of the rows engine in blocks of ``block`` pair rows of the attended frame, per sample, at L padded to
+    a multiple of 128 (zero pair entries, the pad keys masked, the pad rows / queries dropped).  Pass 1 normalises each block and projects
+    its bias heads into the sample's ``[H, Lp, Lp]`` planes (masked keys = bf16 min, the ``bias_planes`` values); pass 2 normalises each
+    block again, projects q | k | v | g (one GEMM against the packed front weights' rows), runs the gated core over the block's rows
+    (``attn_fwd_gate_rows``: the kernel and schedule of the whole-pair inference core) and writes ``bf16(x + a Wo^T)`` (one GEMM with the
+    residual as its C operand, as ``out_gemm_residual``).  The largest temporaries are one block's: no pair-sized buffer beyond the output."""
+    cfg = Cfg(x.shape[-1], n_head, hd, False)
+    rows, core = _rows(), _core._ext()
+    b, length, d = x.shape[0], x.shape[1], x.shape[-1]
+    lp, dhp, h = _padded_length(length), cfg.dhp, cfg.h
+    padding, n = _front_padding(cfg)
+    wp = _core.eval_form(
+        ("triattn_sm80w_folded", cfg, padding, n), (*weights, ln_w, ln_b), lambda: _pack_folded(weights, ln_w, ln_b, cfg, padding, n), False
+    )
+    wo_p = _core.eval_form(("triattn_sm80w_wo", cfg), (wo,), lambda: _wo_padded(wo, cfg), False)
+    w_front, w_bias = wp[: 4 * dhp], wp[4 * dhp : 4 * dhp + cfg.hpad]
+    scl = _core._L2E / math.sqrt(hd)
+    no_stats = x.new_empty((0,), dtype=F32)
+    neg = torch.finfo(BF).min  # bias_planes' masked value (bf16_min_f)
+    out = torch.empty_like(x)
+    direct = lp == length and not transposed  # the block's rows are a contiguous view of the input and of the output
+
+    for z in range(b):
+        frame = x[z] if not transposed else x[z].transpose(0, 1)  # [L rows i, L tokens j, D]: the attended frame
+        keys = torch.zeros((lp,), dtype=torch.bool, device=x.device)
+        if mask.numel():
+            keys[:length] = mask[z]
+        else:
+            keys[:length] = True
+        bias = x.new_empty((1, h, lp, lp))
+
+        def normalised(i0: int, r: int, frame=frame) -> tuple[torch.Tensor, torch.Tensor]:
+            real = max(0, min(length, i0 + r) - i0)
+            if direct:
+                xb = frame[i0 : i0 + r].reshape(r * lp, d)
+            else:
+                xb = x.new_zeros((r, lp, d))
+                xb[:real, :length] = frame[i0 : i0 + real]
+                xb = xb.view(r * lp, d)
+            xh = x.new_empty((r * lp, d + padding))
+            rows.ln_rows(xb, xh, no_stats, d, 1, 0, float(eps))  # the starting frame as it is (L = 1: no transposed reads)
+            return xb, xh
+
+        for i0 in range(0, lp, block):
+            r = min(block, lp - i0)
+            _, xh = normalised(i0, r)
+            planes = torch.mm(xh, w_bias.t()).view(r, lp, cfg.hpad)[..., :h].permute(2, 0, 1)  # [H, rows a, tokens b]
+            del xh
+            if flip:  # AlphaFold 3's ending-node orientation: token (a, b) is bias (b, a)
+                bias[0, :, :, i0 : i0 + r] = planes.transpose(1, 2)
+            else:
+                bias[0, :, i0 : i0 + r] = planes
+            del planes
+        bias.masked_fill_(~keys.view(1, 1, 1, lp), neg)
+
+        for i0 in range(0, length, block):
+            r = min(block, lp - i0, -(-(length - i0) // 2) * 2)  # the real rows, rounded up to the core's 2-row step
+            xb, xh = normalised(i0, r)
+            y = torch.mm(xh, w_front.t())  # q | k | v | g [r Lp, 4 DHp]
+            del xh
+            ld = 4 * dhp
+            a = x.new_empty((r * lp, dhp))
+            core.attn_fwd_gate_rows(
+                y[:, :dhp], y[:, dhp : 2 * dhp], y[:, 2 * dhp : 3 * dhp], bias, y[:, 3 * dhp :], a, lp, h, r, ld, ld, ld, ld, dhp, scl
+            )
+            del y
+            real = min(length, i0 + r) - i0
+            if direct:
+                torch.addmm(xb, a, wo_p.t(), out=out[z, i0 : i0 + r].view(r * lp, d))  # bf16(x + a Wo^T)
+            else:
+                ob = torch.addmm(xb, a, wo_p.t()).view(r, lp, d)[:real, :length]
+                if transposed:
+                    out[z][:, i0 : i0 + real] = ob.transpose(0, 1)
+                else:
+                    out[z, i0 : i0 + real] = ob
+                del ob
+            del xb, a
+        del bias
+    return out
+
+
+def forward_rows(
+    pair: torch.Tensor,
+    cfg: Cfg,
+    weights: Sequence[torch.Tensor],
+    wo: torch.Tensor,
+    ln_w: torch.Tensor,
+    ln_b: torch.Tensor,
+    eps: float,
+    mask: torch.Tensor | None = None,
+    *,
+    transposed: bool = False,
+    flip: bool = False,
+) -> torch.Tensor:
+    """``pair + TriangleAttention(pair)`` (inference) in row blocks (``ROWS_BLOCK_BYTES``) at any L above 128: see ``_rows_forward``."""
+    lp = _padded_length(pair.shape[1])
+    block = max(2, min(lp, ROWS_BLOCK_BYTES // (lp * _front_padding(cfg)[1] * 2)) // 2 * 2)
+    m = mask.contiguous() if mask is not None else pair.new_empty((0,), dtype=torch.bool)
+    return _rows_forward(pair, list(weights), wo, ln_w, ln_b, m, float(eps), bool(transposed), cfg.h, cfg.hd, bool(flip), int(block))
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------- backward

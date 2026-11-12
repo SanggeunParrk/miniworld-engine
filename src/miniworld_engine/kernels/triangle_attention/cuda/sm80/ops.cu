@@ -260,6 +260,40 @@ void attn_fwd_gate(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
   else launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, true>>(p, (int)Z);
 }
 
+// The gated inference core of `attn_fwd_gate_fast` on a block of `rows` pair rows of one sample (the row-blocked inference of the wide path, sm80_wide.forward_rows:
+// pairs whose whole-pair projections would not fit).  q / k / v / gate / aout are token-major views of the block ([rows L, ld], token (i, j) at i L + j); bias
+// [1, H, L, L] is the whole sample's (query j, key k; masked keys = bf16 min), shared by every row.  The same kernel and schedule as attn_fwd_gate_fast at L >= 256
+// (2 rows, 64 keys, 3 CTAs / SM, the fixed-shift softmax); the grid covers the block's rows only.  No plain output, no log-sum-exp (inference).
+void attn_fwd_gate_rows(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor gate, torch::Tensor aout, int64_t L, int64_t H, int64_t rows,
+                        int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldgate, int64_t ldao, double scl) {
+  using G = a100::AttnCfg<2, 2, 64, 3, true, false, 64, (bool)A100_ATTN_FIXALL>;
+  for (auto* t : {&q, &k, &v, &bias, &gate, &aout}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kBFloat16, "attn_fwd_gate_rows: bf16 CUDA tensors");
+  TORCH_CHECK(bias.is_contiguous() && bias.numel() == H * L * L && reinterpret_cast<uintptr_t>(bias.data_ptr()) % 16 == 0, "attn_fwd_gate_rows: bias [1, H, L, L] contiguous");
+  TORCH_CHECK(L % a100::TA_BM == 0 && L >= 256, "attn_fwd_gate_rows: L a multiple of 128, at least 256");
+  TORCH_CHECK(rows >= G::R && rows % G::R == 0 && rows <= L && rows / G::R <= 65535 && H <= 65535, "attn_fwd_gate_rows: rows a multiple of 2 up to L");
+  const int64_t T = rows * L;
+  for (auto [t, ld] : {std::pair<const torch::Tensor*, int64_t>{&q, ldq}, {&k, ldk}, {&v, ldv}, {&gate, ldgate}, {&aout, ldao}}) {
+    TORCH_CHECK(ld >= H * 32 && ld % 8 == 0 && reinterpret_cast<uintptr_t>(t->data_ptr()) % 16 == 0, "attn_fwd_gate_rows: row strides / alignment");
+    TORCH_CHECK((t->storage_offset() + (T - 1) * ld + H * 32) * t->element_size() <= (int64_t)t->storage().nbytes(), "attn_fwd_gate_rows: tensor extents");
+  }
+  const c10::cuda::CUDAGuard guard(q.device());
+  a100::AttnParams p;
+  p.q = reinterpret_cast<const __nv_bfloat16*>(q.data_ptr()); p.k = reinterpret_cast<const __nv_bfloat16*>(k.data_ptr());
+  p.v = reinterpret_cast<const __nv_bfloat16*>(v.data_ptr()); p.bias = reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr());
+  p.out = nullptr; p.lse = nullptr;
+  p.ldq = ldq; p.ldk = ldk; p.ldv = ldv; p.ldo = 0; p.L = (int)L; p.H = (int)H; p.scl = (float)scl;
+  p.gate = reinterpret_cast<const __nv_bfloat16*>(gate.data_ptr()); p.aout = reinterpret_cast<__nv_bfloat16*>(aout.data_ptr()); p.ldgate = ldgate; p.ldao = ldao;
+  static bool set[64] = {};                                   // the attribute is per device
+  const int dev = at::cuda::current_device() & 63;
+  if (!set[dev]) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(a100::attn_fwd_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
+    set[dev] = true;
+  }
+  const dim3 grid((unsigned)(L / G::BM), (unsigned)(rows / G::R), (unsigned)H);   // z = 0: token (i, j) of the block at i L + j
+  a100::attn_fwd_kernel<G><<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 // The front: input LayerNorm + q | k | v | g + bias projections (f1_sm80.cuh).  x [T, 128] bf16 (T = Z L^2 tokens of Z square pair stacks, L a multiple of
 // 128; transposed != 0: the ending node, token (a, b) read from row (b, a)), w [520, 128] bf16 = W' (rows 516-519 zero), bvec [520] fp32, mask [Z, L]
 // uint8 or empty, out [T, 512] bf16 (q | k | v | g, token-major), bias [Z, 4, L, L] bf16, lnst [T, 2] fp32 (mean, rstd) or empty.
@@ -610,6 +644,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("attn_fwd_gate_internal", &attn_fwd_gate<2>);
   m.def("attn_fwd_gate_fast", &attn_fwd_gate<3>);
   m.def("attn_fwd_gate_trainfast", &attn_fwd_gate<4>);
+  m.def("attn_fwd_gate_rows", &attn_fwd_gate_rows);
   m.def("front", &front);
   m.def("front_pack", &front_pack);
   m.def("back", &back);

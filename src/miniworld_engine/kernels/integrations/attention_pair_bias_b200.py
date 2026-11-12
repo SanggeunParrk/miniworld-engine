@@ -64,9 +64,11 @@ _cores: dict = {}
 EXACT_DWB = False
 
 
-def refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool) -> str | None:
+def refusal(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool, padded: bool = False
+) -> str | None:
     """Why the H100 (sm_90) native path cannot take this call (``grad``: the training Function, else the inference op), or ``None``.
-    The ``cuda`` backend of ``AttentionPairBias`` states exactly this."""
+    The ``cuda`` backend of ``AttentionPairBias`` states exactly this. ``padded``: the caller pads L to a multiple of 128 (inference)."""
     if not single.is_cuda:
         return "CUDA tensors only"
     if torch.cuda.get_device_capability(single.device) != (9, 0):
@@ -98,8 +100,8 @@ def refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor
     if module.ln_single.weight is None or module.ln_pair.weight is None:
         return "the kernels take the affine LayerNorms"
     L = single.shape[1]
-    if L % 128:
-        return f"L {L}: a multiple of 128 only"
+    if L % 128 and not padded:
+        return f"L {L}: a multiple of 128 only (inference pads it: AttentionPairBias._forward_cuda)"
     if tuple(pair.shape) != (B, L, L, dp) or not pair.is_contiguous():
         return f"pair must be one contiguous [{B}, {L}, {L}, {dp}] tensor"
     if mask is not None and (tuple(mask.shape) != (B, L) or mask.dtype != torch.bool):

@@ -140,14 +140,16 @@ def _sm80():
     return sm80
 
 
-def refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool) -> str | None:
+def refusal(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool, padded: bool = False
+) -> str | None:
     """Why the A100 (sm_80) paths cannot take this call (``grad``: the training Function, else the inference op), or ``None``: the fused C++ step
     (``_step_refusal``), else the composed path (``_generic_refusal``: fp32 on the TF32 core, the wide pairs, ``gate_bias``). The ``cuda`` backend of
     ``AttentionPairBias`` states exactly this on an A100."""
     why = _step_refusal(module, single, pair, mask, grad)
     if why is None:
         return None
-    generic = _generic_refusal(module, single, pair, mask, grad)
+    generic = _generic_refusal(module, single, pair, mask, grad, padded)
     return None if generic is None else f"{why}; composed path: {generic}"
 
 
@@ -620,7 +622,7 @@ def _hdp(hd: int) -> int:
     return max(hd, 32)
 
 
-def _generic_refusal(module, single, pair, mask, grad: bool) -> str | None:
+def _generic_refusal(module, single, pair, mask, grad: bool, padded: bool = False) -> str | None:
     sm80 = _sm80()
     if module.use_qk_norm:
         return "per-head q / k RMSNorm"
@@ -635,7 +637,7 @@ def _generic_refusal(module, single, pair, mask, grad: bool) -> str | None:
     if single.ndim != 3 or single.shape[0] < 1:
         return "single must be [B, L, d_single] (B >= 1)"
     B, L, H = single.shape[0], single.shape[1], module.n_head
-    if L % 128:
+    if L % 128 and not padded:  # padded: the caller pads L (inference: AttentionPairBias._forward_cuda)
         return f"L {L}: a multiple of 128"
     hd = module.to_query.weight.shape[0] // H
     if hd not in GENERIC_HEAD_DIMS or module.to_query.weight.shape[0] != H * hd:
