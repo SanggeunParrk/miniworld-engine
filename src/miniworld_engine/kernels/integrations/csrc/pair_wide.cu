@@ -26,7 +26,8 @@ constexpr int KS_ = DZ / 16, CPR = DZ / 8;                // k steps / 16-byte c
 static_assert(DZ % 64 == 0, "d_pair must be a multiple of 64");
 constexpr int TILEB = GJ * DZ * 2;                        // one [16][DZ] bf16 tile
 // the forward holds H rows of N bf16 logits next to its tile ring: N <= 2048 fits every width (d_pair 384: 144 KiB of tiles + 32 KiB of logits; FoldForge
-// 5I28 E3: 1536 / 2048 tokens in inference). The backward stages the w / dw rows [H][N] fp32 on the tile area: N <= 1024 (pair_bwd3).
+// 5I28 E3: 1536 / 2048 tokens in inference). The backward stages the w / dw rows [H][N] fp32 on the tile area while they fit, else reads them
+// from global memory (pair_bwd3: N <= 2048 too, FoldForge R21 training past 1024).
 constexpr int NMAX_FWD = 2048;
 
 __device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
@@ -217,6 +218,11 @@ __global__ void __launch_bounds__(THREADS, PW_MINB) pair_bwd_kernel(const __nv_b
   for (int k = tid; k < DZ; k += THREADS) { sg[k] = LNW[k]; sg[DZ + k] = LNB[k]; }
   for (int k = tid; k < H * DZ + DZ + H; k += THREADS) acc[k] = 0.f;
   for (int k = tid; k < DZ * 4; k += THREADS) { const int d = k >> 2, qq = k & 3; wbt2[k] = pack2(__bfloat162float(WB[(2 * qq) * DZ + d]), __bfloat162float(WB[(2 * qq + 1) * DZ + d])); }
+  // The w / dw rows [H][N] (as fp32) are staged on the tile ring while they fit (N <= 1024 at d_pair 128 / 256, 2048 at 384 / 512); a longer
+  // row (training past 1024 tokens, FoldForge R21) is read from global memory twice instead (the second read hits L2): the same sums in the
+  // same order either way.
+  const bool staged = 2 * H * N * 4 <= NWARP * 2 * TILEB;
+  if (staged) {
   for (int k0 = 0; k0 < H * N; k0 += 8 * THREADS) {                     // staged in chunks of 8 per thread: all 16 loads in flight before the stores
     float vd[8], vw[8];
 #pragma unroll
@@ -227,14 +233,26 @@ __global__ void __launch_bounds__(THREADS, PW_MINB) pair_bwd_kernel(const __nv_b
 #pragma unroll
     for (int m = 0; m < 8; ++m) { const int k = k0 + m * THREADS + tid; if (k < H * N) { sdw[k] = vd[m]; sw[k] = vw[m]; } }
   }
+  }
   __syncthreads();
   for (int h = warp; h < H; h += NWARP) {                               // softmax backward, head h: sdot, db (bf16), S = sum_j db
-
+    const long row = ((long)h * N + i) * N;
     float sdot = 0.f;
-    for (int j = lane; j < N; j += 32) sdot += sw[h * N + j] * sdw[h * N + j];
+    if (staged) {
+      for (int j = lane; j < N; j += 32) sdot += sw[h * N + j] * sdw[h * N + j];
+    } else {
+      for (int j = lane; j < N; j += 32) { const float a = __bfloat162float(W16[row + j]), b = __bfloat162float(DW[row + j]); sdot += a * b; }
+    }
     sdot = wsum(sdot);
     float S = 0.f;
-    for (int j = lane; j < N; j += 32) { const __nv_bfloat16 v = __float2bfloat16(sw[h * N + j] * (sdw[h * N + j] - sdot)); sdb[j * H + h] = v; S += __bfloat162float(v); }
+    if (staged) {
+      for (int j = lane; j < N; j += 32) { const __nv_bfloat16 v = __float2bfloat16(sw[h * N + j] * (sdw[h * N + j] - sdot)); sdb[j * H + h] = v; S += __bfloat162float(v); }
+    } else {
+      for (int j = lane; j < N; j += 32) {
+        const float a = __bfloat162float(W16[row + j]), b = __bfloat162float(DW[row + j]);
+        const __nv_bfloat16 v = __float2bfloat16(a * (b - sdot)); sdb[j * H + h] = v; S += __bfloat162float(v);
+      }
+    }
     S = wsum(S);
     if (lane == 0) acc[H * DZ + DZ + h] = S;
   }
@@ -403,7 +421,7 @@ torch::Tensor pair_fwd3(torch::Tensor z, torch::Tensor mask, torch::Tensor ln_w,
 std::vector<torch::Tensor> pair_bwd3(torch::Tensor z, torch::Tensor w16, torch::Tensor dw, torch::Tensor ln_w, torch::Tensor ln_b, double eps, torch::Tensor wb) {
   TORCH_CHECK(z.is_cuda() && z.scalar_type() == torch::kBFloat16 && z.is_contiguous() && z.dim() == 3 && z.size(2) == DZ && z.size(0) == z.size(1), "z: [N, N, DZ] bf16");
   const int N = (int)z.size(0);
-  TORCH_CHECK(N % GJ == 0 && N <= 1024, "N must be a multiple of 16 (and <= 1024)");
+  TORCH_CHECK(N % GJ == 0 && N <= NMAX_FWD, "N must be a multiple of 16 (and <= ", NMAX_FWD, ": the row of db [N][H] bf16 in shared memory)");
   TORCH_CHECK(w16.scalar_type() == torch::kBFloat16 && w16.is_contiguous() && w16.sizes() == torch::IntArrayRef({H, N, N}), "w16: [8, N, N] bf16");
   auto dwc = dw.contiguous();
   TORCH_CHECK(dwc.scalar_type() == torch::kBFloat16 && dwc.sizes() == torch::IntArrayRef({H, N, N}), "dw: [8, N, N] bf16");
@@ -411,10 +429,9 @@ std::vector<torch::Tensor> pair_bwd3(torch::Tensor z, torch::Tensor w16, torch::
   auto dz = torch::empty_like(z);
   auto pwb = torch::empty({N, H, DZ}, z.options().dtype(torch::kFloat));
   auto pln = torch::empty({N, 2 * DZ}, z.options().dtype(torch::kFloat));
-  TORCH_CHECK(2 * H * N * 4 <= NWARP * 2 * TILEB, "the w / dw staging must fit in the tile area");
   const int smem = NWARP * 2 * TILEB + (2 * DZ + H * DZ + DZ + H) * 4 + DZ * 4 * 4 + N * H * 2 + 2 * KS_ * 32 * 8 + H * 4;
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 2 * TILEB + (2 * DZ + H * DZ + DZ + H) * 4 + DZ * 4 * 4 + 1024 * H * 2 + 2 * KS_ * 32 * 8 + H * 4)); attr = true; }
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 2 * TILEB + (2 * DZ + H * DZ + DZ + H) * 4 + DZ * 4 * 4 + NMAX_FWD * H * 2 + 2 * KS_ * 32 * 8 + H * 4)); attr = true; }
   pair_bwd_kernel<<<N, THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(z.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(w16.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(dwc.data_ptr<at::BFloat16>()),
       ln_w.data_ptr<float>(), ln_b.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wb16.data_ptr<at::BFloat16>()),

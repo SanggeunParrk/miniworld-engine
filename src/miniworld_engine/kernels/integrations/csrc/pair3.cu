@@ -170,6 +170,10 @@ __global__ void __launch_bounds__(THREADS, 2) pair_bwd_kernel(const __nv_bfloat1
   for (int k = tid; k < DZ; k += THREADS) sg[k] = LNW[k];
   for (int k = tid; k < H * DZ; k += THREADS) acc[k] = 0.f;
   for (int k = tid; k < DZ * 4; k += THREADS) { const int d = k >> 2, qq = k & 3; wbt2[k] = pack2(__bfloat162float(WB[(2 * qq) * DZ + d]), __bfloat162float(WB[(2 * qq + 1) * DZ + d])); }
+  // The w / dw rows [H][N] fp32 are staged on the tile area while they fit (N <= 1536); a longer row (training past 1536 tokens,
+  // FoldForge R21) is read from global memory twice instead (the second read hits L2). Both give the same sums in the same order.
+  const bool staged = 2 * H * N * 4 <= NWARP * 3 * TILEB;
+  if (staged) {
   for (int k0 = 0; k0 < H * N; k0 += 8 * THREADS) {                     // staged in chunks of 8 per thread: all 16 loads in flight before the stores
     float vd[8], vw[8];
 #pragma unroll
@@ -180,15 +184,28 @@ __global__ void __launch_bounds__(THREADS, 2) pair_bwd_kernel(const __nv_bfloat1
 #pragma unroll
     for (int m = 0; m < 8; ++m) { const int k = k0 + m * THREADS + tid; if (k < H * N) { sdw[k] = vd[m]; sw[k] = vw[m]; } }
   }
+  }
   __syncthreads();
   {                                                                     // softmax backward, head `warp`: sdot, db (bf16)
     const int h = warp;
+    const long row = ((long)h * N + i) * N;
     float sdot = 0.f;
-    for (int j = lane; j < N; j += 32) sdot += sw[h * N + j] * sdw[h * N + j];
+    if (staged) {
+      for (int j = lane; j < N; j += 32) sdot += sw[h * N + j] * sdw[h * N + j];
+    } else {
+      for (int j = lane; j < N; j += 32) { const float a = __bfloat162float(W16[row + j]), b = DW[row + j]; sdot += a * b; }
+    }
     sdot = wsum(sdot);
     // masked_fill has zero derivative at every masked key, including the
     // all-masked case where finite-min logits produce uniform probabilities.
-    for (int j = lane; j < N; j += 32) sdb[j * H + h] = __float2bfloat16(KEY && !KEY[j] ? 0.f : sw[h * N + j] * (sdw[h * N + j] - sdot));
+    if (staged) {
+      for (int j = lane; j < N; j += 32) sdb[j * H + h] = __float2bfloat16(KEY && !KEY[j] ? 0.f : sw[h * N + j] * (sdw[h * N + j] - sdot));
+    } else {
+      for (int j = lane; j < N; j += 32) {
+        const float a = __bfloat162float(W16[row + j]), b = DW[row + j];
+        sdb[j * H + h] = __float2bfloat16(KEY && !KEY[j] ? 0.f : a * (b - sdot));
+      }
+    }
   }
   __syncthreads();                                                      // the staging area becomes the tile ring
   float cm[8][4];                                                        // M^T accumulators: rows d = 16 mt + r / + 8, cols h = 2q, 2q+1
@@ -432,7 +449,7 @@ std::vector<torch::Tensor> pair_bwd3(torch::Tensor z, torch::Tensor w16, torch::
   TORCH_CHECK(z.is_cuda() && z.scalar_type() == torch::kBFloat16 && z.is_contiguous() && z.dim() == 3 && z.size(2) == DZ && z.size(0) == z.size(1), "z: [N, N, 128] bf16");
   const int N = (int)z.size(0);
   if (key.has_value()) TORCH_CHECK(key->is_cuda() && key->device() == z.device() && key->scalar_type() == at::kBool && key->is_contiguous() && key->numel() == N, "key: contiguous CUDA bool [N]");
-  TORCH_CHECK(N % GJ == 0 && N <= 1024, "N must be a multiple of 16 (and <= 1024)");
+  TORCH_CHECK(N % GJ == 0 && N <= 2048, "N must be a multiple of 16 (and <= 2048: the row of db [N][H] bf16 in shared memory)");
   TORCH_CHECK(w16.scalar_type() == torch::kBFloat16 && w16.is_contiguous() && w16.sizes() == torch::IntArrayRef({H, N, N}), "w16: [8, N, N] bf16");
   auto dwc = dw.contiguous();
   TORCH_CHECK(dwc.scalar_type() == torch::kFloat && dwc.sizes() == torch::IntArrayRef({H, N, N}), "dw: [8, N, N] fp32");
@@ -440,10 +457,9 @@ std::vector<torch::Tensor> pair_bwd3(torch::Tensor z, torch::Tensor w16, torch::
   auto dz = torch::empty_like(z);
   auto pwb = torch::empty({N, H, DZ}, z.options().dtype(torch::kFloat));
   auto pln = torch::empty({N, DZ}, z.options().dtype(torch::kFloat));
-  TORCH_CHECK(2 * H * N * 4 <= NWARP * 3 * TILEB, "the w / dw staging must fit in the tile area");
   const int smem = NWARP * 3 * TILEB + (DZ + H * DZ) * 4 + DZ * 4 * 4 + N * H * 2;
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 3 * TILEB + (DZ + H * DZ) * 4 + DZ * 4 * 4 + 1024 * H * 2)); attr = true; }
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 3 * TILEB + (DZ + H * DZ) * 4 + DZ * 4 * 4 + 2048 * H * 2)); attr = true; }
   pair_bwd_kernel<<<N, THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(z.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(w16.data_ptr<at::BFloat16>()), dwc.data_ptr<float>(),
       ln_w.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wb16.data_ptr<at::BFloat16>()),

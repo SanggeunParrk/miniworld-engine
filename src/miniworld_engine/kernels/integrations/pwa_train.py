@@ -100,9 +100,27 @@ def _h100_training_default(msa: torch.Tensor) -> bool:
     )
 
 
+def _h100_long(msa: torch.Tensor) -> bool:
+    """Training past 1024 tokens on H100 (FoldForge R21): the native builds throughout -- pair3.cu's pair backward reads rows past what its
+    tile ring stages from global memory, and its native build reduces the parameter gradients in a fixed order (deterministic)."""
+    return (
+        msa.device.type == "cuda"
+        and torch.cuda.get_device_capability(msa.device) == (9, 0)
+        and msa.ndim == 4
+        and msa.shape[0] == 1
+        and msa.shape[3] == D
+        and msa.shape[2] > 1024
+    )
+
+
+def _native_scope(msa: torch.Tensor) -> bool:
+    """The native training scope of a call: the six qualified shapes or a length past 1024."""
+    return _h100_training_default(msa) or _h100_long(msa)
+
+
 def native_aux_enabled(msa: torch.Tensor | None = None) -> bool:
-    """Qualified training defaults (the six required H100 shapes, or the active native training scope)."""
-    return _h100_training_default(msa) if msa is not None else _NATIVE_TRAINING_SCOPE.get()
+    """Qualified training defaults (the six required H100 shapes, a length past 1024, or the active native training scope)."""
+    return _native_scope(msa) if msa is not None else _NATIVE_TRAINING_SCOPE.get()
 
 
 def native_inference_enabled(device: torch.device) -> bool:
@@ -149,14 +167,10 @@ def refusal(
             return f"one MSA stack per call, got batch {msa.shape[0]}"
         n, s = msa.shape[2], msa.shape[1]
         native = native_aux_enabled(msa) or (not torch.is_grad_enabled() and native_inference_enabled(msa.device))
-        # the forward pair kernel holds H rows of N logits in shared memory (N <= 2048); the backward one is built for N <= 1024
-        n_max = 1024 if torch.is_grad_enabled() else NMAX_INFER
-        if cap == (9, 0) and native and (n == 0 or s == 0 or n > n_max):
-            return f"the CUDA-only H100 path needs positive S and N <= {n_max}, got N={n}, S={s}"
-        if cap == (9, 0) and torch.is_grad_enabled() and n > 1024:
-            # past 1024 the training step would run the Triton pair kernels (pair3.cu's backward holds N <= 1024): slower than the triton
-            # backend (H100, boltz2 widths, L 1536: 5.80 vs 5.50 ms) -- refused, as at the other widths (FoldForge 5I28: inference only)
-            return f"training past 1024 tokens: the H100 pair backward (pair3.cu pair_bwd3) holds N <= 1024, got N={n} (inference serves N <= {NMAX_INFER})"
+        # the forward pair kernel holds H rows of N logits in shared memory (N <= 2048); the backward reads rows past what its tile ring
+        # stages from global memory (N <= 2048 in training too: FoldForge R21, every width; past 1024 the native builds run, _h100_long)
+        if cap == (9, 0) and native and (n == 0 or s == 0 or n > NMAX_INFER):
+            return f"the CUDA-only H100 path needs positive S and N <= {NMAX_INFER}, got N={n}, S={s}"
         if wide:  # the wide path pads the length to a multiple of 16 itself; any depth
             if cap != (9, 0):
                 return "the wide kernels are built for sm_90a"
@@ -165,11 +179,11 @@ def refusal(
             wide_max = _wide.NMAX if torch.is_grad_enabled() else _wide.NMAX_INFER
             if not 0 < n <= wide_max or s == 0:
                 return (
-                    f"the wide pair kernels hold one row of logits: 0 < N <= {_wide.NMAX} in training (the backward stages fp32 rows), "
+                    f"the wide pair kernels hold one row of logits: 0 < N <= {_wide.NMAX} in training (the backward rows), "
                     f"<= {_wide.NMAX_INFER} in inference; got N={n}, S={s}, grad {torch.is_grad_enabled()}"
                 )
             return None
-        # the pair side is pwa_wide's (sm_90a, one row of logits: N <= 1024 in training, 2048 in inference -- FoldForge 5I28)
+        # the pair side is pwa_wide's (sm_90a, one row of logits: N <= 2048 in training and inference -- FoldForge 5I28 / R21)
         pair_max = _wide.NMAX if torch.is_grad_enabled() else _wide.NMAX_INFER
         if pair_only and (cap != (9, 0) or n > pair_max):
             return (
@@ -541,7 +555,7 @@ class _PwaMath(torch.autograd.Function):
             w16 = k["pwa"].pair_fwd(z, pm, lnz_w.detach().contiguous(), eps_z, wb.detach().contiguous())
         elif z.shape[-1] != DZ:  # pair_only_wide: the pair side at this d_pair is pwa_wide's
             w16 = _wide_pair_fwd(z, pm, lnz_w, eps_z, wb)
-        elif k["pair3"] is not None and N % 16 == 0 and N <= 1024:
+        elif k["pair3"] is not None and N % 16 == 0 and N <= NMAX_INFER:
             (zw,) = _h100_float(lnz_w.detach())
             wb16 = _cast_h100_matrices(wb.detach())[0] if native_aux_enabled() else wb.detach()
             w16 = k["pair3"].pair_fwd3(z, pm, zw, eps_z, wb16)
@@ -942,7 +956,7 @@ from miniworld_engine.kernels._compile import opaque
 
 @opaque(fake=_forward_fake, name="pwa_h100_fwd")
 def _forward_op(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float) -> list[torch.Tensor]:
-    scope = _NATIVE_TRAINING_SCOPE.set(_h100_training_default(args[0]))
+    scope = _NATIVE_TRAINING_SCOPE.set(_native_scope(args[0]))
     try:
         ctx = _SavedContext()
         out = _PwaMath.forward(ctx, *args, eps_m, eps_z, p_drop)  # pyright: ignore[reportCallIssue]  -- args: the ten inputs in forward's order
@@ -965,7 +979,7 @@ def _backward_op(
     eps_z: float,
     p_drop: float,
 ) -> list[torch.Tensor]:
-    scope = _NATIVE_TRAINING_SCOPE.set(_h100_training_default(args[0]))
+    scope = _NATIVE_TRAINING_SCOPE.set(_native_scope(args[0]))
     try:
         return _backward_math(args, kept, dy, eps_m, eps_z, p_drop)
     finally:

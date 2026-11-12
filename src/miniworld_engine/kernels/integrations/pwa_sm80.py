@@ -1,6 +1,6 @@
 """Automatic dispatch to the A100 (sm_80) MSAPairWeightedAveraging: hand CUDA around cuBLAS, inference and training.
 
-Contract: bf16 MSA ``[1, S, L, d_msa]`` (d_msa 64 or 128, any S) and bf16 pair ``[1, L, L, d_pair]`` (d_pair 128 / 256 / 384; L a multiple of 16, at most 1024), 8 heads of 8 / 16 / 32
+Contract: bf16 MSA ``[1, S, L, d_msa]`` (d_msa 64 or 128, any S) and bf16 pair ``[1, L, L, d_pair]`` (d_pair 128 / 256 / 384; L a multiple of 16, at most 2048), 8 heads of 8 / 16 / 32
 channels (``d_hidden``; d_msa 128 with 32-wide heads is not built; d_msa 256 / d_pair 512 / 8 x 32 is ``pwa_wide_sm80``), an optional bool key mask ``[1, L]``, the module's residual and row dropout (``drop_msa``, training), capability 8.0.
 ``refusal`` is the range; ``modules.MSAPairWeightedAveraging``'s ``cuda`` backend refuses everything else (no fallback).
 
@@ -77,7 +77,7 @@ def refusal(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
     if length % 16 or length > longest or tuple(pair.shape) != (1, length, length, d_pair):
         return (
             f"L {length}: the sm_80 kernels take L a multiple of 16 up to {longest} in {'training' if training else 'inference'} "
-            f"(training {sm.MAX_LEN}: the pair backward's shared-memory row; inference {sm.MAX_LEN_INFER}) and a [1, L, L, d_pair] pair"
+            f"(training {sm.MAX_LEN}, inference {sm.MAX_LEN_INFER}: the pair kernels hold a row of logits per head) and a [1, L, L, d_pair] pair"
         )
     if mask is not None and (tuple(mask.shape) != (1, length) or mask.dtype != torch.bool):
         return "mask must be a bool [1, L] key mask"

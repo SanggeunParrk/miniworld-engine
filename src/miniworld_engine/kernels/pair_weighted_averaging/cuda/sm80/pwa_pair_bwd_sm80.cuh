@@ -32,9 +32,11 @@ struct PairBwdParams {
   float eps;
 };
 
-template <int DZ> struct PairBwdCfg {
+// NBUF_: tile buffers per warp (the next tile's rows arrive while this one is processed); a long row at d_pair 256 takes one (its db row
+// [L][8] bf16 does not fit next to two)
+template <int DZ, int NBUF_ = (DZ <= 256 ? 2 : 1)> struct PairBwdCfg {
   static constexpr int NW = 8, NTHR = 256, GJ = 16, NK = DZ / 16, NCHK = DZ / 8;
-  static constexpr int NBUF = DZ <= 256 ? 2 : 1;                       // tile buffers per warp (the next tile's rows arrive while this one is processed)
+  static constexpr int NBUF = NBUF_;
   static constexpr int TILE = GJ * DZ * 2, TILES = NW * NBUF * TILE;
   static constexpr int PREP = DZ * 4 * 4 + 2 * DZ * 4;                 // wbt [DZ][4] words, gamma / beta
   static constexpr int NCH64 = DZ / 64;                                // 64-column chunks (4 ks, 8 n8 tiles)
@@ -56,9 +58,11 @@ template <int DZ> DEVI void pb_load_tile(uint32_t dst, const __nv_bfloat16* src_
   }
 }
 
-template <int DZ, int NMINB>
+// LONG: a row past 1024 keys (training, FoldForge R21): phase 0 streams the row from global memory twice (the sum, then db) instead of holding
+// it in registers; everything after phase 0 is the same.
+template <int DZ, int NMINB, bool LONG = false, int NBUF_ = (DZ <= 256 ? 2 : 1)>
 __global__ void __launch_bounds__(256, NMINB) pwa_pair_bwd_kernel(const PairBwdParams p) {
-  using C = PairBwdCfg<DZ>;
+  using C = PairBwdCfg<DZ, NBUF_>;
   extern __shared__ __align__(128) unsigned char smem[];
   const uint32_t sbase = smem_u32(smem);
   uint32_t* wbt = reinterpret_cast<uint32_t*>(smem + C::TILES);                       // [DZ][4]
@@ -77,7 +81,57 @@ __global__ void __launch_bounds__(256, NMINB) pwa_pair_bwd_kernel(const PairBwdP
   // the warp's first tile is requested, then the arithmetic runs under both.
   const int ngroups = L / C::GJ;
   const uint32_t tb0 = sbase + warp * C::NBUF * C::TILE;
-  {
+  if constexpr (LONG) {
+    const int h = warp, nt_ = (L + 127) / 128;
+    const __nv_bfloat16* wr = p.w + ((long)h * L + i) * L;
+    if (warp < ngroups) pb_load_tile<DZ>(tb0, p.z + ((long)i * L + warp * C::GJ) * DZ, lane);   // the warp's first tile under the row passes
+    cp_async_commit();
+    // key j = 128 t + 4 lane + e, as in the register path; the ns partials of one element summed in order
+    auto load4 = [&](int t, float (&wv)[4], float (&dv)[4], bool (&ok)[4]) {
+      const int j = 128 * t + 4 * lane;
+      float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
+      uint2 wraw = make_uint2(0u, 0u);
+      uint32_t m4 = 0u;
+      if (j < L) {
+        wraw = *reinterpret_cast<const uint2*>(wr + j);
+        for (int k = 0; k < p.ns; ++k) {
+          const float4 x = *reinterpret_cast<const float4*>(p.dw + (((long)h * p.ns + k) * L + i) * L + j);
+          a.x += x.x; a.y += x.y; a.z += x.z; a.w += x.w;
+        }
+        m4 = p.mask == nullptr ? 0x01010101u : *reinterpret_cast<const uint32_t*>(p.mask + j);
+      }
+      wv[0] = bf16lo(wraw.x); wv[1] = bf16hi(wraw.x); wv[2] = bf16lo(wraw.y); wv[3] = bf16hi(wraw.y);
+      dv[0] = a.x; dv[1] = a.y; dv[2] = a.z; dv[3] = a.w;
+#pragma unroll
+      for (int e = 0; e < 4; ++e) ok[e] = ((m4 >> (8 * e)) & 0xffu) != 0u;
+    };
+    float sd = 0.f;
+    for (int t = 0; t < nt_; ++t) {
+      float wv[4], dv[4];
+      bool ok[4];
+      load4(t, wv, dv, ok);
+#pragma unroll
+      for (int e = 0; e < 4; ++e) sd = fmaf(wv[e], dv[e], sd);
+    }
+    sd = warp_sum(sd);
+    float ss = 0.f;
+    for (int t = 0; t < nt_; ++t) {
+      float wv[4], dv[4];
+      bool ok[4];
+      load4(t, wv, dv, ok);
+#pragma unroll
+      for (int e = 0; e < 4; ++e) {
+        const int j = 128 * t + 4 * lane + e;
+        if (j < L) {
+          const __nv_bfloat16 db = __float2bfloat16_rn(ok[e] ? wv[e] * (dv[e] - sd) : 0.f);
+          sdb[j * 8 + h] = db;
+          ss += __bfloat162float(db);
+        }
+      }
+    }
+    ss = warp_sum(ss);
+    if (lane == 0) p.pS[i * 8 + h] = ss;
+  } else {
     // 4 consecutive keys a lane (16-byte loads of the fp32 partials, 8-byte loads of w): key j = 128 t + 4 lane + e.  The partials of one element are summed in order as before.
     constexpr int T = 8;                                                // 8 x 128 = 1024 keys at most
     const int h = warp, nt_ = (L + 127) / 128;

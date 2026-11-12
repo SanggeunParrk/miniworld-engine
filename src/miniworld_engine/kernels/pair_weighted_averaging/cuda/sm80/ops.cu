@@ -102,13 +102,20 @@ template <int D, int C> void launch_dgv(const pwa80::DgvParams& p, int nb, cudaS
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-template <int DZ, int NMINB> void launch_pair_bwd(const pwa80::PairBwdParams& p, cudaStream_t st) {
-  using C = pwa80::PairBwdCfg<DZ>;
+template <int DZ, int NMINB, bool LONG = false, int NBUF = (DZ <= 256 ? 2 : 1)> void launch_pair_bwd(const pwa80::PairBwdParams& p, cudaStream_t st) {
+  using C = pwa80::PairBwdCfg<DZ, NBUF>;
   const int smem = C::TILES + C::PREP + 16 * p.L;
   TORCH_CHECK(smem <= 166912, "pair_bwd: L too long for shared memory");
-  raise_smem(pwa80::pwa_pair_bwd_kernel<DZ, NMINB>, 166912);
-  pwa80::pwa_pair_bwd_kernel<DZ, NMINB><<<p.L, C::NTHR, smem, st>>>(p);
+  raise_smem(pwa80::pwa_pair_bwd_kernel<DZ, NMINB, LONG, NBUF>, 166912);
+  pwa80::pwa_pair_bwd_kernel<DZ, NMINB, LONG, NBUF><<<p.L, C::NTHR, smem, st>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// a row past 1024 keys (training, FoldForge R21): phase 0 streams the row (LONG); at d_pair 256 one tile buffer per warp leaves room for the db row
+template <int DZ> void launch_pair_bwd_long(const pwa80::PairBwdParams& p, cudaStream_t st) {
+  using C2 = pwa80::PairBwdCfg<DZ>;
+  if (C2::TILES + C2::PREP + 16 * p.L <= 166912) launch_pair_bwd<DZ, 1, true>(p, st);
+  else launch_pair_bwd<DZ, 1, true, 1>(p, st);
 }
 
 // block = 32 column quads x 8 row groups: thread (x, y) sums the rows y, y + 8, ... of its quad (loads in flight: R / 8 per thread), then the eight partials are summed in order
@@ -273,6 +280,14 @@ void pair_bwd(torch::Tensor z, torch::Tensor w, torch::Tensor dw, torch::Tensor 
   p.lnw = lnw.data_ptr<float>(); p.lnb = lnb.data_ptr<float>(); p.wb = ptr<__nv_bfloat16>(wb); p.dz = reinterpret_cast<__nv_bfloat16*>(dz.data_ptr()); p.pM = pM.data_ptr<float>();
   p.pS = pS.data_ptr<float>(); p.L = L; p.ns = (int)(dw.size(0) / 8); p.eps = (float)eps;
   auto st = at::cuda::getCurrentCUDAStream();
+  TORCH_CHECK(L <= 2048, "pair_bwd: L <= 2048");
+  if (L > 1024) {
+    if (DZ == 128) launch_pair_bwd_long<128>(p, st);
+    else if (DZ == 256) launch_pair_bwd_long<256>(p, st);
+    else if (DZ == 384) launch_pair_bwd_long<384>(p, st);
+    else TORCH_CHECK(false, "pair_bwd: d_pair must be 128, 256 or 384");
+    return;
+  }
   if (DZ == 128) { if (variant == 1) launch_pair_bwd<128, 1>(p, st); else launch_pair_bwd<128, 2>(p, st); }   // two CTAs per SM (<= 128 registers) is the shipped schedule; variant 1: one
   else if (DZ == 256) launch_pair_bwd<256, 1>(p, st);
   else if (DZ == 384) launch_pair_bwd<384, 1>(p, st);
