@@ -523,7 +523,51 @@ void swa_varlen(torch::Tensor seqused, int64_t S, torch::Tensor cu, torch::Tenso
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// the weight forms of a bf16 training call in one launch (composed._prepare_train): each pair x[k] -> y[k] is a copy in y's dtype (fp32 -> bf16 rounds to nearest even, as
+// torch's cast), transposed when cols[k] > 0: element (r, c) of the row-major [n / cols, cols] x goes to y[c ld + off + r] (a transpose into a column block of a
+// wider row-major matrix: (Wqkv | Wg)^T from Wqkv and Wg).  Replaces the per-call casts of the six weights and the four transposes the backward stages read
+// (12 launches of a few microseconds at small row counts).
+struct FormsParams {
+  const void* x[12];
+  void* y[12];
+  bool xb[12], yb[12];
+  long n[12];
+  int cols[12], ld[12], off[12];
+  int count;
+};
+__global__ void weight_forms_kernel(const FormsParams p) {
+  const long j = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  for (int k = 0; k < p.count; ++k) {
+    if (j >= p.n[k]) continue;
+    const float v = p.xb[k] ? __bfloat162float(static_cast<const __nv_bfloat16*>(p.x[k])[j]) : static_cast<const float*>(p.x[k])[j];
+    const long d = p.cols[k] > 0 ? (j % p.cols[k]) * p.ld[k] + p.off[k] + j / p.cols[k] : j;
+    if (p.yb[k]) static_cast<__nv_bfloat16*>(p.y[k])[d] = __float2bfloat16_rn(v);
+    else static_cast<float*>(p.y[k])[d] = v;
+  }
+}
+void weight_forms(std::vector<torch::Tensor> x, std::vector<torch::Tensor> y, std::vector<int64_t> cols, std::vector<int64_t> ld, std::vector<int64_t> off) {
+  const size_t n = x.size();
+  TORCH_CHECK(n >= 1 && n <= 12 && y.size() == n && cols.size() == n && ld.size() == n && off.size() == n, "weight_forms: 1 .. 12 pairs with cols / ld / off each");
+  FormsParams p{};
+  p.count = (int)n;
+  long mx = 0;
+  for (size_t k = 0; k < n; ++k) {
+    const torch::Tensor &a = x[k], &b = y[k];
+    TORCH_CHECK(a.is_cuda() && b.is_cuda() && a.is_contiguous() && b.is_contiguous(), "weight_forms: CUDA contiguous tensors");
+    TORCH_CHECK((a.scalar_type() == torch::kFloat32 || a.scalar_type() == torch::kBFloat16) && (b.scalar_type() == torch::kFloat32 || b.scalar_type() == torch::kBFloat16), "weight_forms: fp32 / bf16");
+    const long cnt = a.numel();
+    TORCH_CHECK(cols[k] >= 0 && (cols[k] == 0 ? b.numel() == cnt : (cnt % cols[k] == 0 && ld[k] >= cnt / cols[k] + off[k] && (cols[k] - 1) * ld[k] + off[k] + cnt / cols[k] <= b.numel())), "weight_forms: bad layout");
+    p.x[k] = a.data_ptr(); p.y[k] = b.data_ptr(); p.xb[k] = a.scalar_type() == torch::kBFloat16; p.yb[k] = b.scalar_type() == torch::kBFloat16;
+    p.n[k] = cnt; p.cols[k] = (int)cols[k]; p.ld[k] = (int)ld[k]; p.off[k] = (int)off[k];
+    mx = std::max(mx, cnt);
+  }
+  c10::cuda::CUDAGuard guard(x[0].device());
+  weight_forms_kernel<<<(unsigned)((mx + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("weight_forms", &weight_forms);
   m.def("swa_attn_fwd", &swa_attn_fwd);
   m.def("swa_attn_bwd", &swa_attn_bwd);
   m.def("swa_attn_delta", &swa_attn_delta);

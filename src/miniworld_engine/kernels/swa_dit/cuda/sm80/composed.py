@@ -113,19 +113,22 @@ def _fwd_bf16(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
 
 
 def _bwd_bf16(
-    dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, half_window: int
+    dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, half_window: int, forms=None
 ) -> list[torch.Tensor]:
-    """``[dq, dmod, dWqkv, dWg, dWo, dWu, dWd]`` (dq bf16, the rest fp32) of :func:`_fwd_bf16` on the sm_80 backward stages."""
+    """``[dq, dmod, dWqkv, dWg, dWo, dWu, dWd]`` (dq bf16, the rest fp32) of :func:`_fwd_bf16` on the sm_80 backward stages; ``forms``: the
+    transposed weights of :func:`train_forms` (else each stage transposes its own)."""
+    f = forms or {}
     n, s, _ = q.shape
     m = n * s
     mode = sm80.MODE_SINGLE
     dmod = sm80.dmod_buffer(mode, n, n, s, q.device)
     tc = sm80.train_cfg(m)
-    dq1, dffn, hh, dab = sm80.ffn_bwd(dy.reshape(m, C), q1, y, ffn, mod, wu, wd, dmod, n, s, FP32_EPS, mode, **tc.get("ffn_bwd", {}))
-    d_o, dg, datt, gated, delta = sm80.oproj_bwd(dq1, o, g, att, mod, wo, dmod, n, s, mode, **tc.get("oproj_bwd", {}))
+    ffn_kw = dict(wdt=f.get("wdt"), wut=f.get("wut"), **tc.get("ffn_bwd", {}))
+    dq1, dffn, hh, dab = sm80.ffn_bwd(dy.reshape(m, C), q1, y, ffn, mod, wu, wd, dmod, n, s, FP32_EPS, mode, **ffn_kw)
+    d_o, dg, datt, gated, delta = sm80.oproj_bwd(dq1, o, g, att, mod, wo, dmod, n, s, mode, **tc.get("oproj_bwd", {}), wot=f.get("wot"))
     dqh, dkh, dvh = attention_bwd(qh, kh, vh, o, d_o, lse, delta, seqused, half_window)
     qkvg_args = (q.reshape(m, C), pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, wqkv, wg, dmod, n, s, FP32_EPS, FP32_EPS, mode)
-    dq, dp = sm80.qkvg_bwd(*qkvg_args, **tc.get("qkvg_bwd", {}))
+    dq, dp = sm80.qkvg_bwd(*qkvg_args, wt=f.get("wt"), **tc.get("qkvg_bwd", {}))
     return [
         dq.view(n, s, C),
         dmod,
@@ -376,6 +379,30 @@ def block(x, cond, cos, sin, seqused, half_window: int, weights) -> torch.Tensor
         return _fwd_fp32(x, mod, cos, sin, seqused, *ws[1:], half_window, False)[0]
 
 
+def train_forms(weights) -> tuple[list[torch.Tensor], dict[str, torch.Tensor]]:
+    """The weight forms of a bf16 training call in ONE launch (``weight_forms``, ops.cu): the six weights (Wmod, Wqkv, Wg, Wo, Wu, Wd; fp32
+    masters or bf16) cast to bf16 for the forward stages, and the transposes the backward stages read -- Wo^T, Wd^T, Wu^T, (Wqkv | Wg)^T -- from the
+    same weights (rounding and transposing commute: the values of the per-stage casts and transposes, bitwise). At L 1024 the six casts and four
+    transposes were 12 launches, ~30 us of a ~250 us training step."""
+    dev = weights[0].device
+    raw = [w.detach().contiguous() for w in weights]
+    wmod, wqkv, wg, wo, wu, wd = raw
+    ws = [torch.empty(w.shape, device=dev, dtype=_BF) for w in raw]
+    forms = {
+        "wot": torch.empty(wo.shape[1], wo.shape[0], device=dev, dtype=_BF),
+        "wdt": torch.empty(wd.shape[1], wd.shape[0], device=dev, dtype=_BF),
+        "wut": torch.empty(wu.shape[1], wu.shape[0], device=dev, dtype=_BF),
+        "wt": torch.empty(C, 4 * C, device=dev, dtype=_BF),
+    }
+    xs = [*raw, wo, wd, wu, wqkv, wg]
+    ys = [*ws, forms["wot"], forms["wdt"], forms["wut"], forms["wt"], forms["wt"]]
+    cols = [0] * 6 + [wo.shape[1], wd.shape[1], wu.shape[1], C, C]
+    ld = [0] * 6 + [wo.shape[0], wd.shape[0], wu.shape[0], 4 * C, 4 * C]
+    off = [0] * 6 + [0, 0, 0, 0, 3 * C]
+    sm80._ext().weight_forms(xs, ys, cols, ld, off)
+    return ws, forms
+
+
 class SWABlockA100(torch.autograd.Function):
     """:func:`block` with a backward: gradients of x, cond and the six weights (in each one's own dtype; an fp32 master weight gets the
     unrounded fp32 gradient). cos / sin / seqused get none."""
@@ -384,22 +411,33 @@ class SWABlockA100(torch.autograd.Function):
     def forward(ctx, x, cond, cos, sin, seqused, half_window, wmod, wqkv, wg, wo, wu, wd):
         raw = (wmod, wqkv, wg, wo, wu, wd)
         ctx.meta = (half_window, [w.dtype for w in raw], cond.shape, cond.dtype)
-        x, c, cos, sin, ws = _prepare(x, cond, cos, sin, raw)
+        forms: dict[str, torch.Tensor] = {}
+        if x.dtype == _BF and all(w.shape[-1] == C for w in raw[:5]):  # bf16: the casts and the backward's transposes in one launch
+            ws, forms = train_forms(raw)
+            x, c, cos, sin, _ = _prepare(x, cond, cos, sin, ())
+        else:
+            x, c, cos, sin, ws = _prepare(x, cond, cos, sin, raw)
         with torch.autocast("cuda", enabled=False):
             mod, a = _mod_fwd(c, ws[0], True)
             fwd = _fwd_bf16 if x.dtype == _BF else _fwd_fp32
             outputs = fwd(x, mod, cos, sin, seqused, *ws[1:], half_window, True)
-        ctx.save_for_backward(x, c, a, mod, cos, sin, seqused, *ws, *outputs[1:])
+        ctx.form_keys = tuple(forms)
+        ctx.save_for_backward(x, c, a, mod, cos, sin, seqused, *ws, *outputs[1:], *forms.values())
         return outputs[0]
 
     @staticmethod
     def backward(ctx, dy):
         half_window, dtypes, cond_shape, cond_dtype = ctx.meta
         x, c, a, mod, cos, sin, seqused, wmod, *rest = ctx.saved_tensors
-        weights, saves = rest[:5], rest[5:]
+        nf = len(ctx.form_keys)
+        weights, saves = rest[:5], rest[5 : len(rest) - nf]
+        forms = dict(zip(ctx.form_keys, rest[len(rest) - nf :], strict=True))
         with torch.autocast("cuda", enabled=False):
-            bwd = _bwd_bf16 if x.dtype == _BF else _bwd_fp32
-            dx, dmod, *dw = bwd(dy.to(x.dtype).contiguous(), x, mod, cos, sin, seqused, *weights, *saves, half_window)
+            args = (dy.to(x.dtype).contiguous(), x, mod, cos, sin, seqused, *weights, *saves, half_window)
+            if x.dtype == _BF:
+                dx, dmod, *dw = _bwd_bf16(*args, forms=forms)
+            else:
+                dx, dmod, *dw = _bwd_fp32(*args)
             dc, dwmod = _mod_bwd(dmod, c, a, wmod)
         grads = [g.to(dt) for g, dt in zip((dwmod, *dw), dtypes, strict=True)]
         return dx, dc.view(cond_shape).to(cond_dtype), None, None, None, None, *grads
