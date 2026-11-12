@@ -774,9 +774,18 @@ _GEN_BWD_TE = {64: 128, 128: 64, 256: 32, 384: 16, 512: 16}
 GEN_BWD_HEADS = (8, 12, 16, 24)
 
 
+def _gen_bwd_te(dp: int, heads: int) -> int | None:
+    """Elements per tile of ``pair_bias_gen_bwd`` (``aux_sm80.cuh``'s ``PbBwdCfg``): :data:`_GEN_BWD_TE`, except d_pair 512 with more than 12 heads on
+    the RTX 5090 (sm_120a build): 8 (16 elements need 108 / 125 KB of shared memory at 16 / 24 heads, over its 99 KB)."""
+    te = _GEN_BWD_TE.get(dp)
+    if te is not None and dp == 512 and heads > 12 and _sm120_build():
+        return 8
+    return te
+
+
 def pair_bias_generic_bwd_supported(dp: int, heads: int, dtype: torch.dtype) -> bool:
     """The generic pair-bias backward's requirements: bf16 / fp32 pair, a width of 64 / 128 / 256 / 384 / 512, 8 / 12 / 16 / 24 heads, the tile in shared memory."""
-    te = _GEN_BWD_TE.get(dp)
+    te = _gen_bwd_te(dp, heads)
     return (
         te is not None
         and dtype in (torch.bfloat16, torch.float32)
@@ -799,7 +808,8 @@ def pair_bias_generic_backward(
     ``[H, C]`` gradient of the folded weight (summed over the kernel's blocks in a fixed order: a replay is bit-identical).
     ``out``: a contiguous buffer of z's shape and dtype that ``dz`` is written into (a batch row of the caller's gradient)."""
     nz, c, heads = z.shape[0], z.shape[-1], wcm.shape[1]
-    te = _GEN_BWD_TE[c]
+    te = _gen_bwd_te(c, heads)
+    assert te is not None
     tiles = -(-nz // te)
     rows = max(1, min(8, nz * tiles // 864))  # about four waves of two blocks per SM
     pw = torch.empty(tiles * -(-nz // rows), heads, c, device=z.device, dtype=torch.float32)
@@ -831,7 +841,17 @@ GEN_BWD_TC_HEADS = (8, 16, 24)
 
 def pair_bias_generic_backward_tc_supported(dp: int, heads: int, dtype: torch.dtype) -> bool:
     """The fp32 tensor-core pair-bias backward's requirements: an fp32 pair of 128 / 256 / 384 / 512 channels, 8 / 16 / 24 heads."""
-    return dtype is torch.float32 and dp in GEN_BWD_TC_WIDTHS and heads in GEN_BWD_TC_HEADS
+    fits = not _sm120_build() or _tc_smem(dp, heads) <= _smem_cap()  # the RTX 5090: d_pair 512 x 16 / 24 heads take pair_bias_gen_bwd
+    return dtype is torch.float32 and dp in GEN_BWD_TC_WIDTHS and heads in GEN_BWD_TC_HEADS and fits
+
+
+def _tc_smem(dp: int, heads: int) -> int:
+    """Shared memory of ``pair_bias_gen_bwd_tc`` on the RTX 5090 (``aux_sm80.cuh``'s ``PbTcCfg`` with its 99 KB cap: 3 stages when they fit, else 2;
+    d_pair 512 x 16 / 24 heads exceed it even at 2 and take the one-pass kernel ``pair_bias_gen_bwd``)."""
+    hp, red = heads + 4, 4 * 8 * 16 + 2 * 16
+    fixed, stage = dp * hp + red, 16 * (dp + 8) + 16 * hp
+    stages = 3 if (fixed + 3 * stage) * 4 <= _smem_cap() else 2
+    return (fixed + stages * stage) * 4
 
 
 def pair_bias_generic_backward_tc(
