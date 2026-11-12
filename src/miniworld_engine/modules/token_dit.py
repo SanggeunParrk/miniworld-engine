@@ -46,7 +46,7 @@ from miniworld_engine.modules.attention import (
 from miniworld_engine.modules.dit_variant_cuda import MasterEntryCast, VariantTokenCuda, fp32_conditioning
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.norm import IdentityAdaptiveLayerNorm
-from miniworld_engine.modules.primitives import BackendModule, key_mask, random_input, wide
+from miniworld_engine.modules.primitives import BackendModule, key_mask, random_input, shared_cond_stream, wide
 from miniworld_engine.modules.transition import ConditionedTransition, UpGatedConditionedTransition
 
 _capture.instance_cache_attr("_anthropic_pack")  # the anthropic backend's packed W_qkvg (clear_weight_caches)
@@ -56,8 +56,18 @@ def _token_dit_inputs(block, *, length, samples, dtype, device, generator, depth
     """A token DiT block's measurement inputs: ``single`` / ``cond`` [S, 1, L, d] (S samples on the augmentation axis), ``pair`` [1, L, L, d_pair],
     the key ``mask`` [1, L]. Stream ``token_folds`` (the multi-fold contract, docs/modules.md): ``depth`` = F folds (trunk_seeds of one input),
     ``single`` [S, F, L, d], ``cond`` one per fold [1, F, L, d] expanded over the S samples, ``pair`` [F, L, L, d_pair], one key mask [1, L]
-    expanded over the folds (FoldForge's grouped sampler step)."""
+    expanded over the folds (FoldForge's grouped sampler step). A ``*_shared_cond`` stream (``token_single_shared_cond``,
+    ``token_folds_shared_cond``): ``cond`` [1, F, L, d] expanded (stride 0) over the S samples, as FoldForge's ``TokenDiTStack`` calls the
+    block; the measurers keep it expanded (requirements/README.md)."""
     d_single, d_cond, d_pair = block.transition.d_hidden, block.transition.d_cond, block.attention.ln_pair.normalized_shape[0]
+    stream, shared = shared_cond_stream(stream)
+    if shared and stream == "token_single":
+        return {
+            "single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
+            "cond": random_input((1, 1, length, d_cond), dtype=dtype, device=device, generator=generator).expand(samples, -1, -1, -1),
+            "pair": random_input((1, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+            "mask": key_mask(1, length, device=device),
+        }
     if stream == "token_folds":
         f = depth or 1
         return {

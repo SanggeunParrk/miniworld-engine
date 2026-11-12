@@ -474,5 +474,28 @@ def inputs(case: Case, module: BackendModule, *, device) -> dict:
     )
 
 
+def keeps_expanded(case: Case) -> bool:
+    """Whether the measurers keep the case's stride-0 expanded inputs expanded (a ``*_shared_cond`` stream: FoldForge's conditioning
+    shared across the samples, which the backends serve on dedicated shared paths). Every other case's inputs are copied as before."""
+    from miniworld_engine.modules.primitives import shared_cond_stream
+
+    return shared_cond_stream(case.stream)[1]
+
+
+def expanded_dims(t: torch.Tensor) -> tuple[int, ...]:
+    """The dims of ``t`` that are expanded views: stride 0 and size > 1."""
+    return tuple(d for d in range(t.ndim) if t.stride(d) == 0 and t.shape[d] > 1)
+
+
+def expanded_base(t: torch.Tensor, dtype: torch.dtype | None = None) -> torch.Tensor:
+    """A fresh copy of the one stored slice of an expanded ``t`` (size 1 on its :func:`expanded_dims`), in ``dtype`` (default ``t``'s):
+    the tensor ``t`` was expanded from. ``expanded_base(t).expand(t.shape)`` is ``t`` again, with the same strides when the base was
+    dense."""
+    base = t.detach()
+    for d in expanded_dims(t):
+        base = base.narrow(d, 0, 1)
+    return base.to(dtype or t.dtype, copy=True)
+
+
 def clone(module: _M) -> _M:
     return copy.deepcopy(module)
