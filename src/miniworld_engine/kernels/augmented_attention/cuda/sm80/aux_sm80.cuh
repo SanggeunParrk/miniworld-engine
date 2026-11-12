@@ -254,51 +254,101 @@ __global__ void __launch_bounds__(PB_NT) pair_bias_gen_kernel(const TI* __restri
 //   dW phase   thread (head group, channel slot) owns HB = H / 4 heads x CB = C / 64 channels of dW' and runs over the tile's elements and rows: per element one g read per head and one xh read per
 //              channel feed HB x CB FMAs; the block's partial [H, C] goes to pw (the caller sums the blocks in a fixed order).
 // C a multiple of 64 (64, 128, 256, 512: TE = 128, 64, 32, 16), H = 8, 12, 16 or 24 (a multiple of 4).
+// W' sits channel-major with a row pitch WP(H) of an odd number of float4s (H or H + 4): the dz phase's TPE threads of an element read the float4s of TPE consecutive
+// channels, which then fall in distinct bank quads (a pitch of an even number of float4s -- H = 8, 16 -- put them 2- / 4-way on the same banks).
+// 2026-11-12 (A100): the padded pitch and the next row's tile prefetched into registers during the current row's two phases (PbRaw8): 3.65 -> 1.72 ms at H 16, C 256,
+// the pair 768 x 768 (C 128: 1.07 -> 0.74; C 512 H 24, 256 x 256: 0.82 -> 0.59), the same values bitwise.
 template <int C_> struct PbBwdCfg {
   static constexpr int C = C_, TE = C_ == 64 ? 128 : C_ == 128 ? 64 : C_ == 256 ? 32 : 16, TPE = 256 / TE, P = C_ + 4, CB = C_ / 64;
   static_assert(C_ % 64 == 0 && C_ <= 512, "C: 64 .. 512, a multiple of 64");
-  static constexpr int smem(int H) { return (C_ * H + 2 * TE * P + TE * H) * 4; }
+  static constexpr int wp(int H) { return ((H / 4) & 1) ? H : H + 4; }
+  static constexpr int smem(int H) { return (C_ * wp(H) + 2 * TE * P + TE * H) * 4; }
+};
+// The raw 16-byte vectors of 8 channels (bf16: one uint4; fp32: two float4), held in registers between the prefetch and the shared-memory fill.
+template <typename T> struct PbRaw8;
+template <> struct PbRaw8<__nv_bfloat16> {
+  uint4 a;
+  __device__ __forceinline__ void load(const __nv_bfloat16* p) { a = __ldg(reinterpret_cast<const uint4*>(p)); }
+  __device__ __forceinline__ void zero() { a = make_uint4(0u, 0u, 0u, 0u); }
+  __device__ __forceinline__ void put(float* d) const {                  // the values pb_load8 gives, as two float4s
+    const uint32_t w[4] = {a.x, a.y, a.z, a.w};
+    float x[8];
+#pragma unroll
+    for (int k = 0; k < 4; ++k) { x[2 * k] = __uint_as_float(w[k] << 16); x[2 * k + 1] = __uint_as_float(w[k] & 0xffff0000u); }
+    reinterpret_cast<float4*>(d)[0] = make_float4(x[0], x[1], x[2], x[3]); reinterpret_cast<float4*>(d)[1] = make_float4(x[4], x[5], x[6], x[7]);
+  }
+};
+template <> struct PbRaw8<float> {
+  float4 a, b;
+  __device__ __forceinline__ void load(const float* p) { a = __ldg(reinterpret_cast<const float4*>(p)); b = __ldg(reinterpret_cast<const float4*>(p) + 1); }
+  __device__ __forceinline__ void zero() { a = b = make_float4(0.f, 0.f, 0.f, 0.f); }
+  __device__ __forceinline__ void put(float* d) const { reinterpret_cast<float4*>(d)[0] = a; reinterpret_cast<float4*>(d)[1] = b; }
 };
 
 template <int H, int C, typename T>
 __global__ void __launch_bounds__(256) pair_bias_gen_bwd_kernel(const T* __restrict__ z, const float* __restrict__ wcm, const float* __restrict__ db, T* __restrict__ dz, float* __restrict__ pw,
                                                                 int N, int NZ, int RPC, const unsigned char* __restrict__ kv, float eps) {
   using G = PbBwdCfg<C>;
-  constexpr int TE = G::TE, TPE = G::TPE, P = G::P, CB = G::CB, HB = H / 4;
+  constexpr int TE = G::TE, TPE = G::TPE, P = G::P, CB = G::CB, HB = H / 4, WP = G::wp(H);
+  constexpr int NT = (TE * (C / 8) + 255) / 256, NG = (TE * H + 255) / 256;  // z tasks (8 channels) / g values per thread and row
   static_assert(H % 4 == 0, "heads: a multiple of 4");
   extern __shared__ __align__(16) float bsm[];
-  float* ws = bsm;                                                       // W' channel-major [C][H]
-  float* xh = ws + C * H;                                                // [TE][P]: z, then xh
+  float* ws = bsm;                                                       // W' channel-major [C][WP]
+  float* xh = ws + C * WP;                                               // [TE][P]: z, then xh
   float* dx = xh + TE * P;                                               // [TE][P]: dxh, then dz
   float* gs = dx + TE * P;                                               // [TE][H]
   const int tid = threadIdx.x, e = tid / TPE, q = tid % TPE, hg = tid >> 6, slot = tid & 63;
-  for (int k = tid; k < C * H; k += 256) ws[k] = wcm[k];
+  for (int k = tid; k < C * H; k += 256) ws[(k / H) * WP + k % H] = wcm[k];
   const int j0 = blockIdx.x * TE;
   float acc[HB][CB];
 #pragma unroll
   for (int hb = 0; hb < HB; ++hb)
 #pragma unroll
     for (int cb = 0; cb < CB; ++cb) acc[hb][cb] = 0.f;
+  // Row i's z tile and dbias, fetched into registers one row ahead (raw: the conversions and the key mask wait for the shared-memory fill), so the loads of
+  // row i + 1 are in flight during row i's dz and dW phases.
+  PbRaw8<T> zr[NT];
+  float gr[NG];
+  unsigned char kr[NG];
+  auto fetch = [&](int i) {
+#pragma unroll
+    for (int t = 0; t < NT; ++t) {
+      const int idx = tid + 256 * t;
+      if (TE * (C / 8) % 256 != 0 && idx >= TE * (C / 8)) continue;
+      const int el = idx / (C / 8), c8 = (idx - el * (C / 8)) * 8;
+      if (j0 + el < NZ) zr[t].load(z + ((size_t)i * NZ + j0 + el) * C + c8);
+      else zr[t].zero();
+    }
+#pragma unroll
+    for (int t = 0; t < NG; ++t) {
+      const int idx = tid + 256 * t;
+      if (TE * H % 256 != 0 && idx >= TE * H) continue;
+      const int h = idx / TE, el = idx - h * TE, j = j0 + el;
+      gr[t] = j < NZ ? __ldg(db + ((size_t)h * N + i) * N + j) : 0.f;
+      kr[t] = j < NZ && (kv == nullptr || kv[j]);
+    }
+  };
+  if (blockIdx.y * RPC < NZ && RPC > 0) fetch(blockIdx.y * RPC);
   for (int r = 0; r < RPC; ++r) {
     const int i = blockIdx.y * RPC + r;
     if (i >= NZ) break;                                                  // uniform over the block
     __syncthreads();                                                     // the previous row's readers are done with xh / dx / gs
-    for (int idx = tid; idx < TE * (C / 8); idx += 256) {                // the z tile: 8 channels per task
-      const int el = idx / (C / 8), c8 = (idx - el * (C / 8)) * 8;
-      float v[8];
-      if (j0 + el < NZ) pb_load8(z + ((size_t)i * NZ + j0 + el) * C + c8, v);
-      else {
 #pragma unroll
-        for (int k = 0; k < 8; ++k) v[k] = 0.f;
-      }
-      float4* d = reinterpret_cast<float4*>(xh + el * P + c8);
-      d[0] = make_float4(v[0], v[1], v[2], v[3]); d[1] = make_float4(v[4], v[5], v[6], v[7]);
+    for (int t = 0; t < NT; ++t) {                                       // the z tile: 8 channels per task
+      const int idx = tid + 256 * t;
+      if (TE * (C / 8) % 256 != 0 && idx >= TE * (C / 8)) continue;
+      const int el = idx / (C / 8), c8 = (idx - el * (C / 8)) * 8;
+      zr[t].put(xh + el * P + c8);
     }
-    for (int idx = tid; idx < TE * H; idx += 256) {                      // g[el][h]: a masked key and a padded element have none
-      const int h = idx / TE, el = idx - h * TE, j = j0 + el;
-      gs[el * H + h] = (j < NZ && (kv == nullptr || kv[j])) ? __ldg(db + ((size_t)h * N + i) * N + j) : 0.f;
+#pragma unroll
+    for (int t = 0; t < NG; ++t) {                                       // g[el][h]: a masked key and a padded element have none
+      const int idx = tid + 256 * t;
+      if (TE * H % 256 != 0 && idx >= TE * H) continue;
+      const int h = idx / TE, el = idx - h * TE;
+      gs[el * H + h] = kr[t] ? gr[t] : 0.f;
     }
     __syncthreads();
+    if (r + 1 < RPC && i + 1 < NZ) fetch(i + 1);                         // the next row's loads overlap this row's phases
     // ---- dz phase: element e, channels q, q + TPE, ...
     float* xr = xh + e * P;
     float* dr = dx + e * P;
@@ -317,7 +367,7 @@ __global__ void __launch_bounds__(256) pair_bias_gen_bwd_kernel(const T* __restr
       const int c = q + TPE * k;
       const float xn = (xr[c] - mean) * rstd;
       xr[c] = xn;
-      const float4* wr = reinterpret_cast<const float4*>(ws + (size_t)c * H);
+      const float4* wr = reinterpret_cast<const float4*>(ws + (size_t)c * WP);
       float d = 0.f;
 #pragma unroll
       for (int hq = 0; hq < H / 4; ++hq) {
