@@ -534,6 +534,19 @@ class _WideTransitionSM90A(torch.autograd.Function):
         )
 
 
+#: Inference at D >= 384 (the two-kernel forward materializes the hidden h [M, n D]): a call whose h exceeds _H_ONE_LAUNCH_BYTES runs in
+#: launches of h <= _H_CHUNK_BYTES each. Requirement sizes (L <= 2048: h <= 12 GiB at D 384 n 4) keep one launch.
+_H_ONE_LAUNCH_BYTES = 16 << 30
+_H_CHUNK_BYTES = 2 << 30
+
+
+def _inference_chunk_rows(rows: int, d: int, hidden: int) -> int:
+    """Rows of one inference launch: all of them, or a multiple of 128 (whole tiles) keeping h within ``_H_CHUNK_BYTES``."""
+    if d < 384 or rows * hidden * 2 <= _H_ONE_LAUNCH_BYTES:
+        return rows
+    return max(128, _H_CHUNK_BYTES // (hidden * 2) // 128 * 128)
+
+
 def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
     """Module-facing entry, same signature as ``fused_sm90a.transition_fused_sm90a``. Call ``supported()`` first: this
     raises rather than falling back. Inference (grad mode off, or nothing requiring grad) runs the forward without the
@@ -550,8 +563,8 @@ def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
         else:
             wa, wb, ws = _inference_forms(wa, wb, ws, False)[:3]
             wst = None
-        out, _, _, _, _ = _fwd_launch(
-            x.reshape(-1, shape[-1]).contiguous(),
+        flat = x.reshape(-1, shape[-1]).contiguous()
+        args = (
             gamma.float().contiguous(),
             beta.float().contiguous(),
             wa.contiguous(),
@@ -561,6 +574,17 @@ def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
             False,
             wst,
         )
+        rows = _inference_chunk_rows(flat.shape[0], shape[-1], wa.shape[0])
+        if rows >= flat.shape[0]:
+            return _fwd_launch(flat, *args)[0].reshape(shape)
+        # D >= 384 materializes the hidden h [M, n D] (bf16): at OpenDDE's structural pair (3968^2 tokens, D 384, n 2) that is one
+        # 22.5 GiB allocation next to the input and the output. Whole 128-row tiles in chunks of h <= _H_CHUNK_BYTES, one after
+        # another, each written into its rows of one output: every row is the same tile computation (bitwise the one-launch output).
+        out = torch.empty_like(flat)
+        for start in range(0, flat.shape[0], rows):
+            part = _fwd_launch(flat[start : start + rows], *args)[0]
+            out[start : start + rows] = part
+            del part
         return out.reshape(shape)
     out = _WideTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)
     from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_output

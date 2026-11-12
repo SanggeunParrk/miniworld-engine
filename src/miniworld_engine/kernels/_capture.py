@@ -189,6 +189,8 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
         cid = _graph_capture_id()
         if cid == 0:
             return build()
+    if alive is not None:
+        _INPUT_STORES[id(store)] = (store, alive)
     sk = (cid, key)
     pinned = _pin_if_static_capture(store, sk)
     hit = store.get(sk)
@@ -204,6 +206,30 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
         _evict(store, pinned, limit, sk)
     out = store[sk] = build()
     return out
+
+
+#: id(store) -> (the store, its ``alive(entry)``): every per-input cache ``lookup_inputs`` filled with an ``alive`` test, for
+#: ``release_dead_inputs``.
+_INPUT_STORES: dict[int, tuple[dict, object]] = {}
+
+
+def release_dead_inputs() -> int:
+    """Drop every per-input cache entry (``lookup_inputs`` / ``hoisted_table``: a hoisted pair bias, conditioning tables) whose input
+    tensor is gone; returns how many were dropped. ``lookup_inputs`` drops them only at its next call on the same store, so a table of a
+    finished item (a token DiT's hoisted pair bias: [heads x blocks, S, S], 11.3 GiB for OpenDDE's 3968 structural tokens) otherwise
+    outlives its item until the next item reaches the same module -- through the whole next trunk. A graph that read such an entry read
+    its input too, so it is no longer replayable either (as at ``lookup_inputs``'s own drop). Cheap (a weak-reference test per entry);
+    called by :class:`~miniworld_engine.modules.PairformerBlock` on every eager call, and by callers between items."""
+    dropped = 0
+    for store, alive in list(_INPUT_STORES.values()):
+        dead = [k for k, e in store.items() if not alive(e)]  # type: ignore[operator]
+        pinned = _PINNED.get(id(store))
+        for k in dead:
+            del store[k]
+            if pinned is not None:
+                pinned.discard(k)
+        dropped += len(dead)
+    return dropped
 
 
 #: (scope, (tag, ((pointer, version, dtype, shape), ...))) -> (weak references to the parameters, the forms). Also the Transition's ``Ws^T``

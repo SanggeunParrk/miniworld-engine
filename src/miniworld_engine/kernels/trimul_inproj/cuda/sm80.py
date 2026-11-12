@@ -246,6 +246,8 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     pk["eps_in"] = eps_in
     ab, x, zst = _front(ext, zf, mask, pk, n)
     _contract(ext, ab, x, pk["ch"], n, direction)
+    if not save and ds.numel() == 0:
+        del ab  # inference: the planes are dead once contracted -- freed before the output is allocated
     out = torch.empty_like(zf)
     if not save and ds.numel() == 0:
         ext.k3z(

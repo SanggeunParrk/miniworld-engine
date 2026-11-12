@@ -155,6 +155,12 @@ class PairformerBlock(BackendModule, MasterWeights):
         call that records autograd keeps the batched composition (its saved activations are the batch's anyway). The kernel backends
         run the batched composition (every sub-module takes ``B > 1``; the ``cuda`` ``AttentionPairBias`` too, since the FoldForge 5I28
         confidence-head change)."""
+        if pair.is_cuda and not torch.compiler.is_compiling() and not torch.cuda.is_current_stream_capturing():
+            # a finished item's hoisted tables (a token DiT's pair bias: 11.3 GiB at OpenDDE's 3968 structural tokens) go before this
+            # block's pair-sized temporaries are allocated, not at the next item's diffusion (FoldForge 5I28 OpenDDE n = 16)
+            from miniworld_engine.kernels import _capture
+
+            _capture.release_dead_inputs()
         if _per_sample_call(pair) and self.backend == "pytorch":
             return self._per_sample(pair, mask, single, extra_pair_bias)
         return self._block(pair, mask, single, extra_pair_bias)

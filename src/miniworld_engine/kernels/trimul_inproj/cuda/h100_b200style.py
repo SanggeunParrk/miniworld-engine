@@ -342,6 +342,7 @@ def _run_rowpad(leaves, mask, direction, out=None):
 
         front(x, weights, token, gi, bi, ab, xs)
         tri = _contract(ab, d, direction)  # [h, (B,) np, np]
+        del ab  # the planes are dead once contracted: freed before y, so the peak is x + planes + tri, not + y (FoldForge 5I28 OpenDDE)
         prow = rows if bsz > 1 else npad  # pair rows of the planes / tri
         wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
         _aux().fold(wp, go, bo, wg, gi, bi, wpf, wgf, vec)
@@ -418,6 +419,10 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
             pm = owned_bf16_mask(mask, n, x.device, bsz)
             _front(x, w1, pm, gi, bi, ab, xs, xn=saved_xn)
         tri = _contract(ab, d, direction)
+        # inference: the planes are dead once contracted; free them before y is allocated, so the peak is x + planes + tri (not
+        # + y): at D384 L3968 (FoldForge 5I28 OpenDDE n=16, the structural-token refiner) that is 45 GiB instead of 56 GiB
+        planes = ab if save else None
+        del ab
         wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
         _aux().fold(wp, go, bo, wg, gi, bi, wpf, wgf, vec)
         y = T.take_output(x) if out is None else out  # out: a caller-owned [B, n, n, d] buffer (chunked batches)
@@ -461,7 +466,7 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
             [T._launch_module().Struct(fields)],
             smem,
         )
-        return ([y, ab, tri, xs, mu, rs, vec, pv, gv] + ([saved_xn] if d == 512 else [])) if save else [y]
+        return ([y, planes, tri, xs, mu, rs, vec, pv, gv] + ([saved_xn] if d == 512 else [])) if save else [y]
 
 
 @opaque(fake=_forward_fake, name="trimul_h100_schedule256_forward")

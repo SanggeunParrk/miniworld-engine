@@ -29,6 +29,7 @@ NOT_WEIGHT_DERIVED = {
     "kernels/_pretune.py:_BASE_NAME": "tuning bucket names",
     "kernels/_pretune.py:_SQUEUE": "tuning queue",
     "kernels/_capture.py:_PINNED": "pinned keys of the registered stores (cleared with them)",
+    "kernels/_capture.py:_INPUT_STORES": "the per-input stores lookup_inputs filled (registered ones) and their alive tests",
     "kernels/_capture.py:_WEIGHT_CACHES": "the registry itself",
     "kernels/_capture.py:_FORMS": 'registered below its definition: weight_cache("capture.forms", _FORMS)',
     "kernels/_nvcc.py:_KEY_OF": "extension build keys",
