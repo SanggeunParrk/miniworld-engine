@@ -1199,7 +1199,7 @@ class AtomDiTMiniWorld(BackendModule):
     ``backend="anthropic"`` sets its attention's (:class:`SWA3DRoPEAttention`); the block's own statements stay ``"pytorch"``'s.
     """
 
-    backends = ("pytorch", "anthropic", "cuda")
+    backends = ("pytorch", "anthropic", "cuda", "triton")  # "triton": 2026-11-12, the fused block's Triton stages (engine 2.4's SWADiTBlock)
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
     backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 4, "cuda:h100_sm90": 2}
 
@@ -1460,6 +1460,65 @@ class AtomDiTMiniWorld(BackendModule):
         )
         return swa_dit_block_fwd(q, mod, cos, sin, seqused, *weights, q.shape[0], self.attn.half_window, FP32_EPS, False)[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
 
+    # ------------------------------------------------------------------------------------------------------------ "triton"
+    # The whole block on the fused SWA block's Triton stages (kernels/swa_dit/triton, any card: ``swa_dit_block_fwd`` / ``_bwd`` with
+    # ``portable=True``): qkvg + q / k RMSNorm + 3D RoPE, the window attention, out-projection + gated residual + SwiGLU FFN, and their
+    # backwards (bf16; fp32 on the fp32 row kernels around the bf16-operand window attention); the weight gradients and the modulation
+    # ``silu(cond) W^T`` (fp32, one row per sequence row) are cuBLAS. Engine 2.4's SWADiTBlock ran these off H100 / B200. Range: bf16 or
+    # fp32 activations (weights in that dtype or fp32 masters), d_atom 128 = 4 heads x 32, SwiGLU hidden 256, half_window 64 (no global
+    # attention: its kernels are the cards' own), the 6-tuple of build_attention_params.
+    def _supports_triton(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> str | None:
+        from miniworld_engine.kernels.swa_dit._common import D_ATOM, HALF_WINDOW, N_HEAD, N_HIDDEN
+
+        if not x.is_cuda:
+            return "the Triton kernels run on CUDA tensors only"
+        if len(attention_params) != 6:
+            return "attention_params must be the 6-tuple of build_attention_params"
+        if x.dtype not in (_BF, _F32) or cond.dtype != x.dtype:
+            return f"x / cond dtype {x.dtype} / {cond.dtype} (bfloat16 or float32, the same)"
+        if torch.is_autocast_enabled("cuda") and (x.dtype != _BF or torch.get_autocast_dtype("cuda") != _BF):
+            return "autocast: bfloat16 activations under bfloat16 autocast only"
+        linears = self._a100_linears()
+        if x.ndim != 3 or x.shape[-1] != D_ATOM or self.attn.n_heads != N_HEAD or tuple(cond.shape[:2]) != tuple(x.shape[:2]):
+            return f"x / cond must be [N, S, {D_ATOM}] / [N, S, d_cond] with {N_HEAD} heads"
+        if self.attn.half_window != HALF_WINDOW:
+            return f"half_window {self.attn.half_window} (the Triton window attention: {HALF_WINDOW}; global attention is not served)"
+        if any(type(m) is not Linear or m.bias is not None for m in linears):
+            return "the kernels read bias-free (non magnitude-preserving) Linear weights"
+        if tuple(self.ffn.w_up.weight.shape) != (2 * N_HIDDEN, D_ATOM):
+            return f"SwiGLU hidden {self.ffn.w_up.weight.shape[0] // 2} (the kernels: {N_HIDDEN})"
+        if any(m.weight.dtype not in (x.dtype, _F32) for m in linears):
+            return "weights must be in the activation dtype or fp32"
+        cos, sin, seqused = attention_params[:3]
+        for t in (cos, sin):
+            if (
+                t.dtype != _F32
+                or t.shape[-1] != D_ATOM // N_HEAD // 2
+                or t.numel() != x.shape[0] * x.shape[1] * t.shape[-1]
+                or (t.requires_grad and torch.is_grad_enabled())
+            ):
+                return "cos / sin must be fp32 [N, S, head_dim / 2] without gradient"
+        if seqused.dtype != torch.int32 or tuple(seqused.shape) != (x.shape[0],):
+            return "seqused must be int32 [N]"
+        return None
+
+    def _forward_triton(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> torch.Tensor:
+        from miniworld_engine.kernels.swa_dit._common import FP32_EPS
+        from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction
+        from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_block_fwd
+
+        n = x.shape[0]
+        cos, sin, seqused = attention_params[:3]
+        cos, sin = cos.reshape(-1, cos.shape[-1]).contiguous(), sin.reshape(-1, sin.shape[-1]).contiguous()
+        wmod, *weights = (m.weight for m in self._a100_linears())
+        with torch.autocast("cuda", enabled=False):
+            # the modulation in fp32 (the kernels' operand), one row per sequence row (B = N); differentiable in cond and its weight
+            mod = F.linear(F.silu(cond.reshape(-1, cond.shape[-1]).float()), wmod.float())
+            if _needs_grad(self, x, cond):
+                return SWADiTBlockFunction.apply(x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, self.attn.half_window, True)
+            weights = [w.to(x.dtype).contiguous() for w in weights]
+            return swa_dit_block_fwd(x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, self.attn.half_window, FP32_EPS, False, True)[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
+
     def forward_hoisted(self, x: torch.Tensor, c_base: torch.Tensor, attention_params: tuple) -> torch.Tensor:
         """The block over ``N = A * B`` rows whose conditioning repeats over the augments: ``cond[a*B + b] == c_base[b]``, with
         ``c_base`` [B, S, d_cond]. The same function as ``forward(x, c_base.repeat(A, 1, 1), attention_params)``."""
@@ -1524,7 +1583,7 @@ class SWAAtomTransformer(BackendModule):
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "anthropic", "cuda")
+    backends = ("pytorch", "anthropic", "cuda", "triton")  # "triton": every block's (AtomDiTMiniWorld._forward_triton)
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
     backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 4, "cuda:h100_sm90": 2}
 
@@ -1615,6 +1674,13 @@ class SWAAtomTransformer(BackendModule):
         return self._forward_pytorch(q, c, attention_params, c_base)  # the blocks run their own backend
 
     def _forward_anthropic(self, q, c, attention_params, c_base=None):
+        return self._forward_pytorch(q, c, attention_params, c_base)  # the blocks run their own backend
+
+    # "triton": every block on the fused block's Triton stages (:meth:`AtomDiTMiniWorld._forward_triton`); the range is the blocks'.
+    def _supports_triton(self, q, c, attention_params, c_base=None) -> str | None:
+        return cast(AtomDiTMiniWorld, self.blocks[0])._supports_triton(q, c, attention_params) if len(self.blocks) else None
+
+    def _forward_triton(self, q, c, attention_params, c_base=None):
         return self._forward_pytorch(q, c, attention_params, c_base)  # the blocks run their own backend
 
     def build_rope(self, ref_pos: torch.Tensor, ref_space_uid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

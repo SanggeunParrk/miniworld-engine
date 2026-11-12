@@ -49,6 +49,7 @@ same dW operands. The fp32 backward materialises the dW operands as the bf16 one
 
 from __future__ import annotations
 
+import contextlib
 import functools
 from typing import Any, cast
 
@@ -104,6 +105,23 @@ _WGRAD_F32_MAX_ROWS = 8192
 #: it at 196608 (664 against 572).
 _WGRAD_F32_WG_MAX_ROWS = 65536
 
+#: The Triton stages only: set for the duration of one ``swa_dit_block_fwd`` / ``swa_dit_block_bwd`` call with ``portable=True`` (the
+#: ``"triton"`` backend of ``AtomDiTMiniWorld`` / ``SWAAtomTransformer``, any card). Every hand-CUDA / native / sm_100a selection below then
+#: answers "not served" (``_cuda``, ``_sm100``, ``_tf32``, ``native_h100_stages``, ``_h100_global``), so each stage takes its Triton kernel
+#: (bf16: ``triton/forward.py`` / ``backward.py``; fp32: ``forward_fp32.py`` / ``backward_fp32.py``) and the weight gradients cuBLAS.
+_PORTABLE = [False]
+
+
+@contextlib.contextmanager
+def _portable(on: bool):
+    prev = _PORTABLE[0]
+    _PORTABLE[0] = bool(on)
+    try:
+        yield
+    finally:
+        _PORTABLE[0] = prev
+
+
 #: ``pack`` keys an axis only below 4096; an augment count at or above it shares the top key.
 _A_KEY_MAX = 4095
 
@@ -140,7 +158,7 @@ def native_h100_stages(q) -> bool:
     faster than the native stages and no less accurate (A 5, 1024 - 24 576 atoms, inference: 0.069 against 0.104 ms, 1.23 against
     1.65 ms). Under "highest" fp32 keeps the native stages (exact fp32 cuBLAS projections).
     """
-    if not native_h100_enabled(q):
+    if _PORTABLE[0] or not native_h100_enabled(q):
         return False
     if q.dtype == torch.float32:
         # _fp32_cuda's test, with the precision read as a constant under torch.compile (this runs in the autograd.Function's forward)
@@ -169,7 +187,7 @@ def _h100_global(q, half_window):
     global attention is the sm_100a stages, which an H100 cannot run, whatever the per-shape defaults pick for the window."""
     from miniworld_engine.kernels.swa_dit.cuda.loader import is_sm90
 
-    return is_global(half_window) and q.is_cuda and is_sm90(q.device)
+    return not _PORTABLE[0] and is_global(half_window) and q.is_cuda and is_sm90(q.device)
 
 
 def _native_b200_fusion(q=None, training=None, B=None):
@@ -520,7 +538,7 @@ def _augments(N: int, B: int) -> int:
 
 def _cuda(which: str, wanted: bool, device: torch.device) -> Any:
     """The hand-CUDA extension for stage ``which``, or None -> the Triton kernel serves the stage."""
-    if not wanted:
+    if not wanted or _PORTABLE[0]:
         return None
     from miniworld_engine.kernels.swa_dit.cuda.loader import extension, is_sm90
 
@@ -533,7 +551,7 @@ def _sm100(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
     """The sm_100a kernels (``cuda/sm100``) when they serve this bf16 call, else None -> the Triton path."""
     from miniworld_engine.kernels.swa_dit.cuda import sm100
 
-    if not sm100.supported(q, nhid, half_window, eps):
+    if _PORTABLE[0] or not sm100.supported(q, nhid, half_window, eps):
         return None
     try:
         sm100.kernels(q.device.index if q.device.index is not None else torch.cuda.current_device())
@@ -581,7 +599,7 @@ def _tf32(q: torch.Tensor, nhid: int, half_window: int, eps: float, save: bool) 
     """The sm_100a TF32 forward module (``cuda/sm100/tf32_fwd``) when it serves this fp32 call, else None -> the Triton fp32 path.
     Traceable: tensor metadata (``tf32_fwd.supported_tf32``) and the per-device constant ``_tf32_ready``. A deterministic function
     of the call (shapes, dtype, device, earlier failures), so the op's fake reaches the same answer as the launch."""
-    if q.dtype != torch.float32 or not tf32_fwd.supported_tf32(q, nhid, half_window, eps):
+    if _PORTABLE[0] or q.dtype != torch.float32 or not tf32_fwd.supported_tf32(q, nhid, half_window, eps):
         return None
     if not _tf32_ready(q.device, save):
         return None
@@ -637,7 +655,7 @@ def _ffn_packs(wu: torch.Tensor, wd: torch.Tensor) -> tuple[torch.Tensor, torch.
     return (_pack_ffn64(wu), *_pack_ffn(wu, wd))
 
 
-def _swa_dit_block_fwd_fake(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save):
+def _swa_dit_block_fwd_fake(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save, portable=False):
     """Shapes of the forward's outputs: [out [N, S, C] in q's dtype] alone, or with ``save`` the 13 tensors the backward
     reads -- Q / K / V head-major [N, 4, S, C/4] (the attention operands: bf16, except fp32 on the TF32 path), G [N*S, C] in
     q's dtype, O [N*S, C] (the attention output: bf16, except fp32 on the TF32 path), lse [N, 4, S] fp32, then q1, x, pq, pk,
@@ -648,7 +666,8 @@ def _swa_dit_block_fwd_fake(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, 
     M = N * S
     outputs = [q.new_empty((N, S, C))]
     if save:
-        tf32 = q.dtype == torch.float32 and not is_global(half_window) and _tf32(q, wd.shape[1], half_window, eps, save) is not None
+        with _portable(portable):
+            tf32 = q.dtype == torch.float32 and not is_global(half_window) and _tf32(q, wd.shape[1], half_window, eps, save) is not None
         hd = torch.float32 if tf32 else torch.bfloat16
         heads = [q.new_empty((N, H, S, C // H), dtype=hd) for _ in range(3)]
         saved = [q.new_empty((M, C)) for _ in range(7)]
@@ -678,11 +697,19 @@ def swa_dit_block_fwd(
     half_window: int,
     eps: float,
     save: bool,
+    portable: bool = False,
 ) -> list[torch.Tensor]:
     """The block forward. q [N, S, C] bf16 or fp32 (the weights in the same dtype); mod [B*S, 6C] fp32 (hoisted adaLN
     modulation of this block); cos / sin [B*S, D/2] fp32; seqused [N] int32. Returns [out] or, with ``save``,
-    [out, Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, Att, Y, FF] (the tensors the backward reads)."""
-    ext32 = _fp32_global_cuda(q, half_window, save)
+    [out, Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, Att, Y, FF] (the tensors the backward reads). ``portable``: every stage on its Triton
+    kernel, whatever the card (``_PORTABLE``)."""
+    with _portable(portable):
+        return _swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save)
+
+
+def _swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save):
+    """:func:`swa_dit_block_fwd`'s launches: the card's stages, or the Triton ones under ``_PORTABLE``."""
+    ext32 =_fp32_global_cuda(q, half_window, save)
     if ext32 is not None:
         return _swa_dit_fwd_fp32_global(ext32, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, eps)
     if native_h100_stages(q) or _h100_global(q, half_window):
@@ -974,6 +1001,7 @@ def _swa_dit_block_bwd_fake(
     B,
     half_window,
     eps,
+    portable=False,
 ):
     """Shapes of the backward's outputs: dq like q ([N, S, C], q's dtype), dmod like mod (fp32 [B*S, 6C]), and each
     weight gradient in its weight's shape, fp32."""
@@ -1013,10 +1041,20 @@ def swa_dit_block_bwd(
     B: int,
     half_window: int,
     eps: float,
+    portable: bool = False,
 ) -> list[torch.Tensor]:
     """Backward of :func:`swa_dit_block_fwd` from its saved tensors. dy [N, S, C] in q's dtype. Returns [dq [N, S, C] in q's
     dtype, dmod [B*S, 6C] fp32, dWqkv, dWg, dWo, dWu, dWd fp32]: the weight gradients leave their fp32 accumulators unrounded
-    (the parameters may be an fp32 master; ``autograd.SWADiTBlockFunction`` hands them back in the parameters' dtype)."""
+    (the parameters may be an fp32 master; ``autograd.SWADiTBlockFunction`` hands them back in the parameters' dtype). ``portable``:
+    the Triton stages (``_PORTABLE``), as the forward that saved the tensors."""
+    with _portable(portable):
+        return _swa_dit_block_bwd(
+            dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps
+        )
+
+
+def _swa_dit_block_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps):
+    """:func:`swa_dit_block_bwd`'s launches: the card's stages, or the Triton ones under ``_PORTABLE``."""
     if native_h100_stages(q) or _h100_global(q, half_window):
         grads = _native_h100_bwd(
             dy,
