@@ -102,6 +102,13 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     32 / 64 channels, Chai-1's output variants).
     ``"triton"``: the attention core on ``kernels/triangle_attention/triton/main`` (flash-style, forward + backward), every other statement
     the module's own (as the library cores), bf16 only.
+
+    The bias-only form (``use_self_attention=False``; :class:`TriangleAttention` only) has its own engine paths (engine 2.4's, restored
+    2026-11-12): ``"cuda"`` on BidirectionalTriangleAttention's H100 / A100 kernels for one direction
+    (``kernels/integrations/bidir_triattn_h100.forward_single``: the glue LayerNorm, one [Wv; Wg; Wb] GEMM, the softmax per (sample, head),
+    the contraction as plain GEMMs, the gate, the out-projection with the residual / dropout; bf16 activations), ``"triton"`` on the fused
+    LayerNorm + projection and the gate-folded out-projection (:meth:`_bias_only_triton`). The libraries (``"cueq"``, ``"anthropic"``) are
+    q.k attention and refuse it.
     """
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
@@ -382,6 +389,12 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         """``("sm90" | "dh", None)``: the H100 path that serves the call, else ``(None, reason)``. Shapes / dtypes / flags only."""
         if not pair.is_cuda:
             return None, "the kernels run on CUDA tensors only"
+        if not self.use_self_attention:
+            # the bias-only form: BidirectionalTriangleAttention's H100 / A100 kernels, one direction (bidir_triattn_h100.forward_single)
+            from miniworld_engine.kernels.integrations import bidir_triattn_h100
+
+            why = bidir_triattn_h100.single_refusal(self, pair, mask)
+            return (None, why) if why is not None else ("bias_only", None)
         cap = torch.cuda.get_device_capability(pair.device)
         if cap == (8, 0):
             return self._cuda_route_sm80(pair, mask)
@@ -435,6 +448,10 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         if self.dead and not (self.untransposed_output or self.dual_output or self.training or torch.is_grad_enabled()):
             return pair
         route, _ = self._cuda_route(pair, mask)
+        if route == "bias_only":
+            from miniworld_engine.kernels.integrations import bidir_triattn_h100
+
+            return bidir_triattn_h100.forward_single(self, pair, mask)
         if route in ("sm80", "sm80_train"):
             from miniworld_engine.kernels.integrations import triattn_sm80
 
@@ -450,6 +467,8 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     def _supports_triton(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> str | None:
         if not pair.is_cuda:
             return "the Triton kernels run on CUDA tensors only"
+        if not self.use_self_attention:
+            return self._bias_only_triton_refusal(pair, mask)
         why = self._core_refusal(pair, mask)
         if why is not None:
             return why
@@ -459,7 +478,63 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
 
     def _forward_triton(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         with master_autocast(pair, self):  # fp32 master matrices under bf16 activations: the projections run bf16, as the reference's do
-            return self._residual(pair, mask, _triton_core)
+            return self._residual(pair, mask, _triton_core if self.use_self_attention else self._bias_only_triton)
+
+    # The bias-only form (``use_self_attention=False``; engine 2.4's ``_bias_only_inference`` and its portable training path): the attention
+    # weights ``softmax_k(b_jk)`` do not depend on the row i, so the core is one batched GEMM per (batch, head). Triton: the LayerNorm fused
+    # into ONE projection over the concatenated [W_v | W_b | W_g] (``layernorm_linear``: the normalised pair never reaches memory; trainable:
+    # its backward is cuBLAS + the Triton LayerNorm backward), the softmax and the GEMM as the reference's statements, then the gate folded
+    # into the out-projection GEMM (``bias_only_attention/triton/gate_out.fused_gate_out``; at a hidden width above 128 the one-pass sigmoid
+    # gate + a cuBLAS out-projection). bf16 / fp32 activations, d_pair <= 1024, a bool [B, L] key mask or none, no projection biases.
+    _GATE_FUSED_MAX_DH = 128
+
+    def _bias_only_triton_refusal(self, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None:
+        if pair.dim() != 4 or pair.shape[1] != pair.shape[2]:
+            return f"pair must be [B, L, L, d_pair], got {tuple(pair.shape)}"
+        if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != tuple(pair.shape[:2])):
+            return "mask must be a bool [B, L] key mask"
+        if pair.dtype not in (torch.bfloat16, torch.float32):
+            return f"dtype {pair.dtype} (bfloat16 / float32)"
+        if pair.shape[-1] > 1024:
+            return f"d_pair {pair.shape[-1]} > 1024 (the fused LayerNorm + projection kernel)"
+        if self.to_gate.bias is not None or self.to_out.bias is not None or self.dual_output or self.untransposed_output:
+            return "gate / out-projection biases or a second out-projection (the bias-only Triton path has neither)"
+        return None
+
+    def _bias_only_triton(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        """The bias-only update (no residual) of the RAW pair, as :meth:`_attention` computes it."""
+        from miniworld_engine.kernels.bias_only_attention.triton.gate_out import fused_gate_out
+        from miniworld_engine.kernels.gated_projection.triton.main import sigmoid_gate_fused
+        from miniworld_engine.kernels.layernorm_linear.autograd import LayerNormLinearTritonFn
+        from miniworld_engine.kernels.layernorm_linear.triton.fused import layernorm_linear_triton_fwd
+
+        x = pair if self.starting else rearrange(pair, "B I J D -> B J I D").contiguous()
+        L = x.shape[1]
+        dt, H = x.dtype, self.n_head
+        dv = self.to_value.weight.shape[0]
+        w_cat = torch.cat([self.to_value.weight, self.to_bias.weight, self.to_gate.weight], 0).to(dt)
+        grad = torch.is_grad_enabled() and (pair.requires_grad or any(p.requires_grad for p in self.parameters()))
+        ln = self.ln_pair
+        with torch.autocast("cuda", enabled=False):
+            if grad:
+                proj = LayerNormLinearTritonFn.apply(x, ln.weight, ln.bias, w_cat, None, ln.eps, L)
+            else:
+                proj = layernorm_linear_triton_fwd(x, ln.weight, ln.bias, w_cat, None, ln.eps)
+            value, bias, gate = proj.split([dv, H, dv], dim=-1)
+            value = rearrange(value, "B L L2 (H D) -> B H L L2 D", H=H)
+            bias = rearrange(bias, "B L L2 H -> B H L L2")
+            if self._bias_untransposed:
+                bias = bias.transpose(-1, -2)
+            if mask is not None:
+                bias = bias.masked_fill(~mask[:, None, None, :], torch.finfo(bias.dtype).min)
+            attention = torch.softmax(bias.float(), dim=-1).to(dt)  # independent of i: one GEMM per (b, h)
+            out = rearrange(torch.einsum("bhjk,bhikd->bhijd", attention, value), "B H L L2 D -> B L L2 (H D)")
+            wo = self.to_out.weight.to(dt)
+            if dv <= self._GATE_FUSED_MAX_DH:
+                out = fused_gate_out(gate, out, wo)
+            else:
+                out = F.linear(sigmoid_gate_fused(gate, out.contiguous()), wo)
+        return out if self.starting else rearrange(out, "B J I D -> B I J D").contiguous()
 
     def _attention_core(self, x: torch.Tensor, mask: torch.Tensor | None, core) -> torch.Tensor:
         """``_attention``'s q / k / v / bias of the normalised ``x`` (already in the attended frame) through ``core`` -> ``[B, L, L, H * d]``."""
@@ -480,6 +555,8 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     def _attention(self, pair: torch.Tensor, mask: torch.Tensor | None = None, core=None) -> torch.Tensor:
         """The update of :class:`TriangleAttention` / :class:`TriangleAttentionAF3` (no residual / dropout): products and softmax in the
         activation dtype, masked keys at the dtype's min. The ending node attends over the transposed pair."""
+        if core is not None and not self.use_self_attention:
+            return core(pair, mask)  # the bias-only update on the raw pair: its own frame, the LayerNorm fused into the projection
         if not self.starting:
             pair = rearrange(pair, "B I J D -> B J I D").contiguous()
 

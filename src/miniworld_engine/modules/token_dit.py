@@ -915,8 +915,10 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "cuda")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: sm_80 paths
+    backends = ("pytorch", "cuda", "triton")
+    # 2026-11-10: sm_80 paths; cuda:h100_sm90 2 (2026-11-12): the inference pair-bias hoist (runner.hoist) in one pass for a 256-wide
+    # bf16 pair, and on the TF32 tensor-core kernel (3 terms) for a 128-wide fp32 pair
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:h100_sm90": 2}
 
     def __init__(
         self,
@@ -954,6 +956,23 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
         return _token_dit_inputs(
             self, length=length, samples=samples, dtype=dtype, device=device, generator=generator, depth=depth, stream=stream
         )
+
+    # ------------------------------------------------------------------------------------------------------------ "triton"
+    # Engine 2.4's portable block (BiasOnlyDiTBlock off H100 / B200), any card: both parts on their "triton" backends (set_backend) --
+    # BiasOnlyAttention (Triton AdaLN, the one-pass pair LayerNorm + bias kernel, the feature-major training core) and ConditionedTransition
+    # (Triton AdaLN, the SwiGLU / gate tail kernels); the block's statements chain them.
+    def set_backend(self, backend: str = "pytorch"):
+        super().set_backend(backend)
+        parts = "triton" if backend == "triton" else "pytorch"
+        self.attention.set_backend(parts)
+        self.transition.set_backend(parts)
+        return self
+
+    def _supports_triton(self, single, cond, pair=None, mask=None, *, bias=None) -> str | None:
+        return self.attention._supports_triton(single, cond, pair, mask, bias=bias) or self.transition._supports_triton(single, cond)
+
+    def _forward_triton(self, single, cond, pair=None, mask=None, *, bias=None) -> torch.Tensor:
+        return self._forward_pytorch(single, cond, pair, mask, bias=bias)
 
     # ------------------------------------------------------------------------------------------------------------ "cuda"
     # H100: no gradient -> kernels/integrations/bias_only_dit (the fused inference block: P = softmax(pair bias) once per pair, the

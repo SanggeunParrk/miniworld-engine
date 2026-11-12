@@ -295,7 +295,7 @@ void launch_ffn_bwd_gate(const sw80::FfnBwdGateParams& p) {
     attr = true;
   }
   const int ntile = bwd_ntile_host(MODE, p.M, p.S, p.B), ngrp = (ntile + G::NW - 1) / G::NW;
-  const unsigned ctas = (unsigned)std::min(num_sms() * G::MINB, ngrp);
+  const unsigned ctas = (unsigned)std::min(num_sms() * G::MINB, ngrp * p.hsplit);
   sw80::ffn_bwd_gate_kernel<G, MODE><<<ctas, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -314,9 +314,11 @@ void launch_ffn_bwd_dy(const sw80::FfnBwdDyParams& p) {
 }
 
 // FFN backward (two kernels): dy (= dq2), q1, y, ffn [M, C] bf16, mod [B S, 6C] fp32, Wu [2 hidden, C], Wd^T [hidden, C], Wu^T [C, 2 hidden] -> dq1, dffn [M, C], hh [M, hidden], dab [M, 2 hidden] bf16
-// and d shift_f | d scale_f | d gate_f of dmod (columns 3C .. 6C).  gate_cfg 0: 8 warps x 1 CTA, 1: 4 x 2, 2: 6 x 2; dy_cfg 0: 16 warps, 1: 8
+// and d shift_f | d scale_f | d gate_f of dmod (columns 3C .. 6C).  gate_cfg 0: 8 warps x 1 CTA, 1: 4 x 2, 2: 6 x 2; hsplit (1 / 2 / 4 / 8): the hidden
+// chunks of a tile group over that many CTAs; dy_cfg 0: 16 warps, 1: 8, 4: the N split (2 warps per tile, 2 tiles per CTA), 5: the K split (4 warps per tile)
 void swa_ffn_bwd(torch::Tensor dy, torch::Tensor q1, torch::Tensor y, torch::Tensor ffn, torch::Tensor mod, torch::Tensor wu, torch::Tensor wdt, torch::Tensor wut, torch::Tensor dq1, torch::Tensor dffn,
-                 torch::Tensor hh, torch::Tensor dab, torch::Tensor dmod, int64_t S, int64_t B, double eps, int64_t mode, int64_t gate_cfg, int64_t dy_cfg) {
+                 torch::Tensor hh, torch::Tensor dab, torch::Tensor dmod, int64_t S, int64_t B, double eps, int64_t mode, int64_t gate_cfg, int64_t dy_cfg, int64_t hsplit) {
+  TORCH_CHECK(hsplit == 1 || hsplit == 2 || hsplit == 4 || hsplit == 8, "hsplit must be 1, 2, 4 or 8");
   CHECK_CUDA_BF16(dy); CHECK_CUDA_BF16(q1); CHECK_CUDA_BF16(y); CHECK_CUDA_BF16(ffn); CHECK_CUDA_BF16(wu); CHECK_CUDA_BF16(wdt); CHECK_CUDA_BF16(wut);
   CHECK_CUDA_BF16(dq1); CHECK_CUDA_BF16(dffn); CHECK_CUDA_BF16(hh); CHECK_CUDA_BF16(dab); CHECK_CUDA_F32(mod); CHECK_CUDA_F32(dmod);
   CHECK_CONTIG(dy); CHECK_CONTIG(q1); CHECK_CONTIG(y); CHECK_CONTIG(ffn); CHECK_CONTIG(mod); CHECK_CONTIG(wu); CHECK_CONTIG(wdt); CHECK_CONTIG(wut);
@@ -326,7 +328,7 @@ void swa_ffn_bwd(torch::Tensor dy, torch::Tensor q1, torch::Tensor y, torch::Ten
               wut.size(0) == 128 && wut.size(1) == 512 && hh.numel() == M * 256 && dab.numel() == M * 512, "bad operand sizes");
   check_bwd_mode(mode, M, S, B, dmod.numel());
   c10::cuda::CUDAGuard guard(dy.device());
-  sw80::FfnBwdGateParams pg{bptr(dy), bptr(y), bptr(ffn), mod.data_ptr<float>(), bptr(wu), bptr(wdt), bptr_w(dffn), bptr_w(hh), bptr_w(dab), dmod.data_ptr<float>(), (int)M, (int)S, (int)B};
+  sw80::FfnBwdGateParams pg{bptr(dy), bptr(y), bptr(ffn), mod.data_ptr<float>(), bptr(wu), bptr(wdt), bptr_w(dffn), bptr_w(hh), bptr_w(dab), dmod.data_ptr<float>(), (int)M, (int)S, (int)B, (int)hsplit};
   sw80::FfnBwdDyParams pd{bptr(dab), bptr(q1), bptr(dy), mod.data_ptr<float>(), bptr(wut), bptr_w(dq1), dmod.data_ptr<float>(), (int)M, (int)S, (int)B, (float)eps};
   with_mode(mode, [&](auto mc) {
     constexpr int MODE = decltype(mc)::value;
@@ -339,6 +341,8 @@ void swa_ffn_bwd(torch::Tensor dy, torch::Tensor q1, torch::Tensor y, torch::Ten
     switch (dy_cfg) {
       case 0: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<16>, MODE>(pd); break;
       case 1: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<8>, MODE>(pd); break;
+      case 4: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<2, 2>, MODE>(pd); break;         // the N split: 2 warps per tile, 2 tiles per CTA (the same values)
+      case 5: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<1, 4, true>, MODE>(pd); break;   // the K split: 4 warps per tile (another fp32 summation order)
       default: TORCH_CHECK(false, "unknown FFN backward (dy) configuration");
     }
   });
@@ -377,6 +381,9 @@ void swa_qkvg_bwd(torch::Tensor qi, torch::Tensor pq, torch::Tensor pk, torch::T
     switch (cfg) {
       case 0: launch_qkvg_bwd<sw80::QkvgBwdCfg<8>, MODE>(p); break;
       case 1: launch_qkvg_bwd<sw80::QkvgBwdCfg<4>, MODE>(p); break;
+      // the K split (3: 4 warps per tile, 4: 2 warps per tile x 2 tiles per CTA): deterministic, the fp32 sums of the K blocks in another order
+      case 3: launch_qkvg_bwd<sw80::QkvgBwdCfg<1, 4, true>, MODE>(p); break;
+      case 4: launch_qkvg_bwd<sw80::QkvgBwdCfg<2, 2, true>, MODE>(p); break;
       default: TORCH_CHECK(false, "unknown qkvg backward configuration");
     }
   });
@@ -509,7 +516,51 @@ void swa_varlen(torch::Tensor seqused, int64_t S, torch::Tensor cu, torch::Tenso
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// the weight forms of a bf16 training call in one launch (composed._prepare_train): each pair x[k] -> y[k] is a copy in y's dtype (fp32 -> bf16 rounds to nearest even, as
+// torch's cast), transposed when cols[k] > 0: element (r, c) of the row-major [n / cols, cols] x goes to y[c ld + off + r] (a transpose into a column block of a
+// wider row-major matrix: (Wqkv | Wg)^T from Wqkv and Wg).  Replaces the per-call casts of the six weights and the four transposes the backward stages read
+// (12 launches of a few microseconds at small row counts).
+struct FormsParams {
+  const void* x[12];
+  void* y[12];
+  bool xb[12], yb[12];
+  long n[12];
+  int cols[12], ld[12], off[12];
+  int count;
+};
+__global__ void weight_forms_kernel(const FormsParams p) {
+  const long j = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  for (int k = 0; k < p.count; ++k) {
+    if (j >= p.n[k]) continue;
+    const float v = p.xb[k] ? __bfloat162float(static_cast<const __nv_bfloat16*>(p.x[k])[j]) : static_cast<const float*>(p.x[k])[j];
+    const long d = p.cols[k] > 0 ? (j % p.cols[k]) * p.ld[k] + p.off[k] + j / p.cols[k] : j;
+    if (p.yb[k]) static_cast<__nv_bfloat16*>(p.y[k])[d] = __float2bfloat16_rn(v);
+    else static_cast<float*>(p.y[k])[d] = v;
+  }
+}
+void weight_forms(std::vector<torch::Tensor> x, std::vector<torch::Tensor> y, std::vector<int64_t> cols, std::vector<int64_t> ld, std::vector<int64_t> off) {
+  const size_t n = x.size();
+  TORCH_CHECK(n >= 1 && n <= 12 && y.size() == n && cols.size() == n && ld.size() == n && off.size() == n, "weight_forms: 1 .. 12 pairs with cols / ld / off each");
+  FormsParams p{};
+  p.count = (int)n;
+  long mx = 0;
+  for (size_t k = 0; k < n; ++k) {
+    const torch::Tensor &a = x[k], &b = y[k];
+    TORCH_CHECK(a.is_cuda() && b.is_cuda() && a.is_contiguous() && b.is_contiguous(), "weight_forms: CUDA contiguous tensors");
+    TORCH_CHECK((a.scalar_type() == torch::kFloat32 || a.scalar_type() == torch::kBFloat16) && (b.scalar_type() == torch::kFloat32 || b.scalar_type() == torch::kBFloat16), "weight_forms: fp32 / bf16");
+    const long cnt = a.numel();
+    TORCH_CHECK(cols[k] >= 0 && (cols[k] == 0 ? b.numel() == cnt : (cnt % cols[k] == 0 && ld[k] >= cnt / cols[k] + off[k] && (cols[k] - 1) * ld[k] + off[k] + cnt / cols[k] <= b.numel())), "weight_forms: bad layout");
+    p.x[k] = a.data_ptr(); p.y[k] = b.data_ptr(); p.xb[k] = a.scalar_type() == torch::kBFloat16; p.yb[k] = b.scalar_type() == torch::kBFloat16;
+    p.n[k] = cnt; p.cols[k] = (int)cols[k]; p.ld[k] = (int)ld[k]; p.off[k] = (int)off[k];
+    mx = std::max(mx, cnt);
+  }
+  c10::cuda::CUDAGuard guard(x[0].device());
+  weight_forms_kernel<<<(unsigned)((mx + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("weight_forms", &weight_forms);
   m.def("swa_attn_fwd", &swa_attn_fwd);
   m.def("swa_attn_bwd", &swa_attn_bwd);
   m.def("swa_attn_delta", &swa_attn_delta);
