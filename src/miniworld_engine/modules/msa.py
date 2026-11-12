@@ -563,9 +563,9 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
     """
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:a100_sm80": 2
-    }  # 2026-11-10: the BIG width (d_msa 256 / d_pair 512) on sm_80 (pwa_wide_sm80)
+    # 2026-11-10: the BIG width (d_msa 256 / d_pair 512) on sm_80 (pwa_wide_sm80); 2026-11-12: cuda training at 1536 / 2048 tokens on
+    # both cards (FoldForge R21: the pair backward past 1024)
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 2}
 
     #: "cuda": the H100 kernels (kernels.integrations.pwa_train / pwa_wide); "triton": kernels.pair_weighted_averaging.triton (see the
     #: _supports_ docstrings for the ranges). "anthropic" (inference only): the model kits' own masked PWA kernels (see _supports_anthropic).
@@ -869,9 +869,9 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         return None
 
     def _supports_cuda(self, msa, pair, mask=None) -> str | None:
-        """``kernels.integrations.pwa_train`` (d_msa 64, d_pair 128, 8 heads x 32: N % 128, S even, N <= 2048 inference / 1024 training;
-        d_pair 256 / 384 / 512 with pwa_wide's pair kernels: N <= 1024 training / 2048 inference) and ``pwa_wide`` (d_msa 64 / 128, d_pair 128 / 256 / 384, 8 heads x
-        8 / 16, or d_msa 256, d_pair 512, 8 heads x 32 (the BIG build); N <= 1024 training / 2048 inference): bf16 activations, batch 1, sm_90a, forward + backward
+        """``kernels.integrations.pwa_train`` (d_msa 64, d_pair 128, 8 heads x 32: N % 128, S even, N <= 2048;
+        d_pair 256 / 384 / 512 with pwa_wide's pair kernels: N <= 2048) and ``pwa_wide`` (d_msa 64 / 128, d_pair 128 / 256 / 384, 8 heads x
+        8 / 16, or d_msa 256, d_pair 512, 8 heads x 32 (the BIG build); N <= 2048, training and inference): bf16 activations, batch 1, sm_90a, forward + backward
         (the residual and the row dropout in the kernels)."""
         why = self._common_refusal(msa, pair, mask)
         if why is not None:
