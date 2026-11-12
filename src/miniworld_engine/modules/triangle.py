@@ -118,6 +118,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         "cuda:a100_sm80": 3,
         "cuda:5090_sm120": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; 5090 2: the bias-only one-direction path on sm_120a
+    # (2026-11-13: 5090 inference past 2048^2 tokens on chunks of rows, sm80_wide._chunked_inference: no requirement case reaches it, no version change)
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False

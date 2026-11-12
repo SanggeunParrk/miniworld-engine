@@ -243,6 +243,35 @@ def _aligned(t: torch.Tensor) -> torch.Tensor:
     return t if t.data_ptr() % 16 == 0 else t.clone()
 
 
+#: RTX 5090 inference past GROUP_TOKENS tokens: the plane pair [2 Hs, T] (two pair-sized buffers at Hs = D) is formed and contracted GROUP channels at a time
+#: (``_grouped_front``; a group's a | b rows are 4 GROUP = 128 packed rows, one k1w column tile), so the op's transient is the pair, one [64, T] plane group, X and the output (an AF3 trunk past L 3000 on 32 GB). A fixed function of the
+#: shape; per channel the same k1w rows and plane contraction as the whole call.
+GROUP_TOKENS = 2048 * 2048
+GROUP = 32
+
+
+def _grouped(z: torch.Tensor, hs: int, direction: int, save: bool) -> bool:
+    if save or z.dtype is not torch.bfloat16 or not _d128.on_sm120() or z.shape[1] * z.shape[2] <= GROUP_TOKENS:
+        return False
+    h = hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
+    return hs > GROUP and hs % GROUP == 0 and h % GROUP == 0
+
+
+def _grouped_front(k1, zf, pk, st_in, mask, x, hs, n, direction, eps_in, fuse_z) -> None:
+    """k1w + the plane contraction per group of GROUP channels: the group's a rows (packed rows 2 GROUP g ..) and b rows (2 Hs + 2 GROUP g ..) of the packed front
+    weights in one k1w call -> planes [2 GROUP, T] (a | b of the group), then the group's channels of X (outgoing below h, incoming above)."""
+    T = n * n
+    h = hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
+    w1, vs, vb = pk["w1"], pk["vs"], pk["vb"]
+    planes = zf.new_empty((2 * GROUP, T))
+    a, b = planes[:GROUP].view(GROUP, n, n), planes[GROUP:].view(GROUP, n, n)
+    for c0 in range(0, hs, GROUP):
+        ra, rb = slice(2 * c0, 2 * c0 + 2 * GROUP), slice(2 * hs + 2 * c0, 2 * hs + 2 * c0 + 2 * GROUP)
+        k1(zf, torch.cat([w1[ra], w1[rb]]), torch.cat([vs[ra], vs[rb]]), torch.cat([vb[ra], vb[rb]]), st_in, mask, planes, n, eps_in, fuse_z)
+        with _tf32(zf):
+            _cp.planes(0 if c0 < h else 1, a, b, x[c0 : c0 + GROUP])
+
+
 def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     E = _lib()
     z = leaves[0]
@@ -269,12 +298,16 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     st_in = torch.empty((T, 2), dtype=torch.float32, device=z.device)
     if not fuse_z:
         E.stats_rows(zf, st_in, eps_in)
-    planes = zf.new_empty((2 * hs, T))
     k1 = E.k1w if save else E.k1w_row_mask
-    k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z)
     x = zf.new_empty((hs, n, n))
-    with _tf32(z):
-        _contract(planes, x, hs, n, direction)
+    if _grouped(z, hs, direction, save):
+        _grouped_front(k1, zf, pk, st_in, mask, x, hs, n, direction, eps_in, fuse_z)
+    else:
+        planes = zf.new_empty((2 * hs, T))
+        k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z)
+        with _tf32(z):
+            _contract(planes, x, hs, n, direction)
+        del planes
     st_out = torch.empty((T, 2), dtype=torch.float32, device=z.device)
     if not fuse_x:
         E.stats_cm(x.view(hs, T), st_out, eps_out)
