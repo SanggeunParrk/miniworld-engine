@@ -36,7 +36,8 @@ def test_trimul_inference_peak_is_planes_plus_contraction(backend: str, limit: f
     gen = torch.Generator(device="cuda").manual_seed(1)
     inputs = m.make_inputs(length=length, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=gen)
     pair, mask = inputs["pair"], inputs["mask"]
-    why = kern.unsupported(pair, mask)
+    with torch.no_grad():
+        why = kern.unsupported(pair, mask)
     if why is not None:
         pytest.skip(f"not served on this card: {why}")
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
