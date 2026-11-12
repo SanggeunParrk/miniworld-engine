@@ -315,10 +315,21 @@ def _dkv_schedule(head_dim: int) -> tuple[int, int]:
     return (4, 2) if head_dim == 32 else (DKV_NST, DKV_MINB)
 
 
-def _dq_schedule(samples: int) -> tuple[int, int, int]:
+def _dq_schedule(samples: int, head_dim: int = HD) -> tuple[int, int, int]:
     """(samples per CTA, K | V ring stages, CTAs per SM) of the query side.  Four samples per CTA halve the bias-gradient partials that two write and
-    read back (A = 48: dq + reduction 12-20 % faster), at one CTA per SM; two samples when A is not a multiple of four, one when it is odd."""
+    read back (A = 48: dq + reduction 12-20 % faster), at one CTA per SM; two samples when A is not a multiple of four, one when it is odd.
+
+    The RTX 5090 (99 KB of shared memory per block): the Q | dO tiles of four samples (and of two at head dim 48 / 64) do not fit beside the ring, so
+    one sample a CTA there, two at head dim 32 for an even sample count."""
+    if _sm120_build():
+        return (2, 4, 1) if head_dim <= 32 and samples % 2 == 0 else (1, 3, 2)
     return (4, 3, 1) if samples % 4 == 0 else (2, 4, 1) if samples % 2 == 0 else (1, 3, 2)
+
+
+def _sm120_build() -> bool:
+    from miniworld_engine.kernels._sm120 import building_sm120
+
+    return building_sm120()
 
 
 def backward(
@@ -591,7 +602,7 @@ def plain_backward(
     ext.attn_delta(dob, o, delta, samples, length, heads, head_dim)
     dq, dk, dv = (torch.empty(m, d, device=dev, dtype=torch.bfloat16) if t is None else t for t in (dq, dk, dv))
     pen, kps = _penalty(kpen, kps, length)
-    rows, nkv, minb = (1, 3, 4 if warps == 2 else 2) if warps < 8 else _dq_schedule(samples)
+    rows, nkv, minb = (1, 3, 4 if warps == 2 else 2) if warps < 8 else _dq_schedule(samples, head_dim)
     assert warps == 8 or (samples == 1 and kpen is None and warps in (2, 4)), (
         samples,
         warps,
