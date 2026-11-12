@@ -260,7 +260,7 @@ def _fwd_launch(
     if ln:
         gamma, beta = _f32(gamma, not save), _f32(beta, not save)
     # the weights are bf16 or fp32 (a master); the fused forward casts (and packs, cached by the parameters' version) itself, the other path casts here
-    if not is_sm120(x.device) and fused_fwd_sm80.supports(d, wa.shape[0], m) and fused_fwd_sm80.loads():
+    if fused_fwd_sm80.supports(d, wa.shape[0], m) and fused_fwd_sm80.loads():
         # D = 64 / 128: the whole forward in one kernel (a warp owns 32 rows for the whole hidden dimension)
         out, xn, stats = fused_fwd_sm80.forward(x, gamma, beta, wa, wb, ws, eps, save, cache=not save, ln=ln)
         return (
@@ -771,7 +771,7 @@ def transition_f32_sm80(x, gamma, beta, wa, wb, ws, eps):
     shape = x.shape
     flat = x.reshape(-1, shape[-1]).contiguous()
     gf, bf = _f32(gamma, True), _f32(beta, True)
-    if not is_sm120(x.device) and fused_fwd_sm80.f32_supports(flat.shape[1], wa.shape[0], flat.shape[0]) and fused_fwd_sm80.loads():
+    if fused_fwd_sm80.f32_supports(flat.shape[1], wa.shape[0], flat.shape[0]) and fused_fwd_sm80.loads():
         # enough rows at a fused fp32 shape: the one-kernel forward (the same forms and scales, packed once per parameter version)
         wpk, gbk, sc = _capture.param_forms(
             "transition_fused_fwd_f32_pack_sm80",
