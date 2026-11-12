@@ -58,8 +58,9 @@ class PairformerBlock(BackendModule, MasterWeights):
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:a100_sm80": 2
-    }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures
+        "cuda:a100_sm80": 2,
+        "cuda:5090_sm120": 1,
+    }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; 2026-11-12: the sub-modules' sm_120a builds
 
     def __init__(self, config: PairformerConfig, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()

@@ -13,7 +13,8 @@ _dir = Path(__file__).parent
 
 @functools.lru_cache(maxsize=None)
 def ext():
-    from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from ..._nvcc import ensure_cuda_home, gencodes, host_flags
+    from ..._sm120 import sm80_load_extension as load_extension  # RTX 5090: the same source for sm_120a (kernels/_sm120.py)
 
     ensure_cuda_home()
     return load_extension(
@@ -26,8 +27,8 @@ def ext():
 
 
 def device_ext():
-    """The build for the current device: this one on an A100, else the H100 (sm_90a) build."""
-    if torch.cuda.get_device_capability() == (8, 0):
+    """The build for the current device: this one on an A100 (its sm_120a build on an RTX 5090), else the H100 (sm_90a) build."""
+    if torch.cuda.get_device_capability() in ((8, 0), (12, 0)):
         return ext()
     from miniworld_engine.kernels.sampler_ops.cuda import ext as h100_ext
 

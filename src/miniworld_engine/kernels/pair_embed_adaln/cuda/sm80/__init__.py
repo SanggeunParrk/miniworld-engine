@@ -18,7 +18,8 @@ _dir = Path(__file__).parent
 
 @functools.lru_cache(maxsize=None)
 def ext():
-    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags
+    from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension  # RTX 5090: the same source for sm_120a (kernels/_sm120.py)
 
     ensure_cuda_home()
     return load_extension(
@@ -44,5 +45,5 @@ backward = _on_this_build(_h100.backward)
 
 
 def device_build():
-    """The launchers of the current device's build: this one on an A100, else the H100 (sm_90a) one."""
-    return sys.modules[__name__] if torch.cuda.get_device_capability() == (8, 0) else _h100
+    """The launchers of the current device's build: this one on an A100 (and its sm_120a build on an RTX 5090), else the H100 (sm_90a) one."""
+    return sys.modules[__name__] if torch.cuda.get_device_capability() in ((8, 0), (12, 0)) else _h100

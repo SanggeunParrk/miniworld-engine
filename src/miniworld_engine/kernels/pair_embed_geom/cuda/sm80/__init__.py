@@ -18,7 +18,8 @@ _dir = Path(__file__).parent
 
 @functools.lru_cache(maxsize=None)
 def ext():
-    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags
+    from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension  # RTX 5090: the same source for sm_120a (kernels/_sm120.py)
 
     ensure_cuda_home()
     return load_extension(
@@ -46,19 +47,23 @@ ln_backward = _on_this_build(_h100.ln_backward)
 #: (impl 1, here mma.sync on its swizzled operands), the decoder's (mode 1, 157 rows) on the mma.sync kernel over KS concurrent pair chunks
 #: (impl 3, pair_embed_geom_sm80.cu: the H100 grid of 132 CTAs left the A100's SMs too few warps)
 BWD_IMPL = {0: 1, 1: 3}
+#: RTX 5090 (sm_120a build): the encoder table's warpgroup kernel (impl 1) needs 126 KB of shared memory, above the card's 99 KB a block: both tables
+#: take the mma.sync kernel over KS concurrent pair chunks (impl 3, 36 KB of static shared memory)
+BWD_IMPL_SM120 = {0: 3, 1: 3}
 KS = 2  # pair_embed_geom_sm80.cu
 
 
 def backward(g, codes, mode):
     """Table gradient [N_ROWS[mode], 256] bf16 from d pair = g [B, n, n, 256] bf16 (the H100 launcher's arguments and scratch)."""
     nt = _h100.N_ROWS[mode]
-    parts = KS * _h100.NBLK if BWD_IMPL[mode] == 3 else _h100.NBLK
+    impl = (BWD_IMPL_SM120 if torch.cuda.get_device_capability(g.device) == (12, 0) else BWD_IMPL)[mode]
+    parts = KS * _h100.NBLK if impl == 3 else _h100.NBLK
     tpart = torch.empty(parts * nt * 256, device=g.device, dtype=torch.float32)
     dtbl = torch.empty(nt, 256, device=g.device, dtype=torch.bfloat16)
-    ext().backward(g, codes, tpart, dtbl, int(mode), BWD_IMPL[mode])
+    ext().backward(g, codes, tpart, dtbl, int(mode), impl)
     return dtbl
 
 
 def device_build():
-    """The launchers of the current device's build: this one on an A100, else the H100 (sm_90a) one."""
-    return sys.modules[__name__] if torch.cuda.get_device_capability() == (8, 0) else _h100
+    """The launchers of the current device's build: this one on an A100 (and its sm_120a build on an RTX 5090), else the H100 (sm_90a) one."""
+    return sys.modules[__name__] if torch.cuda.get_device_capability() in ((8, 0), (12, 0)) else _h100
