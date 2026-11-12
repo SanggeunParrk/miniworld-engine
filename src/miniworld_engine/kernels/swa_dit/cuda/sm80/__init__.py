@@ -501,25 +501,19 @@ def infer_cfg(m: int) -> tuple[dict, int]:
 
 
 #: the training launch shapes of the bf16 stages (``composed.SWABlockA100``: forward with saves, backward) by the row count M (rows <= the
-#: bound): keywords of ``qkvg_fwd`` / ``ffn_fwd`` / ``oproj_bwd`` / ``ffn_bwd`` / ``qkvg_bwd`` / ``mod_bwd``. A call of few row tiles
-#: splits the qkvg output blocks over 4 warps and runs the other stages on CTAs of fewer warps (more CTAs) -- the same values bitwise.
-#: A100 80GB, AtomDiTESMFold2 master train, S 1, graph timing (2026-11-12): 0.88 / 0.89 / 0.91 / 0.93 / 0.93 of the default launches at
-#: L 1024 / 2048 / 3072 / 4096 / 5120; at 8192 rows the defaults are faster (1.09).
+#: bound): keywords of ``qkvg_fwd`` / ``ffn_fwd`` / ``oproj_bwd`` / ``ffn_bwd`` / ``qkvg_bwd``, and ``mod_bwd_gemm`` (``composed._mod_bwd``: the
+#: modulation backward on cuBLAS). A call of few row tiles splits the qkvg forward's output blocks over 4 warps, the FFN gate backward's hidden
+#: chunks over 4 CTAs (hsplit), the dy / qkvg backwards' K over 4 / 2 warps per tile (the K split: another fp32 summation order) and runs the
+#: other stages on CTAs of fewer warps. A100 80GB, AtomDiTESMFold2 master train, S 1, graph timing (2026-11-12), cuda / triton: L 1024
+#: 1.39 -> 0.96, 2048 1.23 -> 0.96, 3072 1.16 -> 0.96 (the default launches / these, with ``composed.train_forms``).
+_SMALL = dict(qkvg_fwd=dict(cfg=1, nsplit=4), ffn_fwd=dict(cfg=1), oproj_bwd=dict(cfg=1))
 _TRAIN_CFG = (
-    (
-        5120,
-        dict(
-            qkvg_fwd=dict(cfg=1, nsplit=4),
-            ffn_fwd=dict(cfg=1),
-            oproj_bwd=dict(cfg=1),
-            ffn_bwd=dict(cfg=(1, 1)),
-            qkvg_bwd=dict(cfg=1),
-            mod_bwd=dict(dc_cfg=5),
-        ),
-    ),
+    (1024, dict(_SMALL, ffn_bwd=dict(cfg=(1, 5), hsplit=4), qkvg_bwd=dict(cfg=3), mod_bwd_gemm=True)),
+    (3072, dict(_SMALL, ffn_bwd=dict(cfg=(1, 4), hsplit=4), qkvg_bwd=dict(cfg=4), mod_bwd_gemm=True)),
+    (5120, dict(_SMALL, ffn_bwd=dict(cfg=(1, 1)), qkvg_bwd=dict(cfg=1))),
 )
 
 
-def train_cfg(m: int) -> dict[str, dict]:
+def train_cfg(m: int) -> dict:
     """The per-stage keywords of a training call over ``m`` rows (``_TRAIN_CFG``; past its last bound none: the defaults)."""
     return next((c for top, c in _TRAIN_CFG if m <= top), {})
