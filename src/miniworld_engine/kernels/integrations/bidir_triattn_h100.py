@@ -217,8 +217,8 @@ def single_refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str
     """Why the single-direction bias-only path does not serve this call (None: it does)."""
     if not pair.is_cuda:
         return "the kernels run on CUDA tensors only"
-    if torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0)):
-        return "the bias-only TriangleAttention cuda path is the H100 (sm_90a) and A100 (sm_80) one"
+    if torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0), (12, 0)):  # 12.0: the sm_80 glue built for sm_120a (sm80_bidir)
+        return "the bias-only TriangleAttention cuda path is the H100 (sm_90a), A100 (sm_80) and RTX 5090 (sm_120a) one"
     if pair.dtype != torch.bfloat16:
         return f"dtype {pair.dtype}: bf16 activations only (the bias-only path's glue kernels)"
     if pair.dim() != 4 or pair.shape[1] != pair.shape[2]:

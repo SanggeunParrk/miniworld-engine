@@ -466,7 +466,7 @@ namespace {
 template <int H, int C, typename T>
 void launch_gen_bwd(const torch::Tensor& z, const torch::Tensor& wcm, const torch::Tensor& db, torch::Tensor& dz, torch::Tensor& pw, const unsigned char* kvp, int64_t N, int64_t NZ, int64_t rows,
                     double eps) {
-  using G = aa80::PbBwdCfg<C>;
+  using G = aa80::PbBwdCfg<C, H>;
   const size_t smem = (size_t)G::smem(H);
   TORCH_CHECK(smem <= AA80_SMEM_CAP, "pair_bias_gen_bwd: C x H too large for shared memory");
   static bool set[64] = {};
@@ -525,6 +525,13 @@ template <int C, int H>
 void launch_gen_bwd_tc(const torch::Tensor& z, const torch::Tensor& wcm, const torch::Tensor& db, torch::Tensor& dz, torch::Tensor& pw, const unsigned char* kvp, int64_t N, int64_t NZ,
                        int64_t B, int64_t nct, double eps) {
   using G = aa80::PbTcCfg<C, H>;
+#ifdef MWE_SM120
+  if constexpr (!G::FITS) {  // C 512 x 16 / 24 heads: over 99 KB at 2 stages (the caller takes the one-pass kernel, pair_bias_generic_backward_tc_supported)
+    TORCH_CHECK(false, "pair_bias_gen_bwd_tc: C ", C, " x ", H, " heads does not fit 99 KB of shared memory on sm_120a");
+    return;
+  } else
+#endif
+  {
   static bool set[64] = {};
   const int dev = at::cuda::current_device() & 63;
   if (!set[dev]) {
@@ -534,6 +541,7 @@ void launch_gen_bwd_tc(const torch::Tensor& z, const torch::Tensor& wcm, const t
   aa80::pair_bias_gen_bwd_tc_kernel<C, H><<<dim3((unsigned)nct, (unsigned)B), G::NT, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(
       z.data_ptr<float>(), wcm.data_ptr<float>(), db.data_ptr<float>(), dz.data_ptr<float>(), pw.data_ptr<float>(), (int)N, (int)NZ, kvp, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
 }
 
 template <int C>
