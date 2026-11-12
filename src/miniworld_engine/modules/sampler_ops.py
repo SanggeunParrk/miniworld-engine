@@ -288,7 +288,8 @@ class PoolAtoms(BackendModule):
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: sm_80 paths
+    # cuda:h100_sm90 2 (2026-11-12): the wide pooling kernel at 1024+ CTAs takes SUB = 4 (engine 2.4.4's), below SUB = 8 (same bits)
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:h100_sm90": 2}  # 2026-11-10: sm_80 paths
 
     #: Channels of ``make_inputs``' atom features (the atom encoder's ``d_single``) and atoms per token (the token-atoms layout's width).
     _C, _A = 128, 24

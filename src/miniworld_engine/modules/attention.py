@@ -125,11 +125,13 @@ class AttentionPairBias(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
         "cuda:a100_sm80": 7,
-        "cuda:h100_sm90": 3,
+        "cuda:h100_sm90": 4,
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100; cuda:a100_sm80 4 / cuda:h100_sm90 2 (2026-11-11): B > 1 served (one step per batch row, FoldForge 5I28 confidence head); cuda:a100_sm80 5 (2026-11-12): the composed fp32 path's pair backward is one TF32 tensor-core launch for the batch (pair_bias_gen_bwd_tc); cuda:a100_sm80 6 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd, bf16 pairs) 1.4-2.1x faster, the same values;
     # cuda:a100_sm80 7 / cuda:h100_sm90 3 (2026-11-12): inference at L % 128 != 0 runs padded to a multiple of 128 (FoldForge OpenDDE n = 12: 2976)
+    # cuda:h100_sm90 4 (2026-11-12): bf16 inference at B > 1 runs the batch rows together, one launch per stage (5 launches per chunk of
+    # rows instead of 5 per row; the per-row values bit for bit): engine 2.4.4 parity at L 128 for the confidence head's S = 5 / 8
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False

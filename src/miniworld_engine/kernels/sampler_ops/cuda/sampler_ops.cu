@@ -544,10 +544,23 @@ int code_of(const at::Tensor& t) {
   }
 }
 
+// SUB of the wide kernel by the launch's CTA count (tokens x samples): 4 from POOL_SUB4_BLOCKS CTAs on, 8 below. H100 2026-11-12 (C 128, 24
+// atoms per token, graph replay): SUB 4 / SUB 8 equal (+-0.7%) up to 640 CTAs, SUB 4 1.7-5.6% faster from 1024 on (N 16384 S 5: 16.8 vs
+// 17.6 us; N 16384 S 48: 143.7 vs 151.8 us; engine 2.4.4 ran SUB 4). The sums run in the same atom order either way (same bits).
+// The A100 build (sampler_ops_sm80.cu includes this file after defining the PDL launch attribute away) keeps SUB 8 everywhere.
+#ifndef POOL_SUB4_BLOCKS
+#ifdef cudaLaunchAttributeProgrammaticStreamSerialization
+#define POOL_SUB4_BLOCKS 0x7fffffff
+#else
+#define POOL_SUB4_BLOCKS 1024
+#endif
+#endif
 template <int IC, int GC, int MC>
 void pool_fast(dim3 grid, unsigned threads, cudaStream_t s, const __nv_bfloat16* x, const at::Tensor& idx, const at::Tensor& gm, const at::Tensor& am,
                __nv_bfloat16* out, int A, int T, int R, int C) {
-  if (C % 8 == 0)
+  if (C % 8 == 0 && (long)grid.x * grid.y >= (long)POOL_SUB4_BLOCKS)
+    pool_atoms_wide_k<IC, GC, MC, 4><<<grid, (unsigned)(((C / 8) + 31) / 32 * 32), 0, s>>>(x, idx.data_ptr(), gm.data_ptr(), am.data_ptr(), out, A, T, R, C);
+  else if (C % 8 == 0)
     pool_atoms_wide_k<IC, GC, MC><<<grid, (unsigned)(((C / 8) + 31) / 32 * 32), 0, s>>>(x, idx.data_ptr(), gm.data_ptr(), am.data_ptr(), out, A, T, R, C);
   else
     pool_atoms_fast_k<IC, GC, MC><<<grid, threads, 0, s>>>(x, idx.data_ptr(), gm.data_ptr(), am.data_ptr(), out, A, T, R, C);

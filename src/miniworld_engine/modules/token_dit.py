@@ -926,7 +926,9 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # 2026-11-10: sm_80 paths; cuda:h100_sm90 2 (2026-11-12): the inference pair-bias hoist (runner.hoist) in one pass for a 256-wide
     # bf16 pair, and on the TF32 tensor-core kernel (3 terms) for a 128-wide fp32 pair
     # cuda:a100_sm80 3 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd: padded W' pitch, next row prefetched; same values) 2.1x faster
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 2}
+    # cuda:h100_sm90 3 (2026-11-12): pair_bias_all on H100 is the fused hoist (head-major contiguous biases, as engine 2.4.4): the
+    # inference block no longer copies a permuted bias view per call (L 768 24-block stack 9.8 -> ~3.8 ms)
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 3}
 
     def __init__(
         self,
@@ -1069,8 +1071,9 @@ def pair_bias_all(blocks, pair: torch.Tensor) -> tuple[torch.Tensor, ...]:
             raise ValueError(
                 "pair_bias_all: the blocks must share eps and head count, ln_pair must have a weight and no offset, to_bias no bias"
             )
-    # the "cuda" backend on a B200: the fused hoist (one LayerNorm and one GEMM for every block, the blocks' bias gradients written into
-    # one buffer); pair [1, L, L, 128] bf16 or fp32 -- any other pair (and every H100 call) takes the PyTorch fold below
+    # the "cuda" backend on a B200 or an H100: the fused hoist (one LayerNorm and one GEMM for every block, the blocks' bias gradients
+    # written into one buffer, each block's bias a contiguous head-major [1, H, L, L] slice); pair [1, L, L, 128] (or 256 on H100) bf16 or
+    # fp32 -- any other pair (and the A100) takes the PyTorch fold below, whose per-block biases are permuted views
     if getattr(mods[0], "backend", "pytorch") == "cuda":
         from miniworld_engine.kernels.integrations import bias_only_dit_hoist
 
