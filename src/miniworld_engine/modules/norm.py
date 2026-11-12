@@ -322,7 +322,7 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         return None
 
     def _supports_cuda(self, input: torch.Tensor) -> str | None:
-        if a100(input):  # A100: the sm_80 row kernels (kernels/layernorm/cuda/sm80.py)
+        if a100(input) or sm120(input):  # A100 / RTX 5090: the row kernels (kernels/layernorm/cuda/sm80.py)
             from miniworld_engine.kernels.layernorm.cuda import sm80
 
             return self._supports_engine(input) or sm80.refusal(input, self.weight, self.bias)
@@ -336,7 +336,7 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         return None
 
     def _forward_cuda(self, input: torch.Tensor) -> torch.Tensor:
-        if a100(input):
+        if a100(input) or sm120(input):
             from miniworld_engine.kernels.layernorm.cuda import sm80
 
             return sm80.layernorm(input, self.weight, self.bias, self.eps)
@@ -399,7 +399,7 @@ class RMSNorm(BackendModule, nn.RMSNorm):
         return None
 
     def _supports_cuda(self, x: torch.Tensor) -> str | None:
-        if a100(x):  # A100: the RMS mode of the sm_80 row kernels (kernels/rmsnorm/cuda/sm80.py)
+        if a100(x) or sm120(x):  # A100 / RTX 5090: the RMS mode of the row kernels (kernels/rmsnorm/cuda/sm80.py)
             from miniworld_engine.kernels.rmsnorm.cuda import sm80
 
             return self._supports_engine(x) or sm80.refusal(x, self.weight)
@@ -413,7 +413,7 @@ class RMSNorm(BackendModule, nn.RMSNorm):
         return None
 
     def _forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        if a100(x):
+        if a100(x) or sm120(x):
             from miniworld_engine.kernels.rmsnorm.cuda import sm80
 
             return sm80.rmsnorm(x, self.weight, self.effective_eps(x.dtype))

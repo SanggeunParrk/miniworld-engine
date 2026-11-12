@@ -17,6 +17,7 @@ from pathlib import Path
 import torch
 
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+from ..._sm120_builds import is_sm120, per_arch
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -25,11 +26,10 @@ ROWS_PER_BLOCK = {128: 8, 384: 2, 768: 1, 1024: 1}
 WIDTHS = tuple(ROWS_PER_BLOCK)
 
 
-@functools.lru_cache(maxsize=1)
-def _ext():
+def _build(suffix: str, gencode: str):
     ensure_cuda_home()
     return load_extension(
-        name="adaln_sm80",
+        name=f"adaln_{suffix}",
         sources=[str(_dir / "ops.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -38,12 +38,16 @@ def _ext():
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-            "-gencode=arch=compute_80,code=sm_80",
+            gencode,
             f"-I{_dir}",
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
     )
+
+
+#: the A100 build (``adaln_sm80``) and the GeForce RTX 5090 one (``adaln_sm120``, the same sources for sm_120a); ``_ext`` loads the current card's
+_ext, _ext_sm80, _ext_sm120 = per_arch(_build)
 
 
 def available() -> bool:
@@ -150,7 +154,10 @@ ATOM_FWD_PREFETCH_CFG, ATOM_FWD_PREFETCH_ROWS, ATOM_FWD_SMALL_ROWS = (
 
 
 def atom_supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
-    """The fused atom kernels' contract: bf16 rows, d_hidden = d_cond = 128."""
+    """The fused atom kernels' contract: bf16 rows, d_hidden = d_cond = 128.  Not on the RTX 5090: their weight staging needs more than its 99 KB of
+    shared memory a block (the row passes + cuBLAS serve the atom width there)."""
+    if is_sm120(x.device):
+        return False
     return x.dtype is torch.bfloat16 and cond.dtype is torch.bfloat16 and x.shape[-1] == ATOM_WIDTH and cond.shape[-1] == ATOM_WIDTH
 
 
@@ -181,7 +188,10 @@ def atom_fwd(
 
 
 def atom_tf32_supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
-    """The fp32 (TF32) fused forward's contract: fp32 rows, d_hidden = d_cond = 128 (inference only: nothing is saved for a backward)."""
+    """The fp32 (TF32) fused forward's contract: fp32 rows, d_hidden = d_cond = 128 (inference only: nothing is saved for a backward).  Not on the
+    RTX 5090 (128 KB of fp32 weights in shared memory, beyond its 99 KB a block)."""
+    if is_sm120(x.device):
+        return False
     return x.dtype is torch.float32 and cond.dtype is torch.float32 and x.shape[-1] == ATOM_WIDTH and cond.shape[-1] == ATOM_WIDTH
 
 

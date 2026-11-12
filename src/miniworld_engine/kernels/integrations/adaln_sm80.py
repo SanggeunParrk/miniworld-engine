@@ -77,7 +77,7 @@ def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
         return False
     if module.ln_cond.weight is None or module.to_scale.bias is None or module.to_bias.bias is not None:
         return False
-    if torch.cuda.get_device_capability(x.device) != (8, 0):
+    if torch.cuda.get_device_capability(x.device) not in ((8, 0), (12, 0)):  # A100, or the RTX 5090 (the same sources built for sm_120a)
         return False
     if (
         compute_dtype is torch.float32

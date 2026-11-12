@@ -78,7 +78,7 @@ def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
         return False
     if any(w.bias is not None for w in (module.expand_a, module.expand_b, module.squeeze)):
         return False
-    if torch.cuda.get_device_capability(x.device) != (8, 0):
+    if torch.cuda.get_device_capability(x.device) not in ((8, 0), (12, 0)):  # A100, or the RTX 5090 (the same sources built for sm_120a)
         return False
     # update() expands shared conditioning in autograd before the training
     # launch, so its gradient is reduced back to the shared input shape.

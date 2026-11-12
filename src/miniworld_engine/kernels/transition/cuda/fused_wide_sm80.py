@@ -12,7 +12,6 @@ wgmma / tcgen05.  What is hand CUDA and what cuBLAS was decided by measurement (
 fixed order (no atomics), so a replay is bit-identical.
 """
 
-import functools
 from pathlib import Path
 
 import torch
@@ -20,8 +19,9 @@ import torch
 from ... import _capture
 from ..._compile import opaque
 from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
+from ..._sm120_builds import is_sm120, per_arch, served
 from . import fused_bwd_sm80, fused_fwd_sm80
-from .fused_sm80 import _is_ampere, _is_fake
+from .fused_sm80 import _is_fake
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -29,22 +29,25 @@ _dir = Path(__file__).parent / "sm80"
 WIDTHS = (64, 128, 256, 384, 512, 768)
 
 
-@functools.lru_cache(maxsize=1)
-def _ext():
+def _build(suffix: str, gencode: str):
     ensure_cuda_home()
     return load_extension(
-        name="transition_wide_sm80",
+        name=f"transition_wide_{suffix}",
         sources=[str(_dir / "transition_wide_sm80.cu")],
         extra_cuda_cflags=[
             *host_flags(),
             "-std=c++17",
             "-O3",
-            "-gencode=arch=compute_80,code=sm_80",
+            gencode,
             f"-I{_dir}",
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
     )
+
+
+#: the A100 build (``transition_wide_sm80``) and the GeForce RTX 5090 one (``transition_wide_sm120``, the same source for sm_120a); ``_ext`` loads the current card's
+_ext, _ext_sm80, _ext_sm120 = per_arch(_build)
 
 
 @torch.compiler.assume_constant_result
@@ -65,7 +68,7 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """The kernels' own requirements: sm_80, bf16, D in WIDTHS, H % 64 == 0, any row count; the weights bf16 or fp32 (an fp32 master: the entries cast them to bf16 outside autograd)."""
     if not x.is_cuda or x.dtype is not torch.bfloat16 or wa.dtype not in _WEIGHT_DTYPES or ws.dtype not in _WEIGHT_DTYPES:
         return False
-    if not _is_ampere(x.device.index if x.device.index is not None else torch.cuda.current_device()):
+    if not served(x.device):
         return False
     d, h = x.shape[-1], wa.shape[0]
     if d not in WIDTHS or wa.shape != (h, d) or ws.shape != (d, h) or h % 64:
@@ -105,6 +108,24 @@ def _tiles(m: int, d: int, h: int) -> tuple[int, int]:
     else:
         res = 0
     return dual, res
+
+
+def _tiles_sm120(m: int, d: int, h: int) -> tuple[int, int]:
+    """The forward's (dual-GEMM, residual-GEMM) tile configs on the RTX 5090 (``h = 0``: the fp32 builds, dual 0 / 2 / 12 and res 0 / 2 / 3 / 11).  Its 100 KB of
+    shared memory an SM holds one CTA of the A100's 64 KB tiles but two of the 48 KB ones (probe_tiles, every requirement shape, L2 flushed):
+    dual config 2 (64 x 64, 48 KB) is 20-30 % faster than config 0 from 16 k rows on (the 8-warp configs 1 / 5 gain at most 2-4 % at the
+    largest D 256+ calls); the squeeze takes config 3 (128 x 64) at D 64 / D 128 n 2, config 2 (64 x 128) at D 128 n 4 below 393 k rows and
+    config 8 (its 5-slice twin of config 3) above, and at D >= 256 config 2 below 5e10 multiply-adds and config 7 (256 x 128, 8 warps,
+    96 KB) above (5-8 % over config 0)."""
+    if h == 0:
+        return 2, (3 if d <= 128 else 2)
+    if d <= 64 or (d == 128 and h <= 256):
+        res = 3
+    elif d == 128:
+        res = 2 if m < 393216 else 8
+    else:
+        res = 7 if m * d * h >= 5e10 else 2
+    return 2, res
 
 
 def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -180,9 +201,14 @@ def _kernel_weights(wa, wb, ws, dtype, cache: bool):
     )[:3]
 
 
-def _save_ab(m: int, d: int, h: int, save: bool) -> bool:
+def _one_kernel_bwd(m: int, d: int, h: int, device: torch.device) -> bool:
+    """The one-kernel backward (``fused_bwd_sm80``) serves: an A100 (its tiles need more than the RTX 5090's 99 KB of shared memory) and a build for (d, h) at m rows."""
+    return not is_sm120(device) and fused_bwd_sm80.supports(d, h, m) and fused_bwd_sm80.loads()
+
+
+def _save_ab(m: int, d: int, h: int, save: bool, device: torch.device) -> bool:
     """True: the training forward also writes h and a | b, and the backward is the one-kernel ``gate_dh`` (B200's saved-activation scheme at D >= 256)."""
-    return save and d >= SAVE_AB_MIN_D and m >= SAVE_AB_MIN_ROWS and not (fused_bwd_sm80.supports(d, h, m) and fused_bwd_sm80.loads())
+    return save and d >= SAVE_AB_MIN_D and m >= SAVE_AB_MIN_ROWS and not _one_kernel_bwd(m, d, h, device)
 
 
 #: widths / rows from which the saved a | b scheme is used (measured: docs page)
@@ -190,16 +216,20 @@ SAVE_AB_MIN_D = 128
 SAVE_AB_MIN_ROWS = 1024
 
 
-def _dh_cfg(m: int, d: int, h: int) -> int:
+def _dh_cfg(m: int, d: int, h: int, sm120: bool = False) -> int:
     """Tile config of ``gate_dh``: config 0 (128 x 64, two CTAs per SM). In isolation the 128 x 128 tile (config 1) is 6-10 % faster at D384 / D512 (147 k rows), but inside the training step it is
-    0.5-2.5 % slower (interleaved A/B, D256 / D384 / D512), so it is not selected."""
+    0.5-2.5 % slower (interleaved A/B, D256 / D384 / D512), so it is not selected.  On the RTX
+    5090 (one CTA of config 0's 80 KB an SM there): config 3 (64 x 64, 4 stages) at D <= 128 and config 4 (config 0 with a 5-slice ring) above,
+    1-7 % faster than config 0 at every requirement shape (probe_tiles)."""
+    if sm120:
+        return 3 if d <= 128 else 4
     return 0
 
 
 def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, ln):
     """(out like x, xn [M, D] and stats [M, 2] f32 when ``save`` and ``ln`` else empty, h [M, H] and a | b [M, 2H] when the saved-activation scheme applies else empty)."""
     keep = save and ln
-    sab = _save_ab(x.shape[0], x.shape[1], wa.shape[0], save)
+    sab = _save_ab(x.shape[0], x.shape[1], wa.shape[0], save, x.device)
     h = wa.shape[0]
     return (
         torch.empty_like(x),
@@ -242,12 +272,12 @@ def _fwd_launch(
         )
     ext = _ext()
     wa, wb, ws = _kernel_weights(wa, wb, ws, x.dtype, cache=not save)
-    dual, res = _tiles(m, d, wa.shape[0])
+    dual, res = (_tiles_sm120 if is_sm120(x.device) else _tiles)(m, d, wa.shape[0])
     if ln:
         xn, stats = ext.ln_fwd(x, gamma, beta, eps, save)
     else:
         xn, stats = x, torch.empty((0, 2), dtype=torch.float32, device=x.device)
-    if _save_ab(m, d, wa.shape[0], save):
+    if _save_ab(m, d, wa.shape[0], save, x.device):
         hid, ab = ext.dual_swiglu_save(xn, wa, wb, dual)
     else:
         hid, ab = ext.dual_swiglu(xn, wa, wb, dual), x.new_empty((0,))
@@ -296,7 +326,7 @@ def _bwd_launch(
     h = wa.shape[0]
     if ln:
         gamma = _f32(gamma, False)
-    if fused_bwd_sm80.supports(d, h, m) and fused_bwd_sm80.loads():
+    if _one_kernel_bwd(m, d, h, x.device):
         # D = 64 / 128, whole 256-row tiles: PW (a, b, dh, SwiGLU backward, dW partials, dA | dB blocks) + X (d_xn, LayerNorm backward) + the partial sums
         return fused_bwd_sm80.backward(dy, x, xn, stats, gamma, wa, wb, ws, ln, gdt, wdt)
     ext = _ext()
@@ -304,7 +334,7 @@ def _bwd_launch(
     dual, _ = _tiles(m, d, h)
     if ab.numel():
         # one kernel: dh = dy Ws and the SwiGLU backward from the saved a | b (the forward saved h as well)
-        dab = ext.gate_dh(dy, ws.t().contiguous(), ab, _dh_cfg(m, d, h))
+        dab = ext.gate_dh(dy, ws.t().contiguous(), ab, _dh_cfg(m, d, h, is_sm120(x.device)))
     else:
         dh = torch.mm(dy, ws)  # [M, H]
         dab, hid = ext.gate_bwd(a_in, wa, wb, dh, dual)  # dA | dB [M, 2H], h [M, H]
@@ -349,7 +379,7 @@ def _bwd_dx(
     ext = _ext()
     m, d, h = x.shape[0], x.shape[1], wa.shape[0]
     if ab.numel():
-        dab = ext.gate_dh(dy, ws.t().contiguous(), ab, _dh_cfg(m, d, h))
+        dab = ext.gate_dh(dy, ws.t().contiguous(), ab, _dh_cfg(m, d, h, is_sm120(x.device)))
     else:
         dual, _ = _tiles(m, d, h)
         dab, _ = ext.gate_bwd(xn if ln else x, wa, wb, torch.mm(dy, ws), dual)
@@ -550,7 +580,7 @@ def f32_supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         return False
     if wa.dtype not in _WEIGHT_DTYPES or ws.dtype not in _WEIGHT_DTYPES:
         return False
-    if not _is_ampere(x.device.index if x.device.index is not None else torch.cuda.current_device()):
+    if not served(x.device):
         return False
     d, h = x.shape[-1], wa.shape[0]
     return d in F32_WIDTHS and tuple(wa.shape) == (h, d) and tuple(ws.shape) == (d, h) and h % 64 == 0
@@ -561,14 +591,14 @@ def f32_available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     return f32_supported(x, wa, ws) and _loads()
 
 
-def _f32_tiles(m: int, d: int, h: int) -> tuple[int, int, int]:
+def _f32_tiles(m: int, d: int, h: int, sm120: bool = False) -> tuple[int, int, int]:
     """(dual / gate tile config, squeeze tile config, squeeze K splits) of the fp32 bindings for an M-row call. Few rows: as many K splits (a divisor of the
     squeeze's K tiles, at most 8) as keep the squeeze within two CTAs per SM."""
     if m <= F32_SMALL_ROWS:
         tiles, kt = (d // 64) * -(-m // 64), h // 32
         splits = max(s for s in range(1, 9) if kt % s == 0 and (s == 1 or tiles * s <= 2 * _SMS_A100))
         return 12, 11, splits
-    dual, res = _tiles(m, d, 0)
+    dual, res = (_tiles_sm120 if sm120 else _tiles)(m, d, 0)
     return dual, res, 1
 
 
@@ -629,7 +659,7 @@ def _f32_fwd(
     ext = _ext()
     m, d = x.shape
     hid = ws16.shape[1]
-    dual, res, splits = _f32_tiles(m, d, hid)
+    dual, res, splits = _f32_tiles(m, d, hid, is_sm120(x.device))
     xn16, stats = ext.ln_fwd_f32(x, gamma, beta, sc, float(eps), bool(save))
     h16 = ext.dual_swiglu_f16(xn16, wab16[:hid], wab16[hid:], sc, dual)
     return ext.gemm_res_f32(h16, ws16, x, sc, res, splits), xn16, stats

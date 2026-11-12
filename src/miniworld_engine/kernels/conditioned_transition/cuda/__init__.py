@@ -587,6 +587,9 @@ def prebuild(target, rows):
     if target.arch == "sm80":  # A100: the token DiT transition of integrations/conditioned_transition_sm80 (its AdaLN rows + tail)
         yield from _prebuild_sm80(rows)
         return
+    if target.arch == "sm120":  # RTX 5090: the same two extensions built for sm_120a (kernels/_sm120_builds.py)
+        yield from _prebuild_sm120(rows)
+        return
     if target.arch != "sm90":
         return
     import itertools
@@ -644,10 +647,26 @@ def _prebuild_sm80(rows):
 
     from . import sm80
 
-    yield sm80._ext
-    yield adaln_sm80._ext
+    yield sm80._ext_sm80
+    yield adaln_sm80._ext_sm80
     if any(r["module"] in _SM80_TOKEN and r["mode"] == "train" for r in rows):  # the training path's parameter casts (transition family)
         from miniworld_engine.kernels.transition.cuda import parameter_cast_pack_sm80, parameter_cast_sm80
 
-        yield parameter_cast_sm80._ext
+        yield parameter_cast_sm80._ext_sm80
         yield parameter_cast_pack_sm80._ext
+
+
+#: classes whose RTX 5090 "cuda" backend reaches integrations/conditioned_transition_sm80 or integrations/adaln_sm80 (sm_120a builds)
+_SM120_TOKEN = frozenset({"TokenDiTProtenix", "TokenDiTMiniWorld", "TokenDiTMiniWorldBiasOnly", "TokenDiTRoseTTAFold3"})
+
+
+def _prebuild_sm120(rows):
+    """The RTX 5090 builds of the AdaLN rows and the ConditionedTransition tail (the sm_80 sources for sm_120a)."""
+    if not any(r["module"] in _SM120_TOKEN for r in rows):
+        return
+    from miniworld_engine.kernels.adaln.cuda import sm80 as adaln_sm80
+
+    from . import sm80
+
+    yield sm80._ext_sm120
+    yield adaln_sm80._ext_sm120

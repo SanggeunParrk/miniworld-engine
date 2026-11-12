@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from miniworld_engine.modules.functional import swish_gate
-from miniworld_engine.modules.norm import AdaptiveLayerNorm, LayerNorm, _as_rows3, a100, h100_unsupported, triton_unsupported
+from miniworld_engine.modules.norm import AdaptiveLayerNorm, LayerNorm, _as_rows3, a100, h100_unsupported, sm120, triton_unsupported
 from miniworld_engine.modules.primitives import BackendModule, Linear, MasterWeights, master_linear, random_input, stream_shape
 
 #: The OpenDDE kit's transition composition (``fpf_transition_odde``), a release directory for ``modules/_anthropic.load``.
@@ -324,7 +324,7 @@ class Transition(BackendModule, MasterWeights):
         return None
 
     def _supports_cuda(self, x: torch.Tensor) -> str | None:
-        if a100(x):
+        if a100(x) or sm120(x):  # A100 / RTX 5090: the sm_80 sources (built for sm_120a on the 5090)
             return self._supports_cuda_sm80(x)
         from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a, fused_sm90a, fused_wide_sm90a
 
@@ -349,7 +349,7 @@ class Transition(BackendModule, MasterWeights):
     def _forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return x
-        if a100(x):
+        if a100(x) or sm120(x):
             from miniworld_engine.kernels.transition.cuda import transition_sm80
 
             out = transition_sm80(
@@ -372,7 +372,8 @@ class Transition(BackendModule, MasterWeights):
         return out
 
     def _supports_cuda_sm80(self, x: torch.Tensor) -> str | None:
-        """A100: ``kernels/transition/cuda.transition_sm80`` (``fused_sm80`` at D 128 / n 4 with whole 256-row tiles and enough rows,
+        """A100 and GeForce RTX 5090 (the same sources built for sm_120a; there only the wide chain: the one-kernel builds need more than its
+        99 KB of shared memory a block): ``kernels/transition/cuda.transition_sm80`` (``fused_sm80`` at D 128 / n 4 with whole 256-row tiles and enough rows,
         ``fused_wide_sm80`` at D 64 / 128 / 256 / 384 / 512 / 768 with a hidden width a multiple of 64, any row count): bf16 activations,
         bf16 or fp32-master parameters, forward and backward; fp32 activations where torch allows TF32 (``fused_wide_sm80.transition_f32_sm80``:
         fp16 products at TF32's rounding, a TF32 backward)."""
