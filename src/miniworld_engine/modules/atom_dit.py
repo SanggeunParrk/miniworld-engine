@@ -88,6 +88,7 @@ from miniworld_engine.modules.primitives import (
     master_autocast,
     master_linear,
     random_input,
+    shared_cond_stream,
     wide,
 )
 from miniworld_engine.modules.transition import ConditionedTransition, UpGatedConditionedTransition
@@ -546,8 +547,18 @@ class _LocalAtomDiT(BackendModule):
         """``single`` / ``cond`` [S, 1, N, d] (S samples on the augmentation axis), the trunked ``pair`` [1, nwin, 32, 128, d_pair], the key
         ``mask`` [1, N] (real atoms first). Stream ``atom_folds`` (the multi-fold contract, docs/modules.md): ``depth`` = F folds (trunk_seeds of
         one input), ``single`` [S, F, N, d], ``cond`` one per fold [1, F, N, d] expanded over the S samples, ``pair`` [F, nwin, 32, 128, d_pair],
-        one key mask [1, N] expanded over the folds (FoldForge's grouped sampler step)."""
+        one key mask [1, N] expanded over the folds (FoldForge's grouped sampler step). A ``*_shared_cond`` stream (``atom_single_shared_cond``,
+        ``atom_folds_shared_cond``): ``cond`` [1, F, N, d] expanded (stride 0) over the S samples, as FoldForge's ``AtomDiTStack`` calls the
+        block; the measurers keep it expanded (requirements/README.md)."""
         d_single, d_cond, d_pair = self.transition.d_hidden, self.transition.d_cond, self.attention.ln_pair.normalized_shape[0]
+        stream, shared = shared_cond_stream(stream)
+        if shared and stream == "atom_single":
+            return {
+                "single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
+                "cond": random_input((1, 1, length, d_cond), dtype=dtype, device=device, generator=generator).expand(samples, -1, -1, -1),
+                "pair": random_input((1, windows(length), QUERIES, KEYS, d_pair), dtype=dtype, device=device, generator=generator),
+                "mask": key_mask(1, length, device=device, pad=QUERIES - 8),
+            }
         if stream == "atom_folds":
             f = depth or 1
             return {
@@ -1894,15 +1905,21 @@ class AtomDiTESMFold2Pair(BackendModule):
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
         """``single`` / ``cond`` [S, 1, N, d] (S samples), the trunked ``pair`` [1, nwin, 32, 192, d_pair], the key ``mask`` [1, N] (real atoms
-        first, padding inside the last query window) and the rotary tables ``rope`` [1, N, head_dim / 2] (fp32: FoldForge builds them so)."""
+        first, padding inside the last query window) and the rotary tables ``rope`` [1, N, head_dim / 2] (fp32: FoldForge builds them so).
+        Stream ``atom_single_shared_cond``: ``cond`` [1, 1, N, d] expanded (stride 0) over the S samples (requirements/README.md)."""
         d_single, d_cond = self.transition.d_hidden, self.transition.d_cond
+        shared = shared_cond_stream(stream)[1]
         d_pair = self.attention.ln_pair.normalized_shape[0]
         half = d_single // self.attention.n_head // 2
         angle = 3 * random_input((1, length, half), dtype=torch.float32, device=device, generator=generator)
         rdt = torch.float64 if dtype == torch.float64 else torch.float32
         return {
             "single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
-            "cond": random_input((samples, 1, length, d_cond), dtype=dtype, device=device, generator=generator),
+            "cond": (
+                random_input((1, 1, length, d_cond), dtype=dtype, device=device, generator=generator).expand(samples, -1, -1, -1)
+                if shared
+                else random_input((samples, 1, length, d_cond), dtype=dtype, device=device, generator=generator)
+            ),
             "pair": random_input((1, windows(length), QUERIES, ESM_KEYS, d_pair), dtype=dtype, device=device, generator=generator),
             "mask": key_mask(1, length, device=device, pad=QUERIES - 8),
             "rope": (angle.cos().to(rdt), angle.sin().to(rdt)),

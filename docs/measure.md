@@ -38,6 +38,18 @@ are fields of that config type. `build` constructs, moves to the device, redraws
 the case dtype (`master`: fp32 parameters with every `MasterWeights` pinned; inputs bf16; forward under bf16 autocast) and sets the mode.
 Inputs come from the class's `make_inputs` with a generator seeded per case: the same values for every backend.
 
+**Shared conditioning (`*_shared_cond` streams).** FoldForge passes a conditioning shared by the samples (or by the samples of each fold) as
+a stride-0 `expand` (`AtomDiTStack`: cond `[1, 1, N, d]` expanded to `[S, 1, N, d]`; `TokenDiTStack`: `[L, d]` expanded over S; the R18 grouped
+sampler: one cond per fold `[1, F, ., d]` expanded over S), and the DiT backends detect that layout and take dedicated shared paths
+(hoisted conditioning tables, `cond_bwd_shared`, one launch for all samples). A requirements row whose stream ends in `_shared_cond`
+(`atom_single_shared_cond`, `token_single_shared_cond`, `atom_folds_shared_cond`, `token_folds_shared_cond`; source "FoldForge shared cond")
+measures that layout: `make_inputs` gives `cond` as one base tensor expanded over the samples (`primitives.shared_cond_stream`), and the
+measurers keep it expanded (`config.keeps_expanded(case)`): accuracy copies the base (in float64 for the gold) and expands it again with
+the same strides for the gold, the reference and every backend run, and the base is the leaf whose gradient is measured (`grad:cond`
+`[1, F, ., d]`: the sum over the samples, as the gradient of a conditioning the caller expands); speed holds the base and expands it inside
+every captured call. Every other case is measured exactly as before: its inputs are copied densely (an expanded input of an ordinary
+case, e.g. the `token_folds` cond, becomes a dense copy in accuracy and stays the given view in speed), so no measurer version changed.
+
 `settings(cfg)` = seed, `fixed` and the speed keys: how a case is measured. Keys that only select cases are left out, so a subset run
 measures each case exactly as the full run does.
 
