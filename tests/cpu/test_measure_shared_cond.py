@@ -127,18 +127,23 @@ def test_run_keeps_the_shared_layout_and_sums_its_gradient():
     toy = _Toy()
     values, upstream = accuracy._run(toy, inputs, train=True, autocast=None, upstream=None, generator=gen, keep_expanded=True)
     assert toy.seen[-1][0] == 0  # the module saw the stride-0 conditioning
+    assert upstream is not None
+    grad = values["grad:cond"]
+    assert grad is not None
     up = upstream["out"].float()
     expect = (up * inputs["single"] * toy.w.detach()).sum(0, keepdim=True)  # the expand's backward: the sum over the samples
-    assert values["grad:cond"].shape == (1, 2, 8, 4)
-    torch.testing.assert_close(values["grad:cond"], expect)
+    assert grad.shape == (1, 2, 8, 4)
+    torch.testing.assert_close(grad, expect)
     # the gold (float64) path keeps it expanded too
-    gold_inputs = {k: accuracy._map_floats(v, lambda t: accuracy._keep_expanded(t, torch.float64)) for k, v in inputs.items()}
+    gold_inputs: dict = {k: accuracy._map_floats(v, lambda t: accuracy._keep_expanded(t, torch.float64)) for k, v in inputs.items()}
     assert gold_inputs["cond"].stride(0) == 0 and gold_inputs["cond"].dtype == torch.float64
     assert gold_inputs["single"].stride() == inputs["single"].stride()
     toy64 = _Toy().double()
     gold, _ = accuracy._run(toy64, gold_inputs, train=True, autocast=None, upstream=upstream, generator=None, keep_expanded=True)
     assert toy64.seen[-1][0] == 0
-    torch.testing.assert_close(gold["out"], values["out"].double(), rtol=1e-5, atol=1e-5)
+    out, gold_out = values["out"], gold["out"]
+    assert out is not None and gold_out is not None
+    torch.testing.assert_close(gold_out, out.double(), rtol=1e-5, atol=1e-5)
 
 
 def test_run_without_keep_is_unchanged():
@@ -147,8 +152,10 @@ def test_run_without_keep_is_unchanged():
     toy = _Toy()
     values, upstream = accuracy._run(toy, inputs, train=True, autocast=None, upstream=None, generator=torch.Generator().manual_seed(1))
     assert toy.seen[-1][0] != 0
-    assert values["grad:cond"].shape == inputs["cond"].shape
-    torch.testing.assert_close(values["grad:cond"], upstream["out"].float() * inputs["single"] * toy.w.detach())
+    grad = values["grad:cond"]
+    assert grad is not None and upstream is not None
+    assert grad.shape == inputs["cond"].shape
+    torch.testing.assert_close(grad, upstream["out"].float() * inputs["single"] * toy.w.detach())
 
 
 # ---------------------------------------------------------------------------------------------------------------- the speed measurer
@@ -179,6 +186,7 @@ def test_shared_rows_exist_for_the_dit_classes():
 @pytest.mark.parametrize(("n", "row"), SHARED_ROWS, ids=[f"r{n}-{r['module']}-{r['stream']}" for n, r in SHARED_ROWS])
 def test_shared_rows_make_the_shared_layout(n: int, row: dict):
     base_stream = shared_cond_stream(row["stream"])[0]
+    assert base_stream is not None
     depths = cfgmod._ints(row["depths"])
     kw = {
         "row": n,
