@@ -345,7 +345,17 @@ def owed(
     module classes measured again although current (a measurer fix that changes only their results)."""
     tokens, given = load_tokens(now.gpu), answers()
     tally, reasons, questions = collections.Counter(), collections.Counter(), collections.Counter()
-    todo = collections.defaultdict(lambda: {"rows": set(), "lengths": set(), "backends": set(), "dtypes": set(), "modes": set(), "n": 0})
+    todo = collections.defaultdict(
+        lambda: {
+            "rows": set(),
+            "lengths": set(),
+            "backends": set(),
+            "dtypes": set(),
+            "modes": set(),
+            "n": 0,
+            "cells": collections.Counter(),
+        }
+    )
     seen = set()
     for kind in CONFIGS:
         for rec in required(kind):
@@ -373,6 +383,7 @@ def owed(
                 t["dtypes"].add(rec["dtype"])
                 t["modes"].add(rec["mode"])
                 t["n"] += 1
+                t["cells"][(rec["row"], rec["length"])] += 1
             elif state == "pending":
                 for part, old, new in why:
                     questions[(part, str(old), str(new))] += 1
@@ -395,26 +406,49 @@ def owed(
     return 0
 
 
+def _split_cells(cells: collections.Counter, parts: int) -> list[list[tuple[int, int]]]:
+    """The owed (row, length) cells of one (kind, module) in ``parts`` balanced chunks: by row when there are enough rows, else by
+    (row, length) cell -- so one large module runs on several GPUs at once instead of holding one group."""
+    rows = collections.Counter()
+    for (row, _), n in cells.items():
+        rows[row] += n
+    units = [[c for c in cells if c[0] == row] for row in rows] if len(rows) >= parts else [[c] for c in cells]
+    chunks, load = [[] for _ in range(parts)], [0] * parts
+    for unit in sorted(units, key=lambda u: -sum(cells[c] for c in u)):
+        i = load.index(min(load))
+        chunks[i].extend(unit)
+        load[i] += sum(cells[c] for c in unit)
+    return [c for c in chunks if c]
+
+
 def write_plan(plan_dir: str, todo: dict, n_groups: int = 4) -> None:
-    """The owed run: one config per (kind, module) selecting the owed rows / lengths / backends / dtypes / modes (a superset of the
-    owed cases when they do not form a product: the extra cases are measured again, which is harmless), in ``n_groups`` balanced groups
-    (one measurement job each, run in parallel)."""
+    """The owed run: configs selecting the owed rows / lengths / backends / dtypes / modes (a superset of the owed cases when they do
+    not form a product: the extra cases are measured again, which is harmless), in ``n_groups`` balanced groups (one measurement job
+    each, run in parallel). A (kind, module) owing more than its share of the total is split into several configs (by row, else by
+    (row, length)), each its own label ``<module>.p<i>`` (its own record file and done marker), so a lone large module still fills
+    every group."""
     d = Path(plan_dir)
     (d / "cfg").mkdir(parents=True, exist_ok=True)
+    total = sum(t["n"] for t in todo.values())
+    share = max(1, -(-total // max(1, n_groups)))
     jobs = []
     for (kind, module), t in sorted(todo.items()):
-        base = yaml.safe_load(CONFIGS[kind].read_text())
-        base.update(
-            modules=[module],
-            rows=sorted(t["rows"]),
-            lengths=sorted(t["lengths"]),
-            backends=sorted(t["backends"] | {"pytorch"}),
-            dtypes=sorted(t["dtypes"]),
-            modes=sorted(t["modes"]),
-        )
-        path = d / "cfg" / f"{kind}.{module}.yaml"
-        path.write_text(yaml.safe_dump(base, sort_keys=False))
-        jobs.append((t["n"], kind, module, str(path)))
+        parts = min(n_groups, -(-t["n"] // share), len(t["cells"]) or 1)
+        chunks = _split_cells(t["cells"], parts) if parts > 1 else [list(t["cells"])]
+        for i, cells in enumerate(chunks, 1):
+            label = module if len(chunks) == 1 else f"{module}.p{i}"
+            base = yaml.safe_load(CONFIGS[kind].read_text())
+            base.update(
+                modules=[module],
+                rows=sorted({r for r, _ in cells}) if cells else sorted(t["rows"]),
+                lengths=sorted({n for _, n in cells}) if cells else sorted(t["lengths"]),
+                backends=sorted(t["backends"] | {"pytorch"}),
+                dtypes=sorted(t["dtypes"]),
+                modes=sorted(t["modes"]),
+            )
+            path = d / "cfg" / f"{kind}.{label}.yaml"
+            path.write_text(yaml.safe_dump(base, sort_keys=False))
+            jobs.append((sum(t["cells"][c] for c in cells) if cells else t["n"], kind, label, str(path)))
     groups, load = [[] for _ in range(n_groups)], [0] * n_groups
     for n, kind, module, path in sorted(jobs, reverse=True):
         i = load.index(min(load))
@@ -422,7 +456,7 @@ def write_plan(plan_dir: str, todo: dict, n_groups: int = 4) -> None:
         load[i] += n
     for i, g in enumerate(groups, 1):
         (d / f"G{i}").write_text("".join(line + "\n" for line in g))
-    print(f"[judge] plan: {len(jobs)} (kind, module) runs in {plan_dir}, groups of {load} owed cases")
+    print(f"[judge] plan: {len(jobs)} runs in {plan_dir}, groups of {load} owed cases")
 
 
 # ------------------------------------------------------------------------------------------------------------------- sign, status

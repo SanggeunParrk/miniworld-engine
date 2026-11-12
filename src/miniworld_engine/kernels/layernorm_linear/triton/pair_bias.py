@@ -62,7 +62,7 @@ def _layer_norm_linear_fwd(
     # BLOCK_K_D tiles the channel axis (d) and BLOCK_K_NH the projection axis (n_head); when the
     # tuner picks tiles >= the extents, every loop below is a single iteration and this is the
     # original whole-row schedule.
-    rows = (tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)).to(tl.int64)
+    rows = tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
 
     if BLOCK_K_D >= N:
@@ -190,7 +190,7 @@ def _layer_norm_linear_bwd(
         acc_dpw = tl.zeros((BLOCK_K_NH, BLOCK_K_D), dtype=tl.float32)
         acc_dlnw = tl.zeros((BLOCK_K_D,), dtype=tl.float32)
     nblocks = tl.cdiv(M, BLOCK_M1)
-    for blk in range(tl.program_id(0), nblocks, tl.num_programs(0)):
+    for blk in range(tl.program_id(0).to(tl.int64), nblocks, tl.num_programs(0)):  # int64 before blk * BLOCK_M1
         rows = (blk * BLOCK_M1 + tl.arange(0, BLOCK_M1)).to(tl.int64)
         row_mask = rows < M
         mean = tl.load(mean_ptr + rows, mask=row_mask, other=0.0)

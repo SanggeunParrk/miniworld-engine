@@ -15,6 +15,8 @@ from pathlib import Path
 import torch
 from torch.multiprocessing.reductions import StorageWeakRef
 
+from miniworld_engine.kernels import _capture
+
 _dir = Path(__file__).parent
 STAT_W = 128  # kept for the runner's buffer layout (the Triton module's statistics width)
 
@@ -61,7 +63,7 @@ def token_pack(weights, heads, qk, qs, dtype=torch.bfloat16):
 # Private candidate (default 0 = synchronous pack; 1 / 2 = asynchronous pack schedules): kept reachable here instead of being
 # deleted (formerly MINIWORLD_TOKEN_DIT_H100_INFER_ASYNC).
 _CANDIDATE_INFER_ASYNC = 0
-_TOKEN_PACKS: dict = {}
+_TOKEN_PACKS: dict = _capture.weight_cache("conditioned_transition.token_packs")
 _TOKEN_STREAMS: dict = {}
 
 
@@ -74,8 +76,8 @@ def _token_swiglu(device_index):
 
 #: Hopper fp32 token inference: the expand GEMM with the SwiGLU in its epilogue on TF32 wgmma (False: cuBLAS + ``swiglu_rows``)
 _FP32_SWIGLU_GEMM = True  # expand + SwiGLU as one TF32 wgmma GEMM; xa is RNA-rounded by its row kernel (the TMA-fed operands truncate)
-_TF32_WAB: dict = {}
-_PAIR_BIAS: dict = {}  # hoisted pair biases, keyed on the pair / mask / weight pack (kernels/_capture.lookup_inputs)
+_TF32_WAB: dict = _capture.weight_cache("conditioned_transition.tf32_wab")
+_PAIR_BIAS: dict = _capture.weight_cache("conditioned_transition.pair_bias")  # hoisted pair biases, keyed on the pair / mask / weight pack (kernels/_capture.lookup_inputs)
 
 
 def _swiglu_gemm_ok(xa, wab) -> bool:
@@ -146,7 +148,7 @@ def _pair_bias_wide(z2d, wf, mask, L):
 #: A bias-free query (RoseTTAFold3) is a zero to_query.bias leaf, the identity AdaLN a ones ln_cond / to_scale.bias leaf, no gating
 #: query a zero to_gate leaf: the caller's leaf list (``kernels/integrations/token_dit.leaves``).
 VARIANT_DEFAULT = (0.0, 1.0, 1e-5, 1.0, 0.0, 0.0, 1e-5, 0.0)
-_STATIC_PACKS: dict = {}  # the weight packs of the blocks with model options (``token_inference``)
+_STATIC_PACKS: dict = _capture.weight_cache("conditioned_transition.static_packs")  # the weight packs of the blocks with model options (``token_inference``)
 _NO_GATE = 1.0e4  # gate logits of a block without a gating query: sigmoid(1e4) == 1.0 in fp32
 
 

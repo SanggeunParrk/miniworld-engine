@@ -101,6 +101,7 @@ RECIPES: dict[str, str] = {
     "pair_embed_adaln": "miniworld_engine.kernels.pair_embed_adaln.cuda:prebuild",
     "pair_embed_geom": "miniworld_engine.kernels.pair_embed_geom.cuda:prebuild",
     "token_pair_init": "miniworld_engine.kernels.token_pair_init.cuda:prebuild",
+    "parallel_residual": "miniworld_engine.kernels.parallel_residual.cuda:prebuild",
 }
 
 

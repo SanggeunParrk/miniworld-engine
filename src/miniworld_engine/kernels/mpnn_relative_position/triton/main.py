@@ -163,16 +163,18 @@ def _bucket_reduce_kernel(
     table_accumulator = tl.zeros((BUCKET_BLOCK, WIDTH), tl.float32)
     bias_accumulator = tl.zeros((WIDTH,), tl.float32)
 
-    start = tl.program_id(0) * BLOCK_M1
+    # 64-bit addressing: the stream position `base` is an int64 scalar folded into the pointers; the in-tile offsets stay int32
+    start = tl.program_id(0).to(tl.int64) * BLOCK_M1
     stride = PROGRAMS * BLOCK_M1
+    local = tl.arange(0, BLOCK_M1)
+    tile = local[:, None] * WIDTH + columns[None, :]
     for base in range(start, rows, stride):
-        offsets = base + tl.arange(0, BLOCK_M1)
-        valid = offsets < rows
+        valid = local < rows - base
         # ``other=-1`` so a masked-off row matches no bucket and contributes nothing,
         # which keeps the one-hot correct without a second mask on the product.
-        index = tl.load(index_ptr + offsets, mask=valid, other=-1)
+        index = tl.load(index_ptr + base + local, mask=valid, other=-1)
         values = tl.load(
-            grad_ptr + offsets[:, None] * WIDTH + columns[None, :],
+            grad_ptr + base * WIDTH + tile,
             mask=valid[:, None],
             other=0.0,
         ).to(tl.float32)
@@ -190,10 +192,10 @@ def _bucket_reduce_kernel(
     # against 2.789e-06 and irreproducible for the atomic combine, and 2.157e-05 and
     # irreproducible for ``index_add_``.
     tl.store(
-        partial_table_ptr + tl.program_id(0) * BUCKET_BLOCK * WIDTH + bucket_ids[:, None] * WIDTH + columns[None, :],
+        partial_table_ptr + tl.program_id(0).to(tl.int64) * BUCKET_BLOCK * WIDTH + bucket_ids[:, None] * WIDTH + columns[None, :],
         table_accumulator,
     )
-    tl.store(partial_bias_ptr + tl.program_id(0) * WIDTH + columns, bias_accumulator)
+    tl.store(partial_bias_ptr + tl.program_id(0).to(tl.int64) * WIDTH + columns, bias_accumulator)
 
 
 def _triton_bucket_reduce_fake(

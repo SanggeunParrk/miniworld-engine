@@ -194,6 +194,18 @@ def random_input(shape, *, dtype: torch.dtype, device, generator: torch.Generato
     return (scale * torch.randn(tuple(shape), device=device, generator=generator)).to(dtype)
 
 
+#: Suffix of a requirements stream whose conditioning is shared across the samples (FoldForge's layout): ``make_inputs`` gives ``cond`` as
+#: one base tensor ``[1, F, N, d]`` expanded (stride 0) over the S samples, and the measurers keep that input expanded (requirements/README.md).
+SHARED_COND_SUFFIX = "_shared_cond"
+
+
+def shared_cond_stream(stream: str | None) -> tuple[str | None, bool]:
+    """``(the base stream, shared)`` of a requirements stream: ``"atom_single_shared_cond"`` -> ``("atom_single", True)``."""
+    if stream is not None and stream.endswith(SHARED_COND_SUFFIX):
+        return stream[: -len(SHARED_COND_SUFFIX)], True
+    return stream, False
+
+
 def key_mask(rows: int, length: int, *, device, pad: int | None = None) -> torch.Tensor:
     """A bool key mask ``[rows, length]``: real positions first, the last ``pad`` (default ``length // 8``) padding."""
     pad = length // 8 if pad is None else min(pad, length - 1)

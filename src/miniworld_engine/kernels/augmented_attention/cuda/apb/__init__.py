@@ -153,15 +153,17 @@ def pair_bias_bwd(
     d: int = 384,
     saved: tuple[torch.Tensor, torch.Tensor] | None = None,
     grid: int = 0,
+    out: torch.Tensor | None = None,
 ):
     """(dpair [L L, dp] bf16, dWf [H, dp] fp32, per-head dbias sums [H]) of ``pair_bias`` (without the mask: masked keys
     carry zero dbias). dWf and the sums are added into ``acc`` (``acc_n(H, d, dp)`` floats, zeroed by the caller) when given; the
     returned dWf / sums are views of it. A wide pair (dp > 128) takes ``saved`` = (row stats, unmasked bias) of its forward.
-    A100: ``grid`` CTAs of the persistent pass (0: the full occupancy)."""
+    A100: ``grid`` CTAs of the persistent pass (0: the full occupancy). ``out``: a contiguous [L L, dp] buffer dpair is written into
+    (a batch row of the caller's gradient; default a new tensor)."""
     heads, dp = wf.shape
     if acc is None:
         acc = torch.zeros(acc_n(heads, d, dp), device=pair2d.device)
-    dz = torch.empty_like(pair2d)
+    dz = torch.empty_like(pair2d) if out is None else out
     if dp == DP and grid > 0:
         ext().pair_bias_bwd_grid(pair2d, dbias.contiguous(), wf, dz, acc, int(L), float(eps), int(d), int(grid))
     elif dp == DP:

@@ -19,6 +19,11 @@ upstream gradient (seeded, the same for every run). The error of a tensor is ``m
 gold is all zero). Dropout and other training noise (``p_drop``, ``nn.Dropout``, ``coordinate_noise``) is switched off in every run: its
 masks are random draws, not numerics.
 
+Every run gets fresh copies of the inputs. A ``*_shared_cond`` case (``config.keeps_expanded``: FoldForge's conditioning shared across the
+samples) keeps a stride-0 expanded input expanded in the gold and every backend run: its base is copied and expanded again with the same
+strides, and that base is the leaf whose gradient is measured (the sum over the expanded axis). Every other input is copied densely, as
+in every other case.
+
 The light, per tensor: ``tol = max(err_pytorch, fixed[dtype])``; ``err_backend <= tol`` GREEN, ``<= 5 tol`` YELLOW, beyond RED (a NaN /
 inf error is RED). A call's light is its worst tensor's (largest ``err_backend / tol``); the record names that tensor. External
 backends (``external`` in the config) are measured the same way; their light is informational.
@@ -100,14 +105,50 @@ def _rel(x: torch.Tensor | None, gold: torch.Tensor | None) -> float:
 
 
 # ----------------------------------------------------------------------------------------------------------------------------- runs
-def _run(module, inputs: dict, *, train: bool, autocast: torch.dtype | None, upstream: dict | None, generator: torch.Generator | None):
-    """One call: ``{tensor name: value}`` (outputs; in train also ``grad:<input>`` / ``grad:<parameter>``) and the upstream gradients
-    (drawn from ``generator`` on the first, gold, run)."""
-    inputs = {k: _map_floats(v, lambda t: t.detach().clone()) for k, v in inputs.items()}
-    if train:
-        for v in inputs.values():
-            if isinstance(v, torch.Tensor) and v.is_floating_point():
+def _keep_expanded(t: torch.Tensor, dtype: torch.dtype | None = None) -> torch.Tensor:
+    """A copy of ``t`` (in ``dtype``) that keeps a stride-0 expanded ``t`` expanded: its base copied, then expanded again with the same
+    strides (a ``*_shared_cond`` case, :func:`miniworld_engine.measure.config.keeps_expanded`); any other tensor copied densely."""
+    if cfgmod.expanded_dims(t):
+        return cfgmod.expanded_base(t, dtype).expand(t.shape)
+    return t.detach().clone() if dtype is None else t.to(dtype)
+
+
+def _call_inputs(inputs: dict, *, train: bool, keep_expanded: bool) -> tuple[dict, dict]:
+    """The inputs of one call (fresh copies) and the leaves whose gradients are measured, by input name. ``keep_expanded`` (a
+    ``*_shared_cond`` case): a top-level stride-0 expanded input is passed as its base (the leaf: in train its gradient is the sum over
+    the expanded axis, as for a conditioning the caller expands) expanded again; every other input exactly as without it."""
+    if not keep_expanded:
+        call = {k: _map_floats(v, lambda t: t.detach().clone()) for k, v in inputs.items()}
+        leaves = {k: v for k, v in call.items() if isinstance(v, torch.Tensor) and v.is_floating_point()}
+        if train:
+            for v in leaves.values():
                 v.requires_grad_(True)
+        return call, leaves
+    call, leaves = {}, {}
+    for k, v in inputs.items():
+        if isinstance(v, torch.Tensor) and v.is_floating_point():
+            expanded = bool(cfgmod.expanded_dims(v))
+            leaf = cfgmod.expanded_base(v) if expanded else v.detach().clone()
+            leaves[k] = leaf.requires_grad_(train)
+            call[k] = leaf.expand(v.shape) if expanded else leaf
+        else:
+            call[k] = _map_floats(v, _keep_expanded)
+    return call, leaves
+
+
+def _run(
+    module,
+    inputs: dict,
+    *,
+    train: bool,
+    autocast: torch.dtype | None,
+    upstream: dict | None,
+    generator: torch.Generator | None,
+    keep_expanded: bool = False,
+):
+    """One call: ``{tensor name: value}`` (outputs; in train also ``grad:<input>`` / ``grad:<parameter>``) and the upstream gradients
+    (drawn from ``generator`` on the first, gold, run). ``keep_expanded``: see :func:`_call_inputs`."""
+    inputs, leaves = _call_inputs(inputs, train=train, keep_expanded=keep_expanded)
     ctx = torch.autocast("cuda", dtype=autocast) if autocast is not None else contextlib.nullcontext()
     with torch.set_grad_enabled(train), ctx:
         outs = _outputs(module(**inputs))
@@ -118,9 +159,8 @@ def _run(module, inputs: dict, *, train: bool, autocast: torch.dtype | None, ups
         upstream = {name: torch.randn(t.shape, generator=generator, device=t.device, dtype=torch.float64) for name, t in outs}
     diff = [(t, upstream[name].to(t.dtype)) for name, t in outs if t.requires_grad]
     torch.autograd.backward([t for t, _ in diff], [g for _, g in diff])
-    for k, v in inputs.items():
-        if isinstance(v, torch.Tensor) and v.is_floating_point():
-            values[f"grad:{k}"] = v.grad
+    for k, v in leaves.items():
+        values[f"grad:{k}"] = v.grad
     for name, p in module.named_parameters():
         values[f"grad:{name}"] = p.grad
     return values, upstream
@@ -178,6 +218,7 @@ def measure_case(case, cfg, *, device) -> list[dict]:
         return [{**head, "backend": "pytorch", "external": False, "status": "error", "reason": f"{type(exc).__name__}: {exc}"}]
     fixed = float(cfg.fixed[case.dtype])
     train, autocast = case.mode == "train", cfgmod.autocast(case)
+    keep = cfgmod.keeps_expanded(case)  # a *_shared_cond case: stride-0 inputs stay expanded (every other case: copied as always)
     records = []
     try:
         base = cfgmod.build(case, device=device)
@@ -185,12 +226,15 @@ def measure_case(case, cfg, *, device) -> list[dict]:
         inputs = cfgmod.inputs(case, base, device=device)
         _reference_precision()
         gold_module = cfgmod.clone(base).double()
-        gold_inputs = {k: _map_floats(v, lambda t: t.double()) for k, v in inputs.items()}
+        if keep:
+            gold_inputs = {k: _map_floats(v, lambda t: _keep_expanded(t, torch.float64)) for k, v in inputs.items()}
+        else:
+            gold_inputs = {k: _map_floats(v, lambda t: t.double()) for k, v in inputs.items()}
         gen = torch.Generator(device=torch.device(device)).manual_seed(case.seed + 1)
-        gold, upstream = _run(gold_module, gold_inputs, train=train, autocast=None, upstream=None, generator=gen)
+        gold, upstream = _run(gold_module, gold_inputs, train=train, autocast=None, upstream=None, generator=gen, keep_expanded=keep)
         del gold_module, gold_inputs
         _reference_precision()
-        ref, _ = _run(cfgmod.clone(base), inputs, train=train, autocast=autocast, upstream=upstream, generator=None)
+        ref, _ = _run(cfgmod.clone(base), inputs, train=train, autocast=autocast, upstream=upstream, generator=None, keep_expanded=keep)
     except Exception as exc:  # recorded: the case could not be measured at all
         reason = f"reference: {type(exc).__name__}: {exc}"[:600]
         if os.environ.get("ACCURACY_TRACEBACK"):
@@ -205,17 +249,20 @@ def measure_case(case, cfg, *, device) -> list[dict]:
         module = None
         try:
             module = cfgmod.clone(base).set_backend(backend)
-            probe = {
-                k: v.detach().requires_grad_(train) if isinstance(v, torch.Tensor) and v.is_floating_point() else v
-                for k, v in inputs.items()
-            }
+            if keep:  # the call as the run makes it (the expanded inputs as views of their bases)
+                probe = _call_inputs(inputs, train=train, keep_expanded=True)[0]
+            else:
+                probe = {
+                    k: v.detach().requires_grad_(train) if isinstance(v, torch.Tensor) and v.is_floating_point() else v
+                    for k, v in inputs.items()
+                }
             ctx = torch.autocast("cuda", dtype=autocast) if autocast is not None else contextlib.nullcontext()
             with torch.set_grad_enabled(train), ctx:
                 why = module.unsupported(**probe) if backend != "pytorch" else None
             if why is not None:
                 raise BackendUnsupported(why)
             (_reference_precision if backend in cfgmod.TF32_BACKENDS else _backend_precision)()
-            values, _ = _run(module, inputs, train=train, autocast=autocast, upstream=upstream, generator=None)
+            values, _ = _run(module, inputs, train=train, autocast=autocast, upstream=upstream, generator=None, keep_expanded=keep)
             rec.update(_verdict(values, ref, gold, fixed))
         except BackendUnsupported as exc:
             rec.update(status="unsupported", reason=str(exc)[:600])

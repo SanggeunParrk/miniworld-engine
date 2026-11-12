@@ -33,7 +33,7 @@ def _ext():
     )
 
 
-def forward(m, mask, residual, leaves, eps, norm_first, training, save_o):
+def forward(m, mask, residual, leaves, eps, norm_first, training, save_o, dmin=1.0, doff=0.0):
     if mask is None:
         mask = m.new_empty((0,), dtype=torch.uint8)
     if residual is None:
@@ -49,10 +49,12 @@ def forward(m, mask, residual, leaves, eps, norm_first, training, save_o):
         save_o,
         0,
         0,
+        float(dmin),
+        float(doff),
     )
 
 
-def backward(m, mask, leaves, saved, dz, norm_first):
+def backward(m, mask, leaves, saved, dz, norm_first, dmin=1.0, doff=0.0):
     if mask is None:
         mask = m.new_empty((0,), dtype=torch.uint8)
     a, b, stats, o, norm = saved
@@ -69,4 +71,6 @@ def backward(m, mask, leaves, saved, dz, norm_first):
         norm_first,
         0,
         0,
+        float(dmin),
+        float(doff),
     )

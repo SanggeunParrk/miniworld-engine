@@ -216,6 +216,54 @@ _FORMS: dict = {}
 _HELD_BY_CAPTURES: list = []
 
 
+# ------------------------------------------------------------------------------------------------------------- the weight-cache registry
+#: name -> store: every module-level cache whose entries are derived from weights or per-item inputs (keyed on tensor addresses / versions /
+#: identities). A cache registers itself where it is defined (``_PACKS = _capture.weight_cache("family.packs")``), so
+#: ``clear_weight_caches`` finds it without a hand list; tests/cpu/test_capture_api.py fails on a module-level dict in the kernel sources
+#: that is neither registered nor listed there as not weight-derived.
+_WEIGHT_CACHES: dict[str, dict] = {}
+
+#: Per-instance cache attributes (``module.__dict__[name]``) holding weight-derived forms: dropped by ``clear_weight_caches(*modules)``.
+_INSTANCE_CACHE_ATTRS: set[str] = set()
+
+
+def weight_cache(name: str, store: dict | None = None) -> dict:
+    """Register ``store`` (a new empty dict by default) as the weight-derived cache ``name`` and return it. Registering a name again (a module
+    reload) replaces the earlier store."""
+    store = {} if store is None else store
+    _WEIGHT_CACHES[name] = store
+    return store
+
+
+def instance_cache_attr(name: str) -> str:
+    """Register ``name`` as a per-instance cache attribute (a weight-derived form kept in a module's ``__dict__``); returns ``name``."""
+    _INSTANCE_CACHE_ATTRS.add(name)
+    return name
+
+
+def weight_caches() -> dict[str, dict]:
+    """The registered weight-derived caches by name (of the kernel modules imported so far: a module not imported has filled none)."""
+    return dict(_WEIGHT_CACHES)
+
+
+def clear_weight_caches(*modules: torch.nn.Module) -> None:
+    """Drop every weight- or input-derived cache of the engine: each registered store (``weight_cache``: packs, hoisted tables, the parameter
+    forms, the TF32 operand cache) and, for the given modules and their submodules, the per-instance cache attributes. Call it before weights
+    are replaced by new tensors (a second model, a test that builds many): a new tensor at the address of a freed one must not be served the
+    old one's form. Graphs captured before the call may read the dropped entries: drop them first (replaying one afterwards is undefined).
+    Forms already held for live captures (``capture_reads_eager``) stay held."""
+    for store in _WEIGHT_CACHES.values():
+        store.clear()
+    _PINNED.clear()
+    for module in modules:
+        for sub in module.modules():
+            for attr in _INSTANCE_CACHE_ATTRS:
+                sub.__dict__.pop(attr, None)
+
+
+weight_cache("capture.forms", _FORMS)
+
+
 def param_forms(tag, params, build, *, inputs_scope: bool = False, capture_reads_eager: bool = False):
     """``build()`` -- the kernel-dtype forms of some parameters (casts, contiguous copies, transposes, folds) -- cached while the very same
     parameter tensors are alive and unmodified, scoped to the capture like every weight pack (``lookup``): an eager call and a captured

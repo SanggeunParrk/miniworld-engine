@@ -161,7 +161,7 @@ void prologue(torch::Tensor m, torch::Tensor mask, torch::Tensor lnw, torch::Ten
 // O [L 32, L 32] bf16, norm fp32 [L, L] (empty: the constant norm_const), wo [CZ, 1024] bf16, bias fp32 [CZ], residual [L, L, CZ] bf16 (empty: none) -> out [L, L, CZ] bf16
 // variant: the schedule (0: the shipped one; 1..: ring depth / CTAs per SM experiments, see the dispatch below)
 void epilogue(torch::Tensor O, torch::Tensor norm, double norm_const, torch::Tensor wo, torch::Tensor bias, torch::Tensor residual, torch::Tensor out, int64_t norm_first,
-              int64_t variant) {
+              int64_t variant, double norm_min, double norm_add) {
   check_bf16(O, "O"); check_bf16(wo, "wo"); check_bf16(out, "out"); check_f32(bias, "bias");
   const int L = (int)out.size(0), CZ = (int)out.size(2);
   TORCH_CHECK(out.dim() == 3 && out.size(1) == L && O.dim() == 2 && O.size(0) == (int64_t)L * 32 && O.size(1) == (int64_t)L * 32, "O / out shapes");
@@ -173,6 +173,7 @@ void epilogue(torch::Tensor O, torch::Tensor norm, double norm_const, torch::Ten
   p.O = ptr<__nv_bfloat16>(O); p.norm = norm.numel() ? norm.data_ptr<float>() : nullptr; p.wo = ptr<__nv_bfloat16>(wo); p.bias = bias.data_ptr<float>();
   p.residual = residual.numel() ? ptr<__nv_bfloat16>(residual) : nullptr; p.out = reinterpret_cast<__nv_bfloat16*>(out.data_ptr());
   p.ldo = O.stride(0); p.L = L; p.norm_const = (float)norm_const; p.norm_first = (int)norm_first; p.cz = CZ; p.ntile = 1;
+  p.norm_min = (float)norm_min; p.norm_add = (float)norm_add;  // the pair divisor max(n, norm_min) + norm_add
   auto st = at::cuda::getCurrentCUDAStream();
   if (CZ == 128) {
     if (variant == 1) launch_epilogue<128, 3, 1>(p, st);        // one CTA per SM, 3 stages
@@ -197,7 +198,7 @@ void epilogue(torch::Tensor O, torch::Tensor norm, double norm_const, torch::Ten
 
 // dz [L, L, CZ] bf16, norm (as above), wo [CZ, 1024] -> dO [L 32, L 32] bf16, dzn [L, L, CZ] bf16, dbo_part fp32 [ceil(L / 32) * ceil(L / 4), CZ]
 void dgrad(torch::Tensor dz, torch::Tensor norm, double norm_const, torch::Tensor wo, torch::Tensor dO, torch::Tensor dzn, torch::Tensor dbo_part, int64_t norm_first,
-           int64_t variant) {
+           int64_t variant, double norm_min, double norm_add) {
   check_bf16(dz, "dz"); check_bf16(wo, "wo"); check_bf16(dO, "dO"); check_bf16(dzn, "dzn"); check_f32(dbo_part, "dbo_part");
   const int L = (int)dz.size(0), CZ = (int)dz.size(2);
   TORCH_CHECK(dz.dim() == 3 && dz.size(1) == L && dO.size(0) == (int64_t)L * 32 && dO.size(1) == (int64_t)L * 32 && dzn.sizes() == dz.sizes(), "dz / dO / dzn shapes");
@@ -210,6 +211,7 @@ void dgrad(torch::Tensor dz, torch::Tensor norm, double norm_const, torch::Tenso
   p.dz = ptr<__nv_bfloat16>(dz); p.norm = norm.numel() ? norm.data_ptr<float>() : nullptr; p.wo = ptr<__nv_bfloat16>(wo);
   p.dO = reinterpret_cast<__nv_bfloat16*>(dO.data_ptr()); p.dzn = reinterpret_cast<__nv_bfloat16*>(dzn.data_ptr()); p.dbo_part = dbo_part.data_ptr<float>();
   p.ldo = dO.stride(0); p.L = L; p.norm_const = (float)norm_const; p.norm_first = (int)norm_first;
+  p.norm_min = (float)norm_min; p.norm_add = (float)norm_add;
   auto st = at::cuda::getCurrentCUDAStream();
   if (CZ == 128) {
     if (variant == 1) launch_dgrad<128, 3, 1>(p, st);           // one CTA per SM, 3 stages

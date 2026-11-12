@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._wide import needs_wide, wide
 
 import torch
 import torch.nn.functional as F
@@ -111,6 +112,7 @@ def _epilogue_train_kernel(
     BLOCK_K: tl.constexpr,
     HAS_SB: tl.constexpr,
     shape_key,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -130,7 +132,7 @@ def _epilogue_train_kernel(
         cols = tl.arange(0, BLOCK_K)
         cmask = cols < N
         mask = rmask[:, None] & cmask[None, :]
-        x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
         mean = tl.sum(x, axis=1) / N
         xc = tl.where(mask, x - mean[:, None], 0.0)
         var = tl.sum(xc * xc, axis=1) / N
@@ -138,21 +140,21 @@ def _epilogue_train_kernel(
         tl.store(MeanX + rm, mean, mask=rmask)
         tl.store(RstdX + rm, rstd, mask=rmask)
         x_hat = xc * rstd[:, None]
-        scale = tl.load(SB + rm[:, None] * ss0 + cols[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
-        bias = tl.load(SB + rm[:, None] * ss0 + (cols[None, :] + N) * ss1, mask=mask, other=0.0).to(tl.float32)
+        scale = tl.load(SB + rm[:, None] * ss0 + wide(cols, WIDE)[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
+        bias = tl.load(SB + rm[:, None] * ss0 + (wide(cols, WIDE)[None, :] + N) * ss1, mask=mask, other=0.0).to(tl.float32)
         if HAS_SB:  # fold the scale-bias (β for the scale half) add here — free vs a full (M,2N) add pass
             scale += tl.load(ScaleBias + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
         gate = tl.sigmoid(scale)
         y = gate * x_hat + bias
-        tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
-        tl.store(Gate + rm[:, None] * sg0 + cols[None, :] * sg1, gate.to(Gate.dtype.element_ty), mask=mask)
+        tl.store(Y + rm[:, None] * sy0 + wide(cols, WIDE)[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
+        tl.store(Gate + rm[:, None] * sg0 + wide(cols, WIDE)[None, :] * sg1, gate.to(Gate.dtype.element_ty), mask=mask)
     else:
         s = tl.zeros([BLOCK_M1], dtype=tl.float32)
         ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
         for n0 in range(0, N, BLOCK_K):
             cols = n0 + tl.arange(0, BLOCK_K)
             mask = rmask[:, None] & (cols[None, :] < N)
-            x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
             s += tl.sum(x, axis=1)
             ss += tl.sum(x * x, axis=1)
         mean = s / N
@@ -164,16 +166,16 @@ def _epilogue_train_kernel(
             cols = n0 + tl.arange(0, BLOCK_K)
             cmask = cols < N
             mask = rmask[:, None] & cmask[None, :]
-            x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
             x_hat = (x - mean[:, None]) * rstd[:, None]
-            scale = tl.load(SB + rm[:, None] * ss0 + cols[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
-            bias = tl.load(SB + rm[:, None] * ss0 + (cols[None, :] + N) * ss1, mask=mask, other=0.0).to(tl.float32)
+            scale = tl.load(SB + rm[:, None] * ss0 + wide(cols, WIDE)[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
+            bias = tl.load(SB + rm[:, None] * ss0 + (wide(cols, WIDE)[None, :] + N) * ss1, mask=mask, other=0.0).to(tl.float32)
             if HAS_SB:  # fold the scale-bias (β for the scale half) add here — free vs a full (M,2N) add pass
                 scale += tl.load(ScaleBias + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
             gate = tl.sigmoid(scale)
             y = gate * x_hat + bias
-            tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
-            tl.store(Gate + rm[:, None] * sg0 + cols[None, :] * sg1, gate.to(Gate.dtype.element_ty), mask=mask)
+            tl.store(Y + rm[:, None] * sy0 + wide(cols, WIDE)[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
+            tl.store(Gate + rm[:, None] * sg0 + wide(cols, WIDE)[None, :] * sg1, gate.to(Gate.dtype.element_ty), mask=mask)
 
 
 def _epilogue_train_fake(x, sb, eps, scale_bias=None, shape_key=None):
@@ -236,6 +238,7 @@ def _epilogue_train(
         gate.stride(1),
         HAS_SB=scale_bias is not None,
         shape_key=pack(shape_key, N=N),
+        WIDE=needs_wide(x, sb, y, gate),
     )
     return y, mean, rstd, gate
 
@@ -282,6 +285,7 @@ def _bwd_x_kernel(
     HAS_DRES: tl.constexpr = False,
     DSB=None,
     HAS_DSB: tl.constexpr = False,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     # HAS_DRES: DRES (M, N) is a gradient that joins dx on its way out (the residual stream's), added in fp32 before the one rounding
     row = tl.program_id(0).to(tl.int64)
@@ -305,15 +309,15 @@ def _bwd_x_kernel(
         cols = tl.arange(0, BLOCK_K)
         cmask = cols < N
         mask = rmask[:, None] & cmask[None, :]
-        dy = tl.load(DY + rm[:, None] * sy0 + cols[None, :] * sy1, mask=mask, other=0.0).to(tl.float32)
-        x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
-        gate = tl.load(Gate + rm[:, None] * sg0 + cols[None, :] * sg1, mask=mask, other=0.0).to(tl.float32)
+        dy = tl.load(DY + rm[:, None] * sy0 + wide(cols, WIDE)[None, :] * sy1, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+        gate = tl.load(Gate + rm[:, None] * sg0 + wide(cols, WIDE)[None, :] * sg1, mask=mask, other=0.0).to(tl.float32)
         x_hat = tl.where(cmask[None, :], (x - mean) * rstd, 0.0)
         dscale = dy * x_hat * gate * (1.0 - gate)
         # D is (2N, M): D[col, row] = dscale ; D[N+col, row] = dy. This (2NX,M) layout makes the
         # wgrad (D@cond_aff) a contiguous-K NN GEMM (~1.6× faster than the transposed-view read)
         # and dsb a cheap row-sum; cost is a transposed store here. sd0 strides 2N, sd1 strides M.
-        daddr = cols[None, :] * sd0 + rm[:, None] * sd1
+        daddr = wide(cols, WIDE)[None, :] * sd0 + rm[:, None] * sd1
         tl.store(D + daddr, dscale.to(D.dtype.element_ty), mask=mask)
         tl.store(D + daddr + N * sd0, dy.to(D.dtype.element_ty), mask=mask)
         if (
@@ -326,8 +330,8 @@ def _bwd_x_kernel(
         # x LayerNorm backward (no affine): dx = rstd·(dxhat − meanₖ(dxhat) − x̂·meanₖ(dxhat·x̂))
         dx = rstd * (dxhat - c2[:, None] - x_hat * c1[:, None])
         if HAS_DRES:
-            dx += tl.load(DRES + rm[:, None] * sr0 + cols[None, :] * sr1, mask=mask, other=0.0).to(tl.float32)
-        tl.store(DX + rm[:, None] * sdx0 + cols[None, :] * sdx1, dx.to(DX.dtype.element_ty), mask=mask)
+            dx += tl.load(DRES + rm[:, None] * sr0 + wide(cols, WIDE)[None, :] * sr1, mask=mask, other=0.0).to(tl.float32)
+        tl.store(DX + rm[:, None] * sdx0 + wide(cols, WIDE)[None, :] * sdx1, dx.to(DX.dtype.element_ty), mask=mask)
     else:
         c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
         c2 = tl.zeros([BLOCK_M1], dtype=tl.float32)
@@ -335,12 +339,12 @@ def _bwd_x_kernel(
             cols = n0 + tl.arange(0, BLOCK_K)
             cmask = cols < N
             mask = rmask[:, None] & cmask[None, :]
-            dy = tl.load(DY + rm[:, None] * sy0 + cols[None, :] * sy1, mask=mask, other=0.0).to(tl.float32)
-            x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
-            gate = tl.load(Gate + rm[:, None] * sg0 + cols[None, :] * sg1, mask=mask, other=0.0).to(tl.float32)
+            dy = tl.load(DY + rm[:, None] * sy0 + wide(cols, WIDE)[None, :] * sy1, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+            gate = tl.load(Gate + rm[:, None] * sg0 + wide(cols, WIDE)[None, :] * sg1, mask=mask, other=0.0).to(tl.float32)
             x_hat = tl.where(cmask[None, :], (x - mean) * rstd, 0.0)
             dscale = dy * x_hat * gate * (1.0 - gate)
-            daddr = cols[None, :] * sd0 + rm[:, None] * sd1
+            daddr = wide(cols, WIDE)[None, :] * sd0 + rm[:, None] * sd1
             tl.store(D + daddr, dscale.to(D.dtype.element_ty), mask=mask)
             tl.store(D + daddr + N * sd0, dy.to(D.dtype.element_ty), mask=mask)
             if HAS_DSB:
@@ -355,15 +359,15 @@ def _bwd_x_kernel(
             cols = n0 + tl.arange(0, BLOCK_K)
             cmask = cols < N
             mask = rmask[:, None] & cmask[None, :]
-            dy = tl.load(DY + rm[:, None] * sy0 + cols[None, :] * sy1, mask=mask, other=0.0).to(tl.float32)
-            x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
-            gate = tl.load(Gate + rm[:, None] * sg0 + cols[None, :] * sg1, mask=mask, other=0.0).to(tl.float32)
+            dy = tl.load(DY + rm[:, None] * sy0 + wide(cols, WIDE)[None, :] * sy1, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+            gate = tl.load(Gate + rm[:, None] * sg0 + wide(cols, WIDE)[None, :] * sg1, mask=mask, other=0.0).to(tl.float32)
             x_hat = tl.where(cmask[None, :], (x - mean) * rstd, 0.0)
             dxhat = dy * gate
             dx = rstd * (dxhat - c2[:, None] - x_hat * c1[:, None])
             if HAS_DRES:
-                dx += tl.load(DRES + rm[:, None] * sr0 + cols[None, :] * sr1, mask=mask, other=0.0).to(tl.float32)
-            tl.store(DX + rm[:, None] * sdx0 + cols[None, :] * sdx1, dx.to(DX.dtype.element_ty), mask=mask)
+                dx += tl.load(DRES + rm[:, None] * sr0 + wide(cols, WIDE)[None, :] * sr1, mask=mask, other=0.0).to(tl.float32)
+            tl.store(DX + rm[:, None] * sdx0 + wide(cols, WIDE)[None, :] * sdx1, dx.to(DX.dtype.element_ty), mask=mask)
 
 
 def _d_row_major(dy, n):
@@ -455,8 +459,9 @@ def _bwd_x(
     # back on the ladder, which is where a config that wins belongs -- the sweep can now pick it,
     # at the row count that makes it win, and record WHY in the cache instead of in a comment.
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+    wide_ = needs_wide(dy, x, gate, D, dx, dres)
     if dres is None:
-        _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N), DSB=dsb, HAS_DSB=fold_dsb)
+        _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N), DSB=dsb, HAS_DSB=fold_dsb, WIDE=wide_)
     else:  # dx += dres in the same pass (the residual stream's gradient)
         _bwd_x_kernel[grid](
             *args,
@@ -467,6 +472,7 @@ def _bwd_x(
             HAS_DRES=True,
             DSB=dsb,
             HAS_DSB=fold_dsb,
+            WIDE=wide_,
         )
     return D, dx, dsb
 
@@ -514,6 +520,7 @@ def _dgrad_condln_kernel(
     BLOCK_K_K2: tl.constexpr,
     shape_key,
     PRE: tl.constexpr = False,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     # Parameter sums are initialized before this launch and consumed after it.
     # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
@@ -553,10 +560,10 @@ def _dgrad_condln_kernel(
         for k0 in range(0, K2, BLOCK_K_K2):
             kk = k0 + tl.arange(0, BLOCK_K_K2)
             kmask = kk < K2
-            a = tl.load(D + rm[:, None] * sd1 + kk[None, :] * sd0, mask=rmask[:, None] & kmask[None, :], other=0.0)
+            a = tl.load(D + rm[:, None] * sd1 + wide(kk, WIDE)[None, :] * sd0, mask=rmask[:, None] & kmask[None, :], other=0.0)
             b = tl.load(Wcat + kk[:, None] * sw0 + nc[None, :] * sw1, mask=kmask[:, None] & ncmask[None, :], other=0.0)
             acc += tf32_dot(a, b, input_precision="tf32", pre_b=PRE)
-        cond = tl.load(Cond + rm[:, None] * sc0 + nc[None, :] * sc1, mask=nmask2, other=0.0).to(tl.float32)
+        cond = tl.load(Cond + rm[:, None] * sc0 + wide(nc, WIDE)[None, :] * sc1, mask=nmask2, other=0.0).to(tl.float32)
         g_w = tl.load(LNW + nc, mask=ncmask, other=0.0).to(tl.float32)[None, :]
         cnorm = tl.where(ncmask[None, :], (cond - mean) * rstd, 0.0)
         dxhat = acc * g_w
@@ -566,7 +573,7 @@ def _dgrad_condln_kernel(
         tl.atomic_add(DLNW + nc, pdg, mask=ncmask, sem="relaxed")
         # cond LayerNorm backward (affine γ=lnw, no β) on the in-register dcond_aff.
         dcond = rstd * (dxhat - c2[:, None] - cnorm * c1[:, None])
-        tl.store(DCond + rm[:, None] * sdc0 + nc[None, :] * sdc1, dcond.to(DCond.dtype.element_ty), mask=nmask2)
+        tl.store(DCond + rm[:, None] * sdc0 + wide(nc, WIDE)[None, :] * sdc1, dcond.to(DCond.dtype.element_ty), mask=nmask2)
     else:
         c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
         c2 = tl.zeros([BLOCK_M1], dtype=tl.float32)
@@ -581,10 +588,10 @@ def _dgrad_condln_kernel(
             for k0 in range(0, K2, BLOCK_K_K2):
                 kk = k0 + tl.arange(0, BLOCK_K_K2)
                 kmask = kk < K2
-                a = tl.load(D + rm[:, None] * sd1 + kk[None, :] * sd0, mask=rmask[:, None] & kmask[None, :], other=0.0)
+                a = tl.load(D + rm[:, None] * sd1 + wide(kk, WIDE)[None, :] * sd0, mask=rmask[:, None] & kmask[None, :], other=0.0)
                 b = tl.load(Wcat + kk[:, None] * sw0 + nc[None, :] * sw1, mask=kmask[:, None] & ncmask[None, :], other=0.0)
                 acc += tf32_dot(a, b, input_precision="tf32", pre_b=PRE)
-            cond = tl.load(Cond + rm[:, None] * sc0 + nc[None, :] * sc1, mask=nmask2, other=0.0).to(tl.float32)
+            cond = tl.load(Cond + rm[:, None] * sc0 + wide(nc, WIDE)[None, :] * sc1, mask=nmask2, other=0.0).to(tl.float32)
             g_w = tl.load(LNW + nc, mask=ncmask, other=0.0).to(tl.float32)[None, :]
             cnorm = tl.where(ncmask[None, :], (cond - mean) * rstd, 0.0)
             dxhat = acc * g_w
@@ -604,15 +611,15 @@ def _dgrad_condln_kernel(
             for k0 in range(0, K2, BLOCK_K_K2):
                 kk = k0 + tl.arange(0, BLOCK_K_K2)
                 kmask = kk < K2
-                a = tl.load(D + rm[:, None] * sd1 + kk[None, :] * sd0, mask=rmask[:, None] & kmask[None, :], other=0.0)
+                a = tl.load(D + rm[:, None] * sd1 + wide(kk, WIDE)[None, :] * sd0, mask=rmask[:, None] & kmask[None, :], other=0.0)
                 b = tl.load(Wcat + kk[:, None] * sw0 + nc[None, :] * sw1, mask=kmask[:, None] & ncmask[None, :], other=0.0)
                 acc += tf32_dot(a, b, input_precision="tf32", pre_b=PRE)
-            cond = tl.load(Cond + rm[:, None] * sc0 + nc[None, :] * sc1, mask=nmask2, other=0.0).to(tl.float32)
+            cond = tl.load(Cond + rm[:, None] * sc0 + wide(nc, WIDE)[None, :] * sc1, mask=nmask2, other=0.0).to(tl.float32)
             g_w = tl.load(LNW + nc, mask=ncmask, other=0.0).to(tl.float32)[None, :]
             cnorm = tl.where(ncmask[None, :], (cond - mean) * rstd, 0.0)
             dxhat = acc * g_w
             dcond = rstd * (dxhat - c2[:, None] - cnorm * c1[:, None])
-            tl.store(DCond + rm[:, None] * sdc0 + nc[None, :] * sdc1, dcond.to(DCond.dtype.element_ty), mask=nmask2)
+            tl.store(DCond + rm[:, None] * sdc0 + wide(nc, WIDE)[None, :] * sdc1, dcond.to(DCond.dtype.element_ty), mask=nmask2)
 
 
 def _dgrad_condln_fake(D, w_cat, cond, mean_c, rstd_c, lnw, shape_key=None):
@@ -683,7 +690,7 @@ def _dgrad_condln(
     # fired for EVERY build unit too -- no tuning round, nothing captured, no cache entry, and an
     # A5000-measured constant with no arch condition on every card.
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
-    _dgrad_condln_kernel[grid](*dargs, shape_key=pack(shape_key, NC=int(NC), K2=K2), PRE=pre)
+    _dgrad_condln_kernel[grid](*dargs, shape_key=pack(shape_key, NC=int(NC), K2=K2), PRE=pre, WIDE=needs_wide(D, cond, dcond))
     return dcond, dlnw.to(lnw.dtype)
 
 

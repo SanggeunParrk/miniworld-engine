@@ -96,12 +96,16 @@ def test_module_row(row: dict):
 
 
 def test_module_rows_are_unique():
-    """Rows with equal (module, stream, dims, options) are one row (requirements/README.md)."""
-    seen: dict[tuple, int] = {}
+    """Rows with equal (module, stream, dims, options) are one row (requirements/README.md), except an eval row and a train row of the
+    same case set with their own lengths (the long eval-only lengths: no model trains at 1024-2048 tokens): their modes never overlap,
+    so no case is stated twice."""
+    seen: dict[tuple, list[tuple[int, set[str]]]] = {}
     for n, r in enumerate(MODULE_ROWS, 1):
         key = (r["module"], r["stream"], r["dims"], r["options"])
-        assert key not in seen, f"rows {seen[key]} and {n} are the same case set {key}"
-        seen[key] = n
+        modes = set(r["modes"].split("|"))
+        for m, other in seen.get(key, []):
+            assert not (modes & other), f"rows {m} and {n} state the same cases {key} in modes {sorted(modes & other)}"
+        seen.setdefault(key, []).append((n, modes))
 
 
 @pytest.mark.parametrize("module", TRUNK)

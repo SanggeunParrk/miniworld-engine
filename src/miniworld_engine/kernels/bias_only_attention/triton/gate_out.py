@@ -30,6 +30,7 @@ import triton.language as tl
 from miniworld_engine.kernels._tf32 import tf32_dot
 
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
+from miniworld_engine.kernels._wide import needs_wide, wide
 
 
 from miniworld_engine.kernels._shape_key import both_key, length_of, pack, rows_of, token_key
@@ -74,7 +75,10 @@ def _gate_out_fwd(
     BLOCK_K: tl.constexpr,
     shape_key,
     GROUP_M: tl.constexpr,
+    WIDE: tl.constexpr = False,
 ):
+    # 64-bit offsets: offs_m / offs_n are int64 (tile_order of an int64 pid); the channel term `kk * stride_gd` / `kk * stride_od` is int32
+    # and only a channel-major operand (stride = M) can carry it past 2**31 -- WIDE (the launcher, from the operands' extents) casts it.
     # Visit order, tuned: see kernels/_tiles.py. The gated output projection: N wide.
     pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
     offs_m = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -89,12 +93,12 @@ def _gate_out_fwd(
         k_ok = kk < DH
         # A-tile = sigmoid(gate) * out_r  -> [BLOCK_M1, BLOCK_K]
         g = tl.load(
-            gate_ptr + offs_m[:, None] * stride_gm + kk[None, :] * stride_gd,
+            gate_ptr + offs_m[:, None] * stride_gm + wide(kk, WIDE)[None, :] * stride_gd,
             mask=m_ok[:, None] & k_ok[None, :],
             other=0.0,
         ).to(tl.float32)
         r = tl.load(
-            outr_ptr + offs_m[:, None] * stride_om + kk[None, :] * stride_od,
+            outr_ptr + offs_m[:, None] * stride_om + wide(kk, WIDE)[None, :] * stride_od,
             mask=m_ok[:, None] & k_ok[None, :],
             other=0.0,
         ).to(tl.float32)
@@ -263,6 +267,7 @@ def _fwd(gate2d: torch.Tensor, outr2d: torch.Tensor, wo: torch.Tensor, shape_key
         out.stride(0),
         out.stride(1),
         shape_key=token_key(0, N=N, DH=DH) if shape_key is None else pack(shape_key, N=N, DH=DH),
+        WIDE=needs_wide(gate2d, outr2d),
     )
     return out
 

@@ -28,14 +28,17 @@ NH, DP, WQ, WK = 4, 16, 32, 128
 _PDL = ('asm volatile("griddepcontrol.wait;" ::: "memory");', 'asm volatile("griddepcontrol.launch_dependents;" ::: "memory");')
 
 
-def _extension(name: str, source: str):
+def _extension(name: str, source: str | Path, arch: str = "80"):
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags
-    from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension  # sm_120a: same sources (kernels/_sm120.py)
+    from miniworld_engine.kernels._nvcc import load_extension as _load_native
+    from miniworld_engine.kernels._sm120 import sm80_load_extension  # sm_120a: the same sm_80 sources (kernels/_sm120.py)
+
+    load_extension = sm80_load_extension if arch == "80" else _load_native
 
     ensure_cuda_home()
     return load_extension(
         name=name,
-        sources=[str(_dir / source)],
+        sources=[str(_dir / source)],  # an absolute path stays itself
         extra_cuda_cflags=[
             *host_flags(),
             "-O3",
@@ -43,11 +46,25 @@ def _extension(name: str, source: str):
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-            *gencodes("80"),
+            *gencodes(arch),
         ],
         extra_cflags=["-std=c++17"],
         verbose=False,
     )
+
+
+@functools.lru_cache(maxsize=None)
+def qknorm_ext():
+    """``augmented_attention/cuda/qknorm_local.cu`` (the q / k RMSNorm + rotary of AtomDiTESMFold2Pair) for sm_80; its sm_90a build is
+    ``augmented_attention.cuda._ext("qknorm_local")``."""
+    return _extension("augattn_qknorm_local_sm80", _LOCAL_DIR.parent / "qknorm_local.cu")
+
+
+@functools.lru_cache(maxsize=None)
+def train_ext_sm90():
+    """``train_rows.cu`` for sm_90a: the H100 training step of AtomDiTESMFold2Pair (kernels/integrations/local_dit_esm.py; every other H100
+    atom block trains on sm90_atom)."""
+    return _extension("dit_variants_train_rows_sm90a", "train_rows.cu", "90a")
 
 
 @functools.lru_cache(maxsize=None)
@@ -64,13 +81,14 @@ def edge_ext():
 
 @functools.lru_cache(maxsize=None)
 def cubin(stem: str) -> str:
-    """``sm100_atom_local/<stem>.cu`` (lattn90 / lattn90_tf32) for sm_80, its dependent-launch statements emptied."""
+    """``sm100_atom_local/<stem>.cu`` (lattn90 / lattn90_tf32 / lattn90_esm) for sm_80, its dependent-launch statements emptied (lattn90_esm
+    has only the wait)."""
     from miniworld_engine.kernels import _nvcc
 
     text = (_LOCAL_DIR / f"{stem}.cu").read_text()
+    if not any(stmt in text for stmt in _PDL):
+        raise RuntimeError(f"{stem}.cu: no dependent-launch statement found (the sm_80 build empties them)")
     for stmt in _PDL:
-        if stmt not in text:
-            raise RuntimeError(f"{stem}.cu: {stmt!r} not found (the sm_80 build empties it)")
         text = text.replace(stmt, "")
     from miniworld_engine.kernels._sm120 import sm80_cubin_flags
 

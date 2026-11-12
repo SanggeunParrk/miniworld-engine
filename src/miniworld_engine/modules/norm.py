@@ -55,6 +55,21 @@ def triton_unsupported(*tensors: torch.Tensor) -> str | None:
     return None
 
 
+def _activation_dtype_reason(x: torch.Tensor, *others: torch.Tensor) -> str | None:
+    """The activation dtypes the conditioned Triton paths (AdaLN, ConditionedTransition, BiasOnlyAttention) take: bf16 or fp32, every input
+    the same; under autocast only bf16 activations with a bf16 autocast (fp32 master weights are cast to the activation dtype per call)."""
+    if x.dtype not in (torch.bfloat16, torch.float32) or any(t.dtype != x.dtype for t in others):
+        return f"activation dtypes {x.dtype} / {', '.join(str(t.dtype) for t in others)} (all bfloat16 or all float32)"
+    if torch.is_autocast_enabled("cuda") and (x.dtype != torch.bfloat16 or torch.get_autocast_dtype("cuda") != torch.bfloat16):
+        return "autocast: bfloat16 activations under bfloat16 autocast only (float32 activations run without autocast)"
+    return None
+
+
+def _wants_grad(module: nn.Module, *tensors: torch.Tensor) -> bool:
+    """A gradient is recorded for this call: grad mode on and an input or a parameter requires one."""
+    return torch.is_grad_enabled() and (any(t.requires_grad for t in tensors) or any(p.requires_grad for p in module.parameters()))
+
+
 def _as_rows3(x: torch.Tensor) -> torch.Tensor:
     """``x`` with at least three dimensions (the Triton launchers key on the pre-flatten ``(B, L, D)`` / ``(B, L, L, D)`` shape): an
     unbatched ``[L, D]`` (or a single row) becomes one batch of it."""
@@ -437,9 +452,14 @@ class AdaptiveLayerNorm(BackendModule):
 
     ``LN`` has no affine (``ln_in``), ``LN_c`` a weight and no bias (``ln_cond``, fp32-pinned whatever ``dtype`` the rest runs in: a bf16
     gamma at 1.0 cannot move by one Adam step). ``to_scale`` starts at zero weight / unit bias, ``to_bias`` at zero.
+
+    ``backend="triton"``: ``kernels/adaln/triton`` (engine 2.4's portable AdaLN): a gradient -> ``training.adaln_train`` (LN(cond) and the
+    epilogue in Triton around one cuBLAS GEMM of [W_s | W_b], the symmetric backward), else ``inference.adaln_inference`` (one fused kernel
+    for d <= 256, LN(cond) + a fused GEMM + gate kernel above). bf16 or fp32 activations (fp32 master weights under bf16 autocast are cast
+    to bf16 per call), CUDA. A part of the bias-only token DiT's Triton path, not a requirements module of its own.
     """
 
-    backends = ("pytorch",)
+    backends = ("pytorch", "triton")
 
     def __init__(
         self,
@@ -464,6 +484,26 @@ class AdaptiveLayerNorm(BackendModule):
         scale = master_linear(self.to_scale, cond_norm)
         bias = master_linear(self.to_bias, cond_norm)
         return torch.sigmoid(scale) * x_norm + bias
+
+    def _supports_triton(self, x: torch.Tensor, cond: torch.Tensor) -> str | None:
+        return (
+            triton_unsupported(x)
+            or _activation_dtype_reason(x, cond)
+            or (None if self.to_bias.bias is None and self.to_scale.bias is not None else "to_bias without a bias, to_scale with one")
+            or (None if self.ln_cond.weight is not None and self.ln_cond.bias is None else "ln_cond with a weight and no bias")
+        )
+
+    def _forward_triton(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        from miniworld_engine.kernels.adaln.triton.inference import adaln_inference
+        from miniworld_engine.kernels.adaln.triton.training import adaln_train
+
+        dt = x.dtype
+        ws, bs, wb = (t.to(dt) for t in (self.to_scale.weight, self.to_scale.bias, self.to_bias.weight))
+        args = (x, cond, self.ln_cond.weight, ws, bs, wb, self.ln_in.eps, self.ln_cond.eps)
+        with torch.autocast("cuda", enabled=False):
+            if _wants_grad(self, x, cond):
+                return adaln_train(*args)
+            return adaln_inference(*args)
 
     def forward_with_stream(self, x: torch.Tensor, cond: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """``(self(x, cond), x)``, for a caller that adds ``x`` to something later (a residual stream)."""
@@ -512,9 +552,13 @@ class AdaptiveRMSNorm(BackendModule):
 
     Parameters ``to_scale.weight`` and ``to_bias.weight`` (both zero-initialised: the identity). The norm runs in float32 and the result
     comes back in ``x``'s dtype. A part of the ESMFold2 atom block, not a requirements module of its own.
+
+    ``backend="triton"``: ``kernels/rmsnorm/triton.triton_rmsnorm_adamod`` (the RMSNorm with the modulation projections in one kernel,
+    forward and backward) on ``silu(cond)``; its gate output (the kernel always writes one) is not used. bf16 or fp32, CUDA. No requirement
+    row builds this class on its own (MiniWorld / ESMFold2 run it inside the fused SWA block): covered by the GPU tests, not measured.
     """
 
-    backends = ("pytorch",)
+    backends = ("pytorch", "triton")
 
     def __init__(self, d_hidden: int, d_cond: int, *, dtype: torch.dtype = torch.float32, backend: str = "pytorch") -> None:
         super().__init__()
@@ -530,3 +574,14 @@ class AdaptiveRMSNorm(BackendModule):
         scale = master_linear(self.to_scale, context)
         bias = master_linear(self.to_bias, context)
         return ((scale.to(w) + 1.0) * norm + bias.to(w)).to(x.dtype)
+
+    def _supports_triton(self, x: torch.Tensor, cond: torch.Tensor) -> str | None:
+        return triton_unsupported(x) or _activation_dtype_reason(x, cond)
+
+    def _forward_triton(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        from miniworld_engine.kernels.rmsnorm.triton.main import triton_rmsnorm_adamod
+
+        dt = x.dtype
+        ws, wb = self.to_scale.weight.to(dt), self.to_bias.weight.to(dt)
+        with torch.autocast("cuda", enabled=False):
+            return triton_rmsnorm_adamod(x, F.silu(cond), ws, wb, ws, None, RMS_EPS)[0]

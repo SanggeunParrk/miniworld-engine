@@ -28,6 +28,7 @@ from __future__ import annotations
 # bias_only_attention's copies (.bench/direct.out), so both now come from one home.
 from miniworld_engine.kernels.gated_projection.triton.main import _sigmul_bwd, _sigmul_fwd
 from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._wide import needs_wide, wide
 
 import torch
 
@@ -86,7 +87,7 @@ def _swiglu_fwd_kernel(
 ):
     pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK_E + tl.arange(0, BLOCK_E)
-    mask = offs < M * ND
+    mask = offs < tl.cast(M, tl.int64) * ND  # 64-bit: M * ND is the element count (an int32 product of two int32 arguments)
     row = offs // ND
     col = offs % ND
     idx = row * stride_m + col * stride_n
@@ -169,7 +170,7 @@ def _swiglu_bwd_kernel(
     # Packs da into dab[:, :ND] and db into dab[:, ND:] so the expand-bwd is one GEMM.
     pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK_E + tl.arange(0, BLOCK_E)
-    mask = offs < M * ND
+    mask = offs < tl.cast(M, tl.int64) * ND  # 64-bit: M * ND is the element count (an int32 product of two int32 arguments)
     row = offs // ND
     col = offs % ND
     a = tl.load(a_ptr + row * stride_m + col * stride_n, mask=mask, other=0.0).to(tl.float32)
@@ -419,6 +420,7 @@ def _b2b_fwd_train_kernel(
     GROUP_M: tl.constexpr,
     shape_key,
     PRE: tl.constexpr = False,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     # Visit order, tuned: see kernels/_tiles.py. This is the b2b, so ND is looped INSIDE the
     # program and every program reads the whole of Wa and Wb -- the weights are what gets re-read
@@ -442,7 +444,7 @@ def _b2b_fwd_train_kernel(
         for k0 in range(0, K, BLOCK_K_D):
             k = k0 + tl.arange(0, BLOCK_K_D)
             k_mask = k < K
-            x = tl.load(x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+            x = tl.load(x_ptr + rows[:, None] * stride_xm + wide(k, WIDE)[None, :] * stride_xk,
                         mask=row_mask[:, None] & k_mask[None, :], other=0.0)
             wa = tl.load(wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                          mask=k_mask[:, None] & col_mask[None, :], other=0.0)
@@ -467,14 +469,14 @@ def _b2b_fwd_train_kernel(
         # would re-store identical bytes. Folded into the store MASK rather than an `if`, so
         # there is no divergent control flow around the stores.
         cm = row_mask[:, None] & col_mask[None, :] & (pid_d == 0)
-        tl.store(ab_ptr + rows[:, None] * stride_abm + cols[None, :] * stride_abn, a, mask=cm)
-        tl.store(ab_ptr + rows[:, None] * stride_abm + (cols + ND)[None, :] * stride_abn, b, mask=cm)
-        tl.store(h_ptr + rows[:, None] * stride_hm + cols[None, :] * stride_hn, h, mask=cm)
+        tl.store(ab_ptr + rows[:, None] * stride_abm + wide(cols, WIDE)[None, :] * stride_abn, a, mask=cm)
+        tl.store(ab_ptr + rows[:, None] * stride_abm + (wide(cols, WIDE) + ND)[None, :] * stride_abn, b, mask=cm)
+        tl.store(h_ptr + rows[:, None] * stride_hm + wide(cols, WIDE)[None, :] * stride_hn, h, mask=cm)
     scale = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
     for c0 in range(0, DC, BLOCK_K_D):
         dc = c0 + tl.arange(0, BLOCK_K_D)
         dc_mask = dc < DC
-        cond = tl.load(cond_ptr + rows[:, None] * stride_cm + dc[None, :] * stride_cc,
+        cond = tl.load(cond_ptr + rows[:, None] * stride_cm + wide(dc, WIDE)[None, :] * stride_cc,
                        mask=row_mask[:, None] & dc_mask[None, :], other=0.0)
         wsc_t = tl.load(wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
                         mask=dc_mask[:, None] & d_mask[None, :], other=0.0)
@@ -483,9 +485,9 @@ def _b2b_fwd_train_kernel(
     scale += bsc[None, :]
     y = tl.sigmoid(scale) * out_acc
     rm = row_mask[:, None] & d_mask[None, :]
-    tl.store(y_ptr + rows[:, None] * stride_ym + dcols[None, :] * stride_yd, y, mask=rm)
-    tl.store(out_ptr + rows[:, None] * stride_om + dcols[None, :] * stride_od, out_acc, mask=rm)
-    tl.store(scale_ptr + rows[:, None] * stride_sm + dcols[None, :] * stride_sc, scale, mask=rm)
+    tl.store(y_ptr + rows[:, None] * stride_ym + wide(dcols, WIDE)[None, :] * stride_yd, y, mask=rm)
+    tl.store(out_ptr + rows[:, None] * stride_om + wide(dcols, WIDE)[None, :] * stride_od, out_acc, mask=rm)
+    tl.store(scale_ptr + rows[:, None] * stride_sm + wide(dcols, WIDE)[None, :] * stride_sc, scale, mask=rm)
 # fmt: on
 
 
@@ -571,6 +573,7 @@ def _b2b_fwd_train(
         scale.stride(1),
         shape_key=pack(shape_key, ND=ND, K=K, DC=DC),
         PRE=pre,
+        WIDE=needs_wide(x, cond, y, ab, h, out, scale),
     )
     return y, ab, h, out, scale
 

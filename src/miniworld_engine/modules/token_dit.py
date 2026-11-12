@@ -35,6 +35,7 @@ from typing import Any, ClassVar, cast
 import torch
 import torch.nn.functional as F
 
+from miniworld_engine.kernels import _capture
 from miniworld_engine.modules import _anthropic
 from miniworld_engine.modules.attention import (
     AugmentedAttentionPairBias,
@@ -42,17 +43,39 @@ from miniworld_engine.modules.attention import (
     FlatQKNormAugmentedAttention,
     UngatedAugmentedAttention,
 )
-from miniworld_engine.modules.dit_variant_cuda import VariantTokenCuda
+from miniworld_engine.modules.dit_variant_cuda import MasterEntryCast, VariantTokenCuda, fp32_conditioning
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.norm import IdentityAdaptiveLayerNorm
-from miniworld_engine.modules.primitives import BackendModule, key_mask, random_input, wide
+from miniworld_engine.modules.primitives import BackendModule, key_mask, random_input, shared_cond_stream, wide
 from miniworld_engine.modules.transition import ConditionedTransition, UpGatedConditionedTransition
 
+_capture.instance_cache_attr("_anthropic_pack")  # the anthropic backend's packed W_qkvg (clear_weight_caches)
 
-def _token_dit_inputs(block, *, length, samples, dtype, device, generator) -> dict:
+
+def _token_dit_inputs(block, *, length, samples, dtype, device, generator, depth=None, stream=None) -> dict:
     """A token DiT block's measurement inputs: ``single`` / ``cond`` [S, 1, L, d] (S samples on the augmentation axis), ``pair`` [1, L, L, d_pair],
-    the key ``mask`` [1, L]."""
+    the key ``mask`` [1, L]. Stream ``token_folds`` (the multi-fold contract, docs/modules.md): ``depth`` = F folds (trunk_seeds of one input),
+    ``single`` [S, F, L, d], ``cond`` one per fold [1, F, L, d] expanded over the S samples, ``pair`` [F, L, L, d_pair], one key mask [1, L]
+    expanded over the folds (FoldForge's grouped sampler step). A ``*_shared_cond`` stream (``token_single_shared_cond``,
+    ``token_folds_shared_cond``): ``cond`` [1, F, L, d] expanded (stride 0) over the S samples, as FoldForge's ``TokenDiTStack`` calls the
+    block; the measurers keep it expanded (requirements/README.md)."""
     d_single, d_cond, d_pair = block.transition.d_hidden, block.transition.d_cond, block.attention.ln_pair.normalized_shape[0]
+    stream, shared = shared_cond_stream(stream)
+    if shared and stream == "token_single":
+        return {
+            "single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
+            "cond": random_input((1, 1, length, d_cond), dtype=dtype, device=device, generator=generator).expand(samples, -1, -1, -1),
+            "pair": random_input((1, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+            "mask": key_mask(1, length, device=device),
+        }
+    if stream == "token_folds":
+        f = depth or 1
+        return {
+            "single": random_input((samples, f, length, d_single), dtype=dtype, device=device, generator=generator),
+            "cond": random_input((1, f, length, d_cond), dtype=dtype, device=device, generator=generator).expand(samples, -1, -1, -1),
+            "pair": random_input((f, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+            "mask": key_mask(1, length, device=device).expand(f, length),
+        }
     return {
         "single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
         "cond": random_input((samples, 1, length, d_cond), dtype=dtype, device=device, generator=generator),
@@ -388,7 +411,8 @@ class TokenDiTProtenix(BackendModule):
         a = ConditionedTransition(a, s)                  # a + transition(a, s)
 
     ``forward(single, cond, pair, mask)`` -> ``single``'s shape. ``single`` and ``cond`` carry the augmentation axis (``A, B, L, d``);
-    ``pair`` does not (``B, L, L, d_pair``), because the pair bias is shared across augmentations. Both parts build their own
+    ``pair`` does not (``B, L, L, d_pair``), because the pair bias is shared across augmentations. ``B`` is the multi-fold axis: B folds
+    (trunk_seeds of one input) each with its own pair and conditioning, one key mask expanded over B (docs/modules.md, multi-fold contract). Both parts build their own
     ``AdaptiveLayerNorm`` from their ``(d_hidden, d_cond)``. At atom widths (128 / 128 / pair 16 / 4 heads) it is also the dense atom DiT.
 
     AlphaFold 3's own token DiT is this block (registered as ``"af3"``).
@@ -456,7 +480,9 @@ class TokenDiTProtenix(BackendModule):
         return self.transition(single, cond)
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
-        return _token_dit_inputs(self, length=length, samples=samples, dtype=dtype, device=device, generator=generator)
+        return _token_dit_inputs(
+            self, length=length, samples=samples, dtype=dtype, device=device, generator=generator, depth=depth, stream=stream
+        )
 
     # ------------------------------------------------------------------------------------------------------------ "triton"
     # The block's own statements with the attention core on the Triton pair-bias attention kernel (forward and backward): the block's
@@ -815,7 +841,7 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
         return None
 
 
-class TokenDiTChai1(VariantTokenCuda, TokenDiTProtenix):
+class TokenDiTChai1(MasterEntryCast, VariantTokenCuda, TokenDiTProtenix):
     """Chai-1's token DiT block: the parallel schedule, the identity AdaLN ``(1 + W_s s) LN(a) + W_b s`` in both parts
     (``attention.ada_ln_in``, ``transition.ada_ln_in``), no gating query; the pair is 256 wide. ``adaln_eps``: the epsilon of both AdaLNs'
     LayerNorm of ``a`` (Chai-1's release, its traced ``layer_norm(x, None, None, 0.1)``: 0.1, the default)."""
@@ -838,7 +864,8 @@ class TokenDiTChai1(VariantTokenCuda, TokenDiTProtenix):
     attention_part = UngatedAugmentedAttention
 
     def make_inputs(self, **kwargs) -> dict:
-        return {**super().make_inputs(**kwargs), "mask": None}  # the model calls the block without a key mask
+        inputs = {**super().make_inputs(**kwargs), "mask": None}  # the model calls the block without a key mask
+        return fp32_conditioning(inputs, kwargs.get("stream"), kwargs["generator"])
 
     def __init__(
         self,
@@ -899,8 +926,11 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "cuda")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: sm_80 paths
+    backends = ("pytorch", "cuda", "triton")
+    # 2026-11-10: sm_80 paths; cuda:h100_sm90 2 (2026-11-12): the inference pair-bias hoist (runner.hoist) in one pass for a 256-wide
+    # bf16 pair, and on the TF32 tensor-core kernel (3 terms) for a 128-wide fp32 pair
+    # cuda:a100_sm80 3 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd: padded W' pitch, next row prefetched; same values) 2.1x faster
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 2}
 
     def __init__(
         self,
@@ -935,7 +965,26 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
         return self.transition(single, cond)
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
-        return _token_dit_inputs(self, length=length, samples=samples, dtype=dtype, device=device, generator=generator)
+        return _token_dit_inputs(
+            self, length=length, samples=samples, dtype=dtype, device=device, generator=generator, depth=depth, stream=stream
+        )
+
+    # ------------------------------------------------------------------------------------------------------------ "triton"
+    # Engine 2.4's portable block (BiasOnlyDiTBlock off H100 / B200), any card: both parts on their "triton" backends (set_backend) --
+    # BiasOnlyAttention (Triton AdaLN, the one-pass pair LayerNorm + bias kernel, the feature-major training core) and ConditionedTransition
+    # (Triton AdaLN, the SwiGLU / gate tail kernels); the block's statements chain them.
+    def set_backend(self, backend: str = "pytorch"):
+        super().set_backend(backend)
+        parts = "triton" if backend == "triton" else "pytorch"
+        self.attention.set_backend(parts)
+        self.transition.set_backend(parts)
+        return self
+
+    def _supports_triton(self, single, cond, pair=None, mask=None, *, bias=None) -> str | None:
+        return self.attention._supports_triton(single, cond, pair, mask, bias=bias) or self.transition._supports_triton(single, cond)
+
+    def _forward_triton(self, single, cond, pair=None, mask=None, *, bias=None) -> torch.Tensor:
+        return self._forward_pytorch(single, cond, pair, mask, bias=bias)
 
     # ------------------------------------------------------------------------------------------------------------ "cuda"
     # H100: no gradient -> kernels/integrations/bias_only_dit (the fused inference block: P = softmax(pair bias) once per pair, the

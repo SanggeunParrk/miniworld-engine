@@ -531,3 +531,62 @@ def portable_pool_atoms(x, idx, gather_mask, atom_mask):
     key = atom_key(T * A)
     _pool[lambda meta: (T, triton.cdiv(C, meta["BLOCK_C"]), S)](x, idx, gather_mask, atom_mask, out, A, T, R, C, shape_key=key)
     return out
+
+
+# ---- the pooling's backward (training): d out[s, t] / d x[s, r] = sum over the gathered slots (t, a) with idx[t, a] = r of w[t, a] [x[s, r] > 0],
+# w = m / max(sum_a m, 1e-10), as the CUDA backward: the slots sorted by row (a stable sort), one program per (row, channel slice, sample) adds its slots in
+# slot order (fp32; no atomics: bitwise reproducible).
+@configured("sampler_ops_pool_prep_triton", key=["shape_key"], default=dict(BLOCK=256, num_warps=4, num_stages=1))
+@triton.jit
+def _pool_prep(IDX, GM, AM, KEY, W, N, A, R, shape_key, BLOCK: tl.constexpr):
+    """KEY[k] = idx[k] for a gathered slot k = t A + a (m != 0 and g != 0), else R; W[k] = m[k] / max(sum_a m[t, a], 1e-10) there, else 0."""
+    k = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    ok = k < N
+    t0 = (k // A) * A
+    den = tl.zeros([BLOCK], dtype=tl.float32)
+    for a in range(A):  # the token's atom mask summed in atom order (the forward's fp32 sum)
+        den += tl.load(AM + t0 + a, mask=ok, other=0).to(tl.float32)
+    m = tl.load(AM + k, mask=ok, other=0).to(tl.float32)
+    g = tl.load(GM + k, mask=ok, other=0).to(tl.float32)
+    r = tl.load(IDX + k, mask=ok, other=0).to(tl.int32)
+    use = (m != 0.0) & (g != 0.0)
+    tl.store(KEY + k, tl.where(use, r, R), mask=ok)
+    tl.store(W + k, tl.where(use, tl.math.div_rn(m, tl.maximum(den, 1e-10)), 0.0), mask=ok)
+
+
+@configured("sampler_ops_pool_bwd_triton", key=["shape_key"], default=dict(BLOCK_C=128, num_warps=1, num_stages=1))
+@triton.jit
+def _pool_bwd(GOUT, X, OFF, PERM, W, GX, A, T, R, C, shape_key, BLOCK_C: tl.constexpr):
+    """GX[s, r, c] = [x[s, r, c] > 0] sum_{k in OFF[r] .. OFF[r + 1]} W[PERM[k]] GOUT[s, PERM[k] // A, c], bf16."""
+    r = tl.program_id(0).to(tl.int64)
+    s = tl.program_id(2).to(tl.int64)
+    c = tl.program_id(1) * BLOCK_C + tl.arange(0, BLOCK_C)
+    cin = c < C
+    beg = tl.load(OFF + r)
+    end = tl.load(OFF + r + 1)
+    acc = tl.zeros([BLOCK_C], dtype=tl.float32)
+    for k in range(beg, end):
+        slot = tl.load(PERM + k)
+        w = tl.load(W + slot)
+        g = tl.load(GOUT + (s * T + slot // A) * C + c, mask=cin, other=0.0).to(tl.float32)
+        acc += w * g
+    o = (s * R + r) * C + c
+    x = tl.load(X + o, mask=cin, other=0.0).to(tl.float32)
+    tl.store(GX + o, tl.where(x > 0.0, acc, 0.0).to(tl.bfloat16), mask=cin)
+
+
+def portable_pool_atoms_bwd(gout, x, idx, gather_mask, atom_mask):
+    """d x ``[S, Q, C]`` bf16 of the pooling for the upstream gradient ``gout`` ``[S, T, C]`` bf16."""
+    if not (gout.is_cuda and gout.is_contiguous() and gout.dtype is torch.bfloat16 and gout.dim() == 3):
+        raise ValueError("gout: contiguous bf16 cuda [S, T, C] required")
+    S, R, C = x.shape
+    T, A = idx.shape
+    n = T * A
+    key = torch.empty(n, device=x.device, dtype=torch.int32)
+    w = torch.empty(n, device=x.device, dtype=torch.float32)
+    _pool_prep[lambda meta: (triton.cdiv(n, meta["BLOCK"]),)](idx, gather_mask, atom_mask, key, w, n, A, R, shape_key=atom_key(n))
+    skey, perm = torch.sort(key, stable=True)
+    off = torch.searchsorted(skey, torch.arange(R + 1, device=x.device, dtype=torch.int32), out_int32=True)
+    gx = torch.empty_like(x)
+    _pool_bwd[lambda meta: (R, triton.cdiv(C, meta["BLOCK_C"]), S)](gout, x, off, perm, w, gx, A, T, R, C, shape_key=atom_key(R))
+    return gx

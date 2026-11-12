@@ -22,7 +22,8 @@ Each class hard-codes its model's math (no option flags); :data:`ATOM_DIT_MODELS
 
   Atom ``i`` belongs to query window ``w = i // 32`` and attends to the 128 atoms of its key window, with a per-window pair bias. The
   pair is the *trunked* atom pair ``[B, nwin, 32, 128, d_pair]`` (:func:`~miniworld_engine.modules.functional.to_windows` makes it from a
-  dense pair). ``single`` and ``cond`` carry the augmentation axis ``[A, B, N, d]``, the pair does not. Scores and softmax run in fp32
+  dense pair). ``single`` and ``cond`` carry the augmentation axis ``[A, B, N, d]``, the pair does not. ``B`` is the multi-fold axis (B folds of one
+  input, each its own pair and conditioning, one key mask expanded over B: docs/modules.md, multi-fold contract). Scores and softmax run in fp32
   (fp64 for an fp64 call). ``key_window`` (the real atoms ``R`` come first; a masked key is off for every query):
 
       "slide"          ``[32 w - 48, 32 w + 80)`` shifted back inside the real atoms (AF3 ``features.py`` AtomCrossAtt.compute_features;
@@ -46,6 +47,9 @@ Each class hard-codes its model's math (no option flags); :data:`ATOM_DIT_MODELS
       AtomDiTESMFold2       ESMFold2's release atom block: the same block (its own class, ESMFold2's constructor names)
       SWAAtomTransformer    ``n_block`` of them
 
+* FoldForge's ESMFold2 atom block with the atom pair (FoldForge R6), :class:`AtomDiTESMFold2Pair`: the AF3 block above over a 32 x 192
+  trunked pair with AdaptiveRMSNorm AdaLNs, raw gates, the +/- 64 rank window and q / k RMSNorm + rotary (``AtomDiT(model="esmfold2_pair")``).
+
 Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forward_pytorch`` is the reference.
 """
 
@@ -59,13 +63,14 @@ import torch.nn.functional as F
 from pydantic import BaseModel
 from torch.utils.checkpoint import checkpoint_sequential
 
+from miniworld_engine.kernels import _capture
 from miniworld_engine.modules import _anthropic
 from miniworld_engine.modules.attention import (
     AugmentedAttentionPairBias,
     FlatQKNormAugmentedAttention,
     UngatedAugmentedAttention,
 )
-from miniworld_engine.modules.dit_variant_cuda import VariantAtomCuda
+from miniworld_engine.modules.dit_variant_cuda import MasterEntryCast, VariantAtomCuda, fp32_conditioning
 from miniworld_engine.modules.functional import (
     ATOM_KEYS,
     ATOM_QUERIES,
@@ -74,9 +79,22 @@ from miniworld_engine.modules.functional import (
     build_attention_params,
     slide_starts,
 )
-from miniworld_engine.modules.norm import AdaptiveLayerNorm, IdentityAdaptiveLayerNorm, RMSNorm
-from miniworld_engine.modules.primitives import BackendModule, Linear, MPLinear, key_mask, master_autocast, random_input, wide
+from miniworld_engine.modules.norm import RMS_EPS, AdaptiveLayerNorm, AdaptiveRMSNorm, IdentityAdaptiveLayerNorm, LayerNorm, RMSNorm
+from miniworld_engine.modules.primitives import (
+    BackendModule,
+    Linear,
+    MPLinear,
+    key_mask,
+    master_autocast,
+    master_linear,
+    random_input,
+    shared_cond_stream,
+    wide,
+)
 from miniworld_engine.modules.transition import ConditionedTransition, UpGatedConditionedTransition
+
+for _attr in ("_katom_key", "_katom_packs"):  # the ESMFold2 kit's atom packs (clear_weight_caches)
+    _capture.instance_cache_attr(_attr)
 
 QUERIES, KEYS, KEY_OFFSET = ATOM_QUERIES, ATOM_KEYS, 48
 _BF, _F32 = torch.bfloat16, torch.float32
@@ -113,6 +131,48 @@ class _A100View:
 def _needs_grad(module: nn.Module, *tensors) -> bool:
     return torch.is_grad_enabled() and (
         any(p.requires_grad for p in module.parameters()) or any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
+    )
+
+
+def _one_row(t: torch.Tensor, folds: int) -> bool:
+    """``t`` [1, N], or [B, N] that is one row expanded over the B folds (stride 0: metadata only, no device read)."""
+    return t.shape[0] == 1 or (t.shape[0] == folds and t.stride(0) == 0)
+
+
+def _folds(single: torch.Tensor) -> int:
+    """B, the fold axis of ``single`` [A, B, N, d] (1 for any other rank: the shape checks refuse those)."""
+    return single.shape[1] if single.ndim == 4 else 1
+
+
+def _multi_fold_reason(module: nn.Module, single, cond, pair, mask, uid) -> str | None:
+    """Why the ``"cuda"`` backend does not take this B > 1 fold call (the multi-fold contract, docs/modules.md), or None. The kernels keep
+    one pair bias per launch outside the bf16 inference path: bf16 activations, no gradient; one key mask / ``uid`` row for the folds."""
+    folds = _folds(single)
+    if (single.dtype, cond.dtype, pair.dtype) != (_BF, _BF, _BF):
+        return "B > 1 folds: bfloat16 activations only (the TF32 kernels keep one pair bias)"
+    if _needs_grad(module, single, cond, pair):
+        return "B > 1 folds: inference only (the backward keeps one pair bias)"
+    if cond.ndim != 4 or tuple(cond.shape[:3]) != tuple(single.shape[:3]) or pair.shape[0] != folds:
+        return f"B > 1 folds: cond [A, B, N, d] and pair [B, ...] with B = {folds}, got {tuple(cond.shape)} / {tuple(pair.shape)}"
+    for name, t in (("mask", mask), ("uid", uid)):
+        if t is not None and (t.ndim != 2 or t.shape[1] != single.shape[2] or not _one_row(t, folds)):
+            return f"B > 1 folds: {name} must be one [1, N] row (or that row expanded over the B folds), got {tuple(t.shape)}"
+    return None
+
+
+def _fold(single, cond, pair, mask, uid, b: int):
+    """Fold ``b`` of a multi-fold call as a one-fold call: single [A, 1, N, d] (a contiguous copy), cond [A, 1, N, d] (a sample-expanded
+    conditioning stays the view: its hoisted table is keyed on the fold's storage and reused over the sampler's steps), pair [1, ...],
+    the one mask / uid row."""
+    c = cond[:, b : b + 1]
+    if not (c.shape[0] > 1 and c.stride(0) == 0):
+        c = c.contiguous()
+    return (
+        single[:, b : b + 1].contiguous(),
+        c,
+        pair[b : b + 1],
+        None if mask is None else mask[:1],
+        None if uid is None else uid[:1],
     )
 
 
@@ -304,9 +364,10 @@ class _LocalAtomDiT(BackendModule):
         return self.transition(single, cond)
 
     # ------------------------------------------------------------------------------------------------------------ "triton"
-    def _supports_triton(self, single, cond, pair, mask=None, **kw) -> str | None:
-        if set(kw) - {"uid"}:
-            return f"{', '.join(sorted(set(kw) - {'uid'}))} (not an input of the block)"
+    def _supports_triton(self, single, cond, pair, mask=None, uid=None, **kw) -> str | None:
+        # ``uid`` positional as in the forward that takes it (AtomDiTChai1): FoldForge asks ``unsupported(*forward args)``
+        if kw:
+            return f"{', '.join(sorted(kw))} (not an input of the block)"
         if not single.is_cuda:
             return "the Triton window attention runs on CUDA tensors only"
         if single.dtype not in (_BF, _F32):
@@ -321,7 +382,6 @@ class _LocalAtomDiT(BackendModule):
             return f"pair must be the trunked atom pair [B, {windows(n)}, {QUERIES}, {KEYS}, d_pair], got {tuple(pair.shape)}"
         if mask is not None and tuple(mask.shape) != (b, n):
             return f"mask must be [B, N], got {tuple(mask.shape)}"
-        uid = kw.get("uid")
         if uid is not None and tuple(uid.shape) != (b, n):
             return f"uid must be [B, N], got {tuple(uid.shape)}"
         return None
@@ -355,11 +415,15 @@ class _LocalAtomDiT(BackendModule):
     # (``local_dit.WEIGHTS`` + ``CROSS_WEIGHTS``), the K / V AdaLN chained (Protenix) or parallel (AlphaFold 3), the clipped window or AlphaFold
     # 3's slid one or IntelliFold2's slide_qblock (their edge windows recomputed and differentiated in torch), inference and training.
     # Listed only by the classes with a K / V AdaLN (Protenix, OpenFold3).
-    def _supports_cuda(self, single, cond, pair, mask=None, **kw) -> str | None:
-        uid = kw.pop("uid", None)
+    def _supports_cuda(self, single, cond, pair, mask=None, uid=None, **kw) -> str | None:
         if kw:
             return f"{', '.join(kw)} (not an input of the H100 atom block)"
         if _a100(single):
+            if _folds(single) > 1:  # B > 1 folds: one sm_80 call per fold (the sm_80 atom paths take one pair)
+                why = _multi_fold_reason(self, single, cond, pair, mask, uid)
+                if why is not None:
+                    return f"A100: {why}"
+                single, cond, pair, mask, uid = _fold(single, cond, pair, mask, uid, 0)
             return self._a100_reason(single, cond, pair, mask)
         if not _h100(single):
             return "the H100 atom block kernels run on an H100 (sm_90) CUDA tensor only"
@@ -370,8 +434,9 @@ class _LocalAtomDiT(BackendModule):
                 "outside the H100 atom block's options (local_dit_h100.options: mixed AdaLN forms or epsilons, a per-head q / k norm, "
                 "an up-gate weight other than [256, 128] without bias, ...)"
             )
-        if uid is not None and (uid.ndim != 2 or tuple(uid.shape) != (1, single.shape[2])):
-            return f"uid must be [1, N], got {tuple(uid.shape)}"
+        folds = single.shape[1] if single.ndim == 4 else 1
+        if uid is not None and (uid.ndim != 2 or uid.shape[1] != single.shape[2] or not _one_row(uid, folds)):
+            return f"uid must be [1, N] (or one [1, N] row expanded over the B folds), got {tuple(uid.shape)}"
         att, tr = self.attention, self.transition
         params = list(self.parameters())
         dts = (single.dtype, cond.dtype, pair.dtype)
@@ -385,15 +450,22 @@ class _LocalAtomDiT(BackendModule):
                 return "bfloat16 activations take bfloat16 or float32 parameters"
         else:
             return f"dtypes {tuple(str(t) for t in dts)} (single / cond / pair all bfloat16 or all float32)"
-        if single.ndim != 4 or single.shape[1] != 1 or single.shape[3] != 128 or single.shape[2] == 0:
-            return f"single must be [A, 1, N, 128] (one pair), got {tuple(single.shape)}"
+        if single.ndim != 4 or single.shape[3] != 128 or single.shape[2] == 0:
+            return f"single must be [A, B, N, 128], got {tuple(single.shape)}"
         n = single.shape[2]
+        if folds > 1:  # the multi-fold contract (B trunk_seeds of one input, each its own pair): the kernels' grouped-bias path
+            if dts != (_BF, _BF, _BF):
+                return "B > 1 folds: bfloat16 activations only (the TF32 kernels keep one pair bias)"
+            if _needs_grad(self, single, cond, pair):
+                return "B > 1 folds: inference only (the backward keeps one pair bias)"
         if tuple(cond.shape) != (*single.shape[:3], 128):
-            return f"cond must be [A, 1, N, 128], got {tuple(cond.shape)}"
-        if tuple(pair.shape) != (1, windows(n), QUERIES, KEYS, 16):
-            return f"pair must be [1, {windows(n)}, {QUERIES}, {KEYS}, 16], got {tuple(pair.shape)}"
-        if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != (1, n)):
-            return "mask must be a bool [1, N] key mask"
+            return f"cond must be [A, B, N, 128], got {tuple(cond.shape)}"
+        if tuple(pair.shape) != (folds, windows(n), QUERIES, KEYS, 16):
+            return f"pair must be [B, {windows(n)}, {QUERIES}, {KEYS}, 16] with B = {folds}, got {tuple(pair.shape)}"
+        if mask is not None and (
+            mask.dtype != torch.bool or mask.ndim != 2 or mask.shape[1] != n or mask.shape[0] not in (1, folds) or not _one_row(mask, folds)
+        ):
+            return "mask must be a bool [1, N] key mask (B > 1 folds: the folds' one mask, [1, N] or expanded to [B, N])"
         geometry = (
             att.n_head,
             att.to_query.weight.shape[0],
@@ -435,6 +507,8 @@ class _LocalAtomDiT(BackendModule):
         return None if fn is not None else why
 
     def _forward_cuda(self, single, cond, pair, mask=None, uid=None):
+        if _a100(single) and _folds(single) > 1:  # B > 1 folds (``_supports_cuda``): one sm_80 call per fold, in fold order
+            return torch.cat([self._forward_cuda(*_fold(single, cond, pair, mask, uid, b)) for b in range(_folds(single))], 1)
         if _a100(single):
             if not self._a100_rows(single, cond, pair, mask):
                 from miniworld_engine.modules import dit_variant_cuda as dv
@@ -458,6 +532,12 @@ class _LocalAtomDiT(BackendModule):
 
         if not (cond.is_contiguous() or local_dit_h100._shared(cond)):
             cond = cond.contiguous()
+        # B > 1 folds: the folds' one key mask / conformer ids (``_supports_cuda``); pass the one row, not a materialised [B, N] copy, so
+        # the hoisted pair bias (keyed on the mask's storage) is made once per pair, not once per call
+        if mask is not None and mask.shape[0] > 1:
+            mask = mask[:1]
+        if uid is not None and uid.shape[0] > 1:
+            uid = uid[:1]
         # the kernels' precision is their own (bf16 operands, or TF32 for fp32): an enclosing autocast must not recast their torch glue
         with torch.autocast("cuda", enabled=False):
             return local_dit_h100.run_block(
@@ -471,8 +551,28 @@ class _LocalAtomDiT(BackendModule):
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
         """``single`` / ``cond`` [S, 1, N, d] (S samples on the augmentation axis), the trunked ``pair`` [1, nwin, 32, 128, d_pair], the key
-        ``mask`` [1, N] (real atoms first)."""
+        ``mask`` [1, N] (real atoms first). Stream ``atom_folds`` (the multi-fold contract, docs/modules.md): ``depth`` = F folds (trunk_seeds of
+        one input), ``single`` [S, F, N, d], ``cond`` one per fold [1, F, N, d] expanded over the S samples, ``pair`` [F, nwin, 32, 128, d_pair],
+        one key mask [1, N] expanded over the folds (FoldForge's grouped sampler step). A ``*_shared_cond`` stream (``atom_single_shared_cond``,
+        ``atom_folds_shared_cond``): ``cond`` [1, F, N, d] expanded (stride 0) over the S samples, as FoldForge's ``AtomDiTStack`` calls the
+        block; the measurers keep it expanded (requirements/README.md)."""
         d_single, d_cond, d_pair = self.transition.d_hidden, self.transition.d_cond, self.attention.ln_pair.normalized_shape[0]
+        stream, shared = shared_cond_stream(stream)
+        if shared and stream == "atom_single":
+            return {
+                "single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
+                "cond": random_input((1, 1, length, d_cond), dtype=dtype, device=device, generator=generator).expand(samples, -1, -1, -1),
+                "pair": random_input((1, windows(length), QUERIES, KEYS, d_pair), dtype=dtype, device=device, generator=generator),
+                "mask": key_mask(1, length, device=device, pad=QUERIES - 8),
+            }
+        if stream == "atom_folds":
+            f = depth or 1
+            return {
+                "single": random_input((samples, f, length, d_single), dtype=dtype, device=device, generator=generator),
+                "cond": random_input((1, f, length, d_cond), dtype=dtype, device=device, generator=generator).expand(samples, -1, -1, -1),
+                "pair": random_input((f, windows(length), QUERIES, KEYS, d_pair), dtype=dtype, device=device, generator=generator),
+                "mask": key_mask(1, length, device=device, pad=QUERIES - 8).expand(f, length),
+            }
         return {
             "single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
             "cond": random_input((samples, 1, length, d_cond), dtype=dtype, device=device, generator=generator),
@@ -713,20 +813,85 @@ class AtomDiTProtenix(_LocalAtomDiT):
     key_window = "pad"
     kv_norm = "chained"
     #: 2026-11-10: H100 "slide": the five edge windows on the edge kernels (dit_variants edge.cu; were torch)
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 2}
+    #: 2026-11-12: 3, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
 
 
 class AtomDiTOpenFold3(_LocalAtomDiT):
     """AlphaFold 3's atom transformer block in the engine layout (registered as ``"af3"``, ``"openfold3"``, ``"openfold3_preview2"``,
     ``"intellifold2"``): the K / V AdaLN of the raw atoms next to the query one (parallel: AF3 ``cross_attention``'s 'q' / 'k' adaptive
     layernorms, OF3 ``CrossAttentionPairBias.layer_norm_a_q`` / ``_k``), the slid 128-key window (AF3 ``features.py``; IntelliFold2's JAX
-    release runs this code). ``key_window="slide_qblock"``: IntelliFold2's torch release; ``"pad"``: the clipped window."""
+    release runs this code). ``key_window="slide_qblock"``: IntelliFold2's torch release; ``"pad"``: the clipped window.
+
+    ``mask_form`` (FoldForge R13): ``"keys"`` (the default, as every atom DiT block) switches every masked key off for every query; ``"af3"``
+    is AlphaFold 3's own form, whose mask term touches only the pairs where BOTH the query and the key are padding (``+1e9`` there), so a
+    real query reads every key of its window, padding included. The forms differ only below 128 real atoms: from 128 on the slid window
+    (``key_window="slide"``, the only window this form is defined for) lies inside the real atoms; below it every window holds the N real
+    atoms and 128 - N padding keys (AlphaFold 3 ``features.py`` AtomCrossAtt: its windows shifted to start at N - 128 < 0 index padding by
+    wrapping; which padding slots does not matter, as below). One pass, the key mask widened to the first 128 atoms (still a prefix: the
+    window stays [0, 128); the padded atom count must be >= 128), on every backend. Exact for the real rows when the caller's padding atoms
+    are what AlphaFold 3's gathers make them: zero ``single`` / ``cond`` rows (``atom_layout.convert`` fills a padding slot with 0, so every
+    padding key is the same key) and the pair of a padding key the one AlphaFold 3 computes there. The padding rows are not AlphaFold 3's
+    (its padding queries read only padding keys); AlphaFold 3 never reads them -- its keys come from the masked gather -- so zero them
+    before the next block."""
 
     version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     #: 2026-11-10: H100 "slide" / "slide_qblock": the five edge windows on the edge kernels (dit_variants edge.cu; were torch)
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 2}
+    #: 2026-11-12: 3, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
+    #: ``"keys"`` or ``"af3"`` (see the class docstring)
+    mask_form: str = "keys"
+
+    def __init__(
+        self,
+        d_single: int = 128,
+        d_cond: int = 128,
+        d_pair: int = 16,
+        n_head: int = 4,
+        n: int = 2,
+        *,
+        key_window: str | None = None,
+        mask_form: str = "keys",
+        backend: str = "pytorch",
+    ) -> None:
+        super().__init__(d_single, d_cond, d_pair, n_head, n, key_window=key_window, backend=backend)
+        if mask_form not in ("keys", "af3"):
+            raise ValueError(f"mask_form must be 'keys' or 'af3', got {mask_form!r}")
+        if mask_form == "af3" and self.key_window != "slide":
+            raise ValueError(f"mask_form='af3' is AlphaFold 3's form on its slid window (key_window='slide'), got {self.key_window!r}")
+        self.mask_form = mask_form
+
+    def _mask(self, mask):
+        """The key mask every backend runs under: the caller's (``"keys"``), or (``"af3"``) widened to the first 128 atoms, the window below 128
+        real atoms -- a prefix still, so the slid window stays [0, 128); from 128 real atoms on it is the caller's mask."""
+        if self.mask_form == "keys" or mask is None:
+            return mask
+        keep = mask.bool()
+        return keep | (torch.arange(keep.shape[-1], device=keep.device) < KEYS)
+
+    # each backend's entry (the measurers call them directly) takes the form's mask
+    def _forward_pytorch(self, single, cond, pair, mask=None):
+        return super()._forward_pytorch(single, cond, pair, self._mask(mask))
+
+    def _supports_triton(self, single, cond, pair, mask=None, uid=None, **kw) -> str | None:
+        return super()._supports_triton(single, cond, pair, self._mask(mask), uid, **kw)
+
+    def _forward_triton(self, single, cond, pair, mask=None):
+        return super()._forward_triton(single, cond, pair, self._mask(mask))
+
+    def _supports_cuda(self, single, cond, pair, mask=None, uid=None, **kw) -> str | None:
+        return super()._supports_cuda(single, cond, pair, self._mask(mask), uid, **kw)
+
+    def _forward_cuda(self, single, cond, pair, mask=None, uid=None):
+        return super()._forward_cuda(single, cond, pair, self._mask(mask), uid)
+
+    def _supports_anthropic(self, single, cond, pair, mask=None, **kw) -> str | None:
+        return super()._supports_anthropic(single, cond, pair, self._mask(mask), **kw)
+
+    def _forward_anthropic(self, single, cond, pair, mask=None):
+        return super()._forward_anthropic(single, cond, pair, self._mask(mask))
 
 
 class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
@@ -738,7 +903,13 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
     ``BOLTZ_ATOM=fused`` lever): rows [q | k | v] 384 wide and sigmoid(g) 128 wide, the clipped "pad" window, the key mask Boltz's
     ``(1 - mask) * -1e6``, the bias read in place from the trunked [B, nwin, 32, 128, 4]; bf16 operands (bf16, and the master layout's
     autocast operands) or fp32 dots (Boltz-2's ``tf32`` word under the engine's TF32 rule, else ``ieee``); the [q | k | v] rows from one
-    packed GEMM; 128 = 4 x 32 wide, N a multiple of 32."""
+    packed GEMM; 128 = 4 x 32 wide, N a multiple of 32.
+
+    Invariant (shared K / V AdaLN, ``kv_norm = "shared"``): the release computes the queries AND the keys / values from ONE AdaLN output
+    (``b = adaln(a, s)``; ``to_queries(b)``, ``to_keys(b)``, ``to_values(b)``), so the block has no ``attention.ada_ln_kv``. A checkpoint
+    layout that stores a K / V AdaLN beside the query one (e.g. an AF3-style ``q_adaptive_layernorm`` / ``k_adaptive_layernorm`` pair) holds
+    two equal copies of it for this model: load the query copy, and treat a K / V copy that differs as a conversion error, not as a second
+    AdaLN to keep (tests/cpu/test_requests_api.py asserts the layout)."""
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
@@ -752,7 +923,8 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
     kv_norm = "shared"
     transition_part = UpGatedConditionedTransition
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
+    #: 2026-11-12: 4, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4}
     _release_module = "boltz_atom_kernels"
     _release_path = "boltz2/opt/forward/atom/src"
 
@@ -814,7 +986,13 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     values (``ada_ln_1``; no ``attention.ada_ln_kv``), a bias-free query and an affine LayerNorm of the flat q / k (``kq_norm``:
     ``attention.norm_query`` / ``attention.norm_key``, over all heads; ``FlatQKNormAugmentedAttention``), the parallel schedule
     (``no_residual_connection_between_attention_and_transition: true``) and the clipped window (``indicesK``/``maskK``;
-    ``key_window="pad"``, the default). No ``"anthropic"`` backend: RoseTTAFold3's release keeps its stock atom attention (no kernel)."""
+    ``key_window="pad"``, the default). No ``"anthropic"`` backend: RoseTTAFold3's release keeps its stock atom attention (no kernel).
+
+    Invariants: (1) shared K / V AdaLN as :class:`AtomDiTBoltz2` (the release's ``ada_ln_1`` output feeds q, k and v; no
+    ``attention.ada_ln_kv``; a separate K / V AdaLN in a checkpoint layout must equal the query one). (2) No query bias: the release's
+    ``to_q`` is ``MultiDimLinear(..., bias=False)`` (:class:`~miniworld_engine.modules.attention.FlatQKNormAugmentedAttention`, so
+    ``attention.to_query.bias is None``); a checkpoint that carries a query bias for it must hold zeros, which are dropped (a non-zero
+    one is a conversion error). tests/cpu/test_requests_api.py asserts both."""
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
@@ -824,17 +1002,26 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     parallel = True
     attention_part = FlatQKNormAugmentedAttention
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
+    #: 2026-11-12: 4, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4}
 
 
-class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
+class AtomDiTChai1(MasterEntryCast, VariantAtomCuda, _LocalAtomDiT):
     """Chai-1's atom transformer block (its TorchScript ``diffusion_module.pt``): ONE identity AdaLN ``(1 + W_s c) LN(a) + W_b c`` for the
     queries and the keys / values (``single_layer_norm``; no ``attention.ada_ln_kv``) and another for the transition
     (``transition.ada_ln_in``), both LayerNorms of the atoms at ``adaln_eps`` (the release: 0.1, the default), no gating query and no output
     projection (``attention.to_out`` is the identity), the parallel schedule, the clipped window (``get_qkv_indices_for_blocks``: the wrapped
     keys are masked; ``key_window="pad"``, the default) and ``forward(..., uid=uid)`` [B, N]: a real query sees only the keys of its own
     conformer (``get_blocked_atom_pair_dists`` ANDs the same-``ref_space_uid`` mask into the block mask in place). No ``"anthropic"`` backend:
-    Chai-1's release keeps its stock atom attention (no kernel)."""
+    Chai-1's release keeps its stock atom attention (no kernel).
+
+    Invariant (shared K / V AdaLN): the release's ``single_layer_norm`` output feeds the queries and the keys / values (no
+    ``attention.ada_ln_kv``); as for :class:`AtomDiTBoltz2`, a separate K / V AdaLN in a checkpoint layout must equal the query one.
+
+    There is no circular window (FoldForge R9): chai_lab 0.6.1 ``get_qkv_indices_for_blocks`` returns ``kv_mask = (kv_indices < N) &
+    (kv_indices >= 0)`` before ``kv_indices % N`` (the ``%`` only indexes) and ``get_block_atom_pair_mask`` ANDs it in, so a wrapped key is never
+    attended: ``"pad"`` + ``uid`` is the release for every system, also one whose conformer covers both ends of the atom list and one under
+    128 atoms (tests/cpu/test_chai1_key_window.py compares the attended keys with a transcription of the release's mask)."""
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
@@ -872,11 +1059,11 @@ class AtomDiTChai1(VariantAtomCuda, _LocalAtomDiT):
         return self._step(single, cond, pair, mask, uid=uid, delta=self._attention_delta_triton)
 
     def make_inputs(self, **kwargs) -> dict:
-        inputs = super().make_inputs(**kwargs)
+        inputs = fp32_conditioning(super().make_inputs(**kwargs), kwargs.get("stream"), kwargs["generator"])
         return {
             **inputs,
-            "uid": (torch.arange(inputs["mask"].shape[-1], device=inputs["mask"].device) // 24)[None],
-        }  # conformers of 24 atoms
+            "uid": (torch.arange(inputs["mask"].shape[-1], device=inputs["mask"].device) // 24)[None].expand(inputs["mask"].shape[0], -1),
+        }  # conformers of 24 atoms (one row; expanded over the folds of an "atom_folds" call)
 
 
 # ======================================================================================== MiniWorld's sliding-window (SWA) atom block
@@ -1040,9 +1227,12 @@ class AtomDiTMiniWorld(BackendModule):
     ``backend="anthropic"`` sets its attention's (:class:`SWA3DRoPEAttention`); the block's own statements stay ``"pytorch"``'s.
     """
 
-    backends = ("pytorch", "anthropic", "cuda")
+    # "triton": 2026-11-12, the fused block's Triton stages (engine 2.4's SWADiTBlock)
+    backends = ("pytorch", "anthropic", "cuda", "triton")
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 4, "cuda:h100_sm90": 2}
+    # cuda:a100_sm80 6 (2026-11-12): bf16 training: the weight forms in one launch (train_forms), row-count launch shapes and K splits, the
+    # few-row modulation backward on cuBLAS (sm80.train_cfg)
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 6, "cuda:h100_sm90": 2}
 
     def __init__(
         self,
@@ -1301,6 +1491,68 @@ class AtomDiTMiniWorld(BackendModule):
         )
         return swa_dit_block_fwd(q, mod, cos, sin, seqused, *weights, q.shape[0], self.attn.half_window, FP32_EPS, False)[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
 
+    # ------------------------------------------------------------------------------------------------------------ "triton"
+    # The whole block on the fused SWA block's Triton stages (kernels/swa_dit/triton, any card: ``swa_dit_block_fwd`` / ``_bwd`` with
+    # ``portable=True``): qkvg + q / k RMSNorm + 3D RoPE, the window attention, out-projection + gated residual + SwiGLU FFN, and their
+    # backwards (bf16; fp32 on the fp32 row kernels around the bf16-operand window attention); the weight gradients and the modulation
+    # ``silu(cond) W^T`` (fp32, one row per sequence row) are cuBLAS. Engine 2.4's SWADiTBlock ran these off H100 / B200. Range: bf16 or
+    # fp32 activations (weights in that dtype or fp32 masters), d_atom 128 = 4 heads x 32, SwiGLU hidden 256, half_window 64 or global
+    # (2026-11-12: the same window kernels with every key in reach, dispatch.TRITON_GLOBAL_HW), the 6-tuple of build_attention_params.
+    def _supports_triton(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> str | None:
+        from miniworld_engine.kernels.swa_dit._common import D_ATOM, HALF_WINDOW, N_HEAD, N_HIDDEN, is_global
+
+        if not x.is_cuda:
+            return "the Triton kernels run on CUDA tensors only"
+        if len(attention_params) != 6:
+            return "attention_params must be the 6-tuple of build_attention_params"
+        if x.dtype not in (_BF, _F32) or cond.dtype != x.dtype:
+            return f"x / cond dtype {x.dtype} / {cond.dtype} (bfloat16 or float32, the same)"
+        if torch.is_autocast_enabled("cuda") and (x.dtype != _BF or torch.get_autocast_dtype("cuda") != _BF):
+            return "autocast: bfloat16 activations under bfloat16 autocast only"
+        linears = self._a100_linears()
+        if x.ndim != 3 or x.shape[-1] != D_ATOM or self.attn.n_heads != N_HEAD or tuple(cond.shape[:2]) != tuple(x.shape[:2]):
+            return f"x / cond must be [N, S, {D_ATOM}] / [N, S, d_cond] with {N_HEAD} heads"
+        if self.attn.half_window != HALF_WINDOW and not is_global(self.attn.half_window):
+            return f"half_window {self.attn.half_window} (the Triton window attention: {HALF_WINDOW} or global)"
+        if any(type(m) is not Linear or m.bias is not None for m in linears):
+            return "the kernels read bias-free (non magnitude-preserving) Linear weights"
+        if tuple(self.ffn.w_up.weight.shape) != (2 * N_HIDDEN, D_ATOM):
+            return f"SwiGLU hidden {self.ffn.w_up.weight.shape[0] // 2} (the kernels: {N_HIDDEN})"
+        if any(m.weight.dtype not in (x.dtype, _F32) for m in linears):
+            return "weights must be in the activation dtype or fp32"
+        cos, sin, seqused = attention_params[:3]
+        for t in (cos, sin):
+            if (
+                t.dtype != _F32
+                or t.shape[-1] != D_ATOM // N_HEAD // 2
+                or t.numel() != x.shape[0] * x.shape[1] * t.shape[-1]
+                or (t.requires_grad and torch.is_grad_enabled())
+            ):
+                return "cos / sin must be fp32 [N, S, head_dim / 2] without gradient"
+        if seqused.dtype != torch.int32 or tuple(seqused.shape) != (x.shape[0],):
+            return "seqused must be int32 [N]"
+        return None
+
+    def _forward_triton(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> torch.Tensor:
+        from miniworld_engine.kernels.swa_dit._common import FP32_EPS
+        from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction
+        from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_block_fwd
+
+        n = x.shape[0]
+        cos, sin, seqused = attention_params[:3]
+        cos, sin = cos.reshape(-1, cos.shape[-1]).contiguous(), sin.reshape(-1, sin.shape[-1]).contiguous()
+        wmod, *weights = (cast(torch.Tensor, m.weight) for m in self._a100_linears())
+        with torch.autocast("cuda", enabled=False):
+            # the modulation in fp32 (the kernels' operand), one row per sequence row (B = N); differentiable in cond and its weight
+            mod = F.linear(F.silu(cond.reshape(-1, cond.shape[-1]).float()), wmod.float())
+            if _needs_grad(self, x, cond):
+                return SWADiTBlockFunction.apply(
+                    x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, self.attn.half_window, True
+                )
+            weights = [w.to(x.dtype).contiguous() for w in weights]
+            args = (x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, self.attn.half_window, FP32_EPS, False, True)
+            return swa_dit_block_fwd(*args)[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into fixed parameters
+
     def forward_hoisted(self, x: torch.Tensor, c_base: torch.Tensor, attention_params: tuple) -> torch.Tensor:
         """The block over ``N = A * B`` rows whose conditioning repeats over the augments: ``cond[a*B + b] == c_base[b]``, with
         ``c_base`` [B, S, d_cond]. The same function as ``forward(x, c_base.repeat(A, 1, 1), attention_params)``."""
@@ -1337,7 +1589,10 @@ class AtomDiTESMFold2(AtomDiTMiniWorld):
     bias, an affine-free q / k RMSNorm, the 3D rotary, the band ``|rank_i - rank_j| <= 64`` among the valid atoms, ``sigmoid(gate_proj)`` of
     the normalised input, ``out_proj``) and ``SwiGLUFFN``. It is :class:`AtomDiTMiniWorld` (MiniWorld adopted this block), under
     ESMFold2's constructor: ``forward(x [A * B, S, d_single], cond [A * B, S, d_cond], attention_params)``
-    (:func:`~miniworld_engine.modules.functional.build_attention_params`). ``backend="anthropic"``: ESMFold2's own band core."""
+    (:func:`~miniworld_engine.modules.functional.build_attention_params`). ``backend="anthropic"``: ESMFold2's own band core.
+
+    Not FoldForge's ESMFold2 atom stack (FoldForge R6): that one is the AF3 block over a 32 x 192 atom pair (a pair bias this block has no
+    input for), :class:`AtomDiTESMFold2Pair` (``AtomDiT(model="esmfold2_pair")``); no option turns one into the other."""
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
@@ -1362,9 +1617,14 @@ class SWAAtomTransformer(BackendModule):
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
-    backends = ("pytorch", "anthropic", "cuda")
+    backends = ("pytorch", "anthropic", "cuda", "triton")  # "triton": every block's (AtomDiTMiniWorld._forward_triton)
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 4, "cuda:h100_sm90": 2}
+    # cuda:a100_sm80 6 (2026-11-12): bf16 training: the weight forms in one launch (train_forms), row-count launch shapes and K splits, the
+    # few-row modulation backward on cuBLAS (sm80.train_cfg)
+    # triton 2 (2026-11-12): global attention (half_window >= 65536 or negative) served, on the window kernels with every key in reach
+    # cuda:h100_sm90 3 (2026-11-12): bf16 / master global attention on the composed bf16 stages around FlashAttention-4 (dispatch._h100_global_composed;
+    # was the native stages): master train L 1024 S 48 2.19 -> 1.24 ms
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 6, "cuda:h100_sm90": 3, "triton": 2}
 
     class Config(BaseModel):
         """Configuration for the SWA atom transformer."""
@@ -1455,6 +1715,13 @@ class SWAAtomTransformer(BackendModule):
     def _forward_anthropic(self, q, c, attention_params, c_base=None):
         return self._forward_pytorch(q, c, attention_params, c_base)  # the blocks run their own backend
 
+    # "triton": every block on the fused block's Triton stages (:meth:`AtomDiTMiniWorld._forward_triton`); the range is the blocks'.
+    def _supports_triton(self, q, c, attention_params, c_base=None) -> str | None:
+        return cast(AtomDiTMiniWorld, self.blocks[0])._supports_triton(q, c, attention_params) if len(self.blocks) else None
+
+    def _forward_triton(self, q, c, attention_params, c_base=None):
+        return self._forward_pytorch(q, c, attention_params, c_base)  # the blocks run their own backend
+
     def build_rope(self, ref_pos: torch.Tensor, ref_space_uid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """The (cos, sin) [B, N, head_dim // 2] 3D RoPE tensors for one batch (no augment axis): ``ref_pos`` [B, N, 3], ``ref_space_uid``
         [B, N]."""
@@ -1512,6 +1779,236 @@ class SWAAtomTransformer(BackendModule):
         return {"q": q, "c": c, "attention_params": params}
 
 
+# ================================================================ ESMFold2's atom block with the atom pair (FoldForge R6)
+#: The 192-key subset and the +/- 64 rank window of :class:`AtomDiTESMFold2Pair`.
+ESM_KEYS, ESM_HALF = 192, 64
+
+
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Rotary on the head axis ``x [..., N, h, d]`` with per-atom tables ``cos`` / ``sin`` [..., N, r] (r <= d / 2), split into halves:
+    channel ``c < r`` pairs with ``c + r``, ``(a, b) -> (a cos - b sin, b cos + a sin)``; channels from ``2 r`` on pass unchanged (FoldForge
+    ``diffusion_transformer.apply_rope``: tiled tables, not interleaved)."""
+    r = cos.shape[-1]
+    c, s = cos[..., None, :].to(x.dtype), sin[..., None, :].to(x.dtype)
+    a, b = x[..., :r], x[..., r : 2 * r]
+    return torch.cat([a * c - b * s, b * c + a * s, x[..., 2 * r :]], dim=-1)
+
+
+def _rms(x: torch.Tensor) -> torch.Tensor:
+    """Affine-free RMSNorm over the last axis at float32's epsilon (FoldForge ``RMSNorm``, ESMFold2's ``rope_norm``)."""
+    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + RMS_EPS)
+
+
+class _ESMAttention(nn.Module):
+    """The attention half of :class:`AtomDiTESMFold2Pair` (parameters only; the math is the block's)."""
+
+    def __init__(self, d_single: int, d_cond: int, d_pair: int, n_head: int) -> None:
+        super().__init__()
+        self.n_head = n_head
+        self.ada_ln_in = AdaptiveRMSNorm(d_single, d_cond)
+        self.ada_ln_kv = AdaptiveRMSNorm(d_single, d_cond)
+        self.to_query = Linear(d_single, d_single, bias=True)
+        self.to_key = Linear(d_single, d_single, bias=False)
+        self.to_value = Linear(d_single, d_single, bias=False)
+        self.ln_pair = LayerNorm(d_pair, bias=False)
+        self.to_bias = Linear(d_pair, n_head, bias=False, init="zero")
+        self.to_gate = Linear(d_single, d_single, bias=False, init="gating")
+        self.to_out = Linear(d_single, d_single, bias=False, init="zero")
+        self.to_scale = Linear(d_cond, d_single, bias=False, init="zero")
+
+
+class _ESMTransition(nn.Module):
+    """The transition half of :class:`AtomDiTESMFold2Pair` (parameters only)."""
+
+    def __init__(self, d_hidden: int, d_cond: int, n: int) -> None:
+        super().__init__()
+        self.d_hidden, self.d_cond = d_hidden, d_cond
+        self.ada_ln_in = AdaptiveRMSNorm(d_hidden, d_cond)
+        self.expand_a = Linear(d_hidden, n * d_hidden, bias=False)
+        self.expand_b = Linear(d_hidden, n * d_hidden, bias=False)
+        self.squeeze = Linear(n * d_hidden, d_hidden, bias=False, init="zero")
+        self.to_scale = Linear(d_cond, d_hidden, bias=False, init="zero")
+
+
+class AtomDiTESMFold2Pair(BackendModule):
+    """FoldForge's ESMFold2 / ESMFold2-fast atom block (FoldForge R6; ``dense/diffusion_transformer.py`` ``CrossAttention`` +
+    ``DiffusionTransition`` under ``spec.ESMFOLD2``): AlphaFold 3's atom block -- parallel K / V AdaLN of the raw atoms, the slid key
+    window, a pair bias from the trunked atom pair, the sequential schedule -- with four changes:
+
+    * every AdaLN is :class:`~miniworld_engine.modules.norm.AdaptiveRMSNorm`: ``(1 + W_s silu(c)) * rms(x) + W_b silu(c)`` (no biases);
+    * both output gates are raw ``W silu(c)`` (no sigmoid, no bias);
+    * the key window is a 192-key subset slid AlphaFold 3's way (``[32 w - 80, 32 w + 112)``,
+      :func:`~miniworld_engine.modules.functional.slide_starts` with ``keys=192``) in which query ``i`` sees key ``j`` only when
+      ``|i - j| <= 64`` (the rank among the real atoms, which come first);
+    * q and k pass an affine-free per-head RMSNorm and a rotary with per-atom tables the caller supplies: ``forward(..., rope=(cos, sin))``,
+      each ``[B, N, r]``, ``r <= head_dim / 2`` (the keys take their own atoms' rows; FoldForge ``build_atom_rope``).
+
+    ``single`` / ``cond`` ``[A, B, N, d]``, trunked ``pair`` ``[B, nwin, 32, 192, d_pair]`` (the window's keys laid out from its first key,
+    as FoldForge's ``pair_cond`` gathered with the same subsets), key ``mask`` ``[B, N]`` (real atoms first). Not :class:`AtomDiTESMFold2`:
+    that is ESMFold2's released pair-free ``SWAAtomBlock`` (fused ``Wqkv``, adaLN-Zero, 3D RoPE inside); this is the block FoldForge's
+    ESMFold2 port builds (``AtomDiT(model="esmfold2_pair")``).
+
+    Backends: ``"pytorch"`` (the reference), ``"triton"`` (the window attention core on ``kernels/augmented_attention/triton/window.py``, the
+    rest as ``"pytorch"``), ``"cuda"`` (``kernels/integrations/local_dit_esm.py``: H100 inference on the sm90_atom row kernels built with
+    ``RMS``, the q / k RMSNorm + rotary of ``qknorm_local.cu`` and the 192-key rank-window attention of ``lattn90_esm.cu``; H100 training and
+    A100 inference / training on the row passes of ``dit_variants/cuda/train_rows.cu`` + cuBLAS around the same attention kernels).
+    """
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
+    backends = ("pytorch", "triton", "cuda")
+
+    def __init__(
+        self, d_single: int = 128, d_cond: int = 128, d_pair: int = 16, n_head: int = 4, n: int = 2, *, backend: str = "pytorch"
+    ) -> None:
+        super().__init__()
+        self.attention = _ESMAttention(d_single, d_cond, d_pair, n_head)
+        self.transition = _ESMTransition(d_single, d_cond, n)
+        self.set_backend(backend)
+
+    # --------------------------------------------------------------------------------------------------------------------- the math
+    def attention_operands(self, single, cond, pair, mask, rope):
+        """``x`` (the q AdaLN output), q / k (normalised and rotated, fp32 or wider) and v [A, B, N, H, D], the pair bias
+        [B, H, nwin, 32, 192], the window starts [B, nwin] and the key mask [B, N] (float)."""
+        att = self.attention
+        x = att.ada_ln_in(single, cond)
+        xkv = att.ada_ln_kv(single, cond)
+        a, b, n, c = x.shape
+        h = att.n_head
+        d = c // h
+        nwin = windows(n)
+        if tuple(pair.shape[:4]) != (b, nwin, QUERIES, ESM_KEYS):
+            raise ValueError(f"pair must be the trunked atom pair [B, {nwin}, {QUERIES}, {ESM_KEYS}, d_pair], got {tuple(pair.shape)}")
+        if rope is None or len(rope) != 2:
+            raise ValueError("this block rotates q and k: pass rope=(cos, sin), each [B, N, r]")
+        cos, sin = rope
+        if tuple(cos.shape[:2]) not in ((b, n), (1, n)) or cos.shape != sin.shape or 2 * cos.shape[-1] > d:
+            raise ValueError(f"rope tables must be [B, N, r] with r <= {d // 2}, got {tuple(cos.shape)} / {tuple(sin.shape)}")
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            z = F.layer_norm(pair, (pair.shape[-1],), att.ln_pair.weight.to(pair.dtype), None, att.ln_pair.eps)
+        bias = F.linear(z, att.to_bias.weight.to(z.dtype)).permute(0, 4, 1, 2, 3)
+        w = wide(x)
+        q = master_linear(att.to_query, x)
+        k = master_linear(att.to_key, xkv)
+        v = master_linear(att.to_value, xkv).reshape(a, b, n, h, d)
+        q = apply_rope(_rms(q.to(w).reshape(a, b, n, h, d)), cos.to(w), sin.to(w))
+        k = apply_rope(_rms(k.to(w).reshape(a, b, n, h, d)), cos.to(w), sin.to(w))
+        keep = torch.ones(b, n, device=x.device) if mask is None else mask.float()
+        starts = slide_starts(keep.sum(-1).long(), nwin, ESM_KEYS)
+        return x, q, k, v, bias, starts, keep
+
+    def _gates(self, single, cond, x, out):
+        """``W_sc silu(c) * W_o (sigmoid(W_g x) * out)``: the attention's update from its core output ``out`` [A, B, N, H * D]."""
+        att = self.attention
+        out = master_linear(att.to_out, torch.sigmoid(master_linear(att.to_gate, x)) * out)
+        return master_linear(att.to_scale, F.silu(cond)) * out
+
+    def attention_delta(self, single, cond, pair, mask=None, rope=None) -> torch.Tensor:
+        """The attention's update (no residual), PyTorch: softmax over each window's 192 keys, the +/- 64 band and the key mask."""
+        x, q, k, v, bias, starts, keep = self.attention_operands(single, cond, pair, mask, rope)
+        a, b, n, h, d = q.shape
+        nwin, keys = windows(n), ESM_KEYS
+        w = q.dtype
+        key_pos = starts[:, :, None] + torch.arange(keys, device=x.device)  # [B, nwin, keys]
+        qw = F.pad(q.reshape(a, b, n, h * d), (0, 0, 0, nwin * QUERIES - n)).reshape(a, b, nwin, QUERIES, h, d)
+        kw = _gather_windows(k.reshape(a, b, n, h * d), key_pos).reshape(a, b, nwin, keys, h, d)
+        vw = _gather_windows(v.reshape(a, b, n, h * d), key_pos).reshape(a, b, nwin, keys, h, d)
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            scores = torch.einsum("abwqhd,abwkhd->abhwqk", qw, kw.to(w)) * d**-0.5 + bias.to(w)[None]
+        valid = _gather_windows(keep[None, ..., None], key_pos)[0, ..., 0] > 0  # [B, nwin, keys]
+        query_pos = torch.arange(nwin * QUERIES, device=x.device).view(1, nwin, QUERIES, 1)
+        valid = valid[:, :, None, :] & ((query_pos - key_pos[:, :, None, :]).abs() <= ESM_HALF)  # [B, nwin, 32, keys]
+        scores = scores.masked_fill(~valid[None, :, None], float("-inf"))
+        probs = torch.nan_to_num(torch.softmax(scores, dim=-1))
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            out = torch.einsum("abhwqk,abwkhd->abwqhd", probs, vw.to(w)).to(x.dtype)
+        out = out.reshape(a, b, nwin * QUERIES, h * d)[:, :, :n]
+        return self._gates(single, cond, x, out)
+
+    def transition_delta(self, single, cond) -> torch.Tensor:
+        """The transition's update (no residual): AdaptiveRMSNorm, SwiGLU, the raw gate ``W silu(c)``."""
+        tr = self.transition
+        x = tr.ada_ln_in(single, cond)
+        hidden = F.silu(master_linear(tr.expand_a, x)) * master_linear(tr.expand_b, x)
+        return master_linear(tr.to_scale, F.silu(cond)) * master_linear(tr.squeeze, hidden)
+
+    def _step(self, single, cond, pair, mask, rope, delta):
+        single = single + delta(single, cond, pair, mask, rope)
+        return single + self.transition_delta(single, cond)
+
+    def _forward_pytorch(self, single, cond, pair, mask=None, rope=None):
+        """``single`` [A, B, N, d_single], ``cond`` [A, B, N, d_cond], trunked ``pair`` [B, nwin, 32, 192, d_pair], key ``mask`` [B, N],
+        ``rope`` (cos, sin) [B, N, r] -> the stream after the attention and the transition (both residuals included)."""
+        return self._step(single, cond, pair, mask, rope, self.attention_delta)
+
+    # ------------------------------------------------------------------------------------------------------------ "triton"
+    def _supports_triton(self, single, cond, pair, mask=None, rope=None) -> str | None:
+        if not single.is_cuda:
+            return "the Triton window attention runs on CUDA tensors only"
+        if single.dtype not in (_BF, _F32):
+            return f"dtype {single.dtype} (bfloat16 / float32 only)"
+        if single.ndim != 4 or cond.ndim != 4:
+            return f"single / cond must be [A, B, N, d], got {tuple(single.shape)} / {tuple(cond.shape)}"
+        b, n, c = single.shape[1:]
+        h = self.attention.n_head
+        if c % h or c // h > 64:
+            return f"head dim {c / h:g} (the Triton window kernel takes a whole head dim <= 64)"
+        if tuple(pair.shape[:4]) != (b, windows(n), QUERIES, ESM_KEYS):
+            return f"pair must be the trunked atom pair [B, {windows(n)}, {QUERIES}, {ESM_KEYS}, d_pair], got {tuple(pair.shape)}"
+        if mask is not None and tuple(mask.shape) != (b, n):
+            return f"mask must be [B, N], got {tuple(mask.shape)}"
+        if rope is None:
+            return "rope=(cos, sin) is required"
+        return None
+
+    def _attention_delta_triton(self, single, cond, pair, mask=None, rope=None) -> torch.Tensor:
+        """:meth:`attention_delta` with the window softmax on the Triton kernel (same windows, band, key mask and empty-row zero)."""
+        from miniworld_engine.kernels.augmented_attention.triton.window import window_attention
+
+        x, q, k, v, bias, starts, keep = self.attention_operands(single, cond, pair, mask, rope)
+        a, b, n, h, d = q.shape
+        q, k = q.to(x.dtype), k.to(x.dtype)
+        out = window_attention(q, k, v, bias, starts.to(torch.int32).contiguous(), keep > 0, keys=ESM_KEYS, window_half=ESM_HALF)
+        return self._gates(single, cond, x, out.to(x.dtype).reshape(a, b, n, h * d))
+
+    def _forward_triton(self, single, cond, pair, mask=None, rope=None):
+        return self._step(single, cond, pair, mask, rope, self._attention_delta_triton)
+
+    # -------------------------------------------------------------------------------------------------------------- "cuda"
+    def _supports_cuda(self, single, cond, pair, mask=None, rope=None) -> str | None:
+        from miniworld_engine.kernels.integrations import local_dit_esm
+
+        return local_dit_esm.reason(self, single, cond, pair, mask, rope)
+
+    def _forward_cuda(self, single, cond, pair, mask=None, rope=None):
+        from miniworld_engine.kernels.integrations import local_dit_esm
+
+        # the kernels' precision is their own (bf16 operands, or TF32 for fp32): an enclosing autocast must not recast their torch glue
+        with torch.autocast("cuda", enabled=False):
+            return local_dit_esm.run_block(self, single, cond, pair, mask, rope)
+
+    def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
+        """``single`` / ``cond`` [S, 1, N, d] (S samples), the trunked ``pair`` [1, nwin, 32, 192, d_pair], the key ``mask`` [1, N] (real atoms
+        first, padding inside the last query window) and the rotary tables ``rope`` [1, N, head_dim / 2] (fp32: FoldForge builds them so).
+        Stream ``atom_single_shared_cond``: ``cond`` [1, 1, N, d] expanded (stride 0) over the S samples (requirements/README.md)."""
+        d_single, d_cond = self.transition.d_hidden, self.transition.d_cond
+        shared = shared_cond_stream(stream)[1]
+        d_pair = self.attention.ln_pair.normalized_shape[0]
+        half = d_single // self.attention.n_head // 2
+        angle = 3 * random_input((1, length, half), dtype=torch.float32, device=device, generator=generator)
+        rdt = torch.float64 if dtype == torch.float64 else torch.float32
+        return {
+            "single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
+            "cond": (
+                random_input((1, 1, length, d_cond), dtype=dtype, device=device, generator=generator).expand(samples, -1, -1, -1)
+                if shared
+                else random_input((samples, 1, length, d_cond), dtype=dtype, device=device, generator=generator)
+            ),
+            "pair": random_input((1, windows(length), QUERIES, ESM_KEYS, d_pair), dtype=dtype, device=device, generator=generator),
+            "mask": key_mask(1, length, device=device, pad=QUERIES - 8),
+            "rope": (angle.cos().to(rdt), angle.sin().to(rdt)),
+        }
+
+
 # ======================================================================================================================== selector
 #: model name -> its atom DiT class. Several models share a class where their blocks are the same math.
 ATOM_DIT_MODELS: dict[str, type[BackendModule]] = {
@@ -1526,6 +2023,7 @@ ATOM_DIT_MODELS: dict[str, type[BackendModule]] = {
     "protenix_v2": AtomDiTProtenix,
     "opendde": AtomDiTProtenix,
     "esmfold2": AtomDiTESMFold2,
+    "esmfold2_pair": AtomDiTESMFold2Pair,
     "miniworld": AtomDiTMiniWorld,
 }
 
@@ -1546,6 +2044,8 @@ class AtomDiT:
 
 __all__ = [
     "ATOM_DIT_MODELS",
+    "ESM_HALF",
+    "ESM_KEYS",
     "KEYS",
     "KEY_OFFSET",
     "KEY_WINDOWS",
@@ -1554,6 +2054,7 @@ __all__ = [
     "AtomDiTBoltz2",
     "AtomDiTChai1",
     "AtomDiTESMFold2",
+    "AtomDiTESMFold2Pair",
     "AtomDiTMiniWorld",
     "AtomDiTOpenFold3",
     "AtomDiTProtenix",

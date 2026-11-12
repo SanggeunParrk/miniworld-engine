@@ -781,7 +781,7 @@ def pair_bias_generic_bwd_supported(dp: int, heads: int, dtype: torch.dtype) -> 
         te is not None
         and dtype in (torch.bfloat16, torch.float32)
         and heads in GEN_BWD_HEADS
-        and (dp * heads + 2 * te * (dp + 4) + te * heads) * 4 <= _smem_cap()
+        and (dp * (heads if (heads // 4) % 2 else heads + 4) + 2 * te * (dp + 4) + te * heads) * 4 <= _smem_cap()
     )
 
 
@@ -792,16 +792,18 @@ def pair_bias_generic_backward(
     mask: torch.Tensor | None,
     n: int,
     eps: float = 1e-5,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The backward of :func:`pair_bias_generic` in natural units: ``z`` ``[NZ, NZ, C]``, ``wcm`` the folded weight fp32 ``[C, H]``, ``db`` fp32 ``[H, n, n]`` (the bias gradient summed over the
     samples), ``mask`` the bool ``[NZ]`` key mask the forward folded in (a masked key's gradient is dropped) or None.  Returns ``(dz, dw)``: ``dz`` in z's dtype and shape, ``dw`` the fp32
-    ``[H, C]`` gradient of the folded weight (summed over the kernel's blocks in a fixed order: a replay is bit-identical)."""
+    ``[H, C]`` gradient of the folded weight (summed over the kernel's blocks in a fixed order: a replay is bit-identical).
+    ``out``: a contiguous buffer of z's shape and dtype that ``dz`` is written into (a batch row of the caller's gradient)."""
     nz, c, heads = z.shape[0], z.shape[-1], wcm.shape[1]
     te = _GEN_BWD_TE[c]
     tiles = -(-nz // te)
     rows = max(1, min(8, nz * tiles // 864))  # about four waves of two blocks per SM
     pw = torch.empty(tiles * -(-nz // rows), heads, c, device=z.device, dtype=torch.float32)
-    dz = torch.empty_like(z)
+    dz = torch.empty_like(z) if out is None else out
     _ext().pair_bias_gen_bwd(
         z.reshape(nz, nz, c),
         wcm,
@@ -815,6 +817,38 @@ def pair_bias_generic_backward(
         rows,
     )
     return dz, pw.sum(0)
+
+
+@functools.cache
+def _sms(index: int) -> int:
+    return torch.cuda.get_device_properties(index).multi_processor_count
+
+
+#: the fp32 tensor-core pair-bias backward (``pair_bias_gen_bwd_tc``): its widths and head counts
+GEN_BWD_TC_WIDTHS = (128, 256, 384, 512)
+GEN_BWD_TC_HEADS = (8, 16, 24)
+
+
+def pair_bias_generic_backward_tc_supported(dp: int, heads: int, dtype: torch.dtype) -> bool:
+    """The fp32 tensor-core pair-bias backward's requirements: an fp32 pair of 128 / 256 / 384 / 512 channels, 8 / 16 / 24 heads."""
+    return dtype is torch.float32 and dp in GEN_BWD_TC_WIDTHS and heads in GEN_BWD_TC_HEADS
+
+
+def pair_bias_generic_backward_tc(
+    z: torch.Tensor, wcm: torch.Tensor, db: torch.Tensor, mask: torch.Tensor | None, n: int, eps: float = 1e-5
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The backward of :func:`pair_bias_generic` for a batch of fp32 pairs in one launch, on TF32 tensor cores (operands rounded to the nearest TF32,
+    fp32 accumulation; the pair gradient's product in 3xTF32): ``z`` fp32 ``[B, NZ, NZ, C]`` (contiguous), ``wcm`` the folded weight fp32 ``[C, H]``, ``db`` fp32 ``[B, H, n, n]`` (each batch row's bias
+    gradient), ``mask`` a bool ``[B, NZ]`` key mask or None. Returns ``(dz, dw)``: ``dz`` fp32 of z's shape and ``dw`` fp32 ``[B, H, C]``, each batch row's
+    gradient of the folded weight, summed over the row's CTAs in a fixed order -- a replay is bit-identical and a row's result does not depend on B (the CTAs
+    per row are the SM count, whatever B)."""
+    b, nz, c, heads = z.shape[0], z.shape[1], z.shape[-1], wcm.shape[1]
+    nct = _sms(z.device.index if z.device.index is not None else torch.cuda.current_device())
+    dz = torch.empty_like(z)
+    pw = torch.empty(b, nct, heads, c, device=z.device, dtype=torch.float32)
+    dw = torch.empty(b, heads, c, device=z.device, dtype=torch.float32)
+    _ext().pair_bias_gen_bwd_tc(z, wcm, db, dz, pw, dw, _kv(mask, z.device), n, nz, nct, eps)
+    return dz, dw
 
 
 def pair_bias_backward_w(
@@ -1022,10 +1056,12 @@ def tf32_backward(
     dk: torch.Tensor | None = None,
     dv: torch.Tensor | None = None,
     rna: bool = False,
+    db: torch.Tensor | None = None,
 ):
     """The backward of :func:`tf32_forward` (without the gate): ``dob`` the output's gradient fp32 ``[A L, H hd]``, ``o`` / ``lse`` the forward's, ``bias`` fp32 natural units.
     Returns ``(dq, dk, dv, db)``: fp32 ``[A L, H hd]`` each (or the views passed) and the bias gradient fp32 ``[H, L, L]`` (the sum over the samples; masked keys 0), summed from fp32
-    partials of 1-2 samples in a fixed order: a replay is bit-identical."""
+    partials of 1-2 samples in a fixed order: a replay is bit-identical.
+    ``db``: a contiguous fp32 [H, L, L] buffer the bias gradient is written into (e.g. a row of a batch's) instead of a new tensor."""
     assert head_dim in TF32_MODULE_HEAD_DIMS, head_dim
     ext = _tf32_rna_ext() if rna else _tf32_ext()  # rna: operands rounded to the nearest TF32
     dev, m, d = q.device, samples * length, heads * head_dim
@@ -1041,7 +1077,7 @@ def tf32_backward(
     per_tile = groups * heads * 128 * length * 4
     chunk = max(1, min(tiles, _DBP_BUDGET // per_tile))
     dbp = torch.empty(groups, heads, chunk * 128, length, device=dev, dtype=torch.float32)
-    db = torch.empty(heads, length, length, device=dev, dtype=torch.float32)
+    db = torch.empty(heads, length, length, device=dev, dtype=torch.float32) if db is None else db
     for qt0 in range(0, tiles, chunk):
         nqt = min(chunk, tiles - qt0)
         buf = dbp if nqt == chunk else torch.empty(groups, heads, nqt * 128, length, device=dev, dtype=torch.float32)

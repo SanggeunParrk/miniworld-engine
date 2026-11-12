@@ -64,7 +64,7 @@ COND_WIDTHS_H100 = (384, 768)
 #: the QK-norm weights, appended to WEIGHTS when the block has use_qk_norm
 QK_WEIGHTS = ("attention.norm_query.weight", "attention.norm_key.weight")
 #: Packed runners keyed by the weights' (pointer, version): see ``_infer``.
-_RUNNERS: dict = {}
+_RUNNERS: dict = _capture.weight_cache("token_dit.runners")
 
 
 # ------------------------------------------------------------------------------------------------ the models' options
@@ -243,9 +243,14 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         return False
     if not single.is_cuda or single.dtype not in (torch.bfloat16, torch.float32):
         return False
+    if pair.dtype is not single.dtype:  # token_inference's own condition (the pair LayerNorm rows read the single's dtype)
+        return False
     if compute_dtype is not None and compute_dtype != single.dtype:
         return False
     if single.ndim != 4 or single.shape[2] < 8:
+        return False
+    # token_inference's pair: [B, L, L, w], one pair per trunk_seed (the 5I28 run of FoldForge: a call the gate claimed raised there)
+    if pair.ndim != 4 or tuple(pair.shape[:3]) != (single.shape[1], single.shape[2], single.shape[2]):
         return False
     if single.shape[1] != 1 and not (
         # B trunk_seeds, each its own pair (the grouped-bias attention): bf16 on H100 only, a pair per trunk_seed

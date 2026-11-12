@@ -198,6 +198,8 @@ def _rows_blocks(kind: int, pair: torch.Tensor, n_head: int) -> int:
     return min(L, -(-_bytes_per_token(GENERIC, C, n_head, False)[0] * L * L // int(cap)))
 
 
+@torch.autocast("cuda", enabled=False)  # the fp16 core takes the fp16 projections as made: an enclosing bf16 autocast turned the
+# q | k | v | g GEMM bf16 and the core raised (FoldForge's 5I28 run, OpenDDE at 2048 tokens: the first call split into row blocks)
 def _generic_rows(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, out, flip, gate_bias, out_bias, blocks):
     """Inference of one sample at a time in ``blocks`` blocks of its pair rows, on the width-generic kernels (``_rows_blocks``).
 

@@ -100,7 +100,7 @@ def _squeeze_residual_kernel(
     mask = (m[:, None] < M) & (n[None, :] < N)
     if SPLIT_K > 1:
         # this split's fp32 partial; _split_k_residual_kernel sums the splits in order and adds the residual
-        tl.store(P + tl.program_id(1) * M * N + m[:, None] * N + n[None, :], acc, mask=mask)
+        tl.store(P + tl.program_id(1).to(tl.int64) * M * N + m[:, None] * N + n[None, :], acc, mask=mask)  # 64-bit split base
     else:
         residual = tl.load(R + m[:, None] * srm + n[None, :] * srn, mask=mask, other=0).to(tl.float32)
         # Match mm(...).to(activation_dtype) + residual, including the old rounding boundary.
@@ -111,11 +111,13 @@ def _squeeze_residual_kernel(
 @triton.jit
 def _split_k_residual_kernel(P, R, Y, M, N, srm, srn, SPLIT_K: tl.constexpr, BLOCK: tl.constexpr):
     """``Y = (sum of the SPLIT_K fp32 partials, in split order).to(Y dtype) + R``, the squeeze epilogue of a split-K launch."""
+    # 64-bit offsets: `M * N` and `s * M * N` are scalar products of int32 arguments, formed in int64 before they meet `offs`
+    mn = tl.cast(M, tl.int64) * N  # tl.cast: an extent of 1 arrives as a constexpr, which has no .to
     offs = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < M * N
+    mask = offs < mn
     acc = tl.load(P + offs, mask=mask, other=0)
     for s in tl.static_range(1, SPLIT_K):
-        acc += tl.load(P + s * M * N + offs, mask=mask, other=0)
+        acc += tl.load(P + s * mn + offs, mask=mask, other=0)
     row, col = offs // N, offs % N
     residual = tl.load(R + row * srm + col * srn, mask=mask, other=0).to(tl.float32)
     tl.store(Y + offs, acc.to(Y.dtype.element_ty).to(tl.float32) + residual, mask=mask)
