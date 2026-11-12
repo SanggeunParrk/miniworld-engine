@@ -518,3 +518,60 @@ _TRAIN_CFG = (
 def train_cfg(m: int) -> dict:
     """The per-stage keywords of a training call over ``m`` rows (``_TRAIN_CFG``; past its last bound none: the defaults)."""
     return next((c for top, c in _TRAIN_CFG if m <= top), {})
+
+
+# ------------------------------------------------------------------------------------------------------------- RTX 5090: the fused inference stages
+@functools.lru_cache(maxsize=1)
+def _ext_sm120():
+    """The sm_120a-only extension of the fused bf16 inference stages within 99 KB (``fused_sm120.cu``: qkvg on CTA pairs, the FFN on 32-unit weight chunks)."""
+    ensure_cuda_home()
+    from miniworld_engine.kernels._nvcc import load_extension as _load
+
+    return _load(
+        name="swa_dit_fused_sm120",
+        sources=[str(_dir / "fused_sm120.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-gencode=arch=compute_120a,code=sm_120a",
+            "-DMWE_SM120=1",
+            f"-I{_dir}",
+            "-Xcompiler=-fno-gnu-unique",
+        ],
+        extra_cflags=["-std=c++17", "-O3", "-fno-gnu-unique"],
+        verbose=False,
+    )
+
+
+#: RTX 5090 launch shapes of ``block_infer_sm120`` by the row count M (rows <= the bound): the qkvg kernel's (cfg, nsplit of a half's 4 blocks, max CTA pairs)
+#: and the FFN cfg (warps per CTA 8 / 4 / 2 / 1 for 0 / 1 / 2 / 3). Measured 2026-11-13 per stage, graph replays (tune sweep of every cfg x nsplit x pairs):
+#: a call of few rows takes the 4-warp FFN CTAs and splits the qkvg blocks wider; from 16k rows the 8-warp FFN.
+_INFER_CFG_SM120 = (
+    (1024, dict(cfg=1, nsplit=4, max_pairs=32), 1),
+    (2048, dict(cfg=2, nsplit=4), 1),
+    (5120, dict(cfg=2, nsplit=2), 1),
+    (8192, dict(cfg=1, nsplit=2), 1),
+    (10240, dict(cfg=1, nsplit=1), 1),
+)
+_INFER_DEFAULT_SM120 = (dict(cfg=1, nsplit=1), 0)
+#: the bf16 block takes the fused stages from this many rows (fewer: the composed row stages, ``composed._fwd_fp32``, were as fast or faster: L 1024 S 1 38.9 vs 43.3 us)
+FUSED_MIN_ROWS_SM120 = 2049
+
+
+def block_infer_sm120(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, eps: float, qk_eps: float) -> torch.Tensor:
+    """The bf16 window block's inference on the RTX 5090: ``q`` [N, S, 128] bf16, ``mod`` [N S, 768] fp32 (one modulation row per sequence row), ``cos`` / ``sin``
+    [N S, 16] fp32 -> [N, S, 128] bf16.  ``block_fwd``'s three stages (the same statements and rounding points) with the qkvg / FFN kernels of ``fused_sm120.cu``;
+    the launch shapes from ``_INFER_CFG_SM120``."""
+    n, s, _ = q.shape
+    m = n * s
+    qf = q.reshape(m, C)
+    qcfg, fcfg = next(((q_, f_) for top, q_, f_ in _INFER_CFG_SM120 if m <= top), _INFER_DEFAULT_SM120)
+    ext = _ext_sm120()
+    qh, kh, vh = (torch.empty(n, H, s, D, device=q.device, dtype=torch.bfloat16) for _ in range(3))
+    g = torch.empty(m, C, device=q.device, dtype=torch.bfloat16)
+    ext.swa_qkvg_fwd_half(qf, mod, cos, sin, wqkv, wg, qh, kh, vh, g, s, n, eps, qk_eps, qcfg["cfg"], False, qcfg["nsplit"], qcfg.get("max_pairs", 0))
+    o, _ = attn_fwd(qh, kh, vh, seqused, save_lse=False)
+    out = torch.empty_like(qf)
+    ext.swa_ffn_fwd_u32(qf, g, o, mod, wo, wu, wd, out, s, n, eps, fcfg)
+    return out.view(n, s, C)
