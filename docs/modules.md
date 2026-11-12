@@ -58,11 +58,135 @@ Some ops have one class per model; a selector builds the model's own class (not 
 | selector | map | example |
 |---|---|---|
 | `TokenDiT(model, ...)` | `TOKEN_DIT_MODELS` in `token_dit.py` | `af3`, `protenix`, `openfold3`, `esmfold2`, ... -> `TokenDiTProtenix`; `boltz2`, `rosettafold3`, `chai1`, `miniworld`, `miniworld_bias_only` -> their classes |
-| `AtomDiT(model, ...)` | `ATOM_DIT_MODELS` in `atom_dit.py` | `af3` / `openfold3` / `intellifold2` -> `AtomDiTOpenFold3`; `protenix` / `opendde` -> `AtomDiTProtenix`; `esmfold2`, `miniworld`, `boltz2`, `rosettafold3`, `chai1` |
+| `AtomDiT(model, ...)` | `ATOM_DIT_MODELS` in `atom_dit.py` | `af3` / `openfold3` / `intellifold2` -> `AtomDiTOpenFold3`; `protenix` / `opendde` -> `AtomDiTProtenix`; `esmfold2` (released pair-free SWA block), `esmfold2_pair` -> `AtomDiTESMFold2Pair` (FoldForge's ESMFold2 atom stack with the atom pair), `miniworld`, `boltz2`, `rosettafold3`, `chai1` |
 | `TriangleAttention(..., model=)` | `triangle.py` | `chai1` -> `TriangleAttentionChai1`; `af3` -> `TriangleAttentionAF3`; `rf3`; `chai1_confidence` |
 | `TriangleMultiplication(..., model=)` | `triangle.py` | `rf3` -> `TriangleMultiplicationRF3` |
 
 The requirements' `model` column lists the selector keys of each row; the measurers build the class directly by name.
+
+`protenix_v2` is an alias of `protenix` for `TriangleAttention` / `TriangleMultiplication` (Protenix-v2 runs Protenix's triangle updates
+unchanged), so a family maps to one key across all selectors. A `PairformerBlock` takes separate keys for its two kinds of triangle
+update: `PairformerConfig(model=..., triattn_model=None, trimul_model=None)` (None = `model`); RoseTTAFold3's fast mode is
+`model="rf3", trimul_model="miniworld"` (RF3 triangle attention, the plain multiplication).
+
+## Multi-fold contract of the DiT blocks (trunk_seed x diffusion_seed)
+
+Every `TokenDiT*` and pair-taking `AtomDiT*` block (and `TokenDiTStack` / `AtomDiTStack`) takes several folds of one input in ONE call;
+the fold axis is the blocks' `B` axis:
+
+| input | layout | meaning |
+|---|---|---|
+| `single` | `[A, B, L, d]` | A diffusion samples (diffusion_seeds) of each of B folds (trunk_seeds) |
+| `cond` | `[A, B, L, d_cond]` | fold `b`'s conditioning; one per fold expanded over A (stride 0) is the sampler step's form and is read once |
+| `pair` | token `[B, L, L, d_pair]`, atom `[B, nwin, 32, 128, d_pair]` | fold `b`'s own pair (trunk) |
+| `mask` | `[B, L]` | the key mask; the folds of one input share it: one `[1, L]` row expanded over B (stride 0) |
+| `uid` | `[B, N]` | Chai-1's conformer ids, likewise one row expanded over B |
+
+Sample `(a, b)` (row `single[a, b]`) attends with fold `b`'s pair bias and conditioning: the result equals B separate calls of
+`[A, 1, ...]` (one per fold), which is how the tests check it (tests/cpu/test_requests_api.py, tests/gpu/test_requests_api_gpu.py). Inside the kernels the `A x B` rows are laid
+out `[A][B]` and the grouped-bias attention reads sample `s`'s bias from pair `s mod B`. The requirement rows with stream `token_folds` /
+`atom_folds` (the `depths` column = the fold count B) are this layout.
+
+Served on: `pytorch` and `triton` everywhere; `cuda` for bfloat16 (or master) inference: on H100 in one call over the B folds (the grouped-bias
+kernels; the token block within its inference gate, e.g. L a multiple of 128; the atom block: every key window), on A100 the token block
+within its sm_80 gate and the atom block as one sm_80 call per fold (the sm_80 atom kernels take one pair; N a multiple of 64). A B > 1
+call in fp32 or with a gradient is refused with a reason on both cards (the TF32 kernels and the backward keep one pair bias). FoldForge
+measured its grouped 5 x 5 sampler at 1.5x end to end for assemblies up to 256 tokens.
+
+## DiT stacks and the shared pair norm (`modules/dit_stack.py`)
+
+`TokenDiTStack(model, n_blocks, ...)` / `AtomDiTStack(model, n_blocks, ...)` hold `n_blocks` blocks of one model's own class in a
+`ModuleList` `blocks` (state-dict keys `blocks.{i}.<block names>`) and run them in order; they add no math. Every block gets the same
+`pair` / `cond` / `mask` / `uid` objects, so each block's hoisted pair bias and conditioning tables are made once per fold;
+`extra_pair_bias` / `compute_dtype` (token) and `uid` (Chai-1's atom blocks) are forwarded. `AtomDiTStack` refuses the pair-free
+ESMFold2 / MiniWorld atom blocks (their stack is `SWAAtomTransformer`). `set_backend` sets every block's backend.
+
+A released AF3-family stack keeps ONE pair LayerNorm and one projection of `n_blocks * n_head` rows (AF3's token DiT: one per super block
+of four, whose row-concatenation is that projection). `from_shared_pair(norm_weight, projection, n_blocks=, n_head=, norm_bias=None)` gives
+each block `attention.ln_pair.weight` (a copy) and its `n_head` rows of `attention.to_bias.weight`; `stack.load_shared_pair(...)` copies
+them in. The LayerNorm offset is dropped: it adds `W_proj beta`, one constant per head for every (query, key), which the softmax cancels.
+
+## Parallel residual (`parallel_residual`, `ParallelResidual`)
+
+A parallel stage whose parts own their residuals (`y_i = x + delta_i`; Chai-1's MSA block) updates `x` by the sum of the deltas:
+`parallel_residual(x, *ys, backend="pytorch" | "cuda" | "triton")` = `x + sum_i (y_i - x)`, the differences and the sum in fp32, one
+rounding. `"triton"` (`kernels/parallel_residual/triton`) is one pass over the tensors (1 to 4 branches, CUDA, one dtype); its backward
+is torch (`d/dy_i = g`, `d/dx = (1 - n) g`). `"cuda"` (`kernels/parallel_residual/cuda/parallel_residual.cu`: one source, built as
+`parallel_residual_sm90` for H100 sm_90a and `parallel_residual_sm80` for A100 sm_80) is the same arithmetic in the same order (bitwise
+equal to `"pytorch"` and `"triton"`) with 16-byte vector accesses and streaming cache hints, and its backward's `(1 - n) g` in one small
+kernel (the Triton path's torch statements take three passes for bf16). Both forward passes stream near the memory bandwidth (H100, bf16,
+pair 768 x 768 x 256 with three branches: 1.5 GB read + written in 0.49 ms, about 3.1 TB/s against the card's 3.35): in eval `"cuda"` is
+within 0.94-1.05x of `"triton"` (2-5 % slower at L >= 384), in train 1.5-1.9x faster (the backward kernel). Measured on the requirement
+rows (graph timing, L2 flushed; L 768, ms):
+
+| row | mode | H100 pytorch | H100 cuda | H100 triton | A100 pytorch | A100 cuda | A100 triton |
+|---|---|---|---|---|---|---|---|
+| MSA [1, 1024, 768, 64], 2 branches | eval | 1.357 | 0.142 | 0.137 | 2.381 | 0.256 | 0.250 |
+| | train | 2.472 | 0.350 | 0.661 | 4.367 | 0.633 | 1.157 |
+| pair [1, 768, 768, 256], 3 branches | eval | 5.645 | 0.505 | 0.490 | 9.960 | 0.929 | 0.887 |
+| | train | 10.227 | 1.313 | 2.238 | 18.169 | 2.390 | 4.020 |
+| pair [1, 768, 768, 256], 2 branches | eval | 4.015 | 0.407 | 0.393 | 7.074 | 0.750 | 0.722 |
+| | train | 7.321 | 1.016 | 1.942 | 12.980 | 1.851 | 3.494 |
+
+`PairformerBlock(parallel=True)` keeps its own statements for its parallel schedule.
+
+## FoldForge 5I28 sizes (1024-2048 tokens, 12-16 k atoms)
+
+FoldForge's 5I28 benchmark folds n copies of a 128-residue chain (n = 1 .. 16) with an MSA (depth 1024 after the crop) and 4 templates,
+so its trunk runs at 1024 / 1536 / 2048 tokens (n = 8 / 12 / 16) and its atom stacks at about 11.7 k / 15.6 k atoms. The token / pair rows
+of every class the nine 5I28 models build carry 1024 | 1536 | 2048, their atom rows 12288 | 16384 (source "FoldForge 5I28"; the
+`MSAPairWeightedAveraging` rows are extended on their own branch). Every `cuda` / `triton` backend serves them at inference on both cards
+(probed at the rows' eval samples and at 4 samples for the 64-wide template stack). Notes:
+
+- **A100 `Transition`**: the one-kernel kernels hold a per-CTA work list of 253 tiles per SM (`fused_fwd_sm80.max_rows`: 6 994 944 bf16
+  rows on 108 SMs) and the wide chain a row grid of 65 535 x 128 rows; past that an inference call runs as one call per contiguous row
+  block (`kernels.transition.cuda.transition_sm80`; 4 x 2048^2 template rows, 5 x 1536^2 confidence-block rows), a training call is
+  refused with its reason (it raised `fwd: too many work items per CTA` / `invalid configuration argument` before).
+- **A100 triangle attention, training**: refused with a reason by the sm_80 kernels' training bias-gradient budget at L 1536 (OpenDDE
+  d_pair 384) and L 2048 (d_pair 256 / 384, Chai-1 d_pair 256, RoseTTAFold3 d_pair 64 with d_hidden 256); inference is served at every
+  5I28 length.
+- **OpenDDE's structural-token refiner pair, > 2**31 elements**: OpenDDE runs a pairformer-like refiner on a [S, S, 384] pair with S
+  well above the token count (S = 1963 / 2944 / ~3900 at n = 8 / 12 / 16; 1.5e9 / 3.3e9 / 5.8e9 elements). No requirement row covers
+  it (the rows stop at L 2048; a 10-minute job cannot measure every backend there, and the float64 / float32 reference does not fit next
+  to a kernel's at S 2944). The Triton TriMul's fused back half indexed its channel-major contraction in int32 (`channel * L * L`): an
+  illegal address on A100 and a silently wrong result on H100 past 2**31 elements. It now takes a 64-bit channel offset above that
+  bound (`back.py` `WIDE`; the 32-bit kernel below it, unchanged speed). Probed at S 2944, d_pair 384 (bf16 / master inference, both
+  cards, against the float32 reference at S / 8 tiled 8 x 8 -- TriMul, triangle attention and the row-wise ops are invariant under
+  that tiling): `TriangleMultiplication` (triton; cuda), `TriangleAttention` (n_head 12, triton; cuda), `LayerNorm` 384, `Transition`
+  384 n = 2 / 4 and `OuterProductMean` -> 384 (triton; cuda) all match the reference at S / 8; compute-sanitizer memcheck clean
+  (Triton TriMul at L 2400). The A100 TriMul `cuda` kernels refuse L 3900 (n = 16) with their reason; the Triton one serves it
+  (66 GB peak). The Triton TriMul's *training* pipeline keeps 32-bit strided offsets in its output LayerNorm (layernorm_linear
+  `te_style`): it refuses L * L * max(d_pair, d_hidden) >= 2**31 (bidirectional: 2 * d_hidden) with a reason.
+- **Accuracy at these lengths**: the float64 gold of a triangle attention does not fit past ~1024 tokens (N^3 x heads x 8 B), so the
+  measurer skips those cases by design; checked against a float32 gold instead at 1024 (every width: cuda / triton within the pytorch
+  backend's error), not a judge measurement.
+
+## Dead residual modules (the `dead` flag; the loader is not part of the engine)
+
+`Transition`, `AttentionPairBias`, `TriangleAttention`, `TriangleMultiplication`, `OuterProductMean` and `MSAPairWeightedAveraging` keep a
+plain class attribute `dead = False`: a flagged instance returns its residual input at inference (no grad, eval), on every backend. The
+engine does NOT ship the function that sets it (2.4.x `architecture.checkpoints.dead_modules.mark_dead_modules` /
+`clear_dead_modules`, removed with `architecture/` in 2.5.0) and will not export one: deciding that an instance is dead is a property of
+a checkpoint (its parameters fall below a threshold that the model's own kit chose, e.g. Protenix-v2's ~5e-37 weights against a 1e-30
+bound), so it belongs to the model side that loads checkpoints (FoldForge `modules/dense/dead.py`, MiniWorld's loader), next to the
+other checkpoint conversions. The engine's contract is only the flag: set `module.dead = True` after loading and the module returns its
+input at inference; `False` (the default) runs it. Decision 2026-11-11 (FoldForge request R15: declined, scope).
+
+## Public CUDA-graph capture API (`miniworld_engine.capture`)
+
+`miniworld_engine` is a namespace package (no `__init__.py`: the prebuilt kernel wheels install into it), so nothing can be exported
+from the package root; the public capture API is the module `miniworld_engine.capture`:
+
+| name | meaning |
+|---|---|
+| `static_weights()` | context manager: weights stay fixed between graph replays (inference graphs only); a capture inside it serves from, and fills, the eager weight-pack caches, so a replay runs no packing kernel |
+| `static_inputs()` | context manager: the conditioning / pair inputs of hoisted per-item tables keep their contents for the life of the graph (and the weights too); a replay re-runs none of their producing kernels |
+| `clear_weight_caches(*modules)` | drop every weight / input-derived cache of the engine (all stores registered with `kernels._capture.weight_cache`, the parameter-form cache, the TF32 operand cache) and, for the given modules, the per-instance caches; call it before replacing weights (a second model, a test that builds many) and drop graphs captured before the clear |
+| `weight_caches()` | the registered stores by name (inspection) |
+
+A new cache in kernel code registers itself: `_STORE = _capture.weight_cache("family.name")` (a dict), or for a per-instance attribute
+`_capture.instance_cache_attr("_name")`. `tests/cpu/test_capture_api.py` scans the kernel sources so that a module-level dict that is
+neither registered nor listed as not weight-derived fails the CPU tests.
 
 ## Versions
 
@@ -81,3 +205,14 @@ versions that backend on one card only and wins over the plain `"<backend>"` key
   module runs under bf16 autocast (`master_autocast`) or bf16 GEMMs with fp32 weight gradients (`master_linear`). This is the
   `master` dtype of the requirements.
 - `LayerNorm` keeps its affine in fp32 under a bf16 cast (`_Fp32ParamsMixin` in `norm.py`).
+
+## Downstream requests the classes do not take (decisions)
+
+FoldForge's engine requests (its `docs/ENGINE-REQUESTS.md`) that are answered by a statement rather than a class:
+
+| request | decision |
+|---|---|
+| R6: ESMFold2 atom stack with the atom pair | Implemented as a class of its own, `AtomDiTESMFold2Pair` (`AtomDiT(model="esmfold2_pair")`), restored from the 2.4.x `local_dit` ESMFold2 variant (`LocalDiTBlock(**ESMFOLD2)`, commit 2df9a5a82): AF3 block over the trunked 32 x 192 atom pair, AdaptiveRMSNorm AdaLNs, raw `W silu(c)` gates, the +/- 64 rank window, affine-free q / k RMSNorm + rotary from per-atom tables (`forward(..., rope=(cos, sin))`). Backends pytorch / triton / cuda (H100 inference: sm90_atom row kernels with `RMS`, `qknorm_local.cu`, `lattn90_esm.cu`; H100 training and A100: `train_rows.cu` + cuBLAS around the same attention). `AtomDiT("esmfold2")` stays ESMFold2's released pair-free `SWAAtomBlock` (`AtomDiTESMFold2`): the two are different functions. |
+| R8: fp32 `TriangleMultiplication` / `TriangleAttention` / `Transition` kernels | Declined by policy: TriMul is bf16 / master only, the trunk (pairformer-side) rows are master-only, `Transition` serves fp32 only on the five diffusion-head conditioning rows. An fp32 fold of the Protenix lineage runs those classes on `pytorch` by design (`_supports_cuda` refuses with that reason). |
+| R9: Chai-1 `circular` key window | Not needed: Chai-1's release masks the wrapped keys (`get_qkv_indices_for_blocks`' `kv_mask`, ANDed in by `get_block_atom_pair_mask`), so `AtomDiTChai1(key_window="pad")` + `uid` is the release for every system (`AtomDiTChai1` docstring; tested in `tests/cpu/test_chai1_key_window.py`). |
+| R11: an MSA block (Chai-1's parallel schedule with `OuterProductMean(groups=8)`, the AF3 / Boltz orders) | Not taken: every part is a served engine class (`OuterProductMean` with `groups=8`, `MSAPairWeightedAveraging`, `Transition`, the triangle classes); a block class would compose them in torch with no kernel of its own and no speed change, which the caller's composition already is. Revisit with R12 (`parallel_residual`) if a fused residual of the parallel parts is wanted. |

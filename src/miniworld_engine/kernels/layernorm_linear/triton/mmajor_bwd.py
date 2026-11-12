@@ -22,6 +22,7 @@ back to the te_style atomic kernel, which is faster there.
 from __future__ import annotations
 from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._device import num_sms
+from miniworld_engine.kernels._wide import needs_wide, wide
 
 
 import torch
@@ -66,7 +67,10 @@ def _ln_bwd_mmajor_kernel(
     stride_part, sc,                       # sc = feature stride (= M); row stride is 1 (m-major)
     M, N: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, VEC_HINT: tl.constexpr, shape_key,
+    WIDE: tl.constexpr = False,
 ):
+    # 64-bit offsets: pid / pid_n are int64, so `rows` and `offs_n * sc` are; the gather loop's `cn * sc` (sc = M) is int32 and wraps once
+    # K * M >= 2**31 -- WIDE (the launcher, from the tensors' extents) casts it first.
     # Grid is 2-D: axis 0 = the persistent programs that grid-stride over M-tiles (the axis
     # PDG/PDB are indexed by), axis 1 = the feature tile this program owns. The feature axis must
     # be a GRID axis and not an inner loop for the same reason as the canonical persistent kernel:
@@ -129,7 +133,7 @@ def _ln_bwd_mmajor_kernel(
                 cn = n0 + tl.arange(0, BLOCK_K)
                 cm = cn < N
                 m2 = rmask[:, None] & cm[None, :]
-                q = rows[:, None] + cn[None, :] * sc
+                q = rows[:, None] + wide(cn, WIDE)[None, :] * sc
                 dxn_r = tl.load(DXn + q, mask=m2, other=0.0).to(tl.float32)
                 x_r = tl.load(X + q, mask=m2, other=0.0).to(tl.float32)
                 g_r = tl.load(G + cn, mask=cm, other=0.0).to(tl.float32)
@@ -198,6 +202,7 @@ def _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | No
         dx.stride(1),
         N_PAD=triton.next_power_of_2(K),
         shape_key=both_key(0, N=K) if shape_key is None else pack(shape_key, N=K),
+        WIDE=needs_wide(x, dxn, dx, dres),
         **({} if dres is None else dict(DXR=dres, sr0=dres.stride(0), sr1=dres.stride(1), HAS_DXR=True)),
     )
     return dx, dg, db
@@ -231,6 +236,7 @@ def _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: 
         N=K,
         VEC_HINT=(K <= 128),
         shape_key=both_key(0, N=K) if shape_key is None else pack(shape_key, N=K),
+        WIDE=needs_wide(x, dxn, dx),
     )
     return dx, pdg.sum(0), pdb.sum(0)
 
@@ -269,6 +275,7 @@ def _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides, *, shape
         M,
         N=K,
         shape_key=both_key(0, N=K) if shape_key is None else pack(shape_key, N=K),
+        WIDE=needs_wide(x, dxn, dx),
     )
     return dx, pdw.sum(0), pdb.sum(0)
 

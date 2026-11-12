@@ -14,12 +14,28 @@ from miniworld_engine.kernels._launch_config import configured
 # L is the token/atom count, NOT the row count M these launchers receive (x reaches them already
 # flattened, and M = L*L for a pair view). Both launchers take it from their caller.
 from miniworld_engine.kernels._shape_key import both_key, pack
+from miniworld_engine.kernels._wide import needs_wide, wide
 
 
 @configured("layernorm_fwd_recompute_triton", key=["shape_key"], default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
 def _xnormed_kernel(
-    x_ptr, g_ptr, b_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key
+    x_ptr,
+    g_ptr,
+    b_ptr,
+    mean_ptr,
+    rstd_ptr,
+    y_ptr,
+    M,
+    K,
+    sx0,
+    sx1,
+    sy0,
+    sy1,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    shape_key,
+    WIDE: tl.constexpr = False,
 ):
     # Pure elementwise (mean/rstd are read, never reduced here), so the K axis loops in
     # BLOCK_K tiles instead of the old whole-row BLOCK_K=next_power_of_2(K): the tile is now
@@ -32,11 +48,13 @@ def _xnormed_kernel(
     for k0 in range(0, K, BLOCK_K):
         cols = k0 + tl.arange(0, BLOCK_K)
         cm = cols < K
-        x = tl.load(x_ptr + rows[:, None] * sx0 + cols[None, :] * sx1, mask=rm[:, None] & cm[None, :], other=0.0).to(tl.float32)
+        x = tl.load(x_ptr + rows[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=rm[:, None] & cm[None, :], other=0.0).to(tl.float32)
         g = tl.load(g_ptr + cols, mask=cm, other=0.0).to(tl.float32)[None, :]
         b = tl.load(b_ptr + cols, mask=cm, other=0.0).to(tl.float32)[None, :]
         y = (x - mean) * rstd * g + b
-        tl.store(y_ptr + rows[:, None] * sy0 + cols[None, :] * sy1, y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
+        tl.store(
+            y_ptr + rows[:, None] * sy0 + wide(cols, WIDE)[None, :] * sy1, y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :]
+        )
 
 
 def _recompute_xnormed_fake(x, gamma, beta, mean, rstd, shape_key=None):
@@ -71,13 +89,31 @@ def _recompute_xnormed(
         y.stride(0),
         y.stride(1),
         shape_key=both_key(0, K=K) if shape_key is None else pack(shape_key, K=K),
+        WIDE=needs_wide(x, y),
     )
     return y
 
 
 @configured("layernorm_fwd_recompute_noaffine_triton", key=["shape_key"], default=dict(BLOCK_K=32, BLOCK_M1=64, num_warps=4, num_stages=2))
 @triton.jit
-def _xhat_kernel(x_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key):
+def _xhat_kernel(
+    x_ptr,
+    mean_ptr,
+    rstd_ptr,
+    y_ptr,
+    M,
+    K,
+    sx0,
+    sx1,
+    sy0,
+    sy1,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    shape_key,
+    WIDE: tl.constexpr = False,
+):
+    # 64-bit offsets: rows is int64; `cols * sx1` / `cols * sy1` (sx1 = M on a channel-major view) wrap in int32 once K * M >= 2**31 -- WIDE
+    # (the launcher, from the tensors' extents) casts the column index first.
     pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rm = rows < M
@@ -86,9 +122,11 @@ def _xhat_kernel(x_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1, BLO
     for k0 in range(0, K, BLOCK_K):  # K tiled, was a whole-row next_power_of_2(K) constant
         cols = k0 + tl.arange(0, BLOCK_K)
         cm = cols < K
-        x = tl.load(x_ptr + rows[:, None] * sx0 + cols[None, :] * sx1, mask=rm[:, None] & cm[None, :], other=0.0).to(tl.float32)
+        x = tl.load(x_ptr + rows[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=rm[:, None] & cm[None, :], other=0.0).to(tl.float32)
         y = (x - mean) * rstd
-        tl.store(y_ptr + rows[:, None] * sy0 + cols[None, :] * sy1, y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
+        tl.store(
+            y_ptr + rows[:, None] * sy0 + wide(cols, WIDE)[None, :] * sy1, y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :]
+        )
 
 
 def _recompute_xhat_fake(x, mean, rstd, shape_key=None):
@@ -119,5 +157,6 @@ def _recompute_xhat(x: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor, sha
         y.stride(0),
         y.stride(1),
         shape_key=both_key(0, K=K) if shape_key is None else pack(shape_key, K=K),
+        WIDE=needs_wide(x, y),
     )
     return y

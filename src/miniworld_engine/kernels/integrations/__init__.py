@@ -122,7 +122,7 @@ def _prebuild_sm80():
     from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80 as pwa
 
     def plain(o):
-        return not any(k in o for k in ("groups", "count_offset"))  # projection biases: the sm_80 prologue adds them
+        return "groups" not in o  # projection biases: the sm_80 prologue adds them; count_offset: the epilogues' divisor (FoldForge R2)
 
     opm_rows = [
         r

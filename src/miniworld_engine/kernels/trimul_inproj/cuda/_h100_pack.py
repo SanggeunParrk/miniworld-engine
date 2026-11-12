@@ -158,7 +158,7 @@ def _pack(
     RGS1: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)  # int64: the flat index and the strided source offsets
     row, col = i // D, i % D
     source_row = (row // 64) * 32 + row % 32
     right = source_row >= R
@@ -280,6 +280,7 @@ def dense_native_many(values, dtypes):
         if v.ndim != 2 or v.dtype not in (torch.bfloat16, torch.float32) or t not in (torch.bfloat16, torch.float32):
             raise ValueError("native dense copy requires a BF16/FP32 matrix")
         out[i] = torch.empty(v.shape, device=v.device, dtype=t)
+    L = T._launch_module()
     pad = lambda xs, fill=0: [xs[i] if i < len(todo) else fill for i in range(6)]
     srcs = [values[i] for i in todo]
     dsts = [out[i] for i in todo]
@@ -287,7 +288,7 @@ def dense_native_many(values, dtypes):
         [
             *pad(srcs, None),
             *pad(dsts, None),
-            *pad([s.numel() for s in srcs]),
+            *pad([L.i64(s.numel()) for s in srcs], L.i64(0)),  # int64 counts (AuxCopyN.count)
             *pad([s.shape[1] for s in srcs], 1),
             *pad([s.stride(0) for s in srcs]),
             *pad([s.stride(1) for s in srcs]),
@@ -303,7 +304,11 @@ def zero_native_(out):
     """Initialize an owned numeric workspace without an ATen fill kernel."""
     size = out.numel() * out.element_size()
     if size:
-        _launch("mw_aux_zero_bytes", (min(512, (size + 255) // 256), 1, 1), [out, size])
+        grid = (min(512, (size + 255) // 256), 1, 1)
+        if size <= 2**31 - 1 - 512 * 256:  # the 32-bit loop counter must not pass int32 by its last grid stride
+            _launch("mw_aux_zero_bytes", grid, [out, size])
+        else:  # the int64 build past 2**31 bytes
+            _launch("mw_aux_zero_bytes_wide", grid, [out, T._launch_module().i64(size)])
     return out
 
 
@@ -554,7 +559,7 @@ def _training_unit_scale_fake(pair):
 def _training_unit_scale(pair: torch.Tensor) -> torch.Tensor:
     """The constant [B L, D] BF16 unit-scale tensor of the training path (no derivative; one row block per sample)."""
     out = torch.empty((pair.shape[0] * pair.shape[1], pair.shape[-1]), device=pair.device, dtype=torch.bfloat16)
-    _launch("mw_aux_unit_scale", ((out.numel() + 255) // 256, 1, 1), [out, out.numel()])
+    _launch("mw_aux_unit_scale", ((out.numel() + 255) // 256, 1, 1), [out, T._launch_module().i64(out.numel())])
     return out
 
 

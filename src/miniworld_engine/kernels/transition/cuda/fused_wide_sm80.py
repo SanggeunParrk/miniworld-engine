@@ -90,7 +90,9 @@ def route(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> str | None:
     """The A100 path that serves a call: ``"fused"`` (``fused_sm80``), ``"wide"`` (this module) or ``None`` (the Triton path)."""
     from . import fused_sm80
 
-    if fused_sm80.available(x, wa, ws) and x.numel() // x.shape[-1] >= FUSED_MIN_ROWS:
+    rows = x.numel() // x.shape[-1]
+    # fused_sm80's forward / backward are one launch each: past fused_fwd_sm80.max_rows their work lists overflow (transition_sm80 splits such inference calls)
+    if fused_sm80.available(x, wa, ws) and FUSED_MIN_ROWS <= rows <= fused_fwd_sm80.max_rows(x.device, x.dtype):
         return "fused"
     return "wide" if available(x, wa, ws) else None
 
@@ -137,7 +139,7 @@ def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 # ------------------------------------------------------------------------------------------------------------------------ launches
-_affine: dict = {}
+_affine: dict = _capture.weight_cache("transition_fused_wide_sm80.affine")
 
 
 def _f32(t: torch.Tensor, cache: bool) -> torch.Tensor:
@@ -175,7 +177,7 @@ def _squeeze(ext, hid: torch.Tensor, ws: torch.Tensor, x: torch.Tensor, ln: bool
     return out
 
 
-_kernel_forms: dict = {}
+_kernel_forms: dict = _capture.weight_cache("transition_fused_wide_sm80.kernel_forms")
 
 
 def _kernel_weights(wa, wb, ws, dtype, cache: bool):

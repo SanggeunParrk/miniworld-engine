@@ -23,7 +23,7 @@ void pack(std::vector<torch::Tensor> w,torch::Tensor out,torch::Tensor zeros){
  triattn_affine_sm80::pack_kernel<<<33,256,0,at::cuda::getCurrentCUDAStream()>>>((const __nv_bfloat16*)w[0].data_ptr(),(const __nv_bfloat16*)w[1].data_ptr(),(const __nv_bfloat16*)w[2].data_ptr(),(const __nv_bfloat16*)w[3].data_ptr(),(const __nv_bfloat16*)w[4].data_ptr(),(__nv_bfloat16*)out.data_ptr(),zeros.data_ptr<float>());C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 void run(torch::Tensor x,torch::Tensor w,torch::Tensor zeros,torch::Tensor gamma,torch::Tensor beta,torch::Tensor mask,torch::Tensor y,torch::Tensor bias,torch::Tensor stats,torch::Tensor xh,int L,bool transposed,double eps,bool direct){
- TORCH_CHECK(x.is_cuda()&&x.is_contiguous()&&x.scalar_type()==at::kBFloat16&&x.dim()==2&&x.size(1)==64&&L>=128&&L%128==0);int T=x.size(0),Z=T/(L*L);TORCH_CHECK(T%(L*L)==0);
+ TORCH_CHECK(x.is_cuda()&&x.is_contiguous()&&x.scalar_type()==at::kBFloat16&&x.dim()==2&&x.size(1)==64&&L>=128&&L%128==0);const int64_t T=x.size(0),Z=T/((int64_t)L*L);TORCH_CHECK(T%((int64_t)L*L)==0);
  TORCH_CHECK(w.is_contiguous()&&w.scalar_type()==at::kBFloat16&&w.numel()==264*64&&zeros.is_contiguous()&&zeros.scalar_type()==at::kFloat&&zeros.numel()==264);
  TORCH_CHECK(gamma.scalar_type()==at::kFloat&&beta.scalar_type()==at::kFloat&&gamma.is_contiguous()&&beta.is_contiguous()&&gamma.numel()==64&&beta.numel()==64);
  TORCH_CHECK(mask.numel()==0||(mask.is_contiguous()&&mask.scalar_type()==at::kByte&&mask.numel()==Z*L));
@@ -31,7 +31,7 @@ void run(torch::Tensor x,torch::Tensor w,torch::Tensor zeros,torch::Tensor gamma
  TORCH_CHECK(stats.numel()==0||(stats.is_contiguous()&&stats.scalar_type()==at::kFloat&&stats.numel()==(int64_t)T*2));TORCH_CHECK(xh.numel()==0||(xh.is_contiguous()&&xh.scalar_type()==at::kBFloat16&&xh.numel()==(int64_t)T*72));
  c10::cuda::CUDAGuard guard(x.device());for(auto tensor:{w,zeros,gamma,beta,mask,y,bias,stats,xh})TORCH_CHECK(tensor.device()==x.device());
  triattn_affine_sm80::Params p{};p.x=(const __nv_bfloat16*)x.data_ptr();p.w=(const __nv_bfloat16*)w.data_ptr();p.bvec=zeros.data_ptr<float>();p.mask=mask.numel()?mask.data_ptr<uint8_t>():nullptr;p.out=(__nv_bfloat16*)y.data_ptr();p.bias=(__nv_bfloat16*)bias.data_ptr();p.lnst=stats.numel()?stats.data_ptr<float>():nullptr;p.xh=xh.numel()?(__nv_bfloat16*)xh.data_ptr():nullptr;p.ntile=T/32;p.L=L;p.transposed=transposed;p.eps=eps;p.gamma=gamma.data_ptr<float>();p.beta=beta.data_ptr<float>();p.save_affine=direct;
- using G=a100::FusedCfg<64,64,8,1,32>;int grid=std::min<int>(at::cuda::getDeviceProperties(x.device().index())->multiProcessorCount,(p.ntile+G::NW-1)/G::NW);
+ using G=a100::FusedCfg<64,64,8,1,32>;int grid=(int)std::min<int64_t>(at::cuda::getDeviceProperties(x.device().index())->multiProcessorCount,(int64_t)((p.ntile+G::NW-1)/G::NW));
  triattn_affine_sm80::native_f1_kernel<G><<<grid,G::NTHR,G::F1_SMEM+2*G::DIN*4,at::cuda::getCurrentCUDAStream()>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 void store(torch::Tensor G,std::vector<torch::Tensor> dw){

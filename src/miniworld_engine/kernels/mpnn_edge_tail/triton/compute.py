@@ -341,7 +341,7 @@ def _project_output(
     DROPOUT: tl.constexpr,
 ):
     """``gelu(hidden) @ W3 + b3``, then dropout, the residual add, and LayerNorm."""
-    row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    row_block = tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)  # 64-bit rows, as the tile_order kernels here
     valid = row_block < rows
     columns = tl.arange(0, WIDTH)
     # This kernel keeps the whole row -- LayerNorm's reduction needs it -- so its column block IS
@@ -366,7 +366,8 @@ def _project_output(
     offsets = row_block[:, None] * WIDTH + columns[None, :]
     update = accumulator + tl.load(b3_ptr + columns)[None, :]
     if DROPOUT:
-        keep = tl.rand(tl.load(seed_ptr), offsets, n_rounds=7) < keep_probability
+        # the dropout counter stays the int32 element offset: an int64 one would switch tl.rand to its 64-bit Philox (other masks)
+        keep = tl.rand(tl.load(seed_ptr), offsets.to(tl.int32), n_rounds=7) < keep_probability
         update = tl.where(keep, update * dropout_scale, 0.0)
         bits = tl.reshape(keep, (BLOCK_M1, WIDTH // 32, 32)).to(tl.uint32)
         words = tl.sum(bits << tl.arange(0, 32)[None, None, :], axis=2)
@@ -423,7 +424,7 @@ def _norm_backward(
     get their own accumulator -- see the note in :func:`_launch_backward` for why they
     cannot share one.
     """
-    row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    row_block = tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)  # 64-bit rows, as the tile_order kernels here
     valid = row_block < rows
     columns = tl.arange(0, WIDTH)
     offsets = row_block[:, None] * WIDTH + columns[None, :]

@@ -1,6 +1,6 @@
 [project]
 name = "miniworld-engine"
-version = "2.5.2"
+version = "2.5.4"
 requires-python = ">=3.10"
 readme = "README.md"
 description = "H100 + A100 CUDA / Triton kernels for AlphaFold3-style modules, with a PyTorch reference backend per module, accuracy and speed measurers, and a version-based judge."
@@ -24,8 +24,8 @@ dependencies = [
   # miniworld_engine/_prebuilt/ (content-keyed paths; the few arch-independent artifacts, multi-arch fatbins / host-only glue, share a
   # key and are shipped by both, either copy serves both GPUs); elsewhere a kernel
   # JIT-builds on first use (needs a CUDA toolkit; the CUTLASS / MathDx headers are fetched by kernels/_headers.py, see docs/install.md).
-  'miniworld-engine-kernels-sm90-cu129==2.5.2; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
-  'miniworld-engine-kernels-sm80-cu129==2.5.2; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
+  'miniworld-engine-kernels-sm90-cu129==2.5.4; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
+  'miniworld-engine-kernels-sm80-cu129==2.5.4; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
 ]
 
 [project.optional-dependencies]

@@ -24,7 +24,7 @@ def _pack_bool_kernel(
     shape_key,
     BLOCK_BYTES: tl.constexpr,
 ):
-    byte_offsets = tl.program_id(0) * BLOCK_BYTES + tl.arange(0, BLOCK_BYTES)
+    byte_offsets = tl.program_id(0).to(tl.int64) * BLOCK_BYTES + tl.arange(0, BLOCK_BYTES)  # 64-bit: element offsets = 8 x bytes
     element_offsets = byte_offsets * 8
     packed = tl.zeros((BLOCK_BYTES,), dtype=tl.uint32)
     for bit in range(8):
@@ -53,7 +53,7 @@ def _packed_dropout_backward_kernel(
     shape_key,
     BLOCK_ELEMENTS: tl.constexpr,
 ):
-    offsets = tl.program_id(0) * BLOCK_ELEMENTS + tl.arange(0, BLOCK_ELEMENTS)
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK_ELEMENTS + tl.arange(0, BLOCK_ELEMENTS)  # 64-bit flat offsets
     valid = offsets < n_elements
     packed = tl.load(
         packed_ptr + offsets // 8,

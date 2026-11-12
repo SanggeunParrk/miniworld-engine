@@ -39,7 +39,7 @@ template<int CZ> void pipeline_mask_launch(opm_pipeline_mask80::EpilogueParams p
   kernel<<<grid,C::NTHR,C::SMEM,stream>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
-std::vector<torch::Tensor> pipeline_mask_result(torch::Tensor O,torch::Tensor mask,torch::Tensor wo,torch::Tensor bias,torch::Tensor residual,bool norm_first,bool save_norm,int64_t cfg){
+std::vector<torch::Tensor> pipeline_mask_result(torch::Tensor O,torch::Tensor mask,torch::Tensor wo,torch::Tensor bias,torch::Tensor residual,bool norm_first,bool save_norm,int64_t cfg,double norm_min=1.0,double norm_add=0.0){
   TORCH_CHECK(O.is_cuda()&&O.is_contiguous()&&O.scalar_type()==at::kBFloat16&&O.dim()==2,"O BF16 CUDA matrix");
   TORCH_CHECK(mask.is_cuda()&&mask.device()==O.device()&&mask.is_contiguous()&&(mask.scalar_type()==at::kBool||mask.scalar_type()==at::kByte)&&mask.dim()==2,"mask CUDA bool/byte [S,L]");
   const int S=mask.size(0),L=mask.size(1),CZ=wo.size(0);
@@ -63,7 +63,7 @@ std::vector<torch::Tensor> pipeline_mask_result(torch::Tensor O,torch::Tensor ma
   p.O=(const __nv_bfloat16*)O.data_ptr();p.wo=(const __nv_bfloat16*)wo.data_ptr();p.bias=bias.data_ptr<float>();
   p.out=(__nv_bfloat16*)out.data_ptr();p.residual=residual.numel()?(const __nv_bfloat16*)residual.data_ptr():nullptr;
   p.norm_const=1;p.norm=nullptr;p.norm_out=save_norm?norm.data_ptr<float>():nullptr;p.bits=bp;p.valid=vp;p.S=S;p.nk=(S+31)/32;
-  p.ldo=O.stride(0);p.L=L;p.norm_first=norm_first;p.cz=CZ;p.ntile=CZ/128;
+  p.ldo=O.stride(0);p.L=L;p.norm_first=norm_first;p.cz=CZ;p.ntile=CZ/128;p.norm_min=(float)norm_min;p.norm_add=(float)norm_add;
   pipeline_mask_launch<128>(p,stream);
   return {out,norm};
 }

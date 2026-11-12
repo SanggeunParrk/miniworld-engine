@@ -180,7 +180,7 @@ def _tpi_dw(
 @configured("token_pair_init_dw_reduce_triton", key=["shape_key"], default=dict(BLOCK=256, num_warps=4, num_stages=1))
 @triton.jit
 def _tpi_dw_reduce(PART, OUT, total, NBLK: tl.constexpr, BLOCK: tl.constexpr, shape_key):
-    k = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    k = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     m = k < total
     acc = tl.zeros([BLOCK], dtype=tl.float32)
     for t in range(NBLK):

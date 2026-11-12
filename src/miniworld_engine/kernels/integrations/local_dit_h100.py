@@ -18,6 +18,7 @@ from typing import cast
 import torch
 from torch.autograd.function import once_differentiable
 
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._tf32 import tf32_matmul
 from miniworld_engine.kernels.integrations import local_dit as _ld
@@ -26,9 +27,9 @@ DS, DC, DP, NH = 128, 128, 16, 4
 _NW = 27  # the canonical leaves (local_dit.WEIGHTS + CROSS_WEIGHTS); a model's option leaves follow them (KQLN: wq bq wk bk)
 F32 = torch.float32
 BF = torch.bfloat16
-_HOIST_COND: dict = {}
-_HOIST_BIAS: dict = {}
-_HOIST_EDGES: dict = {}  # (pair tensor, LN / bias weights) -> the slid edge windows' indices, key mask and pair bias
+_HOIST_COND: dict = _capture.weight_cache("local_dit_h100.hoist_cond")
+_HOIST_BIAS: dict = _capture.weight_cache("local_dit_h100.hoist_bias")
+_HOIST_EDGES: dict = _capture.weight_cache("local_dit_h100.hoist_edges")  # (pair tensor, LN / bias weights) -> the slid edge windows' indices, key mask and pair bias
 
 
 def _edge_ext():
@@ -399,7 +400,10 @@ def _bwd(
     tf32 = single.dtype == F32
     a, _n0, n, m = _dims(single)
     dev = single.device
-    with torch.cuda.device(dev):
+    # autocast off: a ``.backward()`` called inside an autocast region runs this under the caller's autocast state (autograd carries it to
+    # the backward), and autocast would make the weight-gradient GEMMs below (``_mmT``, ``_cond_bwd_shared``) bf16 -- finalize90 reads
+    # them as fp32 [rows, 128]: out of bounds (FoldForge R20: CUDA_ERROR_ILLEGAL_ADDRESS in finalize, Protenix v1 training step)
+    with torch.cuda.device(dev), torch.autocast("cuda", enabled=False):
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
         c2 = (_ld._padded(cond[:1], n).reshape(n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()

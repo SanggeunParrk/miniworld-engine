@@ -94,7 +94,12 @@ class InputFeatureEmbedder(BackendModule):
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 4, "cuda:h100_sm90": 2, "cuda:5090_sm120": 1}
+    # cuda:a100_sm80 6 (2026-11-12): bf16 training: the weight forms in one launch (train_forms), row-count launch shapes and K splits, the
+    # few-row modulation backward on cuBLAS (sm80.train_cfg)
+    # cuda:h100_sm90 3 (2026-11-12): bf16 / master global attention on the composed bf16 stages around FlashAttention-4 (was the native stages)
+    # triton 2 (2026-11-12): served (its SWAAtomTransformer gained "triton", window and global)
+    # cuda:5090_sm120 1 (2026-11-12): routed on the RTX 5090 (its children's sm_120a builds)
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 6, "cuda:h100_sm90": 3, "triton": 2, "cuda:5090_sm120": 1}
     #: The engine backends this composition hands to its children.
     _ENGINE_BACKENDS = ("cuda", "triton")
 

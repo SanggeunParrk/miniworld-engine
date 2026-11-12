@@ -34,6 +34,8 @@ struct EpilogueParams {
   int norm_first;                // 1: out = acc / n + bias (AF3 order), 0: (acc + bias) / n
   int cz;                        // the full d_pair (a CTA of CZ channels covers the column tile n0 = (blockIdx.x % ntile) CZ of it)
   int ntile;                     // d_pair / CZ column tiles: the fastest grid axis, so the CTAs that share an A tile run together
+  float norm_min = 1.f;          // the pair divisor max(n, norm_min) + norm_add: (1, 0) the clamped count, (0, offset) AlphaFold 3's n + count_offset
+  float norm_add = 0.f;
 };
 
 template <int CZ, int NSTAGE = (CZ == 384 ? 2 : 3), int NMINB = 1, bool WIDE = false> struct EpCfg {
@@ -93,7 +95,7 @@ __global__ void __launch_bounds__(EpCfg<CZ, NSTAGE, NMINB, WIDE>::NTHR, EpCfg<CZ
     const int il = tid / C::BJ, jl = tid % C::BJ, i = i0 + il, j = j0 + jl;
     float n = p.norm_const;
     if ((i < p.L) & (j < p.L) && p.norm != nullptr) n = p.norm[(long)i * p.L + j];
-    sinv[tid] = 1.0f / fmaxf(n, 1.0f); // consume raw mask counts without a separate clamp pass
+    sinv[tid] = 1.0f / (fmaxf(n, p.norm_min) + p.norm_add); // consume raw mask counts without a separate clamp pass (divisor max(n, norm_min) + norm_add)
   }
   for (int v = tid; v < CZ; v += C::NTHR) sbias[v] = p.bias[n0 + v];
 

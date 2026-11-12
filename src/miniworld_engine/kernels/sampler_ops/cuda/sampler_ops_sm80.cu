@@ -145,4 +145,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("augment_noise", &augment_noise_sm80);
   m.def("align_euler", &align_euler);
   m.def("pool_atoms", &pool_atoms);
+  m.def("pool_atoms_prep", &pool_atoms_prep);
+  m.def("pool_atoms_bwd", &pool_atoms_bwd);
 }

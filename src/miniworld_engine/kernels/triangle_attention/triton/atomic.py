@@ -11,6 +11,7 @@ import os
 from einops import rearrange, repeat, reduce
 
 from miniworld_engine.kernels._shape_key import pack, token_key
+from miniworld_engine.kernels._wide import row_tile, row_tile_grid, rows_flat
 
 
 @triton.jit
@@ -223,9 +224,10 @@ def _attn_bwd_preprocess(
     Z, N_CTX, HEAD_DIM: tl.constexpr,
     BLOCK_M1: tl.constexpr, HEAD_DIM_PAD: tl.constexpr,
     shape_key,
+    ROWS_FLAT: tl.constexpr = False,
 ):
-    off_m = tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
-    off_hz = tl.program_id(1).to(tl.int64)
+    off_hz, tile = row_tile(N_CTX, BLOCK_M1, ROWS_FLAT)  # 1-D grid past 65535 rows (the cap of axes y / z)
+    off_m = tile.to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     mask_delta = off_m < N_CTX
 
     # delta[m] = sum_d o[m,d]*do[m,d]: a reduction over d, so HEAD_DIM_PAD tiles it and the partials
@@ -362,13 +364,14 @@ def _attn_bwd(
     HL, N_CTX, HEAD_DIM: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr, HEAD_DIM_PAD: tl.constexpr,
     shape_key,
+    ROWS_FLAT: tl.constexpr = False,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
 
-    bhid = tl.program_id(2).to(tl.int64)
+    bhid, pid = row_tile(N_CTX, BLOCK_M2, ROWS_FLAT)  # 1-D grid past 65535 rows (the cap of axes y / z)
+    pid = pid.to(tl.int64)
     off_chz = (bhid * N_CTX).to(tl.int64)
     adj = (stride_h * (bhid % HL) + stride_z * (bhid // HL)).to(tl.int64)
-    pid = tl.program_id(0).to(tl.int64)
 
     # offset pointers for batch/head
     Q += adj
@@ -559,12 +562,13 @@ def _atomic_bwd(
     delta = torch.empty_like(M)
 
     # fmt: off
-    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
+    grid = lambda META: row_tile_grid(B * HL, L, META["BLOCK_M1"])
     _attn_bwd_preprocess[grid](
         o, grad_output, delta,
         B, L, D,
         shape_key=pack(shape_key, HEAD_DIM=D),
         HEAD_DIM_PAD=triton.next_power_of_2(D),
+        ROWS_FLAT=rows_flat(B * HL),
     )
     # fmt: on
 
@@ -574,7 +578,7 @@ def _atomic_bwd(
     dbias = torch.empty_like(bias)
 
     # fmt: off
-    grid = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
+    grid = lambda META: row_tile_grid(B * HL, L, META["BLOCK_M2"])
     _attn_bwd[grid](
         q, k, v, bias, sm_scale,
         grad_output, dq, dk, dv, dbias,
@@ -584,6 +588,7 @@ def _atomic_bwd(
         HL, L, D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
         shape_key=pack(shape_key, HEAD_DIM=D),
+        ROWS_FLAT=rows_flat(B * HL),
     )
     # fmt: on
 

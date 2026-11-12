@@ -47,12 +47,15 @@ def _edge_mlp_fwd_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    row_block = tl.program_id(0)
+    # 64-bit addressing: the tile's first row is an int64 base folded into the pointers; in-tile offsets stay int32
+    row_start = tl.program_id(0).to(tl.int64) * BLOCK_M1
+    preactivation_ptr += row_start * WIDTH
+    update_ptr += row_start * WIDTH
     output_block = tl.program_id(1)
-    row_indices = row_block * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    row_indices = tl.arange(0, BLOCK_M1)
     hidden_columns = tl.arange(0, WIDTH)
     output_columns = output_block * BLOCK_N + tl.arange(0, BLOCK_N)
-    row_valid = row_indices < rows
+    row_valid = row_indices < rows - row_start
     output_valid = output_columns < WIDTH
 
     preactivation = tl.load(

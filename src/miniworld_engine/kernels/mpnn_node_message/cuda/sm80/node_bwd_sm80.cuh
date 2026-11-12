@@ -39,11 +39,21 @@ struct NodeBwdParams {
   float inv_scale;
 };
 
+#ifdef MWE_SM120
+#define MP_NODE_BWD_ALIAS 1      // RTX 5090 (sm_120a, 99 KB a block): the dh^T / staging tile is the edge tile (dead after GEMM 1); the next edge tile is requested when the tile is done
+#define MP_NODE_BWD_NW 4         // the two weights (64.5 KB) + 4 x 8 KB
+#else
+#define MP_NODE_BWD_ALIAS 0
+#define MP_NODE_BWD_NW 8
+#endif
 struct NodeBwdCfg {
-  static constexpr int NW = 8, NTHR = NW * 32, MINB = 1;
-  static constexpr int W_BYTES = 2 * 128 * 256, BIAS_BYTES = 512, TILE = 16 * 256, WSTRIDE = 3 * TILE;   // the two weights | the bias | per warp: the edge tile | the gathered neighbour tile | dh^T [128 o'][16 n]
+  static constexpr int NW = MP_NODE_BWD_NW, NTHR = NW * 32, MINB = 1;
+  static constexpr int W_BYTES = 2 * 128 * 256, BIAS_BYTES = 512, TILE = 16 * 256, WSTRIDE = (MP_NODE_BWD_ALIAS ? 2 : 3) * TILE;   // the two weights | the bias | per warp: the edge tile | the gathered neighbour tile | dh^T [128 o'][16 n]
   static constexpr int SMEM = W_BYTES + BIAS_BYTES + NW * WSTRIDE;
 };
+#ifdef MWE_SM120
+static_assert(NodeBwdCfg::SMEM <= 101376, "the RTX 5090 allows 99 KB of shared memory a block");
+#endif
 
 // the dh^T tile: 128 rows (o') of 32 B (16 n), 16-B granule jn of row o' stored at granule jn ^ ((o' >> 2) & 1)
 DEVI uint32_t ht_swz(uint32_t o, uint32_t jn) { return o * 32u + ((jn ^ ((o >> 2) & 1u)) << 4); }
@@ -79,7 +89,7 @@ __global__ void __launch_bounds__(NodeBwdCfg::NTHR, NodeBwdCfg::MINB) node_bwd_k
   const int64_t gw = (int64_t)blockIdx.x * C::NW + warp;
   const int64_t ng = gw < p.groups ? (p.groups - gw + total_warps - 1) / total_warps : 0;
   const int64_t ntiles = ng * ntl;
-  const uint32_t tbe = sb + C::W_BYTES + C::BIAS_BYTES + warp * C::WSTRIDE, tbn = tbe + C::TILE, tbh = tbn + C::TILE;
+  const uint32_t tbe = sb + C::W_BYTES + C::BIAS_BYTES + warp * C::WSTRIDE, tbn = tbe + C::TILE, tbh = MP_NODE_BWD_ALIAS ? tbe : tbn + C::TILE;
 
   const int mi = lane >> 3, x7 = lane & 7;
   const uint32_t ae = tbe + ((mi & 1) * 8 + x7) * 256;
@@ -199,8 +209,10 @@ __global__ void __launch_bounds__(NodeBwdCfg::NTHR, NodeBwdCfg::MINB) node_bwd_k
           for (int h = 0; h < 2; ++h) gg16[m][h] = ldg_f32(gp + 16 * m + g8 + 8 * h) * p.inv_scale;
       } else {
         __syncwarp();                                              // the edge tile has been consumed
+#if !MP_NODE_BWD_ALIAS
         if (k + 1 < ntiles) issue_e(k + 1);
         cp_async_commit();
+#endif
       }
 #pragma unroll
       for (int jj = 0; jj < 8; ++jj) {
@@ -371,6 +383,10 @@ __global__ void __launch_bounds__(NodeBwdCfg::NTHR, NodeBwdCfg::MINB) node_bwd_k
       flush_tile<8>(tbh, p.dedge + row0 * 128, 8 * half, nv, lane);
       __syncwarp();
     }
+#if MP_NODE_BWD_ALIAS
+    if (k + 1 < ntiles) issue_e(k + 1);                            // the staging tile (= the edge tile) is free
+    cp_async_commit();
+#endif
 
     if (++tg == ntl) {                                             // the group is complete: dquery[g] (bf16)
       tg = 0;

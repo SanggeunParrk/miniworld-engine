@@ -219,6 +219,70 @@ def _run(fn, stack, single, cond, call, *, wants_grad: bool, keep_autocast: bool
     return out.unsqueeze(1)
 
 
+def _master_entry(module, single, cond, pair) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """``(single, cond, pair)`` rounded to bf16 when the call is the master layout with some fp32 activations, else None.
+
+    The master layout is the one in which the ``pytorch`` reference computes in bf16: a bf16 autocast is on, or ``single`` is bf16 next to fp32
+    master matrices (``primitives.master_autocast`` opens the autocast then). There every GEMM operand is rounded to bf16 anyway; what the
+    kernels add by rounding the fp32 activations at the entry is (1) the rounding of ``cond`` / ``pair`` BEFORE their LayerNorms (the reference
+    normalises them in fp32 and rounds the result) and, for an fp32 ``single``, (2) the rounding of the residual stream itself: about one bf16
+    ulp of ``|single|`` (2^-9 relative) on the output, which is then returned in ``single``'s dtype. Both are inside the master standard
+    (requirements/README.md: 8e-3); the ``*_fp32_cond`` / ``atom_single_fp32`` requirement rows measure them (FoldForge R7)."""
+    ts = (single, cond, pair)
+    if not all(isinstance(t, torch.Tensor) and t.is_cuda and t.dtype in (_BF, _F32) for t in ts):
+        return None
+    if all(t.dtype == _BF for t in ts):
+        return None
+    if torch.is_autocast_enabled("cuda"):
+        if torch.get_autocast_dtype("cuda") != _BF:
+            return None
+    elif not (single.dtype == _BF and any(p.dtype == _F32 for p in module.parameters() if p.ndim >= 2)):
+        return None
+    return single.to(_BF), cond.to(_BF), pair.to(_BF)
+
+
+#: requirements streams of the Chai-1 DiT rows whose inputs are FoldForge's mixed layout (FoldForge R7): ``*_fp32_cond``: the case dtype's
+#: ``single`` with fp32 ``cond`` / ``pair``; ``atom_single_fp32``: ``single``, ``cond`` and ``pair`` all fp32 (the sampler glue's activations
+#: under the case's bf16 autocast)
+FP32_COND_STREAMS = ("token_single_fp32_cond", "atom_single_fp32_cond")
+FP32_ALL_STREAMS = ("atom_single_fp32",)
+
+
+def fp32_conditioning(inputs: dict, stream: str | None, generator: torch.Generator) -> dict:
+    """``make_inputs``'s dict with the activations a mixed-layout stream makes fp32 redrawn in fp32 (unrounded: the entry rounding is measured)."""
+    names = ("cond", "pair") if stream in FP32_COND_STREAMS else ("single", "cond", "pair") if stream in FP32_ALL_STREAMS else ()
+    out = dict(inputs)
+    for name in names:
+        t = inputs[name]
+        out[name] = torch.randn(tuple(t.shape), device=t.device, generator=generator)
+    return out
+
+
+class MasterEntryCast:
+    """Mixin (first in the MRO) of the Chai-1 DiT blocks' ``"cuda"`` backend: a call the kernels refuse as it is because some activations
+    are fp32 under the master layout (FoldForge's flow: bf16 ``single`` with the fp32 conditioning / pair, or the fp32 sampler glue under bf16
+    autocast) runs on the kernels with its activations rounded to bf16 at the entry (:func:`_master_entry`), the output in ``single``'s dtype.
+    A call the kernels serve as it is runs unchanged; anything else is refused with the kernels' own reason."""
+
+    def _supports_cuda(self, single, cond, pair, *args, **kwargs) -> str | None:
+        why = super()._supports_cuda(single, cond, pair, *args, **kwargs)  # pyright: ignore[reportAttributeAccessIssue]  -- cooperative mixin
+        if why is None:
+            return None
+        cast16 = _master_entry(self, single, cond, pair)
+        if cast16 is None:
+            return why
+        why16 = super()._supports_cuda(*cast16, *args, **kwargs)  # pyright: ignore[reportAttributeAccessIssue]  -- cooperative mixin
+        return None if why16 is None else f"{why}; rounded to bf16 at the entry (master layout): {why16}"
+
+    def _forward_cuda(self, single, cond, pair, *args, **kwargs) -> torch.Tensor:
+        if super()._supports_cuda(single, cond, pair, *args, **kwargs) is None:  # pyright: ignore[reportAttributeAccessIssue]  -- cooperative mixin
+            return super()._forward_cuda(single, cond, pair, *args, **kwargs)  # pyright: ignore[reportAttributeAccessIssue]  -- cooperative mixin
+        cast16 = _master_entry(self, single, cond, pair)
+        if cast16 is None:  # _supports_cuda refused this call
+            raise RuntimeError("MasterEntryCast: a call outside the cuda range reached _forward_cuda")
+        return super()._forward_cuda(*cast16, *args, **kwargs).to(single.dtype)  # pyright: ignore[reportAttributeAccessIssue]  -- cooperative mixin
+
+
 class VariantTokenCuda:
     """Mixin of the Boltz-2 / RoseTTAFold3 / Chai-1 token DiT blocks: their A100 (sm_80) ``"cuda"`` paths. On H100 the block runs THE token
     DiT algorithm, TokenDiTProtenix's ``"cuda"`` route (kernels/integrations/token_dit, token_dit_train) with its options
@@ -343,6 +407,13 @@ class VariantAtomCuda:
             from miniworld_engine.modules.atom_dit import _LocalAtomDiT
 
             return _LocalAtomDiT._supports_cuda(cast(_LocalAtomDiT, self), single, cond, pair, mask, uid=uid)
+        from miniworld_engine.modules.atom_dit import _fold, _folds, _multi_fold_reason
+
+        if _a100(single) and _folds(single) > 1:  # B > 1 folds: one sm_80 call per fold (the sm_80 atom paths take one pair)
+            why = _multi_fold_reason(cast(nn.Module, self), single, cond, pair, mask, uid)
+            if why is not None:
+                return f"A100: {why}"
+            single, cond, pair, mask, uid = _fold(single, cond, pair, mask, uid, 0)
         fn, why = self._atom_serving(single, cond, pair, mask, uid)
         return why if fn is None else None
 
@@ -351,6 +422,10 @@ class VariantAtomCuda:
             from miniworld_engine.modules.atom_dit import _LocalAtomDiT
 
             return _LocalAtomDiT._forward_cuda(cast(_LocalAtomDiT, self), single, cond, pair, mask, uid)
+        from miniworld_engine.modules.atom_dit import _fold, _folds
+
+        if _folds(single) > 1:  # B > 1 folds (``_supports_cuda``): one sm_80 call per fold, in fold order
+            return torch.cat([self._forward_cuda(*_fold(single, cond, pair, mask, uid, b)) for b in range(_folds(single))], 1)
         fn, call = self._atom_serving(single, cond, pair, mask, uid)
         return _run(
             fn,

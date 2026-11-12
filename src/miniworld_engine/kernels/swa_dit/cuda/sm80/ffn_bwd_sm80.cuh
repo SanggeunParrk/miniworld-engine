@@ -30,6 +30,7 @@ struct FfnBwdGateParams {
   __nv_bfloat16 *dffn, *hh, *dab;                    // [M][128], [M][256], [M][512]
   float* dmod;                                       // [B S][768]; columns 640 .. 767 are d gate_f
   int M, S, B;
+  int hsplit;                                        // 1, 2, 4 or 8: a work item is (group of NW tiles, 8 / hsplit of the 8 hidden chunks); small calls spread the chunks over CTAs
 };
 
 template <int NW_, int MINB_>
@@ -62,13 +63,16 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) ffn_bwd_gate_kernel(const Ff
   for (int kb = 0; kb < 4; ++kb) wbq[kb] = qf_woff(g8, 4 * kb + q4);
 
   const int ntile_all = bwd_ntile<MODE>(p.M, p.S, p.B);
-  const int ngrp = (ntile_all + G::NW - 1) / G::NW;                // groups of NW tiles (one per warp): the CTA's iterations
-  const int mine = (int)blockIdx.x < ngrp ? (ngrp - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
-  const int total = mine * G::NCH;                                 // chunks of all this CTA's iterations, one stream through the ring
+  const int ngrp = (ntile_all + G::NW - 1) / G::NW;                // groups of NW tiles (one per warp)
+  const int hs = p.hsplit, nchl = G::NCH / hs, nitem = ngrp * hs;   // work items (group, chunk part): the CTA's iterations
+  const int mine = (int)blockIdx.x < nitem ? (nitem - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
+  const int total = mine * nchl;                                   // chunks of all this CTA's iterations, one stream through the ring
+  // the hidden chunk of stream position c: item blockIdx.x + (c / nchl) gridDim.x, its part's chunk c % nchl
+  auto chunk_of = [&](int c) { return ((int)blockIdx.x + (c / nchl) * (int)gridDim.x) % hs * nchl + c % nchl; };
 
 #pragma unroll
   for (int s = 0; s < G::NST - 1; ++s) {
-    if (s < total) bg_load_chunk<G>(p, sring + s * G::STAGE, s % G::NCH, tid);
+    if (s < total) bg_load_chunk<G>(p, sring + s * G::STAGE, chunk_of(s), tid);
     cp_async_commit();
   }
 
@@ -77,14 +81,15 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) ffn_bwd_gate_kernel(const Ff
   for (int ci = 0; ci < total; ++ci) {
     cp_async_wait<G::NST - 2>();
     __syncthreads();                                               // chunk ci is in shared memory; the stage of chunk ci - 1 is free
-    const int j = ci % G::NCH, it = ci / G::NCH;
+    const int j = chunk_of(ci), it = ci / nchl, item = (int)blockIdx.x + it * (int)gridDim.x;
+    const bool first = item % hs == 0;                             // the item that writes the tile's per-row outputs (dffn, d gate_f)
     {
       const int cn = ci + G::NST - 1;
-      if (cn < total) bg_load_chunk<G>(p, sring + (cn % G::NST) * G::STAGE, cn % G::NCH, tid);
+      if (cn < total) bg_load_chunk<G>(p, sring + (cn % G::NST) * G::STAGE, chunk_of(cn), tid);
       cp_async_commit();
     }
-    if (j == 0) {                                                  // ---- a new tile: y -> A fragments, dffn = rn(dq2 rn(gate_f)) -> A fragments + store, d gate_f
-      const int tile = (blockIdx.x + it * gridDim.x) * G::NW + warp;
+    if (ci % nchl == 0) {                                          // ---- a new tile: y -> A fragments, dffn = rn(dq2 rn(gate_f)) -> A fragments + store, d gate_f
+      const int tile = item / hs * G::NW + warp;
       rm = row_map<MODE>(tile, p.M, p.S, p.B, g8);
       float dgr[4] = {0.f, 0.f, 0.f, 0.f};                         // MODE_HOIST: this lane's share of d gate_f of block kb, summed over the row halves
 #pragma unroll
@@ -111,9 +116,9 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) ffn_bwd_gate_kernel(const Ff
           const uint32_t n0 = pack_bf16(t[0], t[1]), n1 = pack_bf16(t[2], t[3]), n2 = pack_bf16(t[4], t[5]), n3 = pack_bf16(t[6], t[7]);
           adff[2 * kb][hh] = n0;      adff[2 * kb][2 + hh] = n1;
           adff[2 * kb + 1][hh] = n2;  adff[2 * kb + 1][2 + hh] = n3;
-          if (rm.rok[hh]) stg128(p.dffn + (size_t)rm.rr[hh] * 128 + 32 * kb + 8 * q4, make_uint4(n0, n1, n2, n3));
+          if (first && rm.rok[hh]) stg128(p.dffn + (size_t)rm.rr[hh] * 128 + 32 * kb + 8 * q4, make_uint4(n0, n1, n2, n3));
           if (MODE == MODE_SINGLE) {
-            if (rm.rok[hh]) {
+            if (first && rm.rok[hh]) {
               float* dm = p.dmod + (size_t)rm.mrow[hh] * 768 + 640 + 32 * kb + 8 * q4;
               *reinterpret_cast<float4*>(dm) = make_float4(dq[0] * ff[0], dq[1] * ff[1], dq[2] * ff[2], dq[3] * ff[3]);
               *reinterpret_cast<float4*>(dm + 4) = make_float4(dq[4] * ff[4], dq[5] * ff[5], dq[6] * ff[6], dq[7] * ff[7]);
@@ -127,7 +132,7 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) ffn_bwd_gate_kernel(const Ff
           }
         }
       }
-      if (MODE == MODE_HOIST && rm.rok[0]) {
+      if (MODE == MODE_HOIST && first && rm.rok[0]) {
         const int i0 = g8_base(lane, 8);
 #pragma unroll
         for (int kb = 0; kb < 4; ++kb) p.dmod[((size_t)rm.blk * p.B * p.S + rm.mrow[0]) * 768 + 640 + 32 * kb + 8 * q4 + i0] = dgr[kb];
@@ -191,10 +196,59 @@ struct FfnBwdDyParams {
   float eps;
 };
 
-template <int NW_>
+// NS > 1: NS warps per 16-row tile, NW tiles per CTA -- the N split (ns_gather) or, with KS, the K split (ks_gather)
+template <int NW_, int NS_ = 1, bool KS_ = false>
 struct FfnBwdDyCfg {
-  static constexpr int NW = NW_, NTHR = NW_ * 32, SMEM = 128 * 1024;
+  static constexpr int NW = NW_, NS = NS_, NTHR = NW_ * NS_ * 32;
+  static constexpr bool KS = KS_;
+  static constexpr int SMEM = 128 * 1024 + (NS_ > 1 ? NW_ * (KS_ ? NS_ - 1 : 1) * 8192 : 0);
 };
+
+// The N split of the dy / qkvg backward for calls of few row tiles: NS warps share a 16-row tile, warp part p computing the n tiles nt with
+// nt NS / 16 == p over the whole K in the one-warp order (every value bitwise the one-warp kernel's); the other parts' accumulators meet part 0's in shared
+// memory (xb: [16 nt][4][32 lanes] fp32 per tile), and part 0 runs the epilogue (its row reductions in the one-warp order).
+template <int NS>
+DEVI bool ns_mine(int nt, int part) { return NS == 1 || (nt * NS) / 16 == part; }
+
+// The K split: NS warps share a 16-row tile, warp part p summing the K blocks [16 p / NS, 16 (p + 1) / NS) for every n tile; the parts' partial sums meet in
+// shared memory (xb: NS - 1 slabs of [16 nt][4][32 lanes] fp32 per tile) and part 0 adds them in the fixed order 1 .. NS - 1 (deterministic; the values differ
+// from the one-warp kernel's by the fp32 summation order only), then runs the epilogue.
+template <int NS>
+DEVI void ks_gather(float (&acc)[4][4][4], float* xb, int part, int lane) {
+  if (part != 0) {
+#pragma unroll
+    for (int nt = 0; nt < 16; ++nt)
+#pragma unroll
+      for (int e = 0; e < 4; ++e) xb[(part - 1) * 2048 + (nt * 4 + e) * 32 + lane] = acc[nt >> 2][nt & 3][e];
+  }
+  __syncthreads();
+  if (part == 0) {
+    for (int q = 1; q < NS; ++q)
+#pragma unroll
+      for (int nt = 0; nt < 16; ++nt)
+#pragma unroll
+        for (int e = 0; e < 4; ++e) acc[nt >> 2][nt & 3][e] += xb[(q - 1) * 2048 + (nt * 4 + e) * 32 + lane];
+  }
+}
+
+template <int NS>
+DEVI void ns_gather(float (&acc)[4][4][4], float* xb, int part, int lane) {
+  if (part != 0) {
+#pragma unroll
+    for (int nt = 0; nt < 16; ++nt)
+      if (ns_mine<NS>(nt, part))
+#pragma unroll
+        for (int e = 0; e < 4; ++e) xb[(nt * 4 + e) * 32 + lane] = acc[nt >> 2][nt & 3][e];
+  }
+  __syncthreads();
+  if (part == 0) {
+#pragma unroll
+    for (int nt = 0; nt < 16; ++nt)
+      if (!ns_mine<NS>(nt, 0))
+#pragma unroll
+        for (int e = 0; e < 4; ++e) acc[nt >> 2][nt & 3][e] = xb[(nt * 4 + e) * 32 + lane];
+  }
+}
 
 // byte offset of 16-byte chunk `chunk` (0 .. 63) of row `row` of the [128][1024 B] Wu^T tile: the chunk index is XOR-ed with 4 on odd rows (as qf_woff)
 DEVI uint32_t wut_off(uint32_t row, uint32_t chunk) { return row * 1024u + ((chunk ^ ((row & 1u) << 2)) << 4); }
@@ -204,6 +258,8 @@ __global__ void __launch_bounds__(G::NTHR, 1) ffn_bwd_dy_kernel(const FfnBwdDyPa
   extern __shared__ __align__(128) unsigned char smem_raw[];
   const uint32_t sw = smem_u32(smem_raw);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g8 = lane >> 2, q4 = lane & 3;
+  const int slot = warp / G::NS, nsp = warp % G::NS;             // the tile of the CTA's NW and this warp's share of its n tiles (ns_gather)
+  const int kb0 = G::KS ? nsp * (16 / G::NS) : 0, kb1 = G::KS ? kb0 + 16 / G::NS : 16;   // the K blocks of this warp (the K split)
 
   // Wu^T into shared memory in the f1 row order (smem row r holds output channel qf_channel(r)), once per CTA
   for (int i = tid; i < 128 * 64; i += G::NTHR) cp_async16(sw + wut_off(i >> 6, i & 63), p.wut + (size_t)qf_channel(i >> 6) * 512 + (i & 63) * 8);
@@ -215,7 +271,7 @@ __global__ void __launch_bounds__(G::NTHR, 1) ffn_bwd_dy_kernel(const FfnBwdDyPa
 
   const int ntile = bwd_ntile<MODE>(p.M, p.S, p.B);
   for (int base = blockIdx.x * G::NW; base < ntile; base += G::NW * gridDim.x) {
-    const int tile = base + warp;
+    const int tile = base + slot;
     const RowMap rm = row_map<MODE>(tile, p.M, p.S, p.B, g8);
 
     // ---- dy_ = dab Wu: the f1 order (4 groups x 4 n tiles); K = 512 hidden units in 16 chunks of 32 (thread: units 32 kb + 8 q4 .. + 7)
@@ -230,17 +286,18 @@ __global__ void __launch_bounds__(G::NTHR, 1) ffn_bwd_dy_kernel(const FfnBwdDyPa
 #pragma unroll
       for (int hh = 0; hh < 2; ++hh) dst[hh] = rm.rok[hh] ? ldg128(p.dab + (size_t)rm.rr[hh] * 512 + 32 * kbl + 8 * q4) : make_uint4(0u, 0u, 0u, 0u);
     };
-    load_dab(0, u0);
-    load_dab(1, u1);
-    load_dab(2, u2);
+    load_dab(kb0, u0);
+    load_dab(kb0 + 1, u1);
+    load_dab(kb0 + 2, u2);
 #pragma unroll 1
-    for (int kb = 0; kb < 16; ++kb) {
-      if (kb + 3 < 16) load_dab(kb + 3, u3);
+    for (int kb = kb0; kb < kb1; ++kb) {
+      if (kb + 3 < kb1) load_dab(kb + 3, u3);
       uint32_t a[2][4];
 #pragma unroll
       for (int hh = 0; hh < 2; ++hh) { a[0][hh] = u0[hh].x; a[0][2 + hh] = u0[hh].y; a[1][hh] = u0[hh].z; a[1][2 + hh] = u0[hh].w; }
 #pragma unroll
       for (int nt = 0; nt < 16; ++nt) {
+        if (!G::KS && !ns_mine<G::NS>(nt, nsp)) continue;
         const uint4 b = lds128_ro(sw + nt * 8 * 1024 + wlane + 64u * (kb ^ gpar));
         mma16816(acc[nt >> 2][nt & 3], a[0], b.x, b.y);
         mma16816(acc[nt >> 2][nt & 3], a[1], b.z, b.w);
@@ -250,7 +307,10 @@ __global__ void __launch_bounds__(G::NTHR, 1) ffn_bwd_dy_kernel(const FfnBwdDyPa
     }
 
     // ---- the adaLN backward: d scale_f -> dmod columns 512 .., d shift_f -> 384 .., dq1 = rn(dq2 + ...)
-    adaln_bwd_epilogue<MODE>(acc, rm, lane, p.q1, p.dy, p.mod, 512, p.dq1, p.dmod, 384, p.B, p.S, p.eps);
+    if constexpr (G::KS) ks_gather<G::NS>(acc, reinterpret_cast<float*>(smem_raw + 128 * 1024) + slot * (G::NS - 1) * 2048, nsp, lane);
+    else if constexpr (G::NS > 1) ns_gather<G::NS>(acc, reinterpret_cast<float*>(smem_raw + 128 * 1024) + slot * 2048, nsp, lane);
+    if (nsp == 0) adaln_bwd_epilogue<MODE>(acc, rm, lane, p.q1, p.dy, p.mod, 512, p.dq1, p.dmod, 384, p.B, p.S, p.eps);
+    if constexpr (G::NS > 1) __syncthreads();                         // xb is free for the next tile
   }
 }
 

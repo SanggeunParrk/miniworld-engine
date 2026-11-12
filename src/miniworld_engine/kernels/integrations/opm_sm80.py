@@ -2,7 +2,7 @@
 
 Contract: bf16 MSA ``[1, S, L, d_msa]`` (d_msa 64 or 128, any S, any L), d_hidden 32, d_pair 128 / 256 / 384, an optional bool mask ``[1, S, L]``, an optional bf16
 pair residual ``[1, L, L, d_pair]`` (fused into the epilogue; its gradient is the output's), either normalisation order (``normalize_before_proj``), no interchain
-mask, RoseTTAFold3's projection biases (added by the prologue), no groups / count_offset, capability 8.0. ``refusal`` is the range; ``modules.OuterProductMean``'s ``cuda`` backend refuses everything else
+mask, RoseTTAFold3's projection biases (added by the prologue), ``count_offset`` (AlphaFold 3's divisor n + offset: the epilogues and the dgrad take max(n, dmin) + doff, FoldForge R2), no groups, capability 8.0. ``refusal`` is the range; ``modules.OuterProductMean``'s ``cuda`` backend refuses everything else
 (no fallback).
 
 The step (``kernels/outer_product_mean/cuda/sm80``; ``kernels/outer_product_mean/cuda/sm80.py`` documents the kernels):
@@ -62,8 +62,6 @@ def refusal(
         return "the sm_80 OuterProductMean kernels are the A100 (capability 8.0) and RTX 5090 (12.0, sm_120a) builds"
     if getattr(module, "groups", 1) > 1:
         return "grouped OPM (Chai-1): no sm_80 build"
-    if getattr(module, "count_offset", None) is not None:
-        return "count_offset: the sm_80 epilogue divides by the clamped pair count only"
     if module.mask_interchain and token_asym_id is not None:
         return "the interchain mask: no sm_80 build"
     ch, d_msa = module.to_left.weight.shape
@@ -114,6 +112,12 @@ def serves_train(
     residual: torch.Tensor | None = None,
 ) -> bool:
     return torch.is_grad_enabled() and _eligible(module, msa, mask, token_asym_id, residual)
+
+
+def _divisor(module) -> tuple[float, float]:
+    """(dmin, doff) of the pair divisor max(n, dmin) + doff: (1, 0) the clamped count, (0, count_offset) AlphaFold 3's n + offset."""
+    offset = getattr(module, "count_offset", None)
+    return (1.0, 0.0) if offset is None else (0.0, float(offset))
 
 
 def _leaves(module) -> list[torch.Tensor]:
@@ -238,6 +242,8 @@ def _inference_fake(
     leaves: list[torch.Tensor],
     eps: float,
     norm_first: bool,
+    dmin: float = 1.0,
+    doff: float = 0.0,
 ) -> torch.Tensor:
     """msa [1, S, L, d_msa] -> the pair update (+ residual) [1, L, L, d_pair], bf16."""
     length = msa.shape[2]
@@ -252,8 +258,11 @@ def inference(
     leaves: list[torch.Tensor],
     eps: float,
     norm_first: bool,
+    dmin: float = 1.0,
+    doff: float = 0.0,
 ) -> torch.Tensor:
-    """residual + OuterProductMean(msa): prologue -> cuBLAS grouped outer product -> epilogue (no autograd, nothing saved)."""
+    """residual + OuterProductMean(msa): prologue -> cuBLAS grouped outer product -> epilogue (no autograd, nothing saved). The pair divisor is
+    max(n, dmin) + doff (``opm_train.divisor_params``)."""
     sm = _sm80()
     lnw, lnb, wl, wr, wo, bo, *pb = _kernel_leaves(leaves)
     with torch.cuda.device(msa.device):
@@ -274,12 +283,14 @@ def inference(
                 bo,
                 None if residual is None else residual[0].contiguous(),
                 norm_first,
+                dmin=dmin,
+                doff=doff,
             )
         else:
             norm, nconst = _norm(
                 None if mk is None else mk,
                 m.shape[0],
-                clamp=True,  # the reference divides by clamp(n, 1)
+                clamp=dmin > 0,  # the reference divides by clamp(n, 1) or (count_offset) n + offset: the epilogue takes max(n, dmin) + doff
             )
             out = sm.epilogue(
                 o,
@@ -289,6 +300,8 @@ def inference(
                 bo,
                 None if residual is None else residual[0].contiguous(),
                 norm_first,
+                dmin=dmin,
+                doff=doff,
             )
     return out.unsqueeze(0)
 
@@ -301,6 +314,7 @@ def update_inference(module, msa: torch.Tensor, mask: torch.Tensor | None, resid
         _leaves(module),
         float(module.ln_msa.eps),
         bool(module.normalize_before_proj),
+        *_divisor(module),
     )
 
 
@@ -313,6 +327,8 @@ def _forward_fake(
     eps: float,
     norm_first: bool,
     save_o: bool,
+    dmin: float = 1.0,
+    doff: float = 0.0,
 ) -> list[torch.Tensor]:
     """The output and what the backward keeps: A, B [S, 32 L], the LayerNorm statistics [S, L, 2], O [32 L, 32 L] (empty when it is recomputed), the mask counts [L, L] (empty without a mask)."""
     depth, length = msa.shape[1], msa.shape[2]
@@ -336,7 +352,10 @@ def forward(
     eps: float,
     norm_first: bool,
     save_o: bool,
+    dmin: float = 1.0,
+    doff: float = 0.0,
 ) -> list[torch.Tensor]:
+    """The training forward; the pair divisor max(n, dmin) + doff, the saved counts max(n, dmin) (the dgrad adds doff)."""
     if _native128_pipeline_enabled(msa, leaves):
         from miniworld_engine.kernels.outer_product_mean.cuda import (
             pipeline_native128_sm80,
@@ -351,9 +370,11 @@ def forward(
             norm_first,
             True,
             save_o,
+            dmin,
+            doff,
         )
         return [values[0].unsqueeze(0), *values[1:]]
-    if _pipeline_enabled(msa, leaves):
+    if _pipeline_enabled(msa, leaves) and (dmin, doff) == (1.0, 0.0):
         from miniworld_engine.kernels.outer_product_mean.cuda import pipeline_sm80
 
         values = pipeline_sm80.forward(
@@ -387,9 +408,11 @@ def forward(
                 None if residual is None else residual[0].contiguous(),
                 norm_first,
                 True,
+                dmin=dmin,
+                doff=doff,
             )
         else:
-            norm, nconst = _norm(mk, m.shape[0], training=True)
+            norm, nconst = _norm(mk, m.shape[0], clamp=dmin > 0, training=True)
             out = sm.epilogue(
                 o,
                 norm,
@@ -398,6 +421,8 @@ def forward(
                 bo,
                 None if residual is None else residual[0].contiguous(),
                 norm_first,
+                dmin=dmin,
+                doff=doff,
             )
         if not save_o:
             o = msa.new_empty((0,))
@@ -414,6 +439,8 @@ def _backward_fake(
     norm_first: bool,
     saved: list[torch.Tensor],
     dz: torch.Tensor,
+    dmin: float = 1.0,
+    doff: float = 0.0,
 ) -> list[torch.Tensor]:
     """dmsa and the gradient of every leaf (LayerNorm weight / bias, Wl, Wr, Wo, bias), each in its leaf's dtype."""
     return [torch.empty_like(msa)] + [torch.empty_like(t) for t in leaves]
@@ -428,15 +455,17 @@ def backward(
     norm_first: bool,
     saved: list[torch.Tensor],
     dz: torch.Tensor,
+    dmin: float = 1.0,
+    doff: float = 0.0,
 ) -> list[torch.Tensor]:
     if _native128_pipeline_enabled(msa, leaves):
         from miniworld_engine.kernels.outer_product_mean.cuda import (
             pipeline_native128_sm80,
         )
 
-        values = pipeline_native128_sm80.backward(msa[0], _mask_u8(mask), leaves, saved, dz[0].contiguous(), norm_first)
+        values = pipeline_native128_sm80.backward(msa[0], _mask_u8(mask), leaves, saved, dz[0].contiguous(), norm_first, dmin, doff)
         return [values[0].unsqueeze(0), *values[1:]]
-    if _pipeline_enabled(msa, leaves):
+    if _pipeline_enabled(msa, leaves) and (dmin, doff) == (1.0, 0.0):
         from miniworld_engine.kernels.outer_product_mean.cuda import pipeline_sm80
 
         values = pipeline_sm80.backward(msa[0], _mask_u8(mask), leaves, saved, dz[0].contiguous(), norm_first)
@@ -453,7 +482,7 @@ def backward(
         nrm = None if norm.numel() == 0 else norm
         if nrm is not None:
             nconst = 1.0
-        dO, dzn, dbo = sm.dgrad(dz.contiguous().view(length, length, -1), nrm, nconst, wo16, norm_first)
+        dO, dzn, dbo = sm.dgrad(dz.contiguous().view(length, length, -1), nrm, nconst, wo16, norm_first, dmin=dmin, doff=doff)
         da = sm.lt_mm(b, dO, False, True)  # [S, 32 L]: dA[s, (i, c)]
         db = sm.lt_mm(a, dO, False, False)  # dB[s, (j, e)]
         dpb = []
@@ -487,8 +516,9 @@ def backward(
 
 class _Training(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, eps, norm_first, save_o, msa, mask, residual, *leaves):
-        out, *saved = forward(msa, mask, residual, list(leaves), eps, norm_first, save_o)
+    def forward(ctx, eps, norm_first, save_o, divisor, msa, mask, residual, *leaves):
+        out, *saved = forward(msa, mask, residual, list(leaves), eps, norm_first, save_o, *divisor)
+        ctx.divisor = divisor
         ctx.eps, ctx.norm_first, ctx.has_residual = (
             eps,
             norm_first,
@@ -504,8 +534,9 @@ class _Training(torch.autograd.Function):
         v = ctx.saved_tensors
         n = 2 + ctx.n_leaves
         msa, mask, leaves, saved = v[0], v[1], list(v[2:n]), list(v[n:])
-        grads = backward(msa, mask, leaves, ctx.eps, ctx.norm_first, saved, dz.contiguous())
+        grads = backward(msa, mask, leaves, ctx.eps, ctx.norm_first, saved, dz.contiguous(), *ctx.divisor)
         return (
+            None,
             None,
             None,
             None,
@@ -522,6 +553,7 @@ def update_train(module, msa: torch.Tensor, mask: torch.Tensor | None, residual:
         float(module.ln_msa.eps),
         bool(module.normalize_before_proj),
         save_o,
+        _divisor(module),
         msa.contiguous(),
         mask,
         residual,

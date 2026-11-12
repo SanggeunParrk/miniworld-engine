@@ -31,6 +31,7 @@ from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 # so it is a CSV tile; a row at or above the extent keeps the whole-row schedule
 # is still reachable and the tuner picks it wherever the second pass is not worth the registers.
 from miniworld_engine.kernels._shape_key import both_key, pack
+from miniworld_engine.kernels._wide import needs_wide, wide
 
 
 @configured("layernorm_fwd_mmajor_triton", key=["shape_key"], default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=4, num_stages=2))
@@ -46,7 +47,10 @@ def _ln_transpose_dbn_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     shape_key,
+    WIDE: tl.constexpr = False,
 ):
+    # 64-bit offsets: rm is int64; the channel-major read `rk * M` is int32 and wraps once D * M >= 2**31 -- WIDE (the launcher, from
+    # D * M) casts the channel index first.
     pid = tl.program_id(0).to(tl.int64)
     rm = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     mmask = rm < M
@@ -67,7 +71,7 @@ def _ln_transpose_dbn_kernel(
         kmask = rk < D
         mask = mmask[:, None] & kmask[None, :]
         # channel-major load -> (BLOCK_M1 rows, BLOCK_K channels), coalesced along m per channel
-        x = tl.load(x_ptr + rk[None, :] * M + rm[:, None], mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(x_ptr + wide(rk, WIDE)[None, :] * M + rm[:, None], mask=mask, other=0.0).to(tl.float32)
         mean = tl.sum(x, axis=1) / D
         xc = tl.where(mask, x - mean[:, None], 0.0)
         var = tl.sum(xc * xc, axis=1) / D
@@ -84,7 +88,7 @@ def _ln_transpose_dbn_kernel(
             rk = k0 + tl.arange(0, BLOCK_K)
             mask = mmask[:, None] & (rk[None, :] < D)
             # channel-major load -> (BLOCK_M1 rows, BLOCK_K channels), coalesced along m per channel
-            x = tl.load(x_ptr + rk[None, :] * M + rm[:, None], mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(x_ptr + wide(rk, WIDE)[None, :] * M + rm[:, None], mask=mask, other=0.0).to(tl.float32)
             s += tl.sum(x, axis=1)
             ss += tl.sum(x * x, axis=1)
         mean = s / D
@@ -94,7 +98,7 @@ def _ln_transpose_dbn_kernel(
             rk = k0 + tl.arange(0, BLOCK_K)
             kmask = rk < D
             mask = mmask[:, None] & kmask[None, :]
-            x = tl.load(x_ptr + rk[None, :] * M + rm[:, None], mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(x_ptr + wide(rk, WIDE)[None, :] * M + rm[:, None], mask=mask, other=0.0).to(tl.float32)
             w = tl.load(w_ptr + rk, mask=kmask, other=0.0).to(tl.float32)
             b = tl.load(b_ptr + rk, mask=kmask, other=0.0).to(tl.float32)
             y = (((x - mean[:, None]) * rstd[:, None]) * w[None, :] + b[None, :]).to(y_ptr.dtype.element_ty)
@@ -128,6 +132,7 @@ def _ln_transpose_dbn_bnd(x: torch.Tensor, weight: torch.Tensor, bias: torch.Ten
         # M, the row count this launch iterates. It used to pass the token axis `n` instead,
         # because a length was what the key was made of; rows are, and M is right here.
         shape_key=both_key(M, D=d),
+        WIDE=needs_wide(x_dm, y),
     )
     return y.view(b, n, d)
 

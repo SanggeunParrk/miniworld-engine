@@ -121,7 +121,7 @@ def _fold(WP, GO, BO, WPF, WG, GI, BI, WGF, UV, D: tl.constexpr, BLOCK: tl.const
     """Fold the LayerNorm affines into K3's weights, one output row per program:
     Wpf = bf16(Wp * go), up = sum(Wpf), vp = Wp . bo (axis 1 == 0; K = 2D) and, GATE,
     Wgf = bf16(Wg * gi), ug = sum(Wgf), vg = Wg . bi (axis 1 == 1; K = D)."""
-    c = tl.program_id(0)
+    c = tl.program_id(0).to(tl.int64)
     k = tl.arange(0, BLOCK)
     if tl.program_id(1) == 0:
         m = k < 2 * D

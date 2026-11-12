@@ -73,7 +73,7 @@ WEIGHTS = (
     "transition.squeeze.weight",
 )
 #: Packed runners keyed by the weights' (pointer, version): see ``_infer``.
-_RUNNERS: dict = {}
+_RUNNERS: dict = _capture.weight_cache("bias_only_dit.runners")
 
 
 def serves(module, single, cond, pair, mask=None, bias=None) -> bool:

@@ -29,9 +29,10 @@ def _ext():
     )
 
 
-def result(o, mask, wo, bias, residual, norm_first, save_norm=False, cfg=None):
+def result(o, mask, wo, bias, residual, norm_first, save_norm=False, cfg=None, dmin=1.0, doff=0.0):
+    """The pair divisor is ``max(n, dmin) + doff``; the saved counts (``save_norm``) are ``max(n, dmin)`` (the dgrad adds ``doff``)."""
     if cfg is None:
         cfg = 2 if mask.shape[0] <= 1024 or mask.shape[1] == 768 else 1
     if residual is None:
         residual = o.new_empty((0,))
-    return _ext().result(o, mask, wo, bias, residual, norm_first, save_norm, cfg)
+    return _ext().result(o, mask, wo, bias, residual, norm_first, save_norm, cfg, float(dmin), float(doff))

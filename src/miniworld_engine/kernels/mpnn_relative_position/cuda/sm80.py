@@ -13,7 +13,8 @@ from pathlib import Path
 
 import torch
 
-from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+from ..._nvcc import ensure_cuda_home, host_flags
+from ..._sm120 import sm80_load_extension as load_extension
 
 _dir = Path(__file__).parent / "sm80"
 _common = Path(__file__).resolve().parents[2] / "mpnn_message" / "cuda" / "sm80"

@@ -645,7 +645,7 @@ def refusal(
         return f"{type(exc).__name__}: {exc}"
 
 
-def _fwd_fake(msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, residual, eps, norm_first):
+def _fwd_fake(msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, residual, eps, norm_first, dmin=1.0, doff=0.0):
     """Shapes of `_fwd`'s outputs: out [L, L, CZ], a / b [S L, CH], O [L CH, L CH] bf16, n [L, L] fp32."""
     S, L, _ = msa.shape
     CH, CZ = wl.shape[0], wo.shape[0]
@@ -668,9 +668,12 @@ def _fwd(
     residual: torch.Tensor,
     eps: float,
     norm_first: bool,
+    dmin: float = 1.0,
+    doff: float = 0.0,
 ) -> list[torch.Tensor]:
     """One stack: msa [S, L, CM], mask [S, L] bool (or empty: no mask), residual [L, L, CZ] (or empty), bl / br the projections'
-    biases [CH] (or empty). Returns [out [L, L, CZ], a, b [S L, CH], O [L CH, L CH], n [L, L]]; the last four are what the backward reads."""
+    biases [CH] (or empty). Returns [out [L, L, CZ], a, b [S L, CH], O [L CH, L CH], n [L, L]]; the last four are what the backward reads.
+    The pair divisor is ``max(count, dmin) + doff`` (``opm_train.divisor_params``): (1, 0) the clamped count, (0, offset) AlphaFold 3's ``count + offset``."""
     S, L, CM = msa.shape
     CH, CZ = wl.shape[0], wo.shape[0]
     T_ = S * L
@@ -705,9 +708,11 @@ def _fwd(
     o = torch.mm(a.view(S, L * CH).t(), b.view(S, L * CH))  # [(i, d), (j, e)]
     if has_mask:
         mf = mask.reshape(S, L).float()
-        norm = (mf.t() @ mf).clamp_(min=1)
+        norm = (mf.t() @ mf).clamp_(min=dmin) if dmin > 0 else mf.t() @ mf
+        if doff:
+            norm.add_(doff)
     else:
-        norm = msa.new_full((L, L), float(S), dtype=torch.float32)
+        norm = msa.new_full((L, L), max(float(S), dmin) + doff, dtype=torch.float32)
     out = msa.new_empty((L, L, CZ), dtype=bf)
     res = residual.reshape(L * L, CZ).contiguous() if has_res else out
     _opm_epilogue_kernel[lambda meta: (triton.cdiv(L, meta["TI"]), triton.cdiv(L, meta["BJ"]), triton.cdiv(CZ, meta["BN"]))](
@@ -981,8 +986,8 @@ class _OuterProductMeanTriton(torch.autograd.Function):
     """One MSA stack (no batch axis). ``mask`` / ``residual`` / ``bl`` / ``br`` are empty tensors when absent."""
 
     @staticmethod
-    def forward(ctx, msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, residual, eps, norm_first):
-        out, a, b, o, norm = _fwd(msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, residual, eps, norm_first)
+    def forward(ctx, msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, residual, eps, norm_first, dmin=1.0, doff=0.0):
+        out, a, b, o, norm = _fwd(msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, residual, eps, norm_first, dmin, doff)
         ctx.save_for_backward(msa, mask, a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo, bo)
         ctx.eps, ctx.norm_first, ctx.has_res = eps, norm_first, residual.numel() > 0
         return out
@@ -1005,6 +1010,8 @@ class _OuterProductMeanTriton(torch.autograd.Function):
             dwo.to(wo.dtype),
             dbo.to(bo.dtype),
             dz if ctx.has_res else None,
+            None,
+            None,
             None,
             None,
         )
@@ -1065,12 +1072,14 @@ def triton_outer_product_mean(
     product_norm_weight: torch.Tensor | None = None,
     product_norm_bias: torch.Tensor | None = None,
     product_norm_eps: float = 0.1,
+    count_offset: float | None = None,
 ) -> torch.Tensor:
     """``residual + OPM(msa)`` (``OPM(msa)`` without a residual), differentiable. msa [B, S, L, CM] bf16, mask [B, S, L] bool.
 
     ``b_left`` / ``b_right`` (RoseTTAFold3): the projections' biases, masked rows lose them too. ``groups`` > 1 (Chai-1): the hidden
     channels split into ``groups`` halves with one outer product each, their ``groups * (CH / groups)^2`` products LayerNorm'd
     (``product_norm_*``, eps ``product_norm_eps``), projected, and NOT divided by the pair counts (``normalize_before_proj`` is moot).
+    ``count_offset`` (AlphaFold 3, groups 1): the pair divisor is ``count + count_offset`` instead of ``max(count, 1)``.
 
     Stacks run one at a time: the mask counts and the grouped outer product are per stack. Check :func:`refusal` first."""
 
@@ -1078,6 +1087,7 @@ def triton_outer_product_mean(
         return msa.new_empty((0,))  # applied to the same tensor twice
 
     bl, br = (empty(), empty()) if b_left is None else (b_left, b_right)
+    dmin, doff = (1.0, 0.0) if count_offset is None else (0.0, float(count_offset))  # the pair divisor max(count, dmin) + doff
     outs = []
     for bi in range(msa.shape[0]):
         m = empty() if mask is None else mask[bi]
@@ -1106,7 +1116,21 @@ def triton_outer_product_mean(
         else:
             outs.append(
                 _OuterProductMeanTriton.apply(
-                    msa[bi], m, ln_weight, ln_bias, w_left, w_right, bl, br, w_out, b_out, r, float(eps), bool(normalize_before_proj)
+                    msa[bi],
+                    m,
+                    ln_weight,
+                    ln_bias,
+                    w_left,
+                    w_right,
+                    bl,
+                    br,
+                    w_out,
+                    b_out,
+                    r,
+                    float(eps),
+                    bool(normalize_before_proj),
+                    dmin,
+                    doff,
                 )
             )
     return outs[0].unsqueeze(0) if len(outs) == 1 else torch.stack(outs, 0)

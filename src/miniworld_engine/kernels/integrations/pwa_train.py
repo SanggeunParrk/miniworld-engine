@@ -35,6 +35,7 @@ import triton
 import triton.language as tl
 
 from miniworld_engine.kernels import _cast_cuda
+from miniworld_engine.kernels._wide import needs_wide, wide
 from miniworld_engine.kernels.integrations import pwa_wide as _wide
 
 H, C, D, DZ = 8, 32, 64, 128
@@ -152,14 +153,29 @@ def refusal(
         n_max = 1024 if torch.is_grad_enabled() else NMAX_INFER
         if cap == (9, 0) and native and (n == 0 or s == 0 or n > n_max):
             return f"the CUDA-only H100 path needs positive S and N <= {n_max}, got N={n}, S={s}"
+        if cap == (9, 0) and torch.is_grad_enabled() and n > 1024:
+            # past 1024 the training step would run the Triton pair kernels (pair3.cu's backward holds N <= 1024): slower than the triton
+            # backend (H100, boltz2 widths, L 1536: 5.80 vs 5.50 ms) -- refused, as at the other widths (FoldForge 5I28: inference only)
+            return f"training past 1024 tokens: the H100 pair backward (pair3.cu pair_bwd3) holds N <= 1024, got N={n} (inference serves N <= {NMAX_INFER})"
         if wide:  # the wide path pads the length to a multiple of 16 itself; any depth
             if cap != (9, 0):
                 return "the wide kernels are built for sm_90a"
-            if not 0 < n <= _wide.NMAX or s == 0:
-                return f"the wide pair kernels hold one row of logits: 0 < N <= {_wide.NMAX}, got N={n}, S={s}"
+            # inference past 1024 (FoldForge 5I28, E3): every wide width, the BIG build (d_msa 256 x 8 x 32, d_pair 512) included -- pair_fwd3's
+            # bf16 row of 2048 logits fits next to its d_pair 512 tiles (pair_wide.cu NMAX_FWD); the MSA-side kernels take any N
+            wide_max = _wide.NMAX if torch.is_grad_enabled() else _wide.NMAX_INFER
+            if not 0 < n <= wide_max or s == 0:
+                return (
+                    f"the wide pair kernels hold one row of logits: 0 < N <= {_wide.NMAX} in training (the backward stages fp32 rows), "
+                    f"<= {_wide.NMAX_INFER} in inference; got N={n}, S={s}, grad {torch.is_grad_enabled()}"
+                )
             return None
-        if pair_only and (cap != (9, 0) or n > _wide.NMAX):  # the pair side is pwa_wide's (sm_90a, one row of N <= 1024 logits)
-            return f"d_pair {d_pair}: the pair side is pwa_wide's sm_90a kernels (N <= {_wide.NMAX}), got N={n} on sm_{cap[0]}{cap[1]}"
+        # the pair side is pwa_wide's (sm_90a, one row of logits: N <= 1024 in training, 2048 in inference -- FoldForge 5I28)
+        pair_max = _wide.NMAX if torch.is_grad_enabled() else _wide.NMAX_INFER
+        if pair_only and (cap != (9, 0) or n > pair_max):
+            return (
+                f"d_pair {d_pair}: the pair side is pwa_wide's sm_90a kernels (N <= {_wide.NMAX} in training, {_wide.NMAX_INFER} in inference), "
+                f"got N={n} on sm_{cap[0]}{cap[1]}, grad {torch.is_grad_enabled()}"
+            )
         if n % 128 or s % 2:
             return f"N must be a multiple of 128 and S even, got N={n}, S={s}"
         if cap == (10, 0) and (s % 128 or n > 1024):  # ln_vg / dv_bwd tiles are 128 MSA rows; pair_fwd holds a row of N
@@ -305,8 +321,11 @@ def _pair_fwd_kernel(
     H: tl.constexpr,
     BJ: tl.constexpr,
     BJO: tl.constexpr,
+    WIDE: tl.constexpr,
 ):
-    i = tl.program_id(0)
+    # 64-bit offsets: `(i * N + j) * DZ` (z, N^2 * DZ) and `(hh * N + i) * N + j` (w, H * N^2) wrap in int32 at N 2048 d_pair 512;
+    # WIDE (the launcher, from the tensors' extents) makes the row index -- and so every product built on it -- int64.
+    i = wide(tl.program_id(0), WIDE)
     jo = tl.program_id(1)  # this program's output block of j
     d = tl.arange(0, DZ)
     hh = tl.arange(0, HP)
@@ -365,8 +384,10 @@ def _pair_bwd_kernel(
     BJ: tl.constexpr,
     BJO: tl.constexpr,
     HAS_SDOT: tl.constexpr,
+    WIDE: tl.constexpr,
 ):
-    i = tl.program_id(0)
+    # 64-bit offsets: as _pair_fwd_kernel (WIDE from the extents of z, w, dw); `pid * HP * DZ` stays small (one partial per program)
+    i = wide(tl.program_id(0), WIDE)
     jo = tl.program_id(1)
     pid = i * tl.num_programs(1) + jo
     d = tl.arange(0, DZ)
@@ -435,6 +456,7 @@ def pair_fwd(z, mask, ln_w, eps, wb, H, BJ=64, num_warps=4, BJO=None):
         H=H,
         BJ=BJ,
         BJO=BJO,
+        WIDE=needs_wide(z, w, HP * N * N),  # HP: the padded head lanes form addresses too (masked)
         num_warps=num_warps,
     )
     return w
@@ -473,6 +495,7 @@ def pair_bwd(z, w16, dw, ln_w, eps, wb, BJ=32, num_warps=4, BJO=None):
         BJ=BJ,
         BJO=BJO,
         HAS_SDOT=BJO < N,
+        WIDE=needs_wide(z, w16, dwc, HP * N * N),
         num_warps=num_warps,
     )
     return dz, colsum(pwb)[:H], colsum(pln)

@@ -1009,3 +1009,144 @@ def pair_bias_bwd_mma(z, gamma, wb, dbias, eps=1e-5):
     )
     _load("pb_fin", d)((1, 1, 1), (64, 1, 1), part, int(nb), wbf, gf, dgamma, dwb, 0)
     return dz, dgamma, dwb
+
+
+# ------------------------------------------------------------------------------------------------ ESMFold2's attention (lattn90_esm.cu)
+# AtomDiTESMFold2Pair (kernels/integrations/local_dit_esm.py): the 192-key slid subset with the +/- 64 rank window, mma.sync bf16 and TF32,
+# forward (row LSE optional) and backward. sm_90a: the cubin of this package (PDL); sm_80: the same source with its dependent-launch wait
+# emptied (dit_variants/cuda/sm80.cubin), so there is one source of these kernels.
+ESM_KEYS, ESM_SPAN = 192, 160
+
+#: name -> (function, dynamic shared memory) of lattn90_esm.cu
+_ESM_KERNELS = {
+    "h_pb_esm": ("h_pair_bias_esm", 0),
+    "h_esm": ("h_attn_esm", 64 * 168 * 4 + 2 * (64 + 192 + 192) * 40 * 2),
+    "h_esm32": ("h_attn_esm_tf32", 64 * 168 * 4 + (64 + 192 + 192) * 36 * 4),
+    "h_esm_dq": ("h_attn_esm_dq", 64 * 168 * 4 + (64 * 2 + 192 * 2) * 40 * 2 + 2 * 64 * 4),
+    "h_esm_dkv": ("h_attn_esm_dkv", 4 * 16 * 164 * 4 + (192 * 2 + 64 * 2) * 40 * 2 + 2 * 192 * 4),
+    "h_esm_dq32": ("h_attn_esm_dq_tf32", 64 * 168 * 4 + (64 * 2 + 192 * 2) * 36 * 4 + 2 * 64 * 4),
+    "h_esm_dkv32": ("h_attn_esm_dkv_tf32", 4 * 16 * 164 * 4 + (192 * 2 + 64 * 2) * 36 * 4 + 2 * 192 * 4),
+    "h_pbb_esm": ("h_pair_bias_esm_bwd", 0),
+}
+
+
+def esm_cubin(hopper: bool) -> str:
+    """The cubin of lattn90_esm.cu: sm_90a (``hopper``) or sm_80."""
+    if hopper:
+        return cubin("lattn90_esm", True)
+    from miniworld_engine.kernels.dit_variants.cuda import sm80
+
+    return sm80.cubin("lattn90_esm")
+
+
+@functools.lru_cache(maxsize=None)
+def _esm_load(name: str, device_index: int):
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+
+    hopper = _hopper(device_index)
+    func, smem = _ESM_KERNELS[name]
+    with torch.cuda.device(device_index):
+        return driver.Kernel(esm_cubin(hopper), func, smem, pdl=hopper)
+
+
+def _pb_fin(device_index: int):
+    """The pair-bias weight finish (``local_bias_fin`` of lbias.cu): this package's sm_90a build, or sm80_atom_local's."""
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+
+    if _hopper(device_index):
+        return _load("pb_fin", device_index)
+    from miniworld_engine.kernels.augmented_attention.cuda import sm80_atom_local
+
+    return sm80_atom_local._load("pb_fin", device_index)
+
+
+def pair_bias_esm(z, gamma, wb, kmask, nreal, n, eps=1e-5):
+    """ESMFold2's trunked pair z [nwin, 32, 192, 16] bf16 / fp32 -> bias2 [4, nwin, 32, 160] fp32 by POSITION: entry (w, i, c) is the bias of
+    the key at 32 w - 64 + c, read from the slot of AlphaFold 3's 192-key slid subset that holds it (log2 domain), -inf outside the +/- 64
+    rank window, outside the real keys (``kmask`` [n] or None) or outside the subset. ``nreal``: the real atom count, a device int32 scalar."""
+    d = _dev(z)
+    out = torch.empty(NH, z.shape[0], WQ, ESM_SPAN, device=z.device, dtype=torch.float32)
+    _esm_load("h_pb_esm", d)(
+        (min(8 * num_sms(d), (out[0].numel() + 255) // 256), 1, 1),
+        (256, 1, 1),
+        z.contiguous(),
+        gamma.float().contiguous(),
+        wb.float().contiguous(),
+        _u8(kmask),
+        nreal,
+        out,
+        int(n),
+        float(eps),
+        int(z.dtype == torch.bfloat16),
+    )
+    return out
+
+
+def attn_esm(q, k, v, bias2, tf32: bool):
+    """ESMFold2's window attention forward (inference). q, k, v [A, N, 128] (bf16, or fp32 rounded to tf32; q / k normalised and rotated),
+    bias2 from ``pair_bias_esm`` -> O [A, N, 128] in q's dtype. N a multiple of 64."""
+    A, N, _ = q.shape
+    d = _dev(q)
+    o = torch.empty_like(q)
+    spc = _chunk(A, (N // 64) * NH)
+    grid = (N // 64, NH, (A + spc - 1) // spc)
+    if tf32:
+        _esm_load("h_esm32", d)(grid, (128, 1, 1), q, k, v, bias2, o, int(N), int(A), int(spc), None)
+    else:
+        _esm_load("h_esm", d)(grid, (128, 1, 1), q, k, v, bias2, o, None, int(N), int(A), int(spc))
+    return o
+
+
+def attn_esm_fwd_lse(q, k, v, bias2):
+    """The forward of :func:`attn_esm` for training (bf16, or fp32 on TF32 by q's dtype): O [A, N, 128] and the row LSE [A, 4, N] fp32 (log2
+    units; 1e30 for a row with no key)."""
+    A, N, _ = q.shape
+    d = _dev(q)
+    o = torch.empty_like(q)
+    lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
+    spc = _chunk(A, (N // 64) * NH)
+    grid = (N // 64, NH, (A + spc - 1) // spc)
+    if q.dtype == torch.float32:
+        _esm_load("h_esm32", d)(grid, (128, 1, 1), q, k, v, bias2, o, int(N), int(A), int(spc), lse)
+    else:
+        _esm_load("h_esm", d)(grid, (128, 1, 1), q, k, v, bias2, o, lse, int(N), int(A), int(spc))
+    return o, lse
+
+
+def attn_esm_bwd(q, k, v, do, bias2, lse, dd, dkv):
+    """Backward of the ESMFold2 window attention (bf16, or TF32 for fp32 operands): dQ, dK, dV into ``dkv`` [A N, >= 384] (row stride
+    ``dkv.stride(0)``, columns 0 / 128 / 256 relative to its base) and the bias gradient [4, nwin, 32, 160] fp32 (natural units, by position,
+    summed over the samples). ``lse`` from :func:`attn_esm_fwd_lse`, ``dd`` [A, 4, N] = rowsum(dO * O) per head."""
+    A, N, _ = q.shape
+    d = _dev(q)
+    nwin = nwindows(N)
+    ldd = dkv.stride(0)
+    spc = _chunk(A, (N // 64) * NH)
+    sp = (A + spc - 1) // spc
+    partial = torch.empty(sp, NH, nwin, WQ, ESM_SPAN, device=q.device, dtype=torch.float32)
+    grid = (N // 64, NH, sp)
+    sfx = "32" if q.dtype == torch.float32 else ""  # fp32 operands: the TF32 kernels, fp32 gradients into an fp32 dkv
+    _esm_load("h_esm_dq" + sfx, d)(grid, (128, 1, 1), q, k, v, do, bias2, lse, dd, dkv, partial, int(ldd), int(N), int(A), int(spc))
+    _esm_load("h_esm_dkv" + sfx, d)(grid, (128, 1, 1), q, k, v, do, bias2, lse, dd, dkv, int(ldd), int(N), int(A), int(spc))
+    return partial.sum(0)
+
+
+def pair_bias_esm_bwd(z, gamma, wb, dbias, nreal, eps=1e-5):
+    """dbias [4, nwin, 32, 160] fp32 (natural units) -> dz (z's shape / dtype), dgamma [16], dWb [4, 16] (fp32); ``nreal`` as in
+    :func:`pair_bias_esm`."""
+    d = _dev(z)
+    n = dbias.shape[1] * WQ
+    z = z.contiguous()
+    rows = z.numel() // DP
+    dz = torch.empty_like(z)
+    nb = min(num_sms(d), (rows + 255) // 256)
+    part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
+    dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
+    dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
+    wbf, gf = wb.float().contiguous(), gamma.float().contiguous()
+    _esm_load("h_pbb_esm", d)(
+        (nb, 1, 1), (256, 1, 1), z, wbf, gf, dbias.contiguous(), nreal, dz, part, int(n), float(eps), int(z.dtype == torch.bfloat16)
+    )
+    _pb_fin(d)((1, 1, 1), (64, 1, 1), part, int(nb), wbf, gf, dgamma, dwb, 0)
+    return dz, dgamma, dwb

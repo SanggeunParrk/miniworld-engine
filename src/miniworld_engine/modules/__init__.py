@@ -16,6 +16,8 @@ One file per op family; a folder only where a family needs several files:
                    MiniWorldBiasOnly
     atom_dit.py    AtomDiT (selector) + one block class per model: AtomDiTOpenFold3 (also AF3) / Boltz2 / RoseTTAFold3 / Chai1 / Protenix /
                    ESMFold2 / MiniWorld, SWA3DRoPEAttention, SWAAtomTransformer
+    dit_stack.py   TokenDiTStack / AtomDiTStack (n blocks of one model, run in order), from_shared_pair (a released stack's shared pair norm)
+    residual.py    ParallelResidual / parallel_residual (the fused residual add of parallel branches: x + sum_i (y_i - x))
     embedder.py    InputFeatureEmbedder
     smooth_lddt.py SmoothLddtLoss (the diffusion loss, AF3 Algorithm 27)
     sampler_ops.py AugmentNoise, AlignEuler, PoolAtoms (the diffusion sampler's glue and the atom encoder's pooling)
@@ -29,6 +31,7 @@ from miniworld_engine.modules.atom_dit import (
     AtomDiTBoltz2,
     AtomDiTChai1,
     AtomDiTESMFold2,
+    AtomDiTESMFold2Pair,
     AtomDiTMiniWorld,
     AtomDiTOpenFold3,
     AtomDiTProtenix,
@@ -43,6 +46,7 @@ from miniworld_engine.modules.attention import (
     FlatQKNormAugmentedAttention,
     UngatedAugmentedAttention,
 )
+from miniworld_engine.modules.dit_stack import AtomDiTStack, TokenDiTStack, from_shared_pair
 from miniworld_engine.modules.embedder import InputFeatureEmbedder
 from miniworld_engine.modules.init import apply_init, describe_init
 from miniworld_engine.modules.msa import MSAPairWeightedAveraging, OuterProduct, OuterProductMean
@@ -50,6 +54,7 @@ from miniworld_engine.modules.norm import AdaptiveLayerNorm, AdaptiveRMSNorm, Id
 from miniworld_engine.modules.pair_embed import PairEmbedAdaLN, PairEmbedCA, PairEmbedGeom
 from miniworld_engine.modules.pairformer import Pairformer, PairformerBlock, PairformerConfig
 from miniworld_engine.modules.primitives import BackendModule, Dropout, Linear, MasterWeights, MPLinear
+from miniworld_engine.modules.residual import ParallelResidual, parallel_residual
 from miniworld_engine.modules.sampler_ops import AlignEuler, AugmentNoise, PoolAtoms
 from miniworld_engine.modules.smooth_lddt import SmoothLddtLoss
 from miniworld_engine.modules.token_dit import (
@@ -83,10 +88,12 @@ __all__ = [
     "AtomDiTBoltz2",
     "AtomDiTChai1",
     "AtomDiTESMFold2",
+    "AtomDiTESMFold2Pair",
     "AtomDiTMiniWorld",
     "AtomDiTOpenFold3",
     "AtomDiTProtenix",
     "AtomDiTRoseTTAFold3",
+    "AtomDiTStack",
     "AttentionPairBias",
     "AugmentNoise",
     "AugmentedAttentionPairBias",
@@ -112,6 +119,7 @@ __all__ = [
     "Pairformer",
     "PairformerBlock",
     "PairformerConfig",
+    "ParallelResidual",
     "PoolAtoms",
     "RMSNorm",
     "SWA3DRoPEAttention",
@@ -124,6 +132,7 @@ __all__ = [
     "TokenDiTMiniWorldBiasOnly",
     "TokenDiTProtenix",
     "TokenDiTRoseTTAFold3",
+    "TokenDiTStack",
     "TokenPairInit",
     "Transition",
     "TriangleAttention",
@@ -137,4 +146,6 @@ __all__ = [
     "UpGatedConditionedTransition",
     "apply_init",
     "describe_init",
+    "from_shared_pair",
+    "parallel_residual",
 ]

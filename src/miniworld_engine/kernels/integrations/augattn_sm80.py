@@ -249,7 +249,7 @@ def _penalties(kmask: torch.Tensor, a: int, batch: int, length: int, padded: int
     return pen
 
 
-_PACKS: dict = {}
+_PACKS: dict = _capture.weight_cache("augattn_sm80.packs")
 
 
 def _pack(params: list[torch.Tensor], heads: int, dt: torch.dtype, save: bool = True):
@@ -1257,7 +1257,7 @@ def attention_ops(query, key, value, bias, mask):
 # keeps reading it), and a later no-grad call with the same tensors (data pointer, shape, strides, version of ``pair``, ``mask`` and the two weights) reads it instead of
 # recomputing.  Nothing is cached unless asked.  An in-place change of ``pair`` or a weight through PyTorch bumps its version and the call recomputes; a CUDA-graph
 # REPLAY does not run this code, so after changing the graph's static ``pair`` buffer the caller refreshes the cache (one eager ``cache_pair_bias``) before replaying.
-_CACHE = "_augattn_sm80_pair_bias"
+_CACHE = _capture.instance_cache_attr("_augattn_sm80_pair_bias")
 
 
 def _ident(t):

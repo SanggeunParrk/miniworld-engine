@@ -17,6 +17,11 @@ from miniworld_engine.modules.transition import Transition
 from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleAttention, TriangleMultiplication
 
 
+def _per_sample_call(pair: torch.Tensor) -> bool:
+    """A :class:`PairformerBlock` call the block may run one sample at a time: ``B > 1`` and no autograd recorded (FoldForge R19)."""
+    return pair.shape[0] > 1 and not torch.is_grad_enabled()
+
+
 @dataclass
 class PairformerConfig:
     """Pairformer hyper-parameters (AF3 defaults)."""
@@ -38,6 +43,10 @@ class PairformerConfig:
     #: ``TriangleMultiplication(model=...)``): e.g. ``"af3"`` (AF3 ending-bias orientation), ``"rf3"`` (gate / out biases, the trimul
     #: divided by the sequence length), ``"chai1"`` / ``"chai1_confidence"`` (Chai-1's output forms).
     model: str = "miniworld"
+    #: Separate keys for the two kinds of triangle update (None: ``model``). RoseTTAFold3's fast mode, for example, is
+    #: ``model="rf3", trimul_model="miniworld"``: the RF3 triangle attention with the plain multiplication (no division by the length).
+    triattn_model: str | None = None
+    trimul_model: str | None = None
     # Single track (AF3 Alg. 17 lines 9-10): ``d_single > 0`` adds ``AttentionPairBias`` over the pair logits and a single
     # ``Transition``; ``forward(pair, mask, single)`` then returns ``(pair, single)``. Its mask is ``mask``.
     d_single: int = 0
@@ -58,13 +67,19 @@ class PairformerBlock(BackendModule, MasterWeights):
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:a100_sm80": 2,
+        "cuda:a100_sm80": 4,
+        "cuda:h100_sm90": 2,
         "cuda:5090_sm120": 1,
-    }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; 2026-11-12: the sub-modules' sm_120a builds
+    }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; cuda 3 / 2 (2026-11-11): B > 1 without autograd runs
+    # batched (the cuda AttentionPairBias takes B > 1: no refusal-driven per-sample path)
+    # cuda:a100_sm80 4 (2026-11-12): its AttentionPairBias's generic sm_80 pair-bias backward faster (the same values)
+    # cuda:5090_sm120 1 (2026-11-12): the sub-modules' sm_120a builds
 
     def __init__(self, config: PairformerConfig, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()
         self.config = config
+        trimul_model = config.model if config.trimul_model is None else config.trimul_model
+        triattn_model = config.model if config.triattn_model is None else config.triattn_model
 
         if config.bidirectional_trimul:
             self.tri_multi = BidirectionalTriangleMultiplication(
@@ -81,14 +96,14 @@ class PairformerBlock(BackendModule, MasterWeights):
                 d_hidden=config.d_hidden_tri_multi,
                 outgoing=True,
                 p_drop=config.p_drop,
-                model=config.model,
+                model=trimul_model,
             )
             self.tri_multi_incoming = TriangleMultiplication(
                 d_pair=config.d_pair,
                 d_hidden=config.d_hidden_tri_multi,
                 outgoing=False,
                 p_drop=config.p_drop,
-                model=config.model,
+                model=trimul_model,
             )
         if config.use_triangle_attention:
             # ``d_hidden_tri_attention`` is the PER-HEAD width; TriangleAttention takes the TOTAL hidden width.
@@ -98,7 +113,7 @@ class PairformerBlock(BackendModule, MasterWeights):
                 "n_head": config.n_head_tri_attention,
                 "d_hidden": d_hidden_attn_total,
                 "p_drop": config.p_drop,
-                "model": config.model,
+                "model": triattn_model,
             }
             if not config.use_self_attention:  # bias-only: only TriangleAttention has it (a model variant refuses the argument)
                 attention["use_self_attention"] = False
@@ -134,7 +149,57 @@ class PairformerBlock(BackendModule, MasterWeights):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """``pair`` ``[B, L, L, d_pair]``, ``mask`` ``[B, L]`` (bool). Pair track only: returns ``pair``. With ``config.d_single`` the
         single track is added and ``(pair, single)`` is returned (``single`` ``[B, L, d_single]`` is then required). ``extra_pair_bias``
-        ``[B, n_head_single, L, L]`` is added to the single attention's pair-bias logits; it needs the single track."""
+        ``[B, n_head_single, L, L]`` is added to the single attention's pair-bias logits; it needs the single track.
+
+        Workspace (FoldForge R19): a call without autograd (``torch.no_grad`` / ``inference_mode``) and ``B > 1`` on ``"pytorch"`` runs
+        the block one sample at a time into the batched output (every statement acts per sample: the same math), so its temporaries
+        are one sample's (the reference composition's are about 8-10 pair-sized tensors) plus the output, not ``B`` times that. The
+        outputs equal the batched composition's up to GEMM rounding (a GEMM over one sample's rows may run another cuBLAS kernel). A
+        call that records autograd keeps the batched composition (its saved activations are the batch's anyway). The kernel backends
+        run the batched composition (every sub-module takes ``B > 1``; the ``cuda`` ``AttentionPairBias`` too, since the FoldForge 5I28
+        confidence-head change)."""
+        if _per_sample_call(pair) and self.backend == "pytorch":
+            return self._per_sample(pair, mask, single, extra_pair_bias)
+        return self._block(pair, mask, single, extra_pair_bias)
+
+    def _per_sample(
+        self,
+        pair: torch.Tensor,
+        mask: torch.Tensor | None,
+        single: torch.Tensor | None,
+        extra_pair_bias: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """:meth:`_block` on each sample ``b`` of ``pair[b : b + 1]`` (a size-1 leading dim of ``mask`` / ``single`` / ``extra_pair_bias``
+        broadcasts), written into one ``[B, ...]`` output per track as it is produced."""
+        count = pair.shape[0]
+
+        def pick(t: torch.Tensor | None, b: int) -> torch.Tensor | None:
+            return t if t is None or t.shape[0] == 1 else t[b : b + 1]
+
+        out_pair: torch.Tensor | None = None
+        out_single: torch.Tensor | None = None
+        for b in range(count):
+            res = self._block(pair[b : b + 1], pick(mask, b), pick(single, b), pick(extra_pair_bias, b))
+            p, s = res if isinstance(res, tuple) else (res, None)
+            if out_pair is None:
+                out_pair = p.new_empty((count, *p.shape[1:]))
+            out_pair[b : b + 1] = p
+            if s is not None:
+                if out_single is None:
+                    out_single = s.new_empty((count, *s.shape[1:]))
+                out_single[b : b + 1] = s
+            del res, p, s
+        assert out_pair is not None  # count > 1
+        return out_pair if out_single is None else (out_pair, out_single)
+
+    def _block(
+        self,
+        pair: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        single: torch.Tensor | None = None,
+        extra_pair_bias: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """The block's composition on the whole batch (the reference statements; see :meth:`_forward_pytorch`)."""
         if self.config.d_single and single is None:
             raise ValueError("a block with a single track (config.d_single) needs the single representation")
         if not self.config.d_single and single is not None:
@@ -188,9 +253,14 @@ class PairformerBlock(BackendModule, MasterWeights):
         return self
 
     def unsupported(self, pair, mask=None, single=None, extra_pair_bias=None) -> str | None:
-        """The first sub-module that has no such backend, or whose range does not take this call (its own reason); None if all run."""
+        """The first sub-module that has no such backend, or whose range does not take this call (its own reason); None if all run (a
+        kernel backend runs the call batched: :meth:`_forward_pytorch`)."""
         if self.backend == "pytorch":
             return None
+        return self._refusal(pair, mask, single, extra_pair_bias)
+
+    def _refusal(self, pair, mask=None, single=None, extra_pair_bias=None) -> str | None:
+        """The call's refusal on the selected backend (None: every sub-module takes it)."""
         calls = {"single_attention": (single, pair, mask, extra_pair_bias), "single_transition": (single,), "transition_pair": (pair,)}
         for name, child in self._backend_children():
             if self.backend not in child.backends:

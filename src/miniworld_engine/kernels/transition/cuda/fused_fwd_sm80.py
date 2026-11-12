@@ -68,6 +68,36 @@ def supports(d: int, h: int, rows: int | None = None) -> bool:
     return rows is None or rows >= MIN_ROWS[(d, h)]
 
 
+# --------------------------------------------------------------------------------------------------------------- rows per launch
+#: Entries of a CTA's work list in the one-kernel forward / backward kernels (``sm80/tr_fwd_sm80.cuh`` / ``tr_bwd_sm80.cuh`` ``MAX_ITEMS``); the
+#: schedule keeps two for the remainder's half tile and the terminator, so one launch (one CTA per SM) takes at most 253 tiles per SM.
+MAX_ITEMS = 255
+
+
+_SMS: dict[int, int] = {}
+
+
+def _num_sms(index: int) -> int:
+    n = _SMS.get(index)
+    if n is None:
+        n = _SMS[index] = torch.cuda.get_device_properties(index).multi_processor_count
+    return n
+
+
+#: The wide chain's GEMM grids put 128-row tiles on gridDim.y (at most 65 535).
+CHAIN_MAX_ROWS = 65535 * 128
+
+
+def max_rows(device: torch.device, dtype: torch.dtype = torch.bfloat16) -> int:
+    """Most rows one call of the sm_80 Transition takes on ``device``: (MAX_ITEMS - 2) tiles per SM of the one-kernel kernels (bf16: 256-row
+    tiles, ``fused_sm80`` / the bf16 builds / ``fused_bwd_sm80``; the fp32 build: 128-row tiles) and the wide chain's row grid
+    (``CHAIN_MAX_ROWS``).  An inference call past it runs as one call per contiguous row block (``transition_sm80``; FoldForge 5I28: the template
+    pair stack at 4 x 2048 x 2048 rows, the confidence block at 5 x 1536 x 1536); a training call past it is refused (``modules.Transition``)."""
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    tile = 128 if dtype is torch.float32 else 256
+    return min((MAX_ITEMS - 2) * _num_sms(index) * tile, CHAIN_MAX_ROWS)
+
+
 # ------------------------------------------------------------------------------------------------------------------ weight layouts
 def _k_perm(dev, d):
     """Physical GEMM1 k index 16 s + kk -> input column (thread q of a quad holds the 16 B vectors at 32 i + 8 q)."""
@@ -114,7 +144,7 @@ def _tables(dev, d, h):
     return idx16, idx32
 
 
-_packs: dict = {}
+_packs: dict = _capture.weight_cache("transition_fused_fwd_sm80.packs")
 
 
 def pack(gamma, beta, wa, wb, ws, cache: bool):

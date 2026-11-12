@@ -168,8 +168,8 @@ def mpnn_sm80_unsupported(x: torch.Tensor, loads=None) -> str | None:
     if x.device.type != "cuda":
         return "the CUDA kernels run on CUDA tensors only"
     cc = torch.cuda.get_device_capability(x.device)
-    if cc != (8, 0):
-        return f"the MPNN CUDA kernels are the A100 (sm_80) builds, got sm_{cc[0]}{cc[1]} (that card has the Triton kernels only)"
+    if cc not in ((8, 0), (12, 0)):
+        return f"the MPNN CUDA kernels are the A100 (sm_80) and RTX 5090 (sm_120a) builds, got sm_{cc[0]}{cc[1]} (that card has the Triton kernels only)"
     if loads is not None and not loads():
         return "the sm_80 MPNN extension failed to build"
     return None

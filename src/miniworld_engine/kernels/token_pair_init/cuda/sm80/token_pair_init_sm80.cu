@@ -46,15 +46,15 @@ tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const f
   pack_rows(pk, ids, bond, BL, L, b, i0, nrows, rmax, smax);
   float4 lf[RMAX];
 #pragma unroll
-  for (int r = 0; r < RMAX; r++) lf[r] = r < nrows ? ((const float4*)(left + (size_t)(b * L + i0 + r) * P))[lane] : make_float4(0, 0, 0, 0);
+  for (int r = 0; r < RMAX; r++) lf[r] = r < nrows ? ((const float4*)(left + ((size_t)b * L + i0 + r) * P))[lane] : make_float4(0, 0, 0, 0);
   asm volatile("cp.async.wait_group 0;\n" ::: "memory");
   __syncthreads();
   const float4* T = (const float4*)sm;
-  float4* obase = (float4*)(out + ((size_t)(b * L + i0) * L) * P);
+  float4* obase = (float4*)(out + ((size_t)b * L + i0) * L * P);
   for (int j0 = warp * UNR; j0 < L; j0 += TPI_FWD_WARPS * UNR) {
     float4 rt[UNR];
 #pragma unroll
-    for (int u = 0; u < UNR; u++) rt[u] = ((const float4*)(right + (size_t)(b * L + min(j0 + u, L - 1)) * P))[lane];
+    for (int u = 0; u < UNR; u++) rt[u] = ((const float4*)(right + ((size_t)b * L + min(j0 + u, L - 1)) * P))[lane];
 #pragma unroll
     for (int r = 0; r < RMAX; r++) if (r < nrows) {
       float4 o[UNR];

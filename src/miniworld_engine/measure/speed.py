@@ -104,11 +104,24 @@ def _context(train: bool, autocast: torch.dtype | None):
     return stack
 
 
-def make_step(module, inputs: dict, *, backend: str, train: bool, autocast: torch.dtype | None, seed: int, compile_mode: str | None):
+def make_step(
+    module,
+    inputs: dict,
+    *,
+    backend: str,
+    train: bool,
+    autocast: torch.dtype | None,
+    seed: int,
+    compile_mode: str | None,
+    keep_expanded: bool = False,
+):
     """The callable one replay runs, or raise ``BackendUnsupported`` with the backend's reason.
 
-    ``compile_mode`` None: the backend's forward as is; a string: ``torch.compile(forward, dynamic=False, mode=...)``."""
-    from miniworld_engine.measure.config import TF32_BACKENDS
+    ``compile_mode`` None: the backend's forward as is; a string: ``torch.compile(forward, dynamic=False, mode=...)``.
+    ``keep_expanded`` (a ``*_shared_cond`` case, ``config.keeps_expanded``): a top-level stride-0 expanded floating input is held as its
+    base (a copy, the leaf whose gradient the train step makes) and expanded again inside every call, as a caller that expands a shared
+    conditioning does; every other input is used as is."""
+    from miniworld_engine.measure.config import TF32_BACKENDS, expanded_base, expanded_dims
 
     allow = backend in TF32_BACKENDS  # every backend (user decision 2026-11-10, see TF32_RULE); one left out: fp32 without TF32
     torch.backends.cuda.matmul.allow_tf32 = allow
@@ -118,11 +131,31 @@ def make_step(module, inputs: dict, *, backend: str, train: bool, autocast: torc
     params = [p for p in module.parameters() if p.is_floating_point()] if train else []
     # the accuracy measurer's rule: a top-level floating input is a differentiable activation; a tensor inside a nested structure
     # (e.g. the SWA attention_params tuple: fp32 RoPE cos/sin, sequence lengths) is a constant and gets no gradient
+    expanded = (
+        {
+            k: (expanded_base(v), tuple(v.shape))
+            for k, v in inputs.items()
+            if isinstance(v, torch.Tensor) and v.is_floating_point() and expanded_dims(v)
+        }
+        if keep_expanded
+        else {}
+    )
+    if expanded:
+        inputs = {**inputs, **{k: b for k, (b, _) in expanded.items()}}
+
+        def call() -> dict:
+            return {**inputs, **{k: b.expand(shape) for k, (b, shape) in expanded.items()}}
+
+    else:
+
+        def call() -> dict:
+            return inputs
+
     leaves = [v for v in inputs.values() if isinstance(v, torch.Tensor) and v.is_floating_point() and v.is_leaf] if train else []
     for t in leaves:
         t.requires_grad_(True)
     with _context(train, autocast):
-        reason = module.unsupported(**inputs) if backend != "pytorch" else None
+        reason = module.unsupported(**call()) if backend != "pytorch" else None
     if reason is not None:
         raise BackendUnsupported(reason)
     forward = getattr(module, f"_forward_{backend}")
@@ -133,12 +166,12 @@ def make_step(module, inputs: dict, *, backend: str, train: bool, autocast: torc
 
         def eval_step():
             with _context(False, autocast):
-                return forward(**inputs)
+                return forward(**call())
 
         return eval_step
 
     with _context(True, autocast):
-        outs = [t for t in _floats(forward(**inputs)) if t.requires_grad]
+        outs = [t for t in _floats(forward(**call())) if t.requires_grad]
     if not outs:
         raise RuntimeError("train step: no floating output requires grad")
     g = torch.Generator(device=outs[0].device).manual_seed(seed + 1)
@@ -150,7 +183,7 @@ def make_step(module, inputs: dict, *, backend: str, train: bool, autocast: torc
         for t in targets:
             t.grad = None  # set_to_none inside the region: the captured backward writes fresh gradients
         with _context(True, autocast):
-            out = [t for t in _floats(forward(**inputs)) if t.requires_grad]
+            out = [t for t in _floats(forward(**call())) if t.requires_grad]
         torch.autograd.backward(out, upstream)
         return out
 
@@ -342,6 +375,7 @@ def run(cfg, out_path: str, *, device: str = "cuda") -> list[dict]:
                             autocast=config.autocast(case),
                             seed=config.seed(case),
                             compile_mode=compile_mode if timing == "compile+graph" else None,
+                            keep_expanded=config.keeps_expanded(case),
                         )
                         rec.update(
                             status="ok",
@@ -373,6 +407,7 @@ def run(cfg, out_path: str, *, device: str = "cuda") -> list[dict]:
                                     autocast=config.autocast(case),
                                     seed=config.seed(case),
                                     compile_mode=None,
+                                    keep_expanded=config.keeps_expanded(case),
                                 )
                                 timed = measure(step, timer, timing="eager", warmup=warmup, iterations=iterations)
                                 rec.update(

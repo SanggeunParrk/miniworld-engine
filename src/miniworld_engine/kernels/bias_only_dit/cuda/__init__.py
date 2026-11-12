@@ -1013,7 +1013,8 @@ def prebuild(target, rows):
         (h100_ext, None, None),  # pv_gate_inf.cu: the attention core (bf16 pv_cta / fp32 pv_cta_tf32), dpb, swiglu pipeline
         (h100_gemm_ext, bf16, eval_),  # one-launch conditioning tables, squeeze + out-projection (the bf16 inference step)
         (functools.partial(_rows_ext, True), bf16, None),
-        (functools.partial(train._rows_ext, True), bf16, train_),
+        # the training rows; inference reads their one-pass pair_bias for a 256-wide pair (runner.hoist)
+        (functools.partial(train._rows_ext, True), bf16, None),
         (tf32.rows32, fp32, None),  # the fp32 row kernels
     )
     served = {("bfloat16" if r["dtype"] == "master" else r["dtype"], r["mode"]) for r in rows}

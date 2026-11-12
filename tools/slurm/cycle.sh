@@ -9,6 +9,7 @@
 #   GPU_GRES   (default gpu:1)                   the GPU request of a measurement job
 #   ENGINE_ENV (default <repo>/.pixi/envs/default)  the Python environment (its bin/ on PATH, lib/ on LD_LIBRARY_PATH)
 #   CUTLASS_PATH, MATHDX_HOME                    forwarded to the prebuild job (see docs/kernels.md)
+#   PREBUILD_CPUS, PREBUILD_MEM                  the prebuild job's CPUs / memory (default 48 / 240G; a cluster without such nodes: e.g. 16 / 64G)
 #   CARD       (default h100_sm90)              the card the plan, the tokens and the records are for (a100_sm80 on an A100 cluster)
 #   ARCH       (default sm90a)                  the prebuild target (sm80 for an A100)
 #   PARALLEL   (default 4)                      measurement jobs (GPUs) at once
@@ -51,7 +52,7 @@ cpu() {  # cpu NAME CPUS MEM COMMAND... : one CPU job, waited for, its log print
 
 say "plan"; cpu judge-owed 8 32G "python -m miniworld_engine.judge --gpu ${CARD:-h100_sm90} owed $* --groups ${PLAN_GROUPS:-${PARALLEL:-4}} --plan $PLAN"
 say "prebuild"; for round in 1 2 3; do
-  out=$(cpu prebuild 48 240G "python -m miniworld_engine.kernels._prebuild --arch ${ARCH:-sm90a} --stop-after 480")
+  out=$(cpu prebuild ${PREBUILD_CPUS:-48} ${PREBUILD_MEM:-240G} "python -m miniworld_engine.kernels._prebuild --arch ${ARCH:-sm90a} --stop-after 480")
   echo "$out" | tee -a "$S" | grep -q " 0 of .* still absent" && break
 done
 run_group() {

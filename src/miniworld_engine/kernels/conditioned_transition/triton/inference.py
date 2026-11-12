@@ -23,6 +23,7 @@ fp32 inputs with TF32 tensor-core matmuls (input_precision="tf32"). Practical wh
 from __future__ import annotations
 
 from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._wide import needs_wide, wide
 import torch
 
 from miniworld_engine.kernels._compile import opaque
@@ -87,6 +88,7 @@ def _cond_transition_inference_kernel(
     GROUP_M: tl.constexpr,
     shape_key,
     PRE: tl.constexpr = False,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     # Visit order, tuned: see kernels/_tiles.py. The fused b2b holds h in registers, so the only
     # operands read are x and the weights. `K` is the output width here -- this kernel drops D as a
@@ -110,7 +112,7 @@ def _cond_transition_inference_kernel(
             k_mask = k < K
             # x is the AdaLN output (no LN fold here — AdaLN is a separate kernel).
             x = tl.load(
-                x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+                x_ptr + rows[:, None] * stride_xm + wide(k, WIDE)[None, :] * stride_xk,
                 mask=row_mask[:, None] & k_mask[None, :], other=0.0,
             )
             wa = tl.load(
@@ -137,7 +139,7 @@ def _cond_transition_inference_kernel(
         dc = c0 + tl.arange(0, BLOCK_K_DC)
         dc_mask = dc < DC
         cond = tl.load(
-            cond_ptr + rows[:, None] * stride_cm + dc[None, :] * stride_cc,
+            cond_ptr + rows[:, None] * stride_cm + wide(dc, WIDE)[None, :] * stride_cc,
             mask=row_mask[:, None] & dc_mask[None, :], other=0.0,
         )
         wsc_t = tl.load(  # (BLOCK_K_DC, BN): Wsc[d, dc]^T
@@ -149,7 +151,7 @@ def _cond_transition_inference_kernel(
     scale += bsc[None, :]
     y = tl.sigmoid(scale) * out_acc
     tl.store(
-        out_ptr + rows[:, None] * stride_om + dcols[None, :] * stride_od,
+        out_ptr + rows[:, None] * stride_om + wide(dcols, WIDE)[None, :] * stride_od,
         y, mask=row_mask[:, None] & d_mask[None, :],
     )
 # fmt: on
@@ -215,5 +217,6 @@ def cond_transition_inference(
         out.stride(1),
         shape_key=atom_key(length if length is not None else length_of(x.shape), ND=ND, K=K, DC=DC),
         PRE=pre,
+        WIDE=needs_wide(x, cond, out),
     )
     return out

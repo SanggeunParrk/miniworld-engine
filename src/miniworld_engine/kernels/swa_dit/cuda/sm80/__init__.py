@@ -302,6 +302,7 @@ def oproj_bwd(
     s: int,
     mode: int,
     cfg: int = 0,
+    wot: torch.Tensor | None = None,
 ):
     """The out-projection backward: ``dq1`` / ``o`` / ``g`` / ``att`` [M, 128] bf16 (the gradient of q1, the attention output, the gate projection, the saved ``att``), ``mod`` [b S, 768] fp32,
     ``wo`` [128, 128].  Returns ``(dO, dG, datt, gated, dv)``: [M, 128] bf16 and the attention backward's D, [N, 4, S] fp32; d gate_a goes into columns 256 .. 383 of ``dmod`` (see :func:`dmod_buffer`)."""
@@ -315,7 +316,7 @@ def oproj_bwd(
         g,
         att,
         mod,
-        wo.t().contiguous(),
+        wo.t().contiguous() if wot is None else wot,  # wot: Wo^T made by the caller (composed.train_forms)
         d_o,
         d_g,
         datt,
@@ -344,10 +345,14 @@ def ffn_bwd(
     eps: float,
     mode: int,
     cfg: tuple[int, int] = (2, 1),
+    hsplit: int = 1,
+    wdt: torch.Tensor | None = None,
+    wut: torch.Tensor | None = None,
 ):
     """The FFN backward: ``dy`` (= dq2, the gradient of the block output) / ``q1`` / ``y`` / ``ffn`` [M, 128] bf16 (``y``, ``ffn`` and ``q1`` saved by the forward), ``mod`` [b S, 768] fp32,
     ``wu`` [512, 128], ``wd`` [128, 256].  Returns ``(dq1, dffn, hh, dab)`` bf16 -- [M, 128], [M, 128], [M, 256], [M, 512] (da | db): the gradient of q1 and the dW operands; d shift_f | d scale_f | d gate_f go
-    into columns 384 .. 767 of ``dmod`` (see :func:`dmod_buffer`)."""
+    into columns 384 .. 767 of ``dmod`` (see :func:`dmod_buffer`).  ``cfg`` (gate, dy) and ``hsplit`` (the hidden chunks of a tile group over
+    1 / 2 / 4 / 8 CTAs) select the launch shapes (see ``ops.cu``; every one gives the same values)."""
     m = dy.shape[0]
     dev = dy.device
     dq1, dffn = (torch.empty(m, C, device=dev, dtype=torch.bfloat16) for _ in range(2))
@@ -360,8 +365,8 @@ def ffn_bwd(
         ffn,
         mod,
         wu.contiguous(),
-        wd.t().contiguous(),
-        wu.t().contiguous(),
+        wd.t().contiguous() if wdt is None else wdt,  # Wd^T / Wu^T made by the caller (composed.train_forms)
+        wu.t().contiguous() if wut is None else wut,
         dq1,
         dffn,
         hh,
@@ -373,6 +378,7 @@ def ffn_bwd(
         mode,
         cfg[0],
         cfg[1],
+        hsplit,
     )
     return dq1, dffn, hh, dab
 
@@ -398,6 +404,7 @@ def qkvg_bwd(
     qk_eps: float,
     mode: int,
     cfg: int = 0,
+    wt: torch.Tensor | None = None,
 ):
     """The qkvg backward: ``qi`` (the block input q) / ``pq`` / ``pk`` (the saved rounded pre-norm projections) / ``dg`` / ``dq1`` [M, 128] bf16, ``dqh`` / ``dkh`` / ``dvh`` head-major [N, 4, S, 32] bf16 (the
     attention backward's outputs), ``mod`` [b S, 768] fp32, ``cos`` / ``sin`` [b S, 16] fp32, ``wqkv`` [384, 128], ``wg`` [128, 128].  Returns ``(dq [M, 128], dP [M, 512])`` bf16 (dP = dpq | dpk | dpv | dpg, the
@@ -418,7 +425,7 @@ def qkvg_bwd(
         mod,
         cos,
         sin,
-        torch.cat([wqkv, wg]).t().contiguous(),
+        torch.cat([wqkv, wg]).t().contiguous() if wt is None else wt,  # (Wqkv | Wg)^T made by the caller (composed.train_forms)
         dq,
         dp,
         dmod,
@@ -492,3 +499,22 @@ _INFER_CFG = ((3072, dict(cfg=1, nsplit=8), 1), (5120, dict(cfg=1, nsplit=2), 1)
 def infer_cfg(m: int) -> tuple[dict, int]:
     """(qkvg keywords, ffn cfg) of an inference call over ``m`` rows (``_INFER_CFG``; past its last bound the defaults)."""
     return next(((q, f) for top, q, f in _INFER_CFG if m <= top), ({}, 0))
+
+
+#: the training launch shapes of the bf16 stages (``composed.SWABlockA100``: forward with saves, backward) by the row count M (rows <= the
+#: bound): keywords of ``qkvg_fwd`` / ``ffn_fwd`` / ``oproj_bwd`` / ``ffn_bwd`` / ``qkvg_bwd``, and ``mod_bwd_gemm`` (``composed._mod_bwd``: the
+#: modulation backward on cuBLAS). A call of few row tiles splits the qkvg forward's output blocks over 4 warps, the FFN gate backward's hidden
+#: chunks over 4 CTAs (hsplit), the dy / qkvg backwards' K over 4 / 2 warps per tile (the K split: another fp32 summation order) and runs the
+#: other stages on CTAs of fewer warps. A100 80GB, AtomDiTESMFold2 master train, S 1, graph timing (2026-11-12), cuda / triton: L 1024
+#: 1.39 -> 0.96, 2048 1.23 -> 0.96, 3072 1.16 -> 0.96 (the default launches / these, with ``composed.train_forms``).
+_SMALL = dict(qkvg_fwd=dict(cfg=1, nsplit=4), ffn_fwd=dict(cfg=1), oproj_bwd=dict(cfg=1))
+_TRAIN_CFG = (
+    (1024, dict(_SMALL, ffn_bwd=dict(cfg=(1, 5), hsplit=4), qkvg_bwd=dict(cfg=3), mod_bwd_gemm=True)),
+    (3072, dict(_SMALL, ffn_bwd=dict(cfg=(1, 4), hsplit=4), qkvg_bwd=dict(cfg=4), mod_bwd_gemm=True)),
+    (5120, dict(_SMALL, ffn_bwd=dict(cfg=(1, 1)), qkvg_bwd=dict(cfg=1))),
+)
+
+
+def train_cfg(m: int) -> dict:
+    """The per-stage keywords of a training call over ``m`` rows (``_TRAIN_CFG``; past its last bound none: the defaults)."""
+    return next((c for top, c in _TRAIN_CFG if m <= top), {})

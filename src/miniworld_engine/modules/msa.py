@@ -174,7 +174,7 @@ class OuterProductMean(BackendModule, MasterWeights):
     #:       (S % 256, N % 64, d_msa 64 / 128, d_pair 128 / 256 / 384), else ``composed.inference``
     #:   groups (Chai-1, 8 x 8)  ``kernels.outer_product_mean.chai`` (fused CUDA passes, forward + backward; d_msa 64, N % 64)
     #: ``"triton"``: ``kernels.outer_product_mean.triton.main.triton_outer_product_mean`` (forward + backward, bf16 activations; d_msa /
-    #: d_hidden powers of two >= 16, d_pair % 32; divides by the clamped count only: no ``count_offset``; no ``mask_interchain``).
+    #: d_hidden powers of two >= 16, d_pair % 32; the pair divisor clamp(n, 1) or, with ``count_offset``, n + count_offset; no ``mask_interchain``).
     #: ``"anthropic"`` (inference only; the residual and the interchain mask are the module's): the model kit's own OPM kernel by the
     #: module's form (the module is model-agnostic: the kit of the models its rows serve):
     #:   normalize_before_proj, groups 1, d_pair 128 (Boltz-2, MiniWorld; RoseTTAFold3's biased projections in the same form)  the boltz2
@@ -187,7 +187,11 @@ class OuterProductMean(BackendModule, MasterWeights):
     #:   divide after the projection, d_msa 128, d_hidden 32, d_pair % 256, no projection bias (ESMFold2, Protenix-v2)  the esmfold2 kit's
     #:       ``ef2_msa_v2.opm_fused`` (LN + W x row mask producer, cuBLAS, projection + bias / clamp(n, 1) + pair residual epilogue)
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: sm_80 paths; 2026-11-12: their sm_120a build (RTX 5090)
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:a100_sm80": 3,
+        "triton": 2,
+        "cuda:5090_sm120": 1,
+    }  # 2026-11-10: sm_80 paths; 2026-11-11: count_offset in the triton / sm_80 kernels (FoldForge R2); 2026-11-12: their sm_120a build (RTX 5090)
 
     # ------------------------------------------------------------------------------------------------------------------ anthropic
     def _anthropic_route(self, msa, mask, residual) -> tuple[str | None, str | None]:
@@ -483,8 +487,6 @@ class OuterProductMean(BackendModule, MasterWeights):
         why = self._common_refusal(msa, mask, residual)
         if why is not None:
             return why
-        if self.count_offset is not None:
-            return "count_offset: the Triton kernel divides by the clamped pair count only"
         from miniworld_engine.kernels.outer_product_mean.triton.main import refusal
 
         return refusal(
@@ -523,6 +525,7 @@ class OuterProductMean(BackendModule, MasterWeights):
             normalize_before_proj=self.normalize_before_proj,
             b_left=self.to_left.bias,
             b_right=self.to_right.bias,
+            count_offset=self.count_offset,
             **options,
         )
 
@@ -869,8 +872,8 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
 
     def _supports_cuda(self, msa, pair, mask=None) -> str | None:
         """``kernels.integrations.pwa_train`` (d_msa 64, d_pair 128, 8 heads x 32: N % 128, S even, N <= 2048 inference / 1024 training;
-        d_pair 256 / 384 / 512 with pwa_wide's pair kernels: N <= 1024) and ``pwa_wide`` (d_msa 64 / 128, d_pair 128 / 256 / 384, 8 heads x
-        8 / 16, or d_msa 256, d_pair 512, 8 heads x 32 (the BIG build); N <= 1024): bf16 activations, batch 1, sm_90a, forward + backward
+        d_pair 256 / 384 / 512 with pwa_wide's pair kernels: N <= 1024 training / 2048 inference) and ``pwa_wide`` (d_msa 64 / 128, d_pair 128 / 256 / 384, 8 heads x
+        8 / 16, or d_msa 256, d_pair 512, 8 heads x 32 (the BIG build); N <= 1024 training / 2048 inference): bf16 activations, batch 1, sm_90a, forward + backward
         (the residual and the row dropout in the kernels)."""
         why = self._common_refusal(msa, pair, mask)
         if why is not None:

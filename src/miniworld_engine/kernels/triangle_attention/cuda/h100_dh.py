@@ -28,7 +28,7 @@ from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flag
 
 _SRC = Path(__file__).parent / "h100_sources"
 HEAD_DIMS = (32, 64)
-_PACKS: dict = {}
+_PACKS: dict = _capture.weight_cache("triangle_attention_h100_dh.packs")
 
 
 @functools.lru_cache(maxsize=None)
@@ -40,6 +40,18 @@ def ext():
         extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"), "--use_fast_math", "-DNDEBUG"],
         verbose=False,
     )
+
+
+#: query tile of the inference core: 128 (4 warps x 32 queries) for 64-channel heads once the length is a multiple of 128 and at least
+#: this, else 64 (4 x 16). A 16-query warp tile is bound by its ldmatrix traffic (every K | V fragment feeds one MMA); 32 queries per warp
+#: halve it (H100, core alone: 0.98 / 0.93 / 0.87 / 0.94 / 0.83 / 0.86 of the 64 tile at S 384 / 512 / 768 / 1024 / 1536 / 2048; 1.04 at
+#: S 256). 32-channel heads keep 64 (the 128 tile is 1.17-1.30x slower there: 4 x 16 queries already fit its registers twice over).
+QUERY_TILE_128_MIN = 384
+
+
+def query_tile(length: int, d: int) -> int:
+    """The inference core's query tile at ``length`` (the padded S) and head width ``d``: a pure function of the shape."""
+    return 128 if d == 64 and length % 128 == 0 and length >= QUERY_TILE_128_MIN else 64
 
 
 def train_core(proj, bias, n_head, d, scale):
@@ -134,9 +146,8 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> tor
     bias = torch.mm(yb, pack["wb"].t()).view(B, L, L, H).permute(0, 3, 1, 2)
     if mask is not None:
         bias = bias.masked_fill(~mask[:, None, None, :], float("-inf"))
-    u = ext().triattn_dh_forward(
-        proj, bias.contiguous(), pack["gb"] if pack["gb"] is not None else proj.new_empty(0, dtype=torch.float32), H, D, D**-0.5
-    )
+    gb = pack["gb"] if pack["gb"] is not None else proj.new_empty(0, dtype=torch.float32)
+    u = ext().triattn_dh_forward(proj, bias.contiguous(), gb, H, D, D**-0.5, query_tile(L, D))
 
     def project(w):
         t = torch.mm(u, w.t())

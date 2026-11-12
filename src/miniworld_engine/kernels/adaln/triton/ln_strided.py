@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._wide import wide
 
 import torch
 import triton
@@ -75,6 +76,7 @@ def _ln_kernel(
     MC=None,
     RC=None,
     SAVE_C: tl.constexpr = False,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -95,7 +97,7 @@ def _ln_kernel(
         cols = tl.arange(0, BLOCK_K)
         cmask = cols < N
         mask = rmask[:, None] & cmask[None, :]
-        x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
         mean = tl.sum(x, axis=1) / N
         xc = tl.where(mask, x - mean[:, None], 0.0)
         var = tl.sum(xc * xc, axis=1) / N
@@ -107,14 +109,14 @@ def _ln_kernel(
         if HAS_W:
             w = tl.load(W + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
             xn = xn * w
-        tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, xn.to(Y.dtype.element_ty), mask=mask)
+        tl.store(Y + rm[:, None] * sy0 + wide(cols, WIDE)[None, :] * sy1, xn.to(Y.dtype.element_ty), mask=mask)
     else:
         s = tl.zeros([BLOCK_M1], dtype=tl.float32)
         ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
         for n0 in range(0, N, BLOCK_K):
             cols = n0 + tl.arange(0, BLOCK_K)
             mask = rmask[:, None] & (cols[None, :] < N)
-            x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
             s += tl.sum(x, axis=1)
             ss += tl.sum(x * x, axis=1)
         mean = s / N
@@ -127,12 +129,12 @@ def _ln_kernel(
             cols = n0 + tl.arange(0, BLOCK_K)
             cmask = cols < N
             mask = rmask[:, None] & cmask[None, :]
-            x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
             xn = (x - mean[:, None]) * rstd[:, None]
             if HAS_W:
                 w = tl.load(W + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
                 xn = xn * w
-            tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, xn.to(Y.dtype.element_ty), mask=mask)
+            tl.store(Y + rm[:, None] * sy0 + wide(cols, WIDE)[None, :] * sy1, xn.to(Y.dtype.element_ty), mask=mask)
     if HAS_STATS:
         # a second row-wise reduction in the same launch: the LayerNorm statistics of X2 (M, N2), as (rstd, mean * rstd) -- what
         # `layernorm_stats_triton` returns (the same sums, the same formula), without its own launch

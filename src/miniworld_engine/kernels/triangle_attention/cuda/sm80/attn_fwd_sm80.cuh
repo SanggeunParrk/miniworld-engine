@@ -146,7 +146,7 @@ DEVI bool attn_fwd_body(const AttnParams p) {
 
   // ---- loads: sub-step s = (key tile j = s / R, row r = s % R) brings its K | V, and the first row of a key tile also its bias tile
   const KVBiasLoader<G, G::COMPACT> loader(p.k, p.v, p.ldk, p.ldv, p.bias, L, tok0, row0, h, z, p.H, qt, tid,
-                                          G::COMPACT ? p.indices + z * L : nullptr);
+                                          G::COMPACT ? p.indices + (size_t)z * L : nullptr);
   auto issue = [&](int s) { loader.issue(sbase, s, NS, L); };
   // Q of the R rows rides in group 0
 #pragma unroll

@@ -171,21 +171,23 @@ def _edge_tail_project_kernel(
     hidden_weight = tl.load(hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH).to(tl.bfloat16)
     hidden_bias = tl.load(hidden_bias_ptr + columns).to(tl.bfloat16)
 
-    first_tile = tl.program_id(0) * TILES
+    local = tl.arange(0, BLOCK_M1)
+    first_tile = tl.program_id(0).to(tl.int64) * TILES
     for tile in range(TILES):
-        row_indices = (first_tile + tile) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
-        row_valid = row_indices < rows
-        offsets = row_indices[:, None] * WIDTH + columns[None, :]
-        edge = tl.load(edge_ptr + offsets, mask=row_valid[:, None], other=0.0).to(tl.bfloat16)
-        groups = row_indices // NEIGHBORS
+        row0 = (first_tile + tile) * BLOCK_M1  # the tile's first row (int64)
+        row_valid = local < rows - row0
+        tile_off = local[:, None] * WIDTH + columns[None, :]  # in-tile offsets (int32); the tile's first row is an int64 scalar
+        edge = tl.load(edge_ptr + row0 * WIDTH + tile_off, mask=row_valid[:, None], other=0.0).to(tl.bfloat16)
+        group0 = row0 // NEIGHBORS  # int64; the tile's groups relative to it stay int32
+        groups = ((row0 - group0 * NEIGHBORS).to(tl.int32) + local) // NEIGHBORS
         query = tl.load(
-            query_ptr + groups[:, None] * WIDTH + columns[None, :],
+            query_ptr + group0 * WIDTH + groups[:, None] * WIDTH + columns[None, :],
             mask=row_valid[:, None],
             other=0.0,
         ).to(tl.float32)
-        neighbor_rows = tl.load(index_ptr + row_indices, mask=row_valid, other=0)
+        neighbor_rows = tl.load(index_ptr + row0 + local, mask=row_valid, other=0)
         neighbor = tl.load(
-            neighbor_ptr + neighbor_rows[:, None] * WIDTH + columns[None, :],
+            neighbor_ptr + neighbor_rows.to(tl.int64)[:, None] * WIDTH + columns[None, :],
             mask=row_valid[:, None],
             other=0.0,
         ).to(tl.float32)
@@ -197,7 +199,7 @@ def _edge_tail_project_kernel(
         preactivation = (preactivation + neighbor).to(tl.bfloat16)
         activated = _gelu(preactivation.to(tl.float32)).to(tl.bfloat16)
         hidden = (tl.dot(activated, hidden_weight) + hidden_bias[None, :]).to(tl.bfloat16)
-        tl.store(hidden_ptr + offsets, hidden, mask=row_valid[:, None])
+        tl.store(hidden_ptr + row0 * WIDTH + tile_off, hidden, mask=row_valid[:, None])
 
 
 @configured(
@@ -238,12 +240,13 @@ def _edge_tail_norm_kernel(
     norm_bias = tl.load(norm_bias_ptr + columns).to(tl.float32)
     seed = tl.load(seed_ptr)
 
-    first_tile = tl.program_id(0) * TILES
+    local = tl.arange(0, BLOCK_M1)
+    first_tile = tl.program_id(0).to(tl.int64) * TILES
     for tile in range(TILES):
-        row_indices = (first_tile + tile) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
-        row_valid = row_indices < rows
-        offsets = row_indices[:, None] * WIDTH + columns[None, :]
-        edge = tl.load(edge_ptr + offsets, mask=row_valid[:, None], other=0.0).to(tl.bfloat16)
+        row0 = (first_tile + tile) * BLOCK_M1  # the tile's first row (int64)
+        row_valid = local < rows - row0
+        tile_off = local[:, None] * WIDTH + columns[None, :]  # in-tile offsets (int32); the tile's first row is an int64 scalar
+        edge = tl.load(edge_ptr + row0 * WIDTH + tile_off, mask=row_valid[:, None], other=0.0).to(tl.bfloat16)
         # Contract in BLOCK_K slices, applying the second GELU per slice as it is
         # loaded.  At BLOCK_K == WIDTH this is one full-width dot and reproduces the
         # unlooped kernel exactly; below that it stages a smaller operand and buys
@@ -253,7 +256,7 @@ def _edge_tail_norm_kernel(
         for contraction in range(0, WIDTH, BLOCK_K):
             slice_columns = contraction + tl.arange(0, BLOCK_K)
             hidden_slice = tl.load(
-                hidden_ptr + row_indices[:, None] * WIDTH + slice_columns[None, :],
+                hidden_ptr + row0 * WIDTH + local[:, None] * WIDTH + slice_columns[None, :],
                 mask=row_valid[:, None],
                 other=0.0,
             ).to(tl.float32)
@@ -263,7 +266,9 @@ def _edge_tail_norm_kernel(
             )
         update = (accumulator + output_bias[None, :]).to(tl.bfloat16)
         if DROPOUT:
-            keep = tl.rand(seed, offsets, n_rounds=_PHILOX_ROUNDS) < keep_probability
+            # the dropout counter stays the int32 element offset (an int64 counter would switch tl.rand to its 64-bit Philox and
+            # change every mask); the truncation wraps exactly as the old int32 offset did
+            keep = tl.rand(seed, (row0 * WIDTH).to(tl.int32) + tile_off, n_rounds=_PHILOX_ROUNDS) < keep_probability
             dropped = tl.where(keep, update.to(tl.float32) * dropout_scale, 0.0).to(tl.bfloat16)
         else:
             dropped = update
@@ -274,7 +279,7 @@ def _edge_tail_norm_kernel(
         variance = tl.sum(centered * centered, axis=1) / WIDTH
         rstd = 1.0 / tl.sqrt(variance + eps)
         tl.store(
-            out_ptr + offsets,
+            out_ptr + row0 * WIDTH + tile_off,
             centered * rstd[:, None] * norm_weight[None, :] + norm_bias[None, :],
             mask=row_valid[:, None],
         )
@@ -359,25 +364,26 @@ def _edge_tail_replay_kernel(
     grad_norm_weight = tl.zeros((WIDTH,), tl.float32)
     grad_norm_bias = tl.zeros((WIDTH,), tl.float32)
 
-    first_tile = tl.program_id(0) * TILES
+    local = tl.arange(0, BLOCK_M1)
+    first_tile = tl.program_id(0).to(tl.int64) * TILES
     for tile in tl.range(TILES, disable_licm=NATIVE_BF16):
-        local_rows = (first_tile + tile) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
-        row_indices = local_rows + row_offset
-        row_valid = (local_rows < chunk_rows) & (row_indices < rows)
-        offsets = row_indices[:, None] * WIDTH + columns[None, :]
-        local_offsets = local_rows[:, None] * WIDTH + columns[None, :]
+        local_row0 = (first_tile + tile) * BLOCK_M1  # the tile's first row in the chunk (int64)
+        row0 = local_row0 + row_offset  # and in the whole edge tensor
+        row_valid = (local < chunk_rows - local_row0) & (local < rows - row0)
+        tile_off = local[:, None] * WIDTH + columns[None, :]  # in-tile offsets (int32); the tile's first row is an int64 scalar
 
         # --- replay forward from the saved inputs -----------------------------
-        edge = tl.load(edge_ptr + offsets, mask=row_valid[:, None], other=0.0).to(tl.bfloat16)
-        groups = row_indices // NEIGHBORS
+        edge = tl.load(edge_ptr + row0 * WIDTH + tile_off, mask=row_valid[:, None], other=0.0).to(tl.bfloat16)
+        group0 = row0 // NEIGHBORS  # int64; the tile's groups relative to it stay int32
+        groups = ((row0 - group0 * NEIGHBORS).to(tl.int32) + local) // NEIGHBORS
         query = tl.load(
-            query_ptr + groups[:, None] * WIDTH + columns[None, :],
+            query_ptr + group0 * WIDTH + groups[:, None] * WIDTH + columns[None, :],
             mask=row_valid[:, None],
             other=0.0,
         ).to(tl.float32)
-        neighbor_rows = tl.load(index_ptr + row_indices, mask=row_valid, other=0)
+        neighbor_rows = tl.load(index_ptr + row0 + local, mask=row_valid, other=0)
         neighbor = tl.load(
-            neighbor_ptr + neighbor_rows[:, None] * WIDTH + columns[None, :],
+            neighbor_ptr + neighbor_rows.to(tl.int64)[:, None] * WIDTH + columns[None, :],
             mask=row_valid[:, None],
             other=0.0,
         ).to(tl.float32)
@@ -395,7 +401,9 @@ def _edge_tail_replay_kernel(
             output_weight = tl.load(output_weight_ptr + columns[:, None] + columns[None, :] * WIDTH).to(tl.bfloat16)
         update = (tl.dot(activated_hidden, output_weight) + output_bias[None, :]).to(tl.bfloat16)
         if DROPOUT:
-            keep = tl.rand(seed, offsets, n_rounds=_PHILOX_ROUNDS) < keep_probability
+            # the dropout counter stays the int32 element offset (an int64 counter would switch tl.rand to its 64-bit Philox and
+            # change every mask); the truncation wraps exactly as the old int32 offset did
+            keep = tl.rand(seed, (row0 * WIDTH).to(tl.int32) + tile_off, n_rounds=_PHILOX_ROUNDS) < keep_probability
             dropped = tl.where(keep, update.to(tl.float32) * dropout_scale, 0.0).to(tl.bfloat16)
         else:
             dropped = update
@@ -408,7 +416,7 @@ def _edge_tail_replay_kernel(
         normalized = centered * rstd[:, None]
 
         # --- LayerNorm, dropout, residual ------------------------------------
-        grad_out = tl.load(grad_out_ptr + offsets, mask=row_valid[:, None], other=0.0).to(tl.float32)
+        grad_out = tl.load(grad_out_ptr + row0 * WIDTH + tile_off, mask=row_valid[:, None], other=0.0).to(tl.float32)
         grad_norm_weight += tl.sum(grad_out * normalized, axis=0)
         grad_norm_bias += tl.sum(grad_out, axis=0)
         scaled = grad_out * norm_weight[None, :]
@@ -426,11 +434,11 @@ def _edge_tail_replay_kernel(
         # contribution, and a read-modify-write there would not be idempotent, so the
         # autotuner's repeated benchmark runs would accumulate into it.  A measured run
         # with that bug reported a relative error of 57 on this gradient alone.
-        tl.store(grad_values_ptr + local_offsets, grad_values, mask=row_valid[:, None])
-        tl.store(preactivation_ptr + local_offsets, preactivation, mask=row_valid[:, None])
-        tl.store(hidden_ptr + local_offsets, hidden, mask=row_valid[:, None])
+        tl.store(grad_values_ptr + local_row0 * WIDTH + tile_off, grad_values, mask=row_valid[:, None])
+        tl.store(preactivation_ptr + local_row0 * WIDTH + tile_off, preactivation, mask=row_valid[:, None])
+        tl.store(hidden_ptr + local_row0 * WIDTH + tile_off, hidden, mask=row_valid[:, None])
         tl.store(
-            grad_update_ptr + local_offsets,
+            grad_update_ptr + local_row0 * WIDTH + tile_off,
             grad_update.to(tl.bfloat16),
             mask=row_valid[:, None],
         )
@@ -493,16 +501,16 @@ def _edge_tail_dx_kernel(
         output_weight = tl.load(output_weight_ptr + columns[:, None] * WIDTH + columns[None, :]).to(tl.bfloat16)
     grad_hidden_bias = tl.zeros((WIDTH,), tl.float32)
 
-    first_tile = tl.program_id(0) * TILES
+    local = tl.arange(0, BLOCK_M1)
+    first_tile = tl.program_id(0).to(tl.int64) * TILES
     for tile in tl.range(TILES, disable_licm=NATIVE_BF16):
-        local_rows = (first_tile + tile) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
-        row_indices = local_rows + row_offset
-        row_valid = (local_rows < chunk_rows) & (row_indices < rows)
-        offsets = row_indices[:, None] * WIDTH + columns[None, :]
-        local_offsets = local_rows[:, None] * WIDTH + columns[None, :]
+        local_row0 = (first_tile + tile) * BLOCK_M1  # the tile's first row in the chunk (int64)
+        row0 = local_row0 + row_offset  # and in the whole edge tensor
+        row_valid = (local < chunk_rows - local_row0) & (local < rows - row0)
+        tile_off = local[:, None] * WIDTH + columns[None, :]  # in-tile offsets (int32); the tile's first row is an int64 scalar
 
-        grad_update = tl.load(grad_update_ptr + local_offsets, mask=row_valid[:, None], other=0.0).to(tl.bfloat16)
-        hidden = tl.load(hidden_ptr + local_offsets, mask=row_valid[:, None], other=0.0).to(tl.float32)
+        grad_update = tl.load(grad_update_ptr + local_row0 * WIDTH + tile_off, mask=row_valid[:, None], other=0.0).to(tl.bfloat16)
+        hidden = tl.load(hidden_ptr + local_row0 * WIDTH + tile_off, mask=row_valid[:, None], other=0.0).to(tl.float32)
         # This pass wants both GELU and its derivative at ``hidden``, and again at
         # ``preactivation`` below -- four calls over two distinct arguments, so half the
         # erf evaluations were recomputation.  Hoisting the shared term is bit for bit
@@ -521,12 +529,12 @@ def _edge_tail_dx_kernel(
         # and keeping two [BLOCK_M1, WIDTH] erf blocks live at once is how a saving this
         # size gets paid straight back in spill.
         tl.store(
-            activated_hidden_ptr + local_offsets,
+            activated_hidden_ptr + local_row0 * WIDTH + tile_off,
             _gelu_from_erf(hidden, hidden_erf).to(tl.bfloat16),
             mask=row_valid[:, None],
         )
 
-        preactivation = tl.load(preactivation_ptr + local_offsets, mask=row_valid[:, None], other=0.0).to(tl.float32)
+        preactivation = tl.load(preactivation_ptr + local_row0 * WIDTH + tile_off, mask=row_valid[:, None], other=0.0).to(tl.float32)
         preactivation_erf = _gelu_erf(preactivation)
         if NATIVE_BF16:
             hidden_weight = tl.load(hidden_weight_ptr + columns[:, None] * WIDTH + columns[None, :]).to(tl.bfloat16)
@@ -534,7 +542,7 @@ def _edge_tail_dx_kernel(
             tl.bfloat16
         )
         tl.store(
-            activated_ptr + local_offsets,
+            activated_ptr + local_row0 * WIDTH + tile_off,
             _gelu_from_erf(preactivation, preactivation_erf).to(tl.bfloat16),
             mask=row_valid[:, None],
         )
@@ -544,36 +552,36 @@ def _edge_tail_dx_kernel(
         # The residual branch's gradient arrives through an FP32 chunk buffer, so this
         # is a plain overwrite: the pass stays idempotent and the two contributions
         # round to BF16 exactly once, here.
-        residual = tl.load(grad_values_ptr + local_offsets, mask=row_valid[:, None], other=0.0).to(tl.float32)
+        residual = tl.load(grad_values_ptr + local_row0 * WIDTH + tile_off, mask=row_valid[:, None], other=0.0).to(tl.float32)
         tl.store(
-            grad_edge_ptr + offsets,
+            grad_edge_ptr + row0 * WIDTH + tile_off,
             residual + tl.dot(grad_preactivation, edge_weight),
             mask=row_valid[:, None],
         )
         tl.store(
-            grad_hidden_ptr + local_offsets,
+            grad_hidden_ptr + local_row0 * WIDTH + tile_off,
             grad_hidden_bf16,
             mask=row_valid[:, None],
         )
         tl.store(
-            grad_preactivation_ptr + local_offsets,
+            grad_preactivation_ptr + local_row0 * WIDTH + tile_off,
             grad_preactivation,
             mask=row_valid[:, None],
         )
-        neighbor_rows = tl.load(index_ptr + row_indices, mask=row_valid, other=0)
+        neighbor_rows = tl.load(index_ptr + row0 + local, mask=row_valid, other=0)
         tl.atomic_add(
-            grad_neighbor_ptr + neighbor_rows[:, None] * WIDTH + columns[None, :],
+            grad_neighbor_ptr + neighbor_rows.to(tl.int64)[:, None] * WIDTH + columns[None, :],
             grad_preactivation.to(tl.float32),
             mask=row_valid[:, None],
         )
         # The query block is broadcast over the neighbor axis, so its gradient is a
         # per-group row sum.  A row tile touches only a handful of groups; reducing
         # inside the tile turns one atomic per row into a few per tile.
-        groups = row_indices // NEIGHBORS
-        first_group = ((first_tile + tile) * BLOCK_M1 + row_offset) // NEIGHBORS
+        first_group = row0 // NEIGHBORS  # int64; the tile's groups relative to it stay int32
+        groups = ((row0 - first_group * NEIGHBORS).to(tl.int32) + local) // NEIGHBORS
         for span in tl.static_range((BLOCK_M1 + NEIGHBORS - 1) // NEIGHBORS + 1):
             group = first_group + span
-            selected = row_valid & (groups == group)
+            selected = row_valid & (groups == span)
             tl.atomic_add(
                 grad_query_ptr + group * WIDTH + columns,
                 tl.sum(tl.where(selected[:, None], grad_preactivation, 0.0), axis=0),
