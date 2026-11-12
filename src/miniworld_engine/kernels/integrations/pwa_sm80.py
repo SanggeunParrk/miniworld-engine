@@ -21,6 +21,7 @@ from typing import cast
 import torch
 
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels import _msa_card as _card
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import build_failed
 from miniworld_engine.kernels.integrations import pwa_wide_sm80
@@ -51,8 +52,8 @@ def _sm80():
 
 def refusal(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None:
     """Why the sm_80 kernels cannot run this call, or ``None`` (the contract above). Shapes, dtypes and the device only, plus the build."""
-    if not msa.is_cuda or torch.cuda.get_device_capability(msa.device) != (8, 0):
-        return "the sm_80 MSAPairWeightedAveraging kernels are the A100 (capability 8.0) builds"
+    if not _card.device_ok(msa):
+        return "the sm_80 MSAPairWeightedAveraging kernels are the A100 (capability 8.0) and RTX 5090 (12.0, sm_120a) builds"
     if msa.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
         return "the sm_80 kernels take bfloat16 msa / pair"
     if msa.ndim != 4 or pair.ndim != 4:

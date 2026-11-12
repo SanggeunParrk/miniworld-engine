@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.norm import LayerNorm
+from miniworld_engine.modules.norm import LayerNorm, a100, sm120
 from miniworld_engine.modules.primitives import BackendModule, Dropout, Linear, MasterWeights, key_mask, master_autocast, random_input, wide
 
 #: Release directories of the model kits' own MSA kernels (the ``"anthropic"`` backends; ``modules/_anthropic.load(..., path=...)``).
@@ -400,7 +400,7 @@ class OuterProductMean(BackendModule, MasterWeights):
         why = self._common_refusal(msa, mask, residual)
         if why is not None:
             return None, why
-        if torch.cuda.get_device_capability(msa.device) == (8, 0):  # A100: kernels.integrations.opm_sm80 (forward + backward)
+        if a100(msa) or sm120(msa):  # A100 / RTX 5090 (the sm_120a build of the sm_80 sources): kernels.integrations.opm_sm80 (forward + backward)
             if self.groups > 1:  # Chai-1: kernels.outer_product_mean.chai on its sm_80 passes (cuda/chai_sm80)
                 from miniworld_engine.kernels.outer_product_mean import chai
 
@@ -408,7 +408,7 @@ class OuterProductMean(BackendModule, MasterWeights):
                     return "chai", None
                 return None, (
                     f"grouped OPM (groups {self.groups} x {self.group_width}, d_msa {msa.shape[-1]}, d_pair {self.to_out.weight.shape[0]}, N "
-                    f"{msa.shape[2]}, batch {msa.shape[0]}): the A100 Chai-1 passes take 8 x 8 groups, d_msa 64, d_pair a multiple of 256, N % 64, batch 1"
+                    f"{msa.shape[2]}, batch {msa.shape[0]}): the A100 / RTX 5090 Chai-1 passes take 8 x 8 groups, d_msa 64, d_pair a multiple of 256, N % 64, batch 1"
                 )
             from miniworld_engine.kernels.integrations import opm_sm80
 
@@ -874,7 +874,7 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         why = self._common_refusal(msa, pair, mask)
         if why is not None:
             return why
-        if torch.cuda.get_device_capability(msa.device) == (8, 0):  # A100: kernels.integrations.pwa_sm80 (forward + backward)
+        if a100(msa) or sm120(msa):  # A100 / RTX 5090 (the sm_120a build of the sm_80 sources): kernels.integrations.pwa_sm80 (forward + backward)
             from miniworld_engine.kernels.integrations import pwa_sm80
 
             why = pwa_sm80.refusal(self, msa, pair, mask)
@@ -888,7 +888,7 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
     def _forward_cuda(self, msa, pair, mask=None) -> torch.Tensor:
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return msa
-        if torch.cuda.get_device_capability(msa.device) == (8, 0):
+        if a100(msa) or sm120(msa):
             from miniworld_engine.kernels.integrations import pwa_sm80
 
             if self._trains():

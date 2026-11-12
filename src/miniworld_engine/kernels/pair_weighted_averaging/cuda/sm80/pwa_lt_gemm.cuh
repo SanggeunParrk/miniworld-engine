@@ -35,6 +35,9 @@ struct Plan {
 };
 
 inline const Entry* find(int op, int B, int L, int N) {
+#ifdef MWE_SM120  // RTX 5090 build: the table was searched on the A100; the caller keeps its cuBLAS path there
+  return nullptr;
+#endif
   for (const Entry& e : kTable)
     if (e.op == op && e.B == B && e.L == L && e.N == N) return &e;
   return nullptr;

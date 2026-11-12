@@ -4,6 +4,7 @@ import functools
 from pathlib import Path
 import torch
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+from miniworld_engine.kernels import _msa_card as _card
 from . import sm80
 
 
@@ -12,10 +13,10 @@ def _ext():
     ensure_cuda_home()
     directory = Path(__file__).parent / "sm80"
     return load_extension(
-        name="pwa_glue_tuned_sm80",
+        name=_card.name("pwa_glue_tuned_sm80"),
         sources=[str(directory / "glue_tuned_ops.cu")],
         extra_include_paths=[str(directory)],
-        extra_cuda_cflags=[
+        extra_cuda_cflags=_card.cflags([
             *host_flags(),
             "-O3",
             "-std=c++17",
@@ -23,7 +24,7 @@ def _ext():
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        ],
+        ]),
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
     )

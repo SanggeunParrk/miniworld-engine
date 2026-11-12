@@ -14,13 +14,14 @@ _dir = Path(__file__).parent / "sm80"
 @functools.lru_cache(maxsize=1)
 def ext():
     from ..._nvcc import cutlass_include, ensure_cuda_home, host_flags, load_extension
+    from miniworld_engine.kernels import _msa_card as _card
 
     ensure_cuda_home()
     return load_extension(
-        name="opm_ogemm_sm80",
+        name=_card.name("opm_ogemm_sm80"),
         sources=[str(_dir / "ogemm_cutlass.cu")],
         extra_include_paths=[str(_dir), str(cutlass_include())],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-gencode=arch=compute_80,code=sm_80", "--expt-relaxed-constexpr"],
+        extra_cuda_cflags=_card.cflags([*host_flags(), "-O3", "-std=c++17", "-gencode=arch=compute_80,code=sm_80", "--expt-relaxed-constexpr"]),
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
     )

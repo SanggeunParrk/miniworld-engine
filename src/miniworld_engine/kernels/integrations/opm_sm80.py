@@ -22,6 +22,7 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels import _msa_card as _card
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import build_failed
 
@@ -57,8 +58,8 @@ def refusal(
     residual: torch.Tensor | None,
 ) -> str | None:
     """Why the sm_80 kernels cannot run this call, or ``None`` (the contract above). Shapes, dtypes and the device only, plus the build."""
-    if not msa.is_cuda or torch.cuda.get_device_capability(msa.device) != (8, 0):
-        return "the sm_80 OuterProductMean kernels are the A100 (capability 8.0) builds"
+    if not _card.device_ok(msa):
+        return "the sm_80 OuterProductMean kernels are the A100 (capability 8.0) and RTX 5090 (12.0, sm_120a) builds"
     if getattr(module, "groups", 1) > 1:
         return "grouped OPM (Chai-1): no sm_80 build"
     if getattr(module, "count_offset", None) is not None:

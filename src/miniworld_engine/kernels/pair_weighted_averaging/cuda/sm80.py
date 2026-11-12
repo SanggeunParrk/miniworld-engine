@@ -21,6 +21,7 @@ import torch
 
 
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from miniworld_engine.kernels import _msa_card as _card
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -36,10 +37,10 @@ def ext():
     """The extension (built on first use into ``TORCH_EXTENSIONS_DIR``)."""
     ensure_cuda_home()
     return load_extension(
-        name="pwa_sm80",
+        name=_card.name("pwa_sm80"),
         sources=[str(_dir / "ops.cu")],
         extra_include_paths=[str(_dir)],
-        extra_cuda_cflags=[
+        extra_cuda_cflags=_card.cflags([
             *host_flags(),
             "-O3",
             "-std=c++17",
@@ -48,7 +49,7 @@ def ext():
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        ],
+        ]),
         extra_cflags=["-std=c++17", "-O3"],
         extra_ldflags=["-lcublasLt"],  # the searched explicit batched-GEMM algorithms (pwa_lt_gemm.cuh)
         verbose=False,
@@ -59,9 +60,9 @@ def ext():
 def _bmm_ext():
     ensure_cuda_home()
     return load_extension(
-        name="pwa_broadcast_bmm_sm80",
+        name=_card.name("pwa_broadcast_bmm_sm80"),
         sources=[str(_dir / "broadcast_bmm.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80")],
+        extra_cuda_cflags=_card.cflags([*host_flags(), "-O3", "-std=c++17", *gencodes("80")]),
         extra_cflags=["-O3", "-std=c++17"],
         verbose=False,
     )
