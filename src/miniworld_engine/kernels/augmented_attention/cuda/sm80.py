@@ -762,7 +762,7 @@ def pair_bias_generic_bwd_supported(dp: int, heads: int, dtype: torch.dtype) -> 
         te is not None
         and dtype in (torch.bfloat16, torch.float32)
         and heads in GEN_BWD_HEADS
-        and (dp * heads + 2 * te * (dp + 4) + te * heads) * 4 <= 160 * 1024
+        and (dp * (heads if (heads // 4) % 2 else heads + 4) + 2 * te * (dp + 4) + te * heads) * 4 <= 160 * 1024
     )
 
 

@@ -188,11 +188,28 @@ def _composed_builds(device: torch.device, extra: str | None) -> bool:
 
 
 def _h100_global(q, half_window):
-    """Global attention on H100 always takes the native sm_90a stages (FlashAttention-4 between them): the composed path's
-    global attention is the sm_100a stages, which an H100 cannot run, whatever the per-shape defaults pick for the window."""
+    """Whether this global-attention call takes the native sm_90a stages (FlashAttention-4 between them) on H100: fp32 (and a bf16
+    call whose composed extensions do not build). A bf16 call takes the composed stages around FlashAttention-4
+    (:func:`_h100_global_composed`)."""
     from miniworld_engine.kernels.swa_dit.cuda.loader import is_sm90
 
-    return not _PORTABLE[0] and is_global(half_window) and q.is_cuda and is_sm90(q.device)
+    return not _PORTABLE[0] and is_global(half_window) and q.is_cuda and is_sm90(q.device) and not _h100_global_composed(q, half_window)
+
+
+def _h100_global_composed(q, half_window):
+    """bf16 global attention on H100: the composed bf16 stages (the window block's hand-CUDA qkvg / out-projection + FFN and their
+    backwards) with FlashAttention-4 in the window attention's place -- 2026-11-12: A 1 x B 48, 1024 atoms, master training 2.19 ms on
+    the native stages (six row passes and cuBLAS GEMMs per direction) against 1.997 for the "triton" backend."""
+    from miniworld_engine.kernels.swa_dit.cuda.loader import is_sm90
+
+    return (
+        not _PORTABLE[0]
+        and is_global(half_window)
+        and q.dtype == torch.bfloat16
+        and q.is_cuda
+        and is_sm90(q.device)
+        and _composed_cuda(q.device)
+    )
 
 
 def _native_b200_fusion(q=None, training=None, B=None):
@@ -723,7 +740,8 @@ def _swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_
         # The native stages take an fp32 modulation; a bf16 one comes from the composed bf16 hoist (global attention, which only the
         # native stages serve on H100, under a bf16 call that the composed stages otherwise take).
         return _native_h100_fwd(q, mod.float(), cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save)
-    if is_global(half_window) and not _PORTABLE[0]:
+    fa4 = _h100_global_composed(q, half_window)  # the composed bf16 stages with FlashAttention-4 as the attention
+    if is_global(half_window) and not _PORTABLE[0] and not fa4:
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
             raise RuntimeError(
@@ -792,7 +810,13 @@ def _swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_
             SAVE=save,
         )
     ext = _cuda("attn", _attn_served(C, H, half_window), q.device)
-    if ext is not None:
+    if fa4:
+        from miniworld_engine.kernels.swa_dit.cuda.sm100 import attn_global_fwd
+
+        O = torch.zeros(M, C, device=q.device, dtype=torch.bfloat16)  # FA4 skips the rows past seqused: they must read zero
+        lse = torch.empty(N, H, S, device=q.device, dtype=torch.float32)
+        attn_global_fwd(Qh, Kh, Vh, seqused, O, lse)
+    elif ext is not None:
         O, lse = ext.attn_fwd(Qh, Kh, Vh, seqused, D**-0.5)
     else:
         O = torch.empty_like(qf)
@@ -1098,7 +1122,7 @@ def _swa_dit_block_bwd(
         )
         grads[1] = grads[1].to(mod.dtype)  # dmod like mod (the contract), whatever the native stages computed it in
         return grads
-    if is_global(half_window) and not _PORTABLE[0]:
+    if is_global(half_window) and not _PORTABLE[0] and not _h100_global_composed(q, half_window):
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
             raise RuntimeError(
@@ -1496,7 +1520,19 @@ def _bwd_attention_side(
         if ext_q is not None:
             dP[:, 3 * C :] = dG
     heads: list[torch.Tensor] | None = None
-    if ext_a is not None:
+    if _h100_global_composed(q, half_window):
+        # global attention: FlashAttention-4's backward (its own softmax-delta pass; Dv unused). It writes dq | dk | dv straight into
+        # dP's column blocks 0 | 1 | 2 (strided [N, S, H, D] views) and leaves the rows past seqused alone: they are zeroed first.
+        from miniworld_engine.kernels.swa_dit.cuda.sm100 import attn_global_bwd
+
+        if ext_q is not None:
+            dP[:, : 3 * C].zero_()
+            blocks = [dP[:, i * C : (i + 1) * C].view(N, S, H, D).transpose(1, 2) for i in range(3)]
+            attn_global_bwd(qh, kh, vh, o, dO, lse, seqused, *blocks)
+        else:
+            heads = [torch.zeros(N, H, S, D, device=dev, dtype=bf) for _ in range(3)]
+            attn_global_bwd(qh, kh, vh, o, dO, lse, seqused, *heads)
+    elif ext_a is not None:
         if ext_q is not None:
             ext_a.attn_bwd(qh, kh, vh, dO, lse, Dv, seqused, dP, scale)
         else:
