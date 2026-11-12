@@ -1232,7 +1232,9 @@ class AtomDiTMiniWorld(BackendModule):
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
     # cuda:a100_sm80 6 (2026-11-12): bf16 training: the weight forms in one launch (train_forms), row-count launch shapes and K splits, the
     # few-row modulation backward on cuBLAS (sm80.train_cfg)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 6, "cuda:h100_sm90": 2}
+    # cuda:5090_sm120 2 (2026-11-13): window inference on the fused stages re-tiled into 99 KB (sm80.block_infer_sm120 from 2049 rows bf16; the TF32 row kernels with
+    # two-deep weight rings for fp32, composed._infer_fp32 sm120) in place of the composed row stages
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 6, "cuda:h100_sm90": 2, "cuda:5090_sm120": 2}
 
     def __init__(
         self,
@@ -1624,7 +1626,8 @@ class SWAAtomTransformer(BackendModule):
     # triton 2 (2026-11-12): global attention (half_window >= 65536 or negative) served, on the window kernels with every key in reach
     # cuda:h100_sm90 3 (2026-11-12): bf16 / master global attention on the composed bf16 stages around FlashAttention-4 (dispatch._h100_global_composed;
     # was the native stages): master train L 1024 S 48 2.19 -> 1.24 ms
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 6, "cuda:h100_sm90": 3, "triton": 2}
+    # cuda:5090_sm120 2 (2026-11-13): window inference on the fused stages within 99 KB (as AtomDiTMiniWorld)
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 6, "cuda:h100_sm90": 3, "triton": 2, "cuda:5090_sm120": 2}
 
     class Config(BaseModel):
         """Configuration for the SWA atom transformer."""

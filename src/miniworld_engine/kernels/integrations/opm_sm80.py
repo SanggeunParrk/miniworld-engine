@@ -269,6 +269,12 @@ def inference(
         m = msa[0]
         mk = _mask_u8(mask)
         a, b, _ = sm.prologue(m, mk, lnw, lnb, wl, wr, eps, False, None, *pb)
+        if _card.sm120() and m.shape[1] * m.shape[1] > sm.ROWS_TOKENS:  # RTX 5090 past L 2048: O per chunk of rows (2 KiB a pair in one piece)
+            norm, nconst = _norm(mk, m.shape[0], clamp=dmin > 0)
+            out = sm.epilogue_rows(
+                a, b, norm, nconst, wo, bo, None if residual is None else residual[0].contiguous(), norm_first, dmin=dmin, doff=doff
+            )
+            return out.unsqueeze(0)
         o = _outer(sm, a, b, mk)
         del a, b
         if mk is not None and _mask_epilogue_enabled(m, wo):

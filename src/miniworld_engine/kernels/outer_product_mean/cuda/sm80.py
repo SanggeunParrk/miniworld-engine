@@ -240,3 +240,78 @@ def reduce_rows(part: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     out = part.new_empty((part.shape[1],), dtype=dtype)
     ext().reduce_rows(part, out)
     return out
+
+
+# ------------------------------------------------------------------------------------------------------------- RTX 5090: row chunks
+#: Past ROWS_TOKENS pairs the 5090's inference forms the grouped outer product per chunk of rows i (``O`` is 2 KiB a pair: 14 GiB at L 2688), a fixed function
+#: of the shape; ROWS_BYTES bounds one chunk's O.
+ROWS_TOKENS = 2048 * 2048
+ROWS_BYTES = 1 << 30
+
+
+@functools.lru_cache(maxsize=1)
+def rows_ext():
+    """The sm_120a-only epilogue launcher over a chunk of rows (``sm80/epilogue_rows_sm120.cu``)."""
+    ensure_cuda_home()
+    return load_extension(
+        name="opm_epilogue_rows_sm120",
+        sources=[str(_dir / "epilogue_rows_sm120.cu")],
+        extra_include_paths=[str(_dir)],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "-lineinfo",
+            "-gencode=arch=compute_120a,code=sm_120a",
+            _card.DEFINE,
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
+    )
+
+
+def rows_chunk(length: int) -> int:
+    """Rows i per chunk of the row-chunked inference: the largest multiple of 32 whose O fits ROWS_BYTES."""
+    return max(32, (ROWS_BYTES // (2048 * length)) // 32 * 32)
+
+
+def epilogue_rows(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    norm: torch.Tensor | None,
+    norm_const: float,
+    wo: torch.Tensor,
+    bias: torch.Tensor,
+    residual: torch.Tensor | None,
+    norm_first: bool,
+    dmin: float = 1.0,
+    doff: float = 0.0,
+) -> torch.Tensor:
+    """``epilogue(A^T B, ...)`` on chunks of rows i (A, B [S, 32 L] from ``prologue``; norm [L, L] or None, residual [L, L, CZ] or None) -> [L, L, CZ] bf16: each chunk's
+    O_c = A[:, 32 i0 : 32 i1]^T B (cuBLAS) and the epilogue kernel over its rows."""
+    length = a.shape[1] // CH
+    out = a.new_empty((length, length, wo.shape[0]))
+    step = rows_chunk(length)
+    ext_rows = rows_ext()
+    empty_f, empty_b = _none(a, torch.float32), _none(a, torch.bfloat16)
+    for i0 in range(0, length, step):
+        i1 = min(length, i0 + step)
+        i0 = i1 - -(-(i1 - i0) // 4) * 4  # the kernel takes rows in groups of 4: a short last chunk starts earlier (its overlap rewrites the same values)
+        o = torch.mm(a[:, i0 * CH : i1 * CH].t(), b)
+        ext_rows.epilogue_rows(
+            o,
+            empty_f if norm is None else norm[i0:i1],
+            norm_const,
+            wo,
+            bias,
+            empty_b if residual is None else residual[i0:i1],
+            out[i0:i1],
+            int(norm_first),
+            float(dmin),
+            float(doff),
+        )
+        del o
+    return out

@@ -35,8 +35,19 @@ MAX_LEN_INFER = 2048  # inference (FoldForge 5I28 E3): pair_fwd keeps the row in
 
 def max_len(d_pair: int, training: bool) -> int:
     """The longest L the kernels take: MAX_LEN in training, MAX_LEN_INFER in inference (every d_pair: a bf16 row of 2048 logits fits next to the
-    d_pair 384 tiles)."""
+    d_pair 384 tiles).  The RTX 5090 (99 KB) in inference: the longest bf16 row of logits that fits next to the tiles (``_sm120_infer_len``)."""
+    if not training and _card.sm120():
+        return _sm120_infer_len(d_pair)
     return MAX_LEN if training else MAX_LEN_INFER
+
+
+def _sm120_infer_len(d_pair: int) -> int:
+    """The RTX 5090's inference limit of ``pair_fwd`` (sm80/ops.cu launch_pair_fwd, sm80/pwa_pair_fwd_sm80.cuh PairFwdCfg under MWE_SM120): the shared memory is
+    FIXED + 8 (L + 4) 2 bytes (the bf16 row of logits of the 8 heads) within 101376 B; FIXED = LW warps x a [16][d_pair] bf16 tile + gamma / beta + the Wb^T fragments
+    (LW = 4 at d_pair >= 384, else 8).  L a multiple of 16: 4080 at d_pair 128, 1840 at 256, 2672 at 384."""
+    lw = 4 if d_pair >= 384 else 8
+    fixed = lw * 16 * d_pair * 2 + 2 * d_pair * 4 + d_pair * 16
+    return ((101376 - fixed) // 16 - 4) // 16 * 16
 
 
 @functools.lru_cache(maxsize=1)

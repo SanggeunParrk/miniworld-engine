@@ -26,6 +26,8 @@ from miniworld_engine.kernels.swa_dit.cuda import sm80
 
 C, H, D = sm80.C, sm80.H, sm80.D
 _BF, _F32 = torch.bfloat16, torch.float32
+#: RTX 5090 bf16 window inference on the fused stages within 99 KB (``sm80.block_infer_sm120``); False: the composed row stages (``_fwd_fp32``)
+FUSED_SM120 = True
 
 
 def _rows(stage: int, ins: list, outs: list, n: int, s: int, bf: bool) -> None:
@@ -314,8 +316,9 @@ def _infer_bf16(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: in
     return sm80.ffn_fwd(qf, g, o, mod, wo, wu, wd, n, s, FP32_EPS, False, cfg=fcfg)[0].view(n, s, C)
 
 
-def _infer_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int) -> torch.Tensor:
-    """The fp32 inference block on the TF32 row kernels: qkvg -> attention -> out-projection + FFN (``_fwd_fp32``'s statements)."""
+def _infer_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int, sm120: bool = False) -> torch.Tensor:
+    """The fp32 inference block on the TF32 row kernels: qkvg -> attention -> out-projection + FFN (``_fwd_fp32``'s statements).  ``sm120``: the RTX 5090's
+    build of the two kernels (``fused_sm120.cu``: weight rings two chunks deep, the FFN on 16-row tiles) within its 99 KB."""
     from miniworld_engine.kernels.swa_dit.dispatch import eval_form
 
     n, s, _ = q.shape
@@ -326,10 +329,14 @@ def _infer_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: in
     qkv = [torch.empty(*((m, H, D) if glob else (n, H, s, D)), device=dev, dtype=_BF) for _ in range(3)]
     g = torch.empty(m, C, device=dev, dtype=_F32)
     mt = _f32_mt(m)
-    sm80._ext().swa_qkvg_f32(q, mod, cos, sin, w1, *qkv, g, s, n, FP32_EPS, FP32_EPS, not glob, mt)
+    ext = sm80._ext_sm120() if sm120 else sm80._ext()
+    ext.swa_qkvg_f32(q, mod, cos, sin, w1, *qkv, g, s, n, FP32_EPS, FP32_EPS, not glob, mt)
     o = _attention_infer(qkv, seqused, n, s, half_window, True)
     out = torch.empty(m, C, device=dev, dtype=_F32)
-    sm80._ext().swa_ffn_f32(q, g, o, mod, wop, wup, wdp, out, s, n, FP32_EPS, min(mt, 2))
+    if sm120:
+        ext.swa_ffn_f32(q, g, o, mod, wop, wup, wdp, out, s, n, FP32_EPS)
+    else:
+        ext.swa_ffn_f32(q, g, o, mod, wop, wup, wdp, out, s, n, FP32_EPS, min(mt, 2))
     return out.view(n, s, C)
 
 
@@ -382,7 +389,12 @@ def block(x, cond, cos, sin, seqused, half_window: int, weights) -> torch.Tensor
     x, c, cos, sin, ws = _prepare(x, cond, cos, sin, weights, save=False)
     with torch.autocast("cuda", enabled=False):
         mod = _mod_fwd(c, ws[0], False)[0]
-        if _sm120.is_sm120(x.device):  # the RTX 5090: the row stages around cuBLAS (the fused stages' weight tiles exceed its 99 KB)
+        if _sm120.is_sm120(x.device):
+            if x.dtype == _BF and not is_global(half_window) and FUSED_SM120 and x.shape[0] * x.shape[1] >= sm80.FUSED_MIN_ROWS_SM120:  # the fused bf16 stages within 99 KB
+                return sm80.block_infer_sm120(x, mod, cos, sin, seqused, *ws[1:], FP32_EPS, FP32_EPS)
+            if x.dtype == _F32 and not is_global(half_window) and torch.backends.cuda.matmul.allow_tf32 and FUSED_SM120:  # the TF32 row kernels with shallower weight rings
+                return _infer_fp32(x, mod, cos, sin, seqused, *ws[1:], half_window, sm120=True)
+            # the row stages around cuBLAS (the A100 fused stages' weight tiles exceed its 99 KB)
             return _fwd_fp32(x, mod, cos, sin, seqused, *ws[1:], half_window, False)[0]
         if x.dtype == _BF:
             if is_global(half_window):
