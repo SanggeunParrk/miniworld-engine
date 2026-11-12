@@ -65,6 +65,9 @@ class _UniBackHalfTriton(torch.autograd.Function):
         # reference). mask is (B=1,L,L) -> broadcast over the H channel axis.
         mm = mask  # Applied inside the front stores; x_n/output gate stay unmasked.
         tri = _contract(lf, rf, outgoing)  # (H, L, L)
+    # the projections are dead once contracted: freed before the back half allocates the output (peak x_n + left + right + tri, not
+    # + y; FoldForge 5I28 OpenDDE n = 16 on A100: the refiner's second TriMul at 3968 structural tokens, d_pair 384)
+    del left, right, lf, rf
         view = tri.reshape(H, M).t()  # (M, H) m-major
         if x_n.dtype == torch.bfloat16:
             te_xn, mean_out, rstd_out = _ln_materialize(view, ln_out_w, ln_out_b, eps, shape_key=both_key(M))
