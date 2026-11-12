@@ -9,35 +9,39 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <cstdint>
+#include <cstdlib>
 using bf = __nv_bfloat16;
 namespace {
-__device__ float rd(const void* p, int i, bool fp32) {
+__device__ float rd(const void* p, int64_t i, bool fp32) {
   return fp32 ? static_cast<const float*>(p)[i] : __bfloat162float(static_cast<const bf*>(p)[i]);
 }
 struct Prep {
   const void* src[3]; bf* dst[4];
-  int rows[3], cols[3], s0[3], s1[3], fp32[3], tasks[4];
+  int rows[3], cols[3], s0[3], s1[3], fp32[3], tasks[4];   // strides fit int (checked); offsets are formed in I (below)
 };
-__global__ void prepare_k(Prep p) {
+// I: the index type. Weight tensors stay below 2**31 elements in every served case, where the 32-bit build runs (the int64 one
+// measured up to 3 % slower on these ~10 us launches); the launcher picks the int64 build when an offset could pass 2**31.
+template<class I> __global__ void prepare_k(Prep p) {
   __shared__ float tile[32][33];
   int op=p.tasks[blockIdx.y],s=op==3?2:op;
   int ntx=(p.cols[s]+31)/32,r0=(blockIdx.x/ntx)*32,c0=(blockIdx.x%ntx)*32;
   int lane=threadIdx.x&31,rr=threadIdx.x>>5;
   for(int j=rr;j<32;j+=8){
     int r=r0+j,c=c0+lane;
-    float v=(r<p.rows[s]&&c<p.cols[s])?rd(p.src[s],r*p.s0[s]+c*p.s1[s],p.fp32[s]):0.f;
+    float v=(r<p.rows[s]&&c<p.cols[s])?rd(p.src[s],static_cast<I>(r)*static_cast<I>(p.s0[s])+static_cast<I>(c)*static_cast<I>(p.s1[s]),p.fp32[s]):0.f;
     if(op==3)tile[j][lane]=v;
-    else if(r<p.rows[s]&&c<p.cols[s])p.dst[op][r*p.cols[s]+c]=__float2bfloat16_rn(v);
+    else if(r<p.rows[s]&&c<p.cols[s])p.dst[op][static_cast<I>(r)*p.cols[s]+c]=__float2bfloat16_rn(v);
   }
   if(op==3){
     __syncthreads();
     for(int j=rr;j<32;j+=8){
       int r=c0+j,c=r0+lane;
-      if(r<p.cols[s]&&c<p.rows[s])p.dst[3][r*p.rows[s]+c]=__float2bfloat16_rn(tile[lane][j]);
+      if(r<p.cols[s]&&c<p.rows[s])p.dst[3][static_cast<I>(r)*p.rows[s]+c]=__float2bfloat16_rn(tile[lane][j]);
     }
   }
 }
-__global__ void pair_layout_k(const bf* a,const bf* b,bf* out,int h,int d,int block,bool transpose) {
+template<class I> __global__ void pair_layout_k(const bf* a,const bf* b,bf* out,int h,int d,int block,bool transpose) {
   __shared__ float tile[32][33];
   int ntx=(d+31)/32,r0=(blockIdx.x/ntx)*32,c0=(blockIdx.x%ntx)*32;
   int lane=threadIdx.x&31,rr=threadIdx.x>>5;
@@ -45,15 +49,15 @@ __global__ void pair_layout_k(const bf* a,const bf* b,bf* out,int h,int d,int bl
     int r=r0+j,c=c0+lane;
     int leaf=block?(r/block)%2:r/h;
     int sr=block?(r/(2*block))*block+r%block:r%h;
-    float v=r<2*h&&c<d?__bfloat162float((leaf?b:a)[sr*d+c]):0.f;
+    float v=r<2*h&&c<d?__bfloat162float((leaf?b:a)[static_cast<I>(sr)*d+c]):0.f;
     if(transpose)tile[j][lane]=v;
-    else if(r<2*h&&c<d)out[r*d+c]=__float2bfloat16_rn(v);
+    else if(r<2*h&&c<d)out[static_cast<I>(r)*d+c]=__float2bfloat16_rn(v);
   }
   if(transpose){
     __syncthreads();
     for(int j=rr;j<32;j+=8){
       int r=c0+j,c=r0+lane;
-      if(r<d&&c<2*h)out[r*(2*h)+c]=__float2bfloat16_rn(tile[lane][j]);
+      if(r<d&&c<2*h)out[static_cast<I>(r)*(2*h)+c]=__float2bfloat16_rn(tile[lane][j]);
     }
   }
 }
@@ -72,16 +76,17 @@ void ln_bwd_k(const bf* dy,const bf* x,const float* gamma,const float* rs,const 
     for(int v=0;v<NV;++v){int c=(v*32+lane)*4;gm[HOIST?v:0]=c<d?*reinterpret_cast<const float4*>(gamma+c):make_float4(0.f,0.f,0.f,0.f);}
   }
   for(int row=gw;row<rows;row+=nw){
+    const int64_t ro=static_cast<int64_t>(row)*d;      // 64-bit row base: rows * d can pass 2^31
     float xh[4*NV],grad[4*NV],wd[4*NV],a=0.f,b=0.f;
     Vec rv[NV];                                        // the residual is issued with the first loads: it was a second dependent round trip
     #pragma unroll
-    for(int v=0;v<NV;++v){int c=(v*32+lane)*4;if(c<d)rv[v].u=*reinterpret_cast<const uint2*>(residual+row*d+c);}
+    for(int v=0;v<NV;++v){int c=(v*32+lane)*4;if(c<d)rv[v].u=*reinterpret_cast<const uint2*>(residual+ro+c);}
     float rstd=rs[row],offset=c1[row];
     #pragma unroll
     for(int v=0;v<NV;++v){
       int c=(v*32+lane)*4;
       if(c<d){
-        Vec xv,gv;xv.u=*reinterpret_cast<const uint2*>(x+row*d+c);gv.u=*reinterpret_cast<const uint2*>(dy+row*d+c);
+        Vec xv,gv;xv.u=*reinterpret_cast<const uint2*>(x+ro+c);gv.u=*reinterpret_cast<const uint2*>(dy+ro+c);
         const float4 gq=HOIST?gm[HOIST?v:0]:*reinterpret_cast<const float4*>(gamma+c);
         const float g4[4]={gq.x,gq.y,gq.z,gq.w};
         #pragma unroll
@@ -105,7 +110,7 @@ void ln_bwd_k(const bf* dy,const bf* x,const float* gamma,const float* rs,const 
           out.v[e]=__float2bfloat16_rn((wd[k]-(xh[k]*a+b))*rstd+__bfloat162float(rv[v].v[e]));
           ag[k]=__fadd_rn(ag[k],grad[k]*xh[k]);ab[k]=__fadd_rn(ab[k],grad[k]);
         }
-        *reinterpret_cast<uint2*>(dx+row*d+c)=out.u;
+        *reinterpret_cast<uint2*>(dx+ro+c)=out.u;
       }
     }
   }
@@ -114,14 +119,14 @@ void ln_bwd_k(const bf* dy,const bf* x,const float* gamma,const float* rs,const 
     int c=(v*32+lane)*4;
     if(c<d){
       #pragma unroll
-      for(int e=0;e<4;++e){partial[gw*d+c+e]=ag[4*v+e];partial[(nw+gw)*d+c+e]=ab[4*v+e];}
+      for(int e=0;e<4;++e){partial[static_cast<int64_t>(gw)*d+c+e]=ag[4*v+e];partial[static_cast<int64_t>(nw+gw)*d+c+e]=ab[4*v+e];}
     }
   }
 }
 __global__ void ln_reduce_k(const float* partial,float* dg,float* db,int nw,int d){
   __shared__ float sg[256],sb[256];
   int c=blockIdx.x,t=threadIdx.x;float g=0.f,b=0.f;
-  for(int r=t;r<nw;r+=256){g=__fadd_rn(g,partial[r*d+c]);b=__fadd_rn(b,partial[(nw+r)*d+c]);}
+  for(int r=t;r<nw;r+=256){g=__fadd_rn(g,partial[static_cast<int64_t>(r)*d+c]);b=__fadd_rn(b,partial[static_cast<int64_t>(nw+r)*d+c]);}
   sg[t]=g;sb[t]=b;__syncthreads();
   for(int s=128;s;s>>=1){if(t<s){sg[t]=__fadd_rn(sg[t],sg[t+s]);sb[t]=__fadd_rn(sb[t],sb[t+s]);}__syncthreads();}
   if(!t){dg[c]=sg[0];db[c]=sb[0];}
@@ -137,12 +142,13 @@ void ln_bwd_compact512_k(const bf* dy,const bf* x,const float* gamma,const float
   float ag[16]={0},ab[16]={0};
   union Vec{uint2 u;bf v[4];};
   for(int row=gw;row<rows;row+=nw){
+    const int64_t ro=static_cast<int64_t>(row)*d;
     float xh[16],wd[16],a=0.f,b=0.f;
     float rstd=rs[row],offset=c1[row];
     #pragma unroll
     for(int v=0;v<4;++v){
       int c=(v*32+lane)*4;
-      Vec xv,gv;xv.u=*reinterpret_cast<const uint2*>(x+row*d+c);gv.u=*reinterpret_cast<const uint2*>(dy+row*d+c);
+      Vec xv,gv;xv.u=*reinterpret_cast<const uint2*>(x+ro+c);gv.u=*reinterpret_cast<const uint2*>(dy+ro+c);
       #pragma unroll
       for(int e=0;e<4;++e){
         int k=4*v+e;float grad=__bfloat162float(gv.v[e]);
@@ -154,20 +160,20 @@ void ln_bwd_compact512_k(const bf* dy,const bf* x,const float* gamma,const float
     a=wsum(a)/d;b=wsum(b)/d;
     #pragma unroll
     for(int v=0;v<4;++v){
-      int c=(v*32+lane)*4;Vec out,res;res.u=*reinterpret_cast<const uint2*>(residual+row*d+c);
+      int c=(v*32+lane)*4;Vec out,res;res.u=*reinterpret_cast<const uint2*>(residual+ro+c);
       #pragma unroll
       for(int e=0;e<4;++e){
         int k=4*v+e;
         out.v[e]=__float2bfloat16_rn((wd[k]-(xh[k]*a+b))*rstd+__bfloat162float(res.v[e]));
       }
-      *reinterpret_cast<uint2*>(dx+row*d+c)=out.u;
+      *reinterpret_cast<uint2*>(dx+ro+c)=out.u;
     }
   }
   #pragma unroll
   for(int v=0;v<4;++v){
     int c=(v*32+lane)*4;
     #pragma unroll
-    for(int e=0;e<4;++e){partial[gw*d+c+e]=ag[4*v+e];partial[(nw+gw)*d+c+e]=ab[4*v+e];}
+    for(int e=0;e<4;++e){partial[static_cast<int64_t>(gw)*d+c+e]=ag[4*v+e];partial[static_cast<int64_t>(nw+gw)*d+c+e]=ab[4*v+e];}
   }
 }
 // D384 candidate: same fused tensor lifetimes, with twelve live channels per lane.
@@ -179,12 +185,13 @@ void ln_bwd_compact384_k(const bf* dy,const bf* x,const float* gamma,const float
   float ag[12]={0},ab[12]={0};
   union Vec{uint2 u;bf v[4];};
   for(int row=gw;row<rows;row+=nw){
+    const int64_t ro=static_cast<int64_t>(row)*d;
     float xh[12],wd[12],a=0.f,b=0.f;
     float rstd=rs[row],offset=c1[row];
     #pragma unroll
     for(int v=0;v<3;++v){
       int c=(v*32+lane)*4;
-      Vec xv,gv;xv.u=*reinterpret_cast<const uint2*>(x+row*d+c);gv.u=*reinterpret_cast<const uint2*>(dy+row*d+c);
+      Vec xv,gv;xv.u=*reinterpret_cast<const uint2*>(x+ro+c);gv.u=*reinterpret_cast<const uint2*>(dy+ro+c);
       #pragma unroll
       for(int e=0;e<4;++e){
         int k=4*v+e;float grad=__bfloat162float(gv.v[e]);
@@ -196,20 +203,20 @@ void ln_bwd_compact384_k(const bf* dy,const bf* x,const float* gamma,const float
     a=wsum(a)/d;b=wsum(b)/d;
     #pragma unroll
     for(int v=0;v<3;++v){
-      int c=(v*32+lane)*4;Vec out,res;res.u=*reinterpret_cast<const uint2*>(residual+row*d+c);
+      int c=(v*32+lane)*4;Vec out,res;res.u=*reinterpret_cast<const uint2*>(residual+ro+c);
       #pragma unroll
       for(int e=0;e<4;++e){
         int k=4*v+e;
         out.v[e]=__float2bfloat16_rn((wd[k]-(xh[k]*a+b))*rstd+__bfloat162float(res.v[e]));
       }
-      *reinterpret_cast<uint2*>(dx+row*d+c)=out.u;
+      *reinterpret_cast<uint2*>(dx+ro+c)=out.u;
     }
   }
   #pragma unroll
   for(int v=0;v<3;++v){
     int c=(v*32+lane)*4;
     #pragma unroll
-    for(int e=0;e<4;++e){partial[gw*d+c+e]=ag[4*v+e];partial[(nw+gw)*d+c+e]=ab[4*v+e];}
+    for(int e=0;e<4;++e){partial[static_cast<int64_t>(gw)*d+c+e]=ag[4*v+e];partial[static_cast<int64_t>(nw+gw)*d+c+e]=ab[4*v+e];}
   }
 }
 void check(const at::Tensor& t){
@@ -218,7 +225,7 @@ void check(const at::Tensor& t){
 }
 std::vector<at::Tensor> prepare(at::Tensor a,at::Tensor b,at::Tensor s,bool transpose){
   c10::cuda::CUDAGuard guard(a.device());
-  std::vector<at::Tensor> in={a,b,s},out;Prep p{};int count=0;
+  std::vector<at::Tensor> in={a,b,s},out;Prep p{};int count=0;bool wide=false;
   TORCH_CHECK(a.dim()==2&&b.sizes()==a.sizes()&&s.dim()==2&&s.size(0)==a.size(1)&&s.size(1)==a.size(0),"transition weight shapes");
   for(int j=0;j<3;++j){
     check(in[j]);TORCH_CHECK(in[j].device()==a.device(),"weight device mismatch");
@@ -228,6 +235,9 @@ std::vector<at::Tensor> prepare(at::Tensor a,at::Tensor b,at::Tensor s,bool tran
     p.rows[j]=in[j].size(0);p.cols[j]=in[j].size(1);p.s0[j]=in[j].stride(0);p.s1[j]=in[j].stride(1);
     p.fp32[j]=in[j].scalar_type()==at::kFloat;
     if(copy)p.tasks[count++]=j;
+    TORCH_CHECK(std::abs(in[j].stride(0))<=INT32_MAX&&std::abs(in[j].stride(1))<=INT32_MAX,"transition weight strides must fit int32");
+    const int64_t span=(in[j].size(0)-1)*std::abs(in[j].stride(0))+(in[j].size(1)-1)*std::abs(in[j].stride(1))+1;  // largest source offset + 1
+    wide=wide||span>INT32_MAX||in[j].numel()>INT32_MAX;
   }
   out.push_back(at::empty(transpose?std::vector<int64_t>{s.size(1),s.size(0)}:std::vector<int64_t>{0},s.options().dtype(at::kBFloat16)));
   p.dst[3]=reinterpret_cast<bf*>(out[3].data_ptr());if(transpose)p.tasks[count++]=3;
@@ -235,7 +245,8 @@ std::vector<at::Tensor> prepare(at::Tensor a,at::Tensor b,at::Tensor s,bool tran
   if(count){
     // Pass an explicit kernel handle, as in the native dropout launcher. This
     // avoids the runtime probing a host symbol as a CU kernel under memcheck.
-    cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,prepare_k));
+    cudaKernel_t kernel;
+    if(wide)C10_CUDA_CHECK(cudaGetKernel(&kernel,prepare_k<int64_t>));else C10_CUDA_CHECK(cudaGetKernel(&kernel,prepare_k<int>));
     void* args[]={&p};
     C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),
       dim3(tiles,count),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
@@ -251,7 +262,9 @@ at::Tensor pair_layout(at::Tensor a,at::Tensor b,int block,bool transpose){
   const bf* ap=reinterpret_cast<const bf*>(a.data_ptr());
   const bf* bp=reinterpret_cast<const bf*>(b.data_ptr());
   bf* op=reinterpret_cast<bf*>(out.data_ptr());
-  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,pair_layout_k));
+  cudaKernel_t kernel;
+  if(2*static_cast<int64_t>(h)*d>INT32_MAX)C10_CUDA_CHECK(cudaGetKernel(&kernel,pair_layout_k<int64_t>));
+  else C10_CUDA_CHECK(cudaGetKernel(&kernel,pair_layout_k<int>));
   void* args[]={&ap,&bp,&op,&h,&d,&block,&transpose};
   C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),
     dim3(((2*h+31)/32)*((d+31)/32)),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
@@ -301,7 +314,7 @@ __global__ void affine_reduce_k(const float* pg,const float* pb,float* dg,float*
   __shared__ float sg[256],sb[256];
   int lane=threadIdx.x&31,warp=threadIdx.x>>5,c=blockIdx.x*32+lane;
   float g=0.f,b=0.f;
-  if(c<d)for(int r=warp;r<rows;r+=8){g=__fadd_rn(g,pg[r*d+c]);b=__fadd_rn(b,pb[r*d+c]);}
+  if(c<d)for(int r=warp;r<rows;r+=8){const int64_t o=static_cast<int64_t>(r)*d+c;g=__fadd_rn(g,pg[o]);b=__fadd_rn(b,pb[o]);}
   sg[threadIdx.x]=g;sb[threadIdx.x]=b;__syncthreads();
   if(warp==0&&c<d){
     g=0.f;b=0.f;
@@ -322,12 +335,13 @@ std::vector<at::Tensor> reduce_affine(at::Tensor pg,at::Tensor pb){
 template<int NV> __global__ void ln_fwd_k(const bf* x,const float* gamma,const float* beta,bf* xn,float* rs,float* c1,int rows,int d,float eps){
   int lane=threadIdx.x&31,row=blockIdx.x*8+(threadIdx.x>>5);
   if(row>=rows)return;
+  const int64_t ro=static_cast<int64_t>(row)*d;      // 64-bit row base
   float v[4*NV],sum=0.f,var=0.f;
   union Vec{uint2 u;bf v[4];};
   #pragma unroll
   for(int j=0;j<NV;++j){
     int c=(j*32+lane)*4;
-    Vec q;q.u=*reinterpret_cast<const uint2*>(x+row*d+c);
+    Vec q;q.u=*reinterpret_cast<const uint2*>(x+ro+c);
     #pragma unroll
     for(int k=0;k<4;++k){v[j*4+k]=__bfloat162float(q.v[k]);sum=__fadd_rn(sum,v[j*4+k]);}
   }
@@ -340,7 +354,7 @@ template<int NV> __global__ void ln_fwd_k(const bf* x,const float* gamma,const f
     int c=(j*32+lane)*4;Vec q;
     #pragma unroll
     for(int k=0;k<4;++k)q.v[k]=__float2bfloat16_rn((v[j*4+k]-mean)*r*gamma[c+k]+beta[c+k]);
-    *reinterpret_cast<uint2*>(xn+row*d+c)=q.u;
+    *reinterpret_cast<uint2*>(xn+ro+c)=q.u;
   }
   if(!lane){rs[row]=r;c1[row]=mean*r;}
 }
